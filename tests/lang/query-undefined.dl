@@ -1,0 +1,5 @@
+% A query naming a predicate nothing defines is answered, with no rows, and
+% the typo it most likely is draws the undefined-predicate warning.
+edge(a, b).
+
+egde(X, Y)?

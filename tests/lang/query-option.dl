@@ -1,0 +1,6 @@
+% With -q, only the command line's queries run, in the order given.  The
+% program's own query is checked but not answered.
+edge(a, b).
+edge(b, c).
+
+edge(X, Y)?

@@ -1,0 +1,1 @@
+negation-refused.dl:8:5: error: rule open/1 uses negation, which evaluation does not support

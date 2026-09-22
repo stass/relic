@@ -1,0 +1,7 @@
+% -a evaluates the whole program, and answers the program's queries from it.
+edge(a, b).
+edge(b, c).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+
+path(X, c)?

@@ -49,6 +49,7 @@
 
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
+#define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
@@ -106,6 +107,17 @@
 #define	INSERT_SWEEP	10
 
 /*
+ * The evaluation sweep's program is the transitive closure of a chain of
+ * this many edges, which derives EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 paths.
+ * That is enough to grow the path relation's columns and index several times
+ * over, so a refusal can land in preparing the query, in planning, in either
+ * relation's growth, or in creating the answer relation, and the sweep is
+ * bound well past the last of them.
+ */
+#define	EVAL_CHAIN	40
+#define	EVAL_SWEEP	160
+
+/*
  * Requests still to be served before the allocator starts refusing.  A
  * negative budget means refuse nothing, which is the state every allocation
  * outside a swept region runs in.  Once the budget reaches zero every later
@@ -135,6 +147,12 @@ static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
 static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
 static void	 a_relation_survives_a_failed_allocation(void);
+static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
+static int	 count_answer(void *callback_ctx, const relic_value_t *values,
+		    size_t count);
+static char	*evaluation_sweep_program(void);
+static bool	 answer_is_first(const relic_t *ctx,
+		    const relic_query_t *query);
 static relic_relation_t *sweep_relation(relic_t *ctx, relic_dom_t *values,
 		    size_t count);
 static char	*check_sweep_program(void);
@@ -844,6 +862,213 @@ a_relation_survives_a_failed_allocation(void)
 	    INSERT_SWEEP);
 }
 
+/*
+ * The transitive closure of a chain n0 -> n1 -> ... of EVAL_CHAIN edges.
+ */
+static char *
+evaluation_sweep_program(void)
+{
+	char *text;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = (EVAL_CHAIN + 4) * 48;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size,
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n");
+
+	for (i = 0; i < EVAL_CHAIN; i++) {
+		used += (size_t)snprintf(text + used, size - used,
+		    "edge(n%u, n%u).\n", i, i + 1);
+
+		if (used >= size) {
+			free(text);
+			return (NULL);
+		}
+	}
+
+	return (text);
+}
+
+/*
+ * Whether a query's answer predicate is $q0, the first a context names.
+ */
+static bool
+answer_is_first(const relic_t *ctx, const relic_query_t *query)
+{
+	const relic_pred_t *pred;
+	const char *name;
+
+	pred = relic_pred_of(ctx, query->rule.head);
+	if (pred == NULL)
+		return (false);
+
+	name = relic_symbol_bytes(ctx, pred->name, NULL);
+
+	return (name != NULL && strcmp(name, "$q0") == 0);
+}
+
+static int
+count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
+    size_t count RELIC_UNUSED)
+{
+	size_t *rows;
+
+	rows = callback_ctx;
+	(*rows)++;
+
+	return (0);
+}
+
+/*
+ * Prepare and run a query with the nth allocation refused, then run it again
+ * with the allocator restored.
+ *
+ * A query that runs out of memory must say so once and deliver no rows,
+ * since a partial answer would look like a complete one.  What it leaves
+ * behind must be consistent: every relation still a set, so that the retry
+ * continues the fixed point from tuples that are all justified and reaches
+ * exactly the answer an undisturbed run does.  A duplicate left in the path
+ * relation by an insertion that failed half way would show up as a relation
+ * holding more tuples than the closure has pairs.
+ */
+static void
+a_query_that_ran_out_of_memory_can_be_retried(void)
+{
+	relic_query_t *query;
+	char *program;
+	size_t completed;
+	size_t evaluating;
+	size_t expected_paths;
+	size_t refused;
+	size_t rows;
+	long budget;
+
+	program = evaluation_sweep_program();
+	if (program == NULL) {
+		check(false, SCENARIO_EVALUATE, "the sweep program is built");
+		return;
+	}
+
+	expected_paths = (size_t)EVAL_CHAIN * (EVAL_CHAIN + 1) / 2;
+	completed = 0;
+	evaluating = 0;
+	refused = 0;
+
+	for (budget = 0; budget < EVAL_SWEEP; budget++) {
+		const relic_relation_t *paths;
+		relic_pred_id_t path;
+		relic_t *ctx;
+		uint32_t name;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_EVALUATE,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "sweep.dl", program) != 0 ||
+		    relic_check(ctx) != 0) {
+			check(false, SCENARIO_EVALUATE,
+			    "the program should load and check before the "
+			    "sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+		rows = 0;
+
+		refuse_allocations_after(budget);
+		query = relic_query_prepare(ctx, NULL, "path(n0, X)?");
+		status = -1;
+		if (query != NULL)
+			status = relic_query_run(ctx, query, count_answer,
+			    &rows);
+		serve_every_allocation();
+
+		if (status == 0) {
+			completed++;
+		} else {
+			refused++;
+			if (query != NULL)
+				evaluating++;
+		}
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_EVALUATE,
+		    "a query that %s should report %d message(s), not %zu, "
+		    "with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(rows == (status != 0 ? 0u : (size_t)EVAL_CHAIN),
+		    SCENARIO_EVALUATE,
+		    "a query that %s should deliver %d rows, not %zu, with "
+		    "allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded",
+		    status != 0 ? 0 : EVAL_CHAIN, rows, budget);
+
+		if (query == NULL)
+			query = relic_query_prepare(ctx, NULL, "path(n0, X)?");
+
+		/*
+		 * A query that ran out of memory was never published, so the
+		 * one that eventually is takes the number it would have had:
+		 * the program holds no query of its own, so this is $q0.
+		 */
+		checkf(query != NULL && answer_is_first(ctx, query),
+		    SCENARIO_EVALUATE,
+		    "the retried query should answer into $q0, with "
+		    "allocation %ld refused", budget);
+
+		rows = 0;
+		checkf(query != NULL &&
+		    relic_query_run(ctx, query, count_answer, &rows) == 0 &&
+		    rows == EVAL_CHAIN, SCENARIO_EVALUATE,
+		    "the retry should answer %d rows, not %zu, with "
+		    "allocation %ld refused", EVAL_CHAIN, rows, budget);
+
+		paths = NULL;
+		if (relic_symbol_intern(ctx, "path", 4, &name) == 0 &&
+		    relic_pred_intern(ctx, name, 2, NULL, &path) == 0)
+			paths = relic_relation_for(ctx, path);
+		checkf(paths != NULL &&
+		    relic_relation_count(paths) == expected_paths,
+		    SCENARIO_EVALUATE,
+		    "the path relation should hold %zu tuples, not %zu, with "
+		    "allocation %ld refused", expected_paths,
+		    paths != NULL ? relic_relation_count(paths) : 0, budget);
+
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	free(program);
+
+	/*
+	 * The sweep has to reach a refusal inside evaluation itself, not
+	 * only in preparing the query, and a run that completes; otherwise
+	 * one of the outcomes above is never checked.
+	 */
+	checkf(evaluating > 0, SCENARIO_EVALUATE,
+	    "the sweep should reach a query that runs out of memory while "
+	    "evaluating, in %d attempts", EVAL_SWEEP);
+	checkf(refused > evaluating, SCENARIO_EVALUATE,
+	    "the sweep should reach a query that runs out of memory while "
+	    "being prepared, in %d attempts", EVAL_SWEEP);
+	checkf(completed > 0, SCENARIO_EVALUATE,
+	    "the sweep should reach a query that completes, in %d attempts",
+	    EVAL_SWEEP);
+}
+
 int
 main(void)
 {
@@ -853,6 +1078,7 @@ main(void)
 	a_load_that_ran_out_of_memory_adds_nothing();
 	a_check_that_ran_out_of_memory_can_be_retried();
 	a_relation_survives_a_failed_allocation();
+	a_query_that_ran_out_of_memory_can_be_retried();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

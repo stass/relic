@@ -1,0 +1,1 @@
+query-columns-limit.dl:8:3: error: the query has more than 32 output columns

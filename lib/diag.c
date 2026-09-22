@@ -103,6 +103,7 @@ relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
 		strlcpy(ctx->diag.last_error, message,
 		    sizeof(ctx->diag.last_error));
 		ctx->diag.has_error = true;
+		ctx->diag.error_count++;
 	}
 
 	if (ctx->diag.callback != NULL)

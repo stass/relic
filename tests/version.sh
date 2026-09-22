@@ -37,8 +37,9 @@ fi
 
 # An unknown option is a usage error, which the tool reports as status 2 and
 # keeps distinct from the status 1 it uses for a rejected program or query.
-# An operand it cannot act on is a usage error for the same reason.
-for arguments in '-Z' '' '-V extra'; do
+# So is an operand -V cannot act on, an option missing its argument, a format
+# that does not exist, and -c with -a, which contradict each other.
+for arguments in '-Z' '-V extra' '-V -c' '-q' '-F bogus' '-c -a'; do
 	status=0
 	# Word splitting is wanted here: each case is a whole command line.
 	# shellcheck disable=SC2086

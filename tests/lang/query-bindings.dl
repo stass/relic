@@ -1,0 +1,29 @@
+% Every binding pattern of a two-column predicate, asked by the queries the
+% program itself contains, over a graph with a cycle and a dead end.  Each
+% query's rows are sorted, and the results of successive queries are
+% separated by a blank line.
+edge(a, b).
+edge(b, c).
+edge(c, b).
+edge(c, d).
+
+path(X, Y) :-
+    edge(X, Y).
+
+path(X, Z) :-
+    edge(X, Y),
+    path(Y, Z).
+
+% Free second column, free first column, both free, the same variable twice.
+path(a, X)?
+path(X, d)?
+path(X, Y)?
+path(X, X)?
+
+% Both bound: a query that holds has one row of no values, and one that does
+% not has no rows at all.
+path(a, c)?
+path(d, a)?
+
+% An anonymous variable is not an output column.
+path(_, X)?

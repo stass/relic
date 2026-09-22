@@ -1,0 +1,2 @@
+% -q takes a query, and a fact or a rule is refused rather than loaded.
+edge(a, b).

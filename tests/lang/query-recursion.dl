@@ -1,0 +1,27 @@
+% Mutual recursion, a rule with two recursive literals, and recursion over a
+% cycle, each reaching its least fixed point.
+succ(0, 1).
+succ(1, 2).
+succ(2, 3).
+succ(3, 4).
+
+even(0).
+odd(X) :- succ(Y, X), even(Y).
+even(X) :- succ(Y, X), odd(Y).
+
+link(p, q).
+link(q, r).
+link(r, s).
+reach(X, Y) :- link(X, Y).
+reach(X, Z) :- reach(X, Y), reach(Y, Z).
+
+ring(1, 2).
+ring(2, 3).
+ring(3, 1).
+around(X, Y) :- ring(X, Y).
+around(X, Z) :- around(X, Y), ring(Y, Z).
+
+even(X)?
+odd(X)?
+reach(p, X)?
+around(X, X)?

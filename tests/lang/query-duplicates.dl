@@ -1,0 +1,11 @@
+% A relation is a set: a fact written twice is one tuple, and an answer
+% derived along two paths is one row.
+edge(a, b).
+edge(a, b).
+edge(a, c).
+edge(c, b).
+
+target(Y) :- edge(_, Y).
+
+edge(a, X)?
+target(X)?

@@ -1,0 +1,7 @@
+% Predicates of arity zero hold or do not hold.
+initialized.
+started :- initialized.
+
+started?
+stopped :- initialized, 1 > 2.
+stopped?

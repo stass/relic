@@ -176,10 +176,15 @@ TAILQ_HEAD(relic_ast_stmt_list, relic_ast_stmt);
  * superseded generation of itself behind.  The terms of an atom and the
  * literals of a body are arrays, because their lengths are known by the time
  * they are copied into the arena.
+ *
+ * `query_count` is how many of the statements are queries, which is what a
+ * caller enumerating the program's queries needs before anything has been
+ * compiled.
  */
 struct relic_ast_program {
 	relic_ast_stmt_list_t	statements;
 	size_t			count;
+	size_t			query_count;
 };
 
 #endif /* RELIC_AST_H */

@@ -408,7 +408,7 @@ status(Y, todo)?
 Internally, every query is transformed into a synthetic relation:
 
 ```prolog
-__query(X, Y) :-
+$q0(X, Y) :-
     depends(X, Y),
     status(Y, todo).
 ```
@@ -420,6 +420,9 @@ Anonymous variables are omitted.
 Queries have set semantics.
 
 Result order is unspecified unless sorting is explicitly requested.
+
+The synthetic rule, its name and its checking are specified in
+`specs/design-plan.md`.
 
 ---
 
@@ -983,6 +986,9 @@ Recursive SCCs are evaluated using semi-naive deltas.
 
 SCCs within each stratum are processed in topological order.
 
+The executor, the naive and semi-naive fixed points, and how a query's answers
+reach a caller are specified in `specs/design-eval.md`.
+
 ---
 
 # 30. Stratification
@@ -1482,6 +1488,9 @@ Diagnostics always go to stderr.
 
 Results go to stdout or the `-o` target.
 
+The phases of an invocation and the exact form of every output format are
+specified in `specs/design-cli.md`.
+
 ---
 
 # 44. Exit Status
@@ -1735,8 +1744,13 @@ Prepare a reusable query:
 ```c
 relic_query_t *
 relic_query_prepare(relic_t *,
+    const char *source_name,
     const char *query_text);
 ```
+
+`source_name` is what diagnostics about the text point at, as it is for
+`relic_load_string()`, so that a caller preparing several queries can tell
+their messages apart.
 
 Destroy:
 
@@ -1893,7 +1907,7 @@ MEMBER edge/2 key={0,1}
 Negation becomes:
 
 ```text
-ANTI_LOOKUP
+ANTI_MEMBER
 ```
 
 Comparisons become filters.
@@ -1907,12 +1921,13 @@ Plans should use a compact internal operation representation rather than a VM by
 Example:
 
 ```c
-enum relic_op {
-        RELIC_SCAN,
-        RELIC_LOOKUP,
-        RELIC_FILTER,
-        RELIC_ANTI_LOOKUP,
-        RELIC_EMIT
+enum relic_op_kind {
+        RELIC_OP_SCAN,
+        RELIC_OP_LOOKUP,
+        RELIC_OP_MEMBER,
+        RELIC_OP_ANTI_MEMBER,
+        RELIC_OP_FILTER,
+        RELIC_OP_EMIT
 };
 ```
 
@@ -1921,6 +1936,9 @@ A rule plan may simply be an ordered array of these operations.
 This keeps the evaluator direct and debuggable.
 
 A bytecode engine is not justified for v1.
+
+The operations, the binding decisions a plan records and the lifetime of a
+plan are specified in `specs/design-plan.md`.
 
 ---
 
@@ -2692,6 +2710,19 @@ and six milestones of `relic-plan.md`.
 **Success criteria, section 72.** Added index and reordering equivalence, a
 diagnostic quality requirement for the unstratified case, a tarball-build
 requirement, and a sanitizer-clean requirement.
+
+**Queries, section 11.** The synthetic query predicate is `$q0` rather than
+`__query`, per `relic-plan.md` decision D-12: `$` cannot occur in an
+identifier, so the name cannot collide with a user predicate.
+
+**Plan representation, sections 58 and 59.** The operation set is the six of
+decision D-8. `MEMBER` answers a literal whose every argument is bound through
+the canonical full-tuple index, and negation is `ANTI_MEMBER`, the same test
+inverted, rather than a lookup.
+
+**Queries, section 52.** `relic_query_prepare()` takes a source name, as
+`relic_load_string()` does. Query text comes from no file, and without a name
+the diagnostics of several queries would all point at the same place.
 
 **New sections.** 74 dependency policy, 75 repository and documentation
 conventions, 76 this log.

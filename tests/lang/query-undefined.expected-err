@@ -1,0 +1,1 @@
+query-undefined.dl:5:1: warning: predicate egde/2 is referenced but never defined

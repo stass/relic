@@ -42,7 +42,11 @@ fi
 
 # Options are read as a line of words and are deliberately left unquoted at
 # the point of use, so that a file holding "-c -F csv" passes two options
-# rather than one argument containing a space.
+# rather than one argument containing a space.  Pathname expansion is turned
+# off, because a query such as path(a,X)? is also a glob pattern, and a file
+# that happened to match it would silently replace the query.  A query in an
+# options file is therefore written without spaces.
+set -f
 args=""
 if [ -f "$directory/$base.args" ]; then
 	args=$(cat "$directory/$base.args")

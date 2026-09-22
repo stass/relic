@@ -1,0 +1,13 @@
+% The first milestone: the transitive closure of a chain, asked from the
+% command line.  The query is answered from the relation the fixed point
+% derived, and its rows come out in the order that relation holds them.
+edge(a, b).
+edge(b, c).
+edge(c, d).
+
+path(X, Y) :-
+    edge(X, Y).
+
+path(X, Z) :-
+    edge(X, Y),
+    path(Y, Z).

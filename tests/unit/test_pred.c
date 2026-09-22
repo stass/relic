@@ -33,6 +33,8 @@
 #define	SCENARIO_GROWTH		"the table stays exact as it grows"
 #define	SCENARIO_IDENTITY	"(name, arity) identifies a predicate"
 #define	SCENARIO_WHERE		"a predicate remembers where it was first seen"
+#define	SCENARIO_ARITY		"no predicate has more than 32 arguments"
+#define	SCENARIO_ANSWER		"an answer predicate is recognized by its name"
 
 /*
  * How many predicates the growth scenario interns.  Enough to make the
@@ -49,6 +51,8 @@ static void	 a_predicate_describes_itself_for_a_message(void);
 static void	 a_predicate_remembers_where_it_was_first_seen(void);
 static void	 defining_a_predicate_is_recorded_once(void);
 static void	 the_table_stays_exact_as_it_grows(void);
+static void	 no_predicate_has_more_than_32_arguments(void);
+static void	 an_answer_predicate_is_recognized(void);
 
 static relic_t *
 context(void)
@@ -329,6 +333,62 @@ the_table_stays_exact_as_it_grows(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * The evaluator builds a tuple in a fixed array of 32 columns and an index key
+ * is a 32-bit column mask, so no predicate may be wider.  The parser refuses
+ * such an atom where it is written, but interning is the one path every
+ * predicate takes, whatever creates it, so it is refused here too.
+ */
+static void
+no_predicate_has_more_than_32_arguments(void)
+{
+	relic_t *ctx;
+	relic_pred_id_t id;
+
+	ctx = context();
+	if (ctx == NULL)
+		return;
+
+	check(intern(ctx, "wide", RELIC_MAX_ARITY, &id), SCENARIO_ARITY,
+	    "a predicate of 32 arguments interns");
+	check(!intern(ctx, "wider", RELIC_MAX_ARITY + 1, &id), SCENARIO_ARITY,
+	    "a predicate of 33 arguments is refused");
+	checkf(relic_pred_count(ctx) == 1, SCENARIO_ARITY,
+	    "the refused predicate should not be in the table, which "
+	    "holds %zu", relic_pred_count(ctx));
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A query's answer predicate is named `$q` and a number, which no identifier
+ * the lexer accepts can begin with, so the name is what tells it apart.
+ */
+static void
+an_answer_predicate_is_recognized(void)
+{
+	relic_t *ctx;
+	relic_pred_id_t answer;
+	relic_pred_id_t user;
+
+	ctx = context();
+	if (ctx == NULL)
+		return;
+
+	if (!intern(ctx, "$q0", 1, &answer) || !intern(ctx, "q0", 1, &user)) {
+		check(false, SCENARIO_ANSWER, "both predicates intern");
+		relic_destroy(ctx);
+		return;
+	}
+
+	check(relic_pred_is_answer(ctx, answer), SCENARIO_ANSWER,
+	    "$q0/1 is an answer predicate");
+	check(!relic_pred_is_answer(ctx, user), SCENARIO_ANSWER,
+	    "q0/1 is not");
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -337,6 +397,8 @@ main(void)
 	defining_a_predicate_is_recorded_once();
 	a_predicate_describes_itself_for_a_message();
 	the_table_stays_exact_as_it_grows();
+	no_predicate_has_more_than_32_arguments();
+	an_answer_predicate_is_recognized();
 
 	return (check_summary("test_pred"));
 }

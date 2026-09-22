@@ -1,0 +1,3 @@
+% A program with no queries is checked and nothing is evaluated.
+edge(a, b).
+path(X, Y) :- edge(X, Y).

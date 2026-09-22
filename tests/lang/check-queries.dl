@@ -1,0 +1,2 @@
+% -c checks the program and the -q queries, and evaluates nothing.
+edge(a, b).

@@ -1,0 +1,9 @@
+% A query's columns are its named variables in the order they first occur.
+% `_` contributes none; `_Count` is a named variable and is a column.
+e(a, b).
+e(b, c).
+f(b, 1).
+f(c, 2).
+
+f(Y, N), e(X, Y)?
+e(_, Y), f(Y, _Count)?

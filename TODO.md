@@ -6,20 +6,15 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S4 landed; S5, the plan representation,
-the executor and the command-line tool, next. S5 is milestone M1.
+`relic-plan.md`. Current position: S5 landed, milestone M1; S6, the
+dependency graph, strongly connected components and stratification, next.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`design-plan.md` and `design-eval.md` (S5), `design-stratify.md` (S6),
-`design-index.md` and `design-planner.md` (S9), `design-magic.md` (S10). Each
-is referenced from `specs/architecture.md` when written.
-
-**`specs/style.md` readability references.** [Low] The readability standard
-lists qualities to aim for but names no relic functions yet, because none
-exist. Populate the reference table once S5 lands, choosing functions that
-actually read well rather than whichever happen to be there.
+`design-stratify.md` (S6), `design-index.md` and `design-planner.md` (S9),
+`design-magic.md` (S10). Each is referenced from `specs/architecture.md` when
+written.
 
 ## Build and packaging
 
@@ -83,18 +78,6 @@ considering. Decide at S14 with the rest of packaging.
 
 ## Engine
 
-**A query is not validated by `relic_check()`.** [High, component:
-`lib/rule.c`] The program model resolves a query's predicates, so a typo in
-one is reported as an undefined predicate, but it numbers no variables and
-checks no safety. Architecture section 11 turns a query into a rule over a
-synthetic `$q0` predicate whose arguments are its output columns, and
-`relic-plan.md` places that transformation in S5 with the planner that
-consumes it. Until then `relic -c 'answer(X) :- q(X). X = 42?'` accepts a
-query that S5 will reject. The check itself needs no new code: the synthetic
-rule's head is the list of output columns, so "every head variable is bound"
-is already "every output column is bound". Close this when S5 builds the
-synthetic rule.
-
 **A rejected statement keeps its arena memory.** [Low, component:
 `lib/rule.c`] A statement is compiled in one pass, so a rule that turns out
 to be unsafe has already had its arguments, body and variables allocated from
@@ -138,6 +121,16 @@ parse diagnostic. The two should agree. Parser text is not restricted to
 identifier bytes, so a shared helper has to leave escaping to
 `relic_diag_stderr()` as it does today; check that before merging them.
 
+**Sanitizer suites cannot run from an in-place build.** [Medium, component:
+`Makefile.am`] `make check-asan` and its siblings configure a fresh tree
+beside the current one, and `configure` refuses to build out of a source
+directory that has itself been configured, so from a tree built in place
+every one of them fails before compiling anything. They work from an
+out-of-tree build, which is how they were run for S5. Either the targets
+should detect the in-place case and say so, or they should configure from a
+pristine copy of the sources; the first is a few lines and removes a trap
+from a step the working agreement makes mandatory.
+
 **A check between loads can warn about a predicate a later load defines.**
 [Low, component: `lib/pred.c`] The undefined-predicate sweep answers a
 program-wide question, and an embedded caller has no end-of-program event at
@@ -147,6 +140,11 @@ predicate that is now defined. The warning is not repeated and the program is
 not refused. The command-line tool cannot hit it, because it loads every
 operand before checking. Revisit if S11 gives a caller a way to say that
 loading is finished.
+
+Prepared queries share the same sweep, which cuts both ways. A predicate a
+query names and nothing defines is warned about once, pointing at the
+query's text; a program loaded afterwards that references the same predicate
+is then not warned about it, since the warning has been given.
 
 **A failed load keeps its arena memory.** [Low, component: `lib/parse.c`] A
 load parses onto a list of its own and splices it into the program only if the
@@ -174,6 +172,52 @@ over. Folding the two into one key would make `-l memory=N` mean two things
 and would still not help the one caller who cannot check, which is a program
 reading an untrusted pipe. Revisit if S11 or S12 finds that caller; the
 answer there is a separate key, not a wider meaning for this one.
+
+**Negation is refused at evaluation.** [High, component: `lib/plan.c`] A
+negated literal passes `relic_check()` and is refused when its rule is
+planned, because testing absence is meaningful only against a relation that
+is complete and nothing yet guarantees that. S6 supplies the strata that make
+it so and S8 the `ANTI_MEMBER` operation; `reject_negation()` is then deleted
+and a negated literal becomes a filter placed like a comparison. Until then
+any program with negation, the architecture section 72 program among them,
+can be checked but not evaluated.
+
+**Options that arrive with their features.** [Medium, component:
+`cmd/relic/main.c`] `-X` arrives in S7, with a second evaluator for
+`-X naive` to select and counters for `-X stats` to print; `-e` in S9; `-i`,
+`-l`, `-n` and `-v` in S12. Each is an unknown option until then, and the
+usage message lists only what is accepted. `-l` in particular is cheap -- the
+limits are enforced already -- and is the one to bring forward if a user needs
+to bound a query before S12.
+
+**A later load continues the fixed point.** [Medium, component:
+`lib/eval.c`] The relations record how many rules they are a fixed point of,
+and a query after a later load continues from what they hold rather than
+recomputing. That is sound for a positive program and unsound once negation
+evaluates: a fact loaded later can make a tuple derived earlier false. When S8
+lands, a change to a program with negation after an evaluation must discard
+derived state, which is the operation `relic_fact_add()` needs in S11 as well.
+
+**Answer relations are never released.** [Medium, component: `lib/rule.c`]
+Each query compiles to a predicate of its own, `$qN`, and its answers live in
+that predicate's relation for the life of the context, as every relation
+does. Destroying the query does not give them back. The command-line tool
+prepares each query once, so it cannot notice; a long-lived embedder or the
+S12 REPL preparing many queries grows by every answer it has ever computed.
+Worse than the growth, the answers count against `max_tuples` and
+`max_memory`, so under a limit the queries that have been answered use it up
+for the ones that have not: with `max_tuples=6` and three facts, preparing,
+running and destroying `e(X)?` twice fails the second time with "limit
+exceeded: tuples=6 while deriving $q1/1", naming a predicate the caller never
+wrote. Settle it with S11's derived-state discarding, which needs the same
+operation on a whole relation: destroying a query should release its answer
+relation, and a loaded query's answers should be released with the last query
+object that refers to them.
+
+**Mixed-type ordering comparisons are not reported.** [Low, component:
+`lib/eval.c`] Architecture section 10.1 reports the first cross-type ordering
+comparison per rule at verbosity 2, and there is no verbosity until S12. The
+comparison itself already filters the binding out, as specified.
 
 **Semi-naive duplicate elimination.** [Low, component: `lib/plan.c`] The delta
 variant scheme of D-10 derives some tuples more than once per iteration for
@@ -217,6 +261,15 @@ the identifier table and the growable array were already there and the memory
 limit needed two pure projections from them rather than a mechanism of its
 own.
 
+S5 came in at about 1910 non-comment lines against a budget of 1670, a seventh
+over. The library is about 1060 against the 1070 its share implies, and the
+tool about 850 against 600, most of it `cmd/relic/output.c`: four formats
+that each escape differently, a UTF-8 validator for json and a merge sort for
+`-s`. The S2 question is therefore answered: the tool's budget was understated
+along with the front end's, by the formats rather than the option parsing.
+Risk R7's second lever, dropping one of csv and json, is the place to find the
+lines back if a later stage needs them; neither has proved redundant yet.
+
 **An unknown value type cannot be rejected in a build that checks for it.**
 [Low, component: `lib/value.c`] `value_well_formed()` rejects a
 `relic_value_t` whose `type` is not one of the three enumerators, which an
@@ -237,8 +290,8 @@ embedder hits it.
 zero meaning unlimited, and both are read in one place. `max_magic_preds` and
 `max_magic_rules` are stored and never read, because nothing generates a Magic
 predicate or rule to count until S10, and no `RELIC_F_` behaviour switch is
-defined for `flags` until S5. The header says so plainly so that a caller is
-not misled.
+defined for `flags` until S7 gives `RELIC_F_NAIVE` something to select. The
+header says so plainly so that a caller is not misled.
 
 **Assertions are absent from release builds.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 makes assertions a
@@ -251,12 +304,13 @@ The append-only invariant of D-10 is the first one this applies to.
 **Allocation-failure coverage must grow with each stage.** [Medium,
 component: `tests/unit/test_exhaustion.c`] The suite compiles the library
 against an allocator that refuses the nth request and sweeps n across symbol
-and value interning, across a load, across a check and across a batch of tuple
-insertions, which is what caught the index-growth failure that broke interning
+and value interning, across a load, across a check, across a batch of tuple
+insertions, and across preparing and answering a query over a recursive
+program, which is what caught the index-growth failure that broke interning
 identity. Every later stage adds allocation paths that the sweep will not
-reach unless it is extended: the secondary indexes, and the plan and
-evaluation arenas. Add a scenario per stage rather than leaving the suite
-describing the stages that happened to write one.
+reach unless it is extended: the secondary indexes, the strata, and the Magic
+rewrite. Add a scenario per stage rather than leaving the suite describing the
+stages that happened to write one.
 
 Each new scenario needs the straddle guards the existing ones have. The
 insertion sweep was written first over a single insertion into a relation that
@@ -342,6 +396,24 @@ name will no longer be lexer-checked and the message could carry a terminal
 escape sequence into an embedder's log. Settle it with `relic_fact_add()`:
 either it interns names through the same identifier rule the lexer applies, or
 `relic_pred_describe()` escapes.
+
+**csv and tsv carry raw control bytes.** [Low, component:
+`cmd/relic/output.c`] The text format writes a string as a quoted literal with
+its control bytes escaped, so a program cannot put a terminal escape sequence
+on the reader's screen through its results. csv and tsv are byte-transparent
+machine formats, per `specs/design-cli.md`, and write a string's bytes as they
+are, so `relic -F csv` over an untrusted program, printed to a terminal rather
+than piped to a parser, can. That is the same exposure as `cat` on the
+program itself, and escaping would corrupt the data for the consumers the
+formats exist for; recorded so that the choice stays deliberate.
+
+**Output assumes a symbol is an identifier.** [Low, component:
+`cmd/relic/output.c`] The text, csv and tsv formats write a symbol's bytes
+unescaped, and json replaces a byte that is not UTF-8 with U+FFFD, all on the
+ground that the lexer admits only identifier bytes into a symbol. S11's
+`relic_fact_add()` will accept a caller's bytes as a symbol, and then neither
+holds. Settle it with the predicate-name item above: either symbols are held
+to the identifier rule wherever they are created, or output escapes them.
 
 ## Packaging
 

@@ -150,14 +150,22 @@ pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
  * Intern a predicate, storing its identifier in *idp.  Returns 0, or -1 with
  * a diagnostic already reported.
  *
- * Every failure is a resource the library could not obtain: memory, or the
- * last of four billion predicate identifiers.  Neither says anything about
- * the statement being compiled, so a caller that could not create a
- * predicate has learned nothing about it.
+ * A failure is a resource the library could not obtain -- memory, or the
+ * last of four billion predicate identifiers -- or an arity past the limit
+ * below.  The first two say nothing about the statement being compiled, so a
+ * caller that could not create a predicate has learned nothing about it.  The
+ * third cannot reach a caller compiling a statement, because a statement
+ * with a wider atom never parses.
  *
  * `where` is recorded only for a predicate this is the first mention of, so
  * the location a later warning points at is the first place the program
  * named it rather than the last.
+ *
+ * No predicate may have more than RELIC_MAX_ARITY arguments: an index key is
+ * a 32-bit column mask, and the evaluator builds a tuple in a fixed array of
+ * that many columns.  The parser and the query compiler refuse a wider atom
+ * where it is written, with a message about the text; this is the one path
+ * every predicate takes, so the bound holds here for whatever creates one.
  */
 int
 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
@@ -168,6 +176,13 @@ relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 	const relic_pred_t *candidate;
 	uint32_t hash;
 	uint32_t id;
+
+	if (arity > RELIC_MAX_ARITY) {
+		relic_diagf(ctx, RELIC_ERROR, where,
+		    "a predicate may have at most %d arguments",
+		    RELIC_MAX_ARITY);
+		return (-1);
+	}
 
 	table = &ctx->program.predicates;
 	hash = pred_hash(name, arity);
@@ -274,6 +289,26 @@ relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
 	    (unsigned int)pred->arity);
 
 	return (buffer);
+}
+
+/*
+ * Whether a predicate is a query's answer predicate: `$q` and a serial
+ * number.  No identifier the lexer accepts contains `$`, so the prefix
+ * identifies an answer predicate by construction.
+ */
+bool
+relic_pred_is_answer(const relic_t *ctx, relic_pred_id_t id)
+{
+	const relic_pred_t *pred;
+	const char *name;
+
+	pred = relic_pred_of(ctx, id);
+	if (pred == NULL)
+		return (false);
+
+	name = relic_symbol_bytes(ctx, pred->name, NULL);
+
+	return (name != NULL && name[0] == '$' && name[1] == 'q');
 }
 
 /*

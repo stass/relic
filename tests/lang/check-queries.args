@@ -1,0 +1,1 @@
+-c -q edge(a,X)? -q edge(Y,Z),W<Z?

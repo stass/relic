@@ -1,0 +1,20 @@
+% Comparisons are filters over values of three distinct types.  Integers
+% order numerically, symbols and strings bytewise; values of different types
+% are never equal, and an ordering between them filters the binding out.
+v(-9223372036854775808).
+v(-1).
+v(9).
+v(10).
+v(apple).
+v(banana).
+v("apple").
+v("b").
+
+v(X), X < 9?
+v(X), X >= apple?
+v(X), X > "a"?
+v(X), X = apple?
+v(X), X != apple, X != "apple", X != "b", X > -1?
+
+% A comparison written before the literal that binds its operand.
+N >= 10, v(N)?

@@ -6,7 +6,9 @@
 
 #include "config.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "internal.h"
@@ -36,7 +38,32 @@
  * with nothing new to do therefore compiles nothing and says nothing, each
  * statement is compiled once for the life of the context, and each
  * diagnostic is emitted once rather than repeated by every later check.
+ *
+ * A query is compiled by the same code into a rule of its own.  Its head is a
+ * synthetic predicate whose arguments are the query's named variables in
+ * order of first occurrence, so the relation of that predicate is the answer,
+ * and "every output column is bound" is the ordinary safety check of a head.
+ * A query written in the program is compiled with the program and makes it
+ * invalid when it is unsafe; a query prepared from text is compiled into an
+ * arena of its own and changes nothing but the predicate table.
  */
+
+/*
+ * What diagnostics about a prepared query point at when the caller names no
+ * source, since query text comes from no file.
+ */
+#define	RELIC_QUERY_SOURCE	"<query>"
+
+/*
+ * Room for "$q", the twenty decimal digits of the largest 64-bit serial
+ * number, and a terminator; and for a statement's description, "fact " or
+ * "rule " and a predicate, or "the query".
+ */
+#define	RELIC_ANSWER_NAME_MAX	24
+#define	RELIC_STATEMENT_TEXT_MAX	(RELIC_PRED_TEXT_MAX + 8)
+
+_Static_assert(sizeof(size_t) <= 8,
+    "an answer predicate's serial number must fit RELIC_ANSWER_NAME_MAX");
 
 /*
  * Where an argument sits, which is the whole of what safety turns on.
@@ -99,18 +126,26 @@ typedef struct relic_compiler relic_compiler_t;
  * this file, and are the whole of that analysis.  Nothing here records its
  * verdict, because the verdict is `required & ~bindable`, and a stored copy
  * of a derived fact is a second thing to keep in step.
+ *
+ * `arena` is where the rule's variable-length parts go: the program arena for
+ * a statement of the program, a query's own arena for a prepared query.
+ * `query_columns` is the arity of a query's answer predicate, which is known
+ * only once its body has been compiled.
  */
 struct relic_compiler {
 	relic_t			*ctx;
+	relic_arena_t		*arena;
 	const relic_ast_stmt_t	*statement;
 	relic_rule_t		 rule;
 	relic_variable_t	 variables[RELIC_MAX_VARIABLES];
 	uint64_t		 bindable;	/* the set B */
 	uint64_t		 required;	/* the set R */
 	uint16_t		 variable_count;
+	uint16_t		 query_columns;
 };
 
-static enum relic_compile_result append_rule(relic_compiler_t *compiler);
+static enum relic_compile_result append_rule(relic_t *ctx,
+		    relic_ruletab_t *table, const relic_rule_t *rule);
 static void	*compile_alloc(relic_compiler_t *compiler, size_t count,
 		    size_t size);
 static enum relic_compile_result compile_atom(relic_compiler_t *compiler,
@@ -126,17 +161,30 @@ static enum relic_compile_result compile_literal(relic_compiler_t *compiler,
 		    const relic_ast_literal_t *source,
 		    relic_literal_t *literal);
 static bool	 compile_pending_statements(relic_t *ctx);
+static enum relic_compile_result compile_query(relic_t *ctx,
+		    relic_arena_t *arena, const relic_ast_stmt_t *statement,
+		    relic_rule_t *rulep);
+static enum relic_compile_result compile_query_head(
+		    relic_compiler_t *compiler);
 static enum relic_compile_result compile_rule(relic_t *ctx,
+		    const relic_ast_stmt_t *statement, relic_rule_t *rulep);
+static enum relic_compile_result compile_statement(relic_t *ctx,
 		    const relic_ast_stmt_t *statement);
+static void	 compiler_init(relic_compiler_t *compiler, relic_t *ctx,
+		    relic_arena_t *arena, const relic_ast_stmt_t *statement);
 static enum relic_compile_result compile_term(relic_compiler_t *compiler,
 		    const relic_ast_term_t *term,
 		    enum relic_arg_position position, relic_arg_t *arg);
+static const char *describe_statement(const relic_compiler_t *compiler,
+		    char *buffer, size_t size);
 static const relic_ast_stmt_t *first_pending_statement(const relic_t *ctx);
+static enum relic_compile_result name_answer_predicate(
+		    relic_compiler_t *compiler);
 static enum relic_compile_result occupy_slot(relic_compiler_t *compiler,
 		    const relic_ast_variable_t *variable,
 		    const relic_location_t *where, uint16_t *slotp);
-static enum relic_compile_result register_query(relic_t *ctx,
-		    const relic_ast_stmt_t *statement);
+static void	 publish_query_number(relic_t *ctx);
+static relic_query_t *query_create(relic_t *ctx);
 static void	 report_singleton_variables(relic_compiler_t *compiler,
 		    uint64_t unbound);
 static void	 report_unbound_variables(relic_compiler_t *compiler,
@@ -145,7 +193,6 @@ static void	 report_variable_limit(relic_compiler_t *compiler,
 		    const relic_location_t *where);
 static bool	 singleton_exempt(const relic_compiler_t *compiler,
 		    const relic_variable_t *variable);
-static const char *statement_noun(const relic_compiler_t *compiler);
 static enum relic_compile_result store_variables(relic_compiler_t *compiler);
 static uint64_t	 unbound_variables(const relic_compiler_t *compiler);
 static const char *variable_name(const relic_compiler_t *compiler,
@@ -169,17 +216,18 @@ relic_program_reset(relic_program_t *program)
 	 */
 	relic_predtab_reset(&program->predicates);
 	free(program->rules.entries);
+	free(program->queries.entries);
 	bzero(program, sizeof(*program));
 }
 
 /*
  * Allocate `count` items of `size` bytes for the rule being built.
  *
- * A null return means the program arena has been marked failed, and
- * relic_check() reports that once at its boundary.  A call site therefore
- * answers RELIC_COMPILE_INCOMPLETE without reporting for itself, so one
- * exhaustion produces one message however many allocations a statement was
- * part way through.
+ * A null return means the compiler's arena has been marked failed, and the
+ * phase that owns the arena reports that once at its boundary.  A call site
+ * therefore answers RELIC_COMPILE_INCOMPLETE without reporting for itself, so
+ * one exhaustion produces one message however many allocations a statement
+ * was part way through.
  *
  * The product is checked rather than assumed, because a wrapped product
  * would be answered with a block smaller than what is written into it.  That
@@ -191,7 +239,7 @@ compile_alloc(relic_compiler_t *compiler, size_t count, size_t size)
 {
 	relic_arena_t *arena;
 
-	arena = &compiler->ctx->program_arena;
+	arena = compiler->arena;
 
 	if (count > SIZE_MAX / size) {
 		relic_arena_fail(arena);
@@ -202,21 +250,37 @@ compile_alloc(relic_compiler_t *compiler, size_t count, size_t size)
 }
 
 /*
- * What a message calls the statement: what its writer wrote.  The tree
- * represents a fact as a rule whose body has no literals, and only the
- * wording distinguishes them.
+ * What a message calls the statement being compiled: "fact edge/2" or "rule
+ * path/2", after what its writer wrote, or "the query".  The tree represents
+ * a fact as a rule whose body has no literals, and only the wording
+ * distinguishes them.  A query's head is a predicate its writer never named,
+ * so a message about a query names none.
  *
- * The answer is read from the statement rather than from the rule being
- * built, so that it is available from the first line of compilation and does
- * not depend on how far the build has got.
+ * The kind is read from the statement rather than from the rule being built,
+ * so that the description is available from the first line of compilation
+ * and does not depend on how far the build has got.
  */
 static const char *
-statement_noun(const relic_compiler_t *compiler)
+describe_statement(const relic_compiler_t *compiler, char *buffer,
+    size_t size)
 {
-	if (compiler->statement->body_length == 0)
-		return ("fact");
+	const relic_ast_stmt_t *statement;
+	const char *noun;
+	char described[RELIC_PRED_TEXT_MAX];
 
-	return ("rule");
+	statement = compiler->statement;
+
+	if (statement->kind == RELIC_STMT_QUERY) {
+		strlcpy(buffer, "the query", size);
+		return (buffer);
+	}
+
+	noun = statement->body_length == 0 ? "fact" : "rule";
+	snprintf(buffer, size, "%s %s", noun,
+	    relic_pred_describe(compiler->ctx, compiler->rule.head, described,
+	    sizeof(described)));
+
+	return (buffer);
 }
 
 /*
@@ -240,13 +304,12 @@ static void
 report_variable_limit(relic_compiler_t *compiler,
     const relic_location_t *where)
 {
-	char described[RELIC_PRED_TEXT_MAX];
+	char described[RELIC_STATEMENT_TEXT_MAX];
 
 	relic_diagf(compiler->ctx, RELIC_ERROR, where,
-	    "%s %s uses more than %d distinct variables",
-	    statement_noun(compiler),
-	    relic_pred_describe(compiler->ctx, compiler->rule.head, described,
-	    sizeof(described)), RELIC_MAX_VARIABLES);
+	    "%s uses more than %d distinct variables",
+	    describe_statement(compiler, described, sizeof(described)),
+	    RELIC_MAX_VARIABLES);
 }
 
 /*
@@ -544,15 +607,14 @@ static void
 report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
 {
 	const relic_variable_t *variable;
-	char described[RELIC_PRED_TEXT_MAX];
+	char described[RELIC_STATEMENT_TEXT_MAX];
 	char named[RELIC_NAME_TEXT_MAX];
 	uint16_t slot;
 
 	if (unbound == 0)
 		return;
 
-	relic_pred_describe(compiler->ctx, compiler->rule.head, described,
-	    sizeof(described));
+	describe_statement(compiler, described, sizeof(described));
 
 	for (slot = 0; slot < compiler->variable_count; slot++) {
 		if ((unbound & (UINT64_C(1) << slot)) == 0)
@@ -569,17 +631,15 @@ report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
 		if (variable->anonymous) {
 			relic_diagf(compiler->ctx, RELIC_ERROR,
 			    &variable->where,
-			    "anonymous variable in %s %s cannot be bound by a "
-			    "positive body literal",
-			    statement_noun(compiler), described);
+			    "anonymous variable in %s cannot be bound by a "
+			    "positive body literal", described);
 			continue;
 		}
 
 		relic_diagf(compiler->ctx, RELIC_ERROR, &variable->where,
-		    "variable %s in %s %s is not bound by a positive body "
-		    "literal",
+		    "variable %s in %s is not bound by a positive body literal",
 		    variable_name(compiler, variable, named, sizeof(named)),
-		    statement_noun(compiler), described);
+		    described);
 	}
 }
 
@@ -668,29 +728,38 @@ store_variables(relic_compiler_t *compiler)
 }
 
 /*
- * Publish the finished rule.  This is the last step, so nothing incomplete
- * is ever reachable through the program.
+ * Publish a finished rule into one of the program's tables.  This is the last
+ * step of compiling a statement, so nothing incomplete is ever reachable
+ * through the program.
  */
 static enum relic_compile_result
-append_rule(relic_compiler_t *compiler)
+append_rule(relic_t *ctx, relic_ruletab_t *table, const relic_rule_t *rule)
 {
-	relic_ruletab_t *table;
 	relic_rule_t *entries;
-
-	table = &compiler->ctx->program.rules;
 
 	entries = relic_grow_array(table->entries, &table->capacity,
 	    table->count + 1, sizeof(*table->entries));
 	if (entries == NULL) {
-		relic_diag_no_memory(compiler->ctx);
+		relic_diag_no_memory(ctx);
 		return (RELIC_COMPILE_INCOMPLETE);
 	}
 	table->entries = entries;
 
-	table->entries[table->count] = compiler->rule;
+	table->entries[table->count] = *rule;
 	table->count++;
 
 	return (RELIC_COMPILE_OK);
+}
+
+static void
+compiler_init(relic_compiler_t *compiler, relic_t *ctx, relic_arena_t *arena,
+    const relic_ast_stmt_t *statement)
+{
+	bzero(compiler, sizeof(*compiler));
+	compiler->ctx = ctx;
+	compiler->arena = arena;
+	compiler->statement = statement;
+	compiler->rule.where = statement->where;
 }
 
 /*
@@ -712,18 +781,19 @@ append_rule(relic_compiler_t *compiler)
  *
  * Singletons are reported even for a rule that is being rejected, because a
  * rule can be wrong in both ways at once and one run should say so.
+ *
+ * The finished rule is stored in *rulep and not yet published; the caller
+ * appends it to the program as the last step.
  */
 static enum relic_compile_result
-compile_rule(relic_t *ctx, const relic_ast_stmt_t *statement)
+compile_rule(relic_t *ctx, const relic_ast_stmt_t *statement,
+    relic_rule_t *rulep)
 {
 	relic_compiler_t compiler;
 	enum relic_compile_result result;
 	uint64_t unbound;
 
-	bzero(&compiler, sizeof(compiler));
-	compiler.ctx = ctx;
-	compiler.statement = statement;
-	compiler.rule.where = statement->where;
+	compiler_init(&compiler, ctx, &ctx->program_arena, statement);
 
 	result = compile_head(&compiler);
 	if (result != RELIC_COMPILE_OK)
@@ -744,42 +814,217 @@ compile_rule(relic_t *ctx, const relic_ast_stmt_t *statement)
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
-	return (append_rule(&compiler));
+	*rulep = compiler.rule;
+
+	return (RELIC_COMPILE_OK);
 }
 
 /*
- * Intern the predicates a query mentions, and nothing else.
+ * Build the head of a query's rule: one argument for every named variable, in
+ * slot order, which is the order of first occurrence.  `_` contributes no
+ * column.  In a positive literal it is a wildcard with no slot at all, and a
+ * slot it takes anywhere else belongs to a query about to be rejected as
+ * unsafe.
  *
- * Predicate identity is a property of the program rather than of a rule, so
- * a query's atoms are interned like any other and a typo in a query is
- * caught by the undefined-predicate warning.  The rest of a query is not
- * compiled here: architecture section 11 turns it into a rule over a
- * synthetic predicate whose arguments are its output columns, and that
- * transformation belongs with the planner that consumes it.  A query's
- * variables are numbered and its safety is decided when that rule is built,
- * by this same code, because "every head variable is bound" is exactly
- * "every output column is bound".
+ * The head counts as one occurrence of each variable it names and requires
+ * each one to be bound, exactly as a written head would.  That is what makes
+ * "every output column is bound" the ordinary safety check, and what keeps
+ * `path(a, X)?` free of a singleton warning: X is written once, but the rule
+ * the text means mentions it twice.
+ *
+ * The answer predicate is a predicate like any other, so a query can have at
+ * most as many output columns as a predicate has arguments, although a rule
+ * may hold twice as many variables.
  */
 static enum relic_compile_result
-register_query(relic_t *ctx, const relic_ast_stmt_t *statement)
+compile_query_head(relic_compiler_t *compiler)
 {
-	const relic_ast_literal_t *literal;
-	relic_pred_id_t pred;
-	size_t i;
+	relic_variable_t *variable;
+	uint16_t column;
+	uint16_t columns;
+	uint16_t slot;
 
-	for (i = 0; i < statement->body_length; i++) {
-		literal = &statement->body[i];
-
-		if (literal->kind == RELIC_LITERAL_COMPARISON)
+	columns = 0;
+	for (slot = 0; slot < compiler->variable_count; slot++) {
+		variable = &compiler->variables[slot];
+		if (variable->anonymous)
 			continue;
 
-		if (relic_pred_intern(ctx, literal->u.atom.name,
-		    literal->u.atom.arity, &literal->u.atom.where,
-		    &pred) != 0)
-			return (RELIC_COMPILE_INCOMPLETE);
+		if (columns == RELIC_MAX_ARITY) {
+			relic_diagf(compiler->ctx, RELIC_ERROR,
+			    &variable->where,
+			    "the query has more than %d output columns",
+			    RELIC_MAX_ARITY);
+			return (RELIC_COMPILE_REJECTED);
+		}
+		columns++;
+	}
+
+	compiler->query_columns = columns;
+	if (columns == 0)
+		return (RELIC_COMPILE_OK);
+
+	compiler->rule.head_args = compile_alloc(compiler, columns,
+	    sizeof(*compiler->rule.head_args));
+	if (compiler->rule.head_args == NULL)
+		return (RELIC_COMPILE_INCOMPLETE);
+
+	column = 0;
+	for (slot = 0; slot < compiler->variable_count; slot++) {
+		variable = &compiler->variables[slot];
+		if (variable->anonymous)
+			continue;
+
+		bzero(&compiler->rule.head_args[column],
+		    sizeof(compiler->rule.head_args[column]));
+		compiler->rule.head_args[column].kind = RELIC_ARG_VARIABLE;
+		compiler->rule.head_args[column].u.slot = slot;
+		compiler->required |= UINT64_C(1) << slot;
+		variable->occurrences++;
+		column++;
 	}
 
 	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Intern the query's answer predicate -- `$q` and the query's serial number,
+ * with one argument per output column -- and record that the query defines
+ * it.
+ *
+ * No identifier the lexer accepts can contain `$`, so the name cannot
+ * collide with a predicate a program writes: the answer predicate is distinct
+ * by construction rather than by a check.  The serial number is the count of
+ * queries the context has published, so identical sequences of loads and
+ * preparations name their queries identically.
+ */
+static enum relic_compile_result
+name_answer_predicate(relic_compiler_t *compiler)
+{
+	relic_t *ctx;
+	char name[RELIC_ANSWER_NAME_MAX];
+	uint32_t symbol;
+	int length;
+
+	ctx = compiler->ctx;
+
+	length = snprintf(name, sizeof(name), "$q%zu",
+	    ctx->program.query_serial);
+	if (length < 0) {
+		relic_diagf(ctx, RELIC_ERROR, &compiler->statement->where,
+		    "internal error: the query's answer predicate cannot be "
+		    "named");
+		return (RELIC_COMPILE_REJECTED);
+	}
+
+	if (relic_symbol_intern(ctx, name, (size_t)length, &symbol) != 0)
+		return (RELIC_COMPILE_INCOMPLETE);
+
+	if (relic_pred_intern(ctx, symbol, compiler->query_columns,
+	    &compiler->statement->where, &compiler->rule.head) != 0)
+		return (RELIC_COMPILE_INCOMPLETE);
+
+	relic_pred_define(ctx, compiler->rule.head);
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Compile a query into a rule over its answer predicate, into `arena`, and
+ * store the finished rule in *rulep without publishing it.
+ *
+ * The body is compiled first, because the head is made of the body's named
+ * variables and is not known until the body has numbered them.  Safety is
+ * then the same computation as for any rule.  The answer predicate is named
+ * last, so that a rejected query leaves no predicate behind for it.
+ */
+static enum relic_compile_result
+compile_query(relic_t *ctx, relic_arena_t *arena,
+    const relic_ast_stmt_t *statement, relic_rule_t *rulep)
+{
+	relic_compiler_t compiler;
+	enum relic_compile_result result;
+	uint64_t unbound;
+
+	compiler_init(&compiler, ctx, arena, statement);
+
+	result = compile_body(&compiler);
+	if (result != RELIC_COMPILE_OK)
+		return (result);
+
+	result = compile_query_head(&compiler);
+	if (result != RELIC_COMPILE_OK)
+		return (result);
+
+	unbound = unbound_variables(&compiler);
+	report_unbound_variables(&compiler, unbound);
+	report_singleton_variables(&compiler, unbound);
+
+	if (unbound != 0)
+		return (RELIC_COMPILE_REJECTED);
+
+	result = store_variables(&compiler);
+	if (result != RELIC_COMPILE_OK)
+		return (result);
+
+	result = name_answer_predicate(&compiler);
+	if (result != RELIC_COMPILE_OK)
+		return (result);
+
+	*rulep = compiler.rule;
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Compile one statement of the program and publish the result: a rule or
+ * fact into the program's rules, a query into its queries.
+ *
+ * A query's serial number advances only once the query is published, so a
+ * query that runs out of memory part way is compiled again under the same
+ * name rather than skipping one.
+ */
+static enum relic_compile_result
+compile_statement(relic_t *ctx, const relic_ast_stmt_t *statement)
+{
+	relic_rule_t rule;
+	enum relic_compile_result result;
+
+	if (statement->kind == RELIC_STMT_RULE) {
+		result = compile_rule(ctx, statement, &rule);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+
+		return (append_rule(ctx, &ctx->program.rules, &rule));
+	}
+
+	result = compile_query(ctx, &ctx->program_arena, statement, &rule);
+	if (result != RELIC_COMPILE_OK)
+		return (result);
+
+	result = append_rule(ctx, &ctx->program.queries, &rule);
+	if (result != RELIC_COMPILE_OK)
+		return (result);
+
+	publish_query_number(ctx);
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Record that a compiled query has been published, so that the next one is
+ * named with the next serial number.
+ *
+ * A query is published by one of two routes -- appended to the program by a
+ * check, or handed to the caller by relic_query_prepare() -- and both end
+ * here, after the last step that can fail.  A query that fails before this
+ * is compiled again under the same name, so its answer predicate is interned
+ * once however many attempts it takes.
+ */
+static void
+publish_query_number(relic_t *ctx)
+{
+	ctx->program.query_serial++;
 }
 
 /*
@@ -819,10 +1064,7 @@ compile_pending_statements(relic_t *ctx)
 
 	for (statement = first_pending_statement(ctx); statement != NULL;
 	    statement = TAILQ_NEXT(statement, link)) {
-		if (statement->kind == RELIC_STMT_QUERY)
-			result = register_query(ctx, statement);
-		else
-			result = compile_rule(ctx, statement);
+		result = compile_statement(ctx, statement);
 
 		if (result == RELIC_COMPILE_INCOMPLETE)
 			return (false);
@@ -867,4 +1109,175 @@ relic_check(relic_t *ctx)
 	relic_pred_report_undefined(ctx);
 
 	return (ctx->program.invalid ? -1 : 0);
+}
+
+/*
+ * Check the program before it is used, and say so when it cannot be.
+ *
+ * relic_check() reports each mistake once and then refuses the program in
+ * silence, which is right for a check -- repeating a message says nothing new
+ * -- and wrong for an operation that fails because of it: every failure must
+ * report at least one error, or a caller is left with -1 and no reason.  So
+ * when a check fails having reported nothing this time, the reason is given
+ * here as a pointer to the messages that came before.
+ */
+int
+relic_program_ready(relic_t *ctx)
+{
+	size_t errors_before;
+
+	errors_before = ctx->diag.error_count;
+
+	if (relic_check(ctx) == 0)
+		return (0);
+
+	if (ctx->diag.error_count == errors_before)
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "the program cannot be used: its errors were reported "
+		    "when it was checked");
+
+	return (-1);
+}
+
+/*
+ * A query object, empty.  Returns NULL having reported when memory ran out.
+ */
+static relic_query_t *
+query_create(relic_t *ctx)
+{
+	relic_query_t *query;
+
+	query = calloc(1, sizeof(*query));
+	if (query == NULL) {
+		relic_diag_no_memory(ctx);
+		return (NULL);
+	}
+
+	query->ctx = ctx;
+	relic_arena_init(&query->arena);
+
+	return (query);
+}
+
+/*
+ * Prepare a query from text: parse it, compile it into a rule over a new
+ * answer predicate, and warn about any predicate it names that nothing
+ * defines.
+ *
+ * The program is checked first, and must pass.  A query against a program
+ * that cannot be evaluated could never be run, and the undefined-predicate
+ * sweep that follows compilation would otherwise report the program's own
+ * predicates before the program had been compiled far enough to define them.
+ * With the program checked, the sweep speaks only about predicates the query
+ * introduced.
+ *
+ * A query that is wrong is reported and refused, and the program is not
+ * affected: it stays as valid as it was.
+ */
+relic_query_t *
+relic_query_prepare(relic_t *ctx, const char *source_name, const char *text)
+{
+	relic_query_t *query;
+	const relic_ast_stmt_t *statement;
+	enum relic_compile_result result;
+
+	if (text == NULL) {
+		relic_diagf(ctx, RELIC_ERROR, NULL, "no query text was given");
+		return (NULL);
+	}
+
+	if (relic_program_ready(ctx) != 0)
+		return (NULL);
+
+	query = query_create(ctx);
+	if (query == NULL)
+		return (NULL);
+
+	if (source_name == NULL)
+		source_name = RELIC_QUERY_SOURCE;
+
+	if (relic_parse_query(ctx, &query->arena, source_name, text,
+	    &statement) != 0) {
+		relic_query_destroy(query);
+		return (NULL);
+	}
+
+	result = compile_query(ctx, &query->arena, statement, &query->rule);
+
+	/*
+	 * A refusal by the query's arena was not reported where it happened,
+	 * for the same reason relic_check() reports the program arena's at
+	 * its boundary: one exhaustion, one message.
+	 */
+	if (relic_arena_failed(&query->arena))
+		relic_diag_no_memory(ctx);
+
+	/*
+	 * A query that is refused has still interned the predicates it names,
+	 * and one of them may be the typo that explains the refusal, so the
+	 * sweep runs for it too.  It does not run for a query that ran out of
+	 * memory, which may not have reached all of its predicates.
+	 */
+	if (result != RELIC_COMPILE_INCOMPLETE)
+		relic_pred_report_undefined(ctx);
+
+	if (result != RELIC_COMPILE_OK) {
+		relic_query_destroy(query);
+		return (NULL);
+	}
+
+	publish_query_number(ctx);
+
+	return (query);
+}
+
+size_t
+relic_query_count(relic_t *ctx)
+{
+	return (ctx->ast.query_count);
+}
+
+/*
+ * A query written in the program, by its position among the program's
+ * queries in load order.
+ *
+ * The program is checked first, because that is what compiles its queries.
+ * Once a check has passed, every query statement has been compiled -- a
+ * query that could not be would have made the check fail -- so an index below
+ * relic_query_count() always names one.
+ */
+relic_query_t *
+relic_query_loaded(relic_t *ctx, size_t index)
+{
+	const relic_ruletab_t *queries;
+	relic_query_t *query;
+
+	if (relic_program_ready(ctx) != 0)
+		return (NULL);
+
+	queries = &ctx->program.queries;
+	if (index >= queries->count) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "no query at index %zu: the program's queries number %zu",
+		    index, queries->count);
+		return (NULL);
+	}
+
+	query = query_create(ctx);
+	if (query == NULL)
+		return (NULL);
+
+	query->rule = queries->entries[index];
+
+	return (query);
+}
+
+void
+relic_query_destroy(relic_query_t *query)
+{
+	if (query == NULL)
+		return;
+
+	relic_arena_reset(&query->arena);
+	free(query);
 }

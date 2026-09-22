@@ -205,6 +205,11 @@ typedef void (*relic_diag_cb)(
  * discards diagnostics, which is the default: a library must not write to
  * its caller's stderr uninvited, and an error remains recoverable through
  * relic_error() whether or not a callback saw it.
+ *
+ * A diagnostic can arrive in the middle of loading, checking or evaluating,
+ * when the context is part way through an operation and cannot be entered
+ * again.  The callback therefore must not call into the context, except to
+ * read with relic_string() and relic_error().
  */
 RELIC_EXPORT void relic_diag_set(relic_t *ctx, relic_diag_cb callback,
     void *callback_ctx);
@@ -267,11 +272,124 @@ RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
  * time and returns the same answer. It stays -1 once a program has contained
  * a rejected rule: loading more cannot repair one already loaded.
  *
- * A query is not yet validated here. Its predicates are resolved, so a
- * reference to one nothing defines is reported, but its variables are
- * checked when it is compiled for execution.
+ * The queries a program contains are part of it and are checked the same
+ * way: every output column of a query, which is to say every variable it
+ * names, must occur in a positive relational literal of the query.
  */
 RELIC_EXPORT int relic_check(relic_t *ctx);
+
+/*
+ * Evaluate the whole program, computing every tuple its facts and rules
+ * derive.  Returns 0, or -1 with the reason already reported.
+ *
+ * The program is checked first and must pass.  Evaluation fails when a
+ * configured limit refuses a tuple, when memory runs out, or when a rule
+ * holds a negated literal, which the evaluator does not execute.  A failure
+ * leaves every relation holding only tuples the program justifies, and the
+ * next evaluation continues from them.
+ *
+ * Nothing is recomputed when nothing has been loaded since the last
+ * evaluation that succeeded.  A query materializes the program before it is
+ * answered, so a caller that only queries need not call this.
+ */
+RELIC_EXPORT int relic_materialize(relic_t *ctx);
+
+/*
+ * A query, compiled and ready to run as often as the caller likes.
+ */
+typedef struct relic_query relic_query_t;
+
+/*
+ * Receives one row of a query's answer: the callback context given to
+ * relic_query_run(), the row's values, and how many there are.
+ *
+ * A row holds one value per output column, and the columns are the variables
+ * the query names, in the order they first occur, with `_` contributing none.
+ * A query that names no variable asks whether something holds, and its
+ * answer is one row of no values when it does and no rows when it does not.
+ *
+ * The values are borrowed for the duration of the call; a callback that keeps
+ * a row copies it.  The bytes of a symbol or string belong to the context and
+ * stay valid until it is destroyed.  The callback returns 0 to receive the
+ * next row and nonzero to stop.
+ */
+typedef int (*relic_row_cb)(void *, const relic_value_t *, size_t);
+
+/*
+ * Prepare a query from text, such as "path(a, X)?".  Returns the query, or
+ * NULL with every mistake reported: the text must be exactly one query as the
+ * grammar writes it, ending in `?`, and the query must be safe.  Diagnostics
+ * about the text point at `source_name`, which is copied and may be NULL to
+ * name the text "<query>"; a caller preparing several queries names each so
+ * that a message says which one it is about.
+ *
+ * The loaded program is checked first and must pass, since a query against a
+ * program that cannot be evaluated could never be run.  Preparing a query
+ * adds nothing to the program: a query that is wrong is refused, and the
+ * program stays as valid as it was.  The predicates a query names are
+ * recorded like any others, so one that nothing defines draws the same
+ * warning it would in a rule, once.
+ *
+ * The query belongs to the caller, who releases it with relic_query_destroy()
+ * before the context is destroyed.
+ */
+RELIC_EXPORT relic_query_t *relic_query_prepare(relic_t *ctx,
+    const char *source_name, const char *text);
+
+/*
+ * The queries written in the loaded program.
+ *
+ * relic_query_count() is how many there are, in load order.
+ * relic_query_loaded() returns the one at `index`, counting from zero, as a
+ * query like any prepared one, or NULL when the program does not pass its
+ * check or holds no such query.  The query belongs to the caller, who
+ * releases it with relic_query_destroy().
+ */
+RELIC_EXPORT size_t relic_query_count(relic_t *ctx);
+RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
+
+/*
+ * Answer a query, passing each row of the answer to `callback` in turn.
+ * Returns 0 when every row was delivered or the callback asked to stop, and
+ * -1 with the reason reported when the query could not be answered.
+ *
+ * The program is evaluated first, as relic_materialize() does, and no row is
+ * delivered until the whole answer is known.  A query that fails -- a limit
+ * exceeded, say -- therefore delivers no rows at all rather than a truncated
+ * answer that would be indistinguishable from a complete one.
+ *
+ * Rows are distinct, because a query's answer is a set.  Their order is
+ * unspecified by the language but is the same on every run over the same
+ * input; relic_value_compare() orders them when a caller needs an order that
+ * does not depend on that.
+ *
+ * The callback may read strings through the context with relic_string() and
+ * compare values with relic_value_compare().  It must not otherwise call into
+ * the context -- to load, to prepare or run a query, or to destroy the query
+ * or the context -- while rows are being delivered.
+ */
+RELIC_EXPORT int relic_query_run(relic_t *ctx, relic_query_t *query,
+    relic_row_cb callback, void *callback_ctx);
+
+/*
+ * Release a query.  Accepts NULL.
+ */
+RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
+
+/*
+ * Compare two values in the total order used to sort results, returning a
+ * negative number, zero or a positive number as `a` sorts before, with or
+ * after `b`.
+ *
+ * Every integer sorts before every symbol and every symbol before every
+ * string; integers then compare numerically, and symbols and strings
+ * bytewise.  The order exists so that output can be made stable when a
+ * column holds more than one type, and it is not the order the language's
+ * comparison operators use: those never order values of different types.
+ * Both values must belong to `ctx`.
+ */
+RELIC_EXPORT int relic_value_compare(relic_t *ctx, const relic_value_t *a,
+    const relic_value_t *b);
 
 /*
  * The text of the most recent RELIC_ERROR diagnostic, or NULL if the context

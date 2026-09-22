@@ -62,10 +62,13 @@ typedef struct relic_parser relic_parser_t;
 /*
  * A parse in progress.
  *
+ * `arena` is where the tree is built: the program arena for a load, and a
+ * query's own arena for query text, which lives only as long as the query.
+ *
  * `body` is a scratch array that every statement's literals are collected in
  * and then copied out of, so a body of any length costs one growable array
  * for the whole load rather than one per statement.  `statements` is this
- * load's own list, which becomes part of the program only if the load
+ * parse's own list, which becomes part of the program only if a load
  * succeeds.
  *
  * A parse function returns false only after the load has been made certain
@@ -85,8 +88,8 @@ typedef struct relic_parser relic_parser_t;
  *			Every allocation the parser makes marks the arena when
  *			it is refused, whether it came from the arena itself
  *			or from the scratch array a body is collected in, so
- *			no call site has to remember to.  load_text() reports
- *			it, once, at the boundary.
+ *			no call site has to remember to.  parse_text()
+ *			reports it, once, at the boundary.
  *
  * The division between the last two is what keeps one exhaustion to one
  * message: whoever reported it says so by setting `failed`, and the boundary
@@ -94,11 +97,13 @@ typedef struct relic_parser relic_parser_t;
  */
 struct relic_parser {
 	relic_t			*ctx;
+	relic_arena_t		*arena;
 	relic_ast_literal_t	*body;
 	size_t			 body_length;
 	size_t			 body_capacity;
 	relic_ast_stmt_list_t	 statements;
 	size_t			 statement_count;
+	size_t			 query_count;
 	size_t			 error_count;
 	relic_lexer_t		 lexer;
 	relic_token_t		 token;		/* the current token */
@@ -139,6 +144,7 @@ static bool	 head_is_positive(relic_parser_t *parser,
 		    const relic_ast_literal_t *head, const char *what);
 static int	 load_text(relic_t *ctx, const char *source_name,
 		    const char *text, size_t length);
+static const relic_ast_stmt_t *only_query(relic_parser_t *parser);
 static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
 static bool	 parse_comparison(relic_parser_t *parser,
 		    relic_ast_literal_t *literal, const relic_ast_term_t *left);
@@ -150,7 +156,11 @@ static bool	 parse_literal(relic_parser_t *parser,
 static int	 parse_program(relic_parser_t *parser);
 static bool	 parse_statement(relic_parser_t *parser);
 static bool	 parse_term(relic_parser_t *parser, relic_ast_term_t *term);
+static int	 parse_text(relic_parser_t *parser, relic_t *ctx,
+		    relic_arena_t *arena, const char *source_name,
+		    const char *text, size_t length);
 static int	 parser_init(relic_parser_t *parser, relic_t *ctx,
+		    relic_arena_t *arena,
 		    const char *source_name, const char *text, size_t length);
 static void	 parser_reset(relic_parser_t *parser);
 static const char *predicate_name(const relic_parser_t *parser,
@@ -453,7 +463,7 @@ parse_alloc(relic_parser_t *parser, size_t count, size_t size)
 {
 	relic_arena_t *arena;
 
-	arena = &parser->ctx->program_arena;
+	arena = parser->arena;
 
 	if (count > SIZE_MAX / size) {
 		relic_arena_fail(arena);
@@ -751,7 +761,7 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
  * collected in.
  *
  * A failure here is exhaustion like any other and is reported like any
- * other: by marking the program arena, leaving the load boundary the single
+ * other: by marking the tree's arena, leaving the parse boundary the single
  * place that turns an unreported refusal into a message.  Parsing is not
  * stopped, because `failed` means something narrower -- a refusal already
  * reported elsewhere -- and claiming it here would silence the boundary and
@@ -766,7 +776,7 @@ body_append(relic_parser_t *parser, const relic_ast_literal_t *literal)
 	body = relic_grow_array(parser->body, &parser->body_capacity,
 	    parser->body_length + 1, sizeof(*parser->body));
 	if (body == NULL) {
-		relic_arena_fail(&parser->ctx->program_arena);
+		relic_arena_fail(parser->arena);
 		return (false);
 	}
 	parser->body = body;
@@ -845,6 +855,8 @@ append_statement(relic_parser_t *parser, const relic_ast_atom_t *head,
 
 	TAILQ_INSERT_TAIL(&parser->statements, statement, link);
 	parser->statement_count++;
+	if (statement->kind == RELIC_STMT_QUERY)
+		parser->query_count++;
 
 	return (true);
 }
@@ -1019,12 +1031,13 @@ parse_program(relic_parser_t *parser)
 }
 
 static int
-parser_init(relic_parser_t *parser, relic_t *ctx, const char *source_name,
-    const char *text, size_t length)
+parser_init(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
+    const char *source_name, const char *text, size_t length)
 {
 	bzero(parser, sizeof(*parser));
 
 	parser->ctx = ctx;
+	parser->arena = arena;
 	TAILQ_INIT(&parser->statements);
 
 	/*
@@ -1073,55 +1086,154 @@ source_name_of(relic_t *ctx, const char *name)
 }
 
 /*
- * Parse text into the program.
+ * Parse text into a list of statements built in `arena`, leaving them on the
+ * parser's own list.  Returns 0 when the whole text parsed, or -1 with every
+ * mistake already reported.
  *
- * The three stages that can fail are separate and each is confirmed before
- * the program is touched: parsing itself, the program arena's failure flag,
- * and the count of statements that were reported on.  Only then are the
- * statements spliced in, which is what makes a load all or nothing.
+ * The three things that can make a parse fail are confirmed separately:
+ * parsing itself, the arena's failure flag, and the count of statements that
+ * were reported on.  The caller decides what to do with the statements only
+ * once all three agree, which is what lets a load be all or nothing.
  *
- * The arena flag is cleared once its failure has been reported.  A load is
- * the phase that flag belongs to, and leaving it set would make one
- * transient exhaustion refuse every later load for the life of the context.
- * What a failed load does keep is the arena memory its discarded statements
- * occupied; an arena has no per-allocation free, and the waste is bounded by
- * the text the caller chose to load.
+ * The arena flag is cleared once its failure has been reported.  A parse is
+ * the phase that flag belongs to, and leaving it set on the program arena
+ * would make one transient exhaustion refuse every later load for the life of
+ * the context.
+ *
+ * The parser is left initialized whether or not the parse succeeded, so the
+ * caller releases it with parser_reset() either way.
  */
 static int
-load_text(relic_t *ctx, const char *source_name, const char *text,
-    size_t length)
+parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
+    const char *source_name, const char *text, size_t length)
 {
-	relic_parser_t parser;
 	const char *name;
 	int status;
+
+	bzero(parser, sizeof(*parser));
 
 	name = source_name_of(ctx, source_name);
 	if (name == NULL)
 		return (-1);
 
-	if (parser_init(&parser, ctx, name, text, length) != 0)
+	if (parser_init(parser, ctx, arena, name, text, length) != 0)
 		return (-1);
 
-	status = parse_program(&parser);
+	status = parse_program(parser);
 
 	/*
 	 * A refusal nobody reported is reported here.  One that the interning
 	 * layer already reported set `failed` instead, and saying it a second
 	 * time would tell the reader nothing about a second thing.
 	 */
-	if (relic_arena_failed(&ctx->program_arena)) {
-		if (!parser.failed)
+	if (relic_arena_failed(arena)) {
+		if (!parser->failed)
 			relic_diag_no_memory(ctx);
-		relic_arena_clear_failure(&ctx->program_arena);
+		relic_arena_clear_failure(arena);
 		status = -1;
 	}
 
-	if (parser.error_count > 0)
+	if (parser->error_count > 0)
 		status = -1;
+
+	return (status);
+}
+
+/*
+ * Parse text into the program.
+ *
+ * The statements are spliced in only when the whole text parsed, which is
+ * what makes a load all or nothing.  What a failed load does keep is the
+ * arena memory its discarded statements occupied; an arena has no
+ * per-allocation free, and the waste is bounded by the text the caller chose
+ * to load.
+ */
+static int
+load_text(relic_t *ctx, const char *source_name, const char *text,
+    size_t length)
+{
+	relic_parser_t parser;
+	int status;
+
+	status = parse_text(&parser, ctx, &ctx->program_arena, source_name,
+	    text, length);
 
 	if (status == 0) {
 		TAILQ_CONCAT(&ctx->ast.statements, &parser.statements, link);
 		ctx->ast.count += parser.statement_count;
+		ctx->ast.query_count += parser.query_count;
+	}
+
+	parser_reset(&parser);
+
+	return (status);
+}
+
+/*
+ * The one statement a successful parse of query text produced, or NULL having
+ * reported why the text was not exactly one query.
+ *
+ * Query text is held to the grammar's query form, ending in `?`, rather than
+ * being completed when the terminator is missing.  A rule or a fact is
+ * refused rather than loaded: preparing a query must not change the program.
+ */
+static const relic_ast_stmt_t *
+only_query(relic_parser_t *parser)
+{
+	const relic_ast_stmt_t *statement;
+	const relic_ast_stmt_t *second;
+
+	statement = TAILQ_FIRST(&parser->statements);
+	if (statement == NULL) {
+		relic_diagf(parser->ctx, RELIC_ERROR, &parser->token.where,
+		    "expected a query, found end of input");
+		return (NULL);
+	}
+
+	if (statement->kind != RELIC_STMT_QUERY) {
+		relic_diagf(parser->ctx, RELIC_ERROR, &statement->where,
+		    "expected a query, found a %s",
+		    statement->body_length == 0 ? "fact" : "rule");
+		return (NULL);
+	}
+
+	second = TAILQ_NEXT(statement, link);
+	if (second != NULL) {
+		relic_diagf(parser->ctx, RELIC_ERROR, &second->where,
+		    "expected one query, found another statement after it");
+		return (NULL);
+	}
+
+	return (statement);
+}
+
+/*
+ * Parse text that must hold exactly one query, building it in `arena`.
+ * Returns 0 with the statement in *statementp, or -1 with every mistake
+ * already reported.
+ *
+ * The statement is not added to the program.  It lives in the caller's arena,
+ * detached from any list, for as long as the caller keeps that arena.
+ */
+int
+relic_parse_query(relic_t *ctx, relic_arena_t *arena, const char *source_name,
+    const char *text, const relic_ast_stmt_t **statementp)
+{
+	relic_parser_t parser;
+	const relic_ast_stmt_t *statement;
+	int status;
+
+	*statementp = NULL;
+
+	status = parse_text(&parser, ctx, arena, source_name, text,
+	    strlen(text));
+
+	if (status == 0) {
+		statement = only_query(&parser);
+		if (statement != NULL)
+			*statementp = statement;
+		else
+			status = -1;
 	}
 
 	parser_reset(&parser);

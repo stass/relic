@@ -1,0 +1,2 @@
+% Every -q is checked before any is answered, and each mistake is reported.
+edge(a, b).

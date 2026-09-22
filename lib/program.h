@@ -197,8 +197,11 @@ struct relic_variable {
  * A compiled rule.
  *
  * A fact is a rule whose body has no literals, exactly as in the syntax
- * tree.  `head_args` holds the head predicate's arity of arguments and is
- * NULL when that arity is zero.
+ * tree.  A query is a rule too: its head is a synthetic predicate, `$q`
+ * followed by a serial number, whose arguments are the query's named
+ * variables in order of first occurrence, so its relation is the answer.
+ * `head_args` holds the head predicate's arity of arguments and is NULL when
+ * that arity is zero.
  *
  * Every slot below `variable_count` is bound by some positive relational
  * body literal, because a rule in which one was not would have been
@@ -215,7 +218,7 @@ struct relic_rule {
 };
 
 /*
- * The compiled rules, in the order their statements were loaded.
+ * Compiled rules, in the order their statements were loaded.
  *
  * A growable array over reallocarray() rather than an arena block, because
  * an arena cannot resize and a rule must be reachable by index once the
@@ -244,11 +247,22 @@ struct relic_ruletab {
  * `invalid` is sticky because an unsafe rule stays in the tree and stays
  * unsafe: a later load cannot repair it, so a check that compiles only
  * blameless statements must still refuse the program.
+ *
+ * `queries` holds the queries written in the program, compiled into rules
+ * over their answer predicates, apart from `rules` because evaluating the
+ * program must not answer every query it happens to contain.
+ * `query_serial` counts the queries this context has compiled, those written
+ * in the program and those prepared from text alike, and numbers the next
+ * one's answer predicate.  It advances only when a compiled query is
+ * published, so a query that fails part way and is compiled again reuses its
+ * number.
  */
 struct relic_program {
 	relic_predtab_t		 predicates;
 	relic_ruletab_t		 rules;
+	relic_ruletab_t		 queries;
 	const relic_ast_stmt_t	*compiled;
+	size_t			 query_serial;
 	bool			 invalid;
 };
 

@@ -36,6 +36,8 @@
 static int	 compare_bytes(const relic_t *ctx, uint32_t left,
 		    uint32_t right);
 static int	 compare_integers(int64_t left, int64_t right);
+static int	 compare_totally(const relic_t *ctx, const relic_value_t *left,
+		    const relic_value_t *right);
 static const relic_value_t *value_at(const relic_valtab_t *table,
 		    relic_dom_t dom);
 static bool	 value_equal(const relic_value_t *left,
@@ -376,9 +378,11 @@ compare_integers(int64_t left, int64_t right)
  * are equal the shorter string is the smaller, which is what makes this a
  * lexicographic order over strings that may contain NUL bytes.
  *
- * Both identifiers are known to name interned symbols: a value only reaches
- * the value table through relic_value_intern(), which rejects one that names
- * a symbol this context has not assigned, and no symbol is ever removed.
+ * A value in the table always names an interned symbol, because
+ * relic_value_intern() rejects one that does not, but a value handed to
+ * relic_value_compare() is the caller's and may name anything.  An identifier
+ * this context never assigned sorts before every symbol, so that the order
+ * stays total without a comparator that can fail.
  */
 static int
 compare_bytes(const relic_t *ctx, uint32_t left, uint32_t right)
@@ -392,6 +396,13 @@ compare_bytes(const relic_t *ctx, uint32_t left, uint32_t right)
 
 	left_bytes = relic_symbol_bytes(ctx, left, &left_length);
 	right_bytes = relic_symbol_bytes(ctx, right, &right_length);
+
+	if (left_bytes == NULL || right_bytes == NULL) {
+		if (left_bytes == right_bytes)
+			return (0);
+
+		return (left_bytes == NULL ? -1 : 1);
+	}
 
 	common = left_length < right_length ? left_length : right_length;
 
@@ -465,12 +476,35 @@ value_type_rank(enum relic_type type)
 }
 
 /*
- * A total order over every value, used to sort output rows.
+ * A total order over every value, used to sort output rows: by type rank
+ * first, then within a type as relic_value_order() orders it.
  *
  * It exists only so that a script can ask for stable output from a column
  * that holds more than one type, and it is not visible to the language: no
- * program can observe that an integer sorts before a symbol.  Within a type
- * it agrees with relic_value_order().
+ * program can observe that an integer sorts before a symbol.  This is its
+ * one definition; relic_value_total_order() reaches it by domain identifier
+ * and relic_value_compare() by public value.
+ */
+static int
+compare_totally(const relic_t *ctx, const relic_value_t *left,
+    const relic_value_t *right)
+{
+	unsigned int left_rank;
+	unsigned int right_rank;
+
+	left_rank = value_type_rank(left->type);
+	right_rank = value_type_rank(right->type);
+	if (left_rank != right_rank)
+		return (left_rank < right_rank ? -1 : 1);
+
+	if (left->type == RELIC_INTEGER)
+		return (compare_integers(left->v.integer, right->v.integer));
+
+	return (compare_bytes(ctx, left->v.id, right->v.id));
+}
+
+/*
+ * The total order over two domain identifiers.
  *
  * An identifier this context never assigned sorts before every real value.
  * Nothing should present one, and ordering it consistently is cheaper than
@@ -481,9 +515,6 @@ relic_value_total_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 {
 	const relic_value_t *left;
 	const relic_value_t *right;
-	unsigned int left_rank;
-	unsigned int right_rank;
-	int order;
 
 	if (a == b)
 		return (0);
@@ -498,15 +529,12 @@ relic_value_total_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 		return (left == NULL ? -1 : 1);
 	}
 
-	left_rank = value_type_rank(left->type);
-	right_rank = value_type_rank(right->type);
-	if (left_rank != right_rank)
-		return (left_rank < right_rank ? -1 : 1);
+	return (compare_totally(ctx, left, right));
+}
 
-	if (left->type == RELIC_INTEGER)
-		order = compare_integers(left->v.integer, right->v.integer);
-	else
-		order = compare_bytes(ctx, left->v.id, right->v.id);
-
-	return (order);
+int
+relic_value_compare(relic_t *ctx, const relic_value_t *a,
+    const relic_value_t *b)
+{
+	return (compare_totally(ctx, a, b));
 }

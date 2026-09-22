@@ -1,0 +1,535 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include "config.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+
+#include "internal.h"
+
+/*
+ * The planner: a compiled rule becomes an ordered array of operations.
+ *
+ * The walk keeps one set, the slots bound so far, and turns each literal into
+ * an operation at the point it is placed.  A positive literal whose every
+ * argument is already bound is a membership test; any other positive literal
+ * is a scan that binds what it can.  A comparison binds nothing, so it can
+ * only be placed where both of its operands are bound, and it is placed at
+ * the earliest such point.  The head becomes the EMIT that ends the plan.
+ *
+ * Positive literals are placed in the order they are written.  A comparison
+ * cannot always be: its written position need not be one where its operands
+ * exist -- `N >= 100, size(X, N)` is a safe body -- so it goes where it first
+ * can.  The rule's safety is what guarantees such a point exists: every slot
+ * a comparison reads is bound by some positive literal, so once every
+ * positive literal is placed, every comparison can be.
+ *
+ * Each column's fate is decided here, while the bound set is known: matched
+ * against a constant, matched against a slot already bound, binding its
+ * slot, or ignored.  The executor then makes no decision of its own, and a
+ * better planner is a change to this file and never to the one that runs
+ * what it emits.
+ */
+
+typedef struct relic_planner relic_planner_t;
+
+/*
+ * A plan under construction.
+ *
+ * `ops` has room for one operation per body literal and one EMIT, which is
+ * exactly what a plan holds.  `placed` records which comparisons have been
+ * placed, indexed like the body.  `bound` is the set of slots the operations
+ * placed so far bind.
+ */
+struct relic_planner {
+	relic_t			*ctx;
+	relic_arena_t		*arena;
+	const relic_rule_t	*rule;
+	relic_op_t		*ops;
+	bool			*placed;
+	size_t			 op_count;
+	uint64_t		 bound;
+};
+
+static relic_op_t *append_op(relic_planner_t *planner,
+		    enum relic_op_kind kind);
+static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
+static bool	 atom_is_bound(const relic_planner_t *planner,
+		    const relic_atom_t *atom, uint16_t arity);
+static int	 build_plan(relic_planner_t *planner);
+static uint64_t	 comparison_slots(const relic_comparison_t *comparison);
+static int	 confirm_plan_complete(const relic_planner_t *planner,
+		    uint16_t head_arity);
+static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom);
+static int	 place_body(relic_planner_t *planner);
+static int	 place_emit(relic_planner_t *planner);
+static void	 place_ready_comparisons(relic_planner_t *planner);
+static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
+		    relic_arena_t *arena, const relic_rule_t *rule);
+static void	 read_term(const relic_arg_t *arg, relic_plan_term_t *term);
+static int	 reject_negation(const relic_planner_t *planner);
+static void	 scan_term(relic_planner_t *planner, const relic_arg_t *arg,
+		    relic_plan_term_t *term);
+static uint64_t	 slot_bit(uint16_t slot);
+static relic_plan_term_t *terms_alloc(relic_planner_t *planner,
+		    uint16_t arity);
+
+static uint64_t
+slot_bit(uint16_t slot)
+{
+	return (UINT64_C(1) << slot);
+}
+
+/*
+ * Room for a relation's arity of terms, or NULL for arity zero, which has no
+ * columns to describe.  A null return for a nonzero arity means the arena
+ * refused, which the caller's boundary reports.
+ */
+static relic_plan_term_t *
+terms_alloc(relic_planner_t *planner, uint16_t arity)
+{
+	if (arity == 0)
+		return (NULL);
+
+	return (relic_arena_alloc(planner->arena,
+	    (size_t)arity * sizeof(relic_plan_term_t)));
+}
+
+/*
+ * The next operation of the plan, zeroed and of the given kind.  There is
+ * always room: the array was sized for every literal and the EMIT.
+ */
+static relic_op_t *
+append_op(relic_planner_t *planner, enum relic_op_kind kind)
+{
+	relic_op_t *op;
+
+	op = &planner->ops[planner->op_count];
+	planner->op_count++;
+
+	bzero(op, sizeof(*op));
+	op->kind = kind;
+
+	return (op);
+}
+
+/*
+ * The term a test or an EMIT reads for an argument: a constant, or a slot.
+ * The caller places the reader only where its slots are bound, which
+ * confirm_plan_complete() checks once per plan.
+ *
+ * A reader never meets `_`.  Safety rejects `_` anywhere but a positive
+ * literal, and a positive literal holding one is never a test, because
+ * atom_is_bound() says it is not bound.  Should one arrive regardless, it
+ * reads as matching anything rather than as a slot it does not have.
+ */
+static void
+read_term(const relic_arg_t *arg, relic_plan_term_t *term)
+{
+	bzero(term, sizeof(*term));
+
+	switch (arg->kind) {
+	case RELIC_ARG_CONSTANT:
+		term->action = RELIC_PLAN_CONSTANT;
+		term->u.constant = arg->u.constant;
+		return;
+	case RELIC_ARG_VARIABLE:
+		term->action = RELIC_PLAN_BOUND;
+		term->u.slot = arg->u.slot;
+		return;
+	case RELIC_ARG_WILDCARD:
+		break;
+	}
+
+	term->action = RELIC_PLAN_ANY;
+}
+
+/*
+ * The term a SCAN uses for an argument, binding the argument's slot when
+ * nothing has bound it yet.
+ *
+ * The bound set is updated column by column, so a variable written twice in
+ * one atom -- edge(X, X) -- binds at its first column and is matched at its
+ * second against the value just bound.
+ */
+static void
+scan_term(relic_planner_t *planner, const relic_arg_t *arg,
+    relic_plan_term_t *term)
+{
+	bzero(term, sizeof(*term));
+
+	switch (arg->kind) {
+	case RELIC_ARG_CONSTANT:
+		term->action = RELIC_PLAN_CONSTANT;
+		term->u.constant = arg->u.constant;
+		return;
+	case RELIC_ARG_WILDCARD:
+		term->action = RELIC_PLAN_ANY;
+		return;
+	case RELIC_ARG_VARIABLE:
+		break;
+	}
+
+	term->u.slot = arg->u.slot;
+
+	if ((planner->bound & slot_bit(arg->u.slot)) != 0) {
+		term->action = RELIC_PLAN_BOUND;
+		return;
+	}
+
+	term->action = RELIC_PLAN_BIND;
+	planner->bound |= slot_bit(arg->u.slot);
+}
+
+/*
+ * Whether every argument of an atom is a constant or a bound slot, which is
+ * what makes it a membership test rather than a scan.  A wildcard is never
+ * bound: it asks for any value, and only a scan can supply one.
+ */
+static bool
+atom_is_bound(const relic_planner_t *planner, const relic_atom_t *atom,
+    uint16_t arity)
+{
+	const relic_arg_t *arg;
+	uint16_t i;
+
+	for (i = 0; i < arity; i++) {
+		arg = &atom->args[i];
+
+		if (arg->kind == RELIC_ARG_WILDCARD)
+			return (false);
+
+		if (arg->kind == RELIC_ARG_VARIABLE &&
+		    (planner->bound & slot_bit(arg->u.slot)) == 0)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Place a positive literal: a MEMBER when it is fully bound, a SCAN that
+ * binds the rest otherwise.
+ */
+static int
+place_atom(relic_planner_t *planner, const relic_atom_t *atom)
+{
+	relic_relation_t *relation;
+	relic_op_t *op;
+	uint16_t i;
+
+	relation = relic_relation_for(planner->ctx, atom->pred);
+	if (relation == NULL)
+		return (-1);
+
+	if (atom_is_bound(planner, atom, relation->arity))
+		op = append_op(planner, RELIC_OP_MEMBER);
+	else
+		op = append_op(planner, RELIC_OP_SCAN);
+
+	op->u.atom.relation = relation;
+	op->u.atom.terms = terms_alloc(planner, relation->arity);
+	if (relation->arity > 0 && op->u.atom.terms == NULL)
+		return (-1);
+
+	for (i = 0; i < relation->arity; i++) {
+		if (op->kind == RELIC_OP_MEMBER)
+			read_term(&atom->args[i], &op->u.atom.terms[i]);
+		else
+			scan_term(planner, &atom->args[i],
+			    &op->u.atom.terms[i]);
+	}
+
+	return (0);
+}
+
+/*
+ * The slots a run of arguments reads.
+ */
+static uint64_t
+arg_slots(const relic_arg_t *args, uint16_t count)
+{
+	uint64_t slots;
+	uint16_t i;
+
+	slots = 0;
+	for (i = 0; i < count; i++) {
+		if (args[i].kind == RELIC_ARG_VARIABLE)
+			slots |= slot_bit(args[i].u.slot);
+	}
+
+	return (slots);
+}
+
+static uint64_t
+comparison_slots(const relic_comparison_t *comparison)
+{
+	return (arg_slots(&comparison->left, 1) |
+	    arg_slots(&comparison->right, 1));
+}
+
+/*
+ * Place every comparison not yet placed whose operands are now bound, in the
+ * order the comparisons are written.
+ *
+ * Called before the first literal and after every positive literal, which
+ * are the only points at which the bound set changes, so each comparison is
+ * placed at the earliest point it can be.
+ */
+static void
+place_ready_comparisons(relic_planner_t *planner)
+{
+	const relic_rule_t *rule;
+	const relic_comparison_t *comparison;
+	relic_op_t *op;
+	size_t i;
+
+	rule = planner->rule;
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind != RELIC_LITERAL_COMPARISON ||
+		    planner->placed[i])
+			continue;
+
+		comparison = &rule->body[i].u.comparison;
+		if ((comparison_slots(comparison) & ~planner->bound) != 0)
+			continue;
+
+		op = append_op(planner, RELIC_OP_FILTER);
+		op->u.filter.compare = comparison->op;
+		read_term(&comparison->left, &op->u.filter.left);
+		read_term(&comparison->right, &op->u.filter.right);
+		planner->placed[i] = true;
+	}
+}
+
+/*
+ * Place the positive literals in the order they are written, and each
+ * comparison at the earliest point its operands are bound.
+ *
+ * Comparisons are offered a place before the first literal and after every
+ * positive one, which are the only points at which the bound set changes.
+ */
+static int
+place_body(relic_planner_t *planner)
+{
+	const relic_rule_t *rule;
+	size_t i;
+
+	rule = planner->rule;
+
+	place_ready_comparisons(planner);
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind != RELIC_LITERAL_POSITIVE)
+			continue;
+
+		if (place_atom(planner, &rule->body[i].u.atom) != 0)
+			return (-1);
+
+		place_ready_comparisons(planner);
+	}
+
+	return (0);
+}
+
+/*
+ * Confirm, once the body has been placed, that every body literal became
+ * exactly one operation and that every head argument is bound.  Returns 0,
+ * or -1 having reported which did not hold.
+ *
+ * A checked rule always passes.  Safety guarantees that every slot a
+ * comparison or the head reads is bound by some positive literal, so once
+ * every positive literal is placed, every comparison has been too.  The
+ * question is asked anyway, once per plan, because failing it would be
+ * silent: a literal missing from the plan is a filter nobody applies, and an
+ * unbound head argument is a column read from whatever the frame last held.
+ *
+ * Counting operations rather than checking each kind of literal is what makes
+ * the check cover every kind there is.  A kind of literal the planner does
+ * not place leaves the count short, rather than vanishing from the plan
+ * because nobody thought to look for it.
+ */
+static int
+confirm_plan_complete(const relic_planner_t *planner, uint16_t head_arity)
+{
+	const relic_rule_t *rule;
+	uint64_t unbound;
+
+	rule = planner->rule;
+	unbound = arg_slots(rule->head_args, head_arity) & ~planner->bound;
+
+	if (planner->op_count == rule->body_length && unbound == 0)
+		return (0);
+
+	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
+	    "internal error: the plan leaves a literal out or reads a "
+	    "variable nothing binds");
+
+	return (-1);
+}
+
+/*
+ * Place the EMIT that ends every plan, reading the head's arguments.
+ */
+static int
+place_emit(relic_planner_t *planner)
+{
+	const relic_rule_t *rule;
+	relic_relation_t *relation;
+	relic_op_t *op;
+	uint16_t i;
+
+	rule = planner->rule;
+
+	relation = relic_relation_for(planner->ctx, rule->head);
+	if (relation == NULL)
+		return (-1);
+
+	if (confirm_plan_complete(planner, relation->arity) != 0)
+		return (-1);
+
+	op = append_op(planner, RELIC_OP_EMIT);
+	op->u.atom.relation = relation;
+	op->u.atom.terms = terms_alloc(planner, relation->arity);
+	if (relation->arity > 0 && op->u.atom.terms == NULL)
+		return (-1);
+
+	for (i = 0; i < relation->arity; i++)
+		read_term(&rule->head_args[i], &op->u.atom.terms[i]);
+
+	return (0);
+}
+
+/*
+ * Refuse a rule that holds a negated literal, naming the rule and pointing at
+ * the literal.
+ *
+ * Testing absence is meaningful only against a relation that is complete, and
+ * nothing here guarantees that: the relation may be one this same fixed point
+ * is still deriving, and an absence that later became a presence would have
+ * let through a binding the program does not justify.
+ */
+static int
+reject_negation(const relic_planner_t *planner)
+{
+	const relic_rule_t *rule;
+	char described[RELIC_PRED_TEXT_MAX];
+	char named[RELIC_PRED_TEXT_MAX + 8];
+	size_t i;
+
+	rule = planner->rule;
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind != RELIC_LITERAL_NEGATED)
+			continue;
+
+		/*
+		 * A query's head is a predicate its writer never named, so a
+		 * message about a query names none.
+		 */
+		if (relic_pred_is_answer(planner->ctx, rule->head))
+			strlcpy(named, "the query", sizeof(named));
+		else
+			snprintf(named, sizeof(named), "rule %s",
+			    relic_pred_describe(planner->ctx, rule->head,
+			    described, sizeof(described)));
+
+		relic_diagf(planner->ctx, RELIC_ERROR, &rule->body[i].where,
+		    "%s uses negation, which evaluation does not support",
+		    named);
+
+		return (-1);
+	}
+
+	return (0);
+}
+
+static int
+planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
+    const relic_rule_t *rule)
+{
+	bzero(planner, sizeof(*planner));
+	planner->ctx = ctx;
+	planner->arena = arena;
+	planner->rule = rule;
+
+	/*
+	 * The body length comes from a compiled rule held in memory, so one
+	 * more than it cannot wrap, but the products are checked all the same
+	 * rather than trusted to a count nobody here bounded.
+	 */
+	if (rule->body_length >= SIZE_MAX / sizeof(relic_op_t)) {
+		relic_arena_fail(arena);
+		return (-1);
+	}
+
+	planner->ops = relic_arena_alloc(arena,
+	    (rule->body_length + 1) * sizeof(relic_op_t));
+	planner->placed = relic_arena_alloc(arena,
+	    rule->body_length * sizeof(bool));
+	if (planner->ops == NULL || planner->placed == NULL)
+		return (-1);
+
+	bzero(planner->placed, rule->body_length * sizeof(bool));
+
+	return (0);
+}
+
+static int
+build_plan(relic_planner_t *planner)
+{
+	if (reject_negation(planner) != 0)
+		return (-1);
+
+	if (place_body(planner) != 0)
+		return (-1);
+
+	return (place_emit(planner));
+}
+
+/*
+ * Plan a rule.  Returns 0 with the plan in *plan, or -1 with a diagnostic
+ * reported.
+ *
+ * The plan and everything it points at except its relations are allocated
+ * from `arena`, and live as long as the caller keeps it.  The relations are
+ * created here if they do not yet exist; they belong to the context and never
+ * move, which is what lets a plan hold them.
+ */
+int
+relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
+    relic_plan_t *plan)
+{
+	relic_planner_t planner;
+	int status;
+
+	bzero(plan, sizeof(*plan));
+
+	status = planner_init(&planner, ctx, arena, rule);
+	if (status == 0)
+		status = build_plan(&planner);
+
+	/*
+	 * An arena refusal is reported here rather than where it happened, so
+	 * that one exhaustion produces one message however far into the plan
+	 * it struck.  A relation that could not be created reported itself.
+	 */
+	if (relic_arena_failed(arena)) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	if (status != 0)
+		return (-1);
+
+	plan->ops = planner.ops;
+	plan->op_count = planner.op_count;
+
+	return (0);
+}

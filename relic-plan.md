@@ -628,7 +628,9 @@ runs stratum by stratum with identical results to S5.
 
 **Delivers.** Delta rule variant generation in `lib/plan.c`, the fixed-point
 loop over identifier ranges per D-10 in `lib/eval.c`, and the counters that
-`-X stats` reports.
+`-X stats` reports. The `-X` option itself and `RELIC_F_NAIVE` land here rather
+than in S5: until a second evaluator exists, `-X naive` would select the only
+one there is.
 
 **Design notes.** For a rule with *k* recursive body literals, generate *k*
 variants; variant *i* binds literal *i* to the delta and the rest to the full

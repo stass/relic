@@ -16,6 +16,7 @@
 
 #include "ast.h"
 #include "compat.h"
+#include "plan.h"
 #include "program.h"
 #include "queue.h"
 #include "relation.h"
@@ -112,10 +113,14 @@ struct relic_arena {
  * With no callback installed, diagnostics are discarded and an error is still
  * recoverable through relic_error().  Silence is the right default for a
  * library: a caller must not be made to accept output on its stderr.
+ *
+ * `error_count` counts every error reported, which is how an operation that
+ * failed learns whether anything said why.
  */
 struct relic_diag {
 	relic_diag_cb	 callback;
 	void		*callback_ctx;
+	size_t		 error_count;
 	char		 last_error[512];
 	bool		 has_error;
 };
@@ -167,14 +172,42 @@ struct relic_valtab {
 };
 
 /*
+ * A query ready to run: a compiled rule over the query's answer predicate.
+ *
+ * A query prepared from text owns `arena`, which holds its syntax tree and
+ * the variable-length parts of its rule, and is released when the query is
+ * destroyed.  A query written in the program borrows its rule from the
+ * program arena and leaves `arena` empty.  Either way the rule is a copy held
+ * here rather than a pointer into the program's table of queries, which is a
+ * growable array and moves.
+ *
+ * `ctx` is the context the query was compiled against.  Its predicates, its
+ * constants and its answer relation all belong to that context, so running it
+ * against another would read identifiers that mean something else there.
+ */
+struct relic_query {
+	relic_t		*ctx;
+	relic_arena_t	 arena;
+	relic_rule_t	 rule;
+};
+
+/*
  * A relic context owns everything it allocates, and two contexts share
  * nothing: the library holds no mutable global state at all, which is what
  * lets an embedding program keep several contexts without a lock.  A single
  * context is not itself thread-safe.
+ *
+ * `materialized_rules` is how many of the program's rules the relations are
+ * a fixed point of.  Rules are only ever appended, so the relations are
+ * current exactly when it equals the number of compiled rules, and an
+ * evaluation after a later load continues from what they already hold.  It
+ * advances only when a fixed point is reached, so a failed evaluation leaves
+ * it where it was and the next one tries again.
  */
 struct relic {
 	relic_arena_t		 arena;	/* context lifetime: symbol bytes */
 	relic_arena_t		 program_arena;	/* the parsed program */
+	relic_arena_t		 eval_arena;	/* one evaluation's plans */
 	relic_symtab_t		 symbols;
 	relic_valtab_t		 values;
 	relic_ast_program_t	 ast;
@@ -182,6 +215,7 @@ struct relic {
 	relic_reltab_t		 relations;
 	relic_diag_t		 diag;
 	relic_config_t		 config;
+	size_t			 materialized_rules;
 };
 
 /*
@@ -399,6 +433,15 @@ int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
 void	 relic_ast_program_init(relic_ast_program_t *program);
 
 /*
+ * Parse text that must hold exactly one query, into `arena` rather than into
+ * the program.  Returns 0 with the statement in *statementp, or -1 with every
+ * mistake reported: a syntax error, or text that is not one query.
+ */
+int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
+	    const char *source_name, const char *text,
+	    const relic_ast_stmt_t **statementp);
+
+/*
  * lib/pred.c
  *
  * relic_pred_intern() assigns an identifier to a (name, arity) pair, or
@@ -409,6 +452,9 @@ void	 relic_ast_program_init(relic_ast_program_t *program);
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
  * stand as an argument of the message it decorates.
+ *
+ * relic_pred_is_answer() says whether a predicate is a query's synthetic
+ * answer predicate, which a message about the query must not name.
  */
 void	 relic_predtab_init(relic_predtab_t *table);
 void	 relic_predtab_reset(relic_predtab_t *table);
@@ -419,6 +465,7 @@ size_t	 relic_pred_count(const relic_t *ctx);
 void	 relic_pred_define(relic_t *ctx, relic_pred_id_t id);
 const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
 	    char *buffer, size_t size);
+bool	 relic_pred_is_answer(const relic_t *ctx, relic_pred_id_t id);
 void	 relic_pred_report_undefined(relic_t *ctx);
 
 /*
@@ -427,9 +474,24 @@ void	 relic_pred_report_undefined(relic_t *ctx);
  * relic_program_init() prepares the empty program a context starts with, and
  * relic_program_reset() releases what the program owns outside the arenas.
  * The public entry point into this module is relic_check().
+ *
+ * relic_program_ready() is the check every use of the program begins with:
+ * preparing a query, handing out one of the program's own, or evaluating.
+ * Returns 0, or -1 with at least one error reported by this call.
  */
 void	 relic_program_init(relic_program_t *program);
+int	 relic_program_ready(relic_t *ctx);
 void	 relic_program_reset(relic_program_t *program);
+
+/*
+ * lib/plan.c
+ *
+ * Plan one rule into `arena`, creating the relations it reads and writes.
+ * Returns 0, or -1 with a diagnostic reported: memory ran out, or the rule
+ * holds a literal the evaluator cannot execute.
+ */
+int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
+	    const relic_rule_t *rule, relic_plan_t *plan);
 
 /*
  * lib/relation.c

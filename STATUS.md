@@ -80,16 +80,11 @@ compiles only what was loaded since the previous one, reports each diagnostic
 once, and returns its previous answer when there is nothing new. A program that
 has ever held a rejected rule stays refused.
 
-Queries are not yet validated. Their predicates are resolved, so a typo in a
-query is reported as an undefined predicate, but a query's variables are
-numbered and checked when S5 compiles it into the synthetic `$q0` rule of
-architecture section 11. `TODO.md` records this. Stratification arrives in S6,
-so a program with recursion through negation is still accepted.
+Stratification arrives in S6, so a program with recursion through negation
+is still accepted by the check.
 
 **The relation store, stage S4.** Somewhere to put tuples, specified in
-`specs/design-relations.md`. Nothing evaluates yet, so nothing in the shipping
-library inserts one; the store is reached only by its unit suite until S5's
-evaluator arrives.
+`specs/design-relations.md`.
 
 | Component | State |
 | --- | --- |
@@ -122,6 +117,43 @@ exactly as it was. The memory limit counts allocated capacity rather than the
 smaller number a tuple count implies, since a limit that ignored the
 difference would allow twice what was asked for.
 
+**The plan, the executor and the tool, stage S5, milestone M1.** Positive
+recursive Datalog answers queries from the command line, specified in
+`specs/design-plan.md`, `specs/design-eval.md` and `specs/design-cli.md`.
+`relic -q 'path(a, X)?' graph.dl` prints `b`, `c` and `d`.
+
+| Component | State |
+| --- | --- |
+| `lib/plan.{h,c}` | the plan representation of D-8 and the textual planner: positive literals in written order, each a `SCAN` or, when every argument is bound, a `MEMBER`; each comparison a `FILTER` at the earliest point its operands are bound; the head an `EMIT`; a plan is refused unless every body literal became exactly one operation |
+| `lib/eval.c` | the executor, one loop over a level and a resume flag with no recursion; the naive fixed point of D-9; `relic_materialize()` and `relic_query_run()` |
+| `lib/rule.c` | a query compiles into a rule over the synthetic `$qN` predicate of D-12: its named variables in first-occurrence order are the columns, and safety is the ordinary check of a head; `relic_query_prepare()`, `relic_query_count()`, `relic_query_loaded()`, `relic_query_destroy()` |
+| `lib/parse.c` | parses into any arena, so a prepared query owns its syntax tree; `relic_parse_query()` holds query text to exactly one query |
+| `lib/value.c` | one definition of the total order of section 61, reached by domain identifier and, as `relic_value_compare()`, by public value |
+| `include/relic.h` | adds `relic_materialize()`, `relic_query_t`, `relic_row_cb`, the five query functions and `relic_value_compare()` |
+| `cmd/relic/main.c` | the phases of `design-cli.md`: load every operand or standard input, check, prepare every query, then evaluate; `-a`, `-c`, `-F`, `-o`, `-q`, `-s`, `-V`; each `-q` is named `<query N>` in diagnostics |
+| `cmd/relic/output.c` | text, csv, tsv and json, byte for byte as `design-cli.md` section 4 specifies, a string literal escaping C0 and C1 controls and bytes that are not UTF-8; `-s` through a merge sort over the library's total order |
+| `lib/pred.c` | no predicate may have more than 32 arguments, enforced at interning, the one path every predicate takes |
+| `tests/` | `test_plan`, `test_eval` and `test_query`; an evaluation sweep in `test_exhaustion`; `tests/cli.sh` for standard input, `-o` and write failures; twenty-two golden language tests covering every binding pattern, recursion, comparisons across types, all four formats, sorting, and every query diagnostic |
+
+The queries a program contains are now compiled and checked by
+`relic_check()`, so an unsafe query makes the program invalid exactly as an
+unsafe rule does. With `-q`, only the command line's queries run; the
+program's own are still checked.
+
+Evaluation materializes the whole program before answering any query --
+Magic Sets arrive in S10 -- and answers a query by running its rule once into
+the answer relation, then streaming that relation. No row is delivered until
+the answer is complete, so a query that exceeds a limit delivers none. The
+relations record how many rules they are a fixed point of, so a query after a
+later load continues the fixed point rather than recomputing it.
+
+A negated literal passes the check and is refused when its rule is planned,
+naming the rule. Evaluating negation needs the stratification of S6 and the
+`ANTI_MEMBER` operation of S8. `-X` arrives with the semi-naive evaluator in
+S7, since until then there is nothing for `-X naive` to select; `-e` arrives in
+S9, and `-i`, `-l`, `-n` and `-v` in S12. Each is an unknown option until it
+does.
+
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
 `--with-libedit`. Test suites: `make check`, `make check-asan`,
@@ -144,7 +176,7 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the twelve documented entry
+* the installed shared library exports exactly the nineteen documented entry
   points and nothing else; the compatibility objects linked into it are not
   reachable.
 
@@ -218,7 +250,34 @@ continuous integration yet. `TODO.md` records that as the highest open item,
 and records the two checks whose behaviour on ELF is inferred rather than
 observed.
 
-There is no evaluator or query interface yet.
+The evaluation suites were confirmed to fail when the property they guard
+is broken, by injecting each fault and rerunning:
+
+* a fixed point that stops after one pass, which the recursion tests catch as
+  missing paths;
+* a scan that does not restart its range when it is entered afresh, which
+  every join catches as missing answers;
+* a comparison placed before its operands are bound, which
+  `tests/unit/test_plan.c` and the comparison tests catch;
+* an unordered pair satisfying `<=`, which `tests/unit/test_eval.c` catches as
+  symbols passing an integer comparison;
+* relations never extended after a later load, which it catches as a stale
+  answer;
+* a query's synthetic head not counted as an occurrence, which every query
+  catches as a spurious singleton warning;
+* a refused query consuming a serial number, which
+  `tests/unit/test_query.c` catches as a misnamed answer predicate;
+* rows streamed before evaluation has succeeded, which
+  `tests/unit/test_exhaustion.c` catches as rows from a failed query;
+* a separator written before a query is known to succeed, and a JSON string
+  whose literal is not escaped, which `tests/cli.sh` and the json golden test
+  catch;
+* a C1 control or a byte that is not UTF-8 written raw inside a literal, which
+  the text and json golden tests catch;
+* a predicate wider than 32 arguments admitted by interning, which
+  `tests/unit/test_pred.c` catches;
+* a negated literal left out of a plan rather than refused, which the
+  planner's completeness check turns into an error instead of wrong answers.
 
 ## Documents
 
@@ -229,17 +288,19 @@ There is no evaluator or query interface yet.
 | `specs/design-parser.md` | lexical structure, the syntax tree, diagnostics and error recovery |
 | `specs/design-program.md` | predicate identity, variable numbering, the compiled rule, safety |
 | `specs/design-relations.md` | the tuple store, tuple identifiers, the full-tuple index, ranges, limits |
+| `specs/design-plan.md` | the operations, the binding decisions a plan records, the textual planner, a query as a rule |
+| `specs/design-eval.md` | the executor, the naive and semi-naive fixed points, materialization, answering a query |
+| `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S5, the plan representation, the executor and the command-line tool:
-end to end, where positive recursive Datalog answers queries from the command
-line and `relic -q 'path(a, X)?' graph.dl` prints three symbols. It owes
-`specs/design-plan.md` and `specs/design-eval.md` before its code, and it is
-milestone M1.
+Stage S6, the dependency graph, strongly connected components and
+stratification: the evaluator runs stratum by stratum and a program with
+recursion through negation is rejected with a diagnostic naming the cycle. It
+owes `specs/design-stratify.md` before its code.
 
 ## Decisions taken
 
