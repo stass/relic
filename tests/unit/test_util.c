@@ -30,6 +30,7 @@
 #define	SCENARIO_GROWTH		"an array grows without losing its contents"
 #define	SCENARIO_LOOKUP		"a key survives the table growing under it"
 #define	SCENARIO_OVERFLOW	"an impossible array size is refused"
+#define	SCENARIO_PREDICTED	"a growth is exactly what was predicted"
 #define	SCENARIO_SPREAD		"hashing separates similar keys"
 
 /*
@@ -51,6 +52,9 @@ static void	 an_array_grows_without_losing_its_contents(void);
 static void	 an_array_refuses_an_impossible_size(void);
 static void	 equal_input_hashes_equally(void);
 static void	 every_inserted_key_is_found_after_growth(void);
+static void	 a_growth_is_exactly_what_was_predicted(void);
+static void	 a_reservation_is_exactly_what_was_predicted(void);
+static void	 a_word_sequence_hashes_to_a_fixed_value(void);
 static void	 similar_keys_reach_different_slots(void);
 
 static uint32_t
@@ -313,6 +317,156 @@ similar_keys_reach_different_slots(void)
 	    "consecutive integers should not pile into one bucket");
 }
 
+/*
+ * The array growth predictor agrees with the growth.
+ *
+ * The relation store's memory limit is enforced against what an array *would*
+ * hold, computed before the array is asked to hold it, so that a limit
+ * refuses an allocation instead of reporting one that has already happened.
+ * That is sound only while the prediction and the policy are the same thing.
+ * They are written as one function calling the other, and this is what says
+ * so: were a later edit to give relic_grow_array() a growth factor of its
+ * own, every relation test would still pass and the memory limit would
+ * quietly become an approximation.
+ */
+static void
+a_growth_is_exactly_what_was_predicted(void)
+{
+	enum { STEP_COUNT = 40 };
+
+	uint32_t *items;
+	size_t capacity;
+	size_t i;
+
+	items = NULL;
+	capacity = 0;
+
+	for (i = 0; i < STEP_COUNT; i++) {
+		size_t predicted;
+		size_t wanted;
+		void *grown;
+
+		wanted = i * i + 1;
+		predicted = relic_grow_array_capacity(capacity, wanted);
+
+		grown = relic_grow_array(items, &capacity, wanted,
+		    sizeof(*items));
+		if (grown == NULL) {
+			checkf(false, SCENARIO_PREDICTED,
+			    "an array of %zu items should grow", wanted);
+			break;
+		}
+		items = grown;
+
+		checkf(predicted == capacity, SCENARIO_PREDICTED,
+		    "growing to hold %zu items should reach the predicted "
+		    "capacity %zu, not %zu", wanted, predicted, capacity);
+	}
+
+	free(items);
+
+	/* A request that needs no growth is predicted as no growth. */
+	capacity = 64;
+	check(relic_grow_array_capacity(capacity, 1) == capacity,
+	    SCENARIO_PREDICTED,
+	    "an array with room to spare should be predicted unchanged");
+
+	/*
+	 * A capacity that cannot be doubled is predicted as a refusal, which
+	 * is the one answer the caller must tell apart from a size.  It takes
+	 * both halves: an array past half the address space, asked for more
+	 * than it already has.
+	 */
+	check(relic_grow_array_capacity(SIZE_MAX / 2 + 1, SIZE_MAX) == 0,
+	    SCENARIO_PREDICTED,
+	    "an array that cannot be doubled should be predicted to refuse");
+}
+
+/*
+ * The identifier table's byte predictor agrees with the table, for the same
+ * reason and with the same consequence if it stops.
+ */
+static void
+a_reservation_is_exactly_what_was_predicted(void)
+{
+	enum { KEY_COUNT = 3000 };
+
+	relic_idtab_t table;
+	key_set_t keys;
+	uint32_t storage[KEY_COUNT];
+	size_t i;
+
+	keys.keys = storage;
+	keys.count = 0;
+	relic_idtab_init(&table);
+
+	check(relic_idtab_bytes(&table) == 0, SCENARIO_PREDICTED,
+	    "an empty table should hold no bytes");
+
+	for (i = 0; i < KEY_COUNT; i++) {
+		size_t predicted;
+
+		predicted = relic_idtab_bytes_after_reserve(&table);
+
+		if (relic_idtab_reserve(&table, key_rehash, &keys) != 0) {
+			checkf(false, SCENARIO_PREDICTED,
+			    "reserving room for key %zu should succeed", i);
+			break;
+		}
+
+		checkf(predicted == relic_idtab_bytes(&table),
+		    SCENARIO_PREDICTED,
+		    "reserving room for key %zu should reach the predicted "
+		    "%zu bytes, not %zu", i, predicted,
+		    relic_idtab_bytes(&table));
+
+		storage[keys.count] = (uint32_t)(i * 7919u + 13u);
+		keys.count++;
+		relic_idtab_place(&table, relic_hash_word(storage[i]),
+		    (uint32_t)keys.count);
+	}
+
+	relic_idtab_reset(&table);
+}
+
+/*
+ * The word hash is pinned to fixed values.
+ *
+ * Every other property of a hash is statistical, and a statistical test
+ * passes just as well after a seed has silently changed.  Determinism is not
+ * statistical: the golden test suite compares output byte for byte, so the
+ * same words must hash to the same number in every build on every platform
+ * forever.  Only a stated value can say that, and only a stated value makes a
+ * platform whose byte order differs fail here rather than somewhere far away.
+ *
+ * If a deliberate change to the hash makes this fail, the numbers below are
+ * what has to be updated, and updating them is the moment to notice that
+ * every stored golden file may move with them.
+ */
+static void
+a_word_sequence_hashes_to_a_fixed_value(void)
+{
+	static const uint32_t words[] = { 1u, 2u, 3u };
+
+	check(relic_hash_words(NULL, 0) == 0xab3e7c0bu,
+	    SCENARIO_DETERMINISM,
+	    "the empty sequence should hash to 0xab3e7c0b");
+	check(relic_hash_words(words, 1) == 0x05644487u,
+	    SCENARIO_DETERMINISM,
+	    "the sequence 1 should hash to 0x05644487");
+	check(relic_hash_words(words, 3) == 0x4e63a65bu,
+	    SCENARIO_DETERMINISM,
+	    "the sequence 1, 2, 3 should hash to 0x4e63a65b");
+
+	/*
+	 * Order matters: a tuple is a sequence, and a hash that folded its
+	 * columns commutatively would put (a, b) and (b, a) in one slot.
+	 */
+	check(relic_hash_words(words, 2) != relic_hash_words(words + 1, 2),
+	    SCENARIO_DETERMINISM,
+	    "reordering a sequence should change its hash");
+}
+
 int
 main(void)
 {
@@ -320,6 +474,9 @@ main(void)
 	an_array_refuses_an_impossible_size();
 	equal_input_hashes_equally();
 	every_inserted_key_is_found_after_growth();
+	a_growth_is_exactly_what_was_predicted();
+	a_reservation_is_exactly_what_was_predicted();
+	a_word_sequence_hashes_to_a_fixed_value();
 	similar_keys_reach_different_slots();
 
 	return (check_summary("util"));

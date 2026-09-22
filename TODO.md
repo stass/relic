@@ -6,16 +6,15 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S3 landed; S4, relations and the tuple
-store, next.
+`relic-plan.md`. Current position: S4 landed; S5, the plan representation,
+the executor and the command-line tool, next. S5 is milestone M1.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`design-relations.md` (S4), `design-plan.md` and
-`design-eval.md` (S5), `design-stratify.md` (S6), `design-index.md` and
-`design-planner.md` (S9), `design-magic.md` (S10). Each is referenced from
-`specs/architecture.md` when written.
+`design-plan.md` and `design-eval.md` (S5), `design-stratify.md` (S6),
+`design-index.md` and `design-planner.md` (S9), `design-magic.md` (S10). Each
+is referenced from `specs/architecture.md` when written.
 
 **`specs/style.md` readability references.** [Low] The readability standard
 lists qualities to aim for but names no relic functions yet, because none
@@ -107,6 +106,17 @@ never be evaluated. `specs/design-program.md` section 8.1 explains why the
 single pass is worth it; revisit only if a caller is found that checks
 enormous broken programs in a long-lived context.
 
+**Two capacity ceilings are reported as running out of memory.** [Low,
+component: `lib/relation.c`] `relic_idtab_reserve()` fails both when an
+allocation fails and when the table has reached a size it cannot double, and
+`relic_grow_array()` does the same; neither tells its caller which, so
+`lib/relation.c` reports both as running out of memory. The ceilings need an
+array of more than half the address space to reach, so the misdescription is
+unreachable in practice, and distinguishing them means a second output on two
+functions that have no other reason for one. It would waste a debugging
+session if it ever fired. This is the same trade-off as the predicate
+identifier space below, and should be settled the same way if either is.
+
 **Exhausting the predicate identifier space cannot be retried out of.**
 [Low, component: `lib/pred.c`] `relic_pred_intern()` fails either because
 memory ran out or because all four billion predicate identifiers are taken,
@@ -154,9 +164,16 @@ would reset the arena anyway.
 it produces is as large as the input anyway. Nothing bounds that buffer, so a
 caller that hands the library a pipe with no end waits and grows until the
 allocator refuses. The `-l memory` limit of `specs/architecture.md` section 63
-is about relation and index storage and does not apply here. Decide at S4,
-when the first limit is actually enforced, whether input size belongs in the
-same structure.
+is about relation and index storage and does not apply here.
+
+It stays out of that structure. The four configurable limits bound what a
+program *derives* -- data the caller did not choose and cannot foresee -- and
+that is why they exist. Input is the opposite: the caller picked the file or
+opened the stream, knows how large it is, and can bound it before handing it
+over. Folding the two into one key would make `-l memory=N` mean two things
+and would still not help the one caller who cannot check, which is a program
+reading an untrusted pipe. Revisit if S11 or S12 finds that caller; the
+answer there is a separate key, not a wider meaning for this one.
 
 **Semi-naive duplicate elimination.** [Low, component: `lib/plan.c`] The delta
 variant scheme of D-10 derives some tuples more than once per iteration for
@@ -168,8 +185,13 @@ implementing; rules that would benefit are rare.
 **Append-only invariant versus incremental maintenance.** [Medium, component:
 `lib/relation.c`] D-10 represents a delta as a range of tuple identifiers,
 which requires that nothing compacts, deletes or renumbers a relation during a
-fixed point. Any future incremental insertion or DRed-style deletion support
-must confront this first. The invariant is asserted in `lib/relation.c`.
+fixed point. The store holds to it by construction -- it offers no operation
+that removes, reorders or renumbers a tuple, and only destroying the table
+releases one -- so today there is nothing to enforce. The debt is the moment
+that stops being true. Any incremental insertion or DRed-style deletion
+support, and `relic_fact_add()` in S11 where it discards derived state, has to
+confront it first: a range captured before such an operation means something
+else afterwards, and nothing in the range would say so.
 
 **Size budget.** [Medium] `relic-plan.md` totals about 7.5 KLOC against the 4
 to 7 KLOC of `specs/architecture.md` section 2.2, which treats size as a design
@@ -189,6 +211,12 @@ merge `lib/pred.c` into `lib/rule.c`, which architecture section 64 already
 permits; that would save the file header and a handful of accessors and is
 worth doing only if a later stage needs the lines.
 
+S4 came in at about 400 non-comment lines against a budget of 600, a third
+under, which gives back most of what S3 overran. The store is small because
+the identifier table and the growable array were already there and the memory
+limit needed two pure projections from them rather than a mechanism of its
+own.
+
 **An unknown value type cannot be rejected in a build that checks for it.**
 [Low, component: `lib/value.c`] `value_well_formed()` rejects a
 `relic_value_t` whose `type` is not one of the three enumerators, which an
@@ -203,13 +231,14 @@ taking the type as an integer across the public boundary, which changes the
 representation `specs/architecture.md` section 19.1 specifies. Revisit if an
 embedder hits it.
 
-**A configuration is accepted but not enforced.** [Low, component:
-`include/relic.h`] `relic_config_t` and `relic_create_config()` are public and
-their four limits are stored and never read, because no relation or index
-storage exists to apply them to until S4, and no `RELIC_F_` behaviour switch
-is defined until S5. The header says so plainly so that a caller is not
-misled. Confirm the field shape is right when S4 enforces the first limit;
-public API is the hardest thing to withdraw.
+**Two configured limits are still not enforced.** [Low, component:
+`include/relic.h`] `max_tuples` and `max_memory` are enforced by
+`lib/relation.c`, and the field shape held up: both are a plain `size_t` with
+zero meaning unlimited, and both are read in one place. `max_magic_preds` and
+`max_magic_rules` are stored and never read, because nothing generates a Magic
+predicate or rule to count until S10, and no `RELIC_F_` behaviour switch is
+defined for `flags` until S5. The header says so plainly so that a caller is
+not misled.
 
 **Assertions are absent from release builds.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 makes assertions a
@@ -222,12 +251,18 @@ The append-only invariant of D-10 is the first one this applies to.
 **Allocation-failure coverage must grow with each stage.** [Medium,
 component: `tests/unit/test_exhaustion.c`] The suite compiles the library
 against an allocator that refuses the nth request and sweeps n across symbol
-and value interning, across a load and across a check, which is what caught
-the index-growth failure that broke interning identity. Every later stage adds
-allocation paths that the sweep will not reach unless it is extended: the
-tuple store, the indexes, the plan and evaluation arenas. Add a scenario per
-stage rather than leaving the suite describing the stages that happened to
-write one.
+and value interning, across a load, across a check and across a batch of tuple
+insertions, which is what caught the index-growth failure that broke interning
+identity. Every later stage adds allocation paths that the sweep will not
+reach unless it is extended: the secondary indexes, and the plan and
+evaluation arenas. Add a scenario per stage rather than leaving the suite
+describing the stages that happened to write one.
+
+Each new scenario needs the straddle guards the existing ones have. The
+insertion sweep was written first over a single insertion into a relation that
+already had room, so it refused nothing and reported success without testing
+anything; the guard that the sweep must reach both a refusal and a completion
+is what said so.
 
 **Leak detection is unavailable on macOS.** [Medium, component: `Makefile.am`]
 AddressSanitizer on Apple silicon reports that `detect_leaks` is unsupported
@@ -275,6 +310,38 @@ terminator anywhere is not a string, and AddressSanitizer's
 `strict_string_checks` rejects the fixture before the function runs. The
 arithmetic the guard protects is covered; the exact input a caller would pass
 by mistake is not.
+
+## Security residuals
+
+**Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
+component: `lib/relation.c`] D-4 forbids randomizing a hash seed, and
+`relic_hash_words()` mixes with compile-time constants, so a program author
+controls the order values are first mentioned, therefore each value's domain
+identifier, therefore every tuple hash exactly. Under linear probing a crafted
+fact file can drive a whole relation into one probe cluster, making each
+membership test linear and a load quadratic, with no diagnostic. `-l tuples`
+and `-l memory` bound space; nothing bounds the time this consumes, because
+`specs/architecture.md` section 63 defines no step or time limit.
+
+Randomizing is not the remedy: determinism is a product property that the
+golden suite and `-e` output depend on. The deterministic remedies are a step
+limit (`-l steps=N`) or a ceiling on probe-cluster length. Decide which while
+the `-l` key set is still private, since adding a key after it is documented
+is the expensive moment. It matters for the embedded caller section 63 names:
+a host that accepts an untrusted program and trusts `-l` to protect it is not
+protected against this.
+
+**Predicate names reach an embedder's callback unescaped.** [Low, component:
+`lib/pred.c`] `relic_pred_describe()` quotes a predicate name without
+escaping, justified by every byte of one being an identifier byte. That holds
+while the lexer is the only producer of a symbol. `relic_diag_stderr()`
+escapes on output, but an embedding program installs its own callback and
+receives the raw message, so the escaping is not where a caller would assume.
+When S11 adds `relic_fact_add()` taking caller-supplied bytes, a predicate
+name will no longer be lexer-checked and the message could carry a terminal
+escape sequence into an embedder's log. Settle it with `relic_fact_add()`:
+either it interns names through the same identifier rule the lexer applies, or
+`relic_pred_describe()` escapes.
 
 ## Packaging
 

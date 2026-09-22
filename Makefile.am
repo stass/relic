@@ -28,7 +28,8 @@ LIBOBJDIR = compat/
 
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/diag.c lib/lex.c \
-	lib/parse.c lib/pred.c lib/rule.c lib/symbol.c lib/util.c lib/value.c
+	lib/parse.c lib/pred.c lib/relation.c lib/rule.c lib/symbol.c \
+	lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -38,7 +39,7 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 
 include_HEADERS = include/relic.h
 noinst_HEADERS = compat/compat.h compat/queue.h lib/ast.h lib/internal.h \
-	lib/program.h lib/util.h tests/unit/harness.h
+	lib/program.h lib/relation.h lib/util.h tests/unit/harness.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/main.c
@@ -113,8 +114,8 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 
 check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
 	tests/unit/test_lex tests/unit/test_parse tests/unit/test_pred \
-	tests/unit/test_rule tests/unit/test_symbol tests/unit/test_util \
-	tests/unit/test_value
+	tests/unit/test_relation tests/unit/test_rule tests/unit/test_symbol \
+	tests/unit/test_util tests/unit/test_value
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LIBOBJS)
@@ -130,6 +131,10 @@ tests_unit_test_parse_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_pred_SOURCES = tests/unit/test_pred.c tests/unit/harness.c
 tests_unit_test_pred_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_relation_SOURCES = tests/unit/test_relation.c \
+	tests/unit/harness.c
+tests_unit_test_relation_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
 tests_unit_test_rule_LDADD = librelic_internal.la $(LIBOBJS)

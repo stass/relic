@@ -66,6 +66,21 @@ void	*relic_grow_array(void *items, size_t *capacity, size_t count,
 	    size_t item_size);
 
 /*
+ * The capacity relic_grow_array() would reach for count items, or zero when
+ * it would refuse to grow at all.
+ *
+ * A caller that must know the size of an array before it asks for it -- one
+ * accounting the allocation against a limit, say -- uses this rather than
+ * measuring afterwards.  The growth itself is stated in terms of this
+ * function, so a prediction and the policy it predicts cannot drift apart.
+ *
+ * Zero is unambiguous: an array that needs no growth returns the capacity it
+ * already has, which is never zero, because a request for no items is
+ * rounded up to one exactly as it is in relic_grow_array().
+ */
+size_t	 relic_grow_array_capacity(size_t capacity, size_t count);
+
+/*
  * Hash functions with seeds fixed at compile time.  No seed is randomized,
  * derived from an address, read from the clock or taken from the
  * environment: identical input must produce an identical probe order on
@@ -75,6 +90,16 @@ void	*relic_grow_array(void *items, size_t *capacity, size_t count,
 uint32_t relic_hash_bytes(const void *bytes, size_t length);
 uint32_t relic_hash_int64(int64_t value);
 uint32_t relic_hash_word(uint32_t word);
+
+/*
+ * Hash a sequence of 32-bit words, which is what a tuple is.
+ *
+ * The words are folded as values rather than as the bytes they occupy, so a
+ * sequence hashes identically on a big-endian machine and a little-endian
+ * one.  A count of zero is a defined key rather than a special case, which
+ * is what lets a relation of arity zero use the ordinary code path.
+ */
+uint32_t relic_hash_words(const uint32_t *words, size_t count);
 
 typedef struct relic_idprobe relic_idprobe_t;
 typedef struct relic_idtab relic_idtab_t;
@@ -151,6 +176,19 @@ void	 relic_idtab_reset(relic_idtab_t *table);
 int	 relic_idtab_reserve(relic_idtab_t *table, relic_rehash_fn rehash,
 	    void *ctx);
 void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
+
+/*
+ * The bytes a table's slots occupy now, and the bytes they would occupy once
+ * relic_idtab_reserve() had made room for one more entry.
+ *
+ * These exist for the relation store, whose indexes are accounted against the
+ * memory limit and must therefore be measured before they are allocated
+ * rather than after.  A reservation that could not grow the table reports the
+ * size it already has: the growth will fail as an ordinary allocation
+ * failure, which is a different answer from exceeding a limit.
+ */
+size_t	 relic_idtab_bytes(const relic_idtab_t *table);
+size_t	 relic_idtab_bytes_after_reserve(const relic_idtab_t *table);
 
 /*
  * Begin walking the candidates for hash.

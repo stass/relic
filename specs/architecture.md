@@ -754,13 +754,23 @@ delta insertion
 Insertion operation:
 
 ```c
-bool
-relic_relation_insert(...);
+int
+relic_relation_insert(..., bool *addedp);
 ```
 
-returns true only when the tuple was newly inserted.
+sets `*addedp` true only when the tuple was newly inserted.
 
 This property drives fixed-point detection.
+
+Newness is an output rather than the return value because an insertion can
+also fail, for memory or for a limit, and a two-valued return would conflate a
+failure with a duplicate. They are opposite answers: a duplicate means the
+fixed point is closer, a failure means the answer is unknown.
+
+The storage of a relation, the tuple identifier and the append-only invariant
+it carries, the canonical full-tuple index, the delta range and the tuple and
+memory limits enforced against them are specified in
+`specs/design-relations.md`.
 
 ---
 

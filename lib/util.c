@@ -32,6 +32,7 @@ static uint32_t	 finalize(uint32_t hash);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
 static int	 idtab_grow(relic_idtab_t *table, relic_rehash_fn rehash,
 		    void *ctx);
+static size_t	 idtab_next_capacity(const relic_idtab_t *table);
 static bool	 idtab_would_overfill(const relic_idtab_t *table);
 
 /*
@@ -101,37 +102,80 @@ relic_hash_int64(int64_t value)
 	return (relic_hash_word(low ^ relic_hash_word(high)));
 }
 
+/*
+ * Fold a sequence of words with the same FNV-1a step the byte hash uses, one
+ * whole word at a time.
+ *
+ * Mixing each word as a value rather than as its four bytes is what makes the
+ * result independent of byte order, which matters because the probe order of
+ * every table built on this must be the same on every platform.  An empty
+ * sequence hashes the starting state, which is an ordinary key and not a
+ * special case.
+ */
+uint32_t
+relic_hash_words(const uint32_t *words, size_t count)
+{
+	uint32_t hash;
+	size_t i;
+
+	hash = RELIC_HASH_BASIS;
+
+	for (i = 0; i < count; i++) {
+		hash ^= words[i];
+		hash *= RELIC_HASH_PRIME;
+	}
+
+	return (finalize(hash));
+}
+
+size_t
+relic_grow_array_capacity(size_t capacity, size_t count)
+{
+	size_t wanted;
+
+	if (count == 0)
+		count = 1;
+
+	if (count <= capacity)
+		return (capacity);
+
+	/*
+	 * Doubling from here is not representable, and no allocator could
+	 * serve an array this size in any case.
+	 */
+	if (capacity > SIZE_MAX / 2)
+		return (0);
+
+	/*
+	 * Double, then raise the result to the smallest array worth having
+	 * and to what the caller asked for.
+	 */
+	wanted = capacity * 2;
+	if (wanted < RELIC_ARRAY_MIN_COUNT)
+		wanted = RELIC_ARRAY_MIN_COUNT;
+	if (wanted < count)
+		wanted = count;
+
+	return (wanted);
+}
+
 void *
 relic_grow_array(void *items, size_t *capacity, size_t count, size_t item_size)
 {
 	void *grown;
 	size_t wanted;
 
-	if (count == 0)
-		count = 1;
+	wanted = relic_grow_array_capacity(*capacity, count);
+	if (wanted == 0)
+		return (NULL);
 
-	if (count <= *capacity)
+	if (wanted == *capacity)
 		return (items);
 
 	/*
-	 * Doubling from here is not representable, and no allocator could
-	 * serve an array this size in any case.
+	 * reallocarray() rejects a product that would overflow, so the
+	 * multiplication by item_size needs no check here.
 	 */
-	if (*capacity > SIZE_MAX / 2)
-		return (NULL);
-
-	/*
-	 * Double, then raise the result to the smallest array worth having
-	 * and to what the caller asked for.  reallocarray() rejects a product
-	 * that would overflow, so the multiplication by item_size needs no
-	 * check here.
-	 */
-	wanted = *capacity * 2;
-	if (wanted < RELIC_ARRAY_MIN_COUNT)
-		wanted = RELIC_ARRAY_MIN_COUNT;
-	if (wanted < count)
-		wanted = count;
-
 	grown = reallocarray(items, wanted, item_size);
 	if (grown == NULL)
 		return (NULL);
@@ -252,6 +296,23 @@ relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id)
 }
 
 /*
+ * The capacity a growth would produce: twice the current size, or the
+ * smallest table worth allocating when there is not one yet.  Zero says the
+ * table has reached a size that cannot be doubled.
+ */
+static size_t
+idtab_next_capacity(const relic_idtab_t *table)
+{
+	if (table->capacity < RELIC_IDTAB_MIN_CAPACITY)
+		return (RELIC_IDTAB_MIN_CAPACITY);
+
+	if (table->capacity > SIZE_MAX / 2 / sizeof(*table->slots))
+		return (0);
+
+	return (table->capacity * 2);
+}
+
+/*
  * Replace the slot array with a larger one and reinsert every entry: twice
  * the current size, or the smallest table worth allocating when there is not
  * one yet.
@@ -267,12 +328,9 @@ idtab_grow(relic_idtab_t *table, relic_rehash_fn rehash, void *ctx)
 	size_t capacity;
 	size_t slot;
 
-	capacity = RELIC_IDTAB_MIN_CAPACITY;
-	if (table->capacity >= capacity) {
-		if (table->capacity > SIZE_MAX / 2 / sizeof(*table->slots))
-			return (-1);
-		capacity = table->capacity * 2;
-	}
+	capacity = idtab_next_capacity(table);
+	if (capacity == 0)
+		return (-1);
 
 	relic_idtab_init(&grown);
 	grown.slots = calloc(capacity, sizeof(*grown.slots));
@@ -303,4 +361,25 @@ relic_idtab_reserve(relic_idtab_t *table, relic_rehash_fn rehash, void *ctx)
 		return (0);
 
 	return (idtab_grow(table, rehash, ctx));
+}
+
+size_t
+relic_idtab_bytes(const relic_idtab_t *table)
+{
+	return (table->capacity * sizeof(*table->slots));
+}
+
+size_t
+relic_idtab_bytes_after_reserve(const relic_idtab_t *table)
+{
+	size_t capacity;
+
+	if (!idtab_would_overfill(table))
+		return (relic_idtab_bytes(table));
+
+	capacity = idtab_next_capacity(table);
+	if (capacity == 0)
+		return (relic_idtab_bytes(table));
+
+	return (capacity * sizeof(*table->slots));
 }

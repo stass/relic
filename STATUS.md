@@ -86,6 +86,42 @@ numbered and checked when S5 compiles it into the synthetic `$q0` rule of
 architecture section 11. `TODO.md` records this. Stratification arrives in S6,
 so a program with recursion through negation is still accepted.
 
+**The relation store, stage S4.** Somewhere to put tuples, specified in
+`specs/design-relations.md`. Nothing evaluates yet, so nothing in the shipping
+library inserts one; the store is reached only by its unit suite until S5's
+evaluator arrives.
+
+| Component | State |
+| --- | --- |
+| `lib/relation.c` | the dense tuple array with the arity as its stride, the canonical full-tuple hash index, `relic_relation_insert()` returning newness, membership, reading a tuple by identifier, iteration by identifier range, and the tuple and memory limits |
+| `lib/relation.h` | the tuple identifier, the half-open tuple range, the relation and the table of pointers to them |
+| `lib/util.{h,c}` | adds `relic_hash_words()`, and the two pure projections the memory limit needs: the capacity a growable array would reach and the bytes an identifier table would hold after a reservation |
+| `include/relic.h` | unchanged; `max_tuples` and `max_memory` are now enforced, and the header no longer claims otherwise |
+| `tests/unit/test_relation.c` | the set property, growth, ranges and deltas, arity 0 and arity 32, relation ownership, both limits with their golden diagnostics, and a million tuples inside a memory envelope |
+
+A relation is a set, and that is the property everything above it rests on: an
+insertion reports newness, which is how a fixed point is detected. The store
+is append-only by construction rather than by rule -- it offers no operation
+that removes, reorders or renumbers a tuple -- which is what lets a semi-naive
+delta be a range of identifiers instead of a relation of its own.
+
+A relation never moves. The table holds pointers to individually allocated
+relations, so creating one cannot invalidate another, and a plan or an
+evaluation may resolve a relation once and hold it. Storing the relations
+inline was tried first and was wrong: it made every holder responsible for not
+keeping a pointer across a call that might create a relation, and the first
+thing that list cost was a use-after-free at the ninth predicate.
+
+Arity zero needs no case of its own: the hash of an empty key is defined and
+the comparison of two empty keys is true, so a relation of arity zero holds
+zero or one tuple through the ordinary path.
+
+Both limits are checked against what a relation would hold after an insertion
+and before anything is modified, so a refused insertion leaves the relation
+exactly as it was. The memory limit counts allocated capacity rather than the
+smaller number a tuple count implies, since a limit that ignored the
+difference would allow twice what was asked for.
+
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
 `--with-libedit`. Test suites: `make check`, `make check-asan`,
@@ -111,6 +147,38 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * the installed shared library exports exactly the twelve documented entry
   points and nothing else; the compatibility objects linked into it are not
   reachable.
+
+The relation store's suites were confirmed the same way, by injecting each
+fault and rerunning:
+
+* reporting a duplicate as newly inserted, which `tests/unit/test_relation.c`
+  catches as a second insertion adding a tuple;
+* comparing all but the last column of a tuple, which it catches as a
+  five-thousand-tuple relation collapsing;
+* a rehash that disagrees with the hash the insertion used, which it catches
+  as every tuple becoming unfindable after a growth;
+* counting the tuple limit per relation rather than across all of them, which
+  it catches as the limit admitting more than it allows;
+* checking the memory limit after the growth rather than before, which it
+  catches as storage passing the allowance;
+* an off-by-one in the end of a relation, and a range measured from the wrong
+  first identifier, which it catches as a delta naming the wrong tuples;
+* leaving the storage total unreconciled, and growing the column array four
+  times as fast, which it catches as the total disagreeing with the relation
+  and as the million-tuple envelope being left;
+* storing a tuple's columns before the index has room for it, which
+  `tests/unit/test_exhaustion.c` catches as a relation holding a duplicate
+  after an allocation failure;
+* storing relations inline in a growable table, which
+  `tests/unit/test_relation.c` catches as the first relation moving, and
+  losing its tuple, at the ninth predicate.
+
+Two claims that no test reached until one was written for each are now
+covered by `tests/unit/test_util.c`: that the capacity a growth reaches is
+the capacity its predictor named, which is what makes the memory limit exact
+rather than approximate, and that a sequence of words hashes to a stated
+number, which is what would make a platform of the other byte order fail
+where the difference is rather than somewhere far away.
 
 The checker's own suites were confirmed to fail when the property they guard
 is broken, rather than only to pass, by injecting each fault and rerunning:
@@ -150,7 +218,7 @@ continuous integration yet. `TODO.md` records that as the highest open item,
 and records the two checks whose behaviour on ELF is inferred rather than
 observed.
 
-There is no relation store, evaluator or query interface yet.
+There is no evaluator or query interface yet.
 
 ## Documents
 
@@ -160,16 +228,18 @@ There is no relation store, evaluator or query interface yet.
 | `specs/design-memory.md` | arenas, arrays, interning tables, the value table |
 | `specs/design-parser.md` | lexical structure, the syntax tree, diagnostics and error recovery |
 | `specs/design-program.md` | predicate identity, variable numbering, the compiled rule, safety |
+| `specs/design-relations.md` | the tuple store, tuple identifiers, the full-tuple index, ranges, limits |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S4, relations and the tuple store: somewhere to put tuples, with the
-insert-returns-newness property that fixed-point detection is built on, the
-canonical full-tuple hash index, iteration by identifier range, and the first
-enforced resource limit. It owes `specs/design-relations.md` before its code.
+Stage S5, the plan representation, the executor and the command-line tool:
+end to end, where positive recursive Datalog answers queries from the command
+line and `relic -q 'path(a, X)?' graph.dl` prints three symbols. It owes
+`specs/design-plan.md` and `specs/design-eval.md` before its code, and it is
+milestone M1.
 
 ## Decisions taken
 

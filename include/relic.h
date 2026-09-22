@@ -87,10 +87,22 @@ typedef struct relic_config relic_config_t;
  * options, which exist only to parse into this structure: a limit is defined
  * in one place and nowhere else.
  *
- * A configuration is accepted and stored but not yet acted on: nothing in
- * the library allocates relation or index storage for a limit to apply to,
- * and no behaviour switch is defined for `flags`.  Setting a field therefore
- * has no effect today.
+ * `max_tuples` counts tuples across every relation and `max_memory` the bytes
+ * their storage holds.  Exceeding either is an ordinary error: the tuple is
+ * refused, a diagnostic names the limit and its configured value, and the
+ * relation is left as it was.
+ *
+ * `max_memory` bounds relation and index storage, which is what grows with
+ * the data, and not the memory the library uses in total: the loaded program,
+ * the symbols and values it mentions, and the working state of a query are
+ * sized by the program rather than by what it derives.  Nor is it a bound on
+ * peak usage, since growing an array holds the old one until the new one is
+ * filled.
+ *
+ * `max_magic_preds` and `max_magic_rules` are accepted and stored but not yet
+ * acted on, because nothing generates a Magic predicate or rule to count, and
+ * no behaviour switch is defined for `flags`.  Setting one of those three
+ * therefore has no effect today.
  */
 struct relic_config {
 	size_t		max_memory;	/* relation and index storage, bytes */

@@ -49,6 +49,7 @@
 
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
+#define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
 #define	SCENARIO_SYMBOL		"interning a symbol survives a failed allocation"
@@ -87,6 +88,24 @@
 #define	CHECK_SWEEP	60
 
 /*
+ * The insertion sweep's shape: how many tuples the relation holds before the
+ * sweep begins, how many are inserted with the allocator refusing, and how
+ * far the sweep goes.
+ *
+ * The prelude is what makes a refusal land on a relation with something to
+ * lose rather than on an empty one.  The batch is what makes the swept region
+ * allocate at all: an insertion into a relation that already has room asks
+ * for nothing, so a sweep over a single insertion would refuse nothing and
+ * would report success without having tested anything.  Forty insertions from
+ * a standing start of twenty cross two index doublings and a column doubling,
+ * so a refusal has three different growths to land on, and the sweep is bound
+ * well past that so a request added later is swept too.
+ */
+#define	INSERT_PRELUDE	20
+#define	INSERT_BATCH	40
+#define	INSERT_SWEEP	10
+
+/*
  * Requests still to be served before the allocator starts refusing.  A
  * negative budget means refuse nothing, which is the state every allocation
  * outside a swept region runs in.  Once the budget reaches zero every later
@@ -115,6 +134,9 @@ static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
 static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
+static void	 a_relation_survives_a_failed_allocation(void);
+static relic_relation_t *sweep_relation(relic_t *ctx, relic_dom_t *values,
+		    size_t count);
 static char	*check_sweep_program(void);
 static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
@@ -617,6 +639,211 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 	    "program, in %d attempts", CHECK_SWEEP);
 }
 
+/*
+ * Prepare an empty edge/2 relation and intern the values its tuples are built
+ * from, reporting NULL if anything in the preparation fails.
+ *
+ * All of this happens before the sweep starts refusing, so a failure here is
+ * a broken fixture rather than the condition under test.
+ */
+static relic_relation_t *
+sweep_relation(relic_t *ctx, relic_dom_t *values, size_t count)
+{
+	relic_location_t where;
+	relic_pred_id_t pred;
+	uint32_t name;
+	size_t ordinal;
+	char spelling[32];
+
+	if (relic_symbol_intern(ctx, "edge", 4, &name) != 0)
+		return (NULL);
+
+	bzero(&where, sizeof(where));
+	if (relic_pred_intern(ctx, name, 2, &where, &pred) != 0)
+		return (NULL);
+
+	for (ordinal = 0; ordinal < count; ordinal++) {
+		snprintf(spelling, sizeof(spelling), "v%zu", ordinal);
+
+		if (relic_value_intern_bytes(ctx, RELIC_SYMBOL, spelling,
+		    strlen(spelling), &values[ordinal]) != 0)
+			return (NULL);
+	}
+
+	return (relic_relation_for(ctx, pred));
+}
+
+/*
+ * Insert a batch of tuples into a relation that already holds several, with
+ * the nth allocation refused, then restore the allocator and insert the whole
+ * batch again.
+ *
+ * What is at stake is the same invariant interning has, in a sharper form.  A
+ * relation is a set, and a tuple whose columns were stored while its index
+ * entry was not is a tuple that membership cannot find: the next insertion of
+ * it would append a second copy, and every count, join and fixed-point
+ * decision afterwards would be wrong with nothing having reported an error.
+ * However far the interrupted batch got, the relation must afterwards hold
+ * exactly the prelude and the batch, every one of those tuples must be found,
+ * and inserting the batch a third time must add nothing at all.
+ */
+static void
+a_relation_survives_a_failed_allocation(void)
+{
+	relic_dom_t values[INSERT_PRELUDE + INSERT_BATCH + 1];
+	size_t refused;
+	size_t completed;
+	long budget;
+
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < INSERT_SWEEP; budget++) {
+		relic_t *ctx;
+		relic_relation_t *rel;
+		relic_dom_t columns[2];
+		size_t held;
+		size_t ordinal;
+		size_t inserted;
+		size_t found;
+		size_t added_again;
+		bool added;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_INSERT,
+			    "a context should be created");
+			return;
+		}
+
+		rel = sweep_relation(ctx, values,
+		    INSERT_PRELUDE + INSERT_BATCH + 1);
+		if (rel == NULL) {
+			check(false, SCENARIO_INSERT,
+			    "the fixture should be prepared before the sweep");
+			relic_destroy(ctx);
+			return;
+		}
+
+		for (ordinal = 0; ordinal < INSERT_PRELUDE; ordinal++) {
+			columns[0] = values[0];
+			columns[1] = values[ordinal + 1];
+
+			if (relic_relation_insert(ctx, rel, columns,
+			    &added) != 0) {
+				check(false, SCENARIO_INSERT,
+				    "the prelude should be inserted before "
+				    "the sweep");
+				relic_destroy(ctx);
+				return;
+			}
+		}
+
+		held = INSERT_PRELUDE + INSERT_BATCH;
+		inserted = 0;
+
+		refuse_allocations_after(budget);
+		for (ordinal = INSERT_PRELUDE; ordinal < held; ordinal++) {
+			columns[0] = values[0];
+			columns[1] = values[ordinal + 1];
+
+			if (relic_relation_insert(ctx, rel, columns,
+			    &added) != 0)
+				break;
+
+			inserted++;
+		}
+		serve_every_allocation();
+
+		if (inserted == INSERT_BATCH)
+			completed++;
+		else
+			refused++;
+
+		/*
+		 * The batch is inserted again in full, so that whatever the
+		 * refusal interrupted is completed.  Every one of these must
+		 * succeed: the allocator is serving again, and an insertion
+		 * of a tuple already present needs nothing.
+		 */
+		for (ordinal = INSERT_PRELUDE; ordinal < held; ordinal++) {
+			columns[0] = values[0];
+			columns[1] = values[ordinal + 1];
+
+			checkf(relic_relation_insert(ctx, rel, columns,
+			    &added) == 0, SCENARIO_INSERT,
+			    "inserting should succeed once the allocator "
+			    "recovers, with allocation %ld refused", budget);
+		}
+
+		checkf(relic_relation_count(rel) == held, SCENARIO_INSERT,
+		    "the relation should hold %zu tuples, not %zu, with "
+		    "allocation %ld refused", held,
+		    relic_relation_count(rel), budget);
+
+		/*
+		 * Every tuple the relation is supposed to hold must be found,
+		 * and inserting the batch once more must add nothing.  The
+		 * second is the sharp check: a refusal that stored columns
+		 * without indexing them would leave a tuple that membership
+		 * misses, so this pass would append it a second time and the
+		 * relation would quietly stop being a set.
+		 */
+		found = 0;
+		added_again = 0;
+
+		for (ordinal = 0; ordinal < held; ordinal++) {
+			columns[0] = values[0];
+			columns[1] = values[ordinal + 1];
+
+			if (relic_relation_contains(rel, columns))
+				found++;
+
+			if (relic_relation_insert(ctx, rel, columns,
+			    &added) == 0 && added)
+				added_again++;
+		}
+
+		checkf(found == held, SCENARIO_INSERT,
+		    "every one of %zu tuples should be found, not %zu, with "
+		    "allocation %ld refused", held, found, budget);
+		checkf(added_again == 0, SCENARIO_INSERT,
+		    "no tuple should be added a second time, and %zu were, "
+		    "with allocation %ld refused", added_again, budget);
+		checkf(relic_relation_count(rel) == held, SCENARIO_INSERT,
+		    "the relation should still hold %zu tuples, not %zu, with "
+		    "allocation %ld refused", held,
+		    relic_relation_count(rel), budget);
+
+		/*
+		 * The total the memory limit is enforced against must still
+		 * describe what the relation holds.  A refusal that left the
+		 * total counting an allocation that did not happen would make
+		 * the limit fire on a program well inside it.
+		 */
+		checkf(relic_relation_total_bytes(ctx) ==
+		    relic_relation_bytes(rel), SCENARIO_INSERT,
+		    "the storage total (%zu) should be the relation's size "
+		    "(%zu), with allocation %ld refused",
+		    relic_relation_total_bytes(ctx),
+		    relic_relation_bytes(rel), budget);
+
+		relic_destroy(ctx);
+	}
+
+	/*
+	 * The sweep has to straddle the point where the batch stops needing
+	 * memory, or one of the two outcomes above is never reached and is
+	 * checking nothing.
+	 */
+	checkf(refused > 0, SCENARIO_INSERT,
+	    "the sweep should reach a batch that runs out of memory, in %d "
+	    "attempts", INSERT_SWEEP);
+	checkf(completed > 0, SCENARIO_INSERT,
+	    "the sweep should reach a batch that completes, in %d attempts",
+	    INSERT_SWEEP);
+}
+
 int
 main(void)
 {
@@ -625,6 +852,7 @@ main(void)
 	interning_a_value_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
 	a_check_that_ran_out_of_memory_can_be_retried();
+	a_relation_survives_a_failed_allocation();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

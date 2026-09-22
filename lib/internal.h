@@ -18,6 +18,7 @@
 #include "compat.h"
 #include "program.h"
 #include "queue.h"
+#include "relation.h"
 #include "util.h"
 
 /*
@@ -178,6 +179,7 @@ struct relic {
 	relic_valtab_t		 values;
 	relic_ast_program_t	 ast;
 	relic_program_t		 program;
+	relic_reltab_t		 relations;
 	relic_diag_t		 diag;
 	relic_config_t		 config;
 };
@@ -428,5 +430,49 @@ void	 relic_pred_report_undefined(relic_t *ctx);
  */
 void	 relic_program_init(relic_program_t *program);
 void	 relic_program_reset(relic_program_t *program);
+
+/*
+ * lib/relation.c
+ *
+ * relic_relation_for() is the only way to obtain a relation: one is created
+ * empty for a predicate the first time it is asked for, so no caller decides
+ * whether a relation exists yet.  A relation belongs to the context and never
+ * moves, so a caller may hold as many of them as it likes for as long as the
+ * context lives.
+ *
+ * Every function below takes a relation of the context it was obtained from.
+ *
+ * relic_relation_insert() reports through *addedp whether the tuple was not
+ * already present, which is what fixed-point detection reads, and returns -1
+ * with a diagnostic when memory or a configured limit refuses it.  A refused
+ * insertion adds no tuple and leaves the relation's contents and its index
+ * agreeing with each other; capacity that a partial reservation obtained is
+ * kept, and accounted.
+ *
+ * relic_relation_all() and relic_relation_since() give the identifier ranges
+ * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
+ * later delta is measured from.
+ *
+ * The two totals are what the configurable tuple and memory limits are
+ * enforced against: tuples across every relation, and the bytes their columns
+ * and index slots hold.
+ */
+void	 relic_reltab_init(relic_reltab_t *table);
+void	 relic_reltab_reset(relic_reltab_t *table);
+relic_relation_t *relic_relation_for(relic_t *ctx, relic_pred_id_t pred);
+int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
+	    const relic_dom_t *columns, bool *addedp);
+bool	 relic_relation_contains(const relic_relation_t *relation,
+	    const relic_dom_t *columns);
+const relic_dom_t *relic_relation_tuple(const relic_relation_t *relation,
+	    relic_tuple_id_t id);
+size_t	 relic_relation_bytes(const relic_relation_t *relation);
+size_t	 relic_relation_count(const relic_relation_t *relation);
+relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
+relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
+relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
+	    relic_tuple_id_t first);
+size_t	 relic_relation_total_bytes(const relic_t *ctx);
+size_t	 relic_relation_total_tuples(const relic_t *ctx);
 
 #endif /* RELIC_INTERNAL_H */
