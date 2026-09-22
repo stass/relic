@@ -6,15 +6,16 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S1 landed; S2, the lexer and parser, next.
+`relic-plan.md`. Current position: S2 landed; S3, the program model and
+safety, next.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`design-parser.md` (S2), `design-program.md` (S3), `design-relations.md` (S4),
-`design-plan.md` and `design-eval.md` (S5), `design-stratify.md` (S6),
-`design-index.md` and `design-planner.md` (S9), `design-magic.md` (S10). Each
-is referenced from `specs/architecture.md` when written.
+`design-program.md` (S3), `design-relations.md` (S4), `design-plan.md` and
+`design-eval.md` (S5), `design-stratify.md` (S6), `design-index.md` and
+`design-planner.md` (S9), `design-magic.md` (S10). Each is referenced from
+`specs/architecture.md` when written.
 
 **`specs/style.md` readability references.** [Low] The readability standard
 lists qualities to aim for but names no relic functions yet, because none
@@ -37,22 +38,24 @@ third-party VM actions and can follow.
 `specs/architecture.md` section 65.5 is short two files. The `mandoc -Tlint`
 job of `relic-plan.md` section 6 has nothing to lint until then.
 
-**`--enable-fuzzers` is not implemented.** [Low, component: `configure.ac`]
-`specs/architecture.md` section 65.3 lists it, but the fuzz targets it would
-build arrive in S13. `make coverage` and `make check-random` of section 65.4
-are deferred to S13 for the same reason.
+**`--enable-fuzzers` is not implemented.** [Medium, component:
+`configure.ac`] `specs/architecture.md` section 65.3 lists it, but the fuzz
+targets it would build arrive in S13. `make coverage` and `make check-random`
+of section 65.4 are deferred to S13 for the same reason.
+
+`relic-plan.md` lists a parser fuzz target under S2 as well, and it was
+deferred to S13 with the rest rather than adding build machinery that nothing
+else would use for eleven stages; libFuzzer is also unavailable with Apple
+clang, which is the only toolchain exercised so far. The malformed corpus in
+`tests/lang/` and `tests/unit/test_lex.c` cover the front end's rejection
+paths in the meantime, but neither is a substitute for a fuzzer, and the
+parser is the component most exposed to input nobody chose. Build the parser
+target first when S13 starts.
 
 **`--enable-lsan` is not in the architecture's option list.** [Low, component:
 `specs/architecture.md`] Section 65.4 specifies a `make check-lsan` target but
 section 65.3 lists no option to build with LeakSanitizer, so S0 added one to
 make the target implementable. Decide whether section 65.3 should record it.
-
-**The language test harness does not exist.** [Low, component: `tests/`]
-`relic-plan.md` section 5 specifies `tests/langtest.sh` as automake's
-`DL_LOG_COMPILER`, and S0's `Makefile.am` outline registers it. There are no
-`.dl` tests to run until S2 produces a parser, and a harness with no tests
-rots unnoticed, so both the harness and `TEST_EXTENSIONS = .dl` arrive with
-the first language test.
 
 **Two tree checks behave differently on ELF and have never run there.**
 [High, component: `tests/globals.sh`] The no-mutable-global-state check has
@@ -65,6 +68,14 @@ inferred from how ELF places `.tdata` and `.tbss`, not observed. Settle both
 by injecting each case on Linux, as was done on macOS, rather than by reading
 the output once and assuming.
 
+A third doubt joins them: the check now ignores symbols whose C identifier is
+reserved to the implementation, because AddressSanitizer emits a writable
+descriptor beside every global including a read-only one. The Mach-O form of
+that exclusion was verified by injection; the ELF form, which matches `__` or
+an underscore and a capital directly rather than after a prefix, has never
+run. Verify it catches an injected `static` counter on Linux under both a
+plain and an instrumented build.
+
 **The tarball carries no project documents.** [Low, component: `Makefile.am`]
 `EXTRA_DIST` ships `README.md` and `LICENSE` but not `specs/`, `relic-plan.md`,
 `STATUS.md` or `TODO.md`. For a tool whose selling point is that it can be
@@ -72,6 +83,26 @@ audited, shipping the architecture document with the source is worth
 considering. Decide at S14 with the rest of packaging.
 
 ## Engine
+
+**A failed load keeps its arena memory.** [Low, component: `lib/parse.c`] A
+load parses onto a list of its own and splices it into the program only if the
+whole input parsed, so a failed load adds no statements. What it cannot give
+back is the program arena it allocated them from: an arena has no
+per-allocation free, and the program arena is not reset until the context is
+destroyed, because nothing replaces a loaded program yet. A long-running
+embedder or a REPL that loads a broken file repeatedly therefore grows slowly.
+The waste is bounded by the text the caller chose to load. Revisit when S11 or
+S12 gives a context a way to discard its program, which is the operation that
+would reset the arena anyway.
+
+**A stream is read whole with no size limit.** [Low, component: `lib/parse.c`]
+`relic_load_file()` reads its stream into one buffer, because the syntax tree
+it produces is as large as the input anyway. Nothing bounds that buffer, so a
+caller that hands the library a pipe with no end waits and grows until the
+allocator refuses. The `-l memory` limit of `specs/architecture.md` section 63
+is about relation and index storage and does not apply here. Decide at S4,
+when the first limit is actually enforced, whether input size belongs in the
+same structure.
 
 **Semi-naive duplicate elimination.** [Low, component: `lib/plan.c`] The delta
 variant scheme of D-10 derives some tuples more than once per iteration for
@@ -90,6 +121,13 @@ must confront this first. The invariant is asserted in `lib/relation.c`.
 to 7 KLOC of `specs/architecture.md` section 2.2, which treats size as a design
 constraint. Track actual lines per stage against the budget; the levers are
 listed under risk R7.
+
+S2 came in at about 1200 non-comment lines against a budget of 880, roughly
+a third over. Most of the excess is the three loading entry points, the
+whole-stream reader and the `-c` handling, which the stage's delivery list did
+not enumerate because it assumed `relic -c` came free. Decide at S5, when the
+tool's real size is known, whether to record the front end's budget as having
+been understated or to find the lines back.
 
 **An unknown value type cannot be rejected in a build that checks for it.**
 [Low, component: `lib/value.c`] `value_well_formed()` rejects a
@@ -121,13 +159,14 @@ rule for later stages rather than a defect: an invariant that must hold in a
 release build needs an explicit check and a diagnostic, not an `assert()`.
 The append-only invariant of D-10 is the first one this applies to.
 
-**Allocation-failure coverage stops at interning.** [Medium, component:
-`tests/unit/test_exhaustion.c`] The suite compiles the library against an
-allocator that refuses the nth request and sweeps n across symbol and value
-interning, which is what caught the index-growth failure that broke interning
-identity. Every later stage adds allocation paths that the sweep will not
-reach unless it is extended: the tuple store, the indexes, the plan arena. Add
-a scenario per stage rather than leaving the suite describing S1 forever.
+**Allocation-failure coverage must grow with each stage.** [Medium,
+component: `tests/unit/test_exhaustion.c`] The suite compiles the library
+against an allocator that refuses the nth request and sweeps n across symbol
+and value interning and across a load, which is what caught the index-growth
+failure that broke interning identity. Every later stage adds allocation paths
+that the sweep will not reach unless it is extended: the tuple store, the
+indexes, the plan and evaluation arenas. Add a scenario per stage rather than
+leaving the suite describing the stages that happened to write one.
 
 **Leak detection is unavailable on macOS.** [Medium, component: `Makefile.am`]
 AddressSanitizer on Apple silicon reports that `detect_leaks` is unsupported

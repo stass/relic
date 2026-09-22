@@ -1,0 +1,3 @@
+name(user1, "Al\qice").
+hex(user2, "\xg0").
+short(user3, "\x7").

@@ -479,6 +479,10 @@ initialized.
 
 They are internally relations of arity zero.
 
+The lexical structure, the abstract syntax tree, the interning the front end
+performs, and the diagnostics and error recovery it produces are specified in
+`specs/design-parser.md`.
+
 ---
 
 # 14. Safety Rules

@@ -38,10 +38,20 @@
 /build-msan/
 /build-ubsan/
 
+# Automake's per-directory build marker, one per directory holding objects.
+.dirstamp
+
 # Test harness output.
 *.log
 *.trs
-/tests/unit/test_compat
+
+# The unit test binaries, named for the module each one drives.  Matched by
+# pattern rather than listed, with their sources kept, so that a suite added
+# later needs no entry here: a list would be extended one binary late, and
+# the binary it was missing would be the one that got committed.
+/tests/unit/test_*
+!/tests/unit/test_*.c
+!/tests/unit/test_*.cc
 
 # Release tarballs and the directories distcheck unpacks them into.
 /relic-*.tar.*

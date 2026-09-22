@@ -1,0 +1,516 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+/*
+ * Contract tests for the lexer.
+ *
+ * Three properties matter here and each is checked against something other
+ * than the implementation.  What a byte can begin is checked against an
+ * expectation written from the language definition rather than from the
+ * classification table, so a wrong entry in that table fails rather than
+ * being confirmed.  What a token spans is checked at the end of the buffer,
+ * because a scanner that reads one byte too far is correct everywhere else.
+ * And what a string literal holds is checked byte for byte, including the
+ * NUL bytes a C string comparison would stop at.
+ */
+
+#include "config.h"
+
+#include <limits.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+
+#include "harness.h"
+#include "internal.h"
+
+#define	SCENARIO_CLASSIFY	"a byte begins the token the language says"
+#define	SCENARIO_COMMENT	"a comment runs to the end of its line"
+#define	SCENARIO_INTEGER	"an integer literal spans int64_t"
+#define	SCENARIO_LOCATION	"a token points at its first byte"
+#define	SCENARIO_REJECT		"a malformed token says what is wrong"
+#define	SCENARIO_STRING		"a string literal holds arbitrary bytes"
+#define	SCENARIO_TRAILING	"a token ends where the buffer does"
+
+/* More than any single test scans. */
+#define	TOKEN_MAX		64
+
+typedef struct scan scan_t;
+
+/*
+ * One scan of one input, with the tokens it produced.  Tests build one of
+ * these, assert against it, and release it; nothing is shared between them,
+ * so a failing test cannot make the next one fail.
+ */
+struct scan {
+	relic_t		*ctx;
+	relic_token_t	 tokens[TOKEN_MAX];
+	size_t		 count;
+};
+
+static void	 a_rejected_literal_is_consumed_whole(void);
+static void	 comments_run_to_the_end_of_a_line(void);
+static enum relic_token_kind expected_kind(unsigned char byte);
+static void	 integer_literals_cover_the_whole_range(void);
+static void	 malformed_tokens_report_their_reason(void);
+static void	 scan_close(scan_t *scan);
+static bool	 scan_open(scan_t *scan, const char *text, size_t length);
+static void	 scan_text(scan_t *scan, const char *text,
+		    const char *scenario);
+static bool	 string_holds(const scan_t *scan, size_t index,
+		    const char *bytes, size_t length);
+static void	 string_literals_hold_arbitrary_bytes(void);
+static void	 tokens_end_where_the_buffer_does(void);
+static void	 tokens_point_at_their_first_byte(void);
+static void	 every_byte_begins_what_the_language_says(void);
+
+/*
+ * Scan an input whole.  The text must be NUL-terminated at `length`, which
+ * is the lexer's input contract; every caller below passes a C string, or a
+ * buffer it terminated itself.
+ */
+static bool
+scan_open(scan_t *scan, const char *text, size_t length)
+{
+	relic_lexer_t lexer;
+	bool ok;
+
+	bzero(scan, sizeof(*scan));
+
+	scan->ctx = relic_create();
+	if (scan->ctx == NULL)
+		return (false);
+
+	relic_lexer_init(&lexer, scan->ctx, "test.dl", text, length);
+
+	ok = true;
+	for (;;) {
+		relic_token_t token;
+
+		if (relic_lexer_next(&lexer, &token) != 0) {
+			ok = false;	/* interning ran out of memory */
+			break;
+		}
+
+		if (scan->count == TOKEN_MAX) {
+			ok = false;
+			break;
+		}
+		scan->tokens[scan->count] = token;
+		scan->count++;
+
+		if (token.kind == RELIC_TOKEN_END)
+			break;
+	}
+
+	relic_lexer_reset(&lexer);
+
+	return (ok);
+}
+
+/*
+ * Scan a C string, reporting a failure against the caller's scenario rather
+ * than against a scenario of this helper's own, so that a failing run names
+ * the test that was running.
+ */
+static void
+scan_text(scan_t *scan, const char *text, const char *scenario)
+{
+	if (!scan_open(scan, text, strlen(text)))
+		check(false, scenario, "the input should fit the scan");
+}
+
+static void
+scan_close(scan_t *scan)
+{
+	relic_destroy(scan->ctx);
+	bzero(scan, sizeof(*scan));
+}
+
+/*
+ * Whether the interned bytes of the token at `index` are exactly these.
+ */
+static bool
+string_holds(const scan_t *scan, size_t index, const char *bytes,
+    size_t length)
+{
+	const char *interned;
+	size_t interned_length;
+
+	if (index >= scan->count ||
+	    scan->tokens[index].kind != RELIC_TOKEN_STRING)
+		return (false);
+
+	interned = relic_symbol_bytes(scan->ctx, scan->tokens[index].symbol,
+	    &interned_length);
+	if (interned == NULL || interned_length != length)
+		return (false);
+
+	if (length == 0)
+		return (true);
+
+	return (bcmp(interned, bytes, length) == 0);
+}
+
+/*
+ * What a one-byte input should produce, derived from the language definition
+ * rather than from the lexer's classification table.  This is the oracle the
+ * sweep below compares against: the two must be written from different
+ * descriptions or the comparison proves nothing.
+ */
+static enum relic_token_kind
+expected_kind(unsigned char byte)
+{
+	if (strchr(" \t\n\v\f\r", byte) != NULL && byte != '\0')
+		return (RELIC_TOKEN_END);	/* whitespace, nothing after */
+	if (byte == '%')
+		return (RELIC_TOKEN_END);	/* a comment to end of input */
+
+	if (byte >= 'a' && byte <= 'z')
+		return (RELIC_TOKEN_SYMBOL);
+	if ((byte >= 'A' && byte <= 'Z') || byte == '_')
+		return (RELIC_TOKEN_VARIABLE);
+	if (byte >= '0' && byte <= '9')
+		return (RELIC_TOKEN_INTEGER);
+
+	switch (byte) {
+	case '(':
+		return (RELIC_TOKEN_LPAREN);
+	case ')':
+		return (RELIC_TOKEN_RPAREN);
+	case ',':
+		return (RELIC_TOKEN_COMMA);
+	case '.':
+		return (RELIC_TOKEN_DOT);
+	case '?':
+		return (RELIC_TOKEN_QUESTION);
+	case '=':
+	case '<':
+	case '>':
+		return (RELIC_TOKEN_COMPARE);
+	default:
+		break;
+	}
+
+	/*
+	 * Everything else begins no token: a lone `"` is an unterminated
+	 * literal, a lone `:` or `!` is half of an operator, and every other
+	 * byte, above 0x7f included, is simply not part of the language.
+	 */
+	return (RELIC_TOKEN_ERROR);
+}
+
+static void
+every_byte_begins_what_the_language_says(void)
+{
+	unsigned int candidate;
+
+	for (candidate = 0; candidate <= UCHAR_MAX; candidate++) {
+		char input[2];
+		scan_t scan;
+		enum relic_token_kind expected;
+		unsigned char byte;
+
+		byte = (unsigned char)candidate;
+		expected = expected_kind(byte);
+		input[0] = (char)byte;
+		input[1] = '\0';
+
+		if (!scan_open(&scan, input, 1)) {
+			checkf(false, SCENARIO_CLASSIFY,
+			    "byte 0x%02x should scan", candidate);
+			continue;
+		}
+
+		checkf(scan.count >= 1 && scan.tokens[0].kind == expected,
+		    SCENARIO_CLASSIFY, "byte 0x%02x should begin token kind %d",
+		    candidate, expected);
+
+		scan_close(&scan);
+	}
+}
+
+/*
+ * Every token class scanned with nothing after it, which is where a scanner
+ * that reads one byte past the token it recognized goes wrong.  A trailing
+ * newline would hide all of them.
+ */
+static void
+tokens_end_where_the_buffer_does(void)
+{
+	static const struct {
+		const char		*text;
+		enum relic_token_kind	 kind;
+		size_t			 count;	/* the end token included */
+	} cases[] = {
+		{ "edge", RELIC_TOKEN_SYMBOL, 2 },
+		{ "Node", RELIC_TOKEN_VARIABLE, 2 },
+		{ "_", RELIC_TOKEN_VARIABLE, 2 },
+		{ "\"abc\"", RELIC_TOKEN_STRING, 2 },
+		{ "120", RELIC_TOKEN_INTEGER, 2 },
+		{ "-120", RELIC_TOKEN_INTEGER, 2 },
+		{ ":-", RELIC_TOKEN_IMPLIES, 2 },
+		{ "<=", RELIC_TOKEN_COMPARE, 2 },
+		{ ">=", RELIC_TOKEN_COMPARE, 2 },
+		{ "!=", RELIC_TOKEN_COMPARE, 2 },
+		{ "(", RELIC_TOKEN_LPAREN, 2 },
+		{ ")", RELIC_TOKEN_RPAREN, 2 },
+		{ ",", RELIC_TOKEN_COMMA, 2 },
+		{ ".", RELIC_TOKEN_DOT, 2 },
+		{ "?", RELIC_TOKEN_QUESTION, 2 },
+		{ "% a comment", RELIC_TOKEN_END, 1 }
+	};
+
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		scan_t scan;
+
+		scan_text(&scan, cases[i].text, SCENARIO_TRAILING);
+
+		/*
+		 * The expected count is the token and the end that follows
+		 * it, so a scanner that read one byte past the token and
+		 * produced something more would fail here rather than only
+		 * on the input that happened to follow.
+		 */
+		checkf(scan.count == cases[i].count &&
+		    scan.tokens[0].kind == cases[i].kind, SCENARIO_TRAILING,
+		    "%s should scan as one token and the end of the input",
+		    cases[i].text);
+
+		checkf(scan.count >= 1 &&
+		    scan.tokens[scan.count - 1].kind == RELIC_TOKEN_END,
+		    SCENARIO_TRAILING, "%s should end at the end of the input",
+		    cases[i].text);
+
+		scan_close(&scan);
+	}
+}
+
+static void
+tokens_point_at_their_first_byte(void)
+{
+	/*
+	 * Two lines, with a tab indenting the second.  The tokens are named
+	 * rather than counted to, so that an assertion below says which byte
+	 * of the input it is about.
+	 */
+	enum {
+		TOKEN_EDGE,
+		TOKEN_EDGE_LPAREN,
+		TOKEN_EDGE_A,
+		TOKEN_EDGE_RPAREN,
+		TOKEN_EDGE_DOT,
+		TOKEN_PATH,		/* the first token of the second line */
+		TOKEN_PATH_LPAREN,
+		TOKEN_PATH_X,
+		TOKEN_PATH_RPAREN,
+		TOKEN_PATH_QUESTION,
+		TOKEN_END,
+		TOKEN_COUNT
+	};
+
+	scan_t scan;
+
+	scan_text(&scan, "edge(a).\n\tpath(X)?\n", SCENARIO_LOCATION);
+
+	check(scan.count == TOKEN_COUNT, SCENARIO_LOCATION,
+	    "the two statements should produce ten tokens and an end");
+	if (scan.count != TOKEN_COUNT) {
+		scan_close(&scan);
+		return;
+	}
+
+	check(scan.tokens[TOKEN_EDGE].where.line == 1 &&
+	    scan.tokens[TOKEN_EDGE].where.column == 1, SCENARIO_LOCATION,
+	    "the first symbol should be at line 1 column 1");
+	check(scan.tokens[TOKEN_EDGE_LPAREN].where.column == 5,
+	    SCENARIO_LOCATION,
+	    "the opening parenthesis should be at column 5");
+
+	/*
+	 * A tab is one column: the number exists to let a reader find the
+	 * byte, not to reproduce the indentation.
+	 */
+	check(scan.tokens[TOKEN_PATH].where.line == 2 &&
+	    scan.tokens[TOKEN_PATH].where.column == 2, SCENARIO_LOCATION,
+	    "a tab should advance the column by one, not to a tab stop");
+
+	check(scan.tokens[TOKEN_EDGE].where.file != NULL &&
+	    strcmp(scan.tokens[TOKEN_EDGE].where.file, "test.dl") == 0,
+	    SCENARIO_LOCATION, "a token should name the source it came from");
+
+	scan_close(&scan);
+}
+
+static void
+comments_run_to_the_end_of_a_line(void)
+{
+	scan_t scan;
+
+	scan_text(&scan, "% edge(a).\nedge(b).\n", SCENARIO_COMMENT);
+
+	check(scan.count >= 1 && scan.tokens[0].kind == RELIC_TOKEN_SYMBOL,
+	    SCENARIO_COMMENT, "a commented statement should produce no tokens");
+	check(scan.count >= 1 && scan.tokens[0].where.line == 2,
+	    SCENARIO_COMMENT, "scanning should resume on the line after it");
+
+	scan_close(&scan);
+
+	/*
+	 * There are no block comments, so a comment that reaches the end of
+	 * the input without a newline is ordinary rather than unterminated.
+	 */
+	scan_text(&scan, "edge(b).\n% trailing", SCENARIO_COMMENT);
+
+	check(scan.count >= 1 &&
+	    scan.tokens[scan.count - 1].kind == RELIC_TOKEN_END,
+	    SCENARIO_COMMENT,
+	    "a comment at the end of input should end the input, not fail");
+
+	scan_close(&scan);
+}
+
+static void
+integer_literals_cover_the_whole_range(void)
+{
+	scan_t scan;
+
+	scan_text(&scan, "0 -1 9223372036854775807 -9223372036854775808",
+	    SCENARIO_INTEGER);
+
+	check(scan.count == 5, SCENARIO_INTEGER,
+	    "four literals and an end should be scanned");
+	if (scan.count != 5) {
+		scan_close(&scan);
+		return;
+	}
+
+	check(scan.tokens[0].integer == 0, SCENARIO_INTEGER,
+	    "zero should scan as zero");
+	check(scan.tokens[1].integer == -1, SCENARIO_INTEGER,
+	    "a leading minus should belong to the literal");
+	check(scan.tokens[2].integer == INT64_MAX, SCENARIO_INTEGER,
+	    "the largest representable integer should scan");
+	check(scan.tokens[3].integer == INT64_MIN, SCENARIO_INTEGER,
+	    "the smallest representable integer should scan");
+
+	scan_close(&scan);
+}
+
+static void
+string_literals_hold_arbitrary_bytes(void)
+{
+	static const char with_nul[] = { 'a', '\0', 'b' };
+
+	scan_t scan;
+
+	scan_text(&scan, "\"\" \"a\\0b\" \"\\\\\\\"\\n\\t\\r\" \"\\x7f\\xAf\"",
+	    SCENARIO_STRING);
+
+	check(scan.count == 5, SCENARIO_STRING,
+	    "four literals and an end should be scanned");
+	if (scan.count != 5) {
+		scan_close(&scan);
+		return;
+	}
+
+	check(string_holds(&scan, 0, "", 0), SCENARIO_STRING,
+	    "an empty literal should hold no bytes");
+	check(string_holds(&scan, 1, with_nul, sizeof(with_nul)),
+	    SCENARIO_STRING, "an escaped NUL should be a byte of the string");
+	check(string_holds(&scan, 2, "\\\"\n\t\r", 5), SCENARIO_STRING,
+	    "each named escape should decode to its byte");
+	check(string_holds(&scan, 3, "\x7f\xaf", 2), SCENARIO_STRING,
+	    "a hexadecimal escape should decode in either case");
+
+	scan_close(&scan);
+
+	/* A byte above 0x7f passes through unexamined, so UTF-8 survives. */
+	scan_text(&scan, "\"\xc3\xa9\"", SCENARIO_STRING);
+
+	check(string_holds(&scan, 0, "\xc3\xa9", 2), SCENARIO_STRING,
+	    "bytes above 0x7f should pass through a literal unchanged");
+
+	scan_close(&scan);
+}
+
+static void
+malformed_tokens_report_their_reason(void)
+{
+	static const struct {
+		const char		*text;
+		enum relic_lex_error	 error;
+	} cases[] = {
+		{ "\"abc", RELIC_LEX_UNTERMINATED_STRING },
+		{ "\"abc\n\"", RELIC_LEX_UNTERMINATED_STRING },
+		{ "\"\\q\"", RELIC_LEX_BAD_ESCAPE },
+		{ "\"\\xg0\"", RELIC_LEX_BAD_HEX_ESCAPE },
+		{ "\"\\x7\"", RELIC_LEX_BAD_HEX_ESCAPE },
+		{ "9223372036854775808", RELIC_LEX_INTEGER_RANGE },
+		{ "-9223372036854775809", RELIC_LEX_INTEGER_RANGE },
+		{ "0x10", RELIC_LEX_INTEGER_TRAILING },
+		{ ": ", RELIC_LEX_EXPECTED_IMPLIES },
+		{ "! ", RELIC_LEX_EXPECTED_NE },
+		{ "$", RELIC_LEX_BAD_BYTE },
+		{ "-", RELIC_LEX_BAD_BYTE }
+	};
+
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		scan_t scan;
+
+		scan_text(&scan, cases[i].text, SCENARIO_REJECT);
+
+		checkf(scan.count >= 1 &&
+		    scan.tokens[0].kind == RELIC_TOKEN_ERROR &&
+		    scan.tokens[0].error == cases[i].error, SCENARIO_REJECT,
+		    "%s should be rejected with reason %d", cases[i].text,
+		    (int)cases[i].error);
+
+		scan_close(&scan);
+	}
+}
+
+/*
+ * A literal whose contents were rejected is still consumed whole, so that
+ * what follows it is read as the next statement rather than as the wreckage
+ * of this one.  Stopping at the offending escape would leave the closing
+ * quote to open a literal of its own.
+ */
+static void
+a_rejected_literal_is_consumed_whole(void)
+{
+	scan_t scan;
+
+	scan_text(&scan, "\"\\q\".", SCENARIO_REJECT);
+
+	check(scan.count == 3 && scan.tokens[1].kind == RELIC_TOKEN_DOT,
+	    SCENARIO_REJECT,
+	    "the token after a rejected literal should be what follows it");
+
+	scan_close(&scan);
+}
+
+int
+main(void)
+{
+	every_byte_begins_what_the_language_says();
+	tokens_end_where_the_buffer_does();
+	tokens_point_at_their_first_byte();
+	comments_run_to_the_end_of_a_line();
+	integer_literals_cover_the_whole_range();
+	string_literals_hold_arbitrary_bytes();
+	malformed_tokens_report_their_reason();
+	a_rejected_literal_is_consumed_whole();
+
+	return (check_summary("lex"));
+}

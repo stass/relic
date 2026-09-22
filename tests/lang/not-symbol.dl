@@ -1,0 +1,8 @@
+% `not` is the negation keyword only where a literal may begin, so it stays
+% usable as an ordinary symbol value.
+status(foo, not).
+status(bar, done).
+finished(X) :-
+    status(X, done),
+    not status(X, blocked).
+status(X, not)?

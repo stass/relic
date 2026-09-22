@@ -27,8 +27,8 @@ LIBOBJDIR = compat/
 ##
 
 noinst_LTLIBRARIES = librelic_internal.la
-librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/diag.c lib/symbol.c \
-	lib/util.c lib/value.c
+librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/diag.c lib/lex.c \
+	lib/parse.c lib/symbol.c lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -37,8 +37,8 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
 
 include_HEADERS = include/relic.h
-noinst_HEADERS = compat/compat.h compat/queue.h lib/internal.h lib/util.h \
-	tests/unit/harness.h
+noinst_HEADERS = compat/compat.h compat/queue.h lib/ast.h lib/internal.h \
+	lib/util.h tests/unit/harness.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/main.c
@@ -55,7 +55,8 @@ pkgconfig_DATA = librelic.pc
 # The m4 macro files are distributed by automake already, as dependencies of
 # configure; listing them here as well would only create a list that a sixth
 # macro file could be left out of.
-EXTRA_DIST = autogen.sh LICENSE README.md compat/README.md
+EXTRA_DIST = autogen.sh LICENSE README.md compat/README.md \
+	tests/lang tests/langtest.sh
 
 ##
 ## Tests
@@ -111,13 +112,20 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 ##
 
 check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
-	tests/unit/test_symbol tests/unit/test_util tests/unit/test_value
+	tests/unit/test_lex tests/unit/test_parse tests/unit/test_symbol \
+	tests/unit/test_util tests/unit/test_value
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_diag_SOURCES = tests/unit/test_diag.c tests/unit/harness.c
 tests_unit_test_diag_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_lex_SOURCES = tests/unit/test_lex.c tests/unit/harness.c
+tests_unit_test_lex_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_parse_SOURCES = tests/unit/test_parse.c tests/unit/harness.c
+tests_unit_test_parse_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
 tests_unit_test_symbol_LDADD = librelic_internal.la $(LIBOBJS)
@@ -175,19 +183,53 @@ tests_unit_test_header_cxx_CXXFLAGS = $(RELIC_SAN_CFLAGS)
 tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
-dist_check_SCRIPTS = tests/ascii.sh tests/globals.sh tests/pkgconfig.sh \
-	tests/version.sh
+dist_check_SCRIPTS = tests/ascii.sh tests/globals.sh tests/langfiles.sh \
+	tests/pkgconfig.sh tests/version.sh
 
-TEST_EXTENSIONS = .sh
+##
+## Language tests
+##
+## A language test is a .dl program and the output it must produce, with no
+## code: tests/langtest.sh runs it as automake's DL_LOG_COMPILER, so adding
+## one means adding files rather than writing a test.
+##
+## The .dl files have to be listed for automake to run them, and a list is
+## only as good as the last edit to it -- a test left out of it never runs,
+## and a test that never runs passes forever.  tests/langfiles.sh compares
+## this list against the directory in both directions and fails if they
+## differ, so the omission is loud rather than silent.
+##
+## The expectation files beside each program are distributed by naming the
+## directory in EXTRA_DIST rather than by listing them, because that list
+## would be four times as long and could go stale in a way only make dist
+## notices.  What a directory cannot do is tell a golden file from something
+## a debugging session left behind, so langfiles.sh checks that too.
+##
+
+RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
+	tests/lang/bad-escape.dl tests/lang/comments-only.dl \
+	tests/lang/constructs.dl tests/lang/empty.dl \
+	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
+	tests/lang/head-not-atom.dl tests/lang/incomplete-operator.dl \
+	tests/lang/integer-range.dl tests/lang/integer-trailing.dl \
+	tests/lang/missing-terminator.dl tests/lang/not-as-predicate.dl \
+	tests/lang/not-symbol.dl \
+	tests/lang/recovery.dl tests/lang/string-escapes.dl \
+	tests/lang/trailing-comma.dl tests/lang/unterminated-string.dl \
+	tests/lang/zero-arity.dl
+
+TEST_EXTENSIONS = .dl .sh
+DL_LOG_COMPILER = $(SHELL) $(abs_top_srcdir)/tests/langtest.sh
 SH_LOG_COMPILER = $(SHELL)
 
 AM_TESTS_ENVIRONMENT = \
 	RELIC='$(abs_top_builddir)/relic$(EXEEXT)'; export RELIC; \
 	RELIC_BUILDDIR='$(abs_top_builddir)'; export RELIC_BUILDDIR; \
 	RELIC_SRCDIR='$(abs_top_srcdir)'; export RELIC_SRCDIR; \
-	RELIC_VERSION='$(PACKAGE_VERSION)'; export RELIC_VERSION;
+	RELIC_VERSION='$(PACKAGE_VERSION)'; export RELIC_VERSION; \
+	RELIC_LANG_TESTS='$(RELIC_LANG_TESTS)'; export RELIC_LANG_TESTS;
 
-TESTS = $(check_PROGRAMS) $(dist_check_SCRIPTS)
+TESTS = $(check_PROGRAMS) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 
 ##
 ## Sanitizer suites
@@ -283,8 +325,15 @@ check-ubsan:
 # _SOURCES variable, so automake never learns that libtool builds them in a
 # directory of their own and emits no rule to remove it.  Left behind, that
 # directory fails the distclean check distcheck ends with.
+# The language tests are distributed by naming their directory, and in an
+# in-tree build automake's record of each test run lands in that same
+# directory.  Those records are build output and have no place in a release
+# tarball, so they are removed from the distribution after it is assembled.
+dist-hook:
+	-rm -f $(distdir)/tests/lang/*.log $(distdir)/tests/lang/*.trs
+
 clean-local:
 	-cd $(top_builddir) && rm -rf build-*san
 	-rm -rf $(LIBOBJDIR).libs $(LIBOBJDIR)_libs
 
-.PHONY: check-asan check-lsan check-msan check-ubsan
+.PHONY: check-asan check-lsan check-msan check-ubsan dist-hook

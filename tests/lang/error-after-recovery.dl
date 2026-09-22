@@ -1,0 +1,6 @@
+% A broken statement, then one whose first token is itself malformed: the
+% second must still say what is wrong with it rather than being suppressed
+% by the recovery from the first.
+broken(a b).
+"unterminated
+fine(c).

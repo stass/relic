@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -25,8 +26,12 @@ enum {
 	RELIC_EXIT_USAGE = 2
 };
 
+static int		 check_program(const char *program_name, int argc,
+			    char *argv[]);
+static void		*diag_context(const char *program_name);
 static const char	*invoked_name(const char *argv0);
 static bool		 is_printable_ascii(const char *text);
+static int		 load_operands(relic_t *ctx, int argc, char *argv[]);
 static void		 report_unknown_option(const char *program_name,
 			    int option);
 static void		 usage(const char *program_name);
@@ -114,7 +119,82 @@ report_unknown_option(const char *program_name, int option)
 static void
 usage(const char *program_name)
 {
-	fprintf(stderr, "usage: %s -V\n", program_name);
+	fprintf(stderr, "usage: %s -c [file ...]\n", program_name);
+	fprintf(stderr, "       %s -V\n", program_name);
+}
+
+/*
+ * The program name as the diagnostic callback's context.
+ *
+ * relic_diag_stderr() takes a void * and reads it as a borrowed, read-only
+ * name, so the qualifier has to come off somewhere; the round trip through
+ * uintptr_t is what does it without a cast the compiler objects to.  The
+ * name itself points either into argv or at a string literal, so it outlives
+ * every diagnostic the context can produce.
+ */
+static void *
+diag_context(const char *program_name)
+{
+	return ((void *)(uintptr_t)program_name);
+}
+
+/*
+ * Load every operand, or standard input when there are none.
+ *
+ * Every file is attempted even after one of them fails, so that a run
+ * reports the mistakes in all of the input rather than in whichever file
+ * happened to be named first.
+ */
+static int
+load_operands(relic_t *ctx, int argc, char *argv[])
+{
+	int status;
+	int i;
+
+	if (argc == 0)
+		return (relic_load_file(ctx, stdin, "<stdin>"));
+
+	status = 0;
+	for (i = 0; i < argc; i++) {
+		if (relic_load_path(ctx, argv[i]) != 0)
+			status = -1;
+	}
+
+	return (status);
+}
+
+/*
+ * Check the input: load it, report whatever is wrong with it, and evaluate
+ * nothing.
+ */
+static int
+check_program(const char *program_name, int argc, char *argv[])
+{
+	relic_t *ctx;
+	int status;
+
+	/*
+	 * Reading a program from a terminal would leave the tool waiting for
+	 * input with no prompt and nothing said.  Interactive use arrives as
+	 * an option of its own.
+	 */
+	if (argc == 0 && isatty(STDIN_FILENO) == 1) {
+		usage(program_name);
+		return (RELIC_EXIT_USAGE);
+	}
+
+	ctx = relic_create();
+	if (ctx == NULL) {
+		fprintf(stderr, "%s: out of memory\n", program_name);
+		return (RELIC_EXIT_ERROR);
+	}
+	relic_diag_set(ctx, relic_diag_stderr, diag_context(program_name));
+
+	status = load_operands(ctx, argc, argv);
+
+	relic_destroy(ctx);
+
+	return (status == 0 ? RELIC_EXIT_OK : RELIC_EXIT_ERROR);
 }
 
 int
@@ -122,9 +202,11 @@ main(int argc, char *argv[])
 {
 	const char *program_name;
 	int ch;
+	bool check_only;
 	bool print_version;
 
 	program_name = invoked_name(argv[0]);
+	check_only = false;
 	print_version = false;
 
 	/*
@@ -137,8 +219,11 @@ main(int argc, char *argv[])
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, "V")) != -1) {
+	while ((ch = getopt(argc, argv, "cV")) != -1) {
 		switch (ch) {
+		case 'c':
+			check_only = true;
+			break;
 		case 'V':
 			print_version = true;
 			break;
@@ -151,19 +236,34 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (!print_version || argc != 0) {
+	if (print_version) {
+		if (check_only || argc != 0) {
+			usage(program_name);
+			return (RELIC_EXIT_USAGE);
+		}
+
+		/*
+		 * The version is printed under the package name rather than
+		 * the invoked name: it identifies the software, which a
+		 * rename does not change, and keeping it independent of
+		 * argv[0] keeps the output the same whether the tool runs
+		 * from the build tree or from its installed location.
+		 */
+		printf("%s %s\n", PACKAGE_NAME, relic_version());
+
+		return (RELIC_EXIT_OK);
+	}
+
+	/*
+	 * Checking is the only thing the tool can be asked to do so far, so
+	 * it must be asked explicitly.  Evaluating a program is what a bare
+	 * invocation will mean, and letting it mean checking in the meantime
+	 * would make the eventual behaviour a change rather than an addition.
+	 */
+	if (!check_only) {
 		usage(program_name);
 		return (RELIC_EXIT_USAGE);
 	}
 
-	/*
-	 * The version is printed under the package name rather than the
-	 * invoked name: it identifies the software, which a rename does not
-	 * change, and keeping it independent of argv[0] keeps the output the
-	 * same whether the tool runs from the build tree or from its
-	 * installed location.
-	 */
-	printf("%s %s\n", PACKAGE_NAME, relic_version());
-
-	return (RELIC_EXIT_OK);
+	return (check_program(program_name, argc, argv));
 }

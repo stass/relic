@@ -1,0 +1,2 @@
+integer-range.dl:1:5: error: integer literal out of range: 9223372036854775808
+integer-range.dl:2:7: error: integer literal out of range: -9223372036854775809

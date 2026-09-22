@@ -1,0 +1,3 @@
+X = 42.
+not blocked(a).
+whole(X) = 3 :- edge(X, _).

@@ -27,6 +27,22 @@
 #define	RELIC_ID_NONE	0u
 
 /*
+ * A value, interned.  Every value relic handles -- integers included -- is
+ * reduced to one of these, so a tuple column is four bytes whatever it holds
+ * and a join compares plain integers without inspecting a payload.
+ *
+ * Identifiers are assigned in order of first appearance, so they are
+ * reproducible across runs, but their numeric order records only the order
+ * the input mentioned things in.  Nothing may sort by a domain identifier;
+ * ordering goes through relic_value_order() or relic_value_total_order().
+ *
+ * The typedef lives here, beside the identifier conventions it obeys, so
+ * that a header describing stored values can use it without reaching for
+ * every other internal type.
+ */
+typedef uint32_t relic_dom_t;
+
+/*
  * Grow an array to hold at least count items of item_size bytes each.
  *
  * Returns items unchanged when *capacity already suffices, and otherwise a

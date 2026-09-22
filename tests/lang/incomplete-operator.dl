@@ -1,0 +1,2 @@
+half(X) :- edge(X, Y), Y ! a.
+colon(X) : edge(X).

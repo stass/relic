@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -208,6 +209,29 @@ RELIC_EXPORT void relic_diag_set(relic_t *ctx, relic_diag_cb callback,
 RELIC_EXPORT void relic_diag_stderr(void *callback_ctx,
     enum relic_diag_level level, const relic_location_t *where,
     const char *message);
+
+/*
+ * Load a program.
+ *
+ * relic_load_path() opens the file and delegates; relic_load_file() reads
+ * the stream whole and delegates; relic_load_string() takes a
+ * NUL-terminated program text.  `source_name` is what diagnostics from that
+ * text point at and is copied, so it need not outlive the call; NULL names
+ * the input "<input>".
+ *
+ * Each returns 0, or -1 with every mistake already reported through the
+ * diagnostic callback.  Several loads append to one logical program, which
+ * is what lets facts and rules be split across files.
+ *
+ * A load is all or nothing: a failed one adds none of its statements, so a
+ * program never holds half of a file.  A program with an error in it is not
+ * a smaller program, it is a different one.
+ */
+RELIC_EXPORT int relic_load_file(relic_t *ctx, FILE *stream,
+    const char *source_name);
+RELIC_EXPORT int relic_load_path(relic_t *ctx, const char *path);
+RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
+    const char *text);
 
 /*
  * The text of the most recent RELIC_ERROR diagnostic, or NULL if the context

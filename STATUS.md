@@ -30,12 +30,37 @@ later stage sits on, specified in `specs/design-memory.md`. No Datalog yet.
 | `lib/api.c` | context lifecycle and the context-arena allocation funnel |
 | `include/relic.h` | `relic_t`, `relic_value_t`, `relic_location_t`, `relic_config_t`, the diagnostic callback, `relic_create()`, `relic_create_config()`, `relic_destroy()`, `relic_diag_set()`, `relic_diag_stderr()`, `relic_error()`, `relic_string()` |
 | `compat/queue.h` | bundled OpenBSD copy, provenance and patches in `compat/README.md` |
-| `tests/` | nine unit binaries and four shell tests |
+| `tests/` | the unit suites for each module, plus the tree checks |
 
 A configuration is accepted and stored but not enforced: nothing allocates
 relation or index storage for a limit to apply to yet, and no `flags` value is
 defined. The header says so. `compat/tree.h` is not bundled, because no
 subsystem calls for a red-black tree yet.
+
+**The front end, stage S2.** Source text becomes an abstract syntax tree and
+bad source text becomes diagnostics, specified in `specs/design-parser.md`.
+`relic -c` reads files or standard input, reports what is wrong with them and
+evaluates nothing.
+
+| Component | State |
+| --- | --- |
+| `lib/lex.c` | byte-oriented lexer over its own classification table; every token class of architecture section 13, string escapes including `\xHH`, `strtoll` integer literals with a range check, `%` comments, line and column on every token |
+| `lib/parse.c` | recursive descent over the grammar; error recovery synchronizing on `.` and `?` with one diagnostic per statement; the loading entry points and the whole-stream reader |
+| `lib/ast.h` | terms, atoms, literals, statements and the program list; a fact is a rule with an empty body |
+| `include/relic.h` | adds `relic_load_file()`, `relic_load_path()`, `relic_load_string()` |
+| `cmd/relic/main.c` | `-c` with file operands and standard input; `-V` unchanged |
+| `tests/lang/` | twenty golden language tests run by `tests/langtest.sh` as automake's `DL_LOG_COMPILER`, with `tests/langfiles.sh` failing the build if one is not registered |
+
+Constants are interned as they are parsed, so a term holds the same domain
+identifier a tuple column will hold. `not` is the negation keyword only where
+a literal may begin, so `status(foo, not).` is an ordinary fact. A load is all
+or nothing: a program never holds half of a file.
+
+Nothing yet turns the tree into a program. `relic -c` reports lexical and
+syntactic mistakes only; predicate identity, variable numbering, safety and
+stratification arrive in S3 and S6, so a rule with an unbound head variable is
+still accepted. A bare `relic file.dl` is a usage error, because evaluating a
+program is what it will mean and checking is not.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -59,20 +84,25 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the eight documented entry
+* the installed shared library exports exactly the eleven documented entry
   points and nothing else; the compatibility objects linked into it are not
   reachable.
 
-Three of the tests are checks on the tree rather than on the engine, and each
+Five of the tests are checks on the tree rather than on the engine, and each
 was confirmed to fail when the property it guards is broken, rather than only
 to pass:
 
 * `tests/globals.sh` reports any C object in a writable section, and was
   checked against an injected `static` counter and an injected
   `_Thread_local` one, in both plain and instrumented builds;
+* `tests/langtest.sh` was checked against an altered golden message and an
+  altered expected exit status;
+* `tests/langfiles.sh` was checked against an unregistered `.dl` file and
+  against a file in `tests/lang/` belonging to no test;
 * `tests/unit/test_exhaustion.c` compiles the library against an allocator
-  that refuses the nth request and sweeps n across interning, which is how the
-  index-growth failure that broke interning identity was found;
+  that refuses the nth request and sweeps n across interning and across a
+  load, asserting that the sweep reaches both a load that runs out of memory
+  and one that completes, so neither branch can quietly stop being taken;
 * `tests/ascii.sh` walks the whole tree and excludes what is generated.
 
 No platform other than macOS has been exercised, because there is no
@@ -80,7 +110,7 @@ continuous integration yet. `TODO.md` records that as the highest open item,
 and records the two checks whose behaviour on ELF is inferred rather than
 observed.
 
-There is no lexer, parser, relation store, evaluator or query interface yet.
+There is no program model, relation store, evaluator or query interface yet.
 
 ## Documents
 
@@ -88,16 +118,17 @@ There is no lexer, parser, relation store, evaluator or query interface yet.
 | --- | --- |
 | `specs/architecture.md` | target design, v0.2 |
 | `specs/design-memory.md` | arenas, arrays, interning tables, the value table |
+| `specs/design-parser.md` | lexical structure, the syntax tree, diagnostics and error recovery |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S2, the lexer and parser: source text becomes an AST and bad source text
-becomes good diagnostics, with error recovery synchronizing on `.` and `?`. It
-owes `specs/design-parser.md` before its code, and brings the first `.dl`
-language tests and the first fuzz target.
+Stage S3, the program model and safety: the syntax tree becomes a validated
+program, with the `(name, arity)` predicate table, variable numbering, the
+range-restriction check and the singleton-variable warning, and `relic -c`
+becomes useful. It owes `specs/design-program.md` before its code.
 
 ## Decisions taken
 

@@ -1,0 +1,47 @@
+% Every construct of the grammar, in one file.
+
+% Facts, with each value type.
+edge(a, b).
+name(user1, "Alice").
+size(database, 120).
+offset(start, -1).
+initialized.
+ready().
+
+% A rule with one body literal.
+path(X, Y) :-
+    edge(X, Y).
+
+% A recursive rule with several body literals.
+path(X, Z) :-
+    edge(X, Y),
+    path(Y, Z).
+
+% Negation.
+runnable(X) :-
+    todo(X),
+    not blocked(X).
+
+% Every comparison operator, and an anonymous variable.
+compared(X) :-
+    size(X, N),
+    edge(X, _),
+    N = 100,
+    N != 0,
+    N < 1000,
+    N <= 999,
+    N > 1,
+    N >= 2.
+
+% A comparison between two constants, and one whose left operand is a symbol.
+constant_filter(X) :-
+    edge(X, _),
+    a != b,
+    "left" < "right",
+    1 <= 2.
+
+% Queries: one atom, and a conjunction.
+path(a, X)?
+
+edge(X, Y),
+size(Y, N)?

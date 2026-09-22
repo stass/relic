@@ -1,0 +1,7 @@
+% Four mistakes in one file, each reported once and none hiding the next.
+good(a).
+broken(a b).
+also$broken(a).
+"string" .
+not.
+fine(b).

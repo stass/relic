@@ -1,0 +1,4 @@
+% `not` is the negation keyword wherever a literal begins, so a predicate
+% named `not` can never be defined.  A negated reference to one must be
+% rejected too, or the parser would build an atom nothing could ever satisfy.
+q(X) :- edge(X, _), not not.

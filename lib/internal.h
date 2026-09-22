@@ -14,6 +14,7 @@
 
 #include <relic.h>
 
+#include "ast.h"
 #include "compat.h"
 #include "queue.h"
 #include "util.h"
@@ -53,21 +54,11 @@ typedef struct relic_arena relic_arena_t;
 typedef struct relic_arena_chunk relic_arena_chunk_t;
 typedef struct relic_arena_chunk_list relic_arena_chunk_list_t;
 typedef struct relic_diag relic_diag_t;
+typedef struct relic_lexer relic_lexer_t;
 typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
+typedef struct relic_token relic_token_t;
 typedef struct relic_valtab relic_valtab_t;
-
-/*
- * A value, interned.  Every value relic handles -- integers included -- is
- * reduced to one of these, so a tuple column is four bytes whatever it holds
- * and a join compares plain integers without inspecting a payload.
- *
- * Identifiers are assigned in order of first appearance, so they are
- * reproducible across runs, but their numeric order records only the order
- * the input mentioned things in.  Nothing may sort by a domain identifier;
- * ordering goes through relic_value_order() or relic_value_total_order().
- */
-typedef uint32_t relic_dom_t;
 
 /*
  * The result of comparing two values.
@@ -180,11 +171,13 @@ struct relic_valtab {
  * context is not itself thread-safe.
  */
 struct relic {
-	relic_arena_t	 arena;		/* context lifetime: symbol bytes */
-	relic_symtab_t	 symbols;
-	relic_valtab_t	 values;
-	relic_diag_t	 diag;
-	relic_config_t	 config;
+	relic_arena_t		 arena;	/* context lifetime: symbol bytes */
+	relic_arena_t		 program_arena;	/* the parsed program */
+	relic_symtab_t		 symbols;
+	relic_valtab_t		 values;
+	relic_ast_program_t	 ast;
+	relic_diag_t		 diag;
+	relic_config_t		 config;
 };
 
 /*
@@ -197,6 +190,7 @@ struct relic {
  */
 void	*relic_arena_alloc(relic_arena_t *arena, size_t size);
 void	 relic_arena_clear_failure(relic_arena_t *arena);
+void	 relic_arena_fail(relic_arena_t *arena);
 bool	 relic_arena_failed(const relic_arena_t *arena);
 void	 relic_arena_init(relic_arena_t *arena);
 void	 relic_arena_reset(relic_arena_t *arena);
@@ -233,6 +227,16 @@ void	 relic_diag_init(relic_diag_t *diag);
 void	 relic_diagf(relic_t *ctx, enum relic_diag_level level,
 	    const relic_location_t *where, const char *format, ...)
 	    RELIC_PRINTFLIKE(4, 5);
+
+/*
+ * The same, for a caller that already holds a va_list.  The parser formats
+ * its own messages through this because it decides whether a diagnostic is
+ * reported at all, and that decision has to sit in front of the call rather
+ * than inside it.
+ */
+void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
+	    const relic_location_t *where, const char *format, va_list arguments)
+	    RELIC_PRINTFLIKE(4, 0);
 
 /*
  * Report that an allocation failed, in the one wording the whole library
@@ -273,5 +277,114 @@ int	 relic_value_intern_integer(relic_t *ctx, int64_t value,
 	    relic_dom_t *domp);
 void	 relic_valtab_init(relic_valtab_t *table);
 void	 relic_valtab_reset(relic_valtab_t *table);
+
+/*
+ * lib/lex.c
+ *
+ * The lexer decides what a byte sequence is; it emits no diagnostics.  A
+ * sequence that is not a token comes back as RELIC_TOKEN_ERROR carrying the
+ * reason, and the parser decides whether to report it.  That is what keeps
+ * error recovery in one module: a lexer that reported for itself would have
+ * to be told when the parser is discarding wreckage and wants silence.
+ */
+
+enum relic_token_kind {
+	RELIC_TOKEN_END,	/* no more input */
+	RELIC_TOKEN_SYMBOL,	/* [a-z][A-Za-z0-9_]* */
+	RELIC_TOKEN_VARIABLE,	/* [A-Z_][A-Za-z0-9_]* */
+	RELIC_TOKEN_STRING,
+	RELIC_TOKEN_INTEGER,
+	RELIC_TOKEN_COMPARE,	/* = != < <= > >=, which one in `compare` */
+	RELIC_TOKEN_IMPLIES,	/* :- */
+	RELIC_TOKEN_LPAREN,
+	RELIC_TOKEN_RPAREN,
+	RELIC_TOKEN_COMMA,
+	RELIC_TOKEN_DOT,
+	RELIC_TOKEN_QUESTION,
+	RELIC_TOKEN_ERROR	/* not a token; `error` says why */
+};
+
+enum relic_lex_error {
+	RELIC_LEX_OK,
+	RELIC_LEX_BAD_BYTE,		/* part of no token */
+	RELIC_LEX_BAD_ESCAPE,		/* not one of the escapes */
+	RELIC_LEX_BAD_HEX_ESCAPE,	/* \x without two hex digits */
+	RELIC_LEX_EXPECTED_IMPLIES,	/* : not followed by - */
+	RELIC_LEX_EXPECTED_NE,		/* ! not followed by = */
+	RELIC_LEX_INTEGER_RANGE,	/* outside int64_t */
+	RELIC_LEX_INTEGER_TRAILING,	/* an identifier byte after the digits */
+	RELIC_LEX_UNTERMINATED_STRING
+};
+
+/*
+ * One token.
+ *
+ * `text` spans the bytes the token was read from and belongs to the source
+ * text, so it is valid only while the lexer's input is; diagnostics quote it
+ * and nothing stores it.  `where` is the token's first byte, except where a
+ * scanner found a more precise place to point at, such as the offending
+ * byte of a bad escape.
+ *
+ * `symbol` is the interned spelling of a name and the interned *decoded*
+ * bytes of a string literal.  The lexer interns bytes and not values: an
+ * identifier does not yet know whether it names a predicate or is a symbol
+ * constant, and interning it as a value on sight would give every predicate
+ * name a domain identifier it never uses.
+ */
+struct relic_token {
+	const char		*text;
+	size_t			 text_length;
+	relic_location_t	 where;
+	int64_t			 integer;	/* RELIC_TOKEN_INTEGER */
+	uint32_t		 symbol;	/* names and string bytes */
+	enum relic_token_kind	 kind;
+	enum relic_lex_error	 error;
+	enum relic_compare_op	 compare;	/* RELIC_TOKEN_COMPARE */
+	unsigned char		 byte;		/* the byte an error names */
+};
+
+/*
+ * A scan in progress.
+ *
+ * `text` must hold a NUL at index `length`.  strtoll(3) is what needs it,
+ * and nothing else: the terminator is what stops a conversion from reading
+ * past a digit span that ends at the end of the buffer.  A NUL *inside* the
+ * range is an ordinary byte that begins no token.
+ *
+ * `decoded` is the scratch buffer a string literal's escapes are decoded
+ * into before the result is interned.  It is reused by every literal in the
+ * input and released by relic_lexer_reset().
+ */
+struct relic_lexer {
+	relic_t			*ctx;
+	const char		*text;
+	char			*decoded;
+	size_t			 length;
+	size_t			 offset;
+	size_t			 decoded_length;
+	size_t			 decoded_capacity;
+	relic_location_t	 where;		/* of the byte at `offset` */
+};
+
+void	 relic_lexer_init(relic_lexer_t *lexer, relic_t *ctx,
+	    const char *source_name, const char *text, size_t length);
+void	 relic_lexer_reset(relic_lexer_t *lexer);
+
+/*
+ * Scan the next token.  Returns 0 having filled *token, which may be an
+ * error token, or -1 when interning failed for want of memory, in which case
+ * the diagnostic has already been reported and scanning cannot continue.
+ */
+int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
+
+/*
+ * lib/parse.c
+ *
+ * relic_ast_program_init() prepares the empty statement list a context
+ * starts with.  The statements themselves live in the program arena, which
+ * the context releases when it is destroyed, so there is no matching
+ * teardown.
+ */
+void	 relic_ast_program_init(relic_ast_program_t *program);
 
 #endif /* RELIC_INTERNAL_H */

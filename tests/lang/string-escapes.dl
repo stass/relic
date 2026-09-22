@@ -1,0 +1,5 @@
+plain("Alice").
+escaped("a\\b\"c\nd\te\rf\0g").
+hex("\x00\x7f\xAf").
+empty("").
+utf8("caf\xc3\xa9").

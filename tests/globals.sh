@@ -15,13 +15,21 @@
 # in read-only sections and are not reported; a `static` counter added for
 # debugging is, which is the point.
 #
-# Only symbols that could have come from a C declaration are considered.  A
-# compiler puts records of its own in writable sections -- the source-location
-# descriptors UndefinedBehaviorSanitizer emits are the ones that matter here
-# -- and those are not relic's to remove.  They are told apart by the object
-# format's own naming convention rather than by a list of names to ignore: a
-# list would have to grow with every compiler and every instrumentation mode,
-# and the entry that was missing would be the one that mattered.
+# Only symbols that could have come from a relic declaration are considered.
+# A compiler puts records of its own in writable sections -- the
+# source-location descriptors UndefinedBehaviorSanitizer emits and the
+# per-global descriptors AddressSanitizer emits beside every global,
+# read-only ones included -- and those are not relic's to remove.
+#
+# They are told apart by naming convention rather than by a list of names to
+# ignore, because a list would have to grow with every compiler and every
+# instrumentation mode and the entry that was missing would be the one that
+# mattered.  Two conventions do it.  A symbol that was never declared in C at
+# all has no C identifier: the object format's own prefix is absent.  A
+# symbol that was declared in C by the implementation rather than by relic
+# has an identifier reserved to the implementation, which is one beginning
+# with two underscores or with an underscore and a capital; relic-owned code
+# may not use either, so nothing of relic's can hide behind this.
 
 set -eu
 
@@ -94,17 +102,22 @@ echo "$objects" | while read -r object; do
 		# name without one -- l___unnamed_1, ltmp3 -- was emitted by
 		# the compiler or the assembler and never declared in C.
 		# A thread-local's generated companion carries a $ in its name.
+		# With the prefix stripped, a reserved identifier leaves a
+		# symbol beginning ___ or __ and a capital.
 		found=$(nm -m "$object" 2>/dev/null |
 		    grep -E '\(__DATA(_CONST)?,__' |
 		    grep -Ev '\(__DATA(_CONST)?,__const\)' |
-		    grep -E ' _[A-Za-z0-9_$]+$' || true)
+		    grep -E ' _[A-Za-z0-9_$]+$' |
+		    grep -Ev ' __(_|[A-Z])[A-Za-z0-9_$]*$' || true)
 		;;
 	elf)
 		# ELF has no such prefix, but a compiler-generated object is a
-		# section-local label, whose name begins with a dot.
+		# section-local label, whose name begins with a dot, and a
+		# reserved identifier is unchanged by the format.
 		found=$(nm "$object" 2>/dev/null |
 		    grep -E '^[0-9a-fA-F]* [BbCcDdGgSs] ' |
-		    grep -Ev ' \.' || true)
+		    grep -Ev ' \.' |
+		    grep -Ev ' (__|_[A-Z])[A-Za-z0-9_$]*$' || true)
 		;;
 	esac
 

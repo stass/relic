@@ -1,0 +1,1 @@
+integer-trailing.dl:1:6: error: unexpected character 'x' after an integer literal

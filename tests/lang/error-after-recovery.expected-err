@@ -1,0 +1,2 @@
+error-after-recovery.dl:4:10: error: expected ',' or ')', found a symbol
+error-after-recovery.dl:5:1: error: unterminated string literal

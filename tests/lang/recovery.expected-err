@@ -1,0 +1,4 @@
+recovery.dl:3:10: error: expected ',' or ')', found a symbol
+recovery.dl:4:5: error: unexpected character '$'
+recovery.dl:5:10: error: expected a comparison operator, found '.'
+recovery.dl:6:4: error: expected a predicate name, found '.'

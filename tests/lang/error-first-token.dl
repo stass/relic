@@ -1,0 +1,5 @@
+% The mistake is the first token of the second statement, which is the token
+% fetched by the advance that consumed the first statement's terminator.
+edge(a, b).
+$broken(a).
+edge(c, d).

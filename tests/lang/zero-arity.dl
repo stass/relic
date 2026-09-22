@@ -1,0 +1,4 @@
+initialized.
+ready().
+started :- initialized, ready().
+initialized?

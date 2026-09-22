@@ -48,6 +48,7 @@
 #include "internal.h"
 
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
+#define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
 #define	SCENARIO_SYMBOL		"interning a symbol survives a failed allocation"
 #define	SCENARIO_VALUE		"interning a value survives a failed allocation"
@@ -61,12 +62,25 @@
 #define	VALUE_SWEEP	20
 
 /*
+ * A load makes many more requests than an intern: the text buffer, an arena
+ * chunk per few statements, the body scratch array, and an intern for every
+ * distinct name, value and source name.  The bound covers the small program
+ * below several times over.
+ */
+#define	LOAD_SWEEP	80
+
+/*
  * Requests still to be served before the allocator starts refusing.  A
  * negative budget means refuse nothing, which is the state every allocation
- * outside a swept region runs in.
+ * outside a swept region runs in.  Once the budget reaches zero every later
+ * request is refused as well, so a sweep step models an allocator that has
+ * run out rather than one that hiccupped.
  */
 static long	 allocations_remaining = -1;
 static unsigned long allocations_seen;
+
+/* How many RELIC_ERROR diagnostics the context has reported. */
+static size_t	 errors_reported;
 
 void		*relic_test_calloc(size_t count, size_t size);
 void		*relic_test_malloc(size_t size);
@@ -79,6 +93,9 @@ static void	 refuse_allocations_after(long served);
 static void	 context_creation_reports_a_failed_allocation(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
+static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
+static void	 count_error(void *callback_ctx, enum relic_diag_level level,
+		    const relic_location_t *where, const char *message);
 
 static bool
 refuse_this_allocation(void)
@@ -133,6 +150,15 @@ relic_test_reallocarray(void *items, size_t count, size_t size)
 		return (NULL);
 
 	return (reallocarray(items, count, size));
+}
+
+static void
+count_error(void *callback_ctx RELIC_UNUSED, enum relic_diag_level level,
+    const relic_location_t *where RELIC_UNUSED,
+    const char *message RELIC_UNUSED)
+{
+	if (level == RELIC_ERROR)
+		errors_reported++;
 }
 
 static void
@@ -277,12 +303,110 @@ interning_a_value_survives_a_failed_allocation(void)
 	}
 }
 
+/*
+ * Load a program with the nth allocation refused, then load the same text
+ * again with the allocator restored.
+ *
+ * Two properties are at stake and neither is visible in a return value.  A
+ * load is all or nothing, so a load that failed must have added no
+ * statements at all -- half of a program is worse than none, because a
+ * caller cannot tell which half.  And the program arena's failure flag is
+ * sticky, so a load that did not clear it after reporting would leave a
+ * context that can never load anything again; the second load is what
+ * proves it was cleared.
+ */
+static void
+a_load_that_ran_out_of_memory_adds_nothing(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "path(X, Y) :- edge(X, Y), not blocked(X), Y != \"stop\".\n"
+	    "path(a, Z)?\n";
+
+	size_t refused;
+	size_t completed;
+	long budget;
+
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < LOAD_SWEEP; budget++) {
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_LOAD,
+			    "a context should be created");
+			return;
+		}
+
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		refuse_allocations_after(budget);
+		status = relic_load_string(ctx, "sweep.dl", program);
+		serve_every_allocation();
+
+		/*
+		 * One exhaustion is one message.  The program is well formed,
+		 * so nothing else has anything to report, and a load that
+		 * failed must say why exactly once however many allocations
+		 * the refusal went on to strike.  Two messages would mean a
+		 * site reported for itself as well as leaving the boundary to
+		 * report; none would mean a load failed in silence.
+		 */
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_LOAD,
+		    "a load that %s should report %d message(s), not %zu, "
+		    "with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+
+		if (status != 0) {
+			refused++;
+			checkf(ctx->ast.count == 0, SCENARIO_LOAD,
+			    "a failed load should add no statements, not %zu, "
+			    "with allocation %ld refused", ctx->ast.count,
+			    budget);
+		} else {
+			completed++;
+			checkf(ctx->ast.count == 3, SCENARIO_LOAD,
+			    "a load that reported success should have added "
+			    "all three statements, not %zu, with allocation "
+			    "%ld refused", ctx->ast.count, budget);
+		}
+
+		checkf(relic_load_string(ctx, "sweep.dl", program) == 0,
+		    SCENARIO_LOAD,
+		    "loading should succeed once the allocator recovers, with "
+		    "allocation %ld refused", budget);
+
+		relic_destroy(ctx);
+	}
+
+	/*
+	 * The sweep has to straddle the point where the program stops
+	 * needing memory, or one of the two branches above is never taken
+	 * and is checking nothing.  A bound set too low would make every
+	 * load fail, and one set too high would only waste time; both are
+	 * reported here rather than left to be noticed.
+	 */
+	checkf(refused > 0, SCENARIO_LOAD,
+	    "the sweep should reach a load that runs out of memory, in %d "
+	    "attempts", LOAD_SWEEP);
+	checkf(completed > 0, SCENARIO_LOAD,
+	    "the sweep should reach a load that completes, in %d attempts",
+	    LOAD_SWEEP);
+}
+
 int
 main(void)
 {
 	context_creation_reports_a_failed_allocation();
 	interning_a_symbol_survives_a_failed_allocation();
 	interning_a_value_survives_a_failed_allocation();
+	a_load_that_ran_out_of_memory_adds_nothing();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

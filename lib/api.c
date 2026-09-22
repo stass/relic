@@ -48,6 +48,7 @@ relic_destroy(relic_t *ctx)
 
 	relic_valtab_reset(&ctx->values);
 	relic_symtab_reset(&ctx->symbols);
+	relic_arena_reset(&ctx->program_arena);
 	relic_arena_reset(&ctx->arena);
 	free(ctx);
 }
@@ -63,8 +64,10 @@ relic_create_config(const relic_config_t *config)
 
 	bzero(ctx, sizeof(*ctx));
 	relic_arena_init(&ctx->arena);
+	relic_arena_init(&ctx->program_arena);
 	relic_symtab_init(&ctx->symbols);
 	relic_valtab_init(&ctx->values);
+	relic_ast_program_init(&ctx->ast);
 	relic_diag_init(&ctx->diag);
 
 	/*

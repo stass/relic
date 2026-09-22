@@ -1,0 +1,3 @@
+bad-escape.dl:1:17: error: unknown escape sequence 'q' in a string literal
+bad-escape.dl:2:14: error: a hexadecimal escape needs two hexadecimal digits
+bad-escape.dl:3:16: error: a hexadecimal escape needs two hexadecimal digits

@@ -196,6 +196,25 @@ relic_arena_failed(const relic_arena_t *arena)
 }
 
 /*
+ * Record that an allocation for this arena could not be satisfied, although
+ * the arena itself was never asked for it.
+ *
+ * An owner sometimes rejects a request before it reaches here -- a count and
+ * an element size whose product would wrap is the case that exists -- and a
+ * null return from such a check would otherwise mean something different
+ * from a null return out of relic_arena_alloc(): the first would leave the
+ * flag clear and the phase boundary would see nothing wrong.  Marking the
+ * arena instead gives a refused allocation one meaning wherever it was
+ * decided, so the boundary check stays the single place that turns any of
+ * them into a reported failure.
+ */
+void
+relic_arena_fail(relic_arena_t *arena)
+{
+	arena->failed = true;
+}
+
+/*
  * Forget that an allocation failed, so the arena serves requests again.
  *
  * This belongs to an owner that has observed the failure and reported it,

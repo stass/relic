@@ -1,0 +1,1 @@
+not-as-predicate.dl:4:25: error: not is the negation keyword and cannot name a predicate

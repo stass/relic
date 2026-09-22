@@ -27,6 +27,7 @@
 #define	SCENARIO_ALIGNMENT	"every allocation is aligned"
 #define	SCENARIO_DISTINCT	"allocations do not overlap"
 #define	SCENARIO_FAILURE	"an impossible request fails stickily"
+#define	SCENARIO_MARKED		"an owner can record a failure of its own"
 #define	SCENARIO_RESET		"reset returns the arena to an empty state"
 #define	SCENARIO_ZERO		"a zero-byte request yields a usable pointer"
 
@@ -35,6 +36,7 @@ static void	 a_reset_arena_allocates_again(void);
 static void	 a_zero_byte_request_returns_a_distinct_pointer(void);
 static void	 an_allocation_is_aligned_whatever_its_size(void);
 static void	 an_impossible_request_fails_and_stays_failed(void);
+static void	 an_owner_can_record_a_refusal_it_made_itself(void);
 static void	 separate_allocations_do_not_overlap(void);
 
 static bool
@@ -192,6 +194,47 @@ an_impossible_request_fails_and_stays_failed(void)
 }
 
 /*
+ * An owner sometimes refuses a request before the arena sees it -- a count
+ * and an element size whose product would wrap is the case that exists --
+ * and marking the arena is how that refusal reaches the phase boundary.
+ *
+ * Without it such a refusal would be a second thing a null return could
+ * mean: the caller stops, the flag stays clear, and the boundary check that
+ * is supposed to catch a truncated result sees nothing wrong.  The
+ * indistinguishability from an exhausted arena is the property under test.
+ */
+static void
+an_owner_can_record_a_refusal_it_made_itself(void)
+{
+	relic_arena_t arena;
+	void *afterwards;
+
+	relic_arena_init(&arena);
+
+	check(!relic_arena_failed(&arena), SCENARIO_MARKED,
+	    "a fresh arena should not be marked");
+
+	relic_arena_fail(&arena);
+	check(relic_arena_failed(&arena), SCENARIO_MARKED,
+	    "marking the arena should record the failure");
+
+	afterwards = relic_arena_alloc(&arena, 8);
+	check(afterwards == NULL, SCENARIO_MARKED,
+	    "a marked arena should refuse an ordinary request, as an "
+	    "exhausted one does");
+
+	relic_arena_clear_failure(&arena);
+	check(!relic_arena_failed(&arena), SCENARIO_MARKED,
+	    "clearing should let the arena serve requests again");
+
+	afterwards = relic_arena_alloc(&arena, 8);
+	check(afterwards != NULL, SCENARIO_MARKED,
+	    "and the request should then succeed");
+
+	relic_arena_reset(&arena);
+}
+
+/*
  * A reset arena is indistinguishable from a freshly initialized one: it
  * allocates again, and it has given back everything it held.
  */
@@ -226,6 +269,7 @@ main(void)
 	a_zero_byte_request_returns_a_distinct_pointer();
 	an_allocation_is_aligned_whatever_its_size();
 	an_impossible_request_fails_and_stays_failed();
+	an_owner_can_record_a_refusal_it_made_itself();
 	separate_allocations_do_not_overlap();
 
 	return (check_summary("arena"));

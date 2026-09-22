@@ -71,6 +71,16 @@ relic_diagf(relic_t *ctx, enum relic_diag_level level,
     const relic_location_t *where, const char *format, ...)
 {
 	va_list arguments;
+
+	va_start(arguments, format);
+	relic_vdiagf(ctx, level, where, format, arguments);
+	va_end(arguments);
+}
+
+void
+relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *format, va_list arguments)
+{
 	char message[sizeof(ctx->diag.last_error)];
 
 	/*
@@ -86,10 +96,7 @@ relic_diagf(relic_t *ctx, enum relic_diag_level level,
 	 * terminator is placed before the call rather than assumed after it.
 	 */
 	message[0] = '\0';
-
-	va_start(arguments, format);
 	vsnprintf(message, sizeof(message), format, arguments);
-	va_end(arguments);
 
 	if (level == RELIC_ERROR) {
 		strlcpy(ctx->diag.last_error, message,
