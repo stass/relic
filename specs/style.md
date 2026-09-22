@@ -1,8 +1,9 @@
-# bfx code style
+# relic code style
 
-bfx follows FreeBSD `style(9)` (Kernel Normal Form), with the project
-conventions below. These rules apply to bfx-owned code; preserve upstream
-style and license notices in vendored sources.
+relic follows FreeBSD `style(9)` (Kernel Normal Form), with the project
+conventions below. These rules apply to relic-owned code; preserve upstream
+style and license notices in bundled and vendored sources, such as
+`compat/queue.h` and `compat/tree.h`.
 
 **Human readability is a requirement.** Code should make its purpose, data
 flow, invariants and failure paths understandable to another developer.
@@ -20,18 +21,19 @@ perform the operation, and publish the result. Use the actual operations of
 the subsystem in those steps. The reader should see what a function accomplishes
 before having to understand how its arrays are laid out.
 
-Before writing nontrivial code, read analogous libbfx functions and identify
-what makes their structure understandable. These are references for specific
-qualities, not blanket endorsements of every convention in their files:
+Before writing nontrivial code, read the analogous functions already in the
+tree and identify what makes their structure understandable. The qualities to
+look for, and to aim at:
 
-| Reference | Quality to follow |
+| Quality to follow | Where it matters in relic |
 | --- | --- |
-| `run_pipeline` in [compiler/driver.c](../src/libbfx/compiler/driver.c) | Named compiler stages and immediate error checks make the execution order visible. The file comment explains why a failed stage prevents later stages from running. |
-| `check_advance` and `bfx_cursor_read_bits` in [runtime/cursor.c](../src/libbfx/runtime/cursor.c) | Validation precedes reading; cursor advancement follows success. The bit-extraction explanation includes the boundary case that motivates the algorithm. |
-| `grow_slots` in [util/intern.c](../src/libbfx/util/intern.c) | Allocation, rehashing, and installation of the new table are distinct. The comment explains why arrays indexed by stable IDs need no rehashing. |
-| The body-execution and restoration blocks of `bfx_vm_op_within` in [runtime/within.c](../src/libbfx/runtime/within.c) | Names carry bit units and saved state. Comments explain restoration obligations and why body errors must retain their meaning. |
+| Named stages with immediate error checks make execution order visible; a file comment explains why a failed stage prevents later ones from running. | The compilation pipeline in `lib/api.c`: parse, check, stratify, plan, evaluate. |
+| Validation precedes reading and state advances only after success; the explanation includes the boundary case that motivates the algorithm. | Tuple insertion and delta range advancement in `lib/relation.c`. |
+| Allocation, rehashing and installation of a new table are distinct steps; the comment explains why arrays indexed by stable identifiers need no rehashing. | Table growth in `lib/symbol.c`, `lib/value.c` and `lib/index.c`. |
+| Names carry units and saved state, and comments explain restoration obligations and why a failure inside a nested operation must retain its meaning. | Binding frame save and restore across join levels in `lib/eval.c`. |
 
-Apply the current project rules when adapting these patterns. Existing files
+Name concrete functions in this table as the tree acquires them, choosing ones
+that genuinely read well rather than whichever happen to exist. Existing files
 may contain older formatting, naming, or comment conventions; their presence
 does not override this guide.
 
@@ -177,7 +179,7 @@ discover what the test intended.
 - Use `lower_snake_case` for functions, variables, struct tags, and typedefs.
   Use uppercase names for constants, enum values, and macros with side effects.
   Avoid identifiers reserved to the implementation.
-- **Give every bfx-defined struct a matching `_t` typedef and use that typedef
+- **Give every relic-defined struct a matching `_t` typedef and use that typedef
   in declarations, fields, parameters, and return types.** For example,
   `typedef struct data_fill data_fill_t;`. Keep the struct tag for its definition
   and interfaces that require a tag, such as `queue(3)` macros.
@@ -208,8 +210,8 @@ struct data_fill {
 - Prefer standard fixed-width types such as `uint32_t`, and `bool`, `true`,
   and `false` from `<stdbool.h>`. Use designated initializers when they help
   identify fields, and `_Static_assert()` for compile-time assertions.
-- Mark unused parameters and locals with `BFX_UNUSED` from
-  `include/bfx/macros.h`; do not use `(void)arg;` casts.
+- Mark unused parameters and locals with `RELIC_UNUSED` from `lib/internal.h`;
+  do not use `(void)arg;` casts.
 
 ## Functions and control flow
 
@@ -278,7 +280,7 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
 
 - Keep required copyright and SPDX notices at the top in a comment starting
   in column one, followed by a blank line. Preserve attribution in imported
-  code; do not add revision-history annotations to bfx code.
+  code; do not add revision-history annotations to relic code.
 - Group includes in this order, with a blank line between groups:
   1. System headers (`<sys/...>`). Put `<sys/types.h>` or `<sys/param.h>`
      first when needed; do not include both. Sort the rest alphabetically.
@@ -286,7 +288,8 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
   3. Other library headers, sorted alphabetically.
   4. Project headers, sorted alphabetically.
 - Use angle brackets for system and installed library headers, and double
-  quotes for local headers. Public bfx headers must remain strict C11.
+  quotes for local headers. The public header `include/relic.h` must remain
+  strict C11, must not include `config.h`, and must be includable from C++.
 - Keep function declarations outside functions. Headers must include what
   they need so their users do not depend on a particular include order.
 
@@ -331,29 +334,6 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
   bracketed optional arguments. Use `|` for alternatives. Exit with zero on
   success and one on ordinary failure.
 
-## C++ conventions (where applicable)
-
-Follow the same layout and concise-comment rules, with these language-specific
-conventions from FreeBSD style:
-
-- Use `.cc` and `.hh` file suffixes. Do not parenthesize return values.
-- Open namespaces and classes on the declaration line. Combine nested
-  namespaces, and put a template parameter list on the line before its
-  declaration.
-- Keep the return type on the same line for methods defined inside a class;
-  use the C function layout for out-of-class definitions. Empty or
-  single-statement inline bodies, and defaulted or deleted methods, may occupy
-  one line.
-- Attach reference `&` to the name, as with pointer stars. Locals may be
-  declared where needed. Use `auto` when it improves readability, with
-  qualifiers before it, such as `const auto`.
-- Prefer standard containers, `std::string` / `std::string_view`, `nullptr`,
-  and smart pointers with `std::make_unique` / `std::make_shared`. Use C types
-  and allocation only where an interface requires them.
-- Use `using` for aliases; struct aliases still follow the matching `_t`
-  naming rule. Do not import namespaces at global scope in headers, or import
-  `std` wholesale.
-
 ## Applying the guide
 
 Keep changes focused and consistent. Follow these conventions when creating
@@ -370,7 +350,7 @@ conversation, revise the code. This is a comprehension check, not a requirement
 to add a comment above every step.
 
 The required review must assess structure and explanation, as well as formatting.
-Compare the changed code with the relevant libbfx references above. Cite concrete
+Compare the changed code with the qualities listed above. Cite concrete
 functions or passages in the review and explain where the flow is understandable
 and where the reader must reconstruct missing meaning. Check whether the reader
 can follow the algorithm, distinguish the values it manipulates, and identify
