@@ -1,0 +1,3 @@
+unstratified-policy.dl:18:1: error: program is not stratified
+unstratified-policy.dl:20:5: note: ready/1 depends negatively on blocked/1
+unstratified-policy.dl:25:5: note: blocked/1 depends on ready/1

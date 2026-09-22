@@ -189,6 +189,26 @@ relic_arena_alloc(relic_arena_t *arena, size_t size)
 	return (block);
 }
 
+/*
+ * Allocate an array of `count` elements of `size` bytes each.
+ *
+ * The product is checked rather than assumed, because a wrapped product would
+ * be answered with a block smaller than what the caller goes on to write into
+ * it.  A product that would wrap marks the arena failed, exactly as an
+ * exhausted allocator does, so that a null return has one meaning and the
+ * phase boundary that reports a failed arena reports this too.
+ */
+void *
+relic_arena_allocarray(relic_arena_t *arena, size_t count, size_t size)
+{
+	if (size != 0 && count > SIZE_MAX / size) {
+		arena->failed = true;
+		return (NULL);
+	}
+
+	return (relic_arena_alloc(arena, count * size));
+}
+
 bool
 relic_arena_failed(const relic_arena_t *arena)
 {
@@ -199,9 +219,9 @@ relic_arena_failed(const relic_arena_t *arena)
  * Record that an allocation for this arena could not be satisfied, although
  * the arena itself was never asked for it.
  *
- * An owner sometimes rejects a request before it reaches here -- a count and
- * an element size whose product would wrap is the case that exists -- and a
- * null return from such a check would otherwise mean something different
+ * An owner sometimes makes an allocation elsewhere on the arena's behalf --
+ * a growable array beside the structure the arena holds is the case that
+ * exists -- and a failure there would otherwise mean something different
  * from a null return out of relic_arena_alloc(): the first would leave the
  * flag clear and the phase boundary would see nothing wrong.  Marking the
  * arena instead gives a refused allocation one meaning wherever it was

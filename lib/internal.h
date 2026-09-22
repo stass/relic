@@ -14,6 +14,7 @@
 
 #include <relic.h>
 
+#include "arena.h"
 #include "ast.h"
 #include "compat.h"
 #include "plan.h"
@@ -53,9 +54,6 @@
 #define	RELIC_PRINTFLIKE(fmt, args)
 #endif
 
-typedef struct relic_arena relic_arena_t;
-typedef struct relic_arena_chunk relic_arena_chunk_t;
-typedef struct relic_arena_chunk_list relic_arena_chunk_list_t;
 typedef struct relic_diag relic_diag_t;
 typedef struct relic_lexer relic_lexer_t;
 typedef struct relic_symbol relic_symbol_t;
@@ -76,35 +74,6 @@ enum relic_order {
 	RELIC_ORDER_EQUAL = 0,
 	RELIC_ORDER_GREATER = 1,
 	RELIC_ORDER_UNORDERED = 2
-};
-
-/*
- * One allocation holding this header and, after it, the payload that
- * relic_arena_alloc() hands out in pieces.
- */
-struct relic_arena_chunk {
-	SLIST_ENTRY(relic_arena_chunk)	 link;
-	size_t				 size;	/* payload bytes */
-	size_t				 used;	/* handed out, at most size */
-};
-
-SLIST_HEAD(relic_arena_chunk_list, relic_arena_chunk);
-
-/*
- * A region whose allocations share a lifetime and are released together.
- *
- * Once an allocation fails, `failed` stays set and every later request is
- * refused without reaching the allocator.  Callers check the returned
- * pointer as usual; the flag lets a helper that is already several
- * allocations into a structure stop without threading a status back through
- * every level, and it lets the phase that owns the arena confirm at its
- * boundary that nothing was quietly truncated.
- */
-struct relic_arena {
-	relic_arena_chunk_list_t	 chunks;	/* newest first */
-	size_t				 next_chunk_size;
-	size_t				 total_bytes;	/* from the allocator */
-	bool				 failed;
 };
 
 /*
@@ -217,22 +186,6 @@ struct relic {
 	relic_config_t		 config;
 	size_t			 materialized_rules;
 };
-
-/*
- * lib/arena.c
- *
- * relic_arena_reset() returns an arena to its initialized state and releases
- * all of its memory, so it serves both as a reset between phases and as the
- * teardown operation.  There is no per-allocation free: the point of an arena
- * is that a phase's allocations are forgotten together.
- */
-void	*relic_arena_alloc(relic_arena_t *arena, size_t size);
-void	 relic_arena_clear_failure(relic_arena_t *arena);
-void	 relic_arena_fail(relic_arena_t *arena);
-bool	 relic_arena_failed(const relic_arena_t *arena);
-void	 relic_arena_init(relic_arena_t *arena);
-void	 relic_arena_reset(relic_arena_t *arena);
-size_t	 relic_arena_total_bytes(const relic_arena_t *arena);
 
 /*
  * lib/api.c
@@ -472,7 +425,8 @@ void	 relic_pred_report_undefined(relic_t *ctx);
  * lib/rule.c
  *
  * relic_program_init() prepares the empty program a context starts with, and
- * relic_program_reset() releases what the program owns outside the arenas.
+ * relic_program_reset() releases what the program owns outside the program
+ * arena, the schedule's arena among it.
  * The public entry point into this module is relic_check().
  *
  * relic_program_ready() is the check every use of the program begins with:
@@ -482,6 +436,18 @@ void	 relic_pred_report_undefined(relic_t *ctx);
 void	 relic_program_init(relic_program_t *program);
 int	 relic_program_ready(relic_t *ctx);
 void	 relic_program_reset(relic_program_t *program);
+
+/*
+ * lib/stratify.c
+ *
+ * relic_stratify() brings the program's schedule up to date with its rules,
+ * rejecting a program with recursion through negation.  Returns 0 when the
+ * analysis finished -- a program found unstratified has then been reported
+ * and marked invalid -- or -1, reported, when memory ran out.
+ */
+void	 relic_schedule_init(relic_schedule_t *schedule);
+void	 relic_schedule_reset(relic_schedule_t *schedule);
+int	 relic_stratify(relic_t *ctx);
 
 /*
  * lib/plan.c

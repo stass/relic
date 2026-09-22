@@ -1,0 +1,31 @@
+% Which cycle a rejection names, how many rejections there are, and in what
+% order.
+%
+% p/1, q/1, r/1, s/1 and t/1 form one component.  From q/1 there are two
+% ways back to p/1, through r/1 and t/1 or through s/1 alone; the shorter is
+% named even though the longer is written first.  A second negative edge in
+% the same component, from s/1 to t/1, is part of the same mistake and gets
+% no error of its own.
+%
+% lonely/1 negates itself: a cycle of one edge, in a component of its own.
+% r/1 reads it, so the analysis finishes lonely/1's component before the
+% first one, and it is still reported second, because its negative literal
+% is written later.
+%
+% m/1 and n/1 negate each other.  The fact mentions n/1 first, so the
+% analysis meets n/1's negative edge before m/1's, and the error is still at
+% m/1's rule, because it is written first.
+n(y).
+base(x).
+
+p(X) :- base(X), not q(X).
+q(X) :- r(X).
+q(X) :- s(X).
+r(X) :- t(X), lonely(X).
+t(X) :- p(X).
+s(X) :- p(X), not t(X).
+
+lonely(X) :- base(X), not lonely(X).
+
+m(X) :- base(X), not n(X).
+n(X) :- base(X), not m(X).

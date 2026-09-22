@@ -13,6 +13,7 @@
 
 #include <relic.h>
 
+#include "arena.h"
 #include "ast.h"
 #include "util.h"
 
@@ -54,12 +55,14 @@
 typedef struct relic_arg relic_arg_t;
 typedef struct relic_atom relic_atom_t;
 typedef struct relic_comparison relic_comparison_t;
+typedef struct relic_component relic_component_t;
 typedef struct relic_literal relic_literal_t;
 typedef struct relic_pred relic_pred_t;
 typedef struct relic_predtab relic_predtab_t;
 typedef struct relic_program relic_program_t;
 typedef struct relic_rule relic_rule_t;
 typedef struct relic_ruletab relic_ruletab_t;
+typedef struct relic_schedule relic_schedule_t;
 typedef struct relic_variable relic_variable_t;
 
 /*
@@ -232,6 +235,52 @@ struct relic_ruletab {
 };
 
 /*
+ * One strongly connected component of the dependency graph, as the evaluator
+ * runs it.
+ *
+ * Its members are `schedule->members[first_member]` onward, in identifier
+ * order, and its rules are the program rules whose indexes are
+ * `schedule->rule_indexes[first_rule]` onward, in program order.
+ * `recursive` says whether some rule of the component reads a member, which
+ * is what decides between a fixed point and a single pass.
+ */
+struct relic_component {
+	size_t		first_member;
+	size_t		member_count;
+	size_t		first_rule;
+	size_t		rule_count;
+	uint32_t	stratum;
+	bool		recursive;
+};
+
+/*
+ * The order a stratified program is evaluated in: its components, sorted by
+ * stratum, each after every component it depends on.
+ *
+ * Only components with at least one rule are listed, and every rule of the
+ * program belongs to exactly one of them -- the one containing its head -- so
+ * `rule_count` is both the length of `rule_indexes` and the number of program
+ * rules the schedule describes.  The schedule is current exactly when that is
+ * the program's rule count, because rules are only ever appended.
+ *
+ * Rules are held as indexes into the program's rule table rather than as
+ * pointers, which a growth of the table would leave dangling, or as copies,
+ * which would double the memory of a program of a million facts.
+ *
+ * Everything is allocated from `arena`, which is reset when a new schedule
+ * replaces this one.
+ */
+struct relic_schedule {
+	relic_arena_t		 arena;
+	relic_component_t	*components;	/* evaluation order */
+	relic_pred_id_t		*members;	/* grouped by component */
+	size_t			*rule_indexes;	/* grouped by component */
+	size_t			 component_count;
+	size_t			 member_count;
+	size_t			 rule_count;
+};
+
+/*
  * The program a context has validated.
  *
  * `compiled` is the last statement of the syntax tree a check has compiled,
@@ -256,14 +305,32 @@ struct relic_ruletab {
  * one's answer predicate.  It advances only when a compiled query is
  * published, so a query that fails part way and is compiled again reuses its
  * number.
+ *
+ * `schedule` is the evaluation order the dependency analysis last produced.
+ * `unstratified` records that the analysis found recursion through negation.
+ * It is sticky for the same reason `invalid` is -- adding rules only adds
+ * dependencies, so no later load can break the cycle -- and while it is set
+ * the analysis does not run again, so the cycle is reported once.
  */
 struct relic_program {
 	relic_predtab_t		 predicates;
 	relic_ruletab_t		 rules;
 	relic_ruletab_t		 queries;
+	relic_schedule_t	 schedule;
 	const relic_ast_stmt_t	*compiled;
 	size_t			 query_serial;
 	bool			 invalid;
+	bool			 unstratified;
 };
+
+/*
+ * Whether the schedule describes every rule the program has.  Rules are only
+ * ever appended, so the count says it.
+ */
+static inline bool
+relic_schedule_is_current(const relic_program_t *program)
+{
+	return (program->schedule.rule_count == program->rules.count);
+}
 
 #endif /* RELIC_PROGRAM_H */

@@ -1,0 +1,5 @@
+% A query against a program that is not stratified is refused with the
+% program, before anything is evaluated, so it prints no rows.
+c(x).
+a(X) :- c(X), not b(X).
+b(X) :- c(X), not a(X).

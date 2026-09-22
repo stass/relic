@@ -1,0 +1,3 @@
+unstratified.dl:6:1: error: program is not stratified
+unstratified.dl:6:15: note: a/1 depends negatively on b/1
+unstratified.dl:7:15: note: b/1 depends negatively on a/1

@@ -1,0 +1,9 @@
+unstratified-cycles.dl:21:1: error: program is not stratified
+unstratified-cycles.dl:21:18: note: p/1 depends negatively on q/1
+unstratified-cycles.dl:23:9: note: q/1 depends on s/1
+unstratified-cycles.dl:26:9: note: s/1 depends on p/1
+unstratified-cycles.dl:28:1: error: program is not stratified
+unstratified-cycles.dl:28:23: note: lonely/1 depends negatively on lonely/1
+unstratified-cycles.dl:30:1: error: program is not stratified
+unstratified-cycles.dl:30:18: note: m/1 depends negatively on n/1
+unstratified-cycles.dl:31:18: note: n/1 depends negatively on m/1

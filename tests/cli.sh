@@ -81,9 +81,12 @@ if [ "$status" -ne 1 ]; then
 fi
 
 # A write that fails must not be reported as success.  Standard output is
-# closed here, so every write to it fails.
+# open for reading only here, so every write to it fails.  A closed descriptor
+# would fail the same way, but the AddressSanitizer runtime on macOS reports a
+# flush to one as successful, and the test would then pass or fail with the
+# build rather than with the tool.
 status=0
-diagnostic=$("$RELIC" "$work/graph.dl" 2>&1 >&-) || status=$?
+diagnostic=$("$RELIC" "$work/graph.dl" 2>&1 1</dev/null) || status=$?
 if [ "$status" -ne 1 ]; then
 	fail "a failed write exited $status, expected 1"
 fi

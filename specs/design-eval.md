@@ -64,8 +64,8 @@ The executor's state is exactly two things:
 * **one cursor per operation**, the half-open range of tuple identifiers a
   generator has still to visit. Tests keep no state.
 
-Neither is allocated in the loop. The frame is a fixed array, and the cursors
-are allocated once per evaluation, sized for the longest plan.
+Neither is allocated in the loop. The frame is a fixed array, and each plan's
+cursors are allocated with the plan, when the evaluation that runs it begins.
 
 ### 2.2 A generator never holds a tuple pointer
 
@@ -101,14 +101,28 @@ that unintended mixing is discoverable.
 ## 3. The naive fixed point
 
 ```text
-repeat:
-	for every rule, in program order:
-		run its plan
-until no insertion reported a new tuple
+for every component, in schedule order:
+	if the component is recursive:
+		repeat:
+			for every rule of the component, in program order:
+				run its plan
+		until no insertion reported a new tuple
+	else:
+		for every rule of the component, in program order:
+			run its plan
 ```
 
+The schedule is the one [design-stratify.md](design-stratify.md) section 6
+describes: strata in order and, within a stratum, strongly connected components
+dependencies first. A component's rules read only its own predicates and those
+of components already complete, so the fixed point of each component is taken
+once, over relations that no later component changes. A component with no
+recursion reads nothing it writes, and one pass over its rules is its fixed
+point.
+
 A fact is a rule with an empty body, and its plan is a single `EMIT`, so facts
-need no loading step of their own: the first iteration inserts them.
+need no loading step of their own: the first pass over their component inserts
+them.
 
 **It terminates** because every value an insertion can produce was interned
 before evaluation began -- a rule's head holds constants and variables, and a
@@ -116,9 +130,10 @@ variable is bound only from a tuple -- so each relation can hold only finitely
 many tuples, and an iteration that adds none is the last.
 
 **It computes the least fixed point** because every tuple it inserts is
-justified by tuples already present, and it stops only when a full pass over
-every rule adds nothing, which is the definition of a fixed point of the
-immediate-consequence operator.
+justified by tuples already present, and it leaves a component only when a full
+pass over its rules adds nothing. Since no later component writes a predicate
+an earlier one reads, every rule adds nothing once the last component is done,
+which is the definition of a fixed point of the immediate-consequence operator.
 
 Within an iteration a rule sees the insertions of the rules before it, and of
 its own earlier matches, rather than only the state at the start of the
@@ -168,8 +183,8 @@ destination relation discards the duplicates.
 
 Evaluation proceeds stratum by stratum and, within a stratum, one strongly
 connected component at a time in topological order. A component with no
-recursion needs one pass. Plans are built when a component's fixed point
-starts, never per iteration.
+recursion needs one pass. Plans are built before the first component runs,
+never per iteration.
 
 ---
 
@@ -255,7 +270,11 @@ Evaluation fails for two reasons, both reported where they happen:
   `specs/design-relations.md` section 9;
 * an allocation failed.
 
-Either stops the fixed point at once and returns -1. The relation that refused
+Either stops the fixed point at once and returns -1. A rule that cannot be
+planned, and memory that runs out while planning, stop evaluation before it
+starts: every rule of the schedule is planned before the first component runs,
+so a failure there has derived nothing and cannot hide behind the cost of a
+fixed point it would otherwise have computed first. The relation that refused
 the tuple is exactly as it was, every other relation holds tuples that are all
 justified, and the evaluation arena is released. Nothing needs unwinding, which
 is the payoff of the relation store's refuse-before-modify ordering.

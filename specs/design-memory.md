@@ -34,12 +34,14 @@ rather than by size.
 **Grouped by phase.** Symbols, parsed rules, plans and join state are created
 in large numbers, are never freed individually, and all die at the same
 moment. They are allocated from an arena, which frees them in one operation.
-Four arenas exist, one per lifetime:
+Six arenas exist, one per lifetime:
 
 | Arena | Holds | Released when |
 | --- | --- | --- |
 | context | symbol bytes, value payloads, predicate definitions | the context is destroyed |
 | program | rules, parsed terms | a new program replaces the loaded one |
+| analysis | the dependency graph and its component search | the analysis ends |
+| schedule | the evaluation order: components, their members and rules | a new schedule replaces it |
 | query | the Magic rewrite and query plans | the query is destroyed |
 | evaluation | binding frames and transient join state | the fixed point ends |
 

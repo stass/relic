@@ -1,0 +1,13 @@
+% An unsafe rule and a cycle through negation are reported in one run.
+%
+% The rules below are architecture section 9's example as it would be
+% written without a positive literal: X occurs only under `not`, so both are
+% unsafe, are rejected, and take no part in the dependency analysis.  The
+% cycle between even/1 and odd/1 is among the rules that were accepted, and
+% is reported alongside them.
+a(X) :- not b(X).
+b(X) :- not a(X).
+
+num(0).
+even(X) :- num(X), not odd(X).
+odd(X) :- num(X), not even(X).

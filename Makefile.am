@@ -27,9 +27,10 @@ LIBOBJDIR = compat/
 ##
 
 noinst_LTLIBRARIES = librelic_internal.la
-librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/diag.c lib/eval.c \
-	lib/lex.c lib/parse.c lib/plan.c lib/pred.c lib/relation.c lib/rule.c \
-	lib/symbol.c lib/util.c lib/value.c
+librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/depgraph.c \
+	lib/diag.c lib/eval.c lib/lex.c lib/parse.c lib/plan.c lib/pred.c \
+	lib/relation.c lib/rule.c lib/stratify.c lib/symbol.c lib/util.c \
+	lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -38,9 +39,9 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
 
 include_HEADERS = include/relic.h
-noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h lib/ast.h \
-	lib/internal.h lib/plan.h lib/program.h lib/relation.h lib/util.h \
-	tests/unit/harness.h
+noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h lib/arena.h \
+	lib/ast.h lib/depgraph.h lib/internal.h lib/plan.h lib/program.h \
+	lib/relation.h lib/util.h tests/unit/harness.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/main.c cmd/relic/output.c
@@ -116,8 +117,8 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
 	tests/unit/test_eval tests/unit/test_lex tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
-	tests/unit/test_relation tests/unit/test_rule tests/unit/test_symbol \
-	tests/unit/test_util tests/unit/test_value
+	tests/unit/test_relation tests/unit/test_rule tests/unit/test_stratify \
+	tests/unit/test_symbol tests/unit/test_util tests/unit/test_value
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LIBOBJS)
@@ -149,6 +150,12 @@ tests_unit_test_relation_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
 tests_unit_test_rule_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_stratify_SOURCES = tests/unit/test_stratify.c \
+	tests/unit/harness.c
+# The long-chain test runs its analysis on a thread with a small stack.
+tests_unit_test_stratify_CFLAGS = $(AM_CFLAGS) -pthread
+tests_unit_test_stratify_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
 tests_unit_test_symbol_LDADD = librelic_internal.la $(LIBOBJS)
@@ -231,30 +238,32 @@ dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 
 RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/bad-escape.dl tests/lang/check-queries.dl \
-	tests/lang/comments-only.dl tests/lang/constructs.dl \
-	tests/lang/empty.dl tests/lang/error-after-recovery.dl \
-	tests/lang/error-first-token.dl tests/lang/format-csv.dl \
-	tests/lang/format-json.dl tests/lang/format-text.dl \
-	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \
-	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
-	tests/lang/integer-trailing.dl tests/lang/materialize.dl \
-	tests/lang/missing-terminator.dl tests/lang/negation-refused.dl \
-	tests/lang/not-as-predicate.dl tests/lang/not-symbol.dl \
-	tests/lang/predicate-identity.dl tests/lang/query-bindings.dl \
-	tests/lang/query-columns-limit.dl tests/lang/query-columns.dl \
-	tests/lang/query-comparisons.dl tests/lang/query-duplicates.dl \
-	tests/lang/query-graph.dl tests/lang/query-none.dl \
-	tests/lang/query-not-a-query.dl \
+	tests/lang/comments-only.dl tests/lang/components.dl \
+	tests/lang/constructs.dl tests/lang/empty.dl \
+	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
+	tests/lang/format-csv.dl tests/lang/format-json.dl \
+	tests/lang/format-text.dl tests/lang/format-tsv.dl \
+	tests/lang/head-not-atom.dl tests/lang/incomplete-operator.dl \
+	tests/lang/integer-range.dl tests/lang/integer-trailing.dl \
+	tests/lang/materialize.dl tests/lang/missing-terminator.dl \
+	tests/lang/negation-refused.dl tests/lang/not-as-predicate.dl \
+	tests/lang/not-symbol.dl tests/lang/predicate-identity.dl \
+	tests/lang/query-bindings.dl tests/lang/query-columns-limit.dl \
+	tests/lang/query-columns.dl tests/lang/query-comparisons.dl \
+	tests/lang/query-duplicates.dl tests/lang/query-graph.dl \
+	tests/lang/query-none.dl tests/lang/query-not-a-query.dl \
 	tests/lang/query-option-unsafe.dl tests/lang/query-option.dl \
 	tests/lang/query-recursion.dl tests/lang/query-undefined.dl \
 	tests/lang/query-unsafe.dl tests/lang/query-zero-arity.dl \
-	tests/lang/recovery.dl tests/lang/safe-rules.dl \
-	tests/lang/singleton.dl tests/lang/sort-mixed.dl \
-	tests/lang/string-escapes.dl tests/lang/success-criteria.dl \
-	tests/lang/trailing-comma.dl tests/lang/undefined-predicate.dl \
-	tests/lang/unsafe-anonymous.dl tests/lang/unsafe-comparison.dl \
-	tests/lang/unsafe-fact.dl tests/lang/unsafe-head.dl \
-	tests/lang/unsafe-negation.dl tests/lang/unterminated-string.dl \
+	tests/lang/recovery.dl tests/lang/safe-rules.dl tests/lang/singleton.dl \
+	tests/lang/sort-mixed.dl tests/lang/string-escapes.dl \
+	tests/lang/success-criteria.dl tests/lang/trailing-comma.dl \
+	tests/lang/undefined-predicate.dl tests/lang/unsafe-anonymous.dl \
+	tests/lang/unsafe-comparison.dl tests/lang/unsafe-fact.dl \
+	tests/lang/unsafe-head.dl tests/lang/unsafe-negation.dl \
+	tests/lang/unstratified-cycles.dl tests/lang/unstratified-policy.dl \
+	tests/lang/unstratified-query.dl tests/lang/unstratified-unsafe.dl \
+	tests/lang/unstratified.dl tests/lang/unterminated-string.dl \
 	tests/lang/variable-limit-max.dl tests/lang/variable-limit.dl \
 	tests/lang/zero-arity.dl
 

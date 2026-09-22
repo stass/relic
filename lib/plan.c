@@ -461,18 +461,12 @@ planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
 
 	/*
 	 * The body length comes from a compiled rule held in memory, so one
-	 * more than it cannot wrap, but the products are checked all the same
-	 * rather than trusted to a count nobody here bounded.
+	 * more than it cannot wrap.
 	 */
-	if (rule->body_length >= SIZE_MAX / sizeof(relic_op_t)) {
-		relic_arena_fail(arena);
-		return (-1);
-	}
-
-	planner->ops = relic_arena_alloc(arena,
-	    (rule->body_length + 1) * sizeof(relic_op_t));
-	planner->placed = relic_arena_alloc(arena,
-	    rule->body_length * sizeof(bool));
+	planner->ops = relic_arena_allocarray(arena, rule->body_length + 1,
+	    sizeof(*planner->ops));
+	planner->placed = relic_arena_allocarray(arena, rule->body_length,
+	    sizeof(*planner->placed));
 	if (planner->ops == NULL || planner->placed == NULL)
 		return (-1);
 

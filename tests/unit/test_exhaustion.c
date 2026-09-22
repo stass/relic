@@ -53,6 +53,8 @@
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
+#define	SCENARIO_SCHEDULE	"a schedule that could not be rebuilt is kept"
+#define	SCENARIO_STRATIFY	"an analysis out of memory says nothing"
 #define	SCENARIO_SYMBOL		"interning a symbol survives a failed allocation"
 #define	SCENARIO_VALUE		"interning a value survives a failed allocation"
 
@@ -87,6 +89,32 @@
  */
 #define	CHECK_RULES	200
 #define	CHECK_SWEEP	60
+
+/*
+ * The stratification sweep's program: a cycle of this many predicates
+ * closed by one negative literal, which the analysis must reject and name in
+ * full, one note per edge.  The sweep runs from refusals in compilation,
+ * through the graph and the search space for the cycle, to a check that
+ * completes.  The program is small, so the arrays of the later stages fit in
+ * arena chunks already obtained and no refusal can land on them; the
+ * schedule sweep below is the one that reaches those.
+ */
+#define	STRATIFY_CYCLE	40
+#define	STRATIFY_SWEEP	60
+
+/*
+ * The schedule sweep's program: a chain of this many predicates, each
+ * negating the one before it, so each is a component of its own in a stratum
+ * of its own.  Every array the analysis allocates is proportional to the
+ * number of predicates, components or strata.  At this size the larger ones
+ * -- the edges, the rejection's scan, the rule counts and each of the new
+ * schedule's own arrays -- are requests of their own, so a sweep over the
+ * check refuses them in turn.  An array small enough to fit in a chunk the
+ * arena already holds makes no request and cannot be refused on its own; it
+ * shares the failure handling of the stage that allocates it.
+ */
+#define	SCHEDULE_CHAIN	1000
+#define	SCHEDULE_SWEEP	80
 
 /*
  * The insertion sweep's shape: how many tuples the relation holds before the
@@ -133,6 +161,9 @@ static size_t	 errors_reported;
 /* How many RELIC_WARNING diagnostics the context has reported. */
 static size_t	 warnings_reported;
 
+/* How many RELIC_NOTE diagnostics the context has reported. */
+static size_t	 notes_reported;
+
 void		*relic_test_calloc(size_t count, size_t size);
 void		*relic_test_malloc(size_t size);
 void		*relic_test_reallocarray(void *items, size_t count,
@@ -146,6 +177,8 @@ static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
 static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
+static void	 an_analysis_that_ran_out_of_memory_says_nothing(void);
+static void	 a_schedule_that_could_not_be_rebuilt_is_kept(void);
 static void	 a_relation_survives_a_failed_allocation(void);
 static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
 static int	 count_answer(void *callback_ctx, const relic_value_t *values,
@@ -156,6 +189,10 @@ static bool	 answer_is_first(const relic_t *ctx,
 static relic_relation_t *sweep_relation(relic_t *ctx, relic_dom_t *values,
 		    size_t count);
 static char	*check_sweep_program(void);
+static char	*stratify_sweep_program(void);
+static char	*schedule_sweep_program(void);
+static uint64_t	 schedule_digest(const relic_schedule_t *schedule);
+static bool	 schedule_then_extend(relic_t *ctx, const char *program);
 static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
 
@@ -223,6 +260,8 @@ count_error(void *callback_ctx RELIC_UNUSED, enum relic_diag_level level,
 		errors_reported++;
 	else if (level == RELIC_WARNING)
 		warnings_reported++;
+	else if (level == RELIC_NOTE)
+		notes_reported++;
 }
 
 static void
@@ -527,6 +566,7 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 	size_t refused;
 	size_t completed;
 	size_t resumed;
+	size_t analysed;
 	long budget;
 
 	program = check_sweep_program();
@@ -538,6 +578,7 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 	refused = 0;
 	completed = 0;
 	resumed = 0;
+	analysed = 0;
 
 	for (budget = 0; budget < CHECK_SWEEP; budget++) {
 		relic_t *ctx;
@@ -607,6 +648,14 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 			 */
 			if (ctx->program.rules.count > 0)
 				resumed++;
+
+			/*
+			 * A refusal after every statement was compiled struck
+			 * the dependency analysis, which must fail the check
+			 * without the program being condemned for it.
+			 */
+			if (ctx->program.rules.count == CHECK_RULES + 1)
+				analysed++;
 		} else {
 			completed++;
 		}
@@ -655,6 +704,362 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 	checkf(resumed > 0, SCENARIO_CHECK,
 	    "the sweep should reach a check that stops part way through the "
 	    "program, in %d attempts", CHECK_SWEEP);
+	checkf(analysed > 0, SCENARIO_CHECK,
+	    "the sweep should reach a check that runs out of memory in the "
+	    "dependency analysis, in %d attempts", CHECK_SWEEP);
+}
+
+/*
+ * A cycle of STRATIFY_CYCLE predicates, q0 to q39, each depending on the one
+ * before it, with q0 depending negatively on the last: one component holding
+ * a negative edge, whose shortest cycle has one edge per predicate.
+ */
+static char *
+stratify_sweep_program(void)
+{
+	char *text;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = (STRATIFY_CYCLE + 2) * 48;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size,
+	    "base(a).\n"
+	    "q0(X) :- base(X), not q%u(X).\n", STRATIFY_CYCLE - 1);
+
+	for (i = 1; i < STRATIFY_CYCLE; i++) {
+		used += (size_t)snprintf(text + used, size - used,
+		    "q%u(X) :- q%u(X).\n", i, i - 1);
+
+		if (used >= size) {
+			free(text);
+			return (NULL);
+		}
+	}
+
+	return (text);
+}
+
+/*
+ * Check an unstratified program with the nth allocation refused, then check
+ * it twice more with the allocator restored.
+ *
+ * Running out of memory in the analysis says nothing about the program, so
+ * such a check must report that and only that: no error about the cycle, no
+ * notes, and the program neither condemned nor marked unstratified.  Whether
+ * or not the first check got that far, the cycle is then reported exactly
+ * once across all three checks -- one error and a note per edge -- and the
+ * program stays refused.  A partial report left behind by a failed analysis,
+ * or a report repeated by a later check, would each show as a count that is
+ * off.
+ */
+static void
+an_analysis_that_ran_out_of_memory_says_nothing(void)
+{
+	char *program;
+	size_t analysed;
+	size_t completed;
+	long budget;
+	int status;
+
+	program = stratify_sweep_program();
+	if (program == NULL) {
+		check(false, SCENARIO_STRATIFY, "the sweep program is built");
+		return;
+	}
+
+	analysed = 0;
+	completed = 0;
+
+	for (budget = 0; budget < STRATIFY_SWEEP; budget++) {
+		relic_t *ctx;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_STRATIFY,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "cycle.dl", program) != 0) {
+			check(false, SCENARIO_STRATIFY,
+			    "the program should load before the sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+		notes_reported = 0;
+
+		refuse_allocations_after(budget);
+		status = relic_check(ctx);
+		serve_every_allocation();
+
+		checkf(status != 0, SCENARIO_STRATIFY,
+		    "an unstratified program should never pass a check, with "
+		    "allocation %ld refused", budget);
+
+		if (ctx->program.unstratified) {
+			completed++;
+		} else {
+			checkf(errors_reported == 1 && notes_reported == 0,
+			    SCENARIO_STRATIFY,
+			    "a check that ran out of memory should report that "
+			    "alone, not %zu error(s) and %zu note(s), with "
+			    "allocation %ld refused", errors_reported,
+			    notes_reported, budget);
+			checkf(!ctx->program.invalid, SCENARIO_STRATIFY,
+			    "running out of memory should not condemn the "
+			    "program, with allocation %ld refused", budget);
+
+			if (ctx->program.rules.count == STRATIFY_CYCLE + 1)
+				analysed++;
+
+			errors_reported = 0;
+		}
+
+		status = relic_check(ctx);
+		checkf(status != 0, SCENARIO_STRATIFY,
+		    "the program should be refused once the allocator "
+		    "recovers, with allocation %ld refused", budget);
+
+		status = relic_check(ctx);
+		checkf(status != 0, SCENARIO_STRATIFY,
+		    "the program should stay refused on a later check, with "
+		    "allocation %ld refused", budget);
+
+		checkf(ctx->program.unstratified && ctx->program.invalid,
+		    SCENARIO_STRATIFY,
+		    "the program should end up marked unstratified, with "
+		    "allocation %ld refused", budget);
+
+		checkf(errors_reported == 1 && notes_reported == STRATIFY_CYCLE,
+		    SCENARIO_STRATIFY,
+		    "the cycle should be reported once, as 1 error and %d "
+		    "notes, not %zu and %zu, with allocation %ld refused",
+		    STRATIFY_CYCLE, errors_reported, notes_reported, budget);
+
+		relic_destroy(ctx);
+	}
+
+	free(program);
+
+	checkf(analysed > 0, SCENARIO_STRATIFY,
+	    "the sweep should reach a check that runs out of memory in the "
+	    "analysis, in %d attempts", STRATIFY_SWEEP);
+	checkf(completed > 0, SCENARIO_STRATIFY,
+	    "the sweep should reach a check that completes, in %d attempts",
+	    STRATIFY_SWEEP);
+}
+
+/*
+ * A chain of SCHEDULE_CHAIN predicates, s0 to s999, each but the first
+ * negating the one before it: a component and a stratum per predicate.
+ */
+static char *
+schedule_sweep_program(void)
+{
+	char *text;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = (SCHEDULE_CHAIN + 2) * 48;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size, "base(a).\ns0(X) :- base(X).\n");
+
+	for (i = 1; i < SCHEDULE_CHAIN; i++) {
+		used += (size_t)snprintf(text + used, size - used,
+		    "s%u(X) :- base(X), not s%u(X).\n", i, i - 1);
+
+		if (used >= size) {
+			free(text);
+			return (NULL);
+		}
+	}
+
+	return (text);
+}
+
+/*
+ * A digest of everything a schedule holds, so that a test can tell whether
+ * one changed without keeping a copy of it.  Each word is folded in with the
+ * FNV-1a step, which is enough to make an accidental match between two
+ * different schedules implausible.
+ */
+static uint64_t
+schedule_digest(const relic_schedule_t *schedule)
+{
+	const relic_component_t *component;
+	uint64_t digest;
+	uint64_t words[6];
+	size_t i;
+	size_t w;
+
+	digest = 14695981039346656037ULL;
+
+	for (i = 0; i < schedule->component_count; i++) {
+		component = &schedule->components[i];
+		words[0] = component->first_member;
+		words[1] = component->member_count;
+		words[2] = component->first_rule;
+		words[3] = component->rule_count;
+		words[4] = component->stratum;
+		words[5] = component->recursive;
+
+		for (w = 0; w < 6; w++)
+			digest = (digest ^ words[w]) * 1099511628211ULL;
+	}
+
+	for (i = 0; i < schedule->member_count; i++)
+		digest = (digest ^ schedule->members[i]) * 1099511628211ULL;
+
+	for (i = 0; i < schedule->rule_count; i++)
+		digest = (digest ^ schedule->rule_indexes[i]) *
+		    1099511628211ULL;
+
+	return (digest);
+}
+
+/*
+ * The schedule sweep's fixture: load the chain and check it, which builds a
+ * schedule, then load one more rule, which leaves that schedule describing
+ * fewer rules than the program has.  Returns whether all three succeeded;
+ * the allocator serves everything, so a failure is a broken fixture.
+ */
+static bool
+schedule_then_extend(relic_t *ctx, const char *program)
+{
+	if (relic_load_string(ctx, "chain.dl", program) != 0)
+		return (false);
+
+	if (relic_check(ctx) != 0)
+		return (false);
+
+	return (relic_load_string(ctx, "top.dl", "top(X) :- s999(X).\n") == 0);
+}
+
+/*
+ * Check a stratified program, load one more rule, and check again with the
+ * nth allocation refused.
+ *
+ * A check that runs out of memory must leave the schedule the first check
+ * built exactly as it was -- the new one is built beside it and replaces it
+ * only when complete -- and must leave it describing fewer rules than the
+ * program has, so that nothing evaluates from it and the next check rebuilds
+ * it.  That next check, with the allocator restored, must pass and schedule
+ * the new rule.  A schedule torn down before its replacement was ready would
+ * show as a changed digest, and one installed half-built as a check that
+ * passes.
+ */
+static void
+a_schedule_that_could_not_be_rebuilt_is_kept(void)
+{
+	relic_t *ctx;
+	char *program;
+	uint64_t digest;
+	size_t analysed;
+	size_t completed;
+	size_t components;
+	long budget;
+	int status;
+	bool appended;
+
+	program = schedule_sweep_program();
+	if (program == NULL) {
+		check(false, SCENARIO_SCHEDULE, "the sweep program is built");
+		return;
+	}
+
+	analysed = 0;
+	completed = 0;
+
+	for (budget = 0; budget < SCHEDULE_SWEEP; budget++) {
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_SCHEDULE,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (!schedule_then_extend(ctx, program)) {
+			check(false, SCENARIO_SCHEDULE,
+			    "the program should load and pass a check before "
+			    "the sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		digest = schedule_digest(&ctx->program.schedule);
+		components = ctx->program.schedule.component_count;
+		errors_reported = 0;
+
+		refuse_allocations_after(budget);
+		status = relic_check(ctx);
+		serve_every_allocation();
+
+		if (status == 0) {
+			completed++;
+		} else {
+			checkf(errors_reported == 1, SCENARIO_SCHEDULE,
+			    "a check that ran out of memory should report that "
+			    "alone, not %zu errors, with allocation %ld "
+			    "refused", errors_reported, budget);
+			checkf(schedule_digest(&ctx->program.schedule) ==
+			    digest, SCENARIO_SCHEDULE,
+			    "the schedule should be kept as it was, with "
+			    "allocation %ld refused", budget);
+
+			/*
+			 * A refusal while compiling the new rule leaves it
+			 * out of the program, and the kept schedule then
+			 * describes every rule there is.  Once the rule is
+			 * in, the kept schedule falls short of it.
+			 */
+			appended = ctx->program.rules.count ==
+			    SCHEDULE_CHAIN + 2;
+			checkf(relic_schedule_is_current(&ctx->program) ==
+			    !appended, SCENARIO_SCHEDULE,
+			    "the kept schedule should pass for current only "
+			    "if the new rule was not compiled, with allocation "
+			    "%ld refused", budget);
+
+			if (appended)
+				analysed++;
+
+			status = relic_check(ctx);
+			checkf(status == 0, SCENARIO_SCHEDULE,
+			    "the program should pass a check once the "
+			    "allocator recovers, with allocation %ld refused",
+			    budget);
+		}
+
+		checkf(relic_schedule_is_current(&ctx->program) &&
+		    ctx->program.schedule.component_count == components + 1,
+		    SCENARIO_SCHEDULE,
+		    "the new rule should end up scheduled, with allocation "
+		    "%ld refused", budget);
+
+		relic_destroy(ctx);
+	}
+
+	free(program);
+
+	checkf(analysed > 0, SCENARIO_SCHEDULE,
+	    "the sweep should reach a check that runs out of memory in the "
+	    "analysis, in %d attempts", SCHEDULE_SWEEP);
+	checkf(completed > 0, SCENARIO_SCHEDULE,
+	    "the sweep should reach a check that completes, in %d attempts",
+	    SCHEDULE_SWEEP);
 }
 
 /*
@@ -1077,6 +1482,8 @@ main(void)
 	interning_a_value_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
 	a_check_that_ran_out_of_memory_can_be_retried();
+	an_analysis_that_ran_out_of_memory_says_nothing();
+	a_schedule_that_could_not_be_rebuilt_is_kept();
 	a_relation_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
 

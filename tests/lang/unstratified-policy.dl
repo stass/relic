@@ -1,0 +1,26 @@
+% The diagnostic of architecture section 30, line for line: the error at the
+% rule that closes the cycle, then one note per edge, each at the literal
+% that makes it.
+%
+% The mistake is a common one.  A task is ready when it is not blocked, and
+% blocked while something it depends on is still ready to be worked on --
+% so ready/1 depends negatively on itself, through blocked/1.
+
+todo(design).
+todo(build).
+todo(ship).
+
+depends(build, design).
+depends(ship, build).
+
+% A task with nothing in its way,
+% and nothing it waits for.
+ready(X) :-
+    todo(X),
+    not blocked(X).
+
+% A task waiting on another.
+
+blocked(X) :-
+    ready(Y),
+    depends(X, Y).

@@ -1,0 +1,5 @@
+unstratified-unsafe.dl:8:3: error: variable X in rule a/1 is not bound by a positive body literal
+unstratified-unsafe.dl:9:3: error: variable X in rule b/1 is not bound by a positive body literal
+unstratified-unsafe.dl:12:1: error: program is not stratified
+unstratified-unsafe.dl:12:20: note: even/1 depends negatively on odd/1
+unstratified-unsafe.dl:13:19: note: odd/1 depends negatively on even/1

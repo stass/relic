@@ -311,6 +311,13 @@ The undefined-predicate sweep is skipped when a check stopped early, because
 its answer depends on having seen every definition and some of them are in the
 statements that were not reached.
 
+Between compilation and the sweep, the check runs the dependency analysis of
+[design-stratify.md](design-stratify.md) section 8, which rejects recursion
+through negation and builds the evaluation schedule. It runs before the sweep
+so that a check that runs out of memory has answered neither program-wide
+question and reports its failure and nothing else; the check that retries it
+answers both.
+
 The program arena's failure flag is cleared at the boundary of the check, for
 the same reason `lib/parse.c` clears it at the boundary of a load: leaving it
 set would make one transient exhaustion refuse every later check for the life

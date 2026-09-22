@@ -1,0 +1,7 @@
+% The unstratified example of architecture section 9: each of a/1 and b/1
+% holds exactly when the other does not, so the program has no stratified
+% meaning and is rejected before anything is evaluated.
+c(x).
+
+a(X) :- c(X), not b(X).
+b(X) :- c(X), not a(X).

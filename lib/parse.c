@@ -449,28 +449,13 @@ token_begins_term(const relic_token_t *token)
  * that is what lets a null return here mean one thing: the arena has been
  * marked failed, and the load boundary will fail the load.  A caller can
  * therefore return without reporting, which is the early exit the arena's
- * sticky flag exists to provide.
- *
- * The product is checked rather than assumed, because a count taken from the
- * input could make one that wraps and a wrapped product would be answered
- * with a block smaller than the copy that follows it.  That rejection marks
- * the arena rather than merely returning null, so it reaches the boundary by
- * the same path an exhausted arena does instead of becoming a second thing a
- * null return could mean.
+ * sticky flag exists to provide.  A count taken from the input whose product
+ * would wrap marks the arena too, so it reaches the boundary by the same path.
  */
 static void *
 parse_alloc(relic_parser_t *parser, size_t count, size_t size)
 {
-	relic_arena_t *arena;
-
-	arena = parser->arena;
-
-	if (count > SIZE_MAX / size) {
-		relic_arena_fail(arena);
-		return (NULL);
-	}
-
-	return (relic_arena_alloc(arena, count * size));
+	return (relic_arena_allocarray(parser->arena, count, size));
 }
 
 /*

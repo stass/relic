@@ -6,15 +6,14 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S5 landed, milestone M1; S6, the
-dependency graph, strongly connected components and stratification, next.
+`relic-plan.md`. Current position: S6 landed; S7, semi-naive evaluation and
+milestone M2, next.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`design-stratify.md` (S6), `design-index.md` and `design-planner.md` (S9),
-`design-magic.md` (S10). Each is referenced from `specs/architecture.md` when
-written.
+`design-index.md` and `design-planner.md` (S9), `design-magic.md` (S10). Each
+is referenced from `specs/architecture.md` when written.
 
 ## Build and packaging
 
@@ -176,11 +175,12 @@ answer there is a separate key, not a wider meaning for this one.
 **Negation is refused at evaluation.** [High, component: `lib/plan.c`] A
 negated literal passes `relic_check()` and is refused when its rule is
 planned, because testing absence is meaningful only against a relation that
-is complete and nothing yet guarantees that. S6 supplies the strata that make
-it so and S8 the `ANTI_MEMBER` operation; `reject_negation()` is then deleted
-and a negated literal becomes a filter placed like a comparison. Until then
-any program with negation, the architecture section 72 program among them,
-can be checked but not evaluated.
+is complete. The schedule guarantees that a negated predicate lies in a lower
+stratum, and so is complete before any rule reading it runs; what is missing
+is S8's `ANTI_MEMBER` operation. `reject_negation()` is then deleted and a
+negated literal becomes a filter placed like a comparison. Until then any
+program with negation, the architecture section 72 program among them, can be
+checked but not evaluated.
 
 **Options that arrive with their features.** [Medium, component:
 `cmd/relic/main.c`] `-X` arrives in S7, with a second evaluator for
@@ -270,6 +270,26 @@ along with the front end's, by the formats rather than the option parsing.
 Risk R7's second lever, dropping one of csv and json, is the place to find the
 lines back if a later stage needs them; neither has proved redundant yet.
 
+S6 came in at about 870 non-comment lines against a budget of 500, three
+quarters over. The graph and its iterative search are about 280, close to what
+the budget imagined for the whole stage. The excess is in `lib/stratify.c`:
+about 180 lines for the unstratified diagnostic, which picks the first
+offending edge of each component in text order and finds the shortest cycle
+through it by a breadth-first search, and about 150 for the schedule, which is
+built completely before it replaces the old one so that running out of memory
+leaves a consistent program. The diagnostic was specified by the plan and the
+atomic replacement by the working agreement's exhaustion rules, so neither is
+a lever; the budget understated them.
+
+**A later load's second unstratified cycle is not reported.** [Low,
+component: `lib/stratify.c`] A program found unstratified is refused by every
+later check without being analysed again, so an embedder that checks between
+loads is told about the first cycle and not about an independent one a later
+load introduces. The command-line tool loads every operand before checking and
+cannot hit it. Revisit with S11 if an embedder needs every cycle; re-analysing
+a rejected program and reporting only components not already reported would
+do it.
+
 **An unknown value type cannot be rejected in a build that checks for it.**
 [Low, component: `lib/value.c`] `value_well_formed()` rejects a
 `relic_value_t` whose `type` is not one of the three enumerators, which an
@@ -304,13 +324,14 @@ The append-only invariant of D-10 is the first one this applies to.
 **Allocation-failure coverage must grow with each stage.** [Medium,
 component: `tests/unit/test_exhaustion.c`] The suite compiles the library
 against an allocator that refuses the nth request and sweeps n across symbol
-and value interning, across a load, across a check, across a batch of tuple
+and value interning, across a load, across a check, across the dependency
+analysis and the replacement of a schedule, across a batch of tuple
 insertions, and across preparing and answering a query over a recursive
 program, which is what caught the index-growth failure that broke interning
 identity. Every later stage adds allocation paths that the sweep will not
-reach unless it is extended: the secondary indexes, the strata, and the Magic
-rewrite. Add a scenario per stage rather than leaving the suite describing the
-stages that happened to write one.
+reach unless it is extended: the secondary indexes and the Magic rewrite. Add
+a scenario per stage rather than leaving the suite describing the stages that
+happened to write one.
 
 Each new scenario needs the straddle guards the existing ones have. The
 insertion sweep was written first over a single insertion into a relation that

@@ -1,0 +1,3 @@
+unstratified-query.dl:4:1: error: program is not stratified
+unstratified-query.dl:4:15: note: a/1 depends negatively on b/1
+unstratified-query.dl:5:15: note: b/1 depends negatively on a/1

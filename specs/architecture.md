@@ -319,8 +319,8 @@ Programs containing recursion through negation are rejected.
 For example:
 
 ```prolog
-a(X) :- not b(X).
-b(X) :- not a(X).
+a(X) :- c(X), not b(X).
+b(X) :- c(X), not a(X).
 ```
 
 must produce a static error.
@@ -986,6 +986,9 @@ Recursive SCCs are evaluated using semi-naive deltas.
 
 SCCs within each stratum are processed in topological order.
 
+The dependency graph, the order components are found in, and the schedule the
+evaluator is handed are specified in `specs/design-stratify.md`.
+
 The executor, the naive and semi-naive fixed points, and how a query's answers
 reach a caller are specified in `specs/design-eval.md`.
 
@@ -1016,9 +1019,14 @@ Example diagnostic:
 
 ```text
 policy.dl:18:1: error: program is not stratified
-policy.dl:18:1: note: ready/1 depends negatively on blocked/1
-policy.dl:24:1: note: blocked/1 depends on ready/1
+policy.dl:20:5: note: ready/1 depends negatively on blocked/1
+policy.dl:25:5: note: blocked/1 depends on ready/1
 ```
+
+The error points at the rule that closes the cycle, and each note at the body
+literal that creates its edge. Which cycle is named, and why one error is
+reported per offending component, are specified in
+`specs/design-stratify.md`.
 
 ---
 
@@ -2723,6 +2731,15 @@ inverted, rather than a lookup.
 **Queries, section 52.** `relic_query_prepare()` takes a source name, as
 `relic_load_string()` does. Query text comes from no file, and without a name
 the diagnostics of several queries would all point at the same place.
+
+**Negation, section 9.** The unstratified example gains a positive literal
+in each rule. As first written, `X` occurred only under `not`, which section
+14 makes unsafe, so the example was rejected for safety and never reached the
+stratification check it was meant to illustrate.
+
+**Stratification, section 30.** Each note of the unstratified diagnostic
+points at the body literal that creates its edge rather than at the start of
+the rule, so that a reader is shown the literal to change.
 
 **New sections.** 74 dependency policy, 75 repository and documentation
 conventions, 76 this log.

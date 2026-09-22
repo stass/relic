@@ -27,8 +27,19 @@
  * nothing below it, so the level never passes the end of the plan and the
  * loop needs no case for having got there.
  *
- * The naive fixed point runs every rule's plan until a full pass inserts no
- * new tuple.  It terminates because every value a rule can produce was
+ * A program is evaluated one strongly connected component of its dependency
+ * graph at a time, in the order the program's schedule gives: by stratum, and
+ * every component after everything it depends on.  A component's rules
+ * therefore read only relations that are already complete or that belong to
+ * the component itself.  A component whose rules read none of its own
+ * relations needs a single pass; a recursive one runs to a fixed point.
+ *
+ * Every rule is planned before the first component runs, so a rule that
+ * cannot be planned, or memory that runs out while planning, stops the
+ * evaluation before it has derived anything.
+ *
+ * The naive fixed point runs the component's plans until a full pass inserts
+ * no new tuple.  It terminates because every value a rule can produce was
  * interned before evaluation began -- a head holds constants and variables,
  * and a variable is bound only from a tuple -- so each relation can hold only
  * finitely many tuples.  It is the least fixed point because every tuple it
@@ -37,6 +48,18 @@
  */
 
 typedef struct relic_evaluation relic_evaluation_t;
+typedef struct relic_running_plan relic_running_plan_t;
+
+/*
+ * A plan and the executor state that runs it: one cursor per operation, the
+ * range a SCAN resumes from.  A test keeps no state and leaves its cursor
+ * unused, which lets the executor's level index the operations and the
+ * cursors alike.
+ */
+struct relic_running_plan {
+	relic_plan_t		 plan;
+	relic_tuple_range_t	*cursors;
+};
 
 /*
  * One evaluation: the plans it runs and the executor's state.
@@ -47,10 +70,12 @@ typedef struct relic_evaluation relic_evaluation_t;
  * restored on backtracking, because no operation reads a slot a later one
  * binds.
  *
- * `cursors` holds one range per operation of the longest plan, and is what a
- * SCAN resumes from.  Tests keep no state.  Both it and the plans live in the
- * evaluation arena, allocated once when the evaluation begins, so nothing is
- * allocated while a plan runs.
+ * The plans and their cursors live in the evaluation arena and are allocated
+ * as each rule is planned, before anything runs, so nothing is allocated
+ * while a plan runs.  `plans` has room for `plan_capacity` of them.  A
+ * program's evaluation plans the rules in schedule order, so the plans of
+ * one component are a contiguous stretch, at the same positions its rules
+ * have in the schedule.
  *
  * `derived` is set whenever an EMIT inserts a tuple the relation did not
  * already hold, which is how a pass learns that the fixed point has not been
@@ -58,28 +83,37 @@ typedef struct relic_evaluation relic_evaluation_t;
  */
 struct relic_evaluation {
 	relic_t			*ctx;
-	relic_plan_t		*plans;
-	relic_tuple_range_t	*cursors;
+	relic_running_plan_t	*plans;
 	size_t			 plan_count;
+	size_t			 plan_capacity;
 	relic_dom_t		 frame[RELIC_MAX_VARIABLES];
 	bool			 derived;
 };
 
+static int	 confirm_schedule_current(relic_t *ctx);
 static void	*evaluation_alloc(relic_evaluation_t *eval, size_t count,
 		    size_t size);
+static int	 evaluation_add_rule(relic_evaluation_t *eval,
+		    const relic_rule_t *rule);
 static int	 evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
-		    const relic_rule_t *rules, size_t count);
+		    size_t capacity);
 static void	 evaluation_end(relic_evaluation_t *eval);
+static int	 evaluate_component(relic_evaluation_t *eval,
+		    const relic_component_t *component);
 static void	 build_tuple(const relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom, relic_dom_t *tuple);
 static bool	 comparison_holds(const relic_t *ctx,
 		    enum relic_compare_op compare, relic_dom_t left,
 		    relic_dom_t right);
 static int	 execute_plan(relic_evaluation_t *eval,
-		    const relic_plan_t *plan);
+		    const relic_running_plan_t *running);
 static int	 materialize_program(relic_t *ctx);
-static int	 naive_fixed_point(relic_evaluation_t *eval);
-static int	 run_every_plan(relic_evaluation_t *eval);
+static int	 naive_fixed_point(relic_evaluation_t *eval, size_t first,
+		    size_t count);
+static int	 plan_schedule(relic_evaluation_t *eval,
+		    const relic_schedule_t *schedule);
+static int	 run_plans(relic_evaluation_t *eval, size_t first,
+		    size_t count);
 static int	 step(relic_evaluation_t *eval, const relic_op_t *op,
 		    relic_tuple_range_t *cursor, bool resume, bool *matchedp);
 static int	 step_emit(relic_evaluation_t *eval,
@@ -317,7 +351,7 @@ step(relic_evaluation_t *eval, const relic_op_t *op,
  * tried.
  */
 static int
-execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan)
+execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 {
 	size_t level;
 	bool matched;
@@ -327,8 +361,8 @@ execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan)
 	resume = false;
 
 	for (;;) {
-		if (step(eval, &plan->ops[level], &eval->cursors[level], resume,
-		    &matched) != 0)
+		if (step(eval, &running->plan.ops[level],
+		    &running->cursors[level], resume, &matched) != 0)
 			return (-1);
 
 		if (matched) {
@@ -346,14 +380,15 @@ execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan)
 }
 
 /*
- * One pass: every plan, in program order.
+ * One pass over `count` plans from `first`, in the order the rules were
+ * planned, which is program order within a component.
  */
 static int
-run_every_plan(relic_evaluation_t *eval)
+run_plans(relic_evaluation_t *eval, size_t first, size_t count)
 {
 	size_t i;
 
-	for (i = 0; i < eval->plan_count; i++) {
+	for (i = first; i < first + count; i++) {
 		if (execute_plan(eval, &eval->plans[i]) != 0)
 			return (-1);
 	}
@@ -362,7 +397,7 @@ run_every_plan(relic_evaluation_t *eval)
 }
 
 /*
- * Run passes until one inserts nothing new.
+ * Run passes over `count` plans from `first` until one inserts nothing new.
  *
  * Within a pass a rule sees what the rules before it inserted, and what its
  * own earlier matches inserted, rather than only what was there when the pass
@@ -371,12 +406,12 @@ run_every_plan(relic_evaluation_t *eval)
  * iterate in insertion order.
  */
 static int
-naive_fixed_point(relic_evaluation_t *eval)
+naive_fixed_point(relic_evaluation_t *eval, size_t first, size_t count)
 {
 	do {
 		eval->derived = false;
 
-		if (run_every_plan(eval) != 0)
+		if (run_plans(eval, first, count) != 0)
 			return (-1);
 	} while (eval->derived);
 
@@ -384,19 +419,14 @@ naive_fixed_point(relic_evaluation_t *eval)
 }
 
 /*
- * Allocate from the evaluation arena, reporting exhaustion.  The product is
- * checked rather than assumed, like every other count-times-size in the
- * library.
+ * Allocate from the evaluation arena, reporting exhaustion.
  */
 static void *
 evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
 {
 	void *block;
 
-	block = NULL;
-	if (count <= SIZE_MAX / size)
-		block = relic_arena_alloc(&eval->ctx->eval_arena, count * size);
-
+	block = relic_arena_allocarray(&eval->ctx->eval_arena, count, size);
 	if (block == NULL)
 		relic_diag_no_memory(eval->ctx);
 
@@ -404,43 +434,53 @@ evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
 }
 
 /*
- * Plan every rule and size the executor's state for the longest plan.
- * Returns 0, or -1 with a diagnostic reported.  Either way the caller ends
- * the evaluation with evaluation_end(), which releases what was allocated.
+ * Begin an evaluation that will run at most `capacity` plans.  Returns 0, or
+ * -1 with a diagnostic reported.  Either way the caller ends the evaluation
+ * with evaluation_end(), which releases what was allocated.
  */
 static int
-evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
-    const relic_rule_t *rules, size_t count)
+evaluation_begin(relic_evaluation_t *eval, relic_t *ctx, size_t capacity)
 {
-	size_t longest;
-	size_t i;
-
 	bzero(eval, sizeof(*eval));
 	eval->ctx = ctx;
 
-	if (count == 0)
-		return (0);
-
-	eval->plans = evaluation_alloc(eval, count, sizeof(*eval->plans));
+	eval->plans = evaluation_alloc(eval, capacity, sizeof(*eval->plans));
 	if (eval->plans == NULL)
 		return (-1);
+	eval->plan_capacity = capacity;
 
-	longest = 0;
-	for (i = 0; i < count; i++) {
-		if (relic_plan_rule(ctx, &ctx->eval_arena, &rules[i],
-		    &eval->plans[i]) != 0)
-			return (-1);
+	return (0);
+}
 
-		if (eval->plans[i].op_count > longest)
-			longest = eval->plans[i].op_count;
+/*
+ * Plan one more rule for the evaluation to run, with its cursors.  Returns
+ * 0, or -1 with a diagnostic reported.  The plan is counted only once it is
+ * complete, so a failure leaves the evaluation holding the plans before it.
+ */
+static int
+evaluation_add_rule(relic_evaluation_t *eval, const relic_rule_t *rule)
+{
+	relic_running_plan_t *running;
+
+	if (eval->plan_count == eval->plan_capacity) {
+		relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
+		    "internal error: an evaluation was given more rules than "
+		    "it has room for");
+		return (-1);
 	}
 
-	eval->cursors = evaluation_alloc(eval, longest,
-	    sizeof(*eval->cursors));
-	if (eval->cursors == NULL)
+	running = &eval->plans[eval->plan_count];
+
+	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule,
+	    &running->plan) != 0)
 		return (-1);
 
-	eval->plan_count = count;
+	running->cursors = evaluation_alloc(eval, running->plan.op_count,
+	    sizeof(*running->cursors));
+	if (running->cursors == NULL)
+		return (-1);
+
+	eval->plan_count++;
 
 	return (0);
 }
@@ -457,35 +497,103 @@ evaluation_end(relic_evaluation_t *eval)
 }
 
 /*
- * Bring the relations to the fixed point of every rule of the program.
+ * Plan every rule the schedule lists, in schedule order.
+ */
+static int
+plan_schedule(relic_evaluation_t *eval, const relic_schedule_t *schedule)
+{
+	const relic_ruletab_t *rules;
+	size_t i;
+
+	rules = &eval->ctx->program.rules;
+
+	for (i = 0; i < schedule->rule_count; i++) {
+		if (evaluation_add_rule(eval,
+		    &rules->entries[schedule->rule_indexes[i]]) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Bring one component's relations to their fixed point, given that every
+ * component before it in the schedule is complete.
+ *
+ * A component that is not recursive has no rule reading any of its own
+ * relations, so everything its rules read is complete before they run and
+ * one pass derives everything they ever will.
+ */
+static int
+evaluate_component(relic_evaluation_t *eval,
+    const relic_component_t *component)
+{
+	if (component->recursive)
+		return (naive_fixed_point(eval, component->first_rule,
+		    component->rule_count));
+
+	return (run_plans(eval, component->first_rule, component->rule_count));
+}
+
+/*
+ * Confirm that the schedule describes every rule of the program, which a
+ * successful check guarantees.  It is confirmed rather than assumed because
+ * a stale schedule would not fail: it would silently leave rules out.
+ */
+static int
+confirm_schedule_current(relic_t *ctx)
+{
+	if (relic_schedule_is_current(&ctx->program))
+		return (0);
+
+	relic_diagf(ctx, RELIC_ERROR, NULL,
+	    "internal error: the evaluation order does not cover the "
+	    "program's rules");
+
+	return (-1);
+}
+
+/*
+ * Bring the relations to the fixed point of every rule of the program, one
+ * component of the schedule at a time.
  *
  * The relations are already a fixed point of the first `materialized_rules`
  * rules, and rules are only ever appended, so nothing needs doing when no
- * rule has been added since.  When some have, the fixed point is run over all
- * of them, continuing from the tuples already held.  For a program without
- * negation that is sound: every tuple held is still justified, and the least
- * fixed point reached from them is the one reached from nothing.
+ * rule has been added since.  When some have, every component is evaluated
+ * again in schedule order, continuing from the tuples already held.  For a
+ * program without negation that is sound: every tuple held is still
+ * justified, and the least fixed point reached from them is the one reached
+ * from nothing.
  */
 static int
 materialize_program(relic_t *ctx)
 {
-	const relic_ruletab_t *rules;
+	const relic_schedule_t *schedule;
 	relic_evaluation_t eval;
+	size_t i;
 	int status;
 
-	rules = &ctx->program.rules;
-	if (ctx->materialized_rules == rules->count)
+	if (ctx->materialized_rules == ctx->program.rules.count)
 		return (0);
 
-	status = evaluation_begin(&eval, ctx, rules->entries, rules->count);
+	if (confirm_schedule_current(ctx) != 0)
+		return (-1);
+
+	schedule = &ctx->program.schedule;
+
+	status = evaluation_begin(&eval, ctx, schedule->rule_count);
 	if (status == 0)
-		status = naive_fixed_point(&eval);
+		status = plan_schedule(&eval, schedule);
+
+	for (i = 0; status == 0 && i < schedule->component_count; i++)
+		status = evaluate_component(&eval, &schedule->components[i]);
+
 	evaluation_end(&eval);
 
 	if (status != 0)
 		return (-1);
 
-	ctx->materialized_rules = rules->count;
+	ctx->materialized_rules = ctx->program.rules.count;
 
 	return (0);
 }
@@ -568,9 +676,11 @@ relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 	if (relic_materialize(ctx) != 0)
 		return (-1);
 
-	status = evaluation_begin(&eval, ctx, &query->rule, 1);
+	status = evaluation_begin(&eval, ctx, 1);
 	if (status == 0)
-		status = run_every_plan(&eval);
+		status = evaluation_add_rule(&eval, &query->rule);
+	if (status == 0)
+		status = run_plans(&eval, 0, eval.plan_count);
 	evaluation_end(&eval);
 
 	if (status != 0)

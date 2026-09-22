@@ -80,9 +80,6 @@ compiles only what was loaded since the previous one, reports each diagnostic
 once, and returns its previous answer when there is nothing new. A program that
 has ever held a rejected rule stays refused.
 
-Stratification arrives in S6, so a program with recursion through negation
-is still accepted by the check.
-
 **The relation store, stage S4.** Somewhere to put tuples, specified in
 `specs/design-relations.md`.
 
@@ -148,11 +145,33 @@ relations record how many rules they are a fixed point of, so a query after a
 later load continues the fixed point rather than recomputing it.
 
 A negated literal passes the check and is refused when its rule is planned,
-naming the rule. Evaluating negation needs the stratification of S6 and the
-`ANTI_MEMBER` operation of S8. `-X` arrives with the semi-naive evaluator in
+naming the rule. `-X` arrives with the semi-naive evaluator in
 S7, since until then there is nothing for `-X naive` to select; `-e` arrives in
 S9, and `-i`, `-l`, `-n` and `-v` in S12. Each is an unknown option until it
 does.
+
+**The dependency graph and stratification, stage S6.** The check knows what
+depends on what and rejects recursion through negation; evaluation runs in the
+order that analysis settles, specified in `specs/design-stratify.md`.
+
+| Component | State |
+| --- | --- |
+| `lib/depgraph.{h,c}` | the predicate graph in compressed adjacency form, one edge per relational body literal in rule and literal order, each remembering its rule, literal and sign; strongly connected components by an iterative Tarjan search, completed dependencies first |
+| `lib/stratify.c` | least strata over the condensation; one error per component holding a negative edge, naming the shortest cycle through it with a note at the literal of each edge; the schedule of components with rules, grouped by stratum, cached on the program until a check compiles another rule |
+| `lib/eval.c` | materialization plans every scheduled rule, then runs the schedule component by component: the naive fixed point for a recursive component, one pass for any other; each plan owns its cursors |
+| `lib/rule.c` | `relic_check()` runs the analysis after compiling and before the undefined-predicate sweep |
+| `lib/arena.{h,c}` | the arena declarations in a header of their own, so the program model can hold one, with moving an arena by assignment stated as part of its contract; `relic_arena_allocarray()` refuses a size that overflows |
+| `tests/` | `test_stratify` for component order, strata, rule grouping, independence of textual order, rejection, and a chain and a cycle of a hundred thousand predicates analysed on a one-megabyte stack; two sweeps in `test_exhaustion`, over rejecting a program and over replacing a schedule; six golden tests, reproducing architecture sections 9 and 30 exactly and fixing which cycle is named and in what order |
+
+A program found unstratified stays refused and is not analysed again, so a
+second, independent cycle introduced by a later load is not reported until
+the first is gone. The command-line tool loads every operand before it checks
+and reports every cycle in one run.
+
+Negation is refused when a rule is planned: the strata that make it
+meaningful exist, and the `ANTI_MEMBER` operation that evaluates it arrives in
+S8. Until then the strata order evaluation, but no rule can read a lower
+stratum negatively.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -279,6 +298,29 @@ is broken, by injecting each fault and rerunning:
 * a negated literal left out of a plan rather than refused, which the
   planner's completeness check turns into an error instead of wrong answers.
 
+The analysis suites were confirmed the same way:
+
+* scheduling components in completion order without sorting by stratum,
+  negation not lifting a stratum, and components scheduled in reverse, which
+  `tests/unit/test_stratify.c` catches as schedules out of order;
+* reporting every negative edge of a component rather than the first,
+  choosing a component's first edge in graph order rather than text order,
+  and reporting components in completion order rather than text order, which
+  the golden cycle tests catch as a repeated error or a misplaced one;
+* rejecting nothing because negation is ignored, which every unstratified
+  test catches;
+* tearing the old schedule down before the new one is complete, and
+  installing a schedule an analysis could not finish, which
+  `tests/unit/test_exhaustion.c` catches as a lost schedule and a check that
+  passes;
+* never marking a component recursive, which the recursion tests catch as a
+  fixed point stopping after one pass;
+* a schedule left stale after a later load, and a rejection that is not
+  sticky, which `tests/unit/test_stratify.c` catches as missing rules and a
+  repeated diagnostic;
+* a recursive Tarjan search, which the long-chain test catches by crashing on
+  its one-megabyte stack, through the chain and the cycle each alone.
+
 ## Documents
 
 | File | Contents |
@@ -289,6 +331,7 @@ is broken, by injecting each fault and rerunning:
 | `specs/design-program.md` | predicate identity, variable numbering, the compiled rule, safety |
 | `specs/design-relations.md` | the tuple store, tuple identifiers, the full-tuple index, ranges, limits |
 | `specs/design-plan.md` | the operations, the binding decisions a plan records, the textual planner, a query as a rule |
+| `specs/design-stratify.md` | the dependency graph, components, strata, the unstratified diagnostic, the schedule |
 | `specs/design-eval.md` | the executor, the naive and semi-naive fixed points, materialization, answering a query |
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats |
 | `specs/style.md` | code style, binding on all relic-owned code |
@@ -297,10 +340,10 @@ is broken, by injecting each fault and rerunning:
 
 ## Next
 
-Stage S6, the dependency graph, strongly connected components and
-stratification: the evaluator runs stratum by stratum and a program with
-recursion through negation is rejected with a diagnostic naming the cycle. It
-owes `specs/design-stratify.md` before its code.
+Stage S7, semi-naive evaluation, milestone M2: each recursive component is
+evaluated against the tuples its recursive literals gained in the previous
+round, the naive evaluator stays as `-X naive`, and the two are compared over
+the whole corpus.
 
 ## Decisions taken
 

@@ -1,0 +1,34 @@
+% Evaluation one component at a time gives the answers a whole-program fixed
+% point gives: a diamond, mutual recursion, and two independent recursive
+% components, each answered after everything it reads is complete.
+succ(0, 1).
+succ(1, 2).
+succ(2, 3).
+succ(3, 4).
+
+even(X) :- succ(Y, X), odd(Y).
+odd(X) :- succ(Y, X), even(Y).
+even(0).
+
+left(X) :- even(X).
+right(X) :- odd(X).
+either(X) :- left(X).
+either(X) :- right(X).
+both(X) :- left(X), right(X).
+
+link(a, b).
+link(b, c).
+reach(X, Y) :- link(X, Y).
+reach(X, Z) :- link(X, Y), reach(Y, Z).
+
+road(c, d).
+road(d, c).
+near(X, Y) :- road(X, Y).
+near(X, Z) :- road(X, Y), near(Y, Z).
+
+even(X)?
+odd(X)?
+either(X)?
+both(X)?
+reach(a, X)?
+near(X, Y)?

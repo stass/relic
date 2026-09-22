@@ -204,6 +204,7 @@ relic_program_init(relic_program_t *program)
 {
 	bzero(program, sizeof(*program));
 	relic_predtab_init(&program->predicates);
+	relic_schedule_init(&program->schedule);
 }
 
 void
@@ -211,10 +212,12 @@ relic_program_reset(relic_program_t *program)
 {
 	/*
 	 * The variable-length parts of every rule belong to the program
-	 * arena, which releases them when it is reset.  Only the array of
-	 * rules is this module's to free.
+	 * arena, which releases them when it is reset.  What is released here
+	 * is the rest: the predicate table, the schedule with its own arena,
+	 * and the arrays of rules and queries.
 	 */
 	relic_predtab_reset(&program->predicates);
+	relic_schedule_reset(&program->schedule);
 	free(program->rules.entries);
 	free(program->queries.entries);
 	bzero(program, sizeof(*program));
@@ -228,25 +231,11 @@ relic_program_reset(relic_program_t *program)
  * therefore answers RELIC_COMPILE_INCOMPLETE without reporting for itself, so
  * one exhaustion produces one message however many allocations a statement
  * was part way through.
- *
- * The product is checked rather than assumed, because a wrapped product
- * would be answered with a block smaller than what is written into it.  That
- * rejection marks the arena rather than merely returning null, so it reaches
- * the boundary by the same path an exhausted arena does.
  */
 static void *
 compile_alloc(relic_compiler_t *compiler, size_t count, size_t size)
 {
-	relic_arena_t *arena;
-
-	arena = compiler->arena;
-
-	if (count > SIZE_MAX / size) {
-		relic_arena_fail(arena);
-		return (NULL);
-	}
-
-	return (relic_arena_alloc(arena, count * size));
+	return (relic_arena_allocarray(compiler->arena, count, size));
 }
 
 /*
@@ -1099,11 +1088,23 @@ relic_check(relic_t *ctx)
 	}
 
 	/*
-	 * The undefined-predicate sweep is skipped when compilation stopped
-	 * early, because its answer depends on having seen every definition
-	 * and some of them are in the statements that were not reached.
+	 * The dependency analysis and the undefined-predicate sweep are
+	 * skipped when compilation stopped early, because the answer to each
+	 * depends on having seen every rule and some of them are in the
+	 * statements that were not reached.  The analysis, which can run out
+	 * of memory, goes first, so that a check that fails for want of memory
+	 * has answered neither question and the check that retries it answers
+	 * both.
+	 *
+	 * The analysis runs even when a statement was rejected.  It sees only
+	 * the rules that were accepted, and a cycle through negation among
+	 * those is a mistake no later load can repair, so reporting it now
+	 * saves the reader a second round.
 	 */
 	if (!completed)
+		return (-1);
+
+	if (relic_stratify(ctx) != 0)
 		return (-1);
 
 	relic_pred_report_undefined(ctx);
