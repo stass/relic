@@ -46,6 +46,7 @@ relic_destroy(relic_t *ctx)
 	if (ctx == NULL)
 		return;
 
+	relic_program_reset(&ctx->program);
 	relic_valtab_reset(&ctx->values);
 	relic_symtab_reset(&ctx->symbols);
 	relic_arena_reset(&ctx->program_arena);
@@ -68,6 +69,7 @@ relic_create_config(const relic_config_t *config)
 	relic_symtab_init(&ctx->symbols);
 	relic_valtab_init(&ctx->values);
 	relic_ast_program_init(&ctx->ast);
+	relic_program_init(&ctx->program);
 	relic_diag_init(&ctx->diag);
 
 	/*

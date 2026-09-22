@@ -1,0 +1,4 @@
+% A fact has no body, so it has nothing to bind a variable with.  The message
+% calls it a fact, which is what its writer wrote, although the tree holds it
+% as a rule whose body has no literals.
+edge(X, b).

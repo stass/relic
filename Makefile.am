@@ -28,7 +28,7 @@ LIBOBJDIR = compat/
 
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/diag.c lib/lex.c \
-	lib/parse.c lib/symbol.c lib/util.c lib/value.c
+	lib/parse.c lib/pred.c lib/rule.c lib/symbol.c lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -38,7 +38,7 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 
 include_HEADERS = include/relic.h
 noinst_HEADERS = compat/compat.h compat/queue.h lib/ast.h lib/internal.h \
-	lib/util.h tests/unit/harness.h
+	lib/program.h lib/util.h tests/unit/harness.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/main.c
@@ -112,8 +112,9 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 ##
 
 check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
-	tests/unit/test_lex tests/unit/test_parse tests/unit/test_symbol \
-	tests/unit/test_util tests/unit/test_value
+	tests/unit/test_lex tests/unit/test_parse tests/unit/test_pred \
+	tests/unit/test_rule tests/unit/test_symbol tests/unit/test_util \
+	tests/unit/test_value
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LIBOBJS)
@@ -126,6 +127,12 @@ tests_unit_test_lex_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_parse_SOURCES = tests/unit/test_parse.c tests/unit/harness.c
 tests_unit_test_parse_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_pred_SOURCES = tests/unit/test_pred.c tests/unit/harness.c
+tests_unit_test_pred_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
+tests_unit_test_rule_LDADD = librelic_internal.la $(LIBOBJS)
 
 tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
 tests_unit_test_symbol_LDADD = librelic_internal.la $(LIBOBJS)
@@ -213,10 +220,15 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/head-not-atom.dl tests/lang/incomplete-operator.dl \
 	tests/lang/integer-range.dl tests/lang/integer-trailing.dl \
 	tests/lang/missing-terminator.dl tests/lang/not-as-predicate.dl \
-	tests/lang/not-symbol.dl \
-	tests/lang/recovery.dl tests/lang/string-escapes.dl \
-	tests/lang/trailing-comma.dl tests/lang/unterminated-string.dl \
-	tests/lang/zero-arity.dl
+	tests/lang/not-symbol.dl tests/lang/predicate-identity.dl \
+	tests/lang/recovery.dl tests/lang/safe-rules.dl \
+	tests/lang/singleton.dl tests/lang/string-escapes.dl \
+	tests/lang/success-criteria.dl tests/lang/trailing-comma.dl \
+	tests/lang/undefined-predicate.dl tests/lang/unsafe-anonymous.dl \
+	tests/lang/unsafe-comparison.dl tests/lang/unsafe-fact.dl \
+	tests/lang/unsafe-head.dl tests/lang/unsafe-negation.dl \
+	tests/lang/unterminated-string.dl tests/lang/variable-limit.dl \
+	tests/lang/variable-limit-max.dl tests/lang/zero-arity.dl
 
 TEST_EXTENSIONS = .dl .sh
 DL_LOG_COMPILER = $(SHELL) $(abs_top_srcdir)/tests/langtest.sh

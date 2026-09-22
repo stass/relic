@@ -1,0 +1,1 @@
+unsafe-comparison.dl:3:8: error: variable X in rule answer/1 is not bound by a positive body literal

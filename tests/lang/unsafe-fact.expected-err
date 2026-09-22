@@ -1,0 +1,1 @@
+unsafe-fact.dl:4:6: error: variable X in fact edge/2 is not bound by a positive body literal

@@ -17,7 +17,11 @@ path(X, Z) :-
     edge(X, Y),
     path(Y, Z).
 
-% Negation.
+% Negation.  Both relations are given facts so that the file, whose subject
+% is syntax, does not also exercise the undefined-predicate warning.
+todo(database).
+blocked(start).
+
 runnable(X) :-
     todo(X),
     not blocked(X).

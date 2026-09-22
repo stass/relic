@@ -1,0 +1,12 @@
+% A predicate the program references and nothing defines is a typo far more
+% often than an intentionally empty relation.  It is reported once, at the
+% first place the program names it, however many times it is referenced --
+% including from a query, whose atoms are resolved like any other.
+edge(a, b).
+
+reachable(X, Y) :-
+    edge(X, Y),
+    not excluded(X),
+    not excluded(Y).
+
+missing(X)?

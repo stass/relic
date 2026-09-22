@@ -49,18 +49,42 @@ evaluates nothing.
 | `lib/ast.h` | terms, atoms, literals, statements and the program list; a fact is a rule with an empty body |
 | `include/relic.h` | adds `relic_load_file()`, `relic_load_path()`, `relic_load_string()` |
 | `cmd/relic/main.c` | `-c` with file operands and standard input; `-V` unchanged |
-| `tests/lang/` | twenty golden language tests run by `tests/langtest.sh` as automake's `DL_LOG_COMPILER`, with `tests/langfiles.sh` failing the build if one is not registered |
+| `tests/lang/` | golden language tests run by `tests/langtest.sh` as automake's `DL_LOG_COMPILER`, with `tests/langfiles.sh` failing the build if one is not registered |
 
 Constants are interned as they are parsed, so a term holds the same domain
 identifier a tuple column will hold. `not` is the negation keyword only where
 a literal may begin, so `status(foo, not).` is an ordinary fact. A load is all
 or nothing: a program never holds half of a file.
 
-Nothing yet turns the tree into a program. `relic -c` reports lexical and
-syntactic mistakes only; predicate identity, variable numbering, safety and
-stratification arrive in S3 and S6, so a rule with an unbound head variable is
-still accepted. A bare `relic file.dl` is a usage error, because evaluating a
-program is what it will mean and checking is not.
+A bare `relic file.dl` is a usage error, because evaluating a program is what
+it will mean and checking is not.
+
+**The program model, stage S3.** The syntax tree becomes a validated program,
+specified in `specs/design-program.md`. `relic -c` now checks what it loads.
+
+| Component | State |
+| --- | --- |
+| `lib/pred.c` | predicates interned by `(name, arity)` through the same identifier table the symbol and value pools use; first-mention location, definedness, and the undefined-predicate sweep |
+| `lib/rule.c` | rule compilation in one pass: predicate resolution, variable numbering into the slots of architecture section 25, the range-restriction check, the singleton warning, and `relic_check()` |
+| `lib/program.h` | the compiled forms: arguments, atoms, comparisons, literals, variables, rules, and the program that holds them |
+| `include/relic.h` | adds `relic_check()` |
+| `cmd/relic/main.c` | `-c` validates after loading, and skips validation when a load failed |
+| `tests/lang/` | twelve more golden tests: the accepted and rejected examples of architecture sections 10 and 14, both variable-limit boundaries, predicate identity, singletons with their exemptions, the undefined-predicate warning, and the architecture section 72 program |
+
+Safety is one set computation, not a search: a rule is safe when the variables
+of its head, its negated literals and its comparisons all occur in a positive
+relational body literal. `_` is a wildcard in a positive body literal and takes
+no slot; anywhere else it can never be bound and the rule is rejected. Checking
+is incremental -- a cursor records the last statement compiled, so a check
+compiles only what was loaded since the previous one, reports each diagnostic
+once, and returns its previous answer when there is nothing new. A program that
+has ever held a rejected rule stays refused.
+
+Queries are not yet validated. Their predicates are resolved, so a typo in a
+query is reported as an undefined predicate, but a query's variables are
+numbered and checked when S5 compiles it into the synthetic `$q0` rule of
+architecture section 11. `TODO.md` records this. Stratification arrives in S6,
+so a program with recursion through negation is still accepted.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -84,9 +108,25 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the eleven documented entry
+* the installed shared library exports exactly the twelve documented entry
   points and nothing else; the compatibility objects linked into it are not
   reachable.
+
+The checker's own suites were confirmed to fail when the property they guard
+is broken, rather than only to pass, by injecting each fault and rerunning:
+
+* giving `_` a slot in a positive body literal, which
+  `tests/unit/test_rule.c` catches as two wildcards taking two slots;
+* never advancing the compile cursor, which it catches as a second check
+  repeating the first check's diagnostics and doubling the rule count;
+* numbering slots body-first rather than as written, which it catches as the
+  wrong spellings in the first three slots;
+* keying the predicate table on the name alone, which
+  `tests/unit/test_pred.c` catches as `foo/1` and `foo/2` sharing an
+  identifier;
+* advancing the cursor past a statement a check ran out of memory on, which
+  `tests/unit/test_exhaustion.c` catches as a statement that is never
+  compiled at all.
 
 Five of the tests are checks on the tree rather than on the engine, and each
 was confirmed to fail when the property it guards is broken, rather than only
@@ -110,7 +150,7 @@ continuous integration yet. `TODO.md` records that as the highest open item,
 and records the two checks whose behaviour on ELF is inferred rather than
 observed.
 
-There is no program model, relation store, evaluator or query interface yet.
+There is no relation store, evaluator or query interface yet.
 
 ## Documents
 
@@ -119,16 +159,17 @@ There is no program model, relation store, evaluator or query interface yet.
 | `specs/architecture.md` | target design, v0.2 |
 | `specs/design-memory.md` | arenas, arrays, interning tables, the value table |
 | `specs/design-parser.md` | lexical structure, the syntax tree, diagnostics and error recovery |
+| `specs/design-program.md` | predicate identity, variable numbering, the compiled rule, safety |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S3, the program model and safety: the syntax tree becomes a validated
-program, with the `(name, arity)` predicate table, variable numbering, the
-range-restriction check and the singleton-variable warning, and `relic -c`
-becomes useful. It owes `specs/design-program.md` before its code.
+Stage S4, relations and the tuple store: somewhere to put tuples, with the
+insert-returns-newness property that fixed-point detection is built on, the
+canonical full-tuple hash index, iteration by identifier range, and the first
+enforced resource limit. It owes `specs/design-relations.md` before its code.
 
 ## Decisions taken
 

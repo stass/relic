@@ -1,0 +1,20 @@
+% The rules architecture section 14 accepts, and the shapes that make them
+% safe: a head variable bound by a positive literal, a negated literal whose
+% variable another literal binds, and a comparison over bound variables.
+card(design).
+card(build).
+blocked(build).
+size(design, 3).
+
+ready(X) :-
+    card(X),
+    not blocked(X).
+
+large(X) :-
+    size(X, N),
+    N >= 100.
+
+pair(X, Y) :-
+    card(X),
+    card(Y),
+    X != Y.

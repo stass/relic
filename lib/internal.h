@@ -16,6 +16,7 @@
 
 #include "ast.h"
 #include "compat.h"
+#include "program.h"
 #include "queue.h"
 #include "util.h"
 
@@ -176,6 +177,7 @@ struct relic {
 	relic_symtab_t		 symbols;
 	relic_valtab_t		 values;
 	relic_ast_program_t	 ast;
+	relic_program_t		 program;
 	relic_diag_t		 diag;
 	relic_config_t		 config;
 };
@@ -244,6 +246,13 @@ void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
  * message carries the least information, so it is written once.
  */
 void	 relic_diag_no_memory(relic_t *ctx);
+
+/*
+ * Shorten a name for a message into a caller-owned buffer, marking the cut
+ * with "..." when one was made, and return the buffer so that the call can
+ * stand as an argument of the message it decorates.
+ */
+const char *relic_diag_name(const char *name, char *buffer, size_t size);
 
 /*
  * lib/symbol.c
@@ -386,5 +395,38 @@ int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
  * teardown.
  */
 void	 relic_ast_program_init(relic_ast_program_t *program);
+
+/*
+ * lib/pred.c
+ *
+ * relic_pred_intern() assigns an identifier to a (name, arity) pair, or
+ * returns the one it already has.  `where` is recorded only for a pair this
+ * is the first mention of, so a later message points at the first place the
+ * program named the predicate.
+ *
+ * relic_pred_describe() writes "name/arity" into the caller's buffer, which
+ * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
+ * stand as an argument of the message it decorates.
+ */
+void	 relic_predtab_init(relic_predtab_t *table);
+void	 relic_predtab_reset(relic_predtab_t *table);
+int	 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
+	    const relic_location_t *where, relic_pred_id_t *idp);
+const relic_pred_t *relic_pred_of(const relic_t *ctx, relic_pred_id_t id);
+size_t	 relic_pred_count(const relic_t *ctx);
+void	 relic_pred_define(relic_t *ctx, relic_pred_id_t id);
+const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
+	    char *buffer, size_t size);
+void	 relic_pred_report_undefined(relic_t *ctx);
+
+/*
+ * lib/rule.c
+ *
+ * relic_program_init() prepares the empty program a context starts with, and
+ * relic_program_reset() releases what the program owns outside the arenas.
+ * The public entry point into this module is relic_check().
+ */
+void	 relic_program_init(relic_program_t *program);
+void	 relic_program_reset(relic_program_t *program);
 
 #endif /* RELIC_INTERNAL_H */

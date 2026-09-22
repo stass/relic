@@ -1,0 +1,2 @@
+singleton.dl:7:13: warning: variable Y occurs only once in this rule
+singleton.dl:7:13: note: rename it to _Y to silence this warning

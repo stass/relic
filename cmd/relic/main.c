@@ -166,6 +166,12 @@ load_operands(relic_t *ctx, int argc, char *argv[])
 /*
  * Check the input: load it, report whatever is wrong with it, and evaluate
  * nothing.
+ *
+ * Validation runs only when every operand loaded.  A load is all or nothing,
+ * so a file with a syntax error contributes no statements at all, and
+ * checking what is left would report the predicates that file defined as
+ * referenced and never defined.  Those complaints would be about the file
+ * that is missing rather than about the program the user wrote.
  */
 static int
 check_program(const char *program_name, int argc, char *argv[])
@@ -191,6 +197,8 @@ check_program(const char *program_name, int argc, char *argv[])
 	relic_diag_set(ctx, relic_diag_stderr, diag_context(program_name));
 
 	status = load_operands(ctx, argc, argv);
+	if (status == 0)
+		status = relic_check(ctx);
 
 	relic_destroy(ctx);
 

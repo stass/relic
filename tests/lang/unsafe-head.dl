@@ -1,0 +1,6 @@
+% Architecture section 14: a head variable that no positive body literal
+% binds.  Y is reported as a singleton as well, because it is a separate
+% mistake rather than a consequence of the first.
+bar(a).
+foo(X) :-
+    bar(Y).

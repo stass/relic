@@ -8,6 +8,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 #include <strings.h>
 
 #include "internal.h"
@@ -167,4 +168,40 @@ relic_diag_stderr(void *callback_ctx, enum relic_diag_level level,
 	fprintf(stderr, "%s: ", level_name(level));
 	write_escaped(stderr, message);
 	fputc('\n', stderr);
+}
+
+/*
+ * Shorten a name for a message, into a buffer the caller owns.
+ *
+ * A predicate or variable name is an identifier of arbitrary length.  Left
+ * whole, a long one would push the rest of the sentence past the end of the
+ * diagnostic buffer, so a message would lose its meaning rather than a
+ * detail.  What is cut instead is the name, and the cut is marked: a reader
+ * who sees "..." knows they are not looking at the whole spelling, and
+ * advice that quotes one -- the singleton warning's suggested rename is the
+ * case that exists -- is visibly incomplete rather than quietly naming a
+ * variable that does not exist.
+ *
+ * Returns `buffer`, so the call can stand as an argument of the message it
+ * decorates.
+ */
+const char *
+relic_diag_name(const char *name, char *buffer, size_t size)
+{
+	static const char ellipsis[] = "...";
+
+	if (strlcpy(buffer, name, size) < size)
+		return (buffer);
+
+	/*
+	 * The name did not fit.  Mark where it was cut, if the buffer has
+	 * room for the mark; one too small to hold it is not one any caller
+	 * passes, and a name with no room to say so is better short than
+	 * unwritten.
+	 */
+	if (size > sizeof(ellipsis))
+		bcopy(ellipsis, buffer + size - sizeof(ellipsis),
+		    sizeof(ellipsis));
+
+	return (buffer);
 }

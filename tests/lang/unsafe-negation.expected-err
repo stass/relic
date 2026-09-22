@@ -1,0 +1,1 @@
+unsafe-negation.dl:4:7: error: variable X in rule ready/1 is not bound by a positive body literal

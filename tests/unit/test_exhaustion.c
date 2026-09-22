@@ -47,6 +47,7 @@
 #include "harness.h"
 #include "internal.h"
 
+#define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
@@ -70,6 +71,22 @@
 #define	LOAD_SWEEP	80
 
 /*
+ * The check sweep's program, and how far the sweep goes.
+ *
+ * The program has to be large enough that compiling it allocates many times
+ * over, because a sweep only tests the statements its refusals actually
+ * reach.  A four-rule program makes three requests in total -- the predicate
+ * table, its index, the array of rules -- and all three fall while the first
+ * statement is being compiled, so every refusal would land in the same
+ * place and the cursor would never be asked to resume anywhere else.  A
+ * chain of a couple of hundred rules doubles each of those arrays several
+ * times and needs fresh arena chunks, so the refusals are spread across the
+ * whole program.
+ */
+#define	CHECK_RULES	200
+#define	CHECK_SWEEP	60
+
+/*
  * Requests still to be served before the allocator starts refusing.  A
  * negative budget means refuse nothing, which is the state every allocation
  * outside a swept region runs in.  Once the budget reaches zero every later
@@ -81,6 +98,9 @@ static unsigned long allocations_seen;
 
 /* How many RELIC_ERROR diagnostics the context has reported. */
 static size_t	 errors_reported;
+
+/* How many RELIC_WARNING diagnostics the context has reported. */
+static size_t	 warnings_reported;
 
 void		*relic_test_calloc(size_t count, size_t size);
 void		*relic_test_malloc(size_t size);
@@ -94,6 +114,8 @@ static void	 context_creation_reports_a_failed_allocation(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
+static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
+static char	*check_sweep_program(void);
 static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
 
@@ -159,6 +181,8 @@ count_error(void *callback_ctx RELIC_UNUSED, enum relic_diag_level level,
 {
 	if (level == RELIC_ERROR)
 		errors_reported++;
+	else if (level == RELIC_WARNING)
+		warnings_reported++;
 }
 
 static void
@@ -400,6 +424,199 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 	    LOAD_SWEEP);
 }
 
+/*
+ * Build the check sweep's program: a chain of rules long enough that
+ * compiling it allocates many times over.
+ *
+ * `excluded/1` is referenced by the first rule and defined nowhere, so it
+ * sits in the predicate table long before the last statement is compiled.
+ * That is what lets the sweep tell a check which skipped the
+ * undefined-predicate sweep from one which ran it and found nothing to say:
+ * a check that ran it after stopping early would warn about `excluded/1`,
+ * because by then the table knows about it.
+ *
+ * The caller owns the returned text.
+ */
+static char *
+check_sweep_program(void)
+{
+	char *text;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = (CHECK_RULES + 2) * 48;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size,
+	    "edge(a, b).\n"
+	    "p0(X, Y) :- edge(X, Y), not excluded(Y).\n");
+
+	for (i = 1; i < CHECK_RULES; i++) {
+		used += (size_t)snprintf(text + used, size - used,
+		    "p%u(X, Y) :- p%u(X, Y).\n", i, i - 1);
+
+		if (used >= size) {
+			free(text);
+			return (NULL);
+		}
+	}
+
+	return (text);
+}
+
+/*
+ * Check a well formed program with the nth allocation refused, then check it
+ * again with the allocator restored.
+ *
+ * Exhaustion and rejection are different answers and the whole of the
+ * cursor's contract is that they stay different.  A check that ran out of
+ * memory has not learned anything about the program, so it must leave the
+ * cursor on the statement it could not compile, must not mark the program
+ * invalid, and must clear the program arena's sticky flag on its way out.
+ * If any of those went wrong the failure would be silent and permanent: the
+ * second check below would refuse a program that is perfectly good, or would
+ * accept it while the rules it skipped were never compiled at all.
+ */
+static void
+a_check_that_ran_out_of_memory_can_be_retried(void)
+{
+	char *program;
+	size_t refused;
+	size_t completed;
+	size_t resumed;
+	long budget;
+
+	program = check_sweep_program();
+	if (program == NULL) {
+		check(false, SCENARIO_CHECK, "the sweep program is built");
+		return;
+	}
+
+	refused = 0;
+	completed = 0;
+	resumed = 0;
+
+	for (budget = 0; budget < CHECK_SWEEP; budget++) {
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_CHECK,
+			    "a context should be created");
+			return;
+		}
+
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "sweep.dl", program) != 0) {
+			check(false, SCENARIO_CHECK,
+			    "the program should load before the sweep begins");
+			relic_destroy(ctx);
+			free(program);
+			return;
+		}
+
+		errors_reported = 0;
+		warnings_reported = 0;
+
+		refuse_allocations_after(budget);
+		status = relic_check(ctx);
+		serve_every_allocation();
+
+		/*
+		 * The undefined-predicate sweep asks a question about the
+		 * whole program, so a check that stopped part way through
+		 * must not answer it: the definitions it would need are in
+		 * the statements it never reached.  `excluded/1` is genuinely
+		 * undefined and is interned early, so a check that ran the
+		 * sweep would warn about it whether or not it got to the end
+		 * -- and the warning is due exactly once, from whichever
+		 * check first does get there.
+		 */
+		checkf(warnings_reported == (status != 0 ? 0u : 1u),
+		    SCENARIO_CHECK,
+		    "a check that %s should report %d undefined-predicate "
+		    "warning(s), not %zu, with allocation %ld refused",
+		    status != 0 ? "stopped early" : "finished",
+		    status != 0 ? 0 : 1, warnings_reported, budget);
+
+		/*
+		 * The program is well formed, so the only thing a check of it
+		 * can report is that it ran out of memory, and it must say so
+		 * exactly once however many allocations the refusal struck.
+		 */
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_CHECK,
+		    "a check that %s should report %d message(s), not %zu, "
+		    "with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+
+		if (status != 0) {
+			refused++;
+
+			/*
+			 * A refusal that had already compiled something is
+			 * the case the cursor exists for.  One that stopped
+			 * on the very first statement exercises nothing
+			 * about resuming, so the two are counted apart.
+			 */
+			if (ctx->program.rules.count > 0)
+				resumed++;
+		} else {
+			completed++;
+		}
+
+		checkf(!ctx->program.invalid, SCENARIO_CHECK,
+		    "running out of memory should not condemn the program, "
+		    "with allocation %ld refused", budget);
+
+		checkf(relic_check(ctx) == 0, SCENARIO_CHECK,
+		    "checking should succeed once the allocator recovers, "
+		    "with allocation %ld refused", budget);
+
+		checkf(warnings_reported == 1, SCENARIO_CHECK,
+		    "the undefined predicate should be reported exactly once "
+		    "across both checks, not %zu times, with allocation %ld "
+		    "refused", warnings_reported, budget);
+
+		/*
+		 * Whatever the first check managed, the program afterwards
+		 * holds one compiled rule per statement: the three facts and
+		 * rules, with the fourth statement being the second path
+		 * clause.  A cursor left too far forward would show fewer.
+		 */
+		checkf(ctx->program.rules.count == CHECK_RULES + 1,
+		    SCENARIO_CHECK,
+		    "every statement should end up compiled exactly once, "
+		    "not %zu of %d, with allocation %ld refused",
+		    ctx->program.rules.count, CHECK_RULES + 1, budget);
+
+		relic_destroy(ctx);
+	}
+
+	free(program);
+
+	/*
+	 * The sweep has to straddle the point where the check stops needing
+	 * memory, or one of the two outcomes above is never reached and is
+	 * checking nothing.
+	 */
+	checkf(refused > 0, SCENARIO_CHECK,
+	    "the sweep should reach a check that runs out of memory, in %d "
+	    "attempts", CHECK_SWEEP);
+	checkf(completed > 0, SCENARIO_CHECK,
+	    "the sweep should reach a check that completes, in %d attempts",
+	    CHECK_SWEEP);
+	checkf(resumed > 0, SCENARIO_CHECK,
+	    "the sweep should reach a check that stops part way through the "
+	    "program, in %d attempts", CHECK_SWEEP);
+}
+
 int
 main(void)
 {
@@ -407,6 +624,7 @@ main(void)
 	interning_a_symbol_survives_a_failed_allocation();
 	interning_a_value_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
+	a_check_that_ran_out_of_memory_can_be_retried();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

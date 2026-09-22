@@ -1,0 +1,1 @@
+variable-limit.dl:11:7: error: rule ok/1 uses more than 64 distinct variables

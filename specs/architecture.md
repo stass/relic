@@ -519,6 +519,10 @@ Variables used by `<`, `>`, etc. must similarly be bindable from positive relati
 
 Safety analysis occurs before evaluation.
 
+Predicate identity, variable numbering, the compiled form of a rule, the
+safety analysis and the warnings that accompany it are specified in
+`specs/design-program.md`.
+
 ---
 
 # 15. Semantic Model

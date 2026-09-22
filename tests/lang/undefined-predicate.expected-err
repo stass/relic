@@ -1,0 +1,2 @@
+undefined-predicate.dl:9:9: warning: predicate excluded/1 is referenced but never defined
+undefined-predicate.dl:12:1: warning: predicate missing/1 is referenced but never defined

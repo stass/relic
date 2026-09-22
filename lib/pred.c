@@ -1,0 +1,317 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include "config.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+
+#include "internal.h"
+
+/*
+ * Predicates interned to identifiers.
+ *
+ * A predicate is (name, arity), per architecture section 17, so foo/1 and
+ * foo/2 are unrelated.  The table is the same open-addressing identifier
+ * table the symbol pool and the value table use, with the pair as its key:
+ * two mentions of one predicate return one identifier, and every later stage
+ * indexes by that identifier rather than by a name and a number.
+ *
+ * Identifiers are assigned in order of first mention and are never reused.
+ * The table never removes an entry, because nothing un-defines a predicate.
+ */
+
+/*
+ * Identifiers are 32-bit and zero is reserved to mean "none", so the table
+ * holds one fewer than a uint32_t can count.  A program with four billion
+ * distinct predicates would have exhausted memory long before, but the
+ * ceiling is checked rather than assumed: the alternative is an identifier
+ * that wraps to an existing one and silently merges two predicates.
+ */
+#define	RELIC_PRED_MAX	(UINT32_MAX - 1u)
+
+static relic_pred_t *pred_at(const relic_predtab_t *table,
+		    relic_pred_id_t id);
+static uint32_t	 pred_hash(uint32_t name, uint16_t arity);
+static uint32_t	 pred_rehash(uint32_t id, void *ctx);
+static int	 pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
+		    const relic_location_t *where, relic_pred_id_t *idp);
+
+void
+relic_predtab_init(relic_predtab_t *table)
+{
+	bzero(table, sizeof(*table));
+	relic_idtab_init(&table->index);
+}
+
+void
+relic_predtab_reset(relic_predtab_t *table)
+{
+	relic_idtab_reset(&table->index);
+	free(table->entries);
+	bzero(table, sizeof(*table));
+}
+
+/*
+ * The predicate an identifier names.  Identifier zero is reserved, so the
+ * array is indexed one lower; this is the only place that translation is
+ * written.  The caller must have established that the identifier was
+ * assigned.
+ */
+static relic_pred_t *
+pred_at(const relic_predtab_t *table, relic_pred_id_t id)
+{
+	return (&table->entries[id - 1]);
+}
+
+/*
+ * The hash of a (name, arity) pair.
+ *
+ * The pair is packed into one 64-bit word and hashed by the integer hash the
+ * value table already uses, rather than by a hash function of its own.  The
+ * packing is exact: an interned name is 32 bits and an arity is at most 32,
+ * so no two distinct pairs collide before the hash sees them.
+ */
+static uint32_t
+pred_hash(uint32_t name, uint16_t arity)
+{
+	uint64_t key;
+
+	key = ((uint64_t)name << 16) | (uint64_t)arity;
+
+	return (relic_hash_int64((int64_t)key));
+}
+
+/*
+ * The hash of a predicate already interned, for the identifier table to use
+ * when it grows.
+ */
+static uint32_t
+pred_rehash(uint32_t id, void *ctx)
+{
+	const relic_predtab_t *table;
+	const relic_pred_t *pred;
+
+	table = ctx;
+	pred = pred_at(table, id);
+
+	return (pred_hash(pred->name, pred->arity));
+}
+
+/*
+ * Append a predicate to the table and return the identifier assigned to it.
+ *
+ * The array is grown before the count advances, so a failure part way
+ * through leaves a table that is smaller than it might have been but is
+ * entirely consistent: the entry a caller could reach is one that was fully
+ * written.
+ */
+static int
+pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
+    const relic_location_t *where, relic_pred_id_t *idp)
+{
+	relic_predtab_t *table;
+	relic_pred_t *entries;
+	relic_pred_t *stored;
+
+	table = &ctx->program.predicates;
+
+	if (table->count >= RELIC_PRED_MAX) {
+		relic_diagf(ctx, RELIC_ERROR, where,
+		    "too many distinct predicates");
+		return (-1);
+	}
+
+	entries = relic_grow_array(table->entries, &table->capacity,
+	    table->count + 1, sizeof(*table->entries));
+	if (entries == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	table->entries = entries;
+
+	stored = &table->entries[table->count];
+	bzero(stored, sizeof(*stored));
+	stored->where = *where;
+	stored->name = name;
+	stored->arity = arity;
+
+	table->count++;
+	*idp = (relic_pred_id_t)table->count;
+
+	return (0);
+}
+
+/*
+ * Intern a predicate, storing its identifier in *idp.  Returns 0, or -1 with
+ * a diagnostic already reported.
+ *
+ * Every failure is a resource the library could not obtain: memory, or the
+ * last of four billion predicate identifiers.  Neither says anything about
+ * the statement being compiled, so a caller that could not create a
+ * predicate has learned nothing about it.
+ *
+ * `where` is recorded only for a predicate this is the first mention of, so
+ * the location a later warning points at is the first place the program
+ * named it rather than the last.
+ */
+int
+relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
+    const relic_location_t *where, relic_pred_id_t *idp)
+{
+	relic_predtab_t *table;
+	relic_idprobe_t probe;
+	const relic_pred_t *candidate;
+	uint32_t hash;
+	uint32_t id;
+
+	table = &ctx->program.predicates;
+	hash = pred_hash(name, arity);
+
+	relic_idprobe_open(&probe, &table->index, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		candidate = pred_at(table, id);
+		if (candidate->name == name && candidate->arity == arity) {
+			*idp = id;
+			return (0);
+		}
+	}
+
+	/*
+	 * Room in the index is taken before the predicate is stored, so that
+	 * the only step that can fail happens while there is still nothing to
+	 * leave behind.  Storing first and indexing second would, on a failed
+	 * index growth, leave a predicate no lookup could reach, and the next
+	 * mention of the same pair would assign it a second identifier --
+	 * which would make one predicate into two relations holding half the
+	 * answer each.
+	 */
+	if (relic_idtab_reserve(&table->index, pred_rehash, table) != 0) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	if (pred_store(ctx, name, arity, where, &id) != 0)
+		return (-1);
+
+	relic_idtab_place(&table->index, hash, id);
+	*idp = id;
+
+	return (0);
+}
+
+/*
+ * The predicate an identifier names, or NULL for one this context never
+ * assigned.
+ */
+const relic_pred_t *
+relic_pred_of(const relic_t *ctx, relic_pred_id_t id)
+{
+	const relic_predtab_t *table;
+
+	table = &ctx->program.predicates;
+	if (id == RELIC_ID_NONE || id > table->count)
+		return (NULL);
+
+	return (pred_at(table, id));
+}
+
+size_t
+relic_pred_count(const relic_t *ctx)
+{
+	return (ctx->program.predicates.count);
+}
+
+/*
+ * Record that something derives into this predicate.
+ */
+void
+relic_pred_define(relic_t *ctx, relic_pred_id_t id)
+{
+	relic_predtab_t *table;
+
+	table = &ctx->program.predicates;
+	if (id == RELIC_ID_NONE || id > table->count)
+		return;
+
+	pred_at(table, id)->defined = true;
+}
+
+/*
+ * Write "name/arity" into `buffer` and return it, for a message about a
+ * predicate.
+ *
+ * Every byte of a predicate name is an identifier byte, so the name is safe
+ * to quote without escaping; it is truncated because it can be arbitrarily
+ * long and a message names one thing.  An identifier the context never
+ * assigned cannot arise from a compiled program, but the accessor is total
+ * so that a message can never be the thing that faults.
+ */
+const char *
+relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
+    size_t size)
+{
+	const relic_pred_t *pred;
+	const char *name;
+	char shortened[RELIC_NAME_TEXT_MAX];
+
+	pred = relic_pred_of(ctx, id);
+	if (pred == NULL) {
+		snprintf(buffer, size, "?");
+		return (buffer);
+	}
+
+	name = relic_symbol_bytes(ctx, pred->name, NULL);
+	if (name == NULL)
+		name = "?";
+
+	snprintf(buffer, size, "%s/%u",
+	    relic_diag_name(name, shortened, sizeof(shortened)),
+	    (unsigned int)pred->arity);
+
+	return (buffer);
+}
+
+/*
+ * Warn about every predicate the program mentions and nothing defines.
+ *
+ * Reported once per predicate, at the first place the program named it: such
+ * a predicate is a typo far more often than an intentionally empty relation,
+ * and the consequence is silent, because every positive literal over an
+ * empty relation fails and every negated one succeeds.
+ *
+ * The sweep is over the whole table rather than over what a check just
+ * compiled, because its answer is not incremental: a predicate referenced by
+ * an early load may be defined by a later one, so the sweep must see every
+ * definition before it speaks.  Predicates already reported are skipped, so
+ * repeating the sweep says nothing twice.
+ */
+void
+relic_pred_report_undefined(relic_t *ctx)
+{
+	relic_predtab_t *table;
+	relic_pred_t *pred;
+	char described[RELIC_PRED_TEXT_MAX];
+	size_t position;
+
+	table = &ctx->program.predicates;
+
+	for (position = 0; position < table->count; position++) {
+		pred = &table->entries[position];
+
+		if (pred->defined || pred->reported_undefined)
+			continue;
+
+		pred->reported_undefined = true;
+
+		relic_diagf(ctx, RELIC_WARNING, &pred->where,
+		    "predicate %s is referenced but never defined",
+		    relic_pred_describe(ctx,
+		    (relic_pred_id_t)(position + 1), described,
+		    sizeof(described)));
+	}
+}

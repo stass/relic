@@ -1,0 +1,13 @@
+% Architecture section 17: a predicate is (name, arity), so foo/1 and foo/2
+% are unrelated and neither is an inconsistent use of the other.  A predicate
+% may also have both facts and rules, which seed and extend one relation.
+foo(a).
+foo(X) :-
+    bar(X).
+
+foo(a, b).
+foo(X, Y) :-
+    bar(X),
+    bar(Y).
+
+bar(z).

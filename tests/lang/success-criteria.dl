@@ -1,0 +1,27 @@
+% The program of architecture section 72, with facts for the three relations
+% it leaves extensional.  Validating it is the first of that section's
+% criteria; the rest arrive with evaluation.
+edge(a, b).
+edge(b, c).
+edge(c, d).
+
+todo(design).
+todo(build).
+depends(build, design).
+done(design).
+
+path(X, Y) :-
+    edge(X, Y).
+
+path(X, Z) :-
+    edge(X, Y),
+    path(Y, Z).
+
+blocked(X) :-
+    todo(X),
+    depends(X, Y),
+    not done(Y).
+
+ready(X) :-
+    todo(X),
+    not blocked(X).

@@ -1,0 +1,16 @@
+% Architecture section 7: a variable a rule mentions once is a warning, with
+% two exemptions.  `_` is not a named variable at all, and a longer
+% `_`-prefixed name is how a rule documents a column it deliberately ignores.
+edge(a, b).
+
+warned(X) :-
+    edge(X, Y).
+
+ignored(X) :-
+    edge(X, _).
+
+documented(X) :-
+    edge(X, _Target).
+
+used(X, Y) :-
+    edge(X, Y).

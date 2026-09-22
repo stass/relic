@@ -1,0 +1,4 @@
+% Architecture section 10: comparisons are filters.  They neither generate a
+% value nor bind a variable, so a rule that expects one to is unsafe.
+answer(X) :-
+    X = 42.

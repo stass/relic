@@ -175,7 +175,12 @@ enum relic_diag_level {
 /*
  * Receives every diagnostic the context produces: the context pointer given
  * when it was installed, the level, where the diagnostic points or NULL, and
- * the message.  The message is borrowed and does not outlive the call.
+ * the message.
+ *
+ * Both the message and the location are borrowed and do not outlive the
+ * call; a callback that keeps either copies it. The `file` name inside a
+ * location is the exception and belongs to the context, so it stays valid
+ * until the context is destroyed.
  */
 typedef void (*relic_diag_cb)(
     void *,
@@ -232,6 +237,29 @@ RELIC_EXPORT int relic_load_file(relic_t *ctx, FILE *stream,
 RELIC_EXPORT int relic_load_path(relic_t *ctx, const char *path);
 RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
     const char *text);
+
+/*
+ * Validate the loaded program, returning 0 when it is usable and -1 when it
+ * is not, with every mistake already reported through the diagnostic
+ * callback.
+ *
+ * A program is rejected when a rule is not range restricted: every variable
+ * in a rule head, in a negated literal and in a comparison must also occur in
+ * a positive relational body literal, because nothing else can bind it.
+ * Warnings that do not reject a program are reported too, among them a
+ * variable a rule mentions only once and a predicate the program references
+ * and never defines.
+ *
+ * A check compiles only the statements loaded since the previous one, so
+ * calling it twice with nothing loaded in between reports nothing the second
+ * time and returns the same answer. It stays -1 once a program has contained
+ * a rejected rule: loading more cannot repair one already loaded.
+ *
+ * A query is not yet validated here. Its predicates are resolved, so a
+ * reference to one nothing defines is reported, but its variables are
+ * checked when it is compiled for execution.
+ */
+RELIC_EXPORT int relic_check(relic_t *ctx);
 
 /*
  * The text of the most recent RELIC_ERROR diagnostic, or NULL if the context

@@ -6,13 +6,13 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S2 landed; S3, the program model and
-safety, next.
+`relic-plan.md`. Current position: S3 landed; S4, relations and the tuple
+store, next.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`design-program.md` (S3), `design-relations.md` (S4), `design-plan.md` and
+`design-relations.md` (S4), `design-plan.md` and
 `design-eval.md` (S5), `design-stratify.md` (S6), `design-index.md` and
 `design-planner.md` (S9), `design-magic.md` (S10). Each is referenced from
 `specs/architecture.md` when written.
@@ -84,6 +84,60 @@ considering. Decide at S14 with the rest of packaging.
 
 ## Engine
 
+**A query is not validated by `relic_check()`.** [High, component:
+`lib/rule.c`] The program model resolves a query's predicates, so a typo in
+one is reported as an undefined predicate, but it numbers no variables and
+checks no safety. Architecture section 11 turns a query into a rule over a
+synthetic `$q0` predicate whose arguments are its output columns, and
+`relic-plan.md` places that transformation in S5 with the planner that
+consumes it. Until then `relic -c 'answer(X) :- q(X). X = 42?'` accepts a
+query that S5 will reject. The check itself needs no new code: the synthetic
+rule's head is the list of output columns, so "every head variable is bound"
+is already "every output column is bound". Close this when S5 builds the
+synthetic rule.
+
+**A rejected statement keeps its arena memory.** [Low, component:
+`lib/rule.c`] A statement is compiled in one pass, so a rule that turns out
+to be unsafe has already had its arguments, body and variables allocated from
+the program arena by the time the safety computation runs. They are not
+appended to the program and cannot be given back, because an arena has no
+per-allocation free. The waste is bounded by the statement, spent once for
+the life of the context, and spent only on a program that is refused and will
+never be evaluated. `specs/design-program.md` section 8.1 explains why the
+single pass is worth it; revisit only if a caller is found that checks
+enormous broken programs in a long-lived context.
+
+**Exhausting the predicate identifier space cannot be retried out of.**
+[Low, component: `lib/pred.c`] `relic_pred_intern()` fails either because
+memory ran out or because all four billion predicate identifiers are taken,
+and `lib/rule.c` cannot tell the two apart, so both leave the cursor where it
+is for a later check to resume from. Retrying is right for the first and
+futile for the second: a check will report the same thing every time it is
+called. The condition needs about a hundred gigabytes of predicate table to
+reach, so the cost of distinguishing them -- a second output on an interning
+function that has no other reason for one -- is not obviously worth paying.
+Revisit if a limit on predicates ever becomes configurable, since that limit
+would need the same distinction.
+
+**Diagnostics elsewhere truncate without saying so.** [Low, component:
+`lib/parse.c`] `lib/diag.c`'s `relic_diag_name()` shortens a name to forty
+bytes and marks the cut with `...`, which is what the program model's messages
+use. `lib/parse.c` still truncates quoted token text with a bare `%.*s`
+precision, so a long string literal or identifier is silently cut short in a
+parse diagnostic. The two should agree. Parser text is not restricted to
+identifier bytes, so a shared helper has to leave escaping to
+`relic_diag_stderr()` as it does today; check that before merging them.
+
+**A check between loads can warn about a predicate a later load defines.**
+[Low, component: `lib/pred.c`] The undefined-predicate sweep answers a
+program-wide question, and an embedded caller has no end-of-program event at
+which to ask it. A caller that loads one file, checks, then loads a second
+file defining what the first referenced will have been warned about a
+predicate that is now defined. The warning is not repeated and the program is
+not refused. The command-line tool cannot hit it, because it loads every
+operand before checking. Revisit if S11 gives a caller a way to say that
+loading is finished.
+
 **A failed load keeps its arena memory.** [Low, component: `lib/parse.c`] A
 load parses onto a list of its own and splices it into the program only if the
 whole input parsed, so a failed load adds no statements. What it cannot give
@@ -129,6 +183,12 @@ not enumerate because it assumed `relic -c` came free. Decide at S5, when the
 tool's real size is known, whether to record the front end's budget as having
 been understated or to find the lines back.
 
+S3 came in at about 700 non-comment lines against a budget of 600, a sixth
+over, which is inside the plan's stated tolerance. Risk R7's first lever is to
+merge `lib/pred.c` into `lib/rule.c`, which architecture section 64 already
+permits; that would save the file header and a handful of accessors and is
+worth doing only if a later stage needs the lines.
+
 **An unknown value type cannot be rejected in a build that checks for it.**
 [Low, component: `lib/value.c`] `value_well_formed()` rejects a
 `relic_value_t` whose `type` is not one of the three enumerators, which an
@@ -162,11 +222,12 @@ The append-only invariant of D-10 is the first one this applies to.
 **Allocation-failure coverage must grow with each stage.** [Medium,
 component: `tests/unit/test_exhaustion.c`] The suite compiles the library
 against an allocator that refuses the nth request and sweeps n across symbol
-and value interning and across a load, which is what caught the index-growth
-failure that broke interning identity. Every later stage adds allocation paths
-that the sweep will not reach unless it is extended: the tuple store, the
-indexes, the plan and evaluation arenas. Add a scenario per stage rather than
-leaving the suite describing the stages that happened to write one.
+and value interning, across a load and across a check, which is what caught
+the index-growth failure that broke interning identity. Every later stage adds
+allocation paths that the sweep will not reach unless it is extended: the
+tuple store, the indexes, the plan and evaluation arenas. Add a scenario per
+stage rather than leaving the suite describing the stages that happened to
+write one.
 
 **Leak detection is unavailable on macOS.** [Medium, component: `Makefile.am`]
 AddressSanitizer on Apple silicon reports that `detect_leaks` is unsupported

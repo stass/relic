@@ -1,0 +1,5 @@
+% Architecture section 14: a negated literal cannot bind anything, so a rule
+% whose only mention of X is inside one is unsafe.
+blocked(a).
+ready(X) :-
+    not blocked(X).
