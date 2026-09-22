@@ -137,11 +137,12 @@
 
 /*
  * The evaluation sweep's program is the transitive closure of a chain of
- * this many edges, which derives EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 paths.
+ * this many edges, which derives EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 paths,
+ * and a stratum above it that finds the chain's one sink by negation.
  * That is enough to grow the path relation's columns and index several times
- * over, so a refusal can land in preparing the query, in planning, in either
- * relation's growth, or in creating the answer relation, and the sweep is
- * bound well past the last of them.
+ * over, so a refusal can land in preparing the query, in planning a positive
+ * or a negated literal, in any relation's growth, or in creating the answer
+ * relation, and the sweep is bound well past the last of them.
  */
 #define	EVAL_CHAIN	40
 #define	EVAL_SWEEP	160
@@ -207,6 +208,8 @@ static int	 count_answer(void *callback_ctx, const relic_value_t *values,
 static char	*evaluation_sweep_program(void);
 static bool	 answer_is_first(const relic_t *ctx,
 		    const relic_query_t *query);
+static const relic_relation_t *relation_named(relic_t *ctx, const char *name,
+		    uint16_t arity);
 static relic_relation_t *sweep_relation(relic_t *ctx, relic_dom_t *values,
 		    size_t count);
 static char	*check_sweep_program(void);
@@ -1289,7 +1292,8 @@ a_relation_survives_a_failed_allocation(void)
 }
 
 /*
- * The transitive closure of a chain n0 -> n1 -> ... of EVAL_CHAIN edges.
+ * The transitive closure of a chain n0 -> n1 -> ... of EVAL_CHAIN edges, and
+ * its sink: the one node with an edge in and none out.
  */
 static char *
 evaluation_sweep_program(void)
@@ -1306,7 +1310,9 @@ evaluation_sweep_program(void)
 
 	used = (size_t)snprintf(text, size,
 	    "path(X, Y) :- edge(X, Y).\n"
-	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n");
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n"
+	    "source(X) :- edge(X, _).\n"
+	    "sink(Y) :- edge(_, Y), not source(Y).\n");
 
 	for (i = 0; i < EVAL_CHAIN; i++) {
 		used += (size_t)snprintf(text + used, size - used,
@@ -1339,6 +1345,24 @@ answer_is_first(const relic_t *ctx, const relic_query_t *query)
 	return (name != NULL && strcmp(name, "$q0") == 0);
 }
 
+/*
+ * The relation of a predicate given by name, or NULL when it cannot be had.
+ */
+static const relic_relation_t *
+relation_named(relic_t *ctx, const char *name, uint16_t arity)
+{
+	relic_pred_id_t pred;
+	uint32_t symbol;
+
+	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
+		return (NULL);
+
+	if (relic_pred_intern(ctx, symbol, arity, NULL, &pred) != 0)
+		return (NULL);
+
+	return (relic_relation_for(ctx, pred));
+}
+
 static int
 count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
     size_t count RELIC_UNUSED)
@@ -1356,12 +1380,12 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
  * with the allocator restored.
  *
  * A query that runs out of memory must say so once and deliver no rows,
- * since a partial answer would look like a complete one.  What it leaves
- * behind must be consistent: every relation still a set, so that the retry
- * continues the fixed point from tuples that are all justified and reaches
- * exactly the answer an undisturbed run does.  A duplicate left in the path
- * relation by an insertion that failed half way would show up as a relation
- * holding more tuples than the closure has pairs.
+ * since a partial answer would look like a complete one.  The retry must
+ * reach exactly the answer an undisturbed run does: the failed evaluation
+ * left its relations stale, part of a fixed point, and the retry discards
+ * them and starts again.  A path relation holding more tuples than the
+ * closure has pairs, or a sink relation holding other than the chain's one
+ * sink, would mean something of the failed run survived into the retry.
  */
 static void
 a_query_that_ran_out_of_memory_can_be_retried(void)
@@ -1388,9 +1412,8 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 
 	for (budget = 0; budget < EVAL_SWEEP; budget++) {
 		const relic_relation_t *paths;
-		relic_pred_id_t path;
+		const relic_relation_t *sinks;
 		relic_t *ctx;
-		uint32_t name;
 		int status;
 
 		ctx = relic_create();
@@ -1462,16 +1485,20 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 		    "the retry should answer %d rows, not %zu, with "
 		    "allocation %ld refused", EVAL_CHAIN, rows, budget);
 
-		paths = NULL;
-		if (relic_symbol_intern(ctx, "path", 4, &name) == 0 &&
-		    relic_pred_intern(ctx, name, 2, NULL, &path) == 0)
-			paths = relic_relation_for(ctx, path);
+		paths = relation_named(ctx, "path", 2);
 		checkf(paths != NULL &&
 		    relic_relation_count(paths) == expected_paths,
 		    SCENARIO_EVALUATE,
 		    "the path relation should hold %zu tuples, not %zu, with "
 		    "allocation %ld refused", expected_paths,
 		    paths != NULL ? relic_relation_count(paths) : 0, budget);
+
+		sinks = relation_named(ctx, "sink", 1);
+		checkf(sinks != NULL && relic_relation_count(sinks) == 1,
+		    SCENARIO_EVALUATE,
+		    "the sink relation should hold 1 tuple, not %zu, with "
+		    "allocation %ld refused",
+		    sinks != NULL ? relic_relation_count(sinks) : 0, budget);
 
 		relic_query_destroy(query);
 		relic_destroy(ctx);

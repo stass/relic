@@ -226,11 +226,6 @@ of its member tuples belongs to.
 Insertions within a round are visible to scans that start later in the same
 round. That only adds derivations; the argument above does not depend on it.
 
-Round 0 being a full pass is also what makes continuing a fixed point after a
-later load sound: the tuples the relations already hold are joined with each
-other and with the new rules and facts like any others, so the result is the
-fixed point that starting from nothing would reach.
-
 Evaluation proceeds stratum by stratum and, within a stratum, one strongly
 connected component at a time in topological order. A component with no
 recursion needs one pass. Plans and variants are built before the first
@@ -265,7 +260,14 @@ interface.
 A negated literal becomes `ANTI_MEMBER`: once its variables are bound, the tuple
 it names is looked up, and the binding survives only if it is absent.
 Stratification guarantees that the negated relation belongs to a lower stratum
-and is complete by the time the test runs, so absence is meaningful.
+and is complete by the time the test runs, so absence is meaningful. The
+schedule evaluates every component after everything it depends on, negatively
+as well as positively, so the guarantee holds with no check in the executor.
+
+A negated literal never reads a member of its own component, because that
+would be recursion through negation and the program would have been rejected.
+It therefore never has a delta variant of its own, and in a delta variant of
+another literal it tests the same complete relation every round.
 
 An evaluator that cannot give a negated literal that guarantee must refuse to
 plan one, naming the rule, rather than test absence against a relation that may
@@ -275,27 +277,37 @@ still grow.
 
 ## 6. Materialization and when it is current
 
-**The relations of a context hold the fixed point of some prefix of the
-program's rules**, and the context records how long that prefix is. Rules are
-only ever appended, because checking is incremental and the syntax tree is
-append-only, so a count is enough.
+**The relations of a context hold only what evaluation derived.** A fact is a
+rule with an empty body, so even the facts are in a relation because a plan
+inserted them. The relations are therefore either the fixed point of every
+rule the program has, or stale, and the context records which by counting the
+rules they are the fixed point of. Rules are only ever appended, because
+checking is incremental and the syntax tree is append-only, so a count is
+enough.
 
 * `relic_materialize()` checks the program, and if rules have been added since
-  the relations last reached a fixed point, runs the fixed point again over
-  all of them. For a positive program that is sound: every tuple already held
-  is still justified, and continuing from them reaches the same least fixed
-  point as starting from nothing.
+  the relations last reached a fixed point, **discards every tuple of every
+  relation** and computes the fixed point again from nothing.
 * A query run materializes first, so a caller that loads, queries, loads
   again and queries again gets answers over everything it loaded.
 
-A program with negation is not monotone: a fact added later can make a tuple
-derived earlier false. Continuing a fixed point is then unsound, so when a
-program with negation changes after an evaluation, derived state is discarded
-and recomputed, per architecture section 54.
+Continuing from the tuples already held would be sound for a program without
+negation, where a later fact can only add to what was derived, and unsound for
+one with it, where a later fact can make a derived tuple false: `ready(build)`
+stops holding once a later load gives `build` a dependency that is not done.
+Discarding for every program, rather than only for one that negates, is what
+keeps that question from being asked at all, and it is the rule architecture
+section 54 already sets for `relic_fact_add()`: adding facts after evaluation
+invalidates derived state. One rule covers both ways of changing the program.
 
-A failed evaluation does not advance the count. The relations may hold part of
-the fixed point, which is harmless -- every tuple is still justified -- and the
-next evaluation continues from them.
+The discard empties the relations in place, so a pointer to one stays valid,
+and it happens before an evaluation begins, so no delta range can span it --
+the obligation `specs/design-relations.md` section 4 places on any operation
+that ends a span of the append-only store.
+
+A failed evaluation leaves the count where the discard put it, so the relations
+are stale and the next evaluation discards the part of a fixed point they hold
+before starting again.
 
 ---
 
@@ -328,9 +340,10 @@ A query that exceeds a limit therefore produces no rows and an error, never a
 truncated answer indistinguishable from a complete one, which is what
 architecture section 63 requires.
 
-The answer relation outlives the run, like every relation. Running the query
-again repeats the three steps, finds nothing new to insert, and streams the
-same rows in the same order.
+The answer relation outlives the run, like every relation, until a change to
+the program discards it with the rest. Running the query again repeats the
+three steps, finds nothing new to insert, and streams the same rows in the
+same order.
 
 ---
 
@@ -349,7 +362,8 @@ so a failure there has derived nothing and cannot hide behind the cost of a
 fixed point it would otherwise have computed first. The relation that refused
 the tuple is exactly as it was, every other relation holds tuples that are all
 justified, and the evaluation arena is released. Nothing needs unwinding, which
-is the payoff of the relation store's refuse-before-modify ordering.
+is the payoff of the relation store's refuse-before-modify ordering, and the
+next evaluation discards what the failed one derived before starting again.
 
 ---
 
@@ -378,6 +392,6 @@ that.
 * **Recursion in the executor.** Section 2.
 * **A separate fact-loading pass.** A fact is a rule with no body.
 * **Rows before completion.** Section 7.
-* **Incremental maintenance.** Continuing a positive fixed point after a load
-  is sound and is not the same thing: nothing is ever removed.
+* **Incremental maintenance.** A change to the program discards everything
+  derived, per section 6, and architecture section 70 defers anything finer.
 * **Parallel evaluation.** A context is single-threaded, per D-14.

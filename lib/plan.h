@@ -38,15 +38,19 @@ typedef struct relic_plan_term relic_plan_term_t;
  * The operations.
  *
  * SCAN is a generator: it succeeds once per tuple of its relation that
- * matches, binding the columns it binds.  MEMBER and FILTER are tests: they
- * read only constants and bound slots, bind nothing, and succeed at most
- * once.  EMIT inserts the head tuple and never succeeds, which is what makes
- * it the last operation of every plan: the deepest level of the join always
- * rejects, so the executor always backtracks from it.
+ * matches, binding the columns it binds.  MEMBER, ANTI_MEMBER and FILTER are
+ * tests: they read only constants and bound slots, bind nothing, and succeed
+ * at most once.  ANTI_MEMBER is MEMBER with the answer inverted, which is the
+ * whole of negation: the schedule evaluates a negated relation completely
+ * before any rule that reads it runs, so its absence is meaningful.  EMIT
+ * inserts the head tuple and never succeeds, which is what makes it the last
+ * operation of every plan: the deepest level of the join always rejects, so
+ * the executor always backtracks from it.
  */
 enum relic_op_kind {
 	RELIC_OP_SCAN,		/* match and bind every tuple of a relation */
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
+	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of bound values hold? */
 	RELIC_OP_EMIT		/* insert the head tuple */
 };
@@ -78,8 +82,8 @@ struct relic_plan_term {
 };
 
 /*
- * An operation over a relation: SCAN, MEMBER or EMIT.  `terms` holds the
- * relation's arity of columns and is NULL when that arity is zero.
+ * An operation over a relation: SCAN, MEMBER, ANTI_MEMBER or EMIT.  `terms`
+ * holds the relation's arity of columns and is NULL when that arity is zero.
  *
  * The relation is held directly rather than as a predicate identifier to
  * resolve on every step.  A relation never moves once created, so a plan may
@@ -108,7 +112,7 @@ struct relic_op_filter {
 
 struct relic_op {
 	union {
-		relic_op_atom_t		atom;	/* SCAN, MEMBER, EMIT */
+		relic_op_atom_t		atom;	/* all but FILTER */
 		relic_op_filter_t	filter;	/* FILTER */
 	}			u;
 	enum relic_op_kind	kind;		/* which arm of u is live */

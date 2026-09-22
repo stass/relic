@@ -94,8 +94,9 @@ has ever held a rejected rule stays refused.
 A relation is a set, and that is the property everything above it rests on: an
 insertion reports newness, which is how a fixed point is detected. The store
 is append-only by construction rather than by rule -- it offers no operation
-that removes, reorders or renumbers a tuple -- which is what lets a semi-naive
-delta be a range of identifiers instead of a relation of its own.
+that removes, reorders or renumbers one tuple, and from S8 the only removal is
+a discard of every relation at once, between evaluations -- which is what lets
+a semi-naive delta be a range of identifiers instead of a relation of its own.
 
 A relation never moves. The table holds pointers to individually allocated
 relations, so creating one cannot invalidate another, and a plan or an
@@ -141,12 +142,11 @@ Evaluation materializes the whole program before answering any query --
 Magic Sets arrive in S10 -- and answers a query by running its rule once into
 the answer relation, then streaming that relation. No row is delivered until
 the answer is complete, so a query that exceeds a limit delivers none. The
-relations record how many rules they are a fixed point of, so a query after a
-later load continues the fixed point rather than recomputing it.
+relations record how many rules they are a fixed point of, so a query after
+nothing new was loaded evaluates nothing.
 
-A negated literal passes the check and is refused when its rule is planned,
-naming the rule. `-e` arrives in S9, and `-i`, `-l`, `-n` and `-v` in S12.
-Each is an unknown option until it does.
+`-e` arrives in S9, and `-i`, `-n` and `-v` in S12. Each is an unknown option
+until it does.
 
 **The dependency graph and stratification, stage S6.** The check knows what
 depends on what and rejects recursion through negation; evaluation runs in the
@@ -166,11 +166,6 @@ second, independent cycle introduced by a later load is not reported until
 the first is gone. The command-line tool loads every operand before it checks
 and reports every cycle in one run.
 
-Negation is refused when a rule is planned: the strata that make it
-meaningful exist, and the `ANTI_MEMBER` operation that evaluates it arrives in
-S8. Until then the strata order evaluation, but no rule can read a lower
-stratum negatively.
-
 **Semi-naive evaluation, stage S7, milestone M2.** Recursion no longer redoes
 the work it has already done, specified in `specs/design-eval.md` section 4
 and `specs/design-plan.md` section 5.3.
@@ -187,6 +182,25 @@ The two strategies take the same number of rounds on a chain; what differs is
 the work. Over a six-edge chain the default derives 38 tuples and scans 216,
 the naive fixed point 118 and 694, and the golden counters fail if the default
 regresses toward the naive figures.
+
+**Negation execution, stage S8.** `not` works, specified in
+`specs/design-plan.md` sections 3 and 5 and `specs/design-eval.md` sections 5
+and 6. The architecture section 72 program evaluates correctly under both
+strategies.
+
+| Component | State |
+| --- | --- |
+| `lib/plan.{h,c}` | `RELIC_OP_ANTI_MEMBER`; a comparison and a negated literal are both tests, each placed at the earliest point every slot it reads is bound, in written order among tests placeable at one point; a negated literal is never a delta literal; the negation refusal is gone |
+| `lib/eval.c` | the executor runs `ANTI_MEMBER` as `MEMBER` inverted; a changed program discards every relation and is evaluated again from nothing, for every program rather than only one that negates; the answer stream stops at an identifier its relation no longer has, so a callback that breaks its contract by loading cannot make it read past a relation |
+| `lib/relation.c` | `relic_relation_discard_all()` empties every relation in place and returns both limit totals to zero; relations do not move |
+| `include/relic.h` | `relic_materialize()` documents the discard |
+| `cmd/relic/main.c` | `-l key=value`, repeatable, brought forward from S12: `tuples`, `memory`, `magic-preds` and `magic-rules`, the last two accepted and stored but not acted on until S10; values through `strtonum()`; a malformed `-l` is a usage error naming what is wrong |
+| `tests/` | `test_plan` for where an `ANTI_MEMBER` goes and what its columns read, and a negated literal refused as a delta literal; `test_eval`, under both strategies, for the task graph of section 72 with negation stacked across strata, a negating query, arity zero, constants and a negation written before its binder, a later load that makes a derived tuple false, a discard that gives back what the limits count, and a contract-breaking callback; the evaluation sweep in `test_exhaustion` now includes a negated stratum; `tests/cli.sh` fails queries on `-l` limits and rejects thirteen malformed ones, a sign or a space among them; four golden tests, all compared across strategies by `tests/equiv/strategies.sh` |
+
+The textual planner orders only positive literals. A negated literal and a
+comparison go wherever their variables are first bound, so `not done(a)` and
+`not frozen` are tested before any scan and reject a rule's every binding at
+no cost.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -310,8 +324,8 @@ is broken, by injecting each fault and rerunning:
   the text and json golden tests catch;
 * a predicate wider than 32 arguments admitted by interning, which
   `tests/unit/test_pred.c` catches;
-* a negated literal left out of a plan rather than refused, which the
-  planner's completeness check turns into an error instead of wrong answers.
+* a negated literal left out of a plan, which the planner's completeness
+  check turns into an error instead of wrong answers.
 
 The analysis suites were confirmed the same way:
 
@@ -355,6 +369,21 @@ The semi-naive suites were confirmed the same way:
   against a tool that always fails, both of which it reports rather than
   passing.
 
+The negation suites were confirmed the same way:
+
+* an `ANTI_MEMBER` that is not inverted, which every negation golden test,
+  `test_eval`, the evaluation sweep and the equivalence suite catch;
+* a negated literal placed before its variables are bound, and one never
+  placed at all, which `test_plan` catches, the second also as the planner's
+  completeness error in every negation test;
+* a later load that does not discard, which `test_eval` catches as a stale
+  `ready(build)` and as a limit exceeded by the tuples an earlier evaluation
+  held;
+* a discard that keeps the tuple total, which `test_eval` catches as a limit
+  exceeded after the discard;
+* the answer stream without its guard, which the contract-breaking callback in
+  `test_eval` catches by crashing.
+
 ## Documents
 
 | File | Contents |
@@ -374,9 +403,11 @@ The semi-naive suites were confirmed the same way:
 
 ## Next
 
-Stage S8, negation execution: the `ANTI_MEMBER` operation, a negated literal
-placed once its variables are bound, and the architecture section 72 program
-evaluated under both strategies.
+Stage S9, indexes, statistics, planner and explain, milestone M3:
+column-bitmask hash indexes, access path selection, greedy body ordering,
+relation statistics and `-e`, each with `-X` switches and equivalence tests
+against the textual planner. `specs/design-index.md` and
+`specs/design-planner.md` come first.
 
 ## Decisions taken
 

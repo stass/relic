@@ -38,6 +38,14 @@
  * cannot be planned, or memory that runs out while planning, stops the
  * evaluation before it has derived anything.
  *
+ * The relations hold only what evaluation derived -- a fact is a rule too --
+ * so they are either the fixed point of every rule the program has, or stale.
+ * Stale relations are discarded and the fixed point computed again from
+ * nothing.  Continuing from them would be sound for a program without
+ * negation, where a later fact can only add to what was derived, but not for
+ * one with it, where a later fact can make a derived tuple false; one rule
+ * for every program keeps that question from ever being asked.
+ *
  * Both fixed points terminate because every value a rule can produce was
  * interned before evaluation began -- a head holds constants and variables,
  * and a variable is bound only from a tuple -- so each relation can hold only
@@ -69,8 +77,9 @@
  * then hold everything from round m and before.
  *
  * The delta is a range of tuple identifiers rather than a copy.  The store is
- * append-only -- it offers no operation that removes, reorders or renumbers a
- * tuple -- so the tuples a relation gained in one round are exactly those
+ * append-only between discards -- nothing removes, reorders or renumbers one
+ * tuple, and the discard of every relation runs only before an evaluation
+ * begins -- so the tuples a relation gained in one round are exactly those
  * between its end before the round and its end after it.
  */
 
@@ -173,6 +182,7 @@ static int	 build_running_plan(relic_evaluation_t *eval,
 static enum relic_fixed_point choose_fixed_point(const relic_t *ctx,
 		    const relic_component_t *component);
 static int	 confirm_schedule_current(relic_t *ctx);
+static void	 discard_derived_state(relic_t *ctx);
 static size_t	 count_member_literals(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
 static void	*evaluation_alloc(relic_evaluation_t *eval, size_t count,
@@ -436,8 +446,9 @@ step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
  * whether a binding was produced.
  *
  * A test succeeds at most once, so resuming one always finds nothing more.
- * An EMIT is never resumed: it never matches, so nothing below it is ever
- * entered and nothing backtracks into it.
+ * An ANTI_MEMBER is the membership test inverted: the binding survives when
+ * the tuple is absent.  An EMIT is never resumed: it never matches, so
+ * nothing below it is ever entered and nothing backtracks into it.
  */
 static int
 step(relic_evaluation_t *eval, const relic_op_t *op,
@@ -452,6 +463,10 @@ step(relic_evaluation_t *eval, const relic_op_t *op,
 	case RELIC_OP_MEMBER:
 		if (!resume)
 			*matchedp = step_member(eval, &op->u.atom);
+		break;
+	case RELIC_OP_ANTI_MEMBER:
+		if (!resume)
+			*matchedp = !step_member(eval, &op->u.atom);
 		break;
 	case RELIC_OP_FILTER:
 		if (!resume)
@@ -987,17 +1002,28 @@ confirm_schedule_current(relic_t *ctx)
 }
 
 /*
+ * Forget everything evaluation derived, which is everything the relations
+ * hold, so that they are the fixed point of no rules.  The facts are loaded
+ * again by the next evaluation with the rest.
+ */
+static void
+discard_derived_state(relic_t *ctx)
+{
+	relic_relation_discard_all(ctx);
+	ctx->materialized_rules = 0;
+}
+
+/*
  * Bring the relations to the fixed point of every rule of the program, one
  * component of the schedule at a time.
  *
- * The relations are already a fixed point of the first `materialized_rules`
- * rules, and rules are only ever appended, so nothing needs doing when no
- * rule has been added since.  When some have, every component is evaluated
- * again in schedule order, continuing from the tuples already held.  For a
- * program without negation that is sound: every tuple held is still
- * justified, and the least fixed point reached from them is the one reached
- * from nothing.  Both fixed points begin with a pass over every rule, so the
- * tuples held beforehand are joined like any others.
+ * Rules are only ever appended, so the relations are current exactly when no
+ * rule has been added since they were last brought to a fixed point, and
+ * then nothing needs doing.  Otherwise what they hold is stale -- the fixed
+ * point of an earlier program, or part of one an evaluation that failed was
+ * computing -- and it is discarded before every component is evaluated in
+ * schedule order.  The discard comes before the evaluation begins, so no
+ * delta range can span it.
  */
 static int
 materialize_program(relic_t *ctx)
@@ -1012,6 +1038,8 @@ materialize_program(relic_t *ctx)
 
 	if (confirm_schedule_current(ctx) != 0)
 		return (-1);
+
+	discard_derived_state(ctx);
 
 	schedule = &ctx->program.schedule;
 
@@ -1054,7 +1082,14 @@ relic_materialize(relic_t *ctx)
  *
  * The tuple is fetched afresh for each row rather than held across the call
  * to the callback, so that no pointer into relation storage outlives a call
- * out of the library.
+ * out of the library.  The range is the one range that lives outside an
+ * evaluation and across a call out of the library, so it is the one a discard
+ * could invalidate.  A callback may not call back into the context, but one
+ * that loads and queries regardless has the answer relation discarded and
+ * refilled under the loop.  The stream then delivers whatever the refilled
+ * relation holds at the identifiers it has left, and stops at the first one
+ * the relation no longer has rather than read a tuple that is not there: a
+ * broken contract gives wrong rows, never an invalid read.
  */
 static void
 stream_answer(relic_t *ctx, const relic_relation_t *answer,
@@ -1070,6 +1105,8 @@ stream_answer(relic_t *ctx, const relic_relation_t *answer,
 
 	for (id = range.first; id < range.end; id++) {
 		tuple = relic_relation_tuple(answer, id);
+		if (tuple == NULL)
+			return;
 
 		for (column = 0; column < answer->arity; column++)
 			row[column] = *relic_value_of(ctx, tuple[column]);

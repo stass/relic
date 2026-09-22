@@ -1,0 +1,20 @@
+% Negation stacked across strata.  plain/1 negates red/1, which only facts
+% define; tinted/1 negates plain/1, so it holds exactly where red/1 does --
+% double negation over a complete relation is the relation itself; and
+% bright/1 negates tinted/1 and black/1, the second of which nothing
+% defines, so it is empty and every absence from it succeeds.  Four strata,
+% each complete before the next reads it.
+node(a).
+node(b).
+node(c).
+
+red(a).
+red(c).
+
+plain(X) :- node(X), not red(X).
+tinted(X) :- node(X), not plain(X).
+bright(X) :- node(X), not tinted(X), not black(X).
+
+plain(X)?
+tinted(X)?
+bright(X)?

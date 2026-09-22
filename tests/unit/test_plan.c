@@ -11,8 +11,8 @@
  * answers it produces, and a plan that scanned where it could have tested
  * membership, or placed a comparison late, would produce the same answers
  * more slowly.  This suite examines the plans themselves -- which operation
- * each literal became, what each column does, and where each comparison went
- * -- because those are the decisions every later planner inherits.
+ * each literal became, what each column does, and where each test went --
+ * because those are the decisions every later planner inherits.
  */
 
 #include "config.h"
@@ -31,7 +31,7 @@
 #define	SCENARIO_DELTA_REFUSED	"a delta literal must be a positive literal"
 #define	SCENARIO_FACT		"a fact is a lone EMIT of constants"
 #define	SCENARIO_MEMBER		"a fully bound literal is a membership test"
-#define	SCENARIO_NEGATION	"a negated literal is refused, naming the rule"
+#define	SCENARIO_NEGATION	"a negated literal is an ANTI_MEMBER, placed early"
 #define	SCENARIO_TERMS		"a scan's columns bind, match or ignore"
 
 typedef struct fixture fixture_t;
@@ -65,7 +65,7 @@ static void	 a_delta_literal_must_be_positive(void);
 static void	 a_delta_variant_scans_its_delta_first(void);
 static void	 a_fact_is_a_lone_emit_of_constants(void);
 static void	 a_fully_bound_literal_is_a_membership_test(void);
-static void	 a_negated_literal_is_refused(void);
+static void	 a_negated_literal_is_placed_once_bound(void);
 static void	 a_scans_columns_bind_match_or_ignore(void);
 
 static void
@@ -385,8 +385,8 @@ a_delta_variant_scans_its_delta_first(void)
 
 /*
  * A delta literal that is not a positive literal of the rule -- past the end
- * of the body, or a comparison -- is refused with one error rather than read
- * as an atom it is not.
+ * of the body, a comparison, or a negated literal -- is refused with one
+ * error rather than read as an atom it is not.
  */
 static void
 a_delta_literal_must_be_positive(void)
@@ -403,6 +403,13 @@ a_delta_literal_must_be_positive(void)
 
 	check(!fixture_plan_variant(&fixture, program, 1, 1),
 	    SCENARIO_DELTA_REFUSED, "a comparison is refused");
+	checkf(fixture.errors == 1, SCENARIO_DELTA_REFUSED,
+	    "one error should be reported, %zu were", fixture.errors);
+	fixture_release(&fixture);
+
+	check(!fixture_plan_variant(&fixture, "e(a, b).\nf(b).\n"
+	    "r(X) :- e(X, Y), not f(Y).\n", 2, 1), SCENARIO_DELTA_REFUSED,
+	    "a negated literal is refused");
 	checkf(fixture.errors == 1, SCENARIO_DELTA_REFUSED,
 	    "one error should be reported, %zu were", fixture.errors);
 	fixture_release(&fixture);
@@ -437,20 +444,70 @@ a_fact_is_a_lone_emit_of_constants(void)
 }
 
 /*
- * Absence is meaningful only in a relation that is complete, and nothing
- * the planner knows guarantees that, so a negated literal is refused with
- * one error rather than planned.
+ * A negated literal is a test like a comparison: it binds nothing, so it is
+ * placed at the earliest point every argument is bound, and tests that
+ * become placeable at one point keep their written order.
+ *
+ *	p(X) :- not done(a), not f(Y), e(X, Y), X != Y, not g(X), not frozen.
+ *
+ * `not done(a)` and `not frozen` read no variable, so they come before any
+ * scan, in written order.  `not f(Y)` is written before the literal binding
+ * Y and so follows it, ahead of the comparison and `not g(X)`, which were
+ * written after it.  Every column of an ANTI_MEMBER is read, never bound.
  */
 static void
-a_negated_literal_is_refused(void)
+a_negated_literal_is_placed_once_bound(void)
 {
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_ANTI_MEMBER, RELIC_OP_ANTI_MEMBER, RELIC_OP_SCAN,
+		RELIC_OP_ANTI_MEMBER, RELIC_OP_FILTER, RELIC_OP_ANTI_MEMBER,
+		RELIC_OP_EMIT
+	};
 	fixture_t fixture;
+	const relic_op_atom_t *done;
+	const relic_op_atom_t *frozen;
+	const relic_op_atom_t *f;
+	const relic_op_atom_t *g;
 
-	check(!fixture_plan(&fixture, "e(a).\nf(b).\n"
-	    "p(X) :- e(X), not f(X).\n", 2), SCENARIO_NEGATION,
-	    "the rule is not planned");
-	checkf(fixture.errors == 1, SCENARIO_NEGATION,
-	    "one error should be reported, %zu were", fixture.errors);
+	if (!fixture_plan(&fixture, "e(a, b).\nf(b).\ng(a).\ndone(z).\n"
+	    "frozen.\n"
+	    "p(X) :- not done(a), not f(Y), e(X, Y), X != Y, not g(X), "
+	    "not frozen.\n", 5)) {
+		check(false, SCENARIO_NEGATION, "the rule is planned");
+		fixture_release(&fixture);
+		return;
+	}
+
+	/*
+	 * The operands below are read by position, so a plan of other kinds
+	 * would have them read the wrong arm of an operation.
+	 */
+	if (!kinds_are(&fixture.plan, kinds, 7)) {
+		check(false, SCENARIO_NEGATION, "each negated literal follows "
+		    "the scan that binds its variables");
+		fixture_release(&fixture);
+		return;
+	}
+
+	done = &fixture.plan.ops[0].u.atom;
+	frozen = &fixture.plan.ops[1].u.atom;
+	f = &fixture.plan.ops[3].u.atom;
+	g = &fixture.plan.ops[5].u.atom;
+
+	check(done->relation->arity == 1 &&
+	    done->terms[0].action == RELIC_PLAN_CONSTANT &&
+	    done->terms[0].u.constant == symbol_value(fixture.ctx, "a"),
+	    SCENARIO_NEGATION, "not done(a) matches its constant");
+	check(frozen->relation->arity == 0 && frozen->terms == NULL,
+	    SCENARIO_NEGATION, "not frozen reads no column");
+	check(f->terms[0].action == RELIC_PLAN_BOUND &&
+	    f->terms[0].u.slot == slot_named(&fixture, 5, "Y"),
+	    SCENARIO_NEGATION, "not f(Y) reads the Y the scan bound");
+	check(g->terms[0].action == RELIC_PLAN_BOUND &&
+	    g->terms[0].u.slot == slot_named(&fixture, 5, "X"),
+	    SCENARIO_NEGATION, "not g(X) reads the X the scan bound");
+	check(!done->delta && !f->delta, SCENARIO_NEGATION,
+	    "no negated literal reads a delta");
 
 	fixture_release(&fixture);
 }
@@ -464,7 +521,7 @@ main(void)
 	a_delta_variant_scans_its_delta_first();
 	a_delta_literal_must_be_positive();
 	a_fact_is_a_lone_emit_of_constants();
-	a_negated_literal_is_refused();
+	a_negated_literal_is_placed_once_bound();
 
 	return (check_summary("test_plan"));
 }

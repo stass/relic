@@ -6,8 +6,8 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S7 and milestone M2 landed; S8, negation
-execution, next.
+`relic-plan.md`. Current position: S8, negation execution, landed; S9 and
+milestone M3, indexes, statistics, planner and explain, next.
 
 ## Documentation debt
 
@@ -172,34 +172,28 @@ and would still not help the one caller who cannot check, which is a program
 reading an untrusted pipe. Revisit if S11 or S12 finds that caller; the
 answer there is a separate key, not a wider meaning for this one.
 
-**Negation is refused at evaluation.** [High, component: `lib/plan.c`] A
-negated literal passes `relic_check()` and is refused when its rule is
-planned, because testing absence is meaningful only against a relation that
-is complete. The schedule guarantees that a negated predicate lies in a lower
-stratum, and so is complete before any rule reading it runs; what is missing
-is S8's `ANTI_MEMBER` operation. `reject_negation()` is then deleted and a
-negated literal becomes a filter placed like a comparison. Until then any
-program with negation, the architecture section 72 program among them, can be
-checked but not evaluated.
-
 **Options that arrive with their features.** [Medium, component:
-`cmd/relic/main.c`] `-e` arrives in S9; `-i`, `-l`, `-n` and `-v` in S12.
-Each is an unknown option until then, and the usage message lists only what
-is accepted. `-X` accepts only `naive` and `stats`: `no-index`, `no-reorder`
-and `no-magic` arrive with the features they switch off, in S9 and S10, and
+`cmd/relic/main.c`] `-e` arrives in S9; `-i`, `-n` and `-v` in S12. Each is
+an unknown option until then, and the usage message lists only what is
+accepted. `-l` was brought forward to S8, when negation evaluating took away
+the only other way to make a query fail during evaluation from the command
+line. `-X` accepts only `naive` and `stats`: `no-index`, `no-reorder` and
+`no-magic` arrive with the features they switch off, in S9 and S10, and
 `tests/equiv/strategies.sh` gains each as it does. Magic Sets add relations
 of their own, so `no-magic` will need a comparison other than the total
-tuple count that harness uses. `-l` in particular is cheap -- the
-limits are enforced already -- and is the one to bring forward if a user needs
-to bound a query before S12.
+tuple count that harness uses.
 
-**A later load continues the fixed point.** [Medium, component:
-`lib/eval.c`] The relations record how many rules they are a fixed point of,
-and a query after a later load continues from what they hold rather than
-recomputing. That is sound for a positive program and unsound once negation
-evaluates: a fact loaded later can make a tuple derived earlier false. When S8
-lands, a change to a program with negation after an evaluation must discard
-derived state, which is the operation `relic_fact_add()` needs in S11 as well.
+**A later load re-evaluates the whole program.** [Low, component:
+`lib/eval.c`] Any change to the program after an evaluation discards every
+relation and computes the fixed point again from nothing, for every program:
+continuing from the tuples already held is sound without negation and unsound
+with it, and one rule for both is what `specs/design-eval.md` section 6
+settles, matching architecture section 54 for `relic_fact_add()`. The cost
+falls on a caller that loads a large positive program and then adds to it a
+little at a time -- the S12 REPL, or an embedder -- which pays for the whole
+program on every addition. Measure it there before doing anything; the
+remedy, if one is needed, is incremental maintenance, which architecture
+section 70 defers, and not a return to continuing only positive programs.
 
 **Answer relations are never released.** [Medium, component: `lib/rule.c`]
 Each query compiles to a predicate of its own, `$qN`, and its answers live in
@@ -212,10 +206,26 @@ Worse than the growth, the answers count against `max_tuples` and
 for the ones that have not: with `max_tuples=6` and three facts, preparing,
 running and destroying `e(X)?` twice fails the second time with "limit
 exceeded: tuples=6 while deriving $q1/1", naming a predicate the caller never
-wrote. Settle it with S11's derived-state discarding, which needs the same
-operation on a whole relation: destroying a query should release its answer
-relation, and a loaded query's answers should be released with the last query
-object that refers to them.
+wrote. A change to the program discards every relation, answers included,
+which bounds the growth to the queries run since the last load but does not
+release a destroyed query's answers before then. Settle the rest with S11:
+destroying a query should release its answer relation, and a loaded query's
+answers should be released with the last query object that refers to them.
+
+**Re-entry from a callback is a contract, not a guard.** [Medium, component:
+`lib/eval.c`, `include/relic.h`] A row callback and a diagnostic callback
+must not call back into the context, and nothing enforces it. Memory safety
+holds regardless, but as a property of two call sites rather than of the
+design: `stream_answer()` stops at an identifier a re-entrant discard took
+away, and every evaluation site that reports a diagnostic unwinds at once
+without reading state a re-entrant evaluation reset. A callback that loads
+and queries mid-stream gets wrong rows and a successful return. The next
+call out of the library, or a diagnostic site that continues after reporting
+-- the mixed-type ordering warning below is one -- extends that list without
+anyone noticing. Settle it in S11, which freezes the entry points: a
+per-context flag set for the duration of each entry point that can run a
+callback, with every entry point refusing re-entry with a diagnostic, so a
+broken contract fails loudly and the existing guard becomes a backstop.
 
 **Mixed-type ordering comparisons are not reported.** [Low, component:
 `lib/eval.c`] Architecture section 10.1 reports the first cross-type ordering
@@ -237,13 +247,18 @@ them; measure on a real workload before changing either.
 **Append-only invariant versus incremental maintenance.** [Medium, component:
 `lib/relation.c`] D-10 represents a delta as a range of tuple identifiers,
 which requires that nothing compacts, deletes or renumbers a relation during a
-fixed point. The store holds to it by construction -- it offers no operation
-that removes, reorders or renumbers a tuple, and only destroying the table
-releases one -- so today there is nothing to enforce. The debt is the moment
-that stops being true. Any incremental insertion or DRed-style deletion
-support, and `relic_fact_add()` in S11 where it discards derived state, has to
-confront it first: a range captured before such an operation means something
-else afterwards, and nothing in the range would say so.
+fixed point. The store holds to it by construction: nothing removes, reorders
+or renumbers one tuple, and the one removal there is, discarding every
+relation at once, runs only before an evaluation begins, when no range is
+live. The debt is the moment that stops being enough. Any incremental
+insertion or DRed-style deletion support has to confront it first: a range
+captured before such an operation means something else afterwards, and
+nothing in the range would say so. `relic_fact_add()` in S11 needs no more
+than the existing discard, provided it appends a fact rule to the program
+rather than inserting a tuple into a relation: only the evaluator inserts,
+which is what makes every tuple re-derivable and the discard safe, and
+appending a rule is what advances the count that says the program changed.
+`specs/design-relations.md` section 2 states it.
 
 **Size budget.** [Medium] `relic-plan.md` totals about 7.5 KLOC against the 4
 to 7 KLOC of `specs/architecture.md` section 2.2, which treats size as a design
@@ -294,6 +309,11 @@ it is `lib/eval.c`, where a component's plans became a structure of their own
 -- base plans, delta variants and the members' relations -- and the rest is
 `-X` and the counters in the tool and the header.
 
+S8 came in at about 85 net non-comment lines in the library against a budget
+of 150, as the plan predicted: negation added one operation and a placement
+rule the comparisons already had. `-l`, brought forward from S12, added about
+60 to the tool, which S12's budget of 450 should give back.
+
 **A later load's second unstratified cycle is not reported.** [Low,
 component: `lib/stratify.c`] A program found unstratified is refused by every
 later check without being analysed again, so an embedder that checks between
@@ -323,7 +343,8 @@ embedder hits it.
 zero meaning unlimited, and both are read in one place. `max_magic_preds` and
 `max_magic_rules` are stored and never read, because nothing generates a Magic
 predicate or rule to count until S10. The header says so plainly so that a
-caller is not misled.
+caller is not misled; `-l magic-preds` and `-l magic-rules` are accepted by
+the tool for the same reason, so that S10 changes nothing in option parsing.
 
 **Assertions are absent from release builds.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 makes assertions a

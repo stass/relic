@@ -1,9 +1,10 @@
 #!/bin/sh
 #
 # The command-line tool's handling of its input and output: a program read
-# from standard input, results written to a file with -o, and a write that
-# fails.  The golden language tests cover what the tool prints; these cover
-# where it reads from and writes to, which a golden file cannot express.
+# from standard input, results written to a file with -o, a write that fails,
+# and a query that fails part way through a run.  The golden language tests
+# cover what the tool prints; these cover where it reads from and writes to,
+# and what a run leaves behind, which a golden file cannot express.
 
 set -eu
 
@@ -100,13 +101,14 @@ esac
 
 # A query that fails during evaluation writes nothing -- not even the blank
 # line that would separate it from the query before it -- and ends the run,
-# while what the earlier query wrote stands.  Negation cannot be evaluated,
-# so the second query fails when it is planned, after the first has run.
+# while what the earlier query wrote stands.  The program holds five tuples
+# and the first query's answers two more, so a limit of seven lets the first
+# query through and refuses the second's first answer.
 #
 # The output is compared as a file, byte for byte, because command
 # substitution would strip the very trailing newline this is looking for.
 status=0
-"$RELIC" -q 'edge(X, Y)?' -q 'edge(X, Y), not edge(Y, X)?' \
+"$RELIC" -l tuples=7 -q 'edge(X, Y)?' -q 'path(X, Y)?' \
     -q 'edge(a, X)?' "$work/graph.dl" > "$work/partial.txt" 2>/dev/null ||
     status=$?
 if [ "$status" -ne 1 ]; then
@@ -137,18 +139,63 @@ esac
 # -X stats reports the counters even when evaluation fails, after the error
 # that ended it.
 status=0
-diagnostic=$("$RELIC" -X stats -q 'edge(X, Y), not edge(Y, X)?' \
-    "$work/graph.dl" 2>&1 >/dev/null) || status=$?
+diagnostic=$("$RELIC" -X stats -l tuples=3 "$work/graph.dl" 2>&1 \
+    >/dev/null) || status=$?
 if [ "$status" -ne 1 ]; then
 	fail "a failing run with -X stats exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"negation"*"stats: iterations"*)
+*"limit exceeded: tuples=3"*"stats: iterations"*)
 	;;
 *)
 	fail "a failing run with -X stats reported '$diagnostic'"
 	;;
 esac
+
+# -l sets each limit the library enforces, by the key the diagnostic names
+# it by, and zero means unlimited.  A repeated key takes its later value.
+status=0
+diagnostic=$("$RELIC" -l memory=1 "$work/graph.dl" 2>&1 >/dev/null) ||
+    status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an exceeded memory limit exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"limit exceeded: memory=1 while deriving"*)
+	;;
+*)
+	fail "an exceeded memory limit was reported as '$diagnostic'"
+	;;
+esac
+
+actual=$("$RELIC" -s -l tuples=1 -l tuples=0 -l memory=0 \
+    -l magic-preds=1 -l magic-rules=1 "$work/graph.dl")
+if [ "$actual" != "$expected" ]; then
+	fail "limits of zero answered '$actual', expected '$expected'"
+fi
+
+# A -l that is not a limit is a usage error naming what was wrong with it:
+# no `=`, a key that names no limit, and a value that is empty, not a
+# number, signed, surrounded by space, followed by other bytes, or too large
+# for a size.
+for argument in tuples tuples5 bogus=1 =1 tuples= tuples=many \
+    tuples=-1 tuples=+1 tuples=-0 'tuples= 5' tuples=5x 'tuples=5 ' \
+    tuples=99999999999999999999999; do
+	status=0
+	diagnostic=$("$RELIC" -l "$argument" "$work/graph.dl" 2>&1 \
+	    >/dev/null) || status=$?
+	if [ "$status" -ne 2 ]; then
+		fail "-l '$argument' exited $status, expected 2"
+	fi
+	case "$diagnostic" in
+	*"key=value: $argument"*|*"unknown limit: $argument"*|\
+	*"limit value is "*": $argument"*)
+		;;
+	*)
+		fail "-l '$argument' was reported as '$diagnostic'"
+		;;
+	esac
+done
 
 # A file that does not exist is an error in the input, reported once.
 status=0

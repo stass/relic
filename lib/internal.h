@@ -180,11 +180,12 @@ struct relic_query {
  * context is not itself thread-safe.
  *
  * `materialized_rules` is how many of the program's rules the relations are
- * a fixed point of.  Rules are only ever appended, so the relations are
- * current exactly when it equals the number of compiled rules, and an
- * evaluation after a later load continues from what they already hold.  It
- * advances only when a fixed point is reached, so a failed evaluation leaves
- * it where it was and the next one tries again.
+ * the fixed point of.  Rules are only ever appended, so the relations are
+ * current exactly when it equals the number of compiled rules; when it does
+ * not, the next evaluation discards them and starts again from nothing.  The
+ * discard zeroes it and only a fixed point reached sets it to the rule count,
+ * so a failed evaluation leaves the relations stale and the next one tries
+ * again.
  *
  * `counters` is the work evaluation has done.  What the context holds is
  * not counted here: relic_stats() measures it when asked.
@@ -474,7 +475,7 @@ int	 relic_stratify(relic_t *ctx);
  * `delta_literal` is RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or the
  * body index of the positive literal a semi-naive variant reads from the
  * delta.  Returns 0, or -1 with a diagnostic reported: memory ran out, or the
- * rule holds a literal the evaluator cannot execute.
+ * planner broke one of a plan's invariants, which is an internal error.
  */
 int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
 	    const relic_rule_t *rule, size_t delta_literal, relic_plan_t *plan);
@@ -490,6 +491,13 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
  *
  * Every function below takes a relation of the context it was obtained from.
  *
+ * Only the evaluator inserts, through an EMIT.  That is what makes every
+ * tuple re-derivable from a rule, and so what makes discarding every relation
+ * safe: a fact is a rule, and the next evaluation inserts it again.  A caller
+ * that wants a fact held appends a fact rule to the program rather than
+ * inserting its tuple, which also advances the rule count that tells the
+ * evaluator the program changed.
+ *
  * relic_relation_insert() reports through *addedp whether the tuple was not
  * already present, which is what fixed-point detection reads, and returns -1
  * with a diagnostic when memory or a configured limit refuses it.  A refused
@@ -500,6 +508,10 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
  * relic_relation_all() and relic_relation_since() give the identifier ranges
  * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
  * later delta is measured from.
+ *
+ * relic_relation_discard_all() empties every relation at once, which ends
+ * the span over which a range means anything; no caller may hold a range
+ * across it.
  *
  * The two totals are what the configurable tuple and memory limits are
  * enforced against: tuples across every relation, and the bytes their columns
@@ -520,6 +532,7 @@ relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
 	    relic_tuple_id_t first);
+void	 relic_relation_discard_all(relic_t *ctx);
 size_t	 relic_relation_total_bytes(const relic_t *ctx);
 size_t	 relic_relation_total_tuples(const relic_t *ctx);
 

@@ -42,9 +42,12 @@
 #define	SCENARIO_BINDINGS	"every binding pattern of a query is answered"
 #define	SCENARIO_COMPARE	"comparisons follow the language's type rules"
 #define	SCENARIO_CURRENT	"a later load extends the fixed point"
+#define	SCENARIO_DISCARD	"a later load can make a derived tuple false"
+#define	SCENARIO_RELEASE	"a discard gives back what the limits count"
+#define	SCENARIO_REENTRY	"a callback that loads cannot overrun the stream"
 #define	SCENARIO_DUPLICATES	"duplicate facts and derivations collapse"
 #define	SCENARIO_LIMIT		"a query over a limit delivers no rows"
-#define	SCENARIO_NEGATION	"evaluation refuses a negated literal"
+#define	SCENARIO_NEGATION	"a negated literal keeps what is absent"
 #define	SCENARIO_ORDER		"the total order sorts across types"
 #define	SCENARIO_RECURSION	"recursion reaches the least fixed point"
 #define	SCENARIO_STATS		"the counters record the work each strategy did"
@@ -72,6 +75,18 @@ struct diag_log {
 	size_t	warnings;
 };
 
+typedef struct reentry reentry_t;
+
+/*
+ * What reenter_on_first_row() works with: the context, the query it runs
+ * again from inside its own stream, and how many rows that stream delivered.
+ */
+struct reentry {
+	relic_t		*ctx;
+	relic_query_t	*query;
+	size_t		 rows;
+};
+
 /*
  * The RELIC_F_ flags every context a scenario creates is given, which is how
  * main() runs the scenarios under each evaluation strategy in turn.
@@ -89,16 +104,23 @@ static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static int	 compare_text(const void *left, const void *right);
+static int	 count_row(void *callback_ctx, const relic_value_t *values,
+		    size_t count);
 static int	 render_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
+static int	 reenter_on_first_row(void *callback_ctx,
+		    const relic_value_t *values, size_t count);
 static int	 run_query(relic_t *ctx, const char *text,
 		    rendering_t *rendering);
 static void	 sort_rows(char *text);
 static void	 comparisons_follow_the_type_rules(void);
+static void	 a_callback_that_loads_cannot_overrun_the_stream(void);
+static void	 a_discard_gives_back_what_the_limits_count(void);
+static void	 a_later_load_can_make_a_derived_tuple_false(void);
 static void	 a_later_load_extends_the_fixed_point(void);
 static void	 a_query_over_a_limit_delivers_no_rows(void);
 static void	 duplicates_collapse(void);
-static void	 evaluation_refuses_negation(void);
+static void	 negation_keeps_what_is_absent(void);
 static void	 every_binding_pattern_is_answered(void);
 static void	 recursion_reaches_the_least_fixed_point(void);
 static void	 run_scenarios(const char *strategy, unsigned int flags);
@@ -493,8 +515,8 @@ a_query_over_a_limit_delivers_no_rows(void)
 
 /*
  * The relations are a fixed point of the rules loaded so far.  A later load
- * adds rules and facts, and the next query continues the fixed point over
- * everything, rather than answering from what was computed before.
+ * adds rules and facts, and the next query answers over everything, rather
+ * than from what was computed before.
  */
 static void
 a_later_load_extends_the_fixed_point(void)
@@ -526,30 +548,207 @@ a_later_load_extends_the_fixed_point(void)
 }
 
 /*
- * A negated literal cannot be evaluated, so evaluation fails naming the rule
- * while checking the same program succeeds.
+ * A negated literal lets a binding through exactly when the tuple it names
+ * is absent from a relation the schedule has already completed.
+ *
+ * The program is the task graph of architecture section 72: a task is
+ * blocked while something it depends on is not done, and ready when it is
+ * not blocked.  ship waits on build, which is not done, so ship is blocked;
+ * build waits only on design, which is done; design waits on nothing.  That
+ * puts done/1 in the lowest stratum, blocked/1 above it and ready/1 above
+ * that, so ready/1 negates a relation that itself holds a negation.
+ *
+ * The queries cover a negation over a relation nothing derives into, one
+ * whose arguments are all constants, one written before the literal that
+ * binds its variable, a query that negates, and a negation of a relation of
+ * arity zero.
  */
 static void
-evaluation_refuses_negation(void)
+negation_keeps_what_is_absent(void)
 {
 	relic_t *ctx;
-	diag_log_t log;
 
-	ctx = context_with("todo(a).\nblocked(b).\n"
-	    "ready(X) :- todo(X), not blocked(X).\n", &log);
+	ctx = context_with(
+	    "todo(design).\ntodo(build).\ntodo(ship).\n"
+	    "depends(build, design).\ndepends(ship, build).\n"
+	    "done(design).\n"
+	    "blocked(X) :- todo(X), depends(X, Y), not done(Y).\n"
+	    "ready(X) :- todo(X), not blocked(X).\n"
+	    "unowned(X) :- todo(X), not owner(X).\n"
+	    "frozen.\n"
+	    "movable(X) :- todo(X), not frozen.\n"
+	    "early(X) :- not done(X), todo(X), not done(ship).\n", NULL);
 	if (ctx == NULL)
 		return;
 
-	check(relic_check(ctx) == 0, SCENARIO_NEGATION,
-	    "the program passes its check");
-	check(relic_materialize(ctx) != 0, SCENARIO_NEGATION,
-	    "evaluating it fails");
-	checkf(log.errors == 1, SCENARIO_NEGATION,
-	    "one error should be reported, %zu were", log.errors);
-	check(strstr(relic_error(ctx), "ready/1") != NULL, SCENARIO_NEGATION,
-	    "the error names the rule");
+	answers_are(SCENARIO_NEGATION, ctx, "blocked(X)?", "ship");
+	answers_are(SCENARIO_NEGATION, ctx, "ready(X)?", "build|design");
+	answers_are(SCENARIO_NEGATION, ctx, "unowned(X)?", "build|design|ship");
+	answers_are(SCENARIO_NEGATION, ctx, "early(X)?", "build|ship");
+	answers_are(SCENARIO_NEGATION, ctx, "movable(X)?", "");
+	answers_are(SCENARIO_NEGATION, ctx,
+	    "todo(X), not ready(X), not done(X)?", "ship");
+	answers_are(SCENARIO_NEGATION, ctx, "todo(X), not todo(X)?", "");
 
 	relic_destroy(ctx);
+}
+
+/*
+ * A program with negation is not monotone: a fact loaded after an evaluation
+ * can make false a tuple that evaluation derived.  Here ready(build) holds
+ * after the first load, and the second gives build a dependency that is not
+ * done, which blocks it.  The next query must see build blocked and not
+ * ready, which it can only do if the tuples derived before the load are
+ * discarded rather than continued from.
+ */
+static void
+a_later_load_can_make_a_derived_tuple_false(void)
+{
+	relic_t *ctx;
+
+	ctx = context_with("todo(design).\ntodo(build).\n"
+	    "done(design).\n"
+	    "blocked(X) :- todo(X), depends(X, Y), not done(Y).\n"
+	    "ready(X) :- todo(X), not blocked(X).\n", NULL);
+	if (ctx == NULL)
+		return;
+
+	answers_are(SCENARIO_DISCARD, ctx, "ready(X)?", "build|design");
+
+	if (relic_load_string(ctx, "more.dl",
+	    "todo(test).\ndepends(build, test).\n") != 0) {
+		check(false, SCENARIO_DISCARD, "the second load succeeds");
+		relic_destroy(ctx);
+		return;
+	}
+
+	answers_are(SCENARIO_DISCARD, ctx, "blocked(X)?", "build");
+	answers_are(SCENARIO_DISCARD, ctx, "ready(X)?", "design|test");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Discarding the relations returns the totals the limits are enforced
+ * against, so a program re-evaluated after a load is held to its own size and
+ * not to the sum of every evaluation before it.
+ *
+ * With a limit of six tuples, two facts and the two answers of e(X)? fit.
+ * After a third fact, the three facts and the three answers of a second query
+ * fit exactly -- the first query's answers were discarded with everything
+ * else -- where the ten a discard that kept its count would reach do not.
+ */
+static void
+a_discard_gives_back_what_the_limits_count(void)
+{
+	relic_config_t config;
+	relic_stats_t stats;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = 6;
+	config.flags = strategy_flags;
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_RELEASE, "a context is created");
+		return;
+	}
+
+	if (relic_load_string(ctx, "test.dl", "e(a).\ne(b).\n") != 0) {
+		check(false, SCENARIO_RELEASE, "the program loads");
+		relic_destroy(ctx);
+		return;
+	}
+	answers_are(SCENARIO_RELEASE, ctx, "e(X)?", "a|b");
+
+	if (relic_load_string(ctx, "more.dl", "e(c).\n") != 0) {
+		check(false, SCENARIO_RELEASE, "the second load succeeds");
+		relic_destroy(ctx);
+		return;
+	}
+	answers_are(SCENARIO_RELEASE, ctx, "e(X)?", "a|b|c");
+
+	relic_stats(ctx, &stats);
+	checkf(stats.tuples == 6, SCENARIO_RELEASE,
+	    "the context should hold 6 tuples, not %zu", stats.tuples);
+
+	relic_destroy(ctx);
+}
+
+static int
+count_row(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
+    size_t count RELIC_UNUSED)
+{
+	size_t *rows;
+
+	rows = callback_ctx;
+	(*rows)++;
+
+	return (0);
+}
+
+/*
+ * A row callback that breaks the contract of relic_query_run(): on the first
+ * row it loads facts that empty the answer and runs the query again, inside
+ * the stream that is delivering it.
+ */
+static int
+reenter_on_first_row(void *callback_ctx, const relic_value_t *values
+    RELIC_UNUSED, size_t count RELIC_UNUSED)
+{
+	reentry_t *reentry;
+	size_t inner_rows;
+
+	reentry = callback_ctx;
+	reentry->rows++;
+	if (reentry->rows > 1)
+		return (0);
+
+	inner_rows = 0;
+	if (relic_load_string(reentry->ctx, "inner.dl", "c(x).\nc(y).\n") == 0)
+		relic_query_run(reentry->ctx, reentry->query, count_row,
+		    &inner_rows);
+	check(inner_rows == 0, SCENARIO_REENTRY,
+	    "the inner run finds the answer emptied");
+
+	return (0);
+}
+
+/*
+ * A callback may not call into the context, but one that does must not make
+ * the library read past a relation.  Here the inner run discards the answer
+ * relation the outer stream is walking and refills it with nothing, so the
+ * outer stream's next identifier names no tuple; the stream stops there
+ * rather than reading one.
+ */
+static void
+a_callback_that_loads_cannot_overrun_the_stream(void)
+{
+	reentry_t reentry;
+
+	bzero(&reentry, sizeof(reentry));
+
+	reentry.ctx = context_with("a(x).\na(y).\n"
+	    "b(X) :- a(X), not c(X).\n", NULL);
+	if (reentry.ctx == NULL)
+		return;
+
+	reentry.query = relic_query_prepare(reentry.ctx, NULL, "b(X)?");
+	if (reentry.query == NULL) {
+		check(false, SCENARIO_REENTRY, "the query is prepared");
+		relic_destroy(reentry.ctx);
+		return;
+	}
+
+	check(relic_query_run(reentry.ctx, reentry.query,
+	    reenter_on_first_row, &reentry) == 0, SCENARIO_REENTRY,
+	    "the outer run completes");
+	checkf(reentry.rows == 1, SCENARIO_REENTRY,
+	    "the outer stream should stop after 1 row, not %zu", reentry.rows);
+
+	relic_query_destroy(reentry.query);
+	relic_destroy(reentry.ctx);
 }
 
 /*
@@ -711,7 +910,10 @@ run_scenarios(const char *strategy, unsigned int flags)
 	comparisons_follow_the_type_rules();
 	a_query_over_a_limit_delivers_no_rows();
 	a_later_load_extends_the_fixed_point();
-	evaluation_refuses_negation();
+	negation_keeps_what_is_absent();
+	a_later_load_can_make_a_derived_tuple_false();
+	a_discard_gives_back_what_the_limits_count();
+	a_callback_that_loads_cannot_overrun_the_stream();
 }
 
 int

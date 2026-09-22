@@ -688,6 +688,16 @@ results under both evaluators.
 
 **Budget.** 150.
 
+**Decided during the stage.** Two decisions were taken when S8 landed. First,
+a change to the program after an evaluation discards every relation and
+re-evaluates from nothing, for every program: continuing a fixed point is
+unsound once negation evaluates, and one rule for positive and negative
+programs, the same rule architecture section 54 sets for `relic_fact_add()`,
+keeps the question from being asked. `specs/design-eval.md` section 6 records
+it. Second, `-l` was brought forward from S12, because negation evaluating
+removed the only other way to make a query fail during evaluation from the
+command line, and two tool behaviours would otherwise have gone untested.
+
 ---
 
 ### S9 - Indexes, statistics, planner, explain  (M3)
@@ -838,6 +848,9 @@ limit parsed, rejected when malformed, and enforced. Manual page linted with
 `mandoc -Tlint` is clean.
 
 **Budget.** 450.
+
+`-l` and its parsing tests landed with S8; S12 confirms them rather than
+delivering them.
 
 ---
 

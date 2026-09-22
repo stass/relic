@@ -21,14 +21,17 @@
  * position in the array, and the tuples added since some earlier moment are a
  * range of identifiers rather than a relation of their own.
  *
- * The store is append-only.  A tuple identifier, once assigned, denotes the
- * same tuple for as long as the relation exists, and that is a property of
- * this interface rather than a rule its callers follow: there is no operation
- * that removes, reorders or renumbers a tuple, and the only thing that
- * releases one is destroying the whole table with the context.  Semi-naive
- * evaluation rests on it, because a delta is a pair of identifiers and means
- * nothing if the tuples under them can move.  Future incremental insertion or
- * deletion support has to confront that before it does anything else.
+ * The store is append-only between discards.  A tuple identifier, once
+ * assigned, denotes the same tuple until every relation is emptied at once by
+ * relic_relation_discard_all(), and that is a property of this interface
+ * rather than a rule its callers follow: there is no operation that removes,
+ * reorders or renumbers one tuple, and the one that removes any removes all
+ * of them.  Semi-naive evaluation rests on it, because a delta is a pair of
+ * identifiers and means nothing if the tuples under them can move; an
+ * evaluation holds its ranges in its own state and discards only before it
+ * begins, so no range outlives the span it was taken in.  Future incremental
+ * insertion or deletion support has to confront that before it does anything
+ * else.
  *
  * A relation is created once and never moves, because the table holds
  * pointers to relations rather than relations.  That is what lets a plan or
@@ -52,6 +55,7 @@ static size_t	 relation_bytes_after_insert(const relic_relation_t *relation);
 static bool	 relation_columns_after_insert(
 		    const relic_relation_t *relation, size_t *columnsp);
 static relic_relation_t *relation_create(relic_t *ctx, relic_pred_id_t pred);
+static void	 relation_empty(relic_relation_t *relation);
 static relic_tuple_id_t relation_find(const relic_relation_t *relation,
 		    const relic_dom_t *columns, uint32_t hash);
 static void	 relation_free(relic_relation_t *relation);
@@ -74,6 +78,19 @@ relic_reltab_init(relic_reltab_t *table)
 }
 
 /*
+ * Release a relation's tuples and index, leaving it empty and in place.
+ */
+static void
+relation_empty(relic_relation_t *relation)
+{
+	relic_idtab_reset(&relation->index);
+	free(relation->columns);
+	relation->columns = NULL;
+	relation->column_capacity = 0;
+	relation->count = 0;
+}
+
+/*
  * Release everything one relation owns, and the relation itself.
  */
 static void
@@ -82,8 +99,7 @@ relation_free(relic_relation_t *relation)
 	if (relation == NULL)
 		return;
 
-	relic_idtab_reset(&relation->index);
-	free(relation->columns);
+	relation_empty(relation);
 	free(relation);
 }
 
@@ -683,6 +699,37 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
 	table->entries[pred - 1] = relation;
 
 	return (relation);
+}
+
+/*
+ * Empty every relation, releasing its storage.  The relations stay where they
+ * are, so a pointer to one still names its predicate's relation, which now
+ * holds nothing.
+ *
+ * Identifiers restart from the first afterwards, so a range taken before the
+ * discard names nothing, or other tuples, after it.  The caller must hold no
+ * range across it, which the evaluator satisfies by discarding only before an
+ * evaluation begins: every range lives in an evaluation's state and dies with
+ * it.
+ *
+ * Both totals return to zero, which is exact, because each is a sum over the
+ * relations and every relation now contributes nothing.
+ */
+void
+relic_relation_discard_all(relic_t *ctx)
+{
+	relic_reltab_t *table;
+	size_t position;
+
+	table = &ctx->relations;
+
+	for (position = 0; position < table->count; position++) {
+		if (table->entries[position] != NULL)
+			relation_empty(table->entries[position]);
+	}
+
+	table->tuple_count = 0;
+	table->storage_bytes = 0;
 }
 
 size_t

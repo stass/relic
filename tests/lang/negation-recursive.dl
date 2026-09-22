@@ -1,0 +1,21 @@
+% A recursive rule that negates a relation of a lower stratum.  reach/1 is
+% the set of rooms reachable from the hall without entering a locked one;
+% locked/1 is complete before reach/1's fixed point begins, so every round,
+% and every semi-naive delta variant, tests the same complete relation.
+%
+% The cellar is locked, so the vault beyond it is unreachable even though an
+% unlocked corridor leads on from the cellar.  The attic is reached around
+% the loop through the study.
+door(hall, kitchen).
+door(hall, cellar).
+door(cellar, vault).
+door(kitchen, study).
+door(study, attic).
+door(attic, kitchen).
+
+locked(cellar).
+
+reach(hall).
+reach(Y) :- reach(X), door(X, Y), not locked(Y).
+
+reach(X)?

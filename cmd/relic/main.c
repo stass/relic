@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,6 +20,7 @@
 #include <relic.h>
 
 #include "cmd.h"
+#include "compat.h"
 
 /*
  * The relic tool: load a program, check it, and answer its queries.
@@ -35,9 +37,11 @@
  * ones the program contains.  The program's own queries are still checked
  * when -q replaces them, because they are part of the program.
  *
- * -X selects internal behaviour for testing and debugging: an alternative
- * evaluation strategy, whose answers must equal the default's, or counters
- * printed to standard error when the run ends.
+ * -l sets a resource limit, as key=value, and -X selects internal behaviour
+ * for testing and debugging: an alternative evaluation strategy, whose
+ * answers must equal the default's, or counters printed to standard error
+ * when the run ends.  Both only fill in the configuration the context is
+ * created with.
  */
 
 /*
@@ -58,13 +62,30 @@ enum {
 /* Room for "<query N>" with N any size_t, and a terminator. */
 #define	QUERY_NAME_MAX	32
 
+/*
+ * The largest value -l accepts: a limit is a size_t, and strtonum() returns a
+ * long long, so whichever of the two is smaller.
+ */
+#define	LIMIT_VALUE_MAX	((uintmax_t)SIZE_MAX < (uintmax_t)LLONG_MAX ? \
+	(long long)SIZE_MAX : LLONG_MAX)
+
+typedef struct limit_key limit_key_t;
+
+/*
+ * One -l key and the field of the configuration it sets.
+ */
+struct limit_key {
+	const char	*name;
+	size_t		*field;
+};
+
 typedef struct options options_t;
 typedef struct session session_t;
 
 /*
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `config` is what the
- * context is created with, -X naive setting its flag.
+ * context is created with: -l sets its limits and -X naive its flag.
  */
 struct options {
 	const char		**queries;
@@ -95,12 +116,17 @@ struct session {
 static void		*diag_context(const char *program_name);
 static int		 evaluate(session_t *session, const options_t *options);
 static const char	*invoked_name(const char *argv0);
+static bool		 is_decimal_digit(char byte);
 static bool		 is_printable_ascii(const char *text);
 static int		 load_operands(relic_t *ctx, int argc, char *argv[]);
+static size_t		*limit_named(relic_config_t *config, const char *key,
+			    size_t key_length);
 static int		 open_output(const char *program_name,
 			    const options_t *options, FILE **streamp,
 			    const char **namep);
 static int		 parse_debug(const char *name, options_t *options);
+static int		 parse_limit(const char *program_name,
+			    const char *argument, relic_config_t *config);
 static int		 parse_options(const char *program_name, int argc,
 			    char *argv[], options_t *options);
 static int		 prepare_queries(session_t *session,
@@ -116,6 +142,15 @@ static int		 session_open(session_t *session,
 static void		 usage(const char *program_name);
 static int		 validate(session_t *session, const options_t *options,
 			    int argc, char *argv[]);
+
+/*
+ * Whether a byte is an ASCII decimal digit, whatever the locale says.
+ */
+static bool
+is_decimal_digit(char byte)
+{
+	return (byte >= '0' && byte <= '9');
+}
 
 /*
  * Whether every byte of text is printable ASCII, space included.
@@ -201,8 +236,10 @@ report_unknown_option(const char *program_name, int option)
 static void
 usage(const char *program_name)
 {
-	fprintf(stderr, "usage: %s [-acs] [-F format] [-o file] [-q query] "
-	    "[-X debug] [file ...]\n", program_name);
+	fprintf(stderr, "usage: %s [-acs] [-F format] [-l limit=value] "
+	    "[-o file] [-q query]\n"
+	    "       %*s [-X debug] [file ...]\n", program_name,
+	    (int)strlen(program_name), "");
 	fprintf(stderr, "       %s -V\n", program_name);
 }
 
@@ -529,6 +566,78 @@ parse_debug(const char *name, options_t *options)
 }
 
 /*
+ * The field of the configuration a -l key names, or NULL for a key that names
+ * no limit.  The key is the `key_length` bytes at `key`, which the caller has
+ * cut from a key=value argument, so it is not terminated where it ends.
+ */
+static size_t *
+limit_named(relic_config_t *config, const char *key, size_t key_length)
+{
+	const limit_key_t limits[] = {
+		{ "tuples", &config->max_tuples },
+		{ "memory", &config->max_memory },
+		{ "magic-preds", &config->max_magic_preds },
+		{ "magic-rules", &config->max_magic_rules }
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(limits) / sizeof(limits[0]); i++) {
+		if (strlen(limits[i].name) == key_length &&
+		    bcmp(limits[i].name, key, key_length) == 0)
+			return (limits[i].field);
+	}
+
+	return (NULL);
+}
+
+/*
+ * Apply one -l argument, key=value, to the configuration.  Returns 0, or -1
+ * having reported why the argument is not a limit.
+ *
+ * The value is decimal digits and nothing else, from zero, which means
+ * unlimited, to the largest a limit can hold.  strtonum() rejects trailing
+ * bytes, an empty value and a value out of range, and says which it was; it
+ * would also skip leading space and accept a sign, so the value must begin
+ * with a digit before it is asked.  A key given twice takes the later value,
+ * as a repeated option does.
+ */
+static int
+parse_limit(const char *program_name, const char *argument,
+    relic_config_t *config)
+{
+	const char *equals;
+	const char *error;
+	size_t *field;
+	long long value;
+
+	equals = strchr(argument, '=');
+	if (equals == NULL) {
+		report_error(program_name,
+		    "a limit is written key=value: %s", argument);
+		return (-1);
+	}
+
+	field = limit_named(config, argument, (size_t)(equals - argument));
+	if (field == NULL) {
+		report_error(program_name, "unknown limit: %s", argument);
+		return (-1);
+	}
+
+	value = strtonum(equals + 1, 0, LIMIT_VALUE_MAX, &error);
+	if (error == NULL && !is_decimal_digit(equals[1]))
+		error = "invalid";
+	if (error != NULL) {
+		report_error(program_name, "limit value is %s: %s", error,
+		    argument);
+		return (-1);
+	}
+
+	*field = (size_t)value;
+
+	return (0);
+}
+
+/*
  * Parse the options into *options.  Returns RELIC_EXIT_OK, or the status to
  * exit with having reported why the command line is malformed.
  *
@@ -551,7 +660,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":acF:o:q:sVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":acF:l:o:q:sVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -567,6 +676,13 @@ parse_options(const char *program_name, int argc, char *argv[],
 			    &options->format) != 0) {
 				report_error(program_name,
 				    "unknown output format: %s", optarg);
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			}
+			break;
+		case 'l':
+			if (parse_limit(program_name, optarg,
+			    &options->config) != 0) {
 				usage(program_name);
 				return (RELIC_EXIT_USAGE);
 			}

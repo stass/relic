@@ -1,0 +1,25 @@
+% The forms a negated literal takes.  A negated literal binds nothing, so it
+% is tested wherever its variables are bound, however it is written: before
+% the literal that binds them, with constants for arguments, over a relation
+% of arity zero, or in a query.
+item(pen).
+item(ink).
+item(pad).
+sold(ink).
+closed.
+
+% Written before the literal that binds X.
+unsold(X) :- not sold(X), item(X).
+
+% Constants only: holds for every item, because nothing sold a pad.
+stocked(X) :- item(X), not sold(pad).
+
+% Arity zero: closed/0 holds, so nothing is open.
+open(X) :- item(X), not closed.
+
+unsold(X)?
+stocked(X)?
+open(X)?
+item(X), not unsold(X)?
+not sold(pen)?
+not sold(ink)?

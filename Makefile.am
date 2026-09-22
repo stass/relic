@@ -255,8 +255,10 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/head-not-atom.dl tests/lang/incomplete-operator.dl \
 	tests/lang/integer-range.dl tests/lang/integer-trailing.dl \
 	tests/lang/materialize.dl tests/lang/missing-terminator.dl \
-	tests/lang/negation-refused.dl tests/lang/not-as-predicate.dl \
-	tests/lang/not-symbol.dl tests/lang/predicate-identity.dl \
+	tests/lang/negation-forms.dl tests/lang/negation-recursive.dl \
+	tests/lang/negation-strata.dl tests/lang/negation-tasks.dl \
+	tests/lang/not-as-predicate.dl tests/lang/not-symbol.dl \
+	tests/lang/predicate-identity.dl \
 	tests/lang/query-bindings.dl tests/lang/query-columns-limit.dl \
 	tests/lang/query-columns.dl tests/lang/query-comparisons.dl \
 	tests/lang/query-duplicates.dl tests/lang/query-graph.dl \

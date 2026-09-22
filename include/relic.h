@@ -300,14 +300,15 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * RELIC_F_NAIVE; the two give the same relations.
  *
  * The program is checked first and must pass.  Evaluation fails when a
- * configured limit refuses a tuple, when memory runs out, or when a rule
- * holds a negated literal, which the evaluator does not execute.  A failure
- * leaves every relation holding only tuples the program justifies, and the
- * next evaluation continues from them.
+ * configured limit refuses a tuple or when memory runs out, and the next
+ * evaluation starts again from nothing.
  *
  * Nothing is recomputed when nothing has been loaded since the last
- * evaluation that succeeded.  A query materializes the program before it is
- * answered, so a caller that only queries need not call this.
+ * evaluation that succeeded.  When something has, every derived tuple is
+ * discarded and the whole program evaluated again: a program with negation
+ * is not monotone, and a fact loaded later can make false a tuple derived
+ * before it.  A query materializes the program before it is answered, so a
+ * caller that only queries need not call this.
  */
 RELIC_EXPORT int relic_materialize(relic_t *ctx);
 

@@ -1,0 +1,30 @@
+% The task graph of architecture section 72, with facts for the relations it
+% leaves extensional.  A task is blocked while something it depends on is not
+% done, and ready when it is not blocked.  done/1 is complete before
+% blocked/1 is derived, and blocked/1 before ready/1, so each negation tests
+% absence from a relation that can no longer grow.
+%
+% ship waits on build, which is not done, so ship is blocked.  build waits on
+% design, which is done.  design and docs wait on nothing.
+todo(design).
+todo(build).
+todo(ship).
+todo(docs).
+
+depends(build, design).
+depends(ship, build).
+depends(ship, docs).
+
+done(design).
+
+blocked(X) :-
+    todo(X),
+    depends(X, Y),
+    not done(Y).
+
+ready(X) :-
+    todo(X),
+    not blocked(X).
+
+blocked(X)?
+ready(X)?

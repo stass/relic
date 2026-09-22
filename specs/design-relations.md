@@ -60,6 +60,14 @@ database be discarded without touching the program that derived it, which is
 the operation `relic_fact_add()` needs after an evaluation and a future
 `relic_query_destroy()` does not.
 
+Discarding every relation is safe because only the evaluator inserts: every
+tuple is in a relation because a rule's `EMIT` put it there, facts included,
+so the next evaluation derives everything again. A fact a caller adds must
+therefore be a fact rule appended to the program, never a tuple inserted into
+a relation. A tuple inserted directly would be erased by the next discard,
+and would not change the rule count that tells the evaluator the program
+changed, so the next query would not see what it implies.
+
 A relation holds two allocations and no arena memory:
 
 ```c
@@ -126,12 +134,22 @@ reorders or renumbers it in between, which is what an evaluation needs: a
 fixed point runs entirely inside one such span.
 
 This is not a rule that callers observe; it is a property of the interface.
-The relation store offers insertion, membership, and reading a tuple by
-identifier, and offers no operation that removes one, so today the span is the
-whole life of the context. An operation that modifies the database --
-discarding derived relations so that new facts can be added, say -- ends one
-span and begins another, and the obligation such an operation takes on is to
-make sure no range outlives the span it was taken in.
+The relation store offers insertion, membership, reading a tuple by
+identifier, and one operation that removes anything: **discarding every
+relation at once**, which the evaluator does when the program has changed
+since the relations last reached its fixed point. Nothing removes, reorders or
+renumbers a single tuple. A discard ends one span and begins another --
+identifiers restart from the first, so a range taken before it names nothing,
+or other tuples, after it -- and the obligation it takes on is to make sure no
+range outlives the span it was taken in. The evaluator meets it by
+construction: every range lives in an evaluation's state, and the discard runs
+before an evaluation begins.
+
+A discard empties each relation in place and releases its columns and index.
+The relations themselves stay where they are, so a pointer to one remains
+valid and names that predicate's relation, now empty. Both limit totals return
+to zero, exactly, because each is a sum over relations that now contribute
+nothing.
 
 D-10 is what rests on it. Semi-naive evaluation represents the tuples derived
 in one iteration as a half-open range of tuple identifiers rather than as a
@@ -336,9 +354,10 @@ The relation store contributes three things to the reproducibility of a run:
 
 ## 11. What is deliberately absent
 
-* **Removal.** Nothing deletes a tuple, which is what makes the append-only
-  invariant a property rather than a rule. The identifier table underneath
-  the index has no tombstones for the same reason.
+* **Removal of a tuple.** Nothing deletes one tuple; the only removal is the
+  discard of every relation, which is what keeps the append-only invariant a
+  property rather than a rule. The identifier table underneath the index has
+  no tombstones for the same reason.
 * **A sorted or tree-shaped store.** Membership is the operation that matters
   and a hash answers it in constant time; sorting is an output concern and is
   done by the output layer on the rows it is about to print.
