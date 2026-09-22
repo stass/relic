@@ -25,6 +25,16 @@ because leak detection does not work under AddressSanitizer on macOS and
 `make check-lsan` has therefore never run. The BSD and musl jobs need
 third-party VM actions and can follow.
 
+**Nothing enforces linking `$(LTLIBOBJS)` rather than `$(LIBOBJS)`.** [Low,
+component: `Makefile.am`] A program whose `LDADD` names the plain form
+brings back a second compilation of each replacement that races the libtool
+one under `make -j`, and the failure is intermittent. The rule is stated only
+at `LIBOBJDIR`. A convenience library carrying `$(LTLIBOBJS)` as its only
+`LIBADD` would make the right spelling the only one in the file; whether an
+empty convenience library builds cleanly on every platform (a platform with
+no replacements) needs checking first, and a check script rejecting
+`$(LIBOBJS)` is the cheaper fallback.
+
 **Manual pages are not written.** [Medium, component: `man/`] `relic.1` and
 `relic.3` are S12 and S14 deliverables, so `dist_man1_MANS` and
 `dist_man3_MANS` are absent from `Makefile.am` and the installed set of

@@ -12,6 +12,13 @@ AM_CFLAGS = $(RELIC_WARN_CFLAGS) $(RELIC_WERROR_CFLAGS) \
 
 # AC_REPLACE_FUNCS objects live in compat/.  A non-recursive build with
 # subdir-objects needs the trailing slash here for them to be found.
+#
+# Everything links the libtool form, $(LTLIBOBJS), and nothing the plain
+# $(LIBOBJS); libtool links whichever of the PIC and non-PIC objects was
+# built, so a program can name the .lo form as a library does.  A replacement
+# named in both forms is compiled by two rules, which write the same
+# dependency file and, when static objects are built, the same compat/foo.o,
+# and under make -j the two compilations race over them.
 LIBOBJDIR = compat/
 
 ##
@@ -50,7 +57,7 @@ relic_SOURCES = cmd/relic/main.c cmd/relic/output.c
 # export list together make them unreachable through librelic, so the first
 # call to strtonum(3) from the tool would otherwise fail to link on every
 # platform whose C library lacks it.
-relic_LDADD = librelic.la $(LIBOBJS)
+relic_LDADD = librelic.la $(LTLIBOBJS)
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = librelic.pc
@@ -97,7 +104,7 @@ check_PROGRAMS = tests/unit/test_compat tests/unit/test_compat_replacements \
 
 tests_unit_test_compat_SOURCES = tests/unit/test_compat.c \
 	tests/unit/harness.c
-tests_unit_test_compat_LDADD = $(LIBOBJS)
+tests_unit_test_compat_LDADD = $(LTLIBOBJS)
 
 tests_unit_test_compat_replacements_SOURCES = tests/unit/test_compat.c \
 	tests/unit/harness.c compat/reallocarray.c compat/strlcat.c \
@@ -121,50 +128,50 @@ check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
 	tests/unit/test_symbol tests/unit/test_util tests/unit/test_value
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
-tests_unit_test_arena_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_arena_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_diag_SOURCES = tests/unit/test_diag.c tests/unit/harness.c
-tests_unit_test_diag_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_diag_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_eval_SOURCES = tests/unit/test_eval.c tests/unit/harness.c
-tests_unit_test_eval_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_eval_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_lex_SOURCES = tests/unit/test_lex.c tests/unit/harness.c
-tests_unit_test_lex_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_lex_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_parse_SOURCES = tests/unit/test_parse.c tests/unit/harness.c
-tests_unit_test_parse_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_parse_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_plan_SOURCES = tests/unit/test_plan.c tests/unit/harness.c
-tests_unit_test_plan_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_plan_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_pred_SOURCES = tests/unit/test_pred.c tests/unit/harness.c
-tests_unit_test_pred_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_pred_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_query_SOURCES = tests/unit/test_query.c tests/unit/harness.c
-tests_unit_test_query_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_query_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_relation_SOURCES = tests/unit/test_relation.c \
 	tests/unit/harness.c
-tests_unit_test_relation_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_relation_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
-tests_unit_test_rule_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_rule_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_stratify_SOURCES = tests/unit/test_stratify.c \
 	tests/unit/harness.c
 # The long-chain test runs its analysis on a thread with a small stack.
 tests_unit_test_stratify_CFLAGS = $(AM_CFLAGS) -pthread
-tests_unit_test_stratify_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_stratify_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
-tests_unit_test_symbol_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_symbol_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_util_SOURCES = tests/unit/test_util.c tests/unit/harness.c
-tests_unit_test_util_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_util_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_value_SOURCES = tests/unit/test_value.c tests/unit/harness.c
-tests_unit_test_value_LDADD = librelic_internal.la $(LIBOBJS)
+tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 ##
 ## The allocation-failure suite is the one test program that cannot link the
@@ -189,7 +196,7 @@ tests_unit_test_exhaustion_SOURCES = tests/unit/test_exhaustion.c \
 	tests/unit/harness.c $(librelic_internal_la_SOURCES)
 tests_unit_test_exhaustion_CPPFLAGS = $(AM_CPPFLAGS) \
 	$(RELIC_ALLOCATOR_RENAMES)
-tests_unit_test_exhaustion_LDADD = $(LIBOBJS)
+tests_unit_test_exhaustion_LDADD = $(LTLIBOBJS)
 
 ##
 ## The public header carries the longest-lived contract in the tree: it must
