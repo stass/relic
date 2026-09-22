@@ -14,14 +14,31 @@ AM_CFLAGS = $(RELIC_WARN_CFLAGS) $(RELIC_WERROR_CFLAGS) \
 # subdir-objects needs the trailing slash here for them to be found.
 LIBOBJDIR = compat/
 
+##
+## The library is built once, into a convenience library, and linked from two
+## places.  librelic.la applies hidden visibility and the export list, so the
+## installed library offers only the documented interface; the unit tests link
+## the same objects directly, because a test of the arena or the value table
+## calls symbols that are deliberately unreachable through librelic.
+##
+## Compiling lib/ a second time for the tests would work and would be worse:
+## the tests would exercise objects built with different flags from the ones
+## that ship.
+##
+
+noinst_LTLIBRARIES = librelic_internal.la
+librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/diag.c lib/symbol.c \
+	lib/util.c lib/value.c
+
 lib_LTLIBRARIES = librelic.la
-librelic_la_SOURCES = lib/api.c
-librelic_la_LIBADD = $(LTLIBOBJS)
+librelic_la_SOURCES =
+librelic_la_LIBADD = librelic_internal.la $(LTLIBOBJS)
 librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
 
 include_HEADERS = include/relic.h
-noinst_HEADERS = compat/compat.h
+noinst_HEADERS = compat/compat.h compat/queue.h lib/internal.h lib/util.h \
+	tests/unit/harness.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/main.c
@@ -38,7 +55,7 @@ pkgconfig_DATA = librelic.pc
 # The m4 macro files are distributed by automake already, as dependencies of
 # configure; listing them here as well would only create a list that a sixth
 # macro file could be left out of.
-EXTRA_DIST = autogen.sh LICENSE README.md
+EXTRA_DIST = autogen.sh LICENSE README.md compat/README.md
 
 ##
 ## Tests
@@ -74,15 +91,67 @@ RELIC_COMPAT_RENAMES = \
 check_PROGRAMS = tests/unit/test_compat tests/unit/test_compat_replacements \
 	tests/unit/test_header
 
-tests_unit_test_compat_SOURCES = tests/unit/test_compat.c
+tests_unit_test_compat_SOURCES = tests/unit/test_compat.c \
+	tests/unit/harness.c
 tests_unit_test_compat_LDADD = $(LIBOBJS)
 
 tests_unit_test_compat_replacements_SOURCES = tests/unit/test_compat.c \
-	compat/reallocarray.c compat/strlcat.c compat/strlcpy.c \
-	compat/strtonum.c
+	tests/unit/harness.c compat/reallocarray.c compat/strlcat.c \
+	compat/strlcpy.c compat/strtonum.c
 tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DRELIC_COMPAT_DECLARE_ALL -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
 	$(RELIC_COMPAT_RENAMES)
+
+##
+## One test binary per module, driving each through the interface its callers
+## use.  They link the convenience library rather than librelic.la because
+## every module below the public interface is hidden from a program that
+## links the installed library, which is the property librelic.la exists to
+## have.
+##
+
+check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
+	tests/unit/test_symbol tests/unit/test_util tests/unit/test_value
+
+tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
+tests_unit_test_arena_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_diag_SOURCES = tests/unit/test_diag.c tests/unit/harness.c
+tests_unit_test_diag_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
+tests_unit_test_symbol_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_util_SOURCES = tests/unit/test_util.c tests/unit/harness.c
+tests_unit_test_util_LDADD = librelic_internal.la $(LIBOBJS)
+
+tests_unit_test_value_SOURCES = tests/unit/test_value.c tests/unit/harness.c
+tests_unit_test_value_LDADD = librelic_internal.la $(LIBOBJS)
+
+##
+## The allocation-failure suite is the one test program that cannot link the
+## convenience library.  It compiles the library from source with every
+## allocator call renamed, and supplies replacements that refuse the nth
+## request, so that the failure paths the arena and interning contracts are
+## built around are actually taken.  Without it those paths are dead code in
+## every other suite, and a failure that left a table inconsistent would go
+## unnoticed until a query returned a wrong answer.
+##
+## The renaming follows the pattern the compat suite already uses.  It is
+## confined to this program; nothing that ships is built this way.
+##
+
+RELIC_ALLOCATOR_RENAMES = \
+	-Dcalloc=relic_test_calloc \
+	-Dmalloc=relic_test_malloc \
+	-Dreallocarray=relic_test_reallocarray
+
+check_PROGRAMS += tests/unit/test_exhaustion
+tests_unit_test_exhaustion_SOURCES = tests/unit/test_exhaustion.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_exhaustion_CPPFLAGS = $(AM_CPPFLAGS) \
+	$(RELIC_ALLOCATOR_RENAMES)
+tests_unit_test_exhaustion_LDADD = $(LIBOBJS)
 
 ##
 ## The public header carries the longest-lived contract in the tree: it must
@@ -106,7 +175,8 @@ tests_unit_test_header_cxx_CXXFLAGS = $(RELIC_SAN_CFLAGS)
 tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
-dist_check_SCRIPTS = tests/ascii.sh tests/pkgconfig.sh tests/version.sh
+dist_check_SCRIPTS = tests/ascii.sh tests/globals.sh tests/pkgconfig.sh \
+	tests/version.sh
 
 TEST_EXTENSIONS = .sh
 SH_LOG_COMPILER = $(SHELL)

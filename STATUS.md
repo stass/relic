@@ -13,12 +13,29 @@ rejects anything else as a usage error.
 | --- | --- |
 | `configure.ac`, `Makefile.am`, `autogen.sh` | autoconf 2.69, automake 1.13, libtool 2.4.2 or newer; one non-recursive `Makefile.am` |
 | `m4/` | five local macros: C11 dialect, compiler flags, sanitizers, libedit, debug and assertion options |
-| `include/relic.h` | version macros, `RELIC_EXPORT`, `relic_version()` |
-| `lib/api.c` | `relic_version()` |
 | `cmd/relic/main.c` | `-V` only; unknown options and operands are usage errors |
 | `compat/` | `compat.h` and replacements for `reallocarray`, `strlcat`, `strlcpy`, `strtonum`, each linked only where the platform lacks it and compiled everywhere by the test suite |
 | `librelic.pc.in` | pkg-config module `librelic` |
-| `tests/` | three unit binaries and three shell tests |
+
+**The foundations, stage S1.** The storage and reporting primitives every
+later stage sits on, specified in `specs/design-memory.md`. No Datalog yet.
+
+| Component | State |
+| --- | --- |
+| `lib/arena.c` | chunked region allocator; sticky failure flag, cleared by a reset and by the context-arena funnel |
+| `lib/util.{h,c}` | `relic_grow_array()` over `reallocarray()`; one open-addressing identifier table, reserved and placed as separate steps; hashes with compile-time seeds |
+| `lib/symbol.c` | byte strings interned to 32-bit identifiers; bytes in the context arena, embedded NULs preserved |
+| `lib/value.c` | the value table and `relic_dom_t` of D-3; interning for all three types, the language order of section 10.1 and the total order of section 61 |
+| `lib/diag.c` | diagnostic callback, last-error buffer, and a stderr formatter that escapes non-printable bytes |
+| `lib/api.c` | context lifecycle and the context-arena allocation funnel |
+| `include/relic.h` | `relic_t`, `relic_value_t`, `relic_location_t`, `relic_config_t`, the diagnostic callback, `relic_create()`, `relic_create_config()`, `relic_destroy()`, `relic_diag_set()`, `relic_diag_stderr()`, `relic_error()`, `relic_string()` |
+| `compat/queue.h` | bundled OpenBSD copy, provenance and patches in `compat/README.md` |
+| `tests/` | nine unit binaries and four shell tests |
+
+A configuration is accepted and stored but not enforced: nothing allocates
+relation or index storage for a limit to apply to yet, and no `flags` value is
+defined. The header says so. `compat/tree.h` is not bundled, because no
+subsystem calls for a red-black tree yet.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -42,30 +59,45 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly one symbol, `relic_version`;
-  the compatibility objects linked into it are not reachable.
+* the installed shared library exports exactly the eight documented entry
+  points and nothing else; the compatibility objects linked into it are not
+  reachable.
+
+Three of the tests are checks on the tree rather than on the engine, and each
+was confirmed to fail when the property it guards is broken, rather than only
+to pass:
+
+* `tests/globals.sh` reports any C object in a writable section, and was
+  checked against an injected `static` counter and an injected
+  `_Thread_local` one, in both plain and instrumented builds;
+* `tests/unit/test_exhaustion.c` compiles the library against an allocator
+  that refuses the nth request and sweeps n across interning, which is how the
+  index-growth failure that broke interning identity was found;
+* `tests/ascii.sh` walks the whole tree and excludes what is generated.
 
 No platform other than macOS has been exercised, because there is no
-continuous integration yet. `TODO.md` records that as the highest open item.
+continuous integration yet. `TODO.md` records that as the highest open item,
+and records the two checks whose behaviour on ELF is inferred rather than
+observed.
 
-Nothing else is implemented. There is no lexer, parser, relation store,
-evaluator or query interface yet.
+There is no lexer, parser, relation store, evaluator or query interface yet.
 
 ## Documents
 
 | File | Contents |
 | --- | --- |
 | `specs/architecture.md` | target design, v0.2 |
+| `specs/design-memory.md` | arenas, arrays, interning tables, the value table |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S1, the foundations every later stage sits on: the arena allocator, the
-diagnostic interface, the growable-array and open-addressing hash primitives,
-symbol interning and the value table of D-3. It owes
-`specs/design-memory.md` before its code.
+Stage S2, the lexer and parser: source text becomes an AST and bad source text
+becomes good diagnostics, with error recovery synchronizing on `.` and `?`. It
+owes `specs/design-parser.md` before its code, and brings the first `.dl`
+language tests and the first fuzz target.
 
 ## Decisions taken
 

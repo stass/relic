@@ -1540,8 +1540,12 @@ small, and the macro set provided by the system copy differs between glibc,
 musl, macOS and the BSDs in ways that are tedious to probe correctly and easy
 to probe incompletely. Using one known copy everywhere removes a class of
 portability defect outright and makes list and tree behaviour identical on all
-platforms. The bundled copies keep their original OpenBSD ISC license headers,
-which are compatible with the 2-clause BSD license of the project.
+platforms. Each bundled copy keeps the upstream license header it arrived
+with: `queue.h` carries the 3-clause BSD notice of the Regents of the
+University of California, and `tree.h` the ISC notice of its author. Both are
+compatible with the 2-clause BSD license of the project. `compat/README.md`
+records each copy's upstream origin, revision, checksum and the patches
+applied to it.
 
 Function-level compatibility uses `AC_REPLACE_FUNCS`, so a replacement object
 is compiled only where it is needed and engine sources simply call
@@ -1580,6 +1584,10 @@ allocation failed. Arena exhaustion is reported as an ordinary diagnostic and a
 
 Avoid one `malloc()` per AST node or per tuple.
 
+The arena, the growable-array helper, the open-addressing identifier table,
+the symbol pool and the value table are specified in
+`specs/design-memory.md`.
+
 ---
 
 # 48. C Library
@@ -1601,14 +1609,18 @@ internal layout:
 
 ```c
 typedef struct relic relic_t;
-typedef struct relic_config relic_config_t;
-typedef struct relic_location relic_location_t;
 typedef struct relic_query relic_query_t;
 typedef struct relic_result relic_result_t;
 ```
 
-`relic_value_t` of section 19 is the one exception: it is a complete type,
-because callers construct and read values directly.
+Three types are complete rather than opaque, because a caller constructs or
+reads each one directly and an accessor per field would buy nothing:
+
+* `relic_value_t` of section 19, which callers build and inspect;
+* `relic_location_t` of section 56, a (file, line, column) triple that every
+  diagnostic callback reads;
+* `relic_config_t` of section 49, which a caller fills in before creating a
+  context.
 
 The header is strict C11, contains no project-internal includes, does not
 include `config.h`, and is guarded for C++ inclusion. Only symbols matching
@@ -2604,7 +2616,7 @@ and the tool moves from `usr.bin/relic/` to `cmd/relic/`.
 
 **Portability, section 46.** Feature availability is decided by `configure`
 and `AC_REPLACE_FUNCS`. `queue.h` and `tree.h` are bundled unconditionally
-instead of probed.
+instead of probed, each under its own upstream license.
 
 **Command line, section 40.** Added a repeatable `-l key=value` for resource
 limits, so new limits never consume option letters, and a repeatable
@@ -2639,7 +2651,15 @@ range of tuple identifiers.
 rather than an option to fall back to a dynamic bitmap.
 
 **Memory, section 47.** The arena failure contract is specified: `NULL` plus a
-sticky flag, checked at phase boundaries, never an abort.
+sticky flag, checked at phase boundaries, never an abort. The storage
+primitives are detailed in `specs/design-memory.md`.
+
+**Opaque types, section 48.** `relic_location_t` and `relic_config_t` join
+`relic_value_t` as complete public types. A location is a (file, line,
+column) triple that every diagnostic callback must read, and a configuration
+is a plain record of limits that section 49 already specifies field by field;
+making either opaque would add three accessors and five setters carrying no
+information the struct does not.
 
 **Limits, section 63.** Limits are enumerated, exposed through `-l`, and
 specified to discard partial results.

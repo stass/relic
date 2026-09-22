@@ -12,10 +12,6 @@
  * implementation the rest of the tree will call here.  That is the property
  * worth checking: engine code calls strlcpy(3) and strtonum(3) without
  * knowing which one it got, and must see one behaviour on every platform.
- *
- * The checks do not use assert(3).  An ordinary optimized build defines
- * NDEBUG, which would compile every assertion away and leave a test that
- * passes without testing anything.
  */
 
 #include "config.h"
@@ -24,11 +20,11 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "compat.h"
+#include "harness.h"
 
 /*
  * A byte no test writes deliberately, used to fill a destination buffer
@@ -37,10 +33,6 @@
  */
 #define	SENTINEL	'#'
 
-static unsigned int failures;
-
-static void	check(bool condition, const char *scenario,
-		    const char *expectation);
 static void	fill_with_sentinel(char *buffer, size_t size);
 static bool	tail_is_untouched(const char *buffer, size_t size,
 		    size_t writable);
@@ -64,16 +56,6 @@ static void	strtonum_accepts_the_bounds_of_the_interval(void);
 static void	strtonum_converts_the_extremes_of_long_long(void);
 static void	strtonum_rejects_malformed_input(void);
 static void	strtonum_rejects_values_outside_the_interval(void);
-
-static void
-check(bool condition, const char *scenario, const char *expectation)
-{
-	if (condition)
-		return;
-
-	fprintf(stderr, "FAIL: %s: %s\n", scenario, expectation);
-	failures++;
-}
 
 static void
 fill_with_sentinel(char *buffer, size_t size)
@@ -594,10 +576,5 @@ main(void)
 	strtonum_rejects_malformed_input();
 	strtonum_rejects_values_outside_the_interval();
 
-	if (failures != 0) {
-		fprintf(stderr, "%u check(s) failed\n", failures);
-		return (1);
-	}
-
-	return (0);
+	return (check_summary("compat"));
 }

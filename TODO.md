@@ -6,16 +6,15 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S0 landed at milestone M0, S1 next.
+`relic-plan.md`. Current position: S1 landed; S2, the lexer and parser, next.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`specs/design-memory.md` (S1), `design-parser.md` (S2), `design-program.md`
-(S3), `design-relations.md` (S4), `design-plan.md` and `design-eval.md` (S5),
-`design-stratify.md` (S6), `design-index.md` and `design-planner.md` (S9),
-`design-magic.md` (S10). Each is referenced from `specs/architecture.md` when
-written.
+`design-parser.md` (S2), `design-program.md` (S3), `design-relations.md` (S4),
+`design-plan.md` and `design-eval.md` (S5), `design-stratify.md` (S6),
+`design-index.md` and `design-planner.md` (S9), `design-magic.md` (S10). Each
+is referenced from `specs/architecture.md` when written.
 
 **`specs/style.md` readability references.** [Low] The readability standard
 lists qualities to aim for but names no relic functions yet, because none
@@ -55,6 +54,17 @@ make the target implementable. Decide whether section 65.3 should record it.
 rots unnoticed, so both the harness and `TEST_EXTENSIONS = .dl` arrive with
 the first language test.
 
+**Two tree checks behave differently on ELF and have never run there.**
+[High, component: `tests/globals.sh`] The no-mutable-global-state check has
+two branches, and only the Mach-O one has been exercised, because there is no
+Linux job yet. Two specific doubts to settle the first time it runs on ELF:
+GNU `nm` reports `.data.rel.ro` as type `d`, so a constant table holding
+pointers may be reported as mutable state and fail the build spuriously; and
+the claim that a thread-local object is reported as ordinary data or bss is
+inferred from how ELF places `.tdata` and `.tbss`, not observed. Settle both
+by injecting each case on Linux, as was done on macOS, rather than by reading
+the output once and assuming.
+
 **The tarball carries no project documents.** [Low, component: `Makefile.am`]
 `EXTRA_DIST` ships `README.md` and `LICENSE` but not `specs/`, `relic-plan.md`,
 `STATUS.md` or `TODO.md`. For a tool whose selling point is that it can be
@@ -81,6 +91,28 @@ to 7 KLOC of `specs/architecture.md` section 2.2, which treats size as a design
 constraint. Track actual lines per stage against the budget; the levers are
 listed under risk R7.
 
+**An unknown value type cannot be rejected in a build that checks for it.**
+[Low, component: `lib/value.c`] `value_well_formed()` rejects a
+`relic_value_t` whose `type` is not one of the three enumerators, which an
+embedding program can construct. The guard is unreachable under
+`-fsanitize=undefined`: reading an out-of-range enum is undefined, so
+UndefinedBehaviorSanitizer traps on the load before the guard runs, and in
+that build the library aborts its host rather than returning `-1`. The guard
+is kept because it costs three lines and catches the mistake on an ordinary
+release build, but it cannot be a guarantee and `tests/unit/test_value.c`
+leaves the case untested for the same reason. Making it real would mean
+taking the type as an integer across the public boundary, which changes the
+representation `specs/architecture.md` section 19.1 specifies. Revisit if an
+embedder hits it.
+
+**A configuration is accepted but not enforced.** [Low, component:
+`include/relic.h`] `relic_config_t` and `relic_create_config()` are public and
+their four limits are stored and never read, because no relation or index
+storage exists to apply them to until S4, and no `RELIC_F_` behaviour switch
+is defined until S5. The header says so plainly so that a caller is not
+misled. Confirm the field shape is right when S4 enforces the first limit;
+public API is the hardest thing to withdraw.
+
 **Assertions are absent from release builds.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 makes assertions a
 `--enable-debug` feature, so an ordinary build defines `NDEBUG`. Sanitizer
@@ -88,6 +120,14 @@ builds keep them, which is where they earn their place. The consequence is a
 rule for later stages rather than a defect: an invariant that must hold in a
 release build needs an explicit check and a diagnostic, not an `assert()`.
 The append-only invariant of D-10 is the first one this applies to.
+
+**Allocation-failure coverage stops at interning.** [Medium, component:
+`tests/unit/test_exhaustion.c`] The suite compiles the library against an
+allocator that refuses the nth request and sweeps n across symbol and value
+interning, which is what caught the index-growth failure that broke interning
+identity. Every later stage adds allocation paths that the sweep will not
+reach unless it is extended: the tuple store, the indexes, the plan arena. Add
+a scenario per stage rather than leaving the suite describing S1 forever.
 
 **Leak detection is unavailable on macOS.** [Medium, component: `Makefile.am`]
 AddressSanitizer on Apple silicon reports that `detect_leaks` is unsupported

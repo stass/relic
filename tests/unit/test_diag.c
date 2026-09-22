@@ -1,0 +1,291 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+/*
+ * Contract tests for diagnostics.
+ *
+ * Three obligations are checked.  A caller that installs no callback still
+ * gets nothing on its stderr and can still recover the reason for a failure.
+ * A caller that installs one receives every diagnostic with its level and its
+ * location intact.  And the formatter the tool installs never passes an
+ * unprintable byte through to whoever is reading, because both the message
+ * and the file name in a diagnostic can quote text that came out of a source
+ * file or a command line.
+ */
+
+#include "config.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <unistd.h>
+
+#include "harness.h"
+#include "internal.h"
+
+#define	SCENARIO_CALLBACK	"a callback receives every diagnostic"
+#define	SCENARIO_ESCAPE		"the stderr formatter escapes what it prints"
+#define	SCENARIO_SILENT		"a context with no callback stays silent"
+
+/*
+ * What the recording callback saw.  Only the last diagnostic is kept in
+ * full, since that is what the tests ask about; the counts prove nothing was
+ * dropped along the way.
+ */
+typedef struct record record_t;
+
+struct record {
+	char			 message[256];
+	relic_location_t	 where;
+	enum relic_diag_level	 level;
+	unsigned int		 total;
+	unsigned int		 located;
+	bool			 overflowed;
+};
+
+static bool	 capture_diagnostic(char *buffer, size_t size,
+		    const relic_location_t *where, const char *message);
+static void	 record_diagnostic(void *ctx, enum relic_diag_level level,
+		    const relic_location_t *where, const char *message);
+static void	 a_callback_sees_level_location_and_text(void);
+static void	 a_silent_context_still_remembers_its_error(void);
+static void	 the_stderr_formatter_escapes_unprintable_bytes(void);
+
+static void
+record_diagnostic(void *ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	record_t *record;
+
+	record = ctx;
+	record->total++;
+	record->level = level;
+
+	if (strlen(message) >= sizeof(record->message))
+		record->overflowed = true;
+	strlcpy(record->message, message, sizeof(record->message));
+
+	if (where != NULL) {
+		record->located++;
+		record->where = *where;
+	}
+}
+
+static void
+a_callback_sees_level_location_and_text(void)
+{
+	static const relic_location_t at_rule = {
+		"policy.dl", 18, 5
+	};
+
+	relic_t *ctx;
+	record_t record;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_CALLBACK, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	bzero(&record, sizeof(record));
+	relic_diag_set(ctx, record_diagnostic, &record);
+
+	relic_diagf(ctx, RELIC_NOTE, NULL, "a note about %s", "nothing");
+	check(record.total == 1 && record.level == RELIC_NOTE,
+	    SCENARIO_CALLBACK, "a note should arrive with its level");
+	check(strcmp(record.message, "a note about nothing") == 0,
+	    SCENARIO_CALLBACK, "the format arguments should be substituted");
+	check(record.located == 0, SCENARIO_CALLBACK,
+	    "an unlocated diagnostic should carry no location");
+
+	relic_diagf(ctx, RELIC_ERROR, &at_rule, "%s/%d is not stratified",
+	    "ready", 1);
+	check(record.total == 2 && record.level == RELIC_ERROR,
+	    SCENARIO_CALLBACK, "an error should arrive with its level");
+	check(record.located == 1 && record.where.line == 18 &&
+	    record.where.column == 5, SCENARIO_CALLBACK,
+	    "the location should reach the callback unchanged");
+	check(record.where.file != NULL &&
+	    strcmp(record.where.file, "policy.dl") == 0, SCENARIO_CALLBACK,
+	    "including the source name");
+
+	/*
+	 * Only an error is worth remembering as the reason a call failed; a
+	 * note that followed one must not displace it.
+	 */
+	check(relic_error(ctx) != NULL &&
+	    strcmp(relic_error(ctx), "ready/1 is not stratified") == 0,
+	    SCENARIO_CALLBACK, "the error should be the recoverable one");
+
+	relic_diagf(ctx, RELIC_WARNING, NULL, "a warning");
+	check(relic_error(ctx) != NULL &&
+	    strcmp(relic_error(ctx), "ready/1 is not stratified") == 0,
+	    SCENARIO_CALLBACK, "a later warning should not replace it");
+
+	/*
+	 * Removing the callback stops delivery without disturbing anything
+	 * already recorded.
+	 */
+	relic_diag_set(ctx, NULL, NULL);
+	relic_diagf(ctx, RELIC_ERROR, NULL, "unheard");
+	check(record.total == 3, SCENARIO_CALLBACK,
+	    "no diagnostic should arrive after the callback is removed");
+	check(!record.overflowed, SCENARIO_CALLBACK,
+	    "no message should have been truncated by the recorder");
+
+	relic_destroy(ctx);
+}
+
+static void
+a_silent_context_still_remembers_its_error(void)
+{
+	relic_t *ctx;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_SILENT, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	check(relic_error(ctx) == NULL, SCENARIO_SILENT,
+	    "a fresh context should report no error");
+
+	relic_diagf(ctx, RELIC_WARNING, NULL, "only a warning");
+	check(relic_error(ctx) == NULL, SCENARIO_SILENT,
+	    "a warning alone should not make the context look failed");
+
+	relic_diagf(ctx, RELIC_ERROR, NULL, "could not open %s", "graph.dl");
+	check(relic_error(ctx) != NULL &&
+	    strcmp(relic_error(ctx), "could not open graph.dl") == 0,
+	    SCENARIO_SILENT,
+	    "the error should be recoverable with no callback installed");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Run the stderr formatter with stderr redirected to a temporary file and
+ * return what it wrote in `buffer`.
+ *
+ * Redirecting the real stderr, rather than calling an inner function that
+ * takes a stream, is deliberate: what is under test is the callback the tool
+ * installs, exactly as the tool installs it.
+ *
+ * stderr is restored before returning, so that a check the caller makes
+ * afterwards can still report a failure.  A test whose own failure messages
+ * went into the capture would be a test that cannot fail visibly.
+ */
+static bool
+capture_diagnostic(char *buffer, size_t size, const relic_location_t *where,
+    const char *message)
+{
+	FILE *capture;
+	size_t length;
+	int saved_stderr;
+
+	buffer[0] = '\0';
+
+	capture = tmpfile();
+	if (capture == NULL)
+		return (false);
+
+	fflush(stderr);
+	saved_stderr = dup(fileno(stderr));
+	if (saved_stderr == -1 || dup2(fileno(capture), fileno(stderr)) == -1) {
+		if (saved_stderr != -1)
+			close(saved_stderr);
+		fclose(capture);
+		return (false);
+	}
+
+	relic_diag_stderr(NULL, RELIC_ERROR, where, message);
+	fflush(stderr);
+
+	/*
+	 * If stderr cannot be put back, every later failure message in this
+	 * binary would disappear into the capture, so the suite says so on
+	 * the one descriptor still known to work and stops.
+	 */
+	if (dup2(saved_stderr, fileno(stderr)) == -1) {
+		fprintf(stdout, "could not restore stderr; aborting\n");
+		close(saved_stderr);
+		fclose(capture);
+		exit(1);
+	}
+	close(saved_stderr);
+
+	rewind(capture);
+	length = fread(buffer, 1, size - 1, capture);
+	buffer[length] = '\0';
+	fclose(capture);
+
+	return (true);
+}
+
+/*
+ * A source file relic was asked to read can contain a terminal escape
+ * sequence, in a string literal or in its own name, and a diagnostic quotes
+ * both.  Printing one unexamined would let the file retitle the reader's
+ * terminal or forge a diagnostic line of its own, so every byte outside
+ * printable ASCII is written as an escape instead.
+ */
+static void
+the_stderr_formatter_escapes_unprintable_bytes(void)
+{
+	static const relic_location_t hostile_file = {
+		"graph\033]0;owned\007.dl", 3, 1
+	};
+	static const relic_location_t ordinary_file = {
+		"graph.dl", 3, 1
+	};
+
+	char written[512];
+
+	check(capture_diagnostic(written, sizeof(written), NULL,
+	    "unexpected \033]0;owned\007 token"), SCENARIO_ESCAPE,
+	    "the formatter's output should be capturable");
+	check(strstr(written, "\\x1b") != NULL, SCENARIO_ESCAPE,
+	    "an escape character in a message should be written as \\x1b");
+	check(strchr(written, '\033') == NULL, SCENARIO_ESCAPE,
+	    "and should not reach the stream itself");
+
+	check(capture_diagnostic(written, sizeof(written), &hostile_file,
+	    "bad rule"), SCENARIO_ESCAPE,
+	    "the formatter's output should be capturable for a file name too");
+	check(strstr(written, "\\x1b") != NULL, SCENARIO_ESCAPE,
+	    "a file name should be escaped the same way");
+	check(strchr(written, '\033') == NULL, SCENARIO_ESCAPE,
+	    "and should not reach the stream either");
+
+	/*
+	 * A backslash is doubled so that an escape this formatter produced
+	 * cannot be confused with one the text already contained.
+	 */
+	check(capture_diagnostic(written, sizeof(written), NULL,
+	    "literal \\x1b here"), SCENARIO_ESCAPE,
+	    "the formatter's output should be capturable once more");
+	check(strstr(written, "\\\\x1b") != NULL, SCENARIO_ESCAPE,
+	    "a backslash in the text should be doubled");
+
+	check(capture_diagnostic(written, sizeof(written), &ordinary_file,
+	    "bad rule"), SCENARIO_ESCAPE,
+	    "an ordinary diagnostic should be capturable");
+	check(strcmp(written, "graph.dl:3:1: error: bad rule\n") == 0,
+	    SCENARIO_ESCAPE,
+	    "a located diagnostic should read file:line:column: level: text");
+}
+
+int
+main(void)
+{
+	a_callback_sees_level_location_and_text();
+	a_silent_context_still_remembers_its_error();
+	the_stderr_formatter_escapes_unprintable_bytes();
+
+	return (check_summary("diag"));
+}
