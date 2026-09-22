@@ -7,6 +7,7 @@
 #ifndef RELIC_PLAN_H
 #define RELIC_PLAN_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -83,10 +84,17 @@ struct relic_plan_term {
  * The relation is held directly rather than as a predicate identifier to
  * resolve on every step.  A relation never moves once created, so a plan may
  * keep the pointer for as long as the relation exists.
+ *
+ * `delta` is set only on the SCAN a semi-naive variant begins with.  That
+ * scan walks the tuples its relation gained in the previous iteration rather
+ * than the whole relation; which identifiers those are changes from one
+ * iteration to the next, so the evaluation supplies the range when the scan
+ * starts.
  */
 struct relic_op_atom {
 	relic_relation_t	*relation;
 	relic_plan_term_t	*terms;
+	bool			 delta;
 };
 
 /*
@@ -122,5 +130,11 @@ struct relic_plan {
 	relic_op_t	*ops;
 	size_t		 op_count;
 };
+
+/*
+ * The delta literal argument of relic_plan_rule() that asks for the rule's
+ * ordinary plan, in which every literal reads its whole relation.
+ */
+#define	RELIC_PLAN_NO_DELTA	SIZE_MAX
 
 #endif /* RELIC_PLAN_H */

@@ -52,6 +52,7 @@
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
+#define	SCENARIO_MATERIALIZE	"a materialization out of memory reports once"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
 #define	SCENARIO_SCHEDULE	"a schedule that could not be rebuilt is kept"
 #define	SCENARIO_STRATIFY	"an analysis out of memory says nothing"
@@ -146,6 +147,24 @@
 #define	EVAL_SWEEP	160
 
 /*
+ * The materialization sweep's program is a chain of this many predicates,
+ * each copying the one before it.  An evaluation allocates its per-component
+ * plans and then a delta range and a membership mark for every predicate.
+ * With this many components the first of those arrays is too large for the
+ * arena's first chunk, so the delta ranges need a chunk of their own and a
+ * refusal can land on them, which is the second request the sweep refuses.
+ * The arena's failure is sticky, so the membership marks that follow are
+ * refused as well without asking the allocator, and exactly one message must
+ * say so.
+ *
+ * The sweep's budgets all run out while the evaluation is being set up and
+ * planned, so a refused run must leave every relation empty, and a retry
+ * with memory to spare must then derive the whole chain.
+ */
+#define	WIDE_PREDICATES	600
+#define	WIDE_SWEEP	48
+
+/*
  * Requests still to be served before the allocator starts refusing.  A
  * negative budget means refuse nothing, which is the state every allocation
  * outside a swept region runs in.  Once the budget reaches zero every later
@@ -181,6 +200,8 @@ static void	 an_analysis_that_ran_out_of_memory_says_nothing(void);
 static void	 a_schedule_that_could_not_be_rebuilt_is_kept(void);
 static void	 a_relation_survives_a_failed_allocation(void);
 static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
+static void	 a_materialization_out_of_memory_reports_once(void);
+static char	*wide_sweep_program(void);
 static int	 count_answer(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static char	*evaluation_sweep_program(void);
@@ -1474,6 +1495,118 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 	    EVAL_SWEEP);
 }
 
+/*
+ * The chain w0(a), w1(X) :- w0(X), and so on to WIDE_PREDICATES - 1.
+ */
+static char *
+wide_sweep_program(void)
+{
+	char *text;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = (WIDE_PREDICATES + 1) * 32;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size, "w0(a).\n");
+
+	for (i = 1; i < WIDE_PREDICATES; i++) {
+		used += (size_t)snprintf(text + used, size - used,
+		    "w%u(X) :- w%u(X).\n", i, i - 1);
+
+		if (used >= size) {
+			free(text);
+			return (NULL);
+		}
+	}
+
+	return (text);
+}
+
+/*
+ * Materializing a program with many predicates runs out of memory while the
+ * evaluation is being set up, and says so exactly once however many of its
+ * requests the exhaustion refused.  A retry with memory available reaches
+ * the end of the chain.
+ */
+static void
+a_materialization_out_of_memory_reports_once(void)
+{
+	char *program;
+	size_t held;
+	size_t refused;
+	long budget;
+
+	program = wide_sweep_program();
+	if (program == NULL) {
+		check(false, SCENARIO_MATERIALIZE, "the sweep program is built");
+		return;
+	}
+
+	refused = 0;
+
+	for (budget = 0; budget < WIDE_SWEEP; budget++) {
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_MATERIALIZE,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "wide.dl", program) != 0 ||
+		    relic_check(ctx) != 0) {
+			check(false, SCENARIO_MATERIALIZE,
+			    "the program should load and check before the "
+			    "sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+
+		refuse_allocations_after(budget);
+		status = relic_materialize(ctx);
+		serve_every_allocation();
+		held = relic_relation_total_tuples(ctx);
+
+		if (status != 0)
+			refused++;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_MATERIALIZE,
+		    "a materialization that %s should report %d message(s), "
+		    "not %zu, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(status == 0 || held == 0, SCENARIO_MATERIALIZE,
+		    "a materialization refused while planning should derive "
+		    "nothing, not %zu tuples, with allocation %ld refused",
+		    held, budget);
+
+		status = relic_materialize(ctx);
+		held = relic_relation_total_tuples(ctx);
+		checkf(status == 0 && held == WIDE_PREDICATES,
+		    SCENARIO_MATERIALIZE,
+		    "the retry should hold %d tuples, not %zu, with allocation "
+		    "%ld refused", WIDE_PREDICATES, held, budget);
+
+		relic_destroy(ctx);
+	}
+
+	free(program);
+
+	checkf(refused == WIDE_SWEEP, SCENARIO_MATERIALIZE,
+	    "every step of the sweep should refuse the materialization, "
+	    "%zu of %d did", refused, WIDE_SWEEP);
+}
+
 int
 main(void)
 {
@@ -1486,6 +1619,7 @@ main(void)
 	a_schedule_that_could_not_be_rebuilt_is_kept();
 	a_relation_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
+	a_materialization_out_of_memory_reports_once();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

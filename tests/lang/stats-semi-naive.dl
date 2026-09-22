@@ -1,0 +1,16 @@
+% The work semi-naive evaluation does on a chain, as counted by -X stats.
+% After the first round each round joins only the paths the round before
+% derived, so a path is derived about once, rather than once per round as the
+% naive fixed point in stats-naive.dl derives it.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+edge(d, e).
+edge(e, f).
+edge(f, g).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+
+path(a, X)?

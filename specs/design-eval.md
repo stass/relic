@@ -17,7 +17,9 @@ and 63; `specs/design-plan.md` for the plans this runs;
 * how a plan is executed without recursion, and what state that needs;
 * what a comparison means when its operands have different types;
 * the naive fixed point, why it terminates, and why it stays in the library;
-* the semi-naive fixed point and the invariant it rests on;
+* the semi-naive fixed point, why it is complete, and the invariant it rests
+  on;
+* the counters evaluation keeps, and what they are for;
 * when the relations of a context hold the program's fixed point, and what a
   later load does to that;
 * how a query is answered and its rows streamed, and why no row is delivered
@@ -160,11 +162,21 @@ Architecture sections 27 and 28 describe the algorithm: after the first round,
 a recursive rule is evaluated only against the tuples its recursive literals
 gained in the previous round.
 
+```text
+for every recursive component, in schedule order:
+	delta(R) = empty, for every member R
+	round 0: for every rule, run its plan
+	while some member gained tuples in the last round:
+		delta(R) = the tuples R gained in the last round
+		for every delta variant, in rule order then literal order:
+			run it
+```
+
 **A delta is a range of tuple identifiers**, per D-10. The store is
-append-only, so the tuples a relation gained during one iteration are exactly
-those with identifiers between its end before the iteration and its end after
-it. `relic_relation_end()` takes the mark and `relic_relation_since()` gives the
-range; no delta is ever copied.
+append-only, so the tuples a relation gained during one round are exactly
+those with identifiers between its end before the round and its end after it.
+Each member's delta is the previous delta's end to the relation's current end,
+through `relic_relation_since()`; no delta is ever copied.
 
 **The invariant this rests on**: within one fixed point, no relation is
 compacted, has a tuple removed, or is renumbered. The relation store offers no
@@ -174,17 +186,77 @@ incremental maintenance, or deletion -- must confront it before anything else,
 because a range taken before such an operation silently names different tuples
 afterwards.
 
-For a rule with *k* body literals over predicates of its own strongly connected
-component, *k* variants are planned; variant *i* reads literal *i* from the
-delta and every other literal from the full relation. The delta literal is
-placed first and is always a `SCAN` of its range, so no index over a delta is
-ever needed. Some tuples are derived more than once in an iteration; the
-destination relation discards the duplicates.
+### 4.1 Variants
+
+For a rule with *k* positive body literals over predicates of its own strongly
+connected component, *k* variants are planned; variant *i* reads literal *i*
+from the delta and every other literal from the full relation. The delta
+literal is placed first and is always a `SCAN` of its range, even when every
+argument is a constant, so no index over a delta is ever needed. Some tuples
+are derived more than once in a round; the destination relation discards the
+duplicates. A refinement avoids them, reading the relations as they were before
+the round for the literals ahead of the delta one; it saves work only for rules
+with several recursive literals and is not obviously correct on first reading,
+so the design is the simpler scheme until a measurement says otherwise.
+
+A rule with no literal over its own component -- a fact, or a base case such
+as `path(X, Y) :- edge(X, Y)` -- has no variant. Everything it reads was
+complete before the component began, so round 0 derived everything it ever
+will.
+
+The delta ranges are held by the evaluation, one per predicate, and a delta
+`SCAN` takes its range from there when it starts. The plan records only that
+the scan reads the delta; which identifiers that is changes every round, and
+the plan does not.
+
+### 4.2 Why it is complete
+
+Number the rounds from zero, and say a tuple of a member belongs to the round
+that inserted it, or to round -1 if the relation held it before round 0.
+Take any way of satisfying a rule's body, and let *m* be the latest round any
+of its member tuples belongs to.
+
+* If *m* is -1, round 0 ran every rule's full plan over relations that
+  already held all of them.
+* Otherwise round *m* inserted a tuple, so round *m* + 1 runs. In it, the
+  variant whose delta literal is matched by a tuple of round *m* finds that
+  tuple in its delta, and finds every other tuple in the full relations,
+  whose scans start after round *m* ended.
+
+Insertions within a round are visible to scans that start later in the same
+round. That only adds derivations; the argument above does not depend on it.
+
+Round 0 being a full pass is also what makes continuing a fixed point after a
+later load sound: the tuples the relations already hold are joined with each
+other and with the new rules and facts like any others, so the result is the
+fixed point that starting from nothing would reach.
 
 Evaluation proceeds stratum by stratum and, within a stratum, one strongly
 connected component at a time in topological order. A component with no
-recursion needs one pass. Plans are built before the first component runs,
-never per iteration.
+recursion needs one pass. Plans and variants are built before the first
+component runs, never per iteration.
+
+### 4.3 Counters
+
+The context counts the work evaluation does, cumulatively, for `relic_stats()`
+and `-X stats`:
+
+| Counter | Counts |
+| --- | --- |
+| iterations | rounds of a recursive component's fixed point, round 0 included |
+| derivations | head tuples produced by an `EMIT`, facts included, new or not |
+| tuples inserted | derivations that added a tuple |
+| tuples scanned | tuples a `SCAN` read |
+
+Iterations alone do not tell the two fixed points apart: on a chain, both take
+as many rounds as the chain is long. What semi-naive evaluation saves is the
+rederivation of what earlier rounds found, and that shows in the derivations
+and the scans. The tests that guard against a regression to naive behaviour
+therefore assert those.
+
+The counters are for understanding and comparing strategies. They depend on
+the strategy and on the implementation, and are not part of any stable
+interface.
 
 ---
 

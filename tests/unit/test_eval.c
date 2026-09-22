@@ -18,6 +18,11 @@
  * order that evaluation strategy derived them in, and a different strategy
  * derives the same set in a different order.  A query's answer is the set,
  * so the set is what is compared.
+ *
+ * Every scenario runs twice, once under the semi-naive fixed point and once
+ * under the naive one, against the same expected answers.  The counters are
+ * the one thing the two are expected to differ in, and a scenario of their
+ * own pins down both.
  */
 
 #include "config.h"
@@ -42,6 +47,7 @@
 #define	SCENARIO_NEGATION	"evaluation refuses a negated literal"
 #define	SCENARIO_ORDER		"the total order sorts across types"
 #define	SCENARIO_RECURSION	"recursion reaches the least fixed point"
+#define	SCENARIO_STATS		"the counters record the work each strategy did"
 
 /* Room for the rendered answers any test below expects. */
 #define	RENDERED_MAX	1024
@@ -66,11 +72,19 @@ struct diag_log {
 	size_t	warnings;
 };
 
+/*
+ * The RELIC_F_ flags every context a scenario creates is given, which is how
+ * main() runs the scenarios under each evaluation strategy in turn.
+ */
+static unsigned int strategy_flags;
+
 static void	 append_text(rendering_t *rendering, const char *text,
 		    size_t length);
 static bool	 answers_are(const char *scenario, relic_t *ctx,
 		    const char *query, const char *expected);
 static relic_t	*context_with(const char *program, diag_log_t *log);
+static relic_t	*context_flagged(const char *program, diag_log_t *log,
+		    unsigned int flags);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
@@ -87,6 +101,8 @@ static void	 duplicates_collapse(void);
 static void	 evaluation_refuses_negation(void);
 static void	 every_binding_pattern_is_answered(void);
 static void	 recursion_reaches_the_least_fixed_point(void);
+static void	 run_scenarios(const char *strategy, unsigned int flags);
+static void	 the_counters_record_the_work_done(void);
 static void	 the_total_order_sorts_across_types(void);
 
 static void
@@ -107,18 +123,23 @@ record_diagnostic(void *callback_ctx, enum relic_diag_level level,
 }
 
 /*
- * A context holding a loaded program, or NULL having recorded a failure when
- * it does not load.  Diagnostics are counted into `log`, which may be NULL.
+ * A context created with `flags` and holding a loaded program, or NULL
+ * having recorded a failure when it does not load.  Diagnostics are counted
+ * into `log`, which may be NULL.
  */
 static relic_t *
-context_with(const char *program, diag_log_t *log)
+context_flagged(const char *program, diag_log_t *log, unsigned int flags)
 {
+	relic_config_t config;
 	relic_t *ctx;
 
 	if (log != NULL)
 		bzero(log, sizeof(*log));
 
-	ctx = relic_create();
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+
+	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
 		check(false, "creating a context", "a context is created");
 		return (NULL);
@@ -132,6 +153,15 @@ context_with(const char *program, diag_log_t *log)
 	}
 
 	return (ctx);
+}
+
+/*
+ * A context under the strategy the scenarios are running with.
+ */
+static relic_t *
+context_with(const char *program, diag_log_t *log)
+{
+	return (context_flagged(program, log, strategy_flags));
 }
 
 static void
@@ -430,6 +460,7 @@ a_query_over_a_limit_delivers_no_rows(void)
 
 	bzero(&config, sizeof(config));
 	config.max_tuples = 8;
+	config.flags = strategy_flags;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -584,9 +615,96 @@ the_total_order_sorts_across_types(void)
 	relic_destroy(ctx);
 }
 
-int
-main(void)
+/*
+ * The counters of one materialization of a chain, under each strategy,
+ * computed by hand.
+ *
+ *	edge(a, b).  edge(b, c).  edge(c, d).
+ *	path(X, Y) :- edge(X, Y).
+ *	path(X, Z) :- path(X, Y), edge(Y, Z).
+ *
+ * The facts are one pass: 3 derivations, 3 insertions.  The path component
+ * is recursive.  In its first round the base rule scans 3 edges and derives
+ * ab, bc and cd; the recursive rule scans those 3 paths, 3 edges for each,
+ * and derives ac and bd.  That is 5 derivations over 15 scanned tuples,
+ * leaving 8 tuples in all; ad is still missing, and the fixed point, reached
+ * below by either strategy, holds 9.
+ *
+ * Semi-naively, round 1 joins the 5 new paths with the edges: 20 scanned,
+ * deriving ac and bd again and ad for the first time.  Round 2 joins ad
+ * alone: 4 scanned, nothing derived, so it is the last.  3 rounds, 11
+ * derivations, 39 scanned.
+ *
+ * Naively, pass 2 reruns both rules over everything: 3 edges and 3
+ * derivations for the base rule, 5 paths and 15 edges and 3 derivations,
+ * one of them ad, for the recursive one.  Pass 3 is the same over 6 paths
+ * and finds nothing new: 3 + 6 + 18 scanned, 6 derived.  3 passes, 20
+ * derivations, 65 scanned.
+ *
+ * The iteration counts agree, as they do on a chain.  What semi-naive
+ * evaluation saves is the rederivation, so a regression to naive behaviour
+ * shows in the derivations and the scans.
+ */
+static void
+the_counters_record_the_work_done(void)
 {
+	static const char *const program =
+	    "edge(a, b).\nedge(b, c).\nedge(c, d).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n";
+	relic_stats_t stats;
+	relic_t *ctx;
+
+	ctx = context_flagged(program, NULL, 0);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf(stats.iterations == 3 && stats.derivations == 11 &&
+		    stats.tuples_inserted == 9 && stats.tuples_scanned == 39,
+		    SCENARIO_STATS, "semi-naive should be 3 11 9 39, was "
+		    "%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64,
+		    stats.iterations, stats.derivations,
+		    stats.tuples_inserted, stats.tuples_scanned);
+		check(stats.tuples == 9 && stats.symbol_values == 4 &&
+		    stats.string_values == 0 && stats.integer_values == 0 &&
+		    stats.storage_bytes > 0, SCENARIO_STATS,
+		    "the context holds 9 tuples over 4 symbols");
+
+		/* Nothing was loaded, so nothing is evaluated again. */
+		check(relic_materialize(ctx) == 0, SCENARIO_STATS,
+		    "a second materialization succeeds");
+		relic_stats(ctx, &stats);
+		check(stats.iterations == 3 && stats.derivations == 11,
+		    SCENARIO_STATS, "a current program costs nothing");
+	} else {
+		check(false, SCENARIO_STATS, "the chain is materialized");
+	}
+	relic_destroy(ctx);
+
+	ctx = context_flagged(program, NULL, RELIC_F_NAIVE);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf(stats.iterations == 3 && stats.derivations == 20 &&
+		    stats.tuples_inserted == 9 && stats.tuples_scanned == 65,
+		    SCENARIO_STATS, "naive should be 3 20 9 65, was "
+		    "%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64,
+		    stats.iterations, stats.derivations,
+		    stats.tuples_inserted, stats.tuples_scanned);
+	} else {
+		check(false, SCENARIO_STATS, "the chain is materialized");
+	}
+	relic_destroy(ctx);
+}
+
+/*
+ * Every scenario that checks answers, under one evaluation strategy.  The
+ * name goes to the log, so that a failure says which strategy it was under.
+ */
+static void
+run_scenarios(const char *strategy, unsigned int flags)
+{
+	fprintf(stderr, "test_eval: the %s fixed point\n", strategy);
+	strategy_flags = flags;
+
 	recursion_reaches_the_least_fixed_point();
 	every_binding_pattern_is_answered();
 	duplicates_collapse();
@@ -594,6 +712,15 @@ main(void)
 	a_query_over_a_limit_delivers_no_rows();
 	a_later_load_extends_the_fixed_point();
 	evaluation_refuses_negation();
+}
+
+int
+main(void)
+{
+	run_scenarios("semi-naive", 0);
+	run_scenarios("naive", RELIC_F_NAIVE);
+
+	the_counters_record_the_work_done();
 	the_total_order_sorts_across_types();
 
 	return (check_summary("test_eval"));

@@ -187,6 +187,37 @@ Each later stage replaces a piece of 5.1 and leaves the rest:
 The filter placement of 5.1 and the operation choice of section 5 are common
 to all of them. `specs/design-planner.md` specifies the cost model.
 
+### 5.3 Delta variants
+
+A semi-naive delta variant is the plan of a rule with one positive literal,
+the **delta literal**, placed ahead of all the others. It is planned by the same
+walk with that one change:
+
+* the delta literal is placed first, before any other positive literal, and
+  comparisons that its bindings make placeable follow it as usual;
+* it always becomes a `SCAN`, marked as reading the delta, even when every
+  argument is a constant. A `MEMBER` would consult the whole relation, and the
+  point of the variant is to read only what the previous round added;
+* every other literal is placed as it would be in the rule's ordinary plan,
+  against the bindings the delta scan made.
+
+```c
+struct relic_op_atom {
+	relic_relation_t	*relation;
+	relic_plan_term_t	*terms;
+	bool			 delta;		/* SCAN only */
+};
+```
+
+The plan records *that* a scan reads the delta and not *which* tuples that is.
+The range changes every round while the plan does not, so the evaluation holds
+one range per predicate and a delta scan takes its range from there when it
+starts; `specs/design-eval.md` section 4 describes how the ranges advance.
+
+Pinning the delta literal first is what keeps a delta from ever needing an
+index. It is scanned, never looked up, so the index machinery of a later
+planner applies only to whole relations.
+
 ---
 
 ## 6. The plan

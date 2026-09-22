@@ -1648,14 +1648,31 @@ typedef struct relic_query relic_query_t;
 typedef struct relic_result relic_result_t;
 ```
 
-Three types are complete rather than opaque, because a caller constructs or
+Four types are complete rather than opaque, because a caller constructs or
 reads each one directly and an accessor per field would buy nothing:
 
 * `relic_value_t` of section 19, which callers build and inspect;
 * `relic_location_t` of section 56, a (file, line, column) triple that every
   diagnostic callback reads;
 * `relic_config_t` of section 49, which a caller fills in before creating a
-  context.
+  context;
+* `relic_stats_t`, the context's counters, which a caller reads.
+
+```c
+void
+relic_stats(relic_t *, relic_stats_t *);
+```
+
+fills a `relic_stats_t` with counters of the work evaluation has done --
+fixed-point iterations, derivations, insertions, tuples scanned -- and of what
+the context holds: tuples, relation and index storage, and distinct values by
+type. `-X stats` and the interactive `.stats` print it. The counters are a
+fixed, small set read at one moment, so a struct is their natural shape; a
+callback suits rows and diagnostics because those are unbounded in number and
+arrive while work is in progress. What the counters count depends on the
+evaluation strategy and is not a stable interface. The struct's layout is part
+of the ABI, so adding a counter is an interface change, and the library's
+version-info of section 65.6 changes with it.
 
 The header is strict C11, contains no project-internal includes, does not
 include `config.h`, and is guarded for C++ inclusion. Only symbols matching
@@ -2697,6 +2714,10 @@ rather than an option to fall back to a dynamic bitmap.
 **Memory, section 47.** The arena failure contract is specified: `NULL` plus a
 sticky flag, checked at phase boundaries, never an abort. The storage
 primitives are detailed in `specs/design-memory.md`.
+
+**Statistics, section 48.** `relic_stats_t` joins the complete public types,
+filled by `relic_stats()`, so that `-X stats` and `.stats` reach the engine's
+counters through the public header rather than from inside the library.
 
 **Opaque types, section 48.** `relic_location_t` and `relic_config_t` join
 `relic_value_t` as complete public types. A location is a (file, line,

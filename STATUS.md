@@ -127,7 +127,7 @@ recursive Datalog answers queries from the command line, specified in
 | `lib/parse.c` | parses into any arena, so a prepared query owns its syntax tree; `relic_parse_query()` holds query text to exactly one query |
 | `lib/value.c` | one definition of the total order of section 61, reached by domain identifier and, as `relic_value_compare()`, by public value |
 | `include/relic.h` | adds `relic_materialize()`, `relic_query_t`, `relic_row_cb`, the five query functions and `relic_value_compare()` |
-| `cmd/relic/main.c` | the phases of `design-cli.md`: load every operand or standard input, check, prepare every query, then evaluate; `-a`, `-c`, `-F`, `-o`, `-q`, `-s`, `-V`; each `-q` is named `<query N>` in diagnostics |
+| `cmd/relic/main.c` | the phases of `design-cli.md`: load every operand or standard input, check, prepare every query, then evaluate; `-a`, `-c`, `-F`, `-o`, `-q`, `-s`, `-V`, and `-X` from S7; each `-q` is named `<query N>` in diagnostics |
 | `cmd/relic/output.c` | text, csv, tsv and json, byte for byte as `design-cli.md` section 4 specifies, a string literal escaping C0 and C1 controls and bytes that are not UTF-8; `-s` through a merge sort over the library's total order |
 | `lib/pred.c` | no predicate may have more than 32 arguments, enforced at interning, the one path every predicate takes |
 | `tests/` | `test_plan`, `test_eval` and `test_query`; an evaluation sweep in `test_exhaustion`; `tests/cli.sh` for standard input, `-o` and write failures; twenty-two golden language tests covering every binding pattern, recursion, comparisons across types, all four formats, sorting, and every query diagnostic |
@@ -145,10 +145,8 @@ relations record how many rules they are a fixed point of, so a query after a
 later load continues the fixed point rather than recomputing it.
 
 A negated literal passes the check and is refused when its rule is planned,
-naming the rule. `-X` arrives with the semi-naive evaluator in
-S7, since until then there is nothing for `-X naive` to select; `-e` arrives in
-S9, and `-i`, `-l`, `-n` and `-v` in S12. Each is an unknown option until it
-does.
+naming the rule. `-e` arrives in S9, and `-i`, `-l`, `-n` and `-v` in S12.
+Each is an unknown option until it does.
 
 **The dependency graph and stratification, stage S6.** The check knows what
 depends on what and rejects recursion through negation; evaluation runs in the
@@ -173,6 +171,23 @@ meaningful exist, and the `ANTI_MEMBER` operation that evaluates it arrives in
 S8. Until then the strata order evaluation, but no rule can read a lower
 stratum negatively.
 
+**Semi-naive evaluation, stage S7, milestone M2.** Recursion no longer redoes
+the work it has already done, specified in `specs/design-eval.md` section 4
+and `specs/design-plan.md` section 5.3.
+
+| Component | State |
+| --- | --- |
+| `lib/plan.{h,c}` | `relic_plan_rule()` takes a delta literal, which it places first as a `SCAN` marked as reading the delta, even when every argument is a constant; any other literal is refused as an internal error |
+| `lib/eval.c` | each component is planned with its members' relations, one plan per rule, and for a recursive component under the default strategy one delta variant per positive literal over a member; the semi-naive fixed point runs every plan once, then the variants round after round, each member's delta the identifier range it gained in the round before, until a round adds nothing; the naive fixed point stays behind `RELIC_F_NAIVE`; the executor counts iterations, derivations, insertions and scanned tuples |
+| `include/relic.h` | `RELIC_F_NAIVE`; `relic_stats_t` and `relic_stats()`, the cumulative counters and a snapshot of tuples, storage and values by type |
+| `cmd/relic/main.c` | `-X naive` and `-X stats`, the counters printed to standard error when the run ends, whether or not it succeeded; any other `-X` name is a usage error |
+| `tests/` | `tests/equiv/strategies.sh` runs every registered language test under `-X naive` and compares sorted output, diagnostics and status with the default; `test_eval` runs every answer scenario under both strategies and pins both strategies' counters on a chain, computed by hand; `test_plan` checks variant plans and refusals; golden tests for transitive closure over a chain, a cycle, a complete graph and a disconnected one, for rules with two and three recursive literals, and for the counters of both strategies |
+
+The two strategies take the same number of rounds on a chain; what differs is
+the work. Over a six-edge chain the default derives 38 tuples and scans 216,
+the naive fixed point 118 and 694, and the golden counters fail if the default
+regresses toward the naive figures.
+
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
 `--with-libedit`. Test suites: `make check`, `make check-asan`,
@@ -195,7 +210,7 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the nineteen documented entry
+* the installed shared library exports exactly the twenty documented entry
   points and nothing else; the compatibility objects linked into it are not
   reachable.
 
@@ -321,6 +336,25 @@ The analysis suites were confirmed the same way:
 * a recursive Tarjan search, which the long-chain test catches by crashing on
   its one-megabyte stack, through the chain and the cycle each alone.
 
+The semi-naive suites were confirmed the same way:
+
+* delta variants that never run, which `tests/equiv/strategies.sh`, the
+  closure tests and `tests/unit/test_eval.c` catch as missing answers;
+* a delta scan that reads the whole relation, which is correct and slower,
+  and which the pinned counters in `test_eval` and `stats-semi-naive` catch as
+  the extra work;
+* a variant for only the first recursive literal of each rule, which the
+  `joined` case of `closure-double` and the equivalence suite catch; the
+  transitive closures alone did not, because a path can be split either way;
+* advancing only the first member's delta, which mutual recursion catches in
+  `query-recursion`, `components`, `test_eval` and the equivalence suite;
+* reporting exhaustion once per refused array rather than once per
+  evaluation, which the wide sweep in `test_exhaustion` catches as two
+  messages;
+* the equivalence suite itself run against a missing source directory and
+  against a tool that always fails, both of which it reports rather than
+  passing.
+
 ## Documents
 
 | File | Contents |
@@ -340,10 +374,9 @@ The analysis suites were confirmed the same way:
 
 ## Next
 
-Stage S7, semi-naive evaluation, milestone M2: each recursive component is
-evaluated against the tuples its recursive literals gained in the previous
-round, the naive evaluator stays as `-X naive`, and the two are compared over
-the whole corpus.
+Stage S8, negation execution: the `ANTI_MEMBER` operation, a negated literal
+placed once its variables are bound, and the architecture section 72 program
+evaluated under both strategies.
 
 ## Decisions taken
 

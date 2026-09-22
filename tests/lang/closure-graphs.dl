@@ -1,0 +1,42 @@
+% Transitive closure over four shapes of graph: a chain, a cycle, a complete
+% graph, and two pieces with no edge between them.
+
+chain(1, 2).
+chain(2, 3).
+chain(3, 4).
+chain(4, 5).
+along(X, Y) :- chain(X, Y).
+along(X, Z) :- along(X, Y), chain(Y, Z).
+
+cycle(a, b).
+cycle(b, c).
+cycle(c, d).
+cycle(d, a).
+around(X, Y) :- cycle(X, Y).
+around(X, Z) :- around(X, Y), cycle(Y, Z).
+
+% Every ordered pair of distinct nodes; the closure adds a loop on each.
+complete(p, q).
+complete(p, r).
+complete(q, p).
+complete(q, r).
+complete(r, p).
+complete(r, q).
+within(X, Y) :- complete(X, Y).
+within(X, Z) :- within(X, Y), complete(Y, Z).
+
+split(u, v).
+split(v, w).
+split(x, y).
+split(y, z).
+apart(X, Y) :- split(X, Y).
+apart(X, Z) :- apart(X, Y), split(Y, Z).
+
+along(1, X)?
+along(X, 5)?
+around(a, X)?
+around(X, X)?
+within(X, Y)?
+apart(u, X)?
+apart(x, X)?
+apart(u, z)?

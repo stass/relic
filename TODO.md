@@ -6,8 +6,8 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S6 landed; S7, semi-naive evaluation and
-milestone M2, next.
+`relic-plan.md`. Current position: S7 and milestone M2 landed; S8, negation
+execution, next.
 
 ## Documentation debt
 
@@ -183,10 +183,13 @@ program with negation, the architecture section 72 program among them, can be
 checked but not evaluated.
 
 **Options that arrive with their features.** [Medium, component:
-`cmd/relic/main.c`] `-X` arrives in S7, with a second evaluator for
-`-X naive` to select and counters for `-X stats` to print; `-e` in S9; `-i`,
-`-l`, `-n` and `-v` in S12. Each is an unknown option until then, and the
-usage message lists only what is accepted. `-l` in particular is cheap -- the
+`cmd/relic/main.c`] `-e` arrives in S9; `-i`, `-l`, `-n` and `-v` in S12.
+Each is an unknown option until then, and the usage message lists only what
+is accepted. `-X` accepts only `naive` and `stats`: `no-index`, `no-reorder`
+and `no-magic` arrive with the features they switch off, in S9 and S10, and
+`tests/equiv/strategies.sh` gains each as it does. Magic Sets add relations
+of their own, so `no-magic` will need a comparison other than the total
+tuple count that harness uses. `-l` in particular is cheap -- the
 limits are enforced already -- and is the one to bring forward if a user needs
 to bound a query before S12.
 
@@ -219,12 +222,17 @@ object that refers to them.
 comparison per rule at verbosity 2, and there is no verbosity until S12. The
 comparison itself already filters the binding out, as specified.
 
-**Semi-naive duplicate elimination.** [Low, component: `lib/plan.c`] The delta
-variant scheme of D-10 derives some tuples more than once per iteration for
-rules with three or more recursive body literals. The refinement that uses the
-old relation for earlier literals and the new one for later literals removes
-that, at the cost of being non-obvious on first reading. Measure before
-implementing; rules that would benefit are rare.
+**Semi-naive duplicate derivations.** [Low, component: `lib/eval.c`,
+`lib/plan.c`] The semi-naive fixed point derives some tuples more than once,
+for two reasons. A rule with several recursive literals has one variant per
+literal, and a combination of tuples that are all new is found by each of
+them; the refinement that reads the relations as they stood before the round
+for the literals ahead of the delta one removes that, at the cost of being
+non-obvious on first reading. And a scan sees tuples inserted earlier in the
+same round, so a round can derive what the next round's delta will derive
+again: over the six-edge chain of `tests/lang/stats-semi-naive.dl`, 21 paths
+take 26 derivations. Both are correct and both cost work. `-X stats` measures
+them; measure on a real workload before changing either.
 
 **Append-only invariant versus incremental maintenance.** [Medium, component:
 `lib/relation.c`] D-10 represents a delta as a range of tuple identifiers,
@@ -281,6 +289,11 @@ leaves a consistent program. The diagnostic was specified by the plan and the
 atomic replacement by the working agreement's exhaustion rules, so neither is
 a lever; the budget understated them.
 
+S7 came in at about 360 non-comment lines against a budget of 350. Most of
+it is `lib/eval.c`, where a component's plans became a structure of their own
+-- base plans, delta variants and the members' relations -- and the rest is
+`-X` and the counters in the tool and the header.
+
 **A later load's second unstratified cycle is not reported.** [Low,
 component: `lib/stratify.c`] A program found unstratified is refused by every
 later check without being analysed again, so an embedder that checks between
@@ -309,9 +322,8 @@ embedder hits it.
 `lib/relation.c`, and the field shape held up: both are a plain `size_t` with
 zero meaning unlimited, and both are read in one place. `max_magic_preds` and
 `max_magic_rules` are stored and never read, because nothing generates a Magic
-predicate or rule to count until S10, and no `RELIC_F_` behaviour switch is
-defined for `flags` until S7 gives `RELIC_F_NAIVE` something to select. The
-header says so plainly so that a caller is not misled.
+predicate or rule to count until S10. The header says so plainly so that a
+caller is not misled.
 
 **Assertions are absent from release builds.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 makes assertions a
@@ -387,6 +399,19 @@ arithmetic the guard protects is covered; the exact input a caller would pass
 by mistake is not.
 
 ## Security residuals
+
+**Planning a long recursive body is quadratic in memory and cubic in time.**
+[High, component: `lib/eval.c`, `lib/plan.c`, `lib/rule.c`] A rule body has
+no length limit, and a rule with N literals over its own component gets N
+delta variants of N + 1 operations each; placing each literal also rescans
+the body for comparisons. `p(a). p(X) :- p(X), ..., p(X). p(X)?` with N = 2000
+is 12 KB of text and takes 4.4 s and 202 MB to plan, against 0.03 s and
+1.6 MB under `-X naive`; the cost is paid before any tuple is derived, and
+`max_memory` does not cover the evaluation arena that holds plans. The
+options weighed were a structural body-length limit beside the arity and
+variable limits of D-7 (64 literals would bound a rule to about four
+thousand operations), a larger limit, and charging the evaluation arena to
+`max_memory`. Decide with the `-l` work of S12 or the hardening of S13.
 
 **Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
 component: `lib/relation.c`] D-4 forbids randomizing a hash seed, and

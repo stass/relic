@@ -54,6 +54,7 @@
 #define	RELIC_PRINTFLIKE(fmt, args)
 #endif
 
+typedef struct relic_counters relic_counters_t;
 typedef struct relic_diag relic_diag_t;
 typedef struct relic_lexer relic_lexer_t;
 typedef struct relic_symbol relic_symbol_t;
@@ -141,6 +142,18 @@ struct relic_valtab {
 };
 
 /*
+ * The work evaluation has done over the life of a context, which the
+ * executor advances as it runs and relic_stats() reports.  Each field is
+ * defined where relic_stats_t documents the one of the same name.
+ */
+struct relic_counters {
+	uint64_t	iterations;
+	uint64_t	derivations;
+	uint64_t	tuples_inserted;
+	uint64_t	tuples_scanned;
+};
+
+/*
  * A query ready to run: a compiled rule over the query's answer predicate.
  *
  * A query prepared from text owns `arena`, which holds its syntax tree and
@@ -172,6 +185,9 @@ struct relic_query {
  * evaluation after a later load continues from what they already hold.  It
  * advances only when a fixed point is reached, so a failed evaluation leaves
  * it where it was and the next one tries again.
+ *
+ * `counters` is the work evaluation has done.  What the context holds is
+ * not counted here: relic_stats() measures it when asked.
  */
 struct relic {
 	relic_arena_t		 arena;	/* context lifetime: symbol bytes */
@@ -184,6 +200,7 @@ struct relic {
 	relic_reltab_t		 relations;
 	relic_diag_t		 diag;
 	relic_config_t		 config;
+	relic_counters_t	 counters;
 	size_t			 materialized_rules;
 };
 
@@ -262,6 +279,7 @@ void	 relic_symtab_reset(relic_symtab_t *table);
  * rather than reading past the table.
  */
 size_t	 relic_value_count(const relic_t *ctx);
+size_t	 relic_value_count_of(const relic_t *ctx, enum relic_type type);
 const relic_value_t *relic_value_of(const relic_t *ctx, relic_dom_t dom);
 enum relic_order relic_value_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
@@ -453,11 +471,13 @@ int	 relic_stratify(relic_t *ctx);
  * lib/plan.c
  *
  * Plan one rule into `arena`, creating the relations it reads and writes.
- * Returns 0, or -1 with a diagnostic reported: memory ran out, or the rule
- * holds a literal the evaluator cannot execute.
+ * `delta_literal` is RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or the
+ * body index of the positive literal a semi-naive variant reads from the
+ * delta.  Returns 0, or -1 with a diagnostic reported: memory ran out, or the
+ * rule holds a literal the evaluator cannot execute.
  */
 int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
-	    const relic_rule_t *rule, relic_plan_t *plan);
+	    const relic_rule_t *rule, size_t delta_literal, relic_plan_t *plan);
 
 /*
  * lib/relation.c

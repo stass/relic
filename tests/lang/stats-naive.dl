@@ -1,0 +1,16 @@
+% The work naive evaluation does on a chain, as counted by -X stats.  Every
+% pass joins every path with every edge again, so each path is rederived in
+% every pass after the one that first derived it; stats-semi-naive.dl is the
+% same program under the default fixed point.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+edge(d, e).
+edge(e, f).
+edge(f, g).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+
+path(a, X)?

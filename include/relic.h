@@ -100,9 +100,13 @@ typedef struct relic_config relic_config_t;
  * filled.
  *
  * `max_magic_preds` and `max_magic_rules` are accepted and stored but not yet
- * acted on, because nothing generates a Magic predicate or rule to count, and
- * no behaviour switch is defined for `flags`.  Setting one of those three
- * therefore has no effect today.
+ * acted on: nothing generates a Magic predicate or rule to count, so setting
+ * either has no effect.
+ *
+ * `flags` holds RELIC_F_ switches, each of which selects an alternative
+ * evaluation strategy that must give the same answers as the default.  They
+ * exist so that strategies can be compared against one another, and are not
+ * meant for ordinary use.  Bits no switch defines are ignored.
  */
 struct relic_config {
 	size_t		max_memory;	/* relation and index storage, bytes */
@@ -111,6 +115,16 @@ struct relic_config {
 	size_t		max_magic_rules;
 	unsigned int	flags;
 };
+
+/*
+ * Evaluate recursion with the naive fixed point, which reruns every rule of
+ * a recursive component against whole relations until nothing new is
+ * derived, instead of the semi-naive one, which after the first round
+ * reruns only the rule variants reading what the previous round derived.
+ * The naive evaluator is kept as the reference the default is tested
+ * against.
+ */
+#define	RELIC_F_NAIVE	0x0001u
 
 /*
  * Create a context.  Returns NULL when memory is exhausted; there is no
@@ -282,6 +296,9 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * Evaluate the whole program, computing every tuple its facts and rules
  * derive.  Returns 0, or -1 with the reason already reported.
  *
+ * Recursion is evaluated semi-naively unless the context was created with
+ * RELIC_F_NAIVE; the two give the same relations.
+ *
  * The program is checked first and must pass.  Evaluation fails when a
  * configured limit refuses a tuple, when memory runs out, or when a rule
  * holds a negated literal, which the evaluator does not execute.  A failure
@@ -390,6 +407,50 @@ RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
  */
 RELIC_EXPORT int relic_value_compare(relic_t *ctx, const relic_value_t *a,
     const relic_value_t *b);
+
+typedef struct relic_stats relic_stats_t;
+
+/*
+ * Counters describing the work a context has done and what it holds, for
+ * understanding and comparing evaluation strategies.
+ *
+ * The first four accumulate over the life of the context, and count the
+ * rules of the program and of every query answered alike:
+ *
+ *	iterations	rounds of fixed-point evaluation of recursive
+ *			components; a component that is not recursive is
+ *			evaluated in one pass, which is not counted
+ *	derivations	head tuples produced by rules, facts included, whether
+ *			or not the relation already held them
+ *	tuples_inserted	derivations that added a tuple to its relation
+ *	tuples_scanned	tuples read while scanning relations
+ *
+ * The rest describe the context when the counters are read: the tuples held
+ * across every relation, the answers of queries included, the bytes of
+ * relation and index storage they occupy, and the distinct values interned,
+ * by type.
+ *
+ * The counts depend on the evaluation strategy and on how the engine is
+ * implemented, and are not stable from one release to the next; only the
+ * answers are.  The structure's layout is part of the binary interface, so a
+ * release that adds a counter changes the library's interface version.
+ */
+struct relic_stats {
+	uint64_t	iterations;
+	uint64_t	derivations;
+	uint64_t	tuples_inserted;
+	uint64_t	tuples_scanned;
+	size_t		tuples;
+	size_t		storage_bytes;
+	size_t		symbol_values;
+	size_t		string_values;
+	size_t		integer_values;
+};
+
+/*
+ * Fill *stats, which must not be NULL, with the context's counters.
+ */
+RELIC_EXPORT void relic_stats(relic_t *ctx, relic_stats_t *stats);
 
 /*
  * The text of the most recent RELIC_ERROR diagnostic, or NULL if the context

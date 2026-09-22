@@ -34,6 +34,10 @@
  * The queries that run are the -q ones when there are any, and otherwise the
  * ones the program contains.  The program's own queries are still checked
  * when -q replaces them, because they are part of the program.
+ *
+ * -X selects internal behaviour for testing and debugging: an alternative
+ * evaluation strategy, whose answers must equal the default's, or counters
+ * printed to standard error when the run ends.
  */
 
 /*
@@ -59,15 +63,18 @@ typedef struct session session_t;
 
 /*
  * What the command line asked for.  `queries` holds the -q arguments in the
- * order given; they point into argv and are not copied.
+ * order given; they point into argv and are not copied.  `config` is what the
+ * context is created with, -X naive setting its flag.
  */
 struct options {
 	const char		**queries;
 	const char		 *output_path;
 	size_t			  query_count;
+	relic_config_t		  config;
 	enum output_format	  format;
 	bool			  check_only;
 	bool			  materialize;
+	bool			  print_stats;
 	bool			  print_version;
 	bool			  sorted;
 	bool			  version_alone;
@@ -93,6 +100,7 @@ static int		 load_operands(relic_t *ctx, int argc, char *argv[]);
 static int		 open_output(const char *program_name,
 			    const options_t *options, FILE **streamp,
 			    const char **namep);
+static int		 parse_debug(const char *name, options_t *options);
 static int		 parse_options(const char *program_name, int argc,
 			    char *argv[], options_t *options);
 static int		 prepare_queries(session_t *session,
@@ -101,9 +109,10 @@ static void		 report_unknown_option(const char *program_name,
 			    int option);
 static int		 run(const char *program_name,
 			    const options_t *options, int argc, char *argv[]);
+static void		 print_stats(const session_t *session);
 static void		 session_close(session_t *session);
 static int		 session_open(session_t *session,
-			    const char *program_name);
+			    const char *program_name, const options_t *options);
 static void		 usage(const char *program_name);
 static int		 validate(session_t *session, const options_t *options,
 			    int argc, char *argv[]);
@@ -193,7 +202,7 @@ static void
 usage(const char *program_name)
 {
 	fprintf(stderr, "usage: %s [-acs] [-F format] [-o file] [-q query] "
-	    "[file ...]\n", program_name);
+	    "[-X debug] [file ...]\n", program_name);
 	fprintf(stderr, "       %s -V\n", program_name);
 }
 
@@ -400,13 +409,14 @@ evaluate(session_t *session, const options_t *options)
 }
 
 static int
-session_open(session_t *session, const char *program_name)
+session_open(session_t *session, const char *program_name,
+    const options_t *options)
 {
 	session->queries = NULL;
 	session->query_count = 0;
 	session->program_name = program_name;
 
-	session->ctx = relic_create();
+	session->ctx = relic_create_config(&options->config);
 	if (session->ctx == NULL) {
 		report_error(program_name, "out of memory");
 		return (-1);
@@ -415,6 +425,36 @@ session_open(session_t *session, const char *program_name)
 	    diag_context(program_name));
 
 	return (0);
+}
+
+/*
+ * Write the context's counters to standard error, one per line.
+ *
+ * The lines are not prefixed with the program name, unlike the tool's own
+ * messages: they are data about the run rather than a complaint about it,
+ * and their text is the same however the tool was invoked, which is what
+ * lets a golden test compare them.
+ */
+static void
+print_stats(const session_t *session)
+{
+	relic_stats_t stats;
+
+	relic_stats(session->ctx, &stats);
+
+	fprintf(stderr, "stats: iterations %ju\n",
+	    (uintmax_t)stats.iterations);
+	fprintf(stderr, "stats: derivations %ju\n",
+	    (uintmax_t)stats.derivations);
+	fprintf(stderr, "stats: tuples inserted %ju\n",
+	    (uintmax_t)stats.tuples_inserted);
+	fprintf(stderr, "stats: tuples scanned %ju\n",
+	    (uintmax_t)stats.tuples_scanned);
+	fprintf(stderr, "stats: tuples held %zu\n", stats.tuples);
+	fprintf(stderr, "stats: storage bytes %zu\n", stats.storage_bytes);
+	fprintf(stderr, "stats: symbol values %zu\n", stats.symbol_values);
+	fprintf(stderr, "stats: string values %zu\n", stats.string_values);
+	fprintf(stderr, "stats: integer values %zu\n", stats.integer_values);
 }
 
 static void
@@ -445,16 +485,47 @@ run(const char *program_name, const options_t *options, int argc,
 		return (RELIC_EXIT_USAGE);
 	}
 
-	if (session_open(&session, program_name) != 0)
+	if (session_open(&session, program_name, options) != 0)
 		return (RELIC_EXIT_ERROR);
 
 	status = validate(&session, options, argc, argv);
 	if (status == 0 && !options->check_only)
 		status = evaluate(&session, options);
 
+	/*
+	 * The counters are printed whether or not the run succeeded: the work
+	 * an evaluation did before a limit stopped it is often what the reader
+	 * wants to see.
+	 */
+	if (options->print_stats)
+		print_stats(&session);
+
 	session_close(&session);
 
 	return (status == 0 ? RELIC_EXIT_OK : RELIC_EXIT_ERROR);
+}
+
+/*
+ * Apply one -X argument.  Returns 0, or -1 when it names no behaviour.
+ *
+ * Only the behaviours that exist are accepted.  A name for one that does not
+ * would be accepted and do nothing, and a comparison run with it would pass
+ * while comparing a strategy with itself.
+ */
+static int
+parse_debug(const char *name, options_t *options)
+{
+	if (strcmp(name, "naive") == 0) {
+		options->config.flags |= RELIC_F_NAIVE;
+		return (0);
+	}
+
+	if (strcmp(name, "stats") == 0) {
+		options->print_stats = true;
+		return (0);
+	}
+
+	return (-1);
 }
 
 /*
@@ -480,7 +551,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":acF:o:q:sV")) != -1) {
+	while ((ch = getopt(argc, argv, ":acF:o:q:sVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -512,6 +583,14 @@ parse_options(const char *program_name, int argc, char *argv[],
 			break;
 		case 'V':
 			options->print_version = true;
+			break;
+		case 'X':
+			if (parse_debug(optarg, options) != 0) {
+				report_error(program_name,
+				    "unknown debug behaviour: %s", optarg);
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			}
 			break;
 		case ':':
 			report_error(program_name,

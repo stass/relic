@@ -217,6 +217,14 @@ dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 	tests/langfiles.sh tests/pkgconfig.sh tests/version.sh
 
 ##
+## The equivalence suite runs every language test under each alternative
+## evaluation strategy -X selects and compares it with the default.  Its
+## corpus is RELIC_LANG_TESTS below, so it needs no list of its own.
+##
+
+dist_check_SCRIPTS += tests/equiv/strategies.sh
+
+##
 ## Language tests
 ##
 ## A language test is a .dl program and the output it must produce, with no
@@ -238,6 +246,7 @@ dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 
 RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/bad-escape.dl tests/lang/check-queries.dl \
+	tests/lang/closure-double.dl tests/lang/closure-graphs.dl \
 	tests/lang/comments-only.dl tests/lang/components.dl \
 	tests/lang/constructs.dl tests/lang/empty.dl \
 	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
@@ -255,17 +264,18 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/query-option-unsafe.dl tests/lang/query-option.dl \
 	tests/lang/query-recursion.dl tests/lang/query-undefined.dl \
 	tests/lang/query-unsafe.dl tests/lang/query-zero-arity.dl \
-	tests/lang/recovery.dl tests/lang/safe-rules.dl tests/lang/singleton.dl \
-	tests/lang/sort-mixed.dl tests/lang/string-escapes.dl \
-	tests/lang/success-criteria.dl tests/lang/trailing-comma.dl \
-	tests/lang/undefined-predicate.dl tests/lang/unsafe-anonymous.dl \
-	tests/lang/unsafe-comparison.dl tests/lang/unsafe-fact.dl \
-	tests/lang/unsafe-head.dl tests/lang/unsafe-negation.dl \
-	tests/lang/unstratified-cycles.dl tests/lang/unstratified-policy.dl \
-	tests/lang/unstratified-query.dl tests/lang/unstratified-unsafe.dl \
-	tests/lang/unstratified.dl tests/lang/unterminated-string.dl \
-	tests/lang/variable-limit-max.dl tests/lang/variable-limit.dl \
-	tests/lang/zero-arity.dl
+	tests/lang/recovery.dl tests/lang/safe-rules.dl \
+	tests/lang/singleton.dl tests/lang/sort-mixed.dl \
+	tests/lang/stats-naive.dl tests/lang/stats-semi-naive.dl \
+	tests/lang/string-escapes.dl tests/lang/success-criteria.dl \
+	tests/lang/trailing-comma.dl tests/lang/undefined-predicate.dl \
+	tests/lang/unsafe-anonymous.dl tests/lang/unsafe-comparison.dl \
+	tests/lang/unsafe-fact.dl tests/lang/unsafe-head.dl \
+	tests/lang/unsafe-negation.dl tests/lang/unstratified-cycles.dl \
+	tests/lang/unstratified-policy.dl tests/lang/unstratified-query.dl \
+	tests/lang/unstratified-unsafe.dl tests/lang/unstratified.dl \
+	tests/lang/unterminated-string.dl tests/lang/variable-limit-max.dl \
+	tests/lang/variable-limit.dl tests/lang/zero-arity.dl
 
 TEST_EXTENSIONS = .dl .sh
 DL_LOG_COMPILER = $(SHELL) $(abs_top_srcdir)/tests/langtest.sh

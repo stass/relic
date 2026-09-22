@@ -34,6 +34,13 @@
  * slot, or ignored.  The executor then makes no decision of its own, and a
  * better planner is a change to this file and never to the one that runs
  * what it emits.
+ *
+ * A semi-naive delta variant of a rule is the same walk with one literal
+ * placed ahead of the others: the delta literal, which reads only the tuples
+ * its relation gained in the previous iteration.  It is always a SCAN, even
+ * when every argument is a constant, because a membership test would consult
+ * the whole relation rather than the delta.  Placed first, it is only ever
+ * scanned, so a delta never needs an index of its own.
  */
 
 typedef struct relic_planner relic_planner_t;
@@ -44,7 +51,8 @@ typedef struct relic_planner relic_planner_t;
  * `ops` has room for one operation per body literal and one EMIT, which is
  * exactly what a plan holds.  `placed` records which comparisons have been
  * placed, indexed like the body.  `bound` is the set of slots the operations
- * placed so far bind.
+ * placed so far bind.  `delta_literal` is the body index of the literal that
+ * reads the delta, or RELIC_PLAN_NO_DELTA.
  */
 struct relic_planner {
 	relic_t			*ctx;
@@ -53,6 +61,7 @@ struct relic_planner {
 	relic_op_t		*ops;
 	bool			*placed;
 	size_t			 op_count;
+	size_t			 delta_literal;
 	uint64_t		 bound;
 };
 
@@ -63,14 +72,18 @@ static bool	 atom_is_bound(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
 static int	 build_plan(relic_planner_t *planner);
 static uint64_t	 comparison_slots(const relic_comparison_t *comparison);
+static int	 confirm_delta_literal(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner,
 		    uint16_t head_arity);
-static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom);
+static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
+		    bool delta);
 static int	 place_body(relic_planner_t *planner);
 static int	 place_emit(relic_planner_t *planner);
+static int	 place_positive(relic_planner_t *planner, size_t index);
 static void	 place_ready_comparisons(relic_planner_t *planner);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
-		    relic_arena_t *arena, const relic_rule_t *rule);
+		    relic_arena_t *arena, const relic_rule_t *rule,
+		    size_t delta_literal);
 static void	 read_term(const relic_arg_t *arg, relic_plan_term_t *term);
 static int	 reject_negation(const relic_planner_t *planner);
 static void	 scan_term(relic_planner_t *planner, const relic_arg_t *arg,
@@ -214,10 +227,11 @@ atom_is_bound(const relic_planner_t *planner, const relic_atom_t *atom,
 
 /*
  * Place a positive literal: a MEMBER when it is fully bound, a SCAN that
- * binds the rest otherwise.
+ * binds the rest otherwise.  A literal that reads the delta is a SCAN
+ * whatever is bound, since only a scan walks the delta's range.
  */
 static int
-place_atom(relic_planner_t *planner, const relic_atom_t *atom)
+place_atom(relic_planner_t *planner, const relic_atom_t *atom, bool delta)
 {
 	relic_relation_t *relation;
 	relic_op_t *op;
@@ -227,12 +241,13 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom)
 	if (relation == NULL)
 		return (-1);
 
-	if (atom_is_bound(planner, atom, relation->arity))
+	if (!delta && atom_is_bound(planner, atom, relation->arity))
 		op = append_op(planner, RELIC_OP_MEMBER);
 	else
 		op = append_op(planner, RELIC_OP_SCAN);
 
 	op->u.atom.relation = relation;
+	op->u.atom.delta = delta;
 	op->u.atom.terms = terms_alloc(planner, relation->arity);
 	if (relation->arity > 0 && op->u.atom.terms == NULL)
 		return (-1);
@@ -309,8 +324,25 @@ place_ready_comparisons(relic_planner_t *planner)
 }
 
 /*
- * Place the positive literals in the order they are written, and each
- * comparison at the earliest point its operands are bound.
+ * Place the positive literal at body index `index`, then every comparison it
+ * made placeable.
+ */
+static int
+place_positive(relic_planner_t *planner, size_t index)
+{
+	if (place_atom(planner, &planner->rule->body[index].u.atom,
+	    index == planner->delta_literal) != 0)
+		return (-1);
+
+	place_ready_comparisons(planner);
+
+	return (0);
+}
+
+/*
+ * Place the delta literal first when there is one, then the other positive
+ * literals in the order they are written, and each comparison at the
+ * earliest point its operands are bound.
  *
  * Comparisons are offered a place before the first literal and after every
  * positive one, which are the only points at which the bound set changes.
@@ -325,14 +357,17 @@ place_body(relic_planner_t *planner)
 
 	place_ready_comparisons(planner);
 
+	if (planner->delta_literal != RELIC_PLAN_NO_DELTA &&
+	    place_positive(planner, planner->delta_literal) != 0)
+		return (-1);
+
 	for (i = 0; i < rule->body_length; i++) {
-		if (rule->body[i].kind != RELIC_LITERAL_POSITIVE)
+		if (rule->body[i].kind != RELIC_LITERAL_POSITIVE ||
+		    i == planner->delta_literal)
 			continue;
 
-		if (place_atom(planner, &rule->body[i].u.atom) != 0)
+		if (place_positive(planner, i) != 0)
 			return (-1);
-
-		place_ready_comparisons(planner);
 	}
 
 	return (0);
@@ -370,6 +405,32 @@ confirm_plan_complete(const relic_planner_t *planner, uint16_t head_arity)
 	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
 	    "internal error: the plan leaves a literal out or reads a "
 	    "variable nothing binds");
+
+	return (-1);
+}
+
+/*
+ * Confirm that the delta literal, when one is asked for, is a positive
+ * literal of the rule.  Anything else is a caller's mistake that would not
+ * fail on its own: an index past the body would be read, and a comparison
+ * or a negated literal taken for an atom.
+ */
+static int
+confirm_delta_literal(const relic_planner_t *planner)
+{
+	const relic_rule_t *rule;
+	size_t index;
+
+	rule = planner->rule;
+	index = planner->delta_literal;
+
+	if (index == RELIC_PLAN_NO_DELTA || (index < rule->body_length &&
+	    rule->body[index].kind == RELIC_LITERAL_POSITIVE))
+		return (0);
+
+	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
+	    "internal error: a delta variant was asked for a literal that is "
+	    "not a positive literal of the rule");
 
 	return (-1);
 }
@@ -452,12 +513,13 @@ reject_negation(const relic_planner_t *planner)
 
 static int
 planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
-    const relic_rule_t *rule)
+    const relic_rule_t *rule, size_t delta_literal)
 {
 	bzero(planner, sizeof(*planner));
 	planner->ctx = ctx;
 	planner->arena = arena;
 	planner->rule = rule;
+	planner->delta_literal = delta_literal;
 
 	/*
 	 * The body length comes from a compiled rule held in memory, so one
@@ -478,6 +540,9 @@ planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
 static int
 build_plan(relic_planner_t *planner)
 {
+	if (confirm_delta_literal(planner) != 0)
+		return (-1);
+
 	if (reject_negation(planner) != 0)
 		return (-1);
 
@@ -491,6 +556,10 @@ build_plan(relic_planner_t *planner)
  * Plan a rule.  Returns 0 with the plan in *plan, or -1 with a diagnostic
  * reported.
  *
+ * `delta_literal` is RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or
+ * the body index of a positive literal for the semi-naive variant in which
+ * that literal reads the delta and is placed first.
+ *
  * The plan and everything it points at except its relations are allocated
  * from `arena`, and live as long as the caller keeps it.  The relations are
  * created here if they do not yet exist; they belong to the context and never
@@ -498,14 +567,14 @@ build_plan(relic_planner_t *planner)
  */
 int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
-    relic_plan_t *plan)
+    size_t delta_literal, relic_plan_t *plan)
 {
 	relic_planner_t planner;
 	int status;
 
 	bzero(plan, sizeof(*plan));
 
-	status = planner_init(&planner, ctx, arena, rule);
+	status = planner_init(&planner, ctx, arena, rule, delta_literal);
 	if (status == 0)
 		status = build_plan(&planner);
 

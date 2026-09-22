@@ -117,6 +117,39 @@ if ! cmp -s "$work/partial.expected" "$work/partial.txt"; then
 	fail "a query failing in evaluation left '$(cat "$work/partial.txt")'"
 fi
 
+# -X accepts only the behaviours that exist.  Any other name is a usage error
+# naming it, rather than a no-op that would let a comparison run a strategy
+# against itself and pass.
+status=0
+diagnostic=$("$RELIC" -X bogus "$work/graph.dl" 2>&1 >/dev/null) ||
+    status=$?
+if [ "$status" -ne 2 ]; then
+	fail "an unknown -X exited $status, expected 2"
+fi
+case "$diagnostic" in
+*"unknown debug behaviour: bogus"*)
+	;;
+*)
+	fail "an unknown -X was reported as '$diagnostic'"
+	;;
+esac
+
+# -X stats reports the counters even when evaluation fails, after the error
+# that ended it.
+status=0
+diagnostic=$("$RELIC" -X stats -q 'edge(X, Y), not edge(Y, X)?' \
+    "$work/graph.dl" 2>&1 >/dev/null) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a failing run with -X stats exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"negation"*"stats: iterations"*)
+	;;
+*)
+	fail "a failing run with -X stats reported '$diagnostic'"
+	;;
+esac
+
 # A file that does not exist is an error in the input, reported once.
 status=0
 "$RELIC" "$work/absent.dl" 2>/dev/null || status=$?

@@ -361,6 +361,26 @@ relic_value_count(const relic_t *ctx)
 	return (ctx->values.count);
 }
 
+/*
+ * How many of the interned values have the given type.  The table is walked
+ * rather than counted on insertion, because only statistics ask and they ask
+ * rarely.
+ */
+size_t
+relic_value_count_of(const relic_t *ctx, enum relic_type type)
+{
+	size_t count;
+	size_t i;
+
+	count = 0;
+	for (i = 0; i < ctx->values.count; i++) {
+		if (ctx->values.entries[i].type == type)
+			count++;
+	}
+
+	return (count);
+}
+
 static int
 compare_integers(int64_t left, int64_t right)
 {
