@@ -324,7 +324,7 @@ macros and `relic_version()`, `cmd/relic/main.c` handling `-V` only, `LICENSE`,
 AC_PREREQ([2.69])
 AC_INIT([relic], [0.1.0], [relic-bugs@example.org], [relic])
 AC_CONFIG_SRCDIR([lib/api.c])
-AC_CONFIG_AUXDIR([build-aux])
+AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_LIBOBJ_DIR([compat])

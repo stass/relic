@@ -1,0 +1,220 @@
+ACLOCAL_AMFLAGS = -I m4
+
+AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/lib \
+	      -I$(top_srcdir)/compat -I$(top_builddir) \
+	      $(RELIC_ASSERT_CPPFLAGS)
+
+# Automake passes AM_CFLAGS to the link command as well as to the compile
+# command, which is what the sanitizer and coverage switches need.
+AM_CFLAGS = $(RELIC_WARN_CFLAGS) $(RELIC_WERROR_CFLAGS) \
+	    $(RELIC_VISIBILITY_CFLAGS) $(RELIC_PREFIX_MAP_CFLAGS) \
+	    $(RELIC_SAN_CFLAGS)
+
+# AC_REPLACE_FUNCS objects live in compat/.  A non-recursive build with
+# subdir-objects needs the trailing slash here for them to be found.
+LIBOBJDIR = compat/
+
+lib_LTLIBRARIES = librelic.la
+librelic_la_SOURCES = lib/api.c
+librelic_la_LIBADD = $(LTLIBOBJS)
+librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
+	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
+
+include_HEADERS = include/relic.h
+noinst_HEADERS = compat/compat.h
+
+bin_PROGRAMS = relic
+relic_SOURCES = cmd/relic/main.c
+
+# The tool links the compatibility objects itself.  Hidden visibility and the
+# export list together make them unreachable through librelic, so the first
+# call to strtonum(3) from the tool would otherwise fail to link on every
+# platform whose C library lacks it.
+relic_LDADD = librelic.la $(LIBOBJS)
+
+pkgconfigdir = $(libdir)/pkgconfig
+pkgconfig_DATA = librelic.pc
+
+# The m4 macro files are distributed by automake already, as dependencies of
+# configure; listing them here as well would only create a list that a sixth
+# macro file could be left out of.
+EXTRA_DIST = autogen.sh LICENSE README.md
+
+##
+## Tests
+##
+## Shell tests receive the paths and the expected version through the
+## environment, so that a test is identical in an in-tree build, an
+## out-of-tree build and the unpacked tarball that distcheck builds.
+##
+
+##
+## The compatibility replacements are exercised twice.
+##
+## test_compat calls each interface by its ordinary name, so it tests whatever
+## this platform will actually link: the C library's implementation where one
+## exists, and the replacement from compat/ where it does not.
+##
+## test_compat_replacements compiles every replacement from source under a
+## private name and runs the same scenarios against those.  Without it, a
+## replacement would be compiled only on the platforms whose C library lacks
+## it, so relic-owned code could go unread by the compiler and unvisited by
+## the sanitizers on the machine it was written on.  Fortification is turned
+## off for that build because a C library may define these interfaces as
+## function-like macros, which take precedence over the renaming and leave
+## the replacement's own definition colliding with a compiler builtin.
+##
+
+RELIC_COMPAT_RENAMES = \
+	-Dreallocarray=relic_replacement_reallocarray \
+	-Dstrlcat=relic_replacement_strlcat \
+	-Dstrlcpy=relic_replacement_strlcpy \
+	-Dstrtonum=relic_replacement_strtonum
+
+check_PROGRAMS = tests/unit/test_compat tests/unit/test_compat_replacements \
+	tests/unit/test_header
+
+tests_unit_test_compat_SOURCES = tests/unit/test_compat.c
+tests_unit_test_compat_LDADD = $(LIBOBJS)
+
+tests_unit_test_compat_replacements_SOURCES = tests/unit/test_compat.c \
+	compat/reallocarray.c compat/strlcat.c compat/strlcpy.c \
+	compat/strtonum.c
+tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
+	-DRELIC_COMPAT_DECLARE_ALL -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
+	$(RELIC_COMPAT_RENAMES)
+
+##
+## The public header carries the longest-lived contract in the tree: it must
+## stay strict C11, must compile without config.h, and must be includable
+## from C++.  Each property is checked by a translation unit that includes
+## <relic.h> and nothing else, compiled with only the include directory on
+## its search path.  The C++ program is built where a C++ compiler exists and
+## skipped where one does not, since relic itself needs none.
+##
+
+tests_unit_test_header_SOURCES = tests/unit/test_header.c
+tests_unit_test_header_CPPFLAGS = -I$(top_srcdir)/include
+tests_unit_test_header_CFLAGS = $(RELIC_STRICT_CFLAGS) $(RELIC_SAN_CFLAGS)
+tests_unit_test_header_LDADD = librelic.la
+
+if RELIC_HAVE_CXX
+check_PROGRAMS += tests/unit/test_header_cxx
+tests_unit_test_header_cxx_SOURCES = tests/unit/test_header_cxx.cc
+tests_unit_test_header_cxx_CPPFLAGS = -I$(top_srcdir)/include
+tests_unit_test_header_cxx_CXXFLAGS = $(RELIC_SAN_CFLAGS)
+tests_unit_test_header_cxx_LDADD = librelic.la
+endif
+
+dist_check_SCRIPTS = tests/ascii.sh tests/pkgconfig.sh tests/version.sh
+
+TEST_EXTENSIONS = .sh
+SH_LOG_COMPILER = $(SHELL)
+
+AM_TESTS_ENVIRONMENT = \
+	RELIC='$(abs_top_builddir)/relic$(EXEEXT)'; export RELIC; \
+	RELIC_BUILDDIR='$(abs_top_builddir)'; export RELIC_BUILDDIR; \
+	RELIC_SRCDIR='$(abs_top_srcdir)'; export RELIC_SRCDIR; \
+	RELIC_VERSION='$(PACKAGE_VERSION)'; export RELIC_VERSION;
+
+TESTS = $(check_PROGRAMS) $(dist_check_SCRIPTS)
+
+##
+## Sanitizer suites
+##
+## Each suite configures a disposable build tree beside the current one.  The
+## sanitizers need compiler and link flags that the working tree does not
+## have, and rebuilding in place would leave instrumented objects behind for
+## the next ordinary build to link against.
+##
+## The options below matter as much as the flags.  AddressSanitizer defaults
+## to halt_on_error=0 and detect_leaks=0 on macOS, so a run that found a
+## poisoned read or a leak would report it and still exit successfully,
+## turning a failing test into a passing one with a message in its log.
+##
+## Whether leak detection is asked for at all is decided by configure, which
+## runs an instrumented program to find out: a platform without it treats the
+## request as an error and aborts every test before it starts.
+##
+
+RELIC_ASAN_OPTIONS = halt_on_error=1:detect_leaks=$(RELIC_ASAN_DETECT_LEAKS):detect_stack_use_after_return=1:check_initialization_order=1:strict_string_checks=1:detect_invalid_pointer_pairs=2:abort_on_error=1
+RELIC_LSAN_OPTIONS = exitcode=1
+RELIC_MSAN_OPTIONS = halt_on_error=1:abort_on_error=1
+RELIC_UBSAN_OPTIONS = halt_on_error=1:print_stacktrace=1
+
+# Configure, build and test in the tree named by $$tree using the configure
+# options in $$flags.  The calling target sets those, $$name for messages,
+# $$supported to say whether this toolchain has the sanitizer at all, and
+# optionally $$note for a limitation worth mentioning.
+#
+# The variables are checked rather than assumed.  A target that forgot to set
+# $$flags would otherwise configure an uninstrumented tree, run the suite in
+# it and report a pass, which is the one outcome worse than a failure.
+#
+# A sanitizer the toolchain cannot provide makes the target say so and
+# succeed.  Failing instead would leave no way to run the suite on a platform
+# that has only some of them, and would make the sanitizer runs that the
+# working agreement asks for impossible rather than merely unavailable.
+#
+# The tree is configured afresh with nothing carried over but the compiler,
+# so that a sanitizer run means the same thing whatever options the
+# surrounding build was configured with.
+RELIC_SANITIZER_CHECK = \
+	{ test -n "$$tree" && test -n "$$flags" && test -n "$$name" && \
+	  test -n "$$supported"; } || \
+	    { echo "sanitizer target is incompletely defined" >&2; exit 1; }; \
+	if test "x$$supported" != xyes; then \
+		echo "$$name is not available with $(CC); skipping."; \
+		exit 0; \
+	fi; \
+	if test -n "$$note"; then echo "note: $$note"; fi; \
+	rm -rf $(abs_top_builddir)/$$tree && \
+	$(MKDIR_P) $(abs_top_builddir)/$$tree && \
+	cd $(abs_top_builddir)/$$tree && \
+	$(abs_top_srcdir)/configure $$flags CC="$(CC)" && \
+	$(MAKE) $(AM_MAKEFLAGS) && \
+	$(MAKE) $(AM_MAKEFLAGS) check
+
+check-asan:
+	@tree=build-asan; flags=--enable-asan; name=AddressSanitizer; \
+	supported='$(RELIC_ASAN_SUPPORTED)'; note=; \
+	test x'$(RELIC_ASAN_DETECT_LEAKS)' = x1 || \
+	    note='this platform cannot detect leaks; memory errors only'; \
+	ASAN_OPTIONS='$(RELIC_ASAN_OPTIONS)'; export ASAN_OPTIONS; \
+	$(RELIC_SANITIZER_CHECK)
+
+check-lsan:
+	@tree=build-lsan; flags=--enable-lsan; name=LeakSanitizer; \
+	supported='$(RELIC_LSAN_SUPPORTED)'; note=; \
+	LSAN_OPTIONS='$(RELIC_LSAN_OPTIONS)'; export LSAN_OPTIONS; \
+	$(RELIC_SANITIZER_CHECK)
+
+check-msan:
+	@tree=build-msan; flags=--enable-msan; name=MemorySanitizer; \
+	supported='$(RELIC_MSAN_SUPPORTED)'; note=; \
+	MSAN_OPTIONS='$(RELIC_MSAN_OPTIONS)'; export MSAN_OPTIONS; \
+	$(RELIC_SANITIZER_CHECK)
+
+check-ubsan:
+	@tree=build-ubsan; flags=--enable-ubsan; \
+	name=UndefinedBehaviorSanitizer; \
+	supported='$(RELIC_UBSAN_SUPPORTED)'; note=; \
+	UBSAN_OPTIONS='$(RELIC_UBSAN_OPTIONS)'; export UBSAN_OPTIONS; \
+	$(RELIC_SANITIZER_CHECK)
+
+# Two build products automake does not generate a rule for.
+#
+# The sanitizer trees belong to this build directory rather than to the
+# source directory, so they are removed relative to it.  They are matched by
+# pattern rather than listed, so that a suite added later is cleaned without
+# a second place to remember.
+#
+# The compatibility objects come from AC_REPLACE_FUNCS rather than from a
+# _SOURCES variable, so automake never learns that libtool builds them in a
+# directory of their own and emits no rule to remove it.  Left behind, that
+# directory fails the distclean check distcheck ends with.
+clean-local:
+	-cd $(top_builddir) && rm -rf build-*san
+	-rm -rf $(LIBOBJDIR).libs $(LIBOBJDIR)_libs
+
+.PHONY: check-asan check-lsan check-msan check-ubsan
