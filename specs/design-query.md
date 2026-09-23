@@ -95,10 +95,12 @@ struct relic_query {
 	relic_arena_t		 arena;		/* text, syntax tree, rule parts */
 	relic_rule_t		 rule;		/* head RELIC_ID_NONE */
 	relic_relation_t	*answer;	/* the query's, of the output arity */
-	size_t			 serial;	/* names the query: $q<serial> */
 	bool			 running;
 };
 ```
+
+The query's serial is recorded once, in its answer relation (section 5),
+since naming the answer is the only thing the serial is for.
 
 The relation is an allocation of its own rather than a field of the query
 struct for the reason `specs/design-relations.md` section 2 gives for every
@@ -177,6 +179,9 @@ void relic_relation_clear(relic_t *, relic_relation_t *);
 void relic_relation_free(relic_relation_t *);
 ```
 
+A predicate's relation is created with a serial of zero, which nothing
+reads: the serial names a relation only when `pred` is `RELIC_ID_NONE`.
+
 `create` allocates an empty relation and records what it is called (section
 5) and its arity; the table creates a predicate's relation through it, and a
 query its answer. `clear` empties one relation and gives back what it counted
@@ -220,7 +225,11 @@ rule, the number of bound columns for a magic rule, the query's for the
 rewritten query. The field is not a copy that can drift from the predicate's
 arity, because arity is half of a predicate's identity and nothing can change
 it once the head is interned; what could go wrong is a constructor that
-leaves the field unset, and the planner catches that, below.
+leaves the field unset, and the planner catches that, below, for every rule
+whose head is a predicate. A query's answer relation is sized from the
+query rule's head arity, so for a query's rule the planner's comparison is
+of the field with itself; what guards it is that the compiler sets the head
+arity where it builds the head's arguments, from the same count.
 
 **The plan emits into a relation its caller names, and confirms it fits.**
 The planner takes the relation the EMIT writes from its caller rather than
@@ -278,10 +287,11 @@ struct relic_relation {
 };
 ```
 
-One function, `relic_relation_describe()`, renders the name, with the arity
-where a diagnostic wants `name/arity`, and it is the only way a relation is
-named: every `-e` line that names an operation's relation, and every
-diagnostic of the relation store -- a limit reached while deriving into or
+One function, `relic_relation_name()`, renders the name, and
+`relic_relation_describe()` adds the arity to it where a diagnostic wants
+`name/arity`; they are the only way a relation is named: every `-e` line
+that names an operation's relation, and every diagnostic of the relation
+store -- a limit reached while deriving into or
 indexing a relation, a relation too large to grow, an internal error over an
 index or a statistic -- goes through it. The `-e` output and the diagnostics
 are therefore the same text whether the relation is a predicate's or an

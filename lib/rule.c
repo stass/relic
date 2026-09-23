@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,13 +40,15 @@
  * statement is compiled once for the life of the context, and each
  * diagnostic is emitted once rather than repeated by every later check.
  *
- * A query is compiled by the same code into a rule of its own.  Its head is a
- * synthetic predicate whose arguments are the query's named variables in
- * order of first occurrence, so the relation of that predicate is the answer,
- * and "every output column is bound" is the ordinary safety check of a head.
- * A query written in the program is compiled with the program and makes it
+ * A query is compiled by the same code into a rule of its own.  Its head
+ * names no predicate, and its arguments are the query's named variables in
+ * order of first occurrence, so "every output column is bound" is the
+ * ordinary safety check of a head.  The tuples of that head go to a relation
+ * the query object owns rather than to a predicate's, so a query adds
+ * nothing to the program's tables but the predicates its body names.  A
+ * query written in the program is compiled with the program and makes it
  * invalid when it is unsafe; a query prepared from text is compiled into an
- * arena of its own and changes nothing but the predicate table.
+ * arena of its own.
  */
 
 /*
@@ -55,15 +58,10 @@
 #define	RELIC_QUERY_SOURCE	"<query>"
 
 /*
- * Room for "$q", the twenty decimal digits of the largest 64-bit serial
- * number, and a terminator; and for a statement's description, "fact " or
- * "rule " and a predicate, or "the query".
+ * Room for a statement's description: "fact " or "rule " and a predicate, or
+ * "the query".
  */
-#define	RELIC_ANSWER_NAME_MAX	24
 #define	RELIC_STATEMENT_TEXT_MAX	(RELIC_PRED_TEXT_MAX + 8)
-
-_Static_assert(sizeof(size_t) <= 8,
-    "an answer predicate's serial number must fit RELIC_ANSWER_NAME_MAX");
 
 /*
  * Where an argument sits, which is the whole of what safety turns on.
@@ -129,8 +127,6 @@ typedef struct relic_compiler relic_compiler_t;
  *
  * `arena` is where the rule's variable-length parts go: the program arena for
  * a statement of the program, a query's own arena for a prepared query.
- * `query_columns` is the arity of a query's answer predicate, which is known
- * only once its body has been compiled.
  */
 struct relic_compiler {
 	relic_t			*ctx;
@@ -141,9 +137,10 @@ struct relic_compiler {
 	uint64_t		 bindable;	/* the set B */
 	uint64_t		 required;	/* the set R */
 	uint16_t		 variable_count;
-	uint16_t		 query_columns;
 };
 
+static enum relic_compile_result append_loaded_query(relic_t *ctx,
+		    const relic_rule_t *rule, size_t serial);
 static enum relic_compile_result append_rule(relic_t *ctx,
 		    relic_ruletab_t *table, const relic_rule_t *rule);
 static int	 check_program(relic_t *ctx);
@@ -180,15 +177,15 @@ static relic_query_t *copy_loaded_query(relic_t *ctx, size_t index);
 static const char *describe_statement(const relic_compiler_t *compiler,
 		    char *buffer, size_t size);
 static const relic_ast_stmt_t *first_pending_statement(const relic_t *ctx);
-static enum relic_compile_result name_answer_predicate(
-		    relic_compiler_t *compiler);
 static enum relic_compile_result occupy_slot(relic_compiler_t *compiler,
 		    const relic_ast_variable_t *variable,
 		    const relic_location_t *where, uint16_t *slotp);
 static relic_query_t *prepare_query(relic_t *ctx, const char *source_name,
 		    const char *text);
+static size_t	 next_query_serial(const relic_t *ctx);
 static void	 publish_query_number(relic_t *ctx);
 static relic_query_t *query_create(relic_t *ctx);
+static int	 query_create_answer(relic_query_t *query, size_t serial);
 static void	 report_singleton_variables(relic_compiler_t *compiler,
 		    uint64_t unbound);
 static void	 report_unbound_variables(relic_compiler_t *compiler,
@@ -218,7 +215,7 @@ relic_program_reset(relic_program_t *program)
 	 * The variable-length parts of every rule belong to the program
 	 * arena, which releases them when it is reset.  What is released here
 	 * is the rest: the predicate table, the schedule with its own arena,
-	 * and the arrays of rules and queries.
+	 * and the arrays of rules and of the program's queries.
 	 */
 	relic_predtab_reset(&program->predicates);
 	relic_schedule_reset(&program->schedule);
@@ -246,8 +243,8 @@ compile_alloc(relic_compiler_t *compiler, size_t count, size_t size)
  * What a message calls the statement being compiled: "fact edge/2" or "rule
  * path/2", after what its writer wrote, or "the query".  The tree represents
  * a fact as a rule whose body has no literals, and only the wording
- * distinguishes them.  A query's head is a predicate its writer never named,
- * so a message about a query names none.
+ * distinguishes them.  A query's head names no predicate, so a message about
+ * a query names none.
  *
  * The kind is read from the statement rather than from the rule being built,
  * so that the description is available from the first line of compilation
@@ -522,6 +519,7 @@ compile_head(relic_compiler_t *compiler)
 		return (RELIC_COMPILE_INCOMPLETE);
 
 	relic_pred_define(compiler->ctx, compiler->rule.head);
+	compiler->rule.head_arity = head->arity;
 
 	if (head->arity == 0)
 		return (RELIC_COMPILE_OK);
@@ -721,9 +719,10 @@ store_variables(relic_compiler_t *compiler)
 }
 
 /*
- * Publish a finished rule into one of the program's tables.  This is the last
- * step of compiling a statement, so nothing incomplete is ever reachable
- * through the program.
+ * Publish a finished rule into the program's rules.  This is the last step
+ * of compiling a statement, so nothing incomplete is ever reachable through
+ * the program.  A rule table is indexed by its heads' predicates wherever it
+ * is analysed, so a query's rule, whose head names none, never joins one.
  */
 static enum relic_compile_result
 append_rule(relic_t *ctx, relic_ruletab_t *table, const relic_rule_t *rule)
@@ -738,7 +737,35 @@ append_rule(relic_t *ctx, relic_ruletab_t *table, const relic_rule_t *rule)
 	}
 	table->entries = entries;
 
+	assert(rule->head != RELIC_ID_NONE);
 	table->entries[table->count] = *rule;
+	table->count++;
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Publish a finished query into the program's queries, under the serial
+ * number that names its answer, as the last step of compiling it.
+ */
+static enum relic_compile_result
+append_loaded_query(relic_t *ctx, const relic_rule_t *rule, size_t serial)
+{
+	relic_querytab_t *table;
+	relic_loaded_query_t *entries;
+
+	table = &ctx->program.queries;
+
+	entries = relic_grow_array(table->entries, &table->capacity,
+	    table->count + 1, sizeof(*table->entries));
+	if (entries == NULL) {
+		relic_diag_no_memory(ctx);
+		return (RELIC_COMPILE_INCOMPLETE);
+	}
+	table->entries = entries;
+
+	table->entries[table->count].rule = *rule;
+	table->entries[table->count].serial = serial;
 	table->count++;
 
 	return (RELIC_COMPILE_OK);
@@ -826,9 +853,10 @@ compile_rule(relic_t *ctx, const relic_ast_stmt_t *statement,
  * `path(a, X)?` free of a singleton warning: X is written once, but the rule
  * the text means mentions it twice.
  *
- * The answer predicate is a predicate like any other, so a query can have at
- * most as many output columns as a predicate has arguments, although a rule
- * may hold twice as many variables.
+ * The head names no predicate: `head` stays RELIC_ID_NONE, and the number of
+ * output columns is the head arity.  Each answer is a tuple of a relation, so
+ * a query can have at most as many output columns as a relation has columns,
+ * although a rule may hold twice as many variables.
  */
 static enum relic_compile_result
 compile_query_head(relic_compiler_t *compiler)
@@ -854,7 +882,8 @@ compile_query_head(relic_compiler_t *compiler)
 		columns++;
 	}
 
-	compiler->query_columns = columns;
+	compiler->rule.head = RELIC_ID_NONE;
+	compiler->rule.head_arity = columns;
 	if (columns == 0)
 		return (RELIC_COMPILE_OK);
 
@@ -882,55 +911,12 @@ compile_query_head(relic_compiler_t *compiler)
 }
 
 /*
- * Intern the query's answer predicate -- `$q` and the query's serial number,
- * with one argument per output column -- and record that the query defines
- * it.
- *
- * No identifier the lexer accepts can contain `$`, so the name cannot
- * collide with a predicate a program writes: the answer predicate is distinct
- * by construction rather than by a check.  The serial number is the count of
- * queries the context has published, so identical sequences of loads and
- * preparations name their queries identically.
- */
-static enum relic_compile_result
-name_answer_predicate(relic_compiler_t *compiler)
-{
-	relic_t *ctx;
-	char name[RELIC_ANSWER_NAME_MAX];
-	uint32_t symbol;
-	int length;
-
-	ctx = compiler->ctx;
-
-	length = snprintf(name, sizeof(name), "$q%zu",
-	    ctx->program.query_serial);
-	if (length < 0) {
-		relic_diagf(ctx, RELIC_ERROR, &compiler->statement->where,
-		    "internal error: the query's answer predicate cannot be "
-		    "named");
-		return (RELIC_COMPILE_REJECTED);
-	}
-
-	if (relic_symbol_intern(ctx, name, (size_t)length, &symbol) != 0)
-		return (RELIC_COMPILE_INCOMPLETE);
-
-	if (relic_pred_intern(ctx, symbol, compiler->query_columns,
-	    &compiler->statement->where, &compiler->rule.head) != 0)
-		return (RELIC_COMPILE_INCOMPLETE);
-
-	relic_pred_define(ctx, compiler->rule.head);
-
-	return (RELIC_COMPILE_OK);
-}
-
-/*
- * Compile a query into a rule over its answer predicate, into `arena`, and
- * store the finished rule in *rulep without publishing it.
+ * Compile a query into a rule whose head names no predicate, into `arena`,
+ * and store the finished rule in *rulep without publishing it.
  *
  * The body is compiled first, because the head is made of the body's named
  * variables and is not known until the body has numbered them.  Safety is
- * then the same computation as for any rule.  The answer predicate is named
- * last, so that a rejected query leaves no predicate behind for it.
+ * then the same computation as for any rule.
  */
 static enum relic_compile_result
 compile_query(relic_t *ctx, relic_arena_t *arena,
@@ -958,10 +944,6 @@ compile_query(relic_t *ctx, relic_arena_t *arena,
 		return (RELIC_COMPILE_REJECTED);
 
 	result = store_variables(&compiler);
-	if (result != RELIC_COMPILE_OK)
-		return (result);
-
-	result = name_answer_predicate(&compiler);
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
@@ -997,7 +979,7 @@ compile_statement(relic_t *ctx, const relic_ast_stmt_t *statement)
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
-	result = append_rule(ctx, &ctx->program.queries, &rule);
+	result = append_loaded_query(ctx, &rule, next_query_serial(ctx));
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
@@ -1007,14 +989,24 @@ compile_statement(relic_t *ctx, const relic_ast_stmt_t *statement)
 }
 
 /*
- * Record that a compiled query has been published, so that the next one is
- * named with the next serial number.
+ * The serial number of the query being published: how many queries this
+ * context has published before it.  Identical sequences of loads and
+ * preparations therefore number their queries identically.
+ */
+static size_t
+next_query_serial(const relic_t *ctx)
+{
+	return (ctx->program.query_serial);
+}
+
+/*
+ * Record that a compiled query has been published under the number
+ * next_query_serial() gave it, so that the next one takes the next number.
  *
  * A query is published by one of two routes -- appended to the program by a
  * check, or handed to the caller by relic_query_prepare() -- and both end
  * here, after the last step that can fail.  A query that fails before this
- * is compiled again under the same name, so its answer predicate is interned
- * once however many attempts it takes.
+ * is compiled again under the same number, so a failure part way skips none.
  */
 static void
 publish_query_number(relic_t *ctx)
@@ -1167,7 +1159,8 @@ relic_program_ready(relic_t *ctx)
 }
 
 /*
- * A query object, empty.  Returns NULL having reported when memory ran out.
+ * A query object with no rule and no answer yet.  Returns NULL having
+ * reported when memory ran out.
  */
 static relic_query_t *
 query_create(relic_t *ctx)
@@ -1187,9 +1180,22 @@ query_create(relic_t *ctx)
 }
 
 /*
- * Prepare a query from text: parse it, compile it into a rule over a new
- * answer predicate, and warn about any predicate it names that nothing
- * defines.
+ * Give a query whose rule is compiled the relation its answer is derived
+ * into: of the rule's head arity, and named after the query's serial number.
+ * Returns 0, or -1 having reported when memory ran out.
+ */
+static int
+query_create_answer(relic_query_t *query, size_t serial)
+{
+	query->answer = relic_relation_create(query->ctx, RELIC_ID_NONE, serial,
+	    query->rule.head_arity);
+
+	return (query->answer != NULL ? 0 : -1);
+}
+
+/*
+ * Prepare a query from text: parse it, compile it into a rule, warn about any
+ * predicate it names that nothing defines, and give it its answer relation.
  *
  * The program is checked first, and must pass.  A query against a program
  * that cannot be evaluated could never be run, and the undefined-predicate
@@ -1199,7 +1205,9 @@ query_create(relic_t *ctx)
  * introduced.
  *
  * A query that is wrong is reported and refused, and the program is not
- * affected: it stays as valid as it was.
+ * affected: it stays as valid as it was.  The answer relation is created
+ * only once the rule has compiled, so a refused query creates none, and
+ * before the query is published, so one handed out always has one.
  */
 relic_query_t *
 relic_query_prepare(relic_t *ctx, const char *source_name, const char *text)
@@ -1268,6 +1276,11 @@ prepare_query(relic_t *ctx, const char *source_name, const char *text)
 		return (NULL);
 	}
 
+	if (query_create_answer(query, next_query_serial(ctx)) != 0) {
+		relic_query_destroy(query);
+		return (NULL);
+	}
+
 	publish_query_number(ctx);
 
 	return (query);
@@ -1281,7 +1294,8 @@ relic_query_count(relic_t *ctx)
 
 /*
  * A query written in the program, by its position among the program's
- * queries in load order.
+ * queries in load order, with an answer relation of its own named by the
+ * serial number the check gave the query.
  *
  * The program is checked first, because that is what compiles its queries.
  * Once a check has passed, every query statement has been compiled -- a
@@ -1306,7 +1320,7 @@ relic_query_loaded(relic_t *ctx, size_t index)
 static relic_query_t *
 copy_loaded_query(relic_t *ctx, size_t index)
 {
-	const relic_ruletab_t *queries;
+	const relic_querytab_t *queries;
 	relic_query_t *query;
 
 	if (relic_program_ready(ctx) != 0)
@@ -1324,7 +1338,11 @@ copy_loaded_query(relic_t *ctx, size_t index)
 	if (query == NULL)
 		return (NULL);
 
-	query->rule = queries->entries[index];
+	query->rule = queries->entries[index].rule;
+	if (query_create_answer(query, queries->entries[index].serial) != 0) {
+		relic_query_destroy(query);
+		return (NULL);
+	}
 
 	return (query);
 }
@@ -1332,7 +1350,9 @@ copy_loaded_query(relic_t *ctx, size_t index)
 /*
  * Only the query being answered is refused, from whatever caller code runs
  * while it is; any other is released without reading its context, which
- * may be gone.
+ * may be gone.  Its answer relation is empty, since a query holds tuples
+ * only while it is being answered, so freeing it gives nothing back to the
+ * context's totals and needs nothing of the context.
  */
 void
 relic_query_destroy(relic_query_t *query)
@@ -1345,6 +1365,7 @@ relic_query_destroy(relic_query_t *query)
 		return;
 	}
 
+	relic_relation_free(query->answer);
 	relic_arena_reset(&query->arena);
 	free(query);
 }

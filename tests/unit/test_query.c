@@ -9,10 +9,11 @@
  * caller prepares, enumerates and runs them through.
  *
  * The golden language tests compare the rows and the messages; this suite
- * examines what they cannot see -- the answer predicate a query compiles to
- * and its name, that a query that fails to prepare leaves the program as it
- * was, that a callback can stop the rows, and that a query cannot be run in
- * a context it does not belong to.
+ * examines what they cannot see -- the rule a query compiles to and the name
+ * of its answer, that answering queries leaves the context as it was, that a
+ * query that fails to prepare leaves the program as it was, that a callback
+ * can stop the rows, and that a query cannot be run in a context it does not
+ * belong to.
  */
 
 #include "config.h"
@@ -29,24 +30,60 @@
 
 #define	SCENARIO_COLUMNS	"a query's columns are its named variables"
 #define	SCENARIO_FOREIGN	"a query runs only in its own context"
+#define	SCENARIO_GROWTH		"answering queries does not grow the context"
+#define	SCENARIO_LIMIT		"an answer refused by a limit is given back"
 #define	SCENARIO_LOADED		"the program's queries are enumerated"
-#define	SCENARIO_NAMES		"answer predicates are named in order"
+#define	SCENARIO_NAMES		"answers are named in the order queries compile"
 #define	SCENARIO_REFUSED	"a refused query leaves the program valid"
 #define	SCENARIO_STOP		"a callback can stop the rows"
 #define	SCENARIO_UNDEFINED	"a query warns of a predicate nothing defines"
 #define	SCENARIO_UNSAFE		"an unsafe query makes the program invalid"
 
+/* How many times the growth test prepares, runs and destroys its query. */
+#define	GROWTH_ROUNDS		64
+
+/* Room for one line of explain output about a small query. */
+#define	EXPLAIN_TEXT_MAX	128
+
+typedef struct context_size context_size_t;
 typedef struct diag_log diag_log_t;
+typedef struct explained explained_t;
+
+/*
+ * What a context holds that answering a query could leave behind: its
+ * predicates, the slots of its relation table, and the tuples and bytes its
+ * relations hold.
+ */
+struct context_size {
+	size_t	predicates;
+	size_t	relation_slots;
+	size_t	tuples;
+	size_t	storage_bytes;
+};
 
 struct diag_log {
 	size_t	errors;
 	size_t	warnings;
 };
 
-static const char *answer_name(relic_t *ctx, const relic_query_t *query);
+/*
+ * The lines of explain output that name a query's answer: the heading that
+ * writes the query's rule, and the EMIT of its plan, last seen of each.
+ */
+struct explained {
+	char	query[EXPLAIN_TEXT_MAX];
+	char	emit[EXPLAIN_TEXT_MAX];
+};
+
+static bool	 answer_once(relic_t *ctx, const char *text);
+static bool	 answer_is_named(relic_t *ctx, relic_query_t *query,
+		    explained_t *explained, const char *name);
+static context_size_t context_size(relic_t *ctx);
+static void	 growth_under(unsigned int flags, const char *strategy);
 static relic_t	*context_with(const char *program, diag_log_t *log);
 static int	 count_rows(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
+static void	 record_explained(void *callback_ctx, const char *line);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
@@ -56,8 +93,10 @@ static void	 a_callback_can_stop_the_rows(void);
 static void	 a_query_runs_only_in_its_own_context(void);
 static void	 a_query_warns_of_an_undefined_predicate(void);
 static void	 a_refused_query_leaves_the_program_valid(void);
+static void	 an_answer_refused_by_a_limit_is_given_back(void);
 static void	 an_unsafe_query_makes_the_program_invalid(void);
-static void	 answer_predicates_are_named_in_order(void);
+static void	 answers_are_named_in_the_order_queries_compile(void);
+static void	 answering_queries_does_not_grow_the_context(void);
 static void	 columns_are_the_named_variables(void);
 static void	 the_programs_queries_are_enumerated(void);
 
@@ -123,24 +162,56 @@ stop_after_one(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
 }
 
 /*
- * The spelling of a query's answer predicate.
+ * Keep the explain lines that name a query's answer, leading spaces removed.
  */
-static const char *
-answer_name(relic_t *ctx, const relic_query_t *query)
+static void
+record_explained(void *callback_ctx, const char *line)
 {
-	const relic_pred_t *pred;
+	explained_t *explained;
 
-	pred = relic_pred_of(ctx, query->rule.head);
-	if (pred == NULL)
-		return ("");
+	explained = callback_ctx;
 
-	return (relic_symbol_bytes(ctx, pred->name, NULL));
+	while (*line == ' ')
+		line++;
+
+	if (strncmp(line, "query ", 6) == 0)
+		strlcpy(explained->query, line, sizeof(explained->query));
+	else if (strncmp(line, "emit ", 5) == 0)
+		strlcpy(explained->emit, line, sizeof(explained->emit));
 }
 
 /*
- * The answer predicate has one argument per named variable, in order of first
- * occurrence, and `_` contributes none.  A variable that occurs once is an
- * output column rather than a singleton, so it draws no warning.
+ * Whether answering `query` explains it under `name`: the query's rule is
+ * headed by the name and its plan emits into the relation of that name.  The
+ * queries of this suite's naming test have no columns, so the name is the
+ * whole of the head.
+ */
+static bool
+answer_is_named(relic_t *ctx, relic_query_t *query, explained_t *explained,
+    const char *name)
+{
+	char heading[EXPLAIN_TEXT_MAX];
+	char emit[EXPLAIN_TEXT_MAX];
+	size_t rows;
+
+	bzero(explained, sizeof(*explained));
+	rows = 0;
+	if (query == NULL ||
+	    relic_query_run(ctx, query, count_rows, &rows) != 0)
+		return (false);
+
+	snprintf(heading, sizeof(heading), "query %s :- ", name);
+	snprintf(emit, sizeof(emit), "emit %s", name);
+
+	return (strncmp(explained->query, heading, strlen(heading)) == 0 &&
+	    strcmp(explained->emit, emit) == 0);
+}
+
+/*
+ * A query's rule has one head argument per named variable, in order of first
+ * occurrence, and `_` contributes none.  The head names no predicate, and the
+ * answer relation has a column per argument.  A variable that occurs once is
+ * an output column rather than a singleton, so it draws no warning.
  */
 static void
 columns_are_the_named_variables(void)
@@ -148,7 +219,6 @@ columns_are_the_named_variables(void)
 	relic_t *ctx;
 	relic_query_t *query;
 	const relic_rule_t *rule;
-	const relic_pred_t *pred;
 	const char *spelling;
 	diag_log_t log;
 	uint16_t column;
@@ -166,11 +236,12 @@ columns_are_the_named_variables(void)
 	}
 
 	rule = &query->rule;
-	pred = relic_pred_of(ctx, rule->head);
-	check(pred != NULL && pred->arity == 3, SCENARIO_COLUMNS,
-	    "the answer predicate has three arguments");
+	check(rule->head == RELIC_ID_NONE, SCENARIO_COLUMNS,
+	    "the head names no predicate");
+	check(rule->head_arity == 3 && query->answer->arity == 3,
+	    SCENARIO_COLUMNS, "the head and the answer have three columns");
 
-	for (column = 0; pred != NULL && column < pred->arity; column++) {
+	for (column = 0; column < rule->head_arity; column++) {
 		spelling = relic_symbol_bytes(ctx,
 		    rule->variables[rule->head_args[column].u.slot].name, NULL);
 		checkf(spelling != NULL &&
@@ -187,37 +258,227 @@ columns_are_the_named_variables(void)
 }
 
 /*
- * The program's own queries are compiled by the check and named $q0, $q1 in
- * load order.  A query prepared afterwards takes the next number, and one
- * that is refused takes none.
+ * A query's answer is named `$q` and the query's serial number, which counts
+ * the queries the context has compiled in the order it compiled them.  The
+ * program's own queries are compiled by the check and take $q0, $q1 in load
+ * order; a query prepared afterwards takes the next number, and one that is
+ * refused takes none; a query written in a later load takes the number after
+ * the prepared one, since loads and preparations share one sequence.  Each
+ * name is read from the explain output, which names the answer as the head
+ * of the query's rule and as the relation its plan emits into.
  */
 static void
-answer_predicates_are_named_in_order(void)
+answers_are_named_in_the_order_queries_compile(void)
 {
 	relic_t *ctx;
 	relic_query_t *first;
 	relic_query_t *refused;
 	relic_query_t *prepared;
+	relic_query_t *later;
+	relic_query_t *last;
+	explained_t explained;
 	diag_log_t log;
 
 	ctx = context_with("e(a).\ne(X)?\ne(a)?\n", &log);
 	if (ctx == NULL)
 		return;
+	relic_explain_set(ctx, record_explained, &explained);
 
 	first = relic_query_loaded(ctx, 1);
 	refused = relic_query_prepare(ctx, NULL, "X = 1?");
-	prepared = relic_query_prepare(ctx, NULL, "e(X)?");
+	prepared = relic_query_prepare(ctx, NULL, "e(b)?");
 
-	check(first != NULL && strcmp(answer_name(ctx, first), "$q1") == 0,
-	    SCENARIO_NAMES, "the second query in the program is $q1");
+	check(answer_is_named(ctx, first, &explained, "$q1"), SCENARIO_NAMES,
+	    "the second query in the program is $q1");
 	check(refused == NULL, SCENARIO_NAMES, "the unsafe query is refused");
-	check(prepared != NULL &&
-	    strcmp(answer_name(ctx, prepared), "$q2") == 0, SCENARIO_NAMES,
-	    "the prepared query after the refused one is $q2");
+	check(answer_is_named(ctx, prepared, &explained, "$q2"),
+	    SCENARIO_NAMES, "the prepared query after the refused one is $q2");
+
+	check(relic_load_string(ctx, "later.dl", "e(c).\ne(c)?\n") == 0,
+	    SCENARIO_NAMES, "a second program loads");
+	later = relic_query_loaded(ctx, 2);
+	last = relic_query_prepare(ctx, NULL, "e(a)?");
+
+	check(answer_is_named(ctx, later, &explained, "$q3"), SCENARIO_NAMES,
+	    "the query of the second load, after the prepared one, is $q3");
+	check(answer_is_named(ctx, last, &explained, "$q4"), SCENARIO_NAMES,
+	    "a query prepared after it is $q4");
 
 	relic_query_destroy(first);
 	relic_query_destroy(prepared);
+	relic_query_destroy(later);
+	relic_query_destroy(last);
 	relic_destroy(ctx);
+}
+
+static context_size_t
+context_size(relic_t *ctx)
+{
+	context_size_t size;
+	relic_stats_t stats;
+
+	relic_stats(ctx, &stats);
+
+	size.predicates = relic_pred_count(ctx);
+	size.relation_slots = ctx->relations.count;
+	size.tuples = stats.tuples;
+	size.storage_bytes = stats.storage_bytes;
+
+	return (size);
+}
+
+/*
+ * Prepare a query, run it to its last row and destroy it, as an interactive
+ * session does with every line.  Returns whether all three succeeded.
+ */
+static bool
+answer_once(relic_t *ctx, const char *text)
+{
+	relic_query_t *query;
+	size_t rows;
+	int status;
+
+	query = relic_query_prepare(ctx, NULL, text);
+	if (query == NULL)
+		return (false);
+
+	rows = 0;
+	status = relic_query_run(ctx, query, count_rows, &rows);
+	relic_query_destroy(query);
+
+	return (status == 0 && rows == 3);
+}
+
+/*
+ * A query's answer belongs to the query, so answering one leaves the context
+ * holding what it held before: after the first query, which may leave behind
+ * the predicates its rewrite generates, every later one adds no predicate, no
+ * relation slot, and no tuple or byte of storage.  Were each query given a
+ * predicate of its own, a session of many queries would pay, on every answer,
+ * for every query before it.  Both ways of answering are covered: through
+ * the Magic rewrite, and from the whole fixed point.
+ */
+static void
+answering_queries_does_not_grow_the_context(void)
+{
+	growth_under(0, "through the rewrite");
+	growth_under(RELIC_F_NO_MAGIC, "from the whole fixed point");
+}
+
+/*
+ * One strategy's run of answering_queries_does_not_grow_the_context().
+ */
+static void
+growth_under(unsigned int flags, const char *strategy)
+{
+	relic_config_t config;
+	relic_t *ctx;
+	context_size_t first;
+	context_size_t later;
+	bool answered;
+	size_t round;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_GROWTH, "a context is created");
+		return;
+	}
+
+	if (relic_load_string(ctx, "test.dl",
+	    "edge(a, b).\nedge(b, c).\nedge(c, d).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n") != 0) {
+		check(false, SCENARIO_GROWTH, "the program loads");
+		relic_destroy(ctx);
+		return;
+	}
+
+	answered = answer_once(ctx, "path(a, X)?");
+	first = context_size(ctx);
+
+	for (round = 1; answered && round < GROWTH_ROUNDS; round++)
+		answered = answer_once(ctx, "path(a, X)?");
+	later = context_size(ctx);
+
+	checkf(answered, SCENARIO_GROWTH,
+	    "answered %s, every query should answer three rows", strategy);
+	checkf(later.predicates == first.predicates, SCENARIO_GROWTH,
+	    "answered %s, the context should hold %zu predicates, as after "
+	    "the first query, not %zu", strategy, first.predicates,
+	    later.predicates);
+	checkf(later.relation_slots == first.relation_slots, SCENARIO_GROWTH,
+	    "answered %s, the relation table should have %zu slots, as after "
+	    "the first query, not %zu", strategy, first.relation_slots,
+	    later.relation_slots);
+	checkf(later.tuples == first.tuples, SCENARIO_GROWTH,
+	    "answered %s, the relations should hold %zu tuples, as after the "
+	    "first query, not %zu", strategy, first.tuples, later.tuples);
+	checkf(later.storage_bytes == first.storage_bytes, SCENARIO_GROWTH,
+	    "answered %s, the relations should hold %zu bytes, as after the "
+	    "first query, not %zu", strategy, first.storage_bytes,
+	    later.storage_bytes);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * An answer counts against the tuple limit like any relation, and one that
+ * the limit refuses part way is emptied and gives back what it counted: the
+ * totals afterwards are what the program's own relations held before it.  The query is
+ * destroyed after its context, which reads nothing of the context, and
+ * leaves nothing for AddressSanitizer to report.
+ */
+static void
+an_answer_refused_by_a_limit_is_given_back(void)
+{
+	relic_config_t config;
+	relic_query_t *query;
+	relic_stats_t before;
+	relic_stats_t after;
+	relic_t *ctx;
+	diag_log_t log;
+	size_t rows;
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = 4;
+	bzero(&log, sizeof(log));
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_LIMIT, "a context is created");
+		return;
+	}
+	relic_diag_set(ctx, record_diagnostic, &log);
+
+	query = NULL;
+	if (relic_load_string(ctx, "test.dl", "e(a).\ne(b).\ne(c).\n") == 0 &&
+	    relic_materialize(ctx) == 0)
+		query = relic_query_prepare(ctx, NULL, "e(X)?");
+	relic_stats(ctx, &before);
+
+	rows = 0;
+	check(query != NULL &&
+	    relic_query_run(ctx, query, count_rows, &rows) != 0 && rows == 0,
+	    SCENARIO_LIMIT, "the query fails without delivering a row");
+	check(strstr(relic_error(ctx), "while deriving $q0/1") != NULL,
+	    SCENARIO_LIMIT, "the limit names the answer relation");
+
+	relic_stats(ctx, &after);
+	checkf(before.tuples == 3 && after.tuples == before.tuples,
+	    SCENARIO_LIMIT, "the relations should hold the 3 facts, not %zu "
+	    "tuples", after.tuples);
+	checkf(after.storage_bytes == before.storage_bytes, SCENARIO_LIMIT,
+	    "the relations should hold the facts' %zu bytes, not %zu",
+	    before.storage_bytes, after.storage_bytes);
+	check(query != NULL && relic_relation_count(query->answer) == 0 &&
+	    relic_relation_bytes(query->answer) == 0, SCENARIO_LIMIT,
+	    "the answer holds nothing");
+
+	relic_destroy(ctx);
+	relic_query_destroy(query);
 }
 
 /*
@@ -465,7 +726,9 @@ int
 main(void)
 {
 	columns_are_the_named_variables();
-	answer_predicates_are_named_in_order();
+	answers_are_named_in_the_order_queries_compile();
+	answering_queries_does_not_grow_the_context();
+	an_answer_refused_by_a_limit_is_given_back();
 	the_programs_queries_are_enumerated();
 	an_unsafe_query_makes_the_program_invalid();
 	a_refused_query_leaves_the_program_valid();

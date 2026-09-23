@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -50,7 +51,10 @@
  * An adornment with no bound column has no magic predicate and its rules no
  * guard, since there is no bound value to record.  The query is rewritten the
  * same way, with nothing bound and no guard, and the magic rules its body
- * generates are the seeds: for path(a, X)? the fact magic$path$bf(a).
+ * generates are the seeds: for path(a, X)? the fact magic$path$bf(a).  The
+ * query's head names no predicate, and nothing here looks it up: a head's
+ * arity is read from the rule, and a limit reached while generating a rule is
+ * attributed to the predicate called, never to the rule making the call.
  *
  * The rewrite terminates because adornments are memoized on the predicate and
  * the bound columns, and a predicate of arity n has at most 2^n of them.  The
@@ -123,9 +127,11 @@ struct relic_demand {
 /*
  * A generated rule being written, in the slots of the rule it comes from,
  * whose variable table `source` supplies.  Its arrays are borrowed, and
- * publishing it copies them renumbered.  `attributed` is the predicate of the
- * program the rule belongs to -- the one adorned, or the one whose calls a
- * magic rule records -- which a limit diagnostic names.
+ * publishing it copies them renumbered.  `head_arity` is the number of
+ * `head_args`: the source rule's for an adorned rule or the rewritten query,
+ * the number of bound columns for a magic rule.  `attributed` is the
+ * predicate of the program the rule belongs to -- the one adorned, or the one
+ * whose calls a magic rule records -- which a limit diagnostic names.
  */
 struct relic_draft {
 	const relic_rule_t	*source;
@@ -133,6 +139,7 @@ struct relic_draft {
 	const relic_literal_t	*body;
 	size_t			 body_length;
 	relic_pred_id_t		 head;
+	uint16_t		 head_arity;
 	relic_pred_id_t		 attributed;
 };
 
@@ -240,8 +247,7 @@ static int	 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *head, relic_draft_t *draft);
 static int	 rewrite_query(relic_magic_t *magic,
 		    const relic_rule_t *query);
-static bool	 rule_derives_nothing(const relic_magic_t *magic,
-		    const relic_rule_t *rule);
+static bool	 rule_derives_nothing(const relic_rule_t *rule);
 static uint32_t	 rule_hash(const relic_magic_t *magic,
 		    const relic_rule_t *rule);
 static bool	 rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
@@ -1044,7 +1050,6 @@ canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 {
 	relic_renumbering_t renumbering;
 	relic_variable_t *variable;
-	uint16_t head_arity;
 	uint16_t n;
 	size_t i;
 
@@ -1054,13 +1059,13 @@ canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 	renumbering.count = 0;
 
 	rule->head = draft->head;
+	rule->head_arity = draft->head_arity;
 	rule->where = draft->source->where;
 	rule->origin = draft->source->origin;
 
-	head_arity = pred_arity(magic, draft->head);
 	rule->head_args = copy_args(magic, &renumbering, draft->head_args,
-	    head_arity);
-	if (head_arity > 0 && rule->head_args == NULL)
+	    rule->head_arity);
+	if (rule->head_arity > 0 && rule->head_args == NULL)
 		return (-1);
 
 	rule->body = magic_alloc(magic, draft->body_length,
@@ -1137,9 +1142,9 @@ rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
 {
 	size_t i;
 
-	if (a->head != b->head || a->body_length != b->body_length ||
-	    !args_equal(a->head_args, b->head_args,
-	    pred_arity(magic, a->head)))
+	if (a->head != b->head || a->head_arity != b->head_arity ||
+	    a->body_length != b->body_length ||
+	    !args_equal(a->head_args, b->head_args, a->head_arity))
 		return (false);
 
 	for (i = 0; i < a->body_length; i++) {
@@ -1155,7 +1160,7 @@ rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
  * only derive a tuple its relation already holds.
  */
 static bool
-rule_derives_nothing(const relic_magic_t *magic, const relic_rule_t *rule)
+rule_derives_nothing(const relic_rule_t *rule)
 {
 	const relic_literal_t *literal;
 	size_t i;
@@ -1166,7 +1171,7 @@ rule_derives_nothing(const relic_magic_t *magic, const relic_rule_t *rule)
 		if (literal->kind == RELIC_LITERAL_POSITIVE &&
 		    literal->u.atom.pred == rule->head &&
 		    args_equal(literal->u.atom.args, rule->head_args,
-		    pred_arity(magic, rule->head)))
+		    rule->head_arity))
 			return (true);
 	}
 
@@ -1210,8 +1215,7 @@ rule_hash(const relic_magic_t *magic, const relic_rule_t *rule)
 	size_t i;
 
 	hash = relic_hash_word(rule->head);
-	arity = pred_arity(magic, rule->head);
-	for (j = 0; j < arity; j++)
+	for (j = 0; j < rule->head_arity; j++)
 		hash = hash_arg(hash, &rule->head_args[j]);
 
 	hash = hash_step(hash, (uint32_t)rule->body_length);
@@ -1268,6 +1272,9 @@ find_rule(const relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
  * Append a generated rule and index it.  Room in the table and in the index
  * is made before the rule is stored.  A rule's index entry is its position
  * plus one, so the table stops one short of what an identifier can hold.
+ * The generated rules are analysed like the program's, indexed by head, so
+ * the rewritten query, whose head names no predicate, is kept apart and
+ * never appended here.
  */
 static int
 append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
@@ -1295,6 +1302,7 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 		return (-1);
 	}
 
+	assert(rule->head != RELIC_ID_NONE);
 	magic->rules.entries[magic->rules.count] = *rule;
 	magic->rules.count++;
 	relic_idtab_place(&magic->rule_index, hash,
@@ -1318,7 +1326,7 @@ publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 	if (canonicalize(magic, draft, &rule) != 0)
 		return (-1);
 
-	if (rule_derives_nothing(magic, &rule))
+	if (rule_derives_nothing(&rule))
 		return (0);
 
 	hash = rule_hash(magic, &rule);
@@ -1424,7 +1432,7 @@ guard_literal(relic_magic_t *magic, const relic_rule_t *rule,
 	guard->u.atom.where = rule->where;
 	guard->u.atom.pred = head->magic;
 	guard->u.atom.args = bound_args(magic, rule->head_args,
-	    pred_arity(magic, rule->head), head->bound);
+	    rule->head_arity, head->bound);
 	if (guard->u.atom.args == NULL)
 		return (-1);
 
@@ -1499,6 +1507,7 @@ record_call(relic_magic_t *magic, const relic_rule_t *rule,
 	bzero(&draft, sizeof(draft));
 	draft.source = rule;
 	draft.head = adornment->magic;
+	draft.head_arity = column_count(adornment->bound);
 	draft.head_args = bound_args(magic, body[position].u.atom.args,
 	    pred_arity(magic, adornment->source), adornment->bound);
 	if (draft.head_args == NULL)
@@ -1519,8 +1528,8 @@ record_call(relic_magic_t *magic, const relic_rule_t *rule,
  * -- and walked in that order, keeping the set of slots bound so far.  Each
  * call on a predicate read on demand is renamed to the adornment it asks
  * for, after the magic rule recording it is generated from the literals
- * before it.  The draft has the source rule's head arguments; its caller
- * names the head.
+ * before it.  The draft has the source rule's head arguments and head arity;
+ * its caller names the head.
  */
 static int
 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
@@ -1579,6 +1588,7 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	bzero(draft, sizeof(*draft));
 	draft->source = rule;
 	draft->head_args = rule->head_args;
+	draft->head_arity = rule->head_arity;
 	draft->body = body;
 	draft->body_length = length;
 
@@ -1608,6 +1618,11 @@ adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
  * Rewrite the query, which is called with nothing bound and has no guard,
  * into the rule kept apart from the generated ones.  The magic rules its
  * calls generate are the seeds.
+ *
+ * The query's head names no predicate, so it is the source and the adorned
+ * predicate of a pseudo-adornment with no bound column and no magic
+ * predicate: nothing of it is looked up, and the rewritten rule keeps the
+ * query's head and head arity, to run into the same answer relation.
  */
 static int
 rewrite_query(relic_magic_t *magic, const relic_rule_t *query)

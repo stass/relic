@@ -152,8 +152,8 @@ destroyed, because nothing replaces a loaded program yet. A long-running
 embedder or a REPL that loads a broken file repeatedly therefore grows slowly.
 The waste is bounded by the text the caller chose to load. The interactive
 mode never loads, so it does not grow this way; it grows through the queries
-it prepares instead, the items on answer predicates and on the symbols and
-values of query text below. Revisit
+it prepares instead, the item on the symbols and values of query text below.
+Revisit
 when a context is given a way to discard its program, which is the operation
 that would reset the arena anyway.
 
@@ -183,28 +183,6 @@ line ending in `.` through it. Both evaluation items below -- a later load
 re-evaluating everything, and complete relations evaluated per query -- would
 then fall on the session.
 
-**Every prepared query leaves its answer predicate behind.** [Medium,
-component: `lib/rule.c`, `lib/eval.c`, `lib/plan.c`, `lib/relation.c`,
-`lib/magic.c`, `lib/explain.c`] A query's answer is the relation of a
-predicate `$q` and a serial, interned when the query is prepared and never
-retired, since a predicate is never removed from a context. Every stage sized
-by the predicate count then pays for every query ever prepared, once per
-answer: the dependency graph and stratification of the rewrite's generated
-rules, the delta tracking of each evaluation, the discard of every relation,
-the complete-predicate analysis and the undefined-predicate sweep. A long run
-of queries is quadratic; an interactive session shows it. A four-rule graph
-program with `path(a, X)?` repeated per line, under the default configure on
-macOS, takes 0.4 s for 5,000 lines, 1.8 s for 10,000 and 7.1 s for 20,000,
-with the rewrite's schedule build the largest share; an embedder preparing a
-query per request is the same case. The design is `specs/design-query.md`
-and decision D-17: the query object owns its answer relation, the head of
-its rule names no predicate, and `$q<serial>` is a display name the relation
-carries, so the predicate table is bounded by the program and no walk needs
-to change. Retiring the predicate in relic_query_destroy() is ruled out by
-the API contract that a query may be destroyed after its context.
-Implementation pending, with the growth test of the design's section 7
-written first; `relic_pred_is_answer()` and its test go with the predicate.
-
 **The symbols and values of a query's text are interned for the life of the
 context.** [Low, component: `lib/parse.c`, `lib/lex.c`, `lib/symbol.c`,
 `lib/value.c`, `cmd/relic/repl.c`] A constant in a query is interned as a
@@ -214,8 +192,9 @@ distinct constants grows the value table by one entry per distinct constant,
 and a session grows the symbol table by one entry per line, because the tool
 names each line's query `<query N>` and the parser interns the name. Nothing
 walks either table per answer, so the cost is memory rather than time, and
-it is bounded by the distinct text seen. What remains once the answer
-predicate is gone, per `specs/design-query.md` section 9. A fix is either a
+it is bounded by the distinct text seen. A query's answer leaves nothing in
+the context's tables, per `specs/design-query.md` section 9; these entries
+are what a query does leave. A fix is either a
 source name that is not interned -- diagnostics copy it -- or a per-query
 scope for the symbols and values only the query's text mentions, which is a
 change to interning and wants a design note first.
@@ -325,12 +304,8 @@ evaluating them for every query proposes, would avoid the second pass.
 **Generated names are interned for the life of the context.** [Low,
 component: `lib/magic.c`, `lib/rule.c`, `lib/symbol.c`] Every adorned and
 magic predicate a rewrite generates, and the symbol naming it, stays in the
-context's tables after the query, as every interned entry does. So does each
-prepared query's answer predicate, `$qN`, whose relation is emptied after its
-rows are delivered but whose predicate and symbol entries are not released
-when the query is destroyed; a long-lived embedder preparing many queries
-grows by one of each per query. The same query run again
-reuses them, so the growth is bounded by the distinct adornments ever asked
+context's tables after the query, as every interned entry does. The same
+query run again reuses them, so the growth is bounded by the distinct adornments ever asked
 for, at most the budget per distinct query shape; a long-lived embedder
 answering many differently shaped queries grows by all of them. Releasing a
 rewrite's generated entries would need the tables to support removal, or

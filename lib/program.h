@@ -57,9 +57,11 @@ typedef struct relic_atom relic_atom_t;
 typedef struct relic_comparison relic_comparison_t;
 typedef struct relic_component relic_component_t;
 typedef struct relic_literal relic_literal_t;
+typedef struct relic_loaded_query relic_loaded_query_t;
 typedef struct relic_pred relic_pred_t;
 typedef struct relic_predtab relic_predtab_t;
 typedef struct relic_program relic_program_t;
+typedef struct relic_querytab relic_querytab_t;
 typedef struct relic_rule relic_rule_t;
 typedef struct relic_ruletab relic_ruletab_t;
 typedef struct relic_schedule relic_schedule_t;
@@ -200,11 +202,16 @@ struct relic_variable {
  * A compiled rule.
  *
  * A fact is a rule whose body has no literals, exactly as in the syntax
- * tree.  A query is a rule too: its head is a synthetic predicate, `$q`
- * followed by a serial number, whose arguments are the query's named
- * variables in order of first occurrence, so its relation is the answer.
- * `head_args` holds the head predicate's arity of arguments and is NULL when
- * that arity is zero.
+ * tree.  A query is a rule too, whose head names no predicate: `head` is
+ * RELIC_ID_NONE and the head's arguments are the query's named variables in
+ * order of first occurrence.  Its tuples go to the answer relation the query
+ * object owns, which is why the predicate table holds nothing for it.
+ *
+ * `head_arity` is the number of head arguments, set wherever a rule is
+ * built: the head predicate's arity, or a query's number of output columns.
+ * Every stage that needs a head's arity reads it here rather than from the
+ * predicate table, which a query's head is not in.  `head_args` holds that
+ * many arguments and is NULL when there are none.
  *
  * Every slot below `variable_count` is bound by some positive relational
  * body literal, because a rule in which one was not would have been
@@ -228,7 +235,8 @@ struct relic_rule {
 	size_t			 body_length;
 	size_t			 origin;
 	relic_location_t	 where;
-	relic_pred_id_t		 head;
+	relic_pred_id_t		 head;		/* RELIC_ID_NONE for a query */
+	uint16_t		 head_arity;
 	uint16_t		 variable_count;
 	bool			 mixed_noted;
 };
@@ -248,6 +256,28 @@ struct relic_ruletab {
 	relic_rule_t	*entries;
 	size_t		 count;
 	size_t		 capacity;
+};
+
+/*
+ * A query written in the program, compiled, with the serial number that
+ * names its answer relation.  The program's queries and the queries prepared
+ * from text share one sequence of serial numbers in the order they were
+ * compiled, and loads and preparations interleave, so a query's serial is
+ * not its position among the program's queries and is recorded beside it.
+ */
+struct relic_loaded_query {
+	relic_rule_t	rule;
+	size_t		serial;
+};
+
+/*
+ * The program's queries, in the order they were loaded.  A growable array
+ * for the reason relic_ruletab_t gives.
+ */
+struct relic_querytab {
+	relic_loaded_query_t	*entries;
+	size_t			 count;
+	size_t			 capacity;
 };
 
 /*
@@ -313,14 +343,13 @@ struct relic_schedule {
  * unsafe: a later load cannot repair it, so a check that compiles only
  * blameless statements must still refuse the program.
  *
- * `queries` holds the queries written in the program, compiled into rules
- * over their answer predicates, apart from `rules` because evaluating the
- * program must not answer every query it happens to contain.
- * `query_serial` counts the queries this context has compiled, those written
- * in the program and those prepared from text alike, and numbers the next
- * one's answer predicate.  It advances only when a compiled query is
- * published, so a query that fails part way and is compiled again reuses its
- * number.
+ * `queries` holds the queries written in the program, compiled, apart from
+ * `rules` because evaluating the program must not answer every query it
+ * happens to contain.  `query_serial` counts the queries this context has
+ * compiled, those written in the program and those prepared from text alike,
+ * and is the serial number of the next one.  It advances only when a
+ * compiled query is published, so a query that fails part way and is
+ * compiled again reuses its number.
  *
  * `schedule` is the evaluation order the dependency analysis last produced.
  * `unstratified` records that the analysis found recursion through negation.
@@ -331,7 +360,7 @@ struct relic_schedule {
 struct relic_program {
 	relic_predtab_t		 predicates;
 	relic_ruletab_t		 rules;
-	relic_ruletab_t		 queries;
+	relic_querytab_t	 queries;
 	relic_schedule_t	 schedule;
 	const relic_ast_stmt_t	*compiled;
 	size_t			 query_serial;

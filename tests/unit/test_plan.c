@@ -39,6 +39,7 @@
 #define	SCENARIO_COMPARISONS	"a comparison goes where its operands are bound"
 #define	SCENARIO_DELTA		"a delta variant scans its delta literal first"
 #define	SCENARIO_DELTA_REFUSED	"a delta literal must be a positive literal"
+#define	SCENARIO_EMIT_TARGET	"the EMIT writes the relation it is given"
 #define	SCENARIO_ESTIMATE	"the smaller estimate goes first"
 #define	SCENARIO_FACT		"a fact is a lone EMIT of constants"
 #define	SCENARIO_GREEDY		"bound arguments go first, then small relations"
@@ -89,6 +90,7 @@ static relic_dom_t symbol_value(relic_t *ctx, const char *name);
 static void	 a_comparison_goes_where_its_operands_are_bound(void);
 static void	 a_delta_literal_must_be_positive(void);
 static void	 a_delta_variant_scans_its_delta_first(void);
+static void	 the_emit_writes_the_relation_it_is_given(void);
 static void	 a_fact_is_a_lone_emit_of_constants(void);
 static void	 a_fully_bound_literal_is_a_membership_test(void);
 static void	 a_negated_literal_is_placed_once_bound(void);
@@ -145,19 +147,26 @@ fixture_load(fixture_t *fixture, const char *program, unsigned int flags,
 
 /*
  * Plan the rule at `rule_index` in load order, or its delta variant for the
- * body literal at `delta_literal`, with the relations `incomplete` marks
- * taken to be still derived.  Returns whether the plan was built; a test
- * that expects a refusal reads the error count.
+ * body literal at `delta_literal`, into the relation of its head, with the
+ * relations `incomplete` marks taken to be still derived.  Returns whether
+ * the plan was built; a test that expects a refusal reads the error count.
  */
 static bool
 fixture_plan_rule(fixture_t *fixture, size_t rule_index,
     size_t delta_literal, const bool *incomplete)
 {
+	const relic_rule_t *rule;
+	relic_relation_t *target;
+
 	if (rule_index >= fixture->ctx->program.rules.count)
 		return (false);
 
-	return (relic_plan_rule(fixture->ctx, &fixture->arena,
-	    &fixture->ctx->program.rules.entries[rule_index],
+	rule = &fixture->ctx->program.rules.entries[rule_index];
+	target = relic_relation_for(fixture->ctx, rule->head);
+	if (target == NULL)
+		return (false);
+
+	return (relic_plan_rule(fixture->ctx, &fixture->arena, rule, target,
 	    delta_literal, incomplete, &fixture->plan) == 0);
 }
 
@@ -505,6 +514,60 @@ a_delta_literal_must_be_positive(void)
 	    "a negated literal is refused");
 	checkf(fixture.errors == 1, SCENARIO_DELTA_REFUSED,
 	    "one error should be reported, %zu were", fixture.errors);
+	fixture_release(&fixture);
+}
+
+/*
+ * The EMIT writes whatever relation the caller names, which is how a query's
+ * rule derives into the query's own answer, and the relation must have a
+ * column for each head argument: a rule planned into a relation of another
+ * arity is an internal error rather than a plan that reads past its head or
+ * leaves a column unwritten.
+ */
+static void
+the_emit_writes_the_relation_it_is_given(void)
+{
+	fixture_t fixture;
+	relic_relation_t *answer;
+	relic_relation_t *wide;
+	const relic_rule_t *rule;
+	const relic_op_t *emit;
+
+	if (!fixture_load(&fixture, "e(a, b).\nr(X) :- e(X, _).\n",
+	    TEXTUAL_FLAGS, false)) {
+		check(false, SCENARIO_EMIT_TARGET, "the program loads");
+		fixture_release(&fixture);
+		return;
+	}
+	rule = &fixture.ctx->program.rules.entries[1];
+
+	answer = relic_relation_create(fixture.ctx, RELIC_ID_NONE, 7, 1);
+	wide = relic_relation_create(fixture.ctx, RELIC_ID_NONE, 8, 2);
+	if (answer == NULL || wide == NULL) {
+		check(false, SCENARIO_EMIT_TARGET, "the relations are created");
+		relic_relation_free(answer);
+		relic_relation_free(wide);
+		fixture_release(&fixture);
+		return;
+	}
+
+	check(relic_plan_rule(fixture.ctx, &fixture.arena, rule, answer,
+	    RELIC_PLAN_NO_DELTA, NULL, &fixture.plan) == 0,
+	    SCENARIO_EMIT_TARGET, "a relation of the head's arity is accepted");
+	emit = &fixture.plan.ops[fixture.plan.op_count - 1];
+	check(emit->kind == RELIC_OP_EMIT && emit->u.atom.relation == answer,
+	    SCENARIO_EMIT_TARGET, "the EMIT writes the relation given");
+
+	check(relic_plan_rule(fixture.ctx, &fixture.arena, rule, wide,
+	    RELIC_PLAN_NO_DELTA, NULL, &fixture.plan) != 0,
+	    SCENARIO_EMIT_TARGET, "a relation of another arity is refused");
+	checkf(fixture.errors == 1, SCENARIO_EMIT_TARGET,
+	    "one error should be reported, %zu were", fixture.errors);
+	check(strstr(relic_error(fixture.ctx), "relation $q8/2") != NULL,
+	    SCENARIO_EMIT_TARGET, "the error names the relation");
+
+	relic_relation_free(answer);
+	relic_relation_free(wide);
 	fixture_release(&fixture);
 }
 
@@ -1042,6 +1105,7 @@ main(void)
 	a_comparison_goes_where_its_operands_are_bound();
 	a_delta_variant_scans_its_delta_first();
 	a_delta_literal_must_be_positive();
+	the_emit_writes_the_relation_it_is_given();
 	a_fact_is_a_lone_emit_of_constants();
 	a_negated_literal_is_placed_once_bound();
 	each_binding_pattern_gets_its_access_path();

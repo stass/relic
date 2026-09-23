@@ -162,7 +162,8 @@ struct relic_counters {
 };
 
 /*
- * A query ready to run: a compiled rule over the query's answer predicate.
+ * A query ready to run: a compiled rule whose head names no predicate, and
+ * the relation its answer is derived into.
  *
  * A query prepared from text owns `arena`, which holds its syntax tree and
  * the variable-length parts of its rule, and is released when the query is
@@ -171,22 +172,31 @@ struct relic_counters {
  * here rather than a pointer into the program's table of queries, which is a
  * growable array and moves.
  *
- * `ctx` is the context the query was compiled against.  Its predicates, its
- * constants and its answer relation all belong to that context, so running it
- * against another would read identifiers that mean something else there.
+ * `answer` is the query's own relation, of the rule's head arity and named
+ * after the query's serial number.  It is created with the query and freed
+ * with it, and it is in no table of the context, so a query leaves nothing
+ * behind in the context's predicates or relations.  It holds tuples only
+ * while the query is being answered and is empty at every other moment.
+ *
+ * `ctx` is the context the query was compiled against.  Its predicates and
+ * its constants belong to that context, so running it against another would
+ * read identifiers that mean something else there.
  *
  * `running` is set while the query is being answered.  Destroying a query
  * reads nothing of its context, which a caller may have destroyed first,
  * except to refuse destroying the query being answered: while `running` is
- * set its context is certainly alive and busy with it.  Nothing in a context
- * points into any other query object, so destroying one of those from
- * caller code the library is running is safe.
+ * set its context is certainly alive and busy with it.  A context points
+ * into a query object only while answering it -- the plan that fills the
+ * answer holds the answer's address, and is released before the answer
+ * returns -- so destroying any other query from caller code the library is
+ * running is safe.
  */
 struct relic_query {
-	relic_t		*ctx;
-	relic_arena_t	 arena;
-	relic_rule_t	 rule;
-	bool		 running;
+	relic_t			*ctx;
+	relic_arena_t		 arena;
+	relic_rule_t		 rule;		/* head RELIC_ID_NONE */
+	relic_relation_t	*answer;
+	bool			 running;
 };
 
 /*
@@ -594,9 +604,6 @@ int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
  * stand as an argument of the message it decorates.
- *
- * relic_pred_is_answer() says whether a predicate is a query's synthetic
- * answer predicate, which a message about the query must not name.
  */
 void	 relic_predtab_init(relic_predtab_t *table);
 void	 relic_predtab_reset(relic_predtab_t *table);
@@ -607,7 +614,6 @@ size_t	 relic_pred_count(const relic_t *ctx);
 void	 relic_pred_define(relic_t *ctx, relic_pred_id_t id);
 const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
 	    char *buffer, size_t size);
-bool	 relic_pred_is_answer(const relic_t *ctx, relic_pred_id_t id);
 void	 relic_pred_report_undefined(relic_t *ctx);
 
 /*
@@ -656,19 +662,21 @@ int	 relic_stratify(relic_t *ctx);
 /*
  * lib/plan.c
  *
- * Plan one rule into `arena`, creating the relations it reads and writes and
- * the indexes its lookups read.  `delta_literal` is RELIC_PLAN_NO_DELTA for
- * the rule's ordinary plan, or the body index of the positive literal a
- * semi-naive variant reads from the delta.  `incomplete`, indexed by
- * predicate identifier minus one, marks the relations still being derived,
- * whose size the planner assumes rather than measures; NULL marks none.
- * Returns 0, or -1 with a diagnostic reported: memory or the memory limit
- * refused, or the planner broke one of a plan's invariants, which is an
- * internal error.
+ * Plan one rule into `arena`, creating the relations it reads and the
+ * indexes its lookups read.  The plan's EMIT writes into `target`, which the
+ * caller names -- the relation of the head's predicate, or a query's answer
+ * -- and whose arity must be the rule's head arity.  `delta_literal` is
+ * RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or the body index of the
+ * positive literal a semi-naive variant reads from the delta.  `incomplete`,
+ * indexed by predicate identifier minus one, marks the relations still being
+ * derived, whose size the planner assumes rather than measures; NULL marks
+ * none.  Returns 0, or -1 with a diagnostic reported: memory or the memory
+ * limit refused, or the planner broke one of a plan's invariants, which is
+ * an internal error.
  */
 int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
-	    const relic_rule_t *rule, size_t delta_literal,
-	    const bool *incomplete, relic_plan_t *plan);
+	    const relic_rule_t *rule, relic_relation_t *target,
+	    size_t delta_literal, const bool *incomplete, relic_plan_t *plan);
 
 /*
  * The order relic_plan_rule() would place a rule's body literals in, as body
@@ -727,10 +735,12 @@ int	 relic_query_answer(relic_t *ctx, relic_query_t *query,
  * gathering what it would show.  Each of the others shows one thing when a
  * callback is installed and nothing otherwise: a component's heading and fact
  * count, a rule with its plan, one delta variant of the rule last shown, a
- * query with its plan, and the heading of a query's Magic rewrite.  `depth`
- * is the level a component's heading is indented to, one more for a
- * component of a rewritten program than for one of the program itself; what
- * belongs to the component is indented beneath it.  None can fail.
+ * query with its plan, and the heading of a query's Magic rewrite.  A
+ * query's rule names no predicate, so the two that show one are given the
+ * query's answer relation, whose name its head is written with.  `depth` is
+ * the level a component's heading is indented to, one more for a component
+ * of a rewritten program than for one of the program itself; what belongs
+ * to the component is indented beneath it.  None can fail.
  */
 bool	 relic_explaining(const relic_t *ctx);
 void	 relic_explain_component(relic_t *ctx,
@@ -741,9 +751,9 @@ void	 relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 	    size_t delta_literal, const relic_plan_t *plan, unsigned int depth);
 void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
-	    const relic_plan_t *plan);
+	    const relic_relation_t *answer, const relic_plan_t *plan);
 void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
-	    const relic_magic_t *magic);
+	    const relic_relation_t *answer, const relic_magic_t *magic);
 
 /*
  * lib/index.c
@@ -777,11 +787,19 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
 /*
  * lib/relation.c
  *
- * relic_relation_for() is the only way to obtain a relation: one is created
- * empty for a predicate the first time it is asked for, so no caller decides
- * whether a relation exists yet.  A relation belongs to the context and never
- * moves, so a caller may hold as many of them as it likes for as long as the
- * context lives.
+ * relic_relation_for() is the only way to obtain a predicate's relation:
+ * one is created empty for a predicate the first time it is asked for, so no
+ * caller decides whether a relation exists yet.  Such a relation belongs to
+ * the context and never moves, so a caller may hold as many of them as it
+ * likes for as long as the context lives.
+ *
+ * relic_relation_create() makes an empty relation, of a predicate or of a
+ * query's answer; the table creates a predicate's through it, and a query
+ * its answer, which the query owns.  relic_relation_clear() empties one
+ * relation and gives back what it counted against both totals, and is the
+ * one way a relation loses tuples.  relic_relation_free() releases a
+ * relation that has been cleared and touches nothing else, which is what
+ * lets a query be destroyed after its context.
  *
  * Every function below takes a relation of the context it was obtained from.
  *
@@ -803,10 +821,9 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
  * later delta is measured from.
  *
- * relic_relation_discard_all() empties every relation at once, which ends
- * the span over which a range means anything; no caller may hold a range
- * across it.  relic_relation_discard() empties one predicate's relation, if
- * it has one, under the same rule for that relation's ranges.
+ * relic_relation_discard_all() clears the relation of every predicate,
+ * which ends the span over which a range means anything; no caller may hold
+ * a range across it, nor one of a relation across that relation's clear.
  *
  * relic_relation_index() finds, or builds from the tuples the relation holds,
  * the secondary index keyed on the columns of a mask and gives its position
@@ -817,6 +834,12 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * relic_relation_distinct() gives the number of distinct values in one
  * column, cached until the relation's tuple count changes.
  *
+ * relic_relation_name() writes what a relation is called: its predicate's
+ * name, or `$q` and the serial number of the query whose answer it is.
+ * relic_relation_describe() writes "name/arity" for a message, into a
+ * buffer of RELIC_PRED_TEXT_MAX bytes.  They are the only way a relation is
+ * named, in explain output and in diagnostics alike.
+ *
  * The two totals are what the configurable tuple and memory limits are
  * enforced against: tuples across every relation, and the bytes their columns
  * and indexes hold.
@@ -824,6 +847,10 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
 void	 relic_reltab_init(relic_reltab_t *table);
 void	 relic_reltab_reset(relic_reltab_t *table);
 relic_relation_t *relic_relation_for(relic_t *ctx, relic_pred_id_t pred);
+relic_relation_t *relic_relation_create(relic_t *ctx, relic_pred_id_t pred,
+	    size_t serial, uint16_t arity);
+void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);
+void	 relic_relation_free(relic_relation_t *relation);
 int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *columns, bool *addedp);
 bool	 relic_relation_contains(const relic_relation_t *relation,
@@ -836,12 +863,15 @@ relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
 	    relic_tuple_id_t first);
-void	 relic_relation_discard(relic_t *ctx, relic_pred_id_t pred);
 void	 relic_relation_discard_all(relic_t *ctx);
 int	 relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	    uint32_t key_mask, uint32_t *positionp);
 int	 relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 	    uint16_t column, size_t *distinctp);
+const char *relic_relation_name(const relic_t *ctx,
+	    const relic_relation_t *relation, char *buffer, size_t size);
+const char *relic_relation_describe(const relic_t *ctx,
+	    const relic_relation_t *relation, char *buffer, size_t size);
 size_t	 relic_relation_total_bytes(const relic_t *ctx);
 size_t	 relic_relation_total_tuples(const relic_t *ctx);
 

@@ -8,6 +8,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "internal.h"
 
@@ -27,9 +28,13 @@
  * its plan, and the callback need not escape anything.
  *
  * An operation is written as its kind followed by the literal it reads, the
- * way a program would write it: its arguments are the operation's terms, a
- * variable named as the rule names the slot it reads or binds.  What is
- * shown is therefore the plan itself, not the rule it was built from.
+ * way a program would write it: its relation's name, and its arguments the
+ * operation's terms, a variable named as the rule names the slot it reads or
+ * binds.  What is shown is therefore the plan itself, not the rule it was
+ * built from.  A relation is named by the relation layer, which is what
+ * names a query's answer `$q` and the query's serial number; a query's rule
+ * is written with its head named the same way, so the head and the EMIT
+ * that writes it read alike.
  */
 
 #define	EXPLAIN_LINE_MAX	1024	/* including the terminating NUL */
@@ -56,6 +61,9 @@ static void	 line_put_escaped(relic_explain_line_t *line,
 		    unsigned char byte);
 static void	 put_arg(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_arg_t *arg);
+static void	 put_args(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_arg_t *args,
+		    uint16_t count);
 static void	 put_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_atom_t *atom);
 static void	 put_compare(relic_explain_line_t *line,
@@ -73,7 +81,14 @@ static void	 put_pred(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
 static void	 put_pred_name(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
+static void	 put_query_rule(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_relation_t *answer);
+static void	 put_relation_name(const relic_t *ctx,
+		    relic_explain_line_t *line,
+		    const relic_relation_t *relation);
 static void	 put_rule(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule);
+static void	 put_rule_body(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule);
 static void	 put_size(relic_explain_line_t *line, size_t value);
 static void	 put_string_literal(relic_explain_line_t *line,
@@ -386,6 +401,28 @@ put_term(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
+ * The arguments that follow a name, as the language writes them: nothing for
+ * none, and `(a, b)` otherwise.
+ */
+static void
+put_args(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_arg_t *args, uint16_t count)
+{
+	uint16_t i;
+
+	if (count == 0)
+		return;
+
+	line_put_byte(line, '(');
+	for (i = 0; i < count; i++) {
+		if (i > 0)
+			line_put(line, ", ");
+		put_arg(ctx, line, rule, &args[i]);
+	}
+	line_put_byte(line, ')');
+}
+
+/*
  * An atom of the rule, written `name` for arity zero and `name(a, b)`
  * otherwise, as the language writes it.
  */
@@ -394,21 +431,12 @@ put_atom(const relic_t *ctx, relic_explain_line_t *line,
     const relic_rule_t *rule, const relic_atom_t *atom)
 {
 	const relic_pred_t *pred;
-	uint16_t i;
 
 	put_pred_name(ctx, line, atom->pred);
 
 	pred = relic_pred_of(ctx, atom->pred);
-	if (pred == NULL || pred->arity == 0)
-		return;
-
-	line_put_byte(line, '(');
-	for (i = 0; i < pred->arity; i++) {
-		if (i > 0)
-			line_put(line, ", ");
-		put_arg(ctx, line, rule, &atom->args[i]);
-	}
-	line_put_byte(line, ')');
+	if (pred != NULL)
+		put_args(ctx, line, rule, atom->args, pred->arity);
 }
 
 static void
@@ -432,18 +460,14 @@ put_literal(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
- * A rule as it is written, ending in its full stop.
+ * What follows a rule's head as it is written: its body, if it has one, and
+ * the full stop.
  */
 static void
-put_rule(const relic_t *ctx, relic_explain_line_t *line,
+put_rule_body(const relic_t *ctx, relic_explain_line_t *line,
     const relic_rule_t *rule)
 {
-	relic_atom_t head;
 	size_t i;
-
-	head.args = rule->head_args;
-	head.pred = rule->head;
-	put_atom(ctx, line, rule, &head);
 
 	for (i = 0; i < rule->body_length; i++) {
 		line_put(line, i == 0 ? " :- " : ", ");
@@ -451,6 +475,37 @@ put_rule(const relic_t *ctx, relic_explain_line_t *line,
 	}
 
 	line_put_byte(line, '.');
+}
+
+/*
+ * A rule of the program, or one generated from it, as it is written.  Its
+ * head is an atom over a predicate.
+ */
+static void
+put_rule(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule)
+{
+	relic_atom_t head;
+
+	head.args = rule->head_args;
+	head.pred = rule->head;
+	put_atom(ctx, line, rule, &head);
+
+	put_rule_body(ctx, line, rule);
+}
+
+/*
+ * A query's rule as it is written.  Its head names no predicate, and is
+ * written as the query's answer relation is named.
+ */
+static void
+put_query_rule(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_relation_t *answer)
+{
+	put_relation_name(ctx, line, answer);
+	put_args(ctx, line, rule, rule->head_args, rule->head_arity);
+
+	put_rule_body(ctx, line, rule);
 }
 
 /*
@@ -479,6 +534,21 @@ put_key(relic_explain_line_t *line, uint32_t key_mask)
 }
 
 /*
+ * What a relation is called, as the relation layer names it.  The buffer is
+ * as long as a line, so a name is cut here only where the line would cut it
+ * anyway.
+ */
+static void
+put_relation_name(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_relation_t *relation)
+{
+	char name[EXPLAIN_LINE_MAX];
+
+	relic_relation_name(ctx, relation, name, sizeof(name));
+	put_text(line, name, strlen(name));
+}
+
+/*
  * The literal an operation over a relation reads, from its terms.
  */
 static void
@@ -487,7 +557,7 @@ put_op_atom(const relic_t *ctx, relic_explain_line_t *line,
 {
 	uint16_t i;
 
-	put_pred_name(ctx, line, atom->relation->pred);
+	put_relation_name(ctx, line, atom->relation);
 	if (atom->relation->arity == 0)
 		return;
 
@@ -653,7 +723,7 @@ relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 
 void
 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
-    const relic_plan_t *plan)
+    const relic_relation_t *answer, const relic_plan_t *plan)
 {
 	relic_explain_line_t line;
 
@@ -662,7 +732,7 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 
 	line_begin(&line, 0);
 	line_put(&line, "query ");
-	put_rule(ctx, &line, rule);
+	put_query_rule(ctx, &line, rule, answer);
 	line_finish(ctx, &line);
 
 	put_plan(ctx, rule, plan, 1);
@@ -676,7 +746,7 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
  */
 void
 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
-    const relic_magic_t *magic)
+    const relic_relation_t *answer, const relic_magic_t *magic)
 {
 	const relic_adornment_t *adornment;
 	const relic_pred_t *source;
@@ -689,7 +759,7 @@ relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 
 	line_begin(&line, 0);
 	line_put(&line, "magic rewrite of ");
-	put_rule(ctx, &line, query);
+	put_query_rule(ctx, &line, query, answer);
 	line_finish(ctx, &line);
 
 	for (i = 0; i < magic->adornment_count; i++) {

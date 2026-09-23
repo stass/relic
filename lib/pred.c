@@ -292,26 +292,6 @@ relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
 }
 
 /*
- * Whether a predicate is a query's answer predicate: `$q` and a serial
- * number.  No identifier the lexer accepts contains `$`, so the prefix
- * identifies an answer predicate by construction.
- */
-bool
-relic_pred_is_answer(const relic_t *ctx, relic_pred_id_t id)
-{
-	const relic_pred_t *pred;
-	const char *name;
-
-	pred = relic_pred_of(ctx, id);
-	if (pred == NULL)
-		return (false);
-
-	name = relic_symbol_bytes(ctx, pred->name, NULL);
-
-	return (name != NULL && name[0] == '$' && name[1] == 'q');
-}
-
-/*
  * Warn about every predicate the program mentions and nothing defines.
  *
  * Reported once per predicate, at the first place the program named it: such

@@ -124,7 +124,7 @@ recursive Datalog answers queries from the command line, specified in
 | --- | --- |
 | `lib/plan.{h,c}` | the plan representation of D-8 and the textual planner: positive literals in written order, each a `SCAN` or, when every argument is bound, a `MEMBER`; each comparison a `FILTER` at the earliest point its operands are bound; the head an `EMIT`; a plan is refused unless every body literal became exactly one operation |
 | `lib/eval.c` | the executor, one loop over a level and a resume flag with no recursion; the naive fixed point of D-9; `relic_materialize()` and `relic_query_run()` |
-| `lib/rule.c` | a query compiles into a rule over the synthetic `$qN` predicate of D-12: its named variables in first-occurrence order are the columns, and safety is the ordinary check of a head; `relic_query_prepare()`, `relic_query_count()`, `relic_query_loaded()`, `relic_query_destroy()` |
+| `lib/rule.c` | a query compiles into a rule whose head names no predicate: its named variables in first-occurrence order are the columns, and safety is the ordinary check of a head; `relic_query_prepare()`, `relic_query_count()`, `relic_query_loaded()`, `relic_query_destroy()` |
 | `lib/parse.c` | parses into any arena, so a prepared query owns its syntax tree; `relic_parse_query()` holds query text to exactly one query |
 | `lib/value.c` | one definition of the total order of section 61, reached by domain identifier and, as `relic_value_compare()`, by public value |
 | `include/relic.h` | adds `relic_materialize()`, `relic_query_t`, `relic_row_cb`, the five query functions and `relic_value_compare()` |
@@ -138,8 +138,8 @@ The queries a program contains are now compiled and checked by
 unsafe rule does. With `-q`, only the command line's queries run; the
 program's own are still checked.
 
-A query is answered by running its rule once into the answer relation, then
-streaming that relation. No row is delivered until the answer is complete, so
+A query is answered by running its rule once into its own answer relation,
+then streaming that relation. No row is delivered until the answer is complete, so
 a query that exceeds a limit delivers none. The relations record how many
 rules they are a fixed point of, so a query over a materialized program after
 nothing new was loaded evaluates nothing.
@@ -299,6 +299,20 @@ Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--with-libedit` decides whether the interactive mode edits lines; only the
 tool links libedit, never the library.
 
+**A query owns its answer, decision D-17.** A query's answer is a relation
+the query object owns rather than the relation of a predicate, specified in
+`specs/design-query.md`, so answering queries leaves the predicate and
+relation tables as they were and a session costs each line what the program
+holds rather than every line before it.
+
+| Component | State |
+| --- | --- |
+| `lib/rule.c` | a query's rule has head `RELIC_ID_NONE` and every rule records its head arity; `relic_query_prepare()` and `relic_query_loaded()` create the query's answer relation, of the head arity and named by the query's serial, once the rule has compiled and before the query is published, and `relic_query_destroy()` frees it without reading the context; the program's queries record their serial beside their rule, since loads and preparations share one sequence; `relic_pred_is_answer()` is gone with the predicate |
+| `lib/relation.c` | `relic_relation_create()`, `relic_relation_clear()` and `relic_relation_free()` serve the table's relations and a query's alike; `clear` is the one way a relation loses tuples and gives back what it counted, the discard of every relation is `clear` over the table, and an assertion confirms both totals are zero afterwards; a relation records its predicate or its query's serial, and `relic_relation_name()` and `relic_relation_describe()` name it as `-e` output and every relation diagnostic do, `$q<serial>` for an answer |
+| `lib/plan.c`, `lib/eval.c` | the planner's EMIT writes the relation its caller names and confirms its arity is the rule's head arity; a component's rules derive into their members, a query's rule into the query's answer, emptied before the rule runs and after the rows are delivered |
+| `lib/magic.c`, `lib/explain.c` | the rewrite reads every head arity from the rule or its draft and treats the query's head as a pseudo-adornment it never looks up; the explain output writes a query's head and every operation's relation through the relation's name, so the golden `-e` outputs are unchanged |
+| `tests/` | `test_query`: 64 answers, through the rewrite and from the whole fixed point, leave the predicate count, the relation table and the tuple and storage totals as the first left them; names read from `-e` across loads and preparations; an answer refused by the tuple limit gives back the tuples and bytes it counted, and its query is destroyed after its context; `test_plan`: an EMIT writes the relation given and a relation of the wrong arity is an internal error naming it; `tests/perf.sh`: a session of 100 000 query lines within a tenth of the budget, about 3 s in a debug build, which the quadratic session missed by minutes |
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -404,7 +418,7 @@ is broken, by injecting each fault and rerunning:
 * a query's synthetic head not counted as an occurrence, which every query
   catches as a spurious singleton warning;
 * a refused query consuming a serial number, which
-  `tests/unit/test_query.c` catches as a misnamed answer predicate;
+  `tests/unit/test_query.c` catches as a misnamed answer;
 * rows streamed before evaluation has succeeded, which
   `tests/unit/test_exhaustion.c` catches as rows from a failed query;
 * a separator written before a query is known to succeed, and a JSON string

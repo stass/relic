@@ -244,18 +244,16 @@ struct relic_evaluation {
 static int	 allocate_delta_work(relic_evaluation_t *eval,
 		    relic_delta_work_t *work, size_t variants, size_t members);
 static int	 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
-		    const relic_rule_t *query);
-static int	 answer_from_program(relic_t *ctx, const relic_rule_t *query);
+		    const relic_query_t *query);
+static int	 answer_from_program(relic_t *ctx, const relic_query_t *query);
 static int	 answer_through_rewrite(relic_t *ctx,
-		    const relic_rule_t *query);
+		    const relic_query_t *query);
 static bool	 query_answerable(relic_t *ctx, const relic_query_t *query,
 		    relic_row_cb callback);
 static int	 compute_answer(relic_t *ctx, const relic_query_t *query);
-static int	 deliver_answer(relic_t *ctx, const relic_query_t *query,
-		    relic_row_cb callback, void *callback_ctx);
 static int	 build_running_plan(relic_evaluation_t *eval,
-		    const relic_rule_t *rule, size_t delta_literal,
-		    relic_running_plan_t *running);
+		    const relic_rule_t *rule, relic_relation_t *target,
+		    size_t delta_literal, relic_running_plan_t *running);
 static enum relic_fixed_point choose_fixed_point(const relic_t *ctx,
 		    const relic_component_t *component);
 static int	 compare_indexes(const void *a, const void *b);
@@ -274,7 +272,7 @@ static void	 evaluation_end(relic_evaluation_t *eval);
 static int	 evaluate_component(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 evaluate_rewrite(relic_t *ctx, relic_magic_t *magic,
-		    const relic_rule_t *query);
+		    const relic_query_t *query);
 static int	 evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
 		    const relic_schedule_t *schedule, const bool *wanted,
 		    unsigned depth);
@@ -290,6 +288,9 @@ static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static size_t	 gather_due_variants(relic_delta_work_t *work);
 static size_t	 head_member_of(const relic_evaluation_t *eval,
+		    const relic_rule_t *rule);
+static relic_relation_t *head_relation_of(const relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
 static void	 explain_component(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule, size_t position,
@@ -322,7 +323,7 @@ static int	 plan_members(relic_evaluation_t *eval,
 		    const relic_component_t *component,
 		    relic_component_plans_t *plans);
 static int	 plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
-		    relic_component_plans_t *plans);
+		    relic_relation_t *answer, relic_component_plans_t *plans);
 static int	 plan_variants(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component,
@@ -330,7 +331,8 @@ static int	 plan_variants(relic_evaluation_t *eval,
 static const relic_rule_t *rule_of(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component, size_t i);
-static int	 run_query_rule(relic_t *ctx, const relic_rule_t *rule);
+static int	 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
+		    relic_relation_t *answer);
 static int	 run_plans(relic_evaluation_t *eval,
 		    const relic_running_plan_t *plans, size_t count);
 static int	 run_recording_gain(relic_evaluation_t *eval,
@@ -1047,8 +1049,9 @@ evaluation_track_deltas(relic_evaluation_t *eval)
 }
 
 /*
- * Plan one rule, or one delta variant of it, with the cursors that run it.
- * Returns 0, or -1 with a diagnostic reported.
+ * Plan one rule, or one delta variant of it, with the cursors that run it,
+ * its EMIT writing into `target`.  Returns 0, or -1 with a diagnostic
+ * reported.
  *
  * The relations marked as members are the ones the planner is told are
  * still being derived.  A query's evaluation marks none, having no
@@ -1056,13 +1059,14 @@ evaluation_track_deltas(relic_evaluation_t *eval)
  */
 static int
 build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
-    size_t delta_literal, relic_running_plan_t *running)
+    relic_relation_t *target, size_t delta_literal,
+    relic_running_plan_t *running)
 {
 	running->rule = rule;
 	running->delta_literal = delta_literal;
 	running->head_member = 0;
 
-	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule,
+	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule, target,
 	    delta_literal, eval->is_member, &running->plan) != 0)
 		return (-1);
 
@@ -1172,12 +1176,13 @@ plan_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 
 /*
  * Plan every rule of a component as written, each literal reading its whole
- * relation.
+ * relation.  The members must be marked and their relations resolved.
  */
 static int
 plan_base(relic_evaluation_t *eval, const relic_schedule_t *schedule,
     const relic_component_t *component, relic_component_plans_t *plans)
 {
+	const relic_rule_t *rule;
 	size_t i;
 
 	plans->base = evaluation_alloc(eval, component->rule_count,
@@ -1186,8 +1191,10 @@ plan_base(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 		return (-1);
 
 	for (i = 0; i < component->rule_count; i++) {
-		if (build_running_plan(eval, rule_of(eval, schedule, component,
-		    i), RELIC_PLAN_NO_DELTA, &plans->base[i]) != 0)
+		rule = rule_of(eval, schedule, component, i);
+		if (build_running_plan(eval, rule,
+		    head_relation_of(eval, plans, rule), RELIC_PLAN_NO_DELTA,
+		    &plans->base[i]) != 0)
 			return (-1);
 		plans->base_count++;
 	}
@@ -1198,7 +1205,7 @@ plan_base(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 /*
  * Plan the delta variants of a component's rules: for each rule, one per
  * positive literal over a member, with that literal reading the delta.  The
- * members must be marked.
+ * members must be marked and their relations resolved.
  */
 static int
 plan_variants(relic_evaluation_t *eval, const relic_schedule_t *schedule,
@@ -1226,7 +1233,8 @@ plan_variants(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 			if (!literal_reads_member(eval, &rule->body[j]))
 				continue;
 
-			if (build_running_plan(eval, rule, j,
+			if (build_running_plan(eval, rule,
+			    head_relation_of(eval, plans, rule), j,
 			    &plans->variants[plans->variant_count]) != 0)
 				return (-1);
 			plans->variant_count++;
@@ -1245,6 +1253,18 @@ static size_t
 head_member_of(const relic_evaluation_t *eval, const relic_rule_t *rule)
 {
 	return (eval->member_position[rule->head - 1]);
+}
+
+/*
+ * The relation a rule of the component being planned derives into: its head
+ * predicate's, which is one of the component's members.  The members must be
+ * marked and their relations resolved.
+ */
+static relic_relation_t *
+head_relation_of(const relic_evaluation_t *eval,
+    const relic_component_plans_t *plans, const relic_rule_t *rule)
+{
+	return (plans->members[head_member_of(eval, rule)]);
 }
 
 static size_t
@@ -1441,17 +1461,18 @@ explain_component(const relic_evaluation_t *eval,
 }
 
 /*
- * Plan a query's rule as the single base plan of `plans`.
+ * Plan a query's rule as the single base plan of `plans`, deriving into the
+ * query's answer relation.
  */
 static int
 plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
-    relic_component_plans_t *plans)
+    relic_relation_t *answer, relic_component_plans_t *plans)
 {
 	plans->base = evaluation_alloc(eval, 1, sizeof(*plans->base));
 	if (plans->base == NULL)
 		return (-1);
 
-	if (build_running_plan(eval, rule, RELIC_PLAN_NO_DELTA,
+	if (build_running_plan(eval, rule, answer, RELIC_PLAN_NO_DELTA,
 	    &plans->base[0]) != 0)
 		return (-1);
 	plans->base_count = 1;
@@ -1618,7 +1639,7 @@ relic_materialize(relic_t *ctx)
  *
  * The context is busy while the callback runs, so a callback that calls
  * back to load or query is refused, and the answer relation cannot be
- * discarded or refilled under the loop.  The tuple is fetched afresh for each
+ * emptied or refilled under the loop.  The tuple is fetched afresh for each
  * row all the same, so that no pointer into relation storage is held across a
  * call out of the library, and the loop stops at an identifier the relation
  * does not hold rather than read past it, should that ever stop being true.
@@ -1649,34 +1670,47 @@ stream_answer(relic_t *ctx, const relic_relation_t *answer,
 }
 
 /*
- * Run a query's rule once into its answer relation, every relation it reads
- * being complete.  One pass computes the answer completely, because the
- * answer predicate appears in no body: its name holds `$`, which nothing a
- * program writes can.
+ * Run a query's rule -- the one written, or the one its rewrite produced --
+ * once into the query's answer relation, every relation it reads being
+ * complete.  One pass computes the answer completely, because no body reads
+ * the answer relation: it belongs to no predicate, so no literal can name
+ * it.
+ *
+ * The answer is emptied first, so the run starts from nothing whatever the
+ * relation held and whatever ran before it, and emptied again when the run
+ * fails, so the answer holds tuples only after a run that succeeded and
+ * nothing a caller does after a failure -- such as falling back to the whole
+ * program, which discards every relation -- meets a partial one.
  */
 static int
-run_query_rule(relic_t *ctx, const relic_rule_t *rule)
+run_query_rule(relic_t *ctx, const relic_rule_t *rule,
+    relic_relation_t *answer)
 {
 	relic_evaluation_t eval;
 	int status;
 
+	relic_relation_clear(ctx, answer);
+
 	status = evaluation_begin(&eval, ctx, 1);
 	if (status == 0)
-		status = plan_query(&eval, rule, &eval.components[0]);
+		status = plan_query(&eval, rule, answer, &eval.components[0]);
 	if (status == 0) {
-		relic_explain_query(ctx, rule,
+		relic_explain_query(ctx, rule, answer,
 		    &eval.components[0].base[0].plan);
 		status = run_plans(&eval, eval.components[0].base,
 		    eval.components[0].base_count);
 	}
 	evaluation_end(&eval);
 
+	if (status != 0)
+		relic_relation_clear(ctx, answer);
+
 	return (status);
 }
 
 /*
  * Stratify and evaluate the rules a query's rewrite generated, after showing
- * the rewrite of `query`, the query as written.  The rules are stratifiable
+ * the rewrite of the query as written.  The rules are stratifiable
  * by construction -- a generated rule negates only predicates the query reads
  * completely, which no generated rule derives -- so a failure to stratify
  * them is an internal error rather than something the program did.  The
@@ -1684,12 +1718,12 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule)
  * into components and finds the recursive ones.
  */
 static int
-evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_rule_t *query)
+evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_query_t *query)
 {
 	relic_schedule_t schedule;
 	int status;
 
-	relic_explain_rewrite(ctx, query, magic);
+	relic_explain_rewrite(ctx, &query->rule, query->answer, magic);
 
 	relic_schedule_init(&schedule);
 
@@ -1725,21 +1759,21 @@ evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_rule_t *query)
  */
 static int
 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
-    const relic_rule_t *query)
+    const relic_query_t *query)
 {
 	if (confirm_schedule_current(ctx) != 0)
 		return (-1);
 
 	discard_derived_state(ctx);
 
-	if (relic_magic_find_complete(magic, query) != 0)
+	if (relic_magic_find_complete(magic, &query->rule) != 0)
 		return (-1);
 
 	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
 	    magic->complete_components, 0) != 0)
 		return (-1);
 
-	if (relic_magic_rewrite(magic, query) != 0)
+	if (relic_magic_rewrite(magic, &query->rule) != 0)
 		return (-1);
 
 	if (magic->adornment_count == 0)
@@ -1753,12 +1787,12 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
  * program, computing it first if the relations do not hold it.
  */
 static int
-answer_from_program(relic_t *ctx, const relic_rule_t *query)
+answer_from_program(relic_t *ctx, const relic_query_t *query)
 {
 	if (materialize_program(ctx) != 0)
 		return (-1);
 
-	return (run_query_rule(ctx, query));
+	return (run_query_rule(ctx, &query->rule, query->answer));
 }
 
 /*
@@ -1773,7 +1807,7 @@ answer_from_program(relic_t *ctx, const relic_rule_t *query)
  * the relations marked as materializing no rule.
  */
 static int
-answer_through_rewrite(relic_t *ctx, const relic_rule_t *query)
+answer_through_rewrite(relic_t *ctx, const relic_query_t *query)
 {
 	relic_magic_t magic;
 	bool over_budget;
@@ -1782,7 +1816,7 @@ answer_through_rewrite(relic_t *ctx, const relic_rule_t *query)
 	relic_magic_init(&magic, ctx);
 	status = derive_for_rewrite(ctx, &magic, query);
 	if (status == 0)
-		status = run_query_rule(ctx, &magic.query);
+		status = run_query_rule(ctx, &magic.query, query->answer);
 	over_budget = magic.over_budget;
 	relic_magic_reset(&magic);
 
@@ -1794,6 +1828,11 @@ answer_through_rewrite(relic_t *ctx, const relic_rule_t *query)
 
 /*
  * Answer a query into its answer relation, then stream that relation.
+ *
+ * The relation is the query's own, emptied before its rule runs and again
+ * once the rows are delivered, so outside a run it holds nothing and counts
+ * nothing against the limits.  The context is busy throughout, so no other
+ * operation sees it holding tuples.
  *
  * A program whose fixed point is already computed -- or any program, when
  * the rewrite is turned off -- answers from the whole fixed point.  Otherwise
@@ -1834,7 +1873,7 @@ relic_query_answer(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 
 	status = compute_answer(ctx, query);
 	if (status == 0)
-		status = deliver_answer(ctx, query, callback, callback_ctx);
+		stream_answer(ctx, query->answer, callback, callback_ctx);
 
 	/*
 	 * The answer is transient: once delivered, or once the query has
@@ -1842,7 +1881,7 @@ relic_query_answer(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 	 * relation is emptied and what it counted against the limits given
 	 * back.
 	 */
-	relic_relation_discard(ctx, query->rule.head);
+	relic_relation_clear(ctx, query->answer);
 
 	query->running = false;
 
@@ -1888,28 +1927,9 @@ compute_answer(relic_t *ctx, const relic_query_t *query)
 
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
 	    ctx->materialized_rules == ctx->program.rules.count)
-		return (answer_from_program(ctx, &query->rule));
+		return (answer_from_program(ctx, query));
 
-	return (answer_through_rewrite(ctx, &query->rule));
-}
-
-/*
- * Stream the answer relation compute_answer() filled.  It exists unless
- * creating it ran out of memory, which was reported.
- */
-static int
-deliver_answer(relic_t *ctx, const relic_query_t *query,
-    relic_row_cb callback, void *callback_ctx)
-{
-	relic_relation_t *answer;
-
-	answer = relic_relation_for(ctx, query->rule.head);
-	if (answer == NULL)
-		return (-1);
-
-	stream_answer(ctx, answer, callback, callback_ctx);
-
-	return (0);
+	return (answer_through_rewrite(ctx, query));
 }
 
 void

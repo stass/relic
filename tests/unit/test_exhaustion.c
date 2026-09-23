@@ -1581,21 +1581,15 @@ evaluation_sweep_program(void)
 }
 
 /*
- * Whether a query's answer predicate is $q0, the first a context names.
+ * Whether a query's answer is $q0, the first a context names.
  */
 static bool
 answer_is_first(const relic_t *ctx, const relic_query_t *query)
 {
-	const relic_pred_t *pred;
-	const char *name;
+	char name[RELIC_NAME_TEXT_MAX];
 
-	pred = relic_pred_of(ctx, query->rule.head);
-	if (pred == NULL)
-		return (false);
-
-	name = relic_symbol_bytes(ctx, pred->name, NULL);
-
-	return (name != NULL && strcmp(name, "$q0") == 0);
+	return (strcmp(relic_relation_name(ctx, query->answer, name,
+	    sizeof(name)), "$q0") == 0);
 }
 
 /*

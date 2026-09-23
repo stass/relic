@@ -6,13 +6,15 @@
 
 #include "config.h"
 
+#include <assert.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
 
 #include "internal.h"
 
 /*
- * Relations: a set of tuples per predicate.
+ * Relations: a set of tuples per predicate, and one per query's answer.
  *
  * Tuples are stored end to end in one array of domain identifiers with the
  * arity as the stride, and a hash index over the whole tuple answers
@@ -21,21 +23,23 @@
  * position in the array, and the tuples added since some earlier moment are a
  * range of identifiers rather than a relation of their own.
  *
- * The store is append-only between discards.  A tuple identifier, once
- * assigned, denotes the same tuple until every relation is emptied at once by
- * relic_relation_discard_all(), and that is a property of this interface
- * rather than a rule its callers follow: there is no operation that removes,
+ * The store is append-only between clears.  A tuple identifier, once
+ * assigned, denotes the same tuple until its relation is emptied by
+ * relic_relation_clear(), and that is a property of this interface rather
+ * than a rule its callers follow: there is no operation that removes,
  * reorders or renumbers one tuple, and the one that removes any removes all
- * of them.  Semi-naive evaluation rests on it, because a delta is a pair of
- * identifiers and means nothing if the tuples under them can move; an
- * evaluation holds its ranges in its own state and discards only before it
- * begins, so no range outlives the span it was taken in.  Future incremental
- * insertion or deletion support has to confront that before it does anything
- * else.
+ * of the relation's.  Semi-naive evaluation rests on it, because a delta is a
+ * pair of identifiers and means nothing if the tuples under them can move;
+ * an evaluation holds its ranges in its own state and empties relations only
+ * before it begins, so no range outlives the span it was taken in.  Future
+ * incremental insertion or deletion support has to confront that before it
+ * does anything else.
  *
- * A relation is created once and never moves, because the table holds
- * pointers to relations rather than relations.  That is what lets a plan or
- * an evaluation resolve a relation once and hold it.
+ * A relation is created once, in an allocation of its own, and never moves.
+ * The table holds pointers to the predicates' relations rather than the
+ * relations, and a query holds a pointer to its answer's, which is what lets
+ * a plan or an evaluation resolve a relation once and hold it.  Nothing below
+ * asks which of the two a relation is, except to say what it is called.
  */
 
 /*
@@ -62,15 +66,13 @@ static bool	 key_mask_fits(const relic_relation_t *relation,
 		    uint32_t key_mask);
 static void	 report_limit(relic_t *ctx, const char *limit,
 		    size_t configured, const char *activity,
-		    relic_pred_id_t pred);
+		    const relic_relation_t *relation);
 static size_t	 relation_bytes_after_insert(const relic_relation_t *relation);
 static bool	 relation_columns_after_insert(
 		    const relic_relation_t *relation, size_t *columnsp);
-static relic_relation_t *relation_create(relic_t *ctx, relic_pred_id_t pred);
 static void	 relation_empty(relic_relation_t *relation);
 static relic_tuple_id_t relation_find(const relic_relation_t *relation,
 		    const relic_dom_t *columns, uint32_t hash);
-static void	 relation_free(relic_relation_t *relation);
 static int	 relation_make_room(relic_t *ctx, relic_relation_t *relation);
 static int	 relation_reserve(relic_t *ctx, relic_relation_t *relation);
 static int	 relations_cover(relic_t *ctx, relic_pred_id_t pred);
@@ -118,10 +120,55 @@ relation_empty(relic_relation_t *relation)
 }
 
 /*
- * Release everything one relation owns, and the relation itself.
+ * Create an empty relation of `arity` columns, in an allocation of its own so
+ * that it never moves.  `pred` is the predicate whose tuples it holds, or
+ * RELIC_ID_NONE for the answer of the query whose serial number is `serial`.
+ * Returns NULL having reported when memory ran out.
  */
-static void
-relation_free(relic_relation_t *relation)
+relic_relation_t *
+relic_relation_create(relic_t *ctx, relic_pred_id_t pred, size_t serial,
+    uint16_t arity)
+{
+	relic_relation_t *relation;
+
+	relation = calloc(1, sizeof(*relation));
+	if (relation == NULL) {
+		relic_diag_no_memory(ctx);
+		return (NULL);
+	}
+
+	relic_idtab_init(&relation->index);
+	relation->pred = pred;
+	relation->serial = serial;
+	relation->arity = arity;
+
+	return (relation);
+}
+
+/*
+ * Empty a relation and give back what it counted against both totals.  This
+ * is the one way a live relation loses tuples -- freeing one releases only a
+ * relation already emptied, or one going with its whole context -- so each
+ * total stays the sum of what every relation holds, whichever relations are
+ * emptied, and in the table or not.
+ */
+void
+relic_relation_clear(relic_t *ctx, relic_relation_t *relation)
+{
+	ctx->relations.tuple_count -= relation->count;
+	ctx->relations.storage_bytes -= relic_relation_bytes(relation);
+	relation_empty(relation);
+}
+
+/*
+ * Release everything one relation owns, and the relation itself, touching
+ * nothing else: in particular not the context's totals, so a query's answer
+ * can be freed after its context is gone.  The relation should have been
+ * emptied with relic_relation_clear(); one still holding tuples is freed only
+ * together with its context, whose totals go with it.
+ */
+void
+relic_relation_free(relic_relation_t *relation)
 {
 	if (relation == NULL)
 		return;
@@ -137,7 +184,7 @@ relic_reltab_reset(relic_reltab_t *table)
 	size_t position;
 
 	for (position = 0; position < table->count; position++)
-		relation_free(table->entries[position]);
+		relic_relation_free(table->entries[position]);
 
 	free(table->entries);
 	bzero(table, sizeof(*table));
@@ -397,14 +444,14 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 {
 	if (exceeds_tuple_limit(ctx)) {
 		report_limit(ctx, "tuples", ctx->config.max_tuples, "deriving",
-		    relation->pred);
+		    relation);
 		return (-1);
 	}
 
 	if (exceeds_memory_limit(ctx, relic_relation_bytes(relation),
 	    relation_bytes_after_insert(relation))) {
 		report_limit(ctx, "memory", ctx->config.max_memory, "deriving",
-		    relation->pred);
+		    relation);
 		return (-1);
 	}
 
@@ -414,17 +461,18 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 /*
  * Report a configured limit refusing something, in the form every limit
  * shares: the limit, what it was set to, and what was being done to which
- * predicate -- deriving into it, or indexing it.
+ * relation -- deriving into it, or indexing it.
  */
 static void
 report_limit(relic_t *ctx, const char *limit, size_t configured,
-    const char *activity, relic_pred_id_t pred)
+    const char *activity, const relic_relation_t *relation)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
 	relic_diagf(ctx, RELIC_ERROR, NULL,
 	    "limit exceeded: %s=%zu while %s %s", limit, configured, activity,
-	    relic_pred_describe(ctx, pred, described, sizeof(described)));
+	    relic_relation_describe(ctx, relation, described,
+	    sizeof(described)));
 }
 
 /*
@@ -462,7 +510,7 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 	    !relation_columns_after_insert(relation, &needed_columns)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "relation %s is too large to grow",
-		    relic_pred_describe(ctx, relation->pred, described,
+		    relic_relation_describe(ctx, relation, described,
 		    sizeof(described)));
 		return (-1);
 	}
@@ -719,7 +767,7 @@ index_make_room(relic_t *ctx, const relic_relation_t *relation,
 	if (exceeds_memory_limit(ctx, bytes_before,
 	    relic_index_bytes_after_reserve(index, tuples))) {
 		report_limit(ctx, "memory", ctx->config.max_memory, "indexing",
-		    relation->pred);
+		    relation);
 		return (-1);
 	}
 
@@ -784,8 +832,8 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	if (!key_mask_fits(relation, key_mask)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "internal error: an index of %s was asked for on columns "
-		    "it cannot be keyed on", relic_pred_describe(ctx,
-		    relation->pred, described, sizeof(described)));
+		    "it cannot be keyed on", relic_relation_describe(ctx,
+		    relation, described, sizeof(described)));
 		return (-1);
 	}
 
@@ -915,8 +963,8 @@ relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 	if (column >= relation->arity) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "internal error: the statistics of %s were asked for a "
-		    "column it does not have", relic_pred_describe(ctx,
-		    relation->pred, described, sizeof(described)));
+		    "column it does not have", relic_relation_describe(ctx,
+		    relation, described, sizeof(described)));
 		return (-1);
 	}
 
@@ -972,28 +1020,6 @@ relations_cover(relic_t *ctx, relic_pred_id_t pred)
 }
 
 /*
- * Create the empty relation of a predicate, in an allocation of its own so
- * that it never moves.
- */
-static relic_relation_t *
-relation_create(relic_t *ctx, relic_pred_id_t pred)
-{
-	relic_relation_t *relation;
-
-	relation = calloc(1, sizeof(*relation));
-	if (relation == NULL) {
-		relic_diag_no_memory(ctx);
-		return (NULL);
-	}
-
-	relic_idtab_init(&relation->index);
-	relation->pred = pred;
-	relation->arity = relic_pred_of(ctx, pred)->arity;
-
-	return (relation);
-}
-
-/*
  * The relation of a predicate, created empty if this is the first time one
  * has been asked for.  Returns NULL with a diagnostic already reported when
  * it cannot be created, or when the identifier names no predicate, which is
@@ -1025,7 +1051,8 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
 	if (relation != NULL)
 		return (relation);
 
-	relation = relation_create(ctx, pred);
+	relation = relic_relation_create(ctx, pred, 0,
+	    relic_pred_of(ctx, pred)->arity);
 	if (relation == NULL)
 		return (NULL);
 
@@ -1035,9 +1062,9 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
 }
 
 /*
- * Empty every relation, releasing its storage.  The relations stay where they
- * are, so a pointer to one still names its predicate's relation, which now
- * holds nothing.
+ * Empty the relation of every predicate, releasing its storage.  The
+ * relations stay where they are, so a pointer to one still names its
+ * predicate's relation, which now holds nothing.
  *
  * Identifiers restart from the first afterwards, so a range taken before the
  * discard names nothing, or other tuples, after it, and every index is gone,
@@ -1046,8 +1073,14 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
  * before an evaluation begins: every range and every plan lives in an
  * evaluation's state and dies with it.
  *
- * Both totals return to zero, which is exact, because each is a sum over the
- * relations and every relation now contributes nothing.
+ * Each relation is cleared, so each total loses exactly what the relations
+ * of the table held and keeps what any relation outside it holds.  A query's
+ * answer is outside it, and is empty whenever anything but its own answer
+ * can run, because the context is busy from the moment the answer is filled
+ * until it is emptied again.  Both totals are therefore zero afterwards, and
+ * that is asserted rather than assigned: a total set to zero would be right
+ * only while that argument held, and one that is asserted fails a test the
+ * day it stops holding.
  */
 void
 relic_relation_discard_all(relic_t *ctx)
@@ -1059,36 +1092,57 @@ relic_relation_discard_all(relic_t *ctx)
 
 	for (position = 0; position < table->count; position++) {
 		if (table->entries[position] != NULL)
-			relation_empty(table->entries[position]);
+			relic_relation_clear(ctx, table->entries[position]);
 	}
 
-	table->tuple_count = 0;
-	table->storage_bytes = 0;
+	assert(table->tuple_count == 0 && table->storage_bytes == 0);
 }
 
 /*
- * Empty the relation of `pred`, if it has one, and give back what it counted
- * against both totals.  A predicate with no relation yet is left without
- * one: creating a relation only to empty it could fail, and a caller
- * discarding after a failure must not report a second one.
+ * Write what a relation is called into `buffer` and return it: its
+ * predicate's name, or `$q` and the serial number of the query whose answer
+ * it is.  A name longer than the buffer is shortened as a message shortens
+ * one.  No identifier the lexer accepts contains `$`, so an answer's name
+ * cannot be mistaken for a predicate a program writes, and it is built here
+ * rather than interned anywhere.
  */
-void
-relic_relation_discard(relic_t *ctx, relic_pred_id_t pred)
+const char *
+relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
+    char *buffer, size_t size)
 {
-	relic_reltab_t *table;
-	relic_relation_t *relation;
+	const relic_pred_t *pred;
+	const char *name;
 
-	table = &ctx->relations;
-	if (pred == 0 || pred > table->count)
-		return;
+	if (relation->pred == RELIC_ID_NONE) {
+		snprintf(buffer, size, "$q%zu", relation->serial);
+		return (buffer);
+	}
 
-	relation = table->entries[pred - 1];
-	if (relation == NULL)
-		return;
+	name = NULL;
+	pred = relic_pred_of(ctx, relation->pred);
+	if (pred != NULL)
+		name = relic_symbol_bytes(ctx, pred->name, NULL);
 
-	table->tuple_count -= relation->count;
-	table->storage_bytes -= relic_relation_bytes(relation);
-	relation_empty(relation);
+	return (relic_diag_name(name != NULL ? name : "?", buffer, size));
+}
+
+/*
+ * Write "name/arity" into `buffer`, which must hold RELIC_PRED_TEXT_MAX
+ * bytes, and return it, for a message about a relation.  A predicate's
+ * relation is described exactly as relic_pred_describe() describes the
+ * predicate.
+ */
+const char *
+relic_relation_describe(const relic_t *ctx, const relic_relation_t *relation,
+    char *buffer, size_t size)
+{
+	char name[RELIC_NAME_TEXT_MAX];
+
+	snprintf(buffer, size, "%s/%u",
+	    relic_relation_name(ctx, relation, name, sizeof(name)),
+	    (unsigned int)relation->arity);
+
+	return (buffer);
 }
 
 size_t

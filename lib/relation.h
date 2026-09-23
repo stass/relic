@@ -15,7 +15,7 @@
 #include "util.h"
 
 /*
- * The relation store: where a predicate's tuples live.
+ * The relation store: where a predicate's tuples live, and a query's answer.
  *
  * A relation is a set of tuples of one arity, held as a flat array of domain
  * identifiers with the arity as the stride and a hash index over the whole
@@ -132,7 +132,7 @@ struct relic_relation_stats {
 };
 
 /*
- * One predicate's tuples.
+ * A set of tuples: one predicate's, or one query's answer.
  *
  * `columns` holds `count` tuples of `arity` identifiers each, end to end, so
  * the tuple with identifier `id` begins at `(id - 1) * arity`.  Capacity is
@@ -149,10 +149,16 @@ struct relic_relation_stats {
  * a plan names it; its address is not, because the array grows.  A discard
  * drops every index along with the tuples.
  *
- * `arity` is copied from the predicate rather than read back through it on
- * every insertion.  It cannot drift, because the arity is half of the
- * predicate's identity: foo/1 and foo/2 are two predicates, so nothing can
- * change the arity of one.
+ * `pred` is the predicate whose tuples these are, or RELIC_ID_NONE for a
+ * query's answer, which belongs to the query object rather than to any
+ * predicate; `serial` is then the serial number of the query, and the
+ * relation is called `$q` and that number.  What a relation is called is
+ * read from these two and nowhere else.
+ *
+ * `arity` is fixed when the relation is created: a predicate's arity, or a
+ * query's number of output columns.  A predicate's cannot drift, because the
+ * arity is half of the predicate's identity: foo/1 and foo/2 are two
+ * predicates, so nothing can change the arity of one.
  *
  * None of this is arena memory.  It outlives individual queries, and the
  * tuple and index storage is what is large enough to be worth accounting
@@ -167,12 +173,15 @@ struct relic_relation {
 	size_t			 index_count;
 	size_t			 index_capacity;
 	relic_relation_stats_t	 stats;
-	relic_pred_id_t		 pred;
+	relic_pred_id_t		 pred;		/* RELIC_ID_NONE for an answer */
+	size_t			 serial;	/* the query's, for an answer */
 	uint16_t		 arity;
 };
 
 /*
- * The relations of a program, indexed by predicate identifier minus one.
+ * The relations of the program's predicates, indexed by predicate
+ * identifier minus one.  A query's answer relation belongs to the query and
+ * has no slot here.
  *
  * The table is a prefix of the predicate table, extended to cover a predicate
  * the first time a relation for it is asked for.  A slot is null until then,
@@ -191,10 +200,12 @@ struct relic_relation {
  * of the context and no caller has anything to remember.
  *
  * `tuple_count` and `storage_bytes` are the totals the configurable tuple and
- * memory limits are enforced against.  `storage_bytes` counts the capacity of
- * every relation's columns and canonical index slots and of every array of
- * its secondary indexes, including one being built -- what is actually held,
- * not the smaller number a tuple count implies.  It counts neither this array
+ * memory limits are enforced against, summed over every relation of the
+ * context, whether it is in this table or is a query's answer.
+ * `storage_bytes` counts the capacity of every relation's columns and
+ * canonical index slots and of every array of its secondary indexes,
+ * including one being built -- what is actually held, not the smaller number
+ * a tuple count implies.  It counts neither this array
  * nor the relations it points at, nor a relation's array of index headers,
  * which are sized by the program rather than by the data.
  */

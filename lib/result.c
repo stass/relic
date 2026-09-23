@@ -113,11 +113,10 @@ collect(relic_t *ctx, relic_query_t *query)
 	}
 
 	/*
-	 * The width is read from the query rather than from the rows, which a
-	 * query answering nothing never delivers; relic_query_answer() has
-	 * confirmed that the query belongs to this context.
+	 * The width is read from the query's answer relation rather than from
+	 * the rows, which a query answering nothing never delivers.
 	 */
-	result->columns = relic_pred_of(ctx, query->rule.head)->arity;
+	result->columns = query->answer->arity;
 
 	return (result);
 }

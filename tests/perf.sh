@@ -30,10 +30,19 @@
 # 10^10 steps.  No counter measures that, so this workload is on the clock:
 # linear, it takes a second or two, and quadratic, many minutes.
 #
+# An interactive session of 100 000 lines, each the same query over a small
+# graph, prepares, answers and destroys a query per line.  A query's answer
+# belongs to the query rather than to a predicate of the program, so every
+# line costs what the program holds.  Were each query to leave anything
+# behind that later answers walk, each line would cost every line before it,
+# about 10^10 steps.  No counter measures such a walk, so this workload is on
+# the clock like the cycle: linear, it takes a few seconds, and quadratic,
+# many minutes.
+#
 # RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
 # set, which leaves room for a sanitizer build on a slow machine; for
 # reachability the clock only guards against a run that never ends.  The
-# cycle has a tenth of it.
+# cycle and the session each have a tenth of it.
 
 set -eu
 
@@ -45,6 +54,7 @@ nodes=100000
 edges=1000000
 work_bound=2500000
 cycle=200000
+session_lines=100000
 
 fail() {
 	echo "$1" >&2
@@ -150,4 +160,35 @@ fi
 
 if [ "$(cat "$work/cycle-rows")" != "a" ]; then
 	fail "the recursive cycle answered something other than a"
+fi
+
+cat > "$work/session.dl" <<'EOF'
+edge(a, b).
+edge(b, c).
+edge(c, d).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+EOF
+
+awk -v count="$session_lines" 'BEGIN {
+	for (i = 0; i < count; i++)
+		print "path(a, X)?";
+}' > "$work/session.in"
+
+# A command run in the background reads its standard input from /dev/null,
+# so the session's lines are redirected inside the command, and exec keeps
+# the process run_within watches the session itself.
+status=0
+run_within "$work/session-rows" "$work/session-err" "$cycle_budget" \
+    sh -c 'exec "$0" -i "$1" < "$2"' \
+    "$RELIC" "$work/session.dl" "$work/session.in" || status=$?
+
+if [ "$status" -ne 0 ]; then
+	cat "$work/session-err" >&2
+	fail "the session of $session_lines queries exited $status within a budget of $cycle_budget seconds"
+fi
+
+rows=$(grep -c . "$work/session-rows" || true)
+if [ "$rows" -ne $((session_lines * 3)) ]; then
+	fail "the session answered $rows rows, expected $((session_lines * 3))"
 fi
