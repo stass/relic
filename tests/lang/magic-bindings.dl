@@ -1,0 +1,31 @@
+% The shapes of binding the Magic rewrite handles: both columns bound, a
+% variable repeated in the query, a wildcard, a constant in a rule's head, a
+% repeated variable in a rule's body, a comparison the planner places once
+% its variables are bound, and a predicate of arity zero reached on demand.
+
+edge(a, b).
+edge(b, c).
+edge(c, a).
+edge(c, d).
+weight(a, 1).
+weight(b, 5).
+weight(c, 9).
+weight(d, 2).
+ready.
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+from_a(a, Y) :- path(a, Y).
+loop(X) :- path(X, X).
+heavy(X, Y) :- path(X, Y), weight(Y, W), W > 4.
+go(X) :- live, path(a, X).
+live :- ready.
+
+path(a, d)?
+path(X, X)?
+path(a, _)?
+from_a(a, Y)?
+from_a(b, Y)?
+loop(c)?
+heavy(a, Y)?
+go(X)?

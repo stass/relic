@@ -138,11 +138,10 @@ The queries a program contains are now compiled and checked by
 unsafe rule does. With `-q`, only the command line's queries run; the
 program's own are still checked.
 
-Evaluation materializes the whole program before answering any query --
-Magic Sets arrive in S10 -- and answers a query by running its rule once into
-the answer relation, then streaming that relation. No row is delivered until
-the answer is complete, so a query that exceeds a limit delivers none. The
-relations record how many rules they are a fixed point of, so a query after
+A query is answered by running its rule once into the answer relation, then
+streaming that relation. No row is delivered until the answer is complete, so
+a query that exceeds a limit delivers none. The relations record how many
+rules they are a fixed point of, so a query over a materialized program after
 nothing new was loaded evaluates nothing.
 
 `-i`, `-n` and `-v` arrive in S12. Each is an unknown option until it does.
@@ -193,7 +192,7 @@ strategies.
 | `lib/eval.c` | the executor runs `ANTI_MEMBER` as `MEMBER` inverted; a changed program discards every relation and is evaluated again from nothing, for every program rather than only one that negates; the answer stream stops at an identifier its relation no longer has, so a callback that breaks its contract by loading cannot make it read past a relation |
 | `lib/relation.c` | `relic_relation_discard_all()` empties every relation in place and returns both limit totals to zero; relations do not move |
 | `include/relic.h` | `relic_materialize()` documents the discard |
-| `cmd/relic/main.c` | `-l key=value`, repeatable, brought forward from S12: `tuples`, `memory`, `magic-preds` and `magic-rules`, the last two accepted and stored but not acted on until S10; values through `strtonum()`; a malformed `-l` is a usage error naming what is wrong |
+| `cmd/relic/main.c` | `-l key=value`, repeatable, brought forward from S12: `tuples`, `memory`, `magic-preds` and `magic-rules`, the last two enforced from S10; values through `strtonum()`; a malformed `-l` is a usage error naming what is wrong |
 | `tests/` | `test_plan` for where an `ANTI_MEMBER` goes and what its columns read, and a negated literal refused as a delta literal; `test_eval`, under both strategies, for the task graph of section 72 with negation stacked across strata, a negating query, arity zero, constants and a negation written before its binder, a later load that makes a derived tuple false, a discard that gives back what the limits count, and a contract-breaking callback; the evaluation sweep in `test_exhaustion` now includes a negated stratum; `tests/cli.sh` fails queries on `-l` limits and rejects thirteen malformed ones, a sign or a space among them; four golden tests, all compared across strategies by `tests/equiv/strategies.sh` |
 
 A negated literal and a comparison go wherever their variables are first
@@ -226,6 +225,32 @@ rules rather than the relations, which `TODO.md` records.
 
 The stage is about 2,200 lines of library and tool code, comments included,
 against a budget of 1050; `lib/explain.c` accounts for 650 of them.
+
+**Magic Sets, stage S10, milestone M4.** A bound query derives only what its
+bindings reach, specified in `specs/design-magic.md`. `relic -e -q
+'path(a, X)?' graph.dl` shows the adornment, the seed, the complete `edge`
+and the guarded `path$bf` component that architecture section 60 sketches.
+
+| Component | State |
+| --- | --- |
+| `lib/magic.c` | finds what a query reads completely -- extensional and negated predicates and everything they depend on, as whole components of the program's schedule -- and rewrites the rest: an adornment worklist memoized on predicate and bound columns, body order from the planner seeded with the head's bound slots, adorned rules guarded by their magic predicate, one magic rule per demanded call, seeds from the query's own body; generated rules renumbered into a canonical form, deduplicated through a hash of it, and dropped when the head is one of their own positive literals; `max_magic_preds` and `max_magic_rules` enforced, naming the predicate being adorned, and when unset replaced by budgets of 256 plus 16 times the program's derived predicates and rules, a rewrite outgrowing one abandoned with a warning; the walk visits each component once and adornments read their rules from an index by head, so both are linear in the program; generated names interned with `$` and marked defined |
+| `lib/plan.c` | the order is decided before any operation is emitted; `relic_plan_order()` returns that order alone from a given set of bound slots, and an incomplete relation is estimated without being created |
+| `lib/stratify.c`, `lib/depgraph.c` | the analysis runs over any rule table, `relic_schedule_build()`, so the rewritten rules are stratified by the same code as the program |
+| `lib/eval.c` | a query over a program not yet materialized, and not under `RELIC_F_NO_MAGIC`, is answered in two phases: the complete components evaluated from the program's schedule, then the generated rules from a schedule of their own, then the rewritten query; relations discarded first and left marked as the fixed point of no rules; a rewrite over its budget answered from the whole program instead; a semi-naive round runs only the variants whose delta literal reads a member that gained in the round before, in planning order, so it does exactly the work running every variant would at a cost proportional to what changed |
+| `lib/explain.c` | the `magic rewrite of` heading with its `adorn` and `seed` lines, and the rewritten components nested one level beneath it |
+| `include/relic.h` | `RELIC_F_NO_MAGIC`; the Magic limits documented as enforced when set and as budgets when not |
+| `cmd/relic/main.c` | `-X no-magic` |
+| `tests/` | `test_magic`: the rewrite against the whole fixed point over 24 generated graphs, nine programs -- left, right and double recursion, same generation, mutual recursion, negation of a derived and of a recursive predicate, facts mixed with rules, constants in heads -- and five binding shapes, plus adornment names, memoization, duplicates, the dropped tautology, both limits at and below their values, a widening program of 2^10 adornments abandoned at its budget with the fixed point's answer while configured limits replace the budget, no state leaking between queries or into a later materialization, and a load after a rewritten query reaching the next one; the evaluation sweep in `test_exhaustion` runs through the rewrite as well, and a sweep over every allocation of a query whose rewrite outgrows its budget refuses them before and after it is abandoned; `tests/magic.sh` asserts that five bound queries over a hundred disjoint chains hold at most a tenth of the whole fixed point's tuples and answer the same; `tests/equiv/strategies.sh` compares every language test with and without the rewrite, and tuple totals within runs that evaluate the same rules; eleven golden tests, among them the nested `-e` of both binding patterns of `path`, of a seed derived from another literal and of an adornment with no column, the materialized bypass, both limit diagnostics and the budget warning; `tests/perf.sh` answers a recursive cycle of 200 000 predicates through the rewrite within a tenth of its budget, which any of the three linear walks done by searching a component misses by minutes |
+
+The six-edge chain of the S7 counters holds 19 tuples through the rewrite
+against 33 from the whole fixed point. Over a hundred disjoint chains of fifty
+nodes a query bound to one chain holds about 5,000 tuples against 250,000.
+
+An unbound query reads its predicate through the all-free adornment, which
+may call the predicate bound from inside and so derive about twice what the
+whole fixed point does; `TODO.md` records subsumption as the remedy. The
+stage is about 2,500 lines of library and tool code, comments included,
+against a budget of 800; `lib/magic.c` accounts for 1,700 of them.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -426,6 +451,17 @@ The index and planner suites were confirmed the same way:
 * ordering by estimate alone, and an assumed size not divided per bound
   column, which `test_plan` catches as literals out of order.
 
+The Magic suites were confirmed the same way:
+
+* a negated literal read on demand rather than completely, which the
+  equivalence scenario of `test_magic` catches in 148 comparisons;
+* duplicate generated rules kept, and a rule deriving its own head kept,
+  which the duplicate and tautology scenarios catch;
+* adornments not memoized, which every recursive program of the equivalence
+  scenario catches as the limit on generated predicates, set far above what
+  any of them needs so that the failure is a failed query rather than a hung
+  suite.
+
 ## Documents
 
 | File | Contents |
@@ -440,6 +476,7 @@ The index and planner suites were confirmed the same way:
 | `specs/design-eval.md` | the executor, the naive and semi-naive fixed points, materialization, answering a query |
 | `specs/design-index.md` | secondary indexes: chains in identifier order, building and extending, lifetime, accounting |
 | `specs/design-planner.md` | when a component is planned, statistics, the estimate, greedy order, access paths, the references, explain |
+| `specs/design-magic.md` | what a query reads completely, adornments and names, sideways information passing, generated rules, termination, limits, evaluation, explain |
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
@@ -447,12 +484,9 @@ The index and planner suites were confirmed the same way:
 
 ## Next
 
-Stage S10, Magic Sets, milestone M4: the adornment worklist, sideways
-information passing through the S9 planner with every derived predicate
-marked as still being derived, magic seed and propagation rules, and the
-limits on generated predicates and rules, with `-X no-magic` and an
-equivalence against full materialization. `specs/design-magic.md` comes
-first.
+Stage S11, library ABI stabilization: the final `include/relic.h`, hidden
+visibility, `examples/embed.c` built against the installed library, a symbol
+audit, `man/relic.3`, and the ABI version set to `1:0:0`.
 
 ## Decisions taken
 

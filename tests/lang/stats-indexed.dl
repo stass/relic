@@ -4,7 +4,8 @@
 % and looks up the paths ending where each edge begins.  The lookups read
 % only matching tuples, and because a path inserted early in a round is seen
 % by the lookups after it, the chain is closed in the first round and the
-% second finds nothing new.
+% second finds nothing new.  The query is answered from the whole fixed
+% point, without the Magic rewrite, so that the counts are the program's.
 
 edge(a, b).
 edge(b, c).

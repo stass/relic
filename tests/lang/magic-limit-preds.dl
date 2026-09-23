@@ -1,0 +1,14 @@
+% The Magic rewrite of even(n0, Y)? generates even$bf and magic$even$bf, then
+% odd$bf and magic$odd$bf for the call odd makes.  A limit of three
+% generated predicates is exceeded by the second pair, and the diagnostic
+% names the predicate being adorned.  The query that fails delivers no rows,
+% and the run stops there.
+
+next(n0, n1).
+next(n1, n2).
+
+even(X, X) :- next(X, _).
+even(X, Z) :- next(X, Y), odd(Y, Z).
+odd(X, Z) :- next(X, Y), even(Y, Z).
+
+even(n0, Y)?

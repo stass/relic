@@ -1,1 +1,1 @@
--X naive -X no-index -X no-reorder -X stats
+-X naive -X no-index -X no-reorder -X no-magic -X stats

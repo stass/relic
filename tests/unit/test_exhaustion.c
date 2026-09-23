@@ -39,6 +39,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -46,10 +47,12 @@
 #include "compat.h"
 #include "harness.h"
 #include "internal.h"
+#include "programs.h"
 
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
+#define	SCENARIO_FALLBACK	"an abandoned rewrite out of memory reports once"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
@@ -181,6 +184,33 @@
 #define	WIDE_SWEEP	48
 
 /*
+ * The fallback sweep answers the widening program of arity 8, whose 2^8
+ * adornments outgrow the rewrite's budget, so the query is answered from the
+ * whole program after a warning.  An undisturbed run makes about 130
+ * allocations; the sweep stops at the first run that needs no refusal, and
+ * the bound only keeps a regression that fails every run from sweeping
+ * forever.
+ */
+#define	WIDENING_ARITY	8
+#define	FALLBACK_SWEEP	1024
+
+typedef struct eval_sweep eval_sweep_t;
+
+/*
+ * One way of answering the evaluation sweep's query: how the strategy is
+ * named in a failure, the query, the relation that holds the closure once it
+ * is answered, the flags that select the strategy, and how many rows the
+ * answer has.
+ */
+struct eval_sweep {
+	const char	*strategy;
+	const char	*query;
+	const char	*paths;
+	unsigned int	 flags;
+	size_t		 rows;
+};
+
+/*
  * Requests still to be served before the allocator starts refusing.  A
  * negative budget means refuse nothing, which is the state every allocation
  * outside a swept region runs in.  Once the budget reaches zero every later
@@ -220,7 +250,10 @@ static bool	 index_finds_every_tuple(const relic_relation_t *rel,
 		    uint32_t position);
 static size_t	 storage_by_hand(const relic_t *ctx);
 static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
+static void	 sweep_query_retry(const eval_sweep_t *sweep,
+		    const char *program);
 static void	 a_materialization_out_of_memory_reports_once(void);
+static void	 an_abandoned_rewrite_out_of_memory_reports_once(void);
 static char	*wide_sweep_program(void);
 static int	 count_answer(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
@@ -1587,21 +1620,54 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
 
 /*
  * Prepare and run a query with the nth allocation refused, then run it again
- * with the allocator restored.
+ * with the allocator restored, for each way a query can be answered.
  *
  * A query that runs out of memory must say so once and deliver no rows,
  * since a partial answer would look like a complete one.  The retry must
  * reach exactly the answer an undisturbed run does: the failed evaluation
  * left its relations stale, part of a fixed point, and the retry discards
- * them and starts again.  A path relation holding more tuples than the
- * closure has pairs, or a sink relation holding other than the chain's one
- * sink, would mean something of the failed run survived into the retry.
+ * them and starts again.  A relation holding more paths than the closure has
+ * pairs, or a sink relation holding other than the chain's one sink, would
+ * mean something of the failed run survived into the retry.
+ *
+ * Answered from the whole fixed point, the closure is the path relation.
+ * Answered through the Magic rewrite, it is path$bf, which holds the whole
+ * closure too, because the query's binding reaches every node of the chain;
+ * the negated sink is read completely, so the sweep also lands in the part
+ * of the program evaluated before the rewrite.
  */
 static void
 a_query_that_ran_out_of_memory_can_be_retried(void)
 {
-	relic_query_t *query;
+	static const eval_sweep_t sweeps[] = {
+		{ "from the whole fixed point", "path(n0, X)?", "path",
+		    RELIC_F_NO_MAGIC, EVAL_CHAIN },
+		{ "through the Magic rewrite", "path(n0, X), not sink(X)?",
+		    "path$bf", 0, EVAL_CHAIN - 1 }
+	};
 	char *program;
+	size_t i;
+
+	program = evaluation_sweep_program();
+	if (program == NULL) {
+		check(false, SCENARIO_EVALUATE, "the sweep program is built");
+		return;
+	}
+
+	for (i = 0; i < sizeof(sweeps) / sizeof(sweeps[0]); i++)
+		sweep_query_retry(&sweeps[i], program);
+
+	free(program);
+}
+
+/*
+ * One strategy's sweep of a_query_that_ran_out_of_memory_can_be_retried().
+ */
+static void
+sweep_query_retry(const eval_sweep_t *sweep, const char *program)
+{
+	relic_config_t config;
+	relic_query_t *query;
 	size_t completed;
 	size_t evaluating;
 	size_t expected_paths;
@@ -1609,11 +1675,8 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 	size_t rows;
 	long budget;
 
-	program = evaluation_sweep_program();
-	if (program == NULL) {
-		check(false, SCENARIO_EVALUATE, "the sweep program is built");
-		return;
-	}
+	bzero(&config, sizeof(config));
+	config.flags = sweep->flags;
 
 	expected_paths = (size_t)EVAL_CHAIN * (EVAL_CHAIN + 1) / 2;
 	completed = 0;
@@ -1626,7 +1689,7 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 		relic_t *ctx;
 		int status;
 
-		ctx = relic_create();
+		ctx = relic_create_config(&config);
 		if (ctx == NULL) {
 			check(false, SCENARIO_EVALUATE,
 			    "a context should be created");
@@ -1647,7 +1710,7 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 		rows = 0;
 
 		refuse_allocations_after(budget);
-		query = relic_query_prepare(ctx, NULL, "path(n0, X)?");
+		query = relic_query_prepare(ctx, NULL, sweep->query);
 		status = -1;
 		if (query != NULL)
 			status = relic_query_run(ctx, query, count_answer,
@@ -1664,19 +1727,19 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 
 		checkf(errors_reported == (status != 0 ? 1u : 0u),
 		    SCENARIO_EVALUATE,
-		    "a query that %s should report %d message(s), not %zu, "
-		    "with allocation %ld refused",
+		    "a query answered %s that %s should report %d message(s), "
+		    "not %zu, with allocation %ld refused", sweep->strategy,
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
-		checkf(rows == (status != 0 ? 0u : (size_t)EVAL_CHAIN),
+		checkf(rows == (status != 0 ? 0u : sweep->rows),
 		    SCENARIO_EVALUATE,
-		    "a query that %s should deliver %d rows, not %zu, with "
-		    "allocation %ld refused",
+		    "a query answered %s that %s should deliver %zu rows, not "
+		    "%zu, with allocation %ld refused", sweep->strategy,
 		    status != 0 ? "failed" : "succeeded",
-		    status != 0 ? 0 : EVAL_CHAIN, rows, budget);
+		    status != 0 ? 0 : sweep->rows, rows, budget);
 
 		if (query == NULL)
-			query = relic_query_prepare(ctx, NULL, "path(n0, X)?");
+			query = relic_query_prepare(ctx, NULL, sweep->query);
 
 		/*
 		 * A query that ran out of memory was never published, so the
@@ -1685,36 +1748,36 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 		 */
 		checkf(query != NULL && answer_is_first(ctx, query),
 		    SCENARIO_EVALUATE,
-		    "the retried query should answer into $q0, with "
-		    "allocation %ld refused", budget);
+		    "the retried query answered %s should answer into $q0, "
+		    "with allocation %ld refused", sweep->strategy, budget);
 
 		rows = 0;
 		checkf(query != NULL &&
 		    relic_query_run(ctx, query, count_answer, &rows) == 0 &&
-		    rows == EVAL_CHAIN, SCENARIO_EVALUATE,
-		    "the retry should answer %d rows, not %zu, with "
-		    "allocation %ld refused", EVAL_CHAIN, rows, budget);
+		    rows == sweep->rows, SCENARIO_EVALUATE,
+		    "the retry answered %s should answer %zu rows, not %zu, "
+		    "with allocation %ld refused", sweep->strategy, sweep->rows,
+		    rows, budget);
 
-		paths = relation_named(ctx, "path", 2);
+		paths = relation_named(ctx, sweep->paths, 2);
 		checkf(paths != NULL &&
 		    relic_relation_count(paths) == expected_paths,
 		    SCENARIO_EVALUATE,
-		    "the path relation should hold %zu tuples, not %zu, with "
-		    "allocation %ld refused", expected_paths,
+		    "answered %s, the %s relation should hold %zu tuples, not "
+		    "%zu, with allocation %ld refused", sweep->strategy,
+		    sweep->paths, expected_paths,
 		    paths != NULL ? relic_relation_count(paths) : 0, budget);
 
 		sinks = relation_named(ctx, "sink", 1);
 		checkf(sinks != NULL && relic_relation_count(sinks) == 1,
 		    SCENARIO_EVALUATE,
-		    "the sink relation should hold 1 tuple, not %zu, with "
-		    "allocation %ld refused",
+		    "answered %s, the sink relation should hold 1 tuple, not "
+		    "%zu, with allocation %ld refused", sweep->strategy,
 		    sinks != NULL ? relic_relation_count(sinks) : 0, budget);
 
 		relic_query_destroy(query);
 		relic_destroy(ctx);
 	}
-
-	free(program);
 
 	/*
 	 * The sweep has to reach a refusal inside evaluation itself, not
@@ -1722,14 +1785,148 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 	 * one of the outcomes above is never checked.
 	 */
 	checkf(evaluating > 0, SCENARIO_EVALUATE,
-	    "the sweep should reach a query that runs out of memory while "
-	    "evaluating, in %d attempts", EVAL_SWEEP);
-	checkf(refused > evaluating, SCENARIO_EVALUATE,
-	    "the sweep should reach a query that runs out of memory while "
-	    "being prepared, in %d attempts", EVAL_SWEEP);
-	checkf(completed > 0, SCENARIO_EVALUATE,
-	    "the sweep should reach a query that completes, in %d attempts",
+	    "answered %s, the sweep should reach a query that runs out of "
+	    "memory while evaluating, in %d attempts", sweep->strategy,
 	    EVAL_SWEEP);
+	checkf(refused > evaluating, SCENARIO_EVALUATE,
+	    "answered %s, the sweep should reach a query that runs out of "
+	    "memory while being prepared, in %d attempts", sweep->strategy,
+	    EVAL_SWEEP);
+	checkf(completed > 0, SCENARIO_EVALUATE,
+	    "answered %s, the sweep should reach a query that completes, in "
+	    "%d attempts", sweep->strategy, EVAL_SWEEP);
+}
+
+/*
+ * Answer a query whose Magic rewrite outgrows its budget with the nth
+ * allocation refused, for every allocation an undisturbed run makes, then
+ * answer it again with the allocator restored.
+ *
+ * A refusal can land in the rewrite before it is abandoned, or in answering
+ * from the whole program after it; either way the query must fail with one
+ * error and no rows, not fall back a second time or deliver a partial
+ * answer.  The warning that the rewrite was abandoned is reported at most
+ * once, and only by a run that got as far as abandoning it.  The retry must
+ * then answer exactly as an undisturbed run does.
+ */
+static void
+an_abandoned_rewrite_out_of_memory_reports_once(void)
+{
+	static const char query_text[] = "p(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8)?";
+	relic_query_t *query;
+	char *program;
+	unsigned long undisturbed;
+	size_t abandoned_then_refused;
+	size_t completed;
+	size_t rows;
+	long budget;
+
+	program = widening_program(WIDENING_ARITY);
+	if (program == NULL) {
+		check(false, SCENARIO_FALLBACK, "the sweep program is built");
+		return;
+	}
+
+	undisturbed = 0;
+	abandoned_then_refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < FALLBACK_SWEEP &&
+	    (undisturbed == 0 || budget <= (long)undisturbed); budget++) {
+		relic_t *ctx;
+		unsigned long before;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_FALLBACK,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "widening.dl", program) != 0 ||
+		    relic_check(ctx) != 0) {
+			check(false, SCENARIO_FALLBACK,
+			    "the program should load and check before the "
+			    "sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+		warnings_reported = 0;
+		rows = 0;
+
+		before = allocations_seen;
+		refuse_allocations_after(budget);
+		query = relic_query_prepare(ctx, NULL, query_text);
+		status = -1;
+		if (query != NULL)
+			status = relic_query_run(ctx, query, count_answer,
+			    &rows);
+		serve_every_allocation();
+
+		/*
+		 * The first run to succeed was refused nothing, so what it
+		 * allocated bounds the sweep.
+		 */
+		if (status == 0) {
+			completed++;
+			if (undisturbed == 0)
+				undisturbed = allocations_seen - before;
+		} else if (warnings_reported > 0) {
+			abandoned_then_refused++;
+		}
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_FALLBACK,
+		    "an abandoned rewrite that %s should report %d error(s), "
+		    "not %zu, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(warnings_reported <= 1 &&
+		    (status != 0 || warnings_reported == 1), SCENARIO_FALLBACK,
+		    "an abandoned rewrite that %s should warn %s, not %zu "
+		    "times, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded",
+		    status != 0 ? "at most once" : "once", warnings_reported,
+		    budget);
+		checkf(rows == (status != 0 ? 0u : 1u), SCENARIO_FALLBACK,
+		    "an abandoned rewrite that %s should deliver %d rows, not "
+		    "%zu, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 0 : 1,
+		    rows, budget);
+
+		if (query == NULL)
+			query = relic_query_prepare(ctx, NULL, query_text);
+
+		errors_reported = 0;
+		rows = 0;
+		checkf(query != NULL &&
+		    relic_query_run(ctx, query, count_answer, &rows) == 0 &&
+		    rows == 1 && errors_reported == 0, SCENARIO_FALLBACK,
+		    "the retry should answer 1 row and report no error, not %zu "
+		    "rows and %zu errors, with allocation %ld refused", rows,
+		    errors_reported, budget);
+
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	/*
+	 * The sweep has to reach a refusal after the rewrite was abandoned,
+	 * in answering from the whole program; otherwise only the rewrite's
+	 * own failures were checked.
+	 */
+	checkf(abandoned_then_refused > 0, SCENARIO_FALLBACK,
+	    "the sweep should reach a query that runs out of memory after "
+	    "abandoning its rewrite, in %ld attempts", budget);
+	checkf(completed > 0, SCENARIO_FALLBACK,
+	    "the sweep should reach a query that completes, in %ld attempts",
+	    budget);
+
+	free(program);
 }
 
 /*
@@ -1859,6 +2056,7 @@ main(void)
 	an_index_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
 	a_materialization_out_of_memory_reports_once();
+	an_abandoned_rewrite_out_of_memory_reports_once();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

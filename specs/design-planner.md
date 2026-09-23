@@ -23,7 +23,7 @@ never changes; `specs/design-index.md` for the indexes a lookup reads;
 * the greedy ordering, its tie-breaks, and what it leaves alone;
 * the access path a positive literal gets;
 * the `-X no-index` and `-X no-reorder` references;
-* the static mode Magic Sets will plan in;
+* the static mode Magic Sets plans in;
 * `relic_explain_set()` and the text of `-e`.
 
 `specs/design-plan.md` fixes what a plan is. This document fixes which plan is
@@ -225,17 +225,21 @@ language corpus under each to show it.
 
 ## 7. The static mode
 
-Magic Sets rewrite a program before it is evaluated, and choose the order in
-which bindings flow through a rule body -- the sideways information passing of
-architecture section 35 -- with the planner's ordering, so that the rewrite has
-no private notion of body order. At rewrite time the derived relations are
-unknown.
+Magic Sets rewrite a query's program before most of it is evaluated, and
+choose the order in which bindings flow through a rule body -- the sideways
+information passing of architecture section 35 -- with the planner's
+ordering, so that the rewrite has no private notion of body order. At rewrite
+time the relations the query reads on demand are unknown; those it reads
+completely have been evaluated, per `specs/design-magic.md` section 3.
 
 That is the incomplete set of section 3 and nothing more: the rewrite plans
-with every derived predicate marked incomplete, and the relations it can
-measure are the complete ones. There is one ordering, used by the evaluator
-and by the rewrite, and the only difference between the two uses is which
-relations are in the set.
+with every predicate read on demand marked incomplete, and the relations it
+can measure are the complete ones. It asks for the order alone, starting from
+the slots the head's bound columns bind, and the plan that evaluation later
+emits is the same ordering followed by one operation per literal. There is
+one ordering, used by the evaluator and by the rewrite, and the only
+differences between the two uses are which relations are in the set and
+which slots are bound at the start.
 
 ---
 
@@ -271,7 +275,8 @@ effect there.
 
 ### 8.2 Text
 
-For the graph program of architecture section 72 and `-q 'path(a, X)?'`:
+For the graph program of architecture section 72 and `-q 'path(a, X)?'`,
+under `-a`, which answers the query from the whole fixed point:
 
 ```text
 stratum 0, component 0: edge/2
@@ -301,6 +306,9 @@ query $q0(X) :- path(a, X).
   evaluated semi-naively, each delta variant headed by the literal that
   reads the delta.
 * A query is shown as the rule it compiles to, over its answer predicate.
+* A query answered through its Magic rewrite also shows the rewrite and the
+  components of the rewritten rules, nested beneath it, in the layout
+  `specs/design-magic.md` section 10 gives.
 
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,

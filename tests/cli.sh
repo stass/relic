@@ -136,9 +136,9 @@ case "$diagnostic" in
 	;;
 esac
 
-# The planner's references are selected by name and answer as the default
-# does.
-for reference in no-index no-reorder; do
+# The planner's references and answering without the Magic rewrite are
+# selected by name and answer as the default does.
+for reference in no-index no-reorder no-magic; do
 	actual=$("$RELIC" -s -X "$reference" "$work/graph.dl")
 	if [ "$actual" != "$expected" ]; then
 		fail "-X $reference answered '$actual', expected '$expected'"
@@ -151,7 +151,7 @@ actual=$("$RELIC" -e -s "$work/graph.dl" 2> "$work/plans.txt")
 if [ "$actual" != "$expected" ]; then
 	fail "-e changed the rows to '$actual', expected '$expected'"
 fi
-if ! grep -q -e '^query \$q0(X) :- path(a, X)\.$' "$work/plans.txt"; then
+if ! grep -q -e '^query \$q0(X) :- path\$bf(a, X)\.$' "$work/plans.txt"; then
 	fail "-e wrote no plan for the query: '$(cat "$work/plans.txt")'"
 fi
 "$RELIC" -e -s -o "$work/out.txt" "$work/graph.dl" 2>/dev/null
@@ -176,7 +176,7 @@ case "$diagnostic" in
 esac
 
 # -l sets each limit the library enforces, by the key the diagnostic names
-# it by, and zero means unlimited.  A repeated key takes its later value.
+# it by, and zero asks for the default.  A repeated key takes its later value.
 status=0
 diagnostic=$("$RELIC" -l memory=1 "$work/graph.dl" 2>&1 >/dev/null) ||
     status=$?
@@ -216,8 +216,25 @@ case "$diagnostic" in
 	;;
 esac
 
+for limit in magic-preds magic-rules; do
+	status=0
+	diagnostic=$("$RELIC" -l "$limit=1" "$work/graph.dl" 2>&1 \
+	    >/dev/null) || status=$?
+	if [ "$status" -ne 1 ]; then
+		fail "an exceeded $limit limit exited $status, expected 1"
+	fi
+	case "$diagnostic" in
+	*"limit exceeded: $limit=1 while adorning path/2"*)
+		;;
+	*)
+		fail "an exceeded $limit limit was reported as '$diagnostic'"
+		;;
+	esac
+done
+
 actual=$("$RELIC" -s -l tuples=1 -l tuples=0 -l memory=0 \
-    -l magic-preds=1 -l magic-rules=1 "$work/graph.dl")
+    -l magic-preds=1 -l magic-preds=0 -l magic-rules=1 -l magic-rules=0 \
+    "$work/graph.dl")
 if [ "$actual" != "$expected" ]; then
 	fail "limits of zero answered '$actual', expected '$expected'"
 fi

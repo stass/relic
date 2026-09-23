@@ -1,6 +1,8 @@
 % A plan line longer than 1023 bytes is cut and ends in "..."; the string
 % constant of long/1 makes the rule and its operations that long.  The rule
-% line of fit/1 is exactly 1023 bytes, the longest that is not cut.
+% line of fit/1 is exactly 1023 bytes, the longest that is not cut.  The
+% query is answered without the Magic rewrite, which would repeat each rule
+% under a generated name.
 
 edge(a, b).
 

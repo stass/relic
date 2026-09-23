@@ -81,7 +81,9 @@ typedef struct relic_config relic_config_t;
 
 /*
  * Limits a context enforces, and switches that select internal behaviour.
- * A zero limit means unlimited, so a zeroed structure asks for the defaults.
+ * A zeroed structure asks for the defaults: no bound on memory or tuples,
+ * and for the Magic Sets rewrite the budget described below.  SIZE_MAX sets
+ * no bound on anything.
  *
  * The fields correspond one to one with the tool's repeatable -l key=value
  * options, which exist only to parse into this structure: a limit is defined
@@ -99,9 +101,16 @@ typedef struct relic_config relic_config_t;
  * peak usage, since growing an array holds the old one until the new one is
  * filled.
  *
- * `max_magic_preds` and `max_magic_rules` are accepted and stored but not yet
- * acted on: nothing generates a Magic predicate or rule to count, so setting
- * either has no effect.
+ * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
+ * single query: the adorned and magic predicates it generates, and the rules
+ * it keeps once duplicates are dropped.  Exceeding either fails the query
+ * with a diagnostic naming the limit, its configured value and the predicate
+ * being adorned.  Left at zero, each is instead a budget the library sets in
+ * proportion to the program, and a rewrite outgrowing it is abandoned with a
+ * warning and the query answered from the whole program, as it would be
+ * with RELIC_F_NO_MAGIC: the rewrite is an optimization, and without a limit
+ * the caller asked for it must not decide whether a query is answered.  The
+ * budget bounds the rules the rewrite generates, not what they derive.
  *
  * `flags` holds RELIC_F_ switches, each of which selects an alternative
  * evaluation strategy that must give the same answers as the default.  They
@@ -139,6 +148,13 @@ struct relic_config {
  * one expected to produce the fewest tuples.
  */
 #define	RELIC_F_NO_REORDER	0x0004u
+
+/*
+ * Answer every query from the fixed point of the whole program instead of
+ * through its Magic Sets rewrite, which derives only what the query's
+ * bindings can reach.
+ */
+#define	RELIC_F_NO_MAGIC	0x0008u
 
 /*
  * Create a context.  Returns NULL when memory is exhausted; there is no
@@ -385,10 +401,18 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * Returns 0 when every row was delivered or the callback asked to stop, and
  * -1 with the reason reported when the query could not be answered.
  *
- * The program is evaluated first, as relic_materialize() does, and no row is
- * delivered until the whole answer is known.  A query that fails -- a limit
- * exceeded, say -- therefore delivers no rows at all rather than a truncated
- * answer that would be indistinguishable from a complete one.
+ * A program already evaluated by relic_materialize() is answered from what it
+ * derived.  Otherwise the query is answered through its Magic Sets rewrite:
+ * the predicates it reads through negation, those derived by facts alone and
+ * everything those depend on are evaluated in full, and the rest only as far
+ * as the query's bindings reach.  What that derives is discarded by the next
+ * query or evaluation.  A rewrite that outgrows its budget, when no Magic
+ * limit is configured, is abandoned with a warning, and the query answered
+ * from the whole program instead.
+ *
+ * No row is delivered until the whole answer is known.  A query that fails
+ * -- a limit exceeded, say -- therefore delivers no rows at all rather than a
+ * truncated answer that would be indistinguishable from a complete one.
  *
  * Rows are distinct, because a query's answer is a set.  Their order is
  * unspecified by the language but is the same on every run over the same
@@ -487,10 +511,12 @@ typedef void (*relic_explain_cb)(void *, const char *);
  * shown as soon as it is planned and before it runs -- its heading, how many
  * facts it has, and each other rule followed by its plan and the plans of
  * its semi-naive delta variants -- and a query's plan is shown before the
- * query runs.  What is shown is what runs, so a query against a program
- * already evaluated shows only its own plan.  The text is meant for a person
- * and may change from one release to the next.  A line longer than the limit
- * is cut and ends in "...".
+ * query runs.  A query answered through its Magic Sets rewrite also shows the
+ * rewrite: the adornments and seed rules it generated, then each component of
+ * the rewritten rules, indented beneath it.  What is shown is what runs, so a
+ * query against a program already evaluated shows only its own plan.  The
+ * text is meant for a person and may change from one release to the next.  A
+ * line longer than the limit is cut and ends in "...".
  *
  * As with a diagnostic callback, the callback must not call into the context.
  */

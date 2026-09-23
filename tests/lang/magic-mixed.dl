@@ -1,0 +1,15 @@
+% A predicate derived by facts and rules alike is read on demand like any
+% other, and its facts become rules guarded by its magic predicate, so that
+% only the facts a call asks for are derived.  A predicate derived by facts
+% alone is read as it is.
+
+link(a, b).
+link(b, c).
+link(c, d).
+link(p, q).
+link(X, Z) :- link(X, Y), hop(Y, Z).
+hop(c, z).
+hop(q, r).
+
+link(a, X)?
+link(X, r)?

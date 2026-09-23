@@ -160,6 +160,14 @@ tuples, relation and index memory, generated Magic predicates, generated Magic
 rules. Exceeding a limit is a diagnostic and a nonzero exit, and discards
 partial results.
 
+The two Magic limits differ in what happens when they are not set. The rewrite
+is an optimization, so when no limit was asked for, it must not decide whether
+a query is answered, and must not generate more than a constant multiple of
+the program it rewrites. Unset, each is a budget proportional to the program -- a
+floor plus a factor times its derived predicates or its rules -- and a rewrite
+outgrowing it is abandoned with a warning and the query answered from the
+whole program. Set, it is a limit like the others.
+
 ### D-8 The plan representation exists from S5
 
 The executor is written once, in S5, against an ordered array of operations
@@ -811,6 +819,49 @@ pass, and `relic -e -q 'path(a, X)?' graph.dl` reproduces architecture section
 60. **M4.**
 
 **Budget.** 800.
+
+**Decided during the stage.** Eight decisions were taken when S10 landed,
+each recorded in `specs/design-magic.md`:
+
+* **Two phases.** Measuring the base relations in the static mode needs them
+  loaded, and facts are loaded by evaluation. A query is therefore answered
+  by first evaluating, from the program's own schedule, the components it
+  reads completely, and only then rewriting the rest with the planner
+  measuring those relations.
+* **Extensional predicates are read completely.** A predicate derived by
+  facts alone is read as it is rather than adorned, which would copy every
+  fact into a guarded rule per adornment. Negated predicates, and everything
+  a complete relation depends on, are read completely as well.
+* **No rewrite over a materialized program.** When the relations already hold
+  the fixed point, after `relic_materialize()` or `-a`, a query runs its own
+  plan over them. `-X no-magic` (`RELIC_F_NO_MAGIC`) answers every query that
+  way and is the reference the rewrite is tested against.
+* **Relations discarded per query.** A rewritten query starts from empty
+  relations and leaves them counted as the fixed point of no rules, so what a
+  context holds after a query depends on that query alone. Keeping the
+  complete relations across queries is recorded in `TODO.md`.
+* **Seeds are generated, not constructed.** The query is rewritten like a
+  rule with nothing bound and no guard; the magic rules its body generates
+  are the seeds. An adornment with no bound column has no magic predicate.
+* **Canonical generated rules.** Generated rules are renumbered in order of
+  first occurrence, which keeps every slot bound by a positive literal and
+  makes duplicate detection a structural comparison; a rule whose head is
+  one of its own positive literals is dropped.
+* **A budget when no limit is set.** A three-kilobyte program of arity 14
+  generated all 2^14 adornments in 1.3 GB, which no default limit and no
+  memory limit stopped. Left unset, the Magic limits are budgets
+  proportional to the program, and a rewrite outgrowing one answers the
+  query from the whole program with a warning; D-7 records the rule.
+* **Nested `-e`.** The complete components keep their program headings, then
+  a `magic rewrite of` heading lists the adornments and seeds, the rewritten
+  components are indented beneath it, and the rewritten query's plan comes
+  last.
+
+The stage is about 2,500 lines of library and tool code, comments included,
+against a budget of 800: `lib/magic.c` is 1,700 of them, and splitting the
+planner's ordering from its emission, a rule table parameter for the
+analysis and the evaluator, nested explain, and semi-naive rounds that cost
+what changed account for most of the rest.
 
 ---
 

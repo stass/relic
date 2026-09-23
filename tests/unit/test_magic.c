@@ -1,0 +1,955 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+/*
+ * Contract tests for the Magic Sets rewrite of a query.
+ *
+ * The central property is equivalence: a query answered through its rewrite
+ * answers exactly what it answers from the whole fixed point.  It is checked
+ * over generated graphs, for programs that recurse on the left, on the right
+ * and on both sides, that recurse mutually, that negate, and that mix facts
+ * with rules, and for every way a query can bind a binary predicate's
+ * columns.  A context configured with RELIC_F_NO_MAGIC is the reference.
+ *
+ * The rest examine the rewrite through what -e shows of it: the names of the
+ * adornments and seeds, that adornments are memoized so a program calling
+ * itself with alternating bindings gives a finite rewrite, that rules equal
+ * up to the names of their variables are generated once, that a rule
+ * deriving its head from itself is dropped, and that the limits on generated
+ * predicates and rules are enforced exactly at their values.  A rewrite that
+ * outgrows the budget the library sets when no limit is configured is
+ * abandoned and the query answered from the whole program.  Last, what the
+ * rewrite derives never leaks into a later answer or a later evaluation.
+ */
+
+#include "config.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "harness.h"
+#include "internal.h"
+#include "programs.h"
+
+#define	SCENARIO_BUDGET		"a rewrite over its budget is abandoned"
+#define	SCENARIO_DEDUP		"equal generated rules are kept once"
+#define	SCENARIO_EQUIVALENT	"the rewrite answers as the fixed point does"
+#define	SCENARIO_LIMITS		"the rewrite's limits hold at their values"
+#define	SCENARIO_MEMO		"adornments are memoized"
+#define	SCENARIO_NAMES		"adornments are named by their bound columns"
+#define	SCENARIO_STATE		"what the rewrite derives does not leak"
+#define	SCENARIO_TAUTOLOGY	"a rule deriving its own head is dropped"
+
+/*
+ * The generated graphs: GRAPH_NODES nodes and GRAPH_EDGES edges drawn from a
+ * fixed linear congruential sequence per seed, so every run tests the same
+ * graphs.  Small enough that the whole fixed point is cheap, dense enough to
+ * have cycles and nodes nothing reaches.
+ */
+#define	GRAPH_SEEDS	24
+#define	GRAPH_NODES	10
+#define	GRAPH_EDGES	14
+
+/*
+ * A limit on generated predicates far above what any program here needs --
+ * each has at most two binary predicates, so at most sixteen adorned and
+ * magic ones -- which turns a rewrite that never ends into a failed query
+ * rather than a hung test.
+ */
+#define	PREDS_GUARD	64
+
+/* The ways shape_query() binds p's two columns. */
+#define	QUERY_SHAPES	5
+
+/* Room for a generated program and for a query's text. */
+#define	PROGRAM_MAX	4096
+#define	QUERY_MAX	64
+
+typedef struct diag_log diag_log_t;
+typedef struct rows rows_t;
+typedef struct text text_t;
+
+/* The errors and warnings a context reported, and the last of each. */
+struct diag_log {
+	size_t	errors;
+	size_t	warnings;
+	char	last[256];
+	char	last_warning[256];
+};
+
+/* A growable string.  `failed` is set when memory ran out. */
+struct text {
+	char	*bytes;
+	size_t	 length;
+	size_t	 capacity;
+	bool	 failed;
+};
+
+/* The rows of an answer, each rendered as one line, in delivery order. */
+struct rows {
+	relic_t	 *ctx;
+	char	**lines;
+	size_t	  count;
+	size_t	  capacity;
+	bool	  failed;
+};
+
+static char	*answer(relic_t *ctx, const char *query_text);
+static int	 collect_row(void *callback_ctx, const relic_value_t *values,
+		    size_t count);
+static int	 compare_lines(const void *left, const void *right);
+static relic_t	*context_with(const char *program, unsigned int flags,
+		    size_t max_preds, size_t max_rules, diag_log_t *log);
+static size_t	 count_lines_starting(const char *text, const char *prefix);
+static bool	 explain_answer(const char *program, const char *query_text,
+		    size_t max_preds, size_t max_rules, text_t *explained,
+		    diag_log_t *log);
+static void	 graph_program(unsigned int seed, const char *rules,
+		    char *program, size_t size);
+static bool	 has_line(const char *text, const char *line);
+static void	 shape_query(size_t shape, unsigned int first,
+		    unsigned int second, char *query_text, size_t size);
+static void	 record_diagnostic(void *callback_ctx,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
+static void	 record_explained(void *callback_ctx, const char *line);
+static void	 text_append(text_t *text, const char *bytes, size_t length);
+static void	 adornments_are_memoized(void);
+static void	 adornments_are_named_by_their_bound_columns(void);
+static void	 equal_generated_rules_are_kept_once(void);
+static void	 a_rule_deriving_its_own_head_is_dropped(void);
+static void	 a_rewrite_over_its_budget_is_abandoned(void);
+static void	 a_load_after_a_rewrite_reaches_the_next_query(void);
+static void	 the_limits_hold_at_their_values(void);
+static void	 the_rewrite_answers_as_the_fixed_point_does(void);
+static void	 what_the_rewrite_derives_does_not_leak(void);
+
+static void
+record_diagnostic(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where RELIC_UNUSED, const char *message)
+{
+	diag_log_t *log;
+
+	log = callback_ctx;
+	if (level == RELIC_ERROR) {
+		log->errors++;
+		snprintf(log->last, sizeof(log->last), "%s", message);
+	} else if (level == RELIC_WARNING) {
+		log->warnings++;
+		snprintf(log->last_warning, sizeof(log->last_warning), "%s",
+		    message);
+	}
+}
+
+static void
+text_append(text_t *text, const char *bytes, size_t length)
+{
+	char *grown;
+	size_t capacity;
+
+	if (text->failed)
+		return;
+
+	if (text->length + length + 1 > text->capacity) {
+		capacity = (text->length + length + 1) * 2;
+		grown = realloc(text->bytes, capacity);
+		if (grown == NULL) {
+			text->failed = true;
+			return;
+		}
+		text->bytes = grown;
+		text->capacity = capacity;
+	}
+
+	bcopy(bytes, text->bytes + text->length, length);
+	text->length += length;
+	text->bytes[text->length] = '\0';
+}
+
+static void
+record_explained(void *callback_ctx, const char *line)
+{
+	text_t *text;
+
+	text = callback_ctx;
+	text_append(text, line, strlen(line));
+	text_append(text, "\n", 1);
+}
+
+/*
+ * A context holding `program`, configured with `flags` and the two limits on
+ * the rewrite, reporting its diagnostics to `log`.
+ */
+static relic_t *
+context_with(const char *program, unsigned int flags, size_t max_preds,
+    size_t max_rules, diag_log_t *log)
+{
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(log, sizeof(*log));
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.max_magic_preds = max_preds;
+	config.max_magic_rules = max_rules;
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, "creating a context", "a context is created");
+		return (NULL);
+	}
+	relic_diag_set(ctx, record_diagnostic, log);
+
+	if (relic_load_string(ctx, "test.dl", program) != 0) {
+		check(false, "loading a test program", "the program loads");
+		relic_destroy(ctx);
+		return (NULL);
+	}
+
+	return (ctx);
+}
+
+/*
+ * Render a row as its values separated by spaces.  Only symbols appear in
+ * these programs.
+ */
+static int
+collect_row(void *callback_ctx, const relic_value_t *values, size_t count)
+{
+	rows_t *rows;
+	text_t line;
+	char **lines;
+	const char *name;
+	size_t i;
+
+	rows = callback_ctx;
+	bzero(&line, sizeof(line));
+	text_append(&line, "", 0);
+
+	for (i = 0; i < count; i++) {
+		name = relic_string(rows->ctx, values[i].v.id, NULL);
+		if (i > 0)
+			text_append(&line, " ", 1);
+		text_append(&line, name, strlen(name));
+	}
+
+	if (rows->count == rows->capacity) {
+		rows->capacity = rows->capacity == 0 ? 16 : rows->capacity * 2;
+		lines = realloc(rows->lines,
+		    rows->capacity * sizeof(*rows->lines));
+		if (lines == NULL)
+			line.failed = true;
+		else
+			rows->lines = lines;
+	}
+
+	if (line.failed) {
+		free(line.bytes);
+		rows->failed = true;
+		return (1);
+	}
+
+	rows->lines[rows->count] = line.bytes;
+	rows->count++;
+
+	return (0);
+}
+
+static int
+compare_lines(const void *left, const void *right)
+{
+	return (strcmp(*(char *const *)left, *(char *const *)right));
+}
+
+/*
+ * The answer to a query as its rows, sorted and each ending in a newline, or
+ * NULL when the query could not be prepared or run.  The caller frees it.
+ */
+static char *
+answer(relic_t *ctx, const char *query_text)
+{
+	relic_query_t *query;
+	rows_t rows;
+	text_t sorted;
+	size_t i;
+	int status;
+
+	query = relic_query_prepare(ctx, NULL, query_text);
+	if (query == NULL)
+		return (NULL);
+
+	bzero(&rows, sizeof(rows));
+	rows.ctx = ctx;
+	status = relic_query_run(ctx, query, collect_row, &rows);
+	relic_query_destroy(query);
+
+	bzero(&sorted, sizeof(sorted));
+	text_append(&sorted, "", 0);
+	if (rows.count > 0)
+		qsort(rows.lines, rows.count, sizeof(*rows.lines),
+		    compare_lines);
+	for (i = 0; i < rows.count; i++) {
+		text_append(&sorted, rows.lines[i], strlen(rows.lines[i]));
+		text_append(&sorted, "\n", 1);
+		free(rows.lines[i]);
+	}
+	free(rows.lines);
+
+	if (status != 0 || rows.failed || sorted.failed) {
+		free(sorted.bytes);
+		return (NULL);
+	}
+
+	return (sorted.bytes);
+}
+
+/*
+ * Answer a query through the rewrite with the explain callback installed,
+ * collecting what it shows.  Returns whether the query was answered.
+ */
+static bool
+explain_answer(const char *program, const char *query_text, size_t max_preds,
+    size_t max_rules, text_t *explained, diag_log_t *log)
+{
+	relic_t *ctx;
+	char *rows;
+
+	bzero(explained, sizeof(*explained));
+	text_append(explained, "", 0);
+
+	ctx = context_with(program, 0, max_preds, max_rules, log);
+	if (ctx == NULL)
+		return (false);
+
+	relic_explain_set(ctx, record_explained, explained);
+	rows = answer(ctx, query_text);
+	relic_destroy(ctx);
+
+	free(rows);
+
+	return (rows != NULL && !explained->failed);
+}
+
+/* Whether `text` holds `line` as one of its lines. */
+static bool
+has_line(const char *text, const char *line)
+{
+	const char *at;
+	size_t length;
+
+	length = strlen(line);
+	for (at = text; (at = strstr(at, line)) != NULL; at++) {
+		if ((at == text || at[-1] == '\n') && at[length] == '\n')
+			return (true);
+	}
+
+	return (false);
+}
+
+/* How many lines of `text` begin with `prefix`. */
+static size_t
+count_lines_starting(const char *text, const char *prefix)
+{
+	const char *line;
+	size_t count;
+
+	count = 0;
+	for (line = text; *line != '\0'; line = strchr(line, '\n') + 1) {
+		if (strncmp(line, prefix, strlen(prefix)) == 0)
+			count++;
+		if (strchr(line, '\n') == NULL)
+			break;
+	}
+
+	return (count);
+}
+
+/*
+ * A generated graph -- its edges, a node fact for every node, and a mark on
+ * a few nodes -- followed by `rules`.
+ */
+static void
+graph_program(unsigned int seed, const char *rules, char *program,
+    size_t size)
+{
+	uint32_t x;
+	size_t used;
+	unsigned int from;
+	unsigned int to;
+	unsigned int i;
+
+	x = seed * 2654435761u + 1;
+	used = 0;
+
+	for (i = 0; i < GRAPH_EDGES; i++) {
+		x = x * 1664525u + 1013904223u;
+		from = (x >> 16) % GRAPH_NODES;
+		x = x * 1664525u + 1013904223u;
+		to = (x >> 16) % GRAPH_NODES;
+		used += (size_t)snprintf(program + used, size - used,
+		    "edge(n%u, n%u).\n", from, to);
+	}
+
+	for (i = 0; i < GRAPH_NODES; i++) {
+		used += (size_t)snprintf(program + used, size - used,
+		    "node(n%u).\n", i);
+		if ((i + seed) % 4 == 0)
+			used += (size_t)snprintf(program + used, size - used,
+			    "mark(n%u).\n", i);
+	}
+
+	snprintf(program + used, size - used, "%s", rules);
+}
+
+/*
+ * A query on p of the given shape: the first column bound to node `first`,
+ * the second bound to node `second`, both, neither, or one variable in both.
+ */
+static void
+shape_query(size_t shape, unsigned int first, unsigned int second,
+    char *query_text, size_t size)
+{
+	switch (shape) {
+	case 0:
+		snprintf(query_text, size, "p(n%u, X)?", first);
+		break;
+	case 1:
+		snprintf(query_text, size, "p(X, n%u)?", second);
+		break;
+	case 2:
+		snprintf(query_text, size, "p(n%u, n%u)?", first, second);
+		break;
+	case 3:
+		snprintf(query_text, size, "p(X, Y)?");
+		break;
+	default:
+		snprintf(query_text, size, "p(X, X)?");
+		break;
+	}
+}
+
+/*
+ * Over generated graphs, every program below answers every binding of its
+ * binary predicate through the rewrite as it does from the whole fixed point.
+ * The queries bind the first column, the second, both, neither, and one
+ * variable twice; the constants are nodes, some of them nodes no edge
+ * reaches.
+ */
+static void
+the_rewrite_answers_as_the_fixed_point_does(void)
+{
+	static const struct {
+		const char	*name;
+		const char	*rules;
+	} programs[] = {
+		{ "right", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, Z).\n" },
+		{ "left", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- p(X, Y), edge(Y, Z).\n" },
+		{ "double", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- p(X, Y), p(Y, Z).\n" },
+		{ "same-generation", "p(X, X) :- node(X).\n"
+		    "p(X, Y) :- edge(XP, X), p(XP, YP), edge(YP, Y).\n" },
+		{ "mutual", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), q(Y, Z).\n"
+		    "q(X, Z) :- edge(X, Y), p(Y, Z).\n" },
+		{ "negation", "r(X, Y) :- edge(X, Y).\n"
+		    "r(X, Z) :- r(X, Y), edge(Y, Z).\n"
+		    "open(X, Y) :- edge(X, Y), not mark(X).\n"
+		    "p(X, Y) :- open(X, Y), not r(Y, X).\n"
+		    "p(X, Z) :- open(X, Y), p(Y, Z).\n" },
+		{ "negated-derived", "r(X, Y) :- edge(X, Y).\n"
+		    "r(X, Z) :- edge(X, Y), r(Y, Z).\n"
+		    "p(X, Y) :- node(X), node(Y), not r(X, Y).\n" },
+		{ "mixed", "p(n0, n1).\n"
+		    "p(X, Y) :- edge(X, Y), mark(Y).\n"
+		    "p(X, Z) :- p(X, Y), p(Y, Z).\n" },
+		{ "constants", "p(n1, Y) :- edge(n2, Y).\n"
+		    "p(X, X) :- edge(X, X).\n"
+		    "p(X, Y) :- edge(X, Z), p(Z, Y), mark(Z).\n" }
+	};
+	char program[PROGRAM_MAX];
+	char query_text[QUERY_MAX];
+	diag_log_t magic_log;
+	diag_log_t whole_log;
+	relic_t *magic;
+	relic_t *whole;
+	char *expected;
+	char *actual;
+	size_t compared;
+	size_t p;
+	size_t s;
+	unsigned int seed;
+	unsigned int node;
+
+	compared = 0;
+
+	for (seed = 0; seed < GRAPH_SEEDS; seed++) {
+		for (p = 0; p < sizeof(programs) / sizeof(programs[0]); p++) {
+			graph_program(seed, programs[p].rules, program,
+			    sizeof(program));
+
+			for (s = 0; s < QUERY_SHAPES; s++) {
+				node = (seed * 7 + (unsigned int)s * 3) %
+				    GRAPH_NODES;
+				shape_query(s, node, (node + seed) %
+				    GRAPH_NODES, query_text,
+				    sizeof(query_text));
+
+				magic = context_with(program, 0, PREDS_GUARD,
+				    0, &magic_log);
+				whole = context_with(program, RELIC_F_NO_MAGIC,
+				    0, 0, &whole_log);
+				if (magic == NULL || whole == NULL) {
+					relic_destroy(magic);
+					relic_destroy(whole);
+					return;
+				}
+
+				expected = answer(whole, query_text);
+				actual = answer(magic, query_text);
+
+				checkf(expected != NULL && actual != NULL &&
+				    strcmp(expected, actual) == 0,
+				    SCENARIO_EQUIVALENT,
+				    "program %s, seed %u, %s: the rewrite "
+				    "answered\n%s\nthe fixed point\n%s",
+				    programs[p].name, seed, query_text,
+				    actual != NULL ? actual : "(failed)",
+				    expected != NULL ? expected : "(failed)");
+				checkf(magic_log.errors == 0 &&
+				    magic_log.warnings == 0,
+				    SCENARIO_EQUIVALENT,
+				    "program %s, seed %u, %s: the rewrite "
+				    "reported %zu errors and %zu warnings",
+				    programs[p].name, seed, query_text,
+				    magic_log.errors, magic_log.warnings);
+
+				free(expected);
+				free(actual);
+				relic_destroy(magic);
+				relic_destroy(whole);
+				compared++;
+			}
+		}
+	}
+
+	checkf(compared > 0, SCENARIO_EQUIVALENT,
+	    "some query should be compared");
+}
+
+/*
+ * An adornment is named after its predicate, then `$` and a b or an f per
+ * column; its magic predicate adds `magic$` in front and holds only the
+ * bound columns.  A query that binds nothing has no magic predicate for its
+ * own call and generates no seed, though the rules it reaches may still call
+ * path with a column bound.
+ */
+static void
+adornments_are_named_by_their_bound_columns(void)
+{
+	static const struct {
+		const char	*query;
+		const char	*adorn;
+		const char	*seed;
+	} cases[] = {
+		{ "path(a, X)?", "    adorn path/2 bf",
+		    "    seed magic$path$bf(a)." },
+		{ "path(X, c)?", "    adorn path/2 fb",
+		    "    seed magic$path$fb(c)." },
+		{ "path(a, c)?", "    adorn path/2 bb",
+		    "    seed magic$path$bb(a, c)." },
+		{ "path(X, Y)?", "    adorn path/2 ff", NULL }
+	};
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
+	text_t explained;
+	diag_log_t log;
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		if (!explain_answer(program, cases[i].query, 0, 0, &explained,
+		    &log)) {
+			checkf(false, SCENARIO_NAMES, "%s should be answered",
+			    cases[i].query);
+			free(explained.bytes);
+			continue;
+		}
+
+		checkf(has_line(explained.bytes, cases[i].adorn),
+		    SCENARIO_NAMES, "%s should show \"%s\", not\n%s",
+		    cases[i].query, cases[i].adorn, explained.bytes);
+
+		if (cases[i].seed != NULL)
+			checkf(has_line(explained.bytes, cases[i].seed),
+			    SCENARIO_NAMES, "%s should show \"%s\", not\n%s",
+			    cases[i].query, cases[i].seed, explained.bytes);
+		else
+			checkf(count_lines_starting(explained.bytes,
+			    "    seed ") == 0, SCENARIO_NAMES,
+			    "%s binds nothing, so it should generate no "
+			    "seed, not\n%s", cases[i].query, explained.bytes);
+
+		free(explained.bytes);
+	}
+}
+
+/*
+ * swap calls itself with its columns exchanged, so a call with the first
+ * column bound makes one with the second bound, which makes one with the
+ * first bound again.  Memoized, that is two adornments and a finite rewrite.
+ */
+static void
+adornments_are_memoized(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "swap(X, Y) :- edge(X, Y).\n"
+	    "swap(X, Y) :- swap(Y, X).\n";
+	text_t explained;
+	diag_log_t log;
+
+	if (!explain_answer(program, "swap(a, Y)?", PREDS_GUARD, 0, &explained,
+	    &log)) {
+		check(false, SCENARIO_MEMO, "swap(a, Y)? should be answered");
+		free(explained.bytes);
+		return;
+	}
+
+	checkf(count_lines_starting(explained.bytes, "    adorn ") == 2 &&
+	    has_line(explained.bytes, "    adorn swap/2 bf") &&
+	    has_line(explained.bytes, "    adorn swap/2 fb"),
+	    SCENARIO_MEMO,
+	    "swap(a, Y)? should adorn swap/2 as bf and fb only, not\n%s",
+	    explained.bytes);
+
+	free(explained.bytes);
+}
+
+/*
+ * Two rules that differ only in the names of their variables rewrite to the
+ * same adorned rule and the same magic rule, and each is kept once.
+ */
+static void
+equal_generated_rules_are_kept_once(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "q(X, Y) :- edge(X, Y).\n"
+	    "p(X, Z) :- edge(X, Y), q(Y, Z).\n"
+	    "p(A, C) :- edge(A, B), q(B, C).\n";
+	text_t explained;
+	diag_log_t log;
+
+	if (!explain_answer(program, "p(a, Z)?", 0, 0, &explained, &log)) {
+		check(false, SCENARIO_DEDUP, "p(a, Z)? should be answered");
+		free(explained.bytes);
+		return;
+	}
+
+	checkf(count_lines_starting(explained.bytes,
+	    "        rule p$bf(") == 1 &&
+	    count_lines_starting(explained.bytes,
+	    "        rule magic$q$bf(") == 1,
+	    SCENARIO_DEDUP,
+	    "p(a, Z)? should generate one adorned rule for p and one magic "
+	    "rule for q, not\n%s", explained.bytes);
+
+	free(explained.bytes);
+}
+
+/*
+ * The left-recursive rule calls itself with the column its head binds, so
+ * the magic rule for that call would derive magic$path$bf from itself.  It is
+ * dropped, and the magic predicate holds the seed alone.
+ */
+static void
+a_rule_deriving_its_own_head_is_dropped(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n";
+	text_t explained;
+	diag_log_t log;
+
+	if (!explain_answer(program, "path(a, X)?", 0, 0, &explained,
+	    &log)) {
+		check(false, SCENARIO_TAUTOLOGY,
+		    "path(a, X)? should be answered");
+		free(explained.bytes);
+		return;
+	}
+
+	checkf(count_lines_starting(explained.bytes,
+	    "        rule magic$path$bf(") == 0 &&
+	    has_line(explained.bytes,
+	    "    stratum 0, component 0: magic$path$bf/1"),
+	    SCENARIO_TAUTOLOGY,
+	    "path(a, X)? should generate no magic rule, and its magic "
+	    "predicate should not be recursive, not\n%s", explained.bytes);
+
+	free(explained.bytes);
+}
+
+/*
+ * path(a, X)? generates two predicates, path$bf and magic$path$bf, and keeps
+ * four rules: the seed, the magic rule and the two adorned rules.  A limit
+ * at each count is met and the query answered; one below it fails the query,
+ * naming the limit and the predicate being adorned.
+ */
+static void
+the_limits_hold_at_their_values(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
+	text_t explained;
+	diag_log_t log;
+	bool answered;
+
+	answered = explain_answer(program, "path(a, X)?", 2, 4, &explained,
+	    &log);
+	checkf(answered && log.errors == 0, SCENARIO_LIMITS,
+	    "limits of two predicates and four rules should admit "
+	    "path(a, X)?, which reported \"%s\"", log.last);
+	free(explained.bytes);
+
+	answered = explain_answer(program, "path(a, X)?", 1, 0, &explained,
+	    &log);
+	checkf(!answered && log.errors == 1 && strcmp(log.last,
+	    "limit exceeded: magic-preds=1 while adorning path/2") == 0,
+	    SCENARIO_LIMITS,
+	    "a limit of one predicate should refuse path(a, X)?, which "
+	    "reported \"%s\"", log.last);
+	free(explained.bytes);
+
+	answered = explain_answer(program, "path(a, X)?", 0, 3, &explained,
+	    &log);
+	checkf(!answered && log.errors == 1 && strcmp(log.last,
+	    "limit exceeded: magic-rules=3 while adorning path/2") == 0,
+	    SCENARIO_LIMITS,
+	    "a limit of three rules should refuse path(a, X)?, which "
+	    "reported \"%s\"", log.last);
+	free(explained.bytes);
+}
+
+/* The arity of the widening program, whose p has 2^10 adornments. */
+#define	WIDENING_ARITY	10
+
+/*
+ * With no limit configured, the widening program's rewrite outgrows its
+ * budget long before its 2^10 adornments: it is abandoned with one warning
+ * naming the budget and the predicate being adorned, no error, and the query
+ * answered from the whole program, which explain shows as the program's
+ * components with no rewrite.  A configured limit replaces the budget, so a
+ * generous one lets the whole rewrite run.
+ */
+static void
+a_rewrite_over_its_budget_is_abandoned(void)
+{
+	static const char query[] =
+	    "p(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8, Y9, Y10)?";
+	static const char expected[] = "c c c c c c c c c c\n";
+	char *program;
+	text_t explained;
+	diag_log_t log;
+	relic_t *ctx;
+	char *rows;
+	bool answered;
+
+	program = widening_program(WIDENING_ARITY);
+	if (program == NULL) {
+		check(false, SCENARIO_BUDGET, "the widening program is built");
+		return;
+	}
+
+	ctx = context_with(program, 0, 0, 0, &log);
+	if (ctx == NULL) {
+		free(program);
+		return;
+	}
+	rows = answer(ctx, query);
+	checkf(rows != NULL && strcmp(rows, expected) == 0, SCENARIO_BUDGET,
+	    "the widening query should answer one row of c, not\n%s",
+	    rows != NULL ? rows : "(failed)");
+	free(rows);
+	checkf(log.errors == 0 && log.warnings == 1 && strstr(log.last_warning,
+	    "Magic rewrite outgrew its budget of ") != NULL &&
+	    strstr(log.last_warning, "while adorning p/10; answering it from "
+	    "the whole program") != NULL, SCENARIO_BUDGET,
+	    "the abandoned rewrite should report one warning and no error, "
+	    "not %zu errors and %zu warnings, the last \"%s\"", log.errors,
+	    log.warnings, log.last_warning);
+	relic_destroy(ctx);
+
+	answered = explain_answer(program, query, 0, 0, &explained, &log);
+	checkf(answered && strstr(explained.bytes, "magic rewrite of") ==
+	    NULL, SCENARIO_BUDGET,
+	    "an abandoned rewrite should not be explained, but -e showed\n%s",
+	    explained.bytes);
+	free(explained.bytes);
+
+	answered = explain_answer(program, query, 1000000, 1000000, &explained,
+	    &log);
+	checkf(answered && log.warnings == 0 && strstr(explained.bytes,
+	    "magic rewrite of") != NULL, SCENARIO_BUDGET,
+	    "configured limits should replace the budget and let the rewrite "
+	    "run, which reported %zu warnings", log.warnings);
+	free(explained.bytes);
+
+	free(program);
+}
+
+/*
+ * A query answered through the rewrite leaves only part of the fixed point
+ * in the relations.  A later query with another binding, a later
+ * materialization and a query answered from it must each see the whole
+ * program, not that part.
+ */
+static void
+what_the_rewrite_derives_does_not_leak(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "edge(x, y).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
+	static const char all_paths[] = "a b\na c\nb c\nx y\n";
+	const relic_relation_t *paths;
+	diag_log_t log;
+	relic_t *ctx;
+	uint32_t symbol;
+	relic_pred_id_t pred;
+	char *rows;
+
+	ctx = context_with(program, 0, 0, 0, &log);
+	if (ctx == NULL)
+		return;
+
+	rows = answer(ctx, "path(a, X)?");
+	checkf(rows != NULL && strcmp(rows, "b\nc\n") == 0, SCENARIO_STATE,
+	    "path(a, X)? should answer b and c, not\n%s",
+	    rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	rows = answer(ctx, "path(x, X)?");
+	checkf(rows != NULL && strcmp(rows, "y\n") == 0, SCENARIO_STATE,
+	    "path(x, X)? after path(a, X)? should answer y, not\n%s",
+	    rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	rows = answer(ctx, "path(X, Y)?");
+	checkf(rows != NULL && strcmp(rows, all_paths) == 0, SCENARIO_STATE,
+	    "path(X, Y)? after bound queries should answer every path, "
+	    "not\n%s", rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	checkf(relic_materialize(ctx) == 0, SCENARIO_STATE,
+	    "the program should materialize after rewritten queries");
+
+	paths = NULL;
+	if (relic_symbol_intern(ctx, "path", 4, &symbol) == 0 &&
+	    relic_pred_intern(ctx, symbol, 2, NULL, &pred) == 0)
+		paths = relic_relation_for(ctx, pred);
+	checkf(paths != NULL && relic_relation_count(paths) == 4,
+	    SCENARIO_STATE,
+	    "the materialized path relation should hold 4 tuples, not %zu",
+	    paths != NULL ? relic_relation_count(paths) : 0);
+
+	rows = answer(ctx, "path(a, X)?");
+	checkf(rows != NULL && strcmp(rows, "b\nc\n") == 0, SCENARIO_STATE,
+	    "path(a, X)? over the materialized program should answer b and "
+	    "c, not\n%s", rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	checkf(log.errors == 0 && log.warnings == 0, SCENARIO_STATE,
+	    "the queries should report nothing, not %zu errors and %zu "
+	    "warnings", log.errors, log.warnings);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Loading more of the program after a rewritten query must reach the next
+ * query: a fact extending the graph, and a rule adding a way to derive path,
+ * each change what path(a, X)? answers.
+ */
+static void
+a_load_after_a_rewrite_reaches_the_next_query(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
+	diag_log_t log;
+	relic_t *ctx;
+	char *rows;
+
+	ctx = context_with(program, 0, 0, 0, &log);
+	if (ctx == NULL)
+		return;
+
+	rows = answer(ctx, "path(a, X)?");
+	checkf(rows != NULL && strcmp(rows, "b\n") == 0, SCENARIO_STATE,
+	    "path(a, X)? should answer b, not\n%s",
+	    rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	checkf(relic_load_string(ctx, "more.dl", "edge(b, c).\n") == 0,
+	    SCENARIO_STATE, "a fact should load after a rewritten query");
+	rows = answer(ctx, "path(a, X)?");
+	checkf(rows != NULL && strcmp(rows, "b\nc\n") == 0, SCENARIO_STATE,
+	    "path(a, X)? after loading edge(b, c) should answer b and c, "
+	    "not\n%s", rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	checkf(relic_load_string(ctx, "more.dl",
+	    "hop(c, d).\npath(X, Y) :- hop(X, Y).\n") == 0, SCENARIO_STATE,
+	    "a rule should load after a rewritten query");
+	rows = answer(ctx, "path(a, X)?");
+	checkf(rows != NULL && strcmp(rows, "b\nc\nd\n") == 0,
+	    SCENARIO_STATE,
+	    "path(a, X)? after loading a rule over hop should answer b, c "
+	    "and d, not\n%s", rows != NULL ? rows : "(failed)");
+	free(rows);
+
+	checkf(log.errors == 0 && log.warnings == 0, SCENARIO_STATE,
+	    "the loads and queries should report nothing, not %zu errors and "
+	    "%zu warnings", log.errors, log.warnings);
+
+	relic_destroy(ctx);
+}
+
+int
+main(void)
+{
+	the_rewrite_answers_as_the_fixed_point_does();
+	adornments_are_named_by_their_bound_columns();
+	adornments_are_memoized();
+	equal_generated_rules_are_kept_once();
+	a_rule_deriving_its_own_head_is_dropped();
+	the_limits_hold_at_their_values();
+	a_rewrite_over_its_budget_is_abandoned();
+	what_the_rewrite_derives_does_not_leak();
+	a_load_after_a_rewrite_reaches_the_next_query();
+
+	return (check_summary("test_magic"));
+}

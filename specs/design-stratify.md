@@ -263,6 +263,13 @@ succeeds only when the schedule is current. The evaluator confirms the count
 all the same, once per materialization, because the alternative to confirming
 it is running a schedule that silently leaves rules out.
 
+**The analysis is also run on the rules a query's Magic rewrite generates**,
+into a schedule of the rewrite's own that lives for one query run, per
+`specs/design-magic.md` section 9.1. The analysis is the same function over a
+different table of rules; the graph's edges name rules of whichever table it
+was built from. The generated rules are stratifiable by construction, so there
+the analysis is a guard, and a cycle it found would be an internal error.
+
 ---
 
 ## 9. Determinism

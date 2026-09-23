@@ -1,0 +1,16 @@
+% -e over a query answered through its Magic rewrite, where the query binds
+% its call through another literal rather than a constant: the seed is then a
+% rule reading start/1 rather than a fact.  ready/0 is called with no column
+% to bind, so its adornment has no magic predicate and no guard.
+
+start(a).
+edge(a, b).
+edge(b, c).
+edge(x, y).
+
+ready :- edge(a, b).
+
+path(X, Y) :- ready, edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+
+start(S), path(S, X)?

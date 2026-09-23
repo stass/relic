@@ -1,0 +1,17 @@
+% The chain of stats-indexed.dl answered through the Magic rewrite.  The
+% query binds the first column of path and the recursive rule keeps it
+% bound, so the magic rule would derive magic$path$bf from itself and is
+% dropped: only the paths from a are derived, six of them rather than all
+% twenty-one, and the relations hold nineteen tuples rather than thirty-three.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+edge(d, e).
+edge(e, f).
+edge(f, g).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+
+path(a, X)?

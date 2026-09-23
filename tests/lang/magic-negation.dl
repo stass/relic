@@ -1,0 +1,25 @@
+% Negation under the Magic rewrite.  A predicate the query reaches through
+% negation is evaluated in full before the rewrite, so that a missing tuple
+% means the tuple is false rather than that nothing asked for it, and so is
+% everything it depends on: blocked is read completely, and reach, which it
+% reads, is too.  open is read on demand and negates blocked, and path,
+% which the query calls with a bound column, is adorned around it.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+edge(d, e).
+edge(x, y).
+guard(y).
+guard(c).
+
+reach(X) :- guard(X).
+reach(Y) :- reach(X), edge(X, Y).
+blocked(X) :- edge(X, _), reach(X).
+open(X, Y) :- edge(X, Y), not blocked(X).
+path(X, Y) :- open(X, Y).
+path(X, Z) :- open(X, Y), path(Y, Z).
+
+path(a, X)?
+path(X, c)?
+path(x, X)?

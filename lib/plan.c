@@ -60,6 +60,14 @@
  * the whole relation rather than the delta.  Placed first, it is only ever
  * scanned, so a delta never needs an index of its own.
  *
+ * The order is decided before any operation is built.  A first walk places
+ * the literals -- recording, for each, where it goes and what it binds -- and
+ * a second replays that order, turning each literal into its operation.  The
+ * first walk builds no index and emits nothing, which is what lets the Magic
+ * rewrite ask for the order alone, from a set of slots its caller already
+ * binds, and so borrow the planner's notion of body order rather than keep
+ * one of its own.
+ *
  * Two switches select the references the default is tested against.
  * RELIC_F_NO_INDEX makes every lookup a scan matching the same columns, and
  * RELIC_F_NO_REORDER places positive literals in the order they are written.
@@ -72,21 +80,28 @@ typedef struct relic_planner relic_planner_t;
 /*
  * A plan under construction.
  *
+ * `order` receives the body index of each literal as it is placed, and
+ * `order_count` says how many have been; `placed` records the same thing
+ * indexed like the body.  `bound` is the set of slots bound so far: while the
+ * order is decided, by the literals placed and the slots the caller started
+ * with; while the operations are emitted, by the operations emitted.
+ *
  * `ops` has room for one operation per body literal and one EMIT, which is
- * exactly what a plan holds.  `placed` records which literals have been
- * placed, indexed like the body.  `bound` is the set of slots the operations
- * placed so far bind.  `delta_literal` is the body index of the literal that
- * reads the delta, or RELIC_PLAN_NO_DELTA.  `incomplete`, when not NULL, is
- * indexed by predicate identifier minus one and marks the relations still
- * being derived, which the estimate cannot measure.
+ * exactly what a plan holds, and is NULL when only the order is wanted.
+ * `delta_literal` is the body index of the literal that reads the delta, or
+ * RELIC_PLAN_NO_DELTA.  `incomplete`, when not NULL, is indexed by predicate
+ * identifier minus one and marks the relations still being derived, which
+ * the estimate cannot measure.
  */
 struct relic_planner {
 	relic_t			*ctx;
 	relic_arena_t		*arena;
 	const relic_rule_t	*rule;
 	const bool		*incomplete;
-	relic_op_t		*ops;
+	size_t			*order;
 	bool			*placed;
+	relic_op_t		*ops;
+	size_t			 order_count;
 	size_t			 op_count;
 	size_t			 delta_literal;
 	uint64_t		 bound;
@@ -116,28 +131,34 @@ static int	 choose_positive(relic_planner_t *planner, size_t *indexp);
 static uint16_t	 column_count(uint32_t columns);
 static uint64_t	 comparison_slots(const relic_comparison_t *comparison);
 static int	 confirm_delta_literal(const relic_planner_t *planner);
+static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner,
 		    uint16_t head_arity);
+static int	 decide_order(relic_planner_t *planner);
 static size_t	 divide_rounding_up(size_t dividend, size_t divisor);
-static int	 estimate_literal(relic_planner_t *planner,
+static int	 emit_body(relic_planner_t *planner);
+static size_t	 estimate_unknown(uint16_t arity, uint32_t bound);
+static int	 estimate_measured(relic_planner_t *planner,
 		    relic_relation_t *relation, uint32_t bound,
 		    size_t *estimatep);
 static bool	 is_incomplete(const relic_planner_t *planner,
-		    const relic_relation_t *relation);
+		    relic_pred_id_t pred);
+static int	 order_body(relic_planner_t *planner);
+static void	 order_positive(relic_planner_t *planner, size_t index);
+static void	 order_ready_tests(relic_planner_t *planner);
 static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 		    bool delta);
-static int	 place_body(relic_planner_t *planner);
+static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
+		    int status);
 static void	 place_comparison(relic_planner_t *planner,
 		    const relic_comparison_t *comparison);
 static int	 place_emit(relic_planner_t *planner);
 static int	 place_negated(relic_planner_t *planner,
 		    const relic_atom_t *atom);
-static int	 place_positive(relic_planner_t *planner, size_t index);
 static size_t	 positive_count(const relic_rule_t *rule);
 static enum relic_op_kind positive_kind(const relic_planner_t *planner,
 		    const relic_relation_t *relation, uint32_t bound,
 		    bool delta);
-static int	 place_ready_tests(relic_planner_t *planner);
 static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
@@ -308,15 +329,14 @@ column_count(uint32_t columns)
 }
 
 /*
- * The columns of an atom that hold a constant or a slot already bound, which
- * are the columns an operation placed now could look it up by.  A wildcard is
- * never bound: it asks for any value, and only a generator can supply one.
- * Neither is a variable that only an earlier column of the same atom binds,
- * since that binding does not exist until a tuple has been read.
+ * The columns of an atom that hold a constant or a slot of `bound`.  A
+ * wildcard is never bound: it asks for any value, and only a generator can
+ * supply one.  Neither is a variable that only an earlier column of the same
+ * atom binds, since that binding does not exist until a tuple has been read.
  */
-static uint32_t
-bound_columns(const relic_planner_t *planner, const relic_atom_t *atom,
-    uint16_t arity)
+uint32_t
+relic_plan_bound_columns(const relic_atom_t *atom, uint16_t arity,
+    uint64_t bound)
 {
 	const relic_arg_t *arg;
 	uint32_t columns;
@@ -328,11 +348,21 @@ bound_columns(const relic_planner_t *planner, const relic_atom_t *atom,
 
 		if (arg->kind == RELIC_ARG_CONSTANT ||
 		    (arg->kind == RELIC_ARG_VARIABLE &&
-		    (planner->bound & slot_bit(arg->u.slot)) != 0))
+		    (bound & slot_bit(arg->u.slot)) != 0))
 			columns |= UINT32_C(1) << i;
 	}
 
 	return (columns);
+}
+
+/*
+ * The columns of an atom an operation placed now could look it up by.
+ */
+static uint32_t
+bound_columns(const relic_planner_t *planner, const relic_atom_t *atom,
+    uint16_t arity)
+{
+	return (relic_plan_bound_columns(atom, arity, planner->bound));
 }
 
 /*
@@ -551,52 +581,55 @@ place_test(relic_planner_t *planner, const relic_literal_t *literal)
  * are the only points at which the bound set changes, so each test is placed
  * at the earliest point it can be.
  */
-static int
-place_ready_tests(relic_planner_t *planner)
+static void
+order_ready_tests(relic_planner_t *planner)
 {
 	const relic_rule_t *rule;
-	const relic_literal_t *literal;
 	size_t i;
 
 	rule = planner->rule;
 
 	for (i = 0; i < rule->body_length; i++) {
-		literal = &rule->body[i];
-
-		if (planner->placed[i] || !test_is_ready(planner, literal))
+		if (planner->placed[i] || !test_is_ready(planner,
+		    &rule->body[i]))
 			continue;
 
-		if (place_test(planner, literal) != 0)
-			return (-1);
+		planner->order[planner->order_count] = i;
+		planner->order_count++;
 		planner->placed[i] = true;
 	}
-
-	return (0);
 }
 
 /*
- * Place the positive literal at body index `index`, then every test it made
- * placeable.
+ * Place the positive literal at body index `index`, which binds every
+ * variable it mentions, then every test that makes placeable.
  */
-static int
-place_positive(relic_planner_t *planner, size_t index)
+static void
+order_positive(relic_planner_t *planner, size_t index)
 {
-	if (place_atom(planner, &planner->rule->body[index].u.atom,
-	    index == planner->delta_literal) != 0)
-		return (-1);
-	planner->placed[index] = true;
+	const relic_atom_t *atom;
+	const relic_pred_t *pred;
 
-	return (place_ready_tests(planner));
+	atom = &planner->rule->body[index].u.atom;
+	pred = relic_pred_of(planner->ctx, atom->pred);
+
+	planner->order[planner->order_count] = index;
+	planner->order_count++;
+	planner->placed[index] = true;
+	if (pred != NULL)
+		planner->bound |= arg_slots(atom->args, pred->arity);
+
+	order_ready_tests(planner);
 }
 
 /*
- * Whether the relation is one the component being planned is still deriving.
+ * Whether a predicate's relation is one still being derived, which the
+ * estimate cannot measure.
  */
 static bool
-is_incomplete(const relic_planner_t *planner, const relic_relation_t *relation)
+is_incomplete(const relic_planner_t *planner, relic_pred_id_t pred)
 {
-	return (planner->incomplete != NULL &&
-	    planner->incomplete[relation->pred - 1]);
+	return (planner->incomplete != NULL && planner->incomplete[pred - 1]);
 }
 
 /*
@@ -610,32 +643,40 @@ divide_rounding_up(size_t dividend, size_t divisor)
 }
 
 /*
- * The estimated number of tuples of `relation` matching one binding of the
- * columns in `bound`, as the file comment describes.  Returns 0, or -1 with
- * a diagnostic reported when a distinct count could not be computed.
+ * The estimate for a relation still being derived: the assumed size,
+ * narrowed by the assumed selectivity of each bound column.
+ */
+static size_t
+estimate_unknown(uint16_t arity, uint32_t bound)
+{
+	size_t estimate;
+	uint16_t column;
+
+	estimate = RELIC_PLAN_UNKNOWN_TUPLES;
+	for (column = 0; column < arity; column++) {
+		if ((bound & (UINT32_C(1) << column)) != 0)
+			estimate = divide_rounding_up(estimate,
+			    RELIC_PLAN_UNKNOWN_DISTINCT);
+	}
+
+	return (estimate);
+}
+
+/*
+ * The estimated number of tuples of a complete relation matching one binding
+ * of the columns in `bound`, as the file comment describes.  Returns 0, or -1
+ * with a diagnostic reported when a distinct count could not be computed.
  *
  * A column of a nonempty relation holds at least one distinct value, so no
  * division is by zero.
  */
 static int
-estimate_literal(relic_planner_t *planner, relic_relation_t *relation,
+estimate_measured(relic_planner_t *planner, relic_relation_t *relation,
     uint32_t bound, size_t *estimatep)
 {
 	size_t distinct;
 	size_t estimate;
 	uint16_t column;
-
-	if (is_incomplete(planner, relation)) {
-		estimate = RELIC_PLAN_UNKNOWN_TUPLES;
-		for (column = 0; column < relation->arity; column++) {
-			if ((bound & (UINT32_C(1) << column)) != 0)
-				estimate = divide_rounding_up(estimate,
-				    RELIC_PLAN_UNKNOWN_DISTINCT);
-		}
-
-		*estimatep = estimate;
-		return (0);
-	}
 
 	estimate = relic_relation_count(relation);
 	for (column = 0; estimate != 0 && column < relation->arity; column++) {
@@ -657,22 +698,40 @@ estimate_literal(relic_planner_t *planner, relic_relation_t *relation,
 /*
  * Score a positive literal against the slots bound so far.  Returns 0, or -1
  * with a diagnostic reported.
+ *
+ * A relation still being derived is not even looked up: its estimate is an
+ * assumption, and looking it up would create a relation that the Magic
+ * rewrite, which orders rules over predicates it never evaluates, would leave
+ * lying empty in the context.
  */
 static int
 score_positive(relic_planner_t *planner, const relic_atom_t *atom,
     relic_plan_score_t *scorep)
 {
+	const relic_pred_t *pred;
 	relic_relation_t *relation;
 	uint32_t bound;
+
+	pred = relic_pred_of(planner->ctx, atom->pred);
+	if (pred == NULL) {
+		relic_diagf(planner->ctx, RELIC_ERROR, &atom->where,
+		    "internal error: a literal names no predicate");
+		return (-1);
+	}
+
+	bound = bound_columns(planner, atom, pred->arity);
+	scorep->bound_args = column_count(bound);
+
+	if (is_incomplete(planner, atom->pred)) {
+		scorep->estimate = estimate_unknown(pred->arity, bound);
+		return (0);
+	}
 
 	relation = relic_relation_for(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
 
-	bound = bound_columns(planner, atom, relation->arity);
-	scorep->bound_args = column_count(bound);
-
-	return (estimate_literal(planner, relation, bound, &scorep->estimate));
+	return (estimate_measured(planner, relation, bound, &scorep->estimate));
 }
 
 static bool
@@ -755,27 +814,25 @@ positive_count(const relic_rule_t *rule)
 }
 
 /*
- * Place the delta literal first when there is one, then the other positive
- * literals one at a time in the order choose_positive() picks them, and each
- * test at the earliest point its slots are bound.
+ * Decide the order: the delta literal first when there is one, then the
+ * other positive literals one at a time in the order choose_positive() picks
+ * them, and each test at the earliest point its slots are bound.
  *
  * Tests are offered a place before the first literal and after every
  * positive one, which are the only points at which the bound set changes.
  */
 static int
-place_body(relic_planner_t *planner)
+order_body(relic_planner_t *planner)
 {
 	size_t remaining;
 	size_t index;
 
 	remaining = positive_count(planner->rule);
 
-	if (place_ready_tests(planner) != 0)
-		return (-1);
+	order_ready_tests(planner);
 
 	if (planner->delta_literal != RELIC_PLAN_NO_DELTA) {
-		if (place_positive(planner, planner->delta_literal) != 0)
-			return (-1);
+		order_positive(planner, planner->delta_literal);
 		remaining--;
 	}
 
@@ -783,7 +840,35 @@ place_body(relic_planner_t *planner)
 		if (choose_positive(planner, &index) != 0)
 			return (-1);
 
-		if (place_positive(planner, index) != 0)
+		order_positive(planner, index);
+	}
+
+	return (0);
+}
+
+/*
+ * Emit one operation per literal, in the order order_body() decided, from
+ * nothing bound.  Each operation binds what the literal bound when the order
+ * was decided, so every literal meets the bound set it was placed against.
+ */
+static int
+emit_body(relic_planner_t *planner)
+{
+	const relic_literal_t *literal;
+	size_t index;
+	size_t i;
+
+	planner->bound = 0;
+
+	for (i = 0; i < planner->order_count; i++) {
+		index = planner->order[i];
+		literal = &planner->rule->body[index];
+
+		if (literal->kind == RELIC_LITERAL_POSITIVE) {
+			if (place_atom(planner, &literal->u.atom,
+			    index == planner->delta_literal) != 0)
+				return (-1);
+		} else if (place_test(planner, literal) != 0)
 			return (-1);
 	}
 
@@ -822,6 +907,23 @@ confirm_plan_complete(const relic_planner_t *planner, uint16_t head_arity)
 	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
 	    "internal error: the plan leaves a literal out or reads a "
 	    "variable nothing binds");
+
+	return (-1);
+}
+
+/*
+ * Confirm that the order holds every literal of the body.  A checked rule
+ * always passes, for the reason confirm_plan_complete() gives; a literal left
+ * out would be a filter nobody applies.
+ */
+static int
+confirm_order_complete(const relic_planner_t *planner)
+{
+	if (planner->order_count == planner->rule->body_length)
+		return (0);
+
+	relic_diagf(planner->ctx, RELIC_ERROR, &planner->rule->where,
+	    "internal error: the planner could not place every literal");
 
 	return (-1);
 }
@@ -882,6 +984,11 @@ place_emit(relic_planner_t *planner)
 	return (0);
 }
 
+/*
+ * Prepare to order a rule's body: the record of which literals are placed.
+ * The caller supplies where the order goes.  Returns -1 when the arena
+ * refused, which the caller's boundary reports.
+ */
 static int
 planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
     const relic_rule_t *rule, size_t delta_literal, const bool *incomplete)
@@ -893,32 +1000,72 @@ planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
 	planner->incomplete = incomplete;
 	planner->delta_literal = delta_literal;
 
-	/*
-	 * The body length comes from a compiled rule held in memory, so one
-	 * more than it cannot wrap.
-	 */
-	planner->ops = relic_arena_allocarray(arena, rule->body_length + 1,
-	    sizeof(*planner->ops));
 	planner->placed = relic_arena_allocarray(arena, rule->body_length,
 	    sizeof(*planner->placed));
-	if (planner->ops == NULL || planner->placed == NULL)
+	if (planner->placed == NULL)
 		return (-1);
-
 	bzero(planner->placed, rule->body_length * sizeof(bool));
 
 	return (0);
 }
 
+/*
+ * Decide the order of the body and confirm it is complete.
+ */
 static int
-build_plan(relic_planner_t *planner)
+decide_order(relic_planner_t *planner)
 {
 	if (confirm_delta_literal(planner) != 0)
 		return (-1);
 
-	if (place_body(planner) != 0)
+	if (order_body(planner) != 0)
+		return (-1);
+
+	return (confirm_order_complete(planner));
+}
+
+/*
+ * Build the plan: room for the order and the operations, the order, then an
+ * operation per literal and the EMIT.  The body length comes from a compiled
+ * rule held in memory, so one more than it cannot wrap.
+ */
+static int
+build_plan(relic_planner_t *planner)
+{
+	size_t length;
+
+	length = planner->rule->body_length;
+
+	planner->order = relic_arena_allocarray(planner->arena, length,
+	    sizeof(*planner->order));
+	planner->ops = relic_arena_allocarray(planner->arena, length + 1,
+	    sizeof(*planner->ops));
+	if (planner->order == NULL || planner->ops == NULL)
+		return (-1);
+
+	if (decide_order(planner) != 0)
+		return (-1);
+
+	if (emit_body(planner) != 0)
 		return (-1);
 
 	return (place_emit(planner));
+}
+
+/*
+ * Report an arena refusal once, however far into planning it struck, and
+ * turn it into the failure of the whole call.  A relation that could not be
+ * created, or a statistic that could not be computed, reported itself.
+ */
+static int
+planning_status(relic_t *ctx, relic_arena_t *arena, int status)
+{
+	if (relic_arena_failed(arena)) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	return (status);
 }
 
 /*
@@ -951,21 +1098,40 @@ relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	if (status == 0)
 		status = build_plan(&planner);
 
-	/*
-	 * An arena refusal is reported here rather than where it happened, so
-	 * that one exhaustion produces one message however far into the plan
-	 * it struck.  A relation that could not be created reported itself.
-	 */
-	if (relic_arena_failed(arena)) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-
-	if (status != 0)
+	if (planning_status(ctx, arena, status) != 0)
 		return (-1);
 
 	plan->ops = planner.ops;
 	plan->op_count = planner.op_count;
 
 	return (0);
+}
+
+/*
+ * The order the planner would place a rule's body literals in, starting from
+ * the slots in `bound` rather than from nothing.  Fills `order`, which has
+ * room for the body's length, with body indexes.  Returns 0, or -1 with a
+ * diagnostic reported: memory refused a statistic or the arena its scratch,
+ * or the order left a literal out, which is an internal error.
+ *
+ * `incomplete` is as for relic_plan_rule().  Nothing is emitted and no index
+ * is built; the relations of complete predicates are measured, and created
+ * if they do not yet exist.  Scratch space comes from `arena`.
+ */
+int
+relic_plan_order(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
+    uint64_t bound, const bool *incomplete, size_t *order)
+{
+	relic_planner_t planner;
+	int status;
+
+	status = planner_init(&planner, ctx, arena, rule, RELIC_PLAN_NO_DELTA,
+	    incomplete);
+	if (status == 0) {
+		planner.order = order;
+		planner.bound = bound;
+		status = decide_order(&planner);
+	}
+
+	return (planning_status(ctx, arena, status));
 }

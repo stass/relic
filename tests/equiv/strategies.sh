@@ -4,22 +4,35 @@
 #
 # Each registered language test is run several times: once as the default
 # evaluator runs it, and once under each alternative -X selects -- the naive
-# fixed point, and the planner without indexes and without reordering.  Every
-# run must agree with the default on standard output, standard error and exit
-# status.
-# Rows are sorted with -s, because a strategy that derives the same set of
-# tuples in a different order is correct, and the comparison is of sets.
+# fixed point, the planner without indexes and without reordering, and each
+# of those again answering from the whole fixed point instead of through the
+# Magic rewrite.  Every run must agree with the default on standard output,
+# the diagnostics on standard error, and exit status.  The one diagnostic
+# left out is the warning that a rewrite outgrew its budget: it says which
+# strategy answered, which runs without the rewrite never report, and the
+# answer it announces is compared like any other.  Rows are sorted with
+# -s, because a strategy that derives the same set of tuples in a different
+# order is correct, and the comparison is of sets.
 #
-# Queries read only some relations, so each run also prints -X stats, and the
-# runs must agree on how many tuples every relation together holds.  That
-# stands for comparing the relations themselves, given two premises: the
-# naive fixed point is complete, so its total is the size of the program's
-# least model; and the default inserts only tuples the program justifies --
-# by construction, since a delta is a range of its relation, so every match a
-# variant finds, the rule's full plan would find too.  Every tuple the default
-# holds is then in the least model, and holding as many as the model has, it
-# holds all of them.  The other counters describe the work done or the
-# storage used, differ between strategies by design, and are left out.
+# Queries read only some relations, so each run also prints -X stats, and
+# runs that evaluate the same rules must agree on how many tuples every
+# relation together holds.  That stands for comparing the relations
+# themselves, given two premises: the naive fixed point is complete, so its
+# total is the size of the least model of the rules it evaluates; and the
+# default inserts only tuples those rules justify -- by construction, since a
+# delta is a range of its relation, so every match a variant finds, the
+# rule's full plan would find too.  Every tuple the default holds is then in
+# the least model, and holding as many as the model has, it holds all of
+# them.  The other counters describe the work done or the storage used,
+# differ between strategies by design, and are left out.
+#
+# The rules evaluated are the same within each of two groups.  Answering from
+# the whole fixed point evaluates the program's rules, whatever the fixed
+# point or the planner.  The Magic rewrite evaluates rules generated in the
+# order the planner chooses for each body, and neither the naive fixed point
+# nor the planner without indexes changes that order; the planner without
+# reordering does, so under the rewrite it generates other rules, and only
+# its answers are compared.
 #
 # A comparison between two runs that both went wrong the same way would pass,
 # so the default run is also held to the test's golden output wherever the
@@ -31,7 +44,8 @@
 # strategies without anyone deciding that it should be.  A test that chooses
 # a strategy itself, with -X in its options, is about that strategy and is
 # left to its own expectations, and so is one that shows its plans with -e,
-# since the plans are what the alternatives change.
+# since the plans are what the alternatives change, and one that limits the
+# Magic rewrite, which only some of the alternatives run.
 
 set -eu
 
@@ -39,8 +53,15 @@ set -eu
 : "${RELIC_SRCDIR:?RELIC_SRCDIR must name the source directory}"
 : "${RELIC_LANG_TESTS:?RELIC_LANG_TESTS must list the registered tests}"
 
-# The -X names of the strategies compared against the default.
-strategies="naive no-index no-reorder"
+# The strategies compared, each its -X names joined by `+`.  Those in
+# `same_rules` evaluate the default's rules and are held to its tuple total
+# too, and those in `other_rules` only to its answers.  The no-magic run is
+# compared with the default on its answers, and is the reference whose tuple
+# total those in `whole_rules`, which answer from the whole fixed point too,
+# are held to.
+same_rules="naive no-index"
+other_rules="no-reorder"
+whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic"
 
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT HUP INT TERM
@@ -58,9 +79,38 @@ run() {
 	    > "$work/$label.out" 2> "$work/$label.all" || status=$?
 	echo "$status" > "$work/$label.status"
 
-	grep -v -e '^stats: ' "$work/$label.all" > "$work/$label.err" || true
+	grep -v -e '^stats: ' -e "Magic rewrite outgrew its budget" \
+	    "$work/$label.all" > "$work/$label.err" || true
 	grep -e '^stats: tuples held ' "$work/$label.all" \
-	    >> "$work/$label.err" || true
+	    > "$work/$label.held" || true
+}
+
+# Run the strategy whose -X names `label` joins with `+`.
+run_strategy() {
+	label=$1
+	options=""
+	for name in $(echo "$label" | tr '+' ' '); do
+		options="$options -X $name"
+	done
+
+	run "$label" $options
+}
+
+# Compare the named parts of two runs, reporting each that differs.
+compare() {
+	reference=$1
+	label=$2
+	shift 2
+
+	for part in "$@"; do
+		if ! cmp -s "$work/$reference.$part" "$work/$label.$part"; then
+			echo "$path: $label differs from $reference in its" \
+			    "$part:" >&2
+			diff -u "$work/$reference.$part" \
+			    "$work/$label.$part" >&2 || true
+			failures=$((failures + 1))
+		fi
+	done
 }
 
 set -f
@@ -85,7 +135,7 @@ for path in $RELIC_LANG_TESTS; do
 	fi
 
 	case " $args " in
-	*" -X"* | *" -e"*)
+	*" -X"* | *" -e"* | *" -l magic-"*)
 		continue
 		;;
 	esac
@@ -103,19 +153,22 @@ for path in $RELIC_LANG_TESTS; do
 		;;
 	esac
 
-	for strategy in $strategies; do
-		run "$strategy" -X "$strategy"
+	for strategy in $same_rules; do
+		run_strategy "$strategy"
+		compare default "$strategy" out err status held
+	done
 
-		for part in out err status; do
-			if ! cmp -s "$work/default.$part" \
-			    "$work/$strategy.$part"; then
-				echo "$path: -X $strategy differs from the" \
-				    "default in its $part:" >&2
-				diff -u "$work/default.$part" \
-				    "$work/$strategy.$part" >&2 || true
-				failures=$((failures + 1))
-			fi
-		done
+	for strategy in $other_rules; do
+		run_strategy "$strategy"
+		compare default "$strategy" out err status
+	done
+
+	run_strategy no-magic
+	compare default no-magic out err status
+
+	for strategy in $whole_rules; do
+		run_strategy "$strategy"
+		compare no-magic "$strategy" out err status held
 	done
 
 	compared=$((compared + 1))

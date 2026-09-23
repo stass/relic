@@ -33,19 +33,11 @@
  *
  * The analysis is rebuilt from nothing whenever the program has gained rules
  * since the schedule was made.  It is linear in the size of the program, and
- * it happens once per load.
+ * it happens once per load.  The same analysis schedules the rules a query's
+ * Magic rewrite generates, which is how they are evaluated by the engine that
+ * evaluates the program, and is what would catch a rewrite that recursed
+ * through negation.
  */
-
-/*
- * How an analysis ended.  The two failures mean opposite things to the
- * program: a cycle is a mistake in it, and stays; running out of memory says
- * nothing about it, and the next check tries again.
- */
-enum relic_analysis_result {
-	RELIC_ANALYSIS_STRATIFIED,
-	RELIC_ANALYSIS_UNSTRATIFIED,
-	RELIC_ANALYSIS_INCOMPLETE
-};
 
 /* No edge: a component through which no negation recurses. */
 #define	RELIC_NO_EDGE	SIZE_MAX
@@ -67,16 +59,17 @@ struct relic_cycle_search {
 };
 
 /*
- * One analysis of the program: the graph, and what is derived from it per
- * component, all in the scratch arena that is released when the analysis
- * ends.  `strata`, `recursive` and `rule_counts` -- the number of program
- * rules whose head each component holds -- are indexed by component number.
+ * One analysis of a table of rules: the graph, and what is derived from it
+ * per component, all in the scratch arena that is released when the analysis
+ * ends.  `strata`, `recursive` and `rule_counts` -- the number of rules whose
+ * head each component holds -- are indexed by component number.
  *
  * `search` is allocated only when a cycle is found, since a stratified
  * program never needs it.
  */
 struct relic_analysis {
 	relic_t			*ctx;
+	const relic_ruletab_t	*rules;
 	relic_arena_t		 scratch;
 	relic_depgraph_t	 graph;
 	relic_cycle_search_t	 search;
@@ -142,7 +135,7 @@ note_edge(relic_analysis_t *analysis, const relic_dep_edge_t *edge)
 	char source[RELIC_PRED_TEXT_MAX];
 	char target[RELIC_PRED_TEXT_MAX];
 
-	rule = &analysis->ctx->program.rules.entries[edge->rule_index];
+	rule = &analysis->rules->entries[edge->rule_index];
 
 	relic_pred_describe(analysis->ctx, relic_depgraph_pred(edge->source),
 	    source, sizeof(source));
@@ -273,7 +266,7 @@ report_cycle(relic_analysis_t *analysis, const relic_dep_edge_t *negative)
 	size_t length;
 	size_t i;
 
-	rule = &analysis->ctx->program.rules.entries[negative->rule_index];
+	rule = &analysis->rules->entries[negative->rule_index];
 	length = shortest_path(analysis, negative->target, negative->source);
 
 	relic_diagf(analysis->ctx, RELIC_ERROR, &rule->where,
@@ -490,7 +483,7 @@ assign_strata(relic_analysis_t *analysis)
 }
 
 /*
- * Count the program rules each component holds the head of.
+ * Count the rules each component holds the head of.
  */
 static int
 count_rules(relic_analysis_t *analysis)
@@ -500,7 +493,7 @@ count_rules(relic_analysis_t *analysis)
 	size_t r;
 	uint32_t component;
 
-	rules = &analysis->ctx->program.rules;
+	rules = analysis->rules;
 	graph = &analysis->graph;
 
 	analysis->rule_counts = relic_arena_allocarray(&analysis->scratch,
@@ -582,12 +575,12 @@ order_by_stratum(relic_analysis_t *analysis, uint32_t *order, size_t *countp)
 
 /*
  * Write the schedule's contents, which build_schedule() has allocated: the
- * components in `order`, their members, and every program rule grouped by
- * the component holding its head.
+ * components in `order`, their members, and every rule grouped by the
+ * component holding its head.
  *
  * Laying out the components fixes where each one's rules begin.  The rules
- * are then placed by walking the program in order and appending each to its
- * component's stretch, which keeps program order within a component;
+ * are then placed by walking the table in order and appending each to its
+ * component's stretch, which keeps table order within a component;
  * `next_rule`, indexed by component number, is where the next rule of each
  * component goes.
  */
@@ -606,7 +599,7 @@ fill_schedule(const relic_analysis_t *analysis, const uint32_t *order,
 	uint32_t c;
 
 	graph = &analysis->graph;
-	rules = &analysis->ctx->program.rules;
+	rules = analysis->rules;
 
 	member_cursor = 0;
 	rule_cursor = 0;
@@ -696,8 +689,7 @@ build_schedule(relic_analysis_t *analysis, relic_schedule_t *schedule)
 	schedule->members = relic_arena_allocarray(&schedule->arena, members,
 	    sizeof(*schedule->members));
 	schedule->rule_indexes = relic_arena_allocarray(&schedule->arena,
-	    analysis->ctx->program.rules.count,
-	    sizeof(*schedule->rule_indexes));
+	    analysis->rules->count, sizeof(*schedule->rule_indexes));
 	if (relic_arena_failed(&schedule->arena))
 		return (-1);
 
@@ -715,8 +707,8 @@ analyse_program(relic_analysis_t *analysis, relic_schedule_t *schedule)
 {
 	enum relic_analysis_result result;
 
-	if (relic_depgraph_build(analysis->ctx, &analysis->scratch,
-	    &analysis->graph) != 0)
+	if (relic_depgraph_build(analysis->ctx, analysis->rules,
+	    &analysis->scratch, &analysis->graph) != 0)
 		return (RELIC_ANALYSIS_INCOMPLETE);
 
 	result = report_negative_cycles(analysis);
@@ -750,6 +742,32 @@ install_schedule(relic_program_t *program, relic_schedule_t *schedule)
 }
 
 /*
+ * Analyse a table of rules into a schedule, which must be freshly
+ * initialized.  Returns RELIC_ANALYSIS_STRATIFIED with the schedule filled
+ * in; RELIC_ANALYSIS_UNSTRATIFIED having reported every cycle through
+ * negation; or RELIC_ANALYSIS_INCOMPLETE when memory ran out, which the caller
+ * reports.  On either failure the caller resets the schedule, which may hold
+ * part of what was being built.
+ */
+enum relic_analysis_result
+relic_schedule_build(relic_t *ctx, const relic_ruletab_t *rules,
+    relic_schedule_t *schedule)
+{
+	relic_analysis_t analysis;
+	enum relic_analysis_result result;
+
+	bzero(&analysis, sizeof(analysis));
+	analysis.ctx = ctx;
+	analysis.rules = rules;
+	relic_arena_init(&analysis.scratch);
+
+	result = analyse_program(&analysis, schedule);
+	relic_arena_reset(&analysis.scratch);
+
+	return (result);
+}
+
+/*
  * Bring the program's schedule up to date with its rules, rejecting the
  * program when it is not stratified.
  *
@@ -767,7 +785,6 @@ int
 relic_stratify(relic_t *ctx)
 {
 	relic_program_t *program;
-	relic_analysis_t analysis;
 	relic_schedule_t schedule;
 	enum relic_analysis_result result;
 
@@ -775,13 +792,8 @@ relic_stratify(relic_t *ctx)
 	if (program->unstratified || relic_schedule_is_current(program))
 		return (0);
 
-	bzero(&analysis, sizeof(analysis));
-	analysis.ctx = ctx;
-	relic_arena_init(&analysis.scratch);
 	relic_schedule_init(&schedule);
-
-	result = analyse_program(&analysis, &schedule);
-	relic_arena_reset(&analysis.scratch);
+	result = relic_schedule_build(ctx, &program->rules, &schedule);
 
 	if (result == RELIC_ANALYSIS_STRATIFIED) {
 		install_schedule(program, &schedule);

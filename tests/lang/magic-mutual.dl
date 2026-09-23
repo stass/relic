@@ -1,0 +1,22 @@
+% Mutually recursive predicates under the Magic rewrite.  even and odd call
+% each other with the first column bound, so the rewrite records one
+% adornment for each and stops: memoizing adornments on the predicate and
+% its bound columns is what keeps the rewritten program finite.  The queries
+% bind each column in turn, and bind neither, which reads both predicates
+% through their all-free adornments.
+
+next(n0, n1).
+next(n1, n2).
+next(n2, n3).
+next(n3, n4).
+next(n4, n5).
+next(m0, m1).
+
+even(X, X) :- next(X, _).
+even(X, Z) :- next(X, Y), odd(Y, Z).
+odd(X, Z) :- next(X, Y), even(Y, Z).
+
+even(n0, Y)?
+odd(X, n4)?
+even(n0, n4)?
+odd(X, Y)?

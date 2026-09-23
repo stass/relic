@@ -1,0 +1,12 @@
+% With -a the whole program is evaluated before the first query, and a query
+% is then answered from what that derived rather than through its Magic
+% rewrite: -e shows the program's components and then each query's own plan
+% over the original predicates, with no rewrite between them.
+
+edge(a, b).
+edge(b, c).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+
+path(a, X)?

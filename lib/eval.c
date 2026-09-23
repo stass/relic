@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <strings.h>
 
 #include "internal.h"
@@ -85,6 +86,15 @@
  * tuple, and the discard of every relation runs only before an evaluation
  * begins -- so the tuples a relation gained in one round are exactly those
  * between its end before the round and its end after it.
+ *
+ * A round runs only the variants reading a member that gained something in
+ * the round before.  A variant's delta literal is its first operation, so a
+ * variant over an empty delta matches nothing and derives nothing, and
+ * skipping it changes nothing but the cost.  Running the others in the order
+ * they were planned makes a round do exactly what running every variant
+ * would, while costing what changed rather than what the component holds: a
+ * recursive chain of a hundred thousand predicates takes as many rounds as it
+ * is long, and each round touches one of them.
  */
 
 /*
@@ -99,6 +109,7 @@ enum relic_fixed_point {
 };
 
 typedef struct relic_component_plans relic_component_plans_t;
+typedef struct relic_delta_work relic_delta_work_t;
 typedef struct relic_evaluation relic_evaluation_t;
 typedef struct relic_running_plan relic_running_plan_t;
 
@@ -116,13 +127,44 @@ typedef struct relic_running_plan relic_running_plan_t;
  * does.
  *
  * `rule` and `delta_literal` are what the plan was built from, kept so that
- * the plan can be explained.
+ * the plan can be explained.  `head_member` is the position of the rule's
+ * head among the members of its component, which is what a semi-naive round
+ * records as having gained when the plan inserts something; a query's plan
+ * belongs to no component and leaves it zero.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
 	relic_tuple_range_t	*cursors;
 	const relic_rule_t	*rule;
 	size_t			 delta_literal;
+	size_t			 head_member;
+};
+
+/*
+ * Which variants the next semi-naive round runs.
+ *
+ * `by_member` holds the indexes of the component's variants grouped by the
+ * member their delta literal reads, ascending within each member: those of
+ * member m are by_member[first_of_member[m]] up to
+ * by_member[first_of_member[m + 1]].
+ *
+ * `gained` lists the members that have gained a tuple in the round being run,
+ * each once, which `in_gained` marks.  When the next round starts they become
+ * `changed`, the members whose deltas it reads, and `gained` starts again
+ * empty.  `due` is where a round gathers the variants it runs.
+ *
+ * Everything is sized when the component is planned, so a round allocates
+ * nothing and cannot fail except by an insertion.
+ */
+struct relic_delta_work {
+	size_t	*by_member;
+	size_t	*first_of_member;
+	size_t	*gained;
+	size_t	*changed;
+	size_t	*due;
+	bool	*in_gained;
+	size_t	 gained_count;
+	size_t	 changed_count;
 };
 
 /*
@@ -138,14 +180,15 @@ struct relic_running_plan {
  * resolved when the component is planned, which can fail, so that advancing
  * the deltas between rounds cannot.
  *
- * `fixed_point` is how the component is evaluated.  The variants exist
- * exactly when it is RELIC_FIXED_SEMI_NAIVE, because the one decision sets
- * both.
+ * `fixed_point` is how the component is evaluated.  The variants and the
+ * `work` of running them exist exactly when it is RELIC_FIXED_SEMI_NAIVE,
+ * because the one decision sets both.
  */
 struct relic_component_plans {
 	relic_running_plan_t	 *base;
 	relic_running_plan_t	 *variants;
 	relic_relation_t	**members;
+	relic_delta_work_t	  work;
 	size_t			  base_count;
 	size_t			  variant_count;
 	size_t			  member_count;
@@ -161,8 +204,10 @@ struct relic_component_plans {
  * restored on backtracking, because no operation reads a slot a later one
  * binds.
  *
- * `components` holds the plans of each component of the schedule, at the
- * same position, or of the single query an answer is computed for.  They and
+ * `rules` is the table the schedule's rule indexes refer to: the program's,
+ * or those a query's Magic rewrite generated.  `components` holds the plans
+ * of each component of the schedule, at the same position, or of the single
+ * query an answer is computed for.  They and
  * everything they point at live in the evaluation arena.  A component's
  * plans are allocated before any of them runs, so nothing is allocated while
  * a plan runs; only the relation store grows then.
@@ -176,6 +221,8 @@ struct relic_component_plans {
  * `is_member` marks the members of the component being planned, which is how
  * a literal is recognized as one that needs a delta variant, and is what
  * tells the planner which relations are still being derived.
+ * `member_position` gives each marked member its position among the
+ * component's members, and means nothing for a predicate not marked.
  *
  * `derived` is set whenever an EMIT inserts a tuple the relation did not
  * already hold, which is how a naive pass learns that the fixed point has not
@@ -183,23 +230,33 @@ struct relic_component_plans {
  */
 struct relic_evaluation {
 	relic_t			*ctx;
+	const relic_ruletab_t	*rules;
 	relic_component_plans_t	*components;
 	size_t			 component_count;
 	relic_tuple_range_t	*deltas;
 	bool			*is_member;
+	size_t			*member_position;
 	size_t			 predicate_count;
 	relic_dom_t		 frame[RELIC_MAX_VARIABLES];
 	bool			 derived;
 };
 
-static bool	 advance_deltas(relic_evaluation_t *eval,
-		    const relic_component_plans_t *plans);
+static int	 allocate_delta_work(relic_evaluation_t *eval,
+		    relic_delta_work_t *work, size_t variants, size_t members);
+static int	 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
+		    const relic_rule_t *query);
+static int	 answer_from_program(relic_t *ctx, const relic_rule_t *query);
+static int	 answer_through_rewrite(relic_t *ctx,
+		    const relic_rule_t *query);
 static int	 build_running_plan(relic_evaluation_t *eval,
 		    const relic_rule_t *rule, size_t delta_literal,
 		    relic_running_plan_t *running);
 static enum relic_fixed_point choose_fixed_point(const relic_t *ctx,
 		    const relic_component_t *component);
+static int	 compare_indexes(const void *a, const void *b);
 static int	 confirm_schedule_current(relic_t *ctx);
+static size_t	 delta_member_of(const relic_evaluation_t *eval,
+		    const relic_running_plan_t *variant);
 static void	 discard_derived_state(relic_t *ctx);
 static size_t	 count_member_literals(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
@@ -210,7 +267,12 @@ static int	 evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
 static int	 evaluation_track_deltas(relic_evaluation_t *eval);
 static void	 evaluation_end(relic_evaluation_t *eval);
 static int	 evaluate_component(relic_evaluation_t *eval,
-		    const relic_component_plans_t *plans);
+		    relic_component_plans_t *plans);
+static int	 evaluate_rewrite(relic_t *ctx, relic_magic_t *magic,
+		    const relic_rule_t *query);
+static int	 evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
+		    const relic_schedule_t *schedule, const bool *wanted,
+		    unsigned depth);
 static void	 build_tuple(const relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom, relic_dom_t *tuple);
 static bool	 comparison_holds(const relic_t *ctx,
@@ -218,9 +280,12 @@ static bool	 comparison_holds(const relic_t *ctx,
 		    relic_dom_t right);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
+static size_t	 gather_due_variants(relic_delta_work_t *work);
+static size_t	 head_member_of(const relic_evaluation_t *eval,
+		    const relic_rule_t *rule);
 static void	 explain_component(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule, size_t position,
-		    const relic_component_plans_t *plans);
+		    const relic_component_plans_t *plans, unsigned depth);
 static bool	 literal_reads_member(const relic_evaluation_t *eval,
 		    const relic_literal_t *literal);
 static void	 mark_members(relic_evaluation_t *eval,
@@ -232,6 +297,8 @@ static int	 naive_fixed_point(relic_evaluation_t *eval,
 static int	 plan_base(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component,
+		    relic_component_plans_t *plans);
+static int	 plan_delta_work(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 plan_component(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
@@ -250,12 +317,18 @@ static int	 plan_variants(relic_evaluation_t *eval,
 static const relic_rule_t *rule_of(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component, size_t i);
+static int	 run_query_rule(relic_t *ctx, const relic_rule_t *rule);
 static int	 run_plans(relic_evaluation_t *eval,
 		    const relic_running_plan_t *plans, size_t count);
+static int	 run_recording_gain(relic_evaluation_t *eval,
+		    relic_delta_work_t *work,
+		    const relic_running_plan_t *running);
 static int	 semi_naive_fixed_point(relic_evaluation_t *eval,
-		    const relic_component_plans_t *plans);
+		    relic_component_plans_t *plans);
 static void	 start_deltas(relic_evaluation_t *eval,
-		    const relic_component_plans_t *plans);
+		    relic_component_plans_t *plans);
+static void	 take_deltas(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
 static int	 step(relic_evaluation_t *eval, const relic_op_t *op,
 		    relic_tuple_range_t *cursor, bool resume, bool *matchedp);
 static int	 step_emit(relic_evaluation_t *eval,
@@ -634,10 +707,11 @@ naive_fixed_point(relic_evaluation_t *eval,
 
 /*
  * Give every member an empty delta positioned at its current end, so that
- * the first advance measures what the first round inserts.
+ * the first delta taken holds what the first round inserts, and record that
+ * no member has gained anything yet.
  */
 static void
-start_deltas(relic_evaluation_t *eval, const relic_component_plans_t *plans)
+start_deltas(relic_evaluation_t *eval, relic_component_plans_t *plans)
 {
 	const relic_relation_t *member;
 	size_t i;
@@ -646,55 +720,142 @@ start_deltas(relic_evaluation_t *eval, const relic_component_plans_t *plans)
 		member = plans->members[i];
 		eval->deltas[member->pred - 1] = relic_relation_since(member,
 		    relic_relation_end(member));
+		plans->work.in_gained[i] = false;
 	}
+
+	plans->work.gained_count = 0;
 }
 
 /*
- * Make each member's delta the tuples it gained in the round just run: from
- * where the previous delta ended to where the relation ends now.  Returns
- * whether any member gained a tuple, which is whether another round is
- * needed.
+ * Run one plan of a component being evaluated semi-naively, recording its
+ * head as having gained when the plan inserted a tuple.  Every insertion
+ * during the component's evaluation is into the head of the plan making it,
+ * which is a member, so this records every member that gains.
  */
-static bool
-advance_deltas(relic_evaluation_t *eval, const relic_component_plans_t *plans)
+static int
+run_recording_gain(relic_evaluation_t *eval, relic_delta_work_t *work,
+    const relic_running_plan_t *running)
 {
-	const relic_relation_t *member;
-	relic_tuple_range_t *delta;
-	bool gained;
-	size_t i;
+	eval->derived = false;
+	if (execute_plan(eval, running) != 0)
+		return (-1);
 
-	gained = false;
-
-	for (i = 0; i < plans->member_count; i++) {
-		member = plans->members[i];
-		delta = &eval->deltas[member->pred - 1];
-
-		*delta = relic_relation_since(member, delta->end);
-		if (delta->first < delta->end)
-			gained = true;
+	if (eval->derived && !work->in_gained[running->head_member]) {
+		work->in_gained[running->head_member] = true;
+		work->gained[work->gained_count++] = running->head_member;
 	}
 
-	return (gained);
+	return (0);
+}
+
+/*
+ * Begin a round: the members that gained in the round before become the
+ * ones whose deltas this round reads, each delta becomes the tuples its
+ * member gained since the previous one was taken, and nothing has gained in
+ * this round yet.
+ *
+ * A member that did not gain keeps its old delta, which no variant this
+ * round reads: only a variant whose delta literal reads a member that gained
+ * is run.
+ */
+static void
+take_deltas(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	relic_delta_work_t *work;
+	const relic_relation_t *member;
+	relic_tuple_range_t *delta;
+	size_t *swap;
+	size_t i;
+
+	work = &plans->work;
+
+	swap = work->changed;
+	work->changed = work->gained;
+	work->changed_count = work->gained_count;
+	work->gained = swap;
+	work->gained_count = 0;
+
+	for (i = 0; i < work->changed_count; i++) {
+		work->in_gained[work->changed[i]] = false;
+
+		member = plans->members[work->changed[i]];
+		delta = &eval->deltas[member->pred - 1];
+		*delta = relic_relation_since(member, delta->end);
+	}
+}
+
+static int
+compare_indexes(const void *a, const void *b)
+{
+	size_t left;
+	size_t right;
+
+	left = *(const size_t *)a;
+	right = *(const size_t *)b;
+
+	return ((left > right) - (left < right));
+}
+
+/*
+ * Gather into `due` the variants reading a member whose delta this round
+ * reads, in the order they were planned, and return how many there are.  A
+ * variant appears once, because it has one delta literal.
+ */
+static size_t
+gather_due_variants(relic_delta_work_t *work)
+{
+	size_t member;
+	size_t count;
+	size_t i;
+	size_t j;
+
+	count = 0;
+	for (i = 0; i < work->changed_count; i++) {
+		member = work->changed[i];
+		for (j = work->first_of_member[member];
+		    j < work->first_of_member[member + 1]; j++)
+			work->due[count++] = work->by_member[j];
+	}
+
+	qsort(work->due, count, sizeof(*work->due), compare_indexes);
+
+	return (count);
 }
 
 /*
  * Run every plan of a component once, then its delta variants round after
- * round until a round inserts nothing.
+ * round until a round inserts nothing.  Each round runs only the variants
+ * whose delta holds something, in planning order.
  */
 static int
 semi_naive_fixed_point(relic_evaluation_t *eval,
-    const relic_component_plans_t *plans)
+    relic_component_plans_t *plans)
 {
+	relic_delta_work_t *work;
+	size_t due_count;
+	size_t i;
+
+	work = &plans->work;
+
 	start_deltas(eval, plans);
 
 	eval->ctx->counters.iterations++;
-	if (run_plans(eval, plans->base, plans->base_count) != 0)
-		return (-1);
-
-	while (advance_deltas(eval, plans)) {
-		eval->ctx->counters.iterations++;
-		if (run_plans(eval, plans->variants, plans->variant_count) != 0)
+	for (i = 0; i < plans->base_count; i++) {
+		if (run_recording_gain(eval, work, &plans->base[i]) != 0)
 			return (-1);
+	}
+
+	while (work->gained_count > 0) {
+		eval->ctx->counters.iterations++;
+
+		take_deltas(eval, plans);
+		due_count = gather_due_variants(work);
+
+		for (i = 0; i < due_count; i++) {
+			if (run_recording_gain(eval, work,
+			    &plans->variants[work->due[i]]) != 0)
+				return (-1);
+		}
 	}
 
 	return (0);
@@ -763,6 +924,11 @@ evaluation_track_deltas(relic_evaluation_t *eval)
 	bzero(eval->is_member, eval->predicate_count *
 	    sizeof(*eval->is_member));
 
+	eval->member_position = evaluation_alloc(eval, eval->predicate_count,
+	    sizeof(*eval->member_position));
+	if (eval->member_position == NULL)
+		return (-1);
+
 	return (0);
 }
 
@@ -780,6 +946,7 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 {
 	running->rule = rule;
 	running->delta_literal = delta_literal;
+	running->head_member = 0;
 
 	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule,
 	    delta_literal, eval->is_member, &running->plan) != 0)
@@ -811,7 +978,7 @@ static const relic_rule_t *
 rule_of(const relic_evaluation_t *eval, const relic_schedule_t *schedule,
     const relic_component_t *component, size_t i)
 {
-	return (&eval->ctx->program.rules.entries[
+	return (&eval->rules->entries[
 	    schedule->rule_indexes[component->first_rule + i]]);
 }
 
@@ -828,6 +995,7 @@ mark_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 	for (i = 0; i < component->member_count; i++) {
 		member = schedule->members[component->first_member + i];
 		eval->is_member[member - 1] = is_member;
+		eval->member_position[member - 1] = i;
 	}
 }
 
@@ -955,6 +1123,117 @@ plan_variants(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 }
 
 /*
+ * Where, among the members of the component being planned, a rule's head
+ * is, and where the member a variant's delta literal reads is.  The members
+ * must be marked.
+ */
+static size_t
+head_member_of(const relic_evaluation_t *eval, const relic_rule_t *rule)
+{
+	return (eval->member_position[rule->head - 1]);
+}
+
+static size_t
+delta_member_of(const relic_evaluation_t *eval,
+    const relic_running_plan_t *variant)
+{
+	return (eval->member_position[
+	    variant->rule->body[variant->delta_literal].u.atom.pred - 1]);
+}
+
+/*
+ * Allocate the arrays of a component's delta work, each checked before the
+ * next is asked for, since a refused request leaves the arena refusing and
+ * each refusal would be reported again.
+ */
+static int
+allocate_delta_work(relic_evaluation_t *eval, relic_delta_work_t *work,
+    size_t variants, size_t members)
+{
+	work->by_member = evaluation_alloc(eval, variants,
+	    sizeof(*work->by_member));
+	if (work->by_member == NULL)
+		return (-1);
+
+	work->due = evaluation_alloc(eval, variants, sizeof(*work->due));
+	if (work->due == NULL)
+		return (-1);
+
+	work->first_of_member = evaluation_alloc(eval, members + 1,
+	    sizeof(*work->first_of_member));
+	if (work->first_of_member == NULL)
+		return (-1);
+
+	work->gained = evaluation_alloc(eval, members, sizeof(*work->gained));
+	if (work->gained == NULL)
+		return (-1);
+
+	work->changed = evaluation_alloc(eval, members, sizeof(*work->changed));
+	if (work->changed == NULL)
+		return (-1);
+
+	work->in_gained = evaluation_alloc(eval, members,
+	    sizeof(*work->in_gained));
+	if (work->in_gained == NULL)
+		return (-1);
+
+	return (0);
+}
+
+/*
+ * Prepare what a semi-naive round needs to run only the variants that can
+ * derive something: the member each plan's head is, and the variants
+ * grouped by the member their delta literal reads.  The grouping is a
+ * counting sort over the variants in planning order, so each member's
+ * variants stay ascending.  The members must be marked.
+ */
+static int
+plan_delta_work(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	relic_delta_work_t *work;
+	size_t *next;
+	size_t member;
+	size_t members;
+	size_t i;
+
+	work = &plans->work;
+	members = plans->member_count;
+
+	if (allocate_delta_work(eval, work, plans->variant_count,
+	    members) != 0)
+		return (-1);
+
+	next = evaluation_alloc(eval, members, sizeof(*next));
+	if (next == NULL)
+		return (-1);
+
+	for (i = 0; i < plans->base_count; i++)
+		plans->base[i].head_member = head_member_of(eval,
+		    plans->base[i].rule);
+
+	bzero(work->first_of_member,
+	    (members + 1) * sizeof(*work->first_of_member));
+	for (i = 0; i < plans->variant_count; i++) {
+		plans->variants[i].head_member = head_member_of(eval,
+		    plans->variants[i].rule);
+		member = delta_member_of(eval, &plans->variants[i]);
+		work->first_of_member[member + 1]++;
+	}
+
+	for (member = 0; member < members; member++) {
+		work->first_of_member[member + 1] += work->first_of_member[member];
+		next[member] = work->first_of_member[member];
+	}
+
+	for (i = 0; i < plans->variant_count; i++) {
+		member = delta_member_of(eval, &plans->variants[i]);
+		work->by_member[next[member]++] = i;
+	}
+
+	return (0);
+}
+
+/*
  * How a component is to reach its fixed point: in one pass when it is not
  * recursive, and otherwise by the strategy the context was configured with.
  */
@@ -992,6 +1271,8 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 	status = plan_base(eval, schedule, component, plans);
 	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
 		status = plan_variants(eval, schedule, component, plans);
+	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
+		status = plan_delta_work(eval, plans);
 
 	mark_members(eval, schedule, component, false);
 
@@ -1010,7 +1291,7 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 static void
 explain_component(const relic_evaluation_t *eval,
     const relic_schedule_t *schedule, size_t position,
-    const relic_component_plans_t *plans)
+    const relic_component_plans_t *plans, unsigned depth)
 {
 	const relic_running_plan_t *base;
 	size_t facts;
@@ -1026,7 +1307,7 @@ explain_component(const relic_evaluation_t *eval,
 			facts++;
 	}
 
-	relic_explain_component(eval->ctx, schedule, position, facts);
+	relic_explain_component(eval->ctx, schedule, position, facts, depth);
 
 	variant = 0;
 	for (i = 0; i < plans->base_count; i++) {
@@ -1034,13 +1315,13 @@ explain_component(const relic_evaluation_t *eval,
 		if (base->rule->body_length == 0)
 			continue;
 
-		relic_explain_rule(eval->ctx, base->rule, &base->plan);
+		relic_explain_rule(eval->ctx, base->rule, &base->plan, depth);
 
 		for (; variant < plans->variant_count &&
 		    plans->variants[variant].rule == base->rule; variant++)
 			relic_explain_variant(eval->ctx, base->rule,
 			    plans->variants[variant].delta_literal,
-			    &plans->variants[variant].plan);
+			    &plans->variants[variant].plan, depth);
 	}
 }
 
@@ -1073,8 +1354,7 @@ plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
  * one pass derives everything they ever will.
  */
 static int
-evaluate_component(relic_evaluation_t *eval,
-    const relic_component_plans_t *plans)
+evaluate_component(relic_evaluation_t *eval, relic_component_plans_t *plans)
 {
 	switch (plans->fixed_point) {
 	case RELIC_FIXED_ONE_PASS:
@@ -1123,26 +1403,61 @@ discard_derived_state(relic_t *ctx)
 }
 
 /*
+ * Plan and evaluate the components of a schedule over a table of rules, in
+ * schedule order, each once every component before it is complete.  With
+ * `wanted`, only the components it marks are evaluated; they must be closed
+ * under dependency, so that everything a wanted component reads is wanted
+ * too.  `depth` is how far the explanation of each component is indented.
+ */
+static int
+evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
+    const relic_schedule_t *schedule, const bool *wanted, unsigned depth)
+{
+	relic_component_plans_t *plans;
+	relic_evaluation_t eval;
+	size_t i;
+	int status;
+
+	status = evaluation_begin(&eval, ctx, schedule->component_count);
+	eval.rules = rules;
+	if (status == 0)
+		status = evaluation_track_deltas(&eval);
+
+	for (i = 0; status == 0 && i < schedule->component_count; i++) {
+		if (wanted != NULL && !wanted[i])
+			continue;
+
+		plans = &eval.components[i];
+
+		status = plan_component(&eval, schedule,
+		    &schedule->components[i], plans);
+		if (status != 0)
+			break;
+
+		explain_component(&eval, schedule, i, plans, depth);
+		status = evaluate_component(&eval, plans);
+	}
+
+	evaluation_end(&eval);
+
+	return (status);
+}
+
+/*
  * Bring the relations to the fixed point of every rule of the program, one
  * component of the schedule at a time.
  *
  * Rules are only ever appended, so the relations are current exactly when no
  * rule has been added since they were last brought to a fixed point, and
  * then nothing needs doing.  Otherwise what they hold is stale -- the fixed
- * point of an earlier program, or part of one an evaluation that failed was
- * computing -- and it is discarded before every component is planned and
- * evaluated in schedule order.  The discard comes before the evaluation
- * begins, so no delta range can span it.
+ * point of an earlier program, part of one an evaluation that failed was
+ * computing, or what a query's Magic rewrite derived -- and it is discarded
+ * before every component is planned and evaluated in schedule order.  The
+ * discard comes before the evaluation begins, so no delta range can span it.
  */
 static int
 materialize_program(relic_t *ctx)
 {
-	const relic_schedule_t *schedule;
-	relic_component_plans_t *plans;
-	relic_evaluation_t eval;
-	size_t i;
-	int status;
-
 	if (ctx->materialized_rules == ctx->program.rules.count)
 		return (0);
 
@@ -1151,27 +1466,8 @@ materialize_program(relic_t *ctx)
 
 	discard_derived_state(ctx);
 
-	schedule = &ctx->program.schedule;
-
-	status = evaluation_begin(&eval, ctx, schedule->component_count);
-	if (status == 0)
-		status = evaluation_track_deltas(&eval);
-
-	for (i = 0; status == 0 && i < schedule->component_count; i++) {
-		plans = &eval.components[i];
-
-		status = plan_component(&eval, schedule,
-		    &schedule->components[i], plans);
-		if (status != 0)
-			break;
-
-		explain_component(&eval, schedule, i, plans);
-		status = evaluate_component(&eval, plans);
-	}
-
-	evaluation_end(&eval);
-
-	if (status != 0)
+	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
+	    NULL, 0) != 0)
 		return (-1);
 
 	ctx->materialized_rules = ctx->program.rules.count;
@@ -1234,11 +1530,158 @@ stream_answer(relic_t *ctx, const relic_relation_t *answer,
 }
 
 /*
- * Answer a query: bring the program to its fixed point, run the query's rule
- * once into its answer relation, and stream that relation.
+ * Run a query's rule once into its answer relation, every relation it reads
+ * being complete.  One pass computes the answer completely, because the
+ * answer predicate appears in no body: its name holds `$`, which nothing a
+ * program writes can.
+ */
+static int
+run_query_rule(relic_t *ctx, const relic_rule_t *rule)
+{
+	relic_evaluation_t eval;
+	int status;
+
+	status = evaluation_begin(&eval, ctx, 1);
+	if (status == 0)
+		status = plan_query(&eval, rule, &eval.components[0]);
+	if (status == 0) {
+		relic_explain_query(ctx, rule,
+		    &eval.components[0].base[0].plan);
+		status = run_plans(&eval, eval.components[0].base,
+		    eval.components[0].base_count);
+	}
+	evaluation_end(&eval);
+
+	return (status);
+}
+
+/*
+ * Stratify and evaluate the rules a query's rewrite generated, after showing
+ * the rewrite of `query`, the query as written.  The rules are stratifiable
+ * by construction -- a generated rule negates only predicates the query reads
+ * completely, which no generated rule derives -- so a failure to stratify
+ * them is an internal error rather than something the program did.  The
+ * analysis still runs, because it is what orders the generated predicates
+ * into components and finds the recursive ones.
+ */
+static int
+evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_rule_t *query)
+{
+	relic_schedule_t schedule;
+	int status;
+
+	relic_explain_rewrite(ctx, query, magic);
+
+	relic_schedule_init(&schedule);
+
+	status = -1;
+	switch (relic_schedule_build(ctx, &magic->rules, &schedule)) {
+	case RELIC_ANALYSIS_STRATIFIED:
+		status = evaluate_schedule(ctx, &magic->rules, &schedule, NULL,
+		    1);
+		break;
+	case RELIC_ANALYSIS_UNSTRATIFIED:
+		relic_diagf(ctx, RELIC_ERROR, NULL, "internal error: "
+		    "a query's Magic rewrite is not stratified");
+		break;
+	case RELIC_ANALYSIS_INCOMPLETE:
+		relic_diag_no_memory(ctx);
+		break;
+	}
+
+	relic_schedule_reset(&schedule);
+
+	return (status);
+}
+
+/*
+ * Compute what a query's rewrite needs before its rewritten rule can run:
+ * the relations the query reads completely, evaluated from the program's own
+ * schedule, and then the fixed point of the rules the rewrite generates.
  *
- * One pass computes the answer completely, because the answer predicate
- * appears in no body: its name holds `$`, which nothing a program writes can.
+ * Whatever the relations held is discarded first.  What the rewrite derives
+ * is only part of the program's fixed point, so the relations are left marked
+ * as materializing no rule, and the next evaluation starts again from
+ * nothing.
+ */
+static int
+derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
+    const relic_rule_t *query)
+{
+	if (confirm_schedule_current(ctx) != 0)
+		return (-1);
+
+	discard_derived_state(ctx);
+
+	if (relic_magic_find_complete(magic, query) != 0)
+		return (-1);
+
+	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
+	    magic->complete_components, 0) != 0)
+		return (-1);
+
+	if (relic_magic_rewrite(magic, query) != 0)
+		return (-1);
+
+	if (magic->adornment_count == 0)
+		return (0);
+
+	return (evaluate_rewrite(ctx, magic, query));
+}
+
+/*
+ * Answer a query into its answer relation from the fixed point of the whole
+ * program, computing it first if the relations do not hold it.
+ */
+static int
+answer_from_program(relic_t *ctx, const relic_rule_t *query)
+{
+	if (materialize_program(ctx) != 0)
+		return (-1);
+
+	return (run_query_rule(ctx, query));
+}
+
+/*
+ * Answer a query into its answer relation through its Magic rewrite, which
+ * derives only what the query's bindings can reach, running the rewritten
+ * query rule last.
+ *
+ * A rewrite that outgrows its budget has been reported as a warning, and
+ * the query is answered from the whole program instead: the rewrite is an
+ * optimization, and must not decide whether a query can be answered.  What
+ * the abandoned rewrite derived is discarded with the rest, since it left
+ * the relations marked as materializing no rule.
+ */
+static int
+answer_through_rewrite(relic_t *ctx, const relic_rule_t *query)
+{
+	relic_magic_t magic;
+	bool over_budget;
+	int status;
+
+	relic_magic_init(&magic, ctx);
+	status = derive_for_rewrite(ctx, &magic, query);
+	if (status == 0)
+		status = run_query_rule(ctx, &magic.query);
+	over_budget = magic.over_budget;
+	relic_magic_reset(&magic);
+
+	if (status != 0 && over_budget)
+		return (answer_from_program(ctx, query));
+
+	return (status);
+}
+
+/*
+ * Answer a query into its answer relation, then stream that relation.
+ *
+ * A program whose fixed point is already computed -- or any program, when
+ * the rewrite is turned off -- answers from the whole fixed point.  Otherwise
+ * the query is answered through its Magic rewrite.  Both give the same
+ * answer, because the rewrite computes exactly the tuples of the fixed point
+ * that the query reads.
+ *
  * Duplicate answers collapse as they are inserted, which is what gives a
  * query set semantics.  Every step that can fail comes before the first row
  * is delivered, so a query either delivers its whole answer or none of it.
@@ -1248,7 +1691,6 @@ relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
     void *callback_ctx)
 {
 	relic_relation_t *answer;
-	relic_evaluation_t eval;
 	int status;
 
 	if (query == NULL || callback == NULL) {
@@ -1263,19 +1705,14 @@ relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 		return (-1);
 	}
 
-	if (relic_materialize(ctx) != 0)
+	if (relic_program_ready(ctx) != 0)
 		return (-1);
 
-	status = evaluation_begin(&eval, ctx, 1);
-	if (status == 0)
-		status = plan_query(&eval, &query->rule, &eval.components[0]);
-	if (status == 0) {
-		relic_explain_query(ctx, &query->rule,
-		    &eval.components[0].base[0].plan);
-		status = run_plans(&eval, eval.components[0].base,
-		    eval.components[0].base_count);
-	}
-	evaluation_end(&eval);
+	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
+	    ctx->materialized_rules == ctx->program.rules.count)
+		status = answer_from_program(ctx, &query->rule);
+	else
+		status = answer_through_rewrite(ctx, &query->rule);
 
 	if (status != 0)
 		return (-1);

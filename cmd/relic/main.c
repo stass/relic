@@ -85,8 +85,8 @@ typedef struct session session_t;
 /*
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `config` is what the
- * context is created with: -l sets its limits and -X naive, no-index and
- * no-reorder its flags.
+ * context is created with: -l sets its limits and -X naive, no-index,
+ * no-reorder and no-magic its flags.
  */
 struct options {
 	const char		**queries;
@@ -589,6 +589,11 @@ parse_debug(const char *name, options_t *options)
 		return (0);
 	}
 
+	if (strcmp(name, "no-magic") == 0) {
+		options->config.flags |= RELIC_F_NO_MAGIC;
+		return (0);
+	}
+
 	if (strcmp(name, "stats") == 0) {
 		options->print_stats = true;
 		return (0);
@@ -626,12 +631,12 @@ limit_named(relic_config_t *config, const char *key, size_t key_length)
  * Apply one -l argument, key=value, to the configuration.  Returns 0, or -1
  * having reported why the argument is not a limit.
  *
- * The value is decimal digits and nothing else, from zero, which means
- * unlimited, to the largest a limit can hold.  strtonum() rejects trailing
- * bytes, an empty value and a value out of range, and says which it was; it
- * would also skip leading space and accept a sign, so the value must begin
- * with a digit before it is asked.  A key given twice takes the later value,
- * as a repeated option does.
+ * The value is decimal digits and nothing else, from zero, which asks for
+ * the library's default, to the largest a limit can hold.  strtonum()
+ * rejects trailing bytes, an empty value and a value out of range, and says
+ * which it was; it would also skip leading space and accept a sign, so the
+ * value must begin with a digit before it is asked.  A key given twice takes
+ * the later value, as a repeated option does.
  */
 static int
 parse_limit(const char *program_name, const char *argument,

@@ -79,7 +79,7 @@ struct relic_search {
 };
 
 static void	 assign_component(relic_search_t *search, uint32_t root);
-static int	 build_edges(const relic_t *ctx, relic_arena_t *arena,
+static int	 build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
 		    relic_depgraph_t *graph);
 static void	 descend(relic_search_t *search, uint32_t vertex);
 static int	 find_components(relic_arena_t *arena, relic_depgraph_t *graph);
@@ -110,9 +110,9 @@ literal_makes_edge(const relic_literal_t *literal)
  * starting at first_edge[v], and leaves it at first_edge[v + 1].
  */
 static int
-build_edges(const relic_t *ctx, relic_arena_t *arena, relic_depgraph_t *graph)
+build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
+    relic_depgraph_t *graph)
 {
-	const relic_ruletab_t *rules;
 	const relic_rule_t *rule;
 	const relic_literal_t *literal;
 	relic_dep_edge_t *edge;
@@ -121,8 +121,6 @@ build_edges(const relic_t *ctx, relic_arena_t *arena, relic_depgraph_t *graph)
 	size_t rule_index;
 	size_t v;
 	uint32_t source;
-
-	rules = &ctx->program.rules;
 
 	graph->first_edge = relic_arena_allocarray(arena,
 	    graph->vertex_count + 1, sizeof(*graph->first_edge));
@@ -371,13 +369,13 @@ group_members(relic_arena_t *arena, relic_depgraph_t *graph)
 }
 
 int
-relic_depgraph_build(const relic_t *ctx, relic_arena_t *arena,
-    relic_depgraph_t *graph)
+relic_depgraph_build(const relic_t *ctx, const relic_ruletab_t *rules,
+    relic_arena_t *arena, relic_depgraph_t *graph)
 {
 	bzero(graph, sizeof(*graph));
 	graph->vertex_count = relic_pred_count(ctx);
 
-	if (build_edges(ctx, arena, graph) != 0)
+	if (build_edges(rules, arena, graph) != 0)
 		return (-1);
 
 	if (find_components(arena, graph) != 0)

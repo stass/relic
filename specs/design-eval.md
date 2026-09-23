@@ -176,9 +176,23 @@ for every recursive component, in schedule order:
 	round 0: for every rule, run its plan
 	while some member gained tuples in the last round:
 		delta(R) = the tuples R gained in the last round
-		for every delta variant, in rule order then literal order:
+		for every delta variant, in rule order then literal order,
+		    whose delta literal reads a member that gained:
 			run it
 ```
+
+**A round costs what changed.** A variant's delta literal is its first
+operation, so a variant whose delta is empty matches nothing and derives
+nothing. Skipping it changes nothing but the cost, and running the rest in
+the order they were planned makes a round do, operation for operation, what
+running every variant would. The members that gained are recorded as plans
+insert into their heads -- every insertion during a component's fixed point is
+into the head of the plan making it, which is a member -- and the variants are
+grouped by the member their delta literal reads when the component is
+planned, so a round touches only those members and those variants. Without
+it, a round costs the size of the component: a recursive cycle of *n*
+predicates takes *n* rounds of one new tuple each, and running every variant
+in every one of them is quadratic.
 
 **A delta is a range of tuple identifiers**, per D-10. The store is
 append-only, so the tuples a relation gained during one round are exactly
@@ -301,8 +315,12 @@ enough.
 * `relic_materialize()` checks the program, and if rules have been added since
   the relations last reached a fixed point, **discards every tuple of every
   relation** and computes the fixed point again from nothing.
-* A query run materializes first, so a caller that loads, queries, loads
-  again and queries again gets answers over everything it loaded.
+* A query run answers over everything loaded so far, so a caller that loads,
+  queries, loads again and queries again gets answers over everything it
+  loaded. It reads the fixed point when the relations hold it, and otherwise
+  evaluates through the query's Magic rewrite, which discards the relations
+  in the same way and leaves them holding part of a fixed point, counted as
+  the fixed point of no rules.
 
 Continuing from the tuples already held would be sound for a program without
 negation, where a later fact can only add to what was derived, and unsound for
@@ -329,7 +347,15 @@ before starting again.
 A query is a rule over its answer predicate, per `specs/design-plan.md`
 section 7. Answering one is three steps:
 
-1. **Materialize** the program, as above.
+1. **Evaluate what the query reads.** When the relations hold the program's
+   fixed point, or under `RELIC_F_NO_MAGIC`, that is materializing the
+   program as above, and the query rule is the one written. Otherwise the
+   query is rewritten by Magic Sets, per `specs/design-magic.md`: the
+   relations it reads completely are evaluated from the program's schedule,
+   the rules the rewrite generates are evaluated from a schedule of their
+   own, and the query rule is the rewritten one. A rewrite that outgrows its
+   budget is abandoned, and the query answered from the materialized program
+   instead.
 2. **Run the query's plan once.** The answer predicate never appears in a body,
    because its name contains `$` and nothing a program writes can, so one pass
    computes its relation completely. Duplicate answers collapse on insertion,
@@ -354,9 +380,9 @@ truncated answer indistinguishable from a complete one, which is what
 architecture section 63 requires.
 
 The answer relation outlives the run, like every relation, until a change to
-the program discards it with the rest. Running the query again repeats the
-three steps, finds nothing new to insert, and streams the same rows in the
-same order.
+the program or the next rewritten query discards it with the rest. Running
+the query again repeats the three steps and streams the same rows in the same
+order.
 
 ---
 

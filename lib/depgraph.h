@@ -42,9 +42,10 @@ typedef struct relic_depgraph relic_depgraph_t;
 
 /*
  * One dependency, and the literal that created it: body literal
- * `literal_index` of program rule `rule_index`.  The strata and components do
- * not depend on them; they say where the program wrote the edge, which is
- * what a diagnostic points at and what orders its reports.
+ * `literal_index` of rule `rule_index` of the table the graph was built from.
+ * The strata and components do not depend on them; they say where the rules
+ * wrote the edge, which is what a diagnostic points at and what orders its
+ * reports.
  */
 struct relic_dep_edge {
 	size_t		rule_index;
@@ -78,11 +79,12 @@ relic_depgraph_pred(uint32_t vertex)
 }
 
 /*
- * Build the graph of the program's rules over every predicate in the table,
- * and find its components.  Returns 0, or -1 when `arena` refused an
+ * Build the graph of a table of rules over every predicate in the context's
+ * table, and find its components.  The rules are the program's, or those a
+ * query's Magic rewrite generated.  Returns 0, or -1 when `arena` refused an
  * allocation; the arena is then marked failed and the caller reports it.
  */
-int	 relic_depgraph_build(const relic_t *ctx, relic_arena_t *arena,
-	    relic_depgraph_t *graph);
+int	 relic_depgraph_build(const relic_t *ctx, const relic_ruletab_t *rules,
+	    relic_arena_t *arena, relic_depgraph_t *graph);
 
 #endif /* RELIC_DEPGRAPH_H */

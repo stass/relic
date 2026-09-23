@@ -69,6 +69,8 @@ static void	 put_op_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_op_atom_t *atom);
 static void	 put_plan(const relic_t *ctx, const relic_rule_t *rule,
 		    const relic_plan_t *plan, unsigned int depth);
+static void	 put_pred(const relic_t *ctx, relic_explain_line_t *line,
+		    relic_pred_id_t pred);
 static void	 put_pred_name(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
 static void	 put_rule(const relic_t *ctx, relic_explain_line_t *line,
@@ -548,16 +550,29 @@ put_plan(const relic_t *ctx, const relic_rule_t *rule,
 }
 
 /*
+ * "name/arity", as a message names a predicate but without shortening it.
+ */
+static void
+put_pred(const relic_t *ctx, relic_explain_line_t *line, relic_pred_id_t pred)
+{
+	const relic_pred_t *entry;
+
+	put_pred_name(ctx, line, pred);
+
+	entry = relic_pred_of(ctx, pred);
+	line_put_byte(line, '/');
+	put_size(line, entry == NULL ? 0 : entry->arity);
+}
+
+/*
  * "stratum S, component C: p/2, q/1", with "(recursive)" after the
  * component's position when it is, and then "facts: N" when it has any.
  */
 void
 relic_explain_component(relic_t *ctx, const relic_schedule_t *schedule,
-    size_t position, size_t facts)
+    size_t position, size_t facts, unsigned int depth)
 {
 	const relic_component_t *component;
-	const relic_pred_t *pred;
-	relic_pred_id_t member;
 	relic_explain_line_t line;
 	size_t i;
 
@@ -566,7 +581,7 @@ relic_explain_component(relic_t *ctx, const relic_schedule_t *schedule,
 
 	component = &schedule->components[position];
 
-	line_begin(&line, 0);
+	line_begin(&line, depth);
 	line_put(&line, "stratum ");
 	put_size(&line, component->stratum);
 	line_put(&line, ", component ");
@@ -576,20 +591,16 @@ relic_explain_component(relic_t *ctx, const relic_schedule_t *schedule,
 	line_put_byte(&line, ':');
 
 	for (i = 0; i < component->member_count; i++) {
-		member = schedule->members[component->first_member + i];
-
 		line_put(&line, i == 0 ? " " : ", ");
-		put_pred_name(ctx, &line, member);
-		pred = relic_pred_of(ctx, member);
-		line_put_byte(&line, '/');
-		put_size(&line, pred == NULL ? 0 : pred->arity);
+		put_pred(ctx, &line,
+		    schedule->members[component->first_member + i]);
 	}
 	line_finish(ctx, &line);
 
 	if (facts == 0)
 		return;
 
-	line_begin(&line, 1);
+	line_begin(&line, depth + 1);
 	line_put(&line, "facts: ");
 	put_size(&line, facts);
 	line_finish(ctx, &line);
@@ -597,19 +608,19 @@ relic_explain_component(relic_t *ctx, const relic_schedule_t *schedule,
 
 void
 relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
-    const relic_plan_t *plan)
+    const relic_plan_t *plan, unsigned int depth)
 {
 	relic_explain_line_t line;
 
 	if (!relic_explaining(ctx))
 		return;
 
-	line_begin(&line, 1);
+	line_begin(&line, depth + 1);
 	line_put(&line, "rule ");
 	put_rule(ctx, &line, rule);
 	line_finish(ctx, &line);
 
-	put_plan(ctx, rule, plan, 2);
+	put_plan(ctx, rule, plan, depth + 2);
 }
 
 /*
@@ -618,21 +629,21 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
  */
 void
 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
-    size_t delta_literal, const relic_plan_t *plan)
+    size_t delta_literal, const relic_plan_t *plan, unsigned int depth)
 {
 	relic_explain_line_t line;
 
 	if (!relic_explaining(ctx))
 		return;
 
-	line_begin(&line, 2);
+	line_begin(&line, depth + 2);
 	line_put(&line, "delta ");
 	if (delta_literal < rule->body_length)
 		put_literal(ctx, &line, rule, &rule->body[delta_literal]);
 	line_put_byte(&line, ':');
 	line_finish(ctx, &line);
 
-	put_plan(ctx, rule, plan, 3);
+	put_plan(ctx, rule, plan, depth + 3);
 }
 
 void
@@ -650,4 +661,53 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 	line_finish(ctx, &line);
 
 	put_plan(ctx, rule, plan, 1);
+}
+
+/*
+ * The heading of a query's Magic rewrite: the query as written, each
+ * adornment in the order the rewrite recorded it, as the source predicate and
+ * its b and f per column, and each rule the query's own body generated.  The
+ * rewritten program's components follow, nested one level beneath it.
+ */
+void
+relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
+    const relic_magic_t *magic)
+{
+	const relic_adornment_t *adornment;
+	const relic_pred_t *source;
+	relic_explain_line_t line;
+	uint16_t column;
+	size_t i;
+
+	if (!relic_explaining(ctx))
+		return;
+
+	line_begin(&line, 0);
+	line_put(&line, "magic rewrite of ");
+	put_rule(ctx, &line, query);
+	line_finish(ctx, &line);
+
+	for (i = 0; i < magic->adornment_count; i++) {
+		adornment = &magic->adornments[i];
+		source = relic_pred_of(ctx, adornment->source);
+
+		line_begin(&line, 1);
+		line_put(&line, "adorn ");
+		put_pred(ctx, &line, adornment->source);
+		for (column = 0; source != NULL && column < source->arity;
+		    column++) {
+			if (column == 0)
+				line_put_byte(&line, ' ');
+			line_put_byte(&line, (adornment->bound &
+			    (UINT32_C(1) << column)) != 0 ? 'b' : 'f');
+		}
+		line_finish(ctx, &line);
+	}
+
+	for (i = 0; i < magic->seed_count; i++) {
+		line_begin(&line, 1);
+		line_put(&line, "seed ");
+		put_rule(ctx, &line, &magic->rules.entries[i]);
+		line_finish(ctx, &line);
+	}
 }

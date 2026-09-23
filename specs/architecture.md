@@ -1265,9 +1265,18 @@ There are at most:
 
 adornments for one predicate.
 
-For realistic Datalog arities this is naturally finite.
+For realistic Datalog arities this is naturally finite, but finite is not
+small: a program whose rules each ask for one more bound column reaches every
+one of them. The rewrite is therefore bounded in proportion to the program it
+rewrites. A caller that configures a Magic limit gets a limit, per section 63;
+one that does not gets a budget, and a rewrite outgrowing it is abandoned with
+a warning and the query answered from the whole program. The rewrite is an
+optimization and must not decide whether a query is answered.
 
 Duplicate rewritten rules must be structurally deduplicated.
+
+Which predicates a query reads completely, the rules the rewrite generates,
+its limits and its explain output are specified in `specs/design-magic.md`.
 
 ---
 
@@ -1346,7 +1355,8 @@ page:
 -X debug    enable an internal behaviour; repeatable
 ```
 
-Resource limits, where 0 means unlimited:
+Resource limits, where 0 asks for the default -- no limit on tuples or
+memory, and the budget of section 63 on the Magic rewrite:
 
 ```text
 -l tuples=N        maximum tuples across all relations
@@ -1716,7 +1726,8 @@ relic_t *
 relic_create_config(const relic_config_t *);
 ```
 
-A zero limit means unlimited. The fields correspond one to one with the
+A zero `max_memory` or `max_tuples` means unlimited; a zero Magic limit means
+the budget of section 63. The fields correspond one to one with the
 `-l key=value` options of section 40 and with the limits of section 63, so a
 limit exists in exactly one place and the tool merely parses into it.
 
@@ -2095,6 +2106,10 @@ relic: limit exceeded: tuples=1000000 while deriving path/2
 Partial results are discarded: a query that exceeds a limit produces no rows
 and a nonzero exit status, because a truncated answer set would be
 indistinguishable from a complete one.
+
+The two Magic limits are the exception when left unset: each is then a budget
+proportional to the program, and a rewrite outgrowing it answers the query
+from the whole program rather than failing it, per section 38.
 
 ---
 
@@ -2786,6 +2801,24 @@ members of the component being planned are estimated by documented constants.
 `relic_explain_set()`, a callback receiving one line of printable ASCII at a
 time as each plan is built, and the tool writes it to standard error, so that
 standard output carries only query results in every format.
+
+**Magic Sets, sections 34, 37, 39 and 60.** Generated predicates are named
+`path$bf` and `magic$path$bf`, per D-12 of the plan, rather than the
+`path_bf` and `magic_path_bf` of the examples, which a program could collide
+with. Besides negated relations, a query reads extensional predicates and
+everything a completely read relation depends on in full; those are
+materialized before the rewrite, so that the rewrite's ordering measures them.
+A query against a program whose relations already hold its fixed point is not
+rewritten: it reads them directly. `specs/design-magic.md` records the
+reasoning.
+
+**Magic limits, sections 38, 49 and 63.** Left unset, the limits on generated
+Magic predicates and rules are budgets proportional to the program rather than
+unlimited, and a rewrite outgrowing one is abandoned with a warning and the
+query answered from the whole program. Adornments are finite but can be
+exponential in the arity, and an optimization must neither decide whether a
+query is answered nor generate a program unboundedly larger than the one it
+specializes.
 
 **Source layout, section 64.** `lib/explain.c` renders plans as text, and
 relation statistics live with the tuple store in `lib/relation.c`.

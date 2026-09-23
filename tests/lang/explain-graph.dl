@@ -1,9 +1,15 @@
-% -e shows each component's plans as it is planned, then each query's.  The
-% recursive rule scans edge, which is complete, and looks up path, which is
-% still being derived; its delta variant scans the delta and looks edge up by
-% the column the delta bound.  The second query runs against the program the
-% first materialized, so it shows only its own plan, and looks path up by the
-% other column, through an index built for it.
+% -e shows each query's Magic rewrite.  edge is derived by facts alone, so
+% it is read completely and evaluated first, under its program heading.  The
+% rewrite then lists the adornments and the seeds it generated, and the
+% components of the rewritten rules, indented beneath it, before the
+% rewritten query's plan.
+%
+% path(a, X)? calls path with its first column bound.  The recursive rule
+% passes the binding along edge, so magic$path$bf is recursive too, and holds
+% every node reachable from a.  path(X, d)? binds the second column, and the
+% planner puts the recursive call first, where it is called with that same
+% column bound; the magic rule that would record the call derives
+% magic$path$fb from itself and is dropped, leaving the seed alone.
 
 edge(a, b).
 edge(b, c).

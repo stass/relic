@@ -1,0 +1,21 @@
+% Same generation, the classic program the Magic rewrite was designed for:
+% two people are of the same generation when they are siblings or their
+% parents are.  Asking for one person's generation reads only the ancestors
+% of that person and the descendants of those ancestors.
+
+parent(ann, bob).
+parent(ann, cat).
+parent(bob, dan).
+parent(cat, eve).
+parent(dan, fay).
+parent(eve, gus).
+parent(zed, yan).
+
+person(X) :- parent(X, _).
+person(Y) :- parent(_, Y).
+sg(X, X) :- person(X).
+sg(X, Y) :- parent(XP, X), sg(XP, YP), parent(YP, Y).
+
+sg(fay, Y)?
+sg(X, gus)?
+sg(yan, Y)?

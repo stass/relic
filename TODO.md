@@ -6,15 +6,8 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S9 and milestone M3, indexes,
-statistics, planner and explain, landed; S10 and milestone M4, Magic Sets,
-next.
-
-## Documentation debt
-
-**Design documents owed.** [High] Each stage owes one before its code:
-`design-magic.md` (S10). Each is referenced from `specs/architecture.md` when
-written.
+`relic-plan.md`. Current position: S10 and milestone M4, Magic Sets,
+landed; S11, library ABI stabilization, next.
 
 ## Build and packaging
 
@@ -187,11 +180,7 @@ answer there is a separate key, not a wider meaning for this one.
 `cmd/relic/main.c`] `-i`, `-n` and `-v` arrive in S12. Each is an unknown
 option until then, and the usage message lists only what is accepted. `-l`
 was brought forward to S8, when negation evaluating took away the only other
-way to make a query fail during evaluation from the command line. `-X`
-accepts `naive`, `no-index`, `no-reorder` and `stats`: `no-magic` arrives in
-S10, and `tests/equiv/strategies.sh` gains it then. Magic Sets add relations
-of their own, so `no-magic` will need a comparison other than the total
-tuple count that harness uses.
+way to make a query fail during evaluation from the command line.
 
 **A fact costs a compiled rule and a plan.** [Medium, component:
 `lib/parse.c`, `lib/rule.c`, `lib/eval.c`] A fact is a rule with an empty
@@ -235,11 +224,84 @@ Worse than the growth, the answers count against `max_tuples` and
 for the ones that have not: with `max_tuples=6` and three facts, preparing,
 running and destroying `e(X)?` twice fails the second time with "limit
 exceeded: tuples=6 while deriving $q1/1", naming a predicate the caller never
-wrote. A change to the program discards every relation, answers included,
-which bounds the growth to the queries run since the last load but does not
-release a destroyed query's answers before then. Settle the rest with S11:
+wrote. A change to the program, or a query answered through its Magic
+rewrite, discards every relation, answers included, which bounds the growth
+to the queries answered since, but does not release a destroyed query's
+answers before then. Settle the rest with S11:
 destroying a query should release its answer relation, and a loaded query's
 answers should be released with the last query object that refers to them.
+
+**Complete relations are evaluated again for every query.** [Medium,
+component: `lib/eval.c`] A query answered through its Magic rewrite discards
+every relation first and evaluates again the components it reads completely,
+so a caller running many bound queries over one program loads the facts and
+evaluates the negated and extensional part once per query. What that part
+holds depends only on the program, so it could be kept until the program
+changes, with only the generated relations and the answer discarded between
+queries. `specs/design-magic.md` section 9.2 chose the simpler rule so that
+what a context holds after a query depends on that query alone; measure a
+REPL or embedder workload before changing it.
+
+**A query can derive more through the rewrite than without it.** [Medium,
+component: `lib/magic.c`] Each adornment of a predicate derives a relation of
+its own, and the budget bounds the rules generated, not the tuples those
+relations hold. A query that binds nothing reads its predicate through the
+all-free adornment, but the rules it reaches may still call that predicate
+with a column bound: `path(X, Y)?` over
+`path(X, Z) :- edge(X, Y), path(Y, Z).` derives `path$ff` and `path$bf`,
+each about as large as `path`, so it holds about twice the tuples of the
+whole fixed point. A program whose rules call one predicate with several
+bound patterns does worse: one with a ternary predicate called five ways held
+five times the fixed point's tuples. The remedy is subsumption: once `p$ff`
+is demanded, every other adornment of `p` can read it filtered instead of
+being derived again, and more generally an adornment can read one that binds
+a subset of its columns. A cap on adornments per predicate, falling back to
+the all-free one, would bound the multiple. The rewrite is correct as it
+stands, the tuples count against `max_tuples` and `max_memory`, and
+`tests/perf.sh`, whose query binds nothing, stays inside its bound.
+
+**A mixed predicate's facts are copied per adornment.** [Medium, component:
+`lib/magic.c`] A predicate derived by facts and rules alike is read on demand,
+so each of its facts becomes a rule guarded by the magic predicate, once per
+adornment. A predicate with many facts and a single rule pays for all of them
+in rules and plans: 200 000 `e/2` facts and one rule for `e` take 296 MB and
+1.0 s for `e(n7, X)?`, against 129 MB and 0.45 s without the rewrite, and
+375 MB when the query calls `e` with two adornments. None of it is charged to
+`max_memory`; the budget on generated rules bounds it at sixteen copies of the
+program. Splitting such a predicate into its facts, loaded completely into a
+relation of their own, and its rules, adorned, with one guarded rule per
+adornment reading the facts, would avoid the copies and would make the
+extensional case of `specs/design-magic.md` section 3 a special case of the
+general rule rather than a rule of its own.
+
+**An abandoned rewrite repeats the complete part.** [Low, component:
+`lib/eval.c`, `lib/explain.c`] A rewrite over its budget is abandoned after
+the components it reads completely have been evaluated, and answering from
+the whole program then discards them and evaluates them again. `-e` shows
+both passes, so `tests/lang/magic-budget.dl` under `-e` prints
+`stratum 0, component 0: f/14` twice with nothing between them to say why;
+the warning goes to standard error. An explain line marking the abandoned
+rewrite would say why, and keeping the complete relations, as the item on
+evaluating them for every query proposes, would avoid the second pass.
+
+**Generated names are interned for the life of the context.** [Low,
+component: `lib/magic.c`, `lib/symbol.c`] Every adorned and magic predicate a
+rewrite generates, and the symbol naming it, stays in the context's tables
+after the query, as every interned entry does. The same query run again
+reuses them, so the growth is bounded by the distinct adornments ever asked
+for, at most the budget per distinct query shape; a long-lived embedder
+answering many differently shaped queries grows by all of them. Releasing a
+rewrite's generated entries would need the tables to support removal, or
+generated predicates to live in a table of the rewrite's own.
+
+**A limit reached while deriving a generated predicate names it.** [Low,
+component: `lib/magic.c`, `lib/relation.c`] `relic -l tuples=10 -q
+'path(a, X)?'` reports `limit exceeded: tuples=10 while deriving path$bf/2`,
+where `-X no-magic` says `path/2`. The name is unambiguous -- `$` cannot occur
+in a name a program writes -- and `-e` shows what it means, but
+`specs/design-magic.md` section 8 asks a diagnostic to name what the reader
+has to change. Recording the source predicate on a generated predicate's
+entry and describing it from that would say `path/2`.
 
 **Re-entry from a callback is a contract, not a guard.** [Medium, component:
 `lib/eval.c`, `include/relic.h`] A row callback and a diagnostic callback
@@ -343,6 +405,17 @@ of 150, as the plan predicted: negation added one operation and a placement
 rule the comparisons already had. `-l`, brought forward from S12, added about
 60 to the tool, which S12's budget of 450 should give back.
 
+S10 came in at about 1550 non-comment lines against a budget of 800, nearly
+double, counting the budget on the rewrite and the linear walks it needed
+once review found a 2^14-adornment program and a quadratic cycle.
+`lib/magic.c` is about 1100 of them: finding what a query reads
+completely, the adornment memo, renumbering generated rules into a canonical
+form, and structural duplicate detection with a hash of its own. The rest is
+splitting the planner's ordering from its emission, giving the analysis and
+the evaluator a rule table to work over, and nested explain. Generated rules
+are ordinary compiled rules, which is what kept the evaluator unchanged; a
+lighter representation for them is not a lever while that holds.
+
 **A later load's second unstratified cycle is not reported.** [Low,
 component: `lib/stratify.c`] A program found unstratified is refused by every
 later check without being analysed again, so an embedder that checks between
@@ -366,15 +439,6 @@ taking the type as an integer across the public boundary, which changes the
 representation `specs/architecture.md` section 19.1 specifies. Revisit if an
 embedder hits it.
 
-**Two configured limits are still not enforced.** [Low, component:
-`include/relic.h`] `max_tuples` and `max_memory` are enforced by
-`lib/relation.c`, and the field shape held up: both are a plain `size_t` with
-zero meaning unlimited, and both are read in one place. `max_magic_preds` and
-`max_magic_rules` are stored and never read, because nothing generates a Magic
-predicate or rule to count until S10. The header says so plainly so that a
-caller is not misled; `-l magic-preds` and `-l magic-rules` are accepted by
-the tool for the same reason, so that S10 changes nothing in option parsing.
-
 **Assertions are absent from release builds.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 makes assertions a
 `--enable-debug` feature, so an ordinary build defines `NDEBUG`. Sanitizer
@@ -391,10 +455,10 @@ analysis and the replacement of a schedule, across a batch of tuple
 insertions, and across preparing and answering a query over a recursive
 program, which is what caught the index-growth failure that broke interning
 identity, and across building a secondary index and inserting into an
-indexed relation. Every later stage adds allocation paths that the sweep will
-not reach unless it is extended: next, the Magic rewrite. Add a scenario per
-stage rather than leaving the suite describing the stages that happened to
-write one.
+indexed relation, and across a query answered through its Magic rewrite.
+Every later stage adds allocation paths that the sweep will not reach unless
+it is extended. Add a scenario per stage rather than leaving the suite
+describing the stages that happened to write one.
 
 Each new scenario needs the straddle guards the existing ones have. The
 insertion sweep was written first over a single insertion into a relation that
@@ -467,6 +531,26 @@ literals would bound a rule to about four thousand operations and 250 000
 scores), a larger limit, and charging the evaluation arena to `max_memory`,
 which bounds the memory and not the time. Decide with the `-l` work of S12
 or the hardening of S13.
+
+**The Magic budget counts rules, not their length.** [High, component:
+`lib/magic.c`, `lib/plan.c`] Each adornment of a predicate copies every rule
+deriving it whole and orders the copy's body, which is quadratic in its
+length, so R distinct call patterns of one rule of L literals cost R x L
+literals of memory and R x L^2 ordering work before anything is derived.
+Each pattern needs only one short calling rule, so this stays far inside the
+budgets of 256 + 16 x the program's predicates and rules, no warning fires,
+and `max_memory` does not cover the rewrite. A 71 KB program -- `p/12` with a
+body of 2000 literals, called with 500 bound patterns by
+`cN(X) :- e(X), p(...)` and queried through `all(X)?` -- takes 37.9 s and
+247 MB through the rewrite against 0.05 s and 4.7 MB under `-X no-magic`;
+1000 patterns of 1000 literals take 19.8 s and 252 MB. Over 99% of the time
+is in `relic_plan_order()` called from `rewrite_body()`. It shares its root
+with the item above, an unbounded body length, and a structural body-length
+limit would settle both, making the rule budget a size budget by
+construction. The alternative, keeping bodies unbounded, is two more budgets
+in the rewrite, charged before copying or ordering: generated literals in
+proportion to the program's literals, and ordering work in proportion to the
+sum of its squared body lengths. Decide with the item above.
 
 **Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
 component: `lib/relation.c`] D-4 forbids randomizing a hash seed, and

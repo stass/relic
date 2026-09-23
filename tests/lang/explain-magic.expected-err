@@ -1,0 +1,44 @@
+stratum 0, component 0: start/1
+    facts: 1
+stratum 0, component 1: edge/2
+    facts: 3
+magic rewrite of $q0(S, X) :- start(S), path(S, X).
+    adorn path/2 bf
+    adorn ready/0
+    seed magic$path$bf(S) :- start(S).
+    stratum 0, component 0 (recursive): magic$path$bf/1
+        rule magic$path$bf(S) :- start(S).
+            scan start(S)
+            emit magic$path$bf(S)
+        rule magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
+            scan edge(X, Y)
+            member magic$path$bf(X)
+            emit magic$path$bf(Y)
+            delta magic$path$bf(X):
+                scan delta magic$path$bf(X)
+                lookup edge(X, Y) key={0}
+                emit magic$path$bf(Y)
+    stratum 0, component 1: ready$/0
+        rule ready$ :- edge(a, b).
+            member edge(a, b)
+            emit ready$
+    stratum 0, component 2 (recursive): path$bf/2
+        rule path$bf(X, Y) :- magic$path$bf(X), edge(X, Y), ready$.
+            member ready$
+            scan magic$path$bf(X)
+            lookup edge(X, Y) key={0}
+            emit path$bf(X, Y)
+        rule path$bf(X, Z) :- magic$path$bf(X), edge(X, Y), path$bf(Y, Z).
+            scan magic$path$bf(X)
+            lookup edge(X, Y) key={0}
+            lookup path$bf(Y, Z) key={0}
+            emit path$bf(X, Z)
+            delta path$bf(Y, Z):
+                scan delta path$bf(Y, Z)
+                lookup edge(X, Y) key={1}
+                member magic$path$bf(X)
+                emit path$bf(X, Z)
+query $q0(S, X) :- start(S), path$bf(S, X).
+    scan start(S)
+    lookup path$bf(S, X) key={0}
+    emit $q0(S, X)

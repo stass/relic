@@ -1,1 +1,1 @@
--e -s
+-e -s -X no-magic

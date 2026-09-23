@@ -4,7 +4,9 @@
 % type.  A string constant is written as a literal in printable ASCII, its
 % quote and backslash escaped and every byte outside printable ASCII -- a
 % tab, an escape that would start a terminal control sequence, delete, a
-% byte above 0x7f and a NUL -- written as a hexadecimal escape.
+% byte above 0x7f and a NUL -- written as a hexadecimal escape.  The queries
+% are answered without the Magic rewrite, which would repeat each rule under
+% a generated name.
 
 edge(a, b).
 edge(b, c).
