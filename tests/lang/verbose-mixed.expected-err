@@ -1,0 +1,5 @@
+verbose-mixed.dl:9:19: note: ordering comparison between a symbol and an integer is false
+query 1: 1 row
+verbose-mixed.dl:10:21: note: ordering comparison between a symbol and an integer is false
+query 2: 1 row
+query 3: 1 row

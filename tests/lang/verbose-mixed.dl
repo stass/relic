@@ -1,0 +1,16 @@
+% A second -v adds a note for the first comparison in each rule that ordered
+% values of different types, which is false: one for small and one for
+% between, whose second comparison is never reached by a mixed binding, and
+% none for same, whose = is defined across types.  Answers are unchanged.
+v(1).
+v(a).
+v(b).
+v("s").
+small(X) :- v(X), X < 5.
+between(X) :- v(X), X > 0,
+    X < 9.
+same(X) :- v(X), X = a.
+
+small(X)?
+between(X)?
+same(X)?

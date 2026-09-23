@@ -209,16 +209,32 @@ struct relic_variable {
  * Every slot below `variable_count` is bound by some positive relational
  * body literal, because a rule in which one was not would have been
  * rejected.  The evaluator therefore has no unbound-slot case to handle.
+ *
+ * `origin` is the rule as the program wrote it: its position among the
+ * program's rules, or RELIC_ORIGIN_QUERY for a query's rule.  A rule the
+ * Magic rewrite generates takes the origin of the rule it was generated
+ * from, so every copy of a rule leads back to the one the reader wrote.
+ * Every rule is compiled with RELIC_ORIGIN_QUERY, which is safe for any
+ * rule, and a rule receives its position only as it joins the program's
+ * rules, so no rule can hold a position that is not a program rule's.
+ * `mixed_noted` is meaningful only on a program rule, and records that
+ * RELIC_F_NOTE_MIXED has reported a mixed-type comparison of it or of a
+ * copy of it.
  */
 struct relic_rule {
 	relic_arg_t		*head_args;
 	relic_literal_t		*body;
 	relic_variable_t	*variables;
 	size_t			 body_length;
+	size_t			 origin;
 	relic_location_t	 where;
 	relic_pred_id_t		 head;
 	uint16_t		 variable_count;
+	bool			 mixed_noted;
 };
+
+/* The origin of a query's rule, and of every rule generated from it. */
+#define	RELIC_ORIGIN_QUERY	SIZE_MAX
 
 /*
  * Compiled rules, in the order their statements were loaded.

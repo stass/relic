@@ -30,6 +30,18 @@
 #endif
 
 /*
+ * Mark a parameter a function must accept and does not read.
+ */
+#if defined(__GNUC__)
+#define	RELIC_CMD_UNUSED	__attribute__((__unused__))
+#else
+#define	RELIC_CMD_UNUSED
+#endif
+
+/* Room for "<query N>" with N any size_t, and a terminator. */
+#define	CMD_QUERY_NAME_MAX	32
+
+/*
  * The formats a query's results can be written in.  Their exact form is part
  * of the tool's interface and is specified with the tool.
  */
@@ -41,14 +53,17 @@ enum output_format {
 };
 
 typedef struct output output_t;
+typedef struct invocation invocation_t;
 
 /*
  * Where query results go, and in what form.
  *
- * The rows of one query are written as they are delivered, or collected and
- * sorted first when `sorted` is set.  `queries_written` is what decides whether a query's results need
- * a separator before them; `rows_written` and `begun` belong to the query
- * being written.
+ * An output with no `stream` discards every row, counting it, which is what
+ * -n asks for; output_attach() gives it one to write to.  The rows of one
+ * query are written as they are delivered, or collected and sorted first
+ * when `sorted` is set.  `queries_written` is what decides whether a query's
+ * results need a separator before them; `rows_written` and `begun` belong to
+ * the query being answered.
  *
  * A write that fails is reported once, naming `name`, and `write_failed`
  * then keeps it from being reported again.
@@ -67,14 +82,42 @@ struct output {
 };
 
 /*
+ * One invocation of the tool: its context and the queries prepared against
+ * it, released together.  `queries` has one entry per query the invocation
+ * runs before any interactive session, the -q queries or else the program's
+ * own, NULL where one could not be prepared.  `program_name` is what the
+ * tool's own messages begin with.  `verbosity` is how many -v were given,
+ * and `explain_stream` is where -e sends plans, standard error, or NULL
+ * without -e.
+ */
+struct invocation {
+	relic_t		 *ctx;
+	relic_query_t	**queries;
+	const char	 *program_name;
+	size_t		  query_count;
+	unsigned int	  verbosity;
+	FILE		 *explain_stream;
+};
+
+/*
  * cmd/relic/main.c
  *
- * Report an error of the tool's own through the same formatter the library's
- * diagnostics use, so that a file name taken from the command line is escaped
- * like any other text a diagnostic quotes.
+ * report_error() reports an error of the tool's own through the same
+ * formatter the library's diagnostics use, so that a file name taken from
+ * the command line is escaped like any other text a diagnostic quotes.
+ *
+ * report_rows() writes the line -v adds after a query that succeeded, naming
+ * it by its number, when the invocation is verbose enough to want it.
+ *
+ * explain_into() sends the plans of everything evaluated to `stream`, or
+ * stops sending them when it is NULL.  write_stats() writes the context's
+ * counters, one per line, as -X stats and .stats show them.
  */
 void	report_error(const char *program_name, const char *format, ...)
 	    CMD_PRINTFLIKE(2, 3);
+void	report_rows(const invocation_t *invocation, size_t number, size_t rows);
+void	explain_into(relic_t *ctx, FILE *stream);
+void	write_stats(relic_t *ctx, FILE *stream);
 
 /*
  * cmd/relic/output.c
@@ -82,17 +125,61 @@ void	report_error(const char *program_name, const char *format, ...)
  * output_format_named() sets *formatp from a -F argument and returns 0, or
  * returns -1 for a name that is not a format.
  *
- * output_query() runs a query and writes its results, returning 0, or -1
- * when the query failed or a write did, either having been reported.
+ * output_init() prepares an output that discards rows, and output_attach()
+ * gives it a stream, named `name` in messages, to write them to instead.
  *
- * output_close() flushes the output and closes it unless it is standard
- * output, returning -1 when a write failed at any point, reported once.
+ * output_query() runs a query and writes its results, and output_discard()
+ * runs one and writes nothing whatever the output is.  Each sets *rowsp to
+ * the number of rows and returns 0, or returns -1 when the query failed or a
+ * write did, either having been reported.
+ *
+ * output_flush() pushes what has been written to the stream, returning -1
+ * when a write failed at any point, reported once.  output_close() does the
+ * same and then closes the stream unless it is standard output.
+ * output_is_stdout() is whether the stream is standard output, which other
+ * writers to standard output share.
  */
 int	output_format_named(const char *name, enum output_format *formatp);
-void	output_init(output_t *out, const char *program_name, relic_t *ctx,
-	    FILE *stream, const char *name, enum output_format format,
-	    bool sorted);
-int	output_query(output_t *out, relic_query_t *query);
+void	output_init(output_t *out, const char *program_name, relic_t *ctx);
+void	output_attach(output_t *out, FILE *stream, const char *name,
+	    enum output_format format, bool sorted);
+int	output_query(output_t *out, relic_query_t *query, size_t *rowsp);
+int	output_discard(output_t *out, relic_query_t *query, size_t *rowsp);
+int	output_flush(output_t *out);
+bool	output_is_stdout(const output_t *out);
 int	output_close(output_t *out);
+
+/*
+ * cmd/relic/repl.c
+ *
+ * Run the interactive session of -i over standard input, answering into
+ * `output`.  `first_number` is the number the session's first query is
+ * given.  Returns 0 when everything in the session succeeded, and -1 when
+ * anything failed, each failure having been reported.
+ */
+int	repl_run(invocation_t *invocation, output_t *output,
+	    size_t first_number);
+
+typedef struct line_reader line_reader_t;
+
+/*
+ * cmd/relic/input.c
+ *
+ * Standard input a line at a time, edited with libedit and prompted for when
+ * it is a terminal and the build has libedit, and read plainly otherwise.
+ * The structure is private to input.c; line_reader_open() allocates it.
+ *
+ * line_reader_next() returns 1 with the next line, without its newline, at
+ * *linep and its length at *lengthp; 0 at the end of input; and -1 having
+ * reported a read that failed.  The line belongs to the reader and is valid
+ * until the next call, and the caller may change its bytes in place.
+ * line_reader_number() is the number of the line last returned, counting
+ * from one.
+ */
+line_reader_t	*line_reader_open(const char *program_name);
+int		 line_reader_next(line_reader_t *reader, char **linep,
+		    size_t *lengthp);
+size_t		 line_reader_number(const line_reader_t *reader);
+void		 line_reader_close(line_reader_t *reader);
 
 #endif /* RELIC_CMD_H */

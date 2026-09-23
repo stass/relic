@@ -1,0 +1,4 @@
+relic: error: -c and -i cannot be combined
+usage: relic [-aceinsv] [-F format] [-l limit=value] [-o file] [-q query]
+             [-X debug] [file ...]
+       relic -V

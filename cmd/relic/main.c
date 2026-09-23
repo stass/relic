@@ -31,11 +31,16 @@
  * in the input is therefore reported before anything is evaluated, and a run
  * that evaluates does so over a program and queries that are all known to be
  * valid.  With -c the run stops after preparing; with -a the whole program is
- * materialized before the first query.
+ * materialized before the first query; with -i an interactive session
+ * follows the last one, answering into the same output.
  *
  * The queries that run are the -q ones when there are any, and otherwise the
  * ones the program contains.  The program's own queries are still checked
  * when -q replaces them, because they are part of the program.
+ *
+ * -n runs every query and writes none of its rows, and each -v adds to what
+ * standard error is told: a count of each query's rows, then notes about
+ * comparisons between values of different types.
  *
  * -l sets a resource limit, as key=value, and -X selects internal behaviour
  * for testing and debugging: an alternative evaluation strategy, whose
@@ -59,9 +64,6 @@ enum {
 /* A diagnostic of the tool's own is formatted into this many bytes. */
 #define	REPORT_TEXT_MAX	512
 
-/* Room for "<query N>" with N any size_t, and a terminator. */
-#define	QUERY_NAME_MAX	32
-
 /*
  * The largest value -l accepts: a limit is a size_t, and strtonum() returns a
  * long long, so whichever of the two is smaller.
@@ -80,13 +82,13 @@ struct limit_key {
 };
 
 typedef struct options options_t;
-typedef struct session session_t;
 
 /*
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `config` is what the
- * context is created with: -l sets its limits and -X naive, no-index,
- * no-reorder and no-magic its flags.
+ * context is created with: -l sets its limits, -X naive, no-index,
+ * no-reorder and no-magic its flags, and a second -v the flag that asks for
+ * notes about mixed-type comparisons.  `verbosity` counts the -v options.
  */
 struct options {
 	const char		**queries;
@@ -94,8 +96,11 @@ struct options {
 	size_t			  query_count;
 	relic_config_t		  config;
 	enum output_format	  format;
+	unsigned int		  verbosity;
 	bool			  check_only;
+	bool			  discard_rows;
 	bool			  explain;
+	bool			  interactive;
 	bool			  materialize;
 	bool			  print_stats;
 	bool			  print_version;
@@ -103,48 +108,39 @@ struct options {
 	bool			  version_alone;
 };
 
-/*
- * A context and the queries prepared against it, released together.
- * `queries` has one entry per query that will run, NULL where one could not
- * be prepared.  `program_name` is what the tool's own messages begin with.
- */
-struct session {
-	relic_t		 *ctx;
-	relic_query_t	**queries;
-	const char	 *program_name;
-	size_t		  query_count;
-};
-
 static void		*diag_context(const char *program_name);
-static int		 evaluate(session_t *session, const options_t *options);
+static int		 evaluate(invocation_t *invocation,
+			    const options_t *options);
+static void		 explain_to_stream(void *callback_ctx,
+			    const char *line);
+static void		 invocation_close(invocation_t *invocation);
+static int		 invocation_open(invocation_t *invocation,
+			    const char *program_name, const options_t *options);
 static const char	*invoked_name(const char *argv0);
 static bool		 is_decimal_digit(char byte);
-static void		 explain_line(void *callback_ctx, const char *line);
 static bool		 is_printable_ascii(const char *text);
-static int		 load_operands(relic_t *ctx, int argc, char *argv[]);
+static int		 load_operands(relic_t *ctx, const options_t *options,
+			    int argc, char *argv[]);
 static size_t		*limit_named(relic_config_t *config, const char *key,
 			    size_t key_length);
 static int		 open_output(const char *program_name,
-			    const options_t *options, FILE **streamp,
-			    const char **namep);
+			    const options_t *options, output_t *output);
 static int		 parse_debug(const char *name, options_t *options);
 static int		 parse_limit(const char *program_name,
 			    const char *argument, relic_config_t *config);
 static int		 parse_options(const char *program_name, int argc,
 			    char *argv[], options_t *options);
-static int		 prepare_queries(session_t *session,
+static int		 prepare_queries(invocation_t *invocation,
 			    const options_t *options);
 static void		 report_unknown_option(const char *program_name,
 			    int option);
 static int		 run(const char *program_name,
 			    const options_t *options, int argc, char *argv[]);
-static void		 print_stats(const session_t *session);
-static void		 session_close(session_t *session);
-static int		 session_open(session_t *session,
-			    const char *program_name, const options_t *options);
+static int		 run_queries(invocation_t *invocation,
+			    output_t *output);
 static void		 usage(const char *program_name);
-static int		 validate(session_t *session, const options_t *options,
-			    int argc, char *argv[]);
+static int		 validate(invocation_t *invocation,
+			    const options_t *options, int argc, char *argv[]);
 
 /*
  * Whether a byte is an ASCII decimal digit, whatever the locale says.
@@ -239,7 +235,7 @@ report_unknown_option(const char *program_name, int option)
 static void
 usage(const char *program_name)
 {
-	fprintf(stderr, "usage: %s [-aces] [-F format] [-l limit=value] "
+	fprintf(stderr, "usage: %s [-aceinsv] [-F format] [-l limit=value] "
 	    "[-o file] [-q query]\n"
 	    "       %*s [-X debug] [file ...]\n", program_name,
 	    (int)strlen(program_name), "");
@@ -276,19 +272,41 @@ report_error(const char *program_name, const char *format, ...)
 }
 
 /*
- * Load every operand, or standard input when there are none.
+ * The line -v adds after each query that succeeded.  Like the counters of
+ * -X stats it is data about the run rather than a complaint, so it is written
+ * without the program name and reads the same however the tool was invoked.
+ *
+ * Standard output is flushed first.  It holds the query's rows, or the plan
+ * .plan wrote, and flushing it is what makes the count follow them where a
+ * terminal or a pipe shows both streams, rather than overtake them from
+ * standard error, which is not buffered.
+ */
+void
+report_rows(const invocation_t *invocation, size_t number, size_t rows)
+{
+	if (invocation->verbosity < 1)
+		return;
+
+	fflush(stdout);
+	fprintf(stderr, "query %zu: %zu %s\n", number, rows,
+	    rows == 1 ? "row" : "rows");
+}
+
+/*
+ * Load every operand, or standard input when there are none and standard
+ * input is not the interactive session's.
  *
  * Every file is attempted even after one of them fails, so that a run
  * reports the mistakes in all of the input rather than in whichever file
  * happened to be named first.
  */
 static int
-load_operands(relic_t *ctx, int argc, char *argv[])
+load_operands(relic_t *ctx, const options_t *options, int argc, char *argv[])
 {
 	int status;
 	int i;
 
-	if (argc == 0)
+	if (argc == 0 && !options->interactive)
 		return (relic_load_file(ctx, "<stdin>", stdin));
 
 	status = 0;
@@ -310,10 +328,10 @@ load_operands(relic_t *ctx, int argc, char *argv[])
  * every one was prepared.
  */
 static int
-prepare_queries(session_t *session, const options_t *options)
+prepare_queries(invocation_t *invocation, const options_t *options)
 {
 	relic_query_t *query;
-	char name[QUERY_NAME_MAX];
+	char name[CMD_QUERY_NAME_MAX];
 	size_t count;
 	size_t i;
 	int status;
@@ -321,31 +339,31 @@ prepare_queries(session_t *session, const options_t *options)
 	if (options->query_count > 0)
 		count = options->query_count;
 	else
-		count = relic_query_count(session->ctx);
+		count = relic_query_count(invocation->ctx);
 
 	if (count == 0)
 		return (0);
 
-	session->queries = calloc(count, sizeof(*session->queries));
-	if (session->queries == NULL) {
-		report_error(session->program_name, "out of memory");
+	invocation->queries = calloc(count, sizeof(*invocation->queries));
+	if (invocation->queries == NULL) {
+		report_error(invocation->program_name, "out of memory");
 		return (-1);
 	}
-	session->query_count = count;
+	invocation->query_count = count;
 
 	status = 0;
 	for (i = 0; i < count; i++) {
 		if (options->query_count > 0) {
 			snprintf(name, sizeof(name), "<query %zu>", i + 1);
-			query = relic_query_prepare(session->ctx, name,
+			query = relic_query_prepare(invocation->ctx, name,
 			    options->queries[i]);
 		} else {
-			query = relic_query_loaded(session->ctx, i);
+			query = relic_query_loaded(invocation->ctx, i);
 		}
 
 		if (query == NULL)
 			status = -1;
-		session->queries[i] = query;
+		invocation->queries[i] = query;
 	}
 
 	return (status);
@@ -362,31 +380,35 @@ prepare_queries(session_t *session, const options_t *options)
  * rather than about the program the user wrote.
  */
 static int
-validate(session_t *session, const options_t *options, int argc,
+validate(invocation_t *invocation, const options_t *options, int argc,
     char *argv[])
 {
-	if (load_operands(session->ctx, argc, argv) != 0)
+	if (load_operands(invocation->ctx, options, argc, argv) != 0)
 		return (-1);
 
-	if (relic_check(session->ctx) != 0)
+	if (relic_check(invocation->ctx) != 0)
 		return (-1);
 
-	return (prepare_queries(session, options));
+	return (prepare_queries(invocation, options));
 }
 
 /*
- * Where results go: the -o file, created or truncated, or standard output.
- * `*namep` is what a message about a failed write calls it.
+ * Attach the output results are written to: the -o file, created or
+ * truncated, or standard output.  Under -n nothing is attached, so the
+ * output discards every row and no file is created.
  */
 static int
 open_output(const char *program_name, const options_t *options,
-    FILE **streamp, const char **namep)
+    output_t *output)
 {
 	FILE *stream;
 
+	if (options->discard_rows)
+		return (0);
+
 	if (options->output_path == NULL) {
-		*streamp = stdout;
-		*namep = "standard output";
+		output_attach(output, stdout, "standard output",
+		    options->format, options->sorted);
 		return (0);
 	}
 
@@ -397,50 +419,61 @@ open_output(const char *program_name, const options_t *options,
 		return (-1);
 	}
 
-	*streamp = stream;
-	*namep = options->output_path;
+	output_attach(output, stream, options->output_path, options->format,
+	    options->sorted);
 
 	return (0);
 }
 
 /*
- * Evaluate: materialize the program when asked to, then run each query in
- * turn and write its results.
+ * Run each prepared query in turn, the -q queries or else the program's own,
+ * writing its results.  A query's number is its position among them.
  *
  * The first query that fails ends the run.  A failure in evaluation is most
  * often an exceeded limit, and it would recur in every query after it.  The
  * results of the queries before it have been written and stay written.
  */
 static int
-evaluate(session_t *session, const options_t *options)
+run_queries(invocation_t *invocation, output_t *output)
 {
-	const char *program_name;
-	output_t output;
-	FILE *stream;
-	const char *name;
+	size_t rows;
 	size_t i;
+
+	for (i = 0; i < invocation->query_count; i++) {
+		if (output_query(output, invocation->queries[i], &rows) != 0)
+			return (-1);
+		report_rows(invocation, i + 1, rows);
+	}
+
+	return (0);
+}
+
+/*
+ * Evaluate: materialize the program when asked to, run the queries, and then
+ * the interactive session when asked for one.  The session answers into the
+ * same output, so its results follow the queries' own under the same format
+ * and separators, and its first query is numbered after theirs.
+ */
+static int
+evaluate(invocation_t *invocation, const options_t *options)
+{
+	output_t output;
 	int status;
 
-	program_name = session->program_name;
-
 	if (options->materialize) {
-		if (relic_materialize(session->ctx) != 0)
+		if (relic_materialize(invocation->ctx) != 0)
 			return (-1);
 	}
 
-	if (open_output(program_name, options, &stream, &name) != 0)
+	output_init(&output, invocation->program_name, invocation->ctx);
+	if (open_output(invocation->program_name, options, &output) != 0)
 		return (-1);
 
-	output_init(&output, program_name, session->ctx, stream, name,
-	    options->format, options->sorted);
+	status = run_queries(invocation, &output);
 
-	status = 0;
-	for (i = 0; i < session->query_count; i++) {
-		if (output_query(&output, session->queries[i]) != 0) {
-			status = -1;
-			break;
-		}
-	}
+	if (status == 0 && options->interactive)
+		status = repl_run(invocation, &output,
+		    invocation->query_count + 1);
 
 	if (output_close(&output) != 0)
 		status = -1;
@@ -454,7 +487,7 @@ evaluate(session_t *session, const options_t *options)
  * is.
  */
 static void
-explain_line(void *callback_ctx, const char *line)
+explain_to_stream(void *callback_ctx, const char *line)
 {
 	FILE *stream;
 
@@ -462,94 +495,104 @@ explain_line(void *callback_ctx, const char *line)
 	fprintf(stream, "%s\n", line);
 }
 
+void
+explain_into(relic_t *ctx, FILE *stream)
+{
+	if (stream == NULL)
+		relic_explain_set(ctx, NULL, NULL);
+	else
+		relic_explain_set(ctx, explain_to_stream, stream);
+}
+
 static int
-session_open(session_t *session, const char *program_name,
+invocation_open(invocation_t *invocation, const char *program_name,
     const options_t *options)
 {
-	session->queries = NULL;
-	session->query_count = 0;
-	session->program_name = program_name;
+	invocation->queries = NULL;
+	invocation->query_count = 0;
+	invocation->program_name = program_name;
+	invocation->verbosity = options->verbosity;
+	invocation->explain_stream = options->explain ? stderr : NULL;
 
-	session->ctx = relic_create_config(&options->config);
-	if (session->ctx == NULL) {
+	invocation->ctx = relic_create_config(&options->config);
+	if (invocation->ctx == NULL) {
 		report_error(program_name, "out of memory");
 		return (-1);
 	}
-	relic_diag_set(session->ctx, relic_diag_stderr,
+	relic_diag_set(invocation->ctx, relic_diag_stderr,
 	    diag_context(program_name));
 
-	if (options->explain)
-		relic_explain_set(session->ctx, explain_line, stderr);
+	explain_into(invocation->ctx, invocation->explain_stream);
 
 	return (0);
 }
 
 /*
- * Write the context's counters to standard error, one per line.
+ * Write the context's counters to `stream`, one per line.
  *
  * The lines are not prefixed with the program name, unlike the tool's own
  * messages: they are data about the run rather than a complaint about it,
  * and their text is the same however the tool was invoked, which is what
  * lets a golden test compare them.
  */
-static void
-print_stats(const session_t *session)
+void
+write_stats(relic_t *ctx, FILE *stream)
 {
 	relic_stats_t stats;
 
-	relic_stats(session->ctx, &stats);
+	relic_stats(ctx, &stats);
 
-	fprintf(stderr, "stats: iterations %ju\n",
+	fprintf(stream, "stats: iterations %ju\n",
 	    (uintmax_t)stats.iterations);
-	fprintf(stderr, "stats: derivations %ju\n",
+	fprintf(stream, "stats: derivations %ju\n",
 	    (uintmax_t)stats.derivations);
-	fprintf(stderr, "stats: tuples inserted %ju\n",
+	fprintf(stream, "stats: tuples inserted %ju\n",
 	    (uintmax_t)stats.tuples_inserted);
-	fprintf(stderr, "stats: tuples scanned %ju\n",
+	fprintf(stream, "stats: tuples scanned %ju\n",
 	    (uintmax_t)stats.tuples_scanned);
-	fprintf(stderr, "stats: tuples looked up %ju\n",
+	fprintf(stream, "stats: tuples looked up %ju\n",
 	    (uintmax_t)stats.tuples_looked_up);
-	fprintf(stderr, "stats: tuples held %zu\n", stats.tuples);
-	fprintf(stderr, "stats: storage bytes %zu\n", stats.storage_bytes);
-	fprintf(stderr, "stats: symbol values %zu\n", stats.symbol_values);
-	fprintf(stderr, "stats: string values %zu\n", stats.string_values);
-	fprintf(stderr, "stats: integer values %zu\n", stats.integer_values);
+	fprintf(stream, "stats: tuples held %zu\n", stats.tuples);
+	fprintf(stream, "stats: storage bytes %zu\n", stats.storage_bytes);
+	fprintf(stream, "stats: symbol values %zu\n", stats.symbol_values);
+	fprintf(stream, "stats: string values %zu\n", stats.string_values);
+	fprintf(stream, "stats: integer values %zu\n", stats.integer_values);
 }
 
 static void
-session_close(session_t *session)
+invocation_close(invocation_t *invocation)
 {
 	size_t i;
 
-	for (i = 0; i < session->query_count; i++)
-		relic_query_destroy(session->queries[i]);
-	free(session->queries);
-	relic_destroy(session->ctx);
+	for (i = 0; i < invocation->query_count; i++)
+		relic_query_destroy(invocation->queries[i]);
+	free(invocation->queries);
+	relic_destroy(invocation->ctx);
 }
 
 static int
 run(const char *program_name, const options_t *options, int argc,
     char *argv[])
 {
-	session_t session;
+	invocation_t invocation;
 	int status;
 
 	/*
 	 * Reading a program from a terminal would leave the tool waiting for
 	 * input with no prompt and nothing said.  Interactive use is an option
-	 * of its own.
+	 * of its own, and under it standard input is the session's.
 	 */
-	if (argc == 0 && isatty(STDIN_FILENO) == 1) {
+	if (argc == 0 && !options->interactive && isatty(STDIN_FILENO) == 1) {
 		usage(program_name);
 		return (RELIC_EXIT_USAGE);
 	}
 
-	if (session_open(&session, program_name, options) != 0)
+	if (invocation_open(&invocation, program_name, options) != 0)
 		return (RELIC_EXIT_ERROR);
 
-	status = validate(&session, options, argc, argv);
+	status = validate(&invocation, options, argc, argv);
 	if (status == 0 && !options->check_only)
-		status = evaluate(&session, options);
+		status = evaluate(&invocation, options);
 
 	/*
 	 * The counters are printed whether or not the run succeeded: the work
@@ -557,9 +600,9 @@ run(const char *program_name, const options_t *options, int argc,
 	 * wants to see.
 	 */
 	if (options->print_stats)
-		print_stats(&session);
+		write_stats(invocation.ctx, stderr);
 
-	session_close(&session);
+	invocation_close(&invocation);
 
 	return (status == 0 ? RELIC_EXIT_OK : RELIC_EXIT_ERROR);
 }
@@ -697,7 +740,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":aceF:l:o:q:sVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":aceF:il:no:q:svVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -720,12 +763,18 @@ parse_options(const char *program_name, int argc, char *argv[],
 				return (RELIC_EXIT_USAGE);
 			}
 			break;
+		case 'i':
+			options->interactive = true;
+			break;
 		case 'l':
 			if (parse_limit(program_name, optarg,
 			    &options->config) != 0) {
 				usage(program_name);
 				return (RELIC_EXIT_USAGE);
 			}
+			break;
+		case 'n':
+			options->discard_rows = true;
 			break;
 		case 'o':
 			options->output_path = optarg;
@@ -736,6 +785,10 @@ parse_options(const char *program_name, int argc, char *argv[],
 			break;
 		case 's':
 			options->sorted = true;
+			break;
+		case 'v':
+			if (options->verbosity < UINT_MAX)
+				options->verbosity++;
 			break;
 		case 'V':
 			options->print_version = true;
@@ -761,14 +814,26 @@ parse_options(const char *program_name, int argc, char *argv[],
 	}
 
 	/*
-	 * -c forbids evaluation and -a demands it, so asking for both is a
-	 * contradiction rather than a combination.
+	 * -c forbids evaluation, and -a and -i demand it, so asking for either
+	 * with -c is a contradiction rather than a combination.
 	 */
 	if (options->check_only && options->materialize) {
 		report_error(program_name, "-a and -c cannot be combined");
 		usage(program_name);
 		return (RELIC_EXIT_USAGE);
 	}
+	if (options->check_only && options->interactive) {
+		report_error(program_name, "-c and -i cannot be combined");
+		usage(program_name);
+		return (RELIC_EXIT_USAGE);
+	}
+
+	/*
+	 * The second -v asks the library for the notes it gives only on
+	 * request.
+	 */
+	if (options->verbosity >= 2)
+		options->config.flags |= RELIC_F_NOTE_MIXED;
 
 	return (RELIC_EXIT_OK);
 }

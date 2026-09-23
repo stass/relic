@@ -56,7 +56,7 @@ for path in "$lang_dir"/*; do
 		# rather than part of the test.
 		continue
 		;;
-	*.args|*.expected|*.expected-err|*.exit)
+	*.args|*.expected|*.expected-err|*.exit|*.stdin)
 		;;
 	*)
 		echo "$name is not part of any language test" >&2

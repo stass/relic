@@ -1,0 +1,4 @@
+% Under -n a session's queries run and write no rows, while commands still
+% reply on standard output.
+edge(a, b).
+edge(b, c).

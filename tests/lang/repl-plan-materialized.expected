@@ -1,0 +1,3 @@
+query $q0(X) :- path(a, X).
+    lookup path(a, X) key={0}
+    emit $q0(X)

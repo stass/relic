@@ -1,0 +1,3 @@
+edge(X, Y)?
+.help
+edge(a, X)?

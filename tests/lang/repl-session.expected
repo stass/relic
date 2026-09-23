@@ -1,0 +1,20 @@
+b
+c
+d
+
+a b
+b c
+c d
+
+c
+d
+.help         list the commands
+.plan QUERY   run QUERY and show its plan instead of its rows
+.quit         end the session
+.stats        show the evaluation counters
+
+b
+c
+
+
+

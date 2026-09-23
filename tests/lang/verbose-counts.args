@@ -1,0 +1,1 @@
+-v -q edge(a,X)? -q edge(X,Y)? -q edge(z,X)?

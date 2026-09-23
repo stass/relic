@@ -47,19 +47,23 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
 
 include_HEADERS = include/relic.h
+dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h lib/arena.h \
 	lib/ast.h lib/depgraph.h lib/internal.h lib/plan.h lib/program.h \
 	lib/relation.h lib/util.h tests/unit/harness.h tests/unit/programs.h
 
 bin_PROGRAMS = relic
-relic_SOURCES = cmd/relic/main.c cmd/relic/output.c
+relic_SOURCES = cmd/relic/input.c cmd/relic/main.c cmd/relic/output.c \
+	cmd/relic/repl.c
 
 # The tool links the compatibility objects itself.  Hidden visibility and the
 # export list together make them unreachable through librelic, so the first
 # call to strtonum(3) from the tool would otherwise fail to link on every
-# platform whose C library lacks it.
-relic_LDADD = librelic.la $(LTLIBOBJS)
+# platform whose C library lacks it.  libedit is the tool's alone, for the
+# interactive mode, and is empty when configure did not find it or was told
+# not to use it.
+relic_LDADD = librelic.la $(LTLIBOBJS) $(LIBEDIT_LIBS)
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = librelic.pc
@@ -276,7 +280,8 @@ endif
 
 dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 	tests/langfiles.sh tests/magic.sh tests/man.sh tests/perf.sh \
-	tests/pkgconfig.sh tests/reentry.sh tests/symbols.sh tests/version.sh
+	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/symbols.sh \
+	tests/version.sh
 
 ##
 ## The equivalence suite runs every language test under each alternative
@@ -336,6 +341,10 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/query-option.dl tests/lang/query-recursion.dl \
 	tests/lang/query-undefined.dl tests/lang/query-unsafe.dl \
 	tests/lang/query-zero-arity.dl tests/lang/recovery.dl \
+	tests/lang/repl-check.dl tests/lang/repl-discard.dl \
+	tests/lang/repl-errors.dl tests/lang/repl-json.dl \
+	tests/lang/repl-plan.dl tests/lang/repl-plan-materialized.dl \
+	tests/lang/repl-session.dl tests/lang/repl-verbose.dl \
 	tests/lang/safe-rules.dl tests/lang/singleton.dl \
 	tests/lang/sort-mixed.dl tests/lang/stats-indexed.dl \
 	tests/lang/stats-magic.dl tests/lang/stats-naive.dl \
@@ -348,6 +357,8 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/unstratified-query.dl tests/lang/unstratified-unsafe.dl \
 	tests/lang/unstratified.dl tests/lang/unterminated-string.dl \
 	tests/lang/variable-limit-max.dl tests/lang/variable-limit.dl \
+	tests/lang/verbose-counts.dl tests/lang/verbose-discard.dl \
+	tests/lang/verbose-mixed.dl tests/lang/verbose-one.dl \
 	tests/lang/zero-arity.dl
 
 TEST_EXTENSIONS = .dl .sh

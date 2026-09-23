@@ -132,10 +132,13 @@ typedef struct relic_config relic_config_t;
  * the caller asked for it must not decide whether a query is answered.  The
  * budget bounds the rules the rewrite generates, not what they derive.
  *
- * `flags` holds RELIC_F_ switches, each of which selects an alternative
- * evaluation strategy that must give the same answers as the default.  They
- * exist so that strategies can be compared against one another, and are not
- * meant for ordinary use.  Bits no switch defines are ignored.
+ * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
+ * strategy that must give the same answers as the default; they exist so
+ * that strategies can be compared against one another, and are not meant
+ * for ordinary use.  RELIC_F_NOTE_MIXED instead asks for a diagnostic the
+ * library does not otherwise give.  No switch changes an answer.  Bits no
+ * switch defines are ignored, so a library that predates a switch runs a
+ * caller that sets it as if it were not set.
  *
  * The structure's layout is part of the binary interface, so a release that
  * adds a limit changes the library's interface version.
@@ -178,6 +181,20 @@ struct relic_config {
  * bindings can reach.
  */
 #define	RELIC_F_NO_MAGIC	0x0008u
+
+/*
+ * Report, as a RELIC_NOTE pointing at the comparison, the first ordering
+ * comparison in each rule that compared values of different types.  Such a
+ * comparison is false and filters its binding out, which is the language's
+ * rule rather than a mistake, so it is reported only when asked for; the
+ * note is how a column holding types nobody meant to mix is discovered.
+ *
+ * A rule of the program is reported at most once for the life of the
+ * context, and the rules a Magic Sets rewrite generates from it count as
+ * that rule.  A query is reported on at most once each time it is answered.
+ * Asking for the note costs nothing that can fail.
+ */
+#define	RELIC_F_NOTE_MIXED	0x0010u
 
 /*
  * Create a context.  Returns NULL when memory is exhausted; there is no

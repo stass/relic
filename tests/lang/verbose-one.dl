@@ -1,0 +1,6 @@
+% One -v counts rows and adds no note about comparisons of mixed types.
+v(1).
+v(a).
+small(X) :- v(X), X < 5.
+
+small(X)?

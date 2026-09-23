@@ -1,0 +1,11 @@
+% An interactive session read from standard input: the program's own query
+% runs first, then each line of repl-session.stdin is answered in turn, into
+% the same output and with the same separators.  Blank lines and comments are
+% ignored, and nothing after .quit is read.
+edge(a, b).
+edge(b, c).
+edge(c, d).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+
+path(a, X)?

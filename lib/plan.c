@@ -151,7 +151,7 @@ static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
 		    int status);
 static void	 place_comparison(relic_planner_t *planner,
-		    const relic_comparison_t *comparison);
+		    const relic_literal_t *literal);
 static int	 place_emit(relic_planner_t *planner);
 static int	 place_negated(relic_planner_t *planner,
 		    const relic_atom_t *atom);
@@ -507,13 +507,16 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
  * it only where both are bound.
  */
 static void
-place_comparison(relic_planner_t *planner,
-    const relic_comparison_t *comparison)
+place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 {
+	const relic_comparison_t *comparison;
 	relic_op_t *op;
+
+	comparison = &literal->u.comparison;
 
 	op = append_op(planner, RELIC_OP_FILTER);
 	op->u.filter.compare = comparison->op;
+	op->u.filter.where = literal->where;
 	read_term(&comparison->left, &op->u.filter.left);
 	read_term(&comparison->right, &op->u.filter.right);
 }
@@ -559,7 +562,7 @@ place_test(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	switch (literal->kind) {
 	case RELIC_LITERAL_COMPARISON:
-		place_comparison(planner, &literal->u.comparison);
+		place_comparison(planner, literal);
 		return (0);
 	case RELIC_LITERAL_NEGATED:
 		return (place_negated(planner, &literal->u.atom));

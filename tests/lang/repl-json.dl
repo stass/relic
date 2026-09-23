@@ -1,0 +1,6 @@
+% In json each of a session's queries is a document of its own, following the
+% program's queries' documents with no other separator.
+edge(a, b).
+edge(b, c).
+
+edge(a, X)?

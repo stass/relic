@@ -1,0 +1,15 @@
+.frobnicate
+.
+.quit now
+.help me
+.stats please
+.plan
+.plan   
+edge(a X)?
+edge(X, Y)
+edge(a, Y)?
+edge(X, Y), Z < 1?
+edge(a, b). edge(X, b)?
+.plan edge(q
+edge(b, Y)?
+edge(X,

@@ -6,8 +6,8 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S11, library ABI stabilization,
-landed; S12, the REPL and command-line completion, next.
+`relic-plan.md`. Current position: S12, the REPL and command-line
+completion, landed; S13, differential and fuzz hardening, next.
 
 ## Build and packaging
 
@@ -28,11 +28,6 @@ at `LIBOBJDIR`. A convenience library carrying `$(LTLIBOBJS)` as its only
 empty convenience library builds cleanly on every platform (a platform with
 no replacements) needs checking first, and a check script rejecting
 `$(LIBOBJS)` is the cheaper fallback.
-
-**`relic.1` is not written.** [Medium, component: `man/`] It is an S12
-deliverable, so `dist_man1_MANS` is absent from `Makefile.am` and the
-installed set of `specs/architecture.md` section 65.5 is short one file.
-`tests/man.sh` lints `relic.3` only; extend it to `relic.1` when it lands.
 
 **`--enable-fuzzers` is not implemented.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 lists it, but the fuzz
@@ -155,9 +150,11 @@ back is the program arena it allocated them from: an arena has no
 per-allocation free, and the program arena is not reset until the context is
 destroyed, because nothing replaces a loaded program yet. A long-running
 embedder or a REPL that loads a broken file repeatedly therefore grows slowly.
-The waste is bounded by the text the caller chose to load. Revisit when S12 or
-later gives a context a way to discard its program, which is the operation that
-would reset the arena anyway.
+The waste is bounded by the text the caller chose to load. The interactive
+mode never loads, so it does not grow this way; it grows through the queries
+it prepares instead, the item on answer predicates below. Revisit
+when a context is given a way to discard its program, which is the operation
+that would reset the arena anyway.
 
 **A stream is read whole with no size limit.** [Low, component: `lib/parse.c`]
 `relic_load_file()` reads its stream into one buffer, because the syntax tree
@@ -172,14 +169,49 @@ that is why they exist. Input is the opposite: the caller picked the file or
 opened the stream, knows how large it is, and can bound it before handing it
 over. Folding the two into one key would make `-l memory=N` mean two things
 and would still not help the one caller who cannot check, which is a program
-reading an untrusted pipe. Revisit if S12 or an embedder finds that caller; the
+reading an untrusted pipe. Revisit if an embedder finds that caller; the
 answer there is a separate key, not a wider meaning for this one.
 
-**Options that arrive with their features.** [Medium, component:
-`cmd/relic/main.c`] `-i`, `-n` and `-v` arrive in S12. Each is an unknown
-option until then, and the usage message lists only what is accepted. `-l`
-was brought forward to S8, when negation evaluating took away the only other
-way to make a query fail during evaluation from the command line.
+**An interactive session accepts only queries.** [Low, component:
+`cmd/relic/repl.c`, `include/relic.h`] A session cannot add a fact or a rule,
+because a load that fails its check leaves the program rejected for good, and
+the tool cannot check text without loading it. Accepting statements needs a
+load that is checked as one step and undone when the check fails; that is an
+added entry point, a compatible change, and the session would then load a
+line ending in `.` through it. Both evaluation items below -- a later load
+re-evaluating everything, and complete relations evaluated per query -- would
+then fall on the session.
+
+**Every prepared query leaves its answer predicate behind.** [Medium,
+component: `lib/rule.c`, `lib/eval.c`, `lib/relation.c`, `lib/magic.c`] A
+query's answer is the relation of a predicate `$q` and a serial, interned when
+the query is prepared and never retired, since a predicate is never removed
+from a context. Answering a query walks every relation to discard the last
+answer's derived tuples and every predicate to find which are complete, so
+the cost of an answer grows with the number of queries prepared before it and
+a long run of queries is quadratic. An interactive session is the workload
+that shows it: 10,000 lines take 0.8 s and 20,000 take 3.0 s, and a
+reviewer's 200,000 took 523 s and 261 MB. An embedder preparing a query per
+request is the same case. The fix is for relic_query_destroy() to retire its
+answer predicate so the next query reuses the slot, or for an answer to track
+the relations it touched rather than walk them all; either is a change to how
+predicates are owned and wants a design note first.
+
+**A session's line editing drops bytes outside ASCII.** [Low, component:
+`cmd/relic/input.c`] The tool never calls setlocale(3), so libedit runs in
+the C locale and does not accept a typed byte above 0x7f; a string literal
+holding UTF-8 cannot be typed at the prompt, though it can be piped. Setting
+`LC_CTYPE` from the environment before libedit starts would fix it; neither
+the tool nor the library classifies bytes through `<ctype.h>`, so nothing
+else would follow the locale. What needs checking first is how libedit in a
+UTF-8 locale treats a typed byte that is not valid UTF-8.
+
+**An interrupt ends the session.** [Low, component: `cmd/relic/repl.c`,
+`include/relic.h`] Ctrl-C at the prompt or during a long query ends the
+process, as it would a batch run, because the library has no way to abandon
+a query part way and a session that caught the signal would have nothing to
+stop. Once evaluation can be cancelled, a session should cancel the query
+running and return to the prompt.
 
 **A fact costs a compiled rule and a plan.** [Medium, component:
 `lib/parse.c`, `lib/rule.c`, `lib/eval.c`] A fact is a rule with an empty
@@ -209,7 +241,7 @@ continuing from the tuples already held is sound without negation and unsound
 with it, and one rule for both is what `specs/design-eval.md` section 6
 settles, matching architecture section 54 for `relic_fact_add()`. The cost
 falls on a caller that loads a large positive program and then adds to it a
-little at a time -- the S12 REPL, or an embedder -- which pays for the whole
+little at a time -- an embedder -- which pays for the whole
 program on every addition. Measure it there before doing anything; the
 remedy, if one is needed, is incremental maintenance, which architecture
 section 70 defers, and not a return to continuing only positive programs.
@@ -289,11 +321,6 @@ in a name a program writes -- and `-e` shows what it means, but
 `specs/design-magic.md` section 8 asks a diagnostic to name what the reader
 has to change. Recording the source predicate on a generated predicate's
 entry and describing it from that would say `path/2`.
-
-**Mixed-type ordering comparisons are not reported.** [Low, component:
-`lib/eval.c`] Architecture section 10.1 reports the first cross-type ordering
-comparison per rule at verbosity 2, and there is no verbosity until S12. The
-comparison itself already filters the binding out, as specified.
 
 **Semi-naive duplicate derivations.** [Low, component: `lib/eval.c`,
 `lib/plan.c`] The semi-naive fixed point derives some tuples more than once,
@@ -375,7 +402,7 @@ it is `lib/eval.c`, where a component's plans became a structure of their own
 S8 came in at about 85 net non-comment lines in the library against a budget
 of 150, as the plan predicted: negation added one operation and a placement
 rule the comparisons already had. `-l`, brought forward from S12, added about
-60 to the tool, which S12's budget of 450 should give back.
+60 to the tool, which S12's budget of 450 was to give back.
 
 S10 came in at about 1550 non-comment lines against a budget of 800, nearly
 double, counting the budget on the rewrite and the linear walks it needed
@@ -394,6 +421,15 @@ it. The interface itself is small; the lines are the entry and exit at
 every mutating entry point with the workers that let entry points share
 code, argument validation for the entry points taking caller data, and the
 collector.
+
+S12 came in at about 610 non-comment lines against a budget of 450, and
+did not give back the 60 of `-l`: about 520 in the tool, 240 of them the
+session and its commands in `cmd/relic/repl.c` and 190 the line reader in
+`cmd/relic/input.c`, most of which is the two ways of reading a line and
+libedit's setup; and about 90 in the library for the mixed-type note. The
+tool now stands near 1,650 against the architecture's 400 to 600, the
+overrun of risk R7 concentrated in its output formats and its interactive
+mode.
 
 **A later load's second unstratified cycle is not reported.** [Low,
 component: `lib/stratify.c`] A program found unstratified is refused by every
@@ -453,12 +489,6 @@ same reason. Until the Linux continuous integration jobs exist, no leak check
 runs anywhere, which matters from S1 onward because that is where the tree
 starts allocating.
 
-**`--with-libedit` is detected but not consumed.** [Low, component:
-`Makefile.am`] `configure` finds libedit and reports it, and nothing links
-it, because the interactive mode that would use it arrives in S12. A build
-configured with `--with-libedit=yes` therefore succeeds and offers no line
-editing. `STATUS.md` says so; the option becomes true when S12 lands.
-
 **`librelic.pc` declares no private dependencies.** [Low, component:
 `librelic.pc.in`] There are none today. The moment the library links anything
 of its own, libedit included, `Libs.private` and `Requires.private` have to
@@ -482,6 +512,15 @@ shared library, libtool wraps it in a script that re-executes the real binary
 under a name of its own, which puts `argv[0]` out of reach; the test detects
 that and skips. It runs under `--disable-shared` and against an installed
 binary, so the property is covered, but not in the default build.
+
+**The interactive mode's terminal path is not tested automatically.** [Low,
+component: `tests/`, `cmd/relic/input.c`] The prompt, libedit's editing and
+history, and the end of input at a prompt happen only when standard input is
+a terminal. They were checked by hand through a pseudo-terminal in builds
+with and without libedit, but driving one needs more than `sh`: `script(1)`
+differs between the BSDs and Linux, and on macOS it forwards the end of its
+own input before the session has started. A small pty driver built as a
+check program would cover it.
 
 **The truly unterminated `strlcat` destination cannot be tested.** [Low,
 component: `compat/strlcat.c`] The guard against a destination holding no
@@ -511,7 +550,7 @@ with the header's declaration would close it.
 `include/relic.h`] `relic_config_t` and `relic_stats_t` are complete
 structures the caller allocates, so appending a field changes the size a
 caller compiled against, and the library's version-info must then start a
-new major version: a step limit, or a counter S12 or S13 wants, forces every
+new major version: a step limit, or a counter S13 wants, forces every
 embedder to rebuild. Passing the size the caller compiled against was
 considered and not taken; revisit if the first such change is expensive.
 
@@ -531,8 +570,7 @@ distinct count uses is not charged either. The options weighed were a
 structural body-length limit beside the arity and variable limits of D-7 (64
 literals would bound a rule to about four thousand operations and 250 000
 scores), a larger limit, and charging the evaluation arena to `max_memory`,
-which bounds the memory and not the time. Decide with the `-l` work of S12
-or the hardening of S13.
+which bounds the memory and not the time. Decide in the hardening of S13.
 
 **The Magic budget counts rules, not their length.** [High, component:
 `lib/magic.c`, `lib/plan.c`] Each adornment of a predicate copies every rule
@@ -570,7 +608,8 @@ limit (`-l steps=N`) or a ceiling on probe-cluster length. S11 froze
 `relic_config_t` without a step limit, so adding one to the library is now an
 incompatible change and a new major version of the shared library; a ceiling
 on probe-cluster length needs no new field and is the cheaper of the two for
-that reason. Decide before `relic.1` documents the `-l` key set in S12. It
+that reason. Decide in S13; `relic.1` documents the four keys there are, and
+a ceiling would leave them unchanged where a step limit would add one. It
 matters for the embedded caller section 63 names: a host that accepts an
 untrusted program and trusts `-l` to protect it is not protected against this.
 

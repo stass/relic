@@ -283,6 +283,9 @@ static void	 build_tuple(const relic_evaluation_t *eval,
 static bool	 comparison_holds(const relic_t *ctx,
 		    enum relic_compare_op compare, relic_dom_t left,
 		    relic_dom_t right);
+static bool	 comparison_is_mixed(const relic_t *ctx,
+		    enum relic_compare_op compare, relic_dom_t left,
+		    relic_dom_t right);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static size_t	 gather_due_variants(relic_delta_work_t *work);
@@ -291,6 +294,11 @@ static size_t	 head_member_of(const relic_evaluation_t *eval,
 static void	 explain_component(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule, size_t position,
 		    const relic_component_plans_t *plans, unsigned depth);
+static bool	*mixed_noted_flag(relic_t *ctx, const relic_rule_t *rule);
+static void	 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
+		    const relic_op_filter_t *filter, relic_dom_t left,
+		    relic_dom_t right);
+static const char *type_phrase(const relic_t *ctx, relic_dom_t dom);
 static bool	 literal_reads_member(const relic_evaluation_t *eval,
 		    const relic_literal_t *literal);
 static void	 mark_members(relic_evaluation_t *eval,
@@ -334,12 +342,13 @@ static void	 start_deltas(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static void	 take_deltas(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
-static int	 step(relic_evaluation_t *eval, const relic_op_t *op,
-		    relic_tuple_range_t *cursor, bool resume, bool *matchedp);
+static int	 step(relic_evaluation_t *eval, const relic_rule_t *rule,
+		    const relic_op_t *op, relic_tuple_range_t *cursor,
+		    bool resume, bool *matchedp);
 static int	 step_emit(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom);
 static bool	 step_filter(const relic_evaluation_t *eval,
-		    const relic_op_filter_t *filter);
+		    const relic_rule_t *rule, const relic_op_filter_t *filter);
 static bool	 step_lookup(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom, relic_tuple_range_t *cursor,
 		    bool resume);
@@ -556,12 +565,111 @@ step_member(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
 	return (relic_relation_contains(atom->relation, tuple));
 }
 
+/*
+ * Whether a comparison failed only because it ordered values of different
+ * types, which is what RELIC_F_NOTE_MIXED reports.  Equality and inequality
+ * are defined across types and never count.
+ */
 static bool
-step_filter(const relic_evaluation_t *eval, const relic_op_filter_t *filter)
+comparison_is_mixed(const relic_t *ctx, enum relic_compare_op compare,
+    relic_dom_t left, relic_dom_t right)
 {
-	return (comparison_holds(eval->ctx, filter->compare,
-	    term_value(eval, &filter->left),
-	    term_value(eval, &filter->right)));
+	if (compare == RELIC_CMP_EQ || compare == RELIC_CMP_NE)
+		return (false);
+
+	return (relic_value_order(ctx, left, right) == RELIC_ORDER_UNORDERED);
+}
+
+/*
+ * A value's type as a note names it, with its article.
+ */
+static const char *
+type_phrase(const relic_t *ctx, relic_dom_t dom)
+{
+	const relic_value_t *value;
+
+	value = relic_value_of(ctx, dom);
+	if (value == NULL)
+		return ("an unknown value");
+
+	switch (value->type) {
+	case RELIC_INTEGER:
+		return ("an integer");
+	case RELIC_STRING:
+		return ("a string");
+	case RELIC_SYMBOL:
+		break;
+	}
+
+	return ("a symbol");
+}
+
+/*
+ * The flag recording that a mixed-type comparison of `rule` has been
+ * reported.
+ *
+ * A rule of the program keeps its flag on the program rule it came from, so
+ * the copies the Magic rewrite makes of it share one flag, and so do its
+ * semi-naive variants, which are the same rule.  The rules of a query share
+ * one flag on the context, which is cleared when each answer begins.
+ */
+static bool *
+mixed_noted_flag(relic_t *ctx, const relic_rule_t *rule)
+{
+	if (rule->origin == RELIC_ORIGIN_QUERY)
+		return (&ctx->query_mixed_noted);
+
+	return (&ctx->program.rules.entries[rule->origin].mixed_noted);
+}
+
+/*
+ * Report a mixed-type ordering comparison of a rule, unless the rule it was
+ * written as has had one reported already.  Nothing is allocated, so asking
+ * for the note cannot make an evaluation fail.
+ */
+static void
+note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
+    const relic_op_filter_t *filter, relic_dom_t left, relic_dom_t right)
+{
+	bool *noted;
+
+	noted = mixed_noted_flag(ctx, rule);
+	if (*noted)
+		return;
+	*noted = true;
+
+	relic_diagf(ctx, RELIC_NOTE, &filter->where,
+	    "ordering comparison between %s and %s is false",
+	    type_phrase(ctx, left), type_phrase(ctx, right));
+}
+
+/*
+ * A FILTER of a plan built from `rule`: whether its comparison holds between
+ * the values of its operands.
+ *
+ * Under RELIC_F_NOTE_MIXED a comparison that fails because it ordered values
+ * of different types is also reported, which calls the diagnostic callback
+ * and marks the rule as reported.  Without the switch a filter costs exactly
+ * the comparison and changes nothing.
+ */
+static bool
+step_filter(const relic_evaluation_t *eval, const relic_rule_t *rule,
+    const relic_op_filter_t *filter)
+{
+	relic_dom_t left;
+	relic_dom_t right;
+
+	left = term_value(eval, &filter->left);
+	right = term_value(eval, &filter->right);
+
+	if (comparison_holds(eval->ctx, filter->compare, left, right))
+		return (true);
+
+	if ((eval->ctx->config.flags & RELIC_F_NOTE_MIXED) != 0 &&
+	    comparison_is_mixed(eval->ctx, filter->compare, left, right))
+		note_mixed_comparison(eval->ctx, rule, filter, left, right);
+
+	return (false);
 }
 
 /*
@@ -590,9 +698,10 @@ step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
 }
 
 /*
- * Ask one operation for a match: a fresh one, or the next one when resuming.
- * Returns -1 when an insertion failed, and otherwise 0 with *matchedp saying
- * whether a binding was produced.
+ * Ask one operation of a plan built from `rule` for a match: a fresh one, or
+ * the next one when resuming.  Returns -1 when an insertion failed, which the
+ * relation store has reported, and otherwise 0 with *matchedp saying whether
+ * a binding was produced.
  *
  * A test succeeds at most once, so resuming one always finds nothing more.
  * An ANTI_MEMBER is the membership test inverted: the binding survives when
@@ -600,7 +709,7 @@ step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
  * nothing below it is ever entered and nothing backtracks into it.
  */
 static int
-step(relic_evaluation_t *eval, const relic_op_t *op,
+step(relic_evaluation_t *eval, const relic_rule_t *rule, const relic_op_t *op,
     relic_tuple_range_t *cursor, bool resume, bool *matchedp)
 {
 	*matchedp = false;
@@ -622,7 +731,7 @@ step(relic_evaluation_t *eval, const relic_op_t *op,
 		break;
 	case RELIC_OP_FILTER:
 		if (!resume)
-			*matchedp = step_filter(eval, &op->u.filter);
+			*matchedp = step_filter(eval, rule, &op->u.filter);
 		break;
 	case RELIC_OP_EMIT:
 		return (step_emit(eval, &op->u.atom));
@@ -650,7 +759,7 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 	resume = false;
 
 	for (;;) {
-		if (step(eval, &running->plan.ops[level],
+		if (step(eval, running->rule, &running->plan.ops[level],
 		    &running->cursors[level], resume, &matched) != 0)
 			return (-1);
 
@@ -1226,7 +1335,8 @@ plan_delta_work(relic_evaluation_t *eval, relic_component_plans_t *plans)
 	}
 
 	for (member = 0; member < members; member++) {
-		work->first_of_member[member + 1] += work->first_of_member[member];
+		work->first_of_member[member + 1] +=
+		    work->first_of_member[member];
 		next[member] = work->first_of_member[member];
 	}
 
@@ -1773,6 +1883,8 @@ compute_answer(relic_t *ctx, const relic_query_t *query)
 {
 	if (relic_program_ready(ctx) != 0)
 		return (-1);
+
+	ctx->query_mixed_noted = false;
 
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
 	    ctx->materialized_rules == ctx->program.rules.count)

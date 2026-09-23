@@ -1,0 +1,5 @@
+% -v writes a count after each query that succeeded, naming the query by its
+% position among those the run answers; a query with no rows counts zero, and
+% one with a single row says so in the singular.
+edge(a, b).
+edge(b, c).

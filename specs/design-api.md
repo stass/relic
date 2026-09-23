@@ -244,6 +244,19 @@ installs. Every diagnostic the library produces, at every level, goes through
 the one callback, so a caller that installs one sees all of them and its
 standard error sees none.
 
+One diagnostic is produced only on request. An ordering comparison between
+values of different types is false and filters its binding out, which is the
+language's rule and not a mistake, so the library does not report it by
+default. A context created with the `RELIC_F_NOTE_MIXED` switch reports, as a
+note located at the comparison, the first such comparison in each rule of the
+program, once for the life of the context, and in a query once per answer;
+the rules a Magic rewrite generates from a rule, and its semi-naive variants,
+count as that rule. Asking for the note allocates nothing, so it cannot make
+an evaluation fail. It is a switch in
+`relic_config_t.flags` rather than a field, because the structure is frozen
+and a library that predates the switch ignores the bit, so a caller that sets
+it runs everywhere and loses only the notes. The tool sets it at `-vv`.
+
 ---
 
 ## 8. Exported symbols
@@ -271,6 +284,10 @@ removed or changed one `c+1:0:0`, and a change inside the library alone
 incompatible change, which is why the configuration structure is frozen
 without a step limit (architecture section 63 has none) and why a counter
 added to `relic_stats_t` is one too.
+
+A new `RELIC_F_` switch is an added interface, `c+1:0:a+1`: the bit is new
+and a caller may depend on its effect, while a library without it ignores the
+bit, so nothing built against the older interface changes.
 
 `RELIC_VERSION_STRING` and `relic_version()` are the package's release, and
 are unrelated to the version-info: the release says what the tool and the

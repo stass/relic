@@ -1,0 +1,3 @@
+edge(X, Y)?
+edge(z, X)?
+edge(a, b)?

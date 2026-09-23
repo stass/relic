@@ -1,0 +1,10 @@
+% Under -v a session's queries are counted like any others, numbered after
+% the program's own; .plan counts the query it ran, and a line that was
+% rejected still takes its number.  -vv notes a mixed-type comparison once
+% for the rule, however many queries read it.
+v(1).
+v(a).
+small(X) :- v(X), X < 5.
+
+v(X)?
+small(X)?

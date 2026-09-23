@@ -753,6 +753,7 @@ compiler_init(relic_compiler_t *compiler, relic_t *ctx, relic_arena_t *arena,
 	compiler->arena = arena;
 	compiler->statement = statement;
 	compiler->rule.where = statement->where;
+	compiler->rule.origin = RELIC_ORIGIN_QUERY;
 }
 
 /*
@@ -988,6 +989,7 @@ compile_statement(relic_t *ctx, const relic_ast_stmt_t *statement)
 		if (result != RELIC_COMPILE_OK)
 			return (result);
 
+		rule.origin = ctx->program.rules.count;
 		return (append_rule(ctx, &ctx->program.rules, &rule));
 	}
 

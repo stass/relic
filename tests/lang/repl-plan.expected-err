@@ -1,0 +1,5 @@
+stratum 0, component 0: edge/2
+    facts: 2
+query $q1(X) :- edge(a, X).
+    lookup edge(a, X) key={0}
+    emit $q1(X)

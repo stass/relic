@@ -104,7 +104,17 @@ Per D-11 and architecture section 10.1:
   out rather than reported as an error.
 
 Verbosity level 2 reports the first cross-type ordering comparison per rule, so
-that unintended mixing is discoverable.
+that unintended mixing is discoverable. The library reports it only when the
+context was created with `RELIC_F_NOTE_MIXED`, as a note located at the
+comparison and naming the two types. A FILTER records where its comparison
+was written for that purpose. Every compiled rule records its origin, the
+program rule it was written as, which the rules a Magic rewrite generates
+from it inherit and its semi-naive variants share, so each counts as the rule
+it came from. The record that a rule has been reported lives on that program
+rule for the life of the context, so the note is not repeated by the next
+evaluation or query; a query's rules share one record, cleared when an
+answer begins. Nothing is allocated for it. The check costs nothing unless
+the switch is set and the comparison was unordered.
 
 ---
 

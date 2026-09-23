@@ -1,0 +1,3 @@
+% -c forbids evaluation and -i demands it, so the two together are a usage
+% error, and nothing is read.
+edge(a, b).

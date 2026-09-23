@@ -309,6 +309,12 @@ struct relic_magic {
  * `counters` is the work evaluation has done.  What the context holds is
  * not counted here: relic_stats() measures it when asked.
  *
+ * `query_mixed_noted` records that RELIC_F_NOTE_MIXED has reported a
+ * mixed-type comparison of the query being answered, or of a rule generated
+ * from it.  A program rule keeps the same record on itself for the life of
+ * the context; a query's is cleared when its answer begins, so each answer
+ * is reported on once.
+ *
  * `busy` is set for the whole of an operation, from the public entry point
  * that began it until that entry point returns; relic_enter() and
  * relic_leave() are the only code that changes it.  Caller code runs during
@@ -332,6 +338,7 @@ struct relic {
 	relic_config_t		 config;
 	relic_counters_t	 counters;
 	size_t			 materialized_rules;
+	bool			 query_mixed_noted;
 	bool			 busy;
 };
 
@@ -386,7 +393,8 @@ void	 relic_diagf(relic_t *ctx, enum relic_diag_level level,
  * than inside it.
  */
 void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
-	    const relic_location_t *where, const char *format, va_list arguments)
+	    const relic_location_t *where, const char *format,
+	    va_list arguments)
 	    RELIC_PRINTFLIKE(4, 0);
 
 /*
@@ -482,7 +490,7 @@ enum relic_lex_error {
 	RELIC_LEX_EXPECTED_IMPLIES,	/* : not followed by - */
 	RELIC_LEX_EXPECTED_NE,		/* ! not followed by = */
 	RELIC_LEX_INTEGER_RANGE,	/* outside int64_t */
-	RELIC_LEX_INTEGER_TRAILING,	/* an identifier byte after the digits */
+	RELIC_LEX_INTEGER_TRAILING,	/* identifier byte after the digits */
 	RELIC_LEX_UNTERMINATED_STRING
 };
 

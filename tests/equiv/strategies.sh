@@ -7,10 +7,13 @@
 # fixed point, the planner without indexes and without reordering, and each
 # of those again answering from the whole fixed point instead of through the
 # Magic rewrite.  Every run must agree with the default on standard output,
-# the diagnostics on standard error, and exit status.  The one diagnostic
-# left out is the warning that a rewrite outgrew its budget: it says which
+# the diagnostics on standard error, and exit status.  Two diagnostics are
+# left out.  The warning that a rewrite outgrew its budget says which
 # strategy answered, which runs without the rewrite never report, and the
-# answer it announces is compared like any other.  Rows are sorted with
+# answer it announces is compared like any other.  The note -vv gives about
+# a comparison of mixed types says where evaluation first met one, which is
+# earlier when a query evaluates the whole program, and the answers the
+# comparison filtered are compared like any other.  Rows are sorted with
 # -s, because a strategy that derives the same set of tuples in a different
 # order is correct, and the comparison is of sets.
 #
@@ -44,8 +47,10 @@
 # strategies without anyone deciding that it should be.  A test that chooses
 # a strategy itself, with -X in its options, is about that strategy and is
 # left to its own expectations, and so is one that shows its plans with -e,
-# since the plans are what the alternatives change, and one that limits the
-# Magic rewrite, which only some of the alternatives run.
+# since the plans are what the alternatives change, one that limits the
+# Magic rewrite, which only some of the alternatives run, and an interactive
+# session, whose .plan and .stats show what the strategy did.  Every run
+# reads an empty standard input, so a session's test is not run from here.
 
 set -eu
 
@@ -77,10 +82,12 @@ run() {
 
 	status=0
 	( cd "$directory" && $RELIC $args -s -X stats "$@" "$program" ) \
-	    > "$work/$label.out" 2> "$work/$label.all" || status=$?
+	    < /dev/null > "$work/$label.out" 2> "$work/$label.all" ||
+	    status=$?
 	echo "$status" > "$work/$label.status"
 
 	grep -v -e '^stats: ' -e "Magic rewrite outgrew its budget" \
+	    -e "note: ordering comparison between " \
 	    "$work/$label.all" > "$work/$label.err" || true
 	grep -e '^stats: tuples held ' "$work/$label.all" \
 	    > "$work/$label.held" || true
@@ -136,7 +143,7 @@ for path in $RELIC_LANG_TESTS; do
 	fi
 
 	case " $args " in
-	*" -X"* | *" -e"* | *" -l magic-"*)
+	*" -X"* | *" -e"* | *" -i"* | *" -l magic-"*)
 		continue
 		;;
 	esac

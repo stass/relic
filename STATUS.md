@@ -144,8 +144,6 @@ a query that exceeds a limit delivers none. The relations record how many
 rules they are a fixed point of, so a query over a materialized program after
 nothing new was loaded evaluates nothing.
 
-`-i`, `-n` and `-v` arrive in S12. Each is an unknown option until it does.
-
 **The dependency graph and stratification, stage S6.** The check knows what
 depends on what and rejects recursion through negation; evaluation runs in the
 order that analysis settles, specified in `specs/design-stratify.md`.
@@ -253,8 +251,7 @@ stage is about 2,500 lines of library and tool code, comments included,
 against a budget of 800; `lib/magic.c` accounts for 1,700 of them.
 
 **The library interface, stage S11.** `include/relic.h` is the interface
-`specs/design-api.md` specifies and `man/relic.3` documents: 29 entry points,
-the shared library's version-info `1:0:0`.
+`specs/design-api.md` specifies and `man/relic.3` documents: 29 entry points.
 
 | Component | State |
 | --- | --- |
@@ -273,14 +270,34 @@ The step limit was deferred and `relic_config_t` is frozen without it. The
 stage is about 390 non-comment lines against a budget of 250: about 430 in
 the library, less about 40 the tool gave back by collecting through it.
 
+**The interactive mode and the finished tool, stage S12.** `relic -i`
+answers queries typed at a terminal or read from a pipe, and the option set
+of architecture section 40 is complete, specified in `specs/design-cli.md`
+sections 8 to 10 and documented in `man/relic.1`.
+
+| Component | State |
+| --- | --- |
+| `cmd/relic/repl.c` | the session: each line blank, a `%` comment, a command or one query, prepared as `<query N>` and answered into the batch's output under the same `-F`, `-s`, `-n`, `-o` and separators; `.help`, `.plan QUERY` (the query run with its plan on standard output and its rows discarded, `-e`'s destination put back afterwards, diagnostics at the columns of the line as typed), `.quit`, `.stats`; replies on standard output, never the `-o` file; a failed line reported and the session continued, exit 1 if any failed; a NUL byte refused; everything answered flushed before each line is read; a failed read or write, of a row or a reply, ends the session |
+| `cmd/relic/input.c` | the one place lines are read: libedit with emacs bindings, the user's editrc and an in-session history when standard input and standard error are both a terminal and the build has it, `getline(3)` otherwise; prompt `relic> ` on standard error under the same condition; any `getline(3)` failure but the end of input reported; a line without its newline, text at the end of input without one included |
+| `cmd/relic/main.c` | `-i` as phase 9, standard input never read as a program under it, `-c -i` a usage error; `-n` attaches no output, so `-o` creates nothing; `-v` writes `query N: M rows` to standard error after each query, standard output flushed first; `-vv` sets `RELIC_F_NOTE_MIXED`; every query given to run numbered, session lines continuing after phase 8's |
+| `cmd/relic/output.c` | an output with no stream counts and drops rows; `output_discard()` for `.plan`, `output_flush()` before each session line is read |
+| `lib/eval.c`, `lib/plan.c` | `RELIC_F_NOTE_MIXED`: the first ordering comparison between values of different types in each rule reported as a note at the comparison, once for the life of the context for a program rule and once per answer for a query; every compiled rule records its origin, which Magic copies inherit, and the record of a note lives on the origin, so nothing is allocated; a FILTER records its comparison's location |
+| `include/relic.h`, `man/relic.3`, `configure.ac` | the new switch; version-info `2:0:1`, an added interface |
+| `man/relic.1` | options, limits, the interactive mode, the formats, exit status, examples |
+| `tests/` | `tests/langtest.sh` feeds a test's `.stdin`, or else an empty input, so a session is a golden transcript: eight `repl-*` tests (a session, every command, every refusal and end of input part way through a query, `.plan` with `-e` and after `-a`, `-v` and `-vv` numbering, `-n`, json, `-c -i`) and four `verbose-*` tests; `tests/repl.sh` for a session with no operands, `-o` under `-i`, a NUL byte, a carriage return, blanks splitting a command, `.plan` and `.stats` beside `-o`, an escaped unknown command, `-n -i -o`, rows written before the first read, a failed read, and a failed reply and a failed write; `tests/man.sh` holds `relic.1`'s option list to the usage message and lints both pages; `test_api` notes each rule once across rewrites, later queries and materialization, two rules written at one location apart, a query once per answer together with the seed its rewrite copies the comparison into, and never without the switch; the equivalence suite skips sessions and leaves the `-vv` note out, since when it appears depends on the strategy |
+
+The transcripts pass in a build with libedit and one configured
+`--with-libedit=no`. The terminal path -- the prompt, libedit's editing and
+history, end of input at a prompt -- was checked by hand through a
+pseudo-terminal in both builds, and is not automated.
+
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
 `--with-libedit`. Test suites: `make check`, `make check-asan`,
 `make check-lsan`, `make check-msan`, `make check-ubsan`.
 
-`--with-libedit` is detected but not yet consumed: nothing links libedit until
-the interactive mode arrives in S12, so a build configured with it gains no
-line editing. `TODO.md` records this.
+`--with-libedit` decides whether the interactive mode edits lines; only the
+tool links libedit, never the library.
 
 ### Verified
 
@@ -515,15 +532,16 @@ The Magic suites were confirmed the same way:
 | `specs/design-planner.md` | when a component is planned, statistics, the estimate, greedy order, access paths, the references, explain |
 | `specs/design-magic.md` | what a query reads completely, adornments and names, sideways information passing, generated rules, termination, limits, evaluation, explain |
 | `specs/design-api.md` | the public interface: values, programmatic facts, queries and results, callbacks and re-entry, diagnostics, exported symbols, versioning |
-| `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats |
+| `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats, `-n`, verbosity, the interactive mode |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S12, the REPL and command-line completion: the interactive mode with
-optional libedit, `-i`, `-n` and `-v`, and `man/relic.1`.
+Stage S13, differential and fuzz hardening: a generator of programs and a
+shrinker, fuzz targets for the parser and the evaluator, `make check-random`
+and `make coverage`.
 
 ## Decisions taken
 

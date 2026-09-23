@@ -1,0 +1,378 @@
+.\" Copyright (c) 2026 Stanislav Sedov
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd September 23, 2026
+.Dt RELIC 1
+.Os
+.Sh NAME
+.Nm relic
+.Nd evaluate Datalog programs and answer queries
+.Sh SYNOPSIS
+.Nm
+.Op Fl aceinsv
+.Op Fl F Ar format
+.Op Fl l Ar limit Ns = Ns Ar value
+.Op Fl o Ar file
+.Op Fl q Ar query
+.Op Fl X Ar debug
+.Op Ar
+.Nm
+.Fl V
+.Sh DESCRIPTION
+The
+.Nm
+utility loads a Datalog program, checks it, and answers its queries.
+The program is read from each
+.Ar file
+in the order given, all of them forming one program, or from the standard
+input when no
+.Ar file
+is given and the standard input is not a terminal.
+.Pp
+A program is a sequence of facts, rules and queries.
+A fact is an atom ending in a period; a rule is an atom, the
+.Ql :-
+token and a body of literals separated by commas, ending in a period; a
+query is a body ending in a question mark:
+.Bd -literal -offset indent
+edge(a, b).
+edge(b, c).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+path(a, X)?
+.Ed
+.Pp
+A symbol begins with a lowercase letter, a variable with an uppercase
+letter or an underscore, and
+.Ql _
+alone matches anything.
+Integers are decimal and may be negative.
+Strings are written in double quotes and may hold any bytes, spelled with
+the escapes
+.Ql \e\e ,
+.Ql \e\(dq ,
+.Ql \en ,
+.Ql \et ,
+.Ql \er ,
+.Ql \e0
+and
+.Ql \exHH .
+A body literal is an atom, an atom preceded by
+.Ql not ,
+or a comparison with one of
+.Ql = ,
+.Ql != ,
+.Ql < ,
+.Ql <= ,
+.Ql >
+and
+.Ql >= .
+A comparison that orders values of different types is false.
+.Ql %
+begins a comment that runs to the end of the line.
+.Pp
+Every variable of a rule's head, of a negated literal and of a comparison
+must also occur in a positive atom of the body, and a program may not be
+recursive through negation.
+A program that breaks either rule is rejected and nothing is evaluated.
+.Pp
+The options are as follows:
+.Bl -tag -width Ds
+.It Fl a
+Evaluate the whole program before answering any query, rather than answering
+each query through a rewrite that derives only what its constants can
+reach.
+The answers are the same.
+.It Fl c
+Check the program and its queries, and evaluate nothing.
+.It Fl e
+Write the plan of everything evaluated to the standard error: each part of
+the program as it is planned, and each query's plan before its rows.
+The text is meant to be read and may change from one release to the next.
+A plan names a query's answer
+.Ql $q
+and a serial counting every query prepared, from zero, which need not be the
+number diagnostics and
+.Fl v
+give it.
+.It Fl F Ar format
+Write query results in
+.Ar format :
+.Cm text ,
+the default,
+.Cm csv ,
+.Cm tsv
+or
+.Cm json .
+The formats are described in
+.Sx OUTPUT .
+.It Fl i
+Once the queries have run, read queries from the standard input and answer
+each in turn, as described in
+.Sx INTERACTIVE MODE .
+The standard input is then never read as a program, and with no
+.Ar file
+the program is empty.
+A run that fails before the session would begin ends without one.
+.It Fl l Ar limit Ns = Ns Ar value
+Set a resource limit.
+The option may be repeated, and a limit given twice takes the later value.
+The limits are described in
+.Sx RESOURCE LIMITS .
+.It Fl n
+Run every query and write none of its rows.
+The output is never opened, so
+.Fl o
+creates no file.
+With
+.Fl v
+this counts each query's answers; with
+.Fl e
+it shows what each query runs.
+.It Fl o Ar file
+Write query results to
+.Ar file ,
+created or truncated, instead of the standard output.
+The file is opened only once the program and every query have been checked,
+so a run that fails its checks leaves an existing file alone.
+.It Fl q Ar query
+Answer
+.Ar query ,
+written as in a program and ending in a question mark, instead of the
+queries the program contains.
+The option may be repeated, and the queries are answered in the order
+given; diagnostics about the third are named
+.Ql <query 3> .
+The program's own queries are still checked.
+.It Fl s
+Sort each query's rows before writing them, column by column: integers
+before symbols before strings, integers numerically, and symbols and
+strings bytewise.
+Without
+.Fl s
+the order of the rows is unspecified, though the same on every run over the
+same input.
+.It Fl V
+Print the version and exit.
+.It Fl v
+Say more on the standard error.
+Once: after each query that succeeds, a line
+.Ql query N: M rows ,
+where N is the query's number: its position among the
+.Fl q
+queries, or else the program's own, continued in an interactive session as
+.Sx INTERACTIVE MODE
+describes.
+Twice: also a note for the first comparison in each rule that ordered values
+of different types, which is false and easily unintended.
+.It Fl X Ar debug
+Select an internal behaviour, for testing and debugging.
+The option may be repeated.
+These are not part of the stable interface:
+.Bl -tag -width no-reorder
+.It Cm naive
+evaluate recursion by the naive fixed point;
+.It Cm no-index
+build no index, scanning instead;
+.It Cm no-magic
+answer every query from the whole program;
+.It Cm no-reorder
+join a rule's atoms in the order they are written;
+.It Cm stats
+write the evaluation counters to the standard error when the run ends.
+.El
+.Pp
+Each gives the same answers as the default.
+.El
+.Pp
+An invocation checks everything before it evaluates anything: every file is
+loaded and every query prepared, and all the mistakes found are reported,
+before the first query runs.
+The queries then run in turn, and the first that fails ends the run.
+.Sh RESOURCE LIMITS
+Each
+.Fl l
+limit is a decimal
+.Ar value
+from 0, which asks for the default, to the largest size the platform can
+hold.
+.Bl -tag -width magic-preds
+.It Cm tuples
+the most tuples all relations together may hold; by default there is no
+limit.
+.It Cm memory
+the most bytes relation and index storage may occupy; by default there is
+no limit.
+.It Cm magic-preds
+the most predicates the rewrite of one query may generate.
+.It Cm magic-rules
+the most rules the rewrite of one query may generate.
+.El
+.Pp
+A query or evaluation that exceeds
+.Cm tuples
+or
+.Cm memory
+fails, and writes no rows.
+By default the two
+.Cm magic
+limits are a budget in proportion to the program, and a rewrite that
+outgrows it is abandoned with a warning and the query answered from the
+whole program; set, either is a limit like the others.
+.Sh INTERACTIVE MODE
+With
+.Fl i ,
+each line of the standard input is one of:
+.Bl -bullet
+.It
+nothing but blanks, or a comment beginning with
+.Ql % ,
+which is ignored;
+.It
+a command beginning with a period;
+.It
+one query, which must fit on the line.
+.El
+.Pp
+A query is answered as
+.Fl q
+answers one, into the same output and format.
+Only queries are accepted; facts and rules are not.
+The commands are:
+.Bl -tag -width ".plan query"
+.It Ic .help
+List the commands.
+.It Ic .plan Ar query
+Run
+.Ar query
+and write its plan instead of its rows, to the standard output even under
+.Fl e .
+.It Ic .quit
+End the session.
+.It Ic .stats
+Write the evaluation counters.
+.El
+.Pp
+A command's reply is written to the standard output, never to the
+.Fl o
+file.
+Each query of the session, and each
+.Ic .plan ,
+is numbered after the queries that ran before the session, and a query
+that is rejected still takes its number.
+A query or command that fails is reported, and the session goes on.
+The session ends at the end of input, at
+.Ic .quit ,
+or when a read or a write fails.
+.Pp
+When the standard input and the standard error are both a terminal, the
+session prompts with
+.Ql relic>
+on the standard error and, where
+.Nm
+was built with libedit, allows each line to be edited and recalled.
+Otherwise there is no prompt, so that a session read from a file or a pipe
+writes its answers and nothing else.
+Everything answered is written out before the session waits for the next
+line.
+.Sh OUTPUT
+Every format writes one row per answer.
+A row's columns are the query's variables, in the order they first occur.
+A query with no variables writes one empty row when it holds and nothing
+when it does not.
+In
+.Cm text ,
+.Cm csv
+and
+.Cm tsv ,
+the rows of each query but the first are preceded by an empty line.
+.Bl -tag -width Ds
+.It Cm text
+Values separated by one space, each written as a program would write it:
+integers in decimal, symbols as they are, and strings in double quotes with
+the escapes of the language.
+A string's control characters, C1 controls included, and any byte that is
+not valid UTF-8 are escaped, so results are always safe to print.
+.It Cm csv
+RFC 4180 fields separated by commas, each record ending in a newline.
+A field is quoted when it holds a comma, a double quote, a carriage return
+or a newline, or is empty.
+Symbols and strings are written as their bytes, unescaped.
+.It Cm tsv
+Fields separated by one tab.
+A backslash, tab, newline and carriage return inside a value are written as
+.Ql \e\e ,
+.Ql \et ,
+.Ql \en
+and
+.Ql \er .
+.It Cm json
+One document per query: an array of rows, each an array of values, one row
+per line.
+An integer is a number and a symbol a string holding its bytes; a string
+value is a JSON string holding the
+.Cm text
+format's quoted literal, so a JSON string beginning with a double quote is
+a string value and any other is a symbol.
+.El
+.Pp
+Diagnostics, plans, counts and counters are written to the standard error,
+so the standard output holds only results and, in an interactive session,
+the replies to its commands.
+.Sh FILES
+.Bl -tag -width ~/.editrc
+.It Pa ~/.editrc
+libedit's configuration, read when an interactive session edits its lines;
+see
+.Xr editrc 5 .
+.El
+.Sh EXIT STATUS
+.Ex -std
+It exits 1 when the program or a query was rejected, when evaluation failed,
+when anything in an interactive session failed, or when input or output
+failed, and 2 when the command line is malformed.
+.Sh EXAMPLES
+Check a program without evaluating it:
+.Pp
+.Dl $ relic -c project.dl
+.Pp
+Answer the queries written in two files that form one program:
+.Pp
+.Dl $ relic rules.dl facts.dl
+.Pp
+Answer a query given on the command line, as CSV:
+.Pp
+.Dl $ relic -F csv -q 'depends(X, Y)?' project.dl
+.Pp
+Show how a query is answered, without its rows:
+.Pp
+.Dl $ relic -n -e -q 'path(a, X)?' graph.dl
+.Pp
+Bound the work a query may do:
+.Pp
+.Dl $ relic -l tuples=5000000 -l memory=2147483648 -q 'path(X, Y)?' graph.dl
+.Pp
+Explore a program interactively:
+.Bd -literal -offset indent
+$ relic -i graph.dl
+relic> path(a, X)?
+b
+c
+relic> .quit
+.Ed
+.Sh DIAGNOSTICS
+A diagnostic about the program names the file, line and column it concerns,
+as
+.Ql graph.dl:4:22: error: message .
+Any byte that is not printable ASCII in a diagnostic is escaped.
+.Sh SEE ALSO
+.Xr relic 3 ,
+.Xr editrc 5
+.Sh CAVEATS
+.Cm csv
+and
+.Cm tsv
+write a string's bytes as they are, control characters included.
+They are meant for programs to read; the results of an untrusted program in
+either format, printed to a terminal, can carry escape sequences.

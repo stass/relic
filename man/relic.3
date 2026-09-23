@@ -183,9 +183,9 @@ answered from the whole program.
 .Dv SIZE_MAX
 sets no bound on anything.
 .Fa flags
-holds switches that select alternative evaluation strategies for testing,
-and is zero for ordinary use:
-.Bl -tag -width RELIC_F_NO_REORDER
+holds switches, zero by default.
+The first four select alternative evaluation strategies for testing:
+.Bl -tag -width RELIC_F_NOTE_MIXED
 .It Dv RELIC_F_NAIVE
 evaluate every recursive component by the naive fixed point rather than the
 semi-naive one;
@@ -195,10 +195,16 @@ build no secondary index, scanning instead;
 join positive literals in the order they are written;
 .It Dv RELIC_F_NO_MAGIC
 answer every query from the whole program rather than through its Magic
-Sets rewrite.
+Sets rewrite;
+.It Dv RELIC_F_NOTE_MIXED
+report, as a note pointing at the comparison, the first ordering comparison
+in each rule that compared values of different types, which is false; a
+rule of the program is reported at most once for the life of the context,
+the rules a Magic Sets rewrite generates from it counting as that rule, and
+a query at most once each time it is answered.
 .El
 .Pp
-Each gives the same answers as the default.
+No switch changes an answer, and a bit no switch defines is ignored.
 .Pp
 .Fn relic_destroy
 releases a context and everything it owns, and accepts

@@ -962,6 +962,44 @@ limit parsed, rejected when malformed, and enforced. Manual page linted with
 `-l` and its parsing tests landed with S8; S12 confirms them rather than
 delivering them.
 
+**Decided during the stage.** Six decisions were taken when S12 landed, each
+recorded in `specs/design-cli.md` sections 2 and 8 to 10:
+
+* **A session takes queries only, one per line.** A line is blank, a `%`
+  comment, a command or one query, prepared as `-q` prepares one, so a
+  mistyped query costs its diagnostic and nothing else. Facts and rules are
+  refused: a rule that failed its check would leave the program rejected for
+  the rest of the session, and accepting them needs a checked load the
+  library does not offer. A query must fit on its line, so the tool never
+  needs to know where a statement ends, which only the lexer knows.
+* **`-i` is a phase after the queries.** An invocation under `-i` loads,
+  checks and runs its queries as it would without it, then reads the
+  session from standard input into the same output. Standard input is never
+  a program under `-i`, and `-c -i` is a usage error.
+* **Replies to standard output, prompt to standard error.** A command's
+  reply never reaches the `-o` file, which holds query results only, and the
+  prompt appears only when standard input and standard error are both a
+  terminal, so a scripted session writes exactly its answers and a logged
+  one does not fill its log with prompts. Everything answered is flushed
+  before each line is read, and a failed read or write ends the session.
+* **Every query given to run is numbered.** `-v` counts rows as `query N:
+  M rows`, and a session's query is named `<query N>`, N continuing after
+  the queries that ran before it; a rejected query takes its number too.
+* **`-vv` asks the library for its mixed-type note through a switch.**
+  `relic_config_t` is frozen, so `RELIC_F_NOTE_MIXED` is a flag bit a
+  library predating it ignores; version-info becomes `2:0:1`. The note is
+  given once per program rule for the life of the context and once per
+  answer for a query. Every compiled rule records the program rule it came
+  from, which Magic copies inherit, and the record of the note lives there,
+  so asking for it allocates nothing and cannot fail an evaluation.
+* **The two security residuals S12 was to decide wait for S13.** A
+  structural limit on body length and a ceiling on probe-cluster length
+  change no `-l` key, so `relic.1` documents the four there are.
+
+The stage is about 610 non-comment lines against a budget of 450: about 520
+in the tool, of which the session is 240 and the line reader 190, and about
+90 in the library.
+
 ---
 
 ### S13 - Differential and fuzz hardening

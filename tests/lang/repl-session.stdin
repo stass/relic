@@ -1,0 +1,12 @@
+edge(X, Y)?
+
+   
+% a comment, and one after blanks:
+  % indented
+  path(b, X)?
+.help
+path(X, d), X != a?
+edge(d, X)?
+edge(a, b)?
+.quit
+path(a, X)?

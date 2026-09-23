@@ -1344,7 +1344,7 @@ page:
 -c          check syntax, safety and stratification; do not evaluate
 -e          print the selected execution plan and Magic rewrite
 -F fmt      output format: text, csv, tsv, json
--i          enter interactive mode after loading input
+-i          enter interactive mode once the queries have run
 -l limit=n  set a resource limit; repeatable
 -n          suppress normal query output; useful with -e or -v
 -o file     write query output to file instead of stdout
@@ -1737,7 +1737,9 @@ limit exists in exactly one place and the tool merely parses into it.
 
 `flags` selects internal behaviour corresponding to the `-X` options, including
 `RELIC_F_NAIVE`, `RELIC_F_NO_INDEX`, `RELIC_F_NO_MAGIC` and
-`RELIC_F_NO_REORDER`.
+`RELIC_F_NO_REORDER`, and diagnostics a caller asks for, such as
+`RELIC_F_NOTE_MIXED`, the note on a mixed-type ordering comparison that `-vv`
+requests. No switch changes an answer.
 
 ---
 

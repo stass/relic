@@ -1,0 +1,8 @@
+% .plan runs a query and writes its plan to standard output instead of its
+% rows, even under -e, whose plans go to standard error; afterwards -e's
+% explain callback is back in place, so the next query's plan goes to
+% standard error again, followed by its rows.
+edge(a, b).
+edge(b, c).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).

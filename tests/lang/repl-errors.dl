@@ -1,0 +1,6 @@
+% Mistakes in an interactive session are reported and the session goes on to
+% the next line; the session, and the run, then exit 1.  Every query line is
+% numbered, the rejected ones included, so no two diagnostics share a name.
+% The last line of repl-errors.stdin ends the input part way through a query.
+edge(a, b).
+edge(b, c).

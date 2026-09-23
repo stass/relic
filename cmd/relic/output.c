@@ -42,6 +42,10 @@
  *
  * A write that fails is found by the stream's error indicator after each
  * row, and reported once.
+ *
+ * An output with no stream attached writes nothing: its queries run and their
+ * rows are counted and dropped, which is what -n asks for, and what .plan
+ * does with the rows of the query it shows.
  */
 
 /* Enough for any int64_t in decimal, its sign and a terminator. */
@@ -77,6 +81,8 @@ struct row_order {
 static void	 begin_query(output_t *out);
 static int	 compare_rows(const row_order_t *order,
 		    const relic_value_t *left, const relic_value_t *right);
+static int	 count_row(void *context, const relic_value_t *values,
+		    size_t count);
 static bool	 csv_needs_quotes(const char *bytes, size_t length);
 static void	 end_query(output_t *out);
 static char	 field_separator(enum output_format format);
@@ -135,14 +141,20 @@ output_format_named(const char *name, enum output_format *formatp)
 }
 
 void
-output_init(output_t *out, const char *program_name, relic_t *ctx,
-    FILE *stream, const char *name, enum output_format format, bool sorted)
+output_init(output_t *out, const char *program_name, relic_t *ctx)
 {
 	bzero(out, sizeof(*out));
 	out->ctx = ctx;
+	out->program_name = program_name;
+	out->format = OUTPUT_TEXT;
+}
+
+void
+output_attach(output_t *out, FILE *stream, const char *name,
+    enum output_format format, bool sorted)
+{
 	out->stream = stream;
 	out->name = name;
-	out->program_name = program_name;
 	out->format = format;
 	out->sorted = sorted;
 }
@@ -798,6 +810,42 @@ write_collected(output_t *out, relic_query_t *query)
 }
 
 /*
+ * The row callback of a query whose rows are counted and dropped.  Its
+ * context is the count.
+ */
+static int
+count_row(void *context, const relic_value_t *values RELIC_CMD_UNUSED,
+    size_t count RELIC_CMD_UNUSED)
+{
+	size_t *rows;
+
+	rows = context;
+	(*rows)++;
+
+	return (0);
+}
+
+int
+output_discard(output_t *out, relic_query_t *query, size_t *rowsp)
+{
+	size_t rows;
+
+	rows = 0;
+	if (relic_query_run(out->ctx, query, count_row, &rows) != 0)
+		return (-1);
+
+	*rowsp = rows;
+
+	return (0);
+}
+
+bool
+output_is_stdout(const output_t *out)
+{
+	return (out->stream == stdout);
+}
+
+/*
  * Run a query and write its results.
  *
  * Nothing is written for a query that fails, because the library delivers no
@@ -806,9 +854,12 @@ write_collected(output_t *out, relic_query_t *query)
  * written once it has been sorted.
  */
 int
-output_query(output_t *out, relic_query_t *query)
+output_query(output_t *out, relic_query_t *query, size_t *rowsp)
 {
 	int status;
+
+	if (out->stream == NULL)
+		return (output_discard(out, query, rowsp));
 
 	out->begun = false;
 	out->rows_written = 0;
@@ -823,6 +874,22 @@ output_query(output_t *out, relic_query_t *query)
 
 	end_query(out);
 	out->queries_written++;
+	*rowsp = out->rows_written;
+
+	return (stream_failed(out) ? -1 : 0);
+}
+
+/*
+ * A failed flush sets the stream's error indicator, so the check that
+ * follows reports it, along with any earlier failure not yet reported.
+ */
+int
+output_flush(output_t *out)
+{
+	if (out->stream == NULL)
+		return (0);
+
+	fflush(out->stream);
 
 	return (stream_failed(out) ? -1 : 0);
 }
@@ -832,12 +899,10 @@ output_close(output_t *out)
 {
 	bool failed;
 
-	/*
-	 * A failed flush sets the stream's error indicator, so the check that
-	 * follows reports it, along with any earlier failure not yet reported.
-	 */
-	fflush(out->stream);
-	failed = stream_failed(out);
+	if (out->stream == NULL)
+		return (0);
+
+	failed = output_flush(out) != 0;
 
 	if (out->stream == stdout)
 		return (failed ? -1 : 0);

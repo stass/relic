@@ -12,10 +12,12 @@
  *
  * The scenarios are the interface's promises that no golden test can see:
  * caller code that calls back into its context is refused and changes
- * nothing, and does not hide why an operation failed, an answer does not outlive its delivery, every diagnostic reaches
- * the callback and none reaches standard error, a value is built only from
- * bytes its type can hold, a fact added through the interface is the fact
- * its text would load, and a collected result is the stream, kept.
+ * nothing, a refusal does not hide why an operation failed, an answer does
+ * not outlive its delivery, every diagnostic reaches the callback and none
+ * reaches standard error, a value is built only from bytes its type can
+ * hold, a fact added through the interface is the fact its text would load,
+ * a collected result is the stream, kept, and a mixed-type comparison is
+ * noted once per rule and only when asked for.
  */
 
 #include "config.h"
@@ -37,14 +39,22 @@
 #define	SCENARIO_COLLECT	"a collected result is the stream, kept"
 #define	SCENARIO_FACT		"an added fact is the fact its text loads"
 #define	SCENARIO_INVALIDATE	"an added fact invalidates what was derived"
+#define	SCENARIO_MIXED		"a mixed comparison is noted once per rule"
 #define	SCENARIO_REENTRY	"a callback cannot call into its context"
-#define	SCENARIO_REFUSAL	"a refusal does not hide why an operation failed"
+#define	SCENARIO_REFUSAL \
+	"a refusal does not hide why an operation failed"
 #define	SCENARIO_TRANSIENT	"an answer does not outlive its delivery"
 #define	SCENARIO_VALUES		"a value holds only what its type can"
 
 /* The largest answer answer_text() renders, in rows and bytes per row. */
 #define	ANSWER_ROWS	16
 #define	ANSWER_WIDTH	128
+
+/* The most notes a mixed_log_t keeps the line of. */
+#define	MIXED_NOTES_MAX	8
+
+/* What every note about a mixed-type comparison begins with. */
+#define	MIXED_NOTE	"ordering comparison between "
 
 /* The text relic_error() holds after a refused re-entry. */
 #define	REENTRY_ERROR	"the context was called from one of its own callbacks"
@@ -57,6 +67,7 @@
 #define	REENTRY_PROGRAM	"a(x).\na(y).\nb(X) :- a(X), not c(X).\nb(X)?\n"
 
 typedef struct diag_log diag_log_t;
+typedef struct mixed_log mixed_log_t;
 typedef struct reentry reentry_t;
 
 /* How many diagnostics a context reported, by level. */
@@ -64,6 +75,17 @@ struct diag_log {
 	size_t	notes;
 	size_t	warnings;
 	size_t	errors;
+};
+
+/*
+ * The notes about mixed-type comparisons a context reported: how many, and
+ * the line each of the first MIXED_NOTES_MAX pointed at.  `other` counts
+ * every other diagnostic, which a scenario expects to be none.
+ */
+struct mixed_log {
+	uint32_t	lines[MIXED_NOTES_MAX];
+	size_t		notes;
+	size_t		other;
 };
 
 /*
@@ -127,6 +149,13 @@ static void	 an_added_fact_invalidates_what_was_derived(void);
 static void	 an_added_fact_is_the_fact_its_text_loads(void);
 static void	 an_answer_does_not_outlive_its_delivery(void);
 static void	 every_diagnostic_reaches_the_callback(void);
+static void	 a_mixed_comparison_is_noted_once_per_rule(void);
+static void	 a_mixed_note_follows_the_rule_not_its_place(void);
+static void	 a_query_and_its_rewrite_share_one_note(void);
+static bool	 noted_line(const mixed_log_t *log, uint32_t line);
+static void	 record_mixed_note(void *callback_ctx,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -469,7 +498,8 @@ a_callback_cannot_call_into_its_context(void)
 		relic_diag_set(reentry.ctx, reenter_from_diagnostic, &reentry);
 		reentry.query = relic_query_prepare(reentry.ctx, NULL, "b(X)?");
 		check(reentry.query != NULL && reentry.calls > 0,
-		    SCENARIO_REENTRY, "the check that warns about c/1 completes");
+		    SCENARIO_REENTRY,
+		    "the check that warns about c/1 completes");
 		reentry_end(&reentry);
 	}
 
@@ -714,7 +744,8 @@ a_value_holds_only_what_its_type_can(void)
 	    first.type == RELIC_SYMBOL &&
 	    relic_value_symbol(ctx, "foo_Bar9", 8, &second) == 0 &&
 	    second.v.id == first.v.id, SCENARIO_VALUES,
-	    "foo_Bar9 is a symbol, and interning it twice gives one identifier");
+	    "foo_Bar9 is a symbol, and interning it twice gives one "
+	    "identifier");
 	check(relic_value_symbol(ctx, "not", 3, &first) == 0, SCENARIO_VALUES,
 	    "not is a symbol value, reserved only as a predicate name");
 
@@ -812,7 +843,8 @@ write_row(relic_t *ctx, const relic_value_t *row, size_t columns, char *line)
 	for (column = 0; column < columns && used < ANSWER_WIDTH; column++) {
 		if (row[column].type == RELIC_INTEGER)
 			used += (size_t)snprintf(line + used,
-			    ANSWER_WIDTH - used, "%s%lld", column > 0 ? " " : "",
+			    ANSWER_WIDTH - used, "%s%lld",
+			    column > 0 ? " " : "",
 			    (long long)row[column].v.integer);
 		else
 			used += (size_t)snprintf(line + used,
@@ -876,7 +908,8 @@ an_added_fact_is_the_fact_its_text_loads(void)
 	    relic_value_string(added, "x y", 3, &weight[2]) == 0 &&
 	    relic_fact_add(added, "weight", 3, weight) == 0 &&
 	    relic_fact_add(added, "ready", 0, NULL) == 0,
-	    SCENARIO_FACT, "facts of every value type and of no arity are added");
+	    SCENARIO_FACT,
+	    "facts of every value type and of no arity are added");
 
 	/* Every refusal reports once and adds nothing. */
 	bzero(&log, sizeof(log));
@@ -954,7 +987,8 @@ an_added_fact_invalidates_what_was_derived(void)
 		    SCENARIO_INVALIDATE, "taken(a) is added");
 		if (materialized)
 			check(relic_materialize(ctx) == 0,
-			    SCENARIO_INVALIDATE, "the program materializes again");
+			    SCENARIO_INVALIDATE,
+			    "the program materializes again");
 
 		rows = answer_text(ctx, "free(X)?");
 		checkf(rows != NULL && strcmp(rows, "b\n") == 0,
@@ -966,6 +1000,233 @@ an_added_fact_invalidates_what_was_derived(void)
 
 		relic_destroy(ctx);
 	}
+}
+
+static void
+record_mixed_note(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	mixed_log_t *log;
+
+	log = callback_ctx;
+	if (level != RELIC_NOTE ||
+	    strncmp(message, MIXED_NOTE, strlen(MIXED_NOTE)) != 0 ||
+	    where == NULL) {
+		log->other++;
+		return;
+	}
+
+	if (log->notes < MIXED_NOTES_MAX)
+		log->lines[log->notes] = where->line;
+	log->notes++;
+}
+
+/*
+ * Whether one of the notes a log kept pointed at `line`.  The order of the
+ * notes is the order components are evaluated in, which the scenario does not
+ * depend on.
+ */
+static bool
+noted_line(const mixed_log_t *log, uint32_t line)
+{
+	size_t i;
+
+	for (i = 0; i < log->notes && i < MIXED_NOTES_MAX; i++) {
+		if (log->lines[i] == line)
+			return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * An ordering comparison between values of different types is false, and
+ * RELIC_F_NOTE_MIXED asks for a note about the first in each rule.  The
+ * program has three rules: `small` compares once, `between` twice, and
+ * `before` compares values of one type only, so a full evaluation notes the
+ * first two rules once each, at the line of the first comparison that mixed
+ * types, and says nothing about the third.  Nothing is noted without the
+ * switch, and the answers are the same with it.
+ *
+ * `lt(1, Y)?` is answered through its Magic rewrite, whose copy of the `lt`
+ * rule counts as that rule: it is noted once, and neither a second query
+ * through the rewrite nor a later materialization notes it again.
+ */
+static void
+a_mixed_comparison_is_noted_once_per_rule(void)
+{
+	static const char program[] =
+	    "v(1).\nv(a).\nv(\"s\").\n"
+	    "small(X) :- v(X),\n    X < 5.\n"
+	    "between(X) :- v(X),\n    X > 0,\n    X < 9.\n"
+	    "before(X) :- v(X), v(Y), X = 1, Y = 1, X <= Y.\n"
+	    "lt(X, Y) :- v(X), v(Y),\n    X < Y.\n";
+	relic_config_t config;
+	mixed_log_t log;
+	relic_t *ctx;
+	char *rows;
+	int noting;
+
+	for (noting = 0; noting <= 1; noting++) {
+		bzero(&config, sizeof(config));
+		if (noting)
+			config.flags = RELIC_F_NOTE_MIXED;
+		bzero(&log, sizeof(log));
+
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_MIXED, "a context is created");
+			return;
+		}
+		relic_diag_set(ctx, record_mixed_note, &log);
+		check(relic_load_string(ctx, "mixed.dl", program) == 0,
+		    SCENARIO_MIXED, "the program loads");
+
+		check(relic_materialize(ctx) == 0, SCENARIO_MIXED,
+		    "the program materializes");
+		rows = answer_text(ctx, "between(X)?");
+		checkf(rows != NULL && strcmp(rows, "1\n") == 0,
+		    SCENARIO_MIXED, "between(X)? should answer 1 %s the "
+		    "switch, not\n%s", noting ? "with" : "without",
+		    rows != NULL ? rows : "(failed)");
+		free(rows);
+
+		if (!noting) {
+			checkf(log.notes == 0 && log.other == 0,
+			    SCENARIO_MIXED, "without the switch nothing is "
+			    "noted, not %zu notes and %zu other diagnostics",
+			    log.notes, log.other);
+			relic_destroy(ctx);
+			continue;
+		}
+
+		checkf(log.notes == 3 && log.other == 0, SCENARIO_MIXED,
+		    "materializing notes small, between and lt once each, "
+		    "not %zu notes and %zu other diagnostics", log.notes,
+		    log.other);
+		check(noted_line(&log, 5) && noted_line(&log, 7) &&
+		    noted_line(&log, 11), SCENARIO_MIXED,
+		    "each note points at its rule's first mixed comparison");
+		relic_destroy(ctx);
+
+		bzero(&log, sizeof(log));
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_MIXED, "a context is created");
+			return;
+		}
+		relic_diag_set(ctx, record_mixed_note, &log);
+		check(relic_load_string(ctx, "mixed.dl", program) == 0,
+		    SCENARIO_MIXED, "the program loads again");
+
+		rows = answer_text(ctx, "lt(1, Y)?");
+		free(rows);
+		checkf(log.notes == 1 && log.lines[0] == 11, SCENARIO_MIXED,
+		    "lt(1, Y)? notes the lt rule once, not %zu times",
+		    log.notes);
+
+		rows = answer_text(ctx, "lt(a, Y)?");
+		free(rows);
+		check(relic_materialize(ctx) == 0, SCENARIO_MIXED,
+		    "the program materializes after the queries");
+		checkf(log.notes == 3 && log.other == 0, SCENARIO_MIXED,
+		    "a second query and a materialization note only small "
+		    "and between, for %zu notes in all", log.notes);
+
+		relic_destroy(ctx);
+	}
+
+	a_mixed_note_follows_the_rule_not_its_place();
+	a_query_and_its_rewrite_share_one_note();
+}
+
+/*
+ * The note belongs to a rule, not to the place it was written.  Two loads
+ * under one source name put a rule of each at mixed.dl:3:1, and both rules
+ * are noted.  A query is noted each time it is answered, since each answer is
+ * a question the reader asked afresh.
+ */
+static void
+a_mixed_note_follows_the_rule_not_its_place(void)
+{
+	relic_config_t config;
+	mixed_log_t log;
+	relic_t *ctx;
+	char *rows;
+
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_NOTE_MIXED;
+	bzero(&log, sizeof(log));
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_MIXED, "a context is created");
+		return;
+	}
+	relic_diag_set(ctx, record_mixed_note, &log);
+	check(relic_load_string(ctx, "mixed.dl",
+	    "v(1).\nv(a).\np(X) :- v(X), X < 5.\n") == 0 &&
+	    relic_load_string(ctx, "mixed.dl",
+	    "w(1).\nw(a).\nq(X) :- w(X), X > 0.\n") == 0,
+	    SCENARIO_MIXED, "two loads under one name succeed");
+
+	check(relic_materialize(ctx) == 0, SCENARIO_MIXED,
+	    "the program materializes");
+	checkf(log.notes == 2, SCENARIO_MIXED, "two rules written at the "
+	    "same place are noted apart, not %zu times", log.notes);
+
+	rows = answer_text(ctx, "v(X), X < 9?");
+	free(rows);
+	rows = answer_text(ctx, "v(X), X < 9?");
+	free(rows);
+	checkf(log.notes == 4 && log.other == 0, SCENARIO_MIXED,
+	    "a query is noted once per answer, for %zu notes in all",
+	    log.notes);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * The Magic rewrite of a query copies the query's comparison into the seed
+ * of a magic predicate, so one answer runs the comparison in two rules.
+ * Both are the query's, and the answer is noted once.
+ */
+static void
+a_query_and_its_rewrite_share_one_note(void)
+{
+	relic_config_t config;
+	mixed_log_t log;
+	relic_t *ctx;
+	char *rows;
+
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_NOTE_MIXED;
+	bzero(&log, sizeof(log));
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_MIXED, "a context is created");
+		return;
+	}
+	relic_diag_set(ctx, record_mixed_note, &log);
+	check(relic_load_string(ctx, "seed.dl",
+	    "e(1, 2).\ne(2, 3).\ne(1, b).\n"
+	    "r(X, Y) :- e(X, Y).\nr(X, Z) :- e(X, Y), r(Y, Z).\n") == 0,
+	    SCENARIO_MIXED, "a recursive program loads");
+
+	rows = answer_text(ctx, "e(1, Y), Y < a, r(Y, Z)?");
+	free(rows);
+	checkf(log.notes == 1 && log.other == 0, SCENARIO_MIXED,
+	    "a query and the seed rewritten from it are noted once, not "
+	    "%zu times", log.notes);
+
+	rows = answer_text(ctx, "e(1, Y), Y < a, r(Y, Z)?");
+	free(rows);
+	checkf(log.notes == 2, SCENARIO_MIXED,
+	    "the next answer is noted once more, for %zu notes in all",
+	    log.notes);
+
+	relic_destroy(ctx);
 }
 
 /*
@@ -1052,6 +1313,7 @@ main(void)
 	a_refusal_does_not_hide_why_an_operation_failed();
 	an_answer_does_not_outlive_its_delivery();
 	every_diagnostic_reaches_the_callback();
+	a_mixed_comparison_is_noted_once_per_rule();
 	a_value_holds_only_what_its_type_can();
 	an_added_fact_is_the_fact_its_text_loads();
 	an_added_fact_invalidates_what_was_derived();

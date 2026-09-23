@@ -1,0 +1,6 @@
+% After -a has evaluated the whole program, .plan shows only the query's own
+% plan: a query over relations already complete evaluates nothing else.
+edge(a, b).
+edge(b, c).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).

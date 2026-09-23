@@ -6,6 +6,8 @@
 #
 #	tests/lang/<name>.dl		 the program
 #	tests/lang/<name>.args		 optional: the options to run it with
+#	tests/lang/<name>.stdin		 optional: standard input, such as the
+#					 lines of an interactive session
 #	tests/lang/<name>.expected	 expected standard output
 #	tests/lang/<name>.expected-err	 optional: expected standard error
 #	tests/lang/<name>.exit		 optional: expected status, default 0
@@ -23,7 +25,10 @@
 #
 # The program is run from its own directory, under its bare file name, so the
 # diagnostics name the file the same way wherever the source tree is and
-# whether the build is in-tree or beside it.
+# whether the build is in-tree or beside it.  Standard input is the .stdin
+# file, or else empty, so that no test reads whatever the harness was given:
+# an interactive session driven from a file is compared like any other run,
+# and one that found a terminal instead would wait for it.
 
 set -eu
 
@@ -52,6 +57,11 @@ if [ -f "$directory/$base.args" ]; then
 	args=$(cat "$directory/$base.args")
 fi
 
+input=/dev/null
+if [ -f "$directory/$base.stdin" ]; then
+	input=$directory/$base.stdin
+fi
+
 expected_status=0
 if [ -f "$directory/$base.exit" ]; then
 	expected_status=$(cat "$directory/$base.exit")
@@ -64,7 +74,7 @@ trap 'exit 1' HUP INT TERM
 # The status is captured rather than allowed to end the script, because a
 # nonzero one is what several of these tests expect.
 status=0
-( cd "$directory" && $RELIC $args "$program" ) \
+( cd "$directory" && $RELIC $args "$program" ) < "$input" \
     > "$work/stdout" 2> "$work/stderr" || status=$?
 
 failures=0

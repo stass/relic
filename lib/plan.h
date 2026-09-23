@@ -119,11 +119,14 @@ struct relic_op_atom {
 };
 
 /*
- * A comparison of two values, each a constant or a bound slot.
+ * A comparison of two values, each a constant or a bound slot.  `where` is
+ * where the comparison was written, which a note about how it compared
+ * points at.
  */
 struct relic_op_filter {
 	relic_plan_term_t	left;
 	relic_plan_term_t	right;
+	relic_location_t	where;
 	enum relic_compare_op	compare;
 };
 

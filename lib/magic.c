@@ -1055,6 +1055,7 @@ canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 
 	rule->head = draft->head;
 	rule->where = draft->source->where;
+	rule->origin = draft->source->origin;
 
 	head_arity = pred_arity(magic, draft->head);
 	rule->head_args = copy_args(magic, &renumbering, draft->head_args,
