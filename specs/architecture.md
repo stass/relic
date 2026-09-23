@@ -857,6 +857,10 @@ No exhaustive join-order search is required.
 
 When a rule is planned, the estimate a literal is scored by, the tie-breaks and
 the access path each literal gets are specified in `specs/design-planner.md`.
+What bounds the cost of planning -- why ordering a body costs a bounded
+number of passes over it rather than the square of its length, and why the
+memory an evaluation's plans and a query's rewrite occupy is charged to
+`max_memory` -- is specified in `specs/design-planning-cost.md`.
 
 ---
 
@@ -1365,7 +1369,8 @@ memory, and the budget of section 63 on the Magic rewrite:
 
 ```text
 -l tuples=N        maximum tuples across all relations
--l memory=N        maximum bytes of relation and index storage
+-l memory=N        maximum bytes of relation and index storage, plus
+                   the working state of an evaluation or a rewrite
 -l magic-preds=N   maximum generated adorned and magic predicates
 -l magic-rules=N   maximum generated rules
 ```
@@ -1626,14 +1631,17 @@ The engine uses arenas for structures with a common lifetime:
 ```text
 context arena      symbols, values, predicate definitions
 program arena      rules, parsed terms
-query arena        Magic rewrite and query plans
-evaluation arena   transient binding and join state
+query arena        the query's compiled rule
+rewrite arena      the Magic rewrite of one query's program
+evaluation arena   plans and transient binding and join state
 ```
 
 Relation tuples and indexes are not arena allocated. They outlive individual
-queries, they must be able to shrink, and they are the only allocations large
-enough to be worth accounting against a limit. They use `reallocarray()` with
-explicit failure handling.
+queries, they must be able to shrink, and they are accounted against a limit
+individually. They use `reallocarray()` with explicit failure handling. The
+rewrite and evaluation arenas are accounted against the same limit as a
+whole, because what they hold is multiplied out of the program; see
+`specs/design-planning-cost.md`.
 
 Arena allocation returns `NULL` on exhaustion and sets a sticky failure flag on
 the arena. Callers check the returned pointer as usual; the flag exists so a
@@ -2093,7 +2101,8 @@ The library configuration permits limits on:
 
 ```text
 maximum tuples
-maximum memory for relation and index storage
+maximum memory for relation and index storage and for the working state
+    of an evaluation or a query's rewrite
 maximum generated Magic predicates
 maximum generated Magic rules
 ```

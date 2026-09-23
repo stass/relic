@@ -317,7 +317,7 @@ and indexes are what actually grow:
 | Limit | Counts | Configured by |
 | --- | --- | --- |
 | `max_tuples` | tuples across every relation | `-l tuples=N` |
-| `max_memory` | bytes of column and index storage | `-l memory=N` |
+| `max_memory` | bytes of column and index storage, plus an operation's arenas | `-l memory=N` |
 
 Zero means unlimited, so a zeroed configuration asks for the defaults.
 
@@ -328,9 +328,12 @@ implies. A limit that ignored the difference would let a relation hold twice
 what the user allowed, which would defeat the purpose of asking.
 
 It does not count the array of relation headers, a relation's array of index
-headers, the predicate table, the value table or any arena. Those are sized by
-the program rather than by the data, and the limit exists to bound what the
-data can do.
+headers, the predicate table, the value table, or the arenas that hold the
+program, the schedule or a query as the caller wrote them. Those are sized by
+what the caller wrote, and the limit exists to bound what running it can do. The arenas that hold an evaluation's plans and a query's
+rewrite are sized by the square of a body and are charged to the same total,
+per `specs/design-planning-cost.md` section 6; the check there is the
+arena's, and this document's total is the part the store contributes.
 
 **When it is checked** is before the insertion modifies anything. The
 projected size is computed from the growth policies rather than measured after

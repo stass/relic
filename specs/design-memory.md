@@ -22,7 +22,9 @@ Five questions, once, so that no later subsystem answers them again:
 
 It does not cover relation and index storage. Those are sized by the data
 rather than by the program, they are what a memory limit is enforced against,
-and they get their own document with the tuple store.
+and they get their own document with the tuple store. The two arenas that
+hold an operation's working state are charged to the same limit, for the
+reason `specs/design-planning-cost.md` section 6 gives.
 
 ---
 
@@ -34,7 +36,7 @@ rather than by size.
 **Grouped by phase.** Symbols, parsed rules, plans and join state are created
 in large numbers, are never freed individually, and all die at the same
 moment. They are allocated from an arena, which frees them in one operation.
-Six arenas exist, one per lifetime:
+Seven arenas exist, one per lifetime:
 
 | Arena | Holds | Released when |
 | --- | --- | --- |
@@ -42,12 +44,17 @@ Six arenas exist, one per lifetime:
 | program | rules, parsed terms | a new program replaces the loaded one |
 | analysis | the dependency graph and its component search | the analysis ends |
 | schedule | the evaluation order: components, their members and rules | a new schedule replaces it |
-| query | the Magic rewrite and query plans | the query is destroyed |
-| evaluation | binding frames and transient join state | the fixed point ends |
+| query | the query's compiled rule | the query is destroyed |
+| rewrite | the Magic rewrite of one query's program | the query has run |
+| evaluation | plans, cursors and transient join state | the fixed point ends |
+
+The evaluation arena, and the arena of a query's rewrite that
+`specs/design-magic.md` section 11 describes, are released when their
+operation ends and are charged to `max_memory`; the others hold what the
+caller wrote and are not, per `specs/design-planning-cost.md` section 6.
 
 **Individually owned.** Relation tuples and indexes outlive individual
-queries, must be able to shrink, and are the allocations worth accounting
-against a limit. They use `reallocarray()` with explicit failure handling and
+queries, must be able to shrink, and are accounted against a limit. They use `reallocarray()` with explicit failure handling and
 are never arena allocated. A query's answer relation is owned the same way
 but by the query object rather than the context, and is released with the
 query, per `specs/design-query.md`.

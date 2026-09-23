@@ -555,40 +555,71 @@ considered and not taken; revisit if the first such change is expensive.
 ## Security residuals
 
 **Planning a long recursive body is quadratic in memory and cubic in time.**
-[High, component: `lib/eval.c`, `lib/plan.c`, `lib/rule.c`] A rule body has
-no length limit, and a rule with N literals over its own component gets N
-delta variants of N + 1 operations each; placing each literal rescans the
-body for tests, and the greedy order scores every positive literal not yet
-placed at each step, so each variant costs N^2 scores.
+[High, component: `lib/plan.c`, `lib/eval.c`, `lib/arena.c`] A rule with N
+literals over its own component gets N + 1 plans of N + 1 operations each,
+and ordering each plan rescores every unplaced literal and rescans the body
+for tests at every step, so each plan costs N^2 scores.
 `p(a). p(X) :- p(X), ..., p(X). p(X)?` with N = 1000 is 6 KB of text and
-takes 24.6 s and 62 MB to plan, against 4.2 s under `-X no-reorder`; N = 500
-takes 3.2 s. The cost is paid before any tuple is derived, `max_memory` does
-not cover the evaluation arena that holds plans, and the scratch table a
-distinct count uses is not charged either. The options weighed were a
-structural body-length limit beside the arity and variable limits of D-7 (64
-literals would bound a rule to about four thousand operations and 250 000
-scores), a larger limit, and charging the evaluation arena to `max_memory`,
-which bounds the memory and not the time. Decide in the hardening of S13.
+takes 6.5 s and 80 MB to plan on an optimized build, 24.6 s under a
+sanitizer, against 1.1 s under `-X no-reorder`. The cost is paid before any
+tuple is derived, and `max_memory` does not cover the evaluation arena that
+holds the plans. Designed, not implemented: `specs/design-planning-cost.md`
+orders a body in one pass per state of the bound mask, at most 65, and
+charges the evaluation and rewrite arenas to `max_memory` with the limit's
+own message (D-18). Implementation order: the ranking first, with the
+long-body workload of the design's section 8 in `tests/perf.sh` failing
+against the unfixed tree; then the account, with the `-l memory` refusal
+workload. Under the default configuration planning memory stays bounded by
+the allocator alone, as the data is. The two `tests/cli.sh` cases that set
+`-l memory` to a few kilobytes will then fail in planning rather than while
+deriving or indexing, and their expected messages move with them.
 
 **The Magic budget counts rules, not their length.** [High, component:
 `lib/magic.c`, `lib/plan.c`] Each adornment of a predicate copies every rule
-deriving it whole and orders the copy's body, which is quadratic in its
-length, so R distinct call patterns of one rule of L literals cost R x L
-literals of memory and R x L^2 ordering work before anything is derived.
-Each pattern needs only one short calling rule, so this stays far inside the
-budgets of 256 + 16 x the program's predicates and rules, no warning fires,
-and `max_memory` does not cover the rewrite. A 71 KB program -- `p/12` with a
-body of 2000 literals, called with 500 bound patterns by
-`cN(X) :- e(X), p(...)` and queried through `all(X)?` -- takes 37.9 s and
-247 MB through the rewrite against 0.05 s and 4.7 MB under `-X no-magic`;
-1000 patterns of 1000 literals take 19.8 s and 252 MB. Over 99% of the time
-is in `relic_plan_order()` called from `rewrite_body()`. It shares its root
-with the item above, an unbounded body length, and a structural body-length
-limit would settle both, making the rule budget a size budget by
-construction. The alternative, keeping bodies unbounded, is two more budgets
-in the rewrite, charged before copying or ordering: generated literals in
-proportion to the program's literals, and ordering work in proportion to the
-sum of its squared body lengths. Decide with the item above.
+deriving it whole and orders the copy's body, so R distinct call patterns of
+one rule of L literals cost R x L literals of memory and R x L^2 ordering
+work before anything is derived, and each pattern needs only one short
+calling rule, so this stays inside the budgets and no warning fires. A 71 KB
+program -- `p/12` with a body of 2000 literals, called with 500 bound
+patterns by `cN(X) :- e(X), p(...)` and queried through `all(X)?` -- takes
+37.9 s and 247 MB through the rewrite against 0.05 s and 4.7 MB under `-X
+no-magic`. Over 99% of the time is in `relic_plan_order()` called from
+`rewrite_body()`. Designed with the item above: the ranking removes the L^2
+regardless of configuration, and charging the rewrite arena bounds the R x
+L when `max_memory` is set; under the default configuration the R x L is
+bounded by the literal budget of `specs/design-magic.md` section 8, which is
+designed and not implemented.
+
+**Magic rules repeat the prefix before each demand call, cubic in a body's
+calls.** [High, component: `lib/magic.c`] `record_call()` generates one magic
+rule per call on a predicate read on demand, and its body is the literals
+before the call, so a body of L such calls generates L rules holding about
+L^2/2 literals; in a recursive component each gets its own delta variants,
+about L^3/3 operations in all.
+`e(i, i+1) x200. p(X) :- e(X, Y). r(X) :- p(X), ..., p(X). r(1)?` with L =
+400 is 4.8 KB of text and takes 37 s and 1.77 GB to answer, against 0.03 s
+and about 1 MB under `-X no-magic`; L = 100 gives 102 rules, 4951 delta
+variants and 333 402 `member` operations. No budget fires: the budgets
+count rules, and the 200 facts raise the rule budget to 3488, so the 400
+generated rules are within it (without the facts L above about 250 is
+abandoned). Two things are designed and not implemented: the literal budget
+of `specs/design-magic.md` section 8, which abandons a rewrite whose
+generated literals exceed 256 + 16 x the program's and so closes this under
+the default configuration, and charging the rewrite arena (D-18), which
+bounds what the budget admits when `max_memory` is set. The fix that removes
+the square is the supplementary construction: derive each prefix from the
+one before it through an intermediate predicate, so the generated bodies are
+linear in L. That is a change to `specs/design-magic.md`, to be designed
+before it is built. If it is not adopted, a structural body-length limit is
+the fallback (`specs/design-planning-cost.md` section 10).
+
+**A dropped magic rule's prefix stays in the rewrite arena.** [Medium,
+component: `lib/magic.c`] `publish_rule()` canonicalizes a draft, which
+copies its body into the arena, before `rule_derives_nothing()` and the
+duplicate check, so a rule that is then dropped still costs its body in
+memory. Once the arena is charged to `max_memory` (D-18) that is memory the
+user pays for and gets nothing from. Decide whether the two checks can run
+on the draft, or canonicalize into scratch that a dropped rule releases.
 
 **Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
 component: `lib/relation.c`] D-4 forbids randomizing a hash seed, and

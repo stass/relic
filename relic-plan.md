@@ -143,11 +143,12 @@ interface.
 
 ### D-6 Memory
 
-Four arenas by lifetime: context, program, query, evaluation. Arena allocation
+Arenas by lifetime: context, program, analysis, schedule, query, rewrite,
+evaluation. Arena allocation
 returns `NULL` and sets a sticky per-arena failure flag; callers check the
 pointer, and each phase confirms the flag at its boundary. Relation tuples and
 indexes are not arena allocated: they outlive queries, they shrink, and they
-are the allocations worth accounting against a limit. They use
+are accounted against a limit, as are the two arenas of D-18. They use
 `reallocarray()`. No `malloc()` per AST node or per tuple. The library never
 aborts on allocation failure.
 
@@ -156,8 +157,9 @@ aborts on allocation failure.
 Structural and fixed: arity at most 32, so an index key is a `uint32_t` column
 bitmask; at most 64 distinct variables per rule, so a binding frame is a plain
 array and a `uint64_t` bound-mask. Configurable and unlimited by default:
-tuples, relation and index memory, generated Magic predicates, generated Magic
-rules. Exceeding a limit is a diagnostic and a nonzero exit, and discards
+tuples, memory (relation and index storage, plus the working state of an
+evaluation or a rewrite, per D-18), generated Magic predicates, generated
+Magic rules. Exceeding a limit is a diagnostic and a nonzero exit, and discards
 partial results.
 
 The two Magic limits differ in what happens when they are not set. The rewrite
@@ -167,6 +169,10 @@ the program it rewrites. Unset, each is a budget proportional to the program -- 
 floor plus a factor times its derived predicates or its rules -- and a rewrite
 outgrowing it is abandoned with a warning and the query answered from the
 whole program. Set, it is a limit like the others.
+A third budget, on the body literals the rewrite generates, has no limit
+behind it: it is the invariant that the rewrite stays a constant multiple of
+the program, which the rule budget cannot hold on its own
+(`specs/design-magic.md` section 8).
 
 ### D-8 The plan representation exists from S5
 
@@ -253,6 +259,19 @@ every stage sized by it -- is a function of the program and not of how many
 queries have been prepared. `$q<serial>` remains the query's name in
 diagnostics and `-e` output, built from the serial when printed and interned
 nowhere. Specified in `specs/design-query.md`.
+
+### D-18 Planning costs what its plans hold
+
+A body is ordered in one pass per state of the bound set, at most 65, rather
+than one comparison per step, and the order is unchanged. The evaluation
+arena and the rewrite arena, the two of operation lifetime, are charged to
+`max_memory` beside relation and index storage; the arenas holding the
+program, the schedule and a query are not, because the caller wrote what they
+hold and a query may outlive its context. A refusal by the limit reports
+through the same function an exhaustion does, with the limit's message. So a
+limit on memory bounds planning time, and no limit on body length is added.
+Reverses the part of D-6 that put every arena outside the limit. Specified in
+`specs/design-planning-cost.md`.
 
 ---
 
@@ -801,7 +820,8 @@ existing engine, with no second execution path. `specs/design-magic.md`.
 **Design notes.** This is the highest-risk stage in the plan and the one to
 schedule with the most slack.
 
-Magic rewriting is a program-to-program transformation into the query arena.
+Magic rewriting is a program-to-program transformation into an arena of the
+rewrite's own, released when the query has run.
 The rewritten program goes through S6's stratification unchanged, which is both
 a correctness check and a guard: if a rewrite ever produces an unstratified
 program, the existing analysis catches it rather than the evaluator producing

@@ -408,8 +408,9 @@ Evaluation fails for two reasons, both reported where they happen:
 
 Either stops the fixed point at once and returns -1. Planning a component can
 fail for the same two reasons -- memory, or the memory limit reached while an
-index is built over a complete relation -- and stops the evaluation at that
-component, before it runs. The relation that refused the tuple is exactly as
+index is built over a complete relation or while the evaluation arena grows,
+per `specs/design-planning-cost.md` section 7 -- and stops the evaluation at
+that component, before it runs. The relation that refused the tuple is exactly as
 it was, an index whose build failed was never published, every other relation
 holds tuples that are all justified, and the evaluation arena is released.
 Nothing needs unwinding, which is the payoff of the relation store's
@@ -421,8 +422,9 @@ failed one derived before starting again.
 ## 9. Memory
 
 Plans and cursors live in the **evaluation arena**, which is reset when each
-evaluation ends, successfully or not. Tuples and indexes live in relations,
-which are individually allocated and accounted against the limits, per D-6.
+evaluation ends, successfully or not, and which is charged to the memory
+limit while it lives, per D-18. Tuples and indexes live in relations, which
+are individually allocated and accounted against the limits, per D-6.
 Nothing is allocated per tuple and nothing is allocated inside the executor's
 loop.
 

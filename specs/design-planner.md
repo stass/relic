@@ -99,9 +99,9 @@ frequency: planning happens once per component and insertion millions of
 times.
 
 The scratch table is released as soon as the count is known and is not
-counted against `max_memory`, for the reason the evaluation arena that holds
-plans is not: it is working state of one planning step, not storage that the
-data keeps. It is at most a few bytes per tuple of one relation, briefly.
+counted against `max_memory`: it is at most a few bytes per tuple of one
+relation the limit already admitted, briefly, so the limit bounds it through
+the relation.
 
 A relation's third statistic in architecture section 24, its available
 indexes, needs no computing: section 5 builds the index a plan needs.
@@ -155,7 +155,9 @@ literal not yet placed is scored, against the slots bound so far, by:
 The first literal by that order is placed, the bound set grows by what it
 binds, and the step repeats. This is the greedy ordering of architecture
 section 23 and is not a search: each step is a comparison of the literals
-left, so a body of *k* positive literals costs *k*(*k* + 1)/2 scores.
+left. `specs/design-planning-cost.md` computes the same order in one pass
+per state of the bound set rather than one comparison per step, so that a
+long body costs its length within a logarithm rather than its square.
 
 Architecture section 23 lists index availability as the third preference.
 Under section 5.2 it cannot tell two candidates apart: every literal with a

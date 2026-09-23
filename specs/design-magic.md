@@ -324,17 +324,26 @@ is not configured is replaced by a budget in proportion to the program:
 | --- | --- | --- |
 | generated predicates | as `max_magic_preds` | 256 + 16 x the program's derived predicates |
 | generated rules | as `max_magic_rules` | 256 + 16 x the program's rules |
+| generated literals | body literals of generated rules, after dropping duplicates | 256 + 16 x the program's body literals |
 
-A program's derived predicates are the members of its schedule, and its rules
-are its compiled rules, facts included. Both are fixed for a given program, so
-the budget is the same on every run. The factor admits every rewrite that
+A program's derived predicates are the members of its schedule, its rules
+are its compiled rules, facts included, and its body literals are the
+literals of those rules' bodies. All are fixed for a given program, so the
+budget is the same on every run. The literal budget has no configurable
+limit behind it and applies whether or not the other two are configured: it
+is not a knob but the invariant that the rewrite is a constant multiple of
+the program, which the rule budget alone cannot hold, because a magic rule's
+body is the prefix before its call and a body of many calls generates
+prefixes whose total is the square of its length
+(`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
 specializes the program -- a handful of adornments per predicate, each with
 its rules and magic rules -- and the floor admits every rewrite of a small
 program outright; what it refuses is a rewrite that multiplies the program.
 The budgets count rules, so they bound the rewritten program's size only as
 far as a rule's length is bounded: each adornment copies every rule of its
-predicate whole, and orders its body, which takes time quadratic in its
-length.
+predicate whole, and generates a magic rule per demand call whose body is
+the prefix before it. What that costs, and the memory limit that bounds it,
+is `specs/design-planning-cost.md`.
 
 Outgrowing a budget abandons the rewrite. A warning names the budget and the
 predicate being adorned, and the query is then answered from the whole
@@ -494,10 +503,11 @@ when the query has run, successfully or not, as is the schedule of the
 rewritten program. Symbol and predicate entries for generated names belong to
 the context, as every interned entry does.
 
-None of it counts against `max_memory`, which bounds what the data derives:
-the rewrite is sized by the program and the query, and has limits of its own,
-or its budget, of section 8, which keep it within a constant multiple of the
-program.
+The rewrite's arena is charged to `max_memory`, per
+`specs/design-planning-cost.md` section 6: the budgets of section 8 count
+rules, and a rewrite's size in literals is the square of a body's length,
+which no budget bounds. The growable tables beside the arena are linear in
+the rules the budget admits and are not charged.
 
 ---
 
