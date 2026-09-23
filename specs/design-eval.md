@@ -354,8 +354,9 @@ before starting again.
 
 ## 7. Answering a query
 
-A query is a rule over its answer predicate, per `specs/design-plan.md`
-section 7. Answering one is three steps:
+A query is a rule whose head is its output columns, per
+`specs/design-plan.md` section 7, answered into the **answer relation** the
+query object owns, per `specs/design-query.md`. Answering one is three steps:
 
 1. **Evaluate what the query reads.** When the relations hold the program's
    fixed point, or under `RELIC_F_NO_MAGIC`, that is materializing the
@@ -366,10 +367,10 @@ section 7. Answering one is three steps:
    own, and the query rule is the rewritten one. A rewrite that outgrows its
    budget is abandoned, and the query answered from the materialized program
    instead.
-2. **Run the query's plan once.** The answer predicate never appears in a body,
-   because its name contains `$` and nothing a program writes can, so one pass
-   computes its relation completely. Duplicate answers collapse on insertion,
-   which is what gives a query set semantics.
+2. **Run the query's plan once**, with the answer relation as its emit
+   target. The answer is read by no rule, since it is no predicate's relation,
+   so one pass computes it completely. Duplicate answers collapse on
+   insertion, which is what gives a query set semantics.
 3. **Stream the answer relation** to the caller's callback, one row per tuple,
    in insertion order.
 
@@ -389,8 +390,9 @@ A query that exceeds a limit therefore produces no rows and an error, never a
 truncated answer indistinguishable from a complete one, which is what
 architecture section 63 requires.
 
-The answer relation outlives the run, like every relation, until a change to
-the program or the next rewritten query discards it with the rest. Running
+The answer relation is emptied when the run ends, whether the rows were
+delivered, the callback stopped them or the answer failed part way, so
+outside a run it holds nothing and counts nothing against the limits. Running
 the query again repeats the three steps and streams the same rows in the same
 order.
 

@@ -27,7 +27,7 @@ look for, and to aim at:
 
 | Quality to follow | Where it matters in relic |
 | --- | --- |
-| Named stages with immediate error checks make execution order visible; a file comment explains why a failed stage prevents later ones from running. | `compile_query()` in `lib/rule.c`, which states why the body precedes the head and the name comes last; `run()`, `validate()` and `evaluate()` in `cmd/relic/main.c`. |
+| Named stages with immediate error checks make execution order visible; a file comment explains why a failed stage prevents later ones from running. | `compile_query()` in `lib/rule.c`, which states why the body precedes the head; `run()`, `validate()` and `evaluate()` in `cmd/relic/main.c`. |
 | Validation precedes reading and state advances only after success; the explanation includes the boundary case that motivates the algorithm. | `relic_relation_insert()` and `relation_reserve()` in `lib/relation.c`, which gather every fallible step ahead of every mutation and say what a tuple stored but not indexed would break. |
 | Allocation, rehashing and installation of a new table are distinct steps; the comment explains why the fallible step must come first. | `relic_symbol_intern()` in `lib/symbol.c`, over `relic_idtab_reserve()` and `relic_idtab_place()` in `lib/util.c`. |
 | Names carry their role and saved state, and comments explain restoration obligations -- or why there are none. | `execute_plan()`, `step()` and `struct relic_evaluation` in `lib/eval.c`: `level` and `resume` say what the loop is doing, and the frame's comment says why nothing is saved or restored across join levels. |

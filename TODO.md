@@ -152,7 +152,8 @@ destroyed, because nothing replaces a loaded program yet. A long-running
 embedder or a REPL that loads a broken file repeatedly therefore grows slowly.
 The waste is bounded by the text the caller chose to load. The interactive
 mode never loads, so it does not grow this way; it grows through the queries
-it prepares instead, the item on answer predicates below. Revisit
+it prepares instead, the items on answer predicates and on the symbols and
+values of query text below. Revisit
 when a context is given a way to discard its program, which is the operation
 that would reset the arena anyway.
 
@@ -183,19 +184,41 @@ re-evaluating everything, and complete relations evaluated per query -- would
 then fall on the session.
 
 **Every prepared query leaves its answer predicate behind.** [Medium,
-component: `lib/rule.c`, `lib/eval.c`, `lib/relation.c`, `lib/magic.c`] A
-query's answer is the relation of a predicate `$q` and a serial, interned when
-the query is prepared and never retired, since a predicate is never removed
-from a context. Answering a query walks every relation to discard the last
-answer's derived tuples and every predicate to find which are complete, so
-the cost of an answer grows with the number of queries prepared before it and
-a long run of queries is quadratic. An interactive session is the workload
-that shows it: 10,000 lines take 0.8 s and 20,000 take 3.0 s, and a
-reviewer's 200,000 took 523 s and 261 MB. An embedder preparing a query per
-request is the same case. The fix is for relic_query_destroy() to retire its
-answer predicate so the next query reuses the slot, or for an answer to track
-the relations it touched rather than walk them all; either is a change to how
-predicates are owned and wants a design note first.
+component: `lib/rule.c`, `lib/eval.c`, `lib/plan.c`, `lib/relation.c`,
+`lib/magic.c`, `lib/explain.c`] A query's answer is the relation of a
+predicate `$q` and a serial, interned when the query is prepared and never
+retired, since a predicate is never removed from a context. Every stage sized
+by the predicate count then pays for every query ever prepared, once per
+answer: the dependency graph and stratification of the rewrite's generated
+rules, the delta tracking of each evaluation, the discard of every relation,
+the complete-predicate analysis and the undefined-predicate sweep. A long run
+of queries is quadratic; an interactive session shows it. A four-rule graph
+program with `path(a, X)?` repeated per line, under the default configure on
+macOS, takes 0.4 s for 5,000 lines, 1.8 s for 10,000 and 7.1 s for 20,000,
+with the rewrite's schedule build the largest share; an embedder preparing a
+query per request is the same case. The design is `specs/design-query.md`
+and decision D-17: the query object owns its answer relation, the head of
+its rule names no predicate, and `$q<serial>` is a display name the relation
+carries, so the predicate table is bounded by the program and no walk needs
+to change. Retiring the predicate in relic_query_destroy() is ruled out by
+the API contract that a query may be destroyed after its context.
+Implementation pending, with the growth test of the design's section 7
+written first; `relic_pred_is_answer()` and its test go with the predicate.
+
+**The symbols and values of a query's text are interned for the life of the
+context.** [Low, component: `lib/parse.c`, `lib/lex.c`, `lib/symbol.c`,
+`lib/value.c`, `cmd/relic/repl.c`] A constant in a query is interned as a
+value, a variable's spelling and the query's source name as symbols, and no
+table releases an entry. An embedder preparing a query per request over
+distinct constants grows the value table by one entry per distinct constant,
+and a session grows the symbol table by one entry per line, because the tool
+names each line's query `<query N>` and the parser interns the name. Nothing
+walks either table per answer, so the cost is memory rather than time, and
+it is bounded by the distinct text seen. What remains once the answer
+predicate is gone, per `specs/design-query.md` section 9. A fix is either a
+source name that is not interned -- diagnostics copy it -- or a per-query
+scope for the symbols and values only the query's text mentions, which is a
+change to interning and wants a design note first.
 
 **A session's line editing drops bytes outside ASCII.** [Low, component:
 `cmd/relic/input.c`] The tool never calls setlocale(3), so libedit runs in

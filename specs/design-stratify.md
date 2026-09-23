@@ -63,10 +63,11 @@ predicate, edges are in rule order and then in literal order, which is the
 order the program was written in. That order is the whole of what makes the
 analysis deterministic; see section 9.
 
-A query is not part of the graph. Its answer predicate, `$qN`, is the head of
-a rule that is not in the program, and it appears in no body, so it would be a
-vertex with no edges in and nothing depending on it. A query is answered after
-the whole program is complete, which is the only order any query could need.
+A query is not part of the graph. Its rule is not in the program's rule
+table, and its head names no predicate -- the query is answered into a
+relation the query object owns, per `specs/design-query.md` -- so there is no
+vertex for it to be, and no body reads it. A query is answered after the whole
+program is complete, which is the only order any query could need.
 
 ---
 

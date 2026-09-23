@@ -48,7 +48,9 @@ Six arenas exist, one per lifetime:
 **Individually owned.** Relation tuples and indexes outlive individual
 queries, must be able to shrink, and are the allocations worth accounting
 against a limit. They use `reallocarray()` with explicit failure handling and
-are never arena allocated.
+are never arena allocated. A query's answer relation is owned the same way
+but by the query object rather than the context, and is released with the
+query, per `specs/design-query.md`.
 
 The growable arrays inside the symbol and value tables are the third case, and
 they are individually owned for a mechanical reason rather than a conceptual

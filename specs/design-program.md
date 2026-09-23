@@ -406,10 +406,13 @@ whose arguments are the query's output columns. `relic-plan.md` places that
 transformation in S5, where the planner that consumes it lives, and it stays
 there.
 
-The program model therefore interns a query's predicates, so the table
-describes the whole program and the undefined-predicate warning covers a typo
-in a query, and does nothing else with it. A query's variables are numbered
-and its safety is checked when it is compiled into its synthetic rule, against
+The program model therefore interns the predicates a query's body names, so
+the table describes the whole program and the undefined-predicate warning
+covers a typo in a query, and does nothing else with it. The query's own head
+interns nothing: it names no predicate, and the query is answered into a
+relation the query object owns, per `specs/design-query.md`. A query's
+variables are numbered and its safety is checked when it is compiled into its
+synthetic rule, against
 the same rule this document states, because the synthetic rule's head *is* the
 list of output columns and "every head variable is bound" is exactly "every
 output column is bound".

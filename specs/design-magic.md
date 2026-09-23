@@ -212,8 +212,10 @@ A fact of a predicate read on demand is a rule with an empty body, and is
 rewritten like one: `path(a, b).` adorned `bf` becomes
 `path$bf(a, b) :- magic$path$bf(a).`
 
-**The query is a rule too**, over its answer predicate, and is rewritten with
-nothing bound and no guard. The magic rules its body generates are the
+**The query is a rule too**, whose head is its output columns and names no
+predicate (`specs/design-query.md` section 4), and is rewritten with nothing
+bound and no guard; the rewritten rule keeps that head and runs into the
+query's own answer relation. The magic rules its body generates are the
 **seeds**: with no guard and nothing before the first literal, the first seed
 of `path(a, X)?` is the fact `magic$path$bf(a).`, exactly architecture section
 34's seed, found by the one rule rather than constructed separately. The
@@ -377,8 +379,9 @@ query fails with an internal error.
 
 A rewritten query **starts from empty relations**. It discards every relation
 first, as a materialization with stale relations does, and leaves behind the
-complete part, the generated relations and the answer; the next evaluation of
-any kind discards them in turn. What the context holds after a query is then a
+complete part and the generated relations; the next evaluation of any kind
+discards them in turn, and the answer is emptied when its rows have been
+delivered. What the context holds after a query is then a
 function of that query alone, so its counters and its memory are the same
 whatever ran before it. A query whose rewrite is abandoned over its budget leaves
 the whole program's fixed point instead, as a query under `-X no-magic`

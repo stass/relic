@@ -91,8 +91,8 @@ prepared, so that no two queries' diagnostics share a name; a line that is
 refused before any query is read from it, such as an unknown command, takes
 none. The number is what `-v` reports a query by and what a query typed in
 the session is named in diagnostics. It is the tool's numbering and not the
-library's: the answer predicate a plan names, `$q` and a serial, counts every
-query the context has prepared, the program's own among them, from zero.
+library's: the name a plan gives a query, `$q` and a serial, counts every
+query the context has compiled, the program's own among them, from zero.
 
 ### 2.3 Combinations
 

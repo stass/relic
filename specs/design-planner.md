@@ -305,7 +305,8 @@ query $q0(X) :- path(a, X).
 * Each other rule is shown as written, followed by its plan, and, when it is
   evaluated semi-naively, each delta variant headed by the literal that
   reads the delta.
-* A query is shown as the rule it compiles to, over its answer predicate.
+* A query is shown as the rule it compiles to, headed by its name,
+  `$q` and a serial.
 * A query answered through its Magic rewrite also shows the rewrite and the
   components of the rewritten rules, nested beneath it, in the layout
   `specs/design-magic.md` section 10 gives.

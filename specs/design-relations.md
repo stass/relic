@@ -59,8 +59,14 @@ there is no rule for a caller to obey.
 Relations are database state, not program structure. Keeping them in a table
 of their own rather than in a field of `relic_pred_t` is what lets the derived
 database be discarded without touching the program that derived it, which is
-the operation `relic_fact_add()` needs after an evaluation and a future
-`relic_query_destroy()` does not.
+the operation `relic_fact_add()` needs after an evaluation.
+
+**One relation lives outside the table: a query's answer.** It belongs to no
+predicate and has no identifier to be indexed by; it is created with the
+query object, emptied at the end of every run, and released with the query,
+per `specs/design-query.md`. To the store it is a relation like any other --
+the same struct, inserted into, read and emptied by the same functions,
+counted against the same limits -- and only its ownership differs.
 
 Discarding every relation is safe because only the evaluator inserts: every
 tuple is in a relation because a rule's `EMIT` put it there, facts included,
@@ -143,11 +149,13 @@ fixed point runs entirely inside one such span.
 
 This is not a rule that callers observe; it is a property of the interface.
 The relation store offers insertion, membership, reading a tuple by
-identifier, and one operation that removes anything: **discarding every
-relation at once**, which the evaluator does when the program has changed
-since the relations last reached its fixed point. Nothing removes, reorders or
-renumbers a single tuple. A discard ends one span and begins another --
-identifiers restart from the first, so a range taken before it names nothing,
+identifier, and two operations that remove anything, both of which empty a
+relation whole: **clearing one relation**, which a query's answer undergoes
+at both ends of a run, and **discarding every relation at once**, which the
+evaluator does when the program has changed since the relations last reached
+its fixed point. Nothing removes, reorders or renumbers a single tuple. A
+discard ends one span and begins another -- identifiers restart from the
+first, so a range taken before it names nothing,
 or other tuples, after it -- and the obligation it takes on is to make sure no
 range outlives the span it was taken in. The evaluator meets it by
 construction: every range lives in an evaluation's state, and the discard runs
@@ -155,9 +163,13 @@ before an evaluation begins.
 
 A discard empties each relation in place and releases its columns and index.
 The relations themselves stay where they are, so a pointer to one remains
-valid and names that predicate's relation, now empty. Both limit totals return
-to zero, exactly, because each is a sum over relations that now contribute
-nothing.
+valid and names that predicate's relation, now empty. Each relation is
+emptied through `relic_relation_clear()`, which gives back what that relation
+counted against the limit totals, so the totals are at every moment the sum
+of what every relation holds, in the table or not. A query's answer relation
+is outside the table and empty whenever a discard runs, per
+`specs/design-query.md` sections 3 and 6, so both totals are zero afterwards,
+which an assertion confirms.
 
 D-10 is what rests on it. Semi-naive evaluation represents the tuples derived
 in one iteration as a half-open range of tuple identifiers rather than as a

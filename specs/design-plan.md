@@ -22,8 +22,7 @@ is implemented.
   that the executor never asks;
 * where a comparison or a negated literal goes when its variables are bound
   later than it is written;
-* how a query becomes a rule over a synthetic predicate, and what that
-  predicate is called;
+* how a query becomes a synthetic rule, and what that rule is called;
 * how long a plan lives and what it may hold on to.
 
 It does not settle how the planner *chooses* among orderings and access paths.
@@ -283,8 +282,10 @@ is compiled as
 $q0(X, Y) :- depends(X, Y), status(Y, todo).
 ```
 
-and from then on it is planned, evaluated and stored like any other rule. The
-answer to the query is the relation of `$q0/2`.
+and from then on it is planned and evaluated like any other rule. Its head is
+the list of output columns and names no predicate: the rule is answered into a
+relation the query object owns, per `specs/design-query.md`, and `$q0` is the
+name the query is called by rather than a predicate in the program's table.
 
 **The output columns are the named variables in order of first occurrence,
 and `_` contributes none.** Variables are numbered into slots in exactly that
@@ -317,11 +318,13 @@ with more named variables is rejected at the first one past the limit:
 
 ### 7.1 Names
 
-The synthetic predicate is named `$q` followed by a decimal serial number, per
-D-12. `$` cannot begin or appear in an identifier the lexer accepts, so no user
-predicate can collide with one, by construction rather than by a uniquifying
-check. Arity is part of predicate identity, so the name alone would not need
-to be unique; it is anyway, so that `-e` output can refer to a query by name.
+A query is named `$q` followed by a decimal serial number, per D-12. The name
+is what diagnostics and `-e` output call the query; it is built from the
+serial when it is printed and is neither a symbol nor a predicate in the
+context's tables (`specs/design-query.md` section 5). `$` cannot begin or
+appear in an identifier the lexer accepts, so no user predicate can be
+mistaken for one, by construction rather than by a uniquifying check. The
+serial makes the name unique so that `-e` output can refer to a query by it.
 
 The serial number counts the queries the context has compiled, in the order it
 compiled them. Queries written in the program are compiled by `relic_check()`
@@ -347,8 +350,11 @@ compiled rule:
   program must already have passed its check, so that the undefined-predicate
   sweep that follows speaks only about predicates the query introduced.
 
-Either way the result is a compiled rule whose head is the answer predicate,
-and nothing downstream can tell which route it took.
+Either way the result is a compiled rule whose head is the query's output
+columns, held in a query object that owns the relation the rule is answered
+into, and nothing downstream can tell which route it took. The table of the
+program's queries records each compiled rule with the serial the check gave
+it, so a loaded query is handed out under the name it was compiled with.
 
 ---
 

@@ -405,13 +405,17 @@ depends(X, Y),
 status(Y, todo)?
 ```
 
-Internally, every query is transformed into a synthetic relation:
+Internally, every query is transformed into a synthetic rule:
 
 ```prolog
 $q0(X, Y) :-
     depends(X, Y),
     status(Y, todo).
 ```
+
+The rule's head is the list of output columns and names no predicate: the
+query is answered into a relation the query object itself owns, and `$q0` is
+the name diagnostics and `-e` output call it by.
 
 The query output columns are the named variables in first-occurrence order.
 
@@ -422,7 +426,8 @@ Queries have set semantics.
 Result order is unspecified unless sorting is explicitly requested.
 
 The synthetic rule, its name and its checking are specified in
-`specs/design-plan.md`.
+`specs/design-plan.md`; what the query object owns, where its answer lives
+and how it is released are specified in `specs/design-query.md`.
 
 ---
 
@@ -2777,9 +2782,11 @@ and six milestones of `relic-plan.md`.
 diagnostic quality requirement for the unstratified case, a tarball-build
 requirement, and a sanitizer-clean requirement.
 
-**Queries, section 11.** The synthetic query predicate is `$q0` rather than
+**Queries, section 11.** The synthetic query rule is named `$q0` rather than
 `__query`, per `relic-plan.md` decision D-12: `$` cannot occur in an
-identifier, so the name cannot collide with a user predicate.
+identifier, so the name cannot be mistaken for a user predicate. The rule's
+head names no predicate; the query object owns the relation it is answered
+into, per decision D-17 and `specs/design-query.md`.
 
 **Plan representation, sections 58 and 59.** The operation set is the six of
 decision D-8. `MEMBER` answers a literal whose every argument is bound through

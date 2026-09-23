@@ -210,10 +210,11 @@ is reported once per rule at verbosity 2. `=` is a filter and does not bind.
 ### D-12 Generated names cannot collide
 
 Internally generated predicates contain `$`, which the lexer rejects in an
-identifier: `$q0` for a query, `path$bf` for an adorned predicate,
-`magic$path$bf` for its magic relation. Collision with a user predicate is
-impossible by construction rather than by a uniquifying counter, and the names
-are still readable in `-e` output.
+identifier: `$q0` for a query's rule and answer relation, `path$bf` for an
+adorned predicate, `magic$path$bf` for its magic relation. Collision with a
+user predicate is impossible by construction rather than by a uniquifying
+counter, and the names are still readable in `-e` output. A query's name is
+interned nowhere, per D-17; the others are predicates.
 
 ### D-13 Build
 
@@ -242,6 +243,16 @@ Parsed with `strtoll` into `int64_t`; out of range is a parse error naming the
 literal. A `-` immediately preceding a digit is part of the literal token,
 which is unambiguous because v1 has no arithmetic. `LLONG_MIN` is
 representable.
+
+### D-17 A query owns its answer
+
+A query's answer is a relation the query object owns, created with the query
+and released with it, and the head of a query's rule names no predicate. The
+predicate table holds program vocabulary only, so its size -- and the cost of
+every stage sized by it -- is a function of the program and not of how many
+queries have been prepared. `$q<serial>` remains the query's name in
+diagnostics and `-e` output, built from the serial when printed and interned
+nowhere. Specified in `specs/design-query.md`.
 
 ---
 
