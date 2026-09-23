@@ -24,6 +24,7 @@
 
 #include "config.h"
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -46,6 +47,7 @@
 #define	SCENARIO_INCOMPLETE	"a relation being derived is assumed, not measured"
 #define	SCENARIO_MEMBER		"a fully bound literal is a membership test"
 #define	SCENARIO_NEGATION	"a negated literal is an ANTI_MEMBER, placed early"
+#define	SCENARIO_RANKING	"passes choose the step-by-step greedy order"
 #define	SCENARIO_REFERENCES	"the reference switches change only their choice"
 #define	SCENARIO_TERMS		"a scan's columns bind, match or ignore"
 
@@ -55,7 +57,24 @@
 /* How many tuples half/2 holds in the divided-assumption scenario. */
 #define	HALF_TUPLES		500
 
+/*
+ * The shape of the programs the ranking scenario generates: how many, the
+ * relations their bodies read, the variables a rule may use, the most
+ * tuples a relation holds, the values a column is drawn from, and the most
+ * positive literals and tests a body holds.
+ */
+#define	RANKED_PROGRAMS		60
+#define	RANKED_RULES		4
+#define	RANKED_RELATIONS	5
+#define	RANKED_VARIABLES	8
+#define	RANKED_MAX_TUPLES	24
+#define	RANKED_MAX_VALUES	8
+#define	RANKED_MAX_POSITIVES	24
+#define	RANKED_MAX_TESTS	6
+#define	RANKED_TEXT_MAX		16384
+
 typedef struct fixture fixture_t;
+typedef struct text text_t;
 
 /*
  * A context holding one program, and the plan of one of its rules.  The plan
@@ -67,6 +86,17 @@ struct fixture {
 	relic_arena_t	 arena;
 	relic_plan_t	 plan;
 	size_t		 errors;
+};
+
+/*
+ * Program text under construction, in a fixed buffer.  `overflowed` records
+ * that something did not fit, which fails the scenario rather than testing a
+ * truncated program.
+ */
+struct text {
+	char	buffer[RANKED_TEXT_MAX];
+	size_t	length;
+	bool	overflowed;
 };
 
 static void	 count_error(void *callback_ctx, enum relic_diag_level level,
@@ -87,6 +117,31 @@ static bool	 reads_in_order(const fixture_t *fixture,
 static uint16_t	 slot_named(const fixture_t *fixture, size_t rule_index,
 		    const char *name);
 static relic_dom_t symbol_value(relic_t *ctx, const char *name);
+static uint32_t	 next_random(uint32_t *state, uint32_t bound);
+static void	 text_append(text_t *text, const char *format, ...)
+		    RELIC_PRINTFLIKE(2, 3);
+static void	 generate_facts(text_t *text, uint32_t *state);
+static void	 generate_rule(text_t *text, uint32_t *state, size_t number);
+static void	 generate_positive(text_t *text, uint32_t *state,
+		    uint32_t *variables);
+static void	 generate_test(text_t *text, uint32_t *state,
+		    uint32_t variables);
+static void	 generate_variable(text_t *text, uint32_t *state,
+		    uint32_t variables);
+static uint16_t	 relation_arity(size_t relation);
+static bool	 reference_order(relic_t *ctx, const relic_rule_t *rule,
+		    uint64_t bound, const bool *incomplete, size_t *order);
+static bool	 reference_score(relic_t *ctx, const relic_atom_t *atom,
+		    uint64_t bound, const bool *incomplete,
+		    uint16_t *bound_argsp, size_t *estimatep);
+static bool	 reference_better(uint16_t bound_args, size_t estimate,
+		    uint16_t best_bound_args, size_t best_estimate);
+static size_t	 reference_place_tests(relic_t *ctx, const relic_rule_t *rule,
+		    uint64_t bound, bool *placed, size_t *order, size_t count);
+static bool	 reference_test_ready(relic_t *ctx,
+		    const relic_literal_t *literal, uint64_t bound);
+static uint64_t	 reference_slots(const relic_arg_t *args, uint16_t count);
+static void	 check_ranked_program(uint32_t *state, unsigned int flags);
 static void	 a_comparison_goes_where_its_operands_are_bound(void);
 static void	 a_delta_literal_must_be_positive(void);
 static void	 a_delta_variant_scans_its_delta_first(void);
@@ -101,6 +156,7 @@ static void	 a_bound_argument_outranks_a_smaller_estimate(void);
 static void	 bound_arguments_then_small_relations_go_first(void);
 static void	 each_binding_pattern_gets_its_access_path(void);
 static void	 the_references_change_only_their_choice(void);
+static void	 the_ranking_is_the_step_by_step_order(void);
 static void	 the_smaller_estimate_goes_first(void);
 
 static void
@@ -1097,6 +1153,548 @@ the_references_change_only_their_choice(void)
 	fixture_release(&fixture);
 }
 
+/*
+ * A number in [0, bound) from a linear congruential sequence, so that every
+ * run generates the same programs on every platform.
+ */
+static uint32_t
+next_random(uint32_t *state, uint32_t bound)
+{
+	*state = *state * UINT32_C(1103515245) + UINT32_C(12345);
+
+	return ((*state >> 16) % bound);
+}
+
+static void
+text_append(text_t *text, const char *format, ...)
+{
+	va_list arguments;
+	size_t room;
+	int written;
+
+	room = sizeof(text->buffer) - text->length;
+
+	va_start(arguments, format);
+	written = vsnprintf(text->buffer + text->length, room, format,
+	    arguments);
+	va_end(arguments);
+
+	if (written < 0 || (size_t)written >= room) {
+		text->overflowed = true;
+		return;
+	}
+
+	text->length += (size_t)written;
+}
+
+/*
+ * The arity of generated relation r<relation>: 1, 2 or 3, so that the bodies
+ * mix literals that bind one variable with literals that bind several.
+ */
+static uint16_t
+relation_arity(size_t relation)
+{
+	return ((uint16_t)(1 + relation % 3));
+}
+
+/*
+ * Facts for every generated relation, each drawing its values from a range
+ * of its own so that tuple counts and distinct counts differ between
+ * relations and between columns.  A relation may be empty, which estimates
+ * zero.
+ */
+static void
+generate_facts(text_t *text, uint32_t *state)
+{
+	uint32_t tuples;
+	uint32_t values;
+	uint32_t t;
+	uint16_t column;
+	size_t relation;
+
+	for (relation = 0; relation < RANKED_RELATIONS; relation++) {
+		tuples = next_random(state, RANKED_MAX_TUPLES + 1);
+		values = 1 + next_random(state, RANKED_MAX_VALUES);
+
+		for (t = 0; t < tuples; t++) {
+			text_append(text, "r%zu(", relation);
+			for (column = 0; column < relation_arity(relation);
+			    column++)
+				text_append(text, "%s%u", column > 0 ? ", " : "",
+				    (unsigned int)next_random(state, values));
+			text_append(text, ").\n");
+		}
+
+		/*
+		 * A rule deriving nothing new defines the predicate even
+		 * when it has no facts.
+		 */
+		text_append(text, "r%zu(", relation);
+		for (column = 0; column < relation_arity(relation); column++)
+			text_append(text, "%sX%u", column > 0 ? ", " : "",
+			    (unsigned int)column);
+		text_append(text, ") :- r%zu(", relation);
+		for (column = 0; column < relation_arity(relation); column++)
+			text_append(text, "%sX%u", column > 0 ? ", " : "",
+			    (unsigned int)column);
+		text_append(text, ").\n");
+	}
+}
+
+/*
+ * A variable, one already in `variables` -- a bit per variable -- so that
+ * a test reads only what some positive literal binds, which keeps the rule
+ * safe.
+ */
+static void
+generate_variable(text_t *text, uint32_t *state, uint32_t variables)
+{
+	uint32_t variable;
+
+	do
+		variable = next_random(state, RANKED_VARIABLES);
+	while ((variables & (UINT32_C(1) << variable)) == 0);
+
+	text_append(text, "X%u", (unsigned int)variable);
+}
+
+/*
+ * A positive literal over a generated relation: each argument a variable,
+ * a constant or `_`, the first always a variable so that the literal binds
+ * something the head can read.  Adds the variables it mentions to
+ * `variables`.
+ */
+static void
+generate_positive(text_t *text, uint32_t *state, uint32_t *variables)
+{
+	uint32_t relation;
+	uint32_t choice;
+	uint32_t variable;
+	uint16_t column;
+
+	relation = next_random(state, RANKED_RELATIONS);
+	text_append(text, "r%u(", (unsigned int)relation);
+
+	for (column = 0; column < relation_arity(relation); column++) {
+		text_append(text, "%s", column > 0 ? ", " : "");
+
+		choice = column == 0 ? 0 : next_random(state, 10);
+		if (choice < 7) {
+			variable = next_random(state, RANKED_VARIABLES);
+			*variables |= UINT32_C(1) << variable;
+			text_append(text, "X%u", (unsigned int)variable);
+		} else if (choice < 9) {
+			text_append(text, "%u", (unsigned int)next_random(state,
+			    RANKED_MAX_VALUES));
+		} else {
+			text_append(text, "_");
+		}
+	}
+
+	text_append(text, ")");
+}
+
+/*
+ * A test reading only variables in `variables`: a comparison of a variable
+ * with another or with a constant, or a negated literal over a generated
+ * relation, which is complete.
+ */
+static void
+generate_test(text_t *text, uint32_t *state, uint32_t variables)
+{
+	uint32_t relation;
+	uint16_t column;
+
+	switch (next_random(state, 3)) {
+	case 0:
+		generate_variable(text, state, variables);
+		text_append(text, " < ");
+		generate_variable(text, state, variables);
+		return;
+	case 1:
+		generate_variable(text, state, variables);
+		text_append(text, " != %u", (unsigned int)next_random(state,
+		    RANKED_MAX_VALUES));
+		return;
+	default:
+		break;
+	}
+
+	relation = next_random(state, RANKED_RELATIONS);
+	text_append(text, "not r%u(", (unsigned int)relation);
+	for (column = 0; column < relation_arity(relation); column++) {
+		text_append(text, "%s", column > 0 ? ", " : "");
+		generate_variable(text, state, variables);
+	}
+	text_append(text, ")");
+}
+
+/*
+ * A rule h<number>(X) of positive literals and tests, the tests written at
+ * the end so that each can read any variable of the body; the planner
+ * places a test where its slots are first bound whatever its written
+ * position.  Repeated relations and variables give the ranking ties to
+ * break and placements that bind nothing new.
+ */
+static void
+generate_rule(text_t *text, uint32_t *state, size_t number)
+{
+	uint32_t variables;
+	uint32_t positives;
+	uint32_t tests;
+	uint32_t i;
+	text_t body;
+
+	bzero(&body, sizeof(body));
+	variables = 0;
+
+	positives = 1 + next_random(state, RANKED_MAX_POSITIVES);
+	for (i = 0; i < positives; i++) {
+		text_append(&body, "%s", i > 0 ? ", " : "");
+		generate_positive(&body, state, &variables);
+	}
+
+	tests = next_random(state, RANKED_MAX_TESTS + 1);
+	for (i = 0; i < tests; i++) {
+		text_append(&body, ", ");
+		generate_test(&body, state, variables);
+	}
+
+	text_append(text, "h%zu(", number);
+	generate_variable(text, state, variables);
+	text_append(text, ") :- %s.\n", body.buffer);
+	text->overflowed |= body.overflowed;
+}
+
+/*
+ * The slots a run of arguments reads.
+ */
+static uint64_t
+reference_slots(const relic_arg_t *args, uint16_t count)
+{
+	uint64_t slots;
+	uint16_t i;
+
+	slots = 0;
+	for (i = 0; i < count; i++) {
+		if (args[i].kind == RELIC_ARG_VARIABLE)
+			slots |= UINT64_C(1) << args[i].u.slot;
+	}
+
+	return (slots);
+}
+
+/*
+ * A positive literal's score against `bound`, as the planner's contract
+ * states it: the bound argument count, and the tuple count divided, rounding
+ * up, by the distinct values of each bound column -- or, for a relation
+ * `incomplete` marks, the assumed size divided by the assumed selectivity.
+ * Which columns are bound is asked of relic_plan_bound_columns(), whose own
+ * scenarios above pin it down; what is checked here is the order built on
+ * it.
+ */
+static bool
+reference_score(relic_t *ctx, const relic_atom_t *atom, uint64_t bound,
+    const bool *incomplete, uint16_t *bound_argsp, size_t *estimatep)
+{
+	relic_relation_t *relation;
+	const relic_pred_t *pred;
+	uint32_t columns;
+	size_t distinct;
+	size_t estimate;
+	uint16_t column;
+	bool assumed;
+
+	pred = relic_pred_of(ctx, atom->pred);
+	if (pred == NULL)
+		return (false);
+
+	assumed = incomplete != NULL && incomplete[atom->pred - 1];
+	relation = NULL;
+	if (!assumed && (relation = relic_relation_for(ctx, atom->pred)) ==
+	    NULL)
+		return (false);
+
+	columns = relic_plan_bound_columns(atom, pred->arity, bound);
+
+	*bound_argsp = 0;
+	estimate = assumed ? RELIC_PLAN_UNKNOWN_TUPLES :
+	    relic_relation_count(relation);
+	for (column = 0; column < pred->arity; column++) {
+		if ((columns & (UINT32_C(1) << column)) == 0)
+			continue;
+
+		(*bound_argsp)++;
+		if (assumed) {
+			estimate = (estimate + RELIC_PLAN_UNKNOWN_DISTINCT - 1) /
+			    RELIC_PLAN_UNKNOWN_DISTINCT;
+			continue;
+		}
+		if (estimate == 0)
+			continue;
+
+		if (relic_relation_distinct(ctx, relation, column,
+		    &distinct) != 0)
+			return (false);
+		estimate = (estimate + distinct - 1) / distinct;
+	}
+
+	*estimatep = estimate;
+
+	return (true);
+}
+
+static bool
+reference_better(uint16_t bound_args, size_t estimate,
+    uint16_t best_bound_args, size_t best_estimate)
+{
+	if (bound_args != best_bound_args)
+		return (bound_args > best_bound_args);
+
+	return (estimate < best_estimate);
+}
+
+/*
+ * Whether a test reads only slots in `bound`.  A negated literal holding `_`
+ * would count as ready here and never in the planner, which never places
+ * one; the generated negations hold variables only.
+ */
+static bool
+reference_test_ready(relic_t *ctx, const relic_literal_t *literal,
+    uint64_t bound)
+{
+	const relic_pred_t *pred;
+	uint64_t slots;
+
+	switch (literal->kind) {
+	case RELIC_LITERAL_COMPARISON:
+		slots = reference_slots(&literal->u.comparison.left, 1) |
+		    reference_slots(&literal->u.comparison.right, 1);
+		return ((slots & ~bound) == 0);
+	case RELIC_LITERAL_NEGATED:
+		pred = relic_pred_of(ctx, literal->u.atom.pred);
+		return (pred != NULL && (reference_slots(literal->u.atom.args,
+		    pred->arity) & ~bound) == 0);
+	case RELIC_LITERAL_POSITIVE:
+		break;
+	}
+
+	return (false);
+}
+
+/*
+ * Append every test not yet placed that `bound` makes ready, in body order,
+ * and return the new length of the order.
+ */
+static size_t
+reference_place_tests(relic_t *ctx, const relic_rule_t *rule, uint64_t bound,
+    bool *placed, size_t *order, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (placed[i] || !reference_test_ready(ctx, &rule->body[i],
+		    bound))
+			continue;
+
+		placed[i] = true;
+		order[count] = i;
+		count++;
+	}
+
+	return (count);
+}
+
+/*
+ * The greedy order computed one step at a time: at every step each positive
+ * literal not yet placed is scored against the slots bound so far, in body
+ * order, and the first of the best is placed, followed by every test it
+ * made ready.  Under RELIC_F_NO_REORDER the first positive literal not yet
+ * placed is chosen instead.  This is the definition the planner's passes
+ * must reproduce, written without them.
+ */
+static bool
+reference_order(relic_t *ctx, const relic_rule_t *rule, uint64_t bound,
+    const bool *incomplete, size_t *order)
+{
+	bool placed[RANKED_MAX_POSITIVES + RANKED_MAX_TESTS];
+	uint16_t best_bound_args;
+	uint16_t bound_args;
+	size_t best_estimate;
+	size_t estimate;
+	size_t count;
+	size_t best;
+	size_t i;
+	bool reorder;
+
+	if (rule->body_length > sizeof(placed) / sizeof(placed[0]))
+		return (false);
+
+	reorder = (ctx->config.flags & RELIC_F_NO_REORDER) == 0;
+	bzero(placed, sizeof(placed));
+	count = reference_place_tests(ctx, rule, bound, placed, order, 0);
+
+	while (count < rule->body_length) {
+		best = SIZE_MAX;
+		best_bound_args = 0;
+		best_estimate = 0;
+
+		for (i = 0; i < rule->body_length; i++) {
+			if (placed[i] ||
+			    rule->body[i].kind != RELIC_LITERAL_POSITIVE)
+				continue;
+
+			if (!reorder) {
+				best = i;
+				break;
+			}
+
+			if (!reference_score(ctx, &rule->body[i].u.atom, bound,
+			    incomplete, &bound_args, &estimate))
+				return (false);
+
+			if (best == SIZE_MAX || reference_better(bound_args,
+			    estimate, best_bound_args, best_estimate)) {
+				best = i;
+				best_bound_args = bound_args;
+				best_estimate = estimate;
+			}
+		}
+
+		if (best == SIZE_MAX)
+			return (false);
+
+		placed[best] = true;
+		order[count] = best;
+		count++;
+		bound |= reference_slots(rule->body[best].u.atom.args,
+		    relic_pred_of(ctx, rule->body[best].u.atom.pred)->arity);
+		count = reference_place_tests(ctx, rule, bound, placed, order,
+		    count);
+	}
+
+	return (true);
+}
+
+/*
+ * Generate one program, load its facts and evaluate them so that the
+ * planner has statistics to measure, then load its rules without evaluating
+ * them -- a generated body can be a cross product far too large to run --
+ * and compare the planner's order of each rule with the reference's three
+ * ways: from nothing bound, from a generated set of bound slots, and from
+ * that set with a generated choice of relations taken to be still derived.
+ */
+static void
+check_ranked_program(uint32_t *state, unsigned int flags)
+{
+	size_t expected[RANKED_MAX_POSITIVES + RANKED_MAX_TESTS];
+	size_t actual[RANKED_MAX_POSITIVES + RANKED_MAX_TESTS];
+	const relic_rule_t *rule;
+	bool *incomplete;
+	bool *assumed;
+	fixture_t fixture;
+	text_t facts;
+	text_t rules;
+	uint64_t bound;
+	size_t first_rule;
+	size_t pred_count;
+	size_t p;
+	size_t r;
+	int start;
+
+	bzero(&facts, sizeof(facts));
+	bzero(&rules, sizeof(rules));
+	generate_facts(&facts, state);
+	for (r = 0; r < RANKED_RULES; r++)
+		generate_rule(&rules, state, r);
+
+	if (facts.overflowed || rules.overflowed) {
+		check(false, SCENARIO_RANKING, "a generated program fits");
+		return;
+	}
+
+	if (!fixture_load(&fixture, facts.buffer, flags, true) ||
+	    relic_load_string(fixture.ctx, "rules.dl", rules.buffer) != 0 ||
+	    relic_check(fixture.ctx) != 0) {
+		checkf(false, SCENARIO_RANKING, "the generated program "
+		    "loads:\n%s%s", facts.buffer, rules.buffer);
+		fixture_release(&fixture);
+		return;
+	}
+
+	pred_count = relic_pred_count(fixture.ctx);
+	incomplete = calloc(pred_count, sizeof(*incomplete));
+	if (incomplete == NULL) {
+		check(false, SCENARIO_RANKING, "the incomplete marks fit");
+		fixture_release(&fixture);
+		return;
+	}
+
+	first_rule = fixture.ctx->program.rules.count - RANKED_RULES;
+	for (r = first_rule; r < fixture.ctx->program.rules.count; r++) {
+		rule = &fixture.ctx->program.rules.entries[r];
+
+		for (p = 0; p < pred_count; p++)
+			incomplete[p] = next_random(state, 3) == 0;
+
+		for (start = 0; start < 3; start++) {
+			bound = 0;
+			if (start > 0 && rule->variable_count > 0)
+				bound = next_random(state,
+				    UINT32_C(1) << rule->variable_count);
+			assumed = start == 2 ? incomplete : NULL;
+
+			bzero(expected, sizeof(expected));
+			bzero(actual, sizeof(actual));
+
+			if (!reference_order(fixture.ctx, rule, bound, assumed,
+			    expected) ||
+			    relic_plan_order(fixture.ctx, &fixture.arena, rule,
+			    bound, assumed, actual) != 0) {
+				checkf(false, SCENARIO_RANKING, "rule %zu of "
+				    "this program is ordered:\n%s%s", r,
+				    facts.buffer, rules.buffer);
+				continue;
+			}
+
+			checkf(bcmp(expected, actual, rule->body_length *
+			    sizeof(expected[0])) == 0, SCENARIO_RANKING,
+			    "rule %zu from bound set %#llx%s should be ordered "
+			    "as the step-by-step comparison orders it, with "
+			    "flags %#x:\n%s%s", r, (unsigned long long)bound,
+			    assumed != NULL ? " with relations assumed" : "",
+			    flags, facts.buffer, rules.buffer);
+		}
+	}
+
+	free(incomplete);
+	fixture_release(&fixture);
+}
+
+/*
+ * The planner orders a body in passes, one per state of the bound set,
+ * placing literals from a ranking while the bound set is unchanged.  That
+ * must choose exactly what comparing every unplaced literal at every step
+ * chooses, under the default planner and under -X no-reorder, from nothing
+ * bound, from bound slots a Magic caller would start with, and with some
+ * relations taken to be still derived.  Generated
+ * bodies repeat relations and variables, hold constants, wildcards, empty
+ * relations and tests written anywhere, so ties, placements that bind
+ * nothing and passes that end early all occur.
+ */
+static void
+the_ranking_is_the_step_by_step_order(void)
+{
+	uint32_t state;
+	size_t i;
+
+	state = 20260923;
+	for (i = 0; i < RANKED_PROGRAMS; i++) {
+		check_ranked_program(&state, 0);
+		check_ranked_program(&state, RELIC_F_NO_REORDER);
+	}
+}
+
 int
 main(void)
 {
@@ -1115,6 +1713,7 @@ main(void)
 	a_relation_being_derived_is_assumed();
 	an_assumed_relation_divides_per_bound_column();
 	the_references_change_only_their_choice();
+	the_ranking_is_the_step_by_step_order();
 
 	return (check_summary("test_plan"));
 }

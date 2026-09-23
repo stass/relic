@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# Two workloads that must take time proportional to their size rather than
-# to its square.
+# Workloads that must take time proportional to their size rather than to
+# its square.
 #
 # Reachability over a graph of one million edges finishes, answers every
 # node, and does work proportional to the graph rather than to its square.
@@ -39,10 +39,23 @@
 # the clock like the cycle: linear, it takes a few seconds, and quadratic,
 # many minutes.
 #
+# Two workloads plan long bodies, and must plan them in time proportional to
+# the plans they produce rather than to the square of a body.  A recursive
+# rule of 8000 literals, 500 of them reading its own predicate, has 500
+# delta variants of 8000 operations each; its bound set grows once, so each
+# variant is ordered in a pass or two.  A rule of 8000 literals over
+# complete relations, called with 125 distinct bound patterns through rules
+# a query reads them all through, is copied and ordered once per pattern by
+# the Magic rewrite.  Each holds some 4 million operations or literals, and
+# ordering them by rescoring the body at every step costs the square of the
+# body per plan, 10^10 steps or more: a second or two each in passes, even
+# under a sanitizer, and minutes step by step on an optimized build.
+#
 # RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
 # set, which leaves room for a sanitizer build on a slow machine; for
 # reachability the clock only guards against a run that never ends.  The
-# cycle and the session each have a tenth of it.
+# cycle and the session each have a tenth of it, and each planning workload
+# a fortieth, but never less than five seconds.
 
 set -eu
 
@@ -50,11 +63,18 @@ set -eu
 
 budget=${RELIC_PERF_BUDGET:-600}
 cycle_budget=$((budget / 10))
+planning_budget=$((budget / 40))
+if [ "$planning_budget" -lt 5 ]; then
+	planning_budget=5
+fi
 nodes=100000
 edges=1000000
 work_bound=2500000
 cycle=200000
 session_lines=100000
+body_length=8000
+recursive_every=16
+patterns=125
 
 fail() {
 	echo "$1" >&2
@@ -191,4 +211,68 @@ fi
 rows=$(grep -c . "$work/session-rows" || true)
 if [ "$rows" -ne $((session_lines * 3)) ]; then
 	fail "the session answered $rows rows, expected $((session_lines * 3))"
+fi
+
+# The recursive body is evaluated from the whole program, so that what is
+# measured is planning its variants; the Magic rewrite of the same query
+# generates a magic rule per call, which is a cost of its own.
+awk -v length_="$body_length" -v every="$recursive_every" 'BEGIN {
+	print "p(a).";
+	print "q(a).";
+	printf "p(X) :- p(X)";
+	for (i = 1; i < length_; i++)
+		printf ", %s(X)", (i % every == 0 ? "p" : "q");
+	print ".";
+}' > "$work/long.dl"
+
+status=0
+run_within "$work/long-rows" "$work/long-err" "$planning_budget" \
+    "$RELIC" -X no-magic -q 'p(X)?' "$work/long.dl" || status=$?
+
+if [ "$status" -ne 0 ]; then
+	cat "$work/long-err" >&2
+	fail "a recursive body of $body_length literals exited $status within a budget of $planning_budget seconds"
+fi
+
+if [ "$(cat "$work/long-rows")" != "a" ]; then
+	fail "the recursive body answered something other than a"
+fi
+
+# p/12 reads q/2 only, and its body binds all twelve variables within a few
+# literals, so each copy is ordered in a few passes.  Pattern n binds the
+# columns of the binary digits of n + 1, and every caller cN is read by all.
+awk -v length_="$body_length" -v patterns="$patterns" 'BEGIN {
+	print "e(a).";
+	print "q(a, a).";
+	printf "p(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11) :- ";
+	for (i = 0; i < length_; i++)
+		printf "%sq(A%d, A%d)", (i > 0 ? ", " : ""), i % 12,
+		    (i * 5 + 1) % 12;
+	print ".";
+	for (n = 0; n < patterns; n++) {
+		printf "c%d(X) :- e(X), p(", n;
+		for (c = 0; c < 12; c++)
+			printf "%s%s", (c > 0 ? ", " : ""),
+			    (int((n + 1) / 2 ^ c) % 2 == 1 ? "X" : "_");
+		print ").";
+		printf "all(X) :- c%d(X).\n", n;
+	}
+}' > "$work/patterns.dl"
+
+status=0
+run_within "$work/patterns-rows" "$work/patterns-err" "$planning_budget" \
+    "$RELIC" -q 'all(X)?' "$work/patterns.dl" || status=$?
+
+if [ "$status" -ne 0 ]; then
+	cat "$work/patterns-err" >&2
+	fail "a body of $body_length literals under $patterns patterns exited $status within a budget of $planning_budget seconds"
+fi
+
+if [ "$(cat "$work/patterns-rows")" != "a" ]; then
+	fail "the patterns workload answered something other than a"
+fi
+
+if [ -s "$work/patterns-err" ]; then
+	cat "$work/patterns-err" >&2
+	fail "the patterns workload was not answered through its rewrite"
 fi

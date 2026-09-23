@@ -182,9 +182,13 @@ follows a growth of the mask. One plan therefore costs at most 65 x *N* log
 binds something at every placement still takes *k* passes, and costs what
 it does today within a logarithm; the bound matters for the body that is
 long, where the mask must stop growing long before the body ends. The
-ranking and the planner's record of what is placed are scratch of the
-plan's own length, allocated beside the plan in the same arena, so they are
-charged with it and are of its order.
+planner's record of what is placed is scratch of the plan's own length,
+allocated beside the plan in the same arena, so it is charged with it and is
+of its order. The ranking is scratch of the same length, a few words per
+literal against the byte of that record, and is freed when the plan is
+built: kept beside every plan an evaluation holds, it would add a quarter to
+the memory of the long bodies this document is about. Held for one call
+only, it is of the order of the rule the caller wrote.
 
 ---
 
@@ -333,14 +337,18 @@ Two workloads hold the bound, in `tests/perf.sh` beside the ones already
 there and measured on the clock as the recursive cycle there is: linear in
 the plans, each takes about a second; square in the body, minutes.
 
-* **A long recursive body.** `p(a). p(X) :- p(X), ..., p(X). p(X)?` with
-  some two thousand literals: two thousand delta variants of two thousand
-  operations, ordered in one pass each because the mask grows once.
-* **A long body under many patterns.** A predicate of a two-thousand-literal
-  body, reading complete relations only, called with hundreds of distinct
-  bound patterns and queried through a predicate that reads them all, so
-  that the rewrite orders each copy once and generates one magic rule per
-  pattern.
+* **A long recursive body.** `p(a). q(a). p(X) :- p(X), q(X), ..., p(X),
+  ... . p(X)?` with some eight thousand literals, one in sixteen reading
+  `p`: five hundred delta variants of eight thousand operations, ordered in
+  a pass or two each because the mask grows once. Mixing in a complete
+  relation keeps the plans' size at a few million operations while making
+  each plan long, which is what separates the linear order from the
+  quadratic one by more than any difference between machines.
+* **A long body under many patterns.** A predicate of an
+  eight-thousand-literal body, reading complete relations only, called with
+  a hundred or more distinct bound patterns and queried through a predicate
+  that reads them all, so that the rewrite orders each copy once and
+  generates one magic rule per pattern.
 
 Both also run with `max_memory` set below what their plans need, and must
 fail with the limit message of section 7 before the plans are built, in

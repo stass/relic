@@ -162,7 +162,7 @@
  * relation, and the sweep is bound well past the last of them.
  */
 #define	EVAL_CHAIN	40
-#define	EVAL_SWEEP	160
+#define	EVAL_SWEEP	240
 
 /*
  * The materialization sweep's program is a chain of this many predicates,

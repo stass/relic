@@ -313,6 +313,17 @@ holds rather than every line before it.
 | `lib/magic.c`, `lib/explain.c` | the rewrite reads every head arity from the rule or its draft and treats the query's head as a pseudo-adornment it never looks up; the explain output writes a query's head and every operation's relation through the relation's name, so the golden `-e` outputs are unchanged |
 | `tests/` | `test_query`: 64 answers, through the rewrite and from the whole fixed point, leave the predicate count, the relation table and the tuple and storage totals as the first left them; names read from `-e` across loads and preparations; an answer refused by the tuple limit gives back the tuples and bytes it counted, and its query is destroyed after its context; `test_plan`: an EMIT writes the relation given and a relation of the wrong arity is an internal error naming it; `tests/perf.sh`: a session of 100 000 query lines within a tenth of the budget, about 3 s in a debug build, which the quadratic session missed by minutes |
 
+**Planning costs what its plans hold, decision D-18.** A body is ordered
+in passes, one per state of the bound set, specified in
+`specs/design-planning-cost.md` section 4, so ordering a plan costs its
+length times a logarithm rather than its square. The memory account of
+section 6 is not implemented.
+
+| Component | State |
+| --- | --- |
+| `lib/plan.c` | a pass scores every positive literal not yet placed once, sorts them by bound arguments, estimate and body position, and places from the front of that ranking until a placement binds a new slot; tests are offered a place only when the bound set grows; the scoring and readiness functions take the bound set as an argument; the ranking is allocated for one call and freed when it returns |
+| `tests/` | `test_plan`: 60 generated programs of up to 30 literals, with repeated relations and variables, constants, wildcards, empty relations, comparisons and negations, ordered from nothing bound, from a generated bound set, and with generated relations assumed still derived, under the default planner and `-X no-reorder`, against a step-by-step reference written in the test; every golden `-e` output is unchanged; `tests/perf.sh`: a recursive body of 8000 literals with 500 delta variants, and an 8000-literal body under 125 bound patterns, each within a fortieth of the budget and at least five seconds: about a second each, two under AddressSanitizer, where the step-by-step order took over 300 s and 153 s |
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:

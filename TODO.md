@@ -554,41 +554,35 @@ considered and not taken; revisit if the first such change is expensive.
 
 ## Security residuals
 
-**Planning a long recursive body is quadratic in memory and cubic in time.**
-[High, component: `lib/plan.c`, `lib/eval.c`, `lib/arena.c`] A rule with N
-literals over its own component gets N + 1 plans of N + 1 operations each,
-and ordering each plan rescores every unplaced literal and rescans the body
-for tests at every step, so each plan costs N^2 scores.
-`p(a). p(X) :- p(X), ..., p(X). p(X)?` with N = 1000 is 6 KB of text and
-takes 6.5 s and 80 MB to plan on an optimized build, 24.6 s under a
-sanitizer, against 1.1 s under `-X no-reorder`. The cost is paid before any
-tuple is derived, and `max_memory` does not cover the evaluation arena that
-holds the plans. Designed, not implemented: `specs/design-planning-cost.md`
-orders a body in one pass per state of the bound mask, at most 65, and
-charges the evaluation and rewrite arenas to `max_memory` with the limit's
-own message (D-18). Implementation order: the ranking first, with the
-long-body workload of the design's section 8 in `tests/perf.sh` failing
-against the unfixed tree; then the account, with the `-l memory` refusal
-workload. Under the default configuration planning memory stays bounded by
-the allocator alone, as the data is. The two `tests/cli.sh` cases that set
-`-l memory` to a few kilobytes will then fail in planning rather than while
-deriving or indexing, and their expected messages move with them.
+**Planning memory is not charged to the memory limit.** [High, component:
+`lib/arena.c`, `lib/eval.c`, `lib/magic.c`] A rule with N literals over its
+own component gets N + 1 plans of N + 1 operations each, so
+`p(a). p(X) :- p(X), ..., p(X). p(X)?` holds the square of its body in the
+evaluation arena before any tuple is derived: 2000 literals are 12 KB of
+text and 300 MB of plans, built in about a second since a body is ordered
+in one pass per state of the bound mask. `max_memory` covers neither the
+evaluation arena nor the rewrite arena, so no limit bounds what planning
+holds. Designed, not implemented: `specs/design-planning-cost.md` section 6
+charges both arenas to `max_memory` with the limit's own message (D-18), and
+section 8 adds the `-l memory` refusal workloads to `tests/perf.sh`. Under
+the default configuration planning memory stays bounded by the allocator
+alone, as the data is. The two `tests/cli.sh` cases that set `-l memory` to
+a few kilobytes will then fail in planning rather than while deriving or
+indexing, and their expected messages move with them.
 
 **The Magic budget counts rules, not their length.** [High, component:
-`lib/magic.c`, `lib/plan.c`] Each adornment of a predicate copies every rule
-deriving it whole and orders the copy's body, so R distinct call patterns of
-one rule of L literals cost R x L literals of memory and R x L^2 ordering
-work before anything is derived, and each pattern needs only one short
-calling rule, so this stays inside the budgets and no warning fires. A 71 KB
-program -- `p/12` with a body of 2000 literals, called with 500 bound
-patterns by `cN(X) :- e(X), p(...)` and queried through `all(X)?` -- takes
-37.9 s and 247 MB through the rewrite against 0.05 s and 4.7 MB under `-X
-no-magic`. Over 99% of the time is in `relic_plan_order()` called from
-`rewrite_body()`. Designed with the item above: the ranking removes the L^2
-regardless of configuration, and charging the rewrite arena bounds the R x
-L when `max_memory` is set; under the default configuration the R x L is
-bounded by the literal budget of `specs/design-magic.md` section 8, which is
-designed and not implemented.
+`lib/magic.c`] Each adornment of a predicate copies every rule deriving it
+whole, so R distinct call patterns of one rule of L literals cost R x L
+literals of memory before anything is derived, and each pattern needs only
+one short calling rule, so this stays inside the budgets and no warning
+fires. A 60 KB program -- `p/12` with a body of 2000 literals, called with
+500 bound patterns by `cN(X) :- e(X), p(...)` and queried through `all(X)?`
+-- holds about 250 MB through the rewrite, against about 5 MB under `-X
+no-magic`; it takes under a second, since each copy is ordered in a few
+passes (`tests/perf.sh`). Designed with the item above: charging the rewrite
+arena bounds the R x L when `max_memory` is set, and under the default
+configuration the R x L is bounded by the literal budget of
+`specs/design-magic.md` section 8, which is designed and not implemented.
 
 **Magic rules repeat the prefix before each demand call, cubic in a body's
 calls.** [High, component: `lib/magic.c`] `record_call()` generates one magic
