@@ -6,14 +6,15 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S8, negation execution, landed; S9 and
-milestone M3, indexes, statistics, planner and explain, next.
+`relic-plan.md`. Current position: S9 and milestone M3, indexes,
+statistics, planner and explain, landed; S10 and milestone M4, Magic Sets,
+next.
 
 ## Documentation debt
 
 **Design documents owed.** [High] Each stage owes one before its code:
-`design-index.md` and `design-planner.md` (S9), `design-magic.md` (S10). Each
-is referenced from `specs/architecture.md` when written.
+`design-magic.md` (S10). Each is referenced from `specs/architecture.md` when
+written.
 
 ## Build and packaging
 
@@ -183,15 +184,33 @@ reading an untrusted pipe. Revisit if S11 or S12 finds that caller; the
 answer there is a separate key, not a wider meaning for this one.
 
 **Options that arrive with their features.** [Medium, component:
-`cmd/relic/main.c`] `-e` arrives in S9; `-i`, `-n` and `-v` in S12. Each is
-an unknown option until then, and the usage message lists only what is
-accepted. `-l` was brought forward to S8, when negation evaluating took away
-the only other way to make a query fail during evaluation from the command
-line. `-X` accepts only `naive` and `stats`: `no-index`, `no-reorder` and
-`no-magic` arrive with the features they switch off, in S9 and S10, and
-`tests/equiv/strategies.sh` gains each as it does. Magic Sets add relations
+`cmd/relic/main.c`] `-i`, `-n` and `-v` arrive in S12. Each is an unknown
+option until then, and the usage message lists only what is accepted. `-l`
+was brought forward to S8, when negation evaluating took away the only other
+way to make a query fail during evaluation from the command line. `-X`
+accepts `naive`, `no-index`, `no-reorder` and `stats`: `no-magic` arrives in
+S10, and `tests/equiv/strategies.sh` gains it then. Magic Sets add relations
 of their own, so `no-magic` will need a comparison other than the total
 tuple count that harness uses.
+
+**A fact costs a compiled rule and a plan.** [Medium, component:
+`lib/parse.c`, `lib/rule.c`, `lib/eval.c`] A fact is a rule with an empty
+body, so each one is a syntax tree node, a compiled rule and, at every
+evaluation, a one-operation plan in the evaluation arena. A million `edge/2`
+facts, 21 MB of text, take 1.8 s and 260 MB to load and check and about
+450 MB resident to evaluate, while the relation holding them is 24 MB;
+`tests/perf.sh` measures this shape. Loading facts of a component straight
+into a staging relation, or planning a component's facts as one bulk
+operation, would remove most of it without a second path for rules.
+
+**Explain pairs variants with their rule by order.** [Low, component:
+`lib/eval.c`] `explain_component()` prints each rule's delta variants by
+walking the variant plans alongside the base plans and matching on the rule
+pointer, which is right because both are built in rule order. A reordering of
+either would silently drop the variants of the first rule out of step and of
+every rule after it. Recording
+each base plan's range of variants when the component is planned would make
+the pairing hold by construction.
 
 **A later load re-evaluates the whole program.** [Low, component:
 `lib/eval.c`] Any change to the program after an evaluation discards every
@@ -371,10 +390,11 @@ and value interning, across a load, across a check, across the dependency
 analysis and the replacement of a schedule, across a batch of tuple
 insertions, and across preparing and answering a query over a recursive
 program, which is what caught the index-growth failure that broke interning
-identity. Every later stage adds allocation paths that the sweep will not
-reach unless it is extended: the secondary indexes and the Magic rewrite. Add
-a scenario per stage rather than leaving the suite describing the stages that
-happened to write one.
+identity, and across building a secondary index and inserting into an
+indexed relation. Every later stage adds allocation paths that the sweep will
+not reach unless it is extended: next, the Magic rewrite. Add a scenario per
+stage rather than leaving the suite describing the stages that happened to
+write one.
 
 Each new scenario needs the straddle guards the existing ones have. The
 insertion sweep was written first over a single insertion into a relation that
@@ -434,15 +454,19 @@ by mistake is not.
 **Planning a long recursive body is quadratic in memory and cubic in time.**
 [High, component: `lib/eval.c`, `lib/plan.c`, `lib/rule.c`] A rule body has
 no length limit, and a rule with N literals over its own component gets N
-delta variants of N + 1 operations each; placing each literal also rescans
-the body for comparisons. `p(a). p(X) :- p(X), ..., p(X). p(X)?` with N = 2000
-is 12 KB of text and takes 4.4 s and 202 MB to plan, against 0.03 s and
-1.6 MB under `-X naive`; the cost is paid before any tuple is derived, and
-`max_memory` does not cover the evaluation arena that holds plans. The
-options weighed were a structural body-length limit beside the arity and
-variable limits of D-7 (64 literals would bound a rule to about four
-thousand operations), a larger limit, and charging the evaluation arena to
-`max_memory`. Decide with the `-l` work of S12 or the hardening of S13.
+delta variants of N + 1 operations each; placing each literal rescans the
+body for tests, and the greedy order scores every positive literal not yet
+placed at each step, so each variant costs N^2 scores.
+`p(a). p(X) :- p(X), ..., p(X). p(X)?` with N = 1000 is 6 KB of text and
+takes 24.6 s and 62 MB to plan, against 4.2 s under `-X no-reorder`; N = 500
+takes 3.2 s. The cost is paid before any tuple is derived, `max_memory` does
+not cover the evaluation arena that holds plans, and the scratch table a
+distinct count uses is not charged either. The options weighed were a
+structural body-length limit beside the arity and variable limits of D-7 (64
+literals would bound a rule to about four thousand operations and 250 000
+scores), a larger limit, and charging the evaluation arena to `max_memory`,
+which bounds the memory and not the time. Decide with the `-l` work of S12
+or the hardening of S13.
 
 **Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
 component: `lib/relation.c`] D-4 forbids randomizing a hash seed, and
@@ -461,6 +485,27 @@ the `-l` key set is still private, since adding a key after it is documented
 is the expensive moment. It matters for the embedded caller section 63 names:
 a host that accepts an untrusted program and trusts `-l` to protect it is not
 protected against this.
+
+**A callback that calls into the context during an operation is memory
+unsafe.** [Medium, component: `lib/api.c`, `lib/eval.c`, `lib/explain.c`]
+The diagnostic and explain callbacks are documented as not calling into the
+context, and nothing enforces it. An explain callback that loads and
+materializes during a materialization resets the evaluation arena under the
+plans the outer evaluation is still running, a use-after-free; the inner
+evaluation's discard also drops every index, and its planner may build a
+different index at a position an outer plan names, so the outer lookups
+would walk an index on the wrong columns. A diagnostic callback that evaluates is
+the same hazard. (A callback that clears itself is tolerated: the explain
+renderer checks for a callback before every line.) The answer callback is safe, because streaming begins only after
+evaluation has ended. The callbacks are the embedder's own code, so this is a
+contract violation rather than a hostile program, but the tree's rule is that
+a broken contract gives wrong output, not an invalid access. The remedy that
+holds by construction is a context-wide state saying an operation is in
+progress, set around every loading, checking and evaluating entry point and
+refused by every public entry but `relic_string()` and `relic_error()` while
+it is set, with `relic_relation_discard_all()` asserting that it is not set
+rather than relying on having one caller; settle it with the S11 ABI work,
+which fixes the callback contracts.
 
 **Predicate names reach an embedder's callback unescaped.** [Low, component:
 `lib/pred.c`] `relic_pred_describe()` quotes a predicate name without

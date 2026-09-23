@@ -45,12 +45,24 @@
  */
 #define	RELIC_TUPLE_MAX		(UINT32_MAX - 1u)
 
+static uint32_t	 column_rehash(uint32_t id, void *ctx);
 static bool	 columns_holding(size_t tuples, uint16_t arity,
 		    size_t *columnsp);
+static int	 count_distinct(relic_t *ctx, const relic_relation_t *relation,
+		    uint16_t column, size_t *distinctp);
 static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation);
-static bool	 exceeds_memory_limit(const relic_t *ctx,
-		    const relic_relation_t *relation);
+static bool	 exceeds_memory_limit(const relic_t *ctx, size_t current_bytes,
+		    size_t projected_bytes);
 static bool	 exceeds_tuple_limit(const relic_t *ctx);
+static int	 index_build(relic_t *ctx, const relic_relation_t *relation,
+		    relic_index_t *index);
+static int	 index_make_room(relic_t *ctx, const relic_relation_t *relation,
+		    relic_index_t *index, size_t tuples);
+static bool	 key_mask_fits(const relic_relation_t *relation,
+		    uint32_t key_mask);
+static void	 report_limit(relic_t *ctx, const char *limit,
+		    size_t configured, const char *activity,
+		    relic_pred_id_t pred);
 static size_t	 relation_bytes_after_insert(const relic_relation_t *relation);
 static bool	 relation_columns_after_insert(
 		    const relic_relation_t *relation, size_t *columnsp);
@@ -78,16 +90,31 @@ relic_reltab_init(relic_reltab_t *table)
 }
 
 /*
- * Release a relation's tuples and index, leaving it empty and in place.
+ * Release a relation's tuples and every index, leaving it empty and in
+ * place.  An index asked for again is built over the tuples held by then at
+ * the same cost per tuple as keeping it up would have had, so dropping it
+ * loses nothing, and it keeps a later program from paying, on every
+ * insertion and against the memory limit, for indexes only an earlier one
+ * asked for.  The header array is kept for reuse.  The cached statistics go:
+ * the relation may be refilled to the tuple count they were taken at, with
+ * other tuples.
  */
 static void
 relation_empty(relic_relation_t *relation)
 {
+	size_t position;
+
 	relic_idtab_reset(&relation->index);
 	free(relation->columns);
 	relation->columns = NULL;
 	relation->column_capacity = 0;
 	relation->count = 0;
+
+	for (position = 0; position < relation->index_count; position++)
+		relic_index_empty(&relation->indexes[position]);
+	relation->index_count = 0;
+
+	bzero(&relation->stats, sizeof(relation->stats));
 }
 
 /*
@@ -100,6 +127,7 @@ relation_free(relic_relation_t *relation)
 		return;
 
 	relation_empty(relation);
+	free(relation->indexes);
 	free(relation);
 }
 
@@ -231,11 +259,23 @@ relation_columns_after_insert(const relic_relation_t *relation,
 	    columnsp));
 }
 
+/*
+ * The bytes of tuple and index storage a relation holds: its columns, its
+ * canonical index and every secondary index.
+ */
 size_t
 relic_relation_bytes(const relic_relation_t *relation)
 {
-	return (relation->column_capacity * sizeof(*relation->columns) +
-	    relic_idtab_bytes(&relation->index));
+	size_t bytes;
+	size_t position;
+
+	bytes = relation->column_capacity * sizeof(*relation->columns) +
+	    relic_idtab_bytes(&relation->index);
+
+	for (position = 0; position < relation->index_count; position++)
+		bytes += relic_index_bytes(&relation->indexes[position]);
+
+	return (bytes);
 }
 
 /*
@@ -256,12 +296,15 @@ relic_relation_bytes(const relic_relation_t *relation)
 static size_t
 relation_bytes_after_insert(const relic_relation_t *relation)
 {
+	size_t bytes;
+	size_t canonical_bytes;
 	size_t column_bytes;
 	size_t grown_capacity;
-	size_t index_bytes;
 	size_t needed_columns;
+	size_t position;
+	size_t secondary_bytes;
 
-	index_bytes = relic_idtab_bytes_after_reserve(&relation->index);
+	canonical_bytes = relic_idtab_bytes_after_reserve(&relation->index);
 
 	if (!relation_columns_after_insert(relation, &needed_columns))
 		return (relic_relation_bytes(relation));
@@ -273,10 +316,19 @@ relation_bytes_after_insert(const relic_relation_t *relation)
 		return (relic_relation_bytes(relation));
 
 	column_bytes = grown_capacity * sizeof(*relation->columns);
-	if (column_bytes > SIZE_MAX - index_bytes)
+	if (column_bytes > SIZE_MAX - canonical_bytes)
 		return (relic_relation_bytes(relation));
+	bytes = column_bytes + canonical_bytes;
 
-	return (column_bytes + index_bytes);
+	for (position = 0; position < relation->index_count; position++) {
+		secondary_bytes = relic_index_bytes_after_reserve(
+		    &relation->indexes[position], relation->count + 1);
+		if (secondary_bytes > SIZE_MAX - bytes)
+			return (relic_relation_bytes(relation));
+		bytes += secondary_bytes;
+	}
+
+	return (bytes);
 }
 
 /*
@@ -298,27 +350,26 @@ exceeds_tuple_limit(const relic_t *ctx)
 }
 
 /*
- * Whether one more tuple in this relation would take relation and index
- * storage past the configured maximum.
+ * Whether something holding `current_bytes` of the storage total -- a
+ * relation, or an index being built -- would take relation and index storage
+ * past the configured maximum by growing to `projected_bytes`.
  *
- * The projection replaces this relation's contribution to the total with what
- * that contribution would become, so the answer covers every relation without
+ * The projection replaces that thing's contribution to the total with what
+ * the contribution would become, so the answer covers every relation without
  * revisiting any of them.  The subtraction is safe because the total is by
- * construction the sum of relic_relation_bytes() over every relation the
- * context holds, so this relation's bytes are always a part of it.
+ * construction the sum of what every relation holds and what an index being
+ * built holds, so the current bytes of either are always a part of it.
  */
 static bool
-exceeds_memory_limit(const relic_t *ctx, const relic_relation_t *relation)
+exceeds_memory_limit(const relic_t *ctx, size_t current_bytes,
+    size_t projected_bytes)
 {
 	size_t elsewhere_bytes;
-	size_t projected_bytes;
 
 	if (ctx->config.max_memory == 0)
 		return (false);
 
-	elsewhere_bytes = ctx->relations.storage_bytes -
-	    relic_relation_bytes(relation);
-	projected_bytes = relation_bytes_after_insert(relation);
+	elsewhere_bytes = ctx->relations.storage_bytes - current_bytes;
 
 	/* Two sizes that fit in a size_t need not have a sum that does. */
 	if (projected_bytes > SIZE_MAX - elsewhere_bytes)
@@ -344,31 +395,41 @@ exceeds_memory_limit(const relic_t *ctx, const relic_relation_t *relation)
 static int
 enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 {
-	const char *limit;
-	size_t configured;
-	char described[RELIC_PRED_TEXT_MAX];
-
 	if (exceeds_tuple_limit(ctx)) {
-		limit = "tuples";
-		configured = ctx->config.max_tuples;
-	} else if (exceeds_memory_limit(ctx, relation)) {
-		limit = "memory";
-		configured = ctx->config.max_memory;
-	} else {
-		return (0);
+		report_limit(ctx, "tuples", ctx->config.max_tuples, "deriving",
+		    relation->pred);
+		return (-1);
 	}
 
-	relic_diagf(ctx, RELIC_ERROR, NULL,
-	    "limit exceeded: %s=%zu while deriving %s", limit, configured,
-	    relic_pred_describe(ctx, relation->pred, described,
-	    sizeof(described)));
+	if (exceeds_memory_limit(ctx, relic_relation_bytes(relation),
+	    relation_bytes_after_insert(relation))) {
+		report_limit(ctx, "memory", ctx->config.max_memory, "deriving",
+		    relation->pred);
+		return (-1);
+	}
 
-	return (-1);
+	return (0);
 }
 
 /*
- * Make room for one more tuple: a slot in the index and a tuple's worth of
- * columns.
+ * Report a configured limit refusing something, in the form every limit
+ * shares: the limit, what it was set to, and what was being done to which
+ * predicate -- deriving into it, or indexing it.
+ */
+static void
+report_limit(relic_t *ctx, const char *limit, size_t configured,
+    const char *activity, relic_pred_id_t pred)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	relic_diagf(ctx, RELIC_ERROR, NULL,
+	    "limit exceeded: %s=%zu while %s %s", limit, configured, activity,
+	    relic_pred_describe(ctx, pred, described, sizeof(described)));
+}
+
+/*
+ * Make room for one more tuple: a slot in the canonical index, a tuple's
+ * worth of columns, and room in every secondary index.
  *
  * Every step that can fail is here, and none of them changes what the
  * relation holds.  That separation is what an insertion's consistency rests
@@ -389,6 +450,7 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 {
 	relic_dom_t *columns;
 	size_t needed_columns;
+	size_t position;
 	char described[RELIC_PRED_TEXT_MAX];
 
 	/*
@@ -420,6 +482,14 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 	}
 	relation->columns = columns;
 
+	for (position = 0; position < relation->index_count; position++) {
+		if (relic_index_reserve(&relation->indexes[position], relation,
+		    relation->count + 1) != 0) {
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+	}
+
 	return (0);
 }
 
@@ -447,9 +517,10 @@ relation_make_room(relic_t *ctx, relic_relation_t *relation)
 }
 
 /*
- * Store a tuple the relation has room for and index it under its hash.
+ * Store a tuple the relation has room for, index it under its hash, and add
+ * it to every secondary index.
  *
- * Nothing here can fail, which is what lets the columns and the index entry
+ * Nothing here can fail, which is what lets the columns and every index entry
  * be published together.  The identifier is the one past the last, which is
  * what makes the store append-only: nothing here can name a tuple that
  * already exists.  The columns are written before the count admits them, so a
@@ -461,6 +532,7 @@ tuple_append(relic_relation_t *relation, const relic_dom_t *columns,
 {
 	relic_dom_t *destination;
 	relic_tuple_id_t id;
+	size_t position;
 	uint16_t column;
 
 	id = (relic_tuple_id_t)(relation->count + 1);
@@ -477,6 +549,9 @@ tuple_append(relic_relation_t *relation, const relic_dom_t *columns,
 	relation->count++;
 
 	relic_idtab_place(&relation->index, hash, id);
+
+	for (position = 0; position < relation->index_count; position++)
+		relic_index_add(&relation->indexes[position], relation, id);
 }
 
 /*
@@ -607,6 +682,264 @@ relic_relation_all(const relic_relation_t *relation)
 }
 
 /*
+ * Whether `key_mask` names a nonempty proper subset of this relation's
+ * columns, which is what a secondary index can be keyed on.  Every column is
+ * the whole tuple, which the full-tuple index already answers.
+ */
+static bool
+key_mask_fits(const relic_relation_t *relation, uint32_t key_mask)
+{
+	uint32_t columns;
+
+	columns = relation->arity >= 32 ? UINT32_MAX :
+	    (UINT32_C(1) << relation->arity) - 1;
+
+	return (key_mask != 0 && key_mask != columns &&
+	    (key_mask & ~columns) == 0);
+}
+
+/*
+ * Make room in an index for `tuples` tuples and one more key, under the
+ * memory limit, keeping the storage total in step as relation_make_room()
+ * does.
+ *
+ * `index` need not be one the relation has published: it is measured as a
+ * part of the storage total in its own right, which is what lets an index be
+ * charged for while it is being built and before anything can reach it.
+ */
+static int
+index_make_room(relic_t *ctx, const relic_relation_t *relation,
+    relic_index_t *index, size_t tuples)
+{
+	size_t bytes_before;
+	int status;
+
+	bytes_before = relic_index_bytes(index);
+
+	if (exceeds_memory_limit(ctx, bytes_before,
+	    relic_index_bytes_after_reserve(index, tuples))) {
+		report_limit(ctx, "memory", ctx->config.max_memory, "indexing",
+		    relation->pred);
+		return (-1);
+	}
+
+	status = relic_index_reserve(index, relation, tuples);
+	ctx->relations.storage_bytes += relic_index_bytes(index) - bytes_before;
+	if (status != 0)
+		relic_diag_no_memory(ctx);
+
+	return (status);
+}
+
+/*
+ * Fill an empty, unpublished index with every tuple the relation holds, in
+ * identifier order, which is what puts each chain in that order.  Returns 0,
+ * or -1 with a diagnostic reported, leaving the index holding whatever it had
+ * reached and the storage total counting it.
+ *
+ * Room is made one tuple at a time rather than for the whole relation at
+ * once.  The limit is then applied at each growth exactly as it is when the
+ * relation grows by insertion, so an index that fits is admitted however it
+ * came to be built.
+ */
+static int
+index_build(relic_t *ctx, const relic_relation_t *relation,
+    relic_index_t *index)
+{
+	relic_tuple_id_t id;
+
+	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
+		if (index_make_room(ctx, relation, index, id) != 0)
+			return (-1);
+
+		relic_index_add(index, relation, id);
+	}
+
+	return (0);
+}
+
+/*
+ * The position in relation->indexes of the index keyed on the columns of
+ * `key_mask`, building it now if the relation has none.  Returns 0, or -1
+ * with a diagnostic reported: memory or the memory limit refused the build,
+ * or the mask is not a nonempty proper subset of the relation's columns,
+ * which is a mistake in the caller.
+ *
+ * A build that fails is never published.  It is built outside the relation,
+ * so no lookup can reach a partial index and miss the tuples it had not yet
+ * reached, and on failure its bytes leave the storage total and its storage
+ * is released: a refused build leaves the relation as it was, apart from
+ * header capacity that is not accounted.  The header is grown before the
+ * build begins so that publishing cannot fail after it succeeds.
+ */
+int
+relic_relation_index(relic_t *ctx, relic_relation_t *relation,
+    uint32_t key_mask, uint32_t *positionp)
+{
+	relic_index_t built;
+	relic_index_t *indexes;
+	size_t position;
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (!key_mask_fits(relation, key_mask)) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "internal error: an index of %s was asked for on columns "
+		    "it cannot be keyed on", relic_pred_describe(ctx,
+		    relation->pred, described, sizeof(described)));
+		return (-1);
+	}
+
+	for (position = 0; position < relation->index_count; position++) {
+		if (relation->indexes[position].key_mask == key_mask) {
+			*positionp = (uint32_t)position;
+			return (0);
+		}
+	}
+
+	indexes = relic_grow_array(relation->indexes,
+	    &relation->index_capacity, relation->index_count + 1,
+	    sizeof(*relation->indexes));
+	if (indexes == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	relation->indexes = indexes;
+
+	relic_index_init(&built, key_mask);
+	if (index_build(ctx, relation, &built) != 0) {
+		ctx->relations.storage_bytes -= relic_index_bytes(&built);
+		relic_index_empty(&built);
+		return (-1);
+	}
+
+	position = relation->index_count;
+	relation->indexes[position] = built;
+	relation->index_count++;
+	*positionp = (uint32_t)position;
+
+	return (0);
+}
+
+typedef struct relic_column_rehash relic_column_rehash_t;
+
+/*
+ * What the scratch table of count_distinct() needs to recompute the hash of
+ * a value it holds: the table holds the identifier of the first tuple seen
+ * with each value, and the value is that tuple's entry in `column`.
+ */
+struct relic_column_rehash {
+	const relic_relation_t	*relation;
+	uint16_t		 column;
+};
+
+static uint32_t
+column_rehash(uint32_t id, void *ctx)
+{
+	const relic_column_rehash_t *rehash;
+
+	rehash = ctx;
+
+	return (relic_hash_words(&tuple_at(rehash->relation, id)[rehash->column],
+	    1));
+}
+
+/*
+ * Count the distinct values of one column by keeping, in a scratch
+ * identifier table, the first tuple seen with each value.  Returns 0, or -1
+ * with a diagnostic reported when memory ran out.
+ *
+ * The table is released before returning and is not relation storage, so it
+ * is not charged against the memory limit; it holds at most one slot per
+ * tuple of a relation the limit has already admitted.
+ */
+static int
+count_distinct(relic_t *ctx, const relic_relation_t *relation,
+    uint16_t column, size_t *distinctp)
+{
+	relic_column_rehash_t rehash;
+	relic_idtab_t seen;
+	relic_idprobe_t probe;
+	relic_tuple_id_t id;
+	relic_tuple_id_t held;
+	relic_dom_t value;
+	uint32_t hash;
+	size_t distinct;
+	bool found;
+
+	rehash.relation = relation;
+	rehash.column = column;
+	relic_idtab_init(&seen);
+	distinct = 0;
+
+	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
+		value = tuple_at(relation, id)[column];
+		hash = relic_hash_words(&value, 1);
+
+		found = false;
+		relic_idprobe_open(&probe, &seen, hash);
+		while (!found && relic_idprobe_next(&probe, &held))
+			found = tuple_at(relation, held)[column] == value;
+		if (found)
+			continue;
+
+		if (relic_idtab_reserve(&seen, column_rehash, &rehash) != 0) {
+			relic_idtab_reset(&seen);
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+		relic_idtab_place(&seen, hash, id);
+		distinct++;
+	}
+
+	relic_idtab_reset(&seen);
+	*distinctp = distinct;
+
+	return (0);
+}
+
+/*
+ * The number of distinct values `column` holds across the relation's tuples,
+ * counted the first time it is asked for at the relation's current size and
+ * then answered from relation->stats.  Returns 0, or -1 with a diagnostic
+ * reported: memory ran out, or the relation has no such column, which is a
+ * mistake in the caller.
+ */
+int
+relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
+    uint16_t column, size_t *distinctp)
+{
+	relic_relation_stats_t *stats;
+	size_t distinct;
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (column >= relation->arity) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "internal error: the statistics of %s were asked for a "
+		    "column it does not have", relic_pred_describe(ctx,
+		    relation->pred, described, sizeof(described)));
+		return (-1);
+	}
+
+	stats = &relation->stats;
+	if (stats->counted_at != relation->count) {
+		stats->known = 0;
+		stats->counted_at = relation->count;
+	}
+
+	if ((stats->known & (UINT32_C(1) << column)) == 0) {
+		if (count_distinct(ctx, relation, column, &distinct) != 0)
+			return (-1);
+
+		stats->distinct[column] = (uint32_t)distinct;
+		stats->known |= UINT32_C(1) << column;
+	}
+
+	*distinctp = stats->distinct[column];
+
+	return (0);
+}
+
+/*
  * Extend the table so that it has a slot for every predicate up to `pred`.
  *
  * Only slots are added, and a new one is null: the relation behind it is
@@ -707,10 +1040,11 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
  * holds nothing.
  *
  * Identifiers restart from the first afterwards, so a range taken before the
- * discard names nothing, or other tuples, after it.  The caller must hold no
- * range across it, which the evaluator satisfies by discarding only before an
- * evaluation begins: every range lives in an evaluation's state and dies with
- * it.
+ * discard names nothing, or other tuples, after it, and every index is gone,
+ * so an index position taken before it names nothing either.  The caller must
+ * hold neither across it, which the evaluator satisfies by discarding only
+ * before an evaluation begins: every range and every plan lives in an
+ * evaluation's state and dies with it.
  *
  * Both totals return to zero, which is exact, because each is a sum over the
  * relations and every relation now contributes nothing.

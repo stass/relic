@@ -1,0 +1,19 @@
+% The work the default planner does on the chain of stats-semi-naive.dl.
+% The recursive rule reads edge, which is complete when the path component
+% is planned, before path, which is still being derived: it scans the edges
+% and looks up the paths ending where each edge begins.  The lookups read
+% only matching tuples, and because a path inserted early in a round is seen
+% by the lookups after it, the chain is closed in the first round and the
+% second finds nothing new.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+edge(d, e).
+edge(e, f).
+edge(f, g).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+
+path(a, X)?

@@ -136,6 +136,29 @@ case "$diagnostic" in
 	;;
 esac
 
+# The planner's references are selected by name and answer as the default
+# does.
+for reference in no-index no-reorder; do
+	actual=$("$RELIC" -s -X "$reference" "$work/graph.dl")
+	if [ "$actual" != "$expected" ]; then
+		fail "-X $reference answered '$actual', expected '$expected'"
+	fi
+done
+
+# -e writes the plans to standard error, leaving standard output the rows
+# alone, and with -o the file holds the rows and nothing else.
+actual=$("$RELIC" -e -s "$work/graph.dl" 2> "$work/plans.txt")
+if [ "$actual" != "$expected" ]; then
+	fail "-e changed the rows to '$actual', expected '$expected'"
+fi
+if ! grep -q -e '^query \$q0(X) :- path(a, X)\.$' "$work/plans.txt"; then
+	fail "-e wrote no plan for the query: '$(cat "$work/plans.txt")'"
+fi
+"$RELIC" -e -s -o "$work/out.txt" "$work/graph.dl" 2>/dev/null
+if [ "$(cat "$work/out.txt")" != "$expected" ]; then
+	fail "-e with -o wrote '$(cat "$work/out.txt")', expected '$expected'"
+fi
+
 # -X stats reports the counters even when evaluation fails, after the error
 # that ended it.
 status=0
@@ -165,6 +188,31 @@ case "$diagnostic" in
 	;;
 *)
 	fail "an exceeded memory limit was reported as '$diagnostic'"
+	;;
+esac
+
+# Building an index is relation storage like any other, and a memory limit
+# that admits a relation's tuples can refuse the index a later rule looks
+# them up through.  The refusal names the relation being indexed.
+i=0
+: > "$work/chain.dl"
+while [ "$i" -lt 100 ]; do
+	echo "edge(n$i, n$((i + 1)))." >> "$work/chain.dl"
+	i=$((i + 1))
+done
+echo 'two(X, Z) :- edge(X, Y), edge(Y, Z).' >> "$work/chain.dl"
+
+status=0
+diagnostic=$("$RELIC" -a -l memory=3000 "$work/chain.dl" 2>&1 >/dev/null) ||
+    status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a refused index build exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"limit exceeded: memory=3000 while indexing edge/2"*)
+	;;
+*)
+	fail "a refused index build was reported as '$diagnostic'"
 	;;
 esac
 

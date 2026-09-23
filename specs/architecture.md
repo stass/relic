@@ -813,6 +813,10 @@ uint32_t keymask;
 
 to represent index keys cheaply.
 
+What an index stores for a key, how a lookup walks it, how insertion keeps it
+current and what it costs against the memory limit are specified in
+`specs/design-index.md`.
+
 ---
 
 # 23. Rule Planning
@@ -846,6 +850,9 @@ Version 1 uses a greedy planner.
 
 No exhaustive join-order search is required.
 
+When a rule is planned, the estimate a literal is scored by, the tie-breaks and
+the access path each literal gets are specified in `specs/design-planner.md`.
+
 ---
 
 # 24. Statistics
@@ -861,6 +868,9 @@ available indexes
 Exact multi-column selectivity statistics are unnecessary initially.
 
 Planner heuristics must remain deterministic.
+
+How distinct counts are computed and kept correct is specified in
+`specs/design-planner.md` section 3.1.
 
 ---
 
@@ -2000,6 +2010,9 @@ recursive:
 
 This is useful both for debugging and as an educational feature.
 
+The library interface that delivers these lines, when they are produced, and
+their exact text are specified in `specs/design-planner.md` section 8.
+
 ---
 
 # 61. Determinism
@@ -2108,11 +2121,12 @@ lib/                        librelic
     value.c                 value table and domain identifiers
     pred.c                  predicate table keyed by (name, arity)
     rule.c                  rule compilation, variable numbering, safety
-    relation.c              tuple store and canonical full-tuple index
-    index.c                 secondary indexes and access paths
+    relation.c              tuple store, canonical full-tuple index, statistics
+    index.c                 secondary indexes
     depgraph.c              predicate dependency graph and SCCs
     stratify.c              stratification
     plan.c                  planner and plan representation
+    explain.c               plans rendered as text for -e
     magic.c                 adornment, SIPS, Magic Sets rewriting
     eval.c                  naive and semi-naive execution
     api.c                   public entry points
@@ -2761,6 +2775,20 @@ stratification check it was meant to illustrate.
 **Stratification, section 30.** Each note of the unstratified diagnostic
 points at the body literal that creates its edge rather than at the start of
 the rule, so that a reader is shown the literal to change.
+
+**Rule planning, section 23.** A component's rules are planned when the
+component starts, rather than every rule before evaluation begins, so that the
+planner measures the complete relations of the components before it; the
+members of the component being planned are estimated by documented constants.
+`specs/design-planner.md` section 2 records the trade-off.
+
+**Explain mode, section 60.** `-e` output reaches the tool through
+`relic_explain_set()`, a callback receiving one line of printable ASCII at a
+time as each plan is built, and the tool writes it to standard error, so that
+standard output carries only query results in every format.
+
+**Source layout, section 64.** `lib/explain.c` renders plans as text, and
+relation statistics live with the tuple store in `lib/relation.c`.
 
 **New sections.** 74 dependency policy, 75 repository and documentation
 conventions, 76 this log.

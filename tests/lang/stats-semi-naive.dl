@@ -1,7 +1,9 @@
 % The work semi-naive evaluation does on a chain, as counted by -X stats.
 % After the first round each round joins only the paths the round before
 % derived, so a path is derived about once, rather than once per round as the
-% naive fixed point in stats-naive.dl derives it.
+% naive fixed point in stats-naive.dl derives it.  The textual planner is
+% chosen so that the counts measure the fixed point alone; stats-indexed.dl
+% is the same program as the default planner runs it.
 
 edge(a, b).
 edge(b, c).

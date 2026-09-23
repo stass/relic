@@ -205,9 +205,17 @@ walk with that one change:
 struct relic_op_atom {
 	relic_relation_t	*relation;
 	relic_plan_term_t	*terms;
+	uint32_t		 key_mask;	/* LOOKUP only */
+	uint32_t		 index;		/* LOOKUP only */
 	bool			 delta;		/* SCAN only */
 };
 ```
+
+A `LOOKUP` names its index by position in its relation's list of indexes and
+records the key columns it builds the key from, per
+`specs/design-index.md` section 7; its key columns are `CONSTANT` or `BOUND`
+terms like any other column, and its other columns are processed as a
+`SCAN`'s are.
 
 The plan records *that* a scan reads the delta and not *which* tuples that is.
 The range changes every round while the plan does not, so the evaluation holds

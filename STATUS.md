@@ -145,8 +145,7 @@ the answer is complete, so a query that exceeds a limit delivers none. The
 relations record how many rules they are a fixed point of, so a query after
 nothing new was loaded evaluates nothing.
 
-`-e` arrives in S9, and `-i`, `-n` and `-v` in S12. Each is an unknown option
-until it does.
+`-i`, `-n` and `-v` arrive in S12. Each is an unknown option until it does.
 
 **The dependency graph and stratification, stage S6.** The check knows what
 depends on what and rejects recursion through negation; evaluation runs in the
@@ -197,10 +196,36 @@ strategies.
 | `cmd/relic/main.c` | `-l key=value`, repeatable, brought forward from S12: `tuples`, `memory`, `magic-preds` and `magic-rules`, the last two accepted and stored but not acted on until S10; values through `strtonum()`; a malformed `-l` is a usage error naming what is wrong |
 | `tests/` | `test_plan` for where an `ANTI_MEMBER` goes and what its columns read, and a negated literal refused as a delta literal; `test_eval`, under both strategies, for the task graph of section 72 with negation stacked across strata, a negating query, arity zero, constants and a negation written before its binder, a later load that makes a derived tuple false, a discard that gives back what the limits count, and a contract-breaking callback; the evaluation sweep in `test_exhaustion` now includes a negated stratum; `tests/cli.sh` fails queries on `-l` limits and rejects thirteen malformed ones, a sign or a space among them; four golden tests, all compared across strategies by `tests/equiv/strategies.sh` |
 
-The textual planner orders only positive literals. A negated literal and a
-comparison go wherever their variables are first bound, so `not done(a)` and
-`not frozen` are tested before any scan and reject a rule's every binding at
-no cost.
+A negated literal and a comparison go wherever their variables are first
+bound, so `not done(a)` and `not frozen` are tested before any scan and reject
+a rule's every binding at no cost.
+
+**Indexes, statistics, planner and explain, stage S9, milestone M3.** A
+literal with bound arguments is looked up rather than scanned, and a body is
+ordered by what the relations hold, specified in `specs/design-index.md` and
+`specs/design-planner.md`.
+
+| Component | State |
+| --- | --- |
+| `lib/index.c` | secondary indexes: a key table of distinct keys, each key's first and last tuple, and a `next` identifier per tuple threading every key's chain in identifier order; reserve and add as separate steps, with an exact projection of what a reservation allocates; a lookup takes a probe laid out as a tuple, so only the index knows how a key is packed |
+| `lib/relation.{h,c}` | a relation's indexes, at most one per key mask, at positions fixed until the next discard; every insertion reserves in every index before storing anything; `relic_relation_index()` builds an index over the tuples held, one tuple at a time under the memory limit, and publishes it only once complete; a refused build reports `limit exceeded: memory=N while indexing p/n` and leaves no index and no bytes behind; `relic_relation_distinct()` counts a column's distinct values with a scratch table and caches them until the tuple count changes; a discard drops every index and clears the cache, so an index an earlier program asked for costs a later one nothing |
+| `lib/plan.{h,c}` | `RELIC_OP_LOOKUP`, keyed on exactly a literal's bound columns; greedy ordering by bound arguments, then the integer estimate, then source position; relations of the component being planned assumed to hold 1000 tuples, narrowed tenfold per bound column; `RELIC_F_NO_INDEX` and `RELIC_F_NO_REORDER` select the textual planner's choices |
+| `lib/eval.c` | each component is planned when it starts, with its members marked as still being derived; a lookup walks its key's chain and stops at the relation's end when it started, as a scan does; the counter of tuples looked up |
+| `lib/explain.c` | `relic_explain_set()`: each component's heading, fact count, rules, plans and delta variants as it is planned, and each query's plan before it runs; printable ASCII in a fixed 1024-byte line, cut with `...` |
+| `include/relic.h` | `RELIC_F_NO_INDEX`, `RELIC_F_NO_REORDER`, `relic_explain_cb`, `relic_explain_set()`, `tuples_looked_up` |
+| `cmd/relic/main.c` | `-e`, plans to standard error; `-X no-index` and `-X no-reorder`; `stats: tuples looked up` |
+| `tests/` | `test_index` for chains against a scan under one- and two-column keys, a late build against one kept up, a walk while its chain grows, a discard dropping every index, exact accounting, the memory limit under 200 allowances as two indexes grow, refusing exactly the insertions that would pass it, a refused build, key validation and the distinct-count cache across a discard and refill; `test_plan` for the access path of all eight binding patterns of a 3-ary literal, the architecture section 23 ordering, a bound argument outranking a smaller estimate, selectivity, an empty relation first, the assumed size of a relation being derived and its division per bound column, and both reference switches; `test_eval` runs every answer scenario under both references as well as both fixed points, adds same generation, pins both planners' counters, and pins the counters of a lookup whose own rule extends the chain it walks; an index sweep in `test_exhaustion`; `tests/equiv/strategies.sh` compares every language test under `no-index` and `no-reorder` too; four `-e` golden tests, among them every byte class a string escapes and a line of exactly the longest length that is not cut; `tests/cli.sh` for `-e`, the references and a refused index build; `tests/perf.sh`, reachability over a million edges, bounded by the tuples read |
+
+The default planner closes the six-edge chain of the S7 counters in two
+rounds, deriving 48 tuples while scanning 33 and looking up 36; those golden
+tests now pin the textual planner, and `stats-indexed` the default.
+Reachability over the million-edge graph takes about four seconds, eight
+rounds and a million lookups; without indexes it does not finish in the
+test's budget. Most of the memory it takes, about 450 MB, goes to the fact
+rules rather than the relations, which `TODO.md` records.
+
+The stage is about 2,200 lines of library and tool code, comments included,
+against a budget of 1050; `lib/explain.c` accounts for 650 of them.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -224,8 +249,8 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the twenty documented entry
-  points and nothing else; the compatibility objects linked into it are not
+* the installed shared library exports exactly the twenty-one documented
+  entry points and nothing else; the compatibility objects linked into it are not
   reachable.
 
 The relation store's suites were confirmed the same way, by injecting each
@@ -384,6 +409,23 @@ The negation suites were confirmed the same way:
 * the answer stream without its guard, which the contract-breaking callback in
   `test_eval` catches by crashing.
 
+The index and planner suites were confirmed the same way:
+
+* a tuple not linked after the last of its chain, which `test_index` catches
+  as walks that end early, and as a walk during insertion that visits one
+  tuple of twelve;
+* a discard that keeps the distinct-count cache, which `test_index` catches
+  as a stale count after a refill to the same number of tuples;
+* the planner without indexes, which `tests/perf.sh` catches as a run that
+  does not finish in its budget;
+* a memory projection that leaves out the secondary indexes, or counts them
+  twice, which `test_index` catches as storage over the limit, or as a tuple
+  that fits refused;
+* a lookup that walks past the end its relation had when it started, which
+  `test_eval` catches as a round too few;
+* ordering by estimate alone, and an assumed size not divided per bound
+  column, which `test_plan` catches as literals out of order.
+
 ## Documents
 
 | File | Contents |
@@ -396,6 +438,8 @@ The negation suites were confirmed the same way:
 | `specs/design-plan.md` | the operations, the binding decisions a plan records, the textual planner, a query as a rule |
 | `specs/design-stratify.md` | the dependency graph, components, strata, the unstratified diagnostic, the schedule |
 | `specs/design-eval.md` | the executor, the naive and semi-naive fixed points, materialization, answering a query |
+| `specs/design-index.md` | secondary indexes: chains in identifier order, building and extending, lifetime, accounting |
+| `specs/design-planner.md` | when a component is planned, statistics, the estimate, greedy order, access paths, the references, explain |
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
@@ -403,11 +447,12 @@ The negation suites were confirmed the same way:
 
 ## Next
 
-Stage S9, indexes, statistics, planner and explain, milestone M3:
-column-bitmask hash indexes, access path selection, greedy body ordering,
-relation statistics and `-e`, each with `-X` switches and equivalence tests
-against the textual planner. `specs/design-index.md` and
-`specs/design-planner.md` come first.
+Stage S10, Magic Sets, milestone M4: the adornment worklist, sideways
+information passing through the S9 planner with every derived predicate
+marked as still being derived, magic seed and propagation rules, and the
+limits on generated predicates and rules, with `-X no-magic` and an
+equivalence against full materialization. `specs/design-magic.md` comes
+first.
 
 ## Decisions taken
 

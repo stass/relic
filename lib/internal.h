@@ -151,6 +151,7 @@ struct relic_counters {
 	uint64_t	derivations;
 	uint64_t	tuples_inserted;
 	uint64_t	tuples_scanned;
+	uint64_t	tuples_looked_up;
 };
 
 /*
@@ -200,6 +201,8 @@ struct relic {
 	relic_program_t		 program;
 	relic_reltab_t		 relations;
 	relic_diag_t		 diag;
+	relic_explain_cb	 explain;
+	void			*explain_ctx;
 	relic_config_t		 config;
 	relic_counters_t	 counters;
 	size_t			 materialized_rules;
@@ -471,14 +474,68 @@ int	 relic_stratify(relic_t *ctx);
 /*
  * lib/plan.c
  *
- * Plan one rule into `arena`, creating the relations it reads and writes.
- * `delta_literal` is RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or the
- * body index of the positive literal a semi-naive variant reads from the
- * delta.  Returns 0, or -1 with a diagnostic reported: memory ran out, or the
- * planner broke one of a plan's invariants, which is an internal error.
+ * Plan one rule into `arena`, creating the relations it reads and writes and
+ * the indexes its lookups read.  `delta_literal` is RELIC_PLAN_NO_DELTA for
+ * the rule's ordinary plan, or the body index of the positive literal a
+ * semi-naive variant reads from the delta.  `incomplete`, indexed by
+ * predicate identifier minus one, marks the relations still being derived,
+ * whose size the planner assumes rather than measures; NULL marks none.
+ * Returns 0, or -1 with a diagnostic reported: memory or the memory limit
+ * refused, or the planner broke one of a plan's invariants, which is an
+ * internal error.
  */
 int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
-	    const relic_rule_t *rule, size_t delta_literal, relic_plan_t *plan);
+	    const relic_rule_t *rule, size_t delta_literal,
+	    const bool *incomplete, relic_plan_t *plan);
+
+/*
+ * lib/explain.c
+ *
+ * The lines of explain output, handed to the installed callback.
+ * relic_explaining() says whether one is installed, so that a caller can skip
+ * gathering what it would show.  Each of the others shows one thing when a
+ * callback is installed and nothing otherwise: a component's heading and fact
+ * count, a rule with its plan, one delta variant of the rule last shown, and
+ * a query with its plan.  None can fail.
+ */
+bool	 relic_explaining(const relic_t *ctx);
+void	 relic_explain_component(relic_t *ctx,
+	    const relic_schedule_t *schedule, size_t position, size_t facts);
+void	 relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
+	    const relic_plan_t *plan);
+void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
+	    size_t delta_literal, const relic_plan_t *plan);
+void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
+	    const relic_plan_t *plan);
+
+/*
+ * lib/index.c
+ *
+ * A secondary index over the tuples of one relation, keyed on the columns of
+ * a mask.  relic_index_reserve() makes room for `tuples` tuples and one more
+ * key and is the only operation that can fail; relic_index_add() then links
+ * tuple `id` in, and tuples must be added in increasing identifier order.
+ * relic_index_first() and relic_index_next() walk, in identifier order, the
+ * tuples that agree with a probe on the key columns; the probe is laid out as
+ * a tuple, and its other columns are not read.
+ * relic_index_bytes_after_reserve() is what the memory limit
+ * projects a reservation with.
+ *
+ * Only the relation store calls these, and it does all the accounting.
+ */
+void	 relic_index_init(relic_index_t *index, uint32_t key_mask);
+void	 relic_index_empty(relic_index_t *index);
+size_t	 relic_index_bytes(const relic_index_t *index);
+size_t	 relic_index_bytes_after_reserve(const relic_index_t *index,
+	    size_t tuples);
+int	 relic_index_reserve(relic_index_t *index,
+	    const relic_relation_t *relation, size_t tuples);
+void	 relic_index_add(relic_index_t *index, const relic_relation_t *relation,
+	    relic_tuple_id_t id);
+relic_tuple_id_t relic_index_first(const relic_index_t *index,
+	    const relic_relation_t *relation, const relic_dom_t *probe);
+relic_tuple_id_t relic_index_next(const relic_index_t *index,
+	    relic_tuple_id_t id);
 
 /*
  * lib/relation.c
@@ -513,9 +570,18 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
  * the span over which a range means anything; no caller may hold a range
  * across it.
  *
+ * relic_relation_index() finds, or builds from the tuples the relation holds,
+ * the secondary index keyed on the columns of a mask and gives its position
+ * in relation->indexes, which stays fixed until the next discard.  From then
+ * on every insertion adds to it, and a discard drops it.  A build the memory
+ * limit or memory refuses is reported and leaves no index behind.
+ *
+ * relic_relation_distinct() gives the number of distinct values in one
+ * column, cached until the relation's tuple count changes.
+ *
  * The two totals are what the configurable tuple and memory limits are
  * enforced against: tuples across every relation, and the bytes their columns
- * and index slots hold.
+ * and indexes hold.
  */
 void	 relic_reltab_init(relic_reltab_t *table);
 void	 relic_reltab_reset(relic_reltab_t *table);
@@ -533,6 +599,10 @@ relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
 	    relic_tuple_id_t first);
 void	 relic_relation_discard_all(relic_t *ctx);
+int	 relic_relation_index(relic_t *ctx, relic_relation_t *relation,
+	    uint32_t key_mask, uint32_t *positionp);
+int	 relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
+	    uint16_t column, size_t *distinctp);
 size_t	 relic_relation_total_bytes(const relic_t *ctx);
 size_t	 relic_relation_total_tuples(const relic_t *ctx);
 

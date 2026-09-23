@@ -2,9 +2,11 @@
 #
 # Every evaluation strategy gives the default's answers.
 #
-# Each registered language test is run twice or more: once as the default
-# evaluator runs it, and once under each alternative strategy -X selects.  The
-# two runs must agree on standard output, standard error and exit status.
+# Each registered language test is run several times: once as the default
+# evaluator runs it, and once under each alternative -X selects -- the naive
+# fixed point, and the planner without indexes and without reordering.  Every
+# run must agree with the default on standard output, standard error and exit
+# status.
 # Rows are sorted with -s, because a strategy that derives the same set of
 # tuples in a different order is correct, and the comparison is of sets.
 #
@@ -28,7 +30,8 @@
 # its own, so a program added to exercise the language is compared across
 # strategies without anyone deciding that it should be.  A test that chooses
 # a strategy itself, with -X in its options, is about that strategy and is
-# left to its own expectations.
+# left to its own expectations, and so is one that shows its plans with -e,
+# since the plans are what the alternatives change.
 
 set -eu
 
@@ -37,7 +40,7 @@ set -eu
 : "${RELIC_LANG_TESTS:?RELIC_LANG_TESTS must list the registered tests}"
 
 # The -X names of the strategies compared against the default.
-strategies="naive"
+strategies="naive no-index no-reorder"
 
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT HUP INT TERM
@@ -82,7 +85,7 @@ for path in $RELIC_LANG_TESTS; do
 	fi
 
 	case " $args " in
-	*" -X"*)
+	*" -X"* | *" -e"*)
 		continue
 		;;
 	esac

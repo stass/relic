@@ -80,8 +80,16 @@ options, counting from one, so that a message about the third says so.
 `-V` stands alone. `-c` and `-a` contradict each other, since one forbids
 evaluation and the other demands it. Either conflict is a usage error, as is an
 unknown option, an unknown `-F` format, or a missing operand to an option that
-takes one. Options that do not apply in a mode -- `-F`, `-o` and `-s` under
-`-c` -- are accepted and have no effect.
+takes one. Options that do not apply in a mode -- `-e`, `-F`, `-o` and `-s`
+under `-c` -- are accepted and have no effect.
+
+### 2.4 Plans
+
+`-e` writes the plan of everything evaluated to standard error, each
+component's as it is planned and each query's before its rows, in the text of
+`specs/design-planner.md` section 8. Standard error rather than the output,
+because a plan is about the run and not one of its results: standard output
+or the `-o` file stays exactly the rows, parseable in any format.
 
 ---
 

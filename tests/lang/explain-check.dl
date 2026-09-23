@@ -1,0 +1,5 @@
+% Under -c nothing is evaluated, so -e has nothing to show.
+
+edge(a, b).
+path(X, Y) :- edge(X, Y).
+path(a, X)?

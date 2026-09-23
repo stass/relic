@@ -6,8 +6,10 @@ current, and how a query's answers reach a caller. Forward-looking, like every
 document under `specs/`; `STATUS.md` records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 15, 25 to 31, 39, 52, 53, 61
-and 63; `specs/design-plan.md` for the plans this runs;
-`specs/design-relations.md` for the store it reads and writes;
+and 63; `specs/design-plan.md` for the plans this runs, and
+`specs/design-planner.md` for when they are built;
+`specs/design-relations.md` and `specs/design-index.md` for the store it
+reads and writes;
 `relic-plan.md` decisions D-6, D-7, D-8, D-9, D-10 and D-11.
 
 ---
@@ -83,6 +85,12 @@ scan. They are not lost: they are visited by the next scan to start over the
 relation, in this iteration or the next. This keeps a scan's work bounded by
 the relation's size when it started, and it is what a semi-naive delta range
 needs anyway.
+
+A `LOOKUP` obeys the same rule. It walks the chain of tuples an index holds
+for its key, holding only the next identifier on the chain, and stops at the
+first one at or past the relation's end as it was when the lookup started;
+identifiers increase along a chain, so nothing before that point is skipped.
+`specs/design-index.md` section 4 describes the walk.
 
 ### 2.3 Comparisons
 
@@ -228,8 +236,10 @@ round. That only adds derivations; the argument above does not depend on it.
 
 Evaluation proceeds stratum by stratum and, within a stratum, one strongly
 connected component at a time in topological order. A component with no
-recursion needs one pass. Plans and variants are built before the first
-component runs, never per iteration.
+recursion needs one pass. A component's plans and variants are built when the
+component starts, never per iteration, so that the planner can measure the
+relations of the components before it; `specs/design-planner.md` section 2
+explains the choice.
 
 ### 4.3 Counters
 
@@ -242,12 +252,15 @@ and `-X stats`:
 | derivations | head tuples produced by an `EMIT`, facts included, new or not |
 | tuples inserted | derivations that added a tuple |
 | tuples scanned | tuples a `SCAN` read |
+| tuples looked up | tuples a `LOOKUP` read from an index's chain |
 
 Iterations alone do not tell the two fixed points apart: on a chain, both take
 as many rounds as the chain is long. What semi-naive evaluation saves is the
 rederivation of what earlier rounds found, and that shows in the derivations
 and the scans. The tests that guard against a regression to naive behaviour
-therefore assert those.
+therefore assert those. What an index saves shows in the tuples scanned and
+looked up together: a join through an index reads the tuples that match, and
+a join without one reads every tuple.
 
 The counters are for understanding and comparing strategies. They depend on
 the strategy and on the implementation, and are not part of any stable
@@ -355,24 +368,25 @@ Evaluation fails for two reasons, both reported where they happen:
   `specs/design-relations.md` section 9;
 * an allocation failed.
 
-Either stops the fixed point at once and returns -1. A rule that cannot be
-planned, and memory that runs out while planning, stop evaluation before it
-starts: every rule of the schedule is planned before the first component runs,
-so a failure there has derived nothing and cannot hide behind the cost of a
-fixed point it would otherwise have computed first. The relation that refused
-the tuple is exactly as it was, every other relation holds tuples that are all
-justified, and the evaluation arena is released. Nothing needs unwinding, which
-is the payoff of the relation store's refuse-before-modify ordering, and the
-next evaluation discards what the failed one derived before starting again.
+Either stops the fixed point at once and returns -1. Planning a component can
+fail for the same two reasons -- memory, or the memory limit reached while an
+index is built over a complete relation -- and stops the evaluation at that
+component, before it runs. The relation that refused the tuple is exactly as
+it was, an index whose build failed was never published, every other relation
+holds tuples that are all justified, and the evaluation arena is released.
+Nothing needs unwinding, which is the payoff of the relation store's
+refuse-before-modify ordering, and the next evaluation discards what the
+failed one derived before starting again.
 
 ---
 
 ## 9. Memory
 
 Plans and cursors live in the **evaluation arena**, which is reset when each
-evaluation ends, successfully or not. Tuples live in relations, which are
-individually allocated and accounted against the limits, per D-6. Nothing is
-allocated per tuple and nothing is allocated inside the executor's loop.
+evaluation ends, successfully or not. Tuples and indexes live in relations,
+which are individually allocated and accounted against the limits, per D-6.
+Nothing is allocated per tuple and nothing is allocated inside the executor's
+loop.
 
 ---
 

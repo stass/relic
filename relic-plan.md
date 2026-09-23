@@ -741,6 +741,31 @@ performance smoke test passes. **M3.**
 
 **Budget.** 1050.
 
+**Decided during the stage.** Five decisions were taken when S9 landed, each
+recorded in `specs/design-index.md` or `specs/design-planner.md`:
+
+* **Exact keys, built on demand.** A `LOOKUP` uses the index keyed on exactly
+  the literal's bound columns, building it the first time a plan asks for it,
+  rather than the maximal index contained in the bound mask. Each binding
+  pattern then has an index that answers it without a filter, and index
+  availability drops out of the cost model, since every bound pattern has
+  one. A discard drops every index, so the indexes a relation keeps up are
+  the ones asked for since the program last changed.
+* **Statistics versioned by the tuple count.** A distinct count is cached with
+  the tuple count it was taken at, rather than against a dirty flag set on
+  insertion: relations are append-only between discards, so an unchanged
+  count means unchanged tuples, and the discard clears the cache.
+* **Planning per component.** A component's rules are planned when it
+  starts, so that the planner measures the complete relations of every
+  earlier component; the relations of the component itself are estimated by
+  the documented constants that also serve S10's static mode.
+* **`-e` through a line callback.** Plans reach the tool through
+  `relic_explain_set()` a line at a time, and the tool writes them to
+  standard error, so that standard output carries only results.
+* **Adornments join `-e` with S10.** There is nothing to adorn until the
+  Magic rewrite exists; `-e` prints the strata, components, plans and delta
+  variants now, and S10 adds the adornment.
+
 ---
 
 ### S10 - Magic Sets  (M4)

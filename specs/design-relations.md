@@ -23,10 +23,12 @@ answer none of them again:
 * what the arity-zero relation does, without a case of its own.
 
 It does not cover secondary indexes over argument-position subsets. Those are
-chosen by a plan, built lazily, and specified with the planner that asks for
-them. What this document specifies is the one index every relation has: the
-canonical index over the whole tuple, which exists to answer the membership
-question that duplicate elimination and fixed-point detection are built on.
+chosen by a plan, built lazily, and specified in `specs/design-index.md`;
+which ones a plan asks for, and the statistics a relation offers the planner,
+are in `specs/design-planner.md`. What this document specifies is the one
+index every relation has: the canonical index over the whole tuple, which
+exists to answer the membership question that duplicate elimination and
+fixed-point detection are built on.
 
 ---
 
@@ -68,22 +70,28 @@ a relation. A tuple inserted directly would be erased by the next discard,
 and would not change the rule count that tells the evaluator the program
 changed, so the next query would not see what it implies.
 
-A relation holds two allocations and no arena memory:
+A relation holds its tuples, their canonical index, the secondary indexes of
+`specs/design-index.md`, and the cached statistics of
+`specs/design-planner.md` section 3.1, and no arena memory:
 
 ```c
 struct relic_relation {
-	relic_dom_t	*columns;	/* count tuples, arity apiece */
-	relic_idtab_t	 index;		/* full tuple -> tuple identifier */
-	size_t		 count;
-	size_t		 column_capacity;
-	relic_pred_id_t	 pred;
-	uint16_t	 arity;
+	relic_dom_t		*columns;	/* count tuples, arity apiece */
+	relic_idtab_t		 index;		/* full tuple -> tuple identifier */
+	relic_index_t		*indexes;	/* secondary, one per key mask */
+	size_t			 count;
+	size_t			 column_capacity;
+	size_t			 index_count;
+	size_t			 index_capacity;
+	relic_relation_stats_t	 stats;
+	relic_pred_id_t		 pred;
+	uint16_t		 arity;
 };
 ```
 
-Both grow with `reallocarray()`, per D-6: they outlive individual queries, they
-are the allocations large enough to be worth accounting against a limit, and
-an arena cannot resize a block.
+Every array grows with `reallocarray()`, per D-6: they outlive individual
+queries, they are the allocations large enough to be worth accounting against
+a limit, and an arena cannot resize a block.
 
 The arity is copied from the predicate rather than read back through it on
 every insertion. This is not a second copy of a fact that can drift, because
@@ -210,12 +218,16 @@ The insertion is ordered so that a failure leaves nothing behind:
 
 1. **Look the tuple up.** A tuple already present is reported as not added and
    nothing is allocated.
-2. **Check the limits** against what the relation will hold once the tuple is
-   in it. This is the only place either limit is enforced, and it happens
-   before anything is modified.
+2. **Check the limits** against what the relation and its indexes will hold
+   once the tuple is in them. This is the only place the tuple limit is
+   enforced, and the memory limit is enforced here and, by the same
+   projection, when an index is built; either way before anything is
+   modified.
 3. **Reserve room in the index**, which is the step that can fail.
-4. **Reserve room for the columns**, which is the other step that can fail.
-5. **Append the columns and place the identifier.** Neither can fail.
+4. **Reserve room for the columns**, and in every secondary index, which are
+   the other steps that can fail.
+5. **Append the columns, place the identifier, and add the tuple to every
+   secondary index.** None of these can fail.
 
 Collecting every fallible step into one stage, ahead of every step that
 changes what the relation holds, is what makes a failed insertion safe. A
@@ -297,15 +309,16 @@ and indexes are what actually grow:
 
 Zero means unlimited, so a zeroed configuration asks for the defaults.
 
-**What the memory limit counts** is the bytes the column arrays and index slot
-arrays actually hold, summed over every relation -- allocated capacity, not the
-smaller number a tuple count implies. A limit that ignored the difference
-would let a relation hold twice what the user allowed, which would defeat the
-purpose of asking.
+**What the memory limit counts** is the bytes the column arrays, the canonical
+index's slots and every secondary index's arrays actually hold, summed over
+every relation -- allocated capacity, not the smaller number a tuple count
+implies. A limit that ignored the difference would let a relation hold twice
+what the user allowed, which would defeat the purpose of asking.
 
-It does not count the array of relation headers, the predicate table, the value
-table or any arena. Those are sized by the program rather than by the data,
-and the limit exists to bound what the data can do.
+It does not count the array of relation headers, a relation's array of index
+headers, the predicate table, the value table or any arena. Those are sized by
+the program rather than by the data, and the limit exists to bound what the
+data can do.
 
 **When it is checked** is before the insertion modifies anything. The
 projected size is computed from the growth policies rather than measured after
@@ -327,11 +340,13 @@ to remember, and a step added later would not be on it.
 mutation, so consistency after a refused insertion is a property of the
 ordering rather than of an unwind path. The diagnostic names the limit, its
 configured value and the predicate being derived into, in the form of
-architecture section 63:
+architecture section 63, or the predicate being indexed when the memory limit
+fires while an index is built:
 
 ```text
 relic: limit exceeded: tuples=1000000 while deriving path/2
 relic: limit exceeded: memory=536870912 while deriving path/2
+relic: limit exceeded: memory=536870912 while indexing edge/2
 ```
 
 Discarding the partial results is the evaluator's part and is specified with
@@ -361,10 +376,8 @@ The relation store contributes three things to the reproducibility of a run:
 * **A sorted or tree-shaped store.** Membership is the operation that matters
   and a hash answers it in constant time; sorting is an output concern and is
   done by the output layer on the rows it is about to print.
-* **Per-column statistics.** Architecture section 24 asks for distinct value
-  counts per column, and the planner that would read them decides what they
-  must be. A count nothing consumes would be a count nobody checks.
-* **Secondary indexes.** They are keyed on argument-position subsets a plan
-  asks for, and they are specified with the planner that asks.
+* **Statistics maintained on insertion.** Distinct counts are computed when
+  the planner asks and cached against the tuple count, per
+  `specs/design-planner.md` section 3.1.
 * **A per-relation memory limit.** The limit that protects a user is the total,
   and a program that explodes does so in one relation as readily as in twenty.

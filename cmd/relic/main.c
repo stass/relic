@@ -85,7 +85,8 @@ typedef struct session session_t;
 /*
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `config` is what the
- * context is created with: -l sets its limits and -X naive its flag.
+ * context is created with: -l sets its limits and -X naive, no-index and
+ * no-reorder its flags.
  */
 struct options {
 	const char		**queries;
@@ -94,6 +95,7 @@ struct options {
 	relic_config_t		  config;
 	enum output_format	  format;
 	bool			  check_only;
+	bool			  explain;
 	bool			  materialize;
 	bool			  print_stats;
 	bool			  print_version;
@@ -117,6 +119,7 @@ static void		*diag_context(const char *program_name);
 static int		 evaluate(session_t *session, const options_t *options);
 static const char	*invoked_name(const char *argv0);
 static bool		 is_decimal_digit(char byte);
+static void		 explain_line(void *callback_ctx, const char *line);
 static bool		 is_printable_ascii(const char *text);
 static int		 load_operands(relic_t *ctx, int argc, char *argv[]);
 static size_t		*limit_named(relic_config_t *config, const char *key,
@@ -236,7 +239,7 @@ report_unknown_option(const char *program_name, int option)
 static void
 usage(const char *program_name)
 {
-	fprintf(stderr, "usage: %s [-acs] [-F format] [-l limit=value] "
+	fprintf(stderr, "usage: %s [-aces] [-F format] [-l limit=value] "
 	    "[-o file] [-q query]\n"
 	    "       %*s [-X debug] [file ...]\n", program_name,
 	    (int)strlen(program_name), "");
@@ -445,6 +448,20 @@ evaluate(session_t *session, const options_t *options)
 	return (status);
 }
 
+/*
+ * Write one line of a plan to the stream the callback was installed with.
+ * The library promises the line is printable ASCII, so it is written as it
+ * is.
+ */
+static void
+explain_line(void *callback_ctx, const char *line)
+{
+	FILE *stream;
+
+	stream = callback_ctx;
+	fprintf(stream, "%s\n", line);
+}
+
 static int
 session_open(session_t *session, const char *program_name,
     const options_t *options)
@@ -460,6 +477,9 @@ session_open(session_t *session, const char *program_name,
 	}
 	relic_diag_set(session->ctx, relic_diag_stderr,
 	    diag_context(program_name));
+
+	if (options->explain)
+		relic_explain_set(session->ctx, explain_line, stderr);
 
 	return (0);
 }
@@ -487,6 +507,8 @@ print_stats(const session_t *session)
 	    (uintmax_t)stats.tuples_inserted);
 	fprintf(stderr, "stats: tuples scanned %ju\n",
 	    (uintmax_t)stats.tuples_scanned);
+	fprintf(stderr, "stats: tuples looked up %ju\n",
+	    (uintmax_t)stats.tuples_looked_up);
 	fprintf(stderr, "stats: tuples held %zu\n", stats.tuples);
 	fprintf(stderr, "stats: storage bytes %zu\n", stats.storage_bytes);
 	fprintf(stderr, "stats: symbol values %zu\n", stats.symbol_values);
@@ -554,6 +576,16 @@ parse_debug(const char *name, options_t *options)
 {
 	if (strcmp(name, "naive") == 0) {
 		options->config.flags |= RELIC_F_NAIVE;
+		return (0);
+	}
+
+	if (strcmp(name, "no-index") == 0) {
+		options->config.flags |= RELIC_F_NO_INDEX;
+		return (0);
+	}
+
+	if (strcmp(name, "no-reorder") == 0) {
+		options->config.flags |= RELIC_F_NO_REORDER;
 		return (0);
 	}
 
@@ -660,7 +692,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":acF:l:o:q:sVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":aceF:l:o:q:sVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -670,6 +702,9 @@ parse_options(const char *program_name, int argc, char *argv[],
 			break;
 		case 'c':
 			options->check_only = true;
+			break;
+		case 'e':
+			options->explain = true;
 			break;
 		case 'F':
 			if (output_format_named(optarg,

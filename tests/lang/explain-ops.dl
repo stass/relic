@@ -1,0 +1,30 @@
+% Each kind of operation, as -e writes it: a lookup keyed on two columns, a
+% membership test over a fact of arity zero, an anti-member for a negated
+% literal in a later stratum, filters, a wildcard, and constants of every
+% type.  A string constant is written as a literal in printable ASCII, its
+% quote and backslash escaped and every byte outside printable ASCII -- a
+% tab, an escape that would start a terminal control sequence, delete, a
+% byte above 0x7f and a NUL -- written as a hexadecimal escape.
+
+edge(a, b).
+edge(b, c).
+t(a, 7, b).
+t(b, 8, c).
+size(a, 120).
+size(b, -1).
+name(a, "Al\"ice\\	x").
+raw(a, "\x1b[2J\x7f\xff\0z").
+initialized.
+blocked(b).
+
+pick(Y) :- edge(X, Z), t(X, Y, Z).
+free(X) :- edge(X, _), not blocked(X), initialized.
+large(X) :- size(X, N), N > 100, 1 < 2.
+named(X) :- edge(X, _), name(X, "Al\"ice\\	x").
+hostile(X) :- edge(X, _), raw(X, "\x1b[2J\x7f\xff\0z").
+
+pick(X)?
+free(X)?
+large(X)?
+named(X)?
+hostile(X)?

@@ -1,0 +1,16 @@
+% -e shows each component's plans as it is planned, then each query's.  The
+% recursive rule scans edge, which is complete, and looks up path, which is
+% still being derived; its delta variant scans the delta and looks edge up by
+% the column the delta bound.  The second query runs against the program the
+% first materialized, so it shows only its own plan, and looks path up by the
+% other column, through an index built for it.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+
+path(a, X)?
+path(X, d)?

@@ -34,9 +34,13 @@
  * the component itself.  A component whose rules read none of its own
  * relations needs a single pass; a recursive one runs to a fixed point.
  *
- * Every rule is planned before the first component runs, so a rule that
- * cannot be planned, or memory that runs out while planning, stops the
- * evaluation before it has derived anything.
+ * A component's rules are planned when the component starts, once every
+ * component before it has reached its fixed point.  The relations a rule
+ * reads outside its own component are then complete, so the planner can
+ * measure them, and building an index over one reads every tuple it will
+ * ever hold.  A component that cannot be planned -- memory, or the memory
+ * limit while an index is built -- fails the whole evaluation, as a failed
+ * insertion does.
  *
  * The relations hold only what evaluation derived -- a fact is a rule too --
  * so they are either the fixed point of every rule the program has, or stale.
@@ -103,10 +107,22 @@ typedef struct relic_running_plan relic_running_plan_t;
  * range a SCAN resumes from.  A test keeps no state and leaves its cursor
  * unused, which lets the executor's level index the operations and the
  * cursors alike.
+ *
+ * A LOOKUP uses its cursor differently.  `first` is the next tuple on the
+ * index chain, or RELIC_ID_NONE when the chain is exhausted, and `end` is the
+ * relation's end when the lookup started.  A chain is in identifier order, so
+ * the lookup stops at the first tuple at or past `end`, which leaves tuples
+ * inserted while it runs to the next lookup that starts, exactly as a scan
+ * does.
+ *
+ * `rule` and `delta_literal` are what the plan was built from, kept so that
+ * the plan can be explained.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
 	relic_tuple_range_t	*cursors;
+	const relic_rule_t	*rule;
+	size_t			 delta_literal;
 };
 
 /*
@@ -147,8 +163,9 @@ struct relic_component_plans {
  *
  * `components` holds the plans of each component of the schedule, at the
  * same position, or of the single query an answer is computed for.  They and
- * everything they point at live in the evaluation arena and are allocated
- * before anything runs, so nothing is allocated while a plan runs.
+ * everything they point at live in the evaluation arena.  A component's
+ * plans are allocated before any of them runs, so nothing is allocated while
+ * a plan runs; only the relation store grows then.
  *
  * `deltas` and `is_member` are indexed by predicate identifier minus one and
  * hold `predicate_count` entries.  They exist only in an evaluation that runs
@@ -157,7 +174,8 @@ struct relic_component_plans {
  * the component being evaluated semi-naively, the tuples it gained in the
  * previous round, and is where a delta SCAN takes its range from.
  * `is_member` marks the members of the component being planned, which is how
- * a literal is recognized as one that needs a delta variant.
+ * a literal is recognized as one that needs a delta variant, and is what
+ * tells the planner which relations are still being derived.
  *
  * `derived` is set whenever an EMIT inserts a tuple the relation did not
  * already hold, which is how a naive pass learns that the fixed point has not
@@ -200,6 +218,9 @@ static bool	 comparison_holds(const relic_t *ctx,
 		    relic_dom_t right);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
+static void	 explain_component(const relic_evaluation_t *eval,
+		    const relic_schedule_t *schedule, size_t position,
+		    const relic_component_plans_t *plans);
 static bool	 literal_reads_member(const relic_evaluation_t *eval,
 		    const relic_literal_t *literal);
 static void	 mark_members(relic_evaluation_t *eval,
@@ -222,8 +243,6 @@ static int	 plan_members(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
 		    relic_component_plans_t *plans);
-static int	 plan_schedule(relic_evaluation_t *eval,
-		    const relic_schedule_t *schedule);
 static int	 plan_variants(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component,
@@ -243,6 +262,9 @@ static int	 step_emit(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom);
 static bool	 step_filter(const relic_evaluation_t *eval,
 		    const relic_op_filter_t *filter);
+static bool	 step_lookup(relic_evaluation_t *eval,
+		    const relic_op_atom_t *atom, relic_tuple_range_t *cursor,
+		    bool resume);
 static bool	 step_member(const relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom);
 static bool	 step_scan(relic_evaluation_t *eval,
@@ -397,6 +419,55 @@ step_scan(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 	return (false);
 }
 
+/*
+ * A LOOKUP: find the next tuple on the chain of the key its bound columns
+ * hold that matches, starting from the head of the chain when not resuming.
+ *
+ * Every tuple on the chain already agrees with the key columns; it is matched
+ * against every term all the same, which binds the other columns and checks
+ * a variable written twice among them, so a lookup accepts exactly the
+ * tuples a scan with the same terms would.  The probe holds each key
+ * column's value in that column, the columns chosen by the index's own mask,
+ * which is the only one it reads; the rest are left unset.  The index is
+ * found by position each time, since the array holding it can grow while the
+ * plan exists.
+ */
+static bool
+step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
+    relic_tuple_range_t *cursor, bool resume)
+{
+	const relic_index_t *index;
+	const relic_dom_t *tuple;
+	relic_dom_t probe[RELIC_MAX_ARITY];
+	relic_tuple_id_t id;
+	uint16_t column;
+
+	index = &atom->relation->indexes[atom->index_position];
+
+	if (!resume) {
+		for (column = 0; column < atom->relation->arity; column++) {
+			if ((index->key_mask & (UINT32_C(1) << column)) != 0)
+				probe[column] = term_value(eval,
+				    &atom->terms[column]);
+		}
+
+		cursor->first = relic_index_first(index, atom->relation, probe);
+		cursor->end = relic_relation_end(atom->relation);
+	}
+
+	while (cursor->first != RELIC_ID_NONE && cursor->first < cursor->end) {
+		id = cursor->first;
+		cursor->first = relic_index_next(index, id);
+		eval->ctx->counters.tuples_looked_up++;
+
+		tuple = relic_relation_tuple(atom->relation, id);
+		if (tuple_matches(eval, atom, tuple))
+			return (true);
+	}
+
+	return (false);
+}
+
 static bool
 step_member(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
 {
@@ -459,6 +530,9 @@ step(relic_evaluation_t *eval, const relic_op_t *op,
 	switch (op->kind) {
 	case RELIC_OP_SCAN:
 		*matchedp = step_scan(eval, &op->u.atom, cursor, resume);
+		break;
+	case RELIC_OP_LOOKUP:
+		*matchedp = step_lookup(eval, &op->u.atom, cursor, resume);
 		break;
 	case RELIC_OP_MEMBER:
 		if (!resume)
@@ -695,13 +769,20 @@ evaluation_track_deltas(relic_evaluation_t *eval)
 /*
  * Plan one rule, or one delta variant of it, with the cursors that run it.
  * Returns 0, or -1 with a diagnostic reported.
+ *
+ * The relations marked as members are the ones the planner is told are
+ * still being derived.  A query's evaluation marks none, having no
+ * membership marks at all: everything a query reads is complete.
  */
 static int
 build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
     size_t delta_literal, relic_running_plan_t *running)
 {
+	running->rule = rule;
+	running->delta_literal = delta_literal;
+
 	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule,
-	    delta_literal, &running->plan) != 0)
+	    delta_literal, eval->is_member, &running->plan) != 0)
 		return (-1);
 
 	running->cursors = evaluation_alloc(eval, running->plan.op_count,
@@ -892,7 +973,8 @@ choose_fixed_point(const relic_t *ctx, const relic_component_t *component)
 /*
  * Plan one component: how it reaches its fixed point, its members, its
  * rules, and, when it will be evaluated semi-naively, the delta variants of
- * its rules.
+ * its rules.  The members are marked throughout, which is how the planner
+ * knows which relations it cannot yet measure.
  */
 static int
 plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
@@ -905,17 +987,61 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 	if (plan_members(eval, schedule, component, plans) != 0)
 		return (-1);
 
-	if (plan_base(eval, schedule, component, plans) != 0)
-		return (-1);
-
-	if (plans->fixed_point != RELIC_FIXED_SEMI_NAIVE)
-		return (0);
-
 	mark_members(eval, schedule, component, true);
-	status = plan_variants(eval, schedule, component, plans);
+
+	status = plan_base(eval, schedule, component, plans);
+	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
+		status = plan_variants(eval, schedule, component, plans);
+
 	mark_members(eval, schedule, component, false);
 
 	return (status);
+}
+
+/*
+ * Show a component's plans through the explain callback, if one is
+ * installed: its heading, how many facts it has, and each other rule with
+ * its plan and the delta variants planned for it.
+ *
+ * The variants are in rule order, and each records the rule it was built
+ * from, so a rule's variants are the run of them that follows the previous
+ * rule's.
+ */
+static void
+explain_component(const relic_evaluation_t *eval,
+    const relic_schedule_t *schedule, size_t position,
+    const relic_component_plans_t *plans)
+{
+	const relic_running_plan_t *base;
+	size_t facts;
+	size_t variant;
+	size_t i;
+
+	if (!relic_explaining(eval->ctx))
+		return;
+
+	facts = 0;
+	for (i = 0; i < plans->base_count; i++) {
+		if (plans->base[i].rule->body_length == 0)
+			facts++;
+	}
+
+	relic_explain_component(eval->ctx, schedule, position, facts);
+
+	variant = 0;
+	for (i = 0; i < plans->base_count; i++) {
+		base = &plans->base[i];
+		if (base->rule->body_length == 0)
+			continue;
+
+		relic_explain_rule(eval->ctx, base->rule, &base->plan);
+
+		for (; variant < plans->variant_count &&
+		    plans->variants[variant].rule == base->rule; variant++)
+			relic_explain_variant(eval->ctx, base->rule,
+			    plans->variants[variant].delta_literal,
+			    &plans->variants[variant].plan);
+	}
 }
 
 /*
@@ -933,23 +1059,6 @@ plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
 	    &plans->base[0]) != 0)
 		return (-1);
 	plans->base_count = 1;
-
-	return (0);
-}
-
-/*
- * Plan every component the schedule lists, in schedule order.
- */
-static int
-plan_schedule(relic_evaluation_t *eval, const relic_schedule_t *schedule)
-{
-	size_t i;
-
-	for (i = 0; i < schedule->component_count; i++) {
-		if (plan_component(eval, schedule, &schedule->components[i],
-		    &eval->components[i]) != 0)
-			return (-1);
-	}
 
 	return (0);
 }
@@ -1021,14 +1130,15 @@ discard_derived_state(relic_t *ctx)
  * rule has been added since they were last brought to a fixed point, and
  * then nothing needs doing.  Otherwise what they hold is stale -- the fixed
  * point of an earlier program, or part of one an evaluation that failed was
- * computing -- and it is discarded before every component is evaluated in
- * schedule order.  The discard comes before the evaluation begins, so no
- * delta range can span it.
+ * computing -- and it is discarded before every component is planned and
+ * evaluated in schedule order.  The discard comes before the evaluation
+ * begins, so no delta range can span it.
  */
 static int
 materialize_program(relic_t *ctx)
 {
 	const relic_schedule_t *schedule;
+	relic_component_plans_t *plans;
 	relic_evaluation_t eval;
 	size_t i;
 	int status;
@@ -1046,11 +1156,18 @@ materialize_program(relic_t *ctx)
 	status = evaluation_begin(&eval, ctx, schedule->component_count);
 	if (status == 0)
 		status = evaluation_track_deltas(&eval);
-	if (status == 0)
-		status = plan_schedule(&eval, schedule);
 
-	for (i = 0; status == 0 && i < schedule->component_count; i++)
-		status = evaluate_component(&eval, &eval.components[i]);
+	for (i = 0; status == 0 && i < schedule->component_count; i++) {
+		plans = &eval.components[i];
+
+		status = plan_component(&eval, schedule,
+		    &schedule->components[i], plans);
+		if (status != 0)
+			break;
+
+		explain_component(&eval, schedule, i, plans);
+		status = evaluate_component(&eval, plans);
+	}
 
 	evaluation_end(&eval);
 
@@ -1152,9 +1269,12 @@ relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 	status = evaluation_begin(&eval, ctx, 1);
 	if (status == 0)
 		status = plan_query(&eval, &query->rule, &eval.components[0]);
-	if (status == 0)
+	if (status == 0) {
+		relic_explain_query(ctx, &query->rule,
+		    &eval.components[0].base[0].plan);
 		status = run_plans(&eval, eval.components[0].base,
 		    eval.components[0].base_count);
+	}
 	evaluation_end(&eval);
 
 	if (status != 0)
@@ -1178,6 +1298,7 @@ relic_stats(relic_t *ctx, relic_stats_t *stats)
 	stats->derivations = ctx->counters.derivations;
 	stats->tuples_inserted = ctx->counters.tuples_inserted;
 	stats->tuples_scanned = ctx->counters.tuples_scanned;
+	stats->tuples_looked_up = ctx->counters.tuples_looked_up;
 
 	stats->tuples = relic_relation_total_tuples(ctx);
 	stats->storage_bytes = relic_relation_total_bytes(ctx);

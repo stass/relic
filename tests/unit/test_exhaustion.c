@@ -50,6 +50,7 @@
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
+#define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_MATERIALIZE	"a materialization out of memory reports once"
@@ -136,6 +137,18 @@
 #define	INSERT_SWEEP	10
 
 /*
+ * The index sweep builds an index over a relation of INDEX_PRELUDE tuples
+ * and then inserts INDEX_BATCH more, each step with one more allocation
+ * served.  The build makes room one tuple at a time, so its three arrays
+ * each grow several times, and the batch grows the relation and the index
+ * together; the sweep is bound past every one of those requests, so a
+ * refusal lands on each and some run completes.
+ */
+#define	INDEX_PRELUDE	40
+#define	INDEX_BATCH	40
+#define	INDEX_SWEEP	60
+
+/*
  * The evaluation sweep's program is the transitive closure of a chain of
  * this many edges, which derives EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 paths,
  * and a stratum above it that finds the chain's one sink by negation.
@@ -158,9 +171,11 @@
  * refused as well without asking the allocator, and exactly one message must
  * say so.
  *
- * The sweep's budgets all run out while the evaluation is being set up and
- * planned, so a refused run must leave every relation empty, and a retry
- * with memory to spare must then derive the whole chain.
+ * Components are planned as they start, so a budget can also run out part
+ * way along the chain, after the components before it have derived their
+ * tuples.  A refused run must not be taken for a finished one, and a retry
+ * with memory to spare must then discard what it left and derive the whole
+ * chain.
  */
 #define	WIDE_PREDICATES	600
 #define	WIDE_SWEEP	48
@@ -200,6 +215,10 @@ static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
 static void	 an_analysis_that_ran_out_of_memory_says_nothing(void);
 static void	 a_schedule_that_could_not_be_rebuilt_is_kept(void);
 static void	 a_relation_survives_a_failed_allocation(void);
+static void	 an_index_survives_a_failed_allocation(void);
+static bool	 index_finds_every_tuple(const relic_relation_t *rel,
+		    uint32_t position);
+static size_t	 storage_by_hand(const relic_t *ctx);
 static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
 static void	 a_materialization_out_of_memory_reports_once(void);
 static char	*wide_sweep_program(void);
@@ -1121,6 +1140,197 @@ sweep_relation(relic_t *ctx, relic_dom_t *values, size_t count)
 }
 
 /*
+ * The storage total recomputed from every relation, which the running total
+ * must equal whatever a refusal interrupted.
+ */
+static size_t
+storage_by_hand(const relic_t *ctx)
+{
+	size_t bytes;
+	size_t position;
+
+	bytes = 0;
+	for (position = 0; position < ctx->relations.count; position++) {
+		if (ctx->relations.entries[position] != NULL)
+			bytes += relic_relation_bytes(
+			    ctx->relations.entries[position]);
+	}
+
+	return (bytes);
+}
+
+/*
+ * Whether the index at `position` lists every tuple under its key: walking
+ * from each tuple's key reaches that tuple, and the chains together hold
+ * each tuple once.  A chain's length is counted only when walking it from its
+ * own first tuple, so each chain is counted once.
+ */
+static bool
+index_finds_every_tuple(const relic_relation_t *rel, uint32_t position)
+{
+	const relic_index_t *index;
+	relic_tuple_id_t walked;
+	relic_tuple_id_t first;
+	relic_tuple_id_t id;
+	size_t chained;
+	bool reached;
+
+	index = &rel->indexes[position];
+	chained = 0;
+
+	for (id = RELIC_TUPLE_FIRST; id <= rel->count; id++) {
+		first = relic_index_first(index, rel,
+		    relic_relation_tuple(rel, id));
+
+		reached = false;
+		for (walked = first; walked != RELIC_ID_NONE;
+		    walked = relic_index_next(index, walked)) {
+			if (walked == id)
+				reached = true;
+			if (first == id)
+				chained++;
+		}
+
+		if (!reached)
+			return (false);
+	}
+
+	return (chained == rel->count);
+}
+
+/*
+ * Build an index over a relation and insert more tuples into it, with the
+ * nth allocation refused, then let the allocator serve again and finish the
+ * work.
+ *
+ * A build that could not finish must publish no index and leave the storage
+ * total counting only what the relation holds; a lookup through a partial
+ * index would miss the tuples it had not reached.  An insertion refused
+ * while an index exists must leave the relation and every index agreeing, or
+ * a lookup would miss a tuple the relation holds.  Once memory is back, the
+ * build and the batch complete, and the index lists every tuple.
+ */
+static void
+an_index_survives_a_failed_allocation(void)
+{
+	relic_dom_t values[INDEX_PRELUDE + INDEX_BATCH + 1];
+	size_t built_then_refused;
+	size_t build_refused;
+	size_t completed;
+	long budget;
+
+	build_refused = 0;
+	built_then_refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < INDEX_SWEEP; budget++) {
+		relic_t *ctx;
+		relic_relation_t *rel;
+		relic_dom_t columns[2];
+		uint32_t position;
+		size_t ordinal;
+		size_t inserted;
+		int built;
+		bool added;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_INDEX,
+			    "a context should be created");
+			return;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		rel = sweep_relation(ctx, values,
+		    INDEX_PRELUDE + INDEX_BATCH + 1);
+		if (rel == NULL) {
+			check(false, SCENARIO_INDEX,
+			    "the fixture should be prepared before the sweep");
+			relic_destroy(ctx);
+			return;
+		}
+
+		for (ordinal = 0; ordinal < INDEX_PRELUDE; ordinal++) {
+			columns[0] = values[ordinal % 7];
+			columns[1] = values[ordinal + 1];
+			if (relic_relation_insert(ctx, rel, columns,
+			    &added) != 0) {
+				check(false, SCENARIO_INDEX,
+				    "the prelude should be inserted before "
+				    "the sweep");
+				relic_destroy(ctx);
+				return;
+			}
+		}
+
+		errors_reported = 0;
+		inserted = 0;
+
+		refuse_allocations_after(budget);
+		built = relic_relation_index(ctx, rel, 0x1, &position);
+		for (ordinal = INDEX_PRELUDE; built == 0 &&
+		    ordinal < INDEX_PRELUDE + INDEX_BATCH; ordinal++) {
+			columns[0] = values[ordinal % 7];
+			columns[1] = values[ordinal + 1];
+			if (relic_relation_insert(ctx, rel, columns,
+			    &added) != 0)
+				break;
+			inserted++;
+		}
+		serve_every_allocation();
+
+		checkf(errors_reported == (built != 0 ||
+		    inserted < INDEX_BATCH ? 1u : 0u), SCENARIO_INDEX,
+		    "a refusal should be reported once, and %zu errors were, "
+		    "with allocation %ld refused", errors_reported, budget);
+		checkf(relic_relation_total_bytes(ctx) == storage_by_hand(ctx),
+		    SCENARIO_INDEX, "the storage total should be %zu, not %zu, "
+		    "with allocation %ld refused", storage_by_hand(ctx),
+		    relic_relation_total_bytes(ctx), budget);
+
+		if (built != 0) {
+			build_refused++;
+			checkf(rel->index_count == 0, SCENARIO_INDEX,
+			    "a refused build should publish no index, with "
+			    "allocation %ld refused", budget);
+		} else if (inserted < INDEX_BATCH) {
+			built_then_refused++;
+			checkf(index_finds_every_tuple(rel, position),
+			    SCENARIO_INDEX, "after a refused insertion the "
+			    "index should list every tuple, with allocation "
+			    "%ld refused", budget);
+		} else {
+			completed++;
+		}
+
+		/* With memory back, finish the build and the batch. */
+		built = relic_relation_index(ctx, rel, 0x1, &position);
+		for (ordinal = INDEX_PRELUDE; built == 0 &&
+		    ordinal < INDEX_PRELUDE + INDEX_BATCH; ordinal++) {
+			columns[0] = values[ordinal % 7];
+			columns[1] = values[ordinal + 1];
+			if (relic_relation_insert(ctx, rel, columns,
+			    &added) != 0)
+				built = -1;
+		}
+
+		checkf(built == 0 && rel->index_count == 1 &&
+		    relic_relation_count(rel) == INDEX_PRELUDE + INDEX_BATCH &&
+		    index_finds_every_tuple(rel, position), SCENARIO_INDEX,
+		    "once memory is back the index should list all %d tuples, "
+		    "with allocation %ld refused", INDEX_PRELUDE + INDEX_BATCH,
+		    budget);
+
+		relic_destroy(ctx);
+	}
+
+	checkf(build_refused > 0 && built_then_refused > 0 && completed > 0,
+	    SCENARIO_INDEX, "the sweep should refuse a build (%zu), refuse an "
+	    "insertion after one (%zu), and complete (%zu)", build_refused,
+	    built_then_refused, completed);
+}
+
+/*
  * Insert a batch of tuples into a relation that already holds several, with
  * the nth allocation refused, then restore the allocator and insert the whole
  * batch again.
@@ -1555,9 +1765,10 @@ wide_sweep_program(void)
 
 /*
  * Materializing a program with many predicates runs out of memory while the
- * evaluation is being set up, and says so exactly once however many of its
- * requests the exhaustion refused.  A retry with memory available reaches
- * the end of the chain.
+ * evaluation is being set up or a component planned, and says so exactly
+ * once however many of its requests the exhaustion refused.  The relations it
+ * leaves are stale, and a retry with memory available discards them and
+ * reaches the end of the chain.
  */
 static void
 a_materialization_out_of_memory_reports_once(void)
@@ -1612,10 +1823,10 @@ a_materialization_out_of_memory_reports_once(void)
 		    "not %zu, with allocation %ld refused",
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
-		checkf(status == 0 || held == 0, SCENARIO_MATERIALIZE,
-		    "a materialization refused while planning should derive "
-		    "nothing, not %zu tuples, with allocation %ld refused",
-		    held, budget);
+		checkf(status == 0 || (held < WIDE_PREDICATES &&
+		    ctx->materialized_rules == 0), SCENARIO_MATERIALIZE,
+		    "a refused materialization should be left stale, holding "
+		    "%zu tuples, with allocation %ld refused", held, budget);
 
 		status = relic_materialize(ctx);
 		held = relic_relation_total_tuples(ctx);
@@ -1645,6 +1856,7 @@ main(void)
 	an_analysis_that_ran_out_of_memory_says_nothing();
 	a_schedule_that_could_not_be_rebuilt_is_kept();
 	a_relation_survives_a_failed_allocation();
+	an_index_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
 	a_materialization_out_of_memory_reports_once();
 

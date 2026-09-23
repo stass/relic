@@ -15,18 +15,37 @@
  *
  * The walk keeps one set, the slots bound so far, and turns each literal into
  * an operation at the point it is placed.  A positive literal whose every
- * argument is already bound is a membership test; any other positive literal
- * is a scan that binds what it can.  A comparison and a negated literal bind
- * nothing -- each is a test, a FILTER or an ANTI_MEMBER -- so each can only be
- * placed where every slot it reads is bound, and it is placed at the earliest
- * such point.  The head becomes the EMIT that ends the plan.
+ * argument is already bound is a membership test; one with some bound
+ * arguments is a lookup through the index keyed on exactly those columns,
+ * which the relation builds if it has none; one with none bound is a scan.
+ * A lookup and a scan bind what they can.  A comparison and a negated literal
+ * bind nothing -- each is a test, a FILTER or an ANTI_MEMBER -- so each can
+ * only be placed where every slot it reads is bound, and it is placed at the
+ * earliest such point.  The head becomes the EMIT that ends the plan.
  *
- * Positive literals are placed in the order they are written.  A test cannot
- * always be: its written position need not be one where its operands exist
- * -- `N >= 100, size(X, N)` and `not done(X), todo(X)` are safe bodies -- so
- * it goes where it first can.  The rule's safety is what guarantees such a
- * point exists: every slot a test reads is bound by some positive literal, so
- * once every positive literal is placed, every test can be.
+ * Positive literals are placed greedily.  At each step every positive literal
+ * not yet placed is scored against the slots bound so far, and the best is
+ * placed: the one with more bound arguments, then the one with the smaller
+ * estimate of the tuples it produces per binding, then the one written
+ * first.  The estimate reads the relation's tuple count and the distinct
+ * values of its bound columns, assuming the columns independent:
+ *
+ *	estimate = count
+ *	for each bound column c: estimate = ceil(estimate / distinct(c))
+ *
+ * so an empty relation estimates zero and is placed first among the
+ * literals binding as many arguments, ending the join once it is reached,
+ * and a nonempty one never estimates below one.  A relation the
+ * component being planned is still deriving is empty and cannot be measured;
+ * it is taken to hold RELIC_PLAN_UNKNOWN_TUPLES tuples, narrowed by
+ * RELIC_PLAN_UNKNOWN_DISTINCT per bound column.  The arithmetic is integer so
+ * that the same input gives the same plan on every platform.
+ *
+ * A test's written position need not be one where its operands exist -- `N
+ * >= 100, size(X, N)` and `not done(X), todo(X)` are safe bodies -- so it
+ * goes where it first can.  The rule's safety is what guarantees such a point
+ * exists: every slot a test reads is bound by some positive literal, so once
+ * every positive literal is placed, every test can be.
  *
  * Each column's fate is decided here, while the bound set is known: matched
  * against a constant, matched against a slot already bound, binding its
@@ -40,23 +59,32 @@
  * when every argument is a constant, because a membership test would consult
  * the whole relation rather than the delta.  Placed first, it is only ever
  * scanned, so a delta never needs an index of its own.
+ *
+ * Two switches select the references the default is tested against.
+ * RELIC_F_NO_INDEX makes every lookup a scan matching the same columns, and
+ * RELIC_F_NO_REORDER places positive literals in the order they are written.
+ * Each changes how an answer is found and never what it is.
  */
 
+typedef struct relic_plan_score relic_plan_score_t;
 typedef struct relic_planner relic_planner_t;
 
 /*
  * A plan under construction.
  *
  * `ops` has room for one operation per body literal and one EMIT, which is
- * exactly what a plan holds.  `placed` records which tests have been placed,
- * indexed like the body.  `bound` is the set of slots the operations
+ * exactly what a plan holds.  `placed` records which literals have been
+ * placed, indexed like the body.  `bound` is the set of slots the operations
  * placed so far bind.  `delta_literal` is the body index of the literal that
- * reads the delta, or RELIC_PLAN_NO_DELTA.
+ * reads the delta, or RELIC_PLAN_NO_DELTA.  `incomplete`, when not NULL, is
+ * indexed by predicate identifier minus one and marks the relations still
+ * being derived, which the estimate cannot measure.
  */
 struct relic_planner {
 	relic_t			*ctx;
 	relic_arena_t		*arena;
 	const relic_rule_t	*rule;
+	const bool		*incomplete;
 	relic_op_t		*ops;
 	bool			*placed;
 	size_t			 op_count;
@@ -64,18 +92,38 @@ struct relic_planner {
 	uint64_t		 bound;
 };
 
+/*
+ * How good a positive literal would be to place next: more bound arguments
+ * is better, then a smaller estimate.
+ */
+struct relic_plan_score {
+	size_t		estimate;
+	uint16_t	bound_args;
+};
+
 static relic_op_t *append_atom_op(relic_planner_t *planner,
 		    enum relic_op_kind kind, relic_relation_t *relation);
 static relic_op_t *append_op(relic_planner_t *planner,
 		    enum relic_op_kind kind);
+static uint32_t	 all_columns(uint16_t arity);
 static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
 static bool	 atom_is_bound(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
+static uint32_t	 bound_columns(const relic_planner_t *planner,
+		    const relic_atom_t *atom, uint16_t arity);
 static int	 build_plan(relic_planner_t *planner);
+static int	 choose_positive(relic_planner_t *planner, size_t *indexp);
+static uint16_t	 column_count(uint32_t columns);
 static uint64_t	 comparison_slots(const relic_comparison_t *comparison);
 static int	 confirm_delta_literal(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner,
 		    uint16_t head_arity);
+static size_t	 divide_rounding_up(size_t dividend, size_t divisor);
+static int	 estimate_literal(relic_planner_t *planner,
+		    relic_relation_t *relation, uint32_t bound,
+		    size_t *estimatep);
+static bool	 is_incomplete(const relic_planner_t *planner,
+		    const relic_relation_t *relation);
 static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 		    bool delta);
 static int	 place_body(relic_planner_t *planner);
@@ -85,15 +133,23 @@ static int	 place_emit(relic_planner_t *planner);
 static int	 place_negated(relic_planner_t *planner,
 		    const relic_atom_t *atom);
 static int	 place_positive(relic_planner_t *planner, size_t index);
+static size_t	 positive_count(const relic_rule_t *rule);
+static enum relic_op_kind positive_kind(const relic_planner_t *planner,
+		    const relic_relation_t *relation, uint32_t bound,
+		    bool delta);
 static int	 place_ready_tests(relic_planner_t *planner);
 static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
 		    relic_arena_t *arena, const relic_rule_t *rule,
-		    size_t delta_literal);
+		    size_t delta_literal, const bool *incomplete);
 static void	 read_term(const relic_arg_t *arg, relic_plan_term_t *term);
 static void	 scan_term(relic_planner_t *planner, const relic_arg_t *arg,
 		    relic_plan_term_t *term);
+static int	 score_positive(relic_planner_t *planner,
+		    const relic_atom_t *atom, relic_plan_score_t *scorep);
+static bool	 score_is_better(const relic_plan_score_t *candidate,
+		    const relic_plan_score_t *best);
 static uint64_t	 slot_bit(uint16_t slot);
 static relic_plan_term_t *terms_alloc(relic_planner_t *planner,
 		    uint16_t arity);
@@ -228,35 +284,100 @@ scan_term(relic_planner_t *planner, const relic_arg_t *arg,
 }
 
 /*
+ * Every column of a relation of this arity, bit c for column c.
+ */
+static uint32_t
+all_columns(uint16_t arity)
+{
+	if (arity >= 32)
+		return (UINT32_MAX);
+
+	return ((UINT32_C(1) << arity) - 1);
+}
+
+static uint16_t
+column_count(uint32_t columns)
+{
+	uint16_t count;
+
+	count = 0;
+	for (; columns != 0; columns &= columns - 1)
+		count++;
+
+	return (count);
+}
+
+/*
+ * The columns of an atom that hold a constant or a slot already bound, which
+ * are the columns an operation placed now could look it up by.  A wildcard is
+ * never bound: it asks for any value, and only a generator can supply one.
+ * Neither is a variable that only an earlier column of the same atom binds,
+ * since that binding does not exist until a tuple has been read.
+ */
+static uint32_t
+bound_columns(const relic_planner_t *planner, const relic_atom_t *atom,
+    uint16_t arity)
+{
+	const relic_arg_t *arg;
+	uint32_t columns;
+	uint16_t i;
+
+	columns = 0;
+	for (i = 0; i < arity; i++) {
+		arg = &atom->args[i];
+
+		if (arg->kind == RELIC_ARG_CONSTANT ||
+		    (arg->kind == RELIC_ARG_VARIABLE &&
+		    (planner->bound & slot_bit(arg->u.slot)) != 0))
+			columns |= UINT32_C(1) << i;
+	}
+
+	return (columns);
+}
+
+/*
  * Whether every argument of an atom is a constant or a bound slot, which is
- * what makes it a membership test rather than a scan.  A wildcard is never
- * bound: it asks for any value, and only a scan can supply one.
+ * what makes it a membership test rather than a generator.
  */
 static bool
 atom_is_bound(const relic_planner_t *planner, const relic_atom_t *atom,
     uint16_t arity)
 {
-	const relic_arg_t *arg;
-	uint16_t i;
-
-	for (i = 0; i < arity; i++) {
-		arg = &atom->args[i];
-
-		if (arg->kind == RELIC_ARG_WILDCARD)
-			return (false);
-
-		if (arg->kind == RELIC_ARG_VARIABLE &&
-		    (planner->bound & slot_bit(arg->u.slot)) == 0)
-			return (false);
-	}
-
-	return (true);
+	return (bound_columns(planner, atom, arity) == all_columns(arity));
 }
 
 /*
- * Place a positive literal: a MEMBER when it is fully bound, a SCAN that
- * binds the rest otherwise.  A literal that reads the delta is a SCAN
- * whatever is bound, since only a scan walks the delta's range.
+ * The operation a positive literal becomes with `bound` its bound columns:
+ * MEMBER when every column is bound, LOOKUP when some are, SCAN when none
+ * are.  A literal that reads the delta is a SCAN whatever is bound, since
+ * only a scan walks the delta's range, and under RELIC_F_NO_INDEX a literal
+ * that would be looked up is scanned instead.
+ */
+static enum relic_op_kind
+positive_kind(const relic_planner_t *planner,
+    const relic_relation_t *relation, uint32_t bound, bool delta)
+{
+	if (delta)
+		return (RELIC_OP_SCAN);
+
+	if (bound == all_columns(relation->arity))
+		return (RELIC_OP_MEMBER);
+
+	if (bound == 0 ||
+	    (planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
+		return (RELIC_OP_SCAN);
+
+	return (RELIC_OP_LOOKUP);
+}
+
+/*
+ * Place a positive literal as the operation positive_kind() chooses.  A
+ * LOOKUP names the index keyed on its bound columns, which is built here when
+ * the relation has none, so a plan never names an index that does not exist.
+ *
+ * The bound columns are taken before any term is decided, because deciding
+ * a scan's terms binds slots: in edge(X, X) with X unbound, the second
+ * column is matched against the first rather than looked up.
  */
 static int
 place_atom(relic_planner_t *planner, const relic_atom_t *atom, bool delta)
@@ -264,21 +385,30 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom, bool delta)
 	relic_relation_t *relation;
 	enum relic_op_kind kind;
 	relic_op_t *op;
+	uint32_t bound;
+	uint32_t index_position;
 	uint16_t i;
 
 	relation = relic_relation_for(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
 
-	if (!delta && atom_is_bound(planner, atom, relation->arity))
-		kind = RELIC_OP_MEMBER;
-	else
-		kind = RELIC_OP_SCAN;
+	bound = bound_columns(planner, atom, relation->arity);
+	kind = positive_kind(planner, relation, bound, delta);
+
+	index_position = 0;
+	if (kind == RELIC_OP_LOOKUP && relic_relation_index(planner->ctx,
+	    relation, bound, &index_position) != 0)
+		return (-1);
 
 	op = append_atom_op(planner, kind, relation);
 	if (op == NULL)
 		return (-1);
 	op->u.atom.delta = delta;
+	if (kind == RELIC_OP_LOOKUP) {
+		op->u.atom.key_mask = bound;
+		op->u.atom.index_position = index_position;
+	}
 
 	for (i = 0; i < relation->arity; i++) {
 		if (kind == RELIC_OP_MEMBER)
@@ -454,14 +584,180 @@ place_positive(relic_planner_t *planner, size_t index)
 	if (place_atom(planner, &planner->rule->body[index].u.atom,
 	    index == planner->delta_literal) != 0)
 		return (-1);
+	planner->placed[index] = true;
 
 	return (place_ready_tests(planner));
 }
 
 /*
+ * Whether the relation is one the component being planned is still deriving.
+ */
+static bool
+is_incomplete(const relic_planner_t *planner, const relic_relation_t *relation)
+{
+	return (planner->incomplete != NULL &&
+	    planner->incomplete[relation->pred - 1]);
+}
+
+/*
+ * The quotient rounded up, for a divisor that is not zero.  Written without
+ * adding to the dividend, which could wrap.
+ */
+static size_t
+divide_rounding_up(size_t dividend, size_t divisor)
+{
+	return (dividend / divisor + (dividend % divisor != 0));
+}
+
+/*
+ * The estimated number of tuples of `relation` matching one binding of the
+ * columns in `bound`, as the file comment describes.  Returns 0, or -1 with
+ * a diagnostic reported when a distinct count could not be computed.
+ *
+ * A column of a nonempty relation holds at least one distinct value, so no
+ * division is by zero.
+ */
+static int
+estimate_literal(relic_planner_t *planner, relic_relation_t *relation,
+    uint32_t bound, size_t *estimatep)
+{
+	size_t distinct;
+	size_t estimate;
+	uint16_t column;
+
+	if (is_incomplete(planner, relation)) {
+		estimate = RELIC_PLAN_UNKNOWN_TUPLES;
+		for (column = 0; column < relation->arity; column++) {
+			if ((bound & (UINT32_C(1) << column)) != 0)
+				estimate = divide_rounding_up(estimate,
+				    RELIC_PLAN_UNKNOWN_DISTINCT);
+		}
+
+		*estimatep = estimate;
+		return (0);
+	}
+
+	estimate = relic_relation_count(relation);
+	for (column = 0; estimate != 0 && column < relation->arity; column++) {
+		if ((bound & (UINT32_C(1) << column)) == 0)
+			continue;
+
+		if (relic_relation_distinct(planner->ctx, relation, column,
+		    &distinct) != 0)
+			return (-1);
+
+		estimate = divide_rounding_up(estimate, distinct);
+	}
+
+	*estimatep = estimate;
+
+	return (0);
+}
+
+/*
+ * Score a positive literal against the slots bound so far.  Returns 0, or -1
+ * with a diagnostic reported.
+ */
+static int
+score_positive(relic_planner_t *planner, const relic_atom_t *atom,
+    relic_plan_score_t *scorep)
+{
+	relic_relation_t *relation;
+	uint32_t bound;
+
+	relation = relic_relation_for(planner->ctx, atom->pred);
+	if (relation == NULL)
+		return (-1);
+
+	bound = bound_columns(planner, atom, relation->arity);
+	scorep->bound_args = column_count(bound);
+
+	return (estimate_literal(planner, relation, bound, &scorep->estimate));
+}
+
+static bool
+score_is_better(const relic_plan_score_t *candidate,
+    const relic_plan_score_t *best)
+{
+	if (candidate->bound_args != best->bound_args)
+		return (candidate->bound_args > best->bound_args);
+
+	return (candidate->estimate < best->estimate);
+}
+
+/*
+ * The body index of the positive literal to place next, of those not yet
+ * placed, of which there must be one.  Returns 0, or -1 with a diagnostic
+ * reported.
+ *
+ * Literals are compared in body order and one replaces the best so far only
+ * when it scores strictly better, so of two that score the same the one
+ * written first is chosen.  Under RELIC_F_NO_REORDER nothing is scored and
+ * the first one written is always chosen.
+ */
+static int
+choose_positive(relic_planner_t *planner, size_t *indexp)
+{
+	const relic_rule_t *rule;
+	relic_plan_score_t best;
+	relic_plan_score_t score;
+	bool found;
+	size_t i;
+
+	rule = planner->rule;
+	found = false;
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind != RELIC_LITERAL_POSITIVE ||
+		    planner->placed[i])
+			continue;
+
+		if ((planner->ctx->config.flags & RELIC_F_NO_REORDER) != 0) {
+			*indexp = i;
+			return (0);
+		}
+
+		if (score_positive(planner, &rule->body[i].u.atom, &score) != 0)
+			return (-1);
+
+		if (!found || score_is_better(&score, &best)) {
+			best = score;
+			*indexp = i;
+			found = true;
+		}
+	}
+
+	if (found)
+		return (0);
+
+	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
+	    "internal error: the planner ran out of literals to place");
+
+	return (-1);
+}
+
+/*
+ * How many positive literals a rule's body holds.
+ */
+static size_t
+positive_count(const relic_rule_t *rule)
+{
+	size_t count;
+	size_t i;
+
+	count = 0;
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind == RELIC_LITERAL_POSITIVE)
+			count++;
+	}
+
+	return (count);
+}
+
+/*
  * Place the delta literal first when there is one, then the other positive
- * literals in the order they are written, and each test at the earliest
- * point its slots are bound.
+ * literals one at a time in the order choose_positive() picks them, and each
+ * test at the earliest point its slots are bound.
  *
  * Tests are offered a place before the first literal and after every
  * positive one, which are the only points at which the bound set changes.
@@ -469,24 +765,25 @@ place_positive(relic_planner_t *planner, size_t index)
 static int
 place_body(relic_planner_t *planner)
 {
-	const relic_rule_t *rule;
-	size_t i;
+	size_t remaining;
+	size_t index;
 
-	rule = planner->rule;
+	remaining = positive_count(planner->rule);
 
 	if (place_ready_tests(planner) != 0)
 		return (-1);
 
-	if (planner->delta_literal != RELIC_PLAN_NO_DELTA &&
-	    place_positive(planner, planner->delta_literal) != 0)
-		return (-1);
+	if (planner->delta_literal != RELIC_PLAN_NO_DELTA) {
+		if (place_positive(planner, planner->delta_literal) != 0)
+			return (-1);
+		remaining--;
+	}
 
-	for (i = 0; i < rule->body_length; i++) {
-		if (rule->body[i].kind != RELIC_LITERAL_POSITIVE ||
-		    i == planner->delta_literal)
-			continue;
+	for (; remaining > 0; remaining--) {
+		if (choose_positive(planner, &index) != 0)
+			return (-1);
 
-		if (place_positive(planner, i) != 0)
+		if (place_positive(planner, index) != 0)
 			return (-1);
 	}
 
@@ -587,12 +884,13 @@ place_emit(relic_planner_t *planner)
 
 static int
 planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
-    const relic_rule_t *rule, size_t delta_literal)
+    const relic_rule_t *rule, size_t delta_literal, const bool *incomplete)
 {
 	bzero(planner, sizeof(*planner));
 	planner->ctx = ctx;
 	planner->arena = arena;
 	planner->rule = rule;
+	planner->incomplete = incomplete;
 	planner->delta_literal = delta_literal;
 
 	/*
@@ -625,28 +923,31 @@ build_plan(relic_planner_t *planner)
 
 /*
  * Plan a rule.  Returns 0 with the plan in *plan, or -1 with a diagnostic
- * reported: memory ran out, or the planner broke one of a plan's
- * invariants, which is an internal error.
+ * reported: memory or the memory limit refused an index or a statistic, or
+ * the planner broke one of a plan's invariants, which is an internal error.
  *
  * `delta_literal` is RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or
  * the body index of a positive literal for the semi-naive variant in which
- * that literal reads the delta and is placed first.
+ * that literal reads the delta and is placed first.  `incomplete`, when not
+ * NULL, is indexed by predicate identifier minus one and marks the relations
+ * still being derived; every other relation is measured as it stands.
  *
  * The plan and everything it points at except its relations are allocated
- * from `arena`, and live as long as the caller keeps it.  The relations are
- * created here if they do not yet exist; they belong to the context and never
- * move, which is what lets a plan hold them.
+ * from `arena`, and live as long as the caller keeps it.  The relations, and
+ * the indexes its lookups read, are created here if they do not yet exist;
+ * they belong to the context, which is what lets a plan hold them.
  */
 int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
-    size_t delta_literal, relic_plan_t *plan)
+    size_t delta_literal, const bool *incomplete, relic_plan_t *plan)
 {
 	relic_planner_t planner;
 	int status;
 
 	bzero(plan, sizeof(*plan));
 
-	status = planner_init(&planner, ctx, arena, rule, delta_literal);
+	status = planner_init(&planner, ctx, arena, rule, delta_literal,
+	    incomplete);
 	if (status == 0)
 		status = build_plan(&planner);
 

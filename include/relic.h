@@ -127,6 +127,20 @@ struct relic_config {
 #define	RELIC_F_NAIVE	0x0001u
 
 /*
+ * Plan every literal with bound arguments, short of all of them, as a scan
+ * matching those arguments rather than a lookup through an index on them.
+ * No secondary index is built.
+ */
+#define	RELIC_F_NO_INDEX	0x0002u
+
+/*
+ * Plan each rule's positive literals in the order they are written, after
+ * the one reading a semi-naive delta, rather than choosing at each step the
+ * one expected to produce the fewest tuples.
+ */
+#define	RELIC_F_NO_REORDER	0x0004u
+
+/*
  * Create a context.  Returns NULL when memory is exhausted; there is no
  * other way for it to fail, so no diagnostic callback can be installed yet
  * and none is needed.
@@ -415,7 +429,7 @@ typedef struct relic_stats relic_stats_t;
  * Counters describing the work a context has done and what it holds, for
  * understanding and comparing evaluation strategies.
  *
- * The first four accumulate over the life of the context, and count the
+ * The first five accumulate over the life of the context, and count the
  * rules of the program and of every query answered alike:
  *
  *	iterations	rounds of fixed-point evaluation of recursive
@@ -425,6 +439,9 @@ typedef struct relic_stats relic_stats_t;
  *			or not the relation already held them
  *	tuples_inserted	derivations that added a tuple to its relation
  *	tuples_scanned	tuples read while scanning relations
+ *	tuples_looked_up
+ *			tuples read while looking up relations through an
+ *			index on the bound arguments of a literal
  *
  * The rest describe the context when the counters are read: the tuples held
  * across every relation, the answers of queries included, the bytes of
@@ -441,6 +458,7 @@ struct relic_stats {
 	uint64_t	derivations;
 	uint64_t	tuples_inserted;
 	uint64_t	tuples_scanned;
+	uint64_t	tuples_looked_up;
 	size_t		tuples;
 	size_t		storage_bytes;
 	size_t		symbol_values;
@@ -452,6 +470,32 @@ struct relic_stats {
  * Fill *stats, which must not be NULL, with the context's counters.
  */
 RELIC_EXPORT void relic_stats(relic_t *ctx, relic_stats_t *stats);
+
+/*
+ * Receives the plans evaluation runs, one line at a time: the context
+ * pointer given when it was installed, and the line, which is printable
+ * ASCII, has no newline, is at most 1023 bytes long and does not outlive the
+ * call.
+ */
+typedef void (*relic_explain_cb)(void *, const char *);
+
+/*
+ * Install an explain callback, replacing any previous one; NULL, the
+ * default, explains nothing.
+ *
+ * While one is installed, every component the program's evaluation plans is
+ * shown as soon as it is planned and before it runs -- its heading, how many
+ * facts it has, and each other rule followed by its plan and the plans of
+ * its semi-naive delta variants -- and a query's plan is shown before the
+ * query runs.  What is shown is what runs, so a query against a program
+ * already evaluated shows only its own plan.  The text is meant for a person
+ * and may change from one release to the next.  A line longer than the limit
+ * is cut and ends in "...".
+ *
+ * As with a diagnostic callback, the callback must not call into the context.
+ */
+RELIC_EXPORT void relic_explain_set(relic_t *ctx, relic_explain_cb callback,
+    void *callback_ctx);
 
 /*
  * The text of the most recent RELIC_ERROR diagnostic, or NULL if the context

@@ -28,7 +28,10 @@
  * duplicate elimination are integer work over a dense array.
  */
 
+typedef struct relic_index relic_index_t;
+typedef struct relic_index_key relic_index_key_t;
 typedef struct relic_relation relic_relation_t;
+typedef struct relic_relation_stats relic_relation_stats_t;
 typedef struct relic_reltab relic_reltab_t;
 typedef struct relic_tuple_range relic_tuple_range_t;
 
@@ -64,6 +67,71 @@ struct relic_tuple_range {
 };
 
 /*
+ * One distinct key of a secondary index: the first and the last tuple that
+ * hold it.  The tuples between them are threaded through the index's `next`
+ * array in identifier order, so a key's tuples are walked from `first` and
+ * a new one is linked after `last`.
+ */
+struct relic_index_key {
+	relic_tuple_id_t	first;
+	relic_tuple_id_t	last;
+};
+
+/*
+ * A secondary index: for every combination of values the key columns hold,
+ * the tuples that hold it.
+ *
+ * `key_mask` has bit c set for each key column c.  The key of a tuple is its
+ * key columns' values in ascending column order.
+ *
+ * Each distinct key is assigned a key identifier, from one, in the order keys
+ * are first seen.  `keys` maps the hash of a key to the key identifiers that
+ * share it, and `entries[k - 1]` records key k's first and last tuple.
+ * `next[id - 1]` is the tuple after `id` with the same key, or RELIC_ID_NONE
+ * when `id` is the last.  A key's tuples are therefore a chain through
+ * `next`, and because a tuple is linked at the end of its chain when it is
+ * inserted, every chain is in increasing identifier order.
+ *
+ * The chains are what keep a skewed key cheap.  Storing every tuple identifier
+ * in the table directly would put a key's thousand tuples in a thousand
+ * consecutive slots, and every other key hashing into that run would walk it.
+ * Here the table holds one slot per distinct key however many tuples share
+ * it.
+ *
+ * No key is stored: comparing against key k reads the key columns of
+ * entries[k - 1].first, which the relation already holds.  All three arrays
+ * are relation and index storage, accounted against the memory limit.
+ */
+struct relic_index {
+	relic_idtab_t		 keys;
+	relic_index_key_t	*entries;	/* indexed by key identifier - 1 */
+	relic_tuple_id_t	*next;		/* indexed by tuple identifier - 1 */
+	size_t			 key_count;
+	size_t			 entry_capacity;
+	size_t			 next_capacity;
+	uint32_t		 key_mask;
+};
+
+/*
+ * The number of distinct values in each column, computed when the planner
+ * asks for one and cached here.
+ *
+ * `distinct[c]` is meaningful for the columns whose bit is set in `known`,
+ * and only while the relation holds `counted_at` tuples.  The store is
+ * append-only between discards, so a relation holding as many tuples as it
+ * did when a count was taken holds the same tuples and the count is still
+ * true: the tuple count is the cache's version, and no insertion has to mark
+ * anything stale.  A discard returns a relation to fewer tuples, possibly
+ * to be refilled to the same number with different ones, so a discard clears
+ * `known`.
+ */
+struct relic_relation_stats {
+	uint32_t	distinct[RELIC_MAX_ARITY];
+	size_t		counted_at;
+	uint32_t	known;
+};
+
+/*
  * One predicate's tuples.
  *
  * `columns` holds `count` tuples of `arity` identifiers each, end to end, so
@@ -75,22 +143,32 @@ struct relic_tuple_range {
  * which is what answers membership.  It stores identifiers and no keys: the
  * key is the tuple, and the tuple is already in `columns`.
  *
+ * `indexes` holds the secondary indexes plans have asked for, at most one per
+ * key mask, in the order they were built.  Between discards an index is only
+ * ever appended, so its position is fixed until the next discard and is how
+ * a plan names it; its address is not, because the array grows.  A discard
+ * drops every index along with the tuples.
+ *
  * `arity` is copied from the predicate rather than read back through it on
  * every insertion.  It cannot drift, because the arity is half of the
  * predicate's identity: foo/1 and foo/2 are two predicates, so nothing can
  * change the arity of one.
  *
- * Neither allocation is arena memory.  They outlive individual queries and
- * they are the allocations large enough to be worth accounting against a
- * limit.
+ * None of this is arena memory.  It outlives individual queries, and the
+ * tuple and index storage is what is large enough to be worth accounting
+ * against a limit.
  */
 struct relic_relation {
-	relic_dom_t	*columns;
-	relic_idtab_t	 index;
-	size_t		 count;			/* tuples */
-	size_t		 column_capacity;	/* domain identifiers */
-	relic_pred_id_t	 pred;
-	uint16_t	 arity;
+	relic_dom_t		*columns;
+	relic_idtab_t		 index;
+	relic_index_t		*indexes;
+	size_t			 count;			/* tuples */
+	size_t			 column_capacity;	/* domain identifiers */
+	size_t			 index_count;
+	size_t			 index_capacity;
+	relic_relation_stats_t	 stats;
+	relic_pred_id_t		 pred;
+	uint16_t		 arity;
 };
 
 /*
@@ -114,10 +192,11 @@ struct relic_relation {
  *
  * `tuple_count` and `storage_bytes` are the totals the configurable tuple and
  * memory limits are enforced against.  `storage_bytes` counts the capacity of
- * every relation's columns and index slots -- what is actually held, not the
- * smaller number a tuple count implies.  It counts neither this array nor the
- * relations it points at, which are sized by the program rather than by the
- * data.
+ * every relation's columns and canonical index slots and of every array of
+ * its secondary indexes, including one being built -- what is actually held,
+ * not the smaller number a tuple count implies.  It counts neither this array
+ * nor the relations it points at, nor a relation's array of index headers,
+ * which are sized by the program rather than by the data.
  */
 struct relic_reltab {
 	relic_relation_t	**entries;	/* null until created */
