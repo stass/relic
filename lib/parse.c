@@ -113,6 +113,8 @@ struct relic_parser {
 	bool			 failed;
 };
 
+static int	 add_fact(relic_t *ctx, const char *predicate, size_t arity,
+		    const relic_value_t *values);
 static void	 advance(relic_parser_t *parser);
 static bool	 append_statement(relic_parser_t *parser,
 		    const relic_ast_atom_t *head,
@@ -124,6 +126,8 @@ static bool	 atom_after_name(relic_parser_t *parser,
 		    const relic_token_t *name, relic_ast_atom_t *atom);
 static bool	 body_append(relic_parser_t *parser,
 		    const relic_ast_literal_t *literal);
+static int	 build_fact(relic_t *ctx, uint32_t name, uint16_t arity,
+		    const relic_value_t *values, relic_ast_stmt_t **statementp);
 static bool	 collect_body(relic_parser_t *parser,
 		    const relic_ast_literal_t *first);
 static const char *describe_byte(unsigned char byte, char *buffer,
@@ -144,6 +148,10 @@ static bool	 head_is_positive(relic_parser_t *parser,
 		    const relic_ast_literal_t *head, const char *what);
 static int	 load_text(relic_t *ctx, const char *source_name,
 		    const char *text, size_t length);
+static int	 load_named_file(relic_t *ctx, const char *path);
+static int	 load_stream(relic_t *ctx, const char *source_name,
+		    FILE *stream);
+static bool	 names_a_predicate(const char *predicate);
 static const relic_ast_stmt_t *only_query(relic_parser_t *parser);
 static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
 static bool	 parse_comparison(relic_parser_t *parser,
@@ -1300,16 +1308,45 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 int
 relic_load_string(relic_t *ctx, const char *source_name, const char *text)
 {
-	if (text == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "no program text was given");
+	int status;
+
+	if (relic_enter(ctx) != 0)
 		return (-1);
+
+	if (text != NULL) {
+		status = load_text(ctx, source_name, text, strlen(text));
+	} else {
+		relic_diagf(ctx, RELIC_ERROR, NULL, "no program text was given");
+		status = -1;
 	}
 
-	return (load_text(ctx, source_name, text, strlen(text)));
+	relic_leave(ctx);
+
+	return (status);
 }
 
 int
-relic_load_file(relic_t *ctx, FILE *stream, const char *source_name)
+relic_load_file(relic_t *ctx, const char *source_name, FILE *stream)
+{
+	int status;
+
+	if (relic_enter(ctx) != 0)
+		return (-1);
+
+	status = load_stream(ctx, source_name, stream);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+/*
+ * relic_load_file() inside an operation already entered.  The stream is read
+ * whole before any of it is parsed; its read function may be the caller's
+ * own code, which finds the context busy like any callback.
+ */
+static int
+load_stream(relic_t *ctx, const char *source_name, FILE *stream)
 {
 	const char *name;
 	char *text;
@@ -1335,6 +1372,24 @@ relic_load_file(relic_t *ctx, FILE *stream, const char *source_name)
 int
 relic_load_path(relic_t *ctx, const char *path)
 {
+	int status;
+
+	if (relic_enter(ctx) != 0)
+		return (-1);
+
+	status = load_named_file(ctx, path);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+/*
+ * Open, load and close the file at `path`, naming it by its path.
+ */
+static int
+load_named_file(relic_t *ctx, const char *path)
+{
 	FILE *stream;
 	int status;
 
@@ -1350,7 +1405,7 @@ relic_load_path(relic_t *ctx, const char *path)
 		return (-1);
 	}
 
-	status = relic_load_file(ctx, stream, path);
+	status = load_stream(ctx, path, stream);
 
 	if (fclose(stream) != 0 && status == 0) {
 		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot close %s: %s", path,
@@ -1359,4 +1414,130 @@ relic_load_path(relic_t *ctx, const char *path)
 	}
 
 	return (status);
+}
+
+/*
+ * Whether `predicate` may name a predicate: a symbol by the lexer's rule,
+ * other than the negation keyword, which the grammar reads as `not` wherever
+ * a predicate name would stand.
+ */
+static bool
+names_a_predicate(const char *predicate)
+{
+	return (relic_lex_is_symbol(predicate, strlen(predicate)) &&
+	    strcmp(predicate, "not") != 0);
+}
+
+/*
+ * Build the statement `predicate(values...).` in the program arena, as the
+ * parser builds a fact it has read, and store it in *statementp.  Returns 0,
+ * or -1 with the reason reported; a value the value table refuses has been
+ * reported by it.
+ */
+static int
+build_fact(relic_t *ctx, uint32_t name, uint16_t arity,
+    const relic_value_t *values, relic_ast_stmt_t **statementp)
+{
+	relic_ast_stmt_t *statement;
+	relic_ast_term_t *terms;
+	uint16_t i;
+
+	/*
+	 * An atom with no arguments has no terms array, as the parser builds
+	 * one.  A refusal is reported and the arena's failure flag cleared at
+	 * once, as a check does at its boundary: one exhaustion gives one
+	 * message, and a flag left standing would refuse the next statement
+	 * the parser or this function builds.
+	 */
+	statement = relic_arena_alloc(&ctx->program_arena, sizeof(*statement));
+	terms = NULL;
+	if (arity > 0)
+		terms = relic_arena_allocarray(&ctx->program_arena, arity,
+		    sizeof(*terms));
+	if (statement == NULL || (terms == NULL && arity > 0)) {
+		relic_diag_no_memory(ctx);
+		relic_arena_clear_failure(&ctx->program_arena);
+		return (-1);
+	}
+
+	bzero(statement, sizeof(*statement));
+	for (i = 0; i < arity; i++) {
+		bzero(&terms[i], sizeof(terms[i]));
+		terms[i].kind = RELIC_TERM_CONSTANT;
+		if (relic_value_intern(ctx, &values[i],
+		    &terms[i].u.constant) != 0)
+			return (-1);
+	}
+
+	statement->kind = RELIC_STMT_RULE;
+	statement->head.name = name;
+	statement->head.arity = arity;
+	statement->head.terms = terms;
+	*statementp = statement;
+
+	return (0);
+}
+
+/*
+ * Add a fact to the program as though its text had been loaded.
+ *
+ * The fact becomes a statement like any other, appended after everything
+ * loaded before it and compiled by the next check, so there is one road into
+ * the program and whatever a loaded fact is, this one is too: checked,
+ * explained, and invalidating what was derived before it.  It has no
+ * location in any source, so its statement's location names no file.
+ */
+int
+relic_fact_add(relic_t *ctx, const char *predicate, size_t arity,
+    const relic_value_t *values)
+{
+	int status;
+
+	if (relic_enter(ctx) != 0)
+		return (-1);
+
+	status = add_fact(ctx, predicate, arity, values);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+static int
+add_fact(relic_t *ctx, const char *predicate, size_t arity,
+    const relic_value_t *values)
+{
+	relic_ast_stmt_t *statement;
+	uint32_t name;
+
+	if (predicate == NULL || (values == NULL && arity > 0)) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "a fact needs a predicate name and a value per argument");
+		return (-1);
+	}
+
+	if (!names_a_predicate(predicate)) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "a predicate name is a lowercase letter followed by "
+		    "letters, digits and underscores, and is not `not`");
+		return (-1);
+	}
+
+	if (arity > RELIC_MAX_ARITY) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "a predicate may have at most %d arguments",
+		    RELIC_MAX_ARITY);
+		return (-1);
+	}
+
+	if (relic_symbol_intern(ctx, predicate, strlen(predicate), &name) != 0)
+		return (-1);
+
+	if (build_fact(ctx, name, (uint16_t)arity, values, &statement) != 0)
+		return (-1);
+
+	TAILQ_INSERT_TAIL(&ctx->ast.statements, statement, link);
+	ctx->ast.count++;
+
+	return (0);
 }

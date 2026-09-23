@@ -248,6 +248,11 @@ static int	 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 static int	 answer_from_program(relic_t *ctx, const relic_rule_t *query);
 static int	 answer_through_rewrite(relic_t *ctx,
 		    const relic_rule_t *query);
+static bool	 query_answerable(relic_t *ctx, const relic_query_t *query,
+		    relic_row_cb callback);
+static int	 compute_answer(relic_t *ctx, const relic_query_t *query);
+static int	 deliver_answer(relic_t *ctx, const relic_query_t *query,
+		    relic_row_cb callback, void *callback_ctx);
 static int	 build_running_plan(relic_evaluation_t *eval,
 		    const relic_rule_t *rule, size_t delta_literal,
 		    relic_running_plan_t *running);
@@ -1478,10 +1483,18 @@ materialize_program(relic_t *ctx)
 int
 relic_materialize(relic_t *ctx)
 {
-	if (relic_program_ready(ctx) != 0)
+	int status;
+
+	if (relic_enter(ctx) != 0)
 		return (-1);
 
-	return (materialize_program(ctx));
+	status = relic_program_ready(ctx);
+	if (status == 0)
+		status = materialize_program(ctx);
+
+	relic_leave(ctx);
+
+	return (status);
 }
 
 /*
@@ -1493,16 +1506,12 @@ relic_materialize(relic_t *ctx)
  * because every column holds an identifier the value table assigned: columns
  * are copied only from constants the parser interned and from other tuples.
  *
- * The tuple is fetched afresh for each row rather than held across the call
- * to the callback, so that no pointer into relation storage outlives a call
- * out of the library.  The range is the one range that lives outside an
- * evaluation and across a call out of the library, so it is the one a discard
- * could invalidate.  A callback may not call back into the context, but one
- * that loads and queries regardless has the answer relation discarded and
- * refilled under the loop.  The stream then delivers whatever the refilled
- * relation holds at the identifiers it has left, and stops at the first one
- * the relation no longer has rather than read a tuple that is not there: a
- * broken contract gives wrong rows, never an invalid read.
+ * The context is busy while the callback runs, so a callback that calls
+ * back to load or query is refused, and the answer relation cannot be
+ * discarded or refilled under the loop.  The tuple is fetched afresh for each
+ * row all the same, so that no pointer into relation storage is held across a
+ * call out of the library, and the loop stops at an identifier the relation
+ * does not hold rather than read past it, should that ever stop being true.
  */
 static void
 stream_answer(relic_t *ctx, const relic_relation_t *answer,
@@ -1690,32 +1699,97 @@ int
 relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
     void *callback_ctx)
 {
-	relic_relation_t *answer;
 	int status;
 
+	if (relic_enter(ctx) != 0)
+		return (-1);
+
+	status = relic_query_answer(ctx, query, callback, callback_ctx);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+int
+relic_query_answer(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
+    void *callback_ctx)
+{
+	int status;
+
+	if (!query_answerable(ctx, query, callback))
+		return (-1);
+
+	query->running = true;
+
+	status = compute_answer(ctx, query);
+	if (status == 0)
+		status = deliver_answer(ctx, query, callback, callback_ctx);
+
+	/*
+	 * The answer is transient: once delivered, or once the query has
+	 * failed part way through computing it, nothing keeps it, so the
+	 * relation is emptied and what it counted against the limits given
+	 * back.
+	 */
+	relic_relation_discard(ctx, query->rule.head);
+
+	query->running = false;
+
+	return (status);
+}
+
+/*
+ * Whether `query` can be answered in `ctx` into `callback`, reporting why
+ * not.  A query from another context would be read with identifiers that
+ * mean something else here.
+ */
+static bool
+query_answerable(relic_t *ctx, const relic_query_t *query,
+    relic_row_cb callback)
+{
 	if (query == NULL || callback == NULL) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "a query and a row callback must both be given");
-		return (-1);
+		return (false);
 	}
 
 	if (query->ctx != ctx) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "the query belongs to a different context");
-		return (-1);
+		return (false);
 	}
 
+	return (true);
+}
+
+/*
+ * Fill the query's answer relation, from the relations as they stand when
+ * the program is materialized or the rewrite is turned off, and through the
+ * query's Magic rewrite otherwise.
+ */
+static int
+compute_answer(relic_t *ctx, const relic_query_t *query)
+{
 	if (relic_program_ready(ctx) != 0)
 		return (-1);
 
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
 	    ctx->materialized_rules == ctx->program.rules.count)
-		status = answer_from_program(ctx, &query->rule);
-	else
-		status = answer_through_rewrite(ctx, &query->rule);
+		return (answer_from_program(ctx, &query->rule));
 
-	if (status != 0)
-		return (-1);
+	return (answer_through_rewrite(ctx, &query->rule));
+}
+
+/*
+ * Stream the answer relation compute_answer() filled.  It exists unless
+ * creating it ran out of memory, which was reported.
+ */
+static int
+deliver_answer(relic_t *ctx, const relic_query_t *query,
+    relic_row_cb callback, void *callback_ctx)
+{
+	relic_relation_t *answer;
 
 	answer = relic_relation_for(ctx, query->rule.head);
 	if (answer == NULL)

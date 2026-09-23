@@ -289,7 +289,7 @@ load_operands(relic_t *ctx, int argc, char *argv[])
 	int i;
 
 	if (argc == 0)
-		return (relic_load_file(ctx, stdin, "<stdin>"));
+		return (relic_load_file(ctx, "<stdin>", stdin));
 
 	status = 0;
 	for (i = 0; i < argc; i++) {

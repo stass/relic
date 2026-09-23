@@ -44,7 +44,6 @@
 #define	SCENARIO_CURRENT	"a later load extends the fixed point"
 #define	SCENARIO_DISCARD	"a later load can make a derived tuple false"
 #define	SCENARIO_RELEASE	"a discard gives back what the limits count"
-#define	SCENARIO_REENTRY	"a callback that loads cannot overrun the stream"
 #define	SCENARIO_DUPLICATES	"duplicate facts and derivations collapse"
 #define	SCENARIO_LIMIT		"a query over a limit delivers no rows"
 #define	SCENARIO_NEGATION	"a negated literal keeps what is absent"
@@ -89,18 +88,6 @@ struct diag_log {
 	size_t	warnings;
 };
 
-typedef struct reentry reentry_t;
-
-/*
- * What reenter_on_first_row() works with: the context, the query it runs
- * again from inside its own stream, and how many rows that stream delivered.
- */
-struct reentry {
-	relic_t		*ctx;
-	relic_query_t	*query;
-	size_t		 rows;
-};
-
 /*
  * The RELIC_F_ flags every context a scenario creates is given, which is how
  * main() runs the scenarios under each evaluation strategy in turn.
@@ -118,12 +105,8 @@ static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static int	 compare_text(const void *left, const void *right);
-static int	 count_row(void *callback_ctx, const relic_value_t *values,
-		    size_t count);
 static int	 render_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
-static int	 reenter_on_first_row(void *callback_ctx,
-		    const relic_value_t *values, size_t count);
 static int	 run_query(relic_t *ctx, const char *text,
 		    rendering_t *rendering);
 static void	 sort_rows(char *text);
@@ -134,7 +117,6 @@ static void	 materialized_counters_are(const char *scenario,
 		    const char *program, unsigned int flags, const char *what,
 		    counters_t expected);
 static void	 a_lookup_sees_its_relation_as_it_started(void);
-static void	 a_callback_that_loads_cannot_overrun_the_stream(void);
 static void	 a_discard_gives_back_what_the_limits_count(void);
 static void	 a_later_load_can_make_a_derived_tuple_false(void);
 static void	 a_later_load_extends_the_fixed_point(void);
@@ -675,8 +657,8 @@ a_later_load_can_make_a_derived_tuple_false(void)
  *
  * With a limit of six tuples, two facts and the two answers of e(X)? fit.
  * After a third fact, the three facts and the three answers of a second query
- * fit exactly -- the first query's answers were discarded with everything
- * else -- where the ten a discard that kept its count would reach do not.
+ * fit exactly, where the eight a discard that kept its count would reach do
+ * not.  Once delivered the answers are released too, leaving the facts.
  */
 static void
 a_discard_gives_back_what_the_limits_count(void)
@@ -710,85 +692,10 @@ a_discard_gives_back_what_the_limits_count(void)
 	answers_are(SCENARIO_RELEASE, ctx, "e(X)?", "a|b|c");
 
 	relic_stats(ctx, &stats);
-	checkf(stats.tuples == 6, SCENARIO_RELEASE,
-	    "the context should hold 6 tuples, not %zu", stats.tuples);
+	checkf(stats.tuples == 3, SCENARIO_RELEASE,
+	    "the context should hold 3 tuples, not %zu", stats.tuples);
 
 	relic_destroy(ctx);
-}
-
-static int
-count_row(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
-    size_t count RELIC_UNUSED)
-{
-	size_t *rows;
-
-	rows = callback_ctx;
-	(*rows)++;
-
-	return (0);
-}
-
-/*
- * A row callback that breaks the contract of relic_query_run(): on the first
- * row it loads facts that empty the answer and runs the query again, inside
- * the stream that is delivering it.
- */
-static int
-reenter_on_first_row(void *callback_ctx, const relic_value_t *values
-    RELIC_UNUSED, size_t count RELIC_UNUSED)
-{
-	reentry_t *reentry;
-	size_t inner_rows;
-
-	reentry = callback_ctx;
-	reentry->rows++;
-	if (reentry->rows > 1)
-		return (0);
-
-	inner_rows = 0;
-	if (relic_load_string(reentry->ctx, "inner.dl", "c(x).\nc(y).\n") == 0)
-		relic_query_run(reentry->ctx, reentry->query, count_row,
-		    &inner_rows);
-	check(inner_rows == 0, SCENARIO_REENTRY,
-	    "the inner run finds the answer emptied");
-
-	return (0);
-}
-
-/*
- * A callback may not call into the context, but one that does must not make
- * the library read past a relation.  Here the inner run discards the answer
- * relation the outer stream is walking and refills it with nothing, so the
- * outer stream's next identifier names no tuple; the stream stops there
- * rather than reading one.
- */
-static void
-a_callback_that_loads_cannot_overrun_the_stream(void)
-{
-	reentry_t reentry;
-
-	bzero(&reentry, sizeof(reentry));
-
-	reentry.ctx = context_with("a(x).\na(y).\n"
-	    "b(X) :- a(X), not c(X).\n", NULL);
-	if (reentry.ctx == NULL)
-		return;
-
-	reentry.query = relic_query_prepare(reentry.ctx, NULL, "b(X)?");
-	if (reentry.query == NULL) {
-		check(false, SCENARIO_REENTRY, "the query is prepared");
-		relic_destroy(reentry.ctx);
-		return;
-	}
-
-	check(relic_query_run(reentry.ctx, reentry.query,
-	    reenter_on_first_row, &reentry) == 0, SCENARIO_REENTRY,
-	    "the outer run completes");
-	checkf(reentry.rows == 1, SCENARIO_REENTRY,
-	    "the outer stream should stop after 1 row, not %zu", reentry.rows);
-
-	relic_query_destroy(reentry.query);
-	relic_destroy(reentry.ctx);
 }
 
 /*
@@ -1057,7 +964,6 @@ run_scenarios(const char *strategy, unsigned int flags)
 	negation_keeps_what_is_absent();
 	a_later_load_can_make_a_derived_tuple_false();
 	a_discard_gives_back_what_the_limits_count();
-	a_callback_that_loads_cannot_overrun_the_stream();
 }
 
 int

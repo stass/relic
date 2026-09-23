@@ -283,12 +283,12 @@ the_comparison_order_holds_within_a_type(void)
 	check(relic_value_order(ctx, zero, zero) == RELIC_ORDER_EQUAL,
 	    SCENARIO_ORDER, "a value should equal itself");
 
-	upper_b = intern_text(ctx, RELIC_SYMBOL, "B");
-	lower_a = intern_text(ctx, RELIC_SYMBOL, "a");
+	upper_b = intern_text(ctx, RELIC_SYMBOL, "aB");
+	lower_a = intern_text(ctx, RELIC_SYMBOL, "aa");
 
 	check(relic_value_order(ctx, upper_b, lower_a) == RELIC_ORDER_LESS,
 	    SCENARIO_ORDER,
-	    "symbols should order by byte value, not by letter");
+	    "symbols should order by byte value, aB before aa, not by letter");
 
 	abc = intern_text(ctx, RELIC_STRING, "abc");
 	abcd = intern_text(ctx, RELIC_STRING, "abcd");

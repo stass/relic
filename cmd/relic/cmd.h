@@ -45,30 +45,23 @@ typedef struct output output_t;
 /*
  * Where query results go, and in what form.
  *
- * The rows of one query are written as they are delivered, or held and
- * sorted first when `sorted` is set.  `queries_written` is what decides
- * whether a query's results need a separator before them; `rows_written`
- * and `begun` belong to the query being written.
+ * The rows of one query are written as they are delivered, or collected and
+ * sorted first when `sorted` is set.  `queries_written` is what decides whether a query's results need
+ * a separator before them; `rows_written` and `begun` belong to the query
+ * being written.
  *
  * A write that fails is reported once, naming `name`, and `write_failed`
- * then keeps it from being reported again.  `hold_failed` records that a row
- * of the current query could not be held for sorting, which has been
- * reported and fails the query.
+ * then keeps it from being reported again.
  */
 struct output {
 	relic_t			*ctx;
 	FILE			*stream;
 	const char		*name;
 	const char		*program_name;
-	relic_value_t		*held;		/* the values of held rows */
-	size_t			 held_count;	/* rows */
-	size_t			 held_capacity;	/* values */
-	size_t			 width;		/* values per held row */
 	size_t			 queries_written;
 	size_t			 rows_written;
 	enum output_format	 format;
 	bool			 begun;
-	bool			 hold_failed;
 	bool			 sorted;
 	bool			 write_failed;
 };

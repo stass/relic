@@ -74,6 +74,26 @@ RELIC_EXPORT const char *relic_version(void);
  * A relic context: a loaded program, the values it mentions, and the
  * relations derived from it.  Contexts share nothing, so a program may hold
  * as many as it likes, but one context is not itself thread-safe.
+ *
+ * A function that takes a context and can fail returns -1 or NULL when it
+ * does, and 0 or a pointer otherwise, and a failure is always explained by a
+ * RELIC_ERROR diagnostic, the last of which relic_error() returns.  The
+ * functions that only read -- relic_string(), relic_value_compare(),
+ * relic_query_count(), relic_stats() -- cannot fail and report nothing;
+ * relic_string() returns NULL for an identifier it does not know.
+ *
+ * Caller code runs while the context is part way through an operation in
+ * four ways: the diagnostic, explain and row callbacks, and the read
+ * function of a stream given to relic_load_file().  It may read through the
+ * context with the functions above and relic_error().  Any other call on the
+ * same context is refused: a call that returns a status fails with -1 or
+ * NULL, one that returns nothing does nothing, and relic_error() describes
+ * the refusal until the next error or until the operation the caller code
+ * runs inside returns; the diagnostic callback is not called for it.  A
+ * refused relic_destroy() releases nothing, so a callback that tries to
+ * destroy its context leaks it rather than freeing memory in use.  A
+ * callback must return: one that leaves by longjmp() or an exception leaves
+ * its context refusing every later call.
  */
 typedef struct relic relic_t;
 
@@ -116,6 +136,9 @@ typedef struct relic_config relic_config_t;
  * evaluation strategy that must give the same answers as the default.  They
  * exist so that strategies can be compared against one another, and are not
  * meant for ordinary use.  Bits no switch defines are ignored.
+ *
+ * The structure's layout is part of the binary interface, so a release that
+ * adds a limit changes the library's interface version.
  */
 struct relic_config {
 	size_t		max_memory;	/* relation and index storage, bytes */
@@ -197,6 +220,28 @@ struct relic_value {
 };
 
 /*
+ * Build a symbol or a string value from bytes, interning them in the context.
+ * Each fills *value and returns 0, or returns -1 with the reason reported.
+ * The identifier stays valid for the life of the context, and the same bytes
+ * always give the same one.
+ *
+ * A symbol is what the language can write as one: a lowercase ASCII letter
+ * followed by ASCII letters, digits and underscores.  Any other bytes -- a
+ * space, a capital first, a NUL, UTF-8 -- are refused by
+ * relic_value_symbol() and must be built with relic_value_string(), whose
+ * string holds whatever bytes it is given.  The rule holds wherever a
+ * value enters the program, so a symbol value built by hand from a string's
+ * identifier is refused there too.
+ *
+ * An integer needs no constructor: set `type` to RELIC_INTEGER and
+ * `v.integer` to the value.
+ */
+RELIC_EXPORT int relic_value_symbol(relic_t *ctx, const char *bytes,
+    size_t length, relic_value_t *value);
+RELIC_EXPORT int relic_value_string(relic_t *ctx, const char *bytes,
+    size_t length, relic_value_t *value);
+
+/*
  * The bytes of an interned symbol or string, or NULL for an identifier this
  * context never assigned.
  *
@@ -252,8 +297,8 @@ typedef void (*relic_diag_cb)(
  *
  * A diagnostic can arrive in the middle of loading, checking or evaluating,
  * when the context is part way through an operation and cannot be entered
- * again.  The callback therefore must not call into the context, except to
- * read with relic_string() and relic_error().
+ * again.  The callback may read through the context, and any other call it
+ * makes is refused, as the description of relic_t sets out.
  */
 RELIC_EXPORT void relic_diag_set(relic_t *ctx, relic_diag_cb callback,
     void *callback_ctx);
@@ -280,8 +325,10 @@ RELIC_EXPORT void relic_diag_stderr(void *callback_ctx,
  * Load a program.
  *
  * relic_load_path() opens the file and delegates; relic_load_file() reads
- * the stream whole and delegates; relic_load_string() takes a
- * NUL-terminated program text.  `source_name` is what diagnostics from that
+ * the stream whole and delegates, and a read function of the caller's own
+ * behind the stream is held to the rule for callbacks that the description
+ * of relic_t sets out; relic_load_string() takes a NUL-terminated program
+ * text.  `source_name` is what diagnostics from that
  * text point at and is copied, so it need not outlive the call; NULL names
  * the input "<input>".
  *
@@ -293,11 +340,33 @@ RELIC_EXPORT void relic_diag_stderr(void *callback_ctx,
  * program never holds half of a file.  A program with an error in it is not
  * a smaller program, it is a different one.
  */
-RELIC_EXPORT int relic_load_file(relic_t *ctx, FILE *stream,
-    const char *source_name);
+RELIC_EXPORT int relic_load_file(relic_t *ctx, const char *source_name,
+    FILE *stream);
 RELIC_EXPORT int relic_load_path(relic_t *ctx, const char *path);
 RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
     const char *text);
+
+/*
+ * Add the fact predicate(values[0], ..., values[arity - 1]) to the program,
+ * exactly as loading its text would: it is appended after everything loaded
+ * before it, checked with the next check, and shown by explain like any other
+ * fact.  Returns 0, or -1 with the reason reported and nothing added.
+ *
+ * `predicate` is a NUL-terminated name, which must be a symbol by the rule of
+ * relic_value_symbol() and must not be the negation keyword `not`.  `arity`
+ * is at most 32, and `values` holds that many, each built by the value
+ * constructors, an integer, or read out of a query's answer; it may be NULL
+ * when `arity` is zero.  A predicate is identified by its name and arity
+ * together, so a fact of a new arity starts a new predicate.
+ *
+ * Adding a fact, like loading, changes the program, so everything derived
+ * before it is discarded by the next evaluation and derived again from the
+ * facts: a fact can make a negated literal false, and nothing derived before
+ * it can be kept without maintaining it incrementally, which relic does not
+ * do.
+ */
+RELIC_EXPORT int relic_fact_add(relic_t *ctx, const char *predicate,
+    size_t arity, const relic_value_t *values);
 
 /*
  * Validate the loaded program, returning 0 when it is usable and -1 when it
@@ -379,7 +448,8 @@ typedef int (*relic_row_cb)(void *, const relic_value_t *, size_t);
  * warning it would in a rule, once.
  *
  * The query belongs to the caller, who releases it with relic_query_destroy()
- * before the context is destroyed.
+ * before or after the context is destroyed; it cannot be run once the
+ * context is gone.
  */
 RELIC_EXPORT relic_query_t *relic_query_prepare(relic_t *ctx,
     const char *source_name, const char *text);
@@ -419,16 +489,52 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * input; relic_value_compare() orders them when a caller needs an order that
  * does not depend on that.
  *
- * The callback may read strings through the context with relic_string() and
- * compare values with relic_value_compare().  It must not otherwise call into
- * the context -- to load, to prepare or run a query, or to destroy the query
- * or the context -- while rows are being delivered.
+ * The answer is transient.  Once its rows have been delivered, or the
+ * callback has stopped them, the context keeps nothing of it, so answering
+ * many queries does not grow the context and earlier answers do not count
+ * against the tuple and memory limits.  A caller that wants to keep an answer
+ * copies it, as relic_query_collect() does.
+ *
+ * The callback may read through the context, and any other call it makes is
+ * refused, as the description of relic_t sets out.
  */
 RELIC_EXPORT int relic_query_run(relic_t *ctx, relic_query_t *query,
     relic_row_cb callback, void *callback_ctx);
 
 /*
- * Release a query.  Accepts NULL.
+ * A query's answer, copied out of the context by relic_query_collect().
+ */
+typedef struct relic_result relic_result_t;
+
+/*
+ * Answer a query into a result the caller owns, or return NULL with the
+ * reason reported -- the query failed, or the copy ran out of memory -- and
+ * never a partial result.  The collector is relic_query_run() with a callback
+ * that copies each row, and delivers what the stream would, in its order.
+ *
+ * relic_result_rows() and relic_result_columns() give the result's size; the
+ * columns are the query's output columns even when there are no rows.
+ * relic_result_row() returns the `row`th row's values, or NULL when `row` is
+ * not less than the number of rows; for a query with no output columns a
+ * present row is a non-NULL pointer to no values.
+ *
+ * A result holds nothing of the context's state, so it survives later loads,
+ * facts and queries and may be destroyed after the context.  The bytes of its
+ * symbols and strings are read with relic_string() on the context, for as
+ * long as that lives.  relic_result_destroy() accepts NULL.
+ */
+RELIC_EXPORT relic_result_t *relic_query_collect(relic_t *ctx,
+    relic_query_t *query);
+RELIC_EXPORT size_t relic_result_rows(const relic_result_t *result);
+RELIC_EXPORT size_t relic_result_columns(const relic_result_t *result);
+RELIC_EXPORT const relic_value_t *relic_result_row(
+    const relic_result_t *result, size_t row);
+RELIC_EXPORT void relic_result_destroy(relic_result_t *result);
+
+/*
+ * Release a query.  Accepts NULL.  It may be called before or after
+ * relic_destroy(), and from caller code the library is running, except
+ * while the query itself is being answered, when it does nothing.
  */
 RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
 
@@ -468,9 +574,9 @@ typedef struct relic_stats relic_stats_t;
  *			index on the bound arguments of a literal
  *
  * The rest describe the context when the counters are read: the tuples held
- * across every relation, the answers of queries included, the bytes of
- * relation and index storage they occupy, and the distinct values interned,
- * by type.
+ * across every relation -- answers are transient, so only a row callback
+ * finds one among them, the answer it is receiving -- the bytes of relation
+ * and index storage they occupy, and the distinct values interned, by type.
  *
  * The counts depend on the evaluation strategy and on how the engine is
  * implemented, and are not stable from one release to the next; only the
@@ -518,7 +624,8 @@ typedef void (*relic_explain_cb)(void *, const char *);
  * text is meant for a person and may change from one release to the next.  A
  * line longer than the limit is cut and ends in "...".
  *
- * As with a diagnostic callback, the callback must not call into the context.
+ * As with a diagnostic callback, the callback may read through the context
+ * and any other call it makes is refused.
  */
 RELIC_EXPORT void relic_explain_set(relic_t *ctx, relic_explain_cb callback,
     void *callback_ctx);

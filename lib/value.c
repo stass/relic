@@ -33,15 +33,24 @@
  */
 #define	RELIC_VALUE_MAX		(UINT32_MAX - 1u)
 
+/* Why bytes the language could not write as a symbol are refused as one. */
+#define	RELIC_NOT_A_SYMBOL \
+	"a symbol is a lowercase letter followed by letters, digits and " \
+	"underscores; other bytes make a string"
+
 static int	 compare_bytes(const relic_t *ctx, uint32_t left,
 		    uint32_t right);
 static int	 compare_integers(int64_t left, int64_t right);
 static int	 compare_totally(const relic_t *ctx, const relic_value_t *left,
 		    const relic_value_t *right);
+static int	 intern_bytes(relic_t *ctx, enum relic_type type,
+		    const char *bytes, size_t length, relic_value_t *value);
 static const relic_value_t *value_at(const relic_valtab_t *table,
 		    relic_dom_t dom);
 static bool	 value_equal(const relic_value_t *left,
 		    const relic_value_t *right);
+static int	 value_from_bytes(relic_t *ctx, enum relic_type type,
+		    const char *bytes, size_t length, relic_value_t *value);
 static uint32_t	 value_hash(const relic_value_t *value);
 static relic_value_t value_normalized(const relic_value_t *value);
 static uint32_t	 value_rehash(uint32_t dom, void *ctx);
@@ -145,24 +154,36 @@ value_rehash(uint32_t dom, void *ctx)
 
 /*
  * Whether a value a caller handed in is one this context can intern: a known
- * type, and for a symbol or a string an identifier this context assigned.
+ * type, for a symbol or a string an identifier this context assigned, and for
+ * a symbol bytes the language could write as one.
  *
  * An embedding program builds relic_value_t itself, so the identifier in one
  * may name a symbol from a different context or no symbol at all.  Catching
  * that here keeps a bad identifier out of the value table, where later stages
- * would read through it.
+ * would read through it.  The same caller could name a string's bytes as a
+ * symbol, which would print as text that reads back as something else, so
+ * every value reaching the table is held to the lexer's rule here, once.
  */
 static bool
 value_well_formed(relic_t *ctx, const relic_value_t *value)
 {
+	const char *bytes;
+	size_t length;
+
 	switch (value->type) {
 	case RELIC_SYMBOL:
 	case RELIC_STRING:
-		if (relic_symbol_bytes(ctx, value->v.id, NULL) == NULL) {
+		bytes = relic_symbol_bytes(ctx, value->v.id, &length);
+		if (bytes == NULL) {
 			relic_diagf(ctx, RELIC_ERROR, NULL,
 			    "value refers to symbol %lu, which this context "
 			    "has not interned",
 			    (unsigned long)value->v.id);
+			return (false);
+		}
+		if (value->type == RELIC_SYMBOL &&
+		    !relic_lex_is_symbol(bytes, length)) {
+			relic_diagf(ctx, RELIC_ERROR, NULL, RELIC_NOT_A_SYMBOL);
 			return (false);
 		}
 		return (true);
@@ -550,6 +571,71 @@ relic_value_total_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 	}
 
 	return (compare_totally(ctx, left, right));
+}
+
+/*
+ * The body of relic_value_symbol() and relic_value_string(), which differ
+ * only in `type`.
+ */
+static int
+value_from_bytes(relic_t *ctx, enum relic_type type, const char *bytes,
+    size_t length, relic_value_t *value)
+{
+	int status;
+
+	if (relic_enter(ctx) != 0)
+		return (-1);
+
+	status = intern_bytes(ctx, type, bytes, length, value);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+/*
+ * Fill *value with interned bytes of `type`.  The value table is left alone:
+ * a value is interned there when it enters the program.
+ */
+static int
+intern_bytes(relic_t *ctx, enum relic_type type, const char *bytes,
+    size_t length, relic_value_t *value)
+{
+	uint32_t symbol;
+
+	if ((bytes == NULL && length > 0) || value == NULL) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "a value needs its bytes and somewhere to be stored");
+		return (-1);
+	}
+
+	if (type == RELIC_SYMBOL && !relic_lex_is_symbol(bytes, length)) {
+		relic_diagf(ctx, RELIC_ERROR, NULL, RELIC_NOT_A_SYMBOL);
+		return (-1);
+	}
+
+	if (relic_symbol_intern(ctx, length > 0 ? bytes : "", length,
+	    &symbol) != 0)
+		return (-1);
+
+	value->type = type;
+	value->v.id = symbol;
+
+	return (0);
+}
+
+int
+relic_value_symbol(relic_t *ctx, const char *bytes, size_t length,
+    relic_value_t *value)
+{
+	return (value_from_bytes(ctx, RELIC_SYMBOL, bytes, length, value));
+}
+
+int
+relic_value_string(relic_t *ctx, const char *bytes, size_t length,
+    relic_value_t *value)
+{
+	return (value_from_bytes(ctx, RELIC_STRING, bytes, length, value));
 }
 
 int

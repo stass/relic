@@ -64,7 +64,8 @@ other_rules="no-reorder"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic"
 
 work=$(mktemp -d) || exit 1
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
 
 # Run one program with the given extra options, from its own directory as
 # the language tests do, recording its output and status under `label`.

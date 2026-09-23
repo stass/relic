@@ -32,7 +32,8 @@ fail() {
 }
 
 work=$(mktemp -d) || exit 1
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
 
 awk -v chains="$chains" -v size="$length" 'BEGIN {
 	for (c = 0; c < chains; c++)

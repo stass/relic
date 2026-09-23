@@ -3,8 +3,8 @@ stats: derivations 20
 stats: tuples inserted 19
 stats: tuples scanned 8
 stats: tuples looked up 14
-stats: tuples held 19
-stats: storage bytes 768
+stats: tuples held 13
+stats: storage bytes 672
 stats: symbol values 7
 stats: string values 0
 stats: integer values 0

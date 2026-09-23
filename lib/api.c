@@ -40,10 +40,40 @@ relic_context_alloc(relic_t *ctx, size_t size)
 	return (NULL);
 }
 
+int
+relic_enter(relic_t *ctx)
+{
+	if (ctx->busy) {
+		relic_diag_record_refusal(ctx);
+		return (-1);
+	}
+
+	ctx->busy = true;
+
+	return (0);
+}
+
+/*
+ * A call refused during the operation was the caller code's to learn about,
+ * and the operation may yet have failed on the strength of an error reported
+ * before it; once the operation returns, relic_error() describes the
+ * operation again.
+ */
+void
+relic_leave(relic_t *ctx)
+{
+	ctx->busy = false;
+	ctx->diag.refused = false;
+}
+
+/*
+ * A context is destroyed by entering it and never leaving: nothing is left
+ * to leave.
+ */
 void
 relic_destroy(relic_t *ctx)
 {
-	if (ctx == NULL)
+	if (ctx == NULL || relic_enter(ctx) != 0)
 		return;
 
 	relic_reltab_reset(&ctx->relations);

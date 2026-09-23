@@ -55,6 +55,7 @@
 #define	SCENARIO_FALLBACK	"an abandoned rewrite out of memory reports once"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
+#define	SCENARIO_INTERFACE	"an added fact or collected answer reports once"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_MATERIALIZE	"a materialization out of memory reports once"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
@@ -194,6 +195,13 @@
 #define	WIDENING_ARITY	8
 #define	FALLBACK_SWEEP	1024
 
+/*
+ * The interface sweep builds a value, adds it as a fact, prepares a query
+ * and collects its answer, which makes a few dozen allocations undisturbed;
+ * like the fallback sweep it stops at the first run that needs no refusal.
+ */
+#define	INTERFACE_SWEEP	512
+
 typedef struct eval_sweep eval_sweep_t;
 
 /*
@@ -254,6 +262,8 @@ static void	 sweep_query_retry(const eval_sweep_t *sweep,
 		    const char *program);
 static void	 a_materialization_out_of_memory_reports_once(void);
 static void	 an_abandoned_rewrite_out_of_memory_reports_once(void);
+static void	 an_added_fact_or_collected_answer_reports_once(void);
+static int	 add_and_collect(relic_t *ctx, size_t *rowsp);
 static char	*wide_sweep_program(void);
 static int	 count_answer(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
@@ -2042,6 +2052,112 @@ a_materialization_out_of_memory_reports_once(void)
 	    "%zu of %d did", refused, WIDE_SWEEP);
 }
 
+/*
+ * Build the value `alpha`, add f(alpha) and collect f(X)? into a result,
+ * storing its row count in *rowsp.  Returns 0, or -1 at the first call that
+ * failed.
+ */
+static int
+add_and_collect(relic_t *ctx, size_t *rowsp)
+{
+	relic_value_t value;
+	relic_query_t *query;
+	relic_result_t *result;
+
+	if (relic_value_symbol(ctx, "alpha", 5, &value) != 0)
+		return (-1);
+	if (relic_fact_add(ctx, "f", 1, &value) != 0)
+		return (-1);
+
+	query = relic_query_prepare(ctx, NULL, "f(X)?");
+	if (query == NULL)
+		return (-1);
+	result = relic_query_collect(ctx, query);
+	relic_query_destroy(query);
+	if (result == NULL)
+		return (-1);
+
+	*rowsp = relic_result_rows(result);
+	relic_result_destroy(result);
+
+	return (0);
+}
+
+/*
+ * Build a value, add it as a fact and collect a query's answer with the nth
+ * allocation refused, for every allocation an undisturbed run makes, then do
+ * it all again with the allocator restored.
+ *
+ * The context starts empty, so that building the fact's statement makes the
+ * program arena's first allocation rather than finding room left by a load.
+ * A refusal can land in interning the value, in building the statement, in
+ * preparing or answering the query, or in storing a row of the result.
+ * Wherever it lands, the call it lands in fails with exactly one error, and
+ * the retry answers the one row an undisturbed run does: the fact added
+ * twice is one tuple, and nothing half-added is left behind.
+ */
+static void
+an_added_fact_or_collected_answer_reports_once(void)
+{
+	unsigned long undisturbed;
+	size_t refused;
+	size_t completed;
+	size_t rows;
+	long budget;
+
+	undisturbed = 0;
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < INTERFACE_SWEEP &&
+	    (undisturbed == 0 || budget <= (long)undisturbed); budget++) {
+		relic_t *ctx;
+		unsigned long before;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_INTERFACE,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		errors_reported = 0;
+		rows = 0;
+
+		before = allocations_seen;
+		refuse_allocations_after(budget);
+		status = add_and_collect(ctx, &rows);
+		serve_every_allocation();
+
+		if (status == 0) {
+			completed++;
+			if (undisturbed == 0)
+				undisturbed = allocations_seen - before;
+		} else
+			refused++;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_INTERFACE,
+		    "a run that %s should report %d error(s), not %zu, with "
+		    "allocation %ld refused", status != 0 ? "failed" :
+		    "succeeded", status != 0 ? 1 : 0, errors_reported, budget);
+
+		rows = 0;
+		checkf(add_and_collect(ctx, &rows) == 0 && rows == 1,
+		    SCENARIO_INTERFACE,
+		    "the retry should collect 1 row, not %zu, with allocation "
+		    "%ld refused", rows, budget);
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0, SCENARIO_INTERFACE,
+	    "the sweep should reach both a refused run and a completed one, "
+	    "not %zu and %zu", refused, completed);
+}
+
 int
 main(void)
 {
@@ -2057,6 +2173,7 @@ main(void)
 	a_query_that_ran_out_of_memory_can_be_retried();
 	a_materialization_out_of_memory_reports_once();
 	an_abandoned_rewrite_out_of_memory_reports_once();
+	an_added_fact_or_collected_answer_reports_once();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

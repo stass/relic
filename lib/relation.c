@@ -1066,6 +1066,31 @@ relic_relation_discard_all(relic_t *ctx)
 	table->storage_bytes = 0;
 }
 
+/*
+ * Empty the relation of `pred`, if it has one, and give back what it counted
+ * against both totals.  A predicate with no relation yet is left without
+ * one: creating a relation only to empty it could fail, and a caller
+ * discarding after a failure must not report a second one.
+ */
+void
+relic_relation_discard(relic_t *ctx, relic_pred_id_t pred)
+{
+	relic_reltab_t *table;
+	relic_relation_t *relation;
+
+	table = &ctx->relations;
+	if (pred == 0 || pred > table->count)
+		return;
+
+	relation = table->entries[pred - 1];
+	if (relation == NULL)
+		return;
+
+	table->tuple_count -= relation->count;
+	table->storage_bytes -= relic_relation_bytes(relation);
+	relation_empty(relation);
+}
+
 size_t
 relic_relation_total_bytes(const relic_t *ctx)
 {

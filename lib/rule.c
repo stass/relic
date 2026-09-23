@@ -146,6 +146,7 @@ struct relic_compiler {
 
 static enum relic_compile_result append_rule(relic_t *ctx,
 		    relic_ruletab_t *table, const relic_rule_t *rule);
+static int	 check_program(relic_t *ctx);
 static void	*compile_alloc(relic_compiler_t *compiler, size_t count,
 		    size_t size);
 static enum relic_compile_result compile_atom(relic_compiler_t *compiler,
@@ -175,6 +176,7 @@ static void	 compiler_init(relic_compiler_t *compiler, relic_t *ctx,
 static enum relic_compile_result compile_term(relic_compiler_t *compiler,
 		    const relic_ast_term_t *term,
 		    enum relic_arg_position position, relic_arg_t *arg);
+static relic_query_t *copy_loaded_query(relic_t *ctx, size_t index);
 static const char *describe_statement(const relic_compiler_t *compiler,
 		    char *buffer, size_t size);
 static const relic_ast_stmt_t *first_pending_statement(const relic_t *ctx);
@@ -183,6 +185,8 @@ static enum relic_compile_result name_answer_predicate(
 static enum relic_compile_result occupy_slot(relic_compiler_t *compiler,
 		    const relic_ast_variable_t *variable,
 		    const relic_location_t *where, uint16_t *slotp);
+static relic_query_t *prepare_query(relic_t *ctx, const char *source_name,
+		    const char *text);
 static void	 publish_query_number(relic_t *ctx);
 static relic_query_t *query_create(relic_t *ctx);
 static void	 report_singleton_variables(relic_compiler_t *compiler,
@@ -1070,6 +1074,26 @@ compile_pending_statements(relic_t *ctx)
 int
 relic_check(relic_t *ctx)
 {
+	int status;
+
+	if (relic_enter(ctx) != 0)
+		return (-1);
+
+	status = check_program(ctx);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+/*
+ * relic_check() inside an operation already entered: compile what was loaded
+ * since the last check, then analyse the program and sweep for undefined
+ * predicates.
+ */
+static int
+check_program(relic_t *ctx)
+{
 	bool completed;
 
 	completed = compile_pending_statements(ctx);
@@ -1129,7 +1153,7 @@ relic_program_ready(relic_t *ctx)
 
 	errors_before = ctx->diag.error_count;
 
-	if (relic_check(ctx) == 0)
+	if (check_program(ctx) == 0)
 		return (0);
 
 	if (ctx->diag.error_count == errors_before)
@@ -1177,6 +1201,21 @@ query_create(relic_t *ctx)
  */
 relic_query_t *
 relic_query_prepare(relic_t *ctx, const char *source_name, const char *text)
+{
+	relic_query_t *query;
+
+	if (relic_enter(ctx) != 0)
+		return (NULL);
+
+	query = prepare_query(ctx, source_name, text);
+
+	relic_leave(ctx);
+
+	return (query);
+}
+
+static relic_query_t *
+prepare_query(relic_t *ctx, const char *source_name, const char *text)
 {
 	relic_query_t *query;
 	const relic_ast_stmt_t *statement;
@@ -1250,6 +1289,21 @@ relic_query_count(relic_t *ctx)
 relic_query_t *
 relic_query_loaded(relic_t *ctx, size_t index)
 {
+	relic_query_t *query;
+
+	if (relic_enter(ctx) != 0)
+		return (NULL);
+
+	query = copy_loaded_query(ctx, index);
+
+	relic_leave(ctx);
+
+	return (query);
+}
+
+static relic_query_t *
+copy_loaded_query(relic_t *ctx, size_t index)
+{
 	const relic_ruletab_t *queries;
 	relic_query_t *query;
 
@@ -1273,11 +1327,21 @@ relic_query_loaded(relic_t *ctx, size_t index)
 	return (query);
 }
 
+/*
+ * Only the query being answered is refused, from whatever caller code runs
+ * while it is; any other is released without reading its context, which
+ * may be gone.
+ */
 void
 relic_query_destroy(relic_query_t *query)
 {
 	if (query == NULL)
 		return;
+
+	if (query->running) {
+		relic_diag_record_refusal(query->ctx);
+		return;
+	}
 
 	relic_arena_reset(&query->arena);
 	free(query);

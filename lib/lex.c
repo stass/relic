@@ -208,6 +208,22 @@ skip_ignorable(relic_lexer_t *lexer)
 	}
 }
 
+bool
+relic_lex_is_symbol(const char *bytes, size_t length)
+{
+	size_t i;
+
+	if (length == 0 || !in_class((unsigned char)bytes[0], LEX_SYM_START))
+		return (false);
+
+	for (i = 1; i < length; i++) {
+		if (!in_class((unsigned char)bytes[i], LEX_IDENT))
+			return (false);
+	}
+
+	return (true);
+}
+
 int
 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token)
 {

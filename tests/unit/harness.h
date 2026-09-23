@@ -12,13 +12,23 @@
 /*
  * Report a printf-style call's arguments against its format string.  The
  * harness is not part of the library and cannot include lib/internal.h, so
- * the attribute is spelled out here.
+ * the attribute is spelled out here, as is the one below.
  */
 #if defined(__GNUC__)
 #define	RELIC_TEST_PRINTFLIKE(fmt, args) \
 	__attribute__((__format__(__printf__, fmt, args)))
 #else
 #define	RELIC_TEST_PRINTFLIKE(fmt, args)
+#endif
+
+/*
+ * Mark a parameter a callback's signature requires and its body does not
+ * read, for a test that includes only the public header.
+ */
+#if defined(__GNUC__)
+#define	RELIC_TEST_UNUSED	__attribute__((__unused__))
+#else
+#define	RELIC_TEST_UNUSED
 #endif
 
 /*

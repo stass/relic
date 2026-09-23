@@ -242,8 +242,8 @@ and the guarded `path$bf` component that architecture section 60 sketches.
 | `cmd/relic/main.c` | `-X no-magic` |
 | `tests/` | `test_magic`: the rewrite against the whole fixed point over 24 generated graphs, nine programs -- left, right and double recursion, same generation, mutual recursion, negation of a derived and of a recursive predicate, facts mixed with rules, constants in heads -- and five binding shapes, plus adornment names, memoization, duplicates, the dropped tautology, both limits at and below their values, a widening program of 2^10 adornments abandoned at its budget with the fixed point's answer while configured limits replace the budget, no state leaking between queries or into a later materialization, and a load after a rewritten query reaching the next one; the evaluation sweep in `test_exhaustion` runs through the rewrite as well, and a sweep over every allocation of a query whose rewrite outgrows its budget refuses them before and after it is abandoned; `tests/magic.sh` asserts that five bound queries over a hundred disjoint chains hold at most a tenth of the whole fixed point's tuples and answer the same; `tests/equiv/strategies.sh` compares every language test with and without the rewrite, and tuple totals within runs that evaluate the same rules; eleven golden tests, among them the nested `-e` of both binding patterns of `path`, of a seed derived from another literal and of an adornment with no column, the materialized bypass, both limit diagnostics and the budget warning; `tests/perf.sh` answers a recursive cycle of 200 000 predicates through the rewrite within a tenth of its budget, which any of the three linear walks done by searching a component misses by minutes |
 
-The six-edge chain of the S7 counters holds 19 tuples through the rewrite
-against 33 from the whole fixed point. Over a hundred disjoint chains of fifty
+The six-edge chain of the S7 counters holds 13 tuples through the rewrite
+against 27 from the whole fixed point. Over a hundred disjoint chains of fifty
 nodes a query bound to one chain holds about 5,000 tuples against 250,000.
 
 An unbound query reads its predicate through the all-free adornment, which
@@ -251,6 +251,27 @@ may call the predicate bound from inside and so derive about twice what the
 whole fixed point does; `TODO.md` records subsumption as the remedy. The
 stage is about 2,500 lines of library and tool code, comments included,
 against a budget of 800; `lib/magic.c` accounts for 1,700 of them.
+
+**The library interface, stage S11.** `include/relic.h` is the interface
+`specs/design-api.md` specifies and `man/relic.3` documents: 29 entry points,
+the shared library's version-info `1:0:0`.
+
+| Component | State |
+| --- | --- |
+| `lib/api.c`, `lib/diag.c` | a context is busy for the whole of an operation: every public entry point that changes it begins with `relic_enter()` and returns through `relic_leave()`, and entry points share workers rather than calling one another, so caller code run in any way -- a diagnostic, explain or row callback, or the read function of a stream being loaded -- finds its context busy and every call that would change it refused; a refusal is what `relic_error()` describes until the next error or until the operation returns, is not counted among the operation's errors, and calls no callback; reads -- `relic_string()`, `relic_error()`, `relic_value_compare()`, `relic_stats()`, `relic_query_count()` -- are allowed |
+| `lib/rule.c` | destroying a query reads nothing of its context unless the query is being answered, so it may follow `relic_destroy()`; destroying the query being answered is refused |
+| `lib/eval.c`, `lib/relation.c` | answers are transient: a query's answer relation is emptied once its rows have been delivered, whether the query succeeded or not, so answers never count against `max_tuples` or `max_memory` for a later query |
+| `lib/value.c`, `lib/lex.c` | `relic_value_symbol()` and `relic_value_string()` intern caller bytes; a symbol must be spelled as the lexer spells one, `[a-z][A-Za-z0-9_]*`, and every symbol value the library accepts is checked against the same rule, so a symbol is an identifier wherever it came from |
+| `lib/parse.c` | `relic_fact_add()` appends the fact as a statement of the program, exactly as its text would load, so it is checked, compiled, evaluated and invalidates what was derived by the same code as a loaded fact; the predicate name is held to the symbol rule and may not be `not`; `relic_load_file()` takes the source name before the stream, as the other loaders do |
+| `lib/result.c` | `relic_query_collect()` and the result accessors, a client of `relic_query_run()`; a result holds no pointer into the context and outlives it |
+| `cmd/relic/output.c` | `-s` collects through `relic_query_collect()` rather than holding rows of its own |
+| `examples/embed.c` | facts added through the interface, rules loaded as text, one query streamed and stopped at its first row, one collected; `make installcheck` builds it with the flags `pkg-config` gives for the installed library and runs it |
+| `man/relic.3` | every entry point, the structures an embedder fills in or reads, the callback types, the flags, the return convention and the callback rule; `mandoc -Tlint` clean |
+| `tests/` | `test_api`, linked against the shared library through `<relic.h>` alone: every mutating entry point refused from a row, a diagnostic and an explain callback and from a stream's read function (`funopen(3)` or `fopencookie(3)`), a refusal in a diagnostic callback not hiding the error behind a failed query, a query destroyed after its context, answers not outliving their delivery under `max_tuples`, every diagnostic class reaching the callback with nothing on standard error, value constructors, eight refused facts and an added fact indistinguishable from its text, a fact added after materialization and after a direct query, a collected result equal to the stream and outliving its context; `test_exhaustion` sweeps a value built, added as a fact and collected, from an empty context so that the fact's statement makes the program arena's first allocation; `tests/symbols.sh` holds the shared library's defined dynamic symbols to the header's `RELIC_EXPORT` set in both directions; `tests/man.sh` holds the manual's `NAME` list to the same set and lints it; `tests/reentry.sh` holds every exported function either to a short list of those that never enter a context or to being tried from inside one by `test_api`, so a new entry point cannot go untested |
+
+The step limit was deferred and `relic_config_t` is frozen without it. The
+stage is about 390 non-comment lines against a budget of 250: about 430 in
+the library, less about 40 the tool gave back by collecting through it.
 
 Build options: `--enable-debug`, `--enable-werror`, `--enable-asan`,
 `--enable-lsan`, `--enable-msan`, `--enable-ubsan`, `--enable-coverage`,
@@ -274,9 +295,11 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the twenty-one documented
-  entry points and nothing else; the compatibility objects linked into it are not
-  reachable.
+* the installed shared library exports exactly the twenty-nine documented
+  entry points and nothing else; the compatibility objects linked into it are
+  not reachable;
+* `make installcheck` builds and runs `examples/embed.c` against the installed
+  library through `pkg-config`.
 
 The relation store's suites were confirmed the same way, by injecting each
 fault and rerunning:
@@ -431,8 +454,22 @@ The negation suites were confirmed the same way:
   held;
 * a discard that keeps the tuple total, which `test_eval` catches as a limit
   exceeded after the discard;
-* the answer stream without its guard, which the contract-breaking callback in
-  `test_eval` catches by crashing.
+* a row callback calling back into its context unrefused, which the
+  re-entry scenario of `test_api` catches by crashing;
+* a context left idle while a stream is read, and a load that does not enter
+  its context, which the re-entry scenario catches as calls from a read
+  function and from every callback accepted;
+* a refusal that outlives the diagnostic callback that made it, and one
+  that outlives the query whose row callback made it, which `test_api`
+  catches as a failed query explained by the refusal and as a successful
+  one leaving an error behind;
+* a query destroy that reads its context, which AddressSanitizer catches as
+  a use after free in `test_api`;
+* a collector or an added fact that runs out of memory without saying so,
+  which the interface sweep of `test_exhaustion` catches as a failed run
+  with no error;
+* an answer kept after its rows are delivered, which `test_api` catches as a
+  third query refused by a limit two queries' answers used up.
 
 The index and planner suites were confirmed the same way:
 
@@ -477,6 +514,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-index.md` | secondary indexes: chains in identifier order, building and extending, lifetime, accounting |
 | `specs/design-planner.md` | when a component is planned, statistics, the estimate, greedy order, access paths, the references, explain |
 | `specs/design-magic.md` | what a query reads completely, adornments and names, sideways information passing, generated rules, termination, limits, evaluation, explain |
+| `specs/design-api.md` | the public interface: values, programmatic facts, queries and results, callbacks and re-entry, diagnostics, exported symbols, versioning |
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
@@ -484,9 +522,8 @@ The Magic suites were confirmed the same way:
 
 ## Next
 
-Stage S11, library ABI stabilization: the final `include/relic.h`, hidden
-visibility, `examples/embed.c` built against the installed library, a symbol
-audit, `man/relic.3`, and the ABI version set to `1:0:0`.
+Stage S12, the REPL and command-line completion: the interactive mode with
+optional libedit, `-i`, `-n` and `-v`, and `man/relic.1`.
 
 ## Decisions taken
 

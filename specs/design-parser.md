@@ -324,7 +324,7 @@ error.
 
 ```c
 int relic_load_string(relic_t *, const char *source_name, const char *text);
-int relic_load_file(relic_t *, FILE *, const char *source_name);
+int relic_load_file(relic_t *, const char *source_name, FILE *);
 int relic_load_path(relic_t *, const char *path);
 ```
 

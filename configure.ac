@@ -22,8 +22,12 @@ LT_INIT
 
 dnl The shared library interface version, maintained independently of the
 dnl release version: a release that changes no interface keeps the same
-dnl version-info, and an interface change is a deliberate edit here.
-RELIC_ABI_CURRENT=0
+dnl version-info, and an interface change is a deliberate edit here.  By
+dnl libtool's rules an added entry point is current+1:0:age+1, a removed or
+dnl changed one -- a field added to a complete type among them -- is
+dnl current+1:0:0, and a change inside the library alone is
+dnl current:revision+1:age.
+RELIC_ABI_CURRENT=1
 RELIC_ABI_REVISION=0
 RELIC_ABI_AGE=0
 AC_SUBST([RELIC_ABI_CURRENT])
@@ -33,9 +37,14 @@ AC_SUBST([RELIC_ABI_AGE])
 AC_CHECK_HEADERS([err.h sysexits.h])
 
 dnl A replacement is compiled from compat/ only on a platform whose C library
-dnl lacks the interface, so engine sources call these unconditionally and no
-dnl source outside compat/ tests for a platform.
+dnl lacks the interface, so the library and the tool call these
+dnl unconditionally and neither tests for a platform.
 AC_REPLACE_FUNCS([reallocarray strlcat strlcpy strtonum])
+
+dnl A stream whose read function is the caller's own code, which the interface
+dnl tests hand to relic_load_file().  Neither is used by the library or the
+dnl tool, and the test that needs one is skipped where both are missing.
+AC_CHECK_FUNCS([fopencookie funopen])
 
 RELIC_ARG_DEBUG
 RELIC_ARG_SANITIZERS

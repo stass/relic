@@ -63,16 +63,26 @@ enum literal_context {
 	LITERAL_IN_JSON
 };
 
+typedef struct row_order row_order_t;
+
+/*
+ * What -s sorts rows by: the context whose values they hold, which reads a
+ * string's bytes, and the number of values in each.
+ */
+struct row_order {
+	relic_t	*ctx;
+	size_t	 width;
+};
+
 static void	 begin_query(output_t *out);
-static int	 compare_rows(const output_t *out, const relic_value_t *left,
-		    const relic_value_t *right);
+static int	 compare_rows(const row_order_t *order,
+		    const relic_value_t *left, const relic_value_t *right);
 static bool	 csv_needs_quotes(const char *bytes, size_t length);
 static void	 end_query(output_t *out);
 static char	 field_separator(enum output_format format);
-static int	 hold_row(output_t *out, const relic_value_t *values,
+static void	 merge_sort(const row_order_t *order,
+		    const relic_value_t **rows, const relic_value_t **scratch,
 		    size_t count);
-static void	 merge_sort(const output_t *out, const relic_value_t **rows,
-		    const relic_value_t **scratch, size_t count);
 static size_t	 literal_piece(const unsigned char *bytes, size_t available,
 		    char *piece, size_t size);
 static void	 put_literal(output_t *out, const char *bytes, size_t length,
@@ -81,20 +91,21 @@ static void	 put_literal_text(output_t *out, const char *text,
 		    enum literal_context context);
 static int	 receive_row(void *context, const relic_value_t *values,
 		    size_t count);
-static void	 release_held_rows(output_t *out);
 static bool	 stream_failed(output_t *out);
 static size_t	 utf8_sequence_length(const unsigned char *bytes,
 		    size_t available);
 static const char *value_bytes(const output_t *out,
 		    const relic_value_t *value, size_t *lengthp);
+static int	 write_collected(output_t *out, relic_query_t *query);
 static void	 write_csv_value(output_t *out, const relic_value_t *value);
-static int	 write_sorted_rows(output_t *out);
 static void	 write_integer(output_t *out, int64_t integer);
 static void	 write_json_string(output_t *out, const char *bytes,
 		    size_t length);
 static void	 write_json_value(output_t *out, const relic_value_t *value);
 static void	 write_row(output_t *out, const relic_value_t *values,
 		    size_t count);
+static int	 write_sorted_rows(output_t *out,
+		    const relic_result_t *result);
 static void	 write_text_value(output_t *out, const relic_value_t *value);
 static void	 write_tsv_value(output_t *out, const relic_value_t *value);
 static void	 write_value(output_t *out, const relic_value_t *value);
@@ -644,81 +655,21 @@ write_row(output_t *out, const relic_value_t *values, size_t count)
 }
 
 /*
- * Keep a copy of a row for sorting.  Returns 0, or -1 having reported that
- * memory ran out.
- *
- * The values are copied because the library lends a row only for the
- * duration of the call.  A symbol's or string's bytes are not copied: a value
- * refers to them by identifier, and they belong to the context, which
- * outlives the output.
- */
-static int
-hold_row(output_t *out, const relic_value_t *values, size_t count)
-{
-	relic_value_t *held;
-	size_t capacity;
-	size_t needed;
-
-	if (out->held_count == 0)
-		out->width = count;
-
-	/*
-	 * Room for one more row, in values.  Both the count and the doubling
-	 * are checked before they are formed, since a wrapped size would be
-	 * answered with an array smaller than what is copied into it.
-	 */
-	if (count != 0 && out->held_count + 1 > SIZE_MAX / count)
-		goto exhausted;
-	needed = (out->held_count + 1) * count;
-
-	/*
-	 * The array is allocated even for rows of no values, so that every
-	 * held row can be pointed at: a pointer formed from a null array, even
-	 * at offset zero, is not one C defines.
-	 */
-	if (needed > out->held_capacity || out->held == NULL) {
-		capacity = out->held_capacity == 0 ? 64 : out->held_capacity;
-		while (capacity < needed) {
-			if (capacity > SIZE_MAX / 2)
-				goto exhausted;
-			capacity *= 2;
-		}
-
-		held = reallocarray(out->held, capacity, sizeof(*held));
-		if (held == NULL)
-			goto exhausted;
-		out->held = held;
-		out->held_capacity = capacity;
-	}
-
-	if (count > 0)
-		memcpy(&out->held[out->held_count * count], values,
-		    count * sizeof(*values));
-	out->held_count++;
-
-	return (0);
-
-exhausted:
-	report_error(out->program_name, "out of memory");
-	return (-1);
-}
-
-/*
  * The order -s sorts by: column by column, each in the library's total order
  * over values.
  */
 static int
-compare_rows(const output_t *out, const relic_value_t *left,
+compare_rows(const row_order_t *order, const relic_value_t *left,
     const relic_value_t *right)
 {
 	size_t column;
-	int order;
+	int sign;
 
-	for (column = 0; column < out->width; column++) {
-		order = relic_value_compare(out->ctx, &left[column],
+	for (column = 0; column < order->width; column++) {
+		sign = relic_value_compare(order->ctx, &left[column],
 		    &right[column]);
-		if (order != 0)
-			return (order);
+		if (sign != 0)
+			return (sign);
 	}
 
 	return (0);
@@ -734,7 +685,7 @@ compare_rows(const output_t *out, const relic_value_t *left,
  * logarithm of the row count.
  */
 static void
-merge_sort(const output_t *out, const relic_value_t **rows,
+merge_sort(const row_order_t *order, const relic_value_t **rows,
     const relic_value_t **scratch, size_t count)
 {
 	size_t half;
@@ -746,14 +697,14 @@ merge_sort(const output_t *out, const relic_value_t **rows,
 		return;
 
 	half = count / 2;
-	merge_sort(out, rows, scratch, half);
-	merge_sort(out, rows + half, scratch, count - half);
+	merge_sort(order, rows, scratch, half);
+	merge_sort(order, rows + half, scratch, count - half);
 
 	left = 0;
 	right = half;
 	merged = 0;
 	while (left < half && right < count) {
-		if (compare_rows(out, rows[right], rows[left]) < 0)
+		if (compare_rows(order, rows[right], rows[left]) < 0)
 			scratch[merged++] = rows[right++];
 		else
 			scratch[merged++] = rows[left++];
@@ -767,57 +718,53 @@ merge_sort(const output_t *out, const relic_value_t **rows,
 }
 
 /*
- * Sort the held rows and write them.  Returns 0, or -1 having reported that
- * memory ran out.
+ * Sort a collected answer and write it.  Returns 0, or -1 having reported
+ * that memory ran out.
  *
  * The sort moves pointers to rows rather than the rows, so a row of any
  * width costs the same to move.
  */
 static int
-write_sorted_rows(output_t *out)
+write_sorted_rows(output_t *out, const relic_result_t *result)
 {
-	const relic_value_t **order;
+	row_order_t order;
+	const relic_value_t **sorted;
 	const relic_value_t **scratch;
+	size_t rows;
 	size_t i;
 
-	if (out->held_count == 0)
+	rows = relic_result_rows(result);
+	if (rows == 0)
 		return (0);
 
-	order = reallocarray(NULL, out->held_count, sizeof(*order));
-	scratch = reallocarray(NULL, out->held_count, sizeof(*scratch));
-	if (order == NULL || scratch == NULL) {
+	sorted = reallocarray(NULL, rows, sizeof(*sorted));
+	scratch = reallocarray(NULL, rows, sizeof(*scratch));
+	if (sorted == NULL || scratch == NULL) {
 		report_error(out->program_name, "out of memory");
-		free(order);
+		free(sorted);
 		free(scratch);
 		return (-1);
 	}
 
-	for (i = 0; i < out->held_count; i++)
-		order[i] = &out->held[i * out->width];
+	for (i = 0; i < rows; i++)
+		sorted[i] = relic_result_row(result, i);
 
-	merge_sort(out, order, scratch, out->held_count);
+	order.ctx = out->ctx;
+	order.width = relic_result_columns(result);
+	merge_sort(&order, sorted, scratch, rows);
 
-	for (i = 0; i < out->held_count; i++)
-		write_row(out, order[i], out->width);
+	for (i = 0; i < rows; i++)
+		write_row(out, sorted[i], order.width);
 
-	free(order);
+	free(sorted);
 	free(scratch);
 
 	return (0);
 }
 
-static void
-release_held_rows(output_t *out)
-{
-	free(out->held);
-	out->held = NULL;
-	out->held_count = 0;
-	out->held_capacity = 0;
-}
-
 /*
  * The library's row callback.  Returns nonzero to stop the rows coming once
- * something has failed, since nothing more can usefully be done with them.
+ * a write has failed, since nothing more can usefully be done with them.
  */
 static int
 receive_row(void *context, const relic_value_t *values, size_t count)
@@ -825,18 +772,29 @@ receive_row(void *context, const relic_value_t *values, size_t count)
 	output_t *out;
 
 	out = context;
-
-	if (out->sorted) {
-		if (hold_row(out, values, count) != 0) {
-			out->hold_failed = true;
-			return (1);
-		}
-		return (0);
-	}
-
 	write_row(out, values, count);
 
 	return (stream_failed(out) ? 1 : 0);
+}
+
+/*
+ * Answer a query and write its rows sorted.  Returns 0, or -1 with the
+ * failure reported, by the library when the query or the collection failed.
+ */
+static int
+write_collected(output_t *out, relic_query_t *query)
+{
+	relic_result_t *result;
+	int status;
+
+	result = relic_query_collect(out->ctx, query);
+	if (result == NULL)
+		return (-1);
+
+	status = write_sorted_rows(out, result);
+	relic_result_destroy(result);
+
+	return (status);
 }
 
 /*
@@ -844,8 +802,8 @@ receive_row(void *context, const relic_value_t *values, size_t count)
  *
  * Nothing is written for a query that fails, because the library delivers no
  * row until the whole answer is known and what comes before the first row is
- * written only with it.  When sorting, the rows are held as they arrive and
- * written once the last one has.
+ * written only with it.  When sorting, the answer is collected whole and
+ * written once it has been sorted.
  */
 int
 output_query(output_t *out, relic_query_t *query)
@@ -854,17 +812,11 @@ output_query(output_t *out, relic_query_t *query)
 
 	out->begun = false;
 	out->rows_written = 0;
-	out->hold_failed = false;
 
-	status = relic_query_run(out->ctx, query, receive_row, out);
-
-	if (status == 0 && out->hold_failed)
-		status = -1;
-
-	if (status == 0 && out->sorted)
-		status = write_sorted_rows(out);
-
-	release_held_rows(out);
+	if (out->sorted)
+		status = write_collected(out, query);
+	else
+		status = relic_query_run(out->ctx, query, receive_row, out);
 
 	if (status != 0)
 		return (-1);

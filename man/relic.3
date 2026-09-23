@@ -1,0 +1,455 @@
+.\" Copyright (c) 2026 Stanislav Sedov
+.\"
+.\" SPDX-License-Identifier: BSD-2-Clause
+.\"
+.Dd September 22, 2026
+.Dt RELIC 3
+.Os
+.Sh NAME
+.Nm relic_create ,
+.Nm relic_create_config ,
+.Nm relic_destroy ,
+.Nm relic_version ,
+.Nm relic_diag_set ,
+.Nm relic_diag_stderr ,
+.Nm relic_error ,
+.Nm relic_load_string ,
+.Nm relic_load_file ,
+.Nm relic_load_path ,
+.Nm relic_fact_add ,
+.Nm relic_value_symbol ,
+.Nm relic_value_string ,
+.Nm relic_string ,
+.Nm relic_value_compare ,
+.Nm relic_check ,
+.Nm relic_materialize ,
+.Nm relic_query_prepare ,
+.Nm relic_query_count ,
+.Nm relic_query_loaded ,
+.Nm relic_query_run ,
+.Nm relic_query_collect ,
+.Nm relic_query_destroy ,
+.Nm relic_result_rows ,
+.Nm relic_result_columns ,
+.Nm relic_result_row ,
+.Nm relic_result_destroy ,
+.Nm relic_explain_set ,
+.Nm relic_stats
+.Nd embed the relic Datalog engine
+.Sh LIBRARY
+relic library
+.Pq librelic, \-lrelic
+.Sh SYNOPSIS
+.In relic.h
+.Ft relic_t *
+.Fn relic_create void
+.Ft relic_t *
+.Fn relic_create_config "const relic_config_t *config"
+.Ft void
+.Fn relic_destroy "relic_t *ctx"
+.Ft const char *
+.Fn relic_version void
+.Ft void
+.Fn relic_diag_set "relic_t *ctx" "relic_diag_cb callback" "void *callback_ctx"
+.Ft void
+.Fo relic_diag_stderr
+.Fa "void *callback_ctx"
+.Fa "enum relic_diag_level level"
+.Fa "const relic_location_t *where"
+.Fa "const char *message"
+.Fc
+.Ft const char *
+.Fn relic_error "relic_t *ctx"
+.Ft int
+.Fn relic_load_string "relic_t *ctx" "const char *source_name" "const char *text"
+.Ft int
+.Fn relic_load_file "relic_t *ctx" "const char *source_name" "FILE *stream"
+.Ft int
+.Fn relic_load_path "relic_t *ctx" "const char *path"
+.Ft int
+.Fo relic_fact_add
+.Fa "relic_t *ctx"
+.Fa "const char *predicate"
+.Fa "size_t arity"
+.Fa "const relic_value_t *values"
+.Fc
+.Ft int
+.Fo relic_value_symbol
+.Fa "relic_t *ctx"
+.Fa "const char *bytes"
+.Fa "size_t length"
+.Fa "relic_value_t *value"
+.Fc
+.Ft int
+.Fo relic_value_string
+.Fa "relic_t *ctx"
+.Fa "const char *bytes"
+.Fa "size_t length"
+.Fa "relic_value_t *value"
+.Fc
+.Ft const char *
+.Fn relic_string "relic_t *ctx" "uint32_t id" "size_t *lenp"
+.Ft int
+.Fn relic_value_compare "relic_t *ctx" "const relic_value_t *a" "const relic_value_t *b"
+.Ft int
+.Fn relic_check "relic_t *ctx"
+.Ft int
+.Fn relic_materialize "relic_t *ctx"
+.Ft relic_query_t *
+.Fn relic_query_prepare "relic_t *ctx" "const char *source_name" "const char *text"
+.Ft size_t
+.Fn relic_query_count "relic_t *ctx"
+.Ft relic_query_t *
+.Fn relic_query_loaded "relic_t *ctx" "size_t index"
+.Ft int
+.Fo relic_query_run
+.Fa "relic_t *ctx"
+.Fa "relic_query_t *query"
+.Fa "relic_row_cb callback"
+.Fa "void *callback_ctx"
+.Fc
+.Ft relic_result_t *
+.Fn relic_query_collect "relic_t *ctx" "relic_query_t *query"
+.Ft void
+.Fn relic_query_destroy "relic_query_t *query"
+.Ft size_t
+.Fn relic_result_rows "const relic_result_t *result"
+.Ft size_t
+.Fn relic_result_columns "const relic_result_t *result"
+.Ft const relic_value_t *
+.Fn relic_result_row "const relic_result_t *result" "size_t row"
+.Ft void
+.Fn relic_result_destroy "relic_result_t *result"
+.Ft void
+.Fn relic_explain_set "relic_t *ctx" "relic_explain_cb callback" "void *callback_ctx"
+.Ft void
+.Fn relic_stats "relic_t *ctx" "relic_stats_t *stats"
+.Sh DESCRIPTION
+The
+.Nm librelic
+library evaluates Datalog programs with stratified negation.
+A context,
+.Vt relic_t ,
+holds a program, the values it mentions and the relations derived from it.
+Contexts share nothing, so a program may use as many as it likes and use
+distinct ones from distinct threads, but one context is not thread-safe.
+.Pp
+A program is loaded as text with
+.Fn relic_load_string ,
+.Fn relic_load_file
+or
+.Fn relic_load_path ,
+and grown with facts built through the interface with
+.Fn relic_fact_add .
+Loads and facts append to one program in the order they are made.
+A load is all or nothing.
+Queries are prepared from text, such as
+.Qq path(a, X)? ,
+with
+.Fn relic_query_prepare ,
+or taken from the program with
+.Fn relic_query_loaded ,
+and answered with
+.Fn relic_query_run
+or
+.Fn relic_query_collect .
+.Ss Contexts
+.Fn relic_create
+creates a context with every limit at its default, and
+.Fn relic_create_config
+one with the limits of
+.Fa config :
+.Bd -literal -offset indent
+struct relic_config {
+	size_t		max_memory;
+	size_t		max_tuples;
+	size_t		max_magic_preds;
+	size_t		max_magic_rules;
+	unsigned int	flags;
+};
+.Ed
+.Pp
+.Fa max_tuples
+bounds the tuples held across every relation and
+.Fa max_memory
+the bytes of relation and index storage; zero leaves either unbounded.
+.Fa max_magic_preds
+and
+.Fa max_magic_rules
+bound the predicates and rules the Magic Sets rewrite of one query
+generates; zero sets each to a budget in proportion to the program, and a
+rewrite outgrowing its budget is abandoned with a warning and the query
+answered from the whole program.
+.Dv SIZE_MAX
+sets no bound on anything.
+.Fa flags
+holds switches that select alternative evaluation strategies for testing,
+and is zero for ordinary use:
+.Bl -tag -width RELIC_F_NO_REORDER
+.It Dv RELIC_F_NAIVE
+evaluate every recursive component by the naive fixed point rather than the
+semi-naive one;
+.It Dv RELIC_F_NO_INDEX
+build no secondary index, scanning instead;
+.It Dv RELIC_F_NO_REORDER
+join positive literals in the order they are written;
+.It Dv RELIC_F_NO_MAGIC
+answer every query from the whole program rather than through its Magic
+Sets rewrite.
+.El
+.Pp
+Each gives the same answers as the default.
+.Pp
+.Fn relic_destroy
+releases a context and everything it owns, and accepts
+.Dv NULL .
+.Fn relic_version
+returns the version of the library, as
+.Qq major.minor.patch .
+.Ss Values
+A value is a symbol, a string or an integer:
+.Bd -literal -offset indent
+struct relic_value {
+	enum relic_type	type;	/* RELIC_SYMBOL, RELIC_STRING, RELIC_INTEGER */
+	union {
+		uint32_t	id;
+		int64_t		integer;
+	} v;
+};
+.Ed
+.Pp
+An integer is written into
+.Fa v.integer .
+.Fn relic_value_symbol
+and
+.Fn relic_value_string
+intern
+.Fa length
+bytes and fill
+.Fa value
+with their identifier, which is valid for the life of the context.
+A symbol must be a lowercase ASCII letter followed by ASCII letters, digits
+and underscores, as the language writes one; any other bytes, a NUL among
+them, make a string.
+.Fn relic_string
+returns the bytes of a symbol or string identifier, NUL-terminated, and
+stores their length in
+.Fa *lenp
+when it is not
+.Dv NULL ;
+it returns
+.Dv NULL
+for an identifier the context never assigned.
+.Fn relic_value_compare
+orders two values: every integer before every symbol before every string,
+then numerically or bytewise.
+.Ss Facts
+.Fn relic_fact_add
+adds the fact
+.Fa predicate Ns ( Fa values Ns [0], ...)
+to the program exactly as loading its text would.
+.Fa predicate
+must be a symbol other than
+.Ql not ,
+.Fa arity
+at most 32, and
+.Fa values
+may be
+.Dv NULL
+only when
+.Fa arity
+is zero.
+Adding a fact changes the program, so the next evaluation discards
+everything derived before it and derives it again.
+.Ss Evaluation
+.Fn relic_check
+validates the program: rule safety, stratification, and warnings about
+variables named once and predicates nothing defines.
+.Fn relic_materialize
+evaluates the whole program.
+Neither is needed before a query, which checks and evaluates what it needs.
+.Ss Queries
+.Fn relic_query_run
+computes the whole answer of
+.Fa query
+and passes it to
+.Fa callback
+one row at a time:
+.Bd -literal -offset indent
+typedef int (*relic_row_cb)(void *callback_ctx,
+    const relic_value_t *values, size_t count);
+.Ed
+.Pp
+A row has one value per variable the query names, in the order they first
+occur.
+The callback returns zero for the next row and nonzero to stop.
+A query that fails delivers no rows.
+Once the rows have been delivered the context keeps nothing of the answer,
+so answers do not count against
+.Fa max_tuples
+or
+.Fa max_memory
+for later queries.
+.Pp
+.Fn relic_query_collect
+copies the answer into a result the caller owns.
+.Fn relic_result_rows
+and
+.Fn relic_result_columns
+give its size,
+.Fn relic_result_row
+a row's values or
+.Dv NULL
+past the last row, and
+.Fn relic_result_destroy
+releases it.
+A result may outlive later loads and the context itself.
+.Pp
+.Fn relic_query_count
+is the number of queries the program contains, and
+.Fn relic_query_loaded
+returns the one at
+.Fa index ,
+counting from zero.
+.Fn relic_query_destroy
+releases a query, and accepts
+.Dv NULL .
+It may be called before or after
+.Fn relic_destroy .
+.Ss Diagnostics
+Every note, warning and error goes to the callback installed with
+.Fn relic_diag_set ,
+and nowhere else: a context with no callback writes nothing.
+.Bd -literal -offset indent
+enum relic_diag_level { RELIC_NOTE, RELIC_WARNING, RELIC_ERROR };
+
+struct relic_location {
+	const char	*file;
+	uint32_t	 line;
+	uint32_t	 column;
+};
+
+typedef void (*relic_diag_cb)(void *callback_ctx,
+    enum relic_diag_level level, const relic_location_t *where,
+    const char *message);
+.Ed
+.Pp
+.Fa where
+is
+.Dv NULL
+for a diagnostic that points at no text.
+The message and the location are borrowed for the call; the
+.Fa file
+name a location holds stays valid until the context is destroyed.
+A message quotes program text as it was written, so a callback that writes
+it to a terminal escapes it first, as
+.Fn relic_diag_stderr
+does.
+.Fn relic_diag_stderr
+is a ready-made callback that writes each diagnostic to standard error,
+prefixed by the program name its callback context holds.
+.Fn relic_error
+returns the text of the most recent error, or
+.Dv NULL .
+.Pp
+.Fn relic_explain_set
+installs a callback that receives the plans evaluation runs, one line of
+printable ASCII at a time, of at most 1023 bytes and with no newline:
+.Bd -literal -offset indent
+typedef void (*relic_explain_cb)(void *callback_ctx, const char *line);
+.Ed
+.Pp
+.Fn relic_stats
+fills a
+.Vt relic_stats_t
+with counters of the work done and of what the context holds:
+.Bd -literal -offset indent
+struct relic_stats {
+	uint64_t	iterations;
+	uint64_t	derivations;
+	uint64_t	tuples_inserted;
+	uint64_t	tuples_scanned;
+	uint64_t	tuples_looked_up;
+	size_t		tuples;
+	size_t		storage_bytes;
+	size_t		symbol_values;
+	size_t		string_values;
+	size_t		integer_values;
+};
+.Ed
+.Pp
+The first five count evaluation's work since the context was created; the
+rest describe what it holds when read.
+What they count depends on the evaluation strategy and may change from one
+release to the next.
+.Ss Callbacks
+Caller code runs while the context is part way through an operation in four
+ways: the diagnostic, explain and row callbacks, and the read function of a
+stream given to
+.Fn relic_load_file ,
+which may be the caller's own, as
+.Xr funopen 3
+makes one.
+Such code may call
+.Fn relic_string ,
+.Fn relic_error ,
+.Fn relic_value_compare ,
+.Fn relic_stats
+and
+.Fn relic_query_count
+on its context, and may destroy any query but one being answered.
+Any other call on the same context is refused: it returns \-1 or
+.Dv NULL ,
+or does nothing, and
+.Fn relic_error
+describes the refusal until the next error or until the operation the
+caller code runs inside returns.
+The diagnostic callback is not called for a refusal.
+A callback must return: one that leaves by
+.Xr longjmp 3
+leaves its context refusing every later call.
+.Sh RETURN VALUES
+Functions returning
+.Vt int
+return 0 on success and \-1 on failure, except
+.Fn relic_value_compare ,
+which returns a value less than, equal to or greater than zero.
+Functions returning a pointer return
+.Dv NULL
+on failure.
+Every failure is explained by an error diagnostic, whose text
+.Fn relic_error
+returns.
+.Fn relic_string ,
+.Fn relic_value_compare ,
+.Fn relic_query_count
+and
+.Fn relic_stats
+cannot fail.
+.Sh EXAMPLES
+Answer a query and print the first column of each row.
+A symbol is an identifier and is safe to print as it is; a string may hold
+any bytes, and a program that prints one escapes it.
+.Bd -literal -offset indent
+static int
+print_row(void *ctx, const relic_value_t *values, size_t count)
+{
+	if (count > 0 && values[0].type == RELIC_SYMBOL)
+		puts(relic_string(ctx, values[0].v.id, NULL));
+	return (0);
+}
+
+static char name[] = "example";
+
+relic_t *ctx = relic_create();
+relic_diag_set(ctx, relic_diag_stderr, name);
+relic_load_string(ctx, "graph", "edge(a, b). edge(b, c).\en"
+    "path(X, Y) :- edge(X, Y).\en"
+    "path(X, Z) :- edge(X, Y), path(Y, Z).\en");
+relic_query_t *query = relic_query_prepare(ctx, NULL, "path(a, X)?");
+relic_query_run(ctx, query, print_row, ctx);
+relic_query_destroy(query);
+relic_destroy(ctx);
+.Ed
+.Sh STANDARDS
+The header is strict ISO C11 and may be included from C++.

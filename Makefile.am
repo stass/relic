@@ -37,7 +37,8 @@ noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/depgraph.c \
 	lib/diag.c lib/eval.c lib/explain.c lib/index.c lib/lex.c \
 	lib/magic.c lib/parse.c lib/plan.c lib/pred.c lib/relation.c \
-	lib/rule.c lib/stratify.c lib/symbol.c lib/util.c lib/value.c
+	lib/result.c lib/rule.c lib/stratify.c lib/symbol.c lib/util.c \
+	lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -46,6 +47,7 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 	-version-info $(RELIC_ABI_CURRENT):$(RELIC_ABI_REVISION):$(RELIC_ABI_AGE)
 
 include_HEADERS = include/relic.h
+dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h lib/arena.h \
 	lib/ast.h lib/depgraph.h lib/internal.h lib/plan.h lib/program.h \
 	lib/relation.h lib/util.h tests/unit/harness.h tests/unit/programs.h
@@ -66,7 +68,44 @@ pkgconfig_DATA = librelic.pc
 # configure; listing them here as well would only create a list that a sixth
 # macro file could be left out of.
 EXTRA_DIST = autogen.sh LICENSE README.md compat/README.md \
-	tests/lang tests/langtest.sh
+	examples/embed.c tests/lang tests/langtest.sh
+
+##
+## The example is built and run by make installcheck, against the installed
+## header and library as pkg-config describes them, and never against the
+## build tree: that is the only arrangement that catches a missing export, a
+## public header that needs a private one, or a librelic.pc that points at the
+## wrong place.  make distcheck runs it.  The installed library is found at run
+## time through the loader's path as well, for a platform whose linker does
+## not record where a library was installed.  The configured compiler and
+## linker flags apply, so that a cross or multilib build links the example
+## the way it linked the library, and an instrumented library links an
+## instrumented example.  Without pkg-config there is nothing to
+## check the installation against, and the skip says so rather than passing
+## quietly; pkg-config is not required to build or install relic.  The
+## example is built in a directory of its own and removed with it, together
+## with whatever else the compiler leaves beside an executable.
+##
+installcheck-local:
+	@if ! command -v pkg-config >/dev/null 2>&1; then \
+		echo "SKIP: examples/embed.c: pkg-config is not installed," \
+		    "so the installed library was not checked"; \
+		exit 0; \
+	fi; \
+	PKG_CONFIG_PATH='$(libdir)/pkgconfig'; export PKG_CONFIG_PATH; \
+	work=$$(mktemp -d) || exit 1; \
+	echo "building examples/embed.c against the installed librelic"; \
+	$(CC) $(RELIC_STRICT_CFLAGS) $(RELIC_WARN_CFLAGS) \
+	    $(RELIC_WERROR_CFLAGS) $(RELIC_SAN_CFLAGS) $(CPPFLAGS) $(CFLAGS) \
+	    $$(pkg-config --cflags librelic) \
+	    -o "$$work/embed$(EXEEXT)" $(srcdir)/examples/embed.c \
+	    $(LDFLAGS) $$(pkg-config --libs librelic); status=$$?; \
+	if [ $$status -eq 0 ]; then \
+		LD_LIBRARY_PATH='$(libdir)' "$$work/embed$(EXEEXT)"; \
+		status=$$?; \
+	fi; \
+	rm -rf "$$work"; \
+	exit $$status
 
 ##
 ## Tests
@@ -121,12 +160,18 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 ## have.
 ##
 
-check_PROGRAMS += tests/unit/test_arena tests/unit/test_diag \
-	tests/unit/test_eval tests/unit/test_index tests/unit/test_lex \
-	tests/unit/test_magic tests/unit/test_parse tests/unit/test_plan \
-	tests/unit/test_pred tests/unit/test_query tests/unit/test_relation \
-	tests/unit/test_rule tests/unit/test_stratify tests/unit/test_symbol \
-	tests/unit/test_util tests/unit/test_value
+check_PROGRAMS += tests/unit/test_api tests/unit/test_arena \
+	tests/unit/test_diag tests/unit/test_eval tests/unit/test_index \
+	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
+	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
+	tests/unit/test_relation tests/unit/test_rule tests/unit/test_stratify \
+	tests/unit/test_symbol tests/unit/test_util tests/unit/test_value
+
+## test_api links the installed form of the library rather than the
+## convenience library, so an entry point it calls that the export list or
+## hidden visibility left out fails to link.
+tests_unit_test_api_SOURCES = tests/unit/test_api.c tests/unit/harness.c
+tests_unit_test_api_LDADD = librelic.la
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -230,8 +275,8 @@ tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
 dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
-	tests/langfiles.sh tests/magic.sh tests/perf.sh tests/pkgconfig.sh \
-	tests/version.sh
+	tests/langfiles.sh tests/magic.sh tests/man.sh tests/perf.sh \
+	tests/pkgconfig.sh tests/reentry.sh tests/symbols.sh tests/version.sh
 
 ##
 ## The equivalence suite runs every language test under each alternative

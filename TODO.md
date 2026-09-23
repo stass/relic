@@ -6,8 +6,8 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S10 and milestone M4, Magic Sets,
-landed; S11, library ABI stabilization, next.
+`relic-plan.md`. Current position: S11, library ABI stabilization,
+landed; S12, the REPL and command-line completion, next.
 
 ## Build and packaging
 
@@ -29,11 +29,10 @@ empty convenience library builds cleanly on every platform (a platform with
 no replacements) needs checking first, and a check script rejecting
 `$(LIBOBJS)` is the cheaper fallback.
 
-**Manual pages are not written.** [Medium, component: `man/`] `relic.1` and
-`relic.3` are S12 and S14 deliverables, so `dist_man1_MANS` and
-`dist_man3_MANS` are absent from `Makefile.am` and the installed set of
-`specs/architecture.md` section 65.5 is short two files. The `mandoc -Tlint`
-job of `relic-plan.md` section 6 has nothing to lint until then.
+**`relic.1` is not written.** [Medium, component: `man/`] It is an S12
+deliverable, so `dist_man1_MANS` is absent from `Makefile.am` and the
+installed set of `specs/architecture.md` section 65.5 is short one file.
+`tests/man.sh` lints `relic.3` only; extend it to `relic.1` when it lands.
 
 **`--enable-fuzzers` is not implemented.** [Medium, component:
 `configure.ac`] `specs/architecture.md` section 65.3 lists it, but the fuzz
@@ -141,7 +140,7 @@ which to ask it. A caller that loads one file, checks, then loads a second
 file defining what the first referenced will have been warned about a
 predicate that is now defined. The warning is not repeated and the program is
 not refused. The command-line tool cannot hit it, because it loads every
-operand before checking. Revisit if S11 gives a caller a way to say that
+operand before checking. Revisit if a caller is given a way to say that
 loading is finished.
 
 Prepared queries share the same sweep, which cuts both ways. A predicate a
@@ -156,8 +155,8 @@ back is the program arena it allocated them from: an arena has no
 per-allocation free, and the program arena is not reset until the context is
 destroyed, because nothing replaces a loaded program yet. A long-running
 embedder or a REPL that loads a broken file repeatedly therefore grows slowly.
-The waste is bounded by the text the caller chose to load. Revisit when S11 or
-S12 gives a context a way to discard its program, which is the operation that
+The waste is bounded by the text the caller chose to load. Revisit when S12 or
+later gives a context a way to discard its program, which is the operation that
 would reset the arena anyway.
 
 **A stream is read whole with no size limit.** [Low, component: `lib/parse.c`]
@@ -173,7 +172,7 @@ that is why they exist. Input is the opposite: the caller picked the file or
 opened the stream, knows how large it is, and can bound it before handing it
 over. Folding the two into one key would make `-l memory=N` mean two things
 and would still not help the one caller who cannot check, which is a program
-reading an untrusted pipe. Revisit if S11 or S12 finds that caller; the
+reading an untrusted pipe. Revisit if S12 or an embedder finds that caller; the
 answer there is a separate key, not a wider meaning for this one.
 
 **Options that arrive with their features.** [Medium, component:
@@ -191,6 +190,8 @@ facts, 21 MB of text, take 1.8 s and 260 MB to load and check and about
 `tests/perf.sh` measures this shape. Loading facts of a component straight
 into a staging relation, or planning a component's facts as one bulk
 operation, would remove most of it without a second path for rules.
+`relic_fact_add()` pays the same per fact, since it appends the statement its
+text would load.
 
 **Explain pairs variants with their rule by order.** [Low, component:
 `lib/eval.c`] `explain_component()` prints each rule's delta variants by
@@ -212,24 +213,6 @@ little at a time -- the S12 REPL, or an embedder -- which pays for the whole
 program on every addition. Measure it there before doing anything; the
 remedy, if one is needed, is incremental maintenance, which architecture
 section 70 defers, and not a return to continuing only positive programs.
-
-**Answer relations are never released.** [Medium, component: `lib/rule.c`]
-Each query compiles to a predicate of its own, `$qN`, and its answers live in
-that predicate's relation for the life of the context, as every relation
-does. Destroying the query does not give them back. The command-line tool
-prepares each query once, so it cannot notice; a long-lived embedder or the
-S12 REPL preparing many queries grows by every answer it has ever computed.
-Worse than the growth, the answers count against `max_tuples` and
-`max_memory`, so under a limit the queries that have been answered use it up
-for the ones that have not: with `max_tuples=6` and three facts, preparing,
-running and destroying `e(X)?` twice fails the second time with "limit
-exceeded: tuples=6 while deriving $q1/1", naming a predicate the caller never
-wrote. A change to the program, or a query answered through its Magic
-rewrite, discards every relation, answers included, which bounds the growth
-to the queries answered since, but does not release a destroyed query's
-answers before then. Settle the rest with S11:
-destroying a query should release its answer relation, and a loaded query's
-answers should be released with the last query object that refers to them.
 
 **Complete relations are evaluated again for every query.** [Medium,
 component: `lib/eval.c`] A query answered through its Magic rewrite discards
@@ -285,9 +268,13 @@ rewrite would say why, and keeping the complete relations, as the item on
 evaluating them for every query proposes, would avoid the second pass.
 
 **Generated names are interned for the life of the context.** [Low,
-component: `lib/magic.c`, `lib/symbol.c`] Every adorned and magic predicate a
-rewrite generates, and the symbol naming it, stays in the context's tables
-after the query, as every interned entry does. The same query run again
+component: `lib/magic.c`, `lib/rule.c`, `lib/symbol.c`] Every adorned and
+magic predicate a rewrite generates, and the symbol naming it, stays in the
+context's tables after the query, as every interned entry does. So does each
+prepared query's answer predicate, `$qN`, whose relation is emptied after its
+rows are delivered but whose predicate and symbol entries are not released
+when the query is destroyed; a long-lived embedder preparing many queries
+grows by one of each per query. The same query run again
 reuses them, so the growth is bounded by the distinct adornments ever asked
 for, at most the budget per distinct query shape; a long-lived embedder
 answering many differently shaped queries grows by all of them. Releasing a
@@ -302,21 +289,6 @@ in a name a program writes -- and `-e` shows what it means, but
 `specs/design-magic.md` section 8 asks a diagnostic to name what the reader
 has to change. Recording the source predicate on a generated predicate's
 entry and describing it from that would say `path/2`.
-
-**Re-entry from a callback is a contract, not a guard.** [Medium, component:
-`lib/eval.c`, `include/relic.h`] A row callback and a diagnostic callback
-must not call back into the context, and nothing enforces it. Memory safety
-holds regardless, but as a property of two call sites rather than of the
-design: `stream_answer()` stops at an identifier a re-entrant discard took
-away, and every evaluation site that reports a diagnostic unwinds at once
-without reading state a re-entrant evaluation reset. A callback that loads
-and queries mid-stream gets wrong rows and a successful return. The next
-call out of the library, or a diagnostic site that continues after reporting
--- the mixed-type ordering warning below is one -- extends that list without
-anyone noticing. Settle it in S11, which freezes the entry points: a
-per-context flag set for the duration of each entry point that can run a
-callback, with every entry point refusing re-entry with a diagnostic, so a
-broken contract fails loudly and the existing guard becomes a backstop.
 
 **Mixed-type ordering comparisons are not reported.** [Low, component:
 `lib/eval.c`] Architecture section 10.1 reports the first cross-type ordering
@@ -344,9 +316,9 @@ relation at once, runs only before an evaluation begins, when no range is
 live. The debt is the moment that stops being enough. Any incremental
 insertion or DRed-style deletion support has to confront it first: a range
 captured before such an operation means something else afterwards, and
-nothing in the range would say so. `relic_fact_add()` in S11 needs no more
-than the existing discard, provided it appends a fact rule to the program
-rather than inserting a tuple into a relation: only the evaluator inserts,
+nothing in the range would say so. `relic_fact_add()` needs no more than the
+existing discard, because it appends a fact statement to the program rather
+than inserting a tuple into a relation: only the evaluator inserts,
 which is what makes every tuple re-derivable and the discard safe, and
 appending a rule is what advances the count that says the program changed.
 `specs/design-relations.md` section 2 states it.
@@ -416,12 +388,19 @@ the evaluator a rule table to work over, and nested explain. Generated rules
 are ordinary compiled rules, which is what kept the evaluator unchanged; a
 lighter representation for them is not a lever while that holds.
 
+S11 came in at about 390 non-comment lines against a budget of 250, about
+430 in the library less about 40 the tool gave back by collecting through
+it. The interface itself is small; the lines are the entry and exit at
+every mutating entry point with the workers that let entry points share
+code, argument validation for the entry points taking caller data, and the
+collector.
+
 **A later load's second unstratified cycle is not reported.** [Low,
 component: `lib/stratify.c`] A program found unstratified is refused by every
 later check without being analysed again, so an embedder that checks between
 loads is told about the first cycle and not about an independent one a later
 load introduces. The command-line tool loads every operand before checking and
-cannot hit it. Revisit with S11 if an embedder needs every cycle; re-analysing
+cannot hit it. Revisit if an embedder needs every cycle; re-analysing
 a rejected program and reporting only components not already reported would
 do it.
 
@@ -513,6 +492,29 @@ terminator anywhere is not a string, and AddressSanitizer's
 arithmetic the guard protects is covered; the exact input a caller would pass
 by mistake is not.
 
+**A query's width is known only once it is collected.** [Low, component:
+`include/relic.h`, `lib/rule.c`] `relic_result_columns()` gives a query's
+number of output columns, but only after collecting it; a caller streaming
+rows who wants to write a header first has neither the width nor the
+variable names the columns stand for. `relic_query_columns()` and
+`relic_query_column_name()` would supply both. Adding functions is a
+compatible change, so this can wait for a caller that needs it.
+
+**The manual's prototypes are not checked against the header.** [Low,
+component: `tests/man.sh`] The test holds the `NAME` list of `man/relic.3` to
+the header's exported functions, but not the `SYNOPSIS` prototypes or the
+structures the page reproduces, so a changed parameter would leave the page
+wrong without failing anything. Comparing each `.Fn`/`.Fo` block's types
+with the header's declaration would close it.
+
+**Adding a counter or a limit is a new major version.** [Low, component:
+`include/relic.h`] `relic_config_t` and `relic_stats_t` are complete
+structures the caller allocates, so appending a field changes the size a
+caller compiled against, and the library's version-info must then start a
+new major version: a step limit, or a counter S12 or S13 wants, forces every
+embedder to rebuild. Passing the size the caller compiled against was
+considered and not taken; revisit if the first such change is expensive.
+
 ## Security residuals
 
 **Planning a long recursive body is quadratic in memory and cubic in time.**
@@ -564,44 +566,13 @@ and `-l memory` bound space; nothing bounds the time this consumes, because
 
 Randomizing is not the remedy: determinism is a product property that the
 golden suite and `-e` output depend on. The deterministic remedies are a step
-limit (`-l steps=N`) or a ceiling on probe-cluster length. Decide which while
-the `-l` key set is still private, since adding a key after it is documented
-is the expensive moment. It matters for the embedded caller section 63 names:
-a host that accepts an untrusted program and trusts `-l` to protect it is not
-protected against this.
-
-**A callback that calls into the context during an operation is memory
-unsafe.** [Medium, component: `lib/api.c`, `lib/eval.c`, `lib/explain.c`]
-The diagnostic and explain callbacks are documented as not calling into the
-context, and nothing enforces it. An explain callback that loads and
-materializes during a materialization resets the evaluation arena under the
-plans the outer evaluation is still running, a use-after-free; the inner
-evaluation's discard also drops every index, and its planner may build a
-different index at a position an outer plan names, so the outer lookups
-would walk an index on the wrong columns. A diagnostic callback that evaluates is
-the same hazard. (A callback that clears itself is tolerated: the explain
-renderer checks for a callback before every line.) The answer callback is safe, because streaming begins only after
-evaluation has ended. The callbacks are the embedder's own code, so this is a
-contract violation rather than a hostile program, but the tree's rule is that
-a broken contract gives wrong output, not an invalid access. The remedy that
-holds by construction is a context-wide state saying an operation is in
-progress, set around every loading, checking and evaluating entry point and
-refused by every public entry but `relic_string()` and `relic_error()` while
-it is set, with `relic_relation_discard_all()` asserting that it is not set
-rather than relying on having one caller; settle it with the S11 ABI work,
-which fixes the callback contracts.
-
-**Predicate names reach an embedder's callback unescaped.** [Low, component:
-`lib/pred.c`] `relic_pred_describe()` quotes a predicate name without
-escaping, justified by every byte of one being an identifier byte. That holds
-while the lexer is the only producer of a symbol. `relic_diag_stderr()`
-escapes on output, but an embedding program installs its own callback and
-receives the raw message, so the escaping is not where a caller would assume.
-When S11 adds `relic_fact_add()` taking caller-supplied bytes, a predicate
-name will no longer be lexer-checked and the message could carry a terminal
-escape sequence into an embedder's log. Settle it with `relic_fact_add()`:
-either it interns names through the same identifier rule the lexer applies, or
-`relic_pred_describe()` escapes.
+limit (`-l steps=N`) or a ceiling on probe-cluster length. S11 froze
+`relic_config_t` without a step limit, so adding one to the library is now an
+incompatible change and a new major version of the shared library; a ceiling
+on probe-cluster length needs no new field and is the cheaper of the two for
+that reason. Decide before `relic.1` documents the `-l` key set in S12. It
+matters for the embedded caller section 63 names: a host that accepts an
+untrusted program and trusts `-l` to protect it is not protected against this.
 
 **csv and tsv carry raw control bytes.** [Low, component:
 `cmd/relic/output.c`] The text format writes a string as a quoted literal with
@@ -612,14 +583,6 @@ are, so `relic -F csv` over an untrusted program, printed to a terminal rather
 than piped to a parser, can. That is the same exposure as `cat` on the
 program itself, and escaping would corrupt the data for the consumers the
 formats exist for; recorded so that the choice stays deliberate.
-
-**Output assumes a symbol is an identifier.** [Low, component:
-`cmd/relic/output.c`] The text, csv and tsv formats write a symbol's bytes
-unescaped, and json replaces a byte that is not UTF-8 with U+FFFD, all on the
-ground that the lexer admits only identifier bytes into a symbol. S11's
-`relic_fact_add()` will accept a caller's bytes as a symbol, and then neither
-holds. Settle it with the predicate-name item above: either symbols are held
-to the identifier rule wherever they are created, or output escapes them.
 
 ## Packaging
 

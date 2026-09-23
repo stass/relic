@@ -26,7 +26,12 @@
  * callback at all.
  */
 
+/* What relic_error() says of a call refused because its context was busy. */
+#define	RELIC_REFUSED_ERROR \
+	"the context was called from one of its own callbacks"
+
 static const char	*level_name(enum relic_diag_level level);
+static void		 record_error(relic_t *ctx, const char *message);
 static void		 write_escaped(FILE *stream, const char *text);
 
 static const char *
@@ -45,6 +50,18 @@ level_name(enum relic_diag_level level)
 	return ("error");
 }
 
+/*
+ * Make `message` the context's last error, which relic_error() returns.
+ */
+static void
+record_error(relic_t *ctx, const char *message)
+{
+	strlcpy(ctx->diag.last_error, message, sizeof(ctx->diag.last_error));
+	ctx->diag.has_error = true;
+	ctx->diag.refused = false;
+	ctx->diag.error_count++;
+}
+
 void
 relic_diag_init(relic_diag_t *diag)
 {
@@ -54,13 +71,21 @@ relic_diag_init(relic_diag_t *diag)
 void
 relic_diag_set(relic_t *ctx, relic_diag_cb callback, void *callback_ctx)
 {
+	if (relic_enter(ctx) != 0)
+		return;
+
 	ctx->diag.callback = callback;
 	ctx->diag.callback_ctx = callback_ctx;
+
+	relic_leave(ctx);
 }
 
 const char *
 relic_error(relic_t *ctx)
 {
+	if (ctx->diag.refused)
+		return (RELIC_REFUSED_ERROR);
+
 	if (!ctx->diag.has_error)
 		return (NULL);
 
@@ -99,16 +124,18 @@ relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
 	message[0] = '\0';
 	vsnprintf(message, sizeof(message), format, arguments);
 
-	if (level == RELIC_ERROR) {
-		strlcpy(ctx->diag.last_error, message,
-		    sizeof(ctx->diag.last_error));
-		ctx->diag.has_error = true;
-		ctx->diag.error_count++;
-	}
+	if (level == RELIC_ERROR)
+		record_error(ctx, message);
 
 	if (ctx->diag.callback != NULL)
 		ctx->diag.callback(ctx->diag.callback_ctx, level, where,
 		    message);
+}
+
+void
+relic_diag_record_refusal(relic_t *ctx)
+{
+	ctx->diag.refused = true;
 }
 
 void

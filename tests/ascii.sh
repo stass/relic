@@ -42,11 +42,12 @@ owned_files() {
 	       -o -name 'build-*san' \) -prune -o \
 	    -type f \( -name '*.ac' -o -name '*.am' -o -name '*.c' \
 	       -o -name '*.h' -o -name '*.in' -o -name '*.m4' \
-	       -o -name '*.sh' \) -print
+	       -o -name '*.sh' -o -name '*.[1-9]' \) -print
 }
 
 candidates=$(mktemp) || exit 1
-trap 'rm -f "$candidates"' EXIT HUP INT TERM
+trap 'rm -f "$candidates"' EXIT
+trap 'exit 1' HUP INT TERM
 
 owned_files > "$candidates"
 

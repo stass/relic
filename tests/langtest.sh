@@ -58,7 +58,8 @@ if [ -f "$directory/$base.exit" ]; then
 fi
 
 work=$(mktemp -d) || exit 1
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
 
 # The status is captured rather than allowed to end the script, because a
 # nonzero one is what several of these tests expect.

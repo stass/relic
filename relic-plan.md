@@ -897,6 +897,40 @@ every CI platform, and the symbol audit passes.
 
 **Budget.** 250.
 
+**Decided during the stage.** Seven decisions were taken when S11 landed,
+each recorded in `specs/design-api.md`:
+
+* **Values are made by interning constructors.** `relic_value_symbol()` and
+  `relic_value_string()` take a caller's bytes. A symbol, and the predicate
+  name `relic_fact_add()` takes, must be spelled as the lexer spells an
+  identifier; any other bytes make a string. Holding every symbol to that
+  rule is what lets diagnostics and the tool's output treat a symbol as an
+  identifier without escaping it.
+* **A fact is a statement.** `relic_fact_add()` appends to the program the
+  statement its text would load, so facts reach the relations by the one road
+  the append-only invariant of D-10 relies on.
+* **An opaque result.** The collector returns a `relic_result_t` read through
+  accessors, so its layout is not part of the ABI.
+* **Answers are transient.** A query's answer relation is emptied once its
+  rows are delivered, so answers never count against the limits of a later
+  query and destroying a query has nothing to release.
+* **Re-entry is refused by construction.** A context is busy for the whole
+  of an operation, entered and left through one pair of functions, so caller
+  code that runs inside one -- a callback, or the read function of a stream
+  being loaded -- cannot change it, however that code came to run. Entry
+  points share workers instead of calling one another. A refusal lasts until
+  the operation it happened in returns. Destroying a query reads nothing of
+  its context unless the query is being answered, and may follow
+  `relic_destroy()`.
+* **Loaders name their input first.** `relic_load_file(ctx, source_name,
+  stream)`, as `relic_load_string()` and `relic_query_prepare()`, reversing
+  the order architecture section 50 first gave.
+* **No step limit.** `relic_config_t` is frozen without one; the hash
+  flooding item in `TODO.md` stays open.
+
+The stage is about 390 non-comment lines against a budget of 250: about 430
+in the library, less about 40 the tool gave back.
+
 ---
 
 ### S12 - REPL and CLI completion

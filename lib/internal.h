@@ -88,7 +88,10 @@ enum relic_order {
  * library: a caller must not be made to accept output on its stderr.
  *
  * `error_count` counts every error reported, which is how an operation that
- * failed learns whether anything said why.
+ * failed learns whether anything said why.  `refused` records that a call
+ * was refused during the operation in progress, because the context was
+ * busy; relic_error() then describes the refusal in place of `last_error`
+ * until the operation returns.
  */
 struct relic_diag {
 	relic_diag_cb	 callback;
@@ -96,6 +99,7 @@ struct relic_diag {
 	size_t		 error_count;
 	char		 last_error[512];
 	bool		 has_error;
+	bool		 refused;
 };
 
 /*
@@ -170,11 +174,19 @@ struct relic_counters {
  * `ctx` is the context the query was compiled against.  Its predicates, its
  * constants and its answer relation all belong to that context, so running it
  * against another would read identifiers that mean something else there.
+ *
+ * `running` is set while the query is being answered.  Destroying a query
+ * reads nothing of its context, which a caller may have destroyed first,
+ * except to refuse destroying the query being answered: while `running` is
+ * set its context is certainly alive and busy with it.  Nothing in a context
+ * points into any other query object, so destroying one of those from
+ * caller code the library is running is safe.
  */
 struct relic_query {
 	relic_t		*ctx;
 	relic_arena_t	 arena;
 	relic_rule_t	 rule;
+	bool		 running;
 };
 
 /*
@@ -296,6 +308,14 @@ struct relic_magic {
  *
  * `counters` is the work evaluation has done.  What the context holds is
  * not counted here: relic_stats() measures it when asked.
+ *
+ * `busy` is set for the whole of an operation, from the public entry point
+ * that began it until that entry point returns; relic_enter() and
+ * relic_leave() are the only code that changes it.  Caller code runs during
+ * an operation only by being called from it -- a diagnostic, explain or row
+ * callback, or the read function of a stream handed to relic_load_file() --
+ * and whatever it calls finds the context busy.  So no operation can find
+ * its state changed under it, however the caller's code came to run.
  */
 struct relic {
 	relic_arena_t		 arena;	/* context lifetime: symbol bytes */
@@ -312,6 +332,7 @@ struct relic {
 	relic_config_t		 config;
 	relic_counters_t	 counters;
 	size_t			 materialized_rules;
+	bool			 busy;
 };
 
 /*
@@ -332,6 +353,18 @@ struct relic {
  * object whose caller checks the pointer it gets.
  */
 void	*relic_context_alloc(relic_t *ctx, size_t size);
+
+/*
+ * The one way into an operation, and out of it.  Every public entry point
+ * that changes a context, or can call caller code, begins with
+ * relic_enter() and returns only through relic_leave().  relic_enter()
+ * refuses a context that is already busy: it returns -1 having recorded the
+ * refusal, and the entry point returns its failure at once.  Entry points
+ * never call one another inside the library, since the inner one would be
+ * refused; each has a worker the others share instead.
+ */
+int	 relic_enter(relic_t *ctx);
+void	 relic_leave(relic_t *ctx);
 
 /*
  * lib/diag.c
@@ -362,6 +395,17 @@ void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
  * message carries the least information, so it is written once.
  */
 void	 relic_diag_no_memory(relic_t *ctx);
+
+/*
+ * Record that a call was refused because its context was busy.  relic_error()
+ * describes the refusal until the next error is reported or the operation in
+ * progress returns, whichever comes first, so a refusal never outlasts the
+ * operation the refused caller code ran inside.  The diagnostic callback is
+ * not called: the caller is inside one of its callbacks already, and possibly
+ * inside that one.  Nor is the refusal counted among the operation's errors,
+ * since the operation in progress has not failed.
+ */
+void	 relic_diag_record_refusal(relic_t *ctx);
 
 /*
  * Shorten a name for a message into a caller-owned buffer, marking the cut
@@ -502,6 +546,15 @@ void	 relic_lexer_reset(relic_lexer_t *lexer);
  * the diagnostic has already been reported and scanning cannot continue.
  */
 int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
+
+/*
+ * Whether `length` bytes are exactly one symbol as the lexer scans one: a
+ * lowercase letter followed by letters, digits and underscores.  Bytes that
+ * reach the program by another road than text -- a value or a predicate name
+ * built through the interface -- are held to it, so that everything the
+ * program holds is something the language could have written.
+ */
+bool	 relic_lex_is_symbol(const char *bytes, size_t length);
 
 /*
  * lib/parse.c
@@ -648,6 +701,17 @@ int	 relic_magic_find_complete(relic_magic_t *magic,
 int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
 
 /*
+ * lib/eval.c
+ *
+ * relic_query_answer() is relic_query_run() inside an operation already
+ * entered, which relic_query_collect() shares.  Returns 0 once every row has
+ * been delivered or the callback has stopped the stream, or -1 with an error
+ * reported and no row delivered.
+ */
+int	 relic_query_answer(relic_t *ctx, relic_query_t *query,
+	    relic_row_cb callback, void *callback_ctx);
+
+/*
  * lib/explain.c
  *
  * The lines of explain output, handed to the installed callback.
@@ -733,7 +797,8 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  *
  * relic_relation_discard_all() empties every relation at once, which ends
  * the span over which a range means anything; no caller may hold a range
- * across it.
+ * across it.  relic_relation_discard() empties one predicate's relation, if
+ * it has one, under the same rule for that relation's ranges.
  *
  * relic_relation_index() finds, or builds from the tuples the relation holds,
  * the secondary index keyed on the columns of a mask and gives its position
@@ -763,6 +828,7 @@ relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
 	    relic_tuple_id_t first);
+void	 relic_relation_discard(relic_t *ctx, relic_pred_id_t pred);
 void	 relic_relation_discard_all(relic_t *ctx);
 int	 relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	    uint32_t key_mask, uint32_t *positionp);

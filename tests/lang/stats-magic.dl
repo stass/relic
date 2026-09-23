@@ -2,7 +2,8 @@
 % query binds the first column of path and the recursive rule keeps it
 % bound, so the magic rule would derive magic$path$bf from itself and is
 % dropped: only the paths from a are derived, six of them rather than all
-% twenty-one, and the relations hold nineteen tuples rather than thirty-three.
+% twenty-one, and once the answer has been delivered the relations hold
+% thirteen tuples rather than twenty-seven.
 
 edge(a, b).
 edge(b, c).

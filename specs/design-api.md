@@ -1,0 +1,310 @@
+# relic library interface design
+
+**Status.** Design document for `librelic` as a library other programs depend
+on: the entry points `<relic.h>` exports, the values, facts, queries and
+results that cross it, what a callback may do, how a mistake is reported, and
+how the binary interface is versioned and audited. Forward-looking, like
+every document under `specs/`; `STATUS.md` records what is implemented.
+
+**Companions.** `specs/architecture.md` sections 19, 48 to 57, 63 and 65.6;
+`specs/design-eval.md` for how a query is answered; `specs/design-magic.md`
+for the rewrite a query goes through; `relic-plan.md` decisions D-5, D-7 and
+D-14.
+
+---
+
+## 1. What this document settles
+
+* the shape of the interface: which types are opaque, which complete, and
+  what every entry point returns when it fails;
+* how a caller builds a symbol or a string to insert;
+* what `relic_fact_add()` accepts, what it adds to the program, and what it
+  does to what the context has derived;
+* what a query's answer is after it has been delivered, and the collector
+  built on the streaming callback;
+* what a callback may call, and what happens to a call it may not make;
+* which symbols the shared library exports, and how that is checked;
+* the version-info the library carries, and what changes it;
+* the example program and the manual page that ship with the library.
+
+---
+
+## 2. The interface as a whole
+
+The tool is a client of the library. It includes `<relic.h>` and nothing
+else of the library's, so the interface this document specifies is the one
+the tool uses, extended by the entry points an embedder needs and the tool
+does not: programmatic facts and value constructors. Every loader names its
+input before taking it, `relic_load_file(ctx, source_name, stream)` as
+`relic_load_string(ctx, source_name, text)`.
+
+Three types are opaque -- the context, a prepared query and a collected
+result -- and four are complete, because a caller builds or reads them field
+by field: `relic_value_t`, `relic_location_t`, `relic_config_t` and
+`relic_stats_t` (architecture section 48). A complete type's layout is part
+of the binary interface.
+
+Every entry point follows one convention:
+
+| Returns | Success | Failure |
+| --- | --- | --- |
+| `int` | 0 | -1 |
+| a pointer | the object | NULL |
+| `void` | -- | nothing to report, or the failure is recorded |
+
+A failure is always explained by at least one RELIC_ERROR diagnostic, and
+the last one's text is what `relic_error()` returns. `errno` is not used to
+report a semantic error; a failure to open or read a file carries the
+system's reason in its message.
+
+---
+
+## 3. Values
+
+A value is a symbol, a string or an integer (architecture section 19). An
+integer is written into `v.integer` directly. A symbol or a string is an
+identifier of interned bytes, and a caller that has bytes needs the context
+to intern them:
+
+```c
+int	relic_value_symbol(relic_t *, const char *bytes, size_t length,
+	    relic_value_t *);
+int	relic_value_string(relic_t *, const char *bytes, size_t length,
+	    relic_value_t *);
+```
+
+Each fills the value and returns 0, or returns -1 with a diagnostic. The
+identifier stays valid for the life of the context, and interning the same
+bytes again returns the same one.
+
+**A symbol is what the language can write as one.** Its bytes must match the
+lexer's symbol rule, `[a-z][A-Za-z0-9_]*`. A symbol the language cannot
+write could still be inserted and derived with, but it could not be queried
+for by name, and it would print as text that reads back as something else. A
+caller with arbitrary bytes -- spaces, capitals first, NUL bytes, UTF-8 --
+uses a string, which holds any bytes at all. The same rule is applied again
+wherever a symbol value enters the program, so a caller who fills in a
+`relic_value_t` by hand with the identifier of a string's bytes gains
+nothing.
+
+`relic_string()` reads the bytes of either back; `relic_value_compare()`
+orders any two values of one context.
+
+---
+
+## 4. Programmatic facts
+
+```c
+int	relic_fact_add(relic_t *, const char *predicate, size_t arity,
+	    const relic_value_t *values);
+```
+
+adds the fact `predicate(values[0], ..., values[arity - 1]).` to the
+program, exactly as loading that text would. It is refused, with a
+diagnostic and nothing added, when:
+
+* `predicate` does not match `[a-z][A-Za-z0-9_]*`, or is `not`, which the
+  grammar reserves for negation where a predicate name would stand;
+* `arity` is more than 32, the structural limit of D-7;
+* `values` is NULL and `arity` is not zero;
+* a value's type is not one of the three, a symbol or string names bytes
+  this context never interned, or a symbol's bytes are not a symbol by
+  section 3.
+
+Predicates are identified by name and arity together, so a fact of a new
+arity creates a new predicate rather than conflicting with an old one.
+
+**The fact is a statement of the program.** It is appended after everything
+loaded before it, is checked with the next check, is shown by `-e` like any
+fact, and costs what a loaded fact costs. Programmatic facts and loaded text
+can be interleaved in any order, and the program is the same as the one the
+equivalent text would build. There is no second path into the relations, so
+there is nothing for the two paths to disagree about.
+
+**Adding a fact invalidates everything derived** (architecture section 54).
+Invalidation is total: the next evaluation, whether a query or
+`relic_materialize()`, discards every relation and evaluates again from the
+facts, exactly as it does after a load. A fact can make a negated literal
+false, so nothing derived before it can be kept without incremental
+maintenance, which architecture section 70 defers.
+
+---
+
+## 5. Queries and results
+
+### 5.1 Streaming
+
+`relic_query_run()` computes the whole answer, then passes it to the row
+callback one row at a time. A query that fails delivers no rows. The callback
+returns nonzero to stop early, which is not a failure.
+
+**An answer is transient.** Once the rows have been delivered, or the
+callback has stopped them, the answer relation is emptied. What a context
+holds is then the program's relations and nothing on behalf of queries
+already answered: a long-lived embedder preparing and running many queries
+does not grow by every answer it has computed, and the answers of earlier
+queries do not count against `max_tuples` and `max_memory` for the next one.
+A caller that wants to keep an answer copies it, which is what the collector
+does. Outside a query, `relic_stats()` finds no answers among the tuples
+held; from a row callback it counts the answer being delivered.
+
+### 5.2 The collector
+
+```c
+relic_result_t		*relic_query_collect(relic_t *, relic_query_t *);
+size_t			 relic_result_rows(const relic_result_t *);
+size_t			 relic_result_columns(const relic_result_t *);
+const relic_value_t	*relic_result_row(const relic_result_t *, size_t row);
+void			 relic_result_destroy(relic_result_t *);
+```
+
+The collector is `relic_query_run()` with a callback that copies each row,
+and has no other access to the engine (architecture section 55). It returns
+NULL, with a diagnostic, when the query fails or the copy runs out of memory,
+and never a partial result.
+
+A result holds `rows x columns` values in the order the stream delivered
+them. `relic_result_columns()` is the query's number of output columns, even
+when there are no rows. `relic_result_row()` returns the row's values, or
+NULL when `row` is not less than `relic_result_rows()`; for a query with no
+output columns a present row is a non-NULL pointer to no values.
+
+A result is independent of the context's state: it survives later loads,
+facts and queries, and may be destroyed after the context. The bytes of its
+symbols and strings are read through `relic_string()`, so they are available
+for as long as the context lives.
+
+---
+
+## 6. Callbacks and re-entry
+
+Caller code runs while the library is part way through an operation in four
+ways: the diagnostic callback, the explain callback, the row callback, and
+the read function of a stream handed to `relic_load_file()`, which may be
+the caller's own (`funopen(3)`, `fopencookie(3)`). None may start another
+operation on the same context, and none can: the refusal is a property of
+the context, not of the places it calls out from.
+
+**A context is busy while an operation runs.** Every entry point that
+changes a context -- loading, adding a fact, checking, materializing,
+preparing, running or collecting a query, interning a value, installing a
+callback, destroying the context -- begins by entering it and returns only
+by leaving it, through one pair of functions, and refuses to enter a busy
+context:
+
+* a refused call returns -1 or NULL, and a refused destroy or installation
+  does nothing;
+* it makes "the context was called from one of its own callbacks" what
+  `relic_error()` returns, without calling the diagnostic callback, since
+  the caller is inside one of its callbacks already;
+* it is not counted among the operation's errors, and it lasts only until
+  the operation the caller code runs inside returns, when `relic_error()`
+  again describes the operation, so a refusal never hides why an operation
+  failed or outlives one that succeeded;
+* nothing the operation in progress holds is touched.
+
+The busy state covers the whole operation rather than the moments the
+library calls out, so a new way for caller code to run -- another callback,
+a stream -- is covered without being listed anywhere. Entry points do not
+call one another inside the library, since the inner one would be refused;
+each has a worker that the others share.
+
+A callback must return to the library. One that leaves by `longjmp(3)` or an
+exception leaves its context busy, and every later call on it refused.
+
+A refused destroy leaks what it would have released rather than freeing
+memory the operation in progress is using. That is the cheaper of the two
+failures, and it happens only to a caller that broke the contract.
+
+**Destroying a query reads nothing of its context** unless the query is
+being answered, so a caller may destroy the context first, as a binding with
+finalizers does in whatever order it likes. A query is marked while it is
+answered, and destroying it then -- from its row callback, or any other
+caller code that runs while its answer is computed -- is refused; its
+context is then certainly alive to record the refusal. Destroying any other
+query from caller code is allowed: nothing in a context points into a query
+object but the query being answered.
+
+A few entry points only read, and a callback may call them:
+`relic_string()`, `relic_error()`, `relic_value_compare()`, `relic_stats()`,
+`relic_query_count()`, `relic_version()`, `relic_diag_stderr()` and the
+result accessors. They do not enter the context, and nothing they read moves
+while an operation is running.
+
+---
+
+## 7. Diagnostics
+
+A library does not write to its caller's standard error uninvited
+(architecture section 56). A context starts with no diagnostic callback, and
+every note, warning and error then reaches the caller only through
+`relic_error()` for the last error. `relic_diag_stderr()` is a ready-made
+callback for a caller that wants the tool's format, and is the one the tool
+installs. Every diagnostic the library produces, at every level, goes through
+the one callback, so a caller that installs one sees all of them and its
+standard error sees none.
+
+---
+
+## 8. Exported symbols
+
+The library is compiled with hidden visibility, and each entry point is
+declared with `RELIC_EXPORT`, which makes it visible again. Linking applies
+libtool's `-export-symbols-regex '^relic_'` as a second fence. Internal
+functions are also named `relic_`, so the fence alone would export them;
+visibility is what keeps them in.
+
+The audit holds the two to one list. A test reads the names `<relic.h>`
+declares with `RELIC_EXPORT` and the dynamic symbols the built shared library
+defines, and requires the sets to be equal: a function
+declared but not exported fails a caller at link time, and one exported but
+not declared is an interface nobody documented.
+
+---
+
+## 9. Versioning
+
+The library's libtool version-info starts at `1:0:0` when the interface is
+frozen. It follows libtool's rules: an added entry point is `c+1:0:a+1`, a
+removed or changed one `c+1:0:0`, and a change inside the library alone
+`c:r+1:a`. A field added to a complete type changes its layout and is an
+incompatible change, which is why the configuration structure is frozen
+without a step limit (architecture section 63 has none) and why a counter
+added to `relic_stats_t` is one too.
+
+`RELIC_VERSION_STRING` and `relic_version()` are the package's release, and
+are unrelated to the version-info: the release says what the tool and the
+language do, the version-info what a dynamic linker may substitute.
+
+---
+
+## 10. The example and the manual
+
+`examples/embed.c` is the smallest program that does everything section 2
+lists an embedder needing: create a context with a limit, install a
+diagnostic callback, load text, add facts, stream a query with early
+termination, collect one, and read its values. It is compiled and run by
+`make installcheck` against the installed header and library, found through
+the installed `librelic.pc`, and never against the build tree. That is the
+only arrangement that catches a missing export, a header that needs an
+internal one, or a `.pc` file that points at the wrong place; `make
+distcheck` runs it.
+
+`man/relic.3` documents every entry point, in mdoc, and is checked with
+`mandoc -Tlint` where `mandoc` is installed.
+
+---
+
+## 11. What is deliberately absent
+
+* **A step or time limit.** Architecture section 63 defines none; adding one
+  to `relic_config_t` later is an incompatible change and bumps the
+  version-info.
+* **Sorted results.** A result keeps the stream's order; `relic_value_compare()`
+  sorts it, as the tool does for `-s`.
+* **Thread safety within a context** (D-14). Contexts share nothing, so
+  distinct contexts may be used from distinct threads.
+* **Removing a fact.** v1 has no retraction; a caller builds a new context.
+* **A value lifetime shorter than the context's.** Interned bytes are never
+  released, so a long-lived context grows with the distinct values it has
+  ever seen.

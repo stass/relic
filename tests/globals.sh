@@ -44,7 +44,8 @@ fail() {
 # pipe, so what it finds is collected in a file rather than in a variable the
 # subshell could not export back.
 reported=$(mktemp) || exit 1
-trap 'rm -f "$reported"' EXIT HUP INT TERM
+trap 'rm -f "$reported"' EXIT
+trap 'exit 1' HUP INT TERM
 
 # Both the ordinary and the position-independent objects, because a build may
 # produce either or both depending on --enable-shared and --enable-static.

@@ -92,8 +92,13 @@ static void	 put_variable(const relic_t *ctx, relic_explain_line_t *line,
 void
 relic_explain_set(relic_t *ctx, relic_explain_cb callback, void *callback_ctx)
 {
+	if (relic_enter(ctx) != 0)
+		return;
+
 	ctx->explain = callback;
 	ctx->explain_ctx = callback_ctx;
+
+	relic_leave(ctx);
 }
 
 bool

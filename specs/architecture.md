@@ -1698,6 +1698,10 @@ The header is strict C11, contains no project-internal includes, does not
 include `config.h`, and is guarded for C++ inclusion. Only symbols matching
 `^relic_` are exported from the shared library.
 
+The interface as a whole -- value constructors, programmatic facts, the
+collector, what a callback may call, the symbol audit and versioning -- is
+specified in `specs/design-api.md`.
+
 ---
 
 # 49. Library Lifecycle
@@ -1742,8 +1746,8 @@ limit exists in exactly one place and the tool merely parses into it.
 ```c
 int
 relic_load_file(relic_t *,
-    FILE *,
-    const char *source_name);
+    const char *source_name,
+    FILE *);
 
 int
 relic_load_path(relic_t *,
@@ -1755,7 +1759,9 @@ relic_load_string(relic_t *,
     const char *text);
 ```
 
-Loading parses rules and facts into the current program.
+Loading parses rules and facts into the current program. Every loader that
+takes one names the input its diagnostics point at before the input itself,
+as `relic_query_prepare()` does.
 
 Multiple loads append to the same logical program.
 
