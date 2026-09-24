@@ -260,7 +260,7 @@ relic_magic_init(relic_magic_t *magic, relic_t *ctx)
 {
 	bzero(magic, sizeof(*magic));
 	magic->ctx = ctx;
-	relic_arena_init(&magic->arena);
+	relic_arena_init_charged(&magic->arena, &ctx->account);
 	relic_idtab_init(&magic->adornment_index);
 	relic_idtab_init(&magic->rule_index);
 }

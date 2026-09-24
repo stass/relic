@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -15,7 +16,8 @@
  * Context lifecycle.
  *
  * A context owns an arena for everything whose lifetime is the context's own,
- * a symbol pool, a value table and the diagnostic state.  Creating one is the
+ * a symbol pool, a value table, the diagnostic state, and the memory account
+ * its evaluation arena and its relations are charged to.  Creating one is the
  * only operation in the library that cannot report through a diagnostic
  * callback, because there is no context yet to have one installed.
  *
@@ -49,6 +51,7 @@ relic_enter(relic_t *ctx)
 	}
 
 	ctx->busy = true;
+	relic_diag_begin_operation(ctx);
 
 	return (0);
 }
@@ -62,6 +65,12 @@ relic_enter(relic_t *ctx)
 void
 relic_leave(relic_t *ctx)
 {
+	/*
+	 * Both charged arenas are reset before the operation that filled them
+	 * returns, so an account still holding arena bytes has lost count.
+	 */
+	assert(ctx->account.arena_bytes == 0);
+
 	ctx->busy = false;
 	ctx->diag.refused = false;
 }
@@ -96,15 +105,6 @@ relic_create_config(const relic_config_t *config)
 		return (NULL);
 
 	bzero(ctx, sizeof(*ctx));
-	relic_arena_init(&ctx->arena);
-	relic_arena_init(&ctx->program_arena);
-	relic_arena_init(&ctx->eval_arena);
-	relic_symtab_init(&ctx->symbols);
-	relic_valtab_init(&ctx->values);
-	relic_ast_program_init(&ctx->ast);
-	relic_program_init(&ctx->program);
-	relic_reltab_init(&ctx->relations);
-	relic_diag_init(&ctx->diag);
 
 	/*
 	 * A zeroed configuration means every limit unlimited, so a caller
@@ -113,6 +113,17 @@ relic_create_config(const relic_config_t *config)
 	 */
 	if (config != NULL)
 		ctx->config = *config;
+
+	relic_account_init(&ctx->account, ctx->config.max_memory);
+	relic_arena_init(&ctx->arena);
+	relic_arena_init(&ctx->program_arena);
+	relic_arena_init_charged(&ctx->eval_arena, &ctx->account);
+	relic_symtab_init(&ctx->symbols);
+	relic_valtab_init(&ctx->values);
+	relic_ast_program_init(&ctx->ast);
+	relic_program_init(&ctx->program);
+	relic_reltab_init(&ctx->relations);
+	relic_diag_init(&ctx->diag);
 
 	return (ctx);
 }

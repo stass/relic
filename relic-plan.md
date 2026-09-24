@@ -267,7 +267,9 @@ than one comparison per step, and the order is unchanged. The evaluation
 arena and the rewrite arena, the two of operation lifetime, are charged to
 `max_memory` beside relation and index storage; the arenas holding the
 program, the schedule and a query are not, because the caller wrote what they
-hold and a query may outlive its context. A refusal by the limit reports
+hold and a query may outlive its context. A fact is inserted in its turn
+without a plan, so the charged arena holds plans of rules with bodies only
+and a fact counts once, as its tuple. A refusal by the limit reports
 through the same function an exhaustion does, with the limit's message. So a
 limit on memory bounds planning time, and no limit on body length is added.
 Reverses the part of D-6 that put every arena outside the limit. Specified in

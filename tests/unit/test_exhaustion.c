@@ -1741,6 +1741,14 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		    "%zu, with allocation %ld refused", sweep->strategy,
 		    status != 0 ? "failed" : "succeeded",
 		    status != 0 ? 0 : sweep->rows, rows, budget);
+		checkf(ctx->account.arena_bytes == 0 &&
+		    ctx->account.store_bytes == storage_by_hand(ctx),
+		    SCENARIO_EVALUATE,
+		    "a query answered %s should leave the account holding the "
+		    "relations' %zu bytes and no arena's, not %zu and %zu, with "
+		    "allocation %ld refused", sweep->strategy,
+		    storage_by_hand(ctx), ctx->account.store_bytes,
+		    ctx->account.arena_bytes, budget);
 
 		if (query == NULL)
 			query = relic_query_prepare(ctx, NULL, sweep->query);

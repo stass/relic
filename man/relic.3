@@ -172,7 +172,8 @@ struct relic_config {
 .Fa max_tuples
 bounds the tuples held across every relation and
 .Fa max_memory
-the bytes of relation and index storage; zero leaves either unbounded.
+the bytes of relation and index storage together with the plans of an
+evaluation and the rewrite of a query; zero leaves either unbounded.
 .Fa max_magic_preds
 and
 .Fa max_magic_rules

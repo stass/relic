@@ -283,9 +283,15 @@ so each of its facts becomes a rule guarded by the magic predicate, once per
 adornment. A predicate with many facts and a single rule pays for all of them
 in rules and plans: 200 000 `e/2` facts and one rule for `e` take 296 MB and
 1.0 s for `e(n7, X)?`, against 129 MB and 0.45 s without the rewrite, and
-375 MB when the query calls `e` with two adornments. None of it is charged to
-`max_memory`; the budget on generated rules bounds it at sixteen copies of the
-program. Splitting such a predicate into its facts, loaded completely into a
+375 MB when the query calls `e` with two adornments. The copies and their
+plans are charged to `max_memory` (D-18), so under a limit such a query is
+refused while `-X no-magic` answers it in a fraction of the memory: 20 000
+facts and one rule, `e(n7, X)?`, need 16 MB through the rewrite and under
+2 MB without it. A limit refusing the rewrite fails the query, as
+`specs/design-planning-cost.md` section 7 decides, rather than falling back
+to the whole program as an outgrown budget does; revisit that if this case
+matters. Without a limit, the budget on generated rules bounds it at sixteen
+copies of the program. Splitting such a predicate into its facts, loaded completely into a
 relation of their own, and its rules, adorned, with one guarded rule per
 adornment reading the facts, would avoid the copies and would make the
 extensional case of `specs/design-magic.md` section 3 a special case of the
@@ -552,23 +558,21 @@ new major version: a step limit, or a counter S13 wants, forces every
 embedder to rebuild. Passing the size the caller compiled against was
 considered and not taken; revisit if the first such change is expensive.
 
-## Security residuals
+**A memory-limit refusal can name a generated predicate.** [Low, component:
+`lib/eval.c`] A component of a query's rewritten program is named by its
+first member, so a limit refusing its plans reads `limit exceeded:
+memory=N while planning magic$p$b/1` or `... e$bf/2`, names the user never
+wrote. Naming the query instead, `while planning $q0/1`, for every component
+of a rewritten program would say what the user asked for; it needs the
+evaluation of a schedule to be told whose it is.
 
-**Planning memory is not charged to the memory limit.** [High, component:
-`lib/arena.c`, `lib/eval.c`, `lib/magic.c`] A rule with N literals over its
-own component gets N + 1 plans of N + 1 operations each, so
-`p(a). p(X) :- p(X), ..., p(X). p(X)?` holds the square of its body in the
-evaluation arena before any tuple is derived: 2000 literals are 12 KB of
-text and 300 MB of plans, built in about a second since a body is ordered
-in one pass per state of the bound mask. `max_memory` covers neither the
-evaluation arena nor the rewrite arena, so no limit bounds what planning
-holds. Designed, not implemented: `specs/design-planning-cost.md` section 6
-charges both arenas to `max_memory` with the limit's own message (D-18), and
-section 8 adds the `-l memory` refusal workloads to `tests/perf.sh`. Under
-the default configuration planning memory stays bounded by the allocator
-alone, as the data is. The two `tests/cli.sh` cases that set `-l memory` to
-a few kilobytes will then fail in planning rather than while deriving or
-indexing, and their expected messages move with them.
+**The limit message is formatted in three places.** [Low, component:
+`lib/relation.c`, `lib/magic.c`, `lib/diag.c`] `limit exceeded: %s=%zu while
+%s` is written by the relation store, the Magic rewrite and
+`relic_diag_no_memory()`. One `relic_diag_limit()` would make "the form every
+limit shares" hold by construction.
+
+## Security residuals
 
 **The Magic budget counts rules, not their length.** [High, component:
 `lib/magic.c`] Each adornment of a predicate copies every rule deriving it
@@ -579,10 +583,11 @@ fires. A 60 KB program -- `p/12` with a body of 2000 literals, called with
 500 bound patterns by `cN(X) :- e(X), p(...)` and queried through `all(X)?`
 -- holds about 250 MB through the rewrite, against about 5 MB under `-X
 no-magic`; it takes under a second, since each copy is ordered in a few
-passes (`tests/perf.sh`). Designed with the item above: charging the rewrite
-arena bounds the R x L when `max_memory` is set, and under the default
-configuration the R x L is bounded by the literal budget of
-`specs/design-magic.md` section 8, which is designed and not implemented.
+passes (`tests/perf.sh`). When `max_memory` is set, the rewrite arena is
+charged to it and the R x L is refused with the limit's message (D-18);
+under the default configuration nothing bounds it until the literal budget
+of `specs/design-magic.md` section 8, which is designed and not
+implemented.
 
 **Magic rules repeat the prefix before each demand call, cubic in a body's
 calls.** [High, component: `lib/magic.c`] `record_call()` generates one magic
@@ -596,11 +601,12 @@ and about 1 MB under `-X no-magic`; L = 100 gives 102 rules, 4951 delta
 variants and 333 402 `member` operations. No budget fires: the budgets
 count rules, and the 200 facts raise the rule budget to 3488, so the 400
 generated rules are within it (without the facts L above about 250 is
-abandoned). Two things are designed and not implemented: the literal budget
-of `specs/design-magic.md` section 8, which abandons a rewrite whose
-generated literals exceed 256 + 16 x the program's and so closes this under
-the default configuration, and charging the rewrite arena (D-18), which
-bounds what the budget admits when `max_memory` is set. The fix that removes
+abandoned). With `max_memory` set, the rewrite arena and the evaluation
+arena are charged to it (D-18) and the run is refused with the limit's
+message; under the default configuration the literal budget of
+`specs/design-magic.md` section 8, which abandons a rewrite whose generated
+literals exceed 256 + 16 x the program's, closes it, and is designed and not
+implemented. The fix that removes
 the square is the supplementary construction: derive each prefix from the
 one before it through an intermediate predicate, so the generated bodies are
 linear in L. That is a change to `specs/design-magic.md`, to be designed
@@ -611,7 +617,7 @@ the fallback (`specs/design-planning-cost.md` section 10).
 component: `lib/magic.c`] `publish_rule()` canonicalizes a draft, which
 copies its body into the arena, before `rule_derives_nothing()` and the
 duplicate check, so a rule that is then dropped still costs its body in
-memory. Once the arena is charged to `max_memory` (D-18) that is memory the
+memory. The arena is charged to `max_memory` (D-18), so that is memory the
 user pays for and gets nothing from. Decide whether the two checks can run
 on the draft, or canonicalize into scratch that a dropped rule releases.
 

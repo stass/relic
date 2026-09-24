@@ -22,6 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -29,11 +30,13 @@
 #include "internal.h"
 
 #define	SCENARIO_COLUMNS	"a query's columns are its named variables"
+#define	SCENARIO_FACTS		"a fact costs its tuple and keeps its turn"
 #define	SCENARIO_FOREIGN	"a query runs only in its own context"
 #define	SCENARIO_GROWTH		"answering queries does not grow the context"
 #define	SCENARIO_LIMIT		"an answer refused by a limit is given back"
 #define	SCENARIO_LOADED		"the program's queries are enumerated"
 #define	SCENARIO_NAMES		"answers are named in the order queries compile"
+#define	SCENARIO_PLANNING	"planning is charged to the memory limit"
 #define	SCENARIO_REFUSED	"a refused query leaves the program valid"
 #define	SCENARIO_STOP		"a callback can stop the rows"
 #define	SCENARIO_UNDEFINED	"a query warns of a predicate nothing defines"
@@ -42,12 +45,38 @@
 /* How many times the growth test prepares, runs and destroys its query. */
 #define	GROWTH_ROUNDS		64
 
+/*
+ * The memory limit of the planning scenario, which admits every relation
+ * and ordinary plan the scenario's programs have, and the lengths of the
+ * bodies whose plans it does not admit: a recursive rule's 201 plans of 201
+ * operations, and a query's one plan of 4000.
+ */
+#define	PLANNING_LIMIT		65536
+#define	PLANNING_RECURSIVE	200
+#define	PLANNING_QUERY		4000
+
+/*
+ * A limit that admits the first chunk of one charged arena and not of two:
+ * a chunk is a little over 4 KB.
+ */
+#define	FIRST_WANTED_LIMIT	6000
+
+/*
+ * How many facts the fact scenario loads, and how many bytes past what their
+ * relation holds its memory limit allows: room for an evaluation's
+ * per-component and per-predicate arrays, and not for a plan per fact.
+ */
+#define	FACTS_LOADED		20000
+#define	FACTS_MARGIN		16384
+#define	FACT_TEXT_MAX		16	/* the longest "e(N).\n" line */
+
 /* Room for one line of explain output about a small query. */
 #define	EXPLAIN_TEXT_MAX	128
 
 typedef struct context_size context_size_t;
 typedef struct diag_log diag_log_t;
 typedef struct explained explained_t;
+typedef struct integer_rows integer_rows_t;
 
 /*
  * What a context holds that answering a query could leave behind: its
@@ -66,10 +95,17 @@ struct diag_log {
 	size_t	warnings;
 };
 
+/* The first column of each row a query delivered, when it is an integer. */
+struct integer_rows {
+	int64_t	values[8];
+	size_t	count;
+};
+
 /*
  * The lines of explain output that name a query's answer: the heading that
  * writes the query's rule, and the EMIT of its plan, last seen of each.
  */
+
 struct explained {
 	char	query[EXPLAIN_TEXT_MAX];
 	char	emit[EXPLAIN_TEXT_MAX];
@@ -81,8 +117,17 @@ static bool	 answer_is_named(relic_t *ctx, relic_query_t *query,
 static context_size_t context_size(relic_t *ctx);
 static void	 growth_under(unsigned int flags, const char *strategy);
 static relic_t	*context_with(const char *program, diag_log_t *log);
+static relic_t	*limited_context(size_t max_memory, const char *program,
+		    diag_log_t *log);
+static char	*repeated(const char *first, const char *each, size_t count,
+		    const char *last);
+static bool	 refused_while(relic_t *ctx, size_t max_memory,
+		    const char *activity);
 static int	 count_rows(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
+static int	 keep_integers(void *callback_ctx,
+		    const relic_value_t *values, size_t count);
+static void	 a_fact_costs_its_tuple_and_keeps_its_turn(void);
 static void	 record_explained(void *callback_ctx, const char *line);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
@@ -94,6 +139,7 @@ static void	 a_query_runs_only_in_its_own_context(void);
 static void	 a_query_warns_of_an_undefined_predicate(void);
 static void	 a_refused_query_leaves_the_program_valid(void);
 static void	 an_answer_refused_by_a_limit_is_given_back(void);
+static void	 planning_is_charged_to_the_memory_limit(void);
 static void	 an_unsafe_query_makes_the_program_invalid(void);
 static void	 answers_are_named_in_the_order_queries_compile(void);
 static void	 answering_queries_does_not_grow_the_context(void);
@@ -722,6 +768,270 @@ a_query_runs_only_in_its_own_context(void)
 	relic_destroy(other);
 }
 
+/*
+ * A context with a memory limit, holding a program.
+ */
+static relic_t *
+limited_context(size_t max_memory, const char *program, diag_log_t *log)
+{
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(log, sizeof(*log));
+	bzero(&config, sizeof(config));
+	config.max_memory = max_memory;
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_PLANNING, "a context is created");
+		return (NULL);
+	}
+	relic_diag_set(ctx, record_diagnostic, log);
+
+	if (relic_load_string(ctx, "test.dl", program) != 0) {
+		check(false, SCENARIO_PLANNING, "the program loads");
+		relic_destroy(ctx);
+		return (NULL);
+	}
+
+	return (ctx);
+}
+
+/*
+ * `first`, then `count` copies of `each`, then `last`, in a string the
+ * caller frees, or NULL when there was no memory for it.
+ */
+static char *
+repeated(const char *first, const char *each, size_t count, const char *last)
+{
+	size_t length;
+	size_t i;
+	char *text;
+	char *end;
+
+	length = strlen(first) + count * strlen(each) + strlen(last) + 1;
+	text = malloc(length);
+	if (text == NULL)
+		return (NULL);
+
+	end = stpcpy(text, first);
+	for (i = 0; i < count; i++)
+		end = stpcpy(end, each);
+	stpcpy(end, last);
+
+	return (text);
+}
+
+/*
+ * Whether the last error is the memory limit's, refusing the named activity,
+ * with nothing left charged to the account by the evaluation arena or a
+ * rewrite's once the operation has returned.
+ */
+static bool
+refused_while(relic_t *ctx, size_t max_memory, const char *activity)
+{
+	char expected[128];
+	const char *reported;
+
+	snprintf(expected, sizeof(expected),
+	    "limit exceeded: memory=%zu while %s", max_memory, activity);
+	reported = relic_error(ctx);
+
+	checkf(reported != NULL && strcmp(reported, expected) == 0,
+	    SCENARIO_PLANNING, "the diagnostic should read \"%s\", not \"%s\"",
+	    expected, reported == NULL ? "(none)" : reported);
+
+	return (reported != NULL && strcmp(reported, expected) == 0 &&
+	    ctx->account.arena_bytes == 0);
+}
+
+/*
+ * The evaluation arena and the arena of a query's rewrite are charged to the
+ * memory limit, so a limit that admits every tuple a program derives still
+ * refuses plans that do not fit, before any is built, and names what was
+ * being planned: a component by its first member, a query by its answer.  A
+ * rewrite refused by the limit fails the query rather than being abandoned
+ * for the whole program as a budget would be.  Under a limit that admits
+ * them, the same programs are answered, and every operation gives back what
+ * its arenas held.
+ */
+static void
+planning_is_charged_to_the_memory_limit(void)
+{
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+	char *program;
+	char *text;
+	size_t rows;
+
+	program = repeated("p(a).\np(X) :- p(X)", ", p(X)",
+	    PLANNING_RECURSIVE - 1, ".\n");
+	text = repeated("e(X)", ", e(X)", PLANNING_QUERY - 1, "?");
+	if (program == NULL || text == NULL) {
+		check(false, SCENARIO_PLANNING, "the programs are written");
+		free(program);
+		free(text);
+		return;
+	}
+
+	ctx = limited_context(PLANNING_LIMIT, program, &log);
+	if (ctx != NULL) {
+		check(relic_materialize(ctx) != 0 &&
+		    refused_while(ctx, PLANNING_LIMIT, "planning p/1"),
+		    SCENARIO_PLANNING, "a long recursive body's variants are "
+		    "refused while planning its component");
+		relic_destroy(ctx);
+	}
+
+	ctx = limited_context(PLANNING_LIMIT, "e(a).\n", &log);
+	if (ctx != NULL) {
+		query = relic_materialize(ctx) == 0 ?
+		    relic_query_prepare(ctx, NULL, text) : NULL;
+		rows = 0;
+		check(query != NULL &&
+		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
+		    rows == 0 &&
+		    refused_while(ctx, PLANNING_LIMIT, "planning $q0/1"),
+		    SCENARIO_PLANNING, "a long query's plan is refused while "
+		    "planning the query, the program's having fitted");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	ctx = limited_context(1, "e(a).\np(X) :- e(X).\n", &log);
+	if (ctx != NULL) {
+		query = relic_query_prepare(ctx, NULL, "p(a)?");
+		rows = 0;
+		check(query != NULL &&
+		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
+		    rows == 0 && log.warnings == 0 &&
+		    refused_while(ctx, 1, "rewriting $q0/0"), SCENARIO_PLANNING,
+		    "a rewrite refused by the limit fails the query");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	/*
+	 * The rewrite's first chunk fits under this limit and the evaluation
+	 * arena's does not, so the evaluation of what the query reads
+	 * completely is refused, and names the first component it evaluates:
+	 * e/1, the schedule's third, which is not the first the schedule
+	 * holds.
+	 */
+	ctx = limited_context(FIRST_WANTED_LIMIT,
+	    "b(1).\na(X) :- b(X).\ne(1).\np(X) :- e(X).\n", &log);
+	if (ctx != NULL) {
+		query = relic_query_prepare(ctx, NULL, "p(1)?");
+		rows = 0;
+		check(query != NULL &&
+		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
+		    rows == 0 &&
+		    refused_while(ctx, FIRST_WANTED_LIMIT, "planning e/1"),
+		    SCENARIO_PLANNING, "an evaluation for a rewrite names the "
+		    "first component it evaluates");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	ctx = limited_context(PLANNING_LIMIT, "e(a).\np(X) :- e(X).\n", &log);
+	if (ctx != NULL) {
+		query = relic_query_prepare(ctx, NULL, "p(a)?");
+		rows = 0;
+		check(query != NULL &&
+		    relic_query_run(ctx, query, count_rows, &rows) == 0 &&
+		    rows == 1 && ctx->account.arena_bytes == 0 &&
+		    ctx->account.store_bytes == relic_relation_total_bytes(ctx),
+		    SCENARIO_PLANNING, "a rewrite the limit admits answers, and "
+		    "gives back what its arenas held");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	free(program);
+	free(text);
+}
+
+static int
+keep_integers(void *callback_ctx, const relic_value_t *values, size_t count)
+{
+	integer_rows_t *rows;
+
+	rows = callback_ctx;
+	if (count > 0 && values[0].type == RELIC_INTEGER &&
+	    rows->count < sizeof(rows->values) / sizeof(rows->values[0])) {
+		rows->values[rows->count] = values[0].v.integer;
+		rows->count++;
+	}
+
+	return (0);
+}
+
+/*
+ * A fact has no plan: its turn in the pass over its component inserts its
+ * head.  So a program of many facts evaluates under a memory limit a little
+ * above what their relation holds, which a plan per fact -- several times the
+ * size of its tuple -- would exceed, and a fact written between two rules is
+ * inserted between the tuples they derive, as its plan's EMIT would have
+ * inserted it.
+ */
+static void
+a_fact_costs_its_tuple_and_keeps_its_turn(void)
+{
+	integer_rows_t rows;
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+	char *program;
+	size_t data_bytes;
+	size_t written;
+	size_t i;
+
+	program = malloc(FACTS_LOADED * FACT_TEXT_MAX + 1);
+	if (program == NULL) {
+		check(false, SCENARIO_FACTS, "the program is written");
+		return;
+	}
+	written = 0;
+	program[0] = '\0';
+	for (i = 0; i < FACTS_LOADED; i++)
+		written += (size_t)snprintf(program + written, FACT_TEXT_MAX + 1,
+		    "e(%zu).\n", i);
+
+	data_bytes = 0;
+	ctx = context_with(program, &log);
+	if (ctx != NULL && relic_materialize(ctx) == 0)
+		data_bytes = relic_relation_total_bytes(ctx);
+	relic_destroy(ctx);
+	check(data_bytes > 0, SCENARIO_FACTS, "the facts evaluate");
+
+	ctx = limited_context(data_bytes + FACTS_MARGIN, program, &log);
+	if (ctx != NULL) {
+		checkf(relic_materialize(ctx) == 0 &&
+		    relic_relation_total_tuples(ctx) == FACTS_LOADED,
+		    SCENARIO_FACTS, "%d facts should evaluate within %zu bytes "
+		    "of their relation's %zu: %s", FACTS_LOADED,
+		    (size_t)FACTS_MARGIN, data_bytes,
+		    relic_error(ctx) != NULL ? relic_error(ctx) : "");
+		relic_destroy(ctx);
+	}
+	free(program);
+
+	ctx = context_with("e(1).\np(3).\np(X) :- e(X).\np(5).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	bzero(&rows, sizeof(rows));
+	query = relic_query_prepare(ctx, NULL, "p(X)?");
+	check(query != NULL &&
+	    relic_query_run(ctx, query, keep_integers, &rows) == 0 &&
+	    rows.count == 3 && rows.values[0] == 3 && rows.values[1] == 1 &&
+	    rows.values[2] == 5, SCENARIO_FACTS,
+	    "facts and the rule between them insert in program order");
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -729,6 +1039,8 @@ main(void)
 	answers_are_named_in_the_order_queries_compile();
 	answering_queries_does_not_grow_the_context();
 	an_answer_refused_by_a_limit_is_given_back();
+	planning_is_charged_to_the_memory_limit();
+	a_fact_costs_its_tuple_and_keeps_its_turn();
 	the_programs_queries_are_enumerated();
 	an_unsafe_query_makes_the_program_invalid();
 	a_refused_query_leaves_the_program_valid();

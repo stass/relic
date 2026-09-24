@@ -141,7 +141,35 @@ relic_diag_record_refusal(relic_t *ctx)
 void
 relic_diag_no_memory(relic_t *ctx)
 {
-	relic_diagf(ctx, RELIC_ERROR, NULL, "out of memory");
+	if (!relic_account_take_refusal(&ctx->account)) {
+		relic_diagf(ctx, RELIC_ERROR, NULL, "out of memory");
+		return;
+	}
+
+	if (ctx->diag.activity[0] == '\0') {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "limit exceeded: memory=%zu", ctx->account.limit);
+		return;
+	}
+
+	relic_diagf(ctx, RELIC_ERROR, NULL,
+	    "limit exceeded: memory=%zu while %s", ctx->account.limit,
+	    ctx->diag.activity);
+}
+
+void
+relic_diag_begin_operation(relic_t *ctx)
+{
+	ctx->diag.activity[0] = '\0';
+	relic_account_take_refusal(&ctx->account);
+}
+
+void
+relic_diag_activity(relic_t *ctx, const char *verb, const char *subject)
+{
+	snprintf(ctx->diag.activity, sizeof(ctx->diag.activity), "%s %s", verb,
+	    subject);
+	relic_account_take_refusal(&ctx->account);
 }
 
 /*

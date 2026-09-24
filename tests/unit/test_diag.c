@@ -32,6 +32,7 @@
 
 #define	SCENARIO_CALLBACK	"a callback receives every diagnostic"
 #define	SCENARIO_ESCAPE		"the stderr formatter escapes what it prints"
+#define	SCENARIO_LIMIT		"a refusal by the memory limit is reported as one"
 #define	SCENARIO_SILENT		"a context with no callback stays silent"
 
 /*
@@ -56,6 +57,8 @@ static void	 record_diagnostic(void *ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
 static void	 a_callback_sees_level_location_and_text(void);
 static void	 a_silent_context_still_remembers_its_error(void);
+static void	 a_refusal_by_the_limit_is_reported_as_the_limit(void);
+static bool	 last_error_is(relic_t *ctx, const char *expected);
 static void	 the_stderr_formatter_escapes_unprintable_bytes(void);
 
 static void
@@ -280,11 +283,70 @@ the_stderr_formatter_escapes_unprintable_bytes(void)
 	    "a located diagnostic should read file:line:column: level: text");
 }
 
+static bool
+last_error_is(relic_t *ctx, const char *expected)
+{
+	return (relic_error(ctx) != NULL &&
+	    strcmp(relic_error(ctx), expected) == 0);
+}
+
+/*
+ * A failed allocation reports as exhaustion unless the account records that
+ * the memory limit refused, in which case it reports the limit, its value and
+ * the activity in progress, once.  Beginning an activity, or an operation,
+ * forgets a refusal nothing reported, so a later failure is not blamed on
+ * it.  The refusal is set by hand: what sets it is the arena's business,
+ * and test_arena's.
+ */
+static void
+a_refusal_by_the_limit_is_reported_as_the_limit(void)
+{
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	config.max_memory = 4096;
+	ctx = relic_create_config(&config);
+	check(ctx != NULL, SCENARIO_LIMIT, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	relic_diag_no_memory(ctx);
+	check(last_error_is(ctx, "out of memory"), SCENARIO_LIMIT,
+	    "without a refusal, exhaustion is reported");
+
+	relic_diag_activity(ctx, "planning", "path/2");
+	ctx->account.refused = true;
+	relic_diag_no_memory(ctx);
+	checkf(last_error_is(ctx,
+	    "limit exceeded: memory=4096 while planning path/2"),
+	    SCENARIO_LIMIT, "the refusal should name the limit and the "
+	    "activity, not \"%s\"", relic_error(ctx));
+
+	relic_diag_no_memory(ctx);
+	check(last_error_is(ctx, "out of memory"), SCENARIO_LIMIT,
+	    "the refusal is reported once");
+
+	ctx->account.refused = true;
+	relic_diag_activity(ctx, "rewriting", "$q0/1");
+	relic_diag_no_memory(ctx);
+	check(last_error_is(ctx, "out of memory"), SCENARIO_LIMIT,
+	    "a new activity forgets a refusal nothing reported");
+
+	ctx->account.refused = true;
+	check(relic_load_string(ctx, "test.dl", "e(a).\n") == 0 &&
+	    !ctx->account.refused, SCENARIO_LIMIT,
+	    "so does the beginning of an operation");
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
 	a_callback_sees_level_location_and_text();
 	a_silent_context_still_remembers_its_error();
+	a_refusal_by_the_limit_is_reported_as_the_limit();
 	the_stderr_formatter_escapes_unprintable_bytes();
 
 	return (check_summary("diag"));

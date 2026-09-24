@@ -202,8 +202,9 @@ hold.
 the most tuples all relations together may hold; by default there is no
 limit.
 .It Cm memory
-the most bytes relation and index storage may occupy; by default there is
-no limit.
+the most bytes relation and index storage, the plans of an evaluation and
+the rewrite of a query may occupy together; by default there is no limit.
+A long rule's plans can need more memory than the data does.
 .It Cm magic-preds
 the most predicates the rewrite of one query may generate.
 .It Cm magic-rules

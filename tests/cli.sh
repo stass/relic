@@ -178,6 +178,8 @@ esac
 
 # -l sets each limit the library enforces, by the key the diagnostic names
 # it by, and zero asks for the default.  A repeated key takes its later value.
+# The memory limit counts the working state of a query's Magic rewrite, so a
+# limit of one byte refuses the rewrite's first allocation.
 status=0
 diagnostic=$("$RELIC" -l memory=1 "$work/graph.dl" 2>&1 >/dev/null) ||
     status=$?
@@ -185,16 +187,20 @@ if [ "$status" -ne 1 ]; then
 	fail "an exceeded memory limit exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=1 while deriving"*)
+*"limit exceeded: memory=1 while rewriting \$q0/"*)
 	;;
 *)
 	fail "an exceeded memory limit was reported as '$diagnostic'"
 	;;
 esac
 
-# Building an index is relation storage like any other, and a memory limit
-# that admits a relation's tuples can refuse the index a later rule looks
-# them up through.  The refusal names the relation being indexed.
+# The memory limit counts the plans an evaluation holds as well as its
+# relations, so a limit smaller than the evaluation arena's first chunk
+# refuses the first component's plans, named by its first member, before any
+# tuple is derived.  Building an index is relation storage like any other,
+# and a limit that admits the plans and a relation's tuples can refuse the
+# index a later rule looks them up through; that refusal names the relation
+# being indexed.
 i=0
 : > "$work/chain.dl"
 while [ "$i" -lt 100 ]; do
@@ -207,10 +213,24 @@ status=0
 diagnostic=$("$RELIC" -a -l memory=3000 "$work/chain.dl" 2>&1 >/dev/null) ||
     status=$?
 if [ "$status" -ne 1 ]; then
+	fail "refused plans exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"limit exceeded: memory=3000 while planning edge/2"*)
+	;;
+*)
+	fail "refused plans were reported as '$diagnostic'"
+	;;
+esac
+
+status=0
+diagnostic=$("$RELIC" -a -l memory=7500 "$work/chain.dl" 2>&1 >/dev/null) ||
+    status=$?
+if [ "$status" -ne 1 ]; then
 	fail "a refused index build exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=3000 while indexing edge/2"*)
+*"limit exceeded: memory=7500 while indexing edge/2"*)
 	;;
 *)
 	fail "a refused index build was reported as '$diagnostic'"

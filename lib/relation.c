@@ -55,8 +55,6 @@ static bool	 columns_holding(size_t tuples, uint16_t arity,
 static int	 count_distinct(relic_t *ctx, const relic_relation_t *relation,
 		    uint16_t column, size_t *distinctp);
 static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation);
-static bool	 exceeds_memory_limit(const relic_t *ctx, size_t current_bytes,
-		    size_t projected_bytes);
 static bool	 exceeds_tuple_limit(const relic_t *ctx);
 static int	 index_build(relic_t *ctx, const relic_relation_t *relation,
 		    relic_index_t *index);
@@ -156,7 +154,7 @@ void
 relic_relation_clear(relic_t *ctx, relic_relation_t *relation)
 {
 	ctx->relations.tuple_count -= relation->count;
-	ctx->relations.storage_bytes -= relic_relation_bytes(relation);
+	ctx->account.store_bytes -= relic_relation_bytes(relation);
 	relation_empty(relation);
 }
 
@@ -383,9 +381,9 @@ relation_bytes_after_insert(const relic_relation_t *relation)
  * number of them.
  *
  * The total counts tuples already held, so a total that has reached the limit
- * cannot admit another and the comparison is `>=` rather than `>`.  Its
- * sibling below has to project a size instead, because bytes grow in steps
- * that a tuple count does not predict.
+ * cannot admit another and the comparison is `>=` rather than `>`.  The
+ * memory limit has to project a size instead, because bytes grow in steps
+ * that a tuple count does not predict, and relic_account_exceeds() does.
  */
 static bool
 exceeds_tuple_limit(const relic_t *ctx)
@@ -394,35 +392,6 @@ exceeds_tuple_limit(const relic_t *ctx)
 		return (false);
 
 	return (ctx->relations.tuple_count >= ctx->config.max_tuples);
-}
-
-/*
- * Whether something holding `current_bytes` of the storage total -- a
- * relation, or an index being built -- would take relation and index storage
- * past the configured maximum by growing to `projected_bytes`.
- *
- * The projection replaces that thing's contribution to the total with what
- * the contribution would become, so the answer covers every relation without
- * revisiting any of them.  The subtraction is safe because the total is by
- * construction the sum of what every relation holds and what an index being
- * built holds, so the current bytes of either are always a part of it.
- */
-static bool
-exceeds_memory_limit(const relic_t *ctx, size_t current_bytes,
-    size_t projected_bytes)
-{
-	size_t elsewhere_bytes;
-
-	if (ctx->config.max_memory == 0)
-		return (false);
-
-	elsewhere_bytes = ctx->relations.storage_bytes - current_bytes;
-
-	/* Two sizes that fit in a size_t need not have a sum that does. */
-	if (projected_bytes > SIZE_MAX - elsewhere_bytes)
-		return (true);
-
-	return (elsewhere_bytes + projected_bytes > ctx->config.max_memory);
 }
 
 /*
@@ -448,9 +417,9 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 		return (-1);
 	}
 
-	if (exceeds_memory_limit(ctx, relic_relation_bytes(relation),
+	if (relic_account_exceeds(&ctx->account, relic_relation_bytes(relation),
 	    relation_bytes_after_insert(relation))) {
-		report_limit(ctx, "memory", ctx->config.max_memory, "deriving",
+		report_limit(ctx, "memory", ctx->account.limit, "deriving",
 		    relation);
 		return (-1);
 	}
@@ -558,7 +527,7 @@ relation_make_room(relic_t *ctx, relic_relation_t *relation)
 
 	bytes_before = relic_relation_bytes(relation);
 	status = relation_reserve(ctx, relation);
-	ctx->relations.storage_bytes +=
+	ctx->account.store_bytes +=
 	    relic_relation_bytes(relation) - bytes_before;
 
 	return (status);
@@ -764,15 +733,15 @@ index_make_room(relic_t *ctx, const relic_relation_t *relation,
 
 	bytes_before = relic_index_bytes(index);
 
-	if (exceeds_memory_limit(ctx, bytes_before,
+	if (relic_account_exceeds(&ctx->account, bytes_before,
 	    relic_index_bytes_after_reserve(index, tuples))) {
-		report_limit(ctx, "memory", ctx->config.max_memory, "indexing",
+		report_limit(ctx, "memory", ctx->account.limit, "indexing",
 		    relation);
 		return (-1);
 	}
 
 	status = relic_index_reserve(index, relation, tuples);
-	ctx->relations.storage_bytes += relic_index_bytes(index) - bytes_before;
+	ctx->account.store_bytes += relic_index_bytes(index) - bytes_before;
 	if (status != 0)
 		relic_diag_no_memory(ctx);
 
@@ -855,7 +824,7 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 
 	relic_index_init(&built, key_mask);
 	if (index_build(ctx, relation, &built) != 0) {
-		ctx->relations.storage_bytes -= relic_index_bytes(&built);
+		ctx->account.store_bytes -= relic_index_bytes(&built);
 		relic_index_empty(&built);
 		return (-1);
 	}
@@ -1095,7 +1064,7 @@ relic_relation_discard_all(relic_t *ctx)
 			relic_relation_clear(ctx, table->entries[position]);
 	}
 
-	assert(table->tuple_count == 0 && table->storage_bytes == 0);
+	assert(table->tuple_count == 0 && ctx->account.store_bytes == 0);
 }
 
 /*
@@ -1148,7 +1117,7 @@ relic_relation_describe(const relic_t *ctx, const relic_relation_t *relation,
 size_t
 relic_relation_total_bytes(const relic_t *ctx)
 {
-	return (ctx->relations.storage_bytes);
+	return (ctx->account.store_bytes);
 }
 
 size_t

@@ -17,7 +17,10 @@
  * An arena is a list of chunks.  A chunk is one allocation holding a header
  * and, after it, a payload that allocation hands out by bumping an offset.
  * Nothing is freed individually; relic_arena_reset() releases every chunk
- * together and returns the arena to its initial state.
+ * together and returns the arena to its initial state.  A charged arena's
+ * account counts exactly the bytes `total_bytes` counts: a chunk is charged
+ * before it is obtained, the charge is given back if the allocator refuses
+ * it, and a reset gives back the whole total.
  *
  * The strictest alignment any object needs is used for every allocation.
  * Rounding each request up to it means the running offset is always aligned,
@@ -38,6 +41,8 @@
 
 static relic_arena_chunk_t	*arena_add_chunk(relic_arena_t *arena,
 				    size_t size, bool oversize);
+static bool			 charge(relic_arena_t *arena, size_t bytes);
+static void			 uncharge(relic_arena_t *arena, size_t bytes);
 static unsigned char		*chunk_payload(relic_arena_chunk_t *chunk);
 static size_t			 round_up(size_t size, size_t alignment);
 
@@ -67,8 +72,27 @@ chunk_payload(relic_arena_chunk_t *chunk)
 }
 
 /*
+ * Count `bytes` more against a charged arena's account, or return false when
+ * its limit refuses them.  An arena that is not charged is always admitted.
+ */
+static bool
+charge(relic_arena_t *arena, size_t bytes)
+{
+	return (arena->account == NULL ||
+	    relic_account_charge(arena->account, bytes));
+}
+
+static void
+uncharge(relic_arena_t *arena, size_t bytes)
+{
+	if (arena->account != NULL)
+		relic_account_release(arena->account, bytes);
+}
+
+/*
  * Obtain a chunk able to hold an aligned allocation of `size` bytes and link
- * it into the arena, or return NULL and mark the arena failed.
+ * it into the arena, or return NULL and mark the arena failed.  A chunk the
+ * account does not admit is never asked of the allocator.
  *
  * A chunk that had to be made oversize for one large request is linked after
  * the head rather than in front of it.  Pushing it to the head would abandon
@@ -95,8 +119,14 @@ arena_add_chunk(relic_arena_t *arena, size_t size, bool oversize)
 	}
 	total = header_size + payload_size;
 
+	if (!charge(arena, total)) {
+		arena->failed = true;
+		return (NULL);
+	}
+
 	chunk = malloc(total);
 	if (chunk == NULL) {
+		uncharge(arena, total);
 		arena->failed = true;
 		return (NULL);
 	}
@@ -133,15 +163,25 @@ relic_arena_init(relic_arena_t *arena)
 }
 
 void
+relic_arena_init_charged(relic_arena_t *arena, relic_account_t *account)
+{
+	relic_arena_init(arena);
+	arena->account = account;
+}
+
+void
 relic_arena_reset(relic_arena_t *arena)
 {
 	relic_arena_chunk_t *chunk;
 	relic_arena_chunk_t *next;
+	relic_account_t *account;
 
 	SLIST_FOREACH_SAFE(chunk, &arena->chunks, link, next)
 		free(chunk);
+	uncharge(arena, arena->total_bytes);
 
-	relic_arena_init(arena);
+	account = arena->account;
+	relic_arena_init_charged(arena, account);
 }
 
 /*

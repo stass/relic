@@ -51,6 +51,12 @@
 # body per plan, 10^10 steps or more: a second or two each in passes, even
 # under a sanitizer, and minutes step by step on an optimized build.
 #
+# Each planning workload then runs again under a memory limit of 16 MiB,
+# far below the hundreds of megabytes its plans or its rewrite hold.  The
+# plans and the rewrite are charged to the limit, so each must fail with the
+# limit's message, naming what was being planned or rewritten, once it has
+# built what the limit allows and no more, within the same budget.
+#
 # RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
 # set, which leaves room for a sanitizer build on a slow machine; for
 # reachability the clock only guards against a run that never ends.  The
@@ -75,6 +81,7 @@ session_lines=100000
 body_length=8000
 recursive_every=16
 patterns=125
+planning_memory=16777216
 
 fail() {
 	echo "$1" >&2
@@ -276,3 +283,34 @@ if [ -s "$work/patterns-err" ]; then
 	cat "$work/patterns-err" >&2
 	fail "the patterns workload was not answered through its rewrite"
 fi
+
+# Run a planning workload under the memory limit, which must refuse it with
+# the diagnostic given as the first argument.
+refused_within() {
+	expected=$1
+	shift
+
+	status=0
+	run_within "$work/limited-rows" "$work/limited-err" \
+	    "$planning_budget" "$RELIC" -l "memory=$planning_memory" "$@" ||
+	    status=$?
+
+	if [ "$status" -ne 1 ]; then
+		cat "$work/limited-err" >&2
+		fail "$* under a memory limit exited $status within a budget of $planning_budget seconds, expected 1"
+	fi
+
+	if [ "$(cat "$work/limited-err")" != "relic: error: $expected" ]; then
+		cat "$work/limited-err" >&2
+		fail "$* under a memory limit was not refused with '$expected'"
+	fi
+
+	if [ -s "$work/limited-rows" ]; then
+		fail "$* under a memory limit answered rows"
+	fi
+}
+
+refused_within "limit exceeded: memory=$planning_memory while planning p/1" \
+    -X no-magic -q 'p(X)?' "$work/long.dl"
+refused_within "limit exceeded: memory=$planning_memory while rewriting \$q0/1" \
+    -q 'all(X)?' "$work/patterns.dl"

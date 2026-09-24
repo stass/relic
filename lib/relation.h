@@ -199,22 +199,21 @@ struct relic_relation {
  * pointers and never relations, so a relation's address is fixed for the life
  * of the context and no caller has anything to remember.
  *
- * `tuple_count` and `storage_bytes` are the totals the configurable tuple and
- * memory limits are enforced against, summed over every relation of the
- * context, whether it is in this table or is a query's answer.
- * `storage_bytes` counts the capacity of every relation's columns and
- * canonical index slots and of every array of its secondary indexes,
- * including one being built -- what is actually held, not the smaller number
- * a tuple count implies.  It counts neither this array
- * nor the relations it points at, nor a relation's array of index headers,
- * which are sized by the program rather than by the data.
+ * `tuple_count` is the total the configurable tuple limit is enforced
+ * against, summed over every relation of the context, whether it is in this
+ * table or is a query's answer.  The bytes the same relations hold are the
+ * store's part of the context's memory account, `store_bytes`: the capacity
+ * of every relation's columns and canonical index slots and of every array
+ * of its secondary indexes, including one being built -- what is actually
+ * held, not the smaller number a tuple count implies.  It counts neither
+ * this array nor the relations it points at, nor a relation's array of index
+ * headers, which are sized by the program rather than by the data.
  */
 struct relic_reltab {
 	relic_relation_t	**entries;	/* null until created */
 	size_t			  count;
 	size_t			  capacity;
 	size_t			  tuple_count;
-	size_t			  storage_bytes;
 };
 
 #endif /* RELIC_RELATION_H */

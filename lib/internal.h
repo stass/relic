@@ -66,6 +66,12 @@ typedef struct relic_token relic_token_t;
 typedef struct relic_valtab relic_valtab_t;
 
 /*
+ * The longest description of an activity: a verb of a few letters and the
+ * description of a predicate or a query.
+ */
+#define	RELIC_ACTIVITY_TEXT_MAX	(16 + RELIC_PRED_TEXT_MAX)
+
+/*
  * The result of comparing two values.
  *
  * Ordering is defined only within a type: a mixed-type pair is unordered
@@ -92,12 +98,18 @@ enum relic_order {
  * was refused during the operation in progress, because the context was
  * busy; relic_error() then describes the refusal in place of `last_error`
  * until the operation returns.
+ *
+ * `activity` says what the operation in progress is doing, such as
+ * "planning path/2", for a refusal by the memory limit to name.  It is
+ * written when a phase that uses a charged arena begins, and read only when
+ * the account records such a refusal.
  */
 struct relic_diag {
 	relic_diag_cb	 callback;
 	void		*callback_ctx;
 	size_t		 error_count;
 	char		 last_error[512];
+	char		 activity[RELIC_ACTIVITY_TEXT_MAX];
 	bool		 has_error;
 	bool		 refused;
 };
@@ -319,6 +331,11 @@ struct relic_magic {
  * `counters` is the work evaluation has done.  What the context holds is
  * not counted here: relic_stats() measures it when asked.
  *
+ * `account` is what the memory limit is enforced against: the relation
+ * store's storage and the chunks of the two charged arenas, `eval_arena` and
+ * the arena of a query's Magic rewrite.  The other arenas hold what the
+ * caller wrote and are not charged.
+ *
  * `query_mixed_noted` records that RELIC_F_NOTE_MIXED has reported a
  * mixed-type comparison of the query being answered, or of a rule generated
  * from it.  A program rule keeps the same record on itself for the life of
@@ -337,6 +354,7 @@ struct relic {
 	relic_arena_t		 arena;	/* context lifetime: symbol bytes */
 	relic_arena_t		 program_arena;	/* the parsed program */
 	relic_arena_t		 eval_arena;	/* one evaluation's plans */
+	relic_account_t		 account;
 	relic_symtab_t		 symbols;
 	relic_valtab_t		 values;
 	relic_ast_program_t	 ast;
@@ -411,8 +429,34 @@ void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
  * Report that an allocation failed, in the one wording the whole library
  * uses.  Out-of-memory is the failure every module can hit and the one whose
  * message carries the least information, so it is written once.
+ *
+ * A charged arena refused by the memory limit fails exactly as one refused
+ * by the allocator, and every caller reports it here like any other failed
+ * allocation.  So this is where the two are told apart: when the account
+ * records that the limit refused, the report is the limit's, in the form
+ * every limit shares, naming the activity in progress, and the record is
+ * taken so that it is reported once.
  */
 void	 relic_diag_no_memory(relic_t *ctx);
+
+/*
+ * Record what the operation in progress is now doing, as a verb and the
+ * description of what it acts on -- "planning" and "path/2" -- which
+ * relic_diag_no_memory() names when the memory limit refused a charged
+ * arena.  A phase that allocates from a charged arena calls this before it
+ * allocates.  A refusal the account recorded and nothing reported is
+ * forgotten, so that no failure of this phase is blamed on an earlier one.
+ */
+void	 relic_diag_activity(relic_t *ctx, const char *verb,
+	    const char *subject);
+
+/*
+ * Begin an operation with no activity recorded and no refusal: what the last
+ * operation recorded and never reported belongs to it.  A charged arena used
+ * before any activity is recorded is then reported as the limit without an
+ * activity, rather than with the name of something an earlier operation did.
+ */
+void	 relic_diag_begin_operation(relic_t *ctx);
 
 /*
  * Record that a call was refused because its context was busy.  relic_error()
@@ -842,7 +886,8 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  *
  * The two totals are what the configurable tuple and memory limits are
  * enforced against: tuples across every relation, and the bytes their columns
- * and indexes hold.
+ * and indexes hold, which the memory limit counts together with the charged
+ * arenas in the context's account.
  */
 void	 relic_reltab_init(relic_reltab_t *table);
 void	 relic_reltab_reset(relic_reltab_t *table);

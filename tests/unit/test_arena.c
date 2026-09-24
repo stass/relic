@@ -7,10 +7,11 @@
 /*
  * Contract tests for the region allocator.
  *
- * Three properties matter to everything built on it: an allocation is
+ * Four properties matter to everything built on it: an allocation is
  * correctly aligned and does not overlap its neighbours, a reset returns the
- * arena to a reusable empty state, and a failure is both reported to the
- * caller and remembered on the arena.
+ * arena to a reusable empty state, a failure is both reported to the caller
+ * and remembered on the arena, and a charged arena's account holds exactly
+ * what the arena holds and refuses a chunk its limit does not admit.
  */
 
 #include "config.h"
@@ -25,6 +26,8 @@
 #include "internal.h"
 
 #define	SCENARIO_ALIGNMENT	"every allocation is aligned"
+#define	SCENARIO_CHARGED	"a charged arena's chunks are in its account"
+#define	SCENARIO_LIMITED	"the account's limit refuses a chunk"
 #define	SCENARIO_DISTINCT	"allocations do not overlap"
 #define	SCENARIO_FAILURE	"an impossible request fails stickily"
 #define	SCENARIO_MARKED		"an owner can record a failure of its own"
@@ -32,6 +35,9 @@
 #define	SCENARIO_ZERO		"a zero-byte request yields a usable pointer"
 
 static bool	 is_aligned(const void *block);
+static size_t	 first_chunk_bytes(void);
+static void	 a_charged_arena_is_counted_in_its_account(void);
+static void	 the_limit_refuses_a_chunk_before_it_is_obtained(void);
 static void	 a_reset_arena_allocates_again(void);
 static void	 a_zero_byte_request_returns_a_distinct_pointer(void);
 static void	 an_allocation_is_aligned_whatever_its_size(void);
@@ -262,10 +268,137 @@ a_reset_arena_allocates_again(void)
 	relic_arena_reset(&arena);
 }
 
+/*
+ * What an arena obtains for its first small allocation, chunk header
+ * included, measured rather than assumed so that the scenarios below hold
+ * whatever the header's size on the platform.
+ */
+static size_t
+first_chunk_bytes(void)
+{
+	relic_arena_t arena;
+	size_t bytes;
+
+	relic_arena_init(&arena);
+	bytes = relic_arena_alloc(&arena, 8) != NULL ?
+	    relic_arena_total_bytes(&arena) : 0;
+	relic_arena_reset(&arena);
+
+	return (bytes);
+}
+
+/*
+ * A charged arena's account counts exactly what the arena holds from the
+ * allocator, an oversize chunk included; a reset gives it all back and
+ * leaves the arena charged; an arena that is not charged changes nothing,
+ * and neither arena touches the store's part of the account.
+ */
+static void
+a_charged_arena_is_counted_in_its_account(void)
+{
+	relic_account_t account;
+	relic_arena_t charged;
+	relic_arena_t uncharged;
+
+	relic_account_init(&account, 0);
+	account.store_bytes = 1234;
+	relic_arena_init_charged(&charged, &account);
+	relic_arena_init(&uncharged);
+
+	check(relic_arena_alloc(&charged, 100) != NULL &&
+	    relic_arena_alloc(&charged, 100000) != NULL, SCENARIO_CHARGED,
+	    "a charged arena without a limit allocates");
+	checkf(account.arena_bytes == relic_arena_total_bytes(&charged) &&
+	    account.arena_bytes > 100000, SCENARIO_CHARGED,
+	    "the account should hold the arena's %zu bytes, and holds %zu",
+	    relic_arena_total_bytes(&charged), account.arena_bytes);
+
+	check(relic_arena_alloc(&uncharged, 100000) != NULL &&
+	    account.arena_bytes == relic_arena_total_bytes(&charged),
+	    SCENARIO_CHARGED, "an arena that is not charged is not counted");
+
+	relic_arena_reset(&charged);
+	checkf(account.arena_bytes == 0, SCENARIO_CHARGED,
+	    "a reset should give back every byte, and %zu remain",
+	    account.arena_bytes);
+
+	check(relic_arena_alloc(&charged, 100) != NULL &&
+	    account.arena_bytes == relic_arena_total_bytes(&charged) &&
+	    account.arena_bytes > 0, SCENARIO_CHARGED,
+	    "a reset arena stays charged");
+	check(account.store_bytes == 1234 && !account.refused,
+	    SCENARIO_CHARGED, "the store's part is untouched");
+
+	relic_arena_reset(&charged);
+	relic_arena_reset(&uncharged);
+}
+
+/*
+ * The limit applies to the whole account: a chunk that the store's part
+ * leaves no room for is refused, before the allocator is asked, and the
+ * arena fails as an exhausted one does, stickily.  The account records the
+ * refusal once.  A limit that admits the first chunk refuses the next when
+ * that one would cross it, and the account still holds exactly what the
+ * arena does.
+ */
+static void
+the_limit_refuses_a_chunk_before_it_is_obtained(void)
+{
+	relic_account_t account;
+	relic_arena_t arena;
+	size_t first;
+	int i;
+
+	first = first_chunk_bytes();
+	check(first > 0, SCENARIO_LIMITED, "a first chunk is measured");
+
+	relic_account_init(&account, first + 100);
+	account.store_bytes = 101;
+	relic_arena_init_charged(&arena, &account);
+
+	check(relic_arena_alloc(&arena, 8) == NULL &&
+	    relic_arena_failed(&arena), SCENARIO_LIMITED,
+	    "a chunk the store leaves no room for is refused");
+	check(relic_arena_total_bytes(&arena) == 0 && account.arena_bytes == 0,
+	    SCENARIO_LIMITED, "nothing was obtained or counted");
+	check(relic_account_take_refusal(&account) &&
+	    !relic_account_take_refusal(&account), SCENARIO_LIMITED,
+	    "the refusal is recorded once");
+
+	account.store_bytes = 100;
+	check(relic_arena_alloc(&arena, 8) == NULL, SCENARIO_LIMITED,
+	    "a failed arena stays failed when the limit would admit it");
+	check(!relic_account_take_refusal(&account), SCENARIO_LIMITED,
+	    "and asks the account nothing");
+
+	relic_arena_reset(&arena);
+	check(relic_arena_alloc(&arena, 8) != NULL &&
+	    account.arena_bytes == first, SCENARIO_LIMITED,
+	    "a first chunk that exactly reaches the limit is admitted");
+
+	for (i = 0; i < 1000 && relic_arena_alloc(&arena, 64) != NULL; i++)
+		continue;
+	check(relic_arena_failed(&arena) &&
+	    relic_account_take_refusal(&account), SCENARIO_LIMITED,
+	    "the next chunk crosses the limit and is refused by it");
+	check(account.arena_bytes == relic_arena_total_bytes(&arena) &&
+	    account.arena_bytes == first, SCENARIO_LIMITED,
+	    "the account holds what the arena holds");
+
+	relic_arena_reset(&arena);
+	check(account.arena_bytes == 0, SCENARIO_LIMITED,
+	    "the reset gives it back");
+
+	check(relic_account_exceeds(&account, 0, SIZE_MAX), SCENARIO_LIMITED,
+	    "a projection past the size of memory exceeds any limit");
+}
+
 int
 main(void)
 {
 	a_reset_arena_allocates_again();
+	a_charged_arena_is_counted_in_its_account();
+	the_limit_refuses_a_chunk_before_it_is_obtained();
 	a_zero_byte_request_returns_a_distinct_pointer();
 	an_allocation_is_aligned_whatever_its_size();
 	an_impossible_request_fails_and_stays_failed();

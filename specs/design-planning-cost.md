@@ -253,6 +253,13 @@ arenas out.
   context owns cannot be released after the context is, so a caller-owned
   arena cannot be in the account at all.
 
+A fact is not planned (`specs/design-eval.md` section 3), so the evaluation
+arena holds the plans of rules with bodies. Were a fact planned, its plan
+would be several times the size of its tuple, and charging the arena would
+refuse a program of many facts under a limit that admits their relation,
+which is the effect the first reason above keeps the program arena out to
+avoid.
+
 An arena is attached to the account when it is initialized, and a reset
 returns its bytes to the account and keeps the attachment, so a phase that
 ends gives back what it held and the account is the sum of what the store and

@@ -140,9 +140,13 @@ once, over relations that no later component changes. A component with no
 recursion reads nothing it writes, and one pass over its rules is its fixed
 point.
 
-A fact is a rule with an empty body, and its plan is a single `EMIT`, so facts
-need no loading step of their own: the first pass over their component inserts
-them.
+A fact is a rule with an empty body, so facts need no loading step of their
+own: the first pass over their component inserts them. A fact is not planned.
+Its head holds only constants, so the plan it would get is a single `EMIT` of
+them; the pass inserts that tuple when the fact's turn comes, through the
+insertion an `EMIT` makes, so a fact is ordered and counted exactly as that
+plan would be. What it costs is its tuple, and nothing in the evaluation
+arena, which holds the plans of rules with bodies only (section 9).
 
 **It terminates** because every value an insertion can produce was interned
 before evaluation began -- a rule's head holds constants and variables, and a
@@ -315,9 +319,10 @@ still grow.
 ## 6. Materialization and when it is current
 
 **The relations of a context hold only what evaluation derived.** A fact is a
-rule with an empty body, so even the facts are in a relation because a plan
-inserted them. The relations are therefore either the fixed point of every
-rule the program has, or stale, and the context records which by counting the
+rule with an empty body, so even the facts are in a relation because the
+pass over their component inserted them. The relations are therefore either
+the fixed point of every rule the program has, or stale, and the context
+records which by counting the
 rules they are the fixed point of. Rules are only ever appended, because
 checking is incremental and the syntax tree is append-only, so a count is
 enough.
@@ -423,8 +428,11 @@ failed one derived before starting again.
 
 Plans and cursors live in the **evaluation arena**, which is reset when each
 evaluation ends, successfully or not, and which is charged to the memory
-limit while it lives, per D-18. Tuples and indexes live in relations, which
-are individually allocated and accounted against the limits, per D-6.
+limit while it lives, per D-18. A fact has no plan, per section 3, and a
+pass finds its turn from the schedule, so a program of many facts costs the
+arena nothing and the limit counts the facts once, as tuples. Tuples and
+indexes live in relations, which are individually allocated and accounted
+against the limits, per D-6.
 Nothing is allocated per tuple and nothing is allocated inside the executor's
 loop.
 
@@ -444,7 +452,8 @@ that.
 ## 11. What is deliberately absent
 
 * **Recursion in the executor.** Section 2.
-* **A separate fact-loading pass.** A fact is a rule with no body.
+* **A separate fact-loading pass.** A fact is a rule with no body, inserted
+  in its turn in the pass over its component.
 * **Rows before completion.** Section 7.
 * **Incremental maintenance.** A change to the program discards everything
   derived, per section 6, and architecture section 70 defers anything finer.

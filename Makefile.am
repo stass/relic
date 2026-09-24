@@ -34,11 +34,11 @@ LIBOBJDIR = compat/
 ##
 
 noinst_LTLIBRARIES = librelic_internal.la
-librelic_internal_la_SOURCES = lib/api.c lib/arena.c lib/depgraph.c \
-	lib/diag.c lib/eval.c lib/explain.c lib/index.c lib/lex.c \
-	lib/magic.c lib/parse.c lib/plan.c lib/pred.c lib/relation.c \
-	lib/result.c lib/rule.c lib/stratify.c lib/symbol.c lib/util.c \
-	lib/value.c
+librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
+	lib/depgraph.c lib/diag.c lib/eval.c lib/explain.c lib/index.c \
+	lib/lex.c lib/magic.c lib/parse.c lib/plan.c lib/pred.c \
+	lib/relation.c lib/result.c lib/rule.c lib/stratify.c lib/symbol.c \
+	lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -49,9 +49,10 @@ librelic_la_LDFLAGS = -no-undefined -export-symbols-regex '^relic_' \
 include_HEADERS = include/relic.h
 dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
-noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h lib/arena.h \
-	lib/ast.h lib/depgraph.h lib/internal.h lib/plan.h lib/program.h \
-	lib/relation.h lib/util.h tests/unit/harness.h tests/unit/programs.h
+noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
+	lib/account.h lib/arena.h lib/ast.h lib/depgraph.h lib/internal.h \
+	lib/plan.h lib/program.h lib/relation.h lib/util.h \
+	tests/unit/harness.h tests/unit/programs.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/input.c cmd/relic/main.c cmd/relic/output.c \

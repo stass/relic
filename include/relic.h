@@ -110,16 +110,22 @@ typedef struct relic_config relic_config_t;
  * in one place and nowhere else.
  *
  * `max_tuples` counts tuples across every relation and `max_memory` the bytes
- * their storage holds.  Exceeding either is an ordinary error: the tuple is
- * refused, a diagnostic names the limit and its configured value, and the
- * relation is left as it was.
+ * their storage holds together with the working state of an evaluation and
+ * of a query's Magic rewrite.  Exceeding either is an ordinary error: what
+ * would exceed it is refused, a diagnostic names the limit, its configured
+ * value and what was being done, and the relation is left as it was.
  *
- * `max_memory` bounds relation and index storage, which is what grows with
- * the data, and not the memory the library uses in total: the loaded program,
- * the symbols and values it mentions, and the working state of a query are
- * sized by the program rather than by what it derives.  Nor is it a bound on
- * peak usage, since growing an array holds the old one until the new one is
- * filled.
+ * `max_memory` bounds what running the program holds: relation and index
+ * storage, which grows with the data, and the plans of an evaluation and the
+ * rewritten rules of a query, which grow with the square of a rule's length.
+ * A limit that fits a program's data may therefore refuse its plans, before
+ * any tuple is derived.  It does not bound the memory the library uses in
+ * total: the loaded program, the symbols and values it mentions, the
+ * evaluation order and a prepared query are sized by what the caller wrote,
+ * and the tables and evaluation order of a query's rewrite are a fraction of
+ * the rewrite the limit does count.
+ * Nor is it a bound on peak usage, since growing an array holds the old one
+ * until the new one is filled.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
  * single query: the adorned and magic predicates it generates, and the rules
@@ -144,7 +150,7 @@ typedef struct relic_config relic_config_t;
  * adds a limit changes the library's interface version.
  */
 struct relic_config {
-	size_t		max_memory;	/* relation and index storage, bytes */
+	size_t		max_memory;	/* storage and working state, bytes */
 	size_t		max_tuples;
 	size_t		max_magic_preds;
 	size_t		max_magic_rules;
