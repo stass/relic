@@ -657,7 +657,46 @@ million tuples for an answer of 2000, the left-recursive one six thousand.
 A right-linear recursion bound on its first argument can be answered by
 reachability over `par` alone (the right-linear and factoring rewrites of
 Naughton, Ramakrishnan, Sagiv and Ullman); find whether relic's rewrite can
-recognize the case.
+recognize the case. Souffle's `--magic-transform` produces the identical
+program and runs it about five times faster, so the gap to Souffle is in
+evaluation rather than in the rewrite: see the next three items.
+
+**The delta literal always drives the join.** [Medium, component:
+`lib/plan.c`, `lib/eval.c`, `bench/compare/tc-acyclic-bf`] A delta is a range
+of tuple identifiers, which only a scan can walk, so every delta variant
+places the delta literal first. For `tc_bf(X, Z) :- magic(X), par(X, Y),
+tc_bf(Y, Z)` on the dense acyclic graph that means one lookup of
+`par(_, Y)` per delta tuple, about 48 tuples each, most rejected by
+`member magic(X)`: 6.27 million tuples looked up for 1.77 million
+derivations. The magic relation holds 446 values, and Souffle's loop nest is
+`for magic(X), for par(X, Y), for delta(Y, Z) on index`: about 12 iterations
+x 446 x 48 = 0.26 million probes. relic took 0.26 s against 0.09 s. An index
+chain lists its tuples in identifier order, so a lookup can stop at a range's
+end but has to walk from the head to reach its start. Either materialize a
+delta that an inner literal needs into a scratch relation carrying the
+indexes the plan asks for (Souffle's design, at the cost of one copy of each
+delta), or let a key entry locate the first chain tuple at or past a given
+identifier. The planner also orders a component's plans before its relations
+hold anything, so it cannot see that `magic` is small; choosing the delta
+variant's order from the relations' sizes at the start of each iteration is
+part of the same fix.
+
+**The first pass over a recursive component is repeated as its first
+delta.** [Medium, component: `lib/eval.c`] `run_base_pass()` evaluates every
+rule of the component, recursive ones included, against the whole
+relations, and its lookups see tuples the same pass appends. The first delta
+is then everything that pass inserted, so every recursive rule joins it all
+again. Non-delta literals in later variants also read the whole relation,
+current iteration included, so a derivation can be made in two variants.
+`tc-cyclic-bf` makes 74.2 million derivations where one per (derivation
+path, answer) would be about 49 million; on the complete graph K40 the
+closure makes 132,800 against 65,600. The fix is the textbook scheme: the
+base pass runs only rules with no literal of the component, the first delta
+is the whole of each relation, and a variant's non-delta literals read
+bounded views -- those before the delta literal the tuples older than the
+delta, those after it everything up to the delta's end, fixed when the
+iteration starts. With the views bounded, nothing needs to see a tuple in
+the iteration that inserts it, which the next item relies on.
 
 **relic's evaluation costs several times Souffle's interpreter per
 derivation on the analyses.** [Medium, component: `lib/eval.c`,
@@ -672,9 +711,20 @@ on the draws. `tc-nonlinear`'s program over the `sparse-cyclic` data set
 ran past 600 s in relic against 117 s in the interpreter. Semi-naive evaluation does not repeat work here
 -- on a chain the nonlinear closure makes about 2.5 derivations per path
 triple at every length -- so the gap is the cost of a derivation and its
-lookups, not their number. Profile the join loop on the denser program
-before choosing between index layout, tuple comparison and the lookup
-path.
+lookups, not their number. Profiles of `tc-cyclic` and `sg-cyclic` put
+about three quarters of the time in the duplicate check of
+`relic_relation_insert()`, split between `relic_idprobe_next()` and the
+tuple comparison. The relation's hash table holds only tuple identifiers,
+so every candidate slot costs a read of the tuple it names, at a load factor
+up to three quarters, and a table of a million tuples does not fit in cache.
+Souffle keeps the same relation in a B-tree and inserts with the outer loop
+fixed on the head's first column, so consecutive inserts land in the same
+leaf. Two remedies, to be measured separately: store a hash tag beside each
+identifier (or, for arity two or less, the tuple itself) so that a slot
+rejects a mismatch without a tuple read; and, once the views of the previous
+item are bounded, buffer an iteration's derivations and insert them in
+batches, prefetching or partitioning by hash, instead of one random probe
+per derivation.
 
 **Loading facts costs relic more memory than any other engine.** [Medium,
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
@@ -683,7 +733,13 @@ ternary facts read as source text, relic peaks at about 160 MB, against
 clingo and SWI-Prolog, which also parse. Find where the peak comes from --
 the syntax tree of a fact file held whole, the value table, the relation --
 before deciding whether a streaming fact loader or the CSV import of
-`specs/architecture.md` section 69 is the remedy.
+`specs/architecture.md` section 69 is the remedy. Time follows the same
+path: loading is about half of `facts-join` at scale 4 and 0.07 of the 0.08 s
+of user time `graph-left` takes, which is most of Souffle's lead on
+`graph-left`, `graph-reach`, `facts-join` and `tasks-ready`. Each symbol is
+interned twice, once in the symbol table by the lexer and once in the value
+table, and the symbol table recomputes every symbol's byte hash when it
+grows (`symbol_rehash()`).
 
 **Souffle and Nemo write their answers to files, the others to a discarded
 standard output.** [Low, component: `bench/compare/run.sh`] Under load, a
