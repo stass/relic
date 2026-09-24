@@ -174,6 +174,7 @@ static void	 parser_reset(relic_parser_t *parser);
 static const char *predicate_name(const relic_parser_t *parser,
 		    uint32_t symbol);
 static int	 quoted_precision(const relic_token_t *token);
+static const char *quoted_suffix(const relic_token_t *token);
 static int	 read_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream, char **textp, size_t *lengthp);
 static void	 report_lex_error(relic_parser_t *parser);
@@ -288,6 +289,16 @@ quoted_precision(const relic_token_t *token)
 }
 
 /*
+ * What follows the quoted text: "..." when quoted_precision() cut it, so a
+ * reader knows the message does not hold the whole spelling.
+ */
+static const char *
+quoted_suffix(const relic_token_t *token)
+{
+	return (token->text_length > RELIC_QUOTED_TEXT_MAX ? "..." : "");
+}
+
+/*
  * The spelling of an interned predicate name, for a message about it.  Every
  * byte of it is an identifier byte, so it is safe to quote.
  */
@@ -336,9 +347,9 @@ report_lex_error(relic_parser_t *parser)
 		break;
 	case RELIC_LEX_INTEGER_RANGE:
 		parse_errorf(parser, &token->where,
-		    "integer literal out of range: %.*s",
-		    quoted_precision(token),
-		    token->text);
+		    "integer literal out of range: %.*s%s",
+		    quoted_precision(token), token->text,
+		    quoted_suffix(token));
 		break;
 	case RELIC_LEX_INTEGER_TRAILING:
 		parse_errorf(parser, &token->where,
