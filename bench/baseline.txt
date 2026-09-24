@@ -1,0 +1,19 @@
+# bench/run.sh at BENCH_SCALE=1 on one machine, for comparison by eye.
+#
+# Intel Xeon W-3245 at 3.20 GHz, macOS 26, Apple clang 21, configured with
+# no options (-g -O2), on an otherwise idle machine.  Each workload was run
+# twice and the slower time kept; the counters do not vary between runs.
+# Timing is noisy and machine-dependent: compare the counters exactly and
+# the seconds only by order of magnitude.
+
+workload                      seconds     derived       held     scanned   looked up
+chain, right-recursive           0.83     2009001    2005001     2007002     2005000
+chain, left-recursive            0.03        6002       4001        2002        4002
+chain, whole closure             1.21     4009998    4004000     4010000     4003998
+graph, reachability              0.13      218998     118997       39999       98999
+graph, left-recursive            0.13      218997     118997       20000      118997
+grid, reachability               0.07      111903      67199       45000       44704
+tree, same generation            0.04       11304      10249        2084        7228
+tree, all generations            0.12      353606     175784      351568      265200
+tasks, ready                     0.30     2075189     905650     1767828     1166222
+facts, load and join             0.40      300000     300000           0       11852

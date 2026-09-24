@@ -18,6 +18,7 @@
 # tests/perf.sh is the test that bounds performance, on counters where it
 # can.  This is the instrument for looking closer: before a change meant to
 # be faster, after one that might be slower, or when perf.sh fails.
+# bench/baseline.txt holds one machine's run to compare with by eye.
 
 set -eu
 
