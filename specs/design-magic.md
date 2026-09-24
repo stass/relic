@@ -384,12 +384,25 @@ is not configured is replaced by a budget in proportion to the program:
 | --- | --- | --- |
 | generated predicates | as `max_magic_preds` | 256 + 16 x the program's derived predicates |
 | generated rules | as `max_magic_rules` | 256 + 16 x the program's rules |
-| generated literals | body literals of generated rules, after dropping duplicates | 256 + 16 x the program's body literals |
+| generated literals | body literals of every rule drafted, kept or dropped | 256 + 16 x the program's size in literals |
 
 A program's derived predicates are the members of its schedule, its rules
-are its compiled rules, facts included, and its body literals are the
-literals of those rules' bodies. All are fixed for a given program, so the
-budget is the same on every run. The literal budget has no configurable
+are its compiled rules, facts included, and its size in literals is what one
+adorned copy of it holds: each rule's body plus one for its guard, so a fact
+counts one. A predicate derived by facts and rules alike is read on demand,
+and every adornment copies each of its facts as a guarded rule; a budget
+over body literals alone would refuse a thousand facts behind one rule at
+their first copy, which is the program the rewrite exists for. All are
+fixed for a given program, so the budget is the same on every run.
+
+The literal budget counts every rule drafted, kept or dropped. A duplicate,
+or a rule that derives nothing, is built before it is recognized as one,
+and a long body calling its own predicate drafts copies that are all
+dropped: counting only what is kept would never see them, and their cost
+in the arena would grow as the square of the body until the memory limit,
+if any, refused it. The rule budget counts what is kept, since it measures
+the rewritten program; the literal budget measures what the rewrite
+builds. The literal budget has no configurable
 limit behind it: it is not a knob but the invariant that a rewrite nobody
 has sized is a constant multiple of the program, which the rule budget
 alone cannot hold, because a rule is copied whole once per adornment and a

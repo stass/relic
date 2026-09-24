@@ -1263,7 +1263,10 @@ generates exactly what it did. The cost is a relation per cut, accepted
 uniformly rather than behind a threshold. Supplementary predicates are
 bounded by the rule budget, one rule each, and not counted by the predicate
 limit. A third budget, on generated literals, bounds what remains -- a rule
-copied whole once per adornment -- with no limit behind it, and like the
+copied whole once per adornment -- with no limit behind it. It measures
+the program as one adorned copy of it, a fact counting one, and counts
+every rule drafted, dropped or not, so the arena is bounded by
+construction. Like the
 other two it is lifted when either Magic limit is configured: the budgets
 are proportional to the program, the cost of not rewriting to the data, and
 a caller who set a limit has sized the rewrite. Reverses the
