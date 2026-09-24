@@ -1,0 +1,8 @@
+.decl edge(x: symbol, y: symbol)
+.input edge(filename="edge.tsv")
+
+.decl reach(x: symbol)
+reach(X) :- edge("n0", X).
+reach(Y) :- reach(X), edge(X, Y).
+
+.output reach(filename="answer.csv")

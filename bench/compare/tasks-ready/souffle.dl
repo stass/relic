@@ -1,0 +1,16 @@
+.decl task(x: symbol)
+.input task(filename="task.tsv")
+.decl depends(x: symbol, y: symbol)
+.input depends(filename="depends.tsv")
+.decl done(x: symbol)
+.input done(filename="done.tsv")
+
+.decl waits(x: symbol, y: symbol)
+.decl blocked(x: symbol)
+.decl ready(x: symbol)
+waits(X, Y) :- depends(X, Y), !done(Y).
+waits(X, Z) :- depends(X, Y), waits(Y, Z).
+blocked(X) :- waits(X, _).
+ready(X) :- task(X), !done(X), !blocked(X).
+
+.output ready(filename="answer.csv")

@@ -1,0 +1,4 @@
+from(X, Y) :- edge(X, Y).
+from(X, Z) :- from(X, Y), edge(Y, Z).
+
+from(n0, X)?

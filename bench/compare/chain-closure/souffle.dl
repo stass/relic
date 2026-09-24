@@ -1,0 +1,8 @@
+.decl edge(x: symbol, y: symbol)
+.input edge(filename="edge.tsv")
+
+.decl path(x: symbol, y: symbol)
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+
+.output path(filename="answer.csv")

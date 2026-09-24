@@ -1,0 +1,8 @@
+.decl parent(p: symbol, c: symbol)
+.input parent(filename="parent.tsv")
+
+.decl sg(x: symbol, y: symbol)
+sg(X, X) :- parent(_, X).
+sg(X, Y) :- parent(P, X), sg(P, Q), parent(Q, Y).
+
+.output sg(filename="answer.csv")

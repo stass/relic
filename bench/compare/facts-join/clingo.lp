@@ -1,0 +1,3 @@
+pair(A, B) :- row(A, V, 7), row(B, V, 13).
+
+#show pair/2.

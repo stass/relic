@@ -1,0 +1,7 @@
+.decl row(id: symbol, value: symbol, weight: number)
+.input row(filename="row.tsv")
+
+.decl pair(a: symbol, b: symbol)
+pair(A, B) :- row(A, V, 7), row(B, V, 13).
+
+.output pair(filename="answer.csv")

@@ -353,6 +353,19 @@ bugs planted in a copy of the engine were each found within a few dozen
 seeds and shrunk to five statements or fewer. The coverage report reaches
 96 percent of lines; `docs/todo-coverage.md` sorts the rest.
 
+**Comparison with other engines.** One set of workloads run through relic,
+SWI-Prolog, Souffle, clingo and Nemo, every answer checked against relic's
+before anything is timed, specified in `specs/design-bench.md`.
+
+| Component | State |
+| --- | --- |
+| `bench/datasets.sh` | the data-set generators, shared with `bench/run.sh`: one tab-separated file per relation, and the fact syntax relic, SWI-Prolog and clingo share |
+| `bench/compare/run.sh` | set A, the eleven workloads of section 4.2, in seven engine modes: relic, tabled SWI-Prolog, the Souffle interpreter, compiled Souffle with and without the magic transform, clingo and Nemo, each single-threaded; relic first, its answer the reference and refused when empty; every other engine verified under a time limit, then timed by `hyperfine`; median, fastest, standard deviation, user time, peak memory, rows, compile time and status per cell, and a summary relative to relic; a relic that is a script refused, here and in `bench/run.sh` |
+| `bench/compare/<workload>/` | the five hand-written programs of each workload, and `driver.pl`, which prints SWI-Prolog's answer relation |
+
+Every engine agrees with relic on every workload it finishes within the time
+limit. Set B, the recorded run and the scale sweep are open in `TODO.md`.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -588,6 +601,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-api.md` | the public interface: values, programmatic facts, queries and results, callbacks and re-entry, diagnostics, exported symbols, versioning |
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats, `-n`, verbosity, the interactive mode |
 | `specs/design-hardening.md` | the program generator, the differential driver, the shrinker, the fuzz targets, coverage and benchmarks |
+| `specs/design-bench.md` | the comparison with other engines: engines and modes, workloads, data, answers, measurement |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |

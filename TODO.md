@@ -614,6 +614,45 @@ the form, telling a limit's refusal from a failure by the prefix `limit
 exceeded:`, so a limit worded otherwise would read as a finding there; an
 error class a caller can ask for would free both from the text.
 
+## Benchmarks
+
+**No run is recorded on an idle machine.** [Medium, component: `bench/`]
+`specs/design-bench.md` section 8 keeps one comparison run in
+`bench/compare/results.txt`, which does not exist yet: it needs an idle
+machine, ten timed runs per cell and the scale sweep, `BENCH_SCALE` 1, 2, 4
+and 8, so the curves show which gaps grow with the input.
+`bench/baseline.txt` was recorded on a machine busy with other work; its
+counters are exact, but its seconds are longer than an idle run's and want
+recording again in the same session.
+
+**Set B is not written.** [Medium, component: `bench/compare/`] The
+OpenRuleBench transitive-closure and same-generation programs on cyclic and
+acyclic graphs, the nonlinear closure, and CSPA and Andersen points-to
+analysis over downloaded data, per `specs/design-bench.md` sections 4.3 and
+9. The download cache, its checksums and its `.gitignore` entry come with
+the first external data set.
+
+**Loading facts costs relic more memory than any other engine.** [Medium,
+component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
+ternary facts read as source text, relic peaks at about 160 MB, against
+44 MB for Souffle reading the same data as TSV and 90 to 115 MB for Nemo,
+clingo and SWI-Prolog, which also parse. Find where the peak comes from --
+the syntax tree of a fact file held whole, the value table, the relation --
+before deciding whether a streaming fact loader or the CSV import of
+`specs/architecture.md` section 69 is the remedy.
+
+**Souffle and Nemo write their answers to files, the others to a discarded
+standard output.** [Low, component: `bench/compare/run.sh`] Under load, a
+Souffle run writing its answer file showed wall time far above its CPU time,
+and one writing to standard output did not, but the difference was within
+the noise of a busy machine. Settle on an idle one whether the file costs a
+measurable amount; if it does, time Souffle with `-D -` and find Nemo an
+equivalent.
+
+**Published numbers need a second platform.** [Low, component:
+`bench/compare/`] Section 8's criteria include a machine of a different
+operating system and processor; every run so far is one macOS Xeon.
+
 ## Security residuals
 
 **A long-lived context gives a timing oracle on its hash seed.** [Low,

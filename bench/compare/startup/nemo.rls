@@ -1,0 +1,2 @@
+@import edge :- tsv{resource="edge.tsv", format=(any, any)} .
+@export edge :- tsv{resource="answer.tsv"} .

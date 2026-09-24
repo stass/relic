@@ -2103,6 +2103,10 @@ No specific benchmark number is a v1 correctness requirement.
 
 Architecture must make performance measurable and improvable.
 
+How relic is measured against other Datalog and tabled-Prolog engines --
+the engines, the workloads, how their answers are checked and how the times
+are recorded -- is specified in `specs/design-bench.md`.
+
 ---
 
 # 63. Resource Limits

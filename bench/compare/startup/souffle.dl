@@ -1,0 +1,3 @@
+.decl edge(x: symbol, y: symbol)
+.input edge(filename="edge.tsv")
+.output edge(filename="answer.csv")

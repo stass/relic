@@ -1,0 +1,6 @@
+waits(X, Y) :- depends(X, Y), not done(Y).
+waits(X, Z) :- depends(X, Y), waits(Y, Z).
+blocked(X) :- waits(X, _).
+ready(X) :- task(X), not done(X), not blocked(X).
+
+ready(X)?

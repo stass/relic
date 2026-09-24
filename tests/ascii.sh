@@ -42,7 +42,8 @@ owned_files() {
 	       -o -name 'build-*san' \) -prune -o \
 	    -type f \( -name '*.ac' -o -name '*.am' -o -name '*.c' \
 	       -o -name '*.h' -o -name '*.in' -o -name '*.m4' \
-	       -o -name '*.sh' -o -name '*.[1-9]' \) -print
+	       -o -name '*.sh' -o -name '*.[1-9]' -o -name '*.dl' \
+	       -o -name '*.pl' -o -name '*.lp' -o -name '*.rls' \) -print
 }
 
 candidates=$(mktemp) || exit 1

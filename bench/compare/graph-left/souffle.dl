@@ -1,0 +1,10 @@
+.decl edge(x: symbol, y: symbol)
+.input edge(filename="edge.tsv")
+
+.decl from(x: symbol, y: symbol)
+from(X, Y) :- edge(X, Y).
+from(X, Z) :- from(X, Y), edge(Y, Z).
+
+.decl answer(x: symbol)
+.output answer
+answer(X) :- from("n17", X).
