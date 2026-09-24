@@ -72,7 +72,8 @@ pkgconfig_DATA = librelic.pc
 # The m4 macro files are distributed by automake already, as dependencies of
 # configure; listing them here as well would only create a list that a sixth
 # macro file could be left out of.
-EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt bench/run.sh \
+EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
+	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus \
 	tests/fuzz/relic.dict tests/lang tests/langtest.sh
