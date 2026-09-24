@@ -1,0 +1,6 @@
+@import par :- tsv{resource="par.tsv"} .
+
+tc(?X, ?Y) :- par(?X, ?Y) .
+tc(?X, ?Z) :- tc(?X, ?Y), tc(?Y, ?Z) .
+
+@export tc :- tsv{resource="answer.tsv"} .

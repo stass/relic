@@ -360,11 +360,12 @@ before anything is timed, specified in `specs/design-bench.md`.
 | Component | State |
 | --- | --- |
 | `bench/datasets.sh` | the data-set generators, shared with `bench/run.sh`: one tab-separated file per relation, and the fact syntax relic, SWI-Prolog and clingo share |
-| `bench/compare/run.sh` | set A, the eleven workloads of section 4.2, in seven engine modes: relic, tabled SWI-Prolog, the Souffle interpreter, compiled Souffle with and without the magic transform, clingo and Nemo, each single-threaded; relic first, its answer the reference and refused when empty; every other engine verified under a time limit, then timed by `hyperfine`; median, fastest, standard deviation, user time, peak memory, rows, compile time and status per cell, and a summary relative to relic; a relic that is a script refused, here and in `bench/run.sh` |
-| `bench/compare/<workload>/` | the five hand-written programs of each workload, and `driver.pl`, which prints SWI-Prolog's answer relation |
+| `bench/compare/run.sh` | set A, the eleven workloads of section 4.2, and set B, the fourteen of section 4.3 -- OpenRuleBench's transitive closure and same generation, as rbench writes them, on random graphs, the nonlinear closure, and Andersen and CSPA points-to analysis over generated programs -- in seven engine modes: relic, tabled SWI-Prolog, the Souffle interpreter, compiled Souffle with and without the magic transform, clingo and Nemo, each single-threaded; relic first, its answer the reference and refused when empty; every other engine verified under a time limit, then timed by `hyperfine`; median, fastest, standard deviation, user time, peak memory, rows, compile time and status per cell, and a summary relative to relic; a relic that is a script refused, here and in `bench/run.sh` |
+| `bench/compare/<workload>/` | the five hand-written programs of each workload; `bench/compare/driver.pl` prints SWI-Prolog's answer relation |
 
 Every engine agrees with relic on every workload it finishes within the time
-limit. Set B, the recorded run and the scale sweep are open in `TODO.md`.
+limit. CSPA over the Graspan data sets, the recorded run and the scale sweep
+are open in `TODO.md`.
 
 ### Verified
 

@@ -1,0 +1,8 @@
+.decl par(x: number, y: number)
+.input par(filename="par.tsv")
+
+.decl tc(x: number, y: number)
+tc(X, Y) :- par(X, Y).
+tc(X, Z) :- tc(X, Y), tc(Y, Z).
+
+.output tc(filename="answer.csv")

@@ -1,0 +1,4 @@
+tc(X, Y) :- par(X, Y).
+tc(X, Z) :- tc(X, Y), tc(Y, Z).
+
+tc(X, Y)?

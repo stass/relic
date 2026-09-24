@@ -1,0 +1,10 @@
+.decl par(x: number, y: number)
+.input par(filename="par.tsv")
+
+.decl sg(x: number, y: number)
+sg(Y, Y) :- par(_, Y).
+sg(X, Y) :- par(X, A), sg(A, B), par(Y, B).
+
+.decl answer(x: number)
+.output answer
+answer(X) :- sg(500, X).

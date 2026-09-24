@@ -1,0 +1,5 @@
+sg(Y, Y) :- par(_, Y).
+sg(X, Y) :- par(X, A), sg(A, B), par(Y, B).
+
+answer(X) :- sg(500, X).
+#show answer/1.

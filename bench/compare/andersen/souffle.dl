@@ -1,0 +1,16 @@
+.decl addressOf(v: symbol, w: symbol)
+.decl assign(v: symbol, w: symbol)
+.decl load(v: symbol, p: symbol)
+.decl store(p: symbol, w: symbol)
+.input addressOf(filename="addressOf.tsv")
+.input assign(filename="assign.tsv")
+.input load(filename="load.tsv")
+.input store(filename="store.tsv")
+
+.decl pointsTo(v: symbol, w: symbol)
+pointsTo(V, W) :- addressOf(V, W).
+pointsTo(V, W) :- assign(V, U), pointsTo(U, W).
+pointsTo(V, W) :- load(V, P), pointsTo(P, Q), pointsTo(Q, W).
+pointsTo(Q, W) :- store(P, V), pointsTo(P, Q), pointsTo(V, W).
+
+.output pointsTo(filename="answer.csv")

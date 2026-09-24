@@ -65,9 +65,9 @@ columns="$columns peak_bytes compile_seconds"
 # An awk prelude giving each result column's number, col["status"] and so on,
 # from the names passed in `columns`.
 column_numbers='BEGIN {
-	count = split(columns, name, " ")
+	count = split(columns, column_name, " ")
 	for (i = 1; i <= count; i++)
-		col[name[i]] = i
+		col[column_name[i]] = i
 }'
 
 usage() {
@@ -467,17 +467,18 @@ result_row() {
 # print_result ROW: ROW as a line of the report.
 print_result() {
 	printf '%s\n' "$1" | awk -F '\t' -v columns="$columns" \
-	    "$column_numbers"'{
+	    -v width="$name_width" "$column_numbers"'{
+		first_column = "%-" width "s "
 		spread = $col["spread"]
 		if (spread != "-")
 			spread = sprintf("%.3f", spread)
 		if ($col["status"] == "ok")
-			printf "%-14s %-14s %8.3f %8.3f %7s %8.3f %8.1f", \
+			printf first_column "%-14s %8.3f %8.3f %7s %8.3f %8.1f", \
 			    $col["workload"], $col["engine"], $col["median"], \
 			    $col["fastest"], spread, $col["user"], \
 			    $col["peak_bytes"] / 1048576
 		else
-			printf "%-14s %-14s %8s %8s %7s %8s %8s", \
+			printf first_column "%-14s %8s %8s %7s %8s %8s", \
 			    $col["workload"], $col["engine"], "-", "-", "-", \
 			    "-", "-"
 		printf " %8s %7s  %s\n", $col["rows"], \
@@ -525,10 +526,11 @@ run_engine() {
 # workload, or the engine's status where it has no time.
 summarize() {
 	awk -F '\t' -v columns="$columns" -v engines="$engines" \
-	    "$column_numbers"'
+	    -v width="$name_width" "$column_numbers"'
 	BEGIN {
+		first_column = "%-" width "s"
 		engine_count = split(engines, engine, " ")
-		printf "\n%-14s", "relative"
+		printf "\n" first_column, "relative"
 		for (i = 1; i <= engine_count; i++)
 			printf " %14s", engine[i]
 		printf "\n"
@@ -545,7 +547,7 @@ summarize() {
 	END {
 		for (w = 1; w <= workloads; w++) {
 			workload = order[w]
-			printf "%-14s", workload
+			printf first_column, workload
 			base = median[workload, "relic"]
 			for (i = 1; i <= engine_count; i++) {
 				key = workload SUBSEP engine[i]
@@ -589,8 +591,9 @@ print_header() {
 	    "souffle-magic $magic_switches"
 	echo "# clingo $clingo_switches; nemo $nemo_switches"
 	echo
-	printf '%-14s %-14s %8s %8s %7s %8s %8s %8s %7s  %s\n' workload \
-	    engine median fastest spread user "peak MB" rows compile status
+	printf "%-${name_width}s %-14s %8s %8s %7s %8s %8s %8s %7s  %s\n" \
+	    workload engine median fastest spread user "peak MB" rows compile \
+	    status
 }
 
 requested_engines=$all_engines
@@ -621,6 +624,11 @@ for workload in $workloads; do
 	esac
 	[ -f "$here/$workload/dataset" ] || die "unknown workload $workload"
 done
+
+# The report's first column is as wide as the longest workload name, or its
+# own headings, "workload" and "relative".
+name_width=$(printf '%s\n' workload relative $workloads |
+    awk '{ if (length($0) > width) width = length($0) } END { print width }')
 
 command -v hyperfine >/dev/null 2>&1 ||
     die "hyperfine is needed to time the engines"

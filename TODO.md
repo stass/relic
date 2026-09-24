@@ -625,12 +625,56 @@ and 8, so the curves show which gaps grow with the input.
 counters are exact, but its seconds are longer than an idle run's and want
 recording again in the same session.
 
-**Set B is not written.** [Medium, component: `bench/compare/`] The
-OpenRuleBench transitive-closure and same-generation programs on cyclic and
-acyclic graphs, the nonlinear closure, and CSPA and Andersen points-to
-analysis over downloaded data, per `specs/design-bench.md` sections 4.3 and
-9. The download cache, its checksums and its `.gitignore` entry come with
-the first external data set.
+**CSPA has not run on the Graspan data sets.** [Medium, component:
+`bench/compare/`] `specs/design-bench.md` sections 4.3 and 9 run CSPA over
+the Graspan inputs from a download cache with checksums; only the generated
+program of section 4.3 is run, and the cache, its checksums and its
+`.gitignore` entry come with the first external data set. The inputs have
+no stable public URL -- the papers that use them got them from the RecStep
+authors -- and the smallest, httpd, derives about 2.3e8 `valueAlias` and
+8.9e7 `memoryAlias` tuples from 1.5 million facts, 3.2e8 with the 1.4e6
+of `valueFlow`: 15 to 30 GB at the 47 to 92 bytes of peak memory per held
+tuple relic reached on generated Andersen programs.
+
+**The same-generation program is rbench's, unchecked against
+OpenRuleBench's own.** [Low, component: `bench/compare/sg-*`] Set B's `sg`
+starts from `sg(Y, Y) :- par(_, Y)`, as rbench's rendering of OpenRuleBench
+does. OpenRuleBench describes the problem as same-generation siblings, and
+its original programs, no longer at their published address, may start from
+siblings, `par(X, Z), par(Y, Z), X != Y`, instead. Find the original; if it
+differs, follow it, since section 4.1 admits the inequality.
+
+**A bound right-recursive closure costs relic more than the whole
+closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]
+On the dense cyclic graph, `tc(500, X)?` over `tc(X, Z) :- par(X, Y),
+tc(Y, Z)` took relic 28 s against 17 s for `tc(X, Y)?`, measured on a busy
+machine. The Magic rewrite carries the binding through the recursive call to
+every node reached, which here is every node, so it computes the whole
+closure and pays for the magic relation besides. The rewrite is correct but
+the query's answer is only the nodes reachable from 500. `bench/run.sh`
+shows the same on a chain: the right-recursive bound query derives two
+million tuples for an answer of 2000, the left-recursive one six thousand.
+A right-linear recursion bound on its first argument can be answered by
+reachability over `par` alone (the right-linear and factoring rewrites of
+Naughton, Ramakrishnan, Sagiv and Ullman); find whether relic's rewrite can
+recognize the case.
+
+**relic's evaluation costs several times Souffle's interpreter per
+derivation on the analyses.** [Medium, component: `lib/eval.c`,
+`bench/compare/andersen`] Measured on a busy machine, `andersen` took relic
+1.9 s against 0.7 s for the Souffle interpreter. The gap widens on denser
+inputs. `dataset_andersen` at 2000 functions, with each function's three
+arguments assigned to variables of functions drawn uniformly from the whole
+program instead of received from `(F - 1) / 2`, makes about 1.1 million
+points-to facts from about 380 million derivations and 960 million lookups,
+and took 248 s of user time in relic against 17 s; the exact figures depend
+on the draws. `tc-nonlinear`'s program over the `sparse-cyclic` data set
+ran past 600 s in relic against 117 s in the interpreter. Semi-naive evaluation does not repeat work here
+-- on a chain the nonlinear closure makes about 2.5 derivations per path
+triple at every length -- so the gap is the cost of a derivation and its
+lookups, not their number. Profile the join loop on the denser program
+before choosing between index layout, tuple comparison and the lookup
+path.
 
 **Loading facts costs relic more memory than any other engine.** [Medium,
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
@@ -648,6 +692,15 @@ and one writing to standard output did not, but the difference was within
 the noise of a busy machine. Settle on an idle one whether the file costs a
 measurable amount; if it does, time Souffle with `-D -` and find Nemo an
 equivalent.
+
+**The tasks data set has almost no done tasks.** [Low, component:
+`bench/datasets.sh`] `dataset_tasks` makes a task done two times in three,
+and only if every task it depends on is done, so the done set dies out
+early: at scale 1, 54 of 10000 tasks are done, and `tasks-ready` asks for
+a frontier far smaller than the project the generator's comment describes.
+Choose a rule that keeps a real share of the project done -- a higher
+chance, or dependencies drawn mostly from recent tasks -- and record the
+counters again.
 
 **Published numbers need a second platform.** [Low, component:
 `bench/compare/`] Section 8's criteria include a machine of a different

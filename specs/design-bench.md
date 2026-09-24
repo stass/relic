@@ -141,6 +141,49 @@ workloads trace a curve as the input grows.
   that need only joins and recursion, and are used by several recent Datalog
   papers.
 
+The programs are OpenRuleBench's as rbench, Stefan Brass's collection of
+logic-programming benchmarks, writes them, same generation starting from
+`sg(Y, Y) :- par(_, Y)`. The graphs are OpenRuleBench's: random, over
+integer nodes, as `par(From, To)`. The dense ones draw 50000 edges among
+1000 nodes, the size of OpenRuleBench's `tc_d1000_parsize50000`; the sparse
+ones draw 5000. An acyclic graph points every edge forward in a fixed order
+of its nodes, one that puts node 500, the node the bound queries name, in
+the middle at every scale, so that it has ancestors and descendants both.
+OpenRuleBench's query modes are kept by name: `bf` binds the first
+argument, `fb` the second.
+
+| Workload | Data set | Query |
+| --- | --- | --- |
+| `tc-cyclic` | dense, cyclic | free; the closure, every pair of nodes |
+| `tc-cyclic-bf` | dense, cyclic | `tc(500, X)`; right recursion carries the binding to every node reached |
+| `tc-cyclic-fb` | dense, cyclic | `tc(X, 500)`; the binding stays on the one node |
+| `tc-acyclic` | dense, acyclic | free |
+| `tc-acyclic-bf` | dense, acyclic | `tc(500, X)` |
+| `tc-acyclic-fb` | dense, acyclic | `tc(X, 500)` |
+| `tc-sparse-cyclic` | sparse, cyclic | free |
+| `tc-sparse-acyclic` | sparse, acyclic | free |
+| `tc-nonlinear` | sparse, acyclic | free; `tc(X, Z) :- tc(X, Y), tc(Y, Z)` |
+| `sg-cyclic` | sparse, cyclic | free; same generation |
+| `sg-acyclic` | sparse, acyclic | free |
+| `sg-acyclic-bf` | sparse, acyclic | `sg(500, X)` |
+| `andersen` | a generated program of 2000 functions | free; every points-to fact |
+| `cspa` | a generated program of 1000 functions | free; the value-flow relation, which needs the other two |
+
+The nonlinear closure runs on the sparse acyclic graph only: its cost is
+cubic in the nodes a cycle joins, and on a cyclic graph of this size it runs
+for minutes in every engine.
+
+The two points-to analyses also run on generated programs, so that they can
+be scaled and need nothing downloaded. A generated program is functions of
+twenty variables whose statements relate variables of the same function,
+joined by a binary call tree down which arguments are passed. Statements
+drawn uniformly across the program would not do: past a threshold density
+they join nearly every variable into one set of aliases, and the answer
+jumps from linear to quadratic in the program's size at a point that
+depends on the draws, so the scale sweep would measure the draws. The
+Graspan data sets remain the real-world case, run from the download cache of
+section 9.
+
 ### 4.4 Programs
 
 Each workload's rules are written by hand, once per engine, in that engine's
@@ -167,7 +210,10 @@ workload is adding a directory.
 A data set is generated once per run into a directory of relation files: one
 file `<relation>.tsv` per relation, one tuple per line, columns separated by
 tabs. Symbols are written bare and integers in decimal; no workload uses
-strings, whose quoting rules differ between engines.
+strings, whose quoting rules differ between engines. Every relation file a
+generator writes is a set: a generator may draw a row twice, and the repeat
+is removed, since an engine that keeps facts as clauses, as SWI-Prolog does,
+would use a repeated fact twice where the others use it once.
 
 Each engine loads the data through its own native path, because that is the
 path its users take and the one its authors optimized:
@@ -277,8 +323,10 @@ Numbers are published only from a run that meets all of these:
 Set B's real-world inputs are downloaded on demand into
 `bench/compare/cache/`, which is ignored by git. Each has its source URL and
 SHA-256 checksum in the harness, and a download that does not match is
-discarded. Data is never committed, and a workload whose data is absent is
-skipped with a note rather than failing the run.
+discarded. An input with no stable public URL is placed in the cache by
+hand, and the harness checks it against its checksum the same way. Data is
+never committed, and a workload whose data is absent is skipped with a note
+rather than failing the run.
 
 ---
 

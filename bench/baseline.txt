@@ -11,10 +11,10 @@ workload                      seconds     derived       held     scanned   looke
 chain, right-recursive           1.25     2009001    2005001     2007002     2005000
 chain, left-recursive            0.00        6002       4001        2002        4002
 chain, whole closure             2.19     4009998    4004000     4010000     4003998
-graph, reachability              0.14      220022     119994       40005      100022
-graph, left-recursive            0.15      220010     119995       20002      120011
+graph, reachability              0.14      220016     119994       40005      100022
+graph, left-recursive            0.15      220004     119995       20002      120011
 grid, reachability               0.06      111903      67199       45000       44704
 tree, same generation            0.01       11304      10249        2084        7228
 tree, all generations            0.13      353606     175784      351568      265200
-tasks, ready                     0.18      767721     380347      730488      382515
+tasks, ready                     0.18      767719     380347      730488      382515
 facts, load and join             0.67      317572     308786        8786       11743
