@@ -171,8 +171,9 @@ floor plus a factor times its derived predicates or its rules -- and a rewrite
 outgrowing it is abandoned with a warning and the query answered from the
 whole program. Set, it is a limit like the others.
 A third budget, on the body literals the rewrite generates, has no limit
-behind it: it is the invariant that the rewrite stays a constant multiple of
-the program, which the rule budget cannot hold on its own
+behind it: it is the invariant that a rewrite nobody has sized stays a
+constant multiple of the program, which the rule budget cannot hold on its
+own. Configuring either Magic limit lifts all three budgets
 (`specs/design-magic.md` section 8).
 
 ### D-8 The plan representation exists from S5
@@ -1262,7 +1263,10 @@ generates exactly what it did. The cost is a relation per cut, accepted
 uniformly rather than behind a threshold. Supplementary predicates are
 bounded by the rule budget, one rule each, and not counted by the predicate
 limit. A third budget, on generated literals, bounds what remains -- a rule
-copied whole once per adornment -- with no limit behind it. Reverses the
+copied whole once per adornment -- with no limit behind it, and like the
+other two it is lifted when either Magic limit is configured: the budgets
+are proportional to the program, the cost of not rewriting to the data, and
+a caller who set a limit has sized the rewrite. Reverses the
 part of `specs/design-magic.md` section 13 that left supplementary
 predicates out pending a measurement; the measurement is in `TODO.md`.
 Specified in `specs/design-magic.md` sections 6 and 8.

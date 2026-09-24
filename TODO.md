@@ -617,8 +617,15 @@ would at the 46th, and whose expected warning names generated literals.
 The budget refuses the `tests/perf.sh` patterns workload -- 125 copies of
 an 8000-literal body against a budget of about 134 000 literals -- which
 the test asserts is answered through its rewrite, and its memory-limited
-run expects a refusal while rewriting: retune it to 16 patterns, which fit,
-and re-derive the memory limit for the run that must be refused.
+run expects a refusal while rewriting: have its runs configure
+`-l magic-rules=1000000`, which lifts the budgets, so the workload keeps
+its 125 copies and the memory-limited run is refused as before. The
+budget also fires before the rule budget on `tests/lang/magic-budget.dl`,
+whose expected warning becomes the literal budget's. In practice it
+subsumes the rule budget, which fires first only on a program whose
+unreached rules are long; whether the rule and predicate budgets are then
+worth keeping is a simplification to weigh once the literal budget has
+shipped.
 
 **Magic rules repeat the prefix before each demand call, cubic in a body's
 calls.** [High, component: `lib/magic.c`] `record_call()` generates one magic

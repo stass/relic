@@ -390,12 +390,11 @@ A program's derived predicates are the members of its schedule, its rules
 are its compiled rules, facts included, and its body literals are the
 literals of those rules' bodies. All are fixed for a given program, so the
 budget is the same on every run. The literal budget has no configurable
-limit behind it and applies whether or not the other two are configured: it
-is not a knob but the invariant that the rewrite is a constant multiple of
-the program, which the rule budget alone cannot hold, because a rule is
-copied whole once per adornment and a program of few long rules called with
-many patterns generates few rules holding many literals
-(`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
+limit behind it: it is not a knob but the invariant that a rewrite nobody
+has sized is a constant multiple of the program, which the rule budget
+alone cannot hold, because a rule is copied whole once per adornment and a
+program of few long rules called with many patterns generates few rules
+holding many literals (`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
 specializes the program -- a handful of adornments per predicate, each with
 its rules and magic rules -- and the floor admits every rewrite of a small
 program outright; what it refuses is a rewrite that multiplies the program.
@@ -410,10 +409,16 @@ program's fixed point, exactly as `-X no-magic` answers it:
 relic: warning: the query's Magic rewrite outgrew its budget of 416 generated rules while adorning p/8; answering it from the whole program
 ```
 
-A configured limit replaces the budget rather than joining it, so a caller
-who sets one gets precisely the limit asked for: a larger rewrite than the
-budget admits if the limit is larger, and a failed query when it is
-exceeded.
+Configuring either limit replaces all three budgets rather than joining
+them, so a caller who sets one gets precisely the limit asked for: a larger
+rewrite than the budgets admit if the limit is larger, and a failed query
+when it is exceeded. The literal budget is lifted with the others because
+the budgets are proportional to the program while the cost of answering
+without the rewrite is proportional to the data: ten short rules over an
+8-ary predicate and a million facts rewrite to a few thousand literals,
+many times the program and trivially cheap, where the whole program's
+fixed point is not. A caller who sets a Magic limit has sized the rewrite,
+and the library does not overrule them.
 
 The budget bounds the rewritten program, not what it derives. Adornments of
 one predicate with different bound columns each derive their own relation,
