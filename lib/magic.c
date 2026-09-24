@@ -1858,7 +1858,7 @@ cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
 {
 	relic_literal_t cut;
 	relic_draft_t draft;
-	size_t rules_before;
+	size_t rules_before RELIC_UNUSED;
 
 	if (slot_count(live) > RELIC_MAX_ARITY)
 		return (0);

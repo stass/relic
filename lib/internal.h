@@ -31,10 +31,10 @@
  */
 
 /*
- * Mark a parameter the implementation does not use.  A function whose shape
- * is fixed by a callback type will have some; writing the attribute is
- * clearer than a (void) cast in the body, which reads like a statement that
- * does something.
+ * Mark a parameter the implementation does not use, or a local read only by
+ * an assertion, which NDEBUG leaves unread.  A function whose shape is fixed
+ * by a callback type will have some; writing the attribute is clearer than a
+ * (void) cast in the body, which reads like a statement that does something.
  */
 #if defined(__GNUC__)
 #define	RELIC_UNUSED	__attribute__((__unused__))
