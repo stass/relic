@@ -1277,9 +1277,10 @@ adornments for one predicate.
 For realistic Datalog arities this is naturally finite, but finite is not
 small: a program whose rules each ask for one more bound column reaches every
 one of them. The rewrite is therefore bounded in proportion to the program it
-rewrites. A caller that configures a Magic limit gets a limit, per section 63;
-one that does not gets a budget, and a rewrite outgrowing it is abandoned with
-a warning and the query answered from the whole program. The rewrite is an
+rewrites. A caller that configures a Magic limit gets that limit, per section
+63, and no budget; one that configures neither gets budgets, and a rewrite
+outgrowing one is abandoned with a warning and the query answered from the
+whole program. The rewrite is an
 optimization and must not decide whether a query is answered.
 
 Duplicate rewritten rules must be structurally deduplicated.
@@ -2137,9 +2138,11 @@ Partial results are discarded: a query that exceeds a limit produces no rows
 and a nonzero exit status, because a truncated answer set would be
 indistinguishable from a complete one.
 
-The two Magic limits are the exception when left unset: each is then a budget
-proportional to the program, and a rewrite outgrowing it answers the query
-from the whole program rather than failing it, per section 38.
+The two Magic limits are the exception when both are left unset: the rewrite
+then has budgets proportional to the program, on predicates, rules and the
+literals of the rules it drafts, and a rewrite outgrowing one answers the
+query from the whole program rather than failing it, per section 38. Setting
+either limit lifts every budget.
 
 ---
 
@@ -2844,10 +2847,11 @@ A query against a program whose relations already hold its fixed point is not
 rewritten: it reads them directly. `specs/design-magic.md` records the
 reasoning.
 
-**Magic limits, sections 38, 49 and 63.** Left unset, the limits on generated
-Magic predicates and rules are budgets proportional to the program rather than
-unlimited, and a rewrite outgrowing one is abandoned with a warning and the
-query answered from the whole program. Adornments are finite but can be
+**Magic limits, sections 38, 49 and 63.** With both left unset, the limits on
+generated Magic predicates and rules are replaced by budgets proportional to
+the program, joined by one on the literals the rewrite drafts, rather than
+being unlimited, and a rewrite outgrowing one is abandoned with a warning and
+the query answered from the whole program; setting either lifts them all. Adornments are finite but can be
 exponential in the arity, and an optimization must neither decide whether a
 query is answered nor generate a program unboundedly larger than the one it
 specializes.

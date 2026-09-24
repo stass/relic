@@ -27,6 +27,8 @@ struct program_text {
 static void	 append(program_text_t *text, const char *format, ...)
 		    RELIC_TEST_PRINTFLIKE(2, 3);
 static void	 append_f_padding(program_text_t *text, unsigned int arity);
+static void	 append_filler(program_text_t *text, unsigned int arity,
+		    unsigned int from, unsigned int to);
 static void	 append_p_atom(program_text_t *text, unsigned int arity,
 		    unsigned int stepped);
 
@@ -111,14 +113,39 @@ append_f_padding(program_text_t *text, unsigned int arity)
 }
 
 /*
+ * The literals that take a body of `from` literals to `to`: one f literal
+ * per literal missing, each over a variable of its own, Z1 and on, which
+ * nothing else in the rule reads.
+ */
+static void
+append_filler(program_text_t *text, unsigned int arity, unsigned int from,
+    unsigned int to)
+{
+	unsigned int z;
+
+	for (z = 1; from + z <= to; z++) {
+		append(text, ", ");
+		append_f_padding(text, arity);
+		append(text, "Z%u, Z%u)", z, z);
+	}
+}
+
+char *
+widening_program(unsigned int arity)
+{
+	return (padded_widening_program(arity, 0));
+}
+
+/*
  * The fact f(c, ..., c); a rule deriving p from f alone, binding every
  * column from the fact; and for each column k a rule stepping Xk through f
  * and calling p with Y in its place.  The planner places f first, which
  * binds Y, so that rule calls p with column k bound as well as every other
- * column its head was called with bound.
+ * column its head was called with bound.  Each body shorter than
+ * `body_length` is then filled out to it.
  */
 char *
-widening_program(unsigned int arity)
+padded_widening_program(unsigned int arity, unsigned int body_length)
 {
 	program_text_t text = { NULL, 0, 0, false };
 	unsigned int column;
@@ -134,6 +161,7 @@ widening_program(unsigned int arity)
 		append_f_padding(&text, arity);
 		append(&text, "X%u, X%u)", column, column);
 	}
+	append_filler(&text, arity, arity, body_length);
 	append(&text, ".\n");
 
 	for (column = 1; column <= arity; column++) {
@@ -142,8 +170,49 @@ widening_program(unsigned int arity)
 		append_f_padding(&text, arity);
 		append(&text, "X%u, Y), ", column);
 		append_p_atom(&text, arity, column);
+		append_filler(&text, arity, 2, body_length);
 		append(&text, ".\n");
 	}
+
+	if (text.failed) {
+		free(text.bytes);
+		return (NULL);
+	}
+
+	return (text.bytes);
+}
+
+char *
+self_calling_program(unsigned int arity, unsigned int length)
+{
+	program_text_t text = { NULL, 0, 0, false };
+	char *widening;
+	unsigned int i;
+
+	widening = widening_program(arity);
+	if (widening == NULL)
+		return (NULL);
+	append(&text, "%s", widening);
+	free(widening);
+
+	append_p_atom(&text, arity, 0);
+	append(&text, " :- ");
+	append_p_atom(&text, arity, 0);
+	for (i = 0; i < length; i++) {
+		append(&text, ", ");
+		append_f_padding(&text, arity);
+		append(&text, "c, c)");
+	}
+	append(&text, ".\n");
+
+	for (i = 0; i < length / 10; i++) {
+		append(&text, "d%u(X) :- ", i);
+		append_f_padding(&text, arity);
+		append(&text, "X, X).\n");
+	}
+
+	for (i = 0; i < 2 * length; i++)
+		append(&text, "g(%u).\n", i);
 
 	if (text.failed) {
 		free(text.bytes);

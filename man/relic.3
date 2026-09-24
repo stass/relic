@@ -178,9 +178,12 @@ evaluation and the rewrite of a query; zero leaves either unbounded.
 and
 .Fa max_magic_rules
 bound the predicates and rules the Magic Sets rewrite of one query
-generates; zero sets each to a budget in proportion to the program, and a
-rewrite outgrowing its budget is abandoned with a warning and the query
-answered from the whole program.
+generates.
+With both zero, the rewrite has budgets in proportion to the program, on
+predicates, rules and the literals of the rules it drafts, and a rewrite
+outgrowing one is abandoned with a warning and the query answered from the
+whole program; setting either lifts every budget, and a limit left zero
+beside it bounds nothing.
 .Dv SIZE_MAX
 sets no bound on anything.
 .Fa flags

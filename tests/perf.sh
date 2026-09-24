@@ -46,10 +46,13 @@
 # variant is ordered in a pass or two.  A rule of 8000 literals over
 # complete relations, called with 125 distinct bound patterns through rules
 # a query reads them all through, is copied and ordered once per pattern by
-# the Magic rewrite.  Each holds some 4 million operations or literals, and
-# ordering them by rescoring the body at every step costs the square of the
-# body per plan, 10^10 steps or more: a second or two each in passes, even
-# under a sanitizer, and minutes step by step on an optimized build.
+# the Magic rewrite; that is far more than the budget on generated literals
+# admits, so its runs configure a limit on generated rules, which sizes the
+# rewrite and lifts the budgets.  Each workload holds some 4 million
+# operations or literals, and ordering them by rescoring the body at every
+# step costs the square of the body per plan, 10^10 steps or more: a second
+# or two each in passes, even under a sanitizer, and minutes step by step on
+# an optimized build.
 #
 # Each planning workload then runs again under a memory limit of 16 MiB,
 # far below the hundreds of megabytes its plans or its rewrite hold.  The
@@ -268,7 +271,8 @@ awk -v length_="$body_length" -v patterns="$patterns" 'BEGIN {
 
 status=0
 run_within "$work/patterns-rows" "$work/patterns-err" "$planning_budget" \
-    "$RELIC" -q 'all(X)?' "$work/patterns.dl" || status=$?
+    "$RELIC" -l magic-rules=1000000 -q 'all(X)?' "$work/patterns.dl" ||
+    status=$?
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/patterns-err" >&2
@@ -313,4 +317,4 @@ refused_within() {
 refused_within "limit exceeded: memory=$planning_memory while planning p/1" \
     -X no-magic -q 'p(X)?' "$work/long.dl"
 refused_within "limit exceeded: memory=$planning_memory while rewriting \$q0/1" \
-    -q 'all(X)?' "$work/patterns.dl"
+    -l magic-rules=1000000 -q 'all(X)?' "$work/patterns.dl"

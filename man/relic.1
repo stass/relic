@@ -216,11 +216,16 @@ A query or evaluation that exceeds
 or
 .Cm memory
 fails, and writes no rows.
-By default the two
+When neither
 .Cm magic
-limits are a budget in proportion to the program, and a rewrite that
-outgrows it is abandoned with a warning and the query answered from the
-whole program; set, either is a limit like the others.
+limit is set, the rewrite has budgets in proportion to the program, on the
+predicates and rules it generates and on the literals of the rules it
+drafts, and a rewrite that outgrows one is abandoned with a warning and the
+query answered from the whole program.
+Setting either lifts every budget: a
+.Cm magic
+limit that is set is a limit like the others, and one left unset beside it
+bounds nothing.
 .Sh INTERACTIVE MODE
 With
 .Fl i ,

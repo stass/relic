@@ -301,9 +301,9 @@ facts and one rule, `e(n7, X)?`, need 16 MB through the rewrite and under
 2 MB without it. A limit refusing the rewrite fails the query, as
 `specs/design-planning-cost.md` section 7 decides, rather than falling back
 to the whole program as an outgrown budget does; revisit that if this case
-matters. Without a limit, the budget on generated rules bounds it at sixteen
-copies of the program. Splitting such a predicate into its facts, loaded completely into a
-relation of their own, and its rules, adorned, with one guarded rule per
+matters. Without a limit, the budgets bound it at about sixteen copies of
+the program. Splitting such a predicate into its facts, loaded completely
+into a relation of their own, and its rules, adorned, with one guarded rule per
 adornment reading the facts, would avoid the copies and would make the
 extensional case of `specs/design-magic.md` section 3 a special case of the
 general rule rather than a rule of its own.
@@ -336,6 +336,20 @@ in a name a program writes -- and `-e` shows what it means, but
 `specs/design-magic.md` section 8 asks a diagnostic to name what the reader
 has to change. Recording the source predicate on a generated predicate's
 entry and describing it from that would say `path/2`.
+
+**The literal budget may make the rule budget redundant.** [Low, component:
+`lib/magic.c`] A drafted rule is about as long as the rule it comes from,
+and the literal budget counts every draft against 256 + 16 x the program's
+size in literals, so it fires before the budget on generated rules on every
+program measured, `tests/lang/magic-budget.dl` included; the rule budget
+fires first only on a program whose unreached rules are long, which raise
+the literal budget and generate nothing, and no test reaches it. The
+predicate budget is not redundant: facts of extensional predicates raise
+the literal budget and not the predicate budget, and `widening_program(12)`
+from `tests/unit/programs.c` with 50 000 facts of an unrelated g outgrows
+its budget of 304 generated predicates first; no test reaches that either.
+Weigh whether the rule budget is worth keeping. The configurable limits are
+not in question.
 
 **Semi-naive duplicate derivations.** [Low, component: `lib/eval.c`,
 `lib/plan.c`] The semi-naive fixed point derives some tuples more than once,
@@ -595,38 +609,6 @@ No attack has been built. Decide whether a context used this way should be
 documented as trusting its input, or whether a stronger keyed hash for the
 byte strings the symbol table interns is worth its cost there.
 
-**The Magic budget counts rules, not their length.** [High, component:
-`lib/magic.c`] Each adornment of a predicate copies every rule deriving it
-whole, so R distinct call patterns of one rule of L literals cost R x L
-literals of memory before anything is derived, and each pattern needs only
-one short calling rule, so this stays inside the budgets and no warning
-fires. A 60 KB program -- `p/12` with a body of 2000 literals, called with
-500 bound patterns by `cN(X) :- e(X), p(...)` and queried through `all(X)?`
--- holds about 250 MB through the rewrite, against about 5 MB under `-X
-no-magic`; it takes under a second, since each copy is ordered in a few
-passes (`tests/perf.sh`). When `max_memory` is set, the rewrite arena is
-charged to it and the R x L is refused with the limit's message (D-18);
-under the default configuration nothing bounds it until the literal budget
-of `specs/design-magic.md` section 8, which is designed and not
-implemented. Counted in `publish_rule()` after the duplicate and
-derives-nothing checks, against 256 + 16 x the sum of the program's body
-lengths, computed once per rewrite. Write first a test in the shape of
-`tests/lang/magic-budget.dl` whose rules are padded to about 20 literals,
-so the literal budget fires at the 17th adornment before the rule budget
-would at the 46th, and whose expected warning names generated literals.
-The budget refuses the `tests/perf.sh` patterns workload -- 125 copies of
-an 8000-literal body against a budget of about 134 000 literals -- which
-the test asserts is answered through its rewrite, and its memory-limited
-run expects a refusal while rewriting: have its runs configure
-`-l magic-rules=1000000`, which lifts the budgets, so the workload keeps
-its 125 copies and the memory-limited run is refused as before. The
-budget also fires before the rule budget on `tests/lang/magic-budget.dl`,
-whose expected warning becomes the literal budget's. In practice it
-subsumes the rule budget, which fires first only on a program whose
-unreached rules are long; whether the rule and predicate budgets are then
-worth keeping is a simplification to weigh once the literal budget has
-shipped.
-
 **Magic rules repeat the prefix before each demand call, cubic in a body's
 calls.** [High, component: `lib/magic.c`] `record_call()` generates one magic
 rule per call on a predicate read on demand, and its body is the literals
@@ -634,12 +616,15 @@ before the call, so a body of L such calls generates L rules holding about
 L^2/2 literals; in a recursive component each gets its own delta variants,
 about L^3/3 operations in all.
 `e(i, i+1) x200. p(X) :- e(X, Y). r(X) :- p(X), ..., p(X). r(1)?` with L =
-400 is 4.8 KB of text and takes 2.4 s and 1.69 GB to answer, against 0.03 s
-and about 1 MB under `-X no-magic`; L = 100 gives 102 rules, 4951 delta
-variants and 333 402 `member` operations. No budget fires: the budgets
-count rules, and the 200 facts raise the rule budget to 3488, so the 400
-generated rules are within it (without the facts L above about 250 is
-abandoned). With `max_memory` set, the rewrite arena and the evaluation
+400 is 4.8 KB of text and, under `-l magic-rules=1000000`, takes about 2 s
+and 1.7 GB to answer, against 0.03 s and about 1 MB under `-X no-magic`;
+L = 100 gives 102 rules, 4951 delta variants and 333 402 `member`
+operations. The literal budget bounds the prefixes' literals, not their
+delta variants: unconfigured, it abandons this program, whose L^2/2 prefix
+literals exceed 256 + 16 x its 603 literals, but 5000 unrelated facts raise
+the budget to 89 904 and the same query then takes 1.77 GB and 4.1 s with
+no warning. A caller who configures a Magic limit lifts the budget
+altogether. With `max_memory` set, the rewrite arena and the evaluation
 arena are charged to it (D-18) and the run is refused with the limit's
 message. The fix is the supplementary construction of
 `specs/design-magic.md` section 6, designed and not implemented: a cut
@@ -652,8 +637,9 @@ exceeds RELIC_MAX_ARITY, intern `sup$<adorned>$<rule>$<call>`, publish its
 rule through the draft path, and reset the scratch body to that one
 literal. Supplementary predicates are not counted by the predicate limit.
 Write first: a `tests/perf.sh` workload running the L = 400 program under
-`-l memory=16777216`, which fails today at 1.69 GB; a `-e` language test
-over a rule with three demand calls showing its two supplementary rules,
+`-l memory=16777216` and answered through its rewrite, which fails today;
+a `-e` language test over a rule with three demand calls showing its two
+supplementary rules,
 and the same shape without `-e` so `tests/equiv/strategies.sh` compares it
 across strategies; a `triple` shape in `test_magic.c`'s equivalence
 programs; and a unit test that generated rules and literals grow linearly
@@ -665,9 +651,16 @@ tuples as its adorned predicate.
 component: `lib/magic.c`] `publish_rule()` canonicalizes a draft, which
 copies its body into the arena, before `rule_derives_nothing()` and the
 duplicate check, so a rule that is then dropped still costs its body in
-memory. The arena is charged to `max_memory` (D-18), so that is memory the
-user pays for and gets nothing from. Decide whether the two checks can run
-on the draft, or canonicalize into scratch that a dropped rule releases.
+memory. With no Magic limit configured, the literal budget charges every
+draft, dropped or not, so this is bounded with the rest of the rewrite and
+is a matter of memory efficiency: the arena is charged to `max_memory`
+(D-18), and a dropped rule's body is memory the user pays for and gets
+nothing from. A configured limit lifts the budget and counts only the rules
+kept, so there nothing bounds the drafts but `max_memory`: `p(X) :- p(X)`
+repeated 6000 times in one body, 36 KB, takes 1.3 GB under
+`-l magic-rules=1000`. Deciding derives-nothing on the draft before
+`canonicalize()`, or not recording a call whose adornment and bound
+arguments are the head's own, would close it by construction.
 
 **csv and tsv carry raw control bytes.** [Low, component:
 `cmd/relic/output.c`] The text format writes a string as a quoted literal with

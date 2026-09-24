@@ -231,7 +231,9 @@ struct relic_adornment {
  * How much a query's Magic rewrite may generate of one thing: at most `most`,
  * and `configured` says whether that is a limit the caller set, which fails
  * the query when exceeded, or a budget the library chose, which abandons
- * the rewrite and leaves the query to be answered without it.
+ * the rewrite and leaves the query to be answered without it.  A caller who
+ * sets either Magic limit leaves no budget in force, so a count they left
+ * unset is then configured with `most` SIZE_MAX, and never exceeded.
  */
 struct relic_magic_limit {
 	size_t	most;
@@ -281,7 +283,10 @@ struct relic_magic_limit {
  *
  * `pred_limit` and `rule_limit` bound the predicates and rules the rewrite
  * generates, and `generated_preds` counts the adorned and magic predicates
- * generated so far.
+ * generated so far.  `literal_budget` bounds the body literals of every
+ * rule drafted, kept or dropped, which `generated_literals` counts.
+ * Configuring either Magic limit lifts every budget: an unset limit is then
+ * SIZE_MAX, and so is the literal budget, which no limit configures.
  *
  * `adornment_index` finds an adornment by source and bound columns, holding
  * positions in `adornments` plus one; `rule_index` finds a generated rule by
@@ -313,8 +318,10 @@ struct relic_magic {
 	size_t			 predicate_count;
 	size_t			 adornment_capacity;
 	size_t			 generated_preds;
+	size_t			 generated_literals;
 	relic_magic_limit_t	 pred_limit;
 	relic_magic_limit_t	 rule_limit;
+	size_t			 literal_budget;
 };
 
 /*

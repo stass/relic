@@ -332,7 +332,7 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \
 	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
-	tests/lang/magic-budget.dl \
+	tests/lang/magic-budget.dl tests/lang/magic-budget-literals.dl \
 	tests/lang/magic-limit-preds.dl tests/lang/magic-limit-rules.dl \
 	tests/lang/magic-mixed.dl tests/lang/magic-mutual.dl \
 	tests/lang/magic-negation.dl tests/lang/magic-same-generation.dl \

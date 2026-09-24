@@ -74,7 +74,8 @@
 /*
  * The budget of a rewrite no limit was configured for: the floor plus the
  * factor times the size of the program, in derived predicates for the
- * predicates it generates and in rules for the rules.
+ * predicates it generates, in rules for the rules, and in body literals for
+ * the literals of those rules.
  */
 #define	RELIC_MAGIC_BUDGET_FLOOR	256
 #define	RELIC_MAGIC_BUDGET_FACTOR	16
@@ -173,6 +174,7 @@ static bool	 args_equal(const relic_arg_t *a, const relic_arg_t *b,
 		    uint16_t count);
 static relic_arg_t *bound_args(relic_magic_t *magic, const relic_arg_t *args,
 		    uint16_t arity, uint32_t columns);
+static size_t	 budget_for(size_t program_size);
 static int	 canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 		    relic_rule_t *rule);
 static void	 close_complete(relic_demand_t *demand);
@@ -185,6 +187,8 @@ static size_t	 component_of(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
 static const relic_rule_t *component_rule(const relic_magic_t *magic,
 		    const relic_component_t *component, size_t i);
+static int	 confirm_literal_budget(relic_magic_t *magic,
+		    size_t body_length, relic_pred_id_t attributed);
 static int	 confirm_pred_limit(relic_magic_t *magic,
 		    relic_pred_id_t source, size_t generated);
 static int	 confirm_rule_limit(relic_magic_t *magic,
@@ -215,7 +219,8 @@ static int	 index_rules_by_head(relic_magic_t *magic);
 static int	 intern_generated(relic_magic_t *magic, const char *name,
 		    size_t length, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
-static relic_magic_limit_t limit_or_budget(size_t configured,
+static relic_magic_limit_t limit_or_budget(size_t configured_limit,
+		    bool sized,
 		    size_t program_size);
 static bool	 literals_equal(const relic_magic_t *magic,
 		    const relic_literal_t *a, const relic_literal_t *b);
@@ -231,6 +236,7 @@ static uint64_t	 positive_slots(const relic_magic_t *magic,
 static uint16_t	 pred_arity(const relic_magic_t *magic, relic_pred_id_t pred);
 static bool	 pred_is_complete(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
+static size_t	 program_size_in_literals(const relic_ruletab_t *rules);
 static int	 publish_rule(relic_magic_t *magic, const relic_draft_t *draft);
 static bool	 reads_on_demand(const relic_magic_t *magic,
 		    const relic_literal_t *literal);
@@ -714,33 +720,64 @@ abandon_over_budget(relic_magic_t *magic, const char *what, size_t budget,
 }
 
 /*
- * A configured limit, or, when none is configured, the budget for a program
- * of `program_size`: large enough for every rewrite that specializes the
- * program rather than multiplies it, and small enough that the rewritten
- * program never has more than a constant multiple of the program's
- * predicates and rules, however many adornments the program's arities allow.
- * It counts rules, not their length: each adorned copy of a rule is as long
- * as the rule and costs as much to order, so a long rule reached through
- * many adornments makes a rewrite much larger than its count suggests.
+ * The budget for a program of `program_size`: large enough for every rewrite
+ * that specializes the program rather than multiplies it, and small enough
+ * that the rewritten program never has more than a constant multiple of the
+ * program's size, however many adornments the program's arities allow.
+ * Saturates rather than wrapping.
+ */
+static size_t
+budget_for(size_t program_size)
+{
+	if (program_size > (SIZE_MAX - RELIC_MAGIC_BUDGET_FLOOR) /
+	    RELIC_MAGIC_BUDGET_FACTOR)
+		return (SIZE_MAX);
+
+	return (RELIC_MAGIC_BUDGET_FLOOR +
+	    RELIC_MAGIC_BUDGET_FACTOR * program_size);
+}
+
+/*
+ * The bound on one count of what a rewrite generates.  A caller who
+ * configures either Magic limit has sized the rewrite, and `sized` says so:
+ * the count is then bounded by the limit they set for it,
+ * `configured_limit`, or not at all if they left it zero.  A rewrite nobody
+ * has sized gets the budget for a program of `program_size`.
  */
 static relic_magic_limit_t
-limit_or_budget(size_t configured, size_t program_size)
+limit_or_budget(size_t configured_limit, bool sized, size_t program_size)
 {
 	relic_magic_limit_t limit;
 
-	limit.configured = configured != 0;
-	limit.most = configured;
-	if (limit.configured)
-		return (limit);
-
-	if (program_size > (SIZE_MAX - RELIC_MAGIC_BUDGET_FLOOR) /
-	    RELIC_MAGIC_BUDGET_FACTOR)
-		limit.most = SIZE_MAX;
+	limit.configured = sized;
+	if (!sized)
+		limit.most = budget_for(program_size);
+	else if (configured_limit != 0)
+		limit.most = configured_limit;
 	else
-		limit.most = RELIC_MAGIC_BUDGET_FLOOR +
-		    RELIC_MAGIC_BUDGET_FACTOR * program_size;
+		limit.most = SIZE_MAX;
 
 	return (limit);
+}
+
+/*
+ * The program's size in literals, which the literal budget is proportional
+ * to: what one adorned copy of it holds, each rule's body plus one for its
+ * guard.  A fact counts one, because a predicate derived by facts and rules
+ * alike is read on demand and each adornment copies every fact of it as a
+ * rule of one literal, the guard.
+ */
+static size_t
+program_size_in_literals(const relic_ruletab_t *rules)
+{
+	size_t literals;
+	size_t r;
+
+	literals = 0;
+	for (r = 0; r < rules->count; r++)
+		literals += rules->entries[r].body_length + 1;
+
+	return (literals);
 }
 
 /*
@@ -786,6 +823,28 @@ confirm_rule_limit(relic_magic_t *magic, relic_pred_id_t attributed)
 
 	return (exceed(magic, &magic->rule_limit, "magic-rules",
 	    "generated rules", attributed));
+}
+
+/*
+ * Confirm that one more drafted rule, of `body_length` literals, stays
+ * within the literal budget.  Outgrowing it abandons the rewrite: the budget
+ * exists only for a rewrite nobody has sized.  The count never passes the
+ * budget, since only what this admits is added to it, so the subtraction
+ * cannot wrap where the sum could.
+ */
+static int
+confirm_literal_budget(relic_magic_t *magic, size_t body_length,
+    relic_pred_id_t attributed)
+{
+	assert(magic->generated_literals <= magic->literal_budget);
+
+	if (body_length <= magic->literal_budget - magic->generated_literals)
+		return (0);
+
+	abandon_over_budget(magic, "generated literals", magic->literal_budget,
+	    attributed);
+
+	return (-1);
 }
 
 /*
@@ -1321,14 +1380,24 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 /*
  * Add a generated rule, renumbered, unless it derives nothing or is a
  * duplicate of one already generated.  Returns 0, or -1 with a diagnostic
- * reported: memory, or the limit on generated rules, which counts only the
- * rules kept.
+ * reported: memory, the budget on literals, or the limit on generated rules.
+ *
+ * The literal budget is charged on entry, for every draft: whether a rule
+ * is kept is known only once it is built, and a long body calling its own
+ * predicate drafts copies that are all dropped, each costing the arena its
+ * length.  Charging what is kept would never see them.  The rule limit
+ * measures the rewritten program, so it counts only the rules kept.
  */
 static int
 publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 {
 	relic_rule_t rule;
 	uint32_t hash;
+
+	if (confirm_literal_budget(magic, draft->body_length,
+	    draft->attributed) != 0)
+		return (-1);
+	magic->generated_literals += draft->body_length;
 
 	if (canonicalize(magic, draft, &rule) != 0)
 		return (-1);
@@ -1630,6 +1699,11 @@ adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
  * predicate of a pseudo-adornment with no bound column and no magic
  * predicate: nothing of it is looked up, and the rewritten rule keeps the
  * query's head and head arity, to run into the same answer relation.
+ *
+ * The rewritten query is canonicalized here rather than published, so the
+ * literal budget does not charge it.  It is one rule as long as the query,
+ * which is not part of the program the budget is proportional to: charging
+ * it would abandon the rewrite of a long query over a small program.
  */
 static int
 rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
@@ -1686,21 +1760,39 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
  * derived by some rule -- one no rule derives is complete -- so each
  * adornment's source has rules to generate from.
  *
+ * What the rewrite may generate is bounded in predicates, rules and body
+ * literals.  Configuring either Magic limit sizes the rewrite and lifts all
+ * three budgets, leaving only the limits set.  Otherwise each is a budget in
+ * proportion to the program.  The one on literals has no limit behind it and
+ * holds everything the rewrite drafts, kept or dropped, to a constant
+ * multiple of the program's size in literals, which counting rules cannot
+ * when long rules are copied once per adornment.  The budgets are
+ * proportional to the program while the cost of answering without the
+ * rewrite is proportional to the data, which is why a caller who sets a
+ * limit is not overruled.
+ *
  * An adornment is copied out of the array before its rules are generated,
  * because generating them may record more and move the array.
  */
 int
 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query)
 {
+	const relic_config_t *config;
+	const relic_program_t *program;
 	relic_adornment_t adornment;
 	size_t i;
+	bool sized;
 
-	magic->pred_limit = limit_or_budget(
-	    magic->ctx->config.max_magic_preds,
-	    magic->ctx->program.schedule.member_count);
-	magic->rule_limit = limit_or_budget(
-	    magic->ctx->config.max_magic_rules,
-	    magic->ctx->program.rules.count);
+	config = &magic->ctx->config;
+	program = &magic->ctx->program;
+	sized = config->max_magic_preds != 0 || config->max_magic_rules != 0;
+
+	magic->pred_limit = limit_or_budget(config->max_magic_preds, sized,
+	    program->schedule.member_count);
+	magic->rule_limit = limit_or_budget(config->max_magic_rules, sized,
+	    program->rules.count);
+	magic->literal_budget = sized ? SIZE_MAX :
+	    budget_for(program_size_in_literals(&program->rules));
 
 	if (rewrite_query(magic, query) != 0)
 		return (-1);

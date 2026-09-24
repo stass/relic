@@ -131,12 +131,15 @@ typedef struct relic_config relic_config_t;
  * single query: the adorned and magic predicates it generates, and the rules
  * it keeps once duplicates are dropped.  Exceeding either fails the query
  * with a diagnostic naming the limit, its configured value and the predicate
- * being adorned.  Left at zero, each is instead a budget the library sets in
- * proportion to the program, and a rewrite outgrowing it is abandoned with a
- * warning and the query answered from the whole program, as it would be
- * with RELIC_F_NO_MAGIC: the rewrite is an optimization, and without a limit
- * the caller asked for it must not decide whether a query is answered.  The
- * budget bounds the rules the rewrite generates, not what they derive.
+ * being adorned.  Setting either sizes the rewrite: a limit left at zero
+ * beside one that is set is unbounded.  With both at zero, the library sets
+ * budgets in proportion to the program, on the predicates and rules the
+ * rewrite generates and on the literals of every rule it drafts, and a
+ * rewrite outgrowing one is abandoned with a warning and the query answered
+ * from the whole program, as it would be with RELIC_F_NO_MAGIC: the rewrite
+ * is an optimization, and without a limit the caller asked for it must not
+ * decide whether a query is answered.  The budgets bound the rewrite, not
+ * what its rules derive.
  *
  * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
  * strategy that must give the same answers as the default; they exist so
