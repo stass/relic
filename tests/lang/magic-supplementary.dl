@@ -1,0 +1,28 @@
+% Rules with three demand calls, answered through the Magic rewrite, which
+% cuts each body's prefix before its second and third call into a
+% supplementary predicate.  r chains three predicates read on demand, and
+% hop3 calls itself three times, so its supplementary predicates sit in a
+% recursive component with hop3's adornment and magic predicate.  Every
+% strategy must give the answers of the whole fixed point.
+
+e(1, 2).
+e(2, 3).
+e(2, 5).
+e(3, 4).
+e(4, 1).
+e(5, 6).
+e(7, 8).
+
+a(X, Y) :- e(X, Y).
+b(X, Y) :- e(X, Y).
+c(X, Y) :- e(X, Y).
+
+r(X, W) :- a(X, Y), b(Y, Z), c(Z, W).
+
+hop3(X, Y) :- e(X, Y).
+hop3(X, W) :- hop3(X, Y), hop3(Y, Z), hop3(Z, W).
+
+r(1, W)?
+r(X, 4)?
+hop3(1, W)?
+hop3(7, W)?

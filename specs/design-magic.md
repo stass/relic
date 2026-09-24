@@ -153,7 +153,11 @@ a bound call made inside one of them propagates demand like any other.
 Generated predicates enter the context's predicate table like any other and
 are never removed, per `specs/design-program.md` section 3. Their number is
 bounded by the adornments the program admits, and a second query with the
-same adornments reuses them. They are marked defined when interned, so the
+same adornments reuses them. A supplementary predicate cut from the query's
+rule is named after `$q0` whatever the query, so a later query reuses it
+when its cut at that position keeps as many variables, and otherwise gets a
+predicate of the same name and another arity. They are marked defined when
+interned, so the
 undefined-predicate warning never names one.
 
 ---
@@ -563,8 +567,10 @@ query $q0(X) :- path$bf(a, X).
 * `adorn` names the source predicate and the adornment; the adorned and magic
   names follow from them by section 4.
 * A supplementary predicate is not listed under `adorn`: it belongs to the
-  rule that generated it, and appears in that rule's component with the
-  rules that read it.
+  rule that generated it, and appears as the head of its one rule among the
+  rewritten program's components -- in the component of the rules that read
+  it when they are recursive through it, and in a component of its own
+  otherwise.
 * `seed` shows each rule the query's body generated, fact or not. Facts in a
   component are counted, as everywhere, and a seed that is a fact would
   otherwise be visible only as a count.

@@ -1,0 +1,19 @@
+% -e over a rule with three demand calls.  r(1, W)? adorns r with its first
+% column bound, and r's body, ordered from X, calls a, b and c each with its
+% first column bound.  The first call's magic rule reads the guard; before
+% the second and the third, the prefix is cut into a supplementary predicate
+% over its live variables, named after the adorned predicate, the rule's
+% position among r's rules and the call's among its demand calls.  Y is not
+% live past b's call, so the second cut drops it.  No component is recursive.
+
+e(1, 2).
+e(2, 3).
+e(3, 4).
+
+a(X, Y) :- e(X, Y).
+b(X, Y) :- e(X, Y).
+c(X, Y) :- e(X, Y).
+
+r(X, W) :- a(X, Y), b(Y, Z), c(Z, W).
+
+r(1, W)?

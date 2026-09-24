@@ -327,6 +327,7 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/explain-check.dl tests/lang/explain-graph.dl \
 	tests/lang/explain-long.dl tests/lang/explain-magic.dl \
 	tests/lang/explain-materialized.dl tests/lang/explain-ops.dl \
+	tests/lang/explain-supplementary.dl \
 	tests/lang/format-csv.dl tests/lang/format-json.dl \
 	tests/lang/format-text.dl \
 	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \
@@ -336,6 +337,7 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/magic-limit-preds.dl tests/lang/magic-limit-rules.dl \
 	tests/lang/magic-mixed.dl tests/lang/magic-mutual.dl \
 	tests/lang/magic-negation.dl tests/lang/magic-same-generation.dl \
+	tests/lang/magic-supplementary.dl \
 	tests/lang/materialize.dl tests/lang/missing-terminator.dl \
 	tests/lang/negation-forms.dl tests/lang/negation-recursive.dl \
 	tests/lang/negation-strata.dl tests/lang/negation-tasks.dl \

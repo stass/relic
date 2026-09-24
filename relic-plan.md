@@ -1271,5 +1271,7 @@ other two it is lifted when either Magic limit is configured: the budgets
 are proportional to the program, the cost of not rewriting to the data, and
 a caller who set a limit has sized the rewrite. Reverses the
 part of `specs/design-magic.md` section 13 that left supplementary
-predicates out pending a measurement; the measurement is in `TODO.md`.
+predicates out pending a measurement: a rule of 400 demand calls, 4.8 KB of
+text, took 2.4 s and 1.69 GB through the rewrite against 0.03 s and 1 MB
+without it.
 Specified in `specs/design-magic.md` sections 6 and 8.

@@ -48,6 +48,7 @@
 #define	SCENARIO_LIMITS		"the rewrite's limits hold at their values"
 #define	SCENARIO_LITERALS	"a rewrite over its literal budget is abandoned"
 #define	SCENARIO_MEMO		"adornments are memoized"
+#define	SCENARIO_LINEAR		"the rewrite grows linearly in a body's calls"
 #define	SCENARIO_NAMES		"adornments are named by their bound columns"
 #define	SCENARIO_STATE		"what the rewrite derives does not leak"
 #define	SCENARIO_TAUTOLOGY	"a rule deriving its own head is dropped"
@@ -107,6 +108,7 @@ struct rows {
 };
 
 static char	*answer(relic_t *ctx, const char *query_text);
+static char	*calls_program(size_t calls);
 static int	 collect_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static int	 compare_lines(const void *left, const void *right);
@@ -114,6 +116,8 @@ static relic_t	*context_configured(const char *program,
 		    const relic_config_t *config, diag_log_t *log);
 static relic_t	*context_with(const char *program, unsigned int flags,
 		    size_t max_preds, size_t max_rules, diag_log_t *log);
+static void	 count_generated(const char *explained, size_t *rulesp,
+		    size_t *literalsp);
 static size_t	 count_lines_starting(const char *text, const char *prefix);
 static bool	 explain_answer(const char *program, const char *query_text,
 		    size_t max_preds, size_t max_rules, text_t *explained,
@@ -136,6 +140,7 @@ static void	 a_rewrite_over_its_budget_is_abandoned(void);
 static void	 a_rewrite_over_its_literal_budget_is_abandoned(void);
 static void	 dropped_rules_are_charged_to_the_literal_budget(void);
 static void	 facts_behind_a_rule_fit_the_literal_budget(void);
+static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
 static void	 a_load_after_a_rewrite_reaches_the_next_query(void);
 static void	 the_limits_hold_at_their_values(void);
 static void	 the_rewrite_answers_as_the_fixed_point_does(void);
@@ -478,6 +483,8 @@ the_rewrite_answers_as_the_fixed_point_does(void)
 		    "p(X, Z) :- p(X, Y), edge(Y, Z).\n" },
 		{ "double", "p(X, Y) :- edge(X, Y).\n"
 		    "p(X, Z) :- p(X, Y), p(Y, Z).\n" },
+		{ "triple", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, W) :- p(X, Y), p(Y, Z), p(Z, W).\n" },
 		{ "same-generation", "p(X, X) :- node(X).\n"
 		    "p(X, Y) :- edge(XP, X), p(XP, YP), edge(YP, Y).\n" },
 		{ "mutual", "p(X, Y) :- edge(X, Y).\n"
@@ -1031,6 +1038,142 @@ facts_behind_a_rule_fit_the_literal_budget(void)
 }
 
 /*
+ * How many rules the rewritten program holds, and how many body literals
+ * between them, as -e shows them: each rule of a rewritten component on a
+ * line of its own, a fact counted in its component's heading.  A body's
+ * literals are separated by commas outside parentheses.
+ */
+static void
+count_generated(const char *explained, size_t *rulesp, size_t *literalsp)
+{
+	static const char rule_prefix[] = "        rule ";
+	static const char facts_prefix[] = "        facts: ";
+	const char *line;
+	const char *at;
+	size_t depth;
+
+	*rulesp = 0;
+	*literalsp = 0;
+	for (line = explained; *line != '\0'; line = strchr(line, '\n') + 1) {
+		if (strncmp(line, facts_prefix, strlen(facts_prefix)) == 0)
+			*rulesp += strtoul(line + strlen(facts_prefix), NULL,
+			    10);
+
+		if (strncmp(line, rule_prefix, strlen(rule_prefix)) == 0) {
+			(*rulesp)++;
+			at = strstr(line, " :- ");
+			if (at != NULL)
+				(*literalsp)++;
+			for (depth = 0; at != NULL && *at != '\n' &&
+			    *at != '\0'; at++) {
+				if (*at == '(')
+					depth++;
+				else if (*at == ')')
+					depth--;
+				else if (*at == ',' && depth == 0)
+					(*literalsp)++;
+			}
+		}
+
+		if (strchr(line, '\n') == NULL)
+			break;
+	}
+}
+
+/*
+ * A body of `calls` calls on p, each of which the rule's head binds.
+ * Returns the text, which the caller frees, or NULL when memory ran out.
+ */
+static char *
+calls_program(size_t calls)
+{
+	static const char facts[] = "e(1, 2).\ne(2, 3).\np(X) :- e(X, _Y).\n";
+	static const char first[] = "r(X) :- p(X)";
+	static const char next[] = ", p(X)";
+	text_t text;
+	size_t i;
+
+	bzero(&text, sizeof(text));
+	text_append(&text, facts, sizeof(facts) - 1);
+	text_append(&text, first, sizeof(first) - 1);
+	for (i = 1; i < calls; i++)
+		text_append(&text, next, sizeof(next) - 1);
+	text_append(&text, ".\n", 2);
+
+	if (text.failed) {
+		free(text.bytes);
+		return (NULL);
+	}
+
+	return (text.bytes);
+}
+
+/*
+ * r(X) :- p(X), ..., p(X) with L calls, each called with X bound, generates
+ * a magic rule per call.  Written out in full, the magic rule of the k-th
+ * call repeats the k literals before it, so the rewrite holds about L^2/2
+ * literals: doubling L would quadruple them.  Cut before every call after
+ * the first, each prefix is one literal, and the rewrite is a part growing
+ * in proportion to L and a positive part that does not depend on it, so
+ * twice the rewrite for L bounds the one for 2L.  Each call has a magic
+ * rule, so a rewrite of fewer rules than calls was not measured.  A
+ * generous limit on rules lifts the budgets, which would otherwise abandon a
+ * quadratic rewrite before it could be measured.
+ */
+static void
+the_rewrite_grows_linearly_in_a_bodys_calls(void)
+{
+	static const size_t lengths[] = { 50, 100 };
+	size_t rules[2];
+	size_t literals[2];
+	text_t explained;
+	diag_log_t log;
+	char *program;
+	bool answered;
+	bool measured;
+	size_t i;
+
+	measured = true;
+	for (i = 0; i < 2; i++) {
+		program = calls_program(lengths[i]);
+		if (program == NULL) {
+			check(false, SCENARIO_LINEAR, "the program is built");
+			return;
+		}
+
+		answered = explain_answer(program, "r(1)?", 0, 1000000,
+		    &explained, &log);
+		rules[i] = 0;
+		literals[i] = 0;
+		if (answered)
+			count_generated(explained.bytes, &rules[i],
+			    &literals[i]);
+		checkf(answered && log.errors == 0 && log.warnings == 0 &&
+		    rules[i] >= lengths[i], SCENARIO_LINEAR,
+		    "r(1)? over %zu calls should be answered through a rewrite "
+		    "of a magic rule per call, which generated %zu rules and "
+		    "reported %zu errors and %zu warnings, the last \"%s\"",
+		    lengths[i], rules[i], log.errors, log.warnings,
+		    log.last_warning);
+		if (!answered || rules[i] < lengths[i])
+			measured = false;
+
+		free(explained.bytes);
+		free(program);
+	}
+
+	if (!measured)
+		return;
+
+	checkf(rules[1] <= 2 * rules[0] && literals[1] <= 2 * literals[0],
+	    SCENARIO_LINEAR,
+	    "doubling the calls from %zu to %zu should at most double the "
+	    "generated rules and literals, not take them from %zu to %zu "
+	    "and from %zu to %zu", lengths[0], lengths[1], rules[0], rules[1],
+	    literals[0], literals[1]);
+}
+
+/*
  * A query answered through the rewrite leaves only part of the fixed point
  * in the relations.  A later query with another binding, a later
  * materialization and a query answered from it must each see the whole
@@ -1164,6 +1307,7 @@ main(void)
 	a_rewrite_over_its_literal_budget_is_abandoned();
 	dropped_rules_are_charged_to_the_literal_budget();
 	facts_behind_a_rule_fit_the_literal_budget();
+	the_rewrite_grows_linearly_in_a_bodys_calls();
 	what_the_rewrite_derives_does_not_leak();
 	a_load_after_a_rewrite_reaches_the_next_query();
 

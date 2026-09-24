@@ -60,6 +60,17 @@
 # limit's message, naming what was being planned or rewritten, once it has
 # built what the limit allows and no more, within the same budget.
 #
+# A rule of 400 calls on one predicate read on demand, r(X) :- p(X), ...,
+# p(X), is answered through its Magic rewrite under the same memory limit.
+# Each call's magic rule is derived from the literals before it; written out
+# in full, those prefixes hold the square of the calls in literals and, in
+# the recursive component they form, the cube in delta-variant operations,
+# some 1.7 GB.  Cut into a supplementary predicate before every call after
+# the first, each prefix is one literal and the rewrite is linear in the
+# calls, a few megabytes.  The run must answer without a diagnostic: a
+# rewrite abandoned over its budget would still answer, from the whole
+# program, and say so.
+#
 # RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
 # set, which leaves room for a sanitizer build on a slow machine; for
 # reachability the clock only guards against a run that never ends.  The
@@ -84,6 +95,7 @@ session_lines=100000
 body_length=8000
 recursive_every=16
 patterns=125
+demand_calls=400
 planning_memory=16777216
 
 fail() {
@@ -318,3 +330,34 @@ refused_within "limit exceeded: memory=$planning_memory while planning p/1" \
     -X no-magic -q 'p(X)?' "$work/long.dl"
 refused_within "limit exceeded: memory=$planning_memory while rewriting \$q0/1" \
     -l magic-rules=1000000 -q 'all(X)?' "$work/patterns.dl"
+
+awk -v calls="$demand_calls" 'BEGIN {
+	for (i = 1; i <= 200; i++)
+		printf "e(%d, %d).\n", i, i + 1;
+	print "p(X) :- e(X, _Y).";
+	printf "r(X) :- p(X)";
+	for (i = 1; i < calls; i++)
+		printf ", p(X)";
+	print ".";
+}' > "$work/calls.dl"
+
+status=0
+run_within "$work/calls-rows" "$work/calls-err" "$planning_budget" \
+    "$RELIC" -l "memory=$planning_memory" -q 'r(1)?' "$work/calls.dl" ||
+    status=$?
+
+if [ "$status" -ne 0 ]; then
+	cat "$work/calls-err" >&2
+	fail "a rule of $demand_calls demand calls exited $status under a memory limit within a budget of $planning_budget seconds"
+fi
+
+# r(1)? binds every column, so its one answer is the empty row.
+if [ "$(wc -l < "$work/calls-rows")" -ne 1 ] ||
+    [ -n "$(cat "$work/calls-rows")" ]; then
+	fail "the demand calls workload answered something other than one empty row"
+fi
+
+if [ -s "$work/calls-err" ]; then
+	cat "$work/calls-err" >&2
+	fail "the demand calls workload was not answered through its rewrite"
+fi

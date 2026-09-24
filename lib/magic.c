@@ -8,6 +8,7 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -46,7 +47,14 @@
  *
  *	each such call, on q with some columns bound, generates a magic rule:
  *	magic$q$... over the call's bound arguments, derived from the guard and
- *	every literal placed before the call.
+ *	every literal placed before the call;
+ *
+ *	before every such call after the first, the literals placed so far are
+ *	cut into a supplementary predicate, sup$p$bf$<rule>$<call>, over the
+ *	variables they bind that the rest of the rule reads, derived once by a
+ *	rule of its own; from there the magic rules and the adorned rule read
+ *	those literals through it.  Written out in full before every call, the
+ *	prefixes of a body of L calls would hold the square of L in literals.
  *
  * An adornment with no bound column has no magic predicate and its rules no
  * guard, since there is no bound value to record.  The query is rewritten the
@@ -92,8 +100,21 @@
 #define	MAGIC_PREFIX		"magic$"
 #define	MAGIC_PREFIX_LENGTH	(sizeof(MAGIC_PREFIX) - 1)
 
+/*
+ * A supplementary predicate is named sup$, the adorned predicate's name --
+ * $q0 for the query, whose head names no predicate -- and $ and a decimal
+ * ordinal twice.  ORDINALS_MAX leaves room for the two as 64-bit sizes of
+ * at most 20 digits each; building the name checks that they fit.
+ */
+#define	SUPPLEMENTARY_PREFIX		"sup$"
+#define	SUPPLEMENTARY_PREFIX_LENGTH	(sizeof(SUPPLEMENTARY_PREFIX) - 1)
+#define	QUERY_ADORNED_NAME		"$q0"
+#define	QUERY_ADORNED_NAME_LENGTH	(sizeof(QUERY_ADORNED_NAME) - 1)
+#define	ORDINALS_MAX			(2 * (1 + 20))
+
 typedef struct relic_demand relic_demand_t;
 typedef struct relic_draft relic_draft_t;
+typedef struct relic_prefix relic_prefix_t;
 typedef struct relic_renumbering relic_renumbering_t;
 
 /*
@@ -145,6 +166,22 @@ struct relic_draft {
 };
 
 /*
+ * The prefix of a body being rewritten: the literals evaluated so far as the
+ * generated rules write them, `length` of them in `body`, which has room for
+ * the whole body and a guard.  `rule` is the rule being rewritten, the
+ * `rule_ordinal`th of those deriving its predicate, and `adornment` the one
+ * it is rewritten for, a pseudo-adornment for the query; a cut names its
+ * supplementary predicate from them.
+ */
+struct relic_prefix {
+	const relic_rule_t	*rule;
+	const relic_adornment_t	*adornment;
+	size_t			 rule_ordinal;
+	relic_literal_t		*body;
+	size_t			 length;
+};
+
+/*
  * The slots of a rule being renumbered.  `renamed[s]` is the slot the source
  * rule's slot s takes, or RELIC_NO_SLOT until it has occurred; `original[n]`
  * is the source slot that slot n came from, and `occurrences[n]` how often it
@@ -160,7 +197,7 @@ struct relic_renumbering {
 static void	 abandon_over_budget(relic_magic_t *magic, const char *what,
 		    size_t budget, relic_pred_id_t source);
 static int	 adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
-		    const relic_adornment_t *adornment);
+		    size_t rule_ordinal, const relic_adornment_t *adornment);
 static int	 adorn_rules(relic_magic_t *magic,
 		    const relic_adornment_t *adornment);
 static uint32_t	 adornment_hash(const relic_magic_t *magic,
@@ -170,6 +207,7 @@ static int	 adornment_of_call(relic_magic_t *magic,
 		    relic_adornment_t *adornmentp);
 static int	 append_rule(relic_magic_t *magic, const relic_rule_t *rule,
 		    uint32_t hash);
+static uint64_t	 arg_slot(const relic_arg_t *arg);
 static bool	 args_equal(const relic_arg_t *a, const relic_arg_t *b,
 		    uint16_t count);
 static relic_arg_t *bound_args(relic_magic_t *magic, const relic_arg_t *args,
@@ -199,6 +237,9 @@ static relic_arg_t *copy_args(relic_magic_t *magic,
 static int	 copy_literal(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering,
 		    const relic_literal_t *source, relic_literal_t *copy);
+static int	 cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix,
+		    size_t call_ordinal, uint64_t live,
+		    const relic_adornment_t *called);
 static int	 demand_begin(relic_demand_t *demand, relic_magic_t *magic);
 static int	 exceed(relic_magic_t *magic,
 		    const relic_magic_limit_t *limit, const char *key,
@@ -219,9 +260,16 @@ static int	 index_rules_by_head(relic_magic_t *magic);
 static int	 intern_generated(relic_magic_t *magic, const char *name,
 		    size_t length, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
+static int	 intern_supplementary(relic_magic_t *magic,
+		    const relic_prefix_t *prefix, size_t call_ordinal,
+		    uint16_t arity, relic_pred_id_t *idp);
+static uint64_t	*later_slots(relic_magic_t *magic, const relic_rule_t *rule,
+		    const size_t *order);
 static relic_magic_limit_t limit_or_budget(size_t configured_limit,
 		    bool sized,
 		    size_t program_size);
+static uint64_t	 literal_slots(const relic_magic_t *magic,
+		    const relic_literal_t *literal);
 static bool	 literals_equal(const relic_magic_t *magic,
 		    const relic_literal_t *a, const relic_literal_t *b);
 static void	*magic_alloc(relic_magic_t *magic, size_t count, size_t size);
@@ -244,7 +292,8 @@ static int	 record_adornment(relic_magic_t *magic,
 		    relic_pred_id_t source, uint32_t bound, uint32_t hash,
 		    relic_adornment_t *adornmentp);
 static int	 record_call(relic_magic_t *magic, const relic_rule_t *rule,
-		    const relic_literal_t *body, size_t position,
+		    const relic_literal_t *prefix, size_t length,
+		    const relic_literal_t *call,
 		    const relic_adornment_t *adornment);
 static uint32_t	 rehash_adornment(uint32_t id, void *ctx);
 static uint32_t	 rehash_rule(uint32_t id, void *ctx);
@@ -253,7 +302,8 @@ static void	 renumber_arg(relic_renumbering_t *renumbering,
 static void	 report_limit(relic_magic_t *magic, const char *limit,
 		    size_t configured, relic_pred_id_t source);
 static int	 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
-		    const relic_adornment_t *head, relic_draft_t *draft);
+		    const relic_adornment_t *head, size_t rule_ordinal,
+		    relic_draft_t *draft);
 static int	 rewrite_query(relic_magic_t *magic,
 		    const relic_rule_t *query);
 static bool	 rule_derives_nothing(const relic_rule_t *rule);
@@ -261,6 +311,10 @@ static uint32_t	 rule_hash(const relic_magic_t *magic,
 		    const relic_rule_t *rule);
 static bool	 rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
 		    const relic_rule_t *b);
+static uint16_t	 slot_count(uint64_t slots);
+static int	 supplementary_literal(relic_magic_t *magic,
+		    const relic_prefix_t *prefix, size_t call_ordinal,
+		    uint64_t live, relic_literal_t *literal);
 static void	 visit_body(relic_demand_t *demand, const relic_rule_t *rule);
 static void	 visit_demanded(relic_demand_t *demand, size_t position);
 
@@ -1563,16 +1617,16 @@ adornment_of_call(relic_magic_t *magic, const relic_literal_t *call,
 }
 
 /*
- * Generate the magic rule recording the call at body[position], made with
- * `adornment`: the call's bound arguments, derived from every literal before
- * it in the body.  The body is in the order the rule is evaluated in, guard
- * first, so what comes before the call is exactly what has bound its
- * arguments.  An adornment with nothing bound has no magic predicate and
- * records nothing.
+ * Generate the magic rule recording `call`, made with `adornment`: the call's
+ * bound arguments, derived from the `length` literals of `prefix`, which are
+ * those before the call as the generated rules write them.  The body is in
+ * the order the rule is evaluated in, guard first, so the prefix is exactly
+ * what has bound the call's arguments.  An adornment with nothing bound has
+ * no magic predicate and records nothing.
  */
 static int
 record_call(relic_magic_t *magic, const relic_rule_t *rule,
-    const relic_literal_t *body, size_t position,
+    const relic_literal_t *prefix, size_t length, const relic_literal_t *call,
     const relic_adornment_t *adornment)
 {
 	relic_draft_t draft;
@@ -1584,104 +1638,381 @@ record_call(relic_magic_t *magic, const relic_rule_t *rule,
 	draft.source = rule;
 	draft.head = adornment->magic;
 	draft.head_arity = column_count(adornment->bound);
-	draft.head_args = bound_args(magic, body[position].u.atom.args,
+	draft.head_args = bound_args(magic, call->u.atom.args,
 	    pred_arity(magic, adornment->source), adornment->bound);
 	if (draft.head_args == NULL)
 		return (-1);
-	draft.body = body;
-	draft.body_length = position;
+	draft.body = prefix;
+	draft.body_length = length;
 	draft.attributed = adornment->source;
 
 	return (publish_rule(magic, &draft));
 }
 
+/* The slot an argument reads, as a mask: none unless it is a variable. */
+static uint64_t
+arg_slot(const relic_arg_t *arg)
+{
+	if (arg->kind != RELIC_ARG_VARIABLE)
+		return (0);
+
+	return (UINT64_C(1) << arg->u.slot);
+}
+
 /*
- * Draft the body of `rule` rewritten for a call with the columns of `head`
- * bound, generating the magic rules of the calls it makes.
+ * The slots a literal reads: every variable among its arguments, whatever
+ * its kind.
+ */
+static uint64_t
+literal_slots(const relic_magic_t *magic, const relic_literal_t *literal)
+{
+	const relic_arg_t *args;
+	uint64_t slots;
+	uint16_t arity;
+	uint16_t i;
+
+	if (literal->kind == RELIC_LITERAL_COMPARISON)
+		return (arg_slot(&literal->u.comparison.left) |
+		    arg_slot(&literal->u.comparison.right));
+
+	args = literal->u.atom.args;
+	arity = pred_arity(magic, literal->u.atom.pred);
+
+	slots = 0;
+	for (i = 0; i < arity; i++)
+		slots |= arg_slot(&args[i]);
+
+	return (slots);
+}
+
+/*
+ * For each position i of a body in the order `order`, the slots read at or
+ * after it -- by the literal at i, by any literal placed later, or by the
+ * head -- as `later[i]`, with `later[body_length]` the head's alone.  One
+ * pass from the end: each position adds its literal to the one after it.
+ */
+static uint64_t *
+later_slots(relic_magic_t *magic, const relic_rule_t *rule,
+    const size_t *order)
+{
+	uint64_t *later;
+	uint16_t column;
+	size_t i;
+
+	later = magic_alloc(magic, rule->body_length + 1, sizeof(*later));
+	if (later == NULL)
+		return (NULL);
+
+	later[rule->body_length] = 0;
+	for (column = 0; column < rule->head_arity; column++)
+		later[rule->body_length] |= arg_slot(&rule->head_args[column]);
+
+	for (i = rule->body_length; i > 0; i--)
+		later[i - 1] = later[i] |
+		    literal_slots(magic, &rule->body[order[i - 1]]);
+
+	return (later);
+}
+
+static uint16_t
+slot_count(uint64_t slots)
+{
+	uint16_t count;
+
+	count = 0;
+	for (; slots != 0; slots &= slots - 1)
+		count++;
+
+	return (count);
+}
+
+/*
+ * Name and intern the supplementary predicate of arity `arity` that the cut
+ * before the `call_ordinal`th demand call of a prefix's rule makes:
+ * sup$<adorned>$<rule>$<call>, the adorned predicate's name, the rule's
+ * position among the rules deriving its predicate from 0, and the call's
+ * among the rule's demand calls from 1.  The query's head names no
+ * predicate, and its cuts are named after $q0.  The name depends only on the
+ * adornment and the positions, so a later query with the same adornments
+ * interns the same names and, where the live variables are as many, finds
+ * the same predicates.
+ */
+static int
+intern_supplementary(relic_magic_t *magic, const relic_prefix_t *prefix,
+    size_t call_ordinal, uint16_t arity, relic_pred_id_t *idp)
+{
+	const relic_pred_t *adorned;
+	const char *name;
+	char *text;
+	size_t name_length;
+	size_t length;
+	size_t room;
+	int written;
+
+	name = QUERY_ADORNED_NAME;
+	name_length = QUERY_ADORNED_NAME_LENGTH;
+	if (prefix->adornment->adorned != RELIC_ID_NONE) {
+		adorned = relic_pred_of(magic->ctx,
+		    prefix->adornment->adorned);
+		name = relic_symbol_bytes(magic->ctx, adorned->name,
+		    &name_length);
+	}
+
+	room = SUPPLEMENTARY_PREFIX_LENGTH + name_length + ORDINALS_MAX + 1;
+	text = magic_alloc(magic, room, 1);
+	if (text == NULL)
+		return (-1);
+
+	bcopy(SUPPLEMENTARY_PREFIX, text, SUPPLEMENTARY_PREFIX_LENGTH);
+	bcopy(name, text + SUPPLEMENTARY_PREFIX_LENGTH, name_length);
+	length = SUPPLEMENTARY_PREFIX_LENGTH + name_length;
+	written = snprintf(text + length, room - length, "$%zu$%zu",
+	    prefix->rule_ordinal, call_ordinal);
+	if (written < 0 || (size_t)written >= room - length) {
+		relic_diagf(magic->ctx, RELIC_ERROR, NULL,
+		    "internal error: a supplementary predicate's name does "
+		    "not fit");
+		return (-1);
+	}
+	length += (size_t)written;
+
+	return (intern_generated(magic, text, length, arity,
+	    &prefix->rule->where, idp));
+}
+
+/*
+ * The literal a cut leaves in place of the prefix: the supplementary
+ * predicate over the slots of `live`, in slot order.  A cut with no live
+ * slot is a predicate of arity zero, and its literal has no arguments.
+ */
+static int
+supplementary_literal(relic_magic_t *magic, const relic_prefix_t *prefix,
+    size_t call_ordinal, uint64_t live, relic_literal_t *literal)
+{
+	relic_arg_t *args;
+	uint16_t arity;
+	uint16_t slot;
+	uint16_t n;
+
+	bzero(literal, sizeof(*literal));
+	literal->kind = RELIC_LITERAL_POSITIVE;
+	literal->where = prefix->rule->where;
+	literal->u.atom.where = prefix->rule->where;
+
+	arity = slot_count(live);
+	if (intern_supplementary(magic, prefix, call_ordinal, arity,
+	    &literal->u.atom.pred) != 0)
+		return (-1);
+
+	args = NULL;
+	if (arity > 0) {
+		args = magic_alloc(magic, arity, sizeof(*args));
+		if (args == NULL)
+			return (-1);
+	}
+
+	n = 0;
+	for (slot = 0; slot < RELIC_MAX_VARIABLES; slot++) {
+		if ((live & (UINT64_C(1) << slot)) == 0)
+			continue;
+
+		bzero(&args[n], sizeof(args[n]));
+		args[n].kind = RELIC_ARG_VARIABLE;
+		args[n].u.slot = slot;
+		n++;
+	}
+	literal->u.atom.args = args;
+
+	return (0);
+}
+
+/*
+ * Cut the prefix before the `call_ordinal`th demand call, `called`: derive
+ * it once, by one supplementary rule, into a supplementary predicate over
+ * its live slots, and continue the prefix from that one literal.  `live`
+ * holds the slots the prefix binds that the call, a literal after it or the
+ * head reads, so every later literal finds its variables in the cut and the
+ * generated bodies stay linear in the rule's calls.
+ *
+ * A cut whose live slots are more than a predicate may have columns is not
+ * made, and the prefix continues, written out in full, to the next cut that
+ * fits.
+ *
+ * The supplementary rule is published as every generated rule is, and so is
+ * charged to the budgets.  It is attributed to the predicate adorned, or,
+ * for the query, which is no predicate, to the predicate its call reads, as
+ * the query's seeds are.  It is never dropped, because its head is new to
+ * this rewrite and absent from its own body: the name is built from the
+ * adorned predicate's name, which has one `$` before its b's and f's, or
+ * `$q0`, which no adorned name is, and from positions a rewrite visits
+ * once, and no name a program writes contains `$`.  Were it ever dropped as
+ * equal to a rule already kept, that rule would derive the same relation;
+ * the assertion guards the argument rather than correctness.  When a budget
+ * abandons the rewrite here, the prefix is left as it was and the predicate
+ * stays interned with no rule, as an abandoned adornment's predicates do;
+ * the rewrite is discarded whole.
+ */
+static int
+cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
+    uint64_t live, const relic_adornment_t *called)
+{
+	relic_literal_t cut;
+	relic_draft_t draft;
+	size_t rules_before;
+
+	if (slot_count(live) > RELIC_MAX_ARITY)
+		return (0);
+
+	if (supplementary_literal(magic, prefix, call_ordinal, live,
+	    &cut) != 0)
+		return (-1);
+
+	bzero(&draft, sizeof(draft));
+	draft.source = prefix->rule;
+	draft.head = cut.u.atom.pred;
+	draft.head_args = cut.u.atom.args;
+	draft.head_arity = slot_count(live);
+	draft.body = prefix->body;
+	draft.body_length = prefix->length;
+	draft.attributed = prefix->adornment->source != RELIC_ID_NONE ?
+	    prefix->adornment->source : called->source;
+
+	rules_before = magic->rules.count;
+	if (publish_rule(magic, &draft) != 0)
+		return (-1);
+	assert(magic->rules.count == rules_before + 1);
+
+	prefix->body[0] = cut;
+	prefix->length = 1;
+
+	return (0);
+}
+
+/*
+ * Draft the body of `rule`, the `rule_ordinal`th rule deriving its
+ * predicate, rewritten for a call with the columns of `head` bound,
+ * generating the magic rules of the calls it makes and the supplementary
+ * rules of the cuts between them.
  *
  * The body is put in the order the planner would evaluate it with the head's
  * bound variables already known -- guard first, when the call binds anything
- * -- and walked in that order, keeping the set of slots bound so far.  Each
- * call on a predicate read on demand is renamed to the adornment it asks
- * for, after the magic rule recording it is generated from the literals
- * before it.  The draft has the source rule's head arguments and head arity;
- * its caller names the head.
+ * -- and walked in that order, keeping the prefix, the literals evaluated
+ * so far as the generated rules write them, and `bound`, the slots the
+ * literals walked so far bind.  Each call on a predicate read on demand is
+ * renamed to the adornment it asks for.  A demand call, one whose adornment
+ * binds a column, has its magic rule generated from the prefix; before
+ * every demand call after the first the prefix is cut, so that the magic
+ * rule, every later one and the draft read it through one literal.
+ *
+ * Why a cut loses nothing: it keeps the slots of `bound` that are read at or
+ * after the call, `later[i]`.  A slot it drops is in `bound` and absent from
+ * the prefix from then on, but no literal from position i onwards reads it,
+ * and later[] only shrinks along the body, so no later cut asks for it
+ * either.  `bound` keeps meaning what the source rule has bound, which is
+ * what an adornment is computed from, and a skipped cut changes nothing.
+ * The draft has the source rule's head arguments and head arity; its caller
+ * names the head.
  */
 static int
 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
-    const relic_adornment_t *head, relic_draft_t *draft)
+    const relic_adornment_t *head, size_t rule_ordinal, relic_draft_t *draft)
 {
 	relic_adornment_t called;
-	relic_literal_t *body;
+	relic_literal_t literal;
+	relic_prefix_t prefix;
+	uint64_t *later;
 	size_t *order;
-	size_t length;
+	size_t demand_calls;
 	size_t i;
 	uint64_t bound;
+	uint64_t live;
+
+	bzero(&prefix, sizeof(prefix));
+	prefix.rule = rule;
+	prefix.adornment = head;
+	prefix.rule_ordinal = rule_ordinal;
+	demand_calls = 0;
 
 	order = magic_alloc(magic, rule->body_length, sizeof(*order));
 	if (order == NULL)
 		return (-1);
-	body = magic_alloc(magic, rule->body_length + 1, sizeof(*body));
-	if (body == NULL)
+	prefix.body = magic_alloc(magic, rule->body_length + 1,
+	    sizeof(*prefix.body));
+	if (prefix.body == NULL)
 		return (-1);
 
 	bound = head_bound_slots(rule, head);
 	if (relic_plan_order(magic->ctx, &magic->arena, rule, bound,
 	    magic->incomplete, order) != 0)
 		return (-1);
+	later = later_slots(magic, rule, order);
+	if (later == NULL)
+		return (-1);
 
-	length = 0;
 	if (head->magic != RELIC_ID_NONE) {
-		if (guard_literal(magic, rule, head, &body[0]) != 0)
+		if (guard_literal(magic, rule, head, &prefix.body[0]) != 0)
 			return (-1);
-		length++;
+		prefix.length++;
 	}
 
 	for (i = 0; i < rule->body_length; i++) {
-		body[length] = rule->body[order[i]];
+		literal = rule->body[order[i]];
 
-		if (negates_on_demand(magic, &body[length])) {
+		if (negates_on_demand(magic, &literal)) {
 			relic_diagf(magic->ctx, RELIC_ERROR, &rule->where,
 			    "internal error: a query's Magic rewrite negates "
 			    "a predicate it does not read completely");
 			return (-1);
 		}
 
-		if (reads_on_demand(magic, &body[length])) {
-			if (adornment_of_call(magic, &body[length], bound,
+		if (reads_on_demand(magic, &literal)) {
+			if (adornment_of_call(magic, &literal, bound,
 			    &called) != 0)
 				return (-1);
-			if (record_call(magic, rule, body, length,
-			    &called) != 0)
+
+			if (called.magic != RELIC_ID_NONE)
+				demand_calls++;
+
+			if (called.magic != RELIC_ID_NONE && demand_calls > 1) {
+				live = bound & later[i];
+				if (cut_prefix(magic, &prefix, demand_calls,
+				    live, &called) != 0)
+					return (-1);
+			}
+
+			if (record_call(magic, rule, prefix.body,
+			    prefix.length, &literal, &called) != 0)
 				return (-1);
-			body[length].u.atom.pred = called.adorned;
+			literal.u.atom.pred = called.adorned;
 		}
 
-		bound |= positive_slots(magic, &body[length]);
-		length++;
+		prefix.body[prefix.length] = literal;
+		prefix.length++;
+		bound |= positive_slots(magic, &literal);
 	}
 
 	bzero(draft, sizeof(*draft));
 	draft->source = rule;
 	draft->head_args = rule->head_args;
 	draft->head_arity = rule->head_arity;
-	draft->body = body;
-	draft->body_length = length;
+	draft->body = prefix.body;
+	draft->body_length = prefix.length;
 
 	return (0);
 }
 
 /*
- * Generate the adorned rule of one rule deriving an adornment's source: the
- * rewritten body over the adorned head.
+ * Generate the adorned rule of one rule deriving an adornment's source, the
+ * `rule_ordinal`th of them in program order: the rewritten body over the
+ * adorned head.
  */
 static int
 adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
-    const relic_adornment_t *adornment)
+    size_t rule_ordinal, const relic_adornment_t *adornment)
 {
 	relic_draft_t draft;
 
-	if (rewrite_body(magic, rule, adornment, &draft) != 0)
+	if (rewrite_body(magic, rule, adornment, rule_ordinal, &draft) != 0)
 		return (-1);
 
 	draft.head = adornment->adorned;
@@ -1717,7 +2048,7 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 	unbound.magic = RELIC_ID_NONE;
 	unbound.bound = 0;
 
-	if (rewrite_body(magic, query, &unbound, &draft) != 0)
+	if (rewrite_body(magic, query, &unbound, 0, &draft) != 0)
 		return (-1);
 
 	draft.head = query->head;
@@ -1743,7 +2074,7 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 
 	for (i = first; i < end; i++) {
 		if (adorn_rule(magic, &rules->entries[magic->rules_by_head[i]],
-		    adornment) != 0)
+		    i - first, adornment) != 0)
 			return (-1);
 	}
 

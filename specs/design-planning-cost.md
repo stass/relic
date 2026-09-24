@@ -389,8 +389,12 @@ set such a limit expect the planning message of section 7.
   meet.
 * **A default budget on plans.** The Magic budgets of D-7 exist because the
   rewrite is optional and has a fallback, and the literal budget of section
-  2 is that mechanism applied to the prefixes. A rule's plans and its delta
-  variants are the evaluation itself: the naive evaluator of D-9 is the
+  2 is that mechanism applied to the rewrite's size: it bounds the literals
+  the rewrite drafts, not the plans and delta variants that evaluating them
+  builds. It is the supplementary construction, which keeps every prefix
+  after a body's first demand call to one literal wherever its live
+  variables fit a predicate, that keeps those plans linear in the body. A rule's plans and its delta variants are the
+  evaluation itself: the naive evaluator of D-9 is the
   reference the semi-naive one is tested against and not a fallback the
   library would silently choose, so a budget that refused a plan would refuse
   the program. Planning memory is unlimited by default because the data is.
