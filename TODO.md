@@ -676,10 +676,13 @@ end but has to walk from the head to reach its start. Either materialize a
 delta that an inner literal needs into a scratch relation carrying the
 indexes the plan asks for (Souffle's design, at the cost of one copy of each
 delta), or let a key entry locate the first chain tuple at or past a given
-identifier. The planner also orders a component's plans before its relations
-hold anything, so it cannot see that `magic` is small; choosing the delta
-variant's order from the relations' sizes at the start of each iteration is
-part of the same fix.
+identifier. The planner orders a component's plans before its members hold
+anything, so it cannot know how large a delta will be against a complete
+relation it can measure; the delta's size is known only when each iteration
+starts. Designed in `specs/design-evaluation-cost.md` section 4: the delta
+is placed by the planner, reached through a per-key frontier of the
+relation's own index, and each iteration chooses between the placed plan
+and the delta-first one by the delta's size.
 
 **The first pass over a recursive component is repeated as its first
 delta.** [Medium, component: `lib/eval.c`] `run_base_pass()` evaluates every
@@ -696,7 +699,8 @@ is the whole of each relation, and a variant's non-delta literals read
 bounded views -- those before the delta literal the tuples older than the
 delta, those after it everything up to the delta's end, fixed when the
 iteration starts. With the views bounded, nothing needs to see a tuple in
-the iteration that inserts it, which the next item relies on.
+the iteration that inserts it, which the next item relies on. Designed in
+`specs/design-evaluation-cost.md` section 3.
 
 **relic's evaluation costs several times Souffle's interpreter per
 derivation on the analyses.** [Medium, component: `lib/eval.c`,
@@ -724,7 +728,8 @@ identifier (or, for arity two or less, the tuple itself) so that a slot
 rejects a mismatch without a tuple read; and, once the views of the previous
 item are bounded, buffer an iteration's derivations and insert them in
 batches, prefetching or partitioning by hash, instead of one random probe
-per derivation.
+per derivation. Designed in `specs/design-evaluation-cost.md` sections 5
+and 6.
 
 **Loading facts costs relic more memory than any other engine.** [Medium,
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
@@ -736,10 +741,14 @@ before deciding whether a streaming fact loader or the CSV import of
 `specs/architecture.md` section 69 is the remedy. Time follows the same
 path: loading is about half of `facts-join` at scale 4 and 0.07 of the 0.08 s
 of user time `graph-left` takes, which is most of Souffle's lead on
-`graph-left`, `graph-reach`, `facts-join` and `tasks-ready`. Each symbol is
-interned twice, once in the symbol table by the lexer and once in the value
-table, and the symbol table recomputes every symbol's byte hash when it
-grows (`symbol_rehash()`).
+`graph-left`, `graph-reach`, `facts-join` and `tasks-ready`. A symbol's
+bytes are hashed once, by the lexer into the symbol table; the value table
+hashes the symbol identifier, one word. The symbol table recomputes every
+symbol's byte hash when it grows (`symbol_rehash()`), which
+`specs/design-evaluation-cost.md` section 5 removes; section 7 of that
+design records that the rest of the cost is a fact's representation as a
+syntax tree statement and a compiled rule beside its tuple, and defers it
+to a design of its own.
 
 **Souffle and Nemo write their answers to files, the others to a discarded
 standard output.** [Low, component: `bench/compare/run.sh`] Under load, a

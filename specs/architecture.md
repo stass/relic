@@ -991,6 +991,11 @@ Duplicate results are eliminated by the destination relation.
 
 The compiler should generate these variants automatically.
 
+What each literal of a variant may see of its component's relations, so
+that every derivation is made once, where the delta literal is placed and
+how a lookup reaches a delta's start, and what a duplicate check costs, are
+specified in `specs/design-evaluation-cost.md`.
+
 ---
 
 # 29. SCC Evaluation
