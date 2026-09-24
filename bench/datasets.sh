@@ -2,9 +2,9 @@
 #
 # `dataset NAME DIR SCALE` writes one data set into DIR: one file per
 # relation, <relation>.tsv, one tuple per line with its columns separated by
-# tabs, symbols bare and integers in decimal.  That is the form Souffle and
-# Nemo read directly; source_facts turns it into the fact syntax relic,
-# SWI-Prolog and clingo share.  The generators are awk programs over a fixed
+# tabs, symbols bare and integers in decimal.  That is the form Souffle,
+# Nemo, DuckDB and SQLite read directly; source_facts turns it into the fact
+# syntax relic, SWI-Prolog and clingo share.  The generators are awk programs over a fixed
 # sequence, so a data set is the same on every run and every platform.
 
 # dataset NAME DIR SCALE: generate the data set NAME into DIR, every size

@@ -43,7 +43,8 @@ owned_files() {
 	    -type f \( -name '*.ac' -o -name '*.am' -o -name '*.c' \
 	       -o -name '*.h' -o -name '*.in' -o -name '*.m4' \
 	       -o -name '*.sh' -o -name '*.[1-9]' -o -name '*.dl' \
-	       -o -name '*.pl' -o -name '*.lp' -o -name '*.rls' \) -print
+	       -o -name '*.pl' -o -name '*.lp' -o -name '*.rls' \
+	       -o -name '*.sql' \) -print
 }
 
 candidates=$(mktemp) || exit 1

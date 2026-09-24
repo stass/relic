@@ -1,11 +1,14 @@
 #!/bin/sh
 #
-# Compare relic with other Datalog and tabled-Prolog engines.
+# Compare relic with other Datalog and tabled-Prolog engines and with SQL
+# databases.
 #
 # usage: bench/compare/run.sh [-e engines] [-o results.tsv] [-w workloads]
 #
 # A workload is a directory beside this script holding one program per
 # engine and a file naming the data set, which bench/datasets.sh generates.
+# Only the SQL engines may lack a program, for a workload SQL cannot
+# express; they are reported n/a there.
 # relic answers each workload first, and its answer becomes the reference;
 # every other engine runs the workload once under a time limit, and its
 # answer is checked against the reference.  An engine that agrees is then
@@ -16,8 +19,9 @@
 #
 # -e and -w take comma-separated names and restrict the run; relic always
 # runs.  -o also writes the results as a tab-separated file.  RELIC, SWIPL,
-# SOUFFLE, CLINGO and NMO name the engines' commands, and CXX the compiler,
-# one command without arguments, for Souffle's compiled programs.
+# SOUFFLE, CLINGO, NMO, DUCKDB and SQLITE name the engines' commands, and
+# CXX the compiler, one command without arguments, for Souffle's compiled
+# programs.
 # BENCH_SCALE, 1 by default, multiplies every data set as it does for
 # bench/run.sh; BENCH_RUNS, 5, is the number of timed runs; and
 # BENCH_TIMEOUT, 300, the seconds each engine is given to answer.
@@ -37,6 +41,8 @@ swipl=${SWIPL:-swipl}
 souffle=${SOUFFLE:-souffle}
 clingo=${CLINGO:-clingo}
 nmo=${NMO:-nmo}
+duckdb=${DUCKDB:-duckdb}
+sqlite=${SQLITE:-sqlite3}
 cxx=${CXX:-c++}
 scale=${BENCH_SCALE:-1}
 runs=${BENCH_RUNS:-5}
@@ -45,18 +51,27 @@ limit=${BENCH_TIMEOUT:-300}
 # The switches each engine runs with, recorded in the report's header.
 # SWI-Prolog reads no initialization file, which could change its flags,
 # and its default stack and table space are too small for the larger
-# closures.  Souffle is held to one thread.  The compiler's switches depend
-# on the Souffle installed and are set once it is found.
+# closures.  Souffle and DuckDB are held to one thread, and DuckDB may not
+# download an extension during a run.  DuckDB and SQLite read no
+# initialization file, stop at the first error, and print rows without a
+# header, their columns separated by tabs.  The compiler's
+# switches depend on the Souffle installed and are set once it is found.
 relic_switches="-F tsv"
 swipl_switches="-f none --stack-limit=16g --table-space=16g"
 souffle_switches="-j1"
 magic_switches="--magic-transform=*"
 clingo_switches="-V0"
 nemo_switches="--report none -o"
+duckdb_switches="-batch -bail -no-init -noheader -cmd '.mode tabs'"
+duckdb_switches="$duckdb_switches -cmd 'SET threads = 1'"
+duckdb_switches="$duckdb_switches -cmd"
+duckdb_switches="$duckdb_switches 'SET autoinstall_known_extensions = false'"
+sqlite_switches="-batch -bail -init /dev/null -noheader -tabs"
 cxx_switches=
 
 # The engines, in the report's order; relic, the reference, is first.
 all_engines="relic swipl souffle-interp souffle souffle-magic clingo nemo"
+all_engines="$all_engines duckdb sqlite"
 
 # The columns of a result, in the order result_row writes them.
 columns="workload engine status rows median fastest spread user"
@@ -106,6 +121,13 @@ quote() {
 	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+# dot_argument TEXT: TEXT as one argument of a dot-command of the DuckDB or
+# SQLite command-line shell, in double quotes, within which that shell
+# resolves backslash escapes.
+dot_argument() {
+	printf '"%s"' "$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')"
+}
+
 # words LIST: the comma-separated LIST as words.
 words() {
 	printf '%s\n' "$1" | tr ',' ' '
@@ -152,6 +174,8 @@ engine_tool() {
 	souffle-interp | souffle | souffle-magic) printf '%s\n' "$souffle" ;;
 	clingo) printf '%s\n' "$clingo" ;;
 	nemo) printf '%s\n' "$nmo" ;;
+	duckdb) printf '%s\n' "$duckdb" ;;
+	sqlite) printf '%s\n' "$sqlite" ;;
 	*) die "internal error: no command for engine $1" ;;
 	esac
 }
@@ -178,7 +202,29 @@ engine_version() {
 		;;
 	clingo) "$tool" --version | head -n 1 ;;
 	nemo) "$tool" --version ;;
+	duckdb) "$tool" --version | awk '{ print "duckdb", $1; exit }' ;;
+	sqlite) "$tool" --version | awk '{ print "sqlite", $1; exit }' ;;
 	*) die "internal error: no version for engine $1" ;;
+	esac
+}
+
+# engine_switches ENGINE: the switches ENGINE runs with, and for Souffle's
+# compiled modes those it is compiled with.
+engine_switches() {
+	case $1 in
+	relic) echo "$relic_switches" ;;
+	swipl) echo "$swipl_switches" ;;
+	souffle-interp) echo "$souffle_switches" ;;
+	souffle) echo "$souffle_switches; compiled with $cxx_switches" ;;
+	souffle-magic)
+		echo "$souffle_switches $magic_switches; compiled with" \
+		    "$cxx_switches"
+		;;
+	clingo) echo "$clingo_switches" ;;
+	nemo) echo "$nemo_switches" ;;
+	duckdb) echo "$duckdb_switches" ;;
+	sqlite) echo "$sqlite_switches" ;;
+	*) die "internal error: no switches for engine $1" ;;
 	esac
 }
 
@@ -210,28 +256,57 @@ prepare_dataset() {
 	source_facts "$dir" > "$dir.pl"
 }
 
+# program_file ENGINE: the name of ENGINE's program in a workload's
+# directory.
+program_file() {
+	case $1 in
+	relic) echo relic.dl ;;
+	swipl) echo swipl.pl ;;
+	souffle-interp | souffle | souffle-magic) echo souffle.dl ;;
+	clingo) echo clingo.lp ;;
+	nemo) echo nemo.rls ;;
+	duckdb) echo duckdb.sql ;;
+	sqlite) echo sqlite.sql ;;
+	*) die "internal error: no program for engine $1" ;;
+	esac
+}
+
+# optional_program ENGINE: whether a workload may have no program for
+# ENGINE.  Every workload is written for every Datalog engine; DuckDB and
+# SQLite cannot express nonlinear recursion or recursion through two
+# relations.
+optional_program() {
+	case $1 in
+	duckdb | sqlite) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 # engine_command ENGINE WORKLOAD: the command that runs WORKLOAD's program
-# with ENGINE.  relic, SWI-Prolog and clingo write the answer to standard
-# output; Souffle and Nemo write it into $work/out/ENGINE.
+# with ENGINE.  relic, SWI-Prolog, clingo, DuckDB and SQLite write the
+# answer to standard output; Souffle and Nemo write it into
+# $work/out/ENGINE.  The SQL engines change to the data set's directory,
+# where the program names its relation files and DuckDB writes any data it
+# spills to disk.
 engine_command() (
-	program=$here/$2
+	program=$here/$2/$(program_file "$1")
 	data=$work/data/$(dataset_of "$2")
 	out=$work/out/$1
 
 	case $1 in
 	relic)
 		echo "$(quote "$relic") $relic_switches" \
-		    "$(quote "$program/relic.dl") $(quote "$data.pl")"
+		    "$(quote "$program") $(quote "$data.pl")"
 		;;
 	swipl)
 		echo "$(quote "$swipl") $swipl_switches" \
-		    "$(quote "$here/driver.pl") $(quote "$program/swipl.pl")" \
+		    "$(quote "$here/driver.pl") $(quote "$program")" \
 		    "$(quote "$data.pl")"
 		;;
 	souffle-interp)
 		echo "$(quote "$souffle") $souffle_switches" \
 		    "-F $(quote "$data") -D $(quote "$out")" \
-		    "$(quote "$program/souffle.dl")"
+		    "$(quote "$program")"
 		;;
 	souffle | souffle-magic)
 		echo "$(quote "$work/bin/$1") $souffle_switches" \
@@ -239,12 +314,22 @@ engine_command() (
 		;;
 	clingo)
 		echo "$(quote "$clingo") $clingo_switches" \
-		    "$(quote "$data.pl") $(quote "$program/clingo.lp")"
+		    "$(quote "$data.pl") $(quote "$program")"
 		;;
 	nemo)
 		echo "$(quote "$nmo") $nemo_switches" \
 		    "-I $(quote "$data") -D $(quote "$out")" \
-		    "$(quote "$program/nemo.rls")"
+		    "$(quote "$program")"
+		;;
+	duckdb)
+		echo "$(quote "$duckdb") $duckdb_switches" \
+		    "-cmd $(quote ".cd $(dot_argument "$data")")" \
+		    "-f $(quote "$program")"
+		;;
+	sqlite)
+		echo "$(quote "$sqlite") $sqlite_switches" \
+		    "-cmd $(quote ".cd $(dot_argument "$data")") :memory:" \
+		    "$(quote ".read $(dot_argument "$program")")"
 		;;
 	*)
 		die "internal error: no command line for engine $1"
@@ -256,7 +341,9 @@ engine_command() (
 # in.
 answer_file() {
 	case $1 in
-	relic | swipl | clingo) printf '%s\n' "$work/stdout" ;;
+	relic | swipl | clingo | duckdb | sqlite)
+		printf '%s\n' "$work/stdout"
+		;;
 	souffle-interp | souffle | souffle-magic)
 		printf '%s\n' "$work/out/$1/answer.csv"
 		;;
@@ -283,7 +370,7 @@ succeeded() {
 compile_souffle() (
 	source=$work/bin/$1.cpp
 	binary=$work/bin/$1
-	program=$here/$2/souffle.dl
+	program=$here/$2/$(program_file "$1")
 	mkdir -p "$work/bin"
 
 	translate="$(quote "$souffle")"
@@ -310,6 +397,19 @@ compile_souffle() (
 	awk '/^real / { total += $2 } END { printf "%.2f\n", total }' \
 	    "$work/translate.time" "$work/build.time"
 )
+
+# compile ENGINE WORKLOAD: build WORKLOAD's program if ENGINE runs a
+# compiled one, setting compile_seconds, or status on a failure.
+compile() {
+	case $1 in
+	souffle | souffle-magic)
+		if ! compile_seconds=$(compile_souffle "$1" "$2"); then
+			compile_seconds=-
+			status=failed
+		fi
+		;;
+	esac
+}
 
 # normalize_answer ENGINE: the answer ENGINE's verification run left, as
 # sorted, distinct rows of tab-separated columns.  clingo prints the atoms
@@ -487,7 +587,9 @@ print_result() {
 }
 
 # run_engine: compile if $engine needs it, answer $workload, judge the
-# answer, time the engine if it agrees, and record the result.
+# answer, time the engine if it agrees, and record the result.  A workload
+# with no program for the engine is n/a if the engine's programs are
+# optional, and a failure otherwise.
 run_engine() {
 	status=ok
 	rows=-
@@ -498,15 +600,17 @@ run_engine() {
 	peak_bytes=-
 	compile_seconds=-
 
-	case $engine in
-	souffle | souffle-magic)
-		if ! compile_seconds=$(compile_souffle "$engine" "$workload")
-		then
-			compile_seconds=-
+	if [ ! -f "$here/$workload/$(program_file "$engine")" ]; then
+		if optional_program "$engine"; then
+			status=n/a
+		else
 			status=failed
+			echo "compare: $workload has no program for $engine" >&2
 		fi
-		;;
-	esac
+	fi
+	if [ "$status" = ok ]; then
+		compile "$engine" "$workload"
+	fi
 	if [ "$status" = ok ]; then
 		verify "$engine" "$workload"
 	fi
@@ -585,11 +689,9 @@ print_header() {
 		echo "# $("$cxx" --version | head -n 1):" \
 		    "$(home_relative "$(command -v "$cxx")")"
 	fi
-	echo "# relic $relic_switches"
-	echo "# swipl $swipl_switches"
-	echo "# souffle $souffle_switches; compiled with $cxx_switches;" \
-	    "souffle-magic $magic_switches"
-	echo "# clingo $clingo_switches; nemo $nemo_switches"
+	for engine in $engines; do
+		echo "# $engine $(engine_switches "$engine")"
+	done
 	echo
 	printf "%-${name_width}s %-14s %8s %8s %7s %8s %8s %8s %7s  %s\n" \
 	    workload engine median fastest spread user "peak MB" rows compile \

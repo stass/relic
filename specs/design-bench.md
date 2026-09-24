@@ -1,9 +1,10 @@
 # relic benchmark comparison design: relic against other engines
 
 **Status.** Design document for the harness that runs one set of workloads
-through relic and through other Datalog and tabled-Prolog engines, checks that
-every engine gives the same answer, and times them. Forward-looking, like
-every document under `specs/`; `STATUS.md` records what is implemented.
+through relic, through other Datalog and tabled-Prolog engines and through
+SQL databases, checks that every engine gives the same answer, and times
+them. Forward-looking, like every document under `specs/`; `STATUS.md`
+records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 62 and 66;
 `specs/design-hardening.md` section 7, which specifies `bench/run.sh`, the
@@ -54,6 +55,8 @@ publish.
 | Souffle | the reference high-performance Datalog engine, bottom-up and compiled | `souffle-interp`: the interpreter; `souffle`: the program compiled to C++; `souffle-magic`: compiled, with `--magic-transform=*` |
 | clingo | the most widely used answer-set system; for a stratified program its grounder is a complete bottom-up Datalog engine | the default solver, one thread |
 | Nemo | a modern in-memory Datalog engine built for large data | the default |
+| DuckDB | what a user who knows SQL reaches for instead: an in-process analytical database with recursive common table expressions | an in-memory database, one thread |
+| SQLite | the most widely deployed SQL database, whose shell comes with most systems | an in-memory database |
 
 Souffle appears three times because its modes answer different questions.
 The interpreter is the fair comparison with relic's interpreter; the compiled
@@ -68,8 +71,22 @@ adds for SQLite, zlib and ncurses input and output, and OpenMP, are left out:
 no workload uses them, and every run is single-threaded. Compile time is
 reported separately and is not part of the run time.
 
+**The SQL engines.** A recursive common table expression is SQL's Datalog:
+a rule set becomes one `WITH RECURSIVE` expression per recursive relation,
+its base rules and its recursive rule joined by `UNION`, which gives set
+semantics, and a stratified negation becomes `NOT EXISTS`. Each relation is
+a table the engine loads with its own bulk loader, and no index is created:
+the engines build what their joins need, SQLite an automatic index and
+DuckDB a hash table. The query is written as the final `SELECT`
+over the relation, its constants in its `WHERE` clause. Moving a constant
+into the expression's base case instead would be the Magic rewrite done by
+hand, which no Datalog engine here is given; that neither DuckDB nor SQLite
+pushes the constant into a recursive expression itself is a measurement of
+them.
+
 **One thread.** relic is single-threaded, so the primary numbers are too:
-Souffle runs with `-j1`, clingo with its default of one thread. An engine
+Souffle runs with `-j1`, clingo with its default of one thread, DuckDB with
+`SET threads = 1`; SQLite runs a query on one thread. An engine
 that parallelizes without a switch is reported as it is, and its user time
 beside its wall time shows the parallelism. Multi-threaded Souffle may be
 added as an extra column for context; it is never the comparison.
@@ -84,7 +101,9 @@ Engines that were considered and left out: DDlog (archived); Scryer and
 Trealla Prolog (tabling not mature enough to be a fair representative);
 XSB (the reference for tabling, but SWI-Prolog's tabling descends from it and
 is the one users have); embedded Rust engines such as Crepe and Ascent, which
-compile each program into a Rust binary and measure a different use.
+compile each program into a Rust binary and measure a different use; and
+PostgreSQL, whose recursive expressions are SQLite's and DuckDB's, behind a
+server the harness would have to run.
 
 ---
 
@@ -98,12 +117,22 @@ negation must be stratified, so those features are absent from every
 workload. A program that needs one of them is not translated around it for
 relic's benefit or anyone else's.
 
+The SQL engines are a baseline outside the rule. SQL allows a recursive
+expression only linear recursion, one reference to itself in its recursive
+part, and DuckDB and SQLite allow no recursion through another expression
+either, so the nonlinear closure and the points-to analyses cannot be
+written for them, and those workloads have no SQL program; the report shows
+`n/a`. DuckDB accepts
+a nonlinear expression but answers it incompletely, since each recursive
+reference sees only the rows the previous iteration added.
+
 Every workload is a data set, a set of rules, and one query. The query is
 either bound -- it names a constant, and a goal-directed engine may explore
 only what it reaches -- or free, when the whole relation is the answer. Both
 kinds are in the set, because they favour different designs: relic, Souffle
 with the magic transform and SWI-Prolog's tabling are goal-directed; Souffle,
-clingo and Nemo evaluate bottom-up by default.
+clingo and Nemo evaluate bottom-up by default, as DuckDB and SQLite evaluate
+a recursive expression.
 
 ### 4.2 Set A: the relic workloads
 
@@ -189,15 +218,17 @@ section 9.
 Each workload's rules are written by hand, once per engine, in that engine's
 own syntax, and kept beside each other in the workload's directory. A
 translator from one dialect to the others would be a second compiler to
-trust; five short programs are easier to read and to check against each other.
+trust; short programs are easier to read and to check against each other.
 relic's program ends with the query itself, as a relic user writes it. Every
 other program writes the query's answer, its columns the query's named
 variables in order of first occurrence -- the columns relic prints -- as its
 engine writes a result: SWI-Prolog's defines `answer/N`, which a shared driver
 prints; Souffle's, Nemo's and clingo's output a relation to the file
-`answer.csv`, `answer.tsv` or standard output. When the query is a whole
-relation, the bottom-up programs output that relation itself rather than
-copying it into a second one, which relic and SWI-Prolog would not pay for.
+`answer.csv`, `answer.tsv` or standard output; DuckDB's and SQLite's end with
+the query, whose rows the engine prints to standard output. When the query
+is a whole relation, the bottom-up programs output that relation itself
+rather than copying it into a second one, which relic and SWI-Prolog would
+not pay for.
 
 Each workload's directory also names its data set in a file, `dataset`, and
 the harness finds the workloads by looking for that file, so adding a
@@ -225,6 +256,8 @@ path its users take and the one its authors optimized:
 | relic | one source file of facts converted from the relation files |
 | SWI-Prolog | one source file of facts, consulted |
 | clingo | one source file of facts |
+| DuckDB | the relation files, through `COPY` |
+| SQLite | the relation files, through `.import` |
 
 relic has no bulk import, so it reads facts as source text. That is a real
 cost a relic user pays and the comparison shows it; the `facts-join` workload
@@ -254,6 +287,9 @@ then every other engine. Each is run twice over:
 Souffle's compiled modes are compiled before the verification run; the
 compilation is timed once and reported in its own column.
 
+An engine with no program for a workload, which only the SQL engines may
+lack, is reported `n/a` and not run.
+
 A failing engine is recorded and the harness continues with the next; it
 exits unsuccessfully at the end if any engine failed or disagreed, so a
 mismatch is never lost in a long table. An engine that runs out of time is
@@ -267,9 +303,10 @@ would otherwise leave the exit status unable to signal a mismatch.
 
 The verification run's output is normalized to rows of tab-separated
 columns -- relic's `-F tsv`, SWI-Prolog's rows as the driver prints them,
-Souffle's and Nemo's exported files, and clingo's atoms taken apart -- then
-sorted with duplicates removed, since every engine has set semantics but not
-every one prints a set in order. relic's normalized answer is the reference,
+Souffle's and Nemo's exported files, clingo's atoms taken apart, and the SQL
+engines' rows printed with tabs between columns -- then sorted with
+duplicates removed, since every engine has set semantics but not every one
+prints a set in order. relic's normalized answer is the reference,
 and every other engine's must equal it byte for byte. An engine that leaves
 no answer file has failed, not answered nothing.
 
@@ -338,7 +375,7 @@ bench/run.sh                 the relic-only instrument
 bench/compare/run.sh         this harness
 bench/compare/driver.pl      prints SWI-Prolog's answer relation
 bench/compare/<workload>/    dataset, relic.dl, swipl.pl, souffle.dl,
-                             clingo.lp, nemo.rls
+                             clingo.lp, nemo.rls, duckdb.sql, sqlite.sql
 bench/compare/results.txt    one recorded run
 bench/compare/cache/         downloaded data sets, not committed
 ```
@@ -351,9 +388,9 @@ bench/compare/run.sh [-e engines] [-o results.tsv] [-w workloads]
 covers every workload and every engine found. relic is required; any other
 engine that is not installed is skipped with a note. Each engine's command
 can be named by an environment variable -- `RELIC`, `SWIPL`, `SOUFFLE`,
-`CLINGO`, `NMO`, and `CXX` for Souffle's compiler -- and `BENCH_SCALE`,
-`BENCH_RUNS` and `BENCH_TIMEOUT` set the scale, the number of timed runs and
-the time limit.
+`CLINGO`, `NMO`, `DUCKDB`, `SQLITE`, and `CXX` for Souffle's compiler -- and
+`BENCH_SCALE`, `BENCH_RUNS` and `BENCH_TIMEOUT` set the scale, the number of
+timed runs and the time limit.
 
 relic must be a binary. In a build tree configured for shared libraries,
 `./relic` is libtool's wrapper script, whose start-up would be timed as
