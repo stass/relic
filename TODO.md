@@ -622,25 +622,16 @@ user pays for and gets nothing from. Decide whether the two checks can run
 on the draft, or canonicalize into scratch that a dropped rule releases.
 
 **Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
-component: `lib/relation.c`] D-4 forbids randomizing a hash seed, and
-`relic_hash_words()` mixes with compile-time constants, so a program author
-controls the order values are first mentioned, therefore each value's domain
-identifier, therefore every tuple hash exactly. Under linear probing a crafted
-fact file can drive a whole relation into one probe cluster, making each
-membership test linear and a load quadratic, with no diagnostic. `-l tuples`
-and `-l memory` bound space; nothing bounds the time this consumes, because
-`specs/architecture.md` section 63 defines no step or time limit.
-
-Randomizing is not the remedy: determinism is a product property that the
-golden suite and `-e` output depend on. The deterministic remedies are a step
-limit (`-l steps=N`) or a ceiling on probe-cluster length. S11 froze
-`relic_config_t` without a step limit, so adding one to the library is now an
-incompatible change and a new major version of the shared library; a ceiling
-on probe-cluster length needs no new field and is the cheaper of the two for
-that reason. Decide in S13; `relic.1` documents the four keys there are, and
-a ceiling would leave them unchanged where a step limit would add one. It
-matters for the embedded caller section 63 names: a host that accepts an
-untrusted program and trusts `-l` to protect it is not protected against this.
+component: `lib/util.c`] Every table hashes with compile-time constants, so
+a program author controls every hash and a crafted fact file, or a crafted
+set of symbols, drives a table into one probe cluster and makes a load
+quadratic inside every limit. Decided: the seed is drawn per context from
+`getentropy(2)` and passed explicitly to every hash, per D-19 and
+`specs/design-hash-seed.md`. Remaining work: thread the seed through the
+hash functions and the seven table owners, add the `configure` check and
+the `compat/` replacement, make `relic_create()` fail without entropy and
+say so in `<relic.h>`, and write the tests of the design's section 8, the
+flooding test first so that it fails against the constants.
 
 **csv and tsv carry raw control bytes.** [Low, component:
 `cmd/relic/output.c`] The text format writes a string as a quoted literal with

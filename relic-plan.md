@@ -125,11 +125,12 @@ measurement rather than an argument.
 
 ### D-4 Determinism
 
-Fixed compile-time hash seeds, never randomized. Identifiers assigned in
-first-appearance order. Relations iterate in insertion order. Planner ties
-break by source position. Magic predicate names derive from predicate and
-adornment, never a counter. No result and no `-e` output depends on a pointer
-value. The golden test suite depends on all of this.
+Identifiers assigned in first-appearance order. Relations iterate in
+insertion order. Planner ties break by source position. Magic predicate names
+derive from predicate and adornment, never a counter. No result and no `-e`
+output depends on a pointer value. The golden test suite depends on all of
+this. The hash seed was fixed at compile time under this decision until D-19
+made it random per context.
 
 ### D-5 Error model
 
@@ -274,6 +275,20 @@ through the same function an exhaustion does, with the limit's message. So a
 limit on memory bounds planning time, and no limit on body length is added.
 Reverses the part of D-6 that put every arena outside the limit. Specified in
 `specs/design-planning-cost.md`.
+
+### D-19 The hash seed is random per context
+
+Every hash table answers which identifier a key has and is never walked in
+slot order, so the seed decides where a key sits and how many probes find
+it, and no result, `-e` line, identifier, capacity or memory charge depends
+on it. A context draws a 64-bit seed from `getentropy(2)` when created and
+every table owner hashes with a copy of it; creation fails when there is no
+entropy rather than falling back to a constant. With a compile-time seed a
+program author could compute every hash and craft an input that drives a
+relation into one probe cluster, making its load quadratic inside every
+limit. No configuration field, limit or option is added. Reverses the first
+sentence of D-4; the rest of D-4 is what determinism rests on. Specified in
+`specs/design-hash-seed.md`.
 
 ---
 

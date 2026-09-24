@@ -364,8 +364,11 @@ value table, and that is the only correct way to compare two values.
 Identifier assignment must be reproducible, because the golden test suite
 compares output byte for byte across runs, machines and object formats.
 
-* **Hash seeds are compile-time constants.** No seed is randomized, derived
-  from an address, read from the clock or taken from the environment.
+* **The hash seed decides nothing that is reported.** A table is never
+  walked in slot order, so the seed decides where a key sits and how many
+  probes find it and nothing else; it is drawn at random once per context,
+  per `specs/design-hash-seed.md`, and no identifier, capacity or output
+  depends on it.
 * **Integers are hashed arithmetically, not by reinterpreting their bytes**,
   so a table on a big-endian machine probes in the same order as one on a
   little-endian machine.

@@ -288,8 +288,9 @@ columns, which is the price of not scanning.
 
 ## 9. Determinism
 
-* A key's hash folds its columns as words in ascending column order, with the
-  compile-time constants of `specs/design-memory.md`.
+* A key's hash folds its columns as words in ascending column order, with
+  the context's seed of `specs/design-hash-seed.md`, which decides nothing
+  a lookup reports.
 * Key identifiers are assigned in first-seen order and chains are in
   identifier order, so the order a lookup visits tuples depends only on the
   order they were inserted.

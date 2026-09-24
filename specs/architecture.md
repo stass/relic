@@ -1565,6 +1565,7 @@ getopt(3)
 err(3), errx(3), warn(3), warnx(3)
 reallocarray(3)
 strtonum(3)
+getentropy(2)
 bzero(3), bcopy(3), bcmp(3)
 ```
 
@@ -1598,6 +1599,7 @@ compat/
     strlcpy.c         compiled only where strlcpy(3) is missing
     strlcat.c         compiled only where strlcat(3) is missing
     strtonum.c        compiled only where strtonum(3) is missing
+    getentropy.c      compiled only where getentropy(2) is missing
 ```
 
 `queue.h` and `tree.h` are bundled rather than probed. They are header-only and
@@ -2054,8 +2056,6 @@ input.
 
 Specifically:
 
-* hash functions use fixed compile-time seeds; a seed is never randomized and
-  never derived from an address, the clock or the environment;
 * value and predicate identifiers are assigned in order of first appearance;
 * relations iterate in tuple insertion order;
 * the planner breaks cost ties by source position;
@@ -2066,6 +2066,14 @@ Specifically:
 Two runs over the same input therefore produce byte-identical `-e` output and
 byte-identical unsorted results. This is a testability property, not a
 convenience: the golden test suite depends on it.
+
+The hash seed is not among these properties. Every hash table answers which
+identifier a key has and is never walked in slot order, so the seed decides
+where a key sits and how many probes find it and nothing that any interface
+reports. It is therefore drawn at random once per context, which is what
+stops a program author from crafting an input that drives a table into one
+probe cluster; `specs/design-hash-seed.md` specifies the seed, its source
+and why the promise above survives it.
 
 `-s` sorts rows lexicographically by column, for scripts that must not depend
 on that guarantee. Because a column may hold more than one type, sorting uses a
@@ -2843,6 +2851,14 @@ query answered from the whole program. Adornments are finite but can be
 exponential in the arity, and an optimization must neither decide whether a
 query is answered nor generate a program unboundedly larger than the one it
 specializes.
+
+**Determinism, section 61.** The hash seed is drawn at random once per
+context rather than fixed at compile time. No result, `-e` line, identifier,
+capacity or memory charge depends on it, so the byte-identical promise stands
+on the remaining properties, and a program author can no longer craft an
+input that drives a table into one probe cluster. `getentropy(2)` joins the
+BSD interfaces of section 45 and the portability layer of section 46.
+Specified in `specs/design-hash-seed.md`.
 
 **Source layout, section 64.** `lib/explain.c` renders plans as text, and
 relation statistics live with the tuple store in `lib/relation.c`.

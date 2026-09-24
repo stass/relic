@@ -375,8 +375,9 @@ The relation store contributes three things to the reproducibility of a run:
 
 * **tuple identifiers are assigned in insertion order**, and iteration is by
   identifier, so no result is ordered by a hash;
-* **the tuple hash has compile-time constants and folds 32-bit words**, so the
-  probe order is the same on every platform and in every run;
+* **the tuple hash folds 32-bit words**, so for one seed the probe order is
+  the same on every platform; the seed itself is drawn per context, per
+  `specs/design-hash-seed.md`, and decides nothing the relation reports;
 * **nothing is keyed on an address**, and a relation's contents do not depend
   on how many times its arrays have grown.
 
