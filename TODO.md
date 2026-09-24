@@ -702,6 +702,15 @@ Choose a rule that keeps a real share of the project done -- a higher
 chance, or dependencies drawn mostly from recent tasks -- and record the
 counters again.
 
+**An interrupted comparison leaves the engine it was timing running.**
+[Low, component: `bench/compare/run.sh`] On SIGTERM or SIGINT the harness
+exits and removes its work directory, but `hyperfine` and the engine under
+it, or the `timeout` of a verification run, are not signalled; an engine
+past its data keeps running, orphaned, until it finishes on its own. Stop
+the children the harness started without signalling a process group it
+does not own, which `kill 0` would when the harness runs without job
+control.
+
 **Published numbers need a second platform.** [Low, component:
 `bench/compare/`] Section 8's criteria include a machine of a different
 operating system and processor; every run so far is one macOS Xeon.
