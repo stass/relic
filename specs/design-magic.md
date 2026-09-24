@@ -22,8 +22,9 @@ decisions D-4, D-7, D-8 and D-12.
   called, and which adornments have no magic predicate;
 * the order in which bindings flow through a rule body, and why it is the
   planner's;
-* the rules the rewrite generates, the seed among them, and the rewritten
-  query;
+* the rules the rewrite generates, the seed among them, the supplementary
+  predicates that carry a prefix from one call to the next, and the
+  rewritten query;
 * why the rewrite terminates, and how duplicate rules are recognized;
 * the limits on what the rewrite generates, and what their diagnostics say;
 * how the rewritten program is evaluated, what it does to the relations the
@@ -133,8 +134,13 @@ so they collide with nothing a program writes:
 | --- | --- | --- |
 | `path/2` called with its first argument bound | `path$bf` | 2 |
 | the demand for it: the bound arguments asked about | `magic$path$bf` | 1 |
+| the prefix before the second demand call of the second rule deriving `path$bf` (section 6) | `sup$path$bf$1$2` | its live variables |
 
-A predicate of arity zero is adorned as `p$`.
+A predicate of arity zero is adorned as `p$`. A supplementary predicate is
+named by the adorned predicate, the position of its rule among the rules
+deriving that predicate, counted from 0 in program order, and the position
+of the demand call it precedes among the rule's demand calls, counted from
+1 in body order; one generated from the query's rule is named after `$q0`.
 
 **An adornment with no bound column has no magic predicate.** A magic relation
 records which bound values were asked about, and with nothing bound there is
@@ -192,21 +198,64 @@ written one, which makes the textual rewrite available as a reference too.
 ## 6. The generated rules
 
 Take a predicate *p* adorned with *α*, and a rule deriving *p*, its body
-ordered for *α* as section 5 describes. The rewrite generates:
+ordered for *α* as section 5 describes. Call a body literal a **demand
+call** when it is a positive literal over a predicate read on demand whose
+adornment *β* binds at least one column. The rewrite walks the body in that
+order keeping a **prefix**, the literals evaluated so far as the generated
+rules will write them. The prefix starts as the guard `magic$p$α(...)` over
+the head's bound arguments, or empty when *α* binds no column. Each positive
+literal over a predicate read on demand is appended renamed to the adorned
+predicate for its own adornment; literals over complete predicates, negated
+literals and comparisons are appended as they are. The rewrite generates:
 
-* **the adorned rule**: the rule with *p* renamed `p$α`, the guard
-  `magic$p$α(...)` over the head's bound arguments placed first, and every
-  positive literal over a predicate read on demand renamed to the adorned
-  predicate for its own adornment. Literals over complete predicates,
-  negated literals and comparisons are kept as they are. The body is written
-  in the section 5 order, guard first. With no bound column in *α* there is
-  no guard;
-* **one magic rule per positive literal over a predicate read on demand**,
-  whose adornment *β* binds at least one column: its head is
-  `magic$q$β(...)` over the literal's bound arguments, and its body is the
-  guard followed by every literal placed before it in the order. The magic
-  rule says: whenever the rule is called with these bound values, and the
-  literals before this one hold, this literal is called with these.
+* **one magic rule per demand call**: its head is `magic$q$β(...)` over the
+  call's bound arguments and its body is the prefix. The magic rule says:
+  whenever the rule is called with these bound values, and the literals
+  before this one hold, this literal is called with these;
+* **one supplementary rule before every demand call after the first**: the
+  prefix is not written out again but derived once, into a **supplementary
+  predicate** whose columns are the prefix's *live* variables -- those it
+  binds that occur in the call, in a literal after it, or in the head -- by
+  the one rule whose body is the prefix. From there the prefix is that one
+  literal: the call's magic rule, every later rule and the adorned rule read
+  the prefix through it;
+* **the adorned rule**: the rule with *p* renamed `p$α` and the prefix after
+  the last literal as its body.
+
+A rule with one demand call, which most rules have, generates exactly what
+the plain construction does: the prefix before the call is written into its
+magic rule and again into the adorned rule, and no supplementary predicate
+exists. A rule with *k* demand calls over *n* literals generates bodies
+holding about *n* + 2*k* literals rather than the sum of the prefixes, about
+*nk*/2, and the prefix through a call is evaluated once rather than once per
+later call and again for the adorned rule. The cost is one relation per
+supplementary predicate, holding the prefix's live bindings. For
+
+```prolog
+p(X, Z) :- p(X, Y), p(Y, Z).
+```
+
+as the second rule deriving *p*, adorned `bf`, the rewrite generates
+
+```prolog
+sup$p$bf$1$2(X, Y) :- magic$p$bf(X), p$bf(X, Y).
+magic$p$bf(Y) :- sup$p$bf$1$2(X, Y).
+p$bf(X, Z) :- sup$p$bf$1$2(X, Y), p$bf(Y, Z).
+```
+
+after dropping the first call's magic rule, `magic$p$bf(X) :- magic$p$bf(X)`,
+per section 7; the supplementary relation holds the tuples of `p$bf`, so this
+rule's memory doubles. The trade is made uniformly: a threshold on where to
+cut would be a knob whose right value depends on the data, and what a
+supplementary relation holds is counted by the tuple and memory limits as
+every relation is.
+
+A supplementary predicate is a predicate, of at most 32 columns per D-7,
+while a rule has up to 64 variables. A cut whose live variables do not fit
+is not made: the prefix continues through that call, written out in full in
+the call's magic rule, to the next call where they fit or to the adorned
+rule. Such a body is bounded as the plain construction is, by the literal
+budget of section 8.
 
 A fact of a predicate read on demand is a rule with an empty body, and is
 rewritten like one: `path(a, b).` adorned `bf` becomes
@@ -246,7 +295,8 @@ and it gives each rule a canonical form, which is what section 7 compares.
 
 Every generated rule is safe by construction. A magic rule's head reads only
 columns its adornment calls bound, which the guard or a literal before it
-binds, and a test is placed only where its slots are bound. An adorned rule
+binds; a supplementary rule's head reads only variables its prefix binds; and
+a test is placed only where its slots are bound. An adorned rule
 reads the variables its source rule did, through the same positive literals.
 
 ---
@@ -276,7 +326,11 @@ both give `magic$q$b(X) :- magic$p$b(X), a(X).` after renumbering. A
 generated rule is compared structurally with those already generated, through
 a hash table over their canonical forms, and a duplicate is not appended.
 Renumbering is what makes a plain structural comparison enough: two rules
-equal up to renaming have equal canonical forms.
+equal up to renaming have equal canonical forms. Supplementary predicates are
+named by their rule and call, so two source rules sharing a prefix beyond
+their first demand call generate distinct supplementary rules, and only their
+first magic rules are found equal. Sharing further would name a supplementary
+predicate by its content, and what it would save is linear in what is kept.
 
 **A rule whose head is one of its own positive literals is dropped.** It can
 only derive a tuple that the relation already holds. It arises naturally:
@@ -306,9 +360,15 @@ relic: limit exceeded: magic-rules=1000 while adorning path/2
 ```
 
 A generated rule is attributed to the source predicate its head belongs to:
-an adorned rule to the predicate adorned, and a magic rule to the predicate
-whose demand it records, so a seed is attributed to the predicate the query
-calls. Exceeding a limit fails the query as any limit does: no rows, and a
+an adorned rule and a supplementary rule to the predicate adorned, and a
+magic rule to the predicate whose demand it records, so a seed is attributed
+to the predicate the query calls. Supplementary predicates are not counted
+by the predicate limit or its budget: each has exactly one rule, which the
+rule limit and the literal budget count, so bounding rules bounds them, and
+the predicate limit bounds adornments, of which the arity admits 2^n.
+Counting them would abandon, against a budget of a few hundred predicates,
+the rewrite of a body of hundreds of calls that the construction of section
+6 exists to keep small. Exceeding a limit fails the query as any limit does: no rows, and a
 nonzero exit.
 
 **A limit left unset is a budget.** Finite is not small: a program whose
@@ -332,18 +392,15 @@ literals of those rules' bodies. All are fixed for a given program, so the
 budget is the same on every run. The literal budget has no configurable
 limit behind it and applies whether or not the other two are configured: it
 is not a knob but the invariant that the rewrite is a constant multiple of
-the program, which the rule budget alone cannot hold, because a magic rule's
-body is the prefix before its call and a body of many calls generates
-prefixes whose total is the square of its length
+the program, which the rule budget alone cannot hold, because a rule is
+copied whole once per adornment and a program of few long rules called with
+many patterns generates few rules holding many literals
 (`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
 specializes the program -- a handful of adornments per predicate, each with
 its rules and magic rules -- and the floor admits every rewrite of a small
 program outright; what it refuses is a rewrite that multiplies the program.
-The budgets count rules, so they bound the rewritten program's size only as
-far as a rule's length is bounded: each adornment copies every rule of its
-predicate whole, and generates a magic rule per demand call whose body is
-the prefix before it. What that costs, and the memory limit that bounds it,
-is `specs/design-planning-cost.md`.
+What a rewrite within its budgets costs to order and to hold, and the memory
+limit that bounds it, is `specs/design-planning-cost.md`.
 
 Outgrowing a budget abandons the rewrite. A warning names the budget and the
 predicate being adorned, and the query is then answered from the whole
@@ -404,9 +461,12 @@ that ends a span of the append-only store.
 
 ### 9.3 Why the answers are right
 
-**Sound.** Every generated rule is a source rule with literals renamed and,
-for an adorned rule, a guard added; or a magic rule, whose head no answer
-reads except through a guard. By induction on derivations, every tuple of
+**Sound.** Unfolding every supplementary literal into the body of its rule
+gives the rules the plain construction generates, because a supplementary
+predicate carries every variable of its prefix that the rest of the rule
+reads; so the argument is made for those. Every generated rule is then a
+source rule with literals renamed and, for an adorned rule, a guard added;
+or a magic rule, whose head no answer reads except through a guard. By induction on derivations, every tuple of
 `p$α` is a tuple of *p* in the program's least model: a guard only restricts,
 an adorned literal holds a subset of its predicate by induction, and a
 complete literal, negated or not, reads the relation full materialization
@@ -422,7 +482,9 @@ fires -- its guard holds by assumption, and every literal before it holds:
 complete ones and tests because the least model agrees, adorned ones by the
 induction hypothesis, their derivations being shorter and their own demand
 established earlier in the walk. So `magic$q$β` holds the bound part of that
-literal's tuple, and by the hypothesis the adorned literal holds too. Every
+literal's tuple, and by the hypothesis the adorned literal holds too; each
+supplementary rule on the way fires for the same reason, so the prefix it
+stands for holds through it. Every
 literal of the adorned rule then holds, and it derives `p$α(t)`. Applied to the
 query, whose rewrite has no guard, this gives every answer.
 
@@ -482,6 +544,9 @@ query $q0(X) :- path$bf(a, X).
   gap is what shows that it was not evaluated.
 * `adorn` names the source predicate and the adornment; the adorned and magic
   names follow from them by section 4.
+* A supplementary predicate is not listed under `adorn`: it belongs to the
+  rule that generated it, and appears in that rule's component with the
+  rules that read it.
 * `seed` shows each rule the query's body generated, fact or not. Facts in a
   component are counted, as everywhere, and a seed that is a fact would
   otherwise be visible only as a count.
@@ -504,9 +569,9 @@ rewritten program. Symbol and predicate entries for generated names belong to
 the context, as every interned entry does.
 
 The rewrite's arena is charged to `max_memory`, per
-`specs/design-planning-cost.md` section 6: the budgets of section 8 count
-rules, and a rewrite's size in literals is the square of a body's length,
-which no budget bounds. The growable tables beside the arena are linear in
+`specs/design-planning-cost.md` section 6: the budgets of section 8 bound
+the rewrite's size in literals to a multiple of the program's, and the
+memory limit bounds what that multiple costs. The growable tables beside the arena are linear in
 the rules the budget admits and are not charged.
 
 ---
@@ -517,10 +582,12 @@ the rules the budget admits and are not charged.
   program and the query, and evaluated in schedule order.
 * Adornments are recorded in the order they are first asked for, and
   processed in that order; rules are generated in program order and, within
-  a rule, its magic rules in body order and then the adorned rule.
+  a rule, its magic and supplementary rules in body order and then the
+  adorned rule.
 * The order within a body is the planner's, which is deterministic per
   `specs/design-planner.md` section 9.
-* Names derive from the predicate and the adornment.
+* Names derive from the predicate and the adornment, and for a
+  supplementary predicate from the positions of its rule and its call.
 * Duplicates are found by comparison, not by address.
 
 So the same program and query give the same generated rules in the same order,
@@ -535,9 +602,11 @@ the same schedule, and byte-identical `-e` output.
   refinements of magic sets for stratified negation, which are correct only
   under conditions that are not obvious on first reading.
 * **Adorning extensional predicates.** Section 3.
-* **Supplementary magic predicates.** They save recomputing a shared prefix
-  between an adorned rule and its magic rules at the cost of another relation
-  per literal; the prefixes here are short, and a measurement should come
-  first.
+* **A supplementary predicate before the first demand call.** The classic
+  construction cuts there too, which would materialize a relation for every
+  adorned rule, `path :- edge, path` included, to save repeating a prefix
+  that is usually one literal.
+* **A threshold on cutting.** Section 6.
+* **Naming supplementary predicates by content.** Section 7.
 * **Relations kept across queries.** Section 9.2.
 * **A rewrite of a program already materialized.** Section 2.

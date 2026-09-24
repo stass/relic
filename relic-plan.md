@@ -1249,3 +1249,20 @@ design, security and readability, `make check` plus `make check-asan` and
 
 The architecture document is not updated at the end of a stage. It is updated
 when a decision in it changes.
+
+### D-20 Magic prefixes are derived, not repeated
+
+A magic rule's body is the prefix before its call. Written out for every
+call, a body of L demand calls holds the square of L in literals and, when
+recursive, the cube in plan operations, and the budgets on rules and
+predicates do not notice. The rewrite cuts the prefix before every demand
+call after the first into a supplementary predicate over its live variables,
+so generated bodies are linear in L, and a rule with one demand call
+generates exactly what it did. The cost is a relation per cut, accepted
+uniformly rather than behind a threshold. Supplementary predicates are
+bounded by the rule budget, one rule each, and not counted by the predicate
+limit. A third budget, on generated literals, bounds what remains -- a rule
+copied whole once per adornment -- with no limit behind it. Reverses the
+part of `specs/design-magic.md` section 13 that left supplementary
+predicates out pending a measurement; the measurement is in `TODO.md`.
+Specified in `specs/design-magic.md` sections 6 and 8.

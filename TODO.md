@@ -608,7 +608,17 @@ passes (`tests/perf.sh`). When `max_memory` is set, the rewrite arena is
 charged to it and the R x L is refused with the limit's message (D-18);
 under the default configuration nothing bounds it until the literal budget
 of `specs/design-magic.md` section 8, which is designed and not
-implemented.
+implemented. Counted in `publish_rule()` after the duplicate and
+derives-nothing checks, against 256 + 16 x the sum of the program's body
+lengths, computed once per rewrite. Write first a test in the shape of
+`tests/lang/magic-budget.dl` whose rules are padded to about 20 literals,
+so the literal budget fires at the 17th adornment before the rule budget
+would at the 46th, and whose expected warning names generated literals.
+The budget refuses the `tests/perf.sh` patterns workload -- 125 copies of
+an 8000-literal body against a budget of about 134 000 literals -- which
+the test asserts is answered through its rewrite, and its memory-limited
+run expects a refusal while rewriting: retune it to 16 patterns, which fit,
+and re-derive the memory limit for the run that must be refused.
 
 **Magic rules repeat the prefix before each demand call, cubic in a body's
 calls.** [High, component: `lib/magic.c`] `record_call()` generates one magic
@@ -617,22 +627,32 @@ before the call, so a body of L such calls generates L rules holding about
 L^2/2 literals; in a recursive component each gets its own delta variants,
 about L^3/3 operations in all.
 `e(i, i+1) x200. p(X) :- e(X, Y). r(X) :- p(X), ..., p(X). r(1)?` with L =
-400 is 4.8 KB of text and takes 37 s and 1.77 GB to answer, against 0.03 s
+400 is 4.8 KB of text and takes 2.4 s and 1.69 GB to answer, against 0.03 s
 and about 1 MB under `-X no-magic`; L = 100 gives 102 rules, 4951 delta
 variants and 333 402 `member` operations. No budget fires: the budgets
 count rules, and the 200 facts raise the rule budget to 3488, so the 400
 generated rules are within it (without the facts L above about 250 is
 abandoned). With `max_memory` set, the rewrite arena and the evaluation
 arena are charged to it (D-18) and the run is refused with the limit's
-message; under the default configuration the literal budget of
-`specs/design-magic.md` section 8, which abandons a rewrite whose generated
-literals exceed 256 + 16 x the program's, closes it, and is designed and not
-implemented. The fix that removes
-the square is the supplementary construction: derive each prefix from the
-one before it through an intermediate predicate, so the generated bodies are
-linear in L. That is a change to `specs/design-magic.md`, to be designed
-before it is built. If it is not adopted, a structural body-length limit is
-the fallback (`specs/design-planning-cost.md` section 10).
+message. The fix is the supplementary construction of
+`specs/design-magic.md` section 6, designed and not implemented: a cut
+before every demand call after the first, into a supplementary predicate
+over the prefix's live variables, so the generated bodies are linear in L
+and a rule with one demand call generates what it generates today. In
+`rewrite_body()` the cut goes before `record_call()`: compute the live
+mask from a suffix-usage array over the ordered body, skip the cut when it
+exceeds RELIC_MAX_ARITY, intern `sup$<adorned>$<rule>$<call>`, publish its
+rule through the draft path, and reset the scratch body to that one
+literal. Supplementary predicates are not counted by the predicate limit.
+Write first: a `tests/perf.sh` workload running the L = 400 program under
+`-l memory=16777216`, which fails today at 1.69 GB; a `-e` language test
+over a rule with three demand calls showing its two supplementary rules,
+and the same shape without `-e` so `tests/equiv/strategies.sh` compares it
+across strategies; a `triple` shape in `test_magic.c`'s equivalence
+programs; and a unit test that generated rules and literals grow linearly
+in L. Measure the same-generation and double-recursion workloads before
+committing, since a two-call rule's supplementary relation holds as many
+tuples as its adorned predicate.
 
 **A dropped magic rule's prefix stays in the rewrite arena.** [Medium,
 component: `lib/magic.c`] `publish_rule()` canonicalizes a draft, which

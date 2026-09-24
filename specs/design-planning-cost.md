@@ -62,31 +62,30 @@ product of these factors.
 
 4. **Magic prefixes.** For each call in a rewritten body that reads a
    predicate on demand, the rewrite generates a magic rule whose body is the
-   literals before the call. A body of *L* such calls generates *L* rules
-   holding about *L* squared over 2 literals between them, and when those
-   rules are recursive in the rewritten program each gets its own delta
-   variants, about *L* cubed over 3 operations in all. A rule of four
-   hundred calls on one demanded predicate, under five kilobytes of text,
-   takes tens of seconds and over a gigabyte to answer, and the budgets of
-   `specs/design-magic.md` section 8 do not notice, because they count rules
-   and predicates and the program's facts raise the rule budget.
+   prefix before the call. Written out in full for every call, the plain
+   construction, a body of *L* such calls generates *L* rules holding about
+   *L* squared over 2 literals between them, and when those rules are
+   recursive in the rewritten program each gets its own delta variants,
+   about *L* cubed over 3 operations in all. A rule of four hundred calls on
+   one demanded predicate, under five kilobytes of text, takes seconds and
+   over a gigabyte to answer, and the budgets on rules and predicates do not
+   notice, because the program's facts raise the rule budget. The
+   supplementary construction of `specs/design-magic.md` section 6 derives
+   each prefix from the one before it, so the generated bodies are linear in
+   *L*.
 
 The second and third factors are inherent: semi-naive evaluation needs a
 variant per occurrence, and an adornment needs a copy per pattern, and each
 plan or copy is output the evaluation goes on to use. The first is not. It
 comes from recomputing, at every step, answers that the step before already
-had. The fourth is inherent to the form of magic rule the rewrite generates
-and not to the rewrite: a rule per call whose body repeats the prefix is the
-plain construction, and the supplementary construction, which derives each
-prefix from the one before it through an intermediate predicate, makes the
-generated bodies linear in *L*. That change belongs to
-`specs/design-magic.md`, and `TODO.md` records it. Until then the rewrite
-holds D-7's invariant, that it generates no more than a constant multiple of
-the program, by budgeting the literals it generates as it budgets the rules,
-per `specs/design-magic.md` section 8: a rewrite whose prefixes multiply the
-program is abandoned with the usual warning and the query answered from the
-whole program. This document bounds what the budget admits the way it bounds
-the other factors, by charging what it holds.
+had. The fourth is removed by the supplementary construction, and what remains
+of the rewrite's size is the third: a rule copied whole once per adornment.
+The rewrite holds D-7's invariant, that it generates no more than a constant
+multiple of the program, by budgeting the literals it generates as it
+budgets the rules, per `specs/design-magic.md` section 8: a rewrite whose
+adornments multiply the program is abandoned with the usual warning and the
+query answered from the whole program. This document bounds what the budget
+admits the way it bounds the other factors, by charging what it holds.
 
 Multiplied out, a rule of a thousand identical recursive literals -- six
 kilobytes of text -- takes seconds to plan and tens of megabytes to hold, and
@@ -387,9 +386,7 @@ set such a limit expect the planning message of section 7.
   its plans hold, and section 6 bounds that when the user bounds memory; a
   structural limit like the arity and variable limits of D-7 would buy no
   representation and would be a restriction that a generated program can
-  meet. It remains the fallback if the supplementary construction of
-  section 2 is not adopted and the plain construction's cube is judged not
-  worth charging for.
+  meet.
 * **A default budget on plans.** The Magic budgets of D-7 exist because the
   rewrite is optional and has a fallback, and the literal budget of section
   2 is that mechanism applied to the prefixes. A rule's plans and its delta
