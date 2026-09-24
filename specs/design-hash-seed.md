@@ -40,10 +40,11 @@ It adds no configuration field, no limit and no command-line option.
 
 Every table in the engine is the open-addressing identifier table of
 `specs/design-memory.md` section 6, probed linearly from the slot the low
-bits of a key's hash select. Seven owners build on it: the symbol table over
+bits of a key's hash select. Eight tables build on it: the symbol table over
 byte strings, the value table over typed values, the predicate table, the
 canonical full-tuple index of every relation, the secondary index of every
-relation, and the adornment and rule tables of the Magic rewrite. Linear
+relation, the scratch table that counts a column's distinct values for the
+planner, and the adornment and rule tables of the Magic rewrite. Linear
 probing is fast because clusters are short, and clusters are short because
 hashes are spread. A hash the author of the input can compute lets the author
 choose keys whose hashes share their low bits, and every key so chosen
@@ -122,7 +123,7 @@ uint32_t relic_hash_int64(uint64_t seed, int64_t value);
 
 The seed is explicit rather than reached through a context pointer for
 three reasons. The identifier table and the hash functions stay free of the
-context, as they are today, so the unit tests keep exercising them alone.
+context, so the unit tests exercise them alone.
 Every call site that forgets the seed fails to compile, which is the wide
 and shallow kind of change the working agreement prefers over a narrow and
 clever one. And `specs/design-memory.md` section 10 forbids the alternative
@@ -131,10 +132,12 @@ once, fails `tests/globals.sh`, and two contexts sharing a seed would let an
 input crafted against one flood the other.
 
 The owners are the symbol table, the value table, the predicate table, each
-relation with its canonical index, each secondary index, and the Magic
-rewrite's two tables. Each already reaches its keys through an owner pointer
-in its rehash callback; the seed sits beside the table in the same
-structure.
+relation, and the Magic rewrite. Each already reaches its keys through an
+owner pointer in its rehash callback, and the seed sits in the same
+structure. A relation's seed keys every table over its tuples: its canonical
+index, each of its secondary indexes, and the scratch table that counts a
+column's distinct values. Each operation on those already takes the
+relation, so none of them holds a copy of its own.
 
 A caller cannot set the seed. There is nothing a caller could want from a
 chosen seed that a random one does not give: results do not depend on it,
@@ -159,17 +162,44 @@ hash     = finalize(state ^ high 32 bits of seed)
 
 The two halves enter at different points so that the fold and the finalizer
 are each keyed. An empty sequence hashes the seeded state, which is an
-ordinary key and not a special case, as before. Integers still fold as two
-32-bit halves extracted by shifting, so a table probes in the same order on
-a big-endian machine as on a little-endian one for the same seed.
+ordinary key and not a special case. A word hashes as the sequence of that
+one word.
+
+An integer is split into two 32-bit halves by shifting, so a table probes in
+the same order on a big-endian machine as on a little-endian one for the
+same seed, and hashes as `hash_word(low ^ hash_word(high))` rather than as
+the sequence of its halves. The fold has one difference that survives every
+seed: flipping bit 31 of a word adds 2^31 to the state, multiplying by an odd
+prime keeps that difference in bit 31 alone, and a flip of bit 31 in a later
+word cancels it. So `v` and `v ^ 0x8000000080000000` would collide under
+every seed if folded as a sequence. Finalizing the high half first spreads
+its flip across the word by an amount that depends on the seed. No other
+key needs this, because no other key has two words that can both reach bit
+31. Tuple and index keys are domain identifiers, which reach it only after
+two billion values are interned. An adornment's key ends in a column mask
+that can, but a difference in the last word has no later word to cancel it.
+The rule table's hash finalizes after every word.
 
 The defence is the secret, not the mixer. relic runs offline over a file
 or a caller's buffers and offers no oracle: no interface reports a probe
 count, a slot or a hash, and timing is not returned to whoever wrote the
 input. An author who cannot learn the seed cannot compute the hashes, and
-cannot choose keys that collide under a seed drawn from a space of 2^64. A
-keyed hash of cryptographic strength would buy nothing here and would cost
-every tuple hash on the hot path of evaluation, so FNV stays.
+no reachable pair of keys collides under every seed. Pairs that collide
+under a fraction of seeds do exist: `[a, b]` and `[a ^ 0x100, b ^ 0x19300]`
+collide under about one seed in thirty, because 256 times the FNV prime is
+0x19300 modulo 2^32. They do not compose into a flood. Each such pair spends
+two columns, a tuple has at most thirty-two, and the keys that collide with
+one another under a given seed stay a handful while a crafted cluster would
+need thousands. A keyed hash of cryptographic strength would remove these
+pairs, buy nothing more, and cost every tuple hash on the hot path of
+evaluation, so FNV stays.
+
+No context holds a seed of zero. A draw of zero is drawn again, and a
+second zero fails creation, since a source that returns zero twice is
+handing out nothing but zeros. That makes
+zero the mark of a table owner that was never given its context's seed, and
+the hash functions assert that they are not given it, which checks every
+owner wherever it hashes.
 
 ---
 
@@ -183,9 +213,11 @@ platform lacks it, `configure` selects a replacement from `compat/` that
 reads `/dev/urandom`, under the rule of section 46 that no engine source
 contains a platform test.
 
-`getentropy(2)` fails only when the system has no random device to offer,
-which happens in a sandbox built without one. Then `relic_create()` returns
-`NULL`, as it does when the context cannot be allocated. A context that fell
+`getentropy(2)` fails only when the system has no random source to offer
+the process: a sandbox built without a random device, or on Linux a kernel
+older than 3.17 or a seccomp filter that denies `getrandom(2)`, which glibc
+and musl implement it with. Then `relic_create()` returns `NULL`, as it
+does when the context cannot be allocated. A context that fell
 back to a fixed seed would be the vulnerability with a false assurance
 attached, and a library never aborts, per D-6; failing creation is the one
 remaining honest outcome. The failure is not reported through the diagnostic

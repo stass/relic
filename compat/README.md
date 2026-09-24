@@ -2,12 +2,13 @@
 
 Two kinds of file live here, and they are governed by different rules.
 
-**Replacements.** `reallocarray.c`, `strlcat.c`, `strlcpy.c` and
-`strtonum.c` are relic-owned implementations of BSD interfaces that some
-platforms lack. `configure` compiles one only where the C library does not
-provide the interface, through `AC_REPLACE_FUNCS`, so engine sources call
-each interface unconditionally and no source outside this directory contains a
-platform test. `compat.h` declares whichever ones this platform needs.
+**Replacements.** `getentropy.c`, `reallocarray.c`, `strlcat.c`,
+`strlcpy.c` and `strtonum.c` are relic-owned implementations of BSD
+interfaces that some platforms lack. `configure` compiles one only where the
+C library does not provide the interface, through `AC_REPLACE_FUNCS`, so
+engine sources call each interface unconditionally and no source outside
+this directory contains a platform test. `compat.h` declares whichever ones
+this platform needs.
 
 **Bundled upstream headers.** `queue.h` is a copy of an upstream file, not
 relic's work. It is bundled rather than probed because the macro set of a

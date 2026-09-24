@@ -58,7 +58,8 @@ static uint32_t		 find_key(const relic_index_t *index,
 			    uint32_t hash);
 static uint16_t		 gather_key(const relic_index_t *index,
 			    const relic_dom_t *tuple, relic_dom_t *key);
-static uint32_t		 key_hash(const relic_dom_t *key, uint16_t length);
+static uint32_t		 key_hash(const relic_relation_t *relation,
+			    const relic_dom_t *key, uint16_t length);
 static bool		 key_matches(const relic_index_t *index,
 			    const relic_relation_t *relation, uint32_t key_id,
 			    const relic_dom_t *key, uint16_t length);
@@ -113,10 +114,15 @@ gather_key(const relic_index_t *index, const relic_dom_t *tuple,
 	return (length);
 }
 
+/*
+ * The hash of a key's values, keyed by the seed of the relation the index
+ * belongs to.
+ */
 static uint32_t
-key_hash(const relic_dom_t *key, uint16_t length)
+key_hash(const relic_relation_t *relation, const relic_dom_t *key,
+    uint16_t length)
 {
-	return (relic_hash_words(key, length));
+	return (relic_hash_words(relation->hash_seed, key, length));
 }
 
 /*
@@ -160,7 +166,7 @@ key_rehash(uint32_t key_id, void *ctx)
 	    rehash->index->entries[key_id - 1].first);
 	length = gather_key(rehash->index, tuple, key);
 
-	return (key_hash(key, length));
+	return (key_hash(rehash->relation, key, length));
 }
 
 /*
@@ -287,7 +293,7 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	uint16_t length;
 
 	length = gather_key(index, relic_relation_tuple(relation, id), key);
-	hash = key_hash(key, length);
+	hash = key_hash(relation, key, length);
 	index->next[id - 1] = RELIC_ID_NONE;
 
 	key_id = find_key(index, relation, key, length, hash);
@@ -326,7 +332,8 @@ relic_index_first(const relic_index_t *index, const relic_relation_t *relation,
 	uint16_t length;
 
 	length = gather_key(index, probe, key);
-	key_id = find_key(index, relation, key, length, key_hash(key, length));
+	key_id = find_key(index, relation, key, length,
+	    key_hash(relation, key, length));
 	if (key_id == RELIC_ID_NONE)
 		return (RELIC_ID_NONE);
 

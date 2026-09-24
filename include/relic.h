@@ -203,9 +203,11 @@ struct relic_config {
 #define	RELIC_F_NOTE_MIXED	0x0010u
 
 /*
- * Create a context.  Returns NULL when memory is exhausted; there is no
- * other way for it to fail, so no diagnostic callback can be installed yet
- * and none is needed.
+ * Create a context.  Returns NULL when memory is exhausted or when
+ * getentropy(2) cannot supply the random bytes the context keys its hash
+ * tables with, as in a sandbox with no random device.  There is no other way
+ * for it to fail, and no context yet to report through, so neither failure
+ * is reported to a diagnostic callback.
  *
  * relic_create() is relic_create_config() with every limit at its default.
  * relic_destroy() releases everything the context owns and accepts NULL.

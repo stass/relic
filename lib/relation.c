@@ -80,7 +80,8 @@ static relic_dom_t *tuple_at(const relic_relation_t *relation,
 		    relic_tuple_id_t id);
 static bool	 tuple_equal(const relic_dom_t *left, const relic_dom_t *right,
 		    uint16_t arity);
-static uint32_t	 tuple_hash(const relic_dom_t *columns, uint16_t arity);
+static uint32_t	 tuple_hash(const relic_relation_t *relation,
+		    const relic_dom_t *columns);
 static uint32_t	 tuple_rehash(uint32_t id, void *ctx);
 
 void
@@ -136,6 +137,7 @@ relic_relation_create(relic_t *ctx, relic_pred_id_t pred, size_t serial,
 	}
 
 	relic_idtab_init(&relation->index);
+	relation->hash_seed = ctx->hash_seed;
 	relation->pred = pred;
 	relation->serial = serial;
 	relation->arity = arity;
@@ -210,9 +212,10 @@ tuple_at(const relic_relation_t *relation, relic_tuple_id_t id)
  * arity zero use this path like any other.
  */
 static uint32_t
-tuple_hash(const relic_dom_t *columns, uint16_t arity)
+tuple_hash(const relic_relation_t *relation, const relic_dom_t *columns)
 {
-	return (relic_hash_words(columns, arity));
+	return (relic_hash_words(relation->hash_seed, columns,
+	    relation->arity));
 }
 
 /*
@@ -248,7 +251,7 @@ tuple_rehash(uint32_t id, void *ctx)
 
 	relation = ctx;
 
-	return (tuple_hash(tuple_at(relation, id), relation->arity));
+	return (tuple_hash(relation, tuple_at(relation, id)));
 }
 
 /*
@@ -602,7 +605,7 @@ relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 
 	*addedp = false;
 
-	hash = tuple_hash(columns, relation->arity);
+	hash = tuple_hash(relation, columns);
 	if (relation_find(relation, columns, hash) != RELIC_ID_NONE)
 		return (0);
 
@@ -629,7 +632,7 @@ relic_relation_contains(const relic_relation_t *relation,
 {
 	uint32_t hash;
 
-	hash = tuple_hash(columns, relation->arity);
+	hash = tuple_hash(relation, columns);
 
 	return (relation_find(relation, columns, hash) != RELIC_ID_NONE);
 }
@@ -856,8 +859,8 @@ column_rehash(uint32_t id, void *ctx)
 
 	rehash = ctx;
 
-	return (relic_hash_words(&tuple_at(rehash->relation, id)[rehash->column],
-	    1));
+	return (relic_hash_word(rehash->relation->hash_seed,
+	    tuple_at(rehash->relation, id)[rehash->column]));
 }
 
 /*
@@ -890,7 +893,7 @@ count_distinct(relic_t *ctx, const relic_relation_t *relation,
 
 	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
 		value = tuple_at(relation, id)[column];
-		hash = relic_hash_words(&value, 1);
+		hash = relic_hash_word(relation->hash_seed, value);
 
 		found = false;
 		relic_idprobe_open(&probe, &seen, hash);

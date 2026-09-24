@@ -162,7 +162,8 @@ static int	 adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *adornment);
 static int	 adorn_rules(relic_magic_t *magic,
 		    const relic_adornment_t *adornment);
-static uint32_t	 adornment_hash(relic_pred_id_t source, uint32_t bound);
+static uint32_t	 adornment_hash(const relic_magic_t *magic,
+		    relic_pred_id_t source, uint32_t bound);
 static int	 adornment_of_call(relic_magic_t *magic,
 		    const relic_literal_t *call, uint64_t bound,
 		    relic_adornment_t *adornmentp);
@@ -204,8 +205,10 @@ static bool	 find_rule(const relic_magic_t *magic, const relic_rule_t *rule,
 		    uint32_t hash);
 static int	 guard_literal(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *head, relic_literal_t *guard);
-static uint32_t	 hash_arg(uint32_t hash, const relic_arg_t *arg);
-static uint32_t	 hash_step(uint32_t hash, uint32_t word);
+static uint32_t	 hash_arg(const relic_magic_t *magic, uint32_t hash,
+		    const relic_arg_t *arg);
+static uint32_t	 hash_step(const relic_magic_t *magic, uint32_t hash,
+		    uint32_t word);
 static uint64_t	 head_bound_slots(const relic_rule_t *rule,
 		    const relic_adornment_t *head);
 static int	 index_rules_by_head(relic_magic_t *magic);
@@ -263,6 +266,7 @@ relic_magic_init(relic_magic_t *magic, relic_t *ctx)
 	relic_arena_init_charged(&magic->arena, &ctx->account);
 	relic_idtab_init(&magic->adornment_index);
 	relic_idtab_init(&magic->rule_index);
+	magic->hash_seed = ctx->hash_seed;
 }
 
 void
@@ -862,14 +866,15 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 }
 
 static uint32_t
-adornment_hash(relic_pred_id_t source, uint32_t bound)
+adornment_hash(const relic_magic_t *magic, relic_pred_id_t source,
+    uint32_t bound)
 {
 	uint32_t key[2];
 
 	key[0] = source;
 	key[1] = bound;
 
-	return (relic_hash_words(key, 2));
+	return (relic_hash_words(magic->hash_seed, key, 2));
 }
 
 static uint32_t
@@ -881,7 +886,7 @@ rehash_adornment(uint32_t id, void *ctx)
 	magic = ctx;
 	adornment = &magic->adornments[id - 1];
 
-	return (adornment_hash(adornment->source, adornment->bound));
+	return (adornment_hash(magic, adornment->source, adornment->bound));
 }
 
 /*
@@ -947,7 +952,7 @@ find_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	uint32_t hash;
 	uint32_t id;
 
-	hash = adornment_hash(source, bound);
+	hash = adornment_hash(magic, source, bound);
 
 	relic_idprobe_open(&probe, &magic->adornment_index, hash);
 	while (relic_idprobe_next(&probe, &id)) {
@@ -1180,21 +1185,21 @@ rule_derives_nothing(const relic_rule_t *rule)
 
 /* Fold one word into a running hash. */
 static uint32_t
-hash_step(uint32_t hash, uint32_t word)
+hash_step(const relic_magic_t *magic, uint32_t hash, uint32_t word)
 {
-	return (relic_hash_word(hash ^ word));
+	return (relic_hash_word(magic->hash_seed, hash ^ word));
 }
 
 static uint32_t
-hash_arg(uint32_t hash, const relic_arg_t *arg)
+hash_arg(const relic_magic_t *magic, uint32_t hash, const relic_arg_t *arg)
 {
-	hash = hash_step(hash, (uint32_t)arg->kind);
+	hash = hash_step(magic, hash, (uint32_t)arg->kind);
 
 	switch (arg->kind) {
 	case RELIC_ARG_CONSTANT:
-		return (hash_step(hash, arg->u.constant));
+		return (hash_step(magic, hash, arg->u.constant));
 	case RELIC_ARG_VARIABLE:
-		return (hash_step(hash, arg->u.slot));
+		return (hash_step(magic, hash, arg->u.slot));
 	case RELIC_ARG_WILDCARD:
 		break;
 	}
@@ -1214,27 +1219,29 @@ rule_hash(const relic_magic_t *magic, const relic_rule_t *rule)
 	uint16_t j;
 	size_t i;
 
-	hash = relic_hash_word(rule->head);
+	hash = relic_hash_word(magic->hash_seed, rule->head);
 	for (j = 0; j < rule->head_arity; j++)
-		hash = hash_arg(hash, &rule->head_args[j]);
+		hash = hash_arg(magic, hash, &rule->head_args[j]);
 
-	hash = hash_step(hash, (uint32_t)rule->body_length);
+	hash = hash_step(magic, hash, (uint32_t)rule->body_length);
 	for (i = 0; i < rule->body_length; i++) {
 		literal = &rule->body[i];
-		hash = hash_step(hash, (uint32_t)literal->kind);
+		hash = hash_step(magic, hash, (uint32_t)literal->kind);
 
 		if (literal->kind == RELIC_LITERAL_COMPARISON) {
-			hash = hash_step(hash,
+			hash = hash_step(magic, hash,
 			    (uint32_t)literal->u.comparison.op);
-			hash = hash_arg(hash, &literal->u.comparison.left);
-			hash = hash_arg(hash, &literal->u.comparison.right);
+			hash = hash_arg(magic, hash,
+			    &literal->u.comparison.left);
+			hash = hash_arg(magic, hash,
+			    &literal->u.comparison.right);
 			continue;
 		}
 
-		hash = hash_step(hash, literal->u.atom.pred);
+		hash = hash_step(magic, hash, literal->u.atom.pred);
 		arity = pred_arity(magic, literal->u.atom.pred);
 		for (j = 0; j < arity; j++)
-			hash = hash_arg(hash, &literal->u.atom.args[j]);
+			hash = hash_arg(magic, hash, &literal->u.atom.args[j]);
 	}
 
 	return (hash);

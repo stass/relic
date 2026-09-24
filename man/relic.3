@@ -207,6 +207,12 @@ a query at most once each time it is answered.
 .Pp
 No switch changes an answer, and a bit no switch defines is ignored.
 .Pp
+Each context keys its hash tables with a seed drawn from
+.Xr getentropy 2
+when it is created, so that a program cannot be written to crowd its keys
+into one part of a table and make every lookup slow.
+No answer, identifier, limit or line of explain output depends on the seed.
+.Pp
 .Fn relic_destroy
 releases a context and everything it owns, and accepts
 .Dv NULL .
@@ -426,7 +432,14 @@ Functions returning a pointer return
 on failure.
 Every failure is explained by an error diagnostic, whose text
 .Fn relic_error
-returns.
+returns, except that of
+.Fn relic_create
+and
+.Fn relic_create_config ,
+which have no context to report through: they fail only when memory is
+exhausted or
+.Xr getentropy 2
+fails.
 .Fn relic_string ,
 .Fn relic_value_compare ,
 .Fn relic_query_count

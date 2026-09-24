@@ -34,6 +34,20 @@
 
 #include <stddef.h>
 
+/*
+ * getentropy(2) is declared in one of two places depending on the platform.
+ * Including both here is what lets a caller include this header and nothing
+ * else, wherever the declaration lives.
+ */
+#include <unistd.h>
+#ifdef HAVE_SYS_RANDOM_H
+#include <sys/random.h>
+#endif
+
+#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_GETENTROPY)
+int getentropy(void *buf, size_t buflen);
+#endif
+
 #if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_REALLOCARRAY)
 void *reallocarray(void *optr, size_t nmemb, size_t size);
 #endif

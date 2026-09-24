@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -13,11 +14,10 @@
 #include "util.h"
 
 /*
- * The FNV-1a parameters, used both as the byte hash's starting state and as
- * the constant that mixes an integer key before it is finalized.  They are
- * ordinary compile-time constants: relic never randomizes a hash seed.
+ * The FNV-1a prime, which the fold multiplies the state by after mixing in
+ * each unit of a key.  The state it starts from is not the FNV basis but half
+ * of the caller's seed.
  */
-#define	RELIC_HASH_BASIS	2166136261u
 #define	RELIC_HASH_PRIME	16777619u
 
 /*
@@ -29,6 +29,9 @@
 #define	RELIC_ARRAY_MIN_COUNT		8u
 
 static uint32_t	 finalize(uint32_t hash);
+static uint32_t	 hash_finish(uint64_t seed, uint32_t state);
+static uint32_t	 hash_fold(uint32_t state, uint32_t unit);
+static uint32_t	 hash_start(uint64_t seed);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
 static int	 idtab_grow(relic_idtab_t *table, relic_rehash_fn rehash,
 		    void *ctx);
@@ -57,75 +60,116 @@ finalize(uint32_t hash)
 	return (hash);
 }
 
+/*
+ * Every hash is a keyed FNV-1a fold followed by finalize():
+ *
+ *	state = low 32 bits of seed
+ *	for each unit u of the key:  state = (state ^ u) * FNV prime
+ *	hash  = finalize(state ^ high 32 bits of seed)
+ *
+ * The two halves of the seed enter at different points so that both the fold
+ * and the finalizer are keyed.  A unit is a byte of a byte string and a word
+ * of a word sequence.  The three functions below are those three steps, and
+ * each hash function is written in terms of them so that none can drift from
+ * the others.
+ *
+ * hash_start() also asserts that the seed is not zero.  No context holds a
+ * seed of zero, so a zero is an owner that was never given its context's
+ * seed, and since every hash starts here the one assertion checks every
+ * owner.
+ */
+static uint32_t
+hash_start(uint64_t seed)
+{
+	assert(seed != 0);
+
+	return ((uint32_t)seed);
+}
+
+static uint32_t
+hash_fold(uint32_t state, uint32_t unit)
+{
+	return ((state ^ unit) * RELIC_HASH_PRIME);
+}
+
+static uint32_t
+hash_finish(uint64_t seed, uint32_t state)
+{
+	return (finalize(state ^ (uint32_t)(seed >> 32)));
+}
+
 uint32_t
-relic_hash_bytes(const void *bytes, size_t length)
+relic_hash_bytes(uint64_t seed, const void *bytes, size_t length)
 {
 	const unsigned char *data;
-	uint32_t hash;
+	uint32_t state;
 	size_t i;
 
 	data = bytes;
-	hash = RELIC_HASH_BASIS;
+	state = hash_start(seed);
 
-	for (i = 0; i < length; i++) {
-		hash ^= data[i];
-		hash *= RELIC_HASH_PRIME;
-	}
+	for (i = 0; i < length; i++)
+		state = hash_fold(state, data[i]);
 
-	return (finalize(hash));
+	return (hash_finish(seed, state));
 }
 
+/*
+ * Mixing each word as a value rather than as its four bytes is what makes the
+ * result independent of byte order.
+ */
 uint32_t
-relic_hash_word(uint32_t word)
+relic_hash_words(uint64_t seed, const uint32_t *words, size_t count)
 {
-	return (finalize(word ^ RELIC_HASH_BASIS));
+	uint32_t state;
+	size_t i;
+
+	state = hash_start(seed);
+
+	for (i = 0; i < count; i++)
+		state = hash_fold(state, words[i]);
+
+	return (hash_finish(seed, state));
 }
 
 uint32_t
-relic_hash_int64(int64_t value)
+relic_hash_word(uint64_t seed, uint32_t word)
+{
+	return (relic_hash_words(seed, &word, 1));
+}
+
+/*
+ * An integer is hashed in two steps: its high half alone, then its low half
+ * mixed with that hash.
+ *
+ * Folding the two halves as one word sequence would admit a collision that
+ * holds under every seed.  Flipping bit 31 of a word adds 2^31 to the state,
+ * multiplying by an odd prime keeps that difference in bit 31 alone, and the
+ * next word can flip it back, so v and v ^ 0x8000000080000000 would hash
+ * alike whatever the seed.  Finalizing the high half first spreads a flip of
+ * any of its bits over the whole word, by an amount that depends on the
+ * seed, before the low half can meet it.  No other key has two words that
+ * can both reach bit 31: tuple and index keys are domain identifiers, which
+ * reach it only once two billion values have been interned, and the one
+ * other word that can, an adornment's column mask, is the last of its key.
+ *
+ * The halves are extracted by shifting rather than by reading the
+ * representation's bytes, so the result does not depend on byte order.
+ * Conversion to the unsigned type is a defined wraparound, so a negative
+ * value mixes as well as a positive one.
+ */
+uint32_t
+relic_hash_int64(uint64_t seed, int64_t value)
 {
 	uint64_t bits;
 	uint32_t low;
 	uint32_t high;
 
-	/*
-	 * The halves are extracted by shifting rather than by reading the
-	 * representation's bytes, so a table probes in the same order on a
-	 * big-endian machine as on a little-endian one.  Conversion to the
-	 * unsigned type is a defined wraparound, so a negative value mixes as
-	 * well as a positive one.
-	 */
 	bits = (uint64_t)value;
 	low = (uint32_t)bits;
 	high = (uint32_t)(bits >> 32);
 
-	return (relic_hash_word(low ^ relic_hash_word(high)));
-}
-
-/*
- * Fold a sequence of words with the same FNV-1a step the byte hash uses, one
- * whole word at a time.
- *
- * Mixing each word as a value rather than as its four bytes is what makes the
- * result independent of byte order, which matters because the probe order of
- * every table built on this must be the same on every platform.  An empty
- * sequence hashes the starting state, which is an ordinary key and not a
- * special case.
- */
-uint32_t
-relic_hash_words(const uint32_t *words, size_t count)
-{
-	uint32_t hash;
-	size_t i;
-
-	hash = RELIC_HASH_BASIS;
-
-	for (i = 0; i < count; i++) {
-		hash ^= words[i];
-		hash *= RELIC_HASH_PRIME;
-	}
-
-	return (finalize(hash));
+	return (relic_hash_word(seed, low ^ relic_hash_word(seed, high)));
 }
 
 size_t

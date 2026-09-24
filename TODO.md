@@ -67,6 +67,17 @@ an underscore and a capital directly rather than after a prefix, has never
 run. Verify it catches an injected `static` counter on Linux under both a
 plain and an instrumented build.
 
+**The getentropy(2) configuration is verified only on macOS.** [Low,
+component: `configure.ac`, `compat/compat.h`] `AC_REPLACE_FUNCS` tests that
+`getentropy` links, not that a prototype is in scope; `compat.h` relies on
+`<unistd.h>` (the BSDs, glibc, musl) or `<sys/random.h>` (macOS) declaring
+it, which `AC_USE_SYSTEM_EXTENSIONS` should make true. Under
+`RELIC_COMPAT_DECLARE_ALL` the header redeclares the renamed interface after
+the system header has declared it, as it already does for `reallocarray`;
+GCC's `-Wredundant-decls` may reject that. Build `check` on glibc, musl,
+FreeBSD and OpenBSD, and switch to `AC_CHECK_DECLS` if a platform links the
+function without declaring it.
+
 **The tarball carries no project documents.** [Low, component: `Makefile.am`]
 `EXTRA_DIST` ships `README.md` and `LICENSE` but not `specs/`, `relic-plan.md`,
 `STATUS.md` or `TODO.md`. For a tool whose selling point is that it can be
@@ -574,6 +585,16 @@ limit shares" hold by construction.
 
 ## Security residuals
 
+**A long-lived context gives a timing oracle on its hash seed.** [Low,
+component: `lib/util.c`] The seed defeats crafted collisions because an
+author cannot learn it, and a batch run gives nothing to learn from. A REPL
+session (`-i`), or an embedding that feeds one context facts from an
+untrusted party over time, lets that party time its own insertions against
+one fixed seed and, in principle, search for keys that share a cluster.
+No attack has been built. Decide whether a context used this way should be
+documented as trusting its input, or whether a stronger keyed hash for the
+byte strings the symbol table interns is worth its cost there.
+
 **The Magic budget counts rules, not their length.** [High, component:
 `lib/magic.c`] Each adornment of a predicate copies every rule deriving it
 whole, so R distinct call patterns of one rule of L literals cost R x L
@@ -620,18 +641,6 @@ duplicate check, so a rule that is then dropped still costs its body in
 memory. The arena is charged to `max_memory` (D-18), so that is memory the
 user pays for and gets nothing from. Decide whether the two checks can run
 on the draft, or canonicalize into scratch that a dropped rule releases.
-
-**Fixed hash seeds make hash flooding cheap and reproducible.** [Medium,
-component: `lib/util.c`] Every table hashes with compile-time constants, so
-a program author controls every hash and a crafted fact file, or a crafted
-set of symbols, drives a table into one probe cluster and makes a load
-quadratic inside every limit. Decided: the seed is drawn per context from
-`getentropy(2)` and passed explicitly to every hash, per D-19 and
-`specs/design-hash-seed.md`. Remaining work: thread the seed through the
-hash functions and the seven table owners, add the `configure` check and
-the `compat/` replacement, make `relic_create()` fail without entropy and
-say so in `<relic.h>`, and write the tests of the design's section 8, the
-flooding test first so that it fails against the constants.
 
 **csv and tsv carry raw control bytes.** [Low, component:
 `cmd/relic/output.c`] The text format writes a string as a quoted literal with

@@ -36,10 +36,15 @@ AC_SUBST([RELIC_ABI_AGE])
 
 AC_CHECK_HEADERS([err.h sysexits.h])
 
+dnl getentropy(2) is declared by <unistd.h> on the BSDs, glibc and musl, and
+dnl by <sys/random.h> on macOS.  compat.h includes whichever exists, so no
+dnl engine source has to know which one it is.
+AC_CHECK_HEADERS([sys/random.h])
+
 dnl A replacement is compiled from compat/ only on a platform whose C library
 dnl lacks the interface, so the library and the tool call these
 dnl unconditionally and neither tests for a platform.
-AC_REPLACE_FUNCS([reallocarray strlcat strlcpy strtonum])
+AC_REPLACE_FUNCS([getentropy reallocarray strlcat strlcpy strtonum])
 
 dnl A stream whose read function is the caller's own code, which the interface
 dnl tests hand to relic_load_file().  Neither is used by the library or the

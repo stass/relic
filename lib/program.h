@@ -118,6 +118,7 @@ struct relic_predtab {
 	size_t		 count;
 	size_t		 capacity;
 	relic_idtab_t	 index;
+	uint64_t	 hash_seed;	/* the context's */
 };
 
 enum relic_arg_kind {

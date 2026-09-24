@@ -138,6 +138,7 @@ installcheck-local:
 ##
 
 RELIC_COMPAT_RENAMES = \
+	-Dgetentropy=relic_replacement_getentropy \
 	-Dreallocarray=relic_replacement_reallocarray \
 	-Dstrlcat=relic_replacement_strlcat \
 	-Dstrlcpy=relic_replacement_strlcpy \
@@ -151,8 +152,8 @@ tests_unit_test_compat_SOURCES = tests/unit/test_compat.c \
 tests_unit_test_compat_LDADD = $(LTLIBOBJS)
 
 tests_unit_test_compat_replacements_SOURCES = tests/unit/test_compat.c \
-	tests/unit/harness.c compat/reallocarray.c compat/strlcat.c \
-	compat/strlcpy.c compat/strtonum.c
+	tests/unit/harness.c compat/getentropy.c compat/reallocarray.c \
+	compat/strlcat.c compat/strlcpy.c compat/strtonum.c
 tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DRELIC_COMPAT_DECLARE_ALL -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
 	$(RELIC_COMPAT_RENAMES)
@@ -240,12 +241,17 @@ tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 ## every other suite, and a failure that left a table inconsistent would go
 ## unnoticed until a query returned a wrong answer.
 ##
+## getentropy(2) is renamed the same way, and for the same reason: a context
+## that cannot draw its hash seed is not created, and only a replacement that
+## fails on demand can show that it is not.
+##
 ## The renaming follows the pattern the compat suite already uses.  It is
 ## confined to this program; nothing that ships is built this way.
 ##
 
-RELIC_ALLOCATOR_RENAMES = \
+RELIC_EXHAUSTION_RENAMES = \
 	-Dcalloc=relic_test_calloc \
+	-Dgetentropy=relic_test_getentropy \
 	-Dmalloc=relic_test_malloc \
 	-Dreallocarray=relic_test_reallocarray
 
@@ -254,7 +260,7 @@ tests_unit_test_exhaustion_SOURCES = tests/unit/test_exhaustion.c \
 	tests/unit/harness.c tests/unit/programs.c \
 	$(librelic_internal_la_SOURCES)
 tests_unit_test_exhaustion_CPPFLAGS = $(AM_CPPFLAGS) \
-	$(RELIC_ALLOCATOR_RENAMES)
+	$(RELIC_EXHAUSTION_RENAMES)
 tests_unit_test_exhaustion_LDADD = $(LTLIBOBJS)
 
 ##

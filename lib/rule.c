@@ -201,10 +201,10 @@ static const char *variable_name(const relic_compiler_t *compiler,
 		    size_t size);
 
 void
-relic_program_init(relic_program_t *program)
+relic_program_init(relic_program_t *program, uint64_t hash_seed)
 {
 	bzero(program, sizeof(*program));
-	relic_predtab_init(&program->predicates);
+	relic_predtab_init(&program->predicates, hash_seed);
 	relic_schedule_init(&program->schedule);
 }
 

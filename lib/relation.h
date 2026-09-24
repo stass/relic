@@ -143,6 +143,11 @@ struct relic_relation_stats {
  * which is what answers membership.  It stores identifiers and no keys: the
  * key is the tuple, and the tuple is already in `columns`.
  *
+ * `hash_seed` is the context's, copied when the relation is created.  Every
+ * hash computed over the relation's tuples is keyed by it: the canonical
+ * index's, each secondary index's, and the scratch table's that counts a
+ * column's distinct values.
+ *
  * `indexes` holds the secondary indexes plans have asked for, at most one per
  * key mask, in the order they were built.  Between discards an index is only
  * ever appended, so its position is fixed until the next discard and is how
@@ -173,6 +178,7 @@ struct relic_relation {
 	size_t			 index_count;
 	size_t			 index_capacity;
 	relic_relation_stats_t	 stats;
+	uint64_t		 hash_seed;	/* the context's */
 	relic_pred_id_t		 pred;		/* RELIC_ID_NONE for an answer */
 	size_t			 serial;	/* the query's, for an answer */
 	uint16_t		 arity;

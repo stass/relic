@@ -14,7 +14,7 @@ rejects anything else as a usage error.
 | `configure.ac`, `Makefile.am`, `autogen.sh` | autoconf 2.69, automake 1.13, libtool 2.4.2 or newer; one non-recursive `Makefile.am` |
 | `m4/` | five local macros: C11 dialect, compiler flags, sanitizers, libedit, debug and assertion options |
 | `cmd/relic/main.c` | `-V` only; unknown options and operands are usage errors |
-| `compat/` | `compat.h` and replacements for `reallocarray`, `strlcat`, `strlcpy`, `strtonum`, each linked only where the platform lacks it and compiled everywhere by the test suite |
+| `compat/` | `compat.h` and replacements for `getentropy`, `reallocarray`, `strlcat`, `strlcpy`, `strtonum`, each linked only where the platform lacks it and compiled everywhere by the test suite |
 | `librelic.pc.in` | pkg-config module `librelic` |
 
 **The foundations, stage S1.** The storage and reporting primitives every
@@ -23,11 +23,11 @@ later stage sits on, specified in `specs/design-memory.md`. No Datalog yet.
 | Component | State |
 | --- | --- |
 | `lib/arena.c` | chunked region allocator; sticky failure flag, cleared by a reset and by the context-arena funnel |
-| `lib/util.{h,c}` | `relic_grow_array()` over `reallocarray()`; one open-addressing identifier table, reserved and placed as separate steps; hashes with compile-time seeds |
+| `lib/util.{h,c}` | `relic_grow_array()` over `reallocarray()`; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed FNV-1a fold and a finalizer, an integer's high half finalized before its low half joins it, and a zero seed asserted against |
 | `lib/symbol.c` | byte strings interned to 32-bit identifiers; bytes in the context arena, embedded NULs preserved |
 | `lib/value.c` | the value table and `relic_dom_t` of D-3; interning for all three types, the language order of section 10.1 and the total order of section 61 |
 | `lib/diag.c` | diagnostic callback, last-error buffer, and a stderr formatter that escapes non-printable bytes |
-| `lib/api.c` | context lifecycle and the context-arena allocation funnel |
+| `lib/api.c` | context lifecycle and the context-arena allocation funnel; each context draws a nonzero hash seed from `getentropy(2)`, copied by every table owner -- symbols, values, predicates, relations and their indexes, the Magic rewrite -- and creation fails without one |
 | `include/relic.h` | `relic_t`, `relic_value_t`, `relic_location_t`, `relic_config_t`, the diagnostic callback, `relic_create()`, `relic_create_config()`, `relic_destroy()`, `relic_diag_set()`, `relic_diag_stderr()`, `relic_error()`, `relic_string()` |
 | `compat/queue.h` | bundled OpenBSD copy, provenance and patches in `compat/README.md` |
 | `tests/` | the unit suites for each module, plus the tree checks |

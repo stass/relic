@@ -81,25 +81,34 @@ void	*relic_grow_array(void *items, size_t *capacity, size_t count,
 size_t	 relic_grow_array_capacity(size_t capacity, size_t count);
 
 /*
- * Hash functions with seeds fixed at compile time.  No seed is randomized,
- * derived from an address, read from the clock or taken from the
- * environment: identical input must produce an identical probe order on
- * every run and on every platform, because the golden test suite compares
- * output byte for byte.
+ * Hash functions keyed by a 64-bit seed.
+ *
+ * Each context draws its seed at random when it is created, and every table
+ * owner copies it and passes it to every hash it computes.  The author of a
+ * program cannot learn the seed, so cannot compute where a key will land and
+ * cannot choose keys that pile into one probe cluster and make every lookup
+ * linear.  Nothing a run reports depends on the seed: no table is walked in
+ * slot order, so the seed decides where a key sits and how many probes find
+ * it, and nothing else.
+ *
+ * A seed is never zero, which the hashes assert: a zero is an owner that was
+ * never given its context's seed.
+ *
+ * For one seed the hashes are the same on every platform.  Words and integers
+ * are folded as values rather than as the bytes they occupy, so a table
+ * probes in the same order on a big-endian machine as on a little-endian
+ * one.
  */
-uint32_t relic_hash_bytes(const void *bytes, size_t length);
-uint32_t relic_hash_int64(int64_t value);
-uint32_t relic_hash_word(uint32_t word);
+uint32_t relic_hash_bytes(uint64_t seed, const void *bytes, size_t length);
+uint32_t relic_hash_int64(uint64_t seed, int64_t value);
+uint32_t relic_hash_word(uint64_t seed, uint32_t word);
 
 /*
- * Hash a sequence of 32-bit words, which is what a tuple is.
- *
- * The words are folded as values rather than as the bytes they occupy, so a
- * sequence hashes identically on a big-endian machine and a little-endian
- * one.  A count of zero is a defined key rather than a special case, which
- * is what lets a relation of arity zero use the ordinary code path.
+ * Hash a sequence of 32-bit words, which is what a tuple is.  A count of zero
+ * is a defined key rather than a special case, which is what lets a relation
+ * of arity zero use the ordinary code path.
  */
-uint32_t relic_hash_words(const uint32_t *words, size_t count);
+uint32_t relic_hash_words(uint64_t seed, const uint32_t *words, size_t count);
 
 typedef struct relic_idprobe relic_idprobe_t;
 typedef struct relic_idtab relic_idtab_t;

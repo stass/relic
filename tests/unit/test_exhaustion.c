@@ -26,16 +26,20 @@
 
 /*
  * The library sources in this program are compiled with their allocator
- * calls renamed, and this file supplies the replacements.  Undefining the
- * names here, before anything is included, lets this one translation unit
- * reach the real allocator to implement them.
+ * calls and their entropy source renamed, and this file supplies the
+ * replacements.  Undefining the names here, before anything is included,
+ * lets this one translation unit reach the real interfaces to implement
+ * them.
  */
 #undef calloc
+#undef getentropy
 #undef malloc
 #undef reallocarray
 
 #include "config.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -51,6 +55,7 @@
 
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
+#define	SCENARIO_ENTROPY	"context creation fails without entropy"
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
 #define	SCENARIO_FALLBACK	"an abandoned rewrite out of memory reports once"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
@@ -237,7 +242,14 @@ static size_t	 warnings_reported;
 /* How many RELIC_NOTE diagnostics the context has reported. */
 static size_t	 notes_reported;
 
+/* Whether relic_test_getentropy() refuses every request. */
+static bool	 entropy_unavailable;
+
+/* How many of the next requests relic_test_getentropy() fills with zeros. */
+static unsigned int zero_draws_remaining;
+
 void		*relic_test_calloc(size_t count, size_t size);
+int		 relic_test_getentropy(void *buffer, size_t length);
 void		*relic_test_malloc(size_t size);
 void		*relic_test_reallocarray(void *items, size_t count,
 		    size_t size);
@@ -246,6 +258,7 @@ static bool	 refuse_this_allocation(void);
 static void	 serve_every_allocation(void);
 static void	 refuse_allocations_after(long served);
 static void	 context_creation_reports_a_failed_allocation(void);
+static void	 context_creation_fails_without_entropy(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
@@ -319,6 +332,30 @@ relic_test_calloc(size_t count, size_t size)
 	return (calloc(count, size));
 }
 
+/*
+ * The real entropy source, or one of two broken ones.  With
+ * `entropy_unavailable` set every request fails, as getentropy(2) does on a
+ * system with no random device to offer.  While `zero_draws_remaining` is
+ * positive a request succeeds and hands out zeros, as a random device
+ * replaced by /dev/zero would.
+ */
+int
+relic_test_getentropy(void *buffer, size_t length)
+{
+	if (entropy_unavailable) {
+		errno = EIO;
+		return (-1);
+	}
+
+	if (zero_draws_remaining > 0) {
+		zero_draws_remaining--;
+		bzero(buffer, length);
+		return (0);
+	}
+
+	return (getentropy(buffer, length));
+}
+
 void *
 relic_test_malloc(size_t size)
 {
@@ -362,6 +399,58 @@ context_creation_reports_a_failed_allocation(void)
 	check(ctx == NULL, SCENARIO_CREATE,
 	    "creating a context should fail when nothing can be allocated");
 
+	relic_destroy(ctx);
+}
+
+/*
+ * A context whose tables could not be keyed by a secret seed is not created
+ * at all, with or without a configuration, rather than falling back to a
+ * seed an input could be crafted against.  Once entropy is available again
+ * creation succeeds, so the failure left nothing behind.
+ */
+static void
+context_creation_fails_without_entropy(void)
+{
+	relic_config_t config;
+	relic_t *ctx;
+	relic_t *configured;
+
+	bzero(&config, sizeof(config));
+
+	entropy_unavailable = true;
+	ctx = relic_create();
+	configured = relic_create_config(&config);
+	entropy_unavailable = false;
+
+	check(ctx == NULL, SCENARIO_ENTROPY,
+	    "creating a context should fail without entropy");
+	check(configured == NULL, SCENARIO_ENTROPY,
+	    "creating a configured context should fail without entropy");
+	relic_destroy(ctx);
+	relic_destroy(configured);
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_ENTROPY,
+	    "creating a context should succeed once entropy is back");
+	relic_destroy(ctx);
+
+	/*
+	 * Zero is the one seed a context may not hold.  A single zero is a
+	 * draw like any other and is drawn again; a source that gives nothing
+	 * but zeros is broken, and must fail creation rather than be asked
+	 * forever.
+	 */
+	zero_draws_remaining = 1;
+	ctx = relic_create();
+	check(ctx != NULL && ctx->hash_seed != 0, SCENARIO_ENTROPY,
+	    "a zero draw should be drawn again");
+	relic_destroy(ctx);
+
+	zero_draws_remaining = UINT_MAX;
+	ctx = relic_create();
+	zero_draws_remaining = 0;
+	check(ctx == NULL, SCENARIO_ENTROPY,
+	    "a source of nothing but zeros should fail creation");
 	relic_destroy(ctx);
 }
 
@@ -2164,6 +2253,7 @@ int
 main(void)
 {
 	context_creation_reports_a_failed_allocation();
+	context_creation_fails_without_entropy();
 	interning_a_symbol_survives_a_failed_allocation();
 	interning_a_value_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();

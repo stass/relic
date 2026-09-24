@@ -27,6 +27,8 @@
  * forwarding layer would add a place to look without adding anything to see.
  */
 
+static int	 draw_hash_seed(uint64_t *seedp);
+
 void *
 relic_context_alloc(relic_t *ctx, size_t size)
 {
@@ -95,16 +97,58 @@ relic_destroy(relic_t *ctx)
 	free(ctx);
 }
 
+/*
+ * Draw a context's hash seed from the operating system.  Returns 0 with a
+ * nonzero seed in *seedp, or -1 when there is none to be had.
+ *
+ * Zero is the one value a seed may not take: reserving it is what lets the
+ * hash functions tell an owner that was never given a seed from one that
+ * was.  A zero draw, one in 2^64, is drawn again.  A second is not: two in a
+ * row happen by chance with probability 2^-128, and mean a source that hands
+ * out nothing but zeros -- a random device replaced by /dev/zero -- which
+ * would otherwise be asked forever.
+ */
+static int
+draw_hash_seed(uint64_t *seedp)
+{
+	uint64_t seed;
+	int draw;
+
+	for (draw = 0; draw < 2; draw++) {
+		if (getentropy(&seed, sizeof(seed)) != 0)
+			return (-1);
+
+		if (seed != 0) {
+			*seedp = seed;
+			return (0);
+		}
+	}
+
+	return (-1);
+}
+
 relic_t *
 relic_create_config(const relic_config_t *config)
 {
 	relic_t *ctx;
+	uint64_t hash_seed;
+
+	/*
+	 * Without a seed nobody else can know, every table is open to keys
+	 * crafted to collide, and a constant in its place would be that
+	 * weakness with a false assurance attached.  So a system that cannot
+	 * supply entropy gets no context, as one that cannot supply memory
+	 * does not.
+	 */
+	if (draw_hash_seed(&hash_seed) != 0)
+		return (NULL);
 
 	ctx = malloc(sizeof(*ctx));
 	if (ctx == NULL)
 		return (NULL);
 
 	bzero(ctx, sizeof(*ctx));
+	ctx->hash_seed = hash_seed;
 
 	/*
 	 * A zeroed configuration means every limit unlimited, so a caller
@@ -118,10 +162,10 @@ relic_create_config(const relic_config_t *config)
 	relic_arena_init(&ctx->arena);
 	relic_arena_init(&ctx->program_arena);
 	relic_arena_init_charged(&ctx->eval_arena, &ctx->account);
-	relic_symtab_init(&ctx->symbols);
-	relic_valtab_init(&ctx->values);
+	relic_symtab_init(&ctx->symbols, ctx->hash_seed);
+	relic_valtab_init(&ctx->values, ctx->hash_seed);
 	relic_ast_program_init(&ctx->ast);
-	relic_program_init(&ctx->program);
+	relic_program_init(&ctx->program, ctx->hash_seed);
 	relic_reltab_init(&ctx->relations);
 	relic_diag_init(&ctx->diag);
 

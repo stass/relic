@@ -36,16 +36,17 @@
 
 static relic_pred_t *pred_at(const relic_predtab_t *table,
 		    relic_pred_id_t id);
-static uint32_t	 pred_hash(uint32_t name, uint16_t arity);
+static uint32_t	 pred_hash(uint64_t seed, uint32_t name, uint16_t arity);
 static uint32_t	 pred_rehash(uint32_t id, void *ctx);
 static int	 pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
 
 void
-relic_predtab_init(relic_predtab_t *table)
+relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed)
 {
 	bzero(table, sizeof(*table));
 	relic_idtab_init(&table->index);
+	table->hash_seed = hash_seed;
 }
 
 void
@@ -77,13 +78,13 @@ pred_at(const relic_predtab_t *table, relic_pred_id_t id)
  * so no two distinct pairs collide before the hash sees them.
  */
 static uint32_t
-pred_hash(uint32_t name, uint16_t arity)
+pred_hash(uint64_t seed, uint32_t name, uint16_t arity)
 {
 	uint64_t key;
 
 	key = ((uint64_t)name << 16) | (uint64_t)arity;
 
-	return (relic_hash_int64((int64_t)key));
+	return (relic_hash_int64(seed, (int64_t)key));
 }
 
 /*
@@ -99,7 +100,7 @@ pred_rehash(uint32_t id, void *ctx)
 	table = ctx;
 	pred = pred_at(table, id);
 
-	return (pred_hash(pred->name, pred->arity));
+	return (pred_hash(table->hash_seed, pred->name, pred->arity));
 }
 
 /*
@@ -185,7 +186,7 @@ relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 	}
 
 	table = &ctx->program.predicates;
-	hash = pred_hash(name, arity);
+	hash = pred_hash(table->hash_seed, name, arity);
 
 	relic_idprobe_open(&probe, &table->index, hash);
 	while (relic_idprobe_next(&probe, &id)) {

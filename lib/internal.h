@@ -144,6 +144,7 @@ struct relic_symtab {
 	size_t		 count;
 	size_t		 capacity;
 	relic_idtab_t	 index;
+	uint64_t	 hash_seed;	/* the context's */
 };
 
 /*
@@ -158,6 +159,7 @@ struct relic_valtab {
 	size_t		 count;
 	size_t		 capacity;
 	relic_idtab_t	 index;
+	uint64_t	 hash_seed;	/* the context's */
 };
 
 /*
@@ -307,6 +309,7 @@ struct relic_magic {
 	size_t			*first_rule_of;
 	relic_idtab_t		 adornment_index;
 	relic_idtab_t		 rule_index;
+	uint64_t		 hash_seed;	/* the context's */
 	size_t			 predicate_count;
 	size_t			 adornment_capacity;
 	size_t			 generated_preds;
@@ -342,6 +345,12 @@ struct relic_magic {
  * the context; a query's is cleared when its answer begins, so each answer
  * is reported on once.
  *
+ * `hash_seed` keys every hash the context's tables compute.  It is drawn
+ * from the operating system when the context is created and never changes;
+ * each table owner copies it when it is initialized.  No result depends on
+ * it, and a program's author cannot learn it, which is what keeps an input
+ * from being crafted to collide in a table.
+ *
  * `busy` is set for the whole of an operation, from the public entry point
  * that began it until that entry point returns; relic_enter() and
  * relic_leave() are the only code that changes it.  Caller code runs during
@@ -365,6 +374,7 @@ struct relic {
 	void			*explain_ctx;
 	relic_config_t		 config;
 	relic_counters_t	 counters;
+	uint64_t		 hash_seed;
 	size_t			 materialized_rules;
 	bool			 query_mixed_noted;
 	bool			 busy;
@@ -484,7 +494,7 @@ const char *relic_symbol_bytes(const relic_t *ctx, uint32_t id,
 size_t	 relic_symbol_count(const relic_t *ctx);
 int	 relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	    uint32_t *idp);
-void	 relic_symtab_init(relic_symtab_t *table);
+void	 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed);
 void	 relic_symtab_reset(relic_symtab_t *table);
 
 /*
@@ -507,7 +517,7 @@ int	 relic_value_intern_bytes(relic_t *ctx, enum relic_type type,
 	    const void *bytes, size_t length, relic_dom_t *domp);
 int	 relic_value_intern_integer(relic_t *ctx, int64_t value,
 	    relic_dom_t *domp);
-void	 relic_valtab_init(relic_valtab_t *table);
+void	 relic_valtab_init(relic_valtab_t *table, uint64_t hash_seed);
 void	 relic_valtab_reset(relic_valtab_t *table);
 
 /*
@@ -649,7 +659,7 @@ int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
  * stand as an argument of the message it decorates.
  */
-void	 relic_predtab_init(relic_predtab_t *table);
+void	 relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed);
 void	 relic_predtab_reset(relic_predtab_t *table);
 int	 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 	    const relic_location_t *where, relic_pred_id_t *idp);
@@ -663,16 +673,17 @@ void	 relic_pred_report_undefined(relic_t *ctx);
 /*
  * lib/rule.c
  *
- * relic_program_init() prepares the empty program a context starts with, and
- * relic_program_reset() releases what the program owns outside the program
- * arena, the schedule's arena among it.
+ * relic_program_init() prepares the empty program a context starts with,
+ * whose predicate table hashes with `hash_seed`, and relic_program_reset()
+ * releases what the program owns outside the program arena, the schedule's
+ * arena among it.
  * The public entry point into this module is relic_check().
  *
  * relic_program_ready() is the check every use of the program begins with:
  * preparing a query, handing out one of the program's own, or evaluating.
  * Returns 0, or -1 with at least one error reported by this call.
  */
-void	 relic_program_init(relic_program_t *program);
+void	 relic_program_init(relic_program_t *program, uint64_t hash_seed);
 int	 relic_program_ready(relic_t *ctx);
 void	 relic_program_reset(relic_program_t *program);
 

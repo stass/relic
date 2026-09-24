@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "compat.h"
 #include "harness.h"
@@ -38,6 +39,8 @@ static bool	tail_is_untouched(const char *buffer, size_t size,
 		    size_t writable);
 
 static void	an_empty_source_changes_nothing(void);
+static void	getentropy_fills_exactly_the_bytes_asked_for(void);
+static void	getentropy_refuses_more_than_it_may_hand_out(void);
 static void	reallocarray_accepts_a_count_of_zero(void);
 static void	reallocarray_preserves_contents_when_it_grows(void);
 static void	reallocarray_refuses_an_overflowing_product(void);
@@ -79,6 +82,50 @@ tail_is_untouched(const char *buffer, size_t size, size_t writable)
 	}
 
 	return (true);
+}
+
+/*
+ * Two draws of 32 bytes are equal with probability 2^-256, so equal draws
+ * mean the bytes did not come from a random source.  The largest request the
+ * interface admits, 256 bytes, must succeed as well, and neither call may
+ * write past the bytes it was asked for.
+ */
+static void
+getentropy_fills_exactly_the_bytes_asked_for(void)
+{
+	const char *scenario = "getentropy fills exactly the bytes asked for";
+	char first[40];
+	char second[40];
+	char largest[264];
+
+	fill_with_sentinel(first, sizeof(first));
+	fill_with_sentinel(second, sizeof(second));
+	fill_with_sentinel(largest, sizeof(largest));
+
+	check(getentropy(first, 32) == 0 && getentropy(second, 32) == 0,
+	    scenario, "succeeds for 32 bytes");
+	check(bcmp(first, second, 32) != 0, scenario,
+	    "gives different bytes to two requests");
+	check(tail_is_untouched(first, sizeof(first), 32), scenario,
+	    "writes nothing beyond the bytes asked for");
+	check(getentropy(largest, 256) == 0, scenario,
+	    "succeeds for the largest request it admits");
+	check(tail_is_untouched(largest, sizeof(largest), 256), scenario,
+	    "writes nothing beyond the largest request");
+}
+
+/*
+ * A request beyond 256 bytes is refused whole rather than filled in part,
+ * so a caller never mistakes a partial buffer for a seed.
+ */
+static void
+getentropy_refuses_more_than_it_may_hand_out(void)
+{
+	const char *scenario = "getentropy refuses more than 256 bytes";
+	char buffer[257];
+
+	check(getentropy(buffer, sizeof(buffer)) == -1, scenario,
+	    "fails for 257 bytes");
 }
 
 static void
@@ -557,6 +604,8 @@ int
 main(void)
 {
 	an_empty_source_changes_nothing();
+	getentropy_fills_exactly_the_bytes_asked_for();
+	getentropy_refuses_more_than_it_may_hand_out();
 	reallocarray_accepts_a_count_of_zero();
 	reallocarray_preserves_contents_when_it_grows();
 	reallocarray_refuses_an_overflowing_product();

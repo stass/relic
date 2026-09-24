@@ -514,9 +514,14 @@ invocation_open(invocation_t *invocation, const char *program_name,
 	invocation->verbosity = options->verbosity;
 	invocation->explain_stream = options->explain ? stderr : NULL;
 
+	/*
+	 * Creation fails for one of two reasons and does not say which, so
+	 * the message names both.
+	 */
 	invocation->ctx = relic_create_config(&options->config);
 	if (invocation->ctx == NULL) {
-		report_error(program_name, "out of memory");
+		report_error(program_name,
+		    "cannot create a context: out of memory or no random device");
 		return (-1);
 	}
 	relic_diag_set(invocation->ctx, relic_diag_stderr,

@@ -42,10 +42,11 @@ static int	 symbol_store(relic_t *ctx, const void *bytes, size_t length,
 		    uint32_t *idp);
 
 void
-relic_symtab_init(relic_symtab_t *table)
+relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed)
 {
 	bzero(table, sizeof(*table));
 	relic_idtab_init(&table->index);
+	table->hash_seed = hash_seed;
 }
 
 void
@@ -108,7 +109,8 @@ symbol_rehash(uint32_t id, void *ctx)
 	table = ctx;
 	symbol = symbol_at(table, id);
 
-	return (relic_hash_bytes(symbol->bytes, symbol->length));
+	return (relic_hash_bytes(table->hash_seed, symbol->bytes,
+	    symbol->length));
 }
 
 /*
@@ -191,7 +193,7 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	uint32_t id;
 
 	table = &ctx->symbols;
-	hash = relic_hash_bytes(bytes, length);
+	hash = relic_hash_bytes(table->hash_seed, bytes, length);
 
 	relic_idprobe_open(&probe, &table->index, hash);
 	while (relic_idprobe_next(&probe, &id)) {

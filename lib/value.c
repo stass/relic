@@ -51,7 +51,7 @@ static bool	 value_equal(const relic_value_t *left,
 		    const relic_value_t *right);
 static int	 value_from_bytes(relic_t *ctx, enum relic_type type,
 		    const char *bytes, size_t length, relic_value_t *value);
-static uint32_t	 value_hash(const relic_value_t *value);
+static uint32_t	 value_hash(uint64_t seed, const relic_value_t *value);
 static relic_value_t value_normalized(const relic_value_t *value);
 static uint32_t	 value_rehash(uint32_t dom, void *ctx);
 static int	 value_store(relic_t *ctx, const relic_value_t *value,
@@ -60,10 +60,11 @@ static unsigned int value_type_rank(enum relic_type type);
 static bool	 value_well_formed(relic_t *ctx, const relic_value_t *value);
 
 void
-relic_valtab_init(relic_valtab_t *table)
+relic_valtab_init(relic_valtab_t *table, uint64_t hash_seed)
 {
 	bzero(table, sizeof(*table));
 	relic_idtab_init(&table->index);
+	table->hash_seed = hash_seed;
 }
 
 void
@@ -97,7 +98,7 @@ value_at(const relic_valtab_t *table, relic_dom_t dom)
  * likely to land in different slots as any two unrelated keys.
  */
 static uint32_t
-value_hash(const relic_value_t *value)
+value_hash(uint64_t seed, const relic_value_t *value)
 {
 	uint32_t payload;
 
@@ -115,14 +116,14 @@ value_hash(const relic_value_t *value)
 	switch (value->type) {
 	case RELIC_SYMBOL:
 	case RELIC_STRING:
-		payload = relic_hash_word(value->v.id);
+		payload = relic_hash_word(seed, value->v.id);
 		break;
 	case RELIC_INTEGER:
-		payload = relic_hash_int64(value->v.integer);
+		payload = relic_hash_int64(seed, value->v.integer);
 		break;
 	}
 
-	return (relic_hash_word(payload ^ (uint32_t)value->type));
+	return (relic_hash_word(seed, payload ^ (uint32_t)value->type));
 }
 
 /*
@@ -149,7 +150,7 @@ value_rehash(uint32_t dom, void *ctx)
 
 	table = ctx;
 
-	return (value_hash(value_at(table, dom)));
+	return (value_hash(table->hash_seed, value_at(table, dom)));
 }
 
 /*
@@ -296,7 +297,7 @@ relic_value_intern(relic_t *ctx, const relic_value_t *value, relic_dom_t *domp)
 		return (-1);
 
 	table = &ctx->values;
-	hash = value_hash(value);
+	hash = value_hash(table->hash_seed, value);
 
 	relic_idprobe_open(&probe, &table->index, hash);
 	while (relic_idprobe_next(&probe, &dom)) {
