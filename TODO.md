@@ -70,6 +70,11 @@ function without declaring it.
 audited, shipping the architecture document with the source is worth
 considering. Decide at S14 with the rest of packaging.
 
+**`librelic` name collision.** [Low] An unrelated cryptographic toolkit
+publishes `librelic` and a `relic.h`. Only matters if both install under one
+prefix. Remedies are `--program-prefix` and a renamed pkg-config module.
+Revisit if a distribution reports it.
+
 ## Engine
 
 **A rejected statement keeps its arena memory.** [Low, component:
@@ -668,13 +673,6 @@ are, so `relic -F csv` over an untrusted program, printed to a terminal rather
 than piped to a parser, can. That is the same exposure as `cat` on the
 program itself, and escaping would corrupt the data for the consumers the
 formats exist for; recorded so that the choice stays deliberate.
-
-## Packaging
-
-**`librelic` name collision.** [Low] An unrelated cryptographic toolkit
-publishes `librelic` and a `relic.h`. Only matters if both install under one
-prefix. Remedies are `--program-prefix` and a renamed pkg-config module.
-Revisit if a distribution reports it.
 
 ## Post-1.0
 
