@@ -18,10 +18,11 @@ stratum 0, component 7: pick/1
         lookup t(X, Y, Z) key={0,2}
         emit pick(Y)
 stratum 0, component 8: large/1
-    rule large(X) :- size(X, N), N > 100, 1 < 2.
+    rule large(X) :- size(X, N), N > 100, N <= 200, 1 < 2.
         filter 1 < 2
         scan size(X, N)
         filter N > 100
+        filter N <= 200
         emit large(X)
 stratum 0, component 9: named/1
     rule named(X) :- edge(X, _), name(X, "Al\"ice\\\x09x").

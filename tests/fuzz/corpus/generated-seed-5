@@ -1,0 +1,19 @@
+p2(c).
+p0(a, a).
+p2(C) :- p0(C, C).
+p1.
+p2(1) :- p4(B, 1, B, D), p2(A), p4(A, 1, D, D), D != a, A >= B.
+p4(C, E, C, E) :- p0(E, C), not p0(E, C).
+p0(d, c).
+p1 :- p2(A), p2(B), p0(A, A).
+p0(1, 1).
+p2(a).
+p0(0, -7).
+p0("a", 1).
+p4(A, B, A, B) :- p0(_, "a"), p4(B, A, A, A), p2(A).
+p4(c, A, d, A) :- p0(B, A), p4(A, B, A, _).
+p2(b) :- p0(E, D), p0(D, B), not p0(D, B), not p0(D, E).
+p3(b, "\xc3\xa9") :- not p4(c, c, d, a), not p2(c).
+p0(b, "a").
+p3(A, B) :- p0(A, B), p4(D, A, B, A), p0(C, D).
+p4(C, B, A, A), not p1, A > B?

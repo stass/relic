@@ -1,6 +1,10 @@
-% Architecture section 14: a head variable that no positive body literal
-% binds.  Y is reported as a singleton as well, because it is a separate
-% mistake rather than a consequence of the first.
+% A head variable that no positive body literal binds is an error.  Y is
+% reported as a singleton as well, because it is a separate mistake rather
+% than a consequence of the first.  A predicate name longer than 43 bytes is
+% cut to 40 in a message and marked with "...": the first of the two long
+% names below fits, and the second, a byte longer, is cut.
 bar(a).
 foo(X) :-
     bar(Y).
+abcdefghijabcdefghijabcdefghijabcdefghijabc(X) :- bar(a).
+abcdefghijabcdefghijabcdefghijabcdefghijabcd(X) :- bar(a).

@@ -37,6 +37,11 @@
 /build-lsan/
 /build-msan/
 /build-ubsan/
+/build-coverage/
+
+# A fuzzing run's working corpus and the inputs it found.
+/fuzz-artifacts/
+/fuzz-corpus/
 
 # Automake's per-directory build marker, one per directory holding objects.
 .dirstamp
@@ -52,6 +57,13 @@
 /tests/unit/test_*
 !/tests/unit/test_*.c
 !/tests/unit/test_*.cc
+
+# The randomized suite's driver and the fuzz targets, in both their
+# libFuzzer and their replay builds.
+/tests/random/random
+/tests/fuzz/fuzz_*
+/tests/fuzz/replay_*
+!/tests/fuzz/*.c
 
 # Release tarballs and the directories distcheck unpacks them into.
 /relic-*.tar.*

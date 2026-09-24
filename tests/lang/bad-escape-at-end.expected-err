@@ -1,0 +1,1 @@
+bad-escape-at-end.dl:5:5: error: unknown escape sequence 'q' in a string literal

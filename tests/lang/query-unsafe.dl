@@ -1,6 +1,8 @@
 % A query is checked like a rule: every variable it names must be bound by a
-% positive literal, so this program is rejected and nothing is answered.
+% positive literal, and `_` may appear only as an argument of one, so this
+% program is rejected and nothing is answered.
 edge(a, b).
 
 edge(X, Y)?
 edge(X, _), Y < X?
+edge(X, _), not edge(_, X)?

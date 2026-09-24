@@ -329,6 +329,30 @@ tuples and nothing else.
 | `lib/eval.c` | a component's base plans are its rules with bodies; one base pass walks its rules in program order, inserting a fact's constant head through the same insertion an `EMIT` makes, so counters and tuple order are unchanged; a fact's head is confirmed to be constants of the relation's arity once per evaluation; an evaluation names its first component, and a query's rewrite and plan name the query, before they allocate |
 | `tests/` | `test_plan`: 60 generated programs of up to 30 literals, with repeated relations and variables, constants, wildcards, empty relations, comparisons and negations, ordered from nothing bound, from a generated bound set, and with generated relations assumed still derived, under the default planner and `-X no-reorder`, against a step-by-step reference written in the test; every golden `-e` output is unchanged; `test_arena`: a charged arena's account holds what it holds, through an oversize chunk and a reset, an uncharged one is not counted, and the limit refuses a chunk the store leaves no room for, stickily and recorded once, and the next chunk past it; `test_diag`: a refusal is reported as the limit with its activity, once, and forgotten by a new activity or operation; `test_query`: a recursive body's variants refused while planning its component, a long query refused while planning it, a rewrite refused while rewriting and not answered from the whole program, an admitted rewrite giving back its arenas, 20 000 facts evaluating within 16 KB of their relation, and a fact between rules inserting in its turn; `tests/cli.sh`: a one-byte limit refused while rewriting, a 3000-byte one while planning, and a limit admitting the plans and tuples refusing the index; `tests/perf.sh`: a recursive body of 8000 literals with 500 delta variants, and an 8000-literal body under 125 bound patterns, each within a fortieth of the budget and at least five seconds, about a second each where the step-by-step order took over 300 s and 153 s, and each refused under a 16 MiB limit with the limit's message within the same budget |
 
+**Generated programs, fuzzing, coverage and benchmarks, stage S13.** Test
+machinery that looks for the bugs the curated corpus cannot find, specified
+in `specs/design-hardening.md`.
+
+| Component | State |
+| --- | --- |
+| `tests/random/generate.c` | a program of up to eight predicates, 96 rules and four queries from one 64-bit seed through splitmix64; arity 0 to 4; extensional predicates at level 0, derived ones at 1 to 3, a positive literal reading at or below its head's level and a negated one strictly below, so every program is stratified; each derived predicate's first rule reading only lower levels; positive literals drawn first and every other variable from theirs, so every program is safe; symbols, integers including both extremes, and strings needing escapes; all six comparisons; atom and conjunctive queries |
+| `tests/random/program.c` | the model's safety check, its printer, and the shrinker's four edits: drop a query, a rule, a body literal, or a predicate's column everywhere |
+| `tests/random/compare.c`, `answer.c` | each program loaded and checked in one context per strategy -- default, naive, no-index, no-reorder, no-magic, the three combined with no-magic, and materialized; answers rendered to text, sorted and compared with the default's; tuple totals compared with the reference strategy's; a refused program, a failed query, differing answers and differing totals each a failure kind |
+| `tests/random/main.c`, `shrink.c` | each program run in a forked child under an alarm, announcing each strategy and then its verdict on a pipe; a signal a crash or a hang, a nonzero status or a missing verdict abnormal, each charged to the strategy running and keeping its signal or status; a failure shrunk greedily while kind, strategy and signal hold, printed with its seed, and optionally written out; `-F` injects a fault and requires it found and shrunk to four statements or fewer |
+| `tests/fuzz/` | `fuzz_load` loads and checks its input; `fuzz_eval` also answers every query under the default configuration and under naive without Magic, with tuple and memory limits, and aborts when both succeed with different answers; each linked with libFuzzer under `--enable-fuzzers` and always with a replay driver `make check` runs over `tests/lang` and `tests/fuzz/corpus`; a token dictionary |
+| `tests/coverage-report.sh` | lines and functions per file of `lib/` and `cmd/relic/`, unioned over every object compiled from the file, with every function never entered and every range never executed |
+| `bench/run.sh` | chain, random graph, grid, same-generation tree, negation-heavy task graph and a large fact file, generated with `awk`, each timed once with its `-X stats` counters |
+| `Makefile.am`, `m4/relic_sanitizers.m4` | `--enable-fuzzers`, refused where the compiler cannot link a libFuzzer target; `make check-random` over `RELIC_SEEDS` seeds from `RELIC_SEED_START`, a thousand from 1 by default; `make fuzz` for `FUZZ_SECONDS` a target; `make coverage` in a static instrumented tree beside the build |
+
+`make check` runs the self-test, fifty seeds and the corpus replay. A
+thousand seeds pass in about six seconds and ten thousand pass clean. Each
+fuzz target ran for twenty minutes under AddressSanitizer,
+UndefinedBehaviorSanitizer and LeakSanitizer -- 6.9 million inputs through
+the load target and 775,000 through the eval target -- with no finding. Four
+bugs planted in a copy of the engine were each found within a few dozen
+seeds and shrunk to five statements or fewer. The coverage report reaches
+96 percent of lines; `docs/todo-coverage.md` sorts the rest.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -563,15 +587,16 @@ The Magic suites were confirmed the same way:
 | `specs/design-magic.md` | what a query reads completely, adornments and names, sideways information passing, generated rules, termination, limits, evaluation, explain |
 | `specs/design-api.md` | the public interface: values, programmatic facts, queries and results, callbacks and re-entry, diagnostics, exported symbols, versioning |
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats, `-n`, verbosity, the interactive mode |
+| `specs/design-hardening.md` | the program generator, the differential driver, the shrinker, the fuzz targets, coverage and benchmarks |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S13, differential and fuzz hardening: a generator of programs and a
-shrinker, fuzz targets for the parser and the evaluator, `make check-random`
-and `make coverage`.
+Stage S14, documentation, packaging and release: the complete manual pages,
+a `README.md`, `NEWS`, `LICENSE`, the `contrib/` port skeletons and the
+release tarball.
 
 ## Decisions taken
 

@@ -1,3 +1,8 @@
+% A bad escape is reported once, and the rest of its literal is still read
+% as a string: an escaped quote after it does not end the literal, and an
+% escaped backslash does not escape the quote that does.
 name(user1, "Al\qice").
 hex(user2, "\xg0").
 short(user3, "\x7").
+skipped(user4, "\q\"x").
+after(user5, "\q\\").

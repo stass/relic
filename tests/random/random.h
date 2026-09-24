@@ -1,0 +1,246 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#ifndef RELIC_TEST_RANDOM_H
+#define RELIC_TEST_RANDOM_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+/*
+ * The randomized differential suite.
+ *
+ * A seed generates a program that is safe and stratified by construction.
+ * The program is run under every evaluation strategy the library offers, in
+ * a child process, and every strategy must give the default's answers and,
+ * where it evaluates the same rules, hold as many tuples.  A program that
+ * fails is shrunk to a small one that fails the same way.
+ *
+ * The program model below is the generator's own rather than the library's
+ * syntax tree, so that a mistake in the library's representation cannot be
+ * repeated by the generator and hidden by the agreement of the two.
+ */
+
+/*
+ * Sizes of the model.  They are far inside the library's structural limits
+ * -- arity 32 and 64 variables per rule -- so no limit can refuse a generated
+ * program, and small enough that every relation stays small and a program
+ * runs in milliseconds under every strategy.
+ */
+#define	RANDOM_MAX_PREDICATES	8
+#define	RANDOM_MAX_ARITY	4
+#define	RANDOM_MAX_VARIABLES	6
+#define	RANDOM_MAX_BODY		7
+#define	RANDOM_MAX_RULES	96
+#define	RANDOM_MAX_QUERIES	4
+
+typedef enum random_term_kind {
+	TERM_VARIABLE,		/* index names the variable: A, B, ... */
+	TERM_ANONYMOUS,		/* `_`, a distinct variable at every occurrence */
+	TERM_CONSTANT		/* index is a position in the constant pool */
+} random_term_kind_t;
+
+typedef struct random_term random_term_t;
+
+struct random_term {
+	random_term_kind_t	kind;
+	uint8_t			index;
+};
+
+typedef enum random_literal_kind {
+	LITERAL_POSITIVE,
+	LITERAL_NEGATED,
+	LITERAL_COMPARISON
+} random_literal_kind_t;
+
+typedef enum random_comparator {
+	COMPARE_EQ,
+	COMPARE_NE,
+	COMPARE_LT,
+	COMPARE_LE,
+	COMPARE_GT,
+	COMPARE_GE,
+	COMPARE_COUNT
+} random_comparator_t;
+
+/*
+ * A body literal.  A relational literal, positive or negated, reads its
+ * predicate's arity from the program's predicate table and holds that many
+ * arguments.  A comparison holds its two operands in the first two argument
+ * slots.
+ */
+typedef struct random_literal random_literal_t;
+
+struct random_literal {
+	random_literal_kind_t	kind;
+	random_comparator_t	comparator;	/* comparisons only */
+	uint8_t			predicate;	/* relational literals only */
+	random_term_t		args[RANDOM_MAX_ARITY];
+};
+
+/*
+ * A body is a rule's or a query's conjunction of literals.
+ */
+typedef struct random_body random_body_t;
+
+struct random_body {
+	size_t			length;
+	random_literal_t	literals[RANDOM_MAX_BODY];
+};
+
+/* A rule; a fact is a rule whose body is empty and whose head is ground. */
+typedef struct random_rule random_rule_t;
+
+struct random_rule {
+	uint8_t			head_predicate;
+	random_term_t		head[RANDOM_MAX_ARITY];
+	random_body_t		body;
+};
+
+/*
+ * A predicate is named `p` and its index.  Its level is what makes every
+ * generated program stratified: a rule for a predicate at level h reads
+ * positively only predicates at levels up to h, and negatively only those
+ * below h, so along any cycle of dependencies the level never falls and
+ * therefore no cycle runs through a negation.
+ */
+typedef struct random_predicate random_predicate_t;
+
+struct random_predicate {
+	uint8_t		arity;
+	uint8_t		level;
+};
+
+typedef struct random_program random_program_t;
+
+struct random_program {
+	size_t			predicate_count;
+	random_predicate_t	predicates[RANDOM_MAX_PREDICATES];
+	size_t			rule_count;
+	random_rule_t		rules[RANDOM_MAX_RULES];
+	size_t			query_count;
+	random_body_t		queries[RANDOM_MAX_QUERIES];
+};
+
+/*
+ * A constant: its type as the library will report it, and the text a
+ * program spells it with.
+ */
+typedef enum random_constant_type {
+	CONSTANT_SYMBOL,
+	CONSTANT_STRING,
+	CONSTANT_INTEGER
+} random_constant_type_t;
+
+typedef struct random_constant random_constant_t;
+
+struct random_constant {
+	random_constant_type_t	 type;
+	const char		*spelling;
+};
+
+extern const random_constant_t	random_constants[];
+extern const size_t		random_constant_count;
+
+/* generate.c */
+void	random_generate(random_program_t *program, uint64_t seed);
+
+/* program.c */
+bool	random_program_is_safe(const random_program_t *program);
+size_t	random_program_statements(const random_program_t *program);
+char	*random_program_text(const random_program_t *program);
+void	random_program_write(const random_program_t *program, FILE *out);
+
+void	random_remove_query(random_program_t *program, size_t query);
+void	random_remove_rule(random_program_t *program, size_t rule);
+void	random_remove_literal(random_body_t *body, size_t literal);
+void	random_remove_column(random_program_t *program, size_t predicate,
+	    size_t column);
+
+/*
+ * The evaluation strategies every program is run under.  compare.c holds
+ * what each one configures; STRATEGY_NONE stands for no strategy, as the
+ * reference of one that has none and as the culprit of a failure that
+ * happened outside every strategy's run.
+ */
+typedef enum random_strategy {
+	STRATEGY_DEFAULT,
+	STRATEGY_NAIVE,
+	STRATEGY_NO_INDEX,
+	STRATEGY_NO_REORDER,
+	STRATEGY_NO_MAGIC,
+	STRATEGY_NAIVE_NO_MAGIC,
+	STRATEGY_NO_INDEX_NO_MAGIC,
+	STRATEGY_NO_REORDER_NO_MAGIC,
+	STRATEGY_MATERIALIZED,
+	STRATEGY_COUNT,
+	STRATEGY_NONE = STRATEGY_COUNT
+} random_strategy_t;
+
+/*
+ * The kinds of failure a run can end in.  compare.c finds the first four;
+ * main.c, which runs the comparison in a child, finds the rest from how the
+ * child ended.
+ */
+typedef enum random_failure_kind {
+	FAILURE_NONE,
+	FAILURE_REJECTED,	/* the library refused a generated program */
+	FAILURE_QUERY,		/* a query failed with no limit configured */
+	FAILURE_ANSWERS,	/* a strategy's answer differs from default */
+	FAILURE_TOTALS,		/* a strategy's tuple total differs */
+	FAILURE_LAST_VERDICT = FAILURE_TOTALS,	/* the last compare.c finds */
+	FAILURE_CRASH,		/* the child was killed by a signal */
+	FAILURE_HANG,		/* the child ran past its alarm */
+	FAILURE_ABNORMAL	/* the child exited without its verdict */
+} random_failure_kind_t;
+
+/*
+ * A failure: its kind, the strategy that failed or was running when the
+ * child died, and for a crash the signal and for an abnormal exit the exit
+ * status, so that two crashes of different causes are different failures.
+ */
+typedef struct random_failure random_failure_t;
+
+struct random_failure {
+	random_failure_kind_t	kind;
+	random_strategy_t	strategy;
+	int			code;		/* signal or exit status */
+};
+
+typedef struct random_options random_options_t;
+
+struct random_options {
+	/*
+	 * Drop one row from the naive strategy's answer to every query that
+	 * has one, so that the self-test can show a disagreement is found.
+	 */
+	bool		inject_fault;
+	unsigned int	timeout_seconds;
+};
+
+/* Called as each strategy's run begins, and with STRATEGY_NONE after all. */
+typedef void	random_announce_fn(void *announce_ctx,
+		    random_strategy_t strategy);
+
+/* compare.c */
+const char	*random_strategy_name(random_strategy_t strategy);
+random_failure_t random_compare(const random_program_t *program,
+		    const random_options_t *options, FILE *report,
+		    random_announce_fn *announce, void *announce_ctx);
+
+/* main.c */
+random_failure_t random_run_isolated(const random_program_t *program,
+		    const random_options_t *options, bool show_report);
+bool		 random_failure_equal(random_failure_t a, random_failure_t b);
+const char	*random_failure_name(random_failure_kind_t kind);
+
+/* shrink.c */
+void	random_shrink(random_program_t *program, random_failure_t failure,
+	    const random_options_t *options);
+
+#endif /* RELIC_TEST_RANDOM_H */

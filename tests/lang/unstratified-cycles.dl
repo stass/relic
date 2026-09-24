@@ -15,6 +15,10 @@
 % m/1 and n/1 negate each other.  The fact mentions n/1 first, so the
 % analysis meets n/1's negative edge before m/1's, and the error is still at
 % m/1's rule, because it is written first.
+%
+% u/1 negates w/1 and then itself, both in one rule and both in one
+% component.  The note names the negative literal written first, although
+% the other closes a shorter cycle.
 n(y).
 base(x).
 
@@ -29,3 +33,6 @@ lonely(X) :- base(X), not lonely(X).
 
 m(X) :- base(X), not n(X).
 n(X) :- base(X), not m(X).
+
+u(X) :- base(X), not w(X), not u(X).
+w(X) :- u(X).

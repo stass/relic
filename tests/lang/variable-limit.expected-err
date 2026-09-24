@@ -1,1 +1,3 @@
-variable-limit.dl:11:7: error: rule ok/1 uses more than 64 distinct variables
+variable-limit.dl:13:7: error: rule ok/1 uses more than 64 distinct variables
+variable-limit.dl:18:5: error: rule compared/1 uses more than 64 distinct variables
+variable-limit.dl:22:3: error: the query uses more than 64 distinct variables

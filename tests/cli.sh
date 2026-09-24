@@ -120,6 +120,22 @@ if ! cmp -s "$work/partial.expected" "$work/partial.txt"; then
 	fail "a query failing in evaluation left '$(cat "$work/partial.txt")'"
 fi
 
+# -n writes no rows, and a query that fails under it fails the run all the
+# same: counting the answers is still answering the query.
+status=0
+diagnostic=$("$RELIC" -n -l tuples=7 -q 'edge(X, Y)?' -q 'path(X, Y)?' \
+    "$work/graph.dl" 2>&1 >/dev/null) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a query failing under -n exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"limit exceeded: tuples=7"*)
+	;;
+*)
+	fail "a query failing under -n was reported as '$diagnostic'"
+	;;
+esac
+
 # -X accepts only the behaviours that exist.  Any other name is a usage error
 # naming it, rather than a no-op that would let a comparison run a strategy
 # against itself and pass.
@@ -289,5 +305,38 @@ status=0
 if [ "$status" -ne 1 ]; then
 	fail "a missing file exited $status, expected 1"
 fi
+
+# A directory opens for reading on the systems relic runs on, and reading it
+# fails.  That is an error in the input like a missing file, and it names the
+# operand; the reason is the system's, and its wording is not compared.
+status=0
+diagnostic=$("$RELIC" "$work" 2>&1 >/dev/null) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a directory operand exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"cannot read $work: "?*)
+	;;
+*)
+	fail "a directory operand was reported as '$diagnostic'"
+	;;
+esac
+
+# An unknown option is named in the usage error, and a byte that would not
+# print is named by its value in hexadecimal instead of written to the
+# terminal.
+status=0
+diagnostic=$("$RELIC" "-$(printf '\001')" "$work/graph.dl" 2>&1 \
+    >/dev/null) || status=$?
+if [ "$status" -ne 2 ]; then
+	fail "an unprintable option exited $status, expected 2"
+fi
+case "$diagnostic" in
+*"unknown option -- \\x01"*)
+	;;
+*)
+	fail "an unprintable option was reported as '$diagnostic'"
+	;;
+esac
 
 exit 0

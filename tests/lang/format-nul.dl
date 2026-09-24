@@ -1,0 +1,9 @@
+% A string holding NUL bytes is written as a literal that spells them with
+% the \0 escape, so that neither a terminal nor a line-oriented reader meets
+% a NUL.  The csv and tsv formats copy a string's bytes as they are, which is
+% why these strings are not among the values the other format tests share.
+v(1, "\0").
+v(2, "nul\0inside\0").
+v(3, "\x00\x01").
+
+v(N, V)?

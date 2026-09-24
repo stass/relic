@@ -6,8 +6,8 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S12, the REPL and command-line
-completion, landed; S13, differential and fuzz hardening, next.
+`relic-plan.md`. Current position: S13, differential and fuzz hardening,
+landed; S14, documentation, packaging and release, next.
 
 ## Build and packaging
 
@@ -28,20 +28,6 @@ at `LIBOBJDIR`. A convenience library carrying `$(LTLIBOBJS)` as its only
 empty convenience library builds cleanly on every platform (a platform with
 no replacements) needs checking first, and a check script rejecting
 `$(LIBOBJS)` is the cheaper fallback.
-
-**`--enable-fuzzers` is not implemented.** [Medium, component:
-`configure.ac`] `specs/architecture.md` section 65.3 lists it, but the fuzz
-targets it would build arrive in S13. `make coverage` and `make check-random`
-of section 65.4 are deferred to S13 for the same reason.
-
-`relic-plan.md` lists a parser fuzz target under S2 as well, and it was
-deferred to S13 with the rest rather than adding build machinery that nothing
-else would use for eleven stages; libFuzzer is also unavailable with Apple
-clang, which is the only toolchain exercised so far. The malformed corpus in
-`tests/lang/` and `tests/unit/test_lex.c` cover the front end's rejection
-paths in the meantime, but neither is a substitute for a fuzzer, and the
-parser is the component most exposed to input nobody chose. Build the parser
-target first when S13 starts.
 
 **`--enable-lsan` is not in the architecture's option list.** [Low, component:
 `specs/architecture.md`] Section 65.4 specifies a `make check-lsan` target but
@@ -506,6 +492,14 @@ rule for later stages rather than a defect: an invariant that must hold in a
 release build needs an explicit check and a diagnostic, not an `assert()`.
 The append-only invariant of D-10 is the first one this applies to.
 
+**Coverage gaps.** [Medium, component: `tests/`] `make coverage` reaches
+96 percent of the library's and the tool's lines. What it does not reach is
+sorted in `docs/todo-coverage.md`: arena allocation failures the exhaustion
+sweep cannot land on, which one arena-level fault point would reach; the
+tool's allocation failures, which nothing injects; two `fclose(3)` failures
+no portable test can cause; defensive branches, three of which have lost
+their reason to exist; and the terminal path.
+
 **Allocation-failure coverage must grow with each stage.** [Medium,
 component: `tests/unit/test_exhaustion.c`] The suite compiles the library
 against an allocator that refuses the nth request and sweeps n across symbol
@@ -594,7 +588,7 @@ with the header's declaration would close it.
 `include/relic.h`] `relic_config_t` and `relic_stats_t` are complete
 structures the caller allocates, so appending a field changes the size a
 caller compiled against, and the library's version-info must then start a
-new major version: a step limit, or a counter S13 wants, forces every
+new major version: a step limit, or any new counter, forces every
 embedder to rebuild. Passing the size the caller compiled against was
 considered and not taken; revisit if the first such change is expensive.
 
@@ -610,7 +604,10 @@ evaluation of a schedule to be told whose it is.
 `lib/relation.c`, `lib/magic.c`, `lib/diag.c`] `limit exceeded: %s=%zu while
 %s` is written by the relation store, the Magic rewrite and
 `relic_diag_no_memory()`. One `relic_diag_limit()` would make "the form every
-limit shares" hold by construction.
+limit shares" hold by construction. The eval fuzz target already depends on
+the form, telling a limit's refusal from a failure by the prefix `limit
+exceeded:`, so a limit worded otherwise would read as a finding there; an
+error class a caller can ask for would free both from the text.
 
 ## Security residuals
 
@@ -650,6 +647,17 @@ Deciding derives-nothing on the draft before `canonicalize()` closes the
 memory by construction; not recording, and not cutting before, a call whose
 adornment and bound arguments are the head's own closes the hidden
 tautology as well.
+
+**No limit bounds the work of a join.** [Low, component: `lib/eval.c`,
+`include/relic.h`] The limits count tuples held and bytes allocated, and a
+join over small relations whose every result is a duplicate -- a cross
+product of a few thousand tuples projected onto one column -- stays inside
+both while its time grows with the product. `specs/design-api.md` leaves a
+step or time limit out deliberately, so an embedder evaluating untrusted
+programs has to bound the time itself, and the eval fuzz target leans on
+libFuzzer's `-timeout` for the same reason. Adding one is the
+`relic_config_t` change the item above describes; decide before 1.0
+whether it belongs in the frozen interface.
 
 **csv and tsv carry raw control bytes.** [Low, component:
 `cmd/relic/output.c`] The text format writes a string as a quoted literal with

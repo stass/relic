@@ -1084,6 +1084,54 @@ enumerated.
 
 **Budget.** 500 lines of test code.
 
+**Decided during the stage.** Seven decisions were taken when S13 landed,
+each recorded in `specs/design-hardening.md`:
+
+* **The differential driver is a C program over the public interface.** It
+  builds each program as a model of its own, not `lib/ast.h`, prints it, and
+  runs it in one context per strategy through `relic_create_config()`, so
+  the four equivalences are checked without a process per strategy and the
+  shrinker edits the model rather than text. The harness still needs no
+  private entry point: every strategy it runs is a public flag.
+* **Tuple totals are a second oracle.** Answers do not see a relation no
+  query reads; each strategy's `relic_stats()` total is held to the strategy
+  that evaluates the same rules, as `tests/equiv/strategies.sh` holds them.
+  `no-reorder` is held to answers only, since with the rewrite the planner's
+  order changes the rules generated.
+* **Every program runs in a child that announces its strategies.** The
+  child names each strategy on a pipe before running it and sends its
+  verdict at the end, so a crash, a hang or a sanitizer report is charged to
+  the strategy that was running, and its signal or status is kept. The
+  shrinker preserves all three, so a reduction cannot slide to another bug,
+  and no exit status a sanitizer chooses can be read as a verdict.
+* **`make check` runs a small fixed set.** The fault-injection self-test,
+  fifty seeds and the replay of the fuzz corpus run in every build; `make
+  check-random` runs a thousand seeds by default and more on request.
+* **Fuzz targets are replayed everywhere.** Each target links twice: with
+  libFuzzer under `--enable-fuzzers`, which fails where the compiler has no
+  libFuzzer, and always with a replay driver that `make check` runs over
+  `tests/lang` and `tests/fuzz/corpus`. The eval target compares the default
+  configuration with `RELIC_F_NAIVE | RELIC_F_NO_MAGIC` under tuple and memory
+  limits, and aborts when both succeed with different answers.
+* **The coverage report unions every object built from a file.** The
+  allocation-failure suite compiles the library a second time, and only that
+  copy runs the failure paths, so a report of either copy alone would list
+  every error path as a gap.
+* **The harness is validated against planted bugs.** A self-test proves only
+  that a disagreement is reported. Four mutations of the engine -- in the
+  delta scan, component gains, index lookup and the supplementary Magic
+  construction -- were each found within a few dozen seeds and shrunk to five
+  statements or fewer before the stage landed.
+
+The two security residuals S12 left to S13 were settled by D-18 and D-19
+before the stage began.
+
+The stage is about 1780 non-comment lines of C against a budget of 500, and
+about 400 of shell: the generator is 430, the driver and its failure
+reporting 650, the shrinker and program edits 450, and the fuzz targets and
+their replay driver 250. The budget assumed a shell driver over `-X`; the
+model, the isolation and the shrinker's edits are what the overrun buys.
+
 ---
 
 ### S14 - Documentation, packaging, release  (M5)

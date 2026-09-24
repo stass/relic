@@ -1,0 +1,4 @@
+% The input ends with a backslash inside a string literal, with no newline
+% after it: the escape it begins is cut off with the literal, which is
+% reported as unterminated.
+p("abc\

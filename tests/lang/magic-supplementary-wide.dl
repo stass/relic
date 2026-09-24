@@ -1,0 +1,39 @@
+% A rule whose prefix before its second demand call has 33 live variables,
+% one more than a predicate can have columns.  The query binds the first
+% column of h/32; the body reads a/32, which binds X1 to X32, and calls c/1
+% and c2/2 on demand.  Whichever call the planner puts second, every one of
+% X1 to X33 is still needed there, by the head or by the call itself, so the
+% prefix is left uncut and the rule is rewritten as one with no
+% supplementary predicate.  Every strategy must give the answers of the
+% whole fixed point: only X33 = 3 satisfies a2, c and c2 together, and
+% only for X1 = 1.
+
+a(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1).
+a(1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+  2, 2, 2, 2, 2, 2, 2, 2).
+a(2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+  2, 2, 2, 2, 2, 2, 2, 2).
+a2(1).
+a2(3).
+e(1).
+e(3).
+link(1, 3).
+
+c(X) :- e(X).
+c2(X, Y) :- link(X, Y).
+
+h(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17,
+  X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, X31,
+  X32) :-
+    a(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16,
+      X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
+      X31, X32),
+    a2(X33),
+    c(X33),
+    c2(X1, X33).
+
+h(1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17,
+  X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, X31, X32)?
+h(2, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17,
+  X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, X31, X32)?

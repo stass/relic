@@ -1,0 +1,114 @@
+% The Magic rewrite drops a generated rule equal to one it has kept, and must
+% keep every rule that differs, however little.
+%
+% s/2 has a rule written twice, whose second copy is dropped, and two rules
+% that differ from it only in a comparison: in its operator, or in an operand
+% that is a constant rather than a variable.  Were either taken for the
+% first, s(3, Y)? or s(2, Y)? would lose its answer.
+%
+% p/1 has forty pairs of rules whose last literals differ only in being
+% negated.  Their adorned copies are indexed by a hash and found by linear
+% probing, which compares every rule in a run of occupied slots, so rules of
+% different kinds are compared many times over.  Were a negated literal taken
+% for its positive twin, p(2)? would be false and p(X)? would answer 1 alone.
+
+e2(1, 2).
+e2(2, 2).
+e2(3, 1).
+
+s(X, Y) :- e2(X, Y), X < Y.
+s(X, Y) :- e2(X, Y), X < Y.
+s(X, Y) :- e2(X, Y), X > Y.
+s(X, Y) :- e2(X, Y), X < 3.
+
+e(1).
+e(2).
+e(3).
+q(1, 0).
+
+p(X) :- e(X), q(X, 0).
+p(X) :- e(X), not q(X, 0).
+p(X) :- e(X), q(X, 1).
+p(X) :- e(X), not q(X, 1).
+p(X) :- e(X), q(X, 2).
+p(X) :- e(X), not q(X, 2).
+p(X) :- e(X), q(X, 3).
+p(X) :- e(X), not q(X, 3).
+p(X) :- e(X), q(X, 4).
+p(X) :- e(X), not q(X, 4).
+p(X) :- e(X), q(X, 5).
+p(X) :- e(X), not q(X, 5).
+p(X) :- e(X), q(X, 6).
+p(X) :- e(X), not q(X, 6).
+p(X) :- e(X), q(X, 7).
+p(X) :- e(X), not q(X, 7).
+p(X) :- e(X), q(X, 8).
+p(X) :- e(X), not q(X, 8).
+p(X) :- e(X), q(X, 9).
+p(X) :- e(X), not q(X, 9).
+p(X) :- e(X), q(X, 10).
+p(X) :- e(X), not q(X, 10).
+p(X) :- e(X), q(X, 11).
+p(X) :- e(X), not q(X, 11).
+p(X) :- e(X), q(X, 12).
+p(X) :- e(X), not q(X, 12).
+p(X) :- e(X), q(X, 13).
+p(X) :- e(X), not q(X, 13).
+p(X) :- e(X), q(X, 14).
+p(X) :- e(X), not q(X, 14).
+p(X) :- e(X), q(X, 15).
+p(X) :- e(X), not q(X, 15).
+p(X) :- e(X), q(X, 16).
+p(X) :- e(X), not q(X, 16).
+p(X) :- e(X), q(X, 17).
+p(X) :- e(X), not q(X, 17).
+p(X) :- e(X), q(X, 18).
+p(X) :- e(X), not q(X, 18).
+p(X) :- e(X), q(X, 19).
+p(X) :- e(X), not q(X, 19).
+p(X) :- e(X), q(X, 20).
+p(X) :- e(X), not q(X, 20).
+p(X) :- e(X), q(X, 21).
+p(X) :- e(X), not q(X, 21).
+p(X) :- e(X), q(X, 22).
+p(X) :- e(X), not q(X, 22).
+p(X) :- e(X), q(X, 23).
+p(X) :- e(X), not q(X, 23).
+p(X) :- e(X), q(X, 24).
+p(X) :- e(X), not q(X, 24).
+p(X) :- e(X), q(X, 25).
+p(X) :- e(X), not q(X, 25).
+p(X) :- e(X), q(X, 26).
+p(X) :- e(X), not q(X, 26).
+p(X) :- e(X), q(X, 27).
+p(X) :- e(X), not q(X, 27).
+p(X) :- e(X), q(X, 28).
+p(X) :- e(X), not q(X, 28).
+p(X) :- e(X), q(X, 29).
+p(X) :- e(X), not q(X, 29).
+p(X) :- e(X), q(X, 30).
+p(X) :- e(X), not q(X, 30).
+p(X) :- e(X), q(X, 31).
+p(X) :- e(X), not q(X, 31).
+p(X) :- e(X), q(X, 32).
+p(X) :- e(X), not q(X, 32).
+p(X) :- e(X), q(X, 33).
+p(X) :- e(X), not q(X, 33).
+p(X) :- e(X), q(X, 34).
+p(X) :- e(X), not q(X, 34).
+p(X) :- e(X), q(X, 35).
+p(X) :- e(X), not q(X, 35).
+p(X) :- e(X), q(X, 36).
+p(X) :- e(X), not q(X, 36).
+p(X) :- e(X), q(X, 37).
+p(X) :- e(X), not q(X, 37).
+p(X) :- e(X), q(X, 38).
+p(X) :- e(X), not q(X, 38).
+p(X) :- e(X), q(X, 39).
+p(X) :- e(X), not q(X, 39).
+
+s(1, Y)?
+s(2, Y)?
+s(3, Y)?
+p(2)?
+p(X)?

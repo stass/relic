@@ -148,6 +148,46 @@ AS_VAR_IF([enable_coverage], [yes],
 	[RELIC_SAN_CFLAGS="$RELIC_SAN_CFLAGS --coverage"],
 	[AC_MSG_ERROR([--enable-coverage was requested but $CC cannot build with it])])])
 
+dnl The fuzz targets are linked with libFuzzer, whose main() drives them, and
+dnl the probe therefore links a program that defines the entry point and no
+dnl main().  Everything else is compiled with the coverage instrumentation
+dnl libFuzzer steers by, which -fsanitize=fuzzer-no-link adds without
+dnl linking libFuzzer's main() into every program.  The option fails where
+dnl the compiler lacks libFuzzer, Apple's clang among them, rather than
+dnl building a tree with nothing to fuzz.
+AC_ARG_ENABLE([fuzzers],
+    [AS_HELP_STRING([--enable-fuzzers],
+	[build the libFuzzer targets in tests/fuzz, clang only (default: no)])],
+    [], [enable_fuzzers=no])
+
+_RELIC_REQUIRE_YES_NO([enable-fuzzers], [$enable_fuzzers])
+
+AS_VAR_IF([enable_fuzzers], [yes],
+    [AC_CACHE_CHECK([whether $CC can build libFuzzer targets],
+	[relic_cv_fuzzers],
+	[relic_saved_CFLAGS=$CFLAGS
+	 relic_saved_LDFLAGS=$LDFLAGS
+	 CFLAGS="$CFLAGS -fsanitize=fuzzer"
+	 LDFLAGS="$LDFLAGS -fsanitize=fuzzer"
+	 AC_LINK_IFELSE([AC_LANG_SOURCE([[
+#include <stddef.h>
+#include <stdint.h>
+int LLVMFuzzerTestOneInput(const uint8_t *, size_t);
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+{
+	return (data != NULL && size > 0 ? 0 : 0);
+}
+]])],
+	    [relic_cv_fuzzers=yes],
+	    [relic_cv_fuzzers=no])
+	 CFLAGS=$relic_saved_CFLAGS
+	 LDFLAGS=$relic_saved_LDFLAGS])
+     AS_VAR_IF([relic_cv_fuzzers], [yes],
+	[RELIC_SAN_CFLAGS="$RELIC_SAN_CFLAGS -fsanitize=fuzzer-no-link"],
+	[AC_MSG_ERROR([--enable-fuzzers was requested but $CC cannot link a libFuzzer target])])])
+
+AM_CONDITIONAL([RELIC_FUZZERS], [test "x$enable_fuzzers" = xyes])
+
 AC_SUBST([RELIC_SAN_CFLAGS])
 
 _RELIC_TRY_SANITIZER([asan_probe], [-fsanitize=address], [-fsanitize=address],

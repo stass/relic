@@ -1,0 +1,33 @@
+p0(b, "a", c, 1).
+p2(a, d, a, c).
+p1(0, c, 0).
+p1(0, b, d).
+p0("a", 0, "a", "\xc3\xa9").
+p0(d, a, d, "a").
+p1(0, "a", d).
+p1(d, b, 0).
+p2(a, "a", d, 0).
+p3(A, E) :- p2(C, E, F, A), p0(D, E, F, C), p0(C, A, B, E).
+p1("a", 1, d).
+p5(B, A) :- p2(B, B, A, B), p2(A, A, A, B), not p0(B, A, B, "a"), not p0(A, B, A, B).
+p1(b, a, a).
+p0(d, z_Z9, d, b).
+p2(a, a, 1, 1).
+p2(c, b, b, c).
+p2(b, z_Z9, a, "a").
+p1(0, 0, d).
+p1("a", c, a).
+p0(a, b, b, d).
+p0(c, d, b, "\xc3\xa9").
+p1(a, d, "a").
+p4(C, D, A, C) :- p4(D, C, C, A).
+p0("a", "a", c, c).
+p2(-9223372036854775808, d, 0, "a").
+p0(d, c, c, "a").
+p1(0, d, "a").
+p4(E, C, F, D) :- p1(F, D, C), p2(E, E, E, C).
+p2(c, "a", "a", a).
+p5(A, "a") :- p5(C, E), p0(C, D, A, B), p2(D, E, 0, d).
+p0(0, a, c, "a").
+p4(_, C, D, B), D > B?
+p5(B, B)?

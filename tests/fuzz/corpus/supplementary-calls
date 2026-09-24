@@ -1,0 +1,8 @@
+e(a, b). e(b, c). e(c, d). e(d, a). e(b, e).
+path(X, Y) :- e(X, Y).
+path(X, Z) :- e(X, Y), path(Y, Z).
+walk(A, D) :- path(A, B), path(B, C), path(C, D), not e(A, D), A != D.
+same(X, Y) :- e(P, X), e(P, Y).
+same(X, Y) :- e(P, X), same(P, Q), e(Q, Y).
+walk(a, X)?
+same(b, X), path(X, Y), Y < c?

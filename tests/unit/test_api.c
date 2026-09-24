@@ -16,8 +16,10 @@
  * not outlive its delivery, every diagnostic reaches the callback and none
  * reaches standard error, a value is built only from bytes its type can
  * hold, a fact added through the interface is the fact its text would load,
- * a collected result is the stream, kept, and a mixed-type comparison is
- * noted once per rule and only when asked for.
+ * a collected result is the stream, kept, a mixed-type comparison is noted
+ * once per rule and only when asked for, a missing argument is reported
+ * rather than followed, and a prepared query runs over the program as it
+ * stands when it runs.
  */
 
 #include "config.h"
@@ -35,10 +37,13 @@
 
 #include "harness.h"
 
+#define	SCENARIO_ARGUMENTS	"a missing argument is reported, not followed"
 #define	SCENARIO_CLASSES	"every diagnostic reaches the callback"
 #define	SCENARIO_COLLECT	"a collected result is the stream, kept"
 #define	SCENARIO_FACT		"an added fact is the fact its text loads"
 #define	SCENARIO_INVALIDATE	"an added fact invalidates what was derived"
+#define	SCENARIO_LATER_LOAD \
+	"a prepared query runs over the program as it stands"
 #define	SCENARIO_MIXED		"a mixed comparison is noted once per rule"
 #define	SCENARIO_REENTRY	"a callback cannot call into its context"
 #define	SCENARIO_REFUSAL \
@@ -67,6 +72,7 @@
 #define	REENTRY_PROGRAM	"a(x).\na(y).\nb(X) :- a(X), not c(X).\nb(X)?\n"
 
 typedef struct diag_log diag_log_t;
+typedef struct first_error first_error_t;
 typedef struct mixed_log mixed_log_t;
 typedef struct reentry reentry_t;
 
@@ -75,6 +81,17 @@ struct diag_log {
 	size_t	notes;
 	size_t	warnings;
 	size_t	errors;
+};
+
+/*
+ * How many errors a context reported, and where the first of them pointed:
+ * the source name, cut to fit, and the line.  `file` is empty when the first
+ * error pointed at no source.
+ */
+struct first_error {
+	char		file[64];
+	uint32_t	line;
+	size_t		errors;
 };
 
 /*
@@ -117,6 +134,12 @@ static int	 count_rows(void *callback_ctx, const relic_value_t *values,
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
+static void	 record_first_error(void *callback_ctx,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
+static void	 check_argument_refused(relic_t *ctx,
+		    const first_error_t *first, int status, const char *call,
+		    const char *expected_error);
 static bool	 refused(reentry_t *reentry, int status, const char *call);
 static bool	 refused_object(reentry_t *reentry, const void *object,
 		    const char *call);
@@ -143,6 +166,8 @@ static char	*answer_text(relic_t *ctx, const char *query_text);
 static int	 compare_lines(const void *left, const void *right);
 static void	 a_callback_cannot_call_into_its_context(void);
 static void	 a_collected_result_is_the_stream_kept(void);
+static void	 a_missing_argument_is_reported_not_followed(void);
+static void	 a_prepared_query_runs_over_the_program_as_it_stands(void);
 static void	 a_refusal_does_not_hide_why_an_operation_failed(void);
 static void	 a_value_holds_only_what_its_type_can(void);
 static void	 an_added_fact_invalidates_what_was_derived(void);
@@ -171,6 +196,24 @@ record_diagnostic(void *callback_ctx, enum relic_diag_level level,
 		log->warnings++;
 	else
 		log->errors++;
+}
+
+static void
+record_first_error(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message RELIC_TEST_UNUSED)
+{
+	first_error_t *first;
+
+	first = callback_ctx;
+	if (level != RELIC_ERROR)
+		return;
+
+	first->errors++;
+	if (first->errors > 1 || where == NULL || where->file == NULL)
+		return;
+
+	snprintf(first->file, sizeof(first->file), "%s", where->file);
+	first->line = where->line;
 }
 
 static int
@@ -1306,6 +1349,146 @@ a_collected_result_is_the_stream_kept(void)
 	relic_result_destroy(NULL);
 }
 
+/*
+ * Confirm that `call`, which was given NULL for something it needs and
+ * returned `status`, failed with -1 after reporting exactly one error,
+ * `expected_error`, which is also the context's last error.
+ */
+static void
+check_argument_refused(relic_t *ctx, const first_error_t *first, int status,
+    const char *call, const char *expected_error)
+{
+	const char *error;
+
+	error = relic_error(ctx);
+	checkf(status == -1 && first->errors == 1 && error != NULL &&
+	    strcmp(error, expected_error) == 0, SCENARIO_ARGUMENTS,
+	    "%s should fail with \"%s\", not return %d with \"%s\" and %zu "
+	    "errors", call, expected_error, status,
+	    error != NULL ? error : "(none)", first->errors);
+}
+
+/*
+ * An entry point given NULL where it needs a program, a stream, a path or
+ * bytes fails with an error saying so, rather than reading through the
+ * pointer, and the context stays usable.  The one NULL that is not missing
+ * anything is a source name: it names the input "<input>", which is what
+ * the diagnostics of a load without a name point at.
+ */
+static void
+a_missing_argument_is_reported_not_followed(void)
+{
+	first_error_t first;
+	relic_value_t value;
+	relic_query_t *query;
+	relic_t *ctx;
+	size_t rows;
+	int status;
+
+	ctx = relic_create();
+	if (ctx == NULL) {
+		check(false, SCENARIO_ARGUMENTS, "a context is created");
+		return;
+	}
+	relic_diag_set(ctx, record_first_error, &first);
+
+	bzero(&first, sizeof(first));
+	status = relic_load_string(ctx, NULL, "p(1).\nq(X) :- .\n");
+	checkf(status == -1 && first.errors == 1 &&
+	    strcmp(first.file, "<input>") == 0 && first.line == 2,
+	    SCENARIO_ARGUMENTS, "a load with no source name should report "
+	    "its error at <input>:2, not at %s:%u",
+	    first.file[0] != '\0' ? first.file : "(none)",
+	    (unsigned int)first.line);
+
+	bzero(&first, sizeof(first));
+	status = relic_load_string(ctx, "none.dl", NULL);
+	check_argument_refused(ctx, &first, status,
+	    "relic_load_string() with no text", "no program text was given");
+
+	bzero(&first, sizeof(first));
+	status = relic_load_file(ctx, "none.dl", NULL);
+	check_argument_refused(ctx, &first, status,
+	    "relic_load_file() with no stream", "no input stream was given");
+
+	bzero(&first, sizeof(first));
+	status = relic_load_path(ctx, NULL);
+	check_argument_refused(ctx, &first, status,
+	    "relic_load_path() with no path", "no path was given");
+
+	bzero(&first, sizeof(first));
+	status = relic_value_symbol(ctx, NULL, 3, &value);
+	check_argument_refused(ctx, &first, status,
+	    "relic_value_symbol() with no bytes",
+	    "a value needs its bytes and somewhere to be stored");
+
+	bzero(&first, sizeof(first));
+	status = relic_load_string(ctx, NULL, "p(1).\n");
+	check(status == 0, SCENARIO_ARGUMENTS,
+	    "after the refusals a program loads without a name");
+	query = relic_query_prepare(ctx, NULL, "p(X)?");
+	rows = 0;
+	status = -1;
+	if (query != NULL)
+		status = relic_query_run(ctx, query, count_rows, &rows);
+	check(status == 0 && rows == 1 && first.errors == 0,
+	    SCENARIO_ARGUMENTS, "after the refusals the program answers");
+
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
+/*
+ * A query is prepared against the program loaded so far, and whenever it
+ * runs it answers the program as it stands then.  A later load that leaves
+ * the program with no stratification makes the prepared query fail, with the
+ * reason as the context's error, even though what the query reads does not
+ * depend on the new rule: the program as a whole has no meaning, so the
+ * answers derived before the load are not given either.
+ */
+static void
+a_prepared_query_runs_over_the_program_as_it_stands(void)
+{
+	relic_query_t *query;
+	const char *error;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t rows;
+	int status;
+
+	ctx = context_with("p(1).\np(2).\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+
+	query = relic_query_prepare(ctx, NULL, "p(X)?");
+	rows = 0;
+	status = -1;
+	if (query != NULL)
+		status = relic_query_run(ctx, query, count_rows, &rows);
+	checkf(status == 0 && rows == 2, SCENARIO_LATER_LOAD,
+	    "p(X)? should answer 2 rows before the load, not %zu", rows);
+
+	status = relic_load_string(ctx, "later.dl",
+	    "r(X) :- p(X), not r(X).\n");
+	check(status == 0, SCENARIO_LATER_LOAD,
+	    "a rule negating its own head loads");
+
+	rows = 0;
+	log.errors = 0;
+	status = -1;
+	if (query != NULL)
+		status = relic_query_run(ctx, query, count_rows, &rows);
+	error = relic_error(ctx);
+	checkf(status == -1 && rows == 0 && log.errors > 0 && error != NULL &&
+	    strcmp(error, "program is not stratified") == 0,
+	    SCENARIO_LATER_LOAD, "after the load p(X)? should fail as not "
+	    "stratified, not return %d with %zu rows and \"%s\"", status, rows,
+	    error != NULL ? error : "(none)");
+
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -1318,6 +1501,8 @@ main(void)
 	an_added_fact_is_the_fact_its_text_loads();
 	an_added_fact_invalidates_what_was_derived();
 	a_collected_result_is_the_stream_kept();
+	a_missing_argument_is_reported_not_followed();
+	a_prepared_query_runs_over_the_program_as_it_stands();
 
 	return (check_summary("test_api"));
 }

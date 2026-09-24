@@ -2377,13 +2377,19 @@ tests/lang/     *.dl golden tests; a LOG_COMPILER runs relic and compares
                 stdout, stderr and exit status against *.expected,
                 *.expected-err and *.exit
 tests/equiv/    differential harness across -X strategies
-tests/random/   seeded program generator and shrinker
-tests/fuzz/     libFuzzer entry points, built with --enable-fuzzers
+tests/random/   seeded program generator, differential driver and shrinker
+tests/fuzz/     libFuzzer entry points, built with --enable-fuzzers, and a
+                replay driver that runs their corpus in every build
+bench/          generated workloads and a timing harness
 ```
 
-`make check` runs the unit, language and equivalence suites. `make check-random`
-runs the generator over a configurable number of seeds and runs nightly rather
-than per commit.
+`make check` runs the unit, language and equivalence suites, the random
+driver's fault-injection self-test and a small fixed set of seeds, and replays
+the fuzz corpus through both fuzz targets. `make check-random` runs the
+generator over a configurable number of seeds, a thousand by default, and
+runs nightly rather than per commit. The generator, the driver, the shrinker,
+the fuzz targets, the coverage report and the benchmarks are specified in
+`specs/design-hardening.md`.
 
 ## 66.4 Regression categories
 
@@ -2413,18 +2419,25 @@ Core regression categories:
 
 # 67. Fuzzing
 
-Lexer and parser should expose an optional libFuzzer entry point.
+Two libFuzzer entry points drive the public interface. The first loads and
+checks its input as program text, covering the lexer, the parser, the program
+model and the static analyses. The second goes on to answer every query the
+input holds under the optimized and the naive, fully materializing
+configurations, and fails if they disagree.
 
-Fuzzing targets should verify:
+Fuzzing targets verify:
 
 ```text
 no crashes
 no hangs
 no invalid memory accesses
 bounded parser behavior
+optimized and naive answers agree
 ```
 
-A second future fuzz target may compare optimized and naive execution on generated programs.
+Both targets also link against a replay driver, so the corpus is run by
+every `make check` on every compiler, including those without libFuzzer.
+Their inputs, bounds and corpus are specified in `specs/design-hardening.md`.
 
 ---
 

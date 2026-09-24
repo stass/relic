@@ -1,0 +1,5 @@
+% The input ends with a backslash inside a string literal, with no newline
+% after it, and the literal already holds an unknown escape.  The bad escape
+% is reported, and the rest of the literal is skipped to the end of input
+% without a second error for the literal being unterminated.
+p("\q \

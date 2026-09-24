@@ -1,0 +1,15 @@
+% A limit on generated rules is charged for a supplementary rule too.  The
+% Magic rewrite of path(a, X)? generates five rules: the seed, the adorned
+% rule of path that reads edge, the supplementary rule that cuts the prefix
+% of the rule calling path twice before its second call, the magic rule of
+% that call, and the adorned rule itself.  A limit of four generated rules
+% is therefore exceeded, and would not be if the supplementary rule went
+% uncharged.
+
+edge(a, b).
+edge(b, c).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), path(Y, Z).
+
+path(a, X)?

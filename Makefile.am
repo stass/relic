@@ -72,8 +72,9 @@ pkgconfig_DATA = librelic.pc
 # The m4 macro files are distributed by automake already, as dependencies of
 # configure; listing them here as well would only create a list that a sixth
 # macro file could be left out of.
-EXTRA_DIST = autogen.sh LICENSE README.md compat/README.md \
-	examples/embed.c tests/lang tests/langtest.sh
+EXTRA_DIST = autogen.sh LICENSE README.md bench/run.sh compat/README.md \
+	examples/embed.c tests/coverage-report.sh tests/fuzz/corpus \
+	tests/fuzz/relic.dict tests/lang tests/langtest.sh
 
 ##
 ## The example is built and run by make installcheck, against the installed
@@ -144,7 +145,8 @@ RELIC_COMPAT_RENAMES = \
 	-Dstrlcpy=relic_replacement_strlcpy \
 	-Dstrtonum=relic_replacement_strtonum
 
-check_PROGRAMS = tests/unit/test_compat tests/unit/test_compat_replacements \
+RELIC_TEST_BINARIES = tests/unit/test_compat \
+	tests/unit/test_compat_replacements \
 	tests/unit/test_header
 
 tests_unit_test_compat_SOURCES = tests/unit/test_compat.c \
@@ -166,7 +168,7 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 ## have.
 ##
 
-check_PROGRAMS += tests/unit/test_api tests/unit/test_arena \
+RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_diag tests/unit/test_eval tests/unit/test_index \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
@@ -255,7 +257,7 @@ RELIC_EXHAUSTION_RENAMES = \
 	-Dmalloc=relic_test_malloc \
 	-Dreallocarray=relic_test_reallocarray
 
-check_PROGRAMS += tests/unit/test_exhaustion
+RELIC_TEST_BINARIES += tests/unit/test_exhaustion
 tests_unit_test_exhaustion_SOURCES = tests/unit/test_exhaustion.c \
 	tests/unit/harness.c tests/unit/programs.c \
 	$(librelic_internal_la_SOURCES)
@@ -278,7 +280,7 @@ tests_unit_test_header_CFLAGS = $(RELIC_STRICT_CFLAGS) $(RELIC_SAN_CFLAGS)
 tests_unit_test_header_LDADD = librelic.la
 
 if RELIC_HAVE_CXX
-check_PROGRAMS += tests/unit/test_header_cxx
+RELIC_TEST_BINARIES += tests/unit/test_header_cxx
 tests_unit_test_header_cxx_SOURCES = tests/unit/test_header_cxx.cc
 tests_unit_test_header_cxx_CPPFLAGS = -I$(top_srcdir)/include
 tests_unit_test_header_cxx_CXXFLAGS = $(RELIC_SAN_CFLAGS)
@@ -297,6 +299,96 @@ dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 ##
 
 dist_check_SCRIPTS += tests/equiv/strategies.sh
+
+##
+## The randomized differential suite generates programs from seeds, runs each
+## under every strategy the public configuration selects, and shrinks a
+## program that makes two disagree.  It links the installed form of the
+## library, as an embedder would, because every equivalence it checks is
+## reachable through <relic.h>.  make check runs it over fifty fixed seeds,
+## and the self-test shows it can fail: a fault injected into one strategy
+## must be found and shrunk.  make check-random runs a range of any size.
+##
+
+RELIC_TEST_BINARIES += tests/random/random
+tests_random_random_SOURCES = tests/random/answer.c tests/random/answer.h \
+	tests/random/compare.c tests/random/generate.c \
+	tests/random/main.c tests/random/program.c tests/random/shrink.c \
+	tests/random/random.h
+tests_random_random_LDADD = librelic.la $(LTLIBOBJS)
+
+dist_check_SCRIPTS += tests/random/selftest.sh
+
+RELIC_SEEDS = 1000
+RELIC_SEED_START = 1
+
+check-random: tests/random/random$(EXEEXT)
+	$(builddir)/tests/random/random -n $(RELIC_SEEDS) \
+	    -s $(RELIC_SEED_START)
+
+##
+## Fuzz targets
+##
+## Each target is an LLVMFuzzerTestOneInput() over the public interface, and
+## is linked twice.  The replay driver, built always, passes every file of a
+## corpus to the target once, so make check replays the corpora on every
+## compiler and under every sanitizer build.  With --enable-fuzzers the
+## target is also linked with libFuzzer, and make fuzz runs each for
+## FUZZ_SECONDS over a working corpus in the build tree seeded from the
+## language tests and tests/fuzz/corpus; the source tree's corpus changes only
+## when someone copies a finding into it.  configure then compiles the whole
+## tree with the coverage instrumentation libFuzzer steers by, and the
+## targets alone with its main().  No clean target removes fuzz-corpus or
+## fuzz-artifacts: an input not yet looked at is the one thing a fuzzing run
+## produces that cannot be made again.
+##
+
+RELIC_FUZZ_COMMON = tests/fuzz/fuzz.c tests/fuzz/fuzz.h
+RELIC_FUZZ_EVAL_SOURCES = tests/fuzz/fuzz_eval.c tests/random/answer.c \
+	tests/random/answer.h $(RELIC_FUZZ_COMMON)
+
+RELIC_REPLAY_BINARIES = tests/fuzz/replay_eval tests/fuzz/replay_load
+tests_fuzz_replay_eval_SOURCES = tests/fuzz/replay.c $(RELIC_FUZZ_EVAL_SOURCES)
+tests_fuzz_replay_eval_LDADD = librelic.la $(LTLIBOBJS)
+tests_fuzz_replay_load_SOURCES = tests/fuzz/replay.c tests/fuzz/fuzz_load.c \
+	$(RELIC_FUZZ_COMMON)
+tests_fuzz_replay_load_LDADD = librelic.la $(LTLIBOBJS)
+
+dist_check_SCRIPTS += tests/fuzz/replay.sh
+
+FUZZ_SECONDS = 60
+
+if RELIC_FUZZERS
+noinst_PROGRAMS = tests/fuzz/fuzz_eval tests/fuzz/fuzz_load
+tests_fuzz_fuzz_eval_SOURCES = $(RELIC_FUZZ_EVAL_SOURCES)
+tests_fuzz_fuzz_eval_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
+tests_fuzz_fuzz_eval_LDADD = librelic.la $(LTLIBOBJS)
+tests_fuzz_fuzz_load_SOURCES = tests/fuzz/fuzz_load.c $(RELIC_FUZZ_COMMON)
+tests_fuzz_fuzz_load_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
+tests_fuzz_fuzz_load_LDADD = librelic.la $(LTLIBOBJS)
+
+# -max_len bounds an input's text, and with it how long a program can take
+# to load and check; -timeout reports an input that runs longer anyway.  An
+# evaluation can stay inside every limit and still run long -- a cross
+# product whose tuples are all duplicates -- so a timeout from the eval
+# target needs reading before it is called a bug.
+fuzz: $(noinst_PROGRAMS)
+	@for target in load eval; do \
+		corpus=fuzz-corpus/$$target; \
+		artifacts=fuzz-artifacts/$$target/; \
+		$(MKDIR_P) $$corpus $$artifacts || exit 1; \
+		echo "fuzzing $$target for $(FUZZ_SECONDS) seconds"; \
+		./tests/fuzz/fuzz_$$target -max_total_time=$(FUZZ_SECONDS) \
+		    -max_len=4096 -timeout=10 \
+		    -dict=$(srcdir)/tests/fuzz/relic.dict \
+		    -artifact_prefix=$$artifacts $$corpus \
+		    $(srcdir)/tests/lang $(srcdir)/tests/fuzz/corpus || exit 1; \
+	done
+else
+fuzz:
+	@echo "the fuzz targets need configure --enable-fuzzers and a" \
+	    "compiler with libFuzzer; skipping."
+endif
 
 ##
 ## Language tests
@@ -318,7 +410,8 @@ dist_check_SCRIPTS += tests/equiv/strategies.sh
 ## a debugging session left behind, so langfiles.sh checks that too.
 ##
 
-RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
+RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
+	tests/lang/bad-byte.dl tests/lang/bad-escape-at-end.dl \
 	tests/lang/bad-escape.dl tests/lang/check-queries.dl \
 	tests/lang/closure-double.dl tests/lang/closure-graphs.dl \
 	tests/lang/comments-only.dl tests/lang/components.dl \
@@ -329,15 +422,18 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/explain-materialized.dl tests/lang/explain-ops.dl \
 	tests/lang/explain-supplementary.dl \
 	tests/lang/format-csv.dl tests/lang/format-json.dl \
-	tests/lang/format-text.dl \
+	tests/lang/format-nul.dl tests/lang/format-text.dl \
 	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \
 	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
 	tests/lang/magic-budget.dl tests/lang/magic-budget-literals.dl \
+	tests/lang/magic-budget-rules.dl tests/lang/magic-duplicate-rules.dl \
 	tests/lang/magic-limit-preds.dl tests/lang/magic-limit-rules.dl \
+	tests/lang/magic-limit-supplementary.dl \
 	tests/lang/magic-mixed.dl tests/lang/magic-mutual.dl \
 	tests/lang/magic-negation.dl tests/lang/magic-same-generation.dl \
 	tests/lang/magic-supplementary.dl \
+	tests/lang/magic-supplementary-wide.dl \
 	tests/lang/materialize.dl tests/lang/missing-terminator.dl \
 	tests/lang/negation-forms.dl tests/lang/negation-recursive.dl \
 	tests/lang/negation-strata.dl tests/lang/negation-tasks.dl \
@@ -352,6 +448,7 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/query-zero-arity.dl tests/lang/recovery.dl \
 	tests/lang/repl-check.dl tests/lang/repl-discard.dl \
 	tests/lang/repl-errors.dl tests/lang/repl-json.dl \
+	tests/lang/repl-limit.dl \
 	tests/lang/repl-plan.dl tests/lang/repl-plan-materialized.dl \
 	tests/lang/repl-session.dl tests/lang/repl-verbose.dl \
 	tests/lang/safe-rules.dl tests/lang/singleton.dl \
@@ -359,12 +456,14 @@ RELIC_LANG_TESTS = tests/lang/arity-limit.dl tests/lang/bad-byte.dl \
 	tests/lang/stats-magic.dl tests/lang/stats-naive.dl \
 	tests/lang/stats-semi-naive.dl tests/lang/string-escapes.dl \
 	tests/lang/success-criteria.dl tests/lang/trailing-comma.dl \
-	tests/lang/undefined-predicate.dl tests/lang/unsafe-anonymous.dl \
+	tests/lang/undefined-predicate.dl tests/lang/unexpected-token.dl \
+	tests/lang/unsafe-anonymous.dl \
 	tests/lang/unsafe-comparison.dl tests/lang/unsafe-fact.dl \
 	tests/lang/unsafe-head.dl tests/lang/unsafe-negation.dl \
 	tests/lang/unstratified-cycles.dl tests/lang/unstratified-policy.dl \
 	tests/lang/unstratified-query.dl tests/lang/unstratified-unsafe.dl \
-	tests/lang/unstratified.dl tests/lang/unterminated-string.dl \
+	tests/lang/unstratified.dl tests/lang/unterminated-escape.dl \
+	tests/lang/unterminated-string.dl \
 	tests/lang/variable-limit-max.dl tests/lang/variable-limit.dl \
 	tests/lang/verbose-counts.dl tests/lang/verbose-discard.dl \
 	tests/lang/verbose-mixed.dl tests/lang/verbose-one.dl \
@@ -381,7 +480,11 @@ AM_TESTS_ENVIRONMENT = \
 	RELIC_VERSION='$(PACKAGE_VERSION)'; export RELIC_VERSION; \
 	RELIC_LANG_TESTS='$(RELIC_LANG_TESTS)'; export RELIC_LANG_TESTS;
 
-TESTS = $(check_PROGRAMS) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
+# A test program runs as a test, with no arguments.  A replay driver is
+# built for make check too, but needs its corpus named, which the script that
+# runs it does.
+check_PROGRAMS = $(RELIC_TEST_BINARIES) $(RELIC_REPLAY_BINARIES)
+TESTS = $(RELIC_TEST_BINARIES) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 
 ##
 ## Sanitizer suites
@@ -466,6 +569,31 @@ check-ubsan:
 	UBSAN_OPTIONS='$(RELIC_UBSAN_OPTIONS)'; export UBSAN_OPTIONS; \
 	$(RELIC_SANITIZER_CHECK)
 
+##
+## Coverage
+##
+## make coverage configures a disposable tree beside this one, as the
+## sanitizer suites do, builds it with gcov instrumentation, runs the suite
+## and writes the report to coverage.txt there as well as to the terminal.
+## The tree is built without shared libraries, so that every object and its
+## counts sit beside its source's directory rather than in libtool's hidden
+## one.  A failing suite stops the target: the coverage of a suite that
+## fails describes nothing worth reading.
+##
+
+coverage:
+	@tree=build-coverage; \
+	rm -rf $(abs_top_builddir)/$$tree && \
+	$(MKDIR_P) $(abs_top_builddir)/$$tree && \
+	cd $(abs_top_builddir)/$$tree && \
+	$(abs_top_srcdir)/configure --enable-coverage --disable-shared \
+	    CC="$(CC)" && \
+	$(MAKE) $(AM_MAKEFLAGS) && \
+	$(MAKE) $(AM_MAKEFLAGS) check && \
+	$(SHELL) $(abs_top_srcdir)/tests/coverage-report.sh . \
+	    $(abs_top_srcdir) > coverage.txt && \
+	cat coverage.txt
+
 # Two build products automake does not generate a rule for.
 #
 # The sanitizer trees belong to this build directory rather than to the
@@ -485,7 +613,8 @@ dist-hook:
 	-rm -f $(distdir)/tests/lang/*.log $(distdir)/tests/lang/*.trs
 
 clean-local:
-	-cd $(top_builddir) && rm -rf build-*san
+	-cd $(top_builddir) && rm -rf build-*san build-coverage
 	-rm -rf $(LIBOBJDIR).libs $(LIBOBJDIR)_libs
 
-.PHONY: check-asan check-lsan check-msan check-ubsan dist-hook
+.PHONY: check-asan check-lsan check-msan check-random check-ubsan coverage \
+	dist-hook fuzz

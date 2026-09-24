@@ -21,7 +21,7 @@ blocked(b).
 
 pick(Y) :- edge(X, Z), t(X, Y, Z).
 free(X) :- edge(X, _), not blocked(X), initialized.
-large(X) :- size(X, N), N > 100, 1 < 2.
+large(X) :- size(X, N), N > 100, N <= 200, 1 < 2.
 named(X) :- edge(X, _), name(X, "Al\"ice\\	x").
 hostile(X) :- edge(X, _), raw(X, "\x1b[2J\x7f\xff\0z").
 
