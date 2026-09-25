@@ -199,6 +199,11 @@ Duplicate facts have no semantic effect.
 
 Datalog relations use set semantics.
 
+A fact is a rule with an empty body in the language. The facts a program
+states are stored as the tuples of their predicate's base store rather than
+as statements and compiled rules; the base store, loading and how evaluation
+reads it are specified in `specs/design-facts.md`.
+
 ---
 
 # 6. Values

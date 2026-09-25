@@ -682,6 +682,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-hardening.md` | the program generator, the differential driver, the shrinker, the fuzz targets, coverage and benchmarks |
 | `specs/design-bench.md` | the comparison with other engines: engines and modes, workloads, data, answers, measurement |
 | `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the four-byte identifier slot kept, batched insertion |
+| `specs/design-facts.md` | a program's facts as the tuples of their predicates' base stores: derived predicates and the relation each is read through, the all-or-nothing commit, seeding before the first pass, Magic over base views |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |

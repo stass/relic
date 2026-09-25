@@ -681,21 +681,25 @@ buffer and writing it with one call, would remove them.
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
 ternary facts read as source text, relic peaks at 136 to 153 MB, against 44 MB
 for Souffle reading the same data as TSV and 90 to 115 MB for Nemo, clingo and
-SWI-Prolog, which also parse. Find where the peak comes from -- the syntax
-tree of a fact file held whole, the value table, the relation -- before
-deciding whether a streaming fact loader or the CSV import of
-`specs/architecture.md` section 69 is the remedy. Time follows the same path:
-loading is about half of `facts-join` at scale 4 and 0.07 of the 0.08 s of
-user time `graph-left` takes, which is most of Souffle's lead on `graph-left`,
-`graph-reach`, `facts-join` and `tasks-ready`. A symbol's bytes are hashed
-once, by the lexer into the symbol table; the value table hashes the symbol
-identifier, one word. The symbol table recomputes every symbol's byte hash
-when it grows (`symbol_rehash()`); a hash stored in each slot would remove
-that, and measured at about a quarter of `facts-join`'s time, but
-`specs/design-evaluation-cost.md` section 5.2 keeps the four-byte slot for the
-closure workloads' memory. Section 7 of that design records that the rest of
-the cost is a fact's representation as a syntax tree statement and a compiled
-rule beside its tuple, and defers it to a design of its own.
+SWI-Prolog, which also parse. At scale 4, 1.2 million facts, the peak is about
+470 bytes per fact, of which 358 are the fact as a program object -- its
+syntax tree statement and three terms (192, an 88-byte statement and 32-byte
+terms rounded to the arena's 16-byte alignment), its rule table entry (126, 72
+bytes in an array doubled past it), its compiled head (32) and its schedule
+entry (8) -- and 21 the tuple and its index slot; the symbols and values its
+constants intern take 86. Checking alone takes 1.27 of the 2.05 s of user
+time, and a sampled profile of the whole run puts 40 per cent in parsing, the
+lexer and the symbol interning it calls included. `specs/design-facts.md`
+stores a program's facts as the tuples of their predicates' base stores, and
+orders the work: reservation for many tuples in the relation store; base
+stores, derived predicates and the all-or-nothing commit, with Magic over base
+views; then the parser's staging, which keeps a fact from ever building a
+statement. A symbol's bytes are hashed once, by the lexer into the symbol
+table; the symbol table recomputes every symbol's byte hash when it grows
+(`symbol_rehash()`), and the value table every value's hash, each about 3 per
+cent of `facts-join` at scale 4; the four-byte slot of
+`specs/design-evaluation-cost.md` section 5.2, whose stored hash would remove
+both and took about a quarter off `facts-join` at scale 1, keeps them.
 
 **Souffle and Nemo write their answers to files, the others to a discarded
 standard output.** [Low, component: `bench/compare/run.sh`] Under load, a
