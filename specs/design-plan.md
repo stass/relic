@@ -75,9 +75,9 @@ candidate.
 
 **Tests** succeed at most once. `MEMBER`, `ANTI_MEMBER` and `FILTER` read only
 bound values, bind nothing, and either let the binding through or reject it.
-`EMIT` is a test that always rejects: it inserts the head tuple and then
-reports that there is nothing further down this path, which is what makes it
-the last operation of every plan.
+`EMIT` is a test that always rejects: it derives the head tuple, which the
+evaluation inserts in batches, and then reports that there is nothing further
+down this path, which is what makes it the last operation of every plan.
 
 | Operation | Reads | Binds | Succeeds |
 | --- | --- | --- | --- |
@@ -97,8 +97,8 @@ architecture section 31.
 
 **An operation over a relation reads through a view of it**, fixed by the
 planner. Every operation of a rule's ordinary plan, of a query's plan and of
-the naive evaluator reads `all`, the relation as it stands when the operation
-starts. In a semi-naive delta variant an operation over a member of the
+the naive evaluator reads `all`, the relation as it stood when the plan
+started. In a semi-naive delta variant an operation over a member of the
 component being evaluated reads one of three narrower views derived from the
 member's delta: `delta`, `old` or `current`. A `SCAN` walks the view's range,
 a `LOOKUP` the part of its key's chain inside it, and a `MEMBER` holds only
@@ -222,7 +222,7 @@ only what each binding costs, so the two are chosen separately.
 
 ```c
 enum relic_view {
-	RELIC_VIEW_ALL,		/* the relation as it stands when the op starts */
+	RELIC_VIEW_ALL,		/* the relation as it stood when the plan started */
 	RELIC_VIEW_OLD,		/* a member: tuples older than its delta */
 	RELIC_VIEW_DELTA,	/* a member: its delta */
 	RELIC_VIEW_CURRENT	/* a member: everything up to its delta's end */

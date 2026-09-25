@@ -655,37 +655,37 @@ nonlinear closure makes about 2.5 derivations per path triple at every length
 -- so the gap is the cost of a derivation and its lookups, not their number.
 Profiles of `tc-cyclic` and `sg-cyclic` put about three quarters of the time
 in the duplicate check of `relic_relation_insert()`, split between
-`relic_idprobe_next()` and the tuple comparison. The relation's hash table
-holds only tuple identifiers, so every candidate slot costs a read of the
-tuple it names, at a load factor up to three quarters, and a table of a
-million tuples does not fit in cache. Souffle keeps the same relation in a
-B-tree and inserts with the outer loop fixed on the head's first column, so
-consecutive inserts land in the same leaf. Two remedies, to be measured
-separately: store a hash tag beside each identifier (or, for arity two or
-less, the tuple itself) so that a slot rejects a mismatch without a tuple
-read; and, once the views of the previous item are bounded, buffer an
-iteration's derivations and insert them in batches, prefetching or
-partitioning by hash, instead of one random probe per derivation. Designed in
-`specs/design-evaluation-cost.md` sections 5 and 6.
+`relic_idprobe_next()` and the tuple comparison. 92 to 96 per cent of those
+checks find a duplicate, each a miss on the slot array and a miss on the tuple
+that confirms it; a table of a million tuples does not fit in cache. Souffle
+keeps the same relation in a B-tree and inserts with the outer loop fixed on
+the head's first column, so consecutive inserts land in the same leaf. A hash
+stored beside each identifier was measured and set aside
+(`specs/design-evaluation-cost.md` section 5.2): it saves the tuple reads of
+the candidates that are not the match, which a duplicate-heavy workload makes
+few of, and took `tc-cyclic` and `sg-cyclic` 8 per cent faster and 4 per cent
+slower for a larger peak on both. Batched insertion with prefetching, section
+6 of the same document, overlaps the two misses instead.
 
 **Loading facts costs relic more memory than any other engine.** [Medium,
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
-ternary facts read as source text, relic peaks at about 160 MB, against
-44 MB for Souffle reading the same data as TSV and 90 to 115 MB for Nemo,
-clingo and SWI-Prolog, which also parse. Find where the peak comes from --
-the syntax tree of a fact file held whole, the value table, the relation --
-before deciding whether a streaming fact loader or the CSV import of
-`specs/architecture.md` section 69 is the remedy. Time follows the same
-path: loading is about half of `facts-join` at scale 4 and 0.07 of the 0.08 s
-of user time `graph-left` takes, which is most of Souffle's lead on
-`graph-left`, `graph-reach`, `facts-join` and `tasks-ready`. A symbol's
-bytes are hashed once, by the lexer into the symbol table; the value table
-hashes the symbol identifier, one word. The symbol table recomputes every
-symbol's byte hash when it grows (`symbol_rehash()`), which
-`specs/design-evaluation-cost.md` section 5 removes; section 7 of that
-design records that the rest of the cost is a fact's representation as a
-syntax tree statement and a compiled rule beside its tuple, and defers it
-to a design of its own.
+ternary facts read as source text, relic peaks at 136 to 153 MB, against 44 MB
+for Souffle reading the same data as TSV and 90 to 115 MB for Nemo, clingo and
+SWI-Prolog, which also parse. Find where the peak comes from -- the syntax
+tree of a fact file held whole, the value table, the relation -- before
+deciding whether a streaming fact loader or the CSV import of
+`specs/architecture.md` section 69 is the remedy. Time follows the same path:
+loading is about half of `facts-join` at scale 4 and 0.07 of the 0.08 s of
+user time `graph-left` takes, which is most of Souffle's lead on `graph-left`,
+`graph-reach`, `facts-join` and `tasks-ready`. A symbol's bytes are hashed
+once, by the lexer into the symbol table; the value table hashes the symbol
+identifier, one word. The symbol table recomputes every symbol's byte hash
+when it grows (`symbol_rehash()`); a hash stored in each slot would remove
+that, and measured at about a quarter of `facts-join`'s time, but
+`specs/design-evaluation-cost.md` section 5.2 keeps the four-byte slot for the
+closure workloads' memory. Section 7 of that design records that the rest of
+the cost is a fact's representation as a syntax tree statement and a compiled
+rule beside its tuple, and defers it to a design of its own.
 
 **Souffle and Nemo write their answers to files, the others to a discarded
 standard output.** [Low, component: `bench/compare/run.sh`] Under load, a

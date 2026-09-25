@@ -143,17 +143,17 @@ alone. Insertion gathers a key from a stored tuple and a lookup from a probe
 by the same function, so the two cannot disagree about the layout, which
 would make every lookup miss without any error.
 
-**A lookup sees the relation as it stood when the lookup started.** The
-executor takes the relation's end when a `LOOKUP` starts and stops at the
-first chain member at or beyond it. That is exact because identifiers
-increase along a chain: once one member is past the end, every later one is
-too. It is the same visibility a `SCAN` has, and for the same two reasons:
+**A lookup sees the relation as it stood when its plan started.** The executor
+resolves the lookup's view when the plan starts and stops at the first chain
+member at or beyond its end. That is exact because identifiers increase along
+a chain: once one member is past the end, every later one is too. It is the
+same visibility a `SCAN` has, and for the same two reasons:
 
-* an `EMIT` below the lookup may insert into the very relation it walks,
-  extending the chain it is on. Without the bound the lookup would visit what
-  its own join derived, which is correct but makes a rule's work depend on
-  the order of its insertions, and in a self-recursive plan it need not
-  finish in one pass;
+* an `EMIT` below the lookup may insert, through its batch, into the very
+  relation it walks, extending the chain it is on. Without the bound the
+  lookup would visit what its own join derived, which is correct but makes a
+  rule's work depend on the order of its insertions, and in a self-recursive
+  plan it need not finish in one pass;
 * the semi-naive argument of `specs/design-eval.md` section 4.2, that every
   derivation is made exactly once, rests on no operation of a round seeing
   what the round inserted.

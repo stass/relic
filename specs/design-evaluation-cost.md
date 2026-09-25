@@ -2,17 +2,18 @@
 
 **Status.** Design document for what a derivation costs: how a semi-naive
 round is bounded so that every derivation is made exactly once, how a delta
-literal is placed and reached wherever the planner puts it, how the
-identifier table rejects a candidate without reading the tuple it names, and
-what remains of the fact-loading gap once those are in. Forward-looking, like
-every document under `specs/`; `STATUS.md` records what is implemented.
+literal is placed and reached wherever the planner puts it, why the
+identifier table keeps its four-byte slot and how insertion overlaps the
+misses of its duplicate check instead, and why the fact-loading gap needs a
+design of its own. Forward-looking, like every document under `specs/`;
+`STATUS.md` records what is implemented.
 
 **Companions.** `specs/design-eval.md` sections 2 and 4, whose delta variants
 this document bounds; `specs/design-plan.md` sections 3 to 5, whose
 operations gain a view; `specs/design-planner.md` sections 4 and 5, whose
 estimate and order the delta literal now takes part in;
 `specs/design-index.md` sections 3 and 4, whose chains gain a frontier;
-`specs/design-memory.md` section 6, whose table gains a tag;
+`specs/design-memory.md` section 6, whose table section 5 measures;
 `specs/design-relations.md` section 5 for the canonical index;
 `specs/design-bench.md` for the comparison that found the gaps;
 `relic-plan.md` decisions D-4, D-8, D-9 and D-10, the last of which this
@@ -37,18 +38,22 @@ document amends.
 * the estimate a delta gets, the one a member read beside it gets, and why
   a variant whose delta is not placed first keeps two plans and lets each
   round choose between them by the delta's size;
-* **the identifier table stores each entry's hash beside its identifier**, so
-  a probe rejects a mismatch without reading the tuple, and growth needs no
-  callback into the owner;
-* batched insertion, and why it is contingent on a measurement;
-* what this leaves of the fact-loading gap, and why the rest needs a design
-  of its own;
+* **the identifier table keeps its four-byte slot**: a hash stored beside
+  each identifier was measured, and on the closure workloads, where almost
+  every insertion is a duplicate, it gives a mixed result in time for a
+  larger peak;
+* **batched insertion**, which overlaps the misses of the duplicate check
+  that remain, and every view resolved when a plan starts, which makes
+  when a batch is inserted invisible to every plan by construction;
+* what is left of the fact-loading gap, and why it needs a design of its
+  own;
 * what a reader of `-e` and of the golden tests sees change, and the counts
   the tests hold.
 
-It changes which tuples an operation reads and how a slot is probed. It
-does not change what a plan is, what a relation holds, or any answer: two
-runs of the same input still produce the same rows in the same order, and
+It changes which tuples an operation reads and when a derived tuple is
+inserted. It does not change what a plan is, what a relation holds, or any
+answer: two runs of the same input still produce the same rows in the same
+order, and
 `-X naive` still answers every program the semi-naive evaluator does, which
 is what keeps it the oracle of D-9.
 
@@ -109,20 +114,26 @@ not fit in cache once the relation holds a million tuples. The table is up
 to three quarters full: with linear probing an unsuccessful search, which is
 what inserting a new tuple is, visits on average between 1.8 slots just
 after a doubling and 8.5 just before one, and every visited slot but the
-empty one that ends the walk reads a tuple. Souffle keeps the relation in a
-B-tree and runs its outer loop over the head's first column, so consecutive
-insertions land in one leaf.
+empty one that ends the walk reads a tuple. But almost every insertion is
+of a tuple the relation holds already: `tc-cyclic` makes 49.8 million
+derivations for 2.05 million insertions, and `sg-cyclic` 25.5 million for
+1.97 million, so 96 and 92 per cent of the duplicate checks are successful
+searches, each a miss on the slot array and a miss on the tuple that
+confirms the match. Souffle keeps the relation in a B-tree and runs its
+outer loop over the head's first column, so consecutive insertions land in
+one leaf.
 
 **Cause 4: loading dominates the small workloads.** Loading is 0.07 of the
 0.08 s of user time `graph-left` takes, and about half of `facts-join` at
 scale 4. The symbol table recomputes every symbol's byte hash when it grows,
 a fact is kept as a syntax tree statement and a compiled rule as well as a
-tuple, and `facts-join` peaks at about 160 MB for 300,000 ternary facts,
-some 530 bytes per fact.
+tuple, and `facts-join` peaks at 136 to 153 MB of resident memory for
+300,000 ternary facts, some 450 to 500 bytes per fact.
 
 Sections 3 and 4 close causes 2 and 1, in that order, because bounded views
-are what make placing the delta anywhere safe. Section 5 closes cause 3.
-Section 7 says what sections 3 to 5 do for cause 4 and what they leave.
+are what make placing the delta anywhere safe. Section 5 says why storing
+the hash in the slot does not close cause 3, and section 6 overlaps the two
+misses a duplicate costs. Section 7 says what is left of cause 4.
 
 ---
 
@@ -138,18 +149,19 @@ exactly one of four:
 
 | View | Range | Meaning |
 | --- | --- | --- |
-| `all` | `[1, relation end)`, taken when the operation starts | the relation as it stands; the only view of a complete relation |
+| `all` | `[1, relation end)`, taken when the plan starts | the relation as it stood when the plan started; the only view of a complete relation |
 | `old` | `[1, first)` | the member's tuples older than its delta |
 | `delta` | `[first, end)` | the tuples the member gained in the previous round |
 | `current` | `[1, end)` | everything the member held when the round began |
 
 The view is a property of the operation, set by the planner; the range it
-denotes is supplied by the evaluation when the operation starts, from the
-member's delta.
+denotes is resolved by the evaluation for every operation of a plan when
+the plan starts, before it has inserted anything, from the member's delta
+or, for `all`, from the relation's end.
 
 ```c
 enum relic_view {
-	RELIC_VIEW_ALL,		/* the relation as it stands when the operation starts */
+	RELIC_VIEW_ALL,		/* the relation as it stood when the plan started */
 	RELIC_VIEW_OLD,		/* a member: tuples older than its delta */
 	RELIC_VIEW_DELTA,	/* a member: its delta */
 	RELIC_VIEW_CURRENT	/* a member: everything up to its delta's end */
@@ -202,11 +214,12 @@ reads no relation. Neither has a view.
   purpose; `relic_relation_contains()` is that function compared against
   `RELIC_ID_NONE`.
 * `ANTI_MEMBER` and `FILTER` never read a member and are unchanged.
-* `EMIT` inserts. The tuple it inserts takes the identifier past
-  the relation's end, which is at or past every view's end, so **nothing in
-  the round can see it**. That is not a rule the executor obeys but a fact
-  about the ranges: no view of a member reaches past `end`, and `end` was
-  the member's end when the round began.
+* `EMIT` inserts, through the batch of section 6. The tuple it inserts
+  takes an identifier past the relation's end, which is at or past every
+  view's end, so **nothing in the round can see it**. That is not a rule
+  the executor obeys but a fact about the ranges: no view of a member
+  reaches past `end`, and `end` was the member's end when the round
+  began.
 
 ### 3.4 Round 0 and the deltas
 
@@ -648,9 +661,9 @@ every recursive rule as a fact once it has no base plan.
 
 ---
 
-## 5. The tagged identifier table
+## 5. The identifier table keeps its slot
 
-### 5.1 What a probe costs today
+### 5.1 What a probe costs
 
 `specs/design-memory.md` section 6 gives the identifier table one design
 rule: a slot holds an identifier and nothing else. The key stays with its
@@ -658,11 +671,10 @@ owner, so the table costs four bytes per slot and a probe that finds a
 candidate asks the owner whether the candidate's key is the one wanted. For
 the canonical index of a relation that question reads the candidate tuple's
 columns, at an address the identifier determines and the probe does not
-predict. Every visited slot but the last is therefore a dependent read of a
-random line of the column array, and with the relation past the cache that
-is a miss each. Cause 3 of section 2 is that read, repeated for the 1.8 to
-8.5 slots an insertion visits, three quarters of the time of the closure
-workloads.
+predict. Every visited slot but the empty one that ends an unsuccessful
+search is therefore a dependent read of a random line of the column array,
+the matching slot of a successful one included, and with the relation past
+the cache that is a miss each.
 
 The same shape costs the secondary indexes twice over: a key's table holds
 key identifiers, and comparing a candidate key reads the first tuple of its
@@ -672,142 +684,173 @@ call per entry into the owner to recompute the hash from the key, which for
 the symbol table means rehashing every symbol's bytes and for a relation
 means rereading every tuple.
 
-### 5.2 A slot holds its hash
+### 5.2 A hash beside each identifier, measured
 
-A slot becomes the pair of the entry's hash and its identifier:
+The alternative is a slot of eight bytes, the entry's hash beside its
+identifier. A probe would compare the stored hash first and ask the owner
+only about an entry whose hash matched, so an unsuccessful search would
+read no tuple at all, and a growth would place each entry by its stored
+hash with no callback into the owner, deleting the eight rehash functions
+of the symbol, value and predicate tables, the canonical and secondary
+indexes, the distinct count and the rewrite's two tables.
 
-```c
-struct relic_idslot {
-	uint32_t	hash;
-	uint32_t	id;		/* RELIC_ID_NONE marks an empty slot */
-};
+Measured against the four-byte slot, with neither batching, on the closure
+workloads whose profile section 2 cause 3 describes and on `facts-join`;
+times are the median user time of five interleaved runs, peaks the range
+of the maximum resident set over them, and the share is of a sampled
+profile:
 
-struct relic_idtab {
-	relic_idslot_t	*slots;
-	size_t		 capacity;	/* a power of two, zero if empty */
-	size_t		 count;
-};
-```
+| Workload | Time, 4 / 8 bytes | Peak, 4 / 8 bytes | Duplicate check, 4 / 8 bytes |
+| --- | --- | --- | --- |
+| `tc-cyclic` | 4.75 / 4.36 s | 81-82 / 90-116 MB | 73 / 78 % |
+| `sg-cyclic` | 3.42 / 3.56 s | 56-69 / 77-102 MB | 68 / 72 % |
+| `facts-join` | 0.35 / 0.27 s | 136-153 / 147-163 MB | |
 
-A probe compares the stored hash against the one it is walking with and
-hands back only the candidates whose hash matches. The owner's comparison
-stays at the call site and still decides equality; it is simply asked once
-per hash match rather than once per occupied slot, and for a new tuple,
-whose hash matches no stored one but by chance, it is asked about nothing.
-A run of occupied slots is consecutive memory, one or two lines, and the
-column array is read only to confirm a duplicate.
+The stored hash saves the tuple reads of the candidates that are not the
+match, and these workloads make few: section 2 counts 92 to 96 per cent of
+their duplicate checks as successful searches, which at loads between three
+eighths and three quarters visit 1.3 to 2.5 slots on average and read the
+matching tuple with or without the stored hash. What the stored hash does
+change is the slot array, which doubles; the likely reading of the table is
+that a larger array misses more, and that the time the saved tuple reads
+gave back went to slot reads. What it gains is the growth without a
+callback, about a quarter of `facts-join`'s time.
 
-Growth copies each pair into the doubled array by its stored hash. The
-rehash callback and its context go:
-
-```c
-int	 relic_idtab_reserve(relic_idtab_t *);
-```
-
-and with them `tuple_rehash()`, `column_rehash()`, `key_rehash()`,
-`symbol_rehash()`, `value_rehash()`, `pred_rehash()`, `rehash_adornment()`
-and `rehash_rule()`, eight functions whose only purpose was to recover what
-the slot now holds. A doubling of the symbol table no longer
-rereads every symbol's bytes and a doubling of a canonical index no longer
-rereads every tuple, which is the part of cause 4 this section closes.
-
-### 5.3 Cost
-
-Four bytes more per slot. A table doubles at three quarters full and is
-three eighths full just after, so an entry occupies between 1.33 and 2.67
-slots, and a tuple's entry in its canonical index grows from between 5.3
-and 10.7 bytes to between 10.7 and 21.3. For a relation of arity 2 with no
-secondary index, whose columns cost 8 bytes, that is about two fifths to
-three fifths more store per tuple, and a smaller share for a relation that
-also carries secondary indexes, whose key tables grow the same way per
-distinct key. The relation store's bytes are charged to `max_memory`
-through `relic_idtab_bytes()` and `relic_idtab_bytes_after_reserve()`,
-which measure capacity in slots and need only the new slot size. The
-symbol, value and predicate tables, the rewrite's two tables and the
-scratch table of a distinct count are not charged, as today, and each
-doubles in the same way; they are sized by what the caller wrote, which is
-the reason `specs/design-relations.md` section 9 gives for leaving them
-out.
-
-The load factor stays three quarters. What made a fuller table expensive
-was the tuple read per slot, not the slot; with tags a longer run costs
-consecutive words.
-
-### 5.4 What it does not change
-
-The hash of a key is the same function of the same seed, so a probe walks
-the same slots in the same order and a growth places entries where it did:
-no row and no derivation order depends on the change. What does is the
-store's size. `storage bytes` in `-X stats` grows for every program, so
-the golden files that print it are regenerated; a program near a
-`-l memory=N` limit may be refused that was admitted, and the runs of
-`tests/perf.sh` and of `tests/unit/test_relation.c` that hold a store
-under a fixed number of bytes are re-derived against the new slot size.
-Reserving before placing, and the absence of deletion, are as
-`specs/design-memory.md` section 6 states them. The comparison that decides
-equality is still the owner's and still where a reader can see it.
+**The slot stays four bytes.** The closure workloads pay the two dependent
+misses of a successful search, one it would not remove, for a mixed result in
+time and a larger peak on both, and section 6 overlaps those misses rather
+than removing one. The stored hash is worth its slot again for a workload
+whose insertions are mostly new tuples, whose unsuccessful searches read a
+tuple per visited slot; the measurement that would show it is the profile
+share of the duplicate check against the peak, taken with section 6 in place.
 
 ---
 
-## 6. Batched insertion, contingent
+## 6. Batched insertion
 
-Section 3.3 establishes that nothing in a round reads a tuple the round
-inserts. That makes it sound to let an `EMIT` append its head tuple to a
-buffer and insert the buffer when it fills and when the plan ends, and to
-read `derived` and record the members that gained after the final flush.
-Under the naive fixed point, and in a one-pass component, flushing at the
-end of each plan keeps what `specs/design-eval.md` section 3 promises: a
-rule sees what the rules before it inserted. It no longer sees its own
-earlier matches, which changes how many passes the naive fixed point takes
+### 6.1 What it overlaps
+
+A duplicate check that finds its tuple, which section 2 counts as nearly
+all of them, costs two dependent misses: the slot the tuple's hash selects,
+and the tuple that slot names, read to confirm the match. The executor
+makes one check per derivation and waits out both misses before it derives
+the next tuple, so the misses of consecutive derivations are paid one after
+another although nothing orders them. Batching lets them overlap: gather
+several derived tuples, start the slot reads of all of them, then the reads
+of the tuples their first slots name, and only then insert each in turn,
+finding the lines already on their way. A search that visits more slots
+waits out the later ones as before.
+
+### 6.2 Why it is sound
+
+An `EMIT` appends its head tuple to a buffer, and the buffer is inserted
+when it fills and when the plan ends. The end-of-plan insertion is part of
+running a plan: the executor inserts the buffer before it returns, so
+every caller sees a plan's whole result and none takes part in flushing.
+
+A batch inserted while its plan runs is invisible to that plan by
+construction, not by an argument about which plans read what. Every view
+of a plan is resolved when the plan starts, section 3.1, before it has
+inserted anything, so every view ends at or before its relation's end at
+that moment: a member view at the delta's end, which is the member's end
+when the round began, section 3.3, and `all` at the relation's end. A
+batch takes identifiers past it. So what a plan reads does not depend on
+when, or in how many batches, its tuples are inserted, and
+`RELIC_INSERT_BATCH` is a constant of performance alone.
+
+Resolving `all` at the plan's start is what the naive fixed point and a
+one-pass component see: a rule sees what the rules before it inserted, as
+`specs/design-eval.md` section 3 promises, and none of its own derivations
+of the same pass. That changes how many passes the naive fixed point takes
 and not where it ends, as that section already says of the order rules run
-in.
+in; a pass still ends the fixed point only when it inserted nothing. The
+rows of a query's answer relation are read only after its plan ends.
 
-What batching buys is the chance to probe several slots before waiting for
-any of them: hash the buffered tuples, touch the slot each hashes to, then
-probe them in turn with the lines already on their way. That needs a
-prefetch the C standard does not provide. Both compilers relic builds with
-have one as a builtin; `configure` would detect it and the call would be a
-no-op elsewhere, which is a development-tool question and not a dependency
-in the sense of architecture section 74.
+The buffer is inserted in the order its tuples were derived, one at a time,
+so every tuple takes the identifier it would have taken inserted alone at
+the moment its batch is inserted, and a tuple equal to an earlier one of
+the same batch is found as a duplicate of it. When the evaluation succeeds,
+`derivations` and `tuples inserted` total what unbatched insertion totals.
+A refusal inserts the tuples before the refused one and discards the rest,
+which the failed evaluation discards anyway. The tuple limit refuses the
+same tuple with the same diagnostic, but reports it when the batch is
+inserted, so the executor may have run past it: up to a batch less one of
+further derivations, any number of tuples scanned and looked up on the way
+to them, and a mixed-comparison note among those bindings, all of which
+the counters and the diagnostics record. The buffer is charged to the
+evaluation arena, so a memory limit can fall a buffer's size earlier.
 
-It is contingent because section 5 removes the tuple read that the profile
-shows and may leave the duplicate check cheap enough that a second
-mechanism buys nothing. **It is designed only if, after section 5 is
-measured, the duplicate check still dominates a closure workload's
-profile.** Its shape is fixed here so that sections 3 and 5 are built with
-it in mind: one buffer per evaluation, since one plan runs at a time and
-the buffer is empty between plans, sized by the largest arity of the
-evaluation's heads and a fixed number of tuples, allocated from the
-evaluation arena when the evaluation begins and charged as the arena is,
-so a round still allocates nothing and a program of many rules costs no
-more than one of few.
+### 6.3 The insertion
+
+`relic_relation_insert_batch()` takes a relation, its tuples packed at its
+arity, and a count, and reports for each whether it was added and how many
+insertions completed; on a refusal those before the refused one completed,
+and it and the rest are reported not added. The tuples pointer is never
+null, even for a relation of arity zero, whose tuples occupy none of it. It
+works in chunks of `RELIC_INSERT_BATCH` tuples, so no caller can hand it
+more than its scratch holds, in three passes over a chunk:
+
+1. hash each tuple and prefetch the slot its hash selects;
+2. read each tuple's first slot, now arriving, and prefetch the tuple it
+   names, if any;
+3. insert each tuple in order by the hash pass 1 computed, as a single
+   insertion would.
+
+The table's own helpers do the first two passes, and they touch no slot of
+a table with no capacity, which is what a relation's first insertion
+finds. Pass 3 may grow the canonical index, after which the lines
+prefetched for the old slot array are simply not used: every address was
+computed from live pointers before the growth, a prefetch is a hint that
+reads nothing a later pass depends on, and it cannot fault. The insertion
+of a single tuple is the same code as pass 3 with its hash computed there,
+so the two cannot disagree about what a duplicate is.
+
+The prefetch is `RELIC_PREFETCH(address)`, the compiler's builtin where
+`configure` finds one and nothing elsewhere, where batching still inserts
+correctly and only loses the overlap. A builtin is a development-tool
+question and not a dependency in the sense of architecture section 74.
+
+### 6.4 The buffer
+
+One buffer per evaluation, since one plan runs at a time and the buffer is
+empty between plans: `RELIC_INSERT_BATCH` tuples of the widest head of any
+plan the evaluation builds, a head of arity zero counting as one column so
+that the buffer always exists. It is grown from the evaluation arena when a
+plan is built whose head is wider than any before, and charged as the arena
+is, so a round still allocates nothing, a program of narrow relations pays
+for narrow tuples, and a program of many rules costs no more than one of
+few. A plan has one `EMIT`, so the buffer holds tuples of one relation
+until it is inserted. `RELIC_INSERT_BATCH` is 64: measured on `tc-cyclic`
+and `sg-cyclic`, 16 tuples overlap most of the misses, 64 a little more,
+and 256 no more than 64.
 
 ---
 
 ## 7. Loading facts
 
-Section 5.2 removes the rehash of every symbol at each doubling of the
-symbol table, and the rereading of every tuple at each doubling of a
-relation's canonical index. That is the part of cause 4 the changes above
-close.
+An identifier table doubles by asking its owner for the hash of every
+entry, which rehashes every symbol's bytes at each doubling of the symbol
+table and rereads every tuple at each doubling of a relation's canonical
+index. Section 5.2 measured what storing the hash in the slot would save,
+about a quarter of `facts-join`, and left it for its memory.
 
-What they do not close is the cost of a fact as a program object. A fact
-is a rule with an empty body, `specs/design-parser.md` section 5, and the
-representation follows: the parser keeps its statement in the syntax tree,
-which is append-only and never discarded, the check compiles it into a
-`relic_rule_t` with its head arguments in the program arena and an entry in
-the rule table, the schedule records it in its component, and evaluation
-inserts its tuple. Per ternary fact that is a statement with three terms
-and their locations, a compiled rule with three arguments, and a schedule
-index: several hundred bytes, against the twelve of the tuple and the
-handful of its index slot. The 530 bytes per fact of `facts-join`'s peak are
-that, and the loading time of the small workloads is the parsing, checking
-and scheduling of each fact as a rule, before its tuple is ever inserted.
+The larger cost is that of a fact as a program object. A fact is a rule with
+an empty body, `specs/design-parser.md` section 5, and the representation
+follows: the parser keeps its statement in the syntax tree, which is
+append-only and never discarded, the check compiles it into a `relic_rule_t`
+with its head arguments in the program arena and an entry in the rule table,
+the schedule records it in its component, and evaluation inserts its tuple.
+Per ternary fact that is a statement with three terms and their locations, a
+compiled rule with three arguments, and a schedule index: several hundred
+bytes, against the twelve of the tuple and the handful of its index slot. The
+450 to 500 bytes per fact of `facts-join`'s peak are that, and the loading
+time of the small workloads is the parsing, checking and scheduling of each
+fact as a rule, before its tuple is ever inserted.
 
 Note that a symbol is not interned twice in the sense of hashing its bytes
 twice: the lexer interns the bytes into the symbol table, and the value
 table hashes the symbol's identifier, one word, to intern the value. The
-second is cheap; the first, and the rehash section 5.2 removes, are the
+second is cheap; the first, and the rehash at each growth, are the
 interning costs.
 
 The remedy is a representation question. A fact should stay a rule in the
@@ -839,24 +882,30 @@ re-derived from section 3 and asserted exactly. Two are added:
   from the exit rule; round 1 joins the 1600 delta tuples with 40 `par`
   tuples each, 64,000 derivations, none new, and the fixed point is
   reached. With the query's 1600 rows the derivations number 68,800 and the
-  tuples looked up 64,000. Today's evaluator makes 132,800 and 128,000. The
-  test is written first and fails on the unchanged tree.
+  tuples looked up 64,000. An evaluator whose round 0 runs the recursive
+  rule and whose views reach the round's own insertions makes 132,800 and
+  128,000.
 * **Two member literals.** `p(X, Y) :- edge(X, Y). p(X, Z) :- p(X, Y),
   p(Y, Z).` over a chain of *n* nodes. A body of the recursive rule is
   satisfied once per triple of nodes in chain order, so its variants make
   *n* choose 3 derivations over the fixed point, to which the *n* - 1 facts
   and the exit rule's *n* - 1 add; the query adds *n* choose 2. For *n* =
-  20 that is 1140 + 19 + 19 + 190 = 1368 derivations, which today's
-  evaluator exceeds through the current round's insertions. The test also
+  20 that is 1140 + 19 + 19 + 190 = 1368 derivations, which an evaluator
+  whose views reach the current round's insertions exceeds. The test also
   covers the boundary of section 3.4 with two members, one gaining in a
   round the other does not.
 
 `tests/unit/test_index.c` gains the frontier: a chain looked up from
 successive marks visits each tuple once; a chain whose every tuple is below
 the mark, then extended, then asked from a higher mark, finds the new
-tuples; and a mark below the last stays correct. `tests/unit/test_util.c`
-gains the tagged table: a candidate whose hash differs is never offered,
-and growth preserves every entry with no callback.
+tuples; and a mark below the last stays correct.
+`tests/unit/test_relation.c` gains batched insertion, section 6: batches of
+sizes on both sides of `RELIC_INSERT_BATCH` insert what single insertions
+would, under the same identifiers, and a limit refuses a batch where it
+refuses single insertions. `tests/unit/test_eval.c` gains a plan under the
+naive fixed point that derives more than a batch, so that a batch is
+inserted under an open `SCAN` and before a `MEMBER` of the head, and whose
+counters show the plan read none of it.
 
 **Equivalences, `tests/equiv/strategies.sh`.** The language corpus under
 `-X naive`, `-X no-index` and `-X no-reorder` gives the default's answers,
@@ -873,7 +922,7 @@ distinct bindings of its body variables over the final relations, which
 the driver computes from the naive answer.
 
 **Sanitizers.** `make check-asan` and `make check-ubsan` before each commit:
-the frontier, the tagged slots and the per-rule plan records are memory
+the frontier, the batch buffer and the per-rule plan records are memory
 layout changes.
 
 **Bounds.** `tests/perf.sh` holds its bounds unchanged: the reachability
@@ -902,11 +951,15 @@ useful without the ones after it.
    million and its derivations from 1.77 million to about 1.1 million, its
    time toward Souffle's; no `bench/run.sh` counter rises; `-e` shows the
    orders section 4.4 works through.
-3. **The tagged table** (section 5). Gate: the profile share of
-   `relic_relation_insert()` on `tc-cyclic` and `sg-cyclic`, their times,
-   and the peak memory of `facts-join`, all recorded in the commit.
-4. **Batched insertion** (section 6), only if step 3's profile still shows
-   the duplicate check dominating.
+3. **The identifier table** (section 5). Measured with the hash stored in
+   each slot: a mixed result in time on the closure workloads and a larger
+   peak on both. The slot stays; the measurement is recorded in section 5.2.
+4. **Batched insertion and the `all` view fixed at the plan's start**
+   (section 6), since the duplicate check still holds two thirds to three
+   quarters of `tc-cyclic`'s and `sg-cyclic`'s profile. Gate: their times
+   fall and the share of the duplicate check with them; no `bench/run.sh`
+   counter rises but those of the naive fixed point, whose counters are
+   re-derived by hand; the answers of `-X naive` are unchanged.
 5. **Facts** (section 7): a profile of `facts-join` and `graph-left`, then
    `specs/design-facts.md`.
 
@@ -924,12 +977,15 @@ own insertions, and step 4 for the same reason.
   position.
 * A delta lookup visits a chain forward, in identifier order, from a
   position that depends only on the delta's start.
-* A slot's stored hash is the hash the table already probed by; a tagged
-  table places every entry where the untagged one did.
+* A batch is inserted in the order its tuples were derived, and no plan
+  reads its own batches, so the tuples every plan reads, and the
+  identifiers its tuples take, are the same whatever `RELIC_INSERT_BATCH`
+  is.
 
 So two runs over the same input produce the same plans, the same derivation
-order, the same rows in the same order and byte-identical `-e` output; what
-differs from today is the order, once, at the commit that changes it.
+order, the same rows in the same order and byte-identical `-e` output. Each
+step of section 9 that changes the order changes it once, at its commit:
+steps 1 and 2 for the semi-naive evaluator, and step 4 for `-X naive`.
 
 ---
 
@@ -938,17 +994,20 @@ differs from today is the order, once, at the commit that changes it.
 On acceptance the durable record changes in these places, and nowhere else:
 
 * `relic-plan.md` D-10: the delta remains a range of tuple identifiers; the
-  sentence pinning it first is replaced by section 4, and a decision
-  records the tagged table as reversing the "identifier and nothing else"
-  rule of `specs/design-memory.md` section 6.
-* `specs/design-eval.md` sections 3, 4, 4.1, 4.2 and 4.3: the naive pass
-  no longer sees a rule's own earlier matches once section 6 batches; the
+  sentence pinning it first is replaced by section 4.
+* `specs/design-eval.md` sections 2.1 and 2.2, where an `EMIT` inserts
+  through the batch and the `all` view is fixed when the plan starts;
+  sections 3, 4, 4.1, 4.2 and 4.3: a naive pass does not see a rule's own
+  derivations of the same pass; the
   pseudocode, the variants and the completeness argument become sections
   3.2 to 3.5 here, the "refinement" 4.1 defers being what section 3
   specifies and the measurement it asked for being section 2; and `tuples
   looked up` says that a frontier step is not one.
 * `specs/design-plan.md` sections 3 to 5.3: `view` replaces `delta` on an
-  atom, and 5.3 no longer pins the delta first.
+  atom, `all` ends where the relation ended when the plan started, and 5.3
+  no longer pins the delta first.
+* `specs/design-relations.md` section 6: the batch insertion beside the
+  single one, and the one hashed insertion both perform.
 * `specs/design-planner.md` sections 5.1, 5.2, 6, 8.2 and 10: the delta
   literal takes part in the order; a variant may have two plans, with a
   prefix and a fan-out estimate and the threshold between them; the
@@ -964,10 +1023,8 @@ On acceptance the durable record changes in these places, and nowhere else:
 * `specs/design-index.md` sections 3, 4, 8 and 10: the frontier, the
   positioned lookup, twelve bytes of `entries` per key, and the removal of
   "indexes over a delta".
-* `specs/design-relations.md` section 5: the canonical index's slot holds
-  its hash beside the identifier, eight bytes.
-* `specs/design-memory.md` section 6: the slot, and the growth without a
-  callback.
+* `specs/design-memory.md` section 6: the stored hash measured and not
+  adopted, section 5.2, as a reason the slot holds an identifier alone.
 * `specs/architecture.md` section 28 points here.
 * `STATUS.md` and `TODO.md` follow the implementation.
 
@@ -991,16 +1048,16 @@ On acceptance the durable record changes in these places, and nowhere else:
   points the delta literal's atom at a relation that changes identity
   each round; the frontier reaches the same tuples in the same order for
   four bytes per key and no copy.
-* **A B-tree store.** The 24-way and 3-way gaps of section 2 are a join
-  order and a dependent read, not a data structure; the hash store keeps
+* **A B-tree store.** The gaps of section 2 are a join order, repeated
+  work and dependent reads, not a data structure; the hash store keeps
   membership constant-time and the tuple identifier a position, which
   D-10 rests on.
-* **A lower load factor.** Section 5.3.
-* **A tag narrower than the hash.** A 32-bit tag costs the same slot as a
-  16-bit one padded, rejects a mismatch with certainty, and is what growth
-  needs to place the entry.
+* **A hash stored in each slot.** Section 5.2: on duplicate-heavy
+  workloads it trades a larger peak for a mixed result in time.
+* **A lower load factor.** It shortens the unsuccessful searches, which
+  the duplicate check rarely makes, and costs slots.
 * **A different guess for the rewrite's static mode.** Section 4.4 leaves
   the estimate of an incomplete relation read whole where it is, so the
   sideways information passing of `specs/design-magic.md` section 5
-  chooses the orders it chooses today.
+  chooses its orders by the estimates that section describes.
 * **The fact representation.** Section 7.

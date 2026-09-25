@@ -79,18 +79,24 @@ pointer is not kept across the operations below it, because one of them may be
 an `EMIT` into the very relation being scanned, and an insertion can move the
 storage the pointer points into.
 
-The range a `SCAN` walks is taken when it starts. Tuples inserted into the
-relation while the scan runs lie beyond its end and are not visited by that
-scan. They are not lost: they are visited by the next scan to start over the
-relation, in this iteration or the next. This keeps a scan's work bounded by
-the relation's size when it started, and it is what a semi-naive delta range
-needs anyway.
+An `EMIT` appends its head tuple to a batch, which is inserted when it fills
+and when the plan ends, before the plan returns;
+`specs/design-evaluation-cost.md` section 6 says why. So a batch can be
+inserted while a scan of the head relation is still running.
+
+The range a `SCAN` of the whole relation walks ends where the relation ended
+when the plan started. Tuples the plan inserts lie beyond that end and are
+not visited by any operation of the plan. They are not lost: they are
+visited by the next plan to read the relation, in this pass or the next.
+This keeps a plan's work bounded by the relations' sizes when it started,
+makes what a plan reads independent of when its batches are inserted, and
+is what a semi-naive delta range needs anyway.
 
 A `LOOKUP` obeys the same rule. It walks the chain of tuples an index holds
 for its key, holding only the next identifier on the chain, and stops at the
-first one at or past the relation's end as it was when the lookup started;
-identifiers increase along a chain, so nothing before that point is skipped.
-`specs/design-index.md` section 4 describes the walk.
+first one at or past that end; identifiers increase along a chain, so
+nothing before that point is skipped. `specs/design-index.md` section 4
+describes the walk.
 
 Both are the `all` view of a relation. An operation of a semi-naive variant
 over a member of its component reads through a narrower view whose end is
@@ -164,11 +170,12 @@ pass over its rules adds nothing. Since no later component writes a predicate
 an earlier one reads, every rule adds nothing once the last component is done,
 which is the definition of a fixed point of the immediate-consequence operator.
 
-Within an iteration a rule sees the insertions of the rules before it, and of
-its own earlier matches, rather than only the state at the start of the
-iteration. That changes how many iterations are needed and not what they
-reach, and it is deterministic, because rules run in program order and
-relations iterate in insertion order.
+Within an iteration a rule sees the insertions of the rules before it,
+rather than only the state at the start of the iteration, and none of its
+own: each of its operations reads the relation as it stood when the rule's
+plan started, section 2.2. That changes how many iterations are needed and
+not what they reach, and it is deterministic, because rules run in program
+order and relations iterate in insertion order.
 
 ### 3.1 Why it stays
 

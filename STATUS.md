@@ -418,6 +418,16 @@ held 672. A program near its `-l memory=` limit can be refused where it was
 not. A plan no delta can select is not built, so a threshold at either end
 costs no index.
 
+The identifier table keeps its four-byte slot. A hash stored beside each
+identifier, section 5 of the evaluation cost design, is not in the tree:
+on `tc-cyclic` and `sg-cyclic`, whose duplicate checks find a duplicate 96
+and 92 times in a hundred, it took the median user time from 4.75 s to
+4.36 s and from 3.42 s to 3.56 s, and the peak from 81-82 MB to 90-116 MB
+and from 56-69 MB to 77-102 MB. `facts-join`, whose tables would grow
+without rereading their keys, went from 0.35 s to 0.27 s. The duplicate
+check held 73 and 68 per cent of the two profiles without it and 78 and 72
+with it.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -654,7 +664,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats, `-n`, verbosity, the interactive mode |
 | `specs/design-hardening.md` | the program generator, the differential driver, the shrinker, the fuzz targets, coverage and benchmarks |
 | `specs/design-bench.md` | the comparison with other engines: engines and modes, workloads, data, answers, measurement |
-| `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the tagged identifier table |
+| `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the four-byte identifier slot kept, batched insertion |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |

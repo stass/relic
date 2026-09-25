@@ -260,6 +260,22 @@ insertion uses it.
 not validate them, because it never inspects a value: a column is an opaque
 32-bit integer to everything in this layer.
 
+```c
+int
+relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
+    const relic_dom_t *tuples, size_t count, bool *added,
+    size_t *completedp);
+```
+
+inserts `count` tuples packed at the relation's arity exactly as that many
+single insertions would in order, reporting each one's newness in `added`
+and how many completed before any refusal in `*completedp`. It exists so
+that the cache misses of the duplicate checks overlap rather than follow
+one another, `specs/design-evaluation-cost.md` section 6. Both entry points
+hash the tuple and then perform one insertion by that hash, the steps
+above, so they cannot disagree about what a duplicate is or where a limit
+falls.
+
 ---
 
 ## 7. The empty tuple

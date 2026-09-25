@@ -208,6 +208,14 @@ That is the entire reason for a purpose-built table rather than a generic
 container: the key lives wherever its owner already keeps it, so the table
 costs four bytes per entry and the owner pays nothing twice.
 
+Storing the hash beside the identifier would let a probe pass a mismatch
+without asking the owner, and let the table grow without calling back into
+it. `specs/design-evaluation-cost.md` section 5.2 measured that slot on the
+closure workloads: their duplicate checks are almost all successful
+searches, which read the matching tuple either way and pass few
+mismatches, and the doubled slot array raised the peak for a mixed result
+in time. The slot stays an identifier.
+
 **Identifier zero is never assigned.** Symbol identifiers and domain
 identifiers both start at one, which is what lets a zeroed slot mean "empty"
 with no separate occupancy bitmap and no sentinel that a caller could collide
