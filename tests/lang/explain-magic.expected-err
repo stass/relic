@@ -11,7 +11,11 @@ magic rewrite of $q0(S, X) :- start(S), path(S, X).
             scan start(S)
             emit magic$path$bf(S)
         rule magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
-            delta magic$path$bf(X):
+            delta magic$path$bf(X) when the delta holds more than 3 tuples:
+                scan edge(X, Y)
+                member delta magic$path$bf(X)
+                emit magic$path$bf(Y)
+            delta magic$path$bf(X) otherwise:
                 scan delta magic$path$bf(X)
                 lookup edge(X, Y) key={0}
                 emit magic$path$bf(Y)
@@ -26,7 +30,12 @@ magic rewrite of $q0(S, X) :- start(S), path(S, X).
             lookup edge(X, Y) key={0}
             emit path$bf(X, Y)
         rule path$bf(X, Z) :- magic$path$bf(X), edge(X, Y), path$bf(Y, Z).
-            delta path$bf(Y, Z):
+            delta path$bf(Y, Z) when the delta holds more than 3 tuples:
+                scan magic$path$bf(X)
+                lookup edge(X, Y) key={0}
+                lookup delta path$bf(Y, Z) key={0}
+                emit path$bf(X, Z)
+            delta path$bf(Y, Z) otherwise:
                 scan delta path$bf(Y, Z)
                 lookup edge(X, Y) key={1}
                 member magic$path$bf(X)

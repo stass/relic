@@ -473,9 +473,9 @@ growth_under(unsigned int flags, const char *strategy)
 /*
  * An answer counts against the tuple limit like any relation, and one that
  * the limit refuses part way is emptied and gives back what it counted: the
- * totals afterwards are what the program's own relations held before it.  The query is
- * destroyed after its context, which reads nothing of the context, and
- * leaves nothing for AddressSanitizer to report.
+ * totals afterwards are what the program's own relations held before it.
+ * The query is destroyed after its context, which reads nothing of the
+ * context, and leaves nothing for AddressSanitizer to report.
  */
 static void
 an_answer_refused_by_a_limit_is_given_back(void)

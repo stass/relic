@@ -151,8 +151,15 @@ struct relic_running_plan {
 };
 
 /*
- * A semi-naive delta variant of a rule: its plan, in which body literal
- * `delta_literal` reads its member's delta.
+ * A semi-naive delta variant of `rule`, in which body literal
+ * `delta_literal` reads its member's delta.  `placed` runs it with the delta
+ * literal ordered like any other and `delta_first` with the delta literal
+ * placed first; a round runs `placed` when the delta holds more than
+ * `threshold` tuples and `delta_first` otherwise, since which is cheaper
+ * depends on a size known only when the round starts.  Each is NULL when no
+ * round would run it, and at least one is not (relic_variant_plans_t).
+ * Both read every literal through the same view, so they derive the same
+ * tuples.
  *
  * `empty_old_views` counts the literals the variant reads through the old
  * view while that view is still empty, one for each member literal written
@@ -162,9 +169,12 @@ struct relic_running_plan {
  * nothing while it is not zero.
  */
 struct relic_variant {
-	relic_running_plan_t	running;
-	size_t			delta_literal;
-	size_t			empty_old_views;
+	const relic_rule_t	*rule;
+	relic_running_plan_t	*placed;
+	relic_running_plan_t	*delta_first;
+	uint64_t		 threshold;
+	size_t			 delta_literal;
+	size_t			 empty_old_views;
 };
 
 /*
@@ -323,7 +333,7 @@ static bool	 query_answerable(relic_t *ctx, const relic_query_t *query,
 static int	 compute_answer(relic_t *ctx, const relic_query_t *query);
 static int	 build_running_plan(relic_evaluation_t *eval,
 		    const relic_rule_t *rule, relic_relation_t *target,
-		    size_t delta_literal, relic_running_plan_t *running);
+		    relic_running_plan_t **runningp);
 static enum relic_fixed_point choose_fixed_point(const relic_t *ctx,
 		    const relic_component_t *component);
 static int	 compare_indexes(const void *a, const void *b);
@@ -401,6 +411,9 @@ static bool	 literal_reads_member(const relic_evaluation_t *eval,
 static void	 mark_members(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component, bool is_member);
+static int	 make_running_plan(relic_evaluation_t *eval,
+		    const relic_rule_t *rule, const relic_plan_t *plan,
+		    relic_running_plan_t **runningp);
 static int	 materialize_program(relic_t *ctx);
 static int	 naive_fixed_point(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans);
@@ -423,6 +436,10 @@ static int	 plan_rules(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component,
 		    relic_component_plans_t *plans);
+static int	 plan_variant(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
+		    const relic_rule_t *rule, size_t j,
+		    relic_variant_t *variant);
 static int	 plan_variants(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans,
 		    relic_rule_plans_t *rule_plans);
@@ -443,6 +460,7 @@ static bool	 rule_is_recursive(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
 static int	 run_variant(relic_evaluation_t *eval, relic_delta_work_t *work,
 		    const relic_variant_t *variant);
+static const relic_plan_t *variant_any_plan(const relic_variant_t *variant);
 static int	 semi_naive_fixed_point(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static void	 start_deltas(relic_evaluation_t *eval,
@@ -468,6 +486,9 @@ static relic_dom_t term_value(const relic_evaluation_t *eval,
 		    const relic_plan_term_t *term);
 static bool	 tuple_matches(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom, const relic_dom_t *tuple);
+static const relic_running_plan_t *variant_plan(
+		    const relic_evaluation_t *eval,
+		    const relic_variant_t *variant);
 static relic_tuple_range_t view_range(const relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom);
 
@@ -644,10 +665,11 @@ step_scan(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 
 /*
  * A LOOKUP: find the next tuple on the chain of the key its bound columns
- * hold that matches, starting from the head of the chain when not resuming
- * and stopping at the end of its view.  A delta is only ever scanned, so the
- * view a lookup reads through begins at the first identifier and the head of
- * the chain is where its tuples begin.
+ * hold that matches, starting when not resuming at the first chain tuple in
+ * its view and stopping at the end of the view.  Every view but a delta
+ * begins at the first identifier, so its tuples begin at the head of the
+ * chain; a delta's begin at the first chain tuple at or past its start,
+ * which the index finds from the key's frontier.
  *
  * Every tuple on the chain already agrees with the key columns; it is matched
  * against every term all the same, which binds the other columns and checks
@@ -662,9 +684,10 @@ static bool
 step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
     relic_tuple_range_t *cursor, bool resume)
 {
-	const relic_index_t *index;
+	relic_index_t *index;
 	const relic_dom_t *tuple;
 	relic_dom_t probe[RELIC_MAX_ARITY];
+	relic_tuple_range_t view;
 	relic_tuple_id_t id;
 	uint16_t column;
 
@@ -677,9 +700,14 @@ step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 				    &atom->terms[column]);
 		}
 
-		assert(atom->view != RELIC_VIEW_DELTA);
-		cursor->first = relic_index_first(index, atom->relation, probe);
-		cursor->end = view_range(eval, atom).end;
+		view = view_range(eval, atom);
+		if (atom->view == RELIC_VIEW_DELTA)
+			cursor->first = relic_index_first_since(index,
+			    atom->relation, probe, view.first);
+		else
+			cursor->first = relic_index_first(index,
+			    atom->relation, probe);
+		cursor->end = view.end;
 	}
 
 	while (cursor->first != RELIC_ID_NONE && cursor->first < cursor->end) {
@@ -1144,6 +1172,29 @@ record_gain(relic_delta_work_t *work, size_t member)
 }
 
 /*
+ * The plan of a variant this round runs: the placed plan when its delta
+ * holds more tuples than the variant's threshold, and the delta-first plan
+ * otherwise, or whichever of the two was built when only one was.
+ */
+static const relic_running_plan_t *
+variant_plan(const relic_evaluation_t *eval, const relic_variant_t *variant)
+{
+	const relic_tuple_range_t *delta;
+
+	if (variant->placed == NULL)
+		return (variant->delta_first);
+	if (variant->delta_first == NULL)
+		return (variant->placed);
+
+	delta = &eval->deltas[variant->rule->body[
+	    variant->delta_literal].u.atom.pred - 1];
+	if (delta->end - delta->first > variant->threshold)
+		return (variant->placed);
+
+	return (variant->delta_first);
+}
+
+/*
  * Run one delta variant of a component being evaluated semi-naively,
  * recording its head as having gained when it inserted a tuple.
  */
@@ -1152,11 +1203,11 @@ run_variant(relic_evaluation_t *eval, relic_delta_work_t *work,
     const relic_variant_t *variant)
 {
 	eval->derived = false;
-	if (execute_plan(eval, &variant->running) != 0)
+	if (execute_plan(eval, variant_plan(eval, variant)) != 0)
 		return (-1);
 
 	if (eval->derived)
-		record_gain(work, head_member_of(eval, variant->running.rule));
+		record_gain(work, head_member_of(eval, variant->rule));
 
 	return (0);
 }
@@ -1389,9 +1440,9 @@ evaluation_track_deltas(relic_evaluation_t *eval)
 }
 
 /*
- * Plan one rule, or one delta variant of it, with the cursors that run it,
- * its EMIT writing into `target`.  Returns 0, or -1 with a diagnostic
- * reported.
+ * Plan one rule's ordinary plan, with the cursors that run it, into
+ * *runningp, its EMIT writing into `target`.  Returns 0, or -1 with a
+ * diagnostic reported.
  *
  * The relations marked as members are the ones the planner is told are
  * still being derived.  A query's evaluation marks none, having no
@@ -1399,20 +1450,40 @@ evaluation_track_deltas(relic_evaluation_t *eval)
  */
 static int
 build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
-    relic_relation_t *target, size_t delta_literal,
-    relic_running_plan_t *running)
+    relic_relation_t *target, relic_running_plan_t **runningp)
 {
-	running->rule = rule;
+	relic_plan_t plan;
 
+	*runningp = NULL;
 	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule, target,
-	    delta_literal, eval->is_member, &running->plan) != 0)
+	    eval->is_member, &plan) != 0)
 		return (-1);
 
-	running->cursors = evaluation_alloc(eval, running->plan.op_count,
+	return (make_running_plan(eval, rule, &plan, runningp));
+}
+
+/*
+ * Pair a plan built for `rule` with the cursors that run it, in *runningp.
+ */
+static int
+make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
+    const relic_plan_t *plan, relic_running_plan_t **runningp)
+{
+	relic_running_plan_t *running;
+
+	*runningp = NULL;
+	running = evaluation_alloc(eval, 1, sizeof(*running));
+	if (running == NULL)
+		return (-1);
+
+	running->plan = *plan;
+	running->rule = rule;
+	running->cursors = evaluation_alloc(eval, plan->op_count,
 	    sizeof(*running->cursors));
 	if (running->cursors == NULL)
 		return (-1);
 
+	*runningp = running;
 	return (0);
 }
 
@@ -1577,12 +1648,43 @@ plan_base(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 
 	rule = rule_plans->rule;
 
-	rule_plans->base = evaluation_alloc(eval, 1, sizeof(*rule_plans->base));
-	if (rule_plans->base == NULL)
+	return (build_running_plan(eval, rule, head_relation_of(eval, plans,
+	    rule), &rule_plans->base));
+}
+
+/*
+ * Plan the variant of `rule` whose delta literal is body literal
+ * `delta_literal`: the plans a round may choose between, each left NULL when
+ * the planner built none because no round would run it, and the threshold
+ * a round chooses by.
+ */
+static int
+plan_variant(relic_evaluation_t *eval, const relic_component_plans_t *plans,
+    const relic_rule_t *rule, size_t delta_literal, relic_variant_t *variant)
+{
+	relic_variant_plans_t variant_plans;
+
+	bzero(variant, sizeof(*variant));
+	variant->rule = rule;
+	variant->delta_literal = delta_literal;
+
+	if (relic_plan_variant(eval->ctx, &eval->ctx->eval_arena, rule,
+	    head_relation_of(eval, plans, rule), delta_literal,
+	    eval->is_member, &variant_plans) != 0)
+		return (-1);
+	variant->threshold = variant_plans.threshold;
+
+	if (variant_plans.placed.ops != NULL &&
+	    make_running_plan(eval, rule, &variant_plans.placed,
+	    &variant->placed) != 0)
 		return (-1);
 
-	return (build_running_plan(eval, rule, head_relation_of(eval, plans,
-	    rule), RELIC_PLAN_NO_DELTA, rule_plans->base));
+	if (variant_plans.delta_first.ops != NULL &&
+	    make_running_plan(eval, rule, &variant_plans.delta_first,
+	    &variant->delta_first) != 0)
+		return (-1);
+
+	return (0);
 }
 
 /*
@@ -1605,9 +1707,7 @@ plan_variants(relic_evaluation_t *eval, relic_component_plans_t *plans,
 			continue;
 
 		variant = &plans->variants[plans->variant_count];
-		variant->delta_literal = j;
-		if (build_running_plan(eval, rule, head_relation_of(eval, plans,
-		    rule), j, &variant->running) != 0)
+		if (plan_variant(eval, plans, rule, j, variant) != 0)
 			return (-1);
 		plans->variant_count++;
 		rule_plans->variant_count++;
@@ -1715,7 +1815,7 @@ head_relation_of(const relic_evaluation_t *eval,
 static size_t
 delta_member_of(const relic_evaluation_t *eval, const relic_variant_t *variant)
 {
-	return (eval->member_position[variant->running.rule->body[
+	return (eval->member_position[variant->rule->body[
 	    variant->delta_literal].u.atom.pred - 1]);
 }
 
@@ -1818,10 +1918,24 @@ group_by_delta_member(relic_evaluation_t *eval,
 }
 
 /*
+ * One of the plans a variant was given, it does not matter which.
+ */
+static const relic_plan_t *
+variant_any_plan(const relic_variant_t *variant)
+{
+	if (variant->placed != NULL)
+		return (&variant->placed->plan);
+
+	return (&variant->delta_first->plan);
+}
+
+/*
  * List, in planning order, every variant under each member one of its
  * operations reads through the old view, once per such operation, and group
  * them.  The list is read off the plans themselves, so the count of empty
- * old views a variant waits on is exactly what its plan reads.
+ * old views a variant waits on is exactly what its plans read; both of a
+ * variant's plans read every literal through the same view, so either
+ * serves.
  */
 static int
 group_by_old_member(relic_evaluation_t *eval, relic_component_plans_t *plans)
@@ -1835,7 +1949,7 @@ group_by_old_member(relic_evaluation_t *eval, relic_component_plans_t *plans)
 
 	count = 0;
 	for (i = 0; i < plans->variant_count; i++) {
-		plan = &plans->variants[i].running.plan;
+		plan = variant_any_plan(&plans->variants[i]);
 		for (j = 0; j < plan->op_count; j++) {
 			if (op_reads_old(&plan->ops[j]))
 				count++;
@@ -1848,7 +1962,7 @@ group_by_old_member(relic_evaluation_t *eval, relic_component_plans_t *plans)
 
 	count = 0;
 	for (i = 0; i < plans->variant_count; i++) {
-		plan = &plans->variants[i].running.plan;
+		plan = variant_any_plan(&plans->variants[i]);
 		for (j = 0; j < plan->op_count; j++) {
 			op = &plan->ops[j];
 			if (!op_reads_old(op))
@@ -1971,7 +2085,11 @@ explain_component(const relic_evaluation_t *eval,
 		for (j = 0; j < rule_plans->variant_count; j++) {
 			variant = &rule_plans->variants[j];
 			relic_explain_variant(eval->ctx, rule_plans->rule,
-			    variant->delta_literal, &variant->running.plan,
+			    variant->delta_literal,
+			    variant->placed == NULL ? NULL :
+			    &variant->placed->plan,
+			    variant->delta_first == NULL ? NULL :
+			    &variant->delta_first->plan, variant->threshold,
 			    depth);
 		}
 	}
@@ -1995,12 +2113,7 @@ plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
 	rule_plans->rule = rule;
 	plans->planned_count = 1;
 
-	rule_plans->base = evaluation_alloc(eval, 1, sizeof(*rule_plans->base));
-	if (rule_plans->base == NULL)
-		return (-1);
-
-	return (build_running_plan(eval, rule, answer, RELIC_PLAN_NO_DELTA,
-	    rule_plans->base));
+	return (build_running_plan(eval, rule, answer, &rule_plans->base));
 }
 
 /*

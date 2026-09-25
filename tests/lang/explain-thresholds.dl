@@ -1,0 +1,17 @@
+% -e over variants one of whose two plans no delta would select, and which
+% is therefore not built.  loop holds nothing.  The first variant's
+% delta-first plan tests each delta tuple against loop and finds nothing,
+% cheaper whatever the delta holds than its placed plan, which looks the
+% delta up once per e(a, Y); the second variant's placed plan reads loop
+% first and so reads nothing at all.  Each shows only the plan that runs,
+% under the plain heading of a variant with one plan.
+
+e(a, b).
+e(b, c).
+e(c, d).
+
+loop(X) :- e(X, X).
+
+r(X, Y) :- e(X, Y).
+r(a, Z) :- e(a, Y), r(Y, Z), loop(Z).
+r(X, Z) :- loop(X), e(X, Y), r(Y, Z).

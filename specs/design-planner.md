@@ -10,6 +10,8 @@ under `specs/`; `STATUS.md` records what is implemented.
 `specs/design-plan.md` for the shape every plan has, which this document
 never changes; `specs/design-index.md` for the indexes a lookup reads;
 `specs/design-eval.md` for the fixed points that run the plans;
+`specs/design-evaluation-cost.md` sections 3 and 4 for the views a variant
+reads and the placement of its delta literal;
 `relic-plan.md` decisions D-4, D-8 and D-10.
 
 ---
@@ -21,6 +23,8 @@ never changes; `specs/design-index.md` for the indexes a lookup reads;
 * the statistics a relation offers and how they stay correct;
 * the estimate a literal is scored by, in integer arithmetic;
 * the greedy ordering, its tie-breaks, and what it leaves alone;
+* the two plans of a delta variant, and the threshold a round chooses
+  between them by;
 * the access path a positive literal gets;
 * the `-X no-index` and `-X no-reorder` references;
 * the static mode Magic Sets plans in;
@@ -133,6 +137,15 @@ narrows it by an order of magnitude. Neither is a measurement; both are
 visible in the source and in this document, which is all D-4 asks of a
 heuristic.
 
+In a semi-naive delta variant the guess depends on the view the literal
+reads, `specs/design-evaluation-cost.md` section 4.4. A member read through
+`all` or `delta` estimates `RELIC_PLAN_UNKNOWN_TUPLES`; a member read
+through `old` or `current`, beside its own delta, estimates
+`RELIC_PLAN_UNKNOWN_TUPLES` times `RELIC_PLAN_DELTAS_HELD`, 10, before the
+same division. That says only that a member is larger than its own delta,
+which is true by construction, and it ranks the delta ahead of every other
+member literal with the same bound columns.
+
 **The arithmetic is integer.** A floating-point estimate is deterministic on
 most platforms and not on all -- x87 extended precision rounds differently --
 and a plan that depended on it would make `-e` output differ between two
@@ -164,14 +177,45 @@ Under section 5.2 it cannot tell two candidates apart: every literal with a
 bound column gets an index, so among literals with the same number of bound
 arguments either all have one or none does.
 
-Two things are fixed before the greedy order starts, and it does not touch
-them:
+One thing is fixed before the greedy order starts, and it does not touch it:
+**tests are placed at the earliest point every slot they read is bound**,
+exactly as in the textual planner of `specs/design-plan.md` section 5.1,
+after whichever positive literal makes them placeable.
 
-* **a delta literal is placed first**, per D-10, so that a delta is only ever
-  scanned;
-* **tests are placed at the earliest point every slot they read is bound**,
-  exactly as in the textual planner of `specs/design-plan.md` section 5.1,
-  after whichever positive literal makes them placeable.
+**A delta literal takes part in the order** like any other positive literal,
+scored by the estimate of its view (section 4), so a small complete relation
+that binds the columns the delta would be looked up by goes before it, as it
+would before any other literal. That is the shape a Magic rewrite produces,
+a magic relation of a few bindings guarding a rule whose delta holds the
+answers found so far for all of them.
+
+**A variant may have two plans.** Whether the placed order is cheaper than
+the delta first depends on the delta's size, which the planner cannot know
+and which changes from round to round. So when the order places another
+positive literal before the delta literal, the variant keeps two plans:
+
+* the **placed plan**, the greedy order, whose **prefix estimate** is the
+  product of the estimates the positive literals before the delta literal
+  were placed by: the bindings that reach the delta literal in a round, each
+  one lookup of the delta whatever it holds;
+* the **delta-first plan**, the same walk with the delta literal placed
+  before every other positive literal, whose **fan-out estimate** is the
+  product of the estimates of the positive literals after it: the bindings
+  each delta tuple leads to.
+
+A round whose delta holds *D* tuples costs the placed plan about the prefix
+and the delta-first plan about *D* times the fan-out, so the variant's
+**threshold** is the prefix over the fan-out, in integer division, and each
+round runs the placed plan when its delta holds more tuples than the
+threshold and the delta-first plan otherwise. A prefix of zero, a relation
+before the delta found empty, makes the threshold zero; otherwise a fan-out
+of zero makes it one no delta exceeds. The products are 64-bit and saturate
+rather than wrap, so the same program has the same threshold on every
+platform. A plan that no delta would select is not built, and neither are
+the indexes only it would read. When the order places the delta literal
+first, the two plans coincide and there is one.
+`specs/design-evaluation-cost.md` sections 4.3 and 4.4 give the reasoning
+and the examples.
 
 For the body of architecture section 23, with `tiny/1` holding 10 tuples,
 `medium/1` 1000 and `huge/2` 100 000:
@@ -192,9 +236,13 @@ A positive literal becomes, at the point it is placed:
 * `MEMBER`, when every argument is bound: the canonical index answers it;
 * `LOOKUP`, when some but not all are, through **the index keyed on exactly
   its bound columns**, which the relation builds if it has none;
-* `SCAN`, when none are;
+* `SCAN`, when none are.
 
-and a delta literal is always a `SCAN` of the delta, as before.
+A delta literal follows the same rule through the delta view: a `SCAN` of
+the delta, a `LOOKUP` whose walk starts, through the key's frontier, at the
+key's first tuple inside the delta, `specs/design-index.md` section 4.1, or a
+`MEMBER` that holds only for a tuple of the delta. The delta is never
+copied and has no index of its own; it reads the relation's.
 
 The index is keyed on every bound column because that is the most selective
 lookup there is, and because the alternative -- reusing an index over some of
@@ -212,13 +260,14 @@ equivalences of architecture section 66.2:
 
 | Switch | Flag | Effect |
 | --- | --- | --- |
-| `-X no-index` | `RELIC_F_NO_INDEX` | no `LOOKUP`: a literal with bound columns is a `SCAN` that matches them |
-| `-X no-reorder` | `RELIC_F_NO_REORDER` | positive literals in written order after the delta literal |
+| `-X no-index` | `RELIC_F_NO_INDEX` | no `LOOKUP`: a literal with bound columns is a `SCAN` of its view that matches them; a delta variant places its delta literal first and has that one plan, since a delta scanned after other literals would be scanned once per binding |
+| `-X no-reorder` | `RELIC_F_NO_REORDER` | positive literals in written order, the delta literal in its written place, and one plan per variant |
 
 Both leave everything else as it is: `MEMBER` still answers a fully bound
 literal, because the canonical index is not a secondary one, and tests are
 still placed as early as they can be. With both switches the planner is the
-textual planner of `specs/design-plan.md` section 5.1.
+textual planner of `specs/design-plan.md` section 5.1, and a delta variant is
+the textbook semi-naive scheme.
 
 Each must give the default's answers, and `tests/equiv/strategies.sh` runs the
 language corpus under each to show it.
@@ -288,10 +337,11 @@ stratum 0, component 1 (recursive): path/2
         scan edge(X, Y)
         emit path(X, Y)
     rule path(X, Z) :- edge(X, Y), path(Y, Z).
-        scan edge(X, Y)
-        lookup path(Y, Z) key={0}
-        emit path(X, Z)
-        delta path(Y, Z):
+        delta path(Y, Z) when the delta holds more than 3 tuples:
+            scan edge(X, Y)
+            lookup delta path(Y, Z) key={0}
+            emit path(X, Z)
+        delta path(Y, Z) otherwise:
             scan delta path(Y, Z)
             lookup edge(X, Y) key={1}
             emit path(X, Z)
@@ -304,9 +354,17 @@ query $q0(X) :- path(a, X).
   whether it is recursive, and its members.
 * Its facts are counted rather than shown, because a component of a million
   facts would otherwise print a million plans of one `emit` each.
-* Each other rule is shown as written, followed by its plan, and, when it is
-  evaluated semi-naively, each delta variant headed by the literal that
-  reads the delta.
+* Each other rule is shown as written. A rule of a component evaluated in one
+  pass, an exit rule of a recursive component, and every rule under `-X naive`
+  are each followed by its plan. A recursive rule under the semi-naive fixed
+  point runs only as its variants and shows no plan of its own: each variant
+  follows, headed by the literal that reads the delta.
+* A variant with one plan is headed `delta` and its delta literal. A variant
+  with two shows the placed plan, headed by the threshold its delta must
+  exceed, `when the delta holds more than N tuples` (`tuple` when N is one),
+  and then the delta-first plan, headed `otherwise`. Which plan a round chose
+  is not printed, so that the lines are a function of the plans and not of how
+  many rounds ran.
 * A query is shown as the rule it compiles to, headed by its name,
   `$q` and a serial.
 * A query answered through its Magic rewrite also shows the rewrite and the
@@ -315,8 +373,12 @@ query $q0(X) :- path(a, X).
 
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
-`anti-member`, `filter` with its comparison, and `emit`. A delta scan says
-`scan delta`. Variables are named as the rule names them, `_` is written as
+`anti-member`, `filter` with its comparison, and `emit`. An operation over a
+member of the component follows its kind with the view it reads when that
+view is `delta` or `old`: `scan delta`, `lookup delta`, `member delta`,
+`scan old`, `lookup old`, `member old`. The `current` view, what a member
+literal of a variant reads unless marked otherwise, and `all` are unmarked.
+Variables are named as the rule names them, `_` is written as
 `_`, and constants as the text output format writes them.
 
 ### 8.3 Safe to print
@@ -350,11 +412,15 @@ order and byte-identical `-e` output, which the golden tests compare.
 
 * **A join-order search.** Architecture section 23: greedy is enough, and
   explainable.
-* **Replanning during a fixed point.** Section 2.
+* **Replanning during a fixed point.** Section 2. A variant's plans are built
+  when its component is planned, with the indexes they read, and a round
+  only chooses between them (section 5.1).
 * **Multi-column statistics.** Architecture section 24 calls them unnecessary
   initially; the independence assumption is visible in section 4.
 * **Estimates in `-e` output.** The plan says what was chosen; the estimates
   that chose it depend on constants that may change, and would make every
-  golden plan move with them.
+  golden plan move with them. A variant's threshold is the one figure
+  derived from them that `-e` prints, because without it a reader could not
+  tell which of the two plans a round runs.
 * **Plans without evaluation.** A plan depends on the complete relations of
   the components before it, so it exists only once they are complete.

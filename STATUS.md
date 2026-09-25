@@ -369,16 +369,18 @@ limit. CSPA over the Graspan data sets, the recorded run and the scale sweep
 are open in `TODO.md`.
 
 **Evaluation cost.** What a derivation costs, specified in
-`specs/design-evaluation-cost.md`. Section 3, views, is implemented.
+`specs/design-evaluation-cost.md`. Sections 3, views, and 4, the delta's
+placement, are implemented.
 
 | Component | State |
 | --- | --- |
-| `lib/plan.{h,c}` | an operation over a relation reads through a view -- `all`, or for a member in a delta variant `delta`, `old` or `current` -- assigned by body order: the delta literal reads its delta, a member literal written before it the old view and one after it the current view; a variant whose delta literal does not read a relation marked as still being derived is refused; the delta literal is still placed first, as a `SCAN` |
-| `lib/eval.c` | the executor takes each view's range from the member's delta when an operation starts, and a `MEMBER` holds only for a tuple whose identifier lies in its view; round 0 runs the facts and the exit rules, a recursive rule having only its variants; every member's delta starts empty at the first identifier, so the first delta is the whole member; each boundary advances, once each, the members that gained and those whose delta held something; a variant runs only once every old view its plan reads holds something, counted down as each member's delta first moves past the first identifier; a component's plans are recorded per rule with a body, so explain pairs a rule with its variants by construction and counts the facts as the rules without one |
+| `lib/plan.{h,c}` | an operation over a relation reads through a view -- `all`, or for a member in a delta variant `delta`, `old` or `current` -- assigned by body order: the delta literal reads its delta, a member literal written before it the old view and one after it the current view; a variant whose delta literal does not read a relation marked as still being derived is refused; the delta literal is ordered with the other positive literals and becomes the `SCAN`, `LOOKUP` or `MEMBER` its bound columns give it, a member read beside its delta estimated at ten deltas; `relic_plan_variant()` decides a variant's placed order and its order with the delta pinned first before emitting either, and when the placed order puts another positive literal first takes the threshold, `relic_plan_delta_threshold()`, as the product of the estimates before the delta in the one over the product of those after it in the other, zero for an empty prefix and never for an empty fan-out, in 64 bits on every platform; only a plan some delta selects is emitted, so a plan no round would run builds no index; under `-X no-reorder` the delta stays where it is written and there is one plan |
+| `lib/index.c` | each key keeps a frontier, and `relic_index_first_since()` finds a key's first tuple at or past a delta's start from it, moving it forward, so positioning walks each chain once over a fixed point; a start below the largest served is walked to from the chain's head and moves nothing |
+| `lib/eval.c` | the executor takes each view's range from the member's delta when an operation starts, and a `MEMBER` holds only for a tuple whose identifier lies in its view; round 0 runs the facts and the exit rules, a recursive rule having only its variants; every member's delta starts empty at the first identifier, so the first delta is the whole member; each boundary advances, once each, the members that gained and those whose delta held something; a variant runs only once every old view its plan reads holds something, counted down as each member's delta first moves past the first identifier; a component's plans are recorded per rule with a body, so explain pairs a rule with its variants by construction and counts the facts as the rules without one; a variant with two plans runs its placed plan in a round whose delta holds more tuples than its threshold and its delta-first plan otherwise; a lookup of the delta view is positioned through the frontier |
 | `lib/relation.c` | `relic_relation_find()` gives the identifier of the tuple holding some columns |
-| `lib/explain.c` | a recursive rule under the semi-naive fixed point shows its variants and no plan; `scan`, `lookup` and `member` are followed by `delta` or `old` for those views |
-| `tests/` | `test_eval`: the complete graph on 40 nodes closes in 68,800 derivations where the evaluator without views made 132,800, a rule reading its own predicate twice over a 20-node chain makes 20 choose 3 derivations for it, with its rounds and scans, two members gaining in alternate rounds exercise the boundary, and every counter scenario re-derived by hand, the lookup snapshot under the naive fixed point; `test_plan`: the view of each literal of a variant, and a variant over an unmarked relation refused; `tests/random`: for a program whose rules hold no `_`, materializing must make exactly one derivation per fact and per distinct binding of each rule body's variables, counted as the rows of one query per body under the naive fixed point, a new verdict `derivations miscounted` |
-| `tests/lang` | the `-e` and `-X stats` golden files of recursive programs regenerated; `explain-views` shows both views a rule reading its own predicate twice reads |
+| `lib/explain.c` | a recursive rule under the semi-naive fixed point shows its variants and no plan; `scan`, `lookup` and `member` are followed by `delta` or `old` for those views; a variant with two plans shows the placed plan headed `when the delta holds more than N tuples`, then the delta-first plan headed `otherwise`; a variant with one shows it under the plain heading |
+| `tests/` | `test_eval`: the complete graph on 40 nodes closes in 68,800 derivations where the evaluator without views made 132,800, a rule reading its own predicate twice over a 20-node chain makes 20 choose 3 derivations for it, with its rounds and scans, two members gaining in alternate rounds exercise the boundary, and every counter scenario re-derived by hand, the lookup snapshot under the naive fixed point; `test_plan`: the view of each literal of a variant, a variant over an unmarked relation refused, a textual variant in its written order, a delta going before the old and the current view of its own member, a delta placed after a guard and its join and looked up, the delta-first plan beside it, the threshold worked by hand, with its empty prefix and empty fan-out, each leaving the plan no round would run unbuilt, and a fully bound delta literal a `MEMBER` of the delta; `tests/random`: for a program whose rules hold no `_`, materializing must make exactly one derivation per fact and per distinct binding of each rule body's variables, counted as the rows of one query per body under the naive fixed point, a new verdict `derivations miscounted`; `test_index`: delta lookups over twelve rounds of growth agree with a scan from every start, higher, repeated and lower, and every frontier rests where its lookup stopped |
+| `tests/lang` | the `-e` and `-X stats` golden files of recursive programs regenerated; `explain-views` shows both views a rule reading its own predicate twice reads; `explain-thresholds` shows the one plan left to each of two variants, by an empty prefix and an empty fan-out |
 
 Every derivation is made once: `derivations` is the facts plus the ways each
 body is satisfied over the fixed point, which on the six-edge chain is also
@@ -386,13 +388,35 @@ the number of tuples inserted. `tc-cyclic-bf` of the comparison makes 48.9
 million derivations where it made 74.2 million, and no counter of
 `bench/run.sh` rose on any workload. A component may take more rounds, up to
 its longest derivation chain, since a round no longer sees what it inserts:
-the six-edge chain takes seven rather than two. The evaluator without views fails the new
-random verdict on 24 of the first 300 seeds, each shrunk to a few
-statements, and fails the three new `test_eval` scenarios; a boundary that
+the six-edge chain takes seven rather than two. The evaluator without views
+fails the new random verdict on 24 of the first 300 seeds, each shrunk to a
+few statements, and fails the three new `test_eval` scenarios; a boundary that
 does not empty the delta of a member that rested is caught by the
 alternating-members scenario and by the recursion scenarios of `test_eval`,
 and running a variant whose old view is empty by the scans of the chain
 scenario.
+
+Placing the delta takes `tc-acyclic-bf` from 5.66 million tuples looked up
+to 1.19 million and from 0.28 s to 0.10 s; its derivations stay at 1.18
+million. Against Souffle compiled with `--magic-transform`, on a busy
+machine, the ratio of Souffle's median to relic's is 0.95 on
+`tc-acyclic-bf`, 0.88 on `tc-cyclic-bf`, 0.84 on `tc-cyclic`, 1.47 on
+`sg-cyclic` and 0.77 on `chain-closure`. No `bench/run.sh` counter rose but
+one: on `graph, left-recursive` the single magic tuple is placed before the
+delta, which is looked up rather than scanned, so 20,000 tuples scanned
+become tuples looked up, and the reads of both kinds grow by one magic tuple
+a round while 20,000 membership tests go. `tree, same generation` scans 156
+tuples where it scanned 2071. The frontier scenario fails when a start below
+the largest is walked from the frontier, and when a lookup leaves the
+frontier where it was.
+
+The frontier costs four bytes per key, twelve where there were eight, and a
+variant with two plans keeps up the indexes both read, a member's index for
+the placed plan's lookup of the delta among them: `stats-indexed` holds
+1280 bytes of storage where it held 928, and `stats-magic` 736 where it
+held 672. A program near its `-l memory=` limit can be refused where it was
+not. A plan no delta can select is not built, so a threshold at either end
+costs no index.
 
 ### Verified
 

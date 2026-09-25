@@ -534,10 +534,11 @@ magic rewrite of $q0(X) :- path(a, X).
     stratum 0, component 0 (recursive): magic$path$bf/1
         facts: 1
         rule magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
-            scan edge(X, Y)
-            member magic$path$bf(X)
-            emit magic$path$bf(Y)
-            delta magic$path$bf(X):
+            delta magic$path$bf(X) when the delta holds more than 3 tuples:
+                scan edge(X, Y)
+                member delta magic$path$bf(X)
+                emit magic$path$bf(Y)
+            delta magic$path$bf(X) otherwise:
                 scan delta magic$path$bf(X)
                 lookup edge(X, Y) key={0}
                 emit magic$path$bf(Y)
@@ -547,11 +548,12 @@ magic rewrite of $q0(X) :- path(a, X).
             member magic$path$bf(X)
             emit path$bf(X, Y)
         rule path$bf(X, Z) :- magic$path$bf(X), edge(X, Y), path$bf(Y, Z).
-            scan edge(X, Y)
-            member magic$path$bf(X)
-            lookup path$bf(Y, Z) key={0}
-            emit path$bf(X, Z)
-            delta path$bf(Y, Z):
+            delta path$bf(Y, Z) when the delta holds more than 3 tuples:
+                scan edge(X, Y)
+                member magic$path$bf(X)
+                lookup delta path$bf(Y, Z) key={0}
+                emit path$bf(X, Z)
+            delta path$bf(Y, Z) otherwise:
                 scan delta path$bf(Y, Z)
                 lookup edge(X, Y) key={1}
                 member magic$path$bf(X)
@@ -576,6 +578,12 @@ query $q0(X) :- path$bf(a, X).
   otherwise be visible only as a count.
 * A query whose body reads only complete predicates has nothing to adorn and
   shows no rewrite heading: its phase 1 components and its plan.
+* A recursive rule of the rewritten program shows its delta variants and no
+  plan of its own, as `specs/design-planner.md` section 8.2 describes.
+  `edge` is small and complete, so each variant's placed plan scans it
+  before the delta and reaches the delta through a lookup or a membership
+  test; the delta-first plan after it runs on the rounds whose delta holds
+  no more tuples than the threshold.
 
 The lines follow the rules of `specs/design-planner.md` section 8.3: printable
 ASCII, escaped constants, cut at 1023 bytes.

@@ -4,7 +4,7 @@ stats: tuples inserted 19
 stats: tuples scanned 7
 stats: tuples looked up 12
 stats: tuples held 13
-stats: storage bytes 672
+stats: storage bytes 736
 stats: symbol values 7
 stats: string values 0
 stats: integer values 0

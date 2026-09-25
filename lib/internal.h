@@ -724,22 +724,43 @@ int	 relic_stratify(relic_t *ctx);
 /*
  * lib/plan.c
  *
- * Plan one rule into `arena`, creating the relations it reads and the
- * indexes its lookups read.  The plan's EMIT writes into `target`, which the
- * caller names -- the relation of the head's predicate, or a query's answer
- * -- and whose arity must be the rule's head arity.  `delta_literal` is
- * RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or the body index of the
- * positive literal a semi-naive variant reads from the delta, which must be
- * over a relation `incomplete` marks.  `incomplete`, indexed by predicate
- * identifier minus one, marks the relations still being derived, whose size
- * the planner assumes rather than measures, and which a variant's other
- * literals read through the old or current view; NULL marks none.  Returns 0, or -1 with a diagnostic reported: memory or the memory
- * limit refused, or the planner broke one of a plan's invariants, which is
- * an internal error.
+ * Plan one rule's ordinary plan into `arena`, creating the relations it
+ * reads and the indexes its lookups read.  The plan's EMIT writes into
+ * `target`, which the caller names -- the relation of the head's predicate,
+ * or a query's answer -- and whose arity must be the rule's head arity.
+ * `incomplete`, indexed by predicate identifier minus one, marks the
+ * relations still being derived, whose size the planner assumes rather than
+ * measures; NULL marks none.  Returns 0, or -1 with a diagnostic reported:
+ * memory or the memory limit refused, or the planner broke one of a plan's
+ * invariants, which is an internal error.
  */
 int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
 	    const relic_rule_t *rule, relic_relation_t *target,
-	    size_t delta_literal, const bool *incomplete, relic_plan_t *plan);
+	    const bool *incomplete, relic_plan_t *plan);
+
+/*
+ * Plan a semi-naive delta variant of a rule into *plans (plan.h): its plan
+ * with `delta_literal` ordered like any other positive literal, the same
+ * variant with it placed first, and the delta size above which a round runs
+ * the first rather than the second, emitting only the plans some delta
+ * selects.  `delta_literal` is the body index of the positive literal that
+ * reads the delta, which must be over a relation `incomplete` marks; the
+ * variant's other literals over marked relations read the old or current
+ * view.  Otherwise arguments and failures are as for relic_plan_rule().
+ */
+int	 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
+	    const relic_rule_t *rule, relic_relation_t *target,
+	    size_t delta_literal, const bool *incomplete,
+	    relic_variant_plans_t *plans);
+
+/*
+ * The threshold between a variant's two plans, given the placed plan's
+ * prefix estimate and the delta-first plan's fan-out estimate: the delta
+ * size above which the placed plan is the cheaper, zero when it always is,
+ * and RELIC_PLAN_NEVER when it never is.
+ */
+uint64_t relic_plan_delta_threshold(uint64_t prefix_estimate,
+	    uint64_t fanout_estimate);
 
 /*
  * The order relic_plan_rule() would place a rule's body literals in, as body
@@ -812,7 +833,9 @@ void	 relic_explain_component(relic_t *ctx,
 void	 relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_plan_t *plan, unsigned int depth);
 void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
-	    size_t delta_literal, const relic_plan_t *plan, unsigned int depth);
+	    size_t delta_literal, const relic_plan_t *placed,
+	    const relic_plan_t *delta_first, uint64_t threshold,
+	    unsigned int depth);
 void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_relation_t *answer, const relic_plan_t *plan);
 void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
@@ -827,11 +850,17 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * tuple `id` in, and tuples must be added in increasing identifier order.
  * relic_index_first() and relic_index_next() walk, in identifier order, the
  * tuples that agree with a probe on the key columns; the probe is laid out as
- * a tuple, and its other columns are not read.
- * relic_index_bytes_after_reserve() is what the memory limit
- * projects a reservation with.
+ * a tuple, and its other columns are not read.  relic_index_first_since()
+ * starts such a walk at the first of those tuples whose identifier is at
+ * least `since`, from the key's frontier, which it moves forward; the starts
+ * it is asked for should never decrease between two emptyings of the index,
+ * as a semi-naive delta's never do, or the walk costs the whole chain.
+ * relic_index_bytes_after_reserve() is what the memory limit projects a
+ * reservation with.
  *
- * Only the relation store calls these, and it does all the accounting.
+ * The relation store builds and extends indexes and does all the
+ * accounting; the evaluator only walks them, moving a key's frontier as a
+ * lookup of a delta walks toward the delta's start.
  */
 void	 relic_index_init(relic_index_t *index, uint32_t key_mask);
 void	 relic_index_empty(relic_index_t *index);
@@ -844,6 +873,9 @@ void	 relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	    relic_tuple_id_t id);
 relic_tuple_id_t relic_index_first(const relic_index_t *index,
 	    const relic_relation_t *relation, const relic_dom_t *probe);
+relic_tuple_id_t relic_index_first_since(relic_index_t *index,
+	    const relic_relation_t *relation, const relic_dom_t *probe,
+	    relic_tuple_id_t since);
 relic_tuple_id_t relic_index_next(const relic_index_t *index,
 	    relic_tuple_id_t id);
 

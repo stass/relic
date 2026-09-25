@@ -92,6 +92,11 @@ first one at or past the relation's end as it was when the lookup started;
 identifiers increase along a chain, so nothing before that point is skipped.
 `specs/design-index.md` section 4 describes the walk.
 
+Both are the `all` view of a relation. An operation of a semi-naive variant
+over a member of its component reads through a narrower view whose end is
+fixed when the round begins, section 4.1, and never reaches its own round's
+insertions at all.
+
 ### 2.3 Comparisons
 
 Per D-11 and architecture section 10.1:
@@ -186,24 +191,33 @@ gained in the previous round.
 
 ```text
 for every recursive component, in schedule order:
-	delta(R) = empty, for every member R
-	round 0: for every rule, run its plan
+	delta(R) = empty at the first identifier, for every member R
+	round 0: for every fact and every exit rule, in program order, run it
 	while some member gained tuples in the last round:
 		delta(R) = the tuples R gained in the last round
-		for every delta variant, in rule order then literal order,
-		    whose delta literal reads a member that gained:
-			run it
+		for every delta variant, in planning order,
+		    whose delta literal reads a member that gained
+		    and whose every old view is nonempty:
+			run the plan its delta's size selects
 ```
 
-**A round costs what changed.** A variant's delta literal is its first
-operation, so a variant whose delta is empty matches nothing and derives
-nothing. Skipping it changes nothing but the cost, and running the rest in
-the order they were planned makes a round do, operation for operation, what
-running every variant would. The members that gained are recorded as plans
-insert into their heads -- every insertion during a component's fixed point is
-into the head of the plan making it, which is a member -- and the variants are
-grouped by the member their delta literal reads when the component is
-planned, so a round touches only those members and those variants. Without
+An **exit rule** is one with no positive literal over a member of its
+component. Round 0 runs the facts and the exit rules only, so the first
+delta of each member is the whole of it, and a recursive rule runs only as
+its variants, from round 1 on. `specs/design-evaluation-cost.md` section 3.4
+gives round 0, the round boundary and the invariant it keeps, and section 3.6
+which variants a round runs.
+
+**A round costs what changed.** A join over an empty operand is empty, so a
+variant whose delta is empty, or one of whose `old` views is, derives
+nothing wherever its plan places that literal. Skipping it changes nothing
+but the cost, and running the rest in the order they were planned makes a
+round do, operation for operation, what running every variant would. The
+members that gained are recorded as plans insert into their heads -- every
+insertion during a component's fixed point is into the head of the plan
+making it, which is a member -- and the variants are grouped by the member
+their delta literal reads when the component is planned, so a round touches
+only those members and those variants. Without
 it, a round costs the size of the component: a recursive cycle of *n*
 predicates takes *n* rounds of one new tuple each, and running every variant
 in every one of them is quadratic.
@@ -212,11 +226,12 @@ in every one of them is quadratic.
 append-only, so the tuples a relation gained during one round are exactly
 those with identifiers between its end before the round and its end after it.
 Each member's delta is the previous delta's end to the relation's current end,
-through `relic_relation_since()`; no delta is ever copied.
+through `relic_relation_since()`; no delta is ever copied, and no delta has an
+index of its own.
 
 **The invariant this rests on**: within one fixed point, no relation is
 compacted, has a tuple removed, or is renumbered. The relation store offers no
-operation that could, so today the invariant is a property of the interface
+operation that could, so the invariant is a property of the interface
 rather than a rule callers obey; the first feature that changes that --
 incremental maintenance, or deletion -- must confront it before anything else,
 because a range taken before such an operation silently names different tuples
@@ -224,43 +239,47 @@ afterwards.
 
 ### 4.1 Variants
 
-For a rule with *k* positive body literals over predicates of its own strongly
-connected component, *k* variants are planned; variant *i* reads literal *i*
-from the delta and every other literal from the full relation. The delta
-literal is placed first and is always a `SCAN` of its range, even when every
-argument is a constant, so no index over a delta is ever needed. Some tuples
-are derived more than once in a round; the destination relation discards the
-duplicates. A refinement avoids them, reading the relations as they were before
-the round for the literals ahead of the delta one; it saves work only for rules
-with several recursive literals and is not obviously correct on first reading,
-so the design is the simpler scheme until a measurement says otherwise.
+For a rule with *k* positive body literals over members of its own strongly
+connected component, *k* variants are planned. Every operation over a
+relation reads through a **view**, `specs/design-evaluation-cost.md` section
+3.1, and the views of variant *i* follow from body order alone: literal *i*
+reads the **delta**, the tuples its member gained in the previous round; a
+member literal written before it reads **old**, the member's tuples older
+than its delta; a member literal written after it reads **current**,
+everything the member held when the round began; and a literal over a
+complete relation reads **all**. Section 3.2 of that document assigns them
+and section 3.3 says what each operation does under each.
 
-A rule with no literal over its own component -- a fact, or a base case such
+The views decide which tuples a literal can match, and the plan decides only
+what each binding costs. The delta literal is therefore ordered like any
+other literal and becomes a `SCAN`, a `LOOKUP` or a `MEMBER` of the delta by
+its bound columns; a variant whose order puts another literal before the
+delta keeps a second plan with the delta first, and each round runs the one
+its delta's size selects. `specs/design-evaluation-cost.md` section 4 gives
+the placement, the frontier a delta `LOOKUP` starts from, and the threshold
+between the two plans.
+
+A rule with no literal over its own component -- a fact, or an exit rule such
 as `path(X, Y) :- edge(X, Y)` -- has no variant. Everything it reads was
 complete before the component began, so round 0 derived everything it ever
 will.
 
-The delta ranges are held by the evaluation, one per predicate, and a delta
-`SCAN` takes its range from there when it starts. The plan records only that
-the scan reads the delta; which identifiers that is changes every round, and
+The evaluation keeps each member's delta and derives the ranges of its views
+from it, and an operation takes its view's range when it starts. The plan
+records only the view; which identifiers it denotes changes every round, and
 the plan does not.
 
-### 4.2 Why it is complete
+### 4.2 Why every derivation is made exactly once
 
-Number the rounds from zero, and say a tuple of a member belongs to the round
-that inserted it, or to round -1 if the relation held it before round 0.
-Take any way of satisfying a rule's body, and let *m* be the latest round any
-of its member tuples belongs to.
-
-* If *m* is -1, round 0 ran every rule's full plan over relations that
-  already held all of them.
-* Otherwise round *m* inserted a tuple, so round *m* + 1 runs. In it, the
-  variant whose delta literal is matched by a tuple of round *m* finds that
-  tuple in its delta, and finds every other tuple in the full relations,
-  whose scans start after round *m* ended.
-
-Insertions within a round are visible to scans that start later in the same
-round. That only adds derivations; the argument above does not depend on it.
+Every way of satisfying a rule's body is derived in exactly one variant of
+exactly one round: by the variant whose delta literal is the first member
+literal, in body order, matched by a tuple of the latest round any of the
+member tuples belongs to, in the round after that one.
+`specs/design-evaluation-cost.md` section 3.5 gives the argument, both
+completeness and uniqueness. It rests on two facts: the first delta of each
+member is the whole of it, and no view of a member reaches past the end its
+delta had when the round began, so nothing a round inserts is visible to any
+variant of that round.
 
 Evaluation proceeds stratum by stratum and, within a stratum, one strongly
 connected component at a time in topological order. A component with no
@@ -280,7 +299,7 @@ and `-X stats`:
 | derivations | head tuples produced by an `EMIT`, facts included, new or not |
 | tuples inserted | derivations that added a tuple |
 | tuples scanned | tuples a `SCAN` read |
-| tuples looked up | tuples a `LOOKUP` read from an index's chain |
+| tuples looked up | tuples a `LOOKUP` read from an index's chain; a frontier step, which positions a delta lookup and reads no tuple, is not one |
 
 Iterations alone do not tell the two fixed points apart: on a chain, both take
 as many rounds as the chain is long. What semi-naive evaluation saves is the

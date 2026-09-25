@@ -95,6 +95,18 @@ same question with the answer inverted, which is the whole of negation once
 stratification has guaranteed that the negated relation is complete; see
 architecture section 31.
 
+**An operation over a relation reads through a view of it**, fixed by the
+planner. Every operation of a rule's ordinary plan, of a query's plan and of
+the naive evaluator reads `all`, the relation as it stands when the operation
+starts. In a semi-naive delta variant an operation over a member of the
+component being evaluated reads one of three narrower views derived from the
+member's delta: `delta`, `old` or `current`. A `SCAN` walks the view's range,
+a `LOOKUP` the part of its key's chain inside it, and a `MEMBER` holds only
+when the tuple it names lies inside it. An `ANTI_MEMBER` reads and an `EMIT`
+writes through `all`, and a `FILTER` reads no relation.
+`specs/design-evaluation-cost.md` section 3 defines the views and what each
+operation does under each; section 5.3 below says how a variant's are chosen.
+
 ---
 
 ## 4. Terms: the binding decision is made once
@@ -174,8 +186,9 @@ join, are exactly as written.
 
 Each later stage replaces a piece of 5.1 and leaves the rest:
 
-* **semi-naive variants** pin the delta literal first and scan only its range,
-  per D-10, so that a delta never needs an index;
+* **semi-naive variants** read each member of the component through a view,
+  and the delta literal becomes a `SCAN`, `LOOKUP` or `MEMBER` of the delta
+  by the rule of section 5, wherever the order places it (section 5.3);
 * **secondary indexes** turn a generator with bound columns into a `LOOKUP`;
 * **greedy ordering** chooses which positive literal to place next by bound
   arguments, estimated cardinality and index availability, breaking ties by
@@ -188,25 +201,39 @@ to all of them. `specs/design-planner.md` specifies the cost model.
 
 ### 5.3 Delta variants
 
-A semi-naive delta variant is the plan of a rule with one positive literal,
-the **delta literal**, placed ahead of all the others. It is planned by the same
-walk with that one change:
+A semi-naive delta variant is the plan of a rule in which one positive
+literal, the **delta literal**, reads only the tuples its relation gained in
+the previous round. It is planned by the same walk, with two differences:
 
-* the delta literal is placed first, before any other positive literal, and
-  comparisons that its bindings make placeable follow it as usual;
-* it always becomes a `SCAN`, marked as reading the delta, even when every
-  argument is a constant. A `MEMBER` would consult the whole relation, and the
-  point of the variant is to read only what the previous round added;
-* every other literal is placed as it would be in the rule's ordinary plan,
-  against the bindings the delta scan made.
+* every positive literal reads through the view its place in **body order**
+  gives it, per `specs/design-evaluation-cost.md` section 3.2: the delta
+  literal reads `delta`, a literal over a member of the component reads `old`
+  when it is written before the delta literal and `current` when it is
+  written after it, and a literal over a complete relation reads `all`;
+* the delta literal is ordered with the other positive literals and becomes
+  the operation its bound columns give it where it is placed, by the rule of
+  section 5: a `SCAN` of the delta, a `LOOKUP` of the delta, whose walk
+  starts, through the key's frontier, at the key's first tuple inside the
+  delta (`specs/design-index.md` section 4.1), or a `MEMBER` that holds only
+  for a tuple of the delta.
+
+The view decides which tuples a literal can match, and the order decides
+only what each binding costs, so the two are chosen separately.
 
 ```c
+enum relic_view {
+	RELIC_VIEW_ALL,		/* the relation as it stands when the op starts */
+	RELIC_VIEW_OLD,		/* a member: tuples older than its delta */
+	RELIC_VIEW_DELTA,	/* a member: its delta */
+	RELIC_VIEW_CURRENT	/* a member: everything up to its delta's end */
+};
+
 struct relic_op_atom {
 	relic_relation_t	*relation;
 	relic_plan_term_t	*terms;
-	uint32_t		 key_mask;	/* LOOKUP only */
-	uint32_t		 index;		/* LOOKUP only */
-	bool			 delta;		/* SCAN only */
+	uint32_t		 key_mask;		/* LOOKUP only */
+	uint32_t		 index_position;	/* LOOKUP only */
+	enum relic_view		 view;
 };
 ```
 
@@ -216,14 +243,35 @@ records the key columns it builds the key from, per
 terms like any other column, and its other columns are processed as a
 `SCAN`'s are.
 
-The plan records *that* a scan reads the delta and not *which* tuples that is.
-The range changes every round while the plan does not, so the evaluation holds
-one range per predicate and a delta scan takes its range from there when it
-starts; `specs/design-eval.md` section 4 describes how the ranges advance.
+The plan records *which view* an operation reads and not *which tuples* that
+is. The range changes every round while the plan does not, so the evaluation
+holds each member's delta and an operation takes its view's range from there
+when it starts; `specs/design-eval.md` section 4 describes how the deltas
+advance.
 
-Pinning the delta literal first is what keeps a delta from ever needing an
-index. It is scanned, never looked up, so the index machinery of a later
-planner applies only to whole relations.
+**A variant may have two plans.** When the order places another positive
+literal before the delta literal, the variant also keeps the **delta-first
+plan**, the same walk with the delta literal placed before every other
+positive literal, and a threshold between the two:
+
+```c
+struct relic_variant_plans {
+	relic_plan_t	placed;
+	relic_plan_t	delta_first;
+	uint64_t	threshold;
+};
+```
+
+Each round runs `placed` when its delta holds more tuples than `threshold`,
+and `delta_first` otherwise. Both read every literal through the same view,
+so they derive the same tuples and differ only in cost. A plan that no delta
+would select is not built, and neither are the indexes only it would read;
+when the order places the delta literal first anyway, or under `-X
+no-reorder`, which keeps it in its written place, there is one plan, and
+under `-X no-index` alone, where a delta placed later would be scanned
+once per binding before it, the one plan is the delta-first plan.
+`specs/design-evaluation-cost.md` sections 4.3 and 4.4 give the threshold
+and why a round, and not the planner, makes the choice.
 
 ---
 

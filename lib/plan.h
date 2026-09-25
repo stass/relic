@@ -33,6 +33,7 @@ typedef struct relic_op_atom relic_op_atom_t;
 typedef struct relic_op_filter relic_op_filter_t;
 typedef struct relic_plan relic_plan_t;
 typedef struct relic_plan_term relic_plan_term_t;
+typedef struct relic_variant_plans relic_variant_plans_t;
 
 /*
  * The operations.
@@ -178,6 +179,9 @@ struct relic_op {
  *	column of the same operation, binds;
  *	every test reads only constants and bound slots.
  *
+ * A plan that was built therefore always has `ops`; a plan left unbuilt, as
+ * a variant's plan no round would run is, has `ops` NULL and no operations.
+ *
  * A plan lives in the evaluation arena and is discarded when the evaluation
  * it was built for ends.
  */
@@ -187,17 +191,53 @@ struct relic_plan {
 };
 
 /*
- * The delta literal argument of relic_plan_rule() that asks for the rule's
- * ordinary plan, in which every literal reads its whole relation.
+ * The plans of one semi-naive delta variant, between which each round
+ * chooses by the size of the delta, known only when the round starts.
+ *
+ * `placed` orders the delta literal like any other positive literal, and
+ * `delta_first` places it before them all.  When the placed order puts
+ * another positive literal first, a round whose delta holds D tuples costs
+ * the placed plan about its prefix estimate -- the bindings that reach the
+ * delta literal, one lookup of the delta each -- and the delta-first plan
+ * about D times its fan-out estimate -- the bindings each delta tuple leads
+ * to.  A round runs `placed` when D exceeds `threshold`, the prefix over the
+ * fan-out, and `delta_first` otherwise.  When the placed order puts the
+ * delta literal first anyway, or under RELIC_F_NO_REORDER, there is one
+ * order, `threshold` is zero and `placed` is the plan.  Under
+ * RELIC_F_NO_INDEX alone, which would scan a placed delta once per binding
+ * before it, `delta_first` is the plan and `threshold` RELIC_PLAN_NEVER.
+ *
+ * Both plans read every literal through the same view, so they derive the
+ * same tuples and differ only in cost.  A plan no delta of at least one
+ * tuple would select is not built: `placed` when `threshold` is
+ * RELIC_PLAN_NEVER, and `delta_first` when `threshold` is zero.  At least
+ * one of the two is always built.
+ */
+struct relic_variant_plans {
+	relic_plan_t	placed;
+	relic_plan_t	delta_first;
+	uint64_t	threshold;
+};
+
+#define	RELIC_PLAN_NEVER	UINT64_MAX
+
+/*
+ * The delta literal of a rule's ordinary plan, in which every literal reads
+ * its whole relation: none.
  */
 #define	RELIC_PLAN_NO_DELTA	SIZE_MAX
 
 /*
  * What the planner assumes about a relation it cannot measure, one the
  * component being planned is still deriving: how many tuples it holds, and
- * by how much binding one of its columns narrows it.
+ * by how much binding one of its columns narrows it.  A member a variant
+ * reads beside its own delta, through the old or current view, is taken to
+ * hold RELIC_PLAN_DELTAS_HELD deltas' worth: a member is larger than its
+ * delta, which ranks the delta ahead of every other member literal bound
+ * alike.
  */
 #define	RELIC_PLAN_UNKNOWN_TUPLES	1000u
 #define	RELIC_PLAN_UNKNOWN_DISTINCT	10u
+#define	RELIC_PLAN_DELTAS_HELD		10u
 
 #endif /* RELIC_PLAN_H */

@@ -54,6 +54,13 @@ typedef uint32_t relic_tuple_id_t;
 #define	RELIC_TUPLE_FIRST	1u
 
 /*
+ * The most tuples a relation holds, and so the most a delta or any range of
+ * one does.  The store checks it rather than assuming it: an identifier that
+ * wrapped would silently make one tuple into another.
+ */
+#define	RELIC_TUPLE_MAX		(UINT32_MAX - 1u)
+
+/*
  * A half-open range of tuple identifiers, which is how a relation is
  * iterated and how a semi-naive delta is represented.
  *
@@ -68,13 +75,22 @@ struct relic_tuple_range {
 
 /*
  * One distinct key of a secondary index: the first and the last tuple that
- * hold it.  The tuples between them are threaded through the index's `next`
- * array in identifier order, so a key's tuples are walked from `first` and
- * a new one is linked after `last`.
+ * hold it, and its frontier.  The tuples between first and last are threaded
+ * through the index's `next` array in identifier order, so a key's tuples
+ * are walked from `first` and a new one is linked after `last`.
+ *
+ * The frontier is a tuple of the chain from which a lookup of a semi-naive
+ * delta starts walking: every chain tuple before it has an identifier below
+ * the index's `latest_since`, the largest delta start it has been asked
+ * for.  Deltas only move forward, so the frontier does too, and positioning
+ * a lookup at the start of a delta costs, over a whole fixed point, one pass
+ * along each chain.  A new key's frontier is its first tuple, and a frontier
+ * is never RELIC_ID_NONE, so tuples linked later stay reachable from it.
  */
 struct relic_index_key {
 	relic_tuple_id_t	first;
 	relic_tuple_id_t	last;
+	relic_tuple_id_t	frontier;
 };
 
 /*
@@ -101,6 +117,10 @@ struct relic_index_key {
  * No key is stored: comparing against key k reads the key columns of
  * entries[k - 1].first, which the relation already holds.  All three arrays
  * are relation and index storage, accounted against the memory limit.
+ *
+ * `latest_since` is the largest delta start a lookup has been positioned
+ * at, which is what the frontiers are valid for; it is cleared when the
+ * index is emptied.
  */
 struct relic_index {
 	relic_idtab_t		 keys;
@@ -109,6 +129,7 @@ struct relic_index {
 	size_t			 key_count;
 	size_t			 entry_capacity;
 	size_t			 next_capacity;
+	relic_tuple_id_t	 latest_since;
 	uint32_t		 key_mask;
 };
 

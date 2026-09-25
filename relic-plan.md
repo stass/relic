@@ -204,9 +204,17 @@ rests on - no compaction, no deletion, no renumbering during a fixed point - is
 asserted in the relation code and stated in `specs/design-eval.md`, because
 future incremental maintenance is the change most likely to break it.
 
-In delta rule variants the delta literal is pinned first in the plan. It is the
-smallest input, and putting it first means the delta is only ever scanned, so
-no index over a delta is ever needed.
+A delta variant reads each member of its component through a view of that
+range: the delta literal reads the delta, a member literal written before it
+the tuples older than the delta, and one written after it everything up to the
+delta's end, so every derivation is made in exactly one variant of one round.
+The planner orders the delta literal like any other literal, and a lookup
+reaches the start of a delta through a per-key frontier in the relation's own
+secondary index, so the delta is never copied and has no index of its own.
+Where the placed order puts another literal before the delta, the variant also
+keeps the delta-first order, and each round runs whichever of the two plans
+its delta's size selects. `specs/design-evaluation-cost.md` sections 3 and 4
+give the views, the frontier and the choice between the plans.
 
 ### D-11 Comparison semantics
 
@@ -689,17 +697,13 @@ than in S5: until a second evaluator exists, `-X naive` would select the only
 one there is.
 
 **Design notes.** For a rule with *k* recursive body literals, generate *k*
-variants; variant *i* binds literal *i* to the delta and the rest to the full
-relation. This is the scheme of architecture section 28. It derives some tuples
-more than once within an iteration, which the destination relation discards.
-The alternative that eliminates those duplicates - old for earlier literals,
-new for later ones - is a known refinement, is not obviously correct on first
-reading, and saves work only for rules with three or more recursive literals,
-which are rare. Note it in `TODO.md` as a measured optimization rather than
-guessing now.
+variants; variant *i* reads literal *i* through the delta, the member
+literals written before it through the old view and those after it through
+the current view, as `specs/design-evaluation-cost.md` section 3 specifies,
+so every derivation is made in exactly one variant of one round.
 
-The delta literal is pinned first in the plan per D-10, so a delta is only ever
-scanned and no delta index is needed.
+The delta literal is placed as `specs/design-evaluation-cost.md` section 4
+specifies, per D-10.
 
 Plans are built once per rule variant when its SCC's fixed point starts, not
 per iteration. Replanning each iteration would chase changing cardinalities at

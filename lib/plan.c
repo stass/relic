@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -38,11 +39,12 @@
  *
  * so an empty relation estimates zero and is placed first among the
  * literals binding as many arguments, ending the join once it is reached,
- * and a nonempty one never estimates below one.  A relation the
- * component being planned is still deriving is empty and cannot be measured;
- * it is taken to hold RELIC_PLAN_UNKNOWN_TUPLES tuples, narrowed by
- * RELIC_PLAN_UNKNOWN_DISTINCT per bound column.  The arithmetic is integer so
- * that the same input gives the same plan on every platform.
+ * and a nonempty one never estimates below one.  A relation the component
+ * being planned is still deriving is empty and cannot be measured; it is
+ * taken to hold RELIC_PLAN_UNKNOWN_TUPLES tuples, or RELIC_PLAN_DELTAS_HELD
+ * times as many when a variant reads it beside its delta, narrowed by
+ * RELIC_PLAN_UNKNOWN_DISTINCT per bound column.  The arithmetic is integer
+ * so that the same input gives the same plan on every platform.
  *
  * The greedy order is computed in passes rather than steps.  A literal's
  * score depends only on the bound set and on statistics that nothing changes
@@ -72,12 +74,34 @@
  * better planner is a change to this file and never to the one that runs
  * what it emits.
  *
- * A semi-naive delta variant of a rule is the same walk with one literal
- * placed ahead of the others: the delta literal, which reads only the tuples
- * its relation gained in the previous round.  It is always a SCAN, even when
- * every argument is a constant, because only a scan walks the delta's range.
- * Placed first, it is only ever scanned, so a delta never needs an index of
- * its own.
+ * A semi-naive delta variant of a rule is the same walk, in which one
+ * literal, the delta literal, reads only the tuples its relation gained in
+ * the previous round.  It is ordered with the other positive literals and
+ * becomes the operation its bound columns give it where it is placed: a
+ * SCAN of the delta, a LOOKUP whose walk the index starts at the delta
+ * through the key's frontier, or a MEMBER that holds only for a tuple of the
+ * delta.  So a small complete relation that binds the columns the delta
+ * would be looked up by -- a magic relation guarding its rule, say -- goes
+ * before it, as it would before any other literal.
+ *
+ * Whether that order is cheaper than the delta first depends on the delta's
+ * size, which no plan can know: a delta of one tuple costs little to scan,
+ * and a prefix of a million bindings costs a million lookups whatever the
+ * delta holds.  So relic_plan_variant() decides two orders before it emits
+ * anything: the placed one, and the same walk with the delta literal pinned
+ * first.  Every positive literal records the estimate it was placed by, and
+ * from the two orders come the prefix estimate, the product of the
+ * estimates of the positive literals the placed order puts before the delta
+ * literal, which is the lookups of the delta a round makes, and the fan-out
+ * estimate, the product of those the pinned order puts after it, which is
+ * the bindings each delta tuple leads to.  A round of D delta tuples costs
+ * the one plan about the prefix and the other about D times the fan-out, so
+ * the placed plan runs exactly when D exceeds the prefix over the fan-out,
+ * the threshold relic_plan_delta_threshold() gives, and only the plans some
+ * delta can select are emitted, along with the indexes they read.  Under
+ * RELIC_F_NO_REORDER the delta literal stays where it is written and there
+ * is one order; under RELIC_F_NO_INDEX alone, which would scan a placed
+ * delta once per binding before it, the delta goes first.
  *
  * Every positive literal of a variant reads through a view (plan.h), and the
  * view follows from body order alone: the delta literal reads `delta`, a
@@ -86,10 +110,10 @@
  * delta literal and `current` when it is written after it, and a literal
  * over a complete relation reads `all`.  A variant is refused unless its
  * delta literal reads a marked relation, so the marks a view is decided by
- * are always the component's.  The order the
- * walk chooses decides what each binding costs; the view decides which
- * tuples a literal can match, and the set of tuples a join produces does not
- * depend on its nesting, so the two questions are separate.
+ * are always the component's.  The order the walk chooses decides what each
+ * binding costs; the view decides which tuples a literal can match, and the
+ * set of tuples a join produces does not depend on its nesting, so the two
+ * questions are separate.
  *
  * The order is decided before any operation is built.  A first walk places
  * the literals -- recording, for each, where it goes and what it binds -- and
@@ -104,6 +128,15 @@
  * RELIC_F_NO_REORDER places positive literals in the order they are written.
  * Each changes how an answer is found and never what it is.
  */
+
+/*
+ * Where a planner puts a delta variant's delta literal: ranked with the
+ * other positive literals, or pinned before them all.
+ */
+enum relic_delta_placement {
+	RELIC_DELTA_RANKED,
+	RELIC_DELTA_PINNED
+};
 
 typedef struct relic_plan_candidate relic_plan_candidate_t;
 typedef struct relic_plan_score relic_plan_score_t;
@@ -128,7 +161,11 @@ typedef struct relic_planner relic_planner_t;
  * `target` is the relation the EMIT writes, and NULL when only the order is
  * wanted.
  * `delta_literal` is the body index of the literal that reads the delta, or
- * RELIC_PLAN_NO_DELTA.  `incomplete`, when not NULL, is indexed by predicate
+ * RELIC_PLAN_NO_DELTA, and `pin_delta` places it before every other positive
+ * literal.  `estimates`, indexed like the body, holds the estimate each
+ * positive literal was placed by, and is zero for a literal placed without
+ * being ranked: the pinned delta literal, and every literal under
+ * RELIC_F_NO_REORDER.  `incomplete`, when not NULL, is indexed by predicate
  * identifier minus one and marks the relations still being derived, which
  * the estimate cannot measure.
  */
@@ -140,6 +177,7 @@ struct relic_planner {
 	const bool		*incomplete;
 	size_t			*order;
 	bool			*placed;
+	size_t			*estimates;
 	relic_plan_candidate_t	*ranking;
 	relic_op_t		*ops;
 	size_t			 order_count;
@@ -147,6 +185,7 @@ struct relic_planner {
 	size_t			 op_count;
 	size_t			 delta_literal;
 	uint64_t		 bound;
+	bool			 pin_delta;
 };
 
 /*
@@ -177,7 +216,6 @@ static bool	 atom_is_bound(const relic_atom_t *atom, uint16_t arity,
 		    uint64_t bound);
 static uint32_t	 bound_columns(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
-static int	 build_plan(relic_planner_t *planner);
 static uint16_t	 column_count(uint32_t columns);
 static int	 compare_candidates(const void *a, const void *b);
 static uint64_t	 comparison_slots(const relic_comparison_t *comparison);
@@ -186,12 +224,19 @@ static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner);
 static int	 confirm_target_fits(const relic_planner_t *planner);
 static int	 decide_order(relic_planner_t *planner);
+static int	 decide_variant(relic_planner_t *placed,
+		    relic_planner_t *pinned, uint64_t *thresholdp);
+static bool	 delta_has_prefix(const relic_planner_t *planner);
+static size_t	 delta_position(const relic_planner_t *planner);
 static size_t	 divide_rounding_up(size_t dividend, size_t divisor);
 static int	 emit_body(relic_planner_t *planner);
-static size_t	 estimate_unknown(uint16_t arity, uint32_t bound);
+static int	 emit_plan(relic_planner_t *planner, relic_plan_t *plan);
+static size_t	 estimate_unknown(uint16_t arity, uint32_t bound,
+		    enum relic_view view);
 static int	 estimate_measured(relic_t *ctx, relic_relation_t *relation,
 		    uint32_t columns, size_t *estimatep);
 static bool	 is_incomplete(const bool *incomplete, relic_pred_id_t pred);
+static uint64_t	 multiply_estimates(uint64_t product, size_t estimate);
 static int	 order_body(relic_planner_t *planner);
 static void	 order_positive(relic_planner_t *planner, size_t index);
 static void	 order_ranked(relic_planner_t *planner);
@@ -207,24 +252,27 @@ static int	 place_negated(relic_planner_t *planner,
 		    const relic_atom_t *atom);
 static size_t	 positive_count(const relic_rule_t *rule);
 static enum relic_op_kind positive_kind(const relic_planner_t *planner,
-		    const relic_relation_t *relation, uint32_t bound,
-		    enum relic_view view);
+		    const relic_relation_t *relation, uint32_t bound);
 static enum relic_view positive_view(const relic_planner_t *planner,
 		    size_t index);
+static uint64_t	 product_of_estimates(const relic_planner_t *planner,
+		    size_t first, size_t end);
 static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
 		    relic_arena_t *arena, const relic_rule_t *rule,
 		    relic_relation_t *target, size_t delta_literal,
+		    enum relic_delta_placement placement,
 		    const bool *incomplete);
+static int	 planner_prepare_order(relic_planner_t *planner);
 static void	 planner_release(relic_planner_t *planner);
 static int	 rank_positives(relic_planner_t *planner);
 static void	 read_term(const relic_arg_t *arg, relic_plan_term_t *term);
 static void	 scan_term(relic_planner_t *planner, const relic_arg_t *arg,
 		    relic_plan_term_t *term);
 static int	 score_positive(relic_t *ctx, const bool *incomplete,
-		    const relic_atom_t *atom, uint64_t bound,
-		    relic_plan_score_t *scorep);
+		    const relic_atom_t *atom, enum relic_view view,
+		    uint64_t bound, relic_plan_score_t *scorep);
 static uint64_t	 slot_bit(uint16_t slot);
 static relic_plan_term_t *terms_alloc(relic_planner_t *planner,
 		    uint16_t arity);
@@ -434,17 +482,13 @@ atom_is_bound(const relic_atom_t *atom, uint16_t arity, uint64_t bound)
 /*
  * The operation a positive literal becomes with `bound` its bound columns:
  * MEMBER when every column is bound, LOOKUP when some are, SCAN when none
- * are.  A literal that reads the delta is a SCAN whatever is bound, since
- * only a scan walks the delta's range, and under RELIC_F_NO_INDEX a literal
+ * are, whichever view it reads through.  Under RELIC_F_NO_INDEX a literal
  * that would be looked up is scanned instead.
  */
 static enum relic_op_kind
 positive_kind(const relic_planner_t *planner,
-    const relic_relation_t *relation, uint32_t bound, enum relic_view view)
+    const relic_relation_t *relation, uint32_t bound)
 {
-	if (view == RELIC_VIEW_DELTA)
-		return (RELIC_OP_SCAN);
-
 	if (bound == all_columns(relation->arity))
 		return (RELIC_OP_MEMBER);
 
@@ -480,7 +524,7 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 		return (-1);
 
 	bound = bound_columns(planner, atom, relation->arity);
-	kind = positive_kind(planner, relation, bound, view);
+	kind = positive_kind(planner, relation, bound);
 
 	index_position = 0;
 	if (kind == RELIC_OP_LOOKUP && relic_relation_index(planner->ctx,
@@ -706,16 +750,19 @@ divide_rounding_up(size_t dividend, size_t divisor)
 }
 
 /*
- * The estimate for a relation still being derived: the assumed size,
- * narrowed by the assumed selectivity of each bound column.
+ * The estimate for a relation still being derived, read through `view`: the
+ * assumed size, larger for a member read beside its own delta, narrowed by
+ * the assumed selectivity of each bound column.
  */
 static size_t
-estimate_unknown(uint16_t arity, uint32_t bound)
+estimate_unknown(uint16_t arity, uint32_t bound, enum relic_view view)
 {
 	size_t estimate;
 	uint16_t column;
 
 	estimate = RELIC_PLAN_UNKNOWN_TUPLES;
+	if (view == RELIC_VIEW_OLD || view == RELIC_VIEW_CURRENT)
+		estimate *= RELIC_PLAN_DELTAS_HELD;
 	for (column = 0; column < arity; column++) {
 		if ((bound & (UINT32_C(1) << column)) != 0)
 			estimate = divide_rounding_up(estimate,
@@ -759,8 +806,9 @@ estimate_measured(relic_t *ctx, relic_relation_t *relation, uint32_t columns,
 }
 
 /*
- * Score a positive literal against the slots in `bound`.  Returns 0, or -1
- * with a diagnostic reported.  `incomplete` is the planner's.
+ * Score a positive literal, read through `view`, against the slots in
+ * `bound`.  Returns 0, or -1 with a diagnostic reported.  `incomplete` is the
+ * planner's.
  *
  * A relation still being derived is not even looked up: its estimate is an
  * assumption, and looking it up would create a relation that the Magic
@@ -769,7 +817,7 @@ estimate_measured(relic_t *ctx, relic_relation_t *relation, uint32_t columns,
  */
 static int
 score_positive(relic_t *ctx, const bool *incomplete, const relic_atom_t *atom,
-    uint64_t bound, relic_plan_score_t *scorep)
+    enum relic_view view, uint64_t bound, relic_plan_score_t *scorep)
 {
 	const relic_pred_t *pred;
 	relic_relation_t *relation;
@@ -786,7 +834,7 @@ score_positive(relic_t *ctx, const bool *incomplete, const relic_atom_t *atom,
 	scorep->bound_args = column_count(columns);
 
 	if (is_incomplete(incomplete, atom->pred)) {
-		scorep->estimate = estimate_unknown(pred->arity, columns);
+		scorep->estimate = estimate_unknown(pred->arity, columns, view);
 		return (0);
 	}
 
@@ -857,8 +905,8 @@ rank_positives(relic_planner_t *planner)
 		candidate->index = i;
 
 		if (reorder && score_positive(planner->ctx, planner->incomplete,
-		    &rule->body[i].u.atom, planner->bound,
-		    &candidate->score) != 0)
+		    &rule->body[i].u.atom, positive_view(planner, i),
+		    planner->bound, &candidate->score) != 0)
 			return (-1);
 	}
 
@@ -871,7 +919,7 @@ rank_positives(relic_planner_t *planner)
 
 /*
  * Place literals from the front of the ranking until one binds a new slot or
- * the ranking runs out.
+ * the ranking runs out, recording the estimate each was placed by.
  *
  * While the bound set stays as the pass found it, every score in the ranking
  * is still what it was when the pass began, so the best literal not yet
@@ -887,8 +935,125 @@ order_ranked(relic_planner_t *planner)
 	bound_at_start = planner->bound;
 
 	for (i = 0; i < planner->ranking_count &&
-	    planner->bound == bound_at_start; i++)
+	    planner->bound == bound_at_start; i++) {
+		planner->estimates[planner->ranking[i].index] =
+		    planner->ranking[i].score.estimate;
 		order_positive(planner, planner->ranking[i].index);
+	}
+}
+
+/*
+ * A product of estimates, saturating one below RELIC_PLAN_NEVER rather than
+ * wrapping, so that no threshold computed from it is RELIC_PLAN_NEVER.  The
+ * products are 64-bit on every platform, so the same program gives the same
+ * threshold everywhere.
+ */
+static uint64_t
+multiply_estimates(uint64_t product, size_t estimate)
+{
+	uint64_t factor;
+
+	factor = (uint64_t)estimate;
+	if (factor != 0 && product > (RELIC_PLAN_NEVER - 1) / factor)
+		return (RELIC_PLAN_NEVER - 1);
+
+	return (product * factor);
+}
+
+/*
+ * The product of the estimates the positive literals at order positions
+ * `first` up to `end` were placed by, the delta literal left out.
+ */
+static uint64_t
+product_of_estimates(const relic_planner_t *planner, size_t first,
+    size_t end)
+{
+	const relic_rule_t *rule;
+	uint64_t product;
+	size_t index;
+	size_t i;
+
+	rule = planner->rule;
+	product = 1;
+
+	for (i = first; i < end; i++) {
+		index = planner->order[i];
+		if (rule->body[index].kind == RELIC_LITERAL_POSITIVE &&
+		    index != planner->delta_literal)
+			product = multiply_estimates(product,
+			    planner->estimates[index]);
+	}
+
+	return (product);
+}
+
+/*
+ * The position of the delta literal in a decided order, which holds it:
+ * decide_order() confirms both that the delta literal is one of the body's
+ * and that the order holds every literal.
+ */
+static size_t
+delta_position(const relic_planner_t *planner)
+{
+	size_t i;
+
+	for (i = 0; i < planner->order_count; i++) {
+		if (planner->order[i] == planner->delta_literal)
+			break;
+	}
+	assert(i < planner->order_count);
+
+	return (i);
+}
+
+/*
+ * Whether a decided order of a delta variant places another positive
+ * literal before the delta literal.
+ */
+static bool
+delta_has_prefix(const relic_planner_t *planner)
+{
+	size_t delta;
+	size_t i;
+
+	delta = delta_position(planner);
+	for (i = 0; i < delta; i++) {
+		if (planner->rule->body[planner->order[i]].kind ==
+		    RELIC_LITERAL_POSITIVE)
+			return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * The delta size above which a variant's placed plan is the cheaper of it
+ * and the delta-first plan: a round whose delta holds D tuples costs the
+ * placed plan about its prefix estimate, one lookup of the delta per
+ * binding, and the delta-first plan about D times its fan-out estimate, so
+ * the placed plan runs exactly when D exceeds the prefix over the fan-out.
+ * A prefix of zero -- a relation placed before the delta is empty -- makes
+ * the placed plan read nothing, and a threshold of zero says it always runs.
+ * Otherwise a fan-out of zero makes the delta-first plan the cheaper
+ * whatever the delta holds, and so does a quotient no delta can exceed, one
+ * of at least RELIC_TUPLE_MAX; RELIC_PLAN_NEVER says the placed plan never
+ * runs.
+ */
+uint64_t
+relic_plan_delta_threshold(uint64_t prefix_estimate, uint64_t fanout_estimate)
+{
+	uint64_t threshold;
+
+	if (prefix_estimate == 0)
+		return (0);
+	if (fanout_estimate == 0)
+		return (RELIC_PLAN_NEVER);
+
+	threshold = prefix_estimate / fanout_estimate;
+	if (threshold >= RELIC_TUPLE_MAX)
+		return (RELIC_PLAN_NEVER);
+
+	return (threshold);
 }
 
 /*
@@ -911,7 +1076,7 @@ positive_count(const relic_rule_t *rule)
 
 /*
  * Decide the order: the tests ready against the slots the caller started
- * with, the delta literal when there is one, then the other positive
+ * with, the delta literal when it is pinned first, then the positive
  * literals in passes, as the file comment describes, and each test at the
  * earliest point its slots are bound.
  *
@@ -924,7 +1089,7 @@ order_body(relic_planner_t *planner)
 {
 	order_ready_tests(planner);
 
-	if (planner->delta_literal != RELIC_PLAN_NO_DELTA)
+	if (planner->pin_delta)
 		order_positive(planner, planner->delta_literal);
 
 	for (;;) {
@@ -1153,7 +1318,7 @@ place_emit(relic_planner_t *planner)
 static int
 planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
     const relic_rule_t *rule, relic_relation_t *target, size_t delta_literal,
-    const bool *incomplete)
+    enum relic_delta_placement placement, const bool *incomplete)
 {
 	size_t count;
 
@@ -1164,12 +1329,17 @@ planner_init(relic_planner_t *planner, relic_t *ctx, relic_arena_t *arena,
 	planner->target = target;
 	planner->incomplete = incomplete;
 	planner->delta_literal = delta_literal;
+	planner->pin_delta = placement == RELIC_DELTA_PINNED;
 
 	planner->placed = relic_arena_allocarray(arena, rule->body_length,
 	    sizeof(*planner->placed));
-	if (planner->placed == NULL)
+	planner->estimates = relic_arena_allocarray(arena, rule->body_length,
+	    sizeof(*planner->estimates));
+	if (planner->placed == NULL || planner->estimates == NULL)
 		return (-1);
-	bzero(planner->placed, rule->body_length * sizeof(bool));
+	bzero(planner->placed, rule->body_length * sizeof(*planner->placed));
+	bzero(planner->estimates,
+	    rule->body_length * sizeof(*planner->estimates));
 
 	count = positive_count(rule);
 	planner->ranking = calloc(count, sizeof(*planner->ranking));
@@ -1207,31 +1377,88 @@ decide_order(relic_planner_t *planner)
 }
 
 /*
- * Build the plan: room for the order and the operations, the order, then an
- * operation per literal and the EMIT.  The body length comes from a compiled
- * rule held in memory, so one more than it cannot wrap.
+ * Give a planner room in its arena for the order it will decide.
  */
 static int
-build_plan(relic_planner_t *planner)
+planner_prepare_order(relic_planner_t *planner)
 {
-	size_t length;
+	planner->order = relic_arena_allocarray(planner->arena,
+	    planner->rule->body_length, sizeof(*planner->order));
 
-	length = planner->rule->body_length;
+	return (planner->order == NULL ? -1 : 0);
+}
 
-	planner->order = relic_arena_allocarray(planner->arena, length,
-	    sizeof(*planner->order));
-	planner->ops = relic_arena_allocarray(planner->arena, length + 1,
-	    sizeof(*planner->ops));
-	if (planner->order == NULL || planner->ops == NULL)
+/*
+ * Emit the plan of a decided order into *plan: an operation per literal and
+ * the EMIT, which is where the relations and indexes the plan reads are
+ * created.  The body length comes from a compiled rule held in memory, so
+ * one more than it cannot wrap.
+ */
+static int
+emit_plan(relic_planner_t *planner, relic_plan_t *plan)
+{
+	planner->ops = relic_arena_allocarray(planner->arena,
+	    planner->rule->body_length + 1, sizeof(*planner->ops));
+	if (planner->ops == NULL)
 		return (-1);
 
-	if (decide_order(planner) != 0)
+	if (emit_body(planner) != 0 || place_emit(planner) != 0)
 		return (-1);
 
-	if (emit_body(planner) != 0)
+	plan->ops = planner->ops;
+	plan->op_count = planner->op_count;
+
+	return (0);
+}
+
+/*
+ * Decide the orders of a delta variant and the threshold between them.
+ *
+ * The written order of RELIC_F_NO_REORDER is the textbook scheme and is not
+ * second-guessed: it is the placed order, and the only one.  Without
+ * indexes a delta placed after other literals would be scanned whole once
+ * for each binding that reaches it, which the estimates, made for lookups,
+ * do not weigh, while the delta-first plan scans it once; so under
+ * RELIC_F_NO_INDEX alone the pinned order is the only one.  Otherwise the
+ * pinned order is decided when the placed one puts another positive literal
+ * before the delta literal, and the two are weighed; when it does not, the
+ * two orders would be one.
+ */
+static int
+decide_variant(relic_planner_t *placed, relic_planner_t *pinned,
+    uint64_t *thresholdp)
+{
+	unsigned int flags;
+	uint64_t prefix_estimate;
+	uint64_t fanout_estimate;
+
+	flags = placed->ctx->config.flags;
+	*thresholdp = 0;
+
+	if ((flags & RELIC_F_NO_REORDER) != 0)
+		return (decide_order(placed));
+
+	if ((flags & RELIC_F_NO_INDEX) != 0) {
+		*thresholdp = RELIC_PLAN_NEVER;
+		return (decide_order(pinned));
+	}
+
+	if (decide_order(placed) != 0)
+		return (-1);
+	if (!delta_has_prefix(placed))
+		return (0);
+
+	if (decide_order(pinned) != 0)
 		return (-1);
 
-	return (place_emit(planner));
+	prefix_estimate = product_of_estimates(placed, 0,
+	    delta_position(placed));
+	fanout_estimate = product_of_estimates(pinned, delta_position(pinned),
+	    pinned->order_count);
+	*thresholdp = relic_plan_delta_threshold(prefix_estimate,
+	    fanout_estimate);
+
+	return (0);
 }
 
 /*
@@ -1251,16 +1478,15 @@ planning_status(relic_t *ctx, relic_arena_t *arena, int status)
 }
 
 /*
- * Plan a rule.  Returns 0 with the plan in *plan, or -1 with a diagnostic
+ * Plan a rule's ordinary plan, in which every literal reads its whole
+ * relation.  Returns 0 with the plan in *plan, or -1 with a diagnostic
  * reported: memory or the memory limit refused an index or a statistic, or
  * the planner broke one of a plan's invariants, which is an internal error.
  *
  * The EMIT writes into `target`, whose arity must be the rule's head arity.
- * `delta_literal` is RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or
- * the body index of a positive literal for the semi-naive variant in which
- * that literal reads the delta and is placed first.  `incomplete`, when not
- * NULL, is indexed by predicate identifier minus one and marks the relations
- * still being derived; every other relation is measured as it stands.
+ * `incomplete`, when not NULL, is indexed by
+ * predicate identifier minus one and marks the relations still being
+ * derived; every other relation is measured as it stands.
  *
  * The plan and everything it points at except its relations are allocated
  * from `arena`, and live as long as the caller keeps it.  The relations the
@@ -1271,8 +1497,7 @@ planning_status(relic_t *ctx, relic_arena_t *arena, int status)
  */
 int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
-    relic_relation_t *target, size_t delta_literal, const bool *incomplete,
-    relic_plan_t *plan)
+    relic_relation_t *target, const bool *incomplete, relic_plan_t *plan)
 {
 	relic_planner_t planner;
 	int status;
@@ -1280,18 +1505,69 @@ relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	bzero(plan, sizeof(*plan));
 
 	status = planner_init(&planner, ctx, arena, rule, target,
-	    delta_literal, incomplete);
+	    RELIC_PLAN_NO_DELTA, RELIC_DELTA_RANKED, incomplete);
 	if (status == 0)
-		status = build_plan(&planner);
+		status = planner_prepare_order(&planner);
+	if (status == 0)
+		status = decide_order(&planner);
+	if (status == 0)
+		status = emit_plan(&planner, plan);
 	planner_release(&planner);
 
-	if (planning_status(ctx, arena, status) != 0)
+	return (planning_status(ctx, arena, status));
+}
+
+/*
+ * Plan a semi-naive delta variant of a rule into *plans: the placed plan,
+ * the delta-first plan and the threshold between them, each plan emitted
+ * only when some delta selects it (plan.h).  Arguments and failures are as
+ * for relic_plan_rule(), and a request without a delta literal is refused
+ * as an internal error.
+ */
+int
+relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
+    const relic_rule_t *rule, relic_relation_t *target, size_t delta_literal,
+    const bool *incomplete, relic_variant_plans_t *plans)
+{
+	relic_planner_t placed;
+	relic_planner_t pinned;
+	int status;
+
+	bzero(plans, sizeof(*plans));
+	bzero(&placed, sizeof(placed));
+	bzero(&pinned, sizeof(pinned));
+	if (delta_literal == RELIC_PLAN_NO_DELTA) {
+		relic_diagf(ctx, RELIC_ERROR, &rule->where, "internal error: "
+		    "a delta variant was asked for with no delta literal");
 		return (-1);
+	}
 
-	plan->ops = planner.ops;
-	plan->op_count = planner.op_count;
+	status = planner_init(&placed, ctx, arena, rule, target,
+	    delta_literal, RELIC_DELTA_RANKED, incomplete);
+	if (status == 0)
+		status = planner_init(&pinned, ctx, arena, rule, target,
+		    delta_literal, RELIC_DELTA_PINNED, incomplete);
 
-	return (0);
+	if (status == 0)
+		status = planner_prepare_order(&placed);
+	if (status == 0)
+		status = planner_prepare_order(&pinned);
+	if (status == 0)
+		status = decide_variant(&placed, &pinned, &plans->threshold);
+
+	/*
+	 * A round runs a variant only for a delta of at least one tuple, which
+	 * exceeds a threshold of zero and no threshold of RELIC_PLAN_NEVER.
+	 */
+	if (status == 0 && plans->threshold != RELIC_PLAN_NEVER)
+		status = emit_plan(&placed, &plans->placed);
+	if (status == 0 && plans->threshold != 0)
+		status = emit_plan(&pinned, &plans->delta_first);
+
+	planner_release(&placed);
+	planner_release(&pinned);
+
+	return (planning_status(ctx, arena, status));
 }
 
 /*
@@ -1313,7 +1589,7 @@ relic_plan_order(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	int status;
 
 	status = planner_init(&planner, ctx, arena, rule, NULL,
-	    RELIC_PLAN_NO_DELTA, incomplete);
+	    RELIC_PLAN_NO_DELTA, RELIC_DELTA_RANKED, incomplete);
 	if (status == 0) {
 		planner.order = order;
 		planner.bound = bound;

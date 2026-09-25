@@ -145,7 +145,7 @@ exactly one of four:
 
 The view is a property of the operation, set by the planner; the range it
 denotes is supplied by the evaluation when the operation starts, from the
-member's delta, exactly as a delta scan takes its range today.
+member's delta.
 
 ```c
 enum relic_view {
@@ -189,11 +189,11 @@ reads no relation. Neither has a view.
 
 ### 3.3 Each operation under a view
 
-* A `SCAN` walks the view's range. A delta scan today is a `SCAN` whose view
-  is `delta`; the `all` scan is unchanged.
+* A `SCAN` walks the view's range; a delta scan is a `SCAN` whose view is
+  `delta`.
 * A `LOOKUP` walks its key's chain from the first chain tuple in the view to
   the first at or past the view's end. For `all`, `old` and `current` the
-  walk begins at the chain's head, as today, and only the end differs. For
+  walk begins at the chain's head, and only the end differs. For
   `delta` it begins at the first chain tuple whose identifier is at least
   `first`, which section 4.2 finds without walking the chain from its head.
 * A `MEMBER` asks the canonical index for the identifier of the tuple its
@@ -202,7 +202,7 @@ reads no relation. Neither has a view.
   purpose; `relic_relation_contains()` is that function compared against
   `RELIC_ID_NONE`.
 * `ANTI_MEMBER` and `FILTER` never read a member and are unchanged.
-* `EMIT` inserts, as today. The tuple it inserts takes the identifier past
+* `EMIT` inserts. The tuple it inserts takes the identifier past
   the relation's end, which is at or past every view's end, so **nothing in
   the round can see it**. That is not a rule the executor obeys but a fact
   about the ranges: no view of a member reaches past `end`, and `end` was
@@ -214,15 +214,14 @@ reads no relation. Neither has a view.
 with no positive literal over a member, each once, in program order. A
 recursive rule, one with such a literal, has no base plan under the
 semi-naive fixed point and runs only as its variants; its base plan exists
-under `-X naive`, where every rule runs in full every pass, and is the same
-plan as today.
+under `-X naive`, where every rule runs in full every pass.
 
 At the start of the component every member's delta is set empty at the
 first identifier, `[1, 1)`, and a member that already holds tuples is
 recorded as having gained, as though round 0 had inserted them. The
 relations were discarded before the evaluation began and nothing but
-evaluation writes a member, so no member holds anything at that point
-today; the rule costs nothing and makes the argument of section 3.5
+evaluation writes a member, so no member holds anything at that point;
+the rule costs nothing and makes the argument of section 3.5
 independent of that fact, which a recursive rule that no longer runs in
 round 0 would otherwise depend on silently. Round 0 inserts the facts and
 what the exit rules derive. **The first delta of each member is therefore
@@ -287,7 +286,7 @@ shares the executor, and under it every operation's view is `all`.
 ### 3.6 Which variants a round runs
 
 A round runs, in planning order, the variants whose delta literal reads a
-member that gained in the previous round, as today, and among those only
+member that gained in the previous round, and among those only
 the variants whose every `old` view is nonempty. A variant with an empty
 `old` view derives nothing, since a join over an empty operand is empty, and
 skipping it changes the cost and nothing else. It is what keeps round 1
@@ -308,8 +307,8 @@ round, which the 500-literal rule of `tests/perf.sh` would feel.
 
 ### 3.7 What changes
 
-* **Rounds.** A round now derives only from the previous round's tuples, so
-  a component may take more rounds than today, when round 0's lookups could
+* **Rounds.** A round derives only from the previous round's tuples, so a
+  component may take more rounds than an evaluator whose round 0 lookups
   see round 0's insertions and carry a chain several links in one round if
   the facts happened to be in its order. It never takes more than the
   longest derivation chain. `iterations` in `-X stats` changes accordingly.
@@ -351,8 +350,9 @@ A secondary index chains the tuples of a key in identifier order,
 `specs/design-index.md` section 3, so the tuples of a key that lie in a
 delta `[first, end)` are a contiguous run of the chain: the chain members
 with identifiers at or past `first`, up to the first one at or past `end`.
-A lookup stops at `end` today. What it cannot do is *start* at `first`
-without walking the chain from its head, which is what made the delta
+A lookup stops at `end` by itself. What it cannot do unaided is *start* at
+`first` without walking the chain from its head, which is what made the
+delta
 unplaceable anywhere but first.
 
 Each key entry gains a third identifier, its **frontier**:
@@ -384,8 +384,7 @@ invariant. A frontier is never `RELIC_ID_NONE`: the tuples a later round
 links after `last` must remain reachable from it, and a walk from a lost
 frontier would miss them without an error. The delta `LOOKUP` of section
 3.3 calls it with the delta's `first` and stops, as every lookup does, at
-the view's end. It takes a mutable index, where the executor holds a
-constant one today, because it moves the frontier.
+the view's end. It takes a mutable index, because it moves the frontier.
 
 A frontier step reads the `next` array and no tuple, and is not counted as
 a tuple looked up; the counter of `specs/design-eval.md` section 4.3 keeps
@@ -432,38 +431,60 @@ greedy order of `specs/design-planner.md` section 5.1, scored like any
 other, and becomes the operation its bound columns give it at the point it
 is placed, per section 5.2 of that document. The planner learns each
 literal's view from what it already has: the delta literal's index, the set
-of incomplete predicates and body order, so `relic_plan_rule()` takes no
-new argument and the static mode of the rewrite, which passes no delta
-literal, plans as it does today. The operation is:
+of incomplete predicates and body order, and the static mode of the
+rewrite, which asks for no delta literal, is untouched. The operation is:
 
-* `SCAN` through the delta view when no column is bound, which is today's
-  delta scan;
+* `SCAN` through the delta view when no column is bound;
 * `LOOKUP` through the delta view, on the index keyed on its bound columns,
   when some are, positioned by section 4.2;
 * `MEMBER` through the delta view when every column is bound.
 
-The other member literals of the variant are placed as today and read their
-`old` or `current` view. Under `-X no-index` a delta literal with bound
-columns is a `SCAN` of the delta view matching them, as every lookup becomes
-a scan there. Under `-X no-reorder` positive literals are placed in the
-order they are written, the delta literal in its written place, so the
-textual reference is the textbook semi-naive scheme and nothing more.
+The other member literals of the variant are placed by the same order and read
+their `old` or `current` view. Under `-X no-index` every lookup becomes a
+scan, so a delta placed after other literals would be scanned whole once for
+every binding that reaches it; there the delta literal is placed first, as a
+`SCAN` of the delta view, and the variant has that one plan. Under `-X
+no-reorder` positive literals are placed in the order they are written, the
+delta literal in its written place, so the textual reference is the textbook
+semi-naive scheme and nothing more.
 
 **A variant has two plans when the order places the delta anywhere but
 first**, and one otherwise. The **placed plan** is the order above. The
-**delta-first plan** is the same walk with the delta literal pinned first,
-which is today's variant. The planner records with the placed plan its
-**prefix estimate**: the product of the estimates of the generators placed
-before the delta literal, each the estimate it was placed by, which is the
-planner's own figure for the bindings that reach the delta literal in a
-round. When the order places the delta first the two plans coincide, the
-prefix is empty, and only one plan is built.
+**delta-first plan** is the same walk with the delta literal pinned first.
+Each records one estimate, the product of the
+estimates the positive literals on one side of the delta literal were
+placed by:
+
+* the placed plan's **prefix estimate**, over the literals before the
+  delta: the planner's figure for the bindings that reach the delta literal
+  in a round, each costing one lookup of the delta, whatever the delta
+  holds;
+* the delta-first plan's **fan-out estimate**, over the literals after it:
+  the planner's figure for the bindings each delta tuple leads to.
+
+A round whose delta holds *D* tuples then costs the placed plan about the
+prefix and the delta-first plan about *D* times the fan-out, and the
+**threshold** of the variant is the prefix over the fan-out, in integer
+division. When the order places the delta first the two plans coincide, the
+prefix is empty, and only one plan is built. Two degenerate estimates
+settle the choice for every round: a prefix of zero, a relation before the
+delta found empty, makes the placed plan read nothing and the threshold
+zero; otherwise a fan-out of zero makes the delta-first plan the cheaper
+whatever the delta holds, and the threshold is one no delta exceeds.
+
+**Both orders are decided before either plan is emitted**, and only a plan
+some delta would select is emitted: a round runs only for a delta of at
+least one tuple, so a threshold of zero leaves the delta-first plan
+unbuilt, and one no delta exceeds leaves the placed plan unbuilt. Since
+emitting a plan is what creates the indexes it reads, a plan no round
+would run costs no index kept up through the fixed point.
 
 **Each round chooses**: a variant runs its placed plan when its delta holds
-more tuples than the prefix estimate, and its delta-first plan otherwise.
-The delta's size is known when the round starts, the comparison is one
-integer against another, and nothing is planned or allocated in the round.
-Section 4.4 says why the choice cannot be made once for all rounds.
+more tuples than the threshold, and its delta-first plan otherwise. The
+delta's size is known when the round starts, the comparison is one integer
+against another, and nothing is planned or allocated in the round. Section
+4.4 says why the choice cannot be made once for all rounds, and why both
+sides of it carry an estimate.
 
 The static mode the Magic rewrite plans in, `specs/design-planner.md`
 section 7, asks for the order of a rule with no delta literal and is
@@ -485,7 +506,7 @@ now depends on the view:
 The second rule says only that a member is larger than its own delta, which
 is true by construction, and ranks the delta ahead of every other member
 literal with the same bound columns, so the variants of a rule over its own
-component alone are ordered as today unless a constant binds a column of
+component alone put the delta first unless a constant binds a column of
 another member literal, when that literal's bound argument ranks it first,
 as the greedy order ranks every literal. The first rule leaves `all`, which
 competes with a delta in no plan, where it was, so the base plans of `-X
@@ -506,44 +527,67 @@ Nothing is bound at first. `magic` estimates 446, the delta of `tc$bf`
 bound column and is looked up on `X`; the delta is last, looked up on `Y`
 through the frontier. That is Souffle's loop nest. The prefix estimate is
 446 times `par`'s estimate for one bound column, 50,000 over its 1000
-distinct first columns, about 22,300; every round's delta but the last
-holds more, so the placed plan runs, and the tuples looked up fall from
-6.27 million to about 1.2 million (section 2).
+distinct first columns, about 22,300. Pinned first, the delta is scanned,
+`par` looked up on `Y`, about 50 tuples a binding, and `magic` tested, one:
+a fan-out of about 50, and a threshold of about 446. A round whose delta
+holds more runs the placed plan, a smaller one the delta-first plan, and
+the tuples looked up fall from 6.27 million to about 1.2 million
+(section 2).
 
 ```prolog
 tc(X, Z) :- par(X, Y), tc(Y, Z).
 ```
 
 The delta estimates 1000 against 50,000, is placed first and scanned, and
-`par` is looked up on `Y`: today's variant, one plan, unchanged.
+`par` is looked up on `Y`: the delta-first order, and the only plan.
 
 ```prolog
 p(X, Z) :- p(X, Y), p(Y, Z).
 ```
 
 Variant 2 reads the first `p` old and the second delta: 10,000 against
-1000, so the delta is scanned and the old `p` looked up on `Y`, as today.
+1000, so the delta is scanned and the old `p` looked up on `Y`.
 Variant 1 reads the first delta and the second current, 1000 against
 10,000, the same way round. One plan each.
 
 **Why the round chooses.** The planner cannot know a delta's size, and no
 constant stands in for it. Take `r(X, Z) :- g(X), big(X, Y), r(Y, Z)` with
-`g` holding 999 tuples and `big` a thousand `Y` per `X`. The placed plan
-loops over the 999,000 bindings of `g` and `big` every round and looks each
-up in the delta; the delta-first plan costs each round its delta times
-`big`'s fan-in. On a round whose delta holds one tuple the placed plan is a
-million times the work, and on one whose delta holds a million it is the
-work the delta-first plan would do a thousand times over. Neither plan is
-right for both rounds, and a fixed point has both kinds. The prefix
-estimate is the planner's figure for the placed plan's outer bindings, the
-delta's size is the delta-first plan's, and comparing the two each round
-runs whichever loops over fewer, up to the accuracy of the estimate. On the
-example above the delta-first plan runs until a round's delta exceeds
-999,000 tuples, which is to say always.
+`g` holding 999 tuples and `big` a thousand `Y` per `X`, each `Y` reached
+from ten `X`. The placed plan loops over the 999,000 bindings of `g` and
+`big` every round and looks each up in the delta; the delta-first plan
+costs each round its delta times `big`'s fan-in, ten. On a round whose
+delta holds one tuple the placed plan is a hundred thousand times the
+work, and on one whose delta holds a million it is a tenth of what the
+delta-first plan would do. Neither plan is right for both rounds, and a
+fixed point has both kinds.
+
+**Why both sides carry an estimate.** Comparing the delta's size with the
+prefix alone would weigh the placed plan's outer loop against the
+delta-first plan's outer loop and ignore what each delta tuple goes on to
+cost, which is the whole of that plan's work when the literals after the
+delta fan out: under it `tc$bf` above would run the delta-first plan on
+every round whose delta holds fewer than 22,300 tuples, and each of those
+tuples looks up about 50. Weighing the prefix against the delta times the
+fan-out compares the two plans' work, each side up to the accuracy of the
+planner's estimates, and on the `r`, `g` and `big` body runs the placed plan
+once a round's delta exceeds 99,900 tuples.
+
+The comparison is between the parts of the two plans that differ. The work
+after the delta literal in the placed plan, the delta tuples it matches and
+what they join with, is work the delta-first plan does as well, and is left
+out of both sides, and so is the delta-first plan's own scan of the delta.
+A positive literal the delta-first plan tests for membership contributes
+its estimate to the fan-out, one tuple unless its relation is empty, so a
+guard that rejects most bindings makes the delta-first plan look dearer
+than it is and moves the threshold down; the placed plan is then chosen a
+little early, which costs at most the prefix's lookups. A relation found
+empty after the delta makes the fan-out zero and the placed plan never
+run, even for a prefix of one binding; such a rule derives nothing either
+way.
 
 The choice is deterministic, because the sizes are; it is bounded, because
 it is a comparison; and it is explainable, because both plans and the
-estimate are printed once (section 4.5) and the choice follows from the
+threshold are printed once (section 4.5) and the choice follows from the
 counters. What it is not is replanning: the plans are built when the
 component is, as `specs/design-planner.md` section 2 requires, and the
 indexes they name with them.
@@ -554,7 +598,7 @@ An operation over a member of the component prints its view after its kind,
 for the views a reader needs to see: `scan delta`, `lookup delta`, `member
 delta`, `scan old`, `lookup old`, `member old`. The `current` view is
 unmarked, since it is what a member literal in a variant reads unless
-marked otherwise, and `all` is unmarked as today. For the graph program of
+marked otherwise, and `all` is unmarked. For the graph program of
 `specs/design-planner.md` section 8.2:
 
 ```text
@@ -571,12 +615,12 @@ stratum 0, component 1 (recursive): path/2
 
 A recursive rule shows its variants and no base plan, because the lines are
 what ran (`specs/design-planner.md` section 8.1) and no base plan runs.
-Under `-X naive` it shows its base plan and no variants, as today. A
-variant with two plans shows both, the placed plan headed by its prefix
-estimate and the delta-first plan after it:
+Under `-X naive` it shows its base plan and no variants. A
+variant with two plans shows both, the placed plan headed by its threshold
+and the delta-first plan after it:
 
 ```text
-        delta tc$bf(Y, Z) when the delta holds more than 22300 tuples:
+        delta tc$bf(Y, Z) when the delta holds more than 446 tuples:
             scan magic$tc$bf(X)
             lookup par(X, Y) key={0}
             lookup delta tc$bf(Y, Z) key={0}
@@ -587,6 +631,10 @@ estimate and the delta-first plan after it:
             member magic$tc$bf(X)
             emit tc$bf(X, Z)
 ```
+
+A variant left with one plan by its threshold shows that plan alone,
+under the heading of a variant with one plan, and a threshold of one says
+`tuple`.
 
 The lines are still what ran, or could have: which plan each round chose
 follows from the counters and is not printed, so that `-e` output stays a
@@ -902,8 +950,9 @@ On acceptance the durable record changes in these places, and nowhere else:
 * `specs/design-plan.md` sections 3 to 5.3: `view` replaces `delta` on an
   atom, and 5.3 no longer pins the delta first.
 * `specs/design-planner.md` sections 5.1, 5.2, 6, 8.2 and 10: the delta
-  literal takes part in the order; a variant may have two plans and a
-  prefix estimate; the estimate depends on the view; `-X no-reorder` places
+  literal takes part in the order; a variant may have two plans, with a
+  prefix and a fan-out estimate and the threshold between them; the
+  estimate depends on the view; `-X no-reorder` places
   the delta in its written place; the explain example and the `scan delta`
   sentence; "indexes over a delta" leaves the absent list, and "replanning
   during a fixed point" stays on it.

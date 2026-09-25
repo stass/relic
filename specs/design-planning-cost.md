@@ -49,11 +49,15 @@ product of these factors.
    Done as a rescan of the body per step, that is *N* scores and *N*
    readiness checks per step, *N* steps: the square of the body.
 
-2. **Delta variants.** A rule over a recursive component gets, beside its
-   plan, one variant per literal that reads a member of the component, each
-   of *N* + 1 operations, per `specs/design-eval.md`. A body whose literals
-   all read the component gets *N* + 1 plans: *N* + 1 times the ordering
-   cost, and the square of the body in memory.
+2. **Delta variants.** A rule over a recursive component gets one variant
+   per literal that reads a member of the component, per
+   `specs/design-eval.md` section 4.1, and under `-X naive` a plan instead.
+   A variant orders its body once, or twice when the placed order puts
+   another literal before the delta literal, and holds one or two plans of
+   *N* + 1 operations, per `specs/design-evaluation-cost.md` section 4.3. A
+   body whose literals all read the component gets *N* variants: up to 2*N*
+   times the ordering cost, and up to twice the square of the body in
+   memory.
 
 3. **Magic copies.** The rewrite of `specs/design-magic.md` copies every rule
    deriving a predicate once per adornment of it, and orders each copy's body
@@ -141,8 +145,11 @@ The order is decided as follows, from the mask the caller starts the planner
 with: nothing bound for a rule's plan, the head's bound columns when the
 Magic rewrite orders a body for a call.
 
-1. Place the tests that are ready against the starting mask. When there is
-   a delta literal, place it, per D-10, and then the tests it made ready.
+1. Place the tests that are ready against the starting mask. When the
+   order is a variant's delta-first order, place the delta literal, and then
+   the tests it made ready. In every other order a delta literal is ranked
+   with the other positive literals, by the estimate of its view,
+   `specs/design-planner.md` section 5.1.
 2. If no positive literal is left, the order is complete. Otherwise score
    every unplaced positive literal against the mask and sort them into the
    ranking.
@@ -153,8 +160,8 @@ Magic rewrite orders a body for a call.
 
 Under `-X no-reorder` step 2 sorts by body position alone and scores
 nothing, so the order is the one the reference of `specs/design-planner.md`
-section 6 produces today, within the cost bound below rather than the
-quadratic one.
+section 6 defines, the delta literal in its written place, within the cost
+bound below rather than the quadratic one.
 
 **Why it chooses what the step-by-step comparison chose.** At every step the
 greedy order places the unplaced positive literal that is least by the key,
@@ -173,21 +180,21 @@ same literal at the same point in both, because a pass scores in body order.
 the only event that can make one ready. Between growths a scan would find
 nothing.
 
-**What it costs.** Each pass scores at most *N* literals, sorts them in
-*N* log *N* comparisons, and scans *N* tests. There are no more passes than
+**What it costs.** Each pass scores at most *N* literals, sorts them in *N*
+log *N* comparisons, and scans *N* tests. There are no more passes than
 positive literals, and no more than 65, because each pass after the first
 follows a growth of the mask. One plan therefore costs at most 65 x *N* log
-*N* rather than *N* squared. A short body of *k* positive literals that
-binds something at every placement still takes *k* passes, and costs what
-it does today within a logarithm; the bound matters for the body that is
+*N* rather than *N* squared. A short body of *k* positive literals that binds
+something at every placement still takes *k* passes, and costs what a rescan
+per step would within a logarithm; the bound matters for the body that is
 long, where the mask must stop growing long before the body ends. The
 planner's record of what is placed is scratch of the plan's own length,
 allocated beside the plan in the same arena, so it is charged with it and is
 of its order. The ranking is scratch of the same length, a few words per
-literal against the byte of that record, and is freed when the plan is
-built: kept beside every plan an evaluation holds, it would add a quarter to
-the memory of the long bodies this document is about. Held for one call
-only, it is of the order of the rule the caller wrote.
+literal against the byte of that record, and is freed when the plan is built:
+kept beside every plan an evaluation holds, it would add a quarter to the
+memory of the long bodies this document is about. Held for one call only, it
+is of the order of the rule the caller wrote.
 
 ---
 
@@ -196,6 +203,15 @@ only, it is of the order of the rule the caller wrote.
 A plan of *N* literals holds *N* + 1 operations, and section 4 orders it in
 at most 65 x *N* log *N* work. So **the time to plan is bounded by the size
 of the plans produced**, within a factor logarithmic in the longest body.
+
+A delta variant may decide an order it does not build. When the placed
+order puts another literal before the delta literal, the variant also
+decides the delta-first order, and each of the two plans is then built only
+if some delta size would select it. A variant decides at most two orders of
+the same body and builds at least one plan of *N* + 1 operations, so its
+planning time is at most twice what ordering one of its plans costs, and the
+bound holds within that factor of two.
+
 The delta variants of section 2 multiply the plans, the Magic copies and
 prefixes multiply the rule bodies, and each multiplies the time by what it
 adds to the rewritten program and its plans.

@@ -29,6 +29,12 @@
  * tuples inserted after it started simply stop at the first identifier past
  * the relation's end as it was then.
  *
+ * A lookup of a semi-naive delta, the tuples of one key at or past some
+ * identifier, starts from the key's frontier rather than from its first
+ * tuple.  The frontier is moved forward as far as each such lookup walks,
+ * and deltas only move forward, so over a whole fixed point the positioning
+ * walks each chain at most once however many rounds and lookups there are.
+ *
  * Adding a tuple is two operations, as installing an identifier in the table
  * is.  relic_index_reserve() makes room for one more tuple and one more key
  * and is the only part that can fail; relic_index_add() then links the tuple
@@ -64,6 +70,11 @@ static bool		 key_matches(const relic_index_t *index,
 			    const relic_relation_t *relation, uint32_t key_id,
 			    const relic_dom_t *key, uint16_t length);
 static uint32_t		 key_rehash(uint32_t key_id, void *ctx);
+static uint32_t		 probe_key(const relic_index_t *index,
+			    const relic_relation_t *relation,
+			    const relic_dom_t *probe);
+static relic_tuple_id_t	 walk_toward(const relic_index_t *index,
+			    relic_tuple_id_t id, relic_tuple_id_t since);
 
 void
 relic_index_init(relic_index_t *index, uint32_t key_mask)
@@ -88,6 +99,7 @@ relic_index_empty(relic_index_t *index)
 	index->key_count = 0;
 	index->entry_capacity = 0;
 	index->next_capacity = 0;
+	index->latest_since = RELIC_ID_NONE;
 }
 
 /*
@@ -314,17 +326,18 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	entry = &index->entries[key_id - 1];
 	entry->first = id;
 	entry->last = id;
+	entry->frontier = id;
 	relic_idtab_place(&index->keys, hash, key_id);
 }
 
 /*
- * The first tuple, in identifier order, that agrees with `probe` on the key
- * columns, or RELIC_ID_NONE when none does.  `probe` is laid out as a tuple
- * of the relation, and only its key columns are read, so a caller never
- * needs to know how the index packs a key.
+ * The identifier of the key `probe` holds in the key columns, or
+ * RELIC_ID_NONE when no tuple of the relation holds it.  `probe` is laid out
+ * as a tuple of the relation, and only its key columns are read, so a caller
+ * never needs to know how the index packs a key.
  */
-relic_tuple_id_t
-relic_index_first(const relic_index_t *index, const relic_relation_t *relation,
+static uint32_t
+probe_key(const relic_index_t *index, const relic_relation_t *relation,
     const relic_dom_t *probe)
 {
 	relic_dom_t key[RELIC_MAX_ARITY];
@@ -334,10 +347,81 @@ relic_index_first(const relic_index_t *index, const relic_relation_t *relation,
 	length = gather_key(index, probe, key);
 	key_id = find_key(index, relation, key, length,
 	    key_hash(relation, key, length));
+
+	return (key_id);
+}
+
+/*
+ * The first tuple, in identifier order, that agrees with `probe` on the key
+ * columns, or RELIC_ID_NONE when none does.
+ */
+relic_tuple_id_t
+relic_index_first(const relic_index_t *index, const relic_relation_t *relation,
+    const relic_dom_t *probe)
+{
+	uint32_t key_id;
+
+	key_id = probe_key(index, relation, probe);
 	if (key_id == RELIC_ID_NONE)
 		return (RELIC_ID_NONE);
 
 	return (index->entries[key_id - 1].first);
+}
+
+/*
+ * Walk a chain forward from its tuple `id` toward `since`, and return where
+ * the walk stops: the first chain tuple at or past `since`, or the chain's
+ * last tuple when every tuple from `id` on is below `since`.
+ */
+static relic_tuple_id_t
+walk_toward(const relic_index_t *index, relic_tuple_id_t id,
+    relic_tuple_id_t since)
+{
+	while (id < since && index->next[id - 1] != RELIC_ID_NONE)
+		id = index->next[id - 1];
+
+	return (id);
+}
+
+/*
+ * The first tuple, in identifier order, that agrees with `probe` on the key
+ * columns and whose identifier is at least `since`, or RELIC_ID_NONE when
+ * none does: where a lookup of a delta beginning at `since` starts.
+ *
+ * Every chain tuple before a key's frontier is below `latest_since`, so a
+ * start at or past `latest_since` can be walked to from the frontier.  Such
+ * a walk raises `latest_since` to its start and leaves the frontier where
+ * it stops, at the tuple found or at the chain's last tuple, both of which
+ * keep the invariant.  A start below `latest_since` is walked to from the
+ * chain's head and moves nothing; the evaluator never asks for one, since a
+ * relation's deltas advance and its indexes are dropped with the discard
+ * that precedes every evaluation, so that walk costs the chain's length on
+ * no path it has.
+ *
+ * A step of the walk reads the `next` array and no tuple.
+ */
+relic_tuple_id_t
+relic_index_first_since(relic_index_t *index, const relic_relation_t *relation,
+    const relic_dom_t *probe, relic_tuple_id_t since)
+{
+	relic_index_key_t *entry;
+	relic_tuple_id_t stop;
+	uint32_t key_id;
+
+	key_id = probe_key(index, relation, probe);
+	if (key_id == RELIC_ID_NONE)
+		return (RELIC_ID_NONE);
+	entry = &index->entries[key_id - 1];
+
+	if (since < index->latest_since) {
+		stop = walk_toward(index, entry->first, since);
+	} else {
+		index->latest_since = since;
+		stop = walk_toward(index, entry->frontier, since);
+		entry->frontier = stop;
+	}
+
+	return (stop >= since ? stop : RELIC_ID_NONE);
 }
 
 /*

@@ -637,60 +637,36 @@ A right-linear recursion bound on its first argument can be answered by
 reachability over `par` alone (the right-linear and factoring rewrites of
 Naughton, Ramakrishnan, Sagiv and Ullman); find whether relic's rewrite can
 recognize the case. Souffle's `--magic-transform` produces the identical
-program and runs it about five times faster, so the gap to Souffle is in
-evaluation rather than in the rewrite: see the next two items.
+program and runs it in about 0.9 of relic's time, so the gap to Souffle is
+in evaluation rather than in the rewrite: see the next item.
 
-**The delta literal always drives the join.** [Medium, component:
-`lib/plan.c`, `lib/eval.c`, `bench/compare/tc-acyclic-bf`] A delta is a range
-of tuple identifiers, which only a scan can walk, so every delta variant
-places the delta literal first. For `tc_bf(X, Z) :- magic(X), par(X, Y),
-tc_bf(Y, Z)` on the dense acyclic graph that means one lookup of
-`par(_, Y)` per delta tuple, about 48 tuples each, most rejected by
-`member magic(X)`: 6.27 million tuples looked up for 1.77 million
-derivations. The magic relation holds 446 values, and Souffle's loop nest is
-`for magic(X), for par(X, Y), for delta(Y, Z) on index`: about 12 iterations
-x 446 x 48 = 0.26 million probes. relic took 0.26 s against 0.09 s. An index
-chain lists its tuples in identifier order, so a lookup can stop at a range's
-end but has to walk from the head to reach its start. Either materialize a
-delta that an inner literal needs into a scratch relation carrying the
-indexes the plan asks for (Souffle's design, at the cost of one copy of each
-delta), or let a key entry locate the first chain tuple at or past a given
-identifier. The planner orders a component's plans before its members hold
-anything, so it cannot know how large a delta will be against a complete
-relation it can measure; the delta's size is known only when each iteration
-starts. Designed in `specs/design-evaluation-cost.md` section 4: the delta
-is placed by the planner, reached through a per-key frontier of the
-relation's own index, and each iteration chooses between the placed plan
-and the delta-first one by the delta's size.
-
-**relic's evaluation costs several times Souffle's interpreter per
-derivation on the analyses.** [Medium, component: `lib/eval.c`,
-`bench/compare/andersen`] Measured on a busy machine, `andersen` took relic
-1.9 s against 0.7 s for the Souffle interpreter. The gap widens on denser
-inputs. `dataset_andersen` at 2000 functions, with each function's three
-arguments assigned to variables of functions drawn uniformly from the whole
-program instead of received from `(F - 1) / 2`, makes about 1.1 million
-points-to facts from about 380 million derivations and 960 million lookups,
-and took 248 s of user time in relic against 17 s; the exact figures depend
-on the draws. `tc-nonlinear`'s program over the `sparse-cyclic` data set
-ran past 600 s in relic against 117 s in the interpreter. Semi-naive evaluation does not repeat work here
--- on a chain the nonlinear closure makes about 2.5 derivations per path
-triple at every length -- so the gap is the cost of a derivation and its
-lookups, not their number. Profiles of `tc-cyclic` and `sg-cyclic` put
-about three quarters of the time in the duplicate check of
-`relic_relation_insert()`, split between `relic_idprobe_next()` and the
-tuple comparison. The relation's hash table holds only tuple identifiers,
-so every candidate slot costs a read of the tuple it names, at a load factor
-up to three quarters, and a table of a million tuples does not fit in cache.
-Souffle keeps the same relation in a B-tree and inserts with the outer loop
-fixed on the head's first column, so consecutive inserts land in the same
-leaf. Two remedies, to be measured separately: store a hash tag beside each
-identifier (or, for arity two or less, the tuple itself) so that a slot
-rejects a mismatch without a tuple read; and, once the views of the previous
-item are bounded, buffer an iteration's derivations and insert them in
-batches, prefetching or partitioning by hash, instead of one random probe
-per derivation. Designed in `specs/design-evaluation-cost.md` sections 5
-and 6.
+**relic's evaluation costs several times Souffle's interpreter per derivation
+on the analyses.** [Medium, component: `lib/eval.c`, `bench/compare/andersen`]
+Measured on a busy machine, `andersen` took relic 1.9 s against 0.7 s for the
+Souffle interpreter. The gap widens on denser inputs. `dataset_andersen` at
+2000 functions, with each function's three arguments assigned to variables of
+functions drawn uniformly from the whole program instead of received from `(F
+- 1) / 2`, makes about 1.1 million points-to facts from about 380 million
+derivations and 960 million lookups, and took 248 s of user time in relic
+against 17 s; the exact figures depend on the draws. `tc-nonlinear`'s program
+over the `sparse-cyclic` data set ran past 600 s in relic against 117 s in the
+interpreter. Semi-naive evaluation does not repeat work here -- on a chain the
+nonlinear closure makes about 2.5 derivations per path triple at every length
+-- so the gap is the cost of a derivation and its lookups, not their number.
+Profiles of `tc-cyclic` and `sg-cyclic` put about three quarters of the time
+in the duplicate check of `relic_relation_insert()`, split between
+`relic_idprobe_next()` and the tuple comparison. The relation's hash table
+holds only tuple identifiers, so every candidate slot costs a read of the
+tuple it names, at a load factor up to three quarters, and a table of a
+million tuples does not fit in cache. Souffle keeps the same relation in a
+B-tree and inserts with the outer loop fixed on the head's first column, so
+consecutive inserts land in the same leaf. Two remedies, to be measured
+separately: store a hash tag beside each identifier (or, for arity two or
+less, the tuple itself) so that a slot rejects a mismatch without a tuple
+read; and, once the views of the previous item are bounded, buffer an
+iteration's derivations and insert them in batches, prefetching or
+partitioning by hash, instead of one random probe per derivation. Designed in
+`specs/design-evaluation-cost.md` sections 5 and 6.
 
 **Loading facts costs relic more memory than any other engine.** [Medium,
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000

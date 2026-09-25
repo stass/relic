@@ -10,7 +10,9 @@ is implemented.
 `specs/design-relations.md` for the store an index points into and the
 canonical full-tuple index beside it; `specs/design-planner.md` for which
 indexes a plan asks for; `specs/design-plan.md` for the `LOOKUP` operation
-that reads one; `relic-plan.md` decisions D-3, D-4, D-6, D-7 and D-10.
+that reads one; `specs/design-evaluation-cost.md` section 4 for the lookup
+of a delta the frontier serves; `relic-plan.md` decisions D-3, D-4, D-6, D-7
+and D-10.
 
 ---
 
@@ -19,6 +21,8 @@ that reads one; `relic-plan.md` decisions D-3, D-4, D-6, D-7 and D-10.
 * what a secondary index is keyed on, and what it stores for a key;
 * why a key's tuples form a chain rather than sharing a probe cluster;
 * what a lookup visits, in what order, and what it does not see;
+* how a lookup of a semi-naive delta starts at the delta through a per-key
+  frontier, without walking the chain from its head;
 * how an insertion extends every index without a failure leaving one behind;
 * when an index is built, how building over tuples already held can fail, and
   why a half-built index is never published;
@@ -55,17 +59,19 @@ column. A relation holds at most one index per mask.
 ```c
 struct relic_index {
 	relic_idtab_t		 keys;		/* key hash -> key identifier */
-	relic_index_key_t	*entries;	/* per key: its first and last tuple */
+	relic_index_key_t	*entries;	/* per key: first, last, frontier */
 	relic_tuple_id_t	*next;		/* per tuple: the next with its key */
 	size_t			 key_count;
 	size_t			 entry_capacity;
 	size_t			 next_capacity;
+	relic_tuple_id_t	 latest_since;	/* the largest delta start served */
 	uint32_t		 key_mask;
 };
 
 struct relic_index_key {
 	relic_tuple_id_t	first;
 	relic_tuple_id_t	last;
+	relic_tuple_id_t	frontier;	/* where a delta lookup starts walking */
 };
 ```
 
@@ -81,6 +87,15 @@ Nothing is stored twice. A key is not copied into the index: comparing a
 probe's key against key *k* reads the key columns of `entries[k - 1].first`,
 which is in the relation already. A tuple is not copied either; the index
 holds identifiers.
+
+A key's **frontier** is a tuple of its chain with one invariant: every chain
+tuple before it has an identifier below every delta start the index will yet
+be asked for. A new key's frontier is its first tuple, which holds the
+invariant vacuously, and a frontier is never `RELIC_ID_NONE`, so a tuple
+linked after `last` later stays reachable from it. `latest_since` is the
+largest delta start a lookup has been positioned at, which is what the
+frontiers are valid for, and is cleared when the index is emptied. Section
+4.1 says how both move.
 
 ### 3.1 Why chains
 
@@ -139,9 +154,15 @@ too. It is the same visibility a `SCAN` has, and for the same two reasons:
   its own join derived, which is correct but makes a rule's work depend on
   the order of its insertions, and in a self-recursive plan it need not
   finish in one pass;
-* the semi-naive completeness argument of `specs/design-eval.md` section 4.2
-  is written in terms of what a full relation held when an operation started,
-  and a lookup is a full-relation read.
+* the semi-naive argument of `specs/design-eval.md` section 4.2, that every
+  derivation is made exactly once, rests on no operation of a round seeing
+  what the round inserted.
+
+In a semi-naive variant a lookup over a member of the component stops
+instead at the end of the view it reads, which is the member's end when the
+round began, `specs/design-evaluation-cost.md` section 3.3; for the `old`
+view that is the delta's start. The walk is the same, and only where it
+stops differs.
 
 A lookup holds no pointer into the relation or the index across the
 operations below it, only the next identifier and the end. An insertion below
@@ -152,6 +173,51 @@ The key columns of a candidate need not be compared again. Every tuple on a
 chain holds the key, because a chain is found by comparing key columns, not
 hashes. The executor compares the other columns as a `SCAN` would; it may
 compare the key columns too, which is redundant and harmless.
+
+### 4.1 A lookup of a delta
+
+A lookup through the `delta` view visits the key's tuples in the delta
+`[since, end)`. Chains are in identifier order, so those tuples are a
+contiguous run of the chain: the members at or past `since`, up to the first
+at or past `end`. Stopping at `end` is what every lookup does; starting at
+`since` without walking the chain from its head is what the frontier is for.
+
+```c
+relic_tuple_id_t relic_index_first_since(relic_index_t *,
+    const relic_relation_t *, const relic_dom_t *probe,
+    relic_tuple_id_t since);
+```
+
+finds the key as `relic_index_first()` does, then walks the chain forward
+from the key's frontier while the identifier is below `since`, and returns
+the tuple it reached: the first chain tuple at or past `since`, or
+`RELIC_ID_NONE` when the chain has none. The frontier becomes the tuple
+reached or, when the walk ran off the chain's end, the chain's last tuple,
+which is still below `since` and so still satisfies the invariant. The
+function takes a mutable index because it moves the frontier. The lookup
+then follows the chain with `relic_index_next()` as any lookup does.
+
+**It is amortized constant time because deltas advance.** Within one fixed
+point a member's delta starts where the previous one ended, so the `since`
+an index is asked for never decreases. A key's frontier therefore only
+moves forward and passes each chain tuple at most once over the whole fixed
+point, and after the first lookup of a key in a round every later one of
+that round walks nothing. Positioning costs at most one pass over the
+relation, however many rounds and lookups there are.
+
+**It is correct whatever it is asked.** The invariant depends on `since`
+never decreasing, which the evaluator guarantees: an index is dropped with
+the discard that precedes every evaluation, an index over a member is built
+when its component starts, over an empty member, and a relation is a member
+of one component. It is made unconditional rather than trusted: a call whose
+`since` is below `latest_since` walks the chain from its head and leaves the
+frontier where it is. That call costs the chain's length and happens on no
+path the evaluator has.
+
+A frontier step reads the `next` array and no tuple, and is not counted as
+a tuple looked up. The walk is forward along the chain, so a delta lookup
+visits exactly the tuples a scan of the delta matching the key columns
+would, in the same order.
 
 ---
 
@@ -182,9 +248,9 @@ charged for exactly what is allocated, as the canonical index already is.
 
 Adding a tuple to an index is then: compute its key's hash; probe for the key;
 if it is there, link the tuple after the key's `last` and make it the new
-`last`; otherwise assign the next key identifier, record the tuple as both
-`first` and `last`, and place the identifier. In both cases the tuple's own
-`next` is `RELIC_ID_NONE`.
+`last`; otherwise assign the next key identifier, record the tuple as the
+key's `first`, `last` and `frontier`, and place the identifier. In both cases
+the tuple's own `next` is `RELIC_ID_NONE`.
 
 A tuple stored but missing from a secondary index would be a lookup that
 misses a tuple the relation holds: a join that silently drops answers, with no
@@ -279,8 +345,9 @@ The array of index headers does not count, for the reason the array of
 relation headers does not: it is sized by the program -- by the binding
 patterns its rules look relations up with -- and not by the data.
 
-Per tuple, an index costs four bytes of `next`, plus at most eight bytes of
-`entries` and some fraction of a four-byte slot per distinct key. A relation
+An index costs four bytes of `next` per tuple and, per distinct key, twelve
+bytes of `entries` -- the first tuple, the last and the frontier -- and some
+fraction of a four-byte slot. A relation
 looked up under three masks therefore pays roughly as much again as its
 columns, which is the price of not scanning.
 
@@ -303,8 +370,6 @@ columns, which is the price of not scanning.
 
 * **Removal.** Indexes follow the relation store: nothing removes one tuple,
   so `keys` needs no tombstones and a chain is never unlinked.
-* **Indexes over a delta.** A delta literal is pinned first in its variant and
-  always scanned, per D-10, so no plan looks a delta up.
 * **Range and prefix lookups.** Every comparison is a filter and nothing in
   the language asks for an ordered traversal.
 * **Reusing an index over fewer columns.** A plan that binds columns `{0,1}`

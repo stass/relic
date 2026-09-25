@@ -42,13 +42,6 @@
  * asks which of the two a relation is, except to say what it is called.
  */
 
-/*
- * Tuple identifiers are 32-bit and zero names no tuple, so a relation holds
- * at most this many.  Checked rather than assumed: an identifier that wrapped
- * would silently make one tuple into another.
- */
-#define	RELIC_TUPLE_MAX		(UINT32_MAX - 1u)
-
 static uint32_t	 column_rehash(uint32_t id, void *ctx);
 static bool	 columns_holding(size_t tuples, uint16_t arity,
 		    size_t *columnsp);

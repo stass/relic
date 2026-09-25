@@ -38,6 +38,7 @@
 #define	SCENARIO_CHAINS		"a lookup visits a key's tuples in order"
 #define	SCENARIO_DISCARD	"a discard drops every index"
 #define	SCENARIO_DISTINCT	"a distinct count follows the tuples"
+#define	SCENARIO_FRONTIER	"a delta lookup starts where its delta does"
 #define	SCENARIO_LIMIT		"the memory limit refuses a build whole"
 #define	SCENARIO_LIMIT_SWEEP	"the memory limit holds as indexes grow"
 #define	SCENARIO_MASK		"an index is keyed on columns the relation has"
@@ -74,11 +75,19 @@ static bool	 index_agrees(const relic_relation_t *rel, uint32_t position,
 		    const char *scenario);
 static bool	 keys_agree(uint16_t arity, uint32_t key_mask,
 		    const relic_dom_t *a, const relic_dom_t *b);
+static relic_tuple_id_t first_since_by_scan(const relic_relation_t *rel,
+		    uint32_t key_mask, const relic_dom_t *probe,
+		    relic_tuple_id_t since);
+static bool	 delta_lookups_agree(relic_t *ctx, relic_relation_t *rel,
+		    uint32_t position, relic_tuple_id_t since);
+static bool	 frontiers_rest_at(const relic_relation_t *rel,
+		    uint32_t position, relic_tuple_id_t since);
 static size_t	 distinct_by_hand(const relic_relation_t *rel, uint16_t column);
 static size_t	 storage_by_hand(const relic_t *ctx);
 static void	 a_lookup_visits_a_keys_tuples_in_order(void);
 static void	 an_index_built_late_matches_one_kept_up(void);
 static void	 a_lookup_walking_while_its_key_grows(void);
+static void	 a_delta_lookup_starts_where_its_delta_does(void);
 static void	 a_discard_drops_every_index(void);
 static void	 an_index_is_charged_exactly(void);
 static void	 the_memory_limit_refuses_a_build_whole(void);
@@ -464,6 +473,161 @@ a_lookup_walking_while_its_key_grows(void)
 	    "and visited %zu", before, visited);
 	check(index_agrees(rel, position, SCENARIO_WALK), SCENARIO_WALK,
 	    "a later walk finds every tuple, the new ones included");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * The first tuple at or past `since` that agrees with `probe` on the columns
+ * of `key_mask`, found by scanning: what relic_index_first_since() is
+ * specified to return.
+ */
+static relic_tuple_id_t
+first_since_by_scan(const relic_relation_t *rel, uint32_t key_mask,
+    const relic_dom_t *probe, relic_tuple_id_t since)
+{
+	relic_tuple_id_t id;
+
+	for (id = since; id <= rel->count; id++) {
+		if (keys_agree(rel->arity, key_mask,
+		    relic_relation_tuple(rel, id), probe))
+			return (id);
+	}
+
+	return (RELIC_ID_NONE);
+}
+
+/*
+ * Whether a delta lookup from `since` finds what a scan finds for every
+ * value the first column draws from, and for one it never holds.
+ */
+static bool
+delta_lookups_agree(relic_t *ctx, relic_relation_t *rel, uint32_t position,
+    relic_tuple_id_t since)
+{
+	relic_index_t *index;
+	relic_tuple_id_t expected;
+	relic_tuple_id_t found;
+	relic_dom_t probe[3];
+	unsigned int key;
+
+	index = &rel->indexes[position];
+	bzero(probe, sizeof(probe));
+
+	for (key = 0; key <= SWEEP_VALUES; key++) {
+		probe[0] = value(ctx, key == SWEEP_VALUES ? 999999u : key);
+		expected = first_since_by_scan(rel, index->key_mask, probe,
+		    since);
+		found = relic_index_first_since(index, rel, probe, since);
+		if (found != expected) {
+			checkf(false, SCENARIO_FRONTIER, "key %u from %u "
+			    "should start at %u, and started at %u", key,
+			    (unsigned int)since, (unsigned int)expected,
+			    (unsigned int)found);
+			return (false);
+		}
+	}
+
+	return (true);
+}
+
+/*
+ * Whether every key's frontier rests where a lookup from `since` left it:
+ * at the key's first tuple at or past `since`, or at its last tuple when all
+ * of them are below.  A frontier left anywhere earlier would have the next
+ * lookup walk again what this one walked.
+ */
+static bool
+frontiers_rest_at(const relic_relation_t *rel, uint32_t position,
+    relic_tuple_id_t since)
+{
+	const relic_index_t *index;
+	const relic_index_key_t *entry;
+	relic_tuple_id_t expected;
+	size_t key;
+
+	index = &rel->indexes[position];
+
+	for (key = 0; key < index->keys.count; key++) {
+		entry = &index->entries[key];
+		expected = first_since_by_scan(rel, index->key_mask,
+		    relic_relation_tuple(rel, entry->first), since);
+		if (expected == RELIC_ID_NONE)
+			expected = entry->last;
+
+		if (entry->frontier != expected) {
+			checkf(false, SCENARIO_FRONTIER, "a frontier should "
+			    "rest at %u, and rests at %u",
+			    (unsigned int)expected,
+			    (unsigned int)entry->frontier);
+			return (false);
+		}
+	}
+
+	return (true);
+}
+
+/*
+ * A lookup of a semi-naive delta finds a key's first tuple at or past the
+ * delta's start, starting from where the key's previous delta lookup left
+ * off rather than from the key's first tuple.
+ *
+ * The relation grows round by round, as a member of a fixed point does, and
+ * each round asks for every key from the round's start: a key whose chain
+ * lay wholly below the previous start and has grown since is found from
+ * where the previous walk ran off its end, and one that has not grown is
+ * not found.  Every key's frontier then rests where its lookup stopped,
+ * which is what makes the positioning walk each chain once over all the
+ * rounds.  Asking a second time from the same start, and asking from a start
+ * below the largest yet asked for, which no evaluation does, both find what
+ * a scan finds and leave the frontiers where they were.
+ */
+static void
+a_delta_lookup_starts_where_its_delta_does(void)
+{
+	relic_relation_t *rel;
+	relic_config_t config;
+	relic_tuple_id_t since;
+	uint32_t position;
+	unsigned int round;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	ctx = context(SCENARIO_FRONTIER, &config);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_FRONTIER, "member", 3);
+	if (rel == NULL || !fill(ctx, SCENARIO_FRONTIER, rel, 0, 100) ||
+	    relic_relation_index(ctx, rel, 0x1, &position) != 0) {
+		check(false, SCENARIO_FRONTIER, "the relation is indexed");
+		relic_destroy(ctx);
+		return;
+	}
+
+	/*
+	 * Round r adds r * 5 tuples, so the early rounds' deltas leave most
+	 * keys' chains wholly below their start, and the later ones reach
+	 * every key.
+	 */
+	for (round = 0; round < 12; round++) {
+		since = relic_relation_end(rel);
+		if (!fill(ctx, SCENARIO_FRONTIER, rel, 100 + round * 1000,
+		    round * 5) ||
+		    !delta_lookups_agree(ctx, rel, position, since) ||
+		    !frontiers_rest_at(rel, position, since) ||
+		    !delta_lookups_agree(ctx, rel, position, since) ||
+		    !delta_lookups_agree(ctx, rel, position,
+		    RELIC_TUPLE_FIRST) ||
+		    !delta_lookups_agree(ctx, rel, position, since / 2) ||
+		    !frontiers_rest_at(rel, position, since))
+			break;
+	}
+
+	checkf(round == 12, SCENARIO_FRONTIER, "every round's delta lookups "
+	    "should agree with a scan, and round %u did not", round);
+	check(index_agrees(rel, position, SCENARIO_FRONTIER), SCENARIO_FRONTIER,
+	    "a walk from a key's first tuple still finds every tuple");
 
 	relic_destroy(ctx);
 }
@@ -865,6 +1029,7 @@ main(void)
 	a_lookup_visits_a_keys_tuples_in_order();
 	an_index_built_late_matches_one_kept_up();
 	a_lookup_walking_while_its_key_grows();
+	a_delta_lookup_starts_where_its_delta_does();
 	a_discard_drops_every_index();
 	an_index_is_charged_exactly();
 	the_memory_limit_refuses_a_build_whole();
