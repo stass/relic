@@ -1,8 +1,8 @@
-stats: iterations 6
-stats: derivations 20
+stats: iterations 7
+stats: derivations 19
 stats: tuples inserted 19
-stats: tuples scanned 8
-stats: tuples looked up 14
+stats: tuples scanned 7
+stats: tuples looked up 12
 stats: tuples held 13
 stats: storage bytes 672
 stats: symbol values 7

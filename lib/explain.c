@@ -103,6 +103,7 @@ static void	 put_value(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_dom_t dom);
 static void	 put_variable(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, uint16_t slot);
+static void	 put_view(relic_explain_line_t *line, enum relic_view view);
 
 void
 relic_explain_set(relic_t *ctx, relic_explain_cb callback, void *callback_ctx)
@@ -570,22 +571,47 @@ put_op_atom(const relic_t *ctx, relic_explain_line_t *line,
 	line_put_byte(line, ')');
 }
 
+/*
+ * The view an operation reads through, after its kind, for the views a
+ * reader needs to see: `delta` and `old`.  A member literal of a variant
+ * reads `current` unless marked otherwise, and every other operation reads
+ * `all`, so neither is written.
+ */
+static void
+put_view(relic_explain_line_t *line, enum relic_view view)
+{
+	switch (view) {
+	case RELIC_VIEW_DELTA:
+		line_put(line, "delta ");
+		return;
+	case RELIC_VIEW_OLD:
+		line_put(line, "old ");
+		return;
+	case RELIC_VIEW_ALL:
+	case RELIC_VIEW_CURRENT:
+		break;
+	}
+}
+
 static void
 put_op(const relic_t *ctx, relic_explain_line_t *line,
     const relic_rule_t *rule, const relic_op_t *op)
 {
 	switch (op->kind) {
 	case RELIC_OP_SCAN:
-		line_put(line, op->u.atom.delta ? "scan delta " : "scan ");
+		line_put(line, "scan ");
+		put_view(line, op->u.atom.view);
 		put_op_atom(ctx, line, rule, &op->u.atom);
 		return;
 	case RELIC_OP_LOOKUP:
 		line_put(line, "lookup ");
+		put_view(line, op->u.atom.view);
 		put_op_atom(ctx, line, rule, &op->u.atom);
 		put_key(line, op->u.atom.key_mask);
 		return;
 	case RELIC_OP_MEMBER:
 		line_put(line, "member ");
+		put_view(line, op->u.atom.view);
 		put_op_atom(ctx, line, rule, &op->u.atom);
 		return;
 	case RELIC_OP_ANTI_MEMBER:
@@ -681,6 +707,10 @@ relic_explain_component(relic_t *ctx, const relic_schedule_t *schedule,
 	line_finish(ctx, &line);
 }
 
+/*
+ * A rule, followed by its plan when it has one.  A recursive rule under the
+ * semi-naive fixed point runs only as its delta variants and has none.
+ */
 void
 relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
     const relic_plan_t *plan, unsigned int depth)
@@ -695,7 +725,8 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 	put_rule(ctx, &line, rule);
 	line_finish(ctx, &line);
 
-	put_plan(ctx, rule, plan, depth + 2);
+	if (plan != NULL)
+		put_plan(ctx, rule, plan, depth + 2);
 }
 
 /*

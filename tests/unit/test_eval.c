@@ -47,6 +47,7 @@
 #define	SCENARIO_DUPLICATES	"duplicate facts and derivations collapse"
 #define	SCENARIO_LIMIT		"a query over a limit delivers no rows"
 #define	SCENARIO_NEGATION	"a negated literal keeps what is absent"
+#define	SCENARIO_ONCE		"every derivation is made exactly once"
 #define	SCENARIO_ORDER		"the total order sorts across types"
 #define	SCENARIO_RECURSION	"recursion reaches the least fixed point"
 #define	SCENARIO_STATS		"the counters record the work each strategy did"
@@ -116,6 +117,7 @@ static void	 counters_are(const char *scenario, const char *what,
 static void	 materialized_counters_are(const char *scenario,
 		    const char *program, unsigned int flags, const char *what,
 		    counters_t expected);
+static void	 a_delta_is_emptied_when_its_member_rests(void);
 static void	 a_lookup_sees_its_relation_as_it_started(void);
 static void	 a_discard_gives_back_what_the_limits_count(void);
 static void	 a_later_load_can_make_a_derived_tuple_false(void);
@@ -124,10 +126,12 @@ static void	 a_query_over_a_limit_delivers_no_rows(void);
 static void	 duplicates_collapse(void);
 static void	 negation_keeps_what_is_absent(void);
 static void	 every_binding_pattern_is_answered(void);
+static void	 every_derivation_is_made_once(void);
 static void	 recursion_reaches_the_least_fixed_point(void);
 static void	 run_scenarios(const char *strategy, unsigned int flags);
 static void	 the_counters_record_the_work_done(void);
 static void	 the_total_order_sorts_across_types(void);
+static void	 two_member_literals_derive_once(void);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -816,47 +820,42 @@ materialized_counters_are(const char *scenario, const char *program,
  * and tuples looked up.  Insertions are 9 throughout: 3 facts and the 6
  * paths of the fixed point.
  *
- * The textual planner (-X no-index, -X no-reorder) joins path first and
- * scans edge for every path.  The facts are one pass: 3 derivations.  In the
- * path component's first round the base rule scans 3 edges and derives ab,
- * bc and cd; the recursive rule scans those 3 paths, 3 edges for each, and
- * derives ac and bd.  That is 5 derivations over 15 scanned tuples; ad is
- * still missing.
+ * The facts are one pass: 3 derivations.  The recursive rule's body is
+ * satisfied 3 times over the fixed point, by ab and bc, bc and cd, and ac
+ * and cd, and the base rule's 3 times, so the semi-naive fixed point, which
+ * makes every derivation once, makes 9 under either planner.
  *
- * Semi-naively, round 1 joins the 5 new paths with the edges: 20 scanned,
- * deriving ac and bd again and ad for the first time.  Round 2 joins ad
- * alone: 4 scanned, nothing derived, so it is the last.  3 rounds, 11
- * derivations, 39 scanned.
+ * Semi-naively, round 0 runs the base rule alone: 3 edges scanned, deriving
+ * ab, bc and cd.  The recursive rule runs only as its variant, which reads
+ * the delta of path.  Round 1's delta is those 3 paths, round 2's is ac and
+ * bd, and round 3's is ad, which extends nothing, so round 3 is the last: 4
+ * rounds.
  *
- * Naively, pass 2 reruns both rules over everything: 3 edges and 3
- * derivations for the base rule, 5 paths and 15 edges and 3 derivations,
- * one of them ad, for the recursive one.  Pass 3 is the same over 6 paths
- * and finds nothing new: 3 + 6 + 18 scanned, 6 derived.  3 passes, 20
- * derivations, 65 scanned.
+ * The textual planner (-X no-index, -X no-reorder) scans edge for every
+ * path of the delta: 3 + 12 + 8 + 4 = 27 scanned.
+ *
+ * Naively, every pass runs both plans over everything, and the recursive
+ * rule joins path first and scans edge for every path.  Pass 1: the base
+ * rule scans 3 edges and derives ab, bc and cd; the recursive rule scans
+ * those 3 paths, 3 edges for each, and derives ac and bd, which it can see
+ * because the scan of path takes its end when it starts.  Pass 2 is 3 edges
+ * and 3 derivations for the base rule, and 5 paths and 15 edges and 3
+ * derivations, one of them ad, for the recursive one.  Pass 3 is the same
+ * over 6 paths and finds nothing new: 3 + 6 + 18 scanned, 6 derived.  3
+ * passes, 20 derivations, 65 scanned.
  *
  * The default planner measures edge, complete with 3 tuples, against path,
- * still being derived and assumed to hold 1000, so the recursive rule scans
- * edge(Y, Z) and looks path(X, Y) up by Y; its delta variant scans the delta
- * of path and looks edge(Y, Z) up by Y.  In the first round the base rule
- * derives ab, bc and cd as before, and the recursive rule scans the 3 edges:
- * for ab it looks up paths ending in a and finds none, for bc those ending
- * in b and finds ab, deriving ac, and for cd those ending in c and finds bc
- * and the ac just inserted, deriving bd and ad.  6 scanned, 3 looked up, 6
- * derivations, and the fixed point is already reached.
+ * still being derived and assumed to hold 1000.  The variant scans the delta
+ * of path and looks edge(Y, Z) up by Y: bc for ab, cd for bc in round 1, cd
+ * for ac in round 2.  3 + 3 + 2 + 1 = 9 scanned and 3 looked up.
  *
- * Semi-naively, round 1 scans the 6 new paths and looks up the edges leaving
- * each one's end: bc for ab, cd for bc and for ac, nothing for the rest.  3
- * looked up, 3 derivations, none new.  2 rounds, 12 derivations, 12 scanned,
- * 6 looked up.
- *
- * Naively, pass 2 reruns both rules: 3 edges scanned and 3 derived by the
- * base rule, and the recursive rule's pass 1 again, 3 edges scanned, 3 paths
- * looked up and 3 derived.  2 passes, 15 derivations, 12 scanned, 6 looked
- * up.
- *
- * Under the textual planner the iteration counts agree, as they do on a
- * chain, and what semi-naive evaluation saves is the rederivation, so a
- * regression to naive behaviour shows in the derivations and the scans.
+ * Naively, the recursive rule's plan scans edge(Y, Z) and looks path(X, Y)
+ * up by Y.  In pass 1 the base rule derives ab, bc and cd as before, and the
+ * recursive rule scans the 3 edges: for ab it looks up paths ending in a and
+ * finds none, for bc those ending in b and finds ab, deriving ac, and for cd
+ * those ending in c and finds bc and the ac just inserted, deriving bd and
+ * ad.  Pass 2 repeats pass 1 and finds nothing new.  2 passes, 15
+ * derivations, 12 scanned, 6 looked up.
  */
 static void
 the_counters_record_the_work_done(void)
@@ -874,8 +873,8 @@ the_counters_record_the_work_done(void)
 	if (ctx != NULL && relic_materialize(ctx) == 0) {
 		relic_stats(ctx, &stats);
 		counters_are(SCENARIO_STATS, "semi-naive", &stats,
-		    (counters_t){ .iterations = 2, .derivations = 12,
-		    .inserted = 9, .scanned = 12, .looked_up = 6 });
+		    (counters_t){ .iterations = 4, .derivations = 9,
+		    .inserted = 9, .scanned = 9, .looked_up = 3 });
 		check(stats.tuples == 9 && stats.symbol_values == 4 &&
 		    stats.string_values == 0 && stats.integer_values == 0 &&
 		    stats.storage_bytes > 0, SCENARIO_STATS,
@@ -885,7 +884,7 @@ the_counters_record_the_work_done(void)
 		check(relic_materialize(ctx) == 0, SCENARIO_STATS,
 		    "a second materialization succeeds");
 		relic_stats(ctx, &stats);
-		check(stats.iterations == 2 && stats.derivations == 12,
+		check(stats.iterations == 4 && stats.derivations == 9,
 		    SCENARIO_STATS, "a current program costs nothing");
 	} else {
 		check(false, SCENARIO_STATS, "the chain is materialized");
@@ -896,8 +895,8 @@ the_counters_record_the_work_done(void)
 	    "naive", (counters_t){ .iterations = 2, .derivations = 15,
 	    .inserted = 9, .scanned = 12, .looked_up = 6 });
 	materialized_counters_are(SCENARIO_STATS, program, textual,
-	    "textual semi-naive", (counters_t){ .iterations = 3,
-	    .derivations = 11, .inserted = 9, .scanned = 39, .looked_up = 0 });
+	    "textual semi-naive", (counters_t){ .iterations = 4,
+	    .derivations = 9, .inserted = 9, .scanned = 27, .looked_up = 0 });
 	materialized_counters_are(SCENARIO_STATS, program,
 	    textual | RELIC_F_NAIVE, "textual naive",
 	    (counters_t){ .iterations = 3, .derivations = 20, .inserted = 9,
@@ -905,9 +904,12 @@ the_counters_record_the_work_done(void)
 }
 
 /*
- * A lookup stops at the end its relation had when the lookup started, even
- * when the rule below it inserts into the very chain it is walking.  The
- * counters of this program, computed by hand, are what show it:
+ * A lookup through the whole relation stops at the end its relation had
+ * when the lookup started, even when the rule below it inserts into the very
+ * chain it is walking.  Only the naive fixed point reads a relation it is
+ * deriving through the whole relation -- a semi-naive variant reads a member
+ * through views that end where the round began -- so the program runs under
+ * it.  The counters, computed by hand, are what show it:
  *
  *	s(a).  seed(a, n0).  seed(a, m0).
  *	e(n0, n1).  e(n1, n2).  e(n2, n3).
@@ -916,20 +918,19 @@ the_counters_record_the_work_done(void)
  *
  * The recursive rule scans s, looks r up by X and e up by Z, and emits into
  * r under the key X it is walking.  The 6 facts are 6 derivations and 6
- * insertions.  In the first round of r the base rule scans 2 seeds and
- * derives an0 and am0, so the chain for a holds 2 tuples.  The recursive
- * rule scans s, then walks that chain: an0 finds e(n0, n1) and inserts an1
- * at the end of the chain, am0 finds no edge, and an1 is past the end the
- * walk started with, so the walk stops.  3 scanned, 3 looked up, 3 derived.
- *
- * The rule's one delta variant then extends r one edge per round: round 1
- * scans the 3 new tuples and finds 2 edges, deriving an1 again and an2;
- * round 2 scans an2 and derives an3; round 3 scans an3 and finds nothing.
- * 4 rounds, 12 derivations, 11 insertions, 8 scanned, 6 looked up.
+ * insertions.  Every pass scans the 2 seeds and derives an0 and am0, and
+ * scans s: 3 scanned and 2 derived.  In pass 1 the recursive rule then walks
+ * the chain for a, which holds those 2 tuples: an0 finds e(n0, n1) and
+ * inserts an1 at the end of the chain, am0 finds no edge, and an1 is past
+ * the end the walk started with, so the walk stops.  2 + 1 looked up, 1
+ * derived.  Each later pass walks one more tuple of the chain and finds one
+ * more edge: pass 2 looks up 3 + 2 and derives an1 and an2, pass 3 looks up
+ * 4 + 3 and derives an1, an2 and an3, and pass 4 looks up 5 + 3, derives the
+ * same three and finds nothing new.  4 passes, 23 derivations, 11
+ * insertions, 12 scanned, 23 looked up.
  *
  * A walk that did not stop would go on to an1, inserted while the walk was
- * at an0, derive an2 in the first round, and reach the fixed point a round
- * sooner with a derivation and two lookups more.
+ * at an0, and on down the chain, deriving all of r in the first pass.
  */
 static void
 a_lookup_sees_its_relation_as_it_started(void)
@@ -940,9 +941,182 @@ a_lookup_sees_its_relation_as_it_started(void)
 	    "r(X, Y) :- seed(X, Y).\n"
 	    "r(X, Y) :- s(X), r(X, Z), e(Z, Y).\n";
 
-	materialized_counters_are(SCENARIO_SNAPSHOT, program, 0, "default",
-	    (counters_t){ .iterations = 4, .derivations = 12, .inserted = 11,
-	    .scanned = 8, .looked_up = 6 });
+	materialized_counters_are(SCENARIO_SNAPSHOT, program, RELIC_F_NAIVE,
+	    "naive", (counters_t){ .iterations = 4, .derivations = 23,
+	    .inserted = 11, .scanned = 12, .looked_up = 23 });
+}
+
+/*
+ * The complete graph on 40 nodes, loops included, closed transitively:
+ *
+ *	par(nI, nJ) for every I and J from 0 to 39
+ *	tc(X, Y) :- par(X, Y).
+ *	tc(X, Z) :- par(X, Y), tc(Y, Z).
+ *
+ * Round 0 inserts the 1600 facts and derives the 1600 tuples of the exit
+ * rule, which are the whole closure.  Round 1 scans those 1600 as the delta
+ * of tc and looks up the 40 tuples of par ending in each one's first node:
+ * 64,000 derivations, none new, and the fixed point is reached.  Every
+ * derivation is one of the 64,000 ways the recursive rule's body can be
+ * satisfied, made once.  The query then scans tc and derives its 1600 rows.
+ * 2 rounds, 68,800 derivations, 4800 insertions, 4800 scanned, 64,000 looked
+ * up.  A round that could see what its own rules inserted derives most of
+ * the closure twice.
+ */
+static void
+every_derivation_is_made_once(void)
+{
+	rendering_t rendering;
+	relic_stats_t stats;
+	relic_t *ctx;
+	char *program;
+	size_t length;
+	size_t capacity;
+	int i;
+	int j;
+
+	capacity = 40 * 40 * 32 + 128;
+	program = malloc(capacity);
+	if (program == NULL) {
+		check(false, SCENARIO_ONCE, "the program is written");
+		return;
+	}
+
+	length = 0;
+	for (i = 0; i < 40; i++) {
+		for (j = 0; j < 40; j++)
+			length += (size_t)snprintf(program + length,
+			    capacity - length, "par(n%d, n%d).\n", i, j);
+	}
+	snprintf(program + length, capacity - length,
+	    "tc(X, Y) :- par(X, Y).\ntc(X, Z) :- par(X, Y), tc(Y, Z).\n");
+
+	ctx = context_flagged(program, NULL, 0);
+	free(program);
+
+	if (ctx != NULL && relic_materialize(ctx) == 0 &&
+	    run_query(ctx, "tc(X, Y)?", &rendering) == 0) {
+		check(rendering.rows == 1600, SCENARIO_ONCE,
+		    "the closure is every ordered pair");
+		relic_stats(ctx, &stats);
+		counters_are(SCENARIO_ONCE, "the complete graph", &stats,
+		    (counters_t){ .iterations = 2, .derivations = 68800,
+		    .inserted = 4800, .scanned = 4800, .looked_up = 64000 });
+	} else {
+		check(false, SCENARIO_ONCE, "the complete graph is closed");
+	}
+	relic_destroy(ctx);
+}
+
+/*
+ * A rule whose body reads its own predicate twice, over a chain of 20
+ * nodes:
+ *
+ *	edge(n0, n1).  ...  edge(n18, n19).
+ *	p(X, Y) :- edge(X, Y).
+ *	p(X, Z) :- p(X, Y), p(Y, Z).
+ *
+ * p holds a pair for every two nodes in chain order, and the recursive
+ * rule's body is satisfied once for every three: X, Y and Z in chain order.
+ * Its two variants, one reading the first literal's delta and the second's
+ * current view, the other the first literal's old view and the second's
+ * delta, between them make each of those 20 choose 3 = 1140 derivations
+ * once.  With the 19 facts, the exit rule's 19 derivations and the query's
+ * 20 choose 2 = 190 rows, that is 1368 derivations.
+ *
+ * Round 0 derives the 19 pairs one edge apart, and each round after it
+ * derives the pairs up to twice as far apart as the round before: 2 in round
+ * 1, 3 to 4 in round 2, then 5 to 8, 9 to 16, and 17 to 19 in round 5, so
+ * round 6 finds nothing: 7 rounds.  Both variants scan their delta first.
+ * The first runs in rounds 1 to 6 and scans every pair once; the second,
+ * whose old view is empty until round 1 has run, only in rounds 2 to 6, and
+ * scans every pair but the 19 of round 0.  With round 0's 19 edges and the
+ * query's 190 rows, that is 19 + 190 + 171 + 190 = 570 scanned.
+ */
+static void
+two_member_literals_derive_once(void)
+{
+	rendering_t rendering;
+	relic_stats_t stats;
+	relic_t *ctx;
+	char program[1024];
+	size_t length;
+	int i;
+
+	length = 0;
+	for (i = 0; i < 19; i++)
+		length += (size_t)snprintf(program + length,
+		    sizeof(program) - length, "edge(n%d, n%d).\n", i, i + 1);
+	snprintf(program + length, sizeof(program) - length,
+	    "p(X, Y) :- edge(X, Y).\np(X, Z) :- p(X, Y), p(Y, Z).\n");
+
+	ctx = context_flagged(program, NULL, 0);
+	if (ctx != NULL && relic_materialize(ctx) == 0 &&
+	    run_query(ctx, "p(X, Y)?", &rendering) == 0) {
+		check(rendering.rows == 190, SCENARIO_ONCE,
+		    "p holds every pair in chain order");
+		relic_stats(ctx, &stats);
+		checkf(stats.iterations == 7 && stats.derivations == 1368 &&
+		    stats.tuples_scanned == 570, SCENARIO_ONCE,
+		    "the chain should take 7 1368 570, took %" PRIu64 " %"
+		    PRIu64 " %" PRIu64, stats.iterations, stats.derivations,
+		    stats.tuples_scanned);
+	} else {
+		check(false, SCENARIO_ONCE, "the chain is closed");
+	}
+	relic_destroy(ctx);
+}
+
+/*
+ * Two members that gain in alternate rounds, and a rule that reads one
+ * through its old view in a round the other gained in:
+ *
+ *	s(a).  e(a, b).  e(b, c).  e(c, d).  e(d, e).  j(b, c, z).
+ *	p(X) :- s(X).
+ *	q(Y) :- p(X), e(X, Y).
+ *	p(Y) :- q(X), e(X, Y).
+ *	p(Z) :- q(X), p(Y), j(X, Y, Z).
+ *
+ * Round 0 derives p(a), and the rounds after it alternate: q(b) in round 1,
+ * p(c) in round 2, q(d) in round 3, p(e) in round 4.  q gains nothing in
+ * round 2, so at the boundary before round 3 its delta, q(b), must become
+ * empty and q(b) move into q's old view.  In round 3 the last rule's variant
+ * reading p's delta, p(c), then finds q(b) in that old view and derives
+ * p(z).  Nothing else can derive it: in round 2 the other variant finds q(b)
+ * in its delta but p(c) is not yet in p's current view.  Round 5 finds
+ * nothing.
+ *
+ * The derivations are the ways the bodies are satisfied, each once: 6
+ * facts, p(a), q from p(a) and p(c), p from q(b) and q(d), and p(z).  6
+ * rounds, 12 derivations, 12 insertions.
+ */
+static void
+a_delta_is_emptied_when_its_member_rests(void)
+{
+	static const char *const program =
+	    "s(a).\ne(a, b).\ne(b, c).\ne(c, d).\ne(d, e).\nj(b, c, z).\n"
+	    "p(X) :- s(X).\n"
+	    "q(Y) :- p(X), e(X, Y).\n"
+	    "p(Y) :- q(X), e(X, Y).\n"
+	    "p(Z) :- q(X), p(Y), j(X, Y, Z).\n";
+	relic_stats_t stats;
+	relic_t *ctx;
+
+	ctx = context_flagged(program, NULL, 0);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf(stats.iterations == 6 && stats.derivations == 12 &&
+		    stats.tuples_inserted == 12, SCENARIO_ONCE,
+		    "the alternating members should take 6 12 12, took %"
+		    PRIu64 " %" PRIu64 " %" PRIu64, stats.iterations,
+		    stats.derivations, stats.tuples_inserted);
+		answers_are(SCENARIO_ONCE, ctx, "p(X)?", "a|c|e|z");
+		answers_are(SCENARIO_ONCE, ctx, "q(X)?", "b|d");
+	} else {
+		check(false, SCENARIO_ONCE, "the alternating members are "
+		    "materialized");
+	}
+	relic_destroy(ctx);
 }
 
 /*
@@ -978,6 +1152,9 @@ main(void)
 
 	the_counters_record_the_work_done();
 	a_lookup_sees_its_relation_as_it_started();
+	every_derivation_is_made_once();
+	two_member_literals_derive_once();
+	a_delta_is_emptied_when_its_member_rests();
 	the_total_order_sorts_across_types();
 
 	return (check_summary("test_eval"));

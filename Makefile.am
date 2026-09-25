@@ -422,7 +422,7 @@ RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/explain-check.dl tests/lang/explain-graph.dl \
 	tests/lang/explain-long.dl tests/lang/explain-magic.dl \
 	tests/lang/explain-materialized.dl tests/lang/explain-ops.dl \
-	tests/lang/explain-supplementary.dl \
+	tests/lang/explain-supplementary.dl tests/lang/explain-views.dl \
 	tests/lang/format-csv.dl tests/lang/format-json.dl \
 	tests/lang/format-nul.dl tests/lang/format-text.dl \
 	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \

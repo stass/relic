@@ -39,6 +39,14 @@
  * rules justify.  A strategy whose rules differ from every other's, because
  * its planner's order decides what the Magic rewrite generates, has no
  * reference.
+ *
+ * And the semi-naive fixed point must make every derivation exactly once: to
+ * materialize a program whose rules hold no `_`, one per fact and, for each
+ * other rule, one per distinct binding of its body's variables over the
+ * fixed point.  The bindings are counted in a context of their own under the
+ * naive fixed point, as the rows of one query per rule body.  No answer
+ * shows a derivation made twice, since a duplicate changes none, so this is
+ * the only comparison that can.
  */
 
 typedef struct strategy strategy_t;
@@ -76,12 +84,16 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 		"materialized", 0, true, STRATEGY_NO_MAGIC },
 };
 
-/* What one strategy produced: an answer and a tuple total per query. */
+/*
+ * What one strategy produced: an answer and a tuple total per query, and
+ * for a strategy that materializes, the derivations that took.
+ */
 typedef struct run run_t;
 
 struct run {
 	answer_t	answers[RANDOM_MAX_QUERIES];
 	size_t		totals[RANDOM_MAX_QUERIES];
+	uint64_t	derivations;
 };
 
 /* The diagnostic callback's state while a strategy loads the program. */
@@ -97,6 +109,9 @@ static void	 capture_diagnostic(void *capture_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static void	 drop_last_row(answer_t *answer);
+static random_failure_kind_t count_derivations(
+		    const random_program_t *program, FILE *report,
+		    uint64_t *expectedp);
 static const char *error_text(relic_t *ctx);
 static bool	 load_program(relic_t *ctx, const char *text,
 		    const diag_capture_t *capture);
@@ -186,6 +201,26 @@ random_compare(const random_program_t *program,
 		}
 	}
 
+	if (!random_program_has_anonymous(program)) {
+		uint64_t expected_derivations;
+		uint64_t made;
+
+		failure.kind = count_derivations(program, report,
+		    &expected_derivations);
+		if (failure.kind != FAILURE_NONE)
+			goto done;
+
+		made = runs[STRATEGY_MATERIALIZED].derivations;
+		if (made != expected_derivations) {
+			fprintf(report, "%s makes %" PRIu64 " derivations, the "
+			    "rules have %" PRIu64 " ways to derive\n",
+			    strategies[STRATEGY_MATERIALIZED].name, made,
+			    expected_derivations);
+			failure.kind = FAILURE_DERIVATIONS;
+			failure.strategy = STRATEGY_MATERIALIZED;
+		}
+	}
+
 done:
 	for (size_t s = 0; s < STRATEGY_COUNT; s++) {
 		for (size_t q = 0; q < RANDOM_MAX_QUERIES; q++)
@@ -241,12 +276,16 @@ run_strategy(const random_program_t *program, const char *text,
 	}
 
 	if (strategy->materialize) {
+		relic_stats_t stats;
+
 		if (relic_materialize(ctx) != 0) {
 			fprintf(report, "%s: materializing failed: %s\n",
 			    strategy->name, error_text(ctx));
 			kind = FAILURE_QUERY;
 			goto done;
 		}
+		relic_stats(ctx, &stats);
+		run->derivations = stats.derivations;
 	}
 
 	for (size_t q = 0; q < query_count; q++) {
@@ -275,6 +314,75 @@ run_strategy(const random_program_t *program, const char *text,
 	}
 
 done:
+	relic_destroy(ctx);
+	return (kind);
+}
+
+/*
+ * The derivations that materializing the program must make: one per fact,
+ * and for every other rule the number of distinct bindings of its body's
+ * variables over the fixed point, counted as the rows of a query asking for
+ * that body under the naive fixed point without the Magic rewrite.  A
+ * refusal of the program or a failed query is reported as it would be for a
+ * strategy.
+ */
+static random_failure_kind_t
+count_derivations(const random_program_t *program, FILE *report,
+    uint64_t *expectedp)
+{
+	random_failure_kind_t kind = FAILURE_NONE;
+	diag_capture_t capture;
+	relic_config_t config;
+	relic_t *ctx;
+	char *text;
+	size_t query = 0;
+
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_NAIVE | RELIC_F_NO_MAGIC;
+	ctx = relic_create_config(&config);
+	if (ctx == NULL)
+		errx(1, "relic_create_config failed");
+
+	capture.report = report;
+	capture.strategy = "bindings";
+	capture.errors = 0;
+	relic_diag_set(ctx, capture_diagnostic, &capture);
+
+	*expectedp = 0;
+	text = random_bindings_text(program);
+	if (!load_program(ctx, text, &capture)) {
+		fprintf(report, "bindings: the program was refused\n");
+		kind = FAILURE_REJECTED;
+		goto done;
+	}
+
+	for (size_t r = 0; r < program->rule_count; r++) {
+		relic_query_t *body;
+		relic_result_t *result;
+
+		if (program->rules[r].body.length == 0) {
+			(*expectedp)++;
+			continue;
+		}
+
+		body = relic_query_loaded(ctx, query);
+		if (body == NULL)
+			errx(1, "relic_query_loaded failed");
+		result = relic_query_collect(ctx, body);
+		relic_query_destroy(body);
+		if (result == NULL) {
+			fprintf(report, "bindings: the body of rule %zu "
+			    "failed: %s\n", r + 1, error_text(ctx));
+			kind = FAILURE_QUERY;
+			goto done;
+		}
+		*expectedp += relic_result_rows(result);
+		relic_result_destroy(result);
+		query++;
+	}
+
+done:
+	free(text);
 	relic_destroy(ctx);
 	return (kind);
 }

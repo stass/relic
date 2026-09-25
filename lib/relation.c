@@ -69,8 +69,9 @@ static size_t	 relation_bytes_after_insert(const relic_relation_t *relation);
 static bool	 relation_columns_after_insert(
 		    const relic_relation_t *relation, size_t *columnsp);
 static void	 relation_empty(relic_relation_t *relation);
-static relic_tuple_id_t relation_find(const relic_relation_t *relation,
-		    const relic_dom_t *columns, uint32_t hash);
+static relic_tuple_id_t relation_find_hashed(
+		    const relic_relation_t *relation, const relic_dom_t *columns,
+		    uint32_t hash);
 static int	 relation_make_room(relic_t *ctx, relic_relation_t *relation);
 static int	 relation_reserve(relic_t *ctx, relic_relation_t *relation);
 static int	 relations_cover(relic_t *ctx, relic_pred_id_t pred);
@@ -259,8 +260,8 @@ tuple_rehash(uint32_t id, void *ctx)
  * the relation does not hold it.
  */
 static relic_tuple_id_t
-relation_find(const relic_relation_t *relation, const relic_dom_t *columns,
-    uint32_t hash)
+relation_find_hashed(const relic_relation_t *relation,
+    const relic_dom_t *columns, uint32_t hash)
 {
 	relic_idprobe_t probe;
 	relic_tuple_id_t id;
@@ -606,7 +607,7 @@ relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 	*addedp = false;
 
 	hash = tuple_hash(relation, columns);
-	if (relation_find(relation, columns, hash) != RELIC_ID_NONE)
+	if (relation_find_hashed(relation, columns, hash) != RELIC_ID_NONE)
 		return (0);
 
 	if (enforce_limits(ctx, relation) != 0)
@@ -623,18 +624,28 @@ relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 }
 
 /*
- * Whether the relation already holds this tuple.  As with an insertion,
- * `columns` may be anything for a relation of arity zero.
+ * The identifier of the tuple holding these columns, or RELIC_ID_NONE when
+ * the relation does not hold it.  A caller that must know not only whether
+ * the tuple is present but whether it lies in some range of identifiers --
+ * a view of a member being evaluated -- compares the identifier.  As with an
+ * insertion, `columns` may be anything for a relation of arity zero.
+ */
+relic_tuple_id_t
+relic_relation_find(const relic_relation_t *relation,
+    const relic_dom_t *columns)
+{
+	return (relation_find_hashed(relation, columns,
+	    tuple_hash(relation, columns)));
+}
+
+/*
+ * Whether the relation already holds this tuple.
  */
 bool
 relic_relation_contains(const relic_relation_t *relation,
     const relic_dom_t *columns)
 {
-	uint32_t hash;
-
-	hash = tuple_hash(relation, columns);
-
-	return (relation_find(relation, columns, hash) != RELIC_ID_NONE);
+	return (relic_relation_find(relation, columns) != RELIC_ID_NONE);
 }
 
 /*

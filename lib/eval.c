@@ -63,24 +63,35 @@
  * The naive fixed point runs the component's plans until a full pass inserts
  * no new tuple.  It reaches the least fixed point because it stops only when
  * every rule, run over everything, adds nothing.  It is kept as the reference
- * the semi-naive one is tested against.
+ * the semi-naive one is tested against, and every operation of its plans
+ * reads the whole relation.
  *
- * The semi-naive fixed point runs every plan once, and from then on runs only
- * delta variants: for each literal over a member of the component, the rule
- * with that literal reading just the tuples its relation gained in the
- * previous round, and every other literal reading the whole relation.  It
- * stops after a round that adds nothing.
+ * The semi-naive fixed point makes every derivation exactly once.  Call a
+ * rule recursive when a positive literal of its body reads a member of the
+ * component, and an exit rule otherwise.  Round 0 runs the facts and the exit
+ * rules, each once, in program order; a recursive rule has no ordinary plan
+ * and runs only as its delta variants, one per member literal.  Each member
+ * has a delta, the range of identifiers of the tuples it gained in the
+ * previous round, which starts empty at the first identifier and after round
+ * 0 is the whole member.  In variant i of a rule whose member literals are,
+ * in body order, m1 to mk, literal mi reads the delta, the member literals
+ * before it read the `old` view, the tuples older than their member's delta,
+ * and those after it the `current` view, everything up to their delta's end
+ * (plan.h).  Rounds run until one inserts nothing.
  *
- * Why that reaches the least fixed point, finding every derivation: number
- * the rounds from zero, and say a tuple of a member belongs to the round that
- * inserted it, or to round -1 if it was there before round zero.  Take any
- * way of satisfying a rule's body, and let m be the latest round any of its
- * member tuples belongs to.  If m is -1, round zero ran every plan over
- * relations that already held them all.
- * Otherwise round m inserted something, so round m + 1 runs, and in it the
- * variant whose delta literal is matched by a tuple of round m finds that
- * tuple in its delta and every other tuple in the whole relations, which by
- * then hold everything from round m and before.
+ * Why every derivation is made, and made once: say a tuple of a member
+ * belongs to the round that inserted it, take any way of satisfying a rule's
+ * body with member tuples t1 to tk in body order, and let m be the latest
+ * round any of them belongs to, and i the first position whose tuple belongs
+ * to round m.  Round m inserted a tuple, so round m + 1 runs, and in it
+ * variant i finds ti in its delta, every earlier tj -- all of rounds before
+ * m -- in the old view, and every later one -- none of a round after m -- in
+ * the current view: the combination is derived.  Variant j < i would need tj
+ * in its delta, but tj is older than round m; variant j > i would need ti in
+ * its old view, but ti is of round m; an earlier round has not yet inserted
+ * ti; and a later round's deltas hold no tuple of round m or before.  No
+ * view of a round reaches past the ends its members had when the round
+ * began, so what the round inserts is invisible to it by construction.
  *
  * The delta is a range of tuple identifiers rather than a copy.  The store is
  * append-only between discards -- nothing removes, reorders or renumbers one
@@ -88,14 +99,14 @@
  * begins -- so the tuples a relation gained in one round are exactly those
  * between its end before the round and its end after it.
  *
- * A round runs only the variants reading a member that gained something in
- * the round before.  A variant's delta literal is its first operation, so a
- * variant over an empty delta matches nothing and derives nothing, and
- * skipping it changes nothing but the cost.  Running the others in the order
- * they were planned makes a round do exactly what running every variant
- * would, while costing what changed rather than what the component holds: a
- * recursive chain of a hundred thousand predicates takes as many rounds as it
- * is long, and each round touches one of them.
+ * A round runs only the variants whose delta literal reads a member that
+ * gained something in the round before, and among those only the ones whose
+ * every old view holds something: a join over an empty operand derives
+ * nothing, so skipping either kind changes nothing but the cost.  Running
+ * the others in the order they were planned makes a round do exactly what
+ * running every variant would, while costing what changed rather than what
+ * the component holds: a recursive chain of a hundred thousand predicates
+ * takes as many rounds as it is long, and each round touches one of them.
  */
 
 /*
@@ -106,13 +117,16 @@
 enum relic_fixed_point {
 	RELIC_FIXED_ONE_PASS,	/* not recursive: one pass over the rules */
 	RELIC_FIXED_NAIVE,	/* every rule, every round */
-	RELIC_FIXED_SEMI_NAIVE	/* every rule once, then the delta variants */
+	RELIC_FIXED_SEMI_NAIVE	/* facts and exit rules, then the variants */
 };
 
 typedef struct relic_component_plans relic_component_plans_t;
 typedef struct relic_delta_work relic_delta_work_t;
 typedef struct relic_evaluation relic_evaluation_t;
+typedef struct relic_member_entry relic_member_entry_t;
+typedef struct relic_rule_plans relic_rule_plans_t;
 typedef struct relic_running_plan relic_running_plan_t;
+typedef struct relic_variant relic_variant_t;
 
 /*
  * A plan and the executor state that runs it: one cursor per operation, the
@@ -122,20 +136,58 @@ typedef struct relic_running_plan relic_running_plan_t;
  *
  * A LOOKUP uses its cursor differently.  `first` is the next tuple on the
  * index chain, or RELIC_ID_NONE when the chain is exhausted, and `end` is the
- * relation's end when the lookup started.  A chain is in identifier order, so
- * the lookup stops at the first tuple at or past `end`, which leaves tuples
- * inserted while it runs to the next lookup that starts, exactly as a scan
- * does.
+ * end of the view it reads through, taken when the lookup started.  A chain
+ * is in identifier order, so the lookup stops at the first tuple at or past
+ * `end`, which leaves tuples inserted while it runs to the next lookup that
+ * starts, exactly as a scan does.
  *
- * `rule` and `delta_literal` are what the plan was built from, kept so that
- * the plan can be explained and its head found among the component's
- * members.
+ * `rule` is what the plan was built from, kept so that the plan can be
+ * explained and its head found among the component's members.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
 	relic_tuple_range_t	*cursors;
 	const relic_rule_t	*rule;
-	size_t			 delta_literal;
+};
+
+/*
+ * A semi-naive delta variant of a rule: its plan, in which body literal
+ * `delta_literal` reads its member's delta.
+ *
+ * `empty_old_views` counts the literals the variant reads through the old
+ * view while that view is still empty, one for each member literal written
+ * before the delta literal until its member's delta first starts past the
+ * first identifier.  A delta's start never moves back, so a view that holds
+ * something always will, and the count only falls.  The variant can derive
+ * nothing while it is not zero.
+ */
+struct relic_variant {
+	relic_running_plan_t	running;
+	size_t			delta_literal;
+	size_t			empty_old_views;
+};
+
+/*
+ * A rule of a component with a body, and what runs it.  `base` is the
+ * rule's ordinary plan, in which every literal reads its whole relation;
+ * `variants` are its `variant_count` delta variants, a run of the
+ * component's.  A recursive rule under the semi-naive fixed point has only
+ * variants, and every other rule only a base plan.
+ */
+struct relic_rule_plans {
+	const relic_rule_t	*rule;
+	relic_running_plan_t	*base;
+	relic_variant_t		*variants;
+	size_t			 variant_count;
+};
+
+/*
+ * A variant listed under a member of the component, from which the
+ * variants of each member are grouped.
+ */
+struct relic_member_entry {
+	size_t	member;
+	size_t	variant;
 };
 
 /*
@@ -144,12 +196,14 @@ struct relic_running_plan {
  * `by_member` holds the indexes of the component's variants grouped by the
  * member their delta literal reads, ascending within each member: those of
  * member m are by_member[first_of_member[m]] up to
- * by_member[first_of_member[m + 1]].
+ * by_member[first_of_member[m + 1]].  `old_readers` groups them the same way
+ * by each member they read through the old view, once per such literal, from
+ * `first_old_reader`.
  *
  * `gained` lists the members that have gained a tuple in the round being run,
- * each once, which `in_gained` marks.  When the next round starts they become
- * `changed`, the members whose deltas it reads, and `gained` starts again
- * empty.  `due` is where a round gathers the variants it runs.
+ * each once, which `in_gained` marks.  `changed` lists the members whose
+ * delta the round reads holds something, which are those that gained in the
+ * round before it.  `due` is where a round gathers the variants it runs.
  *
  * Everything is sized when the component is planned, so a round allocates
  * nothing and cannot fail except by an insertion.
@@ -157,6 +211,8 @@ struct relic_running_plan {
 struct relic_delta_work {
 	size_t	*by_member;
 	size_t	*first_of_member;
+	size_t	*old_readers;
+	size_t	*first_old_reader;
 	size_t	*gained;
 	size_t	*changed;
 	size_t	*due;
@@ -169,14 +225,16 @@ struct relic_delta_work {
  * The plans of one component of the schedule.
  *
  * `rule_indexes` holds the component's `rule_count` rules, as indexes into
- * the evaluation's table of rules, in program order.  `base` holds one plan
- * per rule with a body, in the same order, in which every literal reads its
- * whole relation.  A fact has no plan: its head is all constants, and a pass
+ * the evaluation's table of rules, in program order.  `planned` holds, in
+ * the same order, the `planned_count` of them that have a body, each with
+ * what runs it.  A fact has no plan: its head is all constants, and a pass
  * inserts it when its turn comes, so that a program's facts cost the
- * evaluation arena nothing.  `variants` holds the semi-naive delta variants:
- * for each rule in program order, one per positive literal over a member of
- * the component, in body order.  It is empty for a component that is not
- * recursive and under the naive fixed point, neither of which runs one.
+ * evaluation arena nothing, and the component's facts are the rules it has
+ * that were not planned.  `variants` holds every rule's semi-naive delta
+ * variants: for each rule in program order, one per positive literal over a
+ * member of the component, in body order.  It is empty for a component that
+ * is not recursive and under the naive fixed point, neither of which runs
+ * one.
  *
  * `members` are the relations of the component's predicates.  They are
  * resolved when the component is planned, which can fail, so that advancing
@@ -188,12 +246,12 @@ struct relic_delta_work {
  */
 struct relic_component_plans {
 	const size_t		 *rule_indexes;
-	relic_running_plan_t	 *base;
-	relic_running_plan_t	 *variants;
+	relic_rule_plans_t	 *planned;
+	relic_variant_t		 *variants;
 	relic_relation_t	**members;
 	relic_delta_work_t	  work;
 	size_t			  rule_count;
-	size_t			  base_count;
+	size_t			  planned_count;
 	size_t			  variant_count;
 	size_t			  member_count;
 	enum relic_fixed_point	  fixed_point;
@@ -219,9 +277,10 @@ struct relic_component_plans {
  * `deltas` and `is_member` are indexed by predicate identifier minus one and
  * hold `predicate_count` entries.  They exist only in an evaluation that runs
  * fixed points; a query's single pass has no component to plan variants for,
- * so none of its plans reads a delta.  `deltas` holds, for each member of
- * the component being evaluated semi-naively, the tuples it gained in the
- * previous round, and is where a delta SCAN takes its range from.
+ * so every operation of its plan reads through the `all` view.  `deltas`
+ * holds, for each member of the component being evaluated semi-naively, the
+ * tuples it gained in the previous round, and is where every view of a
+ * member takes its range from.
  * `is_member` marks the members of the component being planned, which is how
  * a literal is recognized as one that needs a delta variant, and is what
  * tells the planner which relations are still being derived.
@@ -248,6 +307,10 @@ struct relic_evaluation {
 	bool			 derived;
 };
 
+static void	 advance_delta(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans, size_t member);
+static void	 advance_deltas(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
 static int	 allocate_delta_work(relic_evaluation_t *eval,
 		    relic_delta_work_t *work, size_t variants, size_t members);
 static int	 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
@@ -264,9 +327,12 @@ static int	 build_running_plan(relic_evaluation_t *eval,
 static enum relic_fixed_point choose_fixed_point(const relic_t *ctx,
 		    const relic_component_t *component);
 static int	 compare_indexes(const void *a, const void *b);
+static int	 confirm_planned(const relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans, size_t planned,
+		    const relic_rule_t *rule);
 static int	 confirm_schedule_current(relic_t *ctx);
 static size_t	 delta_member_of(const relic_evaluation_t *eval,
-		    const relic_running_plan_t *variant);
+		    const relic_variant_t *variant);
 static void	 discard_derived_state(relic_t *ctx);
 static size_t	 count_member_literals(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
@@ -308,7 +374,15 @@ static int	 insert_derived(relic_evaluation_t *eval,
 static int	 insert_fact(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
-static size_t	 gather_due_variants(relic_delta_work_t *work);
+static size_t	 gather_due_variants(relic_component_plans_t *plans);
+static int	 group_by_delta_member(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
+static int	 group_by_member(relic_evaluation_t *eval,
+		    const relic_member_entry_t *entries, size_t count,
+		    size_t members, size_t **groupedp, size_t **firstp);
+static int	 group_by_old_member(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
+static bool	 op_reads_old(const relic_op_t *op);
 static size_t	 head_member_of(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
 static relic_relation_t *head_relation_of(const relic_evaluation_t *eval,
@@ -331,9 +405,8 @@ static int	 materialize_program(relic_t *ctx);
 static int	 naive_fixed_point(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans);
 static int	 plan_base(relic_evaluation_t *eval,
-		    const relic_schedule_t *schedule,
-		    const relic_component_t *component,
-		    relic_component_plans_t *plans);
+		    const relic_component_plans_t *plans,
+		    relic_rule_plans_t *rule_plans);
 static int	 plan_delta_work(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 plan_component(relic_evaluation_t *eval,
@@ -346,26 +419,33 @@ static int	 plan_members(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
 		    relic_relation_t *answer, relic_component_plans_t *plans);
-static int	 plan_variants(relic_evaluation_t *eval,
+static int	 plan_rules(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component,
 		    relic_component_plans_t *plans);
+static int	 plan_variants(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans,
+		    relic_rule_plans_t *rule_plans);
 static const relic_rule_t *rule_of(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component, size_t i);
 static int	 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 		    relic_relation_t *answer);
+static void	 count_empty_old_views(relic_component_plans_t *plans);
+static void	 empty_every_delta(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
 static void	 record_gain(relic_delta_work_t *work, size_t member);
+static void	 record_initial_gains(relic_component_plans_t *plans);
 static int	 run_base_pass(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    relic_delta_work_t *work);
+static bool	 rule_is_recursive(const relic_evaluation_t *eval,
+		    const relic_rule_t *rule);
 static int	 run_variant(relic_evaluation_t *eval, relic_delta_work_t *work,
-		    const relic_running_plan_t *variant);
+		    const relic_variant_t *variant);
 static int	 semi_naive_fixed_point(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static void	 start_deltas(relic_evaluation_t *eval,
-		    relic_component_plans_t *plans);
-static void	 take_deltas(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 step(relic_evaluation_t *eval, const relic_rule_t *rule,
 		    const relic_op_t *op, relic_tuple_range_t *cursor,
@@ -388,6 +468,8 @@ static relic_dom_t term_value(const relic_evaluation_t *eval,
 		    const relic_plan_term_t *term);
 static bool	 tuple_matches(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom, const relic_dom_t *tuple);
+static relic_tuple_range_t view_range(const relic_evaluation_t *eval,
+		    const relic_op_atom_t *atom);
 
 /*
  * The value a reading term stands for: its constant, or what its slot holds.
@@ -494,9 +576,42 @@ comparison_holds(const relic_t *ctx, enum relic_compare_op compare,
 }
 
 /*
- * A SCAN: find the next tuple of its range that matches, starting from the
- * beginning of the range when not resuming.  The range is the whole relation,
- * or for a delta scan the tuples the relation gained in the previous round.
+ * The identifiers an operation's view covers, taken as the operation starts:
+ * the whole relation as it stands, or a range derived from the delta of the
+ * member being read, as plan.h sets out.
+ */
+static relic_tuple_range_t
+view_range(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
+{
+	relic_tuple_range_t delta;
+	relic_tuple_range_t range;
+
+	if (atom->view == RELIC_VIEW_ALL)
+		return (relic_relation_all(atom->relation));
+
+	assert(eval->deltas != NULL);
+	delta = eval->deltas[atom->relation->pred - 1];
+	range.first = RELIC_TUPLE_FIRST;
+	range.end = delta.end;
+
+	switch (atom->view) {
+	case RELIC_VIEW_OLD:
+		range.end = delta.first;
+		break;
+	case RELIC_VIEW_DELTA:
+		range.first = delta.first;
+		break;
+	case RELIC_VIEW_ALL:
+	case RELIC_VIEW_CURRENT:
+		break;
+	}
+
+	return (range);
+}
+
+/*
+ * A SCAN: find the next tuple of its view that matches, starting from the
+ * beginning of the view when not resuming.
  *
  * The range is taken when the scan starts, so tuples inserted into the
  * relation while it runs -- by an EMIT below it into the same relation, say --
@@ -511,12 +626,8 @@ step_scan(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 	const relic_dom_t *tuple;
 	relic_tuple_id_t id;
 
-	if (!resume) {
-		if (atom->delta)
-			*cursor = eval->deltas[atom->relation->pred - 1];
-		else
-			*cursor = relic_relation_all(atom->relation);
-	}
+	if (!resume)
+		*cursor = view_range(eval, atom);
 
 	while (cursor->first < cursor->end) {
 		id = cursor->first;
@@ -533,7 +644,10 @@ step_scan(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 
 /*
  * A LOOKUP: find the next tuple on the chain of the key its bound columns
- * hold that matches, starting from the head of the chain when not resuming.
+ * hold that matches, starting from the head of the chain when not resuming
+ * and stopping at the end of its view.  A delta is only ever scanned, so the
+ * view a lookup reads through begins at the first identifier and the head of
+ * the chain is where its tuples begin.
  *
  * Every tuple on the chain already agrees with the key columns; it is matched
  * against every term all the same, which binds the other columns and checks
@@ -563,8 +677,9 @@ step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 				    &atom->terms[column]);
 		}
 
+		assert(atom->view != RELIC_VIEW_DELTA);
 		cursor->first = relic_index_first(index, atom->relation, probe);
-		cursor->end = relic_relation_end(atom->relation);
+		cursor->end = view_range(eval, atom).end;
 	}
 
 	while (cursor->first != RELIC_ID_NONE && cursor->first < cursor->end) {
@@ -580,14 +695,26 @@ step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 	return (false);
 }
 
+/*
+ * A MEMBER, and the test an ANTI_MEMBER inverts: whether the relation holds
+ * the tuple the terms name, at an identifier inside the operation's view.
+ */
 static bool
 step_member(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
 {
 	relic_dom_t tuple[RELIC_MAX_ARITY];
+	relic_tuple_range_t view;
+	relic_tuple_id_t id;
 
 	build_tuple(eval, atom, tuple);
 
-	return (relic_relation_contains(atom->relation, tuple));
+	id = relic_relation_find(atom->relation, tuple);
+	if (id == RELIC_ID_NONE)
+		return (false);
+
+	view = view_range(eval, atom);
+
+	return (id >= view.first && id < view.end);
 }
 
 /*
@@ -835,15 +962,39 @@ insert_fact(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 }
 
 /*
+ * Confirm that the `planned`th record of a component's plans is the plans of
+ * `rule`, which it is because the component's rules with a body were planned
+ * in program order.  It is confirmed rather than assumed because a record
+ * out of step would not fail: it would run one rule's plan in another's turn.
+ */
+static int
+confirm_planned(const relic_evaluation_t *eval,
+    const relic_component_plans_t *plans, size_t planned,
+    const relic_rule_t *rule)
+{
+	if (planned < plans->planned_count &&
+	    plans->planned[planned].rule == rule)
+		return (0);
+
+	relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
+	    "internal error: a rule's plans are out of step with the program");
+
+	return (-1);
+}
+
+/*
  * One pass over a component's rules, each once, in program order: a fact
- * inserts its head, and any other rule runs its base plan.  With `work`, each
- * member that gains a tuple is recorded for the semi-naive rounds that
- * follow.  `derived` is left set exactly when something in the pass was new.
+ * inserts its head, and a rule with a base plan runs it.  A recursive rule
+ * under the semi-naive fixed point has none and waits for the rounds that
+ * run its variants.  With `work`, each member that gains a tuple is recorded
+ * for those rounds.  `derived` is left set exactly when something in the
+ * pass was new.
  */
 static int
 run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
     relic_delta_work_t *work)
 {
+	const relic_rule_plans_t *rule_plans;
 	const relic_rule_t *rule;
 	size_t planned;
 	size_t i;
@@ -860,10 +1011,13 @@ run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 		if (rule->body_length == 0) {
 			status = insert_fact(eval, plans, rule);
 		} else {
-			assert(planned < plans->base_count &&
-			    plans->base[planned].rule == rule);
-			status = execute_plan(eval, &plans->base[planned]);
+			if (confirm_planned(eval, plans, planned, rule) != 0)
+				return (-1);
+			rule_plans = &plans->planned[planned];
 			planned++;
+			if (rule_plans->base == NULL)
+				continue;
+			status = execute_plan(eval, rule_plans->base);
 		}
 		if (status != 0)
 			return (-1);
@@ -873,7 +1027,7 @@ run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 		derived = derived || eval->derived;
 	}
 
-	assert(planned == plans->base_count);
+	assert(planned == plans->planned_count);
 	eval->derived = derived;
 
 	return (0);
@@ -904,24 +1058,72 @@ naive_fixed_point(relic_evaluation_t *eval,
 }
 
 /*
- * Give every member an empty delta positioned at its current end, so that
- * the first delta taken holds what the first round inserts, and record that
- * no member has gained anything yet.
+ * Prepare a component for round 0, in three steps.
  */
 static void
 start_deltas(relic_evaluation_t *eval, relic_component_plans_t *plans)
 {
+	empty_every_delta(eval, plans);
+	count_empty_old_views(plans);
+	record_initial_gains(plans);
+}
+
+/*
+ * Give every member an empty delta at the first identifier, so that its old
+ * view is empty and the first delta taken is the whole member, and record
+ * that no member has gained anything or holds a delta with anything in it.
+ */
+static void
+empty_every_delta(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	relic_delta_work_t *work;
 	const relic_relation_t *member;
 	size_t i;
 
+	work = &plans->work;
+
 	for (i = 0; i < plans->member_count; i++) {
 		member = plans->members[i];
-		eval->deltas[member->pred - 1] = relic_relation_since(member,
-		    relic_relation_end(member));
-		plans->work.in_gained[i] = false;
+		eval->deltas[member->pred - 1].first = RELIC_TUPLE_FIRST;
+		eval->deltas[member->pred - 1].end = RELIC_TUPLE_FIRST;
+		work->in_gained[i] = false;
 	}
+	work->gained_count = 0;
+	work->changed_count = 0;
+}
 
-	plans->work.gained_count = 0;
+/*
+ * Every old view is empty while every delta starts at the first identifier,
+ * so each variant waits on one per operation of its plan that reads one.
+ */
+static void
+count_empty_old_views(relic_component_plans_t *plans)
+{
+	const relic_delta_work_t *work;
+	size_t i;
+
+	work = &plans->work;
+
+	for (i = 0; i < plans->variant_count; i++)
+		plans->variants[i].empty_old_views = 0;
+	for (i = 0; i < work->first_old_reader[plans->member_count]; i++)
+		plans->variants[work->old_readers[i]].empty_old_views++;
+}
+
+/*
+ * Record a member that already holds tuples as having gained them, as
+ * though round 0 had inserted them, so that the first delta is the whole of
+ * every member whatever the relations held when the component began.
+ */
+static void
+record_initial_gains(relic_component_plans_t *plans)
+{
+	size_t i;
+
+	for (i = 0; i < plans->member_count; i++) {
+		if (relic_relation_count(plans->members[i]) > 0)
+			record_gain(&plans->work, i);
+	}
 }
 
 /*
@@ -947,52 +1149,88 @@ record_gain(relic_delta_work_t *work, size_t member)
  */
 static int
 run_variant(relic_evaluation_t *eval, relic_delta_work_t *work,
-    const relic_running_plan_t *variant)
+    const relic_variant_t *variant)
 {
 	eval->derived = false;
-	if (execute_plan(eval, variant) != 0)
+	if (execute_plan(eval, &variant->running) != 0)
 		return (-1);
 
 	if (eval->derived)
-		record_gain(work, head_member_of(eval, variant->rule));
+		record_gain(work, head_member_of(eval, variant->running.rule));
 
 	return (0);
 }
 
 /*
- * Begin a round: the members that gained in the round before become the
- * ones whose deltas this round reads, each delta becomes the tuples its
- * member gained since the previous one was taken, and nothing has gained in
- * this round yet.
+ * Advance one member's delta to the tuples it gained since the delta's end:
+ * what the round just run inserted into it, or an empty range at its end.
  *
- * A member that did not gain keeps its old delta, which no variant this
- * round reads: only a variant whose delta literal reads a member that gained
- * is run.
+ * The first time a delta starts past the first identifier, the member's old
+ * view holds something from then on, so every variant reading it through
+ * that view has one empty old view fewer.
  */
 static void
-take_deltas(relic_evaluation_t *eval, relic_component_plans_t *plans)
+advance_delta(relic_evaluation_t *eval, relic_component_plans_t *plans,
+    size_t member)
+{
+	const relic_delta_work_t *work;
+	const relic_relation_t *relation;
+	relic_tuple_range_t *delta;
+	bool old_was_empty;
+	size_t i;
+
+	work = &plans->work;
+	relation = plans->members[member];
+	delta = &eval->deltas[relation->pred - 1];
+
+	old_was_empty = delta->first == RELIC_TUPLE_FIRST;
+	*delta = relic_relation_since(relation, delta->end);
+	if (!old_was_empty || delta->first == RELIC_TUPLE_FIRST)
+		return;
+
+	for (i = work->first_old_reader[member];
+	    i < work->first_old_reader[member + 1]; i++)
+		plans->variants[work->old_readers[i]].empty_old_views--;
+}
+
+/*
+ * The boundary between two rounds.  Afterwards every member's delta is
+ * exactly what it gained in the round just run, possibly nothing, and ends
+ * at the member's end; the members that gained become the ones whose deltas
+ * hold something; and nothing has gained in the round about to run.
+ *
+ * Only two kinds of member can need advancing: those that gained, whose
+ * delta must become what they gained, and those whose delta held something,
+ * which must become empty.  Every other member's delta is already empty at
+ * its end.  Each member is advanced once, the previous round's nonempty
+ * deltas first, skipping the members that gained, then the gainers, since
+ * advancing a member twice would empty the delta it had just been given.
+ * The boundary therefore costs the two sets rather than the component.
+ */
+static void
+advance_deltas(relic_evaluation_t *eval, relic_component_plans_t *plans)
 {
 	relic_delta_work_t *work;
-	const relic_relation_t *member;
-	relic_tuple_range_t *delta;
 	size_t *swap;
 	size_t i;
 
 	work = &plans->work;
+
+	for (i = 0; i < work->changed_count; i++) {
+		if (!work->in_gained[work->changed[i]])
+			advance_delta(eval, plans, work->changed[i]);
+	}
+
+	for (i = 0; i < work->gained_count; i++) {
+		work->in_gained[work->gained[i]] = false;
+		advance_delta(eval, plans, work->gained[i]);
+	}
 
 	swap = work->changed;
 	work->changed = work->gained;
 	work->changed_count = work->gained_count;
 	work->gained = swap;
 	work->gained_count = 0;
-
-	for (i = 0; i < work->changed_count; i++) {
-		work->in_gained[work->changed[i]] = false;
-
-		member = plans->members[work->changed[i]];
-		delta = &eval->deltas[member->pred - 1];
-		*delta = relic_relation_since(member, delta->end);
-	}
 }
 
 static int
@@ -1008,24 +1246,33 @@ compare_indexes(const void *a, const void *b)
 }
 
 /*
- * Gather into `due` the variants reading a member whose delta this round
- * reads, in the order they were planned, and return how many there are.  A
- * variant appears once, because it has one delta literal.
+ * Gather into `due` the variants that can derive something this round, in
+ * the order they were planned, and return how many there are: those whose
+ * delta literal reads a member whose delta holds something, and whose every
+ * old view does too.  A variant appears once, because it has one delta
+ * literal.
  */
 static size_t
-gather_due_variants(relic_delta_work_t *work)
+gather_due_variants(relic_component_plans_t *plans)
 {
+	relic_delta_work_t *work;
+	size_t variant;
 	size_t member;
 	size_t count;
 	size_t i;
 	size_t j;
 
+	work = &plans->work;
+
 	count = 0;
 	for (i = 0; i < work->changed_count; i++) {
 		member = work->changed[i];
 		for (j = work->first_of_member[member];
-		    j < work->first_of_member[member + 1]; j++)
-			work->due[count++] = work->by_member[j];
+		    j < work->first_of_member[member + 1]; j++) {
+			variant = work->by_member[j];
+			if (plans->variants[variant].empty_old_views == 0)
+				work->due[count++] = variant;
+		}
 	}
 
 	qsort(work->due, count, sizeof(*work->due), compare_indexes);
@@ -1034,9 +1281,9 @@ gather_due_variants(relic_delta_work_t *work)
 }
 
 /*
- * Run every plan of a component once, then its delta variants round after
- * round until a round inserts nothing.  Each round runs only the variants
- * whose delta holds something, in planning order.
+ * Run round 0 of a component -- its facts and exit rules -- then its delta
+ * variants round after round until a round inserts nothing.  Each round runs
+ * only the variants that can derive something, in planning order.
  */
 static int
 semi_naive_fixed_point(relic_evaluation_t *eval,
@@ -1057,8 +1304,8 @@ semi_naive_fixed_point(relic_evaluation_t *eval,
 	while (work->gained_count > 0) {
 		eval->ctx->counters.iterations++;
 
-		take_deltas(eval, plans);
-		due_count = gather_due_variants(work);
+		advance_deltas(eval, plans);
+		due_count = gather_due_variants(plans);
 
 		for (i = 0; i < due_count; i++) {
 			if (run_variant(eval, work,
@@ -1156,7 +1403,6 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
     relic_running_plan_t *running)
 {
 	running->rule = rule;
-	running->delta_literal = delta_literal;
 
 	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule, target,
 	    delta_literal, eval->is_member, &running->plan) != 0)
@@ -1310,29 +1556,105 @@ confirm_fact(const relic_evaluation_t *eval,
 }
 
 /*
- * Plan every rule of a component that has a body as written, each literal
- * reading its whole relation, and confirm that every fact can be inserted as
- * it stands.  The members must be marked and their relations resolved.
+ * Whether a rule of the component being planned is recursive: whether a
+ * positive literal of its body reads a member, which is what gives it delta
+ * variants.  The members must be marked.
+ */
+static bool
+rule_is_recursive(const relic_evaluation_t *eval, const relic_rule_t *rule)
+{
+	return (count_member_literals(eval, rule) > 0);
+}
+
+/*
+ * Plan a rule's ordinary plan, every literal reading its whole relation.
  */
 static int
-plan_base(relic_evaluation_t *eval, const relic_schedule_t *schedule,
-    const relic_component_t *component, relic_component_plans_t *plans)
+plan_base(relic_evaluation_t *eval, const relic_component_plans_t *plans,
+    relic_rule_plans_t *rule_plans)
 {
 	const relic_rule_t *rule;
+
+	rule = rule_plans->rule;
+
+	rule_plans->base = evaluation_alloc(eval, 1, sizeof(*rule_plans->base));
+	if (rule_plans->base == NULL)
+		return (-1);
+
+	return (build_running_plan(eval, rule, head_relation_of(eval, plans,
+	    rule), RELIC_PLAN_NO_DELTA, rule_plans->base));
+}
+
+/*
+ * Plan a recursive rule's delta variants, one per positive literal over a
+ * member, in body order, as the next run of the component's variants.
+ */
+static int
+plan_variants(relic_evaluation_t *eval, relic_component_plans_t *plans,
+    relic_rule_plans_t *rule_plans)
+{
+	const relic_rule_t *rule;
+	relic_variant_t *variant;
+	size_t j;
+
+	rule = rule_plans->rule;
+	rule_plans->variants = &plans->variants[plans->variant_count];
+
+	for (j = 0; j < rule->body_length; j++) {
+		if (!literal_reads_member(eval, &rule->body[j]))
+			continue;
+
+		variant = &plans->variants[plans->variant_count];
+		variant->delta_literal = j;
+		if (build_running_plan(eval, rule, head_relation_of(eval, plans,
+		    rule), j, &variant->running) != 0)
+			return (-1);
+		plans->variant_count++;
+		rule_plans->variant_count++;
+	}
+
+	return (0);
+}
+
+/*
+ * Plan every rule of a component, in program order: confirm that a fact can
+ * be inserted as it stands, give a recursive rule its delta variants when
+ * the component is evaluated semi-naively, and give every other rule its
+ * ordinary plan.  The members must be marked and their relations resolved.
+ */
+static int
+plan_rules(relic_evaluation_t *eval, const relic_schedule_t *schedule,
+    const relic_component_t *component, relic_component_plans_t *plans)
+{
+	relic_rule_plans_t *rule_plans;
+	const relic_rule_t *rule;
 	size_t with_body;
+	size_t variants;
 	size_t i;
+	int status;
 
 	plans->rule_indexes = &schedule->rule_indexes[component->first_rule];
 	plans->rule_count = component->rule_count;
 
 	with_body = 0;
+	variants = 0;
 	for (i = 0; i < component->rule_count; i++) {
-		if (rule_of(eval, schedule, component, i)->body_length > 0)
+		rule = rule_of(eval, schedule, component, i);
+		if (rule->body_length > 0)
 			with_body++;
+		if (plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
+			variants += count_member_literals(eval, rule);
 	}
 
-	plans->base = evaluation_alloc(eval, with_body, sizeof(*plans->base));
-	if (plans->base == NULL)
+	plans->planned = evaluation_alloc(eval, with_body,
+	    sizeof(*plans->planned));
+	if (plans->planned == NULL)
+		return (-1);
+	bzero(plans->planned, with_body * sizeof(*plans->planned));
+
+	plans->variants = evaluation_alloc(eval, variants,
+	    sizeof(*plans->variants));
+	if (plans->variants == NULL)
 		return (-1);
 
 	for (i = 0; i < component->rule_count; i++) {
@@ -1344,53 +1666,17 @@ plan_base(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 			continue;
 		}
 
-		if (build_running_plan(eval, rule,
-		    head_relation_of(eval, plans, rule), RELIC_PLAN_NO_DELTA,
-		    &plans->base[plans->base_count]) != 0)
+		rule_plans = &plans->planned[plans->planned_count];
+		rule_plans->rule = rule;
+		plans->planned_count++;
+
+		if (plans->fixed_point == RELIC_FIXED_SEMI_NAIVE &&
+		    rule_is_recursive(eval, rule))
+			status = plan_variants(eval, plans, rule_plans);
+		else
+			status = plan_base(eval, plans, rule_plans);
+		if (status != 0)
 			return (-1);
-		plans->base_count++;
-	}
-
-	return (0);
-}
-
-/*
- * Plan the delta variants of a component's rules: for each rule, one per
- * positive literal over a member, with that literal reading the delta.  The
- * members must be marked and their relations resolved.
- */
-static int
-plan_variants(relic_evaluation_t *eval, const relic_schedule_t *schedule,
-    const relic_component_t *component, relic_component_plans_t *plans)
-{
-	const relic_rule_t *rule;
-	size_t total;
-	size_t i;
-	size_t j;
-
-	total = 0;
-	for (i = 0; i < component->rule_count; i++)
-		total += count_member_literals(eval,
-		    rule_of(eval, schedule, component, i));
-
-	plans->variants = evaluation_alloc(eval, total,
-	    sizeof(*plans->variants));
-	if (plans->variants == NULL)
-		return (-1);
-
-	for (i = 0; i < component->rule_count; i++) {
-		rule = rule_of(eval, schedule, component, i);
-
-		for (j = 0; j < rule->body_length; j++) {
-			if (!literal_reads_member(eval, &rule->body[j]))
-				continue;
-
-			if (build_running_plan(eval, rule,
-			    head_relation_of(eval, plans, rule), j,
-			    &plans->variants[plans->variant_count]) != 0)
-				return (-1);
-			plans->variant_count++;
-		}
 	}
 
 	return (0);
@@ -1427,15 +1713,14 @@ head_relation_of(const relic_evaluation_t *eval,
 }
 
 static size_t
-delta_member_of(const relic_evaluation_t *eval,
-    const relic_running_plan_t *variant)
+delta_member_of(const relic_evaluation_t *eval, const relic_variant_t *variant)
 {
-	return (eval->member_position[
-	    variant->rule->body[variant->delta_literal].u.atom.pred - 1]);
+	return (eval->member_position[variant->running.rule->body[
+	    variant->delta_literal].u.atom.pred - 1]);
 }
 
 /*
- * Allocate the arrays of a component's delta work, each checked before the
+ * Allocate the sets of a component's delta work, each checked before the
  * next is asked for, since a refused request leaves the arena refusing and
  * each refusal would be reported again.
  */
@@ -1443,18 +1728,8 @@ static int
 allocate_delta_work(relic_evaluation_t *eval, relic_delta_work_t *work,
     size_t variants, size_t members)
 {
-	work->by_member = evaluation_alloc(eval, variants,
-	    sizeof(*work->by_member));
-	if (work->by_member == NULL)
-		return (-1);
-
 	work->due = evaluation_alloc(eval, variants, sizeof(*work->due));
 	if (work->due == NULL)
-		return (-1);
-
-	work->first_of_member = evaluation_alloc(eval, members + 1,
-	    sizeof(*work->first_of_member));
-	if (work->first_of_member == NULL)
 		return (-1);
 
 	work->gained = evaluation_alloc(eval, members, sizeof(*work->gained));
@@ -1474,51 +1749,149 @@ allocate_delta_work(relic_evaluation_t *eval, relic_delta_work_t *work,
 }
 
 /*
- * Prepare what a semi-naive round needs to run only the variants that can
- * derive something: the member each plan's head is, and the variants
- * grouped by the member their delta literal reads.  The grouping is a
- * counting sort over the variants in planning order, so each member's
- * variants stay ascending.  The members must be marked.
+ * Group `count` entries by member, as a counting sort: afterwards the
+ * variants listed under member m are (*groupedp)[(*firstp)[m]] up to
+ * (*groupedp)[(*firstp)[m + 1]], in the order the entries give them.
  */
 static int
-plan_delta_work(relic_evaluation_t *eval, relic_component_plans_t *plans)
+group_by_member(relic_evaluation_t *eval, const relic_member_entry_t *entries,
+    size_t count, size_t members, size_t **groupedp, size_t **firstp)
 {
-	relic_delta_work_t *work;
+	size_t *grouped;
+	size_t *first;
 	size_t *next;
 	size_t member;
-	size_t members;
 	size_t i;
 
-	work = &plans->work;
-	members = plans->member_count;
-
-	if (allocate_delta_work(eval, work, plans->variant_count,
-	    members) != 0)
+	grouped = evaluation_alloc(eval, count, sizeof(*grouped));
+	if (grouped == NULL)
 		return (-1);
-
+	first = evaluation_alloc(eval, members + 1, sizeof(*first));
+	if (first == NULL)
+		return (-1);
 	next = evaluation_alloc(eval, members, sizeof(*next));
 	if (next == NULL)
 		return (-1);
 
-	bzero(work->first_of_member,
-	    (members + 1) * sizeof(*work->first_of_member));
-	for (i = 0; i < plans->variant_count; i++) {
-		member = delta_member_of(eval, &plans->variants[i]);
-		work->first_of_member[member + 1]++;
-	}
+	bzero(first, (members + 1) * sizeof(*first));
+	for (i = 0; i < count; i++)
+		first[entries[i].member + 1]++;
 
 	for (member = 0; member < members; member++) {
-		work->first_of_member[member + 1] +=
-		    work->first_of_member[member];
-		next[member] = work->first_of_member[member];
+		first[member + 1] += first[member];
+		next[member] = first[member];
 	}
 
-	for (i = 0; i < plans->variant_count; i++) {
-		member = delta_member_of(eval, &plans->variants[i]);
-		work->by_member[next[member]++] = i;
-	}
+	for (i = 0; i < count; i++)
+		grouped[next[entries[i].member]++] = entries[i].variant;
+
+	*groupedp = grouped;
+	*firstp = first;
 
 	return (0);
+}
+
+/*
+ * List, in planning order, every variant under the member its delta literal
+ * reads, and group them.
+ */
+static int
+group_by_delta_member(relic_evaluation_t *eval,
+    relic_component_plans_t *plans)
+{
+	relic_member_entry_t *entries;
+	size_t i;
+
+	entries = evaluation_alloc(eval, plans->variant_count,
+	    sizeof(*entries));
+	if (entries == NULL)
+		return (-1);
+
+	for (i = 0; i < plans->variant_count; i++) {
+		entries[i].member = delta_member_of(eval, &plans->variants[i]);
+		entries[i].variant = i;
+	}
+
+	return (group_by_member(eval, entries, plans->variant_count,
+	    plans->member_count, &plans->work.by_member,
+	    &plans->work.first_of_member));
+}
+
+/*
+ * List, in planning order, every variant under each member one of its
+ * operations reads through the old view, once per such operation, and group
+ * them.  The list is read off the plans themselves, so the count of empty
+ * old views a variant waits on is exactly what its plan reads.
+ */
+static int
+group_by_old_member(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	relic_member_entry_t *entries;
+	const relic_plan_t *plan;
+	const relic_op_t *op;
+	size_t count;
+	size_t i;
+	size_t j;
+
+	count = 0;
+	for (i = 0; i < plans->variant_count; i++) {
+		plan = &plans->variants[i].running.plan;
+		for (j = 0; j < plan->op_count; j++) {
+			if (op_reads_old(&plan->ops[j]))
+				count++;
+		}
+	}
+
+	entries = evaluation_alloc(eval, count, sizeof(*entries));
+	if (entries == NULL)
+		return (-1);
+
+	count = 0;
+	for (i = 0; i < plans->variant_count; i++) {
+		plan = &plans->variants[i].running.plan;
+		for (j = 0; j < plan->op_count; j++) {
+			op = &plan->ops[j];
+			if (!op_reads_old(op))
+				continue;
+
+			entries[count].member = eval->member_position[
+			    op->u.atom.relation->pred - 1];
+			entries[count].variant = i;
+			count++;
+		}
+	}
+
+	return (group_by_member(eval, entries, count, plans->member_count,
+	    &plans->work.old_readers, &plans->work.first_old_reader));
+}
+
+/*
+ * Whether an operation reads a member through the old view.
+ */
+static bool
+op_reads_old(const relic_op_t *op)
+{
+	return (op->kind != RELIC_OP_FILTER &&
+	    op->u.atom.view == RELIC_VIEW_OLD);
+}
+
+/*
+ * Prepare what a semi-naive round needs to run only the variants that can
+ * derive something: the variants grouped by the member their delta literal
+ * reads and by each member they read through the old view, and room for the
+ * sets a round keeps.  The members must be marked.
+ */
+static int
+plan_delta_work(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	if (allocate_delta_work(eval, &plans->work, plans->variant_count,
+	    plans->member_count) != 0)
+		return (-1);
+
+	if (group_by_delta_member(eval, plans) != 0)
+		return (-1);
+
+	return (group_by_old_member(eval, plans));
 }
 
 /*
@@ -1556,9 +1929,7 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 
 	mark_members(eval, schedule, component, true);
 
-	status = plan_base(eval, schedule, component, plans);
-	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
-		status = plan_variants(eval, schedule, component, plans);
+	status = plan_rules(eval, schedule, component, plans);
 	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
 		status = plan_delta_work(eval, plans);
 
@@ -1569,62 +1940,67 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 
 /*
  * Show a component's plans through the explain callback, if one is
- * installed: its heading, how many facts it has -- its rules without a plan --
- * and each other rule with its plan and the delta variants planned for it.
- *
- * The variants are in rule order, and each records the rule it was built
- * from, so a rule's variants are the run of them that follows the previous
- * rule's.
+ * installed: its heading, how many facts it has -- its rules without a plan
+ * -- and each other rule with its plan or its delta variants.
  */
 static void
 explain_component(const relic_evaluation_t *eval,
     const relic_schedule_t *schedule, size_t position,
     const relic_component_plans_t *plans, unsigned depth)
 {
-	const relic_running_plan_t *base;
+	const relic_rule_plans_t *rule_plans;
+	const relic_variant_t *variant;
 	size_t facts;
-	size_t variant;
 	size_t i;
+	size_t j;
 
 	if (!relic_explaining(eval->ctx))
 		return;
 
-	facts = plans->rule_count - plans->base_count;
+	facts = plans->rule_count - plans->planned_count;
 
 	relic_explain_component(eval->ctx, schedule, position, facts, depth);
 
-	variant = 0;
-	for (i = 0; i < plans->base_count; i++) {
-		base = &plans->base[i];
+	for (i = 0; i < plans->planned_count; i++) {
+		rule_plans = &plans->planned[i];
 
-		relic_explain_rule(eval->ctx, base->rule, &base->plan, depth);
+		relic_explain_rule(eval->ctx, rule_plans->rule,
+		    rule_plans->base == NULL ? NULL : &rule_plans->base->plan,
+		    depth);
 
-		for (; variant < plans->variant_count &&
-		    plans->variants[variant].rule == base->rule; variant++)
-			relic_explain_variant(eval->ctx, base->rule,
-			    plans->variants[variant].delta_literal,
-			    &plans->variants[variant].plan, depth);
+		for (j = 0; j < rule_plans->variant_count; j++) {
+			variant = &rule_plans->variants[j];
+			relic_explain_variant(eval->ctx, rule_plans->rule,
+			    variant->delta_literal, &variant->running.plan,
+			    depth);
+		}
 	}
 }
 
 /*
- * Plan a query's rule as the single base plan of `plans`, deriving into the
+ * Plan a query's rule as the single rule of `plans`, deriving into the
  * query's answer relation.
  */
 static int
 plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
     relic_relation_t *answer, relic_component_plans_t *plans)
 {
-	plans->base = evaluation_alloc(eval, 1, sizeof(*plans->base));
-	if (plans->base == NULL)
+	relic_rule_plans_t *rule_plans;
+
+	plans->planned = evaluation_alloc(eval, 1, sizeof(*plans->planned));
+	if (plans->planned == NULL)
+		return (-1);
+	rule_plans = &plans->planned[0];
+	bzero(rule_plans, sizeof(*rule_plans));
+	rule_plans->rule = rule;
+	plans->planned_count = 1;
+
+	rule_plans->base = evaluation_alloc(eval, 1, sizeof(*rule_plans->base));
+	if (rule_plans->base == NULL)
 		return (-1);
 
-	if (build_running_plan(eval, rule, answer, RELIC_PLAN_NO_DELTA,
-	    &plans->base[0]) != 0)
-		return (-1);
-	plans->base_count = 1;
-
-	return (0);
+	return (build_running_plan(eval, rule, answer, RELIC_PLAN_NO_DELTA,
+	    rule_plans->base));
 }
 
 /*
@@ -1905,8 +2281,8 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 		status = plan_query(&eval, rule, answer, &eval.components[0]);
 	if (status == 0) {
 		relic_explain_query(ctx, rule, answer,
-		    &eval.components[0].base[0].plan);
-		status = execute_plan(&eval, &eval.components[0].base[0]);
+		    &eval.components[0].planned[0].base->plan);
+		status = execute_plan(&eval, eval.components[0].planned[0].base);
 	}
 	evaluation_end(&eval);
 

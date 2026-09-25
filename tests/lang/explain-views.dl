@@ -1,0 +1,16 @@
+% -e over a rule that reads its own predicate twice.  Its two delta
+% variants read p through different views: the one whose delta literal is
+% the second p reads the first through the old view, the tuples older than
+% its delta, marked `old`; the one whose delta literal is the first reads the
+% second through the current view, everything up to its delta's end, which
+% is left unmarked.  The rule runs only as its variants, so it shows no plan
+% of its own.
+
+e(a, b).
+e(b, c).
+e(c, d).
+
+p(X, Y) :- e(X, Y).
+p(X, Z) :- p(X, Y), p(Y, Z).
+
+p(a, X)?

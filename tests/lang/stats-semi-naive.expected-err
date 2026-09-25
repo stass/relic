@@ -1,7 +1,7 @@
-stats: iterations 6
-stats: derivations 38
+stats: iterations 7
+stats: derivations 33
 stats: tuples inserted 33
-stats: tuples scanned 216
+stats: tuples scanned 174
 stats: tuples looked up 0
 stats: tuples held 27
 stats: storage bytes 512

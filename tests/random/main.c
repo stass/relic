@@ -562,6 +562,8 @@ random_failure_name(random_failure_kind_t kind)
 		return ("answers differ");
 	case FAILURE_TOTALS:
 		return ("tuple totals differ");
+	case FAILURE_DERIVATIONS:
+		return ("derivations miscounted");
 	case FAILURE_CRASH:
 		return ("crashed");
 	case FAILURE_HANG:

@@ -18,8 +18,10 @@
  * A seed generates a program that is safe and stratified by construction.
  * The program is run under every evaluation strategy the library offers, in
  * a child process, and every strategy must give the default's answers and,
- * where it evaluates the same rules, hold as many tuples.  A program that
- * fails is shrunk to a small one that fails the same way.
+ * where it evaluates the same rules, hold as many tuples.  The semi-naive
+ * fixed point must also make every derivation exactly once, which no answer
+ * shows, since a duplicate changes none.  A program that fails is shrunk to
+ * a small one that fails the same way.
  *
  * The program model below is the generator's own rather than the library's
  * syntax tree, so that a mistake in the library's representation cannot be
@@ -152,6 +154,8 @@ void	random_generate(random_program_t *program, uint64_t seed);
 
 /* program.c */
 bool	random_program_is_safe(const random_program_t *program);
+bool	random_program_has_anonymous(const random_program_t *program);
+char	*random_bindings_text(const random_program_t *program);
 size_t	random_program_statements(const random_program_t *program);
 char	*random_program_text(const random_program_t *program);
 void	random_program_write(const random_program_t *program, FILE *out);
@@ -183,7 +187,7 @@ typedef enum random_strategy {
 } random_strategy_t;
 
 /*
- * The kinds of failure a run can end in.  compare.c finds the first four;
+ * The kinds of failure a run can end in.  compare.c finds the first five;
  * main.c, which runs the comparison in a child, finds the rest from how the
  * child ended.
  */
@@ -193,7 +197,8 @@ typedef enum random_failure_kind {
 	FAILURE_QUERY,		/* a query failed with no limit configured */
 	FAILURE_ANSWERS,	/* a strategy's answer differs from default */
 	FAILURE_TOTALS,		/* a strategy's tuple total differs */
-	FAILURE_LAST_VERDICT = FAILURE_TOTALS,	/* the last compare.c finds */
+	FAILURE_DERIVATIONS,	/* a derivation was made twice, or missed */
+	FAILURE_LAST_VERDICT = FAILURE_DERIVATIONS, /* the last compare.c finds */
 	FAILURE_CRASH,		/* the child was killed by a signal */
 	FAILURE_HANG,		/* the child ran past its alarm */
 	FAILURE_ABNORMAL	/* the child exited without its verdict */

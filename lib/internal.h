@@ -729,10 +729,11 @@ int	 relic_stratify(relic_t *ctx);
  * caller names -- the relation of the head's predicate, or a query's answer
  * -- and whose arity must be the rule's head arity.  `delta_literal` is
  * RELIC_PLAN_NO_DELTA for the rule's ordinary plan, or the body index of the
- * positive literal a semi-naive variant reads from the delta.  `incomplete`,
- * indexed by predicate identifier minus one, marks the relations still being
- * derived, whose size the planner assumes rather than measures; NULL marks
- * none.  Returns 0, or -1 with a diagnostic reported: memory or the memory
+ * positive literal a semi-naive variant reads from the delta, which must be
+ * over a relation `incomplete` marks.  `incomplete`, indexed by predicate
+ * identifier minus one, marks the relations still being derived, whose size
+ * the planner assumes rather than measures, and which a variant's other
+ * literals read through the old or current view; NULL marks none.  Returns 0, or -1 with a diagnostic reported: memory or the memory
  * limit refused, or the planner broke one of a plan's invariants, which is
  * an internal error.
  */
@@ -879,6 +880,10 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * agreeing with each other; capacity that a partial reservation obtained is
  * kept, and accounted.
  *
+ * relic_relation_find() gives the identifier of the tuple holding some
+ * columns, or RELIC_ID_NONE, and relic_relation_contains() whether there is
+ * one.
+ *
  * relic_relation_all() and relic_relation_since() give the identifier ranges
  * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
  * later delta is measured from.
@@ -916,6 +921,8 @@ void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);
 void	 relic_relation_free(relic_relation_t *relation);
 int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *columns, bool *addedp);
+relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
+	    const relic_dom_t *columns);
 bool	 relic_relation_contains(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 const relic_dom_t *relic_relation_tuple(const relic_relation_t *relation,

@@ -1,11 +1,11 @@
 % The work the default planner does on the chain of stats-semi-naive.dl.
-% The recursive rule reads edge, which is complete when the path component
-% is planned, before path, which is still being derived: it scans the edges
-% and looks up the paths ending where each edge begins.  The lookups read
-% only matching tuples, and because a path inserted early in a round is seen
-% by the lookups after it, the chain is closed in the first round and the
-% second finds nothing new.  The query is answered from the whole fixed
-% point, without the Magic rewrite, so that the counts are the program's.
+% The recursive rule runs as its delta variant, which scans the paths the
+% round before derived and looks up the edges leaving the node each ends at:
+% the lookups read only matching tuples, so a path reads the one edge that
+% extends it, or none at the end of the chain.  Every path is derived once,
+% and the chain takes a round for each of its edges.  The query is answered
+% from the whole fixed point, without the Magic rewrite, so that the counts
+% are the program's.
 
 edge(a, b).
 edge(b, c).

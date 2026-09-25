@@ -229,15 +229,6 @@ operation, would remove most of it without a second path for rules.
 `relic_fact_add()` pays the same per fact, since it appends the statement its
 text would load.
 
-**Explain pairs variants with their rule by order.** [Low, component:
-`lib/eval.c`] `explain_component()` prints each rule's delta variants by
-walking the variant plans alongside the base plans and matching on the rule
-pointer, which is right because both are built in rule order. A reordering of
-either would silently drop the variants of the first rule out of step and of
-every rule after it. Recording
-each base plan's range of variants when the component is planned would make
-the pairing hold by construction.
-
 **A later load re-evaluates the whole program.** [Low, component:
 `lib/eval.c`] Any change to the program after an evaluation discards every
 relation and computes the fixed point again from nothing, for every program:
@@ -356,18 +347,6 @@ from `tests/unit/programs.c` with 50 000 facts of an unrelated g outgrows
 its budget of 304 generated predicates first; no test reaches that either.
 Weigh whether the rule budget is worth keeping. The configurable limits are
 not in question.
-
-**Semi-naive duplicate derivations.** [Low, component: `lib/eval.c`,
-`lib/plan.c`] The semi-naive fixed point derives some tuples more than once,
-for two reasons. A rule with several recursive literals has one variant per
-literal, and a combination of tuples that are all new is found by each of
-them; the refinement that reads the relations as they stood before the round
-for the literals ahead of the delta one removes that, at the cost of being
-non-obvious on first reading. And a scan sees tuples inserted earlier in the
-same round, so a round can derive what the next round's delta will derive
-again: over the six-edge chain of `tests/lang/stats-semi-naive.dl`, 21 paths
-take 26 derivations. Both are correct and both cost work. `-X stats` measures
-them; measure on a real workload before changing either.
 
 **Append-only invariant versus incremental maintenance.** [Medium, component:
 `lib/relation.c`] D-10 represents a delta as a range of tuple identifiers,
@@ -659,7 +638,7 @@ reachability over `par` alone (the right-linear and factoring rewrites of
 Naughton, Ramakrishnan, Sagiv and Ullman); find whether relic's rewrite can
 recognize the case. Souffle's `--magic-transform` produces the identical
 program and runs it about five times faster, so the gap to Souffle is in
-evaluation rather than in the rewrite: see the next three items.
+evaluation rather than in the rewrite: see the next two items.
 
 **The delta literal always drives the join.** [Medium, component:
 `lib/plan.c`, `lib/eval.c`, `bench/compare/tc-acyclic-bf`] A delta is a range
@@ -683,24 +662,6 @@ starts. Designed in `specs/design-evaluation-cost.md` section 4: the delta
 is placed by the planner, reached through a per-key frontier of the
 relation's own index, and each iteration chooses between the placed plan
 and the delta-first one by the delta's size.
-
-**The first pass over a recursive component is repeated as its first
-delta.** [Medium, component: `lib/eval.c`] `run_base_pass()` evaluates every
-rule of the component, recursive ones included, against the whole
-relations, and its lookups see tuples the same pass appends. The first delta
-is then everything that pass inserted, so every recursive rule joins it all
-again. Non-delta literals in later variants also read the whole relation,
-current iteration included, so a derivation can be made in two variants.
-`tc-cyclic-bf` makes 74.2 million derivations where one per (derivation
-path, answer) would be about 49 million; on the complete graph K40 the
-closure makes 132,800 against 65,600. The fix is the textbook scheme: the
-base pass runs only rules with no literal of the component, the first delta
-is the whole of each relation, and a variant's non-delta literals read
-bounded views -- those before the delta literal the tuples older than the
-delta, those after it everything up to the delta's end, fixed when the
-iteration starts. With the views bounded, nothing needs to see a tuple in
-the iteration that inserts it, which the next item relies on. Designed in
-`specs/design-evaluation-cost.md` section 3.
 
 **relic's evaluation costs several times Souffle's interpreter per
 derivation on the analyses.** [Medium, component: `lib/eval.c`,

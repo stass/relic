@@ -5,9 +5,6 @@ stratum 0, component 1 (recursive): path/2
         scan edge(X, Y)
         emit path(X, Y)
     rule path(X, Z) :- edge(X, Y), path(Y, Z).
-        scan edge(X, Y)
-        lookup path(Y, Z) key={0}
-        emit path(X, Z)
         delta path(Y, Z):
             scan delta path(Y, Z)
             lookup edge(X, Y) key={1}

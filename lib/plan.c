@@ -74,10 +74,22 @@
  *
  * A semi-naive delta variant of a rule is the same walk with one literal
  * placed ahead of the others: the delta literal, which reads only the tuples
- * its relation gained in the previous iteration.  It is always a SCAN, even
- * when every argument is a constant, because a membership test would consult
- * the whole relation rather than the delta.  Placed first, it is only ever
- * scanned, so a delta never needs an index of its own.
+ * its relation gained in the previous round.  It is always a SCAN, even when
+ * every argument is a constant, because only a scan walks the delta's range.
+ * Placed first, it is only ever scanned, so a delta never needs an index of
+ * its own.
+ *
+ * Every positive literal of a variant reads through a view (plan.h), and the
+ * view follows from body order alone: the delta literal reads `delta`, a
+ * literal over a relation still being derived -- a member of the component,
+ * which `incomplete` marks -- reads `old` when it is written before the
+ * delta literal and `current` when it is written after it, and a literal
+ * over a complete relation reads `all`.  A variant is refused unless its
+ * delta literal reads a marked relation, so the marks a view is decided by
+ * are always the component's.  The order the
+ * walk chooses decides what each binding costs; the view decides which
+ * tuples a literal can match, and the set of tuples a join produces does not
+ * depend on its nesting, so the two questions are separate.
  *
  * The order is decided before any operation is built.  A first walk places
  * the literals -- recording, for each, where it goes and what it binds -- and
@@ -185,7 +197,7 @@ static void	 order_positive(relic_planner_t *planner, size_t index);
 static void	 order_ranked(relic_planner_t *planner);
 static void	 order_ready_tests(relic_planner_t *planner);
 static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
-		    bool delta);
+		    enum relic_view view);
 static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
 		    int status);
 static void	 place_comparison(relic_planner_t *planner,
@@ -196,7 +208,9 @@ static int	 place_negated(relic_planner_t *planner,
 static size_t	 positive_count(const relic_rule_t *rule);
 static enum relic_op_kind positive_kind(const relic_planner_t *planner,
 		    const relic_relation_t *relation, uint32_t bound,
-		    bool delta);
+		    enum relic_view view);
+static enum relic_view positive_view(const relic_planner_t *planner,
+		    size_t index);
 static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
@@ -269,6 +283,7 @@ append_atom_op(relic_planner_t *planner, enum relic_op_kind kind,
 
 	op = append_op(planner, kind);
 	op->u.atom.relation = relation;
+	op->u.atom.view = RELIC_VIEW_ALL;
 	op->u.atom.terms = terms_alloc(planner, relation->arity);
 	if (relation->arity > 0 && op->u.atom.terms == NULL)
 		return (NULL);
@@ -425,9 +440,9 @@ atom_is_bound(const relic_atom_t *atom, uint16_t arity, uint64_t bound)
  */
 static enum relic_op_kind
 positive_kind(const relic_planner_t *planner,
-    const relic_relation_t *relation, uint32_t bound, bool delta)
+    const relic_relation_t *relation, uint32_t bound, enum relic_view view)
 {
-	if (delta)
+	if (view == RELIC_VIEW_DELTA)
 		return (RELIC_OP_SCAN);
 
 	if (bound == all_columns(relation->arity))
@@ -450,7 +465,8 @@ positive_kind(const relic_planner_t *planner,
  * column is matched against the first rather than looked up.
  */
 static int
-place_atom(relic_planner_t *planner, const relic_atom_t *atom, bool delta)
+place_atom(relic_planner_t *planner, const relic_atom_t *atom,
+    enum relic_view view)
 {
 	relic_relation_t *relation;
 	enum relic_op_kind kind;
@@ -464,7 +480,7 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom, bool delta)
 		return (-1);
 
 	bound = bound_columns(planner, atom, relation->arity);
-	kind = positive_kind(planner, relation, bound, delta);
+	kind = positive_kind(planner, relation, bound, view);
 
 	index_position = 0;
 	if (kind == RELIC_OP_LOOKUP && relic_relation_index(planner->ctx,
@@ -474,7 +490,7 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom, bool delta)
 	op = append_atom_op(planner, kind, relation);
 	if (op == NULL)
 		return (-1);
-	op->u.atom.delta = delta;
+	op->u.atom.view = view;
 	if (kind == RELIC_OP_LOOKUP) {
 		op->u.atom.key_mask = bound;
 		op->u.atom.index_position = index_position;
@@ -923,6 +939,33 @@ order_body(relic_planner_t *planner)
 }
 
 /*
+ * The view the positive literal at body index `index` reads through: `all`
+ * in an ordinary plan and for a complete relation, and in a delta variant
+ * `delta` for the delta literal and `old` or `current` for a literal over
+ * another relation still being derived, as it is written before or after
+ * the delta literal.
+ */
+static enum relic_view
+positive_view(const relic_planner_t *planner, size_t index)
+{
+	const relic_atom_t *atom;
+
+	atom = &planner->rule->body[index].u.atom;
+
+	if (planner->delta_literal == RELIC_PLAN_NO_DELTA)
+		return (RELIC_VIEW_ALL);
+
+	if (index == planner->delta_literal)
+		return (RELIC_VIEW_DELTA);
+
+	if (!is_incomplete(planner->incomplete, atom->pred))
+		return (RELIC_VIEW_ALL);
+
+	return (index < planner->delta_literal ? RELIC_VIEW_OLD :
+	    RELIC_VIEW_CURRENT);
+}
+
+/*
  * Emit one operation per literal, in the order order_body() decided, from
  * nothing bound.  Each operation binds what the literal bound when the order
  * was decided, so every literal meets the bound set it was placed against.
@@ -942,7 +985,7 @@ emit_body(relic_planner_t *planner)
 
 		if (literal->kind == RELIC_LITERAL_POSITIVE) {
 			if (place_atom(planner, &literal->u.atom,
-			    index == planner->delta_literal) != 0)
+			    positive_view(planner, index)) != 0)
 				return (-1);
 		} else if (place_test(planner, literal) != 0)
 			return (-1);
@@ -1007,9 +1050,12 @@ confirm_order_complete(const relic_planner_t *planner)
 
 /*
  * Confirm that the delta literal, when one is asked for, is a positive
- * literal of the rule.  Anything else is a caller's mistake that would not
- * fail on its own: an index past the body would be read, and a comparison
- * or a negated literal taken for an atom.
+ * literal of the rule over a relation `incomplete` marks as still being
+ * derived.  Anything else is a caller's mistake that would not fail on its
+ * own: an index past the body would be read, a comparison or a negated
+ * literal taken for an atom, and without the marks every other member
+ * literal would read the whole relation, deriving what other variants
+ * derive too.
  */
 static int
 confirm_delta_literal(const relic_planner_t *planner)
@@ -1020,15 +1066,26 @@ confirm_delta_literal(const relic_planner_t *planner)
 	rule = planner->rule;
 	index = planner->delta_literal;
 
-	if (index == RELIC_PLAN_NO_DELTA || (index < rule->body_length &&
-	    rule->body[index].kind == RELIC_LITERAL_POSITIVE))
+	if (index == RELIC_PLAN_NO_DELTA)
 		return (0);
 
-	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
-	    "internal error: a delta variant was asked for a literal that is "
-	    "not a positive literal of the rule");
+	if (index >= rule->body_length ||
+	    rule->body[index].kind != RELIC_LITERAL_POSITIVE) {
+		relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
+		    "internal error: a delta variant was asked for a literal "
+		    "that is not a positive literal of the rule");
+		return (-1);
+	}
 
-	return (-1);
+	if (!is_incomplete(planner->incomplete,
+	    rule->body[index].u.atom.pred)) {
+		relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
+		    "internal error: a delta variant was asked for a literal "
+		    "over a relation not being derived");
+		return (-1);
+	}
+
+	return (0);
 }
 
 /*

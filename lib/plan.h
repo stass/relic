@@ -90,6 +90,38 @@ struct relic_plan_term {
 };
 
 /*
+ * Which of a relation's tuples an operation may read.
+ *
+ * A member of the recursive component being evaluated semi-naively has a
+ * delta: the half-open range [first, end) of the identifiers of the tuples it
+ * gained in the previous round.  That one range defines three views of the
+ * member, and with the whole relation they are the four an operation reads
+ * through:
+ *
+ *	all	[1, relation end), the end taken when the operation starts
+ *	old	[1, first), the member's tuples older than its delta
+ *	delta	[first, end), what the member gained in the previous round
+ *	current	[1, end), everything the member held when the round began
+ *
+ * `all` is the view of every operation of an ordinary plan and of every
+ * operation over a complete relation.  The other three occur only in a
+ * semi-naive delta variant, only over members of the component, and are
+ * assigned by body order: the delta literal reads `delta`, a member literal
+ * written before it `old`, and one written after it `current`.  That is what
+ * makes every derivation happen in exactly one variant of one round.
+ *
+ * None of the member views reaches past the delta's end, which was the
+ * member's end when the round began, so nothing a round inserts is visible
+ * to any variant of that round.
+ */
+enum relic_view {
+	RELIC_VIEW_ALL,		/* the relation as it stands when the op starts */
+	RELIC_VIEW_OLD,		/* a member: tuples older than its delta */
+	RELIC_VIEW_DELTA,	/* a member: its delta */
+	RELIC_VIEW_CURRENT	/* a member: everything up to its delta's end */
+};
+
+/*
  * An operation over a relation: SCAN, LOOKUP, MEMBER, ANTI_MEMBER or EMIT.
  * `terms` holds the relation's arity of columns and is NULL when that arity
  * is zero.
@@ -98,11 +130,10 @@ struct relic_plan_term {
  * resolve on every step.  A relation never moves once created, so a plan may
  * keep the pointer for as long as the relation exists.
  *
- * `delta` is set only on the SCAN a semi-naive variant begins with.  That
- * scan walks the tuples its relation gained in the previous iteration rather
- * than the whole relation; which identifiers those are changes from one
- * iteration to the next, so the evaluation supplies the range when the scan
- * starts.
+ * `view` is the view a SCAN, LOOKUP or MEMBER reads through, fixed by the
+ * planner.  The range it denotes changes from one round to the next, so the
+ * evaluation supplies it when the operation starts.  An ANTI_MEMBER and an
+ * EMIT read and write through `all`.
  *
  * `key_mask` and `index_position` are set only on a LOOKUP: the columns it
  * looks up by, bit c for column c, and the position in relation->indexes of
@@ -115,7 +146,7 @@ struct relic_op_atom {
 	relic_plan_term_t	*terms;
 	uint32_t		 key_mask;		/* LOOKUP only */
 	uint32_t		 index_position;	/* LOOKUP only */
-	bool			 delta;
+	enum relic_view		 view;
 };
 
 /*

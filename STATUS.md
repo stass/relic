@@ -169,15 +169,15 @@ and `specs/design-plan.md` section 5.3.
 | Component | State |
 | --- | --- |
 | `lib/plan.{h,c}` | `relic_plan_rule()` takes a delta literal, which it places first as a `SCAN` marked as reading the delta, even when every argument is a constant; any other literal is refused as an internal error |
-| `lib/eval.c` | each component is planned with its members' relations, one plan per rule, and for a recursive component under the default strategy one delta variant per positive literal over a member; the semi-naive fixed point runs every plan once, then the variants round after round, each member's delta the identifier range it gained in the round before, until a round adds nothing; the naive fixed point stays behind `RELIC_F_NAIVE`; the executor counts iterations, derivations, insertions and scanned tuples |
+| `lib/eval.c` | each component is planned with its members' relations, one plan per rule, and for a recursive component under the default strategy one delta variant per positive literal over a member; the semi-naive fixed point runs the facts and the rules reading no member once, then the variants round after round, each member's delta the identifier range it gained in the round before, until a round adds nothing; the naive fixed point stays behind `RELIC_F_NAIVE`; the executor counts iterations, derivations, insertions and scanned tuples |
 | `include/relic.h` | `RELIC_F_NAIVE`; `relic_stats_t` and `relic_stats()`, the cumulative counters and a snapshot of tuples, storage and values by type |
 | `cmd/relic/main.c` | `-X naive` and `-X stats`, the counters printed to standard error when the run ends, whether or not it succeeded; any other `-X` name is a usage error |
 | `tests/` | `tests/equiv/strategies.sh` runs every registered language test under `-X naive` and compares sorted output, diagnostics and status with the default; `test_eval` runs every answer scenario under both strategies and pins both strategies' counters on a chain, computed by hand; `test_plan` checks variant plans and refusals; golden tests for transitive closure over a chain, a cycle, a complete graph and a disconnected one, for rules with two and three recursive literals, and for the counters of both strategies |
 
-The two strategies take the same number of rounds on a chain; what differs is
-the work. Over a six-edge chain the default derives 38 tuples and scans 216,
-the naive fixed point 118 and 694, and the golden counters fail if the default
-regresses toward the naive figures.
+What differs between the two strategies is the work. Over a six-edge chain
+the default derives 33 tuples and scans 174, the naive fixed point 118 and
+694, and the golden counters fail if the default regresses toward the naive
+figures.
 
 **Negation execution, stage S8.** `not` works, specified in
 `specs/design-plan.md` sections 3 and 5 and `specs/design-eval.md` sections 5
@@ -213,8 +213,8 @@ ordered by what the relations hold, specified in `specs/design-index.md` and
 | `cmd/relic/main.c` | `-e`, plans to standard error; `-X no-index` and `-X no-reorder`; `stats: tuples looked up` |
 | `tests/` | `test_index` for chains against a scan under one- and two-column keys, a late build against one kept up, a walk while its chain grows, a discard dropping every index, exact accounting, the memory limit under 200 allowances as two indexes grow, refusing exactly the insertions that would pass it, a refused build, key validation and the distinct-count cache across a discard and refill; `test_plan` for the access path of all eight binding patterns of a 3-ary literal, the architecture section 23 ordering, a bound argument outranking a smaller estimate, selectivity, an empty relation first, the assumed size of a relation being derived and its division per bound column, and both reference switches; `test_eval` runs every answer scenario under both references as well as both fixed points, adds same generation, pins both planners' counters, and pins the counters of a lookup whose own rule extends the chain it walks; an index sweep in `test_exhaustion`; `tests/equiv/strategies.sh` compares every language test under `no-index` and `no-reorder` too; four `-e` golden tests, among them every byte class a string escapes and a line of exactly the longest length that is not cut; `tests/cli.sh` for `-e`, the references and a refused index build; `tests/perf.sh`, reachability over a million edges, bounded by the tuples read |
 
-The default planner closes the six-edge chain of the S7 counters in two
-rounds, deriving 48 tuples while scanning 33 and looking up 36; those golden
+The default planner closes the six-edge chain of the S7 counters in seven
+rounds, deriving 33 tuples while scanning 27 and looking up 21; those golden
 tests now pin the textual planner, and `stats-indexed` the default.
 Reachability over the million-edge graph takes about four seconds, eight
 rounds and a million lookups; without indexes it does not finish in the
@@ -367,6 +367,32 @@ against relic's before anything is timed, specified in
 Every engine agrees with relic on every workload it finishes within the time
 limit. CSPA over the Graspan data sets, the recorded run and the scale sweep
 are open in `TODO.md`.
+
+**Evaluation cost.** What a derivation costs, specified in
+`specs/design-evaluation-cost.md`. Section 3, views, is implemented.
+
+| Component | State |
+| --- | --- |
+| `lib/plan.{h,c}` | an operation over a relation reads through a view -- `all`, or for a member in a delta variant `delta`, `old` or `current` -- assigned by body order: the delta literal reads its delta, a member literal written before it the old view and one after it the current view; a variant whose delta literal does not read a relation marked as still being derived is refused; the delta literal is still placed first, as a `SCAN` |
+| `lib/eval.c` | the executor takes each view's range from the member's delta when an operation starts, and a `MEMBER` holds only for a tuple whose identifier lies in its view; round 0 runs the facts and the exit rules, a recursive rule having only its variants; every member's delta starts empty at the first identifier, so the first delta is the whole member; each boundary advances, once each, the members that gained and those whose delta held something; a variant runs only once every old view its plan reads holds something, counted down as each member's delta first moves past the first identifier; a component's plans are recorded per rule with a body, so explain pairs a rule with its variants by construction and counts the facts as the rules without one |
+| `lib/relation.c` | `relic_relation_find()` gives the identifier of the tuple holding some columns |
+| `lib/explain.c` | a recursive rule under the semi-naive fixed point shows its variants and no plan; `scan`, `lookup` and `member` are followed by `delta` or `old` for those views |
+| `tests/` | `test_eval`: the complete graph on 40 nodes closes in 68,800 derivations where the evaluator without views made 132,800, a rule reading its own predicate twice over a 20-node chain makes 20 choose 3 derivations for it, with its rounds and scans, two members gaining in alternate rounds exercise the boundary, and every counter scenario re-derived by hand, the lookup snapshot under the naive fixed point; `test_plan`: the view of each literal of a variant, and a variant over an unmarked relation refused; `tests/random`: for a program whose rules hold no `_`, materializing must make exactly one derivation per fact and per distinct binding of each rule body's variables, counted as the rows of one query per body under the naive fixed point, a new verdict `derivations miscounted` |
+| `tests/lang` | the `-e` and `-X stats` golden files of recursive programs regenerated; `explain-views` shows both views a rule reading its own predicate twice reads |
+
+Every derivation is made once: `derivations` is the facts plus the ways each
+body is satisfied over the fixed point, which on the six-edge chain is also
+the number of tuples inserted. `tc-cyclic-bf` of the comparison makes 48.9
+million derivations where it made 74.2 million, and no counter of
+`bench/run.sh` rose on any workload. A component may take more rounds, up to
+its longest derivation chain, since a round no longer sees what it inserts:
+the six-edge chain takes seven rather than two. The evaluator without views fails the new
+random verdict on 24 of the first 300 seeds, each shrunk to a few
+statements, and fails the three new `test_eval` scenarios; a boundary that
+does not empty the delta of a member that rested is caught by the
+alternating-members scenario and by the recursion scenarios of `test_eval`,
+and running a variant whose old view is empty by the scans of the chain
+scenario.
 
 ### Verified
 
@@ -604,6 +630,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-cli.md` | the phases of an invocation, which queries run, exit statuses, the output formats, `-n`, verbosity, the interactive mode |
 | `specs/design-hardening.md` | the program generator, the differential driver, the shrinker, the fuzz targets, coverage and benchmarks |
 | `specs/design-bench.md` | the comparison with other engines: engines and modes, workloads, data, answers, measurement |
+| `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the tagged identifier table |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |

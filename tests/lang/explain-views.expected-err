@@ -1,0 +1,18 @@
+stratum 0, component 0: e/2
+    facts: 3
+stratum 0, component 1 (recursive): p/2
+    rule p(X, Y) :- e(X, Y).
+        scan e(X, Y)
+        emit p(X, Y)
+    rule p(X, Z) :- p(X, Y), p(Y, Z).
+        delta p(X, Y):
+            scan delta p(X, Y)
+            lookup p(Y, Z) key={0}
+            emit p(X, Z)
+        delta p(Y, Z):
+            scan delta p(Y, Z)
+            lookup old p(X, Y) key={1}
+            emit p(X, Z)
+query $q0(X) :- p(a, X).
+    lookup p(a, X) key={0}
+    emit $q0(X)

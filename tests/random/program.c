@@ -33,6 +33,8 @@ static void	 write_atom(FILE *out, const random_program_t *program,
 		    uint8_t predicate, const random_term_t *args);
 static void	 write_body(FILE *out, const random_program_t *program,
 		    const random_body_t *body);
+static void	 write_rule(FILE *out, const random_program_t *program,
+		    const random_rule_t *rule);
 static void	 write_term(FILE *out, random_term_t term);
 
 static const char *const comparator_spellings[COMPARE_COUNT] = {
@@ -151,6 +153,66 @@ random_program_statements(const random_program_t *program)
 }
 
 /*
+ * Whether any rule's body holds `_`.  A binding of such a body's variables
+ * does not name the tuples that satisfy it, since the column `_` stands in
+ * may hold several values under one binding.
+ */
+bool
+random_program_has_anonymous(const random_program_t *program)
+{
+	for (size_t r = 0; r < program->rule_count; r++) {
+		const random_body_t *body = &program->rules[r].body;
+
+		for (size_t i = 0; i < body->length; i++) {
+			const random_literal_t *literal = &body->literals[i];
+
+			for (size_t a = 0; a < literal_arity(program, literal);
+			    a++) {
+				if (literal->args[a].kind == TERM_ANONYMOUS)
+					return (true);
+			}
+		}
+	}
+	return (false);
+}
+
+/*
+ * The program's facts and rules, followed not by its queries but by one
+ * query per rule with a body, asking for that body alone, in rule order.
+ * A query's columns are its named variables, so each one's rows are the
+ * distinct bindings of its rule's body variables.  The caller frees the
+ * result.
+ */
+char *
+random_bindings_text(const random_program_t *program)
+{
+	FILE *out;
+	char *text = NULL;
+	size_t length = 0;
+
+	out = open_memstream(&text, &length);
+	if (out == NULL)
+		err(1, "open_memstream");
+
+	for (size_t r = 0; r < program->rule_count; r++)
+		write_rule(out, program, &program->rules[r]);
+
+	for (size_t r = 0; r < program->rule_count; r++) {
+		const random_body_t *body = &program->rules[r].body;
+
+		if (body->length == 0)
+			continue;
+		write_body(out, program, body);
+		fputs("?\n", out);
+	}
+
+	if (fclose(out) != 0)
+		err(1, "writing a program");
+
+	return (text);
+}
+
+/*
  * The program as source text: its facts and rules in order, then its
  * queries.  The caller frees the result.
  */
@@ -174,21 +236,25 @@ random_program_text(const random_program_t *program)
 void
 random_program_write(const random_program_t *program, FILE *out)
 {
-	for (size_t r = 0; r < program->rule_count; r++) {
-		const random_rule_t *rule = &program->rules[r];
-
-		write_atom(out, program, rule->head_predicate, rule->head);
-		if (rule->body.length > 0) {
-			fputs(" :- ", out);
-			write_body(out, program, &rule->body);
-		}
-		fputs(".\n", out);
-	}
+	for (size_t r = 0; r < program->rule_count; r++)
+		write_rule(out, program, &program->rules[r]);
 
 	for (size_t q = 0; q < program->query_count; q++) {
 		write_body(out, program, &program->queries[q]);
 		fputs("?\n", out);
 	}
+}
+
+static void
+write_rule(FILE *out, const random_program_t *program,
+    const random_rule_t *rule)
+{
+	write_atom(out, program, rule->head_predicate, rule->head);
+	if (rule->body.length > 0) {
+		fputs(" :- ", out);
+		write_body(out, program, &rule->body);
+	}
+	fputs(".\n", out);
 }
 
 static void

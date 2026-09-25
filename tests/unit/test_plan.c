@@ -39,7 +39,7 @@
 #define	SCENARIO_ACCESS		"each binding pattern gets its access path"
 #define	SCENARIO_COMPARISONS	"a comparison goes where its operands are bound"
 #define	SCENARIO_DELTA		"a delta variant scans its delta literal first"
-#define	SCENARIO_DELTA_REFUSED	"a delta literal must be a positive literal"
+#define	SCENARIO_DELTA_REFUSED	"a delta literal must be a member literal"
 #define	SCENARIO_EMIT_TARGET	"the EMIT writes the relation it is given"
 #define	SCENARIO_ESTIMATE	"the smaller estimate goes first"
 #define	SCENARIO_FACT		"a fact is a lone EMIT of constants"
@@ -228,21 +228,38 @@ fixture_plan_rule(fixture_t *fixture, size_t rule_index,
 
 /*
  * Load a program without evaluating it and plan one of its rules, or one
- * delta variant of it, with the textual planner.
+ * delta variant of it, with the textual planner.  A variant is planned with
+ * the relation its delta literal reads marked as still being derived, as the
+ * member of a component it would be; a delta literal that is not a positive
+ * literal marks nothing, for the planner to refuse.
  */
 static bool
 fixture_plan_variant(fixture_t *fixture, const char *program,
     size_t rule_index, size_t delta_literal)
 {
-	return (fixture_load(fixture, program, TEXTUAL_FLAGS, false) &&
-	    fixture_plan_rule(fixture, rule_index, delta_literal, NULL));
+	const relic_rule_t *rule;
+	bool incomplete[8];
+
+	if (!fixture_load(fixture, program, TEXTUAL_FLAGS, false) ||
+	    rule_index >= fixture->ctx->program.rules.count ||
+	    relic_pred_count(fixture->ctx) > 8)
+		return (false);
+
+	bzero(incomplete, sizeof(incomplete));
+	rule = &fixture->ctx->program.rules.entries[rule_index];
+	if (delta_literal < rule->body_length &&
+	    rule->body[delta_literal].kind == RELIC_LITERAL_POSITIVE)
+		incomplete[rule->body[delta_literal].u.atom.pred - 1] = true;
+
+	return (fixture_plan_rule(fixture, rule_index, delta_literal,
+	    incomplete));
 }
 
 static bool
 fixture_plan(fixture_t *fixture, const char *program, size_t rule_index)
 {
-	return (fixture_plan_variant(fixture, program, rule_index,
-	    RELIC_PLAN_NO_DELTA));
+	return (fixture_load(fixture, program, TEXTUAL_FLAGS, false) &&
+	    fixture_plan_rule(fixture, rule_index, RELIC_PLAN_NO_DELTA, NULL));
 }
 
 static void
@@ -467,13 +484,17 @@ a_comparison_goes_where_its_operands_are_bound(void)
  * A delta variant places its delta literal first, as a SCAN of the delta,
  * and plans the rest as usual against what that scan binds.
  *
- * In p(X, Z) :- p(X, Y), p(Y, Z) with the second literal as the delta, the
- * delta scan binds Y and Z, and the first literal becomes a scan of the whole
- * relation that binds X and matches Y.  In r(X) :- e(X, Y), e(a, b), X != Y
- * with the constant literal as the delta, that literal is a delta SCAN even
- * though every argument is a constant, because a membership test would ask
- * the whole relation; the comparison follows the scan that binds its
- * operands, as it would in any plan.
+ * In p(X, Z) :- p(X, Y), p(Y, Z), with p still being derived and the second
+ * literal as the delta, the delta scan binds Y and Z, and the first literal
+ * becomes a scan of p's old view that binds X and matches Y: it is written
+ * before the delta literal.  With the first literal as the delta, the second
+ * reads p's current view, being written after it.
+ *
+ * In r(X) :- e(X, Y), e(a, b), X != Y with the constant literal as the
+ * delta, that literal is a delta SCAN even though every argument is a
+ * constant, because only a scan walks the delta's range; e(X, Y), written
+ * before it, reads e's old view; and the comparison follows the scan that
+ * binds its operands, as it would in any plan.
  */
 static void
 a_delta_variant_scans_its_delta_first(void)
@@ -484,16 +505,33 @@ a_delta_variant_scans_its_delta_first(void)
 	static const enum relic_op_kind constant_kinds[] = {
 		RELIC_OP_SCAN, RELIC_OP_SCAN, RELIC_OP_FILTER, RELIC_OP_EMIT
 	};
+	static const char *const recursive = "e(a, b).\n"
+	    "p(X, Y) :- e(X, Y).\n"
+	    "p(X, Z) :- p(X, Y), p(Y, Z).\n";
 	fixture_t fixture;
 	const relic_op_atom_t *delta;
 	const relic_op_atom_t *full;
+	bool incomplete[8];
 	uint16_t x;
 	uint16_t y;
 	uint16_t z;
 
-	if (fixture_plan_variant(&fixture, "e(a, b).\n"
-	    "p(X, Y) :- e(X, Y).\n"
-	    "p(X, Z) :- p(X, Y), p(Y, Z).\n", 2, 1)) {
+	bzero(incomplete, sizeof(incomplete));
+	if (!fixture_load(&fixture, recursive, TEXTUAL_FLAGS, false) ||
+	    relic_pred_count(fixture.ctx) > 8) {
+		check(false, SCENARIO_DELTA, "the recursive rule is loaded");
+		fixture_release(&fixture);
+		return;
+	}
+	incomplete[fixture.ctx->program.rules.entries[2].head - 1] = true;
+
+	check(fixture_plan_rule(&fixture, 2, 0, incomplete) &&
+	    fixture.plan.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
+	    fixture.plan.ops[1].u.atom.view == RELIC_VIEW_CURRENT,
+	    SCENARIO_DELTA, "a member literal after the delta literal reads the "
+	    "current view");
+
+	if (fixture_plan_rule(&fixture, 2, 1, incomplete)) {
 		check(kinds_are(&fixture.plan, recursive_kinds, 3),
 		    SCENARIO_DELTA, "the variant is two SCANs and an EMIT");
 
@@ -503,8 +541,10 @@ a_delta_variant_scans_its_delta_first(void)
 		delta = &fixture.plan.ops[0].u.atom;
 		full = &fixture.plan.ops[1].u.atom;
 
-		check(delta->delta && !full->delta, SCENARIO_DELTA,
-		    "only the first scan reads the delta");
+		check(delta->view == RELIC_VIEW_DELTA &&
+		    full->view == RELIC_VIEW_OLD, SCENARIO_DELTA,
+		    "the first scan reads the delta, and the member literal "
+		    "written before it the old view");
 		check(delta->terms[0].action == RELIC_PLAN_BIND &&
 		    delta->terms[0].u.slot == y &&
 		    delta->terms[1].action == RELIC_PLAN_BIND &&
@@ -524,10 +564,13 @@ a_delta_variant_scans_its_delta_first(void)
 	    "r(X) :- e(X, Y), e(a, b), X != Y.\n", 1, 1)) {
 		check(kinds_are(&fixture.plan, constant_kinds, 4),
 		    SCENARIO_DELTA, "the constant literal is scanned first");
-		check(fixture.plan.ops[0].u.atom.delta &&
+		check(fixture.plan.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
 		    fixture.plan.ops[0].u.atom.terms[0].action ==
-		    RELIC_PLAN_CONSTANT, SCENARIO_DELTA,
-		    "the constant literal scans the delta, matching constants");
+		    RELIC_PLAN_CONSTANT &&
+		    fixture.plan.ops[1].u.atom.view == RELIC_VIEW_OLD,
+		    SCENARIO_DELTA, "the constant literal scans the delta, "
+		    "matching constants, and the literal written before it "
+		    "reads the old view");
 	} else {
 		check(false, SCENARIO_DELTA, "the constant variant is planned");
 	}
@@ -536,7 +579,8 @@ a_delta_variant_scans_its_delta_first(void)
 	check(fixture_plan(&fixture, "e(a, b).\n"
 	    "r(X) :- e(X, Y), e(a, b), X != Y.\n", 1) &&
 	    fixture.plan.ops[2].kind == RELIC_OP_MEMBER &&
-	    !fixture.plan.ops[0].u.atom.delta, SCENARIO_DELTA,
+	    fixture.plan.ops[0].u.atom.view == RELIC_VIEW_ALL &&
+	    fixture.plan.ops[2].u.atom.view == RELIC_VIEW_ALL, SCENARIO_DELTA,
 	    "without a delta the constant literal is a membership test");
 	fixture_release(&fixture);
 }
@@ -544,7 +588,9 @@ a_delta_variant_scans_its_delta_first(void)
 /*
  * A delta literal that is not a positive literal of the rule -- past the end
  * of the body, a comparison, or a negated literal -- is refused with one
- * error rather than read as an atom it is not.
+ * error rather than read as an atom it is not, and so is one over a relation
+ * the planner is not told is being derived, which would leave the variant's
+ * other member literals reading the whole relation.
  */
 static void
 a_delta_literal_must_be_positive(void)
@@ -568,6 +614,13 @@ a_delta_literal_must_be_positive(void)
 	check(!fixture_plan_variant(&fixture, "e(a, b).\nf(b).\n"
 	    "r(X) :- e(X, Y), not f(Y).\n", 2, 1), SCENARIO_DELTA_REFUSED,
 	    "a negated literal is refused");
+	checkf(fixture.errors == 1, SCENARIO_DELTA_REFUSED,
+	    "one error should be reported, %zu were", fixture.errors);
+	fixture_release(&fixture);
+
+	check(fixture_load(&fixture, program, TEXTUAL_FLAGS, false) &&
+	    !fixture_plan_rule(&fixture, 1, 0, NULL), SCENARIO_DELTA_REFUSED,
+	    "a delta literal over a relation not being derived is refused");
 	checkf(fixture.errors == 1, SCENARIO_DELTA_REFUSED,
 	    "one error should be reported, %zu were", fixture.errors);
 	fixture_release(&fixture);
@@ -718,8 +771,8 @@ a_negated_literal_is_placed_once_bound(void)
 	check(g->terms[0].action == RELIC_PLAN_BOUND &&
 	    g->terms[0].u.slot == slot_named(&fixture, 5, "X"),
 	    SCENARIO_NEGATION, "not g(X) reads the X the scan bound");
-	check(!done->delta && !f->delta, SCENARIO_NEGATION,
-	    "no negated literal reads a delta");
+	check(done->view == RELIC_VIEW_ALL && f->view == RELIC_VIEW_ALL,
+	    SCENARIO_NEGATION, "no negated literal reads a delta");
 
 	fixture_release(&fixture);
 }
