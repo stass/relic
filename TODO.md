@@ -653,19 +653,29 @@ over the `sparse-cyclic` data set ran past 600 s in relic against 117 s in the
 interpreter. Semi-naive evaluation does not repeat work here -- on a chain the
 nonlinear closure makes about 2.5 derivations per path triple at every length
 -- so the gap is the cost of a derivation and its lookups, not their number.
-Profiles of `tc-cyclic` and `sg-cyclic` put about three quarters of the time
-in the duplicate check of `relic_relation_insert()`, split between
-`relic_idprobe_next()` and the tuple comparison. 92 to 96 per cent of those
-checks find a duplicate, each a miss on the slot array and a miss on the tuple
-that confirms it; a table of a million tuples does not fit in cache. Souffle
-keeps the same relation in a B-tree and inserts with the outer loop fixed on
-the head's first column, so consecutive inserts land in the same leaf. A hash
-stored beside each identifier was measured and set aside
-(`specs/design-evaluation-cost.md` section 5.2): it saves the tuple reads of
-the candidates that are not the match, which a duplicate-heavy workload makes
-few of, and took `tc-cyclic` and `sg-cyclic` 8 per cent faster and 4 per cent
-slower for a larger peak on both. Batched insertion with prefetching, section
-6 of the same document, overlaps the two misses instead.
+Profiles of `tc-cyclic` and `sg-cyclic` put 59 and 49 per cent of the time in
+the duplicate check of relation insertion, with batched insertion overlapping
+its misses (`specs/design-evaluation-cost.md` section 6); it held 73 and 68
+per cent before. 92 to 96 per cent of those checks find a duplicate, each a
+miss on the slot array and a miss on the tuple that confirms it; a table of a
+million tuples does not fit in cache. Souffle keeps the same relation in a
+B-tree and inserts with the outer loop fixed on the head's first column, so
+consecutive inserts land in the same leaf. A hash stored beside each
+identifier was measured and set aside (`specs/design-evaluation-cost.md`
+section 5.2): it saves the tuple reads of the candidates that are not the
+match, which a duplicate-heavy workload makes few of, and took `tc-cyclic` and
+`sg-cyclic` 8 per cent faster and 4 per cent slower for a larger peak on both.
+Worth measuring next: the stored hash again with batching in place, and
+whether a successful search visits enough slots past the first to make
+prefetching them pay.
+
+**Writing a row locks the output stream once per field.** [Low, component:
+`cmd/relic/output.c`] `write_row()` writes each field and separator with
+`fputs()` and `fputc()`, each of which takes and releases the stream's lock;
+on `tc-cyclic`, which writes about two million rows, the lock calls are about
+5 per cent of the profile. Taking the lock once per row with `flockfile()` and
+writing with `putc_unlocked()`, both POSIX, or formatting the row into a
+buffer and writing it with one call, would remove them.
 
 **Loading facts costs relic more memory than any other engine.** [Medium,
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000

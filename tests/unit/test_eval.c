@@ -51,7 +51,20 @@
 #define	SCENARIO_ORDER		"the total order sorts across types"
 #define	SCENARIO_RECURSION	"recursion reaches the least fixed point"
 #define	SCENARIO_STATS		"the counters record the work each strategy did"
-#define	SCENARIO_SNAPSHOT	"a lookup sees its relation as it started"
+#define	SCENARIO_SNAPSHOT	"a naive pass walks a chain one edge further"
+#define	SCENARIO_BATCHES	"a plan reads none of its own batches"
+
+/*
+ * The fan-out of the batch scenario: more tuples than one batch holds, so
+ * that a single plan inserts a full batch while it runs.  FAN_LINE_MAX
+ * bounds a line of the program it writes, whose longest, an edge between
+ * two nodes numbered below 1000, takes 16 bytes.
+ */
+#define	FAN_OUT			100
+#define	FAN_LINE_MAX		32
+
+_Static_assert(FAN_OUT > RELIC_INSERT_BATCH, "the fan-out fills a batch");
+_Static_assert(FAN_OUT < 1000, "a line of the fan fits FAN_LINE_MAX");
 
 /* Room for the rendered answers any test below expects. */
 #define	RENDERED_MAX	1024
@@ -118,7 +131,10 @@ static void	 materialized_counters_are(const char *scenario,
 		    const char *program, unsigned int flags, const char *what,
 		    counters_t expected);
 static void	 a_delta_is_emptied_when_its_member_rests(void);
-static void	 a_lookup_sees_its_relation_as_it_started(void);
+static void	 a_naive_pass_walks_a_chain_one_edge_further(void);
+static void	 a_plan_reads_none_of_its_own_batches(void);
+static void	 fan_counters_are(const char *what, bool binary,
+		    unsigned int flags, counters_t expected);
 static void	 a_discard_gives_back_what_the_limits_count(void);
 static void	 a_later_load_can_make_a_derived_tuple_false(void);
 static void	 a_later_load_extends_the_fixed_point(void);
@@ -837,8 +853,8 @@ materialized_counters_are(const char *scenario, const char *program,
  * Naively, every pass runs both plans over everything, and the recursive
  * rule joins path first and scans edge for every path.  Pass 1: the base
  * rule scans 3 edges and derives ab, bc and cd; the recursive rule scans
- * those 3 paths, 3 edges for each, and derives ac and bd, which it can see
- * because the scan of path takes its end when it starts.  Pass 2 is 3 edges
+ * those 3 paths, 3 edges for each, and derives ac and bd from the paths the
+ * base rule's plan derived before it started.  Pass 2 is 3 edges
  * and 3 derivations for the base rule, and 5 paths and 15 edges and 3
  * derivations, one of them ad, for the recursive one.  Pass 3 is the same
  * over 6 paths and finds nothing new: 3 + 6 + 18 scanned, 6 derived.  3
@@ -853,9 +869,13 @@ materialized_counters_are(const char *scenario, const char *program,
  * up by Y.  In pass 1 the base rule derives ab, bc and cd as before, and the
  * recursive rule scans the 3 edges: for ab it looks up paths ending in a and
  * finds none, for bc those ending in b and finds ab, deriving ac, and for cd
- * those ending in c and finds bc and the ac just inserted, deriving bd and
- * ad.  Pass 2 repeats pass 1 and finds nothing new.  2 passes, 15
- * derivations, 12 scanned, 6 looked up.
+ * those ending in c and finds bc, deriving bd; ac is derived by the plan
+ * that is running, which reads path as it stood when it started.  3 + 3
+ * scanned, 2 looked up, 3 + 2 derived.  Pass 2 derives the same over 5
+ * paths, and for cd finds bc and ac, deriving bd and the new ad: 3 + 3
+ * scanned, 3 looked up, 3 + 3 derived.  Pass 3 is pass 2 again and finds
+ * nothing new.  3 passes, 3 + 5 + 6 + 6 = 20 derivations, 18 scanned, 8
+ * looked up.
  */
 static void
 the_counters_record_the_work_done(void)
@@ -892,8 +912,8 @@ the_counters_record_the_work_done(void)
 	relic_destroy(ctx);
 
 	materialized_counters_are(SCENARIO_STATS, program, RELIC_F_NAIVE,
-	    "naive", (counters_t){ .iterations = 2, .derivations = 15,
-	    .inserted = 9, .scanned = 12, .looked_up = 6 });
+	    "naive", (counters_t){ .iterations = 3, .derivations = 20,
+	    .inserted = 9, .scanned = 18, .looked_up = 8 });
 	materialized_counters_are(SCENARIO_STATS, program, textual,
 	    "textual semi-naive", (counters_t){ .iterations = 4,
 	    .derivations = 9, .inserted = 9, .scanned = 27, .looked_up = 0 });
@@ -904,12 +924,10 @@ the_counters_record_the_work_done(void)
 }
 
 /*
- * A lookup through the whole relation stops at the end its relation had
- * when the lookup started, even when the rule below it inserts into the very
- * chain it is walking.  Only the naive fixed point reads a relation it is
- * deriving through the whole relation -- a semi-naive variant reads a member
- * through views that end where the round began -- so the program runs under
- * it.  The counters, computed by hand, are what show it:
+ * Under the naive fixed point a pass extends a chain by one edge: a rule
+ * that walks the chain it derives into sees none of what it derives in the
+ * same pass.  The counters, computed by hand, pin the naive evaluator's
+ * work on a small recursive program:
  *
  *	s(a).  seed(a, n0).  seed(a, m0).
  *	e(n0, n1).  e(n1, n2).  e(n2, n3).
@@ -921,19 +939,21 @@ the_counters_record_the_work_done(void)
  * insertions.  Every pass scans the 2 seeds and derives an0 and am0, and
  * scans s: 3 scanned and 2 derived.  In pass 1 the recursive rule then walks
  * the chain for a, which holds those 2 tuples: an0 finds e(n0, n1) and
- * inserts an1 at the end of the chain, am0 finds no edge, and an1 is past
- * the end the walk started with, so the walk stops.  2 + 1 looked up, 1
- * derived.  Each later pass walks one more tuple of the chain and finds one
+ * derives an1, am0 finds no edge, and an1 is past the end the chain had when
+ * the plan started, so the walk stops.  2 + 1 looked up, 1 derived.  Each
+ * later pass walks one more tuple of the chain and finds one
  * more edge: pass 2 looks up 3 + 2 and derives an1 and an2, pass 3 looks up
  * 4 + 3 and derives an1, an2 and an3, and pass 4 looks up 5 + 3, derives the
  * same three and finds nothing new.  4 passes, 23 derivations, 11
  * insertions, 12 scanned, 23 looked up.
  *
- * A walk that did not stop would go on to an1, inserted while the walk was
- * at an0, and on down the chain, deriving all of r in the first pass.
+ * Each plan here derives fewer tuples than a batch holds, so an1 waits in
+ * the batch until the plan ends and the walk never meets it;
+ * a_plan_reads_none_of_its_own_batches() is the scenario in which a batch
+ * is inserted while a walk runs.
  */
 static void
-a_lookup_sees_its_relation_as_it_started(void)
+a_naive_pass_walks_a_chain_one_edge_further(void)
 {
 	static const char *const program =
 	    "s(a).\nseed(a, n0).\nseed(a, m0).\n"
@@ -944,6 +964,98 @@ a_lookup_sees_its_relation_as_it_started(void)
 	materialized_counters_are(SCENARIO_SNAPSHOT, program, RELIC_F_NAIVE,
 	    "naive", (counters_t){ .iterations = 4, .derivations = 23,
 	    .inserted = 11, .scanned = 12, .looked_up = 23 });
+}
+
+/*
+ * A plan that derives more tuples than a batch holds, so that one batch is
+ * inserted while the plan runs, reads none of them: what it reads of its
+ * head relation stops where the relation ended when the plan started, not
+ * where the last batch left it.  With the fan-out F = FAN_OUT, the program
+ * is written with r unary, read by membership, and with r binary, read by a
+ * lookup or, without indexes, by a scan:
+ *
+ *	e(s0, t0).  ...  e(sF-1, tF-1).
+ *	e(t0, u0).  ...  e(tF-1, uF-1).
+ *	r(s0).  ...  r(sF-1).		r(s0, w).  ...  r(sF-1, w).
+ *	r(Y) :- e(Z, Y), r(Z).		r(Y, W) :- e(Z, Y), r(Z, W).
+ *
+ * Under the naive fixed point in written order, the recursive rule scans the
+ * 2F edges and, for each, tests its source for membership in r, which is not
+ * counted as looked up, looks r up by it, or scans the whole of r.  The 2F
+ * edges are 2F derivations and insertions.  Every pass of r's component
+ * derives its F facts again, and then:
+ *
+ *	pass 1: s edges derive the F tuples tI, the t edges find no tI in r
+ *	pass 2: s edges derive tI again, the t edges the F new tuples uI
+ *	pass 3: both derive what r holds, and nothing is new
+ *
+ * which is 3 passes, 2F + 2F + 3F + 3F derivations, 2F + F + F + F
+ * insertions and 3 * 2F edges scanned.  The lookups find one sI in pass 1,
+ * and one sI and one tI for each of theirs in passes 2 and 3: F + 2F + 2F
+ * looked up.  The scans of r read the F, 2F and 3F tuples r held when each
+ * pass's plan started, once per edge: 2F * (F + 2F + 3F) = 12F^2 more
+ * scanned.  A plan that read the batch it inserted at the
+ * RELIC_INSERT_BATCH-th derivation would find those tI in r in pass 1 and
+ * make more derivations.
+ */
+static void
+a_plan_reads_none_of_its_own_batches(void)
+{
+	static const unsigned int flags = RELIC_F_NAIVE | RELIC_F_NO_REORDER;
+
+	fan_counters_are("a membership test", false, flags,
+	    (counters_t){ .iterations = 3, .derivations = 10 * FAN_OUT,
+	    .inserted = 5 * FAN_OUT, .scanned = 6 * FAN_OUT,
+	    .looked_up = 0 });
+	fan_counters_are("a lookup", true, flags,
+	    (counters_t){ .iterations = 3, .derivations = 10 * FAN_OUT,
+	    .inserted = 5 * FAN_OUT, .scanned = 6 * FAN_OUT,
+	    .looked_up = 5 * FAN_OUT });
+	fan_counters_are("a scan", true, flags | RELIC_F_NO_INDEX,
+	    (counters_t){ .iterations = 3, .derivations = 10 * FAN_OUT,
+	    .inserted = 5 * FAN_OUT,
+	    .scanned = 6 * FAN_OUT + 12 * FAN_OUT * FAN_OUT,
+	    .looked_up = 0 });
+}
+
+/*
+ * Materialize the fan of a_plan_reads_none_of_its_own_batches(), with r of
+ * arity 2 when `binary` and of arity 1 otherwise, and compare the counters
+ * with `expected`.  Every line of the program is well under
+ * FAN_LINE_MAX bytes.
+ */
+static void
+fan_counters_are(const char *what, bool binary, unsigned int flags,
+    counters_t expected)
+{
+	char *program;
+	size_t length;
+	size_t capacity;
+	int i;
+
+	capacity = (size_t)FAN_OUT * 3 * FAN_LINE_MAX + FAN_LINE_MAX;
+	program = malloc(capacity);
+	if (program == NULL) {
+		check(false, SCENARIO_BATCHES, "the program is written");
+		return;
+	}
+
+	length = 0;
+	for (i = 0; i < FAN_OUT; i++)
+		length += (size_t)snprintf(program + length, capacity - length,
+		    "e(s%d, t%d).\n", i, i);
+	for (i = 0; i < FAN_OUT; i++)
+		length += (size_t)snprintf(program + length, capacity - length,
+		    "e(t%d, u%d).\n", i, i);
+	for (i = 0; i < FAN_OUT; i++)
+		length += (size_t)snprintf(program + length, capacity - length,
+		    binary ? "r(s%d, w).\n" : "r(s%d).\n", i);
+	snprintf(program + length, capacity - length, "%s", binary ?
+	    "r(Y, W) :- e(Z, Y), r(Z, W).\n" : "r(Y) :- e(Z, Y), r(Z).\n");
+
+	materialized_counters_are(SCENARIO_BATCHES, program, flags, what,
+	    expected);
+	free(program);
 }
 
 /*
@@ -1151,7 +1263,8 @@ main(void)
 	    RELIC_F_NAIVE | RELIC_F_NO_INDEX | RELIC_F_NO_REORDER);
 
 	the_counters_record_the_work_done();
-	a_lookup_sees_its_relation_as_it_started();
+	a_naive_pass_walks_a_chain_one_edge_further();
+	a_plan_reads_none_of_its_own_batches();
 	every_derivation_is_made_once();
 	two_member_literals_derive_once();
 	a_delta_is_emptied_when_its_member_rests();

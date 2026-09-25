@@ -813,16 +813,16 @@ question and not a dependency in the sense of architecture section 74.
 ### 6.4 The buffer
 
 One buffer per evaluation, since one plan runs at a time and the buffer is
-empty between plans: `RELIC_INSERT_BATCH` tuples of the widest head of any
-plan the evaluation builds, a head of arity zero counting as one column so
-that the buffer always exists. It is grown from the evaluation arena when a
-plan is built whose head is wider than any before, and charged as the arena
-is, so a round still allocates nothing, a program of narrow relations pays
-for narrow tuples, and a program of many rules costs no more than one of
-few. A plan has one `EMIT`, so the buffer holds tuples of one relation
-until it is inserted. `RELIC_INSERT_BATCH` is 64: measured on `tc-cyclic`
-and `sg-cyclic`, 16 tuples overlap most of the misses, 64 a little more,
-and 256 no more than 64.
+empty between plans: `RELIC_INSERT_BATCH` tuples of the widest head among the
+rules the evaluation is given, or of the query's answer, a head of arity zero
+counting as one column so that the buffer always exists. It is allocated from
+the evaluation arena once, when the evaluation begins, and charged as the
+arena is, so a round still allocates nothing, a program of narrow relations
+pays for narrow tuples, and a program of many rules costs no more than one of
+few. A plan has one `EMIT`, so the buffer holds tuples of one relation until
+it is inserted. `RELIC_INSERT_BATCH` is 64: measured on `tc-cyclic` and
+`sg-cyclic`, 16 tuples overlap most of the misses, 64 a little more, and 256
+no more than 64.
 
 ---
 

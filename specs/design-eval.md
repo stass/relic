@@ -58,18 +58,23 @@ ten thousand literals uses no more C stack than a rule with one.
 
 ### 2.1 State
 
-The executor's state is exactly two things:
+The executor's state is exactly three things:
 
 * **the binding frame**, one domain identifier per slot, at most 64 per D-7.
   A slot is written by the operation that binds it and read only by later
   ones, so a new match simply overwrites what the previous match left;
   nothing is saved and nothing is restored on backtracking, because nothing
   earlier in the plan ever reads a slot a later operation binds.
-* **one cursor per operation**, the half-open range of tuple identifiers a
-  generator has still to visit. Tests keep no state.
+* **one state per operation**: the range of tuple identifiers its view
+  covers, resolved for every operation when the plan starts, and the
+  cursor, the half-open range a generator has still to visit. Tests keep
+  no cursor.
+* **the batch** of head tuples the `EMIT` has derived and not yet inserted,
+  `specs/design-evaluation-cost.md` section 6.
 
-Neither is allocated in the loop. The frame is a fixed array, and each plan's
-cursors are allocated with the plan, when the evaluation that runs it begins.
+None is allocated in the loop. The frame is a fixed array, each plan's
+operation states are allocated with the plan, when the evaluation that runs
+it begins, and the batch when the evaluation begins.
 
 ### 2.2 A generator never holds a tuple pointer
 
@@ -272,7 +277,7 @@ complete before the component began, so round 0 derived everything it ever
 will.
 
 The evaluation keeps each member's delta and derives the ranges of its views
-from it, and an operation takes its view's range when it starts. The plan
+from it, and every operation's view is resolved when its plan starts. The plan
 records only the view; which identifiers it denotes changes every round, and
 the plan does not.
 

@@ -552,7 +552,8 @@ parse_term(relic_parser_t *parser, relic_ast_term_t *term)
 
 	if (!token_begins_term(&parser->token)) {
 		parse_errorf(parser, &parser->token.where,
-		    "expected a term, found %s", describe_token(&parser->token));
+		    "expected a term, found %s",
+		    describe_token(&parser->token));
 		return (false);
 	}
 
@@ -1299,8 +1300,9 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 			continue;
 
 		if (ferror(stream)) {
-			relic_diagf(ctx, RELIC_ERROR, NULL, "cannot read %s: %s",
-			    source_name, strerror(read_errno));
+			relic_diagf(ctx, RELIC_ERROR, NULL,
+			    "cannot read %s: %s", source_name,
+			    strerror(read_errno));
 			free(text);
 			return (-1);
 		}
@@ -1327,7 +1329,8 @@ relic_load_string(relic_t *ctx, const char *source_name, const char *text)
 	if (text != NULL) {
 		status = load_text(ctx, source_name, text, strlen(text));
 	} else {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "no program text was given");
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "no program text was given");
 		status = -1;
 	}
 
@@ -1365,7 +1368,8 @@ load_stream(relic_t *ctx, const char *source_name, FILE *stream)
 	int status;
 
 	if (stream == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "no input stream was given");
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "no input stream was given");
 		return (-1);
 	}
 

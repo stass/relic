@@ -880,6 +880,14 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
 	    relic_tuple_id_t id);
 
 /*
+ * How many tuples relic_relation_insert_batch() prefetches for at a time,
+ * and so how many an evaluation buffers before it inserts them.  Measured
+ * on the closure workloads: 16 overlaps most of the misses of a duplicate
+ * check, 64 a little more, and 256 no more than 64.
+ */
+#define	RELIC_INSERT_BATCH	64u
+
+/*
  * lib/relation.c
  *
  * relic_relation_for() is the only way to obtain a predicate's relation:
@@ -911,6 +919,14 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * insertion adds no tuple and leaves the relation's contents and its index
  * agreeing with each other; capacity that a partial reservation obtained is
  * kept, and accounted.
+ *
+ * relic_relation_insert_batch() inserts `count` tuples, packed at the
+ * relation's arity, exactly as relic_relation_insert() would one at a time
+ * in order -- the same tuples added, under the same identifiers, refused at
+ * the same one with the same diagnostic -- recording in added[i] whether
+ * tuple i was added and in *completedp how many insertions completed before
+ * any refusal.  It overlaps the cache misses of their duplicate checks,
+ * RELIC_INSERT_BATCH tuples at a time.
  *
  * relic_relation_find() gives the identifier of the tuple holding some
  * columns, or RELIC_ID_NONE, and relic_relation_contains() whether there is
@@ -953,6 +969,9 @@ void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);
 void	 relic_relation_free(relic_relation_t *relation);
 int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *columns, bool *addedp);
+int	 relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
+	    const relic_dom_t *tuples, size_t count, bool *added,
+	    size_t *completedp);
 relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 bool	 relic_relation_contains(const relic_relation_t *relation,

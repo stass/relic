@@ -25,9 +25,9 @@
  * Descending means the operation at the current level produced a binding and
  * the next one should start afresh against it.  Backtracking means an
  * operation has nothing more, so the one before it is asked for its next
- * binding.  EMIT inserts the head tuple and then reports that there is
- * nothing below it, so the level never passes the end of the plan and the
- * loop needs no case for having got there.
+ * binding.  EMIT adds the head tuple to the plan's batch of insertions and
+ * then reports that there is nothing below it, so the level never passes the
+ * end of the plan and the loop needs no case for having got there.
  *
  * A program is evaluated one strongly connected component of its dependency
  * graph at a time, in the order the program's schedule gives: by stratum, and
@@ -64,7 +64,8 @@
  * no new tuple.  It reaches the least fixed point because it stops only when
  * every rule, run over everything, adds nothing.  It is kept as the reference
  * the semi-naive one is tested against, and every operation of its plans
- * reads the whole relation.
+ * reads the whole relation as it stood when the plan started, so a plan
+ * sees what earlier plans of the pass derived but not its own tuples.
  *
  * The semi-naive fixed point makes every derivation exactly once.  Call a
  * rule recursive when a positive literal of its body reads a member of the
@@ -124,29 +125,61 @@ typedef struct relic_component_plans relic_component_plans_t;
 typedef struct relic_delta_work relic_delta_work_t;
 typedef struct relic_evaluation relic_evaluation_t;
 typedef struct relic_member_entry relic_member_entry_t;
+typedef struct relic_pending relic_pending_t;
 typedef struct relic_rule_plans relic_rule_plans_t;
+typedef struct relic_op_state relic_op_state_t;
 typedef struct relic_running_plan relic_running_plan_t;
 typedef struct relic_variant relic_variant_t;
 
 /*
- * A plan and the executor state that runs it: one cursor per operation, the
- * range a SCAN resumes from.  A test keeps no state and leaves its cursor
- * unused, which lets the executor's level index the operations and the
- * cursors alike.
+ * The head tuples a running plan has derived and not yet inserted into
+ * `relation`, the one relation the plan writes.  `count` of them are packed
+ * at its arity in `tuples`, which has room for RELIC_INSERT_BATCH tuples of
+ * `arity_room` columns: the widest head of any plan the evaluation builds,
+ * sized when it begins.
+ * `added` receives, for each tuple, whether its insertion added it.
+ */
+struct relic_pending {
+	relic_relation_t	*relation;
+	relic_dom_t		*tuples;
+	bool			 added[RELIC_INSERT_BATCH];
+	size_t			 count;
+	uint16_t		 arity_room;
+};
+
+/*
+ * The executor's state for one operation of a running plan.  `view` is the
+ * range of identifiers the operation's view covers, resolved for every
+ * operation that reads a relation when the plan starts.  `cursor` is the
+ * range a SCAN has still to visit, copied from the view each time the scan
+ * starts.
  *
  * A LOOKUP uses its cursor differently.  `first` is the next tuple on the
  * index chain, or RELIC_ID_NONE when the chain is exhausted, and `end` is the
- * end of the view it reads through, taken when the lookup started.  A chain
- * is in identifier order, so the lookup stops at the first tuple at or past
- * `end`, which leaves tuples inserted while it runs to the next lookup that
- * starts, exactly as a scan does.
+ * view's end, copied when the lookup starts.  A chain is in identifier
+ * order, so the lookup stops at the first tuple at or past `end`, exactly as
+ * a scan stops at the end of its range.
+ *
+ * A test keeps no cursor, and a FILTER and the EMIT read no relation and
+ * leave the view unset too.
+ */
+struct relic_op_state {
+	relic_tuple_range_t	 view;
+	relic_tuple_range_t	 cursor;
+};
+
+/*
+ * A plan and the executor state that runs it, one record per operation, so
+ * that the executor's level indexes the operations and their states alike.
+ * The states are the executor's scratch: they are written as the plan runs,
+ * even through a pointer to a running plan that is otherwise read only.
  *
  * `rule` is what the plan was built from, kept so that the plan can be
  * explained and its head found among the component's members.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
-	relic_tuple_range_t	*cursors;
+	relic_op_state_t	*states;
 	const relic_rule_t	*rule;
 };
 
@@ -300,9 +333,18 @@ struct relic_component_plans {
  * what lets a rule find the member its head is while the component runs; it
  * means nothing for any other predicate.
  *
- * `derived` is set whenever an EMIT inserts a tuple the relation did not
- * already hold, which is how a naive pass learns that the fixed point has not
- * been reached.
+ * `derived` is set whenever a derived tuple is inserted that the relation
+ * did not already hold, which is how a naive pass learns that the fixed
+ * point has not been reached.
+ *
+ * `pending` holds the head tuples the running plan's EMIT has derived and
+ * not yet inserted, packed at the arity of the relation it writes.  It is
+ * inserted as one batch, which overlaps the cache misses of the duplicate
+ * checks, when it holds RELIC_INSERT_BATCH tuples and when the plan ends,
+ * before anything reads `derived`.  Deferring the insertions changes no
+ * tuple a plan reads, because no view reaches past the end its relation had
+ * when the plan started: a delta variant's views end where the round began,
+ * and the `all` view where the plan did.
  */
 struct relic_evaluation {
 	relic_t			*ctx;
@@ -315,6 +357,7 @@ struct relic_evaluation {
 	size_t			 predicate_count;
 	relic_dom_t		 frame[RELIC_MAX_VARIABLES];
 	bool			 derived;
+	relic_pending_t		 pending;
 };
 
 static void	 advance_delta(relic_evaluation_t *eval,
@@ -349,8 +392,9 @@ static size_t	 count_member_literals(const relic_evaluation_t *eval,
 static void	*evaluation_alloc(relic_evaluation_t *eval, size_t count,
 		    size_t size);
 static int	 evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
-		    size_t component_count);
+		    size_t component_count, uint16_t head_arity_max);
 static int	 evaluation_track_deltas(relic_evaluation_t *eval);
+static uint16_t	 widest_head(const relic_ruletab_t *rules);
 static void	 evaluation_end(relic_evaluation_t *eval);
 static int	 evaluate_component(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
@@ -379,8 +423,13 @@ static int	 confirm_fact(const relic_evaluation_t *eval,
 static bool	 fact_head_is_constant(const relic_rule_t *rule);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
-static int	 insert_derived(relic_evaluation_t *eval,
-		    relic_relation_t *relation, const relic_dom_t *tuple);
+static void	 count_derivation(relic_evaluation_t *eval, bool added);
+static int	 insert_pending(relic_evaluation_t *eval);
+static relic_relation_t *plan_head(const relic_plan_t *plan);
+static void	 resolve_views(const relic_evaluation_t *eval,
+		    const relic_running_plan_t *running);
+static void	 start_batch(relic_pending_t *pending,
+		    relic_relation_t *relation);
 static int	 insert_fact(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
@@ -466,19 +515,20 @@ static int	 semi_naive_fixed_point(relic_evaluation_t *eval,
 static void	 start_deltas(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
 static int	 step(relic_evaluation_t *eval, const relic_rule_t *rule,
-		    const relic_op_t *op, relic_tuple_range_t *cursor,
-		    bool resume, bool *matchedp);
+		    const relic_op_t *op, relic_op_state_t *state, bool resume,
+		    bool *matchedp);
 static int	 step_emit(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom);
 static bool	 step_filter(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule, const relic_op_filter_t *filter);
 static bool	 step_lookup(relic_evaluation_t *eval,
-		    const relic_op_atom_t *atom, relic_tuple_range_t *cursor,
+		    const relic_op_atom_t *atom, relic_op_state_t *state,
 		    bool resume);
 static bool	 step_member(const relic_evaluation_t *eval,
-		    const relic_op_atom_t *atom);
+		    const relic_op_atom_t *atom,
+		    const relic_tuple_range_t *view);
 static bool	 step_scan(relic_evaluation_t *eval,
-		    const relic_op_atom_t *atom, relic_tuple_range_t *cursor,
+		    const relic_op_atom_t *atom, relic_op_state_t *state,
 		    bool resume);
 static void	 stream_answer(relic_t *ctx, const relic_relation_t *answer,
 		    relic_row_cb callback, void *callback_ctx);
@@ -597,9 +647,8 @@ comparison_holds(const relic_t *ctx, enum relic_compare_op compare,
 }
 
 /*
- * The identifiers an operation's view covers, taken as the operation starts:
- * the whole relation as it stands, or a range derived from the delta of the
- * member being read, as plan.h sets out.
+ * The identifiers an operation's view covers now: the whole relation, or a
+ * range derived from the delta of the member being read, as plan.h sets out.
  */
 static relic_tuple_range_t
 view_range(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
@@ -631,24 +680,58 @@ view_range(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
 }
 
 /*
+ * Resolve the view of every operation of `running` that reads a relation,
+ * before any of them runs.  Nothing has been inserted yet, so every range
+ * ends at or before its relation's end as the plan starts, and the tuples
+ * the plan derives, whenever its batches are inserted, lie past it: what a
+ * plan reads cannot depend on when it writes.
+ */
+static void
+resolve_views(const relic_evaluation_t *eval,
+    const relic_running_plan_t *running)
+{
+	const relic_op_t *op;
+	size_t level;
+
+	for (level = 0; level < running->plan.op_count; level++) {
+		op = &running->plan.ops[level];
+		switch (op->kind) {
+		case RELIC_OP_SCAN:
+		case RELIC_OP_LOOKUP:
+		case RELIC_OP_MEMBER:
+		case RELIC_OP_ANTI_MEMBER:
+			running->states[level].view = view_range(eval,
+			    &op->u.atom);
+			break;
+		case RELIC_OP_FILTER:
+		case RELIC_OP_EMIT:
+			break;
+		}
+	}
+}
+
+/*
  * A SCAN: find the next tuple of its view that matches, starting from the
  * beginning of the view when not resuming.
  *
- * The range is taken when the scan starts, so tuples inserted into the
- * relation while it runs -- by an EMIT below it into the same relation, say --
- * lie past its end and are left to the next scan that starts.  The tuple is
- * fetched afresh by identifier each time rather than held, because that same
- * insertion may have moved the storage a held pointer would point into.
+ * The view was resolved when the plan started, so tuples inserted into the
+ * relation while the plan runs -- a batch from the EMIT below it into the
+ * same relation, say -- lie past its end and are left to the next plan that
+ * reads the relation.  The tuple is fetched afresh by identifier each time
+ * rather than held, because that same insertion may have moved the storage a
+ * held pointer would point into.
  */
 static bool
 step_scan(relic_evaluation_t *eval, const relic_op_atom_t *atom,
-    relic_tuple_range_t *cursor, bool resume)
+    relic_op_state_t *state, bool resume)
 {
+	relic_tuple_range_t *cursor;
 	const relic_dom_t *tuple;
 	relic_tuple_id_t id;
 
+	cursor = &state->cursor;
 	if (!resume)
-		*cursor = view_range(eval, atom);
+		*cursor = state->view;
 
 	while (cursor->first < cursor->end) {
 		id = cursor->first;
@@ -682,15 +765,16 @@ step_scan(relic_evaluation_t *eval, const relic_op_atom_t *atom,
  */
 static bool
 step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
-    relic_tuple_range_t *cursor, bool resume)
+    relic_op_state_t *state, bool resume)
 {
+	relic_tuple_range_t *cursor;
 	relic_index_t *index;
 	const relic_dom_t *tuple;
 	relic_dom_t probe[RELIC_MAX_ARITY];
-	relic_tuple_range_t view;
 	relic_tuple_id_t id;
 	uint16_t column;
 
+	cursor = &state->cursor;
 	index = &atom->relation->indexes[atom->index_position];
 
 	if (!resume) {
@@ -700,14 +784,13 @@ step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
 				    &atom->terms[column]);
 		}
 
-		view = view_range(eval, atom);
 		if (atom->view == RELIC_VIEW_DELTA)
 			cursor->first = relic_index_first_since(index,
-			    atom->relation, probe, view.first);
+			    atom->relation, probe, state->view.first);
 		else
 			cursor->first = relic_index_first(index,
 			    atom->relation, probe);
-		cursor->end = view.end;
+		cursor->end = state->view.end;
 	}
 
 	while (cursor->first != RELIC_ID_NONE && cursor->first < cursor->end) {
@@ -728,10 +811,10 @@ step_lookup(relic_evaluation_t *eval, const relic_op_atom_t *atom,
  * the tuple the terms name, at an identifier inside the operation's view.
  */
 static bool
-step_member(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
+step_member(const relic_evaluation_t *eval, const relic_op_atom_t *atom,
+    const relic_tuple_range_t *view)
 {
 	relic_dom_t tuple[RELIC_MAX_ARITY];
-	relic_tuple_range_t view;
 	relic_tuple_id_t id;
 
 	build_tuple(eval, atom, tuple);
@@ -740,9 +823,7 @@ step_member(const relic_evaluation_t *eval, const relic_op_atom_t *atom)
 	if (id == RELIC_ID_NONE)
 		return (false);
 
-	view = view_range(eval, atom);
-
-	return (id >= view.first && id < view.end);
+	return (id >= view->first && id < view->end);
 }
 
 /*
@@ -853,42 +934,71 @@ step_filter(const relic_evaluation_t *eval, const relic_rule_t *rule,
 }
 
 /*
- * An EMIT: insert the head tuple.  Returns -1 when the insertion was refused,
- * which the relation store has reported.
+ * An EMIT: append the head tuple to the pending batch, and insert the batch
+ * once it is full.  Returns -1 when an insertion was refused, which the
+ * relation store has reported.  A plan has one EMIT, so every tuple pending
+ * is for the relation this one writes.
  */
 static int
 step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
 {
-	relic_dom_t tuple[RELIC_MAX_ARITY];
+	relic_pending_t *pending;
+	uint16_t arity;
 
-	build_tuple(eval, atom, tuple);
+	pending = &eval->pending;
+	arity = pending->relation->arity;
+	assert(atom->relation == pending->relation);
+	assert(arity <= pending->arity_room);
 
-	return (insert_derived(eval, atom->relation, tuple));
+	build_tuple(eval, atom, &pending->tuples[pending->count * arity]);
+	pending->count++;
+
+	if (pending->count < RELIC_INSERT_BATCH)
+		return (0);
+
+	return (insert_pending(eval));
 }
 
 /*
- * Insert a tuple a rule derived, counting the derivation and noting whether
- * the tuple was new.  Both ways a rule produces a tuple -- an EMIT, and a
- * fact's turn in a pass -- insert through here, so they are counted alike.
- * Returns -1 when the insertion was refused, which the relation store has
- * reported.
+ * Insert the pending batch, counting a derivation for each tuple whose
+ * insertion completed and noting which were new, and empty it.  Returns -1
+ * when an insertion was refused, which the relation store has reported.
  */
 static int
-insert_derived(relic_evaluation_t *eval, relic_relation_t *relation,
-    const relic_dom_t *tuple)
+insert_pending(relic_evaluation_t *eval)
 {
-	bool added;
+	relic_pending_t *pending;
+	size_t completed;
+	size_t i;
+	int status;
 
-	if (relic_relation_insert(eval->ctx, relation, tuple, &added) != 0)
-		return (-1);
+	pending = &eval->pending;
+	if (pending->count == 0)
+		return (0);
 
+	status = relic_relation_insert_batch(eval->ctx, pending->relation,
+	    pending->tuples, pending->count, pending->added, &completed);
+
+	for (i = 0; i < completed; i++)
+		count_derivation(eval, pending->added[i]);
+	pending->count = 0;
+
+	return (status);
+}
+
+/*
+ * Count one completed insertion of a derived tuple, and note whether it was
+ * new.  Both ways a rule produces a tuple -- a batch of an EMIT's, and a
+ * fact's turn in a pass -- count through here, so they are counted alike.
+ */
+static void
+count_derivation(relic_evaluation_t *eval, bool added)
+{
 	eval->ctx->counters.derivations++;
 	if (added) {
 		eval->ctx->counters.tuples_inserted++;
 		eval->derived = true;
 	}
-
-	return (0);
 }
 
 /*
@@ -904,24 +1014,26 @@ insert_derived(relic_evaluation_t *eval, relic_relation_t *relation,
  */
 static int
 step(relic_evaluation_t *eval, const relic_rule_t *rule, const relic_op_t *op,
-    relic_tuple_range_t *cursor, bool resume, bool *matchedp)
+    relic_op_state_t *state, bool resume, bool *matchedp)
 {
 	*matchedp = false;
 
 	switch (op->kind) {
 	case RELIC_OP_SCAN:
-		*matchedp = step_scan(eval, &op->u.atom, cursor, resume);
+		*matchedp = step_scan(eval, &op->u.atom, state, resume);
 		break;
 	case RELIC_OP_LOOKUP:
-		*matchedp = step_lookup(eval, &op->u.atom, cursor, resume);
+		*matchedp = step_lookup(eval, &op->u.atom, state, resume);
 		break;
 	case RELIC_OP_MEMBER:
 		if (!resume)
-			*matchedp = step_member(eval, &op->u.atom);
+			*matchedp = step_member(eval, &op->u.atom,
+			    &state->view);
 		break;
 	case RELIC_OP_ANTI_MEMBER:
 		if (!resume)
-			*matchedp = !step_member(eval, &op->u.atom);
+			*matchedp = !step_member(eval, &op->u.atom,
+			    &state->view);
 		break;
 	case RELIC_OP_FILTER:
 		if (!resume)
@@ -935,12 +1047,16 @@ step(relic_evaluation_t *eval, const relic_rule_t *rule, const relic_op_t *op,
 }
 
 /*
- * Run one plan: every binding its join produces reaches the EMIT.
+ * Run one plan: resolve the views its operations read through, and start a
+ * batch for the relation it writes; then every binding its join produces
+ * reaches the EMIT, and every tuple the EMIT derived is inserted before the
+ * plan returns, so a caller reading `derived` reads the whole plan's result.
  *
  * `level` is the operation being asked for a match, and `resume` says whether
  * it is being asked for its next one or started afresh.  The loop ends when
  * the first operation has nothing more, which is when every binding has been
- * tried.
+ * tried.  A failure discards the tuples still pending, which the failed
+ * evaluation discards with everything else.
  */
 static int
 execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
@@ -949,12 +1065,15 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 	bool matched;
 	bool resume;
 
+	resolve_views(eval, running);
+	start_batch(&eval->pending, plan_head(&running->plan));
+
 	level = 0;
 	resume = false;
 
 	for (;;) {
 		if (step(eval, running->rule, &running->plan.ops[level],
-		    &running->cursors[level], resume, &matched) != 0)
+		    &running->states[level], resume, &matched) != 0)
 			return (-1);
 
 		if (matched) {
@@ -964,7 +1083,7 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 		}
 
 		if (level == 0)
-			return (0);
+			return (insert_pending(eval));
 
 		level--;
 		resume = true;
@@ -973,20 +1092,29 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 
 /*
  * A fact's turn in a pass: insert its head, every argument of which is a
- * constant, exactly as the EMIT of a plan for it would.
+ * constant, and count it as the batch of a plan's EMIT counts its tuples.
+ * Returns -1 when the insertion was refused, which the relation store has
+ * reported.
  */
 static int
 insert_fact(relic_evaluation_t *eval, const relic_component_plans_t *plans,
     const relic_rule_t *rule)
 {
+	relic_relation_t *relation;
 	relic_dom_t tuple[RELIC_MAX_ARITY];
 	uint16_t column;
+	bool added;
 
 	for (column = 0; column < rule->head_arity; column++)
 		tuple[column] = rule->head_args[column].u.constant;
 
-	return (insert_derived(eval, head_relation_of(eval, plans, rule),
-	    tuple));
+	relation = head_relation_of(eval, plans, rule);
+	if (relic_relation_insert(eval->ctx, relation, tuple, &added) != 0)
+		return (-1);
+
+	count_derivation(eval, added);
+
+	return (0);
 }
 
 /*
@@ -1064,9 +1192,10 @@ run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 /*
  * Run passes over a component's plans until one inserts nothing new.
  *
- * Within a pass a rule sees what the rules before it inserted, and what its
- * own earlier matches inserted, rather than only what was there when the pass
- * began.  That changes how many passes are needed and not where they end,
+ * Within a pass a rule sees what the rules before it inserted, rather than
+ * only what was there when the pass began, and none of what it derives
+ * itself, since its plan reads each relation as it stood when the plan
+ * started.  That changes how many passes are needed and not where they end,
  * and it is deterministic, because rules run in program order and relations
  * iterate in insertion order.
  */
@@ -1384,14 +1513,21 @@ evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
 }
 
 /*
- * Begin an evaluation of `component_count` components, or of one query.
- * Returns 0, or -1 with a diagnostic reported.  Either way the caller ends
- * the evaluation with evaluation_end(), which releases what was allocated.
+ * Begin an evaluation of `component_count` components, or of one query,
+ * whose plans write heads of at most `head_arity_max` columns.  Returns 0, or
+ * -1 with a diagnostic reported.  Either way the caller ends the evaluation
+ * with evaluation_end(), which releases what was allocated.
+ *
+ * The pending batch is sized here, once, for the widest head, so every plan
+ * the evaluation builds has room for its tuples.  A head of no columns is
+ * given a column of room, so the buffer always exists.
  */
 static int
 evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
-    size_t component_count)
+    size_t component_count, uint16_t head_arity_max)
 {
+	uint16_t arity_room;
+
 	bzero(eval, sizeof(*eval));
 	eval->ctx = ctx;
 
@@ -1402,7 +1538,34 @@ evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
 	bzero(eval->components, component_count * sizeof(*eval->components));
 	eval->component_count = component_count;
 
+	arity_room = head_arity_max > 0 ? head_arity_max : 1;
+	eval->pending.tuples = evaluation_alloc(eval,
+	    (size_t)RELIC_INSERT_BATCH * arity_room,
+	    sizeof(*eval->pending.tuples));
+	if (eval->pending.tuples == NULL)
+		return (-1);
+	eval->pending.arity_room = arity_room;
+
 	return (0);
+}
+
+/*
+ * The widest head among `rules`, which bounds the head of every plan built
+ * from them.
+ */
+static uint16_t
+widest_head(const relic_ruletab_t *rules)
+{
+	uint16_t widest;
+	size_t i;
+
+	widest = 0;
+	for (i = 0; i < rules->count; i++) {
+		if (rules->entries[i].head_arity > widest)
+			widest = rules->entries[i].head_arity;
+	}
+
+	return (widest);
 }
 
 /*
@@ -1440,7 +1603,7 @@ evaluation_track_deltas(relic_evaluation_t *eval)
 }
 
 /*
- * Plan one rule's ordinary plan, with the cursors that run it, into
+ * Plan one rule's ordinary plan, with the states that run it, into
  * *runningp, its EMIT writing into `target`.  Returns 0, or -1 with a
  * diagnostic reported.
  *
@@ -1463,7 +1626,34 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 }
 
 /*
- * Pair a plan built for `rule` with the cursors that run it, in *runningp.
+ * The relation `plan` writes: the one its last operation, the EMIT, names.
+ */
+static relic_relation_t *
+plan_head(const relic_plan_t *plan)
+{
+	return (plan->ops[plan->op_count - 1].u.atom.relation);
+}
+
+/*
+ * Begin a plan's batch of head tuples for `relation`, empty.  The previous
+ * plan left its batch empty, having inserted it or had its insertion
+ * refused; emptying it here as well means a batch can only ever hold tuples
+ * of the plan that is running.
+ */
+static void
+start_batch(relic_pending_t *pending, relic_relation_t *relation)
+{
+	pending->relation = relation;
+	pending->count = 0;
+}
+
+/*
+ * Pair a plan built for `rule` with the operation states that run it, in
+ * *runningp.  Every plan an evaluation runs is made here, so this is where
+ * its head is confirmed to fit the evaluation's batch: a head wider than
+ * the batch's room would have its tuples written past the buffer.  Each
+ * allocation is checked before the next is made, since the arena's failure
+ * is sticky and a second request would report it again.
  */
 static int
 make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
@@ -1472,15 +1662,21 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 	relic_running_plan_t *running;
 
 	*runningp = NULL;
+	if (plan_head(plan)->arity > eval->pending.arity_room) {
+		relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
+		    "internal error: a rule's head does not fit the batch");
+		return (-1);
+	}
+
 	running = evaluation_alloc(eval, 1, sizeof(*running));
 	if (running == NULL)
 		return (-1);
 
 	running->plan = *plan;
 	running->rule = rule;
-	running->cursors = evaluation_alloc(eval, plan->op_count,
-	    sizeof(*running->cursors));
-	if (running->cursors == NULL)
+	running->states = evaluation_alloc(eval, plan->op_count,
+	    sizeof(*running->states));
+	if (running->states == NULL)
 		return (-1);
 
 	*runningp = running;
@@ -1488,8 +1684,8 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 }
 
 /*
- * Release the plans and cursors.  Resetting the arena also clears a failure
- * it recorded, which this evaluation has already reported.
+ * Release the plans and their states.  Resetting the arena also clears a
+ * failure it recorded, which this evaluation has already reported.
  */
 static void
 evaluation_end(relic_evaluation_t *eval)
@@ -2250,7 +2446,8 @@ evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
 	if (i < schedule->component_count)
 		note_planning_component(ctx, schedule, i);
 
-	status = evaluation_begin(&eval, ctx, schedule->component_count);
+	status = evaluation_begin(&eval, ctx, schedule->component_count,
+	    widest_head(rules));
 	eval.rules = rules;
 	if (status == 0)
 		status = evaluation_track_deltas(&eval);
@@ -2389,13 +2586,14 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 	relic_relation_clear(ctx, answer);
 	note_query_activity(ctx, "planning", answer);
 
-	status = evaluation_begin(&eval, ctx, 1);
+	status = evaluation_begin(&eval, ctx, 1, answer->arity);
 	if (status == 0)
 		status = plan_query(&eval, rule, answer, &eval.components[0]);
 	if (status == 0) {
 		relic_explain_query(ctx, rule, answer,
 		    &eval.components[0].planned[0].base->plan);
-		status = execute_plan(&eval, eval.components[0].planned[0].base);
+		status = execute_plan(&eval,
+		    eval.components[0].planned[0].base);
 	}
 	evaluation_end(&eval);
 

@@ -51,6 +51,8 @@ dnl tests hand to relic_load_file().  Neither is used by the library or the
 dnl tool, and the test that needs one is skipped where both are missing.
 AC_CHECK_FUNCS([fopencookie funopen])
 
+RELIC_CHECK_PREFETCH
+
 RELIC_ARG_DEBUG
 RELIC_ARG_SANITIZERS
 RELIC_SET_ASSERTIONS

@@ -61,7 +61,7 @@ enum relic_op_kind {
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
 	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of two bound values hold? */
-	RELIC_OP_EMIT		/* insert the head tuple */
+	RELIC_OP_EMIT		/* derive the head tuple */
 };
 ```
 
@@ -245,8 +245,8 @@ terms like any other column, and its other columns are processed as a
 
 The plan records *which view* an operation reads and not *which tuples* that
 is. The range changes every round while the plan does not, so the evaluation
-holds each member's delta and an operation takes its view's range from there
-when it starts; `specs/design-eval.md` section 4 describes how the deltas
+holds each member's delta and resolves every operation's view from there when
+the plan starts; `specs/design-eval.md` section 4 describes how the deltas
 advance.
 
 **A variant may have two plans.** When the order places another positive

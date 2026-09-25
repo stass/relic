@@ -124,8 +124,8 @@ struct relic_index_key {
  */
 struct relic_index {
 	relic_idtab_t		 keys;
-	relic_index_key_t	*entries;	/* indexed by key identifier - 1 */
-	relic_tuple_id_t	*next;		/* indexed by tuple identifier - 1 */
+	relic_index_key_t	*entries;	/* by key identifier - 1 */
+	relic_tuple_id_t	*next;		/* by tuple identifier - 1 */
 	size_t			 key_count;
 	size_t			 entry_capacity;
 	size_t			 next_capacity;
@@ -200,7 +200,7 @@ struct relic_relation {
 	size_t			 index_capacity;
 	relic_relation_stats_t	 stats;
 	uint64_t		 hash_seed;	/* the context's */
-	relic_pred_id_t		 pred;		/* RELIC_ID_NONE for an answer */
+	relic_pred_id_t		 pred;	/* RELIC_ID_NONE for an answer */
 	size_t			 serial;	/* the query's, for an answer */
 	uint16_t		 arity;
 };

@@ -200,6 +200,43 @@ size_t	 relic_idtab_bytes(const relic_idtab_t *table);
 size_t	 relic_idtab_bytes_after_reserve(const relic_idtab_t *table);
 
 /*
+ * A prefetch of the line holding `address`: the compiler's builtin where
+ * configure found one, and nothing elsewhere.  A prefetch is a hint that
+ * reads nothing a program depends on and cannot fault, so without one the
+ * same work is done and only the overlap is lost.
+ */
+#ifdef HAVE_BUILTIN_PREFETCH
+#define	RELIC_PREFETCH(address)	__builtin_prefetch(address)
+#else
+#define	RELIC_PREFETCH(address)	((void)(address))
+#endif
+
+/*
+ * Hints for a caller about to probe many hashes, which lets their cache
+ * misses overlap.  relic_idtab_prefetch() asks for the slot `hash` selects;
+ * relic_idtab_peek() gives the identifier in that slot, RELIC_ID_NONE when
+ * it is empty, whatever hash it was placed under, so that the caller can
+ * ask for the key it names too.  Neither is a lookup, and neither changes
+ * anything.  A table with no capacity has no slots, and neither touches
+ * one.  Both are inline because a batch calls them once per tuple.
+ */
+static inline void
+relic_idtab_prefetch(const relic_idtab_t *table, uint32_t hash)
+{
+	if (table->capacity > 0)
+		RELIC_PREFETCH(&table->slots[hash & (table->capacity - 1)]);
+}
+
+static inline uint32_t
+relic_idtab_peek(const relic_idtab_t *table, uint32_t hash)
+{
+	if (table->capacity == 0)
+		return (RELIC_ID_NONE);
+
+	return (table->slots[hash & (table->capacity - 1)]);
+}
+
+/*
  * Begin walking the candidates for hash.
  */
 void	 relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,

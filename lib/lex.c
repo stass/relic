@@ -35,7 +35,7 @@
 #define	LEX_DIGIT	0x02u
 #define	LEX_HEX		0x04u
 #define	LEX_SYM_START	0x08u	/* a lowercase letter: begins a symbol */
-#define	LEX_VAR_START	0x10u	/* an uppercase letter or _: begins a variable */
+#define	LEX_VAR_START	0x10u	/* uppercase or _: begins a variable */
 #define	LEX_IDENT	0x20u	/* continues either */
 
 /*

@@ -207,7 +207,7 @@ ordered by what the relations hold, specified in `specs/design-index.md` and
 | `lib/index.c` | secondary indexes: a key table of distinct keys, each key's first and last tuple, and a `next` identifier per tuple threading every key's chain in identifier order; reserve and add as separate steps, with an exact projection of what a reservation allocates; a lookup takes a probe laid out as a tuple, so only the index knows how a key is packed |
 | `lib/relation.{h,c}` | a relation's indexes, at most one per key mask, at positions fixed until the next discard; every insertion reserves in every index before storing anything; `relic_relation_index()` builds an index over the tuples held, one tuple at a time under the memory limit, and publishes it only once complete; a refused build reports `limit exceeded: memory=N while indexing p/n` and leaves no index and no bytes behind; `relic_relation_distinct()` counts a column's distinct values with a scratch table and caches them until the tuple count changes; a discard drops every index and clears the cache, so an index an earlier program asked for costs a later one nothing |
 | `lib/plan.{h,c}` | `RELIC_OP_LOOKUP`, keyed on exactly a literal's bound columns; greedy ordering by bound arguments, then the integer estimate, then source position; relations of the component being planned assumed to hold 1000 tuples, narrowed tenfold per bound column; `RELIC_F_NO_INDEX` and `RELIC_F_NO_REORDER` select the textual planner's choices |
-| `lib/eval.c` | each component is planned when it starts, with its members marked as still being derived; a lookup walks its key's chain and stops at the relation's end when it started, as a scan does; the counter of tuples looked up |
+| `lib/eval.c` | each component is planned when it starts, with its members marked as still being derived; a lookup walks its key's chain and stops at the relation's end when its plan started, as a scan does; the counter of tuples looked up |
 | `lib/explain.c` | `relic_explain_set()`: each component's heading, fact count, rules, plans and delta variants as it is planned, and each query's plan before it runs; printable ASCII in a fixed 1024-byte line, cut with `...` |
 | `include/relic.h` | `RELIC_F_NO_INDEX`, `RELIC_F_NO_REORDER`, `relic_explain_cb`, `relic_explain_set()`, `tuples_looked_up` |
 | `cmd/relic/main.c` | `-e`, plans to standard error; `-X no-index` and `-X no-reorder`; `stats: tuples looked up` |
@@ -376,7 +376,7 @@ placement, are implemented.
 | --- | --- |
 | `lib/plan.{h,c}` | an operation over a relation reads through a view -- `all`, or for a member in a delta variant `delta`, `old` or `current` -- assigned by body order: the delta literal reads its delta, a member literal written before it the old view and one after it the current view; a variant whose delta literal does not read a relation marked as still being derived is refused; the delta literal is ordered with the other positive literals and becomes the `SCAN`, `LOOKUP` or `MEMBER` its bound columns give it, a member read beside its delta estimated at ten deltas; `relic_plan_variant()` decides a variant's placed order and its order with the delta pinned first before emitting either, and when the placed order puts another positive literal first takes the threshold, `relic_plan_delta_threshold()`, as the product of the estimates before the delta in the one over the product of those after it in the other, zero for an empty prefix and never for an empty fan-out, in 64 bits on every platform; only a plan some delta selects is emitted, so a plan no round would run builds no index; under `-X no-reorder` the delta stays where it is written and there is one plan |
 | `lib/index.c` | each key keeps a frontier, and `relic_index_first_since()` finds a key's first tuple at or past a delta's start from it, moving it forward, so positioning walks each chain once over a fixed point; a start below the largest served is walked to from the chain's head and moves nothing |
-| `lib/eval.c` | the executor takes each view's range from the member's delta when an operation starts, and a `MEMBER` holds only for a tuple whose identifier lies in its view; round 0 runs the facts and the exit rules, a recursive rule having only its variants; every member's delta starts empty at the first identifier, so the first delta is the whole member; each boundary advances, once each, the members that gained and those whose delta held something; a variant runs only once every old view its plan reads holds something, counted down as each member's delta first moves past the first identifier; a component's plans are recorded per rule with a body, so explain pairs a rule with its variants by construction and counts the facts as the rules without one; a variant with two plans runs its placed plan in a round whose delta holds more tuples than its threshold and its delta-first plan otherwise; a lookup of the delta view is positioned through the frontier |
+| `lib/eval.c` | the executor resolves the range of every operation's view, from the member's delta, when the plan starts, and a `MEMBER` holds only for a tuple whose identifier lies in its view; round 0 runs the facts and the exit rules, a recursive rule having only its variants; every member's delta starts empty at the first identifier, so the first delta is the whole member; each boundary advances, once each, the members that gained and those whose delta held something; a variant runs only once every old view its plan reads holds something, counted down as each member's delta first moves past the first identifier; a component's plans are recorded per rule with a body, so explain pairs a rule with its variants by construction and counts the facts as the rules without one; a variant with two plans runs its placed plan in a round whose delta holds more tuples than its threshold and its delta-first plan otherwise; a lookup of the delta view is positioned through the frontier |
 | `lib/relation.c` | `relic_relation_find()` gives the identifier of the tuple holding some columns |
 | `lib/explain.c` | a recursive rule under the semi-naive fixed point shows its variants and no plan; `scan`, `lookup` and `member` are followed by `delta` or `old` for those views; a variant with two plans shows the placed plan headed `when the delta holds more than N tuples`, then the delta-first plan headed `otherwise`; a variant with one shows it under the plain heading |
 | `tests/` | `test_eval`: the complete graph on 40 nodes closes in 68,800 derivations where the evaluator without views made 132,800, a rule reading its own predicate twice over a 20-node chain makes 20 choose 3 derivations for it, with its rounds and scans, two members gaining in alternate rounds exercise the boundary, and every counter scenario re-derived by hand, the lookup snapshot under the naive fixed point; `test_plan`: the view of each literal of a variant, a variant over an unmarked relation refused, a textual variant in its written order, a delta going before the old and the current view of its own member, a delta placed after a guard and its join and looked up, the delta-first plan beside it, the threshold worked by hand, with its empty prefix and empty fan-out, each leaving the plan no round would run unbuilt, and a fully bound delta literal a `MEMBER` of the delta; `tests/random`: for a program whose rules hold no `_`, materializing must make exactly one derivation per fact and per distinct binding of each rule body's variables, counted as the rows of one query per body under the naive fixed point, a new verdict `derivations miscounted`; `test_index`: delta lookups over twelve rounds of growth agree with a scan from every start, higher, repeated and lower, and every frontier rests where its lookup stopped |
@@ -427,6 +427,23 @@ and from 56-69 MB to 77-102 MB. `facts-join`, whose tables would grow
 without rereading their keys, went from 0.35 s to 0.27 s. The duplicate
 check held 73 and 68 per cent of the two profiles without it and 78 and 72
 with it.
+
+Derived tuples are inserted in batches of 64, section 6 of that design: an
+`EMIT` buffers its head tuple, and the store hashes a batch, prefetches the
+slots and then the tuples they name, and inserts in order, so the cache misses
+of consecutive duplicate checks overlap. `configure` detects
+`__builtin_prefetch`; without it batching inserts the same tuples and only
+loses the overlap. Every view of a plan is resolved when the plan starts, so
+no plan reads its own batches, and under `-X naive` a rule does not see its
+own derivations within a pass, so the chain of the counter test takes 3 passes
+rather than 2 and derives 20 times rather than 15. Batching takes `tc-cyclic`
+from 4.75 s to 3.03 s and `sg-cyclic` from 3.42 s to 2.06 s of median user
+time with the peak unchanged, and the duplicate check's share of their
+profiles from 73 to 59 per cent and from 68 to 49; no `bench/run.sh` counter
+moved. The buffer holds 256 bytes per column of the widest head among the
+rules an evaluation is given, sized once when it begins, and is charged to the
+evaluation arena, so a program near its `-l memory=` limit can be refused that
+much earlier.
 
 ### Verified
 
@@ -629,8 +646,8 @@ The index and planner suites were confirmed the same way:
 * a memory projection that leaves out the secondary indexes, or counts them
   twice, which `test_index` catches as storage over the limit, or as a tuple
   that fits refused;
-* a lookup that walks past the end its relation had when it started, which
-  `test_eval` catches as a round too few;
+* a lookup that walks past the end its relation had when its plan started,
+  which `test_eval` catches as a pass too few;
 * ordering by estimate alone, and an assumed size not divided per bound
   column, which `test_plan` catches as literals out of order.
 

@@ -253,6 +253,41 @@ case "$diagnostic" in
 	;;
 esac
 
+# A refusal is reported once, as the limit it is, wherever it falls: while
+# the plans of the rules are allocated one after another, while tuples are
+# derived, or while an index is built.  Each limit of the sweep refuses the
+# program somewhere, and a second diagnostic after the first -- an allocation
+# attempted after a refused one, say -- would misreport the refusal as the
+# allocator running out.
+{
+	echo 'e(1, 2).'
+	echo 'e(2, 3).'
+	echo 'e(3, 4).'
+	for i in 1 2 3 4 5; do
+		echo "r$i(X, W) :- e(X, Y), e(Y, Z), e(Z, W)."
+	done
+} > "$work/rules.dl"
+
+limit=3000
+while [ "$limit" -le 10000 ]; do
+	diagnostic=$("$RELIC" -a -l memory=$limit "$work/rules.dl" 2>&1 \
+	    >/dev/null) || :
+	case "$diagnostic" in
+	""|"relic: error: limit exceeded: memory=$limit while "*/*)
+		case "$diagnostic" in
+		*"
+"*)
+			fail "memory=$limit was reported more than once: '$diagnostic'"
+			;;
+		esac
+		;;
+	*)
+		fail "memory=$limit was reported as '$diagnostic'"
+		;;
+	esac
+	limit=$((limit + 100))
+done
+
 for limit in magic-preds magic-rules; do
 	status=0
 	diagnostic=$("$RELIC" -l "$limit=1" "$work/graph.dl" 2>&1 \

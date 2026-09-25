@@ -40,6 +40,8 @@
 #include "internal.h"
 
 #define	SCENARIO_ARITY_MAX	"a relation of the greatest arity is exact"
+#define	SCENARIO_BATCH		"a batch inserts what single insertions would"
+#define	SCENARIO_BATCH_LIMIT	"a limit refuses a batch where it would one"
 #define	SCENARIO_CONSISTENT	"a refused insertion leaves the relation whole"
 #define	SCENARIO_EMPTY_TUPLE	"a relation of arity zero holds one tuple"
 #define	SCENARIO_ENVELOPE	"a million tuples fit in the expected memory"
@@ -102,6 +104,16 @@
 #define	LIMIT_ATTEMPTS		10000u
 
 /*
+ * The batch scenario derives BATCH_TUPLES pairs from BATCH_VALUES values in
+ * each column, so that about a third of them repeat an earlier pair, and
+ * hands them over in batches whose sizes cycle through BATCH_SIZES, one of
+ * them larger than RELIC_INSERT_BATCH.
+ */
+#define	BATCH_TUPLES		6000u
+#define	BATCH_VALUES		67u
+#define	BATCH_SIZES		{ 1, 7, 64, 65, 200, 3 }
+
+/*
  * The fixture helpers below all take the scenario they serve, and the ones a
  * scenario calls in a loop take the case as well.
  *
@@ -136,6 +148,13 @@ static void	 a_refused_insertion_leaves_the_relation_whole(relic_t *ctx,
 		    relic_relation_t *rel, const char *scenario);
 static void	 a_million_tuples_fit_in_the_expected_memory(void);
 static void	 a_relation_stays_where_it_was_put(void);
+static void	 a_batch_inserts_what_single_insertions_would(void);
+static bool	 insert_in_batches(relic_t *ctx, relic_relation_t *batched,
+		    const relic_dom_t *tuples, bool *added);
+static void	 compare_with_single(relic_t *ctx,
+		    const relic_relation_t *batched, relic_relation_t *single,
+		    const relic_dom_t *tuples, const bool *added);
+static void	 a_limit_refuses_a_batch_where_it_would_one(void);
 
 static relic_t *
 context(const char *scenario, const relic_config_t *config)
@@ -642,7 +661,8 @@ a_relation_of_the_greatest_arity_is_exact(void)
 		wide[column] = value(ctx, SCENARIO_ARITY_MAX, column);
 
 	bcopy(wide, altered, sizeof(wide));
-	altered[RELIC_MAX_ARITY - 1] = value(ctx, SCENARIO_ARITY_MAX, RELIC_MAX_ARITY);
+	altered[RELIC_MAX_ARITY - 1] = value(ctx, SCENARIO_ARITY_MAX,
+	    RELIC_MAX_ARITY);
 
 	if (!insert(ctx, SCENARIO_ARITY_MAX, 0, rel, wide, &added)) {
 		relic_destroy(ctx);
@@ -863,7 +883,8 @@ the_tuple_limit_refuses_a_tuple_and_says_so(void)
 	}
 
 	for (ordinal = 0; ordinal < LIMIT_ATTEMPTS; ordinal++) {
-		pair(columns, left, value(ctx, SCENARIO_TUPLE_LIMIT, ordinal + 1));
+		pair(columns, left,
+		    value(ctx, SCENARIO_TUPLE_LIMIT, ordinal + 1));
 
 		if (relic_relation_insert(ctx, first, columns, &added) != 0)
 			break;
@@ -930,7 +951,8 @@ the_memory_limit_refuses_a_tuple_and_says_so(void)
 	accepted = 0;
 
 	for (ordinal = 0; ordinal < LIMIT_ATTEMPTS; ordinal++) {
-		pair(columns, left, value(ctx, SCENARIO_MEMORY_LIMIT, ordinal + 1));
+		pair(columns, left,
+		    value(ctx, SCENARIO_MEMORY_LIMIT, ordinal + 1));
 
 		if (relic_relation_insert(ctx, rel, columns, &added) != 0)
 			break;
@@ -1125,6 +1147,212 @@ a_relation_stays_where_it_was_put(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * A batch is inserted as its tuples would be one at a time, in order: each
+ * is reported added exactly when a single insertion would have added it,
+ * and takes the identifier it would have taken.
+ *
+ * The same sequence of pairs goes into one relation in batches and into
+ * another one tuple at a time.  A pair repeats an earlier one about a third
+ * of the time, often within the same batch, so a batch must find a
+ * duplicate of a tuple it inserted itself; the canonical index grows many
+ * times partway through a batch; and one batch size is larger than
+ * RELIC_INSERT_BATCH, so it is inserted in chunks.  A relation of arity
+ * zero takes a batch of two empty tuples, adding the first.
+ */
+static void
+a_batch_inserts_what_single_insertions_would(void)
+{
+	relic_relation_t *batched;
+	relic_relation_t *single;
+	relic_relation_t *empty;
+	relic_config_t config;
+	relic_dom_t *tuples;
+	bool *added;
+	size_t completed;
+	size_t i;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	ctx = context(SCENARIO_BATCH, &config);
+	if (ctx == NULL)
+		return;
+
+	tuples = calloc(BATCH_TUPLES * 2, sizeof(*tuples));
+	added = calloc(BATCH_TUPLES, sizeof(*added));
+	batched = relation(ctx, SCENARIO_BATCH, "batched", 2);
+	single = relation(ctx, SCENARIO_BATCH, "single", 2);
+	empty = relation(ctx, SCENARIO_BATCH, "empty", 0);
+
+	if (tuples != NULL && added != NULL && batched != NULL &&
+	    single != NULL && empty != NULL) {
+		for (i = 0; i < BATCH_TUPLES; i++)
+			pair(&tuples[i * 2], value(ctx, SCENARIO_BATCH,
+			    (unsigned int)(i % BATCH_VALUES)),
+			    value(ctx, SCENARIO_BATCH,
+			    (unsigned int)(i * 7 % (BATCH_VALUES + 2))));
+
+		if (insert_in_batches(ctx, batched, tuples, added))
+			compare_with_single(ctx, batched, single, tuples,
+			    added);
+
+		check(relic_relation_insert_batch(ctx, empty, tuples, 2,
+		    added, &completed) == 0 && completed == 2 && added[0] &&
+		    !added[1] && relic_relation_count(empty) == 1,
+		    SCENARIO_BATCH, "a batch of two empty tuples adds the "
+		    "first");
+	} else {
+		check(false, SCENARIO_BATCH, "the fixture is built");
+	}
+
+	free(tuples);
+	free(added);
+	relic_destroy(ctx);
+}
+
+/*
+ * Insert the batch scenario's tuples into `batched` in batches whose sizes
+ * cycle through BATCH_SIZES, recording in `added` which were added.
+ * Returns whether every batch was inserted.
+ */
+static bool
+insert_in_batches(relic_t *ctx, relic_relation_t *batched,
+    const relic_dom_t *tuples, bool *added)
+{
+	static const size_t sizes[] = BATCH_SIZES;
+	size_t completed;
+	size_t size;
+	size_t done;
+	size_t i;
+
+	for (done = 0, i = 0; done < BATCH_TUPLES; done += size, i++) {
+		size = sizes[i % (sizeof(sizes) / sizeof(sizes[0]))];
+		if (size > BATCH_TUPLES - done)
+			size = BATCH_TUPLES - done;
+
+		if (relic_relation_insert_batch(ctx, batched,
+		    &tuples[done * 2], size, &added[done], &completed) != 0 ||
+		    completed != size) {
+			checkf(false, SCENARIO_BATCH, "the batch at tuple %zu "
+			    "should be inserted whole", done);
+			return (false);
+		}
+	}
+
+	return (true);
+}
+
+/*
+ * Insert the same tuples into `single` one at a time, and check that each
+ * was added exactly when the batch added it and that both relations hold
+ * the same tuples under the same identifiers.
+ */
+static void
+compare_with_single(relic_t *ctx, const relic_relation_t *batched,
+    relic_relation_t *single, const relic_dom_t *tuples, const bool *added)
+{
+	relic_tuple_id_t id;
+	size_t first_wrong;
+	size_t i;
+	bool single_added;
+
+	first_wrong = BATCH_TUPLES;
+	for (i = 0; i < BATCH_TUPLES && first_wrong == BATCH_TUPLES; i++) {
+		if (!insert(ctx, SCENARIO_BATCH, (unsigned int)i, single,
+		    &tuples[i * 2], &single_added))
+			return;
+		if (single_added != added[i])
+			first_wrong = i;
+	}
+	checkf(first_wrong == BATCH_TUPLES, SCENARIO_BATCH, "tuple %zu should "
+	    "be added in the batch exactly when it is added alone",
+	    first_wrong);
+
+	checkf(relic_relation_count(batched) == relic_relation_count(single) &&
+	    relic_relation_count(batched) < BATCH_TUPLES, SCENARIO_BATCH,
+	    "both relations should hold the same %zu tuples, fewer than "
+	    "offered, not %zu", relic_relation_count(single),
+	    relic_relation_count(batched));
+
+	first_wrong = 0;
+	for (id = RELIC_TUPLE_FIRST; id <= relic_relation_count(single) &&
+	    first_wrong == 0; id++) {
+		if (bcmp(relic_relation_tuple(batched, id),
+		    relic_relation_tuple(single, id),
+		    2 * sizeof(relic_dom_t)) != 0)
+			first_wrong = id;
+	}
+	checkf(first_wrong == 0, SCENARIO_BATCH, "tuple %zu should have the "
+	    "identifier it has when inserted alone", first_wrong);
+}
+
+/*
+ * A limit refuses the tuple of a batch a single insertion would have been
+ * refused on, with the same diagnostic: the tuples before it are inserted
+ * and reported added, and it and the rest are reported not added.  The
+ * relation is left whole.
+ */
+static void
+a_limit_refuses_a_batch_where_it_would_one(void)
+{
+	static const char expected[] =
+	    "limit exceeded: tuples=10 while deriving edge/2";
+
+	relic_relation_t *rel;
+	relic_config_t config;
+	relic_dom_t tuples[2 * 2 * TUPLE_LIMIT];
+	bool added[2 * TUPLE_LIMIT];
+	const char *reported;
+	size_t first_wrong;
+	size_t completed;
+	size_t i;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = TUPLE_LIMIT;
+	ctx = context(SCENARIO_BATCH_LIMIT, &config);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_BATCH_LIMIT, "edge", 2);
+	if (rel == NULL) {
+		relic_destroy(ctx);
+		return;
+	}
+
+	for (i = 0; i < 2 * TUPLE_LIMIT; i++) {
+		pair(&tuples[i * 2], value(ctx, SCENARIO_BATCH_LIMIT, 0),
+		    value(ctx, SCENARIO_BATCH_LIMIT, (unsigned int)i + 1));
+		added[i] = true;
+	}
+
+	check(relic_relation_insert_batch(ctx, rel, tuples, 2 * TUPLE_LIMIT,
+	    added, &completed) != 0 && completed == TUPLE_LIMIT,
+	    SCENARIO_BATCH_LIMIT, "the batch is refused after the insertions "
+	    "the limit admits");
+
+	first_wrong = 2 * TUPLE_LIMIT;
+	for (i = 0; i < 2 * TUPLE_LIMIT && first_wrong == 2 * TUPLE_LIMIT;
+	    i++) {
+		if (added[i] != (i < TUPLE_LIMIT))
+			first_wrong = i;
+	}
+	checkf(first_wrong == 2 * TUPLE_LIMIT &&
+	    relic_relation_count(rel) == TUPLE_LIMIT, SCENARIO_BATCH_LIMIT,
+	    "exactly the first %u tuples should be added, and tuple %zu's "
+	    "report is wrong", TUPLE_LIMIT, first_wrong);
+
+	reported = relic_error(ctx);
+	checkf(reported != NULL && strcmp(reported, expected) == 0,
+	    SCENARIO_BATCH_LIMIT, "the diagnostic should read \"%s\", not "
+	    "\"%s\"", expected, reported == NULL ? "(none)" : reported);
+
+	a_refused_insertion_leaves_the_relation_whole(ctx, rel,
+	    SCENARIO_BATCH_LIMIT);
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -1138,6 +1366,8 @@ main(void)
 	the_memory_limit_refuses_a_tuple_and_says_so();
 	a_million_tuples_fit_in_the_expected_memory();
 	a_relation_stays_where_it_was_put();
+	a_batch_inserts_what_single_insertions_would();
+	a_limit_refuses_a_batch_where_it_would_one();
 
 	return (check_summary("relation"));
 }

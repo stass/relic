@@ -20,7 +20,7 @@
  *
  * The order of the array is the nesting of the join.  Each operation either
  * produces bindings (a generator), lets a binding through or rejects it (a
- * test), or inserts the head tuple, and each states every decision in advance
+ * test), or derives the head tuple, and each states every decision in advance
  * -- which relation it reads, and for every column whether it is matched
  * against a constant, matched against a slot already bound, binds a slot, or
  * is ignored.  The executor therefore makes no decision a plan could have
@@ -49,18 +49,18 @@ typedef struct relic_variant_plans relic_variant_plans_t;
  * bound slots, bind nothing, and succeed at most once.  ANTI_MEMBER is MEMBER
  * with the answer inverted, which is the whole of negation: the schedule
  * evaluates a negated relation completely before any rule that reads it
- * runs, so its absence is meaningful.  EMIT inserts the head tuple and never
- * succeeds, which is what makes it the last operation of every plan: the
- * deepest level of the join always rejects, so the executor always
- * backtracks from it.
+ * runs, so its absence is meaningful.  EMIT derives the head tuple, which
+ * the evaluation inserts in batches, and never succeeds, which is what makes
+ * it the last operation of every plan: the deepest level of the join always
+ * rejects, so the executor always backtracks from it.
  */
 enum relic_op_kind {
 	RELIC_OP_SCAN,		/* match and bind every tuple of a relation */
-	RELIC_OP_LOOKUP,	/* the same, through an index on bound columns */
+	RELIC_OP_LOOKUP,	/* the same, by an index on bound columns */
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
 	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of bound values hold? */
-	RELIC_OP_EMIT		/* insert the head tuple */
+	RELIC_OP_EMIT		/* derive the head tuple */
 };
 
 /*
@@ -99,7 +99,7 @@ struct relic_plan_term {
  * member, and with the whole relation they are the four an operation reads
  * through:
  *
- *	all	[1, relation end), the end taken when the operation starts
+ *	all	[1, relation end), the end taken when the plan starts
  *	old	[1, first), the member's tuples older than its delta
  *	delta	[first, end), what the member gained in the previous round
  *	current	[1, end), everything the member held when the round began
@@ -116,7 +116,7 @@ struct relic_plan_term {
  * to any variant of that round.
  */
 enum relic_view {
-	RELIC_VIEW_ALL,		/* the relation as it stands when the op starts */
+	RELIC_VIEW_ALL,		/* the relation when the plan started */
 	RELIC_VIEW_OLD,		/* a member: tuples older than its delta */
 	RELIC_VIEW_DELTA,	/* a member: its delta */
 	RELIC_VIEW_CURRENT	/* a member: everything up to its delta's end */
@@ -131,10 +131,11 @@ enum relic_view {
  * resolve on every step.  A relation never moves once created, so a plan may
  * keep the pointer for as long as the relation exists.
  *
- * `view` is the view a SCAN, LOOKUP or MEMBER reads through, fixed by the
- * planner.  The range it denotes changes from one round to the next, so the
- * evaluation supplies it when the operation starts.  An ANTI_MEMBER and an
- * EMIT read and write through `all`.
+ * `view` is the view a SCAN, LOOKUP, MEMBER or ANTI_MEMBER reads through,
+ * fixed by the planner; an ANTI_MEMBER's is always `all`.  The range it
+ * denotes changes from one round to the next, and for `all` from one plan to
+ * the next, so the evaluation resolves it when the plan starts.  An EMIT
+ * writes past the end of every view of its relation.
  *
  * `key_mask` and `index_position` are set only on a LOOKUP: the columns it
  * looks up by, bit c for column c, and the position in relation->indexes of
