@@ -62,6 +62,7 @@
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_INTERFACE	"an added fact or collected answer reports once"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
+#define	SCENARIO_LOOKAHEAD	"a refusal in the lookahead reports once"
 #define	SCENARIO_MATERIALIZE	"a materialization out of memory reports once"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
 #define	SCENARIO_SCHEDULE	"a schedule that could not be rebuilt is kept"
@@ -84,6 +85,15 @@
  * below several times over.
  */
 #define	LOAD_SWEEP	80
+
+/*
+ * The bytes of the symbol the lookahead sweep's programs place after a fact
+ * and after a term.  Interning a symbol this long cannot fit in the slack of
+ * an arena chunk already obtained, so it always allocates, and the sweep
+ * goes far enough that one of its refusals lands there.
+ */
+#define	LOOKAHEAD_SYMBOL_BYTES	300000
+#define	LOOKAHEAD_SWEEP		200
 
 /*
  * The check sweep's program, and how far the sweep goes.
@@ -262,6 +272,8 @@ static void	 context_creation_fails_without_entropy(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
+static void	 a_refusal_in_the_lookahead_reports_once(void);
+static void	 sweep_lookahead(const char *program, bool well_formed);
 static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
 static void	 an_analysis_that_ran_out_of_memory_says_nothing(void);
 static void	 a_schedule_that_could_not_be_rebuilt_is_kept(void);
@@ -681,6 +693,112 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 	checkf(completed > 0, SCENARIO_LOAD,
 	    "the sweep should reach a load that completes, in %d attempts",
 	    LOAD_SWEEP);
+}
+
+/*
+ * One exhaustion is one message even when it strikes the token of
+ * lookahead.  The parser reads the token after a fact or a term before it is
+ * done with the fact or the term, and a refusal the lexer reports while
+ * interning that token stops the parse: staging the fact, or interning the
+ * term's value, must not report the same exhaustion again.  A long symbol
+ * follows a fact in a well-formed program and a term in a malformed one.
+ */
+static void
+a_refusal_in_the_lookahead_reports_once(void)
+{
+	char *symbol;
+	char *after_fact;
+	char *after_term;
+	size_t size;
+
+	symbol = malloc(LOOKAHEAD_SYMBOL_BYTES + 1);
+	size = LOOKAHEAD_SYMBOL_BYTES + 32;
+	after_fact = malloc(size);
+	after_term = malloc(size);
+	if (symbol == NULL || after_fact == NULL || after_term == NULL) {
+		check(false, SCENARIO_LOOKAHEAD, "the programs are built");
+		free(symbol);
+		free(after_fact);
+		free(after_term);
+		return;
+	}
+
+	memset(symbol, 'l', LOOKAHEAD_SYMBOL_BYTES);
+	symbol[LOOKAHEAD_SYMBOL_BYTES] = '\0';
+	snprintf(after_fact, size, "e(a).\n%s(b).\n", symbol);
+	snprintf(after_term, size, "e(a %s).\n", symbol);
+
+	sweep_lookahead(after_fact, true);
+	sweep_lookahead(after_term, false);
+
+	free(symbol);
+	free(after_fact);
+	free(after_term);
+}
+
+/*
+ * Load `program` with the nth allocation refused, for every n the sweep
+ * reaches, and require one message from each load that fails and none from
+ * one that succeeds.  A malformed program fails every time, with either its
+ * syntax error or its exhaustion, and a well-formed one succeeds once no
+ * refusal strikes it.  Either way the sweep must reach a load that made
+ * every allocation it asked for, so that it is known to have run past them
+ * all.
+ */
+static void
+sweep_lookahead(const char *program, bool well_formed)
+{
+	bool unrefused;
+	bool reached_unrefused;
+	unsigned long seen_before;
+	long budget;
+
+	reached_unrefused = false;
+
+	for (budget = 0; budget < LOOKAHEAD_SWEEP; budget++) {
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_LOOKAHEAD,
+			    "a context should be created");
+			return;
+		}
+
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		seen_before = allocations_seen;
+		refuse_allocations_after(budget);
+		status = relic_load_string(ctx, "lookahead.dl", program);
+		serve_every_allocation();
+		unrefused =
+		    allocations_seen - seen_before <= (unsigned long)budget;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_LOOKAHEAD,
+		    "a %s load that %s should report %d message(s), not %zu, "
+		    "with allocation %ld refused",
+		    well_formed ? "well-formed" : "malformed",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf((status == 0) == (well_formed && unrefused),
+		    SCENARIO_LOOKAHEAD, "a %s load that %s refusal struck "
+		    "should %s, with allocation %ld refused",
+		    well_formed ? "well-formed" : "malformed",
+		    unrefused ? "no" : "a",
+		    well_formed && unrefused ? "succeed" : "fail", budget);
+
+		if (unrefused)
+			reached_unrefused = true;
+
+		relic_destroy(ctx);
+	}
+
+	checkf(reached_unrefused, SCENARIO_LOOKAHEAD, "the sweep should "
+	    "reach a load that no refusal strikes, in %d attempts",
+	    LOOKAHEAD_SWEEP);
 }
 
 /*
@@ -2267,6 +2385,7 @@ main(void)
 	interning_a_symbol_survives_a_failed_allocation();
 	interning_a_value_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
+	a_refusal_in_the_lookahead_reports_once();
 	a_check_that_ran_out_of_memory_can_be_retried();
 	an_analysis_that_ran_out_of_memory_says_nothing();
 	a_schedule_that_could_not_be_rebuilt_is_kept();

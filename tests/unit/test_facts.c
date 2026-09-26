@@ -30,6 +30,7 @@
 #include "programs.h"
 
 #define	SCENARIO_ARITY_ZERO	"a fact of no columns is a fact like any other"
+#define	SCENARIO_NO_TREE	"a load's facts build no statements"
 #define	SCENARIO_FACT_ADD	"an added fact is a load of one"
 #define	SCENARIO_FUNNEL		"a predicate is read from the store it has"
 #define	SCENARIO_LOAD		"a load keeps what is not a fact as it was"
@@ -46,6 +47,7 @@
  * are much larger than the fixed costs of an evaluation.
  */
 #define	SESSION_FACTS		400
+#define	TREELESS_FACTS		5000	/* many arena chunks of statements */
 #define	SESSION_LINE_MAX	32	/* the longest "e(N, N, N).\n" line */
 
 /*
@@ -154,6 +156,8 @@ static size_t	 bytes_after_loading(const char *facts);
 static void	 the_rewrite_reads_facts_through_a_view(void);
 static void	 an_abandoned_rewrite_leaves_no_warning(void);
 static void	 a_fact_of_no_columns_is_a_fact(void);
+static void	 a_loads_facts_build_no_statements(void);
+static size_t	 tree_growth(relic_t *ctx, const char *text);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -442,11 +446,12 @@ a_load_keeps_what_is_not_a_fact(void)
 		query = relic_query_prepare(ctx, NULL, "e(a).");
 		checkf(query == NULL && log.errors == 1 &&
 		    strcmp(log.last_error, "expected a query, found a fact") ==
-		    0, SCENARIO_LOAD, "a fact in a query's text should be refused "
-		    "as a fact, not with %zu errors, the last \"%s\"",
+		    0, SCENARIO_LOAD, "a fact in a query's text should be "
+		    "refused as a fact, not with %zu errors, the last \"%s\"",
 		    log.errors, log.last_error);
 		checkf(relic_base_total(ctx) == 0, SCENARIO_LOAD,
-		    "the refused query text should store nothing, not %zu facts",
+		    "the refused query text should store nothing, not %zu "
+		    "facts",
 		    relic_base_total(ctx));
 		relic_query_destroy(query);
 		relic_destroy(ctx);
@@ -556,7 +561,8 @@ refused_by(enum limit_kind kind)
 		status = relic_load_string(ctx, "facts.dl", facts);
 		check(status == 0, SCENARIO_REFUSED, "the facts load");
 		status = relic_load_string(control, "facts.dl", facts);
-		check(status == 0, SCENARIO_REFUSED, "the control's facts load");
+		check(status == 0, SCENARIO_REFUSED,
+		    "the control's facts load");
 		status = relic_materialize(ctx);
 		check(status == 0 && relic_relations_current(ctx),
 		    SCENARIO_REFUSED, "the program is materialized");
@@ -1014,7 +1020,8 @@ facts_after(const char *program, const char *grown, enum limit_kind kind,
 		    kind_name(kind));
 	}
 
-	status = relic_load_string(ctx, "more.dl", "e(b, b, b).\ne(c, c, c).\n");
+	status = relic_load_string(ctx, "more.dl",
+	    "e(b, b, b).\ne(c, c, c).\n");
 	checkf(status == 0, SCENARIO_SESSION, "a load after %s should not be "
 	    "refused under %s, but reported \"%s\"", evaluation,
 	    kind_name(kind), log.last_error);
@@ -1235,6 +1242,75 @@ an_abandoned_rewrite_leaves_no_warning(void)
 }
 
 /*
+ * A load stages its facts as it parses them and keeps no statement for any
+ * of them, so a file of facts costs the program's tree nothing: the program
+ * arena, which holds the tree, grows by as much for thousands of facts and a
+ * rule as a control's grows for the rule alone, and the facts are all in
+ * their store.
+ */
+static void
+a_loads_facts_build_no_statements(void)
+{
+	static const char first_rule[] = "r(X) :- e(X, X, X).\n";
+	static const char second_rule[] = "s(X) :- r(X).\n";
+	diag_log_t control_log;
+	diag_log_t log;
+	relic_t *control;
+	relic_t *ctx;
+	char *facts;
+	char *text;
+	size_t control_growth;
+	size_t growth;
+
+	facts = numbered_facts("e", 3, TREELESS_FACTS);
+	text = NULL;
+	if (facts != NULL)
+		text = concatenated(facts, second_rule);
+	ctx = context_with(NULL, first_rule, &log);
+	control = context_with(NULL, first_rule, &control_log);
+	if (text == NULL || ctx == NULL || control == NULL) {
+		check(false, SCENARIO_NO_TREE,
+		    "the contexts and text are built");
+		free(text);
+		free(facts);
+		relic_destroy(ctx);
+		relic_destroy(control);
+		return;
+	}
+
+	growth = tree_growth(ctx, text);
+	control_growth = tree_growth(control, second_rule);
+
+	checkf(growth == control_growth, SCENARIO_NO_TREE, "loading %d "
+	    "facts and a rule should grow the tree by %zu bytes as the rule "
+	    "alone does, not %zu", TREELESS_FACTS, control_growth, growth);
+	checkf(ctx->ast.count == 2 &&
+	    facts_held(ctx, "e", 3) == TREELESS_FACTS, SCENARIO_NO_TREE,
+	    "the two rules should be statements and the %d facts stored, not "
+	    "%zu statements and %zu facts", TREELESS_FACTS, ctx->ast.count,
+	    facts_held(ctx, "e", 3));
+
+	free(text);
+	free(facts);
+	relic_destroy(ctx);
+	relic_destroy(control);
+}
+
+/* The bytes the program arena obtains while `text` is loaded. */
+static size_t
+tree_growth(relic_t *ctx, const char *text)
+{
+	size_t before;
+	int status;
+
+	before = relic_arena_total_bytes(&ctx->program_arena);
+	status = relic_load_string(ctx, "more.dl", text);
+	check(status == 0, SCENARIO_NO_TREE, "the text loads");
+
+	return (relic_arena_total_bytes(&ctx->program_arena) - before);
+}
+
+/*
  * A fact of no columns is staged once, stored, seeded into a derived
  * predicate and answered, like a fact of any arity.  done/0's rule reads a
  * predicate that derives nothing, so done holds only because its fact was
@@ -1294,6 +1370,7 @@ main(void)
 	the_rewrite_reads_facts_through_a_view();
 	an_abandoned_rewrite_leaves_no_warning();
 	a_fact_of_no_columns_is_a_fact();
+	a_loads_facts_build_no_statements();
 
 	return (check_summary("test_facts"));
 }

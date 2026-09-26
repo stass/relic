@@ -33,8 +33,9 @@
  * statements and lets a file with five mistakes report five lines.
  *
  * A load is all or nothing.  Statements are parsed onto a list belonging to
- * the load and spliced into the program only once the whole input has
- * parsed, so a program never contains half of a file.
+ * the load, and facts into the load's staging; both are added to the program
+ * only once the whole input has parsed, so a program never contains half of
+ * a file.
  */
 
 /*
@@ -71,6 +72,11 @@ typedef struct relic_parser relic_parser_t;
  * parse's own list, which becomes part of the program only if a load
  * succeeds.
  *
+ * `staging` is the load's staging, which a fact whose arguments are all
+ * constants is added to instead of becoming a statement.  It is NULL when
+ * the text is a query's, where a fact is a mistake: there it is kept as a
+ * statement so that it can be refused as the fact it is.
+ *
  * A parse function returns false only after the load has been made certain
  * to fail.  There are three ways that happens and each means one thing, so
  * that the boundary can reconcile them without asking what else went on:
@@ -79,10 +85,18 @@ typedef struct relic_parser relic_parser_t;
  *			being parsed, and counted.  Cleared when a statement
  *			ends, which is what limits a statement to one message.
  *
- *	`failed`	an allocation was refused *and already reported* by the
- *			module that made it -- interning is the only one --
- *			so parsing stops rather than continuing against a
- *			context that can no longer intern.
+ *	`failed`	an allocation or a limit refused something *and it was
+ *			already reported* by the module that refused it --
+ *			interning or staging -- so parsing stops rather than
+ *			continuing against a context that can no longer
+ *			intern or a load that can no longer commit.  Once it
+ *			is set advance() returns false, and every caller
+ *			returns false at once.  That is what keeps a refusal
+ *			to one message: the token of lookahead is interned
+ *			before the parser is done with what precedes it, so
+ *			a fact or a term can still be in hand when the
+ *			refusal comes, and finishing it would report the
+ *			same exhaustion a second time.
  *
  *	the arena	an allocation was refused and nobody reported it.
  *			Every allocation the parser makes marks the arena when
@@ -102,6 +116,7 @@ struct relic_parser {
 	size_t			 body_length;
 	size_t			 body_capacity;
 	relic_ast_stmt_list_t	 statements;
+	relic_staging_t		*staging;
 	size_t			 statement_count;
 	size_t			 query_count;
 	size_t			 error_count;
@@ -115,7 +130,7 @@ struct relic_parser {
 
 static int	 add_fact(relic_t *ctx, const char *predicate, size_t arity,
 		    const relic_value_t *values);
-static void	 advance(relic_parser_t *parser);
+static bool	 advance(relic_parser_t *parser) RELIC_MUST_CHECK;
 static bool	 append_statement(relic_parser_t *parser,
 		    const relic_ast_atom_t *head,
 		    const relic_ast_literal_t *literals, size_t literal_count,
@@ -123,14 +138,13 @@ static bool	 append_statement(relic_parser_t *parser,
 static void	*parse_alloc(relic_parser_t *parser, size_t count,
 		    size_t size);
 static bool	 atom_after_name(relic_parser_t *parser,
-		    const relic_token_t *name, relic_ast_atom_t *atom);
+		    const relic_token_t *name, relic_ast_atom_t *atom,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static bool	 body_append(relic_parser_t *parser,
 		    const relic_ast_literal_t *literal);
-static bool	 is_ground_fact(const relic_ast_stmt_t *statement);
-static int	 stage_facts(relic_staging_t *staging,
-		    relic_parser_t *parser);
 static bool	 collect_body(relic_parser_t *parser,
-		    const relic_ast_literal_t *first);
+		    const relic_ast_literal_t *first,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static const char *describe_byte(unsigned char byte, char *buffer,
 		    size_t size);
 static const char *describe_token(const relic_token_t *token);
@@ -141,12 +155,17 @@ static bool	 finish_fact(relic_parser_t *parser,
 		    const relic_location_t *where);
 static bool	 finish_query(relic_parser_t *parser,
 		    const relic_ast_literal_t *first,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY],
 		    const relic_location_t *where);
 static bool	 finish_rule(relic_parser_t *parser,
 		    const relic_ast_atom_t *head,
 		    const relic_location_t *where);
 static bool	 head_is_positive(relic_parser_t *parser,
 		    const relic_ast_literal_t *head, const char *what);
+static bool	 is_ground(const relic_ast_atom_t *atom);
+static bool	 keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
+static bool	 keep_literal(relic_parser_t *parser,
+		    relic_ast_literal_t *literal);
 static int	 load_text(relic_t *ctx, const char *source_name,
 		    const char *text, size_t length);
 static int	 load_named_file(relic_t *ctx, const char *path);
@@ -154,22 +173,24 @@ static int	 load_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream);
 static bool	 names_a_predicate(const char *predicate);
 static const relic_ast_stmt_t *only_query(relic_parser_t *parser);
-static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
+static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static bool	 parse_comparison(relic_parser_t *parser,
 		    relic_ast_literal_t *literal, const relic_ast_term_t *left);
 static void	 parse_errorf(relic_parser_t *parser,
 		    const relic_location_t *where, const char *format, ...)
 		    RELIC_PRINTFLIKE(3, 4);
 static bool	 parse_literal(relic_parser_t *parser,
-		    relic_ast_literal_t *literal, const char *expected);
+		    relic_ast_literal_t *literal, const char *expected,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static int	 parse_program(relic_parser_t *parser);
 static bool	 parse_statement(relic_parser_t *parser);
 static bool	 parse_term(relic_parser_t *parser, relic_ast_term_t *term);
 static int	 parse_text(relic_parser_t *parser, relic_t *ctx,
-		    relic_arena_t *arena, const char *source_name,
-		    const char *text, size_t length);
+		    relic_arena_t *arena, relic_staging_t *staging,
+		    const char *source_name, const char *text, size_t length);
 static int	 parser_init(relic_parser_t *parser, relic_t *ctx,
-		    relic_arena_t *arena,
+		    relic_arena_t *arena, relic_staging_t *staging,
 		    const char *source_name, const char *text, size_t length);
 static void	 parser_reset(relic_parser_t *parser);
 static const char *predicate_name(const relic_parser_t *parser,
@@ -179,6 +200,8 @@ static const char *quoted_suffix(const relic_token_t *token);
 static int	 read_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream, char **textp, size_t *lengthp);
 static void	 report_lex_error(relic_parser_t *parser);
+static bool	 stage_fact(relic_parser_t *parser,
+		    const relic_ast_atom_t *fact);
 static const char *source_name_of(relic_t *ctx, const char *name);
 static void	 synchronize(relic_parser_t *parser);
 static bool	 term_from_token(relic_parser_t *parser,
@@ -367,8 +390,11 @@ report_lex_error(relic_parser_t *parser)
 }
 
 /*
- * Take the next token.  A token the lexer could not make sense of is
- * reported here, so no other part of the parser has to consider the
+ * Take the next token.  Returns false when the parse has failed, whether
+ * the lexer's interning refused the token now or a refusal came earlier, and
+ * the caller must then return false without finishing what it was doing;
+ * see `failed`.  A token the lexer could not make sense of is not a failure.
+ * It is reported here, so no other part of the parser has to consider the
  * possibility; it simply fails to match whatever it wanted, and the message
  * it would have produced is suppressed because this one came first.
  *
@@ -384,13 +410,13 @@ report_lex_error(relic_parser_t *parser)
  * the reason.  Consuming a terminator is the one event that means a new
  * statement is starting, and this is the one place that sees it.
  */
-static void
+static bool
 advance(relic_parser_t *parser)
 {
 	bool ended_statement;
 
 	if (parser->failed)
-		return;
+		return (false);
 
 	ended_statement = parser->token.kind == RELIC_TOKEN_DOT ||
 	    parser->token.kind == RELIC_TOKEN_QUESTION;
@@ -399,7 +425,7 @@ advance(relic_parser_t *parser)
 		parser->failed = true;
 		bzero(&parser->token, sizeof(parser->token));
 		parser->token.kind = RELIC_TOKEN_END;
-		return;
+		return (false);
 	}
 
 	if (ended_statement)
@@ -407,6 +433,8 @@ advance(relic_parser_t *parser)
 
 	if (parser->token.kind == RELIC_TOKEN_ERROR)
 		report_lex_error(parser);
+
+	return (true);
 }
 
 /*
@@ -419,10 +447,8 @@ static bool
 expect(relic_parser_t *parser, enum relic_token_kind kind,
     const char *expected)
 {
-	if (parser->token.kind == kind) {
-		advance(parser);
-		return (true);
-	}
+	if (parser->token.kind == kind)
+		return (advance(parser));
 
 	parse_errorf(parser, &parser->token.where, "expected %s, found %s",
 	    expected, describe_token(&parser->token));
@@ -559,7 +585,8 @@ parse_term(relic_parser_t *parser, relic_ast_term_t *term)
 	}
 
 	token = parser->token;
-	advance(parser);
+	if (!advance(parser))
+		return (false);
 
 	return (term_from_token(parser, &token, term));
 }
@@ -569,16 +596,16 @@ parse_term(relic_parser_t *parser, relic_ast_term_t *term)
  *
  * A name with no argument list is an atom of arity zero, which is an
  * ordinary relation holding no columns and not a special case anywhere
- * below.  The arguments are collected in a fixed buffer, which the arity
- * limit is what permits, and copied into the arena once their number is
- * known.
+ * below.  The arguments are read into the caller's scratch buffer of
+ * RELIC_MAX_ARITY terms, which the arity limit is what permits, and the atom
+ * points into it.  Nothing is allocated: whether the atom is kept in the
+ * tree, and so copied out by keep_atom(), is decided by what follows it.
  */
 static bool
 atom_after_name(relic_parser_t *parser, const relic_token_t *name,
-    relic_ast_atom_t *atom)
+    relic_ast_atom_t *atom,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY])
 {
-	relic_ast_term_t terms[RELIC_MAX_ARITY];
-	relic_ast_term_t *stored;
 	size_t term_count;
 
 	bzero(atom, sizeof(*atom));
@@ -587,7 +614,8 @@ atom_after_name(relic_parser_t *parser, const relic_token_t *name,
 
 	if (parser->token.kind != RELIC_TOKEN_LPAREN)
 		return (true);
-	advance(parser);
+	if (!advance(parser))
+		return (false);
 
 	/*
 	 * An empty argument list is tested for once, before the loop, rather
@@ -605,31 +633,75 @@ atom_after_name(relic_parser_t *parser, const relic_token_t *name,
 				return (false);
 			}
 
-			if (!parse_term(parser, &terms[term_count]))
+			if (!parse_term(parser, &scratch[term_count]))
 				return (false);
 			term_count++;
 
 			if (parser->token.kind != RELIC_TOKEN_COMMA)
 				break;
-			advance(parser);
+			if (!advance(parser))
+				return (false);
 		}
 	}
 
 	if (!expect(parser, RELIC_TOKEN_RPAREN, "',' or ')'"))
 		return (false);
 
-	if (term_count == 0)
-		return (true);
-
-	stored = parse_alloc(parser, term_count, sizeof(*stored));
-	if (stored == NULL)
-		return (false);
-	bcopy(terms, stored, term_count * sizeof(*stored));
-
-	atom->terms = stored;
-	atom->arity = (uint16_t)term_count;
+	if (term_count > 0) {
+		atom->terms = scratch;
+		atom->arity = (uint16_t)term_count;
+	}
 
 	return (true);
+}
+
+/*
+ * Copy an atom's arguments out of the scratch buffer they were read into
+ * and into the tree's arena, so that the atom outlives the buffer.  Every
+ * atom the tree keeps passes through here, a head in append_statement() and
+ * a body's atom in body_append(), and no other way into the tree exists.
+ */
+static bool
+keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
+{
+	relic_ast_term_t *stored;
+
+	if (atom->arity == 0)
+		return (true);
+
+	stored = parse_alloc(parser, atom->arity, sizeof(*stored));
+	if (stored == NULL)
+		return (false);
+	bcopy(atom->terms, stored, atom->arity * sizeof(*stored));
+
+	atom->terms = stored;
+
+	return (true);
+}
+
+/*
+ * Keep a literal's atom, if it has one.  A comparison holds its two operands
+ * in the literal itself, so there is nothing of it outside to copy.
+ */
+static bool
+keep_literal(relic_parser_t *parser, relic_ast_literal_t *literal)
+{
+	switch (literal->kind) {
+	case RELIC_LITERAL_POSITIVE:
+	case RELIC_LITERAL_NEGATED:
+		return (keep_atom(parser, &literal->u.atom));
+	case RELIC_LITERAL_COMPARISON:
+		return (true);
+	}
+
+	/*
+	 * Unreachable, since the switch names every kind.  A literal of no
+	 * known kind cannot be kept safely, so the load is failed with a
+	 * report rather than an assumption, as term_from_token() fails a
+	 * token of no known kind.
+	 */
+	parse_errorf(parser, &literal->where, "a literal of unknown kind");
+	return (false);
 }
 
 /*
@@ -644,7 +716,8 @@ atom_after_name(relic_parser_t *parser, const relic_token_t *name,
  * predicate to every later stage.
  */
 static bool
-parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
+parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY])
 {
 	relic_token_t name;
 
@@ -662,9 +735,10 @@ parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
 	}
 
 	name = parser->token;
-	advance(parser);
+	if (!advance(parser))
+		return (false);
 
-	return (atom_after_name(parser, &name, atom));
+	return (atom_after_name(parser, &name, atom, scratch));
 }
 
 /*
@@ -679,7 +753,8 @@ parse_comparison(relic_parser_t *parser, relic_ast_literal_t *literal,
 	literal->kind = RELIC_LITERAL_COMPARISON;
 	literal->u.comparison.left = *left;
 	literal->u.comparison.op = parser->token.compare;
-	advance(parser);
+	if (!advance(parser))
+		return (false);
 
 	return (parse_term(parser, &literal->u.comparison.right));
 }
@@ -687,11 +762,14 @@ parse_comparison(relic_parser_t *parser, relic_ast_literal_t *literal,
 /*
  * Parse one literal: a positive atom, a negated atom, or a comparison.
  * `expected` names what the caller was looking for, so that the message for
- * a token that can begin no literal reads in the caller's terms.
+ * a token that can begin no literal reads in the caller's terms.  An atom's
+ * arguments are read into `scratch`, a buffer of RELIC_MAX_ARITY terms that
+ * the literal points into until it is kept.
  */
 static bool
 parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
-    const char *expected)
+    const char *expected,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY])
 {
 	relic_ast_term_t left;
 	relic_token_t name;
@@ -720,10 +798,11 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 	 */
 	if (parser->token.kind == RELIC_TOKEN_SYMBOL &&
 	    parser->token.symbol == parser->negation_symbol) {
-		advance(parser);
+		if (!advance(parser))
+			return (false);
 		literal->kind = RELIC_LITERAL_NEGATED;
 
-		return (parse_atom(parser, &literal->u.atom));
+		return (parse_atom(parser, &literal->u.atom, scratch));
 	}
 
 	/*
@@ -734,13 +813,14 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 	 */
 	if (parser->token.kind == RELIC_TOKEN_SYMBOL) {
 		name = parser->token;
-		advance(parser);
+		if (!advance(parser))
+			return (false);
 
 		if (parser->token.kind != RELIC_TOKEN_COMPARE) {
 			literal->kind = RELIC_LITERAL_POSITIVE;
 
 			return (atom_after_name(parser, &name,
-			    &literal->u.atom));
+			    &literal->u.atom, scratch));
 		}
 
 		if (!term_from_token(parser, &name, &left))
@@ -764,7 +844,8 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 
 /*
  * Append a literal to the scratch array the current statement's body is
- * collected in.
+ * collected in, keeping its atom's arguments in the tree so that the buffer
+ * they were read into can be reused for the next literal.
  *
  * A failure here is exhaustion like any other and is reported like any
  * other: by marking the tree's arena, leaving the parse boundary the single
@@ -778,6 +859,11 @@ static bool
 body_append(relic_parser_t *parser, const relic_ast_literal_t *literal)
 {
 	relic_ast_literal_t *body;
+	relic_ast_literal_t kept;
+
+	kept = *literal;
+	if (!keep_literal(parser, &kept))
+		return (false);
 
 	body = relic_grow_array(parser->body, &parser->body_capacity,
 	    parser->body_length + 1, sizeof(*parser->body));
@@ -787,7 +873,7 @@ body_append(relic_parser_t *parser, const relic_ast_literal_t *literal)
 	}
 	parser->body = body;
 
-	parser->body[parser->body_length] = *literal;
+	parser->body[parser->body_length] = kept;
 	parser->body_length++;
 
 	return (true);
@@ -795,10 +881,15 @@ body_append(relic_parser_t *parser, const relic_ast_literal_t *literal)
 
 /*
  * Collect a comma-separated body whose first literal has already been
- * parsed, into the scratch array.
+ * parsed, into the body array.  `scratch` is the buffer the first literal's
+ * arguments were read into; once that literal is appended the buffer is
+ * free, and each later literal is read into it in turn.  So the caller's
+ * `first` no longer describes its arguments when this returns: the kept copy
+ * in the body does.
  */
 static bool
-collect_body(relic_parser_t *parser, const relic_ast_literal_t *first)
+collect_body(relic_parser_t *parser, const relic_ast_literal_t *first,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY])
 {
 	relic_ast_literal_t literal;
 
@@ -806,9 +897,10 @@ collect_body(relic_parser_t *parser, const relic_ast_literal_t *first)
 		return (false);
 
 	while (parser->token.kind == RELIC_TOKEN_COMMA) {
-		advance(parser);
+		if (!advance(parser))
+			return (false);
 
-		if (!parse_literal(parser, &literal, "a literal"))
+		if (!parse_literal(parser, &literal, "a literal", scratch))
 			return (false);
 		if (!body_append(parser, &literal))
 			return (false);
@@ -845,6 +937,8 @@ append_statement(relic_parser_t *parser, const relic_ast_atom_t *head,
 	if (head != NULL) {
 		statement->kind = RELIC_STMT_RULE;
 		statement->head = *head;
+		if (!keep_atom(parser, &statement->head))
+			return (false);
 	} else {
 		statement->kind = RELIC_STMT_QUERY;
 	}
@@ -887,6 +981,51 @@ head_is_positive(relic_parser_t *parser, const relic_ast_literal_t *head,
 	return (false);
 }
 
+/* Whether every argument of an atom is a constant. */
+static bool
+is_ground(const relic_ast_atom_t *atom)
+{
+	uint16_t i;
+
+	for (i = 0; i < atom->arity; i++) {
+		if (atom->terms[i].kind != RELIC_TERM_CONSTANT)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Add a ground fact to the load's staging.  Its predicate is interned now,
+ * while the text is parsed, as the lexer interns every symbol it reads, so
+ * the predicate stays interned if the load later fails.  relic_pred_intern()
+ * and relic_staging_add() each report their own refusal, so either refusing
+ * stops the parse as a refusal already reported.
+ */
+static bool
+stage_fact(relic_parser_t *parser, const relic_ast_atom_t *fact)
+{
+	relic_dom_t tuple[RELIC_MAX_ARITY];
+	relic_pred_id_t pred;
+	uint16_t i;
+
+	for (i = 0; i < fact->arity; i++)
+		tuple[i] = fact->terms[i].u.constant;
+
+	if (relic_pred_intern(parser->ctx, fact->name, fact->arity,
+	    &fact->where, &pred) != 0) {
+		parser->failed = true;
+		return (false);
+	}
+
+	if (relic_staging_add(parser->staging, pred, tuple) != 0) {
+		parser->failed = true;
+		return (false);
+	}
+
+	return (true);
+}
+
 /*
  * The three statement forms, each entered with its head or first literal
  * already parsed.
@@ -899,29 +1038,46 @@ head_is_positive(relic_parser_t *parser, const relic_ast_literal_t *head,
  * `?` that ends the statement and is expected after the body.
  */
 
-/* Entered on the `.`, which ends the statement. */
+/*
+ * Entered on the `.`, which ends the statement.
+ *
+ * A fact a load reads whose arguments are all constants is a tuple, and is
+ * staged rather than kept.  Any other fact is kept as what it means, a rule
+ * with no body: one with a variable, for the check to reject as unsafe with
+ * the message an unsafe rule receives, and one in a query's text, for the
+ * query parser to refuse as a fact.
+ */
 static bool
 finish_fact(relic_parser_t *parser, const relic_ast_atom_t *head,
     const relic_location_t *where)
 {
-	advance(parser);
+	if (!advance(parser))
+		return (false);
 
-	/* A fact is a rule with no body, which is what it means. */
+	if (parser->staging != NULL && is_ground(head))
+		return (stage_fact(parser, head));
+
 	return (append_statement(parser, head, NULL, 0, where));
 }
 
-/* Entered on the `:-`, which separates the head from the body. */
+/*
+ * Entered on the `:-`, which separates the head from the body.  The head's
+ * arguments are still in the caller's buffer until the statement is
+ * appended, so the body is read into a buffer of its own.
+ */
 static bool
 finish_rule(relic_parser_t *parser, const relic_ast_atom_t *head,
     const relic_location_t *where)
 {
+	relic_ast_term_t scratch[RELIC_MAX_ARITY];
 	relic_ast_literal_t first;
 
-	advance(parser);
-
-	if (!parse_literal(parser, &first, "a literal"))
+	if (!advance(parser))
 		return (false);
-	if (!collect_body(parser, &first))
+
+	if (!parse_literal(parser, &first, "a literal", scratch))
+		return (false);
+	if (!collect_body(parser, &first, scratch))
 		return (false);
 	if (!expect(parser, RELIC_TOKEN_DOT, "',' or '.'"))
 		return (false);
@@ -930,12 +1086,16 @@ finish_rule(relic_parser_t *parser, const relic_ast_atom_t *head,
 	    parser->body_length, where));
 }
 
-/* Entered on the `,` before the next literal, or on the closing `?`. */
+/*
+ * Entered on the `,` before the next literal, or on the closing `?`.
+ * `scratch` is the buffer the first literal was read into.
+ */
 static bool
 finish_query(relic_parser_t *parser, const relic_ast_literal_t *first,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY],
     const relic_location_t *where)
 {
-	if (!collect_body(parser, first))
+	if (!collect_body(parser, first, scratch))
 		return (false);
 	if (!expect(parser, RELIC_TOKEN_QUESTION, "',' or '?'"))
 		return (false);
@@ -949,11 +1109,13 @@ finish_query(relic_parser_t *parser, const relic_ast_literal_t *first,
  *
  * Which of the three forms is being read is not known until the token after
  * the first literal: `:-` makes it a rule, `.` a fact, and `,` or `?` a
- * query whose body has already begun.
+ * query whose body has already begun.  So the first literal's arguments are
+ * read into a buffer here, and each form keeps them in the tree or not.
  */
 static bool
 parse_statement(relic_parser_t *parser)
 {
+	relic_ast_term_t scratch[RELIC_MAX_ARITY];
 	relic_ast_literal_t first;
 	relic_location_t where;
 
@@ -967,7 +1129,7 @@ parse_statement(relic_parser_t *parser)
 	parser->body_length = 0;
 	where = parser->token.where;
 
-	if (!parse_literal(parser, &first, "a fact, rule or query"))
+	if (!parse_literal(parser, &first, "a fact, rule or query", scratch))
 		return (false);
 
 	switch (parser->token.kind) {
@@ -983,7 +1145,7 @@ parse_statement(relic_parser_t *parser)
 		return (finish_fact(parser, &first.u.atom, &where));
 	case RELIC_TOKEN_COMMA:
 	case RELIC_TOKEN_QUESTION:
-		return (finish_query(parser, &first, &where));
+		return (finish_query(parser, &first, scratch, &where));
 	default:
 		parse_errorf(parser, &parser->token.where,
 		    "expected ':-', ',', '.' or '?', found %s",
@@ -1011,12 +1173,13 @@ synchronize(relic_parser_t *parser)
 {
 	parser->reported = true;
 
-	while (!parser->failed && parser->token.kind != RELIC_TOKEN_END) {
+	while (parser->token.kind != RELIC_TOKEN_END) {
 		bool terminator;
 
 		terminator = parser->token.kind == RELIC_TOKEN_DOT ||
 		    parser->token.kind == RELIC_TOKEN_QUESTION;
-		advance(parser);
+		if (!advance(parser))
+			return;
 
 		if (terminator)
 			return;
@@ -1026,7 +1189,8 @@ synchronize(relic_parser_t *parser)
 static int
 parse_program(relic_parser_t *parser)
 {
-	advance(parser);		/* prime the current token */
+	if (!advance(parser))		/* prime the current token */
+		return (-1);
 
 	while (!parser->failed && parser->token.kind != RELIC_TOKEN_END) {
 		if (!parse_statement(parser))
@@ -1038,12 +1202,14 @@ parse_program(relic_parser_t *parser)
 
 static int
 parser_init(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
-    const char *source_name, const char *text, size_t length)
+    relic_staging_t *staging, const char *source_name, const char *text,
+    size_t length)
 {
 	bzero(parser, sizeof(*parser));
 
 	parser->ctx = ctx;
 	parser->arena = arena;
+	parser->staging = staging;
 	TAILQ_INIT(&parser->statements);
 
 	/*
@@ -1093,8 +1259,9 @@ source_name_of(relic_t *ctx, const char *name)
 
 /*
  * Parse text into a list of statements built in `arena`, leaving them on the
- * parser's own list.  Returns 0 when the whole text parsed, or -1 with every
- * mistake already reported.
+ * parser's own list, and its ground facts into `staging` unless that is
+ * NULL.  Returns 0 when the whole text parsed, or -1 with every mistake
+ * already reported.
  *
  * The three things that can make a parse fail are confirmed separately:
  * parsing itself, the arena's failure flag, and the count of statements that
@@ -1111,7 +1278,8 @@ source_name_of(relic_t *ctx, const char *name)
  */
 static int
 parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
-    const char *source_name, const char *text, size_t length)
+    relic_staging_t *staging, const char *source_name, const char *text,
+    size_t length)
 {
 	const char *name;
 	int status;
@@ -1122,15 +1290,16 @@ parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 	if (name == NULL)
 		return (-1);
 
-	if (parser_init(parser, ctx, arena, name, text, length) != 0)
+	if (parser_init(parser, ctx, arena, staging, name, text, length) != 0)
 		return (-1);
 
 	status = parse_program(parser);
 
 	/*
-	 * A refusal nobody reported is reported here.  One that the interning
-	 * layer already reported set `failed` instead, and saying it a second
-	 * time would tell the reader nothing about a second thing.
+	 * A refusal nobody reported is reported here, unless interning or
+	 * staging has since reported one of its own and set `failed`: the load
+	 * already fails with a message, and a second would tell the reader
+	 * about the same exhaustion, or about one that no longer matters.
 	 */
 	if (relic_arena_failed(arena)) {
 		if (!parser->failed)
@@ -1148,9 +1317,9 @@ parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 /*
  * Parse text into the program.
  *
- * A load is all or nothing in what it adds to the program.  When the whole
- * text has parsed, its facts are taken off its statements and committed to
- * their base stores, and only when the commit succeeds are the remaining
+ * A load is all or nothing in what it adds to the program.  Its facts are
+ * staged as they are parsed, and when the whole text has parsed they are
+ * committed to their base stores; only when the commit succeeds are its
  * statements -- rules, queries, and a fact with a variable, which the check
  * rejects -- spliced in.  What a failed load does keep is the arena memory
  * its statements occupied, and the predicates its facts named; an arena has
@@ -1167,10 +1336,8 @@ load_text(relic_t *ctx, const char *source_name, const char *text,
 
 	relic_staging_init(&staging, ctx);
 
-	status = parse_text(&parser, ctx, &ctx->program_arena, source_name,
-	    text, length);
-	if (status == 0)
-		status = stage_facts(&staging, &parser);
+	status = parse_text(&parser, ctx, &ctx->program_arena, &staging,
+	    source_name, text, length);
 	if (status == 0)
 		status = relic_staging_commit(&staging);
 
@@ -1184,62 +1351,6 @@ load_text(relic_t *ctx, const char *source_name, const char *text,
 	parser_reset(&parser);
 
 	return (status);
-}
-
-/*
- * Whether a statement is a fact that can be a tuple: a rule with no body,
- * every argument of its head a constant.  A fact with a variable is not,
- * and stays a statement for the check to reject.
- */
-static bool
-is_ground_fact(const relic_ast_stmt_t *statement)
-{
-	uint16_t i;
-
-	if (statement->kind != RELIC_STMT_RULE || statement->body_length != 0)
-		return (false);
-
-	for (i = 0; i < statement->head.arity; i++) {
-		if (statement->head.terms[i].kind != RELIC_TERM_CONSTANT)
-			return (false);
-	}
-
-	return (true);
-}
-
-/*
- * Take every fact that can be a tuple off the parser's statements and
- * stage it, interning its predicate.  Returns 0, or -1 with the reason
- * reported.
- */
-static int
-stage_facts(relic_staging_t *staging, relic_parser_t *parser)
-{
-	relic_ast_stmt_t *statement;
-	relic_ast_stmt_t *next;
-	relic_dom_t tuple[RELIC_MAX_ARITY];
-	relic_pred_id_t pred;
-	uint16_t i;
-
-	TAILQ_FOREACH_SAFE(statement, &parser->statements, link, next) {
-		if (!is_ground_fact(statement))
-			continue;
-
-		if (relic_pred_intern(staging->ctx, statement->head.name,
-		    statement->head.arity, &statement->head.where, &pred) != 0)
-			return (-1);
-
-		for (i = 0; i < statement->head.arity; i++)
-			tuple[i] = statement->head.terms[i].u.constant;
-
-		if (relic_staging_add(staging, pred, tuple) != 0)
-			return (-1);
-
-		TAILQ_REMOVE(&parser->statements, statement, link);
-		parser->statement_count--;
-	}
-
-	return (0);
 }
 
 /*
@@ -1298,7 +1409,8 @@ relic_parse_query(relic_t *ctx, relic_arena_t *arena, const char *source_name,
 
 	*statementp = NULL;
 
-	status = parse_text(&parser, ctx, arena, source_name, text,
+	/* No staging: a fact in a query's text stays a statement to refuse. */
+	status = parse_text(&parser, ctx, arena, NULL, source_name, text,
 	    strlen(text));
 
 	if (status == 0) {

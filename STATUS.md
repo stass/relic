@@ -459,24 +459,54 @@ and which exists for a predicate once a rule derives it.
 | Component | State |
 | --- | --- |
 | `lib/facts.c` | a load's staging: a set per predicate of the tuples the load states, deduplicated through a seeded hash and not charged to the limits; the commit marks each tuple new or not against its base store, discards what was derived when any is new, reserves every store it grows under both limits at once, refusing with `limit exceeded: tuples=N while loading p/2` or its `memory` form, named by the first predicate whose store would grow, and then appends without looking anything up |
-| `lib/parse.c` | a load moves each ground body-less statement into staging and commits before it splices its statements; `relic_fact_add()` stages and commits one fact; a fact in a query's text is refused as a fact |
+| `lib/parse.c` | a load commits its staging before it splices its statements; `relic_fact_add()` stages and commits one fact; a fact in a query's text is refused as a fact |
 | `lib/relation.c` | two tables, derived relations and base stores; the write funnel refuses a predicate no rule derives, and the read funnel returns a derived predicate's relation, any other predicate's base store, or for a base view the store it views; the discard empties the derived relations and drops the base stores' secondary indexes, and returns at once when nothing was derived or indexed since the last; a derived predicate's base store is named `p$base` wherever a relation is named |
 | `lib/pred.c`, `lib/rule.c` | the shared rule append marks a head derived as its infallible last step; `defined` is a function of that mark, a named head, a base view and the base store's count; `referenced` is a mark with the location of the first atom reading the predicate, and the undefined-predicate warning asks both |
 | `lib/eval.c` | a component's members are seeded from their base stores before its first pass, as round 0's gains; the relations are current when the rules and the facts they were computed from are the program's; explain's `facts: N` counts a component's seeds and its members' facts |
 | `lib/magic.c` | a derived predicate with facts has a base view, `p$base`, interned before the rewrite, and each of its adornments begins with one rule over it; the budget on generated rules is retired, decision D-21, since the literal budget bounds the rules kept |
-| `tests/` | `test_facts`: what a load keeps as statements, a failed load, loads refused by the tuple and the memory limit, the funnel, `relic_fact_add()` through every strategy and under a limit, indexes over a session, loads after an evaluation under both limits, a refused load of several predicates, the base view and a rewrite abandoned over its budget, and facts of no columns; `test_magic`: a rewrite of a 200-call body admitted, facts read as `e$base`; every counter of `test_eval` re-derived by hand; `tests/lang/explain-facts` |
+| `tests/` | `test_facts`: what a load keeps as statements, a failed load, loads refused by the tuple and the memory limit, the funnel, `relic_fact_add()` through every strategy and under a limit, indexes over a session, loads after an evaluation under both limits, a refused load of several predicates, the base view and a rewrite abandoned over its budget, and facts of no columns; `test_magic`: a rewrite of a 400-call body admitted, facts read as `e$base`; every counter of `test_eval` re-derived by hand; `tests/lang/explain-facts` |
 
 A predicate of facts alone is not a component, so `-e` shows no stratum
 for it, and its facts are neither derived nor inserted: the
 `stats-*` goldens count 6 fewer derivations and insertions, and hold 16
 fewer bytes, a base store being reserved for exactly the facts it holds.
-On `facts-join` at scale 4 the peak is 407 to 412 MB where it was 500 to
-563, and the user time 1.67 s where it was 1.78; the parser still builds a
-statement for each fact, which is most of what remains (`TODO.md`).
+On `facts-join` at scale 4 the peak was 407 to 412 MB where it had been
+500 to 563, and the user time 1.67 s where it had been 1.78.
 The mutations the new tests catch: a commit that reserves before it
 discards is refused under both limits after materialization, and a discard
 that keeps the base stores' indexes refuses the second of three queries
 binding different columns.
+
+**A load parses its facts into staging,** section 10 step 3 of
+`specs/design-facts.md`. The parser reads an atom's arguments into a
+scratch buffer, and the token after a statement's first literal decides
+whether they are copied into the tree: a fact of constants that a load
+reads is interned and staged and builds no statement, and every other head
+and every body atom is copied as it enters the tree, in the one statement
+append and the one body append. A fact with a variable is kept for the
+check, and a fact in a query's text for the query parser to refuse.
+`advance()` returns whether the parse may go on, every caller returns at
+once when it may not, and an ignored result is a warning, an error under
+`--enable-werror`; so nothing runs after a reported refusal, and a refusal
+striking the token of lookahead after a fact or a term is one message.
+
+| Component | State |
+| --- | --- |
+| `lib/parse.c` | `keep_atom()` is the one copy of arguments into the tree; `stage_fact()` interns a ground fact's predicate and stages it; every caller of `advance()` returns once it reports failure, and `RELIC_MUST_CHECK` makes ignoring its result a warning |
+| `tests/` | `test_facts`: 5000 facts and a rule grow the program arena as much as the rule alone; `test_exhaustion`: every refusal while loading a well-formed program with a long symbol after a fact, and a malformed one with a long symbol after a term, is one message, and each sweep reaches a load no refusal strikes |
+
+On `facts-join` at scale 4, 1.2 million facts, the step's gate of below
+200 bytes per fact at the peak is met by each of ten runs under
+`/usr/bin/time -l`: the resident peak is 165 to 199 bytes per fact, median
+185, the physical footprint 126 to 145 bytes per fact, and the user time
+1.61 to 1.65 s. The resident peak varies by a fifth between runs because it
+counts pages the allocator has freed but not yet returned, which the
+footprint does not. `bench/compare/run.sh`, whose peak is the largest of
+its runs, reported 230 and 231 MiB, 201 and 202 bytes per fact; beside
+Souffle 2.5, compiled with `-O3`, the ratio of Souffle's median to relic's
+was 0.90 and 1.14 on those two runs, on a busy machine, at Souffle's 171 MB.
+At scale 1 relic peaks at 59 MB, against 43 MB for Souffle and 79 MB for
+Nemo.
 
 ### Verified
 

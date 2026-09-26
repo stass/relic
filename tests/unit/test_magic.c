@@ -1188,14 +1188,14 @@ the_rewrite_grows_linearly_in_a_bodys_calls(void)
 }
 
 /* The calls in the long body of a_long_bodys_rewrite_fits_the_budgets(). */
-#define	LONG_BODY_CALLS		200
+#define	LONG_BODY_CALLS		400
 
 /*
  * A rewrite that specializes the program fits its budgets however few rules
- * the program has.  r(X) :- p(X), ..., p(X) with 200 calls and the rule
- * deriving p are 2 rules and 2 + 201 = 203 literals, a literal budget of
- * 256 + 16 x 203 = 3504.  The one adornment of r keeps a magic rule and a
- * supplementary rule per call, over 400 rules of one or two literals each,
+ * the program has.  r(X) :- p(X), ..., p(X) with 400 calls and the rule
+ * deriving p are 2 rules and 2 + 401 = 403 literals, a literal budget of
+ * 256 + 16 x 403 = 6704.  The one adornment of r keeps a magic rule and a
+ * supplementary rule per call, over 800 rules of one or two literals each,
  * well within the literal budget, which bounds the rules kept as well: a
  * budget of 256 + 16 x 2 rules would abandon it.
  */

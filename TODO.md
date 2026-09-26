@@ -647,26 +647,46 @@ on `tc-cyclic`, which writes about two million rows, the lock calls are about
 writing with `putc_unlocked()`, both POSIX, or formatting the row into a
 buffer and writing it with one call, would remove them.
 
-**Loading facts costs relic more memory than any other engine.** [Medium,
-component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
-ternary facts read as source text, relic peaks at 136 to 153 MB, against 44 MB
-for Souffle reading the same data as TSV and 90 to 115 MB for Nemo, clingo and
-SWI-Prolog, which also parse. A program's facts are stored as the tuples of
-their predicates' base stores, `specs/design-facts.md`, and at scale 4, 1.2
-million facts, the peak is 407 to 412 MB, about 356 bytes per fact, in 1.67 s
-of user time: the syntax tree
-statement and three terms the parser still builds for each fact before the
-load stages it (192, an 88-byte statement and 32-byte terms rounded to the
-arena's 16-byte alignment), the symbols and values its constants intern (86),
-the staging set live during the commit (about 30), the text of the file,
-read whole (24), and the tuple and its index slot (21). Step 3 of that
-design's order of work, the parser's staging, keeps a fact from ever
-building a statement; its gate is below 200 bytes per fact at the peak. A symbol's bytes are hashed once, by the lexer into the symbol
+**Loading facts costs relic more memory than Souffle.** [Low, component:
+`lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000 ternary facts
+read as source text, relic peaks at 59 MB, against 43 MB for Souffle reading
+the same data as TSV and 79 MB for Nemo, which also parses; at scale 4, 1.2
+million facts, relic's resident peak is 165 to 199 bytes per fact over ten
+direct runs and 201 to 202 as `bench/compare/run.sh` takes it, the largest of
+its runs, 198 to 242 MB, against Souffle's 171 MB, in about the same time. A
+load stages each fact as it parses it and builds no statement for it,
+`specs/design-facts.md`, and what remains per fact is the symbols and values
+its constants intern (86), the staging set live during the commit (about 30),
+the text of the file, read whole (24), the tuple and its index slot (21), and
+the slack of the arrays that double. The text is read before the parse and
+freed after the commit, though nothing reads it once the parse ends;
+releasing a file's text before the commit would take its 24 bytes off a
+load's peak. A symbol's bytes are hashed once, by the lexer into the symbol
 table; the symbol table recomputes every symbol's byte hash when it grows
 (`symbol_rehash()`), and the value table every value's hash, each about 3 per
 cent of `facts-join` at scale 4; the four-byte slot of
 `specs/design-evaluation-cost.md` section 5.2, whose stored hash would remove
 both and took about a quarter off `facts-join` at scale 1, keeps them.
+
+**A load that fails to parse still stages and interns the facts it read.**
+[Low, component: `lib/parse.c`] A fact is staged, and its predicate
+interned, as it is read, so the facts before a syntax error name predicates
+that stay interned, and the facts after it are staged and thrown away. The
+design accepts the identifiers (`specs/design-facts.md` section 12), but
+they are observable: a later load's components are numbered after them, so
+`-e` lists them in another order than a fresh context would. Staging after
+the first error also costs memory in proportion to the text until the load
+returns. Stopping the staging once the load is certain to fail would bound
+the second; only interning at the commit would remove the first.
+
+**A body atom reaches the tree through the body array's one writer.** [Low,
+component: `lib/parse.c`] A head's arguments are copied into the tree by
+the statement append itself, but a body's are copied by `body_append()`,
+and the statement append trusts that its `literals` came from there.
+Collecting every argument of a statement in one growable scratch array, and
+copying head and body in the statement append, would make that append the
+only way into the tree and cost one arena allocation per statement rather
+than one per atom.
 
 **Souffle and Nemo write their answers to files, the others to a discarded
 standard output.** [Low, component: `bench/compare/run.sh`] Under load, a
@@ -709,6 +729,13 @@ one fixed seed and, in principle, search for keys that share a cluster.
 No attack has been built. Decide whether a context used this way should be
 documented as trusting its input, or whether a stronger keyed hash for the
 byte strings the symbol table interns is worth its cost there.
+
+**The arity-limit message quotes a predicate name of any length.** [Low,
+component: `lib/parse.c`] `predicate has more than 32 arguments` names the
+predicate through `predicate_name()`, which is not clamped to
+`RELIC_QUOTED_TEXT_MAX` as quoted token text is, so a 500-byte name makes a
+624-byte message. The bytes are identifier characters and nothing leaks, but
+a message should name its subject in a bounded length.
 
 **A dropped rule's body stays in the rewrite arena.** [Medium, component:
 `lib/magic.c`] `publish_rule()` canonicalizes a draft, which copies its

@@ -55,6 +55,16 @@
 #define	RELIC_PRINTFLIKE(fmt, args)
 #endif
 
+/*
+ * Ask the compiler to reject a call whose result is ignored, for a function
+ * whose result says whether its caller may go on.
+ */
+#if defined(__GNUC__)
+#define	RELIC_MUST_CHECK	__attribute__((__warn_unused_result__))
+#else
+#define	RELIC_MUST_CHECK
+#endif
+
 typedef struct relic_adornment relic_adornment_t;
 typedef struct relic_counters relic_counters_t;
 typedef struct relic_diag relic_diag_t;
