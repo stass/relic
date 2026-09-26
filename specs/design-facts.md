@@ -396,11 +396,12 @@ twice.
 
 ## 9. The tests
 
-* **The relation store.** Reserving for *n* tuples grows the columns and
-  the canonical index to hold at least count plus *n*, geometrically, and
-  changes no content; a count plus *n* past the largest identifier is
-  refused without overflow; a reservation the memory limit refuses leaves
-  the store as it was. The identifier table reserves for *n* entries.
+* **The relation store.** Reserving for *n* tuples grows the columns, the
+  canonical index and any secondary index once, to exactly the bytes
+  projected for it, charges them, and changes no content, and *n* new tuples
+  then go in without growing anything; a count plus *n* past the largest
+  identifier, or a size no `size_t` expresses, is refused without overflow
+  and grows nothing. The identifier table reserves for *n* entries alike.
 * **Loading.** A fact with a variable is kept as a statement and rejected by
   the check with its diagnostic, and draws no undefined-predicate warning; a
   predicate first named by a fact of a load that failed, then referenced by a

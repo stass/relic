@@ -36,11 +36,11 @@
  * walks each chain at most once however many rounds and lookups there are.
  *
  * Adding a tuple is two operations, as installing an identifier in the table
- * is.  relic_index_reserve() makes room for one more tuple and one more key
- * and is the only part that can fail; relic_index_add() then links the tuple
- * in and cannot.  The relation store reserves in every index before it stores
- * anything, so that no failure leaves a tuple the relation holds missing from
- * an index, which would be a lookup silently missing an answer.
+ * is.  relic_index_reserve() makes room for the tuples and keys about to be
+ * added and is the only part that can fail; relic_index_add() then links a
+ * tuple in and cannot.  The relation store reserves in every index before it
+ * stores anything, so that no failure leaves a tuple the relation holds
+ * missing from an index, which would be a lookup silently missing an answer.
  *
  * Nothing here knows about limits or the context.  The relation store
  * measures an index before and after a reservation and does the accounting.
@@ -211,7 +211,7 @@ relic_index_bytes(const relic_index_t *index)
 
 /*
  * The bytes the index would hold once relic_index_reserve() had made room for
- * `tuples` tuples and one more key.
+ * `tuples` tuples in all and `added_keys` more keys.
  *
  * Each growth policy is asked what it would do rather than measured
  * afterwards, which is what lets the memory limit refuse an allocation
@@ -221,16 +221,20 @@ relic_index_bytes(const relic_index_t *index)
  * for its own arrays.
  */
 size_t
-relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples)
+relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
+    size_t added_keys)
 {
 	size_t entries;
-	size_t keys;
+	size_t key_slots;
 	size_t next;
 
-	keys = relic_idtab_bytes_after_reserve(&index->keys);
+	if (added_keys > SIZE_MAX - index->key_count)
+		return (relic_index_bytes(index));
+
+	key_slots = relic_idtab_bytes_after_reserve(&index->keys, added_keys);
 
 	entries = relic_grow_array_capacity(index->entry_capacity,
-	    index->key_count + 1);
+	    index->key_count + added_keys);
 	next = relic_grow_array_capacity(index->next_capacity, tuples);
 	if (entries == 0 || next == 0 ||
 	    entries > SIZE_MAX / sizeof(*index->entries) ||
@@ -239,38 +243,43 @@ relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples)
 
 	entries *= sizeof(*index->entries);
 	next *= sizeof(*index->next);
-	if (entries > SIZE_MAX - next || entries + next > SIZE_MAX - keys)
+	if (entries > SIZE_MAX - next || entries + next > SIZE_MAX - key_slots)
 		return (relic_index_bytes(index));
 
-	return (keys + entries + next);
+	return (key_slots + entries + next);
 }
 
 /*
- * Make room for `tuples` tuples and one more key.  Returns 0, or -1 when an
- * array could not grow; whatever the steps before it obtained is kept, and
- * the caller accounts for it by measuring.
+ * Make room for `tuples` tuples in all and `added_keys` more keys.  Returns
+ * 0, or -1 when an array could not grow; whatever the steps before it
+ * obtained is kept, and the caller accounts for it by measuring.
  *
- * Room for a key is made whether or not the tuple about to be added brings a
- * new one.  Finding out would take a probe that relic_index_add() then makes
- * again, and reserving regardless costs at most one growth a little sooner
- * than necessary.  What matters is that relic_index_bytes_after_reserve()
- * assumes the same, so the limit is charged for exactly what is allocated.
+ * The relation store asks for a key per tuple about to be added, whether or
+ * not it brings a new one.  Finding out would take a probe that
+ * relic_index_add() then makes again, and for the one tuple an insertion
+ * adds, reserving regardless costs at most a growth a little sooner than
+ * necessary.  What matters is that relic_index_bytes_after_reserve() assumes
+ * the same, so the limit is charged for exactly what is allocated.
  */
 int
 relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
-    size_t tuples)
+    size_t tuples, size_t added_keys)
 {
 	relic_index_rehash_t rehash;
 	relic_index_key_t *entries;
 	relic_tuple_id_t *next;
 
+	if (added_keys > SIZE_MAX - index->key_count)
+		return (-1);
+
 	rehash.index = index;
 	rehash.relation = relation;
-	if (relic_idtab_reserve(&index->keys, key_rehash, &rehash) != 0)
+	if (relic_idtab_reserve(&index->keys, added_keys,
+	    key_rehash, &rehash) != 0)
 		return (-1);
 
 	entries = relic_grow_array(index->entries, &index->entry_capacity,
-	    index->key_count + 1, sizeof(*index->entries));
+	    index->key_count + added_keys, sizeof(*index->entries));
 	if (entries == NULL)
 		return (-1);
 	index->entries = entries;

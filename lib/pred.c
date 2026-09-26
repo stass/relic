@@ -206,7 +206,7 @@ relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 	 * which would make one predicate into two relations holding half the
 	 * answer each.
 	 */
-	if (relic_idtab_reserve(&table->index, pred_rehash, table) != 0) {
+	if (relic_idtab_reserve(&table->index, 1, pred_rehash, table) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}

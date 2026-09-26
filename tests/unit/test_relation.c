@@ -49,6 +49,7 @@
 #define	SCENARIO_MEMORY_LIMIT	"the memory limit refuses a tuple and says so"
 #define	SCENARIO_OWNERSHIP	"a relation belongs to one predicate"
 #define	SCENARIO_RANGES		"a range names the tuples added since a mark"
+#define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_STABLE		"a relation stays where it was put"
 #define	SCENARIO_SET		"inserting a tuple twice adds it once"
 #define	SCENARIO_TUPLE_LIMIT	"the tuple limit refuses a tuple and says so"
@@ -155,6 +156,11 @@ static void	 compare_with_single(relic_t *ctx,
 		    const relic_relation_t *batched, relic_relation_t *single,
 		    const relic_dom_t *tuples, const bool *added);
 static void	 a_limit_refuses_a_batch_where_it_would_one(void);
+static void	 a_reservation_for_many_holds_them_all(void);
+static bool	 reserve_then_fill(relic_t *ctx, relic_relation_t *rel,
+		    size_t added, unsigned int *ordinalp);
+static void	 refused_as_too_large(relic_t *ctx, relic_relation_t *rel,
+		    size_t added, const char *what);
 
 static relic_t *
 context(const char *scenario, const relic_config_t *config)
@@ -1353,6 +1359,134 @@ a_limit_refuses_a_batch_where_it_would_one(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * Reserve room in `rel` for `added` more tuples, then insert that many new
+ * ones, each pairing the first test value with the next of *ordinalp.
+ * Returns whether the reservation reached the size projected for it, kept
+ * the storage total in step, and left the insertions nothing to grow.
+ */
+static bool
+reserve_then_fill(relic_t *ctx, relic_relation_t *rel, size_t added,
+    unsigned int *ordinalp)
+{
+	relic_dom_t columns[2];
+	const relic_dom_t *storage;
+	size_t bytes_before;
+	size_t projected;
+	size_t store_bytes_before;
+	size_t i;
+	bool added_one;
+
+	bytes_before = relic_relation_bytes(rel);
+	projected = relic_relation_bytes_after_reserve(rel, added);
+	store_bytes_before = ctx->account.store_bytes;
+
+	if (relic_relation_reserve(ctx, rel, added) != 0 ||
+	    relic_relation_bytes(rel) != projected ||
+	    ctx->account.store_bytes - store_bytes_before !=
+	    projected - bytes_before)
+		return (false);
+
+	storage = relic_relation_tuple(rel, RELIC_TUPLE_FIRST);
+	for (i = 0; i < added; i++) {
+		pair(columns, value(ctx, SCENARIO_RESERVED, 0),
+		    value(ctx, SCENARIO_RESERVED, ++*ordinalp));
+		if (!insert(ctx, SCENARIO_RESERVED, *ordinalp, rel, columns,
+		    &added_one) || !added_one)
+			return (false);
+	}
+
+	return (relic_relation_bytes(rel) == projected &&
+	    relic_relation_tuple(rel, RELIC_TUPLE_FIRST) == storage);
+}
+
+/*
+ * A reservation for many tuples grows the columns and the canonical index
+ * once, to exactly the bytes projected for it, and charges them to the
+ * storage total; the tuples it reserved for then go in without growing
+ * anything.  A reservation that would take a relation past the identifier
+ * space, or whose size cannot be expressed, is projected as no growth, and
+ * refused as a relation too large to grow having changed nothing.
+ */
+static void
+a_reservation_for_many_holds_them_all(void)
+{
+	static const size_t addeds[] = { 0, 1, 2, 100, 3000 };
+
+	relic_t *ctx;
+	relic_relation_t *rel;
+	relic_dom_t columns[2];
+	unsigned int ordinal;
+	size_t bytes;
+	size_t store_bytes;
+	size_t a;
+	bool added;
+
+	ctx = context(SCENARIO_RESERVED, NULL);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_RESERVED, "r", 2);
+	if (rel == NULL) {
+		relic_destroy(ctx);
+		return;
+	}
+
+	for (ordinal = 1; ordinal <= 10; ordinal++) {
+		pair(columns, value(ctx, SCENARIO_RESERVED, ordinal),
+		    value(ctx, SCENARIO_RESERVED, ordinal));
+		if (!insert(ctx, SCENARIO_RESERVED, ordinal, rel, columns,
+		    &added)) {
+			relic_destroy(ctx);
+			return;
+		}
+	}
+
+	for (a = 0; a < sizeof(addeds) / sizeof(addeds[0]); a++)
+		checkf(reserve_then_fill(ctx, rel, addeds[a], &ordinal),
+		    SCENARIO_RESERVED,
+		    "reserving for %zu tuples should reach the projection, "
+		    "charge it, and hold them without growing", addeds[a]);
+
+	bytes = relic_relation_bytes(rel);
+	store_bytes = ctx->account.store_bytes;
+	refused_as_too_large(ctx, rel, SIZE_MAX, "an inexpressible count");
+	refused_as_too_large(ctx, rel,
+	    RELIC_TUPLE_MAX - relic_relation_count(rel) + 1,
+	    "past the identifier space");
+	check(relic_relation_bytes(rel) == bytes &&
+	    ctx->account.store_bytes == store_bytes, SCENARIO_RESERVED,
+	    "a refused reservation should grow and charge nothing");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Check that reserving `added` more tuples is projected as no growth and
+ * refused as a relation too large to grow.  `what` says how many that is,
+ * for the message.
+ */
+static void
+refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
+    const char *what)
+{
+	static const char expected[] = "relation r/2 is too large to grow";
+
+	const char *reported;
+
+	checkf(relic_relation_bytes_after_reserve(rel, added) ==
+	    relic_relation_bytes(rel), SCENARIO_RESERVED,
+	    "reserving %s should project no growth", what);
+	checkf(relic_relation_reserve(ctx, rel, added) != 0,
+	    SCENARIO_RESERVED, "reserving %s should fail", what);
+
+	reported = relic_error(ctx);
+	checkf(reported != NULL && strcmp(reported, expected) == 0,
+	    SCENARIO_RESERVED,
+	    "reserving %s should report \"%s\", not \"%s\"", what,
+	    expected, reported == NULL ? "(none)" : reported);
+}
+
 int
 main(void)
 {
@@ -1368,6 +1502,7 @@ main(void)
 	a_relation_stays_where_it_was_put();
 	a_batch_inserts_what_single_insertions_would();
 	a_limit_refuses_a_batch_where_it_would_one();
+	a_reservation_for_many_holds_them_all();
 
 	return (check_summary("relation"));
 }

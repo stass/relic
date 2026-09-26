@@ -159,11 +159,13 @@ void	 relic_idtab_reset(relic_idtab_t *table);
  * separate so that the fallible half can be done before anything is at
  * stake.
  *
- * relic_idtab_reserve() makes room for one more entry, growing the table if
- * it would otherwise pass three quarters full.  It is the only part that can
- * fail, returning -1 when the table cannot grow.
+ * relic_idtab_reserve() makes room for `added` more entries, growing the
+ * table once, if they would otherwise take it past three quarters full, to
+ * the smallest power of two at least twice its size that holds them.  It is
+ * the only part that can fail, returning -1 when the table cannot grow.
  *
- * relic_idtab_place() then stores the identifier, and cannot fail.
+ * relic_idtab_place() then stores an identifier, and cannot fail; at most
+ * `added` places may follow a reservation for `added` entries.
  *
  * An owner reserves before it creates the thing being indexed, so that a
  * failure happens while nothing has been created yet.  Were the order the
@@ -182,13 +184,13 @@ void	 relic_idtab_reset(relic_idtab_t *table);
  * identifier is at least one by construction and no caller can produce the
  * reserved value.
  */
-int	 relic_idtab_reserve(relic_idtab_t *table, relic_rehash_fn rehash,
-	    void *ctx);
+int	 relic_idtab_reserve(relic_idtab_t *table, size_t added,
+	    relic_rehash_fn rehash, void *ctx);
 void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
 
 /*
  * The bytes a table's slots occupy now, and the bytes they would occupy once
- * relic_idtab_reserve() had made room for one more entry.
+ * relic_idtab_reserve() had made room for `added` more entries.
  *
  * These exist for the relation store, whose indexes are accounted against the
  * memory limit and must therefore be measured before they are allocated
@@ -197,7 +199,8 @@ void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
  * failure, which is a different answer from exceeding a limit.
  */
 size_t	 relic_idtab_bytes(const relic_idtab_t *table);
-size_t	 relic_idtab_bytes_after_reserve(const relic_idtab_t *table);
+size_t	 relic_idtab_bytes_after_reserve(const relic_idtab_t *table,
+	    size_t added);
 
 /*
  * A prefetch of the line holding `address`: the compiler's builtin where

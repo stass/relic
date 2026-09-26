@@ -445,6 +445,13 @@ rules an evaluation is given, sized once when it begins, and is charged to the
 evaluation arena, so a program near its `-l memory=` limit can be refused that
 much earlier.
 
+The relation store and the identifier table reserve room for any number of
+entries at once, section 10 step 1 of `specs/design-facts.md`: a reservation
+grows each array once, to exactly the bytes
+`relic_relation_bytes_after_reserve()` projects, and applies no limit of its
+own. An insertion is the reservation of one tuple under the limits; nothing
+reserves for more.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:

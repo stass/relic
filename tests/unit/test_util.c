@@ -36,6 +36,7 @@
 #define	SCENARIO_LOOKUP		"a key survives the table growing under it"
 #define	SCENARIO_OVERFLOW	"an impossible array size is refused"
 #define	SCENARIO_PREDICTED	"a growth is exactly what was predicted"
+#define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_SPREAD		"hashing separates similar keys"
 
 /*
@@ -61,12 +62,15 @@ struct key_set {
 };
 
 static uint32_t	 key_rehash(uint32_t id, void *ctx);
+static uint32_t	 counting_rehash(uint32_t id, void *ctx);
+static size_t	 capacity_reserved(size_t held, size_t added);
 static bool	 key_set_find(const relic_idtab_t *table,
 		    const key_set_t *keys, uint32_t key, uint32_t *idp);
 static bool	 key_set_insert(relic_idtab_t *table, key_set_t *keys,
 		    uint32_t key);
 static size_t	 longest_walk(const relic_idtab_t *table,
 		    const key_set_t *keys);
+static bool	 reserve_then_fill(size_t held, size_t added);
 static size_t	 walk_to(const relic_idtab_t *table, const key_set_t *keys,
 		    uint32_t key);
 static void	 an_array_grows_without_losing_its_contents(void);
@@ -75,6 +79,7 @@ static void	 equal_input_hashes_equally(void);
 static void	 every_inserted_key_is_found_after_growth(void);
 static void	 a_growth_is_exactly_what_was_predicted(void);
 static void	 a_hash_depends_on_its_seed(void);
+static void	 a_reservation_for_many_holds_them_all(void);
 static void	 a_reservation_is_exactly_what_was_predicted(void);
 static void	 a_word_sequence_hashes_to_a_fixed_value(void);
 static void	 colliding_keys_collide_only_under_their_seed(void);
@@ -90,6 +95,28 @@ key_rehash(uint32_t id, void *ctx)
 	keys = ctx;
 
 	return (relic_hash_word(keys->seed, keys->keys[id - 1]));
+}
+
+/*
+ * A key set's rehash that also counts its calls, which is how many entries a
+ * growth moved.
+ */
+typedef struct counted_keys counted_keys_t;
+
+struct counted_keys {
+	key_set_t	*keys;
+	size_t		 rehashes;
+};
+
+static uint32_t
+counting_rehash(uint32_t id, void *ctx)
+{
+	counted_keys_t *counted;
+
+	counted = ctx;
+	counted->rehashes++;
+
+	return (key_rehash(id, counted->keys));
 }
 
 /*
@@ -123,7 +150,7 @@ key_set_find(const relic_idtab_t *table, const key_set_t *keys, uint32_t key,
 static bool
 key_set_insert(relic_idtab_t *table, key_set_t *keys, uint32_t key)
 {
-	if (relic_idtab_reserve(table, key_rehash, keys) != 0)
+	if (relic_idtab_reserve(table, 1, key_rehash, keys) != 0)
 		return (false);
 
 	keys->keys[keys->count] = key;
@@ -684,6 +711,163 @@ a_growth_is_exactly_what_was_predicted(void)
 }
 
 /*
+ * Reserve room for `added` keys in a table already holding `held`, and
+ * check the reservation reached the size predicted for it and that the keys
+ * then fit without the table growing again.  Returns whether every check
+ * held, so the caller can name the pair that failed.
+ */
+static bool
+reserve_then_fill(size_t held, size_t added)
+{
+	enum { KEY_MAX = 4096 };
+
+	relic_idtab_t table;
+	key_set_t keys;
+	counted_keys_t counted;
+	uint32_t storage[KEY_MAX];
+	uint32_t *slots;
+	uint32_t *slots_before;
+	size_t predicted;
+	size_t i;
+	bool held_up;
+
+	keys.keys = storage;
+	keys.count = 0;
+	keys.seed = SEED;
+	relic_idtab_init(&table);
+	held_up = true;
+
+	for (i = 0; i < held && held_up; i++)
+		held_up = key_set_insert(&table, &keys, (uint32_t)(i * 7919u));
+	slots_before = table.slots;
+
+	/*
+	 * A growth moves every entry once, so a reservation that grew the
+	 * table rehashed exactly the entries it held, and one that did not
+	 * rehashed none.
+	 */
+	predicted = relic_idtab_bytes_after_reserve(&table, added);
+	counted.keys = &keys;
+	counted.rehashes = 0;
+	if (held_up)
+		held_up = relic_idtab_reserve(&table, added, counting_rehash,
+		    &counted) == 0 && relic_idtab_bytes(&table) == predicted &&
+		    counted.rehashes ==
+		    (slots_before == table.slots ? 0 : held);
+
+	slots = table.slots;
+	for (i = 0; i < added && held_up; i++)
+		held_up = key_set_insert(&table, &keys,
+		    (uint32_t)((held + i) * 7919u));
+
+	held_up = held_up && table.slots == slots &&
+	    relic_idtab_bytes(&table) == predicted;
+
+	relic_idtab_reset(&table);
+
+	return (held_up);
+}
+
+/*
+ * The slots a table holding `held` keys has once it has reserved room for
+ * `added` more, or zero when the fixture could not be built.
+ */
+static size_t
+capacity_reserved(size_t held, size_t added)
+{
+	relic_idtab_t table;
+	key_set_t keys;
+	uint32_t storage[64];
+	size_t capacity;
+	size_t i;
+
+	keys.keys = storage;
+	keys.count = 0;
+	keys.seed = SEED;
+	relic_idtab_init(&table);
+	capacity = 0;
+
+	for (i = 0; i < held; i++) {
+		if (!key_set_insert(&table, &keys, (uint32_t)i))
+			break;
+	}
+
+	if (i == held &&
+	    relic_idtab_reserve(&table, added, key_rehash, &keys) == 0)
+		capacity = table.capacity;
+
+	relic_idtab_reset(&table);
+
+	return (capacity);
+}
+
+/*
+ * A reservation for many entries grows the table once, to the size its
+ * prediction names, and every entry reserved for then fits without another
+ * growth.  The size is the smallest power of two, at least double the
+ * table's, whose three quarters hold them: twelve entries fit sixteen slots
+ * and thirteen need thirty-two.  A reservation of none changes nothing, and
+ * one whose size could not be expressed is refused and leaves the table as
+ * it was.
+ */
+static void
+a_reservation_for_many_holds_them_all(void)
+{
+	static const size_t helds[] = { 0, 1, 7, 12, 13, 100 };
+	static const size_t addeds[] = { 0, 1, 2, 5, 11, 12, 13, 100, 3000 };
+	static const struct {
+		size_t	held;
+		size_t	added;
+		size_t	capacity;
+	} sized[] = {
+		{ 0, 12, 16 }, { 0, 13, 32 }, { 12, 12, 32 }, { 12, 13, 64 },
+		{ 1, 0, 16 }, { 12, 0, 16 },
+	};
+
+	relic_idtab_t table;
+	key_set_t keys;
+	uint32_t storage[1];
+	uint32_t *slots;
+	size_t h;
+	size_t a;
+
+	for (h = 0; h < sizeof(helds) / sizeof(helds[0]); h++) {
+		for (a = 0; a < sizeof(addeds) / sizeof(addeds[0]); a++)
+			checkf(reserve_then_fill(helds[h], addeds[a]),
+			    SCENARIO_RESERVED,
+			    "a table of %zu reserving for %zu more should "
+			    "reach its prediction and then hold them",
+			    helds[h], addeds[a]);
+	}
+
+	for (h = 0; h < sizeof(sized) / sizeof(sized[0]); h++)
+		checkf(capacity_reserved(sized[h].held, sized[h].added) ==
+		    sized[h].capacity, SCENARIO_RESERVED,
+		    "a table of %zu reserving for %zu more should have %zu "
+		    "slots, not %zu", sized[h].held, sized[h].added,
+		    sized[h].capacity,
+		    capacity_reserved(sized[h].held, sized[h].added));
+
+	keys.keys = storage;
+	keys.count = 0;
+	keys.seed = SEED;
+	relic_idtab_init(&table);
+	check(key_set_insert(&table, &keys, 1u), SCENARIO_RESERVED,
+	    "inserting one key should succeed");
+	slots = table.slots;
+
+	check(relic_idtab_bytes_after_reserve(&table, SIZE_MAX) ==
+	    relic_idtab_bytes(&table), SCENARIO_RESERVED,
+	    "an inexpressible reservation should predict no growth");
+	check(relic_idtab_reserve(&table, SIZE_MAX, key_rehash, &keys) != 0,
+	    SCENARIO_RESERVED, "an inexpressible reservation should fail");
+	check(table.slots == slots && table.count == 1, SCENARIO_RESERVED,
+	    "a failed reservation should leave the table as it was");
+
+	relic_idtab_reset(&table);
+}
+
+/*
  * The identifier table's byte predictor agrees with the table, for the same
  * reason and with the same consequence if it stops.
  */
@@ -708,9 +892,9 @@ a_reservation_is_exactly_what_was_predicted(void)
 	for (i = 0; i < KEY_COUNT; i++) {
 		size_t predicted;
 
-		predicted = relic_idtab_bytes_after_reserve(&table);
+		predicted = relic_idtab_bytes_after_reserve(&table, 1);
 
-		if (relic_idtab_reserve(&table, key_rehash, &keys) != 0) {
+		if (relic_idtab_reserve(&table, 1, key_rehash, &keys) != 0) {
 			checkf(false, SCENARIO_PREDICTED,
 			    "reserving room for key %zu should succeed", i);
 			break;
@@ -775,6 +959,7 @@ main(void)
 	every_inserted_key_is_found_after_growth();
 	a_growth_is_exactly_what_was_predicted();
 	a_hash_depends_on_its_seed();
+	a_reservation_for_many_holds_them_all();
 	a_reservation_is_exactly_what_was_predicted();
 	a_word_sequence_hashes_to_a_fixed_value();
 	colliding_keys_collide_only_under_their_seed();

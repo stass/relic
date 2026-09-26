@@ -33,10 +33,12 @@ static uint32_t	 hash_finish(uint64_t seed, uint32_t state);
 static uint32_t	 hash_fold(uint32_t state, uint32_t unit);
 static uint32_t	 hash_start(uint64_t seed);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
-static int	 idtab_grow(relic_idtab_t *table, relic_rehash_fn rehash,
-		    void *ctx);
-static size_t	 idtab_next_capacity(const relic_idtab_t *table);
-static bool	 idtab_would_overfill(const relic_idtab_t *table);
+static bool	 idtab_capacity_holds(size_t capacity, size_t count,
+		    size_t added);
+static size_t	 idtab_capacity_for(const relic_idtab_t *table,
+		    size_t added);
+static int	 idtab_grow(relic_idtab_t *table, size_t capacity,
+		    relic_rehash_fn rehash, void *ctx);
 
 /*
  * Avalanche a hash so that every input bit affects the low bits.
@@ -289,16 +291,21 @@ relic_idprobe_next(relic_idprobe_t *probe, uint32_t *idp)
 }
 
 /*
- * Whether one more entry would take the table past three quarters full.
+ * Whether `capacity` slots hold `count` entries and `added` more without
+ * passing three quarters full.
  *
  * The load factor is a performance choice, but the fact that some slot stays
  * empty is a correctness one: a full table would make relic_idprobe_next()
- * circle forever instead of reporting that the key is absent.
+ * circle forever instead of reporting that the key is absent.  A total that
+ * does not fit a size_t fits no table.
  */
 static bool
-idtab_would_overfill(const relic_idtab_t *table)
+idtab_capacity_holds(size_t capacity, size_t count, size_t added)
 {
-	return (table->count + 1 > table->capacity - table->capacity / 4);
+	if (added > SIZE_MAX - count)
+		return (false);
+
+	return (count + added <= capacity - capacity / 4);
 }
 
 /*
@@ -340,41 +347,46 @@ relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id)
 }
 
 /*
- * The capacity a growth would produce: twice the current size, or the
- * smallest table worth allocating when there is not one yet.  Zero says the
- * table has reached a size that cannot be doubled.
+ * The capacity a growth for `added` more entries would produce: the current
+ * size doubled, or the smallest table worth allocating when there is not one
+ * yet, and doubled again until the entries fit.  Zero says no table whose
+ * size can be expressed holds them.
+ *
+ * The capacity stays a power of two, which is what lets a probe mask a hash
+ * into a slot.
  */
 static size_t
-idtab_next_capacity(const relic_idtab_t *table)
+idtab_capacity_for(const relic_idtab_t *table, size_t added)
 {
-	if (table->capacity < RELIC_IDTAB_MIN_CAPACITY)
-		return (RELIC_IDTAB_MIN_CAPACITY);
+	size_t capacity;
 
-	if (table->capacity > SIZE_MAX / 2 / sizeof(*table->slots))
-		return (0);
+	capacity = table->capacity;
+	do {
+		if (capacity < RELIC_IDTAB_MIN_CAPACITY)
+			capacity = RELIC_IDTAB_MIN_CAPACITY;
+		else if (capacity > SIZE_MAX / 2 / sizeof(*table->slots))
+			return (0);
+		else
+			capacity *= 2;
+	} while (!idtab_capacity_holds(capacity, table->count, added));
 
-	return (table->capacity * 2);
+	return (capacity);
 }
 
 /*
- * Replace the slot array with a larger one and reinsert every entry: twice
- * the current size, or the smallest table worth allocating when there is not
- * one yet.
+ * Replace the slot array with one of `capacity` slots and reinsert every
+ * entry.
  *
  * The replacement is built complete and installed in one assignment, so a
  * failed allocation leaves the caller's table exactly as it was rather than
  * half rehashed.
  */
 static int
-idtab_grow(relic_idtab_t *table, relic_rehash_fn rehash, void *ctx)
+idtab_grow(relic_idtab_t *table, size_t capacity, relic_rehash_fn rehash,
+    void *ctx)
 {
 	relic_idtab_t grown;
-	size_t capacity;
 	size_t slot;
-
-	capacity = idtab_next_capacity(table);
-	if (capacity == 0)
-		return (-1);
 
 	relic_idtab_init(&grown);
 	grown.slots = calloc(capacity, sizeof(*grown.slots));
@@ -399,12 +411,19 @@ idtab_grow(relic_idtab_t *table, relic_rehash_fn rehash, void *ctx)
 }
 
 int
-relic_idtab_reserve(relic_idtab_t *table, relic_rehash_fn rehash, void *ctx)
+relic_idtab_reserve(relic_idtab_t *table, size_t added,
+    relic_rehash_fn rehash, void *ctx)
 {
-	if (!idtab_would_overfill(table))
+	size_t capacity;
+
+	if (idtab_capacity_holds(table->capacity, table->count, added))
 		return (0);
 
-	return (idtab_grow(table, rehash, ctx));
+	capacity = idtab_capacity_for(table, added);
+	if (capacity == 0)
+		return (-1);
+
+	return (idtab_grow(table, capacity, rehash, ctx));
 }
 
 size_t
@@ -414,14 +433,14 @@ relic_idtab_bytes(const relic_idtab_t *table)
 }
 
 size_t
-relic_idtab_bytes_after_reserve(const relic_idtab_t *table)
+relic_idtab_bytes_after_reserve(const relic_idtab_t *table, size_t added)
 {
 	size_t capacity;
 
-	if (!idtab_would_overfill(table))
+	if (idtab_capacity_holds(table->capacity, table->count, added))
 		return (relic_idtab_bytes(table));
 
-	capacity = idtab_next_capacity(table);
+	capacity = idtab_capacity_for(table, added);
 	if (capacity == 0)
 		return (relic_idtab_bytes(table));
 

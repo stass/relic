@@ -60,9 +60,9 @@ static void	 prefetch_first_candidate(const relic_relation_t *relation,
 static void	 report_limit(relic_t *ctx, const char *limit,
 		    size_t configured, const char *activity,
 		    const relic_relation_t *relation);
-static size_t	 relation_bytes_after_insert(const relic_relation_t *relation);
-static bool	 relation_columns_after_insert(
-		    const relic_relation_t *relation, size_t *columnsp);
+static bool	 relation_columns_after_reserve(
+		    const relic_relation_t *relation, size_t added,
+		    size_t *columnsp);
 static void	 relation_empty(relic_relation_t *relation);
 static relic_tuple_id_t relation_find_hashed(
 		    const relic_relation_t *relation,
@@ -70,8 +70,8 @@ static relic_tuple_id_t relation_find_hashed(
 static int	 relation_insert_hashed(relic_t *ctx,
 		    relic_relation_t *relation, const relic_dom_t *columns,
 		    uint32_t hash, bool *addedp);
-static int	 relation_make_room(relic_t *ctx, relic_relation_t *relation);
-static int	 relation_reserve(relic_t *ctx, relic_relation_t *relation);
+static int	 relation_grow(relic_t *ctx, relic_relation_t *relation,
+		    size_t added);
 static int	 relations_cover(relic_t *ctx, relic_pred_id_t pred);
 static void	 tuple_append(relic_relation_t *relation,
 		    const relic_dom_t *columns, uint32_t hash);
@@ -294,15 +294,21 @@ columns_holding(size_t tuples, uint16_t arity, size_t *columnsp)
 }
 
 /*
- * The same, for one more tuple than the relation holds now.  Both the
- * reservation and the projection that precedes it ask this question, and
- * writing the "one more" in one place is what keeps them asking the same one.
+ * The same, for `added` more tuples than the relation holds now, or false
+ * when those tuples would pass the identifier space.  Both the reservation
+ * and the projection that precedes it ask this question, and writing the
+ * addition and its bound in one place is what keeps them asking the same
+ * one.  A relation's count never exceeds RELIC_TUPLE_MAX, so the bound's
+ * subtraction cannot wrap.
  */
 static bool
-relation_columns_after_insert(const relic_relation_t *relation,
-    size_t *columnsp)
+relation_columns_after_reserve(const relic_relation_t *relation,
+    size_t added, size_t *columnsp)
 {
-	return (columns_holding(relation->count + 1, relation->arity,
+	if (added > RELIC_TUPLE_MAX - relation->count)
+		return (false);
+
+	return (columns_holding(relation->count + added, relation->arity,
 	    columnsp));
 }
 
@@ -326,22 +332,25 @@ relic_relation_bytes(const relic_relation_t *relation)
 }
 
 /*
- * The bytes a relation would hold once it had room for one more tuple.
+ * The bytes a relation would hold once relic_relation_reserve() had made
+ * room for `added` more tuples.
  *
  * Both growth policies are asked what they would do rather than measured
  * after they have done it, which is what lets the memory limit refuse an
  * allocation instead of reporting one that has already happened.
  *
- * A growth whose size cannot be expressed at all -- a column count or a byte
- * count that would overflow a size_t -- is reported as no growth, which is
- * the convention relic_idtab_bytes_after_reserve() follows for the same
- * condition.  The limit then admits the tuple and the reservation refuses it,
- * and that is the better division of labour: a relation too large to grow has
- * not exceeded a limit anybody configured, and the reservation names the real
- * obstacle where a limit diagnostic would name the wrong one.
+ * A growth that cannot happen at all -- past the identifier space, or a
+ * column count or a byte count that would overflow a size_t -- is reported
+ * as no growth, which is the convention relic_idtab_bytes_after_reserve()
+ * follows for the same condition.  The limit then admits the tuples and the
+ * reservation refuses them, and that is the better division of labour: a
+ * relation too large to grow has not exceeded a limit anybody configured,
+ * and the reservation names the real obstacle where a limit diagnostic
+ * would name the wrong one.
  */
-static size_t
-relation_bytes_after_insert(const relic_relation_t *relation)
+size_t
+relic_relation_bytes_after_reserve(const relic_relation_t *relation,
+    size_t added)
 {
 	size_t bytes;
 	size_t canonical_bytes;
@@ -351,10 +360,11 @@ relation_bytes_after_insert(const relic_relation_t *relation)
 	size_t position;
 	size_t secondary_bytes;
 
-	canonical_bytes = relic_idtab_bytes_after_reserve(&relation->index);
-
-	if (!relation_columns_after_insert(relation, &needed_columns))
+	if (!relation_columns_after_reserve(relation, added, &needed_columns))
 		return (relic_relation_bytes(relation));
+
+	canonical_bytes = relic_idtab_bytes_after_reserve(&relation->index,
+	    added);
 
 	grown_capacity = relic_grow_array_capacity(relation->column_capacity,
 	    needed_columns);
@@ -369,7 +379,8 @@ relation_bytes_after_insert(const relic_relation_t *relation)
 
 	for (position = 0; position < relation->index_count; position++) {
 		secondary_bytes = relic_index_bytes_after_reserve(
-		    &relation->indexes[position], relation->count + 1);
+		    &relation->indexes[position], relation->count + added,
+		    added);
 		if (secondary_bytes > SIZE_MAX - bytes)
 			return (relic_relation_bytes(relation));
 		bytes += secondary_bytes;
@@ -420,7 +431,7 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 	}
 
 	if (relic_account_exceeds(&ctx->account, relic_relation_bytes(relation),
-	    relation_bytes_after_insert(relation))) {
+	    relic_relation_bytes_after_reserve(relation, 1))) {
 		report_limit(ctx, "memory", ctx->account.limit, "deriving",
 		    relation);
 		return (-1);
@@ -447,8 +458,8 @@ report_limit(relic_t *ctx, const char *limit, size_t configured,
 }
 
 /*
- * Make room for one more tuple: a slot in the canonical index, a tuple's
- * worth of columns, and room in every secondary index.
+ * Make room for `added` more tuples: slots in the canonical index, their
+ * columns, and room in every secondary index.
  *
  * Every step that can fail is here, and none of them changes what the
  * relation holds.  That separation is what an insertion's consistency rests
@@ -465,7 +476,7 @@ report_limit(relic_t *ctx, const char *limit, size_t configured,
  * holds rather than from which step failed.
  */
 static int
-relation_reserve(relic_t *ctx, relic_relation_t *relation)
+relation_grow(relic_t *ctx, relic_relation_t *relation, size_t added)
 {
 	relic_dom_t *columns;
 	size_t needed_columns;
@@ -473,12 +484,11 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 	char described[RELIC_PRED_TEXT_MAX];
 
 	/*
-	 * The two ways a relation can be too large to grow at all, neither of
-	 * which any limit describes: it has used up the identifier space, or
-	 * its columns would no longer be countable.
+	 * A relation too large to grow at all is one no limit describes: the
+	 * tuples would pass the identifier space, or its columns would no
+	 * longer be countable.
 	 */
-	if (relation->count >= RELIC_TUPLE_MAX ||
-	    !relation_columns_after_insert(relation, &needed_columns)) {
+	if (!relation_columns_after_reserve(relation, added, &needed_columns)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "relation %s is too large to grow",
 		    relic_relation_describe(ctx, relation, described,
@@ -486,7 +496,7 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 		return (-1);
 	}
 
-	if (relic_idtab_reserve(&relation->index, tuple_rehash,
+	if (relic_idtab_reserve(&relation->index, added, tuple_rehash,
 	    relation) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
@@ -503,7 +513,7 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 
 	for (position = 0; position < relation->index_count; position++) {
 		if (relic_index_reserve(&relation->indexes[position], relation,
-		    relation->count + 1) != 0) {
+		    relation->count + added, added) != 0) {
 			relic_diag_no_memory(ctx);
 			return (-1);
 		}
@@ -513,7 +523,7 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
 }
 
 /*
- * Make room for one more tuple and keep the storage total in step.
+ * Make room for `added` more tuples and keep the storage total in step.
  *
  * The total is reconciled from what the relation holds before and after, so
  * it stays exact whether the reservation succeeded, failed part way through,
@@ -521,14 +531,17 @@ relation_reserve(relic_t *ctx, relic_relation_t *relation)
  * sites and subtracting at the failing ones would be a list of places to
  * remember, and the list would be wrong the first time a step was added.
  */
-static int
-relation_make_room(relic_t *ctx, relic_relation_t *relation)
+int
+relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
+    size_t added)
 {
 	size_t bytes_before;
 	int status;
 
+	assert(added <= 1 || relation->index_count == 0);
+
 	bytes_before = relic_relation_bytes(relation);
-	status = relation_reserve(ctx, relation);
+	status = relation_grow(ctx, relation, added);
 	ctx->account.store_bytes +=
 	    relic_relation_bytes(relation) - bytes_before;
 
@@ -621,7 +634,7 @@ relation_insert_hashed(relic_t *ctx, relic_relation_t *relation,
 	if (enforce_limits(ctx, relation) != 0)
 		return (-1);
 
-	if (relation_make_room(ctx, relation) != 0)
+	if (relic_relation_reserve(ctx, relation, 1) != 0)
 		return (-1);
 
 	tuple_append(relation, columns, hash);
@@ -819,7 +832,7 @@ key_mask_fits(const relic_relation_t *relation, uint32_t key_mask)
 
 /*
  * Make room in an index for `tuples` tuples and one more key, under the
- * memory limit, keeping the storage total in step as relation_make_room()
+ * memory limit, keeping the storage total in step as relic_relation_reserve()
  * does.
  *
  * `index` need not be one the relation has published: it is measured as a
@@ -836,13 +849,13 @@ index_make_room(relic_t *ctx, const relic_relation_t *relation,
 	bytes_before = relic_index_bytes(index);
 
 	if (relic_account_exceeds(&ctx->account, bytes_before,
-	    relic_index_bytes_after_reserve(index, tuples))) {
+	    relic_index_bytes_after_reserve(index, tuples, 1))) {
 		report_limit(ctx, "memory", ctx->account.limit, "indexing",
 		    relation);
 		return (-1);
 	}
 
-	status = relic_index_reserve(index, relation, tuples);
+	status = relic_index_reserve(index, relation, tuples, 1);
 	ctx->account.store_bytes += relic_index_bytes(index) - bytes_before;
 	if (status != 0)
 		relic_diag_no_memory(ctx);
@@ -1001,7 +1014,8 @@ count_distinct(relic_t *ctx, const relic_relation_t *relation,
 		if (found)
 			continue;
 
-		if (relic_idtab_reserve(&seen, column_rehash, &rehash) != 0) {
+		if (relic_idtab_reserve(&seen, 1, column_rehash,
+		    &rehash) != 0) {
 			relic_idtab_reset(&seen);
 			relic_diag_no_memory(ctx);
 			return (-1);

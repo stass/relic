@@ -212,7 +212,7 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	 * breaking, permanently and silently, the one property the evaluator
 	 * relies on.
 	 */
-	if (relic_idtab_reserve(&table->index, symbol_rehash, table) != 0) {
+	if (relic_idtab_reserve(&table->index, 1, symbol_rehash, table) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}

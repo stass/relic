@@ -248,8 +248,8 @@ an identifier back to its hash. That indirect call happens once per entry per
 doubling and never on a lookup.
 
 **Reserving and placing are separate operations, and the order matters more
-than it looks.** `relic_idtab_reserve()` makes room for one more entry and is
-the only half that can fail; `relic_idtab_place()` then stores the identifier
+than it looks.** `relic_idtab_reserve()` makes room for the entries about to be
+placed and is the only half that can fail; `relic_idtab_place()` then stores the identifier
 and cannot. An owner reserves *before* it creates the thing being indexed, so
 that the step which can fail runs while there is still nothing to leave
 behind.

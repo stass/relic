@@ -1034,7 +1034,7 @@ record_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	}
 	magic->adornments = adornments;
 
-	if (relic_idtab_reserve(&magic->adornment_index, rehash_adornment,
+	if (relic_idtab_reserve(&magic->adornment_index, 1, rehash_adornment,
 	    magic) != 0) {
 		relic_diag_no_memory(magic->ctx);
 		return (-1);
@@ -1417,7 +1417,8 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 	}
 	magic->rules.entries = entries;
 
-	if (relic_idtab_reserve(&magic->rule_index, rehash_rule, magic) != 0) {
+	if (relic_idtab_reserve(&magic->rule_index, 1, rehash_rule,
+	    magic) != 0) {
 		relic_diag_no_memory(magic->ctx);
 		return (-1);
 	}

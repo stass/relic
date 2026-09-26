@@ -315,7 +315,7 @@ relic_value_intern(relic_t *ctx, const relic_value_t *value, relic_dom_t *domp)
 	 * value would assign it a second identifier -- which the evaluator
 	 * would then treat as a different value.
 	 */
-	if (relic_idtab_reserve(&table->index, value_rehash, table) != 0) {
+	if (relic_idtab_reserve(&table->index, 1, value_rehash, table) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}

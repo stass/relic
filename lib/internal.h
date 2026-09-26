@@ -845,9 +845,10 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * lib/index.c
  *
  * A secondary index over the tuples of one relation, keyed on the columns of
- * a mask.  relic_index_reserve() makes room for `tuples` tuples and one more
- * key and is the only operation that can fail; relic_index_add() then links
- * tuple `id` in, and tuples must be added in increasing identifier order.
+ * a mask.  relic_index_reserve() makes room for `tuples` tuples in all and
+ * `added_keys` more keys and is the only operation that can fail;
+ * relic_index_add() then links tuple `id` in, and tuples must be added in
+ * increasing identifier order.
  * relic_index_first() and relic_index_next() walk, in identifier order, the
  * tuples that agree with a probe on the key columns; the probe is laid out as
  * a tuple, and its other columns are not read.  relic_index_first_since()
@@ -866,9 +867,9 @@ void	 relic_index_init(relic_index_t *index, uint32_t key_mask);
 void	 relic_index_empty(relic_index_t *index);
 size_t	 relic_index_bytes(const relic_index_t *index);
 size_t	 relic_index_bytes_after_reserve(const relic_index_t *index,
-	    size_t tuples);
+	    size_t tuples, size_t added_keys);
 int	 relic_index_reserve(relic_index_t *index,
-	    const relic_relation_t *relation, size_t tuples);
+	    const relic_relation_t *relation, size_t tuples, size_t added_keys);
 void	 relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	    relic_tuple_id_t id);
 relic_tuple_id_t relic_index_first(const relic_index_t *index,
@@ -928,6 +929,22 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * any refusal.  It overlaps the cache misses of their duplicate checks,
  * RELIC_INSERT_BATCH tuples at a time.
  *
+ * relic_relation_reserve() makes room for `added` more tuples -- their
+ * columns, canonical index slots and room in every secondary index --
+ * growing each array at most once, and keeps the storage total in step.  A
+ * secondary index is given a key per tuple, the most the tuples could
+ * bring, which over an index of few keys is far more than a batch would
+ * use; a reservation for more than one tuple is therefore made only of a
+ * relation without secondary indexes, as a base store is when a load
+ * commits.
+ *
+ * A reservation applies no configured limit.
+ * relic_relation_bytes_after_reserve() gives the bytes the relation would
+ * then hold, and a caller bound by the memory limit projects that against
+ * the account first, as an insertion does.  A reservation past the
+ * identifier space is refused as a relation too large to grow; capacity a
+ * failed reservation obtained is kept, and accounted.
+ *
  * relic_relation_find() gives the identifier of the tuple holding some
  * columns, or RELIC_ID_NONE, and relic_relation_contains() whether there is
  * one.
@@ -979,6 +996,10 @@ bool	 relic_relation_contains(const relic_relation_t *relation,
 const relic_dom_t *relic_relation_tuple(const relic_relation_t *relation,
 	    relic_tuple_id_t id);
 size_t	 relic_relation_bytes(const relic_relation_t *relation);
+size_t	 relic_relation_bytes_after_reserve(const relic_relation_t *relation,
+	    size_t added);
+int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
+	    size_t added);
 size_t	 relic_relation_count(const relic_relation_t *relation);
 relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
