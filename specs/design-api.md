@@ -100,8 +100,10 @@ int	relic_fact_add(relic_t *, const char *predicate, size_t arity,
 ```
 
 adds the fact `predicate(values[0], ..., values[arity - 1]).` to the
-program, exactly as loading that text would. It is refused, with a
-diagnostic and nothing added, when:
+program, exactly as loading that text would: it stages the one fact and
+commits it to its predicate's base store as a load commits its facts
+(`specs/design-facts.md` section 4). It is refused, with a diagnostic and
+nothing added, when:
 
 * `predicate` does not match `[a-z][A-Za-z0-9_]*`, or is `not`, which the
   grammar reserves for negation where a predicate name would stand;
@@ -109,24 +111,29 @@ diagnostic and nothing added, when:
 * `values` is NULL and `arity` is not zero;
 * a value's type is not one of the three, a symbol or string names bytes
   this context never interned, or a symbol's bytes are not a symbol by
-  section 3.
+  section 3;
+* the fact is new and the tuple or memory limit does not admit it, reported
+  as a load's refusal is, `limit exceeded: tuples=N while loading p/2`.
 
 Predicates are identified by name and arity together, so a fact of a new
 arity creates a new predicate rather than conflicting with an old one.
 
-**The fact is a statement of the program.** It is appended after everything
-loaded before it, is checked with the next check, is shown by `-e` like any
-fact, and costs what a loaded fact costs. Programmatic facts and loaded text
-can be interleaved in any order, and the program is the same as the one the
-equivalent text would build. There is no second path into the relations, so
-there is nothing for the two paths to disagree about.
+**The fact is committed as a loaded fact is.** It is in its predicate's
+base store when the call returns, needs no check, is counted by `-e` as any
+fact of its predicate is, and costs what a loaded fact costs. Programmatic
+facts and loaded text can be interleaved in any order, and the program is
+the same as the one the equivalent text would build. The commit is the one
+path into a base store, so there is nothing for the two to disagree about.
 
-**Adding a fact invalidates everything derived** (architecture section 54).
-Invalidation is total: the next evaluation, whether a query or
-`relic_materialize()`, discards every relation and evaluates again from the
-facts, exactly as it does after a load. A fact can make a negated literal
-false, so nothing derived before it can be kept without incremental
-maintenance, which architecture section 70 defers.
+**Adding a new fact discards everything derived** (architecture section
+54). The commit discards every derived relation before it adds the fact,
+and the next evaluation, whether a query or `relic_materialize()`, evaluates
+again from the facts, exactly as it does after a load. A fact the base store
+already holds changes nothing and discards nothing. A fact can make a
+negated literal false, so nothing derived before it can be kept without
+incremental maintenance, which architecture section 70 defers. A discard
+with nothing derived to discard returns at once, so a run of calls between
+two queries pays for one discard.
 
 ---
 

@@ -1,0 +1,1299 @@
+/*
+ * Copyright (c) 2026 Stanislav Sedov
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+/*
+ * Contract tests for a program's facts: how a load stages and commits them
+ * into base stores, what a refused load leaves behind, how evaluation and
+ * the Magic rewrite read them, and how the limits count them over a
+ * session of loads and queries.
+ *
+ * The golden language tests see the answers and the messages; this suite
+ * examines what they cannot -- which store holds a fact, whether the
+ * derived relations were discarded, and what the limits were charged.
+ */
+
+#include "config.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "harness.h"
+#include "internal.h"
+#include "programs.h"
+
+#define	SCENARIO_ARITY_ZERO	"a fact of no columns is a fact like any other"
+#define	SCENARIO_FACT_ADD	"an added fact is a load of one"
+#define	SCENARIO_FUNNEL		"a predicate is read from the store it has"
+#define	SCENARIO_LOAD		"a load keeps what is not a fact as it was"
+#define	SCENARIO_MAGIC		"the Magic rewrite reads facts through a view"
+#define	SCENARIO_REFUSED	"a refused load leaves the program as it was"
+#define	SCENARIO_SESSION	"the limits count a session's facts once"
+
+/* Room for the rows of a small query, and for one message. */
+#define	ROWS_TEXT_MAX		256
+#define	MESSAGE_MAX		256
+
+/*
+ * The facts of the session scenarios: enough that a store and its indexes
+ * are much larger than the fixed costs of an evaluation.
+ */
+#define	SESSION_FACTS		400
+#define	SESSION_LINE_MAX	32	/* the longest "e(N, N, N).\n" line */
+
+/*
+ * The bytes a limit may exceed the hungriest query's need by and still
+ * refuse a second index over the session's facts, which takes at least a
+ * slot per fact; and a limit no session scenario needs, of tuples or bytes,
+ * where the search for the least one starts.
+ */
+#define	INDEX_SLACK		64
+#define	LEAST_LIMIT_CEILING	((size_t)1 << 24)
+
+/*
+ * The query the session scenarios answer, which negates p/3 and so
+ * evaluates the whole of it, and the facts a scenario loads and adds after
+ * an evaluation.
+ */
+#define	SESSION_QUERY		"r(x)?"
+#define	GROWN_FACTS		"e(b, b, b).\ne(c, c, c).\ne(a, a, a).\n"
+
+/* The facts of the small store beside c/2's in the multi-store refusal. */
+#define	SMALL_STORE_FACTS	8
+
+/* The arity of the widening program whose rewrite outgrows its budget. */
+#define	ABANDONED_ARITY		8
+
+typedef struct diag_log diag_log_t;
+typedef struct rows_text rows_text_t;
+
+/* Which limit a scenario sets. */
+enum limit_kind {
+	LIMIT_TUPLES,
+	LIMIT_MEMORY
+};
+
+/* What a context does, after loading a program, to measure a limit. */
+enum step {
+	STEP_LOAD,		/* nothing more */
+	STEP_MATERIALIZE,	/* materialize the program */
+	STEP_QUERY		/* answer a query */
+};
+
+/*
+ * What the diagnostic callback has seen: the counts of errors and warnings,
+ * and the last message and location of each.
+ */
+struct diag_log {
+	size_t			errors;
+	size_t			warnings;
+	char			last_error[MESSAGE_MAX];
+	char			last_warning[MESSAGE_MAX];
+	relic_location_t	warning_where;
+};
+
+/*
+ * A query's rows as text, in the order they were delivered: each row's
+ * values separated by spaces, a row of no columns written `()`, and rows
+ * separated by `|`.  `failed` is set when a row did not fit.
+ */
+struct rows_text {
+	relic_t	*ctx;
+	char	 text[ROWS_TEXT_MAX];
+	size_t	 rows;
+	bool	 failed;
+};
+
+static void	 record_diagnostic(void *callback_ctx,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
+static relic_t	*context_with(const relic_config_t *config, const char *program,
+		    diag_log_t *log);
+static int	 keep_row(void *callback_ctx, const relic_value_t *values,
+		    size_t count);
+static int	 rows_of(relic_t *ctx, const char *query_text,
+		    rows_text_t *rows);
+static bool	 answers(relic_t *ctx, const char *query_text,
+		    const char *expected);
+static relic_pred_id_t predicate(relic_t *ctx, const char *name,
+		    uint16_t arity);
+static size_t	 facts_held(relic_t *ctx, const char *name, uint16_t arity);
+static size_t	 indexes_of(relic_t *ctx, const char *name, uint16_t arity);
+static char	*numbered_facts(const char *name, unsigned int arity,
+		    size_t count);
+static char	*concatenated(const char *first, const char *second);
+static const char *kind_name(enum limit_kind kind);
+static relic_value_t symbol(relic_t *ctx, const char *name);
+static void	 a_load_keeps_what_is_not_a_fact(void);
+static void	 a_failed_load_commits_no_fact(void);
+static void	 a_refused_load_leaves_the_program_as_it_was(void);
+static void	 refused_by(enum limit_kind kind);
+static void	 a_refusal_names_the_first_store_that_grows(void);
+static void	 a_predicate_is_read_from_the_store_it_has(void);
+static void	 an_added_fact_is_seen_and_kept_once(void);
+static void	 an_added_fact_can_falsify_a_negation(void);
+static void	 falsified_through(unsigned int flags, bool materialized,
+		    const char *strategy);
+static void	 an_added_fact_the_limit_refuses_changes_nothing(void);
+static void	 queries_do_not_accumulate_indexes(void);
+static char	*session_program(void);
+static size_t	 least_limit(const char *program, enum limit_kind kind,
+		    enum step step, const char *query_text);
+static void	 facts_after_evaluation_are_not_refused(void);
+static void	 facts_after(const char *program, const char *grown,
+		    enum limit_kind kind, enum step step);
+static void	 a_load_over_the_limit_grows_no_store(void);
+static size_t	 bytes_after_loading(const char *facts);
+static void	 the_rewrite_reads_facts_through_a_view(void);
+static void	 an_abandoned_rewrite_leaves_no_warning(void);
+static void	 a_fact_of_no_columns_is_a_fact(void);
+
+static void
+record_diagnostic(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	diag_log_t *log;
+
+	log = callback_ctx;
+	if (level == RELIC_ERROR) {
+		log->errors++;
+		strlcpy(log->last_error, message, sizeof(log->last_error));
+	} else if (level == RELIC_WARNING) {
+		log->warnings++;
+		strlcpy(log->last_warning, message, sizeof(log->last_warning));
+		if (where != NULL)
+			log->warning_where = *where;
+	}
+}
+
+/*
+ * A context configured by `config`, or by the defaults when it is NULL,
+ * reporting to `log` and holding `program` unless that is NULL.
+ */
+static relic_t *
+context_with(const relic_config_t *config, const char *program,
+    diag_log_t *log)
+{
+	relic_t *ctx;
+
+	bzero(log, sizeof(*log));
+
+	ctx = config != NULL ? relic_create_config(config) : relic_create();
+	if (ctx == NULL) {
+		check(false, "creating a context", "a context is created");
+		return (NULL);
+	}
+	relic_diag_set(ctx, record_diagnostic, log);
+
+	if (program != NULL &&
+	    relic_load_string(ctx, "test.dl", program) != 0) {
+		check(false, "loading a test program", "the program loads");
+		relic_destroy(ctx);
+		return (NULL);
+	}
+
+	return (ctx);
+}
+
+static int
+keep_row(void *callback_ctx, const relic_value_t *values, size_t count)
+{
+	rows_text_t *rows;
+	char value[64];
+	size_t i;
+
+	rows = callback_ctx;
+	if (rows->rows > 0)
+		strlcat(rows->text, "|", sizeof(rows->text));
+	if (count == 0 && strlcat(rows->text, "()", sizeof(rows->text)) >=
+	    sizeof(rows->text))
+		rows->failed = true;
+
+	for (i = 0; i < count; i++) {
+		if (values[i].type == RELIC_INTEGER)
+			snprintf(value, sizeof(value), "%lld",
+			    (long long)values[i].v.integer);
+		else
+			strlcpy(value, relic_string(rows->ctx, values[i].v.id,
+			    NULL), sizeof(value));
+
+		if (i > 0)
+			strlcat(rows->text, " ", sizeof(rows->text));
+		if (strlcat(rows->text, value, sizeof(rows->text)) >=
+		    sizeof(rows->text))
+			rows->failed = true;
+	}
+	rows->rows++;
+
+	return (0);
+}
+
+/*
+ * Answer `query_text`, writing its rows into *rows.  Returns 0, or -1 when
+ * the query failed to prepare or to run.
+ */
+static int
+rows_of(relic_t *ctx, const char *query_text, rows_text_t *rows)
+{
+	relic_query_t *query;
+	int status;
+
+	bzero(rows, sizeof(*rows));
+	rows->ctx = ctx;
+
+	query = relic_query_prepare(ctx, NULL, query_text);
+	status = query != NULL ?
+	    relic_query_run(ctx, query, keep_row, rows) : -1;
+	relic_query_destroy(query);
+
+	return (status == 0 ? 0 : -1);
+}
+
+/*
+ * Whether `query_text` is answered, in order, with the rows `expected`
+ * spells as rows_text_t writes them, no rows being an empty string.  A
+ * mismatch is reported with what was delivered.
+ */
+static bool
+answers(relic_t *ctx, const char *query_text, const char *expected)
+{
+	rows_text_t rows;
+	int status;
+
+	status = rows_of(ctx, query_text, &rows);
+	if (status == 0 && !rows.failed && strcmp(rows.text, expected) == 0)
+		return (true);
+
+	fprintf(stderr, "%s answered \"%s\"%s, expected \"%s\"\n", query_text,
+	    rows.text, status == 0 ? "" : " and failed", expected);
+	return (false);
+}
+
+/*
+ * The identifier of the predicate name/arity, interning it if nothing has.
+ * Interning alone changes nothing a scenario asserts: a predicate interned
+ * and never read has no store, no rule and no warning.
+ */
+static relic_pred_id_t
+predicate(relic_t *ctx, const char *name, uint16_t arity)
+{
+	relic_pred_id_t pred;
+	uint32_t symbol_id;
+
+	if (relic_symbol_intern(ctx, name, strlen(name), &symbol_id) != 0 ||
+	    relic_pred_intern(ctx, symbol_id, arity, NULL, &pred) != 0)
+		return (RELIC_ID_NONE);
+
+	return (pred);
+}
+
+/*
+ * How many facts the base store of name/arity holds.
+ */
+static size_t
+facts_held(relic_t *ctx, const char *name, uint16_t arity)
+{
+	return (relic_base_count(ctx, predicate(ctx, name, arity)));
+}
+
+/*
+ * How many secondary indexes the base store of name/arity has, none when
+ * nothing has created the store.
+ */
+static size_t
+indexes_of(relic_t *ctx, const char *name, uint16_t arity)
+{
+	const relic_relation_t *store;
+
+	store = relic_base_store(ctx, predicate(ctx, name, arity));
+
+	return (store != NULL ? store->index_count : 0);
+}
+
+/*
+ * `first` followed by `second`, in a string the caller frees, or NULL when
+ * either is NULL or there was no memory for it.
+ */
+static char *
+concatenated(const char *first, const char *second)
+{
+	size_t first_length;
+	size_t second_length;
+	char *text;
+
+	if (first == NULL || second == NULL)
+		return (NULL);
+
+	first_length = strlen(first);
+	second_length = strlen(second);
+	text = malloc(first_length + second_length + 1);
+	if (text == NULL)
+		return (NULL);
+
+	bcopy(first, text, first_length);
+	bcopy(second, text + first_length, second_length + 1);
+
+	return (text);
+}
+
+static const char *
+kind_name(enum limit_kind kind)
+{
+	return (kind == LIMIT_TUPLES ? "a tuple limit" : "a memory limit");
+}
+
+/*
+ * `count` facts of name/arity, the Nth holding N in every column, in a
+ * string the caller frees, or NULL when there was no memory for it.  The
+ * name is a letter and the arity at most 3, so a line fits
+ * SESSION_LINE_MAX.
+ */
+static char *
+numbered_facts(const char *name, unsigned int arity, size_t count)
+{
+	size_t capacity;
+	size_t length;
+	size_t i;
+	unsigned int column;
+	char *text;
+
+	capacity = count * SESSION_LINE_MAX + 1;
+	text = malloc(capacity);
+	if (text == NULL)
+		return (NULL);
+
+	length = 0;
+	text[0] = '\0';
+	for (i = 0; i < count; i++) {
+		length += (size_t)snprintf(text + length, capacity - length,
+		    "%s(", name);
+		for (column = 0; column < arity; column++)
+			length += (size_t)snprintf(text + length,
+			    capacity - length, column > 0 ? ", %zu" : "%zu", i);
+		length += (size_t)snprintf(text + length, capacity - length,
+		    ").\n");
+	}
+
+	return (text);
+}
+
+static relic_value_t
+symbol(relic_t *ctx, const char *name)
+{
+	relic_value_t value;
+
+	bzero(&value, sizeof(value));
+	if (relic_value_symbol(ctx, name, strlen(name), &value) != 0)
+		check(false, "building a value", "a symbol is interned");
+
+	return (value);
+}
+
+/*
+ * Only a ground body-less statement is a fact.  One with a variable is kept
+ * as a statement and rejected by the check as unsafe, and its head names its
+ * predicate, so a rule reading it draws no undefined-predicate warning.  A
+ * loaded query whose literal is ground stays a query.  A fact in a query's
+ * text is refused as a fact, and stores nothing.
+ */
+static void
+a_load_keeps_what_is_not_a_fact(void)
+{
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	ctx = context_with(NULL, "p(X).\nq(Y) :- p(Y).\n", &log);
+	if (ctx != NULL) {
+		checkf(ctx->ast.count == 2 && relic_base_total(ctx) == 0,
+		    SCENARIO_LOAD, "a fact with a variable should be kept as a "
+		    "statement, not %zu statements and %zu facts",
+		    ctx->ast.count, relic_base_total(ctx));
+
+		status = relic_check(ctx);
+		checkf(status != 0 && log.errors == 1 && log.warnings == 0,
+		    SCENARIO_LOAD, "the check should reject it with one error "
+		    "and no warning, not %zu and %zu, the last \"%s\"",
+		    log.errors, log.warnings, log.last_warning);
+		relic_destroy(ctx);
+	}
+
+	ctx = context_with(NULL, "e(a).\ne(a)?\n", &log);
+	if (ctx != NULL) {
+		checkf(relic_query_count(ctx) == 1 &&
+		    relic_base_total(ctx) == 1, SCENARIO_LOAD, "a ground query "
+		    "should stay a query, not %zu queries and %zu facts",
+		    relic_query_count(ctx), relic_base_total(ctx));
+		check(answers(ctx, "e(a)?", "()"), SCENARIO_LOAD,
+		    "the ground query holds");
+		relic_destroy(ctx);
+	}
+
+	ctx = context_with(NULL, NULL, &log);
+	if (ctx != NULL) {
+		query = relic_query_prepare(ctx, NULL, "e(a).");
+		checkf(query == NULL && log.errors == 1 &&
+		    strcmp(log.last_error, "expected a query, found a fact") ==
+		    0, SCENARIO_LOAD, "a fact in a query's text should be refused "
+		    "as a fact, not with %zu errors, the last \"%s\"",
+		    log.errors, log.last_error);
+		checkf(relic_base_total(ctx) == 0, SCENARIO_LOAD,
+		    "the refused query text should store nothing, not %zu facts",
+		    relic_base_total(ctx));
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * A load that fails to parse commits none of its facts, and a predicate its
+ * facts first named is not defined by them: a check warns of nothing while
+ * no rule reads it, and once a rule does, warns of it at the rule's atom.
+ */
+static void
+a_failed_load_commits_no_fact(void)
+{
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	ctx = context_with(NULL, NULL, &log);
+	if (ctx == NULL)
+		return;
+
+	status = relic_load_string(ctx, "bad.dl", "q(a).\nq(b\n");
+	checkf(status != 0 && relic_base_total(ctx) == 0, SCENARIO_LOAD,
+	    "a load that fails to parse should commit no fact, not %zu",
+	    relic_base_total(ctx));
+
+	log.warnings = 0;
+	status = relic_check(ctx);
+	checkf(status == 0 && log.warnings == 0, SCENARIO_LOAD, "nothing reads "
+	    "q/1, so the check should warn of nothing, not \"%s\"",
+	    log.last_warning);
+
+	status = relic_load_string(ctx, "rule.dl", "\nr(X) :- q(X).\n");
+	check(status == 0, SCENARIO_LOAD, "the rule loads");
+	status = relic_check(ctx);
+	checkf(status == 0 && log.warnings == 1 && strcmp(log.last_warning,
+	    "predicate q/1 is referenced but never defined") == 0 &&
+	    log.warning_where.line == 2 && log.warning_where.column == 9,
+	    SCENARIO_LOAD, "q/1 should be warned about at the rule's atom, "
+	    "not with %zu warnings, the last \"%s\" at %u:%u", log.warnings,
+	    log.last_warning, log.warning_where.line,
+	    log.warning_where.column);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A load refused by the tuple limit or the memory limit grows no base
+ * store and leaves the program as it was: no statement added, and its new
+ * predicate g/1, which no rule reads, neither defined nor warned about, so a
+ * check gives the warnings it gives a context the load was never tried in.
+ * A refused load that held a new fact discards the derived relations, since
+ * the discard precedes the reservation that refuses it.
+ */
+static void
+a_refused_load_leaves_the_program_as_it_was(void)
+{
+	refused_by(LIMIT_TUPLES);
+	refused_by(LIMIT_MEMORY);
+	a_refusal_names_the_first_store_that_grows();
+}
+
+/*
+ * The refusal scenario under a limit of `kind`.  The tuple limit, 4,
+ * admits the program's two facts and its two derived tuples, so the program
+ * is materialized first, and loading the facts again, which changes
+ * nothing, is seen to keep the relations current.  The memory limit, one
+ * byte, admits no fact, so that context holds the rule alone.
+ */
+static void
+refused_by(enum limit_kind kind)
+{
+	static const char program[] = "p(X) :- e(X).\n";
+	static const char facts[] = "e(a).\ne(b).\n";
+	static const char more[] = "e(c).\ne(d).\ng(a).\n";
+	relic_config_t config;
+	diag_log_t control_log;
+	diag_log_t log;
+	relic_t *control;
+	relic_t *ctx;
+	const char *expected;
+	size_t statements;
+	size_t facts_before;
+	int status;
+
+	bzero(&config, sizeof(config));
+	if (kind == LIMIT_TUPLES) {
+		config.max_tuples = 4;
+		expected = "limit exceeded: tuples=4 while loading e/1";
+		facts_before = 2;
+	} else {
+		config.max_memory = 1;
+		expected = "limit exceeded: memory=1 while loading e/1";
+		facts_before = 0;
+	}
+
+	ctx = context_with(&config, program, &log);
+	control = context_with(&config, program, &control_log);
+	if (ctx == NULL || control == NULL) {
+		relic_destroy(ctx);
+		relic_destroy(control);
+		return;
+	}
+
+	if (kind == LIMIT_TUPLES) {
+		status = relic_load_string(ctx, "facts.dl", facts);
+		check(status == 0, SCENARIO_REFUSED, "the facts load");
+		status = relic_load_string(control, "facts.dl", facts);
+		check(status == 0, SCENARIO_REFUSED, "the control's facts load");
+		status = relic_materialize(ctx);
+		check(status == 0 && relic_relations_current(ctx),
+		    SCENARIO_REFUSED, "the program is materialized");
+		status = relic_materialize(control);
+		check(status == 0, SCENARIO_REFUSED,
+		    "the control is materialized");
+		status = relic_load_string(ctx, "again.dl", facts);
+		check(status == 0 && relic_relations_current(ctx),
+		    SCENARIO_REFUSED,
+		    "a load of duplicates alone leaves the relations current");
+	}
+
+	statements = ctx->ast.count;
+	log.errors = 0;
+	log.warnings = 0;
+	control_log.warnings = 0;
+
+	status = relic_load_string(ctx, "more.dl", more);
+	checkf(status != 0 && log.errors == 1 &&
+	    strcmp(log.last_error, expected) == 0, SCENARIO_REFUSED,
+	    "the load should be refused with \"%s\", not with %zu errors, "
+	    "the last \"%s\"", expected, log.errors, log.last_error);
+	checkf(ctx->ast.count == statements &&
+	    facts_held(ctx, "e", 1) == facts_before &&
+	    facts_held(ctx, "g", 1) == 0, SCENARIO_REFUSED,
+	    "no statement should be added and no base store grow, under %s",
+	    kind == LIMIT_TUPLES ? "a tuple limit" : "a memory limit");
+	check(!relic_relations_current(ctx), SCENARIO_REFUSED,
+	    "a refused load holding a new fact discards the derived relations");
+	check(!relic_pred_is_defined(ctx, predicate(ctx, "g", 1)),
+	    SCENARIO_REFUSED, "g/1 stays undefined");
+
+	status = relic_check(ctx);
+	check(status == 0, SCENARIO_REFUSED, "the program still checks");
+	status = relic_check(control);
+	check(status == 0, SCENARIO_REFUSED, "the control checks");
+	checkf(log.warnings == control_log.warnings, SCENARIO_REFUSED,
+	    "the check should give the control's %zu warnings, not %zu, the "
+	    "last \"%s\"", control_log.warnings, log.warnings,
+	    log.last_warning);
+
+	relic_destroy(control);
+	relic_destroy(ctx);
+}
+
+/*
+ * A refusal names the first predicate, in the order the load names them,
+ * whose store would grow: e/1's facts are all held already, so a load that
+ * names e/1 and then g/1 is refused for g/1.
+ */
+static void
+a_refusal_names_the_first_store_that_grows(void)
+{
+	static const char expected[] =
+	    "limit exceeded: tuples=1 while loading g/1";
+	relic_config_t config;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = 1;
+	ctx = context_with(&config, "e(a).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	status = relic_load_string(ctx, "more.dl", "e(a).\ng(b).\n");
+	checkf(status != 0 && strcmp(log.last_error, expected) == 0,
+	    SCENARIO_REFUSED, "the load should be refused with \"%s\", not "
+	    "\"%s\"", expected, log.last_error);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A predicate named only in a query reads as empty.  One that gains its
+ * first rule after its facts were loaded answers from facts and rules
+ * together, facts first, whether through the rewrite or materialized.
+ * Writing is refused for a predicate no rule derives.
+ */
+static void
+a_predicate_is_read_from_the_store_it_has(void)
+{
+	relic_relation_t *written;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	ctx = context_with(NULL, "p(a).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	checkf(answers(ctx, "q(X)?", "") && log.warnings == 1,
+	    SCENARIO_FUNNEL, "a predicate named only in a query should read "
+	    "as empty with one warning, not %zu", log.warnings);
+	check(answers(ctx, "p(X)?", "a"), SCENARIO_FUNNEL,
+	    "a predicate of facts alone answers its facts");
+
+	log.errors = 0;
+	written = relic_relation_written(ctx, predicate(ctx, "p", 1));
+	checkf(written == NULL && log.errors == 1, SCENARIO_FUNNEL,
+	    "writing a predicate no rule derives should be refused with one "
+	    "error, not %zu", log.errors);
+
+	status = relic_load_string(ctx, "rules.dl", "p(X) :- e(X).\ne(b).\n");
+	check(status == 0, SCENARIO_FUNNEL, "p gains a rule");
+	check(answers(ctx, "p(X)?", "a|b"), SCENARIO_FUNNEL, "the rewrite "
+	    "answers from p's facts and its rule, facts first");
+	status = relic_materialize(ctx);
+	check(status == 0, SCENARIO_FUNNEL, "the program is materialized");
+	check(answers(ctx, "p(X)?", "a|b"), SCENARIO_FUNNEL, "the fixed point "
+	    "answers from p's facts and its rule, facts first");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * relic_fact_add() is a load of one fact: the next query sees it without a
+ * check, and adding it again changes nothing, leaving the relations
+ * current.
+ */
+static void
+an_added_fact_is_seen_and_kept_once(void)
+{
+	relic_value_t value;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	ctx = context_with(NULL, "p(X) :- e(X).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	value = symbol(ctx, "a");
+	status = relic_fact_add(ctx, "e", 1, &value);
+	check(status == 0, SCENARIO_FACT_ADD, "a fact is added");
+	check(answers(ctx, "p(X)?", "a"), SCENARIO_FACT_ADD,
+	    "the next query sees an added fact without a check");
+
+	status = relic_materialize(ctx);
+	check(status == 0, SCENARIO_FACT_ADD, "the program is materialized");
+	status = relic_fact_add(ctx, "e", 1, &value);
+	checkf(status == 0 && facts_held(ctx, "e", 1) == 1 &&
+	    relic_relations_current(ctx), SCENARIO_FACT_ADD,
+	    "adding a fact twice should change nothing, but e/1 holds %zu "
+	    "facts and the relations are %scurrent", facts_held(ctx, "e", 1),
+	    relic_relations_current(ctx) ? "" : "not ");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A fact that makes a negated literal false changes the answer of a query
+ * answered before it, whichever way the query is answered.
+ */
+static void
+an_added_fact_can_falsify_a_negation(void)
+{
+	falsified_through(0, false, "the rewrite");
+	falsified_through(0, true, "materialization");
+	falsified_through(RELIC_F_NO_MAGIC, false, "the whole program");
+}
+
+/*
+ * The negation scenario under `flags`, materializing the program before
+ * each pair of queries when `materialized`.
+ */
+static void
+falsified_through(unsigned int flags, bool materialized, const char *strategy)
+{
+	static const char program[] =
+	    "s(a).\ns(b).\nr(X) :- s(X), not b(X).\nb(X) :- c(X).\n";
+	relic_config_t config;
+	relic_value_t value;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	ctx = context_with(&config, program, &log);
+	if (ctx == NULL)
+		return;
+
+	if (materialized) {
+		status = relic_materialize(ctx);
+		check(status == 0, SCENARIO_FACT_ADD, "the program is "
+		    "materialized before the fact");
+	}
+	checkf(answers(ctx, "r(a)?", "()") && answers(ctx, "r(X)?", "a|b"),
+	    SCENARIO_FACT_ADD, "the negation should hold before the fact, "
+	    "through %s", strategy);
+
+	value = symbol(ctx, "a");
+	status = relic_fact_add(ctx, "b", 1, &value);
+	check(status == 0, SCENARIO_FACT_ADD, "the fact is added");
+	if (materialized) {
+		status = relic_materialize(ctx);
+		check(status == 0, SCENARIO_FACT_ADD, "the program is "
+		    "materialized after the fact");
+	}
+	checkf(answers(ctx, "r(X)?", "b") && answers(ctx, "r(a)?", ""),
+	    SCENARIO_FACT_ADD, "an added fact should falsify the negation "
+	    "through %s", strategy);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A fact the tuple limit refuses is reported and changes nothing: the
+ * limit admits the one fact loaded, and no room to answer a query.
+ */
+static void
+an_added_fact_the_limit_refuses_changes_nothing(void)
+{
+	static const char expected[] =
+	    "limit exceeded: tuples=1 while loading e/1";
+	relic_config_t config;
+	relic_value_t value;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = 1;
+	ctx = context_with(&config, "e(a).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	value = symbol(ctx, "b");
+	status = relic_fact_add(ctx, "e", 1, &value);
+	checkf(status != 0 && log.errors == 1 &&
+	    strcmp(log.last_error, expected) == 0, SCENARIO_FACT_ADD,
+	    "the fact should be refused with \"%s\", not with %zu errors, the "
+	    "last \"%s\"", expected, log.errors, log.last_error);
+	checkf(relic_base_total(ctx) == 1, SCENARIO_FACT_ADD,
+	    "a refused fact should change nothing, but %zu facts are held",
+	    relic_base_total(ctx));
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Queries binding different columns of a base store each build an index
+ * over it.  Each evaluation of a rewrite discards what the last one
+ * derived, and the base store's indexes with it, so the indexes do not
+ * accumulate: under a memory limit a few bytes above what the hungriest
+ * query needs alone, every query is answered in turn, with a load between
+ * them or without.  An index holds at least a slot per tuple, so a second
+ * one kept beside the first would not fit.
+ */
+static void
+queries_do_not_accumulate_indexes(void)
+{
+	static const char *const queries[] = {
+		"p(1, Y, Z)?", "p(X, 2, Z)?", "p(X, Y, 3)?"
+	};
+	static const char *const rows[] = { "1 1", "2 2", "3 3" };
+	relic_config_t config;
+	diag_log_t log;
+	relic_t *ctx;
+	char *program;
+	size_t need;
+	size_t least;
+	size_t round;
+	size_t i;
+	int status;
+
+	program = session_program();
+	if (program == NULL)
+		return;
+
+	need = 0;
+	for (i = 0; i < 3; i++) {
+		least = least_limit(program, LIMIT_MEMORY, STEP_QUERY,
+		    queries[i]);
+		if (least > need)
+			need = least;
+	}
+
+	bzero(&config, sizeof(config));
+	config.max_memory = need + INDEX_SLACK;
+	ctx = context_with(&config, program, &log);
+	free(program);
+	if (ctx == NULL)
+		return;
+
+	for (round = 0; round < 2; round++) {
+		for (i = 0; i < 3; i++) {
+			checkf(answers(ctx, queries[i], rows[i]),
+			    SCENARIO_SESSION, "%s should be answered under the "
+			    "limit in round %zu", queries[i], round);
+			checkf(indexes_of(ctx, "e", 3) == 1, SCENARIO_SESSION,
+			    "the base store should hold one index after %s, "
+			    "not %zu", queries[i], indexes_of(ctx, "e", 3));
+		}
+		status = relic_load_string(ctx, "more.dl", round == 0 ?
+		    "f(y).\n" : "f(x).\n");
+		check(status == 0, SCENARIO_SESSION,
+		    "a load between the rounds is admitted");
+	}
+
+	relic_destroy(ctx);
+}
+
+/*
+ * The program of the session scenarios: SESSION_FACTS facts of e/3, a rule
+ * deriving p/3 from them, a fact of f/1 that a scenario can load again, and
+ * a rule negating p, so that a query of it evaluates the whole of p.
+ */
+static char *
+session_program(void)
+{
+	static const char rest[] = "p(X, Y, Z) :- e(X, Y, Z).\nf(x).\n"
+	    "r(X) :- f(X), not p(X, X, X).\n";
+	char *facts;
+	char *program;
+
+	facts = numbered_facts("e", 3, SESSION_FACTS);
+	program = concatenated(facts, rest);
+	free(facts);
+
+	if (program == NULL)
+		check(false, SCENARIO_SESSION, "the program is written");
+	return (program);
+}
+
+/*
+ * The least limit of `kind` under which a fresh context loads `program`
+ * and then takes `step`, answering `query_text` for STEP_QUERY.  It is
+ * found by bisection, since whether the steps fit is monotonic in the
+ * limit.
+ */
+static size_t
+least_limit(const char *program, enum limit_kind kind, enum step step,
+    const char *query_text)
+{
+	relic_config_t config;
+	rows_text_t rows;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t fails;
+	size_t fits;
+	size_t limit;
+	bool done;
+
+	fails = 0;
+	fits = LEAST_LIMIT_CEILING;
+	while (fits - fails > 1) {
+		limit = fails + (fits - fails) / 2;
+		bzero(&config, sizeof(config));
+		if (kind == LIMIT_TUPLES)
+			config.max_tuples = limit;
+		else
+			config.max_memory = limit;
+
+		ctx = context_with(&config, NULL, &log);
+		if (ctx == NULL)
+			return (LEAST_LIMIT_CEILING);
+
+		done = relic_load_string(ctx, "test.dl", program) == 0;
+		if (done && step == STEP_MATERIALIZE)
+			done = relic_materialize(ctx) == 0;
+		else if (done && step == STEP_QUERY)
+			done = rows_of(ctx, query_text, &rows) == 0;
+		relic_destroy(ctx);
+
+		if (done)
+			fits = limit;
+		else
+			fails = limit;
+	}
+
+	return (fits);
+}
+
+/*
+ * A load and an added fact after an evaluation are charged for the facts,
+ * not for what the evaluation derived: the commit discards the derived
+ * relations before it reserves.  Each limit is the least under which the
+ * evaluation runs, and under which the grown program loads.
+ *
+ * The evaluation is a materialization, or the query r(x)?, which evaluates
+ * the whole of p since it negates it.  Under a tuple limit the new facts
+ * beside what either evaluation leaves derived would exceed it, so a commit
+ * that did not discard first would be refused.  Under a memory limit the
+ * arena an evaluation gives back leaves room for the facts either way, and
+ * the scenario shows only that nothing is refused.
+ */
+static void
+facts_after_evaluation_are_not_refused(void)
+{
+	char *grown;
+	char *program;
+
+	program = session_program();
+	grown = concatenated(program, GROWN_FACTS);
+	if (program == NULL || grown == NULL) {
+		check(false, SCENARIO_SESSION, "the grown program is written");
+		free(program);
+		free(grown);
+		return;
+	}
+
+	facts_after(program, grown, LIMIT_TUPLES, STEP_MATERIALIZE);
+	facts_after(program, grown, LIMIT_TUPLES, STEP_QUERY);
+	facts_after(program, grown, LIMIT_MEMORY, STEP_MATERIALIZE);
+	facts_after(program, grown, LIMIT_MEMORY, STEP_QUERY);
+
+	free(grown);
+	free(program);
+}
+
+/*
+ * The scenario under a limit of `kind`: evaluate `program` by `step`,
+ * materializing it or answering SESSION_QUERY, then load two facts and add
+ * a third, which together make `grown`.
+ */
+static void
+facts_after(const char *program, const char *grown, enum limit_kind kind,
+    enum step step)
+{
+	relic_value_t values[3];
+	relic_config_t config;
+	diag_log_t log;
+	relic_t *ctx;
+	const char *evaluation;
+	size_t limit;
+	size_t loads;
+	int status;
+
+	limit = least_limit(program, kind, step, SESSION_QUERY);
+	loads = least_limit(grown, kind, STEP_LOAD, NULL);
+	if (loads > limit)
+		limit = loads;
+
+	bzero(&config, sizeof(config));
+	if (kind == LIMIT_TUPLES)
+		config.max_tuples = limit;
+	else
+		config.max_memory = limit;
+	evaluation = step == STEP_MATERIALIZE ? "materialization" : "a query";
+
+	ctx = context_with(&config, program, &log);
+	if (ctx == NULL)
+		return;
+
+	if (step == STEP_MATERIALIZE) {
+		status = relic_materialize(ctx);
+		checkf(status == 0, SCENARIO_SESSION, "the program should be "
+		    "materialized under %s", kind_name(kind));
+	} else {
+		checkf(answers(ctx, SESSION_QUERY, "()"), SCENARIO_SESSION,
+		    "%s should be answered under %s", SESSION_QUERY,
+		    kind_name(kind));
+	}
+
+	status = relic_load_string(ctx, "more.dl", "e(b, b, b).\ne(c, c, c).\n");
+	checkf(status == 0, SCENARIO_SESSION, "a load after %s should not be "
+	    "refused under %s, but reported \"%s\"", evaluation,
+	    kind_name(kind), log.last_error);
+
+	values[0] = symbol(ctx, "a");
+	values[1] = values[0];
+	values[2] = values[0];
+	status = relic_fact_add(ctx, "e", 3, values);
+	checkf(status == 0, SCENARIO_SESSION, "an added fact after %s should "
+	    "not be refused under %s, but reported \"%s\"", evaluation,
+	    kind_name(kind), log.last_error);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A load whose facts name several predicates and do not fit the memory
+ * limit together grows none of their stores, and names the first predicate
+ * a fact would grow.  The limit admits the store of c/2 alone, and that of
+ * d/1 alone, beside b/1's, so only a check over both stores together
+ * refuses the load of both.
+ */
+static void
+a_load_over_the_limit_grows_no_store(void)
+{
+	relic_config_t config;
+	char expected[MESSAGE_MAX];
+	diag_log_t log;
+	relic_t *ctx;
+	char *c_facts;
+	char *d_facts;
+	char *both;
+	size_t before;
+	int status;
+
+	c_facts = numbered_facts("c", 2, SESSION_FACTS);
+	d_facts = numbered_facts("d", 1, SMALL_STORE_FACTS);
+	both = concatenated(c_facts, d_facts);
+	if (both == NULL) {
+		check(false, SCENARIO_REFUSED, "the facts are written");
+		free(c_facts);
+		free(d_facts);
+		return;
+	}
+
+	bzero(&config, sizeof(config));
+	config.max_memory = bytes_after_loading(c_facts);
+	snprintf(expected, sizeof(expected),
+	    "limit exceeded: memory=%zu while loading c/2", config.max_memory);
+
+	ctx = context_with(&config, "b(0).\n", &log);
+	if (ctx != NULL) {
+		status = relic_load_string(ctx, "c.dl", c_facts);
+		check(status == 0, SCENARIO_REFUSED, "c/2's store fits alone");
+		relic_destroy(ctx);
+	}
+
+	ctx = context_with(&config, "b(0).\n", &log);
+	if (ctx != NULL) {
+		status = relic_load_string(ctx, "d.dl", d_facts);
+		check(status == 0, SCENARIO_REFUSED, "d/1's store fits alone");
+		relic_destroy(ctx);
+	}
+
+	ctx = context_with(&config, "b(0).\n", &log);
+	if (ctx != NULL) {
+		before = ctx->account.store_bytes;
+		status = relic_load_string(ctx, "both.dl", both);
+		checkf(status != 0 && log.errors == 1 &&
+		    strcmp(log.last_error, expected) == 0, SCENARIO_REFUSED,
+		    "the load should be refused with \"%s\", not \"%s\"",
+		    expected, log.last_error);
+		checkf(facts_held(ctx, "b", 1) == 1 &&
+		    facts_held(ctx, "c", 2) == 0 &&
+		    facts_held(ctx, "d", 1) == 0 &&
+		    ctx->account.store_bytes == before, SCENARIO_REFUSED,
+		    "a refused load should grow none of the stores it names, "
+		    "but holds %zu bytes where it held %zu",
+		    ctx->account.store_bytes, before);
+		relic_destroy(ctx);
+	}
+
+	free(both);
+	free(c_facts);
+	free(d_facts);
+}
+
+/*
+ * The bytes the stores of a context hold once it has loaded b(0) and then
+ * `facts`, or SIZE_MAX when that could not be measured.
+ */
+static size_t
+bytes_after_loading(const char *facts)
+{
+	diag_log_t log;
+	relic_t *ctx;
+	size_t bytes;
+
+	ctx = context_with(NULL, "b(0).\n", &log);
+	if (ctx == NULL)
+		return (SIZE_MAX);
+
+	bytes = SIZE_MAX;
+	if (relic_load_string(ctx, "facts.dl", facts) == 0)
+		bytes = ctx->account.store_bytes;
+	relic_destroy(ctx);
+
+	return (bytes);
+}
+
+/*
+ * A bound query over a derived predicate with facts reads them through its
+ * base view, p$base, which reads p's base store; its rows begin with its
+ * facts, and running the query again evaluates the rewrite again, seeds
+ * and all.
+ */
+static void
+the_rewrite_reads_facts_through_a_view(void)
+{
+	const relic_relation_t *store;
+	relic_query_t *query;
+	rows_text_t rows;
+	diag_log_t log;
+	relic_t *ctx;
+	relic_pred_id_t view;
+	relic_pred_id_t viewed;
+	size_t run;
+	int status;
+
+	ctx = context_with(NULL, "p(a, c).\np(a, b).\np(X, Y) :- e(X, Y).\n"
+	    "e(a, d).\ne(b, e).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	query = relic_query_prepare(ctx, NULL, "p(a, Y)?");
+	check(query != NULL, SCENARIO_MAGIC, "the query is prepared");
+	for (run = 0; query != NULL && run < 2; run++) {
+		bzero(&rows, sizeof(rows));
+		rows.ctx = ctx;
+		status = relic_query_run(ctx, query, keep_row, &rows);
+		checkf(status == 0 && strcmp(rows.text, "c|b|d") == 0,
+		    SCENARIO_MAGIC, "run %zu should answer the facts first, "
+		    "c|b|d, not \"%s\"", run, rows.text);
+	}
+	relic_query_destroy(query);
+
+	view = predicate(ctx, "p$base", 2);
+	viewed = predicate(ctx, "p", 2);
+	store = relic_base_store(ctx, viewed);
+	check(relic_pred_of(ctx, view)->views == viewed, SCENARIO_MAGIC,
+	    "p$base views p");
+	checkf(store != NULL && relic_relation_read(ctx, view) == store &&
+	    store->count == 2, SCENARIO_MAGIC, "a base view should read its "
+	    "predicate's base store of 2 facts, not %zu",
+	    store != NULL ? store->count : 0);
+	checkf(log.errors == 0 && log.warnings == 0, SCENARIO_MAGIC,
+	    "nothing should be reported, not %zu errors and %zu warnings",
+	    log.errors, log.warnings);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A rewrite abandoned over its budget interned the predicates it generated,
+ * p's base view among them.  Nothing reads the base view, so it is not
+ * referenced, and a later check warns of none of them: the one warning is
+ * the budget's.
+ */
+static void
+an_abandoned_rewrite_leaves_no_warning(void)
+{
+	static const char query[] = "p(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8)?";
+	relic_pred_id_t view;
+	diag_log_t log;
+	relic_t *ctx;
+	char *program;
+	size_t before;
+	size_t after;
+	int status;
+
+	program = widening_program(ABANDONED_ARITY);
+	if (program == NULL) {
+		check(false, SCENARIO_MAGIC, "the widening program is written");
+		return;
+	}
+	ctx = context_with(NULL, program, &log);
+	free(program);
+	if (ctx == NULL)
+		return;
+
+	status = relic_load_string(ctx, "fact.dl",
+	    "p(c, c, c, c, c, c, c, c).\n");
+	check(status == 0, SCENARIO_MAGIC, "p gains a fact");
+
+	before = relic_pred_count(ctx);
+	checkf(answers(ctx, query, "c c c c c c c c") && log.errors == 0 &&
+	    log.warnings == 1, SCENARIO_MAGIC, "the rewrite should be "
+	    "abandoned with one warning and the query answered, not with %zu "
+	    "errors and %zu warnings", log.errors, log.warnings);
+	after = relic_pred_count(ctx);
+
+	view = predicate(ctx, "p$base", ABANDONED_ARITY);
+	check(view > before && view <= after, SCENARIO_MAGIC,
+	    "the rewrite interned p's base view before it was abandoned");
+	check(!relic_pred_of(ctx, view)->referenced, SCENARIO_MAGIC,
+	    "the base view is not referenced");
+
+	log.warnings = 0;
+	status = relic_load_string(ctx, "more.dl",
+	    "q(X) :- p(X, X, X, X, X, X, X, X).\n");
+	check(status == 0, SCENARIO_MAGIC, "a rule reading p loads");
+	status = relic_check(ctx);
+	checkf(status == 0 && log.warnings == 0, SCENARIO_MAGIC,
+	    "a later check should warn of nothing, but gave %zu warnings, the "
+	    "last \"%s\"", log.warnings, log.last_warning);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A fact of no columns is staged once, stored, seeded into a derived
+ * predicate and answered, like a fact of any arity.  done/0's rule reads a
+ * predicate that derives nothing, so done holds only because its fact was
+ * seeded.
+ */
+static void
+a_fact_of_no_columns_is_a_fact(void)
+{
+	static const char program[] = "ready.\nready.\ngo :- ready.\n"
+	    "done.\ndone :- blocked.\nblocked :- blocked.\n";
+	const relic_relation_t *derived;
+	diag_log_t log;
+	relic_t *ctx;
+	int status;
+
+	ctx = context_with(NULL, program, &log);
+	if (ctx == NULL)
+		return;
+
+	checkf(facts_held(ctx, "ready", 0) == 1 &&
+	    facts_held(ctx, "done", 0) == 1 && relic_base_total(ctx) == 2,
+	    SCENARIO_ARITY_ZERO, "each fact of no columns should be stored "
+	    "once, not %zu facts in all", relic_base_total(ctx));
+	check(answers(ctx, "go?", "()"), SCENARIO_ARITY_ZERO,
+	    "a rule reading a fact of no columns holds");
+	check(answers(ctx, "done?", "()"), SCENARIO_ARITY_ZERO,
+	    "the rewrite reads the fact through the base view");
+
+	status = relic_materialize(ctx);
+	check(status == 0, SCENARIO_ARITY_ZERO, "the program is materialized");
+	derived = relic_relation_read(ctx, predicate(ctx, "done", 0));
+	checkf(derived->count == 1, SCENARIO_ARITY_ZERO, "the fact should be "
+	    "seeded into done/0's relation, which holds %zu", derived->count);
+	check(answers(ctx, "done?", "()"), SCENARIO_ARITY_ZERO,
+	    "the fixed point answers the seeded fact");
+
+	check(answers(ctx, "absent?", "") && log.warnings == 1,
+	    SCENARIO_ARITY_ZERO, "a predicate of no columns nothing states "
+	    "has no row");
+
+	relic_destroy(ctx);
+}
+
+int
+main(void)
+{
+	a_load_keeps_what_is_not_a_fact();
+	a_failed_load_commits_no_fact();
+	a_refused_load_leaves_the_program_as_it_was();
+	a_predicate_is_read_from_the_store_it_has();
+	an_added_fact_is_seen_and_kept_once();
+	an_added_fact_can_falsify_a_negation();
+	an_added_fact_the_limit_refuses_changes_nothing();
+	queries_do_not_accumulate_indexes();
+	facts_after_evaluation_are_not_refused();
+	a_load_over_the_limit_grows_no_store();
+	the_rewrite_reads_facts_through_a_view();
+	an_abandoned_rewrite_leaves_no_warning();
+	a_fact_of_no_columns_is_a_fact();
+
+	return (check_summary("test_facts"));
+}

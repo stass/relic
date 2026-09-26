@@ -181,13 +181,17 @@ components in evaluation order, each carrying
 * the rules whose head it contains, in program order, as indexes into the
   program's rule table.
 
-A component with no rules is left out. Such a predicate is undefined or is a
-query's answer; there is nothing to run for it, and its relation is whatever
-it already is. Every rule of the program belongs to exactly one component,
-the one containing its head, so the schedule lists each rule exactly once.
+A component with no rules is left out. Such a predicate has facts alone, is
+undefined, or was interned by a query's Magic rewrite; there is nothing to
+run for it, and a predicate of facts alone is read as its base store holds
+it (`specs/design-facts.md` section 3). The schedule is built from rules,
+and a program's facts are in none of its components: loading facts adds
+nothing to the dependency graph, the strata or the rule counts. Every rule of
+the program belongs to exactly one component, the one containing its head,
+so the schedule lists each rule exactly once.
 
 Rules are held as indexes rather than copies or pointers. A copy of each rule
-would double the memory of a program of a million facts, and a pointer into the
+would double the memory of a program of a million rules, and a pointer into the
 rule table would dangle the moment a load grew it. An index stays valid for as
 long as the table holds the rule, which is the life of the context.
 
@@ -199,6 +203,7 @@ The evaluator runs the schedule's components in order:
 
 ```text
 for each component, in schedule order:
+	seed its members with the facts their base stores hold
 	if it is recursive:
 		run its rules to a fixed point
 	else:
@@ -235,7 +240,7 @@ that compiled no new rule finds the schedule current and does nothing. A check
 that did rebuilds the analysis from scratch, over every rule. The rebuild is
 linear in the size of the program, and incremental maintenance of components
 would be a great deal of mechanism to save a linear pass that happens once per
-load.
+load that adds a rule; a load of facts alone leaves the schedule current.
 
 **The analysis runs even when some statement has been rejected.** A rejected
 statement never reaches the rule table, so the graph is the graph of the rules

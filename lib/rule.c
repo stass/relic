@@ -423,6 +423,7 @@ compile_atom(relic_compiler_t *compiler, const relic_ast_atom_t *source,
 	if (relic_pred_intern(compiler->ctx, source->name, source->arity,
 	    &source->where, &atom->pred) != 0)
 		return (RELIC_COMPILE_INCOMPLETE);
+	relic_pred_reference(compiler->ctx, atom->pred, &source->where);
 
 	if (source->arity == 0)
 		return (RELIC_COMPILE_OK);
@@ -498,9 +499,9 @@ compile_literal(relic_compiler_t *compiler,
 }
 
 /*
- * Compile the head, and record that something derives into its predicate.
+ * Compile the head, and record that a head names its predicate.
  *
- * The predicate is marked defined even when the statement goes on to be
+ * The predicate is marked even when the statement goes on to be
  * rejected, because it is defined: a rule with an unbound variable is still
  * a rule about that predicate, and warning that nothing defines it would be
  * a second, false complaint about one mistake.
@@ -518,7 +519,7 @@ compile_head(relic_compiler_t *compiler)
 	    &head->where, &compiler->rule.head) != 0)
 		return (RELIC_COMPILE_INCOMPLETE);
 
-	relic_pred_define(compiler->ctx, compiler->rule.head);
+	relic_pred_name_head(compiler->ctx, compiler->rule.head);
 	compiler->rule.head_arity = head->arity;
 
 	if (head->arity == 0)
@@ -719,13 +720,21 @@ store_variables(relic_compiler_t *compiler)
 }
 
 /*
- * Publish a finished rule into the program's rules.  This is the last step
- * of compiling a statement, so nothing incomplete is ever reachable through
- * the program.  A rule table is indexed by its heads' predicates wherever it
- * is analysed, so a query's rule, whose head names none, never joins one.
+ * Append a finished rule to a rule table: the program's, or the one a
+ * query's Magic rewrite builds.  Returns 0, or -1 having reported that
+ * memory ran out.
+ *
+ * This is the one way a rule joins a table, and its last step, taken only
+ * once the table has room, stores the rule, counts it and marks its head
+ * predicate derived, none of which can fail.  So a predicate is derived
+ * exactly when some table has held a rule deriving it, and the mark needs
+ * no other place to be kept in step with.  A rule table is indexed by its
+ * heads' predicates wherever it is analysed, so a query's rule, whose head
+ * names none, never joins one.
  */
-static enum relic_compile_result
-append_rule(relic_t *ctx, relic_ruletab_t *table, const relic_rule_t *rule)
+int
+relic_ruletab_append(relic_t *ctx, relic_ruletab_t *table,
+    const relic_rule_t *rule)
 {
 	relic_rule_t *entries;
 
@@ -733,13 +742,28 @@ append_rule(relic_t *ctx, relic_ruletab_t *table, const relic_rule_t *rule)
 	    table->count + 1, sizeof(*table->entries));
 	if (entries == NULL) {
 		relic_diag_no_memory(ctx);
-		return (RELIC_COMPILE_INCOMPLETE);
+		return (-1);
 	}
 	table->entries = entries;
 
 	assert(rule->head != RELIC_ID_NONE);
 	table->entries[table->count] = *rule;
 	table->count++;
+	relic_pred_mark_derived(ctx, rule->head);
+
+	return (0);
+}
+
+/*
+ * Publish a finished rule into the program's rules.  This is the last step
+ * of compiling a statement, so nothing incomplete is ever reachable through
+ * the program.
+ */
+static enum relic_compile_result
+append_rule(relic_t *ctx, relic_ruletab_t *table, const relic_rule_t *rule)
+{
+	if (relic_ruletab_append(ctx, table, rule) != 0)
+		return (RELIC_COMPILE_INCOMPLETE);
 
 	return (RELIC_COMPILE_OK);
 }

@@ -1,40 +1,26 @@
-stratum 0, component 0: edge/2
-    facts: 2
-stratum 0, component 1: t/3
-    facts: 2
-stratum 0, component 2: size/2
-    facts: 2
-stratum 0, component 3: name/2
-    facts: 1
-stratum 0, component 4: raw/2
-    facts: 1
-stratum 0, component 5: initialized/0
-    facts: 1
-stratum 0, component 6: blocked/1
-    facts: 1
-stratum 0, component 7: pick/1
+stratum 0, component 0: pick/1
     rule pick(Y) :- edge(X, Z), t(X, Y, Z).
         scan edge(X, Z)
         lookup t(X, Y, Z) key={0,2}
         emit pick(Y)
-stratum 0, component 8: large/1
+stratum 0, component 1: large/1
     rule large(X) :- size(X, N), N > 100, N <= 200, 1 < 2.
         filter 1 < 2
         scan size(X, N)
         filter N > 100
         filter N <= 200
         emit large(X)
-stratum 0, component 9: named/1
+stratum 0, component 2: named/1
     rule named(X) :- edge(X, _), name(X, "Al\"ice\\\x09x").
         lookup name(X, "Al\"ice\\\x09x") key={1}
         lookup edge(X, _) key={0}
         emit named(X)
-stratum 0, component 10: hostile/1
+stratum 0, component 3: hostile/1
     rule hostile(X) :- edge(X, _), raw(X, "\x1b[2J\x7f\xff\x00z").
         lookup raw(X, "\x1b[2J\x7f\xff\x00z") key={1}
         lookup edge(X, _) key={0}
         emit hostile(X)
-stratum 1, component 11: free/1
+stratum 1, component 4: free/1
     rule free(X) :- edge(X, _), not blocked(X), initialized.
         member initialized
         scan edge(X, _)

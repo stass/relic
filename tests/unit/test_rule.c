@@ -169,7 +169,7 @@ variables_are_numbered_as_they_are_written(void)
 		return;
 	}
 
-	rule = rule_at(ctx, 1);
+	rule = rule_at(ctx, 0);
 	if (rule == NULL) {
 		check(false, SCENARIO_SLOTS, "the recursive rule was compiled");
 		relic_destroy(ctx);
@@ -231,7 +231,7 @@ a_literal_resolves_to_the_arguments_it_names(void)
 		return;
 	}
 
-	rule = rule_at(ctx, 1);
+	rule = rule_at(ctx, 0);
 	if (rule == NULL || rule->body_length != 2) {
 		check(false, SCENARIO_ARGUMENTS, "the rule has two literals");
 		relic_destroy(ctx);
@@ -296,7 +296,7 @@ an_anonymous_variable_takes_a_slot_only_where_illegal(void)
 		return;
 	}
 
-	rule = rule_at(ctx, 1);
+	rule = rule_at(ctx, 0);
 	if (rule == NULL || rule->body_length != 1) {
 		check(false, SCENARIO_WILDCARD, "the rule was compiled");
 		relic_destroy(ctx);
@@ -342,8 +342,8 @@ a_rejected_statement_leaves_no_rule_behind(void)
 	check(relic_check(ctx) != 0, SCENARIO_REJECTED,
 	    "a rule with an unbound head variable is refused");
 
-	checkf(rule_count(ctx) == 2, SCENARIO_REJECTED,
-	    "the fact and the good rule were compiled, but %zu rules exist",
+	checkf(rule_count(ctx) == 1, SCENARIO_REJECTED,
+	    "the good rule was compiled, but %zu rules exist",
 	    rule_count(ctx));
 
 	checkf(log.errors == 1, SCENARIO_REJECTED,

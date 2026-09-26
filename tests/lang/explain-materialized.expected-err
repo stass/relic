@@ -1,6 +1,4 @@
-stratum 0, component 0: edge/2
-    facts: 2
-stratum 0, component 1 (recursive): path/2
+stratum 0, component 0 (recursive): path/2
     rule path(X, Y) :- edge(X, Y).
         scan edge(X, Y)
         emit path(X, Y)

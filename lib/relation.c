@@ -36,10 +36,19 @@
  * does anything else.
  *
  * A relation is created once, in an allocation of its own, and never moves.
- * The table holds pointers to the predicates' relations rather than the
- * relations, and a query holds a pointer to its answer's, which is what lets
- * a plan or an evaluation resolve a relation once and hold it.  Nothing below
- * asks which of the two a relation is, except to say what it is called.
+ * The store's tables hold pointers to the predicates' relations rather than
+ * the relations, and a query holds a pointer to its answer's, which is what
+ * lets a plan or an evaluation resolve a relation once and hold it.
+ *
+ * A predicate has two relations at most: its base store, holding the facts
+ * the program states for it, and its derived relation, which exists once a
+ * rule derives it.  Two functions hand them out, one per role.  The relation
+ * a rule writes is the derived relation, and asking for it for a predicate
+ * no rule derives is refused, so nothing but a load's commit writes a base
+ * store.  The relation an operation reads is the derived relation of a
+ * derived predicate, whose facts evaluation seeds it with, and otherwise the
+ * base store, which is then the whole relation.  Below the two funnels
+ * nothing asks which kind a relation is, except to say what it is called.
  */
 
 static uint32_t	 column_rehash(uint32_t id, void *ctx);
@@ -59,7 +68,7 @@ static void	 prefetch_first_candidate(const relic_relation_t *relation,
 		    uint32_t hash);
 static void	 report_limit(relic_t *ctx, const char *limit,
 		    size_t configured, const char *activity,
-		    const relic_relation_t *relation);
+		    const char *described);
 static bool	 relation_columns_after_reserve(
 		    const relic_relation_t *relation, size_t added,
 		    size_t *columnsp);
@@ -72,7 +81,22 @@ static int	 relation_insert_hashed(relic_t *ctx,
 		    uint32_t hash, bool *addedp);
 static int	 relation_grow(relic_t *ctx, relic_relation_t *relation,
 		    size_t added);
-static int	 relations_cover(relic_t *ctx, relic_pred_id_t pred);
+static void	 relation_init(relic_relation_t *relation, const relic_t *ctx,
+		    relic_pred_id_t pred, size_t serial, uint16_t arity);
+static void	 relation_drop_indexes(relic_t *ctx,
+		    relic_relation_t *relation);
+static int	 reltab_cover(relic_t *ctx, relic_reltab_t *table,
+		    relic_pred_id_t pred);
+static relic_relation_t *reltab_find(const relic_reltab_t *table,
+		    relic_pred_id_t pred);
+static relic_relation_t *reltab_relation(relic_t *ctx,
+		    relic_reltab_t *table, relic_pred_id_t pred);
+static void	 reltab_reset(relic_reltab_t *table);
+static size_t	 base_bytes(const relic_t *ctx) RELIC_UNUSED;
+static int	 bases_fit(relic_t *ctx, const relic_base_growth_t *growths,
+		    size_t count);
+static int	 refuse_load(relic_t *ctx, const char *key, size_t limit,
+		    relic_pred_id_t pred);
 static void	 tuple_append(relic_relation_t *relation,
 		    const relic_dom_t *columns, uint32_t hash);
 static relic_dom_t *tuple_at(const relic_relation_t *relation,
@@ -84,9 +108,17 @@ static uint32_t	 tuple_hash(const relic_relation_t *relation,
 static uint32_t	 tuple_rehash(uint32_t id, void *ctx);
 
 void
-relic_reltab_init(relic_reltab_t *table)
+relic_store_init(relic_store_t *store)
 {
-	bzero(table, sizeof(*table));
+	bzero(store, sizeof(*store));
+}
+
+void
+relic_store_reset(relic_store_t *store)
+{
+	reltab_reset(&store->derived);
+	reltab_reset(&store->bases);
+	bzero(store, sizeof(*store));
 }
 
 /*
@@ -135,13 +167,25 @@ relic_relation_create(relic_t *ctx, relic_pred_id_t pred, size_t serial,
 		return (NULL);
 	}
 
+	relation_init(relation, ctx, pred, serial, arity);
+
+	return (relation);
+}
+
+/*
+ * Make `relation` an empty relation of `arity` columns, holding nothing
+ * that needs releasing.
+ */
+static void
+relation_init(relic_relation_t *relation, const relic_t *ctx,
+    relic_pred_id_t pred, size_t serial, uint16_t arity)
+{
+	bzero(relation, sizeof(*relation));
 	relic_idtab_init(&relation->index);
 	relation->hash_seed = ctx->hash_seed;
 	relation->pred = pred;
 	relation->serial = serial;
 	relation->arity = arity;
-
-	return (relation);
 }
 
 /*
@@ -154,7 +198,7 @@ relic_relation_create(relic_t *ctx, relic_pred_id_t pred, size_t serial,
 void
 relic_relation_clear(relic_t *ctx, relic_relation_t *relation)
 {
-	ctx->relations.tuple_count -= relation->count;
+	ctx->store.tuple_count -= relation->count;
 	ctx->account.store_bytes -= relic_relation_bytes(relation);
 	relation_empty(relation);
 }
@@ -177,8 +221,8 @@ relic_relation_free(relic_relation_t *relation)
 	free(relation);
 }
 
-void
-relic_reltab_reset(relic_reltab_t *table)
+static void
+reltab_reset(relic_reltab_t *table)
 {
 	size_t position;
 
@@ -404,7 +448,7 @@ exceeds_tuple_limit(const relic_t *ctx)
 	if (ctx->config.max_tuples == 0)
 		return (false);
 
-	return (ctx->relations.tuple_count >= ctx->config.max_tuples);
+	return (ctx->store.tuple_count >= ctx->config.max_tuples);
 }
 
 /*
@@ -424,16 +468,20 @@ exceeds_tuple_limit(const relic_t *ctx)
 static int
 enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 {
+	char described[RELIC_PRED_TEXT_MAX];
+
 	if (exceeds_tuple_limit(ctx)) {
 		report_limit(ctx, "tuples", ctx->config.max_tuples, "deriving",
-		    relation);
+		    relic_relation_describe(ctx, relation, described,
+		    sizeof(described)));
 		return (-1);
 	}
 
 	if (relic_account_exceeds(&ctx->account, relic_relation_bytes(relation),
 	    relic_relation_bytes_after_reserve(relation, 1))) {
 		report_limit(ctx, "memory", ctx->account.limit, "deriving",
-		    relation);
+		    relic_relation_describe(ctx, relation, described,
+		    sizeof(described)));
 		return (-1);
 	}
 
@@ -443,18 +491,16 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 /*
  * Report a configured limit refusing something, in the form every limit
  * shares: the limit, what it was set to, and what was being done to which
- * relation -- deriving into it, or indexing it.
+ * relation, as "name/arity" -- deriving into it, indexing it, or loading
+ * facts into it.
  */
 static void
 report_limit(relic_t *ctx, const char *limit, size_t configured,
-    const char *activity, const relic_relation_t *relation)
+    const char *activity, const char *described)
 {
-	char described[RELIC_PRED_TEXT_MAX];
-
 	relic_diagf(ctx, RELIC_ERROR, NULL,
 	    "limit exceeded: %s=%zu while %s %s", limit, configured, activity,
-	    relic_relation_describe(ctx, relation, described,
-	    sizeof(described)));
+	    described);
 }
 
 /*
@@ -638,7 +684,7 @@ relation_insert_hashed(relic_t *ctx, relic_relation_t *relation,
 		return (-1);
 
 	tuple_append(relation, columns, hash);
-	ctx->relations.tuple_count++;
+	ctx->store.tuple_count++;
 	*addedp = true;
 
 	return (0);
@@ -845,13 +891,15 @@ index_make_room(relic_t *ctx, const relic_relation_t *relation,
 {
 	size_t bytes_before;
 	int status;
+	char described[RELIC_PRED_TEXT_MAX];
 
 	bytes_before = relic_index_bytes(index);
 
 	if (relic_account_exceeds(&ctx->account, bytes_before,
 	    relic_index_bytes_after_reserve(index, tuples, 1))) {
 		report_limit(ctx, "memory", ctx->account.limit, "indexing",
-		    relation);
+		    relic_relation_describe(ctx, relation, described,
+		    sizeof(described)));
 		return (-1);
 	}
 
@@ -948,6 +996,7 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	relation->indexes[position] = built;
 	relation->index_count++;
 	*positionp = (uint32_t)position;
+	ctx->store.holds_derived = true;
 
 	return (0);
 }
@@ -1073,20 +1122,17 @@ relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 }
 
 /*
- * Extend the table so that it has a slot for every predicate up to `pred`.
+ * Extend a table so that it has a slot for every predicate up to `pred`.
  *
  * Only slots are added, and a new one is null: the relation behind it is
  * created when one is asked for.  A predicate that never holds a tuple
  * therefore costs one pointer, and passing over it here commits nothing.
  */
 static int
-relations_cover(relic_t *ctx, relic_pred_id_t pred)
+reltab_cover(relic_t *ctx, relic_reltab_t *table, relic_pred_id_t pred)
 {
-	relic_reltab_t *table;
 	relic_relation_t **entries;
 	size_t position;
-
-	table = &ctx->relations;
 
 	entries = relic_grow_array(table->entries, &table->capacity, pred,
 	    sizeof(*table->entries));
@@ -1105,19 +1151,31 @@ relations_cover(relic_t *ctx, relic_pred_id_t pred)
 }
 
 /*
- * The relation of a predicate, created empty if this is the first time one
- * has been asked for.  Returns NULL with a diagnostic already reported when
- * it cannot be created, or when the identifier names no predicate, which is
- * a mistake in the caller rather than in the program being run.
+ * A predicate's relation in a table, or NULL when none has been created.
+ */
+static relic_relation_t *
+reltab_find(const relic_reltab_t *table, relic_pred_id_t pred)
+{
+	if (pred == RELIC_ID_NONE || pred > table->count)
+		return (NULL);
+
+	return (table->entries[pred - 1]);
+}
+
+/*
+ * A predicate's relation in a table, created empty if this is the first
+ * time one has been asked for.  Returns NULL with a diagnostic already
+ * reported when it cannot be created, or when the identifier names no
+ * predicate, which is a mistake in the caller rather than in the program
+ * being run.
  *
  * The relation is owned by the context and lives as long as it does, so the
- * returned pointer stays valid however many relations are created afterwards.
- * A caller may hold as many of them as it likes.
+ * returned pointer stays valid however many relations are created
+ * afterwards.  A caller may hold as many of them as it likes.
  */
-relic_relation_t *
-relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
+static relic_relation_t *
+reltab_relation(relic_t *ctx, relic_reltab_t *table, relic_pred_id_t pred)
 {
-	relic_reltab_t *table;
 	relic_relation_t *relation;
 
 	if (relic_pred_of(ctx, pred) == NULL) {
@@ -1127,9 +1185,7 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
 		return (NULL);
 	}
 
-	table = &ctx->relations;
-
-	if (pred > table->count && relations_cover(ctx, pred) != 0)
+	if (pred > table->count && reltab_cover(ctx, table, pred) != 0)
 		return (NULL);
 
 	relation = table->entries[pred - 1];
@@ -1147,49 +1203,333 @@ relic_relation_for(relic_t *ctx, relic_pred_id_t pred)
 }
 
 /*
- * Empty the relation of every predicate, releasing its storage.  The
- * relations stay where they are, so a pointer to one still names its
- * predicate's relation, which now holds nothing.
+ * The relation a rule deriving `pred` writes: its derived relation.  Asking
+ * for a predicate no rule derives is an internal error rather than a
+ * relation created on the spot, so no rule can write a base store and no
+ * mistake can give a predicate a second relation.
+ */
+relic_relation_t *
+relic_relation_written(relic_t *ctx, relic_pred_id_t pred)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (!relic_pred_is_derived(ctx, pred)) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "internal error: a rule writes %s, which no rule derives",
+		    relic_pred_describe(ctx, pred, described,
+		    sizeof(described)));
+		return (NULL);
+	}
+
+	ctx->store.holds_derived = true;
+
+	return (reltab_relation(ctx, &ctx->store.derived, pred));
+}
+
+/*
+ * The relation an operation reading `pred` reads: the derived relation of
+ * a derived predicate, and otherwise the base store of the predicate the
+ * read names -- its own, or, for a base view, the one it views.  A base
+ * store is created empty on first use, so a predicate nothing states or
+ * derives reads as empty.
+ */
+relic_relation_t *
+relic_relation_read(relic_t *ctx, relic_pred_id_t pred)
+{
+	const relic_pred_t *entry;
+
+	entry = relic_pred_of(ctx, pred);
+	if (entry != NULL && entry->derived)
+		return (reltab_relation(ctx, &ctx->store.derived, pred));
+
+	if (entry != NULL && entry->views != RELIC_ID_NONE)
+		pred = entry->views;
+
+	return (reltab_relation(ctx, &ctx->store.bases, pred));
+}
+
+/*
+ * A predicate's base store, or NULL when nothing has created it.
+ */
+const relic_relation_t *
+relic_base_store(const relic_t *ctx, relic_pred_id_t pred)
+{
+	return (reltab_find(&ctx->store.bases, pred));
+}
+
+/*
+ * The number of facts a predicate's base store holds.
+ */
+size_t
+relic_base_count(const relic_t *ctx, relic_pred_id_t pred)
+{
+	const relic_relation_t *store;
+
+	store = relic_base_store(ctx, pred);
+
+	return (store == NULL ? 0 : store->count);
+}
+
+/*
+ * The number of facts every base store holds.  Base stores only grow, so
+ * the total only grows.
+ */
+size_t
+relic_base_total(const relic_t *ctx)
+{
+	const relic_reltab_t *table;
+	size_t total;
+	size_t position;
+
+	table = &ctx->store.bases;
+	total = 0;
+
+	for (position = 0; position < table->count; position++) {
+		if (table->entries[position] != NULL)
+			total += table->entries[position]->count;
+	}
+
+	return (total);
+}
+
+/*
+ * The bytes every base store holds.
+ */
+static size_t
+base_bytes(const relic_t *ctx)
+{
+	const relic_reltab_t *table;
+	size_t bytes;
+	size_t position;
+
+	table = &ctx->store.bases;
+	bytes = 0;
+
+	for (position = 0; position < table->count; position++) {
+		if (table->entries[position] != NULL)
+			bytes += relic_relation_bytes(table->entries[position]);
+	}
+
+	return (bytes);
+}
+
+/*
+ * Release a relation's secondary indexes, giving back what they counted
+ * against the storage total, and keep its tuples and canonical index.
+ */
+static void
+relation_drop_indexes(relic_t *ctx, relic_relation_t *relation)
+{
+	size_t position;
+
+	for (position = 0; position < relation->index_count; position++) {
+		ctx->account.store_bytes -=
+		    relic_index_bytes(&relation->indexes[position]);
+		relic_index_empty(&relation->indexes[position]);
+	}
+	relation->index_count = 0;
+}
+
+/*
+ * Discard everything evaluation derived: empty every derived relation and
+ * drop the base stores' secondary indexes, keeping the facts the base
+ * stores hold.  The relations stay where they are, so a pointer to one
+ * still names the same relation.  A store holding nothing derived has
+ * nothing to discard, and the walk is skipped.
  *
- * Identifiers restart from the first afterwards, so a range taken before the
- * discard names nothing, or other tuples, after it, and every index is gone,
- * so an index position taken before it names nothing either.  The caller must
- * hold neither across it, which the evaluator satisfies by discarding only
- * before an evaluation begins: every range and every plan lives in an
- * evaluation's state and dies with it.
+ * Identifiers of a derived relation restart from the first afterwards, so a
+ * range taken before the discard names nothing, or other tuples, after it,
+ * and every secondary index is gone, so an index position taken before it
+ * names nothing either.  The caller must hold neither across it, which the
+ * evaluator satisfies by discarding only before an evaluation begins: every
+ * range and every plan lives in an evaluation's state and dies with it.
  *
- * Each relation is cleared, so each total loses exactly what the relations
- * of the table held and keeps what any relation outside it holds.  A query's
- * answer is outside it, and is empty whenever anything but its own answer
- * can run, because the context is busy from the moment the answer is filled
- * until it is emptied again.  Both totals are therefore zero afterwards, and
- * that is asserted rather than assigned: a total set to zero would be right
- * only while that argument held, and one that is asserted fails a test the
- * day it stops holding.
+ * Each relation is emptied through the totals, so each total loses exactly
+ * what it held.  A query's answer is outside the store, and is empty
+ * whenever anything but its own answer can run, because the context is busy
+ * from the moment the answer is filled until it is emptied again.  Both
+ * totals therefore count the base stores alone afterwards, and that is
+ * asserted rather than assigned: a total set would be right only while that
+ * argument held, and one that is asserted fails a test the day it stops
+ * holding.
  */
 void
 relic_relation_discard_all(relic_t *ctx)
 {
-	relic_reltab_t *table;
+	relic_store_t *store;
 	size_t position;
 
-	table = &ctx->relations;
+	store = &ctx->store;
+	if (!store->holds_derived)
+		return;
 
-	for (position = 0; position < table->count; position++) {
-		if (table->entries[position] != NULL)
-			relic_relation_clear(ctx, table->entries[position]);
+	for (position = 0; position < store->derived.count; position++) {
+		if (store->derived.entries[position] != NULL)
+			relic_relation_clear(ctx,
+			    store->derived.entries[position]);
 	}
 
-	assert(table->tuple_count == 0 && ctx->account.store_bytes == 0);
+	for (position = 0; position < store->bases.count; position++) {
+		if (store->bases.entries[position] != NULL)
+			relation_drop_indexes(ctx,
+			    store->bases.entries[position]);
+	}
+
+	store->holds_derived = false;
+
+	assert(store->tuple_count == relic_base_total(ctx) &&
+	    ctx->account.store_bytes == base_bytes(ctx));
+}
+
+/*
+ * Check that the base stores can grow as `growths` asks, under both
+ * configured limits, before any of them grows.  Returns 0, or -1 having
+ * reported the refusal against the predicate of the first growth.
+ *
+ * A store not yet created is projected as an empty relation of its
+ * predicate's arity, which is what it will be when it is created.  Sums that
+ * a size_t cannot hold cannot fit any limit either, and are refused as a
+ * store too large to grow.
+ */
+static int
+bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
+{
+	const relic_relation_t *store;
+	relic_relation_t absent;
+	size_t added_total;
+	size_t bytes_after;
+	size_t bytes_before;
+	size_t projected;
+	size_t i;
+	char described[RELIC_PRED_TEXT_MAX];
+
+	added_total = 0;
+	bytes_before = 0;
+	bytes_after = 0;
+
+	for (i = 0; i < count; i++) {
+		store = relic_base_store(ctx, growths[i].pred);
+		if (store == NULL) {
+			relation_init(&absent, ctx, growths[i].pred, 0,
+			    relic_pred_of(ctx, growths[i].pred)->arity);
+			store = &absent;
+		}
+
+		projected = relic_relation_bytes_after_reserve(store,
+		    growths[i].added);
+		if (growths[i].added > RELIC_TUPLE_MAX - store->count ||
+		    growths[i].added > SIZE_MAX - added_total ||
+		    projected > SIZE_MAX - bytes_after) {
+			relic_diagf(ctx, RELIC_ERROR, NULL,
+			    "relation %s is too large to grow",
+			    relic_pred_describe(ctx, growths[i].pred,
+			    described, sizeof(described)));
+			return (-1);
+		}
+
+		added_total += growths[i].added;
+		bytes_before += relic_relation_bytes(store);
+		bytes_after += projected;
+	}
+
+	if (ctx->config.max_tuples != 0 &&
+	    (ctx->store.tuple_count > ctx->config.max_tuples ||
+	    added_total > ctx->config.max_tuples - ctx->store.tuple_count))
+		return (refuse_load(ctx, "tuples", ctx->config.max_tuples,
+		    growths[0].pred));
+
+	if (relic_account_exceeds(&ctx->account, bytes_before, bytes_after))
+		return (refuse_load(ctx, "memory", ctx->account.limit,
+		    growths[0].pred));
+
+	return (0);
+}
+
+/*
+ * Report that the limit `key`, of `limit`, refuses a load whose first
+ * growing store is `pred`'s, and return -1.
+ */
+static int
+refuse_load(relic_t *ctx, const char *key, size_t limit, relic_pred_id_t pred)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	report_limit(ctx, key, limit, "loading",
+	    relic_pred_describe(ctx, pred, described, sizeof(described)));
+
+	return (-1);
+}
+
+/*
+ * Make room in the base stores for the facts a load's commit is about to
+ * append: `added` more tuples for each predicate of `growths`, which holds
+ * at least one growth, each of at least one tuple.  Returns 0, or -1 having
+ * reported the refusal.
+ *
+ * Both limits are checked once, over every store together, before any
+ * store is created or grown, so a refusal by either leaves every store as it
+ * was.  Only a failed allocation among the growths that follow can leave a
+ * store with more capacity than it holds, accounted, as a relation that
+ * failed to grow keeps what it obtained.  A base store has no secondary
+ * index when a commit reserves, since the commit discards what was derived
+ * before reserving.
+ */
+int
+relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
+    size_t count)
+{
+	relic_relation_t *store;
+	size_t i;
+
+	assert(count > 0);
+
+	if (bases_fit(ctx, growths, count) != 0)
+		return (-1);
+
+	for (i = 0; i < count; i++) {
+		store = reltab_relation(ctx, &ctx->store.bases,
+		    growths[i].pred);
+		if (store == NULL)
+			return (-1);
+
+		if (relic_relation_reserve(ctx, store, growths[i].added) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Append a fact the base store `pred` lacks, into room relic_bases_reserve()
+ * made: store it and place it in the canonical index, looking nothing up.
+ * Nothing here can fail.
+ */
+void
+relic_base_append(relic_t *ctx, relic_pred_id_t pred,
+    const relic_dom_t *columns)
+{
+	relic_relation_t *store;
+
+	store = reltab_find(&ctx->store.bases, pred);
+	assert(store != NULL && store->index_count == 0);
+	assert(relic_relation_bytes_after_reserve(store, 1) ==
+	    relic_relation_bytes(store));
+	assert(relation_find_hashed(store, columns,
+	    tuple_hash(store, columns)) == RELIC_ID_NONE);
+
+	tuple_append(store, columns, tuple_hash(store, columns));
+	ctx->store.tuple_count++;
 }
 
 /*
  * Write what a relation is called into `buffer` and return it: its
  * predicate's name, or `$q` and the serial number of the query whose answer
- * it is.  A name longer than the buffer is shortened as a message shortens
- * one.  No identifier the lexer accepts contains `$`, so an answer's name
- * cannot be mistaken for a predicate a program writes, and it is built here
- * rather than interned anywhere.
+ * it is.  The base store of a derived predicate p is read only through its
+ * base view, and is called by the view's name, p$base, since p names the
+ * derived relation.  A name longer than the buffer is shortened as a message
+ * shortens one.  No identifier the lexer accepts contains `$`, so neither
+ * name can be mistaken for a predicate a program writes, and both are built
+ * here rather than looked up.
  */
 const char *
 relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
@@ -1207,8 +1547,17 @@ relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
 	pred = relic_pred_of(ctx, relation->pred);
 	if (pred != NULL)
 		name = relic_symbol_bytes(ctx, pred->name, NULL);
+	if (name == NULL)
+		name = "?";
 
-	return (relic_diag_name(name != NULL ? name : "?", buffer, size));
+	if (pred == NULL || !pred->derived ||
+	    relation != relic_base_store(ctx, relation->pred))
+		return (relic_diag_name(name, buffer, size));
+
+	if ((size_t)snprintf(buffer, size, "%s$base", name) >= size)
+		relic_diag_mark_cut(buffer, size);
+
+	return (buffer);
 }
 
 /*
@@ -1239,5 +1588,5 @@ relic_relation_total_bytes(const relic_t *ctx)
 size_t
 relic_relation_total_tuples(const relic_t *ctx)
 {
-	return (ctx->relations.tuple_count);
+	return (ctx->store.tuple_count);
 }

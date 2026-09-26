@@ -519,7 +519,7 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 	uint32_t index_position;
 	uint16_t i;
 
-	relation = relic_relation_for(planner->ctx, atom->pred);
+	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
 
@@ -588,7 +588,7 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 	relic_op_t *op;
 	uint16_t i;
 
-	relation = relic_relation_for(planner->ctx, atom->pred);
+	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
 
@@ -838,7 +838,7 @@ score_positive(relic_t *ctx, const bool *incomplete, const relic_atom_t *atom,
 		return (0);
 	}
 
-	relation = relic_relation_for(ctx, atom->pred);
+	relation = relic_relation_read(ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
 

@@ -32,7 +32,9 @@ typedef struct relic_index relic_index_t;
 typedef struct relic_index_key relic_index_key_t;
 typedef struct relic_relation relic_relation_t;
 typedef struct relic_relation_stats relic_relation_stats_t;
+typedef struct relic_base_growth relic_base_growth_t;
 typedef struct relic_reltab relic_reltab_t;
+typedef struct relic_store relic_store_t;
 typedef struct relic_tuple_range relic_tuple_range_t;
 
 /*
@@ -206,9 +208,9 @@ struct relic_relation {
 };
 
 /*
- * The relations of the program's predicates, indexed by predicate
- * identifier minus one.  A query's answer relation belongs to the query and
- * has no slot here.
+ * Relations of the program's predicates, indexed by predicate identifier
+ * minus one.  A query's answer relation belongs to the query and has no
+ * slot here.
  *
  * The table is a prefix of the predicate table, extended to cover a predicate
  * the first time a relation for it is asked for.  A slot is null until then,
@@ -225,22 +227,48 @@ struct relic_relation {
  * its last entry.  Allocating each relation on its own means growth moves
  * pointers and never relations, so a relation's address is fixed for the life
  * of the context and no caller has anything to remember.
- *
- * `tuple_count` is the total the configurable tuple limit is enforced
- * against, summed over every relation of the context, whether it is in this
- * table or is a query's answer.  The bytes the same relations hold are the
- * store's part of the context's memory account, `store_bytes`: the capacity
- * of every relation's columns and canonical index slots and of every array
- * of its secondary indexes, including one being built -- what is actually
- * held, not the smaller number a tuple count implies.  It counts neither
- * this array nor the relations it points at, nor a relation's array of index
- * headers, which are sized by the program rather than by the data.
  */
 struct relic_reltab {
 	relic_relation_t	**entries;	/* null until created */
 	size_t			  count;
 	size_t			  capacity;
-	size_t			  tuple_count;
+};
+
+/*
+ * The relation store: a table of derived relations, which evaluation writes
+ * and a discard empties, and a table of base stores, which hold the facts a
+ * program states and which only a load's commit writes.  A predicate has
+ * one of each at most, created when first asked for.
+ *
+ * `tuple_count` is the total the configurable tuple limit is enforced
+ * against, summed over every relation of the context: derived relations,
+ * base stores and a query's answer alike.  The bytes the same relations hold
+ * are the store's part of the context's memory account, `store_bytes`: the
+ * capacity of every relation's columns and canonical index slots and of
+ * every array of its secondary indexes, including one being built -- what
+ * is actually held, not the smaller number a tuple count implies.  It counts
+ * neither the tables nor the relations they point at, nor a relation's
+ * array of index headers, which are sized by the program rather than by the
+ * data.
+ *
+ * `holds_derived` is set whenever the store hands out a derived relation to
+ * be written or builds a secondary index, the only two things a discard
+ * removes, and cleared by the discard.  A discard with it clear has nothing
+ * to do.
+ */
+struct relic_store {
+	relic_reltab_t	derived;
+	relic_reltab_t	bases;
+	size_t		tuple_count;
+	bool		holds_derived;
+};
+
+/*
+ * How many facts a load's commit adds to one predicate's base store.
+ */
+struct relic_base_growth {
+	relic_pred_id_t	pred;
+	size_t		added;
 };
 
 #endif /* RELIC_RELATION_H */

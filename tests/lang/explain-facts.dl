@@ -1,0 +1,25 @@
+% A predicate may have facts and rules alike.  Its facts are held apart from
+% what its rules derive: evaluating its component starts from them, which
+% -e shows as the component's facts, and the Magic rewrite reads them
+% through the predicate's base view, named with $base, which only a rewrite
+% names.
+%
+% blocked is negated, so the query reads it completely: its component is
+% evaluated first, under the program's heading, starting from its fact.
+% link is called with its first column bound, so each of its adornments
+% begins with a rule that looks up the facts it reaches in link$base.
+
+link(a, b).
+link(b, c).
+link(X, Y) :- bridge(X, Y).
+bridge(c, d).
+bridge(d, e).
+
+blocked(e).
+blocked(X) :- closed(X).
+closed(a).
+
+reach(X, Y) :- link(X, Y), not blocked(Y).
+reach(X, Z) :- reach(X, Y), link(Y, Z), not blocked(Z).
+
+reach(a, X)?

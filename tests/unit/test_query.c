@@ -30,7 +30,7 @@
 #include "internal.h"
 
 #define	SCENARIO_COLUMNS	"a query's columns are its named variables"
-#define	SCENARIO_FACTS		"a fact costs its tuple and keeps its turn"
+#define	SCENARIO_FACTS		"a fact costs its tuple and comes first"
 #define	SCENARIO_FOREIGN	"a query runs only in its own context"
 #define	SCENARIO_GROWTH		"answering queries does not grow the context"
 #define	SCENARIO_LIMIT		"an answer refused by a limit is given back"
@@ -127,7 +127,7 @@ static int	 count_rows(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static int	 keep_integers(void *callback_ctx,
 		    const relic_value_t *values, size_t count);
-static void	 a_fact_costs_its_tuple_and_keeps_its_turn(void);
+static void	 a_fact_costs_its_tuple_and_comes_first(void);
 static void	 record_explained(void *callback_ctx, const char *line);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
@@ -366,7 +366,8 @@ context_size(relic_t *ctx)
 	relic_stats(ctx, &stats);
 
 	size.predicates = relic_pred_count(ctx);
-	size.relation_slots = ctx->relations.count;
+	size.relation_slots = ctx->store.derived.count +
+	    ctx->store.bases.count;
 	size.tuples = stats.tuples;
 	size.storage_bytes = stats.storage_bytes;
 
@@ -899,7 +900,12 @@ planning_is_charged_to_the_memory_limit(void)
 		relic_destroy(ctx);
 	}
 
-	ctx = limited_context(1, "e(a).\np(X) :- e(X).\n", &log);
+	/*
+	 * No fact, which a limit of one byte would refuse to load: e/1 and
+	 * f/1 derive each other and nothing else.
+	 */
+	ctx = limited_context(1, "e(X) :- f(X).\nf(X) :- e(X).\n"
+	    "p(X) :- e(X).\n", &log);
 	if (ctx != NULL) {
 		query = relic_query_prepare(ctx, NULL, "p(a)?");
 		rows = 0;
@@ -916,11 +922,12 @@ planning_is_charged_to_the_memory_limit(void)
 	 * The rewrite's first chunk fits under this limit and the evaluation
 	 * arena's does not, so the evaluation of what the query reads
 	 * completely is refused, and names the first component it evaluates:
-	 * e/1, the schedule's third, which is not the first the schedule
-	 * holds.
+	 * e/1, which the query negates, and which is the schedule's second
+	 * component, not the first the schedule holds.
 	 */
 	ctx = limited_context(FIRST_WANTED_LIMIT,
-	    "b(1).\na(X) :- b(X).\ne(1).\np(X) :- e(X).\n", &log);
+	    "b(1).\na(X) :- b(X).\nf(1).\ne(X) :- f(X).\ng(1).\n"
+	    "p(X) :- g(X), not e(X).\n", &log);
 	if (ctx != NULL) {
 		query = relic_query_prepare(ctx, NULL, "p(1)?");
 		rows = 0;
@@ -968,15 +975,15 @@ keep_integers(void *callback_ctx, const relic_value_t *values, size_t count)
 }
 
 /*
- * A fact has no plan: its turn in the pass over its component inserts its
- * head.  So a program of many facts evaluates under a memory limit a little
- * above what their relation holds, which a plan per fact -- several times the
- * size of its tuple -- would exceed, and a fact written between two rules is
- * inserted between the tuples they derive, as its plan's EMIT would have
- * inserted it.
+ * A fact is a tuple of its predicate's base store and has no plan.  So a
+ * program of many facts evaluates under a memory limit a little above what
+ * their relation holds, which a plan per fact -- several times the size of
+ * its tuple -- would exceed.  A derived predicate's relation is seeded with
+ * all its facts before its rules run, so its rows begin with its facts, in
+ * the order they were written, wherever they stand among its rules.
  */
 static void
-a_fact_costs_its_tuple_and_keeps_its_turn(void)
+a_fact_costs_its_tuple_and_comes_first(void)
 {
 	integer_rows_t rows;
 	relic_query_t *query;
@@ -1025,9 +1032,10 @@ a_fact_costs_its_tuple_and_keeps_its_turn(void)
 	query = relic_query_prepare(ctx, NULL, "p(X)?");
 	check(query != NULL &&
 	    relic_query_run(ctx, query, keep_integers, &rows) == 0 &&
-	    rows.count == 3 && rows.values[0] == 3 && rows.values[1] == 1 &&
-	    rows.values[2] == 5, SCENARIO_FACTS,
-	    "facts and the rule between them insert in program order");
+	    rows.count == 3 && rows.values[0] == 3 && rows.values[1] == 5 &&
+	    rows.values[2] == 1, SCENARIO_FACTS,
+	    "a derived predicate's facts should come before what its rule "
+	    "derives");
 	relic_query_destroy(query);
 	relic_destroy(ctx);
 }
@@ -1040,7 +1048,7 @@ main(void)
 	answering_queries_does_not_grow_the_context();
 	an_answer_refused_by_a_limit_is_given_back();
 	planning_is_charged_to_the_memory_limit();
-	a_fact_costs_its_tuple_and_keeps_its_turn();
+	a_fact_costs_its_tuple_and_comes_first();
 	the_programs_queries_are_enumerated();
 	an_unsafe_query_makes_the_program_invalid();
 	a_refused_query_leaves_the_program_valid();

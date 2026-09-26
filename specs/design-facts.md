@@ -228,7 +228,8 @@ load commits its facts, then splices its statements:
    new count, an absent store counting as empty. Check both limits once,
    against the account's totals plus those. A refusal reports `limit
    exceeded: tuples=N while loading p/2`, or its `memory` form, naming the
-   predicate of the load's first new tuple, and the load fails with
+   first predicate, in the order the load first names them, whose store
+   would grow, and the load fails with
    nothing grown: the base stores' contents and the program are as they
    were, and the derived relations are discarded, to be evaluated again by
    the next query. Then create each absent store and grow each store for
@@ -294,9 +295,12 @@ columns and canonical indexes. Every discard clears the record of what was
 materialized (section 5.4).
 
 The store records whether it may hold anything derived: the mark is set
-where it creates a derived relation or a secondary index, the only two
-things a discard removes, and cleared by the discard. A discard with the
-mark clear has nothing to do and returns without walking the relations.
+where the write funnel hands out a derived relation, and where a secondary
+index is built, the only two things a discard removes, and cleared by the
+discard. It is set on every hand-out rather than on creation, since a
+discard empties a derived relation and keeps it for the next evaluation.
+A discard with the mark clear has nothing to do and returns without
+walking the relations.
 
 ### 5.4 When a program is current
 
@@ -332,9 +336,9 @@ over its base view**,
 p$bf(X, Y) :- magic$p$bf(X), p$base(X, Y).
 ```
 
-and not as a guarded copy of each fact. The rule is generated directly,
-not by rewriting a rule of the program through the adornment of its body,
-since its body literal is complete and needs none, and it is the
+and not as a guarded copy of each fact. The rule is not the program's:
+the rewrite adorns `p(X1, ..., Xn) :- p$base(X1, ..., Xn)`, built for the
+purpose, whose one literal is complete and is left as it is, and it is the
 adornment's first rule, so a derived predicate's rows begin with its facts
 under the rewrite as they do when it is materialized. The planner looks the
 base store up by the bound columns like any complete relation, so an
@@ -347,14 +351,15 @@ each is 256 plus 16 per unit of the program.
 | Budget | Unit of the program |
 | --- | --- |
 | generated predicates | a member of the program's schedule |
-| generated rules | a rule of the program |
 | generated literals | a rule's body length plus one |
 
-A derived predicate with facts counts as though the program held the rule
-its adornments are given, `p(X, Y) :- p$base(X, Y).`: one rule and two
-literals. The facts themselves count nothing, since the rewrite copies
-none of them. A base view counts against no budget or limit, since it adds
-no relation.
+Generated rules have a limit and no budget: the literal budget bounds
+them, since every generated rule but a seed has a body literal, and every
+seed but the query's follows a draft charged one. A derived predicate with
+facts counts as though the program held the rule its adornments are given,
+`p(X, Y) :- p$base(X, Y).`: two literals. The facts themselves count
+nothing, since the rewrite copies none of them. A base view counts against
+no budget or limit, since it adds no relation.
 
 ---
 
@@ -520,7 +525,7 @@ of a load's facts are interned before its rules' predicates.
   reservation for *n* entries.
 * `specs/design-planning-cost.md`: the limits bound the program's facts
   as well as what running it does, so a load can be refused; and the
-  program's facts do not raise the rule budget.
+  program's facts do not raise the Magic budgets.
 * `specs/design-eval.md` and `specs/design-evaluation-cost.md` sections
   3.4 and 7: seeding before the first pass, the currency pair, and facts
   stored as this document says.

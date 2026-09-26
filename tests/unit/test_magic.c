@@ -49,6 +49,7 @@
 #define	SCENARIO_LITERALS	"a rewrite over its literal budget is abandoned"
 #define	SCENARIO_MEMO		"adornments are memoized"
 #define	SCENARIO_LINEAR		"the rewrite grows linearly in a body's calls"
+#define	SCENARIO_LONG_BODY	"a long body's rewrite fits the budgets"
 #define	SCENARIO_NAMES		"adornments are named by their bound columns"
 #define	SCENARIO_STATE		"what the rewrite derives does not leak"
 #define	SCENARIO_TAUTOLOGY	"a rule deriving its own head is dropped"
@@ -141,6 +142,7 @@ static void	 a_rewrite_over_its_literal_budget_is_abandoned(void);
 static void	 dropped_rules_are_charged_to_the_literal_budget(void);
 static void	 facts_behind_a_rule_fit_the_literal_budget(void);
 static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
+static void	 a_long_bodys_rewrite_fits_the_budgets(void);
 static void	 a_load_after_a_rewrite_reaches_the_next_query(void);
 static void	 the_limits_hold_at_their_values(void);
 static void	 the_rewrite_answers_as_the_fixed_point_does(void);
@@ -854,14 +856,14 @@ a_rewrite_over_its_budget_is_abandoned(void)
 #define	PADDED_BODY_LENGTH	20
 
 /*
- * The padded widening program has a fact and 7 rules of 20 literals, a
- * budget of 256 + 16 x 8 = 384 generated rules and one of 256 + 16 x 148 =
- * 2624 generated literals, its size in literals counting each body and one
- * for its guard, a fact one.  Each adornment copies every rule whole, so the
- * literals outgrow their budget first: the rewrite is abandoned with one
- * warning naming them and the query answered from the whole program.
- * Configuring either Magic limit lifts all three budgets, so a generous
- * limit on predicates alone, or on rules alone, lets the whole rewrite run.
+ * The padded widening program has 7 rules of 20 literals, a budget of 256 +
+ * 16 x 147 = 2608 generated literals, its size in literals counting each
+ * body and one for its guard.  Its fact is f's, which no rule derives, so it
+ * adds no base view.  Each adornment copies every rule whole, so the
+ * literals outgrow their budget: the rewrite is abandoned with one warning
+ * naming them and the query answered from the whole program.  Configuring
+ * either Magic limit lifts both budgets, so a generous limit on predicates
+ * alone, or on rules alone, lets the whole rewrite run.
  */
 static void
 a_rewrite_over_its_literal_budget_is_abandoned(void)
@@ -869,7 +871,7 @@ a_rewrite_over_its_literal_budget_is_abandoned(void)
 	static const char query[] = "p(Y1, Y2, Y3, Y4, Y5, Y6)?";
 	static const char expected[] = "c c c c c c\n";
 	static const char warning[] =
-	    "the query's Magic rewrite outgrew its budget of 2624 generated "
+	    "the query's Magic rewrite outgrew its budget of 2608 generated "
 	    "literals while adorning p/6; answering it from the whole program";
 	static const struct {
 		size_t	max_preds;
@@ -938,10 +940,9 @@ a_rewrite_over_its_literal_budget_is_abandoned(void)
  * rewrite would see a few short rules per adornment, and the drafts would
  * fill the arena, adornment after adornment, until the memory limit refused
  * the query at some 489 MB.  The budget charges every draft: the program's
- * size in literals is 1 + 12 + 11 x 3 + 2002 + 200 x 2 + 4000 x 1 = 6448,
- * its literal budget 256 + 16 x 6448 = 103424, and the rewrite is abandoned
- * at some 22 MiB, within the memory limit, the query answered from the
- * whole program.
+ * size in literals is 12 + 11 x 3 + 2002 + 200 x 2 = 2447, its literal
+ * budget 256 + 16 x 2447 = 39408, and the rewrite is abandoned at some 9 MiB,
+ * within the memory limit, the query answered from the whole program.
  */
 static void
 dropped_rules_are_charged_to_the_literal_budget(void)
@@ -950,7 +951,7 @@ dropped_rules_are_charged_to_the_literal_budget(void)
 	    "p(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8, Y9, Y10, Y11)?";
 	static const char expected[] = "c c c c c c c c c c c\n";
 	static const char warning[] =
-	    "the query's Magic rewrite outgrew its budget of 103424 generated "
+	    "the query's Magic rewrite outgrew its budget of 39408 generated "
 	    "literals while adorning p/11; answering it from the whole program";
 	relic_config_t config;
 	char *program;
@@ -966,7 +967,7 @@ dropped_rules_are_charged_to_the_literal_budget(void)
 		return;
 	}
 
-	/* About 3 x what the budget admits, 1/8 of what it prevents. */
+	/* About 7 x what the budget admits, 1/8 of what it prevents. */
 	bzero(&config, sizeof(config));
 	config.max_memory = 64 * 1024 * 1024;
 
@@ -994,12 +995,13 @@ dropped_rules_are_charged_to_the_literal_budget(void)
 #define	MIXED_FACTS	1000
 
 /*
- * A predicate derived by facts and a rule alike is read on demand, and its
- * adornment copies every fact as a rule of one literal, the guard.  The
- * program's size in literals counts a fact as one, so a thousand facts of e
- * behind one symmetric rule are rewritten for e(n7, X)? without a warning; a
- * budget over body literals alone, 256 + 16 x 1, would refuse their first
- * copy.
+ * A predicate with facts and a rule alike is read on demand, and each of
+ * its adornments reads the facts through one rule over its base view,
+ * e(X, Y) :- e$base(X, Y), which the budget counts as two literals.  A
+ * thousand facts of e behind one symmetric rule are rewritten for e(n7, X)?
+ * without a warning, and the rewrite copies none of them: the rewritten
+ * program holds a few rules, not a thousand.  Its plans read the base store
+ * under the base view's name, since e names the derived relation.
  */
 static void
 facts_behind_a_rule_fit_the_literal_budget(void)
@@ -1008,6 +1010,8 @@ facts_behind_a_rule_fit_the_literal_budget(void)
 	text_t program;
 	text_t explained;
 	diag_log_t log;
+	size_t literals;
+	size_t rules;
 	bool answered;
 	unsigned int i;
 
@@ -1032,6 +1036,16 @@ facts_behind_a_rule_fit_the_literal_budget(void)
 	    "e(n7, X)? should be answered through its rewrite, which "
 	    "reported %zu errors and %zu warnings, the last \"%s\"",
 	    log.errors, log.warnings, log.last_warning);
+
+	if (answered) {
+		count_generated(explained.bytes, &rules, &literals);
+		checkf(rules < 16, SCENARIO_FACTS, "the rewrite should copy "
+		    "none of the facts, but holds %zu rules", rules);
+		checkf(strstr(explained.bytes,
+		    "lookup e$base(X1, X2) key={0}") != NULL, SCENARIO_FACTS,
+		    "the facts should be looked up as e$base, but -e "
+		    "showed\n%s", explained.bytes);
+	}
 
 	free(explained.bytes);
 	free(program.bytes);
@@ -1173,6 +1187,51 @@ the_rewrite_grows_linearly_in_a_bodys_calls(void)
 	    literals[0], literals[1]);
 }
 
+/* The calls in the long body of a_long_bodys_rewrite_fits_the_budgets(). */
+#define	LONG_BODY_CALLS		200
+
+/*
+ * A rewrite that specializes the program fits its budgets however few rules
+ * the program has.  r(X) :- p(X), ..., p(X) with 200 calls and the rule
+ * deriving p are 2 rules and 2 + 201 = 203 literals, a literal budget of
+ * 256 + 16 x 203 = 3504.  The one adornment of r keeps a magic rule and a
+ * supplementary rule per call, over 400 rules of one or two literals each,
+ * well within the literal budget, which bounds the rules kept as well: a
+ * budget of 256 + 16 x 2 rules would abandon it.
+ */
+static void
+a_long_bodys_rewrite_fits_the_budgets(void)
+{
+	text_t explained;
+	diag_log_t log;
+	size_t literals;
+	size_t rules;
+	char *program;
+	bool answered;
+
+	program = calls_program(LONG_BODY_CALLS);
+	if (program == NULL) {
+		check(false, SCENARIO_LONG_BODY, "the program is built");
+		return;
+	}
+
+	answered = explain_answer(program, "r(1)?", 0, 0, &explained, &log);
+	rules = 0;
+	literals = 0;
+	if (answered)
+		count_generated(explained.bytes, &rules, &literals);
+	checkf(answered && log.errors == 0 && log.warnings == 0 &&
+	    rules > 2 * LONG_BODY_CALLS, SCENARIO_LONG_BODY,
+	    "r(1)? over %d calls should be answered through a rewrite of "
+	    "over %d rules, which generated %zu rules and reported %zu "
+	    "errors and %zu warnings, the last \"%s\"", LONG_BODY_CALLS,
+	    2 * LONG_BODY_CALLS, rules, log.errors, log.warnings,
+	    log.last_warning);
+
+	free(explained.bytes);
+	free(program);
+}
+
 /*
  * A query answered through the rewrite leaves only part of the fixed point
  * in the relations.  A later query with another binding, a later
@@ -1224,7 +1283,7 @@ what_the_rewrite_derives_does_not_leak(void)
 	paths = NULL;
 	if (relic_symbol_intern(ctx, "path", 4, &symbol) == 0 &&
 	    relic_pred_intern(ctx, symbol, 2, NULL, &pred) == 0)
-		paths = relic_relation_for(ctx, pred);
+		paths = relic_relation_read(ctx, pred);
 	checkf(paths != NULL && relic_relation_count(paths) == 4,
 	    SCENARIO_STATE,
 	    "the materialized path relation should hold 4 tuples, not %zu",
@@ -1308,6 +1367,7 @@ main(void)
 	dropped_rules_are_charged_to_the_literal_budget();
 	facts_behind_a_rule_fit_the_literal_budget();
 	the_rewrite_grows_linearly_in_a_bodys_calls();
+	a_long_bodys_rewrite_fits_the_budgets();
 	what_the_rewrite_derives_does_not_leak();
 	a_load_after_a_rewrite_reaches_the_next_query();
 

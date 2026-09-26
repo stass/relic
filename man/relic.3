@@ -143,6 +143,15 @@ and grown with facts built through the interface with
 .Fn relic_fact_add .
 Loads and facts append to one program in the order they are made.
 A load is all or nothing.
+A load, or a call to
+.Fn relic_fact_add ,
+whose facts would take the relations past
+.Fa max_tuples
+or
+.Fa max_memory
+is refused with nothing added, by an error naming the first predicate, in
+the order the text names them, that would gain facts:
+.Dq limit exceeded: tuples=4 while loading e/1 .
 Queries are prepared from text, such as
 .Qq path(a, X)? ,
 with
@@ -170,20 +179,22 @@ struct relic_config {
 .Ed
 .Pp
 .Fa max_tuples
-bounds the tuples held across every relation and
+bounds the tuples held across every relation, the program's facts included,
+and
 .Fa max_memory
-the bytes of relation and index storage together with the plans of an
-evaluation and the rewrite of a query; zero leaves either unbounded.
+the bytes of relation and index storage, the program's facts included,
+together with the plans of an evaluation and the rewrite of a query; zero
+leaves either unbounded.
 .Fa max_magic_preds
 and
 .Fa max_magic_rules
 bound the predicates and rules the Magic Sets rewrite of one query
 generates.
 With both zero, the rewrite has budgets in proportion to the program, on
-predicates, rules and the literals of the rules it drafts, and a rewrite
-outgrowing one is abandoned with a warning and the query answered from the
-whole program; setting either lifts every budget, and a limit left zero
-beside it bounds nothing.
+the predicates it generates and the literals of the rules it drafts, which
+bound the rules it keeps as well, and a rewrite outgrowing one is abandoned
+with a warning and the query answered from the whole program; setting
+either lifts every budget, and a limit left zero beside it bounds nothing.
 .Dv SIZE_MAX
 sets no bound on anything.
 .Fa flags
@@ -275,8 +286,10 @@ may be
 only when
 .Fa arity
 is zero.
-Adding a fact changes the program, so the next evaluation discards
-everything derived before it and derives it again.
+The fact is stored with the program's other facts before the call returns.
+Adding a fact the program does not hold changes the program, so everything
+derived before it is discarded and the next evaluation derives it again;
+adding one it holds changes nothing.
 .Ss Evaluation
 .Fn relic_check
 validates the program: rule safety, stratification, and warnings about
@@ -375,6 +388,11 @@ printable ASCII at a time, of at most 1023 bytes and with no newline:
 typedef void (*relic_explain_cb)(void *callback_ctx, const char *line);
 .Ed
 .Pp
+Each part of the program is shown as it is planned, and one whose
+predicates have facts counts them in a line
+.Ql facts: N ;
+a predicate of facts alone needs no evaluation and is not shown.
+.Pp
 .Fn relic_stats
 fills a
 .Vt relic_stats_t
@@ -396,6 +414,10 @@ struct relic_stats {
 .Pp
 The first five count evaluation's work since the context was created; the
 rest describe what it holds when read.
+.Fa derivations
+counts the tuples rules derive and the facts copied into the relation of a
+predicate rules also derive, not the facts of a predicate no rule derives,
+which are read where they are stored.
 What they count depends on the evaluation strategy and may change from one
 release to the next.
 .Ss Callbacks

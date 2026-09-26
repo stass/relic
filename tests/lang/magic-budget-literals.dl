@@ -2,9 +2,10 @@
 % but every rule is padded to twenty literals with f literals over
 % variables of their own, which bind nothing p is called with.  Each
 % adornment copies every rule whole, so the rewrite outgrows its budget of
-% generated literals well before its budget of generated rules.  The
-% program's size in literals, each body and one for its guard, a fact one,
-% is 1 + 21 + 8 x 21 = 190, and its literal budget 256 + 16 x 190 = 3296.
+% generated literals well before it runs out of adornments.  The program's
+% size in literals, each body and one for its guard, is 21 + 8 x 21 = 189,
+% and its literal budget 256 + 16 x 189 = 3280.  f's fact counts nothing,
+% since no rule derives f and the rewrite copies no fact.
 % The warning names the literals, and the query is answered from the whole
 % program.
 

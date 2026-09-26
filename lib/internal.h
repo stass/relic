@@ -31,10 +31,11 @@
  */
 
 /*
- * Mark a parameter the implementation does not use, or a local read only by
- * an assertion, which NDEBUG leaves unread.  A function whose shape is fixed
- * by a callback type will have some; writing the attribute is clearer than a
- * (void) cast in the body, which reads like a statement that does something.
+ * Mark a parameter the implementation does not use, or a local or a static
+ * function read only by an assertion, which NDEBUG leaves unread.  A function
+ * whose shape is fixed by a callback type will have some; writing the attribute
+ * is clearer than a (void) cast in the body, which reads like a statement that
+ * does something.
  */
 #if defined(__GNUC__)
 #define	RELIC_UNUSED	__attribute__((__unused__))
@@ -60,6 +61,9 @@ typedef struct relic_diag relic_diag_t;
 typedef struct relic_lexer relic_lexer_t;
 typedef struct relic_magic relic_magic_t;
 typedef struct relic_magic_limit relic_magic_limit_t;
+typedef struct relic_staged_set relic_staged_set_t;
+typedef struct relic_staging relic_staging_t;
+typedef struct relic_materialized relic_materialized_t;
 typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
@@ -252,8 +256,8 @@ struct relic_magic_limit {
  * `complete_components` marks, by position in the program's schedule, the
  * components the query reads completely, which the evaluator evaluates
  * before the rewrite.  The predicates the query reads completely are those
- * nothing but facts derive, those the query reaches through negation,
- * everything they depend on, and those nothing derives.
+ * the query reaches through negation, everything they depend on, and those
+ * no rule derives, which their base stores hold whole.
  *
  * `adornments` are the adornments recorded, in the order they were first
  * asked for, which is also the order their rules are generated in.  `rules`
@@ -281,12 +285,18 @@ struct relic_magic_limit {
  * predicate p are rules_by_head[first_rule_of[p - 1]] up to
  * rules_by_head[first_rule_of[p]].
  *
- * `pred_limit` and `rule_limit` bound the predicates and rules the rewrite
- * generates, and `generated_preds` counts the adorned and magic predicates
- * generated so far.  `literal_budget` bounds the body literals of every
- * rule drafted, kept or dropped, which `generated_literals` counts.
- * Configuring either Magic limit lifts every budget: an unset limit is then
- * SIZE_MAX, and so is the literal budget, which no limit configures.
+ * `base_view_count` counts the derived predicates whose base stores hold
+ * facts, each of which has a base view and gives each of its adornments one
+ * rule over it; the literal budget counts each as a rule of two literals.
+ *
+ * `pred_limit` bounds the predicates the rewrite generates, by a limit or a
+ * budget, and `generated_preds` counts the adorned and magic predicates
+ * generated so far.  `rule_limit` bounds the rules it keeps by a limit
+ * alone, SIZE_MAX when none is set: the literal budget bounds them
+ * otherwise.  `literal_budget` bounds the body literals of every rule
+ * drafted, kept or dropped, which `generated_literals` counts.  Configuring
+ * either Magic limit lifts both budgets: an unset limit is then SIZE_MAX,
+ * and so is the literal budget, which no limit configures.
  *
  * `adornment_index` finds an adornment by source and bound columns, holding
  * positions in `adornments` plus one; `rule_index` finds a generated rule by
@@ -316,6 +326,7 @@ struct relic_magic {
 	relic_idtab_t		 rule_index;
 	uint64_t		 hash_seed;	/* the context's */
 	size_t			 predicate_count;
+	size_t			 base_view_count;
 	size_t			 adornment_capacity;
 	size_t			 generated_preds;
 	size_t			 generated_literals;
@@ -325,18 +336,30 @@ struct relic_magic {
 };
 
 /*
+ * What the relations were last brought to the fixed point of: the number of
+ * the program's rules and the number of facts its base stores held.  A
+ * program changes only by gaining rules or facts, and both counts only
+ * grow, so the relations are current exactly when a pair is recorded and
+ * neither count has moved since.  relic_relations_current() asks, and only
+ * a fixed point reached records a pair; relic_discard_derived() clears the
+ * record with everything derived, so a failed evaluation leaves the
+ * relations stale and the next one tries again.
+ */
+struct relic_materialized {
+	size_t	rules;
+	size_t	facts;
+	bool	recorded;
+};
+
+/*
  * A relic context owns everything it allocates, and two contexts share
  * nothing: the library holds no mutable global state at all, which is what
  * lets an embedding program keep several contexts without a lock.  A single
  * context is not itself thread-safe.
  *
- * `materialized_rules` is how many of the program's rules the relations are
- * the fixed point of.  Rules are only ever appended, so the relations are
- * current exactly when it equals the number of compiled rules; when it does
- * not, the next evaluation discards them and starts again from nothing.  The
- * discard zeroes it and only a fixed point reached sets it to the rule count,
- * so a failed evaluation leaves the relations stale and the next one tries
- * again.
+ * `materialized` records what the relations are the fixed point of; when
+ * they are not current, the next evaluation discards what was derived and
+ * starts again from the facts.
  *
  * `counters` is the work evaluation has done.  What the context holds is
  * not counted here: relic_stats() measures it when asked.
@@ -375,14 +398,14 @@ struct relic {
 	relic_valtab_t		 values;
 	relic_ast_program_t	 ast;
 	relic_program_t		 program;
-	relic_reltab_t		 relations;
+	relic_store_t		 store;
 	relic_diag_t		 diag;
 	relic_explain_cb	 explain;
 	void			*explain_ctx;
 	relic_config_t		 config;
 	relic_counters_t	 counters;
 	uint64_t		 hash_seed;
-	size_t			 materialized_rules;
+	relic_materialized_t	 materialized;
 	bool			 query_mixed_noted;
 	bool			 busy;
 };
@@ -492,6 +515,12 @@ void	 relic_diag_record_refusal(relic_t *ctx);
  * stand as an argument of the message it decorates.
  */
 const char *relic_diag_name(const char *name, char *buffer, size_t size);
+
+/*
+ * Mark a name that was cut to fill all of `buffer` by ending it in "...", as
+ * relic_diag_name() marks the names it shortens.
+ */
+void	 relic_diag_mark_cut(char *buffer, size_t size);
 
 /*
  * lib/symbol.c
@@ -658,9 +687,11 @@ int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
  * lib/pred.c
  *
  * relic_pred_intern() assigns an identifier to a (name, arity) pair, or
- * returns the one it already has.  `where` is recorded only for a pair this
- * is the first mention of, so a later message points at the first place the
- * program named the predicate.
+ * returns the one it already has; `where` is what a refusal names.  The
+ * marks of struct relic_pred are set by relic_pred_name_head(),
+ * relic_pred_mark_derived(), relic_pred_reference() and
+ * relic_pred_make_view(), and read by relic_pred_is_derived() and
+ * relic_pred_is_defined().
  *
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
@@ -672,7 +703,14 @@ int	 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 	    const relic_location_t *where, relic_pred_id_t *idp);
 const relic_pred_t *relic_pred_of(const relic_t *ctx, relic_pred_id_t id);
 size_t	 relic_pred_count(const relic_t *ctx);
-void	 relic_pred_define(relic_t *ctx, relic_pred_id_t id);
+void	 relic_pred_name_head(relic_t *ctx, relic_pred_id_t id);
+void	 relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id);
+void	 relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
+	    const relic_location_t *where);
+void	 relic_pred_make_view(relic_t *ctx, relic_pred_id_t view,
+	    relic_pred_id_t viewed);
+bool	 relic_pred_is_derived(const relic_t *ctx, relic_pred_id_t id);
+bool	 relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id);
 const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
 	    char *buffer, size_t size);
 void	 relic_pred_report_undefined(relic_t *ctx);
@@ -689,10 +727,15 @@ void	 relic_pred_report_undefined(relic_t *ctx);
  * relic_program_ready() is the check every use of the program begins with:
  * preparing a query, handing out one of the program's own, or evaluating.
  * Returns 0, or -1 with at least one error reported by this call.
+ *
+ * relic_ruletab_append() is the one way a rule joins a rule table, the
+ * program's or a rewrite's, and marks its head predicate derived.
  */
 void	 relic_program_init(relic_program_t *program, uint64_t hash_seed);
 int	 relic_program_ready(relic_t *ctx);
 void	 relic_program_reset(relic_program_t *program);
+int	 relic_ruletab_append(relic_t *ctx, relic_ruletab_t *table,
+	    const relic_rule_t *rule);
 
 /*
  * lib/stratify.c
@@ -807,9 +850,45 @@ int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
  * entered, which relic_query_collect() shares.  Returns 0 once every row has
  * been delivered or the callback has stopped the stream, or -1 with an error
  * reported and no row delivered.
+ *
+ * relic_relations_current() says whether the relations are the fixed point
+ * of the program as it stands.  relic_discard_derived() is the one discard:
+ * it empties everything evaluation derived and clears the record of what
+ * was materialized, and it cannot fail.  A load's commit calls it before it
+ * adds a fact, and every evaluation that must start from the facts calls it
+ * before it begins.
  */
 int	 relic_query_answer(relic_t *ctx, relic_query_t *query,
 	    relic_row_cb callback, void *callback_ctx);
+bool	 relic_relations_current(const relic_t *ctx);
+void	 relic_discard_derived(relic_t *ctx);
+
+/*
+ * lib/facts.c
+ *
+ * A load's facts are staged as they are read, then committed to the base
+ * stores all or nothing.  relic_staging_add() stages one fact, given its
+ * predicate and its arity of interned values; a fact staged twice is held
+ * once.  relic_staging_commit() adds every staged fact the base stores lack,
+ * or, refused by a limit or by memory, reports why and adds none.
+ * relic_staging_reset() releases the staging, and is every load's exit.
+ * `last` is the set the previous fact used, and `by_pred` holds each set's
+ * position plus one, keyed by its predicate.
+ */
+struct relic_staging {
+	relic_t			*ctx;
+	relic_staged_set_t	*sets;
+	size_t			 set_count;
+	size_t			 set_capacity;
+	size_t			 last;
+	relic_idtab_t		 by_pred;
+};
+
+void	 relic_staging_init(relic_staging_t *staging, relic_t *ctx);
+void	 relic_staging_reset(relic_staging_t *staging);
+int	 relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
+	    const relic_dom_t *tuple);
+int	 relic_staging_commit(relic_staging_t *staging);
 
 /*
  * lib/explain.c
@@ -891,11 +970,21 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
 /*
  * lib/relation.c
  *
- * relic_relation_for() is the only way to obtain a predicate's relation:
- * one is created empty for a predicate the first time it is asked for, so no
- * caller decides whether a relation exists yet.  Such a relation belongs to
- * the context and never moves, so a caller may hold as many of them as it
- * likes for as long as the context lives.
+ * A predicate's relations are obtained through two functions, one per
+ * role.  relic_relation_written() gives the derived relation a rule writes,
+ * and refuses a predicate no rule derives.  relic_relation_read() gives the
+ * relation an operation reads: the derived relation of a derived predicate,
+ * and otherwise the base store of the predicate read, or of the one a base
+ * view views.  Either is created empty the first time it is asked for, so
+ * no caller decides whether a relation exists yet, and belongs to the
+ * context and never moves, so a caller may hold as many of them as it likes
+ * for as long as the context lives.
+ *
+ * relic_base_store() finds a predicate's base store without creating it,
+ * and relic_base_count() and relic_base_total() count the facts one or
+ * every base store holds; they serve what handles facts as facts: the
+ * commit, seeding, explain and the question of whether the relations are
+ * current.
  *
  * relic_relation_create() makes an empty relation, of a predicate or of a
  * query's answer; the table creates a predicate's through it, and a query
@@ -907,12 +996,15 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  *
  * Every function below takes a relation of the context it was obtained from.
  *
- * Only the evaluator inserts, through an EMIT.  That is what makes every
- * tuple re-derivable from a rule, and so what makes discarding every relation
- * safe: a fact is a rule, and the next evaluation inserts it again.  A caller
- * that wants a fact held appends a fact rule to the program rather than
- * inserting its tuple, which also advances the rule count that tells the
- * evaluator the program changed.
+ * The evaluator inserts into derived relations, through an EMIT and by
+ * seeding one from its predicate's base store, and a load's commit appends
+ * to base stores and nothing else does.  That is what makes every derived
+ * tuple re-derivable, and so what makes discarding every derived relation
+ * safe: the next evaluation seeds and derives it again.
+ * relic_bases_reserve() makes room for a commit's new facts, checking both
+ * limits once over every store it grows before growing any, and
+ * relic_base_append() then appends one fact the store lacks without looking
+ * anything up.
  *
  * relic_relation_insert() reports through *addedp whether the tuple was not
  * already present, which is what fixed-point detection reads, and returns -1
@@ -953,9 +1045,10 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
  * later delta is measured from.
  *
- * relic_relation_discard_all() clears the relation of every predicate,
- * which ends the span over which a range means anything; no caller may hold
- * a range across it, nor one of a relation across that relation's clear.
+ * relic_relation_discard_all() empties every derived relation and drops the
+ * base stores' secondary indexes, which ends the span over which a range
+ * means anything; no caller may hold a range across it, nor one of a
+ * relation across that relation's clear.
  *
  * relic_relation_index() finds, or builds from the tuples the relation holds,
  * the secondary index keyed on the columns of a mask and gives its position
@@ -977,9 +1070,18 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * and indexes hold, which the memory limit counts together with the charged
  * arenas in the context's account.
  */
-void	 relic_reltab_init(relic_reltab_t *table);
-void	 relic_reltab_reset(relic_reltab_t *table);
-relic_relation_t *relic_relation_for(relic_t *ctx, relic_pred_id_t pred);
+void	 relic_store_init(relic_store_t *store);
+void	 relic_store_reset(relic_store_t *store);
+relic_relation_t *relic_relation_written(relic_t *ctx, relic_pred_id_t pred);
+relic_relation_t *relic_relation_read(relic_t *ctx, relic_pred_id_t pred);
+const relic_relation_t *relic_base_store(const relic_t *ctx,
+	    relic_pred_id_t pred);
+size_t	 relic_base_count(const relic_t *ctx, relic_pred_id_t pred);
+size_t	 relic_base_total(const relic_t *ctx);
+int	 relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
+	    size_t count);
+void	 relic_base_append(relic_t *ctx, relic_pred_id_t pred,
+	    const relic_dom_t *columns);
 relic_relation_t *relic_relation_create(relic_t *ctx, relic_pred_id_t pred,
 	    size_t serial, uint16_t arity);
 void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);

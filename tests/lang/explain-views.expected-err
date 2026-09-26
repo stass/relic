@@ -1,6 +1,4 @@
-stratum 0, component 0: e/2
-    facts: 3
-stratum 0, component 1 (recursive): p/2
+stratum 0, component 0 (recursive): p/2
     rule p(X, Y) :- e(X, Y).
         scan e(X, Y)
         emit p(X, Y)

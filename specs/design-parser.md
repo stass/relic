@@ -213,6 +213,16 @@ body length already says, and two representations of one fact eventually
 disagree. `edge(a, b).` is a rule whose body has no literals, which is also
 exactly what it means.
 
+**The tree holds rules and queries, not the facts a load states.** A fact
+whose terms are all constants is a tuple of its predicate's base store,
+`specs/design-facts.md`: a load stages it (section 8) and keeps no
+statement for it. The one fact the tree holds is a fact with a variable
+among its terms, which cannot be a tuple; it is kept as a statement so that
+the check rejects it as it rejects any unsafe rule, with the diagnostic an
+unsafe fact receives. Text parsed as a query stages nothing, and a fact
+there is kept as a statement and reported as a fact where a query was
+expected.
+
 **A term is a domain identifier or a variable.** A constant is interned as it
 is parsed, so the tree holds the same 32-bit identifier a tuple column will
 hold and no later stage re-derives it. A variable holds the interned symbol of
@@ -245,6 +255,7 @@ identifiers, and something has to produce them.
 | a symbol used as a term | value, `RELIC_SYMBOL` | the parser |
 | a string used as a term | value, `RELIC_STRING` | the parser |
 | an integer literal | value, `RELIC_INTEGER` | the parser |
+| the name and arity of a fact a load stages | predicate identifier | the parser |
 
 The lexer interns *bytes* and the parser interns *values*, and the division is
 not arbitrary. An identifier token does not yet know whether it names a
@@ -253,10 +264,18 @@ give every predicate name a domain identifier it never uses. The lexer
 therefore produces the symbol identifier, which both uses need, and the parser
 produces the value only where a term is being built.
 
+A staged fact's predicate is interned because staging and the base stores are
+keyed by it, and a fact keeps no statement from which the program model could
+intern it later. Every other atom's predicate is interned by the program model
+when it compiles the statement, per `specs/design-program.md` section 3.
+
 Interning is permanent and context-lifetime. A file that fails to parse leaves
 its symbols and values interned, which costs a little memory and nothing else:
 identifiers are assigned in first-appearance order, and first appearance
-includes an appearance in a statement that was later discarded.
+includes an appearance in a statement that was later discarded. A failed load
+leaves the predicates of the facts it staged interned in the same way; one the
+failed load first named holds no fact and no atom references it, so no
+warning ever names it (`specs/design-facts.md` section 3.5).
 
 ---
 
@@ -338,16 +357,34 @@ Multiple loads append to one logical program, which is what lets facts and
 rules be split across files on a command line.
 
 **A load is all or nothing.** Statements are parsed onto a list of the load's
-own and spliced into the program only if the whole input parsed. A caller that
-ignores the return value is then working with a program that never contains
-half of a file, and `relic -c` can report every mistake in a file without the
-next stage having to wonder which statements survived.
+own, and facts into the load's staging, a set of tuples per predicate. When
+the whole input has parsed, the load commits its facts to their base stores,
+all or nothing, and only when the commit succeeds splices its statements into
+the program (`specs/design-facts.md` section 4.3). The commit measures and
+reserves before it adds anything, so a tuple or memory limit the new facts
+do not fit refuses the load with no base store grown and no statement
+spliced:
 
-What a failed load does keep is its arena memory: the discarded statements were
-allocated from the program arena and are not individually reclaimable. A
-program that loads a broken file repeatedly grows slowly. This is worth stating
-rather than hiding, and it is bounded by the size of the text the caller chose
-to load.
+```text
+relic: limit exceeded: tuples=4 while loading e/1
+```
+
+naming the first predicate, in the order the load's facts name them, whose
+base store the load would grow. A caller that ignores the return value is then
+working with a program that never contains half of a file, and `relic -c` can
+report every mistake in a file without the next stage having to wonder which
+statements survived.
+
+The staging is the load's working storage, released on the load's one exit
+whether it failed to parse, was refused or committed, and is charged to no
+limit: like the text itself, it is proportional to what the caller chose to
+load.
+
+What a failed load does keep is its arena memory, and the predicates its facts
+named (section 6): the discarded statements were allocated from the program
+arena and are not individually reclaimable. A program that loads a broken file
+repeatedly grows slowly. This is worth stating rather than hiding, and it is
+bounded by the size of the text the caller chose to load.
 
 **Exhaustion of the program arena is caught at the load boundary.** Parsing
 checks its allocations as ordinary C does, and the sticky failure flag lets a

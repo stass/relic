@@ -187,8 +187,8 @@ strategies.
 | Component | State |
 | --- | --- |
 | `lib/plan.{h,c}` | `RELIC_OP_ANTI_MEMBER`; a comparison and a negated literal are both tests, each placed at the earliest point every slot it reads is bound, in written order among tests placeable at one point; a negated literal is never a delta literal; the negation refusal is gone |
-| `lib/eval.c` | the executor runs `ANTI_MEMBER` as `MEMBER` inverted; a changed program discards every relation and is evaluated again from nothing, for every program rather than only one that negates; the answer stream stops at an identifier its relation no longer has, so a callback that breaks its contract by loading cannot make it read past a relation |
-| `lib/relation.c` | `relic_relation_discard_all()` empties every relation in place and returns both limit totals to zero; relations do not move |
+| `lib/eval.c` | the executor runs `ANTI_MEMBER` as `MEMBER` inverted; a changed program discards every derived relation and is evaluated again from its facts, for every program rather than only one that negates; the answer stream stops at an identifier its relation no longer has, so a callback that breaks its contract by loading cannot make it read past a relation |
+| `lib/relation.c` | `relic_relation_discard_all()` empties every derived relation in place and leaves both limit totals the base stores'; relations do not move |
 | `include/relic.h` | `relic_materialize()` documents the discard |
 | `cmd/relic/main.c` | `-l key=value`, repeatable, brought forward from S12: `tuples`, `memory`, `magic-preds` and `magic-rules`, the last two enforced from S10; values through `strtonum()`; a malformed `-l` is a usage error naming what is wrong |
 | `tests/` | `test_plan` for where an `ANTI_MEMBER` goes and what its columns read, and a negated literal refused as a delta literal; `test_eval`, under both strategies, for the task graph of section 72 with negation stacked across strata, a negating query, arity zero, constants and a negation written before its binder, a later load that makes a derived tuple false, a discard that gives back what the limits count, and a contract-breaking callback; the evaluation sweep in `test_exhaustion` now includes a negated stratum; `tests/cli.sh` fails queries on `-l` limits and rejects thirteen malformed ones, a sign or a space among them; four golden tests, all compared across strategies by `tests/equiv/strategies.sh` |
@@ -231,10 +231,10 @@ and the guarded `path$bf` component that architecture section 60 sketches.
 
 | Component | State |
 | --- | --- |
-| `lib/magic.c` | finds what a query reads completely -- extensional and negated predicates and everything they depend on, as whole components of the program's schedule -- and rewrites the rest: an adornment worklist memoized on predicate and bound columns, body order from the planner seeded with the head's bound slots, adorned rules guarded by their magic predicate, one magic rule per demanded call, and before every demand call after the first a supplementary predicate `sup$<adorned>$<rule>$<call>` over the prefix's live variables, so generated bodies are linear in a body's calls; seeds from the query's own body; generated rules renumbered into a canonical form, deduplicated through a hash of it, and dropped when the head is one of their own positive literals; `max_magic_preds` and `max_magic_rules` enforced, naming the predicate being adorned; when neither is set, budgets of 256 plus 16 times the program's derived predicates, its rules, and its size in literals (each body plus one, a fact one), the last counting the body literals of every rule drafted, kept or dropped, a rewrite outgrowing one abandoned with a warning, and setting either limit lifts all three; the walk visits each component once and adornments read their rules from an index by head, so both are linear in the program; generated names interned with `$` and marked defined |
+| `lib/magic.c` | finds what a query reads completely -- predicates no rule derives, and negated predicates and everything they depend on, as whole components of the program's schedule -- and rewrites the rest: an adornment worklist memoized on predicate and bound columns, body order from the planner seeded with the head's bound slots, adorned rules guarded by their magic predicate, one magic rule per demanded call, and before every demand call after the first a supplementary predicate `sup$<adorned>$<rule>$<call>` over the prefix's live variables, so generated bodies are linear in a body's calls; seeds from the query's own body; generated rules renumbered into a canonical form, deduplicated through a hash of it, and dropped when the head is one of their own positive literals; `max_magic_preds` and `max_magic_rules` enforced, naming the predicate being adorned; when neither is set, budgets of 256 plus 16 times the program's derived predicates and its size in literals (each body plus one, and two for each derived predicate with facts), the second counting the body literals of every rule drafted, kept or dropped, and bounding the rules kept as well, a rewrite outgrowing one abandoned with a warning, and setting either limit lifts both; the walk visits each component once and adornments read their rules from an index by head, so both are linear in the program; generated names interned with `$` and marked defined |
 | `lib/plan.c` | the order is decided before any operation is emitted; `relic_plan_order()` returns that order alone from a given set of bound slots, and an incomplete relation is estimated without being created |
 | `lib/stratify.c`, `lib/depgraph.c` | the analysis runs over any rule table, `relic_schedule_build()`, so the rewritten rules are stratified by the same code as the program |
-| `lib/eval.c` | a query over a program not yet materialized, and not under `RELIC_F_NO_MAGIC`, is answered in two phases: the complete components evaluated from the program's schedule, then the generated rules from a schedule of their own, then the rewritten query; relations discarded first and left marked as the fixed point of no rules; a rewrite over its budget answered from the whole program instead; a semi-naive round runs only the variants whose delta literal reads a member that gained in the round before, in planning order, so it does exactly the work running every variant would at a cost proportional to what changed |
+| `lib/eval.c` | a query over a program not yet materialized, and not under `RELIC_F_NO_MAGIC`, is answered in two phases: the complete components evaluated from the program's schedule, then the generated rules from a schedule of their own, then the rewritten query; derived relations discarded first; a rewrite over its budget answered from the whole program instead; a semi-naive round runs only the variants whose delta literal reads a member that gained in the round before, in planning order, so it does exactly the work running every variant would at a cost proportional to what changed |
 | `lib/explain.c` | the `magic rewrite of` heading with its `adorn` and `seed` lines, and the rewritten components nested one level beneath it |
 | `include/relic.h` | `RELIC_F_NO_MAGIC`; the Magic limits documented as enforced when set and as budgets when not |
 | `cmd/relic/main.c` | `-X no-magic` |
@@ -308,7 +308,7 @@ holds rather than every line before it.
 | Component | State |
 | --- | --- |
 | `lib/rule.c` | a query's rule has head `RELIC_ID_NONE` and every rule records its head arity; `relic_query_prepare()` and `relic_query_loaded()` create the query's answer relation, of the head arity and named by the query's serial, once the rule has compiled and before the query is published, and `relic_query_destroy()` frees it without reading the context; the program's queries record their serial beside their rule, since loads and preparations share one sequence; `relic_pred_is_answer()` is gone with the predicate |
-| `lib/relation.c` | `relic_relation_create()`, `relic_relation_clear()` and `relic_relation_free()` serve the table's relations and a query's alike; `clear` is the one way a relation loses tuples and gives back what it counted, the discard of every relation is `clear` over the table, and an assertion confirms both totals are zero afterwards; a relation records its predicate or its query's serial, and `relic_relation_name()` and `relic_relation_describe()` name it as `-e` output and every relation diagnostic do, `$q<serial>` for an answer |
+| `lib/relation.c` | `relic_relation_create()`, `relic_relation_clear()` and `relic_relation_free()` serve the table's relations and a query's alike; `clear` is the one way a relation loses tuples and gives back what it counted, the discard of what was derived is `clear` over the derived relations, and an assertion confirms that both totals are the base stores' afterwards; a relation records its predicate or its query's serial, and `relic_relation_name()` and `relic_relation_describe()` name it as `-e` output and every relation diagnostic do, `$q<serial>` for an answer |
 | `lib/plan.c`, `lib/eval.c` | the planner's EMIT writes the relation its caller names and confirms its arity is the rule's head arity; a component's rules derive into their members, a query's rule into the query's answer, emptied before the rule runs and after the rows are delivered |
 | `lib/magic.c`, `lib/explain.c` | the rewrite reads every head arity from the rule or its draft and treats the query's head as a pseudo-adornment it never looks up; the explain output writes a query's head and every operation's relation through the relation's name, so the golden `-e` outputs are unchanged |
 | `tests/` | `test_query`: 64 answers, through the rewrite and from the whole fixed point, leave the predicate count, the relation table and the tuple and storage totals as the first left them; names read from `-e` across loads and preparations; an answer refused by the tuple limit gives back the tuples and bytes it counted, and its query is destroyed after its context; `test_plan`: an EMIT writes the relation given and a relation of the wrong arity is an internal error naming it; `tests/perf.sh`: a session of 100 000 query lines within a tenth of the budget, about 3 s in a debug build, which the quadratic session missed by minutes |
@@ -316,9 +316,9 @@ holds rather than every line before it.
 **Planning costs what its plans hold, decision D-18.** A body is ordered
 in passes, one per state of the bound set, and the memory an evaluation's
 plans and a query's rewrite hold is charged to `max_memory`, specified in
-`specs/design-planning-cost.md`. A fact is not planned: its turn in the
-pass over its component inserts its head, so a program's facts cost their
-tuples and nothing else.
+`specs/design-planning-cost.md`. A body-less rule, which only the Magic
+rewrite's seeds are, is not planned: its turn in the pass over its component
+inserts its head.
 
 | Component | State |
 | --- | --- |
@@ -326,7 +326,7 @@ tuples and nothing else.
 | `lib/account.{h,c}`, `lib/arena.c` | the memory account: the relation store's storage and the chunks of the charged arenas, checked against `max_memory` before either grows; `relic_arena_init_charged()` attaches an arena, a chunk the limit refuses fails the arena as exhaustion does and is recorded on the account, and a reset gives the chunks back and keeps the arena charged; the evaluation arena and the rewrite arena are charged, the context, program, schedule, analysis and query arenas are not |
 | `lib/relation.c` | the store's storage total is the account's `store_bytes`, and an insertion or index build is checked against the whole account |
 | `lib/diag.c`, `lib/api.c` | `relic_diag_no_memory()` reports a recorded refusal as `limit exceeded: memory=N while <activity>`, once; `relic_diag_activity()` records the activity -- `planning <predicate>`, `planning <query>`, `rewriting <query>` -- and forgets an unreported refusal, as does the beginning of every operation |
-| `lib/eval.c` | a component's base plans are its rules with bodies; one base pass walks its rules in program order, inserting a fact's constant head through the same insertion an `EMIT` makes, so counters and tuple order are unchanged; a fact's head is confirmed to be constants of the relation's arity once per evaluation; an evaluation names its first component, and a query's rewrite and plan name the query, before they allocate |
+| `lib/eval.c` | a component's base plans are its rules with bodies; one base pass walks its rules in program order, inserting a seed's constant head through the same insertion an `EMIT` makes; a seed's head is confirmed to be constants of the relation's arity once per evaluation; an evaluation names its first component, and a query's rewrite and plan name the query, before they allocate |
 | `tests/` | `test_plan`: 60 generated programs of up to 30 literals, with repeated relations and variables, constants, wildcards, empty relations, comparisons and negations, ordered from nothing bound, from a generated bound set, and with generated relations assumed still derived, under the default planner and `-X no-reorder`, against a step-by-step reference written in the test; every golden `-e` output is unchanged; `test_arena`: a charged arena's account holds what it holds, through an oversize chunk and a reset, an uncharged one is not counted, and the limit refuses a chunk the store leaves no room for, stickily and recorded once, and the next chunk past it; `test_diag`: a refusal is reported as the limit with its activity, once, and forgotten by a new activity or operation; `test_query`: a recursive body's variants refused while planning its component, a long query refused while planning it, a rewrite refused while rewriting and not answered from the whole program, an admitted rewrite giving back its arenas, 20 000 facts evaluating within 16 KB of their relation, and a fact between rules inserting in its turn; `tests/cli.sh`: a one-byte limit refused while rewriting, a 3000-byte one while planning, and a limit admitting the plans and tuples refusing the index; `tests/perf.sh`: a recursive body of 8000 literals with 500 delta variants, and an 8000-literal body under 125 bound patterns, each within a fortieth of the budget and at least five seconds, about a second each where the step-by-step order took over 300 s and 153 s, and each refused under a 16 MiB limit with the limit's message within the same budget |
 
 **Generated programs, fuzzing, coverage and benchmarks, stage S13.** Test
@@ -379,12 +379,12 @@ placement, are implemented.
 | `lib/eval.c` | the executor resolves the range of every operation's view, from the member's delta, when the plan starts, and a `MEMBER` holds only for a tuple whose identifier lies in its view; round 0 runs the facts and the exit rules, a recursive rule having only its variants; every member's delta starts empty at the first identifier, so the first delta is the whole member; each boundary advances, once each, the members that gained and those whose delta held something; a variant runs only once every old view its plan reads holds something, counted down as each member's delta first moves past the first identifier; a component's plans are recorded per rule with a body, so explain pairs a rule with its variants by construction and counts the facts as the rules without one; a variant with two plans runs its placed plan in a round whose delta holds more tuples than its threshold and its delta-first plan otherwise; a lookup of the delta view is positioned through the frontier |
 | `lib/relation.c` | `relic_relation_find()` gives the identifier of the tuple holding some columns |
 | `lib/explain.c` | a recursive rule under the semi-naive fixed point shows its variants and no plan; `scan`, `lookup` and `member` are followed by `delta` or `old` for those views; a variant with two plans shows the placed plan headed `when the delta holds more than N tuples`, then the delta-first plan headed `otherwise`; a variant with one shows it under the plain heading |
-| `tests/` | `test_eval`: the complete graph on 40 nodes closes in 68,800 derivations where the evaluator without views made 132,800, a rule reading its own predicate twice over a 20-node chain makes 20 choose 3 derivations for it, with its rounds and scans, two members gaining in alternate rounds exercise the boundary, and every counter scenario re-derived by hand, the lookup snapshot under the naive fixed point; `test_plan`: the view of each literal of a variant, a variant over an unmarked relation refused, a textual variant in its written order, a delta going before the old and the current view of its own member, a delta placed after a guard and its join and looked up, the delta-first plan beside it, the threshold worked by hand, with its empty prefix and empty fan-out, each leaving the plan no round would run unbuilt, and a fully bound delta literal a `MEMBER` of the delta; `tests/random`: for a program whose rules hold no `_`, materializing must make exactly one derivation per fact and per distinct binding of each rule body's variables, counted as the rows of one query per body under the naive fixed point, a new verdict `derivations miscounted`; `test_index`: delta lookups over twelve rounds of growth agree with a scan from every start, higher, repeated and lower, and every frontier rests where its lookup stopped |
+| `tests/` | `test_eval`: the complete graph on 40 nodes closes in 67,200 derivations, its 1600 facts read from their base store, a rule reading its own predicate twice over a 20-node chain makes 20 choose 3 derivations for it, with its rounds and scans, two members gaining in alternate rounds exercise the boundary, and every counter scenario re-derived by hand, the lookup snapshot under the naive fixed point; `test_plan`: the view of each literal of a variant, a variant over an unmarked relation refused, a textual variant in its written order, a delta going before the old and the current view of its own member, a delta placed after a guard and its join and looked up, the delta-first plan beside it, the threshold worked by hand, with its empty prefix and empty fan-out, each leaving the plan no round would run unbuilt, and a fully bound delta literal a `MEMBER` of the delta; `tests/random`: for a program whose rules hold no `_`, materializing must make exactly one derivation per fact seeded into a derived predicate and per distinct binding of each rule body's variables, counted as the rows of one query per body under the naive fixed point, a new verdict `derivations miscounted`; `test_index`: delta lookups over twelve rounds of growth agree with a scan from every start, higher, repeated and lower, and every frontier rests where its lookup stopped |
 | `tests/lang` | the `-e` and `-X stats` golden files of recursive programs regenerated; `explain-views` shows both views a rule reading its own predicate twice reads; `explain-thresholds` shows the one plan left to each of two variants, by an empty prefix and an empty fan-out |
 
-Every derivation is made once: `derivations` is the facts plus the ways each
-body is satisfied over the fixed point, which on the six-edge chain is also
-the number of tuples inserted. `tc-cyclic-bf` of the comparison makes 48.9
+Every derivation is made once: `derivations` is the facts seeded into
+derived predicates plus the ways each body is satisfied over the fixed
+point, which on the six-edge chain is also the number of tuples inserted. `tc-cyclic-bf` of the comparison makes 48.9
 million derivations where it made 74.2 million, and no counter of
 `bench/run.sh` rose on any workload. A component may take more rounds, up to
 its longest derivation chain, since a round no longer sees what it inserts:
@@ -413,8 +413,7 @@ frontier where it was.
 The frontier costs four bytes per key, twelve where there were eight, and a
 variant with two plans keeps up the indexes both read, a member's index for
 the placed plan's lookup of the delta among them: `stats-indexed` holds
-1280 bytes of storage where it held 928, and `stats-magic` 736 where it
-held 672. A program near its `-l memory=` limit can be refused where it was
+1264 bytes of storage, and `stats-magic` 720. A program near its `-l memory=` limit can be refused where it was
 not. A plan no delta can select is not built, so a threshold at either end
 costs no index.
 
@@ -436,7 +435,7 @@ of consecutive duplicate checks overlap. `configure` detects
 loses the overlap. Every view of a plan is resolved when the plan starts, so
 no plan reads its own batches, and under `-X naive` a rule does not see its
 own derivations within a pass, so the chain of the counter test takes 3 passes
-rather than 2 and derives 20 times rather than 15. Batching takes `tc-cyclic`
+rather than 2 and derives 17 times rather than 12. Batching takes `tc-cyclic`
 from 4.75 s to 3.03 s and `sg-cyclic` from 3.42 s to 2.06 s of median user
 time with the peak unchanged, and the duplicate check's share of their
 profiles from 73 to 59 per cent and from 68 to 49; no `bench/run.sh` counter
@@ -449,8 +448,35 @@ The relation store and the identifier table reserve room for any number of
 entries at once, section 10 step 1 of `specs/design-facts.md`: a reservation
 grows each array once, to exactly the bytes
 `relic_relation_bytes_after_reserve()` projects, and applies no limit of its
-own. An insertion is the reservation of one tuple under the limits; nothing
-reserves for more.
+own. An insertion is the reservation of one tuple under the limits; a
+load's commit reserves for all of its facts at once.
+
+**A program's facts are stored, not compiled,** section 10 step 2 of
+`specs/design-facts.md`. Each predicate has a base store, which only a
+load's commit writes, and a derived relation, which only evaluation writes
+and which exists for a predicate once a rule derives it.
+
+| Component | State |
+| --- | --- |
+| `lib/facts.c` | a load's staging: a set per predicate of the tuples the load states, deduplicated through a seeded hash and not charged to the limits; the commit marks each tuple new or not against its base store, discards what was derived when any is new, reserves every store it grows under both limits at once, refusing with `limit exceeded: tuples=N while loading p/2` or its `memory` form, named by the first predicate whose store would grow, and then appends without looking anything up |
+| `lib/parse.c` | a load moves each ground body-less statement into staging and commits before it splices its statements; `relic_fact_add()` stages and commits one fact; a fact in a query's text is refused as a fact |
+| `lib/relation.c` | two tables, derived relations and base stores; the write funnel refuses a predicate no rule derives, and the read funnel returns a derived predicate's relation, any other predicate's base store, or for a base view the store it views; the discard empties the derived relations and drops the base stores' secondary indexes, and returns at once when nothing was derived or indexed since the last; a derived predicate's base store is named `p$base` wherever a relation is named |
+| `lib/pred.c`, `lib/rule.c` | the shared rule append marks a head derived as its infallible last step; `defined` is a function of that mark, a named head, a base view and the base store's count; `referenced` is a mark with the location of the first atom reading the predicate, and the undefined-predicate warning asks both |
+| `lib/eval.c` | a component's members are seeded from their base stores before its first pass, as round 0's gains; the relations are current when the rules and the facts they were computed from are the program's; explain's `facts: N` counts a component's seeds and its members' facts |
+| `lib/magic.c` | a derived predicate with facts has a base view, `p$base`, interned before the rewrite, and each of its adornments begins with one rule over it; the budget on generated rules is retired, decision D-21, since the literal budget bounds the rules kept |
+| `tests/` | `test_facts`: what a load keeps as statements, a failed load, loads refused by the tuple and the memory limit, the funnel, `relic_fact_add()` through every strategy and under a limit, indexes over a session, loads after an evaluation under both limits, a refused load of several predicates, the base view and a rewrite abandoned over its budget, and facts of no columns; `test_magic`: a rewrite of a 200-call body admitted, facts read as `e$base`; every counter of `test_eval` re-derived by hand; `tests/lang/explain-facts` |
+
+A predicate of facts alone is not a component, so `-e` shows no stratum
+for it, and its facts are neither derived nor inserted: the
+`stats-*` goldens count 6 fewer derivations and insertions, and hold 16
+fewer bytes, a base store being reserved for exactly the facts it holds.
+On `facts-join` at scale 4 the peak is 407 to 412 MB where it was 500 to
+563, and the user time 1.67 s where it was 1.78; the parser still builds a
+statement for each fact, which is most of what remains (`TODO.md`).
+The mutations the new tests catch: a commit that reserves before it
+discards is refused under both limits after materialization, and a discard
+that keeps the base stores' indexes refuses the second of three queries
+binding different columns.
 
 ### Verified
 

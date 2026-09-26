@@ -395,19 +395,24 @@ schedule_is(const char *scenario, const char *program, const char *expected)
 static void
 components_come_out_dependencies_first(void)
 {
-	schedule_is(SCENARIO_ORDER, "p(a).", "0:p/1");
+	/*
+	 * A fact is not a rule, so a predicate of facts alone has no component;
+	 * the programs below read predicates nothing defines where they need
+	 * a component at the bottom of the order.
+	 */
+	schedule_is(SCENARIO_ORDER, "p(a).", "");
 
 	schedule_is(SCENARIO_ORDER,
 	    "a(X) :- b(X).\n"
 	    "b(X) :- c(X).\n"
-	    "c(x).\n",
+	    "c(X) :- input(X).\n",
 	    "0:c/1 0:b/1 0:a/1");
 
 	schedule_is(SCENARIO_ORDER,
 	    "top(X) :- left(X), right(X).\n"
 	    "left(X) :- bottom(X).\n"
 	    "right(X) :- bottom(X).\n"
-	    "bottom(x).\n",
+	    "bottom(X) :- input(X).\n",
 	    "0:bottom/1 0:left/1 0:right/1 0:top/1");
 
 	schedule_is(SCENARIO_ORDER,
@@ -419,7 +424,7 @@ components_come_out_dependencies_first(void)
 	    "even(X) :- succ(Y, X), odd(Y).\n"
 	    "odd(X) :- succ(Y, X), even(Y).\n"
 	    "even(z).\n"
-	    "succ(z, one).\n",
+	    "succ(X, Y) :- pair(X, Y).\n",
 	    "0:succ/2 0:even/1,odd/1*");
 
 	schedule_is(SCENARIO_ORDER,
@@ -427,8 +432,8 @@ components_come_out_dependencies_first(void)
 	    "reach(X, Z) :- link(X, Y), reach(Y, Z).\n"
 	    "near(X, Y) :- road(X, Y).\n"
 	    "near(X, Z) :- road(X, Y), near(Y, Z).\n"
-	    "link(a, b).\n"
-	    "road(c, d).\n",
+	    "link(X, Y) :- wire(X, Y).\n"
+	    "road(X, Y) :- lane(X, Y).\n",
 	    "0:link/2 0:reach/2* 0:road/2 0:near/2*");
 }
 
@@ -451,8 +456,7 @@ negation_reads_a_strictly_lower_stratum(void)
 	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n"
 	    "blocked(X) :- todo(X), depends(X, Y), not done(Y).\n"
 	    "ready(X) :- todo(X), not blocked(X).\n",
-	    "0:edge/2 0:todo/1 0:depends/2 0:done/1 0:path/2* 1:blocked/1 "
-	    "2:ready/1");
+	    "0:path/2* 1:blocked/1 2:ready/1");
 
 	/*
 	 * high/1 completes before late/1, but late/1 is in the lower stratum,
@@ -465,7 +469,7 @@ negation_reads_a_strictly_lower_stratum(void)
 	    "low(X) :- base(X).\n"
 	    "low2(X) :- base(X).\n"
 	    "base(a).\n",
-	    "0:base/1 0:low/1 0:low2/1 0:late/1 1:middle/1 2:high/1");
+	    "0:low/1 0:low2/1 0:late/1 1:middle/1 2:high/1");
 
 	/*
 	 * A predicate nothing defines has no component in the schedule, but
@@ -474,12 +478,12 @@ negation_reads_a_strictly_lower_stratum(void)
 	schedule_is(SCENARIO_STRATA,
 	    "p(X) :- q(X), not missing(X).\n"
 	    "q(a).\n",
-	    "0:q/1 1:p/1");
+	    "1:p/1");
 }
 
 /*
  * Only components with rules to run are scheduled: a predicate that is only
- * referenced, and a query's answer predicate, are not.
+ * referenced, one of facts alone, and a query's answer predicate, are not.
  */
 static void
 components_without_rules_are_left_out(void)
@@ -493,7 +497,7 @@ components_without_rules_are_left_out(void)
 	    "p(X) :- q(X), r(X).\n"
 	    "q(a).\n"
 	    "p(X)?\n",
-	    "0:q/1 0:p/1");
+	    "0:p/1");
 
 	ctx = context_logging_to(&log);
 	if (ctx == NULL)
@@ -514,7 +518,7 @@ components_without_rules_are_left_out(void)
 		    "the extended program should pass a check");
 
 	render_schedule(ctx, false, rendered, sizeof(rendered));
-	checkf(strcmp(rendered, "0:q/1 0:p/1") == 0, SCENARIO_UNUSED,
+	checkf(strcmp(rendered, "0:p/1") == 0, SCENARIO_UNUSED,
 	    "a prepared query's answer predicate should not be scheduled, "
 	    "but the schedule is \"%s\"", rendered);
 
@@ -547,12 +551,12 @@ rules_are_grouped_by_component_in_order(void)
 	 * edge/2 holds rules 0, 2 and 5, interleaved in the text.
 	 */
 	if (!load_and_check(ctx,
-	    "edge(a, b).\n"
+	    "edge(X, Y) :- wire(X, Y).\n"
 	    "path(X, Y) :- edge(X, Y).\n"
-	    "edge(b, c).\n"
+	    "edge(X, Y) :- cable(X, Y).\n"
 	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n"
 	    "top(X) :- path(X, _).\n"
-	    "edge(c, d).\n")) {
+	    "edge(X, Y) :- link(X, Y).\n")) {
 		check(false, SCENARIO_RULES, "the program should pass a check");
 		relic_destroy(ctx);
 		return;
@@ -656,7 +660,7 @@ the_order_depends_only_on_the_program(void)
 	}
 
 	checkf(strcmp(first_set,
-	    "0:even/1,odd/1* 0:link/2 0:next/2 0:node/1 0:reach/2* 1:cut/1") ==
+	    "0:even/1,odd/1* 0:reach/2* 1:cut/1") ==
 	    0, SCENARIO_TEXT, "the components should be the expected ones, "
 	    "not \"%s\"", first_set);
 }
@@ -946,11 +950,15 @@ a_long_chain_does_not_overflow(void)
 			    "the %s should pass a check",
 			    closed ? "cycle" : "chain");
 		} else {
+			/*
+			 * The open chain's last predicate holds the fact
+			 * and derives nothing, so it has no component.
+			 */
 			checkf(ctx->program.schedule.component_count ==
-			    (closed ? 1 : CHAIN_LENGTH), SCENARIO_CHAIN,
+			    (closed ? 1 : CHAIN_LENGTH - 1), SCENARIO_CHAIN,
 			    "the %s should be %d component(s), not %zu",
 			    closed ? "cycle" : "chain",
-			    closed ? 1 : CHAIN_LENGTH,
+			    closed ? 1 : CHAIN_LENGTH - 1,
 			    ctx->program.schedule.component_count);
 			checkf(run.answered, SCENARIO_CHAIN,
 			    "the fact should reach the far end of the %s",

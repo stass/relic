@@ -39,8 +39,8 @@ Two modules, with the predicate table underneath the rule compiler because
 compiling a rule is what discovers predicates.
 
 **`lib/pred.c` decides what a predicate is.** It interns `(name, arity)` pairs
-to predicate identifiers, records where the program first mentioned each one
-and whether anything defines it, and formats a predicate for a diagnostic.
+to predicate identifiers, records what derives into each one and the first
+atom that reads it, and formats a predicate for a diagnostic.
 
 **`lib/rule.c` decides what a rule is.** It numbers a rule's variables,
 resolves its atoms against the predicate table, checks safety, warns about
@@ -71,27 +71,63 @@ An entry records:
 
 ```c
 struct relic_pred {
-	relic_location_t	where;	/* first mention in the program */
-	uint32_t		name;	/* interned */
+	relic_location_t	referenced_at;	/* first atom reading it */
+	uint32_t		name;		/* interned */
+	relic_pred_id_t		views;		/* for a base view */
 	uint16_t		arity;
-	bool			defined;
+	bool			head_named;
+	bool			derived;
+	bool			referenced;
 	bool			reported_undefined;
 };
 ```
 
-`defined` becomes true when a statement's head names the predicate, whether
-that statement is a fact or a rule. A predicate may have both, per section 17,
-and `defined` says only that something derives into it.
+The marks are never cleared, and each is set only by the operation it
+records.
+
+* `derived` is set when a rule with the predicate as its head is appended
+  to a rule table, the program's or the one a query's Magic rewrite builds.
+  Both append through one function, whose last step, taken once every
+  allocation it makes has succeeded, stores the rule, counts it and marks
+  the head, so a predicate is derived exactly when some table has held a
+  rule deriving it. The mark decides the relation the predicate is read and
+  written through (`specs/design-facts.md` section 3). The program's rule
+  table holds the rules a program states and no fact: a fact is a tuple of
+  its predicate's base store.
+* `head_named` is set when a rule's head names the predicate, as soon as the
+  head is resolved and before the rule is known to be safe, so that an
+  unsafe rule draws one complaint rather than also a warning that nothing
+  defines its predicate; and when the Magic rewrite generates it.
+* `views` names the predicate whose base store this one reads, for a base
+  view, `p$base`, which only the Magic rewrite interns.
+
+A predicate is **defined** when something derives into it: a rule's head
+names it, it is derived, it is a base view, or its base store holds facts.
+`defined` is a function of the marks and the base store rather than a mark,
+so nothing that stores a fact has a mark to remember. A predicate may have
+facts and rules both, per architecture section 17.
+
+A predicate is **referenced** when an atom of a rule body or a query names
+it, whether or not its statement goes on to be accepted, and the first such
+atom is recorded as `referenced_at`. The undefined-predicate warning of
+section 6 names a predicate that is referenced and not defined, and points at
+that atom. A predicate interned for the facts of a load that failed, or by a
+rewrite that was abandoned, is referenced by nothing and never named.
 
 **The table is context-lifetime state, not derived state.** It grows as loads
 introduce predicates, entries are never removed and identifiers are never
 reused, which is what makes a predicate identifier usable as a stable index by
-every later stage. That matters from S4 onward, where the relation holding a
-predicate's tuples hangs off its entry and must outlive any one query.
+every later stage. It matters to the relation store, which indexes a
+predicate's base store and derived relation by its identifier, and both
+must outlive any one query.
 
 Identifiers are assigned in first-appearance order per D-4. Within a
 statement, the head is interned before the body and the body in textual order,
-so a program always produces the same numbering.
+so a program always produces the same numbering. A load interns the
+predicates of its facts as it reads them, in the order their first facts
+appear, since a fact is stored rather than compiled; so they are interned
+before any rule the check has yet to compile, the load's own and those of
+earlier loads not yet checked.
 
 **Every atom in the program is interned, including a query's.** Predicate
 identity is a property of the program rather than of a rule, and the
@@ -236,10 +272,10 @@ error is the message that matters, and advising a rename would be advice to
 disguise the bug.
 
 The undefined-predicate warning is reported once per predicate, at the first
-place the program mentions it. A predicate that is referenced and never
-defined is a typo far more often than an intentionally empty relation, and
-the consequence is silent: every positive literal over it fails and every
-negated literal over it succeeds.
+atom of a rule body or a query that reads it. A predicate that is referenced
+and never defined is a typo far more often than an intentionally empty
+relation, and the consequence is silent: every positive literal over it fails
+and every negated literal over it succeeds.
 
 ---
 
@@ -445,7 +481,9 @@ number of body literals.
 The program model contributes three things to the reproducibility of a run:
 
 * **predicate identifiers are assigned in first-appearance order**, head
-  before body and body in textual order;
+  before body and body in textual order, and a load's fact predicates in the
+  order their first facts appear, as the load reads them and before any rule
+  not yet compiled;
 * **slots are assigned in first-occurrence order**, head before body;
 * **diagnostics are emitted in statement order**, and within a statement in
   the textual order of the occurrences they point at, which section 5.1 shows
@@ -468,6 +506,6 @@ pointer value.
 * **Removal from the predicate table.** Nothing un-defines a predicate, and a
   table that must delete would need tombstones in the identifier table that
   nothing else in the tree needs.
-* **A distinction between extensional and intensional predicates.** It is
-  derivable from `defined` and the rules, and the stage that needs it is the
-  stage that should define it.
+* **A declared distinction between extensional and intensional predicates.**
+  A predicate may have facts and rules both, and what the later stages need
+  is the `derived` mark of section 3, which the rule table sets.

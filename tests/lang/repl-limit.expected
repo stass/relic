@@ -1,5 +1,3 @@
-stratum 0, component 0: e/1
-    facts: 2
 magic rewrite of $q1(X) :- p(X).
     adorn p/1 f
     stratum 0, component 0: p$f/1

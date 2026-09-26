@@ -77,6 +77,28 @@ Revisit if a distribution reports it.
 
 ## Engine
 
+**The discard's mark is set where a relation is handed out, not derived.**
+[Low, component: `lib/relation.c`] `holds_derived` is set by the write
+funnel and by an index build, and the discard returns at once when it is
+clear. That is right because nothing writes a derived relation through a
+pointer handed out before a discard, which holds today since every
+evaluation discards before it plans and nothing commits while one runs; a
+future path that kept such a pointer would leave derived tuples the next
+discard skips. Derive the property instead: count the base stores' tuples
+in the store, bumped only by `relic_base_append()`, and the secondary
+indexes where one is published or dropped, so that something is derived
+exactly when the tuple total differs from the base total or an index
+exists. The same count makes `relic_base_total()`, which
+`relic_relations_current()` walks the base stores for on every query,
+constant time.
+
+**The arity-zero tuple convention is written twice.** [Low, component:
+`lib/facts.c`, `lib/eval.c`] A tuple of no columns is passed as a pointer to
+a static one-element array that is never read, in `set_tuple()` and in
+`seed_member()`, and explained a third time in `tuple_append()`. One helper
+in `lib/relation.c` returning a readable tuple pointer for any arity would
+keep the convention in one place.
+
 **A rejected statement keeps its arena memory.** [Low, component:
 `lib/rule.c`] A statement is compiled in one pass, so a rule that turns out
 to be unsafe has already had its arguments, body and variables allocated from
@@ -217,21 +239,10 @@ a query part way and a session that caught the signal would have nothing to
 stop. Once evaluation can be cancelled, a session should cancel the query
 running and return to the prompt.
 
-**A fact costs a compiled rule and a plan.** [Medium, component:
-`lib/parse.c`, `lib/rule.c`, `lib/eval.c`] A fact is a rule with an empty
-body, so each one is a syntax tree node, a compiled rule and, at every
-evaluation, a one-operation plan in the evaluation arena. A million `edge/2`
-facts, 21 MB of text, take 1.8 s and 260 MB to load and check and about
-450 MB resident to evaluate, while the relation holding them is 24 MB;
-`tests/perf.sh` measures this shape. Loading facts of a component straight
-into a staging relation, or planning a component's facts as one bulk
-operation, would remove most of it without a second path for rules.
-`relic_fact_add()` pays the same per fact, since it appends the statement its
-text would load.
-
 **A later load re-evaluates the whole program.** [Low, component:
 `lib/eval.c`] Any change to the program after an evaluation discards every
-relation and computes the fixed point again from nothing, for every program:
+derived relation and computes the fixed point again from the facts, for
+every program:
 continuing from the tuples already held is sound without negation and unsound
 with it, and one rule for both is what `specs/design-eval.md` section 6
 settles, matching architecture section 54 for `relic_fact_add()`. The cost
@@ -243,9 +254,9 @@ section 70 defers, and not a return to continuing only positive programs.
 
 **Complete relations are evaluated again for every query.** [Medium,
 component: `lib/eval.c`] A query answered through its Magic rewrite discards
-every relation first and evaluates again the components it reads completely,
-so a caller running many bound queries over one program loads the facts and
-evaluates the negated and extensional part once per query. What that part
+every derived relation first and evaluates again the components it reads
+completely, so a caller running many bound queries over one program seeds
+their facts and evaluates the negated part once per query. What that part
 holds depends only on the program, so it could be kept until the program
 changes, with only the generated relations and the answer discarded between
 queries. `specs/design-magic.md` section 9.2 chose the simpler rule so that
@@ -270,33 +281,12 @@ the all-free one, would bound the multiple. The rewrite is correct as it
 stands, the tuples count against `max_tuples` and `max_memory`, and
 `tests/perf.sh`, whose query binds nothing, stays inside its bound.
 
-**A mixed predicate's facts are copied per adornment.** [Medium, component:
-`lib/magic.c`] A predicate derived by facts and rules alike is read on demand,
-so each of its facts becomes a rule guarded by the magic predicate, once per
-adornment. A predicate with many facts and a single rule pays for all of them
-in rules and plans: 200 000 `e/2` facts and one rule for `e` take 296 MB and
-1.0 s for `e(n7, X)?`, against 129 MB and 0.45 s without the rewrite, and
-375 MB when the query calls `e` with two adornments. The copies and their
-plans are charged to `max_memory` (D-18), so under a limit such a query is
-refused while `-X no-magic` answers it in a fraction of the memory: 20 000
-facts and one rule, `e(n7, X)?`, need 16 MB through the rewrite and under
-2 MB without it. A limit refusing the rewrite fails the query, as
-`specs/design-planning-cost.md` section 7 decides, rather than falling back
-to the whole program as an outgrown budget does; revisit that if this case
-matters. Without a limit, the budgets bound it at about sixteen copies of
-the program. Splitting such a predicate into its facts, loaded completely
-into a relation of their own, and its rules, adorned, with one guarded rule per
-adornment reading the facts, would avoid the copies and would make the
-extensional case of `specs/design-magic.md` section 3 a special case of the
-general rule rather than a rule of its own.
-
 **An abandoned rewrite repeats the complete part.** [Low, component:
 `lib/eval.c`, `lib/explain.c`] A rewrite over its budget is abandoned after
 the components it reads completely have been evaluated, and answering from
 the whole program then discards them and evaluates them again. `-e` shows
-both passes, so `tests/lang/magic-budget.dl` under `-e` prints
-`stratum 0, component 0: f/14` twice with nothing between them to say why;
-the warning goes to standard error. An explain line marking the abandoned
+both passes, each complete component printed twice with nothing between
+them to say why; the warning goes to standard error. An explain line marking the abandoned
 rewrite would say why, and keeping the complete relations, as the item on
 evaluating them for every query proposes, would avoid the second pass.
 
@@ -319,50 +309,30 @@ in a name a program writes -- and `-e` shows what it means, but
 has to change. Recording the source predicate on a generated predicate's
 entry and describing it from that would say `path/2`.
 
-**The rule budget counts a body's demand calls twice.** [Medium, component:
+**The rule limit counts a body's demand calls twice.** [Low, component:
 `lib/magic.c`] A body of k demand calls generates a magic rule and, after
 the first, a supplementary rule per call, about 2k rules, and both count
-against `max_magic_rules` and against the rule budget of 256 + 16 x the
-program's rules. With `-l magic-rules=1000`, `r(X) :- p(X), ..., p(X)` of
-600 calls over five facts is refused, where writing the prefixes out in
-full kept 602 rules and answered it, at 15 s and 5.9 GB; without a limit,
-the same body of 200 calls outgrows its rule budget of 368, where the
-literal budget, 256 + 16 x its size in literals, would admit it.
-`specs/design-magic.md` section 8 keeps supplementary predicates out of the
-predicate budget so as not to abandon a body of hundreds of calls; a rule
-budget sized by rules does just that, and the literal budget already bounds
-supplementary rules. Size the rule budget by the program's literals, stop
-counting supplementary rules, or retire the budget as the next item asks.
-
-**The literal budget may make the rule budget redundant.** [Low, component:
-`lib/magic.c`] A drafted rule is about as long as the rule it comes from,
-and the literal budget counts every draft against 256 + 16 x the program's
-size in literals, so it fires before the budget on generated rules on every
-program measured, `tests/lang/magic-budget.dl` included; the rule budget
-fires first only on a program whose unreached rules are long, which raise
-the literal budget and generate nothing, and no test reaches it. The
-predicate budget is not redundant: facts of extensional predicates raise
-the literal budget and not the predicate budget, and `widening_program(12)`
-from `tests/unit/programs.c` with 50 000 facts of an unrelated g outgrows
-its budget of 304 generated predicates first; no test reaches that either.
-Weigh whether the rule budget is worth keeping. The configurable limits are
-not in question.
+against `max_magic_rules`. With `-l magic-rules=1000`,
+`r(X) :- p(X), ..., p(X)` of 600 calls is refused, where writing the
+prefixes out in full kept 602 rules and answered it, at 15 s and 5.9 GB. A
+caller who sets the limit sized the rewrite, so the question is only what
+a generated rule means to them: decide whether supplementary rules count.
 
 **Append-only invariant versus incremental maintenance.** [Medium, component:
 `lib/relation.c`] D-10 represents a delta as a range of tuple identifiers,
 which requires that nothing compacts, deletes or renumbers a relation during a
 fixed point. The store holds to it by construction: nothing removes, reorders
 or renumbers one tuple, and the one removal there is, discarding every
-relation at once, runs only before an evaluation begins, when no range is
+derived relation at once, runs only between evaluations, when no range is
 live. The debt is the moment that stops being enough. Any incremental
 insertion or DRed-style deletion support has to confront it first: a range
 captured before such an operation means something else afterwards, and
-nothing in the range would say so. `relic_fact_add()` needs no more than the
-existing discard, because it appends a fact statement to the program rather
-than inserting a tuple into a relation: only the evaluator inserts,
-which is what makes every tuple re-derivable and the discard safe, and
-appending a rule is what advances the count that says the program changed.
-`specs/design-relations.md` section 2 states it.
+nothing in the range would say so. A load's commit and `relic_fact_add()`
+need no more than the existing discard: they append to base stores only
+between evaluations, after discarding what was derived, and only the
+evaluator inserts into derived relations, which is what makes every derived
+tuple re-derivable and the discard safe. `specs/design-relations.md`
+section 2 states it.
 
 **Size budget.** [Medium] `relic-plan.md` totals about 7.5 KLOC against the 4
 to 7 KLOC of `specs/architecture.md` section 2.2, which treats size as a design
@@ -681,20 +651,17 @@ buffer and writing it with one call, would remove them.
 component: `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000
 ternary facts read as source text, relic peaks at 136 to 153 MB, against 44 MB
 for Souffle reading the same data as TSV and 90 to 115 MB for Nemo, clingo and
-SWI-Prolog, which also parse. At scale 4, 1.2 million facts, the peak is about
-470 bytes per fact, of which 358 are the fact as a program object -- its
-syntax tree statement and three terms (192, an 88-byte statement and 32-byte
-terms rounded to the arena's 16-byte alignment), its rule table entry (126, 72
-bytes in an array doubled past it), its compiled head (32) and its schedule
-entry (8) -- and 21 the tuple and its index slot; the symbols and values its
-constants intern take 86. Checking alone takes 1.27 of the 2.05 s of user
-time, and a sampled profile of the whole run puts 40 per cent in parsing, the
-lexer and the symbol interning it calls included. `specs/design-facts.md`
-stores a program's facts as the tuples of their predicates' base stores, and
-orders the work: reservation for many tuples in the relation store; base
-stores, derived predicates and the all-or-nothing commit, with Magic over base
-views; then the parser's staging, which keeps a fact from ever building a
-statement. A symbol's bytes are hashed once, by the lexer into the symbol
+SWI-Prolog, which also parse. A program's facts are stored as the tuples of
+their predicates' base stores, `specs/design-facts.md`, and at scale 4, 1.2
+million facts, the peak is 407 to 412 MB, about 356 bytes per fact, in 1.67 s
+of user time: the syntax tree
+statement and three terms the parser still builds for each fact before the
+load stages it (192, an 88-byte statement and 32-byte terms rounded to the
+arena's 16-byte alignment), the symbols and values its constants intern (86),
+the staging set live during the commit (about 30), the text of the file,
+read whole (24), and the tuple and its index slot (21). Step 3 of that
+design's order of work, the parser's staging, keeps a fact from ever
+building a statement; its gate is below 200 bytes per fact at the peak. A symbol's bytes are hashed once, by the lexer into the symbol
 table; the symbol table recomputes every symbol's byte hash when it grows
 (`symbol_rehash()`), and the value table every value's hash, each about 3 per
 cent of `facts-join` at scale 4; the four-byte slot of

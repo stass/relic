@@ -152,7 +152,8 @@ enum relic_ast_stmt_kind {
  * kind and no `is_fact` flag, because either would be a second way to state
  * what `body_length` already states, and two representations of one fact
  * eventually disagree.  `edge(a, b).` is a rule with an empty body, which is
- * also exactly what it means.
+ * also exactly what it means; a load then moves each such ground statement
+ * into its predicate's base store, and keeps the rest.
  *
  * `head` is meaningful for a rule; a query has only a body.  `where` points
  * at the beginning of the statement.

@@ -9,7 +9,7 @@ document under `specs/`; `STATUS.md` records what is implemented.
 and 63; `specs/design-plan.md` for the plans this runs, and
 `specs/design-planner.md` for when they are built;
 `specs/design-relations.md` and `specs/design-index.md` for the store it
-reads and writes;
+reads and writes; `specs/design-facts.md` for the base stores it seeds from;
 `relic-plan.md` decisions D-6, D-7, D-8, D-9, D-10 and D-11.
 
 ---
@@ -138,6 +138,7 @@ the switch is set and the comparison was unordered.
 
 ```text
 for every component, in schedule order:
+	seed each member from its base store
 	if the component is recursive:
 		repeat:
 			for every rule of the component, in program order:
@@ -156,13 +157,23 @@ once, over relations that no later component changes. A component with no
 recursion reads nothing it writes, and one pass over its rules is its fixed
 point.
 
-A fact is a rule with an empty body, so facts need no loading step of their
-own: the first pass over their component inserts them. A fact is not planned.
-Its head holds only constants, so the plan it would get is a single `EMIT` of
-them; the pass inserts that tuple when the fact's turn comes, through the
-insertion an `EMIT` makes, so a fact is ordered and counted exactly as that
-plan would be. What it costs is its tuple, and nothing in the evaluation
+A program's facts are the tuples of their predicates' base stores
+(`specs/design-facts.md`), loaded when the program is, and evaluation reads
+them and never writes them. A predicate of facts alone is in no component and
+is read straight from its base store. A member of a component whose base
+store holds facts has its derived relation **seeded** from it before the
+component's first pass: the whole store, in identifier order, inserted in
+batches as an `EMIT` inserts, so each seeded fact counts a derivation, and an
+insertion when the derived relation did not hold it. A derived predicate's
+rows therefore begin with its facts. Seeding costs nothing in the evaluation
 arena, which holds the plans of rules with bodies only (section 9).
+
+A rule with no body is a seed of a Magic rewrite, `magic$p$bf(a).`; the
+program's rule table holds none, since its facts are in base stores. Such a
+rule is not planned. Its head holds only constants, so the plan it would get
+is a single `EMIT` of them; the pass inserts that tuple when the rule's turn
+comes, through the insertion an `EMIT` makes, so it is ordered and counted
+exactly as that plan would be.
 
 **It terminates** because every value an insertion can produce was interned
 before evaluation began -- a rule's head holds constants and variables, and a
@@ -170,10 +181,11 @@ variable is bound only from a tuple -- so each relation can hold only finitely
 many tuples, and an iteration that adds none is the last.
 
 **It computes the least fixed point** because every tuple it inserts is
-justified by tuples already present, and it leaves a component only when a full
-pass over its rules adds nothing. Since no later component writes a predicate
-an earlier one reads, every rule adds nothing once the last component is done,
-which is the definition of a fixed point of the immediate-consequence operator.
+justified by a fact or by tuples already present, and it leaves a component
+only when a full pass over its rules adds nothing. Since no later component
+writes a predicate an earlier one reads, every rule adds nothing once the last
+component is done, which is the definition of a fixed point of the
+immediate-consequence operator.
 
 Within an iteration a rule sees the insertions of the rules before it,
 rather than only the state at the start of the iteration, and none of its
@@ -203,8 +215,10 @@ gained in the previous round.
 
 ```text
 for every recursive component, in schedule order:
+	seed each member from its base store
 	delta(R) = empty at the first identifier, for every member R
-	round 0: for every fact and every exit rule, in program order, run it
+	round 0: for every body-less rule and every exit rule,
+	    in program order, run it
 	while some member gained tuples in the last round:
 		delta(R) = the tuples R gained in the last round
 		for every delta variant, in planning order,
@@ -214,9 +228,11 @@ for every recursive component, in schedule order:
 ```
 
 An **exit rule** is one with no positive literal over a member of its
-component. Round 0 runs the facts and the exit rules only, so the first
-delta of each member is the whole of it, and a recursive rule runs only as
-its variants, from round 1 on. `specs/design-evaluation-cost.md` section 3.4
+component. Round 0 runs the body-less rules and the exit rules only, after
+the members were seeded with their facts, and every tuple a member holds
+when it ends, seeded or derived, is its gain of round 0; so the first delta
+of each member is the whole of it, and a recursive rule runs only as its
+variants, from round 1 on. `specs/design-evaluation-cost.md` section 3.4
 gives round 0, the round boundary and the invariant it keeps, and section 3.6
 which variants a round runs.
 
@@ -271,10 +287,10 @@ its delta's size selects. `specs/design-evaluation-cost.md` section 4 gives
 the placement, the frontier a delta `LOOKUP` starts from, and the threshold
 between the two plans.
 
-A rule with no literal over its own component -- a fact, or an exit rule such
-as `path(X, Y) :- edge(X, Y)` -- has no variant. Everything it reads was
-complete before the component began, so round 0 derived everything it ever
-will.
+A rule with no literal over its own component -- a body-less rule, or an exit
+rule such as `path(X, Y) :- edge(X, Y)` -- has no variant. Everything it reads
+was complete before the component began, so round 0 derived everything it
+ever will.
 
 The evaluation keeps each member's delta and derives the ranges of its views
 from it, and every operation's view is resolved when its plan starts. The plan
@@ -308,7 +324,7 @@ and `-X stats`:
 | Counter | Counts |
 | --- | --- |
 | iterations | rounds of a recursive component's fixed point, round 0 included |
-| derivations | head tuples produced by an `EMIT`, facts included, new or not |
+| derivations | head tuples produced by an `EMIT` or a body-less rule, and facts seeded into a derived relation, new or not |
 | tuples inserted | derivations that added a tuple |
 | tuples scanned | tuples a `SCAN` read |
 | tuples looked up | tuples a `LOOKUP` read from an index's chain; a frontier step, which positions a delta lookup and reads no tuple, is not one |
@@ -349,24 +365,31 @@ still grow.
 
 ## 6. Materialization and when it is current
 
-**The relations of a context hold only what evaluation derived.** A fact is a
-rule with an empty body, so even the facts are in a relation because the
-pass over their component inserted them. The relations are therefore either
-the fixed point of every rule the program has, or stale, and the context
-records which by counting the
-rules they are the fixed point of. Rules are only ever appended, because
-checking is incremental and the syntax tree is append-only, so a count is
-enough.
+**The derived relations of a context hold only what evaluation put there.**
+The program's facts are in base stores, which evaluation never writes; a
+derived relation holds its predicate's facts, seeded from its base store,
+and what its rules derived. The derived relations are therefore either the
+fixed point of the program as it stands, or stale, and the context records
+which by the pair of counts they are the fixed point of: the number of the
+program's rules, and the total of the tuples its base stores hold. A program
+changes only by gaining rules, which are only ever appended because checking
+is incremental and the syntax tree is append-only, or by its base stores
+gaining facts, which nothing retracts; both counts only grow, so the
+relations are current exactly when a pair is recorded and neither count has
+changed since. One function asks the question for every caller. A load of
+facts the base stores hold already changes neither count, and leaves the
+relations current.
 
-* `relic_materialize()` checks the program, and if rules have been added since
-  the relations last reached a fixed point, **discards every tuple of every
-  relation** and computes the fixed point again from nothing.
+* `relic_materialize()` checks the program, and if the relations are not
+  current, **discards everything derived** -- every derived relation, and the
+  base stores' secondary indexes -- and computes the fixed point again from
+  the facts, recording the pair when it is reached.
 * A query run answers over everything loaded so far, so a caller that loads,
   queries, loads again and queries again gets answers over everything it
   loaded. It reads the fixed point when the relations hold it, and otherwise
-  evaluates through the query's Magic rewrite, which discards the relations
-  in the same way and leaves them holding part of a fixed point, counted as
-  the fixed point of no rules.
+  evaluates through the query's Magic rewrite, which discards in the same way
+  and leaves the relations holding part of a fixed point, with no pair
+  recorded.
 
 Continuing from the tuples already held would be sound for a program without
 negation, where a later fact can only add to what was derived, and unsound for
@@ -374,17 +397,21 @@ one with it, where a later fact can make a derived tuple false: `ready(build)`
 stops holding once a later load gives `build` a dependency that is not done.
 Discarding for every program, rather than only for one that negates, is what
 keeps that question from being asked at all, and it is the rule architecture
-section 54 already sets for `relic_fact_add()`: adding facts after evaluation
-invalidates derived state. One rule covers both ways of changing the program.
+section 54 sets for `relic_fact_add()`. A load's commit, and so
+`relic_fact_add()`, discards everything derived itself when it is about to
+add a fact the base stores lack, before it reserves room for it, so the
+limits it checks count the program's facts and nothing derived. One rule
+covers every way of changing the program.
 
-The discard empties the relations in place, so a pointer to one stays valid,
-and it happens before an evaluation begins, so no delta range can span it --
-the obligation `specs/design-relations.md` section 4 places on any operation
-that ends a span of the append-only store.
+The discard empties the derived relations in place, so a pointer to one stays
+valid, and it happens before an evaluation begins or in a load's commit, so no
+delta range can span it -- the obligation `specs/design-relations.md` section
+4 places on any operation that ends a span of the append-only store. A
+discard clears the recorded pair, and one with nothing derived to discard
+returns at once.
 
-A failed evaluation leaves the count where the discard put it, so the relations
-are stale and the next evaluation discards the part of a fixed point they hold
-before starting again.
+A failed evaluation records no pair, so the relations are stale and the next
+evaluation discards the part of a fixed point they hold before starting again.
 
 ---
 
@@ -459,9 +486,10 @@ failed one derived before starting again.
 
 Plans and cursors live in the **evaluation arena**, which is reset when each
 evaluation ends, successfully or not, and which is charged to the memory
-limit while it lives, per D-18. A fact has no plan, per section 3, and a
-pass finds its turn from the schedule, so a program of many facts costs the
-arena nothing and the limit counts the facts once, as tuples. Tuples and
+limit while it lives, per D-18. A fact is in no rule table and has no plan,
+per section 3, so a program of many facts costs the arena nothing, and the
+limits count the facts as tuples of their base stores, and again, once
+seeded, in the derived relation of a predicate rules also derive. Tuples and
 indexes live in relations, which are individually allocated and accounted
 against the limits, per D-6.
 Nothing is allocated per tuple and nothing is allocated inside the executor's
@@ -471,20 +499,22 @@ loop.
 
 ## 10. Determinism
 
-Rules run in program order, relations iterate in insertion order, and plans
-are a function of the source, so the tuples of every relation are inserted in
-the same order on every run. Rows are streamed in insertion order. Two runs
-over the same input therefore produce the same rows in the same order, which is
-what the golden tests compare; `-s` exists for the caller who must not rely on
-that.
+Rules run in program order after their component's members are seeded in
+the identifier order of their base stores, relations iterate in insertion
+order, and plans are a function of the source, so the tuples of every
+relation are inserted in the same order on every run. Rows are streamed in
+insertion order. Two runs over the same input therefore produce the same rows
+in the same order, which is what the golden tests compare; `-s` exists for
+the caller who must not rely on that.
 
 ---
 
 ## 11. What is deliberately absent
 
 * **Recursion in the executor.** Section 2.
-* **A separate fact-loading pass.** A fact is a rule with no body, inserted
-  in its turn in the pass over its component.
+* **A fact-loading pass over the whole program.** A load commits its facts
+  to base stores, and a component seeds only its own members from theirs,
+  before its first pass.
 * **Rows before completion.** Section 7.
 * **Incremental maintenance.** A change to the program discards everything
   derived, per section 6, and architecture section 70 defers anything finer.

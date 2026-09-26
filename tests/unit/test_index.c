@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -109,16 +110,21 @@ context(const char *scenario, const relic_config_t *config)
 }
 
 /*
- * The relation of a predicate with this name and arity, or NULL having
- * complained.
+ * The derived relation of a predicate with this name and arity, or NULL
+ * having complained: the relation evaluation writes and a discard empties.
+ * The predicate is made derived as evaluation's are, by a rule deriving it
+ * joining a rule table, here a scratch one.
  */
 static relic_relation_t *
 relation(relic_t *ctx, const char *scenario, const char *name, uint16_t arity)
 {
 	relic_location_t where;
 	relic_relation_t *rel;
+	relic_ruletab_t rules;
+	relic_rule_t rule;
 	relic_pred_id_t pred;
 	uint32_t symbol;
+	int appended;
 
 	bzero(&where, sizeof(where));
 	where.file = "test_index.c";
@@ -132,7 +138,14 @@ relation(relic_t *ctx, const char *scenario, const char *name, uint16_t arity)
 		return (NULL);
 	}
 
-	rel = relic_relation_for(ctx, pred);
+	bzero(&rules, sizeof(rules));
+	bzero(&rule, sizeof(rule));
+	rule.head = pred;
+	rule.head_arity = arity;
+	appended = relic_ruletab_append(ctx, &rules, &rule);
+	free(rules.entries);
+
+	rel = appended == 0 ? relic_relation_written(ctx, pred) : NULL;
 	if (rel == NULL)
 		checkf(false, scenario, "%s/%u should have a relation", name,
 		    (unsigned int)arity);
@@ -286,10 +299,15 @@ storage_by_hand(const relic_t *ctx)
 	size_t position;
 
 	bytes = 0;
-	for (position = 0; position < ctx->relations.count; position++) {
-		if (ctx->relations.entries[position] != NULL)
+	for (position = 0; position < ctx->store.derived.count; position++) {
+		if (ctx->store.derived.entries[position] != NULL)
 			bytes += relic_relation_bytes(
-			    ctx->relations.entries[position]);
+			    ctx->store.derived.entries[position]);
+	}
+	for (position = 0; position < ctx->store.bases.count; position++) {
+		if (ctx->store.bases.entries[position] != NULL)
+			bytes += relic_relation_bytes(
+			    ctx->store.bases.entries[position]);
 	}
 
 	return (bytes);

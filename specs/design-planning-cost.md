@@ -72,8 +72,8 @@ product of these factors.
    recursive in the rewritten program each gets its own delta variants,
    about *L* cubed over 3 operations in all. A rule of four hundred calls on
    one demanded predicate, under five kilobytes of text, takes seconds and
-   over a gigabyte to answer, and the budgets on rules and predicates do not
-   notice, because the program's facts raise the rule budget. The
+   over a gigabyte to answer through a rewrite sized to admit it, and with
+   no Magic limit set the budget on literals abandons it. The
    supplementary construction of `specs/design-magic.md` section 6 derives
    each prefix from the one before it, so the generated bodies are linear in
    *L*.
@@ -242,8 +242,8 @@ the user's behalf: the relation and index storage that
 `specs/design-relations.md` section 9 already totals, plus the bytes the
 arenas of operation lifetime hold from the allocator. The limit is enforced
 against that total wherever it grows: the relation store checks it before an
-insertion or an index build as it does today, and a charged arena checks it
-before it obtains a chunk.
+insertion, an index build or a load's commit to the base stores, and a
+charged arena checks it before it obtains a chunk.
 
 **Which arenas are charged** is decided by what they hold, in the terms of
 the lifetimes of `specs/design-memory.md` section 2. The evaluation arena
@@ -257,23 +257,26 @@ in the rewrite and are not charged either: they are a constant fraction of
 what the rewrite arena already pays for. Two things keep the caller's
 arenas out.
 
-* The limit bounds what a program *does*, and the program itself is bounded
-  by the caller, who chose the file; `TODO.md` records why input size is a
-  separate key and not a wider meaning for this one. Charging the program
-  arena would refuse a load of two hundred thousand facts under a limit that
-  admits their relation today, and would move a refusal from deriving to
-  loading.
+* The limit bounds what the program's stores hold and what the program
+  *does*, and the program as written is bounded by the caller, who chose the
+  file; `TODO.md` records why input size is a separate key and not a wider
+  meaning for this one. The facts a program states are held in base stores,
+  which the relation store counts (`specs/design-facts.md` section 8), so the
+  tuple and memory limits bound them, and a load whose facts do not fit is
+  refused while loading, with nothing added. Charging the program arena as
+  well would count the text of the program's rules against a limit meant
+  for what the program holds and derives.
 * A query's arena may outlive the context, per `include/relic.h`: a query is
   destroyed before or after its context. An arena charged to an account the
   context owns cannot be released after the context is, so a caller-owned
   arena cannot be in the account at all.
 
-A fact is not planned (`specs/design-eval.md` section 3), so the evaluation
-arena holds the plans of rules with bodies. Were a fact planned, its plan
-would be several times the size of its tuple, and charging the arena would
-refuse a program of many facts under a limit that admits their relation,
-which is the effect the first reason above keeps the program arena out to
-avoid.
+A fact is not a rule of the program and is not planned, and neither is a
+body-less seed of a rewrite (`specs/design-eval.md` section 3), so the
+evaluation arena holds the plans of rules with bodies. Were each fact
+planned, its plan would be several times the size of its tuple, and charging
+the arena would refuse a program of many facts under a limit that admits
+their base store.
 
 An arena is attached to the account when it is initialized, and a reset
 returns its bytes to the account and keeps the attachment, so a phase that
@@ -285,15 +288,16 @@ reviewer can see.
 
 **What the knob means** widens accordingly, in `include/relic.h`,
 `man/relic.1` and `man/relic.3`, once implemented: `max_memory` bounds the
-bytes of relation and index storage plus the working state of an evaluation
-and of a query's rewrite. It does not count the program, the interned
-symbols and values, the schedule, or the growable tables of the program and
-the rewrite, each of which is linear in something the caller wrote or in
-something the account or a budget already bounds. Zero still means
-unlimited, so under the default configuration planning memory is bounded by
-the allocator alone, exactly as the data is: the limits of D-7 are the
-user's, and a program that plans itself into gigabytes under no limit is the
-same event as one that derives itself there.
+bytes of relation and index storage, the base stores of the program's facts
+included, plus the working state of an evaluation and of a query's rewrite.
+It does not count the program's rules and queries, a load's text and its
+staging, the interned symbols and values, the schedule, or the growable
+tables of the program and the rewrite, each of which is linear in something
+the caller wrote or in something the account or a budget already bounds.
+Zero still means unlimited, so under the default configuration planning
+memory is bounded by the allocator alone, exactly as the data is: the limits
+of D-7 are the user's, and a program that plans itself into gigabytes under
+no limit is the same event as one that derives itself there.
 
 **What it checks.** A charged arena checks the account before it obtains a
 chunk, against the chunk's whole size, so that a limit which fires has

@@ -211,9 +211,6 @@ self_calling_program(unsigned int arity, unsigned int length)
 		append(&text, "X, X).\n");
 	}
 
-	for (i = 0; i < 2 * length; i++)
-		append(&text, "g(%u).\n", i);
-
 	if (text.failed) {
 		free(text.bytes);
 		return (NULL);

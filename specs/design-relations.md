@@ -6,6 +6,7 @@ the tuple and memory limits are enforced against. Forward-looking, like every
 document under `specs/`; `STATUS.md` records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 20, 21, 24, 47 and 63;
+`specs/design-facts.md` for the base stores and the commit that fills them;
 `relic-plan.md` decisions D-3, D-4, D-6, D-7 and D-10.
 
 ---
@@ -34,47 +35,67 @@ fixed-point detection are built on.
 
 ## 2. Where relations live
 
-Every predicate owns a relation, and the relation table is a prefix of the
-predicate table: the relation of predicate `id` is entry `id - 1`, and the
-table is extended to cover a predicate the first time a relation for it is
-asked for.
+A predicate has two relations at most, in two tables: its **base store**,
+which holds the facts the program states for it (`specs/design-facts.md`),
+and its **derived relation**, which exists once a rule derives it and holds
+what evaluation puts there. Each table is a prefix of the predicate table:
+the relation of predicate `id` is entry `id - 1`, and the table is extended
+to cover a predicate the first time a relation for it is asked for.
+
+**Two functions hand them out, one per role.** The relation a rule writes is
+the predicate's derived relation, created empty on first use; it is asked
+only for a rule's head, and asking it for a predicate no rule derives is an
+internal error rather than a relation created on the spot, so no rule can
+write a base store. The relation an operation reads is the derived relation
+of a derived predicate, and otherwise the base store of the predicate the
+read names -- its own, or, for a base view `p$base`, the one it views --
+which is then the whole relation; a base store is created empty on first
+use, so a predicate nothing states or derives reads as empty. Below the two
+functions nothing asks which kind a relation is, except to say what it is
+called. What handles facts as facts rather than reading them through a plan
+-- a load's commit, seeding, explain's fact count, the question of whether
+the relations are current -- reaches a base store directly, by predicate
+identifier.
 
 The relation refers to its predicate by identifier rather than by pointer.
 The predicate table is a growable array, so a pointer into it would dangle the
 next time a predicate is interned.
 
-**The table holds pointers to relations, not relations.** The same growable
+**The tables hold pointers to relations, not relations.** The same growable
 array underneath poses the same hazard in the other direction, and this is
 where it has to be answered rather than warned about. A relation is created
 once and then handed out repeatedly: a plan resolves the relation of each body
 literal, an evaluation holds the head's relation across a whole rule, and both
 outlive the creation of other relations. Were relations stored inline,
-extending the table would move every one of them, and every holder would have
+extending a table would move every one of them, and every holder would have
 to know not to keep a pointer across a call that might create a relation --
 correctness rested on a list of call sites that grows with every caller. Each
 relation is therefore its own allocation, so growth moves pointers and never
 relations, a relation's address is fixed for the life of the context, and
 there is no rule for a caller to obey.
 
-Relations are database state, not program structure. Keeping them in a table
+Relations are database state, not program structure. Keeping them in tables
 of their own rather than in a field of `relic_pred_t` is what lets the derived
 database be discarded without touching the program that derived it, which is
-the operation `relic_fact_add()` needs after an evaluation.
+the operation a load's commit and `relic_fact_add()` need after an evaluation.
 
-**One relation lives outside the table: a query's answer.** It belongs to no
+**One relation lives outside the tables: a query's answer.** It belongs to no
 predicate and has no identifier to be indexed by; it is created with the
 query object, emptied at the end of every run, and released with the query,
 per `specs/design-query.md`. To the store it is a relation like any other --
 the same struct, inserted into, read and emptied by the same functions,
 counted against the same limits -- and only its ownership differs.
 
-Discarding every relation is safe because only the evaluator inserts: every
-tuple is in a relation because a rule's `EMIT` put it there, facts included,
-so the next evaluation derives everything again. A fact a caller adds must
-therefore be a fact rule appended to the program, never a tuple inserted into
-a relation. A tuple inserted directly would be erased by the next discard,
-and would not change the rule count that tells the evaluator the program
-changed, so the next query would not see what it implies.
+Discarding what was derived is safe because of who writes what. The
+evaluator inserts into derived relations only, through a rule's `EMIT` and
+by seeding a derived relation from its predicate's base store, so the next
+evaluation seeds and derives everything a discard removes again. A load's
+commit appends to base stores and nothing else does, and no discard touches
+their tuples. A fact a caller adds is therefore committed to its base store
+as a loaded fact is, never inserted into a derived relation: a tuple
+inserted there would be erased by the next discard, and would not change
+the base stores' tuple total that tells the evaluator the program changed,
+so the next query would not see what it implies.
 
 A relation holds its tuples, their canonical index, the secondary indexes of
 `specs/design-index.md`, and the cached statistics of
@@ -148,28 +169,39 @@ reorders or renumbers it in between, which is what an evaluation needs: a
 fixed point runs entirely inside one such span.
 
 This is not a rule that callers observe; it is a property of the interface.
-The relation store offers insertion, membership, reading a tuple by
-identifier, and two operations that remove anything, both of which empty a
-relation whole: **clearing one relation**, which a query's answer undergoes
-at both ends of a run, and **discarding every relation at once**, which the
-evaluator does when the program has changed since the relations last reached
-its fixed point. Nothing removes, reorders or renumbers a single tuple. A
-discard ends one span and begins another -- identifiers restart from the
-first, so a range taken before it names nothing,
-or other tuples, after it -- and the obligation it takes on is to make sure no
+The relation store offers insertion, a load's reservation and append into
+base stores, membership, reading a tuple by identifier, and two operations
+that remove anything, both of which empty a relation whole: **clearing one
+relation**, which a query's answer undergoes at both ends of a run, and
+**discarding everything derived at once**, which empties every derived
+relation and drops the base stores' secondary indexes. The evaluator
+discards when the program has changed since the relations last reached its
+fixed point, and a load's commit when it is about to add a fact. Nothing
+removes, reorders or renumbers a single tuple, and nothing removes a base
+store's tuples at all. A discard ends one span and begins another --
+identifiers of a derived relation restart from the first, so a range taken
+before it names nothing, or other tuples, after it, and a secondary index
+taken before it is gone -- and the obligation it takes on is to make sure no
 range outlives the span it was taken in. The evaluator meets it by
-construction: every range lives in an evaluation's state, and the discard runs
-before an evaluation begins.
+construction: every range lives in an evaluation's state, and a discard runs
+only outside an evaluation, before one begins or in a load's commit.
 
-A discard empties each relation in place and releases its columns and index.
-The relations themselves stay where they are, so a pointer to one remains
-valid and names that predicate's relation, now empty. Each relation is
-emptied through `relic_relation_clear()`, which gives back what that relation
-counted against the limit totals, so the totals are at every moment the sum
-of what every relation holds, in the table or not. A query's answer relation
-is outside the table and empty whenever a discard runs, per
-`specs/design-query.md` sections 3 and 6, so both totals are zero afterwards,
-which an assertion confirms.
+A discard empties each derived relation in place and releases its columns
+and indexes, and releases each base store's secondary indexes. The relations
+themselves stay where they are, so a pointer to one remains valid and names
+the same relation. Each derived relation is emptied through
+`relic_relation_clear()`, and each index released gives back what it
+counted, so the totals are at every moment the sum of what every relation
+holds, in a table or not. A query's answer relation is outside the tables
+and empty whenever a discard runs, per `specs/design-query.md` sections 3
+and 6, so both totals count the base stores alone afterwards, which an
+assertion confirms.
+
+The store records whether it may hold anything a discard removes: the mark
+is set where it hands out a derived relation to be written or builds a
+secondary index, and cleared by the discard. A discard with the mark clear
+has nothing to do and returns without walking the tables, so a run of loads
+or `relic_fact_add()` calls between two queries pays for one discard.
 
 D-10 is what rests on it. Semi-naive evaluation represents the tuples derived
 in one iteration as a half-open range of tuple identifiers rather than as a
@@ -231,9 +263,10 @@ The insertion is ordered so that a failure leaves nothing behind:
 1. **Look the tuple up.** A tuple already present is reported as not added and
    nothing is allocated.
 2. **Check the limits** against what the relation and its indexes will hold
-   once the tuple is in them. This is the only place the tuple limit is
-   enforced, and the memory limit is enforced here and, by the same
-   projection, when an index is built; either way before anything is
+   once the tuple is in them. This is where the tuple limit is enforced on
+   what evaluation inserts, as a load's commit enforces it on the facts it
+   adds (below); the memory limit is enforced here, by the same projection
+   when an index is built, and in the commit; each time before anything is
    modified.
 3. **Reserve room in the index**, which is the step that can fail.
 4. **Reserve room for the columns**, and in every secondary index, which are
@@ -275,6 +308,22 @@ one another, `specs/design-evaluation-cost.md` section 6. Both entry points
 hash the tuple and then perform one insertion by that hash, the steps
 above, so they cannot disagree about what a duplicate is or where a limit
 falls.
+
+**A load's commit reserves, then appends.** The facts a load adds to base
+stores are not inserted one at a time: the commit has looked every staged
+fact up already, and knows how many each base store gains
+(`specs/design-facts.md` section 4.3). The store checks both limits once,
+against the totals plus everything the commit adds, and refuses the whole
+load before any store is created or grown. It then reserves room for *n*
+tuples in each store, growing its columns and its canonical index at most
+once, to exactly the bytes the check projected, and the commit appends each
+fact into that room without looking anything up; no append can fail. A
+reservation for more than one tuple is made only of a relation without
+secondary indexes, which a base store is when a commit reserves, since the
+commit discards what was derived first: a secondary index would be given
+room for a key per tuple, far more than a column of few values uses. A
+failed allocation among the growths leaves every store's contents as they
+were, and keeps whatever capacity it obtained, accounted.
 
 ---
 
@@ -332,26 +381,32 @@ and indexes are what actually grow:
 
 | Limit | Counts | Configured by |
 | --- | --- | --- |
-| `max_tuples` | tuples across every relation | `-l tuples=N` |
+| `max_tuples` | tuples across every relation, base stores included | `-l tuples=N` |
 | `max_memory` | bytes of column and index storage, plus an operation's arenas | `-l memory=N` |
 
 Zero means unlimited, so a zeroed configuration asks for the defaults.
 
 **What the memory limit counts** is the bytes the column arrays, the canonical
 index's slots and every secondary index's arrays actually hold, summed over
-every relation -- allocated capacity, not the smaller number a tuple count
-implies. A limit that ignored the difference would let a relation hold twice
-what the user allowed, which would defeat the purpose of asking.
+every relation, base stores and derived relations alike -- allocated
+capacity, not the smaller number a tuple count implies. A limit that ignored
+the difference would let a relation hold twice what the user allowed, which
+would defeat the purpose of asking. A fact of a derived predicate is held
+twice, in its base store and in its derived relation, and counted twice.
 
-It does not count the array of relation headers, a relation's array of index
-headers, the predicate table, the value table, or the arenas that hold the
-program, the schedule or a query as the caller wrote them. Those are sized by
-what the caller wrote, and the limit exists to bound what running it can do. The arenas that hold an evaluation's plans and a query's
-rewrite are sized by the square of a body and are charged to the same total,
-per `specs/design-planning-cost.md` section 6; the check there is the
-arena's, and this document's total is the part the store contributes.
+It does not count the arrays of relation headers, a relation's array of index
+headers, the predicate table, the value table, the arenas that hold the
+program's rules, the schedule or a query as the caller wrote them, the text
+a load reads, or the staging a load holds its facts in until it commits.
+Those are sized by what the caller wrote, and the limit exists to bound what
+the program's stores hold and what running the program can do. The arenas
+that hold an evaluation's plans and a query's rewrite are sized by the square
+of a body and are charged to the same total, per
+`specs/design-planning-cost.md` section 6; the check there is the arena's,
+and this document's total is the part the store contributes.
 
-**When it is checked** is before the insertion modifies anything. The
+**When it is checked** is before the insertion, or a load's reservation,
+modifies anything. The
 projected size is computed from the growth policies rather than measured after
 the fact, so that a limit which fires has prevented the allocation rather than
 reported it. Two pure functions make that possible: one gives the capacity a
@@ -370,15 +425,23 @@ to remember, and a step added later would not be on it.
 **When a limit fires**, the relation is exactly as it was. The check precedes every
 mutation, so consistency after a refused insertion is a property of the
 ordering rather than of an unwind path. The diagnostic names the limit, its
-configured value and the predicate being derived into, in the form of
-architecture section 63, or the predicate being indexed when the memory limit
-fires while an index is built:
+configured value, the activity and the relation, in the form of architecture
+section 63: the predicate being derived into, the one being indexed when the
+memory limit fires while an index is built, or, when a load's commit is
+refused, the first predicate, in the order the load's facts name them, whose
+base store it would grow. The activity is a parameter of the one function
+that reports a refusal, so every limit is reported in the same form:
 
 ```text
 relic: limit exceeded: tuples=1000000 while deriving path/2
 relic: limit exceeded: memory=536870912 while deriving path/2
 relic: limit exceeded: memory=536870912 while indexing edge/2
+relic: limit exceeded: tuples=4 while loading e/1
 ```
+
+A relation is named by its predicate, and the base store of a derived
+predicate by its base view's name, `p$base`, since `p` names the derived
+relation.
 
 Discarding the partial results is the evaluator's part and is specified with
 it. The store's part is to refuse the tuple and to stay consistent.
@@ -402,9 +465,10 @@ The relation store contributes three things to the reproducibility of a run:
 ## 11. What is deliberately absent
 
 * **Removal of a tuple.** Nothing deletes one tuple; the only removal is the
-  discard of every relation, which is what keeps the append-only invariant a
-  property rather than a rule. The identifier table underneath the index has
-  no tombstones for the same reason.
+  discard of every derived relation, which is what keeps the append-only
+  invariant a property rather than a rule, and a base store loses nothing.
+  The identifier table underneath the index has no tombstones for the same
+  reason.
 * **A sorted or tree-shaped store.** Membership is the operation that matters
   and a hash answers it in constant time; sorting is an output concern and is
   done by the output layer on the rows it is about to print.

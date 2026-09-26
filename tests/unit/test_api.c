@@ -960,6 +960,7 @@ an_added_fact_is_the_fact_its_text_loads(void)
 	refusals += relic_fact_add(added, "Edge", 2, edge) == -1;
 	refusals += relic_fact_add(added, "not", 2, edge) == -1;
 	refusals += relic_fact_add(added, "", 2, edge) == -1;
+	refusals += relic_fact_add(added, "edge$base", 2, edge) == -1;
 	refusals += relic_fact_add(added, "edge", 2, NULL) == -1;
 	refusals += relic_fact_add(added, NULL, 2, edge) == -1;
 	bzero(wide, sizeof(wide));
@@ -970,8 +971,8 @@ an_added_fact_is_the_fact_its_text_loads(void)
 	edge[1].type = RELIC_SYMBOL;
 	edge[1].v.id = UINT32_MAX;
 	refusals += relic_fact_add(added, "edge", 2, edge) == -1;
-	checkf(refusals == 8 && log.errors == 8, SCENARIO_FACT,
-	    "eight malformed facts should each be refused with one error, "
+	checkf(refusals == 9 && log.errors == 9, SCENARIO_FACT,
+	    "nine malformed facts should each be refused with one error, "
 	    "not %zu refusals and %zu errors", refusals, log.errors);
 
 	from_added = answer_text(added, "path(X, Y)?");

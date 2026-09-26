@@ -1,10 +1,8 @@
-stratum 0, component 0: e/2
-    facts: 3
-stratum 0, component 1: loop/1
+stratum 0, component 0: loop/1
     rule loop(X) :- e(X, X).
         scan e(X, X)
         emit loop(X)
-stratum 0, component 2 (recursive): r/2
+stratum 0, component 1 (recursive): r/2
     rule r(X, Y) :- e(X, Y).
         scan e(X, Y)
         emit r(X, Y)

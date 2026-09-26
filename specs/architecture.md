@@ -1885,7 +1885,11 @@ relic_fact_add(relic_t *,
     const relic_value_t *);
 ```
 
-Adding facts after evaluation invalidates derived state in v1.
+A fact added this way is committed to its predicate's base store, exactly
+as a loaded fact is (`specs/design-facts.md` section 4): it is there when
+the call returns, and a tuple or memory limit it does not fit refuses it
+with nothing added. A fact the base store lacks changes the program, so
+the commit discards everything derived in v1.
 
 The next query may rematerialize as necessary.
 
@@ -2153,10 +2157,11 @@ and a nonzero exit status, because a truncated answer set would be
 indistinguishable from a complete one.
 
 The two Magic limits are the exception when both are left unset: the rewrite
-then has budgets proportional to the program, on predicates, rules and the
-literals of the rules it drafts, and a rewrite outgrowing one answers the
-query from the whole program rather than failing it, per section 38. Setting
-either limit lifts every budget.
+then has budgets proportional to the program, on the predicates it generates
+and the literals of the rules it drafts, which bound the rules it keeps as
+well, and a rewrite outgrowing one answers the query from the whole program
+rather than failing it, per section 38. Setting either limit lifts every
+budget.
 
 ---
 
@@ -2523,9 +2528,11 @@ If:
 relic_fact_add(...)
 ```
 
-is called after materialization, affected derived state may be discarded and recomputed.
+is called after materialization, the fact is committed to its predicate's
+base store and, when the store lacked it, everything derived is discarded,
+to be recomputed from the base stores by the next evaluation.
 
-The internal delta-oriented architecture should nevertheless make future incremental insertion support natural.
+The internal delta-oriented architecture should nevertheless make future incremental insertion support natural: a new base tuple is exactly a delta of an extensional predicate.
 
 Deletion support is deferred because it requires derivation tracking, DRed, or related machinery.
 
@@ -2867,19 +2874,21 @@ standard output carries only query results in every format.
 **Magic Sets, sections 34, 37, 39 and 60.** Generated predicates are named
 `path$bf` and `magic$path$bf`, per D-12 of the plan, rather than the
 `path_bf` and `magic_path_bf` of the examples, which a program could collide
-with. Besides negated relations, a query reads extensional predicates and
-everything a completely read relation depends on in full; those are
-materialized before the rewrite, so that the rewrite's ordering measures them.
+with. A query reads a predicate no rule derives from its base store, and
+negated relations and everything a completely read relation depends on in
+full; those are materialized before the rewrite, so that the rewrite's
+ordering measures them.
 A query against a program whose relations already hold its fixed point is not
 rewritten: it reads them directly. `specs/design-magic.md` records the
 reasoning.
 
 **Magic limits, sections 38, 49 and 63.** With both left unset, the limits on
 generated Magic predicates and rules are replaced by budgets proportional to
-the program, joined by one on the literals the rewrite drafts, rather than
-being unlimited, and a rewrite outgrowing one is abandoned with a warning and
-the query answered from the whole program; setting either lifts them all. Adornments are finite but can be
-exponential in the arity, and an optimization must neither decide whether a
+the program, one on generated predicates and one on the literals the rewrite
+drafts, which bounds the rules it keeps as well, rather than being unlimited,
+and a rewrite outgrowing one is abandoned with a warning and the query
+answered from the whole program; setting either lifts them all.
+Adornments are finite but can be exponential in the arity, and an optimization must neither decide whether a
 query is answered nor generate a program unboundedly larger than the one it
 specializes.
 

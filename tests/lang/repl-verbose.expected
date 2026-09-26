@@ -6,8 +6,6 @@ a
 1
 
 
-stratum 0, component 0: v/1
-    facts: 2
 query $q4 :- v(a).
     member v(a)
     emit $q4

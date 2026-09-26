@@ -194,8 +194,10 @@ esac
 
 # -l sets each limit the library enforces, by the key the diagnostic names
 # it by, and zero asks for the default.  A repeated key takes its later value.
-# The memory limit counts the working state of a query's Magic rewrite, so a
-# limit of one byte refuses the rewrite's first allocation.
+# The memory limit counts the facts a load stores, so a limit of one byte
+# refuses graph.dl's load, naming the first predicate its facts would grow.
+# It also counts the working state of a query's Magic rewrite, so the same
+# limit refuses the rewrite's first allocation for a program with no facts.
 status=0
 diagnostic=$("$RELIC" -l memory=1 "$work/graph.dl" 2>&1 >/dev/null) ||
     status=$?
@@ -203,17 +205,32 @@ if [ "$status" -ne 1 ]; then
 	fail "an exceeded memory limit exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=1 while rewriting \$q0/"*)
+*"limit exceeded: memory=1 while loading edge/2"*)
 	;;
 *)
 	fail "an exceeded memory limit was reported as '$diagnostic'"
 	;;
 esac
 
+status=0
+diagnostic=$(printf 'p(X) :- q(X).\nq(X) :- p(X).\np(a)?\n' |
+    "$RELIC" -l memory=1 2>&1 >/dev/null) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an exceeded memory limit in a rewrite exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"limit exceeded: memory=1 while rewriting \$q0/"*)
+	;;
+*)
+	fail "an exceeded memory limit in a rewrite was reported as '$diagnostic'"
+	;;
+esac
+
 # The memory limit counts the plans an evaluation holds as well as its
 # relations, so a limit smaller than the evaluation arena's first chunk
 # refuses the first component's plans, named by its first member, before any
-# tuple is derived.  Building an index is relation storage like any other,
+# tuple is derived: two/2, since edge/2 holds facts alone and has no
+# component to plan.  Building an index is relation storage like any other,
 # and a limit that admits the plans and a relation's tuples can refuse the
 # index a later rule looks them up through; that refusal names the relation
 # being indexed.
@@ -232,7 +249,7 @@ if [ "$status" -ne 1 ]; then
 	fail "refused plans exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=3000 while planning edge/2"*)
+*"limit exceeded: memory=3000 while planning two/2"*)
 	;;
 *)
 	fail "refused plans were reported as '$diagnostic'"

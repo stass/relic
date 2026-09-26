@@ -125,12 +125,18 @@ measurement rather than an argument.
 
 ### D-4 Determinism
 
-Identifiers assigned in first-appearance order. Relations iterate in
-insertion order. Planner ties break by source position. Magic predicate names
-derive from predicate and adornment, never a counter. No result and no `-e`
-output depends on a pointer value. The golden test suite depends on all of
-this. The hash seed was fixed at compile time under this decision until D-19
-made it random per context.
+Identifiers assigned in first-appearance order; a load interns the
+predicates of its facts as it reads them, before any rule not yet compiled,
+since the rule table holds a program's rules and its facts are stored in base
+stores (`specs/design-facts.md`). Relations iterate in insertion order: a
+base store in the order the text states its facts, and a derived relation
+beginning with the facts seeded from its base store. The undefined-predicate
+warning points at the first atom that reads a predicate, and the warnings
+follow predicate identifier order. Planner ties break by source position.
+Magic predicate names derive from predicate and adornment, never a counter.
+No result and no `-e` output depends on a pointer value. The golden test
+suite depends on all of this. The hash seed was fixed at compile time under
+this decision until D-19 made it random per context.
 
 ### D-5 Error model
 
@@ -166,14 +172,15 @@ partial results.
 The two Magic limits differ in what happens when they are not set. The rewrite
 is an optimization, so when no limit was asked for, it must not decide whether
 a query is answered, and must not generate more than a constant multiple of
-the program it rewrites. Unset, each is a budget proportional to the program -- a
-floor plus a factor times its derived predicates or its rules -- and a rewrite
-outgrowing it is abandoned with a warning and the query answered from the
-whole program. Set, it is a limit like the others.
-A third budget, on the body literals the rewrite generates, has no limit
-behind it: it is the invariant that a rewrite nobody has sized stays a
-constant multiple of the program, which the rule budget cannot hold on its
-own. Configuring either Magic limit lifts all three budgets
+the program it rewrites. With neither set, the rewrite has two budgets
+proportional to the program -- a floor plus a factor times its derived
+predicates, and the same times its size in literals for the body literals
+the rewrite generates -- and a rewrite outgrowing one is abandoned with a
+warning and the query answered from the whole program. Set, each Magic limit
+is a limit like the others. The literal budget has no limit behind it: it is
+the invariant that a rewrite nobody has sized stays a constant multiple of
+the program, and it bounds the generated rules as well, so they have a limit
+and no budget (D-21). Configuring either Magic limit lifts both budgets
 (`specs/design-magic.md` section 8).
 
 ### D-8 The plan representation exists from S5
@@ -1314,12 +1321,13 @@ so generated bodies are linear in L, and a rule with one demand call
 generates exactly what it did. The cost is a relation per cut, accepted
 uniformly rather than behind a threshold. Supplementary predicates are
 bounded by the rule budget, one rule each, and not counted by the predicate
-limit. A third budget, on generated literals, bounds what remains -- a rule
-copied whole once per adornment -- with no limit behind it. It measures
-the program as one adorned copy of it, a fact counting one, and counts
-every rule drafted, dropped or not, so the arena is bounded by
-construction. Like the
-other two it is lifted when either Magic limit is configured: the budgets
+limit; D-21 retires that budget, and the literal budget bounds them. A
+third budget, on generated literals, bounds what remains -- a rule copied
+whole once per adornment -- with no limit behind it. It measures the
+program as one adorned copy of it, and counts every rule drafted, dropped
+or not, so the arena is bounded by construction; D-21 counts a derived
+predicate's facts as the two literals of its base-view rule. Like the
+other budgets it is lifted when either Magic limit is configured: the budgets
 are proportional to the program, the cost of not rewriting to the data, and
 a caller who set a limit has sized the rewrite. Reverses the
 part of `specs/design-magic.md` section 13 that left supplementary
@@ -1327,3 +1335,22 @@ predicates out pending a measurement: a rule of 400 demand calls, 4.8 KB of
 text, took 2.4 s and 1.69 GB through the rewrite against 0.03 s and 1 MB
 without it.
 Specified in `specs/design-magic.md` sections 6 and 8.
+
+### D-21 Generated rules have a limit and no budget
+
+The rewrite had a third budget, on the rules it keeps, of 256 + 16 x the
+program's rules, facts included. Once facts left the program
+(`specs/design-facts.md`), it abandoned rewrites it existed to admit: one
+adornment of a single rule of k demand calls keeps a magic rule and a
+supplementary rule per call, about 2k rules from one rule of the program,
+and a rule of 400 calls over 200 facts, answered through its rewrite while
+the facts funded the budget, outgrew a budget of 288. A budget on rules in
+proportion to the program's literals would bound nothing the literal budget
+does not, to within a factor of two: every rule is charged its body before
+it is kept, every one but a seed has a body literal, and a seed not the
+query's records the first call of an adorned rule whose draft was charged a
+literal, so the rules kept number at most twice the literals drafted plus
+the query's seeds, and the literal budget bounds them already. The budget
+is retired; `max_magic_rules` stays a configurable limit, and configuring
+it lifts both remaining budgets as before.
+Specified in `specs/design-magic.md` section 8.

@@ -89,6 +89,9 @@ Check the program and its queries, and evaluate nothing.
 .It Fl e
 Write the plan of everything evaluated to the standard error: each part of
 the program as it is planned, and each query's plan before its rows.
+A part whose predicates have facts counts them as
+.Ql facts: N ;
+a predicate of facts alone needs no evaluation and is not shown.
 The text is meant to be read and may change from one release to the next.
 A plan names a query's answer
 .Ql $q
@@ -180,7 +183,10 @@ answer every query from the whole program;
 .It Cm no-reorder
 join a rule's atoms in the order they are written;
 .It Cm stats
-write the evaluation counters to the standard error when the run ends.
+write the evaluation counters to the standard error when the run ends;
+the derivations count what rules derive and the facts copied into a
+predicate that rules also derive, not the facts of a predicate no rule
+derives.
 .El
 .Pp
 Each gives the same answers as the default.
@@ -199,11 +205,12 @@ from 0, which asks for the default, to the largest size the platform can
 hold.
 .Bl -tag -width magic-preds
 .It Cm tuples
-the most tuples all relations together may hold; by default there is no
-limit.
+the most tuples all relations together may hold, the program's facts
+included; by default there is no limit.
 .It Cm memory
-the most bytes relation and index storage, the plans of an evaluation and
-the rewrite of a query may occupy together; by default there is no limit.
+the most bytes relation and index storage, the program's facts included,
+the plans of an evaluation and the rewrite of a query may occupy together;
+by default there is no limit.
 A long rule's plans can need more memory than the data does.
 .It Cm magic-preds
 the most predicates the rewrite of one query may generate.
@@ -216,12 +223,16 @@ A query or evaluation that exceeds
 or
 .Cm memory
 fails, and writes no rows.
+A file whose facts would exceed either is refused when it is loaded, with
+nothing of it added, and the diagnostic names the first predicate, in the
+order the file names them, that would gain facts:
+.Dl relic: error: limit exceeded: tuples=4 while loading e/1
 When neither
 .Cm magic
 limit is set, the rewrite has budgets in proportion to the program, on the
-predicates and rules it generates and on the literals of the rules it
-drafts, and a rewrite that outgrows one is abandoned with a warning and the
-query answered from the whole program.
+predicates it generates and on the literals of the rules it drafts, which
+bound the rules it keeps as well, and a rewrite that outgrows one is
+abandoned with a warning and the query answered from the whole program.
 Setting either lifts every budget: a
 .Cm magic
 limit that is set is a limit like the others, and one left unset beside it

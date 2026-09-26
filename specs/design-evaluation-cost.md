@@ -29,8 +29,8 @@ document amends.
   of its component, fixed when the round starts, so that a round's own
   insertions are invisible to it by construction and every derivation is
   made once;
-* round 0 runs the facts and the exit rules only, and the first delta is the
-  whole of each member;
+* round 0 seeds the members with their facts and runs the body-less and exit
+  rules only, and the first delta is the whole of each member;
 * **the delta literal is placed by the planner like any other literal**, and
   a lookup reaches the start of a delta through a per-key **frontier** of the
   relation's own index, without copying the delta and without an index of
@@ -223,22 +223,29 @@ reads no relation. Neither has a view.
 
 ### 3.4 Round 0 and the deltas
 
-**Round 0 runs the facts and the exit rules of the component**, the rules
-with no positive literal over a member, each once, in program order. A
-recursive rule, one with such a literal, has no base plan under the
-semi-naive fixed point and runs only as its variants; its base plan exists
-under `-X naive`, where every rule runs in full every pass.
+**Round 0 seeds the members and runs the exit rules of the component.**
+Each member whose base store holds facts is seeded from it first
+(`specs/design-eval.md` section 3), and then the body-less rules -- a
+rewrite's seeds -- and the exit rules, the rules with no positive literal
+over a member, run each once, in program order. A recursive rule, one with
+such a literal, has no base plan under the semi-naive fixed point and runs
+only as its variants; its base plan exists under `-X naive`, where every
+rule runs in full every pass.
 
 At the start of the component every member's delta is set empty at the
 first identifier, `[1, 1)`, and a member that already holds tuples is
-recorded as having gained, as though round 0 had inserted them. The
-relations were discarded before the evaluation began and nothing but
-evaluation writes a member, so no member holds anything at that point;
-the rule costs nothing and makes the argument of section 3.5
-independent of that fact, which a recursive rule that no longer runs in
-round 0 would otherwise depend on silently. Round 0 inserts the facts and
-what the exit rules derive. **The first delta of each member is therefore
-the whole of it**, and round 1 is the first round to run a variant.
+recorded as having gained, as though round 0 had inserted them. The derived
+relations were discarded before the evaluation began, since the program was
+not current -- its rules or its base stores' facts had grown since the pair
+of counts recorded at the last fixed point, or no pair was recorded -- and
+nothing but evaluation writes a member, so what a member holds at that point
+is exactly the facts seeding put there; the rule makes each of them part of
+the first delta as a gain of round 0, and makes the argument of section 3.5
+independent of what the member held, which a recursive rule that no longer
+runs in round 0 would otherwise depend on silently. Round 0 then inserts the
+body-less rules' tuples and what the exit rules derive. **The first delta of
+each member is therefore the whole of it**, and round 1 is the first round to
+run a variant.
 
 **Invariant: at the start of every round, each member's delta is exactly
 the tuples it gained in the previous round, possibly none, and its end is
@@ -284,7 +291,7 @@ view. A round after *m* + 1 has a delta from a round after *m*, to which
 none of the tuples belongs, so no variant finds its delta tuple among them:
 **uniqueness**.
 
-A combination whose tuples all belong to round 0, facts and exit-rule
+A combination whose tuples all belong to round 0, seeded facts and exit-rule
 derivations, is the case *m* = 0: variant 1 derives it in round 1 from the
 whole of each member, and no `old` view holds anything.
 
@@ -655,9 +662,10 @@ function of the plans and not of how many rounds ran.
 
 The component's plans are recorded per rule, each rule with its base plan
 or its variants, which is what lets explain pair them without walking two
-arrays in step, and what counts a component's facts: the rules with no
-plan, rather than the difference of two array lengths, which would count
-every recursive rule as a fact once it has no base plan.
+arrays in step, and what counts a component's body-less rules, which its
+`facts:` line adds to the facts its members' base stores hold: the rules
+with no plan, rather than the difference of two array lengths, which would
+count every recursive rule as body-less once it has no base plan.
 
 ---
 
@@ -834,18 +842,19 @@ table and rereads every tuple at each doubling of a relation's canonical
 index. Section 5.2 measured what storing the hash in the slot would save,
 about a quarter of `facts-join`, and left it for its memory.
 
-The larger cost is that of a fact as a program object. A fact is a rule with
-an empty body, `specs/design-parser.md` section 5, and the representation
-follows: the parser keeps its statement in the syntax tree, which is
-append-only and never discarded, the check compiles it into a `relic_rule_t`
-with its head arguments in the program arena and an entry in the rule table,
-the schedule records it in its component, and evaluation inserts its tuple.
-Per ternary fact that is a statement with three terms and their locations, a
-compiled rule with three arguments, and a schedule index: several hundred
-bytes, against the twelve of the tuple and the handful of its index slot. The
-450 to 500 bytes per fact of `facts-join`'s peak are that, and the loading
-time of the small workloads is the parsing, checking and scheduling of each
-fact as a rule, before its tuple is ever inserted.
+The larger cost is that of a fact held as a program object. A fact is a rule
+with an empty body, `specs/design-parser.md` section 5, and a representation
+that followed the language would keep its statement in the syntax tree,
+which is append-only and never discarded, compile it into a `relic_rule_t`
+with its head arguments in the program arena and an entry in the rule
+table, record it in its component's schedule, and have evaluation insert its
+tuple. Per ternary fact that is a statement with three terms and their
+locations, a compiled rule with three arguments, and a schedule index:
+several hundred bytes, against the twelve of the tuple and the handful of
+its index slot. Measured on that representation, it was the 450 to 500
+bytes per fact of `facts-join`'s peak in section 2, and the loading time of
+the small workloads there was the parsing, checking and scheduling of each
+fact as a rule, before its tuple was ever inserted.
 
 Note that a symbol is not interned twice in the sense of hashing its bytes
 twice: the lexer interns the bytes into the symbol table, and the value
@@ -853,16 +862,18 @@ table hashes the symbol's identifier, one word, to intern the value. The
 second is cheap; the first, and the rehash at each growth, are the
 interning costs.
 
-The remedy is a representation question. A fact should stay a rule in the
-semantics -- that is what lets `relic_fact_add()`, the discard, Magic's
-per-adornment guards and the schedule treat facts and rules alike -- while
-costing a tuple in the store and nothing per fact in the syntax tree, the
-rule table or the schedule. That touches the parser, the program model,
-stratification's rule counts, explain's fact counts, `relic_fact_add()`,
-the Magic rewrite's copying of facts into guarded rules, and round 0, and
-it is preceded by a profile that says which of those costs the time and
-the peak. It gets a design of its own, `specs/design-facts.md`, and is out
-of this document's scope; `TODO.md` carries it.
+The remedy is a representation question, and `specs/design-facts.md`
+settles it. A fact stays a rule with an empty body in the language, and is
+stored as a tuple of its predicate's base store, costing a tuple and an
+index slot and nothing per fact in the syntax tree, the rule table or the
+schedule. A load stages its facts and commits them to the base stores; a
+derived predicate's relation is seeded from its base store before its
+component's first pass, section 3.4; the relations are current while
+neither the program's rule count nor its base stores' tuple total has grown
+since the last fixed point; and the Magic rewrite reads a derived
+predicate's facts through one rule over its base view per adornment rather
+than a guarded copy of each fact. The representation is that document's
+subject and outside this one's.
 
 ---
 
@@ -878,19 +889,20 @@ re-derived from section 3 and asserted exactly. Two are added:
 
 * **The complete graph.** `par` holds every ordered pair of 40 nodes, loops
   included, 1600 tuples, and `tc(X, Y) :- par(X, Y). tc(X, Z) :- par(X, Y),
-  tc(Y, Z).` is queried whole. Round 0 inserts 1600 facts and derives 1600
-  from the exit rule; round 1 joins the 1600 delta tuples with 40 `par`
-  tuples each, 64,000 derivations, none new, and the fixed point is
-  reached. With the query's 1600 rows the derivations number 68,800 and the
-  tuples looked up 64,000. An evaluator whose round 0 runs the recursive
-  rule and whose views reach the round's own insertions makes 132,800 and
-  128,000.
+  tc(Y, Z).` is queried whole. No rule derives `par`, so its facts are read
+  from its base store and seed nothing. Round 0 derives 1600 from the exit
+  rule; round 1 joins the 1600 delta tuples with 40 `par` tuples each,
+  64,000 derivations, none new, and the fixed point is reached. With the
+  query's 1600 rows the derivations number 67,200 and the tuples looked up
+  64,000. An evaluator whose round 0 runs the recursive rule and whose
+  views reach the round's own insertions makes 131,200 and 128,000.
 * **Two member literals.** `p(X, Y) :- edge(X, Y). p(X, Z) :- p(X, Y),
   p(Y, Z).` over a chain of *n* nodes. A body of the recursive rule is
   satisfied once per triple of nodes in chain order, so its variants make
-  *n* choose 3 derivations over the fixed point, to which the *n* - 1 facts
-  and the exit rule's *n* - 1 add; the query adds *n* choose 2. For *n* =
-  20 that is 1140 + 19 + 19 + 190 = 1368 derivations, which an evaluator
+  *n* choose 3 derivations over the fixed point, to which the exit rule's
+  *n* - 1 add, the *n* - 1 facts of `edge` being read from its base store;
+  the query adds *n* choose 2. For *n* = 20 that is 1140 + 19 + 190 = 1349
+  derivations, which an evaluator
   whose views reach the current round's insertions exceeds. The test also
   covers the boundary of section 3.4 with two members, one gaining in a
   round the other does not.
@@ -917,9 +929,10 @@ the semi-naive and naive fixed points on generated programs and is the
 test that no view loses a derivation on bodies nobody wrote by hand. It
 cannot see a derivation made twice, since a duplicate changes no answer, so
 `tests/random` gains a count: for a program whose rules hold no `_`,
-`derivations` must equal the facts plus, for each rule, the number of
-distinct bindings of its body variables over the final relations, which
-the driver computes from the naive answer.
+`derivations` must equal the distinct facts of the predicates rules derive,
+which seed their relations, plus, for each rule, the number of distinct
+bindings of its body variables over the final relations, which the driver
+computes from the naive answer.
 
 **Sanitizers.** `make check-asan` and `make check-ubsan` before each commit:
 the frontier, the batch buffer and the per-rule plan records are memory

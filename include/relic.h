@@ -109,36 +109,42 @@ typedef struct relic_config relic_config_t;
  * options, which exist only to parse into this structure: a limit is defined
  * in one place and nowhere else.
  *
- * `max_tuples` counts tuples across every relation and `max_memory` the bytes
- * their storage holds together with the working state of an evaluation and
- * of a query's Magic rewrite.  Exceeding either is an ordinary error: what
- * would exceed it is refused, a diagnostic names the limit, its configured
- * value and what was being done, and the relation is left as it was.
+ * `max_tuples` counts tuples across every relation, the facts the program
+ * states among them, and `max_memory` the bytes their storage holds together
+ * with the working state of an evaluation and of a query's Magic rewrite.
+ * Exceeding either is an ordinary error: what would exceed it is refused, a
+ * diagnostic names the limit, its configured value and what was being done,
+ * and the relation is left as it was.  A load, or relic_fact_add(), whose
+ * facts do not fit is refused with nothing added, naming the first
+ * predicate, in the order its text names them, that would gain facts:
+ * "limit exceeded: tuples=4 while loading e/1".
  *
- * `max_memory` bounds what running the program holds: relation and index
- * storage, which grows with the data, and the plans of an evaluation and the
- * rewritten rules of a query, which grow with the square of a rule's length.
- * A limit that fits a program's data may therefore refuse its plans, before
- * any tuple is derived.  It does not bound the memory the library uses in
- * total: the loaded program, the symbols and values it mentions, the
- * evaluation order and a prepared query are sized by what the caller wrote,
- * and the tables and evaluation order of a query's rewrite are a fraction of
- * the rewrite the limit does count.
+ * `max_memory` bounds what the program's stores hold and what running the
+ * program holds: relation and index storage, the program's facts and what it
+ * derives alike, which grows with the data, and the plans of an evaluation
+ * and the rewritten rules of a query, which grow with the square of a rule's
+ * length.  A limit that fits a program's data may therefore refuse its
+ * plans, before any tuple is derived.  It does not bound the memory the
+ * library uses in total: the program's rules and queries, the text being
+ * loaded, the symbols and values it mentions, the evaluation order and a
+ * prepared query are sized by what the caller wrote, and the tables and
+ * evaluation order of a query's rewrite are a fraction of the rewrite the
+ * limit does count.
  * Nor is it a bound on peak usage, since growing an array holds the old one
  * until the new one is filled.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
- * single query: the adorned and magic predicates it generates, and the rules
- * it keeps once duplicates are dropped.  Exceeding either fails the query
- * with a diagnostic naming the limit, its configured value and the predicate
- * being adorned.  Setting either sizes the rewrite: a limit left at zero
- * beside one that is set is unbounded.  With both at zero, the library sets
- * budgets in proportion to the program, on the predicates and rules the
- * rewrite generates and on the literals of every rule it drafts, and a
- * rewrite outgrowing one is abandoned with a warning and the query answered
- * from the whole program, as it would be with RELIC_F_NO_MAGIC: the rewrite
- * is an optimization, and without a limit the caller asked for it must not
- * decide whether a query is answered.  The budgets bound the rewrite, not
+ * single query: the adorned and magic predicates it generates, and the rules it
+ * keeps once duplicates are dropped.  Exceeding either fails the query with a
+ * diagnostic naming the limit, its configured value and the predicate being
+ * adorned.  Setting either sizes the rewrite: a limit left at zero beside one
+ * that is set is unbounded.  With both at zero, the library sets budgets in
+ * proportion to the program, on the predicates the rewrite generates and on the
+ * literals of every rule it drafts, which bounds the rules it keeps as well,
+ * and a rewrite outgrowing one is abandoned with a warning and the query
+ * answered from the whole program, as it would be with RELIC_F_NO_MAGIC: the
+ * rewrite is an optimization, and without a limit the caller asked for it must
+ * not decide whether a query is answered.  The budgets bound the rewrite, not
  * what its rules derive.
  *
  * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
@@ -364,9 +370,11 @@ RELIC_EXPORT void relic_diag_stderr(void *callback_ctx,
  * diagnostic callback.  Several loads append to one logical program, which
  * is what lets facts and rules be split across files.
  *
- * A load is all or nothing: a failed one adds none of its statements, so a
- * program never holds half of a file.  A program with an error in it is not
- * a smaller program, it is a different one.
+ * A load is all or nothing: a failed one adds none of its facts and none of
+ * its statements, so a program never holds half of a file.  A program with
+ * an error in it is not a smaller program, it is a different one.  A load
+ * whose facts `max_tuples` or `max_memory` does not admit is refused, as
+ * relic_config_t describes.
  */
 RELIC_EXPORT int relic_load_file(relic_t *ctx, const char *source_name,
     FILE *stream);
@@ -376,9 +384,11 @@ RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
 
 /*
  * Add the fact predicate(values[0], ..., values[arity - 1]) to the program,
- * exactly as loading its text would: it is appended after everything loaded
- * before it, checked with the next check, and shown by explain like any other
- * fact.  Returns 0, or -1 with the reason reported and nothing added.
+ * exactly as loading its text would: it is stored with the program's other
+ * facts before the call returns, and counted by explain like any other fact.
+ * Returns 0, or -1 with the reason reported and nothing added; a tuple or
+ * memory limit the fact does not fit is one such reason, reported as a
+ * load's refusal is.
  *
  * `predicate` is a NUL-terminated name, which must be a symbol by the rule of
  * relic_value_symbol() and must not be the negation keyword `not`.  `arity`
@@ -387,11 +397,12 @@ RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
  * when `arity` is zero.  A predicate is identified by its name and arity
  * together, so a fact of a new arity starts a new predicate.
  *
- * Adding a fact, like loading, changes the program, so everything derived
- * before it is discarded by the next evaluation and derived again from the
- * facts: a fact can make a negated literal false, and nothing derived before
- * it can be kept without maintaining it incrementally, which relic does not
- * do.
+ * Adding a fact the program does not hold, like loading one, changes the
+ * program, so everything derived before it is discarded and the next
+ * evaluation derives it again from the facts: a fact can make a negated
+ * literal false, and nothing derived before it can be kept without
+ * maintaining it incrementally, which relic does not do.  Adding a fact the
+ * program holds changes nothing.
  */
 RELIC_EXPORT int relic_fact_add(relic_t *ctx, const char *predicate,
     size_t arity, const relic_value_t *values);
@@ -428,14 +439,16 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  *
  * The program is checked first and must pass.  Evaluation fails when a
  * configured limit refuses a tuple or when memory runs out, and the next
- * evaluation starts again from nothing.
+ * evaluation starts again from the facts.
  *
- * Nothing is recomputed when nothing has been loaded since the last
- * evaluation that succeeded.  When something has, every derived tuple is
- * discarded and the whole program evaluated again: a program with negation
- * is not monotone, and a fact loaded later can make false a tuple derived
- * before it.  A query materializes the program before it is answered, so a
- * caller that only queries need not call this.
+ * Nothing is recomputed when the program has gained no rule and no fact
+ * since the last evaluation that succeeded.  When it has, every derived
+ * tuple is discarded and the whole program evaluated again: a program with
+ * negation is not monotone, and a fact loaded later can make false a tuple
+ * derived before it.  A query is answered from the materialized program
+ * when it is current, and otherwise through its Magic rewrite, or under
+ * RELIC_F_NO_MAGIC by materializing the program first, so a caller that
+ * only queries need not call this.
  */
 RELIC_EXPORT int relic_materialize(relic_t *ctx);
 
@@ -501,12 +514,12 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  *
  * A program already evaluated by relic_materialize() is answered from what it
  * derived.  Otherwise the query is answered through its Magic Sets rewrite:
- * the predicates it reads through negation, those derived by facts alone and
- * everything those depend on are evaluated in full, and the rest only as far
- * as the query's bindings reach.  What that derives is discarded by the next
- * query or evaluation.  A rewrite that outgrows its budget, when no Magic
- * limit is configured, is abandoned with a warning, and the query answered
- * from the whole program instead.
+ * the predicates it reads through negation and everything those depend on
+ * are evaluated in full, those no rule derives are read as their facts
+ * stand, and the rest only as far as the query's bindings reach.  What that
+ * derives is discarded by the next query or evaluation.  A rewrite that
+ * outgrows its budget, when no Magic limit is configured, is abandoned with
+ * a warning, and the query answered from the whole program instead.
  *
  * No row is delivered until the whole answer is known.  A query that fails
  * -- a limit exceeded, say -- therefore delivers no rows at all rather than a
@@ -593,7 +606,8 @@ typedef struct relic_stats relic_stats_t;
  *	iterations	rounds of fixed-point evaluation of recursive
  *			components; a component that is not recursive is
  *			evaluated in one pass, which is not counted
- *	derivations	head tuples produced by rules, facts included, whether
+ *	derivations	head tuples produced by rules, and facts seeded into
+ *			the relation of a predicate rules derive, whether
  *			or not the relation already held them
  *	tuples_inserted	derivations that added a tuple to its relation
  *	tuples_scanned	tuples read while scanning relations
@@ -643,14 +657,16 @@ typedef void (*relic_explain_cb)(void *, const char *);
  *
  * While one is installed, every component the program's evaluation plans is
  * shown as soon as it is planned and before it runs -- its heading, how many
- * facts it has, and each other rule followed by its plan and the plans of
- * its semi-naive delta variants -- and a query's plan is shown before the
- * query runs.  A query answered through its Magic Sets rewrite also shows the
- * rewrite: the adornments and seed rules it generated, then each component of
- * the rewritten rules, indented beneath it.  What is shown is what runs, so a
- * query against a program already evaluated shows only its own plan.  The
- * text is meant for a person and may change from one release to the next.  A
- * line longer than the limit is cut and ends in "...".
+ * facts its predicates have, and each rule with a body followed by its plan
+ * and the plans of its semi-naive delta variants -- and a query's plan is
+ * shown before the query runs.  A predicate of facts alone needs no
+ * evaluation, is in no component and is not shown.  A query answered through
+ * its Magic Sets rewrite also shows the rewrite: the adornments and seed
+ * rules it generated, then each component of the rewritten rules, indented
+ * beneath it.  What is shown is what runs, so a query against a program
+ * already evaluated shows only its own plan.  The text is meant for a person
+ * and may change from one release to the next.  A line longer than the limit
+ * is cut and ends in "...".
  *
  * As with a diagnostic callback, the callback may read through the context
  * and any other call it makes is refused.

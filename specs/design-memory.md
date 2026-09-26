@@ -54,10 +54,25 @@ operation ends and are charged to `max_memory`; the others hold what the
 caller wrote and are not, per `specs/design-planning-cost.md` section 6.
 
 **Individually owned.** Relation tuples and indexes outlive individual
-queries, must be able to shrink, and are accounted against a limit. They use `reallocarray()` with explicit failure handling and
-are never arena allocated. A query's answer relation is owned the same way
-but by the query object rather than the context, and is released with the
-query, per `specs/design-query.md`.
+queries, must be able to shrink, and are accounted against a limit. They use
+`reallocarray()` with explicit failure handling and are never arena
+allocated. The base stores that hold a program's facts are relations like
+any other, in the account with the relations evaluation derives
+(`specs/design-facts.md`); a discard empties the derived relations and drops
+the base stores' secondary indexes, and never shrinks a base store's tuples.
+The store records whether it holds anything a discard removes, so a discard
+with nothing derived to remove returns at once. A query's answer relation is
+owned the same way but by the query object rather than the context, and is
+released with the query, per `specs/design-query.md`.
+
+**What the account bounds** is what the program's stores hold -- its facts
+and what it derives, with their indexes -- and what running the program does,
+in the two charged arenas. It does not bound what the caller wrote: the
+program's rules and queries, the text a load reads, and the staging a load
+holds its facts in until it commits. Staging is individually owned, grows by
+doubling, and is released when the load returns, whatever the outcome; it is
+proportional to the text being loaded, as the text and the program arena
+are.
 
 The growable arrays inside the symbol and value tables are the third case, and
 they are individually owned for a mechanical reason rather than a conceptual
@@ -253,6 +268,15 @@ placed and is the only half that can fail; `relic_idtab_place()` then stores the
 and cannot. An owner reserves *before* it creates the thing being indexed, so
 that the step which can fail runs while there is still nothing to leave
 behind.
+
+A reservation takes the number of entries to make room for, and at most that
+many places may follow it. The table grows at most once, when the entries
+would take it past three quarters full, straight to the smallest power of two,
+at least twice its size, that holds them, rehashing each entry once; a load's
+commit reserves for all of a base store's new facts this way before it places
+any. A pure function gives the bytes the slots would occupy after such a
+reservation, which is what lets a caller bound by the memory limit project a
+growth before it makes it.
 
 The other order is the one to understand, because it is the one that looks
 harmless. Storing first and indexing second means a failed growth leaves an

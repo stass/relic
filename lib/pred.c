@@ -40,6 +40,7 @@ static uint32_t	 pred_hash(uint64_t seed, uint32_t name, uint16_t arity);
 static uint32_t	 pred_rehash(uint32_t id, void *ctx);
 static int	 pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
+static relic_pred_t *pred_entry(relic_t *ctx, relic_pred_id_t id);
 
 void
 relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed)
@@ -137,8 +138,8 @@ pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 
 	stored = &table->entries[table->count];
 	bzero(stored, sizeof(*stored));
-	stored->where = *where;
 	stored->name = name;
+	stored->views = RELIC_ID_NONE;
 	stored->arity = arity;
 
 	table->count++;
@@ -158,9 +159,8 @@ pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
  * third cannot reach a caller compiling a statement, because a statement
  * with a wider atom never parses.
  *
- * `where` is recorded only for a predicate this is the first mention of, so
- * the location a later warning points at is the first place the program
- * named it rather than the last.
+ * `where` is what an error names; it is not recorded, since interning a
+ * predicate says nothing about whether anything reads it.
  *
  * No predicate may have more than RELIC_MAX_ARITY arguments: an index key is
  * a 32-bit column mask, and the evaluator builds a tuple in a fixed array of
@@ -243,18 +243,106 @@ relic_pred_count(const relic_t *ctx)
 }
 
 /*
- * Record that something derives into this predicate.
+ * The writable entry of an identifier, or NULL for one this context never
+ * assigned.
  */
-void
-relic_pred_define(relic_t *ctx, relic_pred_id_t id)
+static relic_pred_t *
+pred_entry(relic_t *ctx, relic_pred_id_t id)
 {
 	relic_predtab_t *table;
 
 	table = &ctx->program.predicates;
 	if (id == RELIC_ID_NONE || id > table->count)
+		return (NULL);
+
+	return (pred_at(table, id));
+}
+
+/*
+ * Record that a rule's head names this predicate.
+ */
+void
+relic_pred_name_head(relic_t *ctx, relic_pred_id_t id)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, id);
+	if (pred != NULL)
+		pred->head_named = true;
+}
+
+/*
+ * Record that a rule with this predicate as its head has been appended to a
+ * rule table.  Only relic_ruletab_append() calls this.
+ */
+void
+relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, id);
+	if (pred != NULL)
+		pred->derived = true;
+}
+
+/*
+ * Record that an atom at `where` reads this predicate.  The first such atom
+ * is the one a warning points at.
+ */
+void
+relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
+    const relic_location_t *where)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, id);
+	if (pred == NULL || pred->referenced)
 		return;
 
-	pred_at(table, id)->defined = true;
+	pred->referenced = true;
+	pred->referenced_at = *where;
+}
+
+/*
+ * Make `view` the base view of `viewed`: a predicate that reads viewed's
+ * base store.  A view is made once, when it is first interned.
+ */
+void
+relic_pred_make_view(relic_t *ctx, relic_pred_id_t view,
+    relic_pred_id_t viewed)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, view);
+	if (pred != NULL)
+		pred->views = viewed;
+}
+
+bool
+relic_pred_is_derived(const relic_t *ctx, relic_pred_id_t id)
+{
+	const relic_pred_t *pred;
+
+	pred = relic_pred_of(ctx, id);
+
+	return (pred != NULL && pred->derived);
+}
+
+/*
+ * Whether something derives into this predicate: a rule's head names it,
+ * it is derived, it is a base view, or its base store holds tuples.
+ */
+bool
+relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id)
+{
+	const relic_pred_t *pred;
+
+	pred = relic_pred_of(ctx, id);
+	if (pred == NULL)
+		return (false);
+
+	return (pred->head_named || pred->derived ||
+	    pred->views != RELIC_ID_NONE || relic_base_count(ctx, id) > 0);
 }
 
 /*
@@ -293,9 +381,9 @@ relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
 }
 
 /*
- * Warn about every predicate the program mentions and nothing defines.
+ * Warn about every predicate the program reads and nothing defines.
  *
- * Reported once per predicate, at the first place the program named it: such
+ * Reported once per predicate, at the first atom that read it: such
  * a predicate is a typo far more often than an intentionally empty relation,
  * and the consequence is silent, because every positive literal over an
  * empty relation fails and every negated one succeeds.
@@ -319,12 +407,14 @@ relic_pred_report_undefined(relic_t *ctx)
 	for (position = 0; position < table->count; position++) {
 		pred = &table->entries[position];
 
-		if (pred->defined || pred->reported_undefined)
+		if (!pred->referenced || pred->reported_undefined ||
+		    relic_pred_is_defined(ctx,
+		    (relic_pred_id_t)(position + 1)))
 			continue;
 
 		pred->reported_undefined = true;
 
-		relic_diagf(ctx, RELIC_WARNING, &pred->where,
+		relic_diagf(ctx, RELIC_WARNING, &pred->referenced_at,
 		    "predicate %s is referenced but never defined",
 		    relic_pred_describe(ctx,
 		    (relic_pred_id_t)(position + 1), described,

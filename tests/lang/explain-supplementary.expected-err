@@ -1,5 +1,3 @@
-stratum 0, component 0: e/2
-    facts: 3
 magic rewrite of $q0(W) :- r(1, W).
     adorn r/2 bf
     adorn a/2 bf

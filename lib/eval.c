@@ -44,10 +44,13 @@
  * limit while an index is built -- fails the whole evaluation, as a failed
  * insertion does.
  *
- * The relations hold only what evaluation derived -- a fact is a rule too --
- * so they are either the fixed point of every rule the program has, or stale.
- * Stale relations are discarded and the fixed point computed again from
- * nothing.  Continuing from them would be sound for a program without
+ * A program's facts are held in base stores, which evaluation reads and
+ * never writes.  A derived predicate's relation holds what evaluation put
+ * there: its facts, seeded from its base store before its component's first
+ * pass, and what its rules derived.  The derived relations are therefore
+ * either the fixed point of the program as it stands, or stale.  Stale
+ * relations are discarded and the fixed point computed again from the
+ * facts.  Continuing from them would be sound for a program without
  * negation, where a later fact can only add to what was derived, but not for
  * one with it, where a later fact can make a derived tuple false; one rule
  * for every program keeps that question from ever being asked.
@@ -56,9 +59,8 @@
  * interned before evaluation began -- a head holds constants and variables,
  * and a variable is bound only from a tuple -- so each relation can hold only
  * finitely many tuples.  Neither overshoots the least fixed point, because
- * every tuple either inserts is justified by tuples already present.  A fact
- * is a rule whose plan is a lone EMIT, so the first pass loads the facts and
- * nothing else has to.
+ * every tuple either inserts is justified by tuples already present or by a
+ * fact.
  *
  * The naive fixed point runs the component's plans until a full pass inserts
  * no new tuple.  It reaches the least fixed point because it stops only when
@@ -67,18 +69,18 @@
  * reads the whole relation as it stood when the plan started, so a plan
  * sees what earlier plans of the pass derived but not its own tuples.
  *
- * The semi-naive fixed point makes every derivation exactly once.  Call a
- * rule recursive when a positive literal of its body reads a member of the
- * component, and an exit rule otherwise.  Round 0 runs the facts and the exit
- * rules, each once, in program order; a recursive rule has no ordinary plan
- * and runs only as its delta variants, one per member literal.  Each member
- * has a delta, the range of identifiers of the tuples it gained in the
- * previous round, which starts empty at the first identifier and after round
- * 0 is the whole member.  In variant i of a rule whose member literals are,
- * in body order, m1 to mk, literal mi reads the delta, the member literals
- * before it read the `old` view, the tuples older than their member's delta,
- * and those after it the `current` view, everything up to their delta's end
- * (plan.h).  Rounds run until one inserts nothing.
+ * The semi-naive fixed point makes every derivation exactly once.  Call a rule
+ * recursive when a positive literal of its body reads a member of the
+ * component, and an exit rule otherwise.  Round 0 runs the exit rules, each
+ * once, in program order, after the members were seeded with their facts; a
+ * recursive rule has no ordinary plan and runs only as its delta variants, one
+ * per member literal.  Each member has a delta, the range of identifiers of the
+ * tuples it gained in the previous round, which starts empty at the first
+ * identifier and after round 0 is the whole member.  In variant i of a rule
+ * whose member literals are, in body order, m1 to mk, literal mi reads the
+ * delta, the member literals before it read the `old` view, the tuples older
+ * than their member's delta, and those after it the `current` view, everything
+ * up to their delta's end (plan.h).  Rounds run until one inserts nothing.
  *
  * Why every derivation is made, and made once: say a tuple of a member
  * belongs to the round that inserted it, take any way of satisfying a rule's
@@ -96,9 +98,10 @@
  *
  * The delta is a range of tuple identifiers rather than a copy.  The store is
  * append-only between discards -- nothing removes, reorders or renumbers one
- * tuple, and the discard of every relation runs only before an evaluation
- * begins -- so the tuples a relation gained in one round are exactly those
- * between its end before the round and its end after it.
+ * tuple, and neither the discard of what was derived nor a load's commit to
+ * the base stores runs while an evaluation does -- so the tuples a relation
+ * gained in one round are exactly those between its end before the round and
+ * its end after it.
  *
  * A round runs only the variants whose delta literal reads a member that
  * gained something in the round before, and among those only the ones whose
@@ -118,7 +121,7 @@
 enum relic_fixed_point {
 	RELIC_FIXED_ONE_PASS,	/* not recursive: one pass over the rules */
 	RELIC_FIXED_NAIVE,	/* every rule, every round */
-	RELIC_FIXED_SEMI_NAIVE	/* facts and exit rules, then the variants */
+	RELIC_FIXED_SEMI_NAIVE	/* seeds and exit rules, then the variants */
 };
 
 typedef struct relic_component_plans relic_component_plans_t;
@@ -267,17 +270,17 @@ struct relic_delta_work {
 /*
  * The plans of one component of the schedule.
  *
- * `rule_indexes` holds the component's `rule_count` rules, as indexes into
- * the evaluation's table of rules, in program order.  `planned` holds, in
- * the same order, the `planned_count` of them that have a body, each with
- * what runs it.  A fact has no plan: its head is all constants, and a pass
- * inserts it when its turn comes, so that a program's facts cost the
- * evaluation arena nothing, and the component's facts are the rules it has
- * that were not planned.  `variants` holds every rule's semi-naive delta
- * variants: for each rule in program order, one per positive literal over a
- * member of the component, in body order.  It is empty for a component that
- * is not recursive and under the naive fixed point, neither of which runs
- * one.
+ * `rule_indexes` holds the component's `rule_count` rules, as indexes into the
+ * evaluation's table of rules, in program order.  `planned` holds, in the same
+ * order, the `planned_count` of them that have a body, each with what runs it.
+ *  A rule with no body is a seed of the Magic rewrite, since a program's facts
+ * are stored rather than compiled, and it has no plan: its head is all
+ * constants, and a pass inserts it when its turn comes, so the component's
+ * seeds are the rules it has that were not planned.  `variants` holds every
+ * rule's semi-naive delta variants: for each rule in program order, one per
+ * positive literal over a member of the component, in body order.  It is empty
+ * for a component that is not recursive and under the naive fixed point,
+ * neither of which runs one.
  *
  * `members` are the relations of the component's predicates.  They are
  * resolved when the component is planned, which can fail, so that advancing
@@ -386,7 +389,7 @@ static int	 confirm_planned(const relic_evaluation_t *eval,
 static int	 confirm_schedule_current(relic_t *ctx);
 static size_t	 delta_member_of(const relic_evaluation_t *eval,
 		    const relic_variant_t *variant);
-static void	 discard_derived_state(relic_t *ctx);
+static void	 record_materialized(relic_t *ctx);
 static size_t	 count_member_literals(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
 static void	*evaluation_alloc(relic_evaluation_t *eval, size_t count,
@@ -398,6 +401,10 @@ static uint16_t	 widest_head(const relic_ruletab_t *rules);
 static void	 evaluation_end(relic_evaluation_t *eval);
 static int	 evaluate_component(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
+static int	 seed_member(relic_evaluation_t *eval,
+		    relic_relation_t *derived);
+static int	 seed_members(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans);
 static int	 evaluate_rewrite(relic_t *ctx, relic_magic_t *magic,
 		    const relic_query_t *query);
 static int	 evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
@@ -417,10 +424,10 @@ static bool	 comparison_holds(const relic_t *ctx,
 static bool	 comparison_is_mixed(const relic_t *ctx,
 		    enum relic_compare_op compare, relic_dom_t left,
 		    relic_dom_t right);
-static int	 confirm_fact(const relic_evaluation_t *eval,
+static int	 confirm_seed(const relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
-static bool	 fact_head_is_constant(const relic_rule_t *rule);
+static bool	 seed_head_is_constant(const relic_rule_t *rule);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static void	 count_derivation(relic_evaluation_t *eval, bool added);
@@ -430,7 +437,7 @@ static void	 resolve_views(const relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static void	 start_batch(relic_pending_t *pending,
 		    relic_relation_t *relation);
-static int	 insert_fact(relic_evaluation_t *eval,
+static int	 insert_seed(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
 static size_t	 gather_due_variants(relic_component_plans_t *plans);
@@ -988,8 +995,9 @@ insert_pending(relic_evaluation_t *eval)
 
 /*
  * Count one completed insertion of a derived tuple, and note whether it was
- * new.  Both ways a rule produces a tuple -- a batch of an EMIT's, and a
- * fact's turn in a pass -- count through here, so they are counted alike.
+ * new.  Every way a tuple is derived -- a batch of an EMIT's, a seed's turn
+ * in a pass, and a fact seeded from a base store -- counts through here, so
+ * they are counted alike.
  */
 static void
 count_derivation(relic_evaluation_t *eval, bool added)
@@ -1091,13 +1099,13 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 }
 
 /*
- * A fact's turn in a pass: insert its head, every argument of which is a
+ * A seed's turn in a pass: insert its head, every argument of which is a
  * constant, and count it as the batch of a plan's EMIT counts its tuples.
  * Returns -1 when the insertion was refused, which the relation store has
  * reported.
  */
 static int
-insert_fact(relic_evaluation_t *eval, const relic_component_plans_t *plans,
+insert_seed(relic_evaluation_t *eval, const relic_component_plans_t *plans,
     const relic_rule_t *rule)
 {
 	relic_relation_t *relation;
@@ -1139,7 +1147,7 @@ confirm_planned(const relic_evaluation_t *eval,
 }
 
 /*
- * One pass over a component's rules, each once, in program order: a fact
+ * One pass over a component's rules, each once, in program order: a seed
  * inserts its head, and a rule with a base plan runs it.  A recursive rule
  * under the semi-naive fixed point has none and waits for the rounds that
  * run its variants.  With `work`, each member that gains a tuple is recorded
@@ -1165,7 +1173,7 @@ run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 
 		eval->derived = false;
 		if (rule->body_length == 0) {
-			status = insert_fact(eval, plans, rule);
+			status = insert_seed(eval, plans, rule);
 		} else {
 			if (confirm_planned(eval, plans, planned, rule) != 0)
 				return (-1);
@@ -1461,7 +1469,7 @@ gather_due_variants(relic_component_plans_t *plans)
 }
 
 /*
- * Run round 0 of a component -- its facts and exit rules -- then its delta
+ * Run round 0 of a component -- its seeds and exit rules -- then its delta
  * variants round after round until a round inserts nothing.  Each round runs
  * only the variants that can derive something, in planning order.
  */
@@ -1755,7 +1763,9 @@ count_member_literals(const relic_evaluation_t *eval,
 }
 
 /*
- * Resolve the relations of a component's members.
+ * Resolve the relations of a component's members: the derived relations its
+ * rules write.  Every member is derived, since a component is scheduled
+ * only for the rules deriving it.
  */
 static int
 plan_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
@@ -1769,7 +1779,7 @@ plan_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 		return (-1);
 
 	for (i = 0; i < component->member_count; i++) {
-		plans->members[i] = relic_relation_for(eval->ctx,
+		plans->members[i] = relic_relation_written(eval->ctx,
 		    schedule->members[component->first_member + i]);
 		if (plans->members[i] == NULL)
 			return (-1);
@@ -1780,11 +1790,11 @@ plan_members(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 }
 
 /*
- * Whether every argument of a fact's head is a constant, which is what lets
+ * Whether every argument of a seed's head is a constant, which is what lets
  * its turn in a pass insert the head's constants with no plan.
  */
 static bool
-fact_head_is_constant(const relic_rule_t *rule)
+seed_head_is_constant(const relic_rule_t *rule)
 {
 	uint16_t column;
 
@@ -1797,25 +1807,25 @@ fact_head_is_constant(const relic_rule_t *rule)
 }
 
 /*
- * Confirm that a fact's head is constants alone, as many as the relation it
+ * Confirm that a seed's head is constants alone, as many as the relation it
  * goes into has columns.  A checked rule always passes -- safety rejects a
  * variable or `_` in the head of a rule with no body -- and the question is
- * asked anyway, once per fact, because a failure would not be silent
+ * asked anyway, once per seed, because a failure would not be silent
  * otherwise: a variable's slot number would be inserted as though it were a
  * constant's identifier.
  */
 static int
-confirm_fact(const relic_evaluation_t *eval,
+confirm_seed(const relic_evaluation_t *eval,
     const relic_component_plans_t *plans, const relic_rule_t *rule)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (head_relation_of(eval, plans, rule)->arity == rule->head_arity &&
-	    fact_head_is_constant(rule))
+	    seed_head_is_constant(rule))
 		return (0);
 
 	relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
-	    "internal error: a fact of %s holds something other than one "
+	    "internal error: a seed of %s holds something other than one "
 	    "constant per column", relic_pred_describe(eval->ctx, rule->head,
 	    described, sizeof(described)));
 
@@ -1913,7 +1923,7 @@ plan_variants(relic_evaluation_t *eval, relic_component_plans_t *plans,
 }
 
 /*
- * Plan every rule of a component, in program order: confirm that a fact can
+ * Plan every rule of a component, in program order: confirm that a seed can
  * be inserted as it stands, give a recursive rule its delta variants when
  * the component is evaluated semi-naively, and give every other rule its
  * ordinary plan.  The members must be marked and their relations resolved.
@@ -1957,7 +1967,7 @@ plan_rules(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 		rule = rule_of(eval, schedule, component, i);
 
 		if (rule->body_length == 0) {
-			if (confirm_fact(eval, plans, rule) != 0)
+			if (confirm_seed(eval, plans, rule) != 0)
 				return (-1);
 			continue;
 		}
@@ -2249,9 +2259,10 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 }
 
 /*
- * Show a component's plans through the explain callback, if one is
- * installed: its heading, how many facts it has -- its rules without a plan
- * -- and each other rule with its plan or its delta variants.
+ * Show a component's plans through the explain callback, if one is installed:
+ * its heading, how many facts it has -- its seeds, the rules without a plan,
+ * and the facts its members' base stores hold -- and each other rule with its
+ * plan or its delta variants.
  */
 static void
 explain_component(const relic_evaluation_t *eval,
@@ -2268,6 +2279,8 @@ explain_component(const relic_evaluation_t *eval,
 		return;
 
 	facts = plans->rule_count - plans->planned_count;
+	for (i = 0; i < plans->member_count; i++)
+		facts += relic_base_count(eval->ctx, plans->members[i]->pred);
 
 	relic_explain_component(eval->ctx, schedule, position, facts, depth);
 
@@ -2324,6 +2337,9 @@ plan_query(relic_evaluation_t *eval, const relic_rule_t *rule,
 static int
 evaluate_component(relic_evaluation_t *eval, relic_component_plans_t *plans)
 {
+	if (seed_members(eval, plans) != 0)
+		return (-1);
+
 	switch (plans->fixed_point) {
 	case RELIC_FIXED_ONE_PASS:
 		return (run_base_pass(eval, plans, NULL));
@@ -2338,6 +2354,66 @@ evaluate_component(relic_evaluation_t *eval, relic_component_plans_t *plans)
 	    "fixed point");
 
 	return (-1);
+}
+
+/*
+ * Seed each member of a component with the facts its base store holds,
+ * before the component's first pass: the whole store, in identifier order,
+ * inserted in batches as a plan's EMIT inserts them and counted the same
+ * way.  The semi-naive fixed point records the members' first deltas after
+ * this, so every seeded tuple is a gain of round 0.
+ */
+static int
+seed_members(relic_evaluation_t *eval, const relic_component_plans_t *plans)
+{
+	size_t i;
+
+	for (i = 0; i < plans->member_count; i++) {
+		if (seed_member(eval, plans->members[i]) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Insert every fact of `derived`'s base store into it.  A store of arity
+ * zero has no columns, and its batches are read through a buffer that is
+ * never null, as a batch insertion requires.
+ */
+static int
+seed_member(relic_evaluation_t *eval, relic_relation_t *derived)
+{
+	static const relic_dom_t no_columns[1];
+	const relic_relation_t *store;
+	const relic_dom_t *tuples;
+	bool added[RELIC_INSERT_BATCH];
+	size_t completed;
+	size_t first;
+	size_t count;
+	size_t i;
+	int status;
+
+	store = relic_base_store(eval->ctx, derived->pred);
+	if (store == NULL || store->count == 0)
+		return (0);
+
+	for (first = 0; first < store->count; first += count) {
+		count = store->count - first < RELIC_INSERT_BATCH ?
+		    store->count - first : RELIC_INSERT_BATCH;
+		tuples = store->arity == 0 ? no_columns :
+		    relic_relation_tuple(store,
+		    (relic_tuple_id_t)(RELIC_TUPLE_FIRST + first));
+
+		status = relic_relation_insert_batch(eval->ctx, derived,
+		    tuples, count, added, &completed);
+		for (i = 0; i < completed; i++)
+			count_derivation(eval, added[i]);
+		if (status != 0)
+			return (-1);
+	}
+
+	return (0);
 }
 
 /*
@@ -2359,15 +2435,41 @@ confirm_schedule_current(relic_t *ctx)
 }
 
 /*
- * Forget everything evaluation derived, which is everything the relations
- * hold, so that they are the fixed point of no rules.  The facts are loaded
- * again by the next evaluation with the rest.
+ * Forget everything evaluation derived, so that the derived relations are
+ * the fixed point of nothing, and the record of what they materialized with
+ * it.  The facts stay in their base stores, and the next evaluation seeds
+ * from them.
  */
-static void
-discard_derived_state(relic_t *ctx)
+void
+relic_discard_derived(relic_t *ctx)
 {
 	relic_relation_discard_all(ctx);
-	ctx->materialized_rules = 0;
+	ctx->materialized.recorded = false;
+}
+
+/*
+ * Whether the relations are the fixed point of the program as it stands:
+ * a fixed point was recorded, and neither the program's rules nor the
+ * facts of its base stores have been added to since.
+ */
+bool
+relic_relations_current(const relic_t *ctx)
+{
+	return (ctx->materialized.recorded &&
+	    ctx->materialized.rules == ctx->program.rules.count &&
+	    ctx->materialized.facts == relic_base_total(ctx));
+}
+
+/*
+ * Record that the relations are the fixed point of the program as it
+ * stands.
+ */
+static void
+record_materialized(relic_t *ctx)
+{
+	ctx->materialized.rules = ctx->program.rules.count;
+	ctx->materialized.facts = relic_base_total(ctx);
+	ctx->materialized.recorded = true;
 }
 
 /*
@@ -2477,30 +2579,29 @@ evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
  * Bring the relations to the fixed point of every rule of the program, one
  * component of the schedule at a time.
  *
- * Rules are only ever appended, so the relations are current exactly when no
- * rule has been added since they were last brought to a fixed point, and
- * then nothing needs doing.  Otherwise what they hold is stale -- the fixed
- * point of an earlier program, part of one an evaluation that failed was
- * computing, or what a query's Magic rewrite derived -- and it is discarded
- * before every component is planned and evaluated in schedule order.  The
- * discard comes before the evaluation begins, so no delta range can span it.
+ * When the relations are current nothing needs doing.  Otherwise what they
+ * hold is stale -- the fixed point of an earlier program, part of one an
+ * evaluation that failed was computing, or what a query's Magic rewrite
+ * derived -- and it is discarded before every component is planned and
+ * evaluated in schedule order.  The discard comes before the evaluation
+ * begins, so no delta range can span it.
  */
 static int
 materialize_program(relic_t *ctx)
 {
-	if (ctx->materialized_rules == ctx->program.rules.count)
+	if (relic_relations_current(ctx))
 		return (0);
 
 	if (confirm_schedule_current(ctx) != 0)
 		return (-1);
 
-	discard_derived_state(ctx);
+	relic_discard_derived(ctx);
 
 	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
 	    NULL, 0) != 0)
 		return (-1);
 
-	ctx->materialized_rules = ctx->program.rules.count;
+	record_materialized(ctx);
 
 	return (0);
 }
@@ -2574,7 +2675,7 @@ stream_answer(relic_t *ctx, const relic_relation_t *answer,
  * relation held and whatever ran before it, and emptied again when the run
  * fails, so the answer holds tuples only after a run that succeeded and
  * nothing a caller does after a failure -- such as falling back to the whole
- * program, which discards every relation -- meets a partial one.
+ * program, which discards every derived relation -- meets a partial one.
  */
 static int
 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
@@ -2651,9 +2752,8 @@ evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_query_t *query)
  * the evaluations between them name what they plan.
  *
  * Whatever the relations held is discarded first.  What the rewrite derives
- * is only part of the program's fixed point, so the relations are left marked
- * as materializing no rule, and the next evaluation starts again from
- * nothing.
+ * is only part of the program's fixed point, so no materialized program is
+ * recorded, and the next evaluation starts again from the facts.
  */
 static int
 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
@@ -2662,7 +2762,7 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 	if (confirm_schedule_current(ctx) != 0)
 		return (-1);
 
-	discard_derived_state(ctx);
+	relic_discard_derived(ctx);
 
 	note_query_activity(ctx, "rewriting", query->answer);
 	if (relic_magic_find_complete(magic, &query->rule) != 0)
@@ -2703,8 +2803,8 @@ answer_from_program(relic_t *ctx, const relic_query_t *query)
  * A rewrite that outgrows its budget has been reported as a warning, and
  * the query is answered from the whole program instead: the rewrite is an
  * optimization, and must not decide whether a query can be answered.  What
- * the abandoned rewrite derived is discarded with the rest, since it left
- * the relations marked as materializing no rule.
+ * the abandoned rewrite derived is discarded with the rest, since it
+ * recorded no materialized program.
  */
 static int
 answer_through_rewrite(relic_t *ctx, const relic_query_t *query)
@@ -2826,7 +2926,7 @@ compute_answer(relic_t *ctx, const relic_query_t *query)
 	ctx->query_mixed_noted = false;
 
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
-	    ctx->materialized_rules == ctx->program.rules.count)
+	    relic_relations_current(ctx))
 		return (answer_from_program(ctx, query));
 
 	return (answer_through_rewrite(ctx, query));

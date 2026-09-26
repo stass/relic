@@ -1,6 +1,6 @@
-% -e shows each query's Magic rewrite.  edge is derived by facts alone, so
-% it is read completely and evaluated first, under its program heading.  The
-% rewrite then lists the adornments and the seeds it generated, and the
+% -e shows each query's Magic rewrite.  edge holds facts alone, which need
+% no evaluation, so it has no component; the rewrite reads it completely.
+% The rewrite lists the adornments and the seeds it generated, and the
 % components of the rewritten rules, indented beneath it, before the
 % rewritten query's plan.
 %

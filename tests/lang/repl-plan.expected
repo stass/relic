@@ -1,5 +1,3 @@
-stratum 0, component 0: edge/2
-    facts: 2
 magic rewrite of $q0(X) :- path(a, X).
     adorn path/2 bf
     seed magic$path$bf(a).

@@ -1,15 +1,14 @@
-% With no limit configured, the Magic rewrite has a budget of generated rules
-% as well as one of generated literals, each proportional to the program,
-% and this rewrite outgrows the one on rules.  The query binds p's first
-% four columns, and the recursive rule calls p forty times, each call
-% placing A, B, C and D in a different four of its columns, so the rewrite
-% reaches dozens of adornments.  Each adornment cuts the long body into a
-% supplementary predicate before every call but the first, which makes it
-% some eighty short rules.  The program has four rules and facts, for a
-% budget of 256 + 16 x 4 = 320 generated rules, and 46 literals, for a
-% budget of 256 + 16 x 46 = 992 generated literals; short rules reach the
-% first long before the second.  The warning names the rules, and the query
-% is answered from the whole program, as -X no-magic answers it.
+% A rewrite of many short rules outgrows the budget on generated literals,
+% which bounds the rules it keeps as well as what it drafts.  The query
+% binds p's first four columns, and the recursive rule calls p forty times,
+% each call placing A, B, C and D in a different four of its columns, so the
+% rewrite reaches dozens of adornments.  Each adornment cuts the long body
+% into a supplementary predicate before every call but the first, which
+% makes it some eighty short rules.  The program has two rules of 44
+% literals in all, for a budget of 256 + 16 x 44 = 960 generated literals,
+% which the adornments' short rules outgrow together though each adornment
+% is linear in the body.  The warning names the literals, and the query is
+% answered from the whole program, as -X no-magic answers it.
 
 e(1, 1, 1, 1, 1, 1, 1, 1).
 f(1, 1, 1, 1).

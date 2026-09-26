@@ -22,17 +22,18 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
 #include "harness.h"
 #include "internal.h"
 
-#define	SCENARIO_DEFINE		"defining a predicate is recorded once"
+#define	SCENARIO_DEFINE		"a predicate is defined by what derives it"
 #define	SCENARIO_DESCRIBE	"a predicate describes itself for a message"
 #define	SCENARIO_GROWTH		"the table stays exact as it grows"
 #define	SCENARIO_IDENTITY	"(name, arity) identifies a predicate"
-#define	SCENARIO_WHERE		"a predicate remembers where it was first seen"
+#define	SCENARIO_WHERE		"a predicate remembers the first atom reading it"
 #define	SCENARIO_ARITY		"no predicate has more than 32 arguments"
 
 /*
@@ -47,8 +48,8 @@ static bool	 intern(relic_t *ctx, const char *name, uint16_t arity,
 		    relic_pred_id_t *idp);
 static void	 name_and_arity_identify_a_predicate(void);
 static void	 a_predicate_describes_itself_for_a_message(void);
-static void	 a_predicate_remembers_where_it_was_first_seen(void);
-static void	 defining_a_predicate_is_recorded_once(void);
+static void	 a_predicate_remembers_the_first_atom_reading_it(void);
+static void	 a_predicate_is_defined_by_what_derives_it(void);
 static void	 the_table_stays_exact_as_it_grows(void);
 static void	 no_predicate_has_more_than_32_arguments(void);
 
@@ -135,11 +136,13 @@ name_and_arity_identify_a_predicate(void)
 }
 
 /*
- * A predicate is mentioned in many places and remembers the first, because
- * that is where the undefined-predicate warning has to point.
+ * A predicate is read in many places and remembers the first, because that
+ * is where the undefined-predicate warning has to point.  Interning it is
+ * not reading it: a predicate a load interned for facts it never committed
+ * must never be warned about.
  */
 static void
-a_predicate_remembers_where_it_was_first_seen(void)
+a_predicate_remembers_the_first_atom_reading_it(void)
 {
 	relic_t *ctx;
 	const relic_pred_t *pred;
@@ -169,7 +172,7 @@ a_predicate_remembers_where_it_was_first_seen(void)
 	later.line = 99;
 	later.column = 1;
 
-	if (relic_pred_intern(ctx, symbol, 2, &first, &id) != 0 ||
+	if (relic_pred_intern(ctx, symbol, 2, &later, &id) != 0 ||
 	    relic_pred_intern(ctx, symbol, 2, &later, &again) != 0) {
 		check(false, SCENARIO_WHERE, "both mentions intern");
 		relic_destroy(ctx);
@@ -183,44 +186,78 @@ a_predicate_remembers_where_it_was_first_seen(void)
 		return;
 	}
 
-	checkf(pred->where.line == first.line &&
-	    pred->where.column == first.column &&
-	    strcmp(pred->where.file, first.file) == 0, SCENARIO_WHERE,
-	    "the second mention moved the location to %s:%u:%u",
-	    pred->where.file, (unsigned int)pred->where.line,
-	    (unsigned int)pred->where.column);
+	check(!pred->referenced, SCENARIO_WHERE,
+	    "interning a predicate should not mark it read");
+
+	relic_pred_reference(ctx, id, &first);
+	relic_pred_reference(ctx, again, &later);
+
+	checkf(pred->referenced && pred->referenced_at.line == first.line &&
+	    pred->referenced_at.column == first.column &&
+	    strcmp(pred->referenced_at.file, first.file) == 0, SCENARIO_WHERE,
+	    "the second reading moved the location to %s:%u:%u",
+	    pred->referenced_at.file, (unsigned int)pred->referenced_at.line,
+	    (unsigned int)pred->referenced_at.column);
 
 	relic_destroy(ctx);
 }
 
+/*
+ * A predicate is defined when a rule's head names it, when a rule deriving
+ * it joins a rule table, when it is a base view, or when its base store
+ * holds a fact; one only read is not.
+ */
 static void
-defining_a_predicate_is_recorded_once(void)
+a_predicate_is_defined_by_what_derives_it(void)
 {
 	relic_t *ctx;
-	const relic_pred_t *pred;
-	relic_pred_id_t defined;
+	relic_ruletab_t rules;
+	relic_rule_t rule;
+	relic_value_t value;
+	relic_pred_id_t named;
+	relic_pred_id_t appended;
+	relic_pred_id_t view;
 	relic_pred_id_t referenced;
 
 	ctx = context();
 	if (ctx == NULL)
 		return;
 
-	if (!intern(ctx, "head", 1, &defined) ||
+	if (!intern(ctx, "head", 1, &named) ||
+	    !intern(ctx, "derived", 0, &appended) ||
+	    !intern(ctx, "view", 1, &view) ||
 	    !intern(ctx, "body", 1, &referenced)) {
-		check(false, SCENARIO_DEFINE, "two predicates intern");
+		check(false, SCENARIO_DEFINE, "four predicates intern");
 		relic_destroy(ctx);
 		return;
 	}
 
-	relic_pred_define(ctx, defined);
+	relic_pred_name_head(ctx, named);
+	relic_pred_make_view(ctx, view, named);
 
-	pred = relic_pred_of(ctx, defined);
-	check(pred != NULL && pred->defined, SCENARIO_DEFINE,
-	    "a predicate something derives into is defined");
+	bzero(&rules, sizeof(rules));
+	bzero(&rule, sizeof(rule));
+	rule.head = appended;
+	check(relic_ruletab_append(ctx, &rules, &rule) == 0, SCENARIO_DEFINE,
+	    "a rule is appended");
+	free(rules.entries);
 
-	pred = relic_pred_of(ctx, referenced);
-	check(pred != NULL && !pred->defined, SCENARIO_DEFINE,
-	    "a predicate only referenced is not defined");
+	check(relic_pred_is_defined(ctx, named) &&
+	    !relic_pred_is_derived(ctx, named), SCENARIO_DEFINE,
+	    "a predicate a head names is defined, and not derived");
+	check(relic_pred_is_defined(ctx, appended) &&
+	    relic_pred_is_derived(ctx, appended), SCENARIO_DEFINE,
+	    "a predicate a table's rule derives is defined and derived");
+	check(relic_pred_is_defined(ctx, view), SCENARIO_DEFINE,
+	    "a base view is defined");
+	check(!relic_pred_is_defined(ctx, referenced), SCENARIO_DEFINE,
+	    "a predicate only read is not defined");
+
+	value.type = RELIC_INTEGER;
+	value.v.integer = 1;
+	check(relic_fact_add(ctx, "body", 1, &value) == 0 &&
+	    relic_pred_is_defined(ctx, referenced), SCENARIO_DEFINE,
+	    "a predicate with a fact is defined");
 
 	/*
 	 * An identifier the context never assigned reads as no predicate
@@ -362,8 +399,8 @@ int
 main(void)
 {
 	name_and_arity_identify_a_predicate();
-	a_predicate_remembers_where_it_was_first_seen();
-	defining_a_predicate_is_recorded_once();
+	a_predicate_remembers_the_first_atom_reading_it();
+	a_predicate_is_defined_by_what_derives_it();
 	a_predicate_describes_itself_for_a_message();
 	the_table_stays_exact_as_it_grows();
 	no_predicate_has_more_than_32_arguments();

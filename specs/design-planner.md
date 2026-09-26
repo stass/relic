@@ -42,13 +42,15 @@ component before it in the schedule has reached its fixed point, and never
 again during that evaluation. A query's rule is planned when the query runs,
 after the program is materialized.
 
-The reason is what the planner can know. Evaluation discards every relation
-before it begins, and a fact is a rule, so before the first component runs
-every relation is empty and no statistic says anything. When a component
-starts, every relation it reads outside itself belongs to an earlier
-component and is complete: its size and its distinct values are the ones it
-will have while this component runs. Only the component's own members are
-unknown, and they are empty.
+The reason is what the planner can know. Evaluation discards every derived
+relation before it begins, so before the first component runs only the base
+stores hold anything. When a component starts, every relation it reads
+outside itself is the base store of a predicate no rule derives, which holds
+that predicate whole, or belongs to an earlier component and is complete:
+its size and its distinct values are the ones it will have while this
+component runs. Only the component's own members are unknown, and they are
+empty until the component seeds them with their facts, after it is
+planned.
 
 Planning once per component, rather than once per round, is the rule of
 `specs/design-plan.md` section 6.1: a plan chasing cardinalities that change
@@ -330,9 +332,7 @@ For the graph program of architecture section 72 and `-q 'path(a, X)?'`,
 under `-a`, which answers the query from the whole fixed point:
 
 ```text
-stratum 0, component 0: edge/2
-    facts: 3
-stratum 0, component 1 (recursive): path/2
+stratum 0, component 0 (recursive): path/2
     rule path(X, Y) :- edge(X, Y).
         scan edge(X, Y)
         emit path(X, Y)
@@ -351,14 +351,19 @@ query $q0(X) :- path(a, X).
 ```
 
 * A component is headed by its stratum, its position in the schedule,
-  whether it is recursive, and its members.
-* Its facts are counted rather than shown, because a component of a million
-  facts would otherwise print a million plans of one `emit` each.
-* Each other rule is shown as written. A rule of a component evaluated in one
-  pass, an exit rule of a recursive component, and every rule under `-X naive`
-  are each followed by its plan. A recursive rule under the semi-naive fixed
-  point runs only as its variants and shows no plan of its own: each variant
-  follows, headed by the literal that reads the delta.
+  whether it is recursive, and its members. `edge` holds facts alone: it is
+  in no component and needs no evaluation, so it is not shown, and the
+  components are numbered without it.
+* A component's facts are counted rather than shown, as `facts: N` when N is
+  not zero: the facts its members' base stores hold, which seed their
+  relations before its first pass, and its body-less rules, the seeds of a
+  Magic rewrite. A component of a million facts would otherwise print a
+  million lines.
+* Each rule with a body is shown as written. A rule of a component
+  evaluated in one pass, an exit rule of a recursive component, and every
+  rule under `-X naive` are each followed by its plan. A recursive rule under
+  the semi-naive fixed point runs only as its variants and shows no plan of
+  its own: each variant follows, headed by the literal that reads the delta.
 * A variant with one plan is headed `delta` and its delta literal. A variant
   with two shows the placed plan, headed by the threshold its delta must
   exceed, `when the delta holds more than N tuples` (`tuple` when N is one),
@@ -374,6 +379,9 @@ query $q0(X) :- path(a, X).
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
 `anti-member`, `filter` with its comparison, and `emit`. An operation over a
+base view names it as the rule does, `lookup link$base(X1, X2) key={0}`: it
+reads the base store of `link`, whose own name denotes its derived relation.
+An operation over a
 member of the component follows its kind with the view it reads when that
 view is `delta` or `old`: `scan delta`, `lookup delta`, `member delta`,
 `scan old`, `lookup old`, `member old`. The `current` view, what a member

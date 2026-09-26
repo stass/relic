@@ -244,20 +244,23 @@ relic_diag_stderr(void *callback_ctx, enum relic_diag_level level,
 const char *
 relic_diag_name(const char *name, char *buffer, size_t size)
 {
+	if (strlcpy(buffer, name, size) >= size)
+		relic_diag_mark_cut(buffer, size);
+
+	return (buffer);
+}
+
+/*
+ * Mark a name cut to fill all of `buffer` as cut, by ending it in "...".  A
+ * buffer too small to hold the mark is not one any caller passes, and a name
+ * with no room to say so is better short than unwritten.
+ */
+void
+relic_diag_mark_cut(char *buffer, size_t size)
+{
 	static const char ellipsis[] = "...";
 
-	if (strlcpy(buffer, name, size) < size)
-		return (buffer);
-
-	/*
-	 * The name did not fit.  Mark where it was cut, if the buffer has
-	 * room for the mark; one too small to hold it is not one any caller
-	 * passes, and a name with no room to say so is better short than
-	 * unwritten.
-	 */
 	if (size > sizeof(ellipsis))
 		bcopy(ellipsis, buffer + size - sizeof(ellipsis),
 		    sizeof(ellipsis));
-
-	return (buffer);
 }

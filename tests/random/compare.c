@@ -112,6 +112,9 @@ static void	 drop_last_row(answer_t *answer);
 static random_failure_kind_t count_derivations(
 		    const random_program_t *program, FILE *report,
 		    uint64_t *expectedp);
+static bool	 fact_repeats_earlier(const random_program_t *program,
+		    size_t r);
+static bool	 fact_seeds(const random_program_t *program, size_t r);
 static const char *error_text(relic_t *ctx);
 static bool	 load_program(relic_t *ctx, const char *text,
 		    const diag_capture_t *capture);
@@ -319,12 +322,13 @@ done:
 }
 
 /*
- * The derivations that materializing the program must make: one per fact,
- * and for every other rule the number of distinct bindings of its body's
- * variables over the fixed point, counted as the rows of a query asking for
- * that body under the naive fixed point without the Magic rewrite.  A
- * refusal of the program or a failed query is reported as it would be for a
- * strategy.
+ * The derivations that materializing the program must make: one per distinct
+ * fact of a predicate some rule with a body also derives, which seeds that
+ * predicate's derived relation, and for every other rule the number of distinct
+ * bindings of its body's variables over the fixed point, counted as the rows of
+ * a query asking for that body under the naive fixed point without the Magic
+ * rewrite.  A refusal of the program or a failed query is reported as it would
+ * be for a strategy.
  */
 static random_failure_kind_t
 count_derivations(const random_program_t *program, FILE *report,
@@ -361,7 +365,8 @@ count_derivations(const random_program_t *program, FILE *report,
 		relic_result_t *result;
 
 		if (program->rules[r].body.length == 0) {
-			(*expectedp)++;
+			if (fact_seeds(program, r))
+				(*expectedp)++;
 			continue;
 		}
 
@@ -385,6 +390,53 @@ done:
 	free(text);
 	relic_destroy(ctx);
 	return (kind);
+}
+
+/*
+ * Whether fact `r` seeds a derived relation: a rule with a body derives its
+ * predicate, and no earlier fact states the same tuple.  A predicate no
+ * such rule derives is read from its base store, and nothing evaluates its
+ * facts.
+ */
+static bool
+fact_seeds(const random_program_t *program, size_t r)
+{
+	uint8_t predicate = program->rules[r].head_predicate;
+	bool derived = false;
+
+	for (size_t other = 0; other < program->rule_count; other++) {
+		if (program->rules[other].head_predicate == predicate &&
+		    program->rules[other].body.length > 0)
+			derived = true;
+	}
+
+	return (derived && !fact_repeats_earlier(program, r));
+}
+
+/*
+ * Whether a fact before fact `r` states the same tuple.  Every constant of
+ * the pool is a distinct value, so two facts are equal exactly when their
+ * predicates and their constants' positions in the pool are.
+ */
+static bool
+fact_repeats_earlier(const random_program_t *program, size_t r)
+{
+	const random_rule_t *fact = &program->rules[r];
+	uint8_t arity = program->predicates[fact->head_predicate].arity;
+
+	for (size_t other = 0; other < r; other++) {
+		const random_rule_t *earlier = &program->rules[other];
+		bool same = earlier->body.length == 0 &&
+		    earlier->head_predicate == fact->head_predicate;
+
+		for (uint8_t column = 0; same && column < arity; column++)
+			same = earlier->head[column].index ==
+			    fact->head[column].index;
+		if (same)
+			return (true);
+	}
+
+	return (false);
 }
 
 /*

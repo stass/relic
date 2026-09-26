@@ -60,6 +60,7 @@ static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static relic_t	*context_logging_to(diag_log_t *log);
+static size_t	 facts_held(relic_t *ctx, const char *name, uint16_t arity);
 static void	 statements_keep_the_shape_they_were_written_in(void);
 static void	 terms_hold_the_values_they_spell(void);
 
@@ -101,6 +102,23 @@ statement_count(const relic_t *ctx)
 }
 
 /*
+ * The facts the base store of name/arity holds: where a loaded fact goes,
+ * rather than into the statements.
+ */
+static size_t
+facts_held(relic_t *ctx, const char *name, uint16_t arity)
+{
+	relic_pred_id_t pred;
+	uint32_t symbol;
+
+	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0 ||
+	    relic_pred_intern(ctx, symbol, arity, NULL, &pred) != 0)
+		return (0);
+
+	return (relic_base_count(ctx, pred));
+}
+
+/*
  * The statement at `index` in load order, or NULL when there are fewer than
  * that many.  Statements are a list rather than an array, so every test that
  * wants the third one walks to it through here instead of open-coding the
@@ -123,8 +141,9 @@ statement_at(relic_t *ctx, size_t index)
 }
 
 /*
- * A fact, a rule and a query, and what each one becomes.  A fact is a rule
- * with an empty body; a query has a body and no head.
+ * Facts, rules and a query, and what each one becomes.  A fact becomes a
+ * tuple of its predicate's base store and no statement; a rule keeps its
+ * head and body, and a query has a body and no head.
  */
 static void
 statements_keep_the_shape_they_were_written_in(void)
@@ -132,10 +151,10 @@ statements_keep_the_shape_they_were_written_in(void)
 	static const char program[] =
 	    "edge(a, b).\n"
 	    "initialized.\n"
+	    "started :- initialized.\n"
 	    "ready(X) :- todo(X), not blocked(X), X != done.\n"
 	    "path(a, Y)?\n";
 
-	relic_ast_stmt_t *fact;
 	relic_ast_stmt_t *zero_arity;
 	relic_ast_stmt_t *rule;
 	relic_ast_stmt_t *query;
@@ -151,30 +170,25 @@ statements_keep_the_shape_they_were_written_in(void)
 	    "the program should load");
 	check(log.errors == 0, SCENARIO_SHAPE,
 	    "a well-formed program should report nothing");
-	check(statement_count(ctx) == 4, SCENARIO_SHAPE,
-	    "four statements should have been stored");
+	check(statement_count(ctx) == 3, SCENARIO_SHAPE,
+	    "three statements should have been stored");
+	check(facts_held(ctx, "edge", 2) == 1 &&
+	    facts_held(ctx, "initialized", 0) == 1, SCENARIO_SHAPE,
+	    "each fact should be a tuple of its predicate's base store");
 
-	fact = statement_at(ctx, 0);
-	zero_arity = statement_at(ctx, 1);
-	rule = statement_at(ctx, 2);
-	query = statement_at(ctx, 3);
+	zero_arity = statement_at(ctx, 0);
+	rule = statement_at(ctx, 1);
+	query = statement_at(ctx, 2);
 
-	check(fact != NULL && zero_arity != NULL && rule != NULL &&
-	    query != NULL, SCENARIO_SHAPE,
-	    "each of the four statements should be reachable");
-	if (fact == NULL || zero_arity == NULL || rule == NULL ||
-	    query == NULL) {
+	check(zero_arity != NULL && rule != NULL && query != NULL,
+	    SCENARIO_SHAPE, "each of the three statements should be reachable");
+	if (zero_arity == NULL || rule == NULL || query == NULL) {
 		relic_destroy(ctx);
 		return;
 	}
 
-	check(fact->kind == RELIC_STMT_RULE && fact->body_length == 0,
-	    SCENARIO_SHAPE, "a fact should be a rule with an empty body");
-	check(fact->head.arity == 2, SCENARIO_SHAPE,
-	    "edge(a, b) should have two arguments");
-	check(fact->where.line == 1, SCENARIO_SHAPE,
+	check(zero_arity->where.line == 3, SCENARIO_SHAPE,
 	    "a statement should point at where it began");
-
 	check(zero_arity->head.arity == 0 && zero_arity->head.terms == NULL,
 	    SCENARIO_SHAPE,
 	    "a predicate with no argument list should have arity zero");
@@ -272,7 +286,10 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 	    "ready(X) :- todo(X), not blocked(X).\n";
 
 	relic_ast_stmt_t *statement;
+	const relic_relation_t *store;
 	const relic_value_t *value;
+	relic_pred_id_t pred;
+	uint32_t symbol;
 	diag_log_t log;
 	relic_t *ctx;
 
@@ -284,19 +301,23 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 	check(relic_load_string(ctx, "not.dl", program) == 0, SCENARIO_NEGATION,
 	    "both statements should load");
 
-	statement = statement_at(ctx, 0);
-	check(statement != NULL && statement->head.arity == 2, SCENARIO_NEGATION,
+	store = NULL;
+	if (relic_symbol_intern(ctx, "status", 6, &symbol) == 0 &&
+	    relic_pred_intern(ctx, symbol, 2, NULL, &pred) == 0)
+		store = relic_base_store(ctx, pred);
+	check(store != NULL && store->count == 1, SCENARIO_NEGATION,
 	    "a fact with `not` as an argument should be stored");
-	if (statement == NULL || statement->head.arity != 2) {
+	if (store == NULL || store->count != 1) {
 		relic_destroy(ctx);
 		return;
 	}
 
-	value = relic_value_of(ctx, statement->head.terms[1].u.constant);
+	value = relic_value_of(ctx,
+	    relic_relation_tuple(store, RELIC_TUPLE_FIRST)[1]);
 	check(value != NULL && value->type == RELIC_SYMBOL, SCENARIO_NEGATION,
 	    "`not` as a term should be a symbol");
 
-	statement = statement_at(ctx, 1);
+	statement = statement_at(ctx, 0);
 	check(statement != NULL && statement->body_length == 2 &&
 	    statement->body[1].kind == RELIC_LITERAL_NEGATED,
 	    SCENARIO_NEGATION,
@@ -405,16 +426,20 @@ a_failed_load_adds_nothing(void)
 	if (ctx == NULL)
 		return;
 
-	check(relic_load_string(ctx, "first.dl", "kept(a).\n") == 0,
+	check(relic_load_string(ctx, "first.dl",
+	    "kept(a).\nfollows(X) :- kept(X).\n") == 0,
 	    SCENARIO_ATOMIC, "the first load should succeed");
-	check(statement_count(ctx) == 1, SCENARIO_ATOMIC,
-	    "its statement should be in the program");
+	check(statement_count(ctx) == 1 && facts_held(ctx, "kept", 1) == 1,
+	    SCENARIO_ATOMIC, "its rule and its fact should be in the program");
 
 	check(relic_load_string(ctx, "second.dl",
-	    "accepted(a).\nrejected(a b).\n") != 0, SCENARIO_ATOMIC,
+	    "kept(b).\naccepted(a).\nlater(X) :- kept(X).\n"
+	    "rejected(a b).\n") != 0, SCENARIO_ATOMIC,
 	    "a load with a mistake in it should fail");
-	check(statement_count(ctx) == 1, SCENARIO_ATOMIC,
-	    "neither statement of a failed load should be in the program");
+	check(statement_count(ctx) == 1 && facts_held(ctx, "kept", 1) == 1 &&
+	    facts_held(ctx, "accepted", 1) == 0, SCENARIO_ATOMIC,
+	    "no statement and no fact of a failed load should be in the "
+	    "program");
 
 	relic_destroy(ctx);
 }
@@ -435,16 +460,16 @@ loads_append_to_one_program(void)
 	check(relic_load_string(ctx, "rules.dl",
 	    "path(X, Y) :- edge(X, Y).\n") == 0, SCENARIO_APPEND,
 	    "the rules should load");
-	check(statement_count(ctx) == 2, SCENARIO_APPEND,
-	    "the program should hold the statements of both");
+	check(statement_count(ctx) == 1 && facts_held(ctx, "edge", 2) == 1,
+	    SCENARIO_APPEND, "the program should hold the rule and the fact");
 
 	/* An empty input is a program of no statements, not a failure. */
 	check(relic_load_string(ctx, "empty.dl", "") == 0, SCENARIO_APPEND,
 	    "an empty input should load");
 	check(relic_load_string(ctx, "comment.dl", "% nothing here") == 0,
 	    SCENARIO_APPEND, "an input of only comments should load");
-	check(statement_count(ctx) == 2, SCENARIO_APPEND,
-	    "an input with no statements should add none");
+	check(statement_count(ctx) == 1 && facts_held(ctx, "edge", 2) == 1,
+	    SCENARIO_APPEND, "an input with no statements should add none");
 
 	relic_destroy(ctx);
 }

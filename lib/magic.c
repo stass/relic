@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "internal.h"
@@ -27,9 +28,9 @@
  * to the call: sideways, in the order the planner would evaluate the body.
  * What comes out is ordinary rules, which the ordinary engine evaluates.
  *
- * Not every predicate is worth adorning.  One derived by nothing but facts is
- * read as it is, since adorning it would copy every fact into a guarded rule.
- * One the query reaches through negation is materialized in full, so that
+ * Not every predicate is worth adorning.  One no rule derives is read from
+ * its base store as it is, which holds it whole.  One the query reaches
+ * through negation is materialized in full, so that
  * absence means absence, and so is everything a fully materialized relation
  * depends on.  Those are the predicates the query reads completely.
  * relic_magic_find_complete() finds them before anything is evaluated, the
@@ -55,6 +56,18 @@
  *	rule of its own; from there the magic rules and the adorned rule read
  *	those literals through it.  Written out in full before every call, the
  *	prefixes of a body of L calls would hold the square of L in literals.
+ *
+ * A derived predicate with facts gives each of its adornments one more
+ * rule, first, reading the facts through its base view, p$base, a predicate
+ * of p's arity that reads p's base store: for p$bf,
+ *
+ *	p$bf(X1, X2) :- magic$p$bf(X1), p$base(X1, X2).
+ *
+ * The base view is complete, so the adornment reads only the facts its
+ * demand reaches, looking them up by the bound columns, and the rewrite's
+ * size does not depend on how many facts there are.  Base views are
+ * interned before the predicate table is measured, so that each is inside
+ * the snapshot of what is complete.
  *
  * An adornment with no bound column has no magic predicate and its rules no
  * guard, since there is no bound value to record.  The query is rewritten the
@@ -212,14 +225,16 @@ static bool	 args_equal(const relic_arg_t *a, const relic_arg_t *b,
 		    uint16_t count);
 static relic_arg_t *bound_args(relic_magic_t *magic, const relic_arg_t *args,
 		    uint16_t arity, uint32_t columns);
+static int	 base_view_of(relic_magic_t *magic, relic_pred_id_t source,
+		    relic_pred_id_t *viewp);
+static int	 base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
+		    const relic_location_t *where, relic_rule_t *rulep);
 static size_t	 budget_for(size_t program_size);
 static int	 canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 		    relic_rule_t *rule);
 static void	 close_complete(relic_demand_t *demand);
 static uint16_t	 column_count(uint32_t columns);
 static const relic_component_t *component_at(const relic_magic_t *magic,
-		    size_t position);
-static bool	 component_is_extensional(const relic_magic_t *magic,
 		    size_t position);
 static size_t	 component_of(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
@@ -257,6 +272,7 @@ static uint32_t	 hash_step(const relic_magic_t *magic, uint32_t hash,
 static uint64_t	 head_bound_slots(const relic_rule_t *rule,
 		    const relic_adornment_t *head);
 static int	 index_rules_by_head(relic_magic_t *magic);
+static int	 intern_base_views(relic_magic_t *magic);
 static int	 intern_generated(relic_magic_t *magic, const char *name,
 		    size_t length, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
@@ -514,26 +530,6 @@ index_rules_by_head(relic_magic_t *magic)
 }
 
 /*
- * Whether every rule of a component is a fact, which makes its predicate
- * extensional: loading the facts computes the whole relation.
- */
-static bool
-component_is_extensional(const relic_magic_t *magic, size_t position)
-{
-	const relic_component_t *component;
-	size_t i;
-
-	component = component_at(magic, position);
-
-	for (i = 0; i < component->rule_count; i++) {
-		if (component_rule(magic, component, i)->body_length != 0)
-			return (false);
-	}
-
-	return (true);
-}
-
-/*
  * Room for the walk and for its result, every mark clear.
  */
 static int
@@ -589,8 +585,8 @@ mark_complete(relic_demand_t *demand, size_t position)
 
 /*
  * Examine the relational literals of a body the query reaches.  A negated
- * literal's predicate is complete.  A positive literal's is complete when it
- * is extensional, and otherwise read on demand, and the rules of its
+ * literal's predicate is complete.  A positive literal's is complete when no
+ * rule derives it, and otherwise read on demand, and the rules of its
  * component are visited in turn -- once, however many literals call it or
  * its fellow members.
  *
@@ -630,11 +626,6 @@ visit_body(relic_demand_t *demand, const relic_rule_t *rule)
 
 		if (magic->complete_components[position])
 			continue;
-
-		if (component_is_extensional(magic, position)) {
-			mark_complete(demand, position);
-			continue;
-		}
 
 		demand->pending[demand->pending_count] = position;
 		demand->pending_count++;
@@ -700,7 +691,7 @@ close_complete(relic_demand_t *demand)
  * Find what the query reads completely: walk from its body through every
  * predicate read on demand, collecting the complete components, then close
  * that set over what its members depend on.  A predicate is complete when its
- * component is, or when no rule derives it.
+ * component is, or when no rule derives it; a base view is derived by none.
  *
  * The walk may visit the rules of a predicate that the closure later finds
  * complete.  That adds nothing wrong: whatever it collects beyond such a
@@ -712,6 +703,9 @@ relic_magic_find_complete(relic_magic_t *magic, const relic_rule_t *query)
 	relic_demand_t demand;
 	size_t position;
 	size_t p;
+
+	if (intern_base_views(magic) != 0)
+		return (-1);
 
 	magic->predicate_count = relic_pred_count(magic->ctx);
 
@@ -792,11 +786,11 @@ budget_for(size_t program_size)
 }
 
 /*
- * The bound on one count of what a rewrite generates.  A caller who
- * configures either Magic limit has sized the rewrite, and `sized` says so:
- * the count is then bounded by the limit they set for it,
- * `configured_limit`, or not at all if they left it zero.  A rewrite nobody
- * has sized gets the budget for a program of `program_size`.
+ * The bound on the predicates a rewrite generates.  A caller who configures
+ * either Magic limit has sized the rewrite, and `sized` says so: the count
+ * is then bounded by the limit they set for it, `configured_limit`, or not
+ * at all if they left it zero.  A rewrite nobody has sized gets the budget
+ * for a program of `program_size`.
  */
 static relic_magic_limit_t
 limit_or_budget(size_t configured_limit, bool sized, size_t program_size)
@@ -815,11 +809,10 @@ limit_or_budget(size_t configured_limit, bool sized, size_t program_size)
 }
 
 /*
- * The program's size in literals, which the literal budget is proportional
- * to: what one adorned copy of it holds, each rule's body plus one for its
- * guard.  A fact counts one, because a predicate derived by facts and rules
- * alike is read on demand and each adornment copies every fact of it as a
- * rule of one literal, the guard.
+ * The size in literals of the program's rules, which with the rules over
+ * base views the literal budget is proportional to: what one adorned copy
+ * of them holds, each rule's body plus one for its guard.  A rule over a
+ * base view, p(X1, ...) :- p$base(X1, ...), counts two.
  */
 static size_t
 program_size_in_literals(const relic_ruletab_t *rules)
@@ -918,7 +911,152 @@ intern_generated(relic_magic_t *magic, const char *name, size_t length,
 	if (relic_pred_intern(magic->ctx, symbol, arity, where, idp) != 0)
 		return (-1);
 
-	relic_pred_define(magic->ctx, *idp);
+	relic_pred_name_head(magic->ctx, *idp);
+
+	return (0);
+}
+
+/*
+ * Intern the base view of every derived predicate whose base store holds
+ * facts, counting them.  Only the predicates interned before this began are
+ * looked at, which every base view is among: a base view is derived by
+ * nothing, and interning one is what extends the table.
+ */
+static int
+intern_base_views(relic_magic_t *magic)
+{
+	relic_pred_id_t view;
+	size_t count;
+	size_t p;
+
+	count = relic_pred_count(magic->ctx);
+	magic->base_view_count = 0;
+
+	for (p = 1; p <= count; p++) {
+		if (!relic_pred_is_derived(magic->ctx, (relic_pred_id_t)p) ||
+		    relic_base_count(magic->ctx, (relic_pred_id_t)p) == 0)
+			continue;
+
+		if (base_view_of(magic, (relic_pred_id_t)p, &view) != 0)
+			return (-1);
+		magic->base_view_count++;
+	}
+
+	return (0);
+}
+
+/*
+ * The base view of `source` in *viewp: `name$base`, of source's arity,
+ * reading source's base store.  It is interned the first time it is asked
+ * for and found afterwards.  No adornment's name ends in `base`, since an
+ * adornment's suffix holds only b and f.
+ */
+static int
+base_view_of(relic_magic_t *magic, relic_pred_id_t source,
+    relic_pred_id_t *viewp)
+{
+	static const char suffix[] = "$base";
+	const relic_pred_t *entry;
+	const char *name;
+	char *text;
+	size_t name_length;
+	uint32_t symbol;
+	uint16_t arity;
+
+	entry = relic_pred_of(magic->ctx, source);
+	name = relic_symbol_bytes(magic->ctx, entry->name, &name_length);
+	arity = entry->arity;
+
+	text = magic_alloc(magic, name_length + sizeof(suffix) - 1, 1);
+	if (text == NULL)
+		return (-1);
+	bcopy(name, text, name_length);
+	bcopy(suffix, text + name_length, sizeof(suffix) - 1);
+
+	if (relic_symbol_intern(magic->ctx, text,
+	    name_length + sizeof(suffix) - 1, &symbol) != 0)
+		return (-1);
+
+	if (relic_pred_intern(magic->ctx, symbol, arity, NULL, viewp) != 0)
+		return (-1);
+
+	relic_pred_make_view(magic->ctx, *viewp, source);
+
+	return (0);
+}
+
+/*
+ * Build in *rulep the rule reading `source`'s facts through its base view,
+ *
+ *	source(X1, ..., Xn) :- source$base(X1, ..., Xn).
+ *
+ * for adorn_rule() to rewrite like any rule of the program, located at
+ * `where`, the first rule deriving `source`.  Its variables are named X1 to
+ * Xn, for explain to show, and each occurs twice, in the head and in the
+ * body, as a checked rule's would.  The base view was interned by
+ * intern_base_views() before the predicates were counted, so it is found
+ * here, among the predicates the rewrite knows complete.
+ */
+static int
+base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
+    const relic_location_t *where, relic_rule_t *rulep)
+{
+	relic_literal_t *literal;
+	relic_arg_t *args;
+	relic_variable_t *variables;
+	relic_pred_id_t view;
+	char name[16];
+	uint16_t arity;
+	uint16_t column;
+
+	if (base_view_of(magic, source, &view) != 0)
+		return (-1);
+	assert(view <= magic->predicate_count);
+
+	arity = relic_pred_of(magic->ctx, source)->arity;
+	literal = magic_alloc(magic, 1, sizeof(*literal));
+	if (literal == NULL)
+		return (-1);
+	args = NULL;
+	variables = NULL;
+	if (arity > 0) {
+		args = magic_alloc(magic, arity, sizeof(*args));
+		variables = magic_alloc(magic, arity, sizeof(*variables));
+		if (args == NULL || variables == NULL)
+			return (-1);
+	}
+
+	for (column = 0; column < arity; column++) {
+		bzero(&args[column], sizeof(args[column]));
+		args[column].kind = RELIC_ARG_VARIABLE;
+		args[column].u.slot = column;
+
+		bzero(&variables[column], sizeof(variables[column]));
+		snprintf(name, sizeof(name), "X%u", (unsigned int)column + 1);
+		if (relic_symbol_intern(magic->ctx, name, strlen(name),
+		    &variables[column].name) != 0)
+			return (-1);
+		variables[column].where = *where;
+		variables[column].occurrences = 2;
+	}
+
+	bzero(literal, sizeof(*literal));
+	literal->kind = RELIC_LITERAL_POSITIVE;
+	literal->where = *where;
+	literal->u.atom.args = args;
+	literal->u.atom.where = *where;
+	literal->u.atom.pred = view;
+
+	bzero(rulep, sizeof(*rulep));
+	rulep->head_args = args;
+	rulep->body = literal;
+	rulep->variables = variables;
+	rulep->body_length = 1;
+	rulep->origin = RELIC_ORIGIN_QUERY;
+	rulep->where = *where;
+	rulep->head = source;
+	rulep->head_arity = arity;
+	rulep->variable_count = arity;
 
 	return (0);
 }
@@ -937,7 +1075,6 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
     relic_adornment_t *adornment)
 {
 	const relic_pred_t *entry;
-	relic_location_t where;
 	const char *name;
 	char *text;
 	size_t name_length;
@@ -948,7 +1085,6 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	entry = relic_pred_of(magic->ctx, source);
 	name = relic_symbol_bytes(magic->ctx, entry->name, &name_length);
 	arity = entry->arity;
-	where = entry->where;
 
 	length = MAGIC_PREFIX_LENGTH + name_length + 1 + arity;
 	text = magic_alloc(magic, length, 1);
@@ -967,7 +1103,7 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	adornment->magic = RELIC_ID_NONE;
 
 	if (intern_generated(magic, text + MAGIC_PREFIX_LENGTH,
-	    length - MAGIC_PREFIX_LENGTH, arity, &where,
+	    length - MAGIC_PREFIX_LENGTH, arity, NULL,
 	    &adornment->adorned) != 0)
 		return (-1);
 
@@ -975,7 +1111,7 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 		return (0);
 
 	return (intern_generated(magic, text, length, column_count(bound),
-	    &where, &adornment->magic));
+	    NULL, &adornment->magic));
 }
 
 static uint32_t
@@ -1399,8 +1535,6 @@ find_rule(const relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 static int
 append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 {
-	relic_rule_t *entries;
-
 	if (magic->rules.count >= UINT32_MAX - 1) {
 		relic_diagf(magic->ctx, RELIC_ERROR, NULL,
 		    "a query's Magic rewrite generated more rules than it can "
@@ -1408,24 +1542,15 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 		return (-1);
 	}
 
-	entries = relic_grow_array(magic->rules.entries,
-	    &magic->rules.capacity, magic->rules.count + 1,
-	    sizeof(*magic->rules.entries));
-	if (entries == NULL) {
-		relic_diag_no_memory(magic->ctx);
-		return (-1);
-	}
-	magic->rules.entries = entries;
-
 	if (relic_idtab_reserve(&magic->rule_index, 1, rehash_rule,
 	    magic) != 0) {
 		relic_diag_no_memory(magic->ctx);
 		return (-1);
 	}
 
-	assert(rule->head != RELIC_ID_NONE);
-	magic->rules.entries[magic->rules.count] = *rule;
-	magic->rules.count++;
+	if (relic_ruletab_append(magic->ctx, &magic->rules, rule) != 0)
+		return (-1);
+
 	relic_idtab_place(&magic->rule_index, hash,
 	    (uint32_t)magic->rules.count);
 
@@ -2058,13 +2183,18 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 }
 
 /*
- * Generate the rules of one adornment: every rule deriving its source
- * predicate, rewritten for that call.
+ * Generate the rules of one adornment: the rule over its source's base view
+ * first, when the source has facts, then every rule deriving the source, in
+ * program order, each rewritten for that call.  The rule over the base view
+ * is numbered after the program's rules, and calls nothing on demand, so it
+ * cuts no prefix and names no supplementary predicate.
  */
 static int
 adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 {
 	const relic_ruletab_t *rules;
+	const relic_location_t *where;
+	relic_rule_t over_facts;
 	size_t first;
 	size_t end;
 	size_t i;
@@ -2072,6 +2202,22 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 	rules = &magic->ctx->program.rules;
 	first = magic->first_rule_of[adornment->source - 1];
 	end = magic->first_rule_of[adornment->source];
+
+	/*
+	 * A predicate adorned is derived, so it has a rule, whose place the
+	 * rule over its base view borrows.
+	 */
+	assert(first < end);
+	if (relic_base_count(magic->ctx, adornment->source) > 0) {
+		where = &rules->entries[magic->rules_by_head[first]].where;
+		if (base_view_rule(magic, adornment->source, where,
+		    &over_facts) != 0)
+			return (-1);
+
+		if (adorn_rule(magic, &over_facts, end - first,
+		    adornment) != 0)
+			return (-1);
+	}
 
 	for (i = first; i < end; i++) {
 		if (adorn_rule(magic, &rules->entries[magic->rules_by_head[i]],
@@ -2092,16 +2238,20 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
  * derived by some rule -- one no rule derives is complete -- so each
  * adornment's source has rules to generate from.
  *
- * What the rewrite may generate is bounded in predicates, rules and body
- * literals.  Configuring either Magic limit sizes the rewrite and lifts all
- * three budgets, leaving only the limits set.  Otherwise each is a budget in
- * proportion to the program.  The one on literals has no limit behind it and
- * holds everything the rewrite drafts, kept or dropped, to a constant
- * multiple of the program's size in literals, which counting rules cannot
- * when long rules are copied once per adornment.  The budgets are
- * proportional to the program while the cost of answering without the
- * rewrite is proportional to the data, which is why a caller who sets a
- * limit is not overruled.
+ * What the rewrite may generate is bounded in predicates and body literals by
+ * budgets in proportion to the program, and in predicates and rules by the
+ * Magic limits.  Configuring either limit sizes the rewrite and lifts both
+ * budgets, leaving only the limits set.  The budget on literals holds
+ * everything the rewrite drafts, kept or dropped, to a constant multiple of the
+ * program's size in literals, which counting rules cannot when long rules are
+ * copied once per adornment.  It bounds the rules kept as well. Every rule is
+ * charged its body before it is kept, and every one but a seed has a body
+ * literal.  A seed is the query's, or the magic rule of an adorned rule's first
+ * call when constants alone bind it, at most one per adorned rule, whose draft
+ * was charged a literal.  So the rules kept number at most twice the literals
+ * drafted plus the query's seeds.  The budgets are proportional to the program
+ * while the cost of answering without the rewrite is proportional to the data,
+ * which is why a caller who sets a limit is not overruled.
  *
  * An adornment is copied out of the array before its rules are generated,
  * because generating them may record more and move the array.
@@ -2121,10 +2271,12 @@ relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query)
 
 	magic->pred_limit = limit_or_budget(config->max_magic_preds, sized,
 	    program->schedule.member_count);
-	magic->rule_limit = limit_or_budget(config->max_magic_rules, sized,
-	    program->rules.count);
+	magic->rule_limit.configured = sized;
+	magic->rule_limit.most = config->max_magic_rules != 0 ?
+	    config->max_magic_rules : SIZE_MAX;
 	magic->literal_budget = sized ? SIZE_MAX :
-	    budget_for(program_size_in_literals(&program->rules));
+	    budget_for(program_size_in_literals(&program->rules) +
+	    2 * magic->base_view_count);
 
 	if (rewrite_query(magic, query) != 0)
 		return (-1);

@@ -221,7 +221,7 @@ relation(relic_t *ctx, const char *scenario, const char *name, uint16_t arity)
 	if (pred == RELIC_ID_NONE)
 		return (NULL);
 
-	rel = relic_relation_for(ctx, pred);
+	rel = relic_relation_read(ctx, pred);
 	if (rel == NULL)
 		checkf(false, scenario, "%s/%u should have a relation", name,
 		    (unsigned int)arity);
@@ -728,8 +728,8 @@ a_relation_belongs_to_one_predicate(void)
 		return;
 	}
 
-	binary = relic_relation_for(ctx, binary_pred);
-	unary = relic_relation_for(ctx, unary_pred);
+	binary = relic_relation_read(ctx, binary_pred);
+	unary = relic_relation_read(ctx, unary_pred);
 	if (binary == NULL || unary == NULL) {
 		check(false, SCENARIO_OWNERSHIP,
 		    "each predicate should have a relation");
@@ -739,7 +739,7 @@ a_relation_belongs_to_one_predicate(void)
 
 	check(binary != unary, SCENARIO_OWNERSHIP,
 	    "edge/2 and edge/1 should have relations of their own");
-	check(relic_relation_for(ctx, binary_pred) == binary,
+	check(relic_relation_read(ctx, binary_pred) == binary,
 	    SCENARIO_OWNERSHIP,
 	    "asking for a predicate's relation twice should give one relation");
 	checkf(binary->arity == 2 && unary->arity == 1, SCENARIO_OWNERSHIP,
@@ -760,7 +760,7 @@ a_relation_belongs_to_one_predicate(void)
 	check(!relic_relation_contains(unary, columns), SCENARIO_OWNERSHIP,
 	    "edge/1 should not find a tuple inserted into edge/2");
 
-	check(relic_relation_for(ctx, RELIC_ID_NONE) == NULL,
+	check(relic_relation_read(ctx, RELIC_ID_NONE) == NULL,
 	    SCENARIO_OWNERSHIP,
 	    "no relation belongs to an identifier naming no predicate");
 
@@ -859,8 +859,8 @@ the_tuple_limit_refuses_a_tuple_and_says_so(void)
 		return;
 	}
 
-	first = relic_relation_for(ctx, first_pred);
-	second = relic_relation_for(ctx, second_pred);
+	first = relic_relation_read(ctx, first_pred);
+	second = relic_relation_read(ctx, second_pred);
 	if (first == NULL || second == NULL) {
 		check(false, SCENARIO_TUPLE_LIMIT,
 		    "each predicate should have a relation");
@@ -1099,7 +1099,7 @@ a_relation_stays_where_it_was_put(void)
 		return;
 	}
 
-	first = relic_relation_for(ctx, first_pred);
+	first = relic_relation_read(ctx, first_pred);
 	if (first == NULL) {
 		check(false, SCENARIO_STABLE, "the first relation is created");
 		relic_destroy(ctx);
@@ -1123,13 +1123,13 @@ a_relation_stays_where_it_was_put(void)
 		if (other == RELIC_ID_NONE)
 			break;
 
-		if (relic_relation_for(ctx, other) == NULL) {
+		if (relic_relation_read(ctx, other) == NULL) {
 			checkf(false, SCENARIO_STABLE,
 			    "relation %u should be created", ordinal);
 			break;
 		}
 
-		again = relic_relation_for(ctx, first_pred);
+		again = relic_relation_read(ctx, first_pred);
 
 		checkf(again == first, SCENARIO_STABLE,
 		    "the first relation should still be where it was after "

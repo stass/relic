@@ -1,5 +1,3 @@
-stratum 0, component 0: edge/2
-    facts: 3
 magic rewrite of $q0(X) :- path(a, X).
     adorn path/2 bf
     seed magic$path$bf(a).
@@ -33,8 +31,6 @@ magic rewrite of $q0(X) :- path(a, X).
 query $q0(X) :- path$bf(a, X).
     lookup path$bf(a, X) key={0}
     emit $q0(X)
-stratum 0, component 0: edge/2
-    facts: 3
 magic rewrite of $q1(X) :- path(X, d).
     adorn path/2 fb
     seed magic$path$fb(d).

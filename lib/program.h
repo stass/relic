@@ -84,24 +84,31 @@ typedef uint32_t relic_pred_id_t;
  * arity mismatch in this language -- two arities are two predicates rather
  * than one predicate used inconsistently.
  *
- * `where` is the first place the program mentions it, which is where the
- * undefined-predicate warning points.  `defined` becomes true when a
- * statement's head names it, whether that statement is a fact or a rule; a
- * predicate may have both, and `defined` says only that something derives
- * into it.
+ * Three marks record what derives into it, each set in one place and never
+ * cleared.  `head_named` is set when a rule's head names it, as soon as the
+ * head is resolved and before the rule is known to be safe, so that one
+ * unsafe rule draws one complaint rather than also a warning that nothing
+ * defines its predicate; and when the Magic rewrite generates it.
+ * `derived` is set when a rule with it as head is appended to a rule table,
+ * and decides the relation it is read and written through.  `views` names
+ * the predicate whose base store this one reads, for a base view, and is
+ * RELIC_ID_NONE otherwise.  Whether a predicate is defined is a function of
+ * these and of its base store, relic_pred_is_defined().
  *
- * `defined` is set as soon as a head is resolved, before the statement is
- * known to be safe, so that one unsafe rule produces one complaint rather
- * than also being reported as a predicate nothing defines.  It therefore
- * implies that a compiled rule derives into the predicate only for a
- * program that passed its check -- which is the only kind of program
- * anything downstream is given.
+ * `referenced` is set when an atom of a rule body or a query names it,
+ * whether or not that statement is accepted, and `referenced_at` is where
+ * that first atom is: where the undefined-predicate warning points.  A
+ * predicate interned only for facts a failed load never committed, or for a
+ * rewrite that was abandoned, is referenced by nothing and never named.
  */
 struct relic_pred {
-	relic_location_t	where;
+	relic_location_t	referenced_at;
 	uint32_t		name;	/* interned spelling */
+	relic_pred_id_t		views;
 	uint16_t		arity;
-	bool			defined;
+	bool			head_named;
+	bool			derived;
+	bool			referenced;
 	bool			reported_undefined;
 };
 
@@ -202,8 +209,10 @@ struct relic_variable {
 /*
  * A compiled rule.
  *
- * A fact is a rule whose body has no literals, exactly as in the syntax
- * tree.  A query is a rule too, whose head names no predicate: `head` is
+ * A load stores a program's facts in base stores rather than compiling
+ * them, so a rule whose body has no literals is a seed of the Magic rewrite,
+ * or a statement with a variable in its head, which the check rejects.  A
+ * query is a rule too, whose head names no predicate: `head` is
  * RELIC_ID_NONE and the head's arguments are the query's named variables in
  * order of first occurrence.  Its tuples go to the answer relation the query
  * object owns, which is why the predicate table holds nothing for it.

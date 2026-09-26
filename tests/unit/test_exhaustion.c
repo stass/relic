@@ -585,12 +585,13 @@ interning_a_value_survives_a_failed_allocation(void)
  * Load a program with the nth allocation refused, then load the same text
  * again with the allocator restored.
  *
- * Two properties are at stake and neither is visible in a return value.  A
- * load is all or nothing, so a load that failed must have added no
- * statements at all -- half of a program is worse than none, because a
- * caller cannot tell which half.  And the program arena's failure flag is
- * sticky, so a load that did not clear it after reporting would leave a
- * context that can never load anything again; the second load is what
+ * Two properties are at stake and neither is visible in a return value.  A load
+ * is all or nothing, so a load that failed must have added no statements and no
+ * facts at all -- half of a program is worse than none, because a caller cannot
+ * tell which half.  A load that succeeded holds the rule and the query as
+ * statements and the fact in edge's base store.  And the program arena's
+ * failure flag is sticky, so a load that did not clear it after reporting would
+ * leave a context that can never load anything again; the second load is what
  * proves it was cleared.
  */
 static void
@@ -643,16 +644,20 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 
 		if (status != 0) {
 			refused++;
-			checkf(ctx->ast.count == 0, SCENARIO_LOAD,
-			    "a failed load should add no statements, not %zu, "
-			    "with allocation %ld refused", ctx->ast.count,
-			    budget);
+			checkf(ctx->ast.count == 0 &&
+			    relic_base_total(ctx) == 0, SCENARIO_LOAD,
+			    "a failed load should add no statements and no "
+			    "facts, not %zu and %zu, with allocation %ld "
+			    "refused", ctx->ast.count,
+			    relic_base_total(ctx), budget);
 		} else {
 			completed++;
-			checkf(ctx->ast.count == 3, SCENARIO_LOAD,
+			checkf(ctx->ast.count == 2 &&
+			    relic_base_total(ctx) == 1, SCENARIO_LOAD,
 			    "a load that reported success should have added "
-			    "all three statements, not %zu, with allocation "
-			    "%ld refused", ctx->ast.count, budget);
+			    "two statements and one fact, not %zu and %zu, "
+			    "with allocation %ld refused", ctx->ast.count,
+			    relic_base_total(ctx), budget);
 		}
 
 		checkf(relic_load_string(ctx, "sweep.dl", program) == 0,
@@ -829,7 +834,7 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 			 * the dependency analysis, which must fail the check
 			 * without the program being condemned for it.
 			 */
-			if (ctx->program.rules.count == CHECK_RULES + 1)
+			if (ctx->program.rules.count == CHECK_RULES)
 				analysed++;
 		} else {
 			completed++;
@@ -850,15 +855,15 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 
 		/*
 		 * Whatever the first check managed, the program afterwards
-		 * holds one compiled rule per statement: the three facts and
-		 * rules, with the fourth statement being the second path
-		 * clause.  A cursor left too far forward would show fewer.
+		 * holds one compiled rule per rule statement; the fact went
+		 * to edge's base store when it was loaded.  A cursor left too
+		 * far forward would show fewer.
 		 */
-		checkf(ctx->program.rules.count == CHECK_RULES + 1,
+		checkf(ctx->program.rules.count == CHECK_RULES,
 		    SCENARIO_CHECK,
 		    "every statement should end up compiled exactly once, "
 		    "not %zu of %d, with allocation %ld refused",
-		    ctx->program.rules.count, CHECK_RULES + 1, budget);
+		    ctx->program.rules.count, CHECK_RULES, budget);
 
 		relic_destroy(ctx);
 	}
@@ -992,7 +997,7 @@ an_analysis_that_ran_out_of_memory_says_nothing(void)
 			    "running out of memory should not condemn the "
 			    "program, with allocation %ld refused", budget);
 
-			if (ctx->program.rules.count == STRATIFY_CYCLE + 1)
+			if (ctx->program.rules.count == STRATIFY_CYCLE)
 				analysed++;
 
 			errors_reported = 0;
@@ -1201,7 +1206,7 @@ a_schedule_that_could_not_be_rebuilt_is_kept(void)
 			 * in, the kept schedule falls short of it.
 			 */
 			appended = ctx->program.rules.count ==
-			    SCHEDULE_CHAIN + 2;
+			    SCHEDULE_CHAIN + 1;
 			checkf(relic_schedule_is_current(&ctx->program) ==
 			    !appended, SCENARIO_SCHEDULE,
 			    "the kept schedule should pass for current only "
@@ -1268,7 +1273,7 @@ sweep_relation(relic_t *ctx, relic_dom_t *values, size_t count)
 			return (NULL);
 	}
 
-	return (relic_relation_for(ctx, pred));
+	return (relic_relation_read(ctx, pred));
 }
 
 /*
@@ -1282,10 +1287,15 @@ storage_by_hand(const relic_t *ctx)
 	size_t position;
 
 	bytes = 0;
-	for (position = 0; position < ctx->relations.count; position++) {
-		if (ctx->relations.entries[position] != NULL)
+	for (position = 0; position < ctx->store.derived.count; position++) {
+		if (ctx->store.derived.entries[position] != NULL)
 			bytes += relic_relation_bytes(
-			    ctx->relations.entries[position]);
+			    ctx->store.derived.entries[position]);
+	}
+	for (position = 0; position < ctx->store.bases.count; position++) {
+		if (ctx->store.bases.entries[position] != NULL)
+			bytes += relic_relation_bytes(
+			    ctx->store.bases.entries[position]);
 	}
 
 	return (bytes);
@@ -1696,7 +1706,7 @@ relation_named(relic_t *ctx, const char *name, uint16_t arity)
 	if (relic_pred_intern(ctx, symbol, arity, NULL, &pred) != 0)
 		return (NULL);
 
-	return (relic_relation_for(ctx, pred));
+	return (relic_relation_read(ctx, pred));
 }
 
 static int
@@ -2122,7 +2132,7 @@ a_materialization_out_of_memory_reports_once(void)
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
 		checkf(status == 0 || (held < WIDE_PREDICATES &&
-		    ctx->materialized_rules == 0), SCENARIO_MATERIALIZE,
+		    !relic_relations_current(ctx)), SCENARIO_MATERIALIZE,
 		    "a refused materialization should be left stale, holding "
 		    "%zu tuples, with allocation %ld refused", held, budget);
 

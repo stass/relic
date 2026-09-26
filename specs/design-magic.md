@@ -10,8 +10,9 @@ the rewrite is shown to a person. Forward-looking, like every document under
 `specs/design-plan.md` for the query rule this rewrites;
 `specs/design-planner.md` for the ordering the rewrite borrows;
 `specs/design-stratify.md` for the analysis the rewritten rules pass through;
-`specs/design-eval.md` for the fixed points that run them; `relic-plan.md`
-decisions D-4, D-7, D-8 and D-12.
+`specs/design-eval.md` for the fixed points that run them;
+`specs/design-facts.md` for the base stores a rewrite reads facts from;
+`relic-plan.md` decisions D-4, D-7, D-8 and D-12.
 
 ---
 
@@ -22,7 +23,8 @@ decisions D-4, D-7, D-8 and D-12.
   called, and which adornments have no magic predicate;
 * the order in which bindings flow through a rule body, and why it is the
   planner's;
-* the rules the rewrite generates, the seed among them, the supplementary
+* the rules the rewrite generates, the seed among them, the rule that reads
+  a derived predicate's facts through its base view, the supplementary
   predicates that carry a prefix from one call to the next, and the
   rewritten query;
 * why the rewrite terminates, and how duplicate rules are recognized;
@@ -46,13 +48,15 @@ query -> complete part materialized -> rewrite -> stratify -> evaluate -> answer
 
 A query is **not** rewritten when the context's relations already hold the
 program's fixed point -- `relic_materialize()` ran, or `-a` was given, and
-nothing has been loaded since. Everything the query could read is then
-complete, and running its plan over those relations, as a query always did
-before this stage, is cheaper than any rewrite. Nor is it rewritten under
-`-X no-magic` (`RELIC_F_NO_MAGIC`), which materializes the program and runs the
-plan directly: that is the reference the rewrite is tested against.
+the program has gained no rule and no fact since. Everything the query could
+read is then complete, and running its plan over those relations is
+cheaper than any rewrite. Nor is it
+rewritten under `-X no-magic` (`RELIC_F_NO_MAGIC`), which materializes the
+program and runs the plan directly: that is the reference the rewrite is
+tested against.
 
-Otherwise the query is answered in two phases over relations emptied for it:
+Otherwise the query is answered in two phases over derived relations
+emptied for it:
 
 1. **The complete part** is materialized: the program components the query
    reads in full, evaluated exactly as full materialization evaluates them,
@@ -76,10 +80,10 @@ adorned copy that holds only the tuples some caller asked about.
 
 A predicate is read completely when any of these holds:
 
-* **it is extensional**: every rule deriving it is a fact, or nothing derives
-  it at all. Adorning it would copy each fact into a guarded rule per
-  adornment, a million rules for a million facts, to compute a relation that
-  loading the facts computes directly;
+* **no rule derives it**: it is not derived (`specs/design-facts.md` section
+  3.2), so its base store, filled when its facts were loaded, is the whole
+  relation, and reading it needs no evaluation. A predicate of facts alone
+  is one, and so is a base view (section 6);
 * **the query reaches it through negation**. Architecture section 37 keeps
   negation simple by materializing a negated relation in full in its lower
   stratum, so that absence means absence;
@@ -94,7 +98,7 @@ is evaluated:
 ```text
 demanded = {}, roots = {}
 visit the query's body:
-	a positive literal over an extensional predicate: add it to roots
+	a positive literal over a predicate no rule derives: add it to roots
 	a positive literal over any other predicate p: if p is not in
 	    demanded, add it and visit the body of every rule deriving p
 	a negated literal over q: add q to roots
@@ -112,7 +116,15 @@ the schedule filtered to them.
 Two consequences are worth stating. A predicate that is both negated
 somewhere and called positively elsewhere is read completely everywhere, since
 it is materialized anyway. And a program whose relations the query never
-reaches is never evaluated: facts the query cannot see are not loaded.
+reaches is never evaluated: a component the query cannot see is neither
+seeded with its facts nor run.
+
+**Base views are interned before the walk.** When the rewrite begins finding
+what the query reads completely, it interns the base view of every derived
+predicate whose base store holds facts, before it takes its snapshot of the
+predicate table, so every base view is inside the snapshot and complete by
+the rule above. The rewrite asks whether a predicate is complete only of the
+program's predicates and of base views, all of which that snapshot holds.
 
 ---
 
@@ -156,9 +168,11 @@ bounded by the adornments the program admits, and a second query with the
 same adornments reuses them. A supplementary predicate cut from the query's
 rule is named after `$q0` whatever the query, so a later query reuses it
 when its cut at that position keeps as many variables, and otherwise gets a
-predicate of the same name and another arity. They are marked defined when
-interned, so the
-undefined-predicate warning never names one.
+predicate of the same name and another arity. No atom of a program or a
+query names one, so none is ever referenced, and the undefined-predicate
+warning never names one, whether or not the rewrite that generated it was
+kept. A base view, `p$base`, is interned once, the first time a rewrite
+needs it, and reused by every later one.
 
 ---
 
@@ -261,17 +275,38 @@ the call's magic rule, to the next call where they fit or to the adorned
 rule. Such a body is bounded as the plain construction is, by the literal
 budget of section 8.
 
-A fact of a predicate read on demand is a rule with an empty body, and is
-rewritten like one: `path(a, b).` adorned `bf` becomes
-`path$bf(a, b) :- magic$path$bf(a).`
+**A derived predicate's facts enter each of its adornments as one rule over
+its base view.** The facts a program states are tuples of their predicate's
+base store, not rules (`specs/design-facts.md`), so the rewrite names the
+base store of a derived predicate *p* as a predicate of its own, its **base
+view** `p$base`, of *p*'s arity, which no rule derives and which reads *p*'s
+base store. Each adornment of a derived predicate whose base store holds
+facts is given, before the adornments of the program's rules deriving *p*,
+the adornment of the rule `p(X1, ..., Xn) :- p$base(X1, ..., Xn).`:
+
+```prolog
+link$bf(X1, X2) :- magic$link$bf(X1), link$base(X1, X2).
+```
+
+rather than a guarded copy of each fact. The base view is complete, so the
+planner looks the facts up by the bound columns like any complete relation,
+the adornment reads only the facts its demand reaches, and the rewrite's
+size does not depend on how many facts there are. The rule calls nothing on
+demand, so it generates no magic rule, cuts no prefix and names no
+supplementary predicate. Being first, it makes an adornment's rows begin
+with its facts, as a derived predicate's rows do when it is materialized.
 
 **The query is a rule too**, whose head is its output columns and names no
 predicate (`specs/design-query.md` section 4), and is rewritten with nothing
 bound and no guard; the rewritten rule keeps that head and runs into the
 query's own answer relation. The magic rules its body generates are the
 **seeds**: with no guard and nothing before the first literal, the first seed
-of `path(a, X)?` is the fact `magic$path$bf(a).`, exactly architecture section
-34's seed, found by the one rule rather than constructed separately. The
+of `path(a, X)?` is the body-less rule `magic$path$bf(a).`, exactly
+architecture section 34's seed, found by the one rule rather than
+constructed separately. A seed with no body is the only body-less rule a
+rule table holds, since a program's facts are in base stores, and every
+evaluation of the rewrite inserts it when its turn comes
+(`specs/design-eval.md` section 3). The
 rewritten query, `$q0(X) :- path$bf(a, X).`, is kept apart from the generated
 rules and run once after them, as a query always is.
 
@@ -375,43 +410,57 @@ the rewrite of a body of hundreds of calls that the construction of section
 6 exists to keep small. Exceeding a limit fails the query as any limit does: no rows, and a
 nonzero exit.
 
-**A limit left unset is a budget.** Finite is not small: a program whose
+**A rewrite nobody has sized has budgets.** Finite is not small: a program whose
 rules each call a predicate with one more column bound than the head was
 called with reaches all 2^arity adornments. Three kilobytes of arity 14 do
 it, generating 16 384 adornments in 1.3 GB, where the query answered from the
 whole program takes a megabyte. The rewrite is an optimization, and an
 optimization must not decide whether a query is answered, nor generate a
-program unboundedly larger than the one it specializes. So a Magic limit that
-is not configured is replaced by a budget in proportion to the program:
+program unboundedly larger than the one it specializes. So when neither
+Magic limit is configured, the rewrite has budgets in proportion to the
+program:
 
 | Budget | Counts | Is |
 | --- | --- | --- |
 | generated predicates | as `max_magic_preds` | 256 + 16 x the program's derived predicates |
-| generated rules | as `max_magic_rules` | 256 + 16 x the program's rules |
 | generated literals | body literals of every rule drafted, kept or dropped | 256 + 16 x the program's size in literals |
 
-A program's derived predicates are the members of its schedule, its rules
-are its compiled rules, facts included, and its size in literals is what one
-adorned copy of it holds: each rule's body plus one for its guard, so a fact
-counts one. A predicate derived by facts and rules alike is read on demand,
-and every adornment copies each of its facts as a guarded rule; a budget
-over body literals alone would refuse a thousand facts behind one rule at
-their first copy, which is the program the rewrite exists for. All are
-fixed for a given program, so the budget is the same on every run.
+A program's derived predicates are the members of its schedule, and its
+size in literals is what one adorned copy of it holds: each rule's body plus
+one for its guard. A derived predicate whose base store holds facts counts
+as the one rule over its base view that each of its adornments is given,
+two literals (`specs/design-facts.md` section 6). Facts count nothing: the
+rewrite copies none of them, so a thousand facts behind one rule rewrite as
+cheaply as one. Both budgets are fixed for a given program, so they are the
+same on every run.
+
+**The literal budget bounds the rules kept, so generated rules have a limit
+but no budget.** Every rule the rewrite generates is charged its body
+literals before it is kept, and every one but a seed has at least one: an
+adorned rule its guard, a magic rule the literal it records a call from, a
+supplementary rule the prefix it cuts, a rule over a base view the view. A
+seed is the query's, at most one per call the query makes, or the magic
+rule of an adorned rule's first call when constants alone bind it, at most
+one per adorned rule, whose draft was charged at least one literal. So the
+rules kept number at most twice the literals drafted plus the query's
+seeds. A budget on rules in
+proportion to the program's rules would be the stricter only where it is
+wrong: one adornment of a single rule of k demand calls keeps a magic rule
+and a supplementary rule per call, about 2k rules from one rule of the
+program, which is a rewrite that specializes the program and that the
+budgets exist to admit.
 
 The literal budget counts every rule drafted, kept or dropped. A duplicate,
 or a rule that derives nothing, is built before it is recognized as one,
 and a long body calling its own predicate drafts copies that are all
 dropped: counting only what is kept would never see them, and their cost
 in the arena would grow as the square of the body until the memory limit,
-if any, refused it. The rule budget counts what is kept, since it measures
-the rewritten program; the literal budget measures what the rewrite
-builds. The literal budget has no configurable
-limit behind it: it is not a knob but the invariant that a rewrite nobody
-has sized is a constant multiple of the program, which the rule budget
-alone cannot hold, because a rule is copied whole once per adornment and a
-program of few long rules called with many patterns generates few rules
-holding many literals (`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
+if any, refused it. The literal budget has no configurable limit behind
+it: it is not a knob but the invariant that a rewrite nobody has sized is
+a constant multiple of the program, which counting rules cannot hold,
+because a rule is copied whole once per adornment and a program of few
+long rules called with many patterns generates few rules holding many
+literals (`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
 specializes the program -- a handful of adornments per predicate, each with
 its rules and magic rules -- and the floor admits every rewrite of a small
 program outright; what it refuses is a rewrite that multiplies the program.
@@ -423,13 +472,13 @@ predicate being adorned, and the query is then answered from the whole
 program's fixed point, exactly as `-X no-magic` answers it:
 
 ```text
-relic: warning: the query's Magic rewrite outgrew its budget of 416 generated rules while adorning p/8; answering it from the whole program
+relic: warning: the query's Magic rewrite outgrew its budget of 784 generated literals while adorning p/8; answering it from the whole program
 ```
 
-Configuring either limit replaces all three budgets rather than joining
+Configuring either limit replaces both budgets rather than joining
 them, so a caller who sets one gets precisely the limit asked for: a larger
 rewrite than the budgets admit if the limit is larger, and a failed query
-when it is exceeded. The literal budget is lifted with the others because
+when it is exceeded. The literal budget is lifted with the other because
 the budgets are proportional to the program while the cost of answering
 without the rewrite is proportional to the data: ten short rules over an
 8-ary predicate and a million facts rewrite to a few thousand literals,
@@ -465,17 +514,18 @@ query fails with an internal error.
 
 ### 9.2 State
 
-A rewritten query **starts from empty relations**. It discards every relation
-first, as a materialization with stale relations does, and leaves behind the
-complete part and the generated relations; the next evaluation of any kind
-discards them in turn, and the answer is emptied when its rows have been
-delivered. What the context holds after a query is then a
-function of that query alone, so its counters and its memory are the same
-whatever ran before it. A query whose rewrite is abandoned over its budget leaves
-the whole program's fixed point instead, as a query under `-X no-magic`
-does. The price is that each rewritten query loads the
-facts it reads again. `TODO.md` records keeping complete relations across
-queries as an optimization.
+A rewritten query **starts from the facts**. It discards everything derived
+first, as a materialization with stale relations does, keeping the base
+stores, and leaves behind the complete part and the generated relations; the
+next evaluation of any kind discards them in turn, and the answer is emptied
+when its rows have been delivered. What the context holds after a query,
+beside the program's facts, is then a function of that query alone, so its
+counters and its memory are the same whatever ran before it. A query whose
+rewrite is abandoned over its budget leaves the whole program's fixed point
+instead, as a query under `-X no-magic` does. The price is that each
+rewritten query derives again what it reads completely, seeding its derived
+predicates with their facts again. `TODO.md` records keeping complete
+relations across queries as an optimization.
 
 The discard runs before either phase begins, so no delta range spans it --
 the obligation `specs/design-relations.md` section 4 places on any operation
@@ -526,8 +576,6 @@ architecture section 60's program, a chain of three edges, and
 `path(a, X)?`:
 
 ```text
-stratum 0, component 0: edge/2
-    facts: 3
 magic rewrite of $q0(X) :- path(a, X).
     adorn path/2 bf
     seed magic$path$bf(a).
@@ -565,7 +613,9 @@ query $q0(X) :- path$bf(a, X).
 
 * The phase 1 components keep their positions in the program's schedule, so
   a component the query does not read leaves a gap in the numbering, and the
-  gap is what shows that it was not evaluated.
+  gap is what shows that it was not evaluated. `edge` holds facts alone, so
+  it is in no component and needs no evaluation: phase 1 shows nothing, and
+  the plans read `edge` from its base store.
 * `adorn` names the source predicate and the adornment; the adorned and magic
   names follow from them by section 4.
 * A supplementary predicate is not listed under `adorn`: it belongs to the
@@ -573,9 +623,14 @@ query $q0(X) :- path$bf(a, X).
   rewritten program's components -- in the component of the rules that read
   it when they are recursive through it, and in a component of its own
   otherwise.
-* `seed` shows each rule the query's body generated, fact or not. Facts in a
-  component are counted, as everywhere, and a seed that is a fact would
+* `seed` shows each rule the query's body generated, with a body or not. A
+  component's `facts: N` counts its body-less seeds and the facts its
+  members' base stores hold, as everywhere, so a body-less seed would
   otherwise be visible only as a count.
+* The rule that reads a derived predicate's facts is shown as its
+  adornment's first rule, and its plans read the base view by name,
+  `lookup link$base(X1, X2) key={0}`: the base store of `link`, which
+  `link` names the derived relation of.
 * A query whose body reads only complete predicates has nothing to adorn and
   shows no rewrite heading: its phase 1 components and its plan.
 * A recursive rule of the rewritten program shows its delta variants and no
@@ -613,9 +668,10 @@ the rules the budget admits and are not charged.
 * The complete part is found by a walk whose order depends only on the
   program and the query, and evaluated in schedule order.
 * Adornments are recorded in the order they are first asked for, and
-  processed in that order; rules are generated in program order and, within
-  a rule, its magic and supplementary rules in body order and then the
-  adorned rule.
+  processed in that order; an adornment's rule over its base view is
+  generated first, then the rules of the program in program order and,
+  within a rule, its magic and supplementary rules in body order and then
+  the adorned rule.
 * The order within a body is the planner's, which is deterministic per
   `specs/design-planner.md` section 9.
 * Names derive from the predicate and the adornment, and for a
@@ -633,7 +689,8 @@ the same schedule, and byte-identical `-e` output.
   materialized in full. Propagating bindings into it would need the
   refinements of magic sets for stratified negation, which are correct only
   under conditions that are not obvious on first reading.
-* **Adorning extensional predicates.** Section 3.
+* **Adorning a predicate no rule derives.** Section 3.
+* **A guarded copy of each fact.** Section 6.
 * **A supplementary predicate before the first demand call.** The classic
   construction cuts there too, which would materialize a relation for every
   adorned rule, `path :- edge, path` included, to save repeating a prefix

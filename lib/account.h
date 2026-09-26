@@ -16,12 +16,16 @@
  *
  * Two kinds of holder contribute, each keeping its own part of the total
  * exact.  The relation store counts in `store_bytes` the capacity of every
- * relation's columns and indexes, an index being built included.  An arena
- * initialized charged counts in `arena_bytes` every chunk it holds from the
- * allocator, and gives them back when it is reset.  Arenas holding what the
- * caller wrote -- the program, the schedule, a query -- are not charged, so
- * the account is a bound on what running the program does and not on what
- * the program is.
+ * relation's columns and indexes, an index being built included: the base
+ * stores holding the program's facts and the relations evaluation derives
+ * alike.  An arena initialized charged counts in `arena_bytes` every chunk
+ * it holds from the allocator, and gives them back when it is reset.  Arenas
+ * holding what the caller wrote -- the program's rules and queries, the
+ * schedule, a query -- are not charged, and neither is the text being
+ * loaded nor the staging a load holds its facts in until it commits, which
+ * are proportional to that text and released when the load returns.  So
+ * the account is a bound on what the program's stores hold and on what
+ * running the program does, and not on the program as it was written.
  *
  * Every holder asks relic_account_exceeds() before it grows, against the
  * whole total, so the limit bounds the sum and no holder can spend what

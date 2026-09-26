@@ -126,8 +126,9 @@ static bool	 atom_after_name(relic_parser_t *parser,
 		    const relic_token_t *name, relic_ast_atom_t *atom);
 static bool	 body_append(relic_parser_t *parser,
 		    const relic_ast_literal_t *literal);
-static int	 build_fact(relic_t *ctx, uint32_t name, uint16_t arity,
-		    const relic_value_t *values, relic_ast_stmt_t **statementp);
+static bool	 is_ground_fact(const relic_ast_stmt_t *statement);
+static int	 stage_facts(relic_staging_t *staging,
+		    relic_parser_t *parser);
 static bool	 collect_body(relic_parser_t *parser,
 		    const relic_ast_literal_t *first);
 static const char *describe_byte(unsigned char byte, char *buffer,
@@ -1147,21 +1148,31 @@ parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 /*
  * Parse text into the program.
  *
- * The statements are spliced in only when the whole text parsed, which is
- * what makes a load all or nothing.  What a failed load does keep is the
- * arena memory its discarded statements occupied; an arena has no
- * per-allocation free, and the waste is bounded by the text the caller chose
- * to load.
+ * A load is all or nothing in what it adds to the program.  When the whole
+ * text has parsed, its facts are taken off its statements and committed to
+ * their base stores, and only when the commit succeeds are the remaining
+ * statements -- rules, queries, and a fact with a variable, which the check
+ * rejects -- spliced in.  What a failed load does keep is the arena memory
+ * its statements occupied, and the predicates its facts named; an arena has
+ * no per-allocation free, and the waste is bounded by the text the caller
+ * chose to load.
  */
 static int
 load_text(relic_t *ctx, const char *source_name, const char *text,
     size_t length)
 {
 	relic_parser_t parser;
+	relic_staging_t staging;
 	int status;
+
+	relic_staging_init(&staging, ctx);
 
 	status = parse_text(&parser, ctx, &ctx->program_arena, source_name,
 	    text, length);
+	if (status == 0)
+		status = stage_facts(&staging, &parser);
+	if (status == 0)
+		status = relic_staging_commit(&staging);
 
 	if (status == 0) {
 		TAILQ_CONCAT(&ctx->ast.statements, &parser.statements, link);
@@ -1169,9 +1180,66 @@ load_text(relic_t *ctx, const char *source_name, const char *text,
 		ctx->ast.query_count += parser.query_count;
 	}
 
+	relic_staging_reset(&staging);
 	parser_reset(&parser);
 
 	return (status);
+}
+
+/*
+ * Whether a statement is a fact that can be a tuple: a rule with no body,
+ * every argument of its head a constant.  A fact with a variable is not,
+ * and stays a statement for the check to reject.
+ */
+static bool
+is_ground_fact(const relic_ast_stmt_t *statement)
+{
+	uint16_t i;
+
+	if (statement->kind != RELIC_STMT_RULE || statement->body_length != 0)
+		return (false);
+
+	for (i = 0; i < statement->head.arity; i++) {
+		if (statement->head.terms[i].kind != RELIC_TERM_CONSTANT)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Take every fact that can be a tuple off the parser's statements and
+ * stage it, interning its predicate.  Returns 0, or -1 with the reason
+ * reported.
+ */
+static int
+stage_facts(relic_staging_t *staging, relic_parser_t *parser)
+{
+	relic_ast_stmt_t *statement;
+	relic_ast_stmt_t *next;
+	relic_dom_t tuple[RELIC_MAX_ARITY];
+	relic_pred_id_t pred;
+	uint16_t i;
+
+	TAILQ_FOREACH_SAFE(statement, &parser->statements, link, next) {
+		if (!is_ground_fact(statement))
+			continue;
+
+		if (relic_pred_intern(staging->ctx, statement->head.name,
+		    statement->head.arity, &statement->head.where, &pred) != 0)
+			return (-1);
+
+		for (i = 0; i < statement->head.arity; i++)
+			tuple[i] = statement->head.terms[i].u.constant;
+
+		if (relic_staging_add(staging, pred, tuple) != 0)
+			return (-1);
+
+		TAILQ_REMOVE(&parser->statements, statement, link);
+		parser->statement_count--;
+	}
+
+	return (0);
 }
 
 /*
@@ -1444,63 +1512,13 @@ names_a_predicate(const char *predicate)
 }
 
 /*
- * Build the statement `predicate(values...).` in the program arena, as the
- * parser builds a fact it has read, and store it in *statementp.  Returns 0,
- * or -1 with the reason reported; a value the value table refuses has been
- * reported by it.
- */
-static int
-build_fact(relic_t *ctx, uint32_t name, uint16_t arity,
-    const relic_value_t *values, relic_ast_stmt_t **statementp)
-{
-	relic_ast_stmt_t *statement;
-	relic_ast_term_t *terms;
-	uint16_t i;
-
-	/*
-	 * An atom with no arguments has no terms array, as the parser builds
-	 * one.  A refusal is reported and the arena's failure flag cleared at
-	 * once, as a check does at its boundary: one exhaustion gives one
-	 * message, and a flag left standing would refuse the next statement
-	 * the parser or this function builds.
-	 */
-	statement = relic_arena_alloc(&ctx->program_arena, sizeof(*statement));
-	terms = NULL;
-	if (arity > 0)
-		terms = relic_arena_allocarray(&ctx->program_arena, arity,
-		    sizeof(*terms));
-	if (statement == NULL || (terms == NULL && arity > 0)) {
-		relic_diag_no_memory(ctx);
-		relic_arena_clear_failure(&ctx->program_arena);
-		return (-1);
-	}
-
-	bzero(statement, sizeof(*statement));
-	for (i = 0; i < arity; i++) {
-		bzero(&terms[i], sizeof(terms[i]));
-		terms[i].kind = RELIC_TERM_CONSTANT;
-		if (relic_value_intern(ctx, &values[i],
-		    &terms[i].u.constant) != 0)
-			return (-1);
-	}
-
-	statement->kind = RELIC_STMT_RULE;
-	statement->head.name = name;
-	statement->head.arity = arity;
-	statement->head.terms = terms;
-	*statementp = statement;
-
-	return (0);
-}
-
-/*
  * Add a fact to the program as though its text had been loaded.
  *
- * The fact becomes a statement like any other, appended after everything
- * loaded before it and compiled by the next check, so there is one road into
- * the program and whatever a loaded fact is, this one is too: checked,
- * explained, and invalidating what was derived before it.  It has no
- * location in any source, so its statement's location names no file.
+ * The fact is staged and committed exactly as a load commits its facts, so
+ * there is one road into a base store and whatever a loaded fact is, this
+ * one is too: in its predicate's base store when the call returns, refused
+ * by a limit it does not fit, and discarding what was derived before it if
+ * it is new.
  */
 int
 relic_fact_add(relic_t *ctx, const char *predicate, size_t arity,
@@ -1522,8 +1540,12 @@ static int
 add_fact(relic_t *ctx, const char *predicate, size_t arity,
     const relic_value_t *values)
 {
-	relic_ast_stmt_t *statement;
+	relic_staging_t staging;
+	relic_dom_t tuple[RELIC_MAX_ARITY];
+	relic_pred_id_t pred;
 	uint32_t name;
+	size_t i;
+	int status;
 
 	if (predicate == NULL || (values == NULL && arity > 0)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
@@ -1548,11 +1570,19 @@ add_fact(relic_t *ctx, const char *predicate, size_t arity,
 	if (relic_symbol_intern(ctx, predicate, strlen(predicate), &name) != 0)
 		return (-1);
 
-	if (build_fact(ctx, name, (uint16_t)arity, values, &statement) != 0)
+	for (i = 0; i < arity; i++) {
+		if (relic_value_intern(ctx, &values[i], &tuple[i]) != 0)
+			return (-1);
+	}
+
+	if (relic_pred_intern(ctx, name, (uint16_t)arity, NULL, &pred) != 0)
 		return (-1);
 
-	TAILQ_INSERT_TAIL(&ctx->ast.statements, statement, link);
-	ctx->ast.count++;
+	relic_staging_init(&staging, ctx);
+	status = relic_staging_add(&staging, pred, tuple);
+	if (status == 0)
+		status = relic_staging_commit(&staging);
+	relic_staging_reset(&staging);
 
-	return (0);
+	return (status);
 }
