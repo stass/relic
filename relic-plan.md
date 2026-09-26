@@ -369,6 +369,7 @@ depend on the previous stage's capability.
 | S12 | REPL and CLI completion | 450 | |
 | S13 | Differential and fuzz hardening | 500 test | |
 | S14 | Documentation, packaging, release | docs | M5 |
+| S15 | Comparison cost | 700 | |
 
 Engine total lands near 6.5 KLOC against the 4 to 7 KLOC budget of architecture
 section 2.2; the tool adds about 1 KLOC against its stated 400 to 600. See
@@ -1169,6 +1170,40 @@ wrong text in any project. `make distcheck` on every platform. An install,
 **Done when.** Every criterion in architecture section 72 is demonstrated by a
 test that runs in CI. **M5.**
 
+### S15 - Comparison cost
+
+**Goal.** relic trails no engine of `bench/compare/run.sh` on time at scale
+1, and holds one copy of a relation it answers with.
+
+**Delivers.** The six changes of `specs/design-comparison-cost.md`, in its
+section 10 order, each a commit with its test and its measurement: the
+tool's buffered row writer; streamed answers for projection-free queries;
+adornment subsumption and the free rewrite that is no rewrite; index keys
+stored beside their chains and the tag byte of the identifier table;
+mapped growth for large arrays; and the typed domain identifier with the
+integer-only value table, the packed symbol pool and a row hashed once on
+its way in. `bench/baseline.txt` and the comparison run recorded again at
+the end.
+
+**Design notes.** The comparison found the gap in delivering an answer and
+loading facts, not in evaluation: without output relic is at or ahead of
+the Souffle interpreter on the closures, and a free `andersen` query is
+three times its `-a` cost because the rewrite copies the relation it
+computes. The changes are independent of the join loop and of
+`specs/design-evaluation-cost.md`, which stands; the one measurement that
+design left open, a hash beside the canonical index's slot, is repeated
+with the tag once mapped growth has changed the peak it was weighed
+against.
+
+**Tests.** Golden output byte for byte across flush boundaries and
+injected write failures; streamed rows equal to the relation's rows in
+order, with nothing allocated during the run; the central Magic
+equivalence over the corpus with `andersen` and `cspa` added; the index,
+identifier-table, value and growth unit tests, tagged and untagged.
+
+**Done when.** The section 10 gates hold and the comparison run is
+recorded on an idle machine.
+
 ---
 
 ## 5. Test architecture
@@ -1354,3 +1389,51 @@ the query's seeds, and the literal budget bounds them already. The budget
 is retired; `max_magic_rules` stays a configurable limit, and configuring
 it lifts both remaining budgets as before.
 Specified in `specs/design-magic.md` section 8.
+
+### D-22 A projection-free query streams its derivations
+
+A query whose head keeps every variable its body binds derives each answer
+exactly once: its plan visits each full binding of the body once, and a
+head that mentions every variable is injective in the binding. Inserting
+such derivations into the answer relation of D-17 rejects nothing and
+costs a hashed insert and a second copy of the relation, which on
+`chain-closure` was 2,001,000 inserts and 33.6 MB for a relation of the
+same size. The query rule's `EMIT` delivers to the caller's callback
+instead, in derivation order, which is the order the relation would have
+listed. A projecting query keeps the relation, since a set without a
+relation is a relation. D-17 stands: the query owns its answer relation,
+and a streaming query leaves it empty.
+Specified in `specs/design-comparison-cost.md` section 4.
+
+### D-23 A free adornment subsumes the others
+
+Once a rewrite reaches a predicate with every column free, that copy holds
+the whole predicate, and every bound call to the predicate in any generated
+rule reads it by lookup rather than through a bound copy with a magic
+predicate of its own: `pointsTo(X, Y)?` over Andersen's four rules made
+nine relations in one component and three times the derivations of the
+program run whole. The rewrite is split into an adornment pass, which
+applies the rule and drafts nothing, and a drafting pass over the
+adornments that survive. When none of them binds a column the query reads
+what it reaches completely, from the program's own relations, and the
+rewrite generates nothing; when some do, a free copy stays a copy so that
+its rules propagate demand to predicates reached no other way, as
+`specs/design-magic.md` section 4 reasons.
+Specified in `specs/design-comparison-cost.md` section 5.
+
+### D-24 The domain identifier carries its type
+
+D-3's uniform 32-bit domain stands; its encoding changes. Two bits of type
+and thirty of index make a symbol value its symbol identifier, a string
+value the same identifier under another type, and an integer an index into
+a table of integers only. The value table that held an entry and a slot
+for every symbol beside the pool's own is gone, so a symbol is interned
+once, and D-3's canonical-encoding hazard does not return: a symbol's
+identifier is assigned in one place and its value is a function of it.
+The pool's entry stores the hash it was placed by and its bytes are packed
+without alignment, and the identifier table gains a tag byte per slot for
+the tables whose searches are mostly unsuccessful. Measured at scale 10 of
+`facts-join`, a symbol cost 70 bytes and two probes; the estimate under
+this decision is 30 to 40 bytes and one. A context holds at most 2^30 - 1
+symbols and 2^30 - 1 distinct integers rather than 2^32 - 1 values.
+Specified in `specs/design-comparison-cost.md` sections 6.2 and 7.

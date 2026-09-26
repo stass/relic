@@ -9,6 +9,21 @@ what was done. Each item carries a severity and a component pointer.
 `relic-plan.md`. Current position: S13, differential and fuzz hardening,
 landed; S14, documentation, packaging and release, next.
 
+**Close the comparison gaps.** [High] Stage S15 of `relic-plan.md`, specified
+in `specs/design-comparison-cost.md`. The engine comparison found relic
+behind the Souffle interpreter on `andersen` and `chain-closure`, behind
+DuckDB on `facts-join` and 6.3 times SQLite's memory there, and the causes
+are outside the join loop: writing rows through one locked stdio call per
+field is 58 per cent of `chain-closure`; a free query copies its answer into
+an answer relation, doubling the inserts and the live heap; the free
+`andersen` query is rewritten into nine relations for one, three times the
+work of `-a`; a symbol costs 70 bytes and two probes to intern; and an
+identifier table's freed generations stay resident, so the reported peak is
+up to twice the live heap. Six changes in the design's section 10 order,
+each measured against the one before it. Subsumes the writer part of the
+`andersen` and loading items under Benchmarks, which keep what they say
+about the evaluator and the load's text.
+
 ## Build and packaging
 
 **Continuous integration is not configured.** [High] `relic-plan.md` section 6
@@ -691,13 +706,16 @@ Worth measuring next: the stored hash again with batching in place, and
 whether a successful search visits enough slots past the first to make
 prefetching them pay.
 
-**Writing a row locks the output stream once per field.** [Low, component:
-`cmd/relic/output.c`] `write_row()` writes each field and separator with
-`fputs()` and `fputc()`, each of which takes and releases the stream's lock;
-on `tc-cyclic`, which writes about two million rows, the lock calls are about
-5 per cent of the profile. Taking the lock once per row with `flockfile()` and
-writing with `putc_unlocked()`, both POSIX, or formatting the row into a
-buffer and writing it with one call, would remove them.
+**A table's doubling slack is half its size at worst.** [Low, component:
+`lib/util.c`] An identifier table's capacity is a power of two because a
+probe masks the hash, and a column array doubles because one policy serves
+every arity, so a relation just past a doubling is half empty on both.
+Once `specs/design-comparison-cost.md` section 8 has removed the freed
+generations, the slack is what remains between the live heap and the
+reported peak. Growth by three halves under a multiply-shift range
+reduction, `(hash * capacity) >> 32`, would keep a mask-free probe and
+halve the slack; measure it on `chain-closure` and `facts-join` before
+changing either policy.
 
 **Loading facts costs relic more memory than Souffle.** [Low, component:
 `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000 ternary facts

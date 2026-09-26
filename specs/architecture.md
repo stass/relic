@@ -716,6 +716,11 @@ The representation is internal and is reached only through a small set of
 accessors, so it can later be replaced by a tagged 64-bit cell without
 affecting library consumers.
 
+The identifier's encoding -- its type in its top bits, a symbol value being
+its symbol identifier, and a value table of integers only -- and the
+symbol pool's entry and byte packing are specified in
+`specs/design-comparison-cost.md` section 7.
+
 ---
 
 # 20. Relation Representation
@@ -825,7 +830,9 @@ to represent index keys cheaply.
 
 What an index stores for a key, how a lookup walks it, how insertion keeps it
 current and what it costs against the memory limit are specified in
-`specs/design-index.md`.
+`specs/design-index.md`. That a key's values are stored beside its chain,
+and the tag byte its identifier table carries, are specified in
+`specs/design-comparison-cost.md` section 6.
 
 ---
 
@@ -1142,6 +1149,11 @@ path^ff
 Different adornments are treated as separate internal specialized predicates.
 
 They are not visible in ordinary output.
+
+A predicate reached with every column free subsumes its other adornments,
+and a rewrite left with no bound column reads the program's own relations
+rather than copying them; specified in `specs/design-comparison-cost.md`
+section 5.
 
 ---
 
@@ -1550,7 +1562,9 @@ Diagnostics always go to stderr.
 Results go to stdout or the `-o` target.
 
 The phases of an invocation and the exact form of every output format are
-specified in `specs/design-cli.md`.
+specified in `specs/design-cli.md`. The tool formats rows into a buffer of
+its own and writes it in blocks, per `specs/design-comparison-cost.md`
+section 3.
 
 ---
 
@@ -1679,7 +1693,9 @@ Avoid one `malloc()` per AST node or per tuple.
 
 The arena, the growable-array helper, the open-addressing identifier table,
 the symbol pool and the value table are specified in
-`specs/design-memory.md`.
+`specs/design-memory.md`. Arrays past a page threshold are mapped rather
+than malloced, so that a growth leaves nothing resident behind it; specified
+in `specs/design-comparison-cost.md` section 8.
 
 ---
 
@@ -1888,6 +1904,10 @@ relic_query_run(relic_t *,
 ```
 
 This avoids requiring the library to allocate an arbitrarily large result array.
+
+A query whose head keeps every variable of its body is answered from its
+rule's derivations as they are made, with no answer relation in between;
+specified in `specs/design-comparison-cost.md` section 4.
 
 ---
 
@@ -2950,6 +2970,19 @@ the program's files, and `relic_import_file()` and `relic_import_path()`
 through the library, described by `relic_import_t`, a fifth complete type.
 The reader and importer are `lib/import.c`, and a third fuzz target imports
 its input as a table. Specified in `specs/design-import.md`.
+
+**Comparison cost, sections 19, 22, 33, 43, 47 and 52.** The engine
+comparison found relic trailing on the cost of delivering an answer and
+of loading facts rather than on evaluation. The tool formats rows into a
+buffer of its own; a query whose head keeps every body variable streams
+its rule's derivations with no answer relation; a free adornment subsumes
+the bound adornments of its predicate and a rewrite with no bound column
+reads the program's relations; a secondary index stores each key's values
+and its identifier table carries a tag byte per slot; a domain identifier
+carries its type, so the value table holds integers only and a symbol's
+bytes are packed; and arrays past a page threshold are mapped so a growth
+leaves no residue. D-3's decision stands with a new encoding. Specified in
+`specs/design-comparison-cost.md`.
 
 **New sections.** 74 dependency policy, 75 repository and documentation
 conventions, 76 this log.
