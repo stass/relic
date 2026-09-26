@@ -120,7 +120,7 @@ an empty path included -- is therefore a usage error, status 2, as an
 unknown `-F` format is:
 
 ```text
-relic: invalid import: unknown column type 'symbl' in tsv:edge:symbl,symbol=edge.tsv
+relic: error: invalid import: unknown column type 'symbl' in tsv:edge:symbl,symbol=edge.tsv
 ```
 
 **The format is stated, never guessed from the path.** A pipe, `/dev/fd/3`
@@ -532,9 +532,10 @@ one.
 | --- | --- | --- |
 | a field its column refuses | the field's first byte | `expected a symbol, found "Ann"`; `expected an integer, found an empty field`; `expected a symbol, found a field holding 0x09` |
 | an integer out of range | the field's first byte | `integer out of range: "9223372036854775808"` |
-| too many fields | the first byte of the first extra field | `expected 2 fields, found 3` |
+| too many fields | the first byte of the first extra field | `expected 2 fields, found more than 2` |
 | too few fields | the end of the record | `expected 2 fields, found 1` |
 | an unknown tsv escape | the byte after the backslash | `unknown escape: a backslash followed by 'q'` |
+| a tsv backslash ending the input | the end of the input | `unknown escape: a backslash at the end of the input` |
 | a stray carriage return | the carriage return | `carriage return inside a field` |
 | a quote in an unquoted csv field | the quote | `quote inside an unquoted field` |
 | a byte after a closing quote | that byte | `expected ',' or the end of the line after a closing quote, found 'x'` |
@@ -545,6 +546,13 @@ one.
 people.csv:2:1: error: expected a symbol, found "U2"
 people.csv:3:9: error: expected an integer, found "x"
 ```
+
+A record with too many fields is reported when its first extra field
+begins, and the message does not count the rest. Counting them would mean
+reading on past the first mistake, through bytes that may hold mistakes of
+their own -- a quote opened in the fourth field can run to the end of the
+input -- so the count would depend on what follows the mistake reported,
+which section 6.3 rules out.
 
 A failure to read has no location and names the system's reason,
 `cannot read people.csv: Input/output error`, as a load's does.

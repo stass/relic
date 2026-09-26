@@ -1,0 +1,2 @@
+% A predicate is named as in a program, beginning with a lowercase letter.
+edge(a, b).

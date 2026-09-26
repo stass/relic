@@ -36,9 +36,11 @@ An invocation runs in phases, and each phase runs only if the one before it
 succeeded:
 
 1. **Parse the command line.** A malformed one is a usage error.
-2. **Load** every file operand, or standard input when there are none. Every
-   file is attempted even after one fails, so that one run reports the mistakes
-   in all of them.
+2. **Load** every file operand, or standard input when there are none and
+   nothing else reads it, and then import every `-I` table in command-line
+   order (`specs/design-import.md` section 8). Every file and table is
+   attempted even after one fails, so that one run reports the mistakes in all
+   of them.
 3. **Check** the program.
 4. **Prepare** every query that will run, reporting what is wrong with each of
    them before any runs. A mistake in the third `-q` is reported even when the
@@ -66,6 +68,14 @@ so that is a usage error instead; interactive use has an option of its own.
 
 Under `-i`, standard input belongs to the session and is never read as
 program text. The program is the file operands, and with none it is empty.
+
+An import of `-` claims standard input as the session does, and standard
+input has one reader: a second claim, by `-i` or another import of `-`, is a
+usage error naming both. When an import has claimed it, the program is again
+the file operands, and with none it is empty. The claim is on the spelling
+`-`; a path such as `/dev/stdin` is a file like any other. An import of `-`
+when standard input is a terminal is a usage error, as reading a program
+from one is.
 
 ### 2.2 Which queries run
 
@@ -98,10 +108,10 @@ query the context has compiled, the program's own among them, from zero.
 
 `-V` stands alone. `-c` contradicts both `-a` and `-i`, since it forbids
 evaluation and they demand it. Each conflict is a usage error, as is an
-unknown option, an unknown `-F` format, or a missing operand to an option that
-takes one. Options that do not apply in a mode -- `-e`, `-F`, `-o`, `-s` and
-`-v` under `-c`, and `-F`, `-o` and `-s` under `-n` -- are accepted and have no
-effect.
+unknown option, an unknown `-F` format, a malformed `-I` operand, a second
+claim on standard input, or a missing operand to an option that takes one.
+Options that do not apply in a mode -- `-e`, `-F`, `-o`, `-s` and `-v` under
+`-c`, and `-F`, `-o` and `-s` under `-n` -- are accepted and have no effect.
 
 ### 2.4 Plans
 

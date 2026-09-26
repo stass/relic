@@ -42,6 +42,27 @@
 #define	CMD_QUERY_NAME_MAX	32
 
 /*
+ * The most bytes of an argument a message quotes, and room for that many,
+ * the "..." that marks a cut, and a terminator.
+ */
+#define	CMD_QUOTED_MAX		64
+#define	CMD_QUOTED_TEXT_MAX	(CMD_QUOTED_MAX + sizeof("..."))
+
+typedef struct cmd_quoted cmd_quoted_t;
+
+/*
+ * An argument quoted in a message, cut short.  The room is part of the type,
+ * so no caller can hand cmd_quote() less.
+ */
+struct cmd_quoted {
+	char	text[CMD_QUOTED_TEXT_MAX];
+};
+
+/* A macro's value as a string literal. */
+#define	CMD_STRINGIFY(value)	CMD_STRINGIFY_TEXT(value)
+#define	CMD_STRINGIFY_TEXT(value)	#value
+
+/*
  * The formats a query's results can be written in.  Their exact form is part
  * of the tool's interface and is specified with the tool.
  */
@@ -106,6 +127,11 @@ struct invocation {
  * formatter the library's diagnostics use, so that a file name taken from
  * the command line is escaped like any other text a diagnostic quotes.
  *
+ * cmd_quote() copies `length` bytes into `quoted`, cut past CMD_QUOTED_MAX
+ * with "..." after them, and returns its text.  A message of the tool's own
+ * is formatted into a fixed buffer, and an argument quoted whole could crowd
+ * out what the message says about it.
+ *
  * report_rows() writes the line -v adds after a query that succeeded, naming
  * it by its number, when the invocation is verbose enough to want it.
  *
@@ -115,6 +141,7 @@ struct invocation {
  */
 void	report_error(const char *program_name, const char *format, ...)
 	    CMD_PRINTFLIKE(2, 3);
+const char *cmd_quote(const char *bytes, size_t length, cmd_quoted_t *quoted);
 void	report_rows(const invocation_t *invocation, size_t number, size_t rows);
 void	explain_into(relic_t *ctx, FILE *stream);
 void	write_stats(relic_t *ctx, FILE *stream);
@@ -159,6 +186,47 @@ int	output_close(output_t *out);
  */
 int	repl_run(invocation_t *invocation, output_t *output,
 	    size_t first_number);
+
+typedef struct import_operand import_operand_t;
+
+/*
+ * One -I operand, parsed: the import it describes and the storage that
+ * description points into.  `operand` is the argument as given and `path`
+ * the part after its first `=`; both point into argv.  `predicate` and
+ * `columns` are allocated and belong to the operand.
+ */
+struct import_operand {
+	relic_import_t		 import;
+	const char		*operand;
+	const char		*path;
+	char			*predicate;
+	enum relic_column	*columns;
+};
+
+/*
+ * What parsing a -I argument came to: an import, an argument that is not
+ * one, or no memory to hold it.
+ */
+enum import_parse {
+	IMPORT_PARSED,
+	IMPORT_MALFORMED,
+	IMPORT_NO_MEMORY
+};
+
+/*
+ * cmd/relic/import.c
+ *
+ * import_operand_parse() parses a -I argument into *parsed, or reports why
+ * it could not, leaving nothing to free.  import_operand_free() releases
+ * what a parse allocated.
+ *
+ * import_operand_reads_stdin() is whether the import's path is `-`, the
+ * spelling that claims standard input.
+ */
+enum import_parse import_operand_parse(const char *program_name,
+	    const char *operand, import_operand_t *parsed);
+bool	import_operand_reads_stdin(const import_operand_t *parsed);
+void	import_operand_free(import_operand_t *parsed);
 
 typedef struct line_reader line_reader_t;
 

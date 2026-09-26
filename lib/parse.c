@@ -52,12 +52,6 @@
  */
 #define	RELIC_READ_CHUNK	(64u * 1024u)
 
-/* Enough for "'c'" or "0x7f" and a terminator. */
-#define	RELIC_BYTE_TEXT_MAX	8
-
-/* What a diagnostic calls input the caller did not name. */
-#define	RELIC_UNNAMED_SOURCE	"<input>"
-
 typedef struct relic_parser relic_parser_t;
 
 /*
@@ -145,8 +139,6 @@ static bool	 body_append(relic_parser_t *parser,
 static bool	 collect_body(relic_parser_t *parser,
 		    const relic_ast_literal_t *first,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
-static const char *describe_byte(unsigned char byte, char *buffer,
-		    size_t size);
 static const char *describe_token(const relic_token_t *token);
 static bool	 expect(relic_parser_t *parser, enum relic_token_kind kind,
 		    const char *expected);
@@ -171,7 +163,6 @@ static int	 load_text(relic_t *ctx, const char *source_name,
 static int	 load_named_file(relic_t *ctx, const char *path);
 static int	 load_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream);
-static bool	 names_a_predicate(const char *predicate);
 static const relic_ast_stmt_t *only_query(relic_parser_t *parser);
 static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
@@ -202,7 +193,6 @@ static int	 read_stream(relic_t *ctx, const char *source_name,
 static void	 report_lex_error(relic_parser_t *parser);
 static bool	 stage_fact(relic_parser_t *parser,
 		    const relic_ast_atom_t *fact);
-static const char *source_name_of(relic_t *ctx, const char *name);
 static void	 synchronize(relic_parser_t *parser);
 static bool	 term_from_token(relic_parser_t *parser,
 		    const relic_token_t *token, relic_ast_term_t *term);
@@ -236,22 +226,6 @@ parse_errorf(relic_parser_t *parser, const relic_location_t *where,
 	va_start(arguments, format);
 	relic_vdiagf(parser->ctx, RELIC_ERROR, where, format, arguments);
 	va_end(arguments);
-}
-
-/*
- * Describe one byte for a message: as a character when it is printable, and
- * as its value when it is not.  A control byte rendered as itself would tell
- * the reader nothing and would travel to a terminal.
- */
-static const char *
-describe_byte(unsigned char byte, char *buffer, size_t size)
-{
-	if (byte >= ' ' && byte <= '~')
-		snprintf(buffer, size, "'%c'", (int)byte);
-	else
-		snprintf(buffer, size, "0x%02x", (unsigned int)byte);
-
-	return (buffer);
 }
 
 /*
@@ -352,12 +326,12 @@ report_lex_error(relic_parser_t *parser)
 	switch (token->error) {
 	case RELIC_LEX_BAD_BYTE:
 		parse_errorf(parser, &token->where, "unexpected character %s",
-		    describe_byte(token->byte, described, sizeof(described)));
+		    relic_diag_byte(token->byte, described, sizeof(described)));
 		break;
 	case RELIC_LEX_BAD_ESCAPE:
 		parse_errorf(parser, &token->where,
 		    "unknown escape sequence %s in a string literal",
-		    describe_byte(token->byte, described, sizeof(described)));
+		    relic_diag_byte(token->byte, described, sizeof(described)));
 		break;
 	case RELIC_LEX_BAD_HEX_ESCAPE:
 		parse_errorf(parser, &token->where,
@@ -378,7 +352,7 @@ report_lex_error(relic_parser_t *parser)
 	case RELIC_LEX_INTEGER_TRAILING:
 		parse_errorf(parser, &token->where,
 		    "unexpected character %s after an integer literal",
-		    describe_byte(token->byte, described, sizeof(described)));
+		    relic_diag_byte(token->byte, described, sizeof(described)));
 		break;
 	case RELIC_LEX_UNTERMINATED_STRING:
 		parse_errorf(parser, &token->where,
@@ -1243,8 +1217,8 @@ parser_reset(relic_parser_t *parser)
  * printable after the load that produced it has returned, and loading one
  * file twice stores one copy of its name.
  */
-static const char *
-source_name_of(relic_t *ctx, const char *name)
+const char *
+relic_source_name(relic_t *ctx, const char *name)
 {
 	uint32_t symbol;
 
@@ -1286,7 +1260,7 @@ parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 
 	bzero(parser, sizeof(*parser));
 
-	name = source_name_of(ctx, source_name);
+	name = relic_source_name(ctx, source_name);
 	if (name == NULL)
 		return (-1);
 
@@ -1429,12 +1403,10 @@ relic_parse_query(relic_t *ctx, relic_arena_t *arena, const char *source_name,
 /*
  * Read a stream whole.
  *
- * The lexer's input contract asks for a NUL one byte past the text, so a
- * byte beyond what is read is always reserved for it.  A stream is read
- * whole rather than incrementally because the parser needs no more than one
- * byte of lookahead but the tree it produces is as large as the input
- * anyway, so an incremental reader would bound a footprint that is not the
- * one that matters.
+ * A stream is read whole rather than incrementally because the parser needs
+ * no more than one byte of lookahead but the tree it produces is as large as
+ * the input anyway, so an incremental reader would bound a footprint that is
+ * not the one that matters.
  */
 static int
 read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
@@ -1455,7 +1427,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		int read_errno;
 
 		grown = relic_grow_array(text, &capacity,
-		    length + RELIC_READ_CHUNK + 1, sizeof(*text));
+		    length + RELIC_READ_CHUNK, sizeof(*text));
 		if (grown == NULL) {
 			free(text);
 			relic_diag_no_memory(ctx);
@@ -1463,13 +1435,15 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		}
 		text = grown;
 
-		room = capacity - length - 1;
+		room = capacity - length;
 
 		/*
 		 * Cleared first, because a stream whose error indicator was
 		 * already set can return short without touching errno, and
 		 * the message would then name whatever an earlier call left
-		 * behind.
+		 * behind.  A stream that fails without saying why, such as
+		 * one whose read function sets no errno, is reported as an
+		 * input error rather than as no error at all.
 		 */
 		errno = 0;
 		got = fread(text + length, 1, room, stream);
@@ -1482,15 +1456,13 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		if (ferror(stream)) {
 			relic_diagf(ctx, RELIC_ERROR, NULL,
 			    "cannot read %s: %s", source_name,
-			    strerror(read_errno));
+			    strerror(read_errno != 0 ? read_errno : EIO));
 			free(text);
 			return (-1);
 		}
 
 		break;
 	}
-
-	text[length] = '\0';
 
 	*textp = text;
 	*lengthp = length;
@@ -1612,18 +1584,6 @@ load_named_file(relic_t *ctx, const char *path)
 }
 
 /*
- * Whether `predicate` may name a predicate: a symbol by the lexer's rule,
- * other than the negation keyword, which the grammar reads as `not` wherever
- * a predicate name would stand.
- */
-static bool
-names_a_predicate(const char *predicate)
-{
-	return (relic_lex_is_symbol(predicate, strlen(predicate)) &&
-	    strcmp(predicate, "not") != 0);
-}
-
-/*
  * Add a fact to the program as though its text had been loaded.
  *
  * The fact is staged and committed exactly as a load commits its facts, so
@@ -1665,7 +1625,7 @@ add_fact(relic_t *ctx, const char *predicate, size_t arity,
 		return (-1);
 	}
 
-	if (!names_a_predicate(predicate)) {
+	if (!relic_lex_is_predicate_name(predicate, strlen(predicate))) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "a predicate name is a lowercase letter followed by "
 		    "letters, digits and underscores, and is not `not`");

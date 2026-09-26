@@ -282,6 +282,26 @@ optional_program() {
 	esac
 }
 
+# relic_imports DIR: an -I option importing each relation file of DIR into
+# its relation, each column typed as source_facts would spell its values: a
+# column of decimal digits, signed or not, holds integers and any other
+# symbols.  The data sets write every column one way, so the first row
+# decides.  An empty relation file is not imported, as source_facts writes
+# no facts for one.
+relic_imports() (
+	for file in "$1"/*.tsv; do
+		[ -s "$file" ] || continue
+		columns=$(awk -F '\t' 'NR == 1 {
+			for (i = 1; i <= NF; i++)
+				printf "%s%s", (i > 1 ? "," : ""),
+				    ($i ~ /^-?[0-9]+$/ ? "integer" : "symbol")
+			exit
+		}' "$file")
+		printf ' -I %s' "$(quote \
+		    "tsv:$(basename "$file" .tsv):$columns=$file")"
+	done
+)
+
 # engine_command ENGINE WORKLOAD: the command that runs WORKLOAD's program
 # with ENGINE.  relic, SWI-Prolog, clingo, DuckDB and SQLite write the
 # answer to standard output; Souffle and Nemo write it into
@@ -296,7 +316,7 @@ engine_command() (
 	case $1 in
 	relic)
 		echo "$(quote "$relic") $relic_switches" \
-		    "$(quote "$program") $(quote "$data.pl")"
+		    "$(relic_imports "$data") $(quote "$program")"
 		;;
 	swipl)
 		echo "$(quote "$swipl") $swipl_switches" \

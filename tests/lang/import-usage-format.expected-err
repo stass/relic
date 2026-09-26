@@ -1,0 +1,4 @@
+relic: error: invalid import: unknown format 'json' in json:edge:symbol,symbol=edge.json
+usage: relic [-aceinsv] [-F format] [-I import] [-l limit=value] [-o file]
+             [-q query] [-X debug] [file ...]
+       relic -V

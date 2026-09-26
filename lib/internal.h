@@ -533,6 +533,16 @@ const char *relic_diag_name(const char *name, char *buffer, size_t size);
 void	 relic_diag_mark_cut(char *buffer, size_t size);
 
 /*
+ * Describe one byte for a message, into a caller-owned buffer of
+ * RELIC_BYTE_TEXT_MAX bytes, and return the buffer: as 'c' when the byte is
+ * printable and not a backslash, and as 0x%02x otherwise, so that the
+ * description is printable ASCII and holds no backslash.
+ */
+#define	RELIC_BYTE_TEXT_MAX	8
+
+const char *relic_diag_byte(unsigned char byte, char *buffer, size_t size);
+
+/*
  * lib/symbol.c
  */
 const char *relic_symbol_bytes(const relic_t *ctx, uint32_t id,
@@ -634,9 +644,7 @@ struct relic_token {
 /*
  * A scan in progress.
  *
- * `text` must hold a NUL at index `length`.  strtoll(3) is what needs it,
- * and nothing else: the terminator is what stops a conversion from reading
- * past a digit span that ends at the end of the buffer.  A NUL *inside* the
+ * `text` is `length` bytes, and nothing past them is read.  A NUL inside the
  * range is an ordinary byte that begins no token.
  *
  * `decoded` is the scratch buffer a string literal's escapes are decoded
@@ -675,6 +683,30 @@ int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
 bool	 relic_lex_is_symbol(const char *bytes, size_t length);
 
 /*
+ * Whether `length` bytes may name a predicate: a symbol, other than the
+ * negation keyword, which the grammar reads as `not` wherever a predicate
+ * name would stand.
+ */
+bool	 relic_lex_is_predicate_name(const char *bytes, size_t length);
+
+/*
+ * The language's integer rule applied to `length` bytes: the whole range must
+ * be `-?[0-9]+` and its value must fit int64_t.  Returns RELIC_INTEGER_VALID
+ * with the value in *valuep, or the way the bytes fail the rule, leaving
+ * *valuep untouched, since a range that is no integer and one that is an
+ * integer out of range are reported differently.  Nothing past the range is
+ * read.  A leading zero is accepted, and `-0` is zero.
+ */
+enum relic_integer_verdict {
+	RELIC_INTEGER_VALID,
+	RELIC_INTEGER_MALFORMED,	/* not -?[0-9]+ */
+	RELIC_INTEGER_OUT_OF_RANGE	/* -?[0-9]+ outside int64_t */
+};
+
+enum relic_integer_verdict relic_lex_integer(const char *bytes, size_t length,
+	    int64_t *valuep);
+
+/*
  * lib/parse.c
  *
  * relic_ast_program_init() prepares the empty statement list a context
@@ -692,6 +724,15 @@ void	 relic_ast_program_init(relic_ast_program_t *program);
 int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
 	    const char *source_name, const char *text,
 	    const relic_ast_stmt_t **statementp);
+
+/*
+ * The stable name a location may point at for the life of the context: the
+ * source name interned, or "<input>" for NULL.  Returns NULL having reported
+ * that memory ran out.
+ */
+#define	RELIC_UNNAMED_SOURCE	"<input>"
+
+const char *relic_source_name(relic_t *ctx, const char *name);
 
 /*
  * lib/pred.c
@@ -899,6 +940,137 @@ void	 relic_staging_reset(relic_staging_t *staging);
 int	 relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
 	    const relic_dom_t *tuple);
 int	 relic_staging_commit(relic_staging_t *staging);
+
+/*
+ * lib/import.c
+ *
+ * The table reader: the state machine that alone decides where the fields
+ * and records of a csv or tsv table end, and what bytes each field holds
+ * once its format's quoting or escapes are decoded.  It is a function of its
+ * state and the bytes it is fed, with no context and no input or output of
+ * its own, so it reads a table the same way whether the table arrives in one
+ * piece or a byte at a time.
+ *
+ * relic_table_reader_init() prepares a reader of a table in `format` whose
+ * records have `width` fields each, at least one, and names the locations
+ * it reports `source_name`, which it borrows.  relic_table_feed() hands it
+ * the next `length` bytes of the table, which it borrows until it asks for
+ * more, and says whether they are the last.  relic_table_next() fills in
+ * the next event and returns its kind:
+ *
+ *	RELIC_TABLE_MORE	every byte fed has been read; feed more
+ *	RELIC_TABLE_FIELD	a field ended: its decoded bytes, where its
+ *				first byte is, and its position in its record,
+ *				from zero.  The bytes stay valid until the next
+ *				call.
+ *	RELIC_TABLE_RECORD	a record ended, with a field per column
+ *	RELIC_TABLE_END		the table ended, at `where`, the end of the
+ *				input
+ *	RELIC_TABLE_MISTAKE	the table is malformed, as `mistake` says, at
+ *				`where`
+ *	RELIC_TABLE_NO_MEMORY	the field could not grow
+ *
+ * After END, MISTAKE or NO_MEMORY the reader stops, and every later call
+ * returns the same event.  A record with the wrong number of fields is a
+ * mistake: the reader checks the width when a field beyond the last column
+ * begins, and when a record ends short, so the first mistake a table holds
+ * is the first reported, whatever it is.
+ *
+ * relic_table_reader_reset() releases the field buffer.
+ */
+enum relic_table_event_kind {
+	RELIC_TABLE_MORE,
+	RELIC_TABLE_FIELD,
+	RELIC_TABLE_RECORD,
+	RELIC_TABLE_END,
+	RELIC_TABLE_MISTAKE,
+	RELIC_TABLE_NO_MEMORY
+};
+
+enum relic_table_mistake {
+	RELIC_TABLE_TOO_MANY_FIELDS,	/* at the first extra field */
+	RELIC_TABLE_TOO_FEW_FIELDS,	/* at the end of the record */
+	RELIC_TABLE_UNKNOWN_ESCAPE,	/* tsv; at `byte`, after a backslash */
+	RELIC_TABLE_ESCAPE_AT_END,	/* tsv; a backslash ends the input */
+	RELIC_TABLE_STRAY_RETURN,	/* a return not before a line feed */
+	RELIC_TABLE_QUOTE_IN_UNQUOTED,	/* csv; at the quote */
+	RELIC_TABLE_AFTER_CLOSING_QUOTE, /* csv; at `byte` */
+	RELIC_TABLE_UNTERMINATED_QUOTE	/* csv; at the opening quote */
+};
+
+/*
+ * Where the reader stands.  Each state also decides what the end of the
+ * input means there, since the end is not a byte.
+ */
+enum relic_table_state {
+	RELIC_TABLE_AT_RECORD,		/* at the start of a record */
+	RELIC_TABLE_AT_FIELD,		/* at a field, after a separator */
+	RELIC_TABLE_IN_FIELD,		/* inside an unquoted field */
+	RELIC_TABLE_IN_QUOTES,		/* inside a quoted csv field */
+	RELIC_TABLE_AFTER_QUOTE,	/* after a quote inside quotes */
+	RELIC_TABLE_AFTER_BACKSLASH,	/* after a tsv backslash */
+	RELIC_TABLE_AFTER_RETURN,	/* after a carriage return */
+	RELIC_TABLE_RECORD_ENDED,	/* the record's last field has ended */
+	RELIC_TABLE_STOPPED		/* `stopped` is the last event */
+};
+
+typedef struct relic_table_event relic_table_event_t;
+typedef struct relic_table_reader relic_table_reader_t;
+
+/*
+ * One event.  `bytes` and `length` are a field's decoded bytes, never NULL,
+ * and `position` the field's position in its record.  `byte` is the byte a
+ * mistake names, and `fields_found` the number of fields a record with too
+ * few has.
+ */
+struct relic_table_event {
+	const char			*bytes;
+	size_t				 length;
+	size_t				 position;
+	size_t				 fields_found;
+	relic_location_t		 where;
+	enum relic_table_event_kind	 kind;
+	enum relic_table_mistake	 mistake;
+	unsigned char			 byte;
+};
+
+/*
+ * A reader.  `input` is the part of the bytes last fed that has not been
+ * read, and `input_is_last` says whether the table ends after it.
+ * `field` accumulates the field being read; it grows by doubling to the
+ * longest field and is reused for every one.  `fields_ended` counts the
+ * fields of the current record read so far.
+ *
+ * `where` is the location of the next byte.  The other locations are the
+ * places a later event points back to: the current field's first byte, the
+ * carriage return that must be followed by a line feed, and the end of the
+ * record whose last field has ended.
+ */
+struct relic_table_reader {
+	const char			*input;
+	char				*field;
+	size_t				 input_length;
+	size_t				 field_length;
+	size_t				 field_capacity;
+	size_t				 width;
+	size_t				 fields_ended;
+	relic_location_t		 where;
+	relic_location_t		 field_where;
+	relic_location_t		 return_where;
+	relic_location_t		 record_end_where;
+	relic_table_event_t		 stopped;
+	enum relic_format		 format;
+	enum relic_table_state		 state;
+	bool				 input_is_last;
+};
+
+void	 relic_table_reader_init(relic_table_reader_t *reader,
+	    enum relic_format format, size_t width, const char *source_name);
+void	 relic_table_reader_reset(relic_table_reader_t *reader);
+void	 relic_table_feed(relic_table_reader_t *reader, const char *bytes,
+	    size_t length, bool last);
+enum relic_table_event_kind relic_table_next(relic_table_reader_t *reader,
+	    relic_table_event_t *event);
 
 /*
  * lib/explain.c

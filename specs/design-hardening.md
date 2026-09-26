@@ -283,9 +283,9 @@ seeds and shrunk to between two and five statements.
 
 ## 5. Fuzz targets
 
-### 5.1 Two targets
+### 5.1 Three targets
 
-Both are libFuzzer entry points, `LLVMFuzzerTestOneInput()`, over the public
+All are libFuzzer entry points, `LLVMFuzzerTestOneInput()`, over the public
 interface.
 
 * **load** takes the input as program text, loads it with
@@ -298,9 +298,16 @@ interface.
   `RELIC_F_NAIVE | RELIC_F_NO_MAGIC`, and aborts if both succeed with
   different answers. This is architecture section 67's second target,
   comparing optimized and naive execution, with the fuzzer as the generator.
+* **import** takes the input's first byte as a choice of format, header flag
+  and column list from a small fixed table, and imports the rest as a table
+  with `relic_import_file()`, through a stream whose read function is the
+  target's own where the platform can make one (`specs/design-import.md`
+  section 11). It covers the table reader and the importer, and aborts when
+  an import fails without reporting an error.
 
-A diagnostic callback is installed in both, so a fuzzer's own output is not
-flooded: the load target discards every message, and the eval target counts
+A diagnostic callback is installed in each, so a fuzzer's own output is not
+flooded: the load target discards every message, the import target counts
+the errors, and the eval target counts
 the errors each call reports and notes whether the last was a limit's
 refusal. A query that fails is skipped only when that call itself reported a
 refusal; one that fails reporting nothing is a finding like any other. The eval target's optimized context also
@@ -322,19 +329,25 @@ A fuzz target is compiled twice. With `--enable-fuzzers`, it is linked with
 `-fsanitize=fuzzer` into a libFuzzer program. Always, it is also linked with
 a small replay driver whose `main()` passes each file named on its command
 line, or each file in a named directory, to the entry point once. `make check`
-runs both targets' replay programs over their corpora, so every input that
+runs every target's replay program over its corpora, so every input that
 ever mattered is replayed on every compiler and under every sanitizer target,
 including platforms with no libFuzzer at all.
 
 ### 5.3 The corpus
 
-The corpus of both targets is `tests/lang/*.dl`, which already holds every
-construct and every malformed input the golden suite specifies, plus
-`tests/fuzz/corpus/`, which starts with inputs the golden suite does not
-hold -- raw bytes the lexer must refuse, a program the Magic rewrite cuts
-into supplementary predicates, and a few generated programs -- and is where
-an input a fuzzer found is kept once the bug it found is fixed. A reproducer
-is added there with a name saying what it found, never deleted.
+The corpus of the load and eval targets is `tests/lang/*.dl`, which already
+holds every construct and every malformed input the golden suite specifies,
+plus `tests/fuzz/corpus/`, which starts with inputs the golden suite does not
+hold -- raw bytes the lexer must refuse, a program the Magic rewrite cuts into
+supplementary predicates, and a few generated programs -- and is where an
+input a fuzzer found is kept once the bug it found is fixed. A reproducer is
+added there with a name saying what it found, never deleted.
+
+The import target's input is a table rather than program text, so it has a
+corpus of its own, `tests/fuzz/corpus-import/`, replayed through that target
+alone: tables in both formats, with and without a header, under each column
+list, well formed and holding each kind of mistake. Its findings are kept
+there by the same rule.
 
 ### 5.4 `--enable-fuzzers`
 
@@ -343,7 +356,7 @@ is added there with a name saying what it found, never deleted.
 compiler that cannot build the targets, so saying so at configure time is
 better than a build that quietly omits them. It then compiles the whole tree
 with `-fsanitize=fuzzer-no-link`, the coverage instrumentation libFuzzer
-steers by, and only the two targets with libFuzzer's `main()`. Apple's
+steers by, and only the targets with libFuzzer's `main()`. Apple's
 clang has no libFuzzer; LLVM's own clang does. `make fuzz` then runs each
 libFuzzer target for `FUZZ_SECONDS`, sixty by default, over a working copy of
 its corpus in the build tree, so the source tree's corpus changes only when

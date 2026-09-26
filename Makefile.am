@@ -36,9 +36,9 @@ LIBOBJDIR = compat/
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/explain.c lib/facts.c \
-	lib/index.c lib/lex.c lib/magic.c lib/parse.c lib/plan.c lib/pred.c \
-	lib/relation.c lib/result.c lib/rule.c lib/stratify.c lib/symbol.c \
-	lib/util.c lib/value.c
+	lib/import.c lib/index.c lib/lex.c lib/magic.c lib/parse.c lib/plan.c \
+	lib/pred.c lib/relation.c lib/result.c lib/rule.c lib/stratify.c \
+	lib/symbol.c lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -55,8 +55,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	tests/unit/harness.h tests/unit/programs.h
 
 bin_PROGRAMS = relic
-relic_SOURCES = cmd/relic/input.c cmd/relic/main.c cmd/relic/output.c \
-	cmd/relic/repl.c
+relic_SOURCES = cmd/relic/import.c cmd/relic/input.c cmd/relic/main.c \
+	cmd/relic/output.c cmd/relic/repl.c
 
 # The tool links the compatibility objects itself.  Hidden visibility and the
 # export list together make them unreachable through librelic, so the first
@@ -75,7 +75,7 @@ pkgconfig_DATA = librelic.pc
 EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
 	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
-	tests/fuzz/corpus \
+	tests/fuzz/corpus tests/fuzz/corpus-import \
 	tests/fuzz/relic.dict tests/lang tests/langtest.sh
 
 ##
@@ -172,7 +172,7 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 
 RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_diag tests/unit/test_eval tests/unit/test_facts \
-	tests/unit/test_index \
+	tests/unit/test_import tests/unit/test_index \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
 	tests/unit/test_relation tests/unit/test_rule tests/unit/test_stratify \
@@ -196,6 +196,9 @@ tests_unit_test_eval_LDADD = librelic_internal.la $(LTLIBOBJS)
 tests_unit_test_facts_SOURCES = tests/unit/test_facts.c tests/unit/harness.c \
 	tests/unit/programs.c
 tests_unit_test_facts_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_import_SOURCES = tests/unit/test_import.c tests/unit/harness.c
+tests_unit_test_import_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_index_SOURCES = tests/unit/test_index.c tests/unit/harness.c
 tests_unit_test_index_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -296,8 +299,8 @@ endif
 
 dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 	tests/langfiles.sh tests/magic.sh tests/man.sh tests/perf.sh \
-	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/symbols.sh \
-	tests/version.sh
+	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/roundtrip.sh \
+	tests/symbols.sh tests/version.sh
 
 ##
 ## The equivalence suite runs every language test under each alternative
@@ -342,21 +345,26 @@ check-random: tests/random/random$(EXEEXT)
 ## compiler and under every sanitizer build.  With --enable-fuzzers the
 ## target is also linked with libFuzzer, and make fuzz runs each for
 ## FUZZ_SECONDS over a working corpus in the build tree seeded from the
-## language tests and tests/fuzz/corpus; the source tree's corpus changes only
-## when someone copies a finding into it.  configure then compiles the whole
-## tree with the coverage instrumentation libFuzzer steers by, and the
-## targets alone with its main().  No clean target removes fuzz-corpus or
-## fuzz-artifacts: an input not yet looked at is the one thing a fuzzing run
-## produces that cannot be made again.
+## language tests and tests/fuzz/corpus, or for the import target, whose
+## inputs are tables, from tests/fuzz/corpus-import; the source tree's
+## corpora change only when someone copies a finding into them.  configure
+## then compiles the whole tree with the coverage instrumentation libFuzzer
+## steers by, and the targets alone with its main().  No clean target removes
+## fuzz-corpus or fuzz-artifacts: an input not yet looked at is the one thing
+## a fuzzing run produces that cannot be made again.
 ##
 
 RELIC_FUZZ_COMMON = tests/fuzz/fuzz.c tests/fuzz/fuzz.h
 RELIC_FUZZ_EVAL_SOURCES = tests/fuzz/fuzz_eval.c tests/random/answer.c \
 	tests/random/answer.h $(RELIC_FUZZ_COMMON)
 
-RELIC_REPLAY_BINARIES = tests/fuzz/replay_eval tests/fuzz/replay_load
+RELIC_REPLAY_BINARIES = tests/fuzz/replay_eval tests/fuzz/replay_import \
+	tests/fuzz/replay_load
 tests_fuzz_replay_eval_SOURCES = tests/fuzz/replay.c $(RELIC_FUZZ_EVAL_SOURCES)
 tests_fuzz_replay_eval_LDADD = librelic.la $(LTLIBOBJS)
+tests_fuzz_replay_import_SOURCES = tests/fuzz/replay.c \
+	tests/fuzz/fuzz_import.c $(RELIC_FUZZ_COMMON)
+tests_fuzz_replay_import_LDADD = librelic.la $(LTLIBOBJS)
 tests_fuzz_replay_load_SOURCES = tests/fuzz/replay.c tests/fuzz/fuzz_load.c \
 	$(RELIC_FUZZ_COMMON)
 tests_fuzz_replay_load_LDADD = librelic.la $(LTLIBOBJS)
@@ -366,10 +374,14 @@ dist_check_SCRIPTS += tests/fuzz/replay.sh
 FUZZ_SECONDS = 60
 
 if RELIC_FUZZERS
-noinst_PROGRAMS = tests/fuzz/fuzz_eval tests/fuzz/fuzz_load
+noinst_PROGRAMS = tests/fuzz/fuzz_eval tests/fuzz/fuzz_import \
+	tests/fuzz/fuzz_load
 tests_fuzz_fuzz_eval_SOURCES = $(RELIC_FUZZ_EVAL_SOURCES)
 tests_fuzz_fuzz_eval_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
 tests_fuzz_fuzz_eval_LDADD = librelic.la $(LTLIBOBJS)
+tests_fuzz_fuzz_import_SOURCES = tests/fuzz/fuzz_import.c $(RELIC_FUZZ_COMMON)
+tests_fuzz_fuzz_import_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
+tests_fuzz_fuzz_import_LDADD = librelic.la $(LTLIBOBJS)
 tests_fuzz_fuzz_load_SOURCES = tests/fuzz/fuzz_load.c $(RELIC_FUZZ_COMMON)
 tests_fuzz_fuzz_load_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
 tests_fuzz_fuzz_load_LDADD = librelic.la $(LTLIBOBJS)
@@ -378,7 +390,9 @@ tests_fuzz_fuzz_load_LDADD = librelic.la $(LTLIBOBJS)
 # to load and check; -timeout reports an input that runs longer anyway.  An
 # evaluation can stay inside every limit and still run long -- a cross
 # product whose tuples are all duplicates -- so a timeout from the eval
-# target needs reading before it is called a bug.
+# target needs reading before it is called a bug.  The import target reads
+# tables rather than programs, so it takes neither the language's dictionary
+# nor its seeds.
 fuzz: $(noinst_PROGRAMS)
 	@for target in load eval; do \
 		corpus=fuzz-corpus/$$target; \
@@ -391,6 +405,12 @@ fuzz: $(noinst_PROGRAMS)
 		    -artifact_prefix=$$artifacts $$corpus \
 		    $(srcdir)/tests/lang $(srcdir)/tests/fuzz/corpus || exit 1; \
 	done
+	@$(MKDIR_P) fuzz-corpus/import fuzz-artifacts/import/
+	@echo "fuzzing import for $(FUZZ_SECONDS) seconds"
+	@./tests/fuzz/fuzz_import -max_total_time=$(FUZZ_SECONDS) \
+	    -max_len=4096 -timeout=10 \
+	    -artifact_prefix=fuzz-artifacts/import/ fuzz-corpus/import \
+	    $(srcdir)/tests/fuzz/corpus-import
 else
 fuzz:
 	@echo "the fuzz targets need configure --enable-fuzzers and a" \
@@ -418,6 +438,7 @@ endif
 ##
 
 RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
+	tests/lang/bad-backslash.dl \
 	tests/lang/bad-byte.dl tests/lang/bad-escape-at-end.dl \
 	tests/lang/bad-escape.dl tests/lang/check-queries.dl \
 	tests/lang/closure-double.dl tests/lang/closure-graphs.dl \
@@ -426,40 +447,47 @@ RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
 	tests/lang/explain-check.dl tests/lang/explain-facts.dl \
 	tests/lang/explain-graph.dl tests/lang/explain-long.dl \
-	tests/lang/explain-magic.dl \
-	tests/lang/explain-materialized.dl tests/lang/explain-ops.dl \
-	tests/lang/explain-supplementary.dl \
+	tests/lang/explain-magic.dl tests/lang/explain-materialized.dl \
+	tests/lang/explain-ops.dl tests/lang/explain-supplementary.dl \
 	tests/lang/explain-thresholds.dl tests/lang/explain-views.dl \
 	tests/lang/format-csv.dl tests/lang/format-json.dl \
 	tests/lang/format-nul.dl tests/lang/format-text.dl \
 	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \
+	tests/lang/import-check.dl tests/lang/import-csv.dl \
+	tests/lang/import-errors-csv.dl tests/lang/import-errors-tsv.dl \
+	tests/lang/import-errors-typed.dl tests/lang/import-order.dl \
+	tests/lang/import-stdin.dl tests/lang/import-tsv.dl \
+	tests/lang/import-usage-arity.dl tests/lang/import-usage-column.dl \
+	tests/lang/import-usage-equals.dl tests/lang/import-usage-format.dl \
+	tests/lang/import-usage-not.dl tests/lang/import-usage-option.dl \
+	tests/lang/import-usage-parts.dl tests/lang/import-usage-path.dl \
+	tests/lang/import-usage-predicate.dl tests/lang/import-wide.dl \
 	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
-	tests/lang/magic-budget.dl tests/lang/magic-budget-adornments.dl \
-	tests/lang/magic-budget-literals.dl \
-	tests/lang/magic-duplicate-rules.dl \
-	tests/lang/magic-limit-preds.dl tests/lang/magic-limit-rules.dl \
-	tests/lang/magic-limit-supplementary.dl \
-	tests/lang/magic-mixed.dl tests/lang/magic-mutual.dl \
-	tests/lang/magic-negation.dl tests/lang/magic-same-generation.dl \
-	tests/lang/magic-supplementary.dl \
+	tests/lang/magic-budget-adornments.dl \
+	tests/lang/magic-budget-literals.dl tests/lang/magic-budget.dl \
+	tests/lang/magic-duplicate-rules.dl tests/lang/magic-limit-preds.dl \
+	tests/lang/magic-limit-rules.dl \
+	tests/lang/magic-limit-supplementary.dl tests/lang/magic-mixed.dl \
+	tests/lang/magic-mutual.dl tests/lang/magic-negation.dl \
+	tests/lang/magic-same-generation.dl \
 	tests/lang/magic-supplementary-wide.dl \
-	tests/lang/materialize.dl tests/lang/missing-terminator.dl \
-	tests/lang/negation-forms.dl tests/lang/negation-recursive.dl \
-	tests/lang/negation-strata.dl tests/lang/negation-tasks.dl \
-	tests/lang/not-as-predicate.dl tests/lang/not-symbol.dl \
-	tests/lang/predicate-identity.dl tests/lang/query-bindings.dl \
-	tests/lang/query-columns-limit.dl tests/lang/query-columns.dl \
-	tests/lang/query-comparisons.dl tests/lang/query-duplicates.dl \
-	tests/lang/query-graph.dl tests/lang/query-none.dl \
-	tests/lang/query-not-a-query.dl tests/lang/query-option-unsafe.dl \
-	tests/lang/query-option.dl tests/lang/query-recursion.dl \
-	tests/lang/query-undefined.dl tests/lang/query-unsafe.dl \
-	tests/lang/query-zero-arity.dl tests/lang/recovery.dl \
-	tests/lang/repl-check.dl tests/lang/repl-discard.dl \
-	tests/lang/repl-errors.dl tests/lang/repl-json.dl \
-	tests/lang/repl-limit.dl \
-	tests/lang/repl-plan.dl tests/lang/repl-plan-materialized.dl \
+	tests/lang/magic-supplementary.dl tests/lang/materialize.dl \
+	tests/lang/missing-terminator.dl tests/lang/negation-forms.dl \
+	tests/lang/negation-recursive.dl tests/lang/negation-strata.dl \
+	tests/lang/negation-tasks.dl tests/lang/not-as-predicate.dl \
+	tests/lang/not-symbol.dl tests/lang/predicate-identity.dl \
+	tests/lang/query-bindings.dl tests/lang/query-columns-limit.dl \
+	tests/lang/query-columns.dl tests/lang/query-comparisons.dl \
+	tests/lang/query-duplicates.dl tests/lang/query-graph.dl \
+	tests/lang/query-none.dl tests/lang/query-not-a-query.dl \
+	tests/lang/query-option-unsafe.dl tests/lang/query-option.dl \
+	tests/lang/query-recursion.dl tests/lang/query-undefined.dl \
+	tests/lang/query-unsafe.dl tests/lang/query-zero-arity.dl \
+	tests/lang/recovery.dl tests/lang/repl-check.dl \
+	tests/lang/repl-discard.dl tests/lang/repl-errors.dl \
+	tests/lang/repl-json.dl tests/lang/repl-limit.dl \
+	tests/lang/repl-plan-materialized.dl tests/lang/repl-plan.dl \
 	tests/lang/repl-session.dl tests/lang/repl-verbose.dl \
 	tests/lang/safe-rules.dl tests/lang/singleton.dl \
 	tests/lang/sort-mixed.dl tests/lang/stats-indexed.dl \
@@ -467,13 +495,12 @@ RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/stats-semi-naive.dl tests/lang/string-escapes.dl \
 	tests/lang/success-criteria.dl tests/lang/trailing-comma.dl \
 	tests/lang/undefined-predicate.dl tests/lang/unexpected-token.dl \
-	tests/lang/unsafe-anonymous.dl \
-	tests/lang/unsafe-comparison.dl tests/lang/unsafe-fact.dl \
-	tests/lang/unsafe-head.dl tests/lang/unsafe-negation.dl \
-	tests/lang/unstratified-cycles.dl tests/lang/unstratified-policy.dl \
-	tests/lang/unstratified-query.dl tests/lang/unstratified-unsafe.dl \
-	tests/lang/unstratified.dl tests/lang/unterminated-escape.dl \
-	tests/lang/unterminated-string.dl \
+	tests/lang/unsafe-anonymous.dl tests/lang/unsafe-comparison.dl \
+	tests/lang/unsafe-fact.dl tests/lang/unsafe-head.dl \
+	tests/lang/unsafe-negation.dl tests/lang/unstratified-cycles.dl \
+	tests/lang/unstratified-policy.dl tests/lang/unstratified-query.dl \
+	tests/lang/unstratified-unsafe.dl tests/lang/unstratified.dl \
+	tests/lang/unterminated-escape.dl tests/lang/unterminated-string.dl \
 	tests/lang/variable-limit-max.dl tests/lang/variable-limit.dl \
 	tests/lang/verbose-counts.dl tests/lang/verbose-discard.dl \
 	tests/lang/verbose-mixed.dl tests/lang/verbose-one.dl \

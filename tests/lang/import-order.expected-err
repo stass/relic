@@ -1,0 +1,3 @@
+import-order.dl:5:1: error: expected ':-', ',', '.' or '?', found a symbol
+import-order.first.tsv:2:5: error: expected 2 fields, found more than 2
+import-order.second.csv:2:1: error: unterminated quoted field

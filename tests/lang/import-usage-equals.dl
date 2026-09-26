@@ -1,0 +1,2 @@
+% The path follows the first =, so an import without one names no table.
+edge(a, b).

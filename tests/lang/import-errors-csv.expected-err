@@ -1,0 +1,8 @@
+import-errors-csv.quote.csv:1:3: error: quote inside an unquoted field
+import-errors-csv.after.csv:1:5: error: expected ',' or the end of the line after a closing quote, found 'c'
+import-errors-csv.afterctl.csv:1:5: error: expected ',' or the end of the line after a closing quote, found 0x7f
+import-errors-csv.open.csv:2:3: error: unterminated quoted field
+import-errors-csv.return.csv:1:2: error: carriage return inside a field
+import-errors-csv.many.csv:2:7: error: expected 2 fields, found more than 2
+import-errors-csv.few.csv:3:3: error: expected 2 fields, found 1
+import-errors-csv.empty.csv:2:1: error: expected 2 fields, found 1

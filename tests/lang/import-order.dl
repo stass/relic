@@ -1,0 +1,5 @@
+% Imports load after the program, in the order given, and each is
+% attempted after one before it has failed, so a run reports the mistakes in
+% the program and then in every table.
+edge(a, b)
+edge(X, Y)?

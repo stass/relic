@@ -1,0 +1,1 @@
+-s -I csv,header:person:symbol,string,integer=import-csv.csv -I csv,header:age:symbol,_,integer=import-csv.csv

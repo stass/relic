@@ -57,6 +57,19 @@ for path in "$lang_dir"/*; do
 		continue
 		;;
 	*.args|*.expected|*.expected-err|*.exit|*.stdin)
+		base=${name%.*}
+		;;
+	*.csv|*.tsv)
+		# A table the test imports with -I: <test>.tsv, or
+		# <test>.<case>.tsv when it imports several.  The test's
+		# arguments must name it, or nothing reads it.
+		base=${name%%.*}
+		if ! grep -qF -- "$name" "$lang_dir/$base.args" 2>/dev/null
+		then
+			echo "$name is not named by $base.args" >&2
+			status=1
+			continue
+		fi
 		;;
 	*)
 		echo "$name is not part of any language test" >&2
@@ -65,7 +78,6 @@ for path in "$lang_dir"/*; do
 		;;
 	esac
 
-	base=${name%.*}
 	if [ ! -f "$lang_dir/$base.dl" ]; then
 		echo "$name has no $base.dl beside it" >&2
 		status=1

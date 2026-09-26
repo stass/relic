@@ -1,0 +1,4 @@
+relic: error: invalid import: unknown format option 'headers' in tsv,headers:edge:symbol,symbol=edge.tsv
+usage: relic [-aceinsv] [-F format] [-I import] [-l limit=value] [-o file]
+             [-q query] [-X debug] [file ...]
+       relic -V

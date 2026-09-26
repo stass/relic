@@ -1,0 +1,3 @@
+% A field its column refuses is reported at the field's first byte.  A field
+% of printable ASCII other than a quote or a backslash is quoted, cut past
+% forty bytes; any other field is named by the first byte that is not.

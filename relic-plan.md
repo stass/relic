@@ -262,10 +262,10 @@ unexamined, and output is byte-transparent.
 
 ### D-16 Integer literals
 
-Parsed with `strtoll` into `int64_t`; out of range is a parse error naming the
-literal. A `-` immediately preceding a digit is part of the literal token,
-which is unambiguous because v1 has no arithmetic. `LLONG_MIN` is
-representable.
+Converted into `int64_t` by one integer rule, `relic_lex_integer()`, which
+table import shares; out of range is a parse error naming the literal. A `-`
+immediately preceding a digit is part of the literal token, which is
+unambiguous because v1 has no arithmetic. `INT64_MIN` is representable.
 
 ### D-17 A query owns its answer
 
@@ -506,7 +506,7 @@ and the parser cannot diverge on canonical form.
 **Tests.** Unit tests per module: arena growth and the failure flag; interning
 returning identical identifiers for equal bytes and distinct ones for unequal;
 embedded NUL bytes in strings; the value table round-tripping every type
-including `LLONG_MIN`; hash table growth, deletion if supported, and behaviour
+including `INT64_MIN`; hash table growth, deletion if supported, and behaviour
 at full load; a test that the library has no writable global state.
 
 **Done when.** Unit tests pass under ASan and UBSan with no leaks.

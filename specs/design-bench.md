@@ -253,15 +253,16 @@ path its users take and the one its authors optimized:
 | --- | --- |
 | Souffle | the relation files, through `.input` |
 | Nemo | the relation files, through `@import` |
-| relic | one source file of facts converted from the relation files |
+| relic | the relation files, through `-I` |
 | SWI-Prolog | one source file of facts, consulted |
 | clingo | one source file of facts |
 | DuckDB | the relation files, through `COPY` |
 | SQLite | the relation files, through `.import` |
 
-relic has no bulk import, so it reads facts as source text. That is a real
-cost a relic user pays and the comparison shows it; the `facts-join` workload
-isolates it.
+relic imports each relation file as a tsv table, with its columns typed
+from the file's first row: a column of integers is `integer`, and any other
+is `symbol`. The `facts-join` workload is mostly loading, so it isolates what
+each engine's native path costs.
 
 The generators are shared with `bench/run.sh` through `bench/datasets.sh`, so
 both harnesses measure the same data. They draw from a fixed linear

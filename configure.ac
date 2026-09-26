@@ -27,9 +27,9 @@ dnl libtool's rules an added entry point is current+1:0:age+1, a removed or
 dnl changed one -- a field added to a complete type among them -- is
 dnl current+1:0:0, and a change inside the library alone is
 dnl current:revision+1:age.
-RELIC_ABI_CURRENT=2
+RELIC_ABI_CURRENT=3
 RELIC_ABI_REVISION=0
-RELIC_ABI_AGE=1
+RELIC_ABI_AGE=2
 AC_SUBST([RELIC_ABI_CURRENT])
 AC_SUBST([RELIC_ABI_REVISION])
 AC_SUBST([RELIC_ABI_AGE])

@@ -1,10 +1,11 @@
 #!/bin/sh
 #
 # The command-line tool's handling of its input and output: a program read
-# from standard input, results written to a file with -o, a write that fails,
-# and a query that fails part way through a run.  The golden language tests
-# cover what the tool prints; these cover where it reads from and writes to,
-# and what a run leaves behind, which a golden file cannot express.
+# from standard input, a table imported from it, results written to a file
+# with -o, a write that fails, and a query that fails part way through a
+# run.  The golden language tests cover what the tool prints; these cover
+# where it reads from and writes to, and what a run leaves behind, which a
+# golden file cannot express.
 
 set -eu
 
@@ -347,6 +348,43 @@ for argument in tuples tuples5 bogus=1 =1 tuples= tuples=many \
 		;;
 	*)
 		fail "-l '$argument' was reported as '$diagnostic'"
+		;;
+	esac
+done
+
+# An import of - reads its table from standard input, and with no file
+# operand the program is empty rather than read from there too.
+actual=$(printf 'a\tb\na\tc\n' |
+    "$RELIC" -s -I tsv:edge:symbol,symbol=- -q 'edge(a, X)?')
+if [ "$actual" != "$expected" ]; then
+	fail "an import of - with no program answered '$actual'"
+fi
+
+# A table named by path claims nothing, so a program piped to standard input
+# is read as it always is, and its rules reach the table's facts.
+printf 'c\td\n' > "$work/edge.tsv"
+actual=$("$RELIC" -s -I "tsv:edge:symbol,symbol=$work/edge.tsv" \
+    < "$work/graph.dl")
+if [ "$actual" != "$(printf 'b\nc\nd')" ]; then
+	fail "a piped program with an import answered '$actual'"
+fi
+
+# Standard input has one reader, so two imports of -, or one under -i, are a
+# usage error naming both, and nothing is read.
+for claims in "-I tsv:a:symbol=- -I csv:b:symbol=-" \
+    "-i -I tsv:a:symbol=-"; do
+	status=0
+	# shellcheck disable=SC2086 # the claims are separate options
+	diagnostic=$(echo 'x' | "$RELIC" $claims "$work/graph.dl" 2>&1 \
+	    >/dev/null) || status=$?
+	if [ "$status" -ne 2 ]; then
+		fail "'$claims' exited $status, expected 2"
+	fi
+	case "$diagnostic" in
+	*"standard input has two readers: "*)
+		;;
+	*)
+		fail "'$claims' was reported as '$diagnostic'"
 		;;
 	esac
 done

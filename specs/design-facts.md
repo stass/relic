@@ -559,8 +559,9 @@ of a load's facts are interned before its rules' predicates.
   what was derived. A new base tuple is exactly a delta of an extensional
   predicate, so the base store is what incremental insertion needs, and it
   is architecture section 69's next step rather than this one.
-* **CSV and TSV import.** It is the same commit fed by a different reader,
-  and needs no representation of its own.
+* **A representation for imported facts.** CSV and TSV import is the same
+  commit fed by a different reader, and needs no representation of its own
+  (`specs/design-import.md`).
 * **Retracting facts.** Nothing in relic retracts a fact, and a base store
   has no deletion.
 * **Unwinding a refused commit.** Truncating the stores a refused commit

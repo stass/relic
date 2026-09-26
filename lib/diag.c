@@ -227,6 +227,24 @@ relic_diag_stderr(void *callback_ctx, enum relic_diag_level level,
 }
 
 /*
+ * Describe one byte for a message: as a character in single quotes when it
+ * is printable and not a backslash, and as its value otherwise.  A control
+ * byte rendered as itself would tell the reader nothing and would travel to
+ * a terminal, and a backslash would be doubled by a formatter that escapes
+ * what it prints, misstating the byte.
+ */
+const char *
+relic_diag_byte(unsigned char byte, char *buffer, size_t size)
+{
+	if (byte >= ' ' && byte <= '~' && byte != '\\')
+		snprintf(buffer, size, "'%c'", (int)byte);
+	else
+		snprintf(buffer, size, "0x%02x", (unsigned int)byte);
+
+	return (buffer);
+}
+
+/*
  * Shorten a name for a message, into a buffer the caller owns.
  *
  * A predicate or variable name is an identifier of arbitrary length.  Left

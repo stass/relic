@@ -1,0 +1,2 @@
+% Before the = come three parts: the format, the predicate and the columns.
+edge(a, b).

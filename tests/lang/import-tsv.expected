@@ -1,0 +1,10 @@
+a "plain" 0
+b "tab\there" -9223372036854775808
+c "back\\slash" 9223372036854775807
+d "" 7
+e "\0\x80\r\n" 0
+z "from the program" 1
+
+a
+c
+

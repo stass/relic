@@ -39,10 +39,10 @@ input before taking it, `relic_load_file(ctx, source_name, stream)` as
 `relic_load_string(ctx, source_name, text)`.
 
 Three types are opaque -- the context, a prepared query and a collected
-result -- and four are complete, because a caller builds or reads them field
-by field: `relic_value_t`, `relic_location_t`, `relic_config_t` and
-`relic_stats_t` (architecture section 48). A complete type's layout is part
-of the binary interface.
+result -- and five are complete, because a caller builds or reads them field
+by field: `relic_value_t`, `relic_location_t`, `relic_config_t`,
+`relic_import_t` and `relic_stats_t` (architecture section 48). A complete
+type's layout is part of the binary interface.
 
 Every entry point follows one convention:
 
@@ -135,6 +135,32 @@ incremental maintenance, which architecture section 70 defers. A discard
 with nothing derived to discard returns at once, so a run of calls between
 two queries pays for one discard.
 
+### 4.1 Imported facts
+
+```c
+int	relic_import_file(relic_t *, const char *source_name, FILE *,
+	    const relic_import_t *);
+int	relic_import_path(relic_t *, const char *path,
+	    const relic_import_t *);
+```
+
+add a fact for each record of a csv or tsv table, which `relic_import_t`
+describes: the format, whether the first record is a header, the predicate,
+and a type for each column (`specs/design-import.md` section 3.2). The
+entry points name their input first, as the loaders do. The table's facts
+are staged as it is read and committed as a load's are, all or nothing, so
+everything this section says of a programmatic fact holds for each imported
+one: it needs no check, it is committed through the one path into a base
+store, and a new one discards everything derived.
+
+**An unknown flag is refused, where an unknown configuration switch is
+ignored.** No switch changes an answer, so a library may ignore one it
+predates. An import flag changes what is read: a library that ignored a
+header flag it did not know would import the header as a fact. The
+description, and the column array it points at, are borrowed for the call
+and read once, when it is checked, since caller code runs while the table
+is read.
+
 ---
 
 ## 5. Queries and results
@@ -187,17 +213,18 @@ for as long as the context lives.
 
 Caller code runs while the library is part way through an operation in four
 ways: the diagnostic callback, the explain callback, the row callback, and
-the read function of a stream handed to `relic_load_file()`, which may be
-the caller's own (`funopen(3)`, `fopencookie(3)`). None may start another
+the read function of a stream handed to `relic_load_file()` or
+`relic_import_file()`, which may be the caller's own (`funopen(3)`,
+`fopencookie(3)`). None may start another
 operation on the same context, and none can: the refusal is a property of
 the context, not of the places it calls out from.
 
 **A context is busy while an operation runs.** Every entry point that
-changes a context -- loading, adding a fact, checking, materializing,
-preparing, running or collecting a query, interning a value, installing a
-callback, destroying the context -- begins by entering it and returns only
-by leaving it, through one pair of functions, and refuses to enter a busy
-context:
+changes a context -- loading, importing, adding a fact, checking,
+materializing, preparing, running or collecting a query, interning a value,
+installing a callback, destroying the context -- begins by entering it and
+returns only by leaving it, through one pair of functions, and refuses to
+enter a busy context:
 
 * a refused call returns -1 or NULL, and a refused destroy or installation
   does nothing;

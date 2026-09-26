@@ -11,6 +11,8 @@
 #	tests/lang/<name>.expected	 expected standard output
 #	tests/lang/<name>.expected-err	 optional: expected standard error
 #	tests/lang/<name>.exit		 optional: expected status, default 0
+#	tests/lang/<name>[.<case>].csv	 optional: tables the options import
+#	tests/lang/<name>[.<case>].tsv
 #
 # Automake runs this as DL_LOG_COMPILER, so every .dl file listed in TESTS is
 # a test with no per-test registration.  There is no way to add a test that is

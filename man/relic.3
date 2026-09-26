@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd September 22, 2026
+.Dd September 26, 2026
 .Dt RELIC 3
 .Os
 .Sh NAME
@@ -17,6 +17,8 @@
 .Nm relic_load_file ,
 .Nm relic_load_path ,
 .Nm relic_fact_add ,
+.Nm relic_import_file ,
+.Nm relic_import_path ,
 .Nm relic_value_symbol ,
 .Nm relic_value_string ,
 .Nm relic_string ,
@@ -72,6 +74,19 @@ relic library
 .Fa "const char *predicate"
 .Fa "size_t arity"
 .Fa "const relic_value_t *values"
+.Fc
+.Ft int
+.Fo relic_import_file
+.Fa "relic_t *ctx"
+.Fa "const char *source_name"
+.Fa "FILE *stream"
+.Fa "const relic_import_t *import"
+.Fc
+.Ft int
+.Fo relic_import_path
+.Fa "relic_t *ctx"
+.Fa "const char *path"
+.Fa "const relic_import_t *import"
 .Fc
 .Ft int
 .Fo relic_value_symbol
@@ -140,10 +155,14 @@ A program is loaded as text with
 or
 .Fn relic_load_path ,
 and grown with facts built through the interface with
-.Fn relic_fact_add .
-Loads and facts append to one program in the order they are made.
-A load is all or nothing.
-A load, or a call to
+.Fn relic_fact_add
+and facts read from csv and tsv tables with
+.Fn relic_import_file
+and
+.Fn relic_import_path .
+Loads, facts and imports append to one program in the order they are made.
+A load or an import is all or nothing.
+A load, an import, or a call to
 .Fn relic_fact_add ,
 whose facts would take the relations past
 .Fa max_tuples
@@ -153,7 +172,7 @@ is refused with nothing added, by an error naming the first predicate, in
 the order the text names them, that would gain facts:
 .Dq limit exceeded: tuples=4 while loading e/1 .
 Queries are prepared from text, such as
-.Qq path(a, X)? ,
+.Qq path(a, X)?\& ,
 with
 .Fn relic_query_prepare ,
 or taken from the program with
@@ -290,6 +309,108 @@ The fact is stored with the program's other facts before the call returns.
 Adding a fact the program does not hold changes the program, so everything
 derived before it is discarded and the next evaluation derives it again;
 adding one it holds changes nothing.
+.Ss Imports
+.Fn relic_import_file
+and
+.Fn relic_import_path
+add the facts a table holds, one per record, as though the program had
+stated them.
+The import is described by a
+.Vt relic_import_t :
+.Bd -literal -offset indent
+struct relic_import {
+	const char		*predicate;
+	const enum relic_column	*columns;
+	size_t			 column_count;
+	enum relic_format	 format;
+	unsigned int		 flags;
+};
+.Ed
+.Pp
+.Fa format
+is
+.Dv RELIC_FORMAT_CSV
+or
+.Dv RELIC_FORMAT_TSV ,
+each read as the exact inverse of the
+.Xr relic 1
+output format of the same name.
+In csv, fields are separated by commas, and a field that begins with a
+double quote is quoted: it holds commas and line ends as data, writes a
+quote as two, and ends at its closing quote.
+In tsv, fields are separated by tabs, and a backslash begins one of the
+escapes
+.Ql \e\e ,
+.Ql \et ,
+.Ql \en
+and
+.Ql \er ,
+and no other.
+In both, a record ends at a line feed, or a carriage return and a line
+feed, outside quotes; the last needs no line end; and an empty line is a
+record of one empty field.
+Bytes are data: no encoding is assumed and no space is trimmed.
+.Pp
+Each of the
+.Fa column_count
+entries of
+.Fa columns
+types the field in its position:
+.Bl -tag -width RELIC_COLUMN_INTEGER
+.It Dv RELIC_COLUMN_SYMBOL
+a symbol, as
+.Fn relic_value_symbol
+accepts one;
+.It Dv RELIC_COLUMN_STRING
+a string of the field's bytes;
+.It Dv RELIC_COLUMN_INTEGER
+an integer as the language writes one, an optional minus and decimal
+digits, within
+.Vt int64_t ;
+.It Dv RELIC_COLUMN_SKIP
+nothing: the field is read and is not part of the fact.
+.El
+.Pp
+A field is typed after its format has decoded it, so a quoted
+.Ql \&"7"
+in a csv integer column is 7.
+Nothing is inferred: a field its column refuses is an error.
+The fact's arity is the number of columns not skipped, at most 32, and
+every record must have a field per column, skipped ones included.
+With
+.Dv RELIC_IMPORT_HEADER
+in
+.Fa flags ,
+the first record is a header: it must be there and have a field per column,
+and is not imported.
+.Pp
+An import stops at its first mistake, which it reports at its line and
+column, and adds nothing: a table that cannot be read, a malformed record, a
+field its column refuses and a limit the facts do not fit all fail it.
+Facts already held are held once.
+.Fn relic_import_path
+opens
+.Fa path
+and names diagnostics by it;
+.Fn relic_import_file
+reads
+.Fa stream
+and names them
+.Fa source_name ,
+or
+.Qq <input>
+when it is
+.Dv NULL .
+The description is refused, with nothing read, when it is
+.Dv NULL ,
+names no valid predicate, has no columns or a column that is not a
+.Vt relic_column ,
+keeps more than 32 columns, names no format, or sets a flag the library
+does not define; and so is an import given a
+.Dv NULL
+.Fa stream
+or
+.Fa path .
 .Ss Evaluation
 .Fn relic_check
 validates the program: rule safety, stratification, and warnings about
@@ -424,7 +545,9 @@ release to the next.
 Caller code runs while the context is part way through an operation in four
 ways: the diagnostic, explain and row callbacks, and the read function of a
 stream given to
-.Fn relic_load_file ,
+.Fn relic_load_file
+or
+.Fn relic_import_file ,
 which may be the caller's own, as
 .Xr funopen 3
 makes one.

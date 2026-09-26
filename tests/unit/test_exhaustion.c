@@ -58,6 +58,7 @@
 #define	SCENARIO_ENTROPY	"context creation fails without entropy"
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
 #define	SCENARIO_FALLBACK	"an abandoned rewrite out of memory reports once"
+#define	SCENARIO_IMPORT		"an import that ran out of memory adds nothing"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_INTERFACE	"an added fact or collected answer reports once"
@@ -272,6 +273,7 @@ static void	 context_creation_fails_without_entropy(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
+static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
 static void	 sweep_lookahead(const char *program, bool well_formed);
 static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
@@ -692,6 +694,103 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 	    "attempts", LOAD_SWEEP);
 	checkf(completed > 0, SCENARIO_LOAD,
 	    "the sweep should reach a load that completes, in %d attempts",
+	    LOAD_SWEEP);
+}
+
+/*
+ * An import out of memory adds nothing and says so once, wherever the
+ * refusal strikes: the plan copied from its description, the chunk it reads
+ * into, a field growing, a value interned, a tuple staged, or the commit.
+ * The table is held in a temporary file made before any allocation is
+ * refused, since the C library's own allocations are not the import's.
+ */
+static void
+an_import_that_ran_out_of_memory_adds_nothing(void)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SKIP, RELIC_COLUMN_STRING
+	};
+	static const char table[] =
+	    "ann,x,\"a quoted field long enough to make its buffer grow\"\n"
+	    "bob,y,b\n"
+	    "ann,z,\"a quoted field long enough to make its buffer grow\"\n"
+	    "cy,w,\"c\"\n";
+	relic_import_t import;
+	size_t refused;
+	size_t completed;
+	long budget;
+
+	bzero(&import, sizeof(import));
+	import.predicate = "person";
+	import.columns = columns;
+	import.column_count = 3;
+	import.format = RELIC_FORMAT_CSV;
+
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < LOAD_SWEEP; budget++) {
+		relic_t *ctx;
+		FILE *stream;
+		int status;
+
+		ctx = relic_create();
+		stream = tmpfile();
+		if (ctx == NULL || stream == NULL ||
+		    fwrite(table, 1, sizeof(table) - 1, stream) !=
+		    sizeof(table) - 1) {
+			check(false, SCENARIO_IMPORT,
+			    "a context and a table should be made");
+			relic_destroy(ctx);
+			if (stream != NULL)
+				fclose(stream);
+			return;
+		}
+
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		rewind(stream);
+		refuse_allocations_after(budget);
+		status = relic_import_file(ctx, "people.csv", stream, &import);
+		serve_every_allocation();
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_IMPORT,
+		    "an import that %s should report %d message(s), not %zu, "
+		    "with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+
+		if (status != 0) {
+			refused++;
+			checkf(relic_base_total(ctx) == 0, SCENARIO_IMPORT,
+			    "a failed import should add no facts, not %zu, "
+			    "with allocation %ld refused",
+			    relic_base_total(ctx), budget);
+		} else {
+			completed++;
+			checkf(relic_base_total(ctx) == 3, SCENARIO_IMPORT,
+			    "an import that reported success should have added "
+			    "three facts, not %zu, with allocation %ld refused",
+			    relic_base_total(ctx), budget);
+		}
+
+		rewind(stream);
+		checkf(relic_import_file(ctx, "people.csv", stream,
+		    &import) == 0 && relic_base_total(ctx) == 3,
+		    SCENARIO_IMPORT, "importing should succeed once the "
+		    "allocator recovers, with allocation %ld refused", budget);
+
+		fclose(stream);
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0, SCENARIO_IMPORT,
+	    "the sweep should reach an import that runs out of memory, in %d "
+	    "attempts", LOAD_SWEEP);
+	checkf(completed > 0, SCENARIO_IMPORT,
+	    "the sweep should reach an import that completes, in %d attempts",
 	    LOAD_SWEEP);
 }
 
@@ -2385,6 +2484,7 @@ main(void)
 	interning_a_symbol_survives_a_failed_allocation();
 	interning_a_value_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
+	an_import_that_ran_out_of_memory_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();
 	a_check_that_ran_out_of_memory_can_be_retried();
 	an_analysis_that_ran_out_of_memory_says_nothing();

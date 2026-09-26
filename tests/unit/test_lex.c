@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -33,6 +34,7 @@
 #define	SCENARIO_CLASSIFY	"a byte begins the token the language says"
 #define	SCENARIO_COMMENT	"a comment runs to the end of its line"
 #define	SCENARIO_INTEGER	"an integer literal spans int64_t"
+#define	SCENARIO_INTEGER_RULE	"a byte range is an integer by the language's rule"
 #define	SCENARIO_LOCATION	"a token points at its first byte"
 #define	SCENARIO_REJECT		"a malformed token says what is wrong"
 #define	SCENARIO_STRING		"a string literal holds arbitrary bytes"
@@ -46,10 +48,12 @@ typedef struct scan scan_t;
 /*
  * One scan of one input, with the tokens it produced.  Tests build one of
  * these, assert against it, and release it; nothing is shared between them,
- * so a failing test cannot make the next one fail.
+ * so a failing test cannot make the next one fail.  `copy` is the input
+ * scan_text() made, or NULL.
  */
 struct scan {
 	relic_t		*ctx;
+	char		*copy;
 	relic_token_t	 tokens[TOKEN_MAX];
 	size_t		 count;
 };
@@ -58,6 +62,8 @@ static void	 a_rejected_literal_is_consumed_whole(void);
 static void	 comments_run_to_the_end_of_a_line(void);
 static enum relic_token_kind expected_kind(unsigned char byte);
 static void	 integer_literals_cover_the_whole_range(void);
+static void	 integer_rule_holds_at_its_boundaries(void);
+static void	 integer_rule_reads_only_its_range(void);
 static void	 malformed_tokens_report_their_reason(void);
 static void	 scan_close(scan_t *scan);
 static bool	 scan_open(scan_t *scan, const char *text, size_t length);
@@ -69,11 +75,11 @@ static void	 string_literals_hold_arbitrary_bytes(void);
 static void	 tokens_end_where_the_buffer_does(void);
 static void	 tokens_point_at_their_first_byte(void);
 static void	 every_byte_begins_what_the_language_says(void);
+static const char *verdict_name(enum relic_integer_verdict verdict);
 
 /*
- * Scan an input whole.  The text must be NUL-terminated at `length`, which
- * is the lexer's input contract; every caller below passes a C string, or a
- * buffer it terminated itself.
+ * Scan an input whole: `length` bytes at `text`, which need not be
+ * terminated.
  */
 static bool
 scan_open(scan_t *scan, const char *text, size_t length)
@@ -118,18 +124,37 @@ scan_open(scan_t *scan, const char *text, size_t length)
  * Scan a C string, reporting a failure against the caller's scenario rather
  * than against a scenario of this helper's own, so that a failing run names
  * the test that was running.
+ *
+ * The lexer is given a copy of the string without its terminator, in an
+ * allocation of exactly its length, so that under AddressSanitizer a scanner
+ * that reads past its input fails whichever test gave it the input, rather
+ * than finding a NUL there.
  */
 static void
 scan_text(scan_t *scan, const char *text, const char *scenario)
 {
-	if (!scan_open(scan, text, strlen(text)))
+	char *copy;
+	size_t length;
+
+	length = strlen(text);
+	copy = malloc(length > 0 ? length : 1);
+	if (copy == NULL) {
+		bzero(scan, sizeof(*scan));
+		check(false, scenario, "the input should be copied");
+		return;
+	}
+	bcopy(text, copy, length);
+
+	if (!scan_open(scan, copy, length))
 		check(false, scenario, "the input should fit the scan");
+	scan->copy = copy;
 }
 
 static void
 scan_close(scan_t *scan)
 {
 	relic_destroy(scan->ctx);
+	free(scan->copy);
 	bzero(scan, sizeof(*scan));
 }
 
@@ -212,7 +237,7 @@ every_byte_begins_what_the_language_says(void)
 	unsigned int candidate;
 
 	for (candidate = 0; candidate <= UCHAR_MAX; candidate++) {
-		char input[2];
+		char input[1];
 		scan_t scan;
 		enum relic_token_kind expected;
 		unsigned char byte;
@@ -220,7 +245,6 @@ every_byte_begins_what_the_language_says(void)
 		byte = (unsigned char)candidate;
 		expected = expected_kind(byte);
 		input[0] = (char)byte;
-		input[1] = '\0';
 
 		if (!scan_open(&scan, input, 1)) {
 			checkf(false, SCENARIO_CLASSIFY,
@@ -405,6 +429,142 @@ integer_literals_cover_the_whole_range(void)
 	scan_close(&scan);
 }
 
+/* The name of a verdict of the integer rule, for a failure message. */
+static const char *
+verdict_name(enum relic_integer_verdict verdict)
+{
+	switch (verdict) {
+	case RELIC_INTEGER_VALID:
+		return ("valid");
+	case RELIC_INTEGER_MALFORMED:
+		return ("malformed");
+	case RELIC_INTEGER_OUT_OF_RANGE:
+		return ("out of range");
+	}
+
+	return ("unknown");
+}
+
+/*
+ * The rule the lexer and every other reader of integers share, driven
+ * directly over byte ranges.  The expectations are written from the rule as
+ * the language states it, `-?[0-9]+` within int64_t, at each of its edges.
+ * A range may hold any byte, as a table's field may, so a NUL and a byte
+ * above 0x7f are among them; a case's length is its literal's, NUL
+ * included.
+ */
+static void
+integer_rule_holds_at_its_boundaries(void)
+{
+#define	RULE_CASE(text, verdict, value) \
+	{ text, sizeof(text) - 1, verdict, value }
+	static const struct {
+		const char			*text;
+		size_t				 length;
+		enum relic_integer_verdict	 verdict;
+		int64_t				 value;	/* when valid */
+	} cases[] = {
+		RULE_CASE("0", RELIC_INTEGER_VALID, 0),
+		RULE_CASE("-0", RELIC_INTEGER_VALID, 0),
+		RULE_CASE("007", RELIC_INTEGER_VALID, 7),
+		RULE_CASE("-12", RELIC_INTEGER_VALID, -12),
+		RULE_CASE("9223372036854775807", RELIC_INTEGER_VALID,
+		    INT64_MAX),
+		RULE_CASE("-9223372036854775808", RELIC_INTEGER_VALID,
+		    INT64_MIN),
+		RULE_CASE("0009223372036854775807", RELIC_INTEGER_VALID,
+		    INT64_MAX),
+		RULE_CASE("9223372036854775808", RELIC_INTEGER_OUT_OF_RANGE, 0),
+		RULE_CASE("-9223372036854775809", RELIC_INTEGER_OUT_OF_RANGE,
+		    0),
+		RULE_CASE("18446744073709551616", RELIC_INTEGER_OUT_OF_RANGE,
+		    0),
+		RULE_CASE("99999999999999999999999", RELIC_INTEGER_OUT_OF_RANGE,
+		    0),
+		RULE_CASE("", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("-", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("+1", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE(" 7", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("7 ", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("7x", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("1-", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("--1", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("0x10", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("99999999999999999999x", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("1\0", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("\0" "1", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("7\x80", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("\xb7" "7", RELIC_INTEGER_MALFORMED, 0)
+	};
+#undef	RULE_CASE
+
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		enum relic_integer_verdict verdict;
+		int64_t value;
+
+		value = 0;
+		verdict = relic_lex_integer(cases[i].text, cases[i].length,
+		    &value);
+
+		checkf(verdict == cases[i].verdict, SCENARIO_INTEGER_RULE,
+		    "case %zu, \"%s\", should be %s, not %s", i, cases[i].text,
+		    verdict_name(cases[i].verdict), verdict_name(verdict));
+		if (verdict == RELIC_INTEGER_VALID &&
+		    cases[i].verdict == verdict)
+			checkf(value == cases[i].value, SCENARIO_INTEGER_RULE,
+			    "case %zu, \"%s\", should convert to %jd, not %jd",
+			    i, cases[i].text, (intmax_t)cases[i].value,
+			    (intmax_t)value);
+		if (verdict != RELIC_INTEGER_VALID)
+			checkf(value == 0, SCENARIO_INTEGER_RULE,
+			    "case %zu, \"%s\", should leave the value alone",
+			    i, cases[i].text);
+	}
+}
+
+/*
+ * The range is all the rule reads.  A range cut from longer text converts
+ * only what it holds, and a range with no terminator after it is read to
+ * its end and no further; under AddressSanitizer a read past the array
+ * below fails the test.
+ */
+static void
+integer_rule_reads_only_its_range(void)
+{
+	static const char unterminated[] = { '4', '2' };
+
+	scan_t scan;
+	int64_t value;
+
+	value = 0;
+	check(relic_lex_integer("1234", 2, &value) == RELIC_INTEGER_VALID &&
+	    value == 12, SCENARIO_INTEGER_RULE,
+	    "the first two bytes of 1234 should be the integer 12");
+
+	value = 0;
+	check(relic_lex_integer("-5x", 2, &value) == RELIC_INTEGER_VALID &&
+	    value == -5, SCENARIO_INTEGER_RULE,
+	    "a byte past the range should not make it malformed");
+
+	value = 0;
+	check(relic_lex_integer(unterminated, sizeof(unterminated), &value) ==
+	    RELIC_INTEGER_VALID && value == 42, SCENARIO_INTEGER_RULE,
+	    "an unterminated range should convert");
+
+	/* The lexer finds the literal's extent at the end of its input too. */
+	if (!scan_open(&scan, unterminated, sizeof(unterminated))) {
+		check(false, SCENARIO_INTEGER_RULE,
+		    "an unterminated literal should scan");
+		return;
+	}
+	check(scan.count == 2 && scan.tokens[0].kind == RELIC_TOKEN_INTEGER &&
+	    scan.tokens[0].integer == 42, SCENARIO_INTEGER_RULE,
+	    "a literal ending the input with no terminator should be 42");
+	scan_close(&scan);
+}
+
 static void
 string_literals_hold_arbitrary_bytes(void)
 {
@@ -508,6 +668,8 @@ main(void)
 	tokens_point_at_their_first_byte();
 	comments_run_to_the_end_of_a_line();
 	integer_literals_cover_the_whole_range();
+	integer_rule_holds_at_its_boundaries();
+	integer_rule_reads_only_its_range();
 	string_literals_hold_arbitrary_bytes();
 	malformed_tokens_report_their_reason();
 	a_rejected_literal_is_consumed_whole();

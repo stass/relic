@@ -50,7 +50,8 @@
 # since the plans are what the alternatives change, one that limits the
 # Magic rewrite, which only some of the alternatives run, and an interactive
 # session, whose .plan and .stats show what the strategy did.  Every run
-# reads an empty standard input, so a session's test is not run from here.
+# reads the test's .stdin file, or else an empty standard input, as the
+# language tests do.
 
 set -eu
 
@@ -82,7 +83,7 @@ run() {
 
 	status=0
 	( cd "$directory" && $RELIC $args -s -X stats "$@" "$program" ) \
-	    < /dev/null > "$work/$label.out" 2> "$work/$label.all" ||
+	    < "$input" > "$work/$label.out" 2> "$work/$label.all" ||
 	    status=$?
 	echo "$status" > "$work/$label.status"
 
@@ -140,6 +141,11 @@ for path in $RELIC_LANG_TESTS; do
 	args=""
 	if [ -f "$directory/$base.args" ]; then
 		args=$(cat "$directory/$base.args")
+	fi
+
+	input=/dev/null
+	if [ -f "$directory/$base.stdin" ]; then
+		input=$directory/$base.stdin
 	fi
 
 	case " $args " in

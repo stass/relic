@@ -1,0 +1,4 @@
+% A table wider than a predicate may be is imported by skipping columns: 33
+% fields with one skipped keep 32, the most a predicate has.
+wide(A, _, _, _, _, _, _, _, _, _, _, _, _, _, _, P, Q, _, _, _, _, _, _, _,
+    _, _, _, _, _, _, _, Z)?

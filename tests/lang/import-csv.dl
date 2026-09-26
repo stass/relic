@@ -1,0 +1,9 @@
+% A csv table read as RFC 4180 writes it: a header skipped, lines ending in
+% a carriage return and a line feed, quoted fields holding commas, doubled
+% quotes and a line end of their own, and an empty field quoted or not.  A
+% quoted field is typed after its quotes are removed, so "eve" is a symbol
+% and "7" an integer.  The same table imported again with its middle
+% column skipped adds facts of another arity, and the two rows for dee are
+% one fact.
+person(N, C, A)?
+age(N, A)?

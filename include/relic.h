@@ -84,16 +84,17 @@ RELIC_EXPORT const char *relic_version(void);
  *
  * Caller code runs while the context is part way through an operation in
  * four ways: the diagnostic, explain and row callbacks, and the read
- * function of a stream given to relic_load_file().  It may read through the
- * context with the functions above and relic_error().  Any other call on the
- * same context is refused: a call that returns a status fails with -1 or
- * NULL, one that returns nothing does nothing, and relic_error() describes
- * the refusal until the next error or until the operation the caller code
- * runs inside returns; the diagnostic callback is not called for it.  A
- * refused relic_destroy() releases nothing, so a callback that tries to
- * destroy its context leaks it rather than freeing memory in use.  A
- * callback must return: one that leaves by longjmp() or an exception leaves
- * its context refusing every later call.
+ * function of a stream given to relic_load_file() or relic_import_file().
+ * It may read through the context with the functions above and
+ * relic_error().  Any other call on the same context is refused: a call
+ * that returns a status fails with -1 or NULL, one that returns nothing
+ * does nothing, and relic_error() describes the refusal until the next
+ * error or until the operation the caller code runs inside returns; the
+ * diagnostic callback is not called for it.  A refused relic_destroy()
+ * releases nothing, so a callback that tries to destroy its context leaks
+ * it rather than freeing memory in use.  A callback must return: one that
+ * leaves by longjmp() or an exception leaves its context refusing every
+ * later call.
  */
 typedef struct relic relic_t;
 
@@ -114,8 +115,8 @@ typedef struct relic_config relic_config_t;
  * with the working state of an evaluation and of a query's Magic rewrite.
  * Exceeding either is an ordinary error: what would exceed it is refused, a
  * diagnostic names the limit, its configured value and what was being done,
- * and the relation is left as it was.  A load, or relic_fact_add(), whose
- * facts do not fit is refused with nothing added, naming the first
+ * and the relation is left as it was.  A load, an import or relic_fact_add()
+ * whose facts do not fit is refused with nothing added, naming the first
  * predicate, in the order its text names them, that would gain facts:
  * "limit exceeded: tuples=4 while loading e/1".
  *
@@ -126,12 +127,12 @@ typedef struct relic_config relic_config_t;
  * length.  A limit that fits a program's data may therefore refuse its
  * plans, before any tuple is derived.  It does not bound the memory the
  * library uses in total: the program's rules and queries, the text being
- * loaded, the symbols and values it mentions, the evaluation order and a
- * prepared query are sized by what the caller wrote, and the tables and
- * evaluation order of a query's rewrite are a fraction of the rewrite the
- * limit does count.
- * Nor is it a bound on peak usage, since growing an array holds the old one
- * until the new one is filled.
+ * loaded, the field of a table being imported, the symbols and values it
+ * mentions, the evaluation order and a prepared query are sized by what the
+ * caller wrote, and the tables and evaluation order of a query's rewrite are
+ * a fraction of the rewrite the limit does count.  Nor is it a bound on peak
+ * usage, since growing an array holds the old one until the new one is
+ * filled.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
  * single query: the adorned and magic predicates it generates, and the rules it
@@ -406,6 +407,101 @@ RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
  */
 RELIC_EXPORT int relic_fact_add(relic_t *ctx, const char *predicate,
     size_t arity, const relic_value_t *values);
+
+/*
+ * The table formats an import reads.  Each is the exact inverse of the
+ * relic tool's output format of the same name, and reads what other tools
+ * write in it wherever that does not conflict:
+ *
+ *	RELIC_FORMAT_CSV	RFC 4180: fields separated by commas; a field
+ *				beginning with `"` is quoted, holds commas and
+ *				line ends as data, and writes a `"` as `""`
+ *	RELIC_FORMAT_TSV	fields separated by tabs, with the escapes
+ *				\\, \t, \n and \r and no others
+ *
+ * In both, a record ends at a line feed or a carriage return and line feed
+ * outside a quoted field, and bytes are data: no encoding is assumed and no
+ * whitespace is trimmed.
+ */
+enum relic_format {
+	RELIC_FORMAT_CSV = 1,
+	RELIC_FORMAT_TSV
+};
+
+/*
+ * What a column of an imported table holds.  A field is typed after its
+ * format has decoded it, and a field its column refuses is an error:
+ *
+ *	RELIC_COLUMN_SYMBOL	a symbol, by the rule of relic_value_symbol()
+ *	RELIC_COLUMN_STRING	a string of the field's bytes, whatever they are
+ *	RELIC_COLUMN_INTEGER	an integer as the language writes one,
+ *				-?[0-9]+ within int64_t
+ *	RELIC_COLUMN_SKIP	nothing: the field is read by the format's rules
+ *				and is not part of the fact
+ *
+ * Nothing about a field's type is inferred from its bytes.
+ */
+enum relic_column {
+	RELIC_COLUMN_SYMBOL = 1,
+	RELIC_COLUMN_STRING,
+	RELIC_COLUMN_INTEGER,
+	RELIC_COLUMN_SKIP
+};
+
+/* The table's first record is a header, and is read and not imported. */
+#define	RELIC_IMPORT_HEADER	0x1u
+
+typedef struct relic_import relic_import_t;
+
+/*
+ * An import: the facts of `predicate` that a table holds, one per record,
+ * each record's fields typed by `columns`, which has `column_count` entries.
+ * The predicate's arity is the number of columns that are not
+ * RELIC_COLUMN_SKIP, at most 32.  `flags` holds RELIC_IMPORT_ bits.
+ *
+ * The enumerators start at one, so a description or column left zeroed is
+ * refused rather than read as some format or type.  The structure's layout
+ * is part of the binary interface; a later boolean goes in `flags`.
+ */
+struct relic_import {
+	const char		*predicate;
+	const enum relic_column	*columns;
+	size_t			 column_count;
+	enum relic_format	 format;
+	unsigned int		 flags;
+};
+
+/*
+ * Add the facts a table holds to the program, as though its text had
+ * stated them.
+ *
+ * relic_import_path() opens the file, names diagnostics by its path and
+ * closes it.  relic_import_file() reads a stream the caller owns, naming
+ * diagnostics `source_name`, or "<input>" when that is NULL; a read
+ * function of the caller's own behind the stream is held to the rule for
+ * callbacks that the description of relic_t sets out.  The description, and
+ * the columns it points at, are borrowed for the call.
+ *
+ * Each returns 0, or -1 with the reason reported and nothing added.  An
+ * import is all or nothing, like a load: a table that cannot be read, a
+ * malformed record, a field its column refuses, or a limit the facts do not
+ * fit adds no fact.  The first mistake ends an import, and is the one
+ * reported, at its line and column.  With RELIC_IMPORT_HEADER the first
+ * record must be there, and must have a field per column.  Facts already
+ * held are held once, and an import that adds a fact discards what was
+ * derived, as relic_fact_add() does.
+ *
+ * An import is refused, with nothing read, when the description, the path
+ * or the stream is NULL; when `predicate` is not a name relic_fact_add()
+ * accepts; when there are no columns, a column is not an enumerator of
+ * relic_column, or more than 32 are kept; when `format` is not an
+ * enumerator of relic_format; or when `flags` holds a bit this library does
+ * not define, since an import flag changes what is read.
+ */
+RELIC_EXPORT int relic_import_file(relic_t *ctx, const char *source_name,
+    FILE *stream, const relic_import_t *import);
+RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
+    const relic_import_t *import);
 
 /*
  * Validate the loaded program, returning 0 when it is usable and -1 when it

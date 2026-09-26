@@ -1,0 +1,1 @@
+-s -I tsv:row:symbol,string,integer=import-tsv.tsv

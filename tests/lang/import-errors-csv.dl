@@ -1,0 +1,3 @@
+% Every mistake a csv table can hold, each in a table of its own, reported
+% at its line and column.  A line feed inside a quoted field advances the
+% line, and an unterminated field is reported at its opening quote.

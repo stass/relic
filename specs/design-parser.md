@@ -147,9 +147,20 @@ written `\n`.
 
 ### 3.5 Integer literals
 
-Converted with `strtoll(3)` into `int64_t`, base ten. A value outside the
-range is an error that names the literal, so that `-9223372036854775808` is
-representable and `9223372036854775808` is diagnosed rather than wrapped.
+A literal is `-?[0-9]+` whose value fits `int64_t`, base ten. A value
+outside the range is an error that names the literal, so that
+`-9223372036854775808` is representable and `9223372036854775808` is
+diagnosed rather than wrapped. A leading zero is accepted: `007` is 7, and
+`-0` is 0.
+
+The rule is one function over a byte range, `relic_lex_integer()`, which
+the lexer and the table importer (`specs/design-import.md` section 4) both
+call. It accepts the range only when the whole range is `-?[0-9]+` and the
+value fits, and it reads nothing past the range. When it refuses, it says
+which way: the range is not an integer, or it is one outside `int64_t`,
+since each caller reports the two differently. The lexer finds a literal's
+extent first, an optional `-` and the digits after it, and then converts
+exactly that extent, so from the lexer only the second refusal can come.
 
 A `-` immediately preceding a digit is part of the literal token. This is
 unambiguous because v1 has no arithmetic, so a `-` cannot be an operator.
@@ -162,16 +173,12 @@ comma several bytes later. This is the one place the lexer looks past the
 token it has just recognized, and it does so to make a misspelled literal
 report itself.
 
-### 3.6 The input contract
+### 3.6 The input
 
-The lexer scans a byte range and requires one byte past its end to hold a NUL.
-`strtoll(3)` and nothing else needs it: the terminator is what stops the
-conversion from reading past a digit span that ends at the end of the buffer.
-Every loading entry point allocates the text with room for it, so no caller
-has to know.
-
-A NUL *inside* the range is an ordinary byte and is not a token, so it is
-reported as an unexpected character.
+The lexer scans a byte range and reads nothing past its end, so a caller
+hands it text of any length with no terminator. A NUL *inside* the range is
+an ordinary byte and is not a token, so it is reported as an unexpected
+character.
 
 ---
 
@@ -311,8 +318,11 @@ policy.dl:24:9: error: integer literal out of range: 9223372036854775808
 ```
 
 A byte quoted in a message is quoted as a character when it is printable and
-as `0x%02x` when it is not. The stderr formatter escapes what it prints in any
-case, so this is about readability rather than safety.
+not a backslash, and as `0x%02x` otherwise. The stderr formatter escapes what
+it prints in any case, so this is about readability rather than safety. The
+backslash is the exception because the formatter doubles it, so that its own
+escapes cannot be mistaken for the text's: quoted as a character, a stray
+backslash would be shown as two.
 
 Text quoted from the source is truncated past forty bytes. A message names one
 thing and the reader needs enough of it to recognize which, not all of it; the

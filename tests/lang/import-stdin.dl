@@ -1,0 +1,5 @@
+% An import of - reads its table from standard input, and the program is
+% the file operands.
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+path(a, X)?

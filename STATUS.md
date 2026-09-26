@@ -44,7 +44,7 @@ evaluates nothing.
 
 | Component | State |
 | --- | --- |
-| `lib/lex.c` | byte-oriented lexer over its own classification table; every token class of architecture section 13, string escapes including `\xHH`, `strtoll` integer literals with a range check, `%` comments, line and column on every token |
+| `lib/lex.c` | byte-oriented lexer over its own classification table; every token class of architecture section 13, string escapes including `\xHH`, integer literals converted by the integer rule `relic_lex_integer()`, which table import shares, `%` comments, line and column on every token |
 | `lib/parse.c` | recursive descent over the grammar; error recovery synchronizing on `.` and `?` with one diagnostic per statement; the loading entry points and the whole-stream reader |
 | `lib/ast.h` | terms, atoms, literals, statements and the program list; a fact is a rule with an empty body |
 | `include/relic.h` | adds `relic_load_file()`, `relic_load_path()`, `relic_load_string()` |
@@ -508,6 +508,36 @@ was 0.90 and 1.14 on those two runs, on a busy machine, at Souffle's 171 MB.
 At scale 1 relic peaks at 59 MB, against 43 MB for Souffle and 79 MB for
 Nemo.
 
+**Facts are imported from csv and tsv tables,** specified in
+`specs/design-import.md`. A table is read a record at a time by a state
+machine that alone decides where fields and records end, each field is
+typed by its declared column with the lexer's symbol and integer rules, and
+the records are staged and committed as a load's facts are, all or nothing.
+The first mistake ends an import and is reported at its line and column.
+
+| Component | State |
+| --- | --- |
+| `lib/lex.c` | `relic_lex_integer()`, the one integer rule, over a byte range it reads no further than; the lexer finds a literal's extent and converts it through the rule, so a load's text needs no terminator |
+| `lib/import.c` | the table reader, fed chunks and returning one event per call, for both formats with every mistake of the design's section 7; `relic_import_file()` and `relic_import_path()`, which check the description, copy what they read of it, and stage each record into the load's commit |
+| `include/relic.h`, `man/relic.3` | `enum relic_format`, `enum relic_column`, `RELIC_IMPORT_HEADER`, `relic_import_t` and the two entry points; the interface version is 3:0:2 |
+| `cmd/relic/import.c`, `cmd/relic/main.c`, `man/relic.1` | `-I format[,header]:predicate:columns=path`, parsed on the command line and a usage error when malformed; imports load after the program, in order, each attempted after a failure; standard input has one reader, the program, the session or one import of `-` |
+| `tests/` | `test_import`: the reader's events over every table of the design's section 11, whole and a byte at a time; column types at their boundaries; every refusal of a description with nothing read; all or nothing, limits, duplicates and derived facts; a description changed while the table is read; `test_exhaustion`: an import refused at every allocation adds nothing; golden tests for every usage error and every diagnostic; `tests/cli.sh` for standard input; `tests/roundtrip.sh`: every byte value and both ends of the integers written with `-F csv` and `-F tsv` and imported back; the fuzz target `import` over `tests/fuzz/corpus-import/` |
+| `bench/compare/run.sh` | relic reads each workload's relation files through `-I`, typing each column from the file's first row |
+
+An import costs no more than loading the same facts as text. Measured on
+`facts-join` at four times its default size, 1.2 million facts, over ten
+interleaved runs of a `--disable-shared` build at `-O2` on an Intel Xeon
+W-3245:
+
+| Measure | Text | Import |
+| --- | --- | --- |
+| median user time | 1.75 s | 1.69 s |
+| median resident peak per fact | 192 B | 160 B |
+| median footprint per fact | 136 B | 110 B |
+
+The import was the faster of the pair in every run, and both answered the
+same 141858 rows.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -521,7 +551,7 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
 * `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
   `make check-msan` report that the platform does not support them and
   succeed;
-* the installed shared library exports exactly the twenty-nine documented
+* the installed shared library exports exactly the thirty-one documented
   entry points and nothing else; the compatibility objects linked into it are
   not reachable;
 * `make installcheck` builds and runs `examples/embed.c` against the installed
@@ -746,7 +776,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-bench.md` | the comparison with other engines: engines and modes, workloads, data, answers, measurement |
 | `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the four-byte identifier slot kept, batched insertion |
 | `specs/design-facts.md` | a program's facts as the tuples of their predicates' base stores: derived predicates and the relation each is read through, the all-or-nothing commit, seeding before the first pass, Magic over base views |
-| `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit; designed, not implemented |
+| `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |

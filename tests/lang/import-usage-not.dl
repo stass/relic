@@ -1,0 +1,2 @@
+% not is the negation keyword and names no predicate.
+edge(a, b).

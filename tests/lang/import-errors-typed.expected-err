@@ -1,0 +1,8 @@
+import-errors-typed.symbol.csv:2:1: error: expected a symbol, found "Ann"
+import-errors-typed.empty.csv:2:1: error: expected an integer, found an empty field
+import-errors-typed.tab.csv:1:1: error: expected a symbol, found a field holding 0x09
+import-errors-typed.range.csv:2:1: error: integer out of range: "-9223372036854775809"
+import-errors-typed.long.csv:2:1: error: expected a symbol, found "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"...
+import-errors-typed.quote.csv:1:1: error: expected an integer, found a field holding '"'
+import-errors-typed.space.csv:1:1: error: expected an integer, found " 7"
+import-errors-typed.high.csv:1:4: error: expected a symbol, found a field holding 0xe9

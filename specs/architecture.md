@@ -1352,8 +1352,8 @@ options parsed with `getopt(3)`. There are no long options.
 Usage:
 
 ```text
-relic [-aceinsvV] [-F format] [-l limit=value] [-o file] [-q query]
-      [-X debug] [file ...]
+relic [-aceinsvV] [-F format] [-I import] [-l limit=value] [-o file]
+      [-q query] [-X debug] [file ...]
 ```
 
 Options, in the alphabetical order used by the usage message and the manual
@@ -1364,6 +1364,7 @@ page:
 -c          check syntax, safety and stratification; do not evaluate
 -e          print the selected execution plan and Magic rewrite
 -F fmt      output format: text, csv, tsv, json
+-I import   add facts from a csv or tsv table; repeatable
 -i          enter interactive mode once the queries have run
 -l limit=n  set a resource limit; repeatable
 -n          suppress normal query output; useful with -e or -v
@@ -1412,7 +1413,12 @@ relic rules.dl facts.dl
 ```
 
 If no files are given and standard input is not a terminal, the program is read
-from stdin.
+from stdin, unless the interactive session or an import of `-` reads it.
+
+An import names a table's format, whether it has a header, the predicate its
+records become facts of, and a type for each column, and it loads after the
+program's files, in the order given. Its operand, the formats and the rules for
+standard input are specified in `specs/design-import.md`.
 
 ---
 
@@ -1446,6 +1452,12 @@ Inspect optimization:
 
 ```sh
 relic -e -q 'path(a, X)?' graph.dl
+```
+
+Answer a program's queries over facts imported from a table:
+
+```sh
+relic -I tsv:edge:symbol,symbol=edge.tsv graph.dl
 ```
 
 Force whole-program materialization:
@@ -1694,7 +1706,7 @@ typedef struct relic_query relic_query_t;
 typedef struct relic_result relic_result_t;
 ```
 
-Four types are complete rather than opaque, because a caller constructs or
+Five types are complete rather than opaque, because a caller constructs or
 reads each one directly and an accessor per field would buy nothing:
 
 * `relic_value_t` of section 19, which callers build and inspect;
@@ -1702,6 +1714,8 @@ reads each one directly and an accessor per field would buy nothing:
   diagnostic callback reads;
 * `relic_config_t` of section 49, which a caller fills in before creating a
   context;
+* `relic_import_t` of section 50, which a caller fills in to describe a table
+  to import;
 * `relic_stats_t`, the context's counters, which a caller reads.
 
 ```c
@@ -1791,7 +1805,26 @@ Loading parses rules and facts into the current program. Every loader that
 takes one names the input its diagnostics point at before the input itself,
 as `relic_query_prepare()` does.
 
-Multiple loads append to the same logical program.
+Facts can also be imported from a csv or tsv table, beside the loaders:
+
+```c
+int
+relic_import_file(relic_t *,
+    const char *source_name,
+    FILE *,
+    const relic_import_t *);
+
+int
+relic_import_path(relic_t *,
+    const char *path,
+    const relic_import_t *);
+```
+
+`relic_import_t` names the format, the header flag, the predicate and a type
+for each column. An imported fact is a fact, staged and committed as a load's
+are, all or nothing. The import is specified in `specs/design-import.md`.
+
+Multiple loads and imports append to the same logical program.
 
 ---
 
@@ -2184,6 +2217,7 @@ lib/                        librelic
     diag.c                  diagnostics, source locations, error buffer
     lex.c                   lexer
     parse.c                 recursive-descent parser
+    import.c                csv and tsv table reader and importer
     symbol.c                byte-string interning
     value.c                 value table and domain identifiers
     pred.c                  predicate table keyed by (name, arity)
@@ -2200,6 +2234,7 @@ lib/                        librelic
 
 cmd/relic/                  the command-line tool
     cmd.h
+    import.c                the -I operand
     main.c
     output.c
     repl.c
@@ -2438,11 +2473,13 @@ Core regression categories:
 
 # 67. Fuzzing
 
-Two libFuzzer entry points drive the public interface. The first loads and
+Three libFuzzer entry points drive the public interface. The first loads and
 checks its input as program text, covering the lexer, the parser, the program
 model and the static analyses. The second goes on to answer every query the
 input holds under the optimized and the naive, fully materializing
-configurations, and fails if they disagree.
+configurations, and fails if they disagree. The third imports its input as a
+csv or tsv table, under a format and columns its first byte chooses, and fails
+if an import that fails reports no error.
 
 Fuzzing targets verify:
 
@@ -2454,9 +2491,9 @@ bounded parser behavior
 optimized and naive answers agree
 ```
 
-Both targets also link against a replay driver, so the corpus is run by
+Every target also links against a replay driver, so the corpora are run by
 every `make check` on every compiler, including those without libFuzzer.
-Their inputs, bounds and corpus are specified in `specs/design-hardening.md`.
+Their inputs, bounds and corpora are specified in `specs/design-hardening.md`.
 
 ---
 
@@ -2906,6 +2943,13 @@ Specified in `specs/design-hash-seed.md`.
 
 **Source layout, section 64.** `lib/explain.c` renders plans as text, and
 relation statistics live with the tuple store in `lib/relation.c`.
+
+**Table import, sections 40, 41, 48, 50, 64, 67 and 69.** Facts can be
+imported from csv and tsv tables: `-I` on the command line, which loads after
+the program's files, and `relic_import_file()` and `relic_import_path()`
+through the library, described by `relic_import_t`, a fifth complete type.
+The reader and importer are `lib/import.c`, and a third fuzz target imports
+its input as a table. Specified in `specs/design-import.md`.
 
 **New sections.** 74 dependency policy, 75 repository and documentation
 conventions, 76 this log.

@@ -1,0 +1,4 @@
+% -c reads and types every table, so a table that does not match its
+% declaration fails the check, and nothing is evaluated.
+knows(dee, eve).
+knows(X, Y)?

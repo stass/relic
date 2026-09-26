@@ -1,0 +1,3 @@
+% A predicate has at most 32 arguments, so an import keeps at most 32
+% columns.
+edge(a, b).

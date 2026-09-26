@@ -1,0 +1,3 @@
+% An import names its format, csv or tsv; any other word is a usage error
+% and nothing is read.
+edge(a, b).

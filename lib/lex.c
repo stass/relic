@@ -6,8 +6,8 @@
 
 #include "config.h"
 
-#include <errno.h>
-#include <limits.h>
+#include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -224,6 +224,13 @@ relic_lex_is_symbol(const char *bytes, size_t length)
 	return (true);
 }
 
+bool
+relic_lex_is_predicate_name(const char *bytes, size_t length)
+{
+	return (relic_lex_is_symbol(bytes, length) &&
+	    !(length == 3 && bcmp(bytes, "not", 3) == 0));
+}
+
 int
 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token)
 {
@@ -277,7 +284,7 @@ scan_token(relic_lexer_t *lexer, relic_token_t *token)
 	 * A `-` immediately before a digit is part of the literal rather than
 	 * an operator, which is unambiguous because the language has no
 	 * arithmetic for it to be an operator in.  It is also what makes
-	 * LLONG_MIN writable: its magnitude has no positive counterpart.
+	 * INT64_MIN writable: its magnitude has no positive counterpart.
 	 */
 	if (in_class(byte, LEX_DIGIT) ||
 	    (byte == '-' && in_class(peek(lexer, 1), LEX_DIGIT)))
@@ -320,44 +327,100 @@ scan_identifier(relic_lexer_t *lexer, relic_token_t *token,
 }
 
 /*
- * Scan a decimal integer literal into int64_t.
+ * Convert `length` bytes to an integer by the language's integer rule: the
+ * whole range is `-?[0-9]+` and its value fits int64_t.  Nothing past the
+ * range is read, so the range need not be terminated.
  *
- * The digit span is scanned first and strtoll(3) is then pointed at its
- * first byte, so the conversion sees exactly what was scanned: it stops at
- * the first non-digit, and the NUL the input contract requires past the end
- * of the text stops it there.
+ * The digits are accumulated as a magnitude in uint64_t, which holds the
+ * magnitude of INT64_MIN as well as that of INT64_MAX, and each step checks
+ * that one more digit keeps it within the sign's bound before taking it.
+ * The check is `magnitude * 10 + digit > bound` rearranged so that nothing
+ * can wrap: `bound - digit` cannot, as the bound is at least INT64_MAX, and
+ * since the magnitude is a whole number, exceeding the rounded-down quotient
+ * of `(bound - digit) / 10` is exactly exceeding the exact one.
+ * Every byte is examined even after the value has left the range, so that a
+ * range such as `99999999999999999999x` is refused as no integer at all
+ * rather than as one out of range: what the bytes are is decided before
+ * what they are worth.
+ */
+enum relic_integer_verdict
+relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
+{
+	uint64_t bound;
+	uint64_t magnitude;
+	size_t first_digit;
+	size_t i;
+	bool negative;
+	bool out_of_range;
+
+	negative = length > 0 && bytes[0] == '-';
+	first_digit = negative ? 1 : 0;
+	if (first_digit == length)
+		return (RELIC_INTEGER_MALFORMED);
+
+	bound = negative ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
+	magnitude = 0;
+	out_of_range = false;
+
+	for (i = first_digit; i < length; i++) {
+		unsigned char byte;
+		unsigned int digit;
+
+		byte = (unsigned char)bytes[i];
+		if (!in_class(byte, LEX_DIGIT))
+			return (RELIC_INTEGER_MALFORMED);
+		digit = (unsigned int)(byte - '0');
+
+		if (out_of_range || magnitude > (bound - digit) / 10u) {
+			out_of_range = true;
+			continue;
+		}
+		magnitude = magnitude * 10u + digit;
+	}
+
+	if (out_of_range)
+		return (RELIC_INTEGER_OUT_OF_RANGE);
+
+	/*
+	 * The magnitude of INT64_MIN has no positive int64_t counterpart, so
+	 * it is the one value not formed by negating a positive one.
+	 */
+	if (negative && magnitude == (uint64_t)INT64_MAX + 1u)
+		*valuep = INT64_MIN;
+	else if (negative)
+		*valuep = -(int64_t)magnitude;
+	else
+		*valuep = (int64_t)magnitude;
+
+	return (RELIC_INTEGER_VALID);
+}
+
+/*
+ * Scan a decimal integer literal into int64_t.  The literal's extent is
+ * found first -- an optional `-` and the digits after it -- and the range is
+ * then converted by the rule relic_lex_integer() states, which an import
+ * holds a table's integer fields to as well.  Within that extent the only
+ * way to fail the rule is to leave the range.
  */
 static int
 scan_integer(relic_lexer_t *lexer, relic_token_t *token)
 {
-	const char *digits;
-	long long value;
-	bool out_of_range;
+	enum relic_integer_verdict verdict;
+	const char *literal;
+	size_t start;
+	int64_t value;
 
-	digits = lexer->text + lexer->offset;
+	start = lexer->offset;
+	literal = lexer->text + start;
 
 	if (peek(lexer, 0) == '-')
 		advance_byte(lexer);
 	while (in_class(peek(lexer, 0), LEX_DIGIT))
 		advance_byte(lexer);
 
-	errno = 0;
-	value = strtoll(digits, NULL, 10);
-	out_of_range = (errno == ERANGE);
-
-	/*
-	 * long long is at least as wide as int64_t and may be wider, so a
-	 * value the conversion accepted may still not fit the language's
-	 * integer.  The second test is compiled only where the two widths
-	 * can differ: where they cannot it is a constant comparison, which
-	 * every compiler with warnings enabled says so about.
-	 */
-#if LLONG_MIN < INT64_MIN || LLONG_MAX > INT64_MAX
-	if (value < INT64_MIN || value > INT64_MAX)
-		out_of_range = true;
-#endif
-
-	if (out_of_range) {
+	verdict = relic_lex_integer(literal, lexer->offset - start, &value);
+	assert(verdict != RELIC_INTEGER_MALFORMED);
+	if (verdict != RELIC_INTEGER_VALID) {
 		fail_token(token, RELIC_LEX_INTEGER_RANGE);
 		return (0);
 	}
@@ -377,7 +440,7 @@ scan_integer(relic_lexer_t *lexer, relic_token_t *token)
 	}
 
 	token->kind = RELIC_TOKEN_INTEGER;
-	token->integer = (int64_t)value;
+	token->integer = value;
 
 	return (0);
 }

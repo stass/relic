@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd September 23, 2026
+.Dd September 26, 2026
 .Dt RELIC 1
 .Os
 .Sh NAME
@@ -12,6 +12,7 @@
 .Nm
 .Op Fl aceinsv
 .Op Fl F Ar format
+.Op Fl I Ar import
 .Op Fl l Ar limit Ns = Ns Ar value
 .Op Fl o Ar file
 .Op Fl q Ar query
@@ -29,6 +30,10 @@ in the order given, all of them forming one program, or from the standard
 input when no
 .Ar file
 is given and the standard input is not a terminal.
+Facts may also be imported from CSV and TSV tables with
+.Fl I ,
+as described in
+.Sx IMPORTS .
 .Pp
 A program is a sequence of facts, rules and queries.
 A fact is an atom ending in a period; a rule is an atom, the
@@ -86,6 +91,9 @@ reach.
 The answers are the same.
 .It Fl c
 Check the program and its queries, and evaluate nothing.
+Every table named with
+.Fl I
+is read and checked too.
 .It Fl e
 Write the plan of everything evaluated to the standard error: each part of
 the program as it is planned, and each query's plan before its rows.
@@ -110,6 +118,12 @@ or
 .Cm json .
 The formats are described in
 .Sx OUTPUT .
+.It Fl I Ar import
+Add a fact for each record of a table, after the program is loaded.
+The option may be repeated, and the tables are read in the order given.
+.Ar import
+is described in
+.Sx IMPORTS .
 .It Fl i
 Once the queries have run, read queries from the standard input and answer
 each in turn, as described in
@@ -196,6 +210,95 @@ An invocation checks everything before it evaluates anything: every file is
 loaded and every query prepared, and all the mistakes found are reported,
 before the first query runs.
 The queries then run in turn, and the first that fails ends the run.
+.Sh IMPORTS
+An
+.Ar import
+is written
+.Bd -literal -offset indent
+format[,header]:predicate:column[,column...]=path
+.Ed
+.Pp
+and adds a fact of
+.Ar predicate
+for each record of the table at
+.Ar path ,
+or of the standard input when
+.Ar path
+is
+.Ql - .
+The path is everything after the first
+.Ql = .
+The predicate's arity is the number of columns not skipped, at most 32.
+A table's facts are added all together or not at all: any mistake in it,
+reported with its line and column, adds none of them.
+.Pp
+The
+.Ar format
+is
+.Cm csv
+or
+.Cm tsv ,
+each read as the output format of the same name writes it, so that the
+results of one query written with
+.Fl F
+read back as the facts they came from.
+In both, a record ends at a line feed, or at a carriage return followed by a
+line feed; the last needs no line end; an empty line is a record of one empty
+field; and every record has one field per column.
+Bytes are data: no encoding is assumed and no space is trimmed.
+.Bl -tag -width Ds
+.It Cm csv
+Fields are separated by commas.
+A field that begins with a double quote ends at the next quote not doubled;
+inside it a doubled quote is one quote, and commas and line ends are data.
+A quote inside an unquoted field is an error.
+.It Cm tsv
+Fields are separated by tabs.
+A backslash begins one of the escapes
+.Ql \e\e ,
+.Ql \et ,
+.Ql \en
+and
+.Ql \er ;
+any other escape is an error.
+.El
+.Pp
+Outside a quoted field, a carriage return that does not end a line is an
+error.
+With
+.Cm header ,
+the first record is a header of one field per column, and is not imported.
+.Pp
+Each
+.Ar column
+gives the type of its field, which is never guessed:
+.Bl -tag -width integer
+.It Cm symbol
+a symbol, written as in a program;
+.It Cm string
+a string of the field's bytes, whatever they are;
+.It Cm integer
+a decimal integer, optionally negative, that fits in 64 bits;
+.It Cm _
+no value: the field is read and left out of the fact.
+.El
+.Pp
+The symbol
+.Ql ann
+and the string
+.Ql \(dqann\(dq
+are different values, so a column declared with the wrong one of the two
+joins with nothing.
+.Pp
+The standard input has one reader: the program, with no
+.Ar file ,
+the session under
+.Fl i ,
+or one import of
+.Ql - .
+When an import or the session reads it, the program is the
+.Ar file
+operands, and with none it is empty.
 .Sh RESOURCE LIMITS
 Each
 .Fl l
@@ -370,6 +473,16 @@ Bound the work a query may do:
 .Pp
 .Dl $ relic -l tuples=5000000 -l memory=2147483648 -q 'path(X, Y)?' graph.dl
 .Pp
+Answer a program's queries over a table of edges, and over a CSV file with a
+header whose second column is not needed:
+.Pp
+.Dl $ relic -I tsv:edge:symbol,symbol=edge.tsv graph.dl
+.Dl $ relic -I csv,header:person:symbol,_,integer=people.csv rules.dl
+.Pp
+Query a table read from the standard input, with no program file:
+.Pp
+.Dl $ relic -I tsv:edge:symbol,symbol=- -q 'edge(a, X)?' < edge.tsv
+.Pp
 Explore a program interactively:
 .Bd -literal -offset indent
 $ relic -i graph.dl
@@ -379,8 +492,8 @@ c
 relic> .quit
 .Ed
 .Sh DIAGNOSTICS
-A diagnostic about the program names the file, line and column it concerns,
-as
+A diagnostic about the program or a table names the file, line and column it
+concerns, as
 .Ql graph.dl:4:22: error: message .
 Any byte that is not printable ASCII in a diagnostic is escaped.
 .Sh SEE ALSO

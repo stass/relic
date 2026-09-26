@@ -1,0 +1,13 @@
+% A tsv table's fields become a fact's values under their declared types.
+% A string field holds whatever bytes it decodes to, the four escapes
+% included, and an integer spans the whole of int64_t with leading zeros
+% and a negative zero accepted.  The table's facts join the program's own:
+% an imported symbol is the same value as the one a rule names, while the
+% string "plain" is not the symbol plain.
+row(z, "from the program", 1).
+letter(a).
+letter(c).
+letter(plain).
+row(X, S, N)?
+row(X, _, _), letter(X)?
+row(_, S, _), letter(S)?

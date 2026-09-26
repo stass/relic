@@ -1,0 +1,2 @@
+% A column type is one of four words, and a misspelt one is a usage error.
+edge(a, b).

@@ -574,6 +574,47 @@ the form, telling a limit's refusal from a failure by the prefix `limit
 exceeded:`, so a limit worded otherwise would read as a finding there; an
 error class a caller can ask for would free both from the text.
 
+**No fuzzer reads the lexer's input to its exact end.** [Low, component:
+`tests/fuzz/`, `lib/lex.c`] The lexer reads nothing past its byte range,
+and the unit tests hand it every token class in an allocation of exactly
+its length, so AddressSanitizer catches a scanner that reads one byte too
+far. The fuzz targets reach it through `relic_load_file()`, whose buffer has
+spare capacity past the text, and through `relic_load_string()`, whose text
+is terminated, so a fuzzer cannot see such a read. A target that hands
+libFuzzer's exact-size data to the lexer would.
+
+**A carriage return after a closing quote is "inside a field".** [Low,
+component: `lib/import.c`] In csv, `"a"` followed by a carriage return that
+no line feed follows is reported as `carriage return inside a field`, the
+message of section 7 of `specs/design-import.md` for a stray carriage
+return, though the field has closed. The alternative is the message for a
+byte after a closing quote, `found 0x0d`. Either is defensible; decide
+whether the table in section 7 should say which.
+
+**A load or import can fail after its facts are committed.** [Low,
+component: `lib/import.c`, `lib/parse.c`] `relic_import_path()` and
+`relic_load_path()` commit what they read and then close the file, and a
+close that fails turns the call into a failure with its facts already
+added, against the promise that a failed call adds nothing. A read-only
+close fails only on a network or user-space file system. Close before
+committing, or do not count a close failure after the whole stream was
+read.
+
+**The tool repeats the library's import rules.** [Low, component:
+`cmd/relic/import.c`] `-I` checks the predicate name and the 32-column arity
+bound itself, so that a malformed operand is a usage error, status 2, rather
+than a failed load, status 1. The rules match the library's today; if the
+library widens either, the tool refuses imports it would accept. Export the
+arity bound and a name check in `<relic.h>`, or give a refusal a class the
+tool can map to status 2.
+
+**The terminal refusals have no test.** [Low, component:
+`cmd/relic/main.c`, `tests/cli.sh`] A program or an import of `-` read from
+a terminal is a usage error, but no test runs the tool on a pseudo-terminal,
+so neither branch of `refuse_terminal_input()` is exercised. `script(1)`
+takes different arguments on BSD and Linux; a small pty helper under
+`tests/` would serve both.
+
 ## Benchmarks
 
 **No run is recorded on an idle machine.** [Medium, component: `bench/`]
@@ -731,6 +772,21 @@ operating system and processor; every run so far is one macOS Xeon.
 
 ## Security residuals
 
+**Files a load or import opens are inherited by child processes.** [Low,
+component: `lib/parse.c`, `lib/import.c`] `relic_load_path()` and
+`relic_import_path()` open with `fopen(path, "r")`, without close-on-exec, so
+a multithreaded embedder that forks and executes while one is open passes
+the descriptor on. `"re"` asks for close-on-exec on FreeBSD, glibc and
+current macOS; confirm every supported platform accepts it, or open with
+`open(2)` and `O_CLOEXEC` and `fdopen(3)`, before changing both.
+
+**One field of an imported table can grow without bound.** [Low,
+component: `lib/import.c`] The reader holds a field whole before typing it,
+and its buffer is not charged to `max_memory`, so a hostile table with one
+unterminated csv quote makes the reader hold the rest of the input, however
+long. `<relic.h>` says the field is not counted. Charge the buffer to the
+limit, or bound a field's length by a limit of its own.
+
 **A long-lived context gives a timing oracle on its hash seed.** [Low,
 component: `lib/util.c`] The seed defeats crafted collisions because an
 author cannot learn it, and a batch run gives nothing to learn from. A REPL
@@ -822,8 +878,6 @@ formats exist for; recorded so that the choice stays deliberate.
 Candidate features, in the priority order of `specs/architecture.md` section
 69. None may change the language semantics of v1.
 
-* CSV and TSV fact import, designed in `specs/design-import.md`, whose
-  section 12 gives the order of work
 * arithmetic expressions
 * incremental insertion maintenance
 * DRed-style deletion maintenance

@@ -1,0 +1,4 @@
+relic: error: invalid import: more than 32 columns kept in tsv:wide:symbol,symbol,symbol,symbol,symbol,symbol,symbol,symbol...
+usage: relic [-aceinsv] [-F format] [-I import] [-l limit=value] [-o file]
+             [-q query] [-X debug] [file ...]
+       relic -V

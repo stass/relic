@@ -300,6 +300,15 @@ refused_object(reentry_t *reentry, const void *object, const char *call)
 static void
 reenter_every_way(reentry_t *reentry)
 {
+	static const enum relic_column inner_columns[] = {
+		RELIC_COLUMN_SYMBOL
+	};
+	static const relic_import_t inner_import = {
+		.predicate = "c",
+		.columns = inner_columns,
+		.column_count = 1,
+		.format = RELIC_FORMAT_TSV,
+	};
 	relic_stats_t stats;
 	relic_value_t symbol;
 	size_t inner_rows;
@@ -320,6 +329,16 @@ reenter_every_way(reentry_t *reentry)
 	}
 	refused(reentry, relic_load_path(reentry->ctx, "/dev/null"),
 	    "relic_load_path()");
+	stream = tmpfile();
+	if (stream != NULL) {
+		fputs("x\n", stream);
+		rewind(stream);
+		refused(reentry, relic_import_file(reentry->ctx, "inner.tsv",
+		    stream, &inner_import), "relic_import_file()");
+		fclose(stream);
+	}
+	refused(reentry, relic_import_path(reentry->ctx, "/dev/null",
+	    &inner_import), "relic_import_path()");
 	refused(reentry, relic_check(reentry->ctx), "relic_check()");
 	refused(reentry, relic_materialize(reentry->ctx),
 	    "relic_materialize()");

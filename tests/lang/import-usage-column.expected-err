@@ -1,0 +1,4 @@
+relic: error: invalid import: unknown column type 'symbl' in tsv:edge:symbl,symbol=edge.tsv
+usage: relic [-aceinsv] [-F format] [-I import] [-l limit=value] [-o file]
+             [-q query] [-X debug] [file ...]
+       relic -V

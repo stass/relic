@@ -1,0 +1,1 @@
+-I tsv:edge:symbol,symbol=import-order.first.tsv -I tsv:edge:symbol,symbol=import-order.good.tsv -I csv:edge:symbol,symbol=import-order.second.csv

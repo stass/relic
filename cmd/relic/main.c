@@ -26,13 +26,14 @@
  * The relic tool: load a program, check it, and answer its queries.
  *
  * An invocation runs in phases, and each runs only if the one before it
- * succeeded: parse the command line, load every operand, check the program,
- * prepare every query that will run, and only then evaluate.  Every mistake
- * in the input is therefore reported before anything is evaluated, and a run
- * that evaluates does so over a program and queries that are all known to be
- * valid.  With -c the run stops after preparing; with -a the whole program is
- * materialized before the first query; with -i an interactive session
- * follows the last one, answering into the same output.
+ * succeeded: parse the command line, load every operand and then every -I
+ * import, check the program, prepare every query that will run, and only then
+ * evaluate.  Every mistake in the input is therefore reported before anything
+ * is evaluated, and a run that evaluates does so over a program and queries
+ * that are all known to be valid.  With -c the run stops after preparing;
+ * with -a the whole program is materialized before the first query; with -i
+ * an interactive session follows the last one, answering into the same
+ * output.
  *
  * The queries that run are the -q ones when there are any, and otherwise the
  * ones the program contains.  The program's own queries are still checked
@@ -84,18 +85,38 @@ struct limit_key {
 typedef struct options options_t;
 
 /*
+ * Who reads standard input.  It has one reader at most: the program when no
+ * file is named, the interactive session, or one import of `-`.
+ */
+enum stdin_reader {
+	STDIN_UNREAD,
+	STDIN_PROGRAM,
+	STDIN_SESSION,
+	STDIN_IMPORT
+};
+
+/*
  * What the command line asked for.  `queries` holds the -q arguments in the
- * order given; they point into argv and are not copied.  `config` is what the
- * context is created with: -l sets its limits, -X naive, no-index,
- * no-reorder and no-magic its flags, and a second -v the flag that asks for
- * notes about mixed-type comparisons.  `verbosity` counts the -v options.
+ * order given; they point into argv and are not copied.  `imports` holds the
+ * -I operands, parsed, in the order given.  `config` is what the context is
+ * created with: -l sets its limits, -X naive, no-index, no-reorder and
+ * no-magic its flags, and a second -v the flag that asks for notes about
+ * mixed-type comparisons.  `verbosity` counts the -v options.
+ *
+ * `stdin_reader` is who reads standard input, which parse_options() decides
+ * once every option and operand is known, and `stdin_import` the import that
+ * does when one does.
  */
 struct options {
 	const char		**queries;
+	import_operand_t	 *imports;
+	const import_operand_t	 *stdin_import;
 	const char		 *output_path;
 	size_t			  query_count;
+	size_t			  import_count;
 	relic_config_t		  config;
 	enum output_format	  format;
+	enum stdin_reader	  stdin_reader;
 	unsigned int		  verbosity;
 	bool			  check_only;
 	bool			  discard_rows;
@@ -108,6 +129,8 @@ struct options {
 	bool			  version_alone;
 };
 
+static int		 claim_stdin(const char *program_name,
+			    options_t *options, int file_count);
 static void		*diag_context(const char *program_name);
 static int		 evaluate(invocation_t *invocation,
 			    const options_t *options);
@@ -119,12 +142,13 @@ static int		 invocation_open(invocation_t *invocation,
 static const char	*invoked_name(const char *argv0);
 static bool		 is_decimal_digit(char byte);
 static bool		 is_printable_ascii(const char *text);
-static int		 load_operands(relic_t *ctx, const options_t *options,
-			    int argc, char *argv[]);
 static size_t		*limit_named(relic_config_t *config, const char *key,
 			    size_t key_length);
+static int		 load_operands(relic_t *ctx, const options_t *options,
+			    int argc, char *argv[]);
 static int		 open_output(const char *program_name,
 			    const options_t *options, output_t *output);
+static void		 options_free(options_t *options);
 static int		 parse_debug(const char *name, options_t *options);
 static int		 parse_limit(const char *program_name,
 			    const char *argument, relic_config_t *config);
@@ -132,6 +156,11 @@ static int		 parse_options(const char *program_name, int argc,
 			    char *argv[], options_t *options);
 static int		 prepare_queries(invocation_t *invocation,
 			    const options_t *options);
+static bool		 refuse_terminal_input(const char *program_name,
+			    const options_t *options);
+static void		 report_two_readers(const char *program_name,
+			    const options_t *options,
+			    const import_operand_t *second);
 static void		 report_unknown_option(const char *program_name,
 			    int option);
 static int		 run(const char *program_name,
@@ -235,9 +264,9 @@ report_unknown_option(const char *program_name, int option)
 static void
 usage(const char *program_name)
 {
-	fprintf(stderr, "usage: %s [-aceinsv] [-F format] [-l limit=value] "
-	    "[-o file] [-q query]\n"
-	    "       %*s [-X debug] [file ...]\n", program_name,
+	fprintf(stderr, "usage: %s [-aceinsv] [-F format] [-I import] "
+	    "[-l limit=value] [-o file]\n"
+	    "       %*s [-q query] [-X debug] [file ...]\n", program_name,
 	    (int)strlen(program_name), "");
 	fprintf(stderr, "       %s -V\n", program_name);
 }
@@ -264,11 +293,26 @@ report_error(const char *program_name, const char *format, ...)
 	char message[REPORT_TEXT_MAX];
 
 	va_start(arguments, format);
-	vsnprintf(message, sizeof(message), format, arguments);
+	if (vsnprintf(message, sizeof(message), format, arguments) < 0)
+		message[0] = '\0';
 	va_end(arguments);
 
 	relic_diag_stderr(diag_context(program_name), RELIC_ERROR, NULL,
 	    message);
+}
+
+const char *
+cmd_quote(const char *bytes, size_t length, cmd_quoted_t *quoted)
+{
+	size_t kept;
+
+	kept = length < CMD_QUOTED_MAX ? length : CMD_QUOTED_MAX;
+	bcopy(bytes, quoted->text, kept);
+	quoted->text[kept] = '\0';
+	if (kept < length)
+		strlcat(quoted->text, "...", sizeof(quoted->text));
+
+	return (quoted->text);
 }
 
 /*
@@ -293,25 +337,45 @@ report_rows(const invocation_t *invocation, size_t number, size_t rows)
 }
 
 /*
- * Load every operand, or standard input when there are none and standard
- * input is not the interactive session's.
+ * Load the program -- every operand, or standard input when there are none
+ * and nothing else reads it -- and then every import in the order given.
+ * Standard input goes to its one reader, as claim_stdin() decided, and to
+ * no other.
  *
- * Every file is attempted even after one of them fails, so that a run
- * reports the mistakes in all of the input rather than in whichever file
+ * The program comes first so that its diagnostics precede the data's.  Every
+ * file and every import is attempted even after one of them fails, so that a
+ * run reports the mistakes in all of the input rather than in whichever
  * happened to be named first.
  */
 static int
 load_operands(relic_t *ctx, const options_t *options, int argc, char *argv[])
 {
+	const import_operand_t *import;
+	size_t j;
+	int loaded;
 	int status;
 	int i;
 
-	if (argc == 0 && !options->interactive)
-		return (relic_load_file(ctx, "<stdin>", stdin));
-
 	status = 0;
+	if (options->stdin_reader == STDIN_PROGRAM) {
+		if (relic_load_file(ctx, "<stdin>", stdin) != 0)
+			status = -1;
+	}
+
 	for (i = 0; i < argc; i++) {
 		if (relic_load_path(ctx, argv[i]) != 0)
+			status = -1;
+	}
+
+	for (j = 0; j < options->import_count; j++) {
+		import = &options->imports[j];
+		if (import == options->stdin_import)
+			loaded = relic_import_file(ctx, "<stdin>", stdin,
+			    &import->import);
+		else
+			loaded = relic_import_path(ctx, import->path,
+			    &import->import);
+		if (loaded != 0)
 			status = -1;
 	}
 
@@ -575,6 +639,37 @@ invocation_close(invocation_t *invocation)
 	relic_destroy(invocation->ctx);
 }
 
+/*
+ * Standard input is a terminal: refuse the run when the program or a table
+ * would be read from it, as the usage error it is, and return whether it was
+ * refused.  The tool would otherwise wait for input with no prompt and
+ * nothing said.  Interactive use is an option of its own, and a terminal is
+ * the session's to read.
+ */
+static bool
+refuse_terminal_input(const char *program_name, const options_t *options)
+{
+	cmd_quoted_t operand;
+
+	switch (options->stdin_reader) {
+	case STDIN_PROGRAM:
+		usage(program_name);
+		return (true);
+	case STDIN_IMPORT:
+		report_error(program_name, "standard input is a terminal, and "
+		    "-I %s would read a table from it",
+		    cmd_quote(options->stdin_import->operand,
+		    strlen(options->stdin_import->operand), &operand));
+		usage(program_name);
+		return (true);
+	case STDIN_SESSION:
+	case STDIN_UNREAD:
+		break;
+	}
+
+	return (false);
+}
+
 static int
 run(const char *program_name, const options_t *options, int argc,
     char *argv[])
@@ -582,15 +677,9 @@ run(const char *program_name, const options_t *options, int argc,
 	invocation_t invocation;
 	int status;
 
-	/*
-	 * Reading a program from a terminal would leave the tool waiting for
-	 * input with no prompt and nothing said.  Interactive use is an option
-	 * of its own, and under it standard input is the session's.
-	 */
-	if (argc == 0 && !options->interactive && isatty(STDIN_FILENO) == 1) {
-		usage(program_name);
+	if (isatty(STDIN_FILENO) == 1 &&
+	    refuse_terminal_input(program_name, options))
 		return (RELIC_EXIT_USAGE);
-	}
 
 	if (invocation_open(&invocation, program_name, options) != 0)
 		return (RELIC_EXIT_ERROR);
@@ -723,11 +812,75 @@ parse_limit(const char *program_name, const char *argument,
 }
 
 /*
- * Parse the options into *options.  Returns RELIC_EXIT_OK, or the status to
- * exit with having reported why the command line is malformed.
+ * Decide who reads standard input: the session under -i, an import of `-`,
+ * or, when neither does, the program when no file is named.  Returns
+ * RELIC_EXIT_OK, or RELIC_EXIT_USAGE having reported that two claim it,
+ * since each would take what the other expects.
  *
- * `queries` must have room for every argument, which is the most -q options
- * a command line can hold.
+ * The claim is on the spelling `-`: a path such as /dev/stdin is a file like
+ * any other.
+ */
+static int
+claim_stdin(const char *program_name, options_t *options, int file_count)
+{
+	size_t i;
+
+	options->stdin_reader = STDIN_UNREAD;
+	if (options->interactive)
+		options->stdin_reader = STDIN_SESSION;
+
+	for (i = 0; i < options->import_count; i++) {
+		const import_operand_t *import;
+
+		import = &options->imports[i];
+		if (!import_operand_reads_stdin(import))
+			continue;
+
+		if (options->stdin_reader != STDIN_UNREAD) {
+			report_two_readers(program_name, options, import);
+			return (RELIC_EXIT_USAGE);
+		}
+		options->stdin_reader = STDIN_IMPORT;
+		options->stdin_import = import;
+	}
+
+	if (options->stdin_reader == STDIN_UNREAD && file_count == 0)
+		options->stdin_reader = STDIN_PROGRAM;
+
+	return (RELIC_EXIT_OK);
+}
+
+/*
+ * Report that an import of `-` claims standard input after the session or
+ * an earlier import already has, as a usage error naming both.
+ */
+static void
+report_two_readers(const char *program_name, const options_t *options,
+    const import_operand_t *second)
+{
+	cmd_quoted_t first_operand;
+	cmd_quoted_t second_operand;
+
+	cmd_quote(second->operand, strlen(second->operand), &second_operand);
+	if (options->stdin_reader == STDIN_SESSION) {
+		report_error(program_name, "standard input has two readers: "
+		    "-i and -I %s", second_operand.text);
+	} else {
+		cmd_quote(options->stdin_import->operand,
+		    strlen(options->stdin_import->operand), &first_operand);
+		report_error(program_name, "standard input has two readers: "
+		    "-I %s and -I %s", first_operand.text, second_operand.text);
+	}
+	usage(program_name);
+}
+
+/*
+ * Parse the options into *options, and decide who reads standard input
+ * once every option and operand is known.  Returns RELIC_EXIT_OK, or the
+ * status to exit with having reported why the command line is malformed.
+ *
+ * `queries` and `imports` must each have room for every argument, which is
+ * the most -q or -I options a command line can hold.
  */
 static int
 parse_options(const char *program_name, int argc, char *argv[],
@@ -745,7 +898,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":aceF:il:no:q:svVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":aceF:I:il:no:q:svVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -766,6 +919,19 @@ parse_options(const char *program_name, int argc, char *argv[],
 				    "unknown output format: %s", optarg);
 				usage(program_name);
 				return (RELIC_EXIT_USAGE);
+			}
+			break;
+		case 'I':
+			switch (import_operand_parse(program_name, optarg,
+			    &options->imports[options->import_count])) {
+			case IMPORT_PARSED:
+				options->import_count++;
+				break;
+			case IMPORT_MALFORMED:
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			case IMPORT_NO_MEMORY:
+				return (RELIC_EXIT_ERROR);
 			}
 			break;
 		case 'i':
@@ -840,7 +1006,22 @@ parse_options(const char *program_name, int argc, char *argv[],
 	if (options->verbosity >= 2)
 		options->config.flags |= RELIC_F_NOTE_MIXED;
 
-	return (RELIC_EXIT_OK);
+	/* -V reads nothing, and main() refuses it with anything else. */
+	if (options->print_version)
+		return (RELIC_EXIT_OK);
+
+	return (claim_stdin(program_name, options, argc - optind));
+}
+
+static void
+options_free(options_t *options)
+{
+	size_t i;
+
+	for (i = 0; i < options->import_count; i++)
+		import_operand_free(&options->imports[i]);
+	free(options->imports);
+	free(options->queries);
 }
 
 int
@@ -858,21 +1039,24 @@ main(int argc, char *argv[])
 
 	options.queries = calloc(argc > 0 ? (size_t)argc : 1,
 	    sizeof(*options.queries));
-	if (options.queries == NULL) {
+	options.imports = calloc(argc > 0 ? (size_t)argc : 1,
+	    sizeof(*options.imports));
+	if (options.queries == NULL || options.imports == NULL) {
 		report_error(program_name, "out of memory");
+		options_free(&options);
 		return (RELIC_EXIT_ERROR);
 	}
 
 	status = parse_options(program_name, argc, argv, &options);
 	if (status != RELIC_EXIT_OK) {
-		free(options.queries);
+		options_free(&options);
 		return (status);
 	}
 	argc -= optind;
 	argv += optind;
 
 	if (options.print_version) {
-		free(options.queries);
+		options_free(&options);
 
 		if (!options.version_alone || argc != 0) {
 			usage(program_name);
@@ -892,7 +1076,7 @@ main(int argc, char *argv[])
 	}
 
 	status = run(program_name, &options, argc, argv);
-	free(options.queries);
+	options_free(&options);
 
 	return (status);
 }
