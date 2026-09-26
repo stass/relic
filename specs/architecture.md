@@ -2514,6 +2514,10 @@ additional Magic/negation optimization
 
 None should require changing basic language semantics.
 
+CSV and TSV fact import -- how an import names its table's format, header,
+predicate and column types, how each format is read, and how the facts
+reach the base stores -- is specified in `specs/design-import.md`.
+
 ---
 
 # 70. Explicitly Deferred Incremental Evaluation

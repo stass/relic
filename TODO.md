@@ -197,6 +197,17 @@ and would still not help the one caller who cannot check, which is a program
 reading an untrusted pipe. Revisit if an embedder finds that caller; the
 answer there is a separate key, not a wider meaning for this one.
 
+**The reason given for reading a load whole is out of date.** [Low,
+component: `lib/parse.c`, `specs/design-parser.md`] `read_stream()`'s
+comment, `specs/design-parser.md` section 8 and the item above say a stream
+is read whole because the syntax tree a load produces is as large as its
+input. A load's facts are staged rather than built into the tree
+(`specs/design-facts.md`), so for a file of facts the tree is nearly empty
+and the text, 24 bytes per fact by the facts-loading item under
+Benchmarks, is held only for the lexer, which scans one contiguous range.
+State the reason that holds, and decide whether the parse should release
+the text before the commit.
+
 **An interactive session accepts only queries.** [Low, component:
 `cmd/relic/repl.c`, `include/relic.h`] A session cannot add a fact or a rule,
 because a load that fails its check leaves the program rejected for good, and
@@ -764,6 +775,27 @@ memory by construction; not recording, and not cutting before, a call whose
 adornment and bound arguments are the head's own closes the hidden
 tautology as well.
 
+**A load or import refused by a limit stages and interns its whole input
+first.** [Medium, component: `lib/facts.c`, `specs/design-facts.md`,
+`specs/design-import.md`] The commit measures staged tuples against the
+base stores only once the input has been read, and checks the tuple and
+memory limits only then (`bases_fit()`). So a table or fact file of a
+billion distinct rows under `-l tuples=1000000` is staged and interned in
+full before it is refused, and nothing it interned is released. For an
+embedder feeding one long-lived context untrusted tables, each refused
+import permanently spends value identifiers. Nothing can change a base
+store while the context is busy, so staging could mark each tuple new or
+not as it stages it -- the commit's measure step, moved earlier -- and
+refuse as soon as the base stores' tuples plus the new ones exceed
+`max_tuples` (`relic_base_total()` gives the first term), or their
+projected bytes exceed `max_memory`. That bounds staging and interning by
+the limits, by construction. A load would still read its text whole before
+staging any of it; an import reads a record at a time and would stop
+reading too. Still to settle is the message of a refusal part way through a
+load naming several predicates: it names the first predicate in load order
+that would grow, which a refusal before the end of the load cannot yet
+know.
+
 **No limit bounds the work of a join.** [Low, component: `lib/eval.c`,
 `include/relic.h`] The limits count tuples held and bytes allocated, and a
 join over small relations whose every result is a duplicate -- a cross
@@ -790,7 +822,8 @@ formats exist for; recorded so that the choice stays deliberate.
 Candidate features, in the priority order of `specs/architecture.md` section
 69. None may change the language semantics of v1.
 
-* CSV and TSV fact import
+* CSV and TSV fact import, designed in `specs/design-import.md`, whose
+  section 12 gives the order of work
 * arithmetic expressions
 * incremental insertion maintenance
 * DRed-style deletion maintenance
