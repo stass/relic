@@ -214,6 +214,8 @@ static uint32_t	 all_columns(uint16_t arity);
 static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
 static bool	 atom_is_bound(const relic_atom_t *atom, uint16_t arity,
 		    uint64_t bound);
+static bool	 atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp,
+		    uint64_t *readsp);
 static uint32_t	 bound_columns(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
 static uint16_t	 column_count(uint32_t columns);
@@ -1598,4 +1600,101 @@ relic_plan_order(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	planner_release(&planner);
 
 	return (planning_status(ctx, arena, status));
+}
+
+/*
+ * The slots the columns of an operation over a relation bind, and the ones
+ * they read bound, into *bindsp and *readsp.  Returns false when a column
+ * matches with `_`, which binds nothing, so that two tuples differing only
+ * there both pass.  The switch names every action, so that one added later
+ * must be classified here rather than be ignored.
+ */
+static bool
+atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
+{
+	const relic_plan_term_t *term;
+	uint16_t column;
+	bool matches_all;
+
+	*bindsp = 0;
+	*readsp = 0;
+	matches_all = true;
+
+	for (column = 0; column < atom->relation->arity; column++) {
+		term = &atom->terms[column];
+
+		switch (term->action) {
+		case RELIC_PLAN_CONSTANT:
+			break;
+		case RELIC_PLAN_BOUND:
+			*readsp |= slot_bit(term->u.slot);
+			break;
+		case RELIC_PLAN_BIND:
+			*bindsp |= slot_bit(term->u.slot);
+			break;
+		case RELIC_PLAN_ANY:
+			matches_all = false;
+			break;
+		}
+	}
+
+	return (matches_all);
+}
+
+/*
+ * A plan derives each head tuple once when no generator has a wildcard and
+ * its EMIT reads every slot a generator binds.
+ *
+ * Three facts about what a plan reads make that so, over relations that do
+ * not change while it runs: a relation holds no tuple twice, a view lists
+ * each tuple in its range once, and a test lets a binding through at most
+ * once.  Two tuples a generator reads under one binding of the slots before
+ * it both match its constants and its bound slots, so, holding no wildcard,
+ * they differ in a column it binds and bind different values there.  That
+ * holds when a slot repeats in the atom, as X does in e(X, X): the first
+ * occurrence binds X and the second is a bound slot matched against it, so
+ * two tuples differing at the second differ at the first as well.  Each
+ * path through the generators therefore reaches the EMIT with a binding no
+ * other path has, and an EMIT that reads every bound slot derives a tuple
+ * no other path derives.  A wildcard, or a slot the EMIT does not read,
+ * would let two bindings that differ only there derive one tuple twice.
+ *
+ * The switch names every kind of operation, and atom_slots() every action a
+ * column may have, so that a kind or an action added later must be decided
+ * rather than be assumed to keep the property.
+ */
+bool
+relic_plan_derives_distinct(const relic_plan_t *plan)
+{
+	const relic_op_t *op;
+	uint64_t emitted;
+	uint64_t generated;
+	uint64_t binds;
+	uint64_t reads;
+	size_t i;
+
+	generated = 0;
+	emitted = 0;
+	for (i = 0; i < plan->op_count; i++) {
+		op = &plan->ops[i];
+
+		switch (op->kind) {
+		case RELIC_OP_SCAN:
+		case RELIC_OP_LOOKUP:
+			if (!atom_slots(&op->u.atom, &binds, &reads))
+				return (false);
+			generated |= binds;
+			break;
+		case RELIC_OP_MEMBER:
+		case RELIC_OP_ANTI_MEMBER:
+		case RELIC_OP_FILTER:
+			break;
+		case RELIC_OP_EMIT:
+			(void)atom_slots(&op->u.atom, &binds, &reads);
+			emitted |= reads;
+			break;
+		}
+	}
+
+	return ((generated & ~emitted) == 0);
 }

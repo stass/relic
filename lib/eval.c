@@ -25,9 +25,10 @@
  * Descending means the operation at the current level produced a binding and
  * the next one should start afresh against it.  Backtracking means an
  * operation has nothing more, so the one before it is asked for its next
- * binding.  EMIT adds the head tuple to the plan's batch of insertions and
- * then reports that there is nothing below it, so the level never passes the
- * end of the plan and the loop needs no case for having got there.
+ * binding.  EMIT adds the head tuple to the plan's batch, which is inserted
+ * into its relation or delivered to a caller as rows, and then reports that
+ * there is nothing below it, so the level never passes the end of the plan
+ * and the loop needs no case for having got there.
  *
  * A program is evaluated one strongly connected component of its dependency
  * graph at a time, in the order the program's schedule gives: by stratum, and
@@ -126,24 +127,47 @@ enum relic_fixed_point {
 
 typedef struct relic_component_plans relic_component_plans_t;
 typedef struct relic_delta_work relic_delta_work_t;
+typedef struct relic_emit_target relic_emit_target_t;
 typedef struct relic_evaluation relic_evaluation_t;
 typedef struct relic_member_entry relic_member_entry_t;
 typedef struct relic_pending relic_pending_t;
 typedef struct relic_rule_plans relic_rule_plans_t;
 typedef struct relic_op_state relic_op_state_t;
+typedef struct relic_row_sink relic_row_sink_t;
 typedef struct relic_running_plan relic_running_plan_t;
 typedef struct relic_variant relic_variant_t;
 
 /*
- * The head tuples a running plan has derived and not yet inserted into
- * `relation`, the one relation the plan writes.  `count` of them are packed
- * at its arity in `tuples`, which has room for RELIC_INSERT_BATCH tuples of
- * `arity_room` columns: the widest head of any plan the evaluation builds,
- * sized when it begins.
- * `added` receives, for each tuple, whether its insertion added it.
+ * The caller a query's rows are delivered to: the callback that receives
+ * each, and the context it is called with.
+ */
+struct relic_row_sink {
+	relic_row_cb	 callback;
+	void		*callback_ctx;
+};
+
+/*
+ * Where a running plan's EMIT sends the head tuples it derives.  They have
+ * the arity of `relation`, the relation the EMIT names, and are inserted
+ * into it; or, when `rows` has a callback, each is delivered to it as a row
+ * instead, and the relation is never written.  Only a query's rule is ever
+ * given rows, and only when query_streams() admits its plan.
+ */
+struct relic_emit_target {
+	relic_relation_t	*relation;
+	relic_row_sink_t	 rows;
+};
+
+/*
+ * The head tuples a running plan has derived and not yet sent to `target`,
+ * the one place the plan writes.  `count` of them are packed at the arity
+ * of the target's relation in `tuples`, which has room for
+ * RELIC_INSERT_BATCH tuples of `arity_room` columns: the widest head of any
+ * plan the evaluation builds, sized when it begins.
+ * `added` receives, for each tuple inserted, whether its insertion added it.
  */
 struct relic_pending {
-	relic_relation_t	*relation;
+	relic_emit_target_t	 target;
 	relic_dom_t		*tuples;
 	bool			 added[RELIC_INSERT_BATCH];
 	size_t			 count;
@@ -178,12 +202,15 @@ struct relic_op_state {
  * even through a pointer to a running plan that is otherwise read only.
  *
  * `rule` is what the plan was built from, kept so that the plan can be
- * explained and its head found among the component's members.
+ * explained and its head found among the component's members.  `target` is
+ * where its EMIT sends what it derives: the relation the EMIT names, unless
+ * the plan is a query's that delivers its rows to the caller.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
 	relic_op_state_t	*states;
 	const relic_rule_t	*rule;
+	relic_emit_target_t	 target;
 };
 
 /*
@@ -341,13 +368,16 @@ struct relic_component_plans {
  * point has not been reached.
  *
  * `pending` holds the head tuples the running plan's EMIT has derived and
- * not yet inserted, packed at the arity of the relation it writes.  It is
- * inserted as one batch, which overlaps the cache misses of the duplicate
- * checks, when it holds RELIC_INSERT_BATCH tuples and when the plan ends,
- * before anything reads `derived`.  Deferring the insertions changes no
- * tuple a plan reads, because no view reaches past the end its relation had
- * when the plan started: a delta variant's views end where the round began,
- * and the `all` view where the plan did.
+ * not yet sent to its target, packed at the arity of the relation it names.
+ * It is drained as one batch, which overlaps the cache misses of the
+ * duplicate checks, when it holds RELIC_INSERT_BATCH tuples and when the
+ * plan ends, before anything reads `derived`.  Deferring the insertions
+ * changes no tuple a plan reads, because no view reaches past the end its
+ * relation had when the plan started: a delta variant's views end where the
+ * round began, and the `all` view where the plan did.
+ *
+ * `stopped` is set when the caller a query's plan delivers rows to asks for
+ * no more, which ends the plan as though every binding had been tried.
  */
 struct relic_evaluation {
 	relic_t			*ctx;
@@ -360,6 +390,7 @@ struct relic_evaluation {
 	size_t			 predicate_count;
 	relic_dom_t		 frame[RELIC_MAX_VARIABLES];
 	bool			 derived;
+	bool			 stopped;
 	relic_pending_t		 pending;
 };
 
@@ -371,12 +402,14 @@ static int	 allocate_delta_work(relic_evaluation_t *eval,
 		    relic_delta_work_t *work, size_t variants, size_t members);
 static int	 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 		    const relic_query_t *query);
-static int	 answer_from_program(relic_t *ctx, const relic_query_t *query);
+static int	 answer_from_program(relic_t *ctx, const relic_query_t *query,
+		    const relic_row_sink_t *rows);
 static int	 answer_through_rewrite(relic_t *ctx,
-		    const relic_query_t *query);
+		    const relic_query_t *query, const relic_row_sink_t *rows);
 static bool	 query_answerable(relic_t *ctx, const relic_query_t *query,
 		    relic_row_cb callback);
-static int	 compute_answer(relic_t *ctx, const relic_query_t *query);
+static int	 compute_answer(relic_t *ctx, const relic_query_t *query,
+		    const relic_row_sink_t *rows);
 static int	 build_running_plan(relic_evaluation_t *eval,
 		    const relic_rule_t *rule, relic_relation_t *target,
 		    relic_running_plan_t **runningp);
@@ -431,12 +464,16 @@ static bool	 seed_head_is_constant(const relic_rule_t *rule);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static void	 count_derivation(relic_evaluation_t *eval, bool added);
+static void	 decode_row(const relic_t *ctx, const relic_dom_t *tuple,
+		    uint16_t arity, relic_value_t *row);
+static void	 deliver_pending(relic_evaluation_t *eval);
+static int	 drain_pending(relic_evaluation_t *eval);
 static int	 insert_pending(relic_evaluation_t *eval);
 static relic_relation_t *plan_head(const relic_plan_t *plan);
 static void	 resolve_views(const relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static void	 start_batch(relic_pending_t *pending,
-		    relic_relation_t *relation);
+		    const relic_emit_target_t *target);
 static int	 insert_seed(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
@@ -502,8 +539,9 @@ static int	 plan_variants(relic_evaluation_t *eval,
 static const relic_rule_t *rule_of(const relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
 		    const relic_component_t *component, size_t i);
+static bool	 query_streams(const relic_t *ctx, const relic_plan_t *plan);
 static int	 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
-		    relic_relation_t *answer);
+		    relic_relation_t *answer, const relic_row_sink_t *rows);
 static void	 count_empty_old_views(relic_component_plans_t *plans);
 static void	 empty_every_delta(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
@@ -537,8 +575,14 @@ static bool	 step_member(const relic_evaluation_t *eval,
 static bool	 step_scan(relic_evaluation_t *eval,
 		    const relic_op_atom_t *atom, relic_op_state_t *state,
 		    bool resume);
-static void	 stream_answer(relic_t *ctx, const relic_relation_t *answer,
-		    relic_row_cb callback, void *callback_ctx);
+static bool	 choose_query_target(const relic_t *ctx,
+		    relic_running_plan_t *running,
+		    const relic_row_sink_t *rows);
+static void	 deliver_gathered_answer(relic_t *ctx,
+		    const relic_relation_t *answer,
+		    const relic_row_sink_t *sink);
+static int	 stream_query_plan(relic_evaluation_t *eval,
+		    const relic_running_plan_t *running);
 static relic_dom_t term_value(const relic_evaluation_t *eval,
 		    const relic_plan_term_t *term);
 static bool	 tuple_matches(relic_evaluation_t *eval,
@@ -941,10 +985,10 @@ step_filter(const relic_evaluation_t *eval, const relic_rule_t *rule,
 }
 
 /*
- * An EMIT: append the head tuple to the pending batch, and insert the batch
+ * An EMIT: append the head tuple to the pending batch, and drain the batch
  * once it is full.  Returns -1 when an insertion was refused, which the
  * relation store has reported.  A plan has one EMIT, so every tuple pending
- * is for the relation this one writes.
+ * is for the target this one writes.
  */
 static int
 step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
@@ -953,8 +997,8 @@ step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
 	uint16_t arity;
 
 	pending = &eval->pending;
-	arity = pending->relation->arity;
-	assert(atom->relation == pending->relation);
+	arity = pending->target.relation->arity;
+	assert(atom->relation == pending->target.relation);
 	assert(arity <= pending->arity_room);
 
 	build_tuple(eval, atom, &pending->tuples[pending->count * arity]);
@@ -963,7 +1007,72 @@ step_emit(relic_evaluation_t *eval, const relic_op_atom_t *atom)
 	if (pending->count < RELIC_INSERT_BATCH)
 		return (0);
 
-	return (insert_pending(eval));
+	return (drain_pending(eval));
+}
+
+/*
+ * Send the pending batch to its target, inserting it or delivering it as
+ * rows, and empty it.  Returns -1 when an insertion was refused, which the
+ * relation store has reported; a delivery cannot fail.  This is the one
+ * place that tells the two kinds of target apart, so a tuple is built the
+ * same way whichever it is for.
+ */
+static int
+drain_pending(relic_evaluation_t *eval)
+{
+	if (eval->pending.target.rows.callback == NULL)
+		return (insert_pending(eval));
+
+	deliver_pending(eval);
+
+	return (0);
+}
+
+/*
+ * The values of a tuple, as the row a callback receives.  A value is found
+ * for every column because every column holds an identifier the value table
+ * assigned: columns are copied only from constants the parser interned and
+ * from other tuples.
+ */
+static void
+decode_row(const relic_t *ctx, const relic_dom_t *tuple, uint16_t arity,
+    relic_value_t *row)
+{
+	uint16_t column;
+
+	for (column = 0; column < arity; column++)
+		row[column] = *relic_value_of(ctx, tuple[column]);
+}
+
+/*
+ * Deliver the pending batch to the caller, one row per tuple in the order
+ * they were derived, and empty it.  Each is counted as a derivation and not
+ * as an inserted tuple, since nothing was inserted.  A callback that asks
+ * for no more rows gets none: the rest of the batch is dropped, and
+ * `stopped` ends the plan.
+ */
+static void
+deliver_pending(relic_evaluation_t *eval)
+{
+	relic_value_t row[RELIC_MAX_ARITY];
+	const relic_row_sink_t *sink;
+	relic_pending_t *pending;
+	uint16_t arity;
+	size_t i;
+
+	pending = &eval->pending;
+	sink = &pending->target.rows;
+	arity = pending->target.relation->arity;
+
+	for (i = 0; i < pending->count && !eval->stopped; i++) {
+		decode_row(eval->ctx, &pending->tuples[i * arity], arity, row);
+		count_derivation(eval, false);
+
+		if (sink->callback(sink->callback_ctx, row, arity) != 0)
+			eval->stopped = true;
+	}
+
+	pending->count = 0;
 }
 
 /*
@@ -983,8 +1092,9 @@ insert_pending(relic_evaluation_t *eval)
 	if (pending->count == 0)
 		return (0);
 
-	status = relic_relation_insert_batch(eval->ctx, pending->relation,
-	    pending->tuples, pending->count, pending->added, &completed);
+	status = relic_relation_insert_batch(eval->ctx,
+	    pending->target.relation, pending->tuples, pending->count,
+	    pending->added, &completed);
 
 	for (i = 0; i < completed; i++)
 		count_derivation(eval, pending->added[i]);
@@ -1056,15 +1166,17 @@ step(relic_evaluation_t *eval, const relic_rule_t *rule, const relic_op_t *op,
 
 /*
  * Run one plan: resolve the views its operations read through, and start a
- * batch for the relation it writes; then every binding its join produces
- * reaches the EMIT, and every tuple the EMIT derived is inserted before the
- * plan returns, so a caller reading `derived` reads the whole plan's result.
+ * batch for the target it writes; then every binding its join produces
+ * reaches the EMIT, and every tuple the EMIT derived has reached the target
+ * before the plan returns, so a caller reading `derived` reads the whole
+ * plan's result.
  *
  * `level` is the operation being asked for a match, and `resume` says whether
  * it is being asked for its next one or started afresh.  The loop ends when
  * the first operation has nothing more, which is when every binding has been
- * tried.  A failure discards the tuples still pending, which the failed
- * evaluation discards with everything else.
+ * tried, or when the caller the plan delivers rows to has asked for no more.
+ * A failure discards the tuples still pending, which the failed evaluation
+ * discards with everything else.
  */
 static int
 execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
@@ -1074,7 +1186,7 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 	bool resume;
 
 	resolve_views(eval, running);
-	start_batch(&eval->pending, plan_head(&running->plan));
+	start_batch(&eval->pending, &running->target);
 
 	level = 0;
 	resume = false;
@@ -1090,8 +1202,8 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 			continue;
 		}
 
-		if (level == 0)
-			return (insert_pending(eval));
+		if (level == 0 || eval->stopped)
+			return (drain_pending(eval));
 
 		level--;
 		resume = true;
@@ -1643,15 +1755,15 @@ plan_head(const relic_plan_t *plan)
 }
 
 /*
- * Begin a plan's batch of head tuples for `relation`, empty.  The previous
- * plan left its batch empty, having inserted it or had its insertion
+ * Begin a plan's batch of head tuples for `target`, empty.  The previous
+ * plan left its batch empty, having drained it or had its insertion
  * refused; emptying it here as well means a batch can only ever hold tuples
  * of the plan that is running.
  */
 static void
-start_batch(relic_pending_t *pending, relic_relation_t *relation)
+start_batch(relic_pending_t *pending, const relic_emit_target_t *target)
 {
-	pending->relation = relation;
+	pending->target = *target;
 	pending->count = 0;
 }
 
@@ -1682,6 +1794,9 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 	running->plan = *plan;
 	running->rule = rule;
+	running->target.relation = plan_head(plan);
+	running->target.rows.callback = NULL;
+	running->target.rows.callback_ctx = NULL;
 	running->states = evaluation_alloc(eval, plan->op_count,
 	    sizeof(*running->states));
 	if (running->states == NULL)
@@ -2624,13 +2739,11 @@ relic_materialize(relic_t *ctx)
 }
 
 /*
- * Pass every tuple of the answer relation to the callback as a row of
+ * Pass every tuple of a gathered answer relation to the caller as a row of
  * values, in insertion order, until the callback asks to stop.
  *
  * Nothing here can fail, which is what lets a query promise that no row is
- * delivered unless every row can be.  A value is found for every column
- * because every column holds an identifier the value table assigned: columns
- * are copied only from constants the parser interned and from other tuples.
+ * delivered unless every row can be.
  *
  * The context is busy while the callback runs, so a callback that calls
  * back to load or query is refused, and the answer relation cannot be
@@ -2640,14 +2753,13 @@ relic_materialize(relic_t *ctx)
  * does not hold rather than read past it, should that ever stop being true.
  */
 static void
-stream_answer(relic_t *ctx, const relic_relation_t *answer,
-    relic_row_cb callback, void *callback_ctx)
+deliver_gathered_answer(relic_t *ctx, const relic_relation_t *answer,
+    const relic_row_sink_t *sink)
 {
 	relic_value_t row[RELIC_MAX_ARITY];
 	const relic_dom_t *tuple;
 	relic_tuple_range_t range;
 	relic_tuple_id_t id;
-	uint16_t column;
 
 	range = relic_relation_all(answer);
 
@@ -2656,20 +2768,111 @@ stream_answer(relic_t *ctx, const relic_relation_t *answer,
 		if (tuple == NULL)
 			return;
 
-		for (column = 0; column < answer->arity; column++)
-			row[column] = *relic_value_of(ctx, tuple[column]);
-
-		if (callback(callback_ctx, row, answer->arity) != 0)
+		decode_row(ctx, tuple, answer->arity, row);
+		if (sink->callback(sink->callback_ctx, row, answer->arity) != 0)
 			return;
 	}
 }
 
 /*
- * Run a query's rule -- the one written, or the one its rewrite produced --
- * once into the query's answer relation, every relation it reads being
- * complete.  One pass computes the answer completely, because no body reads
- * the answer relation: it belongs to no predicate, so no literal can name
+ * Run a query plan whose EMIT delivers its rows to the caller.
+ *
+ * Such a run inserts nothing and allocates nothing: its plan and states were
+ * allocated when it was planned, every index it looks up was built then, and
+ * its EMIT writes no relation.  So it cannot fail, and the only way it ends
+ * early is the caller's asking for no more rows.  The count of inserted
+ * tuples and the account's totals are asserted to be what they were before
+ * it; the totals move when a relation's storage grows or an arena takes a
+ * new chunk, so an allocation that fits a chunk already taken passes
+ * unseen.  Its status is returned all the same, so that a build without
+ * assertions reports a failure that should be impossible rather than hide
  * it.
+ */
+static int
+stream_query_plan(relic_evaluation_t *eval,
+    const relic_running_plan_t *running)
+{
+#ifndef NDEBUG
+	relic_account_t account_before;
+	uint64_t inserted_before;
+#endif
+	int status;
+
+#ifndef NDEBUG
+	account_before = eval->ctx->account;
+	inserted_before = eval->ctx->counters.tuples_inserted;
+#endif
+
+	status = execute_plan(eval, running);
+
+	assert(status == 0);
+	assert(eval->ctx->account.store_bytes == account_before.store_bytes);
+	assert(eval->ctx->account.arena_bytes == account_before.arena_bytes);
+	assert(eval->ctx->counters.tuples_inserted == inserted_before);
+
+	return (status);
+}
+
+/*
+ * Whether a query's plan delivers its rows as it derives them rather than
+ * gathering them in its answer relation first.
+ *
+ * Its derivations must be its rows already, each derived once, which the
+ * planner decides from the plan.  And no configured limit may bound the
+ * relations.  Under a limit a query that is refused must be refused before
+ * its first row, so that it delivers all of its rows or none; a row that is
+ * delivered without being stored is never refused, so a streamed answer
+ * would hand over any number of rows the limit would not have let the
+ * answer hold.  The query gathers its answer instead, and the limit bounds
+ * it as it bounds any relation.
+ */
+static bool
+query_streams(const relic_t *ctx, const relic_plan_t *plan)
+{
+	if ((ctx->config.flags & RELIC_F_NO_STREAM) != 0)
+		return (false);
+
+	if (relic_limits_bound_relations(ctx))
+		return (false);
+
+	return (relic_plan_derives_distinct(plan));
+}
+
+/*
+ * Point a planned query's EMIT at the caller's rows when query_streams()
+ * admits its plan, and report whether it did.  Otherwise the EMIT keeps the
+ * target it was planned with, the query's answer relation.
+ */
+static bool
+choose_query_target(const relic_t *ctx, relic_running_plan_t *running,
+    const relic_row_sink_t *rows)
+{
+	if (!query_streams(ctx, &running->plan))
+		return (false);
+
+	running->target.rows = *rows;
+
+	return (true);
+}
+
+/*
+ * Run a query's rule -- the one written, or the one its rewrite produced --
+ * once, every relation it reads being complete, and deliver its rows to the
+ * caller `rows` names.  One pass computes the answer completely, because no
+ * body reads `answer`, the query's answer relation: it belongs to no
+ * predicate, so no literal can name it.
+ *
+ * A plan that query_streams() admits delivers each tuple to the caller as
+ * its EMIT derives it, and the answer relation is never written.  Its
+ * derivations are distinct, so the relation would have rejected none of them
+ * and listed them in the order they were derived: the rows are the ones it
+ * would have held, in its order.  Every step that can fail -- beginning the
+ * evaluation, planning, building the indexes the plan looks up -- comes
+ * before the first row, so a query that fails delivers nothing.
+ *
+ * Any other plan fills the answer relation, which drops duplicates as they
+ * are inserted and counts against the limits, and the rows the relation
+ * gathered are delivered once the rule has run.
  *
  * The answer is emptied first, so the run starts from nothing whatever the
  * relation held and whatever ran before it, and emptied again when the run
@@ -2679,29 +2882,41 @@ stream_answer(relic_t *ctx, const relic_relation_t *answer,
  */
 static int
 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
-    relic_relation_t *answer)
+    relic_relation_t *answer, const relic_row_sink_t *rows)
 {
+	relic_running_plan_t *running;
 	relic_evaluation_t eval;
+	bool streams;
 	int status;
 
 	relic_relation_clear(ctx, answer);
 	note_query_activity(ctx, "planning", answer);
 
+	streams = false;
 	status = evaluation_begin(&eval, ctx, 1, answer->arity);
 	if (status == 0)
 		status = plan_query(&eval, rule, answer, &eval.components[0]);
 	if (status == 0) {
-		relic_explain_query(ctx, rule, answer,
-		    &eval.components[0].planned[0].base->plan);
-		status = execute_plan(&eval,
-		    eval.components[0].planned[0].base);
+		running = eval.components[0].planned[0].base;
+		streams = choose_query_target(ctx, running, rows);
+		relic_explain_query(ctx, rule, answer, &running->plan,
+		    streams);
+		if (streams)
+			status = stream_query_plan(&eval, running);
+		else
+			status = execute_plan(&eval, running);
 	}
 	evaluation_end(&eval);
 
-	if (status != 0)
+	if (status != 0) {
 		relic_relation_clear(ctx, answer);
+		return (-1);
+	}
 
-	return (status);
+	if (!streams)
+		deliver_gathered_answer(ctx, answer, rows);
+
+	return (0);
 }
 
 /*
@@ -2783,31 +2998,35 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 }
 
 /*
- * Answer a query into its answer relation from the fixed point of the whole
- * program, computing it first if the relations do not hold it.
+ * Answer a query from the fixed point of the whole program, computing it
+ * first if the relations do not hold it, and deliver its rows.
  */
 static int
-answer_from_program(relic_t *ctx, const relic_query_t *query)
+answer_from_program(relic_t *ctx, const relic_query_t *query,
+    const relic_row_sink_t *rows)
 {
 	if (materialize_program(ctx) != 0)
 		return (-1);
 
-	return (run_query_rule(ctx, &query->rule, query->answer));
+	return (run_query_rule(ctx, &query->rule, query->answer, rows));
 }
 
 /*
- * Answer a query into its answer relation through its Magic rewrite, which
- * derives only what the query's bindings can reach, running the rewritten
- * query rule last.
+ * Answer a query through its Magic rewrite, which derives only what the
+ * query's bindings can reach, running the rewritten query rule last and
+ * delivering its rows.
  *
  * A rewrite that outgrows its budget has been reported as a warning, and
  * the query is answered from the whole program instead: the rewrite is an
  * optimization, and must not decide whether a query can be answered.  What
  * the abandoned rewrite derived is discarded with the rest, since it
- * recorded no materialized program.
+ * recorded no materialized program.  No row has been delivered when the
+ * whole program is turned to, because run_query_rule() delivers none unless
+ * it succeeds, and a rewrite over its budget fails before it is run.
  */
 static int
-answer_through_rewrite(relic_t *ctx, const relic_query_t *query)
+answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
+    const relic_row_sink_t *rows)
 {
 	relic_magic_t magic;
 	bool over_budget;
@@ -2816,23 +3035,26 @@ answer_through_rewrite(relic_t *ctx, const relic_query_t *query)
 	relic_magic_init(&magic, ctx);
 	status = derive_for_rewrite(ctx, &magic, query);
 	if (status == 0)
-		status = run_query_rule(ctx, &magic.query, query->answer);
+		status = run_query_rule(ctx, &magic.query, query->answer,
+		    rows);
 	over_budget = magic.over_budget;
 	relic_magic_reset(&magic);
 
 	if (status != 0 && over_budget)
-		return (answer_from_program(ctx, query));
+		return (answer_from_program(ctx, query, rows));
 
 	return (status);
 }
 
 /*
- * Answer a query into its answer relation, then stream that relation.
+ * Answer a query and deliver its rows, as they are derived or from its
+ * answer relation once it is filled, whichever run_query_rule() chooses.
  *
  * The relation is the query's own, emptied before its rule runs and again
  * once the rows are delivered, so outside a run it holds nothing and counts
- * nothing against the limits.  The context is busy throughout, so no other
- * operation sees it holding tuples.
+ * nothing against the limits; while a query streams, it holds nothing even
+ * during the run.  The context is busy throughout, so no other operation
+ * sees it holding tuples.
  *
  * A program whose fixed point is already computed -- or any program, when
  * the rewrite is turned off -- answers from the whole fixed point.  Otherwise
@@ -2840,9 +3062,10 @@ answer_through_rewrite(relic_t *ctx, const relic_query_t *query)
  * answer, because the rewrite computes exactly the tuples of the fixed point
  * that the query reads.
  *
- * Duplicate answers collapse as they are inserted, which is what gives a
- * query set semantics.  Every step that can fail comes before the first row
- * is delivered, so a query either delivers its whole answer or none of it.
+ * The rows are distinct, which is what gives a query set semantics: a rule
+ * that streams derives no row twice, and any other's duplicates collapse as
+ * they are inserted.  Every step that can fail comes before the first row is
+ * delivered, so a query either delivers its whole answer or none of it.
  */
 int
 relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
@@ -2864,6 +3087,7 @@ int
 relic_query_answer(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
     void *callback_ctx)
 {
+	relic_row_sink_t rows;
 	int status;
 
 	if (!query_answerable(ctx, query, callback))
@@ -2871,9 +3095,9 @@ relic_query_answer(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 
 	query->running = true;
 
-	status = compute_answer(ctx, query);
-	if (status == 0)
-		stream_answer(ctx, query->answer, callback, callback_ctx);
+	rows.callback = callback;
+	rows.callback_ctx = callback_ctx;
+	status = compute_answer(ctx, query, &rows);
 
 	/*
 	 * The answer is transient: once delivered, or once the query has
@@ -2913,12 +3137,13 @@ query_answerable(relic_t *ctx, const relic_query_t *query,
 }
 
 /*
- * Fill the query's answer relation, from the relations as they stand when
- * the program is materialized or the rewrite is turned off, and through the
- * query's Magic rewrite otherwise.
+ * Answer the query and deliver its rows as `rows` says: from the relations
+ * as they stand when the program is materialized or the rewrite is turned
+ * off, and through the query's Magic rewrite otherwise.
  */
 static int
-compute_answer(relic_t *ctx, const relic_query_t *query)
+compute_answer(relic_t *ctx, const relic_query_t *query,
+    const relic_row_sink_t *rows)
 {
 	if (relic_program_ready(ctx) != 0)
 		return (-1);
@@ -2927,9 +3152,9 @@ compute_answer(relic_t *ctx, const relic_query_t *query)
 
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
 	    relic_relations_current(ctx))
-		return (answer_from_program(ctx, query));
+		return (answer_from_program(ctx, query, rows));
 
-	return (answer_through_rewrite(ctx, query));
+	return (answer_through_rewrite(ctx, query, rows));
 }
 
 void

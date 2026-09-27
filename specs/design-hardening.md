@@ -137,13 +137,14 @@ predicate never defined -- are expected and ignored.
 Each program is loaded and checked once per strategy, in a context of its own
 created with `relic_create_config()`, and each of its queries is collected
 with `relic_query_collect()`. The strategies are those of
-`tests/equiv/strategies.sh`, plus one:
+`tests/equiv/strategies.sh`, plus two:
 
 | Strategy | Flags | Tuple total held to |
 | --- | --- | --- |
 | default | none | -- |
 | naive | `RELIC_F_NAIVE` | default |
 | no-index | `RELIC_F_NO_INDEX` | default |
+| no-stream | `RELIC_F_NO_STREAM` | default |
 | no-reorder | `RELIC_F_NO_REORDER` | -- |
 | no-magic | `RELIC_F_NO_MAGIC` | -- |
 | naive+no-magic | `RELIC_F_NAIVE \| RELIC_F_NO_MAGIC` | no-magic |
@@ -157,6 +158,11 @@ equivalences: `semi-naive == naive`, `magic == full materialization`,
 strategy adds the fifth path through the evaluator, a query run over
 relations that already hold the fixed point, which `specs/design-magic.md`
 section 9 specifies and nothing else in the differential harness reaches.
+The no-stream strategy gathers every answer in its relation, as a query
+whose plan may derive a row twice must, so a query whose plan derives each
+row once is answered both ways; that the rows also come in the same order
+is the claim of `tests/equiv/streaming.sh`, since this harness compares
+answers as sets.
 
 Answers alone do not see a relation a query does not read. Tuple totals do:
 after each query, `relic_stats()` gives the tuples every relation together

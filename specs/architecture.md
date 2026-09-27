@@ -1411,6 +1411,7 @@ relic(1) but is not part of the stable interface:
 -X no-index     disable secondary indexes
 -X no-magic     disable Magic Sets for explicit queries
 -X no-reorder   evaluate body literals in textual order
+-X no-stream    gather every answer before writing its first row
 -X stats        print evaluation counters to stderr on exit
 ```
 
@@ -1791,11 +1792,13 @@ the budget of section 63. The fields correspond one to one with the
 `-l key=value` options of section 40 and with the limits of section 63, so a
 limit exists in exactly one place and the tool merely parses into it.
 
-`flags` selects internal behaviour corresponding to the `-X` options, including
-`RELIC_F_NAIVE`, `RELIC_F_NO_INDEX`, `RELIC_F_NO_MAGIC` and
-`RELIC_F_NO_REORDER`, and diagnostics a caller asks for, such as
-`RELIC_F_NOTE_MIXED`, the note on a mixed-type ordering comparison that `-vv`
-requests. No switch changes an answer.
+`flags` selects internal behaviour corresponding to the `-X` options,
+including `RELIC_F_NAIVE`, `RELIC_F_NO_INDEX`, `RELIC_F_NO_MAGIC`,
+`RELIC_F_NO_REORDER` and `RELIC_F_NO_STREAM`, and diagnostics a caller asks
+for, such as `RELIC_F_NOTE_MIXED`, the note on a mixed-type ordering
+comparison that `-vv` requests. No switch changes an answer, though two
+strategies may hold different amounts while they compute one, and so one
+may meet a limit the other does not.
 
 ---
 
@@ -1905,9 +1908,10 @@ relic_query_run(relic_t *,
 
 This avoids requiring the library to allocate an arbitrarily large result array.
 
-A query whose head keeps every variable of its body is answered from its
-rule's derivations as they are made, with no answer relation in between;
-specified in `specs/design-comparison-cost.md` section 4.
+A query whose plan derives each of its rows once is answered from its
+rule's derivations as they are made, with no answer relation in between,
+when the context sets no tuple or memory limit; specified in
+`specs/design-comparison-cost.md` section 4.
 
 ---
 

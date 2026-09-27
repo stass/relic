@@ -608,7 +608,7 @@ magic rewrite of $q0(X) :- path(a, X).
                 emit path$bf(X, Z)
 query $q0(X) :- path$bf(a, X).
     lookup path$bf(a, X) key={0}
-    emit $q0(X)
+    stream $q0(X)
 ```
 
 * The phase 1 components keep their positions in the program's schedule, so

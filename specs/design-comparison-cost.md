@@ -28,9 +28,10 @@ D-22 to D-24.
   another engine, measured by phase and by profile;
 * that a row is formatted into a buffer the tool owns and written in
   blocks, and what that keeps of the write-failure contract;
-* that a query whose head keeps every variable of its body is answered
+* that a query whose plan derives each of its rows once is answered
   from its rule's derivations directly, with no answer relation in
-  between, and why that answer is the same set in the same order;
+  between, unless a limit must bound it, and why that answer is the same
+  set in the same order;
 * that a predicate reached with every column free subsumes every other
   adornment of it, and that a rewrite left with no bound column is no
   rewrite: the query reads the program's own relations;
@@ -233,55 +234,86 @@ twelve bytes, 24 MB, which one `write(2)` per 64 KiB moves in well under
 
 ## 4. Streaming answers
 
-A query whose head keeps every variable its body binds is answered from
-its rule's derivations directly. The rule's `EMIT` delivers each tuple to
-the caller's callback as it is derived; no answer relation is filled,
-hashed or streamed afterwards. Every other query keeps the answer relation
-of `specs/design-query.md` section 3 exactly as it is.
+A query whose plan derives each of its rows once is answered from its
+rule's derivations directly, in a context that sets no tuple or memory
+limit. The rule's `EMIT` delivers each tuple to the caller's callback as it
+is derived; no answer relation is filled, hashed or streamed afterwards.
+Every other query keeps the answer relation of `specs/design-query.md`
+section 3 exactly as it is.
 
 ### 4.1 Which queries stream
 
-Call a query rule **projection-free** when every variable that occurs in
-its body occurs in its head. An anonymous `_` is a body variable the head
-does not mention, so a body with one is not projection-free; a constant in
-the head, a repeated head variable, a comparison and a negated literal do
-not affect the property. The property is read off the query's syntax when
-its rule compiles, and the rewrite preserves it: a supplementary predicate
-carries every variable of its prefix that the rest of the rule reads, and
-a variable the head reads is one of them, so the rewritten query rule
-binds the same variables and keeps them all.
+Call a plan **distinct** when no generator, a `SCAN` or a `LOOKUP`, has a
+wildcard column, and its `EMIT` reads every slot a generator binds. The
+query rule that runs -- the one written, or the one its rewrite produced --
+streams when three things hold: its plan is distinct, the context sets
+neither `max_tuples` nor `max_memory`, and `RELIC_F_NO_STREAM` is clear.
+
+The property is decided on the built plan, by `relic_plan_derives_distinct()`
+in `lib/plan.c`, with a switch that names every kind of operation, so that a
+kind added later is decided there rather than assumed to keep it. For the
+planner as it is, a distinct plan is the plan of a query rule whose head
+holds every variable its body binds and whose body has no `_`: every
+variable is bound by a generator, and a wildcard is always a generator's
+column. Deciding on the plan rather than on the query's syntax keeps the
+decision true of what runs, whatever the rewrite or a later planner does to
+the rule.
 
 **Why its derivations are a set already.** The query rule runs once, after
-every component it reads is at its fixed point, over full views. Its plan
-enumerates bindings of the body's variables by choosing one tuple per
-positive literal in plan order; two different choices for a literal differ
-in some column, which is either a constant, which both match, or a
-variable, so they differ in a variable's value. The sequence of tuples
-chosen is therefore a function of the binding, and the nested enumeration
-visits each sequence once, so each full binding is derived exactly once.
-The head tuple is a function of the binding, and when the head mentions
-every body variable that function is injective: distinct bindings give
-distinct head tuples. The derivations of a projection-free query rule are
-pairwise distinct, and inserting them into a relation would reject
-nothing. A projecting rule has no such guarantee, and keeps the relation.
+every component it reads is at its fixed point, over relations that do not
+change while it runs. Three facts about what a plan reads then hold: a
+relation holds no tuple twice, a view lists each tuple in its range once,
+and a test lets a binding through at most once. Two tuples a generator
+reads under one binding of the slots before it both match its constants and
+its bound slots, so, holding no wildcard, they differ in a column it binds,
+and bind different values there. Each path through the generators therefore
+reaches the `EMIT` with a binding no other path has, and an `EMIT` that
+reads every bound slot derives a tuple no other path derives. The
+derivations of a distinct plan are pairwise distinct, and inserting them
+into a relation would reject nothing. Any other plan has no such guarantee,
+and keeps the relation.
+
+**Why a limit turns streaming off.** Under a limit a query delivers all of
+its rows or none: a query the limit refuses is refused before its first
+row, because the refusal comes while the answer is gathered. A streamed
+row is never stored and so never refused, and a streamed answer that the
+limit would have refused is delivered whole instead: `e(A), e(B), e(C)?`
+over 100 facts would deliver a million rows under `-l tuples=1000`, and a
+caller that keeps the rows, as `relic_query_collect()` does, would hold
+all of them. So a query in a context where a limit bounds the relations
+gathers its answer, and the limit bounds it as it bounds every relation.
+Whether a limit bounds them is answered beside the code that enforces the
+limits, and asks of each limit the question its check asks first, whether
+it is set, so the two cannot disagree about which values bound nothing; a
+limit that comes to bound the relations joins both. The rule also keeps
+`-X no-stream` from deciding whether a query succeeds under `-l`. A limit
+of zero or of `SIZE_MAX` bounds nothing and leaves streaming on. relic(1)
+sets no limit unless `-l` asks for one, so the comparison workloads
+stream.
 
 ### 4.2 What the plan does
 
 A plan has one `EMIT`, and its target is a relation. This design makes the
-target one of two things, chosen when the query's plan is built:
+target one of two things, chosen once the query's plan is built:
 
 ```c
+struct relic_row_sink {
+	relic_row_cb	 callback;
+	void		*callback_ctx;
+};
+
 struct relic_emit_target {
 	relic_relation_t	*relation;	/* an answer or a predicate's */
-	relic_row_cb		 callback;	/* or a caller to deliver to */
-	void			*callback_ctx;
+	relic_row_sink_t	 rows;		/* or, with a callback, a caller */
 };
 ```
 
-A component's rules, generated rules and projecting query rules emit to a
-relation as now, through the pending batch of
-`specs/design-evaluation-cost.md` section 6. A projection-free query rule
-emits to the callback: `EMIT` builds the head tuple into the same pending
+The relation is always the one the `EMIT` names, and gives the tuples their
+arity; the sink, when it has a callback, is where they go instead. A
+component's rules, generated rules and every query rule that does not
+stream emit to a relation as now, through the pending batch of
+`specs/design-evaluation-cost.md` section 6. A streaming query rule emits
+to the callback: `EMIT` builds the head tuple into the same pending
 batch, and the batch is drained by decoding each tuple to a
 `relic_value_t` row and calling the callback once per row, in batch order.
 A callback that returns nonzero stops the run as a stopped stream stops it
@@ -291,16 +323,16 @@ target, and the drain is the only place that knows which target it has.
 **A streaming run allocates nothing and cannot fail.** The query rule's
 plan and its state are allocated in the evaluation arena before it runs,
 every index it looks up was built when it was planned, and its `EMIT`
-inserts nothing, so neither limit is checked and no allocation is made
-between the first row and the last. The only way the run ends early is
-the callback's own nonzero return. This is asserted: the evaluation's
-arena mark and the account's totals are the same after the run as before
-it. The consequence for a caller is the one `relic_query_run()` promises
-now, that a stopped stream is the caller's doing, with one refinement: a
-streamed answer that was not stopped is complete, and a failure during
-the query's evaluation is reported before any row is delivered, since
-every failure that can happen happens in the components the query rule
-reads, which run first.
+inserts nothing, so no allocation is made between the first row and the
+last, and the context sets no limit that could refuse one if it were. The
+only way the run ends early is the callback's own nonzero return. This is
+asserted: the account's totals of store and arena bytes and the count of
+inserted tuples are the same after the run as before it. The consequence
+for a caller is the one `relic_query_run()` promises now, that a stopped
+stream is the caller's doing, with one refinement: a streamed answer that
+was not stopped is complete, and a failure during the query's evaluation
+is reported before any row is delivered, since every failure that can
+happen happens in the components the query rule reads, which run first.
 
 **The order is the order the relation would have had.** The answer relation
 lists its tuples in insertion order, which is the query rule's derivation
@@ -314,16 +346,23 @@ depend on the target.
 
 * **`relic_query_collect()`** collects through the callback as it does now
   and does not know which target fed it.
-* **The counters.** A streamed row is counted as a derivation, as every
-  emitted tuple is; it is not an inserted tuple, since nothing was
-  inserted, so `tuples inserted` on `chain-closure` falls from 4,002,000 to
-  2,001,000 and says what it means. `-v` counts rows from the callback,
-  as now.
+* **The counters.** A streamed row is counted as a derivation as it is
+  delivered, as every emitted tuple is; it is not an inserted tuple, since
+  nothing was inserted, so `tuples inserted` on `chain-closure` falls from
+  4,002,000 to 2,001,000 and says what it means. The rest of a batch a
+  callback's stop leaves undelivered is not counted. `-v` counts rows from
+  the callback, as now.
 * **Explain** prints `stream $q0(X, Y)` in place of `emit $q0(X, Y)` for a
   streaming query rule, so a reader sees which queries hold no answer.
 * **Accounting.** An answer relation that streams is empty throughout its
   query's run and counts nothing, which `specs/design-query.md` section 6
-  already requires outside a run and now holds inside one as well.
+  already requires outside a run and now holds inside one as well. A
+  context with a limit never streams, so every answer a limit could bound
+  is gathered and bounded.
+* **Diagnostics.** A note the query rule's evaluation reports, such as the
+  note on a mixed-type comparison, comes between the rows a streaming run
+  has delivered and those it has not, where a gathering run reports it
+  before the first row. relic(1) writes the two to different streams.
 * **The busy context.** Rows are delivered while the query's evaluation
   is in progress rather than after it, and the context is busy for the
   whole call either way (`specs/design-api.md` section 6), so a callback
@@ -730,14 +769,16 @@ tree before it, per `CLAUDE.md`.
   one and at a query's last, each reported once. A unit test of the
   integer renderer covers zero, both extremes of `int64_t` and every
   digit count.
-* **Streaming.** For every projection-free query of the corpus, the
+* **Streaming.** For every query of the corpus whose plan is distinct, the
   rows delivered are the rows of the same query answered through the
   answer relation, in the same order; the differential harness runs both
   by forcing the relation with a flag of the evaluation, kept for the
-  test. The arena mark and the account's totals are asserted equal around
-  a streaming run. A query stopped by its callback delivers exactly the
-  rows before the stop. `-X stats` on `chain-closure` reports 2,001,000
-  inserted tuples.
+  test. The account's byte totals and the count of inserted tuples are
+  asserted equal around a streaming run. A query stopped by its callback
+  delivers exactly the rows before the stop, wherever the stop falls among
+  the batches. Under a tuple or a memory limit, a query whose plan is
+  distinct and whose answer outgrows the limit fails without delivering a
+  row. `-X stats` on `chain-closure` reports 2,001,000 inserted tuples.
 * **Subsumption.** The central equivalence, `magic(Q, P) ==
   Q(full_materialize(P))`, over the corpus and under every strategy, with
   `andersen`, `cspa` and a program whose free rule calls a bound `q`
@@ -815,13 +856,19 @@ which none of the others change.
 
 * `specs/design-cli.md` section 4: the writer's buffer, section 3 here.
   Sections 4.1 to 4.6, 5, 6 and 7 stand.
-* `specs/design-query.md` sections 2 and 3: the answer relation is filled
-  by projecting queries only; section 4 here. The relation, its lifetime
-  and its accounting stand for them.
+* `specs/design-query.md` sections 2, 3 and 6: the answer relation is
+  filled only by a query that does not stream; section 4 here. The
+  relation, its lifetime and its accounting stand for it.
+* `specs/design-eval.md` section 7: a query that streams emits to the
+  caller in step 2 and has no step 3, and no row is delivered until
+  everything that can fail has succeeded; section 4 here.
 * `specs/design-magic.md` section 3: a fourth source of the complete set,
   the free adornments of section 5.2 here; section 4: the rule of section
   5.1 here after "An adornment with no bound column has no magic
-  predicate"; section 10: the explain lines of section 5.3 here.
+  predicate"; section 10: the explain lines of section 5.3 here, and the
+  query's `stream` line of section 4.
+* `specs/design-planner.md` section 8.2: an `EMIT` that streams is shown as
+  `stream`; section 4 here.
 * `specs/design-index.md` section 3: `key_columns` and `key_column`,
   section 6.1 here; "Nothing is stored twice" becomes "no tuple is stored
   twice"; section 8: the key columns are accounted.

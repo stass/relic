@@ -36,10 +36,10 @@
  * The results of successive queries are told apart by a blank line before
  * every query's results but the first in text, csv and tsv, and by each
  * query's being a JSON document of its own in json.  What a query writes
- * first -- that separator, or the opening bracket -- is written only once the
- * query has succeeded, which the library guarantees by delivering no row
- * before the whole answer is known.  A query that fails therefore writes
- * nothing at all.
+ * first -- that separator, or the opening bracket -- is written only with
+ * the query's first row or once the query has succeeded, and the library
+ * delivers no row until everything that can fail has succeeded.  A query
+ * that fails therefore writes nothing at all.
  *
  * Everything is written into a buffer of the output's own and reaches the
  * stream a block of OUTPUT_BUFFER_SIZE bytes at a time, since a stdio call
@@ -1053,9 +1053,9 @@ output_is_stdout(const output_t *out)
  * the library's, or a write's.
  *
  * Nothing is written for a query that fails, because the library delivers no
- * row until the whole answer is known and what comes before the first row is
- * written only with it.  When sorting, the answer is collected whole and
- * written once it has been sorted.
+ * row until everything that can fail has succeeded and what comes before the
+ * first row is written only with it.  When sorting, the answer is collected
+ * whole and written once it has been sorted.
  */
 int
 output_query(output_t *out, relic_query_t *query, size_t *rowsp)

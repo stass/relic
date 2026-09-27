@@ -43,18 +43,26 @@
 typedef struct relic_account relic_account_t;
 
 struct relic_account {
-	size_t	limit;		/* bytes; zero for none */
+	size_t	limit;		/* bytes; see relic_limit_set() */
 	size_t	store_bytes;	/* relation and index storage */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
 	bool	refused;
 };
 
 /*
+ * relic_limit_set() says whether a configured limit, of tuples or of bytes,
+ * can refuse anything, and is what every check of a limit asks first, so
+ * that the checks and relic_limits_bound_relations() agree on what sets no
+ * limit.  Zero sets none, and SIZE_MAX sets none in effect: no count of
+ * tuples reaches it, and a total of bytes passing it is one no allocation
+ * could have produced.
+ *
  * relic_account_charge() admits `bytes` more for an arena and counts them,
  * or records the refusal and returns false having counted nothing.
  * relic_account_release() gives back bytes an arena counted.
  */
 void	 relic_account_init(relic_account_t *account, size_t limit);
+bool	 relic_limit_set(size_t limit);
 bool	 relic_account_exceeds(const relic_account_t *account,
 	    size_t current_bytes, size_t projected_bytes);
 bool	 relic_account_charge(relic_account_t *account, size_t bytes);

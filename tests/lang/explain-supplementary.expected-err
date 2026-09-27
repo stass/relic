@@ -50,4 +50,4 @@ magic rewrite of $q0(W) :- r(1, W).
             emit r$bf(X, W)
 query $q0(W) :- r$bf(1, W).
     lookup r$bf(1, W) key={0}
-    emit $q0(W)
+    stream $q0(W)

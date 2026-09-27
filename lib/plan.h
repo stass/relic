@@ -50,9 +50,10 @@ typedef struct relic_variant_plans relic_variant_plans_t;
  * with the answer inverted, which is the whole of negation: the schedule
  * evaluates a negated relation completely before any rule that reads it
  * runs, so its absence is meaningful.  EMIT derives the head tuple, which
- * the evaluation inserts in batches, and never succeeds, which is what makes
- * it the last operation of every plan: the deepest level of the join always
- * rejects, so the executor always backtracks from it.
+ * the evaluation inserts, or delivers as a query's row, in batches, and
+ * never succeeds, which is what makes it the last operation of every plan:
+ * the deepest level of the join always rejects, so the executor always
+ * backtracks from it.
  */
 enum relic_op_kind {
 	RELIC_OP_SCAN,		/* match and bind every tuple of a relation */

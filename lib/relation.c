@@ -445,7 +445,7 @@ relic_relation_bytes_after_reserve(const relic_relation_t *relation,
 static bool
 exceeds_tuple_limit(const relic_t *ctx)
 {
-	if (ctx->config.max_tuples == 0)
+	if (!relic_limit_set(ctx->config.max_tuples))
 		return (false);
 
 	return (ctx->store.tuple_count >= ctx->config.max_tuples);
@@ -1432,7 +1432,7 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 		bytes_after += projected;
 	}
 
-	if (ctx->config.max_tuples != 0 &&
+	if (relic_limit_set(ctx->config.max_tuples) &&
 	    (ctx->store.tuple_count > ctx->config.max_tuples ||
 	    added_total > ctx->config.max_tuples - ctx->store.tuple_count))
 		return (refuse_load(ctx, "tuples", ctx->config.max_tuples,
@@ -1589,4 +1589,17 @@ size_t
 relic_relation_total_tuples(const relic_t *ctx)
 {
 	return (ctx->store.tuple_count);
+}
+
+/*
+ * Two limits bound what relations hold: the tuple count, which
+ * enforce_limits() and the load path apply, and the memory account, which
+ * they, the building of an index and every charged arena consult.  Each is
+ * asked whether it is set by the relic_limit_set() its checks ask first.
+ */
+bool
+relic_limits_bound_relations(const relic_t *ctx)
+{
+	return (relic_limit_set(ctx->config.max_tuples) ||
+	    relic_limit_set(ctx->account.limit));
 }

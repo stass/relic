@@ -43,6 +43,7 @@
 #define	SCENARIO_PLACED		"a delta literal is placed like any other"
 #define	SCENARIO_WRITTEN	"a textual variant keeps its written order"
 #define	SCENARIO_DELTA_REFUSED	"a delta literal must be a member literal"
+#define	SCENARIO_DISTINCT	"a plan keeping every binding derives distinct rows"
 #define	SCENARIO_EMIT_TARGET	"the EMIT writes the relation it is given"
 #define	SCENARIO_ESTIMATE	"the smaller estimate goes first"
 #define	SCENARIO_FACT		"a body-less rule is a lone EMIT of constants"
@@ -167,6 +168,7 @@ static void	 each_binding_pattern_gets_its_access_path(void);
 static void	 the_references_change_only_their_choice(void);
 static void	 the_ranking_is_the_step_by_step_order(void);
 static void	 the_smaller_estimate_goes_first(void);
+static void	 a_plan_keeping_every_binding_derives_distinct_rows(void);
 
 static void
 count_error(void *callback_ctx, enum relic_diag_level level,
@@ -2037,6 +2039,73 @@ the_ranking_is_the_step_by_step_order(void)
 	}
 }
 
+/*
+ * A plan is known to derive each head tuple once when no generator matches
+ * an argument with `_` and its EMIT reads every slot a generator binds.  A
+ * rule that drops a variable from its head, or matches with `_`, can derive
+ * a tuple twice, whichever operation reads the variable; one that keeps every
+ * variable -- repeated in an atom, tested by a membership, a negation or a
+ * comparison, or with nothing to bind -- cannot.  The answer is read off the
+ * plan, so each rule is planned under every combination of the index and
+ * reordering switches, which change the operations it is planned into.
+ */
+static void
+a_plan_keeping_every_binding_derives_distinct_rows(void)
+{
+	static const struct {
+		const char	*rule;
+		bool		 distinct;
+	} rules[] = {
+		{ "p(X) :- e(X, Y).\n", false },
+		{ "p(X) :- e(X, _).\n", false },
+		{ "p(X) :- e(X, Y), e(Y, Z).\n", false },
+		{ "p(X, Z) :- e(X, Y), e(Y, Z).\n", false },
+		{ "p(X) :- e(X, Y), not f(Y).\n", false },
+		{ "p(X, Y) :- e(X, Y).\n", true },
+		{ "p(X) :- e(X, X).\n", true },
+		{ "p(X, Y) :- e(X, Y), e(Y, X).\n", true },
+		{ "p(X, Y) :- e(X, Y), not f(Y), X != Y.\n", true },
+		{ "p :- f(1).\n", true },
+	};
+	static const unsigned int flag_sets[] = {
+		0, RELIC_F_NO_INDEX, RELIC_F_NO_REORDER, TEXTUAL_FLAGS,
+	};
+
+	fixture_t fixture;
+	char program[256];
+	size_t r;
+	size_t f;
+
+	for (r = 0; r < sizeof(rules) / sizeof(rules[0]); r++) {
+		for (f = 0; f < sizeof(flag_sets) / sizeof(flag_sets[0]); f++) {
+			bool planned;
+
+			(void)snprintf(program, sizeof(program),
+			    "e(1, 2).\ne(2, 1).\ne(1, 1).\nf(1).\n%s",
+			    rules[r].rule);
+
+			planned = fixture_load(&fixture, program,
+			    flag_sets[f], false);
+			if (planned)
+				planned = fixture_plan_rule(&fixture, 0, NULL);
+			checkf(planned, SCENARIO_DISTINCT,
+			    "%s should plan under flags %#x", rules[r].rule,
+			    flag_sets[f]);
+			if (planned)
+				checkf(relic_plan_derives_distinct(
+				    &fixture.plan) == rules[r].distinct,
+				    SCENARIO_DISTINCT,
+				    "the plan of %s under flags %#x should %s",
+				    rules[r].rule, flag_sets[f],
+				    rules[r].distinct ?
+				    "derive each row once" :
+				    "be able to derive a row twice");
+
+			fixture_release(&fixture);
+		}
+	}
+}
+
 int
 main(void)
 {
@@ -2058,6 +2127,7 @@ main(void)
 	an_assumed_relation_divides_per_bound_column();
 	the_references_change_only_their_choice();
 	the_ranking_is_the_step_by_step_order();
+	a_plan_keeping_every_binding_derives_distinct_rows();
 
 	return (check_summary("test_plan"));
 }

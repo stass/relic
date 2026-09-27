@@ -45,6 +45,14 @@ to the caller and emptied. The relation exists for exactly as long as the
 query object does: it is created with the query, filled and emptied by every
 run, and has no meaning once the query is destroyed.
 
+A query that streams fills no relation. When the plan of the rule it runs
+derives each of its rows once, and the context sets no tuple or memory
+limit, its derivations are its answer already, and its rule delivers them
+to the caller as it derives them (`specs/design-comparison-cost.md` section
+4). Such a query still owns an answer relation, which stays empty through
+that run, and everything below about filling, streaming and emptying the
+relation is about the runs that do not stream.
+
 **The predicate table is the wrong place for it.** A predicate is program
 vocabulary. The table that interns predicates is context-lifetime state whose
 entries are never removed and whose identifiers are never reused, and that is
@@ -133,8 +141,10 @@ tuples; a query with more named variables is rejected, per
 relation, runs the query's rule -- the one written, or the one its Magic
 rewrite produced -- with the answer relation as the plan's emit target,
 streams the relation, and empties it again, whether the answer was delivered,
-stopped by the callback or failed part way. The emptying before the run is
-what makes the answer's contents right by construction: whatever the
+stopped by the callback or failed part way. A query that streams runs its
+rule with the caller's callback as the emit target instead, and its
+relation is empty before, during and after the run. The emptying before the
+run is what makes the answer's contents right by construction: whatever the
 relation held, the run starts from nothing, and no ordering between the run
 and any other discard has to be reasoned about. The emptying after the run is
 what makes the answer transient, per `specs/design-api.md` section 5.1:
@@ -352,7 +362,8 @@ adjusts the context's totals for every relation it inserts into, and it does
 not ask whether the relation is in the table. A query whose answer would
 exceed a limit fails before a row is delivered, as `specs/design-eval.md`
 section 7 requires, and the failed answer is emptied and its counts given
-back.
+back. A query streams only in a context that sets neither limit, so every
+answer a limit could bound is gathered in its relation and bounded there.
 
 **The totals are a sum, maintained per relation.** `relic_relation_clear()`
 subtracts what the relation it empties held, and the discard of every

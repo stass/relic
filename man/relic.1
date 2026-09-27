@@ -196,6 +196,10 @@ build no index, scanning instead;
 answer every query from the whole program;
 .It Cm no-reorder
 join a rule's atoms in the order they are written;
+.It Cm no-stream
+gather every query's answer whole before writing its first row, as a query
+whose plan may derive a row twice is answered, rather than writing the rows
+of one whose plan derives each row once as they are derived;
 .It Cm stats
 write the evaluation counters to the standard error when the run ends;
 the derivations count what rules derive and the facts copied into a
@@ -203,7 +207,10 @@ predicate that rules also derive, not the facts of a predicate no rule
 derives.
 .El
 .Pp
-Each gives the same answers as the default.
+Each gives the same answers as the default, though two strategies may hold
+different amounts while they compute them, and so one may meet a limit
+.Fl l
+sets that the other does not.
 .El
 .Pp
 An invocation checks everything before it evaluates anything: every file is

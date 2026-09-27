@@ -1,6 +1,6 @@
 stats: iterations 7
 stats: derivations 13
-stats: tuples inserted 13
+stats: tuples inserted 7
 stats: tuples scanned 7
 stats: tuples looked up 12
 stats: tuples held 13

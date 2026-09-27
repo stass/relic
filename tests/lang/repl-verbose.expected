@@ -8,6 +8,6 @@ a
 
 query $q4 :- v(a).
     member v(a)
-    emit $q4
+    stream $q4
 
 1

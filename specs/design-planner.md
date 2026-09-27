@@ -347,7 +347,7 @@ stratum 0, component 0 (recursive): path/2
             emit path(X, Z)
 query $q0(X) :- path(a, X).
     lookup path(a, X) key={0}
-    emit $q0(X)
+    stream $q0(X)
 ```
 
 * A component is headed by its stratum, its position in the schedule,
@@ -378,7 +378,10 @@ query $q0(X) :- path(a, X).
 
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
-`anti-member`, `filter` with its comparison, and `emit`. An operation over a
+`anti-member`, `filter` with its comparison, and `emit`. A query's `EMIT`
+that delivers its rows as they are derived rather than inserting them into
+the answer relation is shown as `stream`, `specs/design-comparison-cost.md`
+section 4. An operation over a
 base view names it as the rule does, `lookup link$base(X1, X2) key={0}`: it
 reads the base store of `link`, whose own name denotes its derived relation.
 An operation over a

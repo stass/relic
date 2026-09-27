@@ -19,6 +19,12 @@ relic_account_init(relic_account_t *account, size_t limit)
 	account->limit = limit;
 }
 
+bool
+relic_limit_set(size_t limit)
+{
+	return (limit != 0 && limit != SIZE_MAX);
+}
+
 /*
  * Whether something holding `current_bytes` of the total -- a relation, an
  * index being built, or nothing yet for an arena's next chunk -- would take
@@ -36,7 +42,7 @@ relic_account_exceeds(const relic_account_t *account, size_t current_bytes,
 	size_t total;
 	size_t elsewhere_bytes;
 
-	if (account->limit == 0)
+	if (!relic_limit_set(account->limit))
 		return (false);
 
 	total = account->store_bytes + account->arena_bytes;

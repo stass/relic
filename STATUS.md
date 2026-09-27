@@ -558,6 +558,22 @@ The writer's share of `chain-closure`'s samples fell from 58 per cent to
 11, about 0.08 s for 24 MB of rows; the 5 per cent the design's gate asks
 for is not reached, and what remains is formatting rather than the lock.
 
+| Component | State |
+| --- | --- |
+| `lib/eval.c`, `lib/plan.c` | step 2, streaming answers: a query rule whose built plan derives each row once -- no wildcard in a generator, and every slot a generator binds read by the EMIT, decided by `relic_plan_derives_distinct()` -- delivers each row to the caller as its EMIT derives it, after every step that can fail, and never writes its answer relation, when no limit bounds the relations (`relic_limits_bound_relations()` in `lib/relation.c`, beside the enforcement, asking each limit the `relic_limit_set()` its check asks: `max_tuples` and `max_memory` each bound them unless zero or `SIZE_MAX`, which every check of a limit now treats alike); any other plan, every plan under a limit, and every plan under `RELIC_F_NO_STREAM` (`-X no-stream`) gathers its answer as before, bounded by the limits; a streamed row counts as a derivation and never as an inserted tuple; explain prints `stream` for such a query's EMIT |
+| `tests/` | `tests/equiv/streaming.sh`: every registered language test answered streaming and gathering, with the rewrite and without it, byte for byte on output, diagnostics and status, and some run required to insert fewer tuples streaming; the random differential suite's `no-stream` strategy; `test_query`: a streamed answer holds nothing, a query whose plan could stream is refused by a tuple or a memory limit its answer outgrows without delivering a row, and a callback that stops the rows receives exactly those before its stop, inside a batch, on a boundary or in the final partial batch, streamed or gathered, and a streamed run stops reading at the end of the batch its stop fell in; `test_plan`: `relic_plan_derives_distinct()` over ten rules under every combination of the index and reordering switches; `tests/cli.sh`: `-X no-stream` answers as the default does |
+
+Step 2 measured as step 1 was, against step 1:
+
+| Workload | Inserted, before | Inserted, after | Time and peak, before | Time and peak, after |
+| --- | --- | --- | --- | --- |
+| `chain-closure` | 4,002,000 | 2,001,000 | 0.79 s, 112 MB | 0.53 s, 64.5 MB |
+| `tc-sparse-cyclic` | 1,958,208 | 979,104 | 0.53 s, 64 MB | 0.42 s, 32.7 MB |
+| `andersen` | 472,445 | 381,864 | | |
+| `facts-join` | 17,572 | 8,786 | | |
+
+Every workload's output was byte for byte the same.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:

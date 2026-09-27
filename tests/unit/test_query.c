@@ -18,6 +18,7 @@
 
 #include "config.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -39,6 +40,7 @@
 #define	SCENARIO_PLANNING	"planning is charged to the memory limit"
 #define	SCENARIO_REFUSED	"a refused query leaves the program valid"
 #define	SCENARIO_STOP		"a callback can stop the rows"
+#define	SCENARIO_STREAMED	"a streamed answer holds nothing"
 #define	SCENARIO_UNDEFINED	"a query warns of a predicate nothing defines"
 #define	SCENARIO_UNSAFE		"an unsafe query makes the program invalid"
 
@@ -70,6 +72,22 @@
 #define	FACTS_MARGIN		16384
 #define	FACT_TEXT_MAX		16	/* the longest "e(N).\n" line */
 
+/*
+ * How many facts the memory case of the limit scenario loads, and the limit
+ * it runs under: the facts and the plan fit, and the four-way product of the
+ * facts -- 160000 rows of four columns -- does not.
+ */
+#define	LIMITED_FACTS		20
+#define	LIMITED_MEMORY		1048576
+
+/*
+ * How many rows the stop scenario's query answers: three whole batches and a
+ * few rows more, so that a stop can fall inside any whole batch, on the
+ * boundary between two, or among the rows of the partial batch the plan
+ * delivers when its join ends.
+ */
+#define	STOP_ROWS		(3 * RELIC_INSERT_BATCH + 3)
+
 /* Room for one line of explain output about a small query. */
 #define	EXPLAIN_TEXT_MAX	128
 
@@ -77,6 +95,7 @@ typedef struct context_size context_size_t;
 typedef struct diag_log diag_log_t;
 typedef struct explained explained_t;
 typedef struct integer_rows integer_rows_t;
+typedef struct stopping_rows stopping_rows_t;
 
 /*
  * What a context holds that answering a query could leave behind: its
@@ -102,13 +121,23 @@ struct integer_rows {
 };
 
 /*
- * The lines of explain output that name a query's answer: the heading that
- * writes the query's rule, and the EMIT of its plan, last seen of each.
+ * The rows a callback asks for before it stops them, how many it was given,
+ * and whether each was the integer that is its position among them.
  */
+struct stopping_rows {
+	size_t	wanted;
+	size_t	delivered;
+	bool	in_order;
+};
 
+/*
+ * The lines of explain output that name a query's answer, last seen of each:
+ * the heading that writes the query's rule, and what the EMIT of its plan
+ * names, whether the plan writes that relation or streams its rows.
+ */
 struct explained {
 	char	query[EXPLAIN_TEXT_MAX];
-	char	emit[EXPLAIN_TEXT_MAX];
+	char	emitted[EXPLAIN_TEXT_MAX];
 };
 
 static bool	 answer_once(relic_t *ctx, const char *text);
@@ -119,6 +148,8 @@ static void	 growth_under(unsigned int flags, const char *strategy);
 static relic_t	*context_with(const char *program, diag_log_t *log);
 static relic_t	*limited_context(size_t max_memory, const char *program,
 		    diag_log_t *log);
+static bool	 ends_with(const char *text, const char *suffix);
+static char	*numbered_facts(size_t count);
 static char	*repeated(const char *first, const char *each, size_t count,
 		    const char *last);
 static bool	 refused_while(relic_t *ctx, size_t max_memory,
@@ -132,9 +163,16 @@ static void	 record_explained(void *callback_ctx, const char *line);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
-static int	 stop_after_one(void *callback_ctx,
+static int	 stop_when_wanted(void *callback_ctx,
 		    const relic_value_t *values, size_t count);
 static void	 a_callback_can_stop_the_rows(void);
+static void	 stopped_under(unsigned int flags, const char *strategy);
+static void	 a_streamed_answer_holds_nothing(void);
+static void	 streamed_under(size_t max_tuples, size_t max_memory,
+		    const char *limits);
+static void	 refused_under(size_t max_tuples, size_t max_memory,
+		    const char *program, const char *text,
+		    const char *expected);
 static void	 a_query_runs_only_in_its_own_context(void);
 static void	 a_query_warns_of_an_undefined_predicate(void);
 static void	 a_refused_query_leaves_the_program_valid(void);
@@ -195,20 +233,29 @@ count_rows(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
 	return (0);
 }
 
+/*
+ * Count a row, noting whether it is the one integer that is its position
+ * among the rows, and ask for no more rows once as many as wanted are
+ * counted.
+ */
 static int
-stop_after_one(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
-    size_t count RELIC_UNUSED)
+stop_when_wanted(void *callback_ctx, const relic_value_t *values,
+    size_t count)
 {
-	size_t *rows;
+	stopping_rows_t *rows;
 
 	rows = callback_ctx;
-	(*rows)++;
+	if (count != 1 || values[0].type != RELIC_INTEGER ||
+	    values[0].v.integer != (int64_t)rows->delivered)
+		rows->in_order = false;
+	rows->delivered++;
 
-	return (1);
+	return (rows->delivered >= rows->wanted ? 1 : 0);
 }
 
 /*
- * Keep the explain lines that name a query's answer, leading spaces removed.
+ * Keep the explain lines that name a query's answer, leading spaces removed,
+ * and of an EMIT's line only the relation it names.
  */
 static void
 record_explained(void *callback_ctx, const char *line)
@@ -223,21 +270,24 @@ record_explained(void *callback_ctx, const char *line)
 	if (strncmp(line, "query ", 6) == 0)
 		strlcpy(explained->query, line, sizeof(explained->query));
 	else if (strncmp(line, "emit ", 5) == 0)
-		strlcpy(explained->emit, line, sizeof(explained->emit));
+		strlcpy(explained->emitted, line + 5,
+		    sizeof(explained->emitted));
+	else if (strncmp(line, "stream ", 7) == 0)
+		strlcpy(explained->emitted, line + 7,
+		    sizeof(explained->emitted));
 }
 
 /*
  * Whether answering `query` explains it under `name`: the query's rule is
- * headed by the name and its plan emits into the relation of that name.  The
- * queries of this suite's naming test have no columns, so the name is the
- * whole of the head.
+ * headed by the name and its plan's EMIT names the relation of that name.
+ * The queries of this suite's naming test have no columns, so the name is
+ * the whole of the head.
  */
 static bool
 answer_is_named(relic_t *ctx, relic_query_t *query, explained_t *explained,
     const char *name)
 {
 	char heading[EXPLAIN_TEXT_MAX];
-	char emit[EXPLAIN_TEXT_MAX];
 	size_t rows;
 
 	bzero(explained, sizeof(*explained));
@@ -247,10 +297,9 @@ answer_is_named(relic_t *ctx, relic_query_t *query, explained_t *explained,
 		return (false);
 
 	snprintf(heading, sizeof(heading), "query %s :- ", name);
-	snprintf(emit, sizeof(emit), "emit %s", name);
 
 	return (strncmp(explained->query, heading, strlen(heading)) == 0 &&
-	    strcmp(explained->emit, emit) == 0);
+	    strcmp(explained->emitted, name) == 0);
 }
 
 /*
@@ -311,7 +360,7 @@ columns_are_the_named_variables(void)
  * refused takes none; a query written in a later load takes the number after
  * the prepared one, since loads and preparations share one sequence.  Each
  * name is read from the explain output, which names the answer as the head
- * of the query's rule and as the relation its plan emits into.
+ * of the query's rule and as the relation its plan's EMIT names.
  */
 static void
 answers_are_named_in_the_order_queries_compile(void)
@@ -472,25 +521,55 @@ growth_under(unsigned int flags, const char *strategy)
 }
 
 /*
- * An answer counts against the tuple limit like any relation, and one that
- * the limit refuses part way is emptied and gives back what it counted: the
- * totals afterwards are what the program's own relations held before it.
- * The query is destroyed after its context, which reads nothing of the
- * context, and leaves nothing for AddressSanitizer to report.
+ * A limit bounds every answer.  A query whose answer outgrows the context's
+ * tuple or memory limit fails without delivering a row, and the relations
+ * hold what they held before, whether its rows must be gathered first or
+ * could be delivered as they are derived.
  */
 static void
 an_answer_refused_by_a_limit_is_given_back(void)
+{
+	char *program;
+
+	refused_under(4, 0, "e(a).\ne(b).\ne(c).\n", "e(X), e(_)?",
+	    "tuples=4 while deriving $q0/1");
+	refused_under(4, 0, "e(a).\ne(b).\ne(c).\n", "e(X), e(Y)?",
+	    "tuples=4 while deriving $q0/2");
+
+	program = numbered_facts(LIMITED_FACTS);
+	if (program == NULL) {
+		check(false, SCENARIO_LIMIT, "the program is written");
+		return;
+	}
+	refused_under(0, LIMITED_MEMORY, program, "e(A), e(B), e(C), e(D)?",
+	    "memory=1048576 while deriving $q0/4");
+	free(program);
+}
+
+/*
+ * Answer `text` over `program` in a context with the given limits, and
+ * confirm that a limit refuses the answer with a diagnostic ending in
+ * `expected`, that no row was delivered, and that the relations, the answer
+ * among them, hold what they held before.  The query is destroyed after its
+ * context, which reads nothing of the context, and leaves nothing for
+ * AddressSanitizer to report.
+ */
+static void
+refused_under(size_t max_tuples, size_t max_memory, const char *program,
+    const char *text, const char *expected)
 {
 	relic_config_t config;
 	relic_query_t *query;
 	relic_stats_t before;
 	relic_stats_t after;
+	const char *reported;
 	relic_t *ctx;
 	diag_log_t log;
 	size_t rows;
 
 	bzero(&config, sizeof(config));
-	config.max_tuples = 4;
+	config.max_tuples = max_tuples;
+	config.max_memory = max_memory;
 	bzero(&log, sizeof(log));
 
 	ctx = relic_create_config(&config);
@@ -501,24 +580,27 @@ an_answer_refused_by_a_limit_is_given_back(void)
 	relic_diag_set(ctx, record_diagnostic, &log);
 
 	query = NULL;
-	if (relic_load_string(ctx, "test.dl", "e(a).\ne(b).\ne(c).\n") == 0 &&
+	if (relic_load_string(ctx, "test.dl", program) == 0 &&
 	    relic_materialize(ctx) == 0)
-		query = relic_query_prepare(ctx, NULL, "e(X)?");
+		query = relic_query_prepare(ctx, NULL, text);
 	relic_stats(ctx, &before);
 
 	rows = 0;
-	check(query != NULL &&
+	checkf(query != NULL &&
 	    relic_query_run(ctx, query, count_rows, &rows) != 0 && rows == 0,
-	    SCENARIO_LIMIT, "the query fails without delivering a row");
-	check(strstr(relic_error(ctx), "while deriving $q0/1") != NULL,
-	    SCENARIO_LIMIT, "the limit names the answer relation");
+	    SCENARIO_LIMIT, "%s should fail without delivering a row, and "
+	    "%zu were delivered", text, rows);
+	reported = relic_error(ctx);
+	checkf(reported != NULL && ends_with(reported, expected), SCENARIO_LIMIT,
+	    "the diagnostic should end \"%s\", not read \"%s\"", expected,
+	    reported == NULL ? "(none)" : reported);
 
 	relic_stats(ctx, &after);
-	checkf(before.tuples == 3 && after.tuples == before.tuples,
-	    SCENARIO_LIMIT, "the relations should hold the 3 facts, not %zu "
-	    "tuples", after.tuples);
+	checkf(after.tuples == before.tuples, SCENARIO_LIMIT,
+	    "the relations should hold their %zu tuples, not %zu",
+	    before.tuples, after.tuples);
 	checkf(after.storage_bytes == before.storage_bytes, SCENARIO_LIMIT,
-	    "the relations should hold the facts' %zu bytes, not %zu",
+	    "the relations should hold their %zu bytes, not %zu",
 	    before.storage_bytes, after.storage_bytes);
 	check(query != NULL && relic_relation_count(query->answer) == 0 &&
 	    relic_relation_bytes(query->answer) == 0, SCENARIO_LIMIT,
@@ -705,27 +787,169 @@ a_query_warns_of_an_undefined_predicate(void)
 
 /*
  * A callback that returns nonzero receives no further rows, and the run still
- * reports success: the caller asked to stop and nothing failed.
+ * reports success: the caller asked to stop and nothing failed.  The rows
+ * delivered are exactly those before the stop, wherever it falls among the
+ * batches the rows are derived in, whether the query streams its rows as it
+ * derives them or gathers its answer first.  A streamed query also stops
+ * deriving: its join ends with the batch the stop fell in, rather than
+ * running to completion and dropping what it derives.
  */
 static void
 a_callback_can_stop_the_rows(void)
 {
-	relic_t *ctx;
+	stopped_under(0, "streamed");
+	stopped_under(RELIC_F_NO_STREAM, "gathered");
+}
+
+/*
+ * Stop e(X)? over STOP_ROWS facts in a context created with `flags`, which
+ * the checks name as answered by `strategy`: inside the first batch, at its
+ * last row, just after it, just after the second, and inside the partial
+ * batch at the end.  The query's plan scans e in the order of its facts, so
+ * the rows delivered are the integers from 0 up to the stop.
+ *
+ * A streamed run derives its rows a batch at a time and delivers each batch
+ * before deriving the next, so the scan has read no further than the end of
+ * the batch the stop fell in.  A gathered run reads every fact before it
+ * delivers a row.
+ */
+static void
+stopped_under(unsigned int flags, const char *strategy)
+{
+	static const size_t stops[] = {
+		2, RELIC_INSERT_BATCH, RELIC_INSERT_BATCH + 1,
+		2 * RELIC_INSERT_BATCH + 1, 3 * RELIC_INSERT_BATCH + 2
+	};
+	relic_config_t config;
+	stopping_rows_t rows;
 	relic_query_t *query;
+	relic_stats_t before;
+	relic_stats_t after;
+	relic_t *ctx;
+	char *program;
+	diag_log_t log;
+	size_t i;
+	bool streams;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	bzero(&log, sizeof(log));
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_STOP, "a context is created");
+		return;
+	}
+	relic_diag_set(ctx, record_diagnostic, &log);
+
+	query = NULL;
+	program = numbered_facts(STOP_ROWS);
+	if (program != NULL && relic_load_string(ctx, "test.dl", program) == 0)
+		query = relic_query_prepare(ctx, NULL, "e(X)?");
+	free(program);
+	streams = (flags & RELIC_F_NO_STREAM) == 0;
+
+	for (i = 0; i < sizeof(stops) / sizeof(stops[0]); i++) {
+		size_t batches;
+		size_t expected_scanned;
+		uint64_t scanned;
+
+		bzero(&rows, sizeof(rows));
+		rows.wanted = stops[i];
+		rows.in_order = true;
+
+		relic_stats(ctx, &before);
+		checkf(query != NULL &&
+		    relic_query_run(ctx, query, stop_when_wanted, &rows) == 0,
+		    SCENARIO_STOP, "the %s run succeeds", strategy);
+		relic_stats(ctx, &after);
+
+		checkf(rows.delivered == rows.wanted && rows.in_order,
+		    SCENARIO_STOP, "the %s rows should be the integers below "
+		    "%zu, and %zu were delivered%s", strategy, rows.wanted,
+		    rows.delivered, rows.in_order ? "" : " out of order");
+
+		batches = (stops[i] + RELIC_INSERT_BATCH - 1) /
+		    RELIC_INSERT_BATCH;
+		expected_scanned = streams ? batches * RELIC_INSERT_BATCH :
+		    STOP_ROWS;
+		if (expected_scanned > STOP_ROWS)
+			expected_scanned = STOP_ROWS;
+		scanned = after.tuples_scanned - before.tuples_scanned;
+		checkf(scanned == expected_scanned, SCENARIO_STOP,
+		    "the %s run stopping at %zu should read %zu facts, not "
+		    "%" PRIu64, strategy, stops[i], expected_scanned, scanned);
+	}
+
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
+/*
+ * A query whose plan derives each of its rows once, in a context that sets
+ * no limit, delivers its rows as it derives them, and its answer relation is
+ * never written: the relations hold what they held, and each row is counted
+ * as a derivation but not as an inserted tuple.  A limit of SIZE_MAX sets
+ * no limit, as zero does, and leaves the query streaming.
+ */
+static void
+a_streamed_answer_holds_nothing(void)
+{
+	streamed_under(0, 0, "no limit");
+	streamed_under(SIZE_MAX, SIZE_MAX, "limits of SIZE_MAX");
+}
+
+/*
+ * Answer e(X)? over three facts in a context with the given limits, which
+ * the checks name as `limits`, and confirm that the answer was streamed.
+ */
+static void
+streamed_under(size_t max_tuples, size_t max_memory, const char *limits)
+{
+	relic_config_t config;
+	relic_query_t *query;
+	relic_stats_t before;
+	relic_stats_t after;
+	relic_t *ctx;
 	diag_log_t log;
 	size_t rows;
 
-	ctx = context_with("e(a).\ne(b).\ne(c).\n", &log);
-	if (ctx == NULL)
-		return;
+	bzero(&config, sizeof(config));
+	config.max_tuples = max_tuples;
+	config.max_memory = max_memory;
+	bzero(&log, sizeof(log));
 
-	query = relic_query_prepare(ctx, NULL, "e(X)?");
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_STREAMED, "a context is created");
+		return;
+	}
+	relic_diag_set(ctx, record_diagnostic, &log);
+
+	query = NULL;
+	if (relic_load_string(ctx, "test.dl", "e(a).\ne(b).\ne(c).\n") == 0 &&
+	    relic_materialize(ctx) == 0)
+		query = relic_query_prepare(ctx, NULL, "e(X)?");
+	relic_stats(ctx, &before);
+
 	rows = 0;
-	check(query != NULL &&
-	    relic_query_run(ctx, query, stop_after_one, &rows) == 0,
-	    SCENARIO_STOP, "the run succeeds");
-	checkf(rows == 1, SCENARIO_STOP,
-	    "one row should be delivered, %zu were", rows);
+	checkf(query != NULL &&
+	    relic_query_run(ctx, query, count_rows, &rows) == 0,
+	    SCENARIO_STREAMED, "the query succeeds under %s", limits);
+	checkf(rows == 3, SCENARIO_STREAMED,
+	    "three rows should be delivered under %s, %zu were", limits, rows);
+
+	relic_stats(ctx, &after);
+	checkf(after.tuples == before.tuples &&
+	    after.tuples_inserted == before.tuples_inserted, SCENARIO_STREAMED,
+	    "nothing should be inserted under %s, %" PRIu64 " tuples were",
+	    limits, after.tuples_inserted - before.tuples_inserted);
+	checkf(after.derivations == before.derivations + 3, SCENARIO_STREAMED,
+	    "each row should be counted as a derivation under %s, %" PRIu64
+	    " were", limits, after.derivations - before.derivations);
+	check(query != NULL && relic_relation_count(query->answer) == 0 &&
+	    relic_relation_bytes(query->answer) == 0, SCENARIO_STREAMED,
+	    "the answer holds nothing");
 
 	relic_query_destroy(query);
 	relic_destroy(ctx);
@@ -796,6 +1020,46 @@ limited_context(size_t max_memory, const char *program, diag_log_t *log)
 	}
 
 	return (ctx);
+}
+
+/*
+ * Whether `text` ends with `suffix`.
+ */
+static bool
+ends_with(const char *text, const char *suffix)
+{
+	size_t text_length;
+	size_t suffix_length;
+
+	text_length = strlen(text);
+	suffix_length = strlen(suffix);
+
+	return (text_length >= suffix_length &&
+	    strcmp(text + text_length - suffix_length, suffix) == 0);
+}
+
+/*
+ * The facts e(0) to e(count - 1), one to a line, in a string the caller
+ * frees, or NULL when there was no memory for it.
+ */
+static char *
+numbered_facts(size_t count)
+{
+	char *program;
+	size_t written;
+	size_t i;
+
+	program = malloc(count * FACT_TEXT_MAX + 1);
+	if (program == NULL)
+		return (NULL);
+
+	written = 0;
+	for (i = 0; i < count; i++)
+		written += (size_t)snprintf(program + written, FACT_TEXT_MAX + 1,
+		    "e(%zu).\n", i);
+	program[written] = '\0';
+
+	return (program);
 }
 
 /*
@@ -991,19 +1255,12 @@ a_fact_costs_its_tuple_and_comes_first(void)
 	relic_t *ctx;
 	char *program;
 	size_t data_bytes;
-	size_t written;
-	size_t i;
 
-	program = malloc(FACTS_LOADED * FACT_TEXT_MAX + 1);
+	program = numbered_facts(FACTS_LOADED);
 	if (program == NULL) {
 		check(false, SCENARIO_FACTS, "the program is written");
 		return;
 	}
-	written = 0;
-	program[0] = '\0';
-	for (i = 0; i < FACTS_LOADED; i++)
-		written += (size_t)snprintf(program + written, FACT_TEXT_MAX + 1,
-		    "e(%zu).\n", i);
 
 	data_bytes = 0;
 	ctx = context_with(program, &log);
@@ -1054,6 +1311,7 @@ main(void)
 	a_refused_query_leaves_the_program_valid();
 	a_query_warns_of_an_undefined_predicate();
 	a_callback_can_stop_the_rows();
+	a_streamed_answer_holds_nothing();
 	a_query_runs_only_in_its_own_context();
 
 	return (check_summary("test_query"));

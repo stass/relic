@@ -13,4 +13,4 @@ stratum 0, component 0 (recursive): path/2
             emit path(X, Z)
 query $q0(X) :- path(a, X).
     lookup path(a, X) key={0}
-    emit $q0(X)
+    stream $q0(X)

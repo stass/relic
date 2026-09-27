@@ -76,11 +76,12 @@ static void	 put_key(relic_explain_line_t *line, uint32_t key_mask);
 static void	 put_literal(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_literal_t *literal);
 static void	 put_op(const relic_t *ctx, relic_explain_line_t *line,
-		    const relic_rule_t *rule, const relic_op_t *op);
+		    const relic_rule_t *rule, const relic_op_t *op,
+		    bool streams);
 static void	 put_op_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_op_atom_t *atom);
 static void	 put_plan(const relic_t *ctx, const relic_rule_t *rule,
-		    const relic_plan_t *plan, unsigned int depth);
+		    const relic_plan_t *plan, unsigned int depth, bool streams);
 static void	 put_pred(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
 static void	 put_pred_name(const relic_t *ctx, relic_explain_line_t *line,
@@ -607,9 +608,14 @@ put_view(relic_explain_line_t *line, enum relic_view view)
 	}
 }
 
+/*
+ * One operation of a plan.  `streams` says that the plan's EMIT delivers
+ * its tuples to the caller as a query's rows rather than writing the
+ * relation it names, which its line shows as `stream`.
+ */
 static void
 put_op(const relic_t *ctx, relic_explain_line_t *line,
-    const relic_rule_t *rule, const relic_op_t *op)
+    const relic_rule_t *rule, const relic_op_t *op, bool streams)
 {
 	switch (op->kind) {
 	case RELIC_OP_SCAN:
@@ -639,7 +645,7 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 		put_term(ctx, line, rule, &op->u.filter.right);
 		return;
 	case RELIC_OP_EMIT:
-		line_put(line, "emit ");
+		line_put(line, streams ? "stream " : "emit ");
 		put_op_atom(ctx, line, rule, &op->u.atom);
 		return;
 	}
@@ -648,18 +654,19 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
- * One line per operation, in plan order, indented by `depth` levels.
+ * One line per operation, in plan order, indented by `depth` levels, the
+ * EMIT shown as put_op() shows it for `streams`.
  */
 static void
 put_plan(const relic_t *ctx, const relic_rule_t *rule,
-    const relic_plan_t *plan, unsigned int depth)
+    const relic_plan_t *plan, unsigned int depth, bool streams)
 {
 	relic_explain_line_t line;
 	size_t i;
 
 	for (i = 0; i < plan->op_count; i++) {
 		line_begin(&line, depth);
-		put_op(ctx, &line, rule, &plan->ops[i]);
+		put_op(ctx, &line, rule, &plan->ops[i], streams);
 		line_finish(ctx, &line);
 	}
 }
@@ -740,7 +747,7 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 	line_finish(ctx, &line);
 
 	if (plan != NULL)
-		put_plan(ctx, rule, plan, depth + 2);
+		put_plan(ctx, rule, plan, depth + 2, false);
 }
 
 /*
@@ -792,7 +799,7 @@ relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 		    depth + 2);
 		finish_heading(ctx, &line);
 		put_plan(ctx, rule, placed != NULL ? placed : delta_first,
-		    depth + 3);
+		    depth + 3, false);
 		return;
 	}
 
@@ -801,17 +808,17 @@ relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 	put_uint64(&line, threshold);
 	line_put(&line, threshold == 1 ? " tuple" : " tuples");
 	finish_heading(ctx, &line);
-	put_plan(ctx, rule, placed, depth + 3);
+	put_plan(ctx, rule, placed, depth + 3, false);
 
 	begin_variant_heading(ctx, &line, rule, delta_literal, depth + 2);
 	line_put(&line, " otherwise");
 	finish_heading(ctx, &line);
-	put_plan(ctx, rule, delta_first, depth + 3);
+	put_plan(ctx, rule, delta_first, depth + 3, false);
 }
 
 void
 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
-    const relic_relation_t *answer, const relic_plan_t *plan)
+    const relic_relation_t *answer, const relic_plan_t *plan, bool streams)
 {
 	relic_explain_line_t line;
 
@@ -823,7 +830,7 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 	put_query_rule(ctx, &line, rule, answer);
 	line_finish(ctx, &line);
 
-	put_plan(ctx, rule, plan, 1);
+	put_plan(ctx, rule, plan, 1, streams);
 }
 
 /*

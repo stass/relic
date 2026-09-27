@@ -68,4 +68,4 @@ magic rewrite of $q0(X) :- reach(a, X).
                 emit link$bf(X, Y)
 query $q0(X) :- reach$bf(a, X).
     lookup reach$bf(a, X) key={0}
-    emit $q0(X)
+    stream $q0(X)

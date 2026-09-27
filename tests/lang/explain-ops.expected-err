@@ -28,16 +28,16 @@ stratum 1, component 4: free/1
         emit free(X)
 query $q0(X) :- pick(X).
     scan pick(X)
-    emit $q0(X)
+    stream $q0(X)
 query $q1(X) :- free(X).
     scan free(X)
-    emit $q1(X)
+    stream $q1(X)
 query $q2(X) :- large(X).
     scan large(X)
-    emit $q2(X)
+    stream $q2(X)
 query $q3(X) :- named(X).
     scan named(X)
-    emit $q3(X)
+    stream $q3(X)
 query $q4(X) :- hostile(X).
     scan hostile(X)
-    emit $q4(X)
+    stream $q4(X)

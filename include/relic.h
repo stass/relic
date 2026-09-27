@@ -152,9 +152,11 @@ typedef struct relic_config relic_config_t;
  * strategy that must give the same answers as the default; they exist so
  * that strategies can be compared against one another, and are not meant
  * for ordinary use.  RELIC_F_NOTE_MIXED instead asks for a diagnostic the
- * library does not otherwise give.  No switch changes an answer.  Bits no
- * switch defines are ignored, so a library that predates a switch runs a
- * caller that sets it as if it were not set.
+ * library does not otherwise give.  No switch changes an answer, though two
+ * strategies may hold different amounts while they compute one, and so one
+ * may meet a limit the other does not.  Bits no switch defines are ignored,
+ * so a library that predates a switch runs a caller that sets it as if it
+ * were not set.
  *
  * The structure's layout is part of the binary interface, so a release that
  * adds a limit changes the library's interface version.
@@ -211,6 +213,15 @@ struct relic_config {
  * Asking for the note costs nothing that can fail.
  */
 #define	RELIC_F_NOTE_MIXED	0x0010u
+
+/*
+ * Gather every query's answer in its answer relation before delivering a
+ * row, as a query whose derivations may repeat must be answered, even one
+ * whose plan derives each row once and could deliver its rows as it derives
+ * them.  The rows are the same and come in the same order, which tests show
+ * by answering both ways.
+ */
+#define	RELIC_F_NO_STREAM	0x0020u
 
 /*
  * Create a context.  Returns NULL when memory is exhausted or when
@@ -617,9 +628,18 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * outgrows its budget, when no Magic limit is configured, is abandoned with
  * a warning, and the query answered from the whole program instead.
  *
- * No row is delivered until the whole answer is known.  A query that fails
- * -- a limit exceeded, say -- therefore delivers no rows at all rather than a
- * truncated answer that would be indistinguishable from a complete one.
+ * No row is delivered until everything that can fail has succeeded.  A query
+ * answered in a context whose max_tuples and max_memory each set no limit,
+ * being zero or SIZE_MAX, has its rows delivered as they are derived, once
+ * every relation it reads is complete, when the plan of the rule it runs --
+ * its own, or its rewrite's -- derives each row once: when it names every
+ * variable its body binds and matches no argument with `_`.  Any other query's answer is gathered whole, its
+ * duplicates dropped and the limits bounding it, before its first row is
+ * delivered.  A query that fails -- a limit exceeded, say -- therefore
+ * delivers no rows at all rather than a truncated answer that would be
+ * indistinguishable from a complete one.  A diagnostic the query's
+ * evaluation reports, such as the note RELIC_F_NOTE_MIXED asks for, may come
+ * between rows delivered as they are derived.
  *
  * Rows are distinct, because a query's answer is a set.  Their order is
  * unspecified by the language but is the same on every run over the same
@@ -629,8 +649,9 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * The answer is transient.  Once its rows have been delivered, or the
  * callback has stopped them, the context keeps nothing of it, so answering
  * many queries does not grow the context and earlier answers do not count
- * against the tuple and memory limits.  A caller that wants to keep an answer
- * copies it, as relic_query_collect() does.
+ * against the tuple and memory limits.  An answer delivered as it is derived
+ * is never held at all.  A caller that wants to keep an answer copies it, as
+ * relic_query_collect() does.
  *
  * The callback may read through the context, and any other call it makes is
  * refused, as the description of relic_t sets out.
@@ -702,10 +723,13 @@ typedef struct relic_stats relic_stats_t;
  *	iterations	rounds of fixed-point evaluation of recursive
  *			components; a component that is not recursive is
  *			evaluated in one pass, which is not counted
- *	derivations	head tuples produced by rules, and facts seeded into
- *			the relation of a predicate rules derive, whether
- *			or not the relation already held them
- *	tuples_inserted	derivations that added a tuple to its relation
+ *	derivations	head tuples produced by rules, the rows a query
+ *			delivers as it derives them among them, and facts
+ *			seeded into the relation of a predicate rules
+ *			derive, whether or not the relation already held
+ *			them
+ *	tuples_inserted	derivations that added a tuple to its relation,
+ *			which a row delivered as it is derived never does
  *	tuples_scanned	tuples read while scanning relations
  *	tuples_looked_up
  *			tuples read while looking up relations through an
@@ -713,8 +737,9 @@ typedef struct relic_stats relic_stats_t;
  *
  * The rest describe the context when the counters are read: the tuples held
  * across every relation -- answers are transient, so only a row callback
- * finds one among them, the answer it is receiving -- the bytes of relation
- * and index storage they occupy, and the distinct values interned, by type.
+ * finds one among them, the answer it is receiving when its query gathers
+ * the answer before delivering it -- the bytes of relation and index storage
+ * they occupy, and the distinct values interned, by type.
  *
  * The counts depend on the evaluation strategy and on how the engine is
  * implemented, and are not stable from one release to the next; only the

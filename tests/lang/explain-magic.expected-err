@@ -39,4 +39,4 @@ magic rewrite of $q0(S, X) :- start(S), path(S, X).
 query $q0(S, X) :- start(S), path$bf(S, X).
     scan start(S)
     lookup path$bf(S, X) key={0}
-    emit $q0(S, X)
+    stream $q0(S, X)

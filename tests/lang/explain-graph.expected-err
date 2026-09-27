@@ -30,7 +30,7 @@ magic rewrite of $q0(X) :- path(a, X).
                 emit path$bf(X, Z)
 query $q0(X) :- path$bf(a, X).
     lookup path$bf(a, X) key={0}
-    emit $q0(X)
+    stream $q0(X)
 magic rewrite of $q1(X) :- path(X, d).
     adorn path/2 fb
     seed magic$path$fb(d).
@@ -54,4 +54,4 @@ magic rewrite of $q1(X) :- path(X, d).
                 emit path$fb(X, Z)
 query $q1(X) :- path$fb(X, d).
     lookup path$fb(X, d) key={1}
-    emit $q1(X)
+    stream $q1(X)

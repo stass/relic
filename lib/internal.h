@@ -876,6 +876,13 @@ uint32_t relic_plan_bound_columns(const relic_atom_t *atom, uint16_t arity,
 	    uint64_t bound);
 
 /*
+ * Whether a plan, run once over relations that do not change while it
+ * runs, derives each of its head tuples once: so that inserting what it
+ * derives would reject nothing, and its derivations are a set as they come.
+ */
+bool	 relic_plan_derives_distinct(const relic_plan_t *plan);
+
+/*
  * lib/magic.c
  *
  * A query's Magic rewrite.  relic_magic_find_complete() decides which
@@ -1080,12 +1087,14 @@ enum relic_table_event_kind relic_table_next(relic_table_reader_t *reader,
  * gathering what it would show.  Each of the others shows one thing when a
  * callback is installed and nothing otherwise: a component's heading and fact
  * count, a rule with its plan, one delta variant of the rule last shown, a
- * query with its plan, and the heading of a query's Magic rewrite.  A
- * query's rule names no predicate, so the two that show one are given the
- * query's answer relation, whose name its head is written with.  `depth` is
- * the level a component's heading is indented to, one more for a component
- * of a rewritten program than for one of the program itself; what belongs
- * to the component is indented beneath it.  None can fail.
+ * query with its plan, its EMIT shown as `stream` when `streams` says it
+ * delivers the query's rows as it derives them, and the heading of a query's
+ * Magic rewrite.  A query's rule names no predicate, so the two that show
+ * one are given the query's answer relation, whose name its head is written
+ * with.  `depth` is the level a component's heading is indented to, one more
+ * for a component of a rewritten program than for one of the program
+ * itself; what belongs to the component is indented beneath it.  None can
+ * fail.
  */
 bool	 relic_explaining(const relic_t *ctx);
 void	 relic_explain_component(relic_t *ctx,
@@ -1098,7 +1107,8 @@ void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_plan_t *delta_first, uint64_t threshold,
 	    unsigned int depth);
 void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
-	    const relic_relation_t *answer, const relic_plan_t *plan);
+	    const relic_relation_t *answer, const relic_plan_t *plan,
+	    bool streams);
 void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	    const relic_relation_t *answer, const relic_magic_t *magic);
 
@@ -1300,5 +1310,14 @@ const char *relic_relation_describe(const relic_t *ctx,
 	    const relic_relation_t *relation, char *buffer, size_t size);
 size_t	 relic_relation_total_bytes(const relic_t *ctx);
 size_t	 relic_relation_total_tuples(const relic_t *ctx);
+
+/*
+ * Whether a configured limit bounds what the relations may hold, so that an
+ * insertion can be refused by a limit the caller set.  A query consults it
+ * before delivering rows it does not store: under a limit a refusal has to
+ * come before the first row, and a row that is never stored is never
+ * refused.
+ */
+bool	 relic_limits_bound_relations(const relic_t *ctx);
 
 #endif /* RELIC_INTERNAL_H */

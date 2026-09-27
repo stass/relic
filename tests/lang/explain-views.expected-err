@@ -13,4 +13,4 @@ stratum 0, component 0 (recursive): p/2
             emit p(X, Z)
 query $q0(X) :- p(a, X).
     lookup p(a, X) key={0}
-    emit $q0(X)
+    stream $q0(X)

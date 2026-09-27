@@ -304,11 +304,13 @@ dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
 
 ##
 ## The equivalence suite runs every language test under each alternative
-## evaluation strategy -X selects and compares it with the default.  Its
-## corpus is RELIC_LANG_TESTS below, so it needs no list of its own.
+## evaluation strategy -X selects and compares it with the default, and
+## again with every answer gathered before its rows are written, which must
+## write the same rows in the same order.  Its corpus is RELIC_LANG_TESTS
+## below, so it needs no list of its own.
 ##
 
-dist_check_SCRIPTS += tests/equiv/strategies.sh
+dist_check_SCRIPTS += tests/equiv/strategies.sh tests/equiv/streaming.sh
 
 ##
 ## The randomized differential suite generates programs from seeds, runs each

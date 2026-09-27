@@ -433,7 +433,10 @@ query object owns, per `specs/design-query.md`. Answering one is three steps:
 2. **Run the query's plan once**, with the answer relation as its emit
    target. The answer is read by no rule, since it is no predicate's relation,
    so one pass computes it completely. Duplicate answers collapse on
-   insertion, which is what gives a query set semantics.
+   insertion, which is what gives a query set semantics. A plan that derives
+   each row once, run in a context that sets no tuple or memory limit, emits
+   to the caller's callback instead, and the query has no step 3
+   (`specs/design-comparison-cost.md` section 4).
 3. **Stream the answer relation** to the caller's callback, one row per tuple,
    in insertion order.
 
@@ -447,11 +450,13 @@ A row is the tuple's values converted to `relic_value_t`, borrowed for the
 duration of the call. A callback that returns nonzero stops the stream, and the
 run still reports success: the caller asked to stop, and nothing failed.
 
-**No row is delivered until the answer is complete.** Every step that can fail
--- a limit, an allocation -- happens in steps 1 and 2, and step 3 cannot fail.
-A query that exceeds a limit therefore produces no rows and an error, never a
-truncated answer indistinguishable from a complete one, which is what
-architecture section 63 requires.
+**No row is delivered until everything that can fail has succeeded.** Every
+step that can fail -- a limit, an allocation -- happens in step 1, in planning
+step 2 and in running it into the answer relation, and step 3 cannot fail. A
+plan run into the caller's callback allocates nothing and meets no limit once
+its first row is derived. A query that exceeds a limit therefore produces no
+rows and an error, never a truncated answer indistinguishable from a complete
+one, which is what architecture section 63 requires.
 
 The answer relation is emptied when the run ends, whether the rows were
 delivered, the callback stopped them or the answer failed part way, so

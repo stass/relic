@@ -8,4 +8,4 @@ stratum 0, component 1: fit/1
         emit fit(X)
 query $q0(X) :- long(X).
     scan long(X)
-    emit $q0(X)
+    stream $q0(X)

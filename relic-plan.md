@@ -1177,8 +1177,8 @@ test that runs in CI. **M5.**
 
 **Delivers.** The six changes of `specs/design-comparison-cost.md`, in its
 section 10 order, each a commit with its test and its measurement: the
-tool's buffered row writer; streamed answers for projection-free queries;
-adornment subsumption and the free rewrite that is no rewrite; index keys
+tool's buffered row writer; streamed answers for queries whose plans
+derive each row once; adornment subsumption and the free rewrite that is no rewrite; index keys
 stored beside their chains and the tag byte of the identifier table;
 mapped growth for large arrays; and the typed domain identifier with the
 integer-only value table, the packed symbol pool and a row hashed once on
@@ -1390,19 +1390,25 @@ is retired; `max_magic_rules` stays a configurable limit, and configuring
 it lifts both remaining budgets as before.
 Specified in `specs/design-magic.md` section 8.
 
-### D-22 A projection-free query streams its derivations
+### D-22 A query whose plan derives each row once streams its derivations
 
-A query whose head keeps every variable its body binds derives each answer
-exactly once: its plan visits each full binding of the body once, and a
-head that mentions every variable is injective in the binding. Inserting
-such derivations into the answer relation of D-17 rejects nothing and
-costs a hashed insert and a second copy of the relation, which on
-`chain-closure` was 2,001,000 inserts and 33.6 MB for a relation of the
-same size. The query rule's `EMIT` delivers to the caller's callback
-instead, in derivation order, which is the order the relation would have
-listed. A projecting query keeps the relation, since a set without a
-relation is a relation. D-17 stands: the query owns its answer relation,
-and a streaming query leaves it empty.
+A plan in which no generator matches an argument with `_` and whose `EMIT`
+reads every slot a generator binds derives each answer exactly once: it
+visits each binding once, and the head is injective in the binding. The
+planner decides this on the built plan, after any rewrite, rather than on
+the query as written. Inserting such derivations into the answer relation
+of D-17 rejects nothing and costs a hashed insert and a second copy of
+the relation, which on `chain-closure` was 2,001,000 inserts and 33.6 MB
+for a relation of the same size. The query rule's `EMIT` delivers to the
+caller's callback instead, in derivation order, which is the order the
+relation would have listed. Any other plan keeps the relation, since a
+set without a relation is a relation.
+
+Under a tuple or memory limit no query streams. The limit's contract is
+that a refused query delivers no row, and a streamed row is never stored
+to be refused, so under a limit the answer is gathered and bounded as
+every relation is. D-17 stands: the query owns its answer relation, and a
+streaming query leaves it empty.
 Specified in `specs/design-comparison-cost.md` section 4.
 
 ### D-23 A free adornment subsumes the others

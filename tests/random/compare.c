@@ -67,6 +67,8 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 		"naive", RELIC_F_NAIVE, false, STRATEGY_DEFAULT },
 	[STRATEGY_NO_INDEX] = {
 		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT },
+	[STRATEGY_NO_STREAM] = {
+		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT },
 	[STRATEGY_NO_REORDER] = {
 		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE },
 	[STRATEGY_NO_MAGIC] = {

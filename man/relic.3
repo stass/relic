@@ -218,7 +218,9 @@ either lifts every budget, and a limit left zero beside it bounds nothing.
 sets no bound on anything.
 .Fa flags
 holds switches, zero by default.
-The first four select alternative evaluation strategies for testing:
+The first four and
+.Dv RELIC_F_NO_STREAM
+select alternative evaluation strategies for testing:
 .Bl -tag -width RELIC_F_NOTE_MIXED
 .It Dv RELIC_F_NAIVE
 evaluate every recursive component by the naive fixed point rather than the
@@ -235,10 +237,17 @@ report, as a note pointing at the comparison, the first ordering comparison
 in each rule that compared values of different types, which is false; a
 rule of the program is reported at most once for the life of the context,
 the rules a Magic Sets rewrite generates from it counting as that rule, and
-a query at most once each time it is answered.
+a query at most once each time it is answered;
+.It Dv RELIC_F_NO_STREAM
+gather every query's answer whole before delivering its first row, even a
+query whose plan derives each row once and could deliver its rows as it
+derives them; the rows and their order are the same.
 .El
 .Pp
-No switch changes an answer, and a bit no switch defines is ignored.
+No switch changes an answer, though two strategies may hold different
+amounts while they compute one, and so one may meet a limit the other does
+not.
+A bit no switch defines is ignored.
 .Pp
 Each context keys its hash tables with a seed drawn from
 .Xr getentropy 2
@@ -420,9 +429,9 @@ evaluates the whole program.
 Neither is needed before a query, which checks and evaluates what it needs.
 .Ss Queries
 .Fn relic_query_run
-computes the whole answer of
+answers
 .Fa query
-and passes it to
+and passes the answer to
 .Fa callback
 one row at a time:
 .Bd -literal -offset indent
@@ -433,13 +442,29 @@ typedef int (*relic_row_cb)(void *callback_ctx,
 A row has one value per variable the query names, in the order they first
 occur.
 The callback returns zero for the next row and nonzero to stop.
-A query that fails delivers no rows.
+No row is delivered until everything that can fail has succeeded, so a query
+that fails delivers no rows.
+In a context where
+.Fa max_tuples
+and
+.Fa max_memory
+each set no limit, being zero or
+.Dv SIZE_MAX ,
+a query delivers its rows as it derives them, once every relation it reads
+is complete, when the plan of the rule it runs, its own or its rewrite's,
+derives each row once: when it names every variable its body binds and
+matches no argument with
+.Ql _ .
+Any other query's answer is computed whole, its duplicates dropped and the
+limits bounding it, before its first row is delivered.
+A diagnostic the evaluation reports may come between rows delivered as they
+are derived.
 Once the rows have been delivered the context keeps nothing of the answer,
 so answers do not count against
 .Fa max_tuples
 or
 .Fa max_memory
-for later queries.
+for later queries; an answer delivered as it is derived is never held.
 .Pp
 .Fn relic_query_collect
 copies the answer into a result the caller owns.

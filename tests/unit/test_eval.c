@@ -1074,9 +1074,10 @@ fan_counters_are(const char *what, bool binary, unsigned int flags,
  * one's first node: 64,000 derivations, none new, and the fixed point is
  * reached.  Every derivation is one of the 64,000 ways the recursive rule's
  * body can be satisfied, made once.  The query then scans tc and derives its
- * 1600 rows. 2 rounds, 67,200 derivations, 3200 insertions, 4800 scanned,
- * 64,000 looked up.  A round that could see what its own rules inserted derives
- * most of the closure twice.
+ * 1600 rows, which it delivers as it derives them and inserts nowhere.  2
+ * rounds, 67,200 derivations, 1600 insertions, 4800 scanned, 64,000 looked
+ * up.  A round that could see what its own rules inserted derives most of
+ * the closure twice.
  */
 static void
 every_derivation_is_made_once(void)
@@ -1116,7 +1117,7 @@ every_derivation_is_made_once(void)
 		relic_stats(ctx, &stats);
 		counters_are(SCENARIO_ONCE, "the complete graph", &stats,
 		    (counters_t){ .iterations = 2, .derivations = 67200,
-		    .inserted = 3200, .scanned = 4800, .looked_up = 64000 });
+		    .inserted = 1600, .scanned = 4800, .looked_up = 64000 });
 	} else {
 		check(false, SCENARIO_ONCE, "the complete graph is closed");
 	}
