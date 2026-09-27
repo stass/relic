@@ -1178,17 +1178,18 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * a tuple, and its other columns are not read.  relic_index_first_since()
  * starts such a walk at the first of those tuples whose identifier is at
  * least `since`, from the key's frontier, which it moves forward; the starts
- * it is asked for should never decrease between two emptyings of the index,
- * as a semi-naive delta's never do, or the walk costs the whole chain.
+ * it is asked for should never decrease over the life of the index, as a
+ * semi-naive delta's never do, or the walk costs the whole chain.
  * relic_index_bytes_after_reserve() is what the memory limit projects a
- * reservation with.
+ * reservation with.  relic_index_free() releases an index, which
+ * relic_index_init() must set up again before it is used.
  *
  * The relation store builds and extends indexes and does all the
  * accounting; the evaluator only walks them, moving a key's frontier as a
  * lookup of a delta walks toward the delta's start.
  */
 void	 relic_index_init(relic_index_t *index, uint32_t key_mask);
-void	 relic_index_empty(relic_index_t *index);
+void	 relic_index_free(relic_index_t *index);
 size_t	 relic_index_bytes(const relic_index_t *index);
 size_t	 relic_index_bytes_after_reserve(const relic_index_t *index,
 	    size_t tuples, size_t added_keys);

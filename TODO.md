@@ -413,6 +413,23 @@ prefixes out in full kept 602 rules and answered it, at 15 s and 5.9 GB. A
 caller who sets the limit sized the rewrite, so the question is only what
 a generated rule means to them: decide whether supplementary rules count.
 
+**An index keeps a key's entry and its values in two arrays.** [Low,
+component: `lib/index.c`] `entries` and `key_values` are both indexed by key
+identifier, but each has its own capacity, growth, projection and overflow
+check, and they stay in step because the reservation, the byte count, its
+projection and the release each name both. One array holding each key's
+entry followed by its `key_length` values would keep them in step by
+construction, drop a capacity and an overflow clause, and put a key's values
+on the cache line `relic_index_first()` reads right after comparing them.
+
+**No test forces a tag collision in an index's key table.** [Low, component:
+`tests/unit/test_index.c`] The key table is tagged, so a probe is handed
+another key's candidate about one time in 256 rather than on every slot it
+passes, and the late-key test's forty keys almost never reach one: comparing
+too few words of a key does not fail it, though the larger tests catch it.
+Thousands of keys, or a test-only way to place a key under a chosen hash,
+would make the key comparison the thing that test checks.
+
 **Append-only invariant versus incremental maintenance.** [Medium, component:
 `lib/relation.c`] D-10 represents a delta as a range of tuple identifiers,
 which requires that nothing compacts, deletes or renumbers a relation during a

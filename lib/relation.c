@@ -143,7 +143,7 @@ relation_empty(relic_relation_t *relation)
 	relation->count = 0;
 
 	for (position = 0; position < relation->index_count; position++)
-		relic_index_empty(&relation->indexes[position]);
+		relic_index_free(&relation->indexes[position]);
 	relation->index_count = 0;
 
 	bzero(&relation->stats, sizeof(relation->stats));
@@ -181,7 +181,7 @@ relation_init(relic_relation_t *relation, const relic_t *ctx,
     relic_pred_id_t pred, size_t serial, uint16_t arity)
 {
 	bzero(relation, sizeof(*relation));
-	relic_idtab_init(&relation->index);
+	relic_idtab_init(&relation->index, false);
 	relation->hash_seed = ctx->hash_seed;
 	relation->pred = pred;
 	relation->serial = serial;
@@ -988,7 +988,7 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	relic_index_init(&built, key_mask);
 	if (index_build(ctx, relation, &built) != 0) {
 		ctx->account.store_bytes -= relic_index_bytes(&built);
-		relic_index_empty(&built);
+		relic_index_free(&built);
 		return (-1);
 	}
 
@@ -1049,7 +1049,7 @@ count_distinct(relic_t *ctx, const relic_relation_t *relation,
 
 	rehash.relation = relation;
 	rehash.column = column;
-	relic_idtab_init(&seen);
+	relic_idtab_init(&seen, true);
 	distinct = 0;
 
 	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
@@ -1325,7 +1325,7 @@ relation_drop_indexes(relic_t *ctx, relic_relation_t *relation)
 	for (position = 0; position < relation->index_count; position++) {
 		ctx->account.store_bytes -=
 		    relic_index_bytes(&relation->indexes[position]);
-		relic_index_empty(&relation->indexes[position]);
+		relic_index_free(&relation->indexes[position]);
 	}
 	relation->index_count = 0;
 }

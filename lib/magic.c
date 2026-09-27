@@ -402,7 +402,7 @@ relic_magic_init(relic_magic_t *magic, relic_t *ctx)
 	relic_arena_init_charged(&magic->scratch, &ctx->account);
 	adornment_set_init(&magic->kept, ctx->hash_seed);
 	adornment_set_init(&magic->subsumed, ctx->hash_seed);
-	relic_idtab_init(&magic->rule_index);
+	relic_idtab_init(&magic->rule_index, false);
 	magic->hash_seed = ctx->hash_seed;
 }
 
@@ -1209,7 +1209,7 @@ static void
 adornment_set_init(relic_adornment_set_t *set, uint64_t hash_seed)
 {
 	bzero(set, sizeof(*set));
-	relic_idtab_init(&set->index);
+	relic_idtab_init(&set->index, false);
 	set->hash_seed = hash_seed;
 }
 

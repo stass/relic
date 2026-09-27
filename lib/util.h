@@ -116,7 +116,9 @@ typedef struct relic_idtab relic_idtab_t;
 /*
  * Recover the hash of an identifier already in the table.  Only the owner of
  * the keys can do this, so it supplies the function; the table calls it once
- * per entry when it doubles and never on a lookup.
+ * per entry when it doubles and never on a lookup.  It must return exactly
+ * the hash the identifier was placed under, all 32 bits of it: the low bits
+ * choose the slot and a tagged table keeps the top eight.
  */
 typedef uint32_t (*relic_rehash_fn)(uint32_t id, void *ctx);
 
@@ -126,7 +128,18 @@ typedef uint32_t (*relic_rehash_fn)(uint32_t id, void *ctx);
  * A slot holds an identifier and nothing else: no key, no key pointer, no
  * cached hash.  That is the whole reason for a purpose-built table rather
  * than a generic container.  The key stays wherever its owner already keeps
- * it, so an entry costs four bytes and the owner stores nothing twice.
+ * it, so an entry costs four bytes, and five in a table created tagged.
+ *
+ * A table created tagged keeps one byte more per slot, in `tags` beside the
+ * slot array: the top eight bits of the hash the slot's identifier was placed
+ * under.  The bottom bits of a hash choose its first slot, so a tag tells
+ * apart keys that the slot does not, and a probe passes an occupied slot
+ * whose tag differs from its own hash's without handing the identifier to
+ * the owner.  A search for an absent key then asks the owner about one
+ * mismatching slot in 256 rather than each one it visits, which pays where
+ * comparing a candidate reads memory far from the table, such as a symbol's
+ * bytes.  A table whose searches mostly succeed reads the matching key
+ * either way, and is created untagged, with `tags` NULL.
  *
  * The table never removes an entry and therefore has no tombstones, which is
  * what keeps linear probing simple.  Nothing in relic un-interns a symbol or
@@ -135,23 +148,32 @@ typedef uint32_t (*relic_rehash_fn)(uint32_t id, void *ctx);
  */
 struct relic_idtab {
 	uint32_t	*slots;		/* RELIC_ID_NONE marks an empty slot */
+	uint8_t		*tags;		/* per slot when tagged, else NULL */
 	size_t		 capacity;	/* a power of two, zero if empty */
 	size_t		 count;
+	bool		 tagged;
 };
 
 /*
  * A walk over the slots a hash may have landed in.  The probe sequence lives
  * here and nowhere else; the comparison that decides whether a candidate
  * identifier is the one being looked for stays at the call site, where a
- * reader can see what makes two keys equal.
+ * reader can see what makes two keys equal.  `tag` is the hash's tag, which
+ * a tagged table's candidates must carry.
  */
 struct relic_idprobe {
 	const relic_idtab_t	*table;
 	size_t			 mask;
 	size_t			 slot;
+	uint8_t			 tag;
 };
 
-void	 relic_idtab_init(relic_idtab_t *table);
+/*
+ * relic_idtab_init() makes an empty table, tagged or not for good: the
+ * choice survives relic_idtab_reset(), which releases the slots and leaves
+ * the empty table of the same kind.
+ */
+void	 relic_idtab_init(relic_idtab_t *table, bool tagged);
 void	 relic_idtab_reset(relic_idtab_t *table);
 
 /*
@@ -189,8 +211,8 @@ int	 relic_idtab_reserve(relic_idtab_t *table, size_t added,
 void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
 
 /*
- * The bytes a table's slots occupy now, and the bytes they would occupy once
- * relic_idtab_reserve() had made room for `added` more entries.
+ * The bytes a table's slots and tags occupy now, and the bytes they would
+ * occupy once relic_idtab_reserve() had made room for `added` more entries.
  *
  * These exist for the relation store, whose indexes are accounted against the
  * memory limit and must therefore be measured before they are allocated
@@ -216,18 +238,26 @@ size_t	 relic_idtab_bytes_after_reserve(const relic_idtab_t *table,
 
 /*
  * Hints for a caller about to probe many hashes, which lets their cache
- * misses overlap.  relic_idtab_prefetch() asks for the slot `hash` selects;
- * relic_idtab_peek() gives the identifier in that slot, RELIC_ID_NONE when
- * it is empty, whatever hash it was placed under, so that the caller can
- * ask for the key it names too.  Neither is a lookup, and neither changes
- * anything.  A table with no capacity has no slots, and neither touches
- * one.  Both are inline because a batch calls them once per tuple.
+ * misses overlap.  relic_idtab_prefetch() asks for the slot `hash` selects,
+ * and its tag in a tagged table; relic_idtab_peek() gives the identifier in
+ * that slot, RELIC_ID_NONE when it is empty, whatever hash it was placed
+ * under, so that the caller can ask for the key it names too.  Neither is a
+ * lookup, and neither changes anything.  A table with no capacity has no
+ * slots, and neither touches one.  Both are inline because a batch calls
+ * them once per tuple.
  */
 static inline void
 relic_idtab_prefetch(const relic_idtab_t *table, uint32_t hash)
 {
-	if (table->capacity > 0)
-		RELIC_PREFETCH(&table->slots[hash & (table->capacity - 1)]);
+	size_t slot;
+
+	if (table->capacity == 0)
+		return;
+
+	slot = hash & (table->capacity - 1);
+	RELIC_PREFETCH(&table->slots[slot]);
+	if (table->tags != NULL)
+		RELIC_PREFETCH(&table->tags[slot]);
 }
 
 static inline uint32_t
@@ -248,8 +278,9 @@ void	 relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
 /*
  * Store the next candidate identifier in *idp and return true, or return
  * false once the walk reaches an empty slot, which proves no further slot can
- * hold the key.  The walk always terminates: the table keeps an empty slot by
- * growing before it fills.
+ * hold the key.  In a tagged table a candidate is an identifier whose tag is
+ * the probe's; the others are passed over.  The walk always terminates: the
+ * table keeps an empty slot by growing before it fills.
  */
 bool	 relic_idprobe_next(relic_idprobe_t *probe, uint32_t *idp);
 

@@ -40,6 +40,7 @@
 #define	SCENARIO_DISCARD	"a discard drops every index"
 #define	SCENARIO_DISTINCT	"a distinct count follows the tuples"
 #define	SCENARIO_FRONTIER	"a delta lookup starts where its delta does"
+#define	SCENARIO_LATE_KEY	"a key first held late is found by its values"
 #define	SCENARIO_LIMIT		"the memory limit refuses a build whole"
 #define	SCENARIO_LIMIT_SWEEP	"the memory limit holds as indexes grow"
 #define	SCENARIO_MASK		"an index is keyed on columns the relation has"
@@ -85,6 +86,8 @@ static bool	 frontiers_rest_at(const relic_relation_t *rel,
 		    uint32_t position, relic_tuple_id_t since);
 static size_t	 distinct_by_hand(const relic_relation_t *rel, uint16_t column);
 static size_t	 storage_by_hand(const relic_t *ctx);
+static size_t	 index_bytes_by_hand(const relic_index_t *index);
+static void	 a_key_first_held_late_is_found_by_its_values(void);
 static void	 a_lookup_visits_a_keys_tuples_in_order(void);
 static void	 an_index_built_late_matches_one_kept_up(void);
 static void	 a_lookup_walking_while_its_key_grows(void);
@@ -214,6 +217,21 @@ keys_agree(uint16_t arity, uint32_t key_mask, const relic_dom_t *a,
 	}
 
 	return (true);
+}
+
+/*
+ * The bytes an index's arrays occupy, added up from their capacities: the
+ * key table's slots, each with its tag, the keys' entries and values, and
+ * the chains.
+ */
+static size_t
+index_bytes_by_hand(const relic_index_t *index)
+{
+	return (index->keys.capacity * (sizeof(uint32_t) + 1) +
+	    index->entry_capacity * sizeof(relic_index_key_t) +
+	    index->key_value_capacity * index->key_length *
+	    sizeof(relic_dom_t) +
+	    index->next_capacity * sizeof(relic_tuple_id_t));
 }
 
 /*
@@ -416,6 +434,82 @@ an_index_built_late_matches_one_kept_up(void)
 	check(relic_relation_index(ctx, late, 0x3, &again) == 0 &&
 	    again == late_position && late->index_count == 1, SCENARIO_BUILD,
 	    "asking again finds the index already built");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * An index stores each key's values from the tuple that introduced it, and
+ * compares a probe against them, so a key first held late in the relation
+ * is found by its own values.  The first half of the tuples hold only the
+ * first three keys of column 0 and the rest bring in LATE_KEYS in all, each
+ * new key's first tuple past every older key's; the index on column 0, kept
+ * up as they arrive, and the index on columns 0 and 2, built once they
+ * have, both agree with a scan, and a key no tuple holds has no tuples.
+ */
+#define	LATE_KEYS	40u
+#define	LATE_TUPLES	400u
+
+static void
+a_key_first_held_late_is_found_by_its_values(void)
+{
+	relic_relation_t *rel;
+	relic_config_t config;
+	relic_dom_t tuple[3];
+	uint32_t kept_up;
+	uint32_t built;
+	unsigned int key;
+	unsigned int i;
+	relic_t *ctx;
+	bool added;
+
+	bzero(&config, sizeof(config));
+	ctx = context(SCENARIO_LATE_KEY, &config);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_LATE_KEY, "r", 3);
+	if (rel == NULL || relic_relation_index(ctx, rel, 0x1, &kept_up) != 0) {
+		check(false, SCENARIO_LATE_KEY, "the relation is indexed");
+		relic_destroy(ctx);
+		return;
+	}
+
+	for (i = 0; i < LATE_TUPLES; i++) {
+		key = i < LATE_TUPLES / 2 ? i % 3 : i % LATE_KEYS;
+		tuple[0] = value(ctx, key);
+		tuple[1] = value(ctx, i);
+		tuple[2] = value(ctx, i % 2);
+		if (relic_relation_insert(ctx, rel, tuple, &added) != 0 ||
+		    !added) {
+			checkf(false, SCENARIO_LATE_KEY,
+			    "tuple %u should be added", i);
+			relic_destroy(ctx);
+			return;
+		}
+	}
+
+	if (relic_relation_index(ctx, rel, 0x5, &built) != 0) {
+		check(false, SCENARIO_LATE_KEY, "the second index is built");
+		relic_destroy(ctx);
+		return;
+	}
+
+	checkf(rel->indexes[kept_up].key_count == LATE_KEYS, SCENARIO_LATE_KEY,
+	    "column 0 should hold %u keys, not %zu", LATE_KEYS,
+	    rel->indexes[kept_up].key_count);
+	check(index_agrees(rel, kept_up, SCENARIO_LATE_KEY), SCENARIO_LATE_KEY,
+	    "the index kept up agrees with a scan");
+	check(index_agrees(rel, built, SCENARIO_LATE_KEY), SCENARIO_LATE_KEY,
+	    "the index built late agrees with a scan");
+
+	tuple[0] = value(ctx, LATE_KEYS);
+	tuple[1] = value(ctx, 0);
+	tuple[2] = value(ctx, 0);
+	check(relic_index_first(&rel->indexes[kept_up], rel, tuple) ==
+	    RELIC_ID_NONE && relic_index_first(&rel->indexes[built], rel,
+	    tuple) == RELIC_ID_NONE, SCENARIO_LATE_KEY,
+	    "a key no tuple holds has no tuples");
 
 	relic_destroy(ctx);
 }
@@ -741,15 +835,29 @@ an_index_is_charged_exactly(void)
 	    relic_index_bytes(&rel->indexes[position]) > 0,
 	    SCENARIO_ACCOUNTING, "the relation should count its index, "
 	    "%zu bytes over %zu", relic_relation_bytes(rel), unindexed);
+	checkf(relic_index_bytes(&rel->indexes[position]) ==
+	    index_bytes_by_hand(&rel->indexes[position]) &&
+	    rel->indexes[position].key_value_capacity >=
+	    rel->indexes[position].key_count, SCENARIO_ACCOUNTING,
+	    "the index should count its tags and its keys' values, %zu "
+	    "bytes, not %zu", index_bytes_by_hand(&rel->indexes[position]),
+	    relic_index_bytes(&rel->indexes[position]));
 	checkf(relic_relation_total_bytes(ctx) == storage_by_hand(ctx),
 	    SCENARIO_ACCOUNTING, "after the build the total should be %zu, "
 	    "not %zu", storage_by_hand(ctx), relic_relation_total_bytes(ctx));
 
-	if (fill(ctx, SCENARIO_ACCOUNTING, rel, 1000, SWEEP_TUPLES))
+	if (fill(ctx, SCENARIO_ACCOUNTING, rel, 1000, SWEEP_TUPLES)) {
 		checkf(relic_relation_total_bytes(ctx) == storage_by_hand(ctx),
 		    SCENARIO_ACCOUNTING, "after insertion the total should "
 		    "be %zu, not %zu", storage_by_hand(ctx),
 		    relic_relation_total_bytes(ctx));
+		checkf(relic_index_bytes(&rel->indexes[position]) ==
+		    index_bytes_by_hand(&rel->indexes[position]),
+		    SCENARIO_ACCOUNTING, "after insertion the index should "
+		    "count %zu bytes, not %zu",
+		    index_bytes_by_hand(&rel->indexes[position]),
+		    relic_index_bytes(&rel->indexes[position]));
+	}
 
 	relic_destroy(ctx);
 }
@@ -1047,6 +1155,7 @@ main(void)
 	a_lookup_visits_a_keys_tuples_in_order();
 	an_index_built_late_matches_one_kept_up();
 	a_lookup_walking_while_its_key_grows();
+	a_key_first_held_late_is_found_by_its_values();
 	a_delta_lookup_starts_where_its_delta_does();
 	a_discard_drops_every_index();
 	an_index_is_charged_exactly();

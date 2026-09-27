@@ -45,7 +45,7 @@ void
 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed)
 {
 	bzero(table, sizeof(*table));
-	relic_idtab_init(&table->index);
+	relic_idtab_init(&table->index, true);
 	table->hash_seed = hash_seed;
 }
 

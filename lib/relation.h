@@ -99,12 +99,15 @@ struct relic_index_key {
  * A secondary index: for every combination of values the key columns hold,
  * the tuples that hold it.
  *
- * `key_mask` has bit c set for each key column c.  The key of a tuple is its
- * key columns' values in ascending column order.
+ * `key_mask` has bit c set for each key column c, and `key_column` lists
+ * those columns in ascending order, `key_length` of them.  The key of a
+ * tuple is its key columns' values in that order.
  *
  * Each distinct key is assigned a key identifier, from one, in the order keys
  * are first seen.  `keys` maps the hash of a key to the key identifiers that
- * share it, and `entries[k - 1]` records key k's first and last tuple.
+ * share it, `entries[k - 1]` records key k's first and last tuple, and
+ * `key_values[(k - 1) * key_length ..)` holds key k's values, copied from the
+ * tuple that introduced it.
  * `next[id - 1]` is the tuple after `id` with the same key, or RELIC_ID_NONE
  * when `id` is the last.  A key's tuples are therefore a chain through
  * `next`, and because a tuple is linked at the end of its chain when it is
@@ -116,23 +119,31 @@ struct relic_index_key {
  * Here the table holds one slot per distinct key however many tuples share
  * it.
  *
- * No key is stored: comparing against key k reads the key columns of
- * entries[k - 1].first, which the relation already holds.  All three arrays
- * are relation and index storage, accounted against the memory limit.
+ * A key's values are stored beside its chain although its first tuple holds
+ * them too.  A probe compares against every key whose slot it visits and
+ * whose tag matches, and reading `key_values`, where one key's values follow
+ * another's, costs a cache line that neighbouring keys share, where reading
+ * the tuple is a random access into the relation.  A key costs `key_length`
+ * values more, one to a few columns.  All four arrays are relation and index
+ * storage, accounted against the memory limit.
  *
  * `latest_since` is the largest delta start a lookup has been positioned
- * at, which is what the frontiers are valid for; it is cleared when the
- * index is emptied.
+ * at, which is what the frontiers are valid for; a new index starts it at
+ * RELIC_ID_NONE, below every start.
  */
 struct relic_index {
 	relic_idtab_t		 keys;
 	relic_index_key_t	*entries;	/* by key identifier - 1 */
+	relic_dom_t		*key_values;	/* by key, key_length each */
 	relic_tuple_id_t	*next;		/* by tuple identifier - 1 */
 	size_t			 key_count;
 	size_t			 entry_capacity;
+	size_t			 key_value_capacity;	/* in keys */
 	size_t			 next_capacity;
 	relic_tuple_id_t	 latest_since;
 	uint32_t		 key_mask;
+	uint16_t		 key_length;
+	uint16_t		 key_column[RELIC_MAX_ARITY];
 };
 
 /*

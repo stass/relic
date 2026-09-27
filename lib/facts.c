@@ -90,7 +90,7 @@ relic_staging_init(relic_staging_t *staging, relic_t *ctx)
 {
 	bzero(staging, sizeof(*staging));
 	staging->ctx = ctx;
-	relic_idtab_init(&staging->by_pred);
+	relic_idtab_init(&staging->by_pred, false);
 }
 
 /*
@@ -296,7 +296,7 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 
 	set = &staging->sets[staging->set_count];
 	bzero(set, sizeof(*set));
-	relic_idtab_init(&set->index);
+	relic_idtab_init(&set->index, true);
 	set->hash_seed = staging->ctx->hash_seed;
 	set->pred = pred;
 	set->arity = relic_pred_of(staging->ctx, pred)->arity;

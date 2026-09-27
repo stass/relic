@@ -213,9 +213,13 @@ assigned to it? One open-addressing table answers it for all of them.
 ```c
 struct relic_idtab {
 	uint32_t	*slots;		/* 0 marks an empty slot */
+	uint8_t		*tags;		/* per slot when tagged, else NULL */
 	size_t		 capacity;	/* a power of two, or zero while empty */
 	size_t		 count;
+	bool		 tagged;
 };
+
+void	relic_idtab_init(relic_idtab_t *table, bool tagged);
 ```
 
 A slot holds an identifier and nothing else --- no key, no pointer, no hash.
@@ -231,13 +235,39 @@ searches, which read the matching tuple either way and pass few
 mismatches, and the doubled slot array raised the peak for a mixed result
 in time. The slot stays an identifier.
 
+**A tag is the cheaper form of the same thing.** A table created tagged
+keeps one byte per slot in `tags`, beside the slot array: the top eight bits
+of the hash its identifier was placed under. The bottom bits of a hash choose
+its first slot, so a tag tells apart keys that share a slot's
+neighbourhood, and `relic_idprobe_next()` passes an occupied slot whose tag
+differs from the probe's without returning it. A search for an absent key
+then asks its owner about one mismatching slot in 256 instead of each one it
+visits. The tag array is a quarter of the slot array rather than a doubling,
+and it is read only where the slot array is, so a successful search pays one
+byte more per visited slot and nothing else. Growth still asks the owner for
+each identifier's hash; a tag is not a hash.
+
+Whether a table is tagged is decided by its owner when it is created, and
+kept for the table's life:
+
+| Table | Its searches | Tagged |
+| --- | --- | --- |
+| symbol pool | unsuccessful for every new symbol; the bytes far away | yes |
+| value table | as the symbol pool | yes |
+| index keys | a probe compares stored key values | yes |
+| a load's staging sets | unsuccessful for every distinct fact | yes |
+| relation (the canonical index) | successful, per the measurement above | no |
+| a distinct count | unsuccessful for every distinct value; each candidate a tuple | yes |
+| predicate table, rewrite tables | small | no |
+
 **Identifier zero is never assigned.** Symbol identifiers and domain
 identifiers both start at one, which is what lets a zeroed slot mean "empty"
 with no separate occupancy bitmap and no sentinel that a caller could collide
 with.
 
 **Probing.** Slots are probed linearly from `hash & (capacity - 1)`,
-wrapping. The sequence exists in exactly one place, a cursor, and both lookup
+wrapping, and in a tagged table a slot whose tag is not the hash's is passed
+over. The sequence exists in exactly one place, a cursor, and both lookup
 and insertion walk it:
 
 ```c

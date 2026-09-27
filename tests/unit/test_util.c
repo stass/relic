@@ -14,6 +14,8 @@
  * through a key that lives outside the table, and check the properties those
  * callers depend on: a key that was inserted is found, a key that was not is
  * reported absent, and both survive the table doubling underneath them.
+ * Each of those runs on a tagged table and an untagged one, and a tagged
+ * probe is shown to pass over the identifiers placed under other tags.
  */
 
 #include "config.h"
@@ -38,6 +40,7 @@
 #define	SCENARIO_PREDICTED	"a growth is exactly what was predicted"
 #define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_SPREAD		"hashing separates similar keys"
+#define	SCENARIO_TAGS		"a tagged probe passes over other tags"
 
 /*
  * Two seeds chosen by the tests.  A context draws its seed at random, and a
@@ -70,17 +73,22 @@ static bool	 key_set_insert(relic_idtab_t *table, key_set_t *keys,
 		    uint32_t key);
 static size_t	 longest_walk(const relic_idtab_t *table,
 		    const key_set_t *keys);
-static bool	 reserve_then_fill(size_t held, size_t added);
+static bool	 reserve_then_fill(size_t held, size_t added, bool tagged);
 static size_t	 walk_to(const relic_idtab_t *table, const key_set_t *keys,
 		    uint32_t key);
 static void	 an_array_grows_without_losing_its_contents(void);
 static void	 an_array_refuses_an_impossible_size(void);
 static void	 equal_input_hashes_equally(void);
 static void	 every_inserted_key_is_found_after_growth(void);
+static void	 found_after_growth(bool tagged);
 static void	 a_growth_is_exactly_what_was_predicted(void);
 static void	 a_hash_depends_on_its_seed(void);
 static void	 a_reservation_for_many_holds_them_all(void);
 static void	 a_reservation_is_exactly_what_was_predicted(void);
+static void	 reserved_as_predicted(bool tagged);
+static void	 a_tagged_probe_passes_over_other_tags(void);
+static uint32_t	 stored_hash(uint32_t id, void *ctx);
+static size_t	 candidates_for(const relic_idtab_t *table, uint32_t hash);
 static void	 a_word_sequence_hashes_to_a_fixed_value(void);
 static void	 colliding_keys_collide_only_under_their_seed(void);
 static void	 each_context_draws_a_seed_of_its_own(void);
@@ -214,6 +222,16 @@ longest_walk(const relic_idtab_t *table, const key_set_t *keys)
 static void
 every_inserted_key_is_found_after_growth(void)
 {
+	found_after_growth(false);
+	found_after_growth(true);
+}
+
+/*
+ * The growth scenario on a table created tagged or not.
+ */
+static void
+found_after_growth(bool tagged)
+{
 	enum { KEY_COUNT = 5000 };
 
 	relic_idtab_t table;
@@ -227,7 +245,7 @@ every_inserted_key_is_found_after_growth(void)
 	keys.keys = storage;
 	keys.count = 0;
 	keys.seed = SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, tagged);
 
 	first_uninserted = KEY_COUNT;
 	for (i = 0; i < KEY_COUNT; i++) {
@@ -241,8 +259,8 @@ every_inserted_key_is_found_after_growth(void)
 	}
 
 	checkf(first_uninserted == KEY_COUNT, SCENARIO_LOOKUP,
-	    "insertion %zu of %d should have succeeded", first_uninserted,
-	    KEY_COUNT);
+	    "insertion %zu of %d should have succeeded, %s", first_uninserted,
+	    KEY_COUNT, tagged ? "tagged" : "untagged");
 	check(table.count == KEY_COUNT, SCENARIO_LOOKUP,
 	    "the table should hold every identifier inserted");
 	check(table.count < table.capacity, SCENARIO_LOOKUP,
@@ -263,8 +281,8 @@ every_inserted_key_is_found_after_growth(void)
 	}
 
 	checkf(first_lost == KEY_COUNT, SCENARIO_LOOKUP,
-	    "key %zu should still name the identifier it was inserted with",
-	    first_lost);
+	    "key %zu should still name the identifier it was inserted with, "
+	    "%s", first_lost, tagged ? "tagged" : "untagged");
 
 	/*
 	 * A table that reported a hit for a key it never held would make
@@ -281,8 +299,8 @@ every_inserted_key_is_found_after_growth(void)
 	}
 
 	checkf(first_spurious == KEY_COUNT, SCENARIO_LOOKUP,
-	    "key %zu was never inserted and should not be found",
-	    first_spurious);
+	    "key %zu was never inserted and should not be found, %s",
+	    first_spurious, tagged ? "tagged" : "untagged");
 
 	relic_idtab_reset(&table);
 	check(table.slots == NULL && table.count == 0, SCENARIO_LOOKUP,
@@ -508,7 +526,7 @@ colliding_keys_collide_only_under_their_seed(void)
 	keys.keys = storage;
 	keys.count = 0;
 	keys.seed = SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, false);
 	for (i = 0; i < KEY_COUNT; i++)
 		(void)key_set_insert(&table, &keys, crafted[i]);
 	check(keys.count == KEY_COUNT, SCENARIO_FLOODING,
@@ -520,7 +538,7 @@ colliding_keys_collide_only_under_their_seed(void)
 
 	keys.count = 0;
 	keys.seed = OTHER_SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, false);
 	for (i = 0; i < KEY_COUNT; i++)
 		(void)key_set_insert(&table, &keys, crafted[i]);
 	check(keys.count == KEY_COUNT, SCENARIO_FLOODING,
@@ -717,7 +735,7 @@ a_growth_is_exactly_what_was_predicted(void)
  * held, so the caller can name the pair that failed.
  */
 static bool
-reserve_then_fill(size_t held, size_t added)
+reserve_then_fill(size_t held, size_t added, bool tagged)
 {
 	enum { KEY_MAX = 4096 };
 
@@ -734,7 +752,7 @@ reserve_then_fill(size_t held, size_t added)
 	keys.keys = storage;
 	keys.count = 0;
 	keys.seed = SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, tagged);
 	held_up = true;
 
 	for (i = 0; i < held && held_up; i++)
@@ -784,7 +802,7 @@ capacity_reserved(size_t held, size_t added)
 	keys.keys = storage;
 	keys.count = 0;
 	keys.seed = SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, false);
 	capacity = 0;
 
 	for (i = 0; i < held; i++) {
@@ -832,12 +850,18 @@ a_reservation_for_many_holds_them_all(void)
 	size_t a;
 
 	for (h = 0; h < sizeof(helds) / sizeof(helds[0]); h++) {
-		for (a = 0; a < sizeof(addeds) / sizeof(addeds[0]); a++)
-			checkf(reserve_then_fill(helds[h], addeds[a]),
+		for (a = 0; a < sizeof(addeds) / sizeof(addeds[0]); a++) {
+			checkf(reserve_then_fill(helds[h], addeds[a], false),
 			    SCENARIO_RESERVED,
 			    "a table of %zu reserving for %zu more should "
 			    "reach its prediction and then hold them",
 			    helds[h], addeds[a]);
+			checkf(reserve_then_fill(helds[h], addeds[a], true),
+			    SCENARIO_RESERVED,
+			    "a tagged table of %zu reserving for %zu more "
+			    "should reach its prediction and then hold them",
+			    helds[h], addeds[a]);
+		}
 	}
 
 	for (h = 0; h < sizeof(sized) / sizeof(sized[0]); h++)
@@ -851,7 +875,7 @@ a_reservation_for_many_holds_them_all(void)
 	keys.keys = storage;
 	keys.count = 0;
 	keys.seed = SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, false);
 	check(key_set_insert(&table, &keys, 1u), SCENARIO_RESERVED,
 	    "inserting one key should succeed");
 	slots = table.slots;
@@ -874,17 +898,31 @@ a_reservation_for_many_holds_them_all(void)
 static void
 a_reservation_is_exactly_what_was_predicted(void)
 {
+	reserved_as_predicted(false);
+	reserved_as_predicted(true);
+}
+
+/*
+ * Reserve room for one key at a time, in a table created tagged or not,
+ * and check that each reservation reaches the bytes predicted for it: four
+ * per slot, and one more for a tag.
+ */
+static void
+reserved_as_predicted(bool tagged)
+{
 	enum { KEY_COUNT = 3000 };
 
 	relic_idtab_t table;
 	key_set_t keys;
 	uint32_t storage[KEY_COUNT];
+	size_t slot_bytes;
 	size_t i;
 
 	keys.keys = storage;
 	keys.count = 0;
 	keys.seed = SEED;
-	relic_idtab_init(&table);
+	relic_idtab_init(&table, tagged);
+	slot_bytes = sizeof(uint32_t) + (tagged ? 1 : 0);
 
 	check(relic_idtab_bytes(&table) == 0, SCENARIO_PREDICTED,
 	    "an empty table should hold no bytes");
@@ -900,11 +938,12 @@ a_reservation_is_exactly_what_was_predicted(void)
 			break;
 		}
 
-		checkf(predicted == relic_idtab_bytes(&table),
+		checkf(predicted == relic_idtab_bytes(&table) &&
+		    predicted == table.capacity * slot_bytes,
 		    SCENARIO_PREDICTED,
 		    "reserving room for key %zu should reach the predicted "
-		    "%zu bytes, not %zu", i, predicted,
-		    relic_idtab_bytes(&table));
+		    "%zu bytes, %zu to a slot, not %zu", i, predicted,
+		    slot_bytes, relic_idtab_bytes(&table));
 
 		storage[keys.count] = (uint32_t)(i * 7919u + 13u);
 		keys.count++;
@@ -913,6 +952,107 @@ a_reservation_is_exactly_what_was_predicted(void)
 	}
 
 	relic_idtab_reset(&table);
+	check(table.tagged == tagged, SCENARIO_PREDICTED,
+	    "a reset table should keep its kind");
+}
+
+/*
+ * The hash each identifier was placed under, kept by the owner as every
+ * owner keeps its keys: identifier n's is hashes[n - 1].
+ */
+static uint32_t
+stored_hash(uint32_t id, void *ctx)
+{
+	const uint32_t *hashes;
+
+	hashes = ctx;
+
+	return (hashes[id - 1]);
+}
+
+/*
+ * How many candidates a probe for `hash` is handed.
+ */
+static size_t
+candidates_for(const relic_idtab_t *table, uint32_t hash)
+{
+	relic_idprobe_t probe;
+	size_t candidates;
+	uint32_t id;
+
+	candidates = 0;
+	relic_idprobe_open(&probe, table, hash);
+	while (relic_idprobe_next(&probe, &id))
+		candidates++;
+
+	return (candidates);
+}
+
+/*
+ * A tagged table hands a probe only the identifiers whose tag, the top eight
+ * bits of the hash they were placed under, is the probe's.  Every hash here
+ * has the same low bits, so every identifier is in one cluster starting at
+ * the slot they select, and each has a tag of its own.  An untagged probe is
+ * handed the whole cluster, whichever hash it is for; a tagged one is handed
+ * the one identifier placed under its hash, and none for a hash whose tag no
+ * identifier carries.
+ */
+static void
+a_tagged_probe_passes_over_other_tags(void)
+{
+	enum { CLUSTER = 200, LOW_BITS = 5, CHOSEN = 100 };
+
+	static const bool kinds[] = { false, true };
+	uint32_t hashes[CLUSTER];
+	relic_idtab_t table;
+	relic_idprobe_t probe;
+	const char *kind;
+	uint32_t absent;
+	uint32_t found;
+	size_t expected;
+	size_t k;
+	size_t i;
+	bool tagged;
+	bool handed;
+
+	for (i = 0; i < CLUSTER; i++)
+		hashes[i] = ((uint32_t)i << 24) | LOW_BITS;
+	absent = (UINT32_C(0xff) << 24) | LOW_BITS;
+
+	for (k = 0; k < sizeof(kinds) / sizeof(kinds[0]); k++) {
+		tagged = kinds[k];
+		kind = tagged ? "a tagged" : "an untagged";
+
+		relic_idtab_init(&table, tagged);
+		if (relic_idtab_reserve(&table, CLUSTER, stored_hash,
+		    hashes) != 0) {
+			check(false, SCENARIO_TAGS, "the table is reserved");
+			return;
+		}
+		for (i = 0; i < CLUSTER; i++)
+			relic_idtab_place(&table, hashes[i], (uint32_t)(i + 1));
+
+		expected = tagged ? 1 : CLUSTER;
+		checkf(candidates_for(&table, hashes[CHOSEN]) == expected,
+		    SCENARIO_TAGS, "%s probe should be handed %zu candidates, "
+		    "not %zu", kind, expected,
+		    candidates_for(&table, hashes[CHOSEN]));
+
+		relic_idprobe_open(&probe, &table, hashes[CHOSEN]);
+		handed = relic_idprobe_next(&probe, &found);
+		checkf(handed && (!tagged || found == CHOSEN + 1),
+		    SCENARIO_TAGS, "%s probe should be handed %s", kind,
+		    tagged ? "the identifier placed under its hash first" :
+		    "a candidate");
+
+		expected = tagged ? 0 : CLUSTER;
+		checkf(candidates_for(&table, absent) == expected,
+		    SCENARIO_TAGS, "%s probe for an absent tag should be "
+		    "handed %zu candidates, not %zu", kind, expected,
+		    candidates_for(&table, absent));
+
+		relic_idtab_reset(&table);
+	}
 }
 
 /*
@@ -961,6 +1101,7 @@ main(void)
 	a_hash_depends_on_its_seed();
 	a_reservation_for_many_holds_them_all();
 	a_reservation_is_exactly_what_was_predicted();
+	a_tagged_probe_passes_over_other_tags();
 	a_word_sequence_hashes_to_a_fixed_value();
 	colliding_keys_collide_only_under_their_seed();
 	each_context_draws_a_seed_of_its_own();

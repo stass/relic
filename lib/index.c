@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -18,9 +19,10 @@
  * An index answers "which tuples hold these values in the key columns?" by
  * grouping tuples into one chain per distinct key.  The open-addressing
  * identifier table maps a key's hash to its key identifier, the key's entry
- * records the first and last tuple of its chain, and the chain itself is
- * threaded through one `next` identifier per tuple.  A lookup probes once for
- * the key and then follows the chain.
+ * records the first and last tuple of its chain, its values are kept beside
+ * the entries, and the chain itself is threaded through one `next`
+ * identifier per tuple.  A lookup probes once for the key, comparing
+ * against stored values, and then follows the chain.
  *
  * A tuple is added at the end of its key's chain as it is inserted, so every
  * chain lists its tuples in increasing identifier order, which is insertion
@@ -50,8 +52,8 @@ typedef struct relic_index_rehash relic_index_rehash_t;
 
 /*
  * What the key table needs in order to recompute the hash of a key it holds:
- * the key's first tuple lives in the relation, and the entry saying which
- * tuple that is lives in the index.
+ * the index, which holds the key's values, and the relation, whose seed the
+ * hash is keyed by.
  */
 struct relic_index_rehash {
 	const relic_index_t	*index;
@@ -59,71 +61,76 @@ struct relic_index_rehash {
 };
 
 static uint32_t		 find_key(const relic_index_t *index,
-			    const relic_relation_t *relation,
-			    const relic_dom_t *key, uint16_t length,
-			    uint32_t hash);
-static uint16_t		 gather_key(const relic_index_t *index,
+			    const relic_dom_t *key, uint32_t hash);
+static void		 gather_key(const relic_index_t *index,
 			    const relic_dom_t *tuple, relic_dom_t *key);
-static uint32_t		 key_hash(const relic_relation_t *relation,
-			    const relic_dom_t *key, uint16_t length);
-static bool		 key_matches(const relic_index_t *index,
-			    const relic_relation_t *relation, uint32_t key_id,
-			    const relic_dom_t *key, uint16_t length);
+static uint32_t		 key_hash(const relic_index_t *index,
+			    const relic_relation_t *relation,
+			    const relic_dom_t *key);
+static size_t		 key_offset(const relic_index_t *index,
+			    uint32_t key_id);
 static uint32_t		 key_rehash(uint32_t key_id, void *ctx);
+static const relic_dom_t *key_values_of(const relic_index_t *index,
+			    uint32_t key_id);
 static uint32_t		 probe_key(const relic_index_t *index,
 			    const relic_relation_t *relation,
 			    const relic_dom_t *probe);
+static size_t		 saturating_product(size_t count, size_t size);
+static size_t		 saturating_sum(size_t a, size_t b);
 static relic_tuple_id_t	 walk_toward(const relic_index_t *index,
 			    relic_tuple_id_t id, relic_tuple_id_t since);
 
+/*
+ * An empty index keyed on the columns of `key_mask`, which lists them in
+ * `key_column` once so that gathering a key visits its columns and no
+ * others.  The relation store keys an index on at least one column, so a
+ * key has values to store.  The key table is tagged: a probe that misses
+ * would otherwise compare against each key it passes.
+ */
 void
 relic_index_init(relic_index_t *index, uint32_t key_mask)
 {
+	uint16_t column;
+
 	bzero(index, sizeof(*index));
-	relic_idtab_init(&index->keys);
+	relic_idtab_init(&index->keys, true);
 	index->key_mask = key_mask;
+
+	for (column = 0; column < RELIC_MAX_ARITY; column++) {
+		if ((key_mask & (UINT32_C(1) << column)) != 0) {
+			index->key_column[index->key_length] = column;
+			index->key_length++;
+		}
+	}
+	assert(index->key_length > 0);
 }
 
 /*
- * Release everything the index holds, keeping its key mask, so that it is
- * the empty index over the same columns.
+ * Release everything the index holds.  What is left is zeroed, not an index:
+ * relic_index_init() must set it up again before it is used.
  */
 void
-relic_index_empty(relic_index_t *index)
+relic_index_free(relic_index_t *index)
 {
 	relic_idtab_reset(&index->keys);
 	free(index->entries);
+	free(index->key_values);
 	free(index->next);
-	index->entries = NULL;
-	index->next = NULL;
-	index->key_count = 0;
-	index->entry_capacity = 0;
-	index->next_capacity = 0;
-	index->latest_since = RELIC_ID_NONE;
+	bzero(index, sizeof(*index));
 }
 
 /*
  * Copy a tuple's key columns, in ascending column order, into `key`, which
- * has room for the largest arity there is.  Returns how many were copied:
- * one per column in the mask.
+ * has room for `key_length` values.
  */
-static uint16_t
+static void
 gather_key(const relic_index_t *index, const relic_dom_t *tuple,
     relic_dom_t *key)
 {
-	uint16_t column;
-	uint16_t length;
+	uint16_t i;
 
-	length = 0;
-	for (column = 0; column < RELIC_MAX_ARITY; column++) {
-		if ((index->key_mask & (UINT32_C(1) << column)) == 0)
-			continue;
-
-		key[length] = tuple[column];
-		length++;
-	}
-
-	return (length);
+	for (i = 0; i < index->key_length; i++)
+		key[i] = tuple[index->key_column[i]];
 }
 
 /*
@@ -131,35 +138,54 @@ gather_key(const relic_index_t *index, const relic_dom_t *tuple,
  * belongs to.
  */
 static uint32_t
-key_hash(const relic_relation_t *relation, const relic_dom_t *key,
-    uint16_t length)
+key_hash(const relic_index_t *index, const relic_relation_t *relation,
+    const relic_dom_t *key)
 {
-	return (relic_hash_words(relation->hash_seed, key, length));
+	return (relic_hash_words(relation->hash_seed, key, index->key_length));
 }
 
 /*
- * Whether key identifier `key_id` stands for these key values.  The key's
- * values are read from its first tuple, which is where the only copy of them
- * is.
+ * Where key `key_id`'s values begin in `key_values`: keys are numbered from
+ * one, and each holds `key_length` values.
  */
-static bool
-key_matches(const relic_index_t *index, const relic_relation_t *relation,
-    uint32_t key_id, const relic_dom_t *key, uint16_t length)
+static size_t
+key_offset(const relic_index_t *index, uint32_t key_id)
 {
-	relic_dom_t held[RELIC_MAX_ARITY];
-	const relic_dom_t *tuple;
-	uint16_t i;
+	return ((size_t)(key_id - 1) * index->key_length);
+}
 
-	tuple = relic_relation_tuple(relation,
-	    index->entries[key_id - 1].first);
-	gather_key(index, tuple, held);
+/*
+ * The values of key `key_id`, `key_length` of them.
+ */
+static const relic_dom_t *
+key_values_of(const relic_index_t *index, uint32_t key_id)
+{
+	return (&index->key_values[key_offset(index, key_id)]);
+}
 
-	for (i = 0; i < length; i++) {
-		if (held[i] != key[i])
-			return (false);
-	}
+/*
+ * `count` items of `size` bytes, or SIZE_MAX when that is more than a size_t
+ * holds.
+ */
+static size_t
+saturating_product(size_t count, size_t size)
+{
+	if (size != 0 && count > SIZE_MAX / size)
+		return (SIZE_MAX);
 
-	return (true);
+	return (count * size);
+}
+
+/*
+ * The sum of two sizes, or SIZE_MAX when it is more than a size_t holds.
+ */
+static size_t
+saturating_sum(size_t a, size_t b)
+{
+	if (a > SIZE_MAX - b)
+		return (SIZE_MAX);
+
+	return (a + b);
 }
 
 /*
@@ -169,16 +195,11 @@ static uint32_t
 key_rehash(uint32_t key_id, void *ctx)
 {
 	const relic_index_rehash_t *rehash;
-	relic_dom_t key[RELIC_MAX_ARITY];
-	const relic_dom_t *tuple;
-	uint16_t length;
 
 	rehash = ctx;
-	tuple = relic_relation_tuple(rehash->relation,
-	    rehash->index->entries[key_id - 1].first);
-	length = gather_key(rehash->index, tuple, key);
 
-	return (key_hash(rehash->relation, key, length));
+	return (key_hash(rehash->index, rehash->relation,
+	    key_values_of(rehash->index, key_id)));
 }
 
 /*
@@ -186,15 +207,17 @@ key_rehash(uint32_t key_id, void *ctx)
  * tuple of the relation holds them.
  */
 static uint32_t
-find_key(const relic_index_t *index, const relic_relation_t *relation,
-    const relic_dom_t *key, uint16_t length, uint32_t hash)
+find_key(const relic_index_t *index, const relic_dom_t *key, uint32_t hash)
 {
 	relic_idprobe_t probe;
+	size_t key_bytes;
 	uint32_t key_id;
+
+	key_bytes = (size_t)index->key_length * sizeof(*key);
 
 	relic_idprobe_open(&probe, &index->keys, hash);
 	while (relic_idprobe_next(&probe, &key_id)) {
-		if (key_matches(index, relation, key_id, key, length))
+		if (bcmp(key_values_of(index, key_id), key, key_bytes) == 0)
 			return (key_id);
 	}
 
@@ -206,6 +229,8 @@ relic_index_bytes(const relic_index_t *index)
 {
 	return (relic_idtab_bytes(&index->keys) +
 	    index->entry_capacity * sizeof(*index->entries) +
+	    index->key_value_capacity * index->key_length *
+	    sizeof(*index->key_values) +
 	    index->next_capacity * sizeof(*index->next));
 }
 
@@ -224,29 +249,35 @@ size_t
 relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
     size_t added_keys)
 {
-	size_t entries;
-	size_t key_slots;
-	size_t next;
+	size_t entry_count;
+	size_t key_bytes;
+	size_t next_count;
+	size_t total;
+	size_t value_count;
+	size_t keys;
 
-	if (added_keys > SIZE_MAX - index->key_count)
+	keys = saturating_sum(index->key_count, added_keys);
+	entry_count = relic_grow_array_capacity(index->entry_capacity, keys);
+	value_count = relic_grow_array_capacity(index->key_value_capacity,
+	    keys);
+	next_count = relic_grow_array_capacity(index->next_capacity, tuples);
+	if (keys == SIZE_MAX || entry_count == 0 || value_count == 0 ||
+	    next_count == 0)
 		return (relic_index_bytes(index));
 
-	key_slots = relic_idtab_bytes_after_reserve(&index->keys, added_keys);
+	key_bytes = (size_t)index->key_length * sizeof(*index->key_values);
 
-	entries = relic_grow_array_capacity(index->entry_capacity,
-	    index->key_count + added_keys);
-	next = relic_grow_array_capacity(index->next_capacity, tuples);
-	if (entries == 0 || next == 0 ||
-	    entries > SIZE_MAX / sizeof(*index->entries) ||
-	    next > SIZE_MAX / sizeof(*index->next))
+	total = relic_idtab_bytes_after_reserve(&index->keys, added_keys);
+	total = saturating_sum(total, saturating_product(entry_count,
+	    sizeof(*index->entries)));
+	total = saturating_sum(total, saturating_product(value_count,
+	    key_bytes));
+	total = saturating_sum(total, saturating_product(next_count,
+	    sizeof(*index->next)));
+	if (total == SIZE_MAX)
 		return (relic_index_bytes(index));
 
-	entries *= sizeof(*index->entries);
-	next *= sizeof(*index->next);
-	if (entries > SIZE_MAX - next || entries + next > SIZE_MAX - key_slots)
-		return (relic_index_bytes(index));
-
-	return (key_slots + entries + next);
+	return (total);
 }
 
 /*
@@ -268,6 +299,7 @@ relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
 	relic_index_rehash_t rehash;
 	relic_index_key_t *entries;
 	relic_tuple_id_t *next;
+	relic_dom_t *values;
 
 	if (added_keys > SIZE_MAX - index->key_count)
 		return (-1);
@@ -283,6 +315,13 @@ relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
 	if (entries == NULL)
 		return (-1);
 	index->entries = entries;
+
+	values = relic_grow_array(index->key_values,
+	    &index->key_value_capacity, index->key_count + added_keys,
+	    (size_t)index->key_length * sizeof(*index->key_values));
+	if (values == NULL)
+		return (-1);
+	index->key_values = values;
 
 	next = relic_grow_array(index->next, &index->next_capacity, tuples,
 	    sizeof(*index->next));
@@ -311,13 +350,12 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	relic_index_key_t *entry;
 	uint32_t key_id;
 	uint32_t hash;
-	uint16_t length;
 
-	length = gather_key(index, relic_relation_tuple(relation, id), key);
-	hash = key_hash(relation, key, length);
+	gather_key(index, relic_relation_tuple(relation, id), key);
+	hash = key_hash(index, relation, key);
 	index->next[id - 1] = RELIC_ID_NONE;
 
-	key_id = find_key(index, relation, key, length, hash);
+	key_id = find_key(index, key, hash);
 	if (key_id != RELIC_ID_NONE) {
 		entry = &index->entries[key_id - 1];
 		index->next[entry->last - 1] = id;
@@ -328,7 +366,8 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	/*
 	 * A new key.  Its identifier is one past the last, so it can never be
 	 * RELIC_ID_NONE, and it cannot overflow: an index has no more keys
-	 * than its relation has tuples.
+	 * than its relation has tuples.  Its values are stored before it is
+	 * placed, so that every key the table holds has them.
 	 */
 	index->key_count++;
 	key_id = (uint32_t)index->key_count;
@@ -336,6 +375,8 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	entry->first = id;
 	entry->last = id;
 	entry->frontier = id;
+	bcopy(key, &index->key_values[key_offset(index, key_id)],
+	    (size_t)index->key_length * sizeof(*key));
 	relic_idtab_place(&index->keys, hash, key_id);
 }
 
@@ -350,14 +391,10 @@ probe_key(const relic_index_t *index, const relic_relation_t *relation,
     const relic_dom_t *probe)
 {
 	relic_dom_t key[RELIC_MAX_ARITY];
-	uint32_t key_id;
-	uint16_t length;
 
-	length = gather_key(index, probe, key);
-	key_id = find_key(index, relation, key, length,
-	    key_hash(relation, key, length));
+	gather_key(index, probe, key);
 
-	return (key_id);
+	return (find_key(index, key, key_hash(index, relation, key)));
 }
 
 /*

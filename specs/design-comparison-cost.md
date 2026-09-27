@@ -527,7 +527,7 @@ The index stores each key's values beside its chain:
 struct relic_index {
 	relic_idtab_t		 keys;		/* key hash -> key identifier */
 	relic_index_key_t	*entries;	/* per key: first, last, frontier */
-	relic_dom_t		*key_columns;	/* per key: its values, key_length wide */
+	relic_dom_t		*key_values;	/* per key: its values, key_length wide */
 	relic_tuple_id_t	*next;
 	uint16_t		 key_length;	/* columns in key_mask */
 	uint16_t		 key_column[RELIC_MAX_ARITY];	/* the columns, ascending */
@@ -535,12 +535,12 @@ struct relic_index {
 };
 ```
 
-`key_columns[(k - 1) * key_length ..)` holds key *k*'s values in ascending
+`key_values[(k - 1) * key_length ..)` holds key *k*'s values in ascending
 column order, written when the key is first seen, from the tuple that
-introduced it. Comparing a probe against key *k* reads `key_columns`, an
+introduced it. Comparing a probe against key *k* reads `key_values`, an
 array that a probe's neighbours share cache lines in, and never the
 relation; gathering a tuple's key walks `key_column[0 .. key_length)`
-rather than 32 mask bits; and the rehash callback reads `key_columns`
+rather than 32 mask bits; and the rehash callback reads `key_values`
 sequentially. A key costs `4 * key_length` bytes more, one to a few
 columns for every index a plan asks for, accounted by
 `relic_index_bytes()` and projected by `relic_index_bytes_after_reserve()`
@@ -576,7 +576,7 @@ A tag is the top eight bits of the key's hash; the bottom bits choose the
 slot, so a tag is independent of where a key sits. `relic_idprobe_next()`
 skips an occupied slot whose tag differs from the probe's without
 returning it, so a probe asks its owner about one mismatching slot in 256
-instead of every one. A tag array is a fifth of the slot array, not a
+instead of every one. A tag array is a quarter of the slot array, not a
 doubling, and it is read only when the slot array is, so the successful
 search that section 5.2 protects pays one byte more per visited slot and
 nothing else.
@@ -589,8 +589,9 @@ follows the measurement:
 | --- | --- | --- |
 | symbol pool | unsuccessful on every new symbol; entry and bytes far away | yes |
 | integer table | as the symbol pool | yes |
-| index keys | a miss reads `key_columns` | yes |
+| index keys | a miss reads `key_values` | yes |
 | staging sets | unsuccessful on every distinct fact | yes |
+| a distinct count | unsuccessful on every distinct value | yes |
 | canonical index | successful, per section 5.2 | no, until measured with tags |
 | predicate table, rewrite tables | small | no |
 
@@ -817,7 +818,7 @@ tree before it, per `CLAUDE.md`.
   shows `p$ff` as a copy and `q$bf` with its magic predicate.
 * **Index keys.** The index unit tests hold; a test inserts keys whose
   first tuples are later than others' and checks that a lookup reads the
-  right chain; the accounting tests charge `key_columns`.
+  right chain; the accounting tests charge `key_values`.
 * **Tags.** The identifier table's unit tests run tagged and untagged; a
   test with a hash of all-equal low bits and distinct high bits shows a
   tagged probe asking its owner about one candidate.
@@ -900,7 +901,7 @@ which none of the others change.
   here, and the query's `stream` line of section 4.
 * `specs/design-planner.md` section 8.2: an `EMIT` that streams is shown as
   `stream`; section 4 here.
-* `specs/design-index.md` section 3: `key_columns` and `key_column`,
+* `specs/design-index.md` section 3: `key_values` and `key_column`,
   section 6.1 here; "Nothing is stored twice" becomes "no tuple is stored
   twice"; section 8: the key columns are accounted.
 * `specs/design-memory.md` section 3: the arena's alignment is a creation
@@ -936,8 +937,8 @@ which none of the others change.
   adornment is the one the comparison workloads and interactive use hit,
   and the two-pass rewrite is the structure a later merge would use.
 * **A stored hash in every slot.** Measured and set aside in
-  `specs/design-evaluation-cost.md` section 5.2; the tag is a fifth of the
-  cost for most of the effect.
+  `specs/design-evaluation-cost.md` section 5.2; the tag is a quarter of
+  the cost for most of the effect.
 * **Growth by three halves.** Recorded for measurement; the residue was
   the larger term.
 * **Releasing an import's text or staging set early**, and **a load that

@@ -60,12 +60,16 @@ column. A relation holds at most one index per mask.
 struct relic_index {
 	relic_idtab_t		 keys;		/* key hash -> key identifier */
 	relic_index_key_t	*entries;	/* per key: first, last, frontier */
+	relic_dom_t		*key_values;	/* per key: its values */
 	relic_tuple_id_t	*next;		/* per tuple: the next with its key */
 	size_t			 key_count;
 	size_t			 entry_capacity;
+	size_t			 key_value_capacity;
 	size_t			 next_capacity;
 	relic_tuple_id_t	 latest_since;	/* the largest delta start served */
 	uint32_t		 key_mask;
+	uint16_t		 key_length;	/* the columns in key_mask */
+	uint16_t		 key_column[RELIC_MAX_ARITY];	/* ascending */
 };
 
 struct relic_index_key {
@@ -83,10 +87,18 @@ share it; `entries[k - 1]` records the first and the last tuple holding key
 `RELIC_ID_NONE` when `id` is the last. A key's tuples are therefore a singly
 linked **chain** threaded through `next`, from `first` to `last`.
 
-Nothing is stored twice. A key is not copied into the index: comparing a
-probe's key against key *k* reads the key columns of `entries[k - 1].first`,
-which is in the relation already. A tuple is not copied either; the index
-holds identifiers.
+No tuple is stored twice; the index holds identifiers. A key's values are,
+since comparing against them is what a probe does most:
+`key_values[(k - 1) * key_length ..)` holds key *k*'s values in ascending
+column order, written when the key is first seen, from the tuple that
+introduced it. A probe compares against the key of every slot it visits,
+and reading `key_values`, where one key's values follow another's, costs a
+cache line that neighbouring keys share; reading the key columns of the
+key's first tuple instead would be a random access into the relation for
+each. Gathering a tuple's key walks `key_column[0 .. key_length)` rather
+than every bit of the mask, and the key table's rehash reads `key_values`
+in order. `keys` is tagged (`specs/design-memory.md` section 6), so a probe
+for an absent key compares against one key in 256 of those it passes.
 
 A key's **frontier** is a tuple of its chain with one invariant: every chain
 tuple before it has an identifier below every delta start the index will yet
@@ -134,8 +146,8 @@ relic_tuple_id_t relic_index_next(const relic_index_t *, relic_tuple_id_t);
 The probe is laid out as a tuple of the relation, with the key's values in
 their own columns; the other columns are not read. `relic_index_first()`
 gathers the key from it, hashes the key, probes `keys` comparing each
-candidate key's columns against it, and returns the first tuple of the
-matching chain, or `RELIC_ID_NONE` when no tuple holds the key.
+candidate key's stored values against it, and returns the first tuple of
+the matching chain, or `RELIC_ID_NONE` when no tuple holds the key.
 `relic_index_next()` follows the chain.
 
 How a key is packed -- which columns, in what order -- is known to the index
@@ -334,7 +346,8 @@ within one, so no plan names an index a discard dropped.
 
 ## 8. Accounting
 
-An index's `next`, `entries` and `keys` arrays are relation and index storage
+An index's `next`, `entries`, `key_values` and `keys` arrays, and the tags
+of `keys`, are relation and index storage
 in the sense of architecture section 63, and count toward `max_memory` by the
 same method the relation store uses for its own arrays: the growth policies
 are asked what they will allocate before anything is allocated, and the total
@@ -346,8 +359,9 @@ relation headers does not: it is sized by the program -- by the binding
 patterns its rules look relations up with -- and not by the data.
 
 An index costs four bytes of `next` per tuple and, per distinct key, twelve
-bytes of `entries` -- the first tuple, the last and the frontier -- and some
-fraction of a four-byte slot. A relation
+bytes of `entries` -- the first tuple, the last and the frontier -- four
+bytes of `key_values` per key column, and some fraction of a four-byte slot
+and its tag byte. A relation
 looked up under three masks therefore pays roughly as much again as its
 columns, which is the price of not scanning.
 

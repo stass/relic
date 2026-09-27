@@ -597,6 +597,24 @@ calling 4000 predicates each bound and then free is rewritten in 0.02 s,
 against 0.06 s before, and a 21-column predicate whose rules each drop one
 binding outgrows the predicate budget at once, as it did before.
 
+| Component | State |
+| --- | --- |
+| `lib/index.c` | step 4, index keys: each key of an index stores its values in `key_values`, beside its chain, so a probe compares against those rather than reading the key's first tuple from the relation; the key table is tagged; `relic_index_free()` releases an index, which is set up again before any reuse |
+| `lib/util.{h,c}` | tags: a table created tagged keeps, in a byte array beside its slots, the top eight bits of the hash each slot's identifier was placed under, and a probe passes an occupied slot whose tag differs from its own without handing the identifier to the owner; the symbol pool, the value table, a load's staging sets, an index's keys and the distinct-count table are tagged, and the tables whose searches mostly succeed are not; a slot's tag is prefetched with it, and the tags count in a table's bytes |
+| `tests/` | `test_index`: a key whose first tuple is held late is found by its values; `test_util`: a tagged probe passes over other tags, and a table found after growth and reserved as predicted, tagged and not; `stats-indexed` and `stats-magic` count the stored key values |
+
+Step 4 measured as step 1 was, against step 3, three alternating runs each
+on a machine otherwise busy:
+
+| Workload | Before | After |
+| --- | --- | --- |
+| `andersen` | 0.25 to 0.26 s | 0.13 to 0.14 s |
+| `facts-join` | 0.42 to 0.43 s | 0.32 to 0.34 s |
+| `chain-closure` | 0.67 to 0.69 s | 0.61 to 0.65 s |
+| `tc-sparse-cyclic` | 0.51 to 0.53 s | 0.48 to 0.51 s |
+
+The peaks did not move beyond their run-to-run spread.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:

@@ -33,6 +33,8 @@ static uint32_t	 hash_finish(uint64_t seed, uint32_t state);
 static uint32_t	 hash_fold(uint32_t state, uint32_t unit);
 static uint32_t	 hash_start(uint64_t seed);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
+static size_t	 idtab_slot_bytes(const relic_idtab_t *table);
+static uint8_t	 idtab_tag(uint32_t hash);
 static bool	 idtab_capacity_holds(size_t capacity, size_t count,
 		    size_t added);
 static size_t	 idtab_capacity_for(const relic_idtab_t *table,
@@ -232,16 +234,40 @@ relic_grow_array(void *items, size_t *capacity, size_t count, size_t item_size)
 }
 
 void
-relic_idtab_init(relic_idtab_t *table)
+relic_idtab_init(relic_idtab_t *table, bool tagged)
 {
 	bzero(table, sizeof(*table));
+	table->tagged = tagged;
 }
 
 void
 relic_idtab_reset(relic_idtab_t *table)
 {
 	free(table->slots);
-	bzero(table, sizeof(*table));
+	free(table->tags);
+	relic_idtab_init(table, table->tagged);
+}
+
+/*
+ * The bytes one slot costs: its identifier, and its tag when the table keeps
+ * them.
+ */
+static size_t
+idtab_slot_bytes(const relic_idtab_t *table)
+{
+	return (sizeof(*table->slots) + (table->tagged ? sizeof(uint8_t) : 0));
+}
+
+/*
+ * The tag of a hash: its top eight bits.  A table of at most 2^24 slots
+ * chooses a slot from bits below them, so the tag and the slot are
+ * independent there, and above that size they overlap and a tag passes over
+ * fewer mismatches, which costs time and nothing else.
+ */
+static uint8_t
+idtab_tag(uint32_t hash)
+{
+	return ((uint8_t)(hash >> 24));
 }
 
 void
@@ -265,26 +291,36 @@ relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
 	probe->table = table;
 	probe->mask = table->capacity - 1;
 	probe->slot = (size_t)hash & probe->mask;
+	probe->tag = idtab_tag(hash);
 }
 
 bool
 relic_idprobe_next(relic_idprobe_t *probe, uint32_t *idp)
 {
+	const relic_idtab_t *table;
+	size_t slot;
 	uint32_t id;
 
-	if (probe->table == NULL)
-		return (false);
-
-	id = probe->table->slots[probe->slot];
-	if (id == RELIC_ID_NONE)
+	table = probe->table;
+	if (table == NULL)
 		return (false);
 
 	/*
-	 * The slot advances only when a candidate is handed back, so a probe
-	 * that has returned false is left standing on the empty slot where
-	 * the key belongs.  relic_idtab_place() relies on that.
+	 * The slot advances past every occupied slot the walk reaches, a
+	 * candidate or a slot whose tag rules it out, and never past an empty
+	 * one, so a probe that has returned false is left standing on the
+	 * empty slot where the key belongs.  relic_idtab_place() relies on
+	 * that.
 	 */
-	probe->slot = (probe->slot + 1) & probe->mask;
+	do {
+		slot = probe->slot;
+		id = table->slots[slot];
+		if (id == RELIC_ID_NONE)
+			return (false);
+
+		probe->slot = (slot + 1) & probe->mask;
+	} while (table->tags != NULL && table->tags[slot] != probe->tag);
+
 	*idp = id;
 
 	return (true);
@@ -340,9 +376,13 @@ void
 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id)
 {
 	relic_idprobe_t probe;
+	size_t slot;
 
 	relic_idprobe_open(&probe, table, hash);
-	table->slots[idprobe_empty_slot(&probe)] = id;
+	slot = idprobe_empty_slot(&probe);
+	table->slots[slot] = id;
+	if (table->tags != NULL)
+		table->tags[slot] = probe.tag;
 	table->count++;
 }
 
@@ -364,7 +404,7 @@ idtab_capacity_for(const relic_idtab_t *table, size_t added)
 	do {
 		if (capacity < RELIC_IDTAB_MIN_CAPACITY)
 			capacity = RELIC_IDTAB_MIN_CAPACITY;
-		else if (capacity > SIZE_MAX / 2 / sizeof(*table->slots))
+		else if (capacity > SIZE_MAX / 2 / idtab_slot_bytes(table))
 			return (0);
 		else
 			capacity *= 2;
@@ -374,8 +414,8 @@ idtab_capacity_for(const relic_idtab_t *table, size_t added)
 }
 
 /*
- * Replace the slot array with one of `capacity` slots and reinsert every
- * entry.
+ * Replace the slot array, and the tags of a tagged table, with arrays of
+ * `capacity` slots and reinsert every entry.
  *
  * The replacement is built complete and installed in one assignment, so a
  * failed allocation leaves the caller's table exactly as it was rather than
@@ -388,10 +428,17 @@ idtab_grow(relic_idtab_t *table, size_t capacity, relic_rehash_fn rehash,
 	relic_idtab_t grown;
 	size_t slot;
 
-	relic_idtab_init(&grown);
+	relic_idtab_init(&grown, table->tagged);
 	grown.slots = calloc(capacity, sizeof(*grown.slots));
 	if (grown.slots == NULL)
 		return (-1);
+	if (grown.tagged) {
+		grown.tags = calloc(capacity, sizeof(*grown.tags));
+		if (grown.tags == NULL) {
+			free(grown.slots);
+			return (-1);
+		}
+	}
 	grown.capacity = capacity;
 
 	for (slot = 0; slot < table->capacity; slot++) {
@@ -405,6 +452,7 @@ idtab_grow(relic_idtab_t *table, size_t capacity, relic_rehash_fn rehash,
 	}
 
 	free(table->slots);
+	free(table->tags);
 	*table = grown;
 
 	return (0);
@@ -429,7 +477,7 @@ relic_idtab_reserve(relic_idtab_t *table, size_t added,
 size_t
 relic_idtab_bytes(const relic_idtab_t *table)
 {
-	return (table->capacity * sizeof(*table->slots));
+	return (table->capacity * idtab_slot_bytes(table));
 }
 
 size_t
@@ -444,5 +492,5 @@ relic_idtab_bytes_after_reserve(const relic_idtab_t *table, size_t added)
 	if (capacity == 0)
 		return (relic_idtab_bytes(table));
 
-	return (capacity * sizeof(*table->slots));
+	return (capacity * idtab_slot_bytes(table));
 }
