@@ -30,11 +30,14 @@
 #endif
 
 /*
- * The FNV-1a prime, which the fold multiplies the state by after mixing in
- * each unit of a key.  The state it starts from is not the FNV basis but half
- * of the caller's seed.
+ * The odd constant the fold multiplies its state by after mixing in each
+ * unit of a key, the first multiplier of SplitMix64's mixer.  Its bits are
+ * spread across the word: a multiplier with few bits set, such as FNV's
+ * 2^40 + 435, satisfies a short polynomial relation modulo 2^64, which lets
+ * a key's later units be chosen to cancel a difference its earlier ones
+ * made under a fixed share of seeds.
  */
-#define	RELIC_HASH_PRIME	16777619u
+#define	RELIC_HASH_MULTIPLIER	UINT64_C(0xbf58476d1ce4e5b9)
 
 /*
  * The smallest table worth allocating, and the smallest array worth growing
@@ -98,10 +101,9 @@ static void	*array_storage(void *items);
 static _Noreturn void record_corrupt(const relic_array_record_t *stored);
 static uintptr_t record_seal(const relic_array_record_t *record,
 		    size_t mapped_bytes);
-static uint32_t	 finalize(uint32_t hash);
-static uint32_t	 hash_finish(uint64_t seed, uint32_t state);
-static uint32_t	 hash_fold(uint32_t state, uint32_t unit);
-static uint32_t	 hash_start(uint64_t seed);
+static uint32_t	 finalize(uint64_t state);
+static uint64_t	 hash_fold(uint64_t state, uint32_t unit);
+static uint64_t	 hash_start(uint64_t seed);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
 static size_t	 idtab_slot_bytes(const relic_idtab_t *table);
 static uint8_t	 idtab_tag(uint32_t hash);
@@ -113,70 +115,79 @@ static int	 idtab_grow(relic_idtab_t *table, size_t capacity,
 		    relic_rehash_fn rehash, void *ctx);
 
 /*
- * Avalanche a hash so that every input bit affects the low bits.
+ * Avalanche the folded state into a hash so that every bit of the state
+ * affects the low bits.
  *
  * This matters more here than it would in a chained table.  A slot is chosen
  * with hash & (capacity - 1), so only the low bits select it, and collisions
- * under linear probing form runs that lengthen each other.  FNV-1a alone
+ * under linear probing form runs that lengthen each other.  The fold alone
  * mixes poorly into its low bits for short keys, and sequential integer keys
  * -- which a Datalog program full of small integers produces -- would
- * otherwise probe in near-perfect runs.
+ * otherwise probe in near-perfect runs.  This is the 64-bit finalizer of
+ * MurmurHash3, whose low 32 bits are the hash.
  */
 static uint32_t
-finalize(uint32_t hash)
+finalize(uint64_t state)
 {
-	hash ^= hash >> 16;
-	hash *= 0x85ebca6bu;
-	hash ^= hash >> 13;
-	hash *= 0xc2b2ae35u;
-	hash ^= hash >> 16;
+	state ^= state >> 33;
+	state *= UINT64_C(0xff51afd7ed558ccd);
+	state ^= state >> 33;
+	state *= UINT64_C(0xc4ceb9fe1a85ec53);
+	state ^= state >> 33;
 
-	return (hash);
+	return ((uint32_t)state);
 }
 
 /*
- * Every hash is a keyed FNV-1a fold followed by finalize():
+ * Every hash is a keyed multiplicative fold over a 64-bit state, followed by
+ * finalize():
  *
- *	state = low 32 bits of seed
- *	for each unit u of the key:  state = (state ^ u) * FNV prime
- *	hash  = finalize(state ^ high 32 bits of seed)
+ *	state = seed
+ *	for each unit u of the key:  state = (state ^ u) * multiplier
+ *	hash  = finalize(state)
  *
- * The two halves of the seed enter at different points so that both the fold
- * and the finalizer are keyed.  A unit is a byte of a byte string and a word
- * of a word sequence.  The three functions below are those three steps, and
- * each hash function is written in terms of them so that none can drift from
- * the others.
+ * A unit is a byte of a byte string or a word of a word sequence, never more
+ * than half as wide as the state, and that is what stops keys from being
+ * crafted to collide under every seed.  Multiplying by an odd number carries
+ * a difference in the state's top bit through unchanged, whatever the other
+ * bits hold, and changes every other difference by carries that depend on
+ * those bits, and so on the seed.  No unit reaches the top bit, so every
+ * difference a unit makes has been changed in a way only the seed decides
+ * before the next unit meets it, and no later unit can be chosen to cancel
+ * it under every seed.  A state as wide as a word would give a word's top
+ * bit that path: two keys whose words differ in bit 31 in pairs would collide
+ * under every seed, and keys differing only in their words' top bits, as
+ * domain identifiers of different types do, would keep their differences
+ * there and share a handful of hashes between all of them.
+ *
+ * hash_start(), hash_fold() and finalize() are those three steps, and each
+ * hash function is written in terms of them so that none can drift from the
+ * others.
  *
  * hash_start() also asserts that the seed is not zero.  No context holds a
  * seed of zero, so a zero is an owner that was never given its context's
  * seed, and since every hash starts here the one assertion checks every
  * owner.
  */
-static uint32_t
+static uint64_t
 hash_start(uint64_t seed)
 {
 	assert(seed != 0);
 
-	return ((uint32_t)seed);
+	return (seed);
 }
 
-static uint32_t
-hash_fold(uint32_t state, uint32_t unit)
+static uint64_t
+hash_fold(uint64_t state, uint32_t unit)
 {
-	return ((state ^ unit) * RELIC_HASH_PRIME);
-}
-
-static uint32_t
-hash_finish(uint64_t seed, uint32_t state)
-{
-	return (finalize(state ^ (uint32_t)(seed >> 32)));
+	return ((state ^ unit) * RELIC_HASH_MULTIPLIER);
 }
 
 uint32_t
 relic_hash_bytes(uint64_t seed, const void *bytes, size_t length)
 {
 	const unsigned char *data;
-	uint32_t state;
+	uint64_t state;
 	size_t i;
 
 	data = bytes;
@@ -185,7 +196,7 @@ relic_hash_bytes(uint64_t seed, const void *bytes, size_t length)
 	for (i = 0; i < length; i++)
 		state = hash_fold(state, data[i]);
 
-	return (hash_finish(seed, state));
+	return (finalize(state));
 }
 
 /*
@@ -195,7 +206,7 @@ relic_hash_bytes(uint64_t seed, const void *bytes, size_t length)
 uint32_t
 relic_hash_words(uint64_t seed, const uint32_t *words, size_t count)
 {
-	uint32_t state;
+	uint64_t state;
 	size_t i;
 
 	state = hash_start(seed);
@@ -203,7 +214,7 @@ relic_hash_words(uint64_t seed, const uint32_t *words, size_t count)
 	for (i = 0; i < count; i++)
 		state = hash_fold(state, words[i]);
 
-	return (hash_finish(seed, state));
+	return (finalize(state));
 }
 
 uint32_t
@@ -213,37 +224,23 @@ relic_hash_word(uint64_t seed, uint32_t word)
 }
 
 /*
- * An integer is hashed in two steps: its high half alone, then its low half
- * mixed with that hash.
- *
- * Folding the two halves as one word sequence would admit a collision that
- * holds under every seed.  Flipping bit 31 of a word adds 2^31 to the state,
- * multiplying by an odd prime keeps that difference in bit 31 alone, and the
- * next word can flip it back, so v and v ^ 0x8000000080000000 would hash
- * alike whatever the seed.  Finalizing the high half first spreads a flip of
- * any of its bits over the whole word, by an amount that depends on the
- * seed, before the low half can meet it.  No other key has two words that
- * can both reach bit 31: tuple and index keys are domain identifiers, which
- * reach it only once two billion values have been interned, and the one
- * other word that can, an adornment's column mask, is the last of its key.
- *
- * The halves are extracted by shifting rather than by reading the
- * representation's bytes, so the result does not depend on byte order.
- * Conversion to the unsigned type is a defined wraparound, so a negative
- * value mixes as well as a positive one.
+ * An integer hashes as the sequence of its high and low halves.  The halves
+ * are extracted by shifting rather than by reading the representation's
+ * bytes, so the result does not depend on byte order.  Conversion to the
+ * unsigned type is a defined wraparound, so a negative value mixes as well
+ * as a positive one.
  */
 uint32_t
 relic_hash_int64(uint64_t seed, int64_t value)
 {
+	uint32_t halves[2];
 	uint64_t bits;
-	uint32_t low;
-	uint32_t high;
 
 	bits = (uint64_t)value;
-	low = (uint32_t)bits;
-	high = (uint32_t)(bits >> 32);
+	halves[0] = (uint32_t)(bits >> 32);
+	halves[1] = (uint32_t)bits;
 
-	return (relic_hash_word(seed, low ^ relic_hash_word(seed, high)));
+	return (relic_hash_words(seed, halves, 2));
 }
 
 size_t

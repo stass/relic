@@ -68,6 +68,23 @@
 #define	OTHER_SEED	UINT64_C(0xfedcba9876543210)
 
 /*
+ * The columns of the key whose type variants are hashed, and the number of
+ * variants, three types to a column.
+ */
+#define	VARIANT_COLUMNS	8
+#define	VARIANT_COUNT	6561
+_Static_assert(VARIANT_COLUMNS == 8 &&
+    VARIANT_COUNT == 3 * 3 * 3 * 3 * 3 * 3 * 3 * 3,
+    "VARIANT_COUNT is three to the power VARIANT_COLUMNS");
+
+/*
+ * The seeds a crafted pair of keys is tried under, and the bit a domain
+ * identifier's type reaches highest.
+ */
+#define	CHANNEL_SEEDS	16384
+#define	TOP_BIT		UINT32_C(0x80000000)
+
+/*
  * The record in front of a growable array's first item: the two words just
  * before it, the array's mapped length and its seal.
  */
@@ -134,7 +151,11 @@ static void	 a_word_sequence_hashes_to_a_fixed_value(void);
 static void	 colliding_keys_collide_only_under_their_seed(void);
 static void	 each_context_draws_a_seed_of_its_own(void);
 static void	 integers_differing_in_bit_31_of_each_half_differ(void);
+static int	 order_hashes(const void *left, const void *right);
 static void	 similar_keys_reach_different_slots(void);
+static void	 three_word_differences_are_not_cancelled(void);
+static void	 top_bit_differences_are_not_cancelled(void);
+static void	 type_variants_of_a_key_spread(void);
 
 static uint32_t
 key_rehash(uint32_t id, void *ctx)
@@ -1002,14 +1023,11 @@ colliding_keys_collide_only_under_their_seed(void)
 }
 
 /*
- * Flipping bit 31 of a word is the same as adding 2^31, and multiplying by
- * an odd number keeps that difference in bit 31 alone, so a fold that
- * multiplies after each word carries a flipped top bit to the next word
- * whatever the seed, where a second flip cancels it.  Two integers whose
- * halves both differ in bit 31 would then collide under every seed, which
- * is a collision crafted without the seed.  The integer hash finalizes its
- * high half before the low half joins it, which turns the difference into
- * one that depends on the seed; this checks that it does, under a few seeds.
+ * An integer hashes as the sequence of its halves, so two integers whose
+ * halves both differ in bit 31 are the pair a fold over a state as wide as a
+ * word would collide under every seed: the first flip passes the multiply
+ * unchanged and the second cancels it.  This checks that they differ under
+ * a few seeds.
  */
 static void
 integers_differing_in_bit_31_of_each_half_differ(void)
@@ -1035,6 +1053,151 @@ integers_differing_in_bit_31_of_each_half_differ(void)
 	checkf(collisions == 0, SCENARIO_KEYED,
 	    "integers differing in bit 31 of each half should not collide, "
 	    "but %zu pairs did", collisions);
+}
+
+/*
+ * A domain identifier carries its type in its top two bits, so the keys an
+ * input can produce include every way of giving a key's columns other types
+ * over the same positions.  A fold whose differences only ever move upward
+ * would keep such keys' differences in the top two bits of its state, and
+ * sort all 3^n of them into at most four hashes whatever the seed: a flood
+ * built without knowing it.  Hashed properly they are as distinct as any
+ * other keys, so no hash of these 6561 should be shared by more than two.
+ */
+static void
+type_variants_of_a_key_spread(void)
+{
+	static const uint64_t seeds[] = { SEED, OTHER_SEED, 1u };
+	static const uint32_t types[] = {
+		RELIC_DOM_SYMBOL, RELIC_DOM_STRING, RELIC_DOM_INTEGER
+	};
+	static uint32_t hashes[VARIANT_COUNT];
+	uint32_t key[VARIANT_COLUMNS];
+	size_t largest;
+	size_t run;
+	size_t variant;
+	size_t choice;
+	size_t column;
+	size_t i;
+
+	largest = 0;
+	for (i = 0; i < sizeof(seeds) / sizeof(seeds[0]); i++) {
+		for (variant = 0; variant < VARIANT_COUNT; variant++) {
+			choice = variant;
+			for (column = 0; column < VARIANT_COLUMNS; column++) {
+				key[column] = types[choice % 3] |
+				    (uint32_t)(column * 1000 + 7);
+				choice /= 3;
+			}
+			hashes[variant] = relic_hash_words(seeds[i], key,
+			    VARIANT_COLUMNS);
+		}
+
+		qsort(hashes, VARIANT_COUNT, sizeof(hashes[0]), order_hashes);
+		run = 1;
+		for (variant = 1; variant < VARIANT_COUNT; variant++) {
+			run = hashes[variant] == hashes[variant - 1] ?
+			    run + 1 : 1;
+			if (run > largest)
+				largest = run;
+		}
+	}
+
+	checkf(largest <= 2, SCENARIO_FLOODING,
+	    "keys differing only in their columns' types should spread, but "
+	    "%zu of them shared one hash", largest);
+}
+
+static int
+order_hashes(const void *left, const void *right)
+{
+	uint32_t a;
+	uint32_t b;
+
+	a = *(const uint32_t *)left;
+	b = *(const uint32_t *)right;
+
+	return ((a > b) - (a < b));
+}
+
+/*
+ * A difference in a word's top bit passes a multiplication by an odd number
+ * unchanged, whatever the other bits, so a fold that did nothing else would
+ * hand it to the next word unchanged, and a mixing step that only shifted
+ * and xored would hand it on as a pattern just as fixed.  Either way some
+ * later word differing by that pattern would cancel it under every seed.
+ * This pairs a key with one whose first word differs in bit 31 and whose
+ * second differs in bit 31 alone or in bit 31 and one other bit, and expects
+ * no pair to collide under any of sixteen seeds.
+ */
+static void
+top_bit_differences_are_not_cancelled(void)
+{
+	static const uint32_t first[] = { 5u, 0x12345u };
+	uint32_t second_differences[32];
+	uint32_t mixed[2];
+	uint32_t key[2];
+	size_t collisions;
+	uint64_t seed;
+	unsigned int bit;
+	size_t d;
+	size_t i;
+
+	second_differences[0] = TOP_BIT;
+	for (bit = 0; bit < 31; bit++)
+		second_differences[bit + 1] = TOP_BIT | UINT32_C(1) << bit;
+
+	collisions = 0;
+	for (seed = 1; seed <= 16; seed++) {
+		for (d = 0; d < 32; d++) {
+			for (i = 0; i < sizeof(first) / sizeof(first[0]); i++) {
+				key[0] = first[i];
+				key[1] = 0x777u;
+				mixed[0] = key[0] ^ TOP_BIT;
+				mixed[1] = key[1] ^ second_differences[d];
+
+				if (relic_hash_words(seed * SEED, key, 2) ==
+				    relic_hash_words(seed * SEED, mixed, 2))
+					collisions++;
+			}
+		}
+	}
+
+	checkf(collisions == 0, SCENARIO_FLOODING,
+	    "a difference in the top bit of one word should not be cancelled "
+	    "by a later word, but %zu pairs collided", collisions);
+}
+
+/*
+ * A multiplier with few bits set satisfies a short polynomial relation
+ * modulo 2^64 -- FNV's prime, 2^40 + 435, less 435 and squared is a multiple
+ * of 2^64 -- and such a relation lets a difference in one word be partly
+ * offset by the next and cancelled by the third under a fixed share of
+ * seeds.  The pair below is one: through FNV's prime it collided under about
+ * one seed in a thousand.  A multiplier without such a relation leaves the
+ * pair colliding only as often as any two keys do, which no seed here
+ * should.
+ */
+static void
+three_word_differences_are_not_cancelled(void)
+{
+	static const uint32_t key[] = { 0u, 0u, 0u };
+	static const uint32_t crafted[] = {
+		UINT32_C(0x000a0000), UINT32_C(0x11040000), UINT32_C(0x03660000)
+	};
+	size_t collisions;
+	uint64_t seed;
+
+	collisions = 0;
+	for (seed = 1; seed <= CHANNEL_SEEDS; seed++) {
+		if (relic_hash_words(seed * SEED, key, 3) ==
+		    relic_hash_words(seed * SEED, crafted, 3))
+			collisions++;
+	}
+
+	checkf(collisions == 0, SCENARIO_FLOODING,
+	    "a crafted three-word difference should not be cancelled, but it "
+	    "was under %zu of %d seeds", collisions, CHANNEL_SEEDS);
 }
 
 /*
@@ -1517,15 +1680,15 @@ a_word_sequence_hashes_to_a_fixed_value(void)
 {
 	static const uint32_t words[] = { 1u, 2u, 3u };
 
-	check(relic_hash_words(SEED, NULL, 0) == 0x1d6ef8aeu,
+	check(relic_hash_words(SEED, NULL, 0) == 0x89022ceau,
 	    SCENARIO_DETERMINISM,
-	    "the empty sequence should hash to 0x1d6ef8ae");
-	check(relic_hash_words(SEED, words, 1) == 0x702f1c2bu,
+	    "the empty sequence should hash to 0x89022cea");
+	check(relic_hash_words(SEED, words, 1) == 0x0542fc3au,
 	    SCENARIO_DETERMINISM,
-	    "the sequence 1 should hash to 0x702f1c2b");
-	check(relic_hash_words(SEED, words, 3) == 0x58faea37u,
+	    "the sequence 1 should hash to 0x0542fc3a");
+	check(relic_hash_words(SEED, words, 3) == 0x8f6a8af5u,
 	    SCENARIO_DETERMINISM,
-	    "the sequence 1, 2, 3 should hash to 0x58faea37");
+	    "the sequence 1, 2, 3 should hash to 0x8f6a8af5");
 
 	/*
 	 * Order matters: a tuple is a sequence, and a hash that folded its
@@ -1559,6 +1722,9 @@ main(void)
 	each_context_draws_a_seed_of_its_own();
 	integers_differing_in_bit_31_of_each_half_differ();
 	similar_keys_reach_different_slots();
+	three_word_differences_are_not_cancelled();
+	top_bit_differences_are_not_cancelled();
+	type_variants_of_a_key_spread();
 
 	return (check_summary("util"));
 }

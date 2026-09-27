@@ -301,28 +301,27 @@ put_symbol(const relic_t *ctx, relic_explain_line_t *line, uint32_t symbol)
 static void
 put_value(const relic_t *ctx, relic_explain_line_t *line, relic_dom_t dom)
 {
-	const relic_value_t *value;
+	relic_value_t value;
 	const char *bytes;
 	char integer[24];
 	size_t length;
 
-	value = relic_value_of(ctx, dom);
-	if (value == NULL) {
+	if (!relic_value_decode(ctx, dom, &value)) {
 		line_put(line, "?");
 		return;
 	}
 
-	switch (value->type) {
+	switch (value.type) {
 	case RELIC_INTEGER:
 		snprintf(integer, sizeof(integer), "%" PRId64,
-		    value->v.integer);
+		    value.v.integer);
 		line_put(line, integer);
 		return;
 	case RELIC_SYMBOL:
-		put_symbol(ctx, line, value->v.id);
+		put_symbol(ctx, line, value.v.id);
 		return;
 	case RELIC_STRING:
-		bytes = relic_symbol_bytes(ctx, value->v.id, &length);
+		bytes = relic_symbol_bytes(ctx, value.v.id, &length);
 		if (bytes == NULL)
 			break;
 		put_string_literal(line, bytes, length);

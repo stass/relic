@@ -193,9 +193,10 @@ stop, and the number is there to let a reader find the byte, not to align a
 caret under it.
 
 The source name is interned in the symbol pool and the location holds the
-pointer the pool returns. Those bytes live in the context arena and never
-move, so a location stored in the tree stays printable for the life of the
-context, and loading the same file twice stores one copy of its name.
+pointer the pool returns. Those bytes live in the pool's string arena and
+never move, so a location stored in the tree stays printable for the life
+of the context, and loading the same file twice stores one copy of its
+name.
 
 ---
 

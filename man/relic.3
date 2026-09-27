@@ -290,6 +290,11 @@ with their identifier, which is valid for the life of the context.
 A symbol must be a lowercase ASCII letter followed by ASCII letters, digits
 and underscores, as the language writes one; any other bytes, a NUL among
 them, make a string.
+A context holds at most 2^30 \- 1 distinct byte strings, which symbols and
+strings share with predicate names, variable names and source names, and at
+most 2^30 \- 1 distinct integers; a byte string is at most 2^32 \- 2 bytes
+long.
+Interning past a limit fails with the reason reported.
 .Fn relic_string
 returns the bytes of a symbol or string identifier, NUL-terminated, and
 stores their length in

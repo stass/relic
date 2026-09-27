@@ -250,14 +250,21 @@ tuple_at(const relic_relation_t *relation, relic_tuple_id_t id)
 }
 
 /*
- * The hash of a whole tuple, which is what the canonical index is keyed on.
- * A tuple of no columns has a defined hash, which is what lets a relation of
- * arity zero use this path like any other.
+ * The hash of a whole tuple, which is what the canonical index is keyed on,
+ * and what a load's staging computes to hand the base store.  A tuple of no
+ * columns has a defined hash, which is what lets a relation of arity zero
+ * use this path like any other.
  */
+uint32_t
+relic_tuple_hash(uint64_t seed, const relic_dom_t *columns, uint16_t arity)
+{
+	return (relic_hash_words(seed, columns, arity));
+}
+
 static uint32_t
 tuple_hash(const relic_relation_t *relation, const relic_dom_t *columns)
 {
-	return (relic_hash_words(relation->hash_seed, columns,
+	return (relic_tuple_hash(relation->hash_seed, columns,
 	    relation->arity));
 }
 
@@ -792,7 +799,22 @@ bool
 relic_relation_contains(const relic_relation_t *relation,
     const relic_dom_t *columns)
 {
-	return (relic_relation_find(relation, columns) != RELIC_ID_NONE);
+	return (relic_relation_contains_hashed(relation, columns,
+	    tuple_hash(relation, columns)));
+}
+
+/*
+ * Whether the relation holds this tuple, whose hash the caller computed
+ * under the context's seed, as every relation of the context hashes a
+ * tuple.  A debug build checks the hash against the relation's own.
+ */
+bool
+relic_relation_contains_hashed(const relic_relation_t *relation,
+    const relic_dom_t *columns, uint32_t hash)
+{
+	assert(hash == tuple_hash(relation, columns));
+
+	return (relation_find_hashed(relation, columns, hash) != RELIC_ID_NONE);
 }
 
 /*
@@ -1501,12 +1523,14 @@ relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 
 /*
  * Append a fact the base store `pred` lacks, into room relic_bases_reserve()
- * made: store it and place it in the canonical index, looking nothing up.
- * Nothing here can fail.
+ * made: store it and place it in the canonical index by `hash`, which the
+ * caller computed under the context's seed, looking nothing up.  Nothing
+ * here can fail.  A debug build checks what a release build trusts: the
+ * room, the hash, and that the store lacks the fact.
  */
 void
-relic_base_append(relic_t *ctx, relic_pred_id_t pred,
-    const relic_dom_t *columns)
+relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
+    const relic_dom_t *columns, uint32_t hash)
 {
 	relic_relation_t *store;
 
@@ -1514,10 +1538,10 @@ relic_base_append(relic_t *ctx, relic_pred_id_t pred,
 	assert(store != NULL && store->index_count == 0);
 	assert(relic_relation_bytes_after_reserve(store, 1) ==
 	    relic_relation_bytes(store));
-	assert(relation_find_hashed(store, columns,
-	    tuple_hash(store, columns)) == RELIC_ID_NONE);
+	assert(hash == tuple_hash(store, columns));
+	assert(relation_find_hashed(store, columns, hash) == RELIC_ID_NONE);
 
-	tuple_append(store, columns, tuple_hash(store, columns));
+	tuple_append(store, columns, hash);
 	ctx->store.tuple_count++;
 }
 

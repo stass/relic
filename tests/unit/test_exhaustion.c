@@ -66,6 +66,7 @@
 #define	SCENARIO_IMPORT		"an import that ran out of memory adds nothing"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
+#define	SCENARIO_INTEGER	"interning an integer survives a failed allocation"
 #define	SCENARIO_INTERFACE	"an added fact or collected answer reports once"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_LOOKAHEAD	"a refusal in the lookahead reports once"
@@ -83,6 +84,7 @@
  */
 #define	SYMBOL_SWEEP	12
 #define	VALUE_SWEEP	20
+#define	INTEGER_SWEEP	12
 
 /*
  * A load makes many more requests than an intern: the text buffer, an arena
@@ -281,6 +283,7 @@ static void	 context_creation_reports_a_failed_allocation(void);
 static void	 context_creation_fails_without_entropy(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
+static void	 interning_an_integer_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
@@ -570,9 +573,9 @@ interning_a_symbol_survives_a_failed_allocation(void)
 }
 
 /*
- * The same sweep for the value table, which interns bytes in the symbol pool
- * and then the value that refers to them, so it has both tables' failure
- * paths in one operation.
+ * The same sweep for a symbol value, which interns bytes in the symbol pool
+ * and then marks them used as a value, so it has both tables' failure paths
+ * in one operation.  An integer takes a path of its own, swept below.
  */
 static void
 interning_a_value_survives_a_failed_allocation(void)
@@ -630,6 +633,85 @@ interning_a_value_survives_a_failed_allocation(void)
 }
 
 /*
+ * The same sweep for an integer, which is stored in the integer table and
+ * placed in its index.  Room in the index is taken before the integer is
+ * stored; the other order would leave, after a refused index growth, an
+ * integer no lookup reaches, and the retry would give an equal integer a
+ * second identifier.
+ */
+static void
+interning_an_integer_survives_a_failed_allocation(void)
+{
+	const int64_t integer = -42;
+	relic_value_t decoded;
+	size_t refused;
+	size_t completed;
+	long budget;
+
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < INTEGER_SWEEP; budget++) {
+		relic_t *ctx;
+		relic_dom_t interrupted;
+		relic_dom_t first;
+		relic_dom_t again;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_INTEGER,
+			    "a context should be created");
+			return;
+		}
+
+		refuse_allocations_after(budget);
+		status = relic_value_intern_integer(ctx, integer,
+		    &interrupted);
+		serve_every_allocation();
+
+		if (status != 0)
+			refused++;
+		else
+			completed++;
+
+		checkf(relic_value_intern_integer(ctx, integer, &first) == 0,
+		    SCENARIO_INTEGER, "interning should succeed once the "
+		    "allocator recovers, with allocation %ld refused", budget);
+		checkf(relic_value_intern_integer(ctx, integer, &again) == 0,
+		    SCENARIO_INTEGER, "interning should succeed again, with "
+		    "allocation %ld refused", budget);
+
+		checkf(first == again, SCENARIO_INTEGER,
+		    "equal integers should give one identifier (%u then %u), "
+		    "with allocation %ld refused", first, again, budget);
+		checkf(relic_value_count(ctx) == 1, SCENARIO_INTEGER,
+		    "the context should hold one value, not %zu, with "
+		    "allocation %ld refused", relic_value_count(ctx), budget);
+
+		bzero(&decoded, sizeof(decoded));
+		checkf(relic_value_decode(ctx, first, &decoded) &&
+		    decoded.type == RELIC_INTEGER &&
+		    decoded.v.integer == integer, SCENARIO_INTEGER,
+		    "the identifier should decode to the integer interned, "
+		    "with allocation %ld refused", budget);
+
+		if (status == 0) {
+			checkf(interrupted == first, SCENARIO_INTEGER,
+			    "a reported success should stand, with allocation "
+			    "%ld refused", budget);
+		}
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0, SCENARIO_INTEGER,
+	    "the sweep should reach both a refused and a completed intern, "
+	    "not %zu and %zu, in %d attempts", refused, completed,
+	    INTEGER_SWEEP);
+}
+
+/*
  * Load a program with the nth allocation refused, then load the same text
  * again with the allocator restored.
  *
@@ -646,7 +728,7 @@ static void
 a_load_that_ran_out_of_memory_adds_nothing(void)
 {
 	static const char program[] =
-	    "edge(a, b).\n"
+	    "edge(a, 2).\n"
 	    "path(X, Y) :- edge(X, Y), not blocked(X), Y != \"stop\".\n"
 	    "path(a, Z)?\n";
 
@@ -742,13 +824,14 @@ static void
 an_import_that_ran_out_of_memory_adds_nothing(void)
 {
 	static const enum relic_column columns[] = {
-		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SKIP, RELIC_COLUMN_STRING
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SKIP, RELIC_COLUMN_STRING,
+		RELIC_COLUMN_INTEGER
 	};
 	static const char table[] =
-	    "ann,x,\"a quoted field long enough to make its buffer grow\"\n"
-	    "bob,y,b\n"
-	    "ann,z,\"a quoted field long enough to make its buffer grow\"\n"
-	    "cy,w,\"c\"\n";
+	    "ann,x,\"a quoted field long enough to make its buffer grow\",7\n"
+	    "bob,y,b,8\n"
+	    "ann,z,\"a quoted field long enough to make its buffer grow\",7\n"
+	    "cy,w,\"c\",9\n";
 	relic_import_t import;
 	size_t refused;
 	size_t completed;
@@ -757,7 +840,7 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 	bzero(&import, sizeof(import));
 	import.predicate = "person";
 	import.columns = columns;
-	import.column_count = 3;
+	import.column_count = 4;
 	import.format = RELIC_FORMAT_CSV;
 
 	refused = 0;
@@ -2527,6 +2610,7 @@ main(void)
 	context_creation_fails_without_entropy();
 	interning_a_symbol_survives_a_failed_allocation();
 	interning_a_value_survives_a_failed_allocation();
+	interning_an_integer_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
 	an_import_that_ran_out_of_memory_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();

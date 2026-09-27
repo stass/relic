@@ -114,10 +114,11 @@ Per D-11 and architecture section 10.1:
 
 * `=` and `!=` compare domain identifiers, which is exact because every value
   is interned: equal values have equal identifiers and nothing else does.
-* `<`, `<=`, `>` and `>=` go through the value table. Integers compare
-  numerically and symbols and strings bytewise. Values of different types are
-  unordered, and an unordered comparison is false, so the binding is filtered
-  out rather than reported as an error.
+* `<`, `<=`, `>` and `>=` compare the values the identifiers decode to,
+  per `specs/design-memory.md` section 8. Integers compare numerically and
+  symbols and strings bytewise. Values of different types are unordered,
+  and an unordered comparison is false, so the binding is filtered out
+  rather than reported as an error.
 
 Verbosity level 2 reports the first cross-type ordering comparison per rule, so
 that unintended mixing is discoverable. The library reports it only when the

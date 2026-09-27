@@ -24,14 +24,34 @@
  * module rather than in the parser: the parser and relic_fact_add() cannot
  * disagree about a value's canonical form when there is only one path that
  * produces one.
+ *
+ * An identifier's top two bits are its type.  A symbol or a string is its
+ * symbol identifier under that type: the pool gives equal bytes one
+ * identifier, so it gives a value one identifier too, and interning one is a
+ * probe into the pool and nothing else.  An integer is its position in the
+ * integer table, which gives equal integers one position the same way.
  */
 
 /*
- * Domain identifiers are 32-bit and zero means "none", so a context holds at
- * most this many distinct values.  Checked rather than assumed: an identifier
- * that wrapped would silently merge two unrelated values.
+ * An integer's position is the index below the type bits, and zero is
+ * reserved, so the table holds RELIC_DOM_INDEX_MASK integers.  Checked
+ * rather than assumed: a position that ran into the type bits would silently
+ * turn one value into another.  A test build may define the ceiling lower,
+ * so that the refusal can be reached, and never higher.
  */
-#define	RELIC_VALUE_MAX		(UINT32_MAX - 1u)
+#ifndef RELIC_INTEGER_MAX
+#define	RELIC_INTEGER_MAX	RELIC_DOM_INDEX_MASK
+#endif
+
+_Static_assert(RELIC_INTEGER_MAX <= RELIC_DOM_INDEX_MASK,
+    "an integer's position must stay below the type bits");
+
+/*
+ * The bits of a symbol's entry in `symbol_uses`: interned as a symbol value,
+ * and interned as a string value.
+ */
+#define	RELIC_USED_AS_SYMBOL	0x1u
+#define	RELIC_USED_AS_STRING	0x2u
 
 /* Why bytes the language could not write as a symbol are refused as one. */
 #define	RELIC_NOT_A_SYMBOL \
@@ -43,19 +63,28 @@ static int	 compare_bytes(const relic_t *ctx, uint32_t left,
 static int	 compare_integers(int64_t left, int64_t right);
 static int	 compare_totally(const relic_t *ctx, const relic_value_t *left,
 		    const relic_value_t *right);
+static int	 cover_symbol_uses(relic_t *ctx, uint32_t symbol);
+static bool	 decode_integer(const relic_valtab_t *table, uint32_t position,
+		    relic_value_t *value);
+static bool	 decode_symbol_value(const relic_valtab_t *table,
+		    uint32_t symbol, enum relic_type type,
+		    relic_value_t *value);
+static relic_dom_t dom_type_bits(enum relic_type type);
 static int	 intern_bytes(relic_t *ctx, enum relic_type type,
 		    const char *bytes, size_t length, relic_value_t *value);
-static const relic_value_t *value_at(const relic_valtab_t *table,
-		    relic_dom_t dom);
-static bool	 value_equal(const relic_value_t *left,
-		    const relic_value_t *right);
+static int	 intern_integer(relic_t *ctx, int64_t integer,
+		    relic_dom_t *domp);
+static int	 intern_symbol_value(relic_t *ctx, enum relic_type type,
+		    uint32_t symbol, relic_dom_t *domp);
+static uint32_t	 integer_rehash(uint32_t id, void *ctx);
+static int	 integer_store(relic_t *ctx, int64_t integer, uint32_t *idp);
+static void	 record_symbol_use(relic_valtab_t *table, uint32_t symbol,
+		    enum relic_type type);
+static uint8_t	 symbol_use_bit(enum relic_type type);
+static bool	 symbol_used_as(const relic_valtab_t *table, uint32_t symbol,
+		    enum relic_type type);
 static int	 value_from_bytes(relic_t *ctx, enum relic_type type,
 		    const char *bytes, size_t length, relic_value_t *value);
-static uint32_t	 value_hash(uint64_t seed, const relic_value_t *value);
-static relic_value_t value_normalized(const relic_value_t *value);
-static uint32_t	 value_rehash(uint32_t dom, void *ctx);
-static int	 value_store(relic_t *ctx, const relic_value_t *value,
-		    relic_dom_t *domp);
 static unsigned int value_type_rank(enum relic_type type);
 static bool	 value_well_formed(relic_t *ctx, const relic_value_t *value);
 
@@ -71,86 +100,65 @@ void
 relic_valtab_reset(relic_valtab_t *table)
 {
 	relic_idtab_reset(&table->index);
-	relic_free_array(table->entries);
+	relic_free_array(table->integers);
+	relic_free_array(table->symbol_uses);
 	bzero(table, sizeof(*table));
 }
 
 /*
- * The value a domain identifier names.  Identifier zero is reserved, so the
- * array is indexed one lower; this is the only place that translation is
- * written.  The caller must have established that the identifier was
- * assigned.
+ * The type bits of a domain identifier of `type`.  The switch covers every
+ * enumerator and has no default, so a type added later is reported here
+ * rather than given the bits of another; a type outside the enumeration,
+ * which value_well_formed() has already refused, gets none.
  */
-static const relic_value_t *
-value_at(const relic_valtab_t *table, relic_dom_t dom)
+static relic_dom_t
+dom_type_bits(enum relic_type type)
 {
-	return (&table->entries[dom - 1]);
-}
-
-/*
- * Hash a value by its fields rather than by its bytes.
- *
- * relic_value_t contains a union and padding, so hashing its representation
- * would depend on bytes that no assignment defines and two equal values could
- * hash differently.  Reading the type and the live union member makes the
- * hash a function of the value itself.  The type participates so that the
- * symbol foo and the string "foo", which share one symbol identifier, are as
- * likely to land in different slots as any two unrelated keys.
- */
-static uint32_t
-value_hash(uint64_t seed, const relic_value_t *value)
-{
-	uint32_t payload;
-
-	/*
-	 * The switch covers every enumerator and has no default, so a type
-	 * added later is reported here rather than silently hashing every
-	 * value of it into one bucket.  The initialization is what a type
-	 * outside the enumeration would fall back on; such a value cannot
-	 * come from this table, and reaching the switch with one is already
-	 * undefined, but a defined payload is better than an indeterminate
-	 * one.
-	 */
-	payload = 0;
-
-	switch (value->type) {
+	switch (type) {
 	case RELIC_SYMBOL:
+		return (RELIC_DOM_SYMBOL);
 	case RELIC_STRING:
-		payload = relic_hash_word(seed, value->v.id);
-		break;
+		return (RELIC_DOM_STRING);
 	case RELIC_INTEGER:
-		payload = relic_hash_int64(seed, value->v.integer);
-		break;
+		return (RELIC_DOM_INTEGER);
 	}
 
-	return (relic_hash_word(seed, payload ^ (uint32_t)value->type));
+	return (0);
 }
 
 /*
- * Whether two values are the same value.  Different types are never equal,
- * which is the language rule: the symbol foo and the string "foo" are
- * distinct.
+ * The bit of a symbol's `symbol_uses` entry for a value of `type`, which is
+ * a symbol or a string.
+ */
+static uint8_t
+symbol_use_bit(enum relic_type type)
+{
+	return (type == RELIC_SYMBOL ? RELIC_USED_AS_SYMBOL :
+	    RELIC_USED_AS_STRING);
+}
+
+/*
+ * Whether `symbol` has been interned as a value of `type`, which is what
+ * makes the identifier of that value one the context assigned.
  */
 static bool
-value_equal(const relic_value_t *left, const relic_value_t *right)
+symbol_used_as(const relic_valtab_t *table, uint32_t symbol,
+    enum relic_type type)
 {
-	if (left->type != right->type)
+	if (symbol == RELIC_ID_NONE || symbol > table->symbol_use_capacity)
 		return (false);
 
-	if (left->type == RELIC_INTEGER)
-		return (left->v.integer == right->v.integer);
-
-	return (left->v.id == right->v.id);
+	return ((table->symbol_uses[symbol - 1] & symbol_use_bit(type)) != 0);
 }
 
 static uint32_t
-value_rehash(uint32_t dom, void *ctx)
+integer_rehash(uint32_t id, void *ctx)
 {
 	const relic_valtab_t *table;
 
 	table = ctx;
 
-	return (value_hash(table->hash_seed, value_at(table, dom)));
+	return (relic_hash_int64(table->hash_seed, table->integers[id - 1]));
 }
 
 /*
@@ -160,10 +168,10 @@ value_rehash(uint32_t dom, void *ctx)
  *
  * An embedding program builds relic_value_t itself, so the identifier in one
  * may name a symbol from a different context or no symbol at all.  Catching
- * that here keeps a bad identifier out of the value table, where later stages
- * would read through it.  The same caller could name a string's bytes as a
- * symbol, which would print as text that reads back as something else, so
- * every value reaching the table is held to the lexer's rule here, once.
+ * that here keeps a bad identifier out of every domain identifier, where
+ * later stages would read through it.  The same caller could name a string's
+ * bytes as a symbol, which would print as text that reads back as something
+ * else, so every value interned is held to the lexer's rule here, once.
  */
 static bool
 value_well_formed(relic_t *ctx, const relic_value_t *value)
@@ -206,77 +214,154 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
 }
 
 /*
- * A value with one definite representation: the type, the union member that
- * type selects, and zero everywhere else.
- *
- * relic_value_t has padding between its type and its union, and a union half
- * the caller need not have written.  A caller that filled in only the fields
- * the interface documents leaves those bytes holding whatever its stack held,
- * and relic_value_of() hands whatever is stored straight back.  Normalizing
- * here, in the one place a value enters the table, makes the property a fact
- * about the table rather than a habit of the callers that happen to zero
- * their locals first.
- */
-static relic_value_t
-value_normalized(const relic_value_t *value)
-{
-	relic_value_t normalized;
-
-	bzero(&normalized, sizeof(normalized));
-	normalized.type = value->type;
-
-	switch (value->type) {
-	case RELIC_SYMBOL:
-	case RELIC_STRING:
-		normalized.v.id = value->v.id;
-		break;
-	case RELIC_INTEGER:
-		normalized.v.integer = value->v.integer;
-		break;
-	}
-
-	return (normalized);
-}
-
-/*
- * Append a value to the value array and return the domain identifier
- * assigned to it.  The entry is written in full before the count advances,
- * so nothing a caller can reach is half initialized.
+ * Make the record of uses cover `symbol`.  The entries a growth adds are
+ * cleared, since a symbol whose entry held a stray bit would decode as a
+ * value no one made, and a failed growth leaves every earlier record as it
+ * was.
  */
 static int
-value_store(relic_t *ctx, const relic_value_t *value, relic_dom_t *domp)
+cover_symbol_uses(relic_t *ctx, uint32_t symbol)
 {
 	relic_valtab_t *table;
-	relic_value_t *entries;
-	relic_value_t stored;
+	uint8_t *uses;
+	size_t old_capacity;
 
 	table = &ctx->values;
+	if (symbol <= table->symbol_use_capacity)
+		return (0);
 
-	if (table->count >= RELIC_VALUE_MAX) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "too many distinct values");
-		return (-1);
-	}
-
-	/*
-	 * The value is copied out before the array is grown, so a caller may
-	 * pass a pointer into the table itself -- what relic_value_of()
-	 * returns, say -- without the reallocation freeing it underneath the
-	 * copy.
-	 */
-	stored = value_normalized(value);
-
-	entries = relic_grow_array(table->entries, &table->capacity,
-	    table->count + 1, sizeof(*table->entries));
-	if (entries == NULL) {
+	old_capacity = table->symbol_use_capacity;
+	uses = relic_grow_array(table->symbol_uses, &table->symbol_use_capacity,
+	    symbol, sizeof(*uses));
+	if (uses == NULL) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
-	table->entries = entries;
 
-	table->entries[table->count] = stored;
-	table->count++;
+	bzero(uses + old_capacity, table->symbol_use_capacity - old_capacity);
+	table->symbol_uses = uses;
 
-	*domp = (relic_dom_t)table->count;
+	return (0);
+}
+
+/*
+ * Record that `symbol`, which the record of uses covers, is used as a value
+ * of `type`, counting the value the first time.
+ */
+static void
+record_symbol_use(relic_valtab_t *table, uint32_t symbol,
+    enum relic_type type)
+{
+	uint8_t *uses;
+	uint8_t bit;
+
+	uses = &table->symbol_uses[symbol - 1];
+	bit = symbol_use_bit(type);
+	if ((*uses & bit) != 0)
+		return;
+
+	*uses |= bit;
+	if (type == RELIC_SYMBOL)
+		table->symbol_values++;
+	else
+		table->string_values++;
+}
+
+/*
+ * The domain identifier of a symbol or string value whose symbol the pool
+ * holds.  The identifier is the symbol's under the type's bits and needs
+ * nothing stored; the record of the symbol's use is what makes it one the
+ * context assigned, and what counts the distinct values of each type.
+ */
+static int
+intern_symbol_value(relic_t *ctx, enum relic_type type, uint32_t symbol,
+    relic_dom_t *domp)
+{
+	if (cover_symbol_uses(ctx, symbol) != 0)
+		return (-1);
+
+	record_symbol_use(&ctx->values, symbol, type);
+	*domp = dom_type_bits(type) | symbol;
+
+	return (0);
+}
+
+/*
+ * Append an integer to the integer table and return its position.  The
+ * entry is written before the count advances, so nothing a caller can reach
+ * is half initialized.
+ */
+static int
+integer_store(relic_t *ctx, int64_t integer, uint32_t *idp)
+{
+	relic_valtab_t *table;
+	int64_t *integers;
+
+	table = &ctx->values;
+
+	if (table->integer_count >= RELIC_INTEGER_MAX) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "too many distinct integers");
+		return (-1);
+	}
+
+	integers = relic_grow_array(table->integers, &table->integer_capacity,
+	    table->integer_count + 1, sizeof(*table->integers));
+	if (integers == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	table->integers = integers;
+
+	table->integers[table->integer_count] = integer;
+	table->integer_count++;
+
+	*idp = (uint32_t)table->integer_count;
+
+	return (0);
+}
+
+/*
+ * The domain identifier of an integer, found in the integer table or else
+ * appended to it.
+ */
+static int
+intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
+{
+	relic_valtab_t *table;
+	relic_idprobe_t probe;
+	uint32_t hash;
+	uint32_t id;
+
+	table = &ctx->values;
+	hash = relic_hash_int64(table->hash_seed, integer);
+
+	relic_idprobe_open(&probe, &table->index, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		if (table->integers[id - 1] == integer) {
+			*domp = RELIC_DOM_INTEGER | id;
+			return (0);
+		}
+	}
+
+	/*
+	 * Room in the index is taken before the integer is stored, so that
+	 * the only step that can fail happens while there is still nothing to
+	 * leave behind.  Storing first would, on a failed index growth, leave
+	 * an integer no lookup could reach, and the next intern of an equal
+	 * integer would assign it a second identifier -- which the evaluator
+	 * would then treat as a different value.
+	 */
+	if (relic_idtab_reserve(&table->index, 1, integer_rehash, table) != 0) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	if (integer_store(ctx, integer, &id) != 0)
+		return (-1);
+
+	relic_idtab_place(&table->index, hash, id);
+	*domp = RELIC_DOM_INTEGER | id;
 
 	return (0);
 }
@@ -288,52 +373,20 @@ value_store(relic_t *ctx, const relic_value_t *value, relic_dom_t *domp)
 int
 relic_value_intern(relic_t *ctx, const relic_value_t *value, relic_dom_t *domp)
 {
-	relic_valtab_t *table;
-	relic_idprobe_t probe;
-	uint32_t hash;
-	uint32_t dom;
-
 	if (!value_well_formed(ctx, value))
 		return (-1);
 
-	table = &ctx->values;
-	hash = value_hash(table->hash_seed, value);
+	if (value->type == RELIC_INTEGER)
+		return (intern_integer(ctx, value->v.integer, domp));
 
-	relic_idprobe_open(&probe, &table->index, hash);
-	while (relic_idprobe_next(&probe, &dom)) {
-		if (value_equal(value_at(table, dom), value)) {
-			*domp = dom;
-			return (0);
-		}
-	}
-
-	/*
-	 * Room in the index is taken before the value is stored, so that the
-	 * only step that can fail happens while there is still nothing to
-	 * leave behind.  Storing first would, on a failed index growth, leave
-	 * a value no lookup could reach, and the next intern of an equal
-	 * value would assign it a second identifier -- which the evaluator
-	 * would then treat as a different value.
-	 */
-	if (relic_idtab_reserve(&table->index, 1, value_rehash, table) != 0) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-
-	if (value_store(ctx, value, &dom) != 0)
-		return (-1);
-
-	relic_idtab_place(&table->index, hash, dom);
-	*domp = dom;
-
-	return (0);
+	return (intern_symbol_value(ctx, value->type, value->v.id, domp));
 }
 
 /*
  * Intern a symbol or a string given as bytes, which is what the lexer has.
- * The bytes are interned in the symbol pool and the resulting value in the
- * value table, so the symbol foo and the string "foo" share one copy of the
- * bytes and receive two domain identifiers.
+ * The bytes are interned in the symbol pool, so the symbol foo and the
+ * string "foo" share one copy of the bytes and receive two domain
+ * identifiers.
  */
 int
 relic_value_intern_bytes(relic_t *ctx, enum relic_type type, const void *bytes,
@@ -360,47 +413,91 @@ relic_value_intern_bytes(relic_t *ctx, enum relic_type type, const void *bytes,
 int
 relic_value_intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
 {
-	relic_value_t value;
-
-	value.type = RELIC_INTEGER;
-	value.v.integer = integer;
-
-	return (relic_value_intern(ctx, &value, domp));
+	return (intern_integer(ctx, integer, domp));
 }
 
-const relic_value_t *
-relic_value_of(const relic_t *ctx, relic_dom_t dom)
+/*
+ * The value a symbol or string identifier names, when the symbol has been
+ * interned as a value of `type`.
+ */
+static bool
+decode_symbol_value(const relic_valtab_t *table, uint32_t symbol,
+    enum relic_type type, relic_value_t *value)
 {
-	if (dom == RELIC_ID_NONE || dom > ctx->values.count)
-		return (NULL);
+	if (!symbol_used_as(table, symbol, type))
+		return (false);
 
-	return (value_at(&ctx->values, dom));
+	value->type = type;
+	value->v.id = symbol;
+
+	return (true);
+}
+
+/*
+ * The value an integer identifier names, when its position is one the
+ * integer table holds.
+ */
+static bool
+decode_integer(const relic_valtab_t *table, uint32_t position,
+    relic_value_t *value)
+{
+	if (position == RELIC_ID_NONE || position > table->integer_count)
+		return (false);
+
+	value->type = RELIC_INTEGER;
+	value->v.integer = table->integers[position - 1];
+
+	return (true);
+}
+
+/*
+ * The value is zeroed before its type decodes into it, so every byte a
+ * caller receives is written here -- the padding and the member the type
+ * does not use included -- and a failed decode leaves zeros behind.
+ */
+bool
+relic_value_decode(const relic_t *ctx, relic_dom_t dom, relic_value_t *value)
+{
+	const relic_valtab_t *table;
+	uint32_t index;
+
+	table = &ctx->values;
+	index = dom & RELIC_DOM_INDEX_MASK;
+
+	bzero(value, sizeof(*value));
+
+	switch (dom & RELIC_DOM_TYPE_MASK) {
+	case RELIC_DOM_SYMBOL:
+		return (decode_symbol_value(table, index, RELIC_SYMBOL, value));
+	case RELIC_DOM_STRING:
+		return (decode_symbol_value(table, index, RELIC_STRING, value));
+	case RELIC_DOM_INTEGER:
+		return (decode_integer(table, index, value));
+	}
+
+	return (false);
 }
 
 size_t
 relic_value_count(const relic_t *ctx)
 {
-	return (ctx->values.count);
+	return (ctx->values.symbol_values + ctx->values.string_values +
+	    ctx->values.integer_count);
 }
 
-/*
- * How many of the interned values have the given type.  The table is walked
- * rather than counted on insertion, because only statistics ask and they ask
- * rarely.
- */
 size_t
 relic_value_count_of(const relic_t *ctx, enum relic_type type)
 {
-	size_t count;
-	size_t i;
-
-	count = 0;
-	for (i = 0; i < ctx->values.count; i++) {
-		if (ctx->values.entries[i].type == type)
-			count++;
+	switch (type) {
+	case RELIC_SYMBOL:
+		return (ctx->values.symbol_values);
+	case RELIC_STRING:
+		return (ctx->values.string_values);
+	case RELIC_INTEGER:
+		return (ctx->values.integer_count);
 	}
 
-	return (count);
+	return (0);
 }
 
 static int
@@ -474,20 +571,21 @@ compare_bytes(const relic_t *ctx, uint32_t left, uint32_t right)
 enum relic_order
 relic_value_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 {
-	const relic_value_t *left;
-	const relic_value_t *right;
+	relic_value_t left;
+	relic_value_t right;
+	bool left_known;
+	bool right_known;
 	int order;
 
-	left = relic_value_of(ctx, a);
-	right = relic_value_of(ctx, b);
-
-	if (left == NULL || right == NULL || left->type != right->type)
+	left_known = relic_value_decode(ctx, a, &left);
+	right_known = relic_value_decode(ctx, b, &right);
+	if (!left_known || !right_known || left.type != right.type)
 		return (RELIC_ORDER_UNORDERED);
 
-	if (left->type == RELIC_INTEGER)
-		order = compare_integers(left->v.integer, right->v.integer);
+	if (left.type == RELIC_INTEGER)
+		order = compare_integers(left.v.integer, right.v.integer);
 	else
-		order = compare_bytes(ctx, left->v.id, right->v.id);
+		order = compare_bytes(ctx, left.v.id, right.v.id);
 
 	if (order < 0)
 		return (RELIC_ORDER_LESS);
@@ -555,23 +653,25 @@ compare_totally(const relic_t *ctx, const relic_value_t *left,
 int
 relic_value_total_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 {
-	const relic_value_t *left;
-	const relic_value_t *right;
+	relic_value_t left;
+	relic_value_t right;
+	bool left_known;
+	bool right_known;
 
 	if (a == b)
 		return (0);
 
-	left = relic_value_of(ctx, a);
-	right = relic_value_of(ctx, b);
+	left_known = relic_value_decode(ctx, a, &left);
+	right_known = relic_value_decode(ctx, b, &right);
 
-	if (left == NULL || right == NULL) {
-		if (left == NULL && right == NULL)
+	if (!left_known || !right_known) {
+		if (left_known == right_known)
 			return (0);
 
-		return (left == NULL ? -1 : 1);
+		return (left_known ? 1 : -1);
 	}
 
-	return (compare_totally(ctx, left, right));
+	return (compare_totally(ctx, &left, &right));
 }
 
 /*

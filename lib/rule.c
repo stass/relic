@@ -1198,7 +1198,7 @@ query_create(relic_t *ctx)
 	}
 
 	query->ctx = ctx;
-	relic_arena_init(&query->arena);
+	relic_arena_init(&query->arena, RELIC_ARENA_ANY_OBJECT);
 
 	return (query);
 }

@@ -686,8 +686,8 @@ relic_string(relic_t *, uint32_t id, size_t *lenp);
 
 ## 19.2 Internal representation
 
-Internally every value, integers included, is interned into one value table and
-is represented by an opaque 32-bit domain identifier:
+Internally every value, integers included, is interned and is represented by
+an opaque 32-bit domain identifier:
 
 ```c
 typedef uint32_t relic_dom_t;		/* 0 is never a valid value */
@@ -695,22 +695,24 @@ typedef uint32_t relic_dom_t;		/* 0 is never a valid value */
 
 A tuple is therefore a dense array of `relic_dom_t`. The evaluator compares,
 hashes and joins values as plain 32-bit integers and never inspects a payload.
-Only comparison operators, sorting and output formatting consult the value
-table.
+Only comparison operators, sorting and output formatting decode an identifier
+into the value it names.
 
 The rationale, the alternatives considered and their measured trade-offs are
-recorded in `relic-plan.md`, decision D-3. In summary:
+recorded in `relic-plan.md`, decisions D-3 and D-24. In summary:
 
 * joins and duplicate elimination reduce to integer work on a dense array;
 * tuple storage is four bytes per column whatever the value type, which matters
   because symbol-valued columns dominate real Datalog workloads;
-* a program with very many distinct integers pays roughly 24 bytes plus a hash
-  slot for each distinct integer, which is the representation's one real cost;
-* one context holds at most 2^32 - 1 distinct values.
+* a program with very many distinct integers pays eight bytes plus a tagged
+  hash slot for each distinct integer, which is the representation's one real
+  cost;
+* one context holds at most 2^30 - 1 symbols and 2^30 - 1 distinct integers.
 
-Domain identifiers are assigned in order of first appearance, so they are
-reproducible, but their numeric order carries no meaning. Nothing may order
-values by domain identifier; ordering goes through the value table.
+Domain identifiers are assigned in order of first appearance within each
+type, so they are reproducible, but their numeric order carries no meaning.
+Nothing may order values by domain identifier; ordering compares the values
+the identifiers decode to.
 
 The representation is internal and is reached only through a small set of
 accessors, so it can later be replaced by a tagged 64-bit cell without
@@ -719,7 +721,10 @@ affecting library consumers.
 The identifier's encoding -- its type in its top bits, a symbol value being
 its symbol identifier, and a value table of integers only -- and the
 symbol pool's entry and byte packing are specified in
-`specs/design-comparison-cost.md` section 7.
+`specs/design-comparison-cost.md` section 7. D-3 asks for the
+representation to be revisited when a measured workload shows its cost;
+section 7.1 there is that revisit, and it keeps D-3's decision of one 32-bit
+interned domain and changes only the encoding behind its accessors.
 
 ---
 
@@ -1669,7 +1674,7 @@ Rules:
 The engine uses arenas for structures with a common lifetime:
 
 ```text
-context arena      symbols, values, predicate definitions
+string arena       symbol bytes, packed without alignment
 program arena      rules, parsed terms
 query arena        the query's compiled rule
 rewrite arena      the Magic rewrite of one query's program
@@ -2133,7 +2138,8 @@ input.
 
 Specifically:
 
-* value and predicate identifiers are assigned in order of first appearance;
+* value identifiers, within each type, and predicate identifiers are
+  assigned in order of first appearance;
 * relations iterate in tuple insertion order;
 * the planner breaks cost ties by source position;
 * generated Magic predicates are named from the predicate and its adornment,

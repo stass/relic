@@ -662,8 +662,8 @@ build_tuple(const relic_evaluation_t *eval, const relic_op_atom_t *atom,
  *
  * Equality is identity of domain identifiers, which is exact because every
  * value is interned: equal values have equal identifiers and nothing else
- * does.  Ordering goes through the value table, where values of different
- * types are unordered, and an unordered pair satisfies no ordering
+ * does.  Ordering decodes both identifiers and compares the values, and
+ * values of different types are unordered, which satisfies no ordering
  * comparison.  The binding is filtered out rather than reported as an error,
  * because a column may legitimately hold more than one type.
  */
@@ -900,13 +900,12 @@ comparison_is_mixed(const relic_t *ctx, enum relic_compare_op compare,
 static const char *
 type_phrase(const relic_t *ctx, relic_dom_t dom)
 {
-	const relic_value_t *value;
+	relic_value_t value;
 
-	value = relic_value_of(ctx, dom);
-	if (value == NULL)
+	if (!relic_value_decode(ctx, dom, &value))
 		return ("an unknown value");
 
-	switch (value->type) {
+	switch (value.type) {
 	case RELIC_INTEGER:
 		return ("an integer");
 	case RELIC_STRING:
@@ -1031,19 +1030,22 @@ drain_pending(relic_evaluation_t *eval)
 }
 
 /*
- * The values of a tuple, as the row a callback receives.  A value is found
- * for every column because every column holds an identifier the value table
- * assigned: columns are copied only from constants the parser interned and
- * from other tuples.
+ * The values of a tuple, as the row a callback receives.  Every column
+ * decodes, because every column holds an identifier the context assigned:
+ * columns are copied only from constants the parser interned and from other
+ * tuples.
  */
 static void
 decode_row(const relic_t *ctx, const relic_dom_t *tuple, uint16_t arity,
     relic_value_t *row)
 {
 	uint16_t column;
+	bool known RELIC_UNUSED;
 
-	for (column = 0; column < arity; column++)
-		row[column] = *relic_value_of(ctx, tuple[column]);
+	for (column = 0; column < arity; column++) {
+		known = relic_value_decode(ctx, tuple[column], &row[column]);
+		assert(known);
+	}
 }
 
 /*

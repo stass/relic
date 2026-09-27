@@ -463,9 +463,10 @@ produce the same rows in the same order and the same explain text.
   constant in a query is interned as a value, a variable's spelling and the
   query's source name as symbols, and the tables that hold them never
   release an entry, per `specs/design-memory.md`. A run of queries over
-  distinct constants therefore still grows the value table, by an entry per
-  distinct constant rather than a predicate and a relation slot per query,
-  and nothing walks those tables per answer. `TODO.md` records it.
+  distinct constants therefore still grows the symbol pool or the value
+  table, by an entry per distinct constant rather than a predicate and a
+  relation slot per query, and nothing walks those tables per answer.
+  `TODO.md` records it.
 * **Keeping an answer across runs.** An answer is emptied when delivered,
   per `specs/design-api.md` section 5.1; a query object that owns its
   relation could keep it, but a cached answer that a later load or fact

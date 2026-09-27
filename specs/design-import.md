@@ -295,10 +295,11 @@ as part of a field, and trimming them would change what a string column
 holds.
 
 **A value is interned as a program's constant is.** A symbol or string
-field's bytes go into the symbol table and its value into the value table,
-as the lexer and parser intern a constant. An integer goes into the value
-table as the parser interns a literal. An imported `a` is therefore the
-same value as the `a` of a rule, which is what lets them join.
+field's bytes go into the symbol table, whose identifier under the field's
+type is the value, as the lexer and parser intern a constant. An integer
+goes into the value table as the parser interns a literal. An imported `a`
+is therefore the same value as the `a` of a rule, which is what lets them
+join.
 
 **A skipped field is read, not decoded.** The format's rules hold for it --
 its quoting, its escapes -- so a record's structure does not depend on which

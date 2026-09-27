@@ -188,10 +188,17 @@ reads the fact, as the lexer interns the name: a predicate a failed load
 leaves interned holds nothing and is referenced by nothing, which is what
 an unused identifier is (section 3.5). A staging set holds the load's
 distinct facts of its predicate, packed at its arity, an identifier table
-over them that makes it a set, and a mark per tuple that the commit sets.
-A fact finds its set through the set the previous fact used, which a file
-of one predicate's facts always hits, and otherwise through a small
-open-addressing table keyed by predicate identifier.
+over them that makes it a set, and beside each tuple its hash and a mark
+that the commit sets. A fact finds its set through the set the previous
+fact used, which a file of one predicate's facts always hits, and otherwise
+through a small open-addressing table keyed by predicate identifier.
+
+A tuple's hash is computed once, as the fact is staged, under the context's
+seed and exactly as every relation of the context hashes a tuple, so it is
+the hash the predicate's base store would compute. The set's table rehashes
+from the kept hashes when it grows, reading no columns, and the commit's
+measure and append (section 4.3) take them rather than hash each tuple
+again.
 
 Staging is the load's working storage rather than the program's. Its
 packed tuples grow by doubling, and its identifier tables are allocated as
@@ -213,10 +220,10 @@ A load is all or nothing in what it adds to the program,
 load commits its facts, then splices its statements:
 
 1. **Measure.** For each staged tuple, look it up in its predicate's base
-   store, an absent store counting as empty, and mark the tuple new or
-   not. Every mark is written here, and the append trusts them. Count the
-   new tuples of each set. Nothing but the marks changes, and nothing can
-   fail.
+   store by its staged hash, `relic_relation_contains_hashed()`, an absent
+   store counting as empty, and mark the tuple new or not. Every mark is
+   written here, and the append trusts them. Count the new tuples of each
+   set. Nothing but the marks changes, and nothing can fail.
 2. **Discard.** If any tuple is new, the program is about to change, so
    what was derived from it is discarded (section 5.3): the derived
    relations, the base stores' secondary indexes, and the record of what
@@ -237,10 +244,15 @@ load commits its facts, then splices its statements:
    way, and a store that had grown keeps its capacity, accounted, as any
    relation that failed to grow does.
 4. **Append.** Append each set's new tuples to its base store in the
-   order they were staged, placing each in the canonical index. Room is
-   reserved, every appended tuple is one the store lacks, and no secondary
-   index remains to be linked, so no append looks anything up and none can
-   fail.
+   order they were staged, placing each in the canonical index by its
+   staged hash, `relic_base_append_hashed()`. Room is reserved, every
+   appended tuple is one the store lacks, and no secondary index remains to
+   be linked, so no append looks anything up and none can fail.
+
+The measure and the append trust the staged hash, as the append trusts the
+marks. A debug build computes each tuple's hash as the store would, in
+both, and asserts that it matches the staged one, so it still checks what
+a release build trusts.
 
 ### 4.4 relic_fact_add()
 

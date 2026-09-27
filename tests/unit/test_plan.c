@@ -195,7 +195,7 @@ fixture_load(fixture_t *fixture, const char *program, unsigned int flags,
 	relic_config_t config;
 
 	bzero(fixture, sizeof(*fixture));
-	relic_arena_init(&fixture->arena);
+	relic_arena_init(&fixture->arena, RELIC_ARENA_ANY_OBJECT);
 
 	bzero(&config, sizeof(config));
 	config.flags = flags;

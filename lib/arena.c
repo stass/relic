@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -22,13 +23,12 @@
  * before it is obtained, the charge is given back if the allocator refuses
  * it, and a reset gives back the whole total.
  *
- * The strictest alignment any object needs is used for every allocation.
- * Rounding each request up to it means the running offset is always aligned,
- * so no allocation has to inspect or repair alignment, and the payload itself
- * starts at the first correctly aligned offset past the header.
+ * Every request is rounded up to the arena's alignment.  That keeps the
+ * running offset aligned, so no allocation has to inspect or repair
+ * alignment, and the payload itself starts at the first offset past the
+ * header aligned for any object, which serves every alignment an arena may
+ * have.
  */
-
-#define	RELIC_ARENA_ALIGNMENT	 _Alignof(max_align_t)
 
 /*
  * The payload of the first chunk, and the ceiling that doubling stops at.
@@ -68,7 +68,7 @@ static unsigned char *
 chunk_payload(relic_arena_chunk_t *chunk)
 {
 	return ((unsigned char *)chunk +
-	    round_up(sizeof(*chunk), RELIC_ARENA_ALIGNMENT));
+	    round_up(sizeof(*chunk), RELIC_ARENA_ANY_OBJECT));
 }
 
 /*
@@ -110,7 +110,7 @@ arena_add_chunk(relic_arena_t *arena, size_t size, bool oversize)
 	size_t payload_size;
 	size_t total;
 
-	header_size = round_up(sizeof(*chunk), RELIC_ARENA_ALIGNMENT);
+	header_size = round_up(sizeof(*chunk), RELIC_ARENA_ANY_OBJECT);
 	payload_size = oversize ? size : arena->next_chunk_size;
 
 	if (payload_size > SIZE_MAX - header_size) {
@@ -155,17 +155,21 @@ arena_add_chunk(relic_arena_t *arena, size_t size, bool oversize)
 }
 
 void
-relic_arena_init(relic_arena_t *arena)
+relic_arena_init(relic_arena_t *arena, size_t alignment)
 {
+	assert(alignment > 0 && (alignment & (alignment - 1)) == 0 &&
+	    alignment <= RELIC_ARENA_ANY_OBJECT);
+
 	bzero(arena, sizeof(*arena));
 	SLIST_INIT(&arena->chunks);
+	arena->alignment = alignment;
 	arena->next_chunk_size = RELIC_ARENA_FIRST_CHUNK;
 }
 
 void
 relic_arena_init_charged(relic_arena_t *arena, relic_account_t *account)
 {
-	relic_arena_init(arena);
+	relic_arena_init(arena, RELIC_ARENA_ANY_OBJECT);
 	arena->account = account;
 }
 
@@ -175,13 +179,16 @@ relic_arena_reset(relic_arena_t *arena)
 	relic_arena_chunk_t *chunk;
 	relic_arena_chunk_t *next;
 	relic_account_t *account;
+	size_t alignment;
 
 	SLIST_FOREACH_SAFE(chunk, &arena->chunks, link, next)
 		free(chunk);
 	uncharge(arena, arena->total_bytes);
 
 	account = arena->account;
-	relic_arena_init_charged(arena, account);
+	alignment = arena->alignment;
+	relic_arena_init(arena, alignment);
+	arena->account = account;
 }
 
 /*
@@ -206,14 +213,14 @@ relic_arena_alloc(relic_arena_t *arena, size_t size)
 	if (arena->failed)
 		return (NULL);
 
-	if (size > SIZE_MAX - (RELIC_ARENA_ALIGNMENT - 1)) {
+	if (size > SIZE_MAX - (arena->alignment - 1)) {
 		arena->failed = true;
 		return (NULL);
 	}
 
-	needed = round_up(size, RELIC_ARENA_ALIGNMENT);
+	needed = round_up(size, arena->alignment);
 	if (needed == 0)
-		needed = RELIC_ARENA_ALIGNMENT;
+		needed = arena->alignment;
 
 	chunk = SLIST_FIRST(&arena->chunks);
 	if (chunk == NULL || needed > chunk->size - chunk->used) {

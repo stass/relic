@@ -284,6 +284,22 @@ tests_unit_test_exhaustion_CPPFLAGS = $(AM_CPPFLAGS) \
 tests_unit_test_exhaustion_LDADD = $(LTLIBOBJS)
 
 ##
+## The symbol pool and the integer table each number at most 2^30 - 1
+## entries, below the type bits of a domain identifier, far more than a test
+## can intern.  This program compiles the library from source with both
+## ceilings lowered, as the allocation-failure suite compiles it with its
+## allocators renamed, so that the refusal at a ceiling is actually taken.
+##
+
+RELIC_CEILING_DEFINES = -DRELIC_SYMBOL_MAX=64 -DRELIC_INTEGER_MAX=64
+
+RELIC_TEST_BINARIES += tests/unit/test_ceiling
+tests_unit_test_ceiling_SOURCES = tests/unit/test_ceiling.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_ceiling_CPPFLAGS = $(AM_CPPFLAGS) $(RELIC_CEILING_DEFINES)
+tests_unit_test_ceiling_LDADD = $(LTLIBOBJS)
+
+##
 ## The public header carries the longest-lived contract in the tree: it must
 ## stay strict C11, must compile without config.h, and must be includable
 ## from C++.  Each property is checked by a translation unit that includes

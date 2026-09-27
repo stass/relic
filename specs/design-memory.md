@@ -40,7 +40,7 @@ Seven arenas exist, one per lifetime:
 
 | Arena | Holds | Released when |
 | --- | --- | --- |
-| context | symbol bytes, value payloads, predicate definitions | the context is destroyed |
+| string | the symbol pool's bytes, packed (section 7) | the context is destroyed |
 | program | rules, parsed terms | a new program replaces the loaded one |
 | analysis | the dependency graph and its component search | the analysis ends |
 | schedule | the evaluation order: components, their members and rules | a new schedule replaces it |
@@ -78,9 +78,9 @@ The growable arrays inside the symbol and value tables are the third case, and
 they are individually owned for a mechanical reason rather than a conceptual
 one: an arena cannot resize a block, and an array that doubles would otherwise
 leave every superseded generation of itself in the arena. Their *contents*
---- the symbol bytes --- do live in the context arena, which is what keeps a
-pointer returned by `relic_string()` valid for the life of the context even
-though the array indexing it has since moved.
+--- the symbol bytes --- do live in an arena, the symbol pool's string
+arena, which is what keeps a pointer returned by `relic_string()` valid for
+the life of the context even though the array indexing it has since moved.
 
 ---
 
@@ -94,7 +94,7 @@ chunk is released together.
 ```c
 relic_arena_t arena;
 
-relic_arena_init(&arena);
+relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 p = relic_arena_alloc(&arena, n);
 ...
 relic_arena_reset(&arena);
@@ -119,11 +119,20 @@ the oversize chunk at the head is full. An oversize chunk is therefore linked
 *after* the head, leaving the partially used chunk in front of it where the
 next small allocation will find its remaining space.
 
-**Alignment.** Every allocation is aligned for any object relic creates, by
-rounding the requested size up to `_Alignof(max_align_t)` and placing the
-payload at the first correctly aligned offset after the chunk header. A
-request of zero bytes is rounded up in the same way, so it yields a distinct
-non-null pointer and a null return means failure and nothing else.
+**Alignment.** An arena's alignment is a parameter of `relic_arena_init()`:
+a power of two no larger than `_Alignof(max_align_t)`, chosen by the arena's
+creator and kept across resets. Every requested size is rounded up to it,
+so the running offset stays aligned and no allocation has to inspect or
+repair alignment, and the payload starts at the first offset after the
+chunk header that is aligned for any object, which serves every alignment
+an arena may have. Every arena but one is created with
+`RELIC_ARENA_ANY_OBJECT`, which is `_Alignof(max_align_t)`, because its
+blocks hold structures; a charged arena always has it. The symbol pool's
+string arena (section 7) has an alignment of one: its blocks are byte
+strings that are never read as objects, so each follows the previous one
+with no padding. A request of zero bytes is rounded up in the same way, so
+it yields a distinct non-null pointer and a null return means failure and
+nothing else.
 
 ---
 
@@ -158,23 +167,25 @@ requests to an allocator that has already said no.
 
 **The flag belongs to a phase, not to a lifetime.** The three parts above
 describe an arena that is reset when its phase ends, and the reset is what
-clears the flag. The context arena is the exception: it lives as long as the
-context and is never reset, so a flag left standing on it would refuse every
-later request and turn one transient exhaustion into a context that can never
-intern anything again --- a program that reported the failure and carried on,
-which is exactly what a REPL or a long-running embedder does, would find every
-subsequent operation failing for a reason that no longer applies.
+clears the flag. The symbol pool's string arena is the exception: it lives
+as long as the context and is never reset, so a flag left standing on it
+would refuse every later request and turn one transient exhaustion into a
+context that can never intern anything again --- a program that reported
+the failure and carried on, which is exactly what a REPL or a long-running
+embedder does, would find every subsequent operation failing for a reason
+that no longer applies.
 
-Context-lifetime allocation therefore goes through one function,
-`relic_context_alloc()`, which reports the exhaustion and clears the flag,
-because by then the failure has been observed and acted on. It is a funnel
-rather than a rule to remember: there is no way to allocate from the context
-arena that skips it, so no future caller has to know any of this. What that
-funnel gives up is the second part of the contract above --- a half-finished
-construction no longer stops by itself --- and it gives it up safely, because
-context-lifetime allocations are individual objects whose callers check the
-pointer they get. The deep construction that wants the early return is the
-parsed program, and it is built in the program arena, which is reset.
+Allocation from the string arena therefore happens in one place, the
+pool's store of a new symbol, which reports the exhaustion and clears the
+flag, because by then the failure has been observed and acted on. It is a
+funnel rather than a rule to remember: the arena belongs to the pool and
+nothing else can reach it, so no future caller has to know any of this.
+What that funnel gives up is the second part of the contract above --- a
+half-finished construction no longer stops by itself --- and it gives it up
+safely, because each allocation is one symbol's bytes, stored by a caller
+that checks the pointer it gets. The deep construction that wants the early
+return is the parsed program, and it is built in the program arena, which
+is reset.
 
 Exhaustion is reported as an ordinary diagnostic and a `-1` return. The
 library never aborts: it must not terminate its host.
@@ -279,17 +290,18 @@ kept for the table's life:
 | Table | Its searches | Tagged |
 | --- | --- | --- |
 | symbol pool | unsuccessful for every new symbol; the bytes far away | yes |
-| value table | as the symbol pool | yes |
+| value table's integers | unsuccessful for every new integer | yes |
 | index keys | a probe compares stored key values | yes |
 | a load's staging sets | unsuccessful for every distinct fact | yes |
 | relation (the canonical index) | successful, per the measurement above | no |
 | a distinct count | unsuccessful for every distinct value; each candidate a tuple | yes |
 | predicate table, rewrite tables | small | no |
 
-**Identifier zero is never assigned.** Symbol identifiers and domain
-identifiers both start at one, which is what lets a zeroed slot mean "empty"
-with no separate occupancy bitmap and no sentinel that a caller could collide
-with.
+**Identifier zero is never assigned.** Symbol identifiers and the
+positions of the value table's integers both start at one, and a domain
+identifier's type bits are never zero (section 8), which is what lets a
+zeroed slot mean "empty" with no separate occupancy bitmap and no sentinel
+that a caller could collide with.
 
 **Probing.** Slots are probed linearly from `hash & (capacity - 1)`,
 wrapping, and in a tagged table a slot whose tag is not the hash's is passed
@@ -357,31 +369,49 @@ should be a different type rather than a flag on this one.
 
 ## 7. The symbol pool
 
-`lib/symbol.c` maps a byte string to a `uint32_t` symbol identifier.
+`lib/symbol.c` maps a byte string to a symbol identifier that fits in
+thirty bits, so that one fits beside a domain identifier's type (section 8).
 
 ```c
 struct relic_symbol {
-	const char	*bytes;		/* NUL-terminated, in the context arena */
-	size_t		 length;	/* bytes before the terminator */
+	const char	*bytes;		/* NUL-terminated, in the string arena */
+	uint32_t	 length;	/* bytes before the terminator */
+	uint32_t	 hash;		/* of the bytes, under the context's seed */
 };
 ```
 
 Symbols are stored in a growable array indexed by `id - 1` and found through
-an identifier table. The bytes themselves are copied into the context arena,
-where they never move, so the pointer `relic_string()` returns stays valid
-until the context is destroyed even after the array has been reallocated
-several times.
+an identifier table. The bytes themselves are copied into the pool's
+**string arena**, where they never move, so the pointer `relic_string()`
+returns stays valid until the context is destroyed even after the array has
+been reallocated several times. The string arena has an alignment of one
+(section 3): a symbol's bytes are read as bytes and never as an object, so
+one symbol's bytes and terminator follow the previous symbol's with no
+padding.
 
 Length is explicit because a string literal may contain NUL bytes: the lexer
 is byte-oriented and a string holds arbitrary bytes. A terminator is stored
 anyway, after the recorded length, so that a caller that has no use for the
-length can treat the result as a C string.
+length can treat the result as a C string. The length is a `uint32_t`,
+which keeps the entry at sixteen bytes with the hash beside it. The pool is
+the one path every symbol takes, and it refuses with a diagnostic a byte
+string whose length with its terminator does not fit in 32 bits, before it
+reads a byte of it.
+
+The hash is the one the entry was placed by in the identifier table, kept
+so that growing the table reads each entry's hash and none of its bytes.
+
+A pool holds at most 2^30 - 1 byte strings: a symbol identifier is a domain
+identifier's index, and zero is reserved. The count is checked before a
+string is stored, and a string past the limit is refused with a diagnostic
+rather than given an identifier that would run into the type bits and
+silently turn one value into another.
 
 Symbols and string literals share one pool. They are distinguished by the
 *value* that refers to them, not by the pool, so the symbol `foo` and the
 string `"foo"` intern to one symbol identifier and to two different domain
 identifiers. Storing one copy of the bytes is the point; keeping the types
-distinct is the value table's job.
+distinct is the domain identifier's job (section 8).
 
 ---
 
@@ -400,28 +430,74 @@ struct relic_value {
 };
 ```
 
-Values are stored in a growable array indexed by `dom - 1` and found through a
-second identifier table. Interning happens here for every type, integers
-included, so that the parser and `relic_fact_add()` cannot disagree about what
-the canonical form of a value is: there is only one path to a domain
-identifier and it is this one.
+**A domain identifier carries its type.** Its top two bits say the value's
+type and its bottom thirty index the table of that type:
 
-**Hashing and comparison read fields, never bytes.** `relic_value_t` contains
-a union and padding, so hashing its representation would depend on bytes no
-assignment defines. The hash combines the type and the live union member; the
-equality test compares the type and then that member. This is the same hazard
-that decision D-3 rejects a plain 16-byte value cell for, and the reason it
-does not reach the tuple store is that a tuple stores domain identifiers
-rather than values.
+```c
+#define	RELIC_DOM_TYPE_SHIFT	30
+#define	RELIC_DOM_SYMBOL	(UINT32_C(1) << RELIC_DOM_TYPE_SHIFT)
+#define	RELIC_DOM_STRING	(UINT32_C(2) << RELIC_DOM_TYPE_SHIFT)
+#define	RELIC_DOM_INTEGER	(UINT32_C(3) << RELIC_DOM_TYPE_SHIFT)
+#define	RELIC_DOM_INDEX_MASK	((UINT32_C(1) << RELIC_DOM_TYPE_SHIFT) - 1)
+```
 
-**A value is normalized as it enters the table.** The padding and the unused
-half of the union are zeroed and only the member the type selects is copied,
-so a stored value has one definite representation. This is not tidiness: a
-caller fills in the fields the interface documents and leaves the rest holding
-whatever its stack held, and `relic_value_of()` hands back what was stored.
-Without normalization the library would retain and return bytes of its host's
-memory that were never given to it, and the guarantee would hold only for the
-callers that remembered to zero their locals first.
+A symbol value is `RELIC_DOM_SYMBOL | id` for its symbol identifier, a
+string value `RELIC_DOM_STRING | id` for the same identifier, and an integer
+`RELIC_DOM_INTEGER | k` for its position `k` in the integer table. Type bits
+of zero are never assigned, so no value's identifier is zero and a zeroed
+slot or column holds no value.
+
+Interning happens here for every type, integers included, so that the parser
+and `relic_fact_add()` cannot disagree about what the canonical form of a
+value is: there is only one path to a domain identifier and it is this one.
+A symbol or a string needs no entry of its own. The pool assigns its bytes
+one identifier, and the value's identifier is a function of that one, so
+two occurrences of one symbol cannot receive two identifiers and interning
+one is a single probe into the pool. An integer is found through the
+**integer table**, an array of `int64_t` indexed by `k - 1` and a tagged
+identifier table over it, which gives equal integers one position the same
+way.
+
+**Which identifiers were assigned.** The table keeps, per symbol
+identifier, two bits: whether the symbol has been interned as a symbol
+value, and whether as a string value. A symbol in the pool is not yet a
+value --- a predicate's name, a variable's spelling and a source name are
+interned there too --- and these bits are what make a symbol or string
+domain identifier one the context assigned. Setting one counts a distinct
+symbol or string value, as the integer table's length counts the integers,
+so the values are counted by type, which `relic_stats()` reports.
+
+**Decoding.** `relic_value_decode(ctx, dom, &value)` fills a `relic_value_t`
+the caller provides with the value an identifier names and returns true, or
+returns false for an identifier the context never assigned: type bits of
+zero, a symbol not interned as a value of the identifier's type, or a
+position past the integer table. No `relic_value_t` is stored, so there is
+nothing to return a pointer to; the comparisons, the sort and the
+formatters each decode the identifiers they read.
+
+**Limits.** A context holds at most 2^30 - 1 symbols, as section 7 gives,
+and 2^30 - 1 distinct integers, for the same reason: an index is thirty
+bits and zero is reserved. The integer table checks its count before it
+stores, as the pool does, and refuses with a diagnostic rather than let a
+position run into the type bits.
+
+**Comparison reads fields, never bytes.** `relic_value_t` contains a union
+and padding, so comparing or hashing its representation would depend on
+bytes no assignment defines. Nothing hashes one: an integer is hashed as an
+integer and a symbol's bytes by the pool. The comparisons read the type and
+then the member it selects. This is the same hazard that decision D-3
+rejects a plain 16-byte value cell for, and the reason it does not reach the
+tuple store is that a tuple stores domain identifiers rather than values.
+
+**A value the caller built is never retained.** A caller fills in the
+fields the interface documents and leaves the rest holding whatever its
+stack held. Interning keeps only what the type selects --- a symbol's bit
+of that type, or the integer --- and decoding zeroes the caller's struct,
+padding and the unused half of the union included, before it writes the
+type and that member, so a decoded value has one definite representation.
+The library therefore neither retains nor returns bytes of its host's
+memory that were never given to it, whether or not a caller zeroed its
+locals first.
 
 **Ordering.** Two orders exist over domain identifiers, and they are not the
 same order:
@@ -440,10 +516,13 @@ same order:
 Bytewise rather than locale collation, so that a result never depends on the
 environment.
 
-**Nothing may order values by domain identifier.** Identifiers are assigned in
-order of first appearance, so their numeric order records the order the input
-mentioned things in and nothing else. Both order functions go through the
-value table, and that is the only correct way to compare two values.
+**Nothing may order values by domain identifier.** Within a type,
+identifiers are assigned in order of first appearance, so their numeric
+order records the order the input mentioned things in and nothing else;
+across types it is the order of the type bits, which is not the total
+order's. Both order functions decode the identifiers they are given, take
+the type from the type bits and compare within it by the integer table or
+the pool's bytes, and that is the only correct way to compare two values.
 
 ---
 
@@ -460,8 +539,10 @@ compares output byte for byte across runs, machines and object formats.
 * **Integers are hashed arithmetically, not by reinterpreting their bytes**,
   so a table on a big-endian machine probes in the same order as one on a
   little-endian machine.
-* **Identifiers are assigned in order of first appearance.** The counter is
-  the array length, so the same input yields the same identifiers.
+* **Identifiers are assigned in order of first appearance within each
+  type.** A symbol identifier is the pool's array length and an integer's
+  position the integer table's, and a domain identifier is one of those
+  under its type's bits, so the same input yields the same identifiers.
 * **No identifier or output is derived from a pointer value.**
 
 ---

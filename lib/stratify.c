@@ -114,7 +114,7 @@ void
 relic_schedule_init(relic_schedule_t *schedule)
 {
 	bzero(schedule, sizeof(*schedule));
-	relic_arena_init(&schedule->arena);
+	relic_arena_init(&schedule->arena, RELIC_ARENA_ANY_OBJECT);
 }
 
 void
@@ -759,7 +759,7 @@ relic_schedule_build(relic_t *ctx, const relic_ruletab_t *rules,
 	bzero(&analysis, sizeof(analysis));
 	analysis.ctx = ctx;
 	analysis.rules = rules;
-	relic_arena_init(&analysis.scratch);
+	relic_arena_init(&analysis.scratch, RELIC_ARENA_ANY_OBJECT);
 
 	result = analyse_program(&analysis, schedule);
 	relic_arena_reset(&analysis.scratch);

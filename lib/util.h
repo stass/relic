@@ -31,16 +31,31 @@
  * reduced to one of these, so a tuple column is four bytes whatever it holds
  * and a join compares plain integers without inspecting a payload.
  *
- * Identifiers are assigned in order of first appearance, so they are
- * reproducible across runs, but their numeric order records only the order
- * the input mentioned things in.  Nothing may sort by a domain identifier;
- * ordering goes through relic_value_order() or relic_value_total_order().
+ * The top two bits of an identifier say the value's type and the bottom
+ * thirty index the table of that type: a symbol or a string is its symbol
+ * identifier under RELIC_DOM_SYMBOL or RELIC_DOM_STRING, and an integer its
+ * position in the integer table under RELIC_DOM_INTEGER.  Type bits of zero
+ * are never assigned, so no value's identifier is RELIC_ID_NONE and a zeroed
+ * slot or column holds no value.
+ *
+ * Within a type identifiers are assigned in order of first appearance, so
+ * they are reproducible across runs, but their numeric order records only
+ * the order the input mentioned things in.  Nothing may sort by a domain
+ * identifier; ordering goes through relic_value_order() or
+ * relic_value_total_order().
  *
  * The typedef lives here, beside the identifier conventions it obeys, so
  * that a header describing stored values can use it without reaching for
  * every other internal type.
  */
 typedef uint32_t relic_dom_t;
+
+#define	RELIC_DOM_TYPE_SHIFT	30
+#define	RELIC_DOM_SYMBOL	(UINT32_C(1) << RELIC_DOM_TYPE_SHIFT)
+#define	RELIC_DOM_STRING	(UINT32_C(2) << RELIC_DOM_TYPE_SHIFT)
+#define	RELIC_DOM_INTEGER	(UINT32_C(3) << RELIC_DOM_TYPE_SHIFT)
+#define	RELIC_DOM_INDEX_MASK	((UINT32_C(1) << RELIC_DOM_TYPE_SHIFT) - 1)
+#define	RELIC_DOM_TYPE_MASK	(~RELIC_DOM_INDEX_MASK)
 
 /*
  * Grow an array to hold at least count items of item_size bytes each.

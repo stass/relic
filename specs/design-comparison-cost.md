@@ -671,6 +671,11 @@ the type's, and the thing that made that safe, that nothing may order
 values by domain identifier, is the invariant D-3 already asserts in one
 place. A tuple's hash folds its identifiers and the probe order changes,
 which the seed of `specs/design-hash-seed.md` already makes unobservable.
+The type bits put a difference in the top bits of a column wherever two
+keys differ only in their columns' types, and a fold whose state
+were as wide as a column would keep such differences there under every
+seed; the fold's state is twice a column's width for that reason,
+`specs/design-hash-seed.md` section 5.
 
 **Limits.** A context holds at most 2^30 - 1 symbols and 2^30 - 1 distinct
 integers, in place of 2^32 - 1 values of every type together. The
@@ -690,12 +695,12 @@ struct relic_symbol {
 The entry keeps its pointer, so `relic_string()` returns a pointer that
 stays valid until the context is destroyed, as `include/relic.h` promises,
 and stays sixteen bytes: the `size_t` length becomes a `uint32_t`, and the
-hash takes the room. A symbol longer than `UINT32_MAX` bytes is refused
-with a diagnostic where the lexer and the import bound a field's length,
-which no input this tool reads approaches. The stored hash is what the
-pool's rehash callback returns, so growing the pool reads the entries
-sequentially and no symbol's bytes; it is also what the tag of section
-6.2 is cut from.
+hash takes the room. A symbol too long for the length to record is
+refused with a diagnostic by the pool, the one path every symbol takes,
+before a byte of it is read, which no input this tool reads approaches.
+The stored hash is what the pool's rehash callback returns, so growing the
+pool reads each entry's hash and no symbol's bytes; it is also what the
+tag of section 6.2 is cut from.
 
 **The bytes are packed.** The context arena aligns every allocation to
 sixteen bytes, which is right for the structs it holds and wrong for a
@@ -725,8 +730,9 @@ staging set keeps the hash beside each tuple, four bytes per staged fact
 in an array beside the marks, and the measure step and the append take
 it from there. `relic_relation_contains_hashed()` and
 `relic_base_append_hashed()` are the existing operations with the hash as
-a parameter; the unhashed forms compute it and call them, so no caller
-that has no hash changes. The assertion in the append compares the given
+a parameter; the unhashed membership check computes it and calls the
+hashed one, so no caller that has no hash changes, and the append, whose
+only caller is the commit, takes the hash alone. Both compare the given
 hash with a recomputed one under `!NDEBUG`, so the debug build still
 checks what the release build trusts.
 

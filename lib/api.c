@@ -15,11 +15,11 @@
 /*
  * Context lifecycle.
  *
- * A context owns an arena for everything whose lifetime is the context's own,
- * a symbol pool, a value table, the diagnostic state, and the memory account
- * its evaluation arena and its relations are charged to.  Creating one is the
- * only operation in the library that cannot report through a diagnostic
- * callback, because there is no context yet to have one installed.
+ * A context owns a symbol pool, a value table, the diagnostic state, and the
+ * memory account its evaluation arena and its relations are charged to.
+ * Creating one is the only operation in the library that cannot report
+ * through a diagnostic callback, because there is no context yet to have one
+ * installed.
  *
  * The public entry points belonging to a subsystem are defined with that
  * subsystem rather than forwarded from here: relic_string() lives beside the
@@ -28,21 +28,6 @@
  */
 
 static int	 draw_hash_seed(uint64_t *seedp);
-
-void *
-relic_context_alloc(relic_t *ctx, size_t size)
-{
-	void *block;
-
-	block = relic_arena_alloc(&ctx->arena, size);
-	if (block != NULL)
-		return (block);
-
-	relic_arena_clear_failure(&ctx->arena);
-	relic_diag_no_memory(ctx);
-
-	return (NULL);
-}
 
 int
 relic_enter(relic_t *ctx)
@@ -93,7 +78,6 @@ relic_destroy(relic_t *ctx)
 	relic_symtab_reset(&ctx->symbols);
 	relic_arena_reset(&ctx->eval_arena);
 	relic_arena_reset(&ctx->program_arena);
-	relic_arena_reset(&ctx->arena);
 	free(ctx);
 }
 
@@ -159,8 +143,7 @@ relic_create_config(const relic_config_t *config)
 		ctx->config = *config;
 
 	relic_account_init(&ctx->account, ctx->config.max_memory);
-	relic_arena_init(&ctx->arena);
-	relic_arena_init(&ctx->program_arena);
+	relic_arena_init(&ctx->program_arena, RELIC_ARENA_ANY_OBJECT);
 	relic_arena_init_charged(&ctx->eval_arena, &ctx->account);
 	relic_symtab_init(&ctx->symbols, ctx->hash_seed);
 	relic_valtab_init(&ctx->values, ctx->hash_seed);

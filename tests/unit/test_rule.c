@@ -216,6 +216,7 @@ a_literal_resolves_to_the_arguments_it_names(void)
 	const relic_rule_t *rule;
 	const relic_literal_t *literal;
 	const relic_pred_t *pred;
+	relic_value_t decoded;
 	relic_value_t expected;
 	relic_dom_t domain;
 	diag_log_t log;
@@ -262,8 +263,9 @@ a_literal_resolves_to_the_arguments_it_names(void)
 
 	expected.type = RELIC_INTEGER;
 	expected.v.integer = 100;
-	check(relic_value_of(ctx, literal->u.atom.args[1].u.constant) != NULL &&
-	    relic_value_of(ctx, domain)->v.integer == expected.v.integer,
+	check(relic_value_decode(ctx, literal->u.atom.args[1].u.constant,
+	    &decoded) && decoded.type == expected.type &&
+	    decoded.v.integer == expected.v.integer,
 	    SCENARIO_ARGUMENTS, "the constant reads back as the value written");
 
 	literal = &rule->body[1];

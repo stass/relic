@@ -284,6 +284,11 @@ struct relic_value {
  *
  * An integer needs no constructor: set `type` to RELIC_INTEGER and
  * `v.integer` to the value.
+ *
+ * A context holds at most 2^30 - 1 distinct byte strings, which symbols and
+ * strings share with predicate names, variable names and source names, and
+ * at most 2^30 - 1 distinct integers; a byte string is at most 2^32 - 2
+ * bytes long.  Interning past a limit fails with the reason reported.
  */
 RELIC_EXPORT int relic_value_symbol(relic_t *ctx, const char *bytes,
     size_t length, relic_value_t *value);

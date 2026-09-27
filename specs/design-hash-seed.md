@@ -41,7 +41,7 @@ It adds no configuration field, no limit and no command-line option.
 Every table in the engine is the open-addressing identifier table of
 `specs/design-memory.md` section 6, probed linearly from the slot the low
 bits of a key's hash select. Eight tables build on it: the symbol table over
-byte strings, the value table over typed values, the predicate table, the
+byte strings, the value table over integers, the predicate table, the
 canonical full-tuple index of every relation, the secondary index of every
 relation, the scratch table that counts a column's distinct values for the
 planner, and the adornment and rule tables of the Magic rewrite. Linear
@@ -55,8 +55,8 @@ identifiers are assigned in first-appearance order, so the author controls
 each symbol's identifier and through it each domain identifier; a tuple hash
 folds domain identifiers; so a fact file fixes every tuple hash in the run.
 The cheapest route is not even the tuple: the symbol table hashes the bytes of
-a string with FNV-1a, and finding byte strings that collide under a known FNV
-seed is the textbook flooding attack.
+a string with a multiplicative fold, and finding byte strings that collide
+under a known seed is the textbook flooding attack.
 
 The cost is quadratic in the crafted input. A relation of *M* tuples in one
 cluster costs *M* probes per membership test and *M* squared to load; a
@@ -132,12 +132,16 @@ once, fails `tests/globals.sh`, and two contexts sharing a seed would let an
 input crafted against one flood the other.
 
 The owners are the symbol table, the value table, the predicate table, each
-relation, and the Magic rewrite. Each already reaches its keys through an
-owner pointer in its rehash callback, and the seed sits in the same
-structure. A relation's seed keys every table over its tuples: its canonical
-index, each of its secondary indexes, and the scratch table that counts a
-column's distinct values. Each operation on those already takes the
-relation, so none of them holds a copy of its own.
+relation, each staging set of a load, and the Magic rewrite. Each already
+reaches its keys through an owner pointer in its rehash callback, and the
+seed sits in the same structure. A relation's seed keys every table over its
+tuples: its canonical index, each of its secondary indexes, and the scratch
+table that counts a column's distinct values. Each operation on those
+already takes the relation, so none of them holds a copy of its own. A
+staging set hashes a fact as the base store it commits to would, and the
+commit places the fact by that hash without computing it again
+(`specs/design-facts.md` section 4.3), so the two must hold the same seed,
+which both copy from the context.
 
 A caller cannot set the seed. There is nothing a caller could want from a
 chosen seed that a random one does not give: results do not depend on it,
@@ -149,50 +153,69 @@ S11 froze for a knob with no use.
 
 ## 5. How the seed enters the hash
 
-The hash keeps its shape: an FNV-1a fold over words or bytes, then the
-avalanche finalizer that spreads every input bit into the low bits a slot is
-chosen by. The seed replaces the compile-time basis and joins the finalizer's
-input:
+The hash is a multiplicative fold over words or bytes, then the avalanche
+finalizer that spreads every input bit into the low bits a slot is chosen
+by. The fold's state is 64 bits wide, twice the widest unit, and it starts
+from the seed:
 
 ```text
-state    = low 32 bits of seed
-for each unit u:   state = (state ^ u) * FNV_PRIME
-hash     = finalize(state ^ high 32 bits of seed)
+state    = seed
+for each unit u:   state = (state ^ u) * M
+hash     = low 32 bits of finalize64(state)
 ```
 
-The two halves enter at different points so that the fold and the finalizer
-are each keyed. An empty sequence hashes the seeded state, which is an
-ordinary key and not a special case. A word hashes as the sequence of that
-one word.
+`M` is an odd 64-bit constant whose bits are spread across the word, the
+first multiplier of SplitMix64's mixer.
 
-An integer is split into two 32-bit halves by shifting, so a table probes in
-the same order on a big-endian machine as on a little-endian one for the
-same seed, and hashes as `hash_word(low ^ hash_word(high))` rather than as
-the sequence of its halves. The fold has one difference that survives every
-seed: flipping bit 31 of a word adds 2^31 to the state, multiplying by an odd
-prime keeps that difference in bit 31 alone, and a flip of bit 31 in a later
-word cancels it. So `v` and `v ^ 0x8000000080000000` would collide under
-every seed if folded as a sequence. Finalizing the high half first spreads
-its flip across the word by an amount that depends on the seed. No other
-key needs this, because no other key has two words that can both reach bit
-31. Tuple and index keys are domain identifiers, which reach it only after
-two billion values are interned. An adornment's key ends in a column mask
-that can, but a difference in the last word has no later word to cancel it.
-The rule table's hash finalizes after every word.
+An empty sequence hashes the seeded state, which is an ordinary key and not
+a special case. A word hashes as the sequence of that one word, and an
+integer as the sequence of its high and low 32-bit halves, split by shifting
+so that a table probes in the same order on a big-endian machine as on a
+little-endian one for the same seed.
+
+The state is wider than a unit so that no difference between two keys can
+be carried past the seed unchanged. Multiplying by an odd number carries a
+difference in the state's top bit through unchanged whatever the other
+bits hold, since flipping that bit is the same as adding it, and changes
+every other difference by carries that depend on the other bits, and so on
+the seed. A unit reaches only the lower half of the state, so every
+difference it makes has been changed in a way only the seed decides before
+the next unit meets it, and no later unit can be chosen to cancel it under
+every seed.
+
+A state as wide as a word would give a word's top bit exactly that path,
+and domain identifiers carry their type in their top two bits. Two keys
+whose words differ in bit 31 in pairs would collide under every seed, and
+since a multiply spreads a difference only upward, keys differing only in
+their columns' types would keep their differences in the top two bits of
+the state: the 3^n ways of retyping an n-column key would share at most four
+hashes whatever the seed, a flood built from nothing but the choice of
+which columns hold integers. Guarding each place a top bit can be reached
+would be a list to keep complete; the wider state has no such place.
 
 The defence is the secret, not the mixer. relic runs offline over a file
 or a caller's buffers and offers no oracle: no interface reports a probe
 count, a slot or a hash, and timing is not returned to whoever wrote the
 input. An author who cannot learn the seed cannot compute the hashes, and
-no reachable pair of keys collides under every seed. Pairs that collide
-under a fraction of seeds do exist: `[a, b]` and `[a ^ 0x100, b ^ 0x19300]`
-collide under about one seed in thirty, because 256 times the FNV prime is
-0x19300 modulo 2^32. They do not compose into a flood. Each such pair spends
-two columns, a tuple has at most thirty-two, and the keys that collide with
-one another under a given seed stay a handful while a crafted cluster would
-need thousands. A keyed hash of cryptographic strength would remove these
-pairs, buy nothing more, and cost every tuple hash on the hot path of
-evaluation, so FNV stays.
+no pair of keys collides under every seed.
+
+What the multiplier decides is how rare the pairs are that collide under a
+share of the seeds. For a later unit to cancel a difference, the multiplies
+between must leave it small enough for a unit to reach, and that takes a
+relation between the difference and the multiplier modulo 2^64. A multiplier
+with few bits set has short ones: FNV's prime, 2^40 + 435, less 435 and
+squared is a multiple of 2^64, so three words can be chosen whose
+differences offset one another under about one seed in a thousand, and a
+search over differences of a few bits each finds hundreds of such channels.
+`M` has no relation a search of the same differences finds, and for two
+words only 838,328,728, twice it and their negations, among the differences
+below 2^32 in magnitude, are multiplied into another that small, each then
+cancelled only under the seeds whose bits give it the right carries. Such
+pairs do not compose into a flood: each spends columns, a tuple has at most
+thirty-two, and the keys that collide with one another under a given seed
+stay a handful while a crafted cluster would need thousands. A keyed hash of
+cryptographic strength would remove them, buy nothing more, and cost every
+tuple hash on the hot path of evaluation, so the fold stays.
 
 No context holds a seed of zero. A draw of zero is drawn again, and a
 second zero fails creation, since a source that returns zero twice is

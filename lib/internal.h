@@ -132,48 +132,66 @@ struct relic_diag {
 /*
  * One interned byte string, found at index `id - 1` of the symbol table.
  *
- * The bytes live in the context arena, where they never move, so a pointer
- * handed out by relic_string() stays valid until the context is destroyed
- * even after the array of these has been reallocated several times.
+ * The bytes live in the pool's string arena, where they never move, so a
+ * pointer handed out by relic_string() stays valid until the context is
+ * destroyed even after the array of these has been reallocated several
+ * times.
  *
  * The length is recorded because a string literal may contain NUL bytes: the
  * lexer is byte-oriented and a string holds whatever bytes the source did.  A
  * terminator is stored past the recorded length anyway, so that a caller with
- * no use for the length can treat the result as a C string.
+ * no use for the length can treat the result as a C string.  The hash is the
+ * one the pool's index placed the entry by, kept so that growing the index
+ * reads each entry's hash and none of its bytes.
  */
 struct relic_symbol {
 	const char	*bytes;
-	size_t		 length;
+	uint32_t	 length;
+	uint32_t	 hash;
 };
 
 /*
- * Byte strings interned to 32-bit identifiers.
+ * Byte strings interned to identifiers of at most RELIC_DOM_INDEX_MASK, so
+ * that one fits beside a domain identifier's type.
  *
  * Symbols and string literals share this pool.  What distinguishes the symbol
  * foo from the string "foo" is the value that refers to the bytes, not the
  * bytes themselves, so the two intern to one symbol identifier and to two
  * different domain identifiers.
+ *
+ * The bytes are packed in an arena of alignment one: a string is read as
+ * bytes and never as an object, so one symbol's bytes and terminator follow
+ * the previous symbol's with no padding.
  */
 struct relic_symtab {
 	relic_symbol_t	*entries;	/* indexed by id - 1 */
 	size_t		 count;
 	size_t		 capacity;
 	relic_idtab_t	 index;
+	relic_arena_t	 strings;
 	uint64_t	 hash_seed;	/* the context's */
 };
 
 /*
- * Values interned to domain identifiers.
+ * The integers interned to domain identifiers, and which symbols have been
+ * interned as values of each type.
  *
- * Interning happens here for every type, integers included, so that the
- * parser and relic_fact_add() cannot disagree about a value's canonical
- * form: there is one path to a domain identifier and this is it.
+ * A symbol or a string needs no entry here: its domain identifier is its
+ * symbol identifier under its type, so the pool's one identifier per byte
+ * string is already one identifier per value.  An integer is found by its
+ * position in `integers`.  `symbol_uses` records, per symbol identifier,
+ * whether the symbol has been interned as a symbol value and as a string
+ * value, which is what counts the distinct values of each type.
  */
 struct relic_valtab {
-	relic_value_t	*entries;	/* indexed by dom - 1 */
-	size_t		 count;
-	size_t		 capacity;
-	relic_idtab_t	 index;
+	int64_t		*integers;	/* indexed by the dom's index - 1 */
+	size_t		 integer_count;
+	size_t		 integer_capacity;
+	relic_idtab_t	 index;		/* over integers */
+	uint8_t		*symbol_uses;	/* indexed by symbol id - 1 */
+	size_t		 symbol_use_capacity;
+	size_t		 symbol_values;
+	size_t		 string_values;
 	uint64_t	 hash_seed;	/* the context's */
 };
 
@@ -450,7 +468,6 @@ struct relic_materialized {
  * its state changed under it, however the caller's code came to run.
  */
 struct relic {
-	relic_arena_t		 arena;	/* context lifetime: symbol bytes */
 	relic_arena_t		 program_arena;	/* the parsed program */
 	relic_arena_t		 eval_arena;	/* one evaluation's plans */
 	relic_account_t		 account;
@@ -473,23 +490,6 @@ struct relic {
 /*
  * lib/api.c
  *
- * Allocate from the context arena, reporting exhaustion and returning NULL.
- *
- * Every context-lifetime allocation goes through here rather than calling
- * the arena directly, because that arena is never reset while the context
- * lives.  A failure flag left standing on it would refuse every later
- * request and turn one transient exhaustion into a context that can no
- * longer intern anything, so the flag is cleared here, once the failure has
- * been observed and reported.
- *
- * The flag's other purpose, letting a half-finished construction stop
- * without threading a status back through every level, belongs to the arenas
- * that are reset between phases.  A context-lifetime allocation is a single
- * object whose caller checks the pointer it gets.
- */
-void	*relic_context_alloc(relic_t *ctx, size_t size);
-
-/*
  * The one way into an operation, and out of it.  Every public entry point
  * that changes a context, or can call caller code, begins with
  * relic_enter() and returns only through relic_leave().  relic_enter()
@@ -606,13 +606,15 @@ void	 relic_symtab_reset(relic_symtab_t *table);
 /*
  * lib/value.c
  *
- * relic_value_of() returns NULL for an identifier the context never assigned.
- * Both order functions treat such an identifier as unordered and unequal
- * rather than reading past the table.
+ * relic_value_decode() fills *value with the value a domain identifier names
+ * and returns true, or returns false for an identifier the context never
+ * assigned.  Both order functions treat such an identifier as unordered and
+ * unequal rather than reading past a table.
  */
 size_t	 relic_value_count(const relic_t *ctx);
 size_t	 relic_value_count_of(const relic_t *ctx, enum relic_type type);
-const relic_value_t *relic_value_of(const relic_t *ctx, relic_dom_t dom);
+bool	 relic_value_decode(const relic_t *ctx, relic_dom_t dom,
+	    relic_value_t *value);
 enum relic_order relic_value_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
 int	 relic_value_total_order(const relic_t *ctx, relic_dom_t a,
@@ -1249,8 +1251,8 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * safe: the next evaluation seeds and derives it again.
  * relic_bases_reserve() makes room for a commit's new facts, checking both
  * limits once over every store it grows before growing any, and
- * relic_base_append() then appends one fact the store lacks without looking
- * anything up.
+ * relic_base_append_hashed() then appends one fact the store lacks without
+ * looking anything up.
  *
  * relic_relation_insert() reports through *addedp whether the tuple was not
  * already present, which is what fixed-point detection reads, and returns -1
@@ -1286,6 +1288,11 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * relic_relation_find() gives the identifier of the tuple holding some
  * columns, or RELIC_ID_NONE, and relic_relation_contains() whether there is
  * one.
+ *
+ * Every relation of a context hashes a tuple with relic_tuple_hash() under
+ * the context's seed, so a caller that has already hashed one that way, as
+ * a load's staging does, passes the hash to the _hashed forms rather than
+ * have it computed again.
  *
  * relic_relation_all() and relic_relation_since() give the identifier ranges
  * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
@@ -1326,8 +1333,8 @@ size_t	 relic_base_count(const relic_t *ctx, relic_pred_id_t pred);
 size_t	 relic_base_total(const relic_t *ctx);
 int	 relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 	    size_t count);
-void	 relic_base_append(relic_t *ctx, relic_pred_id_t pred,
-	    const relic_dom_t *columns);
+void	 relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
+	    const relic_dom_t *columns, uint32_t hash);
 relic_relation_t *relic_relation_create(relic_t *ctx, relic_pred_id_t pred,
 	    size_t serial, uint16_t arity);
 void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);
@@ -1341,6 +1348,10 @@ relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 bool	 relic_relation_contains(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
+bool	 relic_relation_contains_hashed(const relic_relation_t *relation,
+	    const relic_dom_t *columns, uint32_t hash);
+uint32_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
+	    uint16_t arity);
 const relic_dom_t *relic_relation_tuple(const relic_relation_t *relation,
 	    relic_tuple_id_t id);
 size_t	 relic_relation_bytes(const relic_relation_t *relation);

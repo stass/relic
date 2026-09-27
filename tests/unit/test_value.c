@@ -30,17 +30,23 @@
 #include "harness.h"
 #include "internal.h"
 
+#define	SCENARIO_CLEARED	"a decoded value carries no stale bytes"
 #define	SCENARIO_EXTREMES	"the extremes of the integer range round trip"
 #define	SCENARIO_IDENTITY	"equal values intern to one identifier"
 #define	SCENARIO_MALFORMED	"a malformed value is refused"
 #define	SCENARIO_ORDER		"the comparison operators order within a type"
 #define	SCENARIO_TOTAL		"the sorting order covers every value"
+#define	SCENARIO_TYPED		"a domain identifier carries its type"
 #define	SCENARIO_TYPES		"the three types are distinct domains"
+#define	SCENARIO_UNASSIGNED	"an identifier never assigned names no value"
 
 static relic_dom_t	 intern_integer(relic_t *ctx, int64_t value);
 static relic_dom_t	 intern_text(relic_t *ctx, enum relic_type type,
 			    const char *text);
+static void		 a_decoded_value_carries_no_stale_bytes(void);
 static void		 a_malformed_value_is_refused(void);
+static void		 an_unassigned_identifier_names_no_value(void);
+static void		 an_identifier_carries_its_type(void);
 static void		 equal_values_intern_to_one_identifier(void);
 static void		 every_integer_round_trips(void);
 static void		 the_comparison_order_holds_within_a_type(void);
@@ -79,10 +85,11 @@ static void
 equal_values_intern_to_one_identifier(void)
 {
 	relic_t *ctx;
-	const relic_value_t *stored;
+	relic_value_t stored;
 	relic_dom_t first;
 	relic_dom_t again;
 	relic_dom_t other;
+	bool known;
 
 	ctx = relic_create();
 	check(ctx != NULL, SCENARIO_IDENTITY, "a context should be created");
@@ -111,19 +118,18 @@ equal_values_intern_to_one_identifier(void)
 	check(first != other, SCENARIO_IDENTITY,
 	    "a different integer should receive a different identifier");
 
-	stored = relic_value_of(ctx, first);
-	check(stored != NULL, SCENARIO_IDENTITY,
+	known = relic_value_decode(ctx, first, &stored);
+	check(known, SCENARIO_IDENTITY,
 	    "an assigned identifier should name a value");
-	check(stored != NULL && stored->type == RELIC_INTEGER,
-	    SCENARIO_IDENTITY, "the stored type should be the one interned");
-	check(stored != NULL && stored->v.integer == 10, SCENARIO_IDENTITY,
+	check(known && stored.type == RELIC_INTEGER, SCENARIO_IDENTITY,
+	    "the stored type should be the one interned");
+	check(known && stored.v.integer == 10, SCENARIO_IDENTITY,
 	    "the stored payload should be the one interned");
 
-	check(relic_value_of(ctx, RELIC_ID_NONE) == NULL, SCENARIO_IDENTITY,
-	    "identifier zero should name nothing");
-	check(relic_value_of(ctx, (relic_dom_t)relic_value_count(ctx) + 1) ==
-	    NULL, SCENARIO_IDENTITY,
-	    "an identifier past the last should name nothing");
+	check(!relic_value_decode(ctx, RELIC_ID_NONE, &stored),
+	    SCENARIO_IDENTITY, "identifier zero should name nothing");
+	check(!relic_value_decode(ctx, other + 1, &stored), SCENARIO_IDENTITY,
+	    "an integer identifier past the last should name nothing");
 
 	relic_destroy(ctx);
 }
@@ -138,8 +144,8 @@ static void
 the_three_types_stay_distinct(void)
 {
 	relic_t *ctx;
-	const relic_value_t *as_symbol;
-	const relic_value_t *as_string;
+	relic_value_t as_symbol;
+	relic_value_t as_string;
 	relic_dom_t integer;
 	relic_dom_t symbol;
 	relic_dom_t string;
@@ -157,10 +163,9 @@ the_three_types_stay_distinct(void)
 	check(symbol != string, SCENARIO_TYPES,
 	    "a symbol and a string with the same spelling are not one value");
 
-	as_symbol = relic_value_of(ctx, symbol);
-	as_string = relic_value_of(ctx, string);
-	check(as_symbol != NULL && as_string != NULL &&
-	    as_symbol->v.id == as_string->v.id, SCENARIO_TYPES,
+	check(relic_value_decode(ctx, symbol, &as_symbol) &&
+	    relic_value_decode(ctx, string, &as_string) &&
+	    as_symbol.v.id == as_string.v.id, SCENARIO_TYPES,
 	    "they should nonetheless share one copy of their bytes");
 
 	integer = intern_integer(ctx, 1);
@@ -222,11 +227,11 @@ every_integer_round_trips(void)
 
 	first_unrecovered = VALUE_COUNT;
 	for (i = 0; i < VALUE_COUNT && first_unrecovered == VALUE_COUNT; i++) {
-		const relic_value_t *stored;
+		relic_value_t stored;
 
-		stored = relic_value_of(ctx, doms[i]);
-		if (stored == NULL || stored->type != RELIC_INTEGER ||
-		    stored->v.integer != values[i])
+		if (!relic_value_decode(ctx, doms[i], &stored) ||
+		    stored.type != RELIC_INTEGER ||
+		    stored.v.integer != values[i])
 			first_unrecovered = i;
 	}
 
@@ -394,10 +399,157 @@ a_malformed_value_is_refused(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * A domain identifier's top two bits are its type and the rest index the
+ * table of that type: a symbol and a string of the same bytes share the
+ * index, their symbol's, under different bits.  An identifier is one the
+ * context assigned only when a value of its type was interned: the string
+ * form of a symbol never used as a string decodes to nothing, as do bits
+ * of no type and a symbol the pool holds as a predicate's name alone, and
+ * none of those is counted as a value.
+ */
+static void
+an_identifier_carries_its_type(void)
+{
+	relic_t *ctx;
+	relic_value_t decoded;
+	relic_dom_t symbol;
+	relic_dom_t string;
+	relic_dom_t integer;
+	relic_dom_t bare;
+	uint32_t name;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_TYPED, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	symbol = intern_text(ctx, RELIC_SYMBOL, "foo");
+	string = intern_text(ctx, RELIC_STRING, "foo");
+	integer = intern_integer(ctx, -7);
+	bare = intern_text(ctx, RELIC_SYMBOL, "bar");
+
+	check((symbol & RELIC_DOM_TYPE_MASK) == RELIC_DOM_SYMBOL &&
+	    (string & RELIC_DOM_TYPE_MASK) == RELIC_DOM_STRING &&
+	    (integer & RELIC_DOM_TYPE_MASK) == RELIC_DOM_INTEGER,
+	    SCENARIO_TYPED, "each identifier should carry its type's bits");
+	check((symbol & RELIC_DOM_INDEX_MASK) ==
+	    (string & RELIC_DOM_INDEX_MASK), SCENARIO_TYPED,
+	    "a symbol and a string of the same bytes should share an index");
+	check(relic_value_decode(ctx, string, &decoded) &&
+	    decoded.type == RELIC_STRING, SCENARIO_TYPED,
+	    "the string's identifier should decode as a string");
+
+	check(!relic_value_decode(ctx, RELIC_DOM_STRING |
+	    (bare & RELIC_DOM_INDEX_MASK), &decoded), SCENARIO_TYPED,
+	    "a symbol never used as a string should have no string value");
+	check(!relic_value_decode(ctx, bare & RELIC_DOM_INDEX_MASK, &decoded),
+	    SCENARIO_TYPED, "an index with no type bits should name nothing");
+
+	check(relic_symbol_intern(ctx, "edge", 4, &name) == 0, SCENARIO_TYPED,
+	    "a predicate's name should intern in the pool");
+	check(!relic_value_decode(ctx, RELIC_DOM_SYMBOL | name, &decoded),
+	    SCENARIO_TYPED,
+	    "a name the pool holds should not be a value until one is made");
+
+	check(intern_text(ctx, RELIC_SYMBOL, "foo") == symbol,
+	    SCENARIO_TYPED, "interning a symbol again should change nothing");
+	checkf(relic_value_count_of(ctx, RELIC_SYMBOL) == 2 &&
+	    relic_value_count_of(ctx, RELIC_STRING) == 1 &&
+	    relic_value_count_of(ctx, RELIC_INTEGER) == 1 &&
+	    relic_value_count(ctx) == 4, SCENARIO_TYPED,
+	    "two symbols, a string and an integer should be counted, not "
+	    "%zu, %zu and %zu, %zu in all",
+	    relic_value_count_of(ctx, RELIC_SYMBOL),
+	    relic_value_count_of(ctx, RELIC_STRING),
+	    relic_value_count_of(ctx, RELIC_INTEGER), relic_value_count(ctx));
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Identifiers no value was given name no value, and deciding so reads no
+ * table past its end: a symbol identifier on a context that has made no
+ * symbol value, which has no record of uses at all, and integer positions
+ * zero, which is none, and one past the table.
+ */
+static void
+an_unassigned_identifier_names_no_value(void)
+{
+	relic_t *ctx;
+	relic_value_t decoded;
+	bool known;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_UNASSIGNED, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	known = relic_value_decode(ctx, RELIC_DOM_SYMBOL | 1000u, &decoded);
+	check(!known, SCENARIO_UNASSIGNED,
+	    "a symbol identifier should name nothing before any symbol value");
+
+	known = relic_value_decode(ctx, RELIC_DOM_INTEGER, &decoded);
+	check(!known, SCENARIO_UNASSIGNED,
+	    "integer position zero should name nothing");
+
+	(void)intern_integer(ctx, 5);
+	known = relic_value_decode(ctx, RELIC_DOM_INTEGER | 2u, &decoded);
+	check(!known, SCENARIO_UNASSIGNED,
+	    "an integer position past the table should name nothing");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Decoding writes every byte of the value, the padding and the member its
+ * type does not use included, and a failed decode leaves the value zeroed,
+ * so a value handed to a caller carries nothing from wherever its memory
+ * was before.  The values are filled with a pattern first so that a byte
+ * left unwritten shows.
+ */
+static void
+a_decoded_value_carries_no_stale_bytes(void)
+{
+	relic_t *ctx;
+	relic_value_t decoded;
+	relic_value_t expected;
+	relic_dom_t symbol;
+	bool known;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_CLEARED, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	symbol = intern_text(ctx, RELIC_SYMBOL, "foo");
+
+	bzero(&expected, sizeof(expected));
+	expected.type = RELIC_SYMBOL;
+	expected.v.id = symbol & RELIC_DOM_INDEX_MASK;
+
+	memset(&decoded, 0xa5, sizeof(decoded));
+	known = relic_value_decode(ctx, symbol, &decoded);
+	check(known && bcmp(&decoded, &expected, sizeof(decoded)) == 0,
+	    SCENARIO_CLEARED, "a decoded symbol should equal one built on "
+	    "zeroed memory, byte for byte");
+
+	bzero(&expected, sizeof(expected));
+	memset(&decoded, 0xa5, sizeof(decoded));
+	known = relic_value_decode(ctx, RELIC_DOM_INTEGER, &decoded);
+	check(!known && bcmp(&decoded, &expected, sizeof(decoded)) == 0,
+	    SCENARIO_CLEARED, "a failed decode should leave the value zeroed");
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
+	a_decoded_value_carries_no_stale_bytes();
 	a_malformed_value_is_refused();
+	an_identifier_carries_its_type();
+	an_unassigned_identifier_names_no_value();
 	equal_values_intern_to_one_identifier();
 	every_integer_round_trips();
 	the_comparison_order_holds_within_a_type();

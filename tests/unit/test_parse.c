@@ -219,7 +219,7 @@ terms_hold_the_values_they_spell(void)
 {
 	static const char program[] = "f(a, \"a\", 120, X, _, _Kept, a).\n";
 
-	const relic_value_t *value;
+	relic_value_t value;
 	relic_ast_stmt_t *statement;
 	diag_log_t log;
 	relic_t *ctx;
@@ -240,21 +240,21 @@ terms_hold_the_values_they_spell(void)
 		return;
 	}
 
-	value = relic_value_of(ctx, statement->head.terms[0].u.constant);
 	check(statement->head.terms[0].kind == RELIC_TERM_CONSTANT &&
-	    value != NULL && value->type == RELIC_SYMBOL, SCENARIO_TERMS,
+	    relic_value_decode(ctx, statement->head.terms[0].u.constant,
+	    &value) && value.type == RELIC_SYMBOL, SCENARIO_TERMS,
 	    "a bare identifier should be interned as a symbol");
 
-	value = relic_value_of(ctx, statement->head.terms[1].u.constant);
-	check(value != NULL && value->type == RELIC_STRING, SCENARIO_TERMS,
+	check(relic_value_decode(ctx, statement->head.terms[1].u.constant,
+	    &value) && value.type == RELIC_STRING, SCENARIO_TERMS,
 	    "a quoted literal should be interned as a string");
 	check(statement->head.terms[0].u.constant !=
 	    statement->head.terms[1].u.constant, SCENARIO_TERMS,
 	    "the symbol a and the string \"a\" should be different values");
 
-	value = relic_value_of(ctx, statement->head.terms[2].u.constant);
-	check(value != NULL && value->type == RELIC_INTEGER &&
-	    value->v.integer == 120, SCENARIO_TERMS,
+	check(relic_value_decode(ctx, statement->head.terms[2].u.constant,
+	    &value) && value.type == RELIC_INTEGER &&
+	    value.v.integer == 120, SCENARIO_TERMS,
 	    "an integer literal should be interned as its value");
 
 	check(statement->head.terms[3].kind == RELIC_TERM_VARIABLE &&
@@ -287,7 +287,7 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 
 	relic_ast_stmt_t *statement;
 	const relic_relation_t *store;
-	const relic_value_t *value;
+	relic_value_t value;
 	relic_pred_id_t pred;
 	uint32_t symbol;
 	diag_log_t log;
@@ -312,9 +312,9 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 		return;
 	}
 
-	value = relic_value_of(ctx,
-	    relic_relation_tuple(store, RELIC_TUPLE_FIRST)[1]);
-	check(value != NULL && value->type == RELIC_SYMBOL, SCENARIO_NEGATION,
+	check(relic_value_decode(ctx,
+	    relic_relation_tuple(store, RELIC_TUPLE_FIRST)[1], &value) &&
+	    value.type == RELIC_SYMBOL, SCENARIO_NEGATION,
 	    "`not` as a term should be a symbol");
 
 	statement = statement_at(ctx, 0);

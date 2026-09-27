@@ -31,6 +31,7 @@
 #define	SCENARIO_DISTINCT	"allocations do not overlap"
 #define	SCENARIO_FAILURE	"an impossible request fails stickily"
 #define	SCENARIO_MARKED		"an owner can record a failure of its own"
+#define	SCENARIO_PACKED		"an arena aligns to its own alignment"
 #define	SCENARIO_RESET		"reset returns the arena to an empty state"
 #define	SCENARIO_ZERO		"a zero-byte request yields a usable pointer"
 
@@ -42,6 +43,7 @@ static void	 a_reset_arena_allocates_again(void);
 static void	 a_zero_byte_request_returns_a_distinct_pointer(void);
 static void	 an_allocation_is_aligned_whatever_its_size(void);
 static void	 an_impossible_request_fails_and_stays_failed(void);
+static void	 an_arena_aligns_to_its_own_alignment(void);
 static void	 an_owner_can_record_a_refusal_it_made_itself(void);
 static void	 separate_allocations_do_not_overlap(void);
 
@@ -63,7 +65,7 @@ an_allocation_is_aligned_whatever_its_size(void)
 	relic_arena_t arena;
 	size_t i;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 
 	for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
 		void *block;
@@ -85,6 +87,45 @@ an_allocation_is_aligned_whatever_its_size(void)
 }
 
 /*
+ * An arena created with a smaller alignment rounds each request to it and no
+ * further: one of alignment one hands out each block where the last ended,
+ * which is what lets a pool of short strings waste nothing, and one of
+ * alignment eight rounds a three-byte request up to eight.
+ */
+static void
+an_arena_aligns_to_its_own_alignment(void)
+{
+	static const size_t sizes[] = { 1, 3, 7, 2, 9 };
+
+	enum { SIZE_COUNT = sizeof(sizes) / sizeof(sizes[0]) };
+
+	unsigned char *blocks[SIZE_COUNT];
+	unsigned char *first;
+	unsigned char *second;
+	relic_arena_t arena;
+	size_t i;
+
+	relic_arena_init(&arena, 1);
+	for (i = 0; i < SIZE_COUNT; i++)
+		blocks[i] = relic_arena_alloc(&arena, sizes[i]);
+	for (i = 1; i < SIZE_COUNT; i++) {
+		checkf(blocks[i - 1] != NULL && blocks[i] == blocks[i - 1] +
+		    sizes[i - 1], SCENARIO_PACKED,
+		    "the block of %zu bytes should begin where the block of "
+		    "%zu ended", sizes[i], sizes[i - 1]);
+	}
+	relic_arena_reset(&arena);
+
+	relic_arena_init(&arena, 8);
+	first = relic_arena_alloc(&arena, 3);
+	second = relic_arena_alloc(&arena, 3);
+	check(first != NULL && second == first + 8 &&
+	    (uintptr_t)second % 8 == 0, SCENARIO_PACKED,
+	    "an arena of alignment eight should round three bytes to eight");
+	relic_arena_reset(&arena);
+}
+
+/*
  * Fill each block with a distinct byte and read them all back afterwards.
  * Overlapping blocks, or a chunk that hands out the same offset twice, would
  * show up as a byte that changed after it was written.  The count crosses
@@ -102,7 +143,7 @@ separate_allocations_do_not_overlap(void)
 	size_t first_corrupted;
 	size_t i;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 
 	first_unallocated = BLOCK_COUNT;
 	for (i = 0; i < BLOCK_COUNT; i++) {
@@ -151,7 +192,7 @@ a_zero_byte_request_returns_a_distinct_pointer(void)
 	void *first;
 	void *second;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 
 	first = relic_arena_alloc(&arena, 0);
 	second = relic_arena_alloc(&arena, 0);
@@ -182,7 +223,7 @@ an_impossible_request_fails_and_stays_failed(void)
 	void *refused;
 	void *afterwards;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 
 	refused = relic_arena_alloc(&arena, SIZE_MAX);
 	check(refused == NULL, SCENARIO_FAILURE,
@@ -215,7 +256,7 @@ an_owner_can_record_a_refusal_it_made_itself(void)
 	relic_arena_t arena;
 	void *afterwards;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 
 	check(!relic_arena_failed(&arena), SCENARIO_MARKED,
 	    "a fresh arena should not be marked");
@@ -250,7 +291,7 @@ a_reset_arena_allocates_again(void)
 	relic_arena_t arena;
 	void *block;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 
 	block = relic_arena_alloc(&arena, 1000);
 	check(block != NULL, SCENARIO_RESET, "the first allocation succeeds");
@@ -279,7 +320,7 @@ first_chunk_bytes(void)
 	relic_arena_t arena;
 	size_t bytes;
 
-	relic_arena_init(&arena);
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 	bytes = relic_arena_alloc(&arena, 8) != NULL ?
 	    relic_arena_total_bytes(&arena) : 0;
 	relic_arena_reset(&arena);
@@ -303,7 +344,7 @@ a_charged_arena_is_counted_in_its_account(void)
 	relic_account_init(&account, 0);
 	account.store_bytes = 1234;
 	relic_arena_init_charged(&charged, &account);
-	relic_arena_init(&uncharged);
+	relic_arena_init(&uncharged, RELIC_ARENA_ANY_OBJECT);
 
 	check(relic_arena_alloc(&charged, 100) != NULL &&
 	    relic_arena_alloc(&charged, 100000) != NULL, SCENARIO_CHARGED,
@@ -401,6 +442,7 @@ main(void)
 	the_limit_refuses_a_chunk_before_it_is_obtained();
 	a_zero_byte_request_returns_a_distinct_pointer();
 	an_allocation_is_aligned_whatever_its_size();
+	an_arena_aligns_to_its_own_alignment();
 	an_impossible_request_fails_and_stays_failed();
 	an_owner_can_record_a_refusal_it_made_itself();
 	separate_allocations_do_not_overlap();

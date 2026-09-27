@@ -59,14 +59,26 @@ SLIST_HEAD(relic_arena_chunk_list, relic_arena_chunk);
  * allocations into a structure stop without threading a status back through
  * every level, and it lets the phase that owns the arena confirm at its
  * boundary that nothing was quietly truncated.
+ *
+ * Every allocation is rounded up to `alignment`, which the creator chooses:
+ * RELIC_ARENA_ANY_OBJECT for an arena whose blocks hold structures, and one
+ * for an arena of byte strings, whose blocks then follow one another with
+ * no gap.  A reset keeps the alignment, as it keeps the account.
  */
 struct relic_arena {
 	relic_arena_chunk_list_t	 chunks;	/* newest first */
 	relic_account_t			*account;	/* NULL: not charged */
+	size_t				 alignment;	/* a power of two */
 	size_t				 next_chunk_size;
 	size_t				 total_bytes;	/* from the allocator */
 	bool				 failed;
 };
+
+/*
+ * The alignment of an arena whose blocks may hold any object, the strictest
+ * any object needs.  A charged arena always has it.
+ */
+#define	RELIC_ARENA_ANY_OBJECT	_Alignof(max_align_t)
 
 /*
  * relic_arena_reset() returns an arena to its initialized state and releases
@@ -81,7 +93,7 @@ void	*relic_arena_allocarray(relic_arena_t *arena, size_t count,
 void	 relic_arena_clear_failure(relic_arena_t *arena);
 void	 relic_arena_fail(relic_arena_t *arena);
 bool	 relic_arena_failed(const relic_arena_t *arena);
-void	 relic_arena_init(relic_arena_t *arena);
+void	 relic_arena_init(relic_arena_t *arena, size_t alignment);
 void	 relic_arena_init_charged(relic_arena_t *arena,
 	    relic_account_t *account);
 void	 relic_arena_reset(relic_arena_t *arena);

@@ -1213,9 +1213,9 @@ parser_reset(relic_parser_t *parser)
  * The stable name a location may point at for the life of the context.
  *
  * Source names are interned like any other byte string, so the bytes live in
- * the context arena and never move: a location stored in the tree stays
- * printable after the load that produced it has returned, and loading one
- * file twice stores one copy of its name.
+ * the symbol pool's string arena and never move: a location stored in the
+ * tree stays printable after the load that produced it has returned, and
+ * loading one file twice stores one copy of its name.
  */
 const char *
 relic_source_name(relic_t *ctx, const char *name)

@@ -103,7 +103,7 @@ pointer handed out before a discard, which holds today since every
 evaluation discards before it plans and nothing commits while one runs; a
 future path that kept such a pointer would leave derived tuples the next
 discard skips. Derive the property instead: count the base stores' tuples
-in the store, bumped only by `relic_base_append()`, and the secondary
+in the store, bumped only by `relic_base_append_hashed()`, and the secondary
 indexes where one is published or dropped, so that something is derived
 exactly when the tuple total differs from the base total or an index
 exists. The same count makes `relic_base_total()`, which
@@ -241,16 +241,16 @@ context.** [Low, component: `lib/parse.c`, `lib/lex.c`, `lib/symbol.c`,
 `lib/value.c`, `cmd/relic/repl.c`] A constant in a query is interned as a
 value, a variable's spelling and the query's source name as symbols, and no
 table releases an entry. An embedder preparing a query per request over
-distinct constants grows the value table by one entry per distinct constant,
-and a session grows the symbol table by one entry per line, because the tool
-names each line's query `<query N>` and the parser interns the name. Nothing
-walks either table per answer, so the cost is memory rather than time, and
-it is bounded by the distinct text seen. A query's answer leaves nothing in
-the context's tables, per `specs/design-query.md` section 9; these entries
-are what a query does leave. A fix is either a
-source name that is not interned -- diagnostics copy it -- or a per-query
-scope for the symbols and values only the query's text mentions, which is a
-change to interning and wants a design note first.
+distinct constants grows the symbol pool or the integer table by one entry
+per distinct constant, and a session grows the symbol table by one entry per
+line, because the tool names each line's query `<query N>` and the parser
+interns the name. Nothing walks either table per answer, so the cost is
+memory rather than time, and it is bounded by the distinct text seen. A
+query's answer leaves nothing in the context's tables, per
+`specs/design-query.md` section 9; these entries are what a query does
+leave. A fix is either a source name that is not interned -- diagnostics
+copy it -- or a per-query scope for the symbols and values only the query's
+text mentions, which is a change to interning and wants a design note first.
 
 **A session's line editing drops bytes outside ASCII.** [Low, component:
 `cmd/relic/input.c`] The tool never calls setlocale(3), so libedit runs in
@@ -832,26 +832,44 @@ as an allocator, so the gap fails the build rather than hiding; the fix is
 to rename through a wrapper the library calls instead of the system name.
 Settle when a 32-bit glibc job exists.
 
-**Loading facts costs relic more memory than Souffle.** [Low, component:
-`lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000 ternary facts
-read as source text, relic peaks at 59 MB, against 43 MB for Souffle reading
-the same data as TSV and 79 MB for Nemo, which also parses; at scale 4, 1.2
-million facts, relic's resident peak is 165 to 199 bytes per fact over ten
-direct runs and 201 to 202 as `bench/compare/run.sh` takes it, the largest of
-its runs, 198 to 242 MB, against Souffle's 171 MB, in about the same time. A
-load stages each fact as it parses it and builds no statement for it,
-`specs/design-facts.md`, and what remains per fact is the symbols and values
-its constants intern (86), the staging set live during the commit (about 30),
-the text of the file, read whole (24), the tuple and its index slot (21), and
-the slack of the arrays that double. The text is read before the parse and
-freed after the commit, though nothing reads it once the parse ends;
-releasing a file's text before the commit would take its 24 bytes off a
-load's peak. A symbol's bytes are hashed once, by the lexer into the symbol
-table; the symbol table recomputes every symbol's byte hash when it grows
-(`symbol_rehash()`), and the value table every value's hash, each about 3 per
-cent of `facts-join` at scale 4; the four-byte slot of
-`specs/design-evaluation-cost.md` section 5.2, whose stored hash would remove
-both and took about a quarter off `facts-join` at scale 1, keeps them.
+**Importing facts misses the comparison's gate.** [Medium, component:
+`lib/symbol.c`, `lib/value.c`, `lib/facts.c`, `lib/import.c`,
+`bench/compare/facts-join`] `specs/design-comparison-cost.md` section 10
+gates its step 6 on `facts-join` at scale 10, three million ternary rows
+naming three million distinct symbols, under 2 s and 120 MB. With its
+section 7 in place the import and query take 2.9 to 3.2 s and 218 to 220 MiB
+of resident peak, from 4.2 to 4.6 s and 289 to 292 MiB. The peak is the
+import's commit, which the import alone brings to 218 MiB, because three
+things are held at once there. The staged facts hold about 68 MiB: their
+tuples, hashes and marks, and the table that finds them. The symbols hold
+about 95 MiB: three million sixteen-byte entries, 46 MiB resident of a 64
+MiB array; their packed bytes, 25 MiB; the tagged slots, 20 MiB; the byte
+per symbol recording which types use it, 4 MiB. The base store the commit
+appends to holds 50 MiB. Two thirds of the time is the import: interning the
+symbols (27 per cent), the staging set (17) and appending to the base store
+and its canonical index (7), each probe a cache miss into a table of
+millions. The query is the rest, a third to a half of it building the join's
+index by two profiles taken under load. Candidates, none designed: for a
+load into an empty store, handing the staged facts to the store rather than
+copying them, so that the peak holds them once rather than twice; an entry
+of a 32-bit offset into the string arena and a length, eight bytes rather
+than sixteen, about 23 MiB; growing the pool by walking the entries in
+identifier order and placing each by its stored hash; and checking an
+imported symbol field once, where the import checks it is a symbol and
+interning the value checks again. Loading the same facts as source text also
+holds the file's text whole until the commit, 24 bytes a fact, though
+nothing reads it once the parse ends.
+
+**The hashed commit trusts two copies of the seed.** [Low, component:
+`lib/facts.c`, `lib/relation.c`] A staging set hashes a fact with its own
+copy of the context's seed, and the commit places the fact in the base
+store's canonical index by that hash, which is right only while the set's
+copy and the store's copy are equal and both hash through
+`relic_tuple_hash()`. Both are copied from the context when they are
+created and never change, and a debug build asserts the hash matches; a
+release build trusts it. Reading the seed from the context in the staging
+set, or passing a tuple hash of a type only `relic_tuple_hash()` produces,
+would make the agreement hold by construction.
 
 **A load that fails to parse still stages and interns the facts it read.**
 [Low, component: `lib/parse.c`] A fact is staged, and its predicate

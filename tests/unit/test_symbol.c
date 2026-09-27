@@ -29,16 +29,22 @@
 
 #define	SCENARIO_EMBEDDED	"a NUL byte is part of the key"
 #define	SCENARIO_EMPTY		"the empty string is an ordinary symbol"
+#define	SCENARIO_HASH		"a symbol keeps the hash it was placed by"
 #define	SCENARIO_IDENTITY	"equal bytes intern to one identifier"
+#define	SCENARIO_LONG		"a symbol too long to record is refused"
 #define	SCENARIO_LOOKUP		"an identifier names the bytes it was given"
 #define	SCENARIO_MANY		"many distinct symbols stay distinct"
+#define	SCENARIO_PACKED		"a symbol's bytes follow the previous one's"
 #define	SCENARIO_UNKNOWN	"an unassigned identifier names nothing"
 
+static void	 a_symbol_keeps_the_hash_it_was_placed_by(void);
+static void	 a_symbol_too_long_is_refused_unread(void);
 static void	 an_unassigned_identifier_has_no_bytes(void);
 static void	 embedded_nul_bytes_distinguish_symbols(void);
 static void	 equal_bytes_intern_to_one_identifier(void);
 static void	 many_symbols_receive_distinct_identifiers(void);
 static void	 the_empty_string_interns_like_any_other(void);
+static void	 the_pool_packs_its_bytes(void);
 
 static void
 equal_bytes_intern_to_one_identifier(void)
@@ -276,14 +282,128 @@ an_unassigned_identifier_has_no_bytes(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * The pool's table grows by the hash each entry records, reading no bytes,
+ * so the recorded hash must be the one the bytes were placed by: a
+ * different one would move the symbol where no lookup of its bytes looks.
+ */
+static void
+a_symbol_keeps_the_hash_it_was_placed_by(void)
+{
+	static const char *const texts[] = { "", "a", "path", "a longer one" };
+
+	enum { TEXT_COUNT = sizeof(texts) / sizeof(texts[0]) };
+
+	const relic_symbol_t *entry;
+	relic_t *ctx;
+	uint32_t id;
+	size_t i;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_HASH, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	for (i = 0; i < TEXT_COUNT; i++) {
+		if (relic_symbol_intern(ctx, texts[i], strlen(texts[i]),
+		    &id) != 0) {
+			checkf(false, SCENARIO_HASH, "\"%s\" should intern",
+			    texts[i]);
+			continue;
+		}
+
+		entry = &ctx->symbols.entries[id - 1];
+		checkf(entry->hash == relic_hash_bytes(ctx->symbols.hash_seed,
+		    texts[i], strlen(texts[i])), SCENARIO_HASH,
+		    "\"%s\" should keep the hash of its bytes", texts[i]);
+	}
+
+	relic_destroy(ctx);
+}
+
+/*
+ * An entry records a length of 32 bits, so a longer one is refused, and
+ * before a byte is read: the length is the caller's, and a buffer that
+ * long need not exist.  The buffer here holds one byte, and reading past
+ * it is what AddressSanitizer would report.
+ */
+static void
+a_symbol_too_long_is_refused_unread(void)
+{
+	static const char one[1] = { 'x' };
+	relic_t *ctx;
+	uint32_t id;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_LONG, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	check(relic_symbol_intern(ctx, one, (size_t)UINT32_MAX, &id) != 0,
+	    SCENARIO_LONG, "a symbol of 2^32 - 1 bytes should be refused");
+	check(relic_error(ctx) != NULL && strstr(relic_error(ctx),
+	    "is longer than") != NULL, SCENARIO_LONG,
+	    "and the diagnostic should say it is too long");
+	check(relic_symbol_count(ctx) == 0, SCENARIO_LONG,
+	    "and nothing should have been interned");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * The pool's bytes are packed: each symbol's bytes and terminator follow
+ * the previous symbol's with no padding, whatever their lengths, while a
+ * chunk has room for them.
+ */
+static void
+the_pool_packs_its_bytes(void)
+{
+	static const char *const texts[] = { "a", "bcd", "efghijk", "", "lm" };
+
+	enum { TEXT_COUNT = sizeof(texts) / sizeof(texts[0]) };
+
+	const char *previous;
+	const char *bytes;
+	relic_t *ctx;
+	uint32_t id;
+	size_t i;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_PACKED, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	previous = NULL;
+	for (i = 0; i < TEXT_COUNT; i++) {
+		if (relic_symbol_intern(ctx, texts[i], strlen(texts[i]),
+		    &id) != 0) {
+			checkf(false, SCENARIO_PACKED, "\"%s\" should intern",
+			    texts[i]);
+			break;
+		}
+
+		bytes = relic_symbol_bytes(ctx, id, NULL);
+		checkf(previous == NULL || bytes == previous +
+		    strlen(texts[i - 1]) + 1, SCENARIO_PACKED,
+		    "\"%s\" should begin just past \"%s\" and its terminator",
+		    texts[i], i > 0 ? texts[i - 1] : "");
+		previous = bytes;
+	}
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
+	a_symbol_keeps_the_hash_it_was_placed_by();
+	a_symbol_too_long_is_refused_unread();
 	an_unassigned_identifier_has_no_bytes();
 	embedded_nul_bytes_distinguish_symbols();
 	equal_bytes_intern_to_one_identifier();
 	many_symbols_receive_distinct_identifiers();
 	the_empty_string_interns_like_any_other();
+	the_pool_packs_its_bytes();
 
 	return (check_summary("symbol"));
 }

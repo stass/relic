@@ -12,7 +12,7 @@
 #include "internal.h"
 
 /*
- * Byte strings interned to 32-bit identifiers.
+ * Byte strings interned to identifiers.
  *
  * Every predicate name, symbol and string literal in a program becomes an
  * identifier here, and the evaluator compares identifiers rather than bytes.
@@ -25,13 +25,27 @@
  */
 
 /*
- * Identifiers are 32-bit and zero is reserved to mean "none", so the table
- * holds one fewer than a uint32_t can count.  A program that interned four
- * billion distinct strings would have exhausted memory long before, but the
- * ceiling is checked rather than assumed: the alternative is an identifier
- * that wraps to an existing one and silently merges two symbols.
+ * A symbol identifier is the index of a symbol or string value's domain
+ * identifier, below its two type bits, and zero is reserved to mean "none",
+ * so the table holds RELIC_DOM_INDEX_MASK symbols.  A program that interned
+ * a billion distinct strings would have exhausted memory long before, but
+ * the ceiling is checked rather than assumed: the alternative is an
+ * identifier that runs into the type bits and silently turns one value into
+ * another.  A test build may define the ceiling lower, so that the refusal
+ * can be reached, and never higher.
  */
-#define	RELIC_SYMBOL_MAX	(UINT32_MAX - 1u)
+#ifndef RELIC_SYMBOL_MAX
+#define	RELIC_SYMBOL_MAX	RELIC_DOM_INDEX_MASK
+#endif
+
+_Static_assert(RELIC_SYMBOL_MAX <= RELIC_DOM_INDEX_MASK,
+    "a symbol identifier must stay below the type bits");
+
+/*
+ * The longest byte string the pool holds: its length fits an entry's, and
+ * the length with the terminator's byte fits a size_t however narrow.
+ */
+#define	RELIC_SYMBOL_LENGTH_MAX	(UINT32_MAX - 1)
 
 static const relic_symbol_t *symbol_at(const relic_symtab_t *table,
 		    uint32_t id);
@@ -39,24 +53,22 @@ static bool	 symbol_has_bytes(const relic_symtab_t *table, uint32_t id,
 		    const void *bytes, size_t length);
 static uint32_t	 symbol_rehash(uint32_t id, void *ctx);
 static int	 symbol_store(relic_t *ctx, const void *bytes, size_t length,
-		    uint32_t *idp);
+		    uint32_t hash, uint32_t *idp);
 
 void
 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed)
 {
 	bzero(table, sizeof(*table));
 	relic_idtab_init(&table->index, true);
+	relic_arena_init(&table->strings, 1);
 	table->hash_seed = hash_seed;
 }
 
 void
 relic_symtab_reset(relic_symtab_t *table)
 {
-	/*
-	 * The symbol bytes are not freed here.  They belong to the context
-	 * arena, which releases them when it is reset.
-	 */
 	relic_idtab_reset(&table->index);
+	relic_arena_reset(&table->strings);
 	relic_free_array(table->entries);
 	bzero(table, sizeof(*table));
 }
@@ -109,13 +121,14 @@ symbol_rehash(uint32_t id, void *ctx)
 	table = ctx;
 	symbol = symbol_at(table, id);
 
-	return (relic_hash_bytes(table->hash_seed, symbol->bytes,
-	    symbol->length));
+	return (symbol->hash);
 }
 
 /*
- * Copy bytes into the context arena, append them to the symbol array and
- * return the identifier assigned to them.
+ * Copy bytes into the string arena, append them to the symbol array with
+ * the hash they were placed by, and return the identifier assigned to them.
+ * The length has been checked against RELIC_SYMBOL_LENGTH_MAX, so it fits
+ * the entry and the terminator's byte cannot wrap the size.
  *
  * The array is grown and the copy is made before the count advances, so a
  * failure part way through leaves a table that is smaller than it might have
@@ -123,10 +136,12 @@ symbol_rehash(uint32_t id, void *ctx)
  * was fully written.
  */
 static int
-symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t *idp)
+symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t hash,
+    uint32_t *idp)
 {
 	relic_symtab_t *table;
 	relic_symbol_t *entries;
+	relic_symbol_t *entry;
 	char *copy;
 
 	table = &ctx->symbols;
@@ -134,17 +149,6 @@ symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t *idp)
 	if (table->count >= RELIC_SYMBOL_MAX) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "too many distinct symbols and strings");
-		return (-1);
-	}
-
-	/*
-	 * The terminator below needs one byte beyond the length, and a length
-	 * of SIZE_MAX would wrap that sum to nothing.  No such buffer can
-	 * exist, but the arena would answer the wrapped request with a block
-	 * of one alignment unit and the copy would run off the end of it.
-	 */
-	if (length == SIZE_MAX) {
-		relic_diag_no_memory(ctx);
 		return (-1);
 	}
 
@@ -159,15 +163,22 @@ symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t *idp)
 	/*
 	 * One byte past the recorded length holds a terminator, so a caller
 	 * that has no use for the length can treat the result as a C string.
+	 * A refused copy clears the arena's failure: the next symbol may fit
+	 * where this one did not.
 	 */
-	copy = relic_context_alloc(ctx, length + 1);
-	if (copy == NULL)
+	copy = relic_arena_alloc(&table->strings, length + 1);
+	if (copy == NULL) {
+		relic_arena_clear_failure(&table->strings);
+		relic_diag_no_memory(ctx);
 		return (-1);
+	}
 	bcopy(bytes, copy, length);
 	copy[length] = '\0';
 
-	table->entries[table->count].bytes = copy;
-	table->entries[table->count].length = length;
+	entry = &table->entries[table->count];
+	entry->bytes = copy;
+	entry->length = (uint32_t)length;
+	entry->hash = hash;
 	table->count++;
 
 	*idp = (uint32_t)table->count;
@@ -193,6 +204,19 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	uint32_t id;
 
 	table = &ctx->symbols;
+
+	/*
+	 * Checked before the bytes are read: the length is the caller's, and
+	 * hashing them is the first thing that would read them.
+	 */
+	if (length > RELIC_SYMBOL_LENGTH_MAX) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "a symbol or string of %zu bytes is longer than the %lu "
+		    "a value may hold", length,
+		    (unsigned long)RELIC_SYMBOL_LENGTH_MAX);
+		return (-1);
+	}
+
 	hash = relic_hash_bytes(table->hash_seed, bytes, length);
 
 	relic_idprobe_open(&probe, &table->index, hash);
@@ -217,7 +241,7 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 		return (-1);
 	}
 
-	if (symbol_store(ctx, bytes, length, &id) != 0)
+	if (symbol_store(ctx, bytes, length, hash, &id) != 0)
 		return (-1);
 
 	relic_idtab_place(&table->index, hash, id);

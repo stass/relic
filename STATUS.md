@@ -22,12 +22,12 @@ later stage sits on, specified in `specs/design-memory.md`. No Datalog yet.
 
 | Component | State |
 | --- | --- |
-| `lib/arena.c` | chunked region allocator; sticky failure flag, cleared by a reset and by the context-arena funnel |
-| `lib/util.{h,c}` | `relic_grow_array()`, whose arrays of a mebibyte or more get a mapping of their own that is released when outgrown, behind a sealed header `relic_free_array()` checks before it unmaps or frees; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed FNV-1a fold and a finalizer, an integer's high half finalized before its low half joins it, and a zero seed asserted against |
-| `lib/symbol.c` | byte strings interned to 32-bit identifiers; bytes in the context arena, embedded NULs preserved |
-| `lib/value.c` | the value table and `relic_dom_t` of D-3; interning for all three types, the language order of section 10.1 and the total order of section 61 |
+| `lib/arena.c` | chunked region allocator with an alignment chosen at initialization; sticky failure flag, cleared by a reset and by the symbol pool's store |
+| `lib/util.{h,c}` | `relic_grow_array()`, whose arrays of a mebibyte or more get a mapping of their own that is released when outgrown, behind a sealed header `relic_free_array()` checks before it unmaps or frees; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed multiplicative fold over a 64-bit state, twice the widest unit, so that no unit reaches the top bit a multiply carries unchanged, then a 64-bit finalizer; an integer hashed as its two halves, and a zero seed asserted against |
+| `lib/symbol.c` | byte strings interned to identifiers below the type bits of a domain identifier; an entry of the bytes, a 32-bit length and the stored hash its tagged index places and regrows it by; bytes packed in a string arena of alignment one, embedded NULs preserved |
+| `lib/value.c` | `relic_dom_t` of D-3, typed by its top two bits: a symbol or string value is its symbol identifier under its type, an integer its position in the integer table; interning for all three types, `relic_value_decode()`, the language order of section 10.1 and the total order of section 61 |
 | `lib/diag.c` | diagnostic callback, last-error buffer, and a stderr formatter that escapes non-printable bytes |
-| `lib/api.c` | context lifecycle and the context-arena allocation funnel; each context draws a nonzero hash seed from `getentropy(2)`, copied by every table owner -- symbols, values, predicates, relations and their indexes, the Magic rewrite -- and creation fails without one |
+| `lib/api.c` | context lifecycle; each context draws a nonzero hash seed from `getentropy(2)`, copied by every table owner -- symbols, values, predicates, relations and their indexes, a load's staging sets, the Magic rewrite -- and creation fails without one |
 | `include/relic.h` | `relic_t`, `relic_value_t`, `relic_location_t`, `relic_config_t`, the diagnostic callback, `relic_create()`, `relic_create_config()`, `relic_destroy()`, `relic_diag_set()`, `relic_diag_stderr()`, `relic_error()`, `relic_string()` |
 | `compat/queue.h` | bundled OpenBSD copy, provenance and patches in `compat/README.md` |
 | `tests/` | the unit suites for each module, plus the tree checks |
@@ -633,6 +633,26 @@ The times did not move. `chain-closure` still peaks 17 per cent above its
 live heap of 33.6 MB, against the design's gate of 10; `TODO.md` records
 the two causes that remain.
 
+| Component | State |
+| --- | --- |
+| `lib/value.c`, `lib/symbol.c` | step 6, typed identifiers: a domain identifier carries its type in its top two bits and indexes that type's table with the rest; a symbol or string value is its symbol identifier under its type, so the value table is the integer table, integers behind a tagged index; `relic_value_decode()` fills the caller's value and zeroes what it does not use; a symbol pool entry holds the bytes' pointer, a 32-bit length and the hash its tagged index placed it by and regrows it by, and the bytes are packed in a string arena of alignment one; a context holds at most 2^30 - 1 byte strings and 2^30 - 1 integers, and a byte string of at most 2^32 - 2 bytes, as `relic.h` and relic(3) say |
+| `lib/facts.c`, `lib/relation.c` | a load's staging set keeps each fact's hash, computed with the relation's own tuple hash, and the commit's membership check and append take it, `relic_relation_contains_hashed()` and `relic_base_append_hashed()`; a debug build recomputes each and asserts |
+| `lib/util.c` | the keyed fold's state is 64 bits, twice the widest unit, multiplied by SplitMix64's multiplier and finished by a 64-bit finalizer, so no unit's difference reaches the top bit a multiply carries unchanged |
+| `tests/` | `test_value`: an identifier carries its type, an unassigned identifier names no value, a decoded value carries no stale bytes; `test_symbol`: the pool packs its bytes, a symbol keeps the hash it was placed by, a symbol too long is refused unread; `test_ceiling`: the symbol pool and the integer table stop at their ceilings, compiled lowered; `test_arena`: an arena aligns to its own alignment; `test_util`: the type variants of a key spread, top-bit and three-word differences are not cancelled; `test_exhaustion`: interning an integer survives a failed allocation |
+
+Step 6 measured as step 4 was, against step 5, with `bench/compare`'s
+`facts-join` importing its rows from TSV:
+
+| Workload | Before | After |
+| --- | --- | --- |
+| `facts-join`, scale 10 | 4.20 to 4.56 s, 289 to 292 MiB | 2.87 to 3.22 s, 218 to 220 MiB |
+| `facts-join`, scale 1 | 0.26 to 0.28 s, 35 to 40 MiB | 0.19 to 0.20 s, 27 to 28 MiB |
+| `andersen` | 0.12 s, 10.7 to 12.9 MiB | 0.11 to 0.12 s, 9.6 to 10.1 MiB |
+
+`chain-closure` and `tc-sparse-cyclic` did not move. The gate of 2 s and
+120 MB on `facts-join` at scale 10 is missed; `TODO.md` breaks the peak
+down and lists the candidates.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -855,7 +875,7 @@ The Magic suites were confirmed the same way:
 | File | Contents |
 | --- | --- |
 | `specs/architecture.md` | target design, v0.2 |
-| `specs/design-memory.md` | arenas, arrays, interning tables, the value table |
+| `specs/design-memory.md` | arenas, arrays, interning tables, typed domain identifiers |
 | `specs/design-parser.md` | lexical structure, the syntax tree, diagnostics and error recovery |
 | `specs/design-program.md` | predicate identity, variable numbering, the compiled rule, safety |
 | `specs/design-relations.md` | the tuple store, tuple identifiers, the full-tuple index, ranges, limits |
