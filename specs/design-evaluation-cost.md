@@ -732,6 +732,14 @@ whose insertions are mostly new tuples, whose unsuccessful searches read a
 tuple per visited slot; the measurement that would show it is the profile
 share of the duplicate check against the peak, taken with section 6 in place.
 
+**A tag is the cheaper form this section did not measure.** One byte per
+slot holding the top eight bits of the hash lets an unsuccessful search pass
+most slots whose identifier is not its key without the doubled slot array,
+and `specs/design-comparison-cost.md` section 6.2 gives one to the tables
+whose searches mostly miss. Measured on the canonical index, it made the
+closures faster and their peaks higher, as the stored hash did, so the
+finding above stands for that index and it stays untagged.
+
 ---
 
 ## 6. Batched insertion

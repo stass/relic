@@ -144,7 +144,9 @@ duplicate check are integer operations that never inspect a payload.
 The capacity is counted in columns rather than in tuples so that one growth
 policy serves every arity, the empty one included. Capacity is asked for in
 columns, the growable-array helper doubles it, and the arity does not enter
-the arithmetic a second time.
+the arithmetic a second time. An array that reaches a mebibyte gets a mapping
+of its own, so a generation it outgrows goes back to the system at once
+rather than staying resident (`specs/design-comparison-cost.md` section 8).
 
 The number of columns a relation needs is `count * arity`, and that product is
 checked before it is formed. A 32-bit tuple identifier space and an arity of
@@ -229,6 +231,14 @@ columns as 32-bit words, not by hashing the bytes of the array. A byte hash of
 a `uint32_t` array probes in a different order on a big-endian machine than on
 a little-endian one, and D-4 requires that identical input produce an identical
 probe order everywhere.
+
+**A load's hash is carried in.** Every relation and staging set of a context
+hashes a tuple with the context's seed and the same function, so the hash a
+load's staging kept for a fact is the one its base store would compute.
+`relic_relation_contains_hashed()` and `relic_base_append_hashed()` take that
+hash rather than compute it, and a fact is hashed once on its way in
+(`specs/design-facts.md` sections 4.2 and 4.3). A debug build computes each
+hash again and asserts that it matches.
 
 **Equality is a column loop, not a byte comparison.** The columns of two
 tuples are compared as identifiers. A byte comparison would be equivalent for
