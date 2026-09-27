@@ -86,14 +86,18 @@ typedef struct invocation invocation_t;
  * results need a separator before them; `rows_written` and `begun` belong to
  * the query being answered.
  *
+ * What is written gathers in `buffer`, whose first `filled` bytes wait to be
+ * handed to the stream a block at a time; an output with a stream owns one.
  * A write that fails is reported once, naming `name`, and `write_failed`
- * then keeps it from being reported again.
+ * then keeps anything more from reaching the stream.
  */
 struct output {
 	relic_t			*ctx;
 	FILE			*stream;
+	char			*buffer;
 	const char		*name;
 	const char		*program_name;
+	size_t			 filled;
 	size_t			 queries_written;
 	size_t			 rows_written;
 	enum output_format	 format;
@@ -153,22 +157,25 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * returns -1 for a name that is not a format.
  *
  * output_init() prepares an output that discards rows, and output_attach()
- * gives it a stream, named `name` in messages, to write them to instead.
+ * gives it a stream, named `name` in messages, to write them to instead,
+ * returning 0, or -1 having reported that memory ran out.
  *
- * output_query() runs a query and writes its results, and output_discard()
- * runs one and writes nothing whatever the output is.  Each sets *rowsp to
- * the number of rows and returns 0, or returns -1 when the query failed or a
- * write did, either having been reported.
+ * output_query() runs a query and writes its results, handing them to the
+ * stream before it returns, and output_discard() runs one and writes nothing
+ * whatever the output is.  Each sets *rowsp to the number of rows and
+ * returns 0, or returns -1 when the query failed or a write did, either
+ * having been reported.
  *
- * output_flush() pushes what has been written to the stream, returning -1
- * when a write failed at any point, reported once.  output_close() does the
- * same and then closes the stream unless it is standard output.
+ * output_flush() flushes the stream and returns -1 when a write to it failed
+ * at any point, the output's own or another writer's through the same
+ * stream, reported once.  output_close() does the same, releases the buffer,
+ * and closes the stream unless it is standard output.
  * output_is_stdout() is whether the stream is standard output, which other
  * writers to standard output share.
  */
 int	output_format_named(const char *name, enum output_format *formatp);
 void	output_init(output_t *out, const char *program_name, relic_t *ctx);
-void	output_attach(output_t *out, FILE *stream, const char *name,
+int	output_attach(output_t *out, FILE *stream, const char *name,
 	    enum output_format format, bool sorted);
 int	output_query(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_discard(output_t *out, relic_query_t *query, size_t *rowsp);

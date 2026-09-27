@@ -538,6 +538,26 @@ W-3245:
 The import was the faster of the pair in every run, and both answered the
 same 141858 rows.
 
+**Comparison cost, stage S15,** specified in
+`specs/design-comparison-cost.md`, in its section 10 order.
+
+| Component | State |
+| --- | --- |
+| `cmd/relic/output.c` | step 1, the row writer: every row formatted into a 64 KiB buffer of the tool's own and written to the stream's descriptor a block at a time with `write(2)`, the stream's own buffer turned off; integers rendered by a decimal routine of the tool's own; a tsv field's unescaped runs copied whole; the buffer emptied when full and when a query's results end, so nothing written after a query overtakes its rows; the first failed block reported once, nothing written after it, the query's rows stopped and the run ended |
+| `tests/` | `tests/output.sh`: the 64 KiB mark moved across every byte after a filler symbol in a row holding a symbol, a string of control, quoted, two-byte and line-feed characters, and a nineteen-digit integer, in every format, a string longer than the buffer, and a csv, tsv and symbol value copied in one piece longer than it; `tests/cli.sh`: a write failing at the first block, at a later one and at a query's last, each reported once and the next query never run, and a query's rows ahead of the next query's plan and of `-v`'s count on a shared stream; `format-integers`: zero, both extremes and every digit count, a golden test rather than a unit test of the renderer, which is static to the tool |
+
+Step 1 measured with `-F tsv` on a `--disable-shared` build at `-O2`, one
+run each on a loaded Intel Xeon W-3245:
+
+| Workload | Before | After | After, `-n` |
+| --- | --- | --- | --- |
+| `chain-closure` | 1.54 s | 0.78 s | 0.70 s |
+| `tc-sparse-cyclic` | 0.81 s | 0.54 s | 0.48 s |
+
+The writer's share of `chain-closure`'s samples fell from 58 per cent to
+11, about 0.08 s for 24 MB of rows; the 5 per cent the design's gate asks
+for is not reached, and what remains is formatting rather than the lock.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:

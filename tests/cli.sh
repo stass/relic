@@ -101,6 +101,95 @@ case "$diagnostic" in
 	;;
 esac
 
+# Each query's results reach the stream before anything written after them,
+# on a terminal as in a file: the next query's plan under -e, and the count
+# of -v.  Standard error goes to the same file here, as a terminal shows
+# both streams.
+"$RELIC" -e -q 'edge(X, Y)?' -q 'path(a, X)?' "$work/graph.dl" \
+    > "$work/merged.txt" 2>&1
+rows_at=$(grep -n '^a b$' "$work/merged.txt" | head -n 1 | cut -d : -f 1)
+plan_at=$(grep -n '^magic rewrite of ' "$work/merged.txt" | head -n 1 |
+    cut -d : -f 1)
+if [ -z "$rows_at" ] || [ -z "$plan_at" ] || [ "$rows_at" -gt "$plan_at" ]
+then
+	fail "the first query's rows did not come before the second's plan"
+fi
+
+"$RELIC" -v -q 'edge(X, Y)?' -q 'path(a, X)?' "$work/graph.dl" \
+    > "$work/merged.txt" 2>&1
+printf 'a b\nb c\nquery 1: 2 rows\n\nb\nc\nquery 2: 2 rows\n' \
+    > "$work/merged.expected"
+if ! cmp -s "$work/merged.expected" "$work/merged.txt"; then
+	fail "-v counted queries out of order: '$(cat "$work/merged.txt")'"
+fi
+
+# Results reach the stream in blocks of 64 KiB and once more when a query's
+# results end, and a write that fails is reported once, whichever write it
+# is, and ends the run.  A file size limit makes the writes past it fail,
+# with SIGXFSZ ignored so that they fail rather than end the process.  The
+# shell counts the limit in blocks of 512 or 1024 bytes, and the sizes here
+# allow either: a limit of 256 blocks lets at least two writes of 64 KiB
+# through and stops the results of a 400-node chain, 750 KB of them, well
+# short of their end.
+awk 'BEGIN {
+	for (i = 1; i < 400; i++)
+		printf "edge(n%d, n%d).\n", i, i + 1
+	print "path(X, Y) :- edge(X, Y)."
+	print "path(X, Z) :- edge(X, Y), path(Y, Z)."
+	print "path(X, Y)?"
+}' > "$work/chain.dl"
+
+# write_limited BLOCKS ARGUMENTS...: run the tool with ARGUMENTS, writing
+# into $work/limited.txt under a file size limit of BLOCKS, and set `status`
+# to its exit status and `diagnostic` to what it wrote to standard error.
+# Standard error is read through a pipe, which the limit does not apply to,
+# so that the report of the failure is not lost to the same limit.
+write_limited() {
+	status=0
+	diagnostic=$(
+		blocks=$1
+		shift
+		trap '' XFSZ
+		ulimit -f "$blocks"
+		exec "$RELIC" -o "$work/limited.txt" "$@" 2>&1
+	) || status=$?
+}
+
+# expect_one_failure WHEN: the run of write_limited exited 1 and reported
+# exactly one failed write.
+expect_one_failure() {
+	if [ "$status" -ne 1 ]; then
+		fail "a write failing $1 exited $status, expected 1"
+	fi
+	if [ "$(printf '%s\n' "$diagnostic" | grep -c 'cannot write')" -ne 1 ]
+	then
+		fail "a write failing $1 was reported as '$diagnostic'"
+	fi
+}
+
+write_limited 0 "$work/chain.dl"
+expect_one_failure "at the first write"
+
+write_limited 256 "$work/chain.dl"
+expect_one_failure "at a later write"
+written=$(wc -c < "$work/limited.txt")
+if [ "$written" -lt 131072 ] || [ "$written" -gt 262144 ]; then
+	fail "a write failing at a later write left $written bytes"
+fi
+
+write_limited 0 "$work/graph.dl"
+expect_one_failure "at a query's last write"
+
+# The query whose write failed is the last that runs: the next one's plan
+# never appears.
+write_limited 0 -e -q 'edge(X, Y)?' -q 'path(a, X)?' "$work/graph.dl"
+expect_one_failure "before another query"
+case "$diagnostic" in
+*"magic rewrite of"*)
+	fail "a query ran after a write failed"
+	;;
+esac
+
 # A query that fails during evaluation writes nothing -- not even the blank
 # line that would separate it from the query before it -- and ends the run,
 # while what the earlier query wrote stands.  The program holds five tuples

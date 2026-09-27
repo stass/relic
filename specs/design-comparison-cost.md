@@ -178,48 +178,55 @@ struct output {
 
 **One buffer, one call per block.** `OUTPUT_BUFFER_SIZE` is 64 KiB. A
 value is appended to the buffer by a formatter for its type: a symbol's
-bytes are copied; a string literal is escaped byte by byte into the buffer
-as section 4.1 spells it; an integer is rendered by a decimal routine of
-the tool's own, at most twenty digits and a sign, into the buffer
-directly. A separator and a row's newline are single bytes appended the
-same way. Before appending anything the writer checks that it fits, and
-when it does not it flushes: one `fwrite()` of the filled prefix, checked.
-A value longer than the buffer, which only a string can be, is escaped in
-pieces that each fit, so no value is ever split by anything but a flush
-boundary and the output is the same bytes whatever the boundaries fall on.
+bytes, and in csv and tsv a string's, are copied, or quoted and escaped as
+the format does; a string in text and json is escaped byte by byte into the
+buffer as section 4.1 spells it; an integer is rendered by a decimal
+routine of the tool's own, at most nineteen digits and a sign, into the
+buffer directly. A separator and a row's newline are single bytes appended
+the same way. Before appending anything the writer checks that it fits, and
+when it does not it flushes: one `write(2)` of the filled prefix, checked.
+A value longer than the buffer is appended in pieces that each fit, so no
+value is ever split by anything but a flush boundary and the output is the
+same bytes whatever the boundaries fall on.
 
-**stdio stays the transport.** The stream is standard output or the file
+**The stream stays the stream.** The stream is standard output or the file
 `-o` opened, exactly as now; the buffer sits in front of it, so `-o`, the
 truncation rules and the close of `specs/design-cli.md` section 6 do not
-change. A flush is one `fwrite()`, which takes the stream's lock once per
-64 KiB rather than once per byte. The stream's own buffer is set to none
-with `setvbuf()`, so the block goes to `write(2)` whole and is not copied
-a second time.
+change. The stream's own buffer is set to none with `setvbuf()`, so that
+what other writers send through stdio reaches the descriptor at once, and a
+flush writes the block to the stream's descriptor with `write(2)`,
+continuing after a short write. It does not go through `fwrite()`, which on
+an unbuffered stream of the BSD stdio writes at most `BUFSIZ` bytes per
+call and would split each block into dozens of writes.
 
 **Write failures keep their contract.** Section 7 promises that a failed
 write is reported once and ends the run with status 1. Each flush checks
-`fwrite()`'s return; the first short write sets `failed`, and every later
-append and flush returns at once without touching the stream, so a closed
-pipe costs one failed call and no further formatting. The final flush of a
-query, its `fflush()` and the close at the end of the run are checked as
-they are now. A row is delivered to the writer by the callback of section
-4, which returns nonzero once `failed` is set, so the query stops
-streaming as it stops now when a write fails.
+`write(2)`'s return; the first failure sets `failed`, and every later flush
+drops what was appended since without touching the stream. The row being
+written is finished in the buffer and no other follows it, so a closed pipe
+whose `SIGPIPE` is ignored costs one failed call and the formatting of one
+row. The final flush of a query fails the query, and the stream's
+`fflush()` and the close at the end of the run are checked as they are now.
+A row is delivered to the writer by the callback of section 4, which
+returns nonzero once `failed` is set, so the query stops streaming as it
+stops now when a write fails.
 
 **Everything else writes through the buffer.** The JSON framing, the
 per-query separation of section 4.6, and the sorted output of section 5
 append to the same buffer, so nothing reaches the stream around it and
-the order of bytes is the order of appends. Interactive mode flushes the
-buffer before it prompts, so a prompt never appears before the rows of the
-query it follows. Diagnostics go to standard error and never touch the
-buffer.
+the order of bytes is the order of appends. The buffer is flushed when a
+query's results end, so it is empty between queries: the next query's
+plan, a diagnostic, the count of `-v` and an interactive prompt all follow
+the rows before them, on a terminal as in a file, without a list of the
+places that must flush. Diagnostics go to standard error and never touch
+the buffer.
 
 **Sorting.** `-s` collects every row as now and then writes the sorted
 rows through the same appends. It gains the buffer and nothing else.
 
 **Cost.** About 120 lines in `cmd/relic/output.c`, most of them the integer
 renderer and the flush. `chain-closure` writes 2,001,000 rows of about
-twelve bytes, 24 MB, which one `fwrite()` per 64 KiB moves in well under
+twelve bytes, 24 MB, which one `write(2)` per 64 KiB moves in well under
 0.1 s; the writer's share of the profile falls from 58 per cent to a few.
 
 ---
@@ -720,7 +727,7 @@ tree before it, per `CLAUDE.md`.
   middle of a symbol, a string escape and an integer, and with a string
   longer than the buffer. The write-failure tests of `specs/design-cli.md`
   section 7 hold with the failure injected at the first flush, at a later
-  one and at the final `fflush()`, each reported once. A unit test of the
+  one and at a query's last, each reported once. A unit test of the
   integer renderer covers zero, both extremes of `int64_t` and every
   digit count.
 * **Streaming.** For every projection-free query of the corpus, the

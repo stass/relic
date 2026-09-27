@@ -260,6 +260,30 @@ query's document ends with a newline and needs no other separator, so the
 output of several queries is a sequence of documents, one per query, that a
 streaming JSON reader consumes in turn.
 
+### 4.7 How the bytes reach the stream
+
+The tool formats every row into a buffer of its own, 64 KiB, and hands the
+buffer to the stream's descriptor with `write(2)` whenever the next byte
+would not fit, so a block costs one system call rather than a stdio call
+per value. A value is appended by a formatter for its type: a symbol's
+bytes, and in csv and tsv a string's, are copied, or quoted and escaped as
+section 4.2 says the format does; a string in text and json is escaped as
+section 4.1 spells it; and an integer is rendered by a decimal routine of
+the tool's own. A block may end at any byte, inside a value or inside an
+escape, and the output is the same bytes wherever the blocks end; a value
+longer than the buffer is written in as many blocks as it takes.
+
+Everything the output writes goes through the buffer: the rows, the
+separators of section 4.6, the json framing and the sorted rows of section
+5. The stream is standard output or the file of section 6, with its own
+buffering turned off by `setvbuf()`, so that what other writers send through
+stdio, the replies of section 10.2, reaches the descriptor at once and in
+order with the blocks. The buffer is emptied when it fills and when a
+query's results end. It is therefore empty between queries, and whatever
+follows a query's results -- the next query's plan, a diagnostic, the count
+of `-v`, a prompt -- follows them on a terminal as in a file, however the
+streams are shared.
+
 ---
 
 ## 5. Sorting
@@ -293,6 +317,16 @@ A write can fail -- a full disk, a closed pipe -- and a tool whose output is
 being consumed by a script must not report success when it was cut short. Every
 write is checked, the stream is flushed and closed explicitly, and a failure at
 any point is reported once, naming the output, and ends the run with status 1.
+
+The first block of section 4.7 that fails is the one reported. Nothing more
+reaches the stream after it, the query being written stops delivering rows
+once the row in hand is formatted and fails, and the run ends there, so a
+closed pipe whose `SIGPIPE` is ignored costs one failed write and the
+formatting of one row; otherwise the signal ends the tool at that write. A
+descriptor that is full and set not to block fails like any other: the tool
+does not wait for it to drain. A failure of another writer sharing standard
+output, a reply of section 10.2, is found by the stream's error indicator
+before the session reads its next line, and reported the same way.
 
 ---
 

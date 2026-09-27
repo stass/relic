@@ -320,10 +320,11 @@ cmd_quote(const char *bytes, size_t length, cmd_quoted_t *quoted)
  * -X stats it is data about the run rather than a complaint, so it is written
  * without the program name and reads the same however the tool was invoked.
  *
- * Standard output is flushed first.  It holds the query's rows, or the plan
- * .plan wrote, and flushing it is what makes the count follow them where a
- * terminal or a pipe shows both streams, rather than overtake them from
- * standard error, which is not buffered.
+ * Standard output is flushed first.  The query's rows have reached their
+ * stream already, but the plan .plan wrote may wait in standard output's
+ * buffer when the rows go elsewhere, and flushing it is what makes the count
+ * follow it where a terminal or a pipe shows both streams, rather than
+ * overtake it from standard error, which is not buffered.
  */
 void
 report_rows(const invocation_t *invocation, size_t number, size_t rows)
@@ -470,11 +471,9 @@ open_output(const char *program_name, const options_t *options,
 	if (options->discard_rows)
 		return (0);
 
-	if (options->output_path == NULL) {
-		output_attach(output, stdout, "standard output",
-		    options->format, options->sorted);
-		return (0);
-	}
+	if (options->output_path == NULL)
+		return (output_attach(output, stdout, "standard output",
+		    options->format, options->sorted));
 
 	stream = fopen(options->output_path, "w");
 	if (stream == NULL) {
@@ -483,8 +482,11 @@ open_output(const char *program_name, const options_t *options,
 		return (-1);
 	}
 
-	output_attach(output, stream, options->output_path, options->format,
-	    options->sorted);
+	if (output_attach(output, stream, options->output_path,
+	    options->format, options->sorted) != 0) {
+		fclose(stream);
+		return (-1);
+	}
 
 	return (0);
 }

@@ -298,9 +298,9 @@ tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
 dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
-	tests/langfiles.sh tests/magic.sh tests/man.sh tests/perf.sh \
-	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/roundtrip.sh \
-	tests/symbols.sh tests/version.sh
+	tests/langfiles.sh tests/magic.sh tests/man.sh tests/output.sh \
+	tests/perf.sh tests/pkgconfig.sh tests/reentry.sh tests/repl.sh \
+	tests/roundtrip.sh tests/symbols.sh tests/version.sh
 
 ##
 ## The equivalence suite runs every language test under each alternative
@@ -450,11 +450,12 @@ RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/explain-magic.dl tests/lang/explain-materialized.dl \
 	tests/lang/explain-ops.dl tests/lang/explain-supplementary.dl \
 	tests/lang/explain-thresholds.dl tests/lang/explain-views.dl \
-	tests/lang/format-csv.dl tests/lang/format-json.dl \
-	tests/lang/format-nul.dl tests/lang/format-text.dl \
-	tests/lang/format-tsv.dl tests/lang/head-not-atom.dl \
-	tests/lang/import-check.dl tests/lang/import-csv.dl \
-	tests/lang/import-errors-csv.dl tests/lang/import-errors-tsv.dl \
+	tests/lang/format-csv.dl tests/lang/format-integers.dl \
+	tests/lang/format-json.dl tests/lang/format-nul.dl \
+	tests/lang/format-text.dl tests/lang/format-tsv.dl \
+	tests/lang/head-not-atom.dl tests/lang/import-check.dl \
+	tests/lang/import-csv.dl tests/lang/import-errors-csv.dl \
+	tests/lang/import-errors-tsv.dl \
 	tests/lang/import-errors-typed.dl tests/lang/import-order.dl \
 	tests/lang/import-stdin.dl tests/lang/import-tsv.dl \
 	tests/lang/import-usage-arity.dl tests/lang/import-usage-column.dl \

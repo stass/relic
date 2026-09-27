@@ -13,16 +13,19 @@ landed; S14, documentation, packaging and release, next.
 in `specs/design-comparison-cost.md`. The engine comparison found relic
 behind the Souffle interpreter on `andersen` and `chain-closure`, behind
 DuckDB on `facts-join` and 6.3 times SQLite's memory there, and the causes
-are outside the join loop: writing rows through one locked stdio call per
-field is 58 per cent of `chain-closure`; a free query copies its answer into
-an answer relation, doubling the inserts and the live heap; the free
-`andersen` query is rewritten into nine relations for one, three times the
-work of `-a`; a symbol costs 70 bytes and two probes to intern; and an
-identifier table's freed generations stay resident, so the reported peak is
-up to twice the live heap. Six changes in the design's section 10 order,
-each measured against the one before it. Subsumes the writer part of the
-`andersen` and loading items under Benchmarks, which keep what they say
-about the evaluator and the load's text.
+are outside the join loop: writing rows was 58 per cent of `chain-closure`;
+a free query copies its answer into an answer relation, doubling the
+inserts and the live heap; the free `andersen` query is rewritten into nine
+relations for one, three times the work of `-a`; a symbol costs 70 bytes
+and two probes to intern; and an identifier table's freed generations stay
+resident, so the reported peak is up to twice the live heap. Six changes in
+the design's section 10 order, each measured against the one before it.
+Subsumes the writer part of the `andersen` and loading items under
+Benchmarks, which keep what they say about the evaluator and the load's
+text. The buffered writer of step 1 left the writer at 11 per cent of
+`chain-closure`, above the 5 per cent its gate asks for; what remains is
+formatting 24 MB of rows rather than the stream's lock, and no cheaper
+formatting is designed yet.
 
 ## Build and packaging
 
