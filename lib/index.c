@@ -113,9 +113,9 @@ void
 relic_index_free(relic_index_t *index)
 {
 	relic_idtab_reset(&index->keys);
-	free(index->entries);
-	free(index->key_values);
-	free(index->next);
+	relic_free_array(index->entries);
+	relic_free_array(index->key_values);
+	relic_free_array(index->next);
 	bzero(index, sizeof(*index));
 }
 

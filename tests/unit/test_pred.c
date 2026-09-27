@@ -240,7 +240,7 @@ a_predicate_is_defined_by_what_derives_it(void)
 	rule.head = appended;
 	check(relic_ruletab_append(ctx, &rules, &rule) == 0, SCENARIO_DEFINE,
 	    "a rule is appended");
-	free(rules.entries);
+	relic_free_array(rules.entries);
 
 	check(relic_pred_is_defined(ctx, named) &&
 	    !relic_pred_is_derived(ctx, named), SCENARIO_DEFINE,

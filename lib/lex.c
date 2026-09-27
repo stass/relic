@@ -177,7 +177,7 @@ relic_lexer_init(relic_lexer_t *lexer, relic_t *ctx, const char *source_name,
 void
 relic_lexer_reset(relic_lexer_t *lexer)
 {
-	free(lexer->decoded);
+	relic_free_array(lexer->decoded);
 	bzero(lexer, sizeof(*lexer));
 }
 

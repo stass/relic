@@ -116,9 +116,9 @@ struct relic_relation {
 };
 ```
 
-Every array grows with `reallocarray()`, per D-6: they outlive individual
-queries, they are the allocations large enough to be worth accounting against
-a limit, and an arena cannot resize a block.
+Every array is a growable array of `specs/design-memory.md` section 5, per
+D-6: they outlive individual queries, they are the allocations large enough
+to be worth accounting against a limit, and an arena cannot resize a block.
 
 The arity is copied from the predicate rather than read back through it on
 every insertion. This is not a second copy of a fact that can drift, because

@@ -405,9 +405,9 @@ reads.
 
 Everything variable-length is allocated from the program arena, so a compiled
 rule lives exactly as long as the statement it came from. The array of rules
-is a growable array over `reallocarray()` rather than an arena block, because
-an arena cannot resize and a rule must be reachable by index once the
-dependency graph exists.
+is a growable array, `specs/design-memory.md` section 5, rather than an arena
+block, because an arena cannot resize and a rule must be reachable by index
+once the dependency graph exists.
 
 ### 8.1 A statement is compiled in one pass
 

@@ -137,7 +137,7 @@ relation_empty(relic_relation_t *relation)
 	size_t position;
 
 	relic_idtab_reset(&relation->index);
-	free(relation->columns);
+	relic_free_array(relation->columns);
 	relation->columns = NULL;
 	relation->column_capacity = 0;
 	relation->count = 0;
@@ -217,7 +217,7 @@ relic_relation_free(relic_relation_t *relation)
 		return;
 
 	relation_empty(relation);
-	free(relation->indexes);
+	relic_free_array(relation->indexes);
 	free(relation);
 }
 
@@ -229,7 +229,7 @@ reltab_reset(relic_reltab_t *table)
 	for (position = 0; position < table->count; position++)
 		relic_relation_free(table->entries[position]);
 
-	free(table->entries);
+	relic_free_array(table->entries);
 	bzero(table, sizeof(*table));
 }
 

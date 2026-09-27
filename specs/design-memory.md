@@ -54,9 +54,9 @@ operation ends and are charged to `max_memory`; the others hold what the
 caller wrote and are not, per `specs/design-planning-cost.md` section 6.
 
 **Individually owned.** Relation tuples and indexes outlive individual
-queries, must be able to shrink, and are accounted against a limit. They use
-`reallocarray()` with explicit failure handling and are never arena
-allocated. The base stores that hold a program's facts are relations like
+queries, must be able to shrink, and are accounted against a limit. They are
+growable arrays (section 5) with explicit failure handling and are never
+arena allocated. The base stores that hold a program's facts are relations like
 any other, in the account with the relations evaluation derives
 (`specs/design-facts.md`); a discard empties the derived relations and drops
 the base stores' secondary indexes, and never shrinks a base store's tuples.
@@ -193,14 +193,40 @@ if (items == NULL)
 
 It returns the array unchanged when the existing capacity already suffices,
 and otherwise doubles it --- starting at eight items, and never below the
-requested count --- with `reallocarray()`, which rejects a product that would
-overflow. On failure it returns `NULL` and leaves the caller's array and
-capacity untouched, so a failed growth loses nothing that was already there.
+requested count --- rejecting a product that would overflow. On failure it
+returns `NULL` and leaves the caller's array and capacity untouched, so a
+failed growth loses nothing that was already there.
 
 The point is not that resizing is hard. It is that the doubling arithmetic,
 the overflow check and the failure discipline are written once rather than at
 every array in the engine, while the array itself stays a plain typed pointer
 that the surrounding code indexes directly.
+
+**Where an array lives.** An array whose bytes reach `RELIC_ARRAY_MAP_BYTES`,
+one mebibyte, is given an anonymous private mapping of its own; a smaller one
+is a heap block. A small block grows by `realloc()`. Every other growth maps
+the new size, copies and unmaps the old, so the pages of an outgrown
+generation go back to the system at once instead of staying resident as a
+freed heap block of that size may. The identifier table of section 6
+allocates its slot and tag arrays by the same rule.
+
+A header in front of the first item records which storage an array got: the
+length of its mapping, or zero for a heap block, sealed against the record's
+own address. An array is released by
+
+```c
+relic_free_array(items);
+```
+
+which checks the seal and then unmaps or frees. The header is what makes the
+rule hold without any caller's help. No owner tracks which of its arrays are
+mapped, and none can release one the wrong way unnoticed: `free()` on an
+array of any size is handed a pointer the allocator never returned, which
+AddressSanitizer rejects the first time it runs, not only once some input
+makes the array large. A header damaged by a stray write fails its seal and
+stops the process, rather than unmap whatever length it claims; under
+AddressSanitizer the header is unaddressable, as a heap block's redzone is,
+so the stray write itself is reported.
 
 ---
 

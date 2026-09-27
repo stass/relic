@@ -39,6 +39,7 @@
 #include "harness.h"
 #include "internal.h"
 
+#define	SCENARIO_ACCOUNT	"the account follows a relation across the threshold"
 #define	SCENARIO_ARITY_MAX	"a relation of the greatest arity is exact"
 #define	SCENARIO_BATCH		"a batch inserts what single insertions would"
 #define	SCENARIO_BATCH_LIMIT	"a limit refuses a batch where it would one"
@@ -148,6 +149,7 @@ static void	 the_memory_limit_refuses_a_tuple_and_says_so(void);
 static void	 a_refused_insertion_leaves_the_relation_whole(relic_t *ctx,
 		    relic_relation_t *rel, const char *scenario);
 static void	 a_million_tuples_fit_in_the_expected_memory(void);
+static void	 the_account_follows_a_relation_across_the_threshold(void);
 static void	 a_relation_stays_where_it_was_put(void);
 static void	 a_batch_inserts_what_single_insertions_would(void);
 static bool	 insert_in_batches(relic_t *ctx, relic_relation_t *batched,
@@ -1061,6 +1063,84 @@ a_million_tuples_fit_in_the_expected_memory(void)
 }
 
 /*
+ * The account keeps step with a relation whichever storage its growth
+ * chose.  A relation grown until its columns and its canonical index are
+ * mapped is charged what relic_relation_bytes() reports for it; cleared, it
+ * gives every byte back; grown again, its columns start in the heap and are
+ * charged from nothing.  Both sides derive the bytes from capacities, so
+ * this pins the account's updates across the move to a mapping and back,
+ * not the byte formula itself.
+ */
+static void
+the_account_follows_a_relation_across_the_threshold(void)
+{
+	relic_t *ctx;
+	relic_relation_t *rel;
+	relic_dom_t values[ENVELOPE_VALUES];
+	relic_dom_t columns[2];
+	size_t tuple_count;
+	unsigned int ordinal;
+	bool added;
+
+	ctx = context(SCENARIO_ACCOUNT, NULL);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_ACCOUNT, "pair", 2);
+	if (rel == NULL) {
+		relic_destroy(ctx);
+		return;
+	}
+
+	for (ordinal = 0; ordinal < ENVELOPE_VALUES; ordinal++)
+		values[ordinal] = value(ctx, SCENARIO_ACCOUNT, ordinal);
+
+	tuple_count = RELIC_ARRAY_MAP_BYTES / sizeof(columns) + 1;
+	for (ordinal = 0; ordinal < tuple_count; ordinal++) {
+		pair(columns, values[ordinal / ENVELOPE_VALUES],
+		    values[ordinal % ENVELOPE_VALUES]);
+
+		if (relic_relation_insert(ctx, rel, columns, &added) != 0 ||
+		    !added) {
+			checkf(false, SCENARIO_ACCOUNT,
+			    "tuple %u is distinct and should be added",
+			    ordinal);
+			relic_destroy(ctx);
+			return;
+		}
+	}
+
+	check(relic_array_mapped(rel->columns) &&
+	    relic_array_mapped(rel->index.slots), SCENARIO_ACCOUNT,
+	    "the columns and the index should be mapped past the threshold");
+	checkf(relic_relation_total_bytes(ctx) == relic_relation_bytes(rel),
+	    SCENARIO_ACCOUNT, "the account should hold the relation's %zu "
+	    "bytes, not %zu", relic_relation_bytes(rel),
+	    relic_relation_total_bytes(ctx));
+
+	relic_relation_clear(ctx, rel);
+	checkf(relic_relation_total_bytes(ctx) == 0, SCENARIO_ACCOUNT,
+	    "a cleared relation should give back every byte, not keep %zu",
+	    relic_relation_total_bytes(ctx));
+
+	if (relic_relation_insert(ctx, rel, columns, &added) != 0 || !added) {
+		check(false, SCENARIO_ACCOUNT,
+		    "a cleared relation should take a tuple again");
+		relic_destroy(ctx);
+		return;
+	}
+
+	check(!relic_array_mapped(rel->columns), SCENARIO_ACCOUNT,
+	    "a relation grown again from nothing should start in the heap");
+	checkf(relic_relation_total_bytes(ctx) == relic_relation_bytes(rel),
+	    SCENARIO_ACCOUNT, "the account should hold the regrown "
+	    "relation's %zu bytes, not %zu", relic_relation_bytes(rel),
+	    relic_relation_total_bytes(ctx));
+
+	relic_destroy(ctx);
+}
+
+/*
  * A relation, once created, stays at one address for the life of the
  * context, however many other relations are created afterwards.
  *
@@ -1499,6 +1579,7 @@ main(void)
 	the_tuple_limit_refuses_a_tuple_and_says_so();
 	the_memory_limit_refuses_a_tuple_and_says_so();
 	a_million_tuples_fit_in_the_expected_memory();
+	the_account_follows_a_relation_across_the_threshold();
 	a_relation_stays_where_it_was_put();
 	a_batch_inserts_what_single_insertions_would();
 	a_limit_refuses_a_batch_where_it_would_one();

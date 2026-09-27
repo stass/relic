@@ -20,24 +20,41 @@
 
 #include "config.h"
 
+#include <sys/mman.h>
+#include <sys/wait.h>
+
+#include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "harness.h"
 #include "internal.h"
 
+#ifdef RELIC_ADDRESS_SANITIZER
+#include <sanitizer/asan_interface.h>
+#else
+#define	ASAN_POISON_MEMORY_REGION(start, bytes)	((void)(start), (void)(bytes))
+#define	ASAN_UNPOISON_MEMORY_REGION(start, bytes) ((void)(start), (void)(bytes))
+#endif
+
 #define	SCENARIO_CONTEXTS	"each context draws a seed of its own"
+#define	SCENARIO_DAMAGED	"a damaged array header stops the process"
 #define	SCENARIO_DETERMINISM	"hashing is reproducible within a seed"
+#define	SCENARIO_FENCED		"the sanitizer sees past an array's ends"
 #define	SCENARIO_FLOODING	"keys crafted to collide need the seed"
 #define	SCENARIO_GROWTH		"an array grows without losing its contents"
 #define	SCENARIO_KEYED		"a hash depends on its seed"
 #define	SCENARIO_LOOKUP		"a key survives the table growing under it"
+#define	SCENARIO_MAPPED		"a large array gets pages of its own"
 #define	SCENARIO_OVERFLOW	"an impossible array size is refused"
 #define	SCENARIO_PREDICTED	"a growth is exactly what was predicted"
+#define	SCENARIO_RELEASED	"an outgrown mapping is released whole"
 #define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_SPREAD		"hashing separates similar keys"
 #define	SCENARIO_TAGS		"a tagged probe passes over other tags"
@@ -49,6 +66,18 @@
  */
 #define	SEED		UINT64_C(0x0123456789abcdef)
 #define	OTHER_SEED	UINT64_C(0xfedcba9876543210)
+
+/*
+ * The record in front of a growable array's first item: the two words just
+ * before it, the array's mapped length and its seal.
+ */
+#define	RECORD_BYTES	(sizeof(size_t) + sizeof(uintptr_t))
+
+/*
+ * The status a child freeing an array exits with from its SIGABRT handler,
+ * which says the library stopped it with abort(3).
+ */
+#define	ABORTED_STATUS	86
 
 /*
  * The keys the identifier table is driven with.  Identifier n names keys[n-1],
@@ -77,7 +106,19 @@ static bool	 reserve_then_fill(size_t held, size_t added, bool tagged);
 static size_t	 walk_to(const relic_idtab_t *table, const key_set_t *keys,
 		    uint32_t key);
 static void	 an_array_grows_without_losing_its_contents(void);
+static void	 an_array_is_fenced_for_the_sanitizer(void);
+static void	 an_outgrown_mapping_is_released(void);
+static void	 a_damaged_header_stops_the_process(void);
+static void	 exit_aborted(int signal_number);
+static bool	 freeing_aborts_with(uint32_t *items,
+		    const unsigned char *record);
+static void	 inverted_record(uint32_t *items, size_t offset,
+		    unsigned char *record);
+static unsigned char *record_of(uint32_t *items);
+static bool	 page_is_mapped(uintptr_t address);
 static void	 an_array_refuses_an_impossible_size(void);
+static void	 a_large_array_moves_to_a_mapping(void);
+static void	 a_large_table_starts_mapped_and_empty(void);
 static void	 equal_input_hashes_equally(void);
 static void	 every_inserted_key_is_found_after_growth(void);
 static void	 found_after_growth(bool tagged);
@@ -345,7 +386,7 @@ an_array_grows_without_losing_its_contents(void)
 	    "capacity should cover the items stored");
 
 	if (first_ungrown != ITEM_COUNT) {
-		free(items);
+		relic_free_array(items);
 		return;
 	}
 
@@ -359,7 +400,7 @@ an_array_grows_without_losing_its_contents(void)
 	    "item %zu should have survived the reallocations",
 	    first_corrupted);
 
-	free(items);
+	relic_free_array(items);
 }
 
 /*
@@ -382,6 +423,412 @@ an_array_refuses_an_impossible_size(void)
 	    "an unrepresentable array should not be allocated");
 	check(capacity == 0, SCENARIO_OVERFLOW,
 	    "a refused growth should leave the capacity unchanged");
+}
+
+/*
+ * An array appended to one item at a time stays in the heap while it is
+ * small, moves to a mapping of its own at the growth that takes its bytes to
+ * RELIC_ARRAY_MAP_BYTES, and moves from mapping to mapping after that, with
+ * every item surviving each move.  The array is grown to twice the threshold
+ * so that both kinds of move happen.  A growth that chose its storage by
+ * anything but the bytes it now holds -- the bytes it held before, or the
+ * item count -- is seen as the first growth whose storage is wrong.
+ */
+static void
+a_large_array_moves_to_a_mapping(void)
+{
+	uint32_t *items;
+	size_t capacity;
+	size_t count;
+	size_t item_count;
+	size_t wrong_storage_at;
+	size_t first_corrupted;
+	size_t i;
+	bool grown_all;
+
+	items = NULL;
+	capacity = 0;
+	count = 0;
+	item_count = 2 * RELIC_ARRAY_MAP_BYTES / sizeof(*items) + 1;
+	wrong_storage_at = 0;
+	grown_all = true;
+
+	for (i = 0; i < item_count; i++) {
+		uint32_t *grown;
+		bool large;
+
+		grown = relic_grow_array(items, &capacity, count + 1,
+		    sizeof(*items));
+		if (grown == NULL) {
+			grown_all = false;
+			break;
+		}
+		items = grown;
+		items[count] = (uint32_t)i;
+		count++;
+
+		large = capacity * sizeof(*items) >= RELIC_ARRAY_MAP_BYTES;
+		if (wrong_storage_at == 0 && relic_array_mapped(items) != large)
+			wrong_storage_at = capacity;
+	}
+
+	check(grown_all, SCENARIO_MAPPED,
+	    "an array of twice the threshold should grow");
+	checkf(wrong_storage_at == 0, SCENARIO_MAPPED,
+	    "an array of %zu items should be mapped exactly when its bytes "
+	    "reach the threshold", wrong_storage_at);
+	check(relic_array_mapped(items), SCENARIO_MAPPED,
+	    "an array of twice the threshold should be mapped");
+
+	first_corrupted = count;
+	for (i = 0; i < count && first_corrupted == count; i++) {
+		if (items[i] != (uint32_t)i)
+			first_corrupted = i;
+	}
+	checkf(first_corrupted == count, SCENARIO_MAPPED,
+	    "item %zu should have survived the moves", first_corrupted);
+
+	relic_free_array(items);
+	check(!relic_array_mapped(NULL), SCENARIO_MAPPED,
+	    "a null array should not count as mapped");
+}
+
+/*
+ * A mapping an array has outgrown is released once its items are copied
+ * out, and all of it: that release is what keeps a growth's old generation
+ * out of the resident set.  So is the last mapping when the array is freed.
+ * Both ends of each released range are probed, so releasing half a mapping
+ * fails as surely as releasing none, and the probe is first shown to see
+ * the mapping while it is live.
+ */
+static void
+an_outgrown_mapping_is_released(void)
+{
+	uint32_t *items;
+	uint32_t *grown;
+	size_t capacity;
+	size_t mapped_count;
+	uintptr_t first;
+	uintptr_t last;
+
+	capacity = 0;
+	mapped_count = RELIC_ARRAY_MAP_BYTES / sizeof(*items);
+
+	items = relic_grow_array(NULL, &capacity, mapped_count, sizeof(*items));
+	if (items == NULL) {
+		check(false, SCENARIO_RELEASED,
+		    "an array of the threshold's bytes should be allocated");
+		return;
+	}
+
+	check(capacity == mapped_count && relic_array_mapped(items),
+	    SCENARIO_RELEASED,
+	    "an array of the threshold's bytes should be mapped");
+
+	first = (uintptr_t)items;
+	last = (uintptr_t)(items + capacity) - 1;
+	check(page_is_mapped(first) && page_is_mapped(last), SCENARIO_RELEASED,
+	    "both ends of a live mapping should be seen as mapped");
+
+	grown = relic_grow_array(items, &capacity, capacity + 1,
+	    sizeof(*items));
+	if (grown == NULL) {
+		check(false, SCENARIO_RELEASED, "a mapped array should grow");
+		relic_free_array(items);
+		return;
+	}
+	items = grown;
+
+	check(capacity == 2 * mapped_count, SCENARIO_RELEASED,
+	    "a mapped array should double");
+	check(!page_is_mapped(first) && !page_is_mapped(last),
+	    SCENARIO_RELEASED, "the mapping an array outgrew should be "
+	    "released whole");
+
+	first = (uintptr_t)items;
+	last = (uintptr_t)(items + capacity) - 1;
+	relic_free_array(items);
+
+	check(!page_is_mapped(first) && !page_is_mapped(last),
+	    SCENARIO_RELEASED, "a freed mapping should be released whole");
+}
+
+/*
+ * Whether the page holding `address` is mapped.  msync(2) refuses a range
+ * holding a page that is not with ENOMEM, and does nothing else to an
+ * anonymous mapping that it is asked to schedule.
+ */
+static bool
+page_is_mapped(uintptr_t address)
+{
+	uintptr_t page;
+	size_t page_bytes;
+	int page_size;
+
+	page_size = getpagesize();
+	page_bytes = (size_t)page_size;
+	page = address - address % page_bytes;
+
+	return (msync((void *)page, page_bytes, MS_ASYNC) == 0 ||
+	    errno != ENOMEM);
+}
+
+/*
+ * The record in front of a growable array's first item says what to
+ * release, so a record damaged by a stray write must stop the process
+ * rather than free or unmap by what it says -- a mapped record claiming a
+ * longer mapping would unmap the neighbour after it.  Each byte of the
+ * record is inverted in turn, in a heap array and in a mapped one, and the
+ * whole record is replaced by another array's.  Freeing the array with each
+ * damaged record must end in abort(3).
+ */
+static void
+a_damaged_header_stops_the_process(void)
+{
+	unsigned char damaged[RECORD_BYTES];
+	uint32_t *small;
+	uint32_t *large;
+	uint32_t *donor;
+	size_t small_capacity;
+	size_t large_capacity;
+	size_t donor_capacity;
+	size_t offset;
+	size_t survived_small;
+	size_t survived_large;
+
+	small_capacity = 0;
+	large_capacity = 0;
+	donor_capacity = 0;
+	small = relic_grow_array(NULL, &small_capacity, 1, sizeof(*small));
+	large = relic_grow_array(NULL, &large_capacity,
+	    RELIC_ARRAY_MAP_BYTES / sizeof(*large), sizeof(*large));
+	donor = relic_grow_array(NULL, &donor_capacity, 1, sizeof(*donor));
+
+	if (small == NULL || large == NULL || donor == NULL) {
+		check(false, SCENARIO_DAMAGED,
+		    "the arrays to damage should be allocated");
+		relic_free_array(small);
+		relic_free_array(large);
+		relic_free_array(donor);
+		return;
+	}
+
+	survived_small = 0;
+	survived_large = 0;
+	for (offset = 0; offset < RECORD_BYTES; offset++) {
+		inverted_record(small, offset, damaged);
+		if (!freeing_aborts_with(small, damaged))
+			survived_small++;
+
+		inverted_record(large, offset, damaged);
+		if (!freeing_aborts_with(large, damaged))
+			survived_large++;
+	}
+
+	checkf(survived_small == 0 && survived_large == 0, SCENARIO_DAMAGED,
+	    "freeing with any byte of the record inverted should abort, but "
+	    "%zu of a heap array's bytes and %zu of a mapped array's did not",
+	    survived_small, survived_large);
+
+	bcopy(record_of(donor), damaged, RECORD_BYTES);
+	check(freeing_aborts_with(small, damaged), SCENARIO_DAMAGED,
+	    "freeing with another array's record should abort");
+
+	relic_free_array(small);
+	relic_free_array(large);
+	relic_free_array(donor);
+}
+
+/*
+ * The record in front of `items`, made addressable to the sanitizer so that
+ * the test can read and write it.
+ */
+static unsigned char *
+record_of(uint32_t *items)
+{
+	unsigned char *record;
+
+	record = (unsigned char *)items - RECORD_BYTES;
+	ASAN_UNPOISON_MEMORY_REGION(record, RECORD_BYTES);
+
+	return (record);
+}
+
+/*
+ * The record of `items` with the byte at `offset` inverted, into `record`.
+ */
+static void
+inverted_record(uint32_t *items, size_t offset, unsigned char *record)
+{
+	bcopy(record_of(items), record, RECORD_BYTES);
+	record[offset] ^= 0xff;
+}
+
+/*
+ * Whether freeing `items` with `record` in place of its own ends in abort(3).
+ * The record is installed, a child process frees the array, and the array's
+ * own record is put back once the child has ended, so the caller's array is
+ * whole again.  The child's SIGABRT handler reports the abort as an exit
+ * status of its own, so that the abort leaves no crash report behind.
+ */
+static bool
+freeing_aborts_with(uint32_t *items, const unsigned char *record)
+{
+	unsigned char kept[RECORD_BYTES];
+	unsigned char *installed;
+	pid_t child;
+	pid_t waited;
+	int status;
+
+	status = 0;
+	installed = record_of(items);
+	bcopy(installed, kept, RECORD_BYTES);
+	bcopy(record, installed, RECORD_BYTES);
+
+	child = fork();
+	if (child == 0) {
+		signal(SIGABRT, exit_aborted);
+		relic_free_array(items);
+		_exit(0);
+	}
+
+	waited = child == -1 ? -1 : waitpid(child, &status, 0);
+
+	bcopy(kept, installed, RECORD_BYTES);
+	ASAN_POISON_MEMORY_REGION(installed, RECORD_BYTES);
+
+	if (waited != child || child == -1) {
+		check(false, SCENARIO_DAMAGED,
+		    "a child process should be forked and waited for");
+		return (false);
+	}
+
+	return (WIFEXITED(status) && WEXITSTATUS(status) == ABORTED_STATUS);
+}
+
+static void
+exit_aborted(int signal_number RELIC_UNUSED)
+{
+	_exit(ABORTED_STATUS);
+}
+
+/*
+ * Under AddressSanitizer the header in front of an array's first item is
+ * unaddressable, as a heap block's left redzone would be, and so are a
+ * mapping's bytes past its last item, so a write just outside either end
+ * is reported.  The items themselves stay addressable.  Without the
+ * sanitizer there is nothing to observe.
+ */
+static void
+an_array_is_fenced_for_the_sanitizer(void)
+{
+#ifdef RELIC_ADDRESS_SANITIZER
+	uint32_t *small;
+	uint32_t *large;
+	size_t small_capacity;
+	size_t large_capacity;
+
+	small_capacity = 0;
+	large_capacity = 0;
+	small = relic_grow_array(NULL, &small_capacity, 1, sizeof(*small));
+	large = relic_grow_array(NULL, &large_capacity,
+	    RELIC_ARRAY_MAP_BYTES / sizeof(*large), sizeof(*large));
+
+	if (small == NULL || large == NULL) {
+		check(false, SCENARIO_FENCED,
+		    "the arrays to fence should be allocated");
+		relic_free_array(small);
+		relic_free_array(large);
+		return;
+	}
+
+	check(__asan_address_is_poisoned((char *)small - 1) &&
+	    __asan_address_is_poisoned((char *)large - 1), SCENARIO_FENCED,
+	    "the byte before an array's first item should be unaddressable");
+	check(!__asan_address_is_poisoned(small) &&
+	    !__asan_address_is_poisoned(&small[small_capacity - 1]) &&
+	    !__asan_address_is_poisoned(large) &&
+	    !__asan_address_is_poisoned(&large[large_capacity - 1]),
+	    SCENARIO_FENCED, "an array's items should be addressable");
+	check(__asan_address_is_poisoned(&large[large_capacity]),
+	    SCENARIO_FENCED,
+	    "the byte after a mapped array's last item should be "
+	    "unaddressable");
+
+	relic_free_array(small);
+	relic_free_array(large);
+#endif
+}
+
+/*
+ * An identifier table reserved for enough entries that its slots and its
+ * tags each reach the threshold gets both as mappings, and they arrive as
+ * an empty table: a slot is empty only while it holds RELIC_ID_NONE, so a
+ * large table allocated without zeroing would hold phantom entries.  Keys
+ * inserted into it are then found where they were placed.
+ */
+static void
+a_large_table_starts_mapped_and_empty(void)
+{
+	enum { KEY_COUNT = 1000 };
+
+	relic_idtab_t table;
+	key_set_t keys;
+	uint32_t storage[KEY_COUNT];
+	size_t reserved;
+	size_t occupied;
+	size_t lost;
+	size_t i;
+
+	keys.keys = storage;
+	keys.count = 0;
+	keys.seed = SEED;
+	relic_idtab_init(&table, true);
+
+	/*
+	 * A table keeps a quarter of its slots free, so one of half the
+	 * threshold's slots holds three quarters of them, and one entry more
+	 * needs the next doubling: a slot, and a one-byte tag, for every
+	 * byte of the threshold.
+	 */
+	reserved = RELIC_ARRAY_MAP_BYTES / 2 / 4 * 3 + 1;
+	if (relic_idtab_reserve(&table, reserved, key_rehash, &keys) != 0) {
+		check(false, SCENARIO_MAPPED,
+		    "a large reservation should succeed");
+		return;
+	}
+
+	check(table.capacity >= RELIC_ARRAY_MAP_BYTES, SCENARIO_MAPPED,
+	    "the reservation should reach a tag per byte of the threshold");
+	check(relic_array_mapped(table.slots) && relic_array_mapped(table.tags),
+	    SCENARIO_MAPPED, "a large table's slots and tags should be mapped");
+
+	occupied = 0;
+	for (i = 0; i < table.capacity; i++) {
+		if (table.slots[i] != RELIC_ID_NONE || table.tags[i] != 0)
+			occupied++;
+	}
+	checkf(occupied == 0, SCENARIO_MAPPED,
+	    "a new table should be empty, not hold %zu entries", occupied);
+
+	for (i = 0; i < KEY_COUNT; i++) {
+		if (!key_set_insert(&table, &keys, (uint32_t)(i * 7919u)))
+			break;
+	}
+
+	lost = 0;
+	for (i = 0; i < keys.count; i++) {
+		uint32_t id;
+
+		if (!key_set_find(&table, &keys, storage[i], &id) ||
+		    id != i + 1)
+			lost++;
+	}
+	checkf(keys.count == KEY_COUNT && lost == 0, SCENARIO_MAPPED,
+	    "%zu of %d keys should be found in a large table",
+	    keys.count - lost, KEY_COUNT);
+
+	relic_idtab_reset(&table);
 }
 
 /*
@@ -709,7 +1156,7 @@ a_growth_is_exactly_what_was_predicted(void)
 		    "capacity %zu, not %zu", wanted, predicted, capacity);
 	}
 
-	free(items);
+	relic_free_array(items);
 
 	/* A request that needs no growth is predicted as no growth. */
 	capacity = 64;
@@ -1095,6 +1542,11 @@ main(void)
 {
 	an_array_grows_without_losing_its_contents();
 	an_array_refuses_an_impossible_size();
+	a_large_array_moves_to_a_mapping();
+	a_large_table_starts_mapped_and_empty();
+	an_outgrown_mapping_is_released();
+	a_damaged_header_stops_the_process();
+	an_array_is_fenced_for_the_sanitizer();
 	equal_input_hashes_equally();
 	every_inserted_key_is_found_after_growth();
 	a_growth_is_exactly_what_was_predicted();

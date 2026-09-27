@@ -623,6 +623,13 @@ fails.
 and
 .Fn relic_stats
 cannot fail.
+.Pp
+No function terminates the process on an ordinary failure.
+The library calls
+.Xr abort 3
+only when it finds its own memory already corrupted, such as a storage
+header overwritten by a stray write, where continuing would release memory
+it cannot prove it owns.
 .Sh EXAMPLES
 Answer a query and print the first column of each row.
 A symbol is an identifier and is safe to print as it is; a string may hold

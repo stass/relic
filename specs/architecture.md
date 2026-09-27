@@ -1678,10 +1678,10 @@ evaluation arena   plans and transient binding and join state
 
 Relation tuples and indexes are not arena allocated. They outlive individual
 queries, they must be able to shrink, and they are accounted against a limit
-individually. They use `reallocarray()` with explicit failure handling. The
-rewrite and evaluation arenas are accounted against the same limit as a
-whole, because what they hold is multiplied out of the program; see
-`specs/design-planning-cost.md`.
+individually. They are growable arrays, `specs/design-memory.md` section 5,
+with explicit failure handling. The rewrite and evaluation arenas are
+accounted against the same limit as a whole, because what they hold is
+multiplied out of the program; see `specs/design-planning-cost.md`.
 
 Arena allocation returns `NULL` on exhaustion and sets a sticky failure flag on
 the arena. Callers check the returned pointer as usual; the flag exists so a
@@ -1689,6 +1689,11 @@ deep helper that has already failed can return early without inventing an error
 path, and so each compilation phase can confirm at its boundary that no
 allocation failed. Arena exhaustion is reported as an ordinary diagnostic and a
 `-1` return, never an abort: a library must not terminate its host.
+The one exception is memory the library finds already corrupted. A growable
+array whose sealed header no longer matches, or whose mapping the system
+refuses to release, aborts the process: returning would leave the library
+freeing or unmapping memory it cannot prove it owns, and whatever corrupted
+the header has already broken the host.
 
 Avoid one `malloc()` per AST node or per tuple.
 

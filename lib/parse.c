@@ -1205,7 +1205,7 @@ static void
 parser_reset(relic_parser_t *parser)
 {
 	relic_lexer_reset(&parser->lexer);
-	free(parser->body);
+	relic_free_array(parser->body);
 	bzero(parser, sizeof(*parser));
 }
 
@@ -1429,7 +1429,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		grown = relic_grow_array(text, &capacity,
 		    length + RELIC_READ_CHUNK, sizeof(*text));
 		if (grown == NULL) {
-			free(text);
+			relic_free_array(text);
 			relic_diag_no_memory(ctx);
 			return (-1);
 		}
@@ -1457,7 +1457,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 			relic_diagf(ctx, RELIC_ERROR, NULL,
 			    "cannot read %s: %s", source_name,
 			    strerror(read_errno != 0 ? read_errno : EIO));
-			free(text);
+			relic_free_array(text);
 			return (-1);
 		}
 
@@ -1531,7 +1531,7 @@ load_stream(relic_t *ctx, const char *source_name, FILE *stream)
 		return (-1);
 
 	status = load_text(ctx, name, text, length);
-	free(text);
+	relic_free_array(text);
 
 	return (status);
 }

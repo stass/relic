@@ -792,16 +792,45 @@ Worth measuring next: the stored hash again with batching in place, and
 whether a successful search visits enough slots past the first to make
 prefetching them pay.
 
-**A table's doubling slack is half its size at worst.** [Low, component:
-`lib/util.c`] An identifier table's capacity is a power of two because a
-probe masks the hash, and a column array doubles because one policy serves
-every arity, so a relation just past a doubling is half empty on both.
-Once `specs/design-comparison-cost.md` section 8 has removed the freed
-generations, the slack is what remains between the live heap and the
-reported peak. Growth by three halves under a multiply-shift range
-reduction, `(hash * capacity) >> 32`, would keep a mask-free probe and
-halve the slack; measure it on `chain-closure` and `facts-join` before
+**A growth's slack and transient keep the peak above the live heap.**
+[Medium, component: `lib/util.c`] Mapped growth releases every outgrown
+generation, but `chain-closure` still peaks at 39.4 MB against a live heap
+of 33.6 MB, 17 per cent over the 10 per cent that
+`specs/design-comparison-cost.md` section 10 gates step 5 on. Two causes
+remain. An identifier table's capacity is a power of two because a probe
+masks the hash, and a column array doubles because one policy serves every
+arity, so a relation just past a doubling is half empty on both. And a
+table's growth holds both generations of its slots while it rehashes, one
+and a half times the new size at that moment. Growth by three halves under
+a multiply-shift range reduction, `(hash * capacity) >> 32`, would keep a
+mask-free probe and halve the slack; rehashing a mapped table within its
+own extended mapping would remove the transient where the platform can
+extend one. Measure both on `chain-closure` and `facts-join` before
 changing either policy.
+
+**A mapped array's growth always copies.** [Low, component: `lib/util.c`]
+Growing a mapped array maps the new size, copies and unmaps the old. glibc's
+`realloc()` of a large block moved it with `mremap(2)` without copying, so on
+Linux the copy is new cost on the largest arrays. A `configure`-selected
+`mremap()` would remove it there; not yet measured.
+
+**A table whose slots were not zeroed would hang rather than fail.** [Low,
+component: `lib/util.c`] A probe stops at the first empty slot, and nothing
+bounds it by the capacity, so a table allocated without zeroing probes a
+full table of garbage forever instead of failing a test. Every slot and tag
+array is zeroed where it is allocated, and the large-table test checks it
+for a mapping; a debug-build bound on a probe's length would turn such a
+defect into an assertion.
+
+**The allocation-failure suite's renaming of `mmap` may miss on 32-bit
+glibc.** [Low, component: `Makefile.am`, `tests/unit/test_exhaustion.c`]
+With `_FILE_OFFSET_BITS=64`, glibc declares `mmap` with an assembler label
+naming `mmap64`. The suite's `-Dmmap=relic_test_mmap` renames that
+declaration too, so the hook would carry the label and the library would
+call the system's `mmap64` directly. `tests/allocators.sh` reports `mmap64`
+as an allocator, so the gap fails the build rather than hiding; the fix is
+to rename through a wrapper the library calls instead of the system name.
+Settle when a 32-bit glibc job exists.
 
 **Loading facts costs relic more memory than Souffle.** [Low, component:
 `lib/`, `bench/compare/facts-join`] On `facts-join`, 300,000 ternary facts
@@ -875,6 +904,18 @@ control.
 operating system and processor; every run so far is one macOS Xeon.
 
 ## Security residuals
+
+**Mapped arrays are outside AddressSanitizer's quarantine and leak check.**
+[Low, component: `lib/util.c`] A growable array of a mebibyte or more lives
+in a mapping of its own. The sanitizer reports a write just outside it,
+since the header before the first item and the bytes past the last are
+marked unaddressable, but a stale pointer into a mapping already released
+reads whatever is mapped there next instead of being reported as a use
+after free, and a mapping never released is not reported as a leak. The
+evaluator holds no pointer into a relation across a growth, which is what
+such a stale pointer would need. A sanitizer build that kept every array in
+the heap would catch both, at the cost of not exercising the mapped path
+under the sanitizer.
 
 **Files a load or import opens are inherited by child processes.** [Low,
 component: `lib/parse.c`, `lib/import.c`] `relic_load_path()` and

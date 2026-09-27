@@ -54,7 +54,7 @@ void
 relic_predtab_reset(relic_predtab_t *table)
 {
 	relic_idtab_reset(&table->index);
-	free(table->entries);
+	relic_free_array(table->entries);
 	bzero(table, sizeof(*table));
 }
 

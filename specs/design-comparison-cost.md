@@ -592,13 +592,18 @@ follows the measurement:
 | index keys | a miss reads `key_values` | yes |
 | staging sets | unsuccessful on every distinct fact | yes |
 | a distinct count | unsuccessful on every distinct value | yes |
-| canonical index | successful, per section 5.2 | no, until measured with tags |
+| canonical index | successful, per section 5.2 | no, as measured below |
 | predicate table, rewrite tables | small | no |
 
-The canonical index is measured with a tag under the section 5.2 method
-once section 8 is in place, since the peak that measurement weighed is
-the one section 8 changes. Whatever the result, the decision is a flag at
-one creation site per owner, not a second table type.
+The canonical index is measured with a tag under the section 5.2 method,
+with section 8's mapped growth in place, since the peak that measurement
+weighs is the one section 8 changes. Tagged, `chain-closure` and
+`tc-sparse-cyclic` ran 6 and 8 per cent faster and peaked 15 to 19 per
+cent higher: the tag is a byte per slot of the largest table every
+relation has, and the successful search the canonical index mostly does is
+the one a tag helps least. It stays untagged. The decision is a flag at
+one creation site per owner, not a second table type, so a workload that
+shifts the balance changes one argument.
 
 **Growth** still asks the owner for each identifier's hash, through the
 callback of `specs/design-memory.md` section 6; a tag is not a hash. The
@@ -748,7 +753,7 @@ dynamic threshold in the heap the same way. The reported peak of
 `chain-closure` is up to twice its live heap for that reason.
 
 **Large arrays are mapped.** A growable array whose bytes reach
-`RELIC_PAGE_THRESHOLD`, one mebibyte, is allocated with `mmap()` rather
+`RELIC_ARRAY_MAP_BYTES`, one mebibyte, is allocated with `mmap()` rather
 than `malloc()`, grown by mapping the new size, copying and unmapping the
 old, and freed by `munmap()`. An unmapped region is returned to the
 system at once and leaves the resident set with it, so a growth's cost in
@@ -761,8 +766,19 @@ The rule lives in `relic_grow_array()` and in the slot allocation of the
 identifier table, the two places that allocate anything that grows, so
 every column array, slot array, tag array, entry array and `next` array
 gets it without knowing. A region records its mapped length beside the
-pointer, since `munmap()` needs it and `free()` did not; the growable
-array's capacity is that record. `mmap()` and `munmap()` with
+pointer, since `munmap()` needs it and `free()` did not. The record is a
+header in front of the first item, which `relic_free_array()` reads to
+unmap or free. A stray `free()` of a growable array of any size is then
+handed a pointer `malloc()` never returned, which AddressSanitizer reports
+on the first run rather than only once an input makes the array large.
+
+The record is where a write just before the first item lands, and a
+length read from a damaged record would unmap a neighbour. So the record
+is sealed with its own address folded into its length, and a record that
+fails its seal stops the process before anything is released by it.
+Under AddressSanitizer the header is unaddressable, and so are a
+mapping's bytes past its last item, so a write just outside an array is
+reported as it is for a heap block. `mmap()` and `munmap()` with
 `MAP_ANON | MAP_PRIVATE` are BSD interfaces of architecture section 45 on
 every platform the tool builds for, and `configure` checks for `MAP_ANON`
 against the `MAP_ANONYMOUS` spelling.

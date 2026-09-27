@@ -6,12 +6,28 @@
 
 #include "config.h"
 
+#include <sys/mman.h>
+
 #include <assert.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <unistd.h>
 
-#include "compat.h"
-#include "util.h"
+#include "internal.h"
+
+/*
+ * Under AddressSanitizer an array's header, and a mapping's bytes past its
+ * last item, are marked unaddressable, so the sanitizer reports a write just
+ * outside the array as it would for a plain heap block.  Without it the
+ * marking is nothing, as the sanitizer's own header defines it.
+ */
+#ifdef RELIC_ADDRESS_SANITIZER
+#include <sanitizer/asan_interface.h>
+#else
+#define	ASAN_POISON_MEMORY_REGION(start, bytes)	((void)(start), (void)(bytes))
+#define	ASAN_UNPOISON_MEMORY_REGION(start, bytes) ((void)(start), (void)(bytes))
+#endif
 
 /*
  * The FNV-1a prime, which the fold multiplies the state by after mixing in
@@ -28,6 +44,60 @@
 #define	RELIC_IDTAB_MIN_CAPACITY	16u
 #define	RELIC_ARRAY_MIN_COUNT		8u
 
+/*
+ * The record in front of the first item of every growable array, saying how
+ * its storage was obtained: the length of its mapping, or zero for a heap
+ * block.  relic_free_array() reads it to choose between munmap(2) and
+ * free(3), so no caller has to remember which storage an array got.
+ *
+ * The record is the last thing before the first item, where a write just
+ * before the array lands, and a length read from a damaged record would
+ * unmap memory another array is using.  So the record carries a seal: the
+ * complement of the record's own address folded with its length.  Zeros,
+ * ordinary data, a pointer to the record itself and a record copied from
+ * another array all fail it, and every read of a record checks it first.
+ */
+typedef struct relic_array_record relic_array_record_t;
+
+struct relic_array_record {
+	size_t		mapped_bytes;
+	uintptr_t	seal;
+};
+
+/*
+ * The bytes in front of the first item: the record, and before it whatever
+ * padding leaves the items as aligned as malloc(3) would have left them.
+ * The array's storage begins here, and it is what free(3), realloc(3) and
+ * munmap(2) are given.
+ */
+#define	RELIC_ARRAY_HEADER_BYTES					\
+	((sizeof(relic_array_record_t) + _Alignof(max_align_t) - 1) /	\
+	    _Alignof(max_align_t) * _Alignof(max_align_t))
+
+/*
+ * The mapped length a record gives a heap block: none.
+ */
+#define	RELIC_ARRAY_HEAP_BLOCK	((size_t)0)
+
+/*
+ * A heap block's size is its header and fewer bytes of items than the
+ * threshold, a sum that must not overflow whatever the threshold is set to.
+ */
+_Static_assert(RELIC_ARRAY_MAP_BYTES <= SIZE_MAX - RELIC_ARRAY_HEADER_BYTES,
+    "a heap array's size must fit a size_t");
+
+static void	*array_allocate(size_t bytes);
+static void	*array_allocate_zeroed(size_t bytes);
+static relic_array_record_t array_checked_record(const void *items);
+static void	*array_install_record(void *storage, size_t mapped_bytes);
+static bool	 array_is_large(size_t bytes);
+static void	*array_map(size_t bytes);
+static void	*array_resize(void *items, size_t kept_bytes,
+		    size_t wanted_bytes);
+static void	*array_storage(void *items);
+static _Noreturn void record_corrupt(const relic_array_record_t *stored);
+static uintptr_t record_seal(const relic_array_record_t *record,
+		    size_t mapped_bytes);
 static uint32_t	 finalize(uint32_t hash);
 static uint32_t	 hash_finish(uint64_t seed, uint32_t state);
 static uint32_t	 hash_fold(uint32_t state, uint32_t unit);
@@ -211,26 +281,280 @@ void *
 relic_grow_array(void *items, size_t *capacity, size_t count, size_t item_size)
 {
 	void *grown;
-	size_t wanted;
+	size_t wanted_capacity;
+	size_t kept_bytes;
+	size_t wanted_bytes;
 
-	wanted = relic_grow_array_capacity(*capacity, count);
-	if (wanted == 0)
+	assert(item_size > 0);
+
+	wanted_capacity = relic_grow_array_capacity(*capacity, count);
+	if (wanted_capacity == 0)
 		return (NULL);
 
-	if (wanted == *capacity)
+	if (wanted_capacity == *capacity)
 		return (items);
 
 	/*
-	 * reallocarray() rejects a product that would overflow, so the
-	 * multiplication by item_size needs no check here.
+	 * An item of no bytes is a caller's error, which the assertion
+	 * reports; a release build refuses it rather than divide by it.
 	 */
-	grown = reallocarray(items, wanted, item_size);
+	if (item_size == 0 || wanted_capacity > SIZE_MAX / item_size)
+		return (NULL);
+
+	kept_bytes = *capacity * item_size;
+	wanted_bytes = wanted_capacity * item_size;
+
+	grown = array_resize(items, kept_bytes, wanted_bytes);
 	if (grown == NULL)
 		return (NULL);
 
-	*capacity = wanted;
+	*capacity = wanted_capacity;
 
 	return (grown);
+}
+
+void
+relic_free_array(void *items)
+{
+	relic_array_record_t record;
+	void *storage;
+
+	if (items == NULL)
+		return;
+
+	record = array_checked_record(items);
+	storage = array_storage(items);
+
+	if (record.mapped_bytes == RELIC_ARRAY_HEAP_BLOCK) {
+		free(storage);
+		return;
+	}
+
+	/*
+	 * The record is sealed, so the range is exactly the mapping mmap(2)
+	 * returned.  munmap(2) can still refuse one for want of kernel
+	 * memory, where the kernel had merged the mapping with a neighbour
+	 * and must split the merged region to release it.  The pages then
+	 * stay mapped and unused, which costs memory and nothing else.
+	 */
+	/*
+	 * The pages are unmarked first: a sanitizer runtime that does not see
+	 * munmap(2) would otherwise hold them unaddressable for whatever is
+	 * mapped there next.
+	 */
+	ASAN_UNPOISON_MEMORY_REGION(storage, record.mapped_bytes);
+	if (munmap(storage, record.mapped_bytes) != 0)
+		assert(errno == ENOMEM);
+}
+
+bool
+relic_array_mapped(const void *items)
+{
+	if (items == NULL)
+		return (false);
+
+	return (array_checked_record(items).mapped_bytes !=
+	    RELIC_ARRAY_HEAP_BLOCK);
+}
+
+/*
+ * The start of an array's storage, a header's length in front of its first
+ * item.
+ */
+static void *
+array_storage(void *items)
+{
+	return ((char *)items - RELIC_ARRAY_HEADER_BYTES);
+}
+
+/*
+ * The record in front of the first item, once its seal has been checked.  A
+ * record that fails its seal stops the process: nothing it says can be
+ * trusted, and the storage it describes cannot be released without it.
+ */
+static relic_array_record_t
+array_checked_record(const void *items)
+{
+	const relic_array_record_t *stored;
+	relic_array_record_t record;
+
+	stored = (const relic_array_record_t *)items - 1;
+
+	ASAN_UNPOISON_MEMORY_REGION(stored, sizeof(*stored));
+	record = *stored;
+	ASAN_POISON_MEMORY_REGION(stored, sizeof(*stored));
+
+	if (record.seal != record_seal(stored, record.mapped_bytes))
+		record_corrupt(stored);
+
+	return (record);
+}
+
+/*
+ * Stop the process over a record that failed its seal.  Under
+ * AddressSanitizer the sanitizer first says what the record's address is --
+ * inside a block already freed, in a redzone, in memory it never handed out
+ * -- with the stacks it kept for it, which is the diagnosis of an array
+ * released twice or of a pointer that was never an array's.
+ */
+static _Noreturn void
+record_corrupt(const relic_array_record_t *stored RELIC_UNUSED)
+{
+#ifdef RELIC_ADDRESS_SANITIZER
+	__asan_describe_address((void *)(uintptr_t)stored);
+#endif
+	abort();
+}
+
+static uintptr_t
+record_seal(const relic_array_record_t *record, size_t mapped_bytes)
+{
+	return (~((uintptr_t)record ^ (uintptr_t)mapped_bytes));
+}
+
+/*
+ * Write the sealed record into new storage, and hide the whole header from
+ * the sanitizer.  Returns the first item.
+ */
+static void *
+array_install_record(void *storage, size_t mapped_bytes)
+{
+	relic_array_record_t *record;
+	char *items;
+
+	items = (char *)storage + RELIC_ARRAY_HEADER_BYTES;
+	record = (relic_array_record_t *)(void *)items - 1;
+
+	ASAN_UNPOISON_MEMORY_REGION(storage, RELIC_ARRAY_HEADER_BYTES);
+	record->mapped_bytes = mapped_bytes;
+	record->seal = record_seal(record, mapped_bytes);
+	ASAN_POISON_MEMORY_REGION(storage, RELIC_ARRAY_HEADER_BYTES);
+
+	return (items);
+}
+
+/*
+ * Whether an array of this many bytes gets a mapping of its own.
+ */
+static bool
+array_is_large(size_t bytes)
+{
+	return (bytes >= RELIC_ARRAY_MAP_BYTES);
+}
+
+/*
+ * Storage for `bytes` bytes of items behind their header, the items'
+ * contents unspecified.  A large array is mapped and a small one is a heap
+ * block, whose size cannot overflow because it is below the threshold.
+ * Returns the first item, or NULL when nothing could be allocated.
+ */
+static void *
+array_allocate(size_t bytes)
+{
+	void *storage;
+
+	if (array_is_large(bytes))
+		return (array_map(bytes));
+
+	storage = malloc(RELIC_ARRAY_HEADER_BYTES + bytes);
+	if (storage == NULL)
+		return (NULL);
+
+	return (array_install_record(storage, RELIC_ARRAY_HEAP_BLOCK));
+}
+
+/*
+ * Storage as array_allocate() gives it, with every item zero.  A mapping's
+ * pages arrive zeroed, so only a heap block is cleared.
+ */
+static void *
+array_allocate_zeroed(size_t bytes)
+{
+	void *storage;
+
+	if (array_is_large(bytes))
+		return (array_map(bytes));
+
+	storage = calloc(1, RELIC_ARRAY_HEADER_BYTES + bytes);
+	if (storage == NULL)
+		return (NULL);
+
+	return (array_install_record(storage, RELIC_ARRAY_HEAP_BLOCK));
+}
+
+/*
+ * A mapping of its own for `bytes` bytes of items behind their header,
+ * rounded up to whole pages, which arrive zeroed.  The bytes past the last
+ * item are hidden from the sanitizer, as the redzone after a heap block is.
+ * Returns the first item, or NULL when nothing could be mapped.
+ */
+static void *
+array_map(size_t bytes)
+{
+	void *region;
+	size_t page_bytes;
+	size_t used_bytes;
+	size_t mapped_bytes;
+	int page_size;
+
+	page_size = getpagesize();
+	page_bytes = (size_t)page_size;
+
+	if (bytes > SIZE_MAX - RELIC_ARRAY_HEADER_BYTES - page_bytes)
+		return (NULL);
+	used_bytes = RELIC_ARRAY_HEADER_BYTES + bytes;
+	mapped_bytes = used_bytes + page_bytes - 1;
+	mapped_bytes -= mapped_bytes % page_bytes;
+
+	region = mmap(NULL, mapped_bytes, PROT_READ | PROT_WRITE,
+	    MAP_PRIVATE | RELIC_MAP_ANON, -1, 0);
+	if (region == MAP_FAILED)
+		return (NULL);
+
+	ASAN_POISON_MEMORY_REGION((char *)region + used_bytes,
+	    mapped_bytes - used_bytes);
+
+	return (array_install_record(region, mapped_bytes));
+}
+
+/*
+ * Give an array room for `wanted_bytes` bytes, keeping its first
+ * `kept_bytes`.
+ *
+ * A heap block that stays small is resized by realloc(3), which may extend
+ * it where it lies.  Every other growth -- a heap block becoming large, or a
+ * mapping growing -- takes new storage, copies the kept bytes into it and
+ * releases the old, so the old generation leaves the resident set as soon as
+ * the copy is made.  On failure the array is left exactly as it was.
+ */
+static void *
+array_resize(void *items, size_t kept_bytes, size_t wanted_bytes)
+{
+	void *resized;
+	void *moved;
+	bool stays_in_heap;
+
+	if (items == NULL)
+		return (array_allocate(wanted_bytes));
+
+	stays_in_heap = array_checked_record(items).mapped_bytes ==
+	    RELIC_ARRAY_HEAP_BLOCK && !array_is_large(wanted_bytes);
+
+	if (stays_in_heap) {
+		resized = realloc(array_storage(items),
+		    RELIC_ARRAY_HEADER_BYTES + wanted_bytes);
+		if (resized == NULL)
+			return (NULL);
+		return (array_install_record(resized, RELIC_ARRAY_HEAP_BLOCK));
+	}
+
+	moved = array_allocate(wanted_bytes);
+	if (moved == NULL)
+		return (NULL);
+	bcopy(items, moved, kept_bytes);
+	relic_free_array(items);
+
+	return (moved);
 }
 
 void
@@ -243,8 +567,8 @@ relic_idtab_init(relic_idtab_t *table, bool tagged)
 void
 relic_idtab_reset(relic_idtab_t *table)
 {
-	free(table->slots);
-	free(table->tags);
+	relic_free_array(table->slots);
+	relic_free_array(table->tags);
 	relic_idtab_init(table, table->tagged);
 }
 
@@ -428,14 +752,21 @@ idtab_grow(relic_idtab_t *table, size_t capacity, relic_rehash_fn rehash,
 	relic_idtab_t grown;
 	size_t slot;
 
+	/*
+	 * idtab_capacity_for() stops doubling before a capacity whose slots
+	 * and tags together would not fit in a size_t.
+	 */
+	assert(capacity <= SIZE_MAX / idtab_slot_bytes(table));
+
 	relic_idtab_init(&grown, table->tagged);
-	grown.slots = calloc(capacity, sizeof(*grown.slots));
+	grown.slots = array_allocate_zeroed(capacity * sizeof(*grown.slots));
 	if (grown.slots == NULL)
 		return (-1);
 	if (grown.tagged) {
-		grown.tags = calloc(capacity, sizeof(*grown.tags));
+		grown.tags = array_allocate_zeroed(capacity *
+		    sizeof(*grown.tags));
 		if (grown.tags == NULL) {
-			free(grown.slots);
+			relic_free_array(grown.slots);
 			return (-1);
 		}
 	}
@@ -451,8 +782,8 @@ idtab_grow(relic_idtab_t *table, size_t capacity, relic_rehash_fn rehash,
 		relic_idtab_place(&grown, rehash(id, ctx), id);
 	}
 
-	free(table->slots);
-	free(table->tags);
+	relic_free_array(table->slots);
+	relic_free_array(table->tags);
 	*table = grown;
 
 	return (0);

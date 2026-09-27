@@ -257,10 +257,10 @@ struct relic_rule {
 /*
  * Compiled rules, in the order their statements were loaded.
  *
- * A growable array over reallocarray() rather than an arena block, because
- * an arena cannot resize and a rule must be reachable by index once the
- * dependency graph exists.  The variable-length parts of each rule are
- * arena allocated and are not moved by a growth.
+ * A growable array, released by relic_free_array(), rather than an arena
+ * block, because an arena cannot resize and a rule must be reachable by
+ * index once the dependency graph exists.  The variable-length parts of each
+ * rule are arena allocated and are not moved by a growth.
  */
 struct relic_ruletab {
 	relic_rule_t	*entries;

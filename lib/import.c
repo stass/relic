@@ -216,7 +216,7 @@ relic_table_reader_init(relic_table_reader_t *reader, enum relic_format format,
 void
 relic_table_reader_reset(relic_table_reader_t *reader)
 {
-	free(reader->field);
+	relic_free_array(reader->field);
 	bzero(reader, sizeof(*reader));
 }
 

@@ -258,14 +258,22 @@ tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 ## fails on demand can show that it is not.
 ##
 ## The renaming follows the pattern the compat suite already uses.  It is
-## confined to this program; nothing that ships is built this way.
+## confined to this program; nothing that ships is built this way.  The
+## threshold from which a growable array is mapped is lowered with it, so
+## that the small programs the suite sweeps take the mapped paths as well.
+## tests/allocators.sh checks the objects this program links, so that an
+## allocator the renaming misses fails the build's checks rather than
+## quietly narrowing what the suite refuses.
 ##
 
 RELIC_EXHAUSTION_RENAMES = \
 	-Dcalloc=relic_test_calloc \
 	-Dgetentropy=relic_test_getentropy \
 	-Dmalloc=relic_test_malloc \
-	-Dreallocarray=relic_test_reallocarray
+	-Dmmap=relic_test_mmap \
+	-Drealloc=relic_test_realloc \
+	-Dreallocarray=relic_test_reallocarray \
+	-DRELIC_ARRAY_MAP_BYTES=4096
 
 RELIC_TEST_BINARIES += tests/unit/test_exhaustion
 tests_unit_test_exhaustion_SOURCES = tests/unit/test_exhaustion.c \
@@ -297,10 +305,10 @@ tests_unit_test_header_cxx_CXXFLAGS = $(RELIC_SAN_CFLAGS)
 tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
-dist_check_SCRIPTS = tests/ascii.sh tests/cli.sh tests/globals.sh \
-	tests/langfiles.sh tests/magic.sh tests/man.sh tests/output.sh \
-	tests/perf.sh tests/pkgconfig.sh tests/reentry.sh tests/repl.sh \
-	tests/roundtrip.sh tests/symbols.sh tests/version.sh
+dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/cli.sh \
+	tests/globals.sh tests/langfiles.sh tests/magic.sh tests/man.sh \
+	tests/output.sh tests/perf.sh tests/pkgconfig.sh tests/reentry.sh \
+	tests/repl.sh tests/roundtrip.sh tests/symbols.sh tests/version.sh
 
 ##
 ## The equivalence suite runs every language test under each alternative

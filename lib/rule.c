@@ -219,8 +219,8 @@ relic_program_reset(relic_program_t *program)
 	 */
 	relic_predtab_reset(&program->predicates);
 	relic_schedule_reset(&program->schedule);
-	free(program->rules.entries);
-	free(program->queries.entries);
+	relic_free_array(program->rules.entries);
+	relic_free_array(program->queries.entries);
 	bzero(program, sizeof(*program));
 }
 

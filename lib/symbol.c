@@ -57,7 +57,7 @@ relic_symtab_reset(relic_symtab_t *table)
 	 * arena, which releases them when it is reset.
 	 */
 	relic_idtab_reset(&table->index);
-	free(table->entries);
+	relic_free_array(table->entries);
 	bzero(table, sizeof(*table));
 }
 

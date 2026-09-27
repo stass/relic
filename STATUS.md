@@ -23,7 +23,7 @@ later stage sits on, specified in `specs/design-memory.md`. No Datalog yet.
 | Component | State |
 | --- | --- |
 | `lib/arena.c` | chunked region allocator; sticky failure flag, cleared by a reset and by the context-arena funnel |
-| `lib/util.{h,c}` | `relic_grow_array()` over `reallocarray()`; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed FNV-1a fold and a finalizer, an integer's high half finalized before its low half joins it, and a zero seed asserted against |
+| `lib/util.{h,c}` | `relic_grow_array()`, whose arrays of a mebibyte or more get a mapping of their own that is released when outgrown, behind a sealed header `relic_free_array()` checks before it unmaps or frees; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed FNV-1a fold and a finalizer, an integer's high half finalized before its low half joins it, and a zero seed asserted against |
 | `lib/symbol.c` | byte strings interned to 32-bit identifiers; bytes in the context arena, embedded NULs preserved |
 | `lib/value.c` | the value table and `relic_dom_t` of D-3; interning for all three types, the language order of section 10.1 and the total order of section 61 |
 | `lib/diag.c` | diagnostic callback, last-error buffer, and a stderr formatter that escapes non-printable bytes |
@@ -614,6 +614,24 @@ on a machine otherwise busy:
 | `tc-sparse-cyclic` | 0.51 to 0.53 s | 0.48 to 0.51 s |
 
 The peaks did not move beyond their run-to-run spread.
+
+| Component | State |
+| --- | --- |
+| `lib/util.{h,c}` | step 5, mapped growth: an array `relic_grow_array()` grows to a mebibyte or more gets an anonymous mapping of its own, whose pages go back to the system when it is outgrown or released, and an identifier table's slots and tags follow the same rule; every growable array carries a header, sealed against its own address, saying how its storage was obtained, and `relic_free_array()`, the one release, stops the process on a header that fails its seal; under AddressSanitizer the header and a mapping's tail are poisoned |
+| `m4/relic_mmap.m4`, `configure.ac` | `configure` finds how `<sys/mman.h>` spells an anonymous mapping and stops when it spells none |
+| `tests/` | `test_util`: a large array moves to a mapping, an outgrown mapping is released, a large table starts mapped and empty, a damaged header stops the process, and an array is fenced for the sanitizer; `test_relation`: the account follows a relation across the threshold; `test_exhaustion`: `mmap` refused like every other allocator; `tests/allocators.sh`: every name the allocation-failure suite's objects reference is the library's own, a replacement the suite supplies, a listed C library function that hands its caller no memory, or reserved to the implementation, so an allocator the suite does not refuse fails the build |
+
+Step 5 measured as step 4 was, against step 4:
+
+| Workload | Peak before | Peak after |
+| --- | --- | --- |
+| `chain-closure` | 56.9 to 64.6 MB | 39.0 to 39.4 MB |
+| `tc-sparse-cyclic` | 26.7 to 32.7 MB | 21.0 to 21.7 MB |
+| `facts-join` | 52.0 to 57.6 MB | 38.2 to 41.6 MB |
+
+The times did not move. `chain-closure` still peaks 17 per cent above its
+live heap of 33.6 MB, against the design's gate of 10; `TODO.md` records
+the two causes that remain.
 
 ### Verified
 

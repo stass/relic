@@ -71,7 +71,7 @@ void
 relic_valtab_reset(relic_valtab_t *table)
 {
 	relic_idtab_reset(&table->index);
-	free(table->entries);
+	relic_free_array(table->entries);
 	bzero(table, sizeof(*table));
 }
 
