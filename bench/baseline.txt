@@ -8,13 +8,13 @@
 # the seconds only by order of magnitude.
 
 workload                      seconds     derived       held     scanned   looked up
-chain, right-recursive           1.25     2009001    2005001     2007002     2005000
-chain, left-recursive            0.00        6002       4001        2002        4002
-chain, whole closure             2.19     4009998    4004000     4010000     4003998
-graph, reachability              0.14      220016     119994       40005      100022
-graph, left-recursive            0.15      220004     119995       20002      120011
-grid, reachability               0.06      111903      67199       45000       44704
-tree, same generation            0.01       11304      10249        2084        7228
-tree, all generations            0.13      353606     175784      351568      265200
-tasks, ready                     0.18      767719     380347      730488      382515
-facts, load and join             0.67      317572     308786        8786       11743
+chain, right-recursive           0.57     2005001    2005001     2005001     2003000
+chain, left-recursive            0.00        4001       4001        2001        4000
+chain, whole closure             0.92     4004000    4004000     4006000     4000000
+graph, reachability              0.05      119999     119994       40000       99999
+graph, left-recursive            0.06      119997     119995          11      139996
+grid, reachability               0.02       67199      67199       44998       44700
+tree, same generation            0.00        3093      10249         156        4236
+tree, all generations            0.04      350544     175784      350546      262140
+tasks, ready                     0.08      721348     380347      715747      361176
+facts, load and join             0.22       17572     308786        8786       11743
