@@ -653,6 +653,28 @@ Step 6 measured as step 4 was, against step 5, with `bench/compare`'s
 120 MB on `facts-join` at scale 10 is missed; `TODO.md` breaks the peak
 down and lists the candidates.
 
+The comparison run again after step 6, `bench/compare/run.sh` at scale 1,
+five timed runs a cell, on the same machine and as busy, so the numbers
+are indicative and not publishable under `specs/design-bench.md` section
+8. Medians, in seconds, and peaks for the workloads section 2 of the
+design measured:
+
+| Workload | relic | Souffle interpreter | Souffle compiled | DuckDB | SQLite |
+| --- | --- | --- | --- | --- | --- |
+| `chain-closure` | 0.57, 39 MB | 1.40, 44 MB | 1.21, 40 MB | 1.69, 385 MB | 5.57, 39 MB |
+| `tc-sparse-cyclic` | 0.38, 22 MB | 0.82, 45 MB | 0.56, 40 MB | 0.77, 153 MB | 4.28, 19 MB |
+| `andersen` | 0.13, 12 MB | 0.41, 13 MB | 0.28, 9 MB | n/a | n/a |
+| `facts-join` | 0.19, 28 MB | 0.44, 47 MB | 0.39, 43 MB | 0.23, 36 MB | 0.40, 9 MB |
+
+Of the 25 workloads relic is the fastest engine on 22 and ahead of every
+interpreter and SQL engine on all of them. Souffle compiled, which spends
+6 to 8 s compiling each program first, is ahead on three: `tc-cyclic`,
+1.91 s against 2.24, `tc-cyclic-bf`, 1.81 against 1.89, and `grid-reach`,
+0.034 against 0.040. `sg-cyclic` and `tc-cyclic-bf`, which the full run
+timed at twice their standalone times while the machine was busier, were
+timed again alone and are reported from that run. SQLite still holds the
+smallest peak on `facts-join`.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
