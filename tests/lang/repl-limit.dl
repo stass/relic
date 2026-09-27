@@ -1,9 +1,9 @@
 % A query that fails in evaluation is reported and the session goes on to
 % the next line, whether the query was typed alone or under .plan, which
 % shows the plan it made before failing.  The two facts and a limit of four
-% tuples leave no room for p(X)?, whose rewrite derives two tuples and whose
-% answer would hold two more, and room for the answers of e(1)? and e(X)?.
-% The session, and the run, then exit 1.
+% tuples leave no room for p(X)?, which reads p completely, deriving two
+% tuples, and whose answer would hold two more, and room for the answers of
+% e(1)? and e(X)?.  The session, and the run, then exit 1.
 e(1).
 e(2).
 p(X) :- e(X).

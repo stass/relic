@@ -347,6 +347,10 @@ Setting either lifts every budget: a
 .Cm magic
 limit that is set is a limit like the others, and one left unset beside it
 bounds nothing.
+The rewrite searches for what to generate before it generates anything,
+and the search is held to the same limits and budgets; it can count
+predicates and rules the finished rewrite drops, so a limit may refuse a
+query whose rewrite would have fit.
 .Sh INTERACTIVE MODE
 With
 .Fl i ,

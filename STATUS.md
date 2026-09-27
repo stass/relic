@@ -231,7 +231,7 @@ and the guarded `path$bf` component that architecture section 60 sketches.
 
 | Component | State |
 | --- | --- |
-| `lib/magic.c` | finds what a query reads completely -- predicates no rule derives, and negated predicates and everything they depend on, as whole components of the program's schedule -- and rewrites the rest: an adornment worklist memoized on predicate and bound columns, body order from the planner seeded with the head's bound slots, adorned rules guarded by their magic predicate, one magic rule per demanded call, and before every demand call after the first a supplementary predicate `sup$<adorned>$<rule>$<call>` over the prefix's live variables, so generated bodies are linear in a body's calls; seeds from the query's own body; generated rules renumbered into a canonical form, deduplicated through a hash of it, and dropped when the head is one of their own positive literals; `max_magic_preds` and `max_magic_rules` enforced, naming the predicate being adorned; when neither is set, budgets of 256 plus 16 times the program's derived predicates and its size in literals (each body plus one, and two for each derived predicate with facts), the second counting the body literals of every rule drafted, kept or dropped, and bounding the rules kept as well, a rewrite outgrowing one abandoned with a warning, and setting either limit lifts both; the walk visits each component once and adornments read their rules from an index by head, so both are linear in the program; generated names interned with `$` and marked defined |
+| `lib/magic.c` | finds what a query reads completely -- predicates no rule derives, and negated predicates and everything they depend on, as whole components of the program's schedule -- and rewrites the rest: an adornment worklist memoized on predicate and bound columns, body order from the planner seeded with the head's bound slots, adorned rules guarded by their magic predicate, one magic rule per demanded call, and before every call binding a column after the first a supplementary predicate `sup$<adorned>$<rule>$<call>` over the prefix's live variables, so generated bodies are linear in a body's calls; seeds from the query's own body; generated rules renumbered into a canonical form, deduplicated through a hash of it, and dropped when the head is one of their own positive literals; `max_magic_preds` and `max_magic_rules` enforced, naming the predicate being adorned; when neither is set, budgets of 256 plus 16 times the program's derived predicates and its size in literals (each body plus one, and two for each derived predicate with facts), the second counting the body literals of every rule drafted, kept or dropped, and bounding the rules kept as well, a rewrite outgrowing one abandoned with a warning, and setting either limit lifts both; the walk visits each component once and adornments read their rules from an index by head, so both are linear in the program; generated names interned with `$` and marked defined |
 | `lib/plan.c` | the order is decided before any operation is emitted; `relic_plan_order()` returns that order alone from a given set of bound slots, and an incomplete relation is estimated without being created |
 | `lib/stratify.c`, `lib/depgraph.c` | the analysis runs over any rule table, `relic_schedule_build()`, so the rewritten rules are stratified by the same code as the program |
 | `lib/eval.c` | a query over a program not yet materialized, and not under `RELIC_F_NO_MAGIC`, is answered in two phases: the complete components evaluated from the program's schedule, then the generated rules from a schedule of their own, then the rewritten query; derived relations discarded first; a rewrite over its budget answered from the whole program instead; a semi-naive round runs only the variants whose delta literal reads a member that gained in the round before, in planning order, so it does exactly the work running every variant would at a cost proportional to what changed |
@@ -573,6 +573,29 @@ Step 2 measured as step 1 was, against step 1:
 | `facts-join` | 17,572 | 8,786 | | |
 
 Every workload's output was byte for byte the same.
+
+| Component | State |
+| --- | --- |
+| `lib/magic.c` | step 3, free-adornment subsumption: the adornments a query reaches are found by a search that drafts nothing, before any rule is drafted; a predicate is read free from the first call that reaches it with nothing bound, every later call of it reads the free relation and is recorded as subsumed, and when the search kept a bound adornment of a predicate it went on to read free, a second search starts with every such mark in place, after which no kept adornment is reached for nothing; each search is held on its own to the predicate limit and budget, the rule limit and the literal budget, and what it needs to read one rule is released once the rule is read; a rule's prefix is cut before every call binding a column but the first, whatever adornment the call reads, so no rule drafted for an adornment is longer than it would be without subsumption; when no kept adornment binds a column the rewrite generates nothing, reads the reached components completely and runs the query as written |
+| `lib/explain.c` | `adorn p/2 bf, subsumed by p/2 ff` for a subsumed call, listed in the order the search reached it; `read completely: p/2` for a rewrite that generates nothing |
+| `tests/` | `magic-subsumed`, `magic-cspa`, `explain-free`, `explain-subsumed`: subsumption, a CSPA-shaped program and both explain forms, each answering as `-X no-magic` does; `magic-rules-read`: a configured rule limit counts every rule a search reads; `magic-budget-subsumed` and `magic-budget-wide-cut`: a rule whose first or second call binding a column is subsumed is cut where it would be without subsumption, and fits the literal budget that rewrite fit; `test_magic`: the first search charged what it reads and held to the rule limit; `test_exhaustion`: every refused allocation while answering through the second search and while reading the reach completely, each retried to the undisturbed answer |
+
+Step 3 measured as step 1 was, against step 2, on `andersen`, whose query
+binds nothing:
+
+| | Before | After |
+| --- | --- | --- |
+| Time | 0.67 to 0.79 s | 0.25 to 0.26 s |
+| Peak | 18.4 to 22.3 MB | 10.6 to 10.8 MB |
+| Tuples inserted | 381,864 | 90,581 |
+| Tuples held | 429,560 | 138,277 |
+| Iterations | 47 | 32 |
+
+The rewrite derived `pointsTo` three times, free and with either column
+bound; it now reads `pointsTo` completely, once. A query
+calling 4000 predicates each bound and then free is rewritten in 0.02 s,
+against 0.06 s before, and a 21-column predicate whose rules each drop one
+binding outgrows the predicate budget at once, as it did before.
 
 ### Verified
 

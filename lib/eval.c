@@ -438,6 +438,8 @@ static int	 seed_member(relic_evaluation_t *eval,
 		    relic_relation_t *derived);
 static int	 seed_members(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans);
+static int	 evaluate_read_completely(relic_t *ctx, relic_magic_t *magic,
+		    const relic_query_t *query);
 static int	 evaluate_rewrite(relic_t *ctx, relic_magic_t *magic,
 		    const relic_query_t *query);
 static int	 evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
@@ -2641,9 +2643,10 @@ first_wanted(const relic_schedule_t *schedule, const bool *wanted)
 /*
  * Plan and evaluate the components of a schedule over a table of rules, in
  * schedule order, each once every component before it is complete.  With
- * `wanted`, only the components it marks are evaluated; they must be closed
- * under dependency, so that everything a wanted component reads is wanted
- * too.  `depth` is how far the explanation of each component is indented.
+ * `wanted`, only the components it marks are evaluated; everything a wanted
+ * component reads must be wanted too or already evaluated, so that no
+ * component runs over a relation short of its fixed point.  `depth` is how
+ * far the explanation of each component is indented.
  *
  * What the evaluation allocates before its first component it allocates to
  * plan that component, and a refusal by the memory limit there names it.  An
@@ -2959,9 +2962,26 @@ evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_query_t *query)
 }
 
 /*
+ * Evaluate from the program's own schedule the components a query reads
+ * completely because its rewrite found every predicate it reaches read
+ * free, after showing the rewrite that found so.  The rewrite generated no
+ * rule, and the query runs as written over what this evaluates.
+ */
+static int
+evaluate_read_completely(relic_t *ctx, relic_magic_t *magic,
+    const relic_query_t *query)
+{
+	relic_explain_rewrite(ctx, &query->rule, query->answer, magic);
+
+	return (evaluate_schedule(ctx, &ctx->program.rules,
+	    &ctx->program.schedule, magic->completed_late, 0));
+}
+
+/*
  * Compute what a query's rewrite needs before its rewritten rule can run:
  * the relations the query reads completely, evaluated from the program's own
- * schedule, and then the fixed point of the rules the rewrite generates.
+ * schedule, and then the fixed point of the rules the rewrite generates, or
+ * of the program's rules for the components it found read completely.
  * Finding what the query reads completely and generating the rules are the
  * rewrite's, and a refusal by the memory limit in either names the query;
  * the evaluations between them name what they plan.
@@ -2991,8 +3011,11 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 	if (relic_magic_rewrite(magic, &query->rule) != 0)
 		return (-1);
 
-	if (magic->adornment_count == 0)
+	if (magic->kept.count == 0)
 		return (0);
+
+	if (magic->reads_completely)
+		return (evaluate_read_completely(ctx, magic, query));
 
 	return (evaluate_rewrite(ctx, magic, query));
 }

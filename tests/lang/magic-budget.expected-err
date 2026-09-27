@@ -1,1 +1,1 @@
-relic: warning: the query's Magic rewrite outgrew its budget of 784 generated literals while adorning p/8; answering it from the whole program
+relic: warning: the query's Magic rewrite outgrew its budget of 656 generated literals while adorning p/6; answering it from the whole program

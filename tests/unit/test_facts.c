@@ -1193,7 +1193,7 @@ the_rewrite_reads_facts_through_a_view(void)
 static void
 an_abandoned_rewrite_leaves_no_warning(void)
 {
-	static const char query[] = "p(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8)?";
+	static const char query[] = "p(c, Y2, Y3, Y4, Y5, Y6, Y7, Y8)?";
 	relic_pred_id_t view;
 	diag_log_t log;
 	relic_t *ctx;
@@ -1217,7 +1217,7 @@ an_abandoned_rewrite_leaves_no_warning(void)
 	check(status == 0, SCENARIO_MAGIC, "p gains a fact");
 
 	before = relic_pred_count(ctx);
-	checkf(answers(ctx, query, "c c c c c c c c") && log.errors == 0 &&
+	checkf(answers(ctx, query, "c c c c c c c") && log.errors == 0 &&
 	    log.warnings == 1, SCENARIO_MAGIC, "the rewrite should be "
 	    "abandoned with one warning and the query answered, not with %zu "
 	    "errors and %zu warnings", log.errors, log.warnings);

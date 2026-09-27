@@ -295,20 +295,86 @@ REPL or embedder workload before changing it.
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of
 its own, and the budget bounds the rules generated, not the tuples those
-relations hold. A query that binds nothing reads its predicate through the
-all-free adornment, but the rules it reaches may still call that predicate
-with a column bound: `path(X, Y)?` over
-`path(X, Z) :- edge(X, Y), path(Y, Z).` derives `path$ff` and `path$bf`,
-each about as large as `path`, so it holds about twice the tuples of the
-whole fixed point. A program whose rules call one predicate with several
-bound patterns does worse: one with a ternary predicate called five ways held
-five times the fixed point's tuples. The remedy is subsumption: once `p$ff`
-is demanded, every other adornment of `p` can read it filtered instead of
-being derived again, and more generally an adornment can read one that binds
-a subset of its columns. A cap on adornments per predicate, falling back to
-the all-free one, would bound the multiple. The rewrite is correct as it
-stands, the tuples count against `max_tuples` and `max_memory`, and
-`tests/perf.sh`, whose query binds nothing, stays inside its bound.
+relations hold. Once any call reaches a predicate with nothing bound, every
+other call of it reads that free relation, so `path(X, Y)?` holds `path`
+once. A query can still reach one predicate with several bound patterns and
+none free, whether or not the query binds a column itself: a ternary
+predicate called with its first column bound and with its second derives
+two relations, each of which may approach the whole of it. The general
+remedy is for an adornment to read one that binds a subset of its columns; a
+cap on adornments per predicate, falling back to the free one, would bound
+the multiple. The rewrite is correct as it stands, and the tuples count
+against `max_tuples` and `max_memory`.
+
+**A predicate the first adornment search reads free stays free.** [Low,
+component: `lib/magic.c`] The second search starts from every mark the first
+made, including one only an adornment the second no longer reaches put
+there, so the rewrite can compute a predicate in full that it then reads
+only through bound calls. That needs a rule whose body the planner orders
+differently for two bindings of its head. In `s(a, Y), s(U, V)?` over
+`s(X, Y) :- g(Z), t(X, Z, Y).` and
+`t(X, Z, Y) :- h(X, W), q(V, Y), k(Z, V).`,
+with `k` large, the first search reaches `t` through `s$bf`, with `X` bound,
+and calls `q` before `k`, free; the second reaches `t` only through `s$ff`,
+with `Z` bound, calls `k` first and `q` bound, and still derives `q` whole.
+The rewrite is correct and holds no more than the fixed point of `q`;
+searching until the marks stop changing, with a mark cleared when nothing
+the search keeps reaches the predicate free, would drop it.
+
+**A rule holding its own head can leave a supplementary relation unread.**
+[Low, component: `lib/magic.c`] A source rule with its head among its
+positive literals derives nothing new. Drafted for the free adornment, with
+the call on its head subsumed and a cut before that call, its adorned rule
+reads its own head and is dropped, but the supplementary rule before it is
+kept and evaluated with nothing reading it. Dropping such a source rule
+before the rewrite drafts it would remove both.
+
+**The rewrite's adornment tables are outside the memory account.** [Low,
+component: `lib/magic.c`] The kept and subsumed adornments, the tables that
+find them and the table of generated rules are grown with
+`relic_grow_array()` rather than in the rewrite's charged arena, so
+`max_memory` does not see them. They are bounded: each kept adornment counts
+against the predicate limit or budget, each subsumed one was reached by a
+call in a rule a search read for a kept adornment, and each generated rule
+is charged to the rule limit and the literal budget. Growing them in the
+charged arena, or charging the account for them, would make `max_memory`
+count them too.
+
+**The adornment search and the draft each walk a body.** [Medium, component:
+`lib/magic.c`] The search for the adornments a query reaches
+(`reach_calls_in_order()`) and the draft of the rewritten rules
+(`rewrite_body()`) each plan a rule's body and walk it, and they must agree
+on the rules walked, the order, the columns each call binds and which calls
+read on demand. The only guard is the internal-error diagnostic
+`adornment_of_call()` gives for a call the search never recorded, so an edit
+to one walker would surface as a failed query on some program rather than as
+a failing test. Recording, per adornment and rule the search walks, the
+order and the calls it reached would let the draft replay the record by
+construction, and let the second search reuse the first's plans rather than
+plan each body again.
+
+**Reading a query's reach completely is a mode beside the rewrite.** [Low,
+component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment
+the rewrite keeps binds a column, it generates nothing and sets
+`reads_completely`, which evaluation and explain each test, and the
+rewrite's query then aliases the caller's rule where it is otherwise an
+arena copy. `read_reached_completely()` closes the reached components over
+their dependencies with a closure of its own. Treating the reached
+predicates as complete components from the start, as the negated part of a
+query already is, would remove both branches and the second closure.
+
+**The Magic limits count the adornment search.** [Low, component:
+`lib/magic.c`] Each adornment search is held to `magic-preds`,
+`magic-rules` and the literal budget on its own. The first search keeps
+bound adornments of a predicate that the second drops once a call reads the
+predicate free, and the rule limit counts every rule a search reads where
+the draft counts only the rules it keeps, dropping duplicates and rules that
+derive nothing. So a limit may refuse a query whose finished rewrite would
+have fit, and a configured `magic-rules` can refuse a query the rewrite
+without subsumption answered (`tests/lang/magic-rules-read.dl`); the
+predicate limit and the literal budget cannot. Counting only what the draft
+keeps needs the recorded walk of the item above, so that exploring is
+bounded apart from what is kept.
 
 **An abandoned rewrite repeats the complete part.** [Low, component:
 `lib/eval.c`, `lib/explain.c`] A rewrite over its budget is abandoned after

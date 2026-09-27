@@ -1,11 +1,12 @@
 magic rewrite of $q1(X) :- p(X).
     adorn p/1 f
-    stratum 0, component 0: p$f/1
-        rule p$f(X) :- e(X).
-            scan e(X)
-            emit p$f(X)
-query $q1(X) :- p$f(X).
-    scan p$f(X)
+    read completely: p/1
+stratum 0, component 0: p/1
+    rule p(X) :- e(X).
+        scan e(X)
+        emit p(X)
+query $q1(X) :- p(X).
+    scan p(X)
     emit $q1(X)
 
 

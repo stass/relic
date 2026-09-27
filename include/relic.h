@@ -146,7 +146,10 @@ typedef struct relic_config relic_config_t;
  * answered from the whole program, as it would be with RELIC_F_NO_MAGIC: the
  * rewrite is an optimization, and without a limit the caller asked for it must
  * not decide whether a query is answered.  The budgets bound the rewrite, not
- * what its rules derive.
+ * what its rules derive.  The rewrite searches for what to generate before it
+ * generates anything, and the search is held to the same limits and budgets;
+ * it can count predicates and rules the finished rewrite drops, so a limit may
+ * refuse a query whose rewrite would have fit.
  *
  * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
  * strategy that must give the same answers as the default; they exist so

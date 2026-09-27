@@ -1,0 +1,28 @@
+% The query calls p with its first column bound, and q's last rule calls p
+% with none, so the free adornment of p subsumes the bound one.  The free
+% call is found only after the bound adornment's rules were walked, and they
+% had asked for r's bound adornment; both were reached for nothing, so the
+% rewrite begins again with p read free from the start and keeps neither.
+% r's own rules then call r with a column bound, which r's free adornment
+% subsumes.  p's free copy calls q with a column bound, and q is reached no
+% other way, so the rewrite goes on for q.  The answers are the program's.
+
+e(a, b).
+e(b, c).
+start(c).
+f(c, x).
+f(x, y).
+g(x).
+
+r(X, Y) :- e(X, Y).
+r(X, Z) :- e(X, Y), r(Y, Z).
+
+q(X, Y) :- f(X, Y).
+q(X, Z) :- f(X, Y), q(Y, Z).
+q(X, Y) :- g(X), p(Y, _).
+
+p(X, Y) :- r(X, Y).
+p(X, Y) :- start(X), q(X, Y).
+
+p(a, X)?
+p(c, X)?

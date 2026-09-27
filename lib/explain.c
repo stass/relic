@@ -63,6 +63,16 @@ static void	 line_put(relic_explain_line_t *line, const char *text);
 static void	 line_put_byte(relic_explain_line_t *line, char byte);
 static void	 line_put_escaped(relic_explain_line_t *line,
 		    unsigned char byte);
+static void	 put_adorn(const relic_t *ctx, relic_explain_line_t *line,
+		    relic_pred_id_t source, uint32_t bound);
+static void	 put_adorn_line(relic_t *ctx,
+		    const relic_adornment_t *adornment);
+static void	 put_adorn_lines(relic_t *ctx, const relic_magic_t *magic);
+static void	 put_adorned_pred(const relic_t *ctx,
+		    relic_explain_line_t *line, relic_pred_id_t source,
+		    uint32_t bound);
+static void	 put_adornment(const relic_t *ctx, relic_explain_line_t *line,
+		    relic_pred_id_t pred, uint32_t bound);
 static void	 put_arg(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_arg_t *arg);
 static void	 put_args(const relic_t *ctx, relic_explain_line_t *line,
@@ -88,6 +98,8 @@ static void	 put_pred_name(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
 static void	 put_query_rule(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_relation_t *answer);
+static void	 put_read_completely(relic_t *ctx,
+		    const relic_magic_t *magic);
 static void	 put_relation_name(const relic_t *ctx,
 		    relic_explain_line_t *line,
 		    const relic_relation_t *relation);
@@ -98,6 +110,8 @@ static void	 put_rule_body(const relic_t *ctx, relic_explain_line_t *line,
 static void	 put_size(relic_explain_line_t *line, size_t value);
 static void	 put_string_literal(relic_explain_line_t *line,
 		    const char *bytes, size_t length);
+static void	 put_subsumed_line(relic_t *ctx,
+		    const relic_adornment_t *adornment);
 static void	 put_symbol(const relic_t *ctx, relic_explain_line_t *line,
 		    uint32_t symbol);
 static void	 put_term(const relic_t *ctx, relic_explain_line_t *line,
@@ -834,19 +848,140 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 }
 
 /*
- * The heading of a query's Magic rewrite: the query as written, each
- * adornment in the order the rewrite recorded it, as the source predicate and
- * its b and f per column, and each rule the query's own body generated.  The
- * rewritten program's components follow, nested one level beneath it.
+ * A predicate's b and f per column for the columns of `bound`, with nothing
+ * written for a predicate of no columns.
+ */
+static void
+put_adornment(const relic_t *ctx, relic_explain_line_t *line,
+    relic_pred_id_t pred, uint32_t bound)
+{
+	const relic_pred_t *entry;
+	uint16_t column;
+
+	entry = relic_pred_of(ctx, pred);
+	for (column = 0; entry != NULL && column < entry->arity; column++)
+		line_put_byte(line, (bound & (UINT32_C(1) << column)) != 0 ?
+		    'b' : 'f');
+}
+
+/*
+ * One adornment of a query's rewrite, "adorn p/2 bf".
+ */
+static void
+put_adorn_line(relic_t *ctx, const relic_adornment_t *adornment)
+{
+	relic_explain_line_t line;
+
+	line_begin(&line, 1);
+	put_adorn(ctx, &line, adornment->source, adornment->bound);
+	line_finish(ctx, &line);
+}
+
+/*
+ * One call a query's rewrite found subsumed by the free adornment of its
+ * predicate: "adorn p/2 bf, subsumed by p/2 ff".  The free adornment is
+ * named as an adornment rather than as a predicate, since a rewrite that
+ * reads what it reaches completely names no predicate for it.
+ */
+static void
+put_subsumed_line(relic_t *ctx, const relic_adornment_t *adornment)
+{
+	relic_explain_line_t line;
+
+	line_begin(&line, 1);
+	put_adorn(ctx, &line, adornment->source, adornment->bound);
+	line_put(&line, ", subsumed by ");
+	put_adorned_pred(ctx, &line, adornment->source, 0);
+	line_finish(ctx, &line);
+}
+
+/*
+ * "adorn " and the adornment of `source` binding the columns of `bound`.
+ */
+static void
+put_adorn(const relic_t *ctx, relic_explain_line_t *line,
+    relic_pred_id_t source, uint32_t bound)
+{
+	line_put(line, "adorn ");
+	put_adorned_pred(ctx, line, source, bound);
+}
+
+/*
+ * A predicate and an adornment of it, "p/2 bf", or "p/0" alone for a
+ * predicate with no columns to adorn.
+ */
+static void
+put_adorned_pred(const relic_t *ctx, relic_explain_line_t *line,
+    relic_pred_id_t source, uint32_t bound)
+{
+	const relic_pred_t *pred;
+
+	pred = relic_pred_of(ctx, source);
+
+	put_pred(ctx, line, source);
+	if (pred != NULL && pred->arity > 0)
+		line_put_byte(line, ' ');
+	put_adornment(ctx, line, source, bound);
+}
+
+/*
+ * The predicates a rewrite that generated nothing reads completely: those of
+ * the adornments it kept, every one of them free.
+ */
+static void
+put_read_completely(relic_t *ctx, const relic_magic_t *magic)
+{
+	relic_explain_line_t line;
+	size_t i;
+
+	for (i = 0; i < magic->kept.count; i++) {
+		line_begin(&line, 1);
+		line_put(&line, "read completely: ");
+		put_pred(ctx, &line, magic->kept.entries[i].source);
+		line_finish(ctx, &line);
+	}
+}
+
+/*
+ * Every adornment the search reached, in the order it reached them: the
+ * subsumed calls interleaved with the adornments kept, each listed before
+ * the kept adornment its `kept_before` names.
+ */
+static void
+put_adorn_lines(relic_t *ctx, const relic_magic_t *magic)
+{
+	const relic_adornment_set_t *subsumed;
+	size_t next;
+	size_t i;
+
+	subsumed = &magic->subsumed;
+	next = 0;
+
+	for (i = 0; i < magic->kept.count; i++) {
+		for (; next < subsumed->count &&
+		    subsumed->entries[next].kept_before <= i; next++)
+			put_subsumed_line(ctx, &subsumed->entries[next]);
+		put_adorn_line(ctx, &magic->kept.entries[i]);
+	}
+
+	for (; next < subsumed->count; next++)
+		put_subsumed_line(ctx, &subsumed->entries[next]);
+}
+
+/*
+ * The heading of a query's Magic rewrite: the query as written, and each
+ * adornment and subsumed call in the order the search reached it.  Then, when
+ * the rewrite found every predicate the query reaches read free, the predicates
+ * it reads completely instead, and the heading ends there; the components they
+ * need follow as the program's own.  Otherwise each rule the query's own body
+ * generated, and the rewritten program's components follow, nested one level
+ * beneath the heading.
  */
 void
 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
     const relic_relation_t *answer, const relic_magic_t *magic)
 {
-	const relic_adornment_t *adornment;
-	const relic_pred_t *source;
 	relic_explain_line_t line;
-	uint16_t column;
 	size_t i;
 
 	if (!relic_explaining(ctx))
@@ -857,22 +992,10 @@ relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	put_query_rule(ctx, &line, query, answer);
 	line_finish(ctx, &line);
 
-	for (i = 0; i < magic->adornment_count; i++) {
-		adornment = &magic->adornments[i];
-		source = relic_pred_of(ctx, adornment->source);
+	put_adorn_lines(ctx, magic);
 
-		line_begin(&line, 1);
-		line_put(&line, "adorn ");
-		put_pred(ctx, &line, adornment->source);
-		for (column = 0; source != NULL && column < source->arity;
-		    column++) {
-			if (column == 0)
-				line_put_byte(&line, ' ');
-			line_put_byte(&line, (adornment->bound &
-			    (UINT32_C(1) << column)) != 0 ? 'b' : 'f');
-		}
-		line_finish(ctx, &line);
-	}
+	if (magic->reads_completely)
+		put_read_completely(ctx, magic);
 
 	for (i = 0; i < magic->seed_count; i++) {
 		line_begin(&line, 1);

@@ -201,14 +201,14 @@
 #define	WIDE_SWEEP	48
 
 /*
- * The fallback sweep answers the widening program of arity 8, whose 2^8
- * adornments outgrow the rewrite's budget, so the query is answered from the
- * whole program after a warning.  An undisturbed run makes about 130
- * allocations; the sweep stops at the first run that needs no refusal, and
- * the bound only keeps a regression that fails every run from sweeping
- * forever.
+ * The fallback sweep answers the widening program of arity 6, whose query
+ * reaches 2^5 adornments of p, which outgrow the rewrite's budget, so the
+ * query is answered from the whole program after a warning.  An undisturbed
+ * run makes some 680 allocations; the sweep stops at the first run that
+ * needs no refusal, and the bound only keeps a regression that fails every
+ * run from sweeping forever.
  */
-#define	WIDENING_ARITY	8
+#define	WIDENING_ARITY	6
 #define	FALLBACK_SWEEP	1024
 
 /*
@@ -222,14 +222,15 @@ typedef struct eval_sweep eval_sweep_t;
 
 /*
  * One way of answering the evaluation sweep's query: how the strategy is
- * named in a failure, the query, the relation that holds the closure once it
- * is answered, the flags that select the strategy, and how many rows the
- * answer has.
+ * named in a failure, the query, the relations that hold the closure and
+ * the sink once it is answered, the flags that select the strategy, and how
+ * many rows the answer has.
  */
 struct eval_sweep {
 	const char	*strategy;
 	const char	*query;
 	const char	*paths;
+	const char	*sinks;
 	unsigned int	 flags;
 	size_t		 rows;
 };
@@ -1954,16 +1955,25 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
  * Answered through the Magic rewrite, it is path$bf, which holds the whole
  * closure too, because the query's binding reaches every node of the chain;
  * the negated sink is read completely, so the sweep also lands in the part
- * of the program evaluated before the rewrite.
+ * of the program evaluated before the rewrite.  A query that reaches path
+ * free reads it completely instead of rewriting, into the path relation.
+ * And a query that calls sink bound before calling it free finds its
+ * adornments in a second search, which reads sink through sink$f whatever
+ * the call binds.
  */
 static void
 a_query_that_ran_out_of_memory_can_be_retried(void)
 {
 	static const eval_sweep_t sweeps[] = {
-		{ "from the whole fixed point", "path(n0, X)?", "path",
+		{ "from the whole fixed point", "path(n0, X)?", "path", "sink",
 		    RELIC_F_NO_MAGIC, EVAL_CHAIN },
 		{ "through the Magic rewrite", "path(n0, X), not sink(X)?",
-		    "path$bf", 0, EVAL_CHAIN - 1 }
+		    "path$bf", "sink", 0, EVAL_CHAIN - 1 },
+		{ "reading what it reaches completely",
+		    "path(X, Y), not sink(Y)?", "path", "sink", 0,
+		    EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 - EVAL_CHAIN },
+		{ "through a second search", "path(n0, X), sink(X), sink(Y)?",
+		    "path$bf", "sink$f", 0, 1 }
 	};
 	char *program;
 	size_t i;
@@ -2096,11 +2106,12 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		    sweep->paths, expected_paths,
 		    paths != NULL ? relic_relation_count(paths) : 0, budget);
 
-		sinks = relation_named(ctx, "sink", 1);
+		sinks = relation_named(ctx, sweep->sinks, 1);
 		checkf(sinks != NULL && relic_relation_count(sinks) == 1,
 		    SCENARIO_EVALUATE,
-		    "answered %s, the sink relation should hold 1 tuple, not "
+		    "answered %s, the %s relation should hold 1 tuple, not "
 		    "%zu, with allocation %ld refused", sweep->strategy,
+		    sweep->sinks,
 		    sinks != NULL ? relic_relation_count(sinks) : 0, budget);
 
 		relic_query_destroy(query);
@@ -2140,7 +2151,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 static void
 an_abandoned_rewrite_out_of_memory_reports_once(void)
 {
-	static const char query_text[] = "p(Y1, Y2, Y3, Y4, Y5, Y6, Y7, Y8)?";
+	static const char query_text[] = "p(c, Y2, Y3, Y4, Y5, Y6)?";
 	relic_query_t *query;
 	char *program;
 	unsigned long undisturbed;

@@ -1,0 +1,36 @@
+% p's one rule calls q with its first column bound and r with the end of a
+% chain of fifty f literals bound, and the query calls p twelve ways, each
+% binding X, and q with nothing bound.  So every call of q reads q$ff, and
+% in each of p's twelve adornments the call of r is the only call with a
+% magic rule.  The prefix is still cut before r, the second call to bind a
+% column, so the chain is written once, into a supplementary rule, and each
+% adornment costs about sixty literals.  Were the call of q not counted as
+% a call binding a column, r's magic rule would copy the chain and the
+% adorned rule copy it again, twice that, past the budget of
+% 256 + 16 x 61 = 1232 literals this program's size gives.  The rewrite
+% fits, and answers without a warning.
+
+e(a, b).
+e(b, c).
+f(b, b).
+g(c).
+
+q(X, Y) :- e(X, Y).
+r(X, Y) :- e(X, Y).
+
+p(X, Y, Z1, Z2, Z3, Z4) :- q(X, B0), f(B0, B1), f(B1, B2), f(B2, B3),
+    f(B3, B4), f(B4, B5), f(B5, B6), f(B6, B7), f(B7, B8), f(B8, B9),
+    f(B9, B10), f(B10, B11), f(B11, B12), f(B12, B13), f(B13, B14),
+    f(B14, B15), f(B15, B16), f(B16, B17), f(B17, B18), f(B18, B19),
+    f(B19, B20), f(B20, B21), f(B21, B22), f(B22, B23), f(B23, B24),
+    f(B24, B25), f(B25, B26), f(B26, B27), f(B27, B28), f(B28, B29),
+    f(B29, B30), f(B30, B31), f(B31, B32), f(B32, B33), f(B33, B34),
+    f(B34, B35), f(B35, B36), f(B36, B37), f(B37, B38), f(B38, B39),
+    f(B39, B40), f(B40, B41), f(B41, B42), f(B42, B43), f(B43, B44),
+    f(B44, B45), f(B45, B46), f(B46, B47), f(B47, B48), f(B48, B49),
+    f(B49, B50), r(B50, Y), g(Z1), g(Z2), g(Z3), g(Z4).
+
+p(a, _, _, _, _, _), p(a, _, c, _, _, _), p(a, _, _, c, _, _),
+    p(a, _, c, c, _, _), p(a, _, _, _, c, _), p(a, _, c, _, c, _),
+    p(a, _, _, c, c, _), p(a, _, c, c, c, _), p(a, _, _, _, _, c),
+    p(a, _, c, _, _, c), p(a, _, _, c, _, c), p(a, _, c, c, _, c), q(U, V)?

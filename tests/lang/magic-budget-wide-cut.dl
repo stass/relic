@@ -1,0 +1,48 @@
+% p's one rule calls q with X bound, walks a chain of twenty-six e literals,
+% calls r with the chain's end bound, and then calls u with the thirty-one
+% columns fx binds.  The query calls p thirteen ways, each binding X, and r
+% with nothing bound, so every call of r reads r$ff and has no magic rule.
+% The prefix is still cut before r, the second call to bind a column, so the
+% chain is written once, into a supplementary rule.  No cut is made before
+% u: more slots are live there than a predicate may have columns.  Without
+% the cut before r, u's magic rule and the adorned rule would each copy the
+% chain in every adornment of p, past the budget of 256 + 16 x 41 = 912
+% literals this program's size gives.  The rewrite fits, and answers
+% without a warning.
+
+e(a, b).
+e(b, b).
+fx(b, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c,
+    c, c, c, c, c, c, c, c).
+t(c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c, c,
+    c, c, c, c, c, c, c, k).
+g(z).
+
+q(X, Y) :- e(X, Y).
+r(X, Y) :- e(X, Y).
+u(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16,
+    A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, A30,
+    A31, A32) :-
+    t(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16,
+    A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, A30,
+    A31, A32).
+
+p(X, E, Z1, Z2, Z3, Z4) :- q(X, B0), e(B0, B1), e(B1, B2), e(B2, B3),
+    e(B3, B4), e(B4, B5), e(B5, B6), e(B6, B7), e(B7, B8), e(B8, B9),
+    e(B9, B10), e(B10, B11), e(B11, B12), e(B12, B13), e(B13, B14),
+    e(B14, B15), e(B15, B16), e(B16, B17), e(B17, B18), e(B18, B19),
+    e(B19, B20), e(B20, B21), e(B21, B22), e(B22, B23), e(B23, B24),
+    e(B24, B25), e(B25, B26), r(B26, E),
+    fx(E, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15,
+    X16, X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29,
+    X30, X31),
+    u(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16,
+    X17, X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28, X29, X30,
+    X31, _),
+    g(Z1), g(Z2), g(Z3), g(Z4).
+
+p(a, _, _, _, _, _), p(a, _, z, _, _, _), p(a, _, _, z, _, _),
+    p(a, _, z, z, _, _), p(a, _, _, _, z, _), p(a, _, z, _, z, _),
+    p(a, _, _, z, z, _), p(a, _, z, z, z, _), p(a, _, _, _, _, z),
+    p(a, _, z, _, _, z), p(a, _, _, z, _, z), p(a, _, z, z, _, z),
+    p(a, _, _, _, z, z), r(U, V)?

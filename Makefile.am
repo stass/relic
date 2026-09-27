@@ -448,9 +448,11 @@ RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/constructs.dl tests/lang/empty.dl \
 	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
 	tests/lang/explain-check.dl tests/lang/explain-facts.dl \
+	tests/lang/explain-free.dl \
 	tests/lang/explain-graph.dl tests/lang/explain-long.dl \
 	tests/lang/explain-magic.dl tests/lang/explain-materialized.dl \
-	tests/lang/explain-ops.dl tests/lang/explain-supplementary.dl \
+	tests/lang/explain-ops.dl tests/lang/explain-subsumed.dl \
+	tests/lang/explain-supplementary.dl \
 	tests/lang/explain-thresholds.dl tests/lang/explain-views.dl \
 	tests/lang/format-csv.dl tests/lang/format-integers.dl \
 	tests/lang/format-json.dl tests/lang/format-nul.dl \
@@ -468,12 +470,16 @@ RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
 	tests/lang/magic-budget-adornments.dl \
-	tests/lang/magic-budget-literals.dl tests/lang/magic-budget.dl \
+	tests/lang/magic-budget-literals.dl \
+	tests/lang/magic-budget-subsumed.dl \
+	tests/lang/magic-budget-wide-cut.dl tests/lang/magic-budget.dl \
+	tests/lang/magic-cspa.dl \
 	tests/lang/magic-duplicate-rules.dl tests/lang/magic-limit-preds.dl \
 	tests/lang/magic-limit-rules.dl \
 	tests/lang/magic-limit-supplementary.dl tests/lang/magic-mixed.dl \
 	tests/lang/magic-mutual.dl tests/lang/magic-negation.dl \
-	tests/lang/magic-same-generation.dl \
+	tests/lang/magic-rules-read.dl \
+	tests/lang/magic-same-generation.dl tests/lang/magic-subsumed.dl \
 	tests/lang/magic-supplementary-wide.dl \
 	tests/lang/magic-supplementary.dl tests/lang/materialize.dl \
 	tests/lang/missing-terminator.dl tests/lang/negation-forms.dl \

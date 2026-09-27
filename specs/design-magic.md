@@ -20,7 +20,8 @@ the rewrite is shown to a person. Forward-looking, like every document under
 
 * which predicates a query reads completely and which it reads on demand;
 * what an adornment is, what an adorned predicate and a magic predicate are
-  called, and which adornments have no magic predicate;
+  called, which adornments have no magic predicate, and which a free
+  adornment subsumes;
 * the order in which bindings flow through a rule body, and why it is the
   planner's;
 * the rules the rewrite generates, the seed among them, the rule that reads
@@ -88,7 +89,10 @@ A predicate is read completely when any of these holds:
   negation simple by materializing a negated relation in full in its lower
   stratum, so that absence means absence;
 * **something read completely depends on it**, positively or negatively. A
-  relation is complete only if everything it is derived from is.
+  relation is complete only if everything it is derived from is;
+* **the rewrite keeps only free adornments**: when no adornment the rewrite
+  keeps binds a column, every predicate the rewrite adorned is read
+  completely, and no rule is generated (section 4).
 
 Everything else the query reaches through positive literals is read on demand.
 
@@ -119,6 +123,17 @@ it is materialized anyway. And a program whose relations the query never
 reaches is never evaluated: a component the query cannot see is neither
 seeded with its facts nor run.
 
+The fourth source is known only once the adornments are, so it is decided
+after the walk, by the search of section 4. Its predicates are closed
+over components exactly as the walk's are, and the components they add are
+evaluated from the program's schedule after the walk's, before the query
+rule runs; the query rule is then the one written, planned over the
+program's relations as a query against a materialized program is. That
+generalizes the case where the relations already hold the fixed point: a
+rewrite whose adornments bind nothing would derive exactly what full
+materialization of the reached components derives, so the program's own
+relations are read instead.
+
 **Base views are interned before the walk.** When the rewrite begins finding
 what the query reads completely, it interns the base view of every derived
 predicate whose base store holds facts, before it takes its snapshot of the
@@ -146,13 +161,14 @@ so they collide with nothing a program writes:
 | --- | --- | --- |
 | `path/2` called with its first argument bound | `path$bf` | 2 |
 | the demand for it: the bound arguments asked about | `magic$path$bf` | 1 |
-| the prefix before the second demand call of the second rule deriving `path$bf` (section 6) | `sup$path$bf$1$2` | its live variables |
+| the prefix before the second call binding a column of the second rule deriving `path$bf` (section 6) | `sup$path$bf$1$2` | its live variables |
 
 A predicate of arity zero is adorned as `p$`. A supplementary predicate is
 named by the adorned predicate, the position of its rule among the rules
 deriving that predicate, counted from 0 in program order, and the position
-of the demand call it precedes among the rule's demand calls, counted from
-1 in body order; one generated from the query's rule is named after `$q0`.
+of the call it precedes among the rule's calls binding a column, counted
+from 1 in body order; one generated from the query's rule is named after
+`$q0`.
 
 **An adornment with no bound column has no magic predicate.** A magic relation
 records which bound values were asked about, and with nothing bound there is
@@ -161,6 +177,50 @@ exist exactly when the adorned predicate is reached at all, which the rewrite
 already knows. `path$ff` is therefore a copy of `path` with no guard. It is
 still a copy, rather than `path` itself, because its rules are rewritten too:
 a bound call made inside one of them propagates demand like any other.
+
+**A free adornment subsumes the others.** Once the query reaches a predicate
+`p` with the adornment that binds no column, every call to `p` in every
+generated rule, whatever columns the call binds, is a call to `p$ff`, and no
+other adornment of `p` is generated. `p$ff` holds every tuple of `p` in the
+program's least model, by the completeness of section 9.3 for an adornment
+that binds nothing, and only such tuples, by its soundness. A call adorned
+`bf` reads the tuples of `p` whose first column is the bound value, which
+are the tuples of `p$ff` whose first column is that value: a lookup into
+`p$ff` on that column, which the planner gives it as it gives any bound
+literal. The redirected call binds the variables the adorned call bound, so
+the literals after it see the same bound set and their adornments do not
+change; it propagates no demand, so its magic rule is not generated. The
+draft places its cuts by the columns calls bind, never by the adornments
+they read (section 6), so the prefix is still cut before the redirected
+call, and every rule drafted for an adornment is as long as it would be
+without subsumption. Stratification stays a guard (section 9.1): the
+redirection adds positive edges to `p$ff` and removes edges to `p$bf` and
+its magic predicate, and a negated literal still names a predicate read
+completely.
+
+**Adorn first, draft second.** A bound adornment of `p` may be reached
+before the free one, so the rewrite finds the adornments before it drafts
+any rule. The search reads each rule's body in the order
+`relic_plan_order()` gives it for the adornment of its head, which is the
+order its draft reads, reaches the adornment of each call on a predicate
+read on demand, and drafts nothing. A predicate is read free from the first
+call that reaches it free, and every later call on it, whatever it binds,
+reaches the free adornment. An adornment of `p` binding columns that an
+earlier call reached was reached on behalf of a call the draft will not
+make, and so was whatever only it reached; when the search kept one, it
+runs once more, with every predicate the first search read free read free
+from the start. No third search is needed. Which adornments a rule's calls
+reach depends on the adornment the rule is read for and on which predicates
+are read free, and on nothing else, so every call the second search makes
+the first made too, and every predicate it reaches free is one the first
+read free already. The adornments the last search kept are named and
+drafted. When none of them binds a column, the query reads every predicate
+the search adorned completely, per section 3, and nothing is drafted.
+
+When some adornment binds a column, a free copy `p$ff` stays a copy: its
+rules may call a predicate `q` with a binding that nothing else asks for,
+and that demand is worth propagating. The subsumption rule has already made
+sure that no such call is to a predicate that is also reached free.
 
 Generated predicates enter the context's predicate table like any other and
 are never removed, per `specs/design-program.md` section 3. Their number is
@@ -230,24 +290,27 @@ literals and comparisons are appended as they are. The rewrite generates:
   call's bound arguments and its body is the prefix. The magic rule says:
   whenever the rule is called with these bound values, and the literals
   before this one hold, this literal is called with these;
-* **one supplementary rule before every demand call after the first**: the
-  prefix is not written out again but derived once, into a **supplementary
-  predicate** whose columns are the prefix's *live* variables -- those it
-  binds that occur in the call, in a literal after it, or in the head -- by
-  the one rule whose body is the prefix. From there the prefix is that one
-  literal: the call's magic rule, every later rule and the adorned rule read
+* **one supplementary rule before every call binding a column but the
+  first**, whether or not the call propagates demand, as a call the free
+  adornment subsumes (section 4) does not: the prefix is not written out
+  again but derived once, into a **supplementary predicate** whose columns
+  are the prefix's *live* variables -- those it binds that occur in the
+  call, in a literal after it, or in the head -- by the one rule whose body
+  is the prefix. From there the prefix is that one literal: the call's
+  magic rule, when it has one, every later rule and the adorned rule read
   the prefix through it;
 * **the adorned rule**: the rule with *p* renamed `p$α` and the prefix after
   the last literal as its body.
 
-A rule with one demand call, which most rules have, generates exactly what
+A rule with one call binding a column, which most rules have, generates what
 the plain construction does: the prefix before the call is written into its
-magic rule and again into the adorned rule, and no supplementary predicate
-exists. A rule with *k* demand calls over *n* literals generates bodies
-holding about *n* + 2*k* literals rather than the sum of the prefixes, about
-*nk*/2, and the prefix through a call is evaluated once rather than once per
-later call and again for the adorned rule. The cost is one relation per
-supplementary predicate, holding the prefix's live bindings. For
+magic rule, when it has one, and again into the adorned rule, and no
+supplementary predicate exists. A rule with *k* calls binding a column over
+*n* literals generates bodies holding about *n* + 2*k* literals rather than
+the sum of the prefixes, about *nk*/2, and the prefix through a call is
+evaluated once rather than once per later call and again for the adorned
+rule. The cost is one relation per supplementary predicate, holding the
+prefix's live bindings. For
 
 ```prolog
 p(X, Z) :- p(X, Y), p(Y, Z).
@@ -362,14 +425,15 @@ p(Y) :- a(Y), q(Y), s(Y).
 ```
 
 both give `magic$q$b(X) :- magic$p$b(X), a(X).` after renumbering. A
-generated rule is compared structurally with those already generated, through
-a hash table over their canonical forms, and a duplicate is not appended.
-Renumbering is what makes a plain structural comparison enough: two rules
-equal up to renaming have equal canonical forms. Supplementary predicates are
-named by their rule and call, so two source rules sharing a prefix beyond
-their first demand call generate distinct supplementary rules, and only their
-first magic rules are found equal. Sharing further would name a supplementary
-predicate by its content, and what it would save is linear in what is kept.
+generated rule is compared structurally with those already generated,
+through a hash table over their canonical forms, and a duplicate is not
+appended. Renumbering is what makes a plain structural comparison enough:
+two rules equal up to renaming have equal canonical forms. Supplementary
+predicates are named by their rule and call, so two source rules sharing a
+prefix beyond their first call binding a column generate distinct
+supplementary rules, and at most the magic rules before their first cut are
+found equal. Sharing further would name a supplementary predicate by its
+content, and what it would save is linear in what is kept.
 
 **A rule whose head is one of its own positive literals is dropped.** It can
 only derive a tuple that the relation already holds. It arises naturally:
@@ -423,7 +487,7 @@ program:
 | Budget | Counts | Is |
 | --- | --- | --- |
 | generated predicates | as `max_magic_preds` | 256 + 16 x the program's derived predicates |
-| generated literals | body literals of every rule drafted, kept or dropped | 256 + 16 x the program's size in literals |
+| generated literals | body literals of every rule drafted, kept or dropped, and of every rule a search for the adornments reads | 256 + 16 x the program's size in literals |
 
 A program's derived predicates are the members of its schedule, and its
 size in literals is what one adorned copy of it holds: each rule's body plus
@@ -449,6 +513,29 @@ wrong: one adornment of a single rule of k demand calls keeps a magic rule
 and a supplementary rule per call, about 2k rules from one rule of the
 program, which is a rewrite that specializes the program and that the
 budgets exist to admit.
+
+**The search is charged what it reads.** Finding the adornments reads every
+rule of each, and a query can reach far more adornments than its rewrite
+could draft: the program of 2^arity adornments above does it. So each
+search is held on its own to what bounds the draft: the adornments it keeps
+count against the predicate limit or budget, each rule it reads against the
+rule limit, and its body against the literal budget, counted apart from the
+drafts. A search that outgrows one refuses or abandons the rewrite before
+anything is drafted, whichever a configured limit or a budget does.
+Drafting an adornment drafts every rule of its source, whole or cut into
+pieces that hold at least its body between them, and the literal budget
+charges every draft, so a search reads no more literals than drafting what
+it keeps is charged. A search keeps no more adornments than the rewrite
+without subsumption would adorn, so neither the predicate limit nor the
+literal budget refuses a query that rewrite would admit. The rule limit
+counts only the rules the draft keeps, which drops duplicates and rules
+that derive nothing, so under a configured rule limit a search can refuse a
+query whose rewrite would have fit. A query whose first search reaches more
+than a limit admits is refused even when the adornments a free one subsumes
+would have brought the rewrite within it. What a search needs
+to read one rule, the rule's order and the planner's working state, is
+released once the rule is read, so a search holds its adornments, kept and
+subsumed, and nothing else that grows with the rules it reads.
 
 The literal budget counts every rule drafted, kept or dropped. A duplicate,
 or a rule that derives nothing, is built before it is recognized as one,
@@ -633,6 +720,27 @@ query $q0(X) :- path$bf(a, X).
   `link` names the derived relation of.
 * A query whose body reads only complete predicates has nothing to adorn and
   shows no rewrite heading: its phase 1 components and its plan.
+* An adornment the free one subsumes is listed where it was reached, with
+  the subsumption noted, so a reader sees what the query would have asked
+  for:
+
+  ```text
+  adorn pointsTo/2 ff
+  adorn pointsTo/2 bf, subsumed by pointsTo/2 ff
+  ```
+
+* A rewrite whose adornments bind nothing ends its heading with
+  `read completely:` and the predicates the search reached, and is followed
+  by the plans of the program's components it adds to phase 1 and of the
+  query's own rule:
+
+  ```text
+  magic rewrite of $q0(X, Y) :- pointsTo(X, Y).
+      adorn pointsTo/2 ff
+      adorn pointsTo/2 bf, subsumed by pointsTo/2 ff
+      read completely: pointsTo/2
+  stratum 0, component 0 (recursive): pointsTo/2
+  ```
 * A recursive rule of the rewritten program shows its delta variants and no
   plan of its own, as `specs/design-planner.md` section 8.2 describes.
   `edge` is small and complete, so each variant's placed plan scans it
@@ -691,10 +799,10 @@ the same schedule, and byte-identical `-e` output.
   under conditions that are not obvious on first reading.
 * **Adorning a predicate no rule derives.** Section 3.
 * **A guarded copy of each fact.** Section 6.
-* **A supplementary predicate before the first demand call.** The classic
-  construction cuts there too, which would materialize a relation for every
-  adorned rule, `path :- edge, path` included, to save repeating a prefix
-  that is usually one literal.
+* **A supplementary predicate before the first call binding a column.** The
+  classic construction cuts there too, which would materialize a relation
+  for every adorned rule, `path :- edge, path` included, to save repeating a
+  prefix that is usually one literal.
 * **A threshold on cutting.** Section 6.
 * **Naming supplementary predicates by content.** Section 7.
 * **Relations kept across queries.** Section 9.2.

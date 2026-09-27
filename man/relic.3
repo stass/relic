@@ -214,6 +214,10 @@ the predicates it generates and the literals of the rules it drafts, which
 bound the rules it keeps as well, and a rewrite outgrowing one is abandoned
 with a warning and the query answered from the whole program; setting
 either lifts every budget, and a limit left zero beside it bounds nothing.
+The rewrite searches for what to generate before it generates anything,
+and the search is held to the same limits and budgets; it can count
+predicates and rules the finished rewrite drops, so a limit may refuse a
+query whose rewrite would have fit.
 .Dv SIZE_MAX
 sets no bound on anything.
 .Fa flags

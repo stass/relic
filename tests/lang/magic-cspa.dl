@@ -1,0 +1,34 @@
+% Graspan's context-sensitive points-to rules, which the engine comparison
+% runs as cspa, over a few statements.  valueFlow, memoryAlias and valueAlias
+% call one another with bound columns.  The free query reaches valueFlow
+% free, and that adornment subsumes the bound calls valueFlow's rules make
+% on it; it reaches memoryAlias and valueAlias only bound, so the rewrite
+% goes on for them.  The bound query reaches no predicate free, and keeps
+% every adornment it reaches.  The answers are the program's either way.
+
+assign(a, b).
+assign(b, c).
+assign(d, a).
+assign(e, f).
+assign(f, d).
+dereference(a, p).
+dereference(c, q).
+dereference(p, r).
+dereference(e, p).
+dereference(q, s).
+
+valueFlow(Y, X) :- assign(Y, X).
+valueFlow(X, Y) :- assign(X, Z), memoryAlias(Z, Y).
+valueFlow(X, Y) :- valueFlow(X, Z), valueFlow(Z, Y).
+valueFlow(X, X) :- assign(X, _).
+valueFlow(X, X) :- assign(_, X).
+
+memoryAlias(X, W) :- dereference(Y, X), valueAlias(Y, Z), dereference(Z, W).
+memoryAlias(X, X) :- assign(_, X).
+memoryAlias(X, X) :- assign(X, _).
+
+valueAlias(X, Y) :- valueFlow(Z, X), valueFlow(Z, Y).
+valueAlias(X, Y) :- valueFlow(Z, X), memoryAlias(Z, W), valueFlow(W, Y).
+
+valueFlow(X, Y)?
+valueFlow(d, Y)?

@@ -12,10 +12,10 @@
  */
 
 /*
- * A program whose query p(Y1, ..., Yn)? reaches every one of p's 2^n
- * adornments, n being `arity`: each rule calls p with one more column bound
- * than its head was called with.  f holds the single fact f(c, ..., c), so
- * the answer is one row of n c's.
+ * A program whose query p(c, Y2, ..., Yn)? reaches every one of the 2^(n-1)
+ * adornments of p that bind its first column, n being `arity`: each rule
+ * calls p with one more column bound than its head was called with.  f holds
+ * the single fact f(c, ..., c), so the answer is one row of n - 1 c's.
  *
  * Returns the text, which the caller frees, or NULL when memory ran out.
  */

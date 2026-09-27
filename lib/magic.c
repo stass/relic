@@ -77,11 +77,23 @@
  * arity is read from the rule, and a limit reached while generating a rule is
  * attributed to the predicate called, never to the rule making the call.
  *
+ * A free adornment subsumes the others of its predicate.  Once the query
+ * reaches p with no column bound, p$ff holds every tuple of p, and a call
+ * binding columns of p reads p$ff through a lookup on them rather than an
+ * adornment of its own, which would hold a subset of p$ff computed beside it.
+ * So the rewrite runs in two stages.  The first finds the adornments the
+ * query reaches, reading through the free adornment every call on a
+ * predicate called free anywhere, and drafts nothing; the second drafts the
+ * rules of those it keeps.  When none of them binds a column, a rewrite
+ * would derive exactly the relations of the predicates the query reaches,
+ * so there is no second stage: the query reads those predicates completely,
+ * and runs as written over the program's own relations.
+ *
  * The rewrite terminates because adornments are memoized on the predicate and
  * the bound columns, and a predicate of arity n has at most 2^n of them.  The
- * array of adornments is the worklist: generating one adornment's rules
- * appends the adornments its calls need, and the loop walking the array
- * reaches each of them in turn, once.
+ * kept adornments are the worklist: reading one adornment's rules keeps the
+ * adornments its calls need, and the loop over the kept set reaches each of
+ * them in turn, once.
  *
  * Generated rules are renumbered: their variables take slots in order of first
  * occurrence, head then body.  That keeps every slot of a rule bound by one of
@@ -125,10 +137,25 @@
 #define	QUERY_ADORNED_NAME_LENGTH	(sizeof(QUERY_ADORNED_NAME) - 1)
 #define	ORDINALS_MAX			(2 * (1 + 20))
 
+typedef struct relic_closure relic_closure_t;
 typedef struct relic_demand relic_demand_t;
 typedef struct relic_draft relic_draft_t;
 typedef struct relic_prefix relic_prefix_t;
 typedef struct relic_renumbering relic_renumbering_t;
+
+/*
+ * Components being marked complete and closed over what they depend on.
+ * `queue` holds those marked, in the order they were marked, and those
+ * before `head` have had their rules followed to what they depend on.  A
+ * component is queued at most once, the first time it is marked, which
+ * bounds the queue by the schedule.
+ */
+struct relic_closure {
+	relic_magic_t	*magic;
+	size_t		*queue;
+	size_t		 count;
+	size_t		 head;
+};
 
 /*
  * The walk that finds what a query reads completely.
@@ -144,19 +171,16 @@ typedef struct relic_renumbering relic_renumbering_t;
  *
  * `handled` marks the components a positive literal has already been
  * examined for, and `pending` holds those found to be read on demand whose
- * rules have not been visited yet.  `queue` holds the components marked
- * complete, in the order they were marked, and those before `queue_head` have
- * had their rules followed to what they depend on.  Each component is
- * pending at most once and queued at most once, which bounds both.
+ * rules have not been visited yet.  `complete` collects the components the
+ * walk finds complete.  Each component is pending at most once, which bounds
+ * `pending`.
  */
 struct relic_demand {
 	relic_magic_t		*magic;
 	bool			*handled;
 	size_t			*pending;
-	size_t			*queue;
 	size_t			 pending_count;
-	size_t			 queue_count;
-	size_t			 queue_head;
+	relic_closure_t		 complete;
 };
 
 /*
@@ -209,30 +233,47 @@ struct relic_renumbering {
 
 static void	 abandon_over_budget(relic_magic_t *magic, const char *what,
 		    size_t budget, relic_pred_id_t source);
+static int	 add_adornment(relic_magic_t *magic,
+		    relic_adornment_set_t *set, relic_pred_id_t source,
+		    uint32_t bound, uint32_t hash);
 static int	 adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
 		    size_t rule_ordinal, const relic_adornment_t *adornment);
 static int	 adorn_rules(relic_magic_t *magic,
 		    const relic_adornment_t *adornment);
-static uint32_t	 adornment_hash(const relic_magic_t *magic,
+static uint32_t	 adornment_hash(const relic_adornment_set_t *set,
 		    relic_pred_id_t source, uint32_t bound);
 static int	 adornment_of_call(relic_magic_t *magic,
-		    const relic_literal_t *call, uint64_t bound,
+		    const relic_literal_t *call, uint32_t columns,
 		    relic_adornment_t *adornmentp);
+static void	 adornment_set_clear(relic_adornment_set_t *set);
+static void	 adornment_set_init(relic_adornment_set_t *set,
+		    uint64_t hash_seed);
+static void	 adornment_set_release(relic_adornment_set_t *set);
 static int	 append_rule(relic_magic_t *magic, const relic_rule_t *rule,
 		    uint32_t hash);
 static uint64_t	 arg_slot(const relic_arg_t *arg);
 static bool	 args_equal(const relic_arg_t *a, const relic_arg_t *b,
 		    uint16_t count);
-static relic_arg_t *bound_args(relic_magic_t *magic, const relic_arg_t *args,
-		    uint16_t arity, uint32_t columns);
 static int	 base_view_of(relic_magic_t *magic, relic_pred_id_t source,
 		    relic_pred_id_t *viewp);
 static int	 base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
 		    const relic_location_t *where, relic_rule_t *rulep);
+static void	 begin_search(relic_magic_t *magic);
+static int	 begin_searching(relic_magic_t *magic);
+static bool	 binds_some_column(const relic_magic_t *magic);
+static relic_arg_t *bound_args(relic_magic_t *magic, const relic_arg_t *args,
+		    uint16_t arity, uint32_t columns);
 static size_t	 budget_for(size_t program_size);
+static uint32_t	 call_columns(const relic_magic_t *magic,
+		    const relic_literal_t *call, uint64_t bound);
 static int	 canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 		    relic_rule_t *rule);
-static void	 close_complete(relic_demand_t *demand);
+static int	 charge_literals(relic_magic_t *magic, size_t *spent,
+		    size_t length, relic_pred_id_t attributed);
+static int	 charge_rule_read(relic_magic_t *magic,
+		    const relic_rule_t *rule, relic_pred_id_t source);
+static void	 close_complete(relic_closure_t *closure);
+static int	 closure_begin(relic_closure_t *closure, relic_magic_t *magic);
 static uint16_t	 column_count(uint32_t columns);
 static const relic_component_t *component_at(const relic_magic_t *magic,
 		    size_t position);
@@ -240,8 +281,8 @@ static size_t	 component_of(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
 static const relic_rule_t *component_rule(const relic_magic_t *magic,
 		    const relic_component_t *component, size_t i);
-static int	 confirm_literal_budget(relic_magic_t *magic,
-		    size_t body_length, relic_pred_id_t attributed);
+static int	 confirm_pred_indexed(relic_magic_t *magic,
+		    relic_pred_id_t source);
 static int	 confirm_pred_limit(relic_magic_t *magic,
 		    relic_pred_id_t source, size_t generated);
 static int	 confirm_rule_limit(relic_magic_t *magic,
@@ -254,13 +295,14 @@ static int	 copy_literal(relic_magic_t *magic,
 		    const relic_literal_t *source, relic_literal_t *copy);
 static int	 cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix,
 		    size_t call_ordinal, uint64_t live,
-		    const relic_adornment_t *called);
+		    relic_pred_id_t called_pred);
 static int	 demand_begin(relic_demand_t *demand, relic_magic_t *magic);
 static int	 exceed(relic_magic_t *magic,
 		    const relic_magic_limit_t *limit, const char *key,
 		    const char *what, relic_pred_id_t source);
-static int	 find_adornment(relic_magic_t *magic, relic_pred_id_t source,
-		    uint32_t bound, relic_adornment_t *adornmentp);
+static const relic_adornment_t *find_adornment(
+		    const relic_adornment_set_t *set, relic_pred_id_t source,
+		    uint32_t bound, uint32_t hash);
 static bool	 find_rule(const relic_magic_t *magic, const relic_rule_t *rule,
 		    uint32_t hash);
 static int	 guard_literal(relic_magic_t *magic, const relic_rule_t *rule,
@@ -279,6 +321,9 @@ static int	 intern_generated(relic_magic_t *magic, const char *name,
 static int	 intern_supplementary(relic_magic_t *magic,
 		    const relic_prefix_t *prefix, size_t call_ordinal,
 		    uint16_t arity, relic_pred_id_t *idp);
+static int	 keep_adornment(relic_magic_t *magic, relic_pred_id_t source,
+		    uint32_t bound);
+static bool	 kept_bound_adornment_of_free(const relic_magic_t *magic);
 static uint64_t	*later_slots(relic_magic_t *magic, const relic_rule_t *rule,
 		    const size_t *order);
 static relic_magic_limit_t limit_or_budget(size_t configured_limit,
@@ -290,11 +335,15 @@ static bool	 literals_equal(const relic_magic_t *magic,
 		    const relic_literal_t *a, const relic_literal_t *b);
 static void	*magic_alloc(relic_magic_t *magic, size_t count, size_t size);
 static int	 map_components(relic_magic_t *magic);
-static void	 mark_complete(relic_demand_t *demand, size_t position);
+static void	 mark_complete(relic_closure_t *closure, size_t position);
 static int	 name_adornment(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound, relic_adornment_t *adornment);
+static int	 name_adornments(relic_magic_t *magic);
 static bool	 negates_on_demand(const relic_magic_t *magic,
 		    const relic_literal_t *literal);
+static void	 note_incomplete(relic_magic_t *magic);
+static int	 note_subsumed(relic_magic_t *magic, relic_pred_id_t source,
+		    uint32_t bound);
 static uint64_t	 positive_slots(const relic_magic_t *magic,
 		    const relic_literal_t *literal);
 static uint16_t	 pred_arity(const relic_magic_t *magic, relic_pred_id_t pred);
@@ -302,11 +351,18 @@ static bool	 pred_is_complete(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
 static size_t	 program_size_in_literals(const relic_ruletab_t *rules);
 static int	 publish_rule(relic_magic_t *magic, const relic_draft_t *draft);
+static int	 reach_adornment(relic_magic_t *magic,
+		    relic_pred_id_t source, uint32_t bound);
+static int	 reach_calls(relic_magic_t *magic, const relic_rule_t *rule,
+		    uint64_t bound);
+static int	 reach_calls_in_order(relic_magic_t *magic,
+		    const relic_rule_t *rule, uint64_t bound);
+static int	 reach_rules_of(relic_magic_t *magic,
+		    const relic_adornment_t *adornment);
+static int	 read_reached_completely(relic_magic_t *magic,
+		    const relic_rule_t *query);
 static bool	 reads_on_demand(const relic_magic_t *magic,
 		    const relic_literal_t *literal);
-static int	 record_adornment(relic_magic_t *magic,
-		    relic_pred_id_t source, uint32_t bound, uint32_t hash,
-		    relic_adornment_t *adornmentp);
 static int	 record_call(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_literal_t *prefix, size_t length,
 		    const relic_literal_t *call,
@@ -327,6 +383,9 @@ static uint32_t	 rule_hash(const relic_magic_t *magic,
 		    const relic_rule_t *rule);
 static bool	 rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
 		    const relic_rule_t *b);
+static int	 search_adornments(relic_magic_t *magic,
+		    const relic_rule_t *query);
+static int	 search_once(relic_magic_t *magic, const relic_rule_t *query);
 static uint16_t	 slot_count(uint64_t slots);
 static int	 supplementary_literal(relic_magic_t *magic,
 		    const relic_prefix_t *prefix, size_t call_ordinal,
@@ -340,7 +399,9 @@ relic_magic_init(relic_magic_t *magic, relic_t *ctx)
 	bzero(magic, sizeof(*magic));
 	magic->ctx = ctx;
 	relic_arena_init_charged(&magic->arena, &ctx->account);
-	relic_idtab_init(&magic->adornment_index);
+	relic_arena_init_charged(&magic->scratch, &ctx->account);
+	adornment_set_init(&magic->kept, ctx->hash_seed);
+	adornment_set_init(&magic->subsumed, ctx->hash_seed);
 	relic_idtab_init(&magic->rule_index);
 	magic->hash_seed = ctx->hash_seed;
 }
@@ -352,11 +413,12 @@ relic_magic_reset(relic_magic_t *magic)
 
 	ctx = magic->ctx;
 
-	free(magic->adornments);
+	adornment_set_release(&magic->kept);
+	adornment_set_release(&magic->subsumed);
 	free(magic->rules.entries);
-	relic_idtab_reset(&magic->adornment_index);
 	relic_idtab_reset(&magic->rule_index);
 	relic_arena_reset(&magic->arena);
+	relic_arena_reset(&magic->scratch);
 
 	relic_magic_init(magic, ctx);
 }
@@ -557,8 +619,7 @@ demand_begin(relic_demand_t *demand, relic_magic_t *magic)
 	    sizeof(*demand->pending));
 	if (demand->pending == NULL)
 		return (-1);
-	demand->queue = magic_alloc(magic, components, sizeof(*demand->queue));
-	if (demand->queue == NULL)
+	if (closure_begin(&demand->complete, magic) != 0)
 		return (-1);
 
 	bzero(magic->complete_components, components *
@@ -569,18 +630,33 @@ demand_begin(relic_demand_t *demand, relic_magic_t *magic)
 }
 
 /*
+ * Room for a closure over every component of the schedule, none queued.
+ */
+static int
+closure_begin(relic_closure_t *closure, relic_magic_t *magic)
+{
+	bzero(closure, sizeof(*closure));
+	closure->magic = magic;
+	closure->queue = magic_alloc(magic,
+	    magic->ctx->program.schedule.component_count,
+	    sizeof(*closure->queue));
+
+	return (closure->queue == NULL ? -1 : 0);
+}
+
+/*
  * Mark a component complete, queueing it so that what it depends on is
  * marked too.
  */
 static void
-mark_complete(relic_demand_t *demand, size_t position)
+mark_complete(relic_closure_t *closure, size_t position)
 {
-	if (demand->magic->complete_components[position])
+	if (closure->magic->complete_components[position])
 		return;
 
-	demand->magic->complete_components[position] = true;
-	demand->queue[demand->queue_count] = position;
-	demand->queue_count++;
+	closure->magic->complete_components[position] = true;
+	closure->queue[closure->count] = position;
+	closure->count++;
 }
 
 /*
@@ -616,7 +692,7 @@ visit_body(relic_demand_t *demand, const relic_rule_t *rule)
 			continue;
 
 		if (literal->kind == RELIC_LITERAL_NEGATED) {
-			mark_complete(demand, position);
+			mark_complete(&demand->complete, position);
 			continue;
 		}
 
@@ -653,7 +729,7 @@ visit_demanded(relic_demand_t *demand, size_t position)
  * Each component is queued when first marked and its rules followed once.
  */
 static void
-close_complete(relic_demand_t *demand)
+close_complete(relic_closure_t *closure)
 {
 	const relic_magic_t *magic;
 	const relic_component_t *component;
@@ -663,12 +739,11 @@ close_complete(relic_demand_t *demand)
 	size_t i;
 	size_t j;
 
-	magic = demand->magic;
+	magic = closure->magic;
 
-	while (demand->queue_head < demand->queue_count) {
-		component = component_at(magic,
-		    demand->queue[demand->queue_head]);
-		demand->queue_head++;
+	while (closure->head < closure->count) {
+		component = component_at(magic, closure->queue[closure->head]);
+		closure->head++;
 
 		for (i = 0; i < component->rule_count; i++) {
 			rule = component_rule(magic, component, i);
@@ -681,7 +756,7 @@ close_complete(relic_demand_t *demand)
 				target = component_of(magic,
 				    literal->u.atom.pred);
 				if (target != RELIC_NO_COMPONENT)
-					mark_complete(demand, target);
+					mark_complete(closure, target);
 			}
 		}
 	}
@@ -702,7 +777,6 @@ relic_magic_find_complete(relic_magic_t *magic, const relic_rule_t *query)
 {
 	relic_demand_t demand;
 	size_t position;
-	size_t p;
 
 	if (intern_base_views(magic) != 0)
 		return (-1);
@@ -725,15 +799,27 @@ relic_magic_find_complete(relic_magic_t *magic, const relic_rule_t *query)
 		visit_demanded(&demand, position);
 	}
 
-	close_complete(&demand);
+	close_complete(&demand.complete);
+	note_incomplete(magic);
+
+	return (0);
+}
+
+/*
+ * Mark as read on demand every predicate a rule derives whose component is
+ * not complete.
+ */
+static void
+note_incomplete(relic_magic_t *magic)
+{
+	size_t position;
+	size_t p;
 
 	for (p = 0; p < magic->predicate_count; p++) {
 		position = magic->component_of[p];
 		magic->incomplete[p] = position != RELIC_NO_COMPONENT &&
 		    !magic->complete_components[position];
 	}
-
-	return (0);
 }
 
 static void
@@ -873,25 +959,27 @@ confirm_rule_limit(relic_magic_t *magic, relic_pred_id_t attributed)
 }
 
 /*
- * Confirm that one more drafted rule, of `body_length` literals, stays
- * within the literal budget.  Outgrowing it abandons the rewrite: the budget
- * exists only for a rewrite nobody has sized.  The count never passes the
- * budget, since only what this admits is added to it, so the subtraction
- * cannot wrap where the sum could.
+ * Add `length` literals to the count `spent` of the literal budget, unless
+ * that would take it past the budget.  Outgrowing it abandons the rewrite:
+ * the budget exists only for a rewrite nobody has sized.  The count never
+ * passes the budget, since only what this admits is added to it, so the
+ * subtraction cannot wrap where the sum could.
  */
 static int
-confirm_literal_budget(relic_magic_t *magic, size_t body_length,
+charge_literals(relic_magic_t *magic, size_t *spent, size_t length,
     relic_pred_id_t attributed)
 {
-	assert(magic->generated_literals <= magic->literal_budget);
+	assert(*spent <= magic->literal_budget);
 
-	if (body_length <= magic->literal_budget - magic->generated_literals)
-		return (0);
+	if (length > magic->literal_budget - *spent) {
+		abandon_over_budget(magic, "generated literals",
+		    magic->literal_budget, attributed);
+		return (-1);
+	}
 
-	abandon_over_budget(magic, "generated literals", magic->literal_budget,
-	    attributed);
+	*spent += length;
 
-	return (-1);
+	return (0);
 }
 
 /*
@@ -1114,8 +1202,38 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	    NULL, &adornment->magic));
 }
 
+/*
+ * An empty set of adornments, hashing under `hash_seed`.
+ */
+static void
+adornment_set_init(relic_adornment_set_t *set, uint64_t hash_seed)
+{
+	bzero(set, sizeof(*set));
+	relic_idtab_init(&set->index);
+	set->hash_seed = hash_seed;
+}
+
+/*
+ * Forget every adornment of a set and release its index, keeping the array
+ * of entries for the next search.
+ */
+static void
+adornment_set_clear(relic_adornment_set_t *set)
+{
+	set->count = 0;
+	relic_idtab_reset(&set->index);
+}
+
+static void
+adornment_set_release(relic_adornment_set_t *set)
+{
+	free(set->entries);
+	relic_idtab_reset(&set->index);
+	adornment_set_init(set, set->hash_seed);
+}
+
 static uint32_t
-adornment_hash(const relic_magic_t *magic, relic_pred_id_t source,
+adornment_hash(const relic_adornment_set_t *set, relic_pred_id_t source,
     uint32_t bound)
 {
 	uint32_t key[2];
@@ -1123,96 +1241,153 @@ adornment_hash(const relic_magic_t *magic, relic_pred_id_t source,
 	key[0] = source;
 	key[1] = bound;
 
-	return (relic_hash_words(magic->hash_seed, key, 2));
+	return (relic_hash_words(set->hash_seed, key, 2));
 }
 
 static uint32_t
 rehash_adornment(uint32_t id, void *ctx)
 {
 	const relic_adornment_t *adornment;
-	const relic_magic_t *magic;
+	const relic_adornment_set_t *set;
 
-	magic = ctx;
-	adornment = &magic->adornments[id - 1];
+	set = ctx;
+	adornment = &set->entries[id - 1];
 
-	return (adornment_hash(magic, adornment->source, adornment->bound));
+	return (adornment_hash(set, adornment->source, adornment->bound));
 }
 
 /*
- * Record a new adornment at the end of the worklist, naming its predicates.
- * Room in the array and in the index is made before anything is interned, so
+ * The adornment of `set` for calling `source` with the columns of `bound`
+ * bound, whose hash is `hash`, or NULL when none was recorded.
+ */
+static const relic_adornment_t *
+find_adornment(const relic_adornment_set_t *set, relic_pred_id_t source,
+    uint32_t bound, uint32_t hash)
+{
+	const relic_adornment_t *candidate;
+	relic_idprobe_t probe;
+	uint32_t id;
+
+	relic_idprobe_open(&probe, &set->index, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		candidate = &set->entries[id - 1];
+		if (candidate->source == source && candidate->bound == bound)
+			return (candidate);
+	}
+
+	return (NULL);
+}
+
+/*
+ * Record an adornment at the end of `set`, with no predicates named yet and
+ * the position the search has reached among the adornments it keeps.  Room
+ * in the array and in the index is made before anything is recorded, so
  * that running out of memory leaves no half-recorded adornment.
  */
 static int
-record_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
-    uint32_t hash, relic_adornment_t *adornmentp)
+add_adornment(relic_magic_t *magic, relic_adornment_set_t *set,
+    relic_pred_id_t source, uint32_t bound, uint32_t hash)
 {
-	relic_adornment_t *adornments;
-	size_t generated;
+	relic_adornment_t *entries;
+	relic_adornment_t *recorded;
 
-	generated = bound == 0 ? 1 : 2;
-	if (confirm_pred_limit(magic, source, generated) != 0)
-		return (-1);
-
-	if (magic->adornment_count >= UINT32_MAX - 1) {
+	if (set->count >= UINT32_MAX - 1) {
 		relic_diagf(magic->ctx, RELIC_ERROR, NULL,
 		    "a query's Magic rewrite generated more adornments than it "
 		    "can index");
 		return (-1);
 	}
 
-	adornments = relic_grow_array(magic->adornments,
-	    &magic->adornment_capacity, magic->adornment_count + 1,
-	    sizeof(*magic->adornments));
-	if (adornments == NULL) {
+	entries = relic_grow_array(set->entries, &set->capacity,
+	    set->count + 1, sizeof(*set->entries));
+	if (entries == NULL) {
 		relic_diag_no_memory(magic->ctx);
 		return (-1);
 	}
-	magic->adornments = adornments;
+	set->entries = entries;
 
-	if (relic_idtab_reserve(&magic->adornment_index, 1, rehash_adornment,
-	    magic) != 0) {
+	if (relic_idtab_reserve(&set->index, 1, rehash_adornment, set) != 0) {
 		relic_diag_no_memory(magic->ctx);
 		return (-1);
 	}
 
-	if (name_adornment(magic, source, bound, adornmentp) != 0)
-		return (-1);
+	recorded = &set->entries[set->count];
+	bzero(recorded, sizeof(*recorded));
+	recorded->source = source;
+	recorded->adorned = RELIC_ID_NONE;
+	recorded->magic = RELIC_ID_NONE;
+	recorded->bound = bound;
+	recorded->kept_before = magic->kept.count;
 
-	magic->adornments[magic->adornment_count] = *adornmentp;
-	magic->adornment_count++;
-	magic->generated_preds += generated;
-	relic_idtab_place(&magic->adornment_index, hash,
-	    (uint32_t)magic->adornment_count);
+	set->count++;
+	relic_idtab_place(&set->index, hash, (uint32_t)set->count);
 
 	return (0);
 }
 
 /*
- * The adornment for calling `source` with the columns of `bound` bound,
- * recording it if this is the first call to ask for it.
+ * Keep the adornment calling `source` with the columns of `bound` bound,
+ * unless the search has kept it already.  A new one counts the predicates
+ * naming it will generate -- the adorned one, and the magic one when a
+ * column is bound -- against the limit on generated predicates.
  */
 static int
-find_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
-    relic_adornment_t *adornmentp)
+keep_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
 {
-	const relic_adornment_t *candidate;
-	relic_idprobe_t probe;
+	size_t generated;
 	uint32_t hash;
-	uint32_t id;
 
-	hash = adornment_hash(magic, source, bound);
+	hash = adornment_hash(&magic->kept, source, bound);
+	if (find_adornment(&magic->kept, source, bound, hash) != NULL)
+		return (0);
 
-	relic_idprobe_open(&probe, &magic->adornment_index, hash);
-	while (relic_idprobe_next(&probe, &id)) {
-		candidate = &magic->adornments[id - 1];
-		if (candidate->source == source && candidate->bound == bound) {
-			*adornmentp = *candidate;
-			return (0);
-		}
+	generated = bound == 0 ? 1 : 2;
+	if (confirm_pred_limit(magic, source, generated) != 0)
+		return (-1);
+
+	if (add_adornment(magic, &magic->kept, source, bound, hash) != 0)
+		return (-1);
+	magic->generated_preds += generated;
+
+	return (0);
+}
+
+/*
+ * Note that a call binding the columns of `bound` reads `source` through its
+ * free adornment, unless the search has noted it already.  It generates no
+ * predicate and counts against no limit.
+ */
+static int
+note_subsumed(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
+{
+	uint32_t hash;
+
+	hash = adornment_hash(&magic->subsumed, source, bound);
+	if (find_adornment(&magic->subsumed, source, bound, hash) != NULL)
+		return (0);
+
+	return (add_adornment(magic, &magic->subsumed, source, bound, hash));
+}
+
+/*
+ * Name and intern the predicates of every adornment the query reaches and
+ * keeps, in the order they were recorded.  Their count was confirmed against
+ * the limit when they were recorded.
+ */
+static int
+name_adornments(relic_magic_t *magic)
+{
+	relic_adornment_t *adornment;
+	size_t i;
+
+	for (i = 0; i < magic->kept.count; i++) {
+		adornment = &magic->kept.entries[i];
+		if (name_adornment(magic, adornment->source, adornment->bound,
+		    adornment) != 0)
+			return (-1);
 	}
 
-	return (record_adornment(magic, source, bound, hash, adornmentp));
+	return (0);
 }
 
 /*
@@ -1574,10 +1749,9 @@ publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 	relic_rule_t rule;
 	uint32_t hash;
 
-	if (confirm_literal_budget(magic, draft->body_length,
-	    draft->attributed) != 0)
+	if (charge_literals(magic, &magic->generated_literals,
+	    draft->body_length, draft->attributed) != 0)
 		return (-1);
-	magic->generated_literals += draft->body_length;
 
 	if (canonicalize(magic, draft, &rule) != 0)
 		return (-1);
@@ -1725,21 +1899,47 @@ negates_on_demand(const relic_magic_t *magic, const relic_literal_t *literal)
 }
 
 /*
- * The adornment a call asks for: its predicate with bound the columns that
- * hold a constant or a slot in `bound`, recorded if no earlier call asked
- * for it.
+ * The columns a call binds: those holding a constant or a slot in `bound`.
+ */
+static uint32_t
+call_columns(const relic_magic_t *magic, const relic_literal_t *call,
+    uint64_t bound)
+{
+	return (relic_plan_bound_columns(&call->u.atom,
+	    pred_arity(magic, call->u.atom.pred), bound));
+}
+
+/*
+ * The adornment a call binding `columns` reads, as the search for the
+ * adornments the query reaches found it: the free one when its predicate is
+ * read free, and otherwise the one binding those columns.  The draft walks
+ * every body in the order that search did, so it asks only for adornments
+ * the search recorded, and one it did not find is an internal error.
  */
 static int
 adornment_of_call(relic_magic_t *magic, const relic_literal_t *call,
-    uint64_t bound, relic_adornment_t *adornmentp)
+    uint32_t columns, relic_adornment_t *adornmentp)
 {
-	uint32_t columns;
-	uint16_t arity;
+	const relic_adornment_t *found;
+	relic_pred_id_t source;
+	uint32_t adorned_columns;
 
-	arity = pred_arity(magic, call->u.atom.pred);
-	columns = relic_plan_bound_columns(&call->u.atom, arity, bound);
+	source = call->u.atom.pred;
+	if (confirm_pred_indexed(magic, source) != 0)
+		return (-1);
 
-	return (find_adornment(magic, call->u.atom.pred, columns, adornmentp));
+	adorned_columns = magic->reads_free[source - 1] ? 0 : columns;
+	found = find_adornment(&magic->kept, source, adorned_columns,
+	    adornment_hash(&magic->kept, source, adorned_columns));
+	if (found == NULL) {
+		relic_diagf(magic->ctx, RELIC_ERROR, &call->where,
+		    "internal error: a query's Magic rewrite drafted a call "
+		    "it did not adorn");
+		return (-1);
+	}
+
+	*adornmentp = *found;
+	return (0);
 }
 
 /*
@@ -1854,14 +2054,14 @@ slot_count(uint64_t slots)
 
 /*
  * Name and intern the supplementary predicate of arity `arity` that the cut
- * before the `call_ordinal`th demand call of a prefix's rule makes:
+ * before the `call_ordinal`th call binding a column of a prefix's rule makes:
  * sup$<adorned>$<rule>$<call>, the adorned predicate's name, the rule's
- * position among the rules deriving its predicate from 0, and the call's
- * among the rule's demand calls from 1.  The query's head names no
+ * position among the rules deriving its predicate from 0, and the call's among
+ * the rule's calls binding a column from 1.  The query's head names no
  * predicate, and its cuts are named after $q0.  The name depends only on the
  * adornment and the positions, so a later query with the same adornments
- * interns the same names and, where the live variables are as many, finds
- * the same predicates.
+ * interns the same names and, where the live variables are as many, finds the
+ * same predicates.
  */
 static int
 intern_supplementary(relic_magic_t *magic, const relic_prefix_t *prefix,
@@ -1953,12 +2153,13 @@ supplementary_literal(relic_magic_t *magic, const relic_prefix_t *prefix,
 }
 
 /*
- * Cut the prefix before the `call_ordinal`th demand call, `called`: derive
- * it once, by one supplementary rule, into a supplementary predicate over
- * its live slots, and continue the prefix from that one literal.  `live`
- * holds the slots the prefix binds that the call, a literal after it or the
- * head reads, so every later literal finds its variables in the cut and the
- * generated bodies stay linear in the rule's calls.
+ * Cut the prefix before the `call_ordinal`th call binding a column, a call
+ * on `called_pred`: derive it once, by one supplementary rule, into a
+ * supplementary predicate over its live slots, and continue the prefix from
+ * that one literal.  `live` holds the slots the prefix binds that the call,
+ * a literal after it or the head reads, so every later literal finds its
+ * variables in the cut and the generated bodies stay linear in the rule's
+ * calls.
  *
  * A cut whose live slots are more than a predicate may have columns is not
  * made, and the prefix continues, written out in full, to the next cut that
@@ -1966,21 +2167,21 @@ supplementary_literal(relic_magic_t *magic, const relic_prefix_t *prefix,
  *
  * The supplementary rule is published as every generated rule is, and so is
  * charged to the budgets.  It is attributed to the predicate adorned, or,
- * for the query, which is no predicate, to the predicate its call reads, as
- * the query's seeds are.  It is never dropped, because its head is new to
- * this rewrite and absent from its own body: the name is built from the
- * adorned predicate's name, which has one `$` before its b's and f's, or
- * `$q0`, which no adorned name is, and from positions a rewrite visits
- * once, and no name a program writes contains `$`.  Were it ever dropped as
- * equal to a rule already kept, that rule would derive the same relation;
- * the assertion guards the argument rather than correctness.  When a budget
+ * for the query, which is no predicate, to `called_pred`, as the query's
+ * seeds are.  It is never dropped, because its head is new to this rewrite
+ * and absent from its own body: the name is built from the adorned
+ * predicate's name, which has one `$` before its b's and f's, or `$q0`,
+ * which no adorned name is, and from positions a rewrite visits once, and
+ * no name a program writes contains `$`.  Were it ever dropped as equal to
+ * a rule already kept, that rule would derive the same relation; the
+ * assertion guards the argument rather than correctness.  When a budget
  * abandons the rewrite here, the prefix is left as it was and the predicate
  * stays interned with no rule, as an abandoned adornment's predicates do;
  * the rewrite is discarded whole.
  */
 static int
 cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
-    uint64_t live, const relic_adornment_t *called)
+    uint64_t live, relic_pred_id_t called_pred)
 {
 	relic_literal_t cut;
 	relic_draft_t draft;
@@ -2001,7 +2202,7 @@ cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
 	draft.body = prefix->body;
 	draft.body_length = prefix->length;
 	draft.attributed = prefix->adornment->source != RELIC_ID_NONE ?
-	    prefix->adornment->source : called->source;
+	    prefix->adornment->source : called_pred;
 
 	rules_before = magic->rules.count;
 	if (publish_rule(magic, &draft) != 0)
@@ -2025,10 +2226,22 @@ cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
  * -- and walked in that order, keeping the prefix, the literals evaluated
  * so far as the generated rules write them, and `bound`, the slots the
  * literals walked so far bind.  Each call on a predicate read on demand is
- * renamed to the adornment it asks for.  A demand call, one whose adornment
- * binds a column, has its magic rule generated from the prefix; before
- * every demand call after the first the prefix is cut, so that the magic
- * rule, every later one and the draft read it through one literal.
+ * renamed to the adornment it reads, and a demand call, one whose adornment
+ * binds a column, has its magic rule generated from the prefix.  Before
+ * every call binding a column but the first, the prefix is cut, so that the
+ * call's magic rule, every later rule and the draft read it through one
+ * literal.
+ *
+ * Where the prefix is cut depends on the source rule and `bound`, never on
+ * the adornment a call reads.  A call the free adornment subsumes binds its
+ * columns like any other and has the prefix cut before it, though it reads
+ * the free adornment and has no magic rule.  So every rule drafted for an
+ * adornment is as long as it would be were each call read through the
+ * adornment binding its columns, and subsumption lengthens no rule; it
+ * leaves out the magic rules of the calls it redirects.  Were the cut
+ * before a subsumed call skipped, the prefix before it would run on into
+ * the next rule and, past a later cut too wide to make, into every magic
+ * rule after it and the draft.
  *
  * Why a cut loses nothing: it keeps the slots of `bound` that are read at or
  * after the call, `later[i]`.  A slot it drops is in `bound` and absent from
@@ -2048,16 +2261,17 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	relic_prefix_t prefix;
 	uint64_t *later;
 	size_t *order;
-	size_t demand_calls;
+	size_t binding_calls;
 	size_t i;
 	uint64_t bound;
 	uint64_t live;
+	uint32_t columns;
 
 	bzero(&prefix, sizeof(prefix));
 	prefix.rule = rule;
 	prefix.adornment = head;
 	prefix.rule_ordinal = rule_ordinal;
-	demand_calls = 0;
+	binding_calls = 0;
 
 	order = magic_alloc(magic, rule->body_length, sizeof(*order));
 	if (order == NULL)
@@ -2092,20 +2306,20 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 		}
 
 		if (reads_on_demand(magic, &literal)) {
-			if (adornment_of_call(magic, &literal, bound,
-			    &called) != 0)
-				return (-1);
+			columns = call_columns(magic, &literal, bound);
+			if (columns != 0)
+				binding_calls++;
 
-			if (called.magic != RELIC_ID_NONE)
-				demand_calls++;
-
-			if (called.magic != RELIC_ID_NONE && demand_calls > 1) {
+			if (columns != 0 && binding_calls > 1) {
 				live = bound & later[i];
-				if (cut_prefix(magic, &prefix, demand_calls,
-				    live, &called) != 0)
+				if (cut_prefix(magic, &prefix, binding_calls,
+				    live, literal.u.atom.pred) != 0)
 					return (-1);
 			}
 
+			if (adornment_of_call(magic, &literal, columns,
+			    &called) != 0)
+				return (-1);
 			if (record_call(magic, rule, prefix.body,
 			    prefix.length, &literal, &called) != 0)
 				return (-1);
@@ -2229,10 +2443,389 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 }
 
 /*
+ * Room for the searches that find the adornments the query reaches, no
+ * predicate yet read free.
+ */
+static int
+begin_searching(relic_magic_t *magic)
+{
+	size_t count;
+
+	count = magic->predicate_count;
+
+	magic->reads_free = magic_alloc(magic, count,
+	    sizeof(*magic->reads_free));
+	if (magic->reads_free == NULL)
+		return (-1);
+	bzero(magic->reads_free, count * sizeof(*magic->reads_free));
+
+	return (0);
+}
+
+/*
+ * Begin a search with no adornment recorded and no rule read, keeping the
+ * predicates earlier searches read free.  The counts a search is held to
+ * are its own, so each search is bounded as a rewrite is.
+ */
+static void
+begin_search(relic_magic_t *magic)
+{
+	adornment_set_clear(&magic->kept);
+	adornment_set_clear(&magic->subsumed);
+	magic->generated_preds = 0;
+	magic->searched_rules = 0;
+	magic->searched_literals = 0;
+}
+
+/*
+ * Confirm that `source` is one of the predicates that existed when the
+ * rewrite began, which every array the rewrite indexes by predicate covers.
+ * Every literal of a program rule or of the query was interned before then,
+ * so one outside is an internal error, reported rather than read past an
+ * array.
+ */
+static int
+confirm_pred_indexed(relic_magic_t *magic, relic_pred_id_t source)
+{
+	if (source != RELIC_ID_NONE && source <= magic->predicate_count)
+		return (0);
+
+	relic_diagf(magic->ctx, RELIC_ERROR, NULL,
+	    "internal error: a query's Magic rewrite met a predicate it had "
+	    "not indexed");
+
+	return (-1);
+}
+
+/*
+ * Reach the adornment a call on `source` binding the columns of `bound`
+ * reads, applying subsumption.
+ *
+ * A predicate is read free from the first call that binds none of its
+ * columns: that call and every later one read its free adornment, and a
+ * later call that binds columns is noted as subsumed by it.  Until then a
+ * call binding columns reaches the adornment binding them.
+ */
+static int
+reach_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
+{
+	bool *reads_free;
+
+	if (confirm_pred_indexed(magic, source) != 0)
+		return (-1);
+	reads_free = &magic->reads_free[source - 1];
+
+	if (bound == 0)
+		*reads_free = true;
+
+	if (!*reads_free)
+		return (keep_adornment(magic, source, bound));
+
+	if (bound != 0) {
+		if (note_subsumed(magic, source, bound) != 0)
+			return (-1);
+	}
+
+	return (keep_adornment(magic, source, 0));
+}
+
+/*
+ * Reach the adornment of each call of `rule` in the order it is drafted in
+ * for a call binding the slots of `bound`, each call binding those slots and
+ * those of every positive literal before it: the adornments rewrite_body()
+ * asks for when it drafts the rule in that order.  The order, and the
+ * planner's work in finding it, are taken from the scratch arena.
+ */
+static int
+reach_calls_in_order(relic_magic_t *magic, const relic_rule_t *rule,
+    uint64_t bound)
+{
+	const relic_literal_t *literal;
+	size_t *order;
+	uint32_t columns;
+	size_t i;
+
+	order = relic_arena_allocarray(&magic->scratch, rule->body_length,
+	    sizeof(*order));
+	if (order == NULL) {
+		relic_diag_no_memory(magic->ctx);
+		return (-1);
+	}
+
+	if (relic_plan_order(magic->ctx, &magic->scratch, rule, bound,
+	    magic->incomplete, order) != 0)
+		return (-1);
+
+	for (i = 0; i < rule->body_length; i++) {
+		literal = &rule->body[order[i]];
+
+		if (reads_on_demand(magic, literal)) {
+			columns = call_columns(magic, literal, bound);
+			if (reach_adornment(magic, literal->u.atom.pred,
+			    columns) != 0)
+				return (-1);
+		}
+
+		bound |= positive_slots(magic, literal);
+	}
+
+	return (0);
+}
+
+/*
+ * Reach the adornment of every call `rule` makes on a predicate read on
+ * demand, for a call that binds the slots of `bound`.
+ *
+ * What ordering the rule took from the scratch arena is forgotten once the
+ * rule is read: a search reads the rules of every adornment it keeps, and
+ * keeps none of what it read them with.
+ */
+static int
+reach_calls(relic_magic_t *magic, const relic_rule_t *rule, uint64_t bound)
+{
+	int status;
+
+	status = reach_calls_in_order(magic, rule, bound);
+	relic_arena_reset(&magic->scratch);
+
+	return (status);
+}
+
+/*
+ * Charge a search for reading one rule of an adornment of `source`: a rule
+ * against the rule limit, and its body against the literal budget.
+ *
+ * Drafting an adornment drafts every rule of its source, whole or cut into
+ * pieces that hold at least its body between them, and the literal budget
+ * charges every draft, kept or dropped, so a search reads no more literals
+ * than drafting the adornments it keeps is charged.  The rule limit counts
+ * only the rules the draft keeps, and the draft drops duplicates and rules
+ * that derive nothing, so under a configured rule limit a search can refuse
+ * a query whose rewrite would have fit.  Charging the rules read is what
+ * bounds the search when the rule limit is the only bound configured.
+ */
+static int
+charge_rule_read(relic_magic_t *magic, const relic_rule_t *rule,
+    relic_pred_id_t source)
+{
+	if (magic->searched_rules >= magic->rule_limit.most)
+		return (exceed(magic, &magic->rule_limit, "magic-rules",
+		    "generated rules", source));
+	magic->searched_rules++;
+
+	return (charge_literals(magic, &magic->searched_literals,
+	    rule->body_length, source));
+}
+
+/*
+ * Reach the adornments the rules deriving an adornment's source call, each
+ * rule ordered for the columns the adornment binds.  The rule over the
+ * source's base view reads only the base view, which is complete, and calls
+ * nothing.
+ */
+static int
+reach_rules_of(relic_magic_t *magic, const relic_adornment_t *adornment)
+{
+	const relic_ruletab_t *rules;
+	const relic_rule_t *rule;
+	size_t first;
+	size_t end;
+	size_t i;
+
+	rules = &magic->ctx->program.rules;
+	first = magic->first_rule_of[adornment->source - 1];
+	end = magic->first_rule_of[adornment->source];
+
+	for (i = first; i < end; i++) {
+		rule = &rules->entries[magic->rules_by_head[i]];
+
+		if (charge_rule_read(magic, rule, adornment->source) != 0)
+			return (-1);
+
+		if (reach_calls(magic, rule, head_bound_slots(rule,
+		    adornment)) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * One search: reach the adornments of the query's calls, then those of the
+ * rules of every adornment kept, in the order kept, which appends the
+ * adornments their calls reach.  An adornment is copied out of the set
+ * before its rules are read, because reading them may keep more and move
+ * the set's entries.
+ */
+static int
+search_once(relic_magic_t *magic, const relic_rule_t *query)
+{
+	relic_adornment_t adornment;
+	size_t i;
+
+	begin_search(magic);
+
+	if (reach_calls(magic, query, 0) != 0)
+		return (-1);
+
+	for (i = 0; i < magic->kept.count; i++) {
+		adornment = magic->kept.entries[i];
+		if (reach_rules_of(magic, &adornment) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Whether the search kept an adornment binding columns of a predicate it
+ * read free: one some call reached before a later call read the predicate
+ * free, and so one reached for nothing.
+ */
+static bool
+kept_bound_adornment_of_free(const relic_magic_t *magic)
+{
+	const relic_adornment_t *adornment;
+	size_t i;
+
+	for (i = 0; i < magic->kept.count; i++) {
+		adornment = &magic->kept.entries[i];
+		if (adornment->bound != 0 &&
+		    magic->reads_free[adornment->source - 1])
+			return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * Find the adornments the query reaches, drafting nothing, by one search or
+ * two.
+ *
+ * A predicate the query reaches with no column bound is read through its
+ * free adornment by every call, whatever the call binds: the free adornment
+ * holds every tuple of the predicate, so a call binding columns finds what
+ * it would have found in its own adornment by looking the free one up on
+ * those columns, and the free one is computed in full beside it anyway.
+ * That call binds the same variables either way, so the adornments of the
+ * calls after it do not change, and neither does anything an adornment's
+ * rules reach: which adornments a rule's calls reach depends on the
+ * adornment it is read for and on which predicates are read free, and on
+ * nothing else.
+ *
+ * The first search reads a predicate free from the first call that reaches
+ * it free, so an adornment of it that an earlier call reached binding
+ * columns was reached for nothing.  When there is one, the second search
+ * begins again with every predicate the first read free read free from the
+ * start.  Every call it makes the first made too, by induction over what it
+ * reaches: a call reaching a free adornment reaches one the first search
+ * reached, and a call binding columns of a predicate the first never read
+ * free reaches the adornment the first reached for it.  So every predicate
+ * the second search reaches free is already read free, and no adornment it
+ * keeps was reached for nothing.  A predicate the first search read free
+ * stays free in the second even when only an adornment the second no longer
+ * reaches called it free.
+ *
+ * Each search keeps no more adornments than a rewrite without subsumption
+ * would adorn, and is held on its own to the limits and budgets that rewrite
+ * was held to, as charge_rule_read() describes.  The query's body is read
+ * once in each search and charged to neither.
+ */
+static int
+search_adornments(relic_magic_t *magic, const relic_rule_t *query)
+{
+	if (begin_searching(magic) != 0)
+		return (-1);
+
+	if (search_once(magic, query) != 0)
+		return (-1);
+
+	if (!kept_bound_adornment_of_free(magic))
+		return (0);
+
+	if (search_once(magic, query) != 0)
+		return (-1);
+	assert(!kept_bound_adornment_of_free(magic));
+
+	return (0);
+}
+
+/*
+ * Whether some adornment the query reaches and keeps binds a column.
+ */
+static bool
+binds_some_column(const relic_magic_t *magic)
+{
+	size_t i;
+
+	for (i = 0; i < magic->kept.count; i++) {
+		if (magic->kept.entries[i].bound != 0)
+			return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * Read completely every predicate the query reaches, all of them free: mark
+ * their components complete with everything those depend on, recording in
+ * `completed_late` the components not complete already, and keep the query
+ * as written.  A rewrite would derive exactly the relations of those
+ * predicates, which the program's own rules derive as well, so no rule is
+ * generated and nothing is copied.
+ *
+ * Every adornment kept is of a predicate read on demand, which a rule
+ * derives, so each has a component; one without is an internal error.
+ */
+static int
+read_reached_completely(relic_magic_t *magic, const relic_rule_t *query)
+{
+	relic_closure_t closure;
+	size_t components;
+	size_t position;
+	size_t i;
+
+	components = magic->ctx->program.schedule.component_count;
+
+	if (closure_begin(&closure, magic) != 0)
+		return (-1);
+	magic->completed_late = magic_alloc(magic, components,
+	    sizeof(*magic->completed_late));
+	if (magic->completed_late == NULL)
+		return (-1);
+	bzero(magic->completed_late, components *
+	    sizeof(*magic->completed_late));
+
+	for (i = 0; i < magic->kept.count; i++) {
+		position = component_of(magic, magic->kept.entries[i].source);
+		if (position == RELIC_NO_COMPONENT) {
+			relic_diagf(magic->ctx, RELIC_ERROR, NULL,
+			    "internal error: a query's Magic rewrite adorned "
+			    "a predicate no rule derives");
+			return (-1);
+		}
+		mark_complete(&closure, position);
+	}
+	close_complete(&closure);
+
+	for (i = 0; i < closure.count; i++)
+		magic->completed_late[closure.queue[i]] = true;
+	note_incomplete(magic);
+
+	magic->reads_completely = true;
+	magic->query = *query;
+
+	return (0);
+}
+
+/*
  * Rewrite a query whose complete predicates relic_magic_find_complete() has
- * found and the caller has evaluated: the query first, which records the
- * adornments its body calls for and generates the seeds, then the rules of
- * every adornment recorded, in the order recorded.
+ * found and the caller has evaluated, in two stages.  The first finds the
+ * adornments the query reaches, applying subsumption, and drafts nothing.
+ * When none of them binds a column the query reads what it reaches
+ * completely, and there is no second stage.  Otherwise the second names the
+ * adornments kept and drafts their rules: the query first, which generates
+ * the seeds, then the rules of every adornment kept, in the order recorded.
  *
  * Only predicates read on demand are adorned, and every one of them is
  * derived by some rule -- one no rule derives is complete -- so each
@@ -2241,27 +2834,26 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
  * What the rewrite may generate is bounded in predicates and body literals by
  * budgets in proportion to the program, and in predicates and rules by the
  * Magic limits.  Configuring either limit sizes the rewrite and lifts both
- * budgets, leaving only the limits set.  The budget on literals holds
- * everything the rewrite drafts, kept or dropped, to a constant multiple of the
+ * budgets, leaving only the limits set.  The first stage counts the predicates
+ * of the adornments it keeps; the supplementary predicates the second stage's
+ * cuts add are not counted, since each has one rule, which the rule limit and
+ * the literal budget count.  The budget on literals holds everything the
+ * second stage drafts, kept or dropped, to a constant multiple of the
  * program's size in literals, which counting rules cannot when long rules are
- * copied once per adornment.  It bounds the rules kept as well. Every rule is
+ * copied once per adornment.  It bounds the rules kept as well.  Every rule is
  * charged its body before it is kept, and every one but a seed has a body
- * literal.  A seed is the query's, or the magic rule of an adorned rule's first
- * call when constants alone bind it, at most one per adorned rule, whose draft
- * was charged a literal.  So the rules kept number at most twice the literals
- * drafted plus the query's seeds.  The budgets are proportional to the program
- * while the cost of answering without the rewrite is proportional to the data,
- * which is why a caller who sets a limit is not overruled.
- *
- * An adornment is copied out of the array before its rules are generated,
- * because generating them may record more and move the array.
+ * literal.  A seed is the query's, or the magic rule of an adorned rule's
+ * first call when constants alone bind it, at most one per adorned rule, whose
+ * draft was charged a literal.  So the rules kept number at most twice the
+ * literals drafted plus the query's seeds.  The budgets are proportional to
+ * the program while the cost of answering without the rewrite is proportional
+ * to the data, which is why a caller who sets a limit is not overruled.
  */
 int
 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query)
 {
 	const relic_config_t *config;
 	const relic_program_t *program;
-	relic_adornment_t adornment;
 	size_t i;
 	bool sized;
 
@@ -2278,13 +2870,21 @@ relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query)
 	    budget_for(program_size_in_literals(&program->rules) +
 	    2 * magic->base_view_count);
 
+	if (search_adornments(magic, query) != 0)
+		return (-1);
+
+	if (!binds_some_column(magic))
+		return (read_reached_completely(magic, query));
+
+	if (name_adornments(magic) != 0)
+		return (-1);
+
 	if (rewrite_query(magic, query) != 0)
 		return (-1);
 	magic->seed_count = magic->rules.count;
 
-	for (i = 0; i < magic->adornment_count; i++) {
-		adornment = magic->adornments[i];
-		if (adorn_rules(magic, &adornment) != 0)
+	for (i = 0; i < magic->kept.count; i++) {
+		if (adorn_rules(magic, &magic->kept.entries[i]) != 0)
 			return (-1);
 	}
 

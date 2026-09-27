@@ -1,0 +1,21 @@
+% -e over a query that binds no column of the predicate it reads.  Its rules
+% call pointsTo with one column bound, which the free adornment already
+% holds in full, so every such call reads pointsTo$ff, and the bound
+% adornments are shown subsumed by it.  No adornment is left that binds a
+% column, so there is nothing for a rewrite to restrict: the query reads
+% pointsTo completely, the program's own rules evaluate it, and the query
+% rule reads the program's relation.
+
+addressOf(a, x).
+addressOf(b, y).
+addressOf(c, z).
+assign(d, a).
+load(e, c).
+store(c, a).
+
+pointsTo(V, W) :- addressOf(V, W).
+pointsTo(V, W) :- assign(V, U), pointsTo(U, W).
+pointsTo(V, W) :- load(V, P), pointsTo(P, Q), pointsTo(Q, W).
+pointsTo(Q, W) :- store(P, V), pointsTo(P, Q), pointsTo(V, W).
+
+pointsTo(X, Y)?

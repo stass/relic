@@ -3,8 +3,9 @@
 % first column bound.  The first call's magic rule reads the guard; before
 % the second and the third, the prefix is cut into a supplementary predicate
 % over its live variables, named after the adorned predicate, the rule's
-% position among r's rules and the call's among its demand calls.  Y is not
-% live past b's call, so the second cut drops it.  No component is recursive.
+% position among r's rules and the call's among its calls binding a column.
+% Y is not live past b's call, so the second cut drops it.  No component is
+% recursive.
 
 e(1, 2).
 e(2, 3).

@@ -400,38 +400,67 @@ free copy is computed in full beside it.
 
 The redirected call binds the same variables the adorned call bound, so
 the literals after it in the section 5 order see the same bound set and
-their adornments do not change. Its magic rule and its supplementary cut
-are not generated, since a call to `p$ff` propagates no demand: there is
-no magic predicate for a free adornment, per section 4. The
-stratification of the rewrite is a guard (section 9.1) and stays one: the
-redirection adds positive edges from generated rules to `p$ff` and removes
-the edges to `p$bf`, `magic$p$bf` and the cuts, and a negated literal
-still names a predicate read completely, so no cycle through negation can
-appear.
+their adornments do not change. Its magic rule is not generated, since a
+call to `p$ff` propagates no demand: there is no magic predicate for a
+free adornment, per section 4. The draft places its cuts by the columns
+calls bind, never by the adornments they read, so the prefix is still cut
+before the redirected call, and every rule drafted for an adornment is as
+long as it would be without subsumption, and subsumption lengthens no
+rule; it leaves out the magic rules of the calls it redirects. Were the cut
+before a redirected call skipped, the prefix before it would run on into
+the next rule and, past a later cut too wide to make, into every magic
+rule after it and the adorned rule. The stratification of
+the rewrite is a guard (section 9.1) and stays one: the redirection adds
+positive edges from generated rules to `p$ff` and removes the edges to
+`p$bf` and `magic$p$bf`, and a negated literal still names a predicate
+read completely, so no cycle through negation can appear.
 
 **Adorn first, draft second.** The rewrite today drafts a rule as it
 discovers an adornment, and a bound adornment of `p` may be discovered
 before the free one. Rather than drafting and then withdrawing, the
-rewrite is split into two passes over the same worklist: the first
-computes the set of adornments the query reaches, applying the rule as it
-goes, so that reaching `p$ff` collapses every adornment of `p` already
-reached and every one reached later; the second drafts rules for the
-adornments that survive. The first pass reads each rule's body in the
-order `relic_plan_order()` gives it for each head adornment, which is what
-the draft would read, and drafts nothing, so it costs no budget. The
-predicate limit and budget count the adornments the first pass keeps; the
-literal budget counts what the second pass drafts. A rewrite that
-outgrows a budget is abandoned as now, in the pass where it outgrows it.
+rewrite finds the set of adornments the query reaches before it drafts
+any, applying the rule as it goes, and then drafts rules for the
+adornments that survive. The search reads each rule's body in the order
+`relic_plan_order()` gives it for each head adornment, which is what the
+draft would read, and drafts nothing. A predicate is read free from the
+first call that reaches it free. A bound adornment of `p` reached before
+that call was reached for nothing, and so was whatever only it reached, so
+a search that kept one runs once more with every predicate the first read
+free read free from the start. The marks are kept whole: a predicate the
+first search read free stays free even when only an adornment the second
+no longer reaches called it free, and is then computed in full beside the
+bound calls it serves. That second search is the last: which
+adornments a rule's calls reach depends only on the adornment the rule is
+read for and on which predicates are read free, so every call the second
+makes the first made too, and every predicate it reaches free is already
+read free.
+
+Each search is held on its own to what bounds the draft: the predicate
+limit and budget count the adornments it keeps, the rule limit the rules
+it reads, and the literal budget their bodies, apart from the drafts,
+since a query can reach far more adornments than it could draft. A search
+keeps no more adornments than the rewrite without subsumption would adorn
+and reads no more literals than drafting them is charged, so the predicate
+limit and the literal budget refuse nothing that rewrite admits. The rule
+limit can: the search charges it every rule it reads, while the draft
+charges only the rules it keeps and drops duplicates and rules that derive
+nothing, so under a configured rule limit a program holding such rules can
+be refused where the rewrite without subsumption fit. A query whose first
+search reaches more than a limit admits is refused, as it is today, even
+when subsumption would have brought its rewrite within the limit. What a
+search needs to read one rule is released once the rule is read. A rewrite
+that outgrows a budget is abandoned as now, in the search where it
+outgrows it.
 
 ### 5.2 A rewrite with no bound column is no rewrite
 
-**Rule.** When the first pass ends with no adornment that binds a column,
+**Rule.** When the search ends with no adornment that binds a column,
 the query reads every predicate it reaches completely, and no rule is
 generated.
 
 Section 3 of `specs/design-magic.md` computes what a query reads completely
 from the program's structure: facts, negation and their dependencies. This
-adds a fourth source: every predicate the first pass adorned free. The
+adds a fourth source: every predicate the search adorned free. The
 complete set is closed over components as before, phase 1 evaluates the
 program's own schedule for those components, and the query rule is planned
 over the program's relations exactly as a query against a materialized
@@ -458,16 +487,17 @@ The adornment lines of `specs/design-magic.md` section 10 gain two forms:
 
 ```text
 adorn pointsTo/2 ff
-adorn pointsTo/2 bf, subsumed by pointsTo$ff
-adorn pointsTo/2 fb, subsumed by pointsTo$ff
+adorn pointsTo/2 bf, subsumed by pointsTo/2 ff
+adorn pointsTo/2 fb, subsumed by pointsTo/2 ff
 read completely: pointsTo/2
 ```
 
-The first pass prints an `adorn` line for every adornment it reaches, with
-the subsumption noted, so a reader sees what the query would have asked
-for; and when section 5.2 applies, `read completely` names the predicates
-the query reads from the program and the rewrite section ends there,
-followed by the plans of the program's components and of the query rule.
+Explain prints an `adorn` line for every adornment the last search
+reaches, with the subsumption noted, so a reader sees what the query would
+have asked for; and when section 5.2 applies, `read completely` names the
+predicates the query reads from the program and the rewrite section ends
+there, followed by the plans of the program's components and of the query
+rule.
 
 ### 5.4 Cost
 
@@ -476,7 +506,7 @@ followed by the plans of the program's components and of the query rule.
 every free query over a program whose recursive rules call the recursive
 predicate after another literal gain the same. A bound query, `path(a,
 X)?`, reaches no free adornment and is unchanged. About 150 lines in
-`lib/magic.c`, most of them the split into two passes.
+`lib/magic.c`, most of them the search that precedes the draft.
 
 ---
 
@@ -865,8 +895,9 @@ which none of the others change.
 * `specs/design-magic.md` section 3: a fourth source of the complete set,
   the free adornments of section 5.2 here; section 4: the rule of section
   5.1 here after "An adornment with no bound column has no magic
-  predicate"; section 10: the explain lines of section 5.3 here, and the
-  query's `stream` line of section 4.
+  predicate"; section 8: the search is charged the rules and literals it
+  walks, section 5.1 here; section 10: the explain lines of section 5.3
+  here, and the query's `stream` line of section 4.
 * `specs/design-planner.md` section 8.2: an `EMIT` that streams is shown as
   `stream`; section 4 here.
 * `specs/design-index.md` section 3: `key_columns` and `key_column`,
