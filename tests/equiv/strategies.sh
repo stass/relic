@@ -4,18 +4,19 @@
 #
 # Each registered language test is run several times: once as the default
 # evaluator runs it, and once under each alternative -X selects -- the naive
-# fixed point, the planner without indexes and without reordering, and each
-# of those again answering from the whole fixed point instead of through the
-# Magic rewrite.  Every run must agree with the default on standard output,
-# the diagnostics on standard error, and exit status.  Two diagnostics are
-# left out.  The warning that a rewrite outgrew its budget says which
-# strategy answered, which runs without the rewrite never report, and the
-# answer it announces is compared like any other.  The note -vv gives about
-# a comparison of mixed types says where evaluation first met one, which is
-# earlier when a query evaluates the whole program, and the answers the
-# comparison filtered are compared like any other.  Rows are sorted with
-# -s, because a strategy that derives the same set of tuples in a different
-# order is correct, and the comparison is of sets.
+# fixed point, the planner without indexes and without reordering, each of
+# those again answering from the whole fixed point instead of through the
+# Magic rewrite, and rounds whose insertions wait for their end.  Every run
+# must agree with the default on standard output, the diagnostics on
+# standard error, and exit status.  Two diagnostics are left out.  The
+# warning that a rewrite outgrew its budget says which strategy answered,
+# which runs without the rewrite never report, and the answer it announces
+# is compared like any other.  The note -vv gives about a comparison of
+# mixed types says where evaluation first met one, which is earlier when a
+# query evaluates the whole program, and the answers the comparison
+# filtered are compared like any other.  Rows are sorted with -s, because a
+# strategy that derives the same set of tuples in a different order is
+# correct, and the comparison is of sets.
 #
 # Queries read only some relations, so each run also prints -X stats, and
 # runs that evaluate the same rules must agree on how many tuples every
@@ -65,7 +66,7 @@ set -eu
 # compared with the default on its answers, and is the reference whose tuple
 # total those in `whole_rules`, which answer from the whole fixed point too,
 # are held to.
-same_rules="naive no-index"
+same_rules="naive no-index parallel"
 other_rules="no-reorder"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic"
 

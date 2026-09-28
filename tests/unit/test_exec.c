@@ -33,6 +33,7 @@
 #define	SCENARIO_EMIT_ONLY	"a plan of its EMIT alone derives its head once"
 #define	SCENARIO_GROWTH		"what is appended between calls is not read"
 #define	SCENARIO_NEGLECT	"a batch left full is not written past"
+#define	SCENARIO_PIECES		"pieces of a view derive what the whole does"
 #define	SCENARIO_UNSTARTED	"a scratch no plan has started derives nothing"
 
 /*
@@ -68,6 +69,7 @@ static void	 a_batch_left_full_is_not_written_past(void);
 static void	 a_plans_batches_hold_each_derivation_once(void);
 static void	 a_plan_of_its_emit_alone_derives_its_head_once(void);
 static void	 a_scratch_no_plan_has_started_derives_nothing(void);
+static void	 pieces_of_a_view_derive_what_the_whole_does(void);
 static bool	 fill(fixture_t *fixture, const char *scenario, int64_t first,
 		    size_t count);
 static void	 fixture_close(fixture_t *fixture);
@@ -463,6 +465,81 @@ a_scratch_no_plan_has_started_derives_nothing(void)
 	fixture_close(&fixture);
 }
 
+/*
+ * A plan started on a piece of its first scan's view derives what the whole
+ * plan derives while its cursor is inside the piece, in the same order, so
+ * pieces that cover the view in order, run one after another, derive what
+ * the whole does and scan as much.  The pieces here are empty, one tuple
+ * long, a batch long, and the rest, and one piece runs past a batch.
+ */
+static void
+pieces_of_a_view_derive_what_the_whole_does(void)
+{
+	enum { HELD = 150 };
+	static const relic_tuple_id_t cuts[] = {
+		RELIC_TUPLE_FIRST, RELIC_TUPLE_FIRST, RELIC_TUPLE_FIRST + 1,
+		RELIC_TUPLE_FIRST + 1 + RELIC_INSERT_BATCH,
+		RELIC_TUPLE_FIRST + HELD
+	};
+	enum relic_exec_status status;
+	relic_tuple_range_t piece;
+	relic_tuple_range_t view;
+	relic_scratch_t *scratch;
+	const relic_dom_t *tuple;
+	fixture_t fixture;
+	size_t derived;
+	size_t i;
+	size_t k;
+	bool ordered;
+
+	if (!fixture_open(&fixture, SCENARIO_PIECES))
+		return;
+	if (!fill(&fixture, SCENARIO_PIECES, 1, HELD)) {
+		fixture_close(&fixture);
+		return;
+	}
+
+	scratch = &fixture.scratch;
+	view = relic_exec_view(&fixture.env, &fixture.ops[0].u.atom);
+	check(view.first == cuts[0] &&
+	    view.end == cuts[sizeof(cuts) / sizeof(cuts[0]) - 1],
+	    SCENARIO_PIECES, "the view is the whole relation");
+
+	derived = 0;
+	ordered = true;
+	for (k = 0; k + 1 < sizeof(cuts) / sizeof(cuts[0]); k++) {
+		piece.first = cuts[k];
+		piece.end = cuts[k + 1];
+		relic_exec_start_piece(scratch, &fixture.env, &fixture.plan,
+		    piece);
+
+		do {
+			status = relic_exec_run(scratch);
+			for (i = 0; i < scratch->batch_count; i++) {
+				tuple = relic_relation_tuple(fixture.scanned,
+				    (relic_tuple_id_t)(RELIC_TUPLE_FIRST +
+				    derived));
+				if (tuple == NULL ||
+				    scratch->batch[i] != tuple[0])
+					ordered = false;
+				derived++;
+			}
+			scratch->batch_count = 0;
+		} while (status == RELIC_EXEC_BATCH_FULL);
+	}
+
+	checkf(derived == HELD && ordered, SCENARIO_PIECES, "the pieces "
+	    "should derive the %u tuples in order, derived %zu%s", HELD,
+	    derived, ordered ? "" : " out of order");
+	checkf(scratch->counters.tuples_scanned == HELD, SCENARIO_PIECES,
+	    "the pieces should scan %u tuples, not %llu", HELD,
+	    (unsigned long long)scratch->counters.tuples_scanned);
+	check(guards_hold(&fixture), SCENARIO_PIECES,
+	    "nothing is written past the batch");
+
+	fixture_close(&fixture);
+}
+
 int
 main(void)
 {
@@ -471,6 +548,7 @@ main(void)
 	a_batch_left_full_is_not_written_past();
 	what_is_appended_between_calls_is_not_read();
 	a_plan_of_its_emit_alone_derives_its_head_once();
+	pieces_of_a_view_derive_what_the_whole_does();
 
 	return (check_summary("test_exec"));
 }

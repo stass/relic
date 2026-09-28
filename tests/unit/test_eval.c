@@ -160,6 +160,15 @@ struct diag_log {
  */
 static unsigned int strategy_flags;
 
+/*
+ * RELIC_F_PARALLEL_ALWAYS while main() runs every scenario a second time
+ * with each round's insertions deferred to its end, and zero the first
+ * time.  Every context is given it, whatever else it is given: a deferred
+ * round inserts what the serial one does, in the order it does, so no
+ * answer and no counter written below may change.
+ */
+static unsigned int deferral_flags;
+
 static void	 append_text(rendering_t *rendering, const char *text,
 		    size_t length);
 static bool	 answers_are(const char *scenario, relic_t *ctx,
@@ -197,6 +206,7 @@ static void	 negation_keeps_what_is_absent(void);
 static void	 every_binding_pattern_is_answered(void);
 static void	 every_derivation_is_made_once(void);
 static void	 recursion_reaches_the_least_fixed_point(void);
+static void	 run_everything(void);
 static void	 run_scenarios(const char *strategy, unsigned int flags);
 static void	 the_counters_record_the_work_done(void);
 static void	 the_total_order_sorts_across_types(void);
@@ -234,7 +244,7 @@ context_flagged(const char *program, diag_log_t *log, unsigned int flags)
 		bzero(log, sizeof(*log));
 
 	bzero(&config, sizeof(config));
-	config.flags = flags;
+	config.flags = flags | deferral_flags;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -577,7 +587,7 @@ a_query_over_a_limit_delivers_no_rows(void)
 
 	bzero(&config, sizeof(config));
 	config.max_tuples = 8;
-	config.flags = strategy_flags;
+	config.flags = strategy_flags | deferral_flags;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -742,7 +752,7 @@ a_discard_gives_back_what_the_limits_count(void)
 
 	bzero(&config, sizeof(config));
 	config.max_tuples = 6;
-	config.flags = strategy_flags;
+	config.flags = strategy_flags | deferral_flags;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -1106,6 +1116,7 @@ a_rule_no_query_reaches_costs_it_no_memory(void)
 
 	bzero(&config, sizeof(config));
 	config.max_memory = UNREACHED_LIMIT;
+	config.flags = deferral_flags;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL || relic_load_string(ctx, "test.dl", program) != 0) {
@@ -1361,8 +1372,11 @@ run_scenarios(const char *strategy, unsigned int flags)
 	a_discard_gives_back_what_the_limits_count();
 }
 
-int
-main(void)
+/*
+ * Every scenario, under every strategy.
+ */
+static void
+run_everything(void)
 {
 	run_scenarios("the semi-naive fixed point", 0);
 	run_scenarios("the naive fixed point", RELIC_F_NAIVE);
@@ -1379,6 +1393,16 @@ main(void)
 	two_member_literals_derive_once();
 	a_delta_is_emptied_when_its_member_rests();
 	the_total_order_sorts_across_types();
+}
+
+int
+main(void)
+{
+	run_everything();
+
+	fprintf(stderr, "test_eval: every round deferred\n");
+	deferral_flags = RELIC_F_PARALLEL_ALWAYS;
+	run_everything();
 
 	return (check_summary("test_eval"));
 }

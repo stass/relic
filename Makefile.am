@@ -38,7 +38,8 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
 	lib/parse.c lib/plan.c lib/pred.c lib/relation.c lib/result.c \
-	lib/rule.c lib/stratify.c lib/symbol.c lib/util.c lib/value.c
+	lib/round.c lib/rule.c lib/stratify.c lib/symbol.c lib/task.c \
+	lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -52,7 +53,7 @@ dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/ast.h lib/depgraph.h lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/relation.h \
-	lib/util.h tests/unit/harness.h tests/unit/programs.h
+	lib/round.h lib/util.h tests/unit/harness.h tests/unit/programs.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/import.c cmd/relic/input.c cmd/relic/main.c \
@@ -175,8 +176,9 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
-	tests/unit/test_relation tests/unit/test_rule tests/unit/test_stratify \
-	tests/unit/test_symbol tests/unit/test_util tests/unit/test_value
+	tests/unit/test_relation tests/unit/test_round tests/unit/test_rule \
+	tests/unit/test_stratify tests/unit/test_symbol tests/unit/test_util \
+	tests/unit/test_value
 
 ## test_api links the installed form of the library rather than the
 ## convenience library, so an entry point it calls that the export list or
@@ -228,6 +230,9 @@ tests_unit_test_query_LDADD = librelic_internal.la $(LTLIBOBJS)
 tests_unit_test_relation_SOURCES = tests/unit/test_relation.c \
 	tests/unit/harness.c
 tests_unit_test_relation_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_round_SOURCES = tests/unit/test_round.c tests/unit/harness.c
+tests_unit_test_round_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
 tests_unit_test_rule_LDADD = librelic_internal.la $(LTLIBOBJS)

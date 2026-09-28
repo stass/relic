@@ -1418,6 +1418,7 @@ relic(1) but is not part of the stable interface:
 -X no-magic     disable Magic Sets for explicit queries
 -X no-reorder   evaluate body literals in textual order
 -X no-stream    gather every answer before writing its first row
+-X parallel     defer every round's insertions to its end, cut finely
 -X stats        print evaluation counters to stderr on exit
 ```
 

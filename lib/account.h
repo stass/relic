@@ -7,14 +7,24 @@
 #ifndef RELIC_ACCOUNT_H
 #define RELIC_ACCOUNT_H
 
+/*
+ * This header defines what code compiled against frozen.h alone must not
+ * see, and such code defines RELIC_FROZEN_ONLY to have it refused.
+ */
+#ifdef RELIC_FROZEN_ONLY
+#error "code that only reads the store must see it only through frozen.h"
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
+
+#include "frozen.h"
 
 /*
  * The memory account: the bytes a context holds on the user's behalf while
  * it works, which the configured memory limit is enforced against.
  *
- * Two kinds of holder contribute, each keeping its own part of the total
+ * Three kinds of holder contribute, each keeping its own part of the total
  * exact.  The relation store counts in `store_bytes` the capacity of every
  * relation's columns and indexes, an index being built included: the base
  * stores holding the program's facts and the relations evaluation derives
@@ -23,15 +33,21 @@
  * holding what the caller wrote -- the program's rules and queries, the
  * schedule, a query -- are not charged, and neither is the text being
  * loaded nor the staging a load holds its facts in until it commits, which
- * are proportional to that text and released when the load returns.  So
- * the account is a bound on what the program's stores hold and on what
- * running the program does, and not on the program as it was written.
+ * are proportional to that text and released when the load returns.  A
+ * round of evaluation whose insertions wait for its end counts in
+ * `round_bytes` the buffers holding what it has derived, from the moment
+ * they grow until the round ends, when they are released.  So the account
+ * is a bound on what the program's stores hold and on what running the
+ * program does, and not on the program as it was written.
  *
  * Every holder asks relic_account_exceeds() before it grows, against the
  * whole total, so the limit bounds the sum and no holder can spend what
  * another was admitted.
  *
- * `refused` records that the limit refused an arena a chunk.  The arena
+ * `refused` records that the limit refused an arena a chunk.  A refused
+ * round is not recorded, because nothing reports it: the round is run
+ * again inserting as it derives, which holds no buffers, and whatever
+ * refuses that run reports itself.  The arena
  * fails as it would had the allocator refused, and its caller reports the
  * failure through relic_diag_no_memory() as every allocation failure is
  * reported; that function takes the record with relic_account_take_refusal()
@@ -40,12 +56,11 @@
  * record nobody reported, so that no later failure is blamed on it.
  */
 
-typedef struct relic_account relic_account_t;
-
 struct relic_account {
 	size_t	limit;		/* bytes; see relic_limit_set() */
 	size_t	store_bytes;	/* relation and index storage */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
+	size_t	round_bytes;	/* buffers of a deferred round */
 	bool	refused;
 };
 
@@ -59,7 +74,9 @@ struct relic_account {
  *
  * relic_account_charge() admits `bytes` more for an arena and counts them,
  * or records the refusal and returns false having counted nothing.
- * relic_account_release() gives back bytes an arena counted.
+ * relic_account_release() gives back bytes an arena counted.  A round's
+ * buffers are charged and released through the two functions frozen.h
+ * declares, which the code running a round's tasks can reach.
  */
 void	 relic_account_init(relic_account_t *account, size_t limit);
 bool	 relic_limit_set(size_t limit);

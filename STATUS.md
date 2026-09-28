@@ -684,6 +684,10 @@ section 15 order.
 | `lib/eval.c` | the evaluation's scratch holds states for the longest plan it builds, grown as plans are built; `set_delta()` is the one place a delta is written, and raises every index of the member to the delta's start |
 | `lib/index.c`, `lib/relation.h` | a key's frontier in an array of its own beside the key entries, which a lookup handed the index read-only moves; `latest_since` raised by the evaluator and never by a lookup, and a lookup from a start its index was not raised to stops a debug build |
 | `tests/` | `test_exec`: the executor run directly over a hand-built plan, its batches holding each derivation once at and around one and two batches, a batch left full reported full and not written past, tuples appended between calls not read, a plan of its EMIT alone, and a scratch never started; `test_eval`: the executor's entry points, the handles it is given, a relation's indexes and the delta lookup hold the store read-only, as static assertions, and a rule of 2000 literals no query reaches costs the query no memory; `test_index`: the frontiers' storage counted by hand, and a lookup of a delta at the start its index was raised to leaves that start where it was |
+| `lib/round.{h,c}`, `lib/task.c` | step 2, deferred rounds on one thread: a round is a sequence of items -- a seed, or a plan with the relation its EMIT writes -- cut into tasks, each a contiguous piece of its plan's first scan's view; a task runs its piece with the executor and screens every batch, first against the store through `relic_relation_screen()`, then against the worker's own candidates in one identifier table keyed by the tuple's hash and its target, keeping what neither holds; `lib/task.c` is compiled against `lib/frozen.h` alone, as the executor is; the candidates and the screen are charged to the account as a round's bytes and released at the round's end; a worker whose candidates could not grow, or outnumber the tuples the limit could still admit, abandons the round, which then runs serially; before the merge the growth of every target is projected one insertion at a time with the candidates still charged, and a round the memory limit would refuse runs serially; the merge inserts the candidates in task order by the hashes the screen computed, reports a task's mixed-comparison note when it reaches the task, and adds the counters the tasks kept; the pool is one worker, the calling thread, created by the first deferred round and kept until the context is destroyed |
+| `lib/eval.c`, `include/relic.h`, `man/relic.3`, `cmd/relic/main.c`, `configure.ac` | the base pass, a semi-naive round, a component's single pass and a gathered query are each gathered as a round's items and run either item by item, inserting as they derive, or offered for deferral; `RELIC_F_PARALLEL_ALWAYS`, `-X parallel`, offers every round and cuts each as finely as the clamps allow, and a round that reads a relation it writes other than through a view fixed before it began -- a pass of the naive fixed point -- is declined and runs serially, which is decided from the round's plans in `lib/round.c` rather than by the caller; version-info `5:0:4`, an added interface |
+| `lib/relation.c`, `lib/index.c`, `lib/util.{h,c}`, `lib/account.{h,c}` | `relic_relation_screen()`; `relic_relation_insert_batch_hashed()`, the batch insertion by hashes already computed; `relic_relation_bytes_after_inserts()`, the bytes after *n* insertions at the capacities one insertion after another reaches, through `relic_index_bytes_after_adds()` and `relic_grow_array_capacity_stepwise()`; the account's third holder, `round_bytes`, which an operation must have given back when it leaves; the code running a round's tasks sees the account as an incomplete type and reaches it only through the round charge and release `lib/frozen.h` declares |
+| `tests/` | `test_round`: a serial context and a deferred one agree word for word on every derived relation, its identifiers and its bytes, and on every counter, under the default, textual and naive strategies, through queries' rewrites with rows in delivery order, under tuple and memory limits swept from what the load holds past what evaluation needs, and in the mixed-comparison notes; `test_eval` runs every scenario a second time with every round deferred; `test_exhaustion` sweeps allocation failures through deferred evaluation with and without the rewrite; `test_util` and `test_relation`: the stepwise projection is what one insertion after another reaches, and a screen finds what an insertion would; `test_exec`: the pieces of a view derive what the whole does; `tests/langtest.sh` runs every golden program again under `-X parallel -X stats` and requires the serial run's status, output, diagnostics and counters; the random differential suite, `tests/equiv/strategies.sh` and the eval fuzz target hold the deferred path to the serial one |
 
 Step 1 measured against the commit before it on a `--disable-shared` build,
 alternating, on the same machine: `bench/run.sh`, seven runs each, gives
@@ -691,6 +695,19 @@ identical counters on every workload and times within noise, `chain, whole
 closure` 1.100 s before and 1.090 s after; `tc-cyclic` at scale 1, five runs
 each, 2.66 s before and 2.67 s after, and `cspa` 0.21 s both, with identical
 counters.
+
+Step 2 measured the same way against step 1: `bench/run.sh`, seven runs
+each, gives identical counters on every workload and times within noise;
+`chain, right-recursive` retires 4.715 to 4.718 billion instructions
+against step 1's 4.719 billion, in cycle counts whose runs overlap. An
+interactive session of 100 000 queries over a three-edge closure, whose
+evaluations are nearly all overhead, retires 0.8 per cent more
+instructions, about a thousand a query, for gathering each round's items. Deferral
+on one thread, `-X parallel` against the default in the same build, five
+runs each with identical counters: `tc-cyclic` 2.24 s serial and 2.62 s
+deferred, `cspa` 0.19 s and 0.21 s, `chain-closure` 0.42 s and 0.61 s, the
+last deriving a new tuple nearly every time and so gathering nearly every
+derivation as a candidate.
 
 ### Verified
 

@@ -45,7 +45,8 @@ relic_account_exceeds(const relic_account_t *account, size_t current_bytes,
 	if (!relic_limit_set(account->limit))
 		return (false);
 
-	total = account->store_bytes + account->arena_bytes;
+	total = account->store_bytes + account->arena_bytes +
+	    account->round_bytes;
 	elsewhere_bytes = total - current_bytes;
 
 	/* Two sizes that fit in a size_t need not have a sum that does. */
@@ -81,6 +82,24 @@ relic_account_release(relic_account_t *account, size_t bytes)
 {
 	assert(bytes <= account->arena_bytes);
 	account->arena_bytes -= bytes;
+}
+
+bool
+relic_account_charge_round(relic_account_t *account, size_t bytes)
+{
+	if (relic_account_exceeds(account, 0, bytes))
+		return (false);
+
+	account->round_bytes += bytes;
+
+	return (true);
+}
+
+void
+relic_account_release_round(relic_account_t *account, size_t bytes)
+{
+	assert(bytes <= account->round_bytes);
+	account->round_bytes -= bytes;
 }
 
 /*

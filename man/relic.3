@@ -222,10 +222,12 @@ query whose rewrite would have fit.
 sets no bound on anything.
 .Fa flags
 holds switches, zero by default.
-The first four and
+The first four,
 .Dv RELIC_F_NO_STREAM
+and
+.Dv RELIC_F_PARALLEL_ALWAYS
 select alternative evaluation strategies for testing:
-.Bl -tag -width RELIC_F_NOTE_MIXED
+.Bl -tag -width RELIC_F_PARALLEL_ALWAYS
 .It Dv RELIC_F_NAIVE
 evaluate every recursive component by the naive fixed point rather than the
 semi-naive one;
@@ -245,7 +247,13 @@ a query at most once each time it is answered;
 .It Dv RELIC_F_NO_STREAM
 gather every query's answer whole before delivering its first row, even a
 query whose plan derives each row once and could deliver its rows as it
-derives them; the rows and their order are the same.
+derives them; the rows and their order are the same;
+.It Dv RELIC_F_PARALLEL_ALWAYS
+defer the insertions of every round of evaluation that reads none of the
+relations it derives except as they stood when it began, which is every
+round but a pass of the naive fixed point, to the round's end, cutting the
+scan each rule starts from into pieces, as a round run on several threads
+is run; the relations and every count of work are the same.
 .El
 .Pp
 No switch changes an answer, though two strategies may hold different

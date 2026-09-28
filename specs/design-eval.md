@@ -279,6 +279,19 @@ Each member's delta is the previous delta's end to the relation's current end,
 through `relic_relation_since()`; no delta is ever copied, and no delta has an
 index of its own.
 
+**A round's insertions may wait for its end.** No view of a round reaches
+past the end its relation had when the round began, section 4.2, so what a
+round inserts is invisible to every plan of that round. A round may
+therefore run its plans over a store nothing writes, gather what they
+derive, and insert it all when the last plan has finished, in the order the
+plans derived it; the same tuples then take the same identifiers, and the
+deltas, the counters and the rows are those of a round that inserted as it
+went. That is how `specs/design-parallel.md` runs a round on several
+threads, and a round that cannot finish that way runs again as described
+here. Round 0 and the single pass of a component that is not recursive may
+wait too, since their rules read no member; a pass of the naive fixed
+point may not, since it reads what the rules before it inserted.
+
 **The invariant this rests on**: within one fixed point, no relation is
 compacted, has a tuple removed, or is renumbered. The relation store offers no
 operation that could, so the invariant is a property of the interface

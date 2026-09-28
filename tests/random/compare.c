@@ -69,6 +69,8 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT },
 	[STRATEGY_NO_STREAM] = {
 		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT },
+	[STRATEGY_PARALLEL] = {
+		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT },
 	[STRATEGY_NO_REORDER] = {
 		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE },
 	[STRATEGY_NO_MAGIC] = {
@@ -81,6 +83,9 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 		STRATEGY_NO_MAGIC },
 	[STRATEGY_NO_REORDER_NO_MAGIC] = {
 		"no-reorder+no-magic", RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC,
+		false, STRATEGY_NO_MAGIC },
+	[STRATEGY_PARALLEL_NO_MAGIC] = {
+		"parallel+no-magic", RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_MAGIC,
 		false, STRATEGY_NO_MAGIC },
 	[STRATEGY_MATERIALIZED] = {
 		"materialized", 0, true, STRATEGY_NO_MAGIC },

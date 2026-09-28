@@ -54,9 +54,11 @@ relic_leave(relic_t *ctx)
 {
 	/*
 	 * Both charged arenas are reset before the operation that filled them
-	 * returns, so an account still holding arena bytes has lost count.
+	 * returns, and a round's buffers are released before the round ends,
+	 * so an account still holding either has lost count.
 	 */
 	assert(ctx->account.arena_bytes == 0);
+	assert(ctx->account.round_bytes == 0);
 
 	ctx->busy = false;
 	ctx->diag.refused = false;
@@ -72,6 +74,7 @@ relic_destroy(relic_t *ctx)
 	if (ctx == NULL || relic_enter(ctx) != 0)
 		return;
 
+	relic_pool_free(ctx->pool);
 	relic_store_reset(&ctx->store);
 	relic_program_reset(&ctx->program);
 	relic_valtab_reset(&ctx->values);

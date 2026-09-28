@@ -200,6 +200,11 @@ join a rule's atoms in the order they are written;
 gather every query's answer whole before writing its first row, as a query
 whose plan may derive a row twice is answered, rather than writing the rows
 of one whose plan derives each row once as they are derived;
+.It Cm parallel
+run every round of evaluation that could run on several threads that way,
+however little work it holds: its rules' derivations gathered as they run
+and inserted when the round ends, in the order they would have been
+inserted as they were derived;
 .It Cm stats
 write the evaluation counters to the standard error when the run ends;
 the derivations count what rules derive and the facts copied into a

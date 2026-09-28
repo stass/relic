@@ -182,10 +182,14 @@
  * That is enough to grow the path relation's columns and index several times
  * over, so a refusal can land in preparing the query, in planning a positive
  * or a negated literal, in any relation's growth, or in creating the answer
- * relation, and the sweep is bound well past the last of them.
+ * relation.  Each sweep stops at the first run that needs no refusal, and
+ * the bound only keeps a regression that fails every run from sweeping
+ * forever.  An undisturbed run makes some 100 to 200 allocations, and one
+ * whose rounds are deferred, which allocates its rounds' buffers afresh
+ * each round, some 550 to 800.
  */
 #define	EVAL_CHAIN	40
-#define	EVAL_SWEEP	240
+#define	EVAL_SWEEP	2048
 
 /*
  * The materialization sweep's program is a chain of this many predicates,
@@ -2076,6 +2080,13 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
  * And a query that calls sink bound before calling it free finds its
  * adornments in a second search, which reads sink through sink$f whatever
  * the call binds.
+ *
+ * Two strategies run again with every round deferred.  A refusal can then
+ * land in a round's buffers, or in the storage its pool keeps, which
+ * abandons the round and runs it again inserting as it derives; that run
+ * meets the refusals that follow as the serial evaluator meets them, so the
+ * query still fails once or succeeds whole, and the round's buffers are
+ * given back either way.
  */
 static void
 a_query_that_ran_out_of_memory_can_be_retried(void)
@@ -2089,7 +2100,13 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 		    "path(X, Y), not sink(Y)?", "path", "sink", 0,
 		    EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 - EVAL_CHAIN },
 		{ "through a second search", "path(n0, X), sink(X), sink(Y)?",
-		    "path$bf", "sink$f", 0, 1 }
+		    "path$bf", "sink$f", 0, 1 },
+		{ "from the whole fixed point, deferred", "path(n0, X)?",
+		    "path", "sink", RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS,
+		    EVAL_CHAIN },
+		{ "through the Magic rewrite, deferred",
+		    "path(n0, X), not sink(X)?", "path$bf", "sink",
+		    RELIC_F_PARALLEL_ALWAYS, EVAL_CHAIN - 1 }
 	};
 	char *program;
 	size_t i;
@@ -2120,6 +2137,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	size_t refused;
 	size_t rows;
 	long budget;
+	bool undisturbed;
 
 	bzero(&config, sizeof(config));
 	config.flags = sweep->flags;
@@ -2128,10 +2146,12 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	completed = 0;
 	evaluating = 0;
 	refused = 0;
+	undisturbed = false;
 
-	for (budget = 0; budget < EVAL_SWEEP; budget++) {
+	for (budget = 0; budget < EVAL_SWEEP && !undisturbed; budget++) {
 		const relic_relation_t *paths;
 		const relic_relation_t *sinks;
+		unsigned long before;
 		relic_t *ctx;
 		int status;
 
@@ -2155,6 +2175,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		errors_reported = 0;
 		rows = 0;
 
+		before = allocations_seen;
 		refuse_allocations_after(budget);
 		query = relic_query_prepare(ctx, NULL, sweep->query);
 		status = -1;
@@ -2162,6 +2183,8 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 			status = relic_query_run(ctx, query, count_answer,
 			    &rows);
 		serve_every_allocation();
+		undisturbed =
+		    allocations_seen - before <= (unsigned long)budget;
 
 		if (status == 0) {
 			completed++;
@@ -2184,13 +2207,14 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		    status != 0 ? "failed" : "succeeded",
 		    status != 0 ? 0 : sweep->rows, rows, budget);
 		checkf(ctx->account.arena_bytes == 0 &&
+		    ctx->account.round_bytes == 0 &&
 		    ctx->account.store_bytes == storage_by_hand(ctx),
 		    SCENARIO_EVALUATE,
 		    "a query answered %s should leave the account holding the "
-		    "relations' %zu bytes and no arena's, not %zu and %zu, with "
-		    "allocation %ld refused", sweep->strategy,
+		    "relations' %zu bytes and no arena's or round's, not %zu, "
+		    "%zu and %zu, with allocation %ld refused", sweep->strategy,
 		    storage_by_hand(ctx), ctx->account.store_bytes,
-		    ctx->account.arena_bytes, budget);
+		    ctx->account.arena_bytes, ctx->account.round_bytes, budget);
 
 		if (query == NULL)
 			query = relic_query_prepare(ctx, NULL, sweep->query);
@@ -2247,9 +2271,9 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	    "answered %s, the sweep should reach a query that runs out of "
 	    "memory while being prepared, in %d attempts", sweep->strategy,
 	    EVAL_SWEEP);
-	checkf(completed > 0, SCENARIO_EVALUATE,
-	    "answered %s, the sweep should reach a query that completes, in "
-	    "%d attempts", sweep->strategy, EVAL_SWEEP);
+	checkf(completed > 0 && undisturbed, SCENARIO_EVALUATE,
+	    "answered %s, the sweep should reach a query that completes "
+	    "undisturbed, in %d attempts", sweep->strategy, EVAL_SWEEP);
 }
 
 /*

@@ -759,10 +759,13 @@ waits out the later ones as before.
 
 ### 6.2 Why it is sound
 
-An `EMIT` appends its head tuple to a buffer, and the buffer is inserted
-when it fills and when the plan ends. The end-of-plan insertion is part of
-running a plan: the executor inserts the buffer before it returns, so
-every caller sees a plan's whole result and none takes part in flushing.
+An `EMIT` appends its head tuple to a buffer, and the executor hands the
+buffer back when it fills and when the plan ends. Its caller inserts it,
+or, in a round whose insertions wait for its end (`specs/design-eval.md`
+section 4), screens it against the store and gathers the tuples the store
+lacks, `specs/design-parallel.md` section 5.3; either way it takes each
+batch before it asks the executor for the next, so no batch is lost and
+none outlives its plan.
 
 A batch inserted while its plan runs is invisible to that plan by
 construction, not by an argument about which plans read what. Every view
@@ -828,17 +831,20 @@ question and not a dependency in the sense of architecture section 74.
 
 ### 6.4 The buffer
 
-One buffer per evaluation, since one plan runs at a time and the buffer is
-empty between plans: `RELIC_INSERT_BATCH` tuples of the widest head among the
-rules the evaluation is given, or of the query's answer, a head of arity zero
-counting as one column so that the buffer always exists. It is allocated from
-the evaluation arena once, when the evaluation begins, and charged as the
-arena is, so a round still allocates nothing, a program of narrow relations
-pays for narrow tuples, and a program of many rules costs no more than one of
-few. A plan has one `EMIT`, so the buffer holds tuples of one relation until
-it is inserted. `RELIC_INSERT_BATCH` is 64: measured on `tc-cyclic` and
-`sg-cyclic`, 16 tuples overlap most of the misses, 64 a little more, and 256
-no more than 64.
+One buffer per evaluation for the plans it runs itself, since one of them
+runs at a time and the buffer is empty between plans, and one per worker
+for a round whose insertions wait for its end, which belongs to the worker
+pool (`specs/design-parallel.md` section 5.3). The evaluation's is
+`RELIC_INSERT_BATCH` tuples of the widest head among the rules the
+evaluation is given, or of the query's answer, a head of arity zero
+counting as one column so that the buffer always exists. It is allocated
+from the evaluation arena once, when the evaluation begins, and charged as
+the arena is, so a round the evaluation runs itself allocates nothing, a
+program of narrow relations pays for narrow tuples, and a program of many
+rules costs no more than one of few. A plan has one `EMIT`, so the buffer
+holds tuples of one relation until it is inserted. `RELIC_INSERT_BATCH`
+is 64: measured on `tc-cyclic` and `sg-cyclic`, 16 tuples overlap most of
+the misses, 64 a little more, and 256 no more than 64.
 
 ---
 

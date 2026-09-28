@@ -264,7 +264,10 @@ struct relic_delta_work {
  *
  * `members` are the relations of the component's predicates.  They are
  * resolved when the component is planned, which can fail, so that advancing
- * the deltas between rounds cannot.
+ * the deltas between rounds cannot.  They are the targets of every round
+ * the component runs, and `items` has room for the `item_capacity` items
+ * the largest of its rounds holds: a pass over its rules, or every
+ * variant.
  *
  * `fixed_point` is how the component is evaluated.  The variants and the
  * `work` of running them exist exactly when it is RELIC_FIXED_SEMI_NAIVE,
@@ -275,11 +278,13 @@ struct relic_component_plans {
 	relic_rule_plans_t	 *planned;
 	relic_variant_t		 *variants;
 	relic_relation_t	**members;
+	relic_round_item_t	 *items;
 	relic_delta_work_t	  work;
 	size_t			  rule_count;
 	size_t			  planned_count;
 	size_t			  variant_count;
 	size_t			  member_count;
+	size_t			  item_capacity;
 	enum relic_fixed_point	  fixed_point;
 };
 
@@ -314,6 +319,9 @@ struct relic_component_plans {
  * did not already hold, which is how a naive pass learns that the fixed
  * point has not been reached.
  *
+ * `env` is what every plan of the evaluation reads besides its relations:
+ * the context, `deltas`, and whether mixed-type comparisons are noted.
+ *
  * `scratch` is what the executor runs every plan of the evaluation in, with
  * room for the widest head any of the evaluation's rules can have and for
  * the longest plan it has built.  The batch it fills is taken whole, which
@@ -336,6 +344,7 @@ struct relic_evaluation {
 	bool			*is_member;
 	size_t			*member_position;
 	size_t			 predicate_count;
+	relic_exec_env_t	 env;
 	relic_scratch_t		 scratch;
 	bool			 derived;
 	bool			 stopped;
@@ -403,7 +412,8 @@ static int	 confirm_seed(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
 static bool	 seed_head_is_constant(const relic_rule_t *rule);
 static int	 execute_plan(relic_evaluation_t *eval,
-		    const relic_running_plan_t *running);
+		    const relic_plan_t *plan, const relic_rule_t *rule,
+		    const relic_emit_target_t *target);
 static void	 count_derivation(relic_evaluation_t *eval, bool added);
 static void	 decode_row(const relic_t *ctx, const relic_dom_t *tuple,
 		    uint16_t arity, relic_value_t *row);
@@ -416,14 +426,12 @@ static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
 static void	 set_delta(relic_evaluation_t *eval, relic_relation_t *member,
 		    relic_tuple_range_t delta);
-static void	 report_note(relic_t *ctx, const relic_rule_t *rule,
-		    relic_mixed_note_t *note);
 static int	 take_batch(relic_evaluation_t *eval,
-		    const relic_running_plan_t *running);
+		    const relic_rule_t *rule,
+		    const relic_emit_target_t *target);
 static void	 take_counters(relic_t *ctx, relic_scratch_t *scratch);
 static int	 insert_seed(relic_evaluation_t *eval,
-		    const relic_component_plans_t *plans,
-		    const relic_rule_t *rule);
+		    const relic_rule_t *rule, relic_relation_t *relation);
 static size_t	 gather_due_variants(relic_component_plans_t *plans);
 static int	 group_by_delta_member(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
@@ -499,8 +507,23 @@ static int	 run_base_pass(relic_evaluation_t *eval,
 		    relic_delta_work_t *work);
 static bool	 rule_is_recursive(const relic_evaluation_t *eval,
 		    const relic_rule_t *rule);
-static int	 run_variant(relic_evaluation_t *eval, relic_delta_work_t *work,
-		    const relic_variant_t *variant);
+static void	 gather_variant_round(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans, relic_round_t *round);
+static int	 run_item(relic_evaluation_t *eval, const relic_round_t *round,
+		    relic_round_item_t *item);
+static int	 run_round(relic_evaluation_t *eval, relic_round_t *round);
+static void	 begin_round(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
+		    relic_round_t *round);
+static void	 add_item(const relic_evaluation_t *eval, relic_round_t *round,
+		    const relic_plan_t *plan, const relic_rule_t *rule);
+static bool	 record_round_gains(const relic_round_t *round,
+		    relic_delta_work_t *work);
+static int	 gather_base_pass(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
+		    relic_round_t *round);
+static int	 allocate_round_items(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
 static const relic_plan_t *variant_any_plan(const relic_variant_t *variant);
 static int	 semi_naive_fixed_point(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
@@ -513,6 +536,8 @@ static void	 deliver_gathered_answer(relic_t *ctx,
 		    const relic_relation_t *answer,
 		    const relic_row_sink_t *sink);
 static int	 stream_query_plan(relic_evaluation_t *eval,
+		    const relic_running_plan_t *running);
+static int	 gather_query_answer(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static const relic_running_plan_t *variant_plan(
 		    const relic_evaluation_t *eval,
@@ -669,11 +694,13 @@ take_counters(relic_t *ctx, relic_scratch_t *scratch)
 }
 
 /*
- * Report the mixed-type comparison the executor recorded for a plan of
- * `rule`, if it recorded one, and clear the record.
+ * A deferred round's merge reports each task's note through here, as
+ * take_batch() reports a batch's, so the two ways a round runs report the
+ * same note for the same rule.
  */
-static void
-report_note(relic_t *ctx, const relic_rule_t *rule, relic_mixed_note_t *note)
+void
+relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
+    relic_mixed_note_t *note)
 {
 	if (note->filter == NULL)
 		return;
@@ -684,10 +711,10 @@ report_note(relic_t *ctx, const relic_rule_t *rule, relic_mixed_note_t *note)
 }
 
 /*
- * Take what the executor has gathered for a running plan since it was last
+ * Take what the executor has gathered for a plan of `rule` since it was last
  * taken, and empty its batch: count its work, report the note it recorded,
- * and send its tuples to the plan's target, inserting them or delivering
- * them as rows.  Returns -1 when an insertion was refused, which the
+ * and send its tuples to `target`, inserting them or delivering them as
+ * rows.  Returns -1 when an insertion was refused, which the
  * relation store has reported; a delivery cannot fail.
  *
  * This is the one place that tells the two kinds of target apart, so a
@@ -697,14 +724,11 @@ report_note(relic_t *ctx, const relic_rule_t *rule, relic_mixed_note_t *note)
  * callback reading the statistics finds the work that derived its row.
  */
 static int
-take_batch(relic_evaluation_t *eval, const relic_running_plan_t *running)
+take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
+    const relic_emit_target_t *target)
 {
-	const relic_emit_target_t *target;
-
-	target = &running->target;
-
 	take_counters(eval->ctx, &eval->scratch);
-	report_note(eval->ctx, running->rule, &eval->scratch.note);
+	relic_report_mixed_note(eval->ctx, rule, &eval->scratch.note);
 
 	if (target->rows.callback == NULL)
 		return (insert_batch(eval, target->relation));
@@ -731,28 +755,26 @@ count_derivation(relic_evaluation_t *eval, bool added)
 }
 
 /*
- * Run one plan to its end: every batch the executor fills is taken as it
- * fills, and the last one before the plan returns, so a caller reading
- * `derived` reads the whole plan's result.  Returns 0, or -1 when an
+ * Run a plan of `rule` to its end, its EMIT's tuples going to `target`:
+ * every batch the executor fills is taken as it fills, and the last one
+ * before the plan returns, so a caller reading `derived` reads the whole
+ * plan's result.  Returns 0, or -1 when an
  * insertion was refused, which the relation store has reported; what the
  * refused batch held after the refused tuple is discarded, as the failed
  * evaluation discards everything else.  The plan ends early when the caller
  * it delivers rows to has asked for no more.
  */
 static int
-execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
+execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan,
+    const relic_rule_t *rule, const relic_emit_target_t *target)
 {
 	enum relic_exec_status status;
-	relic_exec_env_t env;
 
-	env.ctx = eval->ctx;
-	env.deltas = eval->deltas;
-	env.note_mixed = (eval->ctx->config.flags & RELIC_F_NOTE_MIXED) != 0;
-	relic_exec_start(&eval->scratch, &env, &running->plan);
+	relic_exec_start(&eval->scratch, &eval->env, plan);
 
 	do {
 		status = relic_exec_run(&eval->scratch);
-		if (take_batch(eval, running) != 0)
+		if (take_batch(eval, rule, target) != 0)
 			return (-1);
 	} while (status == RELIC_EXEC_BATCH_FULL && !eval->stopped);
 
@@ -761,15 +783,15 @@ execute_plan(relic_evaluation_t *eval, const relic_running_plan_t *running)
 
 /*
  * A seed's turn in a pass: insert its head, every argument of which is a
- * constant, and count it as the batch of a plan's EMIT counts its tuples.
+ * constant, into `relation`, and count it as the batch of a plan's EMIT
+ * counts its tuples.
  * Returns -1 when the insertion was refused, which the relation store has
  * reported.
  */
 static int
-insert_seed(relic_evaluation_t *eval, const relic_component_plans_t *plans,
-    const relic_rule_t *rule)
+insert_seed(relic_evaluation_t *eval, const relic_rule_t *rule,
+    relic_relation_t *relation)
 {
-	relic_relation_t *relation;
 	relic_dom_t tuple[RELIC_MAX_ARITY];
 	uint16_t column;
 	bool added;
@@ -777,7 +799,6 @@ insert_seed(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 	for (column = 0; column < rule->head_arity; column++)
 		tuple[column] = rule->head_args[column].u.constant;
 
-	relation = head_relation_of(eval, plans, rule);
 	if (relic_relation_insert(eval->ctx, relation, tuple, &added) != 0)
 		return (-1);
 
@@ -808,52 +829,193 @@ confirm_planned(const relic_evaluation_t *eval,
 }
 
 /*
- * One pass over a component's rules, each once, in program order: a seed
- * inserts its head, and a rule with a base plan runs it.  A recursive rule
- * under the semi-naive fixed point has none and waits for the rounds that
- * run its variants.  With `work`, each member that gains a tuple is recorded
- * for those rounds.  `derived` is left set exactly when something in the
- * pass was new.
+ * Run a round's items in order, each inserting what it derives into its
+ * target, and mark each item whose turn inserted a tuple its target did
+ * not hold.  Returns 0, or -1 when an insertion was refused, which the
+ * relation store has reported.
+ *
+ * Under RELIC_F_PARALLEL_ALWAYS every round is offered for deferral: its
+ * items run over a store nothing writes until they have all finished, and
+ * what they derived is then inserted in the order they would have inserted
+ * it (lib/round.c).  A round that reads what it writes, or that could not
+ * go on, is declined before it has changed anything, and runs here,
+ * inserting as it derives.  Either way the relations, the counters and
+ * what is reported come out the same.
  */
 static int
-run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
-    relic_delta_work_t *work)
+run_round(relic_evaluation_t *eval, relic_round_t *round)
+{
+	size_t i;
+
+	if ((eval->ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0) {
+		switch (relic_round_run(eval->ctx, round)) {
+		case RELIC_ROUND_MERGED:
+			return (0);
+		case RELIC_ROUND_FAILED:
+			return (-1);
+		case RELIC_ROUND_DECLINED:
+			break;
+		}
+	}
+
+	for (i = 0; i < round->item_count; i++) {
+		if (run_item(eval, round, &round->items[i]) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * An item's turn in a round that inserts as it derives: a seed inserts its
+ * head and a plan runs, and the item is marked when its turn inserted a
+ * tuple its target did not hold.
+ */
+static int
+run_item(relic_evaluation_t *eval, const relic_round_t *round,
+    relic_round_item_t *item)
+{
+	relic_emit_target_t target;
+	int status;
+
+	bzero(&target, sizeof(target));
+	target.relation = round->targets[item->target];
+
+	eval->derived = false;
+	if (item->plan == NULL)
+		status = insert_seed(eval, item->rule, target.relation);
+	else
+		status = execute_plan(eval, item->plan, item->rule, &target);
+	item->gained = eval->derived;
+
+	return (status);
+}
+
+/*
+ * Begin a round of a component's with no items: its targets are the
+ * component's members, and its items are kept where the component keeps
+ * them.
+ */
+static void
+begin_round(relic_evaluation_t *eval, const relic_component_plans_t *plans,
+    relic_round_t *round)
+{
+	round->items = plans->items;
+	round->targets = plans->members;
+	round->env = &eval->env;
+	round->item_count = 0;
+	round->item_capacity = plans->item_capacity;
+	round->target_count = plans->member_count;
+}
+
+/*
+ * Add an item to a round of the component being evaluated: a seed of
+ * `rule` when `plan` is NULL, and otherwise a plan of it.  Its target is
+ * the member the rule's head is, and a component's round targets its
+ * members in the order of their positions.
+ */
+static void
+add_item(const relic_evaluation_t *eval, relic_round_t *round,
+    const relic_plan_t *plan, const relic_rule_t *rule)
+{
+	relic_round_item_t *item;
+
+	assert(round->item_count < round->item_capacity);
+	item = &round->items[round->item_count];
+	round->item_count++;
+
+	item->plan = plan;
+	item->rule = rule;
+	item->target = head_member_of(eval, rule);
+	item->gained = false;
+}
+
+/*
+ * Whether any item of a round gained a tuple, recording in `work`, when
+ * there is one, the member each such item gained it in.
+ */
+static bool
+record_round_gains(const relic_round_t *round, relic_delta_work_t *work)
+{
+	bool gained;
+	size_t i;
+
+	gained = false;
+	for (i = 0; i < round->item_count; i++) {
+		if (!round->items[i].gained)
+			continue;
+
+		gained = true;
+		if (work != NULL)
+			record_gain(work, round->items[i].target);
+	}
+
+	return (gained);
+}
+
+/*
+ * Gather a pass over a component's rules, each once, in program order, into
+ * a round: a seed, whose turn inserts its head, and each rule with a base
+ * plan.  A recursive rule under the semi-naive fixed point has none and
+ * waits for the rounds that run its variants.
+ */
+static int
+gather_base_pass(relic_evaluation_t *eval,
+    const relic_component_plans_t *plans, relic_round_t *round)
 {
 	const relic_rule_plans_t *rule_plans;
 	const relic_rule_t *rule;
 	size_t planned;
 	size_t i;
-	bool derived;
-	int status;
 
-	derived = false;
+	begin_round(eval, plans, round);
 	planned = 0;
 
 	for (i = 0; i < plans->rule_count; i++) {
 		rule = &eval->rules->entries[plans->rule_indexes[i]];
 
-		eval->derived = false;
 		if (rule->body_length == 0) {
-			status = insert_seed(eval, plans, rule);
-		} else {
-			if (confirm_planned(eval, plans, planned, rule) != 0)
-				return (-1);
-			rule_plans = &plans->planned[planned];
-			planned++;
-			if (rule_plans->base == NULL)
-				continue;
-			status = execute_plan(eval, rule_plans->base);
+			add_item(eval, round, NULL, rule);
+			continue;
 		}
-		if (status != 0)
-			return (-1);
 
-		if (eval->derived && work != NULL)
-			record_gain(work, head_member_of(eval, rule));
-		derived = derived || eval->derived;
+		if (confirm_planned(eval, plans, planned, rule) != 0)
+			return (-1);
+		rule_plans = &plans->planned[planned];
+		planned++;
+		if (rule_plans->base != NULL)
+			add_item(eval, round, &rule_plans->base->plan, rule);
 	}
 
 	assert(planned == plans->planned_count);
-	eval->derived = derived;
+
+	return (0);
+}
+
+/*
+ * One pass over a component's rules, each once, in program order.  With
+ * `work`, each member that gains a tuple is recorded for the rounds that
+ * follow.  `derived` is left set exactly when something in the pass was
+ * new.
+ *
+ * A pass of the naive fixed point reads the members as the rules before it
+ * in the pass left them, so it is never deferred.  Every other pass reads
+ * no relation it writes -- a component that is not recursive has no rule
+ * reading one of its members, and the first pass of the semi-naive fixed
+ * point runs only its exit rules, which read none -- and may be.
+ */
+static int
+run_base_pass(relic_evaluation_t *eval, const relic_component_plans_t *plans,
+    relic_delta_work_t *work)
+{
+	relic_round_t round;
+
+	if (gather_base_pass(eval, plans, &round) != 0)
+		return (-1);
+	if (run_round(eval, &round) != 0)
+		return (-1);
+
+	eval->derived = record_round_gains(&round, work);
 
 	return (0);
 }
@@ -993,21 +1155,27 @@ variant_plan(const relic_evaluation_t *eval, const relic_variant_t *variant)
 }
 
 /*
- * Run one delta variant of a component being evaluated semi-naively,
- * recording its head as having gained when it inserted a tuple.
+ * Gather the variants due this round into a round, in the order they were
+ * planned, each with the plan its delta's size selects.  Every view of a
+ * variant is a member's old, delta or current view, fixed by the deltas
+ * before the round begins, so the round reads nothing it writes.
  */
-static int
-run_variant(relic_evaluation_t *eval, relic_delta_work_t *work,
-    const relic_variant_t *variant)
+static void
+gather_variant_round(relic_evaluation_t *eval,
+    relic_component_plans_t *plans, relic_round_t *round)
 {
-	eval->derived = false;
-	if (execute_plan(eval, variant_plan(eval, variant)) != 0)
-		return (-1);
+	const relic_variant_t *variant;
+	size_t due_count;
+	size_t i;
 
-	if (eval->derived)
-		record_gain(work, head_member_of(eval, variant->rule));
+	begin_round(eval, plans, round);
+	due_count = gather_due_variants(plans);
 
-	return (0);
+	for (i = 0; i < due_count; i++) {
+		variant = &plans->variants[plans->work.due[i]];
+		add_item(eval, round, &variant_plan(eval, variant)->plan,
+		    variant->rule);
+	}
 }
 
 /*
@@ -1167,8 +1335,7 @@ semi_naive_fixed_point(relic_evaluation_t *eval,
     relic_component_plans_t *plans)
 {
 	relic_delta_work_t *work;
-	size_t due_count;
-	size_t i;
+	relic_round_t round;
 
 	work = &plans->work;
 
@@ -1182,13 +1349,10 @@ semi_naive_fixed_point(relic_evaluation_t *eval,
 		eval->ctx->counters.iterations++;
 
 		advance_deltas(eval, plans);
-		due_count = gather_due_variants(plans);
-
-		for (i = 0; i < due_count; i++) {
-			if (run_variant(eval, work,
-			    &plans->variants[work->due[i]]) != 0)
-				return (-1);
-		}
+		gather_variant_round(eval, plans, &round);
+		if (run_round(eval, &round) != 0)
+			return (-1);
+		record_round_gains(&round, work);
 	}
 
 	return (0);
@@ -1230,6 +1394,8 @@ evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
 
 	bzero(eval, sizeof(*eval));
 	eval->ctx = ctx;
+	eval->env.ctx = ctx;
+	eval->env.note_mixed = (ctx->config.flags & RELIC_F_NOTE_MIXED) != 0;
 
 	eval->components = evaluation_alloc(eval, component_count,
 	    sizeof(*eval->components));
@@ -1286,6 +1452,7 @@ evaluation_track_deltas(relic_evaluation_t *eval)
 	if (eval->deltas == NULL)
 		return (-1);
 	bzero(eval->deltas, eval->predicate_count * sizeof(*eval->deltas));
+	eval->env.deltas = eval->deltas;
 
 	eval->is_member = evaluation_alloc(eval, eval->predicate_count,
 	    sizeof(*eval->is_member));
@@ -1974,10 +2141,33 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 	status = plan_rules(eval, schedule, component, plans);
 	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
 		status = plan_delta_work(eval, plans);
+	if (status == 0)
+		status = allocate_round_items(eval, plans);
 
 	mark_members(eval, schedule, component, false);
 
 	return (status);
+}
+
+/*
+ * Give a component room for the items of its largest round: a pass over its
+ * rules has at most one per rule, and a semi-naive round at most one per
+ * variant.
+ */
+static int
+allocate_round_items(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	size_t room;
+
+	room = plans->rule_count > plans->variant_count ?
+	    plans->rule_count : plans->variant_count;
+
+	plans->items = evaluation_alloc(eval, room, sizeof(*plans->items));
+	if (plans->items == NULL)
+		return (-1);
+	plans->item_capacity = room;
+
+	return (0);
 }
 
 /*
@@ -2411,7 +2601,8 @@ stream_query_plan(relic_evaluation_t *eval,
 	inserted_before = eval->ctx->counters.tuples_inserted;
 #endif
 
-	status = execute_plan(eval, running);
+	status = execute_plan(eval, &running->plan, running->rule,
+	    &running->target);
 
 	assert(status == 0);
 	assert(eval->ctx->account.store_bytes == account_before.store_bytes);
@@ -2419,6 +2610,36 @@ stream_query_plan(relic_evaluation_t *eval,
 	assert(eval->ctx->counters.tuples_inserted == inserted_before);
 
 	return (status);
+}
+
+/*
+ * Run a query plan whose EMIT inserts into the query's answer relation, as
+ * a round of that one item.  Nothing reads the answer, so the round may be
+ * deferred.
+ */
+static int
+gather_query_answer(relic_evaluation_t *eval,
+    const relic_running_plan_t *running)
+{
+	relic_relation_t *answer;
+	relic_round_item_t item;
+	relic_round_t round;
+
+	answer = running->target.relation;
+
+	item.plan = &running->plan;
+	item.rule = running->rule;
+	item.target = 0;
+	item.gained = false;
+
+	round.items = &item;
+	round.targets = &answer;
+	round.env = &eval->env;
+	round.item_count = 1;
+	round.item_capacity = 1;
+	round.target_count = 1;
+
+	return (run_round(eval, &round));
 }
 
 /*
@@ -2512,7 +2733,7 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 		if (streams)
 			status = stream_query_plan(&eval, running);
 		else
-			status = execute_plan(&eval, running);
+			status = gather_query_answer(&eval, running);
 	}
 	evaluation_end(&eval);
 

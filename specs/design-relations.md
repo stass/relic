@@ -319,6 +319,29 @@ hash the tuple and then perform one insertion by that hash, the steps
 above, so they cannot disagree about what a duplicate is or where a limit
 falls.
 
+**A round that defers its insertions screens, then merges.** A round whose
+plans run over a store nothing writes (`specs/design-parallel.md` section
+3) needs the read-only half of an insertion and, at its end, the rest:
+
+```c
+void
+relic_relation_screen(const relic_relation_t *relation,
+    const relic_dom_t *tuples, size_t count, uint32_t *hashes, bool *held);
+
+int
+relic_relation_insert_batch_hashed(relic_t *ctx, relic_relation_t *relation,
+    const relic_dom_t *tuples, const uint32_t *hashes, size_t count,
+    bool *added, size_t *completedp);
+```
+
+The screen hashes a batch, prefetches as a batch insertion does, and
+reports which tuples the relation holds, modifying nothing, so a tuple it
+finds is exactly one an insertion would have found present. The hashed
+insertion is the batch insertion by hashes the screen computed, which is
+how the round's merge inserts what its plans gathered: in the order the
+serial round would have inserted it and by the same steps, so it refuses
+the tuple the serial round refuses, with the same diagnostic.
+
 **A load's commit reserves, then appends.** The facts a load adds to base
 stores are not inserted one at a time: the commit has looked every staged
 fact up already, and knows how many each base store gains
@@ -392,7 +415,7 @@ and indexes are what actually grow:
 | Limit | Counts | Configured by |
 | --- | --- | --- |
 | `max_tuples` | tuples across every relation, base stores included | `-l tuples=N` |
-| `max_memory` | bytes of column and index storage, plus an operation's arenas | `-l memory=N` |
+| `max_memory` | bytes of column and index storage, plus an operation's arenas and a round's candidate buffers | `-l memory=N` |
 
 Zero means unlimited, so a zeroed configuration asks for the defaults.
 
@@ -413,7 +436,11 @@ the program's stores hold and what running the program can do. The arenas
 that hold an evaluation's plans and a query's rewrite are sized by the square
 of a body and are charged to the same total, per
 `specs/design-planning-cost.md` section 6; the check there is the arena's,
-and this document's total is the part the store contributes.
+and this document's total is the part the store contributes. So are the
+buffers in which a round that defers its insertions gathers candidates,
+a third kind of holder that exists only until the round's merge and is
+released before anything else asks the limit for room
+(`specs/design-parallel.md` section 8).
 
 **When it is checked** is before the insertion, or a load's reservation,
 modifies anything. The
@@ -422,7 +449,15 @@ the fact, so that a limit which fires has prevented the allocation rather than
 reported it. Two pure functions make that possible: one gives the capacity a
 growable array would reach, the other the bytes an identifier table would hold
 after a reservation. Each is also what the corresponding growth itself uses,
-so the prediction and the policy cannot drift apart.
+so the prediction and the policy cannot drift apart. A round's merge asks
+the question of many insertions at once, before the first of them:
+`relic_relation_bytes_after_inserts()` gives the bytes a relation would
+hold after *n* more tuples, each new to every index, at the capacities one
+insertion after another reaches, which can exceed what one reservation for
+all *n* reaches, since a growth raises a capacity to the count when
+doubling falls short. A merge the projection admits cannot be refused by the
+memory limit; one it refuses is run again the serial way, where each tuple
+is admitted or refused as above.
 
 **How the total is maintained** is by reconciliation rather than by
 bookkeeping at each site. An insertion measures what the relation holds,

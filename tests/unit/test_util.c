@@ -54,6 +54,7 @@
 #define	SCENARIO_MAPPED		"a large array gets pages of its own"
 #define	SCENARIO_OVERFLOW	"an impossible array size is refused"
 #define	SCENARIO_PREDICTED	"a growth is exactly what was predicted"
+#define	SCENARIO_STEPWISE	"growing a step at a time is predicted too"
 #define	SCENARIO_RELEASED	"an outgrown mapping is released whole"
 #define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_SPREAD		"hashing separates similar keys"
@@ -1339,6 +1340,86 @@ a_growth_is_exactly_what_was_predicted(void)
 }
 
 /*
+ * The stepwise predictor agrees with growing one step at a time.
+ *
+ * A deferred round asks, before it inserts anything, how large a relation
+ * would grow were every tuple it holds inserted one at a time, and that is
+ * more than one growth for all of them reaches.  The predictor is checked
+ * against the growth itself, from an empty array and from one part full,
+ * for steps of no items, of one, and of more items than the smallest array
+ * holds.
+ */
+static void
+a_stepwise_growth_is_exactly_what_was_predicted(void)
+{
+	static const size_t steps_of[] = { 0, 1, 3, 32 };
+	static const size_t starts[] = { 0, 5, 64 };
+	uint32_t *items;
+	size_t predicted;
+	size_t capacity;
+	size_t initial;
+	size_t count;
+	size_t step;
+	size_t s;
+	size_t k;
+	size_t i;
+	void *grown;
+
+	for (s = 0; s < sizeof(steps_of) / sizeof(steps_of[0]); s++) {
+		for (k = 0; k < sizeof(starts) / sizeof(starts[0]); k++) {
+			step = steps_of[s];
+			items = NULL;
+			capacity = 0;
+			count = starts[k];
+			if (count > 0) {
+				grown = relic_grow_array(items, &capacity,
+				    count, sizeof(*items));
+				if (grown == NULL)
+					break;
+				items = grown;
+			}
+			initial = capacity;
+
+			for (i = 1; i <= 200; i++) {
+				grown = relic_grow_array(items, &capacity,
+				    count + step, sizeof(*items));
+				if (grown == NULL)
+					break;
+				items = grown;
+				count += step;
+
+				predicted = relic_grow_array_capacity_stepwise(
+				    initial, starts[k], i, step);
+				checkf(predicted == capacity, SCENARIO_STEPWISE,
+				    "%zu steps of %zu from %zu items should "
+				    "reach %zu, predicted %zu", i, step,
+				    starts[k], capacity, predicted);
+			}
+
+			relic_free_array(items);
+		}
+	}
+
+	check(relic_grow_array_capacity_stepwise(8, 8, 0, 4) == 8,
+	    SCENARIO_STEPWISE, "no steps should be predicted as no growth");
+	check(relic_grow_array_capacity_stepwise(SIZE_MAX / 2 + 1,
+	    SIZE_MAX / 2 + 1, 1, 1) == 0, SCENARIO_STEPWISE,
+	    "a step that cannot be grown for should be predicted to refuse");
+	check(relic_grow_array_capacity_stepwise(8, 8, SIZE_MAX / 2, 4) == 0,
+	    SCENARIO_STEPWISE,
+	    "steps whose items no size counts should be predicted to refuse");
+
+	check(relic_saturating_sum(SIZE_MAX - 1, 1) == SIZE_MAX &&
+	    relic_saturating_sum(SIZE_MAX - 1, 2) == SIZE_MAX &&
+	    relic_saturating_sum(3, 4) == 7, SCENARIO_STEPWISE,
+	    "a sum past a size_t should saturate and no other");
+	check(relic_saturating_product(SIZE_MAX / 2, 3) == SIZE_MAX &&
+	    relic_saturating_product(SIZE_MAX, 0) == 0 &&
+	    relic_saturating_product(6, 7) == 42, SCENARIO_STEPWISE,
+	    "a product past a size_t should saturate and no other");
+}
+
+/*
  * Reserve room for `added` keys in a table already holding `held`, and
  * check the reservation reached the size predicted for it and that the keys
  * then fit without the table growing again.  Returns whether every check
@@ -1713,6 +1794,7 @@ main(void)
 	equal_input_hashes_equally();
 	every_inserted_key_is_found_after_growth();
 	a_growth_is_exactly_what_was_predicted();
+	a_stepwise_growth_is_exactly_what_was_predicted();
 	a_hash_depends_on_its_seed();
 	a_reservation_for_many_holds_them_all();
 	a_reservation_is_exactly_what_was_predicted();

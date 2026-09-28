@@ -22,6 +22,7 @@
 
 #include <relic.h>
 
+#include "account.h"
 #include "arena.h"
 #include "ast.h"
 #include "compat.h"
@@ -31,6 +32,7 @@
 #include "program.h"
 #include "queue.h"
 #include "relation.h"
+#include "round.h"
 #include "util.h"
 
 /*
@@ -438,9 +440,14 @@ struct relic_materialized {
  * not counted here: relic_stats() measures it when asked.
  *
  * `account` is what the memory limit is enforced against: the relation
- * store's storage and the chunks of the two charged arenas, `eval_arena` and
- * the arena of a query's Magic rewrite.  The other arenas hold what the
- * caller wrote and are not charged.
+ * store's storage, the chunks of the two charged arenas, `eval_arena` and
+ * the arena of a query's Magic rewrite, and the buffers of a deferred round
+ * while it runs.  The other arenas hold what the caller wrote and are not
+ * charged.
+ *
+ * `pool` runs the rounds whose insertions wait for their end (lib/round.c).
+ * It is NULL until the first such round, and then kept, with the storage
+ * it has grown, until the context is destroyed.
  *
  * `query_mixed_noted` records that RELIC_F_NOTE_MIXED has reported a
  * mixed-type comparison of the query being answered, or of a rule generated
@@ -478,6 +485,7 @@ struct relic {
 	relic_counters_t	 counters;
 	uint64_t		 hash_seed;
 	relic_materialized_t	 materialized;
+	relic_pool_t		*pool;
 	bool			 query_mixed_noted;
 	bool			 busy;
 };
@@ -964,11 +972,17 @@ int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
  * was materialized, and it cannot fail.  A load's commit calls it before it
  * adds a fact, and every evaluation that must start from the facts calls it
  * before it begins.
+ *
+ * relic_report_mixed_note() reports the mixed-type comparison a note
+ * records for a plan of `rule`, unless the rule has had one reported, and
+ * clears the note.
  */
 int	 relic_query_answer(relic_t *ctx, relic_query_t *query,
 	    relic_row_cb callback, void *callback_ctx);
 bool	 relic_relations_current(const relic_t *ctx);
 void	 relic_discard_derived(relic_t *ctx);
+void	 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
+	    relic_mixed_note_t *note);
 
 /*
  * lib/facts.c
@@ -1174,7 +1188,8 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * never decrease over the life of the index, as a semi-naive delta's never
  * do, or a lookup from an earlier one walks the whole chain.
  * relic_index_bytes_after_reserve() is what the memory limit projects a
- * reservation with.  relic_index_free() releases an index, which
+ * reservation with, and relic_index_bytes_after_adds() what it projects a
+ * sequence of insertions with.  relic_index_free() releases an index, which
  * relic_index_init() must set up again before it is used.
  *
  * The relation store builds and extends indexes and does all the
@@ -1187,6 +1202,8 @@ void	 relic_index_free(relic_index_t *index);
 size_t	 relic_index_bytes(const relic_index_t *index);
 size_t	 relic_index_bytes_after_reserve(const relic_index_t *index,
 	    size_t tuples, size_t added_keys);
+size_t	 relic_index_bytes_after_adds(const relic_index_t *index,
+	    size_t tuples, size_t added);
 int	 relic_index_reserve(relic_index_t *index,
 	    const relic_relation_t *relation, size_t tuples, size_t added_keys);
 void	 relic_index_add(relic_index_t *index, const relic_relation_t *relation,
@@ -1245,7 +1262,9 @@ void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
  * the same one with the same diagnostic -- recording in added[i] whether
  * tuple i was added and in *completedp how many insertions completed before
  * any refusal.  It overlaps the cache misses of their duplicate checks,
- * RELIC_INSERT_BATCH tuples at a time.
+ * RELIC_INSERT_BATCH tuples at a time.  relic_relation_insert_batch_hashed()
+ * does the same with each tuple's hash given, as relic_relation_screen()
+ * gave it.
  *
  * relic_relation_reserve() makes room for `added` more tuples -- their
  * columns, canonical index slots and room in every secondary index --
@@ -1259,9 +1278,12 @@ void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
  * A reservation applies no configured limit.
  * relic_relation_bytes_after_reserve() gives the bytes the relation would
  * then hold, and a caller bound by the memory limit projects that against
- * the account first, as an insertion does.  A reservation past the
- * identifier space is refused as a relation too large to grow; capacity a
- * failed reservation obtained is kept, and accounted.
+ * the account first, as an insertion does.
+ * relic_relation_bytes_after_inserts() gives the most it could hold once a
+ * number of tuples had been inserted one at a time, which is what a caller
+ * asks before inserting many whose newness it does not know.  A
+ * reservation past the identifier space is refused as a relation too large
+ * to grow; capacity a failed reservation obtained is kept, and accounted.
  *
  * relic_relation_contains() says whether a relation holds a tuple of some
  * columns.  The reads the executor makes -- the tuple an identifier names,
@@ -1323,6 +1345,10 @@ int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 int	 relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *tuples, size_t count, bool *added,
 	    size_t *completedp);
+int	 relic_relation_insert_batch_hashed(relic_t *ctx,
+	    relic_relation_t *relation, const relic_dom_t *tuples,
+	    const uint32_t *hashes, size_t count, bool *added,
+	    size_t *completedp);
 bool	 relic_relation_contains(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 bool	 relic_relation_contains_hashed(const relic_relation_t *relation,
@@ -1332,6 +1358,8 @@ uint32_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
 size_t	 relic_relation_bytes(const relic_relation_t *relation);
 size_t	 relic_relation_bytes_after_reserve(const relic_relation_t *relation,
 	    size_t added);
+size_t	 relic_relation_bytes_after_inserts(
+	    const relic_relation_t *relation, size_t added);
 int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
 	    size_t added);
 size_t	 relic_relation_count(const relic_relation_t *relation);

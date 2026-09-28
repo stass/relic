@@ -203,11 +203,25 @@ enum relic_exec_status {
  * caller that runs it again without emptying a full batch is told the batch
  * is full, and nothing is derived.  Between two calls the relations may be
  * appended to and nothing else, as the executor's description above says.
+ *
+ * relic_exec_view() gives the range of identifiers an operation's view
+ * covers under `env`.  relic_exec_start_piece() starts a plan whose first
+ * operation is a SCAN as relic_exec_start() does, except that the scan
+ * visits only `piece`, which must lie within its view.  Everything below the
+ * first operation reads only the binding it makes and the relations, so the
+ * plan then derives exactly what the whole plan derives while its first
+ * cursor is inside the piece, in the same order, and a view cut into pieces
+ * run one after another derives what the whole plan does.
  */
 void	 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
 	    size_t op_room, relic_dom_t *batch, uint16_t arity_room);
 void	 relic_exec_start(relic_scratch_t *scratch,
 	    const relic_exec_env_t *env, const relic_plan_t *plan);
+void	 relic_exec_start_piece(relic_scratch_t *scratch,
+	    const relic_exec_env_t *env, const relic_plan_t *plan,
+	    relic_tuple_range_t piece);
 enum relic_exec_status relic_exec_run(relic_scratch_t *scratch);
+relic_tuple_range_t relic_exec_view(const relic_exec_env_t *env,
+	    const relic_op_atom_t *atom);
 
 #endif /* RELIC_EXEC_H */

@@ -447,7 +447,7 @@ serially.
 
 Every counter the executor advances -- tuples scanned, looked up,
 derivations -- is the worker's own, summed into the context's by worker 0
-after a completed merge. The sum is what the serial evaluator would have
+after the barrier, once the round is to be merged rather than abandoned. The sum is what the serial evaluator would have
 counted: a chunk reads exactly the tuples the serial plan read while its
 first cursor was inside the chunk, and every derivation is counted whether
 it was screened out or kept.
@@ -490,7 +490,11 @@ runs every eligible round deferred, however small its estimate and
 whatever the pool's size: on one thread it is the deferred path and the
 merge run by the calling thread alone, which is how step 2 of section 15
 is tested before a thread exists and how a build without threads keeps
-testing the merge. It changes nothing but the cost, which is what a debug
+testing the merge. It also cuts every item as finely as section 5.2's
+clamps allow, into `RELIC_CHUNKS_PER_WORKER` times the pool's size pieces
+or one per tuple of the range, whatever the item's estimate, so that the
+test suite's small rounds cross piece boundaries that their estimates
+would never make. It changes nothing but the cost, which is what a debug
 switch may change.
 
 ---
@@ -514,8 +518,9 @@ would not have decided.
 Worker 0 then inserts the round's candidates, item by item
 and task by task in the order of the task array, into each task's relation
 through `relic_relation_insert_batch()`, exactly as the serial evaluator
-inserts a plan's batches. A seed's task inserts its one tuple through
-`relic_relation_insert()`, as `insert_seed()` does. Each insertion's
+inserts a plan's batches. A seed's task screens its one tuple as a batch
+of one, so the tuple is a candidate like any other, and its insertion is
+the one `insert_seed()` makes. Each insertion's
 newness is counted as a tuple inserted, and a task's relation that gained
 a tuple is recorded as having gained, which is what the next round's
 deltas are advanced from. The merge is the serial evaluator's insertion,
@@ -644,9 +649,12 @@ with them is exactly the functions that header declares --
 `relic_index_first_since()`, `relic_value_order()`, and the few more the
 screening needs -- each of which takes its operands `const` and hands back
 nothing that could be written through. What a plan needs of a relation for
-every tuple, its arity, the planner copies into the operation. The one
+every tuple, its arity, the planner copies into the operation. The
 exception of section 7.2 reaches its mutable words inside `lib/index.c`,
-through a pointer the `const` does not cover. A future write on the task
+through a pointer the `const` does not cover, and the account's total of
+section 8 is reached the same way: the account is incomplete too, and a
+task can only charge and release a round's bytes through the two
+functions that do so. A future write on the task
 path would not compile, whatever array it reached and however the
 representation grew. That is the by-construction form of the table a
 design would otherwise keep of what writes when, and the list of when the
@@ -928,11 +936,14 @@ at every thread count**, and the argument is short because of section 3.
   the serial evaluator; so every refusal is the serial evaluator's, on
   the same tuple or the same growth, with the same message.
 
-A failed evaluation is not held to the identity: a round that fails in
-the merge has counted the scans and derivations of the whole round where
-the serial evaluator stopped part way, as a batch already may run past a
-refused tuple (`specs/design-evaluation-cost.md` section 6.2). What is
-identical on failure is the diagnostic and the state the relations are
+A merge is begun only once neither limit can refuse it, sections 6.1 and
+8, so an evaluation a limit fails is refused in a round run serially,
+after the serial evaluator's own work, and is held to the identity like a
+successful one. An evaluation exhaustion fails is not: a round whose merge
+the allocator refuses has counted the scans and derivations of the whole
+round where the serial evaluator stopped part way, as a batch already may
+run past a refused tuple (`specs/design-evaluation-cost.md` section 6.2).
+What is identical then is the diagnostic and the state the relations are
 left in, which the next evaluation discards.
 
 The golden tests are therefore run at one thread and at several, with
@@ -1044,9 +1055,8 @@ was.
 * **Identity.** `tests/langtest.sh` runs every golden test twice more,
   at `-j 4 -X parallel` and at `-j 16 -X parallel`, and compares output
   and `-X stats` counters byte for byte with the one-thread run, the
-  `parallel rounds` line aside and, for a test whose evaluation fails,
-  the counters of work aside, per section 12; a difference fails the
-  test. The
+  `parallel rounds` line aside, whether its evaluation succeeds or a
+  limit fails it, per section 12; a difference fails the test. The
   equivalence suite of `tests/equiv` and the random programs of
   `tests/random` are run the same way.
 * **The path was taken.** `test_eval` asserts `parallel_rounds` is

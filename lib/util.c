@@ -274,6 +274,47 @@ relic_grow_array_capacity(size_t capacity, size_t count)
 	return (wanted);
 }
 
+size_t
+relic_grow_array_capacity_stepwise(size_t capacity, size_t held,
+    size_t requests, size_t per_request)
+{
+	size_t end;
+	size_t passing;
+
+	assert(held <= capacity);
+
+	if (requests == 0)
+		return (capacity);
+	if (per_request != 0 && requests > (SIZE_MAX - held) / per_request)
+		return (0);
+	end = held + requests * per_request;
+
+	/*
+	 * Requests of no items ask for no items, which relic_grow_array()
+	 * rounds up to one: only the first of them can grow the array.
+	 */
+	if (end == 0)
+		return (relic_grow_array_capacity(capacity, 0));
+
+	/*
+	 * Each pass finds the first request whose items the capacity cannot
+	 * hold and grows for that request.  The request lies within the
+	 * requests, since the capacity is short of their end, and the growth
+	 * leaves the capacity holding it, so what is held after it is again
+	 * within the capacity.
+	 */
+	while (capacity < end) {
+		passing = held +
+		    ((capacity - held) / per_request + 1) * per_request;
+		capacity = relic_grow_array_capacity(capacity, passing);
+		if (capacity == 0)
+			return (0);
+		held = passing;
+	}
+
+	return (capacity);
+}
+
 void *
 relic_grow_array(void *items, size_t *capacity, size_t count, size_t item_size)
 {

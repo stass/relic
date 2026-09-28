@@ -10,8 +10,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "account.h"
 #include "queue.h"
+
+typedef struct relic_account relic_account_t;
 
 /*
  * The region allocator, in a header of its own so that a structure owning an

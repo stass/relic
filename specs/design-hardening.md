@@ -145,17 +145,21 @@ with `relic_query_collect()`. The strategies are those of
 | naive | `RELIC_F_NAIVE` | default |
 | no-index | `RELIC_F_NO_INDEX` | default |
 | no-stream | `RELIC_F_NO_STREAM` | default |
+| parallel | `RELIC_F_PARALLEL_ALWAYS` | default |
 | no-reorder | `RELIC_F_NO_REORDER` | -- |
 | no-magic | `RELIC_F_NO_MAGIC` | -- |
 | naive+no-magic | `RELIC_F_NAIVE \| RELIC_F_NO_MAGIC` | no-magic |
 | no-index+no-magic | `RELIC_F_NO_INDEX \| RELIC_F_NO_MAGIC` | no-magic |
 | no-reorder+no-magic | `RELIC_F_NO_REORDER \| RELIC_F_NO_MAGIC` | no-magic |
+| parallel+no-magic | `RELIC_F_PARALLEL_ALWAYS \| RELIC_F_NO_MAGIC` | no-magic |
 | materialized | `relic_materialize()` before the queries | no-magic |
 
-Every strategy's answers must equal the default's. That covers all four
+Every strategy's answers must equal the default's. That covers all five
 equivalences: `semi-naive == naive`, `magic == full materialization`,
-`indexed == no-index` and `reordered == textual order`. The materialized
-strategy adds the fifth path through the evaluator, a query run over
+`indexed == no-index`, `reordered == textual order` and `deferred ==
+serial`, the last the rounds of `specs/design-parallel.md` whose
+insertions wait for their end. The materialized strategy adds another
+path through the evaluator, a query run over
 relations that already hold the fixed point, which `specs/design-magic.md`
 section 9 specifies and nothing else in the differential harness reaches.
 The no-stream strategy gathers every answer in its relation, as a query

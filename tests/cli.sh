@@ -243,10 +243,10 @@ case "$diagnostic" in
 	;;
 esac
 
-# The planner's references, answering without the Magic rewrite, and
-# gathering every answer before writing it are selected by name and answer
-# as the default does.
-for reference in no-index no-reorder no-magic no-stream; do
+# The planner's references, answering without the Magic rewrite, gathering
+# every answer before writing it and deferring every round's insertions are
+# selected by name and answer as the default does.
+for reference in no-index no-reorder no-magic no-stream parallel; do
 	actual=$("$RELIC" -s -X "$reference" "$work/graph.dl")
 	if [ "$actual" != "$expected" ]; then
 		fail "-X $reference answered '$actual', expected '$expected'"

@@ -36,10 +36,14 @@
  * comes to hold, so a write to the store through a member of one does not
  * compile.
  *
- * The one word such code stores to is a key's frontier, which
- * relic_index_first_since() moves inside lib/index.c.
+ * Such code stores to two words outside its own: a key's frontier, which
+ * relic_index_first_since() moves inside lib/index.c, and the memory
+ * account's total for a round's buffers, which it reaches only through the
+ * two functions of lib/account.c below.  The account is incomplete here
+ * too, so no other part of it can be written.
  */
 
+typedef struct relic_account relic_account_t;
 typedef struct relic_index relic_index_t;
 typedef struct relic_relation relic_relation_t;
 typedef struct relic_tuple_range relic_tuple_range_t;
@@ -109,9 +113,16 @@ enum relic_order {
  * tuple holding some columns, or RELIC_ID_NONE.
  * relic_relation_index_at() gives the secondary index at a position
  * relic_relation_index() gave, found afresh each time since the array
- * holding it can grow between two lookups.
+ * holding it can grow between two lookups.  relic_relation_arity() gives
+ * the columns of each of a relation's tuples.
+ *
+ * relic_relation_screen() looks up a batch of tuples packed at the
+ * relation's arity as inserting them would, and inserts none: it gives
+ * each tuple's hash, which relic_relation_insert_batch_hashed() takes, and
+ * whether the relation holds it.
  */
 relic_pred_id_t relic_relation_pred(const relic_relation_t *relation);
+uint16_t relic_relation_arity(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
 const relic_dom_t *relic_relation_tuple(const relic_relation_t *relation,
 	    relic_tuple_id_t id);
@@ -119,6 +130,34 @@ relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 const relic_index_t *relic_relation_index_at(const relic_relation_t *relation,
 	    uint32_t position);
+void	 relic_relation_screen(const relic_relation_t *relation,
+	    const relic_dom_t *tuples, size_t count, uint32_t *hashes,
+	    bool *held);
+
+/*
+ * Whether two tuples of one arity hold the same values.
+ *
+ * The columns are compared as identifiers rather than as bytes.  A dense
+ * array of uint32_t has no padding, so a byte comparison would agree, but it
+ * is not defined for the empty tuple: comparing zero bytes at a null pointer
+ * is something the standard does not permit and a sanitizer reports.  The
+ * loop is defined at every arity and needs no case for the one that would
+ * break the other form.  It is inline because every lookup of a tuple, and
+ * every screening of one, compares with it.
+ */
+static inline bool
+relic_tuple_equal(const relic_dom_t *left, const relic_dom_t *right,
+    uint16_t arity)
+{
+	uint16_t column;
+
+	for (column = 0; column < arity; column++) {
+		if (left[column] != right[column])
+			return (false);
+	}
+
+	return (true);
+}
 
 /*
  * lib/index.c
@@ -151,5 +190,16 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  */
 enum relic_order relic_value_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
+
+/*
+ * lib/account.c
+ *
+ * relic_account_charge_round() admits `bytes` more for a round's buffers
+ * and counts them, or returns false having counted nothing; unlike an
+ * arena's refusal, a round's is not recorded, since nothing reports it.
+ * relic_account_release_round() gives back bytes a round counted.
+ */
+bool	 relic_account_charge_round(relic_account_t *account, size_t bytes);
+void	 relic_account_release_round(relic_account_t *account, size_t bytes);
 
 #endif /* RELIC_FROZEN_H */

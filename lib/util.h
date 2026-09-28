@@ -104,6 +104,48 @@ void	*relic_grow_array(void *items, size_t *capacity, size_t count,
 size_t	 relic_grow_array_capacity(size_t capacity, size_t count);
 
 /*
+ * The capacity an array holding `held` items with room for `capacity`
+ * reaches when relic_grow_array() is asked, `requests` times over, for room
+ * for `per_request` more items than the last request -- as one insertion
+ * after another grows it -- or zero when a growth on the way would be
+ * refused.  `held` must not exceed `capacity`.
+ *
+ * Growing a step at a time can reach more than growing once for the whole:
+ * room for 100 more items from room for 8 is 100 in one growth, and 128 in
+ * ninety-two growths of one, which double 8 four times.  A projection of
+ * what a sequence of insertions will hold follows the steps.  Only a step
+ * that passes the capacity grows it, and each growth at least doubles it,
+ * so the answer costs as many iterations as the capacity doubles.
+ */
+size_t	 relic_grow_array_capacity_stepwise(size_t capacity, size_t held,
+	    size_t requests, size_t per_request);
+
+/*
+ * The sum of two sizes, and `count` items of `size` bytes, or SIZE_MAX when
+ * the result is more than a size_t holds.  A projection of storage built from
+ * them says "more than anything could hold" rather than wrapping to a small
+ * number a limit would admit.  Both are inline because every insertion
+ * projects its relation's storage with them.
+ */
+static inline size_t
+relic_saturating_sum(size_t a, size_t b)
+{
+	if (a > SIZE_MAX - b)
+		return (SIZE_MAX);
+
+	return (a + b);
+}
+
+static inline size_t
+relic_saturating_product(size_t count, size_t size)
+{
+	if (size != 0 && count > SIZE_MAX / size)
+		return (SIZE_MAX);
+
+	return (count * size);
+}
+
+/*
  * The bytes from which an array is mapped rather than taken from the heap.
  * Below it a mapping would cost a system call and a page of rounding for an
  * array whose residue in the heap is small.  The allocation-failure suite

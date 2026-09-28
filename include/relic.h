@@ -227,6 +227,19 @@ struct relic_config {
 #define	RELIC_F_NO_STREAM	0x0020u
 
 /*
+ * Defer every round of evaluation whose rules read none of the relations it
+ * derives except as they stood when it began, which is every round but a
+ * pass of the naive fixed point: what its rules derive is gathered while
+ * they run and inserted when the last has finished, in the order it would
+ * have been inserted as it was derived, and the scan each rule starts from
+ * is cut into pieces run one after another.  That is how a round runs on
+ * several threads, and the switch runs every round that way however little
+ * work it holds, so that the way is exercised by every program.  The
+ * relations and every count of work come out as they do without it.
+ */
+#define	RELIC_F_PARALLEL_ALWAYS	0x0040u
+
+/*
  * Create a context.  Returns NULL when memory is exhausted or when
  * getentropy(2) cannot supply the random bytes the context keys its hash
  * tables with, as in a sandbox with no random device.  There is no other way
@@ -641,13 +654,14 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * being zero or SIZE_MAX, has its rows delivered as they are derived, once
  * every relation it reads is complete, when the plan of the rule it runs --
  * its own, or its rewrite's -- derives each row once: when it names every
- * variable its body binds and matches no argument with `_`.  Any other query's answer is gathered whole, its
- * duplicates dropped and the limits bounding it, before its first row is
- * delivered.  A query that fails -- a limit exceeded, say -- therefore
- * delivers no rows at all rather than a truncated answer that would be
- * indistinguishable from a complete one.  A diagnostic the query's
- * evaluation reports, such as the note RELIC_F_NOTE_MIXED asks for, may come
- * between rows delivered as they are derived.
+ * variable its body binds and matches no argument with `_`.  Any other
+ * query's answer is gathered whole, its duplicates dropped and the limits
+ * bounding it, before its first row is delivered.  A query that fails -- a
+ * limit exceeded, say -- therefore delivers no rows at all rather than a
+ * truncated answer that would be indistinguishable from a complete one.  A
+ * diagnostic the query's evaluation reports, such as the note
+ * RELIC_F_NOTE_MIXED asks for, may come between rows delivered as they are
+ * derived.
  *
  * Rows are distinct, because a query's answer is a set.  Their order is
  * unspecified by the language but is the same on every run over the same

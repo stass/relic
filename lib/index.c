@@ -53,7 +53,22 @@
  * measures an index before and after a reservation and does the accounting.
  */
 
+typedef struct relic_index_extent relic_index_extent_t;
 typedef struct relic_index_rehash relic_index_rehash_t;
+
+/*
+ * The sizes an index's storage could have: its key table's bytes, and the
+ * capacities of its arrays -- entries, frontiers and key values, each
+ * counted in keys, and chain links, counted in tuples.  A capacity of zero
+ * is a growth that would be refused.
+ */
+struct relic_index_extent {
+	size_t	table_bytes;
+	size_t	entries;
+	size_t	frontiers;
+	size_t	key_values;
+	size_t	next;
+};
 
 /*
  * What the key table needs in order to recompute the hash of a key it holds:
@@ -69,6 +84,8 @@ static uint32_t		 find_key(const relic_index_t *index,
 			    const relic_dom_t *key, uint32_t hash);
 static void		 gather_key(const relic_index_t *index,
 			    const relic_dom_t *tuple, relic_dom_t *key);
+static size_t		 index_bytes_at(const relic_index_t *index,
+			    const relic_index_extent_t *extent);
 static uint32_t		 key_hash(const relic_index_t *index,
 			    const relic_relation_t *relation,
 			    const relic_dom_t *key);
@@ -80,8 +97,6 @@ static const relic_dom_t *key_values_of(const relic_index_t *index,
 static uint32_t		 probe_key(const relic_index_t *index,
 			    const relic_relation_t *relation,
 			    const relic_dom_t *probe);
-static size_t		 saturating_product(size_t count, size_t size);
-static size_t		 saturating_sum(size_t a, size_t b);
 static relic_tuple_id_t	 walk_toward(const relic_index_t *index,
 			    relic_tuple_id_t id, relic_tuple_id_t since);
 
@@ -170,31 +185,6 @@ key_values_of(const relic_index_t *index, uint32_t key_id)
 }
 
 /*
- * `count` items of `size` bytes, or SIZE_MAX when that is more than a size_t
- * holds.
- */
-static size_t
-saturating_product(size_t count, size_t size)
-{
-	if (size != 0 && count > SIZE_MAX / size)
-		return (SIZE_MAX);
-
-	return (count * size);
-}
-
-/*
- * The sum of two sizes, or SIZE_MAX when it is more than a size_t holds.
- */
-static size_t
-saturating_sum(size_t a, size_t b)
-{
-	if (a > SIZE_MAX - b)
-		return (SIZE_MAX);
-
-	return (a + b);
-}
-
-/*
  * The hash of a key the table holds, for the table to use when it grows.
  */
 static uint32_t
@@ -242,6 +232,36 @@ relic_index_bytes(const relic_index_t *index)
 }
 
 /*
+ * The bytes the index would hold at `extent`.  SIZE_MAX says that is more
+ * than a size_t holds, or that a capacity is zero, which is a growth that
+ * would be refused and which no size describes.
+ */
+static size_t
+index_bytes_at(const relic_index_t *index, const relic_index_extent_t *extent)
+{
+	size_t key_bytes;
+	size_t total;
+
+	if (extent->entries == 0 || extent->frontiers == 0 ||
+	    extent->key_values == 0 || extent->next == 0)
+		return (SIZE_MAX);
+
+	key_bytes = (size_t)index->key_length * sizeof(*index->key_values);
+
+	total = extent->table_bytes;
+	total = relic_saturating_sum(total, relic_saturating_product(
+	    extent->entries, sizeof(*index->entries)));
+	total = relic_saturating_sum(total, relic_saturating_product(
+	    extent->frontiers, sizeof(*index->frontiers)));
+	total = relic_saturating_sum(total, relic_saturating_product(
+	    extent->key_values, key_bytes));
+	total = relic_saturating_sum(total, relic_saturating_product(
+	    extent->next, sizeof(*index->next)));
+
+	return (total);
+}
+
+/*
  * The bytes the index would hold once relic_index_reserve() had made room for
  * `tuples` tuples in all and `added_keys` more keys.
  *
@@ -256,40 +276,64 @@ size_t
 relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
     size_t added_keys)
 {
-	size_t entry_count;
-	size_t frontier_count;
-	size_t key_bytes;
-	size_t next_count;
-	size_t total;
-	size_t value_count;
+	relic_index_extent_t extent;
 	size_t keys;
+	size_t total;
 
-	keys = saturating_sum(index->key_count, added_keys);
-	entry_count = relic_grow_array_capacity(index->entry_capacity, keys);
-	frontier_count = relic_grow_array_capacity(index->frontier_capacity,
-	    keys);
-	value_count = relic_grow_array_capacity(index->key_value_capacity,
-	    keys);
-	next_count = relic_grow_array_capacity(index->next_capacity, tuples);
-	if (keys == SIZE_MAX || entry_count == 0 || frontier_count == 0 ||
-	    value_count == 0 || next_count == 0)
+	keys = relic_saturating_sum(index->key_count, added_keys);
+	if (keys == SIZE_MAX)
 		return (relic_index_bytes(index));
 
-	key_bytes = (size_t)index->key_length * sizeof(*index->key_values);
+	extent.table_bytes = relic_idtab_bytes_after_reserve(&index->keys,
+	    added_keys);
+	extent.entries = relic_grow_array_capacity(index->entry_capacity, keys);
+	extent.frontiers = relic_grow_array_capacity(index->frontier_capacity,
+	    keys);
+	extent.key_values = relic_grow_array_capacity(
+	    index->key_value_capacity, keys);
+	extent.next = relic_grow_array_capacity(index->next_capacity, tuples);
 
-	total = relic_idtab_bytes_after_reserve(&index->keys, added_keys);
-	total = saturating_sum(total, saturating_product(entry_count,
-	    sizeof(*index->entries)));
-	total = saturating_sum(total, saturating_product(frontier_count,
-	    sizeof(*index->frontiers)));
-	total = saturating_sum(total, saturating_product(value_count,
-	    key_bytes));
-	total = saturating_sum(total, saturating_product(next_count,
-	    sizeof(*index->next)));
+	total = index_bytes_at(index, &extent);
 	if (total == SIZE_MAX)
 		return (relic_index_bytes(index));
 
 	return (total);
+}
+
+/*
+ * The bytes the index would hold once `added` tuples had been added to it,
+ * one insertion at a time, into a relation holding `tuples`, or SIZE_MAX
+ * when some growth on the way could not happen.
+ *
+ * Each insertion reserves a key of its own, as the relation store's do, so
+ * the key arrays are followed step by step as though every tuple brought a
+ * new key.  That is the most the insertions can hold whatever keys they
+ * bring: a step-by-step growth passes through the same capacities however
+ * many of its steps ask for nothing new, only stopping sooner.  The key
+ * table doubles, so one reservation for every tuple reaches what one per
+ * tuple does.
+ */
+size_t
+relic_index_bytes_after_adds(const relic_index_t *index, size_t tuples,
+    size_t added)
+{
+	relic_index_extent_t extent;
+
+	if (added == 0)
+		return (relic_index_bytes(index));
+
+	extent.table_bytes = relic_idtab_bytes_after_reserve(&index->keys,
+	    added);
+	extent.entries = relic_grow_array_capacity_stepwise(
+	    index->entry_capacity, index->key_count, added, 1);
+	extent.frontiers = relic_grow_array_capacity_stepwise(
+	    index->frontier_capacity, index->key_count, added, 1);
+	extent.key_values = relic_grow_array_capacity_stepwise(
+	    index->key_value_capacity, index->key_count, added, 1);
+	extent.next = relic_grow_array_capacity_stepwise(index->next_capacity,
+	    tuples, added, 1);
+
+	return (index_bytes_at(index, &extent));
 }
 
 /*

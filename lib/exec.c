@@ -79,8 +79,6 @@ static relic_dom_t term_value(const relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
 static bool	 tuple_matches(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, const relic_dom_t *tuple);
-static relic_tuple_range_t view_range(const relic_exec_env_t *env,
-		    const relic_op_atom_t *atom);
 static enum relic_exec_status yield_after_emit(relic_scratch_t *scratch,
 		    size_t level);
 
@@ -204,8 +202,8 @@ comparison_holds(const relic_t *ctx, enum relic_compare_op compare,
  * The identifiers an operation's view covers now: the whole relation, or a
  * range derived from the delta of the member being read, as plan.h sets out.
  */
-static relic_tuple_range_t
-view_range(const relic_exec_env_t *env, const relic_op_atom_t *atom)
+relic_tuple_range_t
+relic_exec_view(const relic_exec_env_t *env, const relic_op_atom_t *atom)
 {
 	relic_tuple_range_t delta;
 	relic_tuple_range_t range;
@@ -254,7 +252,7 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		case RELIC_OP_LOOKUP:
 		case RELIC_OP_MEMBER:
 		case RELIC_OP_ANTI_MEMBER:
-			scratch->states[level].view = view_range(env,
+			scratch->states[level].view = relic_exec_view(env,
 			    &op->u.atom);
 			break;
 		case RELIC_OP_FILTER:
@@ -497,6 +495,27 @@ relic_exec_start(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	scratch->level = 0;
 	scratch->resume = false;
 	scratch->finished = false;
+}
+
+/*
+ * A SCAN copies its view into its cursor each time it starts, so narrowing
+ * the first operation's view to the piece is all it takes: the first
+ * operation starts once, and every operation below it reads its own view.
+ */
+void
+relic_exec_start_piece(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_plan_t *plan, relic_tuple_range_t piece)
+{
+	relic_op_state_t *first;
+
+	relic_exec_start(scratch, env, plan);
+
+	first = &scratch->states[0];
+	assert(plan->ops[0].kind == RELIC_OP_SCAN);
+	assert(first->view.first <= piece.first && piece.first <= piece.end &&
+	    piece.end <= first->view.end);
+
+	first->view = piece;
 }
 
 /*

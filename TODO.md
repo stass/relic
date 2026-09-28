@@ -712,6 +712,19 @@ so neither branch of `refuse_terminal_input()` is exercised. `script(1)`
 takes different arguments on BSD and Linux; a small pty helper under
 `tests/` would serve both.
 
+**A deferred round costs more than a serial one on one thread.** [Medium,
+component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
+and with identical counters, `tc-cyclic` takes 2.62 s against 2.24 s,
+`cspa` 0.21 s against 0.19 s, and `chain-closure` 0.61 s against 0.42 s.
+Screening a batch probes the store as inserting it does, and a tuple the
+store lacks then pays for the worker's screen and candidate buffer and is
+probed once more in the merge; the screen starts empty every round and is
+rehashed at each doubling. That overhead is the floor under every gain the
+pool can give, and it is what the threshold of
+`specs/design-parallel.md` section 5.4 must be measured against. Reserving
+the screen from what the round's items estimate, rather than growing it
+from nothing, is the first thing to try.
+
 ## Benchmarks
 
 **No run is recorded on an idle machine.** [Medium, component: `bench/`]
@@ -1047,8 +1060,9 @@ Candidate features, in the priority order of `specs/architecture.md` section
   frozen store and merged in the serial order so that output and counters
   are identical at every thread count, then a striped merge, then a
   parallel load; six steps, each gated by a measurement, of which the
-  executor scratch is built and deferred rounds, the pool, the parallel
-  merge, the parallel load and components side by side remain
+  executor scratch and deferred rounds on one thread are built and the
+  pool, the parallel merge, the parallel load and components side by side
+  remain
 * persistent compiled rule plans
 * better cardinality estimation
 * further Magic Sets and negation optimization

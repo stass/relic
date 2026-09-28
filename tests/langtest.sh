@@ -103,4 +103,40 @@ if ! diff -u "$expected_stderr" "$work/stderr" >&2; then
 	failures=1
 fi
 
+# Every test is run twice more with the evaluation counters: as it ran above,
+# and with -X parallel, which defers every round's insertions to the round's
+# end.  The two must agree byte for byte -- status, output, diagnostics and
+# counters -- because a deferred round inserts what the serial one does, in
+# the order it does.  Rows are left in the order they came, without the -s
+# the test may sort them with, since that order is what a round inserting
+# out of order would change.  A failed run is held to the counters too: a
+# deferred round is merged only once no limit can refuse the merge, so a
+# limit refuses only in a round run serially, after the serial run's work.
+unsorted_args=""
+for word in $args; do
+	if [ "$word" != "-s" ]; then
+		unsorted_args="$unsorted_args $word"
+	fi
+done
+
+run_counted() {
+	name=$1
+	shift
+	counted_status=0
+	( cd "$directory" && $RELIC -X stats "$@" $unsorted_args "$program" ) \
+	    < "$input" > "$work/$name.stdout" 2> "$work/$name.stderr" ||
+	    counted_status=$?
+	echo "$counted_status" > "$work/$name.status"
+}
+
+run_counted serial
+run_counted deferred -X parallel
+for part in status stdout stderr; do
+	if ! cmp -s "$work/serial.$part" "$work/deferred.$part"; then
+		diff -u "$work/serial.$part" "$work/deferred.$part" >&2 || :
+		echo "$test_path: -X parallel changed the $part" >&2
+		failures=1
+	fi
+done
+
 exit "$failures"

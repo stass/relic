@@ -58,6 +58,9 @@ static int	 count_distinct(relic_t *ctx, const relic_relation_t *relation,
 		    uint16_t column, size_t *distinctp);
 static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation);
 static bool	 exceeds_tuple_limit(const relic_t *ctx);
+static int	 insert_hashed_chunk(relic_t *ctx, relic_relation_t *relation,
+		    const relic_dom_t *chunk, const uint32_t *hashes,
+		    size_t count, bool *added, size_t *completedp);
 static int	 index_build(relic_t *ctx, const relic_relation_t *relation,
 		    relic_index_t *index);
 static int	 index_make_room(relic_t *ctx, const relic_relation_t *relation,
@@ -101,8 +104,6 @@ static void	 tuple_append(relic_relation_t *relation,
 		    const relic_dom_t *columns, uint32_t hash);
 static relic_dom_t *tuple_at(const relic_relation_t *relation,
 		    relic_tuple_id_t id);
-static bool	 tuple_equal(const relic_dom_t *left, const relic_dom_t *right,
-		    uint16_t arity);
 static uint32_t	 tuple_hash(const relic_relation_t *relation,
 		    const relic_dom_t *columns);
 static uint32_t	 tuple_rehash(uint32_t id, void *ctx);
@@ -269,29 +270,6 @@ tuple_hash(const relic_relation_t *relation, const relic_dom_t *columns)
 }
 
 /*
- * Whether two tuples of one arity hold the same values.
- *
- * The columns are compared as identifiers rather than as bytes.  A dense
- * array of uint32_t has no padding, so a byte comparison would agree, but it
- * is not defined for the empty tuple: comparing zero bytes at a null pointer
- * is something the standard does not permit and a sanitizer reports.  The
- * loop is defined at every arity and needs no case for the one that would
- * break the other form.
- */
-static bool
-tuple_equal(const relic_dom_t *left, const relic_dom_t *right, uint16_t arity)
-{
-	uint16_t column;
-
-	for (column = 0; column < arity; column++) {
-		if (left[column] != right[column])
-			return (false);
-	}
-
-	return (true);
-}
-
-/*
  * The hash of a tuple already stored, for the index to use when it grows.
  */
 static uint32_t
@@ -317,7 +295,7 @@ relation_find_hashed(const relic_relation_t *relation,
 
 	relic_idprobe_open(&probe, &relation->index, hash);
 	while (relic_idprobe_next(&probe, &id)) {
-		if (tuple_equal(tuple_at(relation, id), columns,
+		if (relic_tuple_equal(tuple_at(relation, id), columns,
 		    relation->arity))
 			return (id);
 	}
@@ -436,6 +414,52 @@ relic_relation_bytes_after_reserve(const relic_relation_t *relation,
 			return (relic_relation_bytes(relation));
 		bytes += secondary_bytes;
 	}
+
+	return (bytes);
+}
+
+/*
+ * The bytes a relation would hold once `added` tuples it does not hold had
+ * been inserted one at a time, as relic_relation_insert() inserts them, or
+ * SIZE_MAX when the relation could not hold that many tuples or its columns
+ * or a secondary index could not grow that far.
+ *
+ * Each insertion reserves room for one tuple, and arrays grown one tuple
+ * at a time can reach more than one reservation for all of them would
+ * (relic_grow_array_capacity_stepwise()), so the columns and every
+ * secondary index are followed step by step.  The canonical index doubles,
+ * so one reservation for every tuple reaches what one per tuple does; its
+ * part is what relic_idtab_bytes_after_reserve() says, which is what an
+ * insertion's own check projects.  A sequence of insertions of which some
+ * find their tuple present passes through the same capacities and stops
+ * sooner, so no such sequence holds more than this.
+ */
+size_t
+relic_relation_bytes_after_inserts(const relic_relation_t *relation,
+    size_t added)
+{
+	size_t bytes;
+	size_t columns;
+	size_t position;
+
+	if (added == 0)
+		return (relic_relation_bytes(relation));
+	if (added > RELIC_TUPLE_MAX - relation->count)
+		return (SIZE_MAX);
+
+	columns = relic_grow_array_capacity_stepwise(relation->column_capacity,
+	    relation->count * relation->arity, added, relation->arity);
+	if (columns == 0)
+		return (SIZE_MAX);
+
+	bytes = relic_saturating_sum(
+	    relic_saturating_product(columns, sizeof(*relation->columns)),
+	    relic_idtab_bytes_after_reserve(&relation->index, added));
+
+	for (position = 0; position < relation->index_count; position++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_index_bytes_after_adds(&relation->indexes[position],
+		    relation->count, added));
 
 	return (bytes);
 }
@@ -624,9 +648,9 @@ tuple_append(relic_relation_t *relation, const relic_dom_t *columns,
 	destination = tuple_at(relation, id);
 
 	/*
-	 * A loop rather than a block copy, for the reason tuple_equal() gives:
-	 * `columns` may be null for a relation of arity zero, and a copy of
-	 * zero bytes from a null pointer is not defined.
+	 * A loop rather than a block copy, for the reason relic_tuple_equal()
+	 * gives: `columns` may be null for a relation of arity zero, and a
+	 * copy of zero bytes from a null pointer is not defined.
 	 */
 	for (column = 0; column < relation->arity; column++)
 		destination[column] = columns[column];
@@ -743,19 +767,107 @@ relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 			relic_idtab_prefetch(&relation->index, hashes[i]);
 		}
 
-		for (i = 0; i < chunk_count; i++)
-			prefetch_first_candidate(relation, hashes[i]);
-
-		for (i = 0; i < chunk_count; i++) {
-			if (relation_insert_hashed(ctx, relation,
-			    chunk + i * relation->arity, hashes[i],
-			    &added[first + i]) != 0)
-				return (-1);
-			(*completedp)++;
-		}
+		if (insert_hashed_chunk(ctx, relation, chunk, hashes,
+		    chunk_count, &added[first], completedp) != 0)
+			return (-1);
 	}
 
 	return (0);
+}
+
+/*
+ * The same, for tuples whose hashes the caller computed under the context's
+ * seed, as relic_relation_screen() computes them: the first pass prefetches
+ * and hashes nothing.  A debug build checks each hash against the
+ * relation's own.
+ */
+int
+relic_relation_insert_batch_hashed(relic_t *ctx, relic_relation_t *relation,
+    const relic_dom_t *tuples, const uint32_t *hashes, size_t count,
+    bool *added, size_t *completedp)
+{
+	const relic_dom_t *chunk;
+	size_t chunk_count;
+	size_t first;
+	size_t i;
+
+	assert(tuples != NULL);
+
+	bzero(added, count * sizeof(*added));
+	*completedp = 0;
+
+	for (first = 0; first < count; first += chunk_count) {
+		chunk = tuples + first * relation->arity;
+		chunk_count = count - first < RELIC_INSERT_BATCH ?
+		    count - first : RELIC_INSERT_BATCH;
+
+		for (i = 0; i < chunk_count; i++) {
+			assert(hashes[first + i] == tuple_hash(relation,
+			    chunk + i * relation->arity));
+			relic_idtab_prefetch(&relation->index,
+			    hashes[first + i]);
+		}
+
+		if (insert_hashed_chunk(ctx, relation, chunk, &hashes[first],
+		    chunk_count, &added[first], completedp) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * The last two passes over a chunk of a batch whose slots the first pass has
+ * prefetched: prefetch each tuple the slots name, then insert each in turn,
+ * counting the insertions that completed.
+ */
+static int
+insert_hashed_chunk(relic_t *ctx, relic_relation_t *relation,
+    const relic_dom_t *chunk, const uint32_t *hashes, size_t count,
+    bool *added, size_t *completedp)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++)
+		prefetch_first_candidate(relation, hashes[i]);
+
+	for (i = 0; i < count; i++) {
+		if (relation_insert_hashed(ctx, relation,
+		    chunk + i * relation->arity, hashes[i], &added[i]) != 0)
+			return (-1);
+		(*completedp)++;
+	}
+
+	return (0);
+}
+
+/*
+ * Look up `count` tuples, packed at the relation's arity, as an insertion of
+ * them would, without inserting any: set hashes[i] to tuple i's hash and
+ * held[i] to whether the relation holds it.  The passes are those of a
+ * batch insertion, so the misses of the lookups overlap as its duplicate
+ * checks do, and the hash and the probe are its own, so a tuple found here
+ * is exactly one an insertion would have found present.
+ */
+void
+relic_relation_screen(const relic_relation_t *relation,
+    const relic_dom_t *tuples, size_t count, uint32_t *hashes, bool *held)
+{
+	size_t i;
+
+	assert(tuples != NULL);
+
+	for (i = 0; i < count; i++) {
+		hashes[i] = tuple_hash(relation, tuples + i * relation->arity);
+		relic_idtab_prefetch(&relation->index, hashes[i]);
+	}
+
+	for (i = 0; i < count; i++)
+		prefetch_first_candidate(relation, hashes[i]);
+
+	for (i = 0; i < count; i++)
+		held[i] = relation_find_hashed(relation,
+		    tuples + i * relation->arity, hashes[i]) != RELIC_ID_NONE;
 }
 
 /*
@@ -885,6 +997,12 @@ relic_pred_id_t
 relic_relation_pred(const relic_relation_t *relation)
 {
 	return (relation->pred);
+}
+
+uint16_t
+relic_relation_arity(const relic_relation_t *relation)
+{
+	return (relation->arity);
 }
 
 const relic_index_t *

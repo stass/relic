@@ -49,8 +49,10 @@
 #define	SCENARIO_GROWTH		"the store stays a set as it grows"
 #define	SCENARIO_MEMORY_LIMIT	"the memory limit refuses a tuple and says so"
 #define	SCENARIO_OWNERSHIP	"a relation belongs to one predicate"
+#define	SCENARIO_PROJECTED	"a projection of insertions is what they reach"
 #define	SCENARIO_RANGES		"a range names the tuples added since a mark"
 #define	SCENARIO_RESERVED	"a reservation for many holds them all"
+#define	SCENARIO_SCREEN		"a screen finds what an insertion would"
 #define	SCENARIO_STABLE		"a relation stays where it was put"
 #define	SCENARIO_SET		"inserting a tuple twice adds it once"
 #define	SCENARIO_TUPLE_LIMIT	"the tuple limit refuses a tuple and says so"
@@ -163,6 +165,10 @@ static bool	 reserve_then_fill(relic_t *ctx, relic_relation_t *rel,
 		    size_t added, unsigned int *ordinalp);
 static void	 refused_as_too_large(relic_t *ctx, relic_relation_t *rel,
 		    size_t added, const char *what);
+static void	 a_projection_of_insertions_is_what_they_reach(void);
+static bool	 insert_projected(relic_t *ctx, relic_relation_t *rel,
+		    size_t count, bool fresh_keys, unsigned int *ordinalp);
+static void	 a_screen_finds_what_an_insertion_would(void);
 
 static relic_t *
 context(const char *scenario, const relic_config_t *config)
@@ -1567,6 +1573,188 @@ refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
 	    expected, reported == NULL ? "(none)" : reported);
 }
 
+/*
+ * Insert `count` tuples into a relation keyed by two secondary indexes, one
+ * at a time, having projected what they would hold, and return whether the
+ * relation then holds what was projected: exactly, when every tuple is new
+ * and brings a new key to both indexes, the most the insertions can grow
+ * the relation to, and no more otherwise, when every other tuple repeats
+ * the one before it and every tuple shares one key of the first column.
+ */
+static bool
+insert_projected(relic_t *ctx, relic_relation_t *rel, size_t count,
+    bool fresh_keys, unsigned int *ordinalp)
+{
+	relic_dom_t columns[2];
+	size_t projected;
+	size_t i;
+	bool added;
+
+	projected = relic_relation_bytes_after_inserts(rel, count);
+
+	for (i = 0; i < count; i++) {
+		if (fresh_keys || i % 2 == 0)
+			++*ordinalp;
+		pair(columns, value(ctx, SCENARIO_PROJECTED,
+		    fresh_keys ? *ordinalp : 0),
+		    value(ctx, SCENARIO_PROJECTED, *ordinalp + 1000000u));
+		if (!insert(ctx, SCENARIO_PROJECTED, *ordinalp, rel, columns,
+		    &added))
+			return (false);
+	}
+
+	if (fresh_keys)
+		return (relic_relation_bytes(rel) == projected);
+
+	return (relic_relation_bytes(rel) <= projected);
+}
+
+/*
+ * relic_relation_bytes_after_inserts() is what a deferred round asks of each
+ * relation before its merge inserts anything: the most the relation can
+ * hold once that many tuples have gone in one at a time, as the serial
+ * evaluator inserts them.  Growth one tuple at a time reaches more than one
+ * reservation for all of them, so a projection by reservation would be
+ * short of what the insertions reach.  Here it is checked against the
+ * insertions themselves over a relation with two secondary indexes, for
+ * counts from one to past several doublings, and for none.
+ */
+static void
+a_projection_of_insertions_is_what_they_reach(void)
+{
+	static const size_t counts[] = { 1, 2, 7, 64, 300, 1000 };
+	relic_relation_t *rel;
+	relic_config_t config;
+	unsigned int ordinal;
+	uint32_t position;
+	relic_t *ctx;
+	size_t i;
+
+	bzero(&config, sizeof(config));
+	ctx = context(SCENARIO_PROJECTED, &config);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_PROJECTED, "projected", 2);
+	ordinal = 0;
+	if (rel == NULL || !insert_projected(ctx, rel, 5, true, &ordinal) ||
+	    relic_relation_index(ctx, rel, 0x1, &position) != 0 ||
+	    relic_relation_index(ctx, rel, 0x2, &position) != 0) {
+		check(false, SCENARIO_PROJECTED, "the fixture is built");
+		relic_destroy(ctx);
+		return;
+	}
+
+	check(relic_relation_bytes_after_inserts(rel, 0) ==
+	    relic_relation_bytes(rel), SCENARIO_PROJECTED,
+	    "no insertion should be projected as no growth");
+
+	for (i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+		checkf(insert_projected(ctx, rel, counts[i], true, &ordinal),
+		    SCENARIO_PROJECTED, "%zu new tuples with new keys should "
+		    "hold what was projected", counts[i]);
+		checkf(insert_projected(ctx, rel, counts[i], false, &ordinal),
+		    SCENARIO_PROJECTED, "%zu tuples, some repeated, should "
+		    "hold no more than was projected", counts[i]);
+	}
+
+	check(relic_relation_bytes_after_inserts(rel, RELIC_TUPLE_MAX) ==
+	    SIZE_MAX, SCENARIO_PROJECTED, "insertions past the identifier "
+	    "space should be projected as more than anything holds");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * relic_relation_screen() is the read-only half of a batch insertion: over a
+ * batch of which some tuples are held and some are not, it finds the held
+ * ones and gives every tuple the hash the relation keys it by.  A batch
+ * inserted with those hashes then adds exactly the tuples the screen did
+ * not find, under the identifiers a batch insertion hashing for itself
+ * gives them.
+ */
+static void
+a_screen_finds_what_an_insertion_would(void)
+{
+	enum { HELD = 20, BATCH = 40 };
+	uint32_t hashes[BATCH];
+	bool added[BATCH];
+	bool held[BATCH];
+	relic_dom_t tuples[BATCH * 2];
+	relic_dom_t columns[2];
+	relic_relation_t *screened;
+	relic_relation_t *plain;
+	relic_config_t config;
+	uint32_t position;
+	size_t completed;
+	relic_t *ctx;
+	bool agree;
+	bool one;
+	size_t i;
+
+	bzero(&config, sizeof(config));
+	ctx = context(SCENARIO_SCREEN, &config);
+	if (ctx == NULL)
+		return;
+
+	screened = relation(ctx, SCENARIO_SCREEN, "screened", 2);
+	plain = relation(ctx, SCENARIO_SCREEN, "plain", 2);
+	if (screened == NULL || plain == NULL ||
+	    relic_relation_index(ctx, screened, 0x2, &position) != 0 ||
+	    relic_relation_index(ctx, plain, 0x2, &position) != 0) {
+		check(false, SCENARIO_SCREEN, "the fixture is built");
+		relic_destroy(ctx);
+		return;
+	}
+
+	for (i = 0; i < HELD; i++) {
+		pair(columns, value(ctx, SCENARIO_SCREEN, (unsigned int)i),
+		    value(ctx, SCENARIO_SCREEN, (unsigned int)(i % 3)));
+		if (!insert(ctx, SCENARIO_SCREEN, (unsigned int)i, screened,
+		    columns, &one) ||
+		    !insert(ctx, SCENARIO_SCREEN, (unsigned int)i, plain,
+		    columns, &one))
+			break;
+	}
+
+	for (i = 0; i < BATCH; i++)
+		pair(&tuples[i * 2], value(ctx, SCENARIO_SCREEN,
+		    (unsigned int)(i + HELD / 2)), value(ctx, SCENARIO_SCREEN,
+		    (unsigned int)((i + HELD / 2) % 3)));
+
+	relic_relation_screen(screened, tuples, BATCH, hashes, held);
+	agree = true;
+	for (i = 0; i < BATCH; i++) {
+		if (held[i] != (i + HELD / 2 < HELD) ||
+		    hashes[i] != relic_tuple_hash(screened->hash_seed,
+		    &tuples[i * 2], 2))
+			agree = false;
+	}
+	check(agree, SCENARIO_SCREEN, "the screen finds the held tuples and "
+	    "hashes each as the relation does");
+
+	check(relic_relation_insert_batch_hashed(ctx, screened, tuples,
+	    hashes, BATCH, added, &completed) == 0 && completed == BATCH,
+	    SCENARIO_SCREEN, "the screened batch is inserted");
+	agree = true;
+	for (i = 0; i < BATCH; i++) {
+		if (added[i] == held[i])
+			agree = false;
+	}
+	check(agree, SCENARIO_SCREEN,
+	    "the batch adds exactly what the screen did not find");
+
+	check(relic_relation_insert_batch(ctx, plain, tuples, BATCH, added,
+	    &completed) == 0 && relic_relation_count(plain) ==
+	    relic_relation_count(screened) &&
+	    bcmp(plain->columns, screened->columns,
+	    relic_relation_count(plain) * 2 * sizeof(*plain->columns)) == 0,
+	    SCENARIO_SCREEN, "the hashed batch numbers the tuples as the "
+	    "plain one does");
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -1584,6 +1772,8 @@ main(void)
 	a_batch_inserts_what_single_insertions_would();
 	a_limit_refuses_a_batch_where_it_would_one();
 	a_reservation_for_many_holds_them_all();
+	a_projection_of_insertions_is_what_they_reach();
+	a_screen_finds_what_an_insertion_would();
 
 	return (check_summary("relation"));
 }
