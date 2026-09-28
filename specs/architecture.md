@@ -2572,23 +2572,25 @@ is red.
 Potential additions, in approximate priority order:
 
 ```text
-CSV/TSV fact import
 arithmetic expressions
+aggregates
+relation export
 incremental insertion maintenance
 DRed-style deletion maintenance
-aggregates
 parallel SCC evaluation
 persistent compiled rule plans
-relation export
 more sophisticated cardinality estimation
 additional Magic/negation optimization
 ```
 
-None should require changing basic language semantics.
+The language comes first: arithmetic and aggregates decide which programs
+can be written at all, and relation export is the counterpart of the CSV
+and TSV import of `specs/design-import.md`, a small step past what a query
+written with `-F csv` or `-F tsv` already produces. Incremental
+maintenance and parallel evaluation change the engine rather than the
+language, cost the most to build, and follow.
 
-CSV and TSV fact import -- how an import names its table's format, header,
-predicate and column types, how each format is read, and how the facts
-reach the base stores -- is specified in `specs/design-import.md`.
+None should require changing basic language semantics.
 
 ---
 

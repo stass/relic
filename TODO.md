@@ -1038,11 +1038,11 @@ Candidate features, in the priority order of `specs/architecture.md` section
 69. None may change the language semantics of v1.
 
 * arithmetic expressions
+* aggregates
+* relation export
 * incremental insertion maintenance
 * DRed-style deletion maintenance
-* aggregates
 * parallel SCC evaluation
 * persistent compiled rule plans
-* relation export
 * better cardinality estimation
 * further Magic Sets and negation optimization
