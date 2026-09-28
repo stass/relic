@@ -1042,7 +1042,11 @@ Candidate features, in the priority order of `specs/architecture.md` section
 * relation export
 * incremental insertion maintenance
 * DRed-style deletion maintenance
-* parallel SCC evaluation
+* parallel SCC evaluation, specified in `specs/design-parallel.md`: a
+  worker pool the context owns, semi-naive rounds partitioned over a
+  frozen store and merged in the serial order so that output and counters
+  are identical at every thread count, then a striped merge, then a
+  parallel load; six steps, each gated by a measurement
 * persistent compiled rule plans
 * better cardinality estimation
 * further Magic Sets and negation optimization

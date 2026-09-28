@@ -145,7 +145,8 @@ Version 1 shall not implement:
 * persistent database files;
 * incremental maintenance across arbitrary insertions/deletions;
 * distributed execution;
-* parallel execution;
+* parallel execution, specified for a later stage in
+  `specs/design-parallel.md`;
 * cost-based optimization comparable to an SQL database.
 
 Some of these may be added later if they preserve the character of the system.
@@ -2591,6 +2592,11 @@ maintenance and parallel evaluation change the engine rather than the
 language, cost the most to build, and follow.
 
 None should require changing basic language semantics.
+
+Parallel SCC evaluation -- the worker pool a context owns, the round that
+reads a frozen store and merges its results in the serial order, and the
+measurement each step is gated by -- is specified in
+`specs/design-parallel.md`.
 
 ---
 
