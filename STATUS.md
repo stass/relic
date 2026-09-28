@@ -688,6 +688,11 @@ section 15 order.
 | `lib/eval.c`, `include/relic.h`, `man/relic.3`, `cmd/relic/main.c`, `configure.ac` | the base pass, a semi-naive round, a component's single pass and a gathered query are each gathered as a round's items and run either item by item, inserting as they derive, or offered for deferral; `RELIC_F_PARALLEL_ALWAYS`, `-X parallel`, offers every round and cuts each as finely as the clamps allow, and a round that reads a relation it writes other than through a view fixed before it began -- a pass of the naive fixed point -- is declined and runs serially, which is decided from the round's plans in `lib/round.c` rather than by the caller; version-info `5:0:4`, an added interface |
 | `lib/relation.c`, `lib/index.c`, `lib/util.{h,c}`, `lib/account.{h,c}` | `relic_relation_screen()`; `relic_relation_insert_batch_hashed()`, the batch insertion by hashes already computed; `relic_relation_bytes_after_inserts()`, the bytes after *n* insertions at the capacities one insertion after another reaches, through `relic_index_bytes_after_adds()` and `relic_grow_array_capacity_stepwise()`; the account's third holder, `round_bytes`, which an operation must have given back when it leaves; the code running a round's tasks sees the account as an incomplete type and reaches it only through the round charge and release `lib/frozen.h` declares |
 | `tests/` | `test_round`: a serial context and a deferred one agree word for word on every derived relation, its identifiers and its bytes, and on every counter, under the default, textual and naive strategies, through queries' rewrites with rows in delivery order, under tuple and memory limits swept from what the load holds past what evaluation needs, and in the mixed-comparison notes; `test_eval` runs every scenario a second time with every round deferred; `test_exhaustion` sweeps allocation failures through deferred evaluation with and without the rewrite; `test_util` and `test_relation`: the stepwise projection is what one insertion after another reaches, and a screen finds what an insertion would; `test_exec`: the pieces of a view derive what the whole does; `tests/langtest.sh` runs every golden program again under `-X parallel -X stats` and requires the serial run's status, output, diagnostics and counters; the random differential suite, `tests/equiv/strategies.sh` and the eval fuzz target hold the deferred path to the serial one |
+| `lib/pool.c`, `lib/atomic.h`, `m4/relic_threads.m4` | step 3, the pool: a context of `threads` threads starts one thread for each worker but the calling thread the first time it shares a round, with every signal blocked but those a fault raises, and keeps them until it is destroyed, when it joins them; a pool carried into a child of `fork(2)` releases their memory without joining them, before its next job or when it is destroyed, and is the calling thread alone; the calling thread cannot be cancelled while it waits on the pool; a thread that cannot be started leaves the pool the threads that could be; a job is published under the pool's mutex by advancing a generation the threads spin on, then park on, and its end is a count of finished workers the calling thread spins on, then parks on, the last worker taking the mutex before it signals; the calling thread is worker 0 and claims tasks as the threads do, from one atomic counter; the words the workers share are C11 atomics behind `lib/atomic.h`, which a build without threads makes plain loads and stores; `configure` finds POSIX threads and C11 atomics, linking `libatomic` where the atomics need it, `--disable-threads` builds without them, `--enable-threads` makes their absence an error, and `librelic.pc` names the libraries for a static link; a context of a build without threads is configured with one |
+| `lib/round.c`, `lib/task.c`, `lib/eval.c` | a round is shared when the context has more than one thread and its items' estimated work is at least `RELIC_PARALLEL_MIN_WORK`, 65 536 units of tuples read and derivations: an item's estimate is the work its plan did the last time it ran, kept per running plan, scaled by how its first scan's view has grown, or that view's size before it has run; a cut item is cut into pieces of `RELIC_CHUNK_WORK`, 4096 units, between one and eight per worker; a merge is admitted only when the candidates of every worker together are within what the tuple limit admits; each task records the work it did, which becomes its item's history, in the one unit `relic_exec_work()` defines; `parallel_rounds` counts the merged rounds of more than one worker, and the pool counts the tasks its threads ran |
+| `lib/account.c`, `lib/index.c`, `lib/relation.h` | the account's round total is an atomic word, charged by compare-and-swap only when the whole total stays within the limit and released by an atomic subtraction; a key's frontier is a relaxed atomic identifier, loaded and stored by concurrent lookups, which all store the same stop |
+| `include/relic.h`, `man/relic.3`, `cmd/relic/main.c`, `man/relic.1`, `configure.ac` | `threads` in `relic_config_t`, at most `RELIC_THREADS_MAX`, 256, a larger count refusing the context; `parallel_rounds` in `relic_stats_t` and a `stats: parallel rounds` line in `-X stats`; `-j threads`, `-j 0` one per processor online; version-info `6:0:0`, an incompatible change to two complete types |
+| `tests/` | `test_pool`, the library compiled with `pthread_create()` and `pthread_join()` renamed: no thread before a shared round, one per worker but the calling thread at the first, each with every signal blocked but a fault's and the caller's mask kept, every one joined when the context is destroyed, a refused start leaving an evaluation that succeeds silently with the threads that did start, and with none declining rounds a pool of threads would share, and a pool carried into a child of `fork(2)` joining nothing and evaluating there on the calling thread; `test_round` and `test_eval` run every scenario again on four threads and require that the pool's threads ran some of a large program's tasks, and `test_eval` checks that rounds are counted as shared at two threads and not at one, and that some of the layered graph's rounds are shared and not all; `test_exhaustion`'s injector is atomic, and its deferred sweeps run again on four threads, which must refuse an allocation on a thread of the pool and report only from the calling thread; `test_index`: four threads looking up one delta at once agree with a scan and leave every frontier where one lookup would; `test_api`: the mixed-comparison notes under the pool, from the calling thread, and a `threads` past the maximum refused; `tests/cli.sh`: `-j` at 0 to 256 answers as one thread does and anything else is a usage error; `tests/langtest.sh` every golden program at `-j 1`, `-j 2`, `-j 4` and `-j 16` under `-X parallel`; the random suite's deferred strategies and one of `tests/equiv/strategies.sh` on four threads; `make check-tsan` |
 
 Step 1 measured against the commit before it on a `--disable-shared` build,
 alternating, on the same machine: `bench/run.sh`, seven runs each, gives
@@ -709,6 +714,17 @@ deferred, `cspa` 0.19 s and 0.21 s, `chain-closure` 0.42 s and 0.61 s, the
 last deriving a new tuple nearly every time and so gathering nearly every
 derivation as a candidate.
 
+Step 3 measured on a `--disable-shared` build, on sixteen cores of
+thirty-two hardware threads under a load average of about eight, seven
+runs of each alternating: the counters of `tc-cyclic`, `cspa` and
+`chain-closure` are identical at `-j 1`, `-j 2`, `-j 4` and `-j 16`.
+`tc-cyclic` takes 2.63 s at one thread and 0.55 s at sixteen, sharing two
+rounds, 4.8 times faster against the six its gate asks for; `cspa` 0.21 s
+and 0.09 s, sharing twenty; `chain-closure` 0.47 s and 0.48 s, sharing
+none. What `tc-cyclic` keeps on the calling thread, a round that inserts
+most of what it derives and the merge of the next, is recorded in
+`TODO.md`.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -719,9 +735,11 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
   autotools, autoconf macros or pkg-config on `PATH`;
 * `--enable-werror`, `--disable-shared` and `--disable-static` all build and
   test clean, and `make install DESTDIR=...` installs and uninstalls cleanly;
-* `make check-asan` and `make check-ubsan` pass; `make check-lsan` and
-  `make check-msan` report that the platform does not support them and
-  succeed;
+* `make check-asan`, `make check-ubsan` and `make check-tsan` pass;
+  `make check-lsan` and `make check-msan` report that the platform does not
+  support them and succeed;
+* `--disable-threads` builds and tests clean, and its library refers to no
+  `pthread_` symbol;
 * the installed shared library exports exactly the thirty-one documented
   entry points and nothing else; the compatibility objects linked into it are
   not reachable;
@@ -960,8 +978,9 @@ release tarball.
 
 ## Decisions taken
 
-Recorded as D-1 through D-16 in `relic-plan.md` section 1. The three that
-constrain everything else:
+Recorded as D-1 through D-25 in `relic-plan.md`: D-1 to D-19 in section
+1, the later ones after section 9. The three that constrain everything
+else:
 
 * **D-3** tuples are dense arrays of 32-bit interned value identifiers;
 * **D-8** the plan representation and the executor exist from S5 and are not

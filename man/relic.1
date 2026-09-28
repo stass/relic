@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd September 26, 2026
+.Dd September 28, 2026
 .Dt RELIC 1
 .Os
 .Sh NAME
@@ -13,6 +13,7 @@
 .Op Fl aceinsv
 .Op Fl F Ar format
 .Op Fl I Ar import
+.Op Fl j Ar threads
 .Op Fl l Ar limit Ns = Ns Ar value
 .Op Fl o Ar file
 .Op Fl q Ar query
@@ -132,6 +133,19 @@ The standard input is then never read as a program, and with no
 .Ar file
 the program is empty.
 A run that fails before the session would begin ends without one.
+.It Fl j Ar threads
+Share the work of evaluation among as many as
+.Ar threads
+threads, the one running
+.Nm
+included; 0 asks for one per processor online, and the default is 1.
+A round of evaluation is shared only when it holds enough work to repay the
+threads, so a program of small rounds runs as it would on one thread.
+The answers, their order, every diagnostic and every counter
+.Fl X Cm stats
+writes but the parallel rounds are the same whatever the number of threads.
+.Ar threads
+is at most 256.
 .It Fl l Ar limit Ns = Ns Ar value
 Set a resource limit.
 The option may be repeated, and a limit given twice takes the later value.
@@ -202,14 +216,17 @@ whose plan may derive a row twice is answered, rather than writing the rows
 of one whose plan derives each row once as they are derived;
 .It Cm parallel
 run every round of evaluation that could run on several threads that way,
-however little work it holds: its rules' derivations gathered as they run
-and inserted when the round ends, in the order they would have been
-inserted as they were derived;
+however little work it holds and however many threads
+.Fl j
+gives: its rules' derivations gathered as they run and inserted when the
+round ends, in the order they would have been inserted as they were
+derived;
 .It Cm stats
 write the evaluation counters to the standard error when the run ends;
 the derivations count what rules derive and the facts copied into a
 predicate that rules also derive, not the facts of a predicate no rule
-derives.
+derives, and the parallel rounds the rounds whose work was shared among
+threads.
 .El
 .Pp
 Each gives the same answers as the default, though two strategies may hold

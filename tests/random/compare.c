@@ -58,37 +58,46 @@ struct strategy {
 	bool		 materialize;
 	/* The strategy whose tuple totals this one must match. */
 	random_strategy_t total_reference;
+	/* The threads its rounds are shared among; zero is one. */
+	size_t		 threads;
 };
+
+/*
+ * The threads the deferred strategies share every round among, so that
+ * the merge of several workers' candidates is held to the serial answers.
+ */
+#define	PARALLEL_THREADS	4
 
 static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_DEFAULT] = {
-		"default", 0, false, STRATEGY_NONE },
+		"default", 0, false, STRATEGY_NONE, 0 },
 	[STRATEGY_NAIVE] = {
-		"naive", RELIC_F_NAIVE, false, STRATEGY_DEFAULT },
+		"naive", RELIC_F_NAIVE, false, STRATEGY_DEFAULT, 0 },
 	[STRATEGY_NO_INDEX] = {
-		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT },
+		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT, 0 },
 	[STRATEGY_NO_STREAM] = {
-		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT },
+		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT, 0 },
 	[STRATEGY_PARALLEL] = {
-		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT },
+		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT,
+		PARALLEL_THREADS },
 	[STRATEGY_NO_REORDER] = {
-		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE },
+		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE, 0 },
 	[STRATEGY_NO_MAGIC] = {
-		"no-magic", RELIC_F_NO_MAGIC, false, STRATEGY_NONE },
+		"no-magic", RELIC_F_NO_MAGIC, false, STRATEGY_NONE, 0 },
 	[STRATEGY_NAIVE_NO_MAGIC] = {
 		"naive+no-magic", RELIC_F_NAIVE | RELIC_F_NO_MAGIC, false,
-		STRATEGY_NO_MAGIC },
+		STRATEGY_NO_MAGIC, 0 },
 	[STRATEGY_NO_INDEX_NO_MAGIC] = {
 		"no-index+no-magic", RELIC_F_NO_INDEX | RELIC_F_NO_MAGIC, false,
-		STRATEGY_NO_MAGIC },
+		STRATEGY_NO_MAGIC, 0 },
 	[STRATEGY_NO_REORDER_NO_MAGIC] = {
 		"no-reorder+no-magic", RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC,
-		false, STRATEGY_NO_MAGIC },
+		false, STRATEGY_NO_MAGIC, 0 },
 	[STRATEGY_PARALLEL_NO_MAGIC] = {
 		"parallel+no-magic", RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_MAGIC,
-		false, STRATEGY_NO_MAGIC },
+		false, STRATEGY_NO_MAGIC, PARALLEL_THREADS },
 	[STRATEGY_MATERIALIZED] = {
-		"materialized", 0, true, STRATEGY_NO_MAGIC },
+		"materialized", 0, true, STRATEGY_NO_MAGIC, 0 },
 };
 
 /*
@@ -261,6 +270,7 @@ run_strategy(const random_program_t *program, const char *text,
 
 	bzero(&config, sizeof(config));
 	config.flags = strategy->flags;
+	config.threads = strategy->threads;
 	ctx = relic_create_config(&config);
 	if (ctx == NULL)
 		errx(1, "relic_create_config failed");

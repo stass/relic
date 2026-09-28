@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "atomic.h"
 #include "frozen.h"
 
 /*
@@ -42,7 +43,11 @@
  *
  * Every holder asks relic_account_exceeds() before it grows, against the
  * whole total, so the limit bounds the sum and no holder can spend what
- * another was admitted.
+ * another was admitted.  A round's buffers grow on every worker of the
+ * round at once, so `round_bytes` is an atomic word, charged by a
+ * compare-and-swap that admits the bytes only if the total with them stays
+ * within the limit; the store and the arenas change only on the calling
+ * thread, while no round's workers run.
  *
  * `refused` records that the limit refused an arena a chunk.  A refused
  * round is not recorded, because nothing reports it: the round is run
@@ -60,7 +65,7 @@ struct relic_account {
 	size_t	limit;		/* bytes; see relic_limit_set() */
 	size_t	store_bytes;	/* relation and index storage */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
-	size_t	round_bytes;	/* buffers of a deferred round */
+	relic_atomic_size_t round_bytes; /* buffers of a deferred round */
 	bool	refused;
 };
 

@@ -33,6 +33,10 @@
 #include <strings.h>
 #include <unistd.h>
 
+#ifdef RELIC_THREADS
+#include <pthread.h>
+#endif
+
 #include <relic.h>
 
 #include "harness.h"
@@ -48,6 +52,8 @@
 #define	SCENARIO_REENTRY	"a callback cannot call into its context"
 #define	SCENARIO_REFUSAL \
 	"a refusal does not hide why an operation failed"
+#define	SCENARIO_THREADS \
+	"a context takes at most RELIC_THREADS_MAX threads"
 #define	SCENARIO_TRANSIENT	"an answer does not outlive its delivery"
 #define	SCENARIO_VALUES		"a value holds only what its type can"
 
@@ -97,13 +103,27 @@ struct first_error {
 /*
  * The notes about mixed-type comparisons a context reported: how many, and
  * the line each of the first MIXED_NOTES_MAX pointed at.  `other` counts
- * every other diagnostic, which a scenario expects to be none.
+ * every other diagnostic, and any delivered on a thread other than the one
+ * running main(), which a scenario expects to be none.
  */
 struct mixed_log {
 	uint32_t	lines[MIXED_NOTES_MAX];
 	size_t		notes;
 	size_t		other;
 };
+
+/*
+ * The flags and threads the mixed-comparison scenarios' contexts are given
+ * besides their own, which main() sets to run them a second time under the
+ * pool, and the thread running main(), the one every diagnostic must reach
+ * the callback on.
+ */
+static unsigned int mixed_flags;
+static size_t mixed_threads;
+
+#ifdef RELIC_THREADS
+static pthread_t main_thread;
+#endif
 
 /*
  * What caller code that breaks the contract works with: the context, the
@@ -174,6 +194,7 @@ static void	 an_added_fact_invalidates_what_was_derived(void);
 static void	 an_added_fact_is_the_fact_its_text_loads(void);
 static void	 an_answer_does_not_outlive_its_delivery(void);
 static void	 every_diagnostic_reaches_the_callback(void);
+static void	 a_context_takes_at_most_the_maximum_threads(void);
 static void	 a_mixed_comparison_is_noted_once_per_rule(void);
 static void	 a_mixed_note_follows_the_rule_not_its_place(void);
 static void	 a_query_and_its_rewrite_share_one_note(void);
@@ -1072,6 +1093,12 @@ record_mixed_note(void *callback_ctx, enum relic_diag_level level,
 	mixed_log_t *log;
 
 	log = callback_ctx;
+#ifdef RELIC_THREADS
+	if (!pthread_equal(pthread_self(), main_thread)) {
+		log->other++;
+		return;
+	}
+#endif
 	if (level != RELIC_NOTE ||
 	    strncmp(message, MIXED_NOTE, strlen(MIXED_NOTE)) != 0 ||
 	    where == NULL) {
@@ -1132,8 +1159,10 @@ a_mixed_comparison_is_noted_once_per_rule(void)
 
 	for (noting = 0; noting <= 1; noting++) {
 		bzero(&config, sizeof(config));
+		config.flags = mixed_flags;
+		config.threads = mixed_threads;
 		if (noting)
-			config.flags = RELIC_F_NOTE_MIXED;
+			config.flags |= RELIC_F_NOTE_MIXED;
 		bzero(&log, sizeof(log));
 
 		ctx = relic_create_config(&config);
@@ -1218,7 +1247,8 @@ a_mixed_note_follows_the_rule_not_its_place(void)
 	char *rows;
 
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_NOTE_MIXED;
+	config.flags = mixed_flags | RELIC_F_NOTE_MIXED;
+	config.threads = mixed_threads;
 	bzero(&log, sizeof(log));
 
 	ctx = relic_create_config(&config);
@@ -1263,7 +1293,8 @@ a_query_and_its_rewrite_share_one_note(void)
 	char *rows;
 
 	bzero(&config, sizeof(config));
-	config.flags = RELIC_F_NOTE_MIXED;
+	config.flags = mixed_flags | RELIC_F_NOTE_MIXED;
+	config.threads = mixed_threads;
 	bzero(&log, sizeof(log));
 
 	ctx = relic_create_config(&config);
@@ -1509,20 +1540,68 @@ a_prepared_query_runs_over_the_program_as_it_stands(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * A context configured with more threads than RELIC_THREADS_MAX is refused
+ * rather than given fewer, and one with the maximum is created.  Neither
+ * starts a thread, since neither evaluates.
+ */
+static void
+a_context_takes_at_most_the_maximum_threads(void)
+{
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	config.threads = RELIC_THREADS_MAX + 1;
+	ctx = relic_create_config(&config);
+	check(ctx == NULL, SCENARIO_THREADS,
+	    "a context of RELIC_THREADS_MAX + 1 threads is refused");
+	relic_destroy(ctx);
+
+	config.threads = SIZE_MAX;
+	ctx = relic_create_config(&config);
+	check(ctx == NULL, SCENARIO_THREADS,
+	    "a context of SIZE_MAX threads is refused");
+	relic_destroy(ctx);
+
+	config.threads = RELIC_THREADS_MAX;
+	ctx = relic_create_config(&config);
+	check(ctx != NULL, SCENARIO_THREADS,
+	    "a context of RELIC_THREADS_MAX threads is created");
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
+#ifdef RELIC_THREADS
+	main_thread = pthread_self();
+#endif
+
 	a_callback_cannot_call_into_its_context();
 	a_refusal_does_not_hide_why_an_operation_failed();
 	an_answer_does_not_outlive_its_delivery();
 	every_diagnostic_reaches_the_callback();
 	a_mixed_comparison_is_noted_once_per_rule();
+
+	/*
+	 * The notes again, with every round deferred and shared among four
+	 * threads: they come as the serial evaluator's do, from the merge on
+	 * the calling thread.
+	 */
+	mixed_flags = RELIC_F_PARALLEL_ALWAYS;
+	mixed_threads = 4;
+	a_mixed_comparison_is_noted_once_per_rule();
+	mixed_flags = 0;
+	mixed_threads = 0;
+
 	a_value_holds_only_what_its_type_can();
 	an_added_fact_is_the_fact_its_text_loads();
 	an_added_fact_invalidates_what_was_derived();
 	a_collected_result_is_the_stream_kept();
 	a_missing_argument_is_reported_not_followed();
 	a_prepared_query_runs_over_the_program_as_it_stands();
+	a_context_takes_at_most_the_maximum_threads();
 
 	return (check_summary("test_api"));
 }

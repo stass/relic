@@ -99,10 +99,10 @@ enum stdin_reader {
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `imports` holds the
  * -I operands, parsed, in the order given.  `config` is what the context is
- * created with: -l sets its limits, -X naive, no-index, no-reorder,
- * no-magic, no-stream and parallel its flags, and a second -v the flag that
- * asks for notes about mixed-type comparisons.  `verbosity` counts the -v
- * options.
+ * created with: -j sets its thread count, -l its limits, -X naive,
+ * no-index, no-reorder, no-magic, no-stream and parallel its flags, and a
+ * second -v the flag that asks for notes about mixed-type comparisons.
+ * `verbosity` counts the -v options.
  *
  * `stdin_reader` is who reads standard input, which parse_options() decides
  * once every option and operand is known, and `stdin_import` the import that
@@ -155,6 +155,8 @@ static int		 parse_limit(const char *program_name,
 			    const char *argument, relic_config_t *config);
 static int		 parse_options(const char *program_name, int argc,
 			    char *argv[], options_t *options);
+static int		 parse_threads(const char *program_name,
+			    const char *argument, relic_config_t *config);
 static int		 prepare_queries(invocation_t *invocation,
 			    const options_t *options);
 static bool		 refuse_terminal_input(const char *program_name,
@@ -266,9 +268,9 @@ static void
 usage(const char *program_name)
 {
 	fprintf(stderr, "usage: %s [-aceinsv] [-F format] [-I import] "
-	    "[-l limit=value] [-o file]\n"
-	    "       %*s [-q query] [-X debug] [file ...]\n", program_name,
-	    (int)strlen(program_name), "");
+	    "[-j threads]\n"
+	    "       %*s [-l limit=value] [-o file] [-q query] [-X debug] "
+	    "[file ...]\n", program_name, (int)strlen(program_name), "");
 	fprintf(stderr, "       %s -V\n", program_name);
 }
 
@@ -624,6 +626,8 @@ write_stats(relic_t *ctx, FILE *stream)
 	    (uintmax_t)stats.tuples_scanned);
 	fprintf(stream, "stats: tuples looked up %ju\n",
 	    (uintmax_t)stats.tuples_looked_up);
+	fprintf(stream, "stats: parallel rounds %ju\n",
+	    (uintmax_t)stats.parallel_rounds);
 	fprintf(stream, "stats: tuples held %zu\n", stats.tuples);
 	fprintf(stream, "stats: storage bytes %zu\n", stats.storage_bytes);
 	fprintf(stream, "stats: symbol values %zu\n", stats.symbol_values);
@@ -825,6 +829,40 @@ parse_limit(const char *program_name, const char *argument,
 }
 
 /*
+ * Parse -j's argument into the thread count evaluation may use: a decimal
+ * number from 0 to RELIC_THREADS_MAX, zero asking for as many as the
+ * system has processors online, within the same bound.  The number is
+ * validated as a limit's value is.
+ */
+static int
+parse_threads(const char *program_name, const char *argument,
+    relic_config_t *config)
+{
+	const char *error;
+	long long value;
+	long online;
+
+	value = strtonum(argument, 0, RELIC_THREADS_MAX, &error);
+	if (error == NULL && !is_decimal_digit(argument[0]))
+		error = "invalid";
+	if (error != NULL) {
+		report_error(program_name, "thread count is %s: %s", error,
+		    argument);
+		return (-1);
+	}
+
+	if (value == 0) {
+		online = sysconf(_SC_NPROCESSORS_ONLN);
+		value = online < 1 ? 1 : online > RELIC_THREADS_MAX ?
+		    RELIC_THREADS_MAX : online;
+	}
+
+	config->threads = (size_t)value;
+
+	return (0);
+}
+
+/*
  * Decide who reads standard input: the session under -i, an import of `-`,
  * or, when neither does, the program when no file is named.  Returns
  * RELIC_EXIT_OK, or RELIC_EXIT_USAGE having reported that two claim it,
@@ -911,7 +949,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":aceF:I:il:no:q:svVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":aceF:I:ij:l:no:q:svVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -949,6 +987,13 @@ parse_options(const char *program_name, int argc, char *argv[],
 			break;
 		case 'i':
 			options->interactive = true;
+			break;
+		case 'j':
+			if (parse_threads(program_name, optarg,
+			    &options->config) != 0) {
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			}
 			break;
 		case 'l':
 			if (parse_limit(program_name, optarg,

@@ -354,7 +354,7 @@ relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
 {
 	relic_index_rehash_t rehash;
 	relic_index_key_t *entries;
-	relic_tuple_id_t *frontiers;
+	relic_atomic_u32_t *frontiers;
 	relic_tuple_id_t *next;
 	relic_dom_t *values;
 
@@ -438,7 +438,7 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	entry = &index->entries[key_id - 1];
 	entry->first = id;
 	entry->last = id;
-	index->frontiers[key_id - 1] = id;
+	relic_atomic_u32_store_relaxed(&index->frontiers[key_id - 1], id);
 	bcopy(key, &index->key_values[key_offset(index, key_id)],
 	    (size_t)index->key_length * sizeof(*key));
 	relic_idtab_place(&index->keys, hash, key_id);
@@ -542,7 +542,8 @@ relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since)
  * stops at the same tuple and leaves the same frontier, whichever frontier
  * it began from: one that began from an older frontier than another left
  * only walks further to reach the same stop.  Lookups at one start may
- * therefore be made in any order.
+ * therefore be made in any order, on any number of threads at once, which
+ * is why a frontier is loaded and stored as a relaxed atomic word.
  *
  * A step of the walk reads the `next` array and no tuple.
  */
@@ -551,7 +552,8 @@ relic_index_first_since(const relic_index_t *index,
     const relic_relation_t *relation, const relic_dom_t *probe,
     relic_tuple_id_t since)
 {
-	relic_tuple_id_t *frontier;
+	relic_atomic_u32_t *frontier;
+	relic_tuple_id_t start;
 	relic_tuple_id_t stop;
 	uint32_t key_id;
 
@@ -566,9 +568,10 @@ relic_index_first_since(const relic_index_t *index,
 		stop = walk_toward(index, index->entries[key_id - 1].first,
 		    since);
 	} else {
-		stop = walk_toward(index, *frontier, since);
-		if (since == index->latest_since && stop != *frontier)
-			*frontier = stop;
+		start = relic_atomic_u32_load_relaxed(frontier);
+		stop = walk_toward(index, start, since);
+		if (since == index->latest_since && stop != start)
+			relic_atomic_u32_store_relaxed(frontier, stop);
 	}
 
 	return (stop >= since ? stop : RELIC_ID_NONE);

@@ -51,8 +51,8 @@
 # rewrite and lifts the budgets.  Each workload holds some 4 million
 # operations or literals, and ordering them by rescoring the body at every
 # step costs the square of the body per plan, 10^10 steps or more: a second
-# or two each in passes, even under a sanitizer, and minutes step by step on
-# an optimized build.
+# or two each in passes, even under AddressSanitizer, and minutes step by
+# step on an optimized build.
 #
 # Each planning workload then runs again under a memory limit of 16 MiB,
 # far below the hundreds of megabytes its plans or its rewrite hold.  The
@@ -72,8 +72,10 @@
 # program, and say so.
 #
 # RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
-# set, which leaves room for a sanitizer build on a slow machine; for
-# reachability the clock only guards against a run that never ends.  The
+# set, which leaves room for an AddressSanitizer build on a slow machine;
+# make check-tsan sets more for ThreadSanitizer, which is several times
+# slower.  For reachability the clock only guards against a run that never
+# ends.  The
 # cycle and the session each have a tenth of it, and each planning workload
 # a fortieth, but never less than five seconds.
 

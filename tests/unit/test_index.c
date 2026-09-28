@@ -31,6 +31,10 @@
 #include <string.h>
 #include <strings.h>
 
+#ifdef RELIC_THREADS
+#include <pthread.h>
+#endif
+
 #include "harness.h"
 #include "internal.h"
 
@@ -40,6 +44,7 @@
 #define	SCENARIO_DISCARD	"a discard drops every index"
 #define	SCENARIO_DISTINCT	"a distinct count follows the tuples"
 #define	SCENARIO_FRONTIER	"a delta lookup starts where its delta does"
+#define	SCENARIO_FRONTIERS	"concurrent delta lookups leave one frontier"
 #define	SCENARIO_LATE_KEY	"a key first held late is found by its values"
 #define	SCENARIO_LIMIT		"the memory limit refuses a build whole"
 #define	SCENARIO_LIMIT_SWEEP	"the memory limit holds as indexes grow"
@@ -66,6 +71,40 @@
  */
 #define	LIMIT_SWEEP_TUPLES	300u
 #define	LIMIT_SWEEP_STEPS	200u
+
+/*
+ * The threads that look a delta up at once, and how many times each asks
+ * for every key, so that their lookups of one key overlap.
+ */
+#define	LOOKUP_THREADS		4u
+#define	LOOKUP_PASSES		64u
+
+#ifdef RELIC_THREADS
+
+typedef struct lookup_worker lookup_worker_t;
+
+/*
+ * One thread's part in the concurrent lookups: the index and relation it
+ * reads, the start it asks from, one probe per key and what a scan finds
+ * for each, where among the keys it begins, and how many of its lookups
+ * disagreed with the scan.
+ */
+struct lookup_worker {
+	const relic_index_t	*index;
+	const relic_relation_t	*rel;
+	relic_tuple_id_t	 since;
+	const relic_dom_t	*probes;
+	const relic_tuple_id_t	*expected;
+	size_t			 key_count;
+	size_t			 first_key;
+	size_t			 disagreed;
+};
+
+static void	*look_up_every_key(void *argument);
+
+#endif /* RELIC_THREADS */
+
+static void	 concurrent_delta_lookups_leave_one_frontier(void);
 
 static relic_t	*context(const char *scenario, const relic_config_t *config);
 static relic_relation_t *relation(relic_t *ctx, const char *scenario,
@@ -760,6 +799,152 @@ a_delta_lookup_starts_where_its_delta_does(void)
 	relic_destroy(ctx);
 }
 
+#ifdef RELIC_THREADS
+
+/*
+ * A lookup thread: ask for every key from the worker's start, LOOKUP_PASSES
+ * times over, beginning at its own key, and count the answers a scan would
+ * not have given.
+ */
+static void *
+look_up_every_key(void *argument)
+{
+	lookup_worker_t *worker;
+	relic_tuple_id_t found;
+	size_t pass;
+	size_t key;
+	size_t i;
+
+	worker = argument;
+
+	for (pass = 0; pass < LOOKUP_PASSES; pass++) {
+		for (i = 0; i < worker->key_count; i++) {
+			key = (worker->first_key + i) % worker->key_count;
+			found = relic_index_first_since(worker->index,
+			    worker->rel, &worker->probes[key * 3],
+			    worker->since);
+			if (found != worker->expected[key])
+				worker->disagreed++;
+		}
+	}
+
+	return (NULL);
+}
+
+#endif /* RELIC_THREADS */
+
+/*
+ * The threads of a deferred round look up one delta at once, and each moves
+ * a key's frontier toward the stop it found with a relaxed store.  Every
+ * thread's lookups must find what a scan finds, and when they are done each
+ * frontier must rest where a single lookup would have left it: every
+ * thread stores the same stop, or a stop another has already passed and
+ * which leads it to the same place, so no interleaving can leave a frontier
+ * past a tuple the delta still holds.  No lookup moves the start the index
+ * was raised to.  The relation grows round by round as in
+ * a_delta_lookup_starts_where_its_delta_does().
+ */
+static void
+concurrent_delta_lookups_leave_one_frontier(void)
+{
+#ifdef RELIC_THREADS
+	lookup_worker_t workers[LOOKUP_THREADS];
+	pthread_t handles[LOOKUP_THREADS];
+	relic_tuple_id_t expected[SWEEP_VALUES + 1];
+	relic_dom_t probes[(SWEEP_VALUES + 1) * 3];
+	relic_relation_t *rel;
+	relic_config_t config;
+	relic_tuple_id_t since;
+	uint32_t position;
+	unsigned int round;
+	size_t started;
+	size_t key;
+	size_t i;
+	bool agreed;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	ctx = context(SCENARIO_FRONTIERS, &config);
+	if (ctx == NULL)
+		return;
+
+	rel = relation(ctx, SCENARIO_FRONTIERS, "member", 3);
+	if (rel == NULL || !fill(ctx, SCENARIO_FRONTIERS, rel, 0, 100) ||
+	    relic_relation_index(ctx, rel, 0x1, &position) != 0) {
+		check(false, SCENARIO_FRONTIERS, "the relation is indexed");
+		relic_destroy(ctx);
+		return;
+	}
+
+	bzero(probes, sizeof(probes));
+	for (key = 0; key <= SWEEP_VALUES; key++)
+		probes[key * 3] = value(ctx, key == SWEEP_VALUES ? 999999u :
+		    (unsigned int)key);
+
+	for (round = 0; round < 12; round++) {
+		agreed = true;
+		since = relic_relation_end(rel);
+		if (!fill(ctx, SCENARIO_FRONTIERS, rel, 100 + round * 1000,
+		    round * 5))
+			break;
+		relic_index_raise_since(&rel->indexes[position], since);
+
+		for (key = 0; key <= SWEEP_VALUES; key++)
+			expected[key] = first_since_by_scan(rel,
+			    rel->indexes[position].key_mask, &probes[key * 3],
+			    since);
+
+		started = 0;
+		for (i = 0; i < LOOKUP_THREADS; i++) {
+			workers[i].index = &rel->indexes[position];
+			workers[i].rel = rel;
+			workers[i].since = since;
+			workers[i].probes = probes;
+			workers[i].expected = expected;
+			workers[i].key_count = SWEEP_VALUES + 1;
+			workers[i].first_key = i * (SWEEP_VALUES + 1) /
+			    LOOKUP_THREADS;
+			workers[i].disagreed = 0;
+			if (pthread_create(&handles[i], NULL, look_up_every_key,
+			    &workers[i]) != 0)
+				break;
+			started++;
+		}
+		for (i = 0; i < started; i++)
+			pthread_join(handles[i], NULL);
+		if (started < LOOKUP_THREADS) {
+			check(false, SCENARIO_FRONTIERS, "the threads start");
+			break;
+		}
+
+		for (i = 0; i < LOOKUP_THREADS; i++) {
+			if (workers[i].disagreed != 0) {
+				checkf(false, SCENARIO_FRONTIERS,
+				    "in round %u, thread %zu disagreed with a "
+				    "scan %zu times", round, i,
+				    workers[i].disagreed);
+				agreed = false;
+			}
+		}
+		if (!frontiers_rest_at(rel, position, since))
+			agreed = false;
+		if (rel->indexes[position].latest_since != since) {
+			check(false, SCENARIO_FRONTIERS, "no lookup moves the "
+			    "start the index was raised to");
+			agreed = false;
+		}
+		if (!agreed)
+			break;
+	}
+
+	checkf(round == 12, SCENARIO_FRONTIERS, "every round's "
+	    "concurrent lookups should agree with a scan, and round %u did "
+	    "not", round);
+
+	relic_destroy(ctx);
+#endif
+}
+
 /*
  * A discard drops every index with the tuples, so which indexes a relation
  * keeps up depends only on what was asked of it since, never on the plans
@@ -1173,6 +1358,7 @@ main(void)
 	a_lookup_walking_while_its_key_grows();
 	a_key_first_held_late_is_found_by_its_values();
 	a_delta_lookup_starts_where_its_delta_does();
+	concurrent_delta_lookups_leave_one_frontier();
 	a_discard_drops_every_index();
 	an_index_is_charged_exactly();
 	the_memory_limit_refuses_a_build_whole();

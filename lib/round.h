@@ -13,6 +13,7 @@
 
 #include <relic.h>
 
+#include "atomic.h"
 #include "exec.h"
 #include "frozen.h"
 #include "plan.h"
@@ -30,12 +31,16 @@
  * them.  The task side (lib/task.c) sees the store only through frozen.h,
  * as the executor does, and this header is written for it: it names a
  * relation, a context and an index and never looks inside one.  Worker 0's
- * side (lib/round.c) prepares the pool, cuts the tasks and merges.
+ * side (lib/round.c) decides whether a round is worth sharing, prepares the
+ * pool, cuts the tasks and merges.  The pool's threads, and how a job is
+ * handed to them and waited for, are lib/pool.c's.
  */
 
 typedef struct relic_candidate relic_candidate_t;
 typedef struct relic_candidates relic_candidates_t;
+typedef struct relic_plan_history relic_plan_history_t;
 typedef struct relic_pool relic_pool_t;
+typedef struct relic_pool_threads relic_pool_threads_t;
 typedef struct relic_round relic_round_t;
 typedef struct relic_round_item relic_round_item_t;
 typedef struct relic_round_job relic_round_job_t;
@@ -43,17 +48,30 @@ typedef struct relic_round_task relic_round_task_t;
 typedef struct relic_worker relic_worker_t;
 
 /*
+ * What a plan did the last time it ran, from which the next run's work is
+ * estimated: `work`, the tuples it read and derived, and `range`, the
+ * tuples its first scan's view held then, one for a plan that is not cut.
+ * `ran` is false until it has run.
+ */
+struct relic_plan_history {
+	uint64_t	work;
+	uint64_t	range;
+	bool		ran;
+};
+
+/*
  * One item of a round, what the serial evaluator runs in one turn: a seed,
  * whose `plan` is NULL and whose head is all constants, or a plan.  `rule`
- * is what the item was built from.  `target` is the position among the
- * round's targets of the relation the item's tuples go into, which for a
- * plan is the relation its EMIT names.  `gained` is set once the item's
- * turn has inserted a tuple its target did not hold, whichever way the
- * round ran.
+ * is what the item was built from.  `history` is the plan's, where one is
+ * kept, and NULL otherwise.  `target` is the position among the round's
+ * targets of the relation the item's tuples go into, which for a plan is
+ * the relation its EMIT names.  `gained` is set once the item's turn has
+ * inserted a tuple its target did not hold, whichever way the round ran.
  */
 struct relic_round_item {
 	const relic_plan_t	*plan;
 	const relic_rule_t	*rule;
+	relic_plan_history_t	*history;
 	size_t			 target;
 	bool			 gained;
 };
@@ -84,7 +102,8 @@ struct relic_round {
  *
  * The rest is written by the worker that runs the task and read by the
  * merge once every task has run: which worker ran it, where its candidates
- * lie among that worker's, and the first mixed-type comparison it met.
+ * lie among that worker's, the first mixed-type comparison it met, and the
+ * work it did, the tuples it read and derived.
  */
 struct relic_round_task {
 	size_t			 item;
@@ -95,6 +114,7 @@ struct relic_round_task {
 	size_t			 first_candidate;
 	size_t			 candidate_count;
 	relic_mixed_note_t	 note;
+	uint64_t		 work;
 };
 
 /*
@@ -154,19 +174,24 @@ struct relic_worker {
 };
 
 /*
- * A context's pool: its workers, the first of which is the calling thread,
- * the tasks of the round being run, and for each target of the round the
- * number of candidates its tasks gathered.  The arrays are kept from one
- * round to the next, grown to the largest round the pool has run; they are
- * sized by the program and not by the data, and are not charged.
+ * A context's pool: its `worker_count` workers, the first of which is the
+ * calling thread and each other of which is a thread of `threads`, NULL
+ * when there is none; the tasks of the round being run; and for each
+ * target of the round the number of candidates its tasks gathered.  The
+ * arrays are kept from one round to the next, grown to the largest round
+ * the pool has run; they are sized by the program and the thread count and
+ * not by the data, and are not charged.
  *
  * `merged_rounds` and `abandoned_rounds` count the rounds the pool merged
  * and those it ran and then left for the caller to run serially, over the
  * life of the context, so that a test can tell that the deferred way was
- * taken and did not merely fall back.
+ * taken and did not merely fall back.  `thread_tasks` counts the tasks of
+ * merged rounds that a thread of the pool ran rather than the calling
+ * thread, so that a test can tell the threads did work.
  */
 struct relic_pool {
 	relic_worker_t		*workers;
+	relic_pool_threads_t	*threads;
 	relic_round_task_t	*tasks;
 	size_t			*target_candidates;
 	size_t			 worker_count;
@@ -175,6 +200,7 @@ struct relic_pool {
 	size_t			 target_capacity;
 	uint64_t		 merged_rounds;
 	uint64_t		 abandoned_rounds;
+	uint64_t		 thread_tasks;
 };
 
 /*
@@ -188,8 +214,15 @@ struct relic_pool {
  * candidates than that holds a round the merge would refuse part way, and
  * abandons it rather than fill memory first.
  *
- * `next_task` is the first task not yet claimed, and `abandoned` is set by a
- * task that cannot go on, after which no task is claimed.
+ * Three words are shared by every worker of the job and are atomic.
+ * `next_task` is the first task not yet claimed: a worker claims a task by
+ * taking it and moving it past, so each task is claimed once and each
+ * worker claims its tasks in increasing order.  `abandoned` is set by a
+ * worker whose task cannot go on, after which no worker claims another.
+ * `finished` counts the workers that have left their claim loop, for
+ * whatever reason; worker 0 waits for it to reach the pool's workers, and
+ * what every worker wrote -- its tasks' records, its candidates, its
+ * counters -- is then visible to it.
  */
 struct relic_round_job {
 	const relic_round_t	*round;
@@ -197,8 +230,9 @@ struct relic_round_job {
 	relic_account_t		*account;
 	size_t			 task_count;
 	size_t			 admissible;
-	size_t			 next_task;
-	bool			 abandoned;
+	relic_atomic_size_t	 next_task;
+	relic_atomic_size_t	 finished;
+	relic_atomic_bool_t	 abandoned;
 };
 
 /*
@@ -219,12 +253,46 @@ enum relic_round_outcome {
  * lib/round.c
  *
  * relic_round_run() runs a round deferred on the context's pool, creating
- * the pool the first time, unless the round reads a relation it writes,
- * and says how it ended; an item that inserted a tuple its target lacked
- * is marked as having gained when the round merged.  relic_pool_free()
- * releases a pool and everything it kept.
+ * the pool the first time, and says how it ended.  It declines a round
+ * that reads a relation it writes, and, unless RELIC_F_PARALLEL_ALWAYS
+ * asks for every round, one too small to repay sharing it among the
+ * pool's threads.  An item that inserted a tuple its target lacked is
+ * marked as having gained when the round merged.
+ *
+ * relic_round_record() records in an item's history, when it has one,
+ * that its turn in a round run serially did `work`, the tuples it read and
+ * derived.
  */
 enum relic_round_outcome relic_round_run(relic_t *ctx, relic_round_t *round);
+void	 relic_round_record(const relic_round_t *round,
+	    relic_round_item_t *item, uint64_t work);
+
+/*
+ * lib/pool.c
+ *
+ * relic_pool_size() is how many workers a pool asked for `threads` can
+ * have in this build: that many, zero counting as one, or one alone in a
+ * build without threads.
+ *
+ * relic_pool_create() gives a pool `workers` workers, at least one, the
+ * calling thread among them, starting a thread for each other it can; a
+ * thread that cannot be started is not an error, and the pool has fewer
+ * workers.  Returns 0, or -1 when the pool could not be allocated.
+ *
+ * relic_pool_adopt() makes the pool the calling process's before a job:
+ * a pool carried into a child of fork(2) has none of its threads there,
+ * and becomes the calling thread alone.
+ *
+ * relic_pool_run() runs a job on every worker of the pool, the calling
+ * thread as worker 0, and returns once every worker has left the job.
+ *
+ * relic_pool_free() stops and joins the pool's threads and releases the
+ * pool and everything it kept.
+ */
+size_t	 relic_pool_size(size_t threads);
+int	 relic_pool_create(relic_pool_t **poolp, size_t workers);
+void	 relic_pool_adopt(relic_pool_t *pool);
+void	 relic_pool_run(relic_pool_t *pool, relic_round_job_t *job);
 void	 relic_pool_free(relic_pool_t *pool);
 
 /*

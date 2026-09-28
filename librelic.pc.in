@@ -8,3 +8,4 @@ Description: Small general-purpose Datalog engine
 Version: @PACKAGE_VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lrelic
+Libs.private: @RELIC_THREAD_LIBS@

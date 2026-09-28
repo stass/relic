@@ -45,6 +45,9 @@
 
 #include <errno.h>
 #include <limits.h>
+#ifdef RELIC_THREADS
+#include <pthread.h>
+#endif
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -243,21 +246,46 @@ struct eval_sweep {
 	const char	*paths;
 	const char	*sinks;
 	unsigned int	 flags;
+	size_t		 threads;
 	size_t		 rows;
 };
 
 /*
- * Requests still to be served before the allocator starts refusing.  A
- * negative budget means refuse nothing, which is the state every allocation
- * outside a swept region runs in.  Once the budget reaches zero every later
- * request is refused as well, so a sweep step models an allocator that has
- * run out rather than one that hiccupped.
+ * Requests still to be served before the allocator starts refusing, and
+ * every request made.  A budget of SERVE_EVERY means refuse nothing, which
+ * is the state every allocation outside a swept region runs in.  Once the
+ * budget reaches zero every later request is refused as well, so a sweep
+ * step models an allocator that has run out rather than one that
+ * hiccupped.
+ *
+ * A context's worker threads allocate too, so both counters are atomic and
+ * a request takes its place in the budget by compare-and-swap: exactly the
+ * budget's requests are served, whichever threads make them.  Refusals on
+ * a thread other than the one that runs main() are counted apart, so that
+ * a sweep meant to reach a worker can require that it did.
  */
-static long	 allocations_remaining = -1;
-static unsigned long allocations_seen;
+#define	SERVE_EVERY	SIZE_MAX
+
+/* Whether a context's pool can start threads of its own in this build. */
+#ifdef RELIC_THREADS
+#define	THREADS_AVAILABLE	true
+#else
+#define	THREADS_AVAILABLE	false
+#endif
+
+static relic_atomic_size_t allocations_remaining = SERVE_EVERY;
+static relic_atomic_size_t allocations_seen;
+static relic_atomic_size_t worker_refusals;
+
+#ifdef RELIC_THREADS
+static pthread_t main_thread;
+#endif
 
 /* How many RELIC_ERROR diagnostics the context has reported. */
 static size_t	 errors_reported;
+
+/* How many diagnostics came from a thread other than the one running main(). */
+static size_t	 diagnostics_off_thread;
 
 /* How many RELIC_WARNING diagnostics the context has reported. */
 static size_t	 warnings_reported;
@@ -280,6 +308,8 @@ void		*relic_test_realloc(void *block, size_t size);
 void		*relic_test_reallocarray(void *items, size_t count,
 		    size_t size);
 
+static size_t	 allocations_made(void);
+static void	 count_worker_refusal(void);
 static bool	 refuse_this_allocation(void);
 static void	 serve_every_allocation(void);
 static void	 refuse_allocations_after(long served);
@@ -328,29 +358,49 @@ static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 static bool
 refuse_this_allocation(void)
 {
-	allocations_seen++;
+	size_t remaining;
 
-	if (allocations_remaining < 0)
-		return (false);
+	relic_atomic_size_add_relaxed(&allocations_seen, 1);
 
-	if (allocations_remaining == 0)
-		return (true);
-
-	allocations_remaining--;
+	remaining = relic_atomic_size_load(&allocations_remaining);
+	do {
+		if (remaining == SERVE_EVERY)
+			return (false);
+		if (remaining == 0) {
+			count_worker_refusal();
+			return (true);
+		}
+	} while (!relic_atomic_size_swap_if(&allocations_remaining,
+	    &remaining, remaining - 1));
 
 	return (false);
 }
 
 static void
+count_worker_refusal(void)
+{
+#ifdef RELIC_THREADS
+	if (!pthread_equal(pthread_self(), main_thread))
+		relic_atomic_size_add_relaxed(&worker_refusals, 1);
+#endif
+}
+
+static size_t
+allocations_made(void)
+{
+	return (relic_atomic_size_load(&allocations_seen));
+}
+
+static void
 serve_every_allocation(void)
 {
-	allocations_remaining = -1;
+	relic_atomic_size_store(&allocations_remaining, SERVE_EVERY);
 }
 
 static void
 refuse_allocations_after(long served)
 {
-	allocations_remaining = served;
+	relic_atomic_size_store(&allocations_remaining, (size_t)served);
 }
 
 void *
@@ -429,11 +479,21 @@ relic_test_reallocarray(void *items, size_t count, size_t size)
 	return (reallocarray(items, count, size));
 }
 
+/*
+ * The diagnostic callback: count each level.  The library calls it only on
+ * the thread that called into it, so a call from any other thread is
+ * counted apart and fails the suite.
+ */
 static void
 count_error(void *callback_ctx RELIC_UNUSED, enum relic_diag_level level,
     const relic_location_t *where RELIC_UNUSED,
     const char *message RELIC_UNUSED)
 {
+#ifdef RELIC_THREADS
+	if (!pthread_equal(pthread_self(), main_thread))
+		diagnostics_off_thread++;
+#endif
+
 	if (level == RELIC_ERROR)
 		errors_reported++;
 	else if (level == RELIC_WARNING)
@@ -970,7 +1030,7 @@ sweep_lookahead(const char *program, bool well_formed)
 {
 	bool unrefused;
 	bool reached_unrefused;
-	unsigned long seen_before;
+	size_t seen_before;
 	long budget;
 
 	reached_unrefused = false;
@@ -989,12 +1049,11 @@ sweep_lookahead(const char *program, bool well_formed)
 		relic_diag_set(ctx, count_error, NULL);
 		errors_reported = 0;
 
-		seen_before = allocations_seen;
+		seen_before = allocations_made();
 		refuse_allocations_after(budget);
 		status = relic_load_string(ctx, "lookahead.dl", program);
 		serve_every_allocation();
-		unrefused =
-		    allocations_seen - seen_before <= (unsigned long)budget;
+		unrefused = allocations_made() - seen_before <= (size_t)budget;
 
 		checkf(errors_reported == (status != 0 ? 1u : 0u),
 		    SCENARIO_LOOKAHEAD,
@@ -2081,32 +2140,43 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
  * adornments in a second search, which reads sink through sink$f whatever
  * the call binds.
  *
- * Two strategies run again with every round deferred.  A refusal can then
- * land in a round's buffers, or in the storage its pool keeps, which
- * abandons the round and runs it again inserting as it derives; that run
- * meets the refusals that follow as the serial evaluator meets them, so the
- * query still fails once or succeeds whole, and the round's buffers are
- * given back either way.
+ * Two strategies run again with every round deferred, on the calling
+ * thread and then on four.  A refusal can then land in a round's buffers,
+ * or in the storage its pool keeps, which abandons the round and runs it
+ * again inserting as it derives; that run meets the refusals that follow as
+ * the serial evaluator meets them, so the query still fails once or
+ * succeeds whole, and the round's buffers are given back either way.  On
+ * four threads the sweep must land a refusal on a thread of the pool, where
+ * a worker growing its buffers is refused and gives up the round, and the
+ * one message must still come from the calling thread, which count_error()
+ * checks.
  */
 static void
 a_query_that_ran_out_of_memory_can_be_retried(void)
 {
 	static const eval_sweep_t sweeps[] = {
 		{ "from the whole fixed point", "path(n0, X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC, EVAL_CHAIN },
+		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN },
 		{ "through the Magic rewrite", "path(n0, X), not sink(X)?",
-		    "path$bf", "sink", 0, EVAL_CHAIN - 1 },
+		    "path$bf", "sink", 0, 0, EVAL_CHAIN - 1 },
 		{ "reading what it reaches completely",
-		    "path(X, Y), not sink(Y)?", "path", "sink", 0,
+		    "path(X, Y), not sink(Y)?", "path", "sink", 0, 0,
 		    EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 - EVAL_CHAIN },
 		{ "through a second search", "path(n0, X), sink(X), sink(Y)?",
-		    "path$bf", "sink$f", 0, 1 },
+		    "path$bf", "sink$f", 0, 0, 1 },
 		{ "from the whole fixed point, deferred", "path(n0, X)?",
 		    "path", "sink", RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS,
-		    EVAL_CHAIN },
+		    0, EVAL_CHAIN },
 		{ "through the Magic rewrite, deferred",
 		    "path(n0, X), not sink(X)?", "path$bf", "sink",
-		    RELIC_F_PARALLEL_ALWAYS, EVAL_CHAIN - 1 }
+		    RELIC_F_PARALLEL_ALWAYS, 0, EVAL_CHAIN - 1 },
+		{ "from the whole fixed point, on four threads",
+		    "path(n0, X)?", "path", "sink",
+		    RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS, 4,
+		    EVAL_CHAIN },
+		{ "through the Magic rewrite, on four threads",
+		    "path(n0, X), not sink(X)?", "path$bf", "sink",
+		    RELIC_F_PARALLEL_ALWAYS, 4, EVAL_CHAIN - 1 }
 	};
 	char *program;
 	size_t i;
@@ -2136,11 +2206,14 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	size_t expected_paths;
 	size_t refused;
 	size_t rows;
+	size_t workers_refused;
 	long budget;
 	bool undisturbed;
 
 	bzero(&config, sizeof(config));
 	config.flags = sweep->flags;
+	config.threads = sweep->threads;
+	workers_refused = relic_atomic_size_load(&worker_refusals);
 
 	expected_paths = (size_t)EVAL_CHAIN * (EVAL_CHAIN + 1) / 2;
 	completed = 0;
@@ -2151,7 +2224,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	for (budget = 0; budget < EVAL_SWEEP && !undisturbed; budget++) {
 		const relic_relation_t *paths;
 		const relic_relation_t *sinks;
-		unsigned long before;
+		size_t before;
 		relic_t *ctx;
 		int status;
 
@@ -2175,7 +2248,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		errors_reported = 0;
 		rows = 0;
 
-		before = allocations_seen;
+		before = allocations_made();
 		refuse_allocations_after(budget);
 		query = relic_query_prepare(ctx, NULL, sweep->query);
 		status = -1;
@@ -2183,8 +2256,7 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 			status = relic_query_run(ctx, query, count_answer,
 			    &rows);
 		serve_every_allocation();
-		undisturbed =
-		    allocations_seen - before <= (unsigned long)budget;
+		undisturbed = allocations_made() - before <= (size_t)budget;
 
 		if (status == 0) {
 			completed++;
@@ -2274,6 +2346,11 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	checkf(completed > 0 && undisturbed, SCENARIO_EVALUATE,
 	    "answered %s, the sweep should reach a query that completes "
 	    "undisturbed, in %d attempts", sweep->strategy, EVAL_SWEEP);
+	workers_refused = relic_atomic_size_load(&worker_refusals) -
+	    workers_refused;
+	checkf(sweep->threads < 2 || !THREADS_AVAILABLE || workers_refused > 0,
+	    SCENARIO_EVALUATE, "answered %s, the sweep should refuse an "
+	    "allocation on a thread of the pool", sweep->strategy);
 }
 
 /*
@@ -2294,7 +2371,7 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 	static const char query_text[] = "p(c, Y2, Y3, Y4, Y5, Y6)?";
 	relic_query_t *query;
 	char *program;
-	unsigned long undisturbed;
+	size_t undisturbed;
 	size_t abandoned_then_refused;
 	size_t completed;
 	size_t rows;
@@ -2313,7 +2390,7 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 	for (budget = 0; budget < FALLBACK_SWEEP &&
 	    (undisturbed == 0 || budget <= (long)undisturbed); budget++) {
 		relic_t *ctx;
-		unsigned long before;
+		size_t before;
 		int status;
 
 		ctx = relic_create();
@@ -2337,7 +2414,7 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 		warnings_reported = 0;
 		rows = 0;
 
-		before = allocations_seen;
+		before = allocations_made();
 		refuse_allocations_after(budget);
 		query = relic_query_prepare(ctx, NULL, query_text);
 		status = -1;
@@ -2353,7 +2430,7 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 		if (status == 0) {
 			completed++;
 			if (undisturbed == 0)
-				undisturbed = allocations_seen - before;
+				undisturbed = allocations_made() - before;
 		} else if (warnings_reported > 0) {
 			abandoned_then_refused++;
 		}
@@ -2568,7 +2645,7 @@ add_and_collect(relic_t *ctx, size_t *rowsp)
 static void
 an_added_fact_or_collected_answer_reports_once(void)
 {
-	unsigned long undisturbed;
+	size_t undisturbed;
 	size_t refused;
 	size_t completed;
 	size_t rows;
@@ -2581,7 +2658,7 @@ an_added_fact_or_collected_answer_reports_once(void)
 	for (budget = 0; budget < INTERFACE_SWEEP &&
 	    (undisturbed == 0 || budget <= (long)undisturbed); budget++) {
 		relic_t *ctx;
-		unsigned long before;
+		size_t before;
 		int status;
 
 		ctx = relic_create();
@@ -2595,7 +2672,7 @@ an_added_fact_or_collected_answer_reports_once(void)
 		errors_reported = 0;
 		rows = 0;
 
-		before = allocations_seen;
+		before = allocations_made();
 		refuse_allocations_after(budget);
 		status = add_and_collect(ctx, &rows);
 		serve_every_allocation();
@@ -2603,7 +2680,7 @@ an_added_fact_or_collected_answer_reports_once(void)
 		if (status == 0) {
 			completed++;
 			if (undisturbed == 0)
-				undisturbed = allocations_seen - before;
+				undisturbed = allocations_made() - before;
 		} else
 			refused++;
 
@@ -2630,6 +2707,10 @@ an_added_fact_or_collected_answer_reports_once(void)
 int
 main(void)
 {
+#ifdef RELIC_THREADS
+	main_thread = pthread_self();
+#endif
+
 	context_creation_reports_a_failed_allocation();
 	context_creation_fails_without_entropy();
 	interning_a_symbol_survives_a_failed_allocation();
@@ -2655,7 +2736,9 @@ main(void)
 	 * go on reporting success while testing nothing, so it says outright
 	 * that the replacement was reached.
 	 */
-	check(allocations_seen > 0, SCENARIO_SHIM,
+	check(diagnostics_off_thread == 0, SCENARIO_EVALUATE,
+	    "every diagnostic should come from the calling thread");
+	check(allocations_made() > 0, SCENARIO_SHIM,
 	    "the library should have allocated through this file");
 
 	return (check_summary("exhaustion"));

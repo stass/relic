@@ -23,6 +23,12 @@
  * comparison, being the serial evaluator, so each scenario also requires
  * that rounds were merged, and the limits' sweeps that rounds were
  * abandoned and run again serially.
+ *
+ * Every scenario runs twice: with the deferred context's rounds run by the
+ * calling thread alone, and shared among DEFERRED_THREADS threads, whose
+ * tasks are claimed in whatever order the threads reach them.  Neither may
+ * differ from the serial context in anything but the rounds counted as
+ * shared, which a build with threads must count at the larger size.
  */
 
 #include "config.h"
@@ -60,6 +66,16 @@
 #define	CHAIN_LENGTH		150
 #define	LIMIT_STEPS		60
 
+/* The threads the deferred context shares its rounds among, the second time. */
+#define	DEFERRED_THREADS	4
+
+/* Whether a context's pool can start threads of its own in this build. */
+#ifdef RELIC_THREADS
+#define	THREADS_AVAILABLE	true
+#else
+#define	THREADS_AVAILABLE	false
+#endif
+
 typedef struct diagnostics diagnostics_t;
 typedef struct text text_t;
 
@@ -81,12 +97,12 @@ struct text {
 	size_t	length;
 };
 
-static void	 a_deferred_round_inserts_in_serial_order(void);
-static void	 a_querys_rewrite_runs_deferred_rounds(void);
+static void	 a_deferred_round_inserts_in_serial_order(size_t threads);
+static void	 a_querys_rewrite_runs_deferred_rounds(size_t threads);
 static void	 appendf(text_t *text, const char *format, ...)
 		    RELIC_TEST_PRINTFLIKE(2, 3);
 static relic_t	*context_for(const char *program, unsigned int flags,
-		    size_t max_tuples, size_t max_memory,
+		    size_t threads, size_t max_tuples, size_t max_memory,
 		    diagnostics_t *diagnostics);
 static uint64_t	 abandoned_rounds(const relic_t *ctx);
 static bool	 contexts_agree(const char *scenario, const char *what,
@@ -94,8 +110,10 @@ static bool	 contexts_agree(const char *scenario, const char *what,
 static void	 graph_program(text_t *text);
 static size_t	 lines_in(const diagnostics_t *diagnostics);
 static void	 limits_refuse_as_serially(const char *scenario,
-		    const char *program, bool memory);
-static void	 notes_come_as_serially(void);
+		    const char *program, bool memory, size_t threads);
+static void	 notes_come_as_serially(size_t threads);
+static bool	 shared_as_expected(relic_t *deferred, size_t threads);
+static uint64_t	 thread_tasks(const relic_t *ctx);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
@@ -219,12 +237,13 @@ lines_in(const diagnostics_t *diagnostics)
 }
 
 /*
- * A context with the given flags and limits holding a loaded program, or
- * NULL having recorded a failure.  Its diagnostics go to `diagnostics`.
+ * A context with the given flags, threads and limits holding a loaded
+ * program, or NULL having recorded a failure.  Its diagnostics go to
+ * `diagnostics`.
  */
 static relic_t *
-context_for(const char *program, unsigned int flags, size_t max_tuples,
-    size_t max_memory, diagnostics_t *diagnostics)
+context_for(const char *program, unsigned int flags, size_t threads,
+    size_t max_tuples, size_t max_memory, diagnostics_t *diagnostics)
 {
 	relic_config_t config;
 	relic_t *ctx;
@@ -232,6 +251,7 @@ context_for(const char *program, unsigned int flags, size_t max_tuples,
 	bzero(diagnostics, sizeof(*diagnostics));
 	bzero(&config, sizeof(config));
 	config.flags = flags;
+	config.threads = threads;
 	config.max_tuples = max_tuples;
 	config.max_memory = max_memory;
 
@@ -307,6 +327,35 @@ static uint64_t
 abandoned_rounds(const relic_t *ctx)
 {
 	return (ctx->pool != NULL ? ctx->pool->abandoned_rounds : 0);
+}
+
+/*
+ * Whether a deferred context counted its merged rounds as shared exactly
+ * when it had threads to share them with: every one of them on a pool of
+ * more than one worker, and none on the calling thread alone, where no
+ * task can have run on a thread of the pool.  A build without threads has
+ * one worker whatever it is configured with.
+ */
+static bool
+shared_as_expected(relic_t *deferred, size_t threads)
+{
+	relic_stats_t stats;
+
+	relic_stats(deferred, &stats);
+	if (THREADS_AVAILABLE && threads > 1)
+		return (stats.parallel_rounds == merged_rounds(deferred));
+
+	return (stats.parallel_rounds == 0 && thread_tasks(deferred) == 0);
+}
+
+/*
+ * The tasks of a context's merged rounds that a thread of its pool ran
+ * rather than the calling thread.
+ */
+static uint64_t
+thread_tasks(const relic_t *ctx)
+{
+	return (ctx->pool != NULL ? ctx->pool->thread_tasks : 0);
 }
 
 /*
@@ -410,7 +459,7 @@ run_query(relic_t *ctx, const char *query, text_t *rows)
  * those.
  */
 static void
-a_deferred_round_inserts_in_serial_order(void)
+a_deferred_round_inserts_in_serial_order(size_t threads)
 {
 	static const struct {
 		const char	*name;
@@ -427,27 +476,36 @@ a_deferred_round_inserts_in_serial_order(void)
 	relic_t *deferred;
 	int serial_status;
 	int deferred_status;
+	char what[96];
 	size_t i;
 
 	for (i = 0; i < sizeof(strategies) / sizeof(strategies[0]); i++) {
-		serial = context_for(graph.bytes, strategies[i].flags, 0, 0,
+		snprintf(what, sizeof(what), "%s on %zu thread(s)",
+		    strategies[i].name, threads);
+		serial = context_for(graph.bytes, strategies[i].flags, 0, 0, 0,
 		    &serial_diagnostics);
 		deferred = context_for(graph.bytes, strategies[i].flags |
-		    RELIC_F_PARALLEL_ALWAYS, 0, 0, &deferred_diagnostics);
+		    RELIC_F_PARALLEL_ALWAYS, threads, 0, 0,
+		    &deferred_diagnostics);
 
 		if (serial != NULL && deferred != NULL) {
 			serial_status = relic_materialize(serial);
 			deferred_status = relic_materialize(deferred);
 			checkf(serial_status == 0 && deferred_status == 0,
-			    SCENARIO_ORDER, "%s: both materialize",
-			    strategies[i].name);
+			    SCENARIO_ORDER, "%s: both materialize", what);
 			checkf(merged_rounds(deferred) > 0, SCENARIO_ORDER,
-			    "%s: rounds are merged", strategies[i].name);
-			contexts_agree(SCENARIO_ORDER, strategies[i].name,
-			    serial, deferred);
+			    "%s: rounds are merged", what);
+			checkf(shared_as_expected(deferred, threads),
+			    SCENARIO_ORDER, "%s: the rounds are shared when "
+			    "the pool has threads", what);
+			checkf(!THREADS_AVAILABLE || threads < 2 ||
+			    thread_tasks(deferred) > 0, SCENARIO_ORDER,
+			    "%s: the pool's threads run some of the tasks",
+			    what);
+			contexts_agree(SCENARIO_ORDER, what, serial, deferred);
 			checkf(deferred->account.round_bytes == 0,
 			    SCENARIO_ORDER, "%s: the round gave back its "
-			    "buffers", strategies[i].name);
+			    "buffers", what);
 		}
 
 		relic_destroy(serial);
@@ -462,7 +520,7 @@ a_deferred_round_inserts_in_serial_order(void)
  * round of its own.
  */
 static void
-a_querys_rewrite_runs_deferred_rounds(void)
+a_querys_rewrite_runs_deferred_rounds(size_t threads)
 {
 	static const char *const queries[] = {
 		"path(n3, Y)?", "hop(n5, Y)?", "odd(Y)?", "pair(X, n4)?",
@@ -474,13 +532,16 @@ a_querys_rewrite_runs_deferred_rounds(void)
 	relic_t *deferred;
 	int serial_status;
 	int deferred_status;
+	char what[96];
 	size_t i;
 
 	for (i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
-		serial = context_for(graph.bytes, 0, 0, 0,
+		snprintf(what, sizeof(what), "%s on %zu thread(s)", queries[i],
+		    threads);
+		serial = context_for(graph.bytes, 0, 0, 0, 0,
 		    &serial_diagnostics);
 		deferred = context_for(graph.bytes, RELIC_F_PARALLEL_ALWAYS,
-		    0, 0, &deferred_diagnostics);
+		    threads, 0, 0, &deferred_diagnostics);
 
 		if (serial != NULL && deferred != NULL) {
 			serial_status = run_query(serial, queries[i],
@@ -488,14 +549,17 @@ a_querys_rewrite_runs_deferred_rounds(void)
 			deferred_status = run_query(deferred, queries[i],
 			    &deferred_rows);
 			checkf(serial_status == 0 && deferred_status == 0,
-			    SCENARIO_REWRITE, "%s is answered", queries[i]);
+			    SCENARIO_REWRITE, "%s is answered", what);
 			checkf(serial_rows.length > 0 &&
 			    strcmp(serial_rows.bytes, deferred_rows.bytes) == 0,
 			    SCENARIO_REWRITE, "%s: the rows come in one order",
-			    queries[i]);
+			    what);
 			checkf(merged_rounds(deferred) > 0, SCENARIO_REWRITE,
-			    "%s: rounds are merged", queries[i]);
-			contexts_agree(SCENARIO_REWRITE, queries[i], serial,
+			    "%s: rounds are merged", what);
+			checkf(shared_as_expected(deferred, threads),
+			    SCENARIO_REWRITE, "%s: the rounds are shared when "
+			    "the pool has threads", what);
+			contexts_agree(SCENARIO_REWRITE, what, serial,
 			    deferred);
 		}
 
@@ -523,7 +587,7 @@ a_querys_rewrite_runs_deferred_rounds(void)
  */
 static void
 limits_refuse_as_serially(const char *scenario, const char *program,
-    bool memory)
+    bool memory, size_t threads)
 {
 	diagnostics_t serial_diagnostics;
 	diagnostics_t deferred_diagnostics;
@@ -542,7 +606,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	bool merged_seen;
 	char what[64];
 
-	serial = context_for(program, 0, 0, 0, &serial_diagnostics);
+	serial = context_for(program, 0, 0, 0, 0, &serial_diagnostics);
 	if (serial == NULL)
 		return;
 	relic_stats(serial, &loaded);
@@ -565,10 +629,10 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	merged_seen = false;
 
 	for (limit = first; limit <= last; limit += step) {
-		serial = context_for(program, 0, memory ? 0 : limit,
+		serial = context_for(program, 0, 0, memory ? 0 : limit,
 		    memory ? limit : 0, &serial_diagnostics);
 		deferred = context_for(program, RELIC_F_PARALLEL_ALWAYS,
-		    memory ? 0 : limit, memory ? limit : 0,
+		    threads, memory ? 0 : limit, memory ? limit : 0,
 		    &deferred_diagnostics);
 		if (serial == NULL || deferred == NULL) {
 			relic_destroy(serial);
@@ -579,7 +643,8 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 		serial_status = relic_materialize(serial);
 		deferred_status = relic_materialize(deferred);
 
-		snprintf(what, sizeof(what), "a limit of %zu", limit);
+		snprintf(what, sizeof(what), "a limit of %zu on %zu thread(s)",
+		    limit, threads);
 		checkf(serial_status == deferred_status, scenario,
 		    "%s: both %s", what, serial_status == 0 ? "succeed" :
 		    "fail");
@@ -603,11 +668,13 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 		relic_destroy(deferred);
 	}
 
-	check(abandoned_seen, scenario, "the sweep abandons a round");
-	check(merged_seen, scenario, "the sweep merges a round");
+	checkf(abandoned_seen, scenario, "on %zu thread(s), the sweep abandons "
+	    "a round", threads);
+	checkf(merged_seen, scenario, "on %zu thread(s), the sweep merges a "
+	    "round", threads);
 	if (memory)
-		check(recovered_seen, scenario, "the sweep abandons a round "
-		    "whose serial run succeeds");
+		checkf(recovered_seen, scenario, "on %zu thread(s), the sweep "
+		    "abandons a round whose serial run succeeds", threads);
 }
 
 /*
@@ -618,7 +685,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
  * round of its own, noted after them.
  */
 static void
-notes_come_as_serially(void)
+notes_come_as_serially(size_t threads)
 {
 	static const char *const program =
 	    "value(1). value(2). value(a). value(\"s\").\n"
@@ -632,27 +699,30 @@ notes_come_as_serially(void)
 	int serial_status;
 	int deferred_status;
 
-	serial = context_for(program, RELIC_F_NOTE_MIXED, 0, 0,
+	serial = context_for(program, RELIC_F_NOTE_MIXED, 0, 0, 0,
 	    &serial_diagnostics);
 	deferred = context_for(program, RELIC_F_NOTE_MIXED |
-	    RELIC_F_PARALLEL_ALWAYS, 0, 0, &deferred_diagnostics);
+	    RELIC_F_PARALLEL_ALWAYS, threads, 0, 0, &deferred_diagnostics);
 
 	if (serial != NULL && deferred != NULL) {
 		serial_status = relic_materialize(serial);
 		deferred_status = relic_materialize(deferred);
-		check(serial_status == 0 && deferred_status == 0,
-		    SCENARIO_NOTES, "both materialize");
+		checkf(serial_status == 0 && deferred_status == 0,
+		    SCENARIO_NOTES, "on %zu thread(s), both materialize",
+		    threads);
 		checkf(lines_in(&serial_diagnostics) == 3, SCENARIO_NOTES,
 		    "each of three rules is noted: \"%s\"",
 		    serial_diagnostics.text);
 		checkf(strcmp(serial_diagnostics.text,
 		    deferred_diagnostics.text) == 0, SCENARIO_NOTES,
-		    "the notes agree: \"%s\" and \"%s\"",
-		    serial_diagnostics.text, deferred_diagnostics.text);
+		    "on %zu thread(s), the notes agree: \"%s\" and \"%s\"",
+		    threads, serial_diagnostics.text,
+		    deferred_diagnostics.text);
 		checkf(merged_rounds(deferred) > 0, SCENARIO_NOTES,
-		    "rounds are merged");
-		contexts_agree(SCENARIO_NOTES, "the notes' program", serial,
-		    deferred);
+		    "on %zu thread(s), rounds are merged", threads);
+		contexts_agree(SCENARIO_NOTES, threads > 1 ?
+		    "the notes' program shared" : "the notes' program",
+		    serial, deferred);
 	}
 
 	relic_destroy(serial);
@@ -662,13 +732,23 @@ notes_come_as_serially(void)
 int
 main(void)
 {
+	static const size_t thread_counts[] = { 1, DEFERRED_THREADS };
+	size_t threads;
+	size_t i;
+
 	graph_program(&graph);
 
-	a_deferred_round_inserts_in_serial_order();
-	a_querys_rewrite_runs_deferred_rounds();
-	limits_refuse_as_serially(SCENARIO_TUPLES, graph.bytes, false);
-	limits_refuse_as_serially(SCENARIO_MEMORY, graph.bytes, true);
-	notes_come_as_serially();
+	for (i = 0; i < sizeof(thread_counts) / sizeof(thread_counts[0]);
+	    i++) {
+		threads = thread_counts[i];
+		a_deferred_round_inserts_in_serial_order(threads);
+		a_querys_rewrite_runs_deferred_rounds(threads);
+		limits_refuse_as_serially(SCENARIO_TUPLES, graph.bytes, false,
+		    threads);
+		limits_refuse_as_serially(SCENARIO_MEMORY, graph.bytes, true,
+		    threads);
+		notes_come_as_serially(threads);
+	}
 
 	return (check_summary("test_round"));
 }

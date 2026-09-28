@@ -28,18 +28,22 @@
  *
  * The round is cut into tasks, enumerated in serial order: item by item,
  * and a plan whose first operation is a SCAN piece by piece of that scan's
- * view.  A task derives exactly what the serial evaluator derives while its
- * first cursor is inside its piece, in the same order, and screens what it
- * derives (lib/task.c): a worker's candidates are the tuples it derived
- * that neither the frozen store nor its own earlier candidates hold.
+ * view.  The pool's workers claim the tasks (lib/pool.c), each worker its
+ * own in increasing order.  A task derives exactly what the serial
+ * evaluator derives while its first cursor is inside its piece, in the
+ * same order, and screens what it derives (lib/task.c): a worker's
+ * candidates are the tuples it derived that neither the frozen store nor
+ * its own earlier candidates hold.
  *
  * The merge then inserts the candidates task by task, in task order, with
  * the insertion the serial evaluator uses.  The candidates in that order are
  * the serial derivation order with some duplicates removed -- tuples the
- * store held, and repeats of earlier candidates -- so every tuple takes the
+ * store held, and repeats of the same worker's earlier candidates -- and a
+ * tuple several workers gathered is found present by the merge after its
+ * first, as serially it would have been.  So every tuple takes the
  * identifier it takes serially, every later derivation of it is the
  * duplicate it is serially, and the relations and every counter come out as
- * the serial evaluator leaves them.
+ * the serial evaluator leaves them, whatever the number of workers.
  *
  * Nothing is modified until the merge begins.  A round that cannot go on
  * before then -- a candidate buffer that could not grow, for memory or for
@@ -47,11 +51,10 @@
  * or storage the pool itself could not get -- is abandoned: its candidates
  * are released, its counts forgotten, and the caller runs the round
  * serially, where whatever refuses it refuses it as it always would.  The
- * merge is asked first whether it can fit beside the candidates, so the
- * candidates' charge never makes the memory limit refuse what the serial
- * evaluator would have admitted; a deferred round therefore fails only as
- * the serial evaluator fails, in its merge, on the tuple the serial
- * evaluator is refused.
+ * merge is asked first whether either limit could refuse any of it, and a
+ * round that might be refused is abandoned too.  So a limit refuses only in
+ * a round run serially, on the tuple the serial evaluator is refused, and a
+ * merge fails only when the allocator refuses it.
  */
 
 /*
@@ -64,14 +67,35 @@
  */
 #define	RELIC_CHUNKS_PER_WORKER	8u
 
+/*
+ * The work a round must be expected to do, in tuples read and derived, to
+ * be shared among the pool's threads, and the work each piece of a cut
+ * plan is given.  A round below the first runs serially, since publishing
+ * it and waiting for every thread costs more than it would gain; a round
+ * of the fixed point's last few, which shrink toward nothing, is such a
+ * round.  Constants of performance alone, measured on tc-cyclic and cspa.
+ */
+#define	RELIC_PARALLEL_MIN_WORK	65536u
+#define	RELIC_CHUNK_WORK	4096u
+
 static void	 abandon_round(relic_t *ctx, relic_pool_t *pool);
 static void	 count_target_candidates(relic_pool_t *pool,
 		    const relic_round_t *round);
-static void	 cut_tasks(relic_pool_t *pool, const relic_round_t *round);
+static int	 cut_tasks(relic_pool_t *pool, const relic_round_t *round,
+		    bool finest);
 static void	 forget_worker_counters(relic_pool_t *pool);
+static uint64_t	 item_estimate(const relic_round_t *round,
+		    const relic_round_item_t *item);
 static bool	 item_is_cut(const relic_round_item_t *item);
+static size_t	 item_pieces(const relic_pool_t *pool,
+		    const relic_round_t *round, const relic_round_item_t *item,
+		    bool finest);
+static uint64_t	 item_range(const relic_round_t *round,
+		    const relic_round_item_t *item);
 static relic_tuple_range_t item_view(const relic_round_t *round,
 		    const relic_round_item_t *item);
+static void	 job_begin(relic_round_job_t *job, relic_t *ctx,
+		    const relic_pool_t *pool, const relic_round_t *round);
 static bool	 merge_fits(const relic_t *ctx, const relic_pool_t *pool,
 		    const relic_round_t *round);
 static int	 merge_round(relic_t *ctx, relic_pool_t *pool,
@@ -80,14 +104,20 @@ static int	 merge_task(relic_t *ctx, const relic_candidates_t *candidates,
 		    const relic_round_task_t *task, relic_relation_t *target,
 		    bool *gainedp);
 static bool	 op_reads_as_it_runs(const relic_op_t *op);
-static int	 pool_create(relic_t *ctx);
 static int	 pool_prepare(relic_pool_t *pool, const relic_round_t *round);
+static void	 record_task_work(const relic_pool_t *pool,
+		    relic_round_t *round);
 static void	 release_candidates(relic_t *ctx, relic_pool_t *pool);
+static bool	 round_is_worth_sharing(const relic_t *ctx,
+		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
 		    uint16_t *arity_roomp);
 static bool	 round_reads_no_target(const relic_round_t *round);
+static uint64_t	 scaled_work(uint64_t work, uint64_t range_now,
+		    uint64_t range_then);
 static void	 take_worker_counters(relic_pool_t *pool,
 		    relic_counters_t *counters);
+static uint64_t	 tasks_run_by_threads(const relic_pool_t *pool);
 static size_t	 tuples_admissible(const relic_t *ctx);
 static size_t	 view_pieces(const relic_pool_t *pool,
 		    relic_tuple_range_t view);
@@ -96,39 +126,49 @@ static relic_tuple_range_t view_piece(relic_tuple_range_t view, size_t piece,
 static int	 worker_fit(relic_worker_t *worker, size_t op_room,
 		    uint16_t arity_room);
 
+/*
+ * Under RELIC_F_PARALLEL_ALWAYS every round that may wait is run on the
+ * pool, however little it holds and however few workers the pool has, and
+ * cut as finely as the pool allows, so that small programs exercise what
+ * large ones do.  Otherwise a round is shared only when the context has
+ * threads to share it with and it is expected to repay them.
+ */
 enum relic_round_outcome
 relic_round_run(relic_t *ctx, relic_round_t *round)
 {
 	relic_round_job_t job;
 	relic_pool_t *pool;
+	bool abandoned;
+	bool always;
 	int status;
 
+	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
+	if (!always && !round_is_worth_sharing(ctx, round))
+		return (RELIC_ROUND_DECLINED);
 	if (!round_reads_no_target(round))
 		return (RELIC_ROUND_DECLINED);
 
 	if (ctx->pool == NULL) {
-		if (pool_create(ctx) != 0)
+		if (relic_pool_create(&ctx->pool, ctx->config.threads) != 0)
 			return (RELIC_ROUND_DECLINED);
 	}
 	pool = ctx->pool;
-	if (pool_prepare(pool, round) != 0)
+	relic_pool_adopt(pool);
+	if (!always && pool->worker_count < 2)
 		return (RELIC_ROUND_DECLINED);
-	cut_tasks(pool, round);
+	if (pool_prepare(pool, round) != 0 ||
+	    cut_tasks(pool, round, always) != 0)
+		return (RELIC_ROUND_DECLINED);
 
-	bzero(&job, sizeof(job));
-	job.round = round;
-	job.tasks = pool->tasks;
-	job.account = &ctx->account;
-	job.task_count = pool->task_count;
-	job.admissible = tuples_admissible(ctx);
-	relic_round_work(&job, &pool->workers[0], 0);
+	job_begin(&job, ctx, pool, round);
+	relic_pool_run(pool, &job);
 
-	if (!job.abandoned) {
+	abandoned = relic_atomic_bool_load_relaxed(&job.abandoned);
+	if (!abandoned) {
 		count_target_candidates(pool, round);
-		if (!merge_fits(ctx, pool, round))
-			job.abandoned = true;
+		abandoned = !merge_fits(ctx, pool, round);
 	}
-	if (job.abandoned) {
+	if (abandoned) {
 		abandon_round(ctx, pool);
 		pool->abandoned_rounds++;
 		return (RELIC_ROUND_DECLINED);
@@ -140,36 +180,159 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	if (status != 0)
 		return (RELIC_ROUND_FAILED);
 
+	record_task_work(pool, round);
 	pool->merged_rounds++;
+	pool->thread_tasks += tasks_run_by_threads(pool);
+	if (pool->worker_count > 1)
+		ctx->counters.parallel_rounds++;
 
 	return (RELIC_ROUND_MERGED);
 }
 
-/*
- * A round releases its candidates before it returns, so only the storage
- * kept from round to round remains.
- */
 void
-relic_pool_free(relic_pool_t *pool)
+relic_round_record(const relic_round_t *round, relic_round_item_t *item,
+    uint64_t work)
 {
-	relic_worker_t *worker;
-	size_t i;
-
-	if (pool == NULL)
+	if (item->history == NULL)
 		return;
 
-	for (i = 0; i < pool->worker_count; i++) {
-		worker = &pool->workers[i];
-		assert(worker->candidates.count == 0);
-		relic_free_array(worker->states);
-		relic_free_array(worker->batch);
-		relic_idtab_reset(&worker->candidates.screen);
+	item->history->work = work;
+	item->history->range = item_range(round, item);
+	item->history->ran = true;
+}
+
+/*
+ * Whether a round is worth sharing: the context has threads to share it
+ * with, and the round is expected to do enough work to repay them.  The
+ * work summed so far stays below the threshold, so comparing each estimate
+ * with what remains of it cannot overflow.
+ */
+static bool
+round_is_worth_sharing(const relic_t *ctx, const relic_round_t *round)
+{
+	uint64_t estimate;
+	uint64_t work;
+	size_t i;
+
+	if (ctx->config.threads < 2)
+		return (false);
+
+	work = 0;
+	for (i = 0; i < round->item_count; i++) {
+		estimate = item_estimate(round, &round->items[i]);
+		if (estimate >= RELIC_PARALLEL_MIN_WORK - work)
+			return (true);
+		work += estimate;
 	}
 
-	free(pool->workers);
-	relic_free_array(pool->tasks);
-	relic_free_array(pool->target_candidates);
-	free(pool);
+	return (false);
+}
+
+/*
+ * The work an item is expected to do: what it did the last time it ran,
+ * scaled by how its first scan's view has grown or shrunk since, or the
+ * view itself for an item that has not run or keeps no history.  A
+ * recursive component's rounds change size gradually, so the round before
+ * predicts the next well enough for a threshold whose only cost is a
+ * missed chance or a barrier paid for nothing.  An item whose view was
+ * empty last time did work that no tuple of it accounts for -- the rest of
+ * its plan found nothing to read -- so there is nothing to scale, and it
+ * is expected to do that much again and to read its view now.
+ */
+static uint64_t
+item_estimate(const relic_round_t *round, const relic_round_item_t *item)
+{
+	const relic_plan_history_t *history;
+	uint64_t range;
+
+	range = item_range(round, item);
+	history = item->history;
+	if (history == NULL || !history->ran)
+		return (range);
+	if (history->range == 0)
+		return (history->work + range);
+
+	return (scaled_work(history->work, range, history->range));
+}
+
+/*
+ * `work` times `range_now` over `range_then`, which is not zero, or
+ * UINT64_MAX when that is more than a uint64_t holds.  A range is at most
+ * a relation's tuples, below 2^32, so the remainder's product fits.
+ */
+static uint64_t
+scaled_work(uint64_t work, uint64_t range_now, uint64_t range_then)
+{
+	uint64_t whole;
+	uint64_t part;
+
+	whole = work / range_then;
+	part = work % range_then * range_now / range_then;
+	if (whole != 0 && range_now > (UINT64_MAX - part) / whole)
+		return (UINT64_MAX);
+
+	return (whole * range_now + part);
+}
+
+/*
+ * The tuples an item's first scan reads, as the round resolves its view,
+ * or one for an item that is not cut.
+ */
+static uint64_t
+item_range(const relic_round_t *round, const relic_round_item_t *item)
+{
+	relic_tuple_range_t view;
+
+	if (!item_is_cut(item))
+		return (1);
+
+	view = item_view(round, item);
+
+	return (view.end - view.first);
+}
+
+/*
+ * Ready a job for the round's tasks: none claimed, none finished, none
+ * abandoned.
+ */
+static void
+job_begin(relic_round_job_t *job, relic_t *ctx, const relic_pool_t *pool,
+    const relic_round_t *round)
+{
+	bzero(job, sizeof(*job));
+	job->round = round;
+	job->tasks = pool->tasks;
+	job->account = &ctx->account;
+	job->task_count = pool->task_count;
+	job->admissible = tuples_admissible(ctx);
+	relic_atomic_size_init(&job->next_task, 0);
+	relic_atomic_size_init(&job->finished, 0);
+	relic_atomic_bool_init(&job->abandoned, false);
+}
+
+/*
+ * Record in each item's history the work its tasks did, which the merge
+ * has made the item's turn.  An item's tasks are consecutive.
+ */
+static void
+record_task_work(const relic_pool_t *pool, relic_round_t *round)
+{
+	const relic_round_task_t *task;
+	uint64_t work;
+	size_t i;
+
+	work = 0;
+	for (i = 0; i < pool->task_count; i++) {
+		task = &pool->tasks[i];
+		work += task->work;
+
+		if (i + 1 == pool->task_count ||
+		    pool->tasks[i + 1].item != task->item) {
+			relic_round_record(round, &round->items[task->item],
+			    work);
+			work = 0;
+		}
+	}
 }
 
 /*
@@ -233,45 +396,14 @@ op_reads_as_it_runs(const relic_op_t *op)
 }
 
 /*
- * Give the context its pool: one worker, the calling thread.  Returns 0, or
- * -1 when it could not be allocated, which is not reported: the pool is
- * sized by the program rather than the data, and a round that cannot have
- * one runs serially instead.
- */
-static int
-pool_create(relic_t *ctx)
-{
-	relic_pool_t *pool;
-
-	pool = calloc(1, sizeof(*pool));
-	if (pool == NULL)
-		return (-1);
-
-	pool->workers = calloc(1, sizeof(*pool->workers));
-	if (pool->workers == NULL) {
-		free(pool);
-		return (-1);
-	}
-	pool->worker_count = 1;
-	relic_candidates_init(&pool->workers[0].candidates);
-
-	ctx->pool = pool;
-
-	return (0);
-}
-
-/*
  * Ready the pool for a round: each worker's scratch holding the round's
- * longest plan and widest target, and room for the round's tasks and for a
- * count per target.  Returns 0, or -1, unreported, when something could not
- * be allocated.
+ * longest plan and widest target, and room for a count per target.
+ * Returns 0, or -1, unreported, when something could not be allocated.
  */
 static int
 pool_prepare(relic_pool_t *pool, const relic_round_t *round)
 {
-	relic_round_task_t *tasks;
 	size_t *target_candidates;
-	size_t task_count;
 	size_t op_room;
 	size_t i;
 	uint16_t arity_room;
@@ -281,21 +413,6 @@ pool_prepare(relic_pool_t *pool, const relic_round_t *round)
 		if (worker_fit(&pool->workers[i], op_room, arity_room) != 0)
 			return (-1);
 	}
-
-	task_count = 0;
-	for (i = 0; i < round->item_count; i++) {
-		if (item_is_cut(&round->items[i]))
-			task_count += view_pieces(pool,
-			    item_view(round, &round->items[i]));
-		else
-			task_count++;
-	}
-
-	tasks = relic_grow_array(pool->tasks, &pool->task_capacity, task_count,
-	    sizeof(*pool->tasks));
-	if (tasks == NULL)
-		return (-1);
-	pool->tasks = tasks;
 
 	target_candidates = relic_grow_array(pool->target_candidates,
 	    &pool->target_capacity, round->target_count,
@@ -393,7 +510,37 @@ item_view(const relic_round_t *round, const relic_round_item_t *item)
 }
 
 /*
- * How many pieces a view is cut into: as many as the pool's workers use to
+ * How many pieces an item is cut into: one for an item that is not cut,
+ * and otherwise its expected work in pieces of RELIC_CHUNK_WORK, at least
+ * one and at most what view_pieces() allows, or `finest`, that most.  A
+ * plan over a small delta with a large fan-out below it is then cut
+ * finely, where cutting by its range alone would give it one piece.
+ */
+static size_t
+item_pieces(const relic_pool_t *pool, const relic_round_t *round,
+    const relic_round_item_t *item, bool finest)
+{
+	uint64_t wanted;
+	size_t most;
+
+	if (!item_is_cut(item))
+		return (1);
+
+	most = view_pieces(pool, item_view(round, item));
+	if (finest)
+		return (most);
+
+	wanted = item_estimate(round, item) / RELIC_CHUNK_WORK;
+	if (wanted < 1)
+		return (1);
+	if (wanted > most)
+		return (most);
+
+	return ((size_t)wanted);
+}
+
+/*
+ * The most pieces a view is cut into: as many as the pool's workers use to
  * balance their shares, and never more than the view holds tuples, so that
  * each piece holds one.  An empty view is one empty piece.
  */
@@ -414,13 +561,15 @@ view_pieces(const relic_pool_t *pool, relic_tuple_range_t view)
 
 /*
  * Enumerate the round's tasks in serial order: item by item, and the pieces
- * of an item that is cut in the order of its view.  pool_prepare() made
- * room for exactly these, counting them the same way.
+ * of an item that is cut in the order of its view, growing the pool's task
+ * array as each item needs.  Returns 0, or -1, unreported, when the array
+ * could not grow.
  */
-static void
-cut_tasks(relic_pool_t *pool, const relic_round_t *round)
+static int
+cut_tasks(relic_pool_t *pool, const relic_round_t *round, bool finest)
 {
 	const relic_round_item_t *item;
+	relic_round_task_t *tasks;
 	relic_round_task_t *task;
 	relic_tuple_range_t view;
 	size_t pieces;
@@ -432,14 +581,17 @@ cut_tasks(relic_pool_t *pool, const relic_round_t *round)
 	for (i = 0; i < round->item_count; i++) {
 		item = &round->items[i];
 		bzero(&view, sizeof(view));
-		pieces = 1;
-		if (item_is_cut(item)) {
+		if (item_is_cut(item))
 			view = item_view(round, item);
-			pieces = view_pieces(pool, view);
-		}
+		pieces = item_pieces(pool, round, item, finest);
+
+		tasks = relic_grow_array(pool->tasks, &pool->task_capacity,
+		    pool->task_count + pieces, sizeof(*pool->tasks));
+		if (tasks == NULL)
+			return (-1);
+		pool->tasks = tasks;
 
 		for (piece = 0; piece < pieces; piece++) {
-			assert(pool->task_count < pool->task_capacity);
 			task = &pool->tasks[pool->task_count];
 			pool->task_count++;
 
@@ -450,6 +602,8 @@ cut_tasks(relic_pool_t *pool, const relic_round_t *round)
 				task->piece = view_piece(view, piece, pieces);
 		}
 	}
+
+	return (0);
 }
 
 /*
@@ -492,20 +646,28 @@ tuples_admissible(const relic_t *ctx)
 }
 
 /*
- * Whether the merge can be made with the candidates still held, given the
- * candidates each target was offered, as count_target_candidates() counts
- * them.
+ * Whether the merge can be made without either limit refusing it, given
+ * the candidates each target was offered, as count_target_candidates()
+ * counts them.
  *
- * The candidates count against the memory limit for as long as they exist,
- * and the merge's insertions ask the limit for room as the serial
- * evaluator's do.  An insertion the limit refused only because the
- * candidates held the room would be a refusal the serial evaluator never
- * meets.  So before anything is modified, the merge is asked for its worst
- * case: every relation the round writes grown by every candidate offered
- * it, one insertion at a time, as though each were new.  No insertion of
- * the merge asks for more; if that fits beside the candidates, the limit
- * refuses nothing in the merge, and if it does not, the round is abandoned
- * and run serially, which admits or refuses each tuple as it always does.
+ * The tuple limit is asked of all the candidates: each worker checked its
+ * own against what the limit admits, and several can together hold more.
+ * The candidates of different workers may repeat one another, so the merge
+ * may insert fewer than their count, and never more; a round whose count
+ * does not fit is run serially, which inserts each new tuple once and is
+ * refused where the serial evaluator is.
+ *
+ * The memory limit is asked with the candidates still held, since they
+ * count against it for as long as they exist, and the merge's insertions
+ * ask it for room as the serial evaluator's do.  An insertion the limit
+ * refused only because the candidates held the room would be a refusal the
+ * serial evaluator never meets.  So before anything is modified, the merge
+ * is asked for its worst case: every relation the round writes grown by
+ * every candidate offered it, one insertion at a time, as though each were
+ * new.  No insertion of the merge asks for more; if that fits beside the
+ * candidates, the limit refuses nothing in the merge, and if it does not,
+ * the round is abandoned and run serially, which admits or refuses each
+ * tuple as it always does.
  */
 static bool
 merge_fits(const relic_t *ctx, const relic_pool_t *pool,
@@ -514,7 +676,15 @@ merge_fits(const relic_t *ctx, const relic_pool_t *pool,
 	const relic_relation_t *target;
 	size_t offered;
 	size_t growth;
+	size_t total;
 	size_t i;
+
+	total = 0;
+	for (i = 0; i < round->target_count; i++)
+		total = relic_saturating_sum(total,
+		    pool->target_candidates[i]);
+	if (total > tuples_admissible(ctx))
+		return (false);
 
 	if (!relic_limit_set(ctx->account.limit))
 		return (true);
@@ -646,13 +816,30 @@ take_worker_counters(relic_pool_t *pool, relic_counters_t *counters)
 	for (i = 0; i < pool->worker_count; i++) {
 		worker = &pool->workers[i];
 		counters->derivations += worker->derivations;
-		counters->tuples_scanned +=
-		    worker->scratch.counters.tuples_scanned;
-		counters->tuples_looked_up +=
-		    worker->scratch.counters.tuples_looked_up;
+		relic_exec_counters_add(&counters->read,
+		    &worker->scratch.counters);
 	}
 
 	forget_worker_counters(pool);
+}
+
+/*
+ * How many of the round's tasks a thread of the pool ran rather than the
+ * calling thread, worker 0.
+ */
+static uint64_t
+tasks_run_by_threads(const relic_pool_t *pool)
+{
+	uint64_t count;
+	size_t i;
+
+	count = 0;
+	for (i = 0; i < pool->task_count; i++) {
+		if (pool->tasks[i].worker != 0)
+			count++;
+	}
+
+	return (count);
 }
 
 /*

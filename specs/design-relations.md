@@ -440,7 +440,9 @@ and this document's total is the part the store contributes. So are the
 buffers in which a round that defers its insertions gathers candidates,
 a third kind of holder that exists only until the round's merge and is
 released before anything else asks the limit for room
-(`specs/design-parallel.md` section 8).
+(`specs/design-parallel.md` section 8). The workers of a round grow their
+buffers at once, so that holder's total is one atomic word, raised by
+compare-and-swap only when the whole total stays within the limit.
 
 **When it is checked** is before the insertion, or a load's reservation,
 modifies anything. The

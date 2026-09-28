@@ -23,6 +23,10 @@
  * under the naive one, against the same expected answers.  The counters are
  * the one thing the two are expected to differ in, and a scenario of their
  * own pins down both.
+ *
+ * All of it then runs again with every round's insertions deferred, on the
+ * calling thread alone and shared among DEFERRAL_THREADS threads, against
+ * the same answers and the same counters.
  */
 
 #include "config.h"
@@ -54,6 +58,7 @@
 #define	SCENARIO_SNAPSHOT	"a naive pass walks a chain one edge further"
 #define	SCENARIO_BATCHES	"a plan reads none of its own batches"
 #define	SCENARIO_UNREACHED	"a rule no query reaches costs it no memory"
+#define	SCENARIO_SHARED		"a round is shared when it repays the threads"
 
 /*
  * The fan-out of the batch scenario: more tuples than one batch holds, so
@@ -70,6 +75,19 @@
  */
 #define	UNREACHED_LENGTH	2000u
 #define	UNREACHED_LIMIT		20000u
+
+/*
+ * The threads the scenarios' rounds are shared among the third time they
+ * run, and the layered graph of rounds_are_shared_when_they_repay_it():
+ * LAYERS layers of LAYER_WIDTH nodes, every node of a layer joined to every
+ * node of the next.
+ */
+#define	DEFERRAL_THREADS	4
+#define	LAYERS			12
+#define	LAYER_WIDTH		24
+#define	LAYERED_PATHS		(LAYER_WIDTH * LAYER_WIDTH * LAYERS * \
+				    (LAYERS - 1) / 2)
+#define	LAYERED_EDGES		(LAYER_WIDTH * LAYER_WIDTH * (LAYERS - 1))
 
 _Static_assert(FAN_OUT > RELIC_INSERT_BATCH, "the fan-out fills a batch");
 _Static_assert(FAN_OUT < 1000, "a line of the fan fits FAN_LINE_MAX");
@@ -161,13 +179,15 @@ struct diag_log {
 static unsigned int strategy_flags;
 
 /*
- * RELIC_F_PARALLEL_ALWAYS while main() runs every scenario a second time
- * with each round's insertions deferred to its end, and zero the first
- * time.  Every context is given it, whatever else it is given: a deferred
- * round inserts what the serial one does, in the order it does, so no
- * answer and no counter written below may change.
+ * RELIC_F_PARALLEL_ALWAYS while main() runs every scenario again with each
+ * round's insertions deferred to its end, and zero the first time, and the
+ * threads the deferred rounds are shared among.  Every context is given
+ * both, whatever else it is given: a deferred round inserts what the serial
+ * one does, in the order it does, on any number of threads, so no answer
+ * and no counter written below may change.
  */
 static unsigned int deferral_flags;
+static size_t deferral_threads;
 
 static void	 append_text(rendering_t *rendering, const char *text,
 		    size_t length);
@@ -206,6 +226,10 @@ static void	 negation_keeps_what_is_absent(void);
 static void	 every_binding_pattern_is_answered(void);
 static void	 every_derivation_is_made_once(void);
 static void	 recursion_reaches_the_least_fixed_point(void);
+static relic_t	*context_threaded(const char *program, unsigned int flags,
+		    size_t threads);
+static char	*layered_program(void);
+static void	 rounds_are_shared_when_they_repay_it(void);
 static void	 run_everything(void);
 static void	 run_scenarios(const char *strategy, unsigned int flags);
 static void	 the_counters_record_the_work_done(void);
@@ -245,6 +269,7 @@ context_flagged(const char *program, diag_log_t *log, unsigned int flags)
 
 	bzero(&config, sizeof(config));
 	config.flags = flags | deferral_flags;
+	config.threads = deferral_threads;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -1395,6 +1420,166 @@ run_everything(void)
 	the_total_order_sorts_across_types();
 }
 
+/*
+ * A context with `flags` and `threads`, and none of the flags or threads
+ * the scenarios are running with, holding a loaded program, or NULL having
+ * recorded a failure.
+ */
+static relic_t *
+context_threaded(const char *program, unsigned int flags, size_t threads)
+{
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.threads = threads;
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, "creating a context", "a context is created");
+		return (NULL);
+	}
+
+	if (relic_load_string(ctx, "test.dl", program) != 0) {
+		check(false, "loading a test program", "the program loads");
+		relic_destroy(ctx);
+		return (NULL);
+	}
+
+	return (ctx);
+}
+
+/*
+ * The paths of a graph of LAYERS layers of LAYER_WIDTH nodes, every node of
+ * a layer joined to every node of the next, or NULL when memory is short.
+ */
+static char *
+layered_program(void)
+{
+	char *text;
+	size_t size;
+	size_t used;
+	unsigned int layer;
+	unsigned int from;
+	unsigned int to;
+
+	size = 128 + (size_t)LAYERED_EDGES * 32;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size,
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n");
+	for (layer = 0; layer + 1 < LAYERS; layer++) {
+		for (from = 0; from < LAYER_WIDTH; from++) {
+			for (to = 0; to < LAYER_WIDTH && used < size; to++)
+				used += (size_t)snprintf(text + used,
+				    size - used, "edge(l%u_%u, l%u_%u).\n",
+				    layer, from, layer + 1, to);
+		}
+	}
+	if (used >= size) {
+		free(text);
+		return (NULL);
+	}
+
+	return (text);
+}
+
+/*
+ * A round is shared among a context's threads only when it holds enough
+ * work to repay them, and parallel_rounds counts exactly the rounds that
+ * were.
+ *
+ * Under RELIC_F_PARALLEL_ALWAYS every round that may be deferred is, and it
+ * is shared only when the context has more than one thread: a program of
+ * four rounds counts none at one thread and some at two.
+ *
+ * Without the switch, the paths of the layered graph take a round for each
+ * length.  The first two rounds and the last few are not shared: the base
+ * pass copies the edges, the recursive rule's first round has no round
+ * before it to predict its work and is estimated at the paths it reads,
+ * and the rounds near the end extend the few long paths into the last
+ * layers.  The rounds between each extend thousands of paths by
+ * LAYER_WIDTH edges each, and are shared.  So some rounds and not all are
+ * counted, and the relation is what the serial evaluator derives.  A build
+ * without threads shares none.
+ */
+static void
+rounds_are_shared_when_they_repay_it(void)
+{
+	static const char *const chain =
+	    "edge(a, b).\nedge(b, c).\nedge(c, d).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n";
+	relic_stats_t stats;
+	relic_t *ctx;
+	char *layered;
+	bool threads_available;
+
+#ifdef RELIC_THREADS
+	threads_available = true;
+#else
+	threads_available = false;
+#endif
+
+	ctx = context_threaded(chain, RELIC_F_PARALLEL_ALWAYS, 1);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf(stats.parallel_rounds == 0, SCENARIO_SHARED,
+		    "on one thread no round is shared, not %" PRIu64,
+		    stats.parallel_rounds);
+	} else {
+		check(false, SCENARIO_SHARED, "the chain materializes");
+	}
+	relic_destroy(ctx);
+
+	ctx = context_threaded(chain, RELIC_F_PARALLEL_ALWAYS, 2);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf((stats.parallel_rounds > 0) == threads_available,
+		    SCENARIO_SHARED, "on two threads rounds are shared, "
+		    "%" PRIu64 " of them", stats.parallel_rounds);
+	} else {
+		check(false, SCENARIO_SHARED, "the chain materializes");
+	}
+	relic_destroy(ctx);
+
+	layered = layered_program();
+	if (layered == NULL) {
+		check(false, SCENARIO_SHARED, "the layered graph is written");
+		return;
+	}
+
+	ctx = context_threaded(layered, 0, DEFERRAL_THREADS);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf(stats.tuples == LAYERED_EDGES + LAYERED_PATHS,
+		    SCENARIO_SHARED, "the layered graph has %d paths, not %zu",
+		    LAYERED_PATHS, stats.tuples - LAYERED_EDGES);
+		if (threads_available) {
+			checkf(stats.parallel_rounds > 0 &&
+			    stats.parallel_rounds < stats.iterations,
+			    SCENARIO_SHARED, "some of %" PRIu64 " rounds are "
+			    "shared and not all, not %" PRIu64,
+			    stats.iterations, stats.parallel_rounds);
+			check(ctx->pool != NULL && ctx->pool->thread_tasks > 0,
+			    SCENARIO_SHARED, "the pool's threads run some of "
+			    "the shared rounds' tasks");
+		} else
+			checkf(stats.parallel_rounds == 0, SCENARIO_SHARED,
+			    "without threads no round is shared, not %" PRIu64,
+			    stats.parallel_rounds);
+	} else {
+		check(false, SCENARIO_SHARED, "the layered graph materializes");
+	}
+	relic_destroy(ctx);
+
+	free(layered);
+}
+
 int
 main(void)
 {
@@ -1403,6 +1588,13 @@ main(void)
 	fprintf(stderr, "test_eval: every round deferred\n");
 	deferral_flags = RELIC_F_PARALLEL_ALWAYS;
 	run_everything();
+
+	fprintf(stderr, "test_eval: every round deferred, on %d threads\n",
+	    DEFERRAL_THREADS);
+	deferral_threads = DEFERRAL_THREADS;
+	run_everything();
+
+	rounds_are_shared_when_they_repay_it();
 
 	return (check_summary("test_eval"));
 }

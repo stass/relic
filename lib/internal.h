@@ -195,14 +195,15 @@ struct relic_valtab {
 /*
  * The work evaluation has done over the life of a context, which the
  * executor advances as it runs and relic_stats() reports.  Each field is
- * defined where relic_stats_t documents the one of the same name.
+ * defined where relic_stats_t documents the one of the same name, and the
+ * fields of `read` are relic_stats_t's tuples_scanned and tuples_looked_up.
  */
 struct relic_counters {
-	uint64_t	iterations;
-	uint64_t	derivations;
-	uint64_t	tuples_inserted;
-	uint64_t	tuples_scanned;
-	uint64_t	tuples_looked_up;
+	uint64_t		iterations;
+	uint64_t		derivations;
+	uint64_t		tuples_inserted;
+	relic_exec_counters_t	read;
+	uint64_t		parallel_rounds;
 };
 
 /*

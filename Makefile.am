@@ -37,9 +37,9 @@ noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
-	lib/parse.c lib/plan.c lib/pred.c lib/relation.c lib/result.c \
-	lib/round.c lib/rule.c lib/stratify.c lib/symbol.c lib/task.c \
-	lib/util.c lib/value.c
+	lib/parse.c lib/plan.c lib/pool.c lib/pred.c lib/relation.c \
+	lib/result.c lib/round.c lib/rule.c lib/stratify.c lib/symbol.c \
+	lib/task.c lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -51,7 +51,8 @@ include_HEADERS = include/relic.h
 dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
-	lib/account.h lib/arena.h lib/ast.h lib/depgraph.h lib/exec.h \
+	lib/account.h lib/arena.h lib/ast.h lib/atomic.h lib/depgraph.h \
+	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/relation.h \
 	lib/round.h lib/util.h tests/unit/harness.h tests/unit/programs.h
 
@@ -306,6 +307,24 @@ tests_unit_test_ceiling_SOURCES = tests/unit/test_ceiling.c \
 	tests/unit/harness.c $(librelic_internal_la_SOURCES)
 tests_unit_test_ceiling_CPPFLAGS = $(AM_CPPFLAGS) $(RELIC_CEILING_DEFINES)
 tests_unit_test_ceiling_LDADD = $(LTLIBOBJS)
+
+##
+## A context's worker pool starts and joins threads the operating system
+## does not count portably.  This program compiles the library from source
+## with pthread_create() and pthread_join() renamed, as the allocation-failure
+## suite renames its allocators, so that the test counts every thread started
+## and joined and can refuse a start.
+##
+
+RELIC_POOL_RENAMES = \
+	-Dpthread_create=relic_test_pthread_create \
+	-Dpthread_join=relic_test_pthread_join
+
+RELIC_TEST_BINARIES += tests/unit/test_pool
+tests_unit_test_pool_SOURCES = tests/unit/test_pool.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_pool_CPPFLAGS = $(AM_CPPFLAGS) $(RELIC_POOL_RENAMES)
+tests_unit_test_pool_LDADD = $(LTLIBOBJS)
 
 ##
 ## The public header carries the longest-lived contract in the tree: it must
@@ -586,6 +605,12 @@ RELIC_ASAN_OPTIONS = halt_on_error=1:detect_leaks=$(RELIC_ASAN_DETECT_LEAKS):det
 RELIC_LSAN_OPTIONS = exitcode=1
 RELIC_MSAN_OPTIONS = halt_on_error=1:abort_on_error=1
 RELIC_UBSAN_OPTIONS = halt_on_error=1:print_stacktrace=1
+RELIC_TSAN_OPTIONS = halt_on_error=1:abort_on_error=1:second_deadlock_stack=1
+
+# ThreadSanitizer runs a program about six times slower than the other
+# sanitizers do, and tests/perf.sh sizes its clock for those, so its
+# check-tsan budget is six times the default unless one is set.
+RELIC_TSAN_PERF_BUDGET = 3600
 
 # Configure, build and test in the tree named by $$tree using the configure
 # options in $$flags.  The calling target sets those, $$name for messages,
@@ -647,6 +672,15 @@ check-ubsan:
 	UBSAN_OPTIONS='$(RELIC_UBSAN_OPTIONS)'; export UBSAN_OPTIONS; \
 	$(RELIC_SANITIZER_CHECK)
 
+check-tsan:
+	@tree=build-tsan; flags='--enable-tsan --enable-threads'; \
+	name=ThreadSanitizer; \
+	supported='$(RELIC_TSAN_SUPPORTED)'; note=; \
+	TSAN_OPTIONS='$(RELIC_TSAN_OPTIONS)'; export TSAN_OPTIONS; \
+	RELIC_PERF_BUDGET=$${RELIC_PERF_BUDGET:-$(RELIC_TSAN_PERF_BUDGET)}; \
+	export RELIC_PERF_BUDGET; \
+	$(RELIC_SANITIZER_CHECK)
+
 ##
 ## Coverage
 ##
@@ -694,5 +728,6 @@ clean-local:
 	-cd $(top_builddir) && rm -rf build-*san build-coverage
 	-rm -rf $(LIBOBJDIR).libs $(LIBOBJDIR)_libs
 
-.PHONY: check-asan check-lsan check-msan check-random check-ubsan coverage \
+.PHONY: check-asan check-lsan check-msan check-random check-tsan check-ubsan \
+	coverage \
 	dist-hook fuzz

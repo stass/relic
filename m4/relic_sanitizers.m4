@@ -110,10 +110,10 @@ AC_SUBST([RELIC_ASAN_DETECT_LEAKS])
 # would only be a second place to forget one.
 #
 # Each sanitizer is probed whether or not its option was given, because the
-# check-asan, check-lsan, check-msan and check-ubsan targets must be able to
-# report that a platform does not support one and succeed, rather than
-# failing partway through configuring a tree that could never have been
-# built.  OpenBSD, NetBSD and a Linux without the sanitizer runtimes
+# check-asan, check-lsan, check-msan, check-tsan and check-ubsan targets must
+# be able to report that a platform does not support one and succeed, rather
+# than failing partway through configuring a tree that could never have
+# been built.  OpenBSD, NetBSD and a Linux without the sanitizer runtimes
 # installed all reach that case.
 AC_DEFUN_ONCE([RELIC_ARG_SANITIZERS], [
 AC_REQUIRE([AC_PROG_CC])
@@ -128,11 +128,17 @@ _RELIC_ENABLE_SANITIZER([msan], [build with MemorySanitizer],
     [-fsanitize=memory -fsanitize-memory-track-origins -fno-omit-frame-pointer -g])
 _RELIC_ENABLE_SANITIZER([ubsan], [build with UndefinedBehaviorSanitizer],
     [-fsanitize=undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g])
+_RELIC_ENABLE_SANITIZER([tsan], [build with ThreadSanitizer],
+    [-fsanitize=thread -fno-omit-frame-pointer -g])
 
-dnl AddressSanitizer and MemorySanitizer instrument the same accesses in
-dnl incompatible ways and cannot share a build.
+dnl AddressSanitizer, MemorySanitizer and ThreadSanitizer each instrument
+dnl memory accesses in their own way, and no two of them can share a build.
 AS_IF([test "x$enable_asan" = xyes && test "x$enable_msan" = xyes],
     [AC_MSG_ERROR([--enable-asan and --enable-msan cannot be combined])])
+AS_IF([test "x$enable_tsan" = xyes &&
+       { test "x$enable_asan" = xyes || test "x$enable_msan" = xyes ||
+	 test "x$enable_lsan" = xyes; }],
+    [AC_MSG_ERROR([--enable-tsan cannot be combined with another memory sanitizer])])
 
 AC_ARG_ENABLE([coverage],
     [AS_HELP_STRING([--enable-coverage],
@@ -198,9 +204,12 @@ _RELIC_TRY_SANITIZER([msan_probe], [-fsanitize=memory], [-fsanitize=memory],
     [RELIC_MSAN_SUPPORTED])
 _RELIC_TRY_SANITIZER([ubsan_probe], [-fsanitize=undefined],
     [-fsanitize=undefined], [RELIC_UBSAN_SUPPORTED])
+_RELIC_TRY_SANITIZER([tsan_probe], [-fsanitize=thread], [-fsanitize=thread],
+    [RELIC_TSAN_SUPPORTED])
 AC_SUBST([RELIC_ASAN_SUPPORTED])
 AC_SUBST([RELIC_LSAN_SUPPORTED])
 AC_SUBST([RELIC_MSAN_SUPPORTED])
+AC_SUBST([RELIC_TSAN_SUPPORTED])
 AC_SUBST([RELIC_UBSAN_SUPPORTED])
 
 RELIC_CHECK_ASAN_LEAKS

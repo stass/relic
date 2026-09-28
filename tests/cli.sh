@@ -442,6 +442,42 @@ for argument in tuples tuples5 bogus=1 =1 tuples= tuples=many \
 	esac
 done
 
+# -j shares evaluation among threads, 0 among one per processor, and the
+# rows are the ones one thread writes, in the same order, whether the rounds
+# are shared by their size or all of them under -X parallel.
+for threads in 1 2 16 0 256; do
+	actual=$("$RELIC" -s -j "$threads" "$work/graph.dl")
+	if [ "$actual" != "$expected" ]; then
+		fail "-j $threads answered '$actual', expected '$expected'"
+	fi
+done
+for threads in 1 2 16; do
+	actual=$("$RELIC" -s -j "$threads" -X parallel "$work/graph.dl")
+	if [ "$actual" != "$expected" ]; then
+		fail "-j $threads -X parallel answered '$actual', expected" \
+		    "'$expected'"
+	fi
+done
+
+# A -j that is not a number from 0 to 256 is a usage error naming it: empty,
+# signed, too large, not a number, surrounded by space or followed by other
+# bytes.
+for argument in '' -1 +1 257 99999999999999999999 many 4x ' 4' '4 '; do
+	status=0
+	diagnostic=$("$RELIC" -j "$argument" "$work/graph.dl" 2>&1 \
+	    >/dev/null) || status=$?
+	if [ "$status" -ne 2 ]; then
+		fail "-j '$argument' exited $status, expected 2"
+	fi
+	case "$diagnostic" in
+	*"thread count is "*": $argument"*)
+		;;
+	*)
+		fail "-j '$argument' was reported as '$diagnostic'"
+		;;
+	esac
+done
+
 # An import of - reads its table from standard input, and with no file
 # operand the program is empty rather than read from there too.
 actual=$(printf 'a\tb\na\tc\n' |

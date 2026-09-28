@@ -251,7 +251,9 @@ breaks silently.
 
 A `relic_t` is not thread-safe. Distinct contexts share nothing: there is no
 global mutable state, which S1 enforces with a link-time check that the
-library's writable data and BSS sections are empty.
+library's writable data and BSS sections are empty. A context may own
+threads of its own, which run only inside an operation its caller started
+(D-25); to the caller it is still used by one thread at a time.
 
 ### D-15 Encoding
 
@@ -1254,6 +1256,8 @@ time.
 | distcheck | out-of-tree, `DESTDIR`, `--disable-shared`, `--disable-static` |
 | ascii | no byte above 0x7f in a source file |
 | mandoc | `-Tlint` on both manual pages |
+| Linux clang, TSan | `make check-tsan`, the pool's threads under ThreadSanitizer |
+| Linux gcc, no threads | `--disable-threads`: the pool is the calling thread alone |
 
 The tarball job is the one most likely to catch a real user-visible break,
 because it is the only job that builds what users actually download.
@@ -1443,3 +1447,20 @@ the tables whose searches are mostly unsuccessful. Measured at scale 10 of
 this decision is 30 to 40 bytes and one. A context holds at most 2^30 - 1
 symbols and 2^30 - 1 distinct integers rather than 2^32 - 1 values.
 Specified in `specs/design-comparison-cost.md` sections 6.2 and 7.
+
+### D-25 A context's rounds may be shared among threads it owns
+
+A context owns a worker pool of `threads` threads, the calling thread
+included, started the first time an evaluation shares a round and joined
+when the context is destroyed. A round that reads nothing it writes except
+through a view fixed before it began runs over a frozen store: its first
+scans are cut into contiguous pieces, the workers derive and screen their
+pieces' tuples, and the calling thread merges the candidates in the order
+the serial evaluator would have inserted them. So relations, identifiers,
+answers, diagnostics and every counter but `parallel_rounds` are the same
+at every thread count, and a limit refuses only in a round run serially.
+A round is shared only when its work, predicted from the round before it,
+repays the threads. The pool's threads call no caller code and block every
+signal; a build without POSIX threads or C11 atomics, or configured
+`--disable-threads`, has a pool of the calling thread alone. Specified in
+`specs/design-parallel.md`.

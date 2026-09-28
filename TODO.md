@@ -23,10 +23,20 @@ formatting is designed yet. Step 5's peak and step 6's import have items of
 their own: a growth's slack and transient keep the peak above the live
 heap, and importing facts misses the comparison's gate.
 
+**Parallel evaluation misses its pool's speed-up gate.** [Medium,
+component: `lib/round.c`] Section 15 of `specs/design-parallel.md` asks
+step 3 for `tc-cyclic` at least six times faster at sixteen threads than
+at one; it is 4.8 times, 2.63 s against 0.55 s, and every other step 3
+gate holds. About 0.29 s of the sixteen-thread run is the calling thread
+alone: the recursive rule's first round, 0.23 s, which inserts most of
+what it derives and takes 0.25 s when shared, 0.19 s of it merging, and
+the next round's merge, 0.06 s. Both are the merge, which step 4 shares;
+the gate is measured again with step 4's own.
+
 ## Build and packaging
 
 **Continuous integration is not configured.** [High] `relic-plan.md` section 6
-specifies thirteen jobs; the repository has none, so every claim about a
+specifies fifteen jobs; the repository has none, so every claim about a
 platform other than macOS is untested. The tarball job matters most, because
 it builds what users actually download, and the Linux jobs matter next,
 because leak detection does not work under AddressSanitizer on macOS and
@@ -725,7 +735,54 @@ pool can give, and it is what the threshold of
 the screen from what the round's items estimate, rather than growing it
 from nothing, is the first thing to try.
 
+**A round that inserts most of what it derives gains nothing from the
+pool.** [Medium, component: `lib/round.c`] Its screen and its merge each
+hash every new tuple, and only the screen is shared, so such a round is no
+faster on sixteen threads, and a chain whose rounds cross the threshold
+runs ten per cent slower; the threshold is set high enough that the
+chains measured never cross it. The estimate knows a round's work but not
+how much of it the merge repeats: recording each item's insertions beside
+its work would let the threshold weigh the part that parallelizes, until
+the parallel merge of `specs/design-parallel.md` section 6.3 makes the
+distinction moot.
+
+**The pool's spin bound counts iterations, not time.** [Low, component:
+`lib/pool.c`] `RELIC_SPIN_LIMIT` pauses 4096 times before a waiting worker
+parks, which was sized on x86, where `pause` takes tens to a hundred
+cycles; `yield` on aarch64 is close to free, so a worker there parks
+within microseconds and a component of many small rounds pays a wake-up
+per round. A bound in time, the clock read every few hundred pauses,
+would hold on every processor. Unmeasured on aarch64.
+
+**The words workers share are not on cache lines of their own.** [Low,
+component: `lib/round.h`] `specs/design-parallel.md` section 4.3 puts the
+job's claim, abandon and completion words and each worker's counters on
+lines of their own; the job's words share a line with fields every worker
+reads, and `relic_worker_t` is not padded, so one worker's counters sit
+beside the next one's scratch. Padding the workers to 128 bytes measured
+0.778 s against 0.789 s on `tc-cyclic` at sixteen threads, within noise.
+The workers are allocated with `calloc()`, which does not honour an
+alignment above `max_align_t`.
+
+**A fork descendant that reuses the pool's process identifier.** [Low,
+component: `lib/pool.c`] A pool knows it was carried into a child of
+`fork(2)` because the process identifier differs from its creator's. A
+descendant several forks down whose identifier happens to equal the
+exited creator's would take the threads for its own and wait for them.
+
+**The eval fuzz target defers on the calling thread only.** [Low,
+component: `tests/fuzz/fuzz_eval.c`] Its deferred context has one thread,
+so the corpus replay and `make fuzz` hold the merge of one worker's
+candidates to the serial answers but never several workers'; the random
+suite and `tests/langtest.sh` do. Giving it a pool costs a thread start
+per input.
+
 ## Benchmarks
+
+**`bench/run.sh` has no thread count.** [Low, component: `bench/`]
+`specs/design-parallel.md` section 16 asks for a column giving the thread
+count and a run at sixteen in `bench/baseline.txt`, so that a regression
+in the speed-up is visible where every other performance regression is.
 
 **No run is recorded on an idle machine.** [Medium, component: `bench/`]
 `specs/design-bench.md` section 8 keeps one comparison run in
@@ -1060,8 +1117,8 @@ Candidate features, in the priority order of `specs/architecture.md` section
   frozen store and merged in the serial order so that output and counters
   are identical at every thread count, then a striped merge, then a
   parallel load; six steps, each gated by a measurement, of which the
-  executor scratch and deferred rounds on one thread are built and the
-  pool, the parallel merge, the parallel load and components side by side
+  executor scratch, deferred rounds on one thread and the pool are built
+  and the parallel merge, the parallel load and components side by side
   remain
 * persistent compiled rule plans
 * better cardinality estimation

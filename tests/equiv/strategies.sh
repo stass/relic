@@ -60,13 +60,13 @@ set -eu
 : "${RELIC_SRCDIR:?RELIC_SRCDIR must name the source directory}"
 : "${RELIC_LANG_TESTS:?RELIC_LANG_TESTS must list the registered tests}"
 
-# The strategies compared, each its -X names joined by `+`.  Those in
-# `same_rules` evaluate the default's rules and are held to its tuple total
-# too, and those in `other_rules` only to its answers.  The no-magic run is
-# compared with the default on its answers, and is the reference whose tuple
-# total those in `whole_rules`, which answer from the whole fixed point too,
-# are held to.
-same_rules="naive no-index parallel"
+# The strategies compared, each its -X names joined by `+`, among which jN
+# stands for -j N.  Those in `same_rules` evaluate the default's rules and
+# are held to its tuple total too, and those in `other_rules` only to its
+# answers.  The no-magic run is compared with the default on its answers,
+# and is the reference whose tuple total those in `whole_rules`, which
+# answer from the whole fixed point too, are held to.
+same_rules="naive no-index parallel j4+parallel"
 other_rules="no-reorder"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic"
 
@@ -95,12 +95,20 @@ run() {
 	    > "$work/$label.held" || true
 }
 
-# Run the strategy whose -X names `label` joins with `+`.
+# Run the strategy whose names `label` joins with `+`: jN as -j N, and
+# every other name as -X.
 run_strategy() {
 	label=$1
 	options=""
 	for name in $(echo "$label" | tr '+' ' '); do
-		options="$options -X $name"
+		case $name in
+		j[0-9]*)
+			options="$options -j ${name#j}"
+			;;
+		*)
+			options="$options -X $name"
+			;;
+		esac
 	done
 
 	run "$label" $options

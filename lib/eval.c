@@ -158,12 +158,15 @@ struct relic_emit_target {
  * tuples go: the relation the EMIT names, held here writable where the plan
  * holds it read-only, unless the plan is a query's that delivers its rows to
  * the caller.  A running plan is only read while it runs; the executor's
- * state is the evaluation's scratch.
+ * state is the evaluation's scratch.  `history` is what the plan did the
+ * last time it ran, from which a round estimates whether it is worth
+ * sharing among threads; it is kept only on a context that has threads.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
 	const relic_rule_t	*rule;
 	relic_emit_target_t	 target;
+	relic_plan_history_t	 history;
 };
 
 /*
@@ -512,11 +515,12 @@ static void	 gather_variant_round(relic_evaluation_t *eval,
 static int	 run_item(relic_evaluation_t *eval, const relic_round_t *round,
 		    relic_round_item_t *item);
 static int	 run_round(relic_evaluation_t *eval, relic_round_t *round);
+static uint64_t	 counted_work(const relic_t *ctx);
 static void	 begin_round(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    relic_round_t *round);
 static void	 add_item(const relic_evaluation_t *eval, relic_round_t *round,
-		    const relic_plan_t *plan, const relic_rule_t *rule);
+		    relic_running_plan_t *running, const relic_rule_t *rule);
 static bool	 record_round_gains(const relic_round_t *round,
 		    relic_delta_work_t *work);
 static int	 gather_base_pass(relic_evaluation_t *eval,
@@ -539,7 +543,7 @@ static int	 stream_query_plan(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static int	 gather_query_answer(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
-static const relic_running_plan_t *variant_plan(
+static relic_running_plan_t *variant_plan(
 		    const relic_evaluation_t *eval,
 		    const relic_variant_t *variant);
 
@@ -688,8 +692,7 @@ insert_batch(relic_evaluation_t *eval, relic_relation_t *relation)
 static void
 take_counters(relic_t *ctx, relic_scratch_t *scratch)
 {
-	ctx->counters.tuples_scanned += scratch->counters.tuples_scanned;
-	ctx->counters.tuples_looked_up += scratch->counters.tuples_looked_up;
+	relic_exec_counters_add(&ctx->counters.read, &scratch->counters);
 	bzero(&scratch->counters, sizeof(scratch->counters));
 }
 
@@ -834,20 +837,26 @@ confirm_planned(const relic_evaluation_t *eval,
  * not hold.  Returns 0, or -1 when an insertion was refused, which the
  * relation store has reported.
  *
- * Under RELIC_F_PARALLEL_ALWAYS every round is offered for deferral: its
- * items run over a store nothing writes until they have all finished, and
- * what they derived is then inserted in the order they would have inserted
- * it (lib/round.c).  A round that reads what it writes, or that could not
- * go on, is declined before it has changed anything, and runs here,
- * inserting as it derives.  Either way the relations, the counters and
- * what is reported come out the same.
+ * On a context with threads, or under RELIC_F_PARALLEL_ALWAYS, every round
+ * is offered for deferral: its items run over a store nothing writes until
+ * they have all finished, on as many threads as the pool has, and what
+ * they derived is then inserted in the order they would have inserted it
+ * (lib/round.c).  A round too small to repay the threads, one that reads
+ * what it writes, or one that could not go on is declined before it has
+ * changed anything, and runs here, inserting as it derives.  Either way
+ * the relations, the counters and what is reported come out the same.  A
+ * context of one thread without the switch offers nothing, and its rounds
+ * run here as they always have.
  */
 static int
 run_round(relic_evaluation_t *eval, relic_round_t *round)
 {
+	const relic_config_t *config;
 	size_t i;
 
-	if ((eval->ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0) {
+	config = &eval->ctx->config;
+	if (config->threads > 1 ||
+	    (config->flags & RELIC_F_PARALLEL_ALWAYS) != 0) {
 		switch (relic_round_run(eval->ctx, round)) {
 		case RELIC_ROUND_MERGED:
 			return (0);
@@ -869,17 +878,20 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 /*
  * An item's turn in a round that inserts as it derives: a seed inserts its
  * head and a plan runs, and the item is marked when its turn inserted a
- * tuple its target did not hold.
+ * tuple its target did not hold.  An item that keeps a history records the
+ * work its turn did.
  */
 static int
 run_item(relic_evaluation_t *eval, const relic_round_t *round,
     relic_round_item_t *item)
 {
 	relic_emit_target_t target;
+	uint64_t work_before;
 	int status;
 
 	bzero(&target, sizeof(target));
 	target.relation = round->targets[item->target];
+	work_before = counted_work(eval->ctx);
 
 	eval->derived = false;
 	if (item->plan == NULL)
@@ -888,7 +900,19 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 		status = execute_plan(eval, item->plan, item->rule, &target);
 	item->gained = eval->derived;
 
+	relic_round_record(round, item, counted_work(eval->ctx) - work_before);
+
 	return (status);
+}
+
+/*
+ * The work a context has counted: the tuples it read and derived.
+ */
+static uint64_t
+counted_work(const relic_t *ctx)
+{
+	return (relic_exec_work(ctx->counters.derivations,
+	    &ctx->counters.read));
 }
 
 /*
@@ -910,13 +934,14 @@ begin_round(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 
 /*
  * Add an item to a round of the component being evaluated: a seed of
- * `rule` when `plan` is NULL, and otherwise a plan of it.  Its target is
- * the member the rule's head is, and a component's round targets its
- * members in the order of their positions.
+ * `rule` when `running` is NULL, and otherwise the running plan of it,
+ * with the plan's history on a context whose rounds may be shared among
+ * threads.  Its target is the member the rule's head is, and a component's
+ * round targets its members in the order of their positions.
  */
 static void
 add_item(const relic_evaluation_t *eval, relic_round_t *round,
-    const relic_plan_t *plan, const relic_rule_t *rule)
+    relic_running_plan_t *running, const relic_rule_t *rule)
 {
 	relic_round_item_t *item;
 
@@ -924,7 +949,13 @@ add_item(const relic_evaluation_t *eval, relic_round_t *round,
 	item = &round->items[round->item_count];
 	round->item_count++;
 
-	item->plan = plan;
+	item->plan = NULL;
+	item->history = NULL;
+	if (running != NULL) {
+		item->plan = &running->plan;
+		if (eval->ctx->config.threads > 1)
+			item->history = &running->history;
+	}
 	item->rule = rule;
 	item->target = head_member_of(eval, rule);
 	item->gained = false;
@@ -984,7 +1015,7 @@ gather_base_pass(relic_evaluation_t *eval,
 		rule_plans = &plans->planned[planned];
 		planned++;
 		if (rule_plans->base != NULL)
-			add_item(eval, round, &rule_plans->base->plan, rule);
+			add_item(eval, round, rule_plans->base, rule);
 	}
 
 	assert(planned == plans->planned_count);
@@ -1136,7 +1167,7 @@ record_gain(relic_delta_work_t *work, size_t member)
  * holds more tuples than the variant's threshold, and the delta-first plan
  * otherwise, or whichever of the two was built when only one was.
  */
-static const relic_running_plan_t *
+static relic_running_plan_t *
 variant_plan(const relic_evaluation_t *eval, const relic_variant_t *variant)
 {
 	const relic_tuple_range_t *delta;
@@ -1173,7 +1204,7 @@ gather_variant_round(relic_evaluation_t *eval,
 
 	for (i = 0; i < due_count; i++) {
 		variant = &plans->variants[plans->work.due[i]];
-		add_item(eval, round, &variant_plan(eval, variant)->plan,
+		add_item(eval, round, variant_plan(eval, variant),
 		    variant->rule);
 	}
 }
@@ -1574,6 +1605,7 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 	running->target.relation = target;
 	running->target.rows.callback = NULL;
 	running->target.rows.callback_ctx = NULL;
+	bzero(&running->history, sizeof(running->history));
 
 	*runningp = running;
 	return (0);
@@ -2629,6 +2661,7 @@ gather_query_answer(relic_evaluation_t *eval,
 
 	item.plan = &running->plan;
 	item.rule = running->rule;
+	item.history = NULL;
 	item.target = 0;
 	item.gained = false;
 
@@ -3014,8 +3047,9 @@ relic_stats(relic_t *ctx, relic_stats_t *stats)
 	stats->iterations = ctx->counters.iterations;
 	stats->derivations = ctx->counters.derivations;
 	stats->tuples_inserted = ctx->counters.tuples_inserted;
-	stats->tuples_scanned = ctx->counters.tuples_scanned;
-	stats->tuples_looked_up = ctx->counters.tuples_looked_up;
+	stats->tuples_scanned = ctx->counters.read.tuples_scanned;
+	stats->tuples_looked_up = ctx->counters.read.tuples_looked_up;
+	stats->parallel_rounds = ctx->counters.parallel_rounds;
 
 	stats->tuples = relic_relation_total_tuples(ctx);
 	stats->storage_bytes = relic_relation_total_bytes(ctx);

@@ -76,8 +76,19 @@ allocators="$allocators|getdelim|open_memstream|open_wmemstream|realpath"
 allocators="$allocators|getcwd|scandir|glob|tempnam"
 
 listed='abort|bcmp|bzero|fclose|ferror|fopen|fprintf|fputc|fputs|fread|free'
-listed="$listed|getpagesize|memcmp|memcpy|memmove|memset|munmap|qsort"
+listed="$listed|getpagesize|getpid|memcmp|memcpy|memmove|memset|munmap|qsort"
 listed="$listed|snprintf|stderr|strerror|strlcpy|strlen|vsnprintf"
+
+# The worker pool's threads.  Starting a thread and initializing a mutex or
+# a condition variable may allocate for the thread library's own use, and
+# their failure reaches the pool as an error, which it answers by running
+# with the threads it has or by running a round on the calling thread;
+# the rest hand no memory to their caller.
+listed="$listed|pthread_cond_broadcast|pthread_cond_destroy|pthread_cond_init"
+listed="$listed|pthread_cond_signal|pthread_cond_wait|pthread_create"
+listed="$listed|pthread_join|pthread_mutex_destroy|pthread_mutex_init"
+listed="$listed|pthread_mutex_lock|pthread_mutex_unlock"
+listed="$listed|pthread_setcancelstate|pthread_sigmask|sigdelset|sigfillset"
 
 for object in $objects; do
 	if ! nm -u "$object" > "$listing" 2>/dev/null; then

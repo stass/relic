@@ -109,6 +109,28 @@ struct relic_exec_counters {
 };
 
 /*
+ * Add the work one count holds to another.
+ */
+static inline void
+relic_exec_counters_add(relic_exec_counters_t *total,
+    const relic_exec_counters_t *more)
+{
+	total->tuples_scanned += more->tuples_scanned;
+	total->tuples_looked_up += more->tuples_looked_up;
+}
+
+/*
+ * The work plans did, in the one unit a round's estimate and a plan's
+ * history are measured in: the tuples they read and the tuples they
+ * derived.
+ */
+static inline uint64_t
+relic_exec_work(uint64_t derivations, const relic_exec_counters_t *read)
+{
+	return (derivations + read->tuples_scanned + read->tuples_looked_up);
+}
+
+/*
  * The first ordering comparison between values of different types a FILTER
  * of the running plan met, when the environment asks for such comparisons,
  * since the caller last took the record: the filter, NULL when there has

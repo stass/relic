@@ -121,6 +121,13 @@ relic_create_config(const relic_config_t *config)
 	uint64_t hash_seed;
 
 	/*
+	 * A thread count past the maximum is refused rather than lowered to
+	 * it: a caller who wrote one meant something else.
+	 */
+	if (config != NULL && config->threads > RELIC_THREADS_MAX)
+		return (NULL);
+
+	/*
 	 * Without a seed nobody else can know, every table is open to keys
 	 * crafted to collide, and a constant in its place would be that
 	 * weakness with a false assurance attached.  So a system that cannot
@@ -144,6 +151,7 @@ relic_create_config(const relic_config_t *config)
 	 */
 	if (config != NULL)
 		ctx->config = *config;
+	ctx->config.threads = relic_pool_size(ctx->config.threads);
 
 	relic_account_init(&ctx->account, ctx->config.max_memory);
 	relic_arena_init(&ctx->program_arena, RELIC_ARENA_ANY_OBJECT);

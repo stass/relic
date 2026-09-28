@@ -44,6 +44,14 @@ by field: `relic_value_t`, `relic_location_t`, `relic_config_t`,
 `relic_import_t` and `relic_stats_t` (architecture section 48). A complete
 type's layout is part of the binary interface.
 
+`relic_config_t` carries, besides the limits and the switches, `threads`:
+the size of the worker pool the context owns, the calling thread included,
+at most `RELIC_THREADS_MAX`, a larger count refusing the context rather
+than being lowered to it. `relic_stats_t` carries `parallel_rounds`, the
+rounds whose work was shared among more than one thread, the one counter
+that differs between thread counts (`specs/design-parallel.md` section
+11).
+
 Every entry point follows one convention:
 
 | Returns | Success | Failure |
@@ -217,7 +225,10 @@ the read function of a stream handed to `relic_load_file()` or
 `relic_import_file()`, which may be the caller's own (`funopen(3)`,
 `fopencookie(3)`). None may start another
 operation on the same context, and none can: the refusal is a property of
-the context, not of the places it calls out from.
+the context, not of the places it calls out from. Each runs on the thread
+that started the operation: the pool's threads run a round's tasks and
+nothing else, and whatever a round reports is reported by the calling
+thread when the round's merge reaches it.
 
 **A context is busy while an operation runs.** Every entry point that
 changes a context -- loading, importing, adding a fact, checking,
@@ -319,6 +330,9 @@ incompatible change, which is why the configuration structure is frozen
 without a step limit (architecture section 63 has none) and why a counter
 added to `relic_stats_t` is one too.
 
+`threads` and `parallel_rounds` were added together, as one incompatible
+change, so the interface changed once for both.
+
 A new `RELIC_F_` switch is an added interface, `c+1:0:a+1`: the bit is new
 and a caller may depend on its effect, while a library without it ignores the
 bit, so nothing built against the older interface changes.
@@ -354,7 +368,10 @@ distcheck` runs it.
 * **Sorted results.** A result keeps the stream's order; `relic_value_compare()`
   sorts it, as the tool does for `-s`.
 * **Thread safety within a context** (D-14). Contexts share nothing, so
-  distinct contexts may be used from distinct threads.
+  distinct contexts may be used from distinct threads. The threads a
+  context's pool starts are its own and run only inside an operation the
+  caller started, so a context is still used by one caller thread at a
+  time.
 * **Removing a fact.** v1 has no retraction; a caller builds a new context.
 * **A value lifetime shorter than the context's.** Interned bytes are never
   released, so a long-lived context grows with the distinct values it has

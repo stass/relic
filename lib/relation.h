@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "atomic.h"
 #include "frozen.h"
 #include "program.h"
 #include "util.h"
@@ -99,12 +100,16 @@ struct relic_index_key {
  * that relic_index_first_since(), handed the index read-only, can still move
  * them: a lookup of a delta is the one reader that writes.  Keeping them
  * apart from `entries` also keeps the line a lookup reads a key's first
- * tuple from free of the words lookups store to.
+ * tuple from free of the words lookups store to.  The workers of a round
+ * look up one delta at once, so each frontier is an atomic word, loaded and
+ * stored relaxed: every lookup of one key in one round walks toward the
+ * same start and stores the same stop, so no store needs ordering against
+ * another, and a stale load only walks further.
  */
 struct relic_index {
 	relic_idtab_t		 keys;
 	relic_index_key_t	*entries;	/* by key identifier - 1 */
-	relic_tuple_id_t	*frontiers;	/* by key identifier - 1 */
+	relic_atomic_u32_t	*frontiers;	/* by key identifier - 1 */
 	relic_dom_t		*key_values;	/* by key, key_length each */
 	relic_tuple_id_t	*next;		/* by tuple identifier - 1 */
 	size_t			 key_count;

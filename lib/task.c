@@ -69,27 +69,39 @@ static int	 run_task(const relic_round_job_t *job, relic_worker_t *worker,
 static int	 screen_batch(const relic_round_job_t *job,
 		    relic_worker_t *worker, size_t target);
 static uint32_t	 screen_hash(size_t target, uint32_t hash);
+static uint64_t	 worker_work(const relic_worker_t *worker);
 
+/*
+ * A claim takes the first unclaimed task and moves the claim word past it,
+ * in one atomic step, so every task is run once, by the worker that took
+ * it, and a worker's claims come in increasing order: its candidates are
+ * in serial order, which is what lets its screen drop a repeat as a tuple
+ * the serial evaluator would have inserted earlier.  The claim word may be
+ * moved past the last task by workers finding nothing left; nothing reads
+ * it after the job.
+ */
 void
 relic_round_work(relic_round_job_t *job, relic_worker_t *worker,
     size_t worker_index)
 {
-	relic_round_task_t *task;
+	size_t claimed;
 
-	while (!job->abandoned && job->next_task < job->task_count) {
-		task = &job->tasks[job->next_task];
-		job->next_task++;
+	while (!relic_atomic_bool_load_relaxed(&job->abandoned)) {
+		claimed = relic_atomic_size_add_relaxed(&job->next_task, 1);
+		if (claimed >= job->task_count)
+			break;
 
-		if (run_task(job, worker, worker_index, task) != 0)
-			job->abandoned = true;
+		if (run_task(job, worker, worker_index,
+		    &job->tasks[claimed]) != 0)
+			relic_atomic_bool_store_relaxed(&job->abandoned, true);
 	}
 }
 
 /*
  * Run one task on a worker, gathering its candidates after those of the
- * worker's earlier tasks, and record where they lie and the first
- * mixed-type comparison it met.  Returns 0, or -1 when the worker's
- * candidates could not grow or have outgrown the tuple limit.
+ * worker's earlier tasks, and record where they lie, the first mixed-type
+ * comparison it met and the work it did.  Returns 0, or -1 when the
+ * worker's candidates could not grow or have outgrown the tuple limit.
  */
 static int
 run_task(const relic_round_job_t *job, relic_worker_t *worker,
@@ -97,6 +109,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 {
 	const relic_round_item_t *item;
 	relic_scratch_t *scratch;
+	uint64_t work_before;
 	int status;
 
 	item = &job->round->items[task->item];
@@ -104,6 +117,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 
 	task->worker = worker_index;
 	task->first_candidate = worker->candidates.count;
+	work_before = worker_work(worker);
 
 	if (item->plan == NULL) {
 		place_seed(scratch, item->rule);
@@ -116,8 +130,20 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 	    task->first_candidate;
 	task->note = scratch->note;
 	scratch->note.filter = NULL;
+	task->work = worker_work(worker) - work_before;
 
 	return (status);
+}
+
+/*
+ * The work a worker has counted since its counts were last taken: the
+ * tuples it read and the tuples it derived.
+ */
+static uint64_t
+worker_work(const relic_worker_t *worker)
+{
+	return (relic_exec_work(worker->derivations,
+	    &worker->scratch.counters));
 }
 
 /*

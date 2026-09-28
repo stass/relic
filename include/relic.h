@@ -151,6 +151,23 @@ typedef struct relic_config relic_config_t;
  * it can count predicates and rules the finished rewrite drops, so a limit may
  * refuse a query whose rewrite would have fit.
  *
+ * `threads` is how many threads an evaluation may share a round's work
+ * among, the calling thread included; zero and one both mean the calling
+ * thread alone, which is the default, and more than RELIC_THREADS_MAX is
+ * refused when the context is created.  It is the one field no -l option
+ * sets: the tool's -j sets it.  The threads are the context's own: they
+ * are started the first time an evaluation shares a round, run only inside
+ * an operation the caller started, call none of the caller's callbacks,
+ * block every signal but those a fault in them raises, and are joined when
+ * the context is destroyed.  A child forked between operations may go on
+ * using a context its parent created, on the calling thread alone.  A
+ * round is shared only when it holds enough work to repay the threads'
+ * coordination, and the answers, the relations, every diagnostic and every
+ * counter but parallel_rounds are the same whatever the number of threads.
+ * A thread that cannot be started is not an error: the evaluation uses
+ * those that could be.  A library built without threads accepts the field
+ * and runs every round on the calling thread.
+ *
  * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
  * strategy that must give the same answers as the default; they exist so
  * that strategies can be compared against one another, and are not meant
@@ -170,7 +187,13 @@ struct relic_config {
 	size_t		max_magic_preds;
 	size_t		max_magic_rules;
 	unsigned int	flags;
+	size_t		threads;	/* the calling thread included */
 };
+
+/*
+ * The most threads a context may be configured with.
+ */
+#define	RELIC_THREADS_MAX	256
 
 /*
  * Evaluate recursion with the naive fixed point, which reruns every rule of
@@ -240,11 +263,12 @@ struct relic_config {
 #define	RELIC_F_PARALLEL_ALWAYS	0x0040u
 
 /*
- * Create a context.  Returns NULL when memory is exhausted or when
- * getentropy(2) cannot supply the random bytes the context keys its hash
- * tables with, as in a sandbox with no random device.  There is no other way
- * for it to fail, and no context yet to report through, so neither failure
- * is reported to a diagnostic callback.
+ * Create a context.  Returns NULL when the configuration asks for more than
+ * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
+ * cannot supply the random bytes the context keys its hash tables with, as
+ * in a sandbox with no random device.  There is no other way for it to
+ * fail, and no context yet to report through, so no failure is reported to
+ * a diagnostic callback.
  *
  * relic_create() is relic_create_config() with every limit at its default.
  * relic_destroy() releases everything the context owns and accepts NULL.
@@ -739,7 +763,7 @@ typedef struct relic_stats relic_stats_t;
  * Counters describing the work a context has done and what it holds, for
  * understanding and comparing evaluation strategies.
  *
- * The first five accumulate over the life of the context, and count the
+ * The first six accumulate over the life of the context, and count the
  * rules of the program and of every query answered alike:
  *
  *	iterations	rounds of fixed-point evaluation of recursive
@@ -756,6 +780,9 @@ typedef struct relic_stats relic_stats_t;
  *	tuples_looked_up
  *			tuples read while looking up relations through an
  *			index on the bound arguments of a literal
+ *	parallel_rounds	rounds of evaluation shared among more than one
+ *			thread, the one counter that depends on the number
+ *			of threads
  *
  * The rest describe the context when the counters are read: the tuples held
  * across every relation -- answers are transient, so only a row callback
@@ -774,6 +801,7 @@ struct relic_stats {
 	uint64_t	tuples_inserted;
 	uint64_t	tuples_scanned;
 	uint64_t	tuples_looked_up;
+	uint64_t	parallel_rounds;
 	size_t		tuples;
 	size_t		storage_bytes;
 	size_t		symbol_values;

@@ -558,4 +558,3 @@ the caller who must not rely on that.
 * **Rows before completion.** Section 7.
 * **Incremental maintenance.** A change to the program discards everything
   derived, per section 6, and architecture section 70 defers anything finer.
-* **Parallel evaluation.** A context is single-threaded, per D-14.

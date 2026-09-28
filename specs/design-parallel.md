@@ -209,9 +209,12 @@ contexts on two threads keep two pools that never meet. The pool is
 created the first time an evaluation on the context decides to run a round
 in parallel, so a context that only loads, or that is configured with one
 thread, never starts a thread. It is destroyed with the context, which
-joins its threads; a context destroyed in a child of `fork(2)` has no
-threads to join, which the pool knows because it records the process that
-created it and skips the join in another.
+joins its threads. A pool carried into a child of `fork(2)` has none of
+its threads there, which it knows because it records the process that
+created it and compares it before every job and when it is destroyed: in
+another process it releases the threads' records without joining them
+and is the calling thread alone from then on, so a child may evaluate on
+the context as well as destroy it.
 
 The calling thread is worker 0 and takes part in every job; the pool
 starts `threads - 1` others. A thread that cannot be started -- `EAGAIN`,
@@ -219,6 +222,14 @@ a limit on threads -- is not an error: the pool runs with the threads it
 got, down to the calling thread alone, which is the serial evaluator. The
 thread count is a performance knob and is not allowed to decide whether a
 program can be evaluated.
+
+A thread of the pool blocks every signal but those a fault in the thread
+itself raises -- `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`, `SIGTRAP`,
+`SIGSYS` -- so a signal sent to the process is taken by a thread that is
+the caller's, and a fault in a task ends the process as it would on the
+calling thread rather than repeating forever. The calling thread cannot
+be cancelled while it waits for a job or joins the threads, since the job
+lives in its frame and the threads are still reading it.
 
 Between jobs the workers are parked on a condition variable and cost
 nothing. Within an evaluation, between two rounds of one component, they
@@ -478,12 +489,25 @@ recursive component's rounds change size gradually, so the previous round
 predicts the next well enough for a threshold whose only cost is a missed
 opportunity or a barrier paid for nothing.
 
-`chain-closure` estimates about four thousand per round and never crosses
-the threshold: it runs serially, inserting as it derives, and pays nothing
-for the pool but its existence. `tc-cyclic` crosses it in every round. A
-component whose rounds shrink toward its fixed point -- most do -- runs
-its last rounds serially, which is right: a barrier costs more than a
-round of a hundred derivations.
+`chain-closure` estimates at most six thousand per round and never
+crosses the threshold: it runs serially, inserting as it derives, and pays
+nothing for the pool but its existence. `tc-cyclic` crosses it in every
+round but its first two: the base pass, and the recursive rule's first
+round, which the base pass predicts from a closure still empty. That
+round inserts most of what it derives, and such a round gains little
+from the pool before the parallel merge of section 6.3 whatever its
+size: its screen and its merge each hash every new tuple, and only the
+screen is shared. A component whose rounds shrink toward its fixed point
+-- most do -- runs its last rounds serially, which is right: a barrier
+costs more than a round of a hundred derivations.
+
+The threshold sits well above the barrier's cost, which measures some
+tens of microseconds, about what a few thousand units of work take,
+because a round just above break-even is usually one of those that insert
+most of what they derive. A chain of six thousand edges, whose rounds
+estimate up to eighteen thousand, runs ten per cent slower at sixteen
+threads with the threshold at eight or sixteen thousand, and as fast as
+one thread with it at 65 536.
 
 The debug switch `-X parallel`, `RELIC_F_PARALLEL_ALWAYS` in the library,
 runs every eligible round deferred, however small its estimate and
@@ -895,11 +919,17 @@ or the store depends on which was built, and the continuous-integration
 matrix of `relic-plan.md` section 6 gains one job that builds that way.
 
 `--enable-tsan` and `make check-tsan` run the suite under
-ThreadSanitizer with every test's evaluation on a pool of four and
-`-X parallel` set, so that every round of every test crosses the parallel
-path. It joins `check-asan` and `check-ubsan` as a gate: a report is a
-HIGH finding. `make check-asan` runs with the same switches too, because
-a use-after-free in a worker is what a wrong lifetime would look like.
+ThreadSanitizer. The tests that exercise deferred rounds ask for the pool
+themselves, so that every sanitizer suite runs both paths: the unit tests
+of rounds, evaluation, allocation failure, the interface and the pool at
+four threads under `RELIC_F_PARALLEL_ALWAYS`, and `tests/langtest.sh`
+every golden program at one, two, four and sixteen threads under `-X
+parallel`. Forcing every evaluation of the suite onto the pool instead
+would leave the serial evaluator, which every context of one thread
+runs, uncovered by the sanitizer suites. `check-tsan` joins `check-asan`
+and `check-ubsan` as a gate: a report is a HIGH finding. `check-asan`
+runs the same tests, because a use-after-free in a worker is what a
+wrong lifetime would look like.
 
 ---
 
@@ -1052,13 +1082,16 @@ was.
 
 ## 16. Tests
 
-* **Identity.** `tests/langtest.sh` runs every golden test twice more,
-  at `-j 4 -X parallel` and at `-j 16 -X parallel`, and compares output
-  and `-X stats` counters byte for byte with the one-thread run, the
-  `parallel rounds` line aside, whether its evaluation succeeds or a
-  limit fails it, per section 12; a difference fails the test. The
-  equivalence suite of `tests/equiv` and the random programs of
-  `tests/random` are run the same way.
+* **Identity.** `tests/langtest.sh` runs every golden test four times
+  more, at `-j 1`, `-j 2`, `-j 4` and `-j 16` under `-X parallel`, and
+  compares status, output, diagnostics and `-X stats` counters byte for
+  byte with the serial run, the `parallel rounds` line aside, whether its
+  evaluation succeeds or a limit fails it, per section 12; a difference
+  fails the test. `test_round` compares a serial context with a deferred
+  one on one thread and on four, word for word on every relation and on
+  every counter, including under swept limits. The equivalence suite of
+  `tests/equiv` and the random programs of `tests/random` are run the
+  same way.
 * **The path was taken.** `test_eval` asserts `parallel_rounds` is
   nonzero for a program under `RELIC_F_PARALLEL_ALWAYS` with two threads
   and zero with one, and that a component whose rounds fall below the
@@ -1093,14 +1126,24 @@ was.
 * **Striping.** `test_relation` and `test_index` run their suites at a
   stripe count of one and at the constant; membership, lookup, growth and
   accounting are the same.
-* **The pool.** `test_api` creates a context with more threads than the
-  system allows and evaluates; a context with threads and no evaluation
-  starts none, which the test observes through the thread count of the
-  process; destroying a context joins its threads; a `threads` above
+* **The pool.** `test_pool` compiles the library with `pthread_create()`
+  and `pthread_join()` renamed to its own, which count the threads
+  started and joined and can refuse a start, since no portable interface
+  gives a process's thread count: a context with threads and no shared
+  round starts none; the first shared round starts one per worker but
+  the calling thread, each with every signal blocked but a fault's;
+  destroying the context joins them; a pool whose starts are refused
+  evaluates with the threads that started and reports nothing, and
+  declines the rounds it would have shared when none started; a pool
+  carried into a child of `fork(2)` joins nothing, and a child that
+  evaluates does so on the calling thread alone. `test_round` and
+  `test_eval` require that the pool's threads ran some of a large
+  program's tasks, which no identity check would notice were they never
+  to. `test_api` checks that a `threads` above
   `RELIC_THREADS_MAX` is refused.
-* **Sanitizers.** `make check-tsan` at four threads with `-X parallel`
-  over the whole suite; `make check-asan` and `make check-ubsan` the
-  same.
+* **Sanitizers.** `make check-tsan`, `make check-asan` and `make
+  check-ubsan` over the whole suite, whose deferred tests run on the pool
+  as section 11 describes.
 * **Performance.** `tests/perf.sh` gains no timing assertion -- timing is
   not asserted, as that script says -- but `bench/run.sh` gains a column
   for the thread count and `bench/baseline.txt` a run at sixteen, so a
@@ -1173,11 +1216,9 @@ was.
 * **A stripe count that follows the thread count.** It would make the
   memory a program needs, and the identifiers a load assigns, depend on
   `-j`; a constant keeps both a function of the input.
-* **Fork handling beyond the join.** A child of `fork(2)` holds a context
-  whose threads it does not have; it may destroy the context, section
-  4.1, and must not evaluate on it, which is the rule for every threaded
-  library and is documented in the manual page rather than handled with
-  `pthread_atfork()`.
+* **`pthread_atfork()` handlers.** A pool carried into a child of
+  `fork(2)` finds out from the process it records, section 4.1, and a
+  handler would be the global state section 4.1 rules out.
 * **C11 `<threads.h>`.** Not on every platform relic builds for; POSIX
   threads are, and are a BSD interface in the sense of section 74.
 * **Cancelling a running evaluation.** No step or time limit exists

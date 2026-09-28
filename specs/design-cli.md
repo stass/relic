@@ -58,6 +58,16 @@ Validation precedes evaluation throughout: a run either reports mistakes
 without evaluating anything, or evaluates a program and a set of queries that
 are all known to be valid.
 
+How evaluation runs is the context's configuration, set while the command
+line is parsed and fixed before anything loads: `-l` sets its limits, `-X`
+its strategies, and `-j threads` the size of its worker pool, the tool's
+own thread included, with `-j 0` one per processor online. `-X parallel`
+defers every round's insertions to its end and shares every round the pool
+can, however small, so that small programs cross the paths large ones take.
+Neither `-j` nor `-X parallel` changes what a run writes, except the
+`parallel rounds` line of `-X stats` (`specs/design-parallel.md` section
+11).
+
 ### 2.1 Input
 
 File operands are read in the order given and form one program. With no

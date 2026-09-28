@@ -1370,8 +1370,8 @@ options parsed with `getopt(3)`. There are no long options.
 Usage:
 
 ```text
-relic [-aceinsvV] [-F format] [-I import] [-l limit=value] [-o file]
-      [-q query] [-X debug] [file ...]
+relic [-aceinsvV] [-F format] [-I import] [-j threads] [-l limit=value]
+      [-o file] [-q query] [-X debug] [file ...]
 ```
 
 Options, in the alphabetical order used by the usage message and the manual
@@ -1384,6 +1384,7 @@ page:
 -F fmt      output format: text, csv, tsv, json
 -I import   add facts from a csv or tsv table; repeatable
 -i          enter interactive mode once the queries have run
+-j threads  share evaluation among this many threads; 0: one per processor
 -l limit=n  set a resource limit; repeatable
 -n          suppress normal query output; useful with -e or -v
 -o file     write query output to file instead of stdout
@@ -1753,7 +1754,8 @@ relic_stats(relic_t *, relic_stats_t *);
 ```
 
 fills a `relic_stats_t` with counters of the work evaluation has done --
-fixed-point iterations, derivations, insertions, tuples scanned -- and of what
+fixed-point iterations, derivations, insertions, tuples scanned and looked
+up, rounds shared among threads -- and of what
 the context holds: tuples, relation and index storage, and distinct values by
 type. `-X stats` and the interactive `.stats` print it. The counters are a
 fixed, small set read at one moment, so a struct is their natural shape; a
@@ -1793,6 +1795,7 @@ struct relic_config {
 	size_t		max_magic_preds;
 	size_t		max_magic_rules;
 	unsigned int	flags;
+	size_t		threads;
 };
 
 relic_t *
@@ -1800,9 +1803,18 @@ relic_create_config(const relic_config_t *);
 ```
 
 A zero `max_memory` or `max_tuples` means unlimited; a zero Magic limit means
-the budget of section 63. The fields correspond one to one with the
+the budget of section 63. The limits correspond one to one with the
 `-l key=value` options of section 40 and with the limits of section 63, so a
 limit exists in exactly one place and the tool merely parses into it.
+
+`threads` is the size of the worker pool the context owns, the calling
+thread included, which the tool's `-j` sets; zero and one both mean the
+calling thread alone, and more than `RELIC_THREADS_MAX` is refused when the
+context is created. The pool's threads start the first time an evaluation
+shares a round and run only inside an operation the caller started, so a
+context is still used by one caller thread at a time. Answers, relations,
+diagnostics and every counter but `parallel_rounds` are the same at every
+thread count (`specs/design-parallel.md`).
 
 `flags` selects internal behaviour corresponding to the `-X` options,
 including `RELIC_F_NAIVE`, `RELIC_F_NO_INDEX`, `RELIC_F_NO_MAGIC`,
@@ -2346,14 +2358,20 @@ milestone.
 ```text
 --enable-debug          assertions, -O0 -g3                    (default: no)
 --enable-werror         treat warnings as errors               (default: no)
+--disable-threads       evaluate on the calling thread alone   (default: threads)
 --enable-asan           AddressSanitizer                       (default: no)
 --enable-ubsan          UndefinedBehaviorSanitizer             (default: no)
 --enable-msan           MemorySanitizer, clang on Linux        (default: no)
+--enable-tsan           ThreadSanitizer                        (default: no)
 --enable-coverage       gcov or llvm-cov instrumentation       (default: no)
 --enable-fuzzers        build tests/fuzz, clang only           (default: no)
 --with-libedit=auto|yes|no
                         line editing and history in the REPL   (default: auto)
 ```
+
+Threads are POSIX threads and C11 atomics, system interfaces in the sense of
+section 74. A platform lacking either builds without threads and says so;
+`--enable-threads` makes their absence an error instead.
 
 Standard autotools options apply unchanged, including `--prefix`,
 `--program-prefix`, `--disable-shared`, `--disable-static` and `DESTDIR` staged
@@ -2369,6 +2387,7 @@ make check-asan     reconfigure with --enable-asan, rebuild, run the suite
 make check-lsan     LeakSanitizer alone where it exists standalone
 make check-msan     MemorySanitizer where it is supported
 make check-ubsan    UndefinedBehaviorSanitizer
+make check-tsan     ThreadSanitizer, in a build with threads
 make check-random   the randomized differential suite, seed count configurable
 make coverage       build instrumented, run the suite, write a report
 ```
