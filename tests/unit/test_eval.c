@@ -53,6 +53,7 @@
 #define	SCENARIO_STATS		"the counters record the work each strategy did"
 #define	SCENARIO_SNAPSHOT	"a naive pass walks a chain one edge further"
 #define	SCENARIO_BATCHES	"a plan reads none of its own batches"
+#define	SCENARIO_UNREACHED	"a rule no query reaches costs it no memory"
 
 /*
  * The fan-out of the batch scenario: more tuples than one batch holds, so
@@ -63,8 +64,59 @@
 #define	FAN_OUT			100
 #define	FAN_LINE_MAX		32
 
+/*
+ * The length of the rule a_rule_no_query_reaches_costs_it_no_memory() never
+ * plans, and the memory limit its query runs under.
+ */
+#define	UNREACHED_LENGTH	2000u
+#define	UNREACHED_LIMIT		20000u
+
 _Static_assert(FAN_OUT > RELIC_INSERT_BATCH, "the fan-out fills a batch");
 _Static_assert(FAN_OUT < 1000, "a line of the fan fits FAN_LINE_MAX");
+
+/*
+ * The executor is handed the context, the deltas and every relation and
+ * index read-only, and writes nothing but its own scratch and the frontier
+ * of a key it looks up.  That is what lets the plans of a round run on
+ * several threads over a store none of them can write.  lib/exec.c sees the
+ * context, relations and indexes as the incomplete types of frozen.h, and
+ * refuses to compile beside the headers that complete them, so it can reach
+ * them only through the functions frozen.h declares.  The assertions below
+ * hold the rest of the contract: the handles the executor is given, and the
+ * lookup that stores a frontier, stop compiling the moment one of them
+ * becomes writable, so that dropping a const fails a build rather than a
+ * review.
+ */
+_Static_assert(_Generic(&relic_exec_start,
+    void (*)(relic_scratch_t *, const relic_exec_env_t *,
+    const relic_plan_t *): 1, default: 0),
+    "the executor starts a plan from read-only handles");
+_Static_assert(_Generic(&relic_exec_run,
+    enum relic_exec_status (*)(relic_scratch_t *): 1, default: 0),
+    "the executor runs a plan from its scratch alone");
+_Static_assert(_Generic(((const relic_scratch_t *)NULL)->plan,
+    const relic_plan_t *: 1, default: 0),
+    "the scratch holds the plan it runs read-only");
+_Static_assert(_Generic(((const relic_scratch_t *)NULL)->env,
+    const relic_exec_env_t *: 1, default: 0),
+    "the scratch holds what the plan reads read-only");
+_Static_assert(_Generic(((const relic_exec_env_t *)NULL)->ctx,
+    const relic_t *: 1, default: 0),
+    "the executor reads the context read-only");
+_Static_assert(_Generic(((const relic_exec_env_t *)NULL)->deltas,
+    const relic_tuple_range_t *: 1, default: 0),
+    "the executor reads the deltas read-only");
+_Static_assert(_Generic(((const relic_op_atom_t *)NULL)->relation,
+    const relic_relation_t *: 1, default: 0),
+    "a plan holds the relations it reads read-only");
+_Static_assert(_Generic(&relic_relation_index_at,
+    const relic_index_t *(*)(const relic_relation_t *, uint32_t): 1,
+    default: 0),
+    "a relation hands the executor its indexes read-only");
+_Static_assert(_Generic(&relic_index_first_since,
+    relic_tuple_id_t (*)(const relic_index_t *, const relic_relation_t *,
+    const relic_dom_t *, relic_tuple_id_t): 1, default: 0),
+    "a lookup of a delta holds its index read-only");
 
 /* Room for the rendered answers any test below expects. */
 #define	RENDERED_MAX	1024
@@ -133,6 +185,7 @@ static void	 materialized_counters_are(const char *scenario,
 static void	 a_delta_is_emptied_when_its_member_rests(void);
 static void	 a_naive_pass_walks_a_chain_one_edge_further(void);
 static void	 a_plan_reads_none_of_its_own_batches(void);
+static void	 a_rule_no_query_reaches_costs_it_no_memory(void);
 static void	 fan_counters_are(const char *what, bool binary,
 		    unsigned int flags, counters_t expected);
 static void	 a_discard_gives_back_what_the_limits_count(void);
@@ -1022,6 +1075,56 @@ a_plan_reads_none_of_its_own_batches(void)
 }
 
 /*
+ * An evaluation holds room for the operations of the plans it builds, and
+ * for no rule it never plans.  The program holds a rule of UNREACHED_LENGTH
+ * literals that the query never reaches, so the query's evaluation plans
+ * only the component it reads.  Room for the long rule's plan, sixteen
+ * bytes an operation, would take more than UNREACHED_LIMIT bytes, of which
+ * the query needs less than half.
+ */
+static void
+a_rule_no_query_reaches_costs_it_no_memory(void)
+{
+	relic_config_t config;
+	rendering_t rendering;
+	relic_t *ctx;
+	char *program;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = 64 + UNREACHED_LENGTH * sizeof("e(X), ");
+	program = malloc(size);
+	if (program == NULL) {
+		check(false, SCENARIO_UNREACHED, "the program is built");
+		return;
+	}
+	used = (size_t)snprintf(program, size, "q(a).\ne(b).\nr(X) :- e(X)");
+	for (i = 1; i < UNREACHED_LENGTH; i++)
+		used += (size_t)snprintf(program + used, size - used, ", e(X)");
+	(void)snprintf(program + used, size - used, ".\n");
+
+	bzero(&config, sizeof(config));
+	config.max_memory = UNREACHED_LIMIT;
+
+	ctx = relic_create_config(&config);
+	if (ctx == NULL || relic_load_string(ctx, "test.dl", program) != 0) {
+		check(false, SCENARIO_UNREACHED, "the program loads");
+		relic_destroy(ctx);
+		free(program);
+		return;
+	}
+
+	checkf(run_query(ctx, "q(X)?", &rendering) == 0 &&
+	    strcmp(rendering.text, "a") == 0, SCENARIO_UNREACHED,
+	    "q(X)? should answer a under memory=%u: %s", UNREACHED_LIMIT,
+	    relic_error(ctx));
+
+	relic_destroy(ctx);
+	free(program);
+}
+
+/*
  * Materialize the fan of a_plan_reads_none_of_its_own_batches(), with r of
  * arity 2 when `binary` and of arity 1 otherwise, and compare the counters
  * with `expected`.  Every line of the program is well under
@@ -1271,6 +1374,7 @@ main(void)
 	the_counters_record_the_work_done();
 	a_naive_pass_walks_a_chain_one_edge_further();
 	a_plan_reads_none_of_its_own_batches();
+	a_rule_no_query_reaches_costs_it_no_memory();
 	every_derivation_is_made_once();
 	two_member_literals_derive_once();
 	a_delta_is_emptied_when_its_member_rests();

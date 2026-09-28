@@ -59,14 +59,17 @@ column. A relation holds at most one index per mask.
 ```c
 struct relic_index {
 	relic_idtab_t		 keys;		/* key hash -> key identifier */
-	relic_index_key_t	*entries;	/* per key: first, last, frontier */
+	relic_index_key_t	*entries;	/* per key: first, last */
+	relic_atomic_id_t	*frontiers;	/* per key: where a delta lookup
+						   starts walking */
 	relic_dom_t		*key_values;	/* per key: its values */
 	relic_tuple_id_t	*next;		/* per tuple: the next with its key */
 	size_t			 key_count;
 	size_t			 entry_capacity;
+	size_t			 frontier_capacity;
 	size_t			 key_value_capacity;
 	size_t			 next_capacity;
-	relic_tuple_id_t	 latest_since;	/* the largest delta start served */
+	relic_tuple_id_t	 latest_since;	/* the largest delta start raised */
 	uint32_t		 key_mask;
 	uint16_t		 key_length;	/* the columns in key_mask */
 	uint16_t		 key_column[RELIC_MAX_ARITY];	/* ascending */
@@ -75,7 +78,6 @@ struct relic_index {
 struct relic_index_key {
 	relic_tuple_id_t	first;
 	relic_tuple_id_t	last;
-	relic_tuple_id_t	frontier;	/* where a delta lookup starts walking */
 };
 ```
 
@@ -105,9 +107,23 @@ tuple before it has an identifier below every delta start the index will yet
 be asked for. A new key's frontier is its first tuple, which holds the
 invariant vacuously, and a frontier is never `RELIC_ID_NONE`, so a tuple
 linked after `last` later stays reachable from it. `latest_since` is the
-largest delta start a lookup has been positioned at, which is what the
+largest delta start the index has been raised to, which is what the
 frontiers are valid for, and is cleared when the index is emptied. Section
 4.1 says how both move.
+
+The frontiers are an array of their own, `frontiers[k - 1]` for key *k*,
+beside `entries` and grown with it, rather than a third word of each entry.
+A lookup is the one reader that writes, and the pointer to the array is what
+lets it write a frontier while it holds the index, the relation and the
+context read-only (`specs/design-parallel.md` section 7.1); keeping them
+apart also keeps the line a lookup reads `first` and `last` from free of the
+words lookups store to. In a build with threads a frontier is a relaxed
+atomic identifier, so that the lookups of several workers may store to one
+at once as a defined program (section 4.1); without threads it is a plain
+identifier. The array costs what the third word of an entry cost, since it
+grows to the capacity `entries` grows to. The key table and `entries` may
+be striped as `specs/design-parallel.md` section 6.3 describes, and the
+frontiers are striped with the entries.
 
 ### 3.1 Why chains
 
@@ -195,19 +211,39 @@ at or past `end`. Stopping at `end` is what every lookup does; starting at
 `since` without walking the chain from its head is what the frontier is for.
 
 ```c
-relic_tuple_id_t relic_index_first_since(relic_index_t *,
+void relic_index_raise_since(relic_index_t *, relic_tuple_id_t since);
+relic_tuple_id_t relic_index_first_since(const relic_index_t *,
     const relic_relation_t *, const relic_dom_t *probe,
     relic_tuple_id_t since);
 ```
 
-finds the key as `relic_index_first()` does, then walks the chain forward
-from the key's frontier while the identifier is below `since`, and returns
-the tuple it reached: the first chain tuple at or past `since`, or
-`RELIC_ID_NONE` when the chain has none. The frontier becomes the tuple
-reached or, when the walk ran off the chain's end, the chain's last tuple,
-which is still below `since` and so still satisfies the invariant. The
-function takes a mutable index because it moves the frontier. The lookup
-then follows the chain with `relic_index_next()` as any lookup does.
+`relic_index_raise_since()` raises `latest_since` to `since` when `since` is
+past it. The evaluator raises every index of a member to the start of the
+member's delta whenever it sets the delta, which is the one place a delta
+is set, so before any lookup of the delta is made: a delta view reads only
+its own member, from the delta's first identifier, so every lookup of a
+delta in one round starts at the one `since` its index was raised to.
+Raising only loosens the invariant's bound, so it touches no frontier.
+
+`relic_index_first_since()` finds the key as `relic_index_first()` does,
+then walks the chain forward from the key's frontier while the identifier is
+below `since`, and returns the tuple it reached: the first chain tuple at or
+past `since`, or `RELIC_ID_NONE` when the chain has none. When `since` is
+the start the index was raised to, the frontier becomes the tuple reached
+or, when the walk ran off the chain's end, the chain's last tuple, which is
+still below `since` and so still satisfies the invariant; it is stored only
+when it moved. The function takes the index read-only and writes nothing
+but the frontier, through the array's pointer. The lookup then follows the
+chain with `relic_index_next()` as any lookup does.
+
+**Several lookups at one `since` may walk one chain at once**, on the
+workers of a parallel round (`specs/design-parallel.md` section 7.2). Each
+walks toward the same `since` from whichever frontier it read, so each
+stops at the same tuple and stores the same frontier; one that read a
+frontier older than another stored only walks further to reach the same
+stop. The race is benign by construction, and relaxed atomics make it a
+defined one. `latest_since` is written between rounds alone, when no lookup
+runs.
 
 **It is amortized constant time because deltas advance.** Within one fixed
 point a member's delta starts where the previous one ended, so the `since`
@@ -224,7 +260,12 @@ when its component starts, over an empty member, and a relation is a member
 of one component. It is made unconditional rather than trusted: a call whose
 `since` is below `latest_since` walks the chain from its head and leaves the
 frontier where it is. That call costs the chain's length and happens on no
-path the evaluator has.
+path the evaluator has. A call whose `since` is past `latest_since`, one the
+index was not raised to, is a caller's error, which a debug build stops at:
+it would walk from the frontier and could move nothing, since the tuples it
+passes need not lie below every start the index will yet be asked for, so
+every such lookup would walk the same stretch of the chain again and
+nothing but the time would show it.
 
 A frontier step reads the `next` array and no tuple, and is not counted as
 a tuple looked up. The walk is forward along the chain, so a delta lookup

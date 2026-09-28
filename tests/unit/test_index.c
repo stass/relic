@@ -228,7 +228,8 @@ static size_t
 index_bytes_by_hand(const relic_index_t *index)
 {
 	return (index->keys.capacity * (sizeof(uint32_t) + 1) +
-	    index->entry_capacity * sizeof(relic_index_key_t) +
+	    index->entry_capacity * 2 * sizeof(relic_tuple_id_t) +
+	    index->frontier_capacity * sizeof(relic_tuple_id_t) +
 	    index->key_value_capacity * index->key_length *
 	    sizeof(relic_dom_t) +
 	    index->next_capacity * sizeof(relic_tuple_id_t));
@@ -667,11 +668,11 @@ frontiers_rest_at(const relic_relation_t *rel, uint32_t position,
 		if (expected == RELIC_ID_NONE)
 			expected = entry->last;
 
-		if (entry->frontier != expected) {
+		if (index->frontiers[key] != expected) {
 			checkf(false, SCENARIO_FRONTIER, "a frontier should "
 			    "rest at %u, and rests at %u",
 			    (unsigned int)expected,
-			    (unsigned int)entry->frontier);
+			    (unsigned int)index->frontiers[key]);
 			return (false);
 		}
 	}
@@ -693,6 +694,10 @@ frontiers_rest_at(const relic_relation_t *rel, uint32_t position,
  * rounds.  Asking a second time from the same start, and asking from a start
  * below the largest yet asked for, which no evaluation does, both find what
  * a scan finds and leave the frontiers where they were.
+ *
+ * The index is raised to each round's start before the lookups that begin
+ * there, as the evaluator raises a member's indexes when it sets a delta,
+ * and no lookup moves the start it was raised to.
  */
 static void
 a_delta_lookup_starts_where_its_delta_does(void)
@@ -725,8 +730,11 @@ a_delta_lookup_starts_where_its_delta_does(void)
 	for (round = 0; round < 12; round++) {
 		since = relic_relation_end(rel);
 		if (!fill(ctx, SCENARIO_FRONTIER, rel, 100 + round * 1000,
-		    round * 5) ||
-		    !delta_lookups_agree(ctx, rel, position, since) ||
+		    round * 5))
+			break;
+
+		relic_index_raise_since(&rel->indexes[position], since);
+		if (!delta_lookups_agree(ctx, rel, position, since) ||
 		    !frontiers_rest_at(rel, position, since) ||
 		    !delta_lookups_agree(ctx, rel, position, since) ||
 		    !delta_lookups_agree(ctx, rel, position,
@@ -734,6 +742,14 @@ a_delta_lookup_starts_where_its_delta_does(void)
 		    !delta_lookups_agree(ctx, rel, position, since / 2) ||
 		    !frontiers_rest_at(rel, position, since))
 			break;
+
+		if (rel->indexes[position].latest_since != since) {
+			checkf(false, SCENARIO_FRONTIER, "no lookup should "
+			    "move the start the index was raised to, %u, and "
+			    "it is %u", (unsigned int)since,
+			    (unsigned int)rel->indexes[position].latest_since);
+			break;
+		}
 	}
 
 	checkf(round == 12, SCENARIO_FRONTIER, "every round's delta lookups "

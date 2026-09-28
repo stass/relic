@@ -378,25 +378,24 @@ note record, section 5.3.
 
 ### 5.3 Running a task
 
-The executor's state today lives in two places: the frame and the batch
-in the evaluation, and one state per operation allocated with each plan.
-For several workers to run one plan at once, all of that becomes the
-worker's: an **executor scratch** holding the frame, an array of operation
-states sized for the longest plan of the evaluation, and the batch of
-derived tuples. A running plan then holds only its plan, its rule and its
-target, and is read-only while it runs. This is a refactoring of the serial
-evaluator with no change in what it does, and it is the first step of
+For several workers to run one plan at once, the executor's state belongs
+to whoever runs the plan rather than to the plan: an **executor scratch**
+holding the frame, an array of operation states sized for the longest plan
+it runs, and the batch of derived tuples, one for the serial evaluation and
+one per worker. A running plan holds only its plan, its rule and its
+target, and is read-only while it runs. For the serial evaluator this is a
+refactoring with no change in what it does, and it is the first step of
 section 15 so that everything after it is measured against an evaluator of
 the same shape.
 
-The views of every plan of a parallel round are resolved when the round
-begins, before the job is published, rather than when each plan starts.
-The two moments give the same ranges because of section 5.1's rule, and
-resolving once keeps a task from writing the plan's states. A task runs
-`execute_plan()` exactly as today up to its EMIT. The EMIT appends the
-head tuple to the scratch's batch of `RELIC_INSERT_BATCH` tuples as it
-does now; what changes is where a full batch goes. In a serial round it is
-inserted, as today. In a parallel round it is **screened** twice:
+A task resolves its plan's views into its own scratch when it starts the
+plan. Every task of a round resolves the same ranges, since the deltas and
+every relation's end were fixed before the job was published and nothing
+moves them while it runs, which is section 5.1's rule. A task then runs
+the executor exactly as the serial evaluator does, up to its EMIT. The EMIT
+appends the head tuple to the scratch's batch of `RELIC_INSERT_BATCH`
+tuples; what differs is where a full batch goes. In a serial round it is
+inserted. In a parallel round it is **screened** twice:
 
 1. against the frozen store: the batch's tuples are hashed and their
    canonical slots and first candidates prefetched, in the two passes
@@ -628,17 +627,31 @@ stripe.
 Between the moment a job is published and the moment its barrier
 completes, **no relation is modified**, and the executor cannot modify
 one: a task is handed the context as `const relic_t *`, every relation and
-index as `const`, and its own scratch as the only mutable state. The
-functions a task calls -- `relic_relation_tuple()`, `relic_relation_find()`,
-`relic_index_first()`, `relic_index_next()`, `relic_index_first_since()`,
-`relic_value_order()`, `relic_value_decode()`, the probes and the hashes
--- take `const` operands already, or are made to, and the one exception
-of section 7.2 reaches its mutable words through a pointer the `const`
-does not cover. A future write on the task path would not compile. That
-is the by-construction form of the table a design would otherwise keep of
-what writes when, and the list of when the store's writers run -- the
-merge, planning, a load's commit, a query's clear, the discard -- is a
-consequence of it rather than a rule.
+index as `const`, and its own scratch as the only mutable state.
+
+`const` alone would not hold that. It covers the members of the structure
+a pointer reaches and not what those members point at, and a relation
+reaches its columns and its indexes, and the context everything it owns,
+through pointers. So the code a task runs -- the executor, and the
+screening and candidate buffers of section 5.3 -- is compiled against one
+narrow header, `lib/frozen.h`, in which the context, a relation and an
+index are **incomplete types**, and refuses to compile beside the headers
+that complete them. Such code can hold a pointer to one and pass it on,
+and cannot name a member of one, to read it or to write it. What it can do
+with them is exactly the functions that header declares --
+`relic_relation_tuple()`, `relic_relation_find()`, `relic_relation_all()`,
+`relic_relation_index_at()`, `relic_index_first()`, `relic_index_next()`,
+`relic_index_first_since()`, `relic_value_order()`, and the few more the
+screening needs -- each of which takes its operands `const` and hands back
+nothing that could be written through. What a plan needs of a relation for
+every tuple, its arity, the planner copies into the operation. The one
+exception of section 7.2 reaches its mutable words inside `lib/index.c`,
+through a pointer the `const` does not cover. A future write on the task
+path would not compile, whatever array it reached and however the
+representation grew. That is the by-construction form of the table a
+design would otherwise keep of what writes when, and the list of when the
+store's writers run -- the merge, planning, a load's commit, a query's
+clear, the discard -- is a consequence of it rather than a rule.
 
 A reader in a job therefore reads a relation's count, its columns, its
 canonical index and its secondary indexes as they stood when the job was
@@ -646,19 +659,20 @@ published, holding pointers for as long as it likes within the task.
 
 ### 7.2 The frontier: the one write a reader makes
 
-`relic_index_first_since()` moves a key's frontier and the index's
-`latest_since` as it positions a lookup of a delta (`specs/design-index.md`
-section 4.1). Several tasks look up the same delta of the same member in
-one round, so several workers would write these words at once. Two changes
-make the race benign, defined, and cheap:
+`relic_index_first_since()` moves a key's frontier as it positions a
+lookup of a delta (`specs/design-index.md` section 4.1). Several tasks look
+up the same delta of the same member in one round, so several workers
+would write the frontiers at once. Two decisions make the race benign,
+defined, and cheap:
 
 * **`latest_since` is written by worker 0 alone.** Within one round every
   lookup of a delta of one relation is positioned at one `since`, the
   delta's start, which the round fixed before any task ran. Worker 0
-  therefore sets `latest_since` for every index a round reads through the
-  delta view before publishing the job, and a task never writes it.
-* **The frontiers move out of the key entries into an array of their
-  own**, `frontiers`, by key identifier and beside the entries -- per
+  therefore raises `latest_since` for every index of a member when it sets
+  the member's delta, before publishing the job, and a lookup never writes
+  it.
+* **The frontiers are an array of their own**, `frontiers`, by key
+  identifier and beside the entries -- per
   stripe once section 6.3 stripes them -- of atomic identifiers reached
   through a pointer in the index, so that a task holding the index as
   `const` can store to them, and so that a frontier's line is not the line
@@ -674,7 +688,7 @@ make the race benign, defined, and cheap:
   ThreadSanitizer has nothing to report.
 
 Between rounds only worker 0 runs, and the merge sets the frontier of a
-new key as `relic_index_add()` does today.
+new key as `relic_index_add()` does for every insertion.
 
 ---
 

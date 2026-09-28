@@ -36,6 +36,11 @@
  * tuple.  The frontier is moved forward as far as each such lookup walks,
  * and deltas only move forward, so over a whole fixed point the positioning
  * walks each chain at most once however many rounds and lookups there are.
+ * The evaluator raises an index to a delta's start before any lookup starts
+ * there, and a lookup never moves that start: it only walks and moves
+ * frontiers, each toward the one start every lookup of the round shares,
+ * so the order lookups at one start are made in changes nothing any of them
+ * finds.
  *
  * Adding a tuple is two operations, as installing an identifier in the table
  * is.  relic_index_reserve() makes room for the tuples and keys about to be
@@ -114,6 +119,7 @@ relic_index_free(relic_index_t *index)
 {
 	relic_idtab_reset(&index->keys);
 	relic_free_array(index->entries);
+	relic_free_array(index->frontiers);
 	relic_free_array(index->key_values);
 	relic_free_array(index->next);
 	bzero(index, sizeof(*index));
@@ -229,6 +235,7 @@ relic_index_bytes(const relic_index_t *index)
 {
 	return (relic_idtab_bytes(&index->keys) +
 	    index->entry_capacity * sizeof(*index->entries) +
+	    index->frontier_capacity * sizeof(*index->frontiers) +
 	    index->key_value_capacity * index->key_length *
 	    sizeof(*index->key_values) +
 	    index->next_capacity * sizeof(*index->next));
@@ -250,6 +257,7 @@ relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
     size_t added_keys)
 {
 	size_t entry_count;
+	size_t frontier_count;
 	size_t key_bytes;
 	size_t next_count;
 	size_t total;
@@ -258,11 +266,13 @@ relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
 
 	keys = saturating_sum(index->key_count, added_keys);
 	entry_count = relic_grow_array_capacity(index->entry_capacity, keys);
+	frontier_count = relic_grow_array_capacity(index->frontier_capacity,
+	    keys);
 	value_count = relic_grow_array_capacity(index->key_value_capacity,
 	    keys);
 	next_count = relic_grow_array_capacity(index->next_capacity, tuples);
-	if (keys == SIZE_MAX || entry_count == 0 || value_count == 0 ||
-	    next_count == 0)
+	if (keys == SIZE_MAX || entry_count == 0 || frontier_count == 0 ||
+	    value_count == 0 || next_count == 0)
 		return (relic_index_bytes(index));
 
 	key_bytes = (size_t)index->key_length * sizeof(*index->key_values);
@@ -270,6 +280,8 @@ relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
 	total = relic_idtab_bytes_after_reserve(&index->keys, added_keys);
 	total = saturating_sum(total, saturating_product(entry_count,
 	    sizeof(*index->entries)));
+	total = saturating_sum(total, saturating_product(frontier_count,
+	    sizeof(*index->frontiers)));
 	total = saturating_sum(total, saturating_product(value_count,
 	    key_bytes));
 	total = saturating_sum(total, saturating_product(next_count,
@@ -298,6 +310,7 @@ relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
 {
 	relic_index_rehash_t rehash;
 	relic_index_key_t *entries;
+	relic_tuple_id_t *frontiers;
 	relic_tuple_id_t *next;
 	relic_dom_t *values;
 
@@ -315,6 +328,13 @@ relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
 	if (entries == NULL)
 		return (-1);
 	index->entries = entries;
+
+	frontiers = relic_grow_array(index->frontiers,
+	    &index->frontier_capacity, index->key_count + added_keys,
+	    sizeof(*index->frontiers));
+	if (frontiers == NULL)
+		return (-1);
+	index->frontiers = frontiers;
 
 	values = relic_grow_array(index->key_values,
 	    &index->key_value_capacity, index->key_count + added_keys,
@@ -374,7 +394,7 @@ relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	entry = &index->entries[key_id - 1];
 	entry->first = id;
 	entry->last = id;
-	entry->frontier = id;
+	index->frontiers[key_id - 1] = id;
 	bcopy(key, &index->key_values[key_offset(index, key_id)],
 	    (size_t)index->key_length * sizeof(*key));
 	relic_idtab_place(&index->keys, hash, key_id);
@@ -395,6 +415,12 @@ probe_key(const relic_index_t *index, const relic_relation_t *relation,
 	gather_key(index, probe, key);
 
 	return (find_key(index, key, key_hash(index, relation, key)));
+}
+
+uint32_t
+relic_index_key_mask(const relic_index_t *index)
+{
+	return (index->key_mask);
 }
 
 /*
@@ -430,41 +456,75 @@ walk_toward(const relic_index_t *index, relic_tuple_id_t id,
 }
 
 /*
+ * Raise the index to a delta start `since`, from which the lookups about to
+ * be made begin, if it is past every start the index was raised to before.
+ *
+ * Every chain tuple before a key's frontier is below `latest_since`, and
+ * raising `latest_since` only loosens that bound, so the frontiers stay
+ * valid without being touched.  A start below `latest_since` changes
+ * nothing.
+ */
+void
+relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since)
+{
+	if (since > index->latest_since)
+		index->latest_since = since;
+}
+
+/*
  * The first tuple, in identifier order, that agrees with `probe` on the key
  * columns and whose identifier is at least `since`, or RELIC_ID_NONE when
  * none does: where a lookup of a delta beginning at `since` starts.
  *
  * Every chain tuple before a key's frontier is below `latest_since`, so a
- * start at or past `latest_since` can be walked to from the frontier.  Such
- * a walk raises `latest_since` to its start and leaves the frontier where
- * it stops, at the tuple found or at the chain's last tuple, both of which
- * keep the invariant.  A start below `latest_since` is walked to from the
- * chain's head and moves nothing; the evaluator never asks for one, since a
- * relation's deltas advance and its indexes are dropped with the discard
- * that precedes every evaluation, so that walk costs the chain's length on
- * no path it has.
+ * start at or past `latest_since` can be walked to from the frontier.  When
+ * the start is `latest_since` itself the walk leaves the frontier where it
+ * stops, at the tuple found or at the chain's last tuple, and every chain
+ * tuple before either is below the start, which keeps the invariant.  A
+ * start below `latest_since` is walked to from the chain's head and moves
+ * nothing; the evaluator never asks for one, since a relation's deltas
+ * only advance while it is a member, it is a member of one component of
+ * one evaluation, and its indexes are dropped when it is discarded or
+ * cleared.
+ *
+ * A start past `latest_since` is a caller that did not raise the index
+ * first.  It would be answered correctly and could move nothing, since the
+ * tuples its walk passes need not be below `latest_since`, so every such
+ * lookup would walk from the same stale frontier and a fixed point would
+ * pay for each chain once per lookup rather than once.  Nothing wrong would
+ * show but the time, so a debug build stops there instead.
+ *
+ * Every lookup of one key at one start walks toward that start, so each
+ * stops at the same tuple and leaves the same frontier, whichever frontier
+ * it began from: one that began from an older frontier than another left
+ * only walks further to reach the same stop.  Lookups at one start may
+ * therefore be made in any order.
  *
  * A step of the walk reads the `next` array and no tuple.
  */
 relic_tuple_id_t
-relic_index_first_since(relic_index_t *index, const relic_relation_t *relation,
-    const relic_dom_t *probe, relic_tuple_id_t since)
+relic_index_first_since(const relic_index_t *index,
+    const relic_relation_t *relation, const relic_dom_t *probe,
+    relic_tuple_id_t since)
 {
-	relic_index_key_t *entry;
+	relic_tuple_id_t *frontier;
 	relic_tuple_id_t stop;
 	uint32_t key_id;
+
+	assert(since <= index->latest_since);
 
 	key_id = probe_key(index, relation, probe);
 	if (key_id == RELIC_ID_NONE)
 		return (RELIC_ID_NONE);
-	entry = &index->entries[key_id - 1];
+	frontier = &index->frontiers[key_id - 1];
 
 	if (since < index->latest_since) {
-		stop = walk_toward(index, entry->first, since);
+		stop = walk_toward(index, index->entries[key_id - 1].first,
+		    since);
 	} else {
-		index->latest_since = since;
-		stop = walk_toward(index, entry->frontier, since);
-		entry->frontier = stop;
+		stop = walk_toward(index, *frontier, since);
+		if (since == index->latest_since && stop != *frontier)
+			*frontier = stop;
 	}
 
 	return (stop >= since ? stop : RELIC_ID_NONE);

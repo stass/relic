@@ -881,6 +881,20 @@ relic_relation_all(const relic_relation_t *relation)
 	return (relic_relation_since(relation, RELIC_TUPLE_FIRST));
 }
 
+relic_pred_id_t
+relic_relation_pred(const relic_relation_t *relation)
+{
+	return (relation->pred);
+}
+
+const relic_index_t *
+relic_relation_index_at(const relic_relation_t *relation, uint32_t position)
+{
+	assert(position < relation->index_count);
+
+	return (&relation->indexes[position]);
+}
+
 /*
  * Whether `key_mask` names a nonempty proper subset of this relation's
  * columns, which is what a secondary index can be keyed on.  Every column is

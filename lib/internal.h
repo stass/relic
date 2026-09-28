@@ -7,6 +7,14 @@
 #ifndef RELIC_INTERNAL_H
 #define RELIC_INTERNAL_H
 
+/*
+ * This header defines what code compiled against frozen.h alone must not
+ * see, and such code defines RELIC_FROZEN_ONLY to have it refused.
+ */
+#ifdef RELIC_FROZEN_ONLY
+#error "code that only reads the store must see it only through frozen.h"
+#endif
+
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -17,6 +25,8 @@
 #include "arena.h"
 #include "ast.h"
 #include "compat.h"
+#include "exec.h"
+#include "frozen.h"
 #include "plan.h"
 #include "program.h"
 #include "queue.h"
@@ -85,21 +95,6 @@ typedef struct relic_valtab relic_valtab_t;
  * description of a predicate or a query.
  */
 #define	RELIC_ACTIVITY_TEXT_MAX	(16 + RELIC_PRED_TEXT_MAX)
-
-/*
- * The result of comparing two values.
- *
- * Ordering is defined only within a type: a mixed-type pair is unordered
- * rather than erroneous, because predicate arguments are untyped and a column
- * may legitimately hold more than one type.  The evaluator turns
- * RELIC_ORDER_UNORDERED into a filtered-out binding.
- */
-enum relic_order {
-	RELIC_ORDER_LESS = -1,
-	RELIC_ORDER_EQUAL = 0,
-	RELIC_ORDER_GREATER = 1,
-	RELIC_ORDER_UNORDERED = 2
-};
 
 /*
  * Where diagnostics go, and the text of the last error.
@@ -608,15 +603,14 @@ void	 relic_symtab_reset(relic_symtab_t *table);
  *
  * relic_value_decode() fills *value with the value a domain identifier names
  * and returns true, or returns false for an identifier the context never
- * assigned.  Both order functions treat such an identifier as unordered and
- * unequal rather than reading past a table.
+ * assigned.  relic_value_total_order() and relic_value_order(), which
+ * frozen.h declares, treat such an identifier as unordered and unequal
+ * rather than reading past a table.
  */
 size_t	 relic_value_count(const relic_t *ctx);
 size_t	 relic_value_count_of(const relic_t *ctx, enum relic_type type);
 bool	 relic_value_decode(const relic_t *ctx, relic_dom_t dom,
 	    relic_value_t *value);
-enum relic_order relic_value_order(const relic_t *ctx, relic_dom_t a,
-	    relic_dom_t b);
 int	 relic_value_total_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
 int	 relic_value_intern(relic_t *ctx, const relic_value_t *value,
@@ -1174,21 +1168,19 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * a mask.  relic_index_reserve() makes room for `tuples` tuples in all and
  * `added_keys` more keys and is the only operation that can fail;
  * relic_index_add() then links tuple `id` in, and tuples must be added in
- * increasing identifier order.
- * relic_index_first() and relic_index_next() walk, in identifier order, the
- * tuples that agree with a probe on the key columns; the probe is laid out as
- * a tuple, and its other columns are not read.  relic_index_first_since()
- * starts such a walk at the first of those tuples whose identifier is at
- * least `since`, from the key's frontier, which it moves forward; the starts
- * it is asked for should never decrease over the life of the index, as a
- * semi-naive delta's never do, or the walk costs the whole chain.
+ * increasing identifier order.  The walks over an index are in frozen.h.
+ * relic_index_raise_since() raises the start the index's frontiers stand
+ * for to `since`, before any lookup from it; the starts raised to should
+ * never decrease over the life of the index, as a semi-naive delta's never
+ * do, or a lookup from an earlier one walks the whole chain.
  * relic_index_bytes_after_reserve() is what the memory limit projects a
  * reservation with.  relic_index_free() releases an index, which
  * relic_index_init() must set up again before it is used.
  *
  * The relation store builds and extends indexes and does all the
- * accounting; the evaluator only walks them, moving a key's frontier as a
- * lookup of a delta walks toward the delta's start.
+ * accounting; the evaluator raises a member's indexes to its delta's start
+ * whenever it sets the delta, and otherwise only walks them, moving a key's
+ * frontier as a lookup of a delta walks toward the delta's start.
  */
 void	 relic_index_init(relic_index_t *index, uint32_t key_mask);
 void	 relic_index_free(relic_index_t *index);
@@ -1199,21 +1191,7 @@ int	 relic_index_reserve(relic_index_t *index,
 	    const relic_relation_t *relation, size_t tuples, size_t added_keys);
 void	 relic_index_add(relic_index_t *index, const relic_relation_t *relation,
 	    relic_tuple_id_t id);
-relic_tuple_id_t relic_index_first(const relic_index_t *index,
-	    const relic_relation_t *relation, const relic_dom_t *probe);
-relic_tuple_id_t relic_index_first_since(relic_index_t *index,
-	    const relic_relation_t *relation, const relic_dom_t *probe,
-	    relic_tuple_id_t since);
-relic_tuple_id_t relic_index_next(const relic_index_t *index,
-	    relic_tuple_id_t id);
-
-/*
- * How many tuples relic_relation_insert_batch() prefetches for at a time,
- * and so how many an evaluation buffers before it inserts them.  Measured
- * on the closure workloads: 16 overlaps most of the misses of a duplicate
- * check, 64 a little more, and 256 no more than 64.
- */
-#define	RELIC_INSERT_BATCH	64u
+void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
 
 /*
  * lib/relation.c
@@ -1285,18 +1263,19 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  * identifier space is refused as a relation too large to grow; capacity a
  * failed reservation obtained is kept, and accounted.
  *
- * relic_relation_find() gives the identifier of the tuple holding some
- * columns, or RELIC_ID_NONE, and relic_relation_contains() whether there is
- * one.
+ * relic_relation_contains() says whether a relation holds a tuple of some
+ * columns.  The reads the executor makes -- the tuple an identifier names,
+ * the identifier of the tuple holding some columns, the range of every
+ * tuple, a relation's predicate and its indexes -- are in frozen.h.
  *
  * Every relation of a context hashes a tuple with relic_tuple_hash() under
  * the context's seed, so a caller that has already hashed one that way, as
  * a load's staging does, passes the hash to the _hashed forms rather than
  * have it computed again.
  *
- * relic_relation_all() and relic_relation_since() give the identifier ranges
- * a scan and a semi-naive delta walk, and relic_relation_end() is the mark a
- * later delta is measured from.
+ * relic_relation_since() gives the identifier range a semi-naive delta
+ * walks, and relic_relation_end() is the mark a later delta is measured
+ * from.
  *
  * relic_relation_discard_all() empties every derived relation and drops the
  * base stores' secondary indexes, which ends the span over which a range
@@ -1344,16 +1323,12 @@ int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 int	 relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *tuples, size_t count, bool *added,
 	    size_t *completedp);
-relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
-	    const relic_dom_t *columns);
 bool	 relic_relation_contains(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 bool	 relic_relation_contains_hashed(const relic_relation_t *relation,
 	    const relic_dom_t *columns, uint32_t hash);
 uint32_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
 	    uint16_t arity);
-const relic_dom_t *relic_relation_tuple(const relic_relation_t *relation,
-	    relic_tuple_id_t id);
 size_t	 relic_relation_bytes(const relic_relation_t *relation);
 size_t	 relic_relation_bytes_after_reserve(const relic_relation_t *relation,
 	    size_t added);
@@ -1361,7 +1336,6 @@ int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
 	    size_t added);
 size_t	 relic_relation_count(const relic_relation_t *relation);
 relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
-relic_tuple_range_t relic_relation_all(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
 	    relic_tuple_id_t first);
 void	 relic_relation_discard_all(relic_t *ctx);

@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #include "ast.h"
-#include "relation.h"
+#include "frozen.h"
 #include "util.h"
 
 /*
@@ -125,12 +125,16 @@ enum relic_view {
 
 /*
  * An operation over a relation: SCAN, LOOKUP, MEMBER, ANTI_MEMBER or EMIT.
- * `terms` holds the relation's arity of columns and is NULL when that arity
- * is zero.
+ * `terms` holds a term for each of the relation's `arity` columns and is
+ * NULL when that arity is zero.  The arity is the relation's, copied when
+ * the operation is planned, since it never changes and the executor reads
+ * it for every tuple.
  *
  * The relation is held directly rather than as a predicate identifier to
  * resolve on every step.  A relation never moves once created, so a plan may
- * keep the pointer for as long as the relation exists.
+ * keep the pointer for as long as the relation exists.  It is held
+ * read-only: a plan reads relations, and the relation its EMIT names is
+ * written by whoever takes the EMIT's tuples, through a pointer of its own.
  *
  * `view` is the view a SCAN, LOOKUP, MEMBER or ANTI_MEMBER reads through,
  * fixed by the planner; an ANTI_MEMBER's is always `all`.  The range it
@@ -145,11 +149,12 @@ enum relic_view {
  * no plan outlives, and addresses are not.
  */
 struct relic_op_atom {
-	relic_relation_t	*relation;
+	const relic_relation_t	*relation;
 	relic_plan_term_t	*terms;
 	uint32_t		 key_mask;		/* LOOKUP only */
 	uint32_t		 index_position;	/* LOOKUP only */
 	enum relic_view		 view;
+	uint16_t		 arity;
 };
 
 /*

@@ -333,6 +333,7 @@ append_atom_op(relic_planner_t *planner, enum relic_op_kind kind,
 
 	op = append_op(planner, kind);
 	op->u.atom.relation = relation;
+	op->u.atom.arity = relation->arity;
 	op->u.atom.view = RELIC_VIEW_ALL;
 	op->u.atom.terms = terms_alloc(planner, relation->arity);
 	if (relation->arity > 0 && op->u.atom.terms == NULL)

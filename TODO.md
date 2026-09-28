@@ -1046,7 +1046,9 @@ Candidate features, in the priority order of `specs/architecture.md` section
   worker pool the context owns, semi-naive rounds partitioned over a
   frozen store and merged in the serial order so that output and counters
   are identical at every thread count, then a striped merge, then a
-  parallel load; six steps, each gated by a measurement
+  parallel load; six steps, each gated by a measurement, of which the
+  executor scratch is built and deferred rounds, the pool, the parallel
+  merge, the parallel load and components side by side remain
 * persistent compiled rule plans
 * better cardinality estimation
 * further Magic Sets and negation optimization

@@ -123,7 +123,7 @@ recursive Datalog answers queries from the command line, specified in
 | Component | State |
 | --- | --- |
 | `lib/plan.{h,c}` | the plan representation of D-8 and the textual planner: positive literals in written order, each a `SCAN` or, when every argument is bound, a `MEMBER`; each comparison a `FILTER` at the earliest point its operands are bound; the head an `EMIT`; a plan is refused unless every body literal became exactly one operation |
-| `lib/eval.c` | the executor, one loop over a level and a resume flag with no recursion; the naive fixed point of D-9; `relic_materialize()` and `relic_query_run()` |
+| `lib/eval.c`, `lib/exec.c` | the executor, in `lib/exec.c`, one loop over a level and a resume flag with no recursion; the naive fixed point of D-9; `relic_materialize()` and `relic_query_run()` |
 | `lib/rule.c` | a query compiles into a rule whose head names no predicate: its named variables in first-occurrence order are the columns, and safety is the ordinary check of a head; `relic_query_prepare()`, `relic_query_count()`, `relic_query_loaded()`, `relic_query_destroy()` |
 | `lib/parse.c` | parses into any arena, so a prepared query owns its syntax tree; `relic_parse_query()` holds query text to exactly one query |
 | `lib/value.c` | one definition of the total order of section 61, reached by domain identifier and, as `relic_value_compare()`, by public value |
@@ -152,7 +152,7 @@ order that analysis settles, specified in `specs/design-stratify.md`.
 | --- | --- |
 | `lib/depgraph.{h,c}` | the predicate graph in compressed adjacency form, one edge per relational body literal in rule and literal order, each remembering its rule, literal and sign; strongly connected components by an iterative Tarjan search, completed dependencies first |
 | `lib/stratify.c` | least strata over the condensation; one error per component holding a negative edge, naming the shortest cycle through it with a note at the literal of each edge; the schedule of components with rules, grouped by stratum, cached on the program until a check compiles another rule |
-| `lib/eval.c` | materialization plans every scheduled rule, then runs the schedule component by component: the naive fixed point for a recursive component, one pass for any other; each plan owns its cursors |
+| `lib/eval.c` | materialization plans every scheduled rule, then runs the schedule component by component: the naive fixed point for a recursive component, one pass for any other; the cursors are the executor's, in the evaluation's scratch |
 | `lib/rule.c` | `relic_check()` runs the analysis after compiling and before the undefined-predicate sweep |
 | `lib/arena.{h,c}` | the arena declarations in a header of their own, so the program model can hold one, with moving an arena by assignment stated as part of its contract; `relic_arena_allocarray()` refuses a size that overflows |
 | `tests/` | `test_stratify` for component order, strata, rule grouping, independence of textual order, rejection, and a chain and a cycle of a hundred thousand predicates analysed on a one-megabyte stack; two sweeps in `test_exhaustion`, over rejecting a program and over replacing a schedule; six golden tests, reproducing architecture sections 9 and 30 exactly and fixing which cycle is named and in what order |
@@ -281,7 +281,7 @@ sections 8 to 10 and documented in `man/relic.1`.
 | `cmd/relic/input.c` | the one place lines are read: libedit with emacs bindings, the user's editrc and an in-session history when standard input and standard error are both a terminal and the build has it, `getline(3)` otherwise; prompt `relic> ` on standard error under the same condition; any `getline(3)` failure but the end of input reported; a line without its newline, text at the end of input without one included |
 | `cmd/relic/main.c` | `-i` as phase 9, standard input never read as a program under it, `-c -i` a usage error; `-n` attaches no output, so `-o` creates nothing; `-v` writes `query N: M rows` to standard error after each query, standard output flushed first; `-vv` sets `RELIC_F_NOTE_MIXED`; every query given to run numbered, session lines continuing after phase 8's |
 | `cmd/relic/output.c` | an output with no stream counts and drops rows; `output_discard()` for `.plan`, `output_flush()` before each session line is read |
-| `lib/eval.c`, `lib/plan.c` | `RELIC_F_NOTE_MIXED`: the first ordering comparison between values of different types in each rule reported as a note at the comparison, once for the life of the context for a program rule and once per answer for a query; every compiled rule records its origin, which Magic copies inherit, and the record of a note lives on the origin, so nothing is allocated; a FILTER records its comparison's location |
+| `lib/eval.c`, `lib/plan.c` | `RELIC_F_NOTE_MIXED`: the first ordering comparison between values of different types in each rule reported as a note when the batch of the plan that made the comparison is taken, before any tuple derived after it is inserted or delivered, once for the life of the context for a program rule and once per answer for a query; every compiled rule records its origin, which Magic copies inherit, and the record of a note lives on the origin, so nothing is allocated; a FILTER records its comparison's location |
 | `include/relic.h`, `man/relic.3`, `configure.ac` | the new switch; version-info `2:0:1`, an added interface |
 | `man/relic.1` | options, limits, the interactive mode, the formats, exit status, examples |
 | `tests/` | `tests/langtest.sh` feeds a test's `.stdin`, or else an empty input, so a session is a golden transcript: eight `repl-*` tests (a session, every command, every refusal and end of input part way through a query, `.plan` with `-e` and after `-a`, `-v` and `-vv` numbering, `-n`, json, `-c -i`) and four `verbose-*` tests; `tests/repl.sh` for a session with no operands, `-o` under `-i`, a NUL byte, a carriage return, blanks splitting a command, `.plan` and `.stats` beside `-o`, an escaped unknown command, `-n -i -o`, rows written before the first read, a failed read, and a failed reply and a failed write; `tests/man.sh` holds `relic.1`'s option list to the usage message and lints both pages; `test_api` notes each rule once across rewrites, later queries and materialization, two rules written at one location apart, a query once per answer together with the seed its rewrite copies the comparison into, and never without the switch; the equivalence suite skips sessions and leaves the `-vv` note out, since when it appears depends on the strategy |
@@ -674,6 +674,23 @@ interpreter and SQL engine on all of them. Souffle compiled, which spends
 timed at twice their standalone times while the machine was busier, were
 timed again alone and are reported from that run. SQLite still holds the
 smallest peak on `facts-join`.
+
+**Parallel evaluation,** specified in `specs/design-parallel.md`, in its
+section 15 order.
+
+| Component | State |
+| --- | --- |
+| `lib/exec.{h,c}`, `lib/frozen.h` | step 1, the executor scratch: the executor is its own file, its frame, operation states and batch one scratch its caller owns; it returns whenever the batch is full, keeping its place, and its caller takes the batch -- inserting it, or delivering it as rows -- and resumes it, so the executor never inserts and nothing it does can fail; a mixed-type comparison is recorded in the scratch and reported by the caller when it takes the batch; `lib/exec.c` is compiled against `lib/frozen.h` alone, in which the context, a relation and an index are incomplete types reached only through functions that take them const, and it refuses to compile beside the headers that complete them, so a write to the store from the executor does not compile; an operation carries its relation's arity; a batch left full is reported full again rather than appended to |
+| `lib/eval.c` | the evaluation's scratch holds states for the longest plan it builds, grown as plans are built; `set_delta()` is the one place a delta is written, and raises every index of the member to the delta's start |
+| `lib/index.c`, `lib/relation.h` | a key's frontier in an array of its own beside the key entries, which a lookup handed the index read-only moves; `latest_since` raised by the evaluator and never by a lookup, and a lookup from a start its index was not raised to stops a debug build |
+| `tests/` | `test_exec`: the executor run directly over a hand-built plan, its batches holding each derivation once at and around one and two batches, a batch left full reported full and not written past, tuples appended between calls not read, a plan of its EMIT alone, and a scratch never started; `test_eval`: the executor's entry points, the handles it is given, a relation's indexes and the delta lookup hold the store read-only, as static assertions, and a rule of 2000 literals no query reaches costs the query no memory; `test_index`: the frontiers' storage counted by hand, and a lookup of a delta at the start its index was raised to leaves that start where it was |
+
+Step 1 measured against the commit before it on a `--disable-shared` build,
+alternating, on the same machine: `bench/run.sh`, seven runs each, gives
+identical counters on every workload and times within noise, `chain, whole
+closure` 1.100 s before and 1.090 s after; `tc-cyclic` at scale 1, five runs
+each, 2.66 s before and 2.67 s after, and `cspa` 0.21 s both, with identical
+counters.
 
 ### Verified
 

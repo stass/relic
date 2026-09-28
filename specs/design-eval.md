@@ -50,15 +50,23 @@ forever:
 Descending means the operation at `level` produced a binding and the next one
 should start fresh against it. Backtracking means an operation has nothing
 more, so the one before it is asked for its next match. `EMIT` never reports a
-match -- it inserts and says there is nothing below it -- so the level never
-passes the end of the array and the plan needs no end-of-plan case.
+match -- it adds the head tuple to the batch and says there is nothing below
+it -- so the level never passes the end of the array and the plan needs no
+end-of-plan case.
 
 A rule's depth is therefore bounded by nothing but its length, and a rule with
 ten thousand literals uses no more C stack than a rule with one.
 
 ### 2.1 State
 
-The executor's state is exactly three things:
+The executor's state is three things, held in one **executor scratch** the
+evaluation hands it, one per worker when a round runs on
+several threads (`specs/design-parallel.md` section 5.3). A running plan
+holds only its plan, its rule and its target, and is read while it runs; the
+executor sees the context and every relation only through read-only
+functions, as `specs/design-parallel.md` section 7.1 describes, and
+whatever it writes is in the scratch, but for a key's frontier (section 4
+of `specs/design-index.md`):
 
 * **the binding frame**, one domain identifier per slot, at most 64 per D-7.
   A slot is written by the operation that binds it and read only by later
@@ -72,9 +80,22 @@ The executor's state is exactly three things:
 * **the batch** of head tuples the `EMIT` has derived and not yet inserted,
   `specs/design-evaluation-cost.md` section 6.
 
-None is allocated in the loop. The frame is a fixed array, each plan's
-operation states are allocated with the plan, when the evaluation that runs
-it begins, and the batch when the evaluation begins.
+Beside them the scratch keeps what the executor hands back rather than
+uses: where the join stood when the batch filled, the work counted since
+the caller last took the counts, and the note described below.
+
+None is allocated in the loop. The frame is a fixed array, the batch is
+sized when the evaluation begins, for the widest head its rules can have,
+and the operation states as its plans are built, for the longest of them.
+
+The executor does not insert. It returns when the batch is full, having
+kept its place in the scratch, and continues from there when called again;
+its caller takes the batch, inserting it, delivering it as rows or
+gathering it as a parallel round's candidates, before it does. So nothing
+the executor does can fail, and one executor serves every destination of a
+plan's derivations. A note about a mixed-type comparison is recorded in
+the scratch and reported by the caller when it takes the batch, since
+reporting calls the caller's diagnostic callback and changes the context.
 
 ### 2.2 A generator never holds a tuple pointer
 
