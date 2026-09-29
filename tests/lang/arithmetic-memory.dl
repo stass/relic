@@ -1,0 +1,9 @@
+% The table of integer values is charged to the memory limit with the
+% relations, whether a program states an integer or evaluation computes
+% it.  Counting to two thousand interns every integer on the way: the
+% relation holding them takes some 25000 bytes and the integers' table some
+% 37000, so a limit of 50000 admits the relation and not the two.
+n(0).
+n(Y) :- n(X), X < 2000, Y = X + 1.
+
+n(2000)?

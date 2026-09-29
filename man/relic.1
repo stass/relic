@@ -78,9 +78,60 @@ A comparison that orders values of different types is false.
 .Ql %
 begins a comment that runs to the end of the line.
 .Pp
+Either side of a comparison may be an integer expression: integers and
+variables combined with
+.Ql + ,
+.Ql \- ,
+.Ql * ,
+.Ql /
+and
+.Ql mod ,
+a unary minus and parentheses.
+.Ql * ,
+.Ql /
+and
+.Ql mod
+bind tighter than
+.Ql +
+and
+.Ql \- ,
+a unary minus tighter than both, and every binary operator groups to the
+left.
+Arithmetic is on 64-bit integers: division truncates toward zero, and the
+remainder takes the sign of the dividend.
+An expression nests at most 32 deep, and stands only in a comparison, not
+in an atom's argument or a rule's head.
+An equality one side of which is a variable nothing else binds before it,
+and the other side of which reads only bound variables, assigns the
+variable that value, whichever side it is written on:
+.Bd -literal -offset indent
+dist(X, Y, 1) :- edge(X, Y).
+dist(X, Z, D1) :- dist(X, Y, D), edge(Y, Z), D < 8, D1 = D + 1.
+.Ed
+.Pp
+An expression one of whose operands is a symbol or a string has no value,
+and a comparison or assignment over it is false, as an ordering of
+different types is.
+A result outside the 64-bit integers, or a division or remainder by zero,
+is an error instead: the evaluation stops, its query writes no rows, and
+.Nm
+exits with a nonzero status.
+Whether an evaluation meets such a result depends on the bindings it
+evaluates the expression over, so a query answered through its rewrite may
+succeed where evaluating the whole program, with
+.Fl a ,
+fails.
+A rule computing a new integer from one it derived, such as
+.Ql n(Y) :- n(X), Y = X + 1 ,
+derives until it overflows; bound it with a comparison, as
+.Ql D < 8
+bounds
+.Ql dist
+above.
+.Pp
 Every variable of a rule's head, of a negated literal and of a comparison
-must also occur in a positive atom of the body, and a program may not be
-recursive through negation.
+must also occur in a positive atom of the body or be assigned by an
+equality, and a program may not be recursive through negation.
 A program that breaks either rule is rejected and nothing is evaluated.
 .Pp
 The options are as follows:
@@ -196,7 +247,8 @@ queries, or else the program's own, continued in an interactive session as
 .Sx INTERACTIVE MODE
 describes.
 Twice: also a note for the first comparison in each rule that ordered values
-of different types, which is false and easily unintended.
+of different types or applied an operator to a symbol or a string, which is
+false and easily unintended.
 .It Fl X Ar debug
 Select an internal behaviour, for testing and debugging.
 The option may be repeated.
@@ -341,7 +393,8 @@ the most tuples all relations together may hold, the program's facts
 included; by default there is no limit.
 .It Cm memory
 the most bytes relation and index storage, the program's facts included,
-the plans of an evaluation and the rewrite of a query may occupy together;
+the table of the integers the program states and evaluation computes, the
+plans of an evaluation and the rewrite of a query may occupy together;
 by default there is no limit.
 A long rule's plans can need more memory than the data does.
 .It Cm magic-preds

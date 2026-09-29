@@ -1,0 +1,23 @@
+% An equality one side of which is a variable nothing else binds, and the
+% other side of which reads only bound variables, assigns the variable:
+% to a constant, to another variable's value, or to an expression's.  An
+% assignment from a term binds whatever the term holds, a symbol as well as
+% an integer.  Once bound, the variable is tested by any later equality.
+v(1). v(2). v(a).
+
+answer(X) :- X = 42.
+named(X) :- X = foo.
+copied(Y) :- v(X), Y = X.
+successor(X, Y) :- v(X), Y = X + 1.
+tested(X) :- v(X), Y = X * 2, Y = 4.
+reversed(Y) :- v(X), X + 10 = Y.
+
+answer(X)?
+named(X)?
+copied(Y)?
+successor(X, Y)?
+tested(X)?
+reversed(Y)?
+v(X), Y = X?
+v(X), Y = X - 1?
+Z = 5, W = Z * Z?

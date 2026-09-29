@@ -37,12 +37,15 @@
  * All three contexts share limits on tuples and memory, so an input deriving
  * a large relation is refused rather than timing out.  The reference derives
  * different amounts, so a limit may refuse a query in the reference and not
- * in the optimized context, or the other way round; only queries both
- * answer are compared.  Deferral changes nothing but the cost, so the
- * deferred context must answer exactly the queries the optimized one does,
- * and a limit must refuse the rest in both.  A query that fails for any
- * other reason is a finding.  Loading and checking do not depend on the
- * strategy, so the contexts must accept or refuse the program alike.
+ * in the optimized context, or the other way round; and it evaluates
+ * expressions over other bindings, so an arithmetic result that does not
+ * fit, an overflow or a zero divisor, may stop one and not the other.  Only
+ * queries both answer are compared.  Deferral changes nothing but the cost,
+ * so the deferred context must answer exactly the queries the optimized one
+ * does, and a limit or an undefined result must stop the rest in both.  A
+ * query that fails for any other reason is a finding.  Loading and checking
+ * do not depend on the strategy, so the contexts must accept or refuse the
+ * program alike.
  */
 
 #define	EVAL_MAX_TUPLES		20000
@@ -50,21 +53,22 @@
 
 /*
  * The errors a context reported during one call: how many, and whether the
- * last was a limit's refusal.  Reset before each call, so that a call that
- * fails without reporting anything is seen as the finding it is rather than
- * excused by an error some earlier call left behind.
+ * last was one that may stop a query without being a finding: a limit's
+ * refusal or an undefined arithmetic result.  Reset before each call, so
+ * that a call that fails without reporting anything is seen as the finding
+ * it is rather than excused by an error some earlier call left behind.
  */
 typedef struct error_capture error_capture_t;
 
 struct error_capture {
 	size_t		count;
-	bool		limit;
+	bool		stopped;
 };
 
 static void	 capture_error(void *capture_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
-static bool	 collect_unless_limited(relic_t *ctx, error_capture_t *errors,
+static bool	 collect_unless_stopped(relic_t *ctx, error_capture_t *errors,
 		    size_t index, answer_t *answer, const char *strategy);
 static void	 compare_answers(size_t index, const char *strategy,
 		    const answer_t *answer, const char *oracle,
@@ -133,7 +137,7 @@ open_context(const uint8_t *data, size_t size, unsigned int flags,
 	if (ctx == NULL)
 		abort();
 	errors->count = 0;
-	errors->limit = false;
+	errors->stopped = false;
 	relic_diag_set(ctx, capture_error, errors);
 	if (explain)
 		relic_explain_set(ctx, discard_explain, NULL);
@@ -172,12 +176,12 @@ compare_queries(relic_t *optimized, error_capture_t *optimized_errors,
 		answer_t reference_answer = { NULL, 0 };
 		bool optimized_answered, deferred_answered;
 
-		optimized_answered = collect_unless_limited(optimized,
+		optimized_answered = collect_unless_stopped(optimized,
 		    optimized_errors, q, &optimized_answer, "default");
-		deferred_answered = collect_unless_limited(deferred,
+		deferred_answered = collect_unless_stopped(deferred,
 		    deferred_errors, q, &deferred_answer, "parallel");
 		if (optimized_answered != deferred_answered) {
-			fprintf(stderr, "query %zu: a limit refused it %s\n",
+			fprintf(stderr, "query %zu: it was stopped %s\n",
 			    q + 1, optimized_answered ? "under parallel only" :
 			    "by default only");
 			abort();
@@ -186,7 +190,7 @@ compare_queries(relic_t *optimized, error_capture_t *optimized_errors,
 		if (optimized_answered) {
 			compare_answers(q, "parallel", &deferred_answer,
 			    "the default", &optimized_answer);
-			if (collect_unless_limited(reference, reference_errors,
+			if (collect_unless_stopped(reference, reference_errors,
 			    q, &reference_answer, "naive+no-magic"))
 				compare_answers(q, "the default",
 				    &optimized_answer, "naive+no-magic",
@@ -217,20 +221,20 @@ compare_answers(size_t index, const char *strategy, const answer_t *answer,
 }
 
 /*
- * Answer query `index` in ctx.  Returns false when a limit refused it, and
- * aborts when it failed any other way, or without saying why: with nothing
- * but limits to stop it, a query over a program that checked must be
- * answered.
+ * Answer query `index` in ctx.  Returns false when a limit refused it or
+ * it met an undefined arithmetic result, and aborts when it failed any other
+ * way, or without saying why: with nothing but those to stop it, a query
+ * over a program that checked must be answered.
  */
 static bool
-collect_unless_limited(relic_t *ctx, error_capture_t *errors, size_t index,
+collect_unless_stopped(relic_t *ctx, error_capture_t *errors, size_t index,
     answer_t *answer, const char *strategy)
 {
 	relic_query_t *query;
 	bool collected = false;
 
 	errors->count = 0;
-	errors->limit = false;
+	errors->stopped = false;
 	query = relic_query_loaded(ctx, index);
 	if (query != NULL) {
 		collected = answer_collect(ctx, query, answer);
@@ -244,7 +248,7 @@ collect_unless_limited(relic_t *ctx, error_capture_t *errors, size_t index,
 		    index + 1, strategy);
 		abort();
 	}
-	if (errors->limit)
+	if (errors->stopped)
 		return (false);
 	fprintf(stderr, "query %zu failed under %s: %s\n", index + 1, strategy,
 	    relic_error(ctx));
@@ -252,21 +256,29 @@ collect_unless_limited(relic_t *ctx, error_capture_t *errors, size_t index,
 }
 
 /*
- * Count an error and note whether it is a limit's refusal, which every
- * limit words the same way.  Warnings and notes are discarded.
+ * Count an error and note whether it may stop a query: a limit's refusal,
+ * which every limit words the same way, or an undefined arithmetic result,
+ * which names its operation first.  Warnings and notes are discarded.
  */
 static void
 capture_error(void *capture_ctx, enum relic_diag_level level,
     const relic_location_t *where RELIC_TEST_UNUSED, const char *message)
 {
-	static const char limit_refusal[] = "limit exceeded:";
+	static const char *const stops[] = {
+		"limit exceeded:",
+		"integer overflow in ",
+		"division by zero in "
+	};
 	error_capture_t *errors = capture_ctx;
 
 	if (level != RELIC_ERROR)
 		return;
 	errors->count++;
-	errors->limit = strncmp(message, limit_refusal,
-	    sizeof(limit_refusal) - 1) == 0;
+	errors->stopped = false;
+	for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++) {
+		if (strncmp(message, stops[i], strlen(stops[i])) == 0)
+			errors->stopped = true;
+	}
 }
 
 static void

@@ -125,6 +125,7 @@ static bool	 frontiers_rest_at(const relic_relation_t *rel,
 		    uint32_t position, relic_tuple_id_t since);
 static size_t	 distinct_by_hand(const relic_relation_t *rel, uint16_t column);
 static size_t	 storage_by_hand(const relic_t *ctx);
+static size_t	 charged_bytes(const relic_t *ctx);
 static size_t	 index_bytes_by_hand(const relic_index_t *index);
 static size_t	 index_key_count(const relic_index_t *index);
 static void	 a_key_first_held_late_is_found_by_its_values(void);
@@ -370,6 +371,17 @@ distinct_by_hand(const relic_relation_t *rel, uint16_t column)
 	}
 
 	return (distinct);
+}
+
+/*
+ * The bytes the memory limit counts against a context that holds no arena
+ * and runs no round: its relations' storage and its integer table, which
+ * every integer value() interns grows.
+ */
+static size_t
+charged_bytes(const relic_t *ctx)
+{
+	return (relic_relation_total_bytes(ctx) + ctx->account.value_bytes);
 }
 
 /*
@@ -1120,14 +1132,15 @@ the_memory_limit_refuses_a_build_whole(void)
 
 	/*
 	 * The allowance is measured rather than assumed: what the tuples
-	 * alone occupy, plus a little, is less than the index needs.
+	 * and their integers alone occupy, plus a little, is less than the
+	 * index needs.
 	 */
 	rel = relation(ctx, SCENARIO_LIMIT, "edge", 3);
 	if (rel == NULL || !fill(ctx, SCENARIO_LIMIT, rel, 0, LIMIT_TUPLES)) {
 		relic_destroy(ctx);
 		return;
 	}
-	config.max_memory = relic_relation_total_bytes(ctx) + 64;
+	config.max_memory = charged_bytes(ctx) + 64;
 	relic_destroy(ctx);
 
 	ctx = context(SCENARIO_LIMIT, &config);
@@ -1174,13 +1187,14 @@ the_memory_limit_refuses_a_build_whole(void)
  * built while it is empty so that they grow only with insertions, until
  * LIMIT_SWEEP_TUPLES are held or the memory limit refuses one.
  *
- * With no limit (`max_memory` 0), the storage held after each insertion is
- * recorded in `unlimited`, which has room for LIMIT_SWEEP_TUPLES.  Under a
- * limit, each insertion must be refused exactly when the unlimited run held
- * more than the limit after it, and must otherwise leave the same storage
- * held: the limit neither lets storage past it nor refuses a tuple that
- * fits.  After every insertion the storage total must also equal what the
- * arrays hold.  Returns whether all of that held throughout.
+ * With no limit (`max_memory` 0), the bytes charged after each insertion,
+ * the relation's and its integers', are recorded in `unlimited`, which has
+ * room for LIMIT_SWEEP_TUPLES.  Under a limit, each insertion must be
+ * refused exactly when the unlimited run held more than the limit after it,
+ * and must otherwise leave the same bytes charged: the limit neither lets
+ * storage past it nor refuses a tuple that fits.  After every insertion the
+ * storage total must also equal what the arrays hold.  Returns whether all
+ * of that held throughout.
  */
 static bool
 fill_under_limit(size_t max_memory, size_t *unlimited)
@@ -1219,7 +1233,7 @@ fill_under_limit(size_t max_memory, size_t *unlimited)
 		tuple[1] = value(ctx, i % 5);
 		tuple[2] = value(ctx, i);
 		refused = relic_relation_insert(ctx, rel, tuple, &added) != 0;
-		held = relic_relation_total_bytes(ctx);
+		held = charged_bytes(ctx);
 
 		if (max_memory == 0) {
 			unlimited[i] = held;
@@ -1229,7 +1243,8 @@ fill_under_limit(size_t max_memory, size_t *unlimited)
 			within = refused == should_refuse &&
 			    (refused || held == unlimited[i]);
 		}
-		within = within && held == storage_by_hand(ctx);
+		within = within && relic_relation_total_bytes(ctx) ==
+		    storage_by_hand(ctx);
 
 		if (!within)
 			checkf(false, SCENARIO_LIMIT_SWEEP, "under a limit of "

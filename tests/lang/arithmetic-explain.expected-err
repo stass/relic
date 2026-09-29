@@ -1,0 +1,35 @@
+stratum 0, component 0 (recursive): dist/3
+    rule dist(X, Y, 1) :- edge(X, Y).
+        scan edge(X, Y)
+        emit dist(X, Y, 1)
+    rule dist(X, Z, D1) :- dist(X, Y, D), edge(Y, Z), D < 8, D1 = D + 1.
+        delta dist(X, Y, D) when the delta holds more than 2 tuples:
+            scan edge(Y, Z)
+            lookup delta dist(X, Y, D) key={1}
+            filter D < 8
+            assign D1 = D + 1
+            emit dist(X, Z, D1)
+        delta dist(X, Y, D) otherwise:
+            scan delta dist(X, Y, D)
+            filter D < 8
+            assign D1 = D + 1
+            lookup edge(Y, Z) key={0}
+            emit dist(X, Z, D1)
+stratum 0, component 1: shapes/4
+    rule shapes(A, B, C, D) :- n(X), A = (X + 1) * 2, B = 2 * (3 / X), C = X + (X + X), D = -(X - 1) * X, X * 2 > -X.
+        scan n(X)
+        assign A = (X + 1) * 2
+        assign B = 2 * (3 / X)
+        assign C = X + (X + X)
+        assign D = -(X - 1) * X
+        filter X * 2 > -X
+        emit shapes(A, B, C, D)
+stratum 0, component 2: same/1
+    rule same(X) :- n(X), dist(_, _, Y), X = Y.
+        scan n(X)
+        assign Y = X
+        lookup dist(_, _, Y) key={2}
+        emit same(X)
+query $q0(X, D) :- dist(a, X, D).
+    lookup dist(a, X, D) key={0}
+    stream $q0(X, D)

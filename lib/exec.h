@@ -13,6 +13,7 @@
 
 #include <relic.h>
 
+#include "arith.h"
 #include "frozen.h"
 #include "plan.h"
 #include "program.h"
@@ -35,8 +36,10 @@
  * is full, having saved where it was, and the caller decides where the
  * batch goes -- inserted into the relation the EMIT names, delivered to a
  * caller as rows, or kept aside -- and empties it before resuming.  So one
- * executor serves every way a plan's derivations are used, and nothing it
- * does can fail.
+ * executor serves every way a plan's derivations are used.  It fails only by
+ * recording that it did: an expression whose result is not defined records
+ * an error in the scratch and ends the plan, and the caller reports it when
+ * it takes the batch.
  *
  * Between two calls the caller may insert into the relations, the plan's
  * own among them, which appends tuples and may move the storage holding
@@ -59,6 +62,7 @@
 
 typedef struct relic_exec_counters relic_exec_counters_t;
 typedef struct relic_exec_env relic_exec_env_t;
+typedef struct relic_exec_error relic_exec_error_t;
 typedef struct relic_mixed_note relic_mixed_note_t;
 typedef struct relic_op_state relic_op_state_t;
 typedef struct relic_scratch relic_scratch_t;
@@ -131,21 +135,49 @@ relic_exec_work(uint64_t derivations, const relic_exec_counters_t *read)
 }
 
 /*
- * The first ordering comparison between values of different types a FILTER
- * of the running plan met, when the environment asks for such comparisons,
- * since the caller last took the record: the filter, NULL when there has
- * been none, and the two values it compared.  The executor records and
- * never reports, since reporting calls the caller's diagnostic callback and
- * marks the rule as reported, both of which change the context; the caller
- * reports the record when it takes the batch, which is before any tuple
- * derived after the comparison can have been inserted or delivered.  Only
- * the first is kept, because a rule is reported on at most once and every
- * plan running here is of one rule.
+ * What made a comparison or an assignment false only because of a value's
+ * type: an ordering comparison of two values of different types, or an
+ * operand of an arithmetic operator that is not an integer.
+ */
+enum relic_note_kind {
+	RELIC_NOTE_ORDERING,
+	RELIC_NOTE_OPERAND
+};
+
+/*
+ * The first comparison or assignment of the running plan that was false only
+ * because of a value's type, when the environment asks for such, since the
+ * caller last took the record.  `where` is the literal's location, NULL when
+ * there has been none.  An ordering names the types of the two values it
+ * compared, as the type bits of a domain identifier; an operand names its
+ * operator's spelling and its own type.
+ *
+ * The executor records and never reports, since reporting calls the
+ * caller's diagnostic callback and marks the rule as reported, both of which
+ * change the context; the caller reports the record when it takes the
+ * batch, which is before any tuple derived after the comparison can have
+ * been inserted or delivered.  Only the first is kept, because a rule is
+ * reported on at most once and every plan running here is of one rule.
  */
 struct relic_mixed_note {
-	const relic_op_filter_t	*filter;
-	relic_dom_t		 left;
-	relic_dom_t		 right;
+	const relic_location_t	*where;
+	const char		*operator;	/* OPERAND */
+	relic_dom_t		 left_type;	/* ORDERING, and OPERAND's */
+	relic_dom_t		 right_type;	/* ORDERING */
+	enum relic_note_kind	 kind;
+};
+
+/*
+ * The first expression of the running plan whose result was not defined:
+ * `where` is the literal's location, NULL when there has been none, and
+ * `status` says which way the result was undefined.  Recording one ends the
+ * plan, which is left finished; the caller reports it when it takes the
+ * batch, discards the batch and fails the evaluation.  It is kept apart from
+ * the note, which records nothing that fails anything.
+ */
+struct relic_exec_error {
+	const relic_location_t	*where;
+	enum relic_arith_status	 status;
 };
 
 /*
@@ -160,7 +192,15 @@ struct relic_mixed_note {
  * binds it and read only by operations after that one, so a new binding
  * simply overwrites the old: nothing is saved on descending and nothing
  * restored on backtracking, because no operation reads a slot a later one
- * binds.
+ * binds.  A number slot (plan.h) holds its integer in `numbers` beside its
+ * frame entry, which is the integer's identifier or zero.
+ *
+ * `pending` holds the integers of the head tuples in the batch that the
+ * value table did not hold when they were computed, `pending_count` of
+ * them, with room for one per column of the batch.  Such a column holds a
+ * pending marker, the integer's position in `pending` counting from one,
+ * with no type bits, which no identifier is; the caller resolves every
+ * marker before the batch goes anywhere.
  *
  * `states` has room for the operations of a plan of `op_room` operations,
  * one state each, so that the executor's level indexes a plan's operations
@@ -177,10 +217,11 @@ struct relic_mixed_note {
  * it will; a scratch no plan has started on is finished too, so that
  * running it derives nothing.
  *
- * `counters` and `note` are what the plans run on the scratch have counted
- * and met since the caller last took them.  The counters accumulate from
- * one plan to the next until they are taken; the note is taken before
- * another plan starts, since it names a filter of the plan that met it.
+ * `counters`, `note` and `error` are what the plans run on the scratch have
+ * counted and met since the caller last took them.  The counters accumulate
+ * from one plan to the next until they are taken; the note and the error
+ * are taken before another plan starts, since each points into the plan
+ * that met it.
  *
  * The scratch belongs to one thread for as long as a plan runs on it.
  */
@@ -188,13 +229,17 @@ struct relic_scratch {
 	const relic_plan_t	*plan;
 	const relic_exec_env_t	*env;
 	relic_dom_t		 frame[RELIC_MAX_VARIABLES];
+	int64_t			 numbers[RELIC_MAX_VARIABLES];
 	relic_op_state_t	*states;
 	relic_dom_t		*batch;
+	int64_t			*pending;
 	size_t			 op_room;
 	size_t			 batch_count;
+	size_t			 pending_count;
 	size_t			 level;
 	relic_exec_counters_t	 counters;
 	relic_mixed_note_t	 note;
+	relic_exec_error_t	 error;
 	uint16_t		 arity_room;
 	bool			 resume;
 	bool			 finished;
@@ -212,9 +257,10 @@ enum relic_exec_status {
 
 /*
  * relic_scratch_init() gives a scratch the storage it runs in: room for the
- * states of a plan of `op_room` operations, and for a batch of
- * RELIC_INSERT_BATCH tuples of `arity_room` columns, both owned by the
- * caller.  The scratch starts empty and finished.
+ * states of a plan of `op_room` operations, for a batch of
+ * RELIC_INSERT_BATCH tuples of `arity_room` columns, and for as many pending
+ * integers as the batch has columns, all owned by the caller.  The scratch
+ * starts empty and finished.
  *
  * relic_exec_start() readies the scratch to run `plan` from the beginning,
  * over what `env` gives it, resolving the view of every operation that
@@ -236,7 +282,8 @@ enum relic_exec_status {
  * run one after another derives what the whole plan does.
  */
 void	 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
-	    size_t op_room, relic_dom_t *batch, uint16_t arity_room);
+	    size_t op_room, relic_dom_t *batch, int64_t *pending,
+	    uint16_t arity_room);
 void	 relic_exec_start(relic_scratch_t *scratch,
 	    const relic_exec_env_t *env, const relic_plan_t *plan);
 void	 relic_exec_start_piece(relic_scratch_t *scratch,

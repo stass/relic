@@ -36,15 +36,34 @@ scales about eight times on sixteen threads; and the page records a
 comparison with Souffle built with OpenMP, which leads on `tc-cyclic` and
 trails on `cspa` and `chain-closure`.
 
-**Finish arithmetic.** [High, component: `lib/plan.c`, `lib/exec.c`,
-`lib/eval.c`, `lib/magic.c`, `lib/task.c`] Step 1 of
-`specs/design-arithmetic.md` section 16, the front end and the program
-model, is in: expressions parse, check and print, but the planner refuses
-every assignment and every comparison over an operator as an internal
-error, so a program using either is accepted by `-c` and fails when it
-runs. Steps 2 to 5 remain: the serial plan and executor with the integer
-table charged, the Magic rewrite over trees, the frozen round's pending
-integers, and the generator, fuzz dictionary, manual pages and benchmark.
+**Finish arithmetic.** [High, component: `lib/magic.c`, `lib/round.c`,
+`lib/task.c`, `tests/random/`] Steps 1 and 2 of
+`specs/design-arithmetic.md` section 16 are in: expressions parse, check,
+print, plan and run serially, computed integers are interned when stored
+and charged to the memory limit, and an undefined result fails the
+evaluation. Steps 3 to 5 remain:
+
+* the Magic rewrite's budgets count expression sizes, and
+  `arithmetic-magic` and `arithmetic-magic-wide` are written (step 3);
+* a parallel round whose plans compute is declined and runs serially,
+  since a worker has no pending room and no error record; the frozen
+  round's pending integers lift that (step 4);
+* the generator of `specs/design-hardening.md` gains assignments and
+  expression filters, and the benchmark a computing workload (step 5).
+
+**Interning outside evaluation grows the integer table unchecked.**
+[Medium, component: `lib/value.c`] `specs/design-arithmetic.md` section 9.1
+charges the integer table to the memory limit whole and checks it before
+each growth; only an evaluation's batch asks before growing it.  An integer
+a load, an import, `relic_fact_add()` or a prepared query interns is
+counted and not refused, so preparing and destroying queries with distinct
+integer constants grows the table past the limit, as the symbol and string
+tables already grow outside it.  A load's facts are refused by their
+store's growth, which counts the table.  The fix is one reservation path
+that asks the limit before either kind of interning grows the table, with
+a diagnostic for an interning that names no relation, and the limit sweeps
+of `test_index`, which intern before they insert, taught that a value may
+be refused.
 
 ## Build and packaging
 
@@ -1174,7 +1193,8 @@ Candidate features, in the priority order of `specs/architecture.md` section
   variable nothing else binds, a non-integer operand making the comparison
   false and an undefined result -- overflow, a zero divisor -- failing the
   evaluation, computed integers interned when a tuple holding them is
-  stored and charged to the memory limit; five steps, none started
+  stored and charged to the memory limit; in progress, under "Finish
+  arithmetic" above
 * aggregates
 * relation export
 * incremental insertion maintenance

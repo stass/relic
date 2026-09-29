@@ -1,0 +1,12 @@
+query $q0(X, Y) :- v(X), Y = X.
+    scan v(X)
+    assign Y = X
+    stream $q0(X, Y)
+query $q1(X, Y) :- v(X), Y = X * 2.
+    scan v(X)
+    assign Y = X * 2
+    emit $q1(X, Y)
+query $q2(X, Y) :- w(X, _), Y = X.
+    scan w(X, _)
+    assign Y = X
+    emit $q2(X, Y)

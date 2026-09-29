@@ -170,7 +170,7 @@ fixture_open(fixture_t *fixture, const char *scenario)
 	for (i = 0; i < GUARD_WORDS; i++)
 		fixture->batch[RELIC_INSERT_BATCH + i] = GUARD_VALUE;
 	relic_scratch_init(&fixture->scratch, fixture->states, 2,
-	    fixture->batch, 1);
+	    fixture->batch, NULL, 1);
 
 	return (true);
 }

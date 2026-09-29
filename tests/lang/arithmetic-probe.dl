@@ -1,0 +1,25 @@
+% A computed integer is looked up, tested for membership and tested for
+% absence like any value.  One the value table does not hold -- 6 and 51
+% below, which no fact states -- matches nothing and is absent from every
+% relation, whether it is probed through an index on its column or tested
+% for membership beside a column whose value the table does hold.  n/1 is
+% the smallest relation, so each plan scans it first and computes Y from
+% X, rather than testing a Y some other literal bound.
+n(1). n(5). n(50).
+m(2). m(100). m(a). m(b).
+e(2, a). e(7, b). e(100, c). e(8, d).
+pair(2, 1). pair(7, 8). pair(2, 3). pair(52, 7).
+
+member(X) :- n(X), Y = X + 1, m(Y).
+absent(X) :- n(X), Y = X + 1, not m(Y).
+looked_up(X, Z) :- n(X), Y = X * 2, e(Y, Z).
+keyed(X, W) :- n(X), Y = X + 1, pair(Y, W).
+both(X) :- n(X), Y = X + 1, Z = X + 2, pair(Y, Z).
+reversed(X) :- n(X), Y = X + 2, Z = X + 1, pair(Y, Z).
+
+member(X)?
+absent(X)?
+looked_up(X, Z)?
+keyed(X, W)?
+both(X)?
+reversed(X)?

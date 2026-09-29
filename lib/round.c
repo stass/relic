@@ -105,6 +105,7 @@ static bool	 round_is_worth_sharing(const relic_t *ctx,
 		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
 		    uint16_t *arity_roomp);
+static bool	 round_computes(const relic_round_t *round);
 static bool	 round_reads_no_target(const relic_round_t *round);
 static uint64_t	 scaled_work(uint64_t work, uint64_t range_now,
 		    uint64_t range_then);
@@ -135,7 +136,7 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
 		return (false);
-	if (!round_reads_no_target(round))
+	if (!round_reads_no_target(round) || round_computes(round))
 		return (false);
 
 	if (ctx->pool == NULL) {
@@ -353,11 +354,32 @@ round_reads_no_target(const relic_round_t *round)
 }
 
 /*
+ * Whether any item of the round computes an integer.  Such a round is run
+ * serially: a worker has nowhere to keep the integers its tuples make that
+ * the integer table lacks, and no way to report an evaluation error, and
+ * the pool is handed no round that could need either.
+ */
+static bool
+round_computes(const relic_round_t *round)
+{
+	const relic_plan_t *plan;
+	size_t i;
+
+	for (i = 0; i < round->item_count; i++) {
+		plan = round->items[i].plan;
+		if (plan != NULL && relic_plan_computes(plan))
+			return (true);
+	}
+
+	return (false);
+}
+
+/*
  * Whether an operation reads its relation as it stands when the plan
  * starts, which is past whatever the items before it in a round inserted,
  * rather than through a member's view, which the deltas fixed before the
- * round began.  A filter and the EMIT read no relation.  Every kind is
- * named, so a new one does not compile until it is placed.
+ * round began.  A filter, an assignment and the EMIT read no relation.
+ * Every kind is named, so a new one does not compile until it is placed.
  */
 static bool
 op_reads_as_it_runs(const relic_op_t *op)
@@ -369,6 +391,7 @@ op_reads_as_it_runs(const relic_op_t *op)
 	case RELIC_OP_ANTI_MEMBER:
 		return (op->u.atom.view == RELIC_VIEW_ALL);
 	case RELIC_OP_FILTER:
+	case RELIC_OP_ASSIGN:
 	case RELIC_OP_EMIT:
 		return (false);
 	}
@@ -428,9 +451,10 @@ round_needs(const relic_round_t *round, size_t *op_roomp,
 /*
  * Give a worker's scratch room for plans of `op_room` operations and a
  * batch of `arity_room` columns, growing its storage when a round needs more
- * than every round before it did.  The scratch starts afresh, which forgets
- * nothing: the counts and the note of the round before were taken or
- * forgotten when it ended.
+ * than every round before it did.  It has no room for pending integers,
+ * since no round the pool runs computes one.  The scratch starts afresh,
+ * which forgets nothing: the counts and the note of the round before were
+ * taken or forgotten when it ended.
  */
 static int
 worker_fit(relic_worker_t *worker, size_t op_room, uint16_t arity_room)
@@ -451,7 +475,7 @@ worker_fit(relic_worker_t *worker, size_t op_room, uint16_t arity_room)
 	worker->batch = batch;
 
 	relic_scratch_init(&worker->scratch, worker->states, op_room,
-	    worker->batch, arity_room);
+	    worker->batch, NULL, arity_room);
 
 	return (0);
 }
@@ -671,7 +695,7 @@ forget_worker_counters(relic_pool_t *pool)
 		worker->derivations = 0;
 		bzero(&worker->scratch.counters,
 		    sizeof(worker->scratch.counters));
-		worker->scratch.note.filter = NULL;
+		worker->scratch.note.where = NULL;
 	}
 }
 

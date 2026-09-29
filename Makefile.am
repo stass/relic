@@ -34,7 +34,7 @@ LIBOBJDIR = compat/
 ##
 
 noinst_LTLIBRARIES = librelic_internal.la
-librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
+librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
 	lib/merge.c lib/parse.c lib/plan.c lib/pool.c lib/pred.c \
@@ -51,7 +51,8 @@ include_HEADERS = include/relic.h
 dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
-	lib/account.h lib/arena.h lib/ast.h lib/atomic.h lib/depgraph.h \
+	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
+	lib/depgraph.h \
 	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/relation.h \
 	lib/round.h lib/util.h tests/unit/harness.h tests/unit/programs.h
@@ -173,7 +174,8 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 ##
 
 RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
-	tests/unit/test_diag tests/unit/test_eval tests/unit/test_exec \
+	tests/unit/test_arith tests/unit/test_compute tests/unit/test_diag \
+	tests/unit/test_eval tests/unit/test_exec \
 	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
@@ -189,6 +191,18 @@ tests_unit_test_api_LDADD = librelic.la
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_arith_SOURCES = tests/unit/test_arith.c tests/unit/harness.c
+tests_unit_test_arith_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+## Checked arithmetic uses the compiler's overflow builtins where it has
+## them; this program compiles the portable comparisons instead and runs the
+## same suite, so that both forms are held to the same answers.
+RELIC_TEST_BINARIES += tests/unit/test_arith_portable
+tests_unit_test_arith_portable_SOURCES = tests/unit/test_arith.c \
+	tests/unit/harness.c lib/arith.c
+tests_unit_test_arith_portable_CPPFLAGS = $(AM_CPPFLAGS) \
+	-DRELIC_ARITH_PORTABLE
 
 tests_unit_test_diag_SOURCES = tests/unit/test_diag.c tests/unit/harness.c
 tests_unit_test_diag_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -250,6 +264,9 @@ tests_unit_test_symbol_LDADD = librelic_internal.la $(LTLIBOBJS)
 tests_unit_test_util_SOURCES = tests/unit/test_util.c tests/unit/harness.c
 tests_unit_test_util_LDADD = librelic_internal.la $(LTLIBOBJS)
 
+tests_unit_test_compute_SOURCES = tests/unit/test_compute.c \
+	tests/unit/harness.c
+tests_unit_test_compute_LDADD = librelic_internal.la $(LTLIBOBJS)
 tests_unit_test_value_SOURCES = tests/unit/test_value.c tests/unit/harness.c
 tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 
@@ -515,8 +532,18 @@ endif
 ## a debugging session left behind, so langfiles.sh checks that too.
 ##
 
-RELIC_LANG_TESTS = tests/lang/arithmetic-depth.dl \
-	tests/lang/arithmetic-negative.dl tests/lang/arithmetic-unsafe.dl \
+RELIC_LANG_TESTS = tests/lang/arithmetic-binding.dl \
+	tests/lang/arithmetic-depth.dl tests/lang/arithmetic-explain.dl \
+	tests/lang/arithmetic-gathered.dl tests/lang/arithmetic-height.dl \
+	tests/lang/arithmetic-memory.dl \
+	tests/lang/arithmetic-mixed.dl tests/lang/arithmetic-negation.dl \
+	tests/lang/arithmetic-negative.dl tests/lang/arithmetic-order.dl \
+	tests/lang/arithmetic-overflow.dl tests/lang/arithmetic-probe.dl \
+	tests/lang/arithmetic-recursion.dl \
+	tests/lang/arithmetic-strategy.dl \
+	tests/lang/arithmetic-strategy-full.dl \
+	tests/lang/arithmetic-syntax.dl tests/lang/arithmetic-unsafe.dl \
+	tests/lang/arithmetic-zero.dl tests/lang/arithmetic-zero-query.dl \
 	tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/bad-backslash.dl \
 	tests/lang/bad-byte.dl tests/lang/bad-escape-at-end.dl \

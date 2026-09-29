@@ -1,0 +1,3 @@
+Full materialization evaluates p(0, Y) and divides by zero; the Magic
+rewrite of p(1, Y)? never does.  This test pins the default's answer and
+arithmetic-strategy-full the failure under -X no-magic.

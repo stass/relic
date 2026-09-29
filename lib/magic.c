@@ -349,8 +349,6 @@ static bool	 negates_on_demand(const relic_magic_t *magic,
 static void	 note_incomplete(relic_magic_t *magic);
 static int	 note_subsumed(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound);
-static uint64_t	 positive_slots(const relic_magic_t *magic,
-		    const relic_literal_t *literal);
 static uint16_t	 pred_arity(const relic_magic_t *magic, relic_pred_id_t pred);
 static bool	 pred_is_complete(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
@@ -1907,33 +1905,6 @@ head_bound_slots(const relic_rule_t *rule, const relic_adornment_t *head)
 }
 
 /*
- * The slots a literal binds once placed: every variable of a positive one.
- * A test binds nothing.
- */
-static uint64_t
-positive_slots(const relic_magic_t *magic, const relic_literal_t *literal)
-{
-	const relic_arg_t *args;
-	uint64_t slots;
-	uint16_t arity;
-	uint16_t i;
-
-	if (literal->kind != RELIC_LITERAL_POSITIVE)
-		return (0);
-
-	args = literal->u.atom.args;
-	arity = pred_arity(magic, literal->u.atom.pred);
-
-	slots = 0;
-	for (i = 0; i < arity; i++) {
-		if (args[i].kind == RELIC_ARG_VARIABLE)
-			slots |= UINT64_C(1) << args[i].u.slot;
-	}
-
-	return (slots);
-}
-
-/*
  * The guard of an adorned rule: its head's magic predicate over the head's
  * bound arguments.
  */
@@ -2412,7 +2383,7 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 
 		prefix.body[prefix.length] = literal;
 		prefix.length++;
-		bound |= positive_slots(magic, &literal);
+		bound |= relic_plan_literal_binds(magic->ctx, &literal, bound);
 	}
 
 	bzero(draft, sizeof(*draft));
@@ -2650,7 +2621,7 @@ reach_calls_in_order(relic_magic_t *magic, const relic_rule_t *rule,
 				return (-1);
 		}
 
-		bound |= positive_slots(magic, literal);
+		bound |= relic_plan_literal_binds(magic->ctx, literal, bound);
 	}
 
 	return (0);

@@ -1105,6 +1105,23 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation, uint64_t hash)
 	return (0);
 }
 
+int
+relic_relation_admit_integers(relic_t *ctx, const relic_relation_t *relation,
+    size_t projected_bytes)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (!relic_account_exceeds(&ctx->account, ctx->account.value_bytes,
+	    projected_bytes))
+		return (0);
+
+	report_limit(ctx, "memory", ctx->account.limit, "deriving",
+	    relic_relation_describe(ctx, relation, described,
+	    sizeof(described)));
+
+	return (-1);
+}
+
 /*
  * Report a configured limit refusing something, in the form every limit
  * shares: the limit, what it was set to, and what was being done to which

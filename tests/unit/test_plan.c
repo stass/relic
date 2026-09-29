@@ -38,6 +38,8 @@
 #include "internal.h"
 
 #define	SCENARIO_ACCESS		"each binding pattern gets its access path"
+#define	SCENARIO_ASSIGN		"an assignment binds a slot of its kind"
+#define	SCENARIO_EQUALITY	"an equality of two literals' variables assigns"
 #define	SCENARIO_COMPARISONS	"a comparison goes where its operands are bound"
 #define	SCENARIO_BUILT		"only plans some delta selects are built"
 #define	SCENARIO_PLACED		"a delta literal is placed like any other"
@@ -133,7 +135,7 @@ static void	 generate_rule(text_t *text, uint32_t *state, size_t number);
 static void	 generate_positive(text_t *text, uint32_t *state,
 		    uint32_t *variables);
 static void	 generate_test(text_t *text, uint32_t *state,
-		    uint32_t variables);
+		    uint32_t *variables);
 static void	 generate_variable(text_t *text, uint32_t *state,
 		    uint32_t variables);
 static uint16_t	 relation_arity(size_t relation);
@@ -145,13 +147,18 @@ static bool	 reference_score(relic_t *ctx, const relic_atom_t *atom,
 static bool	 reference_better(uint16_t bound_args, size_t estimate,
 		    uint16_t best_bound_args, size_t best_estimate);
 static size_t	 reference_place_tests(relic_t *ctx, const relic_rule_t *rule,
-		    uint64_t bound, bool *placed, size_t *order, size_t count);
+		    uint64_t *boundp, bool *placed, size_t *order,
+		    size_t count);
 static bool	 reference_test_ready(relic_t *ctx,
 		    const relic_literal_t *literal, uint64_t bound);
+static bool	 reference_assigns(const relic_literal_t *literal,
+		    uint64_t bound, uint16_t *slotp);
 static uint64_t	 reference_slots(const relic_arg_t *args, uint16_t count);
 static uint64_t	 reference_expr_slots(const relic_expr_t *expr);
 static void	 check_ranked_program(uint32_t *state, unsigned int flags);
 static void	 a_comparison_goes_where_its_operands_are_bound(void);
+static void	 an_assignment_binds_a_slot_of_its_kind(void);
+static void	 an_equality_of_two_literals_variables_assigns(void);
 static void	 a_delta_literal_must_be_positive(void);
 static void	 a_delta_literal_is_placed_like_any_other(void);
 static void	 a_textual_variant_keeps_its_written_order(void);
@@ -513,6 +520,108 @@ a_comparison_goes_where_its_operands_are_bound(void)
 		    filter);
 		filter++;
 	}
+
+	fixture_release(&fixture);
+}
+
+/*
+ * An assignment goes where its value's slots are bound, whatever its written
+ * position, and one it makes placeable goes a pass later, after those
+ * placeable already: C = B * 2 waits for B = A + 1 and follows D = A,
+ * although written first.  A slot assigned an expression, or another number
+ * slot, is a number slot, which the EMIT reads as a number; one assigned a
+ * domain slot is a domain slot, read as any bound slot is.  A plan that
+ * evaluates an operator computes, and one that only copies does not.
+ */
+static void
+an_assignment_binds_a_slot_of_its_kind(void)
+{
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_ASSIGN, RELIC_OP_ASSIGN,
+		RELIC_OP_ASSIGN, RELIC_OP_ASSIGN, RELIC_OP_ASSIGN, RELIC_OP_EMIT
+	};
+	static const char *const names[] = { "B", "D", "C", "E", "F" };
+	static const bool numbers[] = { true, false, true, false, true };
+	static const char *const program = "n(1).\n"
+	    "h(C, D, E, F) :- C = B * 2, n(A), B = A + 1, D = A, E = D, "
+	    "F = C.\n"
+	    "g(Y) :- n(X), Y = X.\n";
+	enum relic_term_action emitted[4];
+	const relic_op_t *op;
+	fixture_t fixture;
+	size_t i;
+
+	if (!fixture_plan(&fixture, program, 0)) {
+		check(false, SCENARIO_ASSIGN, "the rule is planned");
+		fixture_release(&fixture);
+		return;
+	}
+
+	check(kinds_are(&fixture.plan, kinds, 7), SCENARIO_ASSIGN,
+	    "a scan and five assignments precede the EMIT");
+	for (i = 0; i < 5 && fixture.plan.op_count == 7; i++) {
+		op = &fixture.plan.ops[i + 1];
+		checkf(op->u.assign.slot == slot_named(&fixture, 0, names[i]),
+		    SCENARIO_ASSIGN, "assignment %zu should bind %s", i,
+		    names[i]);
+		checkf(op->u.assign.number == numbers[i], SCENARIO_ASSIGN,
+		    "%s should be a %s slot", names[i],
+		    numbers[i] ? "number" : "domain");
+	}
+
+	if (fixture.plan.op_count == 7) {
+		for (i = 0; i < 4; i++)
+			emitted[i] = fixture.plan.ops[6].u.atom.terms[i].action;
+		check(emitted[0] == RELIC_PLAN_NUMBER &&
+		    emitted[1] == RELIC_PLAN_BOUND &&
+		    emitted[2] == RELIC_PLAN_BOUND &&
+		    emitted[3] == RELIC_PLAN_NUMBER, SCENARIO_ASSIGN,
+		    "the EMIT reads C and F as numbers, D and E as bound");
+	}
+	check(relic_plan_computes(&fixture.plan), SCENARIO_ASSIGN,
+	    "a plan evaluating an operator computes");
+	fixture_release(&fixture);
+
+	if (!fixture_plan(&fixture, program, 1)) {
+		check(false, SCENARIO_ASSIGN, "the copying rule is planned");
+		fixture_release(&fixture);
+		return;
+	}
+	check(fixture.plan.op_count == 3 &&
+	    fixture.plan.ops[1].kind == RELIC_OP_ASSIGN &&
+	    !fixture.plan.ops[1].u.assign.number &&
+	    !relic_plan_computes(&fixture.plan), SCENARIO_ASSIGN,
+	    "a plan that copies a slot binds a domain slot and computes "
+	    "nothing");
+	fixture_release(&fixture);
+}
+
+/*
+ * In p(X), q(Y), X = Y the equality is placed once p(X) binds X, before
+ * q(Y) binds Y, so it assigns Y, and q(Y), fully bound, is a membership
+ * test rather than a scan compared afterwards.
+ */
+static void
+an_equality_of_two_literals_variables_assigns(void)
+{
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_ASSIGN, RELIC_OP_MEMBER, RELIC_OP_EMIT
+	};
+	fixture_t fixture;
+
+	if (!fixture_plan(&fixture, "p(a).\nq(a).\n"
+	    "r(X) :- p(X), q(Y), X = Y.\n", 0)) {
+		check(false, SCENARIO_EQUALITY, "the rule is planned");
+		fixture_release(&fixture);
+		return;
+	}
+
+	check(kinds_are(&fixture.plan, kinds, 4), SCENARIO_EQUALITY,
+	    "the equality assigns Y and q(Y) is a membership test");
+	check(fixture.plan.op_count == 4 &&
+	    fixture.plan.ops[1].u.assign.slot == slot_named(&fixture, 0, "Y") &&
+	    !fixture.plan.ops[1].u.assign.number, SCENARIO_EQUALITY,
+	    "Y is a domain slot");
 
 	fixture_release(&fixture);
 }
@@ -1641,25 +1750,39 @@ generate_positive(text_t *text, uint32_t *state, uint32_t *variables)
 
 /*
  * A test reading only variables in `variables`: a comparison of a variable
- * with another or with a constant, or a negated literal over a generated
- * relation, which is complete.
+ * with another or with a constant, a negated literal over a generated
+ * relation, which is complete, or an equality of any variable with an
+ * expression over those in `variables`.  The equality's variable is added
+ * to `variables`: when no positive literal binds it, the equality is the
+ * assignment that does, and when one does, whether the equality assigns it
+ * or tests it depends on which the plan places first.
  */
 static void
-generate_test(text_t *text, uint32_t *state, uint32_t variables)
+generate_test(text_t *text, uint32_t *state, uint32_t *variables)
 {
 	uint32_t relation;
+	uint32_t target;
 	uint16_t column;
 
-	switch (next_random(state, 3)) {
+	switch (next_random(state, 4)) {
 	case 0:
-		generate_variable(text, state, variables);
+		generate_variable(text, state, *variables);
 		text_append(text, " < ");
-		generate_variable(text, state, variables);
+		generate_variable(text, state, *variables);
 		return;
 	case 1:
-		generate_variable(text, state, variables);
+		generate_variable(text, state, *variables);
 		text_append(text, " != %u", (unsigned int)next_random(state,
 		    RANKED_MAX_VALUES));
+		return;
+	case 2:
+		target = next_random(state, RANKED_VARIABLES);
+		text_append(text, "X%u = ", (unsigned int)target);
+		generate_variable(text, state, *variables);
+		if (next_random(state, 2) == 0)
+			text_append(text, " + %u", (unsigned int)next_random(
+			    state, RANKED_MAX_VALUES));
+		*variables |= UINT32_C(1) << target;
 		return;
 	default:
 		break;
@@ -1669,7 +1792,7 @@ generate_test(text_t *text, uint32_t *state, uint32_t variables)
 	text_append(text, "not r%u(", (unsigned int)relation);
 	for (column = 0; column < relation_arity(relation); column++) {
 		text_append(text, "%s", column > 0 ? ", " : "");
-		generate_variable(text, state, variables);
+		generate_variable(text, state, *variables);
 	}
 	text_append(text, ")");
 }
@@ -1702,7 +1825,7 @@ generate_rule(text_t *text, uint32_t *state, size_t number)
 	tests = next_random(state, RANKED_MAX_TESTS + 1);
 	for (i = 0; i < tests; i++) {
 		text_append(&body, ", ");
-		generate_test(&body, state, variables);
+		generate_test(&body, state, &variables);
 	}
 
 	text_append(text, "h%zu(", number);
@@ -1821,9 +1944,42 @@ reference_better(uint16_t bound_args, size_t estimate,
 }
 
 /*
- * Whether a test reads only slots in `bound`.  A negated literal holding `_`
- * would count as ready here and never in the planner, which never places
- * one; the generated negations hold variables only.
+ * Whether an equality assigns a variable where `bound` is bound: one side a
+ * variable not in `bound`, the left one first, and the other side reading
+ * only slots in it.  The slot assigned is stored in *slotp.
+ */
+static bool
+reference_assigns(const relic_literal_t *literal, uint64_t bound,
+    uint16_t *slotp)
+{
+	const relic_comparison_t *comparison;
+	const relic_expr_t *sides[2];
+	size_t i;
+
+	if (literal->kind != RELIC_LITERAL_COMPARISON ||
+	    literal->u.comparison.op != RELIC_CMP_EQ)
+		return (false);
+
+	comparison = &literal->u.comparison;
+	sides[0] = comparison->left;
+	sides[1] = comparison->right;
+	for (i = 0; i < 2; i++) {
+		if (sides[i]->kind == RELIC_EXPR_VARIABLE &&
+		    (bound & (UINT64_C(1) << sides[i]->u.slot)) == 0 &&
+		    (reference_expr_slots(sides[1 - i]) & ~bound) == 0) {
+			*slotp = sides[i]->u.slot;
+			return (true);
+		}
+	}
+
+	return (false);
+}
+
+/*
+ * Whether a test can be placed where `bound` is bound: it reads only slots
+ * in `bound`, or it is an assignment.  A negated literal holding `_` would
+ * count as ready here and never in the planner, which never places one; the
+ * generated negations hold variables only.
  */
 static bool
 reference_test_ready(relic_t *ctx, const relic_literal_t *literal,
@@ -1831,12 +1987,14 @@ reference_test_ready(relic_t *ctx, const relic_literal_t *literal,
 {
 	const relic_pred_t *pred;
 	uint64_t slots;
+	uint16_t slot;
 
 	switch (literal->kind) {
 	case RELIC_LITERAL_COMPARISON:
 		slots = reference_expr_slots(literal->u.comparison.left) |
 		    reference_expr_slots(literal->u.comparison.right);
-		return ((slots & ~bound) == 0);
+		return ((slots & ~bound) == 0 ||
+		    reference_assigns(literal, bound, &slot));
 	case RELIC_LITERAL_NEGATED:
 		pred = relic_pred_of(ctx, literal->u.atom.pred);
 		return (pred != NULL && (reference_slots(literal->u.atom.args,
@@ -1849,24 +2007,36 @@ reference_test_ready(relic_t *ctx, const relic_literal_t *literal,
 }
 
 /*
- * Append every test not yet placed that `bound` makes ready, in body order,
- * and return the new length of the order.
+ * Append every test not yet placed that *boundp makes ready, in body order,
+ * adding to *boundp what each assignment binds, and again as long as one
+ * bound something; return the new length of the order.  A test an
+ * assignment makes ready is placed after every test ready without it,
+ * since it is placeable only from a later point: each round asks what the
+ * slots bound when it began make ready.
  */
 static size_t
-reference_place_tests(relic_t *ctx, const relic_rule_t *rule, uint64_t bound,
-    bool *placed, size_t *order, size_t count)
+reference_place_tests(relic_t *ctx, const relic_rule_t *rule,
+    uint64_t *boundp, bool *placed, size_t *order, size_t count)
 {
+	uint64_t point;
+	uint16_t slot;
 	size_t i;
 
-	for (i = 0; i < rule->body_length; i++) {
-		if (placed[i] || !reference_test_ready(ctx, &rule->body[i],
-		    bound))
-			continue;
+	do {
+		point = *boundp;
 
-		placed[i] = true;
-		order[count] = i;
-		count++;
-	}
+		for (i = 0; i < rule->body_length; i++) {
+			if (placed[i] || !reference_test_ready(ctx,
+			    &rule->body[i], point))
+				continue;
+
+			placed[i] = true;
+			order[count] = i;
+			count++;
+			if (reference_assigns(&rule->body[i], *boundp, &slot))
+				*boundp |= UINT64_C(1) << slot;
+		}
+	} while (*boundp != point);
 
 	return (count);
 }
@@ -1898,7 +2068,7 @@ reference_order(relic_t *ctx, const relic_rule_t *rule, uint64_t bound,
 
 	reorder = (ctx->config.flags & RELIC_F_NO_REORDER) == 0;
 	bzero(placed, sizeof(placed));
-	count = reference_place_tests(ctx, rule, bound, placed, order, 0);
+	count = reference_place_tests(ctx, rule, &bound, placed, order, 0);
 
 	while (count < rule->body_length) {
 		best = SIZE_MAX;
@@ -1935,8 +2105,8 @@ reference_order(relic_t *ctx, const relic_rule_t *rule, uint64_t bound,
 		count++;
 		bound |= reference_slots(rule->body[best].u.atom.args,
 		    relic_pred_of(ctx, rule->body[best].u.atom.pred)->arity);
-		count = reference_place_tests(ctx, rule, bound, placed, order,
-		    count);
+		count = reference_place_tests(ctx, rule, &bound, placed,
+		    order, count);
 	}
 
 	return (true);
@@ -2134,6 +2304,8 @@ main(void)
 	a_scans_columns_bind_match_or_ignore();
 	a_fully_bound_literal_is_a_membership_test();
 	a_comparison_goes_where_its_operands_are_bound();
+	an_assignment_binds_a_slot_of_its_kind();
+	an_equality_of_two_literals_variables_assigns();
 	a_textual_variant_keeps_its_written_order();
 	a_delta_literal_is_placed_like_any_other();
 	only_plans_some_delta_selects_are_built();

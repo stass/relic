@@ -187,9 +187,18 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
  *
  * relic_value_order() orders two values of one type and calls two of
  * different types, or an identifier the context never assigned, unordered.
+ *
+ * relic_value_integer() gives the integer an identifier names, and false
+ * for a symbol, a string or an identifier never assigned.
+ * relic_value_find_integer() gives the identifier the integer table holds
+ * an integer under, or zero, which names no value, when it holds none: the
+ * lookup half of interning, which writes nothing.
  */
 enum relic_order relic_value_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
+bool	 relic_value_integer(const relic_t *ctx, relic_dom_t dom,
+	    int64_t *integerp);
+relic_dom_t relic_value_find_integer(const relic_t *ctx, int64_t integer);
 
 /*
  * lib/account.c

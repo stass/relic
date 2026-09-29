@@ -1,0 +1,11 @@
+% A query whose plan computes is gathered, since any binding may fail it
+% and no row may be delivered before nothing can; one that assigns from a
+% term alone streams, since the variable it assigns is a function of those
+% bound before it.  A wildcard still gathers, since two bindings differing
+% only under it would give one row twice.
+v(1). v(2).
+w(a, b). w(a, c).
+
+v(X), Y = X?
+v(X), Y = X * 2?
+w(X, _), Y = X?

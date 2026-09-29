@@ -122,7 +122,7 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 	task->candidate_count = worker->candidates.count -
 	    task->first_candidate;
 	task->note = scratch->note;
-	scratch->note.filter = NULL;
+	scratch->note.where = NULL;
 	task->work = worker_work(worker) - work_before;
 
 	return (status);

@@ -41,6 +41,14 @@
  * scratch or in relations nobody writes while the plan runs, so stopping
  * and continuing changes nothing it derives.
  *
+ * An expression is a postfix program run on a stack of cells, each holding a
+ * domain identifier or a computed integer.  An operator reads a cell as an
+ * integer, decoding an identifier through the integer table, and a cell
+ * that is a symbol or a string has no integer: the run has no value, and the
+ * operation running it rejects the binding.  A result arithmetic does not
+ * define ends the run with an error instead, recorded in the scratch, and
+ * the plan ends as though every generator were exhausted.
+ *
  * The context and every relation are read-only here, as frozen.h makes
  * them, and only the scratch is written.  The views of a plan are resolved
  * when it starts, and no view reaches past the end its relation had then,
@@ -49,20 +57,66 @@
  * changes nothing the plan reads.
  */
 
+typedef struct relic_cell relic_cell_t;
+
+/*
+ * One cell of the stack a postfix program runs on: a domain identifier
+ * pushed from a constant or a domain slot, or an integer pushed from a
+ * number slot or computed.
+ */
+struct relic_cell {
+	union {
+		relic_dom_t	dom;
+		int64_t		number;
+	}		u;
+	bool		is_number;
+};
+
+/*
+ * How a postfix program's run ended: with a value, with none because an
+ * operand was not an integer, or with a result arithmetic does not define.
+ */
+enum relic_run_end {
+	RELIC_RUN_VALUE,
+	RELIC_RUN_NO_VALUE,
+	RELIC_RUN_UNDEFINED
+};
+
 static void	 build_tuple(const relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, relic_dom_t *tuple);
-static bool	 comparison_holds(const relic_t *ctx,
-		    enum relic_compare_op compare, relic_dom_t left,
-		    relic_dom_t right);
-static bool	 comparison_is_mixed(const relic_t *ctx,
-		    enum relic_compare_op compare, relic_dom_t left,
-		    relic_dom_t right);
+static relic_dom_t cell_type(relic_cell_t cell);
+static bool	 cell_integer(const relic_exec_env_t *env, relic_cell_t cell,
+		    int64_t *integerp);
+static enum relic_order cells_order(const relic_exec_env_t *env,
+		    relic_cell_t left, relic_cell_t right);
+static relic_cell_t dom_cell(relic_dom_t dom);
+static relic_dom_t emit_column(relic_scratch_t *scratch,
+		    const relic_plan_term_t *term);
 static void	 emit_head(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom);
+static relic_cell_t number_cell(int64_t number);
+static const char *operator_spelling(const relic_step_t *step);
+static bool	 order_satisfies(enum relic_compare_op compare,
+		    enum relic_order order);
+static void	 record_error(relic_scratch_t *scratch,
+		    const relic_location_t *where,
+		    enum relic_arith_status status);
+static void	 record_operand_note(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    const relic_step_t *step, relic_cell_t operand);
+static void	 record_ordering_note(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    relic_cell_t left, relic_cell_t right);
+static enum relic_run_end run_postfix(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_postfix_t *postfix,
+		    const relic_location_t *where, relic_cell_t *valuep);
 static void	 resolve_views(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_plan_t *plan);
 static bool	 step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		    const relic_op_t *op, relic_op_state_t *state, bool resume);
+static bool	 step_assign(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env,
+		    const relic_op_assign_t *assign);
 static bool	 step_filter(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
 		    const relic_op_filter_t *filter);
@@ -84,12 +138,13 @@ static enum relic_exec_status yield_after_emit(relic_scratch_t *scratch,
 
 void
 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
-    size_t op_room, relic_dom_t *batch, uint16_t arity_room)
+    size_t op_room, relic_dom_t *batch, int64_t *pending, uint16_t arity_room)
 {
 	bzero(scratch, sizeof(*scratch));
 	scratch->states = states;
 	scratch->op_room = op_room;
 	scratch->batch = batch;
+	scratch->pending = pending;
 	scratch->arity_room = arity_room;
 	scratch->finished = true;
 }
@@ -128,6 +183,7 @@ tuple_matches(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 		switch (term->action) {
 		case RELIC_PLAN_CONSTANT:
 		case RELIC_PLAN_BOUND:
+		case RELIC_PLAN_NUMBER:
 			if (tuple[column] != term_value(scratch, term))
 				return (false);
 			break;
@@ -157,29 +213,20 @@ build_tuple(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
 }
 
 /*
- * Whether a comparison holds between two values.
- *
- * Equality is identity of domain identifiers, which is exact because every
- * value is interned: equal values have equal identifiers and nothing else
- * does.  Ordering decodes both identifiers and compares the values, and
+ * Whether a comparison holds between two values that `order` orders.  Two
  * values of different types are unordered, which satisfies no ordering
- * comparison.  The binding is filtered out rather than reported as an error,
- * because a column may legitimately hold more than one type.
+ * comparison and makes them unequal.  The binding is filtered out rather
+ * than reported as an error, because a column may legitimately hold more
+ * than one type.
  */
 static bool
-comparison_holds(const relic_t *ctx, enum relic_compare_op compare,
-    relic_dom_t left, relic_dom_t right)
+order_satisfies(enum relic_compare_op compare, enum relic_order order)
 {
-	enum relic_order order;
-
-	if (compare == RELIC_CMP_EQ)
-		return (left == right);
-	if (compare == RELIC_CMP_NE)
-		return (left != right);
-
-	order = relic_value_order(ctx, left, right);
-
 	switch (compare) {
+	case RELIC_CMP_EQ:
+		return (order == RELIC_ORDER_EQUAL);
+	case RELIC_CMP_NE:
+		return (order != RELIC_ORDER_EQUAL);
 	case RELIC_CMP_LT:
 		return (order == RELIC_ORDER_LESS);
 	case RELIC_CMP_LE:
@@ -190,12 +237,252 @@ comparison_holds(const relic_t *ctx, enum relic_compare_op compare,
 	case RELIC_CMP_GE:
 		return (order == RELIC_ORDER_GREATER ||
 		    order == RELIC_ORDER_EQUAL);
-	case RELIC_CMP_EQ:
-	case RELIC_CMP_NE:
-		break;
 	}
 
 	return (false);
+}
+
+static relic_cell_t
+dom_cell(relic_dom_t dom)
+{
+	relic_cell_t cell;
+
+	bzero(&cell, sizeof(cell));
+	cell.u.dom = dom;
+
+	return (cell);
+}
+
+static relic_cell_t
+number_cell(int64_t number)
+{
+	relic_cell_t cell;
+
+	bzero(&cell, sizeof(cell));
+	cell.u.number = number;
+	cell.is_number = true;
+
+	return (cell);
+}
+
+/*
+ * The integer a cell holds, when it holds one: its own, or the one its
+ * identifier names.  A symbol or a string has none.
+ */
+static bool
+cell_integer(const relic_exec_env_t *env, relic_cell_t cell, int64_t *integerp)
+{
+	if (cell.is_number) {
+		*integerp = cell.u.number;
+		return (true);
+	}
+
+	return (relic_value_integer(env->ctx, cell.u.dom, integerp));
+}
+
+/*
+ * The type of a cell's value, as a domain identifier's type bits.
+ */
+static relic_dom_t
+cell_type(relic_cell_t cell)
+{
+	if (cell.is_number)
+		return (RELIC_DOM_INTEGER);
+
+	return (cell.u.dom & RELIC_DOM_TYPE_MASK);
+}
+
+/*
+ * How two cells' values order, by the rules of comparison: two identifiers
+ * as their values order, two integers numerically, and an integer against
+ * an identifier as against the integer it names, unordered against a symbol
+ * or a string.
+ */
+static enum relic_order
+cells_order(const relic_exec_env_t *env, relic_cell_t left, relic_cell_t right)
+{
+	int64_t left_integer;
+	int64_t right_integer;
+
+	if (!left.is_number && !right.is_number)
+		return (relic_value_order(env->ctx, left.u.dom, right.u.dom));
+
+	if (!cell_integer(env, left, &left_integer) ||
+	    !cell_integer(env, right, &right_integer))
+		return (RELIC_ORDER_UNORDERED);
+
+	if (left_integer < right_integer)
+		return (RELIC_ORDER_LESS);
+	if (left_integer > right_integer)
+		return (RELIC_ORDER_GREATER);
+
+	return (RELIC_ORDER_EQUAL);
+}
+
+/*
+ * Record, when the environment asks and nothing is recorded yet, that an
+ * ordering comparison at `where` was false because its values' types
+ * differ.
+ */
+static void
+record_ordering_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, relic_cell_t left, relic_cell_t right)
+{
+	relic_mixed_note_t *note;
+
+	note = &scratch->note;
+	if (!env->note_mixed || note->where != NULL)
+		return;
+
+	bzero(note, sizeof(*note));
+	note->where = where;
+	note->kind = RELIC_NOTE_ORDERING;
+	note->left_type = cell_type(left);
+	note->right_type = cell_type(right);
+}
+
+/*
+ * Record, when the environment asks and nothing is recorded yet, that the
+ * operator of `step` at `where` was given an operand that is not an integer.
+ */
+static void
+record_operand_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, const relic_step_t *step,
+    relic_cell_t operand)
+{
+	relic_mixed_note_t *note;
+
+	note = &scratch->note;
+	if (!env->note_mixed || note->where != NULL)
+		return;
+
+	bzero(note, sizeof(*note));
+	note->where = where;
+	note->kind = RELIC_NOTE_OPERAND;
+	note->operator = operator_spelling(step);
+	note->left_type = cell_type(operand);
+}
+
+/*
+ * Record the first result of the running plan that arithmetic does not
+ * define.
+ */
+static void
+record_error(relic_scratch_t *scratch, const relic_location_t *where,
+    enum relic_arith_status status)
+{
+	if (scratch->error.where != NULL)
+		return;
+
+	scratch->error.where = where;
+	scratch->error.status = status;
+}
+
+/*
+ * How an arithmetic step's operator is written.
+ */
+static const char *
+operator_spelling(const relic_step_t *step)
+{
+	if (step->kind == RELIC_STEP_NEGATE)
+		return ("-");
+
+	switch (step->u.op) {
+	case RELIC_ARITH_ADD:
+		return ("+");
+	case RELIC_ARITH_SUBTRACT:
+		return ("-");
+	case RELIC_ARITH_MULTIPLY:
+		return ("*");
+	case RELIC_ARITH_DIVIDE:
+		return ("/");
+	case RELIC_ARITH_REMAINDER:
+		break;
+	}
+
+	return ("mod");
+}
+
+/*
+ * Run a postfix program of a literal written at `where`, leaving its value
+ * in *valuep.  Each step pushes a cell or pops its operands and pushes its
+ * result, and the planner sized the program so that the stack never holds
+ * more than RELIC_POSTFIX_DEPTH_MAX cells.  An operand that is not an integer
+ * ends the run with no value, and a result arithmetic does not define ends
+ * it with the error recorded.
+ */
+static enum relic_run_end
+run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_postfix_t *postfix, const relic_location_t *where,
+    relic_cell_t *valuep)
+{
+	relic_cell_t stack[RELIC_POSTFIX_DEPTH_MAX];
+	enum relic_arith_status status;
+	const relic_step_t *step;
+	int64_t right;
+	int64_t left;
+	int64_t result;
+	size_t held;
+	size_t i;
+
+	assert(postfix->depth <= RELIC_POSTFIX_DEPTH_MAX);
+	held = 0;
+
+	for (i = 0; i < postfix->step_count; i++) {
+		step = &postfix->steps[i];
+
+		switch (step->kind) {
+		case RELIC_STEP_CONSTANT:
+			assert(held < postfix->depth);
+			stack[held++] = dom_cell(step->u.constant);
+			continue;
+		case RELIC_STEP_DOMAIN_SLOT:
+			assert(held < postfix->depth);
+			stack[held++] = dom_cell(scratch->frame[step->u.slot]);
+			continue;
+		case RELIC_STEP_NUMBER_SLOT:
+			assert(held < postfix->depth);
+			stack[held++] = number_cell(
+			    scratch->numbers[step->u.slot]);
+			continue;
+		case RELIC_STEP_NEGATE:
+			assert(held >= 1);
+			if (!cell_integer(env, stack[held - 1], &right)) {
+				record_operand_note(scratch, env, where, step,
+				    stack[held - 1]);
+				return (RELIC_RUN_NO_VALUE);
+			}
+			status = relic_arith_negate(right, &result);
+			break;
+		case RELIC_STEP_BINARY:
+			assert(held >= 2);
+			if (!cell_integer(env, stack[held - 2], &left)) {
+				record_operand_note(scratch, env, where, step,
+				    stack[held - 2]);
+				return (RELIC_RUN_NO_VALUE);
+			}
+			if (!cell_integer(env, stack[held - 1], &right)) {
+				record_operand_note(scratch, env, where, step,
+				    stack[held - 1]);
+				return (RELIC_RUN_NO_VALUE);
+			}
+			held--;
+			status = relic_arith_binary(step->u.op, left, right,
+			    &result);
+			break;
+		}
+
+		if (status != RELIC_ARITH_DEFINED) {
+			record_error(scratch, where, status);
+			return (RELIC_RUN_UNDEFINED);
+		}
+		stack[held - 1] = number_cell(result);
+	}
+
+	assert(held == 1);
+	*valuep = stack[0];
+
+	return (RELIC_RUN_VALUE);
 }
 
 /*
@@ -256,6 +543,7 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			    &op->u.atom);
 			break;
 		case RELIC_OP_FILTER:
+		case RELIC_OP_ASSIGN:
 		case RELIC_OP_EMIT:
 			break;
 		}
@@ -376,52 +664,102 @@ step_member(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
 }
 
 /*
- * Whether a comparison failed only because it ordered values of different
- * types, which is what RELIC_F_NOTE_MIXED reports.  Equality and inequality
- * are defined across types and never count.
- */
-static bool
-comparison_is_mixed(const relic_t *ctx, enum relic_compare_op compare,
-    relic_dom_t left, relic_dom_t right)
-{
-	if (compare == RELIC_CMP_EQ || compare == RELIC_CMP_NE)
-		return (false);
-
-	return (relic_value_order(ctx, left, right) == RELIC_ORDER_UNORDERED);
-}
-
-/*
- * A FILTER: whether its comparison holds between the values of its
- * operands.
+ * A FILTER: whether its comparison holds between the values of its two
+ * postfix programs.  A side with no value makes the comparison false, so
+ * the right side is not run once the left has none: an undefined result
+ * the right side would meet is not met, as it is not when an earlier
+ * filter drops the binding.
  *
- * When the environment asks for them, a comparison that fails because it
- * ordered values of different types is also recorded in the scratch, when it
- * is the first since the caller took the record, for the caller to report.
- * Otherwise a filter costs exactly the comparison and changes nothing.
+ * Two identifiers are equal exactly when they are one identifier, since
+ * every value is interned, so an equality of identifiers compares them
+ * without decoding.  Otherwise the values are ordered, and when the
+ * environment asks for them, a comparison that fails because it ordered
+ * values of different types is recorded in the scratch for the caller to
+ * report, when it is the first since the caller took the record.
  */
 static bool
 step_filter(relic_scratch_t *scratch, const relic_exec_env_t *env,
     const relic_op_filter_t *filter)
 {
-	relic_mixed_note_t *note;
-	relic_dom_t left;
-	relic_dom_t right;
+	enum relic_order order;
+	relic_cell_t left;
+	relic_cell_t right;
 
-	left = term_value(scratch, &filter->left);
-	right = term_value(scratch, &filter->right);
+	if (run_postfix(scratch, env, &filter->left, &filter->where,
+	    &left) != RELIC_RUN_VALUE)
+		return (false);
 
-	if (comparison_holds(env->ctx, filter->compare, left, right))
+	if (run_postfix(scratch, env, &filter->right, &filter->where,
+	    &right) != RELIC_RUN_VALUE)
+		return (false);
+
+	if (!left.is_number && !right.is_number &&
+	    (filter->compare == RELIC_CMP_EQ ||
+	    filter->compare == RELIC_CMP_NE))
+		return ((left.u.dom == right.u.dom) ==
+		    (filter->compare == RELIC_CMP_EQ));
+
+	order = cells_order(env, left, right);
+	if (order_satisfies(filter->compare, order))
 		return (true);
 
-	note = &scratch->note;
-	if (env->note_mixed && note->filter == NULL &&
-	    comparison_is_mixed(env->ctx, filter->compare, left, right)) {
-		note->filter = filter;
-		note->left = left;
-		note->right = right;
-	}
+	if (order == RELIC_ORDER_UNORDERED &&
+	    filter->compare != RELIC_CMP_EQ && filter->compare != RELIC_CMP_NE)
+		record_ordering_note(scratch, env, &filter->where, left, right);
 
 	return (false);
+}
+
+/*
+ * An ASSIGN: bind its slot to the value of its program, an identifier into
+ * a domain slot or an integer into a number slot, whose frame entry is then
+ * the integer's identifier when the value table holds one and zero when it
+ * does not.  A program with no value binds nothing and rejects the binding.
+ */
+static bool
+step_assign(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_op_assign_t *assign)
+{
+	relic_cell_t value;
+
+	if (run_postfix(scratch, env, &assign->value, &assign->where,
+	    &value) != RELIC_RUN_VALUE)
+		return (false);
+
+	assert(value.is_number == assign->number);
+	if (!assign->number) {
+		scratch->frame[assign->slot] = value.u.dom;
+		return (true);
+	}
+
+	scratch->numbers[assign->slot] = value.u.number;
+	scratch->frame[assign->slot] = relic_value_find_integer(env->ctx,
+	    value.u.number);
+
+	return (true);
+}
+
+/*
+ * The value an EMIT writes for one column.  A number slot whose integer the
+ * value table holds writes its identifier; one whose integer it does not
+ * hold appends the integer to the scratch's pending integers and writes a
+ * pending marker, the integer's position there counting from one, which has
+ * no type bits and so is no identifier.
+ */
+static relic_dom_t
+emit_column(relic_scratch_t *scratch, const relic_plan_term_t *term)
+{
+	if (term->action != RELIC_PLAN_NUMBER ||
+	    scratch->frame[term->u.slot] != 0)
+		return (term_value(scratch, term));
+
+	assert(scratch->pending != NULL && scratch->pending_count <
+	    (size_t)RELIC_INSERT_BATCH * scratch->arity_room);
+	scratch->pending[scratch->pending_count] =
+	    scratch->numbers[term->u.slot];
+	scratch->pending_count++;
+
+	return ((relic_dom_t)scratch->pending_count);
 }
 
 /*
@@ -431,14 +769,17 @@ step_filter(relic_scratch_t *scratch, const relic_exec_env_t *env,
 static void
 emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
 {
+	relic_dom_t *tuple;
 	uint16_t arity;
+	uint16_t column;
 
 	arity = atom->arity;
 	assert(arity <= scratch->arity_room);
 	assert(scratch->batch_count < RELIC_INSERT_BATCH);
 
-	build_tuple(scratch, atom, &scratch->batch[scratch->batch_count *
-	    arity]);
+	tuple = &scratch->batch[scratch->batch_count * arity];
+	for (column = 0; column < arity; column++)
+		tuple[column] = emit_column(scratch, &atom->terms[column]);
 	scratch->batch_count++;
 }
 
@@ -446,7 +787,8 @@ emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
  * Ask one generator or test of the running plan for a match: a fresh one,
  * or the next one when resuming.
  *
- * A test succeeds at most once, so resuming one always finds nothing more.
+ * A test and an ASSIGN succeed at most once, so resuming one always finds
+ * nothing more.
  * An ANTI_MEMBER is the membership test inverted: the binding survives when
  * the tuple is absent.  The EMIT is not asked here: the run loop appends its
  * tuple, and treats it as never matching, so nothing below it is ever
@@ -473,6 +815,10 @@ step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		if (resume)
 			return (false);
 		return (step_filter(scratch, env, &op->u.filter));
+	case RELIC_OP_ASSIGN:
+		if (resume)
+			return (false);
+		return (step_assign(scratch, env, &op->u.assign));
 	case RELIC_OP_EMIT:
 		break;
 	}
@@ -485,13 +831,14 @@ relic_exec_start(relic_scratch_t *scratch, const relic_exec_env_t *env,
     const relic_plan_t *plan)
 {
 	assert(plan->op_count <= scratch->op_room);
-	assert(scratch->note.filter == NULL);
+	assert(scratch->note.where == NULL && scratch->error.where == NULL);
 
 	scratch->plan = plan;
 	scratch->env = env;
 	resolve_views(scratch, env, plan);
 
 	scratch->batch_count = 0;
+	scratch->pending_count = 0;
 	scratch->level = 0;
 	scratch->resume = false;
 	scratch->finished = false;
@@ -548,7 +895,9 @@ yield_after_emit(relic_scratch_t *scratch, size_t level)
  *
  * A batch left full by the caller is reported full again rather than
  * appended to: the EMIT writes a tuple only into room the batch has, so the
- * caller's neglect costs it a turn and cannot write past the batch.
+ * caller's neglect costs it a turn and cannot write past the batch.  An
+ * operation that records an error ends the run there, and the plan is
+ * finished.
  */
 enum relic_exec_status
 relic_exec_run(relic_scratch_t *scratch)
@@ -582,6 +931,8 @@ relic_exec_run(relic_scratch_t *scratch)
 		} else {
 			matched = step(scratch, env, op,
 			    &scratch->states[level], resume);
+			if (scratch->error.where != NULL)
+				break;
 		}
 
 		if (matched) {

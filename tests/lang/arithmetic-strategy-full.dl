@@ -1,0 +1,9 @@
+% Whether an evaluation meets an undefined result depends on the bindings
+% its expressions are evaluated over.  The Magic rewrite of p(1, Y)?
+% evaluates the rule for X = 1 alone and answers; full materialization,
+% under -X no-magic, evaluates it for X = 0 too and fails.
+n(0). n(1).
+
+p(X, Y) :- n(X), Y = 1 / X.
+
+p(1, Y)?

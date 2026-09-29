@@ -1,0 +1,15 @@
+% Expressions at the greatest height a tree may have, 32, in each shape the
+% evaluator's stack meets: left-deep, which needs two cells; right-deep,
+% which needs one per leaf; operators of both precedences alternating to
+% the right; and a column of negations.  Each is evaluated exactly.
+n(3).
+
+left(Y) :- n(X), Y = ((((((((((((((((((((((((((((((X + 1) + 2) + 3) + 4) + 5) + 6) + 7) + 8) + 9) + 10) + 11) + 12) + 13) + 14) + 15) + 16) + 17) + 18) + 19) + 20) + 21) + 22) + 23) + 24) + 25) + 26) + 27) + 28) + 29) + 30) + 31.
+right(Y) :- n(X), Y = 1 - (2 - (3 - (4 - (5 - (6 - (7 - (8 - (9 - (10 - (11 - (12 - (13 - (14 - (15 - (16 - (17 - (18 - (19 - (20 - (21 - (22 - (23 - (24 - (25 - (26 - (27 - (28 - (29 - (30 - (31 - X)))))))))))))))))))))))))))))).
+mixed(Y) :- n(X), Y = X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * (2 + X * X))))))))))))))).
+negated(Y) :- n(X), Y = - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - X.
+
+left(Y)?
+right(Y)?
+mixed(Y)?
+negated(Y)?

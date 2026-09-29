@@ -29,10 +29,13 @@
  */
 
 typedef struct relic_op relic_op_t;
+typedef struct relic_op_assign relic_op_assign_t;
 typedef struct relic_op_atom relic_op_atom_t;
 typedef struct relic_op_filter relic_op_filter_t;
 typedef struct relic_plan relic_plan_t;
 typedef struct relic_plan_term relic_plan_term_t;
+typedef struct relic_postfix relic_postfix_t;
+typedef struct relic_step relic_step_t;
 typedef struct relic_variant_plans relic_variant_plans_t;
 
 /*
@@ -49,7 +52,10 @@ typedef struct relic_variant_plans relic_variant_plans_t;
  * bound slots, bind nothing, and succeed at most once.  ANTI_MEMBER is MEMBER
  * with the answer inverted, which is the whole of negation: the schedule
  * evaluates a negated relation completely before any rule that reads it
- * runs, so its absence is meaningful.  EMIT derives the head tuple, which
+ * runs, so its absence is meaningful.  ASSIGN is a test that binds: it
+ * computes one value from constants and bound slots and binds one slot to
+ * it, succeeding once, or never when the value does not exist because an
+ * operand was not an integer.  EMIT derives the head tuple, which
  * the evaluation inserts, or delivers as a query's row, in batches, and
  * never succeeds, which is what makes it the last operation of every plan:
  * the deepest level of the join always rejects, so the executor always
@@ -61,6 +67,7 @@ enum relic_op_kind {
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
 	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of bound values hold? */
+	RELIC_OP_ASSIGN,	/* bind a slot to a value from bound ones */
 	RELIC_OP_EMIT		/* derive the head tuple */
 };
 
@@ -75,10 +82,23 @@ enum relic_op_kind {
  * RELIC_PLAN_BIND and RELIC_PLAN_ANY occur only in a SCAN or a LOOKUP, and
  * never in a LOOKUP's key columns.  A test and an EMIT read constants and
  * bound slots and nothing else.
+ *
+ * A slot is of one of two kinds, fixed by the operation that binds it.  A
+ * domain slot is bound by a generator, or by an ASSIGN of a constant or of
+ * another domain slot, and its frame entry is a domain identifier.  A number
+ * slot is bound by an ASSIGN of a computed integer, or of another number
+ * slot; the integer is kept beside the frame, and its frame entry is the
+ * integer's identifier when the value table holds one and zero when it does
+ * not.  Zero names no value and is in no tuple and no key, so every
+ * operation over a relation reads a number slot through BOUND like any other
+ * and matches nothing when the integer is new, which is right, since a
+ * relation holds no integer the table lacks.  Only an EMIT needs the integer
+ * itself, to store it, and reads a number slot through RELIC_PLAN_NUMBER.
  */
 enum relic_term_action {
 	RELIC_PLAN_CONSTANT,	/* must equal an interned constant */
 	RELIC_PLAN_BOUND,	/* must equal a slot bound before this column */
+	RELIC_PLAN_NUMBER,	/* an EMIT's number slot: its integer */
 	RELIC_PLAN_BIND,	/* binds its slot from the tuple */
 	RELIC_PLAN_ANY		/* `_`: matches anything, binds nothing */
 };
@@ -86,7 +106,7 @@ enum relic_term_action {
 struct relic_plan_term {
 	union {
 		relic_dom_t	constant;	/* RELIC_PLAN_CONSTANT */
-		uint16_t	slot;		/* BOUND and BIND */
+		uint16_t	slot;		/* BOUND, NUMBER and BIND */
 	}			u;
 	enum relic_term_action	action;		/* which arm of u is live */
 };
@@ -158,21 +178,80 @@ struct relic_op_atom {
 };
 
 /*
- * A comparison of two values, each a constant or a bound slot.  `where` is
- * where the comparison was written, which a note about how it compared
- * points at.
+ * One step of a postfix program: push a constant's identifier, a domain slot's
+ * identifier or a number slot's integer, pop one integer and push its
+ * negation, or pop two and push what a binary operator makes of them.
+ */
+enum relic_step_kind {
+	RELIC_STEP_CONSTANT,
+	RELIC_STEP_DOMAIN_SLOT,
+	RELIC_STEP_NUMBER_SLOT,
+	RELIC_STEP_NEGATE,
+	RELIC_STEP_BINARY
+};
+
+struct relic_step {
+	union {
+		relic_dom_t		constant;	/* CONSTANT */
+		uint16_t		slot;		/* the two SLOTs */
+		enum relic_arith_op	op;		/* BINARY */
+	}			u;
+	enum relic_step_kind	kind;
+};
+
+/*
+ * An expression in the form the executor runs, a postfix program: its tree's
+ * nodes in postfix order, each operand's steps before its operator's, so
+ * that running the steps in order over a stack leaves the expression's value
+ * as the one cell left.  A term is a postfix program of one step.  `depth`
+ * is the stack cells the run needs, at most RELIC_POSTFIX_DEPTH_MAX:
+ * evaluating a tree of height h holds at most h + 1 cells at once, since a
+ * node's left operand leaves one cell while its right operand is evaluated.
+ *
+ * Which kind of slot each step reads is part of the step, decided with the
+ * plan, since a slot's kind is a fact about the plan and not the rule.
+ */
+struct relic_postfix {
+	relic_step_t	*steps;
+	size_t		 step_count;
+	uint8_t		 depth;
+};
+
+#define	RELIC_POSTFIX_DEPTH_MAX	(RELIC_MAX_EXPRESSION_DEPTH + 1)
+
+/*
+ * A comparison of the values of two postfix programs.  `where` is where the
+ * comparison was written, which a note about how it compared and an error in
+ * computing it point at, and `comparison` is the comparison as the rule holds
+ * it, which explain prints.
  */
 struct relic_op_filter {
-	relic_plan_term_t	left;
-	relic_plan_term_t	right;
-	relic_location_t	where;
-	enum relic_compare_op	compare;
+	relic_postfix_t			 left;
+	relic_postfix_t			 right;
+	const relic_comparison_t	*comparison;
+	relic_location_t		 where;
+	enum relic_compare_op		 compare;
+};
+
+/*
+ * An assignment: bind `slot` to the value of `value`, a domain slot when
+ * `number` is false and a number slot when it is true.  `expr` is the
+ * expression as the rule holds it, which explain prints, and `where` is as
+ * for a FILTER.
+ */
+struct relic_op_assign {
+	relic_postfix_t		 value;
+	const relic_expr_t	*expr;
+	relic_location_t	 where;
+	uint16_t		 slot;
+	bool			 number;
 };
 
 struct relic_op {
 	union {
-		relic_op_atom_t		atom;	/* all but FILTER */
+		relic_op_atom_t		atom;	/* all but FILTER and ASSIGN */
 		relic_op_filter_t	filter;	/* FILTER */
+		relic_op_assign_t	assign;	/* ASSIGN */
 	}			u;
 	enum relic_op_kind	kind;		/* which arm of u is live */
 };
@@ -182,8 +261,9 @@ struct relic_op {
  * and the executor relies on them without checking:
  *
  *	the last operation is EMIT, and it is the only one;
- *	every BOUND term reads a slot an earlier operation, or an earlier
- *	column of the same operation, binds;
+ *	every BOUND or NUMBER term and every slot a program reads is one an
+ *	earlier operation, or an earlier column of the same operation, binds,
+ *	a generator or an ASSIGN;
  *	every test reads only constants and bound slots.
  *
  * A plan that was built therefore always has `ops`; a plan left unbuilt, as

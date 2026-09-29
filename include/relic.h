@@ -122,17 +122,20 @@ typedef struct relic_config relic_config_t;
  *
  * `max_memory` bounds what the program's stores hold and what running the
  * program holds: relation and index storage, the program's facts and what it
- * derives alike, which grows with the data, and the plans of an evaluation
- * and the rewritten rules of a query, which grow with the square of a rule's
- * length.  A limit that fits a program's data may therefore refuse its
- * plans, before any tuple is derived.  It does not bound the memory the
- * library uses in total: the program's rules and queries, the text being
- * loaded, the field of a table being imported, the symbols and values it
- * mentions, the evaluation order and a prepared query are sized by what the
- * caller wrote, and the tables and evaluation order of a query's rewrite are
- * a fraction of the rewrite the limit does count.  Nor is it a bound on peak
- * usage, since growing an array holds the old one until the new one is
- * filled.
+ * derives alike, which grows with the data; the table of integer values,
+ * which gains an entry for every distinct integer the program states or
+ * evaluation computes; and the plans of an evaluation and the rewritten
+ * rules of a query, which grow with the square of a rule's length.  A limit
+ * that fits a program's data may therefore refuse its plans, before any
+ * tuple is derived.  It does not bound the memory the library uses in
+ * total: the program's rules and queries, the text being loaded, the field
+ * of a table being imported, the symbols and strings it mentions, the
+ * integers it writes, which the limit counts but only an evaluation's
+ * growth of the table is refused by, the evaluation order and a prepared
+ * query are sized by what the caller wrote,
+ * and the tables and evaluation order of a query's rewrite are a fraction of
+ * the rewrite the limit does count.  Nor is it a bound on peak usage, since
+ * growing an array holds the old one until the new one is filled.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
  * single query: the adorned and magic predicates it generates, and the rules it
@@ -227,11 +230,12 @@ struct relic_config {
 #define	RELIC_F_NO_MAGIC	0x0008u
 
 /*
- * Report, as a RELIC_NOTE pointing at the comparison, the first ordering
- * comparison in each rule that compared values of different types.  Such a
- * comparison is false and filters its binding out, which is the language's
- * rule rather than a mistake, so it is reported only when asked for; the
- * note is how a column holding types nobody meant to mix is discovered.
+ * Report, as a RELIC_NOTE pointing at the comparison, the first comparison
+ * in each rule that ordered values of different types, or that applied an
+ * arithmetic operator to a symbol or a string.  Such a comparison is false
+ * and filters its binding out, which is the language's rule rather than a
+ * mistake, so it is reported only when asked for; the note is how a column
+ * holding types nobody meant to mix is discovered.
  *
  * A rule of the program is reported at most once for the life of the
  * context, and the rules a Magic Sets rewrite generates from it count as
@@ -566,7 +570,9 @@ RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
  *
  * A program is rejected when a rule is not range restricted: every variable
  * in a rule head, in a negated literal and in a comparison must also occur in
- * a positive relational body literal, because nothing else can bind it.
+ * a positive relational body literal, or be assigned by an equality whose
+ * one side is the bare variable and whose other side is bound, because
+ * nothing else can bind it.
  * Warnings that do not reject a program are reported too, among them a
  * variable a rule mentions only once and a predicate the program references
  * and never defines.
@@ -578,7 +584,8 @@ RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
  *
  * The queries a program contains are part of it and are checked the same
  * way: every output column of a query, which is to say every variable it
- * names, must occur in a positive relational literal of the query.
+ * names, must occur in a positive relational literal of the query or be
+ * assigned by one of its equalities.
  */
 RELIC_EXPORT int relic_check(relic_t *ctx);
 
@@ -590,8 +597,10 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * RELIC_F_NAIVE; the two give the same relations.
  *
  * The program is checked first and must pass.  Evaluation fails when a
- * configured limit refuses a tuple or when memory runs out, and the next
- * evaluation starts again from the facts.
+ * configured limit refuses a tuple, when memory runs out, or when an
+ * arithmetic expression has no defined result -- one outside the 64-bit
+ * integers, or a division or remainder by zero -- and the next evaluation
+ * starts again from the facts.
  *
  * Nothing is recomputed when the program has gained no rule and no fact
  * since the last evaluation that succeeded.  When it has, every derived
@@ -677,12 +686,15 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * answered in a context whose max_tuples and max_memory each set no limit,
  * being zero or SIZE_MAX, has its rows delivered as they are derived, once
  * every relation it reads is complete, when the plan of the rule it runs --
- * its own, or its rewrite's -- derives each row once: when it names every
- * variable its body binds and matches no argument with `_`.  Any other
- * query's answer is gathered whole, its duplicates dropped and the limits
- * bounding it, before its first row is delivered.  A query that fails -- a
- * limit exceeded, say -- therefore delivers no rows at all rather than a
- * truncated answer that would be indistinguishable from a complete one.  A
+ * its own, or its rewrite's -- derives each row once and evaluates no
+ * arithmetic operator: when it names every variable a relational literal of
+ * its body binds, matches no argument with `_`, and computes nothing, since
+ * any computation may fail.  Any other query's answer is gathered whole, its
+ * duplicates dropped and the limits bounding it, before its first row is
+ * delivered.  A query that fails -- a limit exceeded, say, or an arithmetic
+ * result that is not defined -- therefore delivers no rows at all rather
+ * than a truncated answer that would be indistinguishable from a complete
+ * one.  A
  * diagnostic the query's evaluation reports, such as the note
  * RELIC_F_NOTE_MIXED asks for, may come between rows delivered as they are
  * derived.
@@ -788,7 +800,10 @@ typedef struct relic_stats relic_stats_t;
  * across every relation -- answers are transient, so only a row callback
  * finds one among them, the answer it is receiving when its query gathers
  * the answer before delivering it -- the bytes of relation and index storage
- * they occupy, and the distinct values interned, by type.
+ * they occupy together with those of the table of integer values, which
+ * is what the memory limit counts beside evaluation's transient buffers,
+ * and the distinct values interned, by type: those the program states and
+ * the integers evaluation computed alike.
  *
  * The counts depend on the evaluation strategy and on how the engine is
  * implemented, and are not stable from one release to the next; only the

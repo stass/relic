@@ -1,0 +1,1 @@
+arithmetic-overflow.dl:8:23: error: integer overflow in rule beyond/1

@@ -25,11 +25,13 @@
  * The memory account: the bytes a context holds on the user's behalf while
  * it works, which the configured memory limit is enforced against.
  *
- * Three kinds of holder contribute, each keeping its own part of the total
+ * Four kinds of holder contribute, each keeping its own part of the total
  * exact.  The relation store counts in `store_bytes` the capacity of every
  * relation's columns and indexes, an index being built included: the base
  * stores holding the program's facts and the relations evaluation derives
- * alike.  An arena initialized charged counts in `arena_bytes` every chunk
+ * alike.  The value table counts in `value_bytes` the capacity of its
+ * integer table, whose integers evaluation computes as well as the program
+ * writes.  An arena initialized charged counts in `arena_bytes` every chunk
  * it holds from the allocator, and gives them back when it is reset.  Arenas
  * holding what the caller wrote -- the program's rules and queries, the
  * schedule, a query -- are not charged, and neither is the text being
@@ -64,6 +66,7 @@
 struct relic_account {
 	size_t	limit;		/* bytes; see relic_limit_set() */
 	size_t	store_bytes;	/* relation and index storage */
+	size_t	value_bytes;	/* the integer table */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
 	relic_atomic_size_t round_bytes; /* buffers of a deferred round */
 	bool	refused;

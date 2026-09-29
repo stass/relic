@@ -1241,8 +1241,8 @@ keep_integers(void *callback_ctx, const relic_value_t *values, size_t count)
 /*
  * A fact is a tuple of its predicate's base store and has no plan.  So a
  * program of many facts evaluates under a memory limit a little above what
- * their relation holds, which a plan per fact -- several times the size of
- * its tuple -- would exceed.  A derived predicate's relation is seeded with
+ * their relation and the integers they name hold, which a plan per fact --
+ * several times the size of its tuple -- would exceed.  A derived predicate's relation is seeded with
  * all its facts before its rules run, so its rows begin with its facts, in
  * the order they were written, wherever they stand among its rules.
  */
@@ -1251,6 +1251,7 @@ a_fact_costs_its_tuple_and_comes_first(void)
 {
 	integer_rows_t rows;
 	relic_query_t *query;
+	relic_stats_t stats;
 	diag_log_t log;
 	relic_t *ctx;
 	char *program;
@@ -1264,8 +1265,10 @@ a_fact_costs_its_tuple_and_comes_first(void)
 
 	data_bytes = 0;
 	ctx = context_with(program, &log);
-	if (ctx != NULL && relic_materialize(ctx) == 0)
-		data_bytes = relic_relation_total_bytes(ctx);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		data_bytes = stats.storage_bytes;
+	}
 	relic_destroy(ctx);
 	check(data_bytes > 0, SCENARIO_FACTS, "the facts evaluate");
 
@@ -1274,7 +1277,7 @@ a_fact_costs_its_tuple_and_comes_first(void)
 		checkf(relic_materialize(ctx) == 0 &&
 		    relic_relation_total_tuples(ctx) == FACTS_LOADED,
 		    SCENARIO_FACTS, "%d facts should evaluate within %zu bytes "
-		    "of their relation's %zu: %s", FACTS_LOADED,
+		    "of their storage's %zu: %s", FACTS_LOADED,
 		    (size_t)FACTS_MARGIN, data_bytes,
 		    relic_error(ctx) != NULL ? relic_error(ctx) : "");
 		relic_destroy(ctx);

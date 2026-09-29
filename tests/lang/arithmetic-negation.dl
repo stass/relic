@@ -1,0 +1,10 @@
+% An overflow under negation must not turn into an affirmative answer: were
+% the binding merely dropped, blocked(a) would be underived and allowed(a)
+% derived, which the program, read over the integers, denies.  The
+% evaluation fails instead, and allowed(a) is never printed.
+score(a, 9223372036854775807). score(b, 5).
+
+blocked(X) :- score(X, S), S + 1 > 100.
+allowed(X) :- score(X, _), not blocked(X).
+
+allowed(X)?

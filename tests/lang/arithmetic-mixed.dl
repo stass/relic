@@ -1,0 +1,14 @@
+% An expression one of whose operands is a symbol or a string has no value:
+% an assignment or a comparison over it is false and drops the binding,
+% which -vv notes once per rule.  The integer rows are derived as always.
+size(a, 4). size(b, big). size(c, "8").
+
+doubled(X, D) :- size(X, S), D = S * 2.
+large(X) :- size(X, S), S + 1 > 4.
+negated(X, N) :- size(X, S), N = -S.
+halved(X, H) :- size(X, S), S != big, H = S / 2.
+
+doubled(X, D)?
+large(X)?
+negated(X, N)?
+halved(X, H)?

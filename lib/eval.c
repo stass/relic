@@ -349,6 +349,7 @@ struct relic_evaluation {
 	size_t			 predicate_count;
 	relic_exec_env_t	 env;
 	relic_scratch_t		 scratch;
+	relic_pending_map_t	 pending_map;
 	bool			 derived;
 	bool			 stopped;
 };
@@ -425,6 +426,7 @@ static void	 deliver_batch(relic_evaluation_t *eval,
 static int	 insert_batch(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
 static const relic_relation_t *plan_head(const relic_plan_t *plan);
+static int64_t	*make_pending_room(relic_evaluation_t *eval);
 static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
 static void	 set_delta(relic_evaluation_t *eval, relic_relation_t *member,
@@ -454,9 +456,12 @@ static void	 explain_component(const relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans, unsigned depth);
 static bool	*mixed_noted_flag(relic_t *ctx, const relic_rule_t *rule);
 static void	 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
-		    const relic_op_filter_t *filter, relic_dom_t left,
-		    relic_dom_t right);
-static const char *type_phrase(const relic_t *ctx, relic_dom_t dom);
+		    const relic_mixed_note_t *note);
+static void	 report_undefined(relic_t *ctx, const relic_rule_t *rule,
+		    const relic_exec_error_t *error);
+static int	 resolve_pending(relic_evaluation_t *eval,
+		    relic_relation_t *relation);
+static const char *type_phrase(relic_dom_t type);
 static bool	 literal_reads_member(const relic_evaluation_t *eval,
 		    const relic_literal_t *literal);
 static void	 mark_members(relic_evaluation_t *eval,
@@ -548,26 +553,22 @@ static relic_running_plan_t *variant_plan(
 		    const relic_variant_t *variant);
 
 /*
- * A value's type as a note names it, with its article.
+ * A type, given as a domain identifier's type bits, as a note names it,
+ * with its article.
  */
 static const char *
-type_phrase(const relic_t *ctx, relic_dom_t dom)
+type_phrase(relic_dom_t type)
 {
-	relic_value_t value;
-
-	if (!relic_value_decode(ctx, dom, &value))
-		return ("an unknown value");
-
-	switch (value.type) {
-	case RELIC_INTEGER:
+	switch (type) {
+	case RELIC_DOM_INTEGER:
 		return ("an integer");
-	case RELIC_STRING:
+	case RELIC_DOM_STRING:
 		return ("a string");
-	case RELIC_SYMBOL:
-		break;
+	case RELIC_DOM_SYMBOL:
+		return ("a symbol");
 	}
 
-	return ("a symbol");
+	return ("an unknown value");
 }
 
 /*
@@ -589,13 +590,14 @@ mixed_noted_flag(relic_t *ctx, const relic_rule_t *rule)
 }
 
 /*
- * Report a mixed-type ordering comparison of a rule, unless the rule it was
- * written as has had one reported already.  Nothing is allocated, so asking
- * for the note cannot make an evaluation fail.
+ * Report a comparison or assignment of a rule that was false only because of
+ * a value's type, unless the rule it was written as has had one reported
+ * already.  Nothing is allocated, so asking for the note cannot make an
+ * evaluation fail.
  */
 static void
 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
-    const relic_op_filter_t *filter, relic_dom_t left, relic_dom_t right)
+    const relic_mixed_note_t *note)
 {
 	bool *noted;
 
@@ -604,9 +606,75 @@ note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 		return;
 	*noted = true;
 
-	relic_diagf(ctx, RELIC_NOTE, &filter->where,
-	    "ordering comparison between %s and %s is false",
-	    type_phrase(ctx, left), type_phrase(ctx, right));
+	switch (note->kind) {
+	case RELIC_NOTE_ORDERING:
+		relic_diagf(ctx, RELIC_NOTE, note->where,
+		    "ordering comparison between %s and %s is false",
+		    type_phrase(note->left_type),
+		    type_phrase(note->right_type));
+		return;
+	case RELIC_NOTE_OPERAND:
+		relic_diagf(ctx, RELIC_NOTE, note->where,
+		    "operand of %s is %s; the comparison is false",
+		    note->operator, type_phrase(note->left_type));
+		return;
+	}
+}
+
+/*
+ * Report the result arithmetic did not define that a plan of `rule`
+ * recorded, naming the program rule it came from, or the query.
+ */
+static void
+report_undefined(relic_t *ctx, const relic_rule_t *rule,
+    const relic_exec_error_t *error)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+	const char *what;
+
+	what = error->status == RELIC_ARITH_ZERO_DIVISOR ? "division by zero" :
+	    "integer overflow";
+
+	if (rule->origin == RELIC_ORIGIN_QUERY) {
+		relic_diagf(ctx, RELIC_ERROR, error->where, "%s in the query",
+		    what);
+		return;
+	}
+
+	relic_diagf(ctx, RELIC_ERROR, error->where, "%s in rule %s", what,
+	    relic_pred_describe(ctx,
+	    ctx->program.rules.entries[rule->origin].head, described,
+	    sizeof(described)));
+}
+
+/*
+ * Give the integers a batch derived into `relation` holds pending their
+ * identifiers, interning those the value table lacks, and write the
+ * identifiers over the markers, so that the batch is a batch of tuples
+ * again.  The memory limit is asked about the table's growth before anything
+ * is interned, so a batch it refuses leaves the table as it was.  Returns 0,
+ * or -1 with the refusal reported.
+ */
+static int
+resolve_pending(relic_evaluation_t *eval, relic_relation_t *relation)
+{
+	relic_scratch_t *scratch;
+	size_t projected;
+
+	scratch = &eval->scratch;
+	if (scratch->pending_count == 0)
+		return (0);
+
+	projected = relic_pending_measure(eval->ctx, scratch->pending,
+	    scratch->pending_count, &eval->pending_map);
+	if (relic_relation_admit_integers(eval->ctx, relation, projected) != 0)
+		return (-1);
+
+	relic_pending_rewrite(&eval->pending_map, scratch->batch,
+	    scratch->batch_count, relation->arity);
+	scratch->pending_count = 0;
+
+	return (relic_pending_commit(eval->ctx, &eval->pending_map));
 }
 
 /*
@@ -705,36 +773,55 @@ void
 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
     relic_mixed_note_t *note)
 {
-	if (note->filter == NULL)
+	if (note->where == NULL)
 		return;
 
-	note_mixed_comparison(ctx, rule, note->filter, note->left,
-	    note->right);
-	note->filter = NULL;
+	note_mixed_comparison(ctx, rule, note);
+	note->where = NULL;
 }
 
 /*
  * Take what the executor has gathered for a plan of `rule` since it was last
  * taken, and empty its batch: count its work, report the note it recorded,
- * and send its tuples to `target`, inserting them or delivering them as
- * rows.  Returns -1 when an insertion was refused, which the
- * relation store has reported; a delivery cannot fail.
+ * and send its tuples to `target`, inserting them, their pending integers
+ * interned first, or delivering them as rows.  Returns -1 when the plan met
+ * a result arithmetic does not define, which is reported here and discards
+ * the batch, or when an insertion or its integers were refused, which the
+ * store has reported; a delivery cannot fail.
  *
  * This is the one place that tells the two kinds of target apart, so a
  * tuple is built the same way whichever it is for.  The note goes before
  * the tuples, since the comparison it names was made before the batch's
  * later tuples were derived, and the counts go first of all, so that a row
- * callback reading the statistics finds the work that derived its row.
+ * callback reading the statistics finds the work that derived its row.  A
+ * plan that streams computes nothing, so a batch delivered as rows holds no
+ * pending integer and no error.
  */
 static int
 take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
     const relic_emit_target_t *target)
 {
-	take_counters(eval->ctx, &eval->scratch);
-	relic_report_mixed_note(eval->ctx, rule, &eval->scratch.note);
+	relic_scratch_t *scratch;
 
-	if (target->rows.callback == NULL)
+	scratch = &eval->scratch;
+	take_counters(eval->ctx, scratch);
+	relic_report_mixed_note(eval->ctx, rule, &scratch->note);
+
+	if (scratch->error.where != NULL) {
+		report_undefined(eval->ctx, rule, &scratch->error);
+		scratch->error.where = NULL;
+		scratch->batch_count = 0;
+		scratch->pending_count = 0;
+		return (-1);
+	}
+
+	if (target->rows.callback == NULL) {
+		if (resolve_pending(eval, target->relation) != 0)
+			return (-1);
 		return (insert_batch(eval, target->relation));
+	}
+
+	assert(scratch->pending_count == 0);
 
 	deliver_batch(eval, &target->rows, target->relation->arity);
 
@@ -1406,9 +1493,10 @@ evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
  *
  * The scratch's batch is sized here, once, for the widest head, so every
  * plan the evaluation builds has room for its tuples; a head of no columns
- * is given a column of room, so the batch always exists.  Its states are
- * sized as plans are built, by fit_scratch(), since only the plans of the
- * components an evaluation reaches need room.
+ * is given a column of room, so the batch always exists.  Its states, and
+ * its room for pending integers, are sized as plans are built, by
+ * fit_scratch(), since only the plans of the components an evaluation
+ * reaches need room, and only a plan that computes needs pending integers.
  */
 static int
 evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
@@ -1435,7 +1523,7 @@ evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
 	if (batch == NULL)
 		return (-1);
 
-	relic_scratch_init(&eval->scratch, NULL, 0, batch, arity_room);
+	relic_scratch_init(&eval->scratch, NULL, 0, batch, NULL, arity_room);
 
 	return (0);
 }
@@ -1518,34 +1606,75 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 /*
  * Give the scratch room for the states of `plan`'s operations, when it has
- * less.  Returns 0, or -1 with the arena's refusal reported.
+ * less, and, when `plan` computes and the scratch has no room for pending
+ * integers yet, room for a batch's worth of them and the map that resolves
+ * them.  Returns 0, or -1 with the arena's refusal reported.
  *
  * Plans are built before any of them runs -- a component's when it starts,
  * a query's before it is answered -- so no plan is running on the scratch
- * when its states are replaced.  relic_scratch_init() starts the scratch
+ * when its storage is replaced.  relic_scratch_init() starts the scratch
  * afresh, forgetting its counts and its note, which have been taken: every
  * run of a plan is followed by take_batch().  The scratch grows to the
  * longest plan the evaluation builds and no further, and at most once per
- * plan.
+ * plan; the pending room, once, sized for the widest head, as the batch is.
  */
 static int
 fit_scratch(relic_evaluation_t *eval, const relic_plan_t *plan)
 {
 	relic_scratch_t *scratch;
 	relic_op_state_t *states;
+	int64_t *pending;
+	size_t op_room;
 
 	scratch = &eval->scratch;
-	if (plan->op_count <= scratch->op_room)
-		return (0);
+	states = scratch->states;
+	op_room = scratch->op_room;
+	pending = scratch->pending;
 
-	states = evaluation_alloc(eval, plan->op_count, sizeof(*states));
-	if (states == NULL)
-		return (-1);
+	if (plan->op_count > op_room) {
+		states = evaluation_alloc(eval, plan->op_count,
+		    sizeof(*states));
+		if (states == NULL)
+			return (-1);
+		op_room = plan->op_count;
+	}
 
-	relic_scratch_init(scratch, states, plan->op_count, scratch->batch,
-	    scratch->arity_room);
+	if (pending == NULL && relic_plan_computes(plan)) {
+		pending = make_pending_room(eval);
+		if (pending == NULL)
+			return (-1);
+	}
+
+	if (states != scratch->states || pending != scratch->pending)
+		relic_scratch_init(scratch, states, op_room, scratch->batch,
+		    pending, scratch->arity_room);
 
 	return (0);
+}
+
+/*
+ * Room for the pending integers of a batch of the scratch's width, and the
+ * map that resolves them: one pending integer per column at most.  Returns
+ * the pending array, or NULL with the arena's refusal reported.
+ */
+static int64_t *
+make_pending_room(relic_evaluation_t *eval)
+{
+	int64_t *pending;
+	size_t columns;
+
+	columns = (size_t)RELIC_INSERT_BATCH * eval->scratch.arity_room;
+	pending = evaluation_alloc(eval, columns, sizeof(*pending));
+	if (pending == NULL)
+		return (NULL);
+
+	if (relic_pending_map_init(&eval->pending_map, &eval->ctx->eval_arena,
+	    columns) != 0) {
+		relic_diag_no_memory(eval->ctx);
+		return (NULL);
+	}
+
+	return (pending);
 }
 
 /*
@@ -2090,7 +2219,7 @@ group_by_old_member(relic_evaluation_t *eval, relic_component_plans_t *plans)
 				continue;
 
 			entries[count].member = eval->member_position[
-			    op->u.atom.relation->pred - 1];
+			    relic_op_atom(op)->relation->pred - 1];
 			entries[count].variant = i;
 			count++;
 		}
@@ -2106,8 +2235,11 @@ group_by_old_member(relic_evaluation_t *eval, relic_component_plans_t *plans)
 static bool
 op_reads_old(const relic_op_t *op)
 {
-	return (op->kind != RELIC_OP_FILTER &&
-	    op->u.atom.view == RELIC_VIEW_OLD);
+	const relic_op_atom_t *atom;
+
+	atom = relic_op_atom(op);
+
+	return (atom != NULL && atom->view == RELIC_VIEW_OLD);
 }
 
 /*
@@ -2674,13 +2806,15 @@ gather_query_answer(relic_evaluation_t *eval,
  * gathering them in its answer relation first.
  *
  * Its derivations must be its rows already, each derived once, which the
- * planner decides from the plan.  And no configured limit may bound the
- * relations.  Under a limit a query that is refused must be refused before
- * its first row, so that it delivers all of its rows or none; a row that is
- * delivered without being stored is never refused, so a streamed answer
- * would hand over any number of rows the limit would not have let the
- * answer hold.  The query gathers its answer instead, and the limit bounds
- * it as it bounds any relation.
+ * planner decides from the plan.  It must compute nothing, since an
+ * expression can meet an undefined result at any binding, which fails the
+ * query, and a query that fails must deliver no row.  And no configured
+ * limit may bound the relations.  Under a limit a query that is refused must
+ * be refused before its first row, so that it delivers all of its rows or
+ * none; a row that is delivered without being stored is never refused, so a
+ * streamed answer would hand over any number of rows the limit would not
+ * have let the answer hold.  The query gathers its answer instead, and the
+ * limit bounds it as it bounds any relation.
  */
 static bool
 query_streams(const relic_t *ctx, const relic_plan_t *plan)
@@ -2689,6 +2823,9 @@ query_streams(const relic_t *ctx, const relic_plan_t *plan)
 		return (false);
 
 	if (relic_limits_bound_relations(ctx))
+		return (false);
+
+	if (relic_plan_computes(plan))
 		return (false);
 
 	return (relic_plan_derives_distinct(plan));
@@ -3046,7 +3183,8 @@ relic_stats(relic_t *ctx, relic_stats_t *stats)
 	stats->parallel_rounds = ctx->counters.parallel_rounds;
 
 	stats->tuples = relic_relation_total_tuples(ctx);
-	stats->storage_bytes = relic_relation_total_bytes(ctx);
+	stats->storage_bytes = relic_relation_total_bytes(ctx) +
+	    relic_value_integer_bytes(ctx);
 	stats->symbol_values = relic_value_count_of(ctx, RELIC_SYMBOL);
 	stats->string_values = relic_value_count_of(ctx, RELIC_STRING);
 	stats->integer_values = relic_value_count_of(ctx, RELIC_INTEGER);

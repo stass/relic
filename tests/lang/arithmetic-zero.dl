@@ -1,0 +1,10 @@
+% A zero divisor is an evaluation error, for the remainder as for division:
+% the evaluation stops with no rows and a nonzero exit, naming the rule.
+% share/1, whose division a filter placed before it guards, never meets
+% the zero, whichever strategy evaluates it.
+n(0). n(4).
+
+share(Y) :- n(X), X > 0, Y = 12 / X.
+leftover(Y) :- n(X), Y = 12 mod X.
+
+leftover(Y)?

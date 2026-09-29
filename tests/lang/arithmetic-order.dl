@@ -1,0 +1,19 @@
+% An assignment may be written before the literals that bind its operands,
+% and before another assignment it reads: the plan places each where what
+% it reads is bound, whatever the order in which it was written.
+edge(a, b, 3). edge(b, c, 4).
+
+cost(X, Z, C) :-
+    C = C1 + C2,
+    C2 = W2 * 10,
+    edge(Y, Z, W2),
+    C1 = W1,
+    edge(X, Y, W1).
+halved(H) :-
+    H = D / 2,
+    D = C * 2,
+    cost(_, _, C).
+
+cost(X, Z, C)?
+halved(H)?
+H = W - 1, edge(X, Y, W)?

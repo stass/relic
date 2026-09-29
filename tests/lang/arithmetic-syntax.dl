@@ -1,0 +1,42 @@
+% Every operator, with the precedence and associativity of section 3: the
+% multiplicative operators bind tighter than the additive ones, a unary
+% minus tighter than both, every binary operator groups to the left, and
+% parentheses override all of it.  Division truncates toward zero and the
+% remainder takes the dividend's sign.
+n(7).
+
+sum(Y) :- n(X), Y = X + 3.
+difference(Y) :- n(X), Y = X - 10.
+product(Y) :- n(X), Y = X * -2.
+quotient(Y) :- n(X), Y = X / 2.
+negative_quotient(Y) :- n(X), Y = -X / 2.
+remainder(Y) :- n(X), Y = X mod 3.
+negative_remainder(Y) :- n(X), Y = -X mod 3.
+remainder_of_negative_divisor(Y) :- n(X), Y = X mod -3.
+precedence(Y) :- n(X), Y = 1 + X * 2.
+grouped(Y) :- n(X), Y = (1 + X) * 2.
+left_to_right(Y) :- n(X), Y = X - 2 - 3.
+right_grouped(Y) :- n(X), Y = X - (2 - 3).
+truncation_first(Y) :- n(X), Y = 2 * (X / 2).
+truncation_last(Y) :- n(X), Y = 2 * X / 2.
+negation(Y) :- n(X), Y = -(X + 1) * - 1.
+double_negation(Y) :- n(X), Y = - -X.
+ordered(X) :- n(X), X * 2 > 13, X mod 2 = 1, -X < -6, X + 1 != 7.
+
+sum(Y)?
+difference(Y)?
+product(Y)?
+quotient(Y)?
+negative_quotient(Y)?
+remainder(Y)?
+negative_remainder(Y)?
+remainder_of_negative_divisor(Y)?
+precedence(Y)?
+grouped(Y)?
+left_to_right(Y)?
+right_grouped(Y)?
+truncation_first(Y)?
+truncation_last(Y)?
+negation(Y)?
+double_negation(Y)?
+ordered(X)?

@@ -56,7 +56,7 @@ for path in "$lang_dir"/*; do
 		# rather than part of the test.
 		continue
 		;;
-	*.args|*.expected|*.expected-err|*.exit|*.stdin)
+	*.args|*.expected|*.expected-err|*.exit|*.stdin|*.per-strategy)
 		base=${name%.*}
 		;;
 	*.csv|*.tsv)

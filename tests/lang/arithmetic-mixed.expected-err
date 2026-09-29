@@ -1,0 +1,8 @@
+arithmetic-mixed.dl:6:30: note: operand of * is a symbol; the comparison is false
+query 1: 1 row
+arithmetic-mixed.dl:7:25: note: operand of + is a symbol; the comparison is false
+query 2: 1 row
+arithmetic-mixed.dl:8:30: note: operand of - is a symbol; the comparison is false
+query 3: 1 row
+arithmetic-mixed.dl:9:39: note: operand of / is a string; the comparison is false
+query 4: 1 row

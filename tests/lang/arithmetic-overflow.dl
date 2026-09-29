@@ -1,0 +1,10 @@
+% A result outside the 64-bit integers is an evaluation error, not a
+% dropped binding or a wrapped value: the evaluation stops with no rows and
+% a nonzero exit, naming the rule whose expression overflowed.  next/1
+% reaches the greatest integer and fits; beyond/1 steps past it.
+n(9223372036854775806). n(1).
+
+next(Y) :- n(X), Y = X + 1.
+beyond(Y) :- next(X), Y = X + 1.
+
+beyond(Y)?

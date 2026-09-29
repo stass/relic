@@ -1,0 +1,23 @@
+% Explain shows a comparison that tests as a filter and one that binds as
+% an assignment, each where the plan places it, and a rule as written,
+% its expressions carrying the parentheses the tree requires and no others.
+edge(a, b). edge(b, c).
+n(1).
+
+dist(X, Y, 1) :-
+    edge(X, Y).
+dist(X, Z, D1) :-
+    dist(X, Y, D),
+    edge(Y, Z),
+    D < 8,
+    D1 = D + 1.
+shapes(A, B, C, D) :-
+    n(X),
+    A = (X + 1) * 2,
+    B = 2 * (3 / X),
+    C = X + (X + X),
+    D = -(X - 1) * ((X)),
+    X * 2 > -X.
+same(X) :- n(X), dist(_, _, Y), X = Y.
+
+dist(a, X, D)?

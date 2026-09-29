@@ -8,15 +8,16 @@
 # those again answering from the whole fixed point instead of through the
 # Magic rewrite, and rounds whose insertions wait for their end.  Every run
 # must agree with the default on standard output, the diagnostics on
-# standard error, and exit status.  Two diagnostics are left out.  The
+# standard error, and exit status.  Three diagnostics are left out.  The
 # warning that a rewrite outgrew its budget says which strategy answered,
 # which runs without the rewrite never report, and the answer it announces
-# is compared like any other.  The note -vv gives about a comparison of
-# mixed types says where evaluation first met one, which is earlier when a
-# query evaluates the whole program, and the answers the comparison
-# filtered are compared like any other.  Rows are sorted with -s, because a
-# strategy that derives the same set of tuples in a different order is
-# correct, and the comparison is of sets.
+# is compared like any other.  The notes -vv gives about a comparison of
+# mixed types and about an arithmetic operand that is not an integer say
+# where evaluation first met one, which is earlier when a query evaluates
+# the whole program, and the answers they filtered are compared like any
+# other.  Rows are sorted with -s, because a strategy that derives the same
+# set of tuples in a different order is correct, and the comparison is of
+# sets.
 #
 # Queries read only some relations, so each run also prints -X stats, and
 # runs that evaluate the same rules must agree on how many tuples every
@@ -50,7 +51,11 @@
 # left to its own expectations, and so is one that shows its plans with -e,
 # since the plans are what the alternatives change, one that limits the
 # Magic rewrite, which only some of the alternatives run, and an interactive
-# session, whose .plan and .stats show what the strategy did.  Every run
+# session, whose .plan and .stats show what the strategy did.  So is a test
+# with a .per-strategy file beside it, saying why: a program on which one
+# strategy meets an undefined arithmetic result that another never
+# evaluates, a difference the language allows and a golden test per
+# strategy pins.  Every run
 # reads the test's .stdin file, or else an empty standard input, as the
 # language tests do.
 
@@ -90,6 +95,7 @@ run() {
 
 	grep -v -e '^stats: ' -e "Magic rewrite outgrew its budget" \
 	    -e "note: ordering comparison between " \
+	    -e "note: operand of .* is a .*; the comparison is false" \
 	    "$work/$label.all" > "$work/$label.err" || true
 	grep -e '^stats: tuples held ' "$work/$label.all" \
 	    > "$work/$label.held" || true
@@ -162,6 +168,9 @@ for path in $RELIC_LANG_TESTS; do
 		continue
 		;;
 	esac
+	if [ -f "$directory/$base.per-strategy" ]; then
+		continue
+	fi
 
 	run default
 

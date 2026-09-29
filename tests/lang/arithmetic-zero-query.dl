@@ -1,0 +1,6 @@
+% A query's own expression fails the query when its divisor is zero, and
+% the diagnostic names the query rather than a rule.
+n(0). n(4).
+
+n(X), X != 0, Y = 12 / X?
+n(X), Y = X / X?

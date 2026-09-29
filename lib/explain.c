@@ -84,6 +84,9 @@ static void	 put_args(const relic_t *ctx, relic_explain_line_t *line,
 		    uint16_t count);
 static void	 put_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_atom_t *atom);
+static void	 put_comparison(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule,
+		    const relic_comparison_t *comparison);
 static void	 put_compare(relic_explain_line_t *line,
 		    enum relic_compare_op compare);
 static void	 put_expr(const relic_t *ctx, relic_explain_line_t *line,
@@ -596,6 +599,7 @@ put_term(const relic_t *ctx, relic_explain_line_t *line,
 		put_value(ctx, line, term->u.constant);
 		return;
 	case RELIC_PLAN_BOUND:
+	case RELIC_PLAN_NUMBER:
 	case RELIC_PLAN_BIND:
 		put_variable(ctx, line, rule, term->u.slot);
 		return;
@@ -645,6 +649,20 @@ put_atom(const relic_t *ctx, relic_explain_line_t *line,
 		put_args(ctx, line, rule, atom->args, pred->arity);
 }
 
+/*
+ * A comparison as the rule writes it.  A left operand that would read back
+ * as the negation keyword keeps the parentheses it was written in.
+ */
+static void
+put_comparison(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_comparison_t *comparison)
+{
+	put_operand(ctx, line, rule, comparison->left,
+	    reads_as_negation(ctx, comparison->left));
+	put_compare(line, comparison->op);
+	put_expr(ctx, line, rule, comparison->right);
+}
+
 static void
 put_literal(const relic_t *ctx, relic_explain_line_t *line,
     const relic_rule_t *rule, const relic_literal_t *literal)
@@ -658,10 +676,7 @@ put_literal(const relic_t *ctx, relic_explain_line_t *line,
 		put_atom(ctx, line, rule, &literal->u.atom);
 		return;
 	case RELIC_LITERAL_COMPARISON:
-		put_operand(ctx, line, rule, literal->u.comparison.left,
-		    reads_as_negation(ctx, literal->u.comparison.left));
-		put_compare(line, literal->u.comparison.op);
-		put_expr(ctx, line, rule, literal->u.comparison.right);
+		put_comparison(ctx, line, rule, &literal->u.comparison);
 		return;
 	}
 }
@@ -831,9 +846,13 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 		return;
 	case RELIC_OP_FILTER:
 		line_put(line, "filter ");
-		put_term(ctx, line, rule, &op->u.filter.left);
-		put_compare(line, op->u.filter.compare);
-		put_term(ctx, line, rule, &op->u.filter.right);
+		put_comparison(ctx, line, rule, op->u.filter.comparison);
+		return;
+	case RELIC_OP_ASSIGN:
+		line_put(line, "assign ");
+		put_variable(ctx, line, rule, op->u.assign.slot);
+		line_put(line, " = ");
+		put_expr(ctx, line, rule, op->u.assign.expr);
 		return;
 	case RELIC_OP_EMIT:
 		line_put(line, streams ? "stream " : "emit ");

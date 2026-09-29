@@ -20,10 +20,15 @@
  * argument is already bound is a membership test; one with some bound
  * arguments is a lookup through the index keyed on exactly those columns,
  * which the relation builds if it has none; one with none bound is a scan.
- * A lookup and a scan bind what they can.  A comparison and a negated literal
- * bind nothing -- each is a test, a FILTER or an ANTI_MEMBER -- so each can
- * only be placed where every slot it reads is bound, and it is placed at the
- * earliest such point.  The head becomes the EMIT that ends the plan, writing
+ * A lookup and a scan bind what they can.  A negated literal binds nothing,
+ * and neither does a comparison, unless it is an equality one side of which
+ * is a variable not yet bound while the other side is: that one is an
+ * ASSIGN, and binds the variable.  Every other comparison is a FILTER and a
+ * negated literal an ANTI_MEMBER, tests that can only be placed where every
+ * slot they read is bound.  Tests and assignments are placed at the earliest
+ * point they can be, and an assignment placed can make more of them
+ * placeable, so they are placed until none more is before the next positive
+ * literal is chosen.  The head becomes the EMIT that ends the plan, writing
  * into the relation the caller names: a predicate's for a rule of the
  * program, the query's own answer for a query.
  *
@@ -65,8 +70,16 @@
  * A test's written position need not be one where its operands exist -- `N
  * >= 100, size(X, N)` and `not done(X), todo(X)` are safe bodies -- so it
  * goes where it first can.  The rule's safety is what guarantees such a point
- * exists: every slot a test reads is bound by some positive literal, so once
- * every positive literal is placed, every test can be.
+ * exists: every slot a test reads is bound by some positive literal or by an
+ * assignment the closure of the safety check reaches, and once every
+ * positive literal is placed the bound set holds all of the first, so every
+ * such assignment can then be placed, in the closure's order if no other,
+ * and then every test.
+ *
+ * A slot bound by an ASSIGN of a computed integer is a number slot (plan.h),
+ * and every operation reading it is told so as it is emitted.  An
+ * expression becomes a postfix program, its tree in postfix order, in the
+ * evaluation's arena with the rest of the plan.
  *
  * Each column's fate is decided here, while the bound set is known: matched
  * against a constant, matched against a slot already bound, binding its
@@ -150,6 +163,8 @@ typedef struct relic_planner relic_planner_t;
  * indexed like the body.  `bound` is the set of slots bound so far: while the
  * order is decided, by the literals placed and the slots the caller started
  * with; while the operations are emitted, by the operations emitted.
+ * `numbers` is the subset of those an ASSIGN emitted binds to a computed
+ * integer, the number slots.
  *
  * `ranking` holds the pass in progress: the `ranking_count` positive
  * literals not yet placed when it began, best first.  It has room for every
@@ -185,6 +200,7 @@ struct relic_planner {
 	size_t			 op_count;
 	size_t			 delta_literal;
 	uint64_t		 bound;
+	uint64_t		 numbers;
 	bool			 pin_delta;
 };
 
@@ -211,6 +227,8 @@ static relic_op_t *append_atom_op(relic_planner_t *planner,
 static relic_op_t *append_op(relic_planner_t *planner,
 		    enum relic_op_kind kind);
 static uint32_t	 all_columns(uint16_t arity);
+static void	 append_steps(const relic_planner_t *planner,
+		    const relic_expr_t *expr, relic_postfix_t *postfix);
 static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
 static bool	 atom_is_bound(const relic_atom_t *atom, uint16_t arity,
 		    uint64_t bound);
@@ -220,6 +238,8 @@ static uint32_t	 bound_columns(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
 static uint16_t	 column_count(uint32_t columns);
 static int	 compare_candidates(const void *a, const void *b);
+static int	 compile_postfix(relic_planner_t *planner,
+		    const relic_expr_t *expr, relic_postfix_t *postfix);
 static int	 confirm_delta_literal(const relic_planner_t *planner);
 static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner);
@@ -236,7 +256,8 @@ static size_t	 estimate_unknown(uint16_t arity, uint32_t bound,
 		    enum relic_view view);
 static int	 estimate_measured(relic_t *ctx, relic_relation_t *relation,
 		    uint32_t columns, size_t *estimatep);
-static void	 expr_term(const relic_expr_t *expr, relic_plan_term_t *term);
+static bool	 expr_is_number(const relic_planner_t *planner,
+		    const relic_expr_t *expr);
 static bool	 is_incomplete(const bool *incomplete, relic_pred_id_t pred);
 static uint64_t	 multiply_estimates(uint64_t product, size_t estimate);
 static int	 order_body(relic_planner_t *planner);
@@ -247,6 +268,9 @@ static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 		    enum relic_view view);
 static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
 		    int status);
+static int	 place_assign(relic_planner_t *planner,
+		    const relic_literal_t *literal, uint16_t slot,
+		    const relic_expr_t *value);
 static int	 place_comparison(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 place_emit(relic_planner_t *planner);
@@ -259,6 +283,7 @@ static enum relic_view positive_view(const relic_planner_t *planner,
 		    size_t index);
 static uint64_t	 product_of_estimates(const relic_planner_t *planner,
 		    size_t first, size_t end);
+static bool	 postfix_computes(const relic_postfix_t *postfix);
 static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 planner_init(relic_planner_t *planner, relic_t *ctx,
@@ -278,8 +303,8 @@ static int	 score_positive(relic_t *ctx, const bool *incomplete,
 static uint64_t	 slot_bit(uint16_t slot);
 static relic_plan_term_t *terms_alloc(relic_planner_t *planner,
 		    uint16_t arity);
-static bool	 test_is_ready(relic_t *ctx, const relic_literal_t *literal,
-		    uint64_t bound);
+static bool	 test_is_placeable(relic_t *ctx,
+		    const relic_literal_t *literal, uint64_t bound);
 
 static uint64_t
 slot_bit(uint16_t slot)
@@ -599,58 +624,187 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 }
 
 /*
- * The term a FILTER reads for an expression of one node.
+ * Append an expression's steps to `postfix` in postfix order: each operand's
+ * steps, then its operator's.  A variable is read as the kind of slot it is
+ * at this point of the plan.  The recursion is as deep as the tree is tall,
+ * which the parser bounds.
  */
 static void
-expr_term(const relic_expr_t *expr, relic_plan_term_t *term)
+append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
+    relic_postfix_t *postfix)
 {
-	relic_arg_t arg;
+	relic_step_t *step;
 
-	bzero(&arg, sizeof(arg));
-	if (expr->kind == RELIC_EXPR_CONSTANT) {
-		arg.kind = RELIC_ARG_CONSTANT;
-		arg.u.constant = expr->u.constant;
-	} else {
-		arg.kind = RELIC_ARG_VARIABLE;
-		arg.u.slot = expr->u.slot;
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+	case RELIC_EXPR_VARIABLE:
+		break;
+	case RELIC_EXPR_NEGATE:
+		append_steps(planner, expr->u.operand, postfix);
+		break;
+	case RELIC_EXPR_BINARY:
+		append_steps(planner, expr->u.binary.left, postfix);
+		append_steps(planner, expr->u.binary.right, postfix);
+		break;
 	}
 
-	read_term(&arg, term);
+	step = &postfix->steps[postfix->step_count];
+	postfix->step_count++;
+	bzero(step, sizeof(*step));
+
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+		step->kind = RELIC_STEP_CONSTANT;
+		step->u.constant = expr->u.constant;
+		return;
+	case RELIC_EXPR_VARIABLE:
+		step->kind = (planner->numbers & slot_bit(expr->u.slot)) != 0 ?
+		    RELIC_STEP_NUMBER_SLOT : RELIC_STEP_DOMAIN_SLOT;
+		step->u.slot = expr->u.slot;
+		return;
+	case RELIC_EXPR_NEGATE:
+		step->kind = RELIC_STEP_NEGATE;
+		return;
+	case RELIC_EXPR_BINARY:
+		step->kind = RELIC_STEP_BINARY;
+		step->u.op = expr->u.binary.op;
+		return;
+	}
 }
 
 /*
- * Place a comparison as a FILTER reading its two operands.  The caller places
- * it only where both are bound.  A comparison over an operator has no
- * operation to become, and is refused as an internal error.
+ * Build the postfix program of an expression in the planner's arena: a step
+ * per node of the tree, and a stack one cell deeper than the tree is tall.
+ * Returns -1 when the arena refused, which the caller's boundary reports.
+ */
+static int
+compile_postfix(relic_planner_t *planner, const relic_expr_t *expr,
+    relic_postfix_t *postfix)
+{
+	bzero(postfix, sizeof(*postfix));
+
+	postfix->steps = relic_arena_allocarray(planner->arena, expr->nodes,
+	    sizeof(*postfix->steps));
+	if (postfix->steps == NULL)
+		return (-1);
+
+	append_steps(planner, expr, postfix);
+	assert(postfix->step_count == expr->nodes);
+	postfix->depth = (uint8_t)(expr->height + 1);
+
+	return (0);
+}
+
+/*
+ * Whether an expression's value is a computed integer rather than a domain
+ * identifier: whether it holds an operator, or is a number slot alone.
+ */
+static bool
+expr_is_number(const relic_planner_t *planner, const relic_expr_t *expr)
+{
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+		return (false);
+	case RELIC_EXPR_VARIABLE:
+		return ((planner->numbers & slot_bit(expr->u.slot)) != 0);
+	case RELIC_EXPR_NEGATE:
+	case RELIC_EXPR_BINARY:
+		break;
+	}
+
+	return (true);
+}
+
+/*
+ * Place an equality that assigns as an ASSIGN binding `slot` to `value`,
+ * the equality's other side, whose slots are bound.  The slot is a number
+ * slot exactly when the value is a computed integer.
+ */
+static int
+place_assign(relic_planner_t *planner, const relic_literal_t *literal,
+    uint16_t slot, const relic_expr_t *value)
+{
+	relic_op_t *op;
+
+	op = append_op(planner, RELIC_OP_ASSIGN);
+	op->u.assign.expr = value;
+	op->u.assign.where = literal->where;
+	op->u.assign.slot = slot;
+	op->u.assign.number = expr_is_number(planner, value);
+	if (compile_postfix(planner, value, &op->u.assign.value) != 0)
+		return (-1);
+
+	planner->bound |= slot_bit(slot);
+	if (op->u.assign.number)
+		planner->numbers |= slot_bit(slot);
+
+	return (0);
+}
+
+/*
+ * Place a comparison: as an ASSIGN when it assigns here, and otherwise as a
+ * FILTER running the postfix programs of its two sides, which the caller
+ * places only where every slot they read is bound.
  */
 static int
 place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	const relic_comparison_t *comparison;
+	const relic_expr_t *value;
 	relic_op_t *op;
+	uint16_t slot;
 
 	comparison = &literal->u.comparison;
-	if (comparison->left->height > 1 || comparison->right->height > 1) {
-		relic_diagf(planner->ctx, RELIC_ERROR, &literal->where,
-		    "internal error: the planner cannot place an arithmetic "
-		    "expression");
-		return (-1);
-	}
+	if (relic_comparison_assigns(comparison, planner->bound, &slot, &value))
+		return (place_assign(planner, literal, slot, value));
 
 	op = append_op(planner, RELIC_OP_FILTER);
+	op->u.filter.comparison = comparison;
 	op->u.filter.compare = comparison->op;
 	op->u.filter.where = literal->where;
-	expr_term(comparison->left, &op->u.filter.left);
-	expr_term(comparison->right, &op->u.filter.right);
+	if (compile_postfix(planner, comparison->left,
+	    &op->u.filter.left) != 0)
+		return (-1);
+
+	return (compile_postfix(planner, comparison->right,
+	    &op->u.filter.right));
+}
+
+/*
+ * The slots a literal binds when placed where `bound` is bound, as
+ * internal.h describes.
+ */
+uint64_t
+relic_plan_literal_binds(const relic_t *ctx, const relic_literal_t *literal,
+    uint64_t bound)
+{
+	const relic_expr_t *value;
+	const relic_pred_t *pred;
+	uint16_t slot;
+
+	switch (literal->kind) {
+	case RELIC_LITERAL_POSITIVE:
+		pred = relic_pred_of(ctx, literal->u.atom.pred);
+		if (pred == NULL)
+			return (0);
+		return (arg_slots(literal->u.atom.args, pred->arity));
+	case RELIC_LITERAL_COMPARISON:
+		if (!relic_comparison_assigns(&literal->u.comparison, bound,
+		    &slot, &value))
+			return (0);
+		return (slot_bit(slot));
+	case RELIC_LITERAL_NEGATED:
+		break;
+	}
 
 	return (0);
 }
 
 /*
  * Whether a literal is a test -- a comparison or a negated literal -- that
- * can be placed now, which is when every slot it reads is bound.  This is
- * the one place a literal is classified as a test; a positive literal is
- * never one.
+ * can be placed now: an assignment, whose value reads only bound slots, or
+ * a test every slot of which is bound.  This is the one place a literal is
+ * classified as a test; a positive literal is never one.
  *
  * A negated literal is ready exactly when it would be a membership test were
  * it positive, so the one question answers both.  One holding `_` is never
@@ -658,13 +812,15 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
  * left out of the plan, which confirm_plan_complete() reports.
  */
 static bool
-test_is_ready(relic_t *ctx, const relic_literal_t *literal, uint64_t bound)
+test_is_placeable(relic_t *ctx, const relic_literal_t *literal,
+    uint64_t bound)
 {
 	const relic_pred_t *pred;
 
 	switch (literal->kind) {
 	case RELIC_LITERAL_COMPARISON:
-		return ((relic_comparison_slots(&literal->u.comparison) &
+		return (relic_plan_literal_binds(ctx, literal, bound) != 0 ||
+		    (relic_comparison_slots(&literal->u.comparison) &
 		    ~bound) == 0);
 	case RELIC_LITERAL_NEGATED:
 		pred = relic_pred_of(ctx, literal->u.atom.pred);
@@ -678,7 +834,8 @@ test_is_ready(relic_t *ctx, const relic_literal_t *literal, uint64_t bound)
 }
 
 /*
- * Place a literal test_is_ready() accepted as the operation that tests it.
+ * Place a literal test_is_placeable() accepted as the operation that tests
+ * or assigns by it.
  * A positive literal cannot arrive here, and is reported as the internal
  * error it would be rather than dropped from the plan.
  */
@@ -701,30 +858,62 @@ place_test(relic_planner_t *planner, const relic_literal_t *literal)
 }
 
 /*
- * Place every test not yet placed whose slots are now bound, in the order
- * the tests are written.
+ * Place every test and assignment not yet placed that can be placed now, in
+ * the order they are written, and again for as long as an assignment placed
+ * binds a slot that may make another placeable.
+ *
+ * Each pass places what the slots bound when it began make placeable, so a
+ * literal an assignment of the pass makes placeable waits for the next pass
+ * rather than overtaking one written after it that was placeable already:
+ * every literal goes at the earliest point it can, and in written order
+ * among those placeable at the same point.  What a literal binds is asked
+ * of the slots bound as it is placed, so that of two assignments of one
+ * variable placeable at one point, the second is a test of what the first
+ * bound.
  *
  * Called before the first literal and after every positive literal that
- * binds a slot, which are the only points at which a test can become ready,
- * so each test is placed at the earliest point it can be.
+ * binds a slot, which with the assignments placed here are the only points
+ * at which a test or an assignment can become ready, so each is placed at
+ * the earliest point it can be.  Each repetition places an assignment, which
+ * binds a slot nothing bound before, so there are no more repetitions than
+ * slots.
  */
 static void
 order_ready_tests(relic_planner_t *planner)
 {
+	const relic_literal_t *literal;
 	const relic_rule_t *rule;
+	uint64_t pass_bound;
+	uint64_t binds;
+	bool assigned;
 	size_t i;
 
 	rule = planner->rule;
 
-	for (i = 0; i < rule->body_length; i++) {
-		if (planner->placed[i] || !test_is_ready(planner->ctx,
-		    &rule->body[i], planner->bound))
-			continue;
+	do {
+		pass_bound = planner->bound;
+		assigned = false;
 
-		planner->order[planner->order_count] = i;
-		planner->order_count++;
-		planner->placed[i] = true;
-	}
+		for (i = 0; i < rule->body_length; i++) {
+			literal = &rule->body[i];
+			if (planner->placed[i] ||
+			    literal->kind == RELIC_LITERAL_POSITIVE ||
+			    !test_is_placeable(planner->ctx, literal,
+			    pass_bound))
+				continue;
+
+			binds = relic_plan_literal_binds(planner->ctx, literal,
+			    planner->bound);
+
+			planner->order[planner->order_count] = i;
+			planner->order_count++;
+			planner->placed[i] = true;
+			if (binds != 0) {
+				planner->bound |= binds;
+				assigned = true;
+			}
+		}
+	} while (assigned);
 }
 
 /*
@@ -735,19 +924,15 @@ order_ready_tests(relic_planner_t *planner)
 static void
 order_positive(relic_planner_t *planner, size_t index)
 {
-	const relic_atom_t *atom;
-	const relic_pred_t *pred;
 	uint64_t bound_before;
 
-	atom = &planner->rule->body[index].u.atom;
-	pred = relic_pred_of(planner->ctx, atom->pred);
 	bound_before = planner->bound;
 
 	planner->order[planner->order_count] = index;
 	planner->order_count++;
 	planner->placed[index] = true;
-	if (pred != NULL)
-		planner->bound |= arg_slots(atom->args, pred->arity);
+	planner->bound |= relic_plan_literal_binds(planner->ctx,
+	    &planner->rule->body[index], planner->bound);
 
 	if (planner->bound != bound_before)
 		order_ready_tests(planner);
@@ -1167,6 +1352,7 @@ emit_body(relic_planner_t *planner)
 	size_t i;
 
 	planner->bound = 0;
+	planner->numbers = 0;
 
 	for (i = 0; i < planner->order_count; i++) {
 		index = planner->order[i];
@@ -1189,8 +1375,9 @@ emit_body(relic_planner_t *planner)
  * or -1 having reported which did not hold.
  *
  * A checked rule always passes.  Safety guarantees that every slot a test
- * or the head reads is bound by some positive literal, so once every
- * positive literal is placed, every test has been too.  The
+ * or the head reads is bound by some positive literal or an assignment the
+ * safety closure reaches, so once every positive literal is placed, every
+ * such assignment and every test has been too.  The
  * question is asked anyway, once per plan, because failing it would be
  * silent: a literal missing from the plan is a filter nobody applies, and an
  * unbound head argument is a column read from whatever the frame last held.
@@ -1304,12 +1491,13 @@ confirm_target_fits(const relic_planner_t *planner)
 
 /*
  * Place the EMIT that ends every plan, reading the head's arguments into the
- * target relation.
+ * target relation, a number slot's as its integer.
  */
 static int
 place_emit(relic_planner_t *planner)
 {
 	const relic_rule_t *rule;
+	relic_plan_term_t *term;
 	relic_op_t *op;
 	uint16_t i;
 
@@ -1325,8 +1513,13 @@ place_emit(relic_planner_t *planner)
 	if (op == NULL)
 		return (-1);
 
-	for (i = 0; i < rule->head_arity; i++)
-		read_term(&rule->head_args[i], &op->u.atom.terms[i]);
+	for (i = 0; i < rule->head_arity; i++) {
+		term = &op->u.atom.terms[i];
+		read_term(&rule->head_args[i], term);
+		if (term->action == RELIC_PLAN_BOUND &&
+		    (planner->numbers & slot_bit(term->u.slot)) != 0)
+			term->action = RELIC_PLAN_NUMBER;
+	}
 
 	return (0);
 }
@@ -1649,6 +1842,7 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
 		case RELIC_PLAN_CONSTANT:
 			break;
 		case RELIC_PLAN_BOUND:
+		case RELIC_PLAN_NUMBER:
 			*readsp |= slot_bit(term->u.slot);
 			break;
 		case RELIC_PLAN_BIND:
@@ -1665,7 +1859,10 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
 
 /*
  * A plan derives each head tuple once when no generator has a wildcard and
- * its EMIT reads every slot a generator binds.
+ * its EMIT reads every slot a generator binds.  An ASSIGN binds a slot too,
+ * but to a function of the slots bound before it, so two bindings that agree
+ * on every slot a generator binds agree on it as well, and the EMIT need not
+ * read it.
  *
  * Three facts about what a plan reads make that so, over relations that do
  * not change while it runs: a relation holds no tuple twice, a view lists
@@ -1710,6 +1907,7 @@ relic_plan_derives_distinct(const relic_plan_t *plan)
 		case RELIC_OP_MEMBER:
 		case RELIC_OP_ANTI_MEMBER:
 		case RELIC_OP_FILTER:
+		case RELIC_OP_ASSIGN:
 			break;
 		case RELIC_OP_EMIT:
 			(void)atom_slots(&op->u.atom, &binds, &reads);
@@ -1719,4 +1917,77 @@ relic_plan_derives_distinct(const relic_plan_t *plan)
 	}
 
 	return ((generated & ~emitted) == 0);
+}
+
+/*
+ * Whether a postfix program applies an operator, rather than reading one
+ * term.
+ */
+static bool
+postfix_computes(const relic_postfix_t *postfix)
+{
+	size_t i;
+
+	for (i = 0; i < postfix->step_count; i++) {
+		switch (postfix->steps[i].kind) {
+		case RELIC_STEP_CONSTANT:
+		case RELIC_STEP_DOMAIN_SLOT:
+		case RELIC_STEP_NUMBER_SLOT:
+			break;
+		case RELIC_STEP_NEGATE:
+		case RELIC_STEP_BINARY:
+			return (true);
+		}
+	}
+
+	return (false);
+}
+
+const relic_op_atom_t *
+relic_op_atom(const relic_op_t *op)
+{
+	switch (op->kind) {
+	case RELIC_OP_SCAN:
+	case RELIC_OP_LOOKUP:
+	case RELIC_OP_MEMBER:
+	case RELIC_OP_ANTI_MEMBER:
+	case RELIC_OP_EMIT:
+		return (&op->u.atom);
+	case RELIC_OP_FILTER:
+	case RELIC_OP_ASSIGN:
+		break;
+	}
+
+	return (NULL);
+}
+
+bool
+relic_plan_computes(const relic_plan_t *plan)
+{
+	const relic_op_t *op;
+	size_t i;
+
+	for (i = 0; i < plan->op_count; i++) {
+		op = &plan->ops[i];
+
+		switch (op->kind) {
+		case RELIC_OP_FILTER:
+			if (postfix_computes(&op->u.filter.left) ||
+			    postfix_computes(&op->u.filter.right))
+				return (true);
+			break;
+		case RELIC_OP_ASSIGN:
+			if (postfix_computes(&op->u.assign.value))
+				return (true);
+			break;
+		case RELIC_OP_SCAN:
+		case RELIC_OP_LOOKUP:
+		case RELIC_OP_MEMBER:
+		case RELIC_OP_ANTI_MEMBER:
+		case RELIC_OP_EMIT:
+			break;
+		}
+	}
+
+	return (false);
 }

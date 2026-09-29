@@ -1110,8 +1110,9 @@ a_load_over_the_limit_grows_no_store(void)
 }
 
 /*
- * The bytes the stores of a context hold once it has loaded b(0) and then
- * `facts`, or SIZE_MAX when that could not be measured.
+ * The bytes the memory limit counts against a context once it has loaded
+ * b(0) and then `facts` -- its stores and the integer table the facts'
+ * integers grew -- or SIZE_MAX when that could not be measured.
  */
 static size_t
 bytes_after_loading(const char *facts)
@@ -1126,7 +1127,7 @@ bytes_after_loading(const char *facts)
 
 	bytes = SIZE_MAX;
 	if (relic_load_string(ctx, "facts.dl", facts) == 0)
-		bytes = ctx->account.store_bytes;
+		bytes = ctx->account.store_bytes + ctx->account.value_bytes;
 	relic_destroy(ctx);
 
 	return (bytes);

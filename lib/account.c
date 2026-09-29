@@ -61,7 +61,8 @@ total_exceeds(const relic_account_t *account, size_t round_bytes,
 	if (!relic_limit_set(account->limit))
 		return (false);
 
-	total = account->store_bytes + account->arena_bytes + round_bytes;
+	total = account->store_bytes + account->value_bytes +
+	    account->arena_bytes + round_bytes;
 	elsewhere_bytes = total - current_bytes;
 
 	/* Two sizes that fit in a size_t need not have a sum that does. */

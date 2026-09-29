@@ -90,6 +90,7 @@ typedef struct relic_materialized relic_materialized_t;
 typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
+typedef struct relic_pending_map relic_pending_map_t;
 typedef struct relic_valtab relic_valtab_t;
 
 /*
@@ -628,8 +629,58 @@ int	 relic_value_intern_bytes(relic_t *ctx, enum relic_type type,
 	    const void *bytes, size_t length, relic_dom_t *domp);
 int	 relic_value_intern_integer(relic_t *ctx, int64_t value,
 	    relic_dom_t *domp);
+size_t	 relic_value_integer_bytes(const relic_t *ctx);
 void	 relic_valtab_init(relic_valtab_t *table, uint64_t hash_seed);
 void	 relic_valtab_reset(relic_valtab_t *table);
+
+/*
+ * Interning the integers a batch of derived tuples holds pending, in three
+ * steps that separate what reads the table from what writes it.
+ *
+ * An integer the executor computed and the table did not hold has no
+ * identifier yet, and its column holds a pending marker (lib/exec.h).  The
+ * table assigns identifiers in order, so the identifier a new integer will
+ * receive is known before it is assigned: the table's count plus the
+ * integer's position among the new integers of the batch, in order of first
+ * occurrence.
+ *
+ * relic_pending_measure() walks the batch's `count` pending integers and
+ * fills `map` with each one's identifier, the one the table holds it under
+ * or the one it will be given, and returns the bytes the integer table will
+ * occupy once the new ones are appended: the capacity appending them one at
+ * a time would reach, so that the table holds the same bytes however its
+ * integers arrived.  It writes nothing but the map.
+ *
+ * relic_pending_rewrite() replaces every pending marker in `tuples` tuples
+ * of `arity` columns with the identifier the map gives it.  It writes
+ * nothing but the tuples.
+ *
+ * relic_pending_commit() appends the map's new integers to the table, each
+ * under exactly the identifier the map promised.  It returns 0, or -1 with a
+ * diagnostic reported when the table could not grow, for memory or because
+ * it holds as many integers as an identifier can name; the table's contents
+ * are then as they were.
+ *
+ * A map is given room for `room` pending integers by
+ * relic_pending_map_init(), from `arena`, and returns -1 when the arena
+ * refused, which the caller's boundary reports.
+ */
+struct relic_pending_map {
+	relic_dom_t	*ids;		/* per pending integer, batch order */
+	int64_t		*fresh;		/* new integers, as first met */
+	uint32_t	*seen;		/* hash of fresh, holding index + 1 */
+	size_t		 room;
+	size_t		 count;
+	size_t		 fresh_count;
+};
+
+int	 relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
+	    size_t room);
+size_t	 relic_pending_measure(const relic_t *ctx, const int64_t *pending,
+	    size_t count, relic_pending_map_t *map);
+void	 relic_pending_rewrite(const relic_pending_map_t *map,
+	    relic_dom_t *tuples, size_t count, uint16_t arity);
+int	 relic_pending_commit(relic_t *ctx, const relic_pending_map_t *map);
 
 /*
  * lib/lex.c
@@ -975,11 +1026,38 @@ uint32_t relic_plan_bound_columns(const relic_atom_t *atom, uint16_t arity,
 	    uint64_t bound);
 
 /*
+ * The slots a body literal binds when the planner places it where the slots
+ * in `bound` are bound: every variable of a positive literal, the variable
+ * of an equality that assigns it there, and nothing for any other test.
+ * The planner decides what each literal binds through this, and so does the
+ * Magic rewrite, walking a body in the order relic_plan_order() gave, so the
+ * two cannot disagree about what is bound where.
+ */
+uint64_t relic_plan_literal_binds(const relic_t *ctx,
+	    const relic_literal_t *literal, uint64_t bound);
+
+/*
  * Whether a plan, run once over relations that do not change while it
  * runs, derives each of its head tuples once: so that inserting what it
  * derives would reject nothing, and its derivations are a set as they come.
  */
 bool	 relic_plan_derives_distinct(const relic_plan_t *plan);
+
+/*
+ * Whether a plan computes an integer: whether some FILTER or ASSIGN runs a
+ * program holding an operator.  Such a plan can meet an undefined result on
+ * any binding, and can derive an integer the value table does not hold.
+ */
+bool	 relic_plan_computes(const relic_plan_t *plan);
+
+/*
+ * The atom of an operation over a relation -- a SCAN, a LOOKUP, a MEMBER,
+ * an ANTI_MEMBER or the EMIT -- or NULL for one over none, a FILTER or an
+ * ASSIGN, whose union holds no atom.  A question about the relation an
+ * operation reads or writes asks this rather than the union, so that an
+ * operation kind over no relation is answered by construction.
+ */
+const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
 
 /*
  * lib/magic.c
@@ -1343,6 +1421,11 @@ void	 relic_index_link_append(relic_index_t *index,
  * does the same with each tuple's hash given, as relic_relation_screen()
  * gave it.
  *
+ * relic_relation_admit_integers() asks the memory limit whether the integer
+ * table may grow from what it holds now to `projected_bytes`, which the
+ * integers of a batch derived into `relation` need, and returns 0, or -1
+ * having reported the refusal as an insertion into `relation` reports one.
+ *
  * relic_relation_reserve() makes room in a relation without secondary
  * indexes, as a base store is when a load commits, for a growth: tuples by
  * the stripe of the canonical index each falls in, for the stripes' slots,
@@ -1437,6 +1520,8 @@ int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 int	 relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *tuples, size_t count, bool *added,
 	    size_t *completedp);
+int	 relic_relation_admit_integers(relic_t *ctx,
+	    const relic_relation_t *relation, size_t projected_bytes);
 int	 relic_relation_insert_batch_hashed(relic_t *ctx,
 	    relic_relation_t *relation, const relic_dom_t *tuples,
 	    const uint64_t *hashes, size_t count, bool *added,
