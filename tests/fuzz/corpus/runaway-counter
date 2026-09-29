@@ -1,0 +1,8 @@
+% A recursion that computes a new integer per round never reaches a fixed
+% point; the target's limits must stop it in the optimized context and in
+% the one whose rounds are deferred, and each must report the stop.
+n(0).
+n(Y) :- n(X), Y = X + 1.
+pair(X, Y) :- n(X), n(Z), Y = X * 3 - Z.
+n(X), X > 5?
+pair(X, Y)?

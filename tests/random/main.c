@@ -283,8 +283,9 @@ run_selftest(const driver_t *driver)
 }
 
 /*
- * Generate the program of a seed.  The generator is safe by construction;
- * a program the model's own check calls unsafe is the generator's bug.
+ * Generate the program of a seed.  The generator is safe and bounded by
+ * construction; a program the model's own checks call unsafe or unbounded
+ * is the generator's bug.
  */
 static void
 generate_checked(random_program_t *program, uint64_t seed)
@@ -293,6 +294,9 @@ generate_checked(random_program_t *program, uint64_t seed)
 	if (!random_program_is_safe(program))
 		errx(1, "seed %" PRIu64 ": the generator produced an unsafe "
 		    "program", seed);
+	if (!random_program_is_bounded(program))
+		errx(1, "seed %" PRIu64 ": the generator produced a program "
+		    "whose arithmetic is not bounded", seed);
 }
 
 /*

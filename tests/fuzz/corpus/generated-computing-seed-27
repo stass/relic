@@ -1,0 +1,28 @@
+p0(b).
+p3(F, a) :- F = -3, C = D, p3(B, D), p1(B, D), p3(E, B), not p0(C), not p0(B).
+p1(a, 0).
+p1(a, 1).
+p0(b).
+p1(d, a).
+p0(2).
+p2(D, F, E, C) :- p2(_, D, B, F), C = E, p2(D, A, F, C).
+p1("\xc3\xa9", 0).
+p3(D, A) :- p0(B), p0(B), B * -2 = A, (-1 - 2) mod 2 = D.
+p0(d).
+p3(F, B) :- D = B, F = A, p3(_, B), p1(A, B).
+p0(-3).
+p1(0, 0).
+p1(a, 2).
+p0(b).
+p2(F, A, C, 0) :- A = D, p2(D, B, C, _), p3(a, B), F = -2, not p0(1).
+p1(1, a).
+p1(-3, 0).
+p1(1, a).
+p1(-2, c).
+p0(1).
+p1(2, 1).
+p1(-2, a).
+p2(C, D, A, B) :- p0(C), p3(A, D), p1(B, D).
+p0(3).
+2 / 1 = E, p3(A, D), E * -3 = B?
+p2(A, A, C, D), not p0(C), A + (C - A) > 0 - C mod 1?

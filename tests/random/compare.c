@@ -128,6 +128,7 @@ static void	 drop_last_row(answer_t *answer);
 static random_failure_kind_t count_derivations(
 		    const random_program_t *program, FILE *report,
 		    uint64_t *expectedp);
+static bool	 constants_equal(random_term_t left, random_term_t right);
 static bool	 fact_repeats_earlier(const random_program_t *program,
 		    size_t r);
 static bool	 fact_seeds(const random_program_t *program, size_t r);
@@ -431,9 +432,8 @@ fact_seeds(const random_program_t *program, size_t r)
 }
 
 /*
- * Whether a fact before fact `r` states the same tuple.  Every constant of
- * the pool is a distinct value, so two facts are equal exactly when their
- * predicates and their constants' positions in the pool are.
+ * Whether a fact before fact `r` states the same tuple: the same predicate,
+ * and in every column the same value.
  */
 static bool
 fact_repeats_earlier(const random_program_t *program, size_t r)
@@ -447,13 +447,39 @@ fact_repeats_earlier(const random_program_t *program, size_t r)
 		    earlier->head_predicate == fact->head_predicate;
 
 		for (uint8_t column = 0; same && column < arity; column++)
-			same = earlier->head[column].index ==
-			    fact->head[column].index;
+			same = constants_equal(earlier->head[column],
+			    fact->head[column]);
 		if (same)
 			return (true);
 	}
 
 	return (false);
+}
+
+/*
+ * Whether two constants of a fact are one value.  Every constant of the
+ * pool is a distinct value, and so is every number, but a number and an
+ * integer of the pool are one value when they spell one integer.
+ */
+static bool
+constants_equal(random_term_t left, random_term_t right)
+{
+	const random_constant_t *constant;
+	long long number;
+
+	if (left.kind == right.kind)
+		return (left.index == right.index);
+	if (left.kind == TERM_NUMBER) {
+		random_term_t swap = left;
+
+		left = right;
+		right = swap;
+	}
+
+	constant = &random_constants[left.index];
+	number = (long long)right.index - RANDOM_NUMBER_MAX;
+	return (constant->type == CONSTANT_INTEGER &&
+	    strtoll(constant->spelling, NULL, 10) == number);
 }
 
 /*

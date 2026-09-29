@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <err.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -32,7 +33,34 @@
  * literals are drawn first, and the variables they mention are then the only
  * variables anything later may use: the head, the negated literals and the
  * comparisons.  That is the whole of the safety condition, so no unsafe rule
- * can be drawn.  `_` appears only in positive literals.
+ * can be drawn.  `_` appears only in positive literals.  An assignment binds
+ * a variable no positive literal mentions from what those bind, and is
+ * drawn before anything else reads it, so the variables it binds join the
+ * safe ones; the text places it anywhere in its body, since the library
+ * binds by the closure and not by the written order.
+ *
+ * Arithmetic is defined and terminating by construction.  A program that
+ * computes is drawn as one, and states no integer larger in magnitude than
+ * RANDOM_INTEGER_SMALL.  An expression's constants lie within
+ * RANDOM_NUMBER_MAX of zero, a divisor is a nonzero constant, and a
+ * multiplication has a constant among its two operands, so an expression of
+ * the shapes drawn here is at most nine times as large as its largest
+ * operand, or a constant.
+ *
+ * Whether an equality assigns depends on what is bound where it runs, and
+ * the Magic rewrite runs a rule's prefix with only the call's bindings, so
+ * any equality holding an operator may compute a new value, filter or not.
+ * Every literal holding an operator is therefore drawn only in a query or
+ * in a rule whose positive literals all read levels below its head's, and
+ * at most two in a body.  A computed value then never feeds its own
+ * computation: bottom up, a value at level h is one stated or one computed
+ * by at most two such literals from values below h; top down, the rewrite
+ * carries a call's demand from a head to a body literal of a lower level,
+ * and a lower level never calls a higher one.  A value passes through at
+ * most six bodies, three levels up and three calls down, each multiplying
+ * it by at most 81, so every value stays below 7 * 9^12, and there are
+ * finitely many under every strategy.  Deleting a literal or a column, as
+ * the shrinker does, keeps both properties.
  *
  * The random stream is splitmix64, which is defined by its arithmetic alone,
  * so a seed names the same program on every platform and C library.
@@ -40,8 +68,13 @@
 
 typedef struct random_stream random_stream_t;
 
+/*
+ * The generator's state: the random stream, and whether the program being
+ * drawn computes, which decides the constants it may state.
+ */
 struct random_stream {
 	uint64_t	state;
+	bool		computes;
 };
 
 /*
@@ -90,13 +123,31 @@ typedef enum predicate_range {
 	READ_UP_TO
 } predicate_range_t;
 
+static void		 draw_assignment(random_stream_t *stream,
+			    random_body_t *body, size_t *operator_literalsp,
+			    uint64_t *bound_variables);
+static bool		 body_may_compute(const random_program_t *program,
+			    const random_body_t *body, body_owner_t owner,
+			    uint8_t level);
 static uint64_t		 draw(random_stream_t *stream);
+static void		 draw_expression(random_stream_t *stream,
+			    uint64_t bound_variables,
+			    random_expression_t *expression);
+static random_term_t	 draw_leaf(random_stream_t *stream,
+			    uint64_t bound_variables);
+static random_term_t	 draw_number(random_stream_t *stream, bool nonzero);
+static void		 fit_operation(random_stream_t *stream,
+			    random_term_t *left, random_operator_t operator,
+			    random_term_t *right);
+static void		 insert_literal(random_stream_t *stream,
+			    random_body_t *body, const random_literal_t *literal);
 static size_t		 draw_below(random_stream_t *stream, size_t bound);
 static void		 draw_bound_terms(random_stream_t *stream,
 			    uint64_t positive_variables, random_term_t *terms,
 			    size_t count);
 static bool		 draw_chance(random_stream_t *stream, size_t in);
 static random_term_t	 draw_constant(random_stream_t *stream);
+static size_t		 draw_assignment_count(random_stream_t *stream);
 static size_t		 draw_filter_count(random_stream_t *stream);
 static size_t		 draw_positive_count(random_stream_t *stream,
 			    body_owner_t owner);
@@ -131,6 +182,7 @@ random_generate(random_program_t *program, uint64_t seed)
 
 	bzero(program, sizeof(*program));
 	stream.state = seed;
+	stream.computes = draw_chance(&stream, 2);
 
 	generate_predicates(&stream, program, &extensional_count);
 
@@ -247,7 +299,7 @@ generate_rule(random_stream_t *stream, random_program_t *program,
 {
 	const random_predicate_t *head = &program->predicates[predicate];
 	random_rule_t *rule;
-	uint64_t positive_variables;
+	uint64_t bound_variables;
 
 	if (program->rule_count == RANDOM_MAX_RULES)
 		return;
@@ -255,16 +307,17 @@ generate_rule(random_stream_t *stream, random_program_t *program,
 
 	rule->head_predicate = predicate;
 	generate_body(stream, program, owner, head->level, &rule->body,
-	    &positive_variables);
-	draw_bound_terms(stream, positive_variables, rule->head, head->arity);
+	    &bound_variables);
+	draw_bound_terms(stream, bound_variables, rule->head, head->arity);
 
 	program->rule_count++;
 }
 
 /*
- * Draw a body: positive relational literals first, then negated literals and
- * comparisons over the variables those bound.  The variables the positive
- * literals mention are returned as a bit set, for the head to draw from.
+ * Draw a body: positive relational literals first, then assignments binding
+ * fresh variables from what those bound, then negated literals and
+ * comparisons over every variable bound.  The bound variables are returned
+ * as a bit set, for the head to draw from.
  *
  * What a body may read depends on what it belongs to.  A query reads any
  * predicate, since nothing depends on a query.  A rule reads what its head's
@@ -279,13 +332,15 @@ generate_rule(random_stream_t *stream, random_program_t *program,
 static void
 generate_body(random_stream_t *stream, const random_program_t *program,
     body_owner_t owner, uint8_t level, random_body_t *body,
-    uint64_t *positive_variables)
+    uint64_t *bound_variables)
 {
 	size_t positive_count, negated_count, comparison_count;
+	size_t assignment_count;
 	size_t variable_count;
+	size_t operator_literals;
 
 	body->length = 0;
-	*positive_variables = 0;
+	*bound_variables = 0;
 
 	/*
 	 * The proportions keep most bodies satisfiable: few variables, so
@@ -293,6 +348,7 @@ generate_body(random_stream_t *stream, const random_program_t *program,
 	 */
 	variable_count = 2 + draw_below(stream, RANDOM_MAX_VARIABLES - 1);
 	positive_count = draw_positive_count(stream, owner);
+	assignment_count = draw_assignment_count(stream);
 	negated_count = draw_filter_count(stream);
 	comparison_count = draw_filter_count(stream);
 
@@ -307,8 +363,15 @@ generate_body(random_stream_t *stream, const random_program_t *program,
 		arity = program->predicates[literal->predicate].arity;
 		for (size_t a = 0; a < arity; a++)
 			literal->args[a] = draw_positive_term(stream,
-			    variable_count, positive_variables);
+			    variable_count, bound_variables);
 	}
+
+	operator_literals = 0;
+	if (stream->computes && body_may_compute(program, body, owner, level))
+		operator_literals = RANDOM_MAX_OPERATOR_LITERALS;
+	for (size_t i = 0; i < assignment_count; i++)
+		draw_assignment(stream, body, &operator_literals,
+		    bound_variables);
 
 	for (size_t i = 0; i < negated_count; i++) {
 		random_literal_t *literal = &body->literals[body->length++];
@@ -318,18 +381,236 @@ generate_body(random_stream_t *stream, const random_program_t *program,
 		literal->kind = LITERAL_NEGATED;
 		literal->predicate = pick_predicate(stream, program, range,
 		    level);
-		draw_bound_terms(stream, *positive_variables, literal->args,
+		draw_bound_terms(stream, *bound_variables, literal->args,
 		    program->predicates[literal->predicate].arity);
 	}
 
 	for (size_t i = 0; i < comparison_count; i++) {
 		random_literal_t *literal = &body->literals[body->length++];
 		size_t comparator = draw_below(stream, COMPARE_COUNT);
+		random_term_t operands[2];
 
 		literal->kind = LITERAL_COMPARISON;
 		literal->comparator = (random_comparator_t)comparator;
-		draw_bound_terms(stream, *positive_variables, literal->args, 2);
+		draw_bound_terms(stream, *bound_variables, operands, 2);
+		for (size_t side = 0; side < 2; side++) {
+			random_expression_t *expression = &literal->sides[side];
+
+			bzero(expression, sizeof(*expression));
+			expression->leaves[0] = operands[side];
+			if (operator_literals > 0 && draw_chance(stream, 2)) {
+				draw_expression(stream, *bound_variables,
+				    expression);
+				operator_literals--;
+			}
+		}
 	}
+}
+
+/*
+ * Whether a body may hold a literal with an operator: a query's may, and a
+ * rule's may when its positive literals all read levels below its head's,
+ * so that nothing it computes can reach it again, bottom up or through the
+ * Magic rewrite's demand.
+ */
+static bool
+body_may_compute(const random_program_t *program, const random_body_t *body,
+    body_owner_t owner, uint8_t level)
+{
+	if (owner == BODY_OF_QUERY)
+		return (true);
+
+	for (size_t i = 0; i < body->length; i++) {
+		const random_literal_t *literal = &body->literals[i];
+
+		if (literal->kind == LITERAL_POSITIVE &&
+		    program->predicates[literal->predicate].level >= level)
+			return (false);
+	}
+	return (true);
+}
+
+/*
+ * Draw an assignment to a variable nothing in the body binds yet, from what
+ * is bound, written either way round and placed anywhere in the body, and
+ * add the variable to the bound ones.  Its value is mostly an expression
+ * with operators while *operator_literalsp allows one more, which it then
+ * uses, and otherwise a bound variable or a constant.  A body with no
+ * variable left to bind gets none.
+ */
+static void
+draw_assignment(random_stream_t *stream, random_body_t *body,
+    size_t *operator_literalsp, uint64_t *bound_variables)
+{
+	random_literal_t literal;
+	uint8_t free_variables[RANDOM_MAX_VARIABLES];
+	size_t free_count = 0;
+	size_t value_side;
+	uint8_t target;
+
+	for (uint8_t v = 0; v < RANDOM_MAX_VARIABLES; v++) {
+		if ((*bound_variables & (UINT64_C(1) << v)) == 0)
+			free_variables[free_count++] = v;
+	}
+	if (free_count == 0)
+		return;
+	target = free_variables[draw_below(stream, free_count)];
+
+	bzero(&literal, sizeof(literal));
+	literal.kind = LITERAL_COMPARISON;
+	literal.comparator = COMPARE_EQ;
+	value_side = draw_below(stream, 2);
+	literal.sides[1 - value_side].leaves[0].kind = TERM_VARIABLE;
+	literal.sides[1 - value_side].leaves[0].index = target;
+	if (*operator_literalsp > 0 && !draw_chance(stream, 4)) {
+		draw_expression(stream, *bound_variables,
+		    &literal.sides[value_side]);
+		(*operator_literalsp)--;
+	} else
+		literal.sides[value_side].leaves[0] = draw_leaf(stream,
+		    *bound_variables);
+
+	assert(body->length < RANDOM_MAX_BODY);
+	insert_literal(stream, body, &literal);
+	*bound_variables |= UINT64_C(1) << target;
+}
+
+/*
+ * Draw an expression with one or two operators over bound variables and
+ * numbers, fitted so that it is defined whatever integers its variables
+ * hold: each operator's operands are fitted where it is drawn.  An operator
+ * whose right operand is a group never divides by it, so a division or a
+ * remainder there is made an addition.
+ */
+static void
+draw_expression(random_stream_t *stream, uint64_t bound_variables,
+    random_expression_t *expression)
+{
+	random_term_t *leaves = expression->leaves;
+	random_operator_t *operators = expression->operators;
+
+	bzero(expression, sizeof(*expression));
+	expression->shape = (random_shape_t)(SHAPE_BINARY +
+	    draw_below(stream, 3));
+	expression->negated = draw_chance(stream, 8);
+	for (size_t i = 0; i < 3; i++)
+		leaves[i] = draw_leaf(stream, bound_variables);
+	for (size_t i = 0; i < 2; i++) {
+		size_t operator = draw_below(stream, OPERATOR_COUNT);
+
+		operators[i] = (random_operator_t)operator;
+	}
+
+	switch (expression->shape) {
+	case SHAPE_LEAF:
+		break;
+	case SHAPE_BINARY:
+		fit_operation(stream, &leaves[0], operators[0], &leaves[1]);
+		break;
+	case SHAPE_LEFT:
+		fit_operation(stream, &leaves[0], operators[0], &leaves[1]);
+		fit_operation(stream, NULL, operators[1], &leaves[2]);
+		break;
+	case SHAPE_RIGHT:
+		if (operators[0] == OPERATOR_DIVIDE ||
+		    operators[0] == OPERATOR_MOD)
+			operators[0] = OPERATOR_ADD;
+		fit_operation(stream, &leaves[0], operators[0], NULL);
+		fit_operation(stream, &leaves[1], operators[1], &leaves[2]);
+		break;
+	}
+}
+
+/*
+ * Make one operation defined and small: a division or a remainder divides
+ * by a nonzero number, and a multiplication has a number among its
+ * operands.  An operand that is a group is NULL; a division's right operand
+ * never is.
+ */
+static void
+fit_operation(random_stream_t *stream, random_term_t *left,
+    random_operator_t operator, random_term_t *right)
+{
+	switch (operator) {
+	case OPERATOR_DIVIDE:
+	case OPERATOR_MOD:
+		*right = draw_number(stream, true);
+		break;
+	case OPERATOR_MULTIPLY:
+		if ((left != NULL && left->kind == TERM_NUMBER) ||
+		    (right != NULL && right->kind == TERM_NUMBER))
+			break;
+		if (right != NULL)
+			*right = draw_number(stream, false);
+		else
+			*left = draw_number(stream, false);
+		break;
+	case OPERATOR_ADD:
+	case OPERATOR_SUBTRACT:
+	case OPERATOR_COUNT:
+		break;
+	}
+}
+
+/*
+ * An operand: two times in three a bound variable, when there is one, and
+ * otherwise a number.
+ */
+static random_term_t
+draw_leaf(random_stream_t *stream, uint64_t bound_variables)
+{
+	uint8_t bound[RANDOM_MAX_VARIABLES];
+	size_t bound_count = 0;
+	random_term_t term;
+
+	for (uint8_t v = 0; v < RANDOM_MAX_VARIABLES; v++) {
+		if ((bound_variables & (UINT64_C(1) << v)) != 0)
+			bound[bound_count++] = v;
+	}
+	if (bound_count == 0 || draw_chance(stream, 3))
+		return (draw_number(stream, false));
+
+	term.kind = TERM_VARIABLE;
+	term.index = bound[draw_below(stream, bound_count)];
+	return (term);
+}
+
+/*
+ * A number within RANDOM_NUMBER_MAX of zero, and not zero when `nonzero`.
+ */
+static random_term_t
+draw_number(random_stream_t *stream, bool nonzero)
+{
+	random_term_t term;
+	size_t magnitude;
+
+	term.kind = TERM_NUMBER;
+	if (!nonzero) {
+		term.index = (uint8_t)draw_below(stream,
+		    2 * RANDOM_NUMBER_MAX + 1);
+		return (term);
+	}
+
+	magnitude = 1 + draw_below(stream, RANDOM_NUMBER_MAX);
+	term.index = (uint8_t)(draw_chance(stream, 2) ?
+	    RANDOM_NUMBER_MAX + magnitude : RANDOM_NUMBER_MAX - magnitude);
+	return (term);
+}
+
+/*
+ * Insert a literal at a position drawn among the body's, moving the ones
+ * after it along.
+ */
+static void
+insert_literal(random_stream_t *stream, random_body_t *body,
+    const random_literal_t *literal)
+{
+	size_t position = draw_below(stream, body->length + 1);
+
+	for (size_t i = body->length; i > position; i--)
+		body->literals[i] = body->literals[i - 1];
+	body->literals[position] = *literal;
+	body->length++;
 }
 
 /*
@@ -362,6 +643,19 @@ draw_filter_count(random_stream_t *stream)
 	size_t count = 1 + draw_below(stream, 2);
 
 	return (present ? count : 0);
+}
+
+/*
+ * How many assignments a body has: in a program that computes, one or two
+ * half the time, since they are what it computes with, and otherwise as
+ * many as a filter.
+ */
+static size_t
+draw_assignment_count(random_stream_t *stream)
+{
+	if (stream->computes && draw_chance(stream, 2))
+		return (1 + draw_below(stream, 2));
+	return (draw_filter_count(stream));
 }
 
 /*
@@ -490,16 +784,29 @@ draw_bound_terms(random_stream_t *stream, uint64_t positive_variables,
 	}
 }
 
+/*
+ * A constant from the pool, mostly a common one.  A program that computes
+ * draws a number half the time, so that its expressions mostly find
+ * integers to compute with, and draws again rather than state a large
+ * integer.
+ */
 static random_term_t
 draw_constant(random_stream_t *stream)
 {
 	random_term_t term;
 
+	if (stream->computes && draw_chance(stream, 2))
+		return (draw_number(stream, false));
+
 	term.kind = TERM_CONSTANT;
-	if (draw_chance(stream, 8))
-		term.index = (uint8_t)draw_below(stream, random_constant_count);
-	else
-		term.index = (uint8_t)draw_below(stream, COMMON_CONSTANTS);
+	do {
+		if (draw_chance(stream, 8))
+			term.index = (uint8_t)draw_below(stream,
+			    random_constant_count);
+		else
+			term.index = (uint8_t)draw_below(stream,
+			    COMMON_CONSTANTS);
+	} while (stream->computes && !random_constant_is_small(term.index));
 	return (term);
 }
 

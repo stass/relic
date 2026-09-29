@@ -32,19 +32,35 @@
  * Sizes of the model.  They are far inside the library's structural limits
  * -- arity 32 and 64 variables per rule -- so no limit can refuse a generated
  * program, and small enough that every relation stays small and a program
- * runs in milliseconds under every strategy.
+ * runs in milliseconds under every strategy.  A body holds at most three
+ * positive literals and two each of assignments, negated literals and
+ * comparisons.
  */
 #define	RANDOM_MAX_PREDICATES	8
 #define	RANDOM_MAX_ARITY	4
 #define	RANDOM_MAX_VARIABLES	6
-#define	RANDOM_MAX_BODY		7
+#define	RANDOM_MAX_BODY		9
 #define	RANDOM_MAX_RULES	96
 #define	RANDOM_MAX_QUERIES	4
+
+/*
+ * The integers an expression may be given as constants are those from
+ * -RANDOM_NUMBER_MAX to RANDOM_NUMBER_MAX, and a program with expressions
+ * states no integer larger in magnitude than RANDOM_INTEGER_SMALL.  With
+ * the expression shapes generate.c draws, that keeps every value any
+ * generated program can compute inside a 64-bit integer.
+ */
+#define	RANDOM_NUMBER_MAX	3
+#define	RANDOM_INTEGER_SMALL	7
+
+/* The most literals holding an operator one body may have. */
+#define	RANDOM_MAX_OPERATOR_LITERALS	2
 
 typedef enum random_term_kind {
 	TERM_VARIABLE,		/* index names the variable: A, B, ... */
 	TERM_ANONYMOUS,		/* `_`, a distinct variable at every occurrence */
-	TERM_CONSTANT		/* index is a position in the constant pool */
+	TERM_CONSTANT,		/* index is a position in the constant pool */
+	TERM_NUMBER		/* index less RANDOM_NUMBER_MAX is an integer */
 } random_term_kind_t;
 
 typedef struct random_term random_term_t;
@@ -60,6 +76,37 @@ typedef enum random_literal_kind {
 	LITERAL_COMPARISON
 } random_literal_kind_t;
 
+typedef enum random_operator {
+	OPERATOR_ADD,
+	OPERATOR_SUBTRACT,
+	OPERATOR_MULTIPLY,
+	OPERATOR_DIVIDE,
+	OPERATOR_MOD,
+	OPERATOR_COUNT
+} random_operator_t;
+
+/*
+ * An expression of one, two or three operands, the leaves, in one of four
+ * shapes: a leaf alone, `l0 op0 l1`, `(l0 op0 l1) op1 l2` and `l0 op0 (l1
+ * op1 l2)`, each negated as a whole when `negated`.  A leaf is a variable or
+ * a number; the text holds the parentheses the shape needs and no others.
+ */
+typedef enum random_shape {
+	SHAPE_LEAF,
+	SHAPE_BINARY,
+	SHAPE_LEFT,
+	SHAPE_RIGHT
+} random_shape_t;
+
+typedef struct random_expression random_expression_t;
+
+struct random_expression {
+	random_shape_t		shape;
+	random_operator_t	operators[2];
+	random_term_t		leaves[3];
+	bool			negated;
+};
+
 typedef enum random_comparator {
 	COMPARE_EQ,
 	COMPARE_NE,
@@ -73,8 +120,9 @@ typedef enum random_comparator {
 /*
  * A body literal.  A relational literal, positive or negated, reads its
  * predicate's arity from the program's predicate table and holds that many
- * arguments.  A comparison holds its two operands in the first two argument
- * slots.
+ * arguments.  A comparison holds its two operands as expressions; an
+ * equality one of whose sides is a variable alone that nothing else binds
+ * is an assignment, and binds it.
  */
 typedef struct random_literal random_literal_t;
 
@@ -83,6 +131,7 @@ struct random_literal {
 	random_comparator_t	comparator;	/* comparisons only */
 	uint8_t			predicate;	/* relational literals only */
 	random_term_t		args[RANDOM_MAX_ARITY];
+	random_expression_t	sides[2];	/* comparisons only */
 };
 
 /*
@@ -154,6 +203,8 @@ void	random_generate(random_program_t *program, uint64_t seed);
 
 /* program.c */
 bool	random_program_is_safe(const random_program_t *program);
+bool	random_program_is_bounded(const random_program_t *program);
+bool	random_constant_is_small(size_t index);
 bool	random_program_has_anonymous(const random_program_t *program);
 char	*random_bindings_text(const random_program_t *program);
 size_t	random_program_statements(const random_program_t *program);

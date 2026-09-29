@@ -195,6 +195,7 @@ argument, `fb` the second.
 | `sg-cyclic` | sparse, cyclic | free; same generation |
 | `sg-acyclic` | sparse, acyclic | free |
 | `sg-acyclic-bf` | sparse, acyclic | `sg(500, X)` |
+| `dist-bounded` | sparse, cyclic | free; `dist(X, Y, D)`, every length up to 5 of a walk from `X` to `Y`, computed by `E = D + 1` |
 | `andersen` | a generated program of 2000 functions | free; every points-to fact |
 | `cspa` | a generated program of 1000 functions | free; the value-flow relation, which needs the other two |
 

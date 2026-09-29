@@ -28,9 +28,10 @@
  * Holding the failure fixed is what keeps a reduction on one bug.  A
  * deletion that turned a wrong answer into a crash, or made the program one
  * the library rightly refuses, is a different failure and is not kept.
- * Deletions add no dependency, so a stratified program stays stratified; a
- * deletion that leaves a variable unbound is recognized by the model's
- * safety check and never run.
+ * Deletions add no dependency, so a stratified program stays stratified,
+ * and add no operator, so a program whose arithmetic is bounded stays
+ * bounded; a deletion that leaves a variable unbound is recognized by the
+ * model's safety check and never run, and the bound is checked as well.
  *
  * Every candidate is run in a child, exactly as the driver runs a program,
  * so a crash or a hang shrinks as readily as a wrong answer.
@@ -176,7 +177,8 @@ keep_if_still_failing(shrink_state_t *state)
 {
 	random_failure_t failure;
 
-	if (!random_program_is_safe(state->candidate))
+	if (!random_program_is_safe(state->candidate) ||
+	    !random_program_is_bounded(state->candidate))
 		return (false);
 
 	failure = random_run_isolated(state->candidate, state->options, false);

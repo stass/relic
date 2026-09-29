@@ -1,0 +1,8 @@
+.decl par(x: number, y: number)
+.input par(filename="par.tsv")
+
+.decl dist(x: number, y: number, d: number)
+dist(X, Y, 1) :- par(X, Y).
+dist(X, Z, D + 1) :- dist(X, Y, D), par(Y, Z), D < 5.
+
+.output dist(filename="answer.csv")

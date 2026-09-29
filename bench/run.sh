@@ -67,6 +67,14 @@ path(X, Z) :- edge(X, Y), path(Y, Z).
 from(X, Y) :- edge(X, Y).
 from(X, Z) :- from(X, Y), edge(Y, Z).'
 
+# Over the chain again, the closure with each path's length, computed as it
+# is derived: a new integer for every length, interned when the first tuple
+# holding it is stored.  The chain is acyclic, so the bound only filters,
+# as a computing recursion's bound does: a million is beyond the chain's
+# length up to a BENCH_SCALE of 500.
+distance_rules='dist(X, Y, 1) :- edge(X, Y).
+dist(X, Z, E) :- dist(X, Y, D), edge(Y, Z), D < 1000000, E = D + 1.'
+
 # Over the graph, the nodes reachable from n0, and the closure from any node.
 graph_rules='reach(X) :- edge(n0, X).
 reach(Y) :- reach(X), edge(X, Y).
@@ -96,9 +104,15 @@ facts_rules='pair(A, B) :- row(A, V, 7), row(B, V, 13).'
 make_program() {
 	mkdir "$work/$1"
 	dataset "$1" "$work/$1" "$scale"
+	write_program "$1" "$1" "$2"
+}
+
+# write_program NAME DATA RULES: write $work/NAME.dl, the facts of the data
+# set already generated into $work/DATA followed by RULES.
+write_program() {
 	{
-		source_facts "$work/$1"
-		printf '%s\n' "$2"
+		source_facts "$work/$2"
+		printf '%s\n' "$3"
 	} > "$work/$1.dl"
 }
 
@@ -130,6 +144,7 @@ run() {
 }
 
 make_program chain "$chain_rules"
+write_program distances chain "$distance_rules"
 make_program graph "$graph_rules"
 make_program grid "$grid_rules"
 make_program tree "$tree_rules"
@@ -142,6 +157,7 @@ printf '%-28s %8s %11s %10s %11s %11s\n' workload seconds derived held \
 run "chain, right-recursive" "$work/chain.dl" -q 'path(n0, X)?'
 run "chain, left-recursive" "$work/chain.dl" -q 'from(n0, X)?'
 run "chain, whole closure" "$work/chain.dl" -X no-magic -q 'path(n0, X)?'
+run "chain, distances" "$work/distances.dl" -q 'dist(X, Y, D)?'
 run "graph, reachability" "$work/graph.dl" -q 'reach(X)?'
 run "graph, left-recursive" "$work/graph.dl" -q 'from(n17, X)?'
 run "grid, reachability" "$work/grid.dl" -q 'reach(X)?'
