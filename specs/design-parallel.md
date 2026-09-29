@@ -623,60 +623,77 @@ tuple is, that admission becomes exact rather than a worst case, and the
 merge runs in phases separated by barriers, those marked *parallel* on
 the pool:
 
-1. **Bucket by stripe** (parallel). Each task's candidates are counted
-   by canonical stripe; worker 0 turns the counts into offsets in task
-   order, and the candidates are written into the buckets. A bucket
-   lists its stripe's candidates in task order.
-2. **Deduplicate by stripe** (parallel). Worker `s` walks bucket `s`
-   with a scratch screen keyed by target and tuple and marks each
-   candidate *first* or *repeat*. A first is a new tuple, since the
-   screen of section 5.3 found it absent from the frozen store, and the
-   firsts are exactly the tuples the serial evaluator inserts. Stripes
-   share nothing, and each writes only its own candidates' marks.
-3. **Stage** (parallel). Worker 0 turns each task's count of firsts into
-   offsets per target in task order, and each task's firsts are copied,
-   columns and hash, into their target's staging at those offsets. A
-   target's staging lists its new tuples in identifier order: the one at
-   offset `i` becomes tuple `count + 1 + i`.
-4. **Classify keys** (parallel). For each secondary index of a target,
-   the staged tuples' keys are hashed and bucketed by key stripe in
-   identifier order, and worker `(index, s)` probes stripe `s` of the
-   frozen key table for each key and screens the keys it lacks,
-   recording for each staged tuple the key it joins: one the index
-   holds, or the new key the first staged tuple holding it creates. It
-   counts the stripe's new keys.
+1. **Find new tuples by stripe** (parallel). Each candidate carries the
+   canonical stripe its hash chooses, recorded when its worker screened
+   it. Part `s` walks the round's candidates in task order, each task's
+   in the order its worker derived them, takes those of stripe `s`, and
+   marks each *first* or *repeat* with a scratch screen keyed by target
+   and tuple, counting each task's firsts in the stripe. A first is a new
+   tuple, since the screen of section 5.3 found it absent from the
+   frozen store, and the firsts are exactly the tuples the serial
+   evaluator inserts. Stripes share nothing, and each writes only its
+   own candidates' marks. Every part reads every candidate's stripe, a
+   byte each, in place of a pass that would copy the candidates into
+   buckets by stripe.
+2. **Count** (serial). Worker 0 turns each task's count of firsts into
+   offsets per target in task order, and sums each target's new tuples
+   per canonical stripe. The tuple limit is asked of their exact number.
+3. **Stage** (parallel). Each task's firsts are copied, columns and
+   hash, into their target's staging at those offsets, with the hash and
+   the stripe of each secondary index's key. A target's staging lists
+   its new tuples in identifier order: the one at offset `i` becomes
+   tuple `count + 1 + i`.
+4. **Classify keys** (parallel). Part `(target, index, s)` walks the
+   target's staging in identifier order, takes the tuples whose key lies
+   in stripe `s`, probes stripe `s` of the frozen key table for each key
+   and screens the keys it lacks, recording for each staged tuple the
+   key it joins: one the index holds, or the new key the first staged
+   tuple holding it creates. It counts the stripe's new keys.
 5. **Check and reserve** (serial). Worker 0 now knows each target's new
    tuples per canonical stripe and each index's new keys per key stripe,
-   which is all an exact projection needs. It checks both limits against
-   that projection with every scratch array still charged; a round that
-   would not fit is abandoned, as section 6.1 abandons one. It then
-   grows every array to exactly that capacity -- the capacity the serial
-   insertions reach, so the storage total after the merge is the serial
-   evaluator's byte for byte -- and allocates each growing table's new
-   slots without yet moving its entries. Every step that can fail is in
-   this phase; a growth that fails leaves every relation holding what it
-   held, and is reported as the serial evaluator reports one.
+   which is all an exact projection needs. It checks the memory limit
+   against that projection, with the tables the growth replaces held
+   beside it until phase 7 frees them, and with the candidates and the
+   staging still charged. It then grows every array to exactly that
+   capacity -- the capacity the serial insertions reach, so the storage
+   total after the merge is the serial evaluator's byte for byte -- and
+   allocates each growing table's new slots without yet moving its
+   entries.
+
+   Every step that can fail is in phases 1 to 5, and none of them changes
+   what a relation holds: a part refused its scratch screen, a limit that
+   would refuse the projection, or a growth the allocator refuses
+   declines the merge, and the round is abandoned as section 6.1 abandons
+   one. Its serial run admits or refuses each tuple as the serial
+   evaluator does, so the merge itself never reports and never fails part
+   way. A growth refused part way keeps what it obtained, accounted: the
+   relations hold what they held, some of them in larger arrays.
 6. **Append** (serial). Worker 0 copies each target's staging into its
    columns and advances its count: a copy of `arity` words per new
    tuple, which is memory bandwidth and not a probe.
-7. **Place and link** (parallel). Worker `s` moves stripe `s` of each
-   target's canonical index into the slots phase 5 allocated, if it grew,
-   and places the stripe's new tuples. Worker `(index, s)` does the same
-   for stripe `s` of the index's key table, then walks its bucket in
-   identifier order, creating each new key and linking each tuple at the
-   end of its key's chain. Chains are per key and a key is in one
-   stripe, so no two workers touch one chain, one entry, one frontier or
-   one `next` slot: `next[last]` belongs to the key's chain and
-   `next[id]` to the tuple. Nothing here can fail. Worker 0 then
-   reconciles the storage total from what the relations hold, as a
-   reservation does.
+7. **Place and link** (parallel). The parts of a target are the stripes
+   of its canonical index and of each of its secondary indexes' key
+   tables, which the relation store numbers and the merge runs every one
+   of. Part `s` moves stripe `s` of the target's canonical index into the
+   slots phase 5 allocated, if it grew, freeing the old ones, and places
+   the stripe's new tuples. Part `(index, s)` does the same for stripe
+   `s` of the index's key table, then walks the staging in identifier
+   order, taking the tuples whose key lies in the stripe, creating each
+   new key and linking each tuple at the end of its key's chain. Placing
+   reads nothing linking writes, so both kinds of part run in one phase.
+   Chains are per key and a key is in one stripe, so no two parts touch
+   one chain, one entry, one frontier or one `next` slot: `next[last]`
+   belongs to the key's chain and `next[id]` to the tuple. Nothing here
+   can fail. Worker 0 then reconciles the storage total from what the
+   relations hold, as a reservation does.
 
 A table's rehash, which moves every entry it holds, is the largest part
 of a growth, and it is the part phase 7 does in parallel: phase 5 only
-allocates. Identifiers are assigned in phase 3 in serial order, so the
-result is the serial evaluator's, and phase 5 checks the limits on the
-capacities the serial evaluator reaches. A lookup through a striped
-table costs one shift more than an unstriped one, to choose the stripe.
+allocates. Identifiers are assigned in phases 2 and 3 in serial order, so
+the result is the serial evaluator's, and phase 5 checks the memory limit
+on the capacities the serial evaluator reaches. A lookup through a
+striped table costs one shift more than an unstriped one, to choose the
+stripe.
 
 ---
 
@@ -762,13 +779,14 @@ serially, section 3. Every refusal a program can meet is therefore made by
 the serial evaluator's code, on the calling thread, in the serial order,
 with the serial message: the tuple limit refuses the tuple it refuses
 today, and the memory limit refuses the growth it refuses today, in the
-merge or in the serial rerun. No worker reports anything, and no outcome
-depends on which worker ran which task.
+serial rerun; the merge declines rather than refuses. No worker reports
+anything, and no outcome depends on which worker ran which task.
 
-**The tuple limit** is enforced in the merge before each insertion by the
-check the serial evaluator makes. Its projection would have to be exact
-here and it is, since the merge runs in serial order. The limit also
-bounds what a round may gather: a worker whose candidates exceed the
+**The tuple limit** is asked of the round's exact number of new tuples
+once the merge has found them, section 6.3 phase 2, before anything is
+modified; a round it would refuse is abandoned and run again serially,
+where the serial evaluator refuses the tuple it refuses today. The limit
+also bounds what a round may gather: a worker whose candidates exceed the
 tuples the limit could still admit abandons the job, section 4.4, so a
 program that runs away under `-l tuples=` alone meets the limit in the
 serial rerun rather than exhausting memory in buffers first.
@@ -776,7 +794,12 @@ serial rerun rather than exhausting memory in buffers first.
 **The memory limit** has two holders in a parallel round. The relation
 store's part, `store_bytes`, is written by the merge alone, on worker 0,
 with the projection and reconciliation of `specs/design-relations.md`
-section 9 unchanged. The workers' candidate buffers and screens are
+section 9. From the reservation until the merge is applied it also
+counts the tables the growth replaces, which stay allocated beside their
+replacements until the parts of phase 7 move their entries and free
+them; the merge's admission asks the limit of that, so the limit holds
+while every stripe of every target grows at once. The workers' candidate
+buffers and screens are
 charged as a second kind of holder, beside the arenas, through an atomic
 charge: a compare-and-swap loop that admits the bytes only if the total
 with them stays under the limit, and an atomic release. The loop runs once
@@ -801,8 +824,8 @@ failing the evaluation, section 4.4, so a memory limit that admits a
 program at one thread admits it at sixteen.
 
 **Diagnostics** are reported from worker 0 only: a limit refusal in the
-merge or in the serial rerun as it happens, a mixed-comparison note during
-the merge in task order. The diagnostic callback, the explain callback and
+serial rerun as it happens, a mixed-comparison note once the round is
+merged, in task order. The diagnostic callback, the explain callback and
 the row callback are never called from another thread, and nothing has to
 check that: no worker has a path to any of them.
 
@@ -981,7 +1004,7 @@ at every thread count**, and the argument is short because of section 3.
   held, which were duplicates in the serial order too, and those a
   worker's screen caught, each a repeat of a candidate earlier in that
   worker's tasks and so earlier in serial order.
-* The merge inserts that sequence with the serial insertion, in that
+* The merge inserts that sequence as the serial insertion would, in that
   order, so every first occurrence takes the identifier it takes in the
   serial run and every later one is the duplicate it is there. Chains
   are built by identifier order and so are the same; deltas are ranges of
@@ -1001,12 +1024,13 @@ at every thread count**, and the argument is short because of section 3.
 A merge is begun only once neither limit can refuse it, sections 6.1 and
 8, so an evaluation a limit fails is refused in a round run serially,
 after the serial evaluator's own work, and is held to the identity like a
-successful one. An evaluation exhaustion fails is not: a round whose merge
-the allocator refuses has counted the scans and derivations of the whole
-round where the serial evaluator stopped part way, as a batch already may
-run past a refused tuple (`specs/design-evaluation-cost.md` section 6.2).
-What is identical then is the diagnostic and the state the relations are
-left in, which the next evaluation discards.
+successful one. An evaluation exhaustion fails is not: where the
+allocator refuses is not a function of the input, a merge it refuses is
+declined and its round run again serially, and a reservation refused part
+way keeps the room it obtained, so the relations may hold larger arrays
+than the serial evaluator's would. What such an evaluation guarantees is
+one diagnostic and an account that holds what the relations hold, which
+the next evaluation discards.
 
 The golden tests are therefore run at one thread and at several, with
 `-X parallel`, and compared byte for byte, `parallel_rounds` aside;
@@ -1049,8 +1073,9 @@ array, one executor scratch per worker of one frame, one operation state
 per operation of the longest plan, and one batch, each grown to the
 largest round the pool has run. Per parallel round, charged, sized by the
 data and released at the round's end: each worker's candidate buffer and
-screen, and for the parallel merge the buckets, the marks, the staging,
-the keys' hashes and classifications, and the stripes' scratch screens.
+screen, and for the parallel merge each candidate's stripe and mark, the
+staging, the keys' hashes and classifications, and the stripes' scratch
+screens.
 Nothing is allocated per task, per tuple or inside the executor's loop,
 which section 9 of `specs/design-eval.md` promises.
 

@@ -118,8 +118,8 @@ static bool	 idtab_capacity_holds(size_t capacity, size_t count,
 		    size_t added);
 static size_t	 idtab_capacity_for(const relic_idtab_t *table,
 		    size_t added);
-static int	 idtab_grow(relic_idtab_t *table, size_t capacity,
-		    relic_rehash_fn rehash, void *ctx);
+static int	 idtab_allocate(const relic_idtab_t *table, size_t capacity,
+		    relic_idtab_t *grown);
 
 /*
  * Avalanche the folded state into a hash so that every bit of the state
@@ -349,6 +349,33 @@ relic_grow_array_capacity_stepwise(size_t capacity, size_t held,
 	}
 
 	return (capacity);
+}
+
+/*
+ * The capacity the steps reach is either the capacity the array has, when
+ * no step passes it, or at least twice it and at least the smallest array
+ * worth having, since the first step that passes doubles it at least and
+ * raises it to that smallest array.  relic_grow_array() asked for that many
+ * items therefore grows to exactly that many.
+ */
+void *
+relic_grow_array_stepwise(void *items, size_t *capacity, size_t held,
+    size_t requests, size_t per_request, size_t item_size)
+{
+	size_t wanted;
+	void *grown;
+
+	assert(requests > 0);
+
+	wanted = relic_grow_array_capacity_stepwise(*capacity, held, requests,
+	    per_request);
+	if (wanted == 0)
+		return (NULL);
+
+	grown = relic_grow_array(items, capacity, wanted, item_size);
+	assert(grown == NULL || *capacity == wanted);
+
+	return (grown);
 }
 
 void *
@@ -767,8 +794,8 @@ idprobe_empty_slot(relic_idprobe_t *probe)
  * one per operation.
  *
  * The table must already have slots and at least one of them empty, which a
- * preceding relic_idtab_reserve() guarantees.  idtab_grow() also uses this,
- * on a table it has just allocated.
+ * preceding relic_idtab_reserve() guarantees.  relic_idtab_complete_growth()
+ * also uses this, on a table it has just allocated.
  */
 void
 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id)
@@ -812,63 +839,68 @@ idtab_capacity_for(const relic_idtab_t *table, size_t added)
 }
 
 /*
- * Replace the slot array, and the tags of a tagged table, with arrays of
- * `capacity` slots and reinsert every entry.
- *
- * The replacement is built complete and installed in one assignment, so a
- * failed allocation leaves the caller's table exactly as it was rather than
- * half rehashed.
+ * Make `grown` an empty table of the same kind as `table`, with arrays of
+ * `capacity` slots.  Returns 0, or -1 with `grown` holding nothing.
  */
 static int
-idtab_grow(relic_idtab_t *table, size_t capacity, relic_rehash_fn rehash,
-    void *ctx)
+idtab_allocate(const relic_idtab_t *table, size_t capacity,
+    relic_idtab_t *grown)
 {
-	relic_idtab_t grown;
-	size_t slot;
-
 	/*
 	 * idtab_capacity_for() stops doubling before a capacity whose slots
 	 * and tags together would not fit in a size_t.
 	 */
 	assert(capacity <= SIZE_MAX / idtab_slot_bytes(table));
 
-	relic_idtab_init(&grown, table->tagged);
-	grown.slots = array_allocate_zeroed(capacity * sizeof(*grown.slots));
-	if (grown.slots == NULL)
+	relic_idtab_init(grown, table->tagged);
+	grown->slots = array_allocate_zeroed(capacity * sizeof(*grown->slots));
+	if (grown->slots == NULL)
 		return (-1);
-	if (grown.tagged) {
-		grown.tags = array_allocate_zeroed(capacity *
-		    sizeof(*grown.tags));
-		if (grown.tags == NULL) {
-			relic_free_array(grown.slots);
+	if (grown->tagged) {
+		grown->tags = array_allocate_zeroed(capacity *
+		    sizeof(*grown->tags));
+		if (grown->tags == NULL) {
+			relic_free_array(grown->slots);
+			grown->slots = NULL;
 			return (-1);
 		}
 	}
-	grown.capacity = capacity;
+	grown->capacity = capacity;
 
-	for (slot = 0; slot < table->capacity; slot++) {
-		uint32_t id;
+	return (0);
+}
 
-		id = table->slots[slot];
-		if (id == RELIC_ID_NONE)
-			continue;
+/*
+ * A table grows by allocating its replacement, the half that can fail, and
+ * then reinserting every entry and installing the replacement in one
+ * assignment, which cannot.  A failed allocation therefore leaves the table
+ * exactly as it was rather than half rehashed.
+ */
+int
+relic_idtab_reserve(relic_idtab_t *table, size_t added,
+    relic_rehash_fn rehash, void *ctx)
+{
+	relic_idtab_t grown;
 
-		relic_idtab_place(&grown, rehash(id, ctx), id);
-	}
+	/* Most reservations find the room already there. */
+	if (idtab_capacity_holds(table->capacity, table->count, added))
+		return (0);
 
-	relic_free_array(table->slots);
-	relic_free_array(table->tags);
-	*table = grown;
+	if (relic_idtab_prepare_growth(table, added, &grown) != 0)
+		return (-1);
+
+	relic_idtab_complete_growth(table, &grown, rehash, ctx);
 
 	return (0);
 }
 
 int
-relic_idtab_reserve(relic_idtab_t *table, size_t added,
-    relic_rehash_fn rehash, void *ctx)
+relic_idtab_prepare_growth(const relic_idtab_t *table, size_t added,
+    relic_idtab_t *grown)
 {
 	size_t capacity;
 
+	relic_idtab_init(grown, table->tagged);
 	if (idtab_capacity_holds(table->capacity, table->count, added))
 		return (0);
 
@@ -876,7 +908,33 @@ relic_idtab_reserve(relic_idtab_t *table, size_t added,
 	if (capacity == 0)
 		return (-1);
 
-	return (idtab_grow(table, capacity, rehash, ctx));
+	return (idtab_allocate(table, capacity, grown));
+}
+
+void
+relic_idtab_complete_growth(relic_idtab_t *table, relic_idtab_t *grown,
+    relic_rehash_fn rehash, void *ctx)
+{
+	uint32_t id;
+	size_t slot;
+
+	if (grown->slots == NULL)
+		return;
+
+	assert(grown->count == 0 && grown->tagged == table->tagged);
+
+	for (slot = 0; slot < table->capacity; slot++) {
+		id = table->slots[slot];
+		if (id == RELIC_ID_NONE)
+			continue;
+
+		relic_idtab_place(grown, rehash(id, ctx), id);
+	}
+
+	relic_free_array(table->slots);
+	relic_free_array(table->tags);
+	*table = *grown;
+	relic_idtab_init(grown, table->tagged);
 }
 
 size_t
@@ -898,4 +956,14 @@ relic_idtab_bytes_after_reserve(const relic_idtab_t *table, size_t added)
 		return (relic_idtab_bytes(table));
 
 	return (capacity * idtab_slot_bytes(table));
+}
+
+size_t
+relic_idtab_bytes_replaced_by_reserve(const relic_idtab_t *table,
+    size_t added)
+{
+	if (idtab_capacity_holds(table->capacity, table->count, added))
+		return (0);
+
+	return (relic_idtab_bytes(table));
 }

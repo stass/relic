@@ -28,23 +28,26 @@
  * quick succession do not each pay a sleep and a wake-up, and then parked
  * on a condition variable, where they cost nothing.
  *
- * A job is published by worker 0 under the pool's mutex: it stores the job
- * and advances the generation, then wakes every parked thread.  A thread
- * that sees the generation move takes the job, runs its tasks and reports
- * that it has finished by counting itself into the job's `finished`.  The
- * mutex orders publication against parking, so no wake-up is lost, and it
- * is taken once per job and once per park, never per task.
+ * A job is a number of parts, each run once by whichever worker claims it
+ * first.  It is published by worker 0 under the pool's mutex: it stores the
+ * job and advances the generation, then wakes every parked thread.  A
+ * thread that sees the generation move takes the job, claims and runs parts
+ * until none is left, and reports that it has finished by counting itself
+ * into the job's `finished`.  The mutex orders publication against parking,
+ * so no wake-up is lost, and it is taken once per job and once per park,
+ * never per part.
  *
  * The barrier is the same shape the other way round: worker 0, out of
- * tasks, spins on `finished` and then parks until it reaches the number of
+ * parts, spins on `finished` and then parks until it reaches the number of
  * workers.  The worker whose report completes the count takes the mutex
  * before it signals, so its signal cannot fall between worker 0's check
  * and worker 0's wait; every other report takes no lock.  A worker touches
  * the job for the last time when it counts itself in, since worker 0 may
  * return and the job end the moment the count is complete.
  *
- * The threads run nothing but tasks: no planning, no diagnostic and none
- * of the caller's callbacks.  Every signal is blocked in them but those a
+ * The threads run nothing but parts of jobs -- a round's tasks, the steps
+ * of its merge: no planning, no diagnostic and none of the caller's
+ * callbacks.  Every signal is blocked in them but those a
  * fault raises, so a signal meant for the caller is delivered to a thread
  * that is the caller's, and a fault in a task ends the process as it would
  * on the calling thread, where a blocked one would repeat forever.  The
@@ -56,6 +59,26 @@
  * started there.  Before its next job, or when it is destroyed, it releases
  * their memory without joining them, and is the calling thread alone.
  */
+
+/*
+ * A job the pool shares: `part_count` parts, each run by `run_part` with
+ * `argument`.  `next_part` is the first part not yet claimed: a worker
+ * claims a part by taking it and moving the word past it, so each part is
+ * claimed once and each worker claims its parts in increasing order; the
+ * word may be moved past the last part by workers finding nothing left.
+ * `finished` counts the workers that have left the job; worker 0 waits for
+ * it to reach the pool's workers, and what every worker wrote is then
+ * visible to it.
+ */
+struct relic_pool_job {
+	relic_pool_part_fn	 run_part;
+	void			*argument;
+	size_t			 part_count;
+	relic_atomic_size_t	 next_part;
+	relic_atomic_size_t	 finished;
+};
+
+static void	 job_work(relic_pool_job_t *job, size_t worker_index);
 
 #ifdef RELIC_THREADS
 
@@ -93,7 +116,7 @@ struct relic_pool_threads {
 	pthread_cond_t		 done;
 	pthread_t		*handles;
 	relic_worker_start_t	*starts;
-	relic_round_job_t	*job;
+	relic_pool_job_t	*job;
 	relic_atomic_u64_t	 generation;
 	uint64_t		 published;
 	size_t			 started;
@@ -103,10 +126,10 @@ struct relic_pool_threads {
 
 static uint64_t	 await_job(relic_pool_threads_t *threads, uint64_t seen);
 static void	 await_workers(relic_pool_threads_t *threads,
-		    relic_round_job_t *job, size_t workers);
+		    relic_pool_job_t *job, size_t workers);
 static void	 finish_job(relic_pool_threads_t *threads,
-		    relic_round_job_t *job, size_t workers);
-static void	 publish(relic_pool_threads_t *threads, relic_round_job_t *job,
+		    relic_pool_job_t *job, size_t workers);
+static void	 publish(relic_pool_threads_t *threads, relic_pool_job_t *job,
 		    bool stopping);
 static void	 spin_pause(void);
 static int	 threads_start(relic_pool_t *pool, size_t workers);
@@ -180,23 +203,53 @@ relic_pool_adopt(relic_pool_t *pool RELIC_UNUSED)
 }
 
 void
-relic_pool_run(relic_pool_t *pool, relic_round_job_t *job)
+relic_pool_for(relic_pool_t *pool RELIC_UNUSED, size_t part_count,
+    relic_pool_part_fn run_part, void *argument)
 {
+	relic_pool_job_t job;
 #ifdef RELIC_THREADS
 	int cancel_state;
+#endif
 
-	if (pool->worker_count > 1) {
+	job.run_part = run_part;
+	job.argument = argument;
+	job.part_count = part_count;
+	relic_atomic_size_init(&job.next_part, 0);
+	relic_atomic_size_init(&job.finished, 0);
+
+#ifdef RELIC_THREADS
+	if (pool->worker_count > 1 && part_count > 1) {
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
-		publish(pool->threads, job, false);
-		relic_round_work(job, &pool->workers[0], 0);
-		finish_job(pool->threads, job, pool->worker_count);
-		await_workers(pool->threads, job, pool->worker_count);
+		publish(pool->threads, &job, false);
+		job_work(&job, 0);
+		finish_job(pool->threads, &job, pool->worker_count);
+		await_workers(pool->threads, &job, pool->worker_count);
 		pthread_setcancelstate(cancel_state, NULL);
 		return;
 	}
 #endif
 
-	relic_round_work(job, &pool->workers[0], 0);
+	job_work(&job, 0);
+}
+
+/*
+ * Claim the job's parts one after another and run each, until none is left.
+ * The claim needs no ordering of its own: what a part reads was published
+ * with the job, and what it writes is published by the worker's count into
+ * `finished`.
+ */
+static void
+job_work(relic_pool_job_t *job, size_t worker_index)
+{
+	size_t part;
+
+	for (;;) {
+		part = relic_atomic_size_add_relaxed(&job->next_part, 1);
+		if (part >= job->part_count)
+			break;
+
+		job->run_part(job->argument, part, worker_index);
+	}
 }
 
 /*
@@ -221,7 +274,6 @@ relic_pool_free(relic_pool_t *pool)
 
 	free(pool->workers);
 	relic_free_array(pool->tasks);
-	relic_free_array(pool->target_candidates);
 	free(pool);
 }
 
@@ -353,7 +405,7 @@ threads_stop(relic_pool_threads_t *threads)
 }
 
 /*
- * A thread of the pool: wait for each job in turn, run its tasks, and
+ * A thread of the pool: wait for each job in turn, run its parts, and
  * report that it has finished, until the pool stops.
  */
 static void *
@@ -361,7 +413,7 @@ worker_main(void *argument)
 {
 	const relic_worker_start_t *start;
 	relic_pool_threads_t *threads;
-	relic_round_job_t *job;
+	relic_pool_job_t *job;
 	relic_pool_t *pool;
 	uint64_t seen;
 
@@ -376,8 +428,7 @@ worker_main(void *argument)
 			break;
 
 		job = threads->job;
-		relic_round_work(job, &pool->workers[start->index],
-		    start->index);
+		job_work(job, start->index);
 		finish_job(threads, job, pool->worker_count);
 	}
 
@@ -388,7 +439,7 @@ worker_main(void *argument)
  * Publish a job, or that the pool is stopping, to every thread.
  */
 static void
-publish(relic_pool_threads_t *threads, relic_round_job_t *job, bool stopping)
+publish(relic_pool_threads_t *threads, relic_pool_job_t *job, bool stopping)
 {
 	pthread_mutex_lock(&threads->mutex);
 	threads->job = job;
@@ -436,7 +487,7 @@ await_job(relic_pool_threads_t *threads, uint64_t seen)
  * the count, since the last count may end it.
  */
 static void
-finish_job(relic_pool_threads_t *threads, relic_round_job_t *job,
+finish_job(relic_pool_threads_t *threads, relic_pool_job_t *job,
     size_t workers)
 {
 	if (relic_atomic_size_add_acq_rel(&job->finished, 1) + 1 < workers)
@@ -451,7 +502,7 @@ finish_job(relic_pool_threads_t *threads, relic_round_job_t *job,
  * Wait until all `workers` have finished the job.
  */
 static void
-await_workers(relic_pool_threads_t *threads, relic_round_job_t *job,
+await_workers(relic_pool_threads_t *threads, relic_pool_job_t *job,
     size_t workers)
 {
 	unsigned int spins;

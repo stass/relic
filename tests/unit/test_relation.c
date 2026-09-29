@@ -49,7 +49,7 @@
 #define	SCENARIO_GROWTH		"the store stays a set as it grows"
 #define	SCENARIO_MEMORY_LIMIT	"the memory limit refuses a tuple and says so"
 #define	SCENARIO_OWNERSHIP	"a relation belongs to one predicate"
-#define	SCENARIO_PROJECTED	"a projection of insertions is what they reach"
+#define	SCENARIO_APPENDED	"an append holds what insertions would"
 #define	SCENARIO_RANGES		"a range names the tuples added since a mark"
 #define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_SCREEN		"a screen finds what an insertion would"
@@ -63,6 +63,13 @@
  * open-addressing table loses entries if its probe sequence is wrong.
  */
 #define	GROWTH_COUNT	5000
+
+/*
+ * The tuples both relations of the append scenario hold before any append,
+ * so that the first batches bring keys the relations hold as well as new
+ * ones.
+ */
+#define	APPEND_SEEDS	5u
 
 /*
  * The envelope scenario's size, and the distinct values it draws columns
@@ -167,9 +174,25 @@ static bool	 reserve_then_fill(relic_t *ctx, relic_relation_t *rel,
 		    size_t added, unsigned int *ordinalp);
 static void	 refused_as_too_large(relic_t *ctx, relic_relation_t *rel,
 		    size_t added, const char *what);
-static void	 a_projection_of_insertions_is_what_they_reach(void);
-static bool	 insert_projected(relic_t *ctx, relic_relation_t *rel,
-		    size_t count, bool fresh_keys, unsigned int *ordinalp);
+static void	 an_append_holds_what_insertions_would(void);
+static bool	 seed_twins(relic_t *ctx, relic_relation_t *one,
+		    relic_relation_t *many, unsigned int seeds);
+static unsigned int appended_key(unsigned int batch, unsigned int ordinal,
+		    size_t i);
+static bool	 append_tuples(relic_t *ctx, relic_relation_t *rel,
+		    const relic_dom_t *tuples, size_t count);
+static bool	 append_steps(relic_t *ctx, relic_relation_t *rel,
+		    relic_append_t *append);
+static bool	 classify_part(relic_relation_t *rel, relic_append_t *append,
+		    size_t part);
+static bool	 layouts_agree(const relic_relation_t *one,
+		    const relic_relation_t *many);
+static bool	 tables_agree(const relic_idtab_t *one,
+		    const relic_idtab_t *many);
+static bool	 key_stripes_agree(const relic_index_stripe_t *one,
+		    const relic_index_stripe_t *many, uint16_t key_length);
+static bool	 chains_agree(const relic_relation_t *one,
+		    const relic_relation_t *many);
 static void	 a_screen_finds_what_an_insertion_would(void);
 
 static relic_t *
@@ -1639,97 +1662,374 @@ refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
 }
 
 /*
- * Insert `count` tuples into a relation keyed by two secondary indexes, one
- * at a time, having projected what they would hold, and return whether the
- * relation then holds no more than was projected: when every tuple is new
- * and brings a new key to both indexes, and when every other tuple repeats
- * the one before it and every tuple shares one key of the first column.
- * With one stripe the projection is exact for the first, since it is the
- * most the insertions can grow the relation to; with several it grows every
- * stripe as though each tuple fell in it.
- */
-static bool
-insert_projected(relic_t *ctx, relic_relation_t *rel, size_t count,
-    bool fresh_keys, unsigned int *ordinalp)
-{
-	relic_dom_t columns[2];
-	size_t projected;
-	size_t i;
-	bool added;
-
-	projected = relic_relation_bytes_after_inserts(rel, count);
-
-	for (i = 0; i < count; i++) {
-		if (fresh_keys || i % 2 == 0)
-			++*ordinalp;
-		pair(columns, value(ctx, SCENARIO_PROJECTED,
-		    fresh_keys ? *ordinalp : 0),
-		    value(ctx, SCENARIO_PROJECTED, *ordinalp + 1000000u));
-		if (!insert(ctx, SCENARIO_PROJECTED, *ordinalp, rel, columns,
-		    &added))
-			return (false);
-	}
-
-	if (fresh_keys && RELIC_STRIPES == 1)
-		return (relic_relation_bytes(rel) == projected);
-
-	return (relic_relation_bytes(rel) <= projected);
-}
-
-/*
- * relic_relation_bytes_after_inserts() is what a deferred round asks of each
- * relation before its merge inserts anything: the most the relation can
- * hold once that many tuples have gone in one at a time, as the serial
- * evaluator inserts them.  Growth one tuple at a time reaches more than one
- * reservation for all of them, so a projection by reservation would be
- * short of what the insertions reach.  Here it is checked against the
- * insertions themselves over a relation with two secondary indexes, for
- * counts from one to past several doublings, and for none.
+ * A round's merge gives a relation its new tuples as one append, a stripe
+ * to a thread, and the relation must come out exactly as inserting them one
+ * at a time would leave it: the same identifiers, the same chains in every
+ * secondary index, and the same bytes, which the append's projection must
+ * predict and the storage total must be charged; from the reservation until
+ * the append is finished, the total counts the tables the reservation
+ * replaces beside their replacements, as the projection of the bytes held
+ * during the append predicts, and the append gives back what it charged the
+ * round.  Two relations with the same indexes and the same tuples take the
+ * same batches, one by insertion and one by append, from none to past
+ * several doublings, with the keys appended_key() chooses.  A relation of
+ * no columns takes its one tuple by append too.
  */
 static void
-a_projection_of_insertions_is_what_they_reach(void)
+an_append_holds_what_insertions_would(void)
 {
-	static const size_t counts[] = { 1, 2, 7, 64, 300, 1000 };
-	relic_relation_t *rel;
-	relic_config_t config;
-	unsigned int ordinal;
-	uint32_t position;
+	static const size_t counts[] = { 0, 1, 2, 7, 64, 300, 1000 };
+	static const relic_dom_t nothing[1];
+	relic_relation_t *one;
+	relic_relation_t *many;
+	relic_relation_t *unit;
+	relic_dom_t *tuples;
 	relic_t *ctx;
+	unsigned int ordinal;
+	unsigned int batch;
+	size_t c;
 	size_t i;
+	bool added;
+	bool built;
 
-	bzero(&config, sizeof(config));
-	ctx = context(SCENARIO_PROJECTED, &config);
+	ctx = context(SCENARIO_APPENDED, NULL);
 	if (ctx == NULL)
 		return;
 
-	rel = relation(ctx, SCENARIO_PROJECTED, "projected", 2);
-	ordinal = 0;
-	if (rel == NULL || !insert_projected(ctx, rel, 5, true, &ordinal) ||
-	    relic_relation_index(ctx, rel, 0x1, &position) != 0 ||
-	    relic_relation_index(ctx, rel, 0x2, &position) != 0) {
-		check(false, SCENARIO_PROJECTED, "the fixture is built");
+	one = relation(ctx, SCENARIO_APPENDED, "one", 2);
+	many = relation(ctx, SCENARIO_APPENDED, "many", 2);
+	unit = relation(ctx, SCENARIO_APPENDED, "unit", 0);
+	tuples = calloc(2 * 1000, sizeof(*tuples));
+	built = one != NULL && many != NULL && unit != NULL && tuples != NULL;
+	if (built)
+		built = seed_twins(ctx, one, many, APPEND_SEEDS);
+	if (!built) {
+		check(false, SCENARIO_APPENDED, "the fixture is built");
+		free(tuples);
 		relic_destroy(ctx);
 		return;
 	}
 
-	check(relic_relation_bytes_after_inserts(rel, 0) ==
-	    relic_relation_bytes(rel), SCENARIO_PROJECTED,
-	    "no insertion should be projected as no growth");
+	ordinal = APPEND_SEEDS;
+	for (c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+		batch = ordinal;
+		for (i = 0; i < counts[c]; i++, ordinal++)
+			pair(&tuples[2 * i], value(ctx, SCENARIO_APPENDED,
+			    appended_key(batch, ordinal, i)),
+			    value(ctx, SCENARIO_APPENDED, 1000000u + ordinal));
 
-	for (i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
-		checkf(insert_projected(ctx, rel, counts[i], true, &ordinal),
-		    SCENARIO_PROJECTED, "%zu new tuples with new keys should "
-		    "hold what was projected", counts[i]);
-		checkf(insert_projected(ctx, rel, counts[i], false, &ordinal),
-		    SCENARIO_PROJECTED, "%zu tuples, some repeated, should "
-		    "hold no more than was projected", counts[i]);
+		for (i = 0; i < counts[c]; i++)
+			if (!insert(ctx, SCENARIO_APPENDED, (unsigned int)i,
+			    one, &tuples[2 * i], &added))
+				break;
+
+		checkf(append_tuples(ctx, many, tuples, counts[c]),
+		    SCENARIO_APPENDED, "an append of %zu tuples should reach "
+		    "exactly the bytes projected, charged, and give back "
+		    "its round's charge", counts[c]);
+		checkf(relic_relation_bytes(many) == relic_relation_bytes(one),
+		    SCENARIO_APPENDED, "after %zu more tuples the append "
+		    "should hold %zu bytes as the insertions do, not %zu",
+		    counts[c], relic_relation_bytes(one),
+		    relic_relation_bytes(many));
+		checkf(layouts_agree(one, many), SCENARIO_APPENDED,
+		    "after %zu more tuples the append should grow every part "
+		    "and number every key as the insertions do", counts[c]);
+		checkf(chains_agree(one, many), SCENARIO_APPENDED,
+		    "after %zu more tuples the append should hold the "
+		    "insertions' tuples and chains", counts[c]);
 	}
 
-	check(relic_relation_bytes_after_inserts(rel, RELIC_TUPLE_MAX) ==
-	    SIZE_MAX, SCENARIO_PROJECTED, "insertions past the identifier "
-	    "space should be projected as more than anything holds");
+	check(append_tuples(ctx, unit, nothing, 1) &&
+	    relic_relation_count(unit) == 1 &&
+	    relic_relation_contains(unit, nothing), SCENARIO_APPENDED,
+	    "a relation of no columns should take its tuple by append");
+	check(relic_relation_total_bytes(ctx) ==
+	    relic_relation_bytes(one) + relic_relation_bytes(many) +
+	    relic_relation_bytes(unit), SCENARIO_APPENDED,
+	    "the storage total should hold what the relations do");
 
+	free(tuples);
 	relic_destroy(ctx);
+}
+
+/*
+ * Give two relations the same `seeds` tuples and the same two secondary
+ * indexes, on the first column and on the second.  Returns whether both
+ * took them.
+ */
+static bool
+seed_twins(relic_t *ctx, relic_relation_t *one, relic_relation_t *many,
+    unsigned int seeds)
+{
+	relic_relation_t *twins[2];
+	relic_dom_t tuple[2];
+	unsigned int ordinal;
+	uint32_t position;
+	size_t t;
+	bool added;
+
+	twins[0] = one;
+	twins[1] = many;
+	for (t = 0; t < 2; t++) {
+		for (ordinal = 0; ordinal < seeds; ordinal++) {
+			pair(tuple, value(ctx, SCENARIO_APPENDED, ordinal),
+			    value(ctx, SCENARIO_APPENDED, 1000000u + ordinal));
+			if (!insert(ctx, SCENARIO_APPENDED, ordinal, twins[t],
+			    tuple, &added))
+				return (false);
+		}
+		if (relic_relation_index(ctx, twins[t], 0x1, &position) != 0)
+			return (false);
+		if (relic_relation_index(ctx, twins[t], 0x2, &position) != 0)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * The first column of tuple `i` of a batch, the `ordinal`th tuple made,
+ * whose first tuple is the `batch`th: in turn one of seven keys every batch
+ * shares, which after the first batches the relation holds; a key new to
+ * the relation and to the batch; and one of eight keys new to the relation
+ * that the batch repeats, whose second tuple joins the chain its first
+ * starts.
+ */
+static unsigned int
+appended_key(unsigned int batch, unsigned int ordinal, size_t i)
+{
+	switch (i % 3) {
+	case 0:
+		return (ordinal % 7);
+	case 1:
+		return (ordinal);
+	default:
+		return (2000000u + batch * 8u + (unsigned int)(i % 8));
+	}
+}
+
+/*
+ * Give a relation `count` tuples it does not hold, packed at its arity, as
+ * one append, through every step a round's merge takes, here on one
+ * thread.  Returns whether every step succeeded and the relation then holds
+ * exactly the bytes projected, with the storage total charged for them,
+ * and whether the append gave back its charge to the round.
+ */
+static bool
+append_tuples(relic_t *ctx, relic_relation_t *rel, const relic_dom_t *tuples,
+    size_t count)
+{
+	relic_append_t append;
+	uint16_t arity;
+	uint64_t hash;
+	size_t i;
+	bool done;
+
+	arity = relic_relation_arity(rel);
+	bzero(&append, sizeof(append));
+	append.count = count;
+	done = relic_relation_append_open(ctx, rel, &append) == 0;
+
+	for (i = 0; done && i < count; i++) {
+		hash = relic_tuple_hash(rel->hash_seed, &tuples[i * arity],
+		    arity);
+		append.growth.by_stripe[relic_hash_stripe(hash)]++;
+		relic_relation_stage(rel, &append, i, &tuples[i * arity],
+		    hash);
+	}
+
+	if (done)
+		done = append_steps(ctx, rel, &append);
+	relic_relation_append_close(ctx, &append);
+
+	return (done && ctx->account.round_bytes == 0);
+}
+
+/*
+ * The steps of an append once its tuples are staged: classify every part,
+ * project, reserve, take, apply every part and finish.  The parts are run
+ * last to first, since a merge's threads may run them in any order.
+ */
+static bool
+append_steps(relic_t *ctx, relic_relation_t *rel, relic_append_t *append)
+{
+	size_t store_before;
+	size_t bytes_before;
+	size_t projected;
+	size_t during;
+	size_t part;
+
+	for (part = relic_relation_classify_parts(append); part-- > 0;) {
+		if (!classify_part(rel, append, part))
+			return (false);
+	}
+
+	projected = relic_relation_bytes_after_append(rel, append);
+	during = relic_relation_bytes_during_append(rel, append);
+	bytes_before = relic_relation_bytes(rel);
+	store_before = ctx->account.store_bytes;
+	if (relic_relation_reserve_append(ctx, rel, append) != 0)
+		return (false);
+	if (ctx->account.store_bytes - store_before != during - bytes_before)
+		return (false);
+
+	relic_relation_take_append(ctx, rel, append);
+	for (part = relic_relation_apply_parts(append); part-- > 0;)
+		relic_relation_apply_append(rel, append, part);
+	relic_relation_finish_append(ctx, rel, append);
+
+	return (relic_relation_bytes(rel) == projected &&
+	    ctx->account.store_bytes - store_before ==
+	    projected - bytes_before);
+}
+
+/*
+ * Classify one part of an append with a table of new keys that has room for
+ * every tuple the part reads, as a merge makes one.  Returns whether the
+ * table could be made.
+ */
+static bool
+classify_part(relic_relation_t *rel, relic_append_t *append, size_t part)
+{
+	relic_new_keys_t new_keys;
+	relic_idtab_t empty;
+	size_t room;
+	bool made;
+
+	room = relic_relation_classify_tuples(append, part);
+	relic_idtab_init(&empty, true);
+	relic_idtab_init(&new_keys.table, true);
+	new_keys.first = calloc(room + 1, sizeof(*new_keys.first));
+	made = new_keys.first != NULL;
+	if (made)
+		made = relic_idtab_prepare_growth(&empty, room,
+		    &new_keys.table) == 0;
+	if (made)
+		relic_relation_classify_append(rel, append, part, &new_keys);
+
+	relic_idtab_reset(&new_keys.table);
+	free(new_keys.first);
+
+	return (made);
+}
+
+/*
+ * Whether two relations with the same indexes are built alike, part for
+ * part: every array and table at the same capacity, every table holding as
+ * many entries, and every stripe of every secondary index numbering the
+ * same keys, with the same values, first and last tuples and frontiers.
+ * Equal totals of bytes could hide two parts grown differently, and equal
+ * chains a stripe whose keys are numbered in another order.
+ */
+static bool
+layouts_agree(const relic_relation_t *one, const relic_relation_t *many)
+{
+	size_t x;
+	size_t s;
+
+	if (one->column_capacity != many->column_capacity)
+		return (false);
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (!tables_agree(&one->index[s], &many->index[s]))
+			return (false);
+	}
+
+	for (x = 0; x < one->index_count; x++) {
+		if (one->indexes[x].next_capacity !=
+		    many->indexes[x].next_capacity)
+			return (false);
+		for (s = 0; s < RELIC_STRIPES; s++) {
+			if (!key_stripes_agree(&one->indexes[x].stripes[s],
+			    &many->indexes[x].stripes[s],
+			    one->indexes[x].key_length))
+				return (false);
+		}
+	}
+
+	return (true);
+}
+
+static bool
+tables_agree(const relic_idtab_t *one, const relic_idtab_t *many)
+{
+	return (one->capacity == many->capacity && one->count == many->count);
+}
+
+/*
+ * Whether two stripes of secondary indexes keyed on `key_length` columns
+ * are built alike (layouts_agree()).
+ */
+static bool
+key_stripes_agree(const relic_index_stripe_t *one,
+    const relic_index_stripe_t *many, uint16_t key_length)
+{
+	size_t k;
+
+	if (!tables_agree(&one->keys, &many->keys) ||
+	    one->key_count != many->key_count ||
+	    one->entry_capacity != many->entry_capacity ||
+	    one->frontier_capacity != many->frontier_capacity ||
+	    one->key_value_capacity != many->key_value_capacity)
+		return (false);
+
+	for (k = 0; k < one->key_count; k++) {
+		if (one->entries[k].first != many->entries[k].first ||
+		    one->entries[k].last != many->entries[k].last ||
+		    relic_atomic_u32_load_relaxed(&one->frontiers[k]) !=
+		    relic_atomic_u32_load_relaxed(&many->frontiers[k]))
+			return (false);
+	}
+
+	return (one->key_count == 0 || bcmp(one->key_values, many->key_values,
+	    one->key_count * key_length * sizeof(*one->key_values)) == 0);
+}
+
+/*
+ * Whether two relations with the same indexes hold the same tuples under
+ * the same identifiers, find each by its columns, and chain each tuple's key
+ * through the same tuples in every index.
+ */
+static bool
+chains_agree(const relic_relation_t *one, const relic_relation_t *many)
+{
+	const relic_index_t *index_one;
+	const relic_index_t *index_many;
+	const relic_dom_t *tuple;
+	relic_tuple_id_t walk_one;
+	relic_tuple_id_t walk_many;
+	relic_tuple_id_t id;
+	uint32_t x;
+
+	if (relic_relation_count(one) != relic_relation_count(many))
+		return (false);
+
+	for (id = RELIC_TUPLE_FIRST; id <= relic_relation_count(one); id++) {
+		tuple = relic_relation_tuple(one, id);
+		if (!relic_tuple_equal(tuple, relic_relation_tuple(many, id),
+		    relic_relation_arity(one)) ||
+		    relic_relation_find(many, tuple) != id)
+			return (false);
+
+		for (x = 0; x < one->index_count; x++) {
+			index_one = relic_relation_index_at(one, x);
+			index_many = relic_relation_index_at(many, x);
+			walk_one = relic_index_first(index_one, one, tuple);
+			walk_many = relic_index_first(index_many, many, tuple);
+			while (walk_one == walk_many &&
+			    walk_one != RELIC_ID_NONE) {
+				walk_one = relic_index_next(index_one,
+				    walk_one);
+				walk_many = relic_index_next(index_many,
+				    walk_many);
+			}
+			if (walk_one != walk_many)
+				return (false);
+		}
+	}
+
+	return (true);
 }
 
 /*
@@ -1839,7 +2139,7 @@ main(void)
 	a_batch_inserts_what_single_insertions_would();
 	a_limit_refuses_a_batch_where_it_would_one();
 	a_reservation_for_many_holds_them_all();
-	a_projection_of_insertions_is_what_they_reach();
+	an_append_holds_what_insertions_would();
 	a_screen_finds_what_an_insertion_would();
 
 	return (check_summary("relation"));

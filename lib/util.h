@@ -121,6 +121,18 @@ size_t	 relic_grow_array_capacity_stepwise(size_t capacity, size_t held,
 	    size_t requests, size_t per_request);
 
 /*
+ * Grow an array, in one allocation, to the capacity
+ * relic_grow_array_capacity_stepwise() gives: the room `requests` growths
+ * of `per_request` items after the `held` would reach one after another.
+ * An owner that makes many insertions' room at once uses this so that it
+ * holds exactly what the same insertions made one at a time would, byte
+ * for byte.  `requests` must be at least one.  Returns the array, or NULL
+ * when it could not grow, leaving the old array and *capacity as they were.
+ */
+void	*relic_grow_array_stepwise(void *items, size_t *capacity, size_t held,
+	    size_t requests, size_t per_request, size_t item_size);
+
+/*
  * The sum of two sizes, and `count` items of `size` bytes, or SIZE_MAX when
  * the result is more than a size_t holds.  A projection of storage built from
  * them says "more than anything could hold" rather than wrapping to a small
@@ -263,10 +275,12 @@ uint64_t relic_hash_words_wide(uint64_t seed, const uint32_t *words,
 
 /*
  * The stripe is taken from the unkeyed high half of a wide hash, so it may
- * use at most those 32 bits; more would take bits of the keyed half.
+ * use at most those 32 bits, and a round's merge keeps it in a byte per
+ * tuple, so at most eight of them.
  */
-_Static_assert(RELIC_STRIPE_BITS >= 0 && RELIC_STRIPE_BITS <= 32,
-    "a stripe is chosen by bits of the unkeyed half of a wide hash");
+_Static_assert(RELIC_STRIPE_BITS >= 0 && RELIC_STRIPE_BITS <= 8,
+    "a stripe is chosen by bits of the unkeyed half of a wide hash and "
+    "kept in a byte");
 
 /*
  * The stripe a wide hash chooses, and the 32 bits of it an identifier table
@@ -387,6 +401,26 @@ int	 relic_idtab_reserve(relic_idtab_t *table, size_t added,
 void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
 
 /*
+ * A reservation in two halves, for an owner that allocates while it may
+ * still fail and moves the entries later, possibly on another thread and
+ * alongside other tables' moves.
+ *
+ * relic_idtab_prepare_growth() makes `grown` the empty table
+ * relic_idtab_reserve() would grow `table` to for `added` more entries,
+ * allocated but holding nothing, or leaves it without slots when `table`
+ * already has room.  It is the only half that can fail, returning -1 with
+ * `grown` holding nothing.  relic_idtab_complete_growth() then moves every
+ * entry of `table` into `grown`, when `grown` has slots, and makes the
+ * result `table`, leaving `grown` holding nothing; it cannot fail.  Until
+ * then `table` is as it was, and a growth that is not to be completed is
+ * released with relic_idtab_reset() on `grown`.
+ */
+int	 relic_idtab_prepare_growth(const relic_idtab_t *table, size_t added,
+	    relic_idtab_t *grown);
+void	 relic_idtab_complete_growth(relic_idtab_t *table,
+	    relic_idtab_t *grown, relic_rehash_fn rehash, void *ctx);
+
+/*
  * The bytes a table's slots and tags occupy now, and the bytes they would
  * occupy once relic_idtab_reserve() had made room for `added` more entries.
  *
@@ -395,9 +429,16 @@ void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
  * rather than after.  A reservation that could not grow the table reports the
  * size it already has: the growth will fail as an ordinary allocation
  * failure, which is a different answer from exceeding a limit.
+ *
+ * relic_idtab_bytes_replaced_by_reserve() is the bytes such a growth
+ * replaces: the table's own when it would grow, which a growth prepared with
+ * relic_idtab_prepare_growth() keeps allocated beside the grown table until
+ * it is completed, and none when the table has room already.
  */
 size_t	 relic_idtab_bytes(const relic_idtab_t *table);
 size_t	 relic_idtab_bytes_after_reserve(const relic_idtab_t *table,
+	    size_t added);
+size_t	 relic_idtab_bytes_replaced_by_reserve(const relic_idtab_t *table,
 	    size_t added);
 
 /*

@@ -50,6 +50,7 @@
 #define	SCENARIO_REWRITE	"a query's rewrite runs deferred rounds"
 #define	SCENARIO_TUPLES		"the tuple limit refuses the serial tuple"
 #define	SCENARIO_MEMORY		"the memory limit refuses as serially"
+#define	SCENARIO_GROWTH		"the memory limit refuses a merge as serially"
 #define	SCENARIO_NOTES		"notes come as the serial evaluator's do"
 
 /* Room for a generated program and for a context's diagnostics. */
@@ -65,6 +66,14 @@
 #define	GRAPH_NODES		40
 #define	CHAIN_LENGTH		150
 #define	LIMIT_STEPS		60
+
+/*
+ * The links of the wide program's chain, the columns of the tuple each of
+ * its rounds derives, and the steps its memory limit is swept in.
+ */
+#define	WIDE_LINKS		100
+#define	WIDE_ARITY		16
+#define	WIDE_LIMIT_STEPS	400
 
 /* The threads the deferred context shares its rounds among, the second time. */
 #define	DEFERRED_THREADS	4
@@ -105,14 +114,17 @@ static relic_t	*context_for(const char *program, unsigned int flags,
 		    size_t threads, size_t max_tuples, size_t max_memory,
 		    diagnostics_t *diagnostics);
 static uint64_t	 abandoned_rounds(const relic_t *ctx);
+static uint64_t	 limit_declines(const relic_t *ctx);
 static bool	 contexts_agree(const char *scenario, const char *what,
 		    relic_t *serial, relic_t *deferred);
 static void	 graph_program(text_t *text);
 static size_t	 lines_in(const diagnostics_t *diagnostics);
 static void	 limits_refuse_as_serially(const char *scenario,
-		    const char *program, bool memory, size_t threads);
+		    const char *program, bool memory, size_t steps,
+		    size_t threads);
 static void	 notes_come_as_serially(size_t threads);
 static bool	 shared_as_expected(relic_t *deferred, size_t threads);
+static void	 wide_program(text_t *text);
 static uint64_t	 thread_tasks(const relic_t *ctx);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
@@ -125,10 +137,12 @@ static bool	 relations_agree(const relic_t *serial,
 static int	 run_query(relic_t *ctx, const char *query, text_t *rows);
 
 /*
- * The program every scenario but the notes' runs, written once by main(),
- * and the rows of the two runs of a query.
+ * The program every scenario but the notes' runs, and the program whose
+ * merges the memory limit refuses, written once by main(), and the rows of
+ * the two runs of a query.
  */
 static text_t graph;
+static text_t wide;
 static text_t serial_rows;
 static text_t deferred_rows;
 
@@ -199,6 +213,42 @@ graph_program(text_t *text)
 	    "pair(X, Y) :- end(X), end(Y), X < Y, edge(X, Y).\n"
 	    "lonely(X) :- node(X), not reach(X).\n"
 	    "done :- lonely(X).\n");
+}
+
+/*
+ * A program each of whose rounds derives one tuple of WIDE_ARITY columns,
+ * the next along a chain of WIDE_LINKS links.  A round's buffers then hold
+ * one candidate, while the relation's columns double as they fill, so at a
+ * doubling the growth of the round's merge outweighs everything the round
+ * has charged, and a memory limit between the two refuses the growth that
+ * the serial evaluator is refused too.  The graph program's rounds, whose
+ * buffers outweigh their growth, have their merges declined where the
+ * buffers are what the limit refuses, where the serial evaluator, which
+ * has none, is not refused.
+ */
+static void
+wide_program(text_t *text)
+{
+	unsigned int i;
+
+	text->length = 0;
+	text->bytes[0] = '\0';
+
+	for (i = 0; i < WIDE_LINKS; i++)
+		appendf(text, "link(n%u, n%u).\n", i, i + 1);
+
+	appendf(text, "wide(n0");
+	for (i = 1; i < WIDE_ARITY; i++)
+		appendf(text, ", c%u", i);
+	appendf(text, ").\n");
+
+	appendf(text, "wide(Y");
+	for (i = 1; i < WIDE_ARITY; i++)
+		appendf(text, ", C%u", i);
+	appendf(text, ") :- wide(X");
+	for (i = 1; i < WIDE_ARITY; i++)
+		appendf(text, ", C%u", i);
+	appendf(text, "), link(X, Y).\n");
 }
 
 static void
@@ -327,6 +377,16 @@ static uint64_t
 abandoned_rounds(const relic_t *ctx)
 {
 	return (ctx->pool != NULL ? ctx->pool->abandoned_rounds : 0);
+}
+
+/*
+ * The merges a context's pool declined because a limit would have refused
+ * what they insert.
+ */
+static uint64_t
+limit_declines(const relic_t *ctx)
+{
+	return (ctx->pool != NULL ? ctx->pool->limit_declines : 0);
 }
 
 /*
@@ -579,24 +639,27 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
 
 /*
  * Materialize a program under limits from what its facts need to more than
- * its evaluation does, in steps fine enough to land inside rounds and
- * inside merges, and require the deferred context to succeed or fail as the
- * serial one does, with the same diagnostic, leaving the same relations.  A
- * limit that refuses a deferred round's buffers abandons the round, which
- * runs again serially; one that would refuse its merge is found before the
- * merge begins.  The memory limit also counts the evaluation's plans, which
- * relic_stats_t does not report, so its sweep runs to twice the storage.
+ * its evaluation does, in about `steps` steps, and require the deferred
+ * context to succeed or fail as the serial one does, with the same
+ * diagnostic, leaving the same relations.  A limit that refuses a deferred
+ * round's buffers abandons the round, which runs again serially; so does
+ * one that would refuse its merge, before the merge changes any relation.
+ * The memory limit also counts the evaluation's plans, which relic_stats_t
+ * does not report, so its sweep runs to twice the storage.
  *
  * The sweep must reach both ways a deferred round ends under a limit: a
  * round abandoned and run again serially, and a round merged.  Under the
  * memory limit it must also reach an abandoned round whose serial run then
- * succeeds, the case where the buffers' charge alone was in the way; under
- * the tuple limit none exists, since a round abandoned for its candidates
- * holds more new tuples than the limit admits.
+ * succeeds, the case where the buffers' charge alone was in the way, and a
+ * merge the limit itself declines, once every task has run, rather than a
+ * buffer or a scratch table it refused; under the tuple limit neither need
+ * exist, since a worker abandons the round once its own candidates
+ * outnumber what the limit admits, which on one thread comes before any
+ * merge could be declined for it.
  */
 static void
 limits_refuse_as_serially(const char *scenario, const char *program,
-    bool memory, size_t threads)
+    bool memory, size_t steps, size_t threads)
 {
 	diagnostics_t serial_diagnostics;
 	diagnostics_t deferred_diagnostics;
@@ -612,6 +675,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	int deferred_status;
 	bool abandoned_seen;
 	bool recovered_seen;
+	bool declined_seen;
 	bool merged_seen;
 	char what[64];
 
@@ -629,12 +693,13 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 
 	first = memory ? loaded.storage_bytes : loaded.tuples;
 	last = memory ? needed.storage_bytes * 2 : needed.tuples;
-	step = (last - first) / LIMIT_STEPS;
+	step = (last - first) / steps;
 	if (step == 0)
 		step = 1;
 
 	abandoned_seen = false;
 	recovered_seen = false;
+	declined_seen = false;
 	merged_seen = false;
 
 	for (limit = first; limit <= last; limit += step) {
@@ -670,6 +735,8 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 			if (deferred_status == 0)
 				recovered_seen = true;
 		}
+		if (limit_declines(deferred) > 0)
+			declined_seen = true;
 		if (merged_rounds(deferred) > 0)
 			merged_seen = true;
 
@@ -681,9 +748,12 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	    "a round", threads);
 	checkf(merged_seen, scenario, "on %zu thread(s), the sweep merges a "
 	    "round", threads);
-	if (memory)
+	if (memory) {
 		checkf(recovered_seen, scenario, "on %zu thread(s), the sweep "
 		    "abandons a round whose serial run succeeds", threads);
+		checkf(declined_seen, scenario, "on %zu thread(s), the sweep "
+		    "has the limit decline a merge", threads);
+	}
 }
 
 /*
@@ -746,6 +816,7 @@ main(void)
 	size_t i;
 
 	graph_program(&graph);
+	wide_program(&wide);
 
 	for (i = 0; i < sizeof(thread_counts) / sizeof(thread_counts[0]);
 	    i++) {
@@ -753,9 +824,11 @@ main(void)
 		a_deferred_round_inserts_in_serial_order(threads);
 		a_querys_rewrite_runs_deferred_rounds(threads);
 		limits_refuse_as_serially(SCENARIO_TUPLES, graph.bytes, false,
-		    threads);
+		    LIMIT_STEPS, threads);
 		limits_refuse_as_serially(SCENARIO_MEMORY, graph.bytes, true,
-		    threads);
+		    LIMIT_STEPS, threads);
+		limits_refuse_as_serially(SCENARIO_GROWTH, wide.bytes, true,
+		    WIDE_LIMIT_STEPS, threads);
 		notes_come_as_serially(threads);
 	}
 

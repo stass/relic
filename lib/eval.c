@@ -857,14 +857,8 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 	config = &eval->ctx->config;
 	if (config->threads > 1 ||
 	    (config->flags & RELIC_F_PARALLEL_ALWAYS) != 0) {
-		switch (relic_round_run(eval->ctx, round)) {
-		case RELIC_ROUND_MERGED:
+		if (relic_round_run(eval->ctx, round))
 			return (0);
-		case RELIC_ROUND_FAILED:
-			return (-1);
-		case RELIC_ROUND_DECLINED:
-			break;
-		}
 	}
 
 	for (i = 0; i < round->item_count; i++) {

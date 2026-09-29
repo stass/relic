@@ -37,9 +37,9 @@ noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
-	lib/parse.c lib/plan.c lib/pool.c lib/pred.c lib/relation.c \
-	lib/result.c lib/round.c lib/rule.c lib/stratify.c lib/symbol.c \
-	lib/task.c lib/util.c lib/value.c
+	lib/merge.c lib/parse.c lib/plan.c lib/pool.c lib/pred.c \
+	lib/relation.c lib/result.c lib/round.c lib/rule.c lib/stratify.c \
+	lib/symbol.c lib/task.c lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =

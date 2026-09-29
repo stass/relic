@@ -188,12 +188,12 @@
  * or a negated literal, in any relation's growth, or in creating the answer
  * relation.  Each sweep stops at the first run that needs no refusal, and
  * the bound only keeps a regression that fails every run from sweeping
- * forever.  An undisturbed run makes some 100 to 200 allocations, and one
- * whose rounds are deferred, which allocates its rounds' buffers afresh
- * each round, some 550 to 800.
+ * forever.  An undisturbed run makes some 250 to 400 allocations, and one
+ * whose rounds are deferred some 3600 to 4800, since each round allocates
+ * its buffers afresh and its merge a screen for every stripe it touches.
  */
 #define	EVAL_CHAIN	40
-#define	EVAL_SWEEP	2048
+#define	EVAL_SWEEP	8192
 
 /*
  * The materialization sweep's program is a chain of this many predicates,

@@ -35,26 +35,26 @@
  * candidates are the tuples it derived that neither the frozen store nor
  * its own earlier candidates hold.
  *
- * The merge then inserts the candidates task by task, in task order, with
- * the insertion the serial evaluator uses.  The candidates in that order are
- * the serial derivation order with some duplicates removed -- tuples the
- * store held, and repeats of the same worker's earlier candidates -- and a
- * tuple several workers gathered is found present by the merge after its
+ * The merge then inserts the candidates as the serial evaluator would have
+ * inserted them, on the pool's workers (lib/merge.c).  The candidates in
+ * task order are the serial derivation order with some duplicates removed
+ * -- tuples the store held, and repeats of the same worker's earlier
+ * candidates -- and a tuple several workers gathered is new only at its
  * first, as serially it would have been.  So every tuple takes the
  * identifier it takes serially, every later derivation of it is the
  * duplicate it is serially, and the relations and every counter come out as
  * the serial evaluator leaves them, whatever the number of workers.
  *
- * Nothing is modified until the merge begins.  A round that cannot go on
- * before then -- a candidate buffer that could not grow, for memory or for
- * the memory limit, more candidates than the tuple limit could still admit,
- * or storage the pool itself could not get -- is abandoned: its candidates
- * are released, its counts forgotten, and the caller runs the round
- * serially, where whatever refuses it refuses it as it always would.  The
- * merge is asked first whether either limit could refuse any of it, and a
- * round that might be refused is abandoned too.  So a limit refuses only in
- * a round run serially, on the tuple the serial evaluator is refused, and a
- * merge fails only when the allocator refuses it.
+ * Nothing is modified until the merge has made room for everything it
+ * inserts.  A round that cannot go on before then -- a candidate buffer or
+ * a scratch table that could not grow, for memory or for the memory limit,
+ * more candidates than the tuple limit could still admit, new tuples a
+ * limit would refuse, room the allocator would not give, or storage the
+ * pool itself could not get -- is abandoned: its candidates are released,
+ * its counts forgotten, and the caller runs the round serially, where
+ * whatever refuses it refuses it as it always would.  So a limit refuses
+ * only in a round run serially, on the tuple the serial evaluator is
+ * refused, and a merge never fails.
  */
 
 /*
@@ -79,8 +79,6 @@
 #define	RELIC_CHUNK_WORK	4096u
 
 static void	 abandon_round(relic_t *ctx, relic_pool_t *pool);
-static void	 count_target_candidates(relic_pool_t *pool,
-		    const relic_round_t *round);
 static int	 cut_tasks(relic_pool_t *pool, const relic_round_t *round,
 		    bool finest);
 static void	 forget_worker_counters(relic_pool_t *pool);
@@ -95,19 +93,14 @@ static uint64_t	 item_range(const relic_round_t *round,
 static relic_tuple_range_t item_view(const relic_round_t *round,
 		    const relic_round_item_t *item);
 static void	 job_begin(relic_round_job_t *job, relic_t *ctx,
-		    const relic_pool_t *pool, const relic_round_t *round);
-static bool	 merge_fits(const relic_t *ctx, const relic_pool_t *pool,
-		    const relic_round_t *round);
-static int	 merge_round(relic_t *ctx, relic_pool_t *pool,
-		    relic_round_t *round);
-static int	 merge_task(relic_t *ctx, const relic_candidates_t *candidates,
-		    const relic_round_task_t *task, relic_relation_t *target,
-		    bool *gainedp);
+		    relic_pool_t *pool, const relic_round_t *round);
 static bool	 op_reads_as_it_runs(const relic_op_t *op);
 static int	 pool_prepare(relic_pool_t *pool, const relic_round_t *round);
 static void	 record_task_work(const relic_pool_t *pool,
 		    relic_round_t *round);
 static void	 release_candidates(relic_t *ctx, relic_pool_t *pool);
+static void	 report_task_notes(relic_t *ctx, relic_pool_t *pool,
+		    const relic_round_t *round);
 static bool	 round_is_worth_sharing(const relic_t *ctx,
 		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
@@ -118,7 +111,6 @@ static uint64_t	 scaled_work(uint64_t work, uint64_t range_now,
 static void	 take_worker_counters(relic_pool_t *pool,
 		    relic_counters_t *counters);
 static uint64_t	 tasks_run_by_threads(const relic_pool_t *pool);
-static size_t	 tuples_admissible(const relic_t *ctx);
 static size_t	 view_pieces(const relic_pool_t *pool,
 		    relic_tuple_range_t view);
 static relic_tuple_range_t view_piece(relic_tuple_range_t view, size_t piece,
@@ -133,52 +125,44 @@ static int	 worker_fit(relic_worker_t *worker, size_t op_room,
  * large ones do.  Otherwise a round is shared only when the context has
  * threads to share it with and it is expected to repay them.
  */
-enum relic_round_outcome
+bool
 relic_round_run(relic_t *ctx, relic_round_t *round)
 {
 	relic_round_job_t job;
 	relic_pool_t *pool;
-	bool abandoned;
 	bool always;
-	int status;
 
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
-		return (RELIC_ROUND_DECLINED);
+		return (false);
 	if (!round_reads_no_target(round))
-		return (RELIC_ROUND_DECLINED);
+		return (false);
 
 	if (ctx->pool == NULL) {
 		if (relic_pool_create(&ctx->pool, ctx->config.threads) != 0)
-			return (RELIC_ROUND_DECLINED);
+			return (false);
 	}
 	pool = ctx->pool;
 	relic_pool_adopt(pool);
 	if (!always && pool->worker_count < 2)
-		return (RELIC_ROUND_DECLINED);
+		return (false);
 	if (pool_prepare(pool, round) != 0 ||
 	    cut_tasks(pool, round, always) != 0)
-		return (RELIC_ROUND_DECLINED);
+		return (false);
 
 	job_begin(&job, ctx, pool, round);
-	relic_pool_run(pool, &job);
+	relic_pool_for(pool, pool->task_count, relic_round_run_task, &job);
 
-	abandoned = relic_atomic_bool_load_relaxed(&job.abandoned);
-	if (!abandoned) {
-		count_target_candidates(pool, round);
-		abandoned = !merge_fits(ctx, pool, round);
-	}
-	if (abandoned) {
+	if (relic_atomic_bool_load_relaxed(&job.abandoned) ||
+	    !relic_round_merge(ctx, pool, round)) {
 		abandon_round(ctx, pool);
 		pool->abandoned_rounds++;
-		return (RELIC_ROUND_DECLINED);
+		return (false);
 	}
 
+	report_task_notes(ctx, pool, round);
 	take_worker_counters(pool, &ctx->counters);
-	status = merge_round(ctx, pool, round);
 	release_candidates(ctx, pool);
-	if (status != 0)
-		return (RELIC_ROUND_FAILED);
 
 	record_task_work(pool, round);
 	pool->merged_rounds++;
@@ -186,7 +170,7 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	if (pool->worker_count > 1)
 		ctx->counters.parallel_rounds++;
 
-	return (RELIC_ROUND_MERGED);
+	return (true);
 }
 
 void
@@ -292,21 +276,18 @@ item_range(const relic_round_t *round, const relic_round_item_t *item)
 }
 
 /*
- * Ready a job for the round's tasks: none claimed, none finished, none
- * abandoned.
+ * Ready a job for the round's tasks, none abandoned.
  */
 static void
-job_begin(relic_round_job_t *job, relic_t *ctx, const relic_pool_t *pool,
+job_begin(relic_round_job_t *job, relic_t *ctx, relic_pool_t *pool,
     const relic_round_t *round)
 {
 	bzero(job, sizeof(*job));
 	job->round = round;
 	job->tasks = pool->tasks;
+	job->workers = pool->workers;
 	job->account = &ctx->account;
-	job->task_count = pool->task_count;
-	job->admissible = tuples_admissible(ctx);
-	relic_atomic_size_init(&job->next_task, 0);
-	relic_atomic_size_init(&job->finished, 0);
+	job->admissible = relic_tuples_admissible(ctx);
 	relic_atomic_bool_init(&job->abandoned, false);
 }
 
@@ -397,13 +378,12 @@ op_reads_as_it_runs(const relic_op_t *op)
 
 /*
  * Ready the pool for a round: each worker's scratch holding the round's
- * longest plan and widest target, and room for a count per target.
- * Returns 0, or -1, unreported, when something could not be allocated.
+ * longest plan and widest target.  Returns 0, or -1, unreported, when
+ * something could not be allocated.
  */
 static int
 pool_prepare(relic_pool_t *pool, const relic_round_t *round)
 {
-	size_t *target_candidates;
 	size_t op_room;
 	size_t i;
 	uint16_t arity_room;
@@ -413,13 +393,6 @@ pool_prepare(relic_pool_t *pool, const relic_round_t *round)
 		if (worker_fit(&pool->workers[i], op_room, arity_room) != 0)
 			return (-1);
 	}
-
-	target_candidates = relic_grow_array(pool->target_candidates,
-	    &pool->target_capacity, round->target_count,
-	    sizeof(*pool->target_candidates));
-	if (target_candidates == NULL)
-		return (-1);
-	pool->target_candidates = target_candidates;
 
 	return (0);
 }
@@ -628,179 +601,21 @@ view_piece(relic_tuple_range_t view, size_t piece, size_t pieces)
 }
 
 /*
- * How many more tuples the tuple limit admits, or SIZE_MAX when none is
- * set.
- */
-static size_t
-tuples_admissible(const relic_t *ctx)
-{
-	size_t limit;
-
-	limit = ctx->config.max_tuples;
-	if (!relic_limit_set(limit))
-		return (SIZE_MAX);
-	if (ctx->store.tuple_count >= limit)
-		return (0);
-
-	return (limit - ctx->store.tuple_count);
-}
-
-/*
- * Whether the merge can be made without either limit refusing it, given
- * the candidates each target was offered, as count_target_candidates()
- * counts them.
- *
- * The tuple limit is asked of all the candidates: each worker checked its
- * own against what the limit admits, and several can together hold more.
- * The candidates of different workers may repeat one another, so the merge
- * may insert fewer than their count, and never more; a round whose count
- * does not fit is run serially, which inserts each new tuple once and is
- * refused where the serial evaluator is.
- *
- * The memory limit is asked with the candidates still held, since they
- * count against it for as long as they exist, and the merge's insertions
- * ask it for room as the serial evaluator's do.  An insertion the limit
- * refused only because the candidates held the room would be a refusal the
- * serial evaluator never meets.  So before anything is modified, the merge
- * is asked for its worst case: every relation the round writes grown by
- * every candidate offered it, one insertion at a time, as though each were
- * new.  No insertion of the merge asks for more; if that fits beside the
- * candidates, the limit refuses nothing in the merge, and if it does not,
- * the round is abandoned and run serially, which admits or refuses each
- * tuple as it always does.
- */
-static bool
-merge_fits(const relic_t *ctx, const relic_pool_t *pool,
-    const relic_round_t *round)
-{
-	const relic_relation_t *target;
-	size_t offered;
-	size_t growth;
-	size_t total;
-	size_t i;
-
-	total = 0;
-	for (i = 0; i < round->target_count; i++)
-		total = relic_saturating_sum(total,
-		    pool->target_candidates[i]);
-	if (total > tuples_admissible(ctx))
-		return (false);
-
-	if (!relic_limit_set(ctx->account.limit))
-		return (true);
-
-	growth = 0;
-	for (i = 0; i < round->target_count; i++) {
-		offered = pool->target_candidates[i];
-		if (offered == 0)
-			continue;
-
-		target = round->targets[i];
-		growth = relic_saturating_sum(growth,
-		    relic_relation_bytes_after_inserts(target, offered) -
-		    relic_relation_bytes(target));
-	}
-
-	return (!relic_account_exceeds(&ctx->account, 0, growth));
-}
-
-/*
- * Count, for each target of the round, the candidates its tasks gathered.
+ * Report each task's first mixed-type comparison in task order, which is
+ * the order the serial evaluator meets them in, once the round has merged.
  */
 static void
-count_target_candidates(relic_pool_t *pool, const relic_round_t *round)
-{
-	const relic_round_task_t *task;
-	size_t i;
-
-	bzero(pool->target_candidates,
-	    round->target_count * sizeof(*pool->target_candidates));
-
-	for (i = 0; i < pool->task_count; i++) {
-		task = &pool->tasks[i];
-		pool->target_candidates[round->items[task->item].target] +=
-		    task->candidate_count;
-	}
-}
-
-/*
- * Insert the round's candidates in task order, which is serial order, each
- * task's into its item's target, reporting each task's note before its
- * tuples as the serial evaluator reports a batch's note before inserting
- * it.  Returns 0, or -1 at the first insertion refused, which the relation
- * store has reported; no later task's note is reported, as the serial
- * evaluator would never have reached it.
- */
-static int
-merge_round(relic_t *ctx, relic_pool_t *pool, relic_round_t *round)
+report_task_notes(relic_t *ctx, relic_pool_t *pool,
+    const relic_round_t *round)
 {
 	relic_round_task_t *task;
-	relic_round_item_t *item;
 	size_t i;
 
 	for (i = 0; i < pool->task_count; i++) {
 		task = &pool->tasks[i];
-		item = &round->items[task->item];
-
-		relic_report_mixed_note(ctx, item->rule, &task->note);
-
-		if (merge_task(ctx, &pool->workers[task->worker].candidates,
-		    task, round->targets[item->target], &item->gained) != 0)
-			return (-1);
+		relic_report_mixed_note(ctx, round->items[task->item].rule,
+		    &task->note);
 	}
-
-	return (0);
-}
-
-/*
- * Insert one task's candidates into its target, in the order it derived
- * them, a batch at a time as the serial evaluator inserts a plan's batches,
- * counting each that was new and marking its item as having gained.  The
- * hashes were computed when the candidates were screened.
- *
- * A task's candidates were appended by one worker while it ran the task
- * alone, all for one relation, so their columns lie end to end at the
- * relation's arity.
- */
-static int
-merge_task(relic_t *ctx, const relic_candidates_t *candidates,
-    const relic_round_task_t *task, relic_relation_t *target,
-    bool *gainedp)
-{
-	uint64_t hashes[RELIC_INSERT_BATCH];
-	bool added[RELIC_INSERT_BATCH];
-	const relic_candidate_t *first;
-	size_t completed;
-	size_t count;
-	size_t done;
-	size_t i;
-	int status;
-
-	for (done = 0; done < task->candidate_count; done += count) {
-		count = task->candidate_count - done < RELIC_INSERT_BATCH ?
-		    task->candidate_count - done : RELIC_INSERT_BATCH;
-		first = &candidates->entries[task->first_candidate + done];
-
-		for (i = 0; i < count; i++) {
-			assert(first[i].offset ==
-			    first->offset + i * target->arity);
-			hashes[i] = first[i].hash;
-		}
-
-		status = relic_relation_insert_batch_hashed(ctx, target,
-		    &candidates->words[first->offset], hashes, count, added,
-		    &completed);
-		for (i = 0; i < completed; i++) {
-			if (added[i]) {
-				ctx->counters.tuples_inserted++;
-				*gainedp = true;
-			}
-		}
-		if (status != 0)
-			return (-1);
-	}
-
-	return (0);
 }
 
 /*

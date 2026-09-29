@@ -1193,10 +1193,20 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * raises the start the index's frontiers stand for to `since`, before any
  * lookup from it; the starts raised to should never decrease over the life
  * of the index, as a semi-naive delta's never do, or a lookup from an
- * earlier one walks the whole chain.  relic_index_bytes_after_adds() is the
- * most a sequence of insertions can grow the index to.  relic_index_free()
- * releases an index, which relic_index_init() must set up again before it is
- * used.
+ * earlier one walks the whole chain.  relic_index_free() releases an index,
+ * which relic_index_init() must set up again before it is used.
+ *
+ * An append of many new tuples at once, as a round's merge makes one, goes
+ * through the index in steps of its own, several of which run a stripe to
+ * a thread: relic_index_stage() records each tuple's key hash and stripe;
+ * relic_index_classify_append() finds, for the tuples of one stripe, the
+ * key each joins, numbering the keys new to the stripe; the projection and
+ * the reservation, relic_index_bytes_after_append() and
+ * relic_index_reserve_append(), are exact, as one insertion at a time would
+ * grow the index, and relic_index_bytes_replaced_by_append() is what the
+ * reservation holds beside that until the tables it replaces are freed;
+ * and relic_index_link_append() fills one stripe's grown table, freeing the
+ * one it replaces, and links its tuples.
  *
  * The relation store builds and extends indexes and does all the
  * accounting; the evaluator raises a member's indexes to its delta's start
@@ -1215,9 +1225,23 @@ int	 relic_index_reserve_pending(relic_index_t *index,
 	    const relic_relation_t *relation);
 void	 relic_index_add_pending(relic_index_t *index,
 	    const relic_relation_t *relation);
-size_t	 relic_index_bytes_after_adds(const relic_index_t *index,
-	    size_t tuples, size_t added);
 void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
+void	 relic_index_stage(const relic_index_t *index,
+	    const relic_relation_t *relation, relic_append_keys_t *keys,
+	    size_t position, const relic_dom_t *tuple);
+void	 relic_index_classify_append(const relic_index_t *index,
+	    const relic_relation_t *relation, const relic_append_t *append,
+	    relic_append_keys_t *keys, size_t s, relic_new_keys_t *new_keys);
+size_t	 relic_index_bytes_after_append(const relic_index_t *index,
+	    size_t tuples, const relic_append_t *append,
+	    const relic_append_keys_t *keys);
+size_t	 relic_index_bytes_replaced_by_append(const relic_index_t *index,
+	    const relic_append_keys_t *keys);
+int	 relic_index_reserve_append(relic_index_t *index, size_t tuples,
+	    const relic_append_t *append, relic_append_keys_t *keys);
+void	 relic_index_link_append(relic_index_t *index,
+	    const relic_relation_t *relation, const relic_append_t *append,
+	    relic_append_keys_t *keys, size_t s);
 
 /*
  * lib/relation.c
@@ -1286,12 +1310,28 @@ void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
  * A reservation applies no configured limit.
  * relic_relation_bytes_after_growth() gives the bytes the relation would
  * then hold, and a caller bound by the memory limit projects that against
- * the account first, as an insertion does.
- * relic_relation_bytes_after_inserts() gives the most it could hold once a
- * number of tuples had been inserted one at a time, which is what a caller
- * asks before inserting many whose newness it does not know.  A
- * reservation past the identifier space is refused as a relation too large
- * to grow; capacity a failed reservation obtained is kept, and accounted.
+ * the account first, as an insertion does.  A reservation past the
+ * identifier space is refused as a relation too large to grow; capacity a
+ * failed reservation obtained is kept, and accounted.
+ *
+ * An append gives a relation many tuples it does not hold at once, in the
+ * identifier order they take, as a round's merge gathers them (relation.h).
+ * relic_relation_append_open() gives it its arrays, charged to the round,
+ * and relic_relation_append_close() releases everything it holds, applied
+ * or not.  relic_relation_stage() records a tuple of it, and
+ * relic_relation_classify_append() classifies its keys in each of the
+ * relic_relation_classify_parts() parts, a key stripe each, with room for
+ * relic_relation_classify_tuples() new keys.
+ * relic_relation_bytes_after_append() is exactly what the relation would
+ * then hold, relic_relation_bytes_during_append() what it holds while the
+ * append is applied, and relic_relation_reserve_append() makes that room,
+ * reporting nothing when it cannot.  relic_relation_take_append() stores
+ * the columns and counts the tuples; relic_relation_apply_append() places
+ * or links the tuples of each of the relic_relation_apply_parts() parts, a
+ * stripe each; and relic_relation_finish_append() brings the storage total
+ * up to date.  Each part is meant for a thread of its own.
+ * relic_tuples_admissible() is how many more tuples the tuple limit admits,
+ * SIZE_MAX when none is set.
  *
  * relic_relation_contains() says whether a relation holds a tuple of some
  * columns.  The reads the executor makes -- the tuple an identifier names,
@@ -1367,8 +1407,31 @@ size_t	 relic_relation_bytes(const relic_relation_t *relation);
 size_t	 relic_relation_bytes_after_growth(const relic_relation_t *relation,
 	    const relic_tuple_growth_t *growth);
 size_t	 relic_tuple_growth_total(const relic_tuple_growth_t *growth);
-size_t	 relic_relation_bytes_after_inserts(
-	    const relic_relation_t *relation, size_t added);
+int	 relic_relation_append_open(relic_t *ctx,
+	    const relic_relation_t *relation, relic_append_t *append);
+void	 relic_relation_append_close(relic_t *ctx, relic_append_t *append);
+void	 relic_relation_stage(const relic_relation_t *relation,
+	    relic_append_t *append, size_t position, const relic_dom_t *columns,
+	    uint64_t hash);
+size_t	 relic_relation_classify_parts(const relic_append_t *append);
+size_t	 relic_relation_classify_tuples(const relic_append_t *append,
+	    size_t part);
+void	 relic_relation_classify_append(const relic_relation_t *relation,
+	    relic_append_t *append, size_t part, relic_new_keys_t *new_keys);
+size_t	 relic_relation_bytes_after_append(const relic_relation_t *relation,
+	    const relic_append_t *append);
+size_t	 relic_relation_bytes_during_append(const relic_relation_t *relation,
+	    const relic_append_t *append);
+int	 relic_relation_reserve_append(relic_t *ctx, relic_relation_t *relation,
+	    relic_append_t *append);
+void	 relic_relation_take_append(relic_t *ctx, relic_relation_t *relation,
+	    const relic_append_t *append);
+size_t	 relic_relation_apply_parts(const relic_append_t *append);
+void	 relic_relation_apply_append(relic_relation_t *relation,
+	    relic_append_t *append, size_t part);
+void	 relic_relation_finish_append(relic_t *ctx,
+	    const relic_relation_t *relation, const relic_append_t *append);
+size_t	 relic_tuples_admissible(const relic_t *ctx);
 int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
 	    const relic_tuple_growth_t *growth);
 size_t	 relic_relation_count(const relic_relation_t *relation);

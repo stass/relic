@@ -68,33 +68,26 @@ static int	 run_task(const relic_round_job_t *job, relic_worker_t *worker,
 		    size_t worker_index, relic_round_task_t *task);
 static int	 screen_batch(const relic_round_job_t *job,
 		    relic_worker_t *worker, size_t target);
-static uint32_t	 screen_hash(size_t target, uint64_t hash);
 static uint64_t	 worker_work(const relic_worker_t *worker);
 
 /*
- * A claim takes the first unclaimed task and moves the claim word past it,
- * in one atomic step, so every task is run once, by the worker that took
- * it, and a worker's claims come in increasing order: its candidates are
+ * Every task is run once, by the worker that claimed it, and a worker's
+ * claims come in increasing order (relic_pool_for()): its candidates are
  * in serial order, which is what lets its screen drop a repeat as a tuple
- * the serial evaluator would have inserted earlier.  The claim word may be
- * moved past the last task by workers finding nothing left; nothing reads
- * it after the job.
+ * the serial evaluator would have inserted earlier.
  */
 void
-relic_round_work(relic_round_job_t *job, relic_worker_t *worker,
-    size_t worker_index)
+relic_round_run_task(void *argument, size_t task, size_t worker_index)
 {
-	size_t claimed;
+	relic_round_job_t *job;
 
-	while (!relic_atomic_bool_load_relaxed(&job->abandoned)) {
-		claimed = relic_atomic_size_add_relaxed(&job->next_task, 1);
-		if (claimed >= job->task_count)
-			break;
+	job = argument;
+	if (relic_atomic_bool_load_relaxed(&job->abandoned))
+		return;
 
-		if (run_task(job, worker, worker_index,
-		    &job->tasks[claimed]) != 0)
-			relic_atomic_bool_store_relaxed(&job->abandoned, true);
-	}
+	if (run_task(job, &job->workers[worker_index], worker_index,
+	    &job->tasks[task]) != 0)
+		relic_atomic_bool_store_relaxed(&job->abandoned, true);
 }
 
 /*
@@ -236,20 +229,6 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 }
 
 /*
- * The hash a candidate is placed under in its worker's screen: the low half
- * of its tuple's wide hash moved by its target, so that one tuple gathered
- * for two targets does not fill one probe sequence.  For each target the
- * move is an exclusive or with a constant, a permutation of the hashes, so
- * hashes that spread still spread.
- */
-static uint32_t
-screen_hash(size_t target, uint64_t hash)
-{
-	return (relic_hash_low(hash) ^ ((uint32_t)target *
-	    UINT32_C(0x9e3779b9)));
-}
-
-/*
  * The screen hash of the candidate at position `position` minus one, for
  * the screen to use when it grows.
  */
@@ -262,7 +241,8 @@ candidate_rehash(uint32_t position, void *ctx)
 	candidates = ctx;
 	candidate = &candidates->entries[position - 1];
 
-	return (screen_hash(candidate->target, candidate->hash));
+	return (relic_candidate_screen_hash(candidate->target,
+	    candidate->hash));
 }
 
 /*
@@ -277,7 +257,7 @@ candidates_hold(const relic_candidates_t *candidates, size_t target,
 	uint32_t position;
 
 	relic_idprobe_open(&probe, &candidates->screen,
-	    screen_hash(target, hash));
+	    relic_candidate_screen_hash(target, hash));
 	while (relic_idprobe_next(&probe, &position)) {
 		candidate = &candidates->entries[position - 1];
 		if (candidate->target == target &&
@@ -298,6 +278,7 @@ candidates_add(relic_candidates_t *candidates, relic_account_t *account,
     size_t target, const relic_dom_t *tuple, uint16_t arity, uint64_t hash)
 {
 	relic_candidate_t *candidate;
+	size_t stripe;
 	uint16_t column;
 
 	if (candidates_reserve(candidates, account, arity) != 0)
@@ -307,6 +288,10 @@ candidates_add(relic_candidates_t *candidates, relic_account_t *account,
 	candidate->offset = candidates->word_count;
 	candidate->target = (uint32_t)target;
 	candidate->hash = hash;
+	candidate->repeat = false;
+	stripe = relic_hash_stripe(hash);
+	candidates->stripes[candidates->count] = (uint8_t)stripe;
+	candidates->by_stripe[stripe]++;
 
 	for (column = 0; column < arity; column++)
 		candidates->words[candidates->word_count + column] =
@@ -314,7 +299,8 @@ candidates_add(relic_candidates_t *candidates, relic_account_t *account,
 	candidates->word_count += arity;
 	candidates->count++;
 
-	relic_idtab_place(&candidates->screen, screen_hash(target, hash),
+	relic_idtab_place(&candidates->screen,
+	    relic_candidate_screen_hash(target, hash),
 	    (uint32_t)candidates->count);
 
 	return (0);
@@ -369,6 +355,7 @@ static int
 candidates_grow(relic_candidates_t *candidates, uint16_t arity)
 {
 	relic_candidate_t *entries;
+	uint8_t *stripes;
 	relic_dom_t *words;
 
 	entries = relic_grow_array(candidates->entries, &candidates->capacity,
@@ -376,6 +363,13 @@ candidates_grow(relic_candidates_t *candidates, uint16_t arity)
 	if (entries == NULL)
 		return (-1);
 	candidates->entries = entries;
+
+	stripes = relic_grow_array(candidates->stripes,
+	    &candidates->stripe_capacity, candidates->count + 1,
+	    sizeof(*candidates->stripes));
+	if (stripes == NULL)
+		return (-1);
+	candidates->stripes = stripes;
 
 	words = relic_grow_array(candidates->words, &candidates->word_capacity,
 	    candidates->word_count + arity, sizeof(*candidates->words));
@@ -394,6 +388,7 @@ static size_t
 candidates_bytes(const relic_candidates_t *candidates)
 {
 	return (candidates->capacity * sizeof(*candidates->entries) +
+	    candidates->stripe_capacity * sizeof(*candidates->stripes) +
 	    candidates->word_capacity * sizeof(*candidates->words) +
 	    relic_idtab_bytes(&candidates->screen));
 }
@@ -408,19 +403,25 @@ candidates_bytes_after_add(const relic_candidates_t *candidates,
     uint16_t arity)
 {
 	size_t entry_capacity;
+	size_t stripe_capacity;
 	size_t word_capacity;
 	size_t bytes;
 
 	entry_capacity = relic_grow_array_capacity(candidates->capacity,
 	    candidates->count + 1);
+	stripe_capacity = relic_grow_array_capacity(
+	    candidates->stripe_capacity, candidates->count + 1);
 	word_capacity = relic_grow_array_capacity(candidates->word_capacity,
 	    candidates->word_count + arity);
-	if (entry_capacity == 0 || word_capacity == 0)
+	if (entry_capacity == 0 || stripe_capacity == 0 || word_capacity == 0)
 		return (SIZE_MAX);
 
 	bytes = relic_saturating_sum(
 	    relic_saturating_product(entry_capacity,
 	    sizeof(*candidates->entries)),
+	    relic_saturating_product(stripe_capacity,
+	    sizeof(*candidates->stripes)));
+	bytes = relic_saturating_sum(bytes,
 	    relic_saturating_product(word_capacity,
 	    sizeof(*candidates->words)));
 
@@ -445,14 +446,18 @@ relic_candidates_release(relic_candidates_t *candidates,
     relic_account_t *account)
 {
 	relic_free_array(candidates->entries);
+	relic_free_array(candidates->stripes);
 	relic_free_array(candidates->words);
 	relic_idtab_reset(&candidates->screen);
 	relic_account_release_round(account, candidates->charged);
 
 	candidates->entries = NULL;
+	candidates->stripes = NULL;
 	candidates->words = NULL;
+	bzero(candidates->by_stripe, sizeof(candidates->by_stripe));
 	candidates->count = 0;
 	candidates->capacity = 0;
+	candidates->stripe_capacity = 0;
 	candidates->word_count = 0;
 	candidates->word_capacity = 0;
 	candidates->charged = 0;

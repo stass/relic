@@ -38,9 +38,12 @@
  * duplicate elimination are integer work over a dense array.
  */
 
+typedef struct relic_append relic_append_t;
+typedef struct relic_append_keys relic_append_keys_t;
 typedef struct relic_index_key relic_index_key_t;
 typedef struct relic_index_pending relic_index_pending_t;
 typedef struct relic_index_stripe relic_index_stripe_t;
+typedef struct relic_new_keys relic_new_keys_t;
 typedef struct relic_relation_stats relic_relation_stats_t;
 typedef struct relic_base_growth relic_base_growth_t;
 typedef struct relic_reltab relic_reltab_t;
@@ -312,6 +315,75 @@ struct relic_tuple_growth {
 struct relic_base_growth {
 	relic_pred_id_t		pred;
 	relic_tuple_growth_t	added;
+};
+
+/*
+ * Tuples a relation takes all at once, as a round's merge gives them: none
+ * of them in the relation and no two of them equal, in the order they take
+ * their identifiers, tuple i becoming `first + i`.
+ *
+ * `columns`, `hashes` and `stripes` hold each tuple's columns, its wide
+ * hash and the stripe of the canonical index that chooses, and `growth`
+ * counts the tuples of each stripe.  `keys` has `key_count` records, one
+ * per secondary index of the relation, in the relation's order.  `grown`
+ * holds, between the reservation and the part that places a stripe, the
+ * stripe's table grown for its new tuples, allocated and not yet filled,
+ * and nothing otherwise.
+ *
+ * `charged` is what the arrays are charged to the round.  `reserved` is
+ * what the relation holds from the reservation on, the grown tables of the
+ * append and of its keys with it, which the storage total counts until the
+ * append is finished, when the grown tables have replaced the tables they
+ * were grown from.
+ *
+ * The caller sets `count` and `growth`; the relation store allocates the
+ * arrays, fills them and releases them.  An append of all zeroes holds
+ * nothing.  Every part of the work on an append that runs on several
+ * threads at once touches one stripe, and so writes no word another
+ * stripe's part touches.
+ */
+struct relic_append {
+	relic_dom_t		*columns;
+	uint64_t		*hashes;
+	uint8_t			*stripes;
+	relic_append_keys_t	*keys;
+	relic_idtab_t		 grown[RELIC_STRIPES];
+	relic_tuple_growth_t	 growth;
+	relic_tuple_id_t	 first;
+	size_t			 count;
+	size_t			 key_count;
+	size_t			 charged;
+	size_t			 reserved;
+};
+
+/*
+ * What an append brings one secondary index: for each tuple its key's wide
+ * hash, the stripe of the index that chooses, and the key it joins there --
+ * one the index holds, or a new one, the stripe's new keys numbered on from
+ * its last in the order the tuples first bring them.  `new_keys` counts
+ * each stripe's new keys, and `grown` holds each stripe's key table grown
+ * for them, as an append's own `grown` does.
+ */
+struct relic_append_keys {
+	uint64_t	*hashes;
+	uint8_t		*stripes;
+	uint32_t	*key_ids;
+	size_t		 new_keys[RELIC_STRIPES];
+	relic_idtab_t	 grown[RELIC_STRIPES];
+};
+
+/*
+ * The keys new to a stripe of an index that an append's tuples bring,
+ * while they are being classified: `table` maps the low half of a new
+ * key's hash to its position among the stripe's new keys plus one, and
+ * `first[k]` is the tuple of the append that brought new key k, whose
+ * columns hold its values.  It is made with room for every tuple of the
+ * stripe, which no number of new keys exceeds, so that classifying never
+ * allocates.
+ */
+struct relic_new_keys {
+	relic_idtab_t	 table;
+	uint32_t	*first;
 };
 
 #endif /* RELIC_RELATION_H */

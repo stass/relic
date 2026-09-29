@@ -62,6 +62,11 @@ static void	 classify_keys(relic_relation_t *relation,
 		    const relic_dom_t *columns);
 static size_t	 columns_bytes_after(const relic_relation_t *relation,
 		    size_t added);
+static void	*append_array(relic_t *ctx, relic_append_t *append,
+		    size_t count, size_t size);
+static size_t	 append_grown_bytes(const relic_append_t *append);
+static int	 append_grow(relic_relation_t *relation,
+		    relic_append_t *append);
 static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation,
 		    uint64_t hash);
 static bool	 exceeds_tuple_limit(const relic_t *ctx);
@@ -82,6 +87,8 @@ static int	 index_make_room(relic_t *ctx, const relic_relation_t *relation,
 		    relic_index_t *index);
 static bool	 key_mask_fits(const relic_relation_t *relation,
 		    uint32_t key_mask);
+static void	 place_append_stripe(relic_relation_t *relation,
+		    relic_append_t *append, size_t s);
 static void	 prefetch_first_candidate(const relic_relation_t *relation,
 		    uint64_t hash);
 static void	 report_limit(relic_t *ctx, const char *limit,
@@ -90,6 +97,7 @@ static void	 report_limit(relic_t *ctx, const char *limit,
 static bool	 relation_columns_after_reserve(
 		    const relic_relation_t *relation, size_t added,
 		    size_t *columnsp);
+static void	 release_grown_tables(relic_t *ctx, relic_idtab_t *grown);
 static void	 relation_empty(relic_relation_t *relation);
 static relic_tuple_id_t relation_find_hashed(
 		    const relic_relation_t *relation,
@@ -548,39 +556,240 @@ insertion_parts_bytes_after(const relic_relation_t *relation, uint64_t hash)
 }
 
 /*
- * The bytes a relation would hold once `added` tuples it does not hold had
- * been inserted one at a time, as relic_relation_insert() inserts them, at
- * most, or SIZE_MAX when the relation could not hold that many tuples or
- * its columns or a secondary index could not grow that far.
- *
- * Each insertion reserves room for one tuple, and arrays grown one tuple
- * at a time can reach more than one reservation for all of them would
- * (relic_grow_array_capacity_stepwise()), so the columns and every
- * secondary index are followed step by step.  Which stripe of the canonical
- * index each tuple falls in is not known here, so each stripe is grown as
- * though every tuple fell in it, which no sequence of insertions exceeds;
- * a stripe doubles, so one reservation for every tuple reaches what one per
- * tuple does.  The secondary indexes are bounded the same way
- * (relic_index_bytes_after_adds()).  A sequence of insertions of which some
- * find their tuple present passes through the same capacities and stops
- * sooner, so no such sequence holds more than this.
+ * Give an append its arrays, for the `count` tuples its caller set, each
+ * charged to the round before it is allocated, since only a round's merge
+ * makes an append: for each tuple its columns, its hash and its stripe, and
+ * for each secondary index of the relation its key's hash, stripe and
+ * identifier.  The records of the secondary indexes are sized by the
+ * program and are not charged.  Returns 0, or -1 when the limit or the
+ * allocator refused; what was obtained is kept, for
+ * relic_relation_append_close() to release.
  */
-size_t
-relic_relation_bytes_after_inserts(const relic_relation_t *relation,
-    size_t added)
+int
+relic_relation_append_open(relic_t *ctx, const relic_relation_t *relation,
+    relic_append_t *append)
 {
+	relic_append_keys_t *keys;
+	size_t words;
+	size_t index;
+
+	if (append->count == 0)
+		return (0);
+
+	words = relic_saturating_product(append->count, relation->arity);
+	append->columns = append_array(ctx, append, words,
+	    sizeof(*append->columns));
+	if (append->columns == NULL)
+		return (-1);
+	append->hashes = append_array(ctx, append, append->count,
+	    sizeof(*append->hashes));
+	if (append->hashes == NULL)
+		return (-1);
+	append->stripes = append_array(ctx, append, append->count,
+	    sizeof(*append->stripes));
+	if (append->stripes == NULL)
+		return (-1);
+
+	if (relation->index_count == 0)
+		return (0);
+	append->keys = calloc(relation->index_count, sizeof(*append->keys));
+	if (append->keys == NULL)
+		return (-1);
+	append->key_count = relation->index_count;
+
+	for (index = 0; index < append->key_count; index++) {
+		keys = &append->keys[index];
+		keys->hashes = append_array(ctx, append, append->count,
+		    sizeof(*keys->hashes));
+		if (keys->hashes == NULL)
+			return (-1);
+		keys->stripes = append_array(ctx, append, append->count,
+		    sizeof(*keys->stripes));
+		if (keys->stripes == NULL)
+			return (-1);
+		keys->key_ids = append_array(ctx, append, append->count,
+		    sizeof(*keys->key_ids));
+		if (keys->key_ids == NULL)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * An array of `count` items of `size` bytes for an append, charged to the
+ * round before it is allocated, the charge counted in the append; NULL,
+ * having charged nothing, when the limit or the allocator refused it.
+ */
+static void *
+append_array(relic_t *ctx, relic_append_t *append, size_t count, size_t size)
+{
+	size_t capacity;
 	size_t bytes;
-	size_t columns;
-	size_t position;
+	void *items;
+
+	capacity = relic_grow_array_capacity(0, count);
+	if (capacity == 0 || capacity > SIZE_MAX / size)
+		return (NULL);
+	bytes = capacity * size;
+	if (!relic_account_charge_round(&ctx->account, bytes))
+		return (NULL);
+
+	capacity = 0;
+	items = relic_grow_array(NULL, &capacity, count, size);
+	if (items == NULL) {
+		relic_account_release_round(&ctx->account, bytes);
+		return (NULL);
+	}
+	append->charged += bytes;
+
+	return (items);
+}
+
+/*
+ * Release everything an append holds, whether it was applied or not: its
+ * arrays and their charge to the round, and every table its reservation
+ * grew and no part filled, which the storage total counted from the
+ * reservation.  Leaves an append of all zeroes.
+ */
+void
+relic_relation_append_close(relic_t *ctx, relic_append_t *append)
+{
+	relic_append_keys_t *keys;
+	size_t index;
+
+	for (index = 0; index < append->key_count; index++) {
+		keys = &append->keys[index];
+		relic_free_array(keys->hashes);
+		relic_free_array(keys->stripes);
+		relic_free_array(keys->key_ids);
+		release_grown_tables(ctx, keys->grown);
+	}
+	free(append->keys);
+
+	relic_free_array(append->columns);
+	relic_free_array(append->hashes);
+	relic_free_array(append->stripes);
+	release_grown_tables(ctx, append->grown);
+	relic_account_release_round(&ctx->account, append->charged);
+
+	bzero(append, sizeof(*append));
+}
+
+/*
+ * Free the RELIC_STRIPES tables of `grown` that a reservation grew and no
+ * part filled, taking their bytes from the storage total that counted them.
+ * A filled table has become its stripe's, and `grown` holds nothing there.
+ */
+static void
+release_grown_tables(relic_t *ctx, relic_idtab_t *grown)
+{
 	size_t s;
 
-	if (added == 0)
-		return (relic_relation_bytes(relation));
-	if (added > RELIC_TUPLE_MAX - relation->count)
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		ctx->account.store_bytes -= relic_idtab_bytes(&grown[s]);
+		relic_idtab_reset(&grown[s]);
+	}
+}
+
+/*
+ * Record the tuple at `position` of an append to the relation -- its
+ * columns, its wide hash and the stripe of the canonical index that
+ * chooses -- and, for each secondary index, its key's hash and stripe.
+ * Writes only the append's entries for `position`, so tuples of one append
+ * may be recorded on several threads at once.
+ */
+void
+relic_relation_stage(const relic_relation_t *relation, relic_append_t *append,
+    size_t position, const relic_dom_t *columns, uint64_t hash)
+{
+	relic_dom_t *staged;
+	size_t index;
+	uint16_t column;
+
+	staged = &append->columns[position * relation->arity];
+	for (column = 0; column < relation->arity; column++)
+		staged[column] = columns[column];
+	append->hashes[position] = hash;
+	append->stripes[position] = (uint8_t)relic_hash_stripe(hash);
+
+	for (index = 0; index < relation->index_count; index++)
+		relic_index_stage(&relation->indexes[index], relation,
+		    &append->keys[index], position, columns);
+}
+
+/*
+ * The parts an append's keys are classified in, a stripe of a secondary
+ * index each: part p is stripe p % RELIC_STRIPES of the secondary index at
+ * p / RELIC_STRIPES.  An empty append has none.  A caller runs every part,
+ * in any order and on any threads, and no two parts write the same word.
+ */
+size_t
+relic_relation_classify_parts(const relic_append_t *append)
+{
+	return (append->key_count * RELIC_STRIPES);
+}
+
+/*
+ * How many of an append's tuples classify part `part` reads, which is also
+ * as many new keys as it can find.
+ */
+size_t
+relic_relation_classify_tuples(const relic_append_t *append, size_t part)
+{
+	const relic_append_keys_t *keys;
+	size_t count;
+	size_t i;
+
+	keys = &append->keys[part / RELIC_STRIPES];
+	count = 0;
+	for (i = 0; i < append->count; i++) {
+		if (keys->stripes[i] == part % RELIC_STRIPES)
+			count++;
+	}
+
+	return (count);
+}
+
+/*
+ * Classify the keys of an append's tuples in part `part`
+ * (relic_index_classify_append()), with `new_keys` made with room for
+ * relic_relation_classify_tuples() of them.
+ */
+void
+relic_relation_classify_append(const relic_relation_t *relation,
+    relic_append_t *append, size_t part, relic_new_keys_t *new_keys)
+{
+	size_t index;
+
+	index = part / RELIC_STRIPES;
+	relic_index_classify_append(&relation->indexes[index], relation,
+	    append, &append->keys[index], part % RELIC_STRIPES, new_keys);
+}
+
+/*
+ * The bytes the relation would hold once it had taken an append whose keys
+ * every secondary index has classified: exactly what inserting its tuples
+ * one at a time would reach (relic_grow_array_capacity_stepwise()), since
+ * the append's tuples are all new.  SIZE_MAX when the relation could not
+ * hold them, or some growth could not happen.
+ */
+size_t
+relic_relation_bytes_after_append(const relic_relation_t *relation,
+    const relic_append_t *append)
+{
+	size_t columns;
+	size_t bytes;
+	size_t index;
+	size_t s;
+
+	if (append->count > RELIC_TUPLE_MAX - relation->count)
 		return (SIZE_MAX);
+	if (append->count == 0)
+		return (relic_relation_bytes(relation));
 
 	columns = relic_grow_array_capacity_stepwise(relation->column_capacity,
-	    relation->count * relation->arity, added, relation->arity);
+	    relation->count * relation->arity, append->count, relation->arity);
 	if (columns == 0)
 		return (SIZE_MAX);
 
@@ -588,14 +797,255 @@ relic_relation_bytes_after_inserts(const relic_relation_t *relation,
 	for (s = 0; s < RELIC_STRIPES; s++)
 		bytes = relic_saturating_sum(bytes,
 		    relic_idtab_bytes_after_reserve(&relation->index[s],
-		    added));
+		    append->growth.by_stripe[s]));
 
-	for (position = 0; position < relation->index_count; position++)
+	for (index = 0; index < relation->index_count; index++)
 		bytes = relic_saturating_sum(bytes,
-		    relic_index_bytes_after_adds(&relation->indexes[position],
-		    relation->count, added));
+		    relic_index_bytes_after_append(&relation->indexes[index],
+		    relation->count, append, &append->keys[index]));
 
 	return (bytes);
+}
+
+/*
+ * The bytes the relation holds while it takes an append, from the
+ * reservation until the append is applied: what it holds once it has taken
+ * it, and beside that every table the reservation replaces, which stays
+ * allocated until the part that fills its replacement frees it, however
+ * many stripes grow at once.  An array's growth holds its old generation
+ * only while it is copied, one array at a time, as an insertion's growth
+ * does, and neither counts it.  SIZE_MAX when the append could not be
+ * taken.
+ */
+size_t
+relic_relation_bytes_during_append(const relic_relation_t *relation,
+    const relic_append_t *append)
+{
+	size_t bytes;
+	size_t index;
+	size_t s;
+
+	bytes = relic_relation_bytes_after_append(relation, append);
+	if (append->count == 0)
+		return (bytes);
+
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_idtab_bytes_replaced_by_reserve(&relation->index[s],
+		    append->growth.by_stripe[s]));
+
+	for (index = 0; index < relation->index_count; index++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_index_bytes_replaced_by_append(
+		    &relation->indexes[index], &append->keys[index]));
+
+	return (bytes);
+}
+
+/*
+ * Make room for an append, as relic_relation_bytes_after_append() projects
+ * it: the columns and every array of every secondary index grown, and the
+ * growth of each stripe of the canonical index and of every key table
+ * prepared in the append, allocated and not yet filled.  The storage total
+ * counts what the relation then holds, the prepared tables with it, as
+ * relic_relation_bytes_during_append() projects it.  Returns 0, or -1 when
+ * something could not grow, reporting nothing: the caller gives the tuples
+ * to the ordinary insertion instead, which reports whatever refuses it.
+ * Whatever a failed reservation obtained is kept and counted, the arrays in
+ * the relation and the prepared tables in the append, which
+ * relic_relation_append_close() releases.
+ */
+int
+relic_relation_reserve_append(relic_t *ctx, relic_relation_t *relation,
+    relic_append_t *append)
+{
+	size_t bytes_before;
+	int status;
+
+	bytes_before = relic_relation_bytes(relation);
+	status = append_grow(relation, append);
+	append->reserved = relic_saturating_sum(relic_relation_bytes(relation),
+	    append_grown_bytes(append));
+	ctx->account.store_bytes += append->reserved - bytes_before;
+
+	return (status);
+}
+
+/*
+ * The growths of relic_relation_reserve_append(), every one that can fail.
+ */
+static int
+append_grow(relic_relation_t *relation, relic_append_t *append)
+{
+	relic_dom_t *columns;
+	size_t index;
+	size_t s;
+
+	if (append->count > RELIC_TUPLE_MAX - relation->count)
+		return (-1);
+	append->first = (relic_tuple_id_t)(relation->count + 1);
+	if (append->count == 0)
+		return (0);
+
+	columns = relic_grow_array_stepwise(relation->columns,
+	    &relation->column_capacity, relation->count * relation->arity,
+	    append->count, relation->arity, sizeof(*relation->columns));
+	if (columns == NULL)
+		return (-1);
+	relation->columns = columns;
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (relic_idtab_prepare_growth(&relation->index[s],
+		    append->growth.by_stripe[s], &append->grown[s]) != 0)
+			return (-1);
+	}
+
+	for (index = 0; index < relation->index_count; index++) {
+		if (relic_index_reserve_append(&relation->indexes[index],
+		    relation->count, append, &append->keys[index]) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * The bytes of the tables an append's reservation grew and no part has yet
+ * filled, of its canonical stripes and of every key stripe.
+ */
+static size_t
+append_grown_bytes(const relic_append_t *append)
+{
+	size_t bytes;
+	size_t index;
+	size_t s;
+
+	bytes = 0;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes += relic_idtab_bytes(&append->grown[s]);
+
+	for (index = 0; index < append->key_count; index++) {
+		for (s = 0; s < RELIC_STRIPES; s++)
+			bytes += relic_idtab_bytes(
+			    &append->keys[index].grown[s]);
+	}
+
+	return (bytes);
+}
+
+/*
+ * Store an append's columns after the relation's last tuple and count its
+ * tuples in, once it has room, before its tuples are placed and linked.
+ * Nothing reads the relation while a merge runs, so no lookup sees tuples
+ * that the indexes do not yet hold.
+ */
+void
+relic_relation_take_append(relic_t *ctx, relic_relation_t *relation,
+    const relic_append_t *append)
+{
+	size_t words;
+
+	assert(append->first == relation->count + 1);
+
+	words = append->count * relation->arity;
+	if (words != 0)
+		bcopy(append->columns, tuple_at(relation, append->first),
+		    words * sizeof(*relation->columns));
+
+	relation->count += append->count;
+	ctx->store.tuple_count += append->count;
+}
+
+/*
+ * The parts an append is applied in once the relation has taken its
+ * columns, a stripe each: part s < RELIC_STRIPES places the tuples of
+ * stripe s of the canonical index, and each later run of RELIC_STRIPES
+ * parts links the tuples of one secondary index, a key stripe each.  An
+ * empty append has none.  A caller runs every part, in any order and on any
+ * threads: placing reads nothing linking writes, and no two parts write the
+ * same word.
+ */
+size_t
+relic_relation_apply_parts(const relic_append_t *append)
+{
+	if (append->count == 0)
+		return (0);
+
+	return ((1 + append->key_count) * RELIC_STRIPES);
+}
+
+void
+relic_relation_apply_append(relic_relation_t *relation,
+    relic_append_t *append, size_t part)
+{
+	size_t index;
+
+	if (part < RELIC_STRIPES) {
+		place_append_stripe(relation, append, part);
+		return;
+	}
+
+	index = part / RELIC_STRIPES - 1;
+	relic_index_link_append(&relation->indexes[index], relation, append,
+	    &append->keys[index], part % RELIC_STRIPES);
+}
+
+/*
+ * Place the tuples of an append that lie in stripe `s` of the canonical
+ * index, in identifier order, the stripe first grown into the table the
+ * reservation prepared.  The relation holds the tuples.  Nothing here can
+ * fail, and nothing here touches another stripe.
+ */
+static void
+place_append_stripe(relic_relation_t *relation, relic_append_t *append,
+    size_t s)
+{
+	relic_idtab_t *stripe;
+	size_t i;
+
+	stripe = &relation->index[s];
+	relic_idtab_complete_growth(stripe, &append->grown[s], tuple_rehash,
+	    relation);
+
+	for (i = 0; i < append->count; i++) {
+		if (append->stripes[i] == s)
+			relic_idtab_place(stripe, relic_hash_low(
+			    append->hashes[i]),
+			    (relic_tuple_id_t)(append->first + i));
+	}
+}
+
+/*
+ * Bring the storage total up to date once every part of an append has been
+ * applied: the tables the reservation grew have replaced the tables they
+ * were grown from, which are freed.
+ */
+void
+relic_relation_finish_append(relic_t *ctx, const relic_relation_t *relation,
+    const relic_append_t *append)
+{
+	assert(append_grown_bytes(append) == 0);
+
+	ctx->account.store_bytes += relic_relation_bytes(relation) -
+	    append->reserved;
+}
+
+/*
+ * How many more tuples the tuple limit admits, or SIZE_MAX when none is
+ * set.
+ */
+size_t
+relic_tuples_admissible(const relic_t *ctx)
+{
+	size_t limit;
+
+	limit = ctx->config.max_tuples;
+	if (!relic_limit_set(limit))
+		return (SIZE_MAX);
+	if (ctx->store.tuple_count >= limit)
+		return (0);
+
+	return (limit - ctx->store.tuple_count);
 }
 
 /*

@@ -23,15 +23,25 @@ formatting is designed yet. Step 5's peak and step 6's import have items of
 their own: a growth's slack and transient keep the peak above the live
 heap, and importing facts misses the comparison's gate.
 
-**Parallel evaluation misses its pool's speed-up gate.** [Medium,
-component: `lib/round.c`] Section 15 of `specs/design-parallel.md` asks
-step 3 for `tc-cyclic` at least six times faster at sixteen threads than
-at one; it is 4.8 times, 2.63 s against 0.55 s, and every other step 3
-gate holds. About 0.29 s of the sixteen-thread run is the calling thread
-alone: the recursive rule's first round, 0.23 s, which inserts most of
-what it derives and takes 0.25 s when shared, 0.19 s of it merging, and
-the next round's merge, 0.06 s. Both are the merge, which step 4 shares;
-the gate is measured again with step 4's own.
+**Parallel evaluation misses its speed-up gates.** [Medium, component:
+`lib/round.c`] Section 15 of `specs/design-parallel.md` asks step 3 for
+`tc-cyclic` at least six times faster at sixteen threads than at one and
+step 4 for ten; with the parallel merge it is 5.3 times, 2.66 s against
+0.50 s under a load average of twenty, and every identity gate holds. The
+merge is no longer what is left: a traced sixteen-thread run merges the
+largest round's 88 000 new tuples in 0.02 to 0.03 s. What remains is the
+recursive rule's first round, about 0.5 s on the calling thread alone,
+which the threshold keeps serial because an item that has not run is
+estimated at its first scan's view, 48 727 tuples, and not at the join
+behind it. Shared, under `-X parallel`, it takes 0.15 to 0.27 s, merge
+included, and the whole run 0.36 s at best, 7.4 times; the largest
+round's tasks, some 3 s of work, take 0.35 to 0.42 s on sixteen threads
+under that load. Estimating an item that has not run from its plan
+rather than its view, which changes section 5.4 of the design, is the
+next thing to try, and the threshold of 65 536, set while a round that
+inserts most of what it derives gained nothing from the pool, can be
+measured again on the chains now that such a round's merge is shared.
+Measure on a quiet machine.
 
 ## Build and packaging
 
@@ -101,17 +111,24 @@ Revisit if a distribution reports it.
 
 ## Engine
 
-**Under a memory limit a shared round is abandoned where it would fit.**
-[Medium, component: `lib/round.c`, `lib/relation.c`] `merge_fits()` asks
-`relic_relation_bytes_after_inserts()`, which grows every stripe of the
-canonical index and of each secondary index as though every candidate
-landed in it, sixteen times the growth one stripe can take. With a memory
-limit close to a program's footprint, rounds the merge would have fitted
-are abandoned after their tasks ran and run again serially: `layered.dl -j 4`
-shares none of its seven rounds at `-l memory=1100000`, where the unstriped
-bound shared all seven, and reaches parity only near 2 MB. The parallel
-merge of `specs/design-parallel.md` section 6.3 replaces the bound with an
-exact check on each stripe's new tuples and keys, which closes this.
+**A round's merge scans its arrays once per stripe.** [Low, component:
+`lib/merge.c`, `lib/relation.c`, `lib/index.c`] Each part of finding the
+new tuples reads every candidate's stripe byte to take its own, and each
+part of classifying, placing and linking reads every staged tuple's, so
+the reading grows with `RELIC_STRIPES` rather than with the threads. At
+sixteen stripes it is a byte per candidate per part; were the stripe
+count raised far beyond that, a counting sort by stripe, once per step,
+would replace the scans.
+
+**The allocation-failure suite's deferred sweeps take a minute.** [Low,
+component: `tests/unit/test_exhaustion.c`, `lib/merge.c`] A deferred run
+of the sweep's program makes some 3600 to 4800 allocations, against 250
+to 400 undeferred, most of them the merge's, which allocates its staging,
+a table of firsts per stripe and a table of new keys per key stripe afresh
+every round; the sweep runs the program once per allocation, so
+`test_exhaustion` takes about 63 s in a debug build. Carving a round's
+scratch tables from one charged block would cut both, at the price of an
+allocator of the merge's own.
 
 **Striped tables multiply the number of mappings.** [Low, component:
 `lib/util.c`] Every stripe's arrays are mapped once they reach
@@ -776,17 +793,6 @@ pool can give, and it is what the threshold of
 the screen from what the round's items estimate, rather than growing it
 from nothing, is the first thing to try.
 
-**A round that inserts most of what it derives gains nothing from the
-pool.** [Medium, component: `lib/round.c`] Its screen and its merge each
-hash every new tuple, and only the screen is shared, so such a round is no
-faster on sixteen threads, and a chain whose rounds cross the threshold
-runs ten per cent slower; the threshold is set high enough that the
-chains measured never cross it. The estimate knows a round's work but not
-how much of it the merge repeats: recording each item's insertions beside
-its work would let the threshold weigh the part that parallelizes, until
-the parallel merge of `specs/design-parallel.md` section 6.3 makes the
-distinction moot.
-
 **The pool's spin bound counts iterations, not time.** [Low, component:
 `lib/pool.c`] `RELIC_SPIN_LIMIT` pauses 4096 times before a waiting worker
 parks, which was sized on x86, where `pause` takes tens to a hundred
@@ -913,7 +919,10 @@ a multiply-shift range reduction, `(hash * capacity) >> 32`, would keep a
 mask-free probe and halve the slack; rehashing a mapped table within its
 own extended mapping would remove the transient where the platform can
 extend one. Measure both on `chain-closure` and `facts-join` before
-changing either policy.
+changing either policy. The memory limit does not count the transient
+either: an insertion or a round's merge admitted at the limit holds one
+array's or one table's old generation beside the new one while it is
+copied, one at a time.
 
 **A mapped array's growth always copies.** [Low, component: `lib/util.c`]
 Growing a mapped array maps the new size, copies and unmaps the old. glibc's
