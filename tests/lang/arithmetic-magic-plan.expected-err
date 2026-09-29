@@ -1,0 +1,88 @@
+magic rewrite of $q0(Y) :- later(n2, Y).
+    adorn later/2 bf
+    adorn at/2 fb
+    adorn at/2 bf
+    seed magic$later$bf(n2).
+    stratum 0, component 0: magic$later$bf/1
+        facts: 1
+    stratum 0, component 1 (recursive): at$fb/2, magic$at$fb/1, magic$at$bf/1, sup$later$bf$0$2/2
+        rule magic$at$fb(X) :- magic$later$bf(X).
+            scan magic$later$bf(X)
+            emit magic$at$fb(X)
+        rule sup$later$bf$0$2(X, M) :- magic$later$bf(X), at$fb(N, X), M = N + 2.
+            delta at$fb(N, X) when the delta holds more than 1 tuple:
+                scan magic$later$bf(X)
+                lookup delta at$fb(N, X) key={1}
+                assign M = N + 2
+                emit sup$later$bf$0$2(X, M)
+            delta at$fb(N, X) otherwise:
+                scan delta at$fb(N, X)
+                assign M = N + 2
+                member magic$later$bf(X)
+                emit sup$later$bf$0$2(X, M)
+        rule magic$at$bf(M) :- sup$later$bf$0$2(X, M).
+            delta sup$later$bf$0$2(X, M):
+                scan delta sup$later$bf$0$2(X, M)
+                emit magic$at$bf(M)
+        rule at$fb(N, X) :- magic$at$fb(X), start(X, N).
+            delta magic$at$fb(X) when the delta holds more than 1 tuple:
+                scan start(X, N)
+                member delta magic$at$fb(X)
+                emit at$fb(N, X)
+            delta magic$at$fb(X) otherwise:
+                scan delta magic$at$fb(X)
+                lookup start(X, N) key={0}
+                emit at$fb(N, X)
+        rule magic$at$fb(X) :- magic$at$fb(Y), edge(X, Y).
+            delta magic$at$fb(Y) when the delta holds more than 5 tuples:
+                scan edge(X, Y)
+                member delta magic$at$fb(Y)
+                emit magic$at$fb(X)
+            delta magic$at$fb(Y) otherwise:
+                scan delta magic$at$fb(Y)
+                lookup edge(X, Y) key={1}
+                emit magic$at$fb(X)
+        rule at$fb(N1, Y) :- magic$at$fb(Y), edge(X, Y), at$fb(N, X), N < 10, N1 = N + 1.
+            delta magic$at$fb(Y):
+                scan edge(X, Y)
+                member delta magic$at$fb(Y)
+                lookup at$fb(N, X) key={1}
+                filter N < 10
+                assign N1 = N + 1
+                emit at$fb(N1, Y)
+            delta at$fb(N, X):
+                scan edge(X, Y)
+                lookup delta at$fb(N, X) key={1}
+                filter N < 10
+                assign N1 = N + 1
+                member old magic$at$fb(Y)
+                emit at$fb(N1, Y)
+        rule magic$at$fb(X) :- magic$at$bf(N1), edge(X, Y).
+            delta magic$at$bf(N1) when the delta holds more than 1 tuple:
+                scan edge(X, Y)
+                scan delta magic$at$bf(N1)
+                emit magic$at$fb(X)
+            delta magic$at$bf(N1) otherwise:
+                scan delta magic$at$bf(N1)
+                scan edge(X, Y)
+                emit magic$at$fb(X)
+    stratum 0, component 2: at$bf/2
+        rule at$bf(N, X) :- magic$at$bf(N), start(X, N).
+            scan magic$at$bf(N)
+            lookup start(X, N) key={1}
+            emit at$bf(N, X)
+        rule at$bf(N1, Y) :- magic$at$bf(N1), edge(X, Y), at$fb(N, X), N < 10, N1 = N + 1.
+            scan magic$at$bf(N1)
+            scan edge(X, Y)
+            lookup at$fb(N, X) key={1}
+            filter N < 10
+            filter N1 = N + 1
+            emit at$bf(N1, Y)
+    stratum 0, component 3: later$bf/2
+        rule later$bf(X, Y) :- sup$later$bf$0$2(X, M), at$bf(M, Y).
+            scan sup$later$bf$0$2(X, M)
+            lookup at$bf(M, Y) key={0}
+            emit later$bf(X, Y)
+query $q0(Y) :- later$bf(n2, Y).
+    lookup later$bf(n2, Y) key={0}
+    stream $q0(Y)

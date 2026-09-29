@@ -1,0 +1,11 @@
+% The plan of arithmetic-magic: the call after M = N + 2 is adorned bound
+% on M, so at/2 is asked for the nodes M hops from the start, and the
+% supplementary predicate before it holds M.
+edge(n1, n2). edge(n2, n3). edge(n3, n4). edge(n4, n5). edge(n5, n6).
+start(n1, 0).
+
+at(N, X) :- start(X, N).
+at(N1, Y) :- at(N, X), edge(X, Y), N < 10, N1 = N + 1.
+later(X, Y) :- at(N, X), M = N + 2, at(M, Y).
+
+later(n2, Y)?

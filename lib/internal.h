@@ -354,7 +354,11 @@ struct relic_magic_limit {
  * the adornments kept so far.  `rule_limit` bounds the rules it keeps by a
  * limit alone, SIZE_MAX when none is set: the literal budget bounds them
  * otherwise.  `literal_budget` bounds the body literals of every rule
- * drafted, kept or dropped, which `generated_literals` counts.  Configuring
+ * drafted, kept or dropped, which `generated_literals` counts.  The budget
+ * and both of its counts, this one and `searched_literals`, are in the
+ * units relic_body_size() gives, a literal counting one and one more per
+ * node of its expressions, so that none of them counts in literals alone
+ * while another counts nodes.  Configuring
  * either Magic limit lifts both budgets: an unset limit is then SIZE_MAX,
  * and so is the literal budget, which no limit configures.
  *
@@ -904,6 +908,10 @@ void	 relic_pred_report_undefined(relic_t *ctx);
  * relic_expr_slots() and relic_comparison_slots() give the slots an
  * expression, or both sides of a comparison, read.
  * relic_comparison_nodes() counts the nodes of a comparison's two trees.
+ * relic_literal_size() is a literal's size: one, and one more per node of
+ * its expressions, so that a count of sizes sees what copying and walking
+ * a literal costs where a count of literals would not; relic_body_size()
+ * sums the sizes of a body's literals, saturating at SIZE_MAX.
  * relic_comparison_assigns() says whether a comparison placed where the
  * slots in `bound` are bound binds a variable rather than testing values,
  * and if so which slot and to what.  relic_expr_equal() says whether two
@@ -912,6 +920,8 @@ void	 relic_pred_report_undefined(relic_t *ctx);
 uint64_t relic_expr_slots(const relic_expr_t *expr);
 uint64_t relic_comparison_slots(const relic_comparison_t *comparison);
 size_t	 relic_comparison_nodes(const relic_comparison_t *comparison);
+size_t	 relic_literal_size(const relic_literal_t *literal);
+size_t	 relic_body_size(const relic_literal_t *body, size_t length);
 bool	 relic_comparison_assigns(const relic_comparison_t *comparison,
 	    uint64_t bound, uint16_t *slotp, const relic_expr_t **valuep);
 bool	 relic_expr_equal(const relic_expr_t *a, const relic_expr_t *b);

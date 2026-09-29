@@ -144,11 +144,14 @@ typedef struct relic_config relic_config_t;
  * adorned.  Setting either sizes the rewrite: a limit left at zero beside one
  * that is set is unbounded.  With both at zero, the library sets budgets in
  * proportion to the program, on the predicates the rewrite generates and on the
- * literals of every rule it drafts, which bounds the rules it keeps as well,
- * and a rewrite outgrowing one is abandoned with a warning and the query
- * answered from the whole program, as it would be with RELIC_F_NO_MAGIC: the
- * rewrite is an optimization, and without a limit the caller asked for it must
- * not decide whether a query is answered.  The budgets bound the rewrite, not
+ * literals of every rule it drafts, a literal counting one and one more per
+ * node of its expressions, which bounds the rules it keeps as well, and a
+ * rewrite outgrowing one is abandoned with a warning and the query answered
+ * from the whole program, as it would be with RELIC_F_NO_MAGIC: the rewrite
+ * is an optimization, and without a limit the caller asked for it must not
+ * decide whether a query is answered.  The whole program never answers
+ * differently, but it may meet an undefined arithmetic result the rewrite
+ * would not have evaluated, and fail.  The budgets bound the rewrite, not
  * what its rules derive.  The rewrite searches for what to generate before it
  * generates anything, and the search is held to the same limits and budgets;
  * it can count predicates and rules the finished rewrite drops, so a limit may
@@ -680,7 +683,9 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * stand, and the rest only as far as the query's bindings reach.  What that
  * derives is discarded by the next query or evaluation.  A rewrite that
  * outgrows its budget, when no Magic limit is configured, is abandoned with
- * a warning, and the query answered from the whole program instead.
+ * a warning, and the query answered from the whole program instead, which
+ * can fail on an undefined arithmetic result the rewrite would not have
+ * reached, and never answers differently.
  *
  * No row is delivered until everything that can fail has succeeded.  A query
  * answered in a context whose max_tuples and max_memory each set no limit,

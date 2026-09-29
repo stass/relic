@@ -43,6 +43,7 @@
 
 #define	SCENARIO_BUDGET		"a rewrite over its budget is abandoned"
 #define	SCENARIO_DEDUP		"equal generated rules are kept once"
+#define	SCENARIO_TREES		"rules equal but for an expression differ"
 #define	SCENARIO_DROPPED	"dropped rules are charged to the budget"
 #define	SCENARIO_EQUIVALENT	"the rewrite answers as the fixed point does"
 #define	SCENARIO_FACTS		"facts behind a rule fit the literal budget"
@@ -138,6 +139,7 @@ static void	 text_append(text_t *text, const char *bytes, size_t length);
 static void	 adornments_are_memoized(void);
 static void	 adornments_are_named_by_their_bound_columns(void);
 static void	 equal_generated_rules_are_kept_once(void);
+static void	 rules_differing_in_an_expression_are_both_kept(void);
 static void	 a_rule_deriving_its_own_head_is_dropped(void);
 static void	 a_rewrite_over_its_budget_is_abandoned(void);
 static void	 a_rewrite_over_its_literal_budget_is_abandoned(void);
@@ -252,12 +254,13 @@ context_configured(const char *program, const relic_config_t *config,
 }
 
 /*
- * Render a row as its values separated by spaces.  Only symbols appear in
- * these programs.
+ * Render a row as its values separated by spaces: a symbol by its name and
+ * an integer in decimal.  No string appears in these programs.
  */
 static int
 collect_row(void *callback_ctx, const relic_value_t *values, size_t count)
 {
+	char number[24];
 	rows_t *rows;
 	text_t line;
 	char **lines;
@@ -269,7 +272,13 @@ collect_row(void *callback_ctx, const relic_value_t *values, size_t count)
 	text_append(&line, "", 0);
 
 	for (i = 0; i < count; i++) {
-		name = relic_string(rows->ctx, values[i].v.id, NULL);
+		if (values[i].type == RELIC_INTEGER) {
+			snprintf(number, sizeof(number), "%lld",
+			    (long long)values[i].v.integer);
+			name = number;
+		} else {
+			name = relic_string(rows->ctx, values[i].v.id, NULL);
+		}
 		if (i > 0)
 			text_append(&line, " ", 1);
 		text_append(&line, name, strlen(name));
@@ -703,6 +712,47 @@ equal_generated_rules_are_kept_once(void)
 	    SCENARIO_DEDUP,
 	    "p(a, Z)? should generate one adorned rule for p and one magic "
 	    "rule for q, not\n%s", explained.bytes);
+
+	free(explained.bytes);
+}
+
+/*
+ * Rules equal up to the names of their variables, expressions included,
+ * rewrite to one adorned rule: the rewrite renumbers the slots inside
+ * expression trees as it does those of atoms.  A rule that differs only in
+ * an expression -- a constant, an operator, or which side of a subtraction
+ * a variable is on -- is another rule, and is kept beside it.
+ */
+static void
+rules_differing_in_an_expression_are_both_kept(void)
+{
+	static const char program[] =
+	    "edge(1, 2).\n"
+	    "edge(2, 3).\n"
+	    "q(X, Y) :- edge(X, Y).\n"
+	    "p(X, Z) :- edge(X, Y), q(Y, W), Z = W * 2 + 1.\n"
+	    "p(A, C) :- edge(A, B), q(B, D), C = D * 2 + 1.\n"
+	    "p(X, Z) :- edge(X, Y), q(Y, W), Z = W * 2 + 2.\n"
+	    "p(X, Z) :- edge(X, Y), q(Y, W), Z = W * 2 - 1.\n"
+	    "p(X, Z) :- edge(X, Y), q(Y, W), Z = W - Y.\n"
+	    "p(X, Z) :- edge(X, Y), q(Y, W), Z = Y - W.\n";
+	text_t explained;
+	diag_log_t log;
+
+	if (!explain_answer(program, "p(1, Z)?", 0, 0, &explained, &log)) {
+		check(false, SCENARIO_TREES, "p(1, Z)? should be answered");
+		free(explained.bytes);
+		return;
+	}
+
+	checkf(count_lines_starting(explained.bytes,
+	    "        rule p$bf(") == 5, SCENARIO_TREES,
+	    "p(1, Z)? should keep five adorned rules for p, the two spellings "
+	    "of W * 2 + 1 as one, not\n%s", explained.bytes);
+	checkf(has_line(explained.bytes, "        rule p$bf(X, Z) :- "
+	    "magic$p$bf(X), edge(X, Y), q$bf(Y, W), Z = W * 2 + 1."),
+	    SCENARIO_TREES, "the kept rule should read its expression over "
+	    "the renumbered slots, not\n%s", explained.bytes);
 
 	free(explained.bytes);
 }
@@ -1596,6 +1646,7 @@ main(void)
 	adornments_are_named_by_their_bound_columns();
 	adornments_are_memoized();
 	equal_generated_rules_are_kept_once();
+	rules_differing_in_an_expression_are_both_kept();
 	a_rule_deriving_its_own_head_is_dropped();
 	the_limits_hold_at_their_values();
 	the_search_is_held_to_the_limits();

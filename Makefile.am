@@ -535,7 +535,9 @@ endif
 RELIC_LANG_TESTS = tests/lang/arithmetic-binding.dl \
 	tests/lang/arithmetic-depth.dl tests/lang/arithmetic-explain.dl \
 	tests/lang/arithmetic-gathered.dl tests/lang/arithmetic-height.dl \
-	tests/lang/arithmetic-memory.dl \
+	tests/lang/arithmetic-magic.dl tests/lang/arithmetic-magic-drafts.dl \
+	tests/lang/arithmetic-magic-plan.dl \
+	tests/lang/arithmetic-magic-wide.dl tests/lang/arithmetic-memory.dl \
 	tests/lang/arithmetic-mixed.dl tests/lang/arithmetic-negation.dl \
 	tests/lang/arithmetic-negative.dl tests/lang/arithmetic-order.dl \
 	tests/lang/arithmetic-overflow.dl tests/lang/arithmetic-probe.dl \

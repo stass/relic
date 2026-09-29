@@ -415,9 +415,12 @@ order the file names them, that would gain facts:
 When neither
 .Cm magic
 limit is set, the rewrite has budgets in proportion to the program, on the
-predicates it generates and on the literals of the rules it drafts, which
-bound the rules it keeps as well, and a rewrite that outgrows one is
-abandoned with a warning and the query answered from the whole program.
+predicates it generates and on the literals of the rules it drafts, a
+literal with an expression counting one more per operator and operand,
+which bound the rules it keeps as well, and a rewrite that outgrows one is
+abandoned with a warning and the query answered from the whole program,
+which never answers differently but may meet an arithmetic error the
+rewrite would not have.
 Setting either lifts every budget: a
 .Cm magic
 limit that is set is a limit like the others, and one left unset beside it

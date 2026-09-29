@@ -36,15 +36,13 @@ scales about eight times on sixteen threads; and the page records a
 comparison with Souffle built with OpenMP, which leads on `tc-cyclic` and
 trails on `cspa` and `chain-closure`.
 
-**Finish arithmetic.** [High, component: `lib/magic.c`, `lib/round.c`,
-`lib/task.c`, `tests/random/`] Steps 1 and 2 of
+**Finish arithmetic.** [High, component: `lib/round.c`,
+`lib/task.c`, `tests/random/`] Steps 1 to 3 of
 `specs/design-arithmetic.md` section 16 are in: expressions parse, check,
-print, plan and run serially, computed integers are interned when stored
-and charged to the memory limit, and an undefined result fails the
-evaluation. Steps 3 to 5 remain:
+print, plan and run serially and through the Magic rewrite, computed
+integers are interned when stored and charged to the memory limit, and an
+undefined result fails the evaluation. Steps 4 and 5 remain:
 
-* the Magic rewrite's budgets count expression sizes, and
-  `arithmetic-magic` and `arithmetic-magic-wide` are written (step 3);
 * a parallel round whose plans compute is declined and runs serially,
   since a worker has no pending room and no error record; the frozen
   round's pending integers lift that (step 4);

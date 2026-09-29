@@ -66,7 +66,31 @@ relic_comparison_slots(const relic_comparison_t *comparison)
 size_t
 relic_comparison_nodes(const relic_comparison_t *comparison)
 {
-	return (comparison->left->nodes + comparison->right->nodes);
+	return (relic_saturating_sum(comparison->left->nodes,
+	    comparison->right->nodes));
+}
+
+size_t
+relic_literal_size(const relic_literal_t *literal)
+{
+	if (literal->kind != RELIC_LITERAL_COMPARISON)
+		return (1);
+
+	return (relic_saturating_sum(1,
+	    relic_comparison_nodes(&literal->u.comparison)));
+}
+
+size_t
+relic_body_size(const relic_literal_t *body, size_t length)
+{
+	size_t size;
+	size_t i;
+
+	size = 0;
+	for (i = 0; i < length; i++)
+		size = relic_saturating_sum(size, relic_literal_size(&body[i]));
+
+	return (size);
 }
 
 /*

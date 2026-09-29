@@ -1,0 +1,1 @@
+relic: warning: the query's Magic rewrite outgrew its budget of 16960 generated literals while adorning r/1; answering it from the whole program

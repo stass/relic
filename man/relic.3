@@ -212,9 +212,12 @@ and
 bound the predicates and rules the Magic Sets rewrite of one query
 generates.
 With both zero, the rewrite has budgets in proportion to the program, on
-the predicates it generates and the literals of the rules it drafts, which
-bound the rules it keeps as well, and a rewrite outgrowing one is abandoned
-with a warning and the query answered from the whole program; setting
+the predicates it generates and the literals of the rules it drafts, a
+literal with an expression counting one more per node of it, which bound
+the rules it keeps as well, and a rewrite outgrowing one is abandoned with
+a warning and the query answered from the whole program, which never
+answers differently but may meet an undefined arithmetic result the
+rewrite would not have; setting
 either lifts every budget, and a limit left zero beside it bounds nothing.
 The rewrite searches for what to generate before it generates anything,
 and the search is held to the same limits and budgets; it can count

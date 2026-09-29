@@ -1,0 +1,44 @@
+% A large expression under many adornments.  Each adornment of p/6 copies
+% its rule, and with it an expression of 1023 nodes, so the rewrite's
+% literal budget, which counts a literal's size, one and one more per node,
+% is outgrown after a few of the twenty-four patterns q/1 calls p/6 with;
+% the rewrite is abandoned with a warning and the query answered from the
+% whole program, with the same rows.  Counted in literals alone, the copies
+% would stay far within the budget.
+b(1, 1, 1, 1, 1, 1).
+b(2, 1, 1, 1, 1, 1).
+s(2).
+s(1).
+
+p(A, B, C, D, E, F) :-
+    b(A, B, C, D, E, F),
+    Z = ((((((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))))) + (((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))))) + ((((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))))) + (((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))))))) + (((((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))))) + (((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))))) + ((((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))))) + (((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))) + ((((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A))) + (((A + A + A + A) + (A + A + A + A)) + ((A + A + A + A) + (A + A + A + A)))))))),
+    Z != 0.
+q(X) :-
+    s(X),
+    p(X, _, _, _, _, _),
+    p(_, X, _, _, _, _),
+    p(1, X, _, _, _, _),
+    p(_, _, X, _, _, _),
+    p(1, _, X, _, _, _),
+    p(_, 1, X, _, _, _),
+    p(1, 1, X, _, _, _),
+    p(_, _, _, X, _, _),
+    p(1, _, _, X, _, _),
+    p(_, 1, _, X, _, _),
+    p(1, 1, _, X, _, _),
+    p(_, _, 1, X, _, _),
+    p(1, _, 1, X, _, _),
+    p(_, 1, 1, X, _, _),
+    p(1, 1, 1, X, _, _),
+    p(_, _, _, _, X, _),
+    p(1, _, _, _, X, _),
+    p(_, 1, _, _, X, _),
+    p(1, 1, _, _, X, _),
+    p(_, _, 1, _, X, _),
+    p(1, _, 1, _, X, _),
+    p(_, 1, 1, _, X, _),
+    p(1, 1, 1, _, X, _),
+    p(_, _, _, 1, X, _).
+
+q(1)?

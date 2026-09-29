@@ -1,0 +1,14 @@
+% A call whose argument an assignment computes is adorned bound, like one
+% whose argument a relational literal bound: later/2 asks at/2 for the
+% nodes a given number of hops from the start, rather than for every node
+% at every distance.  The prefix before that second call carries the
+% assigned variable into the supplementary predicate that feeds it.
+edge(n1, n2). edge(n2, n3). edge(n3, n4). edge(n4, n5). edge(n5, n6).
+start(n1, 0).
+
+at(N, X) :- start(X, N).
+at(N1, Y) :- at(N, X), edge(X, Y), N < 10, N1 = N + 1.
+later(X, Y) :- at(N, X), M = N + 2, at(M, Y).
+
+later(n2, Y)?
+later(X, n6)?
