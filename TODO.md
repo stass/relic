@@ -24,24 +24,17 @@ their own: a growth's slack and transient keep the peak above the live
 heap, and importing facts misses the comparison's gate.
 
 **Parallel evaluation misses its speed-up gates.** [Medium, component:
-`lib/round.c`] Section 15 of `specs/design-parallel.md` asks step 3 for
-`tc-cyclic` at least six times faster at sixteen threads than at one and
-step 4 for ten; with the parallel merge it is 5.3 times, 2.66 s against
-0.50 s under a load average of twenty, and every identity gate holds. The
-merge is no longer what is left: a traced sixteen-thread run merges the
-largest round's 88 000 new tuples in 0.02 to 0.03 s. What remains is the
-recursive rule's first round, about 0.5 s on the calling thread alone,
-which the threshold keeps serial because an item that has not run is
-estimated at its first scan's view, 48 727 tuples, and not at the join
-behind it. Shared, under `-X parallel`, it takes 0.15 to 0.27 s, merge
-included, and the whole run 0.36 s at best, 7.4 times; the largest
-round's tasks, some 3 s of work, take 0.35 to 0.42 s on sixteen threads
-under that load. Estimating an item that has not run from its plan
-rather than its view, which changes section 5.4 of the design, is the
-next thing to try, and the threshold of 65 536, set while a round that
-inserts most of what it derives gained nothing from the pool, can be
-measured again on the chains now that such a round's merge is shared.
-Measure on a quiet machine.
+`lib/round.c`] Steps 1 to 4 of `specs/design-parallel.md` section 15 are in
+and every identity gate holds, but `tc-cyclic` is 5.3 times faster at
+sixteen threads than at one, against the six step 3 asks for and the ten
+step 4 asks for, and steps 5 and 6 are not started. The gaps and what to
+try are sorted in `docs/todo-parallel.md`: the recursive rule's first round,
+about half of a sixteen-thread run, stays on the calling thread because an
+item that has not run is estimated at its view rather than its join; the
+sharing threshold was set before the merge was shared; the largest round
+scales about eight times on sixteen threads; and the page records a
+comparison with Souffle built with OpenMP, which leads on `tc-cyclic` and
+trails on `cspa` and `chain-closure`.
 
 ## Build and packaging
 
@@ -830,6 +823,15 @@ per input.
 `specs/design-parallel.md` section 16 asks for a column giving the thread
 count and a run at sixteen in `bench/baseline.txt`, so that a regression
 in the speed-up is visible where every other performance regression is.
+
+**`bench/compare/run.sh` compares on one thread only.** [Low, component:
+`bench/compare/run.sh`] The harness runs every engine on one thread, Souffle
+with `-j1` and DuckDB with `threads = 1`, so nothing records how relic's
+speed-up at `-j 16` compares. A threaded column needs a Souffle built with
+OpenMP, since the one on this machine's `PATH` is not and ignores `-j`, and
+its programs translated with `-j16`, since a compiled Souffle program has
+parallel loops only when translated with `-j`. `docs/todo-parallel.md`
+records one such comparison made by hand.
 
 **No run is recorded on an idle machine.** [Medium, component: `bench/`]
 `specs/design-bench.md` section 8 keeps one comparison run in
