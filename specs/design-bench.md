@@ -97,13 +97,22 @@ finish at all -- SWI-Prolog's stack and table space -- the harness raises it
 and records the setting. No engine is given hand-written indexing hints,
 modes or pragmas the others do not get.
 
-Engines that were considered and left out: DDlog (archived); Scryer and
-Trealla Prolog (tabling not mature enough to be a fair representative);
-XSB (the reference for tabling, but SWI-Prolog's tabling descends from it and
-is the one users have); embedded Rust engines such as Crepe and Ascent, which
-compile each program into a Rust binary and measure a different use; and
-PostgreSQL, whose recursive expressions are SQLite's and DuckDB's, behind a
-server the harness would have to run.
+Engines that were considered and left out: DDlog (archived, and built to
+maintain a result across a stream of changes, a use no workload here
+measures); Scryer and Trealla Prolog (tabling not mature enough to be a fair
+representative); XSB (the reference for tabling, but SWI-Prolog's tabling
+descends from it and is the one users have); embedded Rust engines such as
+Crepe and Ascent, which compile each program into a Rust binary and measure
+a different use; PostgreSQL, whose recursive expressions are SQLite's and
+DuckDB's, behind a server the harness would have to run; LogicBlox, a
+proprietary product no longer distributed, whose hosted successor cannot be
+run locally; CodeQL, whose evaluator is closed and queries databases its
+extractors build from source code, so the same facts cannot be given to it;
+and Datomic, a database behind a transactor process whose Datalog is a
+query language over its store rather than an engine over a program's facts.
+The rule these follow is that an engine must be freely installable, run
+locally from a command line over the same facts and the same program, on
+one thread, with only its documented switches.
 
 ---
 
