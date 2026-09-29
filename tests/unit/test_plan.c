@@ -149,6 +149,7 @@ static size_t	 reference_place_tests(relic_t *ctx, const relic_rule_t *rule,
 static bool	 reference_test_ready(relic_t *ctx,
 		    const relic_literal_t *literal, uint64_t bound);
 static uint64_t	 reference_slots(const relic_arg_t *args, uint16_t count);
+static uint64_t	 reference_expr_slots(const relic_expr_t *expr);
 static void	 check_ranked_program(uint32_t *state, unsigned int flags);
 static void	 a_comparison_goes_where_its_operands_are_bound(void);
 static void	 a_delta_literal_must_be_positive(void);
@@ -1729,6 +1730,27 @@ reference_slots(const relic_arg_t *args, uint16_t count)
 }
 
 /*
+ * The slots an expression tree reads, by a walk of its own.
+ */
+static uint64_t
+reference_expr_slots(const relic_expr_t *expr)
+{
+	switch (expr->kind) {
+	case RELIC_EXPR_VARIABLE:
+		return (UINT64_C(1) << expr->u.slot);
+	case RELIC_EXPR_NEGATE:
+		return (reference_expr_slots(expr->u.operand));
+	case RELIC_EXPR_BINARY:
+		return (reference_expr_slots(expr->u.binary.left) |
+		    reference_expr_slots(expr->u.binary.right));
+	case RELIC_EXPR_CONSTANT:
+		break;
+	}
+
+	return (0);
+}
+
+/*
  * A positive literal's score against `bound`, as the planner's contract
  * states it: the bound argument count, and the tuple count divided, rounding
  * up, by the distinct values of each bound column -- or, for a relation
@@ -1812,8 +1834,8 @@ reference_test_ready(relic_t *ctx, const relic_literal_t *literal,
 
 	switch (literal->kind) {
 	case RELIC_LITERAL_COMPARISON:
-		slots = reference_slots(&literal->u.comparison.left, 1) |
-		    reference_slots(&literal->u.comparison.right, 1);
+		slots = reference_expr_slots(literal->u.comparison.left) |
+		    reference_expr_slots(literal->u.comparison.right);
 		return ((slots & ~bound) == 0);
 	case RELIC_LITERAL_NEGATED:
 		pred = relic_pred_of(ctx, literal->u.atom.pred);

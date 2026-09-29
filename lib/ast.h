@@ -41,8 +41,29 @@
  */
 #define	RELIC_MAX_ARITY	32
 
+/*
+ * How deeply an expression may nest, counted two ways, each a bound on a
+ * stack.
+ *
+ * The descent of the text: the parentheses and unary minuses the parser is
+ * inside when it reads a token.  That is what bounds the parser's own
+ * recursion, and it is counted in the text rather than in the tree because
+ * `((((X))))` builds one node however many parentheses it has.
+ *
+ * The height of the tree, a leaf counting one and every operator and
+ * negation one more than its tallest operand.  That is what bounds every
+ * walk over a tree, and the stack an expression is evaluated on.
+ *
+ * The limit is structural rather than configurable, as arity's is: a program
+ * the parser accepts can then be walked and run with no stack check.  No
+ * person writes an expression this deep, and one a program generates is
+ * split across assignments, as a person would split it.
+ */
+#define	RELIC_MAX_EXPRESSION_DEPTH	32
+
 typedef struct relic_ast_atom relic_ast_atom_t;
 typedef struct relic_ast_comparison relic_ast_comparison_t;
+typedef struct relic_ast_expr relic_ast_expr_t;
 typedef struct relic_ast_literal relic_ast_literal_t;
 typedef struct relic_ast_program relic_ast_program_t;
 typedef struct relic_ast_stmt relic_ast_stmt_t;
@@ -51,8 +72,9 @@ typedef struct relic_ast_term relic_ast_term_t;
 typedef struct relic_ast_variable relic_ast_variable_t;
 
 /*
- * The six built-in comparisons.  They are filters: a comparison neither
- * generates a value nor binds a variable.
+ * The six built-in comparisons.  A comparison is a filter, except for an
+ * equality one side of which is a variable nothing before it binds: that one
+ * binds the variable to the other side's value, and is an assignment.
  */
 enum relic_compare_op {
 	RELIC_CMP_EQ,
@@ -61,6 +83,18 @@ enum relic_compare_op {
 	RELIC_CMP_LE,
 	RELIC_CMP_GT,
 	RELIC_CMP_GE
+};
+
+/*
+ * The binary arithmetic operators, over 64-bit integers.  Negation has one
+ * operand and is a kind of node of its own rather than an operator.
+ */
+enum relic_arith_op {
+	RELIC_ARITH_ADD,
+	RELIC_ARITH_SUBTRACT,
+	RELIC_ARITH_MULTIPLY,
+	RELIC_ARITH_DIVIDE,
+	RELIC_ARITH_REMAINDER
 };
 
 enum relic_ast_term_kind {
@@ -115,10 +149,45 @@ struct relic_ast_atom {
 	uint16_t		 arity;
 };
 
+enum relic_ast_expr_kind {
+	RELIC_AST_EXPR_TERM,		/* a constant or a variable */
+	RELIC_AST_EXPR_NEGATE,		/* -operand */
+	RELIC_AST_EXPR_BINARY		/* left op right */
+};
+
+/*
+ * An expression as written: a tree whose leaves are terms and whose inner
+ * nodes are negations and binary operators, shaped by precedence and by the
+ * parentheses the writer gave it.  A term alone is an expression of one
+ * node.
+ *
+ * `where` is the term's location for a leaf and the operator's for an inner
+ * node, which is what a message about the node points at.  `height` is one
+ * for a leaf and one more than the tallest operand otherwise, never more
+ * than RELIC_MAX_EXPRESSION_DEPTH.
+ */
+struct relic_ast_expr {
+	union {
+		relic_ast_term_t	 term;		/* TERM */
+		relic_ast_expr_t	*operand;	/* NEGATE */
+		struct {
+			relic_ast_expr_t	*left;
+			relic_ast_expr_t	*right;
+			enum relic_arith_op	 op;
+		}			 binary;	/* BINARY */
+	}				 u;
+	relic_location_t		 where;
+	enum relic_ast_expr_kind	 kind;	/* which arm of u is live */
+	uint8_t				 height;
+};
+
+/*
+ * A comparison of two expressions, each of which may be a single term.
+ */
 struct relic_ast_comparison {
-	relic_ast_term_t	left;
-	relic_ast_term_t	right;
-	enum relic_compare_op	op;
+	relic_ast_expr_t	*left;
+	relic_ast_expr_t	*right;
+	enum relic_compare_op	 op;
 };
 
 enum relic_ast_literal_kind {

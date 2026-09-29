@@ -646,7 +646,8 @@ enum relic_token_kind {
 	RELIC_TOKEN_SYMBOL,	/* [a-z][A-Za-z0-9_]* */
 	RELIC_TOKEN_VARIABLE,	/* [A-Z_][A-Za-z0-9_]* */
 	RELIC_TOKEN_STRING,
-	RELIC_TOKEN_INTEGER,
+	RELIC_TOKEN_INTEGER,	/* [0-9]+, its magnitude in `magnitude` */
+	RELIC_TOKEN_OPERATOR,	/* + - * /, which one in `arith` */
 	RELIC_TOKEN_COMPARE,	/* = != < <= > >=, which one in `compare` */
 	RELIC_TOKEN_IMPLIES,	/* :- */
 	RELIC_TOKEN_LPAREN,
@@ -664,7 +665,6 @@ enum relic_lex_error {
 	RELIC_LEX_BAD_HEX_ESCAPE,	/* \x without two hex digits */
 	RELIC_LEX_EXPECTED_IMPLIES,	/* : not followed by - */
 	RELIC_LEX_EXPECTED_NE,		/* ! not followed by = */
-	RELIC_LEX_INTEGER_RANGE,	/* outside int64_t */
 	RELIC_LEX_INTEGER_TRAILING,	/* identifier byte after the digits */
 	RELIC_LEX_UNTERMINATED_STRING
 };
@@ -683,16 +683,25 @@ enum relic_lex_error {
  * identifier does not yet know whether it names a predicate or is a symbol
  * constant, and interning it as a value on sight would give every predicate
  * name a domain identifier it never uses.
+ *
+ * `magnitude` is an integer literal's digits as a number, without a sign: a
+ * `-` is always a token of its own, since it may be a subtraction, and the
+ * parser joins it to the digits where it makes a negative literal.  So only
+ * the parser knows the sign, and only it decides whether the value fits.  A
+ * magnitude above RELIC_MAGNITUDE_MAX fits no sign, and is recorded as
+ * RELIC_MAGNITUDE_MAX + 1 however large it was, which every range check
+ * refuses without a case of its own.
  */
 struct relic_token {
 	const char		*text;
 	size_t			 text_length;
 	relic_location_t	 where;
-	int64_t			 integer;	/* RELIC_TOKEN_INTEGER */
+	uint64_t		 magnitude;	/* RELIC_TOKEN_INTEGER */
 	uint32_t		 symbol;	/* names and string bytes */
 	enum relic_token_kind	 kind;
 	enum relic_lex_error	 error;
 	enum relic_compare_op	 compare;	/* RELIC_TOKEN_COMPARE */
+	enum relic_arith_op	 arith;		/* RELIC_TOKEN_OPERATOR */
 	unsigned char		 byte;		/* the byte an error names */
 };
 
@@ -745,19 +754,36 @@ bool	 relic_lex_is_symbol(const char *bytes, size_t length);
 bool	 relic_lex_is_predicate_name(const char *bytes, size_t length);
 
 /*
- * The language's integer rule applied to `length` bytes: the whole range must
- * be `-?[0-9]+` and its value must fit int64_t.  Returns RELIC_INTEGER_VALID
- * with the value in *valuep, or the way the bytes fail the rule, leaving
- * *valuep untouched, since a range that is no integer and one that is an
- * integer out of range are reported differently.  Nothing past the range is
- * read.  A leading zero is accepted, and `-0` is zero.
+ * The language's integer rule, in two pieces that the lexer and the parser
+ * each use and that table import uses together.
+ *
+ * relic_lex_magnitude() converts `length` bytes that must be `[0-9]+` into
+ * their magnitude, which must be at most RELIC_MAGNITUDE_MAX, the magnitude
+ * of INT64_MIN.  relic_integer_signed() gives a magnitude a sign, and says
+ * whether the result fits int64_t: RELIC_MAGNITUDE_MAX fits only when it is
+ * negative.
+ *
+ * relic_lex_integer() is the whole rule applied to `length` bytes: the range
+ * must be `-?[0-9]+` and its value must fit int64_t.
+ *
+ * Each returns RELIC_INTEGER_VALID with its result stored, or the way the
+ * bytes fail the rule, leaving the result untouched, since a range that is
+ * no integer and one that is an integer out of range are reported
+ * differently.  Nothing past the range is read.  A leading zero is
+ * accepted, and `-0` is zero.
  */
+#define	RELIC_MAGNITUDE_MAX	((uint64_t)INT64_MAX + 1u)
+
 enum relic_integer_verdict {
 	RELIC_INTEGER_VALID,
-	RELIC_INTEGER_MALFORMED,	/* not -?[0-9]+ */
-	RELIC_INTEGER_OUT_OF_RANGE	/* -?[0-9]+ outside int64_t */
+	RELIC_INTEGER_MALFORMED,	/* not the digits the rule asks for */
+	RELIC_INTEGER_OUT_OF_RANGE	/* digits whose value does not fit */
 };
 
+enum relic_integer_verdict relic_lex_magnitude(const char *bytes,
+	    size_t length, uint64_t *magnitudep);
+enum relic_integer_verdict relic_integer_signed(uint64_t magnitude,
+	    bool negative, int64_t *valuep);
 enum relic_integer_verdict relic_lex_integer(const char *bytes, size_t length,
 	    int64_t *valuep);
 
@@ -820,6 +846,24 @@ bool	 relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id);
 const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
 	    char *buffer, size_t size);
 void	 relic_pred_report_undefined(relic_t *ctx);
+
+/*
+ * lib/expr.c
+ *
+ * relic_expr_slots() and relic_comparison_slots() give the slots an
+ * expression, or both sides of a comparison, read.
+ * relic_comparison_nodes() counts the nodes of a comparison's two trees.
+ * relic_comparison_assigns() says whether a comparison placed where the
+ * slots in `bound` are bound binds a variable rather than testing values,
+ * and if so which slot and to what.  relic_expr_equal() says whether two
+ * trees are the same.
+ */
+uint64_t relic_expr_slots(const relic_expr_t *expr);
+uint64_t relic_comparison_slots(const relic_comparison_t *comparison);
+size_t	 relic_comparison_nodes(const relic_comparison_t *comparison);
+bool	 relic_comparison_assigns(const relic_comparison_t *comparison,
+	    uint64_t bound, uint16_t *slotp, const relic_expr_t **valuep);
+bool	 relic_expr_equal(const relic_expr_t *a, const relic_expr_t *b);
 
 /*
  * lib/rule.c

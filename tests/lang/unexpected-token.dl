@@ -1,6 +1,6 @@
 % A syntax error says what was expected and names the token found instead:
 % a string or an integer literal where a statement should end, a second
-% ':-', a comma, an opening parenthesis or a '?' where a body literal should
+% ':-', a comma, a closing parenthesis or a '?' where a body literal should
 % start, and a symbol where a rule or a query should go on or end.  Each
 % statement is its own mistake, and the parse resumes after it.
 edge(a, b).
@@ -8,7 +8,7 @@ quoted(X) "a".
 numbered(X) 1.
 doubled(X) :- :- edge(X, _).
 led(X) :- , edge(X, _).
-opened(X) :- (.
+closed(X) :- ).
 asked(X) :- ?
 joined(X) :- edge(X, _) edge(_, X).
 edge(X, _), edge(_, X) edge.

@@ -290,6 +290,9 @@ static int	 confirm_rule_limit(relic_magic_t *magic,
 static relic_arg_t *copy_args(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering, const relic_arg_t *args,
 		    uint16_t count);
+static relic_expr_t *copy_expr(relic_magic_t *magic,
+		    relic_renumbering_t *renumbering,
+		    const relic_expr_t *source);
 static int	 copy_literal(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering,
 		    const relic_literal_t *source, relic_literal_t *copy);
@@ -309,6 +312,8 @@ static int	 guard_literal(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *head, relic_literal_t *guard);
 static uint32_t	 hash_arg(const relic_magic_t *magic, uint32_t hash,
 		    const relic_arg_t *arg);
+static uint32_t	 hash_expr(const relic_magic_t *magic, uint32_t hash,
+		    const relic_expr_t *expr);
 static uint32_t	 hash_step(const relic_magic_t *magic, uint32_t hash,
 		    uint32_t word);
 static uint64_t	 head_bound_slots(const relic_rule_t *rule,
@@ -371,6 +376,8 @@ static uint32_t	 rehash_adornment(uint32_t id, void *ctx);
 static uint32_t	 rehash_rule(uint32_t id, void *ctx);
 static void	 renumber_arg(relic_renumbering_t *renumbering,
 		    const relic_arg_t *source, relic_arg_t *copy);
+static uint16_t	 renumber_slot(relic_renumbering_t *renumbering,
+		    uint16_t slot);
 static void	 report_limit(relic_magic_t *magic, const char *limit,
 		    size_t configured, relic_pred_id_t source);
 static int	 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
@@ -1391,20 +1398,14 @@ name_adornments(relic_magic_t *magic)
 }
 
 /*
- * Give a source slot its slot in the generated rule, assigning the next one
- * the first time the slot occurs.
+ * Give an occurrence of a source slot its slot in the generated rule,
+ * assigning the next one the first time the slot occurs.
  */
-static void
-renumber_arg(relic_renumbering_t *renumbering, const relic_arg_t *source,
-    relic_arg_t *copy)
+static uint16_t
+renumber_slot(relic_renumbering_t *renumbering, uint16_t slot)
 {
-	uint16_t slot;
+	uint16_t renamed;
 
-	*copy = *source;
-	if (source->kind != RELIC_ARG_VARIABLE)
-		return;
-
-	slot = source->u.slot;
 	if (renumbering->renamed[slot] == RELIC_NO_SLOT) {
 		renumbering->renamed[slot] = renumbering->count;
 		renumbering->original[renumbering->count] = slot;
@@ -1412,8 +1413,63 @@ renumber_arg(relic_renumbering_t *renumbering, const relic_arg_t *source,
 		renumbering->count++;
 	}
 
-	copy->u.slot = renumbering->renamed[slot];
-	renumbering->occurrences[copy->u.slot]++;
+	renamed = renumbering->renamed[slot];
+	renumbering->occurrences[renamed]++;
+
+	return (renamed);
+}
+
+static void
+renumber_arg(relic_renumbering_t *renumbering, const relic_arg_t *source,
+    relic_arg_t *copy)
+{
+	*copy = *source;
+	if (source->kind == RELIC_ARG_VARIABLE)
+		copy->u.slot = renumber_slot(renumbering, source->u.slot);
+}
+
+/*
+ * A renumbered copy of an expression tree, its variables renumbered in the
+ * order they are written, left operand before right.  Returns NULL when the
+ * arena refused, which has been reported.  The tree is no taller than the
+ * parser allowed, so the recursion is bounded.
+ */
+static relic_expr_t *
+copy_expr(relic_magic_t *magic, relic_renumbering_t *renumbering,
+    const relic_expr_t *source)
+{
+	relic_expr_t *copy;
+
+	copy = magic_alloc(magic, 1, sizeof(*copy));
+	if (copy == NULL)
+		return (NULL);
+	*copy = *source;
+
+	switch (source->kind) {
+	case RELIC_EXPR_CONSTANT:
+		break;
+	case RELIC_EXPR_VARIABLE:
+		copy->u.slot = renumber_slot(renumbering, source->u.slot);
+		break;
+	case RELIC_EXPR_NEGATE:
+		copy->u.operand = copy_expr(magic, renumbering,
+		    source->u.operand);
+		if (copy->u.operand == NULL)
+			return (NULL);
+		break;
+	case RELIC_EXPR_BINARY:
+		copy->u.binary.left = copy_expr(magic, renumbering,
+		    source->u.binary.left);
+		if (copy->u.binary.left == NULL)
+			return (NULL);
+		copy->u.binary.right = copy_expr(magic, renumbering,
+		    source->u.binary.right);
+		if (copy->u.binary.right == NULL)
+			return (NULL);
+		break;
+	}
+
+	return (copy);
 }
 
 /*
@@ -1450,10 +1506,14 @@ copy_literal(relic_magic_t *magic, relic_renumbering_t *renumbering,
 	*copy = *source;
 
 	if (source->kind == RELIC_LITERAL_COMPARISON) {
-		renumber_arg(renumbering, &source->u.comparison.left,
-		    &copy->u.comparison.left);
-		renumber_arg(renumbering, &source->u.comparison.right,
-		    &copy->u.comparison.right);
+		copy->u.comparison.left = copy_expr(magic, renumbering,
+		    source->u.comparison.left);
+		if (copy->u.comparison.left == NULL)
+			return (-1);
+		copy->u.comparison.right = copy_expr(magic, renumbering,
+		    source->u.comparison.right);
+		if (copy->u.comparison.right == NULL)
+			return (-1);
 		return (0);
 	}
 
@@ -1550,10 +1610,10 @@ literals_equal(const relic_magic_t *magic, const relic_literal_t *a,
 
 	if (a->kind == RELIC_LITERAL_COMPARISON)
 		return (a->u.comparison.op == b->u.comparison.op &&
-		    args_equal(&a->u.comparison.left, &b->u.comparison.left,
-		    1) &&
-		    args_equal(&a->u.comparison.right, &b->u.comparison.right,
-		    1));
+		    relic_expr_equal(a->u.comparison.left,
+		    b->u.comparison.left) &&
+		    relic_expr_equal(a->u.comparison.right,
+		    b->u.comparison.right));
 
 	return (a->u.atom.pred == b->u.atom.pred &&
 	    args_equal(a->u.atom.args, b->u.atom.args,
@@ -1632,6 +1692,31 @@ hash_arg(const relic_magic_t *magic, uint32_t hash, const relic_arg_t *arg)
 }
 
 /*
+ * The hash of an expression tree, over everything relic_expr_equal()
+ * compares.
+ */
+static uint32_t
+hash_expr(const relic_magic_t *magic, uint32_t hash, const relic_expr_t *expr)
+{
+	hash = hash_step(magic, hash, (uint32_t)expr->kind);
+
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+		return (hash_step(magic, hash, expr->u.constant));
+	case RELIC_EXPR_VARIABLE:
+		return (hash_step(magic, hash, expr->u.slot));
+	case RELIC_EXPR_NEGATE:
+		return (hash_expr(magic, hash, expr->u.operand));
+	case RELIC_EXPR_BINARY:
+		hash = hash_step(magic, hash, (uint32_t)expr->u.binary.op);
+		hash = hash_expr(magic, hash, expr->u.binary.left);
+		return (hash_expr(magic, hash, expr->u.binary.right));
+	}
+
+	return (hash);
+}
+
+/*
  * The hash of a canonical rule, over everything rules_equal() compares.
  */
 static uint32_t
@@ -1655,10 +1740,10 @@ rule_hash(const relic_magic_t *magic, const relic_rule_t *rule)
 		if (literal->kind == RELIC_LITERAL_COMPARISON) {
 			hash = hash_step(magic, hash,
 			    (uint32_t)literal->u.comparison.op);
-			hash = hash_arg(magic, hash,
-			    &literal->u.comparison.left);
-			hash = hash_arg(magic, hash,
-			    &literal->u.comparison.right);
+			hash = hash_expr(magic, hash,
+			    literal->u.comparison.left);
+			hash = hash_expr(magic, hash,
+			    literal->u.comparison.right);
 			continue;
 		}
 
@@ -1998,8 +2083,7 @@ literal_slots(const relic_magic_t *magic, const relic_literal_t *literal)
 	uint16_t i;
 
 	if (literal->kind == RELIC_LITERAL_COMPARISON)
-		return (arg_slot(&literal->u.comparison.left) |
-		    arg_slot(&literal->u.comparison.right));
+		return (relic_comparison_slots(&literal->u.comparison));
 
 	args = literal->u.atom.args;
 	arity = pred_arity(magic, literal->u.atom.pred);

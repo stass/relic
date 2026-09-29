@@ -33,9 +33,10 @@
 
 #define	SCENARIO_CLASSIFY	"a byte begins the token the language says"
 #define	SCENARIO_COMMENT	"a comment runs to the end of its line"
-#define	SCENARIO_INTEGER	"an integer literal spans int64_t"
+#define	SCENARIO_INTEGER	"an integer literal is a magnitude, its sign a token"
 #define	SCENARIO_INTEGER_RULE	"a byte range is an integer by the language's rule"
 #define	SCENARIO_LOCATION	"a token points at its first byte"
+#define	SCENARIO_OPERATOR	"an arithmetic operator is a token of its own"
 #define	SCENARIO_REJECT		"a malformed token says what is wrong"
 #define	SCENARIO_STRING		"a string literal holds arbitrary bytes"
 #define	SCENARIO_TRAILING	"a token ends where the buffer does"
@@ -63,8 +64,10 @@ static void	 comments_run_to_the_end_of_a_line(void);
 static enum relic_token_kind expected_kind(unsigned char byte);
 static void	 integer_literals_cover_the_whole_range(void);
 static void	 integer_rule_holds_at_its_boundaries(void);
+static void	 integer_rule_is_a_magnitude_and_a_sign(void);
 static void	 integer_rule_reads_only_its_range(void);
 static void	 malformed_tokens_report_their_reason(void);
+static void	 operators_are_tokens_of_their_own(void);
 static void	 scan_close(scan_t *scan);
 static bool	 scan_open(scan_t *scan, const char *text, size_t length);
 static void	 scan_text(scan_t *scan, const char *text,
@@ -219,6 +222,11 @@ expected_kind(unsigned char byte)
 	case '<':
 	case '>':
 		return (RELIC_TOKEN_COMPARE);
+	case '+':
+	case '-':
+	case '*':
+	case '/':
+		return (RELIC_TOKEN_OPERATOR);
 	default:
 		break;
 	}
@@ -227,6 +235,7 @@ expected_kind(unsigned char byte)
 	 * Everything else begins no token: a lone `"` is an unterminated
 	 * literal, a lone `:` or `!` is half of an operator, and every other
 	 * byte, above 0x7f included, is simply not part of the language.
+	 * The remainder operator is the word `mod`, a symbol to the lexer.
 	 */
 	return (RELIC_TOKEN_ERROR);
 }
@@ -278,7 +287,8 @@ tokens_end_where_the_buffer_does(void)
 		{ "_", RELIC_TOKEN_VARIABLE, 2 },
 		{ "\"abc\"", RELIC_TOKEN_STRING, 2 },
 		{ "120", RELIC_TOKEN_INTEGER, 2 },
-		{ "-120", RELIC_TOKEN_INTEGER, 2 },
+		{ "-", RELIC_TOKEN_OPERATOR, 2 },
+		{ "+", RELIC_TOKEN_OPERATOR, 2 },
 		{ ":-", RELIC_TOKEN_IMPLIES, 2 },
 		{ "<=", RELIC_TOKEN_COMPARE, 2 },
 		{ ">=", RELIC_TOKEN_COMPARE, 2 },
@@ -402,29 +412,100 @@ comments_run_to_the_end_of_a_line(void)
 	scan_close(&scan);
 }
 
+/*
+ * A literal is its digits' magnitude, and a `-` before it is an operator
+ * token, since the lexer cannot tell a negative literal from a subtraction.
+ * The magnitude of INT64_MIN scans, since the parser gives it its sign, and
+ * a larger one scans as one past it, which no sign brings into range.
+ */
 static void
 integer_literals_cover_the_whole_range(void)
 {
+	enum {
+		TOKEN_ZERO,
+		TOKEN_MINUS,
+		TOKEN_ONE,
+		TOKEN_INT64_MAX,
+		TOKEN_INT64_MIN_MAGNITUDE,
+		TOKEN_ONE_PAST,
+		TOKEN_FAR_PAST,
+		TOKEN_END,
+		TOKEN_COUNT
+	};
+
 	scan_t scan;
 
-	scan_text(&scan, "0 -1 9223372036854775807 -9223372036854775808",
-	    SCENARIO_INTEGER);
+	scan_text(&scan, "0 -1 9223372036854775807 9223372036854775808 "
+	    "9223372036854775809 99999999999999999999999", SCENARIO_INTEGER);
 
-	check(scan.count == 5, SCENARIO_INTEGER,
-	    "four literals and an end should be scanned");
-	if (scan.count != 5) {
+	check(scan.count == TOKEN_COUNT, SCENARIO_INTEGER,
+	    "six literals, a minus and an end should be scanned");
+	if (scan.count != TOKEN_COUNT) {
 		scan_close(&scan);
 		return;
 	}
 
-	check(scan.tokens[0].integer == 0, SCENARIO_INTEGER,
+	check(scan.tokens[TOKEN_ZERO].magnitude == 0, SCENARIO_INTEGER,
 	    "zero should scan as zero");
-	check(scan.tokens[1].integer == -1, SCENARIO_INTEGER,
-	    "a leading minus should belong to the literal");
-	check(scan.tokens[2].integer == INT64_MAX, SCENARIO_INTEGER,
-	    "the largest representable integer should scan");
-	check(scan.tokens[3].integer == INT64_MIN, SCENARIO_INTEGER,
-	    "the smallest representable integer should scan");
+	check(scan.tokens[TOKEN_MINUS].kind == RELIC_TOKEN_OPERATOR &&
+	    scan.tokens[TOKEN_MINUS].arith == RELIC_ARITH_SUBTRACT,
+	    SCENARIO_INTEGER, "a minus should be an operator token");
+	check(scan.tokens[TOKEN_ONE].kind == RELIC_TOKEN_INTEGER &&
+	    scan.tokens[TOKEN_ONE].magnitude == 1 &&
+	    scan.tokens[TOKEN_ONE].where.column == 4, SCENARIO_INTEGER,
+	    "the digits after a minus should be a literal of their own");
+	check(scan.tokens[TOKEN_INT64_MAX].magnitude == (uint64_t)INT64_MAX,
+	    SCENARIO_INTEGER, "the largest positive integer should scan");
+	check(scan.tokens[TOKEN_INT64_MIN_MAGNITUDE].magnitude ==
+	    RELIC_MAGNITUDE_MAX, SCENARIO_INTEGER,
+	    "the magnitude of the smallest integer should scan");
+	check(scan.tokens[TOKEN_ONE_PAST].kind == RELIC_TOKEN_INTEGER &&
+	    scan.tokens[TOKEN_ONE_PAST].magnitude == RELIC_MAGNITUDE_MAX + 1,
+	    SCENARIO_INTEGER,
+	    "a magnitude one past the largest should scan as one past it");
+	check(scan.tokens[TOKEN_FAR_PAST].kind == RELIC_TOKEN_INTEGER &&
+	    scan.tokens[TOKEN_FAR_PAST].magnitude == RELIC_MAGNITUDE_MAX + 1,
+	    SCENARIO_INTEGER,
+	    "a magnitude far past the largest should scan as one past it");
+
+	scan_close(&scan);
+}
+
+/*
+ * The four operator bytes are tokens wherever they stand, and `%` is a
+ * comment even directly after an operand, so an expression followed by a
+ * comment is the expression.
+ */
+static void
+operators_are_tokens_of_their_own(void)
+{
+	static const enum relic_arith_op expected[] = {
+		RELIC_ARITH_ADD, RELIC_ARITH_SUBTRACT, RELIC_ARITH_MULTIPLY,
+		RELIC_ARITH_DIVIDE
+	};
+
+	scan_t scan;
+	size_t i;
+
+	scan_text(&scan, "X+Y-1*Z/2%3 mod\n", SCENARIO_OPERATOR);
+
+	check(scan.count == 10, SCENARIO_OPERATOR,
+	    "five operands, four operators and an end should be scanned");
+	if (scan.count != 10) {
+		scan_close(&scan);
+		return;
+	}
+
+	for (i = 0; i < sizeof(expected) / sizeof(expected[0]); i++)
+		checkf(scan.tokens[2 * i + 1].kind == RELIC_TOKEN_OPERATOR &&
+		    scan.tokens[2 * i + 1].arith == expected[i],
+		    SCENARIO_OPERATOR, "operator %zu should be its own token",
+		    i);
+
+	check(scan.tokens[8].kind == RELIC_TOKEN_INTEGER &&
+	    scan.tokens[8].magnitude == 2 &&
+	    scan.tokens[9].kind == RELIC_TOKEN_END, SCENARIO_OPERATOR,
+	    "a % after an operand should begin a comment");
 
 	scan_close(&scan);
 }
@@ -560,9 +641,47 @@ integer_rule_reads_only_its_range(void)
 		return;
 	}
 	check(scan.count == 2 && scan.tokens[0].kind == RELIC_TOKEN_INTEGER &&
-	    scan.tokens[0].integer == 42, SCENARIO_INTEGER_RULE,
+	    scan.tokens[0].magnitude == 42, SCENARIO_INTEGER_RULE,
 	    "a literal ending the input with no terminator should be 42");
 	scan_close(&scan);
+}
+
+/*
+ * The two pieces the whole rule is made of, which the lexer and the parser
+ * each use one of: a magnitude of digits alone, within the magnitude of
+ * INT64_MIN, and a sign that must bring it into range.
+ */
+static void
+integer_rule_is_a_magnitude_and_a_sign(void)
+{
+	uint64_t magnitude;
+	int64_t value;
+
+	magnitude = 0;
+	check(relic_lex_magnitude("9223372036854775808", 19, &magnitude) ==
+	    RELIC_INTEGER_VALID && magnitude == RELIC_MAGNITUDE_MAX,
+	    SCENARIO_INTEGER_RULE,
+	    "the magnitude of INT64_MIN should convert as a magnitude");
+	check(relic_lex_magnitude("9223372036854775809", 19, &magnitude) ==
+	    RELIC_INTEGER_OUT_OF_RANGE, SCENARIO_INTEGER_RULE,
+	    "a magnitude past INT64_MIN's should be out of range");
+	check(relic_lex_magnitude("-1", 2, &magnitude) ==
+	    RELIC_INTEGER_MALFORMED, SCENARIO_INTEGER_RULE,
+	    "a magnitude should hold no sign");
+
+	value = 0;
+	check(relic_integer_signed(RELIC_MAGNITUDE_MAX, true, &value) ==
+	    RELIC_INTEGER_VALID && value == INT64_MIN, SCENARIO_INTEGER_RULE,
+	    "the magnitude of INT64_MIN should fit when negative");
+	check(relic_integer_signed(RELIC_MAGNITUDE_MAX, false, &value) ==
+	    RELIC_INTEGER_OUT_OF_RANGE, SCENARIO_INTEGER_RULE,
+	    "the magnitude of INT64_MIN should not fit when positive");
+	check(relic_integer_signed(RELIC_MAGNITUDE_MAX + 1, true, &value) ==
+	    RELIC_INTEGER_OUT_OF_RANGE, SCENARIO_INTEGER_RULE,
+	    "a magnitude past INT64_MIN's should fit no sign");
+	check(relic_integer_signed((uint64_t)INT64_MAX, false, &value) ==
+	    RELIC_INTEGER_VALID && value == INT64_MAX, SCENARIO_INTEGER_RULE,
+	    "INT64_MAX should fit when positive");
 }
 
 static void
@@ -614,13 +733,10 @@ malformed_tokens_report_their_reason(void)
 		{ "\"\\q\"", RELIC_LEX_BAD_ESCAPE },
 		{ "\"\\xg0\"", RELIC_LEX_BAD_HEX_ESCAPE },
 		{ "\"\\x7\"", RELIC_LEX_BAD_HEX_ESCAPE },
-		{ "9223372036854775808", RELIC_LEX_INTEGER_RANGE },
-		{ "-9223372036854775809", RELIC_LEX_INTEGER_RANGE },
 		{ "0x10", RELIC_LEX_INTEGER_TRAILING },
 		{ ": ", RELIC_LEX_EXPECTED_IMPLIES },
 		{ "! ", RELIC_LEX_EXPECTED_NE },
-		{ "$", RELIC_LEX_BAD_BYTE },
-		{ "-", RELIC_LEX_BAD_BYTE }
+		{ "$", RELIC_LEX_BAD_BYTE }
 	};
 
 	size_t i;
@@ -670,6 +786,8 @@ main(void)
 	integer_literals_cover_the_whole_range();
 	integer_rule_holds_at_its_boundaries();
 	integer_rule_reads_only_its_range();
+	integer_rule_is_a_magnitude_and_a_sign();
+	operators_are_tokens_of_their_own();
 	string_literals_hold_arbitrary_bytes();
 	malformed_tokens_report_their_reason();
 	a_rejected_literal_is_consumed_whole();

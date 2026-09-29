@@ -281,13 +281,11 @@ scan_token(relic_lexer_t *lexer, relic_token_t *token)
 		return (scan_identifier(lexer, token, RELIC_TOKEN_VARIABLE));
 
 	/*
-	 * A `-` immediately before a digit is part of the literal rather than
-	 * an operator, which is unambiguous because the language has no
-	 * arithmetic for it to be an operator in.  It is also what makes
-	 * INT64_MIN writable: its magnitude has no positive counterpart.
+	 * A `-` is never part of the literal after it, since `X-1` is a
+	 * subtraction: it is an operator token, and the parser, which knows
+	 * where a term stands, joins it to the digits of a negative literal.
 	 */
-	if (in_class(byte, LEX_DIGIT) ||
-	    (byte == '-' && in_class(peek(lexer, 1), LEX_DIGIT)))
+	if (in_class(byte, LEX_DIGIT))
 		return (scan_integer(lexer, token));
 
 	if (byte == '"')
@@ -327,42 +325,33 @@ scan_identifier(relic_lexer_t *lexer, relic_token_t *token,
 }
 
 /*
- * Convert `length` bytes to an integer by the language's integer rule: the
- * whole range is `-?[0-9]+` and its value fits int64_t.  Nothing past the
- * range is read, so the range need not be terminated.
+ * Convert `length` bytes, which must all be digits, to their magnitude.
  *
- * The digits are accumulated as a magnitude in uint64_t, which holds the
- * magnitude of INT64_MIN as well as that of INT64_MAX, and each step checks
- * that one more digit keeps it within the sign's bound before taking it.
- * The check is `magnitude * 10 + digit > bound` rearranged so that nothing
- * can wrap: `bound - digit` cannot, as the bound is at least INT64_MAX, and
- * since the magnitude is a whole number, exceeding the rounded-down quotient
- * of `(bound - digit) / 10` is exactly exceeding the exact one.
- * Every byte is examined even after the value has left the range, so that a
- * range such as `99999999999999999999x` is refused as no integer at all
- * rather than as one out of range: what the bytes are is decided before
- * what they are worth.
+ * The digits are accumulated in uint64_t, which holds RELIC_MAGNITUDE_MAX,
+ * and each step checks that one more digit keeps the magnitude within it
+ * before taking it.  The check is `magnitude * 10 + digit > bound`
+ * rearranged so that nothing can wrap: `bound - digit` cannot, as the bound
+ * is far above nine, and since the magnitude is a whole number, exceeding
+ * the rounded-down quotient of `(bound - digit) / 10` is exactly exceeding
+ * the exact one.  Every byte is examined even after the value has left the
+ * range, so that a range such as `99999999999999999999x` is refused as no
+ * integer at all rather than as one out of range: what the bytes are is
+ * decided before what they are worth.
  */
 enum relic_integer_verdict
-relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
+relic_lex_magnitude(const char *bytes, size_t length, uint64_t *magnitudep)
 {
-	uint64_t bound;
 	uint64_t magnitude;
-	size_t first_digit;
 	size_t i;
-	bool negative;
 	bool out_of_range;
 
-	negative = length > 0 && bytes[0] == '-';
-	first_digit = negative ? 1 : 0;
-	if (first_digit == length)
+	if (length == 0)
 		return (RELIC_INTEGER_MALFORMED);
 
-	bound = negative ? (uint64_t)INT64_MAX + 1u : (uint64_t)INT64_MAX;
 	magnitude = 0;
 	out_of_range = false;
 
-	for (i = first_digit; i < length; i++) {
+	for (i = 0; i < length; i++) {
 		unsigned char byte;
 		unsigned int digit;
 
@@ -371,7 +360,8 @@ relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
 			return (RELIC_INTEGER_MALFORMED);
 		digit = (unsigned int)(byte - '0');
 
-		if (out_of_range || magnitude > (bound - digit) / 10u) {
+		if (out_of_range ||
+		    magnitude > (RELIC_MAGNITUDE_MAX - digit) / 10u) {
 			out_of_range = true;
 			continue;
 		}
@@ -381,11 +371,23 @@ relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
 	if (out_of_range)
 		return (RELIC_INTEGER_OUT_OF_RANGE);
 
-	/*
-	 * The magnitude of INT64_MIN has no positive int64_t counterpart, so
-	 * it is the one value not formed by negating a positive one.
-	 */
-	if (negative && magnitude == (uint64_t)INT64_MAX + 1u)
+	*magnitudep = magnitude;
+
+	return (RELIC_INTEGER_VALID);
+}
+
+/*
+ * A magnitude with a sign, when the result fits int64_t.  The magnitude of
+ * INT64_MIN has no positive int64_t counterpart, so it is the one negative
+ * value not formed by negating a positive one.
+ */
+enum relic_integer_verdict
+relic_integer_signed(uint64_t magnitude, bool negative, int64_t *valuep)
+{
+	if (magnitude > (negative ? RELIC_MAGNITUDE_MAX : (uint64_t)INT64_MAX))
+		return (RELIC_INTEGER_OUT_OF_RANGE);
+
+	if (negative && magnitude == RELIC_MAGNITUDE_MAX)
 		*valuep = INT64_MIN;
 	else if (negative)
 		*valuep = -(int64_t)magnitude;
@@ -396,34 +398,55 @@ relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
 }
 
 /*
- * Scan a decimal integer literal into int64_t.  The literal's extent is
- * found first -- an optional `-` and the digits after it -- and the range is
- * then converted by the rule relic_lex_integer() states, which an import
- * holds a table's integer fields to as well.  Within that extent the only
- * way to fail the rule is to leave the range.
+ * The whole rule, `-?[0-9]+` within int64_t, as a table's integer field is
+ * held to it: an optional sign, the magnitude of the digits after it, and
+ * the range checked with the sign known.
+ */
+enum relic_integer_verdict
+relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
+{
+	enum relic_integer_verdict verdict;
+	uint64_t magnitude;
+	bool negative;
+
+	negative = length > 0 && bytes[0] == '-';
+	if (negative) {
+		bytes++;
+		length--;
+	}
+
+	verdict = relic_lex_magnitude(bytes, length, &magnitude);
+	if (verdict != RELIC_INTEGER_VALID)
+		return (verdict);
+
+	return (relic_integer_signed(magnitude, negative, valuep));
+}
+
+/*
+ * Scan the digits of an integer literal into its magnitude.  A magnitude no
+ * sign brings into range is recorded as RELIC_MAGNITUDE_MAX + 1 rather than
+ * refused here, because whether a magnitude fits depends on a sign only the
+ * parser sees, and the parser reports the range of the literal it makes.
  */
 static int
 scan_integer(relic_lexer_t *lexer, relic_token_t *token)
 {
 	enum relic_integer_verdict verdict;
-	const char *literal;
+	const char *digits;
 	size_t start;
-	int64_t value;
+	uint64_t magnitude;
 
 	start = lexer->offset;
-	literal = lexer->text + start;
+	digits = lexer->text + start;
 
-	if (peek(lexer, 0) == '-')
-		advance_byte(lexer);
 	while (in_class(peek(lexer, 0), LEX_DIGIT))
 		advance_byte(lexer);
 
-	verdict = relic_lex_integer(literal, lexer->offset - start, &value);
+	verdict = relic_lex_magnitude(digits, lexer->offset - start,
+	    &magnitude);
 	assert(verdict != RELIC_INTEGER_MALFORMED);
-	if (verdict != RELIC_INTEGER_VALID) {
-		fail_token(token, RELIC_LEX_INTEGER_RANGE);
-		return (0);
-	}
+	if (verdict == RELIC_INTEGER_OUT_OF_RANGE)
+		magnitude = RELIC_MAGNITUDE_MAX + 1u;
 
 	/*
 	 * An identifier byte immediately after the digits ends the literal in
@@ -440,7 +463,7 @@ scan_integer(relic_lexer_t *lexer, relic_token_t *token)
 	}
 
 	token->kind = RELIC_TOKEN_INTEGER;
-	token->integer = value;
+	token->magnitude = magnitude;
 
 	return (0);
 }
@@ -677,6 +700,12 @@ two_byte_operator(relic_lexer_t *lexer, relic_token_t *token,
 /*
  * Recognize a punctuation mark or an operator, or report that the byte
  * begins no token at all.
+ *
+ * The remainder operator is spelled `mod` and scanned as a symbol, which the
+ * parser takes for the operator where an operator may stand.  `%` stays the
+ * comment it is wherever a token may begin: were it an operator inside an
+ * expression and a comment outside one, the lexer would have to be told by
+ * the parser which it was in.
  */
 static int
 scan_punctuation(relic_lexer_t *lexer, relic_token_t *token)
@@ -701,6 +730,22 @@ scan_punctuation(relic_lexer_t *lexer, relic_token_t *token)
 		break;
 	case '?':
 		token->kind = RELIC_TOKEN_QUESTION;
+		break;
+	case '+':
+		token->kind = RELIC_TOKEN_OPERATOR;
+		token->arith = RELIC_ARITH_ADD;
+		break;
+	case '-':
+		token->kind = RELIC_TOKEN_OPERATOR;
+		token->arith = RELIC_ARITH_SUBTRACT;
+		break;
+	case '*':
+		token->kind = RELIC_TOKEN_OPERATOR;
+		token->arith = RELIC_ARITH_MULTIPLY;
+		break;
+	case '/':
+		token->kind = RELIC_TOKEN_OPERATOR;
+		token->arith = RELIC_ARITH_DIVIDE;
 		break;
 	case ':':
 		two_byte_operator(lexer, token, '-', RELIC_TOKEN_IMPLIES,

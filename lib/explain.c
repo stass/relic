@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "internal.h"
 
@@ -56,6 +57,7 @@ struct relic_explain_line {
 static void	 begin_variant_heading(const relic_t *ctx,
 		    relic_explain_line_t *line, const relic_rule_t *rule,
 		    size_t delta_literal, unsigned int depth);
+static unsigned int binds_as_tightly(const relic_expr_t *expr);
 static void	 finish_heading(const relic_t *ctx, relic_explain_line_t *line);
 static void	 line_begin(relic_explain_line_t *line, unsigned int depth);
 static void	 line_finish(const relic_t *ctx, relic_explain_line_t *line);
@@ -63,6 +65,8 @@ static void	 line_put(relic_explain_line_t *line, const char *text);
 static void	 line_put_byte(relic_explain_line_t *line, char byte);
 static void	 line_put_escaped(relic_explain_line_t *line,
 		    unsigned char byte);
+static bool	 negation_needs_parentheses(const relic_t *ctx,
+		    const relic_expr_t *operand);
 static void	 put_adorn(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t source, uint32_t bound);
 static void	 put_adorn_line(relic_t *ctx,
@@ -82,6 +86,11 @@ static void	 put_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_atom_t *atom);
 static void	 put_compare(relic_explain_line_t *line,
 		    enum relic_compare_op compare);
+static void	 put_expr(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_expr_t *expr);
+static void	 put_operand(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_expr_t *operand,
+		    bool parenthesized);
 static void	 put_key(relic_explain_line_t *line, uint32_t key_mask);
 static void	 put_literal(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_literal_t *literal);
@@ -124,6 +133,8 @@ static void	 put_value(const relic_t *ctx, relic_explain_line_t *line,
 static void	 put_variable(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, uint16_t slot);
 static void	 put_view(relic_explain_line_t *line, enum relic_view view);
+static bool	 reads_as_negation(const relic_t *ctx,
+		    const relic_expr_t *left);
 
 void
 relic_explain_set(relic_t *ctx, relic_explain_cb callback, void *callback_ctx)
@@ -386,6 +397,172 @@ put_compare(relic_explain_line_t *line, enum relic_compare_op compare)
 }
 
 /*
+ * How tightly a node binds its operands, as the grammar decides: a sum
+ * loosest, then a product, then a negation, and a leaf, which has no
+ * operands, tightest of all.
+ */
+static unsigned int
+binds_as_tightly(const relic_expr_t *expr)
+{
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+	case RELIC_EXPR_VARIABLE:
+		return (4);
+	case RELIC_EXPR_NEGATE:
+		return (3);
+	case RELIC_EXPR_BINARY:
+		break;
+	}
+
+	switch (expr->u.binary.op) {
+	case RELIC_ARITH_ADD:
+	case RELIC_ARITH_SUBTRACT:
+		return (1);
+	case RELIC_ARITH_MULTIPLY:
+	case RELIC_ARITH_DIVIDE:
+	case RELIC_ARITH_REMAINDER:
+		break;
+	}
+
+	return (2);
+}
+
+/*
+ * Whether a negation's operand is printed in parentheses.  An operator binds
+ * less tightly than negation, and a constant that is not negative would read
+ * back folded into a negative literal, `-5` rather than the negation of 5.
+ * A variable, a negation and a negative constant need none: `- -A` and
+ * `- -5` read back as the negations they are, and parentheses there would
+ * nest the text two levels for each level of the tree.
+ */
+static bool
+negation_needs_parentheses(const relic_t *ctx, const relic_expr_t *operand)
+{
+	relic_value_t value;
+
+	switch (operand->kind) {
+	case RELIC_EXPR_VARIABLE:
+	case RELIC_EXPR_NEGATE:
+		return (false);
+	case RELIC_EXPR_BINARY:
+		return (true);
+	case RELIC_EXPR_CONSTANT:
+		break;
+	}
+
+	return (!relic_value_decode(ctx, operand->u.constant, &value) ||
+	    value.type != RELIC_INTEGER || value.v.integer >= 0);
+}
+
+/*
+ * Whether a comparison's left operand is the symbol `not`, which at the start
+ * of a literal would read back as the negation keyword.  It is printed in the
+ * parentheses it must have been written in.
+ */
+static bool
+reads_as_negation(const relic_t *ctx, const relic_expr_t *left)
+{
+	relic_value_t value;
+	const char *bytes;
+	size_t length;
+
+	if (left->kind != RELIC_EXPR_CONSTANT ||
+	    !relic_value_decode(ctx, left->u.constant, &value) ||
+	    value.type != RELIC_SYMBOL)
+		return (false);
+
+	bytes = relic_symbol_bytes(ctx, value.v.id, &length);
+
+	return (bytes != NULL && length == 3 && bcmp(bytes, "not", 3) == 0);
+}
+
+static void
+put_operand(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_expr_t *operand, bool parenthesized)
+{
+	if (parenthesized)
+		line_put_byte(line, '(');
+	put_expr(ctx, line, rule, operand);
+	if (parenthesized)
+		line_put_byte(line, ')');
+}
+
+/*
+ * An expression with exactly the parentheses its tree requires, so that
+ * reading the text back builds the tree that was printed, and two texts
+ * that build one tree print alike.
+ *
+ * An operand binding less tightly than its operator is parenthesized, and so
+ * is a right operand binding exactly as tightly: `A - (B - C)` and
+ * `2 * (3 / 2)` compute something else without them, and so does
+ * `A + (B + C)`, which may overflow where `(A + B) + C` does not.  A negative
+ * constant needs nothing: `X - -1` reads back as the constant it is.  A
+ * negation's operand is parenthesized only where negation_needs_parentheses()
+ * says, and is set off by a space when it begins with a minus of its own.
+ *
+ * Every parenthesis the printer writes, and every minus of a negation, is
+ * owned by a distinct node on the path from the root to what it encloses, so
+ * no token of the text is nested deeper than the tree is tall, and a tree
+ * the parser accepted prints as text it accepts.
+ */
+static void
+put_expr(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_expr_t *expr)
+{
+	const relic_expr_t *left;
+	const relic_expr_t *right;
+	unsigned int tightness;
+	bool parenthesized;
+
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+		put_value(ctx, line, expr->u.constant);
+		return;
+	case RELIC_EXPR_VARIABLE:
+		put_variable(ctx, line, rule, expr->u.slot);
+		return;
+	case RELIC_EXPR_NEGATE:
+		parenthesized = negation_needs_parentheses(ctx,
+		    expr->u.operand);
+		line_put_byte(line, '-');
+		if (!parenthesized &&
+		    expr->u.operand->kind != RELIC_EXPR_VARIABLE)
+			line_put_byte(line, ' ');
+		put_operand(ctx, line, rule, expr->u.operand, parenthesized);
+		return;
+	case RELIC_EXPR_BINARY:
+		break;
+	}
+
+	left = expr->u.binary.left;
+	right = expr->u.binary.right;
+	tightness = binds_as_tightly(expr);
+
+	put_operand(ctx, line, rule, left, binds_as_tightly(left) < tightness);
+
+	switch (expr->u.binary.op) {
+	case RELIC_ARITH_ADD:
+		line_put(line, " + ");
+		break;
+	case RELIC_ARITH_SUBTRACT:
+		line_put(line, " - ");
+		break;
+	case RELIC_ARITH_MULTIPLY:
+		line_put(line, " * ");
+		break;
+	case RELIC_ARITH_DIVIDE:
+		line_put(line, " / ");
+		break;
+	case RELIC_ARITH_REMAINDER:
+		line_put(line, " mod ");
+		break;
+	}
+
+	put_operand(ctx, line, rule, right,
+	    binds_as_tightly(right) <= tightness);
+}
+
+/*
  * An argument as the rule writes it.
  */
 static void
@@ -481,9 +658,10 @@ put_literal(const relic_t *ctx, relic_explain_line_t *line,
 		put_atom(ctx, line, rule, &literal->u.atom);
 		return;
 	case RELIC_LITERAL_COMPARISON:
-		put_arg(ctx, line, rule, &literal->u.comparison.left);
+		put_operand(ctx, line, rule, literal->u.comparison.left,
+		    reads_as_negation(ctx, literal->u.comparison.left));
 		put_compare(line, literal->u.comparison.op);
-		put_arg(ctx, line, rule, &literal->u.comparison.right);
+		put_expr(ctx, line, rule, literal->u.comparison.right);
 		return;
 	}
 }

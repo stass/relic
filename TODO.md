@@ -36,6 +36,16 @@ scales about eight times on sixteen threads; and the page records a
 comparison with Souffle built with OpenMP, which leads on `tc-cyclic` and
 trails on `cspa` and `chain-closure`.
 
+**Finish arithmetic.** [High, component: `lib/plan.c`, `lib/exec.c`,
+`lib/eval.c`, `lib/magic.c`, `lib/task.c`] Step 1 of
+`specs/design-arithmetic.md` section 16, the front end and the program
+model, is in: expressions parse, check and print, but the planner refuses
+every assignment and every comparison over an operator as an internal
+error, so a program using either is accepted by `-c` and fails when it
+runs. Steps 2 to 5 remain: the serial plan and executor with the integer
+table charged, the Magic rewrite over trees, the frozen round's pending
+integers, and the generator, fuzz dictionary, manual pages and benchmark.
+
 ## Build and packaging
 
 **Continuous integration is not configured.** [High] `relic-plan.md` section 6

@@ -24,14 +24,23 @@
  * planner reading one needs no symbol table, and an executor needs no case
  * for a name that has not been numbered yet.
  *
- * Safety is one set computation rather than a search.  Let B be the slots
- * occurring in an argument of a positive relational body literal, and R the
- * slots occurring in the head, in a negated literal or in a comparison.  The
- * rule is safe exactly when R \ B is empty, and the offending variables are
- * precisely its members.  No reordering search is needed, because a positive
- * literal needs nothing bound in order to be scanned: every positive literal
- * can always be scheduled before every negated literal and every comparison,
- * so if a binding order exists at all, that one is such an order.
+ * Safety is one set computation rather than a search.  Let R be the slots
+ * occurring in the head, in a negated literal or in a comparison, and B the
+ * slots a rule can bind: those occurring in an argument of a positive
+ * relational body literal, closed under assignment -- an equality one side
+ * of which is a bare variable not in B and whose other side reads only
+ * slots of B adds that variable to B.  The rule is safe exactly when R \ B
+ * is empty, and the offending variables are precisely its members.
+ *
+ * No reordering search is needed.  A positive literal needs nothing bound in
+ * order to be scanned, so every positive literal can always be scheduled
+ * first; after them, every assignment the closure fired can fire in the
+ * order the closure fired it, since each needs only what came before it;
+ * and after those, every remaining comparison and every negated literal
+ * reads only slots of B.  So if a binding order exists at all, that one is
+ * such an order, and a planner that places each test and each assignment as
+ * soon as it can always places every literal.  The closure is monotone, so
+ * its result does not depend on the order the equalities are tried in.
  *
  * Compilation is incremental, and that is what makes checking cached.  The
  * syntax tree is append-only, so the statements behind the program's cursor
@@ -121,9 +130,11 @@ typedef struct relic_compiler relic_compiler_t;
  * count is final.
  *
  * The two masks are the sets B and R of the safety computation at the top of
- * this file, and are the whole of that analysis.  Nothing here records its
- * verdict, because the verdict is `required & ~bindable`, and a stored copy
- * of a derived fact is a second thing to keep in step.
+ * this file, and are the whole of that analysis: `bindable` holds the slots
+ * of positive literals as the literals are compiled, and grows by the
+ * assignment closure once the body is.  Nothing here records the verdict,
+ * because the verdict is `required & ~bindable`, and a stored copy of a
+ * derived fact is a second thing to keep in step.
  *
  * `arena` is where the rule's variable-length parts go: the program arena for
  * a statement of the program, a query's own arena for a prepared query.
@@ -143,6 +154,7 @@ static enum relic_compile_result append_loaded_query(relic_t *ctx,
 		    const relic_rule_t *rule, size_t serial);
 static enum relic_compile_result append_rule(relic_t *ctx,
 		    relic_ruletab_t *table, const relic_rule_t *rule);
+static void	 bind_by_assignment(relic_compiler_t *compiler);
 static int	 check_program(relic_t *ctx);
 static void	*compile_alloc(relic_compiler_t *compiler, size_t count,
 		    size_t size);
@@ -154,6 +166,8 @@ static enum relic_compile_result compile_comparison(
 		    relic_compiler_t *compiler,
 		    const relic_ast_comparison_t *source,
 		    relic_comparison_t *comparison);
+static enum relic_compile_result compile_expr(relic_compiler_t *compiler,
+		    const relic_ast_expr_t *source, relic_expr_t **exprp);
 static enum relic_compile_result compile_head(relic_compiler_t *compiler);
 static enum relic_compile_result compile_literal(relic_compiler_t *compiler,
 		    const relic_ast_literal_t *source,
@@ -444,8 +458,85 @@ compile_atom(relic_compiler_t *compiler, const relic_ast_atom_t *source,
 }
 
 /*
- * A comparison is a filter: it reads both operands and binds neither, so
- * both are required positions.
+ * Compile an expression tree, numbering its variables in the order they are
+ * written.  Every variable of an expression is in a required position: a
+ * comparison reads its operands, and even the variable an assignment binds
+ * is bound only by the closure over the whole body, never by being written.
+ * The tree is no taller than the parser allowed, so the recursion is
+ * bounded.
+ */
+static enum relic_compile_result
+compile_expr(relic_compiler_t *compiler, const relic_ast_expr_t *source,
+    relic_expr_t **exprp)
+{
+	enum relic_compile_result result;
+	relic_expr_t *expr;
+	relic_arg_t arg;
+
+	expr = compile_alloc(compiler, 1, sizeof(*expr));
+	if (expr == NULL)
+		return (RELIC_COMPILE_INCOMPLETE);
+	bzero(expr, sizeof(*expr));
+	expr->height = source->height;
+	*exprp = expr;
+
+	switch (source->kind) {
+	case RELIC_AST_EXPR_TERM:
+		result = compile_term(compiler, &source->u.term,
+		    RELIC_POSITION_REQUIRED, &arg);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+
+		if (arg.kind == RELIC_ARG_CONSTANT) {
+			expr->kind = RELIC_EXPR_CONSTANT;
+			expr->u.constant = arg.u.constant;
+		} else {
+			expr->kind = RELIC_EXPR_VARIABLE;
+			expr->u.slot = arg.u.slot;
+		}
+		expr->nodes = 1;
+		return (RELIC_COMPILE_OK);
+	case RELIC_AST_EXPR_NEGATE:
+		expr->kind = RELIC_EXPR_NEGATE;
+		result = compile_expr(compiler, source->u.operand,
+		    &expr->u.operand);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+
+		expr->nodes = 1 + expr->u.operand->nodes;
+		return (RELIC_COMPILE_OK);
+	case RELIC_AST_EXPR_BINARY:
+		expr->kind = RELIC_EXPR_BINARY;
+		expr->u.binary.op = source->u.binary.op;
+		result = compile_expr(compiler, source->u.binary.left,
+		    &expr->u.binary.left);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+		result = compile_expr(compiler, source->u.binary.right,
+		    &expr->u.binary.right);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+
+		expr->nodes = 1 + expr->u.binary.left->nodes +
+		    expr->u.binary.right->nodes;
+		return (RELIC_COMPILE_OK);
+	}
+
+	/*
+	 * Unreachable: the parser builds no other kind of node.  Reported
+	 * rather than assumed, as compile_literal() reports a literal of no
+	 * known kind.
+	 */
+	relic_diagf(compiler->ctx, RELIC_ERROR, &source->where,
+	    "internal error: an expression holds a node of no known kind");
+
+	return (RELIC_COMPILE_REJECTED);
+}
+
+/*
+ * A comparison of two expressions.  Both are required positions; whether
+ * the comparison binds one of its variables is a question about the whole
+ * body, which bind_by_assignment() answers once the body is compiled.
  */
 static enum relic_compile_result
 compile_comparison(relic_compiler_t *compiler,
@@ -456,13 +547,11 @@ compile_comparison(relic_compiler_t *compiler,
 	bzero(comparison, sizeof(*comparison));
 	comparison->op = source->op;
 
-	result = compile_term(compiler, &source->left,
-	    RELIC_POSITION_REQUIRED, &comparison->left);
+	result = compile_expr(compiler, source->left, &comparison->left);
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
-	return (compile_term(compiler, &source->right,
-	    RELIC_POSITION_REQUIRED, &comparison->right));
+	return (compile_expr(compiler, source->right, &comparison->right));
 }
 
 static enum relic_compile_result
@@ -569,7 +658,47 @@ compile_body(relic_compiler_t *compiler)
 }
 
 /*
- * The slots the rule reads and no positive body literal binds.
+ * Close B, the slots the compiled body can bind, under assignment: add the
+ * variable of every equality relic_comparison_assigns() says binds it, given
+ * the slots B holds, until a pass over the comparisons adds nothing.
+ *
+ * Each pass adds a slot or is the last, so there are at most as many passes
+ * as slots, and a body with no assignment takes one.  `_` is never added:
+ * each occurrence is a distinct variable, and one computed and discarded is
+ * no binding anything could read, so it stays unbound and is reported with
+ * the message that says so.
+ */
+static void
+bind_by_assignment(relic_compiler_t *compiler)
+{
+	const relic_literal_t *literal;
+	const relic_expr_t *value;
+	uint16_t slot;
+	size_t i;
+	bool grew;
+
+	do {
+		grew = false;
+
+		for (i = 0; i < compiler->rule.body_length; i++) {
+			literal = &compiler->rule.body[i];
+			if (literal->kind != RELIC_LITERAL_COMPARISON)
+				continue;
+
+			if (!relic_comparison_assigns(&literal->u.comparison,
+			    compiler->bindable, &slot, &value))
+				continue;
+			if (compiler->variables[slot].anonymous)
+				continue;
+
+			compiler->bindable |= UINT64_C(1) << slot;
+			grew = true;
+		}
+	} while (grew);
+}
+
+/*
+ * The slots the rule reads and nothing can bind.
  *
  * This is the safety verdict of the whole subsystem, and it is one
  * expression: R \ B.  An empty result is a safe rule.
@@ -585,11 +714,11 @@ unbound_variables(const relic_compiler_t *compiler)
  *
  * The messages come out in the order the variables were written, and that is
  * so by construction rather than by sorting.  A variable in R \ B occurs in
- * no positive relational body literal at all, so every one of its
- * occurrences is in a position that requires it, and its first occurrence is
- * therefore its first required occurrence.  Slots are assigned in
- * first-occurrence order, so walking the slots walks the offending
- * occurrences from left to right.
+ * no positive relational body literal at all and no equality assigns it, so
+ * every one of its occurrences is in a position that requires it, and its
+ * first occurrence is therefore its first required occurrence.  Slots are
+ * assigned in first-occurrence order, so walking the slots walks the
+ * offending occurrences from left to right.
  *
  * Every offender is reported rather than only the first.  Each is an
  * independent mistake, unlike the cascade that follows one bad token in a
@@ -629,7 +758,8 @@ report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
 		}
 
 		relic_diagf(compiler->ctx, RELIC_ERROR, &variable->where,
-		    "variable %s in %s is not bound by a positive body literal",
+		    "variable %s in %s is not bound by a positive body literal "
+		    "or an assignment",
 		    variable_name(compiler, variable, named, sizeof(named)),
 		    described);
 	}
@@ -848,6 +978,7 @@ compile_rule(relic_t *ctx, const relic_ast_stmt_t *statement,
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
+	bind_by_assignment(&compiler);
 	unbound = unbound_variables(&compiler);
 	report_unbound_variables(&compiler, unbound);
 	report_singleton_variables(&compiler, unbound);
@@ -960,6 +1091,7 @@ compile_query(relic_t *ctx, relic_arena_t *arena,
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
+	bind_by_assignment(&compiler);
 	unbound = unbound_variables(&compiler);
 	report_unbound_variables(&compiler, unbound);
 	report_singleton_variables(&compiler, unbound);

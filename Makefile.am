@@ -36,7 +36,7 @@ LIBOBJDIR = compat/
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
-	lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
+	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
 	lib/merge.c lib/parse.c lib/plan.c lib/pool.c lib/pred.c \
 	lib/relation.c lib/result.c lib/round.c lib/rule.c lib/stratify.c \
 	lib/symbol.c lib/task.c lib/util.c lib/value.c
@@ -515,7 +515,9 @@ endif
 ## a debugging session left behind, so langfiles.sh checks that too.
 ##
 
-RELIC_LANG_TESTS = tests/lang/arity-32.dl tests/lang/arity-limit.dl \
+RELIC_LANG_TESTS = tests/lang/arithmetic-depth.dl \
+	tests/lang/arithmetic-negative.dl tests/lang/arithmetic-unsafe.dl \
+	tests/lang/arity-32.dl tests/lang/arity-limit.dl \
 	tests/lang/bad-backslash.dl \
 	tests/lang/bad-byte.dl tests/lang/bad-escape-at-end.dl \
 	tests/lang/bad-escape.dl tests/lang/check-queries.dl \

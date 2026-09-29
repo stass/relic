@@ -58,7 +58,7 @@ fi
 # to be valid, so a run that fails validation leaves an existing file alone.
 echo kept > "$work/out.txt"
 status=0
-"$RELIC" -o "$work/out.txt" -q 'X = 1?' "$work/graph.dl" 2>/dev/null ||
+"$RELIC" -o "$work/out.txt" -q 'X > 1?' "$work/graph.dl" 2>/dev/null ||
     status=$?
 if [ "$status" -ne 1 ]; then
 	fail "an invalid query exited $status, expected 1"

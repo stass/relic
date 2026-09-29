@@ -1,5 +1,5 @@
-unsafe-head.dl:7:5: error: variable X in rule foo/1 is not bound by a positive body literal
+unsafe-head.dl:7:5: error: variable X in rule foo/1 is not bound by a positive body literal or an assignment
 unsafe-head.dl:8:9: warning: variable Y occurs only once in this rule
 unsafe-head.dl:8:9: note: rename it to _Y to silence this warning
-unsafe-head.dl:9:45: error: variable X in rule abcdefghijabcdefghijabcdefghijabcdefghijabc/1 is not bound by a positive body literal
-unsafe-head.dl:10:46: error: variable X in rule abcdefghijabcdefghijabcdefghijabcdefghij.../1 is not bound by a positive body literal
+unsafe-head.dl:9:45: error: variable X in rule abcdefghijabcdefghijabcdefghijabcdefghijabc/1 is not bound by a positive body literal or an assignment
+unsafe-head.dl:10:46: error: variable X in rule abcdefghijabcdefghijabcdefghijabcdefghij.../1 is not bound by a positive body literal or an assignment

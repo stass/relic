@@ -1,0 +1,10 @@
+arithmetic-depth.dl:10:59: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:12:34: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:14:35: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:15:67: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:17:152: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:19:28: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:20:57: error: expected an operand, found '.'
+arithmetic-depth.dl:21:57: error: expression nested more than 32 levels deep
+arithmetic-depth.dl:22:93: error: expected an operand, found '.'
+arithmetic-depth.dl:23:93: error: expression nested more than 32 levels deep

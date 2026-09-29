@@ -380,7 +380,7 @@ answers_are_named_in_the_order_queries_compile(void)
 	relic_explain_set(ctx, record_explained, &explained);
 
 	first = relic_query_loaded(ctx, 1);
-	refused = relic_query_prepare(ctx, NULL, "X = 1?");
+	refused = relic_query_prepare(ctx, NULL, "X > 1?");
 	prepared = relic_query_prepare(ctx, NULL, "e(b)?");
 
 	check(answer_is_named(ctx, first, &explained, "$q1"), SCENARIO_NAMES,
@@ -711,7 +711,7 @@ a_refused_query_leaves_the_program_valid(void)
 		"e(X) :- e(X).",
 		"e(X)? e(a)?",
 		"e(X",
-		"X = 1?",
+		"X > 1?",
 		"e(X), not e(Y)?",
 		"e(_), _ < 1?",
 		"w(A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, "

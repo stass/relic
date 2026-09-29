@@ -1,1 +1,1 @@
-<query 2>:1:11: error: variable W in the query is not bound by a positive body literal
+<query 2>:1:11: error: variable W in the query is not bound by a positive body literal or an assignment

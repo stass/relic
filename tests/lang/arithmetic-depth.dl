@@ -1,0 +1,23 @@
+% An expression nests at most 32 levels deep, counted two ways: the
+% parentheses and unary minuses the text is inside, refused at the 33rd
+% where it opens, and the height of the tree, a leaf counting one, refused
+% at the operator of the 33rd level.  A minus folded into a literal is part
+% of the leaf.  Each shape below is written at the bound and one past it,
+% and the malformed ones are refused before any node is built.
+n(1).
+
+parens_32(X) :- n(X), X < ((((((((((((((((((((((((((((((((X)))))))))))))))))))))))))))))))).
+parens_33(X) :- n(X), X < (((((((((((((((((((((((((((((((((X))))))))))))))))))))))))))))))))).
+minus_literal_32(X) :- n(X), X < --------------------------------1.
+minus_literal_33(X) :- n(X), X < ---------------------------------1.
+minus_variable_31(X) :- n(X), X < -------------------------------X.
+minus_variable_32(X) :- n(X), X < --------------------------------X.
+minus_variable_33(X) :- n(X), X < ---------------------------------X.
+chain_32(X) :- n(X), X < X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X.
+chain_33(X) :- n(X), X < X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X + X.
+mixed_32(X) :- n(X), X < X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X))))))))))))))).
+mixed_33(X) :- n(X), X < X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X + X * (X)))))))))))))))).
+open_32(X) :- n(X), X < ((((((((((((((((((((((((((((((((.
+open_33(X) :- n(X), X < (((((((((((((((((((((((((((((((((.
+dangling_32(X) :- n(X), X < - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - .
+dangling_33(X) :- n(X), X < - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - .

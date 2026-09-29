@@ -1,1 +1,4 @@
-unsafe-comparison.dl:3:8: error: variable X in rule answer/1 is not bound by a positive body literal
+unsafe-comparison.dl:8:11: error: variable X in rule both_free/1 is not bound by a positive body literal or an assignment
+unsafe-comparison.dl:9:9: error: variable Y in rule both_free/1 is not bound by a positive body literal or an assignment
+unsafe-comparison.dl:10:9: error: variable X in rule ordered/1 is not bound by a positive body literal or an assignment
+unsafe-comparison.dl:14:13: error: variable Y in rule inside/1 is not bound by a positive body literal or an assignment

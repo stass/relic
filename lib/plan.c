@@ -220,7 +220,6 @@ static uint32_t	 bound_columns(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
 static uint16_t	 column_count(uint32_t columns);
 static int	 compare_candidates(const void *a, const void *b);
-static uint64_t	 comparison_slots(const relic_comparison_t *comparison);
 static int	 confirm_delta_literal(const relic_planner_t *planner);
 static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner);
@@ -237,6 +236,7 @@ static size_t	 estimate_unknown(uint16_t arity, uint32_t bound,
 		    enum relic_view view);
 static int	 estimate_measured(relic_t *ctx, relic_relation_t *relation,
 		    uint32_t columns, size_t *estimatep);
+static void	 expr_term(const relic_expr_t *expr, relic_plan_term_t *term);
 static bool	 is_incomplete(const bool *incomplete, relic_pred_id_t pred);
 static uint64_t	 multiply_estimates(uint64_t product, size_t estimate);
 static int	 order_body(relic_planner_t *planner);
@@ -247,7 +247,7 @@ static int	 place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 		    enum relic_view view);
 static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
 		    int status);
-static void	 place_comparison(relic_planner_t *planner,
+static int	 place_comparison(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 place_emit(relic_planner_t *planner);
 static int	 place_negated(relic_planner_t *planner,
@@ -572,13 +572,6 @@ arg_slots(const relic_arg_t *args, uint16_t count)
 	return (slots);
 }
 
-static uint64_t
-comparison_slots(const relic_comparison_t *comparison)
-{
-	return (arg_slots(&comparison->left, 1) |
-	    arg_slots(&comparison->right, 1));
-}
-
 /*
  * Place a negated literal as an ANTI_MEMBER that reads every column.  The
  * caller places it only where every argument is bound, so each column is a
@@ -606,22 +599,51 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 }
 
 /*
- * Place a comparison as a FILTER reading its two operands.  The caller places
- * it only where both are bound.
+ * The term a FILTER reads for an expression of one node.
  */
 static void
+expr_term(const relic_expr_t *expr, relic_plan_term_t *term)
+{
+	relic_arg_t arg;
+
+	bzero(&arg, sizeof(arg));
+	if (expr->kind == RELIC_EXPR_CONSTANT) {
+		arg.kind = RELIC_ARG_CONSTANT;
+		arg.u.constant = expr->u.constant;
+	} else {
+		arg.kind = RELIC_ARG_VARIABLE;
+		arg.u.slot = expr->u.slot;
+	}
+
+	read_term(&arg, term);
+}
+
+/*
+ * Place a comparison as a FILTER reading its two operands.  The caller places
+ * it only where both are bound.  A comparison over an operator has no
+ * operation to become, and is refused as an internal error.
+ */
+static int
 place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	const relic_comparison_t *comparison;
 	relic_op_t *op;
 
 	comparison = &literal->u.comparison;
+	if (comparison->left->height > 1 || comparison->right->height > 1) {
+		relic_diagf(planner->ctx, RELIC_ERROR, &literal->where,
+		    "internal error: the planner cannot place an arithmetic "
+		    "expression");
+		return (-1);
+	}
 
 	op = append_op(planner, RELIC_OP_FILTER);
 	op->u.filter.compare = comparison->op;
 	op->u.filter.where = literal->where;
-	read_term(&comparison->left, &op->u.filter.left);
-	read_term(&comparison->right, &op->u.filter.right);
+	expr_term(comparison->left, &op->u.filter.left);
+	expr_term(comparison->right, &op->u.filter.right);
+
+	return (0);
 }
 
 /*
@@ -642,8 +664,8 @@ test_is_ready(relic_t *ctx, const relic_literal_t *literal, uint64_t bound)
 
 	switch (literal->kind) {
 	case RELIC_LITERAL_COMPARISON:
-		return ((comparison_slots(&literal->u.comparison) & ~bound) ==
-		    0);
+		return ((relic_comparison_slots(&literal->u.comparison) &
+		    ~bound) == 0);
 	case RELIC_LITERAL_NEGATED:
 		pred = relic_pred_of(ctx, literal->u.atom.pred);
 		return (pred != NULL &&
@@ -665,8 +687,7 @@ place_test(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	switch (literal->kind) {
 	case RELIC_LITERAL_COMPARISON:
-		place_comparison(planner, literal);
-		return (0);
+		return (place_comparison(planner, literal));
 	case RELIC_LITERAL_NEGATED:
 		return (place_negated(planner, &literal->u.atom));
 	case RELIC_LITERAL_POSITIVE:

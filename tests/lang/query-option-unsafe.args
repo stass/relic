@@ -1,1 +1,1 @@
--q edge(X,Y)? -q X=1? -q edge(X,_),Z<X?
+-q edge(X,Y)? -q X>1? -q edge(X,_),Z<X?

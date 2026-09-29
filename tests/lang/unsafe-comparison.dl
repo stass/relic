@@ -1,4 +1,14 @@
-% Architecture section 10: comparisons are filters.  They neither generate a
-% value nor bind a variable, so a rule that expects one to is unsafe.
-answer(X) :-
-    X = 42.
+% Architecture section 10: a comparison is a filter, and binds nothing,
+% except an equality whose other side is bound, which assigns a bare
+% variable.  An equality whose two sides are both free binds neither; an
+% ordering binds nothing; and a variable inside an expression is never
+% solved for, so each variable below is reported unbound.
+n(1).
+
+both_free(X) :-
+    X = Y.
+ordered(X) :-
+    X > 42.
+inside(X) :-
+    n(X),
+    X + 1 = Y + 2.

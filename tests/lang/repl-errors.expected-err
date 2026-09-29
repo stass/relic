@@ -7,7 +7,7 @@ relic: error: usage: .plan QUERY
 relic: error: usage: .plan QUERY
 <query 1>:1:8: error: expected ',' or ')', found a variable
 <query 2>:1:11: error: expected ':-', ',', '.' or '?', found end of input
-<query 4>:1:13: error: variable Z in the query is not bound by a positive body literal
+<query 4>:1:13: error: variable Z in the query is not bound by a positive body literal or an assignment
 <query 5>:1:1: error: expected a query, found a fact
 <query 6>:1:13: error: expected ',' or ')', found end of input
 <query 8>:1:8: error: expected a term, found end of input

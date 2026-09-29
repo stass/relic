@@ -56,6 +56,7 @@ typedef struct relic_arg relic_arg_t;
 typedef struct relic_atom relic_atom_t;
 typedef struct relic_comparison relic_comparison_t;
 typedef struct relic_component relic_component_t;
+typedef struct relic_expr relic_expr_t;
 typedef struct relic_literal relic_literal_t;
 typedef struct relic_loaded_query relic_loaded_query_t;
 typedef struct relic_pred relic_pred_t;
@@ -135,7 +136,7 @@ enum relic_arg_kind {
 };
 
 /*
- * One argument of a compiled atom or comparison.
+ * One argument of a compiled atom.
  *
  * A wildcard appears only in an argument of a positive relational body
  * literal, because that is the only position where `_` is legal; elsewhere
@@ -162,10 +163,51 @@ struct relic_atom {
 	relic_pred_id_t		 pred;
 };
 
+enum relic_expr_kind {
+	RELIC_EXPR_CONSTANT,		/* an interned value */
+	RELIC_EXPR_VARIABLE,		/* a slot */
+	RELIC_EXPR_NEGATE,		/* -operand */
+	RELIC_EXPR_BINARY		/* left op right */
+};
+
+/*
+ * An expression, resolved: the parser's tree with its variables numbered.
+ *
+ * The tree is kept rather than flattened here, because three consumers want
+ * its shape: the explain output prints a rule with the parentheses the tree
+ * requires, the Magic rewrite renumbers and compares rules by walking their
+ * literals, and the planner reads the slots an expression mentions.  The
+ * form the executor runs is built from it with each plan.
+ *
+ * `height` is one for a leaf and one more than the tallest operand
+ * otherwise, never more than RELIC_MAX_EXPRESSION_DEPTH, so a walk over a
+ * tree is bounded without a check of its own.  `nodes` counts this node and
+ * every node below it, so that a cost charged by size needs no walk.
+ */
+struct relic_expr {
+	union {
+		relic_dom_t		 constant;	/* CONSTANT */
+		uint16_t		 slot;		/* VARIABLE */
+		relic_expr_t		*operand;	/* NEGATE */
+		struct {
+			relic_expr_t		*left;
+			relic_expr_t		*right;
+			enum relic_arith_op	 op;
+		}			 binary;	/* BINARY */
+	}				 u;
+	size_t				 nodes;
+	enum relic_expr_kind		 kind;	/* which arm of u is live */
+	uint8_t				 height;
+};
+
+/*
+ * A comparison of two expressions.  A term is an expression of one node, so
+ * a comparison of two terms holds two one-node trees.
+ */
 struct relic_comparison {
-	relic_arg_t		left;
-	relic_arg_t		right;
-	enum relic_compare_op	op;
+	relic_expr_t		*left;
+	relic_expr_t		*right;
+	enum relic_compare_op	 op;
 };
 
 /*
@@ -224,8 +266,10 @@ struct relic_variable {
  * many arguments and is NULL when there are none.
  *
  * Every slot below `variable_count` is bound by some positive relational
- * body literal, because a rule in which one was not would have been
- * rejected.  The evaluator therefore has no unbound-slot case to handle.
+ * body literal or by an assignment whose other side those bind, because a
+ * rule in which one was not would have been rejected.  The planner can
+ * therefore always place every literal, and the evaluator has no
+ * unbound-slot case to handle.
  *
  * `origin` is the rule as the program wrote it: its position among the
  * program's rules, or RELIC_ORIGIN_QUERY for a query's rule.  A rule the

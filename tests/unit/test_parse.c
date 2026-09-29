@@ -18,10 +18,12 @@
 
 #include "config.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -30,8 +32,13 @@
 
 #define	SCENARIO_APPEND		"loads append to one program"
 #define	SCENARIO_ATOMIC		"a failed load changes nothing"
+#define	SCENARIO_DEPTH		"an expression's nesting is bounded both ways"
+#define	SCENARIO_EXPRESSION	"an expression is the tree its precedence builds"
+#define	SCENARIO_EXPR_ERROR	"an expression's mistake is reported where written"
 #define	SCENARIO_LIMIT		"a structural limit is enforced where written"
+#define	SCENARIO_MOD		"`mod` is an operator only after an operand"
 #define	SCENARIO_NEGATION	"`not` is a keyword only where a literal begins"
+#define	SCENARIO_NEGATIVE	"a negative literal is one term wherever written"
 #define	SCENARIO_RECOVERY	"one broken statement costs one statement"
 #define	SCENARIO_SHAPE		"a statement is the shape it was written in"
 #define	SCENARIO_TERMS		"a term holds the value it spells"
@@ -41,24 +48,43 @@ typedef struct diag_log diag_log_t;
 /*
  * Everything the context reported during a load, so that a test can count
  * the messages without a callback that writes to stderr.  Only the count and
- * the first message are kept; a test that wants the exact text is a golden
- * language test rather than this.
+ * the first message and its column are kept; a test that wants the exact
+ * text is a golden language test rather than this.
  */
 struct diag_log {
-	size_t	errors;
-	char	first[256];
+	size_t		errors;
+	uint32_t	first_column;
+	char		first[256];
 };
 
 static relic_ast_stmt_t *statement_at(relic_t *ctx, size_t index);
 static size_t	 statement_count(const relic_t *ctx);
 static void	 a_failed_load_adds_nothing(void);
+static void	 append_repeated(char *out, size_t size, size_t *usedp,
+		    const char *text, size_t count);
 static void	 arity_is_limited_where_the_argument_is_written(void);
+static void	 expression_mistakes_are_reported_where_written(void);
+static void	 expressions_take_the_shape_their_precedence_gives(void);
+static bool	 loads_alone(const char *program, diag_log_t *log);
 static void	 loads_append_to_one_program(void);
+static void	 mod_is_an_operator_only_after_an_operand(void);
+static void	 negative_literals_are_terms_wherever_written(void);
+static bool	 nested_loads(const char *open, size_t count,
+		    const char *middle, const char *close, diag_log_t *log);
+static void	 nesting_is_bounded_in_the_text_and_in_the_tree(void);
 static void	 not_is_a_keyword_only_where_a_literal_begins(void);
 static void	 one_broken_statement_costs_one_statement(void);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
+static bool	 refused_for_nesting(const diag_log_t *log, uint32_t column);
+static void	 render_comparison(relic_t *ctx,
+		    const relic_ast_comparison_t *comparison, char *out,
+		    size_t size);
+static void	 render_constant(relic_t *ctx, relic_dom_t constant, char *out,
+		    size_t size);
+static void	 render_expr(relic_t *ctx, const relic_ast_expr_t *expr,
+		    char *out, size_t size);
 static relic_t	*context_logging_to(diag_log_t *log);
 static size_t	 facts_held(relic_t *ctx, const char *name, uint16_t arity);
 static void	 statements_keep_the_shape_they_were_written_in(void);
@@ -66,7 +92,7 @@ static void	 terms_hold_the_values_they_spell(void);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
-    const relic_location_t *where RELIC_UNUSED, const char *message)
+    const relic_location_t *where, const char *message)
 {
 	diag_log_t *log;
 
@@ -74,8 +100,10 @@ record_diagnostic(void *callback_ctx, enum relic_diag_level level,
 		return;
 
 	log = callback_ctx;
-	if (log->errors == 0)
+	if (log->errors == 0) {
 		strlcpy(log->first, message, sizeof(log->first));
+		log->first_column = where != NULL ? where->column : 0;
+	}
 	log->errors++;
 }
 
@@ -474,6 +502,548 @@ loads_append_to_one_program(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * Append `count` copies of `text` to the program being built in `out`, whose
+ * first *usedp bytes are already written.  A program that would not fit is
+ * truncated and marked by *usedp reaching `size`, which the caller checks
+ * once when the program is complete.
+ */
+static void
+append_repeated(char *out, size_t size, size_t *usedp, const char *text,
+    size_t count)
+{
+	size_t length;
+
+	length = strlen(text);
+	while (count-- > 0) {
+		if (*usedp + length >= size) {
+			*usedp = size;
+			return;
+		}
+		bcopy(text, out + *usedp, length);
+		*usedp += length;
+		out[*usedp] = '\0';
+	}
+}
+
+/*
+ * Load `program` into a context of its own, recording what it reports in
+ * `log`, and say whether it loaded.
+ */
+static bool
+loads_alone(const char *program, diag_log_t *log)
+{
+	relic_t *ctx;
+	bool loaded;
+
+	ctx = context_logging_to(log);
+	if (ctx == NULL)
+		return (false);
+
+	loaded = relic_load_string(ctx, "alone.dl", program) == 0;
+	relic_destroy(ctx);
+
+	return (loaded);
+}
+
+/*
+ * Append the text of one value to `out`: an integer in decimal, a symbol as
+ * its name and a string in quotes.
+ */
+static void
+render_constant(relic_t *ctx, relic_dom_t constant, char *out, size_t size)
+{
+	relic_value_t value;
+	char text[64];
+
+	if (!relic_value_decode(ctx, constant, &value)) {
+		strlcat(out, "?", size);
+		return;
+	}
+
+	switch (value.type) {
+	case RELIC_INTEGER:
+		snprintf(text, sizeof(text), "%" PRId64, value.v.integer);
+		strlcat(out, text, size);
+		return;
+	case RELIC_STRING:
+		strlcat(out, "\"", size);
+		strlcat(out, relic_string(ctx, value.v.id, NULL), size);
+		strlcat(out, "\"", size);
+		return;
+	case RELIC_SYMBOL:
+		strlcat(out, relic_string(ctx, value.v.id, NULL), size);
+		return;
+	}
+}
+
+/*
+ * Append an expression tree to `out` in a prefix form that shows its shape
+ * with nothing left to precedence: an operator node as `(op left right)`, a
+ * negation as `(neg operand)`, and a leaf as the constant or variable it
+ * holds.  Two trees render alike exactly when they have the same shape and
+ * the same leaves.
+ */
+static void
+render_expr(relic_t *ctx, const relic_ast_expr_t *expr, char *out,
+    size_t size)
+{
+	static const char *const operators[] = {
+		[RELIC_ARITH_ADD] = "+",
+		[RELIC_ARITH_SUBTRACT] = "-",
+		[RELIC_ARITH_MULTIPLY] = "*",
+		[RELIC_ARITH_DIVIDE] = "/",
+		[RELIC_ARITH_REMAINDER] = "mod"
+	};
+	const relic_ast_term_t *term;
+
+	switch (expr->kind) {
+	case RELIC_AST_EXPR_TERM:
+		term = &expr->u.term;
+		if (term->kind == RELIC_TERM_VARIABLE)
+			strlcat(out, relic_string(ctx, term->u.variable.name,
+			    NULL), size);
+		else
+			render_constant(ctx, term->u.constant, out, size);
+		return;
+	case RELIC_AST_EXPR_NEGATE:
+		strlcat(out, "(neg ", size);
+		render_expr(ctx, expr->u.operand, out, size);
+		strlcat(out, ")", size);
+		return;
+	case RELIC_AST_EXPR_BINARY:
+		strlcat(out, "(", size);
+		strlcat(out, operators[expr->u.binary.op], size);
+		strlcat(out, " ", size);
+		render_expr(ctx, expr->u.binary.left, out, size);
+		strlcat(out, " ", size);
+		render_expr(ctx, expr->u.binary.right, out, size);
+		strlcat(out, ")", size);
+		return;
+	}
+}
+
+/*
+ * A comparison in the prefix form of render_expr(): `(op left right)`.
+ */
+static void
+render_comparison(relic_t *ctx, const relic_ast_comparison_t *comparison,
+    char *out, size_t size)
+{
+	static const char *const comparators[] = {
+		[RELIC_CMP_EQ] = "=",
+		[RELIC_CMP_NE] = "!=",
+		[RELIC_CMP_LT] = "<",
+		[RELIC_CMP_LE] = "<=",
+		[RELIC_CMP_GT] = ">",
+		[RELIC_CMP_GE] = ">="
+	};
+
+	out[0] = '\0';
+	strlcat(out, "(", size);
+	strlcat(out, comparators[comparison->op], size);
+	strlcat(out, " ", size);
+	render_expr(ctx, comparison->left, out, size);
+	strlcat(out, " ", size);
+	render_expr(ctx, comparison->right, out, size);
+	strlcat(out, ")", size);
+}
+
+/*
+ * Every operator and every level of precedence, against the tree each must
+ * build.  Binary operators associate to the left, `*`, `/` and `mod` bind
+ * tighter than `+` and `-`, and unary minus tighter than any.  A `-` directly
+ * before digits is folded into a negative constant, with or without space,
+ * and is a negation before anything else, a parenthesis included, so the
+ * fold never changes which value an expression has, only how the tree
+ * holds it.
+ */
+static void
+expressions_take_the_shape_their_precedence_gives(void)
+{
+	static const struct {
+		const char	*comparison;
+		const char	*tree;
+	} cases[] = {
+		{ "X < 1 + 2 * 3",		"(< X (+ 1 (* 2 3)))" },
+		{ "X < (1 + 2) * 3",		"(< X (* (+ 1 2) 3))" },
+		{ "X < 1 - 2 - 3",		"(< X (- (- 1 2) 3))" },
+		{ "X < 1 - (2 - 3)",		"(< X (- 1 (- 2 3)))" },
+		{ "X < 8 / 4 / 2",		"(< X (/ (/ 8 4) 2))" },
+		{ "X < 7 mod 3 * 2",		"(< X (* (mod 7 3) 2))" },
+		{ "X < Y + Z mod 2",		"(< X (+ Y (mod Z 2)))" },
+		{ "X < Y - Z / 2 + 1",		"(< X (+ (- Y (/ Z 2)) 1))" },
+		{ "X < -Y * 2",			"(< X (* (neg Y) 2))" },
+		{ "X < Y * -Z",			"(< X (* Y (neg Z)))" },
+		{ "X < -(Y + 1)",		"(< X (neg (+ Y 1)))" },
+		{ "X < -1",			"(< X -1)" },
+		{ "X < - 1",			"(< X -1)" },
+		{ "X < -(1)",			"(< X (neg 1))" },
+		{ "X < - -1",			"(< X (neg -1))" },
+		{ "X < Y - -1",			"(< X (- Y -1))" },
+		{ "X < Y-1",			"(< X (- Y 1))" },
+		{ "X < 2-1",			"(< X (- 2 1))" },
+		{ "X < ((Y))",			"(< X Y)" },
+		{ "X < -9223372036854775808",	"(< X -9223372036854775808)" },
+		{ "X < Y - -9223372036854775808",
+		    "(< X (- Y -9223372036854775808))" },
+		{ "X < 9223372036854775807 + Y",
+		    "(< X (+ 9223372036854775807 Y))" },
+		{ "Y mod 2 = X",		"(= (mod Y 2) X)" },
+		{ "1 + Y >= Z * 2",		"(>= (+ 1 Y) (* Z 2))" },
+		{ "X = Y",			"(= X Y)" },
+		{ "X != mod",			"(!= X mod)" },
+		{ "a != b",			"(!= a b)" },
+		{ "\"left\" < \"right\"",	"(< \"left\" \"right\")" }
+	};
+
+	relic_ast_stmt_t *statement;
+	char program[256];
+	char tree[256];
+	diag_log_t log;
+	relic_t *ctx;
+	size_t index;
+
+	for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+		ctx = context_logging_to(&log);
+		check(ctx != NULL, SCENARIO_EXPRESSION,
+		    "a context should be created");
+		if (ctx == NULL)
+			return;
+
+		snprintf(program, sizeof(program), "r :- p(X, Y, Z), %s.\n",
+		    cases[index].comparison);
+		checkf(relic_load_string(ctx, "tree.dl", program) == 0,
+		    SCENARIO_EXPRESSION, "`%s` should parse",
+		    cases[index].comparison);
+
+		statement = statement_at(ctx, 0);
+		if (statement == NULL || statement->body_length != 2 ||
+		    statement->body[1].kind != RELIC_LITERAL_COMPARISON) {
+			checkf(false, SCENARIO_EXPRESSION,
+			    "`%s` should be a comparison",
+			    cases[index].comparison);
+			relic_destroy(ctx);
+			continue;
+		}
+
+		render_comparison(ctx, &statement->body[1].u.comparison, tree,
+		    sizeof(tree));
+		checkf(strcmp(tree, cases[index].tree) == 0,
+		    SCENARIO_EXPRESSION, "`%s` should build %s, not %s",
+		    cases[index].comparison, cases[index].tree, tree);
+
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * A `-` and the digits after it are two tokens that the parser joins into
+ * one negative literal wherever a term stands: a fact, a head, an argument.
+ * So `-1` and `- 1` are one value, and INT64_MIN, whose magnitude is out of
+ * range until the sign is known, can be written; one past it cannot.
+ */
+static void
+negative_literals_are_terms_wherever_written(void)
+{
+	relic_ast_stmt_t *statement;
+	relic_value_t value;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	check(ctx != NULL, SCENARIO_NEGATIVE, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	check(relic_load_string(ctx, "negative.dl",
+	    "offset(start, -1).\n"
+	    "offset(start, - 1).\n"
+	    "least(-9223372036854775808).\n"
+	    "h(-2) :- p(X, -3).\n") == 0, SCENARIO_NEGATIVE,
+	    "negative literals should load wherever a term stands");
+	check(facts_held(ctx, "offset", 2) == 1, SCENARIO_NEGATIVE,
+	    "-1 and - 1 should be one fact");
+	check(facts_held(ctx, "least", 1) == 1, SCENARIO_NEGATIVE,
+	    "INT64_MIN should be a writable term");
+
+	statement = statement_at(ctx, 0);
+	check(statement != NULL && statement->head.arity == 1 &&
+	    relic_value_decode(ctx, statement->head.terms[0].u.constant,
+	    &value) && value.type == RELIC_INTEGER && value.v.integer == -2,
+	    SCENARIO_NEGATIVE, "a head should hold the negative constant");
+	check(statement != NULL && statement->body_length == 1 &&
+	    statement->body[0].u.atom.arity == 2 &&
+	    relic_value_decode(ctx, statement->body[0].u.atom.terms[1].u.constant,
+	    &value) && value.type == RELIC_INTEGER && value.v.integer == -3,
+	    SCENARIO_NEGATIVE, "an argument should hold the negative constant");
+
+	relic_destroy(ctx);
+
+	check(!loads_alone("f(9223372036854775808).\n", &log) &&
+	    log.errors == 1 && strstr(log.first, "out of range") != NULL &&
+	    log.first_column == 3, SCENARIO_NEGATIVE,
+	    "INT64_MAX + 1 should be out of range at its digits");
+	check(!loads_alone("f(-9223372036854775809).\n", &log) &&
+	    log.errors == 1 && strstr(log.first, "out of range") != NULL &&
+	    log.first_column == 3, SCENARIO_NEGATIVE,
+	    "INT64_MIN - 1 should be out of range at its sign");
+	check(!loads_alone("f(- a).\n", &log) && log.errors == 1 &&
+	    strstr(log.first, "expected an integer literal") != NULL &&
+	    log.first_column == 5, SCENARIO_NEGATIVE,
+	    "a minus before a symbol should not be a term");
+}
+
+/*
+ * `mod` is the remainder operator only where an operator may stand, after
+ * an operand.  Everywhere else it is the symbol it always was: an argument,
+ * a comparison's operand, and a predicate's name.
+ */
+static void
+mod_is_an_operator_only_after_an_operand(void)
+{
+	relic_ast_stmt_t *statement;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	check(ctx != NULL, SCENARIO_MOD, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	check(relic_load_string(ctx, "mod.dl",
+	    "status(foo, mod).\n"
+	    "mod(X) :- p(X), X mod 2 = 0.\n"
+	    "r(X) :- mod(X), mod != X.\n") == 0, SCENARIO_MOD,
+	    "every use of mod should load");
+	check(facts_held(ctx, "status", 2) == 1, SCENARIO_MOD,
+	    "mod should be a symbol as an argument");
+
+	statement = statement_at(ctx, 0);
+	check(statement != NULL && statement->body_length == 2 &&
+	    statement->body[1].kind == RELIC_LITERAL_COMPARISON &&
+	    statement->body[1].u.comparison.left->kind ==
+	    RELIC_AST_EXPR_BINARY &&
+	    statement->body[1].u.comparison.left->u.binary.op ==
+	    RELIC_ARITH_REMAINDER, SCENARIO_MOD,
+	    "mod after an operand should be the remainder");
+
+	statement = statement_at(ctx, 1);
+	check(statement != NULL && statement->body_length == 2 &&
+	    statement->body[0].kind == RELIC_LITERAL_POSITIVE &&
+	    statement->body[1].kind == RELIC_LITERAL_COMPARISON &&
+	    statement->body[1].u.comparison.left->kind == RELIC_AST_EXPR_TERM,
+	    SCENARIO_MOD,
+	    "mod should name a predicate, and be a comparison's operand");
+
+	relic_destroy(ctx);
+
+	check(!loads_alone("r :- p(X), X < mod mod 2.\n", &log) &&
+	    log.errors == 1 &&
+	    strstr(log.first, "symbol mod cannot be an operand of mod") !=
+	    NULL && log.first_column == 16, SCENARIO_MOD,
+	    "the symbol mod should be refused as an operand");
+}
+
+/*
+ * The mistakes the parser can see in an expression, each reported once, at
+ * the byte the reader should look at: an operand whose type its token
+ * already shows is not an integer, an operand or a parenthesis missing, and
+ * an expression where only a term may stand.
+ */
+static void
+expression_mistakes_are_reported_where_written(void)
+{
+	static const struct {
+		const char	*program;
+		const char	*message;
+		uint32_t	 column;
+	} cases[] = {
+		{ "r :- p(X), X < foo + 1.\n",
+		    "symbol foo cannot be an operand of +", 16 },
+		{ "r :- p(X), X < 1 * \"a\".\n",
+		    "a string literal cannot be an operand of *", 20 },
+		{ "r :- p(X), X < -foo.\n",
+		    "symbol foo cannot be an operand of -", 17 },
+		{ "r :- p(X), foo - 1 < X.\n",
+		    "symbol foo cannot be an operand of -", 12 },
+		{ "r :- p(X), X < X + .\n",
+		    "expected an operand, found '.'", 20 },
+		{ "r :- p(X), X < (X + 1.\n",
+		    "expected an operator or ')', found '.'", 22 },
+		{ "r :- p(X), X = .\n",
+		    "expected an operand, found '.'", 16 },
+		{ "r :- p(X), X + 1.\n",
+		    "expected a comparison operator, found '.'", 17 },
+		{ "r :- p(X), X < 1 2.\n",
+		    "expected ',' or '.', found an integer literal", 18 },
+		{ "succ(X + 1) :- n(X).\n",
+		    "expected ',' or ')', found '+'", 8 },
+		{ "p(X) :- q(X, Y + 1).\n",
+		    "expected ',' or ')', found '+'", 16 },
+		{ "r :- p(X), X < foo + bar * \"a\".\n",
+		    "symbol bar cannot be an operand of *", 22 }
+	};
+
+	diag_log_t log;
+	size_t index;
+
+	for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+		checkf(!loads_alone(cases[index].program, &log) &&
+		    log.errors == 1 &&
+		    strstr(log.first, cases[index].message) != NULL &&
+		    log.first_column == cases[index].column,
+		    SCENARIO_EXPR_ERROR,
+		    "`%.*s` should report once, \"%s\" at column %u; it "
+		    "reported %zu, \"%s\" at column %u",
+		    (int)strlen(cases[index].program) - 1,
+		    cases[index].program, cases[index].message,
+		    (unsigned int)cases[index].column, log.errors, log.first,
+		    (unsigned int)log.first_column);
+	}
+
+	check(!loads_alone(
+	    "r :- p(X), X < foo + 1.\n"
+	    "s :- p(X), X < (X.\n"
+	    "t(X + 1).\n"
+	    "fine(a).\n", &log) && log.errors == 3, SCENARIO_EXPR_ERROR,
+	    "three broken statements should produce three messages");
+}
+
+/*
+ * Load `r :- p(X), X < <expression>.` built of `open` repeated `count`
+ * times, then `middle`, then `close` repeated `count` times, and report
+ * whether it loaded.  The expression begins at column 16.
+ */
+static bool
+nested_loads(const char *open, size_t count, const char *middle,
+    const char *close, diag_log_t *log)
+{
+	char program[4096];
+	size_t used;
+
+	used = strlcpy(program, "r :- p(X), X < ", sizeof(program));
+	append_repeated(program, sizeof(program), &used, open, count);
+	append_repeated(program, sizeof(program), &used, middle, 1);
+	append_repeated(program, sizeof(program), &used, close, count);
+	append_repeated(program, sizeof(program), &used, ".\n", 1);
+	if (used >= sizeof(program)) {
+		check(false, SCENARIO_DEPTH,
+		    "the generated program should fit its buffer");
+		return (false);
+	}
+
+	return (loads_alone(program, log));
+}
+
+/*
+ * Whether a load was refused once for nesting, at `column`.
+ */
+static bool
+refused_for_nesting(const diag_log_t *log, uint32_t column)
+{
+	return (log->errors == 1 &&
+	    strstr(log->first, "nested more than 32 levels deep") != NULL &&
+	    log->first_column == column);
+}
+
+/*
+ * Both of the bounds RELIC_MAX_EXPRESSION_DEPTH sets, met and exceeded by
+ * one in every shape that reaches them.  The descent of the text counts the
+ * parentheses and unary minuses the parser is inside, and is refused at the
+ * 33rd where it opens; the height of the tree counts a leaf as one and each
+ * operator or negation as one more than its tallest operand, and is refused
+ * at the operator of the 33rd level.  A `-` folded into a literal is part of
+ * the leaf, so 32 minuses before digits build a tree 32 high and 32 before a
+ * variable one 33 high.
+ */
+static void
+nesting_is_bounded_in_the_text_and_in_the_tree(void)
+{
+	char *deep;
+	diag_log_t log;
+	size_t count;
+	size_t size;
+	size_t used;
+
+	check(nested_loads("(", 32, "X", ")", &log), SCENARIO_DEPTH,
+	    "32 parentheses around a variable should parse");
+	check(!nested_loads("(", 33, "X", ")", &log) &&
+	    refused_for_nesting(&log, 16 + 32), SCENARIO_DEPTH,
+	    "the 33rd parenthesis should be refused where it opens");
+
+	check(nested_loads("-", 32, "1", "", &log), SCENARIO_DEPTH,
+	    "32 minuses before a literal should build a tree 32 high");
+	check(!nested_loads("-", 33, "1", "", &log) &&
+	    refused_for_nesting(&log, 16), SCENARIO_DEPTH,
+	    "33 minuses before a literal should be refused at the outermost");
+	check(nested_loads("-", 31, "X", "", &log), SCENARIO_DEPTH,
+	    "31 minuses before a variable should build a tree 32 high");
+	check(!nested_loads("-", 32, "X", "", &log) &&
+	    refused_for_nesting(&log, 16), SCENARIO_DEPTH,
+	    "32 minuses before a variable should be refused for height");
+	check(!nested_loads("-", 33, "X", "", &log) &&
+	    refused_for_nesting(&log, 16 + 32), SCENARIO_DEPTH,
+	    "the 33rd minus should be refused where it opens");
+
+	check(nested_loads("X + ", 31, "X", "", &log), SCENARIO_DEPTH,
+	    "a chain of 32 operands should build a tree 32 high");
+	check(!nested_loads("X + ", 32, "X", "", &log) &&
+	    refused_for_nesting(&log, 16 + 31 * 4 + 2), SCENARIO_DEPTH,
+	    "the operator joining the 33rd operand should be refused");
+
+	/*
+	 * Each `X + X * (` wraps the expression inside it in two more
+	 * levels and one more parenthesis, so fifteen of them around `X + X`
+	 * reach 32 and sixteen around `X` reach 33, the outermost `+`
+	 * being the operator refused.
+	 */
+	check(nested_loads("X + X * (", 15, "X + X", ")", &log),
+	    SCENARIO_DEPTH, "X + X * (...) should parse at height 32");
+	check(!nested_loads("X + X * (", 16, "X", ")", &log) &&
+	    refused_for_nesting(&log, 18), SCENARIO_DEPTH,
+	    "X + X * (...) should be refused at height 33");
+
+	/*
+	 * Malformed input at each depth: no node is ever built, so only the
+	 * descent can refuse it, and the message is whichever mistake comes
+	 * first.
+	 */
+	check(!nested_loads("(", 32, "", "", &log) && log.errors == 1 &&
+	    strstr(log.first, "expected an operand") != NULL, SCENARIO_DEPTH,
+	    "32 unclosed parentheses should report the missing operand");
+	check(!nested_loads("(", 33, "", "", &log) &&
+	    refused_for_nesting(&log, 16 + 32), SCENARIO_DEPTH,
+	    "33 unclosed parentheses should be refused for nesting");
+	check(!nested_loads("- ", 32, "", "", &log) && log.errors == 1 &&
+	    strstr(log.first, "expected an operand") != NULL, SCENARIO_DEPTH,
+	    "32 dangling minuses should report the missing operand");
+	check(!nested_loads("- ", 33, "", "", &log) &&
+	    refused_for_nesting(&log, 16 + 64), SCENARIO_DEPTH,
+	    "33 dangling minuses should be refused for nesting");
+
+	/*
+	 * A hundred thousand parentheses must cost one message and bounded
+	 * recursion, however they are closed or not.
+	 */
+	count = 100000;
+	size = count + 64;
+	deep = malloc(size);
+	check(deep != NULL, SCENARIO_DEPTH, "the deep program should fit");
+	if (deep == NULL)
+		return;
+
+	used = strlcpy(deep, "r :- p(X), X < ", size);
+	memset(deep + used, '(', count);
+	used += count;
+	strlcpy(deep + used, "X.\n", size - used);
+	check(!loads_alone(deep, &log) && refused_for_nesting(&log, 16 + 32),
+	    SCENARIO_DEPTH,
+	    "a hundred thousand parentheses should be refused once");
+
+	free(deep);
+}
+
 int
 main(void)
 {
@@ -484,6 +1054,11 @@ main(void)
 	arity_is_limited_where_the_argument_is_written();
 	a_failed_load_adds_nothing();
 	loads_append_to_one_program();
+	expressions_take_the_shape_their_precedence_gives();
+	negative_literals_are_terms_wherever_written();
+	mod_is_an_operator_only_after_an_operand();
+	expression_mistakes_are_reported_where_written();
+	nesting_is_bounded_in_the_text_and_in_the_tree();
 
 	return (check_summary("parse"));
 }

@@ -31,10 +31,16 @@
 
 #define	SCENARIO_ARGUMENTS	"a literal resolves to the arguments it names"
 #define	SCENARIO_CACHED		"a check compiles only what is new"
+#define	SCENARIO_CLOSURE	"an assignment binds what the closure reaches"
+#define	SCENARIO_EXPRESSION	"a comparison compiles to two trees over slots"
+#define	SCENARIO_PRINTED	"a rule prints as text that reads back as it"
 #define	SCENARIO_REJECTED	"a rejected statement leaves no rule behind"
 #define	SCENARIO_SLOTS		"variables are numbered as they are written"
 #define	SCENARIO_STICKY		"a program that held a bad rule stays refused"
 #define	SCENARIO_WILDCARD	"`_` takes a slot only where it is illegal"
+
+/* The longest line an explain callback is given, and its NUL. */
+#define	PRINTED_LINE_MAX	1024
 
 typedef struct diag_log diag_log_t;
 
@@ -61,6 +67,13 @@ static void	 a_check_compiles_only_what_is_new(void);
 static void	 a_literal_resolves_to_the_arguments_it_names(void);
 static void	 a_program_that_held_a_bad_rule_stays_refused(void);
 static void	 a_rejected_statement_leaves_no_rule_behind(void);
+static void	 an_assignment_binds_what_the_closure_reaches(void);
+static void	 a_comparison_compiles_to_two_trees_over_slots(void);
+static void	 checked_alone(const char *program, diag_log_t *log);
+static bool	 printed_rule(const char *program, char *out, size_t size);
+static void	 keep_printed_line(void *callback_ctx, const char *line);
+static void	 a_rule_prints_as_text_that_reads_back_as_it(void);
+static void	 a_rule_at_the_nesting_bound_prints_within_it(void);
 static void	 an_anonymous_variable_takes_a_slot_only_where_illegal(void);
 static void	 variables_are_numbered_as_they_are_written(void);
 
@@ -477,6 +490,309 @@ a_program_that_held_a_bad_rule_stays_refused(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * Load and check `program` in a context of its own, recording what the load
+ * and the check report in `log`.
+ */
+static void
+checked_alone(const char *program, diag_log_t *log)
+{
+	relic_t *ctx;
+
+	ctx = context_logging_to(log);
+	if (ctx == NULL)
+		return;
+
+	if (load(ctx, program))
+		(void)relic_check(ctx);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A variable is bound by a positive literal, or by an equality whose other
+ * side reads only bound variables, and the closure applies that second rule
+ * until nothing more is bound, so the order the assignments are written in
+ * does not matter.  An equality with both sides free binds neither, a
+ * variable inside an expression is never solved for, and `_` is never an
+ * assignment's target.  A variable assigned and never read is a singleton.
+ * The query rule is checked by the same closure.
+ */
+static void
+an_assignment_binds_what_the_closure_reaches(void)
+{
+	static const struct {
+		const char	*program;
+		size_t		 errors;
+		size_t		 warnings;
+		const char	*why;
+	} cases[] = {
+		{ "n(1).\nr(Y) :- n(X), Y = X + 1.\n", 0, 0,
+		    "an assignment from a positive literal's variable" },
+		{ "n(1).\nr(X, Y) :- n(X), Y = 42.\n", 0, 0,
+		    "an assignment from a constant" },
+		{ "n(1).\nr(X, Y) :- n(X), 7 * 6 = Y.\n", 0, 0,
+		    "an assignment written right to left" },
+		{ "n(1).\nr(Z) :- Z = Y * 2, Y = X + 1, n(X).\n", 0, 0,
+		    "assignments written before what binds their operands" },
+		{ "n(1).\nr(X, Y) :- n(X), Y = X, Y > 1.\n", 0, 0,
+		    "an assignment of a bare variable, then a test of it" },
+		{ "n(1).\nr :- n(A), A > 0, X = Y.\n", 2, 0,
+		    "an equality with both sides free binds neither" },
+		{ "n(1).\nr(Y) :- n(X), X + Y = 3.\n", 1, 0,
+		    "a variable inside an expression is not solved for" },
+		{ "n(1).\nr(X) :- n(X), X = Y + 1.\n", 1, 0,
+		    "a bound variable does not bind the expression's" },
+		{ "n(1).\nr(X) :- n(X), _ = X + 1.\n", 1, 0,
+		    "`_` is never an assignment's target" },
+		{ "n(1).\nr(X) :- n(X), Y = X + 1.\n", 0, 1,
+		    "a variable assigned and never read is a singleton" },
+		{ "n(1).\nr(X) :- n(X), Y = Z, Z = Y.\n", 2, 0,
+		    "two equalities waiting on each other bind neither" },
+		{ "v(1).\nv(X), Y = X * 2?\n", 0, 0,
+		    "a query's output column bound by an assignment" },
+		{ "v(1).\nv(X), Y = Z * 2?\n", 2, 0,
+		    "a query's variables bound by nothing" }
+	};
+
+	diag_log_t log;
+	size_t index;
+
+	for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+		checked_alone(cases[index].program, &log);
+		checkf(log.errors == cases[index].errors &&
+		    log.warnings == cases[index].warnings, SCENARIO_CLOSURE,
+		    "%s: expected %zu errors and %zu warnings, got %zu and %zu",
+		    cases[index].why, cases[index].errors,
+		    cases[index].warnings, log.errors, log.warnings);
+	}
+}
+
+/*
+ * A comparison holds two expression trees whose leaves are resolved as an
+ * atom's arguments are, to constants and slots, and whose every node knows
+ * its height and the size of the tree below it.
+ */
+static void
+a_comparison_compiles_to_two_trees_over_slots(void)
+{
+	const relic_comparison_t *comparison;
+	const relic_expr_t *sum;
+	const relic_rule_t *rule;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	if (!load(ctx, "n(1).\nr(Y) :- n(X), Y = -(X + 1) * 2.\n") ||
+	    relic_check(ctx) != 0) {
+		check(false, SCENARIO_EXPRESSION, "the program is accepted");
+		relic_destroy(ctx);
+		return;
+	}
+
+	rule = rule_at(ctx, 0);
+	if (rule == NULL || rule->body_length != 2 ||
+	    rule->body[1].kind != RELIC_LITERAL_COMPARISON) {
+		check(false, SCENARIO_EXPRESSION, "the rule was compiled");
+		relic_destroy(ctx);
+		return;
+	}
+
+	comparison = &rule->body[1].u.comparison;
+	check(comparison->op == RELIC_CMP_EQ &&
+	    comparison->left->kind == RELIC_EXPR_VARIABLE &&
+	    comparison->left->u.slot == 0 && comparison->left->nodes == 1 &&
+	    comparison->left->height == 1, SCENARIO_EXPRESSION,
+	    "the assigned variable is a one-node tree over Y's slot");
+
+	check(comparison->right->kind == RELIC_EXPR_BINARY &&
+	    comparison->right->u.binary.op == RELIC_ARITH_MULTIPLY &&
+	    comparison->right->nodes == 6 && comparison->right->height == 4,
+	    SCENARIO_EXPRESSION,
+	    "the product holds six nodes in a tree four high");
+
+	sum = comparison->right->u.binary.left;
+	check(sum->kind == RELIC_EXPR_NEGATE &&
+	    sum->u.operand->kind == RELIC_EXPR_BINARY &&
+	    sum->u.operand->u.binary.left->kind == RELIC_EXPR_VARIABLE &&
+	    sum->u.operand->u.binary.left->u.slot == 1 &&
+	    sum->u.operand->u.binary.right->kind == RELIC_EXPR_CONSTANT,
+	    SCENARIO_EXPRESSION, "the negated sum reads X's slot and a constant");
+
+	check(relic_comparison_slots(comparison) == 0x3, SCENARIO_EXPRESSION,
+	    "the comparison reads both slots");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Keep the line the explain callback was given, less its indentation and
+ * the word introducing it, in the buffer of PRINTED_LINE_MAX bytes
+ * `callback_ctx` points at.
+ */
+static void
+keep_printed_line(void *callback_ctx, const char *line)
+{
+	char *out;
+
+	out = callback_ctx;
+
+	line += strspn(line, " ");
+	if (strncmp(line, "rule ", 5) == 0)
+		line += 5;
+
+	strlcpy(out, line, PRINTED_LINE_MAX);
+}
+
+/*
+ * Load and check `program`, then print its last rule as the explain output
+ * writes a rule, into `out`, which is PRINTED_LINE_MAX bytes.
+ */
+static bool
+printed_rule(const char *program, char *out, size_t size)
+{
+	diag_log_t log;
+	relic_t *ctx;
+	bool printed;
+
+	bzero(out, size);
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return (false);
+
+	printed = false;
+	if (load(ctx, program) && relic_check(ctx) == 0 && rule_count(ctx) > 0) {
+		relic_explain_set(ctx, keep_printed_line, out);
+		relic_explain_rule(ctx, rule_at(ctx, rule_count(ctx) - 1), NULL,
+		    0);
+		printed = out[0] != '\0';
+	}
+
+	relic_destroy(ctx);
+
+	return (printed);
+}
+
+/*
+ * A rule is printed with exactly the parentheses its expressions' trees
+ * need: parsing the printed text builds the tree that was printed, so a
+ * second print is the first, and two spellings of one tree print alike.  A
+ * right operand as tight as its operator keeps its parentheses, since
+ * `2 * (3 / 2)` and `A + (B + C)` compute other values, or overflow at
+ * other values, without them.
+ */
+static void
+a_rule_prints_as_text_that_reads_back_as_it(void)
+{
+	static const char facts[] = "n(1, 2, 3).\n";
+	static const struct {
+		const char	*comparison;
+		const char	*printed;
+	} cases[] = {
+		{ "Y = 2 * (3 / 2)",		"Y = 2 * (3 / 2)" },
+		{ "Y = A + (B + C)",		"Y = A + (B + C)" },
+		{ "Y = (A + B) + C",		"Y = A + B + C" },
+		{ "Y = A - (B - C)",		"Y = A - (B - C)" },
+		{ "Y = (A mod B) * C",		"Y = A mod B * C" },
+		{ "Y = A mod (B * C)",		"Y = A mod (B * C)" },
+		{ "Y = -(A + 1) * 2",		"Y = -(A + 1) * 2" },
+		{ "Y = (-A) * 2",		"Y = -A * 2" },
+		{ "Y = - -A",			"Y = - -A" },
+		{ "Y = -(-A)",			"Y = - -A" },
+		{ "Y = -(1)",			"Y = -(1)" },
+		{ "Y = - 1",			"Y = -1" },
+		{ "Y = -(-1)",			"Y = - -1" },
+		{ "(not) != A",			"(not) != A" },
+		{ "(a) != A",			"a != A" },
+		{ "Y = A - -1",			"Y = A - -1" },
+		{ "Y = ((A))",			"Y = A" },
+		{ "Y = -9223372036854775808",	"Y = -9223372036854775808" },
+		{ "A * (B + C) - (A - B) / -C < 2 * A",
+		    "A * (B + C) - (A - B) / -C < 2 * A" }
+	};
+
+	char again[PRINTED_LINE_MAX];
+	char expected[PRINTED_LINE_MAX];
+	char first[PRINTED_LINE_MAX];
+	char program[PRINTED_LINE_MAX * 2];
+	size_t index;
+
+	for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+		snprintf(program, sizeof(program),
+		    "%sr(Y) :- n(A, B, C), Y = A, %s.\n", facts,
+		    cases[index].comparison);
+		snprintf(expected, sizeof(expected),
+		    "r(Y) :- n(A, B, C), Y = A, %s.", cases[index].printed);
+
+		if (!printed_rule(program, first, sizeof(first))) {
+			checkf(false, SCENARIO_PRINTED, "`%s` should print",
+			    cases[index].comparison);
+			continue;
+		}
+
+		checkf(strcmp(first, expected) == 0, SCENARIO_PRINTED,
+		    "`%s` should print as `%s`, not `%s`",
+		    cases[index].comparison, expected, first);
+
+		snprintf(program, sizeof(program), "%s%s\n", facts, first);
+		checkf(printed_rule(program, again, sizeof(again)) &&
+		    strcmp(again, first) == 0, SCENARIO_PRINTED,
+		    "`%s` should read back and print again as itself, not `%s`",
+		    first, again);
+	}
+}
+
+/*
+ * A tree the parser accepted prints as text the parser accepts: the printed
+ * parentheses and minuses nest no deeper than the tree does, so a rule at
+ * the nesting bound reads back as itself.  Thirty-one negations over a
+ * variable, and `X + X * (...)` at height 32, are each printed and read back.
+ */
+static void
+a_rule_at_the_nesting_bound_prints_within_it(void)
+{
+	char again[PRINTED_LINE_MAX];
+	char first[PRINTED_LINE_MAX];
+	char program[PRINTED_LINE_MAX * 2];
+	char expression[512];
+	size_t shape;
+	size_t i;
+
+	for (shape = 0; shape < 2; shape++) {
+		expression[0] = '\0';
+		if (shape == 0) {
+			for (i = 0; i < 31; i++)
+				strlcat(expression, "-", sizeof(expression));
+			strlcat(expression, "A", sizeof(expression));
+		} else {
+			for (i = 0; i < 15; i++)
+				strlcat(expression, "A + A * (",
+				    sizeof(expression));
+			strlcat(expression, "A + A", sizeof(expression));
+			for (i = 0; i < 15; i++)
+				strlcat(expression, ")", sizeof(expression));
+		}
+
+		snprintf(program, sizeof(program),
+		    "n(1).\nr(Y) :- n(A), Y = %s.\n", expression);
+		if (!printed_rule(program, first, sizeof(first))) {
+			checkf(false, SCENARIO_PRINTED, "`%s` should print",
+			    expression);
+			continue;
+		}
+
+		snprintf(program, sizeof(program), "n(1).\n%s\n", first);
+		checkf(printed_rule(program, again, sizeof(again)) &&
+		    strcmp(again, first) == 0, SCENARIO_PRINTED,
+		    "`%s` should read back and print again as itself, not `%s`",
+		    first, again);
+	}
+}
+
 int
 main(void)
 {
@@ -486,6 +802,10 @@ main(void)
 	a_rejected_statement_leaves_no_rule_behind();
 	a_check_compiles_only_what_is_new();
 	a_program_that_held_a_bad_rule_stays_refused();
+	an_assignment_binds_what_the_closure_reaches();
+	a_comparison_compiles_to_two_trees_over_slots();
+	a_rule_prints_as_text_that_reads_back_as_it();
+	a_rule_at_the_nesting_bound_prints_within_it();
 
 	return (check_summary("test_rule"));
 }

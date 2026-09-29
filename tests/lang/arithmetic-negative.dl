@@ -1,0 +1,12 @@
+% A minus and the digits after it are one negative literal wherever a term
+% stands, with or without space between them: the two facts below are one
+% fact, and the least 64-bit integer can be written although its magnitude
+% alone is out of range.
+offset(start, -1).
+offset(start, - 1).
+least(-9223372036854775808).
+shifted(X, -2) :- offset(X, - 1).
+
+offset(start, X)?
+least(X)?
+shifted(start, Y), Y < -1?

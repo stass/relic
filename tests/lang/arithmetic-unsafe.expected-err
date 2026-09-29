@@ -1,0 +1,8 @@
+arithmetic-unsafe.dl:9:5: error: variable X in rule both_free/0 is not bound by a positive body literal or an assignment
+arithmetic-unsafe.dl:9:9: error: variable Y in rule both_free/0 is not bound by a positive body literal or an assignment
+arithmetic-unsafe.dl:12:9: error: variable Y in rule inside/1 is not bound by a positive body literal or an assignment
+arithmetic-unsafe.dl:15:5: error: anonymous variable in rule anonymous/1 cannot be bound by a positive body literal
+arithmetic-unsafe.dl:18:5: error: variable Y in rule circular/1 is not bound by a positive body literal or an assignment
+arithmetic-unsafe.dl:18:9: error: variable Z in rule circular/1 is not bound by a positive body literal or an assignment
+arithmetic-unsafe.dl:20:7: error: variable W in the query is not bound by a positive body literal or an assignment
+arithmetic-unsafe.dl:20:11: error: variable V in the query is not bound by a positive body literal or an assignment

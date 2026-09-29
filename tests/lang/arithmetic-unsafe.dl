@@ -1,0 +1,20 @@
+% An equality binds a bare variable to a value computed from variables
+% already bound, and nothing else binds by it: not an equality whose sides
+% are both free, not a variable inside an expression, which is never solved
+% for, not `_`, and not two assignments each waiting for the other.
+n(1).
+
+both_free :-
+    n(_),
+    X = Y.
+inside(X) :-
+    n(X),
+    X = Y * 2.
+anonymous(X) :-
+    n(X),
+    _ = X + 1.
+circular(X) :-
+    n(X),
+    Y = Z + 1,
+    Z = Y - 1.
+n(X), W = V + X?

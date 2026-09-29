@@ -2,7 +2,7 @@ unexpected-token.dl:7:11: error: expected ':-', ',', '.' or '?', found a string 
 unexpected-token.dl:8:13: error: expected ':-', ',', '.' or '?', found an integer literal
 unexpected-token.dl:9:15: error: expected a literal, found ':-'
 unexpected-token.dl:10:11: error: expected a literal, found ','
-unexpected-token.dl:11:14: error: expected a literal, found '('
+unexpected-token.dl:11:14: error: expected a literal, found ')'
 unexpected-token.dl:12:13: error: expected a literal, found '?'
 unexpected-token.dl:13:25: error: expected ',' or '.', found a symbol
 unexpected-token.dl:14:24: error: expected ',' or '?', found a symbol

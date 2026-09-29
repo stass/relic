@@ -753,6 +753,18 @@ of `tc-cyclic` merges its largest round's 88 000 new tuples in 0.02 to
 thread the three retire within 0.7 per cent of the instructions they did
 with the striping alone, at the same peak.
 
+**Arithmetic,** specified in `specs/design-arithmetic.md`, in its section 16
+order.
+
+| Component | State |
+| --- | --- |
+| `lib/lex.c`, `lib/internal.h` | step 1, the front end: `+`, `-`, `*` and `/` are one operator token kind; `-` is always a token of its own, and an integer token carries the magnitude of its digits, clamped one past `INT64_MAX + 1`; the integer rule `relic_lex_integer()` is composed of the magnitude conversion `relic_lex_magnitude()` and the signed range check `relic_integer_signed()`, which the parser applies once the sign is known; `mod` stays a symbol token and `%` a comment |
+| `lib/parse.c`, `lib/ast.h` | expressions as comparison operands only, by the grammar of the design's section 3.2: binary operators left-associative, `*`, `/` and `mod` over `+` and `-`, unary minus tightest; a `-` before digits folded into a negative literal wherever a term stands, with or without space, so `INT64_MIN` is writable; `mod` an operator only after an operand, recognized by its spelling and never interned; a symbol or string operand of an operator, a missing operand or parenthesis, and nesting past `RELIC_MAX_EXPRESSION_DEPTH`, 32, in the text's descent or in the tree's height, each one diagnostic at the byte it concerns |
+| `lib/program.h`, `lib/expr.c`, `lib/rule.c` | a compiled comparison holds two expression trees over slots and constants, each node recording its height and its size in nodes; the pure questions every stage asks of a tree in `lib/expr.c`, among them `relic_comparison_assigns()`, the one statement of when an equality binds; safety is the closure of the design's section 5, the unbound message naming an assignment as the second way to bind |
+| `lib/explain.c`, `lib/magic.c` | a rule prints its expressions with exactly the parentheses their trees need; the rewrite copies, compares and hashes comparison trees |
+| `lib/plan.c` | a comparison over an operator, or an assignment, is refused as an internal error until the planner can place one |
+| `tests/` | `test_lex`: the operator tokens and the magnitude and sign rule; `test_parse`: 28 comparisons against the trees they build, negative literals in facts, heads and arguments, `mod` in its three roles, twelve mistakes at their columns, both nesting bounds met and exceeded in every shape and in malformed text, and a hundred thousand parentheses refused once; `test_rule`: the closure over thirteen programs, a compiled tree's slots, heights and sizes, and sixteen rules printed, read back and printed again alike; `arithmetic-depth`, `arithmetic-negative`, `arithmetic-unsafe`, and `unsafe-comparison` rewritten, since its `X = 42` is now an assignment |
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -994,7 +1006,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the four-byte identifier slot kept, batched insertion |
 | `specs/design-facts.md` | a program's facts as the tuples of their predicates' base stores: derived predicates and the relation each is read through, the all-or-nothing commit, seeding before the first pass, Magic over base views |
 | `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit |
-| `specs/design-arithmetic.md` | integer expressions as comparison operands, the equality that binds, the safety closure, computed integers in the frame and interned when stored, an undefined result as an evaluation error; accepted, not started |
+| `specs/design-arithmetic.md` | integer expressions as comparison operands, the equality that binds, the safety closure, computed integers in the frame and interned when stored, an undefined result as an evaluation error; step 1 of 5 implemented |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |

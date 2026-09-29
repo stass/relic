@@ -1,2 +1,2 @@
-<query 2>:1:1: error: variable X in the query is not bound by a positive body literal
-<query 3>:1:11: error: variable Z in the query is not bound by a positive body literal
+<query 2>:1:1: error: variable X in the query is not bound by a positive body literal or an assignment
+<query 3>:1:11: error: variable Z in the query is not bound by a positive body literal or an assignment

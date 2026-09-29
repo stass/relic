@@ -102,6 +102,11 @@ typedef struct relic_parser relic_parser_t;
  * The division between the last two is what keeps one exhaustion to one
  * message: whoever reported it says so by setting `failed`, and the boundary
  * speaks only for the refusals that went unreported.
+ *
+ * `expression_descent` counts the parentheses and unary minuses the parser
+ * is inside, which is the depth of its recursion into an expression.  Each
+ * production that raises it lowers it again on every way out, so it is zero
+ * between statements.
  */
 struct relic_parser {
 	relic_t			*ctx;
@@ -118,6 +123,7 @@ struct relic_parser {
 	relic_token_t		 token;		/* the current token */
 	uint32_t		 negation_symbol;
 	uint32_t		 anonymous_symbol;
+	unsigned int		 expression_descent;
 	bool			 reported;
 	bool			 failed;
 };
@@ -136,10 +142,19 @@ static bool	 atom_after_name(relic_parser_t *parser,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static bool	 body_append(relic_parser_t *parser,
 		    const relic_ast_literal_t *literal);
+static bool	 check_operand(relic_parser_t *parser,
+		    const relic_ast_expr_t *operand, enum relic_arith_op op,
+		    bool negation);
 static bool	 collect_body(relic_parser_t *parser,
 		    const relic_ast_literal_t *first,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
+static bool	 continue_product(relic_parser_t *parser,
+		    relic_ast_expr_t *first, relic_ast_expr_t **exprp);
+static bool	 continue_sum(relic_parser_t *parser, relic_ast_expr_t *first,
+		    relic_ast_expr_t **exprp);
 static const char *describe_token(const relic_token_t *token);
+static bool	 enter_nesting(relic_parser_t *parser,
+		    const relic_location_t *where);
 static bool	 expect(relic_parser_t *parser, enum relic_token_kind kind,
 		    const char *expected);
 static bool	 finish_fact(relic_parser_t *parser,
@@ -154,6 +169,9 @@ static bool	 finish_rule(relic_parser_t *parser,
 		    const relic_location_t *where);
 static bool	 head_is_positive(relic_parser_t *parser,
 		    const relic_ast_literal_t *head, const char *what);
+static bool	 integer_term(relic_parser_t *parser,
+		    const relic_token_t *digits, const relic_token_t *minus,
+		    relic_ast_term_t *term);
 static bool	 is_ground(const relic_ast_atom_t *atom);
 static bool	 keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
 static bool	 keep_literal(relic_parser_t *parser,
@@ -163,11 +181,30 @@ static int	 load_text(relic_t *ctx, const char *source_name,
 static int	 load_named_file(relic_t *ctx, const char *path);
 static int	 load_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream);
+static bool	 make_binary(relic_parser_t *parser, enum relic_arith_op op,
+		    const relic_location_t *where, relic_ast_expr_t *left,
+		    relic_ast_expr_t *right, relic_ast_expr_t **exprp);
+static bool	 make_leaf(relic_parser_t *parser, const relic_ast_term_t *term,
+		    relic_ast_expr_t **exprp);
+static bool	 make_negation(relic_parser_t *parser,
+		    const relic_location_t *where, relic_ast_expr_t *operand,
+		    relic_ast_expr_t **exprp);
+static bool	 node_fits(relic_parser_t *parser, unsigned int height,
+		    const relic_location_t *where);
 static const relic_ast_stmt_t *only_query(relic_parser_t *parser);
+static const char *operator_spelling(enum relic_arith_op op);
 static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static bool	 parse_comparison(relic_parser_t *parser,
-		    relic_ast_literal_t *literal, const relic_ast_term_t *left);
+		    relic_ast_literal_t *literal, relic_ast_expr_t *left);
+static bool	 parse_expression(relic_parser_t *parser,
+		    relic_ast_expr_t **exprp);
+static bool	 parse_inside_parentheses(relic_parser_t *parser,
+		    relic_ast_expr_t **exprp);
+static bool	 parse_parenthesized(relic_parser_t *parser,
+		    relic_ast_expr_t **exprp);
+static bool	 parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp);
+static bool	 parse_unary(relic_parser_t *parser, relic_ast_expr_t **exprp);
 static void	 parse_errorf(relic_parser_t *parser,
 		    const relic_location_t *where, const char *format, ...)
 		    RELIC_PRINTFLIKE(3, 4);
@@ -196,7 +233,10 @@ static bool	 stage_fact(relic_parser_t *parser,
 static void	 synchronize(relic_parser_t *parser);
 static bool	 term_from_token(relic_parser_t *parser,
 		    const relic_token_t *token, relic_ast_term_t *term);
+static bool	 token_begins_literal(const relic_token_t *token);
 static bool	 token_begins_term(const relic_token_t *token);
+static bool	 token_operator(const relic_parser_t *parser,
+		    enum relic_arith_op *opp);
 
 void
 relic_ast_program_init(relic_ast_program_t *program)
@@ -250,6 +290,20 @@ describe_token(const relic_token_t *token)
 		return ("a string literal");
 	case RELIC_TOKEN_INTEGER:
 		return ("an integer literal");
+	case RELIC_TOKEN_OPERATOR:
+		switch (token->arith) {
+		case RELIC_ARITH_ADD:
+			return ("'+'");
+		case RELIC_ARITH_SUBTRACT:
+			return ("'-'");
+		case RELIC_ARITH_MULTIPLY:
+			return ("'*'");
+		case RELIC_ARITH_DIVIDE:
+			return ("'/'");
+		case RELIC_ARITH_REMAINDER:
+			break;
+		}
+		return ("an operator");
 	case RELIC_TOKEN_COMPARE:
 		return ("a comparison operator");
 	case RELIC_TOKEN_IMPLIES:
@@ -343,12 +397,6 @@ report_lex_error(relic_parser_t *parser)
 	case RELIC_LEX_EXPECTED_NE:
 		parse_errorf(parser, &token->where, "expected '!='");
 		break;
-	case RELIC_LEX_INTEGER_RANGE:
-		parse_errorf(parser, &token->where,
-		    "integer literal out of range: %.*s%s",
-		    quoted_precision(token), token->text,
-		    quoted_suffix(token));
-		break;
 	case RELIC_LEX_INTEGER_TRAILING:
 		parse_errorf(parser, &token->where,
 		    "unexpected character %s after an integer literal",
@@ -431,7 +479,8 @@ expect(relic_parser_t *parser, enum relic_token_kind kind,
 }
 
 /*
- * Whether a term may begin with this token.
+ * Whether a term may begin with this token.  A `-` begins the negative
+ * integer literal it and the digits after it spell.
  *
  * Every kind is listed rather than defaulted, so that a token kind added
  * later is a build failure here instead of quietly beginning nothing.
@@ -445,6 +494,8 @@ token_begins_term(const relic_token_t *token)
 	case RELIC_TOKEN_STRING:
 	case RELIC_TOKEN_INTEGER:
 		return (true);
+	case RELIC_TOKEN_OPERATOR:
+		return (token->arith == RELIC_ARITH_SUBTRACT);
 	case RELIC_TOKEN_END:
 	case RELIC_TOKEN_COMPARE:
 	case RELIC_TOKEN_IMPLIES:
@@ -459,6 +510,72 @@ token_begins_term(const relic_token_t *token)
 
 	/* Unreachable; a token of no known kind begins nothing. */
 	return (false);
+}
+
+/*
+ * Whether a literal may begin with this token: whatever begins a term,
+ * since a predicate name is spelled as a symbol and a comparison may begin
+ * with any term, and a `(` or a `-` that begins a comparison's expression.
+ */
+static bool
+token_begins_literal(const relic_token_t *token)
+{
+	return (token_begins_term(token) || token->kind == RELIC_TOKEN_LPAREN);
+}
+
+/*
+ * Whether the current token is a binary operator, and which.  `mod` is a
+ * symbol everywhere else: it is the remainder operator only where an
+ * operator may stand, after an operand, where a symbol never could without
+ * a comma before it.  So nothing is reserved, and a predicate or a constant
+ * may still be called `mod`.
+ *
+ * `mod` is recognized by its spelling rather than interned beforehand, as
+ * `not` is: an interned spelling takes a symbol identifier in every program,
+ * and every identifier after it would move, and with them the stripes the
+ * program's keys fall in and the storage it reports.
+ */
+static bool
+token_operator(const relic_parser_t *parser, enum relic_arith_op *opp)
+{
+	const relic_token_t *token;
+
+	token = &parser->token;
+
+	if (token->kind == RELIC_TOKEN_OPERATOR) {
+		*opp = token->arith;
+		return (true);
+	}
+
+	if (token->kind == RELIC_TOKEN_SYMBOL && token->text_length == 3 &&
+	    bcmp(token->text, "mod", 3) == 0) {
+		*opp = RELIC_ARITH_REMAINDER;
+		return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * How an operator is written, as a message names it.
+ */
+static const char *
+operator_spelling(enum relic_arith_op op)
+{
+	switch (op) {
+	case RELIC_ARITH_ADD:
+		return ("+");
+	case RELIC_ARITH_SUBTRACT:
+		return ("-");
+	case RELIC_ARITH_MULTIPLY:
+		return ("*");
+	case RELIC_ARITH_DIVIDE:
+		return ("/");
+	case RELIC_ARITH_REMAINDER:
+		return ("mod");
+	}
+
+	return ("?");
 }
 
 /*
@@ -512,9 +629,8 @@ term_from_token(relic_parser_t *parser, const relic_token_t *token,
 		value.v.id = token->symbol;
 		break;
 	case RELIC_TOKEN_INTEGER:
-		value.type = RELIC_INTEGER;
-		value.v.integer = token->integer;
-		break;
+		return (integer_term(parser, token, NULL, term));
+	case RELIC_TOKEN_OPERATOR:
 	case RELIC_TOKEN_END:
 	case RELIC_TOKEN_COMPARE:
 	case RELIC_TOKEN_IMPLIES:
@@ -525,7 +641,8 @@ term_from_token(relic_parser_t *parser, const relic_token_t *token,
 	case RELIC_TOKEN_QUESTION:
 	case RELIC_TOKEN_ERROR:
 		/*
-		 * Every caller has established that the token begins a term,
+		 * Every caller has established that the token begins a
+		 * term, and has taken the `-` of a negative literal itself,
 		 * so this is unreachable.  It reports rather than assuming,
 		 * because assertions are compiled out of a release build and
 		 * a term built from the wrong token would become a wrong
@@ -546,9 +663,51 @@ term_from_token(relic_parser_t *parser, const relic_token_t *token,
 	return (true);
 }
 
+/*
+ * Build the integer term that the digits of `digits` spell, negated when
+ * `minus` is the `-` written before them and NULL otherwise.  The literal
+ * begins at the sign, which is where a message about it points.
+ *
+ * The range is checked here, with the sign known, rather than by the lexer:
+ * the magnitude of INT64_MIN fits only when it is negative, and a lexer that
+ * refused it would make INT64_MIN impossible to write.
+ */
+static bool
+integer_term(relic_parser_t *parser, const relic_token_t *digits,
+    const relic_token_t *minus, relic_ast_term_t *term)
+{
+	relic_value_t value;
+
+	bzero(term, sizeof(*term));
+	term->where = minus != NULL ? minus->where : digits->where;
+	term->kind = RELIC_TERM_CONSTANT;
+
+	value.type = RELIC_INTEGER;
+	if (relic_integer_signed(digits->magnitude, minus != NULL,
+	    &value.v.integer) != RELIC_INTEGER_VALID) {
+		parse_errorf(parser, &term->where,
+		    "integer literal out of range: %s%.*s%s",
+		    minus != NULL ? "-" : "", quoted_precision(digits),
+		    digits->text, quoted_suffix(digits));
+		return (false);
+	}
+
+	if (relic_value_intern(parser->ctx, &value, &term->u.constant) != 0) {
+		parser->failed = true;
+		return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Parse a term: a constant, a variable, or a negative integer literal, whose
+ * `-` and digits are two tokens, with or without space between them.
+ */
 static bool
 parse_term(relic_parser_t *parser, relic_ast_term_t *term)
 {
+	relic_token_t minus;
 	relic_token_t token;
 
 	if (!token_begins_term(&parser->token)) {
@@ -558,11 +717,410 @@ parse_term(relic_parser_t *parser, relic_ast_term_t *term)
 		return (false);
 	}
 
+	if (parser->token.kind == RELIC_TOKEN_OPERATOR) {
+		minus = parser->token;
+		if (!advance(parser))
+			return (false);
+
+		if (parser->token.kind != RELIC_TOKEN_INTEGER) {
+			parse_errorf(parser, &parser->token.where,
+			    "expected an integer literal, found %s",
+			    describe_token(&parser->token));
+			return (false);
+		}
+
+		token = parser->token;
+		if (!advance(parser))
+			return (false);
+
+		return (integer_term(parser, &token, &minus, term));
+	}
+
 	token = parser->token;
 	if (!advance(parser))
 		return (false);
 
 	return (term_from_token(parser, &token, term));
+}
+
+/*
+ * Expressions.
+ *
+ * The grammar, from the loosest binding to the tightest:
+ *
+ *	expression	:= product (("+" | "-") product)*
+ *	product		:= unary (("*" | "/" | "mod") unary)*
+ *	unary		:= "-" unary | primary
+ *	primary		:= integer | variable | symbol | string
+ *			 | "(" expression ")"
+ *
+ * Binary operators associate to the left, so each level is a loop that
+ * folds its operands into the tree as they are read, and only a parenthesis
+ * and a unary minus recurse.  Those are what expression_descent counts, and
+ * the 33rd is refused where it opens, before the parser enters it: that is
+ * what bounds the recursion however the text is shaped, including text that
+ * never builds a node.  Every node is refused too when it would be taller
+ * than RELIC_MAX_EXPRESSION_DEPTH, which bounds every later walk over the
+ * tree.
+ *
+ * A `-` directly before an integer literal is folded into the literal, as it
+ * is wherever a term stands, so `X = -1` holds the constant -1 and not the
+ * negation of 1, and INT64_MIN can be written.  Folding needs the token
+ * after the `-`, so the minus is consumed first and the decision made on
+ * what follows it.
+ *
+ * The leaves of a product and a sum are unary expressions, and a comparison
+ * whose left operand is a symbol has consumed that symbol before it knows
+ * it is reading an expression, so the two loops also continue from an
+ * operand already built.
+ */
+static bool
+parse_expression(relic_parser_t *parser, relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *first;
+
+	if (!parse_unary(parser, &first))
+		return (false);
+
+	return (continue_sum(parser, first, exprp));
+}
+
+/*
+ * A sum whose first unary operand, `first`, has been parsed.
+ */
+static bool
+continue_sum(relic_parser_t *parser, relic_ast_expr_t *first,
+    relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *left;
+	relic_ast_expr_t *operand;
+	relic_ast_expr_t *right;
+	relic_location_t where;
+	enum relic_arith_op op;
+
+	if (!continue_product(parser, first, &left))
+		return (false);
+
+	while (token_operator(parser, &op) &&
+	    (op == RELIC_ARITH_ADD || op == RELIC_ARITH_SUBTRACT)) {
+		where = parser->token.where;
+		if (!advance(parser))
+			return (false);
+
+		if (!parse_unary(parser, &operand))
+			return (false);
+		if (!continue_product(parser, operand, &right))
+			return (false);
+		if (!make_binary(parser, op, &where, left, right, &left))
+			return (false);
+	}
+
+	*exprp = left;
+
+	return (true);
+}
+
+/*
+ * A product whose first unary operand, `first`, has been parsed.
+ */
+static bool
+continue_product(relic_parser_t *parser, relic_ast_expr_t *first,
+    relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *left;
+	relic_ast_expr_t *right;
+	relic_location_t where;
+	enum relic_arith_op op;
+
+	left = first;
+
+	while (token_operator(parser, &op) &&
+	    (op == RELIC_ARITH_MULTIPLY || op == RELIC_ARITH_DIVIDE ||
+	    op == RELIC_ARITH_REMAINDER)) {
+		where = parser->token.where;
+		if (!advance(parser))
+			return (false);
+
+		if (!parse_unary(parser, &right))
+			return (false);
+		if (!make_binary(parser, op, &where, left, right, &left))
+			return (false);
+	}
+
+	*exprp = left;
+
+	return (true);
+}
+
+/*
+ * A unary expression: a negative integer literal, a negation, or a primary.
+ */
+static bool
+parse_unary(relic_parser_t *parser, relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *operand;
+	relic_ast_term_t term;
+	relic_token_t digits;
+	relic_token_t minus;
+	bool parsed;
+
+	if (parser->token.kind != RELIC_TOKEN_OPERATOR ||
+	    parser->token.arith != RELIC_ARITH_SUBTRACT)
+		return (parse_primary(parser, exprp));
+
+	minus = parser->token;
+	if (!advance(parser))
+		return (false);
+
+	if (parser->token.kind == RELIC_TOKEN_INTEGER) {
+		digits = parser->token;
+		if (!advance(parser))
+			return (false);
+		if (!integer_term(parser, &digits, &minus, &term))
+			return (false);
+
+		return (make_leaf(parser, &term, exprp));
+	}
+
+	if (!enter_nesting(parser, &minus.where))
+		return (false);
+	parsed = parse_unary(parser, &operand);
+	parser->expression_descent--;
+	if (!parsed)
+		return (false);
+
+	return (make_negation(parser, &minus.where, operand, exprp));
+}
+
+/*
+ * A primary: a term, or an expression in parentheses.  A parenthesis builds
+ * no node of its own, so redundant ones leave the tree as it would be
+ * without them.
+ */
+static bool
+parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp)
+{
+	relic_ast_term_t term;
+
+	if (parser->token.kind == RELIC_TOKEN_LPAREN)
+		return (parse_parenthesized(parser, exprp));
+
+	if (!token_begins_term(&parser->token)) {
+		parse_errorf(parser, &parser->token.where,
+		    "expected an operand, found %s",
+		    describe_token(&parser->token));
+		return (false);
+	}
+
+	if (!parse_term(parser, &term))
+		return (false);
+
+	return (make_leaf(parser, &term, exprp));
+}
+
+static bool
+parse_parenthesized(relic_parser_t *parser, relic_ast_expr_t **exprp)
+{
+	bool parsed;
+
+	if (!enter_nesting(parser, &parser->token.where))
+		return (false);
+	parsed = parse_inside_parentheses(parser, exprp);
+	parser->expression_descent--;
+
+	return (parsed);
+}
+
+/*
+ * The `(`, the expression and the `)` of a parenthesized expression, whose
+ * nesting the caller has counted.
+ */
+static bool
+parse_inside_parentheses(relic_parser_t *parser, relic_ast_expr_t **exprp)
+{
+	if (!advance(parser))
+		return (false);
+
+	if (!parse_expression(parser, exprp))
+		return (false);
+
+	return (expect(parser, RELIC_TOKEN_RPAREN, "an operator or ')'"));
+}
+
+/*
+ * Count one more parenthesis or unary minus the parser is inside, unless
+ * that would be more than an expression may nest, which is reported where
+ * the production opens.  The caller lowers the count again once the
+ * production has been parsed, whether or not it parsed.
+ */
+static bool
+enter_nesting(relic_parser_t *parser, const relic_location_t *where)
+{
+	if (parser->expression_descent == RELIC_MAX_EXPRESSION_DEPTH) {
+		parse_errorf(parser, where,
+		    "expression nested more than %d levels deep",
+		    RELIC_MAX_EXPRESSION_DEPTH);
+		return (false);
+	}
+
+	parser->expression_descent++;
+
+	return (true);
+}
+
+/*
+ * Whether a node of `height` may be built, reporting at its operator when it
+ * may not.  One message covers both bounds, since a reader fixes both the
+ * same way, by splitting the expression across assignments.
+ */
+static bool
+node_fits(relic_parser_t *parser, unsigned int height,
+    const relic_location_t *where)
+{
+	if (height <= RELIC_MAX_EXPRESSION_DEPTH)
+		return (true);
+
+	parse_errorf(parser, where, "expression nested more than %d levels deep",
+	    RELIC_MAX_EXPRESSION_DEPTH);
+
+	return (false);
+}
+
+/*
+ * Whether an expression may be an operand of an operator, reporting where it
+ * is written when it may not.  A constant's type is a property of its token,
+ * so a symbol or a string under an operator is a mistake that can be seen
+ * here, and is reported where it is written rather than left to make the
+ * comparison false for every binding.  A variable's type is a property of
+ * the tuples that bind it, and is not checked.
+ */
+static bool
+check_operand(relic_parser_t *parser, const relic_ast_expr_t *operand,
+    enum relic_arith_op op, bool negation)
+{
+	const relic_ast_term_t *term;
+	const char *spelling;
+	const char *bytes;
+	char named[RELIC_NAME_TEXT_MAX];
+
+	if (operand->kind != RELIC_AST_EXPR_TERM)
+		return (true);
+
+	term = &operand->u.term;
+	if (term->kind != RELIC_TERM_CONSTANT ||
+	    (term->u.constant & RELIC_DOM_TYPE_MASK) == RELIC_DOM_INTEGER)
+		return (true);
+
+	spelling = negation ? "-" : operator_spelling(op);
+
+	if ((term->u.constant & RELIC_DOM_TYPE_MASK) == RELIC_DOM_STRING) {
+		parse_errorf(parser, &term->where,
+		    "a string literal cannot be an operand of %s", spelling);
+		return (false);
+	}
+
+	bytes = relic_symbol_bytes(parser->ctx,
+	    term->u.constant & RELIC_DOM_INDEX_MASK, NULL);
+	parse_errorf(parser, &term->where,
+	    "symbol %s cannot be an operand of %s",
+	    relic_diag_name(bytes != NULL ? bytes : "?", named, sizeof(named)),
+	    spelling);
+
+	return (false);
+}
+
+/*
+ * A leaf of the tree, holding a term.
+ */
+static bool
+make_leaf(relic_parser_t *parser, const relic_ast_term_t *term,
+    relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *leaf;
+
+	leaf = parse_alloc(parser, 1, sizeof(*leaf));
+	if (leaf == NULL)
+		return (false);
+
+	bzero(leaf, sizeof(*leaf));
+	leaf->kind = RELIC_AST_EXPR_TERM;
+	leaf->where = term->where;
+	leaf->u.term = *term;
+	leaf->height = 1;
+
+	*exprp = leaf;
+
+	return (true);
+}
+
+/*
+ * A negation of `operand`, written at `where`.
+ */
+static bool
+make_negation(relic_parser_t *parser, const relic_location_t *where,
+    relic_ast_expr_t *operand, relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *node;
+	unsigned int height;
+
+	if (!check_operand(parser, operand, RELIC_ARITH_SUBTRACT, true))
+		return (false);
+
+	height = (unsigned int)operand->height + 1;
+	if (!node_fits(parser, height, where))
+		return (false);
+
+	node = parse_alloc(parser, 1, sizeof(*node));
+	if (node == NULL)
+		return (false);
+
+	bzero(node, sizeof(*node));
+	node->kind = RELIC_AST_EXPR_NEGATE;
+	node->where = *where;
+	node->u.operand = operand;
+	node->height = (uint8_t)height;
+
+	*exprp = node;
+
+	return (true);
+}
+
+/*
+ * `left op right`, the operator written at `where`.
+ */
+static bool
+make_binary(relic_parser_t *parser, enum relic_arith_op op,
+    const relic_location_t *where, relic_ast_expr_t *left,
+    relic_ast_expr_t *right, relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *node;
+	unsigned int height;
+
+	if (!check_operand(parser, left, op, false))
+		return (false);
+	if (!check_operand(parser, right, op, false))
+		return (false);
+
+	height = (unsigned int)(left->height > right->height ?
+	    left->height : right->height) + 1;
+	if (!node_fits(parser, height, where))
+		return (false);
+
+	node = parse_alloc(parser, 1, sizeof(*node));
+	if (node == NULL)
+		return (false);
+
+	bzero(node, sizeof(*node));
+	node->kind = RELIC_AST_EXPR_BINARY;
+	node->where = *where;
+	node->u.binary.left = left;
+	node->u.binary.right = right;
+	node->u.binary.op = op;
+	node->height = (uint8_t)height;
+
+	*exprp = node;
+
+	return (true);
 }
 
 /*
@@ -654,8 +1212,9 @@ keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
 }
 
 /*
- * Keep a literal's atom, if it has one.  A comparison holds its two operands
- * in the literal itself, so there is nothing of it outside to copy.
+ * Keep a literal's atom, if it has one.  A comparison's expressions are
+ * built in the tree's arena as they are parsed, so there is nothing of it
+ * outside to copy.
  */
 static bool
 keep_literal(relic_parser_t *parser, relic_ast_literal_t *literal)
@@ -716,21 +1275,27 @@ parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
 }
 
 /*
- * Parse the operator and right operand of a comparison whose left operand
- * has already been built.  The caller has established that the current token
- * is the operator.
+ * Parse the comparator and right operand of a comparison whose left operand
+ * has already been built.
  */
 static bool
 parse_comparison(relic_parser_t *parser, relic_ast_literal_t *literal,
-    const relic_ast_term_t *left)
+    relic_ast_expr_t *left)
 {
+	if (parser->token.kind != RELIC_TOKEN_COMPARE) {
+		parse_errorf(parser, &parser->token.where,
+		    "expected a comparison operator, found %s",
+		    describe_token(&parser->token));
+		return (false);
+	}
+
 	literal->kind = RELIC_LITERAL_COMPARISON;
-	literal->u.comparison.left = *left;
+	literal->u.comparison.left = left;
 	literal->u.comparison.op = parser->token.compare;
 	if (!advance(parser))
 		return (false);
 
-	return (parse_term(parser, &literal->u.comparison.right));
+	return (parse_expression(parser, &literal->u.comparison.right));
 }
 
 /*
@@ -745,19 +1310,16 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
     const char *expected,
     relic_ast_term_t scratch[static RELIC_MAX_ARITY])
 {
-	relic_ast_term_t left;
+	relic_ast_expr_t *left;
+	relic_ast_expr_t *leaf;
+	relic_ast_term_t term;
 	relic_token_t name;
+	enum relic_arith_op op;
 
 	bzero(literal, sizeof(*literal));
 	literal->where = parser->token.where;
 
-	/*
-	 * A literal begins with exactly the tokens a term begins with, which
-	 * is not a coincidence worth relying on silently: a predicate name is
-	 * spelled as a symbol, and a symbol is also a term, so the two sets
-	 * have the same members for different reasons.
-	 */
-	if (!token_begins_term(&parser->token)) {
+	if (!token_begins_literal(&parser->token)) {
 		parse_errorf(parser, &parser->token.where,
 		    "expected %s, found %s", expected,
 		    describe_token(&parser->token));
@@ -780,40 +1342,39 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 	}
 
 	/*
-	 * A symbol begins either an atom or a comparison it is the left
-	 * operand of, and the token after it decides which.  This is the
-	 * grammar's one ambiguity and the only place a decision waits for the
-	 * token of lookahead the parser already holds.
+	 * A symbol begins either an atom or a comparison whose left expression
+	 * begins with it, and the token after it decides which: a comparator
+	 * or an operator makes the symbol an operand.  This is the grammar's
+	 * one ambiguity and the only place a decision waits for the token of
+	 * lookahead the parser already holds.
 	 */
 	if (parser->token.kind == RELIC_TOKEN_SYMBOL) {
 		name = parser->token;
 		if (!advance(parser))
 			return (false);
 
-		if (parser->token.kind != RELIC_TOKEN_COMPARE) {
+		if (parser->token.kind != RELIC_TOKEN_COMPARE &&
+		    !token_operator(parser, &op)) {
 			literal->kind = RELIC_LITERAL_POSITIVE;
 
 			return (atom_after_name(parser, &name,
 			    &literal->u.atom, scratch));
 		}
 
-		if (!term_from_token(parser, &name, &left))
+		if (!term_from_token(parser, &name, &term))
+			return (false);
+		if (!make_leaf(parser, &term, &leaf))
+			return (false);
+		if (!continue_sum(parser, leaf, &left))
 			return (false);
 
-		return (parse_comparison(parser, literal, &left));
+		return (parse_comparison(parser, literal, left));
 	}
 
-	if (!parse_term(parser, &left))
+	if (!parse_expression(parser, &left))
 		return (false);
 
-	if (parser->token.kind != RELIC_TOKEN_COMPARE) {
-		parse_errorf(parser, &parser->token.where,
-		    "expected a comparison operator, found %s",
-		    describe_token(&parser->token));
-		return (false);
-	}
-
-	return (parse_comparison(parser, literal, &left));
+	return (parse_comparison(parser, literal, left));
 }
 
 /*
@@ -1187,9 +1748,9 @@ parser_init(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 	TAILQ_INIT(&parser->statements);
 
 	/*
-	 * The two spellings the parser recognizes are interned once, so that
-	 * every literal and every variable is matched against them by an
-	 * integer comparison rather than by comparing bytes.
+	 * The two spellings the parser recognizes wherever a literal or a
+	 * variable is read are interned once, so that each is matched against
+	 * them by an integer comparison rather than by comparing bytes.
 	 */
 	if (relic_symbol_intern(ctx, "not", 3, &parser->negation_symbol) != 0)
 		return (-1);
