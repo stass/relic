@@ -994,6 +994,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-evaluation-cost.md` | what a derivation costs: views bounding a round, the placed delta and its frontier, the four-byte identifier slot kept, batched insertion |
 | `specs/design-facts.md` | a program's facts as the tuples of their predicates' base stores: derived predicates and the relation each is read through, the all-or-nothing commit, seeding before the first pass, Magic over base views |
 | `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit |
+| `specs/design-arithmetic.md` | integer expressions as comparison operands, the equality that binds, the safety closure, computed integers in the frame and interned when stored, an undefined result as an evaluation error; accepted, not started |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
@@ -1006,7 +1007,7 @@ release tarball.
 
 ## Decisions taken
 
-Recorded as D-1 through D-25 in `relic-plan.md`: D-1 to D-19 in section
+Recorded as D-1 through D-26 in `relic-plan.md`: D-1 to D-19 in section
 1, the later ones after section 9. The three that constrain everything
 else:
 

@@ -228,7 +228,9 @@ give the views, the frontier and the choice between the plans.
 Equality is domain-identifier equality, which is exact because everything is
 interned. Ordering of symbols and strings is bytewise, not locale collation.
 Cross-type equality is false; cross-type ordering filters the binding out and
-is reported once per rule at verbosity 2. `=` is a filter and does not bind.
+is reported once per rule at verbosity 2. `=` is a filter and does not bind
+when both of its sides are bound; an equality with one free side and one
+bound side binds, per D-26.
 
 ### D-12 Generated names cannot collide
 
@@ -266,8 +268,9 @@ unexamined, and output is byte-transparent.
 
 Converted into `int64_t` by one integer rule, `relic_lex_integer()`, which
 table import shares; out of range is a parse error naming the literal. A `-`
-immediately preceding a digit is part of the literal token, which is
-unambiguous because v1 has no arithmetic. `INT64_MIN` is representable.
+is never part of the literal token: the lexer converts a magnitude and the
+parser joins the sign, per D-26, so `-` can be an operator. `INT64_MIN` is
+representable.
 
 ### D-17 A query owns its answer
 
@@ -1464,3 +1467,24 @@ repays the threads. The pool's threads call no caller code and block every
 signal; a build without POSIX threads or C11 atomics, or configured
 `--disable-threads`, has a pool of the calling thread alone. Specified in
 `specs/design-parallel.md`.
+
+### D-26 Arithmetic binds through equality and fails on an undefined result
+
+An integer expression over `+`, `-`, `*`, `/`, `mod`, unary `-` and
+parentheses may stand as a comparison operand, and nowhere else. An
+equality whose one side is a variable nothing before it binds, and whose
+other side is bound, binds that variable; safety is the closure of the
+bound set over such equalities, still one set computation. An operand that
+is not an integer makes the comparison false, as a cross-type ordering
+does; a result that does not fit `int64_t`, or a zero divisor, fails the
+evaluation as a limit does, because dropping the binding would, through
+negation, derive an affirmative answer the program denies. So a strategy
+that evaluates more bindings may fail where one that evaluates fewer
+answers, and every strategy that answers gives the answer over the
+integers; the equivalences, the Magic fallback and streaming are amended to
+say so. A computed integer lives in the frame, is looked up read-only, and
+is interned only when a tuple holding it is stored, with its identifier
+predicted from the table's count so that a parallel round publishes
+nothing before its last phase; the integer table is charged to the memory
+limit. Reverses the binding half of D-11 and the lexer's half of D-16.
+Specified in `specs/design-arithmetic.md`.
