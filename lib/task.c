@@ -40,26 +40,55 @@
  * candidates lie together in its worker's buffer, which is how the merge
  * finds them in task order.
  *
+ * An integer the value table lacked when the round began, which a column of
+ * the batch holds pending, is kept among the worker's pending integers, and
+ * the column is rewritten to name it there before the batch is screened.
+ * Equal integers then hold equal columns, so a tuple holding one is
+ * screened by value as any other is, and the merge gives every such
+ * integer its identifier.
+ *
  * The buffers are charged to the memory account as they grow.  A growth the
  * limit or the allocator refuses is not reported and is not a failure: the
  * task gives up, the job is abandoned, and the round runs again serially,
  * where whatever refuses it reports itself.
  */
 
+typedef struct relic_candidates_growth relic_candidates_growth_t;
+
+/*
+ * What the candidate arrays are grown by: `tuples` more candidates of
+ * `words` columns in all, and `integers` more pending integers.
+ */
+struct relic_candidates_growth {
+	size_t	tuples;
+	size_t	words;
+	size_t	integers;
+};
+
+static size_t	 array_bytes_after(size_t capacity, size_t needed,
+		    bool grows, size_t size);
 static uint32_t	 candidate_rehash(uint32_t position, void *ctx);
 static int	 candidates_add(relic_candidates_t *candidates,
 		    relic_account_t *account, size_t target,
 		    const relic_dom_t *tuple, uint16_t arity, uint64_t hash);
 static size_t	 candidates_bytes(const relic_candidates_t *candidates);
-static size_t	 candidates_bytes_after_add(
-		    const relic_candidates_t *candidates, uint16_t arity);
+static size_t	 candidates_bytes_after(const relic_candidates_t *candidates,
+		    const relic_candidates_growth_t *growth);
 static int	 candidates_grow(relic_candidates_t *candidates,
-		    uint16_t arity);
+		    const relic_candidates_growth_t *growth);
 static bool	 candidates_hold(const relic_candidates_t *candidates,
 		    size_t target, const relic_dom_t *tuple, uint16_t arity,
 		    uint64_t hash);
+static int	 candidates_mark_integer(relic_candidates_t *candidates,
+		    relic_account_t *account, int64_t integer,
+		    relic_dom_t *markerp);
 static int	 candidates_reserve(relic_candidates_t *candidates,
-		    relic_account_t *account, uint16_t arity);
+		    relic_account_t *account,
+		    const relic_candidates_growth_t *growth);
+static uint32_t	 integer_rehash(uint32_t position, void *ctx);
+static int	 mark_pending(relic_candidates_t *candidates,
+		    relic_account_t *account, relic_scratch_t *scratch,
+		    uint16_t arity);
 static void	 place_seed(relic_scratch_t *scratch, const relic_rule_t *rule);
 static int	 run_plan_piece(const relic_round_job_t *job,
 		    relic_worker_t *worker, const relic_round_item_t *item,
@@ -94,7 +123,8 @@ relic_round_run_task(void *argument, size_t task, size_t worker_index)
  * Run one task on a worker, gathering its candidates after those of the
  * worker's earlier tasks, and record where they lie, the first mixed-type
  * comparison it met and the work it did.  Returns 0, or -1 when the
- * worker's candidates could not grow or have outgrown the tuple limit.
+ * worker's candidates could not grow or have outgrown the tuple limit, or
+ * the task met an evaluation error, which the serial run reports.
  */
 static int
 run_task(const relic_round_job_t *job, relic_worker_t *worker,
@@ -158,7 +188,10 @@ place_seed(relic_scratch_t *scratch, const relic_rule_t *rule)
 
 /*
  * Run a task's plan over its piece, or over its whole first view when it is
- * not cut, screening each batch as it fills.
+ * not cut, screening each batch as it fills.  A plan that met an evaluation
+ * error has ended, and what its batch holds is not screened: the round is
+ * abandoned, and its serial run meets the error, or one before it, and
+ * reports it.
  */
 static int
 run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
@@ -176,6 +209,8 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
 
 	do {
 		status = relic_exec_run(scratch);
+		if (scratch->error.where != NULL)
+			return (-1);
 		if (screen_batch(job, worker, item->target) != 0)
 			return (-1);
 	} while (status == RELIC_EXEC_BATCH_FULL);
@@ -186,9 +221,11 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
 /*
  * Screen the scratch's batch of tuples for target `target` and empty it.
  * Each is a derivation.  One the frozen store holds is dropped, and so is
- * one among the worker's candidates; any other becomes a candidate.
- * Returns 0, or -1 when the candidates could not grow or now hold more
- * tuples than the tuple limit could admit.
+ * one among the worker's candidates; any other becomes a candidate.  A
+ * tuple holding a pending integer is never in the frozen store, whose
+ * relations hold only integers the table held.  Returns 0, or -1 when the
+ * candidates could not grow or now hold more tuples than the tuple limit
+ * could admit.
  */
 static int
 screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
@@ -206,6 +243,9 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 	relation = job->round->targets[target];
 	arity = relic_relation_arity(relation);
 
+	if (mark_pending(&worker->candidates, job->account, scratch,
+	    arity) != 0)
+		return (-1);
 	relic_relation_screen(relation, scratch->batch, scratch->batch_count,
 	    hashes, held);
 
@@ -226,6 +266,91 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 		return (-1);
 
 	return (0);
+}
+
+/*
+ * Rewrite every pending marker in the scratch's batch of `arity`-column
+ * tuples, which names an integer among the batch's pending integers, to
+ * the marker naming it among the worker's, and empty the batch's pending
+ * integers.  Returns 0, or -1 when the worker's integers could not grow.
+ */
+static int
+mark_pending(relic_candidates_t *candidates, relic_account_t *account,
+    relic_scratch_t *scratch, uint16_t arity)
+{
+	relic_dom_t *column;
+	size_t columns;
+	size_t i;
+
+	columns = scratch->batch_count * arity;
+	for (i = 0; i < columns && scratch->pending_count > 0; i++) {
+		column = &scratch->batch[i];
+		if ((*column & RELIC_DOM_TYPE_MASK) != 0)
+			continue;
+
+		assert(*column >= 1 && *column <= scratch->pending_count);
+		if (candidates_mark_integer(candidates, account,
+		    scratch->pending[*column - 1], column) != 0)
+			return (-1);
+	}
+	scratch->pending_count = 0;
+
+	return (0);
+}
+
+/*
+ * Set *markerp to the marker of `integer` among the worker's pending
+ * integers, its position there plus one, adding it when the worker has not
+ * met it.  Returns 0, or -1 when the integers could not grow, or a marker
+ * for one more would need type bits.
+ */
+static int
+candidates_mark_integer(relic_candidates_t *candidates,
+    relic_account_t *account, int64_t integer, relic_dom_t *markerp)
+{
+	relic_candidates_growth_t growth;
+	relic_idprobe_t probe;
+	uint32_t position;
+	uint32_t hash;
+
+	hash = relic_hash_int64(candidates->hash_seed, integer);
+	relic_idprobe_open(&probe, &candidates->integer_screen, hash);
+	while (relic_idprobe_next(&probe, &position)) {
+		if (candidates->integers[position - 1] == integer) {
+			*markerp = position;
+			return (0);
+		}
+	}
+
+	if (candidates->integer_count >= RELIC_DOM_INDEX_MASK)
+		return (-1);
+	bzero(&growth, sizeof(growth));
+	growth.integers = 1;
+	if (candidates_reserve(candidates, account, &growth) != 0)
+		return (-1);
+
+	candidates->integers[candidates->integer_count] = integer;
+	candidates->integer_count++;
+	relic_idtab_place(&candidates->integer_screen, hash,
+	    (uint32_t)candidates->integer_count);
+	*markerp = (relic_dom_t)candidates->integer_count;
+
+	return (0);
+}
+
+/*
+ * The screen hash of the pending integer at position `position` minus one,
+ * for the integer screen to use when it grows.
+ */
+static uint32_t
+integer_rehash(uint32_t position, void *ctx)
+{
+	const relic_candidates_t *candidates;
+
+	candidates = ctx;
+
+	return (relic_hash_int64(candidates->hash_seed,
+	    candidates->integers[position - 1]));
 }
 
 /*
@@ -277,11 +402,17 @@ static int
 candidates_add(relic_candidates_t *candidates, relic_account_t *account,
     size_t target, const relic_dom_t *tuple, uint16_t arity, uint64_t hash)
 {
+	relic_candidates_growth_t growth;
 	relic_candidate_t *candidate;
 	size_t stripe;
 	uint16_t column;
 
-	if (candidates_reserve(candidates, account, arity) != 0)
+	if (candidates->count >= RELIC_TUPLE_MAX)
+		return (-1);
+	bzero(&growth, sizeof(growth));
+	growth.tuples = 1;
+	growth.words = arity;
+	if (candidates_reserve(candidates, account, &growth) != 0)
 		return (-1);
 
 	candidate = &candidates->entries[candidates->count];
@@ -307,26 +438,23 @@ candidates_add(relic_candidates_t *candidates, relic_account_t *account,
 }
 
 /*
- * Make room for one more candidate of `arity` columns, charging the growth
- * to the account before it is made and giving back whatever was charged and
- * not grown.  Returns 0, or -1 when the limit refused the charge or the
- * allocator the growth.
+ * Make room for what `growth` adds, charging the growth to the account
+ * before it is made and giving back whatever was charged and not grown.
+ * Returns 0, or -1 when the limit refused the charge or the allocator the
+ * growth.
  *
  * A worker holds no more candidates than a relation holds tuples, which
  * also keeps the screen's positions plus one inside its identifiers.
  */
 static int
 candidates_reserve(relic_candidates_t *candidates, relic_account_t *account,
-    uint16_t arity)
+    const relic_candidates_growth_t *growth)
 {
 	size_t projected;
 	size_t grown;
 	int status;
 
-	if (candidates->count >= RELIC_TUPLE_MAX)
-		return (-1);
-
-	projected = candidates_bytes_after_add(candidates, arity);
+	projected = candidates_bytes_after(candidates, growth);
 	if (projected == candidates->charged)
 		return (0);
 	if (projected == SIZE_MAX)
@@ -337,7 +465,7 @@ candidates_reserve(relic_candidates_t *candidates, relic_account_t *account,
 	    projected - candidates->charged))
 		return (-1);
 
-	status = candidates_grow(candidates, arity);
+	status = candidates_grow(candidates, growth);
 
 	grown = candidates_bytes(candidates);
 	assert(grown <= projected);
@@ -348,37 +476,64 @@ candidates_reserve(relic_candidates_t *candidates, relic_account_t *account,
 }
 
 /*
- * Grow the candidate arrays to hold one more candidate of `arity` columns.
- * Whatever a failed growth managed is kept, and counted by the caller.
+ * Grow the candidate arrays by `growth`: those of the candidates when it
+ * adds a candidate, whatever its arity, and those of the pending integers
+ * when it adds an integer.  Whatever a failed growth managed is kept, and
+ * counted by the caller.
  */
 static int
-candidates_grow(relic_candidates_t *candidates, uint16_t arity)
+candidates_grow(relic_candidates_t *candidates,
+    const relic_candidates_growth_t *growth)
 {
 	relic_candidate_t *entries;
 	uint8_t *stripes;
 	relic_dom_t *words;
+	int64_t *integers;
 
-	entries = relic_grow_array(candidates->entries, &candidates->capacity,
-	    candidates->count + 1, sizeof(*candidates->entries));
-	if (entries == NULL)
-		return (-1);
-	candidates->entries = entries;
+	if (growth->tuples > 0) {
+		entries = relic_grow_array(candidates->entries,
+		    &candidates->capacity, candidates->count + growth->tuples,
+		    sizeof(*candidates->entries));
+		if (entries == NULL)
+			return (-1);
+		candidates->entries = entries;
 
-	stripes = relic_grow_array(candidates->stripes,
-	    &candidates->stripe_capacity, candidates->count + 1,
-	    sizeof(*candidates->stripes));
-	if (stripes == NULL)
-		return (-1);
-	candidates->stripes = stripes;
+		stripes = relic_grow_array(candidates->stripes,
+		    &candidates->stripe_capacity,
+		    candidates->count + growth->tuples,
+		    sizeof(*candidates->stripes));
+		if (stripes == NULL)
+			return (-1);
+		candidates->stripes = stripes;
 
-	words = relic_grow_array(candidates->words, &candidates->word_capacity,
-	    candidates->word_count + arity, sizeof(*candidates->words));
-	if (words == NULL)
-		return (-1);
-	candidates->words = words;
+		words = relic_grow_array(candidates->words,
+		    &candidates->word_capacity,
+		    candidates->word_count + growth->words,
+		    sizeof(*candidates->words));
+		if (words == NULL)
+			return (-1);
+		candidates->words = words;
 
-	return (relic_idtab_reserve(&candidates->screen, 1, candidate_rehash,
-	    candidates));
+		if (relic_idtab_reserve(&candidates->screen, growth->tuples,
+		    candidate_rehash, candidates) != 0)
+			return (-1);
+	}
+
+	if (growth->integers > 0) {
+		integers = relic_grow_array(candidates->integers,
+		    &candidates->integer_capacity,
+		    candidates->integer_count + growth->integers,
+		    sizeof(*candidates->integers));
+		if (integers == NULL)
+			return (-1);
+		candidates->integers = integers;
+
+		if (relic_idtab_reserve(&candidates->integer_screen,
+		    growth->integers, integer_rehash, candidates) != 0)
+			return (-1);
+	}
+
+	return (0);
 }
 
 /*
@@ -390,43 +545,66 @@ candidates_bytes(const relic_candidates_t *candidates)
 	return (candidates->capacity * sizeof(*candidates->entries) +
 	    candidates->stripe_capacity * sizeof(*candidates->stripes) +
 	    candidates->word_capacity * sizeof(*candidates->words) +
-	    relic_idtab_bytes(&candidates->screen));
+	    relic_idtab_bytes(&candidates->screen) +
+	    candidates->integer_capacity * sizeof(*candidates->integers) +
+	    relic_idtab_bytes(&candidates->integer_screen));
 }
 
 /*
- * The bytes the candidate arrays would hold once grown for one more
- * candidate of `arity` columns, asked of the growth policies they grow by,
- * or SIZE_MAX when that growth could not happen.
+ * The bytes the candidate arrays would hold once grown by `growth`, asked
+ * of the growth policies they grow by, or SIZE_MAX when that growth could
+ * not happen.  Which arrays grow is what candidates_grow() grows.
  */
 static size_t
-candidates_bytes_after_add(const relic_candidates_t *candidates,
-    uint16_t arity)
+candidates_bytes_after(const relic_candidates_t *candidates,
+    const relic_candidates_growth_t *growth)
 {
-	size_t entry_capacity;
-	size_t stripe_capacity;
-	size_t word_capacity;
+	bool tuples;
+	bool integers;
 	size_t bytes;
 
-	entry_capacity = relic_grow_array_capacity(candidates->capacity,
-	    candidates->count + 1);
-	stripe_capacity = relic_grow_array_capacity(
-	    candidates->stripe_capacity, candidates->count + 1);
-	word_capacity = relic_grow_array_capacity(candidates->word_capacity,
-	    candidates->word_count + arity);
-	if (entry_capacity == 0 || stripe_capacity == 0 || word_capacity == 0)
-		return (SIZE_MAX);
+	tuples = growth->tuples > 0;
+	integers = growth->integers > 0;
 
-	bytes = relic_saturating_sum(
-	    relic_saturating_product(entry_capacity,
-	    sizeof(*candidates->entries)),
-	    relic_saturating_product(stripe_capacity,
+	bytes = array_bytes_after(candidates->capacity,
+	    candidates->count + growth->tuples, tuples,
+	    sizeof(*candidates->entries));
+	bytes = relic_saturating_sum(bytes,
+	    array_bytes_after(candidates->stripe_capacity,
+	    candidates->count + growth->tuples, tuples,
 	    sizeof(*candidates->stripes)));
 	bytes = relic_saturating_sum(bytes,
-	    relic_saturating_product(word_capacity,
+	    array_bytes_after(candidates->word_capacity,
+	    candidates->word_count + growth->words, tuples,
 	    sizeof(*candidates->words)));
+	bytes = relic_saturating_sum(bytes,
+	    relic_idtab_bytes_after_reserve(&candidates->screen,
+	    growth->tuples));
+	bytes = relic_saturating_sum(bytes,
+	    array_bytes_after(candidates->integer_capacity,
+	    candidates->integer_count + growth->integers, integers,
+	    sizeof(*candidates->integers)));
 
 	return (relic_saturating_sum(bytes,
-	    relic_idtab_bytes_after_reserve(&candidates->screen, 1)));
+	    relic_idtab_bytes_after_reserve(&candidates->integer_screen,
+	    growth->integers)));
+}
+
+/*
+ * The bytes a growable array of `capacity` items of `size` bytes holds
+ * once grown to hold `needed` when it `grows`, or its present bytes when
+ * it does not; SIZE_MAX when it could not grow.
+ */
+static size_t
+array_bytes_after(size_t capacity, size_t needed, bool grows, size_t size)
+{
+	if (grows) {
+		capacity = relic_grow_array_capacity(capacity, needed);
+		if (capacity == 0)
+			return (SIZE_MAX);
+	}
+
+	return (relic_saturating_product(capacity, size));
 }
 
 /*
@@ -435,10 +613,12 @@ candidates_bytes_after_add(const relic_candidates_t *candidates,
  * one, and those comparisons read columns far from the table.
  */
 void
-relic_candidates_init(relic_candidates_t *candidates)
+relic_candidates_init(relic_candidates_t *candidates, uint64_t hash_seed)
 {
 	bzero(candidates, sizeof(*candidates));
 	relic_idtab_init(&candidates->screen, true);
+	relic_idtab_init(&candidates->integer_screen, true);
+	candidates->hash_seed = hash_seed;
 }
 
 void
@@ -449,16 +629,21 @@ relic_candidates_release(relic_candidates_t *candidates,
 	relic_free_array(candidates->stripes);
 	relic_free_array(candidates->words);
 	relic_idtab_reset(&candidates->screen);
+	relic_free_array(candidates->integers);
+	relic_idtab_reset(&candidates->integer_screen);
 	relic_account_release_round(account, candidates->charged);
 
 	candidates->entries = NULL;
 	candidates->stripes = NULL;
 	candidates->words = NULL;
+	candidates->integers = NULL;
 	bzero(candidates->by_stripe, sizeof(candidates->by_stripe));
 	candidates->count = 0;
 	candidates->capacity = 0;
 	candidates->stripe_capacity = 0;
 	candidates->word_count = 0;
 	candidates->word_capacity = 0;
+	candidates->integer_count = 0;
+	candidates->integer_capacity = 0;
 	candidates->charged = 0;
 }

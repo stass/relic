@@ -62,6 +62,7 @@
 #include "programs.h"
 
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
+#define	SCENARIO_COMPUTE	"a computing round out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
 #define	SCENARIO_ENTROPY	"context creation fails without entropy"
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
@@ -194,6 +195,17 @@
  */
 #define	EVAL_CHAIN	40
 #define	EVAL_SWEEP	8192
+
+/*
+ * The computing sweep's program is the closure of a chain of this many
+ * edges between numbered nodes, above which rules compute integers the value
+ * table lacks: one for each path, a few each derived many times over, and
+ * one per round of a recursion along the chain.  Every round is deferred,
+ * so a refusal can land in a worker's integers, in the merge's gathering of
+ * them or in the integer table's growth, as well as anywhere the evaluation
+ * sweep reaches.
+ */
+#define	COMPUTE_CHAIN	24
 
 /*
  * The materialization sweep's program is a chain of this many predicates,
@@ -331,6 +343,12 @@ static void	 an_index_survives_a_failed_allocation(void);
 static bool	 index_finds_every_tuple(const relic_relation_t *rel,
 		    uint32_t position);
 static size_t	 storage_by_hand(const relic_t *ctx);
+static void	 a_computing_round_out_of_memory_can_be_retried(void);
+static char	*compute_sweep_program(void);
+static bool	 integer_tables_agree(const relic_t *ctx,
+		    const relic_t *reference);
+static void	 sweep_compute_retry(const char *program, size_t threads,
+		    const relic_t *reference);
 static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
 static void	 sweep_query_retry(const eval_sweep_t *sweep,
 		    const char *program);
@@ -2518,6 +2536,205 @@ wide_sweep_program(void)
 }
 
 /*
+ * Materialize a program whose deferred rounds compute integers with the nth
+ * allocation refused, on the calling thread and then on four, and then again
+ * with the allocator restored.
+ *
+ * A run that fails says so once, and leaves the account holding what the
+ * relations and the integer table hold and nothing of a round's.  The
+ * integers a failed run interned are the first ones an undisturbed run
+ * interns, in its order, since a round either merged whole or ran serially
+ * up to the failure; so the retry ends with the integer table an
+ * undisturbed run ends with, the same integers under the same identifiers
+ * in storage of the same size.
+ */
+static void
+a_computing_round_out_of_memory_can_be_retried(void)
+{
+	relic_t *reference;
+	char *program;
+
+	program = compute_sweep_program();
+	reference = relic_create();
+	if (program == NULL || reference == NULL ||
+	    relic_load_string(reference, "compute.dl", program) != 0 ||
+	    relic_materialize(reference) != 0) {
+		check(false, SCENARIO_COMPUTE, "the sweep program materializes");
+		relic_destroy(reference);
+		free(program);
+		return;
+	}
+
+	sweep_compute_retry(program, 1, reference);
+	sweep_compute_retry(program, 4, reference);
+
+	relic_destroy(reference);
+	free(program);
+}
+
+/*
+ * One thread count's sweep of a_computing_round_out_of_memory_can_be_retried().
+ */
+static void
+sweep_compute_retry(const char *program, size_t threads,
+    const relic_t *reference)
+{
+	relic_config_t config;
+	size_t completed;
+	size_t refused;
+	size_t workers_refused;
+	long budget;
+	bool undisturbed;
+
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.threads = threads;
+	workers_refused = relic_atomic_size_load(&worker_refusals);
+
+	completed = 0;
+	refused = 0;
+	undisturbed = false;
+
+	for (budget = 0; budget < EVAL_SWEEP && !undisturbed; budget++) {
+		relic_t *ctx;
+		size_t before;
+		int status;
+
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_COMPUTE,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "compute.dl", program) != 0 ||
+		    relic_check(ctx) != 0) {
+			check(false, SCENARIO_COMPUTE,
+			    "the program should load and check before the "
+			    "sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+		before = allocations_made();
+		refuse_allocations_after(budget);
+		status = relic_materialize(ctx);
+		serve_every_allocation();
+		undisturbed = allocations_made() - before <= (size_t)budget;
+
+		if (status == 0)
+			completed++;
+		else
+			refused++;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_COMPUTE, "on %zu thread(s), a materialization "
+		    "that %s should report %d message(s), not %zu, with "
+		    "allocation %ld refused", threads,
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(ctx->account.arena_bytes == 0 &&
+		    ctx->account.round_bytes == 0 &&
+		    ctx->account.store_bytes == storage_by_hand(ctx) &&
+		    ctx->account.value_bytes == relic_value_integer_bytes(ctx),
+		    SCENARIO_COMPUTE, "on %zu thread(s), the account should "
+		    "hold what the relations and the integer table hold and no "
+		    "arena's or round's, with allocation %ld refused", threads,
+		    budget);
+
+		status = relic_materialize(ctx);
+		checkf(status == 0 && relic_relation_total_tuples(ctx) ==
+		    relic_relation_total_tuples(reference), SCENARIO_COMPUTE,
+		    "on %zu thread(s), the retry should hold %zu tuples, not "
+		    "%zu, with allocation %ld refused", threads,
+		    relic_relation_total_tuples(reference),
+		    relic_relation_total_tuples(ctx), budget);
+		checkf(integer_tables_agree(ctx, reference), SCENARIO_COMPUTE,
+		    "on %zu thread(s), the retry should hold the integers an "
+		    "undisturbed run holds, with allocation %ld refused",
+		    threads, budget);
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0 && undisturbed, SCENARIO_COMPUTE,
+	    "on %zu thread(s), the sweep should reach a materialization "
+	    "that fails and one that completes undisturbed, in %d attempts",
+	    threads, EVAL_SWEEP);
+	workers_refused = relic_atomic_size_load(&worker_refusals) -
+	    workers_refused;
+	checkf(threads < 2 || !THREADS_AVAILABLE || workers_refused > 0,
+	    SCENARIO_COMPUTE, "on %zu thread(s), the sweep should refuse an "
+	    "allocation on a thread of the pool", threads);
+}
+
+/*
+ * Whether a context holds the integers `reference` holds, under the same
+ * identifiers, in a table of the same size.
+ */
+static bool
+integer_tables_agree(const relic_t *ctx, const relic_t *reference)
+{
+	const relic_valtab_t *table;
+	const relic_valtab_t *expected;
+
+	table = &ctx->values;
+	expected = &reference->values;
+	if (table->integer_count != expected->integer_count ||
+	    relic_value_integer_bytes(ctx) !=
+	    relic_value_integer_bytes(reference))
+		return (false);
+
+	return (table->integer_count == 0 || bcmp(table->integers,
+	    expected->integers, table->integer_count *
+	    sizeof(*table->integers)) == 0);
+}
+
+/*
+ * The computing sweep's program: the chain n0 -> n1 -> ... of COMPUTE_CHAIN
+ * edges, each node's number, the closure, and the rules computing from it.
+ */
+static char *
+compute_sweep_program(void)
+{
+	char *text;
+	size_t used;
+	size_t size;
+	unsigned int i;
+
+	size = (COMPUTE_CHAIN + 1) * 48 + 512;
+	text = malloc(size);
+	if (text == NULL)
+		return (NULL);
+
+	used = (size_t)snprintf(text, size,
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n"
+	    "span(K) :- path(X, Y), rank(X, I), rank(Y, J),\n"
+	    "    K = I * 1000 + J + 100000.\n"
+	    "width(W) :- path(X, Y), rank(X, I), rank(Y, J),\n"
+	    "    W = J - I + 5000.\n"
+	    "level(n0, D) :- rank(n0, I), D = I + 7000.\n"
+	    "level(Y, E) :- level(X, D), edge(X, Y), E = D + 1.\n");
+
+	for (i = 0; i <= COMPUTE_CHAIN && used < size; i++) {
+		used += (size_t)snprintf(text + used, size - used,
+		    "rank(n%u, %u).\n", i, i);
+		if (i < COMPUTE_CHAIN && used < size)
+			used += (size_t)snprintf(text + used, size - used,
+			    "edge(n%u, n%u).\n", i, i + 1);
+	}
+	if (used >= size) {
+		free(text);
+		return (NULL);
+	}
+
+	return (text);
+}
+
+/*
  * Materializing a program with many predicates runs out of memory while the
  * evaluation is being set up or a component planned, and says so exactly
  * once however many of its requests the exhaustion refused.  The relations it
@@ -2726,6 +2943,7 @@ main(void)
 	a_relation_survives_a_failed_allocation();
 	an_index_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
+	a_computing_round_out_of_memory_can_be_retried();
 	a_materialization_out_of_memory_reports_once();
 	an_abandoned_rewrite_out_of_memory_reports_once();
 	an_added_fact_or_collected_answer_reports_once();

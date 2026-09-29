@@ -123,7 +123,9 @@ struct relic_round_task {
  * A tuple a worker derived that the round's frozen store does not hold and
  * that none of the worker's earlier candidates is: where its columns begin
  * in the worker's `words`, its wide hash, which the merge probes by without
- * hashing again, and the target it is for.  `repeat` is the merge's: set
+ * hashing again, and the target it is for.  The hash of a tuple holding a
+ * pending integer is over its markers until the merge rewrites them to
+ * identifiers and hashes it again.  `repeat` is the merge's: set
  * when another worker's earlier candidate is the same tuple for the same
  * target, so that this one is not new after all.
  */
@@ -160,6 +162,17 @@ relic_candidate_screen_hash(size_t target, uint64_t hash)
  * positions plus one, so that a tuple the worker has already gathered is
  * not gathered again; one table serves every target of the round.
  *
+ * `integers` holds the distinct integers the worker's candidates hold
+ * pending, which the value table lacked when the round began, in the order
+ * the worker first derived them, and `integer_screen` finds one by value,
+ * holding its position plus one, hashed under the context's `hash_seed`.
+ * A candidate's column holding such an integer holds that position plus
+ * one, which has no type bits and so names no value: equal integers hold
+ * equal markers, so a candidate is screened by value as by identifier, and
+ * a marker is never found in the frozen store, where no integer the table
+ * lacked can be.  The merge replaces every marker with the identifier the
+ * integer will take.
+ *
  * `charged` is what the arrays have been charged to the memory account,
  * which is always what they hold at their capacities: a growth is charged
  * at its projection before it is made, and whatever it did not reach is
@@ -172,29 +185,37 @@ struct relic_candidates {
 	uint8_t			*stripes;
 	relic_dom_t		*words;
 	relic_idtab_t		 screen;
+	int64_t			*integers;
+	relic_idtab_t		 integer_screen;
+	uint64_t		 hash_seed;
 	size_t			 by_stripe[RELIC_STRIPES];
 	size_t			 count;
 	size_t			 capacity;
 	size_t			 stripe_capacity;
 	size_t			 word_count;
 	size_t			 word_capacity;
+	size_t			 integer_count;
+	size_t			 integer_capacity;
 	size_t			 charged;
 };
 
 /*
  * What one worker holds: the scratch its tasks run in, with the storage for
- * its operation states and its batch, which is kept from one round to the
- * next and never charged; its candidates, which exist only while a round
- * runs; and the derivations its tasks made, which the scratch does not
- * count.  The scratch's counters and the derivations are taken by worker 0
- * after the round, or forgotten when it is abandoned.
+ * its operation states, its batch and the batch's pending integers, which
+ * is kept from one round to the next and never charged; its candidates,
+ * which exist only while a round runs; and the derivations its tasks made,
+ * which the scratch does not count.  The scratch's counters and the
+ * derivations are taken by worker 0 after the round, or forgotten when it
+ * is abandoned.
  */
 struct relic_worker {
 	relic_scratch_t		 scratch;
 	relic_op_state_t	*states;
 	relic_dom_t		*batch;
+	int64_t			*pending;
 	size_t			 state_capacity;
 	size_t			 batch_capacity;
+	size_t			 pending_capacity;
 	relic_candidates_t	 candidates;
 	uint64_t		 derivations;
 };
@@ -269,8 +290,8 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * relation holds the tuples it held, every counter is as it was and the
  * round has given back its buffers, for the caller to run the round
  * serially; only a reservation the allocator refused part way leaves some
- * of a relation's arrays larger, counted in the storage total, for the
- * serial run to grow into.  A round is not run deferred when it reads a
+ * of a relation's arrays, or the integer table's, larger, counted in the
+ * storage total, for the serial run to grow into.  A round is not run deferred when it reads a
  * relation it writes, when it is too small to repay sharing it among the
  * pool's threads -- unless RELIC_F_PARALLEL_ALWAYS asks for every round --
  * or when the pool could not be had, and is abandoned when a task could
@@ -308,7 +329,8 @@ bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
  * relic_pool_create() gives a pool `workers` workers, at least one, the
  * calling thread among them, starting a thread for each other it can; a
  * thread that cannot be started is not an error, and the pool has fewer
- * workers.  Returns 0, or -1 when the pool could not be allocated.
+ * workers.  `hash_seed` is the seed of the context the pool serves.
+ * Returns 0, or -1 when the pool could not be allocated.
  *
  * relic_pool_adopt() makes the pool the calling process's before a job:
  * a pool carried into a child of fork(2) has none of its threads there,
@@ -327,7 +349,8 @@ bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
  * pool and everything it kept.
  */
 size_t	 relic_pool_size(size_t threads);
-int	 relic_pool_create(relic_pool_t **poolp, size_t workers);
+int	 relic_pool_create(relic_pool_t **poolp, size_t workers,
+	    uint64_t hash_seed);
 void	 relic_pool_adopt(relic_pool_t *pool);
 void	 relic_pool_for(relic_pool_t *pool, size_t part_count,
 	    relic_pool_part_fn run_part, void *argument);
@@ -344,7 +367,8 @@ void	 relic_pool_free(relic_pool_t *pool);
  * they were charged.
  */
 void	 relic_round_run_task(void *job, size_t task, size_t worker_index);
-void	 relic_candidates_init(relic_candidates_t *candidates);
+void	 relic_candidates_init(relic_candidates_t *candidates,
+	    uint64_t hash_seed);
 void	 relic_candidates_release(relic_candidates_t *candidates,
 	    relic_account_t *account);
 

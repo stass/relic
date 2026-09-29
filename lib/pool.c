@@ -152,7 +152,7 @@ relic_pool_size(size_t threads RELIC_UNUSED)
 }
 
 int
-relic_pool_create(relic_pool_t **poolp, size_t workers)
+relic_pool_create(relic_pool_t **poolp, size_t workers, uint64_t hash_seed)
 {
 	relic_pool_t *pool;
 	size_t i;
@@ -169,7 +169,8 @@ relic_pool_create(relic_pool_t **poolp, size_t workers)
 		return (-1);
 	}
 	for (i = 0; i < workers; i++)
-		relic_candidates_init(&pool->workers[i].candidates);
+		relic_candidates_init(&pool->workers[i].candidates,
+		    hash_seed);
 	pool->worker_count = 1;
 
 #ifdef RELIC_THREADS
@@ -287,11 +288,15 @@ worker_release(relic_worker_t *worker)
 	assert(worker->candidates.count == 0);
 	relic_free_array(worker->states);
 	relic_free_array(worker->batch);
+	relic_free_array(worker->pending);
 	relic_idtab_reset(&worker->candidates.screen);
+	relic_idtab_reset(&worker->candidates.integer_screen);
 	worker->states = NULL;
 	worker->batch = NULL;
+	worker->pending = NULL;
 	worker->state_capacity = 0;
 	worker->batch_capacity = 0;
+	worker->pending_capacity = 0;
 }
 
 #ifdef RELIC_THREADS

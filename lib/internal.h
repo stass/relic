@@ -663,11 +663,21 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * under exactly the identifier the map promised.  It returns 0, or -1 with a
  * diagnostic reported when the table could not grow, for memory or because
  * it holds as many integers as an identifier can name; the table's contents
- * are then as they were.
+ * are then as they were.  It is two halves, for a caller that must make
+ * every fallible step before it changes anything and must report nothing
+ * itself: relic_pending_reserve() grows the table to hold the new integers,
+ * returning -1, with no diagnostic and the contents unchanged, when it
+ * could not, and relic_pending_append() then appends them, and cannot
+ * fail.  Nothing may intern an integer between the two.
  *
  * A map is given room for `room` pending integers by
  * relic_pending_map_init(), from `arena`, and returns -1 when the arena
- * refused, which the caller's boundary reports.
+ * refused, which the caller's boundary reports.  relic_pending_map_open()
+ * gives it that room from the allocator instead, for a caller that charges
+ * the map itself: relic_pending_map_bytes() is what the map then holds,
+ * SIZE_MAX when a size cannot count it, and relic_pending_map_close()
+ * frees it.  An opened map has room for at
+ * least one pending integer and at most RELIC_DOM_INDEX_MASK.
  */
 struct relic_pending_map {
 	relic_dom_t	*ids;		/* per pending integer, batch order */
@@ -680,11 +690,16 @@ struct relic_pending_map {
 
 int	 relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 	    size_t room);
+size_t	 relic_pending_map_bytes(size_t room);
+int	 relic_pending_map_open(relic_pending_map_t *map, size_t room);
+void	 relic_pending_map_close(relic_pending_map_t *map);
 size_t	 relic_pending_measure(const relic_t *ctx, const int64_t *pending,
 	    size_t count, relic_pending_map_t *map);
 void	 relic_pending_rewrite(const relic_pending_map_t *map,
 	    relic_dom_t *tuples, size_t count, uint16_t arity);
 int	 relic_pending_commit(relic_t *ctx, const relic_pending_map_t *map);
+int	 relic_pending_reserve(relic_t *ctx, const relic_pending_map_t *map);
+void	 relic_pending_append(relic_t *ctx, const relic_pending_map_t *map);
 
 /*
  * lib/lex.c

@@ -595,6 +595,51 @@ relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 }
 
 /*
+ * A map's arrays have exactly the sizes relic_pending_map_bytes() counts, so
+ * a caller that charged those bytes charged what the map holds.  The count
+ * saturates, where a size_t of 32 bits cannot hold it.
+ */
+size_t
+relic_pending_map_bytes(size_t room)
+{
+	relic_pending_map_t *map;
+
+	assert(room <= RELIC_DOM_INDEX_MASK);
+
+	return (relic_saturating_sum(relic_saturating_product(room,
+	    sizeof(*map->ids) + sizeof(*map->fresh)),
+	    relic_saturating_product(seen_size(room), sizeof(*map->seen))));
+}
+
+int
+relic_pending_map_open(relic_pending_map_t *map, size_t room)
+{
+	assert(room > 0 && room <= RELIC_DOM_INDEX_MASK);
+
+	bzero(map, sizeof(*map));
+	map->room = room;
+
+	map->ids = calloc(room, sizeof(*map->ids));
+	map->fresh = calloc(room, sizeof(*map->fresh));
+	map->seen = calloc(seen_size(room), sizeof(*map->seen));
+	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL) {
+		relic_pending_map_close(map);
+		return (-1);
+	}
+
+	return (0);
+}
+
+void
+relic_pending_map_close(relic_pending_map_t *map)
+{
+	free(map->ids);
+	free(map->fresh);
+	free(map->seen);
+	bzero(map, sizeof(*map));
+}
+
+/*
  * Each pending integer is looked up in the table, and one the table lacks
  * in the map's own table of the batch's new integers, which is cleared for
  * the batch and then filled as they are first met, so that two pending
@@ -674,54 +719,77 @@ relic_pending_rewrite(const relic_pending_map_t *map, relic_dom_t *tuples,
 }
 
 /*
- * The index is reserved and the array grown before any integer is appended,
- * each for all of them at once and each to the capacity appending them one
- * at a time would reach, so that the one step that can fail comes while
- * there is nothing to leave behind, as in intern_integer().  The appends
- * that follow cannot fail.
+ * The index is reserved and the array grown for all of the map's new
+ * integers at once, each to the capacity appending them one at a time would
+ * reach, so that the only step that can fail comes before any integer is
+ * appended, as in intern_integer().  A growth that fails leaves the table's
+ * contents as they were, and whatever it grew counted.
  */
 int
-relic_pending_commit(relic_t *ctx, const relic_pending_map_t *map)
+relic_pending_reserve(relic_t *ctx, const relic_pending_map_t *map)
 {
 	relic_valtab_t *table;
 	int64_t *integers;
-	size_t i;
 
 	table = &ctx->values;
 	if (map->fresh_count == 0)
 		return (0);
 
-	if (map->fresh_count > RELIC_INTEGER_MAX - table->integer_count) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "too many distinct integers");
+	if (map->fresh_count > RELIC_INTEGER_MAX - table->integer_count)
 		return (-1);
-	}
 
 	if (relic_idtab_reserve(&table->index, map->fresh_count,
 	    integer_rehash, table) != 0) {
 		account_integer_table(ctx);
-		relic_diag_no_memory(ctx);
 		return (-1);
 	}
 
 	integers = relic_grow_array_stepwise(table->integers,
 	    &table->integer_capacity, table->integer_count, map->fresh_count,
 	    1, sizeof(*table->integers));
-	if (integers == NULL) {
-		account_integer_table(ctx);
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	table->integers = integers;
+	if (integers != NULL)
+		table->integers = integers;
 	account_integer_table(ctx);
 
+	return (integers == NULL ? -1 : 0);
+}
+
+void
+relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
+{
+	relic_valtab_t *table;
+	size_t i;
+
+	table = &ctx->values;
 	for (i = 0; i < map->fresh_count; i++) {
+		assert(table->integer_count < table->integer_capacity);
 		table->integers[table->integer_count] = map->fresh[i];
 		table->integer_count++;
 		relic_idtab_place(&table->index,
 		    relic_hash_int64(table->hash_seed, map->fresh[i]),
 		    (uint32_t)table->integer_count);
 	}
+}
+
+/*
+ * A reservation fails for one of two reasons, which the diagnostic tells
+ * apart: the table holds as many integers as an identifier can name, or the
+ * allocator refused its growth.
+ */
+int
+relic_pending_commit(relic_t *ctx, const relic_pending_map_t *map)
+{
+	if (relic_pending_reserve(ctx, map) != 0) {
+		if (map->fresh_count > RELIC_INTEGER_MAX -
+		    ctx->values.integer_count)
+			relic_diagf(ctx, RELIC_ERROR, NULL,
+			    "too many distinct integers");
+		else
+			relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	relic_pending_append(ctx, map);
 
 	return (0);
 }

@@ -103,6 +103,33 @@ Souffle program has parallel loops only when it is translated with `-j`, as
 in `souffle -j16 -g`. A threaded column in the harness is an item of its
 own in `TODO.md`.
 
+## A round cut by a scan over a few tuples
+
+[Medium, component: `lib/plan.c`, `lib/round.c`] `dist/3` written with its
+successor as facts, `dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3,
+succ(D, D1)`, over the `tc-cyclic` data: the planner starts the recursive
+rule with `scan succ(D, D1)`, two tuples, and a plan is cut into at most as
+many pieces as its first view holds tuples, so the round's 45 million
+derivations fall in two tasks. On sixteen threads it takes 5.7 to 5.9 s
+against 3.6 to 3.7 s on one, the fastest of five runs on a loaded machine;
+with `-X no-reorder`, which starts it at the delta, 1.43 s against 4.95 s.
+Cut such a plan by its second operation, or let the planner weigh how a
+first operation can be cut when it picks one.
+
+## Rounds that insert what they derive
+
+[Medium, component: `lib/merge.c`] `dist/3` over the `tc-cyclic` data,
+`dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3, D1 = D + 1`, scales 2.7
+times on sixteen threads, 3.52 s to 1.30 s, where `tc-cyclic` scales 5.4
+times, 2.60 s to 0.48 s, the fastest of five runs each on a loaded machine.
+Its two large rounds each insert about a million new tuples of three
+columns, 1.96 million in all against `tc-cyclic`'s one million, into 51 MB
+against 18 MB. The computing is not what holds it back: the same program
+with the successor as facts, joined in the same order, takes 1.43 s on
+sixteen threads. Time the merge's steps on a quiet machine; those worker 0
+runs alone, counting the new tuples, reserving and storing the columns,
+grow with the tuples a round inserts.
+
 ## Not started
 
 * Step 5, loading in parallel (section 10 of the design): its gate is

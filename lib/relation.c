@@ -1594,6 +1594,12 @@ relic_relation_screen(const relic_relation_t *relation,
 		    tuples + i * relation->arity, hashes[i]) != RELIC_ID_NONE;
 }
 
+uint64_t
+relic_relation_hash(const relic_relation_t *relation, const relic_dom_t *tuple)
+{
+	return (tuple_hash(relation, tuple));
+}
+
 /*
  * Prefetch the tuple named by the slot `hash` selects, if the slot is
  * occupied.  That tuple is the first a probe for the hash compares, and for

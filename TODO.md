@@ -36,18 +36,17 @@ scales about eight times on sixteen threads; and the page records a
 comparison with Souffle built with OpenMP, which leads on `tc-cyclic` and
 trails on `cspa` and `chain-closure`.
 
-**Finish arithmetic.** [High, component: `lib/round.c`,
-`lib/task.c`, `tests/random/`] Steps 1 to 3 of
-`specs/design-arithmetic.md` section 16 are in: expressions parse, check,
-print, plan and run serially and through the Magic rewrite, computed
-integers are interned when stored and charged to the memory limit, and an
-undefined result fails the evaluation. Steps 4 and 5 remain:
-
-* a parallel round whose plans compute is declined and runs serially,
-  since a worker has no pending room and no error record; the frozen
-  round's pending integers lift that (step 4);
-* the generator of `specs/design-hardening.md` gains assignments and
-  expression filters, and the benchmark a computing workload (step 5).
+**Finish arithmetic.** [High, component: `tests/random/`, `bench/`]
+Steps 1 to 4 of `specs/design-arithmetic.md` section 16 are in:
+expressions parse, check, print, plan and run serially, in parallel rounds
+and through the Magic rewrite, computed integers are interned when stored
+and charged to the memory limit, and an undefined result fails the
+evaluation. Step 5 remains: the generator of `specs/design-hardening.md`
+gains assignments and expression filters, the fuzz corpus expressions, and
+the benchmark a computing workload. Step 4's speed-up gate is missed:
+`dist/3` scales 2.7 times on sixteen threads where `tc-cyclic` scales 5.4,
+for the tuples it inserts rather than for computing them, as "Rounds that
+insert what they derive" in `docs/todo-parallel.md` records.
 
 **Interning outside evaluation grows the integer table unchecked.**
 [Medium, component: `lib/value.c`] `specs/design-arithmetic.md` section 9.1

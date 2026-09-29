@@ -16,6 +16,9 @@
  * lowered, and checks what the real ceilings are held to: the entry past
  * the ceiling is refused with a diagnostic, and the table is left as it
  * was, its values interning to and decoding as the identifiers they had.
+ * An evaluation computing more integers than the table can number is
+ * refused so too, and a round run deferred is refused where the serial
+ * round is, leaving what it leaves.
  */
 
 #include "config.h"
@@ -25,12 +28,23 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "harness.h"
 #include "internal.h"
 
 #define	SCENARIO_INTEGERS	"the integer table stops at its ceiling"
 #define	SCENARIO_SYMBOLS	"the symbol pool stops at its ceiling"
+#define	SCENARIO_DEFERRED	"a deferred round stops at the integer ceiling"
+
+/*
+ * Forty integers loaded and a rule computing a new one from each, which
+ * together pass the table's ceiling of 64 in the rule's one round.
+ */
+#define	COMPUTED_FACTS		40
+
+static void	 a_deferred_round_stops_as_serially(size_t threads);
+static relic_t	*computing_context(unsigned int flags, size_t threads);
 
 #define	SYMBOL_TEXT_MAX		32
 
@@ -159,6 +173,87 @@ the_integer_table_stops_at_its_ceiling(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * A round that would give the table more integers than it can number fails
+ * the evaluation with the table's message, the serial evaluator refusing
+ * the batch before inserting any of it.  Run deferred, the round's merge
+ * finds the table full before it has grown any relation, and the round
+ * runs again serially: the two contexts end with the same storage.
+ */
+static void
+a_deferred_round_stops_as_serially(size_t threads)
+{
+	relic_stats_t serial_stats;
+	relic_stats_t deferred_stats;
+	relic_t *serial;
+	relic_t *deferred;
+	int serial_status;
+	int deferred_status;
+
+	serial = computing_context(0, 0);
+	deferred = computing_context(RELIC_F_PARALLEL_ALWAYS, threads);
+	if (serial != NULL && deferred != NULL) {
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status != 0 && deferred_status != 0,
+		    SCENARIO_DEFERRED, "on %zu thread(s), both fail", threads);
+		checkf(diagnosed(serial, "too many distinct integers") &&
+		    diagnosed(deferred, "too many distinct integers"),
+		    SCENARIO_DEFERRED, "on %zu thread(s), both say the table "
+		    "is full", threads);
+		checkf(deferred->pool != NULL &&
+		    deferred->pool->abandoned_rounds > 0, SCENARIO_DEFERRED,
+		    "on %zu thread(s), the round is abandoned", threads);
+
+		relic_stats(serial, &serial_stats);
+		relic_stats(deferred, &deferred_stats);
+		checkf(serial_stats.storage_bytes ==
+		    deferred_stats.storage_bytes &&
+		    serial_stats.integer_values ==
+		    deferred_stats.integer_values, SCENARIO_DEFERRED,
+		    "on %zu thread(s), both hold %zu bytes and %zu integers, "
+		    "not %zu and %zu", threads, serial_stats.storage_bytes,
+		    serial_stats.integer_values, deferred_stats.storage_bytes,
+		    deferred_stats.integer_values);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
+/*
+ * A context holding the forty integers and the rule computing from them.
+ */
+static relic_t *
+computing_context(unsigned int flags, size_t threads)
+{
+	char program[COMPUTED_FACTS * 16 + 64];
+	relic_config_t config;
+	relic_t *ctx;
+	size_t used;
+	int i;
+
+	used = 0;
+	for (i = 0; i < COMPUTED_FACTS; i++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "num(%d).\n", i);
+	snprintf(program + used, sizeof(program) - used,
+	    "far(N, M) :- num(N), M = N * 1000 + 1.\n");
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.threads = threads;
+	ctx = relic_create_config(&config);
+	check(ctx != NULL, SCENARIO_DEFERRED, "a context should be created");
+	if (ctx != NULL && relic_load_string(ctx, "far.dl", program) != 0) {
+		check(false, SCENARIO_DEFERRED, "the program should load");
+		relic_destroy(ctx);
+		return (NULL);
+	}
+
+	return (ctx);
+}
+
 static bool
 diagnosed(relic_t *ctx, const char *expected)
 {
@@ -183,6 +278,8 @@ main(void)
 {
 	the_integer_table_stops_at_its_ceiling();
 	the_symbol_pool_stops_at_its_ceiling();
+	a_deferred_round_stops_as_serially(1);
+	a_deferred_round_stops_as_serially(4);
 
 	return (check_summary("ceiling"));
 }

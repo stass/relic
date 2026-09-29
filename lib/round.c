@@ -46,15 +46,16 @@
  * the serial evaluator leaves them, whatever the number of workers.
  *
  * Nothing is modified until the merge has made room for everything it
- * inserts.  A round that cannot go on before then -- a candidate buffer or
- * a scratch table that could not grow, for memory or for the memory limit,
- * more candidates than the tuple limit could still admit, new tuples a
- * limit would refuse, room the allocator would not give, or storage the
- * pool itself could not get -- is abandoned: its candidates are released,
- * its counts forgotten, and the caller runs the round serially, where
- * whatever refuses it refuses it as it always would.  So a limit refuses
- * only in a round run serially, on the tuple the serial evaluator is
- * refused, and a merge never fails.
+ * inserts, the integers the round computed among it.  A round that cannot
+ * go on before then -- a candidate buffer or a scratch table that could not
+ * grow, for memory or for the memory limit, more candidates than the tuple
+ * limit could still admit, new tuples or integers a limit would refuse,
+ * room the allocator would not give, storage the pool itself could not
+ * get, or an evaluation error a task met -- is abandoned: its candidates
+ * are released, its counts forgotten, and the caller runs the round
+ * serially, where whatever refuses it refuses it as it always would.  So a
+ * limit or an error is reported only in a round run serially, at the tuple
+ * the serial evaluator meets it, and a merge never fails.
  */
 
 /*
@@ -105,7 +106,6 @@ static bool	 round_is_worth_sharing(const relic_t *ctx,
 		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
 		    uint16_t *arity_roomp);
-static bool	 round_computes(const relic_round_t *round);
 static bool	 round_reads_no_target(const relic_round_t *round);
 static uint64_t	 scaled_work(uint64_t work, uint64_t range_now,
 		    uint64_t range_then);
@@ -136,11 +136,12 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
 		return (false);
-	if (!round_reads_no_target(round) || round_computes(round))
+	if (!round_reads_no_target(round))
 		return (false);
 
 	if (ctx->pool == NULL) {
-		if (relic_pool_create(&ctx->pool, ctx->config.threads) != 0)
+		if (relic_pool_create(&ctx->pool, ctx->config.threads,
+		    ctx->hash_seed) != 0)
 			return (false);
 	}
 	pool = ctx->pool;
@@ -354,27 +355,6 @@ round_reads_no_target(const relic_round_t *round)
 }
 
 /*
- * Whether any item of the round computes an integer.  Such a round is run
- * serially: a worker has nowhere to keep the integers its tuples make that
- * the integer table lacks, and no way to report an evaluation error, and
- * the pool is handed no round that could need either.
- */
-static bool
-round_computes(const relic_round_t *round)
-{
-	const relic_plan_t *plan;
-	size_t i;
-
-	for (i = 0; i < round->item_count; i++) {
-		plan = round->items[i].plan;
-		if (plan != NULL && relic_plan_computes(plan))
-			return (true);
-	}
-
-	return (false);
-}
-
-/*
  * Whether an operation reads its relation as it stands when the plan
  * starts, which is past whatever the items before it in a round inserted,
  * rather than through a member's view, which the deltas fixed before the
@@ -450,17 +430,18 @@ round_needs(const relic_round_t *round, size_t *op_roomp,
 
 /*
  * Give a worker's scratch room for plans of `op_room` operations and a
- * batch of `arity_room` columns, growing its storage when a round needs more
- * than every round before it did.  It has no room for pending integers,
- * since no round the pool runs computes one.  The scratch starts afresh,
- * which forgets nothing: the counts and the note of the round before were
- * taken or forgotten when it ended.
+ * batch of `arity_room` columns, and for the batch's pending integers,
+ * growing its storage when a round needs more than every round before it
+ * did.  The scratch starts afresh, which forgets nothing: the counts, the
+ * note and the error of the round before were taken or forgotten when it
+ * ended.
  */
 static int
 worker_fit(relic_worker_t *worker, size_t op_room, uint16_t arity_room)
 {
 	relic_op_state_t *states;
 	relic_dom_t *batch;
+	int64_t *pending;
 
 	states = relic_grow_array(worker->states, &worker->state_capacity,
 	    op_room, sizeof(*worker->states));
@@ -474,8 +455,14 @@ worker_fit(relic_worker_t *worker, size_t op_room, uint16_t arity_room)
 		return (-1);
 	worker->batch = batch;
 
+	pending = relic_grow_array(worker->pending, &worker->pending_capacity,
+	    (size_t)RELIC_INSERT_BATCH * arity_room, sizeof(*worker->pending));
+	if (pending == NULL)
+		return (-1);
+	worker->pending = pending;
+
 	relic_scratch_init(&worker->scratch, worker->states, op_room,
-	    worker->batch, NULL, arity_room);
+	    worker->batch, worker->pending, arity_room);
 
 	return (0);
 }
@@ -682,7 +669,7 @@ tasks_run_by_threads(const relic_pool_t *pool)
 }
 
 /*
- * Forget what every worker counted and noted.
+ * Forget what every worker counted, noted and met.
  */
 static void
 forget_worker_counters(relic_pool_t *pool)
@@ -696,6 +683,7 @@ forget_worker_counters(relic_pool_t *pool)
 		bzero(&worker->scratch.counters,
 		    sizeof(worker->scratch.counters));
 		worker->scratch.note.where = NULL;
+		worker->scratch.error.where = NULL;
 	}
 }
 
