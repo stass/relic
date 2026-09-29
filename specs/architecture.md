@@ -392,7 +392,10 @@ mixing remains discoverable.
 Bytewise ordering is used rather than locale collation so that results never
 depend on the environment. See section 61.
 
-Arithmetic expressions are explicitly deferred.
+Arithmetic expressions are outside v1. Integer expressions as comparison
+operands, and the equality that binds a variable to one, are specified in
+`specs/design-arithmetic.md`; that design extends this section and sections
+13 and 14 rather than changing what any v1 program means.
 
 ---
 
@@ -2612,6 +2615,10 @@ maintenance and parallel evaluation change the engine rather than the
 language, cost the most to build, and follow.
 
 None should require changing basic language semantics.
+
+Arithmetic expressions -- integer expressions in comparisons, an equality
+that binds, and what a value evaluation computes does to the value table and
+to a parallel round -- are specified in `specs/design-arithmetic.md`.
 
 Parallel SCC evaluation -- the worker pool a context owns, the round that
 reads a frozen store and merges its results in the serial order, and the

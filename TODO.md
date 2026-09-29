@@ -1159,7 +1159,12 @@ formats exist for; recorded so that the choice stays deliberate.
 Candidate features, in the priority order of `specs/architecture.md` section
 69. None may change the language semantics of v1.
 
-* arithmetic expressions
+* arithmetic expressions, specified in `specs/design-arithmetic.md`:
+  integer expressions as comparison operands, an equality that binds a
+  variable nothing else binds, a non-integer operand making the comparison
+  false and an undefined result -- overflow, a zero divisor -- failing the
+  evaluation, computed integers interned when a tuple holding them is
+  stored and charged to the memory limit; five steps, none started
 * aggregates
 * relation export
 * incremental insertion maintenance
