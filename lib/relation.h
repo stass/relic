@@ -39,10 +39,13 @@
  */
 
 typedef struct relic_index_key relic_index_key_t;
+typedef struct relic_index_pending relic_index_pending_t;
+typedef struct relic_index_stripe relic_index_stripe_t;
 typedef struct relic_relation_stats relic_relation_stats_t;
 typedef struct relic_base_growth relic_base_growth_t;
 typedef struct relic_reltab relic_reltab_t;
 typedef struct relic_store relic_store_t;
+typedef struct relic_tuple_growth relic_tuple_growth_t;
 
 /*
  * One distinct key of a secondary index: the first and the last tuple that
@@ -56,6 +59,47 @@ struct relic_index_key {
 };
 
 /*
+ * The keys of a secondary index whose wide hashes choose one stripe
+ * (relic_hash_stripe()).  Each stripe numbers its keys from one, in the
+ * order they are first seen, on its own: a key is named by its stripe and
+ * its identifier within the stripe.
+ *
+ * `keys` maps the low half of a key's hash to the identifiers of the keys
+ * that share it, `entries[k - 1]` records key k's first and last tuple,
+ * `frontiers[k - 1]` its frontier, and `key_values[(k - 1) * key_length ..)`
+ * holds key k's values, copied from the tuple that introduced it.
+ */
+struct relic_index_stripe {
+	relic_idtab_t		 keys;
+	relic_index_key_t	*entries;	/* by key identifier - 1 */
+	relic_atomic_u32_t	*frontiers;	/* by key identifier - 1 */
+	relic_dom_t		*key_values;	/* by key, key_length each */
+	size_t			 key_count;
+	size_t			 entry_capacity;
+	size_t			 frontier_capacity;
+	size_t			 key_value_capacity;	/* in keys */
+};
+
+/*
+ * One index's part of the insertion the relation store is making, from the
+ * moment it classifies the tuple until it links it in: `tuple`, the
+ * identifier the tuple will take; `hash`, the wide hash of its key; and
+ * `key_id`, the key's identifier within the stripe the hash chooses, or
+ * RELIC_ID_NONE for a key the index does not hold yet, which the insertion
+ * creates.
+ *
+ * The reservation between classifying and linking may move a stripe's
+ * arrays and rehash its table, but cannot change which keys the index holds
+ * or their identifiers.  So the record holds identifiers and a hash, never
+ * a position, and stays true until the tuple is linked.
+ */
+struct relic_index_pending {
+	uint64_t		hash;
+	uint32_t		key_id;
+	relic_tuple_id_t	tuple;
+};
+
+/*
  * A secondary index: for every combination of values the key columns hold,
  * the tuples that hold it.
  *
@@ -63,15 +107,14 @@ struct relic_index_key {
  * those columns in ascending order, `key_length` of them.  The key of a
  * tuple is its key columns' values in that order.
  *
- * Each distinct key is assigned a key identifier, from one, in the order keys
- * are first seen.  `keys` maps the hash of a key to the key identifiers that
- * share it, `entries[k - 1]` records key k's first and last tuple,
- * `frontiers[k - 1]` its frontier, and `key_values[(k - 1) * key_length ..)`
- * holds key k's values, copied from the tuple that introduced it.
- * `next[id - 1]` is the tuple after `id` with the same key, or RELIC_ID_NONE
- * when `id` is the last.  A key's tuples are therefore a chain through
- * `next`, and because a tuple is linked at the end of its chain when it is
- * inserted, every chain is in increasing identifier order.
+ * Each distinct key lives in the stripe of `stripes` its hash chooses.
+ * `next[id - 1]` is the tuple after `id` with the same key, or
+ * RELIC_ID_NONE when `id` is the last.  A key's tuples are therefore a chain
+ * through `next`, and because a tuple is linked at the end of its chain when
+ * it is inserted, every chain is in increasing identifier order.  `next` is
+ * one array for every stripe, by tuple: the slot of a chain's last tuple
+ * belongs to that chain, and a new tuple's slot to the new tuple, so tuples
+ * of keys in different stripes can be linked at once.
  *
  * The chains are what keep a skewed key cheap.  Storing every tuple identifier
  * in the table directly would put a key's thousand tuples in a thousand
@@ -84,8 +127,8 @@ struct relic_index_key {
  * whose tag matches, and reading `key_values`, where one key's values follow
  * another's, costs a cache line that neighbouring keys share, where reading
  * the tuple is a random access into the relation.  A key costs `key_length`
- * values more, one to a few columns.  All five arrays are relation and index
- * storage, accounted against the memory limit.
+ * values more, one to a few columns.  Every table and array is relation and
+ * index storage, accounted against the memory limit.
  *
  * A key's frontier is a tuple of its chain from which a lookup of a
  * semi-naive delta starts walking: every chain tuple before it has an
@@ -105,18 +148,17 @@ struct relic_index_key {
  * stored relaxed: every lookup of one key in one round walks toward the
  * same start and stores the same stop, so no store needs ordering against
  * another, and a stale load only walks further.
+ *
+ * `pending` is the relation store's, for the one tuple it is inserting:
+ * what it found of the tuple's key here, between classifying the tuple and
+ * linking it in.  Every step after the classification reads the tuple from
+ * it, so none can be handed a different one.
  */
 struct relic_index {
-	relic_idtab_t		 keys;
-	relic_index_key_t	*entries;	/* by key identifier - 1 */
-	relic_atomic_u32_t	*frontiers;	/* by key identifier - 1 */
-	relic_dom_t		*key_values;	/* by key, key_length each */
+	relic_index_stripe_t	 stripes[RELIC_STRIPES];
 	relic_tuple_id_t	*next;		/* by tuple identifier - 1 */
-	size_t			 key_count;
-	size_t			 entry_capacity;
-	size_t			 frontier_capacity;
-	size_t			 key_value_capacity;	/* in keys */
 	size_t			 next_capacity;
+	relic_index_pending_t	 pending;
 	relic_tuple_id_t	 latest_since;
 	uint32_t		 key_mask;
 	uint16_t		 key_length;
@@ -150,9 +192,11 @@ struct relic_relation_stats {
  * counted in columns rather than in tuples so that one growth policy serves
  * every arity including zero, where a tuple occupies no columns at all.
  *
- * `index` maps the hash of a whole tuple to the identifiers that share it,
- * which is what answers membership.  It stores identifiers and no keys: the
- * key is the tuple, and the tuple is already in `columns`.
+ * `index` is the canonical index, which answers membership: striped, each
+ * stripe maps the low half of the wide hash of a whole tuple to the
+ * identifiers of the tuples in that stripe that share it.  It stores
+ * identifiers and no keys: the key is the tuple, and the tuple is already in
+ * `columns`.
  *
  * `hash_seed` is the context's, copied when the relation is created.  Every
  * hash computed over the relation's tuples is keyed by it: the canonical
@@ -182,7 +226,7 @@ struct relic_relation_stats {
  */
 struct relic_relation {
 	relic_dom_t		*columns;
-	relic_idtab_t		 index;
+	relic_idtab_t		 index[RELIC_STRIPES];
 	relic_index_t		*indexes;
 	size_t			 count;			/* tuples */
 	size_t			 column_capacity;	/* domain identifiers */
@@ -252,11 +296,22 @@ struct relic_store {
 };
 
 /*
+ * How many tuples a relation is about to gain, `by_stripe[s]` of them in
+ * stripe s of its canonical index.  The total is their sum,
+ * relic_tuple_growth_total(), and is not kept beside them, so that the
+ * room made for the columns and the room made in the stripes cannot
+ * disagree.
+ */
+struct relic_tuple_growth {
+	size_t	by_stripe[RELIC_STRIPES];
+};
+
+/*
  * How many facts a load's commit adds to one predicate's base store.
  */
 struct relic_base_growth {
-	relic_pred_id_t	pred;
-	size_t		added;
+	relic_pred_id_t		pred;
+	relic_tuple_growth_t	added;
 };
 
 #endif /* RELIC_RELATION_H */

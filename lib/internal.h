@@ -1180,18 +1180,23 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
  * lib/index.c
  *
  * A secondary index over the tuples of one relation, keyed on the columns of
- * a mask.  relic_index_reserve() makes room for `tuples` tuples in all and
- * `added_keys` more keys and is the only operation that can fail;
- * relic_index_add() then links tuple `id` in, and tuples must be added in
- * increasing identifier order.  The walks over an index are in frozen.h.
- * relic_index_raise_since() raises the start the index's frontiers stand
- * for to `since`, before any lookup from it; the starts raised to should
- * never decrease over the life of the index, as a semi-naive delta's never
- * do, or a lookup from an earlier one walks the whole chain.
- * relic_index_bytes_after_reserve() is what the memory limit projects a
- * reservation with, and relic_index_bytes_after_adds() what it projects a
- * sequence of insertions with.  relic_index_free() releases an index, which
- * relic_index_init() must set up again before it is used.
+ * a mask.  A tuple is added in four steps, of which only the third can fail:
+ * relic_index_classify() hashes the key of the tuple about to become tuple
+ * `id` and finds it, keeping the hash, the key found and `id` as the index's
+ * pending insertion; relic_index_pending_bytes() and
+ * relic_index_pending_bytes_after() are the bytes of the parts the insertion
+ * can grow, before and after, which the memory limit is asked with;
+ * relic_index_reserve_pending() makes room for the tuple's link and for its
+ * key when it is new; and relic_index_add_pending() links the tuple in once
+ * the relation holds it.  Tuples must be added in increasing identifier
+ * order.  The walks over an index are in frozen.h.  relic_index_raise_since()
+ * raises the start the index's frontiers stand for to `since`, before any
+ * lookup from it; the starts raised to should never decrease over the life
+ * of the index, as a semi-naive delta's never do, or a lookup from an
+ * earlier one walks the whole chain.  relic_index_bytes_after_adds() is the
+ * most a sequence of insertions can grow the index to.  relic_index_free()
+ * releases an index, which relic_index_init() must set up again before it is
+ * used.
  *
  * The relation store builds and extends indexes and does all the
  * accounting; the evaluator raises a member's indexes to its delta's start
@@ -1201,14 +1206,17 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 void	 relic_index_init(relic_index_t *index, uint32_t key_mask);
 void	 relic_index_free(relic_index_t *index);
 size_t	 relic_index_bytes(const relic_index_t *index);
-size_t	 relic_index_bytes_after_reserve(const relic_index_t *index,
-	    size_t tuples, size_t added_keys);
+void	 relic_index_classify(relic_index_t *index,
+	    const relic_relation_t *relation, const relic_dom_t *tuple,
+	    relic_tuple_id_t id);
+size_t	 relic_index_pending_bytes(const relic_index_t *index);
+size_t	 relic_index_pending_bytes_after(const relic_index_t *index);
+int	 relic_index_reserve_pending(relic_index_t *index,
+	    const relic_relation_t *relation);
+void	 relic_index_add_pending(relic_index_t *index,
+	    const relic_relation_t *relation);
 size_t	 relic_index_bytes_after_adds(const relic_index_t *index,
 	    size_t tuples, size_t added);
-int	 relic_index_reserve(relic_index_t *index,
-	    const relic_relation_t *relation, size_t tuples, size_t added_keys);
-void	 relic_index_add(relic_index_t *index, const relic_relation_t *relation,
-	    relic_tuple_id_t id);
 void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
 
 /*
@@ -1267,17 +1275,16 @@ void	 relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since);
  * does the same with each tuple's hash given, as relic_relation_screen()
  * gave it.
  *
- * relic_relation_reserve() makes room for `added` more tuples -- their
- * columns, canonical index slots and room in every secondary index --
- * growing each array at most once, and keeps the storage total in step.  A
- * secondary index is given a key per tuple, the most the tuples could
- * bring, which over an index of few keys is far more than a batch would
- * use; a reservation for more than one tuple is therefore made only of a
- * relation without secondary indexes, as a base store is when a load
- * commits.
+ * relic_relation_reserve() makes room in a relation without secondary
+ * indexes, as a base store is when a load commits, for a growth: tuples by
+ * the stripe of the canonical index each falls in, for the stripes' slots,
+ * and in all, relic_tuple_growth_total(), for the columns.  It grows each
+ * array at most once and keeps the storage total in step, and refuses a
+ * relation with secondary indexes as an internal error.  An insertion makes
+ * its own room, for one tuple and the keys it brings.
  *
  * A reservation applies no configured limit.
- * relic_relation_bytes_after_reserve() gives the bytes the relation would
+ * relic_relation_bytes_after_growth() gives the bytes the relation would
  * then hold, and a caller bound by the memory limit projects that against
  * the account first, as an insertion does.
  * relic_relation_bytes_after_inserts() gives the most it could hold once a
@@ -1336,7 +1343,7 @@ size_t	 relic_base_total(const relic_t *ctx);
 int	 relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 	    size_t count);
 void	 relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
-	    const relic_dom_t *columns, uint32_t hash);
+	    const relic_dom_t *columns, uint64_t hash);
 relic_relation_t *relic_relation_create(relic_t *ctx, relic_pred_id_t pred,
 	    size_t serial, uint16_t arity);
 void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);
@@ -1348,21 +1355,22 @@ int	 relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 	    size_t *completedp);
 int	 relic_relation_insert_batch_hashed(relic_t *ctx,
 	    relic_relation_t *relation, const relic_dom_t *tuples,
-	    const uint32_t *hashes, size_t count, bool *added,
+	    const uint64_t *hashes, size_t count, bool *added,
 	    size_t *completedp);
 bool	 relic_relation_contains(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 bool	 relic_relation_contains_hashed(const relic_relation_t *relation,
-	    const relic_dom_t *columns, uint32_t hash);
-uint32_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
+	    const relic_dom_t *columns, uint64_t hash);
+uint64_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
 	    uint16_t arity);
 size_t	 relic_relation_bytes(const relic_relation_t *relation);
-size_t	 relic_relation_bytes_after_reserve(const relic_relation_t *relation,
-	    size_t added);
+size_t	 relic_relation_bytes_after_growth(const relic_relation_t *relation,
+	    const relic_tuple_growth_t *growth);
+size_t	 relic_tuple_growth_total(const relic_tuple_growth_t *growth);
 size_t	 relic_relation_bytes_after_inserts(
 	    const relic_relation_t *relation, size_t added);
 int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
-	    size_t added);
+	    const relic_tuple_growth_t *growth);
 size_t	 relic_relation_count(const relic_relation_t *relation);
 relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,

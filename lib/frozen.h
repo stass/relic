@@ -118,8 +118,8 @@ enum relic_order {
  *
  * relic_relation_screen() looks up a batch of tuples packed at the
  * relation's arity as inserting them would, and inserts none: it gives
- * each tuple's hash, which relic_relation_insert_batch_hashed() takes, and
- * whether the relation holds it.
+ * each tuple's wide hash, which relic_relation_insert_batch_hashed() takes,
+ * and whether the relation holds it.
  */
 relic_pred_id_t relic_relation_pred(const relic_relation_t *relation);
 uint16_t relic_relation_arity(const relic_relation_t *relation);
@@ -131,7 +131,7 @@ relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
 const relic_index_t *relic_relation_index_at(const relic_relation_t *relation,
 	    uint32_t position);
 void	 relic_relation_screen(const relic_relation_t *relation,
-	    const relic_dom_t *tuples, size_t count, uint32_t *hashes,
+	    const relic_dom_t *tuples, size_t count, uint64_t *hashes,
 	    bool *held);
 
 /*

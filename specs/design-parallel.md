@@ -577,75 +577,106 @@ it is the measurement that decides whether section 6.3 is built.
 When the measurement says the merge is the ceiling, it is parallelized
 without giving up the serial order and without giving up the store's rule
 that every step which can fail comes before every step that modifies
-(`specs/design-relations.md` section 6). The canonical index and every
-secondary index's key table become **striped**: `RELIC_STRIPES` ordinary
-identifier tables under one header, a key choosing its stripe by bits of
-a 64-bit hash that neither the slot nor the tag use -- the fold already
-produces 64 bits and finalizes them, and today keeps the low 32. A
-secondary index keeps one `next` array and one `entries` and `key_values`
-array per stripe, a key identifier naming its stripe in its high bits.
-The stripe count is a constant, the same on every context whatever its
+(`specs/design-relations.md` section 6).
+
+**Stripes.** The canonical index and every secondary index's key table
+become **striped**: `RELIC_STRIPES` ordinary identifier tables, a key
+choosing its stripe by the top bits of a 64-bit hash whose low 32 bits are
+the keyed hash the tables use for the slot and the tag, and whose high 32
+are an unkeyed fold of the same words, made in the same loop. The stripe
+is unkeyed so that which stripe a key lives in, and so what each stripe
+holds and costs, is a function of the input: a keyed stripe would make a
+program's storage, and the insertion a memory limit refuses, differ from
+run to run. Crowding keys into one stripe buys an author one larger
+table, keyed within as any table is. A secondary index keeps one
+`next` array, by tuple, and per stripe a key table and the `entries`,
+`frontiers` and `key_values` of the stripe's keys. A key is named by its
+stripe and its identifier within the stripe, so each stripe numbers its
+keys from one on its own and no stripe's growth waits for another's. The
+stripe count is a constant, the same on every context whatever its
 thread count, so what a table holds and what it costs against the memory
-limit do not depend on `-j`; section 12 needs that. It is a small power of
-two, and section 15 step 4 measures its cost on the serial context before
-it is kept.
+limit do not depend on `-j`; section 12 needs that. It is a small power
+of two, and section 15 step 4 measures its cost on the serial context
+before it is kept.
 
-The merge then runs in four phases, three of them on the pool, separated
-by barriers:
+**One insertion: classify, check, reserve, apply.** Striping changes what
+an insertion must know before it reserves: the canonical stripe its tuple
+falls in, and for each secondary index the stripe of its key and whether
+that key is new, since a key's arrays grow in its stripe. An insertion
+therefore classifies before it checks. It probes the canonical stripe for
+the tuple and each index's key stripe for the key, keeping each key's
+hash and what the probe found; checks both limits against exactly the
+growth that classification implies; reserves that growth; and applies
+it, appending the tuple, placing it and linking it into each index by
+what the probes found, probing nothing again. Each index is probed once
+per insertion, as before, only earlier, and a key's room is reserved only
+when the key is new. That last rule is what lets a whole round's growth
+be computed from counts: every array grows one insertion at a time to a
+capacity that depends only on how many entries it comes to hold
+(`relic_grow_array_capacity_stepwise()`), and every table doubles, so a
+count per stripe of new tuples and of new keys fixes the capacities the
+serial insertions reach.
 
-1. **Bucket and screen, by stripe.** Worker 0 buckets the round's
-   candidates by stripe with one counting sort over the stripe bits of
-   their hashes, in task order within each bucket. Worker `s` then walks
-   bucket `s`, keeps a scratch screen of the tuples it has taken this
-   round, and marks each candidate *first* or *repeat* in a flag array
-   indexed by candidate. Stripes share nothing: each writes its own
-   candidates' flags, and the flags are bytes. The flag array and the
-   scratch screens are the workers' own growable arrays, released with
-   the candidate buffers at the round's end.
-2. **Count, check and reserve, serially.** Worker 0 walks the *first*
-   candidates in global task order -- across every relation the round
-   wrote, since both limits are one total each and the serial evaluator
-   meets them wherever the next insertion happens to be -- and replays
-   the serial evaluator's growth in arithmetic: for each, the tuple
-   limit's check, and the memory limit's projection at the capacity a
-   one-tuple reservation would reach from the capacity the previous one
-   left, for the columns, the canonical stripe the tuple falls in, each
-   secondary index's `next`, and the key-table stripe and entries its key
-   falls in, given room for a key per tuple as an insertion is today. The
-   first candidate a limit refuses, if any, is the tuple the serial
-   evaluator refuses, with the same message, and the candidates before it
-   are the **prefix**; the rest of the merge runs on the prefix, and the
-   refusal is reported after it, so the relations hold exactly what the
-   serial evaluator's hold when it stops. Worker 0 then reserves, for
-   each array, the capacity the replay reached, which is the capacity
-   serial insertion reaches, so the storage total after the merge is the
-   serial evaluator's byte for byte. Every step that can fail is in this
-   phase, which is the store's invariant kept; a reservation that fails
-   for memory leaves every relation as it was, since nothing has been
-   appended, and is reported as the serial evaluator reports one.
-3. **Number and append, serially.** Worker 0 gives each candidate of the
-   prefix the next identifier, in task order, and copies its columns into
-   the relation. A prefix count and a copy of `arity` words per new tuple,
-   which is memory bandwidth and not a probe. Nothing here can fail.
-4. **Place and link, by stripe.** Worker `s` places its candidates of the
-   prefix, now numbered, into stripe `s` of each canonical index. For
-   each secondary index, worker 0 has bucketed the prefix's tuples by
-   the stripe of their key with one counting sort, hashing each key once;
-   worker `(index, s)` then walks bucket `s` in identifier order, finds or
-   creates each key in stripe `s`'s table and entries, and links the
-   tuple at the end of the key's chain. Chains are per key and a key is
-   in one stripe, so no two workers touch one chain, one entry, one
-   frontier -- the frontiers array of section 7.2 is per stripe, as the
-   entries are -- or one `next` slot: `next[last]` belongs to the key's
-   chain and `next[id]` to the tuple. Nothing here can fail, since phase
-   2 reserved every array. Worker 0 then reconciles the storage total
-   from what the relations hold, as a reservation does today.
+**The merge.** Section 6.1 admits a merge only when neither limit can
+refuse it. With the round's new tuples classified as one insertion's
+tuple is, that admission becomes exact rather than a worst case, and the
+merge runs in phases separated by barriers, those marked *parallel* on
+the pool:
 
-Identifiers are assigned in phase 3 in serial order, so the result is the
-serial evaluator's; the limits are checked in phase 2 on the same tuple
-and at the same capacities the serial evaluator checks. A lookup through
-a striped table costs one shift and mask more than today's, to choose the
-stripe.
+1. **Bucket by stripe** (parallel). Each task's candidates are counted
+   by canonical stripe; worker 0 turns the counts into offsets in task
+   order, and the candidates are written into the buckets. A bucket
+   lists its stripe's candidates in task order.
+2. **Deduplicate by stripe** (parallel). Worker `s` walks bucket `s`
+   with a scratch screen keyed by target and tuple and marks each
+   candidate *first* or *repeat*. A first is a new tuple, since the
+   screen of section 5.3 found it absent from the frozen store, and the
+   firsts are exactly the tuples the serial evaluator inserts. Stripes
+   share nothing, and each writes only its own candidates' marks.
+3. **Stage** (parallel). Worker 0 turns each task's count of firsts into
+   offsets per target in task order, and each task's firsts are copied,
+   columns and hash, into their target's staging at those offsets. A
+   target's staging lists its new tuples in identifier order: the one at
+   offset `i` becomes tuple `count + 1 + i`.
+4. **Classify keys** (parallel). For each secondary index of a target,
+   the staged tuples' keys are hashed and bucketed by key stripe in
+   identifier order, and worker `(index, s)` probes stripe `s` of the
+   frozen key table for each key and screens the keys it lacks,
+   recording for each staged tuple the key it joins: one the index
+   holds, or the new key the first staged tuple holding it creates. It
+   counts the stripe's new keys.
+5. **Check and reserve** (serial). Worker 0 now knows each target's new
+   tuples per canonical stripe and each index's new keys per key stripe,
+   which is all an exact projection needs. It checks both limits against
+   that projection with every scratch array still charged; a round that
+   would not fit is abandoned, as section 6.1 abandons one. It then
+   grows every array to exactly that capacity -- the capacity the serial
+   insertions reach, so the storage total after the merge is the serial
+   evaluator's byte for byte -- and allocates each growing table's new
+   slots without yet moving its entries. Every step that can fail is in
+   this phase; a growth that fails leaves every relation holding what it
+   held, and is reported as the serial evaluator reports one.
+6. **Append** (serial). Worker 0 copies each target's staging into its
+   columns and advances its count: a copy of `arity` words per new
+   tuple, which is memory bandwidth and not a probe.
+7. **Place and link** (parallel). Worker `s` moves stripe `s` of each
+   target's canonical index into the slots phase 5 allocated, if it grew,
+   and places the stripe's new tuples. Worker `(index, s)` does the same
+   for stripe `s` of the index's key table, then walks its bucket in
+   identifier order, creating each new key and linking each tuple at the
+   end of its key's chain. Chains are per key and a key is in one
+   stripe, so no two workers touch one chain, one entry, one frontier or
+   one `next` slot: `next[last]` belongs to the key's chain and
+   `next[id]` to the tuple. Nothing here can fail. Worker 0 then
+   reconciles the storage total from what the relations hold, as a
+   reservation does.
+
+A table's rehash, which moves every entry it holds, is the largest part
+of a growth, and it is the part phase 7 does in parallel: phase 5 only
+allocates. Identifiers are assigned in phase 3 in serial order, so the
+result is the serial evaluator's, and phase 5 checks the limits on the
+capacities the serial evaluator reaches. A lookup through a striped
+table costs one shift more than an unstriped one, to choose the stripe.
 
 ---
 
@@ -720,7 +751,7 @@ defined, and cheap:
   ThreadSanitizer has nothing to report.
 
 Between rounds only worker 0 runs, and the merge sets the frontier of a
-new key as `relic_index_add()` does for every insertion.
+new key as an insertion does, to the key's first tuple.
 
 ---
 
@@ -959,9 +990,10 @@ at every thread count**, and the argument is short because of section 3.
   inside the same chunks, and a sum does not depend on who added its
   terms. `parallel_rounds` counts the pool's rounds and is the one
   counter meant to differ.
-* The hash seed decides where a key sits and nothing reported, as it does
-  today; the stripe count is a constant, so what the tables hold and what
-  they cost is the same at every thread count.
+* The hash seed decides where a key sits within its table and nothing
+  reported; the stripe a key lives in is chosen by an unkeyed hash and the
+  stripe count is a constant, so what the tables hold and what they cost is
+  the same in every run and at every thread count.
 * A round abandoned on the pool is rerun serially, and a serial round is
   the serial evaluator; so every refusal is the serial evaluator's, on
   the same tuple or the same growth, with the same message.
@@ -1017,9 +1049,10 @@ array, one executor scratch per worker of one frame, one operation state
 per operation of the longest plan, and one batch, each grown to the
 largest round the pool has run. Per parallel round, charged, sized by the
 data and released at the round's end: each worker's candidate buffer and
-screen, and for the parallel merge the flag array and the stripes'
-scratch screens. Nothing is allocated per task, per tuple or inside the
-executor's loop, which section 9 of `specs/design-eval.md` promises.
+screen, and for the parallel merge the buckets, the marks, the staging,
+the keys' hashes and classifications, and the stripes' scratch screens.
+Nothing is allocated per task, per tuple or inside the executor's loop,
+which section 9 of `specs/design-eval.md` promises.
 
 The striped tables of section 6.3 hold what the unstriped ones hold in
 `RELIC_STRIPES` pieces, and a relation's minimum table is that many times

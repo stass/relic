@@ -56,19 +56,34 @@ static bool	 columns_holding(size_t tuples, uint16_t arity,
 		    size_t *columnsp);
 static int	 count_distinct(relic_t *ctx, const relic_relation_t *relation,
 		    uint16_t column, size_t *distinctp);
-static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation);
+static const relic_idtab_t *canonical_stripe(
+		    const relic_relation_t *relation, uint64_t hash);
+static void	 classify_keys(relic_relation_t *relation,
+		    const relic_dom_t *columns);
+static size_t	 columns_bytes_after(const relic_relation_t *relation,
+		    size_t added);
+static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation,
+		    uint64_t hash);
 static bool	 exceeds_tuple_limit(const relic_t *ctx);
 static int	 insert_hashed_chunk(relic_t *ctx, relic_relation_t *relation,
-		    const relic_dom_t *chunk, const uint32_t *hashes,
+		    const relic_dom_t *chunk, const uint64_t *hashes,
 		    size_t count, bool *added, size_t *completedp);
+static int	 insertion_grow(relic_t *ctx, relic_relation_t *relation,
+		    uint64_t hash);
+static size_t	 insertion_parts_bytes(const relic_relation_t *relation,
+		    uint64_t hash);
+static size_t	 insertion_parts_bytes_after(
+		    const relic_relation_t *relation, uint64_t hash);
+static int	 insertion_reserve(relic_t *ctx, relic_relation_t *relation,
+		    uint64_t hash);
 static int	 index_build(relic_t *ctx, const relic_relation_t *relation,
 		    relic_index_t *index);
 static int	 index_make_room(relic_t *ctx, const relic_relation_t *relation,
-		    relic_index_t *index, size_t tuples);
+		    relic_index_t *index);
 static bool	 key_mask_fits(const relic_relation_t *relation,
 		    uint32_t key_mask);
 static void	 prefetch_first_candidate(const relic_relation_t *relation,
-		    uint32_t hash);
+		    uint64_t hash);
 static void	 report_limit(relic_t *ctx, const char *limit,
 		    size_t configured, const char *activity,
 		    const char *described);
@@ -78,12 +93,15 @@ static bool	 relation_columns_after_reserve(
 static void	 relation_empty(relic_relation_t *relation);
 static relic_tuple_id_t relation_find_hashed(
 		    const relic_relation_t *relation,
-		    const relic_dom_t *columns, uint32_t hash);
+		    const relic_dom_t *columns, uint64_t hash);
 static int	 relation_insert_hashed(relic_t *ctx,
 		    relic_relation_t *relation, const relic_dom_t *columns,
-		    uint32_t hash, bool *addedp);
+		    uint64_t hash, bool *addedp);
 static int	 relation_grow(relic_t *ctx, relic_relation_t *relation,
-		    size_t added);
+		    const relic_tuple_growth_t *growth);
+static bool	 relation_too_large(relic_t *ctx,
+		    const relic_relation_t *relation, size_t added,
+		    size_t *columnsp);
 static void	 relation_init(relic_relation_t *relation, const relic_t *ctx,
 		    relic_pred_id_t pred, size_t serial, uint16_t arity);
 static void	 relation_drop_indexes(relic_t *ctx,
@@ -101,12 +119,14 @@ static int	 bases_fit(relic_t *ctx, const relic_base_growth_t *growths,
 static int	 refuse_load(relic_t *ctx, const char *key, size_t limit,
 		    relic_pred_id_t pred);
 static void	 tuple_append(relic_relation_t *relation,
-		    const relic_dom_t *columns, uint32_t hash);
+		    const relic_dom_t *columns, uint64_t hash);
 static relic_dom_t *tuple_at(const relic_relation_t *relation,
 		    relic_tuple_id_t id);
-static uint32_t	 tuple_hash(const relic_relation_t *relation,
+static uint64_t	 tuple_hash(const relic_relation_t *relation,
 		    const relic_dom_t *columns);
 static uint32_t	 tuple_rehash(uint32_t id, void *ctx);
+static relic_idtab_t *writable_canonical_stripe(relic_relation_t *relation,
+		    uint64_t hash);
 
 void
 relic_store_init(relic_store_t *store)
@@ -136,8 +156,10 @@ static void
 relation_empty(relic_relation_t *relation)
 {
 	size_t position;
+	size_t s;
 
-	relic_idtab_reset(&relation->index);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		relic_idtab_reset(&relation->index[s]);
 	relic_free_array(relation->columns);
 	relation->columns = NULL;
 	relation->column_capacity = 0;
@@ -181,8 +203,11 @@ static void
 relation_init(relic_relation_t *relation, const relic_t *ctx,
     relic_pred_id_t pred, size_t serial, uint16_t arity)
 {
+	size_t s;
+
 	bzero(relation, sizeof(*relation));
-	relic_idtab_init(&relation->index, false);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		relic_idtab_init(&relation->index[s], false);
 	relation->hash_seed = ctx->hash_seed;
 	relation->pred = pred;
 	relation->serial = serial;
@@ -251,18 +276,18 @@ tuple_at(const relic_relation_t *relation, relic_tuple_id_t id)
 }
 
 /*
- * The hash of a whole tuple, which is what the canonical index is keyed on,
- * and what a load's staging computes to hand the base store.  A tuple of no
- * columns has a defined hash, which is what lets a relation of arity zero
+ * The wide hash of a whole tuple, which is what the canonical index is keyed
+ * on, and what a load's staging computes to hand the base store.  A tuple of
+ * no columns has a defined hash, which is what lets a relation of arity zero
  * use this path like any other.
  */
-uint32_t
+uint64_t
 relic_tuple_hash(uint64_t seed, const relic_dom_t *columns, uint16_t arity)
 {
-	return (relic_hash_words(seed, columns, arity));
+	return (relic_hash_words_wide(seed, columns, arity));
 }
 
-static uint32_t
+static uint64_t
 tuple_hash(const relic_relation_t *relation, const relic_dom_t *columns)
 {
 	return (relic_tuple_hash(relation->hash_seed, columns,
@@ -270,7 +295,10 @@ tuple_hash(const relic_relation_t *relation, const relic_dom_t *columns)
 }
 
 /*
- * The hash of a tuple already stored, for the index to use when it grows.
+ * The hash of a tuple already stored, for its stripe of the canonical index
+ * to use when it grows: the low half of its wide hash, which is the keyed
+ * hash of its columns, computed without the unkeyed half that chose the
+ * stripe it is already in.
  */
 static uint32_t
 tuple_rehash(uint32_t id, void *ctx)
@@ -279,7 +307,24 @@ tuple_rehash(uint32_t id, void *ctx)
 
 	relation = ctx;
 
-	return (tuple_hash(relation, tuple_at(relation, id)));
+	return (relic_hash_words(relation->hash_seed, tuple_at(relation, id),
+	    relation->arity));
+}
+
+/*
+ * The stripe of the canonical index a tuple of wide hash `hash` lives in,
+ * read-only and writable.
+ */
+static const relic_idtab_t *
+canonical_stripe(const relic_relation_t *relation, uint64_t hash)
+{
+	return (&relation->index[relic_hash_stripe(hash)]);
+}
+
+static relic_idtab_t *
+writable_canonical_stripe(relic_relation_t *relation, uint64_t hash)
+{
+	return (&relation->index[relic_hash_stripe(hash)]);
 }
 
 /*
@@ -288,12 +333,13 @@ tuple_rehash(uint32_t id, void *ctx)
  */
 static relic_tuple_id_t
 relation_find_hashed(const relic_relation_t *relation,
-    const relic_dom_t *columns, uint32_t hash)
+    const relic_dom_t *columns, uint64_t hash)
 {
 	relic_idprobe_t probe;
 	relic_tuple_id_t id;
 
-	relic_idprobe_open(&probe, &relation->index, hash);
+	relic_idprobe_open(&probe, canonical_stripe(relation, hash),
+	    relic_hash_low(hash));
 	while (relic_idprobe_next(&probe, &id)) {
 		if (relic_tuple_equal(tuple_at(relation, id), columns,
 		    relation->arity))
@@ -342,17 +388,19 @@ relation_columns_after_reserve(const relic_relation_t *relation,
 }
 
 /*
- * The bytes of tuple and index storage a relation holds: its columns, its
- * canonical index and every secondary index.
+ * The bytes of tuple and index storage a relation holds: its columns, every
+ * stripe of its canonical index and every secondary index.
  */
 size_t
 relic_relation_bytes(const relic_relation_t *relation)
 {
 	size_t bytes;
 	size_t position;
+	size_t s;
 
-	bytes = relation->column_capacity * sizeof(*relation->columns) +
-	    relic_idtab_bytes(&relation->index);
+	bytes = relation->column_capacity * sizeof(*relation->columns);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes += relic_idtab_bytes(&relation->index[s]);
 
 	for (position = 0; position < relation->index_count; position++)
 		bytes += relic_index_bytes(&relation->indexes[position]);
@@ -361,8 +409,10 @@ relic_relation_bytes(const relic_relation_t *relation)
 }
 
 /*
- * The bytes a relation would hold once relic_relation_reserve() had made
- * room for `added` more tuples.
+ * The bytes a relation without secondary indexes would hold once
+ * relic_relation_reserve() had made room for `growth`: its columns grown
+ * once for every tuple, and each stripe of its canonical index for the
+ * tuples that fall in it.
  *
  * Both growth policies are asked what they would do rather than measured
  * after they have done it, which is what lets the memory limit refuse an
@@ -378,59 +428,140 @@ relic_relation_bytes(const relic_relation_t *relation)
  * would name the wrong one.
  */
 size_t
-relic_relation_bytes_after_reserve(const relic_relation_t *relation,
-    size_t added)
+relic_relation_bytes_after_growth(const relic_relation_t *relation,
+    const relic_tuple_growth_t *growth)
 {
 	size_t bytes;
-	size_t canonical_bytes;
-	size_t column_bytes;
-	size_t grown_capacity;
-	size_t needed_columns;
-	size_t position;
-	size_t secondary_bytes;
+	size_t s;
 
-	if (!relation_columns_after_reserve(relation, added, &needed_columns))
+	assert(relation->index_count == 0);
+
+	bytes = columns_bytes_after(relation,
+	    relic_tuple_growth_total(growth));
+	if (bytes == SIZE_MAX)
 		return (relic_relation_bytes(relation));
 
-	canonical_bytes = relic_idtab_bytes_after_reserve(&relation->index,
-	    added);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_idtab_bytes_after_reserve(&relation->index[s],
+		    growth->by_stripe[s]));
+	if (bytes == SIZE_MAX)
+		return (relic_relation_bytes(relation));
+
+	return (bytes);
+}
+
+/*
+ * The tuples a growth adds in all: the sum of those it adds to each stripe,
+ * or SIZE_MAX when that sum is more than a size_t holds, which no relation
+ * can take.
+ */
+size_t
+relic_tuple_growth_total(const relic_tuple_growth_t *growth)
+{
+	size_t total;
+	size_t s;
+
+	total = 0;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		total = relic_saturating_sum(total, growth->by_stripe[s]);
+
+	return (total);
+}
+
+/*
+ * The bytes a relation's columns would hold once grown for `added` more
+ * tuples, or SIZE_MAX when they could not grow that far: past the
+ * identifier space, or to a size a size_t does not hold.
+ */
+static size_t
+columns_bytes_after(const relic_relation_t *relation, size_t added)
+{
+	size_t grown_capacity;
+	size_t needed_columns;
+
+	if (!relation_columns_after_reserve(relation, added, &needed_columns))
+		return (SIZE_MAX);
 
 	grown_capacity = relic_grow_array_capacity(relation->column_capacity,
 	    needed_columns);
-	if (grown_capacity == 0 ||
-	    grown_capacity > SIZE_MAX / sizeof(*relation->columns))
-		return (relic_relation_bytes(relation));
+	if (grown_capacity == 0)
+		return (SIZE_MAX);
 
-	column_bytes = grown_capacity * sizeof(*relation->columns);
-	if (column_bytes > SIZE_MAX - canonical_bytes)
-		return (relic_relation_bytes(relation));
-	bytes = column_bytes + canonical_bytes;
+	return (relic_saturating_product(grown_capacity,
+	    sizeof(*relation->columns)));
+}
 
-	for (position = 0; position < relation->index_count; position++) {
-		secondary_bytes = relic_index_bytes_after_reserve(
-		    &relation->indexes[position], relation->count + added,
-		    added);
-		if (secondary_bytes > SIZE_MAX - bytes)
-			return (relic_relation_bytes(relation));
-		bytes += secondary_bytes;
-	}
+/*
+ * The bytes now held by the parts of a relation that inserting a tuple of
+ * wide hash `hash` can grow: its columns, the canonical stripe the hash
+ * chooses, and in each secondary index the parts its pending insertion can
+ * grow, which classify_keys() has classified.  An insertion measures these,
+ * before and after it reserves, rather than the whole relation, which would
+ * cost a look at every stripe of every index.
+ */
+static size_t
+insertion_parts_bytes(const relic_relation_t *relation, uint64_t hash)
+{
+	size_t bytes;
+	size_t position;
+
+	bytes = relation->column_capacity * sizeof(*relation->columns) +
+	    relic_idtab_bytes(canonical_stripe(relation, hash));
+
+	for (position = 0; position < relation->index_count; position++)
+		bytes += relic_index_pending_bytes(
+		    &relation->indexes[position]);
+
+	return (bytes);
+}
+
+/*
+ * The same parts' bytes once insertion_grow() had made room for the tuple.
+ * A growth that could not happen at all is reported as no growth, as
+ * relic_relation_bytes_after_growth() reports one.
+ */
+static size_t
+insertion_parts_bytes_after(const relic_relation_t *relation, uint64_t hash)
+{
+	size_t columns_after;
+	size_t stripe_after;
+	size_t bytes;
+	size_t position;
+
+	columns_after = columns_bytes_after(relation, 1);
+	if (columns_after == SIZE_MAX)
+		return (insertion_parts_bytes(relation, hash));
+
+	stripe_after = relic_idtab_bytes_after_reserve(
+	    canonical_stripe(relation, hash), 1);
+	bytes = relic_saturating_sum(columns_after, stripe_after);
+
+	for (position = 0; position < relation->index_count; position++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_index_pending_bytes_after(
+		    &relation->indexes[position]));
+	if (bytes == SIZE_MAX)
+		return (insertion_parts_bytes(relation, hash));
 
 	return (bytes);
 }
 
 /*
  * The bytes a relation would hold once `added` tuples it does not hold had
- * been inserted one at a time, as relic_relation_insert() inserts them, or
- * SIZE_MAX when the relation could not hold that many tuples or its columns
- * or a secondary index could not grow that far.
+ * been inserted one at a time, as relic_relation_insert() inserts them, at
+ * most, or SIZE_MAX when the relation could not hold that many tuples or
+ * its columns or a secondary index could not grow that far.
  *
  * Each insertion reserves room for one tuple, and arrays grown one tuple
  * at a time can reach more than one reservation for all of them would
  * (relic_grow_array_capacity_stepwise()), so the columns and every
- * secondary index are followed step by step.  The canonical index doubles,
- * so one reservation for every tuple reaches what one per tuple does; its
- * part is what relic_idtab_bytes_after_reserve() says, which is what an
- * insertion's own check projects.  A sequence of insertions of which some
+ * secondary index are followed step by step.  Which stripe of the canonical
+ * index each tuple falls in is not known here, so each stripe is grown as
+ * though every tuple fell in it, which no sequence of insertions exceeds;
+ * a stripe doubles, so one reservation for every tuple reaches what one per
+ * tuple does.  The secondary indexes are bounded the same way
+ * (relic_index_bytes_after_adds()).  A sequence of insertions of which some
  * find their tuple present passes through the same capacities and stops
  * sooner, so no such sequence holds more than this.
  */
@@ -441,6 +572,7 @@ relic_relation_bytes_after_inserts(const relic_relation_t *relation,
 	size_t bytes;
 	size_t columns;
 	size_t position;
+	size_t s;
 
 	if (added == 0)
 		return (relic_relation_bytes(relation));
@@ -452,9 +584,11 @@ relic_relation_bytes_after_inserts(const relic_relation_t *relation,
 	if (columns == 0)
 		return (SIZE_MAX);
 
-	bytes = relic_saturating_sum(
-	    relic_saturating_product(columns, sizeof(*relation->columns)),
-	    relic_idtab_bytes_after_reserve(&relation->index, added));
+	bytes = relic_saturating_product(columns, sizeof(*relation->columns));
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_idtab_bytes_after_reserve(&relation->index[s],
+		    added));
 
 	for (position = 0; position < relation->index_count; position++)
 		bytes = relic_saturating_sum(bytes,
@@ -483,8 +617,9 @@ exceeds_tuple_limit(const relic_t *ctx)
 }
 
 /*
- * Apply the configured limits to one more tuple in this relation.  Returns 0
- * when they admit it, or -1 having reported which of them refused it.
+ * Apply the configured limits to one more tuple in this relation, of wide
+ * hash `hash`, whose keys classify_keys() has classified.  Returns 0 when
+ * they admit it, or -1 having reported which of them refused it.
  *
  * Each is applied to what the relation would hold after the insertion and
  * before anything has been modified, so a relation that refused a tuple is
@@ -497,7 +632,7 @@ exceeds_tuple_limit(const relic_t *ctx)
  * is reported where the other structural refusals are.
  */
 static int
-enforce_limits(relic_t *ctx, const relic_relation_t *relation)
+enforce_limits(relic_t *ctx, const relic_relation_t *relation, uint64_t hash)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
@@ -508,8 +643,9 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation)
 		return (-1);
 	}
 
-	if (relic_account_exceeds(&ctx->account, relic_relation_bytes(relation),
-	    relic_relation_bytes_after_reserve(relation, 1))) {
+	if (relic_account_exceeds(&ctx->account,
+	    insertion_parts_bytes(relation, hash),
+	    insertion_parts_bytes_after(relation, hash))) {
 		report_limit(ctx, "memory", ctx->account.limit, "deriving",
 		    relic_relation_describe(ctx, relation, described,
 		    sizeof(described)));
@@ -535,8 +671,33 @@ report_limit(relic_t *ctx, const char *limit, size_t configured,
 }
 
 /*
- * Make room for `added` more tuples: slots in the canonical index, their
- * columns, and room in every secondary index.
+ * Whether `added` more tuples would take a relation past what it can hold at
+ * all: past the identifier space, or to columns no longer countable.  Such a
+ * relation is one no limit describes, and is reported as too large to grow.
+ * Otherwise sets *columnsp to the columns it would then need.
+ */
+static bool
+relation_too_large(relic_t *ctx, const relic_relation_t *relation,
+    size_t added, size_t *columnsp)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (relation_columns_after_reserve(relation, added, columnsp))
+		return (false);
+
+	relic_diagf(ctx, RELIC_ERROR, NULL, "relation %s is too large to grow",
+	    relic_relation_describe(ctx, relation, described,
+	    sizeof(described)));
+
+	return (true);
+}
+
+/*
+ * Make room in a relation without secondary indexes for `growth`: slots in
+ * each stripe of the canonical index for the tuples that fall in it, and
+ * their columns.  A relation with secondary indexes is refused as the
+ * internal error it is: the tuples appended into the room would have none
+ * in the indexes.
  *
  * Every step that can fail is here, and none of them changes what the
  * relation holds.  That separation is what an insertion's consistency rests
@@ -553,28 +714,89 @@ report_limit(relic_t *ctx, const char *limit, size_t configured,
  * holds rather than from which step failed.
  */
 static int
-relation_grow(relic_t *ctx, relic_relation_t *relation, size_t added)
+relation_grow(relic_t *ctx, relic_relation_t *relation,
+    const relic_tuple_growth_t *growth)
+{
+	relic_dom_t *columns;
+	size_t needed_columns;
+	size_t s;
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (relation->index_count != 0) {
+		relic_diagf(ctx, RELIC_ERROR, NULL,
+		    "internal error: %s was reserved for many tuples while "
+		    "it has secondary indexes", relic_relation_describe(ctx,
+		    relation, described, sizeof(described)));
+		return (-1);
+	}
+
+	if (relation_too_large(ctx, relation, relic_tuple_growth_total(growth),
+	    &needed_columns))
+		return (-1);
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (relic_idtab_reserve(&relation->index[s],
+		    growth->by_stripe[s], tuple_rehash, relation) != 0) {
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+	}
+
+	columns = relic_grow_array(relation->columns,
+	    &relation->column_capacity, needed_columns,
+	    sizeof(*relation->columns));
+	if (columns == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	relation->columns = columns;
+
+	return (0);
+}
+
+/*
+ * Make room in a relation without secondary indexes for `growth` and keep
+ * the storage total in step.
+ *
+ * The total is reconciled from what the relation holds before and after, so
+ * it stays exact whether the reservation succeeded, failed part way through,
+ * or grew nothing at all.  A total maintained by adding at the successful
+ * sites and subtracting at the failing ones would be a list of places to
+ * remember, and the list would be wrong the first time a step was added.
+ */
+int
+relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
+    const relic_tuple_growth_t *growth)
+{
+	size_t bytes_before;
+	int status;
+
+	bytes_before = relic_relation_bytes(relation);
+	status = relation_grow(ctx, relation, growth);
+	ctx->account.store_bytes +=
+	    relic_relation_bytes(relation) - bytes_before;
+
+	return (status);
+}
+
+/*
+ * Make room for one tuple of wide hash `hash`, whose keys classify_keys()
+ * has classified: a slot in its canonical stripe, its columns, and in every
+ * secondary index its link and, when its key is new, the key.  Every step
+ * that can fail is here, as relation_grow() explains.
+ */
+static int
+insertion_grow(relic_t *ctx, relic_relation_t *relation, uint64_t hash)
 {
 	relic_dom_t *columns;
 	size_t needed_columns;
 	size_t position;
-	char described[RELIC_PRED_TEXT_MAX];
 
-	/*
-	 * A relation too large to grow at all is one no limit describes: the
-	 * tuples would pass the identifier space, or its columns would no
-	 * longer be countable.
-	 */
-	if (!relation_columns_after_reserve(relation, added, &needed_columns)) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "relation %s is too large to grow",
-		    relic_relation_describe(ctx, relation, described,
-		    sizeof(described)));
+	if (relation_too_large(ctx, relation, 1, &needed_columns))
 		return (-1);
-	}
 
-	if (relic_idtab_reserve(&relation->index, added, tuple_rehash,
-	    relation) != 0) {
+	if (relic_idtab_reserve(writable_canonical_stripe(relation, hash), 1,
+	    tuple_rehash, relation) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
@@ -589,8 +811,8 @@ relation_grow(relic_t *ctx, relic_relation_t *relation, size_t added)
 	relation->columns = columns;
 
 	for (position = 0; position < relation->index_count; position++) {
-		if (relic_index_reserve(&relation->indexes[position], relation,
-		    relation->count + added, added) != 0) {
+		if (relic_index_reserve_pending(&relation->indexes[position],
+		    relation) != 0) {
 			relic_diag_no_memory(ctx);
 			return (-1);
 		}
@@ -600,34 +822,58 @@ relation_grow(relic_t *ctx, relic_relation_t *relation, size_t added)
 }
 
 /*
- * Make room for `added` more tuples and keep the storage total in step.
- *
- * The total is reconciled from what the relation holds before and after, so
- * it stays exact whether the reservation succeeded, failed part way through,
- * or grew nothing at all.  A total maintained by adding at the successful
- * sites and subtracting at the failing ones would be a list of places to
- * remember, and the list would be wrong the first time a step was added.
+ * Make room for one tuple and keep the storage total in step, by measuring
+ * the parts the insertion can grow before and after, as
+ * relic_relation_reserve() measures the whole relation.  A debug build
+ * measures the whole relation too, so that a growth of anything the parts
+ * leave out stops it rather than drifting the total.
  */
-int
-relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
-    size_t added)
+static int
+insertion_reserve(relic_t *ctx, relic_relation_t *relation, uint64_t hash)
 {
+#ifndef NDEBUG
+	size_t whole_before;
+#endif
 	size_t bytes_before;
+	size_t grown;
 	int status;
 
-	assert(added <= 1 || relation->index_count == 0);
+#ifndef NDEBUG
+	whole_before = relic_relation_bytes(relation);
+#endif
 
-	bytes_before = relic_relation_bytes(relation);
-	status = relation_grow(ctx, relation, added);
-	ctx->account.store_bytes +=
-	    relic_relation_bytes(relation) - bytes_before;
+	bytes_before = insertion_parts_bytes(relation, hash);
+	status = insertion_grow(ctx, relation, hash);
+	grown = insertion_parts_bytes(relation, hash) - bytes_before;
+	ctx->account.store_bytes += grown;
+
+	assert(relic_relation_bytes(relation) - whole_before == grown);
 
 	return (status);
 }
 
 /*
- * Store a tuple the relation has room for, index it under its hash, and add
- * it to every secondary index.
+ * Classify the keys of the tuple about to be inserted, as the tuple after
+ * the relation's last, in every secondary index, which is what the limits,
+ * the reservation and the linking of an insertion all read
+ * (relic_index_classify()).
+ */
+static void
+classify_keys(relic_relation_t *relation, const relic_dom_t *columns)
+{
+	relic_tuple_id_t id;
+	size_t position;
+
+	id = (relic_tuple_id_t)(relation->count + 1);
+	for (position = 0; position < relation->index_count; position++)
+		relic_index_classify(&relation->indexes[position], relation,
+		    columns, id);
+}
+
+/*
+ * Store a tuple the relation has room for, place it in its canonical
+ * stripe under its wide hash, and link it into every secondary index by the
+ * classification of its keys.
  *
  * Nothing here can fail, which is what lets the columns and every index entry
  * be published together.  The identifier is the one past the last, which is
@@ -637,7 +883,7 @@ relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
  */
 static void
 tuple_append(relic_relation_t *relation, const relic_dom_t *columns,
-    uint32_t hash)
+    uint64_t hash)
 {
 	relic_dom_t *destination;
 	relic_tuple_id_t id;
@@ -657,10 +903,14 @@ tuple_append(relic_relation_t *relation, const relic_dom_t *columns,
 
 	relation->count++;
 
-	relic_idtab_place(&relation->index, hash, id);
+	relic_idtab_place(writable_canonical_stripe(relation, hash),
+	    relic_hash_low(hash), id);
 
-	for (position = 0; position < relation->index_count; position++)
-		relic_index_add(&relation->indexes[position], relation, id);
+	for (position = 0; position < relation->index_count; position++) {
+		assert(relation->indexes[position].pending.tuple == id);
+		relic_index_add_pending(&relation->indexes[position],
+		    relation);
+	}
 }
 
 /*
@@ -695,23 +945,27 @@ relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 }
 
 /*
- * Insert a tuple whose hash, tuple_hash(), the caller has computed: the one
- * insertion both relic_relation_insert() and a batch perform, so the two
- * cannot disagree about what a duplicate is.
+ * Insert a tuple whose wide hash, tuple_hash(), the caller has computed: the
+ * one insertion both relic_relation_insert() and a batch perform, so the two
+ * cannot disagree about what a duplicate is.  It classifies, checks,
+ * reserves and applies, in that order: the tuple and its keys are found or
+ * found absent, the limits are asked about exactly the growth that implies,
+ * room is made for it, and only then is anything stored.
  */
 static int
 relation_insert_hashed(relic_t *ctx, relic_relation_t *relation,
-    const relic_dom_t *columns, uint32_t hash, bool *addedp)
+    const relic_dom_t *columns, uint64_t hash, bool *addedp)
 {
 	*addedp = false;
 
 	if (relation_find_hashed(relation, columns, hash) != RELIC_ID_NONE)
 		return (0);
 
-	if (enforce_limits(ctx, relation) != 0)
+	classify_keys(relation, columns);
+	if (enforce_limits(ctx, relation, hash) != 0)
 		return (-1);
 
-	if (relic_relation_reserve(ctx, relation, 1) != 0)
+	if (insertion_reserve(ctx, relation, hash) != 0)
 		return (-1);
 
 	tuple_append(relation, columns, hash);
@@ -745,7 +999,7 @@ relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
     const relic_dom_t *tuples, size_t count, bool *added,
     size_t *completedp)
 {
-	uint32_t hashes[RELIC_INSERT_BATCH];
+	uint64_t hashes[RELIC_INSERT_BATCH];
 	const relic_dom_t *chunk;
 	size_t chunk_count;
 	size_t first;
@@ -764,7 +1018,8 @@ relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 		for (i = 0; i < chunk_count; i++) {
 			hashes[i] = tuple_hash(relation,
 			    chunk + i * relation->arity);
-			relic_idtab_prefetch(&relation->index, hashes[i]);
+			relic_idtab_prefetch(canonical_stripe(relation,
+			    hashes[i]), relic_hash_low(hashes[i]));
 		}
 
 		if (insert_hashed_chunk(ctx, relation, chunk, hashes,
@@ -776,14 +1031,14 @@ relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 }
 
 /*
- * The same, for tuples whose hashes the caller computed under the context's
- * seed, as relic_relation_screen() computes them: the first pass prefetches
- * and hashes nothing.  A debug build checks each hash against the
- * relation's own.
+ * The same, for tuples whose wide hashes the caller computed under the
+ * context's seed, as relic_relation_screen() computes them: the first pass
+ * prefetches and hashes nothing.  A debug build checks each hash against
+ * the relation's own.
  */
 int
 relic_relation_insert_batch_hashed(relic_t *ctx, relic_relation_t *relation,
-    const relic_dom_t *tuples, const uint32_t *hashes, size_t count,
+    const relic_dom_t *tuples, const uint64_t *hashes, size_t count,
     bool *added, size_t *completedp)
 {
 	const relic_dom_t *chunk;
@@ -804,8 +1059,9 @@ relic_relation_insert_batch_hashed(relic_t *ctx, relic_relation_t *relation,
 		for (i = 0; i < chunk_count; i++) {
 			assert(hashes[first + i] == tuple_hash(relation,
 			    chunk + i * relation->arity));
-			relic_idtab_prefetch(&relation->index,
-			    hashes[first + i]);
+			relic_idtab_prefetch(canonical_stripe(relation,
+			    hashes[first + i]),
+			    relic_hash_low(hashes[first + i]));
 		}
 
 		if (insert_hashed_chunk(ctx, relation, chunk, &hashes[first],
@@ -823,7 +1079,7 @@ relic_relation_insert_batch_hashed(relic_t *ctx, relic_relation_t *relation,
  */
 static int
 insert_hashed_chunk(relic_t *ctx, relic_relation_t *relation,
-    const relic_dom_t *chunk, const uint32_t *hashes, size_t count,
+    const relic_dom_t *chunk, const uint64_t *hashes, size_t count,
     bool *added, size_t *completedp)
 {
 	size_t i;
@@ -843,7 +1099,7 @@ insert_hashed_chunk(relic_t *ctx, relic_relation_t *relation,
 
 /*
  * Look up `count` tuples, packed at the relation's arity, as an insertion of
- * them would, without inserting any: set hashes[i] to tuple i's hash and
+ * them would, without inserting any: set hashes[i] to tuple i's wide hash and
  * held[i] to whether the relation holds it.  The passes are those of a
  * batch insertion, so the misses of the lookups overlap as its duplicate
  * checks do, and the hash and the probe are its own, so a tuple found here
@@ -851,7 +1107,7 @@ insert_hashed_chunk(relic_t *ctx, relic_relation_t *relation,
  */
 void
 relic_relation_screen(const relic_relation_t *relation,
-    const relic_dom_t *tuples, size_t count, uint32_t *hashes, bool *held)
+    const relic_dom_t *tuples, size_t count, uint64_t *hashes, bool *held)
 {
 	size_t i;
 
@@ -859,7 +1115,8 @@ relic_relation_screen(const relic_relation_t *relation,
 
 	for (i = 0; i < count; i++) {
 		hashes[i] = tuple_hash(relation, tuples + i * relation->arity);
-		relic_idtab_prefetch(&relation->index, hashes[i]);
+		relic_idtab_prefetch(canonical_stripe(relation, hashes[i]),
+		    relic_hash_low(hashes[i]));
 	}
 
 	for (i = 0; i < count; i++)
@@ -877,14 +1134,15 @@ relic_relation_screen(const relic_relation_t *relation,
  * relation of arity zero has no columns to fetch.
  */
 static void
-prefetch_first_candidate(const relic_relation_t *relation, uint32_t hash)
+prefetch_first_candidate(const relic_relation_t *relation, uint64_t hash)
 {
 	relic_tuple_id_t id;
 
 	if (relation->arity == 0)
 		return;
 
-	id = relic_idtab_peek(&relation->index, hash);
+	id = relic_idtab_peek(canonical_stripe(relation, hash),
+	    relic_hash_low(hash));
 	if (id != RELIC_ID_NONE)
 		RELIC_PREFETCH(tuple_at(relation, id));
 }
@@ -916,13 +1174,13 @@ relic_relation_contains(const relic_relation_t *relation,
 }
 
 /*
- * Whether the relation holds this tuple, whose hash the caller computed
+ * Whether the relation holds this tuple, whose wide hash the caller computed
  * under the context's seed, as every relation of the context hashes a
  * tuple.  A debug build checks the hash against the relation's own.
  */
 bool
 relic_relation_contains_hashed(const relic_relation_t *relation,
-    const relic_dom_t *columns, uint32_t hash)
+    const relic_dom_t *columns, uint64_t hash)
 {
 	assert(hash == tuple_hash(relation, columns));
 
@@ -1031,9 +1289,10 @@ key_mask_fits(const relic_relation_t *relation, uint32_t key_mask)
 }
 
 /*
- * Make room in an index for `tuples` tuples and one more key, under the
- * memory limit, keeping the storage total in step as relic_relation_reserve()
- * does.
+ * Make room in an index for the tuple its pending insertion classified, and
+ * for the tuple's key when it is new, under the memory limit, keeping the
+ * storage total in step as relic_relation_reserve() does, by the parts of
+ * the index the insertion can grow.
  *
  * `index` need not be one the relation has published: it is measured as a
  * part of the storage total in its own right, which is what lets an index be
@@ -1041,24 +1300,35 @@ key_mask_fits(const relic_relation_t *relation, uint32_t key_mask)
  */
 static int
 index_make_room(relic_t *ctx, const relic_relation_t *relation,
-    relic_index_t *index, size_t tuples)
+    relic_index_t *index)
 {
+#ifndef NDEBUG
+	size_t whole_before;
+#endif
 	size_t bytes_before;
+	size_t grown;
 	int status;
 	char described[RELIC_PRED_TEXT_MAX];
 
-	bytes_before = relic_index_bytes(index);
+	bytes_before = relic_index_pending_bytes(index);
 
 	if (relic_account_exceeds(&ctx->account, bytes_before,
-	    relic_index_bytes_after_reserve(index, tuples, 1))) {
+	    relic_index_pending_bytes_after(index))) {
 		report_limit(ctx, "memory", ctx->account.limit, "indexing",
 		    relic_relation_describe(ctx, relation, described,
 		    sizeof(described)));
 		return (-1);
 	}
 
-	status = relic_index_reserve(index, relation, tuples, 1);
-	ctx->account.store_bytes += relic_index_bytes(index) - bytes_before;
+#ifndef NDEBUG
+	whole_before = relic_index_bytes(index);
+#endif
+
+	status = relic_index_reserve_pending(index, relation);
+	grown = relic_index_pending_bytes(index) - bytes_before;
+	ctx->account.store_bytes += grown;
+
+	assert(relic_index_bytes(index) - whole_before == grown);
 	if (status != 0)
 		relic_diag_no_memory(ctx);
 
@@ -1071,10 +1341,10 @@ index_make_room(relic_t *ctx, const relic_relation_t *relation,
  * or -1 with a diagnostic reported, leaving the index holding whatever it had
  * reached and the storage total counting it.
  *
- * Room is made one tuple at a time rather than for the whole relation at
- * once.  The limit is then applied at each growth exactly as it is when the
- * relation grows by insertion, so an index that fits is admitted however it
- * came to be built.
+ * Each tuple is added as an insertion adds it: classified, room made, and
+ * linked.  The limit is then applied at each growth exactly as it is when
+ * the relation grows by insertion, so an index that fits is admitted however
+ * it came to be built.
  */
 static int
 index_build(relic_t *ctx, const relic_relation_t *relation,
@@ -1083,10 +1353,12 @@ index_build(relic_t *ctx, const relic_relation_t *relation,
 	relic_tuple_id_t id;
 
 	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
-		if (index_make_room(ctx, relation, index, id) != 0)
+		relic_index_classify(index, relation, tuple_at(relation, id),
+		    id);
+		if (index_make_room(ctx, relation, index) != 0)
 			return (-1);
 
-		relic_index_add(index, relation, id);
+		relic_index_add_pending(index, relation);
 	}
 
 	return (0);
@@ -1550,6 +1822,7 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 {
 	const relic_relation_t *store;
 	relic_relation_t absent;
+	size_t added;
 	size_t added_total;
 	size_t bytes_after;
 	size_t bytes_before;
@@ -1569,10 +1842,11 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 			store = &absent;
 		}
 
-		projected = relic_relation_bytes_after_reserve(store,
-		    growths[i].added);
-		if (growths[i].added > RELIC_TUPLE_MAX - store->count ||
-		    growths[i].added > SIZE_MAX - added_total ||
+		added = relic_tuple_growth_total(&growths[i].added);
+		projected = relic_relation_bytes_after_growth(store,
+		    &growths[i].added);
+		if (added > RELIC_TUPLE_MAX - store->count ||
+		    added > SIZE_MAX - added_total ||
 		    projected > SIZE_MAX - bytes_after) {
 			relic_diagf(ctx, RELIC_ERROR, NULL,
 			    "relation %s is too large to grow",
@@ -1581,7 +1855,7 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 			return (-1);
 		}
 
-		added_total += growths[i].added;
+		added_total += added;
 		bytes_before += relic_relation_bytes(store);
 		bytes_after += projected;
 	}
@@ -1616,9 +1890,9 @@ refuse_load(relic_t *ctx, const char *key, size_t limit, relic_pred_id_t pred)
 
 /*
  * Make room in the base stores for the facts a load's commit is about to
- * append: `added` more tuples for each predicate of `growths`, which holds
- * at least one growth, each of at least one tuple.  Returns 0, or -1 having
- * reported the refusal.
+ * append: `added` more tuples for each predicate of `growths`, counted by
+ * canonical stripe, which holds at least one growth, each of at least one
+ * tuple.  Returns 0, or -1 having reported the refusal.
  *
  * Both limits are checked once, over every store together, before any
  * store is created or grown, so a refusal by either leaves every store as it
@@ -1646,7 +1920,7 @@ relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 		if (store == NULL)
 			return (-1);
 
-		if (relic_relation_reserve(ctx, store, growths[i].added) != 0)
+		if (relic_relation_reserve(ctx, store, &growths[i].added) != 0)
 			return (-1);
 	}
 
@@ -1655,21 +1929,21 @@ relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 
 /*
  * Append a fact the base store `pred` lacks, into room relic_bases_reserve()
- * made: store it and place it in the canonical index by `hash`, which the
- * caller computed under the context's seed, looking nothing up.  Nothing
- * here can fail.  A debug build checks what a release build trusts: the
- * room, the hash, and that the store lacks the fact.
+ * made: store it and place it in the canonical index by its wide hash
+ * `hash`, which the caller computed under the context's seed, looking
+ * nothing up.  Nothing here can fail.  A debug build checks what a release
+ * build trusts: the room, the hash, and that the store lacks the fact.
  */
 void
 relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
-    const relic_dom_t *columns, uint32_t hash)
+    const relic_dom_t *columns, uint64_t hash)
 {
 	relic_relation_t *store;
 
 	store = reltab_find(&ctx->store.bases, pred);
 	assert(store != NULL && store->index_count == 0);
-	assert(relic_relation_bytes_after_reserve(store, 1) ==
-	    relic_relation_bytes(store));
+	assert(insertion_parts_bytes_after(store, hash) ==
+	    insertion_parts_bytes(store, hash));
 	assert(hash == tuple_hash(store, columns));
 	assert(relation_find_hashed(store, columns, hash) == RELIC_ID_NONE);
 

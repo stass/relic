@@ -59,6 +59,7 @@
 #define	SCENARIO_RESERVED	"a reservation for many holds them all"
 #define	SCENARIO_SPREAD		"hashing separates similar keys"
 #define	SCENARIO_TAGS		"a tagged probe passes over other tags"
+#define	SCENARIO_WIDE		"a wide hash keys its slot, not its stripe"
 
 /*
  * Two seeds chosen by the tests.  A context draws its seed at random, and a
@@ -149,6 +150,7 @@ static void	 a_tagged_probe_passes_over_other_tags(void);
 static uint32_t	 stored_hash(uint32_t id, void *ctx);
 static size_t	 candidates_for(const relic_idtab_t *table, uint32_t hash);
 static void	 a_word_sequence_hashes_to_a_fixed_value(void);
+static void	 a_wide_hash_keys_its_slot_and_not_its_stripe(void);
 static void	 colliding_keys_collide_only_under_their_seed(void);
 static void	 each_context_draws_a_seed_of_its_own(void);
 static void	 integers_differing_in_bit_31_of_each_half_differ(void);
@@ -1781,6 +1783,39 @@ a_word_sequence_hashes_to_a_fixed_value(void)
 	    "reordering a sequence should change its hash");
 }
 
+/*
+ * A wide hash is two hashes in one word.  Its low half is the keyed hash
+ * relic_hash_words() computes, which a table's rehash relies on to recover
+ * a slot without the high half; its high half, and so the stripe, is the
+ * same under every seed, which is what makes a striped table's storage a
+ * function of its keys.
+ */
+static void
+a_wide_hash_keys_its_slot_and_not_its_stripe(void)
+{
+	static const uint32_t words[] = { 7u, 1u, 0u, 42u, 7u, 9u, 3u, 5u };
+	uint64_t wide;
+	uint64_t other;
+	size_t count;
+
+	for (count = 0; count <= sizeof(words) / sizeof(words[0]); count++) {
+		wide = relic_hash_words_wide(SEED, words, count);
+		other = relic_hash_words_wide(OTHER_SEED, words, count);
+
+		checkf(relic_hash_low(wide) ==
+		    relic_hash_words(SEED, words, count), SCENARIO_WIDE,
+		    "the low half of a %zu-word wide hash should be its "
+		    "keyed hash", count);
+		checkf(wide >> 32 == other >> 32, SCENARIO_WIDE,
+		    "the high half of a %zu-word wide hash should not "
+		    "depend on the seed", count);
+		checkf(relic_hash_stripe(wide) == relic_hash_stripe(other) &&
+		    relic_hash_stripe(wide) < RELIC_STRIPES, SCENARIO_WIDE,
+		    "a %zu-word key should choose one stripe under every "
+		    "seed", count);
+	}
+}
+
 int
 main(void)
 {
@@ -1800,6 +1835,7 @@ main(void)
 	a_reservation_is_exactly_what_was_predicted();
 	a_tagged_probe_passes_over_other_tags();
 	a_word_sequence_hashes_to_a_fixed_value();
+	a_wide_hash_keys_its_slot_and_not_its_stripe();
 	colliding_keys_collide_only_under_their_seed();
 	each_context_draws_a_seed_of_its_own();
 	integers_differing_in_bit_31_of_each_half_differ();

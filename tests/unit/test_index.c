@@ -126,6 +126,7 @@ static bool	 frontiers_rest_at(const relic_relation_t *rel,
 static size_t	 distinct_by_hand(const relic_relation_t *rel, uint16_t column);
 static size_t	 storage_by_hand(const relic_t *ctx);
 static size_t	 index_bytes_by_hand(const relic_index_t *index);
+static size_t	 index_key_count(const relic_index_t *index);
 static void	 a_key_first_held_late_is_found_by_its_values(void);
 static void	 a_lookup_visits_a_keys_tuples_in_order(void);
 static void	 an_index_built_late_matches_one_kept_up(void);
@@ -259,19 +260,44 @@ keys_agree(uint16_t arity, uint32_t key_mask, const relic_dom_t *a,
 }
 
 /*
- * The bytes an index's arrays occupy, added up from their capacities: the
- * key table's slots, each with its tag, the keys' entries and values, and
- * the chains.
+ * The bytes an index's arrays occupy, added up from their capacities: in
+ * every stripe the key table's slots, each with its tag, and the keys'
+ * entries, frontiers and values; and the chains.
  */
 static size_t
 index_bytes_by_hand(const relic_index_t *index)
 {
-	return (index->keys.capacity * (sizeof(uint32_t) + 1) +
-	    index->entry_capacity * 2 * sizeof(relic_tuple_id_t) +
-	    index->frontier_capacity * sizeof(relic_tuple_id_t) +
-	    index->key_value_capacity * index->key_length *
-	    sizeof(relic_dom_t) +
-	    index->next_capacity * sizeof(relic_tuple_id_t));
+	const relic_index_stripe_t *stripe;
+	size_t bytes;
+	size_t s;
+
+	bytes = index->next_capacity * sizeof(relic_tuple_id_t);
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		stripe = &index->stripes[s];
+		bytes += stripe->keys.capacity * (sizeof(uint32_t) + 1) +
+		    stripe->entry_capacity * 2 * sizeof(relic_tuple_id_t) +
+		    stripe->frontier_capacity * sizeof(relic_tuple_id_t) +
+		    stripe->key_value_capacity * index->key_length *
+		    sizeof(relic_dom_t);
+	}
+
+	return (bytes);
+}
+
+/*
+ * How many distinct keys an index holds, over every stripe.
+ */
+static size_t
+index_key_count(const relic_index_t *index)
+{
+	size_t count;
+	size_t s;
+
+	count = 0;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		count += index->stripes[s].key_count;
+
+	return (count);
 }
 
 /*
@@ -408,9 +434,9 @@ a_lookup_visits_a_keys_tuples_in_order(void)
 	    SCENARIO_CHAINS, "the index on column 0 agrees with a scan");
 	check(index_agrees(rel, outer_columns, SCENARIO_CHAINS),
 	    SCENARIO_CHAINS, "the index on columns 0 and 2 agrees with a scan");
-	checkf(rel->indexes[first_column].key_count == SWEEP_VALUES,
+	checkf(index_key_count(&rel->indexes[first_column]) == SWEEP_VALUES,
 	    SCENARIO_CHAINS, "column 0 should hold %u keys, not %zu",
-	    SWEEP_VALUES, rel->indexes[first_column].key_count);
+	    SWEEP_VALUES, index_key_count(&rel->indexes[first_column]));
 
 	absent[0] = value(ctx, SWEEP_VALUES + 1);
 	absent[1] = value(ctx, 0);
@@ -535,9 +561,9 @@ a_key_first_held_late_is_found_by_its_values(void)
 		return;
 	}
 
-	checkf(rel->indexes[kept_up].key_count == LATE_KEYS, SCENARIO_LATE_KEY,
-	    "column 0 should hold %u keys, not %zu", LATE_KEYS,
-	    rel->indexes[kept_up].key_count);
+	checkf(index_key_count(&rel->indexes[kept_up]) == LATE_KEYS,
+	    SCENARIO_LATE_KEY, "column 0 should hold %u keys, not %zu",
+	    LATE_KEYS, index_key_count(&rel->indexes[kept_up]));
 	check(index_agrees(rel, kept_up, SCENARIO_LATE_KEY), SCENARIO_LATE_KEY,
 	    "the index kept up agrees with a scan");
 	check(index_agrees(rel, built, SCENARIO_LATE_KEY), SCENARIO_LATE_KEY,
@@ -693,26 +719,31 @@ static bool
 frontiers_rest_at(const relic_relation_t *rel, uint32_t position,
     relic_tuple_id_t since)
 {
+	const relic_index_stripe_t *stripe;
 	const relic_index_t *index;
 	const relic_index_key_t *entry;
 	relic_tuple_id_t expected;
 	size_t key;
+	size_t s;
 
 	index = &rel->indexes[position];
 
-	for (key = 0; key < index->keys.count; key++) {
-		entry = &index->entries[key];
-		expected = first_since_by_scan(rel, index->key_mask,
-		    relic_relation_tuple(rel, entry->first), since);
-		if (expected == RELIC_ID_NONE)
-			expected = entry->last;
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		stripe = &index->stripes[s];
+		for (key = 0; key < stripe->key_count; key++) {
+			entry = &stripe->entries[key];
+			expected = first_since_by_scan(rel, index->key_mask,
+			    relic_relation_tuple(rel, entry->first), since);
+			if (expected == RELIC_ID_NONE)
+				expected = entry->last;
 
-		if (index->frontiers[key] != expected) {
-			checkf(false, SCENARIO_FRONTIER, "a frontier should "
-			    "rest at %u, and rests at %u",
-			    (unsigned int)expected,
-			    (unsigned int)index->frontiers[key]);
-			return (false);
+			if (stripe->frontiers[key] != expected) {
+				checkf(false, SCENARIO_FRONTIER, "a frontier "
+				    "should rest at %u, and rests at %u",
+				    (unsigned int)expected,
+				    (unsigned int)stripe->frontiers[key]);
+				return (false);
+			}
 		}
 	}
 
@@ -1038,8 +1069,8 @@ an_index_is_charged_exactly(void)
 	    "%zu bytes over %zu", relic_relation_bytes(rel), unindexed);
 	checkf(relic_index_bytes(&rel->indexes[position]) ==
 	    index_bytes_by_hand(&rel->indexes[position]) &&
-	    rel->indexes[position].key_value_capacity >=
-	    rel->indexes[position].key_count, SCENARIO_ACCOUNTING,
+	    rel->indexes[position].stripes[0].key_value_capacity >=
+	    rel->indexes[position].stripes[0].key_count, SCENARIO_ACCOUNTING,
 	    "the index should count its tags and its keys' values, %zu "
 	    "bytes, not %zu", index_bytes_by_hand(&rel->indexes[position]),
 	    relic_index_bytes(&rel->indexes[position]));

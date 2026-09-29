@@ -148,12 +148,17 @@ relic_saturating_product(size_t count, size_t size)
 /*
  * The bytes from which an array is mapped rather than taken from the heap.
  * Below it a mapping would cost a system call and a page of rounding for an
- * array whose residue in the heap is small.  The allocation-failure suite
- * sets it lower, so that the small programs it sweeps grow arrays onto and
- * between mappings too.
+ * array whose residue in the heap is small.  Above it the residue is not
+ * small: a heap block outgrown by a doubling array is kept by the allocator
+ * for reuse, and a table split into stripes that grow one after another
+ * leaves such a block behind for every stripe.  At an eighth of a
+ * mebibyte the stripes of a large relation's tables are mapped, so their
+ * outgrown arrays are returned rather than kept.  The allocation-failure
+ * suite sets it lower, so that the small programs it sweeps grow arrays
+ * onto and between mappings too.
  */
 #ifndef RELIC_ARRAY_MAP_BYTES
-#define	RELIC_ARRAY_MAP_BYTES	((size_t)1 << 20)
+#define	RELIC_ARRAY_MAP_BYTES	((size_t)1 << 17)
 #endif
 
 /*
@@ -220,6 +225,66 @@ uint32_t relic_hash_word(uint64_t seed, uint32_t word);
  * of arity zero use the ordinary code path.
  */
 uint32_t relic_hash_words(uint64_t seed, const uint32_t *words, size_t count);
+
+/*
+ * The hash of a sequence of words for a key kept in a striped table, 64 bits
+ * wide.  Its low 32 bits, relic_hash_low(), are what relic_hash_words()
+ * returns, and choose a slot and a tag in an identifier table.  Its high 32
+ * bits are an unkeyed hash of the same words, whose top bits choose the
+ * stripe, relic_hash_stripe().
+ *
+ * The stripe is unkeyed so that which stripe a key lives in is a function of
+ * the key alone.  Each stripe grows as its own keys need, so what the
+ * stripes hold and cost depends on how many keys each receives; chosen by
+ * the seed, that would differ between contexts and runs, and so would the
+ * storage a program reports and the insertion a memory limit refuses.  An
+ * author who crowds keys into one stripe gains nothing a single table would
+ * not give: within the stripe the slot and the tag are keyed as always, so
+ * no probe cluster can be built, and the stripe is only larger.
+ */
+uint64_t relic_hash_words_wide(uint64_t seed, const uint32_t *words,
+	    size_t count);
+
+/*
+ * Striped tables.  A table several threads fill at once without a lock --
+ * a relation's canonical index, a secondary index's key table -- is
+ * RELIC_STRIPES identifier tables, and a key lives in the one its wide
+ * hash's top RELIC_STRIPE_BITS bits choose.  Stripes share nothing, so a
+ * thread per stripe can grow and fill them at once.  The count is a
+ * constant rather than the number of threads, so what a table holds and
+ * what it costs are the same whatever the number of threads.  A test build
+ * may set RELIC_STRIPE_BITS to zero, one stripe, to check that nothing
+ * depends on there being several.
+ */
+#ifndef RELIC_STRIPE_BITS
+#define	RELIC_STRIPE_BITS	4
+#endif
+#define	RELIC_STRIPES		((size_t)1 << RELIC_STRIPE_BITS)
+
+/*
+ * The stripe is taken from the unkeyed high half of a wide hash, so it may
+ * use at most those 32 bits; more would take bits of the keyed half.
+ */
+_Static_assert(RELIC_STRIPE_BITS >= 0 && RELIC_STRIPE_BITS <= 32,
+    "a stripe is chosen by bits of the unkeyed half of a wide hash");
+
+/*
+ * The stripe a wide hash chooses, and the 32 bits of it an identifier table
+ * is keyed by.  The stripe is shifted out in two steps so that one stripe,
+ * zero bits, shifts by 63 and then by one rather than by 64, which C leaves
+ * undefined.
+ */
+static inline size_t
+relic_hash_stripe(uint64_t hash)
+{
+	return ((size_t)(hash >> (63 - RELIC_STRIPE_BITS) >> 1));
+}
+
+static inline uint32_t
+relic_hash_low(uint64_t hash)
+{
+	return ((uint32_t)hash);
+}
 
 typedef struct relic_idprobe relic_idprobe_t;
 typedef struct relic_idtab relic_idtab_t;

@@ -767,7 +767,7 @@ merge_task(relic_t *ctx, const relic_candidates_t *candidates,
     const relic_round_task_t *task, relic_relation_t *target,
     bool *gainedp)
 {
-	uint32_t hashes[RELIC_INSERT_BATCH];
+	uint64_t hashes[RELIC_INSERT_BATCH];
 	bool added[RELIC_INSERT_BATCH];
 	const relic_candidate_t *first;
 	size_t completed;

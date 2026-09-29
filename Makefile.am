@@ -309,6 +309,31 @@ tests_unit_test_ceiling_CPPFLAGS = $(AM_CPPFLAGS) $(RELIC_CEILING_DEFINES)
 tests_unit_test_ceiling_LDADD = $(LTLIBOBJS)
 
 ##
+## The canonical index and every secondary index's key table are striped,
+## RELIC_STRIPES tables a key is spread over by its hash.  These programs
+## compile the library from source with one stripe, as the allocation-failure
+## suite compiles it with its allocators renamed, and run the relation and
+## index suites again, so that membership, lookup, growth and accounting are
+## held to the same answers whatever the stripe count.
+##
+
+RELIC_ONE_STRIPE = -DRELIC_STRIPE_BITS=0
+
+RELIC_TEST_BINARIES += tests/unit/test_relation_one_stripe
+tests_unit_test_relation_one_stripe_SOURCES = tests/unit/test_relation.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_relation_one_stripe_CPPFLAGS = $(AM_CPPFLAGS) \
+	$(RELIC_ONE_STRIPE)
+tests_unit_test_relation_one_stripe_LDADD = $(LTLIBOBJS)
+
+RELIC_TEST_BINARIES += tests/unit/test_index_one_stripe
+tests_unit_test_index_one_stripe_SOURCES = tests/unit/test_index.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_index_one_stripe_CPPFLAGS = $(AM_CPPFLAGS) \
+	$(RELIC_ONE_STRIPE)
+tests_unit_test_index_one_stripe_LDADD = $(LTLIBOBJS)
+
+##
 ## A context's worker pool starts and joins threads the operating system
 ## does not count portably.  This program compiles the library from source
 ## with pthread_create() and pthread_join() renamed, as the allocation-failure

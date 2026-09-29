@@ -543,9 +543,8 @@ relation; gathering a tuple's key walks `key_column[0 .. key_length)`
 rather than 32 mask bits; and the rehash callback reads `key_values`
 sequentially. A key costs `4 * key_length` bytes more, one to a few
 columns for every index a plan asks for, accounted by
-`relic_index_bytes()` and projected by `relic_index_bytes_after_reserve()`
-with the entries. The chains, the frontier and the lookup of section 4 of
-the index design are untouched.
+`relic_index_bytes()` and projected with the entries. The chains, the
+frontier and the lookup of section 4 of the index design are untouched.
 
 ### 6.2 A tag beside each slot
 

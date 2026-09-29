@@ -40,6 +40,13 @@
 #define	RELIC_HASH_MULTIPLIER	UINT64_C(0xbf58476d1ce4e5b9)
 
 /*
+ * The state the unkeyed fold of relic_hash_words_wide() starts from, in
+ * place of a seed: the golden ratio's fraction, an arbitrary constant whose
+ * bits are mixed, so that a key of no words still has a stripe.
+ */
+#define	RELIC_STRIPE_FOLD_START	UINT64_C(0x9e3779b97f4a7c15)
+
+/*
  * The smallest table worth allocating, and the smallest array worth growing
  * to.  Both are first allocations rather than thresholds: a table doubles
  * from here and an array doubles from there.
@@ -101,7 +108,7 @@ static void	*array_storage(void *items);
 static _Noreturn void record_corrupt(const relic_array_record_t *stored);
 static uintptr_t record_seal(const relic_array_record_t *record,
 		    size_t mapped_bytes);
-static uint32_t	 finalize(uint64_t state);
+static uint64_t	 finalize(uint64_t state);
 static uint64_t	 hash_fold(uint64_t state, uint32_t unit);
 static uint64_t	 hash_start(uint64_t seed);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
@@ -116,7 +123,7 @@ static int	 idtab_grow(relic_idtab_t *table, size_t capacity,
 
 /*
  * Avalanche the folded state into a hash so that every bit of the state
- * affects the low bits.
+ * affects every bit of the hash, the low bits in particular.
  *
  * This matters more here than it would in a chained table.  A slot is chosen
  * with hash & (capacity - 1), so only the low bits select it, and collisions
@@ -124,9 +131,10 @@ static int	 idtab_grow(relic_idtab_t *table, size_t capacity,
  * mixes poorly into its low bits for short keys, and sequential integer keys
  * -- which a Datalog program full of small integers produces -- would
  * otherwise probe in near-perfect runs.  This is the 64-bit finalizer of
- * MurmurHash3, whose low 32 bits are the hash.
+ * MurmurHash3.  A hash kept in an unstriped table is its low 32 bits; a
+ * striped table also reads its top bits.
  */
-static uint32_t
+static uint64_t
 finalize(uint64_t state)
 {
 	state ^= state >> 33;
@@ -135,7 +143,7 @@ finalize(uint64_t state)
 	state *= UINT64_C(0xc4ceb9fe1a85ec53);
 	state ^= state >> 33;
 
-	return ((uint32_t)state);
+	return (state);
 }
 
 /*
@@ -196,7 +204,7 @@ relic_hash_bytes(uint64_t seed, const void *bytes, size_t length)
 	for (i = 0; i < length; i++)
 		state = hash_fold(state, data[i]);
 
-	return (finalize(state));
+	return ((uint32_t)finalize(state));
 }
 
 /*
@@ -214,7 +222,35 @@ relic_hash_words(uint64_t seed, const uint32_t *words, size_t count)
 	for (i = 0; i < count; i++)
 		state = hash_fold(state, words[i]);
 
-	return (finalize(state));
+	return ((uint32_t)finalize(state));
+}
+
+/*
+ * Two folds of the same words in one pass: the keyed one relic_hash_words()
+ * makes, and an unkeyed one from a fixed state, whose high half is the
+ * stripe's part.  Neither multiplication waits for the other, so the second
+ * costs little beside the first.  The unkeyed fold is not finalized: the
+ * stripe is read from its top bits, and a product's top bits depend on
+ * every bit of its operands, which is what makes multiplicative hashing
+ * spread keys that differ in any bit.
+ */
+uint64_t
+relic_hash_words_wide(uint64_t seed, const uint32_t *words, size_t count)
+{
+	uint64_t keyed;
+	uint64_t unkeyed;
+	size_t i;
+
+	keyed = hash_start(seed);
+	unkeyed = RELIC_STRIPE_FOLD_START;
+
+	for (i = 0; i < count; i++) {
+		keyed = hash_fold(keyed, words[i]);
+		unkeyed = hash_fold(unkeyed, words[i]);
+	}
+
+	return ((unkeyed & ~(uint64_t)UINT32_MAX) |
+	    (uint32_t)finalize(keyed));
 }
 
 uint32_t

@@ -17,12 +17,13 @@
  * their columns.
  *
  * An index answers "which tuples hold these values in the key columns?" by
- * grouping tuples into one chain per distinct key.  The open-addressing
- * identifier table maps a key's hash to its key identifier, the key's entry
- * records the first and last tuple of its chain, its values are kept beside
- * the entries, and the chain itself is threaded through one `next`
- * identifier per tuple.  A lookup probes once for the key, comparing
- * against stored values, and then follows the chain.
+ * grouping tuples into one chain per distinct key.  A key lives in the
+ * stripe its hash chooses, and the stripe's open-addressing identifier table
+ * maps the key's hash to its key identifier, the key's entry records the
+ * first and last tuple of its chain, its values are kept beside the entries,
+ * and the chain itself is threaded through one `next` identifier per tuple.
+ * A lookup probes once for the key, comparing against stored values, and
+ * then follows the chain.
  *
  * A tuple is added at the end of its key's chain as it is inserted, so every
  * chain lists its tuples in increasing identifier order, which is insertion
@@ -42,12 +43,19 @@
  * so the order lookups at one start are made in changes nothing any of them
  * finds.
  *
- * Adding a tuple is two operations, as installing an identifier in the table
- * is.  relic_index_reserve() makes room for the tuples and keys about to be
- * added and is the only part that can fail; relic_index_add() then links a
- * tuple in and cannot.  The relation store reserves in every index before it
- * stores anything, so that no failure leaves a tuple the relation holds
- * missing from an index, which would be a lookup silently missing an answer.
+ * Adding a tuple is four operations, and only the third can fail.
+ * relic_index_classify() hashes the tuple's key and probes the key's stripe
+ * for it, keeping the hash, what the probe found and the identifier the
+ * tuple will take as the index's pending insertion;
+ * relic_index_pending_bytes_after() is what the memory limit is asked
+ * with; relic_index_reserve_pending() makes room, for the tuple's link and,
+ * only when its key is new, for the key; and relic_index_add_pending() links
+ * the tuple in, probing nothing again.  The last three read everything they
+ * need from the pending insertion, so none can be handed a tuple other than
+ * the one classified.  The relation store classifies and
+ * reserves in every index before it stores anything, so that no failure
+ * leaves a tuple the relation holds missing from an index, which would be a
+ * lookup silently missing an answer.
  *
  * Nothing here knows about limits or the context.  The relation store
  * measures an index before and after a reservation and does the accounting.
@@ -55,65 +63,92 @@
 
 typedef struct relic_index_extent relic_index_extent_t;
 typedef struct relic_index_rehash relic_index_rehash_t;
+typedef struct relic_key_ref relic_key_ref_t;
 
 /*
- * The sizes an index's storage could have: its key table's bytes, and the
+ * The sizes a stripe's storage could have: its key table's bytes, and the
  * capacities of its arrays -- entries, frontiers and key values, each
- * counted in keys, and chain links, counted in tuples.  A capacity of zero
- * is a growth that would be refused.
+ * counted in keys.  A capacity of zero is a growth that would be refused.
  */
 struct relic_index_extent {
 	size_t	table_bytes;
 	size_t	entries;
 	size_t	frontiers;
 	size_t	key_values;
-	size_t	next;
 };
 
 /*
- * What the key table needs in order to recompute the hash of a key it holds:
- * the index, which holds the key's values, and the relation, whose seed the
- * hash is keyed by.
+ * What a stripe's key table needs in order to recompute the hash of a key it
+ * holds: the index, for the key's length, the stripe, which holds the key's
+ * values, and the relation, whose seed the hash is keyed by.
  */
 struct relic_index_rehash {
-	const relic_index_t	*index;
-	const relic_relation_t	*relation;
+	const relic_index_t		*index;
+	const relic_index_stripe_t	*stripe;
+	const relic_relation_t		*relation;
 };
 
+/*
+ * Where a key belongs in an index: its wide hash, the stripe the hash
+ * chooses, and its identifier there, RELIC_ID_NONE when the index holds no
+ * such key.
+ */
+struct relic_key_ref {
+	const relic_index_stripe_t	*stripe;
+	uint64_t			 hash;
+	uint32_t			 key_id;
+};
+
+static size_t		 extent_bytes(const relic_index_t *index,
+			    const relic_index_extent_t *extent);
 static uint32_t		 find_key(const relic_index_t *index,
-			    const relic_dom_t *key, uint32_t hash);
+			    const relic_index_stripe_t *stripe,
+			    const relic_dom_t *key, uint64_t hash);
 static void		 gather_key(const relic_index_t *index,
 			    const relic_dom_t *tuple, relic_dom_t *key);
-static size_t		 index_bytes_at(const relic_index_t *index,
-			    const relic_index_extent_t *extent);
-static uint32_t		 key_hash(const relic_index_t *index,
+static uint64_t		 key_hash(const relic_index_t *index,
 			    const relic_relation_t *relation,
 			    const relic_dom_t *key);
 static size_t		 key_offset(const relic_index_t *index,
 			    uint32_t key_id);
 static uint32_t		 key_rehash(uint32_t key_id, void *ctx);
+static const relic_index_stripe_t *key_stripe(const relic_index_t *index,
+			    uint64_t hash);
 static const relic_dom_t *key_values_of(const relic_index_t *index,
+			    const relic_index_stripe_t *stripe,
 			    uint32_t key_id);
-static uint32_t		 probe_key(const relic_index_t *index,
+static relic_key_ref_t	 probe_key(const relic_index_t *index,
 			    const relic_relation_t *relation,
 			    const relic_dom_t *probe);
+static size_t		 stripe_bytes(const relic_index_t *index,
+			    const relic_index_stripe_t *stripe);
+static size_t		 stripe_bytes_after_new_key(const relic_index_t *index,
+			    const relic_index_stripe_t *stripe);
+static void		 stripe_free(relic_index_stripe_t *stripe);
+static int		 stripe_reserve_key(const relic_index_t *index,
+			    relic_index_stripe_t *stripe,
+			    const relic_relation_t *relation);
 static relic_tuple_id_t	 walk_toward(const relic_index_t *index,
 			    relic_tuple_id_t id, relic_tuple_id_t since);
+static relic_index_stripe_t *writable_key_stripe(relic_index_t *index,
+			    uint64_t hash);
 
 /*
  * An empty index keyed on the columns of `key_mask`, which lists them in
  * `key_column` once so that gathering a key visits its columns and no
  * others.  The relation store keys an index on at least one column, so a
- * key has values to store.  The key table is tagged: a probe that misses
+ * key has values to store.  The key tables are tagged: a probe that misses
  * would otherwise compare against each key it passes.
  */
 void
 relic_index_init(relic_index_t *index, uint32_t key_mask)
 {
+	size_t s;
 	uint16_t column;
 
 	bzero(index, sizeof(*index));
-	relic_idtab_init(&index->keys, true);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		relic_idtab_init(&index->stripes[s].keys, true);
 	index->key_mask = key_mask;
 
 	for (column = 0; column < RELIC_MAX_ARITY; column++) {
@@ -132,12 +167,21 @@ relic_index_init(relic_index_t *index, uint32_t key_mask)
 void
 relic_index_free(relic_index_t *index)
 {
-	relic_idtab_reset(&index->keys);
-	relic_free_array(index->entries);
-	relic_free_array(index->frontiers);
-	relic_free_array(index->key_values);
+	size_t s;
+
+	for (s = 0; s < RELIC_STRIPES; s++)
+		stripe_free(&index->stripes[s]);
 	relic_free_array(index->next);
 	bzero(index, sizeof(*index));
+}
+
+static void
+stripe_free(relic_index_stripe_t *stripe)
+{
+	relic_idtab_reset(&stripe->keys);
+	relic_free_array(stripe->entries);
+	relic_free_array(stripe->frontiers);
+	relic_free_array(stripe->key_values);
 }
 
 /*
@@ -155,19 +199,20 @@ gather_key(const relic_index_t *index, const relic_dom_t *tuple,
 }
 
 /*
- * The hash of a key's values, keyed by the seed of the relation the index
- * belongs to.
+ * The wide hash of a key's values, keyed by the seed of the relation the
+ * index belongs to.
  */
-static uint32_t
+static uint64_t
 key_hash(const relic_index_t *index, const relic_relation_t *relation,
     const relic_dom_t *key)
 {
-	return (relic_hash_words(relation->hash_seed, key, index->key_length));
+	return (relic_hash_words_wide(relation->hash_seed, key,
+	    index->key_length));
 }
 
 /*
- * Where key `key_id`'s values begin in `key_values`: keys are numbered from
- * one, and each holds `key_length` values.
+ * Where key `key_id`'s values begin in its stripe's `key_values`: keys are
+ * numbered from one, and each holds `key_length` values.
  */
 static size_t
 key_offset(const relic_index_t *index, uint32_t key_id)
@@ -176,16 +221,18 @@ key_offset(const relic_index_t *index, uint32_t key_id)
 }
 
 /*
- * The values of key `key_id`, `key_length` of them.
+ * The values of key `key_id` of a stripe, `key_length` of them.
  */
 static const relic_dom_t *
-key_values_of(const relic_index_t *index, uint32_t key_id)
+key_values_of(const relic_index_t *index, const relic_index_stripe_t *stripe,
+    uint32_t key_id)
 {
-	return (&index->key_values[key_offset(index, key_id)]);
+	return (&stripe->key_values[key_offset(index, key_id)]);
 }
 
 /*
- * The hash of a key the table holds, for the table to use when it grows.
+ * The hash of a key a stripe's table holds, for the table to use when it
+ * grows.
  */
 static uint32_t
 key_rehash(uint32_t key_id, void *ctx)
@@ -194,16 +241,18 @@ key_rehash(uint32_t key_id, void *ctx)
 
 	rehash = ctx;
 
-	return (key_hash(rehash->index, rehash->relation,
-	    key_values_of(rehash->index, key_id)));
+	return (relic_hash_words(rehash->relation->hash_seed,
+	    key_values_of(rehash->index, rehash->stripe, key_id),
+	    rehash->index->key_length));
 }
 
 /*
- * The identifier of the key holding these values, or RELIC_ID_NONE when no
- * tuple of the relation holds them.
+ * The identifier within `stripe` of the key holding these values, whose wide
+ * hash is `hash`, or RELIC_ID_NONE when no tuple of the relation holds them.
  */
 static uint32_t
-find_key(const relic_index_t *index, const relic_dom_t *key, uint32_t hash)
+find_key(const relic_index_t *index, const relic_index_stripe_t *stripe,
+    const relic_dom_t *key, uint64_t hash)
 {
 	relic_idprobe_t probe;
 	size_t key_bytes;
@@ -211,9 +260,10 @@ find_key(const relic_index_t *index, const relic_dom_t *key, uint32_t hash)
 
 	key_bytes = (size_t)index->key_length * sizeof(*key);
 
-	relic_idprobe_open(&probe, &index->keys, hash);
+	relic_idprobe_open(&probe, &stripe->keys, relic_hash_low(hash));
 	while (relic_idprobe_next(&probe, &key_id)) {
-		if (bcmp(key_values_of(index, key_id), key, key_bytes) == 0)
+		if (bcmp(key_values_of(index, stripe, key_id), key,
+		    key_bytes) == 0)
 			return (key_id);
 	}
 
@@ -223,242 +273,358 @@ find_key(const relic_index_t *index, const relic_dom_t *key, uint32_t hash)
 size_t
 relic_index_bytes(const relic_index_t *index)
 {
-	return (relic_idtab_bytes(&index->keys) +
-	    index->entry_capacity * sizeof(*index->entries) +
-	    index->frontier_capacity * sizeof(*index->frontiers) +
-	    index->key_value_capacity * index->key_length *
-	    sizeof(*index->key_values) +
-	    index->next_capacity * sizeof(*index->next));
+	size_t bytes;
+	size_t s;
+
+	bytes = index->next_capacity * sizeof(*index->next);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes += stripe_bytes(index, &index->stripes[s]);
+
+	return (bytes);
 }
 
 /*
- * The bytes the index would hold at `extent`.  SIZE_MAX says that is more
+ * The bytes a stripe's key table and arrays hold.
+ */
+static size_t
+stripe_bytes(const relic_index_t *index, const relic_index_stripe_t *stripe)
+{
+	return (relic_idtab_bytes(&stripe->keys) +
+	    stripe->entry_capacity * sizeof(*stripe->entries) +
+	    stripe->frontier_capacity * sizeof(*stripe->frontiers) +
+	    stripe->key_value_capacity * index->key_length *
+	    sizeof(*stripe->key_values));
+}
+
+/*
+ * The bytes a stripe would hold at `extent`.  SIZE_MAX says that is more
  * than a size_t holds, or that a capacity is zero, which is a growth that
  * would be refused and which no size describes.
  */
 static size_t
-index_bytes_at(const relic_index_t *index, const relic_index_extent_t *extent)
+extent_bytes(const relic_index_t *index, const relic_index_extent_t *extent)
 {
 	size_t key_bytes;
 	size_t total;
 
 	if (extent->entries == 0 || extent->frontiers == 0 ||
-	    extent->key_values == 0 || extent->next == 0)
+	    extent->key_values == 0)
 		return (SIZE_MAX);
 
-	key_bytes = (size_t)index->key_length * sizeof(*index->key_values);
+	key_bytes = (size_t)index->key_length *
+	    sizeof(*index->stripes[0].key_values);
 
 	total = extent->table_bytes;
 	total = relic_saturating_sum(total, relic_saturating_product(
-	    extent->entries, sizeof(*index->entries)));
+	    extent->entries, sizeof(*index->stripes[0].entries)));
 	total = relic_saturating_sum(total, relic_saturating_product(
-	    extent->frontiers, sizeof(*index->frontiers)));
+	    extent->frontiers, sizeof(*index->stripes[0].frontiers)));
 	total = relic_saturating_sum(total, relic_saturating_product(
 	    extent->key_values, key_bytes));
-	total = relic_saturating_sum(total, relic_saturating_product(
-	    extent->next, sizeof(*index->next)));
 
 	return (total);
 }
 
 /*
- * The bytes the index would hold once relic_index_reserve() had made room for
- * `tuples` tuples in all and `added_keys` more keys.
- *
- * Each growth policy is asked what it would do rather than measured
- * afterwards, which is what lets the memory limit refuse an allocation
- * instead of reporting one.  A growth that could not happen at all is
- * reported as the size the index already has, so that the limit admits it
- * and the reservation reports the real obstacle, as the relation store does
- * for its own arrays.
+ * The bytes a stripe would hold once stripe_reserve_key() had made room for
+ * one more key, or SIZE_MAX when that growth could not happen.
  */
-size_t
-relic_index_bytes_after_reserve(const relic_index_t *index, size_t tuples,
-    size_t added_keys)
+static size_t
+stripe_bytes_after_new_key(const relic_index_t *index,
+    const relic_index_stripe_t *stripe)
 {
 	relic_index_extent_t extent;
 	size_t keys;
-	size_t total;
 
-	keys = relic_saturating_sum(index->key_count, added_keys);
-	if (keys == SIZE_MAX)
-		return (relic_index_bytes(index));
-
-	extent.table_bytes = relic_idtab_bytes_after_reserve(&index->keys,
-	    added_keys);
-	extent.entries = relic_grow_array_capacity(index->entry_capacity, keys);
-	extent.frontiers = relic_grow_array_capacity(index->frontier_capacity,
+	keys = stripe->key_count + 1;
+	extent.table_bytes = relic_idtab_bytes_after_reserve(&stripe->keys, 1);
+	extent.entries = relic_grow_array_capacity(stripe->entry_capacity,
+	    keys);
+	extent.frontiers = relic_grow_array_capacity(stripe->frontier_capacity,
 	    keys);
 	extent.key_values = relic_grow_array_capacity(
-	    index->key_value_capacity, keys);
-	extent.next = relic_grow_array_capacity(index->next_capacity, tuples);
+	    stripe->key_value_capacity, keys);
 
-	total = index_bytes_at(index, &extent);
-	if (total == SIZE_MAX)
-		return (relic_index_bytes(index));
-
-	return (total);
+	return (extent_bytes(index, &extent));
 }
 
 /*
- * The bytes the index would hold once `added` tuples had been added to it,
- * one insertion at a time, into a relation holding `tuples`, or SIZE_MAX
- * when some growth on the way could not happen.
- *
- * Each insertion reserves a key of its own, as the relation store's do, so
- * the key arrays are followed step by step as though every tuple brought a
- * new key.  That is the most the insertions can hold whatever keys they
- * bring: a step-by-step growth passes through the same capacities however
- * many of its steps ask for nothing new, only stopping sooner.  The key
- * table doubles, so one reservation for every tuple reaches what one per
- * tuple does.
+ * Make room in a stripe for one more key.  Returns 0, or -1 when an array
+ * could not grow; whatever the steps before it obtained is kept, and the
+ * caller accounts for it by measuring.
  */
-size_t
-relic_index_bytes_after_adds(const relic_index_t *index, size_t tuples,
-    size_t added)
-{
-	relic_index_extent_t extent;
-
-	if (added == 0)
-		return (relic_index_bytes(index));
-
-	extent.table_bytes = relic_idtab_bytes_after_reserve(&index->keys,
-	    added);
-	extent.entries = relic_grow_array_capacity_stepwise(
-	    index->entry_capacity, index->key_count, added, 1);
-	extent.frontiers = relic_grow_array_capacity_stepwise(
-	    index->frontier_capacity, index->key_count, added, 1);
-	extent.key_values = relic_grow_array_capacity_stepwise(
-	    index->key_value_capacity, index->key_count, added, 1);
-	extent.next = relic_grow_array_capacity_stepwise(index->next_capacity,
-	    tuples, added, 1);
-
-	return (index_bytes_at(index, &extent));
-}
-
-/*
- * Make room for `tuples` tuples in all and `added_keys` more keys.  Returns
- * 0, or -1 when an array could not grow; whatever the steps before it
- * obtained is kept, and the caller accounts for it by measuring.
- *
- * The relation store asks for a key per tuple about to be added, whether or
- * not it brings a new one.  Finding out would take a probe that
- * relic_index_add() then makes again, and for the one tuple an insertion
- * adds, reserving regardless costs at most a growth a little sooner than
- * necessary.  What matters is that relic_index_bytes_after_reserve() assumes
- * the same, so the limit is charged for exactly what is allocated.
- */
-int
-relic_index_reserve(relic_index_t *index, const relic_relation_t *relation,
-    size_t tuples, size_t added_keys)
+static int
+stripe_reserve_key(const relic_index_t *index, relic_index_stripe_t *stripe,
+    const relic_relation_t *relation)
 {
 	relic_index_rehash_t rehash;
 	relic_index_key_t *entries;
 	relic_atomic_u32_t *frontiers;
-	relic_tuple_id_t *next;
 	relic_dom_t *values;
+	size_t keys;
 
-	if (added_keys > SIZE_MAX - index->key_count)
-		return (-1);
+	keys = stripe->key_count + 1;
 
 	rehash.index = index;
+	rehash.stripe = stripe;
 	rehash.relation = relation;
-	if (relic_idtab_reserve(&index->keys, added_keys,
-	    key_rehash, &rehash) != 0)
+	if (relic_idtab_reserve(&stripe->keys, 1, key_rehash, &rehash) != 0)
 		return (-1);
 
-	entries = relic_grow_array(index->entries, &index->entry_capacity,
-	    index->key_count + added_keys, sizeof(*index->entries));
+	entries = relic_grow_array(stripe->entries, &stripe->entry_capacity,
+	    keys, sizeof(*stripe->entries));
 	if (entries == NULL)
 		return (-1);
-	index->entries = entries;
+	stripe->entries = entries;
 
-	frontiers = relic_grow_array(index->frontiers,
-	    &index->frontier_capacity, index->key_count + added_keys,
-	    sizeof(*index->frontiers));
+	frontiers = relic_grow_array(stripe->frontiers,
+	    &stripe->frontier_capacity, keys, sizeof(*stripe->frontiers));
 	if (frontiers == NULL)
 		return (-1);
-	index->frontiers = frontiers;
+	stripe->frontiers = frontiers;
 
-	values = relic_grow_array(index->key_values,
-	    &index->key_value_capacity, index->key_count + added_keys,
-	    (size_t)index->key_length * sizeof(*index->key_values));
+	values = relic_grow_array(stripe->key_values,
+	    &stripe->key_value_capacity, keys,
+	    (size_t)index->key_length * sizeof(*stripe->key_values));
 	if (values == NULL)
 		return (-1);
-	index->key_values = values;
-
-	next = relic_grow_array(index->next, &index->next_capacity, tuples,
-	    sizeof(*index->next));
-	if (next == NULL)
-		return (-1);
-	index->next = next;
+	stripe->key_values = values;
 
 	return (0);
 }
 
 /*
- * Link tuple `id`, which the relation holds, at the end of its key's chain,
- * starting a chain when its key is new.  The index must have room, which a
- * preceding relic_index_reserve() for at least `id` tuples guarantees, and
- * nothing here can fail.
+ * Classify the tuple the relation store is about to insert as tuple `id`:
+ * hash its key and find the key in the stripe the hash chooses, keeping the
+ * hash, the key's identifier and `id` as the index's pending insertion for
+ * the three steps that follow.  Nothing changes but `pending`.
+ */
+void
+relic_index_classify(relic_index_t *index, const relic_relation_t *relation,
+    const relic_dom_t *tuple, relic_tuple_id_t id)
+{
+	relic_key_ref_t ref;
+
+	ref = probe_key(index, relation, tuple);
+	index->pending.hash = ref.hash;
+	index->pending.key_id = ref.key_id;
+	index->pending.tuple = id;
+}
+
+/*
+ * The stripe a key of wide hash `hash` lives in, read-only and writable.
+ */
+static const relic_index_stripe_t *
+key_stripe(const relic_index_t *index, uint64_t hash)
+{
+	return (&index->stripes[relic_hash_stripe(hash)]);
+}
+
+static relic_index_stripe_t *
+writable_key_stripe(relic_index_t *index, uint64_t hash)
+{
+	return (&index->stripes[relic_hash_stripe(hash)]);
+}
+
+/*
+ * The bytes of the parts of the index the pending insertion can grow: the
+ * chain links, and the stripe its key lives in.  The relation store measures
+ * these before and after it reserves, and asks the memory limit with them,
+ * so that an insertion costs a look at the parts it touches rather than at
+ * every stripe.
+ */
+size_t
+relic_index_pending_bytes(const relic_index_t *index)
+{
+	return (index->next_capacity * sizeof(*index->next) +
+	    stripe_bytes(index, key_stripe(index, index->pending.hash)));
+}
+
+/*
+ * The same parts' bytes once relic_index_reserve_pending() had made room
+ * for the pending tuple and, when it is new, its key.  A key the index
+ * holds needs no room.
+ *
+ * A growth that could not happen at all is reported as the bytes the parts
+ * already hold, so that the limit admits it and the reservation reports the
+ * real obstacle, as the relation store does for its own arrays.
+ */
+size_t
+relic_index_pending_bytes_after(const relic_index_t *index)
+{
+	const relic_index_stripe_t *stripe;
+	size_t next_capacity;
+	size_t stripe_after;
+	size_t bytes;
+
+	next_capacity = relic_grow_array_capacity(index->next_capacity,
+	    index->pending.tuple);
+	if (next_capacity == 0)
+		return (relic_index_pending_bytes(index));
+
+	stripe = key_stripe(index, index->pending.hash);
+	if (index->pending.key_id != RELIC_ID_NONE)
+		stripe_after = stripe_bytes(index, stripe);
+	else
+		stripe_after = stripe_bytes_after_new_key(index, stripe);
+	if (stripe_after == SIZE_MAX)
+		return (relic_index_pending_bytes(index));
+
+	bytes = relic_saturating_sum(relic_saturating_product(next_capacity,
+	    sizeof(*index->next)), stripe_after);
+	if (bytes == SIZE_MAX)
+		return (relic_index_pending_bytes(index));
+
+	return (bytes);
+}
+
+/*
+ * Make room for the pending tuple's link and, when its key is new, for the
+ * key in its stripe.  Returns 0, or -1 when an array could not grow;
+ * whatever the steps before it obtained is kept, and the caller accounts for
+ * it by measuring.
+ */
+int
+relic_index_reserve_pending(relic_index_t *index,
+    const relic_relation_t *relation)
+{
+	relic_tuple_id_t *next;
+
+	next = relic_grow_array(index->next, &index->next_capacity,
+	    index->pending.tuple, sizeof(*index->next));
+	if (next == NULL)
+		return (-1);
+	index->next = next;
+
+	if (index->pending.key_id != RELIC_ID_NONE)
+		return (0);
+
+	return (stripe_reserve_key(index,
+	    writable_key_stripe(index, index->pending.hash), relation));
+}
+
+/*
+ * Link the pending tuple, which the relation now holds, at the end of its
+ * key's chain, starting a chain when its key is new.  The index must have
+ * room, which relic_index_reserve_pending() guarantees, and nothing here can
+ * fail.
+ *
+ * The reservation between the classification and this may have moved the
+ * stripe's arrays and rehashed its table.  The pending insertion survives
+ * that because it records identifiers and a hash, not positions: the
+ * stripe's arrays are found afresh here and a new key is placed by a fresh
+ * probe.
  *
  * Tuples must be added in increasing identifier order, which both insertion
  * and building an index do; that is what keeps every chain in identifier
  * order.
  */
 void
-relic_index_add(relic_index_t *index, const relic_relation_t *relation,
-    relic_tuple_id_t id)
+relic_index_add_pending(relic_index_t *index,
+    const relic_relation_t *relation)
 {
-	relic_dom_t key[RELIC_MAX_ARITY];
+	relic_index_stripe_t *stripe;
 	relic_index_key_t *entry;
+	relic_tuple_id_t id;
 	uint32_t key_id;
-	uint32_t hash;
 
-	gather_key(index, relic_relation_tuple(relation, id), key);
-	hash = key_hash(index, relation, key);
+	id = index->pending.tuple;
+	assert(id != RELIC_ID_NONE && id <= relic_relation_count(relation));
+
+	stripe = writable_key_stripe(index, index->pending.hash);
 	index->next[id - 1] = RELIC_ID_NONE;
 
-	key_id = find_key(index, key, hash);
+	key_id = index->pending.key_id;
 	if (key_id != RELIC_ID_NONE) {
-		entry = &index->entries[key_id - 1];
+		entry = &stripe->entries[key_id - 1];
 		index->next[entry->last - 1] = id;
 		entry->last = id;
 		return;
 	}
 
 	/*
-	 * A new key.  Its identifier is one past the last, so it can never be
-	 * RELIC_ID_NONE, and it cannot overflow: an index has no more keys
-	 * than its relation has tuples.  Its values are stored before it is
-	 * placed, so that every key the table holds has them.
+	 * A new key.  Its identifier is one past the stripe's last, so it can
+	 * never be RELIC_ID_NONE, and it cannot overflow: a stripe has no
+	 * more keys than the relation has tuples.  Its values are stored
+	 * before it is placed, so that every key the table holds has them.
 	 */
-	index->key_count++;
-	key_id = (uint32_t)index->key_count;
-	entry = &index->entries[key_id - 1];
+	stripe->key_count++;
+	key_id = (uint32_t)stripe->key_count;
+	entry = &stripe->entries[key_id - 1];
 	entry->first = id;
 	entry->last = id;
-	relic_atomic_u32_store_relaxed(&index->frontiers[key_id - 1], id);
-	bcopy(key, &index->key_values[key_offset(index, key_id)],
-	    (size_t)index->key_length * sizeof(*key));
-	relic_idtab_place(&index->keys, hash, key_id);
+	relic_atomic_u32_store_relaxed(&stripe->frontiers[key_id - 1], id);
+	gather_key(index, relic_relation_tuple(relation, id),
+	    &stripe->key_values[key_offset(index, key_id)]);
+	relic_idtab_place(&stripe->keys, relic_hash_low(index->pending.hash),
+	    key_id);
 }
 
 /*
- * The identifier of the key `probe` holds in the key columns, or
- * RELIC_ID_NONE when no tuple of the relation holds it.  `probe` is laid out
- * as a tuple of the relation, and only its key columns are read, so a caller
- * never needs to know how the index packs a key.
+ * The bytes the index would hold once `added` tuples had been added to it,
+ * one insertion at a time, into a relation holding `tuples`, at most: each
+ * stripe is followed as though every one of them brought it a new key, which
+ * no sequence of insertions exceeds, since a step-by-step growth passes
+ * through the same capacities however many of its steps ask for nothing new,
+ * only stopping sooner.  SIZE_MAX says some growth on the way could not
+ * happen.  The key tables double, so one reservation for every tuple reaches
+ * what one per tuple does.
  */
-static uint32_t
+size_t
+relic_index_bytes_after_adds(const relic_index_t *index, size_t tuples,
+    size_t added)
+{
+	const relic_index_stripe_t *stripe;
+	relic_index_extent_t extent;
+	size_t next;
+	size_t total;
+	size_t s;
+
+	if (added == 0)
+		return (relic_index_bytes(index));
+
+	next = relic_grow_array_capacity_stepwise(index->next_capacity, tuples,
+	    added, 1);
+	if (next == 0)
+		return (SIZE_MAX);
+	total = relic_saturating_product(next, sizeof(*index->next));
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		stripe = &index->stripes[s];
+		extent.table_bytes = relic_idtab_bytes_after_reserve(
+		    &stripe->keys, added);
+		extent.entries = relic_grow_array_capacity_stepwise(
+		    stripe->entry_capacity, stripe->key_count, added, 1);
+		extent.frontiers = relic_grow_array_capacity_stepwise(
+		    stripe->frontier_capacity, stripe->key_count, added, 1);
+		extent.key_values = relic_grow_array_capacity_stepwise(
+		    stripe->key_value_capacity, stripe->key_count, added, 1);
+		total = relic_saturating_sum(total, extent_bytes(index,
+		    &extent));
+	}
+
+	return (total);
+}
+
+/*
+ * The key `probe` holds in the key columns: its hash, its stripe, and its
+ * identifier there, RELIC_ID_NONE when no tuple of the relation holds it.
+ * `probe` is laid out as a tuple of the relation, and only its key columns
+ * are read, so a caller never needs to know how the index packs a key.
+ */
+static relic_key_ref_t
 probe_key(const relic_index_t *index, const relic_relation_t *relation,
     const relic_dom_t *probe)
 {
 	relic_dom_t key[RELIC_MAX_ARITY];
+	relic_key_ref_t ref;
 
 	gather_key(index, probe, key);
+	ref.hash = key_hash(index, relation, key);
+	ref.stripe = key_stripe(index, ref.hash);
+	ref.key_id = find_key(index, ref.stripe, key, ref.hash);
 
-	return (find_key(index, key, key_hash(index, relation, key)));
+	return (ref);
 }
 
 uint32_t
@@ -475,13 +641,13 @@ relic_tuple_id_t
 relic_index_first(const relic_index_t *index, const relic_relation_t *relation,
     const relic_dom_t *probe)
 {
-	uint32_t key_id;
+	relic_key_ref_t ref;
 
-	key_id = probe_key(index, relation, probe);
-	if (key_id == RELIC_ID_NONE)
+	ref = probe_key(index, relation, probe);
+	if (ref.key_id == RELIC_ID_NONE)
 		return (RELIC_ID_NONE);
 
-	return (index->entries[key_id - 1].first);
+	return (ref.stripe->entries[ref.key_id - 1].first);
 }
 
 /*
@@ -553,20 +719,20 @@ relic_index_first_since(const relic_index_t *index,
     relic_tuple_id_t since)
 {
 	relic_atomic_u32_t *frontier;
+	relic_key_ref_t ref;
 	relic_tuple_id_t start;
 	relic_tuple_id_t stop;
-	uint32_t key_id;
 
 	assert(since <= index->latest_since);
 
-	key_id = probe_key(index, relation, probe);
-	if (key_id == RELIC_ID_NONE)
+	ref = probe_key(index, relation, probe);
+	if (ref.key_id == RELIC_ID_NONE)
 		return (RELIC_ID_NONE);
-	frontier = &index->frontiers[key_id - 1];
+	frontier = &ref.stripe->frontiers[ref.key_id - 1];
 
 	if (since < index->latest_since) {
-		stop = walk_toward(index, index->entries[key_id - 1].first,
-		    since);
+		stop = walk_toward(index,
+		    ref.stripe->entries[ref.key_id - 1].first, since);
 	} else {
 		start = relic_atomic_u32_load_relaxed(frontier);
 		stop = walk_toward(index, start, since);

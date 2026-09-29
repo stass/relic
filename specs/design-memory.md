@@ -214,12 +214,17 @@ every array in the engine, while the array itself stays a plain typed pointer
 that the surrounding code indexes directly.
 
 **Where an array lives.** An array whose bytes reach `RELIC_ARRAY_MAP_BYTES`,
-one mebibyte, is given an anonymous private mapping of its own; a smaller one
-is a heap block. A small block grows by `realloc()`. Every other growth maps
-the new size, copies and unmaps the old, so the pages of an outgrown
-generation go back to the system at once instead of staying resident as a
-freed heap block of that size may. The identifier table of section 6
-allocates its slot and tag arrays by the same rule.
+an eighth of a mebibyte, is given an anonymous private mapping of its own; a
+smaller one is a heap block. A small block grows by `realloc()`. Every other
+growth maps the new size, copies and unmaps the old, so the pages of an
+outgrown generation go back to the system at once instead of staying
+resident as a freed heap block of that size may. The identifier table of
+section 6 allocates its slot and tag arrays by the same rule. The threshold
+is low enough that the stripes of a large relation's tables
+(`specs/design-parallel.md` section 6.3), each a sixteenth of the table,
+are mapped as the whole table would be. Were they heap blocks, each stripe
+would leave its outgrown generations in the heap, one after another, and a
+striped table would hold more resident than the one table it replaces.
 
 A header in front of the first item records which storage an array got: the
 length of its mapping, or zero for a heap block, sealed against the record's
@@ -296,6 +301,21 @@ kept for the table's life:
 | relation (the canonical index) | successful, per the measurement above | no |
 | a distinct count | unsuccessful for every distinct value; each candidate a tuple | yes |
 | predicate table, rewrite tables | small | no |
+
+**Striped tables.** A table several threads fill at once without a lock
+-- a relation's canonical index and each secondary index's key table,
+which the parallel merge of `specs/design-parallel.md` section 6.3 fills --
+is `RELIC_STRIPES` ordinary identifier tables. A key lives in the stripe
+chosen by the top bits of its wide hash, `relic_hash_words_wide()`, whose
+low 32 bits are the ordinary keyed hash that chooses the slot and the tag,
+and whose high 32 bits are an unkeyed fold of the same words, made in the
+same loop. The stripe is unkeyed on purpose. Each stripe grows as its own
+keys need, so what a striped table holds depends on how many keys each
+stripe receives; a keyed stripe would make that, and with it the storage a
+program reports and the insertion a memory limit refuses, differ from run
+to run. An author who crowds keys into one stripe gets one larger table,
+whose slots and tags are keyed as always, which is what an unstriped table
+would have been.
 
 **Identifier zero is never assigned.** Symbol identifiers and the
 positions of the value table's integers both start at one, and a domain

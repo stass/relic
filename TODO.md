@@ -101,6 +101,47 @@ Revisit if a distribution reports it.
 
 ## Engine
 
+**Under a memory limit a shared round is abandoned where it would fit.**
+[Medium, component: `lib/round.c`, `lib/relation.c`] `merge_fits()` asks
+`relic_relation_bytes_after_inserts()`, which grows every stripe of the
+canonical index and of each secondary index as though every candidate
+landed in it, sixteen times the growth one stripe can take. With a memory
+limit close to a program's footprint, rounds the merge would have fitted
+are abandoned after their tasks ran and run again serially: `layered.dl -j 4`
+shares none of its seven rounds at `-l memory=1100000`, where the unstriped
+bound shared all seven, and reaches parity only near 2 MB. The parallel
+merge of `specs/design-parallel.md` section 6.3 replaces the bound with an
+exact check on each stripe's new tuples and keys, which closes this.
+
+**Striped tables multiply the number of mappings.** [Low, component:
+`lib/util.c`] Every stripe's arrays are mapped once they reach
+`RELIC_ARRAY_MAP_BYTES`, so a large program holds several times the
+mappings it did with unstriped tables. On Linux the default
+`vm.max_map_count` of 65530 would be reached with some 8 GB of arrays just
+past the 128 KiB threshold, rather than 64 GB at a mebibyte. Unverified;
+worth measuring on Linux before a release that promises tens of gigabytes.
+
+**A mapped array's page rounding grows with the page size.** [Low,
+component: `lib/util.c`] A mapped array is a power of two of items behind a
+header, so its mapping always rounds up by one page more. Beside the
+smallest mapped arrays, of 128 KiB, that is 3 per cent with 4 KiB pages, 12
+per cent with the 16 KiB pages of Apple silicon and half again with 64 KiB
+pages, and the rounding is not counted in the storage total. The threshold
+was measured on a 4 KiB-page machine only; measure on arm64, or tie it to
+the page size, such as the larger of 128 KiB and 32 pages.
+
+**A small relation pays for every stripe its keys land in.** [Low,
+component: `lib/index.c`, `lib/relation.c`] The canonical index and every
+secondary index are sixteen identifier tables, each allocated at its
+smallest size once it holds a key, so a relation of a few dozen tuples
+holds up to sixteen tables where one would do: the golden programs' storage
+grows from 110 KB with one stripe to 175 KB with sixteen, and
+`tests/lang/stats-indexed` from about 1.4 KB to 5.6 KB. Large relations pay
+nothing measurable. Keeping a table unstriped until it holds a stripe's
+worth of keys, and splitting it once, would remove the cost, provided the
+split happens at the same count at every thread count so storage bytes stay
+identical.
+
 **The discard's mark is set where a relation is handed out, not derived.**
 [Low, component: `lib/relation.c`] `holds_derived` is set by the write
 funnel and by an index build, and the discard returns at once when it is

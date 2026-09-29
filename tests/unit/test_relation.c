@@ -161,6 +161,8 @@ static void	 compare_with_single(relic_t *ctx,
 		    const relic_dom_t *tuples, const bool *added);
 static void	 a_limit_refuses_a_batch_where_it_would_one(void);
 static void	 a_reservation_for_many_holds_them_all(void);
+static void	 fill_tuple(relic_t *ctx, relic_dom_t *columns,
+		    unsigned int ordinal);
 static bool	 reserve_then_fill(relic_t *ctx, relic_relation_t *rel,
 		    size_t added, unsigned int *ordinalp);
 static void	 refused_as_too_large(relic_t *ctx, relic_relation_t *rel,
@@ -1070,12 +1072,15 @@ a_million_tuples_fit_in_the_expected_memory(void)
 
 /*
  * The account keeps step with a relation whichever storage its growth
- * chose.  A relation grown until its columns and its canonical index are
- * mapped is charged what relic_relation_bytes() reports for it; cleared, it
- * gives every byte back; grown again, its columns start in the heap and are
- * charged from nothing.  Both sides derive the bytes from capacities, so
- * this pins the account's updates across the move to a mapping and back,
- * not the byte formula itself.
+ * chose.  A relation grown until its columns and a stripe of its canonical
+ * index are mapped is charged what relic_relation_bytes() reports for it;
+ * cleared, it gives every byte back; grown again, its columns start in the
+ * heap and are charged from nothing.  Both sides derive the bytes from
+ * capacities, so this pins the account's updates across the move to a
+ * mapping and back, not the byte formula itself.  A stripe holds about one
+ * tuple in RELIC_STRIPES, so the relation grows to that many times the
+ * tuples one stripe needs to be mapped, and its tuples are triples, for
+ * values enough to be distinct.
  */
 static void
 the_account_follows_a_relation_across_the_threshold(void)
@@ -1083,8 +1088,7 @@ the_account_follows_a_relation_across_the_threshold(void)
 	relic_t *ctx;
 	relic_relation_t *rel;
 	relic_dom_t values[ENVELOPE_VALUES];
-	relic_dom_t columns[2];
-	size_t tuple_count;
+	relic_dom_t columns[3];
 	unsigned int ordinal;
 	bool added;
 
@@ -1092,7 +1096,7 @@ the_account_follows_a_relation_across_the_threshold(void)
 	if (ctx == NULL)
 		return;
 
-	rel = relation(ctx, SCENARIO_ACCOUNT, "pair", 2);
+	rel = relation(ctx, SCENARIO_ACCOUNT, "triple", 3);
 	if (rel == NULL) {
 		relic_destroy(ctx);
 		return;
@@ -1101,10 +1105,21 @@ the_account_follows_a_relation_across_the_threshold(void)
 	for (ordinal = 0; ordinal < ENVELOPE_VALUES; ordinal++)
 		values[ordinal] = value(ctx, SCENARIO_ACCOUNT, ordinal);
 
-	tuple_count = RELIC_ARRAY_MAP_BYTES / sizeof(columns) + 1;
-	for (ordinal = 0; ordinal < tuple_count; ordinal++) {
-		pair(columns, values[ordinal / ENVELOPE_VALUES],
-		    values[ordinal % ENVELOPE_VALUES]);
+	for (ordinal = 0; !relic_array_mapped(rel->columns) ||
+	    !relic_array_mapped(rel->index[0].slots); ordinal++) {
+		if (ordinal == ENVELOPE_VALUES * ENVELOPE_VALUES *
+		    ENVELOPE_VALUES) {
+			check(false, SCENARIO_ACCOUNT, "a relation of every "
+			    "triple of the values should have been mapped");
+			relic_destroy(ctx);
+			return;
+		}
+
+		columns[0] = values[ordinal / ENVELOPE_VALUES /
+		    ENVELOPE_VALUES];
+		columns[1] = values[ordinal / ENVELOPE_VALUES %
+		    ENVELOPE_VALUES];
+		columns[2] = values[ordinal % ENVELOPE_VALUES];
 
 		if (relic_relation_insert(ctx, rel, columns, &added) != 0 ||
 		    !added) {
@@ -1116,9 +1131,6 @@ the_account_follows_a_relation_across_the_threshold(void)
 		}
 	}
 
-	check(relic_array_mapped(rel->columns) &&
-	    relic_array_mapped(rel->index.slots), SCENARIO_ACCOUNT,
-	    "the columns and the index should be mapped past the threshold");
 	checkf(relic_relation_total_bytes(ctx) == relic_relation_bytes(rel),
 	    SCENARIO_ACCOUNT, "the account should hold the relation's %zu "
 	    "bytes, not %zu", relic_relation_bytes(rel),
@@ -1446,15 +1458,28 @@ a_limit_refuses_a_batch_where_it_would_one(void)
 }
 
 /*
- * Reserve room in `rel` for `added` more tuples, then insert that many new
- * ones, each pairing the first test value with the next of *ordinalp.
- * Returns whether the reservation reached the size projected for it, kept
- * the storage total in step, and left the insertions nothing to grow.
+ * The tuple reserve_then_fill() inserts `ordinal`th: the first test value
+ * paired with the one of that ordinal.
+ */
+static void
+fill_tuple(relic_t *ctx, relic_dom_t *columns, unsigned int ordinal)
+{
+	pair(columns, value(ctx, SCENARIO_RESERVED, 0),
+	    value(ctx, SCENARIO_RESERVED, ordinal));
+}
+
+/*
+ * Reserve room in `rel` for `added` more tuples, counted by the stripe of
+ * the canonical index each falls in, then insert that many new ones, each
+ * pairing the first test value with the next of *ordinalp.  Returns whether
+ * the reservation reached the size projected for it, kept the storage total
+ * in step, and left the insertions nothing to grow.
  */
 static bool
 reserve_then_fill(relic_t *ctx, relic_relation_t *rel, size_t added,
     unsigned int *ordinalp)
 {
+	relic_tuple_growth_t growth;
 	relic_dom_t columns[2];
 	const relic_dom_t *storage;
 	size_t bytes_before;
@@ -1463,11 +1488,18 @@ reserve_then_fill(relic_t *ctx, relic_relation_t *rel, size_t added,
 	size_t i;
 	bool added_one;
 
+	bzero(&growth, sizeof(growth));
+	for (i = 0; i < added; i++) {
+		fill_tuple(ctx, columns, *ordinalp + 1 + (unsigned int)i);
+		growth.by_stripe[relic_hash_stripe(relic_tuple_hash(
+		    rel->hash_seed, columns, 2))]++;
+	}
+
 	bytes_before = relic_relation_bytes(rel);
-	projected = relic_relation_bytes_after_reserve(rel, added);
+	projected = relic_relation_bytes_after_growth(rel, &growth);
 	store_bytes_before = ctx->account.store_bytes;
 
-	if (relic_relation_reserve(ctx, rel, added) != 0 ||
+	if (relic_relation_reserve(ctx, rel, &growth) != 0 ||
 	    relic_relation_bytes(rel) != projected ||
 	    ctx->account.store_bytes - store_bytes_before !=
 	    projected - bytes_before)
@@ -1475,8 +1507,7 @@ reserve_then_fill(relic_t *ctx, relic_relation_t *rel, size_t added,
 
 	storage = relic_relation_tuple(rel, RELIC_TUPLE_FIRST);
 	for (i = 0; i < added; i++) {
-		pair(columns, value(ctx, SCENARIO_RESERVED, 0),
-		    value(ctx, SCENARIO_RESERVED, ++*ordinalp));
+		fill_tuple(ctx, columns, ++*ordinalp);
 		if (!insert(ctx, SCENARIO_RESERVED, *ordinalp, rel, columns,
 		    &added_one) || !added_one)
 			return (false);
@@ -1492,17 +1523,24 @@ reserve_then_fill(relic_t *ctx, relic_relation_t *rel, size_t added,
  * storage total; the tuples it reserved for then go in without growing
  * anything.  A reservation that would take a relation past the identifier
  * space, or whose size cannot be expressed, is projected as no growth, and
- * refused as a relation too large to grow having changed nothing.
+ * refused as a relation too large to grow having changed nothing.  A
+ * relation with a secondary index is refused as an internal error, since
+ * the tuples appended into the room would be missing from the index.
  */
 static void
 a_reservation_for_many_holds_them_all(void)
 {
 	static const size_t addeds[] = { 0, 1, 2, 100, 3000 };
+	static const char indexed[] = "internal error: r/2 was reserved for "
+	    "many tuples while it has secondary indexes";
 
+	relic_tuple_growth_t growth;
 	relic_t *ctx;
 	relic_relation_t *rel;
 	relic_dom_t columns[2];
+	const char *reported;
 	unsigned int ordinal;
+	uint32_t position;
 	size_t bytes;
 	size_t store_bytes;
 	size_t a;
@@ -1544,13 +1582,36 @@ a_reservation_for_many_holds_them_all(void)
 	    ctx->account.store_bytes == store_bytes, SCENARIO_RESERVED,
 	    "a refused reservation should grow and charge nothing");
 
+	if (relic_relation_index(ctx, rel, 0x1, &position) != 0) {
+		check(false, SCENARIO_RESERVED, "indexing r/2 should succeed");
+		relic_destroy(ctx);
+		return;
+	}
+	bytes = relic_relation_bytes(rel);
+	store_bytes = ctx->account.store_bytes;
+	bzero(&growth, sizeof(growth));
+	growth.by_stripe[0] = 1;
+
+	check(relic_relation_reserve(ctx, rel, &growth) != 0,
+	    SCENARIO_RESERVED,
+	    "reserving in a relation with a secondary index should fail");
+	reported = relic_error(ctx);
+	checkf(reported != NULL && strcmp(reported, indexed) == 0,
+	    SCENARIO_RESERVED, "reserving in an indexed relation should "
+	    "report \"%s\", not \"%s\"", indexed,
+	    reported == NULL ? "(none)" : reported);
+	check(relic_relation_bytes(rel) == bytes &&
+	    ctx->account.store_bytes == store_bytes, SCENARIO_RESERVED,
+	    "a refused reservation of an indexed relation should grow and "
+	    "charge nothing");
+
 	relic_destroy(ctx);
 }
 
 /*
- * Check that reserving `added` more tuples is projected as no growth and
- * refused as a relation too large to grow.  `what` says how many that is,
- * for the message.
+ * Check that reserving `added` more tuples, all of them in the first stripe,
+ * is projected as no growth and refused as a relation too large to grow.
+ * `what` says how many that is, for the message.
  */
 static void
 refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
@@ -1558,12 +1619,16 @@ refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
 {
 	static const char expected[] = "relation r/2 is too large to grow";
 
+	relic_tuple_growth_t growth;
 	const char *reported;
 
-	checkf(relic_relation_bytes_after_reserve(rel, added) ==
+	bzero(&growth, sizeof(growth));
+	growth.by_stripe[0] = added;
+
+	checkf(relic_relation_bytes_after_growth(rel, &growth) ==
 	    relic_relation_bytes(rel), SCENARIO_RESERVED,
 	    "reserving %s should project no growth", what);
-	checkf(relic_relation_reserve(ctx, rel, added) != 0,
+	checkf(relic_relation_reserve(ctx, rel, &growth) != 0,
 	    SCENARIO_RESERVED, "reserving %s should fail", what);
 
 	reported = relic_error(ctx);
@@ -1576,10 +1641,12 @@ refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
 /*
  * Insert `count` tuples into a relation keyed by two secondary indexes, one
  * at a time, having projected what they would hold, and return whether the
- * relation then holds what was projected: exactly, when every tuple is new
- * and brings a new key to both indexes, the most the insertions can grow
- * the relation to, and no more otherwise, when every other tuple repeats
+ * relation then holds no more than was projected: when every tuple is new
+ * and brings a new key to both indexes, and when every other tuple repeats
  * the one before it and every tuple shares one key of the first column.
+ * With one stripe the projection is exact for the first, since it is the
+ * most the insertions can grow the relation to; with several it grows every
+ * stripe as though each tuple fell in it.
  */
 static bool
 insert_projected(relic_t *ctx, relic_relation_t *rel, size_t count,
@@ -1603,7 +1670,7 @@ insert_projected(relic_t *ctx, relic_relation_t *rel, size_t count,
 			return (false);
 	}
 
-	if (fresh_keys)
+	if (fresh_keys && RELIC_STRIPES == 1)
 		return (relic_relation_bytes(rel) == projected);
 
 	return (relic_relation_bytes(rel) <= projected);
@@ -1677,7 +1744,7 @@ static void
 a_screen_finds_what_an_insertion_would(void)
 {
 	enum { HELD = 20, BATCH = 40 };
-	uint32_t hashes[BATCH];
+	uint64_t hashes[BATCH];
 	bool added[BATCH];
 	bool held[BATCH];
 	relic_dom_t tuples[BATCH * 2];

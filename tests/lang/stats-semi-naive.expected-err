@@ -5,7 +5,7 @@ stats: tuples scanned 174
 stats: tuples looked up 0
 stats: parallel rounds 0
 stats: tuples held 27
-stats: storage bytes 496
+stats: storage bytes 1584
 stats: symbol values 7
 stats: string values 0
 stats: integer values 0

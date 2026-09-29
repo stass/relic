@@ -49,7 +49,7 @@
 static uint32_t	 candidate_rehash(uint32_t position, void *ctx);
 static int	 candidates_add(relic_candidates_t *candidates,
 		    relic_account_t *account, size_t target,
-		    const relic_dom_t *tuple, uint16_t arity, uint32_t hash);
+		    const relic_dom_t *tuple, uint16_t arity, uint64_t hash);
 static size_t	 candidates_bytes(const relic_candidates_t *candidates);
 static size_t	 candidates_bytes_after_add(
 		    const relic_candidates_t *candidates, uint16_t arity);
@@ -57,7 +57,7 @@ static int	 candidates_grow(relic_candidates_t *candidates,
 		    uint16_t arity);
 static bool	 candidates_hold(const relic_candidates_t *candidates,
 		    size_t target, const relic_dom_t *tuple, uint16_t arity,
-		    uint32_t hash);
+		    uint64_t hash);
 static int	 candidates_reserve(relic_candidates_t *candidates,
 		    relic_account_t *account, uint16_t arity);
 static void	 place_seed(relic_scratch_t *scratch, const relic_rule_t *rule);
@@ -68,7 +68,7 @@ static int	 run_task(const relic_round_job_t *job, relic_worker_t *worker,
 		    size_t worker_index, relic_round_task_t *task);
 static int	 screen_batch(const relic_round_job_t *job,
 		    relic_worker_t *worker, size_t target);
-static uint32_t	 screen_hash(size_t target, uint32_t hash);
+static uint32_t	 screen_hash(size_t target, uint64_t hash);
 static uint64_t	 worker_work(const relic_worker_t *worker);
 
 /*
@@ -201,7 +201,7 @@ static int
 screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
     size_t target)
 {
-	uint32_t hashes[RELIC_INSERT_BATCH];
+	uint64_t hashes[RELIC_INSERT_BATCH];
 	bool held[RELIC_INSERT_BATCH];
 	const relic_relation_t *relation;
 	const relic_dom_t *tuple;
@@ -236,16 +236,17 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 }
 
 /*
- * The hash a candidate is placed under in its worker's screen: its tuple's
- * hash moved by its target, so that one tuple gathered for two targets
- * does not fill one probe sequence.  For each target the move is an
- * exclusive or with a constant, a permutation of the hashes, so hashes that
- * spread still spread.
+ * The hash a candidate is placed under in its worker's screen: the low half
+ * of its tuple's wide hash moved by its target, so that one tuple gathered
+ * for two targets does not fill one probe sequence.  For each target the
+ * move is an exclusive or with a constant, a permutation of the hashes, so
+ * hashes that spread still spread.
  */
 static uint32_t
-screen_hash(size_t target, uint32_t hash)
+screen_hash(size_t target, uint64_t hash)
 {
-	return (hash ^ ((uint32_t)target * UINT32_C(0x9e3779b9)));
+	return (relic_hash_low(hash) ^ ((uint32_t)target *
+	    UINT32_C(0x9e3779b9)));
 }
 
 /*
@@ -269,7 +270,7 @@ candidate_rehash(uint32_t position, void *ctx)
  */
 static bool
 candidates_hold(const relic_candidates_t *candidates, size_t target,
-    const relic_dom_t *tuple, uint16_t arity, uint32_t hash)
+    const relic_dom_t *tuple, uint16_t arity, uint64_t hash)
 {
 	const relic_candidate_t *candidate;
 	relic_idprobe_t probe;
@@ -294,7 +295,7 @@ candidates_hold(const relic_candidates_t *candidates, size_t target,
  */
 static int
 candidates_add(relic_candidates_t *candidates, relic_account_t *account,
-    size_t target, const relic_dom_t *tuple, uint16_t arity, uint32_t hash)
+    size_t target, const relic_dom_t *tuple, uint16_t arity, uint64_t hash)
 {
 	relic_candidate_t *candidate;
 	uint16_t column;

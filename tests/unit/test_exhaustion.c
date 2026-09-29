@@ -158,13 +158,14 @@
  * allocate at all: an insertion into a relation that already has room asks
  * for nothing, so a sweep over a single insertion would refuse nothing and
  * would report success without having tested anything.  Forty insertions from
- * a standing start of twenty cross two index doublings and a column doubling,
- * so a refusal has three different growths to land on, and the sweep is bound
- * well past that so a request added later is swept too.
+ * a standing start of twenty cross a column doubling, start the stripes of
+ * the canonical index the prelude left empty and grow some it did not, so a
+ * refusal has a dozen or so growths to land on, and the sweep is bound well
+ * past that so a request added later is swept too.
  */
 #define	INSERT_PRELUDE	20
 #define	INSERT_BATCH	40
-#define	INSERT_SWEEP	10
+#define	INSERT_SWEEP	32
 
 /*
  * The index sweep builds an index over a relation of INDEX_PRELUDE tuples

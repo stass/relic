@@ -57,17 +57,21 @@ column. A relation holds at most one index per mask.
 ## 3. Representation
 
 ```c
-struct relic_index {
+struct relic_index_stripe {
 	relic_idtab_t		 keys;		/* key hash -> key identifier */
 	relic_index_key_t	*entries;	/* per key: first, last */
 	relic_atomic_id_t	*frontiers;	/* per key: where a delta lookup
 						   starts walking */
 	relic_dom_t		*key_values;	/* per key: its values */
-	relic_tuple_id_t	*next;		/* per tuple: the next with its key */
 	size_t			 key_count;
 	size_t			 entry_capacity;
 	size_t			 frontier_capacity;
 	size_t			 key_value_capacity;
+};
+
+struct relic_index {
+	relic_index_stripe_t	 stripes[RELIC_STRIPES];
+	relic_tuple_id_t	*next;		/* per tuple: the next with its key */
 	size_t			 next_capacity;
 	relic_tuple_id_t	 latest_since;	/* the largest delta start raised */
 	uint32_t		 key_mask;
@@ -81,11 +85,15 @@ struct relic_index_key {
 };
 ```
 
-Each distinct key gets a **key identifier**, assigned from one in the order
-keys are first seen. `keys` is the open-addressing identifier table of
-`specs/design-memory.md`, mapping the hash of a key to the identifiers that
-share it; `entries[k - 1]` records the first and the last tuple holding key
-*k*. `next[id - 1]` is the tuple after `id` holding the same key, or
+Each distinct key lives in one **stripe**, the one the top bits of its hash
+choose (`specs/design-parallel.md` section 6.3), and gets a **key
+identifier** within that stripe, assigned from one in the order the stripe's
+keys are first seen. A stripe's `keys` is the open-addressing identifier
+table of `specs/design-memory.md`, mapping the hash of a key to the
+identifiers that share it; its `entries[k - 1]` records the first and the
+last tuple holding its key *k*. What follows speaks of one stripe's arrays
+wherever it speaks of a key's, since a key is only ever looked for in its own
+stripe. `next[id - 1]` is the tuple after `id` holding the same key, or
 `RELIC_ID_NONE` when `id` is the last. A key's tuples are therefore a singly
 linked **chain** threaded through `next`, from `first` to `last`.
 
@@ -121,9 +129,15 @@ words lookups store to. In a build with threads a frontier is a relaxed
 atomic identifier, so that the lookups of several workers may store to one
 at once as a defined program (section 4.1); without threads it is a plain
 identifier. The array costs what the third word of an entry cost, since it
-grows to the capacity `entries` grows to. The key table and `entries` may
-be striped as `specs/design-parallel.md` section 6.3 describes, and the
-frontiers are striped with the entries.
+grows to the capacity `entries` grows to.
+
+`next` is one array for every stripe, indexed by tuple. The slot of a
+chain's last tuple belongs to that chain and a new tuple's slot to the new
+tuple, so tuples whose keys lie in different stripes can be linked at once,
+which is what lets the parallel merge link a round's tuples stripe by stripe.
+Striping costs a small relation a table of the smallest size in every
+stripe that holds a key, where one table would have held them all; a large
+one pays nothing measurable, since each stripe holds its share of the keys.
 
 ### 3.1 Why chains
 
@@ -161,10 +175,10 @@ relic_tuple_id_t relic_index_next(const relic_index_t *, relic_tuple_id_t);
 
 The probe is laid out as a tuple of the relation, with the key's values in
 their own columns; the other columns are not read. `relic_index_first()`
-gathers the key from it, hashes the key, probes `keys` comparing each
-candidate key's stored values against it, and returns the first tuple of
-the matching chain, or `RELIC_ID_NONE` when no tuple holds the key.
-`relic_index_next()` follows the chain.
+gathers the key from it, hashes the key, probes the `keys` of the stripe the
+hash chooses, comparing each candidate key's stored values against it, and
+returns the first tuple of the matching chain, or `RELIC_ID_NONE` when no
+tuple holds the key. `relic_index_next()` follows the chain.
 
 How a key is packed -- which columns, in what order -- is known to the index
 alone. Insertion gathers a key from a stored tuple and a lookup from a probe
@@ -284,26 +298,34 @@ The relation's insertion order of `specs/design-relations.md` section 6 gains
 one step, and keeps its shape -- every fallible step before every mutation:
 
 1. look the tuple up in the canonical index; a duplicate adds nothing;
-2. check the limits against what the relation *and every index* will hold;
-3. reserve room in the canonical index and for the columns;
-4. **reserve room in every secondary index for one more tuple and one more
-   key**;
-5. append the columns, place the canonical entry, and **add the tuple to each
-   secondary index**. Nothing here can fail.
+2. **classify the tuple's key in every secondary index**: hash it, and probe
+   its stripe for it, noting the key it joins or that it is new;
+3. check the limits against what the relation *and every index* will hold;
+4. reserve room in the canonical index, for the columns, **and in every
+   secondary index for one more tuple, and for one more key where the key is
+   new**;
+5. append the columns, place the canonical entry, and **link the tuple into
+   each secondary index** as step 2 classified it. Nothing here can fail.
 
-**Room for one more key is reserved whether or not the key is new.** Whether
-it is new is a probe away, and the probe would have to be made twice, once to
-decide what to reserve and once to add. Reserving unconditionally means an
-index may grow one step sooner than it had to -- once, and then it has room
-for many keys. What matters more is that the projection of step 2 and the
+**The key is probed for once.** Step 2 notes what it found, and step 5 links
+by that note without probing again. The reservation between them may move a
+stripe's arrays and rehash its table, but it changes neither which keys the
+index holds nor their identifiers, and the note records an identifier and a
+hash, never a position, so it is still true when step 5 reads it. Knowing
+whether the key is new before anything is reserved is what lets steps 3 and 4
+account for exactly the growth the insertion causes: room for a key is
+reserved only for a key that is new, and the projection of step 3 and the
 reservation of step 4 make the same assumption, so that the memory limit is
 charged for exactly what is allocated, as the canonical index already is.
+Each projection is of the parts the insertion grows -- the columns, the
+canonical stripe, each index's `next` and the one stripe of each index a new
+key lands in -- rather than of every stripe.
 
-Adding a tuple to an index is then: compute its key's hash; probe for the key;
-if it is there, link the tuple after the key's `last` and make it the new
-`last`; otherwise assign the next key identifier, record the tuple as the
-key's `first`, `last` and `frontier`, and place the identifier. In both cases
-the tuple's own `next` is `RELIC_ID_NONE`.
+Linking a tuple into an index is then: if its key was found, link the tuple
+after the key's `last` and make it the new `last`; otherwise assign the
+stripe's next key identifier, record the tuple as the key's `first`, `last`
+and `frontier`, and place the identifier in the stripe's table by the hash
+step 2 computed. In both cases the tuple's own `next` is `RELIC_ID_NONE`.
 
 A tuple stored but missing from a secondary index would be a lookup that
 misses a tuple the relation holds: a join that silently drops answers, with no
@@ -324,9 +346,9 @@ int relic_relation_index(relic_t *, relic_relation_t *, uint32_t key_mask,
 ```
 
 Building is insertion of each existing tuple, in identifier order, into an
-empty index: check the memory limit against what the index will hold, reserve,
-add. Doing it in identifier order is what makes every chain of a built index
-identical to the chain insertion would have produced.
+empty index: classify, check the memory limit against what the index will
+hold, reserve, link. Doing it in identifier order is what makes every chain
+of a built index identical to the chain insertion would have produced.
 
 **A half-built index is never published.** The index is appended to the
 relation's list only once every tuple is in it. A build that runs out of
@@ -387,13 +409,13 @@ within one, so no plan names an index a discard dropped.
 
 ## 8. Accounting
 
-An index's `next`, `entries`, `key_values` and `keys` arrays, and the tags
-of `keys`, are relation and index storage
-in the sense of architecture section 63, and count toward `max_memory` by the
-same method the relation store uses for its own arrays: the growth policies
-are asked what they will allocate before anything is allocated, and the total
-is reconciled from what the arrays hold before and after a reservation, so no
-failure path has to give anything back by hand.
+An index's `next` array, and every stripe's `entries`, `frontiers`,
+`key_values` and `keys` arrays and the tags of its `keys`, are relation and
+index storage in the sense of architecture section 63, and count toward
+`max_memory` by the same method the relation store uses for its own arrays:
+the growth policies are asked what they will allocate before anything is
+allocated, and the total is reconciled from what the arrays hold before and
+after a reservation, so no failure path has to give anything back by hand.
 
 The array of index headers does not count, for the reason the array of
 relation headers does not: it is sized by the program -- by the binding

@@ -226,6 +226,14 @@ holds a tuple identifier and nothing else, and the key stays where the store
 already keeps it. An entry therefore costs four bytes and no tuple is stored
 twice.
 
+**The index is striped.** It is `RELIC_STRIPES` identifier tables, and a
+tuple's entry lives in the one the top bits of its hash choose; the low 32
+bits choose its slot and tag within that table (`specs/design-memory.md`
+section 6). A stripe is found from the hash alone, so a lookup probes one
+table as an unstriped index would, and tuples of different stripes can be
+placed at once, which is what lets a round's merge place its tuples in
+parallel (`specs/design-parallel.md` section 6.3).
+
 **Hashing is over values, not bytes.** A tuple is hashed by folding its
 columns as 32-bit words, not by hashing the bytes of the array. A byte hash of
 a `uint32_t` array probes in a different order on a big-endian machine than on
@@ -233,12 +241,12 @@ a little-endian one, and D-4 requires that identical input produce an identical
 probe order everywhere.
 
 **A load's hash is carried in.** Every relation and staging set of a context
-hashes a tuple with the context's seed and the same function, so the hash a
-load's staging kept for a fact is the one its base store would compute.
-`relic_relation_contains_hashed()` and `relic_base_append_hashed()` take that
-hash rather than compute it, and a fact is hashed once on its way in
-(`specs/design-facts.md` sections 4.2 and 4.3). A debug build computes each
-hash again and asserts that it matches.
+hashes a tuple with the context's seed and the same function, to the same
+64-bit hash, so the hash a load's staging kept for a fact is the one its base
+store would compute. `relic_relation_contains_hashed()` and
+`relic_base_append_hashed()` take that hash rather than compute it, and a fact
+is hashed once on its way in (`specs/design-facts.md` sections 4.2 and 4.3). A
+debug build computes each hash again and asserts that it matches.
 
 **Equality is a column loop, not a byte comparison.** The columns of two
 tuples are compared as identifiers. A byte comparison would be equivalent for
@@ -272,17 +280,21 @@ The insertion is ordered so that a failure leaves nothing behind:
 
 1. **Look the tuple up.** A tuple already present is reported as not added and
    nothing is allocated.
-2. **Check the limits** against what the relation and its indexes will hold
+2. **Classify its keys.** In every secondary index, find the key the tuple
+   joins or learn that its key is new (`specs/design-index.md` section 5).
+   Nothing is changed; what is found says exactly what the indexes will grow
+   by.
+3. **Check the limits** against what the relation and its indexes will hold
    once the tuple is in them. This is where the tuple limit is enforced on
    what evaluation inserts, as a load's commit enforces it on the facts it
    adds (below); the memory limit is enforced here, by the same projection
    when an index is built, and in the commit; each time before anything is
    modified.
-3. **Reserve room in the index**, which is the step that can fail.
-4. **Reserve room for the columns**, and in every secondary index, which are
-   the other steps that can fail.
-5. **Append the columns, place the identifier, and add the tuple to every
-   secondary index.** None of these can fail.
+4. **Reserve room** in the tuple's stripe of the canonical index, for the
+   columns, and in every secondary index, for a key only where the key is
+   new. These are the steps that can fail.
+5. **Append the columns, place the identifier, and link the tuple into every
+   secondary index** as step 2 classified it. None of these can fail.
 
 Collecting every fallible step into one stage, ahead of every step that
 changes what the relation holds, is what makes a failed insertion safe. A
@@ -326,11 +338,11 @@ plans run over a store nothing writes (`specs/design-parallel.md` section
 ```c
 void
 relic_relation_screen(const relic_relation_t *relation,
-    const relic_dom_t *tuples, size_t count, uint32_t *hashes, bool *held);
+    const relic_dom_t *tuples, size_t count, uint64_t *hashes, bool *held);
 
 int
 relic_relation_insert_batch_hashed(relic_t *ctx, relic_relation_t *relation,
-    const relic_dom_t *tuples, const uint32_t *hashes, size_t count,
+    const relic_dom_t *tuples, const uint64_t *hashes, size_t count,
     bool *added, size_t *completedp);
 ```
 
@@ -343,20 +355,22 @@ serial round would have inserted it and by the same steps, so it refuses
 the tuple the serial round refuses, with the same diagnostic.
 
 **A load's commit reserves, then appends.** The facts a load adds to base
-stores are not inserted one at a time: the commit has looked every staged
-fact up already, and knows how many each base store gains
-(`specs/design-facts.md` section 4.3). The store checks both limits once,
-against the totals plus everything the commit adds, and refuses the whole
-load before any store is created or grown. It then reserves room for *n*
-tuples in each store, growing its columns and its canonical index at most
-once, to exactly the bytes the check projected, and the commit appends each
-fact into that room without looking anything up; no append can fail. A
-reservation for more than one tuple is made only of a relation without
-secondary indexes, which a base store is when a commit reserves, since the
-commit discards what was derived first: a secondary index would be given
-room for a key per tuple, far more than a column of few values uses. A
-failed allocation among the growths leaves every store's contents as they
-were, and keeps whatever capacity it obtained, accounted.
+stores are not inserted one at a time: the commit has looked every staged fact
+up already, and knows how many each base store gains (`specs/design-facts.md`
+section 4.3). The store checks both limits once, against the totals plus
+everything the commit adds, and refuses the whole load before any store is
+created or grown. It then reserves room for *n* tuples in each store, growing
+its columns and each stripe of its canonical index at most once, to exactly
+the bytes the check projected from how many of the tuples fall in each stripe,
+and the commit appends each fact into that room without looking anything up;
+no append can fail. A reservation for more than one tuple is made only of a
+relation without secondary indexes, which a base store is when a commit
+reserves, since the commit discards what was derived first: what a secondary
+index grows by depends on how many of the facts bring a key it lacks, which
+the commit has not asked, so a reservation of a relation with one is refused
+as an internal error rather than made short. A failed allocation among the
+growths leaves every store's contents as they were, and keeps whatever
+capacity it obtained, accounted.
 
 ---
 

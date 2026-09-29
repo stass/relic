@@ -23,7 +23,7 @@ later stage sits on, specified in `specs/design-memory.md`. No Datalog yet.
 | Component | State |
 | --- | --- |
 | `lib/arena.c` | chunked region allocator with an alignment chosen at initialization; sticky failure flag, cleared by a reset and by the symbol pool's store |
-| `lib/util.{h,c}` | `relic_grow_array()`, whose arrays of a mebibyte or more get a mapping of their own that is released when outgrown, behind a sealed header `relic_free_array()` checks before it unmaps or frees; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed multiplicative fold over a 64-bit state, twice the widest unit, so that no unit reaches the top bit a multiply carries unchanged, then a 64-bit finalizer; an integer hashed as its two halves, and a zero seed asserted against |
+| `lib/util.{h,c}` | `relic_grow_array()`, whose arrays of an eighth of a mebibyte or more get a mapping of their own that is released when outgrown, behind a sealed header `relic_free_array()` checks before it unmaps or frees; one open-addressing identifier table, reserved and placed as separate steps; hashes keyed by a 64-bit seed passed to every call, a keyed multiplicative fold over a 64-bit state, twice the widest unit, so that no unit reaches the top bit a multiply carries unchanged, then a 64-bit finalizer; an integer hashed as its two halves, and a zero seed asserted against |
 | `lib/symbol.c` | byte strings interned to identifiers below the type bits of a domain identifier; an entry of the bytes, a 32-bit length and the stored hash its tagged index places and regrows it by; bytes packed in a string arena of alignment one, embedded NULs preserved |
 | `lib/value.c` | `relic_dom_t` of D-3, typed by its top two bits: a symbol or string value is its symbol identifier under its type, an integer its position in the integer table; interning for all three types, `relic_value_decode()`, the language order of section 10.1 and the total order of section 61 |
 | `lib/diag.c` | diagnostic callback, last-error buffer, and a stderr formatter that escapes non-printable bytes |
@@ -447,7 +447,7 @@ much earlier.
 The relation store and the identifier table reserve room for any number of
 entries at once, section 10 step 1 of `specs/design-facts.md`: a reservation
 grows each array once, to exactly the bytes
-`relic_relation_bytes_after_reserve()` projects, and applies no limit of its
+`relic_relation_bytes_after_growth()` projects, and applies no limit of its
 own. An insertion is the reservation of one tuple under the limits; a
 load's commit reserves for all of its facts at once.
 
@@ -693,6 +693,8 @@ section 15 order.
 | `lib/account.c`, `lib/index.c`, `lib/relation.h` | the account's round total is an atomic word, charged by compare-and-swap only when the whole total stays within the limit and released by an atomic subtraction; a key's frontier is a relaxed atomic identifier, loaded and stored by concurrent lookups, which all store the same stop |
 | `include/relic.h`, `man/relic.3`, `cmd/relic/main.c`, `man/relic.1`, `configure.ac` | `threads` in `relic_config_t`, at most `RELIC_THREADS_MAX`, 256, a larger count refusing the context; `parallel_rounds` in `relic_stats_t` and a `stats: parallel rounds` line in `-X stats`; `-j threads`, `-j 0` one per processor online; version-info `6:0:0`, an incompatible change to two complete types |
 | `tests/` | `test_pool`, the library compiled with `pthread_create()` and `pthread_join()` renamed: no thread before a shared round, one per worker but the calling thread at the first, each with every signal blocked but a fault's and the caller's mask kept, every one joined when the context is destroyed, a refused start leaving an evaluation that succeeds silently with the threads that did start, and with none declining rounds a pool of threads would share, and a pool carried into a child of `fork(2)` joining nothing and evaluating there on the calling thread; `test_round` and `test_eval` run every scenario again on four threads and require that the pool's threads ran some of a large program's tasks, and `test_eval` checks that rounds are counted as shared at two threads and not at one, and that some of the layered graph's rounds are shared and not all; `test_exhaustion`'s injector is atomic, and its deferred sweeps run again on four threads, which must refuse an allocation on a thread of the pool and report only from the calling thread; `test_index`: four threads looking up one delta at once agree with a scan and leave every frontier where one lookup would; `test_api`: the mixed-comparison notes under the pool, from the calling thread, and a `threads` past the maximum refused; `tests/cli.sh`: `-j` at 0 to 256 answers as one thread does and anything else is a usage error; `tests/langtest.sh` every golden program at `-j 1`, `-j 2`, `-j 4` and `-j 16` under `-X parallel`; the random suite's deferred strategies and one of `tests/equiv/strategies.sh` on four threads; `make check-tsan` |
+| `lib/util.{h,c}`, `lib/relation.{h,c}`, `lib/index.c`, `lib/facts.c` | step 4, striped tables: a tuple or key hashes to 64 bits, the top four bits of an unkeyed fold choosing one of sixteen stripes, so that storage bytes do not depend on the seed, and the keyed low 32 bits its slot and tag within the stripe; the canonical index is sixteen identifier tables, and each secondary index sixteen stripes of key table, key entries, frontiers and key values beside one `next` array; an insertion looks the tuple up, classifies its key in every secondary index as found or new, checks both limits against exactly the parts it grows, reserves room for a key only when the key is new, and links by what it classified without probing again; a load's commit reserves each canonical stripe for the facts falling in it; an array of an eighth of a mebibyte or more is mapped rather than taken from `malloc()`, so that the stripes' freed arrays are returned; a round's merge still inserts on the calling thread, and checks its round against an upper bound of what the insertions can grow |
+| `tests/` | `test_relation` and `test_index` built a second time with a single stripe; the storage bytes `tests/lang/stats-*` expect, the same at every thread count and seed; `test_exhaustion`'s insertion sweep reaching the thirteen allocations a batch makes |
 
 Step 1 measured against the commit before it on a `--disable-shared` build,
 alternating, on the same machine: `bench/run.sh`, seven runs each, gives
@@ -724,6 +726,17 @@ and 0.09 s, sharing twenty; `chain-closure` 0.47 s and 0.48 s, sharing
 none. What `tc-cyclic` keeps on the calling thread, a round that inserts
 most of what it derives and the merge of the next, is recorded in
 `TODO.md`.
+
+Step 4's striping measured on a `--disable-shared` build against step 3,
+five alternating runs of `bench/run.sh` under a load average of ten to
+twenty: identical counters on every workload, times within noise, and
+peak resident sets within noise of step 3's, 80.2 MB against 79.8 on
+`chain, whole closure` and 45.1 against 45.0 on `chain, right-recursive`.
+Storage grows by 12 KB on the chains and by 80 KB, 14 per cent, on
+`tree, same generation`, whose relations are small; the golden programs
+hold 175 KB in all against 110 KB with one stripe. With arrays mapped only
+from a quarter of a mebibyte the chain closure peaked 3 per cent higher,
+and from a mebibyte a fifth higher.
 
 ### Verified
 

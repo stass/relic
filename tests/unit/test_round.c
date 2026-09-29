@@ -457,6 +457,12 @@ run_query(relic_t *ctx, const char *query, text_t *rows)
  * by tuple and every counter.  The naive fixed point's passes are never
  * deferred; its components that are not recursive are, and it is here for
  * those.
+ *
+ * That the pool's threads ran tasks is asked of the three strategies
+ * together.  The naive fixed point defers few rounds, and on a loaded
+ * machine the calling thread can claim every task of them before a parked
+ * thread wakes; over every round of the three, only threads that never run
+ * leave the count at zero.
  */
 static void
 a_deferred_round_inserts_in_serial_order(size_t threads)
@@ -477,8 +483,10 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
 	int serial_status;
 	int deferred_status;
 	char what[96];
+	uint64_t threaded;
 	size_t i;
 
+	threaded = 0;
 	for (i = 0; i < sizeof(strategies) / sizeof(strategies[0]); i++) {
 		snprintf(what, sizeof(what), "%s on %zu thread(s)",
 		    strategies[i].name, threads);
@@ -498,10 +506,7 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
 			checkf(shared_as_expected(deferred, threads),
 			    SCENARIO_ORDER, "%s: the rounds are shared when "
 			    "the pool has threads", what);
-			checkf(!THREADS_AVAILABLE || threads < 2 ||
-			    thread_tasks(deferred) > 0, SCENARIO_ORDER,
-			    "%s: the pool's threads run some of the tasks",
-			    what);
+			threaded += thread_tasks(deferred);
 			contexts_agree(SCENARIO_ORDER, what, serial, deferred);
 			checkf(deferred->account.round_bytes == 0,
 			    SCENARIO_ORDER, "%s: the round gave back its "
@@ -511,6 +516,10 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
 		relic_destroy(serial);
 		relic_destroy(deferred);
 	}
+
+	checkf(!THREADS_AVAILABLE || threads < 2 || threaded > 0,
+	    SCENARIO_ORDER, "on %zu thread(s) the pool's threads run some of "
+	    "the tasks", threads);
 }
 
 /*

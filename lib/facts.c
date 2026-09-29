@@ -61,7 +61,7 @@
 
 struct relic_staged_set {
 	relic_dom_t	*tuples;	/* packed at the arity */
-	uint32_t	*hashes;	/* by tuple: as a relation hashes it */
+	uint64_t	*hashes;	/* by tuple: as a relation hashes it */
 	bool		*marks;		/* by tuple: new to the base store */
 	relic_idtab_t	 index;		/* tuple position + 1 */
 	size_t		 count;
@@ -82,7 +82,7 @@ static bool	 held_by_store(const relic_relation_t *store,
 		    const relic_staged_set_t *set, size_t position);
 static int	 set_add(relic_staging_t *staging, relic_staged_set_t *set,
 		    const relic_dom_t *tuple);
-static uint32_t	 set_hash(const relic_staged_set_t *set,
+static uint64_t	 set_hash(const relic_staged_set_t *set,
 		    const relic_dom_t *tuple);
 static uint32_t	 set_rehash(uint32_t id, void *ctx);
 static void	 set_reset(relic_staged_set_t *set);
@@ -219,16 +219,20 @@ commit_measure(relic_staging_t *staging)
 
 /*
  * The growth of each base store that gains a tuple, in the order the load
- * first named their predicates, into a new array in *growthsp.  Returns 0,
- * or -1 when memory ran out, having reported nothing.
+ * first named their predicates, into a new array in *growthsp: its new
+ * tuples by the stripe of its canonical index each falls in.
+ * Returns 0, or -1 when memory ran out, having reported nothing.
  */
 static int
 collect_growths(relic_staging_t *staging, relic_base_growth_t **growthsp,
     size_t *countp)
 {
+	const relic_staged_set_t *set;
 	relic_base_growth_t *growths;
+	relic_tuple_growth_t *added;
 	size_t count;
 	size_t i;
+	size_t t;
 
 	growths = reallocarray(NULL, staging->set_count, sizeof(*growths));
 	if (growths == NULL)
@@ -236,11 +240,18 @@ collect_growths(relic_staging_t *staging, relic_base_growth_t **growthsp,
 
 	count = 0;
 	for (i = 0; i < staging->set_count; i++) {
-		if (staging->sets[i].new_count == 0)
+		set = &staging->sets[i];
+		if (set->new_count == 0)
 			continue;
 
-		growths[count].pred = staging->sets[i].pred;
-		growths[count].added = staging->sets[i].new_count;
+		growths[count].pred = set->pred;
+		added = &growths[count].added;
+		bzero(added, sizeof(*added));
+		for (t = 0; t < set->count; t++) {
+			if (set->marks[t])
+				added->by_stripe[relic_hash_stripe(
+				    set->hashes[t])]++;
+		}
 		count++;
 	}
 
@@ -361,14 +372,14 @@ set_add(relic_staging_t *staging, relic_staged_set_t *set,
 	char described[RELIC_PRED_TEXT_MAX];
 	relic_idprobe_t probe;
 	relic_dom_t *tuples;
-	uint32_t *hashes;
+	uint64_t *hashes;
 	bool *marks;
-	uint32_t hash;
+	uint64_t hash;
 	uint32_t id;
 	uint16_t column;
 
 	hash = set_hash(set, tuple);
-	relic_idprobe_open(&probe, &set->index, hash);
+	relic_idprobe_open(&probe, &set->index, relic_hash_low(hash));
 	while (relic_idprobe_next(&probe, &id)) {
 		if (set->arity == 0 || bcmp(set_tuple(set, id - 1), tuple,
 		    set->arity * sizeof(*tuple)) == 0)
@@ -429,7 +440,8 @@ set_add(relic_staging_t *staging, relic_staged_set_t *set,
 	set->hashes[set->count] = hash;
 	set->marks[set->count] = false;
 	set->count++;
-	relic_idtab_place(&set->index, hash, (uint32_t)set->count);
+	relic_idtab_place(&set->index, relic_hash_low(hash),
+	    (uint32_t)set->count);
 
 	return (0);
 }
@@ -450,10 +462,10 @@ set_tuple(const relic_staged_set_t *set, size_t position)
 }
 
 /*
- * A tuple's hash as every relation of the context computes it, which is what
- * lets the commit hand it to the base store.
+ * A tuple's wide hash as every relation of the context computes it, which is
+ * what lets the commit hand it to the base store.
  */
-static uint32_t
+static uint64_t
 set_hash(const relic_staged_set_t *set, const relic_dom_t *tuple)
 {
 	return (relic_tuple_hash(set->hash_seed, tuple, set->arity));
@@ -470,7 +482,7 @@ set_rehash(uint32_t id, void *ctx)
 
 	set = ctx;
 
-	return (set->hashes[id - 1]);
+	return (relic_hash_low(set->hashes[id - 1]));
 }
 
 static void

@@ -119,14 +119,14 @@ struct relic_round_task {
 
 /*
  * A tuple a worker derived that the round's frozen store does not hold and
- * that none of the worker's earlier candidates is: the target it is for,
- * where its columns begin in the worker's `words`, and its hash, which the
- * merge probes by without hashing again.
+ * that none of the worker's earlier candidates is: where its columns begin
+ * in the worker's `words`, its wide hash, which the merge probes by without
+ * hashing again, and the target it is for.
  */
 struct relic_candidate {
 	size_t		offset;
+	uint64_t	hash;
 	uint32_t	target;
-	uint32_t	hash;
 };
 
 /*
