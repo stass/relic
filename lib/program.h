@@ -58,6 +58,7 @@ typedef struct relic_atom relic_atom_t;
 typedef struct relic_comparison relic_comparison_t;
 typedef struct relic_component relic_component_t;
 typedef struct relic_expr relic_expr_t;
+typedef struct relic_expr_call relic_expr_call_t;
 typedef struct relic_literal relic_literal_t;
 typedef struct relic_loaded_query relic_loaded_query_t;
 typedef struct relic_pred relic_pred_t;
@@ -174,11 +175,23 @@ enum relic_expr_kind {
 	RELIC_EXPR_CONSTANT,		/* an interned value */
 	RELIC_EXPR_VARIABLE,		/* a slot */
 	RELIC_EXPR_NEGATE,		/* -operand */
-	RELIC_EXPR_BINARY		/* left op right */
+	RELIC_EXPR_BINARY,		/* left op right */
+	RELIC_EXPR_CALL			/* fn(args) */
 };
 
 /*
- * An expression, resolved: the parser's tree with its variables numbered.
+ * A call of a function on `argc` arguments, the function's arity, each an
+ * expression.
+ */
+struct relic_expr_call {
+	relic_expr_t		*args[RELIC_MAX_FUNCTION_ARITY];
+	enum relic_function	 fn;
+	uint8_t			 argc;
+};
+
+/*
+ * An expression, resolved: the parser's tree with its variables numbered and
+ * its calls resolved to functions.
  *
  * The tree is kept rather than flattened here, because three consumers want
  * its shape: the explain output prints a rule with the parentheses the tree
@@ -186,10 +199,11 @@ enum relic_expr_kind {
  * literals, and the planner reads the slots an expression mentions.  The
  * form the executor runs is built from it with each plan.
  *
- * `height` is one for a leaf and one more than the tallest operand
- * otherwise, never more than RELIC_MAX_EXPRESSION_DEPTH, so a walk over a
- * tree is bounded without a check of its own.  `nodes` counts this node and
- * every node below it, so that a cost charged by size needs no walk.
+ * `height` is one for a leaf and one more than the tallest operand or
+ * argument otherwise, never more than RELIC_MAX_EXPRESSION_DEPTH, so a walk
+ * over a tree is bounded without a check of its own.  `nodes` counts this
+ * node and every node below it, so that a cost charged by size needs no
+ * walk.
  */
 struct relic_expr {
 	union {
@@ -201,6 +215,7 @@ struct relic_expr {
 			relic_expr_t		*right;
 			enum relic_arith_op	 op;
 		}			 binary;	/* BINARY */
+		relic_expr_call_t	 call;		/* CALL */
 	}				 u;
 	size_t				 nodes;
 	enum relic_expr_kind		 kind;	/* which arm of u is live */

@@ -33,7 +33,11 @@
 #define	SCENARIO_AGGREGATE	"an aggregate is the literal it was written as"
 #define	SCENARIO_AGG_ERROR	"an aggregate's mistake is reported at its byte"
 #define	SCENARIO_AGG_NAMES	"a function name is one only before ( or {"
+#define	SCENARIO_CALL		"a call is the tree its arguments give it"
+#define	SCENARIO_CALL_DEPTH	"a call counts toward both nesting bounds"
+#define	SCENARIO_CALL_ERROR	"a call's mistake is reported where written"
 #define	SCENARIO_APPEND		"loads append to one program"
+#define	SCENARIO_ATOM_OR_CALL	"what follows `name(...)` makes it an atom or a call"
 #define	SCENARIO_ATOMIC		"a failed load changes nothing"
 #define	SCENARIO_DEPTH		"an expression's nesting is bounded both ways"
 #define	SCENARIO_EXPRESSION	"an expression is the tree its precedence builds"
@@ -95,6 +99,16 @@ static void	 terms_hold_the_values_they_spell(void);
 static void	 aggregates_are_the_literals_they_were_written_as(void);
 static void	 function_names_are_names_elsewhere(void);
 static void	 aggregate_mistakes_are_reported_where_written(void);
+static void	 atoms_and_calls_are_told_apart_by_what_follows(void);
+static bool	 body_literal_is(relic_t *ctx, size_t statement_index,
+		    size_t literal_index, enum relic_ast_literal_kind kind,
+		    const char *name);
+static void	 call_mistakes_are_reported_where_written(void);
+static void	 calls_count_toward_both_nesting_bounds(void);
+static void	 calls_take_the_shape_their_arguments_give(void);
+static bool	 nested_call_loads(const char *prefix, const char *open,
+		    size_t count, const char *middle, const char *close,
+		    const char *suffix, diag_log_t *log);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -586,8 +600,8 @@ render_constant(relic_t *ctx, relic_dom_t constant, char *out, size_t size)
 /*
  * Append an expression tree to `out` in a prefix form that shows its shape
  * with nothing left to precedence: an operator node as `(op left right)`, a
- * negation as `(neg operand)`, and a leaf as the constant or variable it
- * holds.  Two trees render alike exactly when they have the same shape and
+ * negation as `(neg operand)`, a call as `(name arg ...)`, and a leaf as the
+ * constant or variable it holds.  Two trees render alike exactly when they have the same shape and
  * the same leaves.
  */
 static void
@@ -602,6 +616,7 @@ render_expr(relic_t *ctx, const relic_ast_expr_t *expr, char *out,
 		[RELIC_ARITH_REMAINDER] = "mod"
 	};
 	const relic_ast_term_t *term;
+	size_t i;
 
 	switch (expr->kind) {
 	case RELIC_AST_EXPR_TERM:
@@ -624,6 +639,16 @@ render_expr(relic_t *ctx, const relic_ast_expr_t *expr, char *out,
 		render_expr(ctx, expr->u.binary.left, out, size);
 		strlcat(out, " ", size);
 		render_expr(ctx, expr->u.binary.right, out, size);
+		strlcat(out, ")", size);
+		return;
+	case RELIC_AST_EXPR_CALL:
+		strlcat(out, "(", size);
+		strlcat(out, relic_string(ctx, expr->u.call.name, NULL), size);
+		for (i = 0; i < expr->u.call.argc &&
+		    i < RELIC_MAX_FUNCTION_ARITY; i++) {
+			strlcat(out, " ", size);
+			render_expr(ctx, expr->u.call.args[i], out, size);
+		}
 		strlcat(out, ")", size);
 		return;
 	}
@@ -855,7 +880,8 @@ mod_is_an_operator_only_after_an_operand(void)
  * The mistakes the parser can see in an expression, each reported once, at
  * the byte the reader should look at: an operand whose type its token
  * already shows is not an integer, an operand or a parenthesis missing, and
- * an expression where only a term may stand.
+ * an expression where only a term may stand.  Of several, the first written
+ * is the one reported.
  */
 static void
 expression_mistakes_are_reported_where_written(void)
@@ -888,7 +914,7 @@ expression_mistakes_are_reported_where_written(void)
 		{ "p(X) :- q(X, Y + 1).\n",
 		    "expected ',' or ')', found '+'", 16 },
 		{ "r :- p(X), X < foo + bar * \"a\".\n",
-		    "symbol bar cannot be an operand of *", 22 }
+		    "symbol foo cannot be an operand of +", 16 }
 	};
 
 	diag_log_t log;
@@ -1203,6 +1229,372 @@ aggregate_mistakes_are_reported_where_written(void)
 	}
 }
 
+/*
+ * Every function at every arity, a call as an operand of every operator and
+ * as an argument of a call, and a call beginning a literal before every
+ * comparator and operator, each builds the tree its text gives.
+ */
+static void
+calls_take_the_shape_their_arguments_give(void)
+{
+	static const struct {
+		const char	*comparison;
+		const char	*tree;
+	} cases[] = {
+		{ "X = length(Y)",		"(= X (length Y))" },
+		{ "X = cat(Y, Z)",		"(= X (cat Y Z))" },
+		{ "X = substr(Y, 1)",		"(= X (substr Y 1))" },
+		{ "X = substr(Y, 1, 2)",	"(= X (substr Y 1 2))" },
+		{ "X = index(Y, \"a\")",	"(= X (index Y \"a\"))" },
+		{ "X = match(Y, \"a*\")",	"(= X (match Y \"a*\"))" },
+		{ "X = str(Y)",			"(= X (str Y))" },
+		{ "X = str(foo)",		"(= X (str foo))" },
+		{ "X = str(-1)",		"(= X (str -1))" },
+		{ "X < length(Y) + 1",		"(< X (+ (length Y) 1))" },
+		{ "X < 1 - length(Y)",		"(< X (- 1 (length Y)))" },
+		{ "X < length(Y) * 2",		"(< X (* (length Y) 2))" },
+		{ "X < 2 / length(Y)",		"(< X (/ 2 (length Y)))" },
+		{ "X < length(Y) mod 2",	"(< X (mod (length Y) 2))" },
+		{ "X < -length(Y)",		"(< X (neg (length Y)))" },
+		{ "X < (length(Y))",		"(< X (length Y))" },
+		{ "X = cat(cat(Y, Z), str(1 + 2))",
+		    "(= X (cat (cat Y Z) (str (+ 1 2))))" },
+		{ "X = substr(Y, 0, length(Y) - 2)",
+		    "(= X (substr Y 0 (- (length Y) 2)))" },
+		{ "length(Y) = X",		"(= (length Y) X)" },
+		{ "length(Y) != X",		"(!= (length Y) X)" },
+		{ "length(Y) < X",		"(< (length Y) X)" },
+		{ "length(Y) <= X",		"(<= (length Y) X)" },
+		{ "length(Y) > X",		"(> (length Y) X)" },
+		{ "length(Y) >= X",		"(>= (length Y) X)" },
+		{ "length(Y) + 1 > X",		"(> (+ (length Y) 1) X)" },
+		{ "length(Y) - 1 > X",		"(> (- (length Y) 1) X)" },
+		{ "length(Y) * 2 > X",		"(> (* (length Y) 2) X)" },
+		{ "length(Y) / 2 > X",		"(> (/ (length Y) 2) X)" },
+		{ "length(Y) mod 2 > X",	"(> (mod (length Y) 2) X)" },
+		{ "index(Y, cat(Z, \"..\")) >= 0",
+		    "(>= (index Y (cat Z \"..\")) 0)" },
+		{ "substr(Y, -1, 2) = X",	"(= (substr Y -1 2) X)" }
+	};
+
+	relic_ast_stmt_t *statement;
+	char program[256];
+	char tree[256];
+	diag_log_t log;
+	relic_t *ctx;
+	size_t index;
+
+	for (index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+		ctx = context_logging_to(&log);
+		check(ctx != NULL, SCENARIO_CALL,
+		    "a context should be created");
+		if (ctx == NULL)
+			return;
+
+		snprintf(program, sizeof(program), "r :- p(X, Y, Z), %s.\n",
+		    cases[index].comparison);
+		checkf(relic_load_string(ctx, "call.dl", program) == 0,
+		    SCENARIO_CALL, "`%s` should parse, not report \"%s\"",
+		    cases[index].comparison, log.errors > 0 ? log.first : "");
+
+		statement = statement_at(ctx, 0);
+		if (statement == NULL || statement->body_length != 2 ||
+		    statement->body[1].kind != RELIC_LITERAL_COMPARISON) {
+			checkf(false, SCENARIO_CALL,
+			    "`%s` should be the rule's second literal",
+			    cases[index].comparison);
+			relic_destroy(ctx);
+			continue;
+		}
+
+		tree[0] = '\0';
+		render_comparison(ctx, &statement->body[1].u.comparison, tree,
+		    sizeof(tree));
+		checkf(strcmp(tree, cases[index].tree) == 0, SCENARIO_CALL,
+		    "`%s` should build %s, and built %s",
+		    cases[index].comparison, cases[index].tree, tree);
+
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * Whether literal `literal_index` of statement `statement_index` is of
+ * `kind`, and, for an atom, of the predicate spelled `name`.
+ */
+static bool
+body_literal_is(relic_t *ctx, size_t statement_index, size_t literal_index,
+    enum relic_ast_literal_kind kind, const char *name)
+{
+	const relic_ast_stmt_t *statement;
+	const relic_ast_literal_t *literal;
+
+	statement = statement_at(ctx, statement_index);
+	if (statement == NULL || literal_index >= statement->body_length)
+		return (false);
+
+	literal = &statement->body[literal_index];
+	if (literal->kind != kind)
+		return (false);
+	if (kind != RELIC_LITERAL_POSITIVE)
+		return (true);
+
+	return (strcmp(relic_string(ctx, literal->u.atom.name, NULL),
+	    name) == 0);
+}
+
+/*
+ * A literal that begins `name(` is a call when an operator or a comparator
+ * follows its `)`, and an atom when anything else does: a `,`, a `.`, a
+ * `?`, an aggregate's `}` or a rule's `:-`.  No name is reserved, so the
+ * functions' names still name predicates.
+ */
+static void
+atoms_and_calls_are_told_apart_by_what_follows(void)
+{
+	relic_ast_stmt_t *statement;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	checkf(relic_load_string(ctx, "atoms.dl",
+	    "length(a, 4). cat(b).\n"
+	    "length(X) :- word(X), length(X, 3).\n"
+	    "long(X) :- word(X), length(X) > 3.\n"
+	    "short(X) :- word(X), length(X), length(X) < 3.\n"
+	    "n(N) :- N = count { length(X) }.\n"
+	    "length(X)?\n"
+	    "word(X), str(X) = \"a\"?\n") == 0, SCENARIO_ATOM_OR_CALL,
+	    "every use of the names should load, not report \"%s\"",
+	    log.errors > 0 ? log.first : "");
+	check(facts_held(ctx, "length", 2) == 1 && facts_held(ctx, "cat", 1) == 1,
+	    SCENARIO_ATOM_OR_CALL, "function names should name facts");
+
+	statement = statement_at(ctx, 0);
+	check(statement != NULL && statement->kind == RELIC_STMT_RULE &&
+	    strcmp(relic_string(ctx, statement->head.name, NULL),
+	    "length") == 0 && statement->head.arity == 1,
+	    SCENARIO_ATOM_OR_CALL, "length(X) :- ... should define length/1");
+	check(body_literal_is(ctx, 0, 1, RELIC_LITERAL_POSITIVE, "length"),
+	    SCENARIO_ATOM_OR_CALL, "length(X, 3) followed by . is an atom");
+	check(body_literal_is(ctx, 1, 1, RELIC_LITERAL_COMPARISON, NULL),
+	    SCENARIO_ATOM_OR_CALL, "length(X) > 3 is a comparison");
+	check(body_literal_is(ctx, 2, 1, RELIC_LITERAL_POSITIVE, "length") &&
+	    body_literal_is(ctx, 2, 2, RELIC_LITERAL_COMPARISON, NULL),
+	    SCENARIO_ATOM_OR_CALL,
+	    "length(X) followed by , is an atom, and < makes a call");
+
+	statement = statement_at(ctx, 3);
+	check(statement != NULL && statement->body_length == 1 &&
+	    statement->body[0].kind == RELIC_LITERAL_AGGREGATE &&
+	    statement->body[0].u.aggregate.body_length == 1 &&
+	    statement->body[0].u.aggregate.body[0].kind ==
+	    RELIC_LITERAL_POSITIVE, SCENARIO_ATOM_OR_CALL,
+	    "length(X) followed by } is an atom");
+	check(body_literal_is(ctx, 4, 0, RELIC_LITERAL_POSITIVE, "length"),
+	    SCENARIO_ATOM_OR_CALL, "length(X) followed by ? is an atom");
+	check(body_literal_is(ctx, 5, 1, RELIC_LITERAL_COMPARISON, NULL),
+	    SCENARIO_ATOM_OR_CALL, "str(X) = \"a\" in a query is a call");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Every mistake in writing a call is reported once, at the byte it is at:
+ * a name that is no function's, a function at an arity it does not have,
+ * an aggregate's name, a constant of the wrong type in each argument
+ * position of each function; and an atom, a head or a fact holding an
+ * expression or a call, where an atom's parser has always stopped.
+ */
+static void
+call_mistakes_are_reported_where_written(void)
+{
+	static const struct {
+		const char	*text;
+		const char	*message;
+		uint32_t	 column;
+	} mistakes[] = {
+		{ "r :- p(X), foo(X) > 1.\n", "foo is not a function", 12 },
+		{ "r :- p(X), X = foo(X).\n", "foo is not a function", 16 },
+		{ "r :- p(X), X = 1 + bar().\n", "bar is not a function", 20 },
+		{ "r :- p(X), X = substr(X, 1, 2, 3).\n",
+		    "substr takes 2 or 3 arguments, not 4", 16 },
+		{ "r :- p(X), X = substr(X).\n",
+		    "substr takes 2 or 3 arguments, not 1", 16 },
+		{ "r :- p(X), X = length(X, X).\n",
+		    "length takes 1 argument, not 2", 16 },
+		{ "r :- p(X), X = length().\n",
+		    "length takes 1 argument, not 0", 16 },
+		{ "r :- p(X), X = cat(X).\n", "cat takes 2 arguments, not 1",
+		    16 },
+		{ "r :- p(X), str(X, X) = X.\n", "str takes 1 argument, not 2",
+		    12 },
+		{ "r :- p(X), X < count(X).\n",
+		    "an aggregate is written V = count { ... }", 16 },
+		{ "r :- p(X), sum(X) > 1.\n",
+		    "an aggregate is written V = count { ... }", 12 },
+		{ "r :- p(X), X = length(42).\n",
+		    "integer 42 cannot be an argument of length", 23 },
+		{ "r :- p(X), X = length(foo).\n",
+		    "symbol foo cannot be an argument of length", 23 },
+		{ "r :- p(X), X = cat(foo, X).\n",
+		    "symbol foo cannot be an argument of cat", 20 },
+		{ "r :- p(X), X = cat(X, -1).\n",
+		    "integer -1 cannot be an argument of cat", 23 },
+		{ "r :- p(X), X = substr(bar, 1).\n",
+		    "symbol bar cannot be an argument of substr", 23 },
+		{ "r :- p(X), X = substr(X, \"0\").\n",
+		    "string \"0\" cannot be an argument of substr", 26 },
+		{ "r :- p(X), X = substr(X, 0, x).\n",
+		    "symbol x cannot be an argument of substr", 29 },
+		{ "r :- p(X), X = index(7, X).\n",
+		    "integer 7 cannot be an argument of index", 22 },
+		{ "r :- p(X), X = index(X, a).\n",
+		    "symbol a cannot be an argument of index", 25 },
+		{ "r :- p(X), X = match(a, X).\n",
+		    "symbol a cannot be an argument of match", 22 },
+		{ "r :- p(X), X = match(X, 1).\n",
+		    "integer 1 cannot be an argument of match", 25 },
+		{ "r :- p(X), X = cat(foo(X), 1).\n",
+		    "foo is not a function", 20 },
+		{ "r :- p(X), X = length(\"a\" + 1).\n",
+		    "a string literal cannot be an operand of +", 23 },
+		{ "r :- p(X), q(X, cat(X, X)).\n",
+		    "expected ',' or ')', found '('", 20 },
+		{ "r :- p(X), q(X, length(X) + 1).\n",
+		    "expected ',' or ')', found '('", 23 },
+		{ "r :- p(X), q((X)).\n", "expected a term, found '('", 14 },
+		{ "r :- p(X), q(-X).\n",
+		    "expected an integer literal, found a variable", 15 },
+		{ "r :- p(X), q(X mod 2).\n",
+		    "expected ',' or ')', found a symbol", 16 },
+		{ "r :- p(X), q(X, \"a\" + 1).\n",
+		    "expected ',' or ')', found '+'", 21 },
+		{ "object(cat(A, B)) :- source(A, B).\n",
+		    "expected ',' or ')', found '('", 11 },
+		{ "p(length(\"a\")).\n", "expected ',' or ')', found '('", 9 },
+		{ "r :- p(X), not length(X) > 3.\n",
+		    "expected ',' or '.', found a comparison operator", 26 },
+		{ "r :- p(X), q(X) = 1.\n", "q is not a function", 12 }
+	};
+
+	diag_log_t log;
+	size_t index;
+
+	for (index = 0; index < sizeof(mistakes) / sizeof(mistakes[0]);
+	    index++) {
+		check(!loads_alone(mistakes[index].text, &log),
+		    SCENARIO_CALL_ERROR, "a mistaken call should not load");
+		checkf(log.errors == 1 &&
+		    strstr(log.first, mistakes[index].message) != NULL &&
+		    log.first_column == mistakes[index].column,
+		    SCENARIO_CALL_ERROR,
+		    "`%s` should report once, \"%s\" at column %u; it "
+		    "reported %zu, \"%s\" at column %u",
+		    mistakes[index].text, mistakes[index].message,
+		    (unsigned int)mistakes[index].column, log.errors,
+		    log.first, (unsigned int)log.first_column);
+	}
+}
+
+/*
+ * Load a rule whose body is `prefix`, `count` copies of `open`, `middle`,
+ * `count` copies of `close`, and `suffix`, into a context of its own.
+ */
+static bool
+nested_call_loads(const char *prefix, const char *open, size_t count,
+    const char *middle, const char *close, const char *suffix,
+    diag_log_t *log)
+{
+	char program[4096];
+	size_t used;
+
+	used = strlcpy(program, "r :- p(X), ", sizeof(program));
+	append_repeated(program, sizeof(program), &used, prefix, 1);
+	append_repeated(program, sizeof(program), &used, open, count);
+	append_repeated(program, sizeof(program), &used, middle, 1);
+	append_repeated(program, sizeof(program), &used, close, count);
+	append_repeated(program, sizeof(program), &used, suffix, 1);
+	append_repeated(program, sizeof(program), &used, ".\n", 1);
+	if (used >= sizeof(program)) {
+		check(false, SCENARIO_CALL_DEPTH,
+		    "the generated program should fit its buffer");
+		return (false);
+	}
+
+	return (loads_alone(program, log));
+}
+
+/*
+ * A call's `(` counts one level of the text's descent and a call node one
+ * level of the tree's height, so thirty-one calls around a leaf build a
+ * tree 32 high, thirty-two are refused at the outermost call's name for
+ * height, and thirty-three at the 33rd `(` for descent; in operand position
+ * and at the start of a literal alike, and in each argument position of
+ * substr.  "r :- p(X), " is eleven bytes, and "X < " four more.
+ */
+static void
+calls_count_toward_both_nesting_bounds(void)
+{
+	static const struct {
+		const char	*open;
+		const char	*middle;
+		const char	*close;
+	} shapes[] = {
+		{ "str(", "X", ")" },
+		{ "cat(", "X", ", X)" },
+		{ "cat(X, ", "X", ")" },
+		{ "substr(", "X", ", 1, 2)" },
+		{ "substr(X, ", "1", ", 2)" },
+		{ "substr(X, 1, ", "2", ")" }
+	};
+	diag_log_t log;
+	size_t length;
+	size_t index;
+
+	for (index = 0; index < sizeof(shapes) / sizeof(shapes[0]); index++) {
+		length = strlen(shapes[index].open);
+
+		checkf(nested_call_loads("X < ", shapes[index].open, 31,
+		    shapes[index].middle, shapes[index].close, "", &log),
+		    SCENARIO_CALL_DEPTH, "31 nested `%s` should parse",
+		    shapes[index].open);
+		checkf(!nested_call_loads("X < ", shapes[index].open, 32,
+		    shapes[index].middle, shapes[index].close, "", &log) &&
+		    refused_for_nesting(&log, 16), SCENARIO_CALL_DEPTH,
+		    "32 nested `%s` should be refused for height",
+		    shapes[index].open);
+		checkf(!nested_call_loads("X < ", shapes[index].open, 33,
+		    shapes[index].middle, shapes[index].close, "", &log) &&
+		    refused_for_nesting(&log,
+		    (uint32_t)(16 + 32 * length + strcspn(shapes[index].open,
+		    "("))), SCENARIO_CALL_DEPTH,
+		    "the 33rd `%s` should be refused where its ( opens",
+		    shapes[index].open);
+
+		checkf(nested_call_loads("", shapes[index].open, 31,
+		    shapes[index].middle, shapes[index].close, " = X", &log),
+		    SCENARIO_CALL_DEPTH,
+		    "31 nested `%s` beginning a literal should parse",
+		    shapes[index].open);
+		checkf(!nested_call_loads("", shapes[index].open, 32,
+		    shapes[index].middle, shapes[index].close, " = X", &log) &&
+		    refused_for_nesting(&log, 12), SCENARIO_CALL_DEPTH,
+		    "32 nested `%s` beginning a literal should be refused for "
+		    "height", shapes[index].open);
+		checkf(!nested_call_loads("", shapes[index].open, 33,
+		    shapes[index].middle, shapes[index].close, " = X", &log) &&
+		    refused_for_nesting(&log,
+		    (uint32_t)(12 + 32 * length + strcspn(shapes[index].open,
+		    "("))), SCENARIO_CALL_DEPTH,
+		    "the 33rd `%s` beginning a literal should be refused where "
+		    "its ( opens", shapes[index].open);
+	}
+}
+
 int
 main(void)
 {
@@ -1221,6 +1613,10 @@ main(void)
 	aggregates_are_the_literals_they_were_written_as();
 	function_names_are_names_elsewhere();
 	aggregate_mistakes_are_reported_where_written();
+	calls_take_the_shape_their_arguments_give();
+	atoms_and_calls_are_told_apart_by_what_follows();
+	call_mistakes_are_reported_where_written();
+	calls_count_toward_both_nesting_bounds();
 
 	return (check_summary("parse"));
 }

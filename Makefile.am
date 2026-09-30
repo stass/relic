@@ -39,8 +39,8 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/relation.c lib/result.c lib/round.c \
-	lib/rule.c lib/stratify.c lib/symbol.c lib/task.c lib/util.c \
-	lib/value.c
+	lib/rule.c lib/stratify.c lib/strfn.c lib/symbol.c lib/task.c \
+	lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -56,7 +56,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/depgraph.h \
 	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/relation.h \
-	lib/round.h lib/util.h tests/unit/harness.h tests/unit/programs.h
+	lib/round.h lib/strfn.h lib/util.h tests/unit/harness.h \
+	tests/unit/programs.h
 
 bin_PROGRAMS = relic
 relic_SOURCES = cmd/relic/import.c cmd/relic/input.c cmd/relic/main.c \

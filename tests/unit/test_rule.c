@@ -33,6 +33,7 @@
 #define	SCENARIO_GROUP		"an aggregate reads a group rule of its own"
 #define	SCENARIO_GROUP_NAME	"a group predicate is named for where it is"
 #define	SCENARIO_CACHED		"a check compiles only what is new"
+#define	SCENARIO_CALL		"a call compiles to a node over its arguments"
 #define	SCENARIO_CLOSURE	"an assignment binds what the closure reaches"
 #define	SCENARIO_EXPRESSION	"a comparison compiles to two trees over slots"
 #define	SCENARIO_PRINTED	"a rule prints as text that reads back as it"
@@ -71,6 +72,7 @@ static void	 a_program_that_held_a_bad_rule_stays_refused(void);
 static void	 a_rejected_statement_leaves_no_rule_behind(void);
 static void	 an_assignment_binds_what_the_closure_reaches(void);
 static void	 a_comparison_compiles_to_two_trees_over_slots(void);
+static void	 a_call_compiles_to_a_node_over_its_arguments(void);
 static void	 checked_alone(const char *program, diag_log_t *log);
 static bool	 printed_rule(const char *program, char *out, size_t size);
 static void	 keep_printed_line(void *callback_ctx, const char *line);
@@ -634,6 +636,68 @@ a_comparison_compiles_to_two_trees_over_slots(void)
 }
 
 /*
+ * A call compiles to a node of its function over its arguments' trees, in
+ * the order written, and counts toward the height and the size of the tree
+ * holding it as any node does.
+ */
+static void
+a_call_compiles_to_a_node_over_its_arguments(void)
+{
+	const relic_comparison_t *comparison;
+	const relic_expr_t *cat;
+	const relic_expr_t *substr;
+	const relic_rule_t *rule;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	if (!load(ctx, "source(m, \"m.c\").\n"
+	    "object(M, O) :- source(M, S), "
+	    "O = cat(substr(S, 0, length(S) - 2), \".o\").\n") ||
+	    relic_check(ctx) != 0) {
+		check(false, SCENARIO_CALL, "the program is accepted");
+		relic_destroy(ctx);
+		return;
+	}
+
+	rule = rule_at(ctx, 0);
+	if (rule == NULL || rule->body_length != 2 ||
+	    rule->body[1].kind != RELIC_LITERAL_COMPARISON) {
+		check(false, SCENARIO_CALL, "the rule was compiled");
+		relic_destroy(ctx);
+		return;
+	}
+
+	comparison = &rule->body[1].u.comparison;
+	cat = comparison->right;
+	check(cat->kind == RELIC_EXPR_CALL && cat->u.call.fn == RELIC_FN_CAT &&
+	    cat->u.call.argc == 2 && cat->nodes == 9 && cat->height == 5,
+	    SCENARIO_CALL, "cat holds nine nodes in a tree five high");
+
+	substr = cat->u.call.args[0];
+	check(substr->kind == RELIC_EXPR_CALL &&
+	    substr->u.call.fn == RELIC_FN_SUBSTR3 &&
+	    substr->u.call.argc == 3 &&
+	    substr->u.call.args[0]->kind == RELIC_EXPR_VARIABLE &&
+	    substr->u.call.args[0]->u.slot == 2 &&
+	    substr->u.call.args[2]->kind == RELIC_EXPR_BINARY &&
+	    substr->u.call.args[2]->u.binary.left->kind == RELIC_EXPR_CALL &&
+	    substr->u.call.args[2]->u.binary.left->u.call.fn ==
+	    RELIC_FN_LENGTH, SCENARIO_CALL,
+	    "substr of three arguments reads S, a constant and a difference");
+	check(cat->u.call.args[1]->kind == RELIC_EXPR_CONSTANT,
+	    SCENARIO_CALL, "cat's second argument is the constant");
+
+	check(relic_comparison_slots(comparison) == 0x6, SCENARIO_CALL,
+	    "the comparison reads O's slot and S's");
+
+	relic_destroy(ctx);
+}
+
+/*
  * Keep the line the explain callback was given, less its indentation and
  * the word introducing it, in the buffer of PRINTED_LINE_MAX bytes
  * `callback_ctx` points at.
@@ -717,7 +781,24 @@ a_rule_prints_as_text_that_reads_back_as_it(void)
 		{ "Y = ((A))",			"Y = A" },
 		{ "Y = -9223372036854775808",	"Y = -9223372036854775808" },
 		{ "A * (B + C) - (A - B) / -C < 2 * A",
-		    "A * (B + C) - (A - B) / -C < 2 * A" }
+		    "A * (B + C) - (A - B) / -C < 2 * A" },
+		{ "Y = length(A)",		"Y = length(A)" },
+		{ "Y = (length(A))",		"Y = length(A)" },
+		{ "Y = length((A))",		"Y = length(A)" },
+		{ "Y = -length(A)",		"Y = -length(A)" },
+		{ "Y = - length(A)",		"Y = -length(A)" },
+		{ "Y = - -length(A)",		"Y = - -length(A)" },
+		{ "Y = (length(A) + 1) * 2",	"Y = (length(A) + 1) * 2" },
+		{ "Y = str(-(1))",		"Y = str(-(1))" },
+		{ "Y = substr(A, -1, (2 + 3) * B)",
+		    "Y = substr(A, -1, (2 + 3) * B)" },
+		{ "Y = cat(substr(A, 0, length(A) - 2), \".o\")",
+		    "Y = cat(substr(A, 0, length(A) - 2), \".o\")" },
+		{ "Y = match(A, \"\\\\.c$\")",
+		    "Y = match(A, \"\\\\.c$\")" },
+		{ "index(A, \"..\") >= 0",	"index(A, \"..\") >= 0" },
+		{ "str(A) = cat(str(B), str(C))",
+		    "str(A) = cat(str(B), str(C))" }
 	};
 
 	char again[PRINTED_LINE_MAX];
@@ -755,7 +836,9 @@ a_rule_prints_as_text_that_reads_back_as_it(void)
  * A tree the parser accepted prints as text the parser accepts: the printed
  * parentheses and minuses nest no deeper than the tree does, so a rule at
  * the nesting bound reads back as itself.  Thirty-one negations over a
- * variable, and `X + X * (...)` at height 32, are each printed and read back.
+ * variable, `X + X * (...)` at height 32, thirty-one calls around a
+ * variable, and ten negated calls nested each in the third argument of
+ * the next, a tree 31 high, are each printed and read back.
  */
 static void
 a_rule_at_the_nesting_bound_prints_within_it(void)
@@ -767,19 +850,32 @@ a_rule_at_the_nesting_bound_prints_within_it(void)
 	size_t shape;
 	size_t i;
 
-	for (shape = 0; shape < 2; shape++) {
+	for (shape = 0; shape < 4; shape++) {
 		expression[0] = '\0';
 		if (shape == 0) {
 			for (i = 0; i < 31; i++)
 				strlcat(expression, "-", sizeof(expression));
 			strlcat(expression, "A", sizeof(expression));
-		} else {
+		} else if (shape == 1) {
 			for (i = 0; i < 15; i++)
 				strlcat(expression, "A + A * (",
 				    sizeof(expression));
 			strlcat(expression, "A + A", sizeof(expression));
 			for (i = 0; i < 15; i++)
 				strlcat(expression, ")", sizeof(expression));
+		} else if (shape == 2) {
+			for (i = 0; i < 31; i++)
+				strlcat(expression, "str(", sizeof(expression));
+			strlcat(expression, "A", sizeof(expression));
+			for (i = 0; i < 31; i++)
+				strlcat(expression, ")", sizeof(expression));
+		} else {
+			for (i = 0; i < 10; i++)
+				strlcat(expression, "-length(substr(A, 0, ",
+				    sizeof(expression));
+			strlcat(expression, "A", sizeof(expression));
+			for (i = 0; i < 10; i++)
+				strlcat(expression, "))", sizeof(expression));
 		}
 
 		snprintf(program, sizeof(program),
@@ -965,6 +1061,7 @@ main(void)
 	a_program_that_held_a_bad_rule_stays_refused();
 	an_assignment_binds_what_the_closure_reaches();
 	a_comparison_compiles_to_two_trees_over_slots();
+	a_call_compiles_to_a_node_over_its_arguments();
 	a_rule_prints_as_text_that_reads_back_as_it();
 	a_rule_at_the_nesting_bound_prints_within_it();
 

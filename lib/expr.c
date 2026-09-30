@@ -25,6 +25,8 @@
  * which decides where each is, cannot disagree about it.
  */
 
+static bool	 calls_equal(const relic_expr_call_t *a,
+		    const relic_expr_call_t *b);
 static bool	 expr_is_variable(const relic_expr_t *expr, uint16_t *slotp);
 static bool	 side_assigns(const relic_expr_t *target,
 		    const relic_expr_t *value, uint64_t bound, uint16_t *slotp);
@@ -35,6 +37,9 @@ static bool	 side_assigns(const relic_expr_t *target,
 uint64_t
 relic_expr_slots(const relic_expr_t *expr)
 {
+	uint64_t slots;
+	uint8_t i;
+
 	switch (expr->kind) {
 	case RELIC_EXPR_CONSTANT:
 		return (0);
@@ -45,6 +50,11 @@ relic_expr_slots(const relic_expr_t *expr)
 	case RELIC_EXPR_BINARY:
 		return (relic_expr_slots(expr->u.binary.left) |
 		    relic_expr_slots(expr->u.binary.right));
+	case RELIC_EXPR_CALL:
+		slots = 0;
+		for (i = 0; i < expr->u.call.argc; i++)
+			slots |= relic_expr_slots(expr->u.call.args[i]);
+		return (slots);
 	}
 
 	return (0);
@@ -187,7 +197,28 @@ relic_expr_equal(const relic_expr_t *a, const relic_expr_t *b)
 		return (a->u.binary.op == b->u.binary.op &&
 		    relic_expr_equal(a->u.binary.left, b->u.binary.left) &&
 		    relic_expr_equal(a->u.binary.right, b->u.binary.right));
+	case RELIC_EXPR_CALL:
+		return (calls_equal(&a->u.call, &b->u.call));
 	}
 
 	return (false);
+}
+
+/*
+ * Whether two calls are of one function on equal arguments.
+ */
+static bool
+calls_equal(const relic_expr_call_t *a, const relic_expr_call_t *b)
+{
+	uint8_t i;
+
+	if (a->fn != b->fn || a->argc != b->argc)
+		return (false);
+
+	for (i = 0; i < a->argc; i++) {
+		if (!relic_expr_equal(a->args[i], b->args[i]))
+			return (false);
+	}
+
+	return (true);
 }

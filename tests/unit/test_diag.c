@@ -34,6 +34,7 @@
 #define	SCENARIO_ESCAPE		"the stderr formatter escapes what it prints"
 #define	SCENARIO_LIMIT		"a refusal by the memory limit is reported as one"
 #define	SCENARIO_SILENT		"a context with no callback stays silent"
+#define	SCENARIO_QUOTE		"a quoted string is written as its literal"
 
 /*
  * What the recording callback saw.  Only the last diagnostic is kept in
@@ -341,6 +342,64 @@ a_refusal_by_the_limit_is_reported_as_the_limit(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * Whether relic_diag_string() writes `length` bytes of `bytes` into a
+ * buffer of `size` bytes as exactly `expected`.  The buffer is one byte
+ * longer than it is said to be, and that byte must be left alone.
+ */
+static bool
+quotes_as(const char *bytes, size_t length, size_t size,
+    const char *expected)
+{
+	char buffer[64];
+
+	if (size + 1 > sizeof(buffer))
+		return (false);
+
+	memset(buffer, '#', sizeof(buffer));
+	relic_diag_string(bytes, length, buffer, size);
+
+	return (buffer[size] == '#' && strcmp(buffer, expected) == 0);
+}
+
+/*
+ * A string in a message is the literal that spells it: a quote and a
+ * backslash escaped, and every byte that is not printable ASCII -- a NUL,
+ * a control byte, a byte above 0x7f -- as \xHH.  A literal that does not
+ * fit is cut after its last whole piece and marked after the quote, and a
+ * buffer too small even for that is left empty rather than written past.
+ */
+static void
+a_quoted_string_is_escaped_and_cut_whole(void)
+{
+	char unused;
+
+	check(quotes_as("", 0, 16, "\"\""), SCENARIO_QUOTE,
+	    "the empty string should be a pair of quotes");
+	check(quotes_as("a\"b\\c", 5, 32, "\"a\\\"b\\\\c\""),
+	    SCENARIO_QUOTE, "a quote and a backslash should be escaped");
+	check(quotes_as("a\0\n\x1b\xff", 5, 32,
+	    "\"a\\x00\\x0a\\x1b\\xff\""), SCENARIO_QUOTE,
+	    "a NUL, control bytes and a high byte should be written in hex");
+
+	check(quotes_as("abc", 3, 6, "\"abc\""), SCENARIO_QUOTE,
+	    "a literal that exactly fits should be written whole");
+	check(quotes_as("abcde", 5, 7, "\"a\"..."), SCENARIO_QUOTE,
+	    "a literal one byte too long should be cut and marked");
+	check(quotes_as("\x01" "bc", 3, 8, "\"\"..."), SCENARIO_QUOTE,
+	    "an escape that does not fit whole should not be split");
+	check(quotes_as("abcd", 4, 6, "\"\"...") &&
+	    quotes_as("", 0, 6, "\"\""), SCENARIO_QUOTE,
+	    "six bytes should hold a quote, the mark and a terminator");
+	check(quotes_as("abc", 3, 5, ""), SCENARIO_QUOTE,
+	    "a buffer too small for the mark should be left empty");
+
+	unused = '#';
+	relic_diag_string("abc", 3, &unused, 0);
+	check(unused == '#', SCENARIO_QUOTE,
+	    "a buffer of no bytes should not be written");
+}
+
 int
 main(void)
 {
@@ -348,6 +407,7 @@ main(void)
 	a_silent_context_still_remembers_its_error();
 	a_refusal_by_the_limit_is_reported_as_the_limit();
 	the_stderr_formatter_escapes_unprintable_bytes();
+	a_quoted_string_is_escaped_and_cut_whole();
 
 	return (check_summary("diag"));
 }

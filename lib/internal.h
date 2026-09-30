@@ -33,6 +33,7 @@
 #include "queue.h"
 #include "relation.h"
 #include "round.h"
+#include "strfn.h"
 #include "util.h"
 
 /*
@@ -591,6 +592,21 @@ void	 relic_diag_record_refusal(relic_t *ctx);
  * stand as an argument of the message it decorates.
  */
 const char *relic_diag_name(const char *name, char *buffer, size_t size);
+
+/*
+ * Room for a string a message quotes: about forty bytes of literal, its
+ * quotes, and the mark of a cut.
+ */
+#define	RELIC_STRING_TEXT_MAX	48
+
+/*
+ * Write a string for a message as a quoted literal that spells its bytes --
+ * a backslash and a quote escaped, and every byte outside printable ASCII
+ * as \xHH -- into a caller-owned buffer, cut and marked as
+ * relic_diag_name() cuts a name, and return the buffer.
+ */
+const char *relic_diag_string(const char *bytes, size_t length, char *buffer,
+	    size_t size);
 
 /*
  * Mark a name that was cut to fill all of `buffer` by ending it in "...", as

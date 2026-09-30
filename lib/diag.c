@@ -32,6 +32,8 @@
 
 static const char	*level_name(enum relic_diag_level level);
 static void		 record_error(relic_t *ctx, const char *message);
+static size_t		 string_piece(unsigned char byte, char *piece,
+			    size_t size);
 static void		 write_escaped(FILE *stream, const char *text);
 
 static const char *
@@ -281,4 +283,73 @@ relic_diag_mark_cut(char *buffer, size_t size)
 	if (size > sizeof(ellipsis))
 		bcopy(ellipsis, buffer + size - sizeof(ellipsis),
 		    sizeof(ellipsis));
+}
+
+/*
+ * The text one byte of a string takes in a quoted literal, into `piece`,
+ * which has room for four bytes and a terminator.  Returns its length.
+ */
+static size_t
+string_piece(unsigned char byte, char *piece, size_t size)
+{
+	if (byte == '\\' || byte == '"')
+		snprintf(piece, size, "\\%c", (int)byte);
+	else if (byte >= ' ' && byte <= '~')
+		snprintf(piece, size, "%c", (int)byte);
+	else
+		snprintf(piece, size, "\\x%02x", (unsigned int)byte);
+
+	return (strlen(piece));
+}
+
+/*
+ * A string written as the literal that spells it, the way explain writes one,
+ * so that a message quotes what the program wrote.  A string whose literal
+ * does not fit is cut after its last byte that does, and the cut is marked
+ * after the closing quote, `"abc"...`, so that the quote still says where
+ * the bytes shown end.  A buffer too small for the opening quote, the mark
+ * and a terminator is not one any caller passes, and is left empty.
+ */
+const char *
+relic_diag_string(const char *bytes, size_t length, char *buffer, size_t size)
+{
+	static const char cut_mark[] = "\"...";
+	char piece[5];
+	size_t whole;
+	size_t used;
+	size_t room;
+	size_t i;
+
+	if (size < 1 + sizeof(cut_mark)) {
+		if (size > 0)
+			buffer[0] = '\0';
+		return (buffer);
+	}
+
+	whole = 2;
+	for (i = 0; i < length; i++)
+		whole += string_piece((unsigned char)bytes[i], piece,
+		    sizeof(piece));
+
+	room = whole < size ? size - 2 : size - sizeof(cut_mark);
+
+	buffer[0] = '"';
+	used = 1;
+	for (i = 0; i < length; i++) {
+		size_t piece_length;
+
+		piece_length = string_piece((unsigned char)bytes[i], piece,
+		    sizeof(piece));
+		if (used + piece_length > room)
+			break;
+		bcopy(piece, buffer + used, piece_length);
+		used += piece_length;
+	}
+
+	if (whole < size)
+		strlcpy(buffer + used, "\"", size - used);
+	else
+		strlcpy(buffer + used, cut_mark, size - used);
+
+	return (buffer);
 }

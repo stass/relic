@@ -804,6 +804,15 @@ times larger, the count takes 111 ms beyond the load at one thread and
 61 ms at eight under `-X parallel`, 1.84 times, against the join's 122 ms
 and 72 ms, 1.69 times, with every counter identical.
 
+**String operations,** specified in `specs/design-strings.md`, in its
+section 16 order.
+
+| Component | State |
+| --- | --- |
+| `lib/parse.c`, `lib/ast.h`, `lib/strfn.c`, `lib/strfn.h` | step 1, the front end: a name followed by `(` where an operand stands is a call, a node of its own counting one level of descent at its `(` and one of height; a body literal beginning `name(` is an atom or the first operand of a comparison by whether an operator or a comparator follows its `)`, the arguments read as terms with nothing allocated until one is more than a term; an atom holding an expression is refused with the message an atom's parser always gave there; once an expression is complete it is checked in the order written, for a name that is no function, an arity the function lacks, an aggregate's name, and a constant of the wrong type under an operator or in an argument; the six functions' signatures are one table in `lib/strfn.c` |
+| `lib/rule.c`, `lib/program.h`, `lib/expr.c`, `lib/explain.c`, `lib/magic.c` | a call compiles to a node of its function over its arguments, counting toward the tree's height and size; explain prints it as written, a negated call with no space; the rewrite copies, compares and hashes calls; the planner refuses a rule holding one as an internal error until step 2 |
+| `tests/` | `test_parse`: every function at every arity, a call under every operator and beginning a literal before every comparator and operator, atoms told from calls by what follows, thirty-four mistakes at their bytes, both nesting bounds met and exceeded with calls in operand position and beginning a literal; `test_rule`: a call's node, height and size, calls printed and read back, and at the nesting bound |
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:

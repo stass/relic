@@ -87,6 +87,8 @@ static void	 put_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_aggregate_t *aggregate);
 static void	 put_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_atom_t *atom);
+static void	 put_call(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_expr_call_t *call);
 static void	 put_comparison(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule,
 		    const relic_comparison_t *comparison);
@@ -407,8 +409,8 @@ put_compare(relic_explain_line_t *line, enum relic_compare_op compare)
 
 /*
  * How tightly a node binds its operands, as the grammar decides: a sum
- * loosest, then a product, then a negation, and a leaf, which has no
- * operands, tightest of all.
+ * loosest, then a product, then a negation, and a leaf or a call, which is
+ * a primary and needs no parentheses anywhere, tightest of all.
  */
 static unsigned int
 binds_as_tightly(const relic_expr_t *expr)
@@ -416,6 +418,7 @@ binds_as_tightly(const relic_expr_t *expr)
 	switch (expr->kind) {
 	case RELIC_EXPR_CONSTANT:
 	case RELIC_EXPR_VARIABLE:
+	case RELIC_EXPR_CALL:
 		return (4);
 	case RELIC_EXPR_NEGATE:
 		return (3);
@@ -440,9 +443,9 @@ binds_as_tightly(const relic_expr_t *expr)
  * Whether a negation's operand is printed in parentheses.  An operator binds
  * less tightly than negation, and a constant that is not negative would read
  * back folded into a negative literal, `-5` rather than the negation of 5.
- * A variable, a negation and a negative constant need none: `- -A` and
- * `- -5` read back as the negations they are, and parentheses there would
- * nest the text two levels for each level of the tree.
+ * A variable, a call, a negation and a negative constant need none: `- -A`
+ * and `- -5` read back as the negations they are, and parentheses there
+ * would nest the text two levels for each level of the tree.
  */
 static bool
 negation_needs_parentheses(const relic_t *ctx, const relic_expr_t *operand)
@@ -451,6 +454,7 @@ negation_needs_parentheses(const relic_t *ctx, const relic_expr_t *operand)
 
 	switch (operand->kind) {
 	case RELIC_EXPR_VARIABLE:
+	case RELIC_EXPR_CALL:
 	case RELIC_EXPR_NEGATE:
 		return (false);
 	case RELIC_EXPR_BINARY:
@@ -535,9 +539,13 @@ put_expr(const relic_t *ctx, relic_explain_line_t *line,
 		    expr->u.operand);
 		line_put_byte(line, '-');
 		if (!parenthesized &&
-		    expr->u.operand->kind != RELIC_EXPR_VARIABLE)
+		    (expr->u.operand->kind == RELIC_EXPR_NEGATE ||
+		    expr->u.operand->kind == RELIC_EXPR_CONSTANT))
 			line_put_byte(line, ' ');
 		put_operand(ctx, line, rule, expr->u.operand, parenthesized);
+		return;
+	case RELIC_EXPR_CALL:
+		put_call(ctx, line, rule, &expr->u.call);
 		return;
 	case RELIC_EXPR_BINARY:
 		break;
@@ -569,6 +577,27 @@ put_expr(const relic_t *ctx, relic_explain_line_t *line,
 
 	put_operand(ctx, line, rule, right,
 	    binds_as_tightly(right) <= tightness);
+}
+
+/*
+ * A call as it is written, `fn(arg, ...)`.  Each argument is a whole
+ * expression between a `(` or a `,` and a `,` or a `)`, so none needs
+ * parentheses at its top.
+ */
+static void
+put_call(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_expr_call_t *call)
+{
+	uint8_t i;
+
+	line_put(line, relic_function_info(call->fn)->spelling);
+	line_put_byte(line, '(');
+	for (i = 0; i < call->argc; i++) {
+		if (i > 0)
+			line_put(line, ", ");
+		put_expr(ctx, line, rule, call->args[i]);
+	}
+	line_put_byte(line, ')');
 }
 
 /*

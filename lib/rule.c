@@ -286,6 +286,8 @@ static enum relic_compile_result compile_atom(relic_compiler_t *compiler,
 		    const relic_ast_atom_t *source,
 		    enum relic_arg_position position, relic_atom_t *atom);
 static enum relic_compile_result compile_body(relic_compiler_t *compiler);
+static enum relic_compile_result compile_call(relic_compiler_t *compiler,
+		    const relic_ast_call_t *source, relic_expr_t *expr);
 static enum relic_compile_result compile_comparison(
 		    relic_compiler_t *compiler,
 		    const relic_ast_comparison_t *source,
@@ -690,6 +692,8 @@ compile_expr(relic_compiler_t *compiler, const relic_ast_expr_t *source,
 		expr->nodes = 1 + expr->u.binary.left->nodes +
 		    expr->u.binary.right->nodes;
 		return (RELIC_COMPILE_OK);
+	case RELIC_AST_EXPR_CALL:
+		return (compile_call(compiler, &source->u.call, expr));
 	}
 
 	/*
@@ -701,6 +705,47 @@ compile_expr(relic_compiler_t *compiler, const relic_ast_expr_t *source,
 	    "internal error: an expression holds a node of no known kind");
 
 	return (RELIC_COMPILE_REJECTED);
+}
+
+/*
+ * A call's arguments, into the node `expr`.  The parser refuses a call that
+ * is no function's, so every call reaching here is resolved and has its
+ * function's arity of arguments; a call that is not is refused as an
+ * internal error rather than compiled into something the executor would
+ * read past.
+ */
+static enum relic_compile_result
+compile_call(relic_compiler_t *compiler, const relic_ast_call_t *source,
+    relic_expr_t *expr)
+{
+	enum relic_compile_result result;
+	relic_expr_call_t *call;
+	size_t i;
+
+	if (!source->resolved ||
+	    source->argc != relic_function_info(source->fn)->arity) {
+		relic_diagf(compiler->ctx, RELIC_ERROR, &source->open,
+		    "internal error: a call of no function reached the "
+		    "compiler");
+		return (RELIC_COMPILE_REJECTED);
+	}
+
+	expr->kind = RELIC_EXPR_CALL;
+	call = &expr->u.call;
+	call->fn = source->fn;
+	call->argc = (uint8_t)source->argc;
+	expr->nodes = 1;
+
+	for (i = 0; i < source->argc; i++) {
+		result = compile_expr(compiler, source->args[i],
+		    &call->args[i]);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+
+		expr->nodes += call->args[i]->nodes;
+	}
+
+	return (RELIC_COMPILE_OK);
 }
 
 /*
@@ -732,6 +777,8 @@ static void
 visit_expr_terms(const relic_ast_expr_t *expr, relic_term_visitor_t *visit,
     void *state)
 {
+	size_t i;
+
 	switch (expr->kind) {
 	case RELIC_AST_EXPR_TERM:
 		visit(state, &expr->u.term);
@@ -742,6 +789,11 @@ visit_expr_terms(const relic_ast_expr_t *expr, relic_term_visitor_t *visit,
 	case RELIC_AST_EXPR_BINARY:
 		visit_expr_terms(expr->u.binary.left, visit, state);
 		visit_expr_terms(expr->u.binary.right, visit, state);
+		return;
+	case RELIC_AST_EXPR_CALL:
+		for (i = 0; i < expr->u.call.argc &&
+		    i < RELIC_MAX_FUNCTION_ARITY; i++)
+			visit_expr_terms(expr->u.call.args[i], visit, state);
 		return;
 	}
 }

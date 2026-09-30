@@ -7,6 +7,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,8 +53,46 @@
  */
 #define	RELIC_READ_CHUNK	(64u * 1024u)
 
+typedef struct relic_argument_offense relic_argument_offense_t;
 typedef struct relic_function_name relic_function_name_t;
+typedef struct relic_literal_argument relic_literal_argument_t;
+typedef struct relic_literal_arguments relic_literal_arguments_t;
 typedef struct relic_parser relic_parser_t;
+
+/*
+ * Where an argument of a literal that began `name(` stopped being a term,
+ * and what an atom's parser says there: `expected <expected>, found
+ * <found>`.  It is the message the literal receives when it turns out to be
+ * an atom, whose arguments must be terms.
+ */
+struct relic_argument_offense {
+	relic_location_t	 where;
+	const char		*expected;
+	const char		*found;
+};
+
+/*
+ * One argument of a literal that began `name(`, read before the parser can
+ * know whether the literal is an atom or a call.  An argument that is a
+ * term alone is kept as `term`, with `tree` NULL and nothing allocated,
+ * since an atom keeps its terms as they are.  One that goes on past a term
+ * is built as `tree`, which only a call can hold, and `offense` says where
+ * it stopped being a term.
+ */
+struct relic_literal_argument {
+	relic_ast_term_t		 term;		/* when tree is NULL */
+	relic_ast_expr_t		*tree;
+	relic_argument_offense_t	 offense;	/* when tree is not NULL */
+};
+
+/*
+ * The `count` arguments of a literal that began `name(`, as many as an atom
+ * may have.
+ */
+struct relic_literal_arguments {
+	relic_literal_argument_t	args[RELIC_MAX_ARITY];
+	size_t				count;
+};
 
 /*
  * An aggregate function's name as written, and the function it names.
@@ -178,9 +217,23 @@ static bool	 refuse_misplaced_aggregate(relic_parser_t *parser,
 		    const relic_token_t *name);
 static bool	 token_function(const relic_token_t *token,
 		    enum relic_aggregate_fn *fnp);
+static bool	 spells_aggregate(const char *bytes, size_t length,
+		    enum relic_aggregate_fn *fnp);
+static bool	 check_argument(relic_parser_t *parser,
+		    enum relic_function fn, size_t position,
+		    const relic_ast_expr_t *arg);
+static bool	 check_call(relic_parser_t *parser,
+		    const relic_ast_expr_t *expr);
+static bool	 check_expression(relic_parser_t *parser,
+		    const relic_ast_expr_t *expr);
 static bool	 check_operand(relic_parser_t *parser,
 		    const relic_ast_expr_t *operand, enum relic_arith_op op,
 		    bool negation);
+static bool	 complete_atom(relic_parser_t *parser,
+		    const relic_token_t *name,
+		    const relic_literal_arguments_t *arguments,
+		    relic_ast_literal_t *literal,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static bool	 collect_body(relic_parser_t *parser,
 		    const relic_ast_literal_t *first,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
@@ -220,6 +273,9 @@ static int	 load_stream(relic_t *ctx, const char *source_name,
 static bool	 make_binary(relic_parser_t *parser, enum relic_arith_op op,
 		    const relic_location_t *where, relic_ast_expr_t *left,
 		    relic_ast_expr_t *right, relic_ast_expr_t **exprp);
+static bool	 make_call(relic_parser_t *parser, const relic_token_t *name,
+		    const relic_location_t *open, const relic_ast_call_t *call,
+		    relic_ast_expr_t **exprp);
 static bool	 make_leaf(relic_parser_t *parser, const relic_ast_term_t *term,
 		    relic_ast_expr_t **exprp);
 static bool	 make_negation(relic_parser_t *parser,
@@ -227,10 +283,25 @@ static bool	 make_negation(relic_parser_t *parser,
 		    relic_ast_expr_t **exprp);
 static bool	 node_fits(relic_parser_t *parser, unsigned int height,
 		    const relic_location_t *where);
+static void	 note_offense(relic_argument_offense_t *offense,
+		    const relic_token_t *token, const char *expected);
 static const relic_ast_stmt_t *only_query(relic_parser_t *parser);
 static const char *operator_spelling(enum relic_arith_op op);
+static bool	 parse_after_minus(relic_parser_t *parser,
+		    const relic_token_t *minus, relic_ast_expr_t **exprp);
 static bool	 parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
+static bool	 parse_atom_or_call(relic_parser_t *parser,
+		    const relic_token_t *name, relic_ast_literal_t *literal,
+		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
+static bool	 parse_call(relic_parser_t *parser, const relic_token_t *name,
+		    relic_ast_expr_t **exprp);
+static bool	 parse_call_arguments(relic_parser_t *parser,
+		    relic_ast_call_t *call);
+static bool	 parse_call_literal(relic_parser_t *parser,
+		    const relic_token_t *name, const relic_location_t *open,
+		    const relic_literal_arguments_t *arguments,
+		    relic_ast_literal_t *literal);
 static bool	 parse_comparison(relic_parser_t *parser,
 		    relic_ast_literal_t *literal, relic_ast_expr_t *left);
 static bool	 parse_expression(relic_parser_t *parser,
@@ -247,6 +318,11 @@ static void	 parse_errorf(relic_parser_t *parser,
 static bool	 parse_literal(relic_parser_t *parser,
 		    relic_ast_literal_t *literal, const char *expected,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
+static bool	 parse_literal_argument(relic_parser_t *parser,
+		    relic_literal_argument_t *argument);
+static bool	 parse_literal_arguments(relic_parser_t *parser,
+		    const relic_token_t *name,
+		    relic_literal_arguments_t *arguments);
 static int	 parse_program(relic_parser_t *parser);
 static bool	 parse_statement(relic_parser_t *parser);
 static bool	 parse_term(relic_parser_t *parser, relic_ast_term_t *term);
@@ -259,6 +335,8 @@ static int	 parser_init(relic_parser_t *parser, relic_t *ctx,
 static void	 parser_reset(relic_parser_t *parser);
 static const char *predicate_name(const relic_parser_t *parser,
 		    uint32_t symbol);
+static bool	 refuse_call(relic_parser_t *parser,
+		    const relic_ast_expr_t *expr);
 static int	 quoted_precision(const relic_token_t *token);
 static const char *quoted_suffix(const relic_token_t *token);
 static int	 read_stream(relic_t *ctx, const char *source_name,
@@ -608,22 +686,31 @@ token_operator(const relic_parser_t *parser, enum relic_arith_op *opp)
 static bool
 token_function(const relic_token_t *token, enum relic_aggregate_fn *fnp)
 {
+	if (token->kind != RELIC_TOKEN_SYMBOL)
+		return (false);
+
+	return (spells_aggregate(token->text, token->text_length, fnp));
+}
+
+/*
+ * Whether `length` bytes spell an aggregate function, and which.
+ */
+static bool
+spells_aggregate(const char *bytes, size_t length, enum relic_aggregate_fn *fnp)
+{
 	static const relic_function_name_t functions[] = {
 		{ "count", RELIC_AGG_COUNT },
 		{ "sum", RELIC_AGG_SUM },
 		{ "min", RELIC_AGG_MIN },
 		{ "max", RELIC_AGG_MAX }
 	};
-	size_t length;
+	size_t spelled;
 	size_t i;
 
-	if (token->kind != RELIC_TOKEN_SYMBOL)
-		return (false);
-
 	for (i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
-		length = strlen(functions[i].spelling);
-		if (token->text_length == length &&
-		    bcmp(token->text, functions[i].spelling, length) == 0) {
+		spelled = strlen(functions[i].spelling);
+		if (length == spelled &&
+		    bcmp(bytes, functions[i].spelling, spelled) == 0) {
 			*fnp = functions[i].fn;
 			return (true);
 		}
@@ -846,15 +933,22 @@ parse_term(relic_parser_t *parser, relic_ast_term_t *term)
  *	unary		:= "-" unary | primary
  *	primary		:= integer | variable | symbol | string
  *			 | "(" expression ")"
+ *			 | name "(" [expression ("," expression)*] ")"
  *
  * Binary operators associate to the left, so each level is a loop that
- * folds its operands into the tree as they are read, and only a parenthesis
- * and a unary minus recurse.  Those are what expression_descent counts, and
- * the 33rd is refused where it opens, before the parser enters it: that is
- * what bounds the recursion however the text is shaped, including text that
- * never builds a node.  Every node is refused too when it would be taller
- * than RELIC_MAX_EXPRESSION_DEPTH, which bounds every later walk over the
- * tree.
+ * folds its operands into the tree as they are read, and only a
+ * parenthesis, a call's parentheses and a unary minus recurse.  Those are
+ * what expression_descent counts, and the 33rd is refused where it opens,
+ * before the parser enters it: that is what bounds the recursion however
+ * the text is shaped, including text that never builds a node.  Every node
+ * is refused too when it would be taller than RELIC_MAX_EXPRESSION_DEPTH,
+ * which bounds every later walk over the tree.
+ *
+ * A name is a call only where an operand may stand and only when `(`
+ * follows it, as `mod` is an operator only after an operand, so no name is
+ * reserved: `length(a, 4).` is still a fact.  Whether the name is a
+ * function, and the constants in the tree of the right types, is checked
+ * once the whole expression is read, by check_expression().
  *
  * A `-` directly before an integer literal is folded into the literal, as it
  * is wherever a term stands, so `X = -1` holds the constant -1 and not the
@@ -951,11 +1045,7 @@ continue_product(relic_parser_t *parser, relic_ast_expr_t *first,
 static bool
 parse_unary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 {
-	relic_ast_expr_t *operand;
-	relic_ast_term_t term;
-	relic_token_t digits;
 	relic_token_t minus;
-	bool parsed;
 
 	if (parser->token.kind != RELIC_TOKEN_OPERATOR ||
 	    parser->token.arith != RELIC_ARITH_SUBTRACT)
@@ -965,30 +1055,52 @@ parse_unary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 	if (!advance(parser))
 		return (false);
 
+	return (parse_after_minus(parser, &minus, exprp));
+}
+
+/*
+ * The rest of a unary expression whose `-`, `minus`, has been consumed: the
+ * negative integer literal it begins, or the negation of a unary
+ * expression.
+ */
+static bool
+parse_after_minus(relic_parser_t *parser, const relic_token_t *minus,
+    relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *operand;
+	relic_ast_term_t term;
+	relic_token_t digits;
+	bool parsed;
+
 	if (parser->token.kind == RELIC_TOKEN_INTEGER) {
 		digits = parser->token;
 		if (!advance(parser))
 			return (false);
-		if (!integer_term(parser, &digits, &minus, &term))
+		if (!integer_term(parser, &digits, minus, &term))
 			return (false);
 
 		return (make_leaf(parser, &term, exprp));
 	}
 
-	if (!enter_nesting(parser, &minus.where))
+	if (!enter_nesting(parser, &minus->where))
 		return (false);
 	parsed = parse_unary(parser, &operand);
 	parser->expression_descent--;
 	if (!parsed)
 		return (false);
 
-	return (make_negation(parser, &minus.where, operand, exprp));
+	return (make_negation(parser, &minus->where, operand, exprp));
 }
 
 /*
- * A primary: a term, or an expression in parentheses.  A parenthesis builds
- * no node of its own, so redundant ones leave the tree as it would be
- * without them.
+ * A primary: a term, a call, or an expression in parentheses.  A
+ * parenthesis builds no node of its own, so redundant ones leave the tree
+ * as it would be without them.
+ *
+ * A symbol is a call's name when `(` follows it, which is known only once
+ * the symbol is consumed, and the constant it spells otherwise; so it is
+ * interned as a value only once it is known to be one.  An aggregate's name
+ * followed by `{` is an aggregate written where none may stand.
  */
 static bool
 parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp)
@@ -996,7 +1108,6 @@ parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 	enum relic_aggregate_fn fn;
 	relic_ast_term_t term;
 	relic_token_t name;
-	bool function;
 
 	if (parser->token.kind == RELIC_TOKEN_LPAREN)
 		return (parse_parenthesized(parser, exprp));
@@ -1008,17 +1119,88 @@ parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 		return (false);
 	}
 
-	name = parser->token;
-	function = token_function(&name, &fn);
+	if (parser->token.kind != RELIC_TOKEN_SYMBOL) {
+		if (!parse_term(parser, &term))
+			return (false);
 
-	if (!parse_term(parser, &term))
+		return (make_leaf(parser, &term, exprp));
+	}
+
+	name = parser->token;
+	if (!advance(parser))
 		return (false);
 
-	if (function && (parser->token.kind == RELIC_TOKEN_LPAREN ||
-	    parser->token.kind == RELIC_TOKEN_LBRACE))
+	if (parser->token.kind == RELIC_TOKEN_LPAREN)
+		return (parse_call(parser, &name, exprp));
+
+	if (parser->token.kind == RELIC_TOKEN_LBRACE &&
+	    token_function(&name, &fn))
 		return (refuse_misplaced_aggregate(parser, &name));
 
+	if (!term_from_token(parser, &name, &term))
+		return (false);
+
 	return (make_leaf(parser, &term, exprp));
+}
+
+/*
+ * A call, from the `(` after its name, `name`: its arguments, each an
+ * expression, and its `)`.  The `(` counts one level of the text's descent,
+ * as a parenthesis does.
+ */
+static bool
+parse_call(relic_parser_t *parser, const relic_token_t *name,
+    relic_ast_expr_t **exprp)
+{
+	relic_ast_call_t call;
+	relic_location_t open;
+	bool parsed;
+
+	open = parser->token.where;
+	if (!enter_nesting(parser, &open))
+		return (false);
+	parsed = parse_call_arguments(parser, &call);
+	parser->expression_descent--;
+	if (!parsed)
+		return (false);
+
+	return (make_call(parser, name, &open, &call, exprp));
+}
+
+/*
+ * The `(`, the arguments and the `)` of a call, into `call`.  Every argument
+ * is parsed, and the first RELIC_MAX_FUNCTION_ARITY are kept: a call with
+ * more is no function's, which check_call() reports from the count.
+ */
+static bool
+parse_call_arguments(relic_parser_t *parser, relic_ast_call_t *call)
+{
+	relic_ast_expr_t *arg;
+
+	bzero(call, sizeof(*call));
+	if (!advance(parser))
+		return (false);
+
+	/*
+	 * An empty argument list is tested for once, before the loop, as an
+	 * atom's is, so that `f(a,)` is the error it looks like.
+	 */
+	if (parser->token.kind != RELIC_TOKEN_RPAREN) {
+		for (;;) {
+			if (!parse_expression(parser, &arg))
+				return (false);
+			if (call->argc < RELIC_MAX_FUNCTION_ARITY)
+				call->args[call->argc] = arg;
+			call->argc++;
+
+			if (parser->token.kind != RELIC_TOKEN_COMMA)
+				break;
+			if (!advance(parser))
+				return (false);
+		}
+	}
+
+	return (expect(parser, RELIC_TOKEN_RPAREN, "',' or ')'"));
 }
 
 static bool
@@ -1085,6 +1267,197 @@ node_fits(relic_parser_t *parser, unsigned int height,
 
 	parse_errorf(parser, where, "expression nested more than %d levels deep",
 	    RELIC_MAX_EXPRESSION_DEPTH);
+
+	return (false);
+}
+
+/*
+ * Check an expression once the whole of it has been read, in the order it
+ * is written, so that the first mistake in the text is the one reported: a
+ * constant of the wrong type under an operator or in a function's argument,
+ * and a call of a name that is no function, or of a function with the
+ * wrong number of arguments.
+ *
+ * These are checked over the finished tree rather than as each node is
+ * built because the arguments of a literal that begins `name(` are parsed
+ * as expressions before the parser knows whether the literal is an atom or
+ * a call: an atom with `X + "a"` for an argument is reported as an atom
+ * whose argument is not a term, and only an expression is held to what an
+ * expression may hold.  The tree is no taller than the parser allowed, so
+ * the recursion is bounded.
+ */
+static bool
+check_expression(relic_parser_t *parser, const relic_ast_expr_t *expr)
+{
+	const relic_ast_expr_t *left;
+	const relic_ast_expr_t *right;
+	enum relic_arith_op op;
+
+	switch (expr->kind) {
+	case RELIC_AST_EXPR_TERM:
+		return (true);
+	case RELIC_AST_EXPR_NEGATE:
+		if (!check_expression(parser, expr->u.operand))
+			return (false);
+		return (check_operand(parser, expr->u.operand,
+		    RELIC_ARITH_SUBTRACT, true));
+	case RELIC_AST_EXPR_BINARY:
+		left = expr->u.binary.left;
+		right = expr->u.binary.right;
+		op = expr->u.binary.op;
+
+		if (!check_expression(parser, left))
+			return (false);
+		if (!check_operand(parser, left, op, false))
+			return (false);
+		if (!check_expression(parser, right))
+			return (false);
+		return (check_operand(parser, right, op, false));
+	case RELIC_AST_EXPR_CALL:
+		return (check_call(parser, expr));
+	}
+
+	return (true);
+}
+
+/*
+ * Check a call: that it calls a function, and then each argument, the
+ * argument's own tree before its type, as they are written.
+ */
+static bool
+check_call(relic_parser_t *parser, const relic_ast_expr_t *expr)
+{
+	const relic_ast_call_t *call;
+	size_t i;
+
+	call = &expr->u.call;
+	if (!call->resolved)
+		return (refuse_call(parser, expr));
+
+	for (i = 0; i < call->argc; i++) {
+		if (!check_expression(parser, call->args[i]))
+			return (false);
+		if (!check_argument(parser, call->fn, i, call->args[i]))
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Refuse a call that calls no function, at its name, with what is wrong:
+ * an aggregate's name, which is an aggregate written where an operand
+ * stands; a name no function has; or a function's name with a number of
+ * arguments it does not take.  Always returns false, having reported.
+ */
+static bool
+refuse_call(relic_parser_t *parser, const relic_ast_expr_t *expr)
+{
+	enum relic_aggregate_fn aggregate;
+	const relic_ast_call_t *call;
+	const char *name;
+	unsigned int least;
+	unsigned int most;
+	size_t length;
+	char named[RELIC_NAME_TEXT_MAX];
+
+	call = &expr->u.call;
+	name = relic_symbol_bytes(parser->ctx, call->name, &length);
+	if (name == NULL) {
+		name = "?";
+		length = 1;
+	}
+
+	if (spells_aggregate(name, length, &aggregate)) {
+		parse_errorf(parser, &expr->where,
+		    "an aggregate is written V = count { ... }");
+		return (false);
+	}
+
+	relic_diag_name(name, named, sizeof(named));
+	if (!relic_function_arities(name, length, &least, &most)) {
+		parse_errorf(parser, &expr->where, "%s is not a function",
+		    named);
+		return (false);
+	}
+
+	if (least == most)
+		parse_errorf(parser, &expr->where,
+		    "%s takes %u argument%s, not %zu", named, least,
+		    least == 1 ? "" : "s", call->argc);
+	else
+		parse_errorf(parser, &expr->where,
+		    "%s takes %u or %u arguments, not %zu", named, least, most,
+		    call->argc);
+
+	return (false);
+}
+
+/*
+ * Whether an argument may stand at `position` of a call of `fn`, reporting
+ * where it is written when it may not.  As for an operator's operand, only
+ * a constant's type is known here; a variable's is a property of the tuples
+ * that bind it, and an operand of the wrong type then makes the comparison
+ * false.
+ */
+static bool
+check_argument(relic_parser_t *parser, enum relic_function fn,
+    size_t position, const relic_ast_expr_t *arg)
+{
+	const relic_function_info_t *info;
+	const relic_ast_term_t *term;
+	enum relic_value_kind wanted;
+	const char *bytes;
+	relic_dom_t type;
+	int64_t integer;
+	size_t length;
+	char described[RELIC_STRING_TEXT_MAX];
+	char named[RELIC_NAME_TEXT_MAX];
+
+	info = relic_function_info(fn);
+	wanted = info->args[position];
+	if (wanted == RELIC_KIND_ANY || arg->kind != RELIC_AST_EXPR_TERM)
+		return (true);
+
+	term = &arg->u.term;
+	if (term->kind != RELIC_TERM_CONSTANT)
+		return (true);
+
+	type = term->u.constant & RELIC_DOM_TYPE_MASK;
+	if ((wanted == RELIC_KIND_STRING && type == RELIC_DOM_STRING) ||
+	    (wanted == RELIC_KIND_INTEGER && type == RELIC_DOM_INTEGER))
+		return (true);
+
+	switch (type) {
+	case RELIC_DOM_INTEGER:
+		if (!relic_value_integer(parser->ctx, term->u.constant,
+		    &integer))
+			integer = 0;
+		parse_errorf(parser, &term->where,
+		    "integer %" PRId64 " cannot be an argument of %s", integer,
+		    info->spelling);
+		return (false);
+	case RELIC_DOM_STRING:
+		bytes = relic_symbol_bytes(parser->ctx,
+		    term->u.constant & RELIC_DOM_INDEX_MASK, &length);
+		if (bytes == NULL) {
+			bytes = "";
+			length = 0;
+		}
+		parse_errorf(parser, &term->where,
+		    "string %s cannot be an argument of %s",
+		    relic_diag_string(bytes, length, described,
+		    sizeof(described)), info->spelling);
+		return (false);
+	default:
+		break;
+	}
+
+	bytes = relic_symbol_bytes(parser->ctx,
+	    term->u.constant & RELIC_DOM_INDEX_MASK, NULL);
+	parse_errorf(parser, &term->where, "symbol %s cannot be an argument of %s",
+	    relic_diag_name(bytes != NULL ? bytes : "?", named, sizeof(named)),
+	    info->spelling);
 
 	return (false);
 }
@@ -1166,9 +1539,6 @@ make_negation(relic_parser_t *parser, const relic_location_t *where,
 	relic_ast_expr_t *node;
 	unsigned int height;
 
-	if (!check_operand(parser, operand, RELIC_ARITH_SUBTRACT, true))
-		return (false);
-
 	height = (unsigned int)operand->height + 1;
 	if (!node_fits(parser, height, where))
 		return (false);
@@ -1199,11 +1569,6 @@ make_binary(relic_parser_t *parser, enum relic_arith_op op,
 	relic_ast_expr_t *node;
 	unsigned int height;
 
-	if (!check_operand(parser, left, op, false))
-		return (false);
-	if (!check_operand(parser, right, op, false))
-		return (false);
-
 	height = (unsigned int)(left->height > right->height ?
 	    left->height : right->height) + 1;
 	if (!node_fits(parser, height, where))
@@ -1220,6 +1585,55 @@ make_binary(relic_parser_t *parser, enum relic_arith_op op,
 	node->u.binary.right = right;
 	node->u.binary.op = op;
 	node->height = (uint8_t)height;
+
+	*exprp = node;
+
+	return (true);
+}
+
+/*
+ * A call of `name`, whose `(` is at `open`, with the arguments `call`
+ * holds.  The name and the argument count are resolved to a function here
+ * when they are one's; check_call() reports them when they are not.
+ */
+static bool
+make_call(relic_parser_t *parser, const relic_token_t *name,
+    const relic_location_t *open, const relic_ast_call_t *call,
+    relic_ast_expr_t **exprp)
+{
+	relic_ast_expr_t *node;
+	const char *bytes;
+	unsigned int height;
+	size_t length;
+	size_t kept;
+	size_t i;
+
+	kept = call->argc < RELIC_MAX_FUNCTION_ARITY ? call->argc :
+	    RELIC_MAX_FUNCTION_ARITY;
+	height = 1;
+	for (i = 0; i < kept; i++) {
+		if ((unsigned int)call->args[i]->height + 1 > height)
+			height = (unsigned int)call->args[i]->height + 1;
+	}
+	if (!node_fits(parser, height, &name->where))
+		return (false);
+
+	node = parse_alloc(parser, 1, sizeof(*node));
+	if (node == NULL)
+		return (false);
+
+	bzero(node, sizeof(*node));
+	node->kind = RELIC_AST_EXPR_CALL;
+	node->where = name->where;
+	node->u.call = *call;
+	node->u.call.name = name->symbol;
+	node->u.call.open = *open;
+	node->height = (uint8_t)height;
+
+	bytes = relic_symbol_bytes(parser->ctx, name->symbol, &length);
+	if (bytes != NULL)
+		node->u.call.resolved = relic_function_find(bytes, length,
+		    call->argc, &node->u.call.fn);
 
 	*exprp = node;
 
@@ -1380,12 +1794,15 @@ parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
 
 /*
  * Parse the comparator and right operand of a comparison whose left operand
- * has already been built.
+ * has already been built, checking each operand as it is completed.
  */
 static bool
 parse_comparison(relic_parser_t *parser, relic_ast_literal_t *literal,
     relic_ast_expr_t *left)
 {
+	if (!check_expression(parser, left))
+		return (false);
+
 	if (parser->token.kind != RELIC_TOKEN_COMPARE) {
 		parse_errorf(parser, &parser->token.where,
 		    "expected a comparison operator, found %s",
@@ -1422,8 +1839,12 @@ parse_right_operand(relic_parser_t *parser, relic_ast_literal_t *literal)
 	relic_ast_term_t term;
 	relic_token_t name;
 
-	if (!token_function(&parser->token, &fn))
-		return (parse_expression(parser, &literal->u.comparison.right));
+	if (!token_function(&parser->token, &fn)) {
+		if (!parse_expression(parser, &literal->u.comparison.right))
+			return (false);
+
+		return (check_expression(parser, literal->u.comparison.right));
+	}
 
 	name = parser->token;
 	if (!advance(parser))
@@ -1439,8 +1860,10 @@ parse_right_operand(relic_parser_t *parser, relic_ast_literal_t *literal)
 		return (false);
 	if (!make_leaf(parser, &term, &leaf))
 		return (false);
+	if (!continue_sum(parser, leaf, &literal->u.comparison.right))
+		return (false);
 
-	return (continue_sum(parser, leaf, &literal->u.comparison.right));
+	return (check_expression(parser, literal->u.comparison.right));
 }
 
 /*
@@ -1628,6 +2051,258 @@ group_append(relic_parser_t *parser, const relic_ast_literal_t *literal)
 }
 
 /*
+ * A literal that begins `name(`: an atom, or a comparison whose left
+ * operand begins with a call of `name`.  Which one is decided by the token
+ * after the `)`, as a symbol alone is decided by the token after it: an
+ * operator or a comparator continues a call, and anything else ends an
+ * atom, what may follow a literal being its caller's to check.
+ *
+ * The arguments are read before that token is seen, so each is read as an
+ * expression, and one that is a term alone -- as every argument of an atom
+ * must be -- is kept as the term with nothing allocated: a fact is a
+ * literal of this shape, and reading a million of them must cost what it
+ * did before calls existed.
+ *
+ * The `(` counts one level of the text's descent, as a call's does.  An
+ * atom's arguments are terms, which never descend, so the count constrains
+ * only a call.
+ */
+static bool
+parse_atom_or_call(relic_parser_t *parser, const relic_token_t *name,
+    relic_ast_literal_t *literal,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY])
+{
+	relic_literal_arguments_t arguments;
+	relic_location_t open;
+	enum relic_arith_op op;
+	bool parsed;
+
+	open = parser->token.where;
+	if (!enter_nesting(parser, &open))
+		return (false);
+	parsed = parse_literal_arguments(parser, name, &arguments);
+	parser->expression_descent--;
+	if (!parsed)
+		return (false);
+
+	if (parser->token.kind == RELIC_TOKEN_COMPARE ||
+	    token_operator(parser, &op))
+		return (parse_call_literal(parser, name, &open, &arguments,
+		    literal));
+
+	return (complete_atom(parser, name, &arguments, literal, scratch));
+}
+
+/*
+ * The `(`, the arguments and the `)` of a literal that began `name(`, into
+ * `arguments`.
+ */
+static bool
+parse_literal_arguments(relic_parser_t *parser, const relic_token_t *name,
+    relic_literal_arguments_t *arguments)
+{
+	arguments->count = 0;
+	if (!advance(parser))
+		return (false);
+
+	/*
+	 * An empty argument list is tested for once, before the loop, rather
+	 * than at the top of it.  Testing inside would also accept the
+	 * trailing comma of `p(a,)`, which must be the error it looks like.
+	 */
+	if (parser->token.kind != RELIC_TOKEN_RPAREN) {
+		for (;;) {
+			if (arguments->count == RELIC_MAX_ARITY) {
+				parse_errorf(parser, &parser->token.where,
+				    "predicate %s has more than %d arguments",
+				    predicate_name(parser, name->symbol),
+				    RELIC_MAX_ARITY);
+				return (false);
+			}
+
+			if (!parse_literal_argument(parser,
+			    &arguments->args[arguments->count]))
+				return (false);
+			arguments->count++;
+
+			if (parser->token.kind != RELIC_TOKEN_COMMA)
+				break;
+			if (!advance(parser))
+				return (false);
+		}
+	}
+
+	return (expect(parser, RELIC_TOKEN_RPAREN, "',' or ')'"));
+}
+
+/*
+ * Record where an argument stops being a term: at `token`, which an atom's
+ * parser, wanting `expected` there, would have reported.
+ */
+static void
+note_offense(relic_argument_offense_t *offense, const relic_token_t *token,
+    const char *expected)
+{
+	offense->where = token->where;
+	offense->expected = expected;
+	offense->found = describe_token(token);
+}
+
+/*
+ * One argument of a literal that began `name(`, into *argument: a term, or
+ * an expression that is more than a term with the place it stopped being
+ * one.
+ *
+ * An argument is a term unless an operator follows it, it begins a call,
+ * or it is an expression in parentheses or under a unary minus; each of
+ * those is where an atom's parser stops, and the offense records the
+ * message it gives there.  A token that begins no term gets the message a
+ * term's absence always has, as parse_term() gives it.
+ */
+static bool
+parse_literal_argument(relic_parser_t *parser,
+    relic_literal_argument_t *argument)
+{
+	relic_argument_offense_t *offense;
+	relic_ast_term_t *term;
+	relic_ast_expr_t *first;
+	relic_token_t digits;
+	relic_token_t token;
+	enum relic_arith_op op;
+
+	argument->tree = NULL;
+	term = &argument->term;
+	offense = &argument->offense;
+	token = parser->token;
+
+	if (token.kind == RELIC_TOKEN_SYMBOL) {
+		if (!advance(parser))
+			return (false);
+
+		if (parser->token.kind == RELIC_TOKEN_LPAREN) {
+			note_offense(offense, &parser->token, "',' or ')'");
+			if (!parse_call(parser, &token, &first))
+				return (false);
+
+			return (continue_sum(parser, first, &argument->tree));
+		}
+
+		if (!term_from_token(parser, &token, term))
+			return (false);
+	} else if (token.kind == RELIC_TOKEN_OPERATOR &&
+	    token.arith == RELIC_ARITH_SUBTRACT) {
+		if (!advance(parser))
+			return (false);
+
+		if (parser->token.kind != RELIC_TOKEN_INTEGER) {
+			note_offense(offense, &parser->token,
+			    "an integer literal");
+			if (!parse_after_minus(parser, &token, &first))
+				return (false);
+
+			return (continue_sum(parser, first, &argument->tree));
+		}
+
+		digits = parser->token;
+		if (!advance(parser))
+			return (false);
+		if (!integer_term(parser, &digits, &token, term))
+			return (false);
+	} else if (token.kind == RELIC_TOKEN_LPAREN) {
+		note_offense(offense, &token, "a term");
+
+		return (parse_expression(parser, &argument->tree));
+	} else if (!parse_term(parser, term)) {
+		return (false);
+	}
+
+	if (!token_operator(parser, &op))
+		return (true);
+
+	note_offense(offense, &parser->token, "',' or ')'");
+	if (!make_leaf(parser, term, &first))
+		return (false);
+
+	return (continue_sum(parser, first, &argument->tree));
+}
+
+/*
+ * A literal that began `name(` and is an atom, whose arguments must be
+ * terms.  The first that is not is refused with the message an atom's
+ * parser gives where it stops being one; otherwise the terms are copied into
+ * `scratch`, which the atom points into until it is kept.
+ */
+static bool
+complete_atom(relic_parser_t *parser, const relic_token_t *name,
+    const relic_literal_arguments_t *arguments, relic_ast_literal_t *literal,
+    relic_ast_term_t scratch[static RELIC_MAX_ARITY])
+{
+	const relic_argument_offense_t *offense;
+	relic_ast_atom_t *atom;
+	size_t i;
+
+	for (i = 0; i < arguments->count; i++) {
+		if (arguments->args[i].tree == NULL)
+			continue;
+
+		offense = &arguments->args[i].offense;
+		parse_errorf(parser, &offense->where, "expected %s, found %s",
+		    offense->expected, offense->found);
+		return (false);
+	}
+
+	for (i = 0; i < arguments->count; i++)
+		scratch[i] = arguments->args[i].term;
+
+	literal->kind = RELIC_LITERAL_POSITIVE;
+	atom = &literal->u.atom;
+	atom->name = name->symbol;
+	atom->where = name->where;
+	if (arguments->count > 0) {
+		atom->terms = scratch;
+		atom->arity = (uint16_t)arguments->count;
+	}
+
+	return (true);
+}
+
+/*
+ * A literal that began `name(` and is a comparison, whose left operand
+ * begins with the call of `name` on `arguments`.  A term is given its leaf
+ * now that it is known to be an expression's.  Arguments past the ones a
+ * function can take are counted and not kept, which leaves the call
+ * unresolved, and check_call() refuses it for its arity.
+ */
+static bool
+parse_call_literal(relic_parser_t *parser, const relic_token_t *name,
+    const relic_location_t *open, const relic_literal_arguments_t *arguments,
+    relic_ast_literal_t *literal)
+{
+	const relic_literal_argument_t *argument;
+	relic_ast_expr_t *left;
+	relic_ast_expr_t *first;
+	relic_ast_call_t call;
+	size_t i;
+
+	bzero(&call, sizeof(call));
+	call.argc = arguments->count;
+	for (i = 0; i < arguments->count && i < RELIC_MAX_FUNCTION_ARITY; i++) {
+		argument = &arguments->args[i];
+		if (argument->tree != NULL)
+			call.args[i] = argument->tree;
+		else if (!make_leaf(parser, &argument->term, &call.args[i]))
+			return (false);
+	}
+
+	if (!make_call(parser, name, open, &call, &first))
+		return (false);
+	if (!continue_sum(parser, first, &left))
+		return (false);
+
+	return (parse_comparison(parser, literal, left));
+}
+
+/*
  * Parse one literal: a positive atom, a negated atom, a comparison, or an
  * aggregate, which is found as the right side of an equality.
  * `expected` names what the caller was looking for, so that the message for
@@ -1675,9 +2350,10 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 	/*
 	 * A symbol begins either an atom or a comparison whose left expression
 	 * begins with it, and the token after it decides which: a comparator
-	 * or an operator makes the symbol an operand.  This is the grammar's
-	 * one ambiguity and the only place a decision waits for the token of
-	 * lookahead the parser already holds.
+	 * or an operator makes the symbol an operand, and a `(` leaves the
+	 * question to the token after the `)`, parse_atom_or_call()'s.  This
+	 * is the grammar's one ambiguity, and each decision waits only for a
+	 * token of lookahead.
 	 */
 	if (parser->token.kind == RELIC_TOKEN_SYMBOL) {
 		name = parser->token;
@@ -1687,6 +2363,10 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 		if (parser->token.kind == RELIC_TOKEN_LBRACE &&
 		    token_function(&name, &fn))
 			return (refuse_misplaced_aggregate(parser, &name));
+
+		if (parser->token.kind == RELIC_TOKEN_LPAREN)
+			return (parse_atom_or_call(parser, &name, literal,
+			    scratch));
 
 		if (parser->token.kind != RELIC_TOKEN_COMPARE &&
 		    !token_operator(parser, &op)) {

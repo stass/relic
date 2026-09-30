@@ -1,4 +1,4 @@
 head-not-atom.dl:1:1: error: a fact must be a positive literal
 head-not-atom.dl:2:1: error: a fact must be a positive literal
-head-not-atom.dl:3:10: error: expected ':-', ',', '.' or '?', found a comparison operator
+head-not-atom.dl:3:1: error: whole is not a function
 head-not-atom.dl:4:1: error: a rule head must be a positive literal

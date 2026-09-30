@@ -63,6 +63,7 @@
 
 typedef struct relic_ast_aggregate relic_ast_aggregate_t;
 typedef struct relic_ast_atom relic_ast_atom_t;
+typedef struct relic_ast_call relic_ast_call_t;
 typedef struct relic_ast_comparison relic_ast_comparison_t;
 typedef struct relic_ast_expr relic_ast_expr_t;
 typedef struct relic_ast_literal relic_ast_literal_t;
@@ -97,6 +98,28 @@ enum relic_arith_op {
 	RELIC_ARITH_DIVIDE,
 	RELIC_ARITH_REMAINDER
 };
+
+/*
+ * The string functions, each at one arity: `substr` is two functions of one
+ * name, as p/2 and p/3 are two predicates.  lib/strfn.c holds what each
+ * takes and returns, and every consumer of a call reads it there.
+ */
+enum relic_function {
+	RELIC_FN_LENGTH,	/* string -> integer */
+	RELIC_FN_CAT,		/* string, string -> string */
+	RELIC_FN_SUBSTR2,	/* string, integer -> string */
+	RELIC_FN_SUBSTR3,	/* string, integer, integer -> string */
+	RELIC_FN_INDEX,		/* string, string -> integer */
+	RELIC_FN_MATCH,		/* string, pattern -> integer */
+	RELIC_FN_STR		/* any -> string */
+};
+
+/*
+ * The most arguments a function takes.  A fixed arity is what bounds the
+ * stack an expression is evaluated on, since a call holds a cell for each
+ * earlier argument while a later one is evaluated.
+ */
+#define	RELIC_MAX_FUNCTION_ARITY	3
 
 /*
  * The four aggregate functions.  COUNT folds a group into its number of
@@ -164,19 +187,45 @@ struct relic_ast_atom {
 enum relic_ast_expr_kind {
 	RELIC_AST_EXPR_TERM,		/* a constant or a variable */
 	RELIC_AST_EXPR_NEGATE,		/* -operand */
-	RELIC_AST_EXPR_BINARY		/* left op right */
+	RELIC_AST_EXPR_BINARY,		/* left op right */
+	RELIC_AST_EXPR_CALL		/* name(args) */
+};
+
+/*
+ * A call as written: a name followed by arguments in parentheses, where an
+ * operand may stand.
+ *
+ * The parser builds a call node for any name before it knows whether the
+ * name is a function, because a call inside an atom's arguments makes the
+ * atom an error whatever the name is, and the atom's error is the one to
+ * report.  So `name` and `argc` are what was written, and `fn` is meaningful
+ * only when `resolved` says the name and the argument count are a
+ * function's; the parser refuses every expression holding a call that is
+ * not, so every call a finished tree holds is resolved.  `args` holds the
+ * first `argc` arguments, at most RELIC_MAX_FUNCTION_ARITY of them: an
+ * argument past that makes the call no function's, and is parsed and
+ * dropped.  `open` is the call's `(`.
+ */
+struct relic_ast_call {
+	relic_ast_expr_t	*args[RELIC_MAX_FUNCTION_ARITY];
+	size_t			 argc;
+	relic_location_t	 open;
+	uint32_t		 name;
+	enum relic_function	 fn;
+	bool			 resolved;
 };
 
 /*
  * An expression as written: a tree whose leaves are terms and whose inner
- * nodes are negations and binary operators, shaped by precedence and by the
- * parentheses the writer gave it.  A term alone is an expression of one
- * node.
+ * nodes are negations, binary operators and calls, shaped by precedence and
+ * by the parentheses the writer gave it.  A term alone is an expression of
+ * one node.
  *
- * `where` is the term's location for a leaf and the operator's for an inner
- * node, which is what a message about the node points at.  `height` is one
- * for a leaf and one more than the tallest operand otherwise, never more
- * than RELIC_MAX_EXPRESSION_DEPTH.
+ * `where` is the term's location for a leaf, the operator's for a negation
+ * or a binary node, and the name's for a call, which is what a message about
+ * the node points at.  `height` is one for a leaf and one more than the
+ * tallest operand or argument otherwise, never more than
+ * RELIC_MAX_EXPRESSION_DEPTH.
  */
 struct relic_ast_expr {
 	union {
@@ -187,6 +236,7 @@ struct relic_ast_expr {
 			relic_ast_expr_t	*right;
 			enum relic_arith_op	 op;
 		}			 binary;	/* BINARY */
+		relic_ast_call_t	 call;		/* CALL */
 	}				 u;
 	relic_location_t		 where;
 	enum relic_ast_expr_kind	 kind;	/* which arm of u is live */

@@ -1215,7 +1215,8 @@ without it; the verdicts are provisional until a design exists.
   tests as comparisons over the positions they return, a regular expression
   matcher of relic's own in `lib/regex.c`, computed strings on the
   pending-value mechanism with the symbol pool charged to the memory
-  limit; five steps, none started
+  limit; five steps, of which the front end is built and the planner
+  refuses a rule holding a call until the executor evaluates one
 * relation export, in `docs/todo-language.md`
 * incremental insertion maintenance
 * DRed-style deletion maintenance

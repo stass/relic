@@ -1865,6 +1865,9 @@ reference_slots(const relic_arg_t *args, uint16_t count)
 static uint64_t
 reference_expr_slots(const relic_expr_t *expr)
 {
+	uint64_t slots;
+	uint8_t i;
+
 	switch (expr->kind) {
 	case RELIC_EXPR_VARIABLE:
 		return (UINT64_C(1) << expr->u.slot);
@@ -1873,6 +1876,11 @@ reference_expr_slots(const relic_expr_t *expr)
 	case RELIC_EXPR_BINARY:
 		return (reference_expr_slots(expr->u.binary.left) |
 		    reference_expr_slots(expr->u.binary.right));
+	case RELIC_EXPR_CALL:
+		slots = 0;
+		for (i = 0; i < expr->u.call.argc; i++)
+			slots |= reference_expr_slots(expr->u.call.args[i]);
+		return (slots);
 	case RELIC_EXPR_CONSTANT:
 		break;
 	}

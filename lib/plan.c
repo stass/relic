@@ -274,6 +274,7 @@ static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
 static int	 place_assign(relic_planner_t *planner,
 		    const relic_literal_t *literal, uint16_t slot,
 		    const relic_expr_t *value);
+static bool	 expr_calls(const relic_expr_t *expr);
 static int	 place_comparison(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 place_aggregate(relic_planner_t *planner,
@@ -651,6 +652,8 @@ append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
 		append_steps(planner, expr->u.binary.left, postfix);
 		append_steps(planner, expr->u.binary.right, postfix);
 		break;
+	case RELIC_EXPR_CALL:
+		break;
 	}
 
 	step = &postfix->steps[postfix->step_count];
@@ -671,6 +674,7 @@ append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
 		step->kind = RELIC_STEP_NEGATE;
 		return;
 	case RELIC_EXPR_BINARY:
+	case RELIC_EXPR_CALL:
 		step->kind = RELIC_STEP_BINARY;
 		step->u.op = expr->u.binary.op;
 		return;
@@ -714,6 +718,29 @@ expr_is_number(const relic_planner_t *planner, const relic_expr_t *expr)
 		return ((planner->numbers & slot_bit(expr->u.slot)) != 0);
 	case RELIC_EXPR_NEGATE:
 	case RELIC_EXPR_BINARY:
+	case RELIC_EXPR_CALL:
+		break;
+	}
+
+	return (true);
+}
+
+/*
+ * Whether an expression holds a call.
+ */
+static bool
+expr_calls(const relic_expr_t *expr)
+{
+	switch (expr->kind) {
+	case RELIC_EXPR_CONSTANT:
+	case RELIC_EXPR_VARIABLE:
+		return (false);
+	case RELIC_EXPR_NEGATE:
+		return (expr_calls(expr->u.operand));
+	case RELIC_EXPR_BINARY:
+		return (expr_calls(expr->u.binary.left) ||
+		    expr_calls(expr->u.binary.right));
+	case RELIC_EXPR_CALL:
 		break;
 	}
 
@@ -760,6 +787,12 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 	uint16_t slot;
 
 	comparison = &literal->u.comparison;
+	if (expr_calls(comparison->left) || expr_calls(comparison->right)) {
+		relic_diagf(planner->ctx, RELIC_ERROR, &literal->where,
+		    "internal error: string functions cannot be evaluated");
+		return (-1);
+	}
+
 	if (relic_comparison_assigns(comparison, planner->bound, &slot, &value))
 		return (place_assign(planner, literal, slot, value));
 

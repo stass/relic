@@ -1462,7 +1462,8 @@ renumber_arg(relic_renumbering_t *renumbering, const relic_arg_t *source,
 
 /*
  * A renumbered copy of an expression tree, its variables renumbered in the
- * order they are written, left operand before right.  Returns NULL when the
+ * order they are written, left operand before right and a call's arguments
+ * in order.  Returns NULL when the
  * arena refused, which has been reported.  The tree is no taller than the
  * parser allowed, so the recursion is bounded.
  */
@@ -1471,6 +1472,7 @@ copy_expr(relic_magic_t *magic, relic_renumbering_t *renumbering,
     const relic_expr_t *source)
 {
 	relic_expr_t *copy;
+	uint8_t i;
 
 	copy = magic_alloc(magic, 1, sizeof(*copy));
 	if (copy == NULL)
@@ -1498,6 +1500,14 @@ copy_expr(relic_magic_t *magic, relic_renumbering_t *renumbering,
 		    source->u.binary.right);
 		if (copy->u.binary.right == NULL)
 			return (NULL);
+		break;
+	case RELIC_EXPR_CALL:
+		for (i = 0; i < source->u.call.argc; i++) {
+			copy->u.call.args[i] = copy_expr(magic, renumbering,
+			    source->u.call.args[i]);
+			if (copy->u.call.args[i] == NULL)
+				return (NULL);
+		}
 		break;
 	}
 
@@ -1788,6 +1798,8 @@ hash_arg(const relic_magic_t *magic, uint32_t hash, const relic_arg_t *arg)
 static uint32_t
 hash_expr(const relic_magic_t *magic, uint32_t hash, const relic_expr_t *expr)
 {
+	uint8_t i;
+
 	hash = hash_step(magic, hash, (uint32_t)expr->kind);
 
 	switch (expr->kind) {
@@ -1801,6 +1813,11 @@ hash_expr(const relic_magic_t *magic, uint32_t hash, const relic_expr_t *expr)
 		hash = hash_step(magic, hash, (uint32_t)expr->u.binary.op);
 		hash = hash_expr(magic, hash, expr->u.binary.left);
 		return (hash_expr(magic, hash, expr->u.binary.right));
+	case RELIC_EXPR_CALL:
+		hash = hash_step(magic, hash, (uint32_t)expr->u.call.fn);
+		for (i = 0; i < expr->u.call.argc; i++)
+			hash = hash_expr(magic, hash, expr->u.call.args[i]);
+		return (hash);
 	}
 
 	return (hash);
