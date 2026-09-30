@@ -522,7 +522,7 @@ a_batch_is_full_when_its_pending_bytes_are(void)
 
 /*
  * A tuple whose strings do not fit an empty batch's pending bytes grows
- * them once, by the growable-array policy, to hold it; the next such tuple
+ * them once, doubling them until it fits; the next such tuple
  * then fills a batch of its own without growing them again.
  */
 static void
@@ -538,7 +538,7 @@ a_tuple_no_batch_holds_grows_the_bytes_once(void)
 	    long_then_digits, &log, &stack_capacity, &pending_capacity))
 		return;
 
-	grown = relic_grow_array_capacity(RELIC_PENDING_BYTES,
+	grown = relic_grow_capacity_doubling(RELIC_PENDING_BYTES,
 	    6 * LONG_BYTES + 1);
 	check(log.tuples == 3 && log.batches == 3, SCENARIO_OVERSIZED,
 	    "each tuple should fill a batch of its own");
@@ -760,7 +760,7 @@ a_constant_pattern_runs_as_its_rule_compiled_it(void)
 		check(planned_pattern(&fixture.plan) != NULL &&
 		    fixture.scratch.match.capacity == 0 &&
 		    fixture.scratch.match.work.capacity ==
-		    relic_grow_array_capacity(0,
+		    relic_grow_capacity_doubling(0,
 		    planned_pattern(&fixture.plan)->count), SCENARIO_CONSTANT,
 		    "only the work space grows, once");
 	}

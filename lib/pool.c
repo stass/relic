@@ -290,7 +290,7 @@ worker_release(relic_worker_t *worker)
 	relic_free_array(worker->batch);
 	relic_free_array(worker->pending);
 	relic_idtab_reset(&worker->candidates.screen);
-	relic_idtab_reset(&worker->candidates.integer_screen);
+	relic_idtab_reset(&worker->candidates.value_screen);
 	worker->states = NULL;
 	worker->batch = NULL;
 	worker->pending = NULL;

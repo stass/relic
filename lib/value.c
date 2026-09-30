@@ -933,7 +933,15 @@ relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map)
 	if (cover_symbol_uses(ctx, map->highest_string) != 0)
 		return (-1);
 
-	return (relic_symbol_reserve(ctx, map->strings, map->string_count));
+	return (relic_symbol_reserve(ctx, map->strings, map->string_count,
+	    &map->copies));
+}
+
+void
+relic_pending_unreserve(relic_t *ctx, relic_pending_map_t *map)
+{
+	relic_symbol_unreserve(ctx, map->strings, map->string_count,
+	    &map->copies);
 }
 
 void

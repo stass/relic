@@ -1216,8 +1216,8 @@ without it; the verdicts are provisional until a design exists.
   matcher of relic's own in `lib/regex.c`, computed strings on the
   pending-value mechanism with the symbol pool charged to the memory
   limit; five steps, of which the front end, the serial plan and
-  executor, and the matcher are built, and a round whose rules call a
-  function runs serially until the frozen round carries pending strings. What remains beyond the steps:
+  executor, the matcher, and the frozen round carrying pending strings
+  are built. What remains beyond the steps:
   * [Medium, performance, `lib/exec.c`, `lib/value.c`] the step-2 gate is
     not met: over a million sources, `object/2` of the design's section 2
     adds 0.60 s to the load where the same join assigning a constant adds
@@ -1229,12 +1229,25 @@ without it; the verdicts are provisional until a design exists.
     only an `EMIT` or an expression reads, would halve the probes without
     changing what the measure decides; it is a planner decision the
     design's section 8.2 would record.
+  * [Medium, performance, `lib/merge.c`] the step-4 gate is not met: over
+    a million sources, `object/2` evaluates in 0.60 s past the load on one
+    thread and 0.33 s on sixteen, 1.8 times, where `tc-cyclic` scales 5.3
+    times (2.66 s to 0.50 s). At sixteen threads the tasks take 0.059 s,
+    gathering the candidates 0.025 s, applying them 0.070 s, and the
+    measure of the pending strings 0.163 s, serially: it probes the pool
+    for each gathered string and numbers the new ones in order of first
+    occurrence. Striping the measure by the string's hash, as the apply is
+    striped by the tuple's, would run the probes in parallel and leave only
+    the numbering serial, over the new strings alone; that changes the
+    design's section 9.2, which specifies one serial measure.
   * [Low, `lib/exec.c`] a round whose rules call a function charges the
     text stack and a megabyte of pending bytes when it begins, so under a
     memory limit below about 1.1 MB such a program fails with the limit
-    before it derives anything. Allocating the pending bytes on the first
-    pending string would lift that floor at the cost of an allocation in
-    an `EMIT`, which the design rules out.
+    before it derives anything, and a frozen round charges them on every
+    worker, so under a limit below about 1.1 MB per thread such a round is
+    declined before it begins and runs serially. Allocating the pending
+    bytes on the first pending string would lift that floor at the cost of
+    an allocation in an `EMIT`, which the design rules out.
   * [Low, tests] a string too long is exercised by `test_ceiling`, built
     with the length limit lowered to 64 bytes, rather than by the
     `strings-too-long` and `strings-negation` language tests the design's

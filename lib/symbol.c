@@ -365,17 +365,9 @@ relic_symbol_has_room(const relic_t *ctx, size_t count)
 }
 
 /*
- * The index and the entries are grown first and the copies made after, in
- * the order the strings are numbered, which is the order interning them one
- * at a time would make them in, so the arena ends as it would have.  A copy
- * the arena refuses rewinds it to where the copies began, so a reservation
- * that fails leaves no copy behind and the arena placing a retry's copies
- * exactly where an undisturbed reservation would.
- */
-/*
- * Clear the copies a failed reservation made before the arena is rewound
- * past them, so that no string holds a pointer into memory the arena has
- * freed or will hand out again.
+ * Clear the copies a reservation made before the arena is rewound past
+ * them, so that no string holds a pointer into memory the arena has freed
+ * or will hand out again.
  */
 static void
 forget_copies(relic_fresh_string_t *fresh, size_t count)
@@ -386,15 +378,25 @@ forget_copies(relic_fresh_string_t *fresh, size_t count)
 		fresh[i].copy = NULL;
 }
 
+/*
+ * The index and the entries are grown first and the copies made after, in
+ * the order the strings are numbered, which is the order interning them one
+ * at a time would make them in, so the arena ends as it would have.  A copy
+ * the arena refuses rewinds it to where the copies began, as giving the
+ * reservation back does, so a reservation that fails or is given back
+ * leaves no copy behind and the arena placing a retry's copies exactly
+ * where an undisturbed reservation would.
+ */
 int
-relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count)
+relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count,
+    relic_arena_mark_t *copiesp)
 {
-	relic_arena_mark_t mark;
 	relic_symtab_t *table;
 	relic_symbol_t *entries;
 	size_t i;
 
 	table = &ctx->symbols;
+	relic_arena_mark(&table->strings, copiesp);
 	if (count == 0)
 		return (0);
 	if (!relic_symbol_has_room(ctx, count))
@@ -414,16 +416,13 @@ relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count)
 	}
 	table->entries = entries;
 
-	relic_arena_mark(&table->strings, &mark);
 	for (i = 0; i < count; i++) {
 		assert(fresh[i].length <= RELIC_STRING_LENGTH_MAX);
 		fresh[i].copy = relic_arena_alloc(&table->strings,
 		    fresh[i].length + 1);
 		if (fresh[i].copy == NULL) {
-			forget_copies(fresh, i);
-			relic_arena_rewind(&table->strings, &mark);
+			relic_symbol_unreserve(ctx, fresh, i, copiesp);
 			relic_arena_clear_failure(&table->strings);
-			account_pool(ctx);
 			return (-1);
 		}
 		if (fresh[i].length > 0)
@@ -433,6 +432,19 @@ relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count)
 	account_pool(ctx);
 
 	return (0);
+}
+
+/*
+ * Give back the copies the first `count` fresh strings were reserved, the
+ * arena rewound to where they began.
+ */
+void
+relic_symbol_unreserve(relic_t *ctx, relic_fresh_string_t *fresh,
+    size_t count, const relic_arena_mark_t *copies)
+{
+	forget_copies(fresh, count);
+	relic_arena_rewind(&ctx->symbols.strings, copies);
+	account_pool(ctx);
 }
 
 void

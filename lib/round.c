@@ -80,6 +80,8 @@
 #define	RELIC_CHUNK_WORK	4096u
 
 static void	 abandon_round(relic_t *ctx, relic_pool_t *pool);
+static int	 begin_worker_texts(relic_t *ctx, relic_pool_t *pool);
+static size_t	 end_worker_texts(relic_pool_t *pool);
 static int	 cut_tasks(relic_pool_t *pool, const relic_round_t *round,
 		    bool finest);
 static void	 forget_worker_counters(relic_pool_t *pool);
@@ -132,13 +134,13 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 {
 	relic_round_job_t job;
 	relic_pool_t *pool;
+	size_t texts_bytes;
 	bool always;
 
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
 		return (false);
-	if (!round_reads_no_target(round) ||
-	    relic_round_first_call(round) != NULL)
+	if (!round_reads_no_target(round))
 		return (false);
 
 	if (ctx->pool == NULL) {
@@ -153,12 +155,16 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	if (pool_prepare(pool, round) != 0 ||
 	    cut_tasks(pool, round, always) != 0)
 		return (false);
+	if (relic_round_first_call(round) != NULL &&
+	    begin_worker_texts(ctx, pool) != 0)
+		return (false);
 
 	job_begin(&job, ctx, pool, round);
 	relic_pool_for(pool, pool->task_count, relic_round_run_task, &job);
+	texts_bytes = end_worker_texts(pool);
 
 	if (relic_atomic_bool_load_relaxed(&job.abandoned) ||
-	    !relic_round_merge(ctx, pool, round)) {
+	    !relic_round_merge(ctx, pool, round, texts_bytes)) {
 		abandon_round(ctx, pool);
 		pool->abandoned_rounds++;
 		return (false);
@@ -178,9 +184,8 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 }
 
 /*
- * A task's executor keeps the strings it computes in a scratch of its own
- * and has no candidate buffer to hand them to the merge in, so a round
- * whose plans call a function is run serially.
+ * A round whose plans call a function needs the buffers its strings are
+ * computed in, on the serial evaluator's scratch or on every worker's.
  */
 const relic_round_item_t *
 relic_round_first_call(const relic_round_t *round)
@@ -725,6 +730,55 @@ release_candidates(relic_t *ctx, relic_pool_t *pool)
 	for (i = 0; i < pool->worker_count; i++)
 		relic_candidates_release(&pool->workers[i].candidates,
 		    &ctx->account);
+}
+
+/*
+ * Give every worker's scratch a round's buffers for the strings its tasks
+ * compute, charged as the serial scratch's are.  Returns 0, or -1 having
+ * given none, when the limit or the allocator refused one: the round is
+ * then declined, and its serial run meets whatever refused it.
+ */
+static int
+begin_worker_texts(relic_t *ctx, relic_pool_t *pool)
+{
+	enum relic_exec_failure failure;
+	size_t i;
+
+	for (i = 0; i < pool->worker_count; i++) {
+		if (relic_scratch_begin_texts(&pool->workers[i].scratch,
+		    &ctx->account, &failure) != 0) {
+			(void)end_worker_texts(pool);
+			return (-1);
+		}
+	}
+
+	return (0);
+}
+
+/*
+ * Release every worker's buffers for strings, with their charge, and give
+ * at least what the serial scratch's would hold by the end of the round:
+ * for each buffer, the largest capacity any worker's reached.  A worker
+ * holding none adds nothing, and a round that computes no string gives
+ * zero.
+ */
+static size_t
+end_worker_texts(relic_pool_t *pool)
+{
+	relic_text_capacity_t peaks;
+	relic_scratch_t *scratch;
+	size_t i;
+
+	bzero(&peaks, sizeof(peaks));
+	for (i = 0; i < pool->worker_count; i++) {
+		scratch = &pool->workers[i].scratch;
+		if (scratch->text_stack.bytes == NULL)
+			continue;
+		relic_text_capacity_raise(&peaks, scratch);
+		relic_scratch_end_texts(scratch);
+	}
+
+	return (relic_text_capacity_bytes(&peaks));
 }
 
 /*

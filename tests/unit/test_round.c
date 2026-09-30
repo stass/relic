@@ -57,6 +57,10 @@
 #define	SCENARIO_ERRORS		"an undefined result fails as serially"
 #define	SCENARIO_COMPUTING	"a round computing integers is merged"
 #define	SCENARIO_SUM		"an overflowing sum fails as serially"
+#define	SCENARIO_STRINGS	"a round computing strings is merged"
+#define	SCENARIO_PATTERN	"an invalid pattern fails as serially"
+#define	SCENARIO_TEXT_TUPLES	"the tuple limit refuses strings as serially"
+#define	SCENARIO_TEXT_MEMORY	"the memory limit refuses strings as serially"
 
 /* Room for a generated program and for a context's diagnostics. */
 #define	PROGRAM_MAX		(256 * 1024)
@@ -79,6 +83,15 @@
 #define	WIDE_LINKS		100
 #define	WIDE_ARITY		16
 #define	WIDE_LIMIT_STEPS	400
+
+/*
+ * The most a program of these tests holds beside its storage while it is
+ * evaluated: a round computing strings holds a megabyte of pending bytes.
+ */
+#define	WORKING_MAX		(4u * 1024u * 1024u)
+
+/* The buffers each worker of a round computing strings holds from its start. */
+#define	WORKER_TEXTS		(RELIC_TEXT_STACK_INITIAL + RELIC_PENDING_BYTES)
 
 /* The threads the deferred context shares its rounds among, the second time. */
 #define	DEFERRED_THREADS	4
@@ -128,10 +141,15 @@ static size_t	 lines_in(const diagnostics_t *diagnostics);
 static void	 limits_refuse_as_serially(const char *scenario,
 		    const char *program, bool memory, size_t steps,
 		    size_t threads);
+static size_t	 least_memory_limit(const char *program, size_t low,
+		    size_t high);
 static void	 computing_rounds_merge(size_t threads);
 static void	 errors_fail_as_serially(size_t threads);
 static void	 sums_overflow_as_serially(size_t threads);
-static bool	 integers_agree(const relic_t *serial, const relic_t *deferred);
+static bool	 values_agree(const relic_t *serial, const relic_t *deferred);
+static void	 string_program(text_t *text);
+static void	 strings_rounds_merge(size_t threads);
+static void	 patterns_fail_as_serially(size_t threads);
 static void	 notes_come_as_serially(size_t threads);
 static bool	 shared_as_expected(relic_t *deferred, size_t threads);
 static void	 wide_program(text_t *text);
@@ -154,6 +172,7 @@ static int	 run_query(relic_t *ctx, const char *query, text_t *rows);
  */
 static text_t graph;
 static text_t wide;
+static text_t strings;
 static text_t failing;
 static text_t serial_rows;
 static text_t deferred_rows;
@@ -287,6 +306,148 @@ wide_program(text_t *text)
 	appendf(text, "), link(X, Y).\n");
 }
 
+/*
+ * A program whose every round computes strings: one new string per fact
+ * (label/2), a few new ones derived many times over in one round (pair/1),
+ * strings the pool holds as a name or a symbol's spelling (spelled/2), the
+ * empty string, which has no bytes to hold (blank/2), new ones round by
+ * round of a recursion (walk/2), and a pattern computed per binding
+ * (hit/1).
+ */
+static void
+string_program(text_t *text)
+{
+	unsigned int i;
+
+	text->length = 0;
+	text->bytes[0] = '\0';
+
+	for (i = 0; i < GRAPH_NODES; i++) {
+		appendf(text, "idx(%u).\n", i);
+		appendf(text, "step(%u, %u).\n", i, (i * 7 + 3) % GRAPH_NODES);
+	}
+	appendf(text,
+	    "label(I, S) :- idx(I), S = cat(\"n\", str(I)).\n"
+	    "pair(S) :- idx(I), idx(J), "
+	    "S = cat(str(I mod 3), cat(\"-\", str(J mod 5))).\n"
+	    "spelled(I, S) :- idx(I), I < 5, S = str(label).\n"
+	    "blank(I, S) :- idx(I), I < 3, S = substr(str(I), 5).\n"
+	    "walk(X, P) :- idx(X), X < 3, P = str(X).\n"
+	    "walk(Y, Q) :- walk(X, P), step(X, Y), length(P) < 24, "
+	    "Q = cat(P, cat(\"/\", str(Y))).\n"
+	    "hit(I) :- label(I, S), match(S, cat(\"^n\", str(I mod 10))) = 0.\n");
+}
+
+/*
+ * A round whose plans compute strings the context lacks is merged, not
+ * abandoned, and the merge interns them as the serial run does: in the
+ * same order, under the same identifiers, into a pool of the same size.
+ */
+static void
+strings_rounds_merge(size_t threads)
+{
+	diagnostics_t serial_diagnostics;
+	diagnostics_t deferred_diagnostics;
+	relic_stats_t loaded;
+	relic_stats_t computed;
+	relic_t *serial;
+	relic_t *deferred;
+	int serial_status;
+	int deferred_status;
+	char what[64];
+
+	string_program(&failing);
+	snprintf(what, sizeof(what), "strings on %zu thread(s)", threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, 0, &deferred_diagnostics);
+
+	if (serial != NULL && deferred != NULL) {
+		relic_stats(deferred, &loaded);
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		relic_stats(deferred, &computed);
+		checkf(serial_status == 0 && deferred_status == 0,
+		    SCENARIO_STRINGS, "%s: both materialize", what);
+		checkf(merged_rounds(deferred) > 0 &&
+		    abandoned_rounds(deferred) == 0, SCENARIO_STRINGS,
+		    "%s: every round is merged, %" PRIu64 " merged and %"
+		    PRIu64 " abandoned", what, merged_rounds(deferred),
+		    abandoned_rounds(deferred));
+		checkf(computed.string_values > loaded.string_values + 60,
+		    SCENARIO_STRINGS, "%s: the merges interned strings, "
+		    "%zu before and %zu after", what, loaded.string_values,
+		    computed.string_values);
+		checkf(shared_as_expected(deferred, threads),
+		    SCENARIO_STRINGS, "%s: the rounds are shared when the "
+		    "pool has threads", what);
+		contexts_agree(SCENARIO_STRINGS, what, serial, deferred);
+		checkf(deferred->account.round_bytes == 0, SCENARIO_STRINGS,
+		    "%s: the rounds gave back their buffers", what);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
+/*
+ * A pattern that is not a regular expression, met by a task, abandons its
+ * round, which runs again serially and reports it as the serial run does;
+ * the rounds before it are merged, and the strings the failing round's
+ * earlier batches interned are interned alike.  A query that matches is
+ * then answered alike on what the failure left.
+ */
+static void
+patterns_fail_as_serially(size_t threads)
+{
+	diagnostics_t serial_diagnostics;
+	diagnostics_t deferred_diagnostics;
+	relic_t *serial;
+	relic_t *deferred;
+	int serial_status;
+	int deferred_status;
+	char what[64];
+	unsigned int i;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (i = 0; i < 600; i++)
+		appendf(&failing, "num(%u).\n", i);
+	appendf(&failing,
+	    "name(I, S) :- num(I), S = cat(\"x\", str(I)).\n"
+	    "found(I, N) :- name(I, S), "
+	    "N = match(S, cat(\"x\", substr(\"(\", 0, I - 450))).\n"
+	    "fine(I) :- name(I, S), match(S, \"7$\") >= 0.\n");
+
+	snprintf(what, sizeof(what), "patterns on %zu thread(s)", threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, 0, &deferred_diagnostics);
+
+	if (serial != NULL && deferred != NULL) {
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status != 0 && deferred_status != 0,
+		    SCENARIO_PATTERN, "%s: both fail", what);
+		checkf(strstr(serial_diagnostics.text,
+		    "invalid regular expression in rule found/2: unmatched (") !=
+		    NULL, SCENARIO_PATTERN, "%s: the serial run names the "
+		    "rule and the reason: %s", what, serial_diagnostics.text);
+		checkf(strcmp(serial_diagnostics.text,
+		    deferred_diagnostics.text) == 0, SCENARIO_PATTERN,
+		    "%s: the diagnostics agree: \"%s\" and \"%s\"", what,
+		    serial_diagnostics.text, deferred_diagnostics.text);
+		checkf(abandoned_rounds(deferred) > 0, SCENARIO_PATTERN,
+		    "%s: the failing round is abandoned", what);
+		contexts_agree(SCENARIO_PATTERN, what, serial, deferred);
+		checkf(deferred->account.round_bytes == 0, SCENARIO_PATTERN,
+		    "%s: the round gave back its buffers", what);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
     const relic_location_t *where, const char *message)
@@ -400,21 +561,36 @@ relations_agree(const relic_t *serial, const relic_t *deferred)
 }
 
 /*
- * Whether two contexts hold the same integers under the same identifiers,
- * in a table of the same size.
+ * Whether two contexts hold the same integers and the same pool, byte
+ * string by byte string under the same identifiers, in a table and a pool
+ * of the same size.
  */
 static bool
-integers_agree(const relic_t *serial, const relic_t *deferred)
+values_agree(const relic_t *serial, const relic_t *deferred)
 {
 	const relic_valtab_t *left;
 	const relic_valtab_t *right;
+	const char *left_bytes;
+	const char *right_bytes;
+	size_t left_length;
+	size_t right_length;
+	uint32_t id;
 
 	left = &serial->values;
 	right = &deferred->values;
 	if (left->integer_count != right->integer_count ||
+	    serial->symbols.count != deferred->symbols.count ||
 	    relic_value_storage_bytes(serial) !=
 	    relic_value_storage_bytes(deferred))
 		return (false);
+
+	for (id = 1; id <= serial->symbols.count; id++) {
+		left_bytes = relic_symbol_bytes(serial, id, &left_length);
+		right_bytes = relic_symbol_bytes(deferred, id, &right_length);
+		if (left_length != right_length || (left_length > 0 &&
+		    bcmp(left_bytes, right_bytes, left_length) != 0))
+			return (false);
+	}
 
 	return (left->integer_count == 0 || bcmp(left->integers,
 	    right->integers, left->integer_count * sizeof(*left->integers)) ==
@@ -496,18 +672,20 @@ contexts_agree(const char *scenario, const char *what, relic_t *serial,
 		return (false);
 	}
 
-	if (!integers_agree(serial, deferred)) {
-		checkf(false, scenario, "%s: the integer tables should agree",
-		    what);
+	if (!values_agree(serial, deferred)) {
+		checkf(false, scenario, "%s: the integer tables and the pools "
+		    "should agree", what);
 		return (false);
 	}
 
 	relic_stats(serial, &left);
 	relic_stats(deferred, &right);
-	if (left.integer_values != right.integer_values) {
-		checkf(false, scenario, "%s: the integers counted should "
-		    "agree, were %zu and %zu", what, left.integer_values,
-		    right.integer_values);
+	if (left.integer_values != right.integer_values ||
+	    left.string_values != right.string_values) {
+		checkf(false, scenario, "%s: the values counted should "
+		    "agree, were %zu and %zu integers and %zu and %zu strings",
+		    what, left.integer_values, right.integer_values,
+		    left.string_values, right.string_values);
 		return (false);
 	}
 	if (left.tuples != right.tuples ||
@@ -721,15 +899,25 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
  * The memory limit also counts the evaluation's plans, which relic_stats_t
  * does not report, so its sweep runs to twice the storage.
  *
- * The sweep must reach both ways a deferred round ends under a limit: a
- * round abandoned and run again serially, and a round merged.  Under the
- * memory limit it must also reach an abandoned round whose serial run then
- * succeeds, the case where the buffers' charge alone was in the way, and a
- * merge the limit itself declines, once every task has run, rather than a
- * buffer or a scratch table it refused; under the tuple limit neither need
- * exist, since a worker abandons the round once its own candidates
- * outnumber what the limit admits, which on one thread comes before any
- * merge could be declined for it.
+ * A program whose evaluation holds more beside the storage than the
+ * storage itself -- the buffers of a round computing strings -- has the
+ * memory limit's sweep moved up by the difference between the least limit
+ * its serial run succeeds under and the storage it needs, so that the
+ * sweep again runs from limits that refuse the evaluation early to limits
+ * that admit it.  Every worker holds those buffers of its own, so on more
+ * than one thread the sweep is moved up by the other workers' too.  Such a
+ * sweep need not see a merge the limit declines: the workers' buffers are
+ * released before the merge asks, and are more than the merge asks for.
+ *
+ * Otherwise the sweep must reach both ways a deferred round ends under a
+ * limit: a round abandoned and run again serially, and a round merged.
+ * Under the memory limit it must also reach an abandoned round whose
+ * serial run then succeeds, the case where the buffers' charge alone was
+ * in the way, and a merge the limit itself declines, once every task has
+ * run, rather than a buffer or a scratch table it refused; under the tuple
+ * limit neither need exist, since a worker abandons the round once its own
+ * candidates outnumber what the limit admits, which on one thread comes
+ * before any merge could be declined for it.
  */
 static void
 limits_refuse_as_serially(const char *scenario, const char *program,
@@ -741,6 +929,8 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	relic_stats_t needed;
 	relic_t *serial;
 	relic_t *deferred;
+	size_t working;
+	size_t least;
 	size_t first;
 	size_t last;
 	size_t limit;
@@ -765,8 +955,17 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	relic_stats(serial, &needed);
 	relic_destroy(serial);
 
-	first = memory ? loaded.storage_bytes : loaded.tuples;
-	last = memory ? needed.storage_bytes * 2 : needed.tuples;
+	working = 0;
+	if (memory) {
+		least = least_memory_limit(program, loaded.storage_bytes,
+		    needed.storage_bytes * 2 + WORKING_MAX);
+		if (least > needed.storage_bytes * 2)
+			working = least - needed.storage_bytes +
+			    (threads - 1) * WORKER_TEXTS;
+	}
+
+	first = memory ? loaded.storage_bytes + working : loaded.tuples;
+	last = memory ? needed.storage_bytes * 2 + working : needed.tuples;
 	step = (last - first) / steps;
 	if (step == 0)
 		step = 1;
@@ -825,9 +1024,41 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	if (memory) {
 		checkf(recovered_seen, scenario, "on %zu thread(s), the sweep "
 		    "abandons a round whose serial run succeeds", threads);
-		checkf(declined_seen, scenario, "on %zu thread(s), the sweep "
-		    "has the limit decline a merge", threads);
+		checkf(declined_seen || (working > 0 && threads > 1), scenario,
+		    "on %zu thread(s), the sweep has the limit decline a "
+		    "merge", threads);
 	}
+}
+
+/*
+ * The least memory limit in [low, high] under which a serial context
+ * materializes `program`, found by bisection, or `high` when none below it
+ * does.  A context that succeeds under a limit succeeds under any larger
+ * one, which is what the bisection relies on.
+ */
+static size_t
+least_memory_limit(const char *program, size_t low, size_t high)
+{
+	diagnostics_t diagnostics;
+	relic_t *ctx;
+	size_t middle;
+	int status;
+
+	while (low < high) {
+		middle = low + (high - low) / 2;
+		ctx = context_for(program, 0, 0, 0, middle, &diagnostics);
+		if (ctx == NULL)
+			return (high);
+		status = relic_materialize(ctx);
+		relic_destroy(ctx);
+
+		if (status == 0)
+			high = middle;
+		else
+			low = middle + 1;
+	}
+
+	return (high);
 }
 
 /*
@@ -1145,6 +1376,7 @@ main(void)
 
 	graph_program(&graph);
 	wide_program(&wide);
+	string_program(&strings);
 
 	for (i = 0; i < sizeof(thread_counts) / sizeof(thread_counts[0]);
 	    i++) {
@@ -1161,8 +1393,15 @@ main(void)
 		computing_rounds_merge(threads);
 		errors_fail_as_serially(threads);
 		sums_overflow_as_serially(threads);
+		strings_rounds_merge(threads);
+		patterns_fail_as_serially(threads);
+		limits_refuse_as_serially(SCENARIO_TEXT_TUPLES, strings.bytes,
+		    false, LIMIT_STEPS, threads);
+		limits_refuse_as_serially(SCENARIO_TEXT_MEMORY, strings.bytes,
+		    true, LIMIT_STEPS, threads);
 	}
 	computing_rounds_merge(MANY_THREADS);
+	strings_rounds_merge(MANY_THREADS);
 
 	return (check_summary("test_round"));
 }

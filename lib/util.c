@@ -311,6 +311,23 @@ relic_grow_array_capacity(size_t capacity, size_t count)
 }
 
 size_t
+relic_grow_capacity_doubling(size_t capacity, size_t count)
+{
+	if (count <= capacity)
+		return (capacity);
+
+	if (capacity < RELIC_ARRAY_MIN_COUNT)
+		capacity = RELIC_ARRAY_MIN_COUNT;
+	while (capacity < count) {
+		if (capacity > SIZE_MAX / 2)
+			return (0);
+		capacity *= 2;
+	}
+
+	return (capacity);
+}
+
+size_t
 relic_grow_array_capacity_stepwise(size_t capacity, size_t held,
     size_t requests, size_t per_request)
 {

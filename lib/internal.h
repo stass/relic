@@ -664,11 +664,15 @@ void	 relic_symtab_reset(relic_symtab_t *table);
  * having reported nothing, when there is not the room or the allocator
  * refuses; the index and the entries it grew stay grown and counted, no
  * copy stays in the arena, and the pool's contents are as they were.
- * relic_symbol_append() then numbers them, and cannot fail.
+ * relic_symbol_append() then numbers them, and cannot fail.  A reservation
+ * sets *copiesp to where its copies begin in the arena, and
+ * relic_symbol_unreserve() gives back the copies of one that will not be
+ * appended after all, leaving the pool as a reservation that failed does:
+ * nothing may allocate from the pool between the two.
  *
  * A fresh string's `bytes` must stay readable until it is reserved, and
  * `copy` is where the reservation put it, or NULL once a reservation has
- * failed.
+ * failed or been given back.
  */
 struct relic_fresh_string {
 	const char	*bytes;
@@ -681,7 +685,9 @@ size_t	 relic_symbol_pool_bytes_after(const relic_t *ctx,
 	    const relic_fresh_string_t *fresh, size_t count);
 bool	 relic_symbol_has_room(const relic_t *ctx, size_t count);
 int	 relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh,
-	    size_t count);
+	    size_t count, relic_arena_mark_t *copiesp);
+void	 relic_symbol_unreserve(relic_t *ctx, relic_fresh_string_t *fresh,
+	    size_t count, const relic_arena_mark_t *copies);
 void	 relic_symbol_append(relic_t *ctx, const relic_fresh_string_t *fresh,
 	    size_t count);
 
@@ -752,7 +758,11 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * relic_pending_reserve() grows the table and the pool to hold the new
  * values, returning -1, with no diagnostic and the contents unchanged, when
  * it could not, and relic_pending_append() then interns them, and cannot
- * fail.  Nothing may intern a value between the two.
+ * fail.  Nothing may intern a value between the two.  A caller that decides
+ * not to append after a reservation succeeded calls
+ * relic_pending_unreserve() instead, which leaves the table and the pool as
+ * a reservation that failed would: grown and counted, with no copy of a new
+ * string left behind.
  *
  * A map is given room for `room` pending values by
  * relic_pending_map_init(), from `arena`, and returns -1 when the arena
@@ -774,6 +784,7 @@ struct relic_pending_map {
 	size_t			 fresh_count;
 	size_t			 string_count;
 	uint32_t		 highest_string; /* symbol, or RELIC_ID_NONE */
+	relic_arena_mark_t	 copies;	/* the reserved strings' */
 };
 
 int	 relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
@@ -788,6 +799,7 @@ void	 relic_pending_rewrite(const relic_pending_map_t *map,
 	    relic_dom_t *tuples, size_t count, uint16_t arity);
 int	 relic_pending_commit(relic_t *ctx, relic_pending_map_t *map);
 int	 relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map);
+void	 relic_pending_unreserve(relic_t *ctx, relic_pending_map_t *map);
 void	 relic_pending_append(relic_t *ctx, const relic_pending_map_t *map);
 
 /*

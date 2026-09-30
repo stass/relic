@@ -79,7 +79,20 @@ typedef struct relic_op_state relic_op_state_t;
 typedef struct relic_pending relic_pending_t;
 typedef struct relic_scratch relic_scratch_t;
 typedef struct relic_text relic_text_t;
+typedef struct relic_text_capacity relic_text_capacity_t;
 typedef struct relic_text_buffer relic_text_buffer_t;
+
+/*
+ * The capacities, in bytes, of the four buffers of a scratch that the data
+ * a plan meets sizes: the text stack, the pending bytes, the room for a
+ * pattern's program and the matcher's work space.
+ */
+struct relic_text_capacity {
+	size_t	text_stack;
+	size_t	pending_bytes;
+	size_t	program;
+	size_t	work;
+};
 
 /*
  * Bytes in one of the scratch's byte buffers -- a computed string in the
@@ -391,6 +404,15 @@ enum relic_exec_status {
  * their charge, whatever they had grown to, and may be called on a scratch
  * that holds none.
  *
+ * relic_text_capacity_raise() raises each capacity `peaks` records, in
+ * bytes, to that of the scratch's buffer, and relic_text_capacity_bytes()
+ * is what they come to together.  The record starts zeroed.  Since each of
+ * the four buffers doubles until it fits, the peak over the scratches of a
+ * round's workers is at least what one scratch would have held had it run
+ * the whole round: as much for the text stack and the match space, and as
+ * much or more for the pending bytes, which carry strings the serial run
+ * would have interned earlier in the round.
+ *
  * relic_exec_start() readies the scratch to run `plan` from the beginning,
  * over what `env` gives it, resolving the view of every operation that
  * reads a relation, with an empty batch.  The plan must fit the scratch,
@@ -416,6 +438,9 @@ void	 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
 int	 relic_scratch_begin_texts(relic_scratch_t *scratch,
 	    relic_account_t *account, enum relic_exec_failure *failurep);
 void	 relic_scratch_end_texts(relic_scratch_t *scratch);
+void	 relic_text_capacity_raise(relic_text_capacity_t *peaks,
+	    const relic_scratch_t *scratch);
+size_t	 relic_text_capacity_bytes(const relic_text_capacity_t *peaks);
 void	 relic_exec_start(relic_scratch_t *scratch,
 	    const relic_exec_env_t *env, const relic_plan_t *plan);
 void	 relic_exec_start_piece(relic_scratch_t *scratch,

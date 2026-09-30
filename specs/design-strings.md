@@ -795,10 +795,12 @@ built it, whatever the kind of that operation or the way it ended.
 
 The text stack starts at `RELIC_TEXT_STACK_INITIAL` bytes, 4 KiB, allocated
 when the evaluation begins with the rest of the scratch, and grows when a
-result does not fit, by the growable-array policy of
-`specs/design-memory.md` section 5, charged to the memory limit with the
-rest of the evaluation's working state. A growth the limit or the allocator
-refuses fails the evaluation as an allocation failing in the executor does,
+result does not fit, doubling until it does, charged to the memory limit
+with the rest of the evaluation's working state. Doubling rather than the
+growable-array policy of `specs/design-memory.md` section 5, which raises
+a growth to the request, makes the capacity a function of the largest
+request alone, which the merge's admission below relies on. A growth the
+limit or the allocator refuses fails the evaluation as an allocation failing in the executor does,
 `specs/design-eval.md` section 8, and in a parallel round abandons the job,
 `specs/design-parallel.md` section 4.4. A plan holding no string function
 never touches the stack, and one whose strings are short never grows it.
@@ -829,13 +831,19 @@ limit with its four buffers charged at whatever capacity they have grown
 to, while the merge asks once, with the workers' buffers already
 released. **The merge's admission therefore adds the capacity the serial
 scratch's buffers would hold**, beside the relations' and the pool's
-growth: for each of the four, the growable-array capacity for the largest
-size any task of the round recorded, which the tasks report with their
-candidates. That is the serial run's capacity at the round's end, since a
-growable array's capacity is a monotone function of the largest request
-made of it and the tasks together compute every text the serial run
-computes; and it is at least the capacity the serial run had at any
-insertion of the round. Admission is then at least as strict as every
+growth: for each of the four, the largest capacity any worker's buffer
+reached, read from the workers before their buffers are released. That
+is at least the serial run's capacity at the round's end, since a buffer
+that doubles until it fits has a capacity that is a monotone function of
+the largest request made of it, every worker's starts where the serial
+run's does, and the tasks together make every request the serial run
+makes. For the text stack and the matcher's buffers they make exactly
+those requests; for the pending bytes they may make larger ones, since a
+string the serial run interned earlier in the round is no longer pending
+there while a worker, reading the frozen pool, still carries its bytes.
+A merge declined on that excess is run again serially, where the limit
+judges it exactly. And the serial run's capacity at the round's end is
+at least what it had at any insertion of the round. Admission is then at least as strict as every
 check the serial evaluator makes in the round, so an admitted merge
 cannot fail where the serial evaluator would have refused, and a declined
 one is rerun serially from the serial state, which is the contract the
@@ -922,8 +930,8 @@ operation to ask again on the same bindings, and the caller resolves the
 batch and empties both; asked again, the `EMIT` finds an empty batch and
 writes its tuple once. The pending bytes are allocated to
 `RELIC_PENDING_BYTES`, 1 MiB, when the evaluation begins and grow only
-for one tuple that does not fit an empty batch, by the growable-array
-policy and charged like the text stack; so a head whose strings are
+for one tuple that does not fit an empty batch, doubling as the text
+stack does and charged like it; so a head whose strings are
 ordinary never allocates in an `EMIT`, one whose strings are enormous
 grows the buffer to the largest tuple and no more, and no tuple is ever
 written twice or skipped.
@@ -1026,15 +1034,15 @@ fit, since a program has fewer than 2^32 instructions and a string fewer
 than 2^32 bytes; a mark is one 32-bit stamp. Each list has room for one
 thread per instruction and the marks one stamp per instruction, so the
 work space is five 32-bit words, twenty bytes, per instruction. It is
-sized for the largest program the plan holds -- known when the plan is
-built, since every constant pattern is compiled by then -- and grown for
-a variable pattern whose program is larger, by the growable-array policy
-and charged like the text stack. The pattern buffer is charged the same
-way. A pattern of *n* bytes therefore costs at most `120 * n + 40` bytes
-of pattern buffer and `60 * n + 20` of work space, so a variable pattern
-of a million bytes costs its worker some 180 MB of charged scratch for
-the duration of one `CALL`, which the memory limit sees and may refuse,
-and which section 13 lists.
+empty when a round begins and grown, doubling as the text stack does,
+for the first match whose program is larger than it holds, and charged
+like the text stack. The pattern buffer grows and is charged the same
+way. A pattern of *n* bytes needs `120 * n + 40` bytes of pattern buffer
+and `60 * n + 20` of work space, and a buffer that doubles holds less
+than twice what it was asked for, or eight instructions' worth when that
+is more, so a variable pattern of a million bytes can cost its worker
+some 360 MB of charged scratch for the duration of one `CALL`, which the
+memory limit sees and may refuse, and which section 13 lists.
 
 **Matching** is Thompson's simulation, run to find the least position at
 which a match begins. The state is two lists of threads, each thread an

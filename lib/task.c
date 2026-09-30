@@ -40,12 +40,12 @@
  * candidates lie together in its worker's buffer, which is how the merge
  * finds them in task order.
  *
- * An integer the value table lacked when the round began, which a column of
- * the batch holds pending, is kept among the worker's pending integers, and
- * the column is rewritten to name it there before the batch is screened.
- * Equal integers then hold equal columns, so a tuple holding one is
- * screened by value as any other is, and the merge gives every such
- * integer its identifier.
+ * A value the context lacked when the round began -- an integer or a
+ * string a column of the batch holds pending -- is kept among the worker's
+ * pending values, a string with its bytes, and the column is rewritten to
+ * name it there before the batch is screened.  Equal values then hold equal
+ * columns, so a tuple holding one is screened by value as any other is, and
+ * the merge gives every such value its identifier.
  *
  * The buffers are charged to the memory account as they grow.  A growth the
  * limit or the allocator refuses is not reported and is not a failure: the
@@ -57,12 +57,14 @@ typedef struct relic_candidates_growth relic_candidates_growth_t;
 
 /*
  * What the candidate arrays are grown by: `tuples` more candidates of
- * `words` columns in all, and `integers` more pending integers.
+ * `words` columns in all, and `values` more pending values holding
+ * `value_bytes` bytes of strings between them.
  */
 struct relic_candidates_growth {
 	size_t	tuples;
 	size_t	words;
-	size_t	integers;
+	size_t	values;
+	size_t	value_bytes;
 };
 
 static size_t	 array_bytes_after(size_t capacity, size_t needed,
@@ -79,13 +81,20 @@ static int	 candidates_grow(relic_candidates_t *candidates,
 static bool	 candidates_hold(const relic_candidates_t *candidates,
 		    size_t target, const relic_dom_t *tuple, uint16_t arity,
 		    uint64_t hash);
-static int	 candidates_mark_integer(relic_candidates_t *candidates,
-		    relic_account_t *account, int64_t integer,
-		    relic_dom_t *markerp);
+static int	 candidates_mark_value(relic_candidates_t *candidates,
+		    relic_account_t *account, const relic_pending_t *pending,
+		    const char *pending_bytes, relic_dom_t *markerp);
 static int	 candidates_reserve(relic_candidates_t *candidates,
 		    relic_account_t *account,
 		    const relic_candidates_growth_t *growth);
-static uint32_t	 integer_rehash(uint32_t position, void *ctx);
+static bool	 pending_equal(const relic_candidates_t *candidates,
+		    const relic_pending_t *held, const relic_pending_t *pending,
+		    const char *pending_bytes);
+static uint32_t	 pending_hash(uint64_t seed, const relic_pending_t *pending,
+		    const char *bytes);
+static const char *pending_text(const char *bytes,
+		    const relic_pending_t *pending);
+static uint32_t	 value_rehash(uint32_t position, void *ctx);
 static int	 mark_pending(relic_candidates_t *candidates,
 		    relic_account_t *account, relic_scratch_t *scratch,
 		    uint16_t arity);
@@ -222,10 +231,10 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
  * Screen the scratch's batch of tuples for target `target` and empty it.
  * Each is a derivation.  One the frozen store holds is dropped, and so is
  * one among the worker's candidates; any other becomes a candidate.  A
- * tuple holding a pending integer is never in the frozen store, whose
- * relations hold only integers the table held.  Returns 0, or -1 when the
- * candidates could not grow or now hold more tuples than the tuple limit
- * could admit.
+ * tuple holding a pending value is never in the frozen store, whose
+ * relations hold only values the context had assigned.  Returns 0, or -1
+ * when the candidates could not grow or now hold more tuples than the
+ * tuple limit could admit.
  */
 static int
 screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
@@ -270,9 +279,10 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 
 /*
  * Rewrite every pending marker in the scratch's batch of `arity`-column
- * tuples, which names an integer among the batch's pending integers, to
- * the marker naming it among the worker's, and empty the batch's pending
- * integers.  Returns 0, or -1 when the worker's integers could not grow.
+ * tuples, which names a value among the batch's pending values, to the
+ * marker naming it among the worker's, and empty the batch's pending
+ * values and their bytes.  Returns 0, or -1 when the worker's values could
+ * not grow.
  */
 static int
 mark_pending(relic_candidates_t *candidates, relic_account_t *account,
@@ -289,70 +299,134 @@ mark_pending(relic_candidates_t *candidates, relic_account_t *account,
 			continue;
 
 		assert(*column >= 1 && *column <= scratch->pending_count);
-		assert(scratch->pending[*column - 1].kind ==
-		    RELIC_PENDING_INTEGER);
-		if (candidates_mark_integer(candidates, account,
-		    scratch->pending[*column - 1].u.integer, column) != 0)
+		if (candidates_mark_value(candidates, account,
+		    &scratch->pending[*column - 1],
+		    scratch->pending_bytes.bytes, column) != 0)
 			return (-1);
 	}
 	scratch->pending_count = 0;
+	scratch->pending_bytes.used = 0;
 
 	return (0);
 }
 
 /*
- * Set *markerp to the marker of `integer` among the worker's pending
- * integers, its position there plus one, adding it when the worker has not
- * met it.  Returns 0, or -1 when the integers could not grow, or a marker
- * for one more would need type bits.
+ * Set *markerp to the marker of a batch's pending value, whose bytes, when
+ * it is a string, lie in `pending_bytes`, among the worker's pending values:
+ * its position there plus one, adding it, a string's bytes copied, when the
+ * worker has not met it.  Returns 0, or -1 when the values could not grow,
+ * or a marker for one more would need type bits.
  */
 static int
-candidates_mark_integer(relic_candidates_t *candidates,
-    relic_account_t *account, int64_t integer, relic_dom_t *markerp)
+candidates_mark_value(relic_candidates_t *candidates,
+    relic_account_t *account, const relic_pending_t *pending,
+    const char *pending_bytes, relic_dom_t *markerp)
 {
 	relic_candidates_growth_t growth;
+	relic_pending_t *added;
 	relic_idprobe_t probe;
 	uint32_t position;
 	uint32_t hash;
 
-	hash = relic_hash_int64(candidates->hash_seed, integer);
-	relic_idprobe_open(&probe, &candidates->integer_screen, hash);
+	hash = pending_hash(candidates->hash_seed, pending, pending_bytes);
+	relic_idprobe_open(&probe, &candidates->value_screen, hash);
 	while (relic_idprobe_next(&probe, &position)) {
-		if (candidates->integers[position - 1] == integer) {
+		if (pending_equal(candidates, &candidates->values[position - 1],
+		    pending, pending_bytes)) {
 			*markerp = position;
 			return (0);
 		}
 	}
 
-	if (candidates->integer_count >= RELIC_DOM_INDEX_MASK)
+	if (candidates->value_count >= RELIC_DOM_INDEX_MASK)
 		return (-1);
 	bzero(&growth, sizeof(growth));
-	growth.integers = 1;
+	growth.values = 1;
+	if (pending->kind == RELIC_PENDING_TEXT)
+		growth.value_bytes = pending->u.text.length;
 	if (candidates_reserve(candidates, account, &growth) != 0)
 		return (-1);
 
-	candidates->integers[candidates->integer_count] = integer;
-	candidates->integer_count++;
-	relic_idtab_place(&candidates->integer_screen, hash,
-	    (uint32_t)candidates->integer_count);
-	*markerp = (relic_dom_t)candidates->integer_count;
+	added = &candidates->values[candidates->value_count];
+	*added = *pending;
+	if (pending->kind == RELIC_PENDING_TEXT) {
+		added->u.text.offset = candidates->value_byte_count;
+		if (pending->u.text.length > 0)
+			bcopy(pending_bytes + pending->u.text.offset,
+			    candidates->value_bytes +
+			    candidates->value_byte_count,
+			    pending->u.text.length);
+		candidates->value_byte_count += pending->u.text.length;
+	}
+	candidates->value_count++;
+	relic_idtab_place(&candidates->value_screen, hash,
+	    (uint32_t)candidates->value_count);
+	*markerp = (relic_dom_t)candidates->value_count;
 
 	return (0);
 }
 
 /*
- * The screen hash of the pending integer at position `position` minus one,
- * for the integer screen to use when it grows.
+ * The screen hash of a pending value: an integer's of its value, a
+ * string's of its bytes, which lie in `bytes`.
  */
 static uint32_t
-integer_rehash(uint32_t position, void *ctx)
+pending_hash(uint64_t seed, const relic_pending_t *pending, const char *bytes)
+{
+	if (pending->kind == RELIC_PENDING_INTEGER)
+		return (relic_hash_int64(seed, pending->u.integer));
+
+	return (relic_hash_bytes(seed, pending_text(bytes, pending),
+	    pending->u.text.length));
+}
+
+/*
+ * The bytes of pending string `pending`, which lie in `bytes`.  An empty
+ * string has none, and the buffer that would hold them may not exist yet,
+ * so its bytes are a constant empty string rather than an offset into it.
+ */
+static const char *
+pending_text(const char *bytes, const relic_pending_t *pending)
+{
+	if (pending->u.text.length == 0)
+		return ("");
+
+	return (bytes + pending->u.text.offset);
+}
+
+/*
+ * Whether a value the worker holds is a batch's pending value, whose bytes,
+ * when it is a string, lie in `pending_bytes`: of one kind, and the same
+ * integer or the same bytes.
+ */
+static bool
+pending_equal(const relic_candidates_t *candidates,
+    const relic_pending_t *held, const relic_pending_t *pending,
+    const char *pending_bytes)
+{
+	if (held->kind != pending->kind)
+		return (false);
+	if (held->kind == RELIC_PENDING_INTEGER)
+		return (held->u.integer == pending->u.integer);
+
+	return (held->u.text.length == pending->u.text.length &&
+	    bcmp(pending_text(candidates->value_bytes, held),
+	    pending_text(pending_bytes, pending), held->u.text.length) == 0);
+}
+
+/*
+ * The screen hash of the pending value at position `position` minus one,
+ * for the value screen to use when it grows.
+ */
+static uint32_t
+value_rehash(uint32_t position, void *ctx)
 {
 	const relic_candidates_t *candidates;
 
 	candidates = ctx;
 
-	return (relic_hash_int64(candidates->hash_seed,
-	    candidates->integers[position - 1]));
+	return (pending_hash(candidates->hash_seed,
+	    &candidates->values[position - 1], candidates->value_bytes));
 }
 
 /*
@@ -479,18 +553,19 @@ candidates_reserve(relic_candidates_t *candidates, relic_account_t *account,
 
 /*
  * Grow the candidate arrays by `growth`: those of the candidates when it
- * adds a candidate, whatever its arity, and those of the pending integers
- * when it adds an integer.  Whatever a failed growth managed is kept, and
- * counted by the caller.
+ * adds a candidate, whatever its arity, those of the pending values when it
+ * adds a value, and the values' bytes when it adds a string's.  Whatever a
+ * failed growth managed is kept, and counted by the caller.
  */
 static int
 candidates_grow(relic_candidates_t *candidates,
     const relic_candidates_growth_t *growth)
 {
 	relic_candidate_t *entries;
+	relic_pending_t *values;
 	uint8_t *stripes;
 	relic_dom_t *words;
-	int64_t *integers;
+	char *bytes;
 
 	if (growth->tuples > 0) {
 		entries = relic_grow_array(candidates->entries,
@@ -521,18 +596,27 @@ candidates_grow(relic_candidates_t *candidates,
 			return (-1);
 	}
 
-	if (growth->integers > 0) {
-		integers = relic_grow_array(candidates->integers,
-		    &candidates->integer_capacity,
-		    candidates->integer_count + growth->integers,
-		    sizeof(*candidates->integers));
-		if (integers == NULL)
+	if (growth->values > 0) {
+		values = relic_grow_array(candidates->values,
+		    &candidates->value_capacity,
+		    candidates->value_count + growth->values,
+		    sizeof(*candidates->values));
+		if (values == NULL)
 			return (-1);
-		candidates->integers = integers;
+		candidates->values = values;
 
-		if (relic_idtab_reserve(&candidates->integer_screen,
-		    growth->integers, integer_rehash, candidates) != 0)
+		if (relic_idtab_reserve(&candidates->value_screen,
+		    growth->values, value_rehash, candidates) != 0)
 			return (-1);
+	}
+
+	if (growth->value_bytes > 0) {
+		bytes = relic_grow_array(candidates->value_bytes,
+		    &candidates->value_byte_capacity,
+		    candidates->value_byte_count + growth->value_bytes, 1);
+		if (bytes == NULL)
+			return (-1);
+		candidates->value_bytes = bytes;
 	}
 
 	return (0);
@@ -548,8 +632,9 @@ candidates_bytes(const relic_candidates_t *candidates)
 	    candidates->stripe_capacity * sizeof(*candidates->stripes) +
 	    candidates->word_capacity * sizeof(*candidates->words) +
 	    relic_idtab_bytes(&candidates->screen) +
-	    candidates->integer_capacity * sizeof(*candidates->integers) +
-	    relic_idtab_bytes(&candidates->integer_screen));
+	    candidates->value_capacity * sizeof(*candidates->values) +
+	    relic_idtab_bytes(&candidates->value_screen) +
+	    candidates->value_byte_capacity);
 }
 
 /*
@@ -562,11 +647,13 @@ candidates_bytes_after(const relic_candidates_t *candidates,
     const relic_candidates_growth_t *growth)
 {
 	bool tuples;
-	bool integers;
+	bool values;
+	bool value_bytes;
 	size_t bytes;
 
 	tuples = growth->tuples > 0;
-	integers = growth->integers > 0;
+	values = growth->values > 0;
+	value_bytes = growth->value_bytes > 0;
 
 	bytes = array_bytes_after(candidates->capacity,
 	    candidates->count + growth->tuples, tuples,
@@ -583,13 +670,17 @@ candidates_bytes_after(const relic_candidates_t *candidates,
 	    relic_idtab_bytes_after_reserve(&candidates->screen,
 	    growth->tuples));
 	bytes = relic_saturating_sum(bytes,
-	    array_bytes_after(candidates->integer_capacity,
-	    candidates->integer_count + growth->integers, integers,
-	    sizeof(*candidates->integers)));
+	    array_bytes_after(candidates->value_capacity,
+	    candidates->value_count + growth->values, values,
+	    sizeof(*candidates->values)));
+	bytes = relic_saturating_sum(bytes,
+	    relic_idtab_bytes_after_reserve(&candidates->value_screen,
+	    growth->values));
 
 	return (relic_saturating_sum(bytes,
-	    relic_idtab_bytes_after_reserve(&candidates->integer_screen,
-	    growth->integers)));
+	    array_bytes_after(candidates->value_byte_capacity,
+	    candidates->value_byte_count + growth->value_bytes, value_bytes,
+	    1)));
 }
 
 /*
@@ -619,7 +710,7 @@ relic_candidates_init(relic_candidates_t *candidates, uint64_t hash_seed)
 {
 	bzero(candidates, sizeof(*candidates));
 	relic_idtab_init(&candidates->screen, true);
-	relic_idtab_init(&candidates->integer_screen, true);
+	relic_idtab_init(&candidates->value_screen, true);
 	candidates->hash_seed = hash_seed;
 }
 
@@ -631,21 +722,25 @@ relic_candidates_release(relic_candidates_t *candidates,
 	relic_free_array(candidates->stripes);
 	relic_free_array(candidates->words);
 	relic_idtab_reset(&candidates->screen);
-	relic_free_array(candidates->integers);
-	relic_idtab_reset(&candidates->integer_screen);
+	relic_free_array(candidates->values);
+	relic_free_array(candidates->value_bytes);
+	relic_idtab_reset(&candidates->value_screen);
 	relic_account_release_round(account, candidates->charged);
 
 	candidates->entries = NULL;
 	candidates->stripes = NULL;
 	candidates->words = NULL;
-	candidates->integers = NULL;
+	candidates->values = NULL;
+	candidates->value_bytes = NULL;
 	bzero(candidates->by_stripe, sizeof(candidates->by_stripe));
 	candidates->count = 0;
 	candidates->capacity = 0;
 	candidates->stripe_capacity = 0;
 	candidates->word_count = 0;
 	candidates->word_capacity = 0;
-	candidates->integer_count = 0;
-	candidates->integer_capacity = 0;
+	candidates->value_count = 0;
+	candidates->value_capacity = 0;
+	candidates->value_byte_count = 0;
+	candidates->value_byte_capacity = 0;
 	candidates->charged = 0;
 }

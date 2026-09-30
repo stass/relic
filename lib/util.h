@@ -121,6 +121,19 @@ size_t	 relic_grow_array_capacity_stepwise(size_t capacity, size_t held,
 	    size_t requests, size_t per_request);
 
 /*
+ * The capacity a buffer with room for `capacity` items reaches when it
+ * doubles -- from the smallest array worth having, when it has less --
+ * until it holds `count`, or zero when a doubling on the way would not be
+ * representable.  Unlike relic_grow_array_capacity(), which raises a growth
+ * to the request, this depends only on the largest request a buffer is
+ * ever asked for: growing for one request and then another reaches what
+ * growing once for the larger would.  A buffer sized by the data a plan
+ * meets grows by it, so that its capacity after a run is the same however
+ * the run's requests were divided among the scratches that made them.
+ */
+size_t	 relic_grow_capacity_doubling(size_t capacity, size_t count);
+
+/*
  * Grow an array, in one allocation, to the capacity
  * relic_grow_array_capacity_stepwise() gives: the room `requests` growths
  * of `per_request` items after the `held` would reach one after another.

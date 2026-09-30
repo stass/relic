@@ -189,6 +189,7 @@ static relic_cell_t number_cell(int64_t number);
 static const char *operator_spelling(const relic_step_t *step);
 static bool	 order_satisfies(enum relic_compare_op compare,
 		    enum relic_order order);
+static size_t	 peak(size_t held, size_t capacity);
 static bool	 program_make_room(relic_scratch_t *scratch, size_t count,
 		    const relic_location_t *where);
 static size_t	 program_room_bytes(size_t capacity);
@@ -325,6 +326,33 @@ relic_scratch_end_texts(relic_scratch_t *scratch)
 	scratch->account = NULL;
 }
 
+static size_t
+peak(size_t held, size_t capacity)
+{
+	return (capacity > held ? capacity : held);
+}
+
+void
+relic_text_capacity_raise(relic_text_capacity_t *peaks,
+    const relic_scratch_t *scratch)
+{
+	peaks->text_stack = peak(peaks->text_stack,
+	    scratch->text_stack.capacity);
+	peaks->pending_bytes = peak(peaks->pending_bytes,
+	    scratch->pending_bytes.capacity);
+	peaks->program = peak(peaks->program,
+	    program_room_bytes(scratch->match.capacity));
+	peaks->work = peak(peaks->work,
+	    work_space_bytes(scratch->match.work.capacity));
+}
+
+size_t
+relic_text_capacity_bytes(const relic_text_capacity_t *peaks)
+{
+	return (peaks->text_stack + peaks->pending_bytes + peaks->program +
+	    peaks->work);
+}
+
 /*
  * The bytes of room for a program of `capacity` instructions, and of a
  * work space for one.  Neither product can wrap for a capacity the space
@@ -360,16 +388,17 @@ charge_growth(relic_scratch_t *scratch, size_t old_bytes, size_t new_bytes,
 }
 
 /*
- * The capacity, by the growable-array policy, of a match space part that
- * has `capacity` instructions' room and needs `needed`, with `unit` bytes
- * per instruction, or zero when its bytes could not be counted.
+ * The capacity a match space part that has `capacity` instructions' room
+ * grows to for `needed`, with `unit` bytes per instruction, or zero when
+ * its bytes could not be counted.  It doubles until it fits, as the text
+ * buffers do (buffer_make_room()).
  */
 static size_t
 grown_capacity(size_t capacity, size_t needed, size_t unit)
 {
 	size_t grown;
 
-	grown = relic_grow_array_capacity(capacity, needed);
+	grown = relic_grow_capacity_doubling(capacity, needed);
 	if (grown > SIZE_MAX / unit)
 		return (0);
 
@@ -468,12 +497,22 @@ work_make_room(relic_scratch_t *scratch, size_t count,
 }
 
 /*
- * Make room in `buffer` for `more` bytes past those in use, growing it by
- * the growable-array policy, the growth charged to the round.  Returns true,
- * or false having recorded at `where` that the limit or the allocator
- * refused the growth, the buffer as it was.  A growth moves the buffer, so a
- * caller reads its bytes through offsets and takes pointers into it only
- * after it has made the room it needs.
+ * Make room in `buffer` for `more` bytes past those in use, doubling it
+ * until they fit, the growth charged to the round.  Returns true, or false
+ * having recorded at `where` that the limit or the allocator refused the
+ * growth, the buffer as it was.  A growth moves the buffer, so a caller
+ * reads its bytes through offsets and takes pointers into it only after it
+ * has made the room it needs.
+ *
+ * Doubling makes a buffer's capacity a function of the largest room it was
+ * ever asked for.  The tasks of a parallel round together ask for every
+ * room the serial run asks for, and for pending bytes they may ask for
+ * more: a string the serial run interned earlier in the round is no longer
+ * pending there, while a worker, reading the frozen pool, still carries its
+ * bytes.  So the largest capacity any worker's buffer reaches is at least
+ * the capacity the serial run's would have, which is what the merge's
+ * admission counts (lib/merge.c); a merge declined on the excess is run
+ * again serially, which the limit then judges exactly.
  */
 static bool
 buffer_make_room(relic_scratch_t *scratch, relic_text_buffer_t *buffer,
@@ -486,7 +525,7 @@ buffer_make_room(relic_scratch_t *scratch, relic_text_buffer_t *buffer,
 		return (true);
 
 	capacity = more > SIZE_MAX - buffer->used ? 0 :
-	    relic_grow_array_capacity(buffer->capacity, buffer->used + more);
+	    relic_grow_capacity_doubling(buffer->capacity, buffer->used + more);
 	if (capacity == 0) {
 		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
 		return (false);

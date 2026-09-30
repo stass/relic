@@ -162,16 +162,18 @@ relic_candidate_screen_hash(size_t target, uint64_t hash)
  * positions plus one, so that a tuple the worker has already gathered is
  * not gathered again; one table serves every target of the round.
  *
- * `integers` holds the distinct integers the worker's candidates hold
- * pending, which the value table lacked when the round began, in the order
- * the worker first derived them, and `integer_screen` finds one by value,
- * holding its position plus one, hashed under the context's `hash_seed`.
- * A candidate's column holding such an integer holds that position plus
- * one, which has no type bits and so names no value: equal integers hold
- * equal markers, so a candidate is screened by value as by identifier, and
- * a marker is never found in the frozen store, where no integer the table
+ * `values` holds the distinct values the worker's candidates hold
+ * pending -- integers the value table lacked and strings the context had
+ * not assigned when the round began -- in the order the worker first
+ * derived them, a string's bytes in `value_bytes`, and `value_screen`
+ * finds one by value, holding its position plus one, hashed under the
+ * context's `hash_seed`: an integer by its value, a string by its bytes.
+ * A candidate's column holding such a value holds that position plus one,
+ * which has no type bits and so names no value: equal values hold equal
+ * markers, so a candidate is screened by value as by identifier, and a
+ * marker is never found in the frozen store, where no value the context
  * lacked can be.  The merge replaces every marker with the identifier the
- * integer will take.
+ * value will take.
  *
  * `charged` is what the arrays have been charged to the memory account,
  * which is always what they hold at their capacities: a growth is charged
@@ -185,8 +187,9 @@ struct relic_candidates {
 	uint8_t			*stripes;
 	relic_dom_t		*words;
 	relic_idtab_t		 screen;
-	int64_t			*integers;
-	relic_idtab_t		 integer_screen;
+	relic_pending_t		*values;
+	char			*value_bytes;
+	relic_idtab_t		 value_screen;
 	uint64_t		 hash_seed;
 	size_t			 by_stripe[RELIC_STRIPES];
 	size_t			 count;
@@ -194,8 +197,10 @@ struct relic_candidates {
 	size_t			 stripe_capacity;
 	size_t			 word_count;
 	size_t			 word_capacity;
-	size_t			 integer_count;
-	size_t			 integer_capacity;
+	size_t			 value_count;
+	size_t			 value_capacity;
+	size_t			 value_byte_count;
+	size_t			 value_byte_capacity;
 	size_t			 charged;
 };
 
@@ -292,13 +297,13 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * serially; only a reservation the allocator refused part way leaves some
  * of a relation's arrays, or the integer table's, larger, counted in the
  * storage total, for the serial run to grow into.  A round is not run
- * deferred when it reads a relation it writes, when one of its plans calls
- * a function, when it is too small to repay sharing it among the pool's
- * threads -- unless RELIC_F_PARALLEL_ALWAYS asks for every round -- or when
- * the pool could not be had, and is abandoned when a task could not go on
- * or its merge declined.  A deferred round's merge cannot fail: whatever
- * could refuse it is asked before anything is inserted, and a refusal
- * declines the round.
+ * deferred when it reads a relation it writes, when it is too small to
+ * repay sharing it among the pool's threads -- unless
+ * RELIC_F_PARALLEL_ALWAYS asks for every round -- or when the pool, or the
+ * workers' buffers for the strings a calling round computes, could not be
+ * had, and is abandoned when a task could not go on or its merge declined.
+ * A deferred round's merge cannot fail: whatever could refuse it is asked
+ * before anything is inserted, and a refusal declines the round.
  *
  * relic_round_record() records in an item's history, when it has one,
  * that its turn in a round run serially did `work`, the tuples it read and
@@ -317,10 +322,12 @@ const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
  * the round's targets, as the serial evaluator would have inserted them, on
  * the pool's workers.  Returns true once it has, or false having inserted
  * nothing, when a limit or the allocator would refuse the merge, for the
- * round to be run serially.  The candidates are the caller's to release.
+ * round to be run serially.  `texts_bytes` is at least what the serial
+ * run's text buffers would hold by the round's end, which the memory limit
+ * is asked of beside the growth.  The candidates are the caller's to release.
  */
 bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
-	    relic_round_t *round);
+	    relic_round_t *round, size_t texts_bytes);
 
 /*
  * lib/pool.c

@@ -30,7 +30,7 @@
  * identifier, and then makes every part of every relation what the serial
  * insertions would have made it, each part at once.
  *
- *	resolve		(worker 0) promise each integer the candidates hold
+ *	resolve		(worker 0) promise each value the candidates hold
  *			pending the identifier the serial run gives it, and
  *			write it over each marker, hashing the candidate
  *			again;
@@ -50,8 +50,9 @@
  *			serial insertions would hold, with the tables their
  *			growth replaces held beside it, and grow every array
  *			to it, preparing each table's growth without filling
- *			it; grow the integer table for the new integers;
- *	apply		(worker 0) append the new integers and store the
+ *			it; grow the value table and the pool for the new
+ *			values;
+ *	apply		(worker 0) append the new values and store the
  *			columns; then a stripe to a part, fill each grown
  *			table, place the canonical entries and link the
  *			chains.
@@ -106,11 +107,15 @@ struct relic_merge_part {
 /*
  * A merge under way.  `appends` holds each target's new tuples, and
  * `projected` the bytes each target will hold once it has taken them.
- * `pending` holds the round's `pending_count` pending integers in task
- * order, `pending_map` the identifier each is promised, and
+ * `pending` holds the round's `pending_count` pending values in task
+ * order, the strings' bytes in `pending_bytes`, where each worker's lie
+ * together, `pending_map` the identifier each is promised, and
  * `table_projected` the bytes the value table and the pool will hold once
- * they have taken the new ones; `pending_charged` is what the two arrays
- * were charged.
+ * they have taken the new ones; `pending_charged` is what the three were
+ * charged, and `pending_reserved` says the value table and the pool hold
+ * a reservation for them not yet appended.  `texts_bytes` is at least
+ * what the serial run's text buffers would hold by the round's end, which
+ * the admission counts.
  * `task_firsts[t * RELIC_STRIPES + s]` counts task t's firsts in stripe s,
  * and `task_starts[t]` is the position task t's first new tuple takes in
  * its target's append.  `classify_parts` and `apply_parts` list the parts
@@ -131,9 +136,12 @@ struct relic_merge {
 	size_t			 apply_part_count;
 	relic_pending_t		*pending;
 	size_t			 pending_count;
+	char			*pending_bytes;
 	relic_pending_map_t	 pending_map;
 	size_t			 pending_charged;
 	size_t			 table_projected;
+	size_t			 texts_bytes;
+	bool			 pending_reserved;
 	relic_atomic_bool_t	 refused;
 };
 
@@ -172,13 +180,16 @@ static void	 new_keys_close(relic_account_t *account,
 static int	 new_keys_open(relic_account_t *account,
 		    relic_new_keys_t *new_keys, size_t count, size_t *chargedp);
 static size_t	 pending_columns(const relic_pool_t *pool);
-static int	 pending_open(relic_merge_t *merge, size_t count);
+static int	 pending_open(relic_merge_t *merge, size_t count,
+		    size_t bytes);
+static size_t	 pending_string_bytes(const relic_pool_t *pool);
 static int	 prepare_merge(relic_merge_t *merge, relic_t *ctx,
-		    relic_pool_t *pool, relic_round_t *round);
+		    relic_pool_t *pool, relic_round_t *round,
+		    size_t texts_bytes);
 static void	 rehash_worker(void *argument, size_t worker,
 		    size_t worker_index);
 static int	 reserve_room(relic_merge_t *merge);
-static int	 resolve_integers(relic_merge_t *merge);
+static int	 resolve_pending(relic_merge_t *merge);
 static int	 scratch_table_open(relic_account_t *account,
 		    relic_idtab_t *table, size_t count, size_t *chargedp);
 static int	 stage_new_tuples(relic_merge_t *merge);
@@ -189,12 +200,13 @@ static const relic_dom_t *tuple_of(const relic_merge_t *merge,
 		    relic_merge_ref_t ref);
 
 bool
-relic_round_merge(relic_t *ctx, relic_pool_t *pool, relic_round_t *round)
+relic_round_merge(relic_t *ctx, relic_pool_t *pool, relic_round_t *round,
+    size_t texts_bytes)
 {
 	relic_merge_t merge;
 	bool merged;
 
-	merged = prepare_merge(&merge, ctx, pool, round) == 0;
+	merged = prepare_merge(&merge, ctx, pool, round, texts_bytes) == 0;
 	if (merged)
 		apply_merge(&merge);
 	merge_end(&merge);
@@ -250,11 +262,12 @@ merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
  */
 static int
 prepare_merge(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
-    relic_round_t *round)
+    relic_round_t *round, size_t texts_bytes)
 {
 	if (merge_begin(merge, ctx, pool, round) != 0)
 		return (-1);
-	if (resolve_integers(merge) != 0)
+	merge->texts_bytes = texts_bytes;
+	if (resolve_pending(merge) != 0)
 		return (-1);
 	if (find_new_tuples(merge) != 0)
 		return (-1);
@@ -272,32 +285,34 @@ prepare_merge(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
 }
 
 /*
- * Promise every integer the candidates hold pending the identifier it will
+ * Promise every value the candidates hold pending the identifier it will
  * take, and write it over each marker, hashing each candidate that held one
- * again, a worker's candidates to a part.  The integers are gathered in
- * task order, each task's candidates in the order its worker derived them
- * and each candidate's columns in order, which is the order the serial
- * evaluator meets them in, and the value table promises identifiers in
- * order of first occurrence: each integer is promised the identifier the
- * serial run gives it.  Nothing is interned until the merge can no longer
- * be declined.  Returns 0, or -1 when the round holds more pending columns
- * than a marker can count or their arrays could not be had.
+ * again, a worker's candidates to a part.  The values are gathered in task
+ * order, each task's candidates in the order its worker derived them and
+ * each candidate's columns in order, which is the order the serial
+ * evaluator meets them in, and the value table and the pool promise
+ * identifiers in order of first occurrence: each value is promised the
+ * identifier the serial run gives it.  Nothing is interned until the merge
+ * can no longer be declined.  Returns 0, or -1 when the round holds more
+ * pending columns than a marker can count or their arrays could not be had.
  */
 static int
-resolve_integers(relic_merge_t *merge)
+resolve_pending(relic_merge_t *merge)
 {
 	size_t count;
 
 	count = pending_columns(merge->pool);
 	if (count == 0)
 		return (0);
-	if (count > RELIC_DOM_INDEX_MASK || pending_open(merge, count) != 0)
+	if (count > RELIC_DOM_INDEX_MASK ||
+	    pending_open(merge, count, pending_string_bytes(merge->pool)) != 0)
 		return (-1);
 
 	gather_pending(merge);
 	assert(merge->pending_count == count);
 	merge->table_projected = relic_pending_measure(merge->ctx,
-	    merge->pending, merge->pending_count, NULL, &merge->pending_map);
+	    merge->pending, merge->pending_count, merge->pending_bytes,
+	    &merge->pending_map);
 	relic_pool_for(merge->pool, merge->pool->worker_count, rehash_worker,
 	    merge);
 
@@ -306,7 +321,7 @@ resolve_integers(relic_merge_t *merge)
 
 /*
  * How many columns of every worker's candidates hold a pending marker.  A
- * worker that met no integer the table lacked holds none.
+ * worker that met no value the context lacked holds none.
  */
 static size_t
 pending_columns(const relic_pool_t *pool)
@@ -319,7 +334,7 @@ pending_columns(const relic_pool_t *pool)
 	count = 0;
 	for (w = 0; w < pool->worker_count; w++) {
 		candidates = &pool->workers[w].candidates;
-		if (candidates->integer_count == 0)
+		if (candidates->value_count == 0)
 			continue;
 
 		for (i = 0; i < candidates->word_count; i++) {
@@ -332,57 +347,96 @@ pending_columns(const relic_pool_t *pool)
 }
 
 /*
- * Make the arrays of `count` pending integers and their map, charged to the
- * round.  Returns 0, or -1 having charged nothing, when their bytes are more
- * than a size can count or the limit or the allocator refused them.
+ * The bytes of every worker's pending strings, each distinct string of a
+ * worker counted once.
+ */
+static size_t
+pending_string_bytes(const relic_pool_t *pool)
+{
+	size_t bytes;
+	size_t w;
+
+	bytes = 0;
+	for (w = 0; w < pool->worker_count; w++)
+		bytes += pool->workers[w].candidates.value_byte_count;
+
+	return (bytes);
+}
+
+/*
+ * Make the arrays of `count` pending values, the buffer for `bytes` bytes of
+ * their strings, and their map, charged to the round.  Returns 0, or -1
+ * having charged nothing, when their bytes are more than a size can count
+ * or the limit or the allocator refused them.
  */
 static int
-pending_open(relic_merge_t *merge, size_t count)
+pending_open(relic_merge_t *merge, size_t count, size_t bytes)
 {
 	relic_account_t *account;
-	size_t bytes;
+	size_t charge;
 
 	account = &merge->ctx->account;
-	bytes = relic_saturating_sum(relic_saturating_product(count,
+	charge = relic_saturating_sum(relic_saturating_product(count,
 	    sizeof(*merge->pending)), relic_pending_map_bytes(count));
-	if (bytes == SIZE_MAX || !relic_account_charge_round(account, bytes))
+	charge = relic_saturating_sum(charge, bytes);
+	if (charge == SIZE_MAX || !relic_account_charge_round(account, charge))
 		return (-1);
 
 	merge->pending = calloc(count, sizeof(*merge->pending));
-	if (merge->pending == NULL ||
+	merge->pending_bytes = malloc(bytes > 0 ? bytes : 1);
+	if (merge->pending == NULL || merge->pending_bytes == NULL ||
 	    relic_pending_map_open(&merge->pending_map, count) != 0) {
 		free(merge->pending);
+		free(merge->pending_bytes);
 		merge->pending = NULL;
-		relic_account_release_round(account, bytes);
+		merge->pending_bytes = NULL;
+		relic_account_release_round(account, charge);
 		return (-1);
 	}
-	merge->pending_charged = bytes;
+	merge->pending_charged = charge;
 
 	return (0);
 }
 
 /*
- * Gather the candidates' pending integers into the round's, in task order,
- * rewriting each marker, which names an integer among its worker's, to
- * name it among the round's.
+ * Gather the candidates' pending values into the round's, in task order,
+ * rewriting each marker, which names a value among its worker's, to name it
+ * among the round's.  Each worker's string bytes are copied once, together,
+ * and a string among the round's names its bytes where its worker's landed.
  */
 static void
 gather_pending(relic_merge_t *merge)
 {
+	const relic_candidates_t *holder;
 	const relic_round_task_t *task;
 	relic_candidates_t *candidates;
 	relic_candidate_t *candidate;
+	size_t base[RELIC_THREADS_MAX];
+	relic_pending_t *value;
 	relic_dom_t *tuple;
 	uint16_t arity;
 	uint16_t column;
+	size_t copied;
 	size_t end;
 	size_t t;
 	size_t i;
+	size_t w;
+
+	assert(merge->pool->worker_count <= RELIC_THREADS_MAX);
+	copied = 0;
+	for (w = 0; w < merge->pool->worker_count; w++) {
+		holder = &merge->pool->workers[w].candidates;
+		base[w] = copied;
+		if (holder->value_byte_count > 0)
+			bcopy(holder->value_bytes, merge->pending_bytes + copied,
+			    holder->value_byte_count);
+		copied += holder->value_byte_count;
+	}
 
 	for (t = 0; t < merge->pool->task_count; t++) {
 		task = &merge->pool->tasks[t];
 		candidates = &merge->pool->workers[task->worker].candidates;
-		if (candidates->integer_count == 0)
+		if (candidates->value_count == 0)
 			continue;
 
 		end = task->first_candidate + task->candidate_count;
@@ -395,12 +449,11 @@ gather_pending(relic_merge_t *merge)
 				if ((tuple[column] & RELIC_DOM_TYPE_MASK) != 0)
 					continue;
 
-				assert(tuple[column] <=
-				    candidates->integer_count);
-				merge->pending[merge->pending_count].kind =
-				    RELIC_PENDING_INTEGER;
-				merge->pending[merge->pending_count].u.integer =
-				    candidates->integers[tuple[column] - 1];
+				assert(tuple[column] <= candidates->value_count);
+				value = &merge->pending[merge->pending_count];
+				*value = candidates->values[tuple[column] - 1];
+				if (value->kind == RELIC_PENDING_TEXT)
+					value->u.text.offset += base[task->worker];
 				merge->pending_count++;
 				tuple[column] =
 				    (relic_dom_t)merge->pending_count;
@@ -428,7 +481,7 @@ rehash_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
 
 	merge = argument;
 	candidates = &merge->pool->workers[worker].candidates;
-	if (candidates->integer_count == 0)
+	if (candidates->value_count == 0)
 		return;
 
 	for (i = 0; i < candidates->count; i++) {
@@ -820,7 +873,11 @@ classify_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
  * tuples -- exactly what it would hold once it had taken them, and beside
  * that the tables its growth replaces until they are freed -- and of what
  * the value table and the pool hold once they have taken the new values,
- * with everything the round holds still charged, and make that room.
+ * with everything the round holds still charged, and make that room.  The
+ * serial run would hold its text buffers too, at the capacity they reach
+ * by the round's end, and the question counts them: the workers' own were
+ * released before it, so that the admission is at least as strict as every
+ * question the serial run puts in the round.
  * Returns 0, or -1 when the limit would refuse, a growth could not happen,
  * or the allocator refused one.  What a refused reservation obtained stays
  * counted, the prepared tables until merge_end() releases them.
@@ -851,6 +908,7 @@ reserve_room(relic_merge_t *merge)
 		growth = relic_saturating_sum(growth,
 		    during - relic_relation_bytes(relation));
 	}
+	growth = relic_saturating_sum(growth, merge->texts_bytes);
 	if (relic_account_exceeds(&merge->ctx->account, table_now,
 	    relic_saturating_sum(growth, table_then))) {
 		merge->pool->limit_declines++;
@@ -858,13 +916,16 @@ reserve_room(relic_merge_t *merge)
 	}
 
 	/*
-	 * The integer table is reserved first: it can also refuse for having
-	 * no identifiers left, which the serial evaluator meets before it
-	 * inserts the batch, and so before any relation has grown.
+	 * The value table and the pool are reserved first: they can also
+	 * refuse for having no identifiers left, which the serial evaluator
+	 * meets before it inserts the batch, and so before any relation has
+	 * grown.
 	 */
-	if (merge->pending_count > 0 &&
-	    relic_pending_reserve(merge->ctx, &merge->pending_map) != 0)
-		return (-1);
+	if (merge->pending_count > 0) {
+		if (relic_pending_reserve(merge->ctx, &merge->pending_map) != 0)
+			return (-1);
+		merge->pending_reserved = true;
+	}
 	for (t = 0; t < merge->round->target_count; t++) {
 		if (relic_relation_reserve_append(merge->ctx,
 		    merge->round->targets[t], &merge->appends[t]) != 0)
@@ -897,6 +958,7 @@ apply_merge(relic_merge_t *merge)
 
 	if (merge->pending_count > 0) {
 		relic_pending_append(merge->ctx, &merge->pending_map);
+		merge->pending_reserved = false;
 		assert(relic_value_storage_bytes(merge->ctx) ==
 		    merge->table_projected);
 	}
@@ -957,8 +1019,8 @@ apply_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
 /*
  * Release everything the merge holds, whether it applied or declined: the
  * appends, with their charge and whatever growth they prepared and did not
- * fill, the pending integers and their map, with their charge, and the
- * records.
+ * fill, the pending values, their bytes and their map, with their charge,
+ * and the records.
  */
 static void
 merge_end(relic_merge_t *merge)
@@ -971,8 +1033,17 @@ merge_end(relic_merge_t *merge)
 			    &merge->appends[t]);
 	}
 
+	/*
+	 * A reservation made for a merge that then declined is given back:
+	 * the serial run makes its own, and the copies of the new strings
+	 * must not be made twice.
+	 */
+	if (merge->pending_reserved)
+		relic_pending_unreserve(merge->ctx, &merge->pending_map);
+
 	if (merge->pending != NULL) {
 		free(merge->pending);
+		free(merge->pending_bytes);
 		relic_pending_map_close(&merge->pending_map);
 		relic_account_release_round(&merge->ctx->account,
 		    merge->pending_charged);
