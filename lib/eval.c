@@ -712,20 +712,25 @@ describe_fold(const relic_t *ctx, const relic_aggregate_t *aggregate,
 
 /*
  * Report the failure a plan of `rule` recorded while deriving into
- * `relation`.  A result that is not a value names the program rule it came
- * from, or the query, at the literal that computed it.  A buffer the memory
- * limit would not let grow is reported as the limit refusing an insertion
- * into `relation` is, and one the allocator would not give as every
- * allocation failure is.
+ * `relation`.  A result that is not a value, or a pattern that is not a
+ * regular expression, names the program rule it came from, or the query,
+ * at the literal that met it; a pattern's message then says why it is not
+ * one.  A buffer the memory limit would not let grow is reported as the
+ * limit refusing an insertion into `relation` is, and one the allocator
+ * would not give as every allocation failure is.
  */
 static void
 report_failure(relic_t *ctx, const relic_rule_t *rule,
     const relic_relation_t *relation, const relic_exec_error_t *error)
 {
 	char described[RELIC_PRED_TEXT_MAX];
+	const char *separator;
+	const char *detail;
 	const char *what;
 
 	what = "integer overflow";
+	separator = "";
+	detail = "";
 	switch (error->failure) {
 	case RELIC_FAIL_OVERFLOW:
 		break;
@@ -735,6 +740,11 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
 	case RELIC_FAIL_TOO_LONG:
 		what = "string too long";
 		break;
+	case RELIC_FAIL_PATTERN:
+		what = "invalid regular expression";
+		separator = ": ";
+		detail = relic_regex_message(error->pattern);
+		break;
 	case RELIC_FAIL_LIMIT:
 	case RELIC_FAIL_NO_MEMORY:
 		report_texts_refused(ctx, relation, error->failure);
@@ -742,15 +752,15 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
 	}
 
 	if (rule->origin == RELIC_ORIGIN_QUERY) {
-		relic_diagf(ctx, RELIC_ERROR, error->where, "%s in the query",
-		    what);
+		relic_diagf(ctx, RELIC_ERROR, error->where,
+		    "%s in the query%s%s", what, separator, detail);
 		return;
 	}
 
-	relic_diagf(ctx, RELIC_ERROR, error->where, "%s in rule %s", what,
+	relic_diagf(ctx, RELIC_ERROR, error->where, "%s in rule %s%s%s", what,
 	    relic_pred_describe(ctx,
 	    ctx->program.rules.entries[rule->origin].head, described,
-	    sizeof(described)));
+	    sizeof(described)), separator, detail);
 }
 
 /*

@@ -1215,10 +1215,9 @@ without it; the verdicts are provisional until a design exists.
   tests as comparisons over the positions they return, a regular expression
   matcher of relic's own in `lib/regex.c`, computed strings on the
   pending-value mechanism with the symbol pool charged to the memory
-  limit; five steps, of which the front end and the serial plan and
-  executor are built, `match` is refused by the planner until the matcher
-  exists, and a round whose rules call a function runs serially until the
-  frozen round carries pending strings. What remains beyond the steps:
+  limit; five steps, of which the front end, the serial plan and
+  executor, and the matcher are built, and a round whose rules call a
+  function runs serially until the frozen round carries pending strings. What remains beyond the steps:
   * [Medium, performance, `lib/exec.c`, `lib/value.c`] the step-2 gate is
     not met: over a million sources, `object/2` of the design's section 2
     adds 0.60 s to the load where the same join assigning a constant adds

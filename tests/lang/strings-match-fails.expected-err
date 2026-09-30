@@ -1,0 +1,1 @@
+strings-match-fails.dl:9:35: error: invalid regular expression in rule hit/2: unmatched (

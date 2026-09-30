@@ -479,9 +479,13 @@ names which:
 
 ```text
 unmatched (          unmatched )          unterminated [
-nothing to repeat    reversed range       trailing \
+nothing to repeat    reversed range       trailing backslash
 nested more than 32 levels deep
 ```
+
+The last byte is named rather than shown because a diagnostic printer
+doubles every backslash it prints, so that a message cannot be misread,
+and `trailing \` would reach the reader as `trailing \\`.
 
 **What is not in the dialect, and why.** Counted repetition, `a{3,5}`: it
 is sugar, `aaaa?a?`, and the one construct under which the compiled pattern

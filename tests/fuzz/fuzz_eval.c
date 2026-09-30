@@ -38,13 +38,14 @@
  * a large relation is refused rather than timing out.  The reference derives
  * different amounts, so a limit may refuse a query in the reference and not
  * in the optimized context, or the other way round; and it evaluates
- * expressions over other bindings, so an arithmetic result that does not
- * fit, an overflow or a zero divisor, may stop one and not the other.  Only
- * queries both answer are compared.  Deferral changes nothing but the cost,
- * so the deferred context must answer exactly the queries the optimized one
- * does, and a limit or an undefined result must stop the rest in both.  A
- * query that fails for any other reason is a finding.  Loading and checking
- * do not depend on the strategy, so the contexts must accept or refuse the
+ * expressions over other bindings, so an evaluation error -- an arithmetic
+ * result that does not fit, a zero divisor, a string too long or a pattern
+ * that is not one -- may stop one and not the other.  Only queries both
+ * answer are compared.  Deferral changes nothing but the cost, so the
+ * deferred context must answer exactly the queries the optimized one does,
+ * and a limit or an evaluation error must stop the rest in both.  A query
+ * that fails for any other reason is a finding.  Loading and checking do
+ * not depend on the strategy, so the contexts must accept or refuse the
  * program alike.
  */
 
@@ -54,7 +55,7 @@
 /*
  * The errors a context reported during one call: how many, and whether the
  * last was one that may stop a query without being a finding: a limit's
- * refusal or an undefined arithmetic result.  Reset before each call, so
+ * refusal or an evaluation error.  Reset before each call, so
  * that a call that fails without reporting anything is seen as the finding
  * it is rather than excused by an error some earlier call left behind.
  */
@@ -222,7 +223,7 @@ compare_answers(size_t index, const char *strategy, const answer_t *answer,
 
 /*
  * Answer query `index` in ctx.  Returns false when a limit refused it or
- * it met an undefined arithmetic result, and aborts when it failed any other
+ * it met an evaluation error, and aborts when it failed any other
  * way, or without saying why: with nothing but those to stop it, a query
  * over a program that checked must be answered.
  */
@@ -257,8 +258,12 @@ collect_unless_stopped(relic_t *ctx, error_capture_t *errors, size_t index,
 
 /*
  * Count an error and note whether it may stop a query: a limit's refusal,
- * which every limit words the same way, or an undefined arithmetic result,
- * which names its operation first.  Warnings and notes are discarded.
+ * which every limit words the same way, or an evaluation error -- an
+ * undefined arithmetic result, a string too long to be a value, or a
+ * pattern arriving in a variable that is not a regular expression -- which
+ * names its failure first.  A constant pattern that is not one is refused
+ * at load, alike in every context, and is worded without the " in ".
+ * Warnings and notes are discarded.
  */
 static void
 capture_error(void *capture_ctx, enum relic_diag_level level,
@@ -267,7 +272,9 @@ capture_error(void *capture_ctx, enum relic_diag_level level,
 	static const char *const stops[] = {
 		"limit exceeded:",
 		"integer overflow in ",
-		"division by zero in "
+		"division by zero in ",
+		"string too long in ",
+		"invalid regular expression in "
 	};
 	error_capture_t *errors = capture_ctx;
 

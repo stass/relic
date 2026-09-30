@@ -135,7 +135,11 @@ static enum relic_run_end call_cat(relic_scratch_t *scratch,
 		    const relic_cell_t *args, relic_cell_t *resultp);
 static enum relic_run_end call_function(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_location_t *where,
-		    enum relic_function fn, const relic_cell_t *args,
+		    enum relic_function fn, const relic_pattern_t *pattern,
+		    const relic_cell_t *args, relic_cell_t *resultp);
+static enum relic_run_end call_match(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    const relic_pattern_t *compiled, const relic_cell_t *args,
 		    relic_cell_t *resultp);
 static enum relic_run_end call_str(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_location_t *where,
@@ -152,6 +156,11 @@ static bool	 cell_string(const relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, relic_cell_t cell,
 		    const char **bytesp, size_t *lengthp);
 static relic_dom_t cell_type(relic_cell_t cell);
+static bool	 charge_growth(relic_scratch_t *scratch, size_t old_bytes,
+		    size_t new_bytes, const relic_location_t *where);
+static bool	 compile_pattern(relic_scratch_t *scratch,
+		    const relic_location_t *where, const char *bytes,
+		    size_t length, relic_pattern_t *patternp);
 static enum relic_order cells_order(const relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, relic_cell_t left,
 		    relic_cell_t right);
@@ -172,6 +181,7 @@ static bool	 fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
 static bool	 fold_value(relic_scratch_t *scratch,
 		    const relic_op_aggregate_t *aggregate,
 		    const relic_fold_t *fold, relic_cell_t *valuep);
+static size_t	 grown_capacity(size_t capacity, size_t needed, size_t unit);
 static bool	 key_matches(const relic_scratch_t *scratch,
 		    const relic_op_aggregate_t *aggregate,
 		    const relic_dom_t *tuple);
@@ -179,6 +189,9 @@ static relic_cell_t number_cell(int64_t number);
 static const char *operator_spelling(const relic_step_t *step);
 static bool	 order_satisfies(enum relic_compare_op compare,
 		    enum relic_order order);
+static bool	 program_make_room(relic_scratch_t *scratch, size_t count,
+		    const relic_location_t *where);
+static size_t	 program_room_bytes(size_t capacity);
 static void	 record_aggregate_note(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
 		    const relic_op_aggregate_t *aggregate,
@@ -186,6 +199,9 @@ static void	 record_aggregate_note(relic_scratch_t *scratch,
 static void	 record_error(relic_scratch_t *scratch,
 		    const relic_location_t *where,
 		    enum relic_exec_failure failure);
+static void	 record_pattern_error(relic_scratch_t *scratch,
+		    const relic_location_t *where,
+		    enum relic_regex_failure pattern);
 static void	 record_operand_note(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_location_t *where,
 		    const char *spelling, relic_cell_t operand);
@@ -226,6 +242,9 @@ static relic_cell_t text_cell(size_t offset, size_t length);
 static relic_cell_t text_push(relic_scratch_t *scratch, size_t length);
 static bool	 tuple_matches(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, const relic_dom_t *tuple);
+static bool	 work_make_room(relic_scratch_t *scratch, size_t count,
+		    const relic_location_t *where);
+static size_t	 work_space_bytes(size_t capacity);
 static enum relic_exec_status yield_after_emit(relic_scratch_t *scratch,
 		    size_t level);
 static enum relic_exec_status yield_before_emit(relic_scratch_t *scratch,
@@ -247,7 +266,8 @@ relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
 
 /*
  * The two buffers are made together and freed together, so a scratch holds
- * both or neither.
+ * both or neither.  The match space begins empty, since most rounds match
+ * nothing, and is freed with them.
  */
 int
 relic_scratch_begin_texts(relic_scratch_t *scratch, relic_account_t *account,
@@ -256,6 +276,7 @@ relic_scratch_begin_texts(relic_scratch_t *scratch, relic_account_t *account,
 	const size_t bytes = RELIC_TEXT_STACK_INITIAL + RELIC_PENDING_BYTES;
 
 	assert(scratch->text_stack.bytes == NULL);
+	assert(scratch->match.insts == NULL && scratch->match.work.words == NULL);
 
 	*failurep = RELIC_FAIL_LIMIT;
 	if (!relic_account_charge_round(account, bytes))
@@ -291,12 +312,159 @@ relic_scratch_end_texts(relic_scratch_t *scratch)
 		return;
 
 	relic_account_release_round(scratch->account,
-	    scratch->text_stack.capacity + scratch->pending_bytes.capacity);
+	    scratch->text_stack.capacity + scratch->pending_bytes.capacity +
+	    program_room_bytes(scratch->match.capacity) +
+	    work_space_bytes(scratch->match.work.capacity));
 	free(scratch->text_stack.bytes);
 	free(scratch->pending_bytes.bytes);
+	free(scratch->match.insts);
+	free(scratch->match.work.words);
 	bzero(&scratch->text_stack, sizeof(scratch->text_stack));
 	bzero(&scratch->pending_bytes, sizeof(scratch->pending_bytes));
+	bzero(&scratch->match, sizeof(scratch->match));
 	scratch->account = NULL;
+}
+
+/*
+ * The bytes of room for a program of `capacity` instructions, and of a
+ * work space for one.  Neither product can wrap for a capacity the space
+ * has, since each was checked when the space grew to it.
+ */
+static size_t
+program_room_bytes(size_t capacity)
+{
+	return (capacity * sizeof(relic_regex_inst_t));
+}
+
+static size_t
+work_space_bytes(size_t capacity)
+{
+	return (capacity * RELIC_REGEX_WORK_WORDS * sizeof(uint32_t));
+}
+
+/*
+ * Charge the growth of a round's buffer from `old_bytes` to `new_bytes`, or
+ * record at `where` that the limit refused it.
+ */
+static bool
+charge_growth(relic_scratch_t *scratch, size_t old_bytes, size_t new_bytes,
+    const relic_location_t *where)
+{
+	if (!relic_account_charge_round(scratch->account,
+	    new_bytes - old_bytes)) {
+		record_error(scratch, where, RELIC_FAIL_LIMIT);
+		return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * The capacity, by the growable-array policy, of a match space part that
+ * has `capacity` instructions' room and needs `needed`, with `unit` bytes
+ * per instruction, or zero when its bytes could not be counted.
+ */
+static size_t
+grown_capacity(size_t capacity, size_t needed, size_t unit)
+{
+	size_t grown;
+
+	grown = relic_grow_array_capacity(capacity, needed);
+	if (grown > SIZE_MAX / unit)
+		return (0);
+
+	return (grown);
+}
+
+/*
+ * Make room in the match space for a program of `count` instructions to be
+ * compiled into, charged to the round.  What the room held is not kept,
+ * since every program compiled into it is run once and discarded.  Returns
+ * true, or false with the refusal recorded at `where` and the space as it
+ * was.
+ */
+static bool
+program_make_room(relic_scratch_t *scratch, size_t count,
+    const relic_location_t *where)
+{
+	relic_match_space_t *space;
+	relic_regex_inst_t *insts;
+	size_t capacity;
+
+	space = &scratch->match;
+	if (count <= space->capacity)
+		return (true);
+
+	capacity = grown_capacity(space->capacity, count,
+	    sizeof(relic_regex_inst_t));
+	if (capacity == 0) {
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+	if (!charge_growth(scratch, program_room_bytes(space->capacity),
+	    program_room_bytes(capacity), where))
+		return (false);
+
+	insts = malloc(program_room_bytes(capacity));
+	if (insts == NULL) {
+		relic_account_release_round(scratch->account,
+		    program_room_bytes(capacity) -
+		    program_room_bytes(space->capacity));
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+
+	free(space->insts);
+	space->insts = insts;
+	space->capacity = capacity;
+
+	return (true);
+}
+
+/*
+ * Make the matcher's work space serve a program of `count` instructions,
+ * as program_make_room() makes room for a program.  A grown space starts
+ * zeroed, with its stamp at zero, which is the state the matcher asks a new
+ * work space to be in: a mark left over from a smaller space would say an
+ * instruction is on a list it is not on.
+ */
+static bool
+work_make_room(relic_scratch_t *scratch, size_t count,
+    const relic_location_t *where)
+{
+	relic_regex_work_t *work;
+	uint32_t *words;
+	size_t capacity;
+
+	work = &scratch->match.work;
+	if (count <= work->capacity)
+		return (true);
+
+	capacity = grown_capacity(work->capacity, count,
+	    RELIC_REGEX_WORK_WORDS * sizeof(uint32_t));
+	if (capacity == 0) {
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+	if (!charge_growth(scratch, work_space_bytes(work->capacity),
+	    work_space_bytes(capacity), where))
+		return (false);
+
+	words = calloc(capacity * RELIC_REGEX_WORK_WORDS, sizeof(uint32_t));
+	if (words == NULL) {
+		relic_account_release_round(scratch->account,
+		    work_space_bytes(capacity) -
+		    work_space_bytes(work->capacity));
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+
+	free(work->words);
+	work->words = words;
+	work->capacity = capacity;
+	work->stamp = 0;
+
+	return (true);
 }
 
 /*
@@ -722,6 +890,21 @@ record_error(relic_scratch_t *scratch, const relic_location_t *where,
 }
 
 /*
+ * Record that a pattern met at `where` was not a regular expression, and
+ * why.
+ */
+static void
+record_pattern_error(relic_scratch_t *scratch, const relic_location_t *where,
+    enum relic_regex_failure pattern)
+{
+	if (scratch->error.failed)
+		return;
+
+	record_error(scratch, where, RELIC_FAIL_PATTERN);
+	scratch->error.pattern = pattern;
+}
+
+/*
  * How an arithmetic step's operator is written.
  */
 static const char *
@@ -871,14 +1054,87 @@ call_str(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
+ * `match`: where the leftmost match of the pattern begins in the string, or
+ * -1 when none does.  A pattern the rule compiled is run as it is; one that
+ * arrives as a value is compiled into the match space first, and fails the
+ * evaluation when it is not a regular expression.  Growing the match space
+ * never moves the text stack, so the string's bytes stay where they are.
+ */
+static enum relic_run_end
+call_match(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, const relic_pattern_t *compiled,
+    const relic_cell_t *args, relic_cell_t *resultp)
+{
+	relic_pattern_t pattern;
+	const char *source;
+	const char *text;
+	size_t source_length;
+	size_t text_length;
+
+	if (!cell_string(scratch, env, args[0], &text, &text_length) ||
+	    !cell_string(scratch, env, args[1], &source, &source_length))
+		return (RELIC_RUN_NO_VALUE);
+
+	if (compiled != NULL)
+		pattern = *compiled;
+	else if (!compile_pattern(scratch, where, source, source_length,
+	    &pattern))
+		return (RELIC_RUN_FAILED);
+
+	if (!work_make_room(scratch, pattern.count, where))
+		return (RELIC_RUN_FAILED);
+
+	*resultp = number_cell(relic_regex_match(pattern.insts, pattern.count,
+	    &scratch->match.work, text, text_length));
+
+	return (RELIC_RUN_VALUE);
+}
+
+/*
+ * Compile the `length` bytes of a pattern into the match space's program
+ * room, setting *patternp to the program there.  Returns true, or false
+ * with the failure recorded: the pattern not a regular expression, or the
+ * room not to be had.  A pattern too long for its program's instructions to
+ * be numbered would need more room than any allocator gives, and is refused
+ * as the allocator refusing it.
+ */
+static bool
+compile_pattern(relic_scratch_t *scratch, const relic_location_t *where,
+    const char *bytes, size_t length, relic_pattern_t *patternp)
+{
+	relic_regex_error_t error;
+	size_t capacity;
+
+	capacity = relic_regex_capacity(length);
+	if (capacity == 0) {
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+	if (!program_make_room(scratch, capacity, where))
+		return (false);
+
+	patternp->insts = scratch->match.insts;
+	patternp->count = relic_regex_compile(bytes, length,
+	    scratch->match.insts, &error);
+	if (patternp->count == 0) {
+		record_pattern_error(scratch, where, error.failure);
+		return (false);
+	}
+
+	return (true);
+}
+
+/*
  * Call `fn` on `args`, one cell per argument, leaving the result in
- * *resultp.  An argument not of the kind the function wants gives the call
- * no value, with the note recorded, before anything is computed.
+ * *resultp; `pattern` is a match's pattern compiled with the rule, or NULL.
+ * An argument not of the kind the function wants gives the call no value,
+ * with the note recorded, before anything is computed.
  */
 static enum relic_run_end
 call_function(relic_scratch_t *scratch, const relic_exec_env_t *env,
     const relic_location_t *where, enum relic_function fn,
-    const relic_cell_t *args, relic_cell_t *resultp)
+    const relic_pattern_t *pattern, const relic_cell_t *args,
+    relic_cell_t *resultp)
 {
 	const relic_function_info_t *info;
 	const char *haystack;
@@ -922,10 +1178,11 @@ call_function(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	case RELIC_FN_STR:
 		return (call_str(scratch, env, where, args[0], resultp));
 	case RELIC_FN_MATCH:
-		break;
+		return (call_match(scratch, env, where, pattern, args,
+		    resultp));
 	}
 
-	assert(fn != RELIC_FN_MATCH);
+	assert(!"a call of no function");
 
 	return (RELIC_RUN_NO_VALUE);
 }
@@ -982,9 +1239,10 @@ run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			    scratch->texts[step->u.slot].length);
 			continue;
 		case RELIC_STEP_CALL:
-			info = relic_function_info(step->u.fn);
+			info = relic_function_info(step->u.call.fn);
 			assert(held >= info->arity);
-			end = call_function(scratch, env, where, step->u.fn,
+			end = call_function(scratch, env, where,
+			    step->u.call.fn, step->u.call.pattern,
 			    &stack[held - info->arity], &result);
 			if (end != RELIC_RUN_VALUE)
 				return (end);

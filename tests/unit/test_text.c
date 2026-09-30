@@ -37,6 +37,21 @@
 #define	SCENARIO_OVERSIZED	"a tuple no batch holds grows the bytes once"
 #define	SCENARIO_REFUSED	"a text stack the limit refuses fails the plan"
 #define	SCENARIO_RESOLVED	"an evaluation resolves every batch whole"
+#define	SCENARIO_CONSTANT	"a constant pattern runs as its rule compiled it"
+#define	SCENARIO_PER_BINDING	"a variable pattern is compiled per binding"
+#define	SCENARIO_INVALID	"an invalid pattern fails on its binding"
+
+/*
+ * The facts n(X) whose decimal text begins with the digit it ends with:
+ * the ten of one digit, nine of two, and ninety of three.
+ */
+#define	SAME_ENDS	(10 + 9 + 90)
+
+/*
+ * The binding at which the invalid-pattern scenario's pattern stops being
+ * one: every n(X) below it matches, and n(INVALID_AT) fails the plan.
+ */
+#define	INVALID_AT	501
 
 /*
  * The facts every scenario's rule reads: n(0) to n(FACTS - 1).
@@ -122,6 +137,13 @@ static void	 a_batch_is_full_when_its_pending_bytes_are(void);
 static void	 a_tuple_no_batch_holds_grows_the_bytes_once(void);
 static void	 a_text_stack_the_limit_refuses_fails_the_plan(void);
 static void	 an_evaluation_resolves_every_batch_whole(void);
+static void	 a_constant_pattern_runs_as_its_rule_compiled_it(void);
+static void	 a_variable_pattern_is_compiled_per_binding(void);
+static void	 an_invalid_pattern_fails_on_its_binding(void);
+static const relic_pattern_t *planned_pattern(const relic_plan_t *plan);
+static size_t	 round_bytes(const relic_t *ctx);
+static int	 count_rows(void *callback_ctx, const relic_value_t *values,
+		    size_t count);
 static int	 check_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 
@@ -662,6 +684,225 @@ an_evaluation_resolves_every_batch_whole(void)
 	free(program);
 }
 
+/*
+ * The pattern the first match step of the plan's filters carries.
+ */
+static const relic_pattern_t *
+planned_pattern(const relic_plan_t *plan)
+{
+	const relic_postfix_t *postfix;
+	size_t i;
+	size_t j;
+
+	for (i = 0; i < plan->op_count; i++) {
+		if (plan->ops[i].kind != RELIC_OP_FILTER)
+			continue;
+		postfix = &plan->ops[i].u.filter.left;
+		for (j = 0; j < postfix->step_count; j++) {
+			if (postfix->steps[j].kind == RELIC_STEP_CALL &&
+			    postfix->steps[j].u.call.fn == RELIC_FN_MATCH)
+				return (postfix->steps[j].u.call.pattern);
+		}
+	}
+
+	return (NULL);
+}
+
+static size_t
+round_bytes(const relic_t *ctx)
+{
+	return (relic_atomic_size_load(&ctx->account.round_bytes));
+}
+
+static int
+count_rows(void *callback_ctx, const relic_value_t *values RELIC_TEST_UNUSED,
+    size_t count RELIC_TEST_UNUSED)
+{
+	size_t *rowsp;
+
+	rowsp = callback_ctx;
+	(*rowsp)++;
+
+	return (0);
+}
+
+/*
+ * A match whose pattern is a constant runs the program its rule compiled,
+ * which the plan's step shares rather than copies: every binding matches
+ * against it, the match space's program room is never needed, and only
+ * the work space grows, once.
+ */
+static void
+a_constant_pattern_runs_as_its_rule_compiled_it(void)
+{
+	const relic_rule_t *rule;
+	fixture_t fixture;
+	batch_log_t log;
+	char *program;
+
+	program = program_with("r(X) :- n(X), match(str(X), \"7$\") >= 0.\n",
+	    0);
+	if (program == NULL) {
+		check(false, SCENARIO_CONSTANT, "the program should be written");
+		return;
+	}
+
+	if (fixture_open(&fixture, program, SCENARIO_CONSTANT) &&
+	    run_to_end(&fixture, SCENARIO_CONSTANT, any_string, &log)) {
+		rule = &fixture.ctx->program.rules.entries[
+		    fixture.ctx->program.rules.count - 1];
+		check(planned_pattern(&fixture.plan) != NULL &&
+		    planned_pattern(&fixture.plan) ==
+		    rule->body[1].u.comparison.left->u.call.pattern,
+		    SCENARIO_CONSTANT, "the step shares the rule's program");
+		checkf(log.tuples == FACTS / 10, SCENARIO_CONSTANT,
+		    "%d numbers end in 7, not %zu", FACTS / 10, log.tuples);
+		check(planned_pattern(&fixture.plan) != NULL &&
+		    fixture.scratch.match.capacity == 0 &&
+		    fixture.scratch.match.work.capacity ==
+		    relic_grow_array_capacity(0,
+		    planned_pattern(&fixture.plan)->count), SCENARIO_CONSTANT,
+		    "only the work space grows, once");
+	}
+
+	fixture_close(&fixture);
+	free(program);
+}
+
+/*
+ * A pattern computed from each binding is compiled for that binding into
+ * the match space, and matched as that binding's pattern: a start anchor
+ * followed by the binding's last digit finds exactly the numbers that
+ * begin with the digit they end with.  The match space is the round's,
+ * charged beside the text buffers while the plan runs and given back with
+ * them.
+ */
+static void
+a_variable_pattern_is_compiled_per_binding(void)
+{
+	fixture_t fixture;
+	batch_log_t log;
+	char *program;
+	size_t charged;
+	size_t buffers;
+
+	program = program_with("r(X) :- n(X), "
+	    "match(str(X), cat(\"^\", str(X mod 10))) = 0.\n", 0);
+	if (program == NULL) {
+		check(false, SCENARIO_PER_BINDING,
+		    "the program should be written");
+		return;
+	}
+
+	if (fixture_open(&fixture, program, SCENARIO_PER_BINDING) &&
+	    run_to_end(&fixture, SCENARIO_PER_BINDING, any_string, &log)) {
+		check(planned_pattern(&fixture.plan) == NULL,
+		    SCENARIO_PER_BINDING, "the step carries no program");
+		checkf(log.tuples == SAME_ENDS, SCENARIO_PER_BINDING,
+		    "%d numbers begin with their last digit, not %zu",
+		    SAME_ENDS, log.tuples);
+		check(fixture.scratch.match.capacity > 0 &&
+		    fixture.scratch.match.work.capacity > 0,
+		    SCENARIO_PER_BINDING, "the match space grows");
+
+		buffers = fixture.scratch.text_stack.capacity +
+		    fixture.scratch.pending_bytes.capacity +
+		    fixture.scratch.match.capacity *
+		    sizeof(relic_regex_inst_t) +
+		    fixture.scratch.match.work.capacity *
+		    RELIC_REGEX_WORK_WORDS * sizeof(uint32_t);
+		charged = round_bytes(fixture.ctx);
+		checkf(charged == buffers, SCENARIO_PER_BINDING, "the round "
+		    "should be charged its %zu bytes of buffers, not %zu",
+		    buffers, charged);
+
+		relic_scratch_end_texts(&fixture.scratch);
+		fixture.texts = false;
+		checkf(round_bytes(fixture.ctx) == 0, SCENARIO_PER_BINDING,
+		    "ending the round should give back every byte, not "
+		    "leave %zu", round_bytes(fixture.ctx));
+	}
+
+	fixture_close(&fixture);
+	free(program);
+}
+
+/*
+ * A pattern that is not a regular expression ends the plan on the binding
+ * that supplies it, with the failure and its reason recorded at the
+ * literal: every binding before it has matched, and none after it runs.
+ * Through an evaluation, the failure is reported naming the rule and the
+ * reason, and fails every query that needs the rule, with no rows.
+ */
+static void
+an_invalid_pattern_fails_on_its_binding(void)
+{
+	static const char rule[] = "r(X) :- n(X), "
+	    "match(\"xa\", cat(\"a\", substr(\")\", 0, X - 500))) >= 0.\n";
+	relic_scratch_t *scratch;
+	enum relic_exec_status status;
+	relic_query_t *query;
+	const char *reported;
+	fixture_t fixture;
+	size_t tuples;
+	size_t rows;
+	char *program;
+	relic_t *ctx;
+
+	program = program_with(rule, 0);
+	if (program == NULL) {
+		check(false, SCENARIO_INVALID, "the program should be written");
+		return;
+	}
+
+	if (fixture_open(&fixture, program, SCENARIO_INVALID)) {
+		scratch = &fixture.scratch;
+		tuples = 0;
+		do {
+			status = relic_exec_run(scratch);
+			tuples += scratch->batch_count;
+			scratch->batch_count = 0;
+			scratch->pending_count = 0;
+			scratch->pending_bytes.used = 0;
+		} while (status == RELIC_EXEC_BATCH_FULL);
+
+		check(scratch->error.failed &&
+		    scratch->error.failure == RELIC_FAIL_PATTERN &&
+		    scratch->error.pattern == RELIC_RE_UNMATCHED_CLOSE &&
+		    scratch->error.where != NULL, SCENARIO_INVALID,
+		    "the plan should fail on the unmatched ) at the literal");
+		checkf(tuples == INVALID_AT, SCENARIO_INVALID, "the %d "
+		    "bindings before it should match, not %zu", INVALID_AT,
+		    tuples);
+		bzero(&scratch->error, sizeof(scratch->error));
+	}
+	fixture_close(&fixture);
+
+	ctx = relic_create();
+	if (ctx == NULL || relic_load_string(ctx, "invalid.dl", program) != 0) {
+		check(false, SCENARIO_INVALID, "the program should load");
+		relic_destroy(ctx);
+		free(program);
+		return;
+	}
+	check(relic_materialize(ctx) != 0, SCENARIO_INVALID,
+	    "the evaluation should fail");
+	reported = relic_error(ctx);
+	check(reported != NULL && strstr(reported, "invalid regular "
+	    "expression in rule r/1: unmatched )") != NULL, SCENARIO_INVALID,
+	    "the error should name the rule and the reason");
+
+	rows = 0;
+	query = relic_query_prepare(ctx, NULL, "r(X)?");
+	check(query != NULL && relic_query_run(ctx, query, count_rows,
+	    &rows) != 0 && rows == 0, SCENARIO_INVALID,
+	    "a query of the rule should fail with no rows");
+
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+	free(program);
+}
+
 int
 main(void)
 {
@@ -671,6 +912,9 @@ main(void)
 	a_tuple_no_batch_holds_grows_the_bytes_once();
 	a_text_stack_the_limit_refuses_fails_the_plan();
 	an_evaluation_resolves_every_batch_whole();
+	a_constant_pattern_runs_as_its_rule_compiled_it();
+	a_variable_pattern_is_compiled_per_binding();
+	an_invalid_pattern_fails_on_its_binding();
 
 	return (check_summary("text"));
 }

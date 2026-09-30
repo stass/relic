@@ -288,6 +288,9 @@ static enum relic_compile_result compile_atom(relic_compiler_t *compiler,
 static enum relic_compile_result compile_body(relic_compiler_t *compiler);
 static enum relic_compile_result compile_call(relic_compiler_t *compiler,
 		    const relic_ast_call_t *source, relic_expr_t *expr);
+static enum relic_compile_result compile_constant_pattern(
+		    relic_compiler_t *compiler, const relic_location_t *where,
+		    relic_expr_call_t *call);
 static enum relic_compile_result compile_comparison(
 		    relic_compiler_t *compiler,
 		    const relic_ast_comparison_t *source,
@@ -744,6 +747,69 @@ compile_call(relic_compiler_t *compiler, const relic_ast_call_t *source,
 
 		expr->nodes += call->args[i]->nodes;
 	}
+
+	if (call->fn == RELIC_FN_MATCH &&
+	    call->args[1]->kind == RELIC_EXPR_CONSTANT)
+		return (compile_constant_pattern(compiler,
+		    &source->args[1]->where, call));
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Compile the pattern of a match whose pattern is a string constant,
+ * written at `where`, into the rule's arena, so that it is compiled once
+ * rather than once per binding.  A pattern that is not a regular expression
+ * refuses the statement, as an unsafe rule is refused, so a program whose
+ * patterns are constants learns of a bad one before anything is evaluated.
+ *
+ * A constant of another type is left to the executor, which gives the call
+ * no value, as it does for any operand of the wrong type.  A pattern too
+ * long for a program to number its instructions could never be laid out,
+ * and is refused as the arena refusing it.
+ */
+static enum relic_compile_result
+compile_constant_pattern(relic_compiler_t *compiler,
+    const relic_location_t *where, relic_expr_call_t *call)
+{
+	relic_regex_error_t error;
+	relic_regex_inst_t *insts;
+	relic_pattern_t *pattern;
+	const char *bytes;
+	size_t capacity;
+	size_t length;
+	uint32_t count;
+
+	if ((call->args[1]->u.constant & RELIC_DOM_TYPE_MASK) !=
+	    RELIC_DOM_STRING)
+		return (RELIC_COMPILE_OK);
+
+	bytes = relic_value_bytes(compiler->ctx, call->args[1]->u.constant,
+	    &length);
+	assert(bytes != NULL);
+
+	capacity = relic_regex_capacity(length);
+	if (capacity == 0) {
+		relic_arena_fail(compiler->arena);
+		return (RELIC_COMPILE_INCOMPLETE);
+	}
+
+	pattern = compile_alloc(compiler, 1, sizeof(*pattern));
+	insts = compile_alloc(compiler, capacity, sizeof(*insts));
+	if (pattern == NULL || insts == NULL)
+		return (RELIC_COMPILE_INCOMPLETE);
+
+	count = relic_regex_compile(bytes, length, insts, &error);
+	if (count == 0) {
+		relic_diagf(compiler->ctx, RELIC_ERROR, where,
+		    "invalid regular expression: %s",
+		    relic_regex_message(error.failure));
+		return (RELIC_COMPILE_REJECTED);
+	}
+
+	pattern->insts = insts;
+	pattern->count = count;
+	call->pattern = pattern;
 
 	return (RELIC_COMPILE_OK);
 }

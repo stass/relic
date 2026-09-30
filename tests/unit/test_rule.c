@@ -34,6 +34,7 @@
 #define	SCENARIO_GROUP_NAME	"a group predicate is named for where it is"
 #define	SCENARIO_CACHED		"a check compiles only what is new"
 #define	SCENARIO_CALL		"a call compiles to a node over its arguments"
+#define	SCENARIO_PATTERN	"a constant pattern is compiled with its rule"
 #define	SCENARIO_CLOSURE	"an assignment binds what the closure reaches"
 #define	SCENARIO_EXPRESSION	"a comparison compiles to two trees over slots"
 #define	SCENARIO_PRINTED	"a rule prints as text that reads back as it"
@@ -73,6 +74,8 @@ static void	 a_rejected_statement_leaves_no_rule_behind(void);
 static void	 an_assignment_binds_what_the_closure_reaches(void);
 static void	 a_comparison_compiles_to_two_trees_over_slots(void);
 static void	 a_call_compiles_to_a_node_over_its_arguments(void);
+static void	 a_constant_pattern_is_compiled_with_its_rule(void);
+static const relic_expr_call_t *compared_call(const relic_rule_t *rule);
 static void	 checked_alone(const char *program, diag_log_t *log);
 static bool	 printed_rule(const char *program, char *out, size_t size);
 static void	 keep_printed_line(void *callback_ctx, const char *line);
@@ -698,6 +701,92 @@ a_call_compiles_to_a_node_over_its_arguments(void)
 }
 
 /*
+ * The call on the left of a rule's first comparison, or NULL when the rule
+ * has no comparison or its left side is no call.
+ */
+static const relic_expr_call_t *
+compared_call(const relic_rule_t *rule)
+{
+	const relic_expr_t *left;
+	size_t i;
+
+	if (rule == NULL)
+		return (NULL);
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind != RELIC_LITERAL_COMPARISON)
+			continue;
+		left = rule->body[i].u.comparison.left;
+		return (left->kind == RELIC_EXPR_CALL ? &left->u.call : NULL);
+	}
+
+	return (NULL);
+}
+
+/*
+ * A match whose pattern is a string constant carries the pattern compiled
+ * with its rule, the program the matcher compiles from the same bytes; one
+ * whose pattern is a variable carries none, and is compiled as it runs.  A
+ * constant pattern that is not a regular expression is one error, and
+ * leaves no rule behind.
+ */
+static void
+a_constant_pattern_is_compiled_with_its_rule(void)
+{
+	static const char alternation[] = "a|b*";
+	relic_regex_inst_t expected[3 * (sizeof(alternation) - 1) + 1];
+	const relic_expr_call_t *constant;
+	const relic_expr_call_t *variable;
+	relic_regex_error_t error;
+	diag_log_t log;
+	uint32_t count;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	if (!load(ctx, "name(\"ab\"). pattern(\"b\").\n"
+	    "fixed(N) :- name(N), match(N, \"a|b*\") >= 0.\n"
+	    "given(N) :- name(N), pattern(P), match(N, P) >= 0.\n") ||
+	    relic_check(ctx) != 0) {
+		check(false, SCENARIO_PATTERN, "the program is accepted");
+		relic_destroy(ctx);
+		return;
+	}
+
+	constant = compared_call(rule_at(ctx, 0));
+	count = relic_regex_compile(alternation, sizeof(alternation) - 1,
+	    expected, &error);
+	check(constant != NULL && constant->fn == RELIC_FN_MATCH &&
+	    constant->pattern != NULL && constant->pattern->count == count &&
+	    bcmp(constant->pattern->insts, expected,
+	    count * sizeof(expected[0])) == 0, SCENARIO_PATTERN,
+	    "the constant pattern's node holds its compiled program");
+
+	variable = compared_call(rule_at(ctx, 1));
+	check(variable != NULL && variable->fn == RELIC_FN_MATCH &&
+	    variable->pattern == NULL, SCENARIO_PATTERN,
+	    "a variable pattern's node holds none");
+
+	relic_destroy(ctx);
+
+	checked_alone("name(\"ab\").\n"
+	    "bad(N) :- name(N), match(N, \"(\") >= 0.\n", &log);
+	check(log.errors == 1, SCENARIO_PATTERN,
+	    "a constant pattern that is not one is one error");
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+	(void)load(ctx, "bad(N) :- name(N), match(N, \"[z-a]\") >= 0.\n");
+	(void)relic_check(ctx);
+	check(rule_count(ctx) == 0, SCENARIO_PATTERN,
+	    "the refused rule leaves nothing behind");
+	relic_destroy(ctx);
+}
+
+/*
  * Keep the line the explain callback was given, less its indentation and
  * the word introducing it, in the buffer of PRINTED_LINE_MAX bytes
  * `callback_ctx` points at.
@@ -1062,6 +1151,7 @@ main(void)
 	an_assignment_binds_what_the_closure_reaches();
 	a_comparison_compiles_to_two_trees_over_slots();
 	a_call_compiles_to_a_node_over_its_arguments();
+	a_constant_pattern_is_compiled_with_its_rule();
 	a_rule_prints_as_text_that_reads_back_as_it();
 	a_rule_at_the_nesting_bound_prints_within_it();
 

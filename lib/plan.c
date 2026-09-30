@@ -738,7 +738,8 @@ append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
 		break;
 	case RELIC_EXPR_CALL:
 		step->kind = RELIC_STEP_CALL;
-		step->u.fn = expr->u.call.fn;
+		step->u.call.fn = expr->u.call.fn;
+		step->u.call.pattern = expr->u.call.pattern;
 		break;
 	}
 
@@ -750,15 +751,13 @@ append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
  * per node of the tree, and the stack its run needs.  Returns -1 when the
  * arena refused, which the caller's boundary reports, or with an internal
  * error reported when the tree needs more stack than any tree the parser
- * admits, which the executor's fixed stack could not hold, or with an error
- * reported when the tree calls match, which the executor cannot run.
+ * admits, which the executor's fixed stack could not hold.
  */
 static int
 compile_postfix(relic_planner_t *planner, const relic_expr_t *expr,
     const relic_location_t *where, relic_postfix_t *postfix)
 {
 	unsigned int need;
-	size_t i;
 
 	bzero(postfix, sizeof(*postfix));
 
@@ -776,15 +775,6 @@ compile_postfix(relic_planner_t *planner, const relic_expr_t *expr,
 		return (-1);
 	}
 	postfix->depth = (uint8_t)need;
-
-	for (i = 0; i < postfix->step_count; i++) {
-		if (postfix->steps[i].kind == RELIC_STEP_CALL &&
-		    postfix->steps[i].u.fn == RELIC_FN_MATCH) {
-			relic_diagf(planner->ctx, RELIC_ERROR, where,
-			    "match is not implemented");
-			return (-1);
-		}
-	}
 
 	return (0);
 }

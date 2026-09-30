@@ -1,0 +1,10 @@
+% A pattern that arrives in a variable is compiled when the call runs, over
+% the binding that supplies it, so one that is not a regular expression is
+% an evaluation error rather than a check error: the evaluation stops,
+% nothing is derived, and the error names the rule and why.  The good
+% pattern is met first and does not save the rule.
+name("main.c").
+pattern("\\.c$"). pattern("a(").
+
+hit(N, P) :- name(N), pattern(P), match(N, P) >= 0.
+hit(N, P)?

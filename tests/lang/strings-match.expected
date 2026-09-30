@@ -1,0 +1,71 @@
+"main.c"
+"lib/a.c"
+
+"main.c" 4
+"util.h" -1
+"lib/a.c" 5
+"x.c.orig" 1
+"README" -1
+"" -1
+
+"main.c"
+"util.h"
+"lib/a.c"
+"x.c.orig"
+
+"README"
+
+"main.c" 0
+"util.h" 0
+"lib/a.c" 0
+"x.c.orig" 0
+"README" 0
+"" 0
+
+1
+
+0
+
+1
+
+1
+
+1
+
+1
+
+0
+
+-1
+
+0
+
+0
+
+0
+
+0
+
+0
+
+-1
+
+-1
+
+0
+
+-1
+
+1
+
+-1
+
+1
+
+-1
+
+1
+
+"README" "^R" 0
+"util.h" "\\.h$" 4
+"lib/a.c" "/" 3

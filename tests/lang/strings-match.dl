@@ -1,0 +1,60 @@
+% match gives the least position at which a match of a pattern begins in a
+% string, or -1.  The dialect is POSIX extended regular expressions without
+% counted repetition, classes or backreferences, over bytes: `.` and a
+% negated set match a line feed, and `^` and `$` match only at the ends of
+% the string.  A pattern is a string value, so a backslash the pattern needs
+% is doubled in the literal; a line feed is the literal's own escape.
+name("main.c"). name("util.h"). name("lib/a.c"). name("x.c.orig").
+name("README"). name("").
+
+c_file(N) :- name(N), match(N, "\\.c$") >= 0.
+unanchored(N, I) :- name(N), I = match(N, "\\.c").
+lower(N) :- name(N), match(N, "^[a-z./]+$") = 0.
+not_lower(N) :- name(N), match(N, "[^a-z./]") >= 0.
+empty(N, I) :- name(N), I = match(N, "").
+
+c_file(N)?
+unanchored(N, I)?
+lower(N)?
+not_lower(N)?
+empty(N, I)?
+
+% Each construct: a byte, `.`, a set with a range, `]` first and `-` last,
+% a group, alternation, the three repetitions and a run of them.
+I = match("xabcab", "abc")?
+I = match("xyz", "x.z")?
+I = match("q-]", "[]-]")?
+I = match("a9b", "[0-9]")?
+I = match("xababc", "(ab)+c")?
+I = match("xcd", "ab|cd")?
+I = match("bc", "ba*c")?
+I = match("bc", "ba+c")?
+I = match("bac", "ba?c")?
+I = match("baaac", "ba+?c")?
+I = match("a{2}", "a{2}")?
+
+% The leftmost start wins, whichever match is longer: `abc|b` over "abc"
+% is 0, and `a*` matches the empty string at the start of "baa".
+I = match("abc", "abc|b")?
+I = match("baa", "a*")?
+I = match("ab", "^b")?
+I = match("ba", "b$")?
+
+% Anchors inside a group and a branch, and a line feed in the string:
+% `$` is only the end, and `.` crosses the line feed.
+I = match("xa", "x(a$|b)")?
+I = match("ab\ncd", "b$")?
+I = match("ab\ncd", "b.c")?
+I = match("ab\ncd", "^c")?
+
+% A backslash makes the next byte literal: `\\.` is a period, and a
+% backslash in the string is matched by `\\\\`.
+I = match("a.b", "\\.")?
+I = match("axb", "a\\.b")?
+I = match("a\\b", "\\\\")?
+
+% A pattern held by a relation is compiled as the rule runs, once per
+% binding.
+pattern("^R"). pattern("\\.h$"). pattern("/").
+hit(N, P, I) :- name(N), pattern(P), I = match(N, P), I >= 0.
+hit(N, P, I)?

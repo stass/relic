@@ -1,0 +1,8 @@
+strings-match-bad.dl:7:30: error: invalid regular expression: unmatched (
+strings-match-bad.dl:8:31: error: invalid regular expression: unmatched )
+strings-match-bad.dl:9:29: error: invalid regular expression: unterminated [
+strings-match-bad.dl:10:32: error: invalid regular expression: nothing to repeat
+strings-match-bad.dl:11:31: error: invalid regular expression: reversed range
+strings-match-bad.dl:12:32: error: invalid regular expression: trailing backslash
+strings-match-bad.dl:14:5: error: invalid regular expression: nested more than 32 levels deep
+strings-match-bad.dl:17:19: error: invalid regular expression: nothing to repeat

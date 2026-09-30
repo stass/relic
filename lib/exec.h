@@ -73,6 +73,7 @@
 typedef struct relic_exec_counters relic_exec_counters_t;
 typedef struct relic_exec_env relic_exec_env_t;
 typedef struct relic_exec_error relic_exec_error_t;
+typedef struct relic_match_space relic_match_space_t;
 typedef struct relic_mixed_note relic_mixed_note_t;
 typedef struct relic_op_state relic_op_state_t;
 typedef struct relic_pending relic_pending_t;
@@ -219,31 +220,49 @@ struct relic_mixed_note {
 
 /*
  * Why a binding stopped the plan: an integer result that does not fit, a
- * division by zero, a string result longer than a value can be, or a
- * buffer of the scratch that could not grow, because the memory limit
- * refused it or because the allocator did.
+ * division by zero, a string result longer than a value can be, a pattern
+ * that is not a regular expression, or a buffer of the scratch that could
+ * not grow, because the memory limit refused it or because the allocator
+ * did.
  */
 enum relic_exec_failure {
 	RELIC_FAIL_OVERFLOW,
 	RELIC_FAIL_ZERO_DIVISOR,
 	RELIC_FAIL_TOO_LONG,
+	RELIC_FAIL_PATTERN,
 	RELIC_FAIL_LIMIT,
 	RELIC_FAIL_NO_MEMORY
 };
 
 /*
  * The first failure the running plan met, when `failed` says there has
- * been one: `failure` says what it was, and `where` is the location of the
- * literal being evaluated, or NULL for a buffer the EMIT could not grow,
- * which is no literal's.  Recording one ends the plan, which is left
- * finished; the caller reports it when it takes the batch, discards the
- * batch and fails the evaluation.  It is kept apart from the note, which
- * records nothing that fails anything.
+ * been one: `failure` says what it was, `pattern` why a pattern was not a
+ * regular expression when that was the failure, and `where` is the
+ * location of the literal being evaluated, or NULL for a buffer the EMIT
+ * could not grow, which is no literal's.  Recording one ends the plan,
+ * which is left finished; the caller reports it when it takes the batch,
+ * discards the batch and fails the evaluation.  It is kept apart from the
+ * note, which records nothing that fails anything.
  */
 struct relic_exec_error {
-	const relic_location_t	*where;
-	enum relic_exec_failure	 failure;
-	bool			 failed;
+	const relic_location_t		*where;
+	enum relic_exec_failure		 failure;
+	enum relic_regex_failure	 pattern;	/* PATTERN */
+	bool				 failed;
+};
+
+/*
+ * What a match needs beside its program: room for the program of a pattern
+ * compiled as the call runs, `capacity` instructions, and the matcher's
+ * work space.  Both are the round's, as the text stack is, charged when
+ * they grow and given back with it.  The program's room keeps nothing from
+ * one call to the next; the work space keeps its marks and stamp, which is
+ * what lets a match begin without clearing them.
+ */
+struct relic_match_space {
+	relic_regex_inst_t	*insts;
+	size_t			 capacity;
+	relic_regex_work_t	 work;
 };
 
 /*
@@ -294,8 +313,8 @@ struct relic_pending {
  *
  * The text stack and the pending bytes are the round's (relic_text_buffer_t):
  * a plan that calls a function runs only on a scratch that has them, and
- * one that does not never reads them.  `account` is what their growth is
- * charged to.
+ * one that does not never reads them.  `match` is the round's too, and
+ * starts empty.  `account` is what the growth of all three is charged to.
  *
  * `states` has room for the operations of a plan of `op_room` operations,
  * one state each, so that the executor's level indexes a plan's operations
@@ -309,10 +328,10 @@ struct relic_pending {
  * with a full batch: the operation to ask next and whether to ask it for
  * its next match rather than a first.  A batch is full when it holds
  * RELIC_INSERT_BATCH tuples, or when the next tuple's pending strings would
- * not fit its pending bytes, and then the EMIT is asked again.  `finished` is set once the first
- * operation has nothing more, after which the plan has derived everything
- * it will; a scratch no plan has started on is finished too, so that
- * running it derives nothing.
+ * not fit its pending bytes, and then the EMIT is asked again.  `finished`
+ * is set once the first operation has nothing more, after which the plan
+ * has derived everything it will; a scratch no plan has started on is
+ * finished too, so that running it derives nothing.
  *
  * `counters`, `note` and `error` are what the plans run on the scratch have
  * counted and met since the caller last took them.  The counters accumulate
@@ -333,6 +352,7 @@ struct relic_scratch {
 	relic_pending_t		*pending;
 	relic_text_buffer_t	 text_stack;
 	relic_text_buffer_t	 pending_bytes;
+	relic_match_space_t	 match;
 	relic_account_t		*account;
 	size_t			 op_room;
 	size_t			 batch_count;
@@ -364,11 +384,12 @@ enum relic_exec_status {
  * starts empty and finished, and holds no round's buffers.
  *
  * relic_scratch_begin_texts() gives the scratch a round's text stack and
- * pending bytes, at their initial sizes, charged to `account` as a round's
- * buffers, and returns 0, or -1 having given it nothing and set *failurep
- * to say whether the limit or the allocator refused them.  relic_scratch_end_texts() frees them and
- * gives back their charge, whatever they had grown to, and may be called
- * on a scratch that holds none.
+ * pending bytes, at their initial sizes, and an empty match space, charged
+ * to `account` as a round's buffers, and returns 0, or -1 having given it
+ * nothing and set *failurep to say whether the limit or the allocator
+ * refused them.  relic_scratch_end_texts() frees all three and gives back
+ * their charge, whatever they had grown to, and may be called on a scratch
+ * that holds none.
  *
  * relic_exec_start() readies the scratch to run `plan` from the beginning,
  * over what `env` gives it, resolving the view of every operation that

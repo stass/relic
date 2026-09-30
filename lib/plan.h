@@ -13,6 +13,7 @@
 
 #include "ast.h"
 #include "frozen.h"
+#include "regex.h"
 #include "util.h"
 
 /*
@@ -204,7 +205,9 @@ struct relic_op_atom {
  * One step of a postfix program: push a constant's identifier, a domain
  * slot's identifier, a number slot's integer or a text slot's bytes, pop one
  * integer and push its negation, pop two and push what a binary operator
- * makes of them, or pop a function's arguments and push its result.
+ * makes of them, or pop a function's arguments and push its result.  A CALL
+ * of match whose pattern was a constant carries the pattern compiled with
+ * the rule, and every other CALL carries NULL.
  */
 enum relic_step_kind {
 	RELIC_STEP_CONSTANT,
@@ -221,7 +224,10 @@ struct relic_step {
 		relic_dom_t		constant;	/* CONSTANT */
 		uint16_t		slot;		/* the three SLOTs */
 		enum relic_arith_op	op;		/* BINARY */
-		enum relic_function	fn;		/* CALL */
+		struct {
+			const relic_pattern_t	*pattern;
+			enum relic_function	 fn;
+		}			call;		/* CALL */
 	}			u;
 	enum relic_step_kind	kind;
 };

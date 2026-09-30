@@ -1164,7 +1164,8 @@ a_load_over_the_limit_grows_no_store(void)
 /*
  * The bytes the memory limit counts against a context once it has loaded
  * b(0) and then `facts` -- its stores, the integer table the facts'
- * integers grew and the symbol pool holding its names -- or SIZE_MAX when that could not be measured.
+ * integers grew and the symbol pool holding its names -- or SIZE_MAX when
+ * that could not be measured.
  */
 static size_t
 bytes_after_loading(const char *facts)

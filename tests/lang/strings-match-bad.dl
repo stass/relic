@@ -1,0 +1,17 @@
+% A pattern written as a constant is compiled with its rule, so one that is
+% not a regular expression refuses the program at load, before anything is
+% evaluated, with an error at the literal naming why.  Each rule below
+% fails a different way; the error names the first failure in the pattern.
+name("main.c").
+
+open(N) :- name(N), match(N, "a(b") >= 0.
+close(N) :- name(N), match(N, "a)b") >= 0.
+set(N) :- name(N), match(N, "[a-") >= 0.
+repeat(N) :- name(N), match(N, "a|*") >= 0.
+range(N) :- name(N), match(N, "[z-a]") >= 0.
+escape(N) :- name(N), match(N, "a\\") >= 0.
+deep(N) :- name(N), match(N,
+    "((((((((((((((((((((((((((((((((( a )))))))))))))))))))))))))))))))))")
+    >= 0.
+
+name(N), match(N, "*") >= 0?

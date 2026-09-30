@@ -109,7 +109,8 @@ struct relic_merge_part {
  * `pending` holds the round's `pending_count` pending integers in task
  * order, `pending_map` the identifier each is promised, and
  * `table_projected` the bytes the value table and the pool will hold once
- * they have taken the new ones; `pending_charged` is what the two arrays were charged.
+ * they have taken the new ones; `pending_charged` is what the two arrays
+ * were charged.
  * `task_firsts[t * RELIC_STRIPES + s]` counts task t's firsts in stripe s,
  * and `task_starts[t]` is the position task t's first new tuple takes in
  * its target's append.  `classify_parts` and `apply_parts` list the parts

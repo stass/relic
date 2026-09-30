@@ -38,9 +38,9 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
-	lib/pool.c lib/pred.c lib/relation.c lib/result.c lib/round.c \
-	lib/rule.c lib/stratify.c lib/strfn.c lib/symbol.c lib/task.c \
-	lib/util.c lib/value.c
+	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
+	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c lib/symbol.c \
+	lib/task.c lib/util.c lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -55,8 +55,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
 	lib/depgraph.h \
 	lib/exec.h \
-	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/relation.h \
-	lib/round.h lib/strfn.h lib/util.h tests/unit/harness.h \
+	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
+	lib/relation.h lib/round.h lib/strfn.h lib/util.h tests/unit/harness.h \
 	tests/unit/programs.h
 
 bin_PROGRAMS = relic
@@ -80,7 +80,7 @@ pkgconfig_DATA = librelic.pc
 EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
 	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
-	tests/fuzz/corpus tests/fuzz/corpus-import \
+	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
 	tests/fuzz/relic.dict tests/lang tests/langtest.sh
 
 ##
@@ -183,9 +183,10 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
-	tests/unit/test_relation tests/unit/test_round tests/unit/test_rule \
-	tests/unit/test_stratify tests/unit/test_strfn tests/unit/test_symbol \
-	tests/unit/test_text tests/unit/test_util tests/unit/test_value
+	tests/unit/test_regex tests/unit/test_relation tests/unit/test_round \
+	tests/unit/test_rule tests/unit/test_stratify tests/unit/test_strfn \
+	tests/unit/test_symbol tests/unit/test_text tests/unit/test_util \
+	tests/unit/test_value
 
 ## test_api links the installed form of the library rather than the
 ## convenience library, so an entry point it calls that the export list or
@@ -252,6 +253,9 @@ tests_unit_test_relation_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_round_SOURCES = tests/unit/test_round.c tests/unit/harness.c
 tests_unit_test_round_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_regex_SOURCES = tests/unit/test_regex.c tests/unit/harness.c
+tests_unit_test_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_rule_SOURCES = tests/unit/test_rule.c tests/unit/harness.c
 tests_unit_test_rule_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -447,14 +451,16 @@ check-random: tests/random/random$(EXEEXT)
 ##
 ## Fuzz targets
 ##
-## Each target is an LLVMFuzzerTestOneInput() over the public interface, and
-## is linked twice.  The replay driver, built always, passes every file of a
+## Each target is an LLVMFuzzerTestOneInput(), over the public interface but
+## for the regex target, which feeds the matcher behind `match` directly, and
+## each is linked twice.  The replay driver, built always, passes every file of a
 ## corpus to the target once, so make check replays the corpora on every
 ## compiler and under every sanitizer build.  With --enable-fuzzers the
 ## target is also linked with libFuzzer, and make fuzz runs each for
 ## FUZZ_SECONDS over a working corpus in the build tree seeded from the
-## language tests and tests/fuzz/corpus, or for the import target, whose
-## inputs are tables, from tests/fuzz/corpus-import; the source tree's
+## language tests and tests/fuzz/corpus, or for the import and regex
+## targets, whose inputs are tables and patterns, from
+## tests/fuzz/corpus-import and tests/fuzz/corpus-regex; the source tree's
 ## corpora change only when someone copies a finding into them.  configure
 ## then compiles the whole tree with the coverage instrumentation libFuzzer
 ## steers by, and the targets alone with its main().  No clean target removes
@@ -467,7 +473,7 @@ RELIC_FUZZ_EVAL_SOURCES = tests/fuzz/fuzz_eval.c tests/random/answer.c \
 	tests/random/answer.h $(RELIC_FUZZ_COMMON)
 
 RELIC_REPLAY_BINARIES = tests/fuzz/replay_eval tests/fuzz/replay_import \
-	tests/fuzz/replay_load
+	tests/fuzz/replay_load tests/fuzz/replay_regex
 tests_fuzz_replay_eval_SOURCES = tests/fuzz/replay.c $(RELIC_FUZZ_EVAL_SOURCES)
 tests_fuzz_replay_eval_LDADD = librelic.la $(LTLIBOBJS)
 tests_fuzz_replay_import_SOURCES = tests/fuzz/replay.c \
@@ -476,6 +482,11 @@ tests_fuzz_replay_import_LDADD = librelic.la $(LTLIBOBJS)
 tests_fuzz_replay_load_SOURCES = tests/fuzz/replay.c tests/fuzz/fuzz_load.c \
 	$(RELIC_FUZZ_COMMON)
 tests_fuzz_replay_load_LDADD = librelic.la $(LTLIBOBJS)
+## The regex target reaches a module the library does not export, so it
+## links the convenience library as the unit tests do.
+tests_fuzz_replay_regex_SOURCES = tests/fuzz/replay.c \
+	tests/fuzz/fuzz_regex.c tests/fuzz/fuzz.h
+tests_fuzz_replay_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 dist_check_SCRIPTS += tests/fuzz/replay.sh
 
@@ -483,7 +494,7 @@ FUZZ_SECONDS = 60
 
 if RELIC_FUZZERS
 noinst_PROGRAMS = tests/fuzz/fuzz_eval tests/fuzz/fuzz_import \
-	tests/fuzz/fuzz_load
+	tests/fuzz/fuzz_load tests/fuzz/fuzz_regex
 tests_fuzz_fuzz_eval_SOURCES = $(RELIC_FUZZ_EVAL_SOURCES)
 tests_fuzz_fuzz_eval_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
 tests_fuzz_fuzz_eval_LDADD = librelic.la $(LTLIBOBJS)
@@ -493,6 +504,9 @@ tests_fuzz_fuzz_import_LDADD = librelic.la $(LTLIBOBJS)
 tests_fuzz_fuzz_load_SOURCES = tests/fuzz/fuzz_load.c $(RELIC_FUZZ_COMMON)
 tests_fuzz_fuzz_load_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
 tests_fuzz_fuzz_load_LDADD = librelic.la $(LTLIBOBJS)
+tests_fuzz_fuzz_regex_SOURCES = tests/fuzz/fuzz_regex.c tests/fuzz/fuzz.h
+tests_fuzz_fuzz_regex_CFLAGS = $(AM_CFLAGS) -fsanitize=fuzzer
+tests_fuzz_fuzz_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 # -max_len bounds an input's text, and with it how long a program can take
 # to load and check; -timeout reports an input that runs longer anyway.  An
@@ -519,6 +533,12 @@ fuzz: $(noinst_PROGRAMS)
 	    -max_len=4096 -timeout=10 \
 	    -artifact_prefix=fuzz-artifacts/import/ fuzz-corpus/import \
 	    $(srcdir)/tests/fuzz/corpus-import
+	@$(MKDIR_P) fuzz-corpus/regex fuzz-artifacts/regex/
+	@echo "fuzzing regex for $(FUZZ_SECONDS) seconds"
+	@./tests/fuzz/fuzz_regex -max_total_time=$(FUZZ_SECONDS) \
+	    -max_len=4096 -timeout=10 \
+	    -artifact_prefix=fuzz-artifacts/regex/ fuzz-corpus/regex \
+	    $(srcdir)/tests/fuzz/corpus-regex
 else
 fuzz:
 	@echo "the fuzz targets need configure --enable-fuzzers and a" \
@@ -636,6 +656,8 @@ RELIC_LANG_TESTS = \
 	tests/lang/strings-binding.dl tests/lang/strings-bytes.dl \
 	tests/lang/strings-explain.dl tests/lang/strings-gathered.dl \
 	tests/lang/strings-index.dl tests/lang/strings-magic.dl \
+	tests/lang/strings-match.dl tests/lang/strings-match-bad.dl \
+	tests/lang/strings-match-fails.dl \
 	tests/lang/strings-memory.dl tests/lang/strings-mixed.dl \
 	tests/lang/strings-parallel.dl tests/lang/strings-probe.dl \
 	tests/lang/strings-recursion.dl tests/lang/strings-str.dl \

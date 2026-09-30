@@ -15,6 +15,7 @@
 
 #include "arena.h"
 #include "ast.h"
+#include "regex.h"
 #include "util.h"
 
 /*
@@ -182,9 +183,15 @@ enum relic_expr_kind {
 /*
  * A call of a function on `argc` arguments, the function's arity, each an
  * expression.
+ *
+ * `pattern` is a match's pattern compiled with the rule, when the pattern
+ * is a string constant, and NULL for every other call.  It lives in the
+ * arena the rule does, and a copy of the node shares it, since nothing
+ * writes a compiled pattern.
  */
 struct relic_expr_call {
 	relic_expr_t		*args[RELIC_MAX_FUNCTION_ARITY];
+	const relic_pattern_t	*pattern;
 	enum relic_function	 fn;
 	uint8_t			 argc;
 };
