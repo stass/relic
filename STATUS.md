@@ -876,8 +876,8 @@ one core and two hardware threads), out-of-tree:
 * `make install`, `make installcheck` and `make uninstall` under a private
   prefix leave nothing behind.
 
-GCC there has no C++ compiler of its own family, so its instrumented builds
-omit the C++ header test.
+With g++ installed beside GCC, its instrumented and coverage builds include
+the C++ header test; without it they omit the test and `configure` says so.
 
 The relation store's suites were confirmed the same way, by injecting each
 fault and rerunning:
