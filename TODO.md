@@ -1203,22 +1203,13 @@ Candidate features, in the priority order of `specs/architecture.md` section
 
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
-`docs/todo-language.md` into what is worth adding -- aggregates first, then
-string operations and provenance, then disjunction, file inclusion,
+`docs/todo-language.md` into what is worth adding -- string operations and
+provenance first, then disjunction, file inclusion,
 constraints, relation export and per-rule profiling -- what is worth
 measuring before deciding, and what stays out on purpose with the reason.
 Each item names the engines that have it and what a relic program does
 without it; the verdicts are provisional until a design exists.
 
-* aggregates, specified in `specs/design-aggregates.md`: `count`, `sum`,
-  `min` and `max` over the rows a body denotes, bound through an equality
-  as an assignment is, the body an ordinary generated rule whose relation
-  is the group, its reader a stratum above it as a negated literal's is,
-  an exact sum that fails only when the total does not fit; five steps,
-  of which the front end, the plan and executor, Magic Sets and the
-  frozen round are built and hardening remains: aggregates in the program
-  generator, the fuzz dictionary and corpus, the manual pages and a
-  degree-count workload in `bench/compare/`
 * relation export, in `docs/todo-language.md`
 * incremental insertion maintenance
 * DRed-style deletion maintenance

@@ -1,0 +1,25 @@
+p5(E) :- E = max(H) { p3(G, H), p2(G, H), not p3(H, -3) }, E > E + E / 2, E < E.
+p4 :- F = -2, p4, p4, p4, B = 2, B > F.
+p1 :- p0(F), F < 0, F + F > F * 3.
+p3(-2, A) :- p4, A = 0 + 0 mod 2, A + (A + A) = B.
+p4 :- E = A, p4, p0(B), C != B, p0(A), C = count { p0(I) }, -3 = F, A = min(N) { p0(N), p0(B), L = N - 0 }.
+p6(a) :- p2(A, C), A - -2 = F, p1.
+p0(1).
+p5(E) :- p2(F, C), p0(B), p2(E, _), D = count { J = (-2 + -2) * 1, p7(G, _) }, E mod 1 mod 3 <= D, D > C.
+p2(A, C) :- p0(C), p1, A = -(C - -1), E = -(C mod -2 - 0).
+p2(C, D) :- -2 / -2 / 1 = D, p0(C).
+p0(-3).
+p4 :- p0(C), E = F + -2 mod 2, p0(B), -3 = F, p0(B).
+p0(d).
+p0("a").
+p0(a).
+p7(B, 2) :- B = D, E = -3, C = count { p4, p1 }, p7(B, C), p2(d, B).
+p1 :- E = count { p0(G), p0(G), G + (G + G) >= (G + G) / -2 }, not p0("a"), E != E.
+p7(a, B) :- D = count { p4 }, p0(A), E = D, p1, p4, B = count { p0(I), p0(H), I * -3 * 1 > I }.
+p0(0).
+p0(-2).
+p0(-2).
+p1 :- p4, -1 = A, not p0(A), not p0(A).
+p5(C), p6(A), E = A?
+E = sum(H) { p0(H) }, p2(C, B), F = -3 mod -3 / 2, not p7(C, 1)?
+p0(A), A - 2 + 0 = C, not p0(3), A != C?

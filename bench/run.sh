@@ -81,6 +81,13 @@ reach(Y) :- reach(X), edge(X, Y).
 from(X, Y) :- edge(X, Y).
 from(X, Z) :- from(X, Y), edge(Y, Z).'
 
+# Over the graph again, each node's out-degree and in-degree: two folds per
+# node, each reading the group relation of one aggregate through the index
+# on its node's column.
+degree_rules='node(X) :- edge(X, _).
+node(Y) :- edge(_, Y).
+degree(X, O, I) :- node(X), O = count { edge(X, Y) }, I = count { edge(Z, X) }.'
+
 # Over the grid, the cells reachable from the corner.
 grid_rules='reach(X) :- edge(c0_0, X).
 reach(Y) :- reach(X), edge(X, Y).'
@@ -146,6 +153,7 @@ run() {
 make_program chain "$chain_rules"
 write_program distances chain "$distance_rules"
 make_program graph "$graph_rules"
+write_program degrees graph "$degree_rules"
 make_program grid "$grid_rules"
 make_program tree "$tree_rules"
 make_program small-tree "$tree_rules"
@@ -160,6 +168,7 @@ run "chain, whole closure" "$work/chain.dl" -X no-magic -q 'path(n0, X)?'
 run "chain, distances" "$work/distances.dl" -q 'dist(X, Y, D)?'
 run "graph, reachability" "$work/graph.dl" -q 'reach(X)?'
 run "graph, left-recursive" "$work/graph.dl" -q 'from(n17, X)?'
+run "graph, degrees" "$work/degrees.dl" -q 'degree(X, O, I)?'
 run "grid, reachability" "$work/grid.dl" -q 'reach(X)?'
 run "tree, same generation" "$work/tree.dl" -q 'sg(t2048, X)?'
 run "tree, all generations" "$work/small-tree.dl" -q 'sg(X, Y)?'

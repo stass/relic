@@ -1,0 +1,15 @@
+@import edge :- tsv{resource="edge.tsv"} .
+
+node(?X) :- edge(?X, _) .
+node(?Y) :- edge(_, ?Y) .
+out(?X, #count(?Y)) :- edge(?X, ?Y) .
+in(?Y, #count(?X)) :- edge(?X, ?Y) .
+outs(?X, ?O) :- out(?X, ?O) .
+outs(?X, 0) :- node(?X), ~source(?X) .
+ins(?X, ?I) :- in(?X, ?I) .
+ins(?X, 0) :- node(?X), ~target(?X) .
+source(?X) :- edge(?X, _) .
+target(?Y) :- edge(_, ?Y) .
+degree(?X, ?O, ?I) :- outs(?X, ?O), ins(?X, ?I) .
+
+@export degree :- tsv{resource="answer.tsv"} .

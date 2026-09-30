@@ -129,9 +129,65 @@ bounds
 .Ql dist
 above.
 .Pp
+An aggregate folds the rows of a body in braces into one value, and is
+written only as the right side of an equality:
+.Bd -literal -offset indent
+dep_count(T, N) :- task(T), N = count { depends(T, D) }.
+dir_size(Dir, S) :- dir(Dir),
+    S = sum(Size) { file(F, Dir), size(F, Size) }.
+.Ed
+.Pp
+.Ql count
+is the number of rows,
+.Ql sum(V)
+the total of
+.Ar V
+over them, and
+.Ql min(V)
+and
+.Ql max(V)
+its least and greatest value, in the order comparisons use.
+The rows are the distinct values of the variables that occur only inside
+the braces, the variable of
+.Ql sum ,
+.Ql min
+or
+.Ql max
+among them, so
+.Ql count { edge(a, Y) }
+counts the distinct
+.Ar Y
+and
+.Ql count { edge(a, _) }
+is 1 when there is any, since
+.Ql _
+names no column.
+A variable that also occurs outside the braces is shared: the body is
+folded once for each of its values, and it must be bound by a positive
+atom or an assignment both inside the braces and outside them, as
+.Ar T
+is above.
+A group with no rows has a count and a sum of 0, and no
+.Ql min
+or
+.Ql max ,
+so the literal is false.
+A sum over a value that is not an integer, and a
+.Ql min
+or
+.Ql max
+over values of different types, have no value either.
+A sum is exact over the whole group, whatever order its rows are met in,
+and an error only when the total is outside the 64-bit integers.
+The body holds atoms, negated atoms, comparisons and assignments, but no
+aggregate, and an aggregate may not read a relation that depends on the
+rule it is in.
+The four names are symbols and predicate names everywhere else.
+.Pp
 Every variable of a rule's head, of a negated literal and of a comparison
 must also occur in a positive atom of the body or be assigned by an
-equality, and a program may not be recursive through negation.
+equality or an aggregate, and a program may not be recursive through
+negation or an aggregate.
 A program that breaks either rule is rejected and nothing is evaluated.
 .Pp
 The options are as follows:
@@ -246,9 +302,11 @@ where N is the query's number: its position among the
 queries, or else the program's own, continued in an interactive session as
 .Sx INTERACTIVE MODE
 describes.
-Twice: also a note for the first comparison in each rule that ordered values
-of different types or applied an operator to a symbol or a string, which is
-false and easily unintended.
+Twice: also a note for the first comparison or aggregate in each rule that
+had no value and was easily unintended: a comparison that ordered values of
+different types or applied an operator to a symbol or a string, which is
+false, or an aggregate whose rows were not all integers or not all of one
+type.
 .It Fl X Ar debug
 Select an internal behaviour, for testing and debugging.
 The option may be repeated.

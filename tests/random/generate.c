@@ -39,6 +39,23 @@
  * safe ones; the text places it anywhere in its body, since the library
  * binds by the closure and not by the written order.
  *
+ * An aggregate is drawn after the positive literals and before the
+ * assignments, and follows the same discipline inside its braces.  Its
+ * group body reads only levels strictly below its head's, as a negated
+ * literal does, so stratification holds by the argument above.  The group
+ * body's positive literals draw from variables of the aggregate's own --
+ * fresh, and distinct from every other aggregate's, so that none is shared
+ * by accident -- and from a subset of the variables the enclosing body's
+ * positive literals bind; a variable of that subset the group body mentions
+ * is then shared, bound both outside the braces and inside them, as the
+ * library requires, and its negated literals, comparisons and assignment
+ * draw only on what its positive literals bind.  The aggregated variable is
+ * one of the aggregate's own that a positive literal of the group body
+ * mentions.  The result is a variable nothing before it binds, which
+ * everything drawn later may read, and which the rule is then made to read
+ * in its head or in a comparison; now and then it is a variable a positive
+ * literal outside the braces binds instead, and the aggregate compares.
+ *
  * Arithmetic is defined and terminating by construction.  A program that
  * computes is drawn as one, and states no integer larger in magnitude than
  * RANDOM_INTEGER_SMALL.  An expression's constants lie within
@@ -62,6 +79,26 @@
  * finitely many under every strategy.  Deleting a literal or a column, as
  * the shrinker does, keeps both properties.
  *
+ * A group body reads only levels below its head's and is never rewritten,
+ * since the Magic rewrite reads a group completely, so an operator inside
+ * the braces cannot feed its own computation either; the two operator
+ * literals are a statement's, shared by its body and its group bodies, so
+ * that a value computed in a group body and passed on by min or max is
+ * still multiplied by at most 81 per statement.  An aggregate brings three
+ * more kinds of value, each of which then enters arithmetic as a stated
+ * integer does.  min and max pass on a value of the group.  A sum is drawn
+ * only in a program that computes, so the integers it states are small,
+ * and over a group body whose positive literals read facts alone: every
+ * summand is a stated integer of at most RANDOM_INTEGER_SMALL in magnitude,
+ * and a group has no more rows than the facts of its two positive literals'
+ * predicates combine to, 13 * 13, so no total exceeds 7 * 169.  A count is
+ * the size of a group, a relation the program derives, and this bound alone
+ * is not by construction: a count below 2^24 keeps every value below
+ * 2^24 * 9^12 < 2^63, and a relation of 2^24 tuples is far beyond what a
+ * generated program derives within the harness's alarm.  Were it reached,
+ * the overflow would fail the query, a failure the harness reports, rather
+ * than hide a disagreement.
+ *
  * The random stream is splitmix64, which is defined by its arithmetic alone,
  * so a seed names the same program on every platform and C library.
  */
@@ -69,12 +106,14 @@
 typedef struct random_stream random_stream_t;
 
 /*
- * The generator's state: the random stream, and whether the program being
- * drawn computes, which decides the constants it may state.
+ * The generator's state: the random stream, whether the program being
+ * drawn computes, which decides the constants it may state, and whether its
+ * bodies may hold aggregates.
  */
 struct random_stream {
 	uint64_t	state;
 	bool		computes;
+	bool		aggregates;
 };
 
 /*
@@ -120,27 +159,58 @@ typedef enum predicate_range {
 	READ_ANY,
 	READ_BELOW,
 	READ_SAME,
-	READ_UP_TO
+	READ_UP_TO,
+	READ_FACTS		/* level zero, whatever the head's */
 } predicate_range_t;
 
-static void		 draw_assignment(random_stream_t *stream,
-			    random_body_t *body, size_t *operator_literalsp,
-			    uint64_t *bound_variables);
+/* A rule's own variables, those outside every aggregate. */
+#define	RULE_VARIABLES	((UINT64_C(1) << RANDOM_MAX_VARIABLES) - 1)
+
 static bool		 body_may_compute(const random_program_t *program,
 			    const random_body_t *body, body_owner_t owner,
 			    uint8_t level);
 static uint64_t		 draw(random_stream_t *stream);
+static void		 draw_aggregate(random_stream_t *stream,
+			    const random_program_t *program, body_owner_t owner,
+			    uint8_t level, uint64_t positive_variables,
+			    size_t *operator_literalsp, random_body_t *body,
+			    uint64_t *bound_variables);
+static size_t		 draw_aggregate_count(random_stream_t *stream);
+static void		 draw_assignment(random_stream_t *stream,
+			    random_literal_t *literals, size_t *lengthp,
+			    size_t capacity, uint64_t targets,
+			    size_t *operator_literalsp,
+			    uint64_t *bound_variables);
+static void		 draw_comparison(random_stream_t *stream,
+			    uint64_t bound_variables,
+			    size_t *operator_literalsp,
+			    random_literal_t *literal);
 static void		 draw_expression(random_stream_t *stream,
 			    uint64_t bound_variables,
 			    random_expression_t *expression);
+static random_function_t draw_function(random_stream_t *stream);
 static random_term_t	 draw_leaf(random_stream_t *stream,
 			    uint64_t bound_variables);
+static uint8_t		 draw_member(random_stream_t *stream, uint64_t set);
+static void		 draw_negated(random_stream_t *stream,
+			    const random_program_t *program,
+			    predicate_range_t range, uint8_t level,
+			    uint64_t bound_variables,
+			    random_literal_t *literal);
 static random_term_t	 draw_number(random_stream_t *stream, bool nonzero);
+static void		 draw_positive(random_stream_t *stream,
+			    const random_program_t *program,
+			    predicate_range_t range, uint8_t level,
+			    uint64_t variables, random_literal_t *literal,
+			    uint64_t *positive_variables);
+static uint64_t		 draw_subset(random_stream_t *stream,
+			    uint64_t set);
 static void		 fit_operation(random_stream_t *stream,
 			    random_term_t *left, random_operator_t operator,
 			    random_term_t *right);
 static void		 insert_literal(random_stream_t *stream,
-			    random_body_t *body, const random_literal_t *literal);
+			    random_literal_t *literals, size_t *lengthp,
+			    size_t capacity, const random_literal_t *literal);
 static size_t		 draw_below(random_stream_t *stream, size_t bound);
 static void		 draw_bound_terms(random_stream_t *stream,
 			    uint64_t positive_variables, random_term_t *terms,
@@ -152,27 +222,41 @@ static size_t		 draw_filter_count(random_stream_t *stream);
 static size_t		 draw_positive_count(random_stream_t *stream,
 			    body_owner_t owner);
 static random_term_t	 draw_positive_term(random_stream_t *stream,
-			    size_t variable_count,
-			    uint64_t *positive_variables);
+			    uint64_t variables, uint64_t *positive_variables);
 static predicate_range_t draw_positive_range(random_stream_t *stream,
 			    body_owner_t owner);
 static void		 generate_body(random_stream_t *stream,
 			    const random_program_t *program,
 			    body_owner_t owner, uint8_t level,
-			    random_body_t *body, uint64_t *positive_variables);
+			    random_body_t *body, uint64_t *bound_variables,
+			    uint64_t *result_variables);
 static void		 generate_fact(random_stream_t *stream,
 			    random_program_t *program, uint8_t predicate);
+static void		 generate_group(random_stream_t *stream,
+			    const random_program_t *program, body_owner_t owner,
+			    uint8_t level, bool sums, uint64_t shareable,
+			    uint64_t local_variables,
+			    size_t *operator_literalsp, random_group_t *group,
+			    uint64_t *positive_variables);
 static void		 generate_predicates(random_stream_t *stream,
 			    random_program_t *program,
 			    size_t *extensional_count);
 static void		 generate_rule(random_stream_t *stream,
 			    random_program_t *program, uint8_t predicate,
 			    body_owner_t owner);
+static uint64_t		 group_local_variables(size_t group,
+			    size_t count);
+static size_t		 list_members(uint64_t set, uint8_t *members);
 static uint8_t		 pick_predicate(random_stream_t *stream,
 			    const random_program_t *program,
 			    predicate_range_t range, uint8_t level);
+static void		 read_results(random_stream_t *stream,
+			    const random_program_t *program,
+			    random_rule_t *rule, uint64_t bound_variables,
+			    uint64_t result_variables);
 static void		 shuffle_rules(random_stream_t *stream,
 			    random_program_t *program);
+static uint64_t		 variable_bit(uint8_t variable);
 
 void
 random_generate(random_program_t *program, uint64_t seed)
@@ -183,6 +267,7 @@ random_generate(random_program_t *program, uint64_t seed)
 	bzero(program, sizeof(*program));
 	stream.state = seed;
 	stream.computes = draw_chance(&stream, 2);
+	stream.aggregates = draw_chance(&stream, 2);
 
 	generate_predicates(&stream, program, &extensional_count);
 
@@ -227,10 +312,10 @@ random_generate(random_program_t *program, uint64_t seed)
 
 	query_count = 1 + draw_below(&stream, RANDOM_MAX_QUERIES);
 	for (size_t q = 0; q < query_count; q++) {
-		uint64_t unused_variables;
+		uint64_t bound_variables, result_variables;
 
 		generate_body(&stream, program, BODY_OF_QUERY, 0,
-		    &program->queries[q], &unused_variables);
+		    &program->queries[q], &bound_variables, &result_variables);
 		program->query_count++;
 	}
 }
@@ -299,7 +384,7 @@ generate_rule(random_stream_t *stream, random_program_t *program,
 {
 	const random_predicate_t *head = &program->predicates[predicate];
 	random_rule_t *rule;
-	uint64_t bound_variables;
+	uint64_t bound_variables, result_variables;
 
 	if (program->rule_count == RANDOM_MAX_RULES)
 		return;
@@ -307,17 +392,81 @@ generate_rule(random_stream_t *stream, random_program_t *program,
 
 	rule->head_predicate = predicate;
 	generate_body(stream, program, owner, head->level, &rule->body,
-	    &bound_variables);
+	    &bound_variables, &result_variables);
 	draw_bound_terms(stream, bound_variables, rule->head, head->arity);
+	read_results(stream, program, rule, bound_variables, result_variables);
 
 	program->rule_count++;
 }
 
 /*
- * Draw a body: positive relational literals first, then assignments binding
- * fresh variables from what those bound, then negated literals and
- * comparisons over every variable bound.  The bound variables are returned
- * as a bit set, for the head to draw from.
+ * Make the rule read every result its aggregates bind that nothing else in
+ * it reads: in a head column no other result took, or, when the head has
+ * no such column, in a comparison added to the body.  A result nothing
+ * reads would draw the singleton warning the library gives for a typo, and
+ * test only whether the aggregate has a value.
+ */
+static void
+read_results(random_stream_t *stream, const random_program_t *program,
+    random_rule_t *rule, uint64_t bound_variables, uint64_t result_variables)
+{
+	random_body_t *body = &rule->body;
+	uint8_t arity = program->predicates[rule->head_predicate].arity;
+	uint64_t read_variables = 0, unread;
+	uint8_t free_columns[RANDOM_MAX_ARITY];
+	size_t free_count = 0;
+
+	for (uint8_t a = 0; a < arity; a++) {
+		if (rule->head[a].kind == TERM_VARIABLE)
+			read_variables |= variable_bit(rule->head[a].index);
+	}
+	for (size_t i = 0; i < body->length; i++) {
+		if (body->literals[i].kind != LITERAL_AGGREGATE)
+			read_variables |= random_literal_variables(program,
+			    &body->literals[i]);
+	}
+	unread = result_variables & ~read_variables;
+
+	for (uint8_t a = 0; a < arity; a++) {
+		if (rule->head[a].kind != TERM_VARIABLE ||
+		    (result_variables & variable_bit(rule->head[a].index)) == 0)
+			free_columns[free_count++] = a;
+	}
+
+	while (unread != 0) {
+		uint8_t result = draw_member(stream, unread);
+		random_literal_t comparison;
+		size_t comparator;
+
+		unread &= ~variable_bit(result);
+		if (free_count > 0) {
+			size_t pick = draw_below(stream, free_count);
+
+			rule->head[free_columns[pick]].kind = TERM_VARIABLE;
+			rule->head[free_columns[pick]].index = result;
+			free_columns[pick] = free_columns[--free_count];
+			continue;
+		}
+
+		bzero(&comparison, sizeof(comparison));
+		comparison.kind = LITERAL_COMPARISON;
+		comparator = draw_below(stream, COMPARE_COUNT);
+		comparison.comparator = (random_comparator_t)comparator;
+		comparison.sides[0].leaves[0].kind = TERM_VARIABLE;
+		comparison.sides[0].leaves[0].index = result;
+		comparison.sides[1].leaves[0] = draw_leaf(stream,
+		    bound_variables & ~variable_bit(result));
+		insert_literal(stream, body->literals, &body->length,
+		    RANDOM_MAX_BODY, &comparison);
+	}
+}
+
+/*
+ * Draw a body: positive relational literals first, then aggregates over
+ * what those bound, then assignments binding fresh variables from what is
+ * bound, then negated literals and comparisons over every variable bound.
+ * The bound variables are returned as a bit set, for the head to draw
+ * from, and so are the results the aggregates bind, for the head to read.
  *
  * What a body may read depends on what it belongs to.  A query reads any
  * predicate, since nothing depends on a query.  A rule reads what its head's
@@ -325,21 +474,26 @@ generate_rule(random_stream_t *stream, random_program_t *program,
  * strictly below its head's, so that every derived predicate has a way to
  * hold tuples that does not go through itself.
  *
- * An occasional rule has no positive literal at all, only ground negations
- * and comparisons, or nothing, which makes it a fact; a query always has
- * one, since a query's body is its whole text.
+ * An occasional rule has no positive literal at all, only aggregates over
+ * no shared variable, ground negations and comparisons, or nothing, which
+ * makes it a fact; a query always has one, since a query's body is its
+ * whole text.
  */
 static void
 generate_body(random_stream_t *stream, const random_program_t *program,
     body_owner_t owner, uint8_t level, random_body_t *body,
-    uint64_t *bound_variables)
+    uint64_t *bound_variables, uint64_t *result_variables)
 {
-	size_t positive_count, negated_count, comparison_count;
+	size_t positive_count, aggregate_count, negated_count, comparison_count;
 	size_t assignment_count;
 	size_t variable_count;
 	size_t operator_literals;
+	uint64_t rule_variables, positive_variables;
+	predicate_range_t negated_range =
+	    owner == BODY_OF_QUERY ? READ_ANY : READ_BELOW;
 
 	body->length = 0;
+	body->group_count = 0;
 	*bound_variables = 0;
 
 	/*
@@ -347,64 +501,216 @@ generate_body(random_stream_t *stream, const random_program_t *program,
 	 * literals share them and joins connect.
 	 */
 	variable_count = 2 + draw_below(stream, RANDOM_MAX_VARIABLES - 1);
+	rule_variables = (UINT64_C(1) << variable_count) - 1;
 	positive_count = draw_positive_count(stream, owner);
+	aggregate_count = draw_aggregate_count(stream);
 	assignment_count = draw_assignment_count(stream);
 	negated_count = draw_filter_count(stream);
 	comparison_count = draw_filter_count(stream);
 
-	for (size_t i = 0; i < positive_count; i++) {
-		random_literal_t *literal = &body->literals[body->length++];
-		predicate_range_t range = draw_positive_range(stream, owner);
-		uint8_t arity;
+	for (size_t i = 0; i < positive_count; i++)
+		draw_positive(stream, program, draw_positive_range(stream,
+		    owner), level, rule_variables,
+		    &body->literals[body->length++], bound_variables);
+	positive_variables = *bound_variables;
 
-		literal->kind = LITERAL_POSITIVE;
-		literal->predicate = pick_predicate(stream, program, range,
-		    level);
-		arity = program->predicates[literal->predicate].arity;
-		for (size_t a = 0; a < arity; a++)
-			literal->args[a] = draw_positive_term(stream,
-			    variable_count, bound_variables);
-	}
+	operator_literals = stream->computes ? RANDOM_MAX_OPERATOR_LITERALS : 0;
+	for (size_t i = 0; i < aggregate_count; i++)
+		draw_aggregate(stream, program, owner, level,
+		    positive_variables, &operator_literals, body,
+		    bound_variables);
+	*result_variables = *bound_variables & ~positive_variables;
 
-	operator_literals = 0;
-	if (stream->computes && body_may_compute(program, body, owner, level))
-		operator_literals = RANDOM_MAX_OPERATOR_LITERALS;
+	if (!body_may_compute(program, body, owner, level))
+		operator_literals = 0;
 	for (size_t i = 0; i < assignment_count; i++)
-		draw_assignment(stream, body, &operator_literals,
+		draw_assignment(stream, body->literals, &body->length,
+		    RANDOM_MAX_BODY, RULE_VARIABLES, &operator_literals,
 		    bound_variables);
 
-	for (size_t i = 0; i < negated_count; i++) {
-		random_literal_t *literal = &body->literals[body->length++];
-		predicate_range_t range =
-		    owner == BODY_OF_QUERY ? READ_ANY : READ_BELOW;
+	for (size_t i = 0; i < negated_count; i++)
+		draw_negated(stream, program, negated_range, level,
+		    *bound_variables, &body->literals[body->length++]);
 
-		literal->kind = LITERAL_NEGATED;
-		literal->predicate = pick_predicate(stream, program, range,
-		    level);
-		draw_bound_terms(stream, *bound_variables, literal->args,
-		    program->predicates[literal->predicate].arity);
-	}
+	for (size_t i = 0; i < comparison_count; i++)
+		draw_comparison(stream, *bound_variables, &operator_literals,
+		    &body->literals[body->length++]);
+}
 
-	for (size_t i = 0; i < comparison_count; i++) {
-		random_literal_t *literal = &body->literals[body->length++];
-		size_t comparator = draw_below(stream, COMPARE_COUNT);
-		random_term_t operands[2];
+/*
+ * Draw a positive literal of a predicate in `range`, each argument mostly
+ * one of `variables`, and add the variables it mentions to
+ * *positive_variables.
+ */
+static void
+draw_positive(random_stream_t *stream, const random_program_t *program,
+    predicate_range_t range, uint8_t level, uint64_t variables,
+    random_literal_t *literal, uint64_t *positive_variables)
+{
+	uint8_t arity;
 
-		literal->kind = LITERAL_COMPARISON;
-		literal->comparator = (random_comparator_t)comparator;
-		draw_bound_terms(stream, *bound_variables, operands, 2);
-		for (size_t side = 0; side < 2; side++) {
-			random_expression_t *expression = &literal->sides[side];
+	literal->kind = LITERAL_POSITIVE;
+	literal->predicate = pick_predicate(stream, program, range, level);
+	arity = program->predicates[literal->predicate].arity;
+	for (size_t a = 0; a < arity; a++)
+		literal->args[a] = draw_positive_term(stream, variables,
+		    positive_variables);
+}
 
-			bzero(expression, sizeof(*expression));
-			expression->leaves[0] = operands[side];
-			if (operator_literals > 0 && draw_chance(stream, 2)) {
-				draw_expression(stream, *bound_variables,
-				    expression);
-				operator_literals--;
-			}
+/* Draw a negated literal of a predicate in `range`, over bound terms. */
+static void
+draw_negated(random_stream_t *stream, const random_program_t *program,
+    predicate_range_t range, uint8_t level, uint64_t bound_variables,
+    random_literal_t *literal)
+{
+	literal->kind = LITERAL_NEGATED;
+	literal->predicate = pick_predicate(stream, program, range, level);
+	draw_bound_terms(stream, bound_variables, literal->args,
+	    program->predicates[literal->predicate].arity);
+}
+
+/*
+ * Draw a comparison of two bound terms, each side made an expression with
+ * operators half the time while *operator_literalsp allows one more.
+ */
+static void
+draw_comparison(random_stream_t *stream, uint64_t bound_variables,
+    size_t *operator_literalsp, random_literal_t *literal)
+{
+	size_t comparator = draw_below(stream, COMPARE_COUNT);
+	random_term_t operands[2];
+
+	literal->kind = LITERAL_COMPARISON;
+	literal->comparator = (random_comparator_t)comparator;
+	draw_bound_terms(stream, bound_variables, operands, 2);
+	for (size_t side = 0; side < 2; side++) {
+		random_expression_t *expression = &literal->sides[side];
+
+		bzero(expression, sizeof(*expression));
+		expression->leaves[0] = operands[side];
+		if (*operator_literalsp > 0 && draw_chance(stream, 2)) {
+			draw_expression(stream, bound_variables, expression);
+			(*operator_literalsp)--;
 		}
 	}
+}
+
+/*
+ * Draw an aggregate over what the body's positive literals bind, insert it
+ * anywhere in the body, and add its result to the bound variables.  The
+ * result is drawn first, so that the variables the group body may share
+ * can leave it out: a result inside its own braces would be shared, and
+ * could be bound only by something else.  A body with no variable left for
+ * a result and none bound to compare against gets no aggregate.
+ */
+static void
+draw_aggregate(random_stream_t *stream, const random_program_t *program,
+    body_owner_t owner, uint8_t level, uint64_t positive_variables,
+    size_t *operator_literalsp, random_body_t *body,
+    uint64_t *bound_variables)
+{
+	uint8_t group_index = (uint8_t)body->group_count;
+	uint64_t fresh_variables = RULE_VARIABLES & ~*bound_variables;
+	uint64_t local_variables, shareable;
+	uint64_t group_positive_variables, aggregated_candidates;
+	random_literal_t literal;
+	bool compares;
+
+	compares = positive_variables != 0 &&
+	    (fresh_variables == 0 || draw_chance(stream, 8));
+	if (!compares && fresh_variables == 0)
+		return;
+
+	bzero(&literal, sizeof(literal));
+	literal.kind = LITERAL_AGGREGATE;
+	literal.group = group_index;
+	literal.function = draw_function(stream);
+	literal.result = draw_member(stream,
+	    compares ? positive_variables : fresh_variables);
+
+	/*
+	 * Two to four variables of its own, fewer making the group body's
+	 * literals join on them more often.
+	 */
+	local_variables = group_local_variables(group_index,
+	    2 + draw_below(stream, RANDOM_GROUP_VARIABLES - 1));
+	shareable = draw_subset(stream,
+	    positive_variables & ~variable_bit(literal.result));
+	generate_group(stream, program, owner, level,
+	    literal.function == FUNCTION_SUM, shareable, local_variables,
+	    operator_literalsp, &body->groups[group_index],
+	    &group_positive_variables);
+
+	/*
+	 * A group body whose positive literals mention none of the
+	 * aggregate's own variables has none to fold, and is counted.
+	 */
+	aggregated_candidates = group_positive_variables & local_variables;
+	if (aggregated_candidates == 0)
+		literal.function = FUNCTION_COUNT;
+	if (literal.function != FUNCTION_COUNT)
+		literal.aggregated = draw_member(stream,
+		    aggregated_candidates);
+
+	insert_literal(stream, body->literals, &body->length, RANDOM_MAX_BODY,
+	    &literal);
+	body->group_count++;
+	*bound_variables |= variable_bit(literal.result);
+}
+
+/*
+ * Draw a group body: one or two positive literals over the shareable
+ * variables and the aggregate's own, then perhaps an assignment to one of
+ * its own, a negated literal and a comparison, over what the positive
+ * literals bind.  It reads levels strictly below its head's, any level in
+ * a query, and level zero alone for a sum.  The variables its positive
+ * literals mention are returned.
+ */
+static void
+generate_group(random_stream_t *stream, const random_program_t *program,
+    body_owner_t owner, uint8_t level, bool sums, uint64_t shareable,
+    uint64_t local_variables, size_t *operator_literalsp,
+    random_group_t *group, uint64_t *positive_variables)
+{
+	predicate_range_t range =
+	    owner == BODY_OF_QUERY ? READ_ANY : READ_BELOW;
+	predicate_range_t positive_range = sums ? READ_FACTS : range;
+	size_t positive_count = 1 + draw_below(stream, 2);
+	uint64_t bound_variables;
+
+	group->length = 0;
+	*positive_variables = 0;
+
+	for (size_t i = 0; i < positive_count; i++)
+		draw_positive(stream, program, positive_range, level,
+		    shareable | local_variables,
+		    &group->literals[group->length++], positive_variables);
+	bound_variables = *positive_variables;
+
+	if (draw_chance(stream, 3))
+		draw_assignment(stream, group->literals, &group->length,
+		    RANDOM_MAX_GROUP_BODY, local_variables, operator_literalsp,
+		    &bound_variables);
+	if (draw_chance(stream, 4))
+		draw_negated(stream, program, range, level, bound_variables,
+		    &group->literals[group->length++]);
+	if (draw_chance(stream, 4))
+		draw_comparison(stream, bound_variables, operator_literalsp,
+		    &group->literals[group->length++]);
+}
+
+/*
+ * The first `count` of the variables reserved for the aggregate whose group
+ * body is `group` in its body, which follow the rule's own and the earlier
+ * aggregates'.
+ */
+static uint64_t
+group_local_variables(size_t group, size_t count)
+{
+	size_t first = RANDOM_MAX_VARIABLES + group * RANDOM_GROUP_VARIABLES;
+
+	assert(count <= RANDOM_GROUP_VARIABLES);
+	return (((UINT64_C(1) << count) - 1) << first);
 }
 
 /*
@@ -431,30 +737,26 @@ body_may_compute(const random_program_t *program, const random_body_t *body,
 }
 
 /*
- * Draw an assignment to a variable nothing in the body binds yet, from what
- * is bound, written either way round and placed anywhere in the body, and
- * add the variable to the bound ones.  Its value is mostly an expression
- * with operators while *operator_literalsp allows one more, which it then
- * uses, and otherwise a bound variable or a constant.  A body with no
- * variable left to bind gets none.
+ * Draw an assignment to one of `targets` nothing binds yet, from what is
+ * bound, written either way round and inserted anywhere among the
+ * literals, and add the variable to the bound ones.  Its value is mostly
+ * an expression with operators while *operator_literalsp allows one more,
+ * which it then uses, and otherwise a bound variable or a constant.  With
+ * no target left to bind there is no assignment.
  */
 static void
-draw_assignment(random_stream_t *stream, random_body_t *body,
+draw_assignment(random_stream_t *stream, random_literal_t *literals,
+    size_t *lengthp, size_t capacity, uint64_t targets,
     size_t *operator_literalsp, uint64_t *bound_variables)
 {
 	random_literal_t literal;
-	uint8_t free_variables[RANDOM_MAX_VARIABLES];
-	size_t free_count = 0;
+	uint64_t free_variables = targets & ~*bound_variables;
 	size_t value_side;
 	uint8_t target;
 
-	for (uint8_t v = 0; v < RANDOM_MAX_VARIABLES; v++) {
-		if ((*bound_variables & (UINT64_C(1) << v)) == 0)
-			free_variables[free_count++] = v;
-	}
-	if (free_count == 0)
+	if (free_variables == 0)
 		return;
-	target = free_variables[draw_below(stream, free_count)];
+	target = draw_member(stream, free_variables);
 
 	bzero(&literal, sizeof(literal));
 	literal.kind = LITERAL_COMPARISON;
@@ -470,9 +772,8 @@ draw_assignment(random_stream_t *stream, random_body_t *body,
 		literal.sides[value_side].leaves[0] = draw_leaf(stream,
 		    *bound_variables);
 
-	assert(body->length < RANDOM_MAX_BODY);
-	insert_literal(stream, body, &literal);
-	*bound_variables |= UINT64_C(1) << target;
+	insert_literal(stream, literals, lengthp, capacity, &literal);
+	*bound_variables |= variable_bit(target);
 }
 
 /*
@@ -559,19 +860,13 @@ fit_operation(random_stream_t *stream, random_term_t *left,
 static random_term_t
 draw_leaf(random_stream_t *stream, uint64_t bound_variables)
 {
-	uint8_t bound[RANDOM_MAX_VARIABLES];
-	size_t bound_count = 0;
 	random_term_t term;
 
-	for (uint8_t v = 0; v < RANDOM_MAX_VARIABLES; v++) {
-		if ((bound_variables & (UINT64_C(1) << v)) != 0)
-			bound[bound_count++] = v;
-	}
-	if (bound_count == 0 || draw_chance(stream, 3))
+	if (bound_variables == 0 || draw_chance(stream, 3))
 		return (draw_number(stream, false));
 
 	term.kind = TERM_VARIABLE;
-	term.index = bound[draw_below(stream, bound_count)];
+	term.index = draw_member(stream, bound_variables);
 	return (term);
 }
 
@@ -598,19 +893,20 @@ draw_number(random_stream_t *stream, bool nonzero)
 }
 
 /*
- * Insert a literal at a position drawn among the body's, moving the ones
- * after it along.
+ * Insert a literal at a position drawn among the `*lengthp` held, moving the
+ * ones after it along.
  */
 static void
-insert_literal(random_stream_t *stream, random_body_t *body,
-    const random_literal_t *literal)
+insert_literal(random_stream_t *stream, random_literal_t *literals,
+    size_t *lengthp, size_t capacity, const random_literal_t *literal)
 {
-	size_t position = draw_below(stream, body->length + 1);
+	size_t position = draw_below(stream, *lengthp + 1);
 
-	for (size_t i = body->length; i > position; i--)
-		body->literals[i] = body->literals[i - 1];
-	body->literals[position] = *literal;
-	body->length++;
+	assert(*lengthp < capacity);
+	for (size_t i = *lengthp; i > position; i--)
+		literals[i] = literals[i - 1];
+	literals[position] = *literal;
+	(*lengthp)++;
 }
 
 /*
@@ -643,6 +939,33 @@ draw_filter_count(random_stream_t *stream)
 	size_t count = 1 + draw_below(stream, 2);
 
 	return (present ? count : 0);
+}
+
+/*
+ * How many aggregates a body has: in a program with aggregates, one a third
+ * of the time and now and then two, and otherwise none.
+ */
+static size_t
+draw_aggregate_count(random_stream_t *stream)
+{
+	if (!stream->aggregates || !draw_chance(stream, 3))
+		return (0);
+	return (draw_chance(stream, 4) ? 2 : 1);
+}
+
+/*
+ * An aggregate's function, each alike, except that only a program that
+ * computes sums: a sum is safe only over the small integers such a program
+ * states, and a program that does not compute counts instead.
+ */
+static random_function_t
+draw_function(random_stream_t *stream)
+{
+	size_t function = draw_below(stream, FUNCTION_KINDS);
+
+	if (function == FUNCTION_SUM && !stream->computes)
+		function = FUNCTION_COUNT;
+	return ((random_function_t)function);
 }
 
 /*
@@ -681,12 +1004,11 @@ draw_positive_range(random_stream_t *stream, body_owner_t owner)
 }
 
 /*
- * An argument of a positive literal: nine times in ten one of the body's
- * variables, which the literal then binds, and otherwise a constant or `_`
- * alike.
+ * An argument of a positive literal: nine times in ten one of `variables`,
+ * which the literal then binds, and otherwise a constant or `_` alike.
  */
 static random_term_t
-draw_positive_term(random_stream_t *stream, size_t variable_count,
+draw_positive_term(random_stream_t *stream, uint64_t variables,
     uint64_t *positive_variables)
 {
 	random_term_t term;
@@ -694,8 +1016,8 @@ draw_positive_term(random_stream_t *stream, size_t variable_count,
 
 	if (choice < 18) {
 		term.kind = TERM_VARIABLE;
-		term.index = (uint8_t)draw_below(stream, variable_count);
-		*positive_variables |= UINT64_C(1) << term.index;
+		term.index = draw_member(stream, variables);
+		*positive_variables |= variable_bit(term.index);
 		return (term);
 	}
 	if (choice < 19)
@@ -735,6 +1057,9 @@ pick_predicate(random_stream_t *stream, const random_program_t *program,
 		case READ_UP_TO:
 			allowed = candidate_level <= level;
 			break;
+		case READ_FACTS:
+			allowed = candidate_level == 0;
+			break;
 		}
 		if (allowed)
 			candidates[candidate_count++] = (uint8_t)p;
@@ -757,13 +1082,9 @@ static void
 draw_bound_terms(random_stream_t *stream, uint64_t positive_variables,
     random_term_t *terms, size_t count)
 {
-	uint8_t bound[RANDOM_MAX_VARIABLES];
-	size_t bound_count = 0;
+	uint8_t bound[RANDOM_VARIABLE_COUNT];
+	size_t bound_count = list_members(positive_variables, bound);
 
-	for (uint8_t v = 0; v < RANDOM_MAX_VARIABLES; v++) {
-		if ((positive_variables & (UINT64_C(1) << v)) != 0)
-			bound[bound_count++] = v;
-	}
 	for (size_t i = bound_count; i > 1; i--) {
 		size_t j = draw_below(stream, i);
 		uint8_t swap = bound[i - 1];
@@ -782,6 +1103,53 @@ draw_bound_terms(random_stream_t *stream, uint64_t positive_variables,
 		terms[i].kind = TERM_VARIABLE;
 		terms[i].index = bound[i % bound_count];
 	}
+}
+
+/*
+ * The variables of a set, in increasing order, and how many there are.
+ */
+static size_t
+list_members(uint64_t set, uint8_t *members)
+{
+	size_t count = 0;
+
+	for (uint8_t v = 0; v < RANDOM_VARIABLE_COUNT; v++) {
+		if ((set & variable_bit(v)) != 0)
+			members[count++] = v;
+	}
+	return (count);
+}
+
+/* One variable of a set that is not empty, each alike. */
+static uint8_t
+draw_member(random_stream_t *stream, uint64_t set)
+{
+	uint8_t members[RANDOM_VARIABLE_COUNT];
+	size_t count = list_members(set, members);
+
+	assert(count > 0);
+	return (members[draw_below(stream, count)]);
+}
+
+/* Each variable of a set, kept or not alike. */
+static uint64_t
+draw_subset(random_stream_t *stream, uint64_t set)
+{
+	uint8_t members[RANDOM_VARIABLE_COUNT];
+	size_t count = list_members(set, members);
+	uint64_t subset = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		if (draw_chance(stream, 2))
+			subset |= variable_bit(members[i]);
+	}
+	return (subset);
+}
+
+static uint64_t
+variable_bit(uint8_t variable)
+{
+	return (UINT64_C(1) << variable);
 }
 
 /*

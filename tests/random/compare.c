@@ -43,10 +43,12 @@
  * And the semi-naive fixed point must make every derivation exactly once: to
  * materialize a program whose rules hold no `_`, one per fact and, for each
  * other rule, one per distinct binding of its body's variables over the
- * fixed point.  The bindings are counted in a context of their own under the
- * naive fixed point, as the rows of one query per rule body.  No answer
- * shows a derivation made twice, since a duplicate changes none, so this is
- * the only comparison that can.
+ * fixed point.  An aggregate's braces are compiled to a rule of their own,
+ * the group rule, which derives once per distinct binding of the group
+ * body's variables.  The bindings are counted in a context of their own
+ * under the naive fixed point, as the rows of one query per rule body and
+ * one per group body.  No answer shows a derivation made twice, since a
+ * duplicate changes none, so this is the only comparison that can.
  */
 
 typedef struct strategy strategy_t;
@@ -125,6 +127,8 @@ static void	 capture_diagnostic(void *capture_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static void	 drop_last_row(answer_t *answer);
+static random_failure_kind_t count_bindings(relic_t *ctx, size_t query,
+		    size_t rule, FILE *report, uint64_t *expectedp);
 static random_failure_kind_t count_derivations(
 		    const random_program_t *program, FILE *report,
 		    uint64_t *expectedp);
@@ -343,10 +347,11 @@ done:
  * The derivations that materializing the program must make: one per distinct
  * fact of a predicate some rule with a body also derives, which seeds that
  * predicate's derived relation, and for every other rule the number of distinct
- * bindings of its body's variables over the fixed point, counted as the rows of
- * a query asking for that body under the naive fixed point without the Magic
- * rewrite.  A refusal of the program or a failed query is reported as it would
- * be for a strategy.
+ * bindings of its body's variables over the fixed point, and of each of its
+ * group bodies', counted as the rows of a query asking for that body under the
+ * naive fixed point without the Magic rewrite.  The queries come in the order
+ * random_bindings_text() writes them.  A refusal of the program or a failed
+ * query is reported as it would be for a strategy.
  */
 static random_failure_kind_t
 count_derivations(const random_program_t *program, FILE *report,
@@ -379,35 +384,54 @@ count_derivations(const random_program_t *program, FILE *report,
 	}
 
 	for (size_t r = 0; r < program->rule_count; r++) {
-		relic_query_t *body;
-		relic_result_t *result;
+		const random_body_t *body = &program->rules[r].body;
+		size_t body_count;
 
-		if (program->rules[r].body.length == 0) {
+		if (body->length == 0) {
 			if (fact_seeds(program, r))
 				(*expectedp)++;
 			continue;
 		}
 
-		body = relic_query_loaded(ctx, query);
-		if (body == NULL)
-			errx(1, "relic_query_loaded failed");
-		result = relic_query_collect(ctx, body);
-		relic_query_destroy(body);
-		if (result == NULL) {
-			fprintf(report, "bindings: the body of rule %zu "
-			    "failed: %s\n", r + 1, error_text(ctx));
-			kind = FAILURE_QUERY;
-			goto done;
+		body_count = 1 + random_body_aggregates(body);
+		for (size_t b = 0; b < body_count; b++) {
+			kind = count_bindings(ctx, query, r, report, expectedp);
+			if (kind != FAILURE_NONE)
+				goto done;
+			query++;
 		}
-		*expectedp += relic_result_rows(result);
-		relic_result_destroy(result);
-		query++;
 	}
 
 done:
 	free(text);
 	relic_destroy(ctx);
 	return (kind);
+}
+
+/*
+ * Add the rows of loaded query `query`, the bindings of a body of rule
+ * `rule`, to *expectedp.
+ */
+static random_failure_kind_t
+count_bindings(relic_t *ctx, size_t query, size_t rule, FILE *report,
+    uint64_t *expectedp)
+{
+	relic_query_t *body;
+	relic_result_t *result;
+
+	body = relic_query_loaded(ctx, query);
+	if (body == NULL)
+		errx(1, "relic_query_loaded failed");
+	result = relic_query_collect(ctx, body);
+	relic_query_destroy(body);
+	if (result == NULL) {
+		fprintf(report, "bindings: a body of rule %zu failed: %s\n",
+		    rule + 1, error_text(ctx));
+		return (FAILURE_QUERY);
+	}
+	*expectedp += relic_result_rows(result);
+	relic_result_destroy(result);
+	return (FAILURE_NONE);
 }
 
 /*

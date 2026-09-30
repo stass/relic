@@ -1,0 +1,18 @@
+p0("a").
+p0(0).
+p0(3).
+p1(1, B) :- E = F, p0(C), p1(B, E).
+p1(F, E) :- F = count { p0(H), p0(G) }, -3 + (-1 - F) = E, (F - E) * -1 <= F, F > E.
+p1(-1, 2).
+p0(-2).
+p0("a").
+p0("a").
+p0(a).
+p1(F, A) :- p0(A), F = C, p1(C, D), p1(B, C), "a" != C.
+p0(d).
+p0(-2).
+p0(a).
+C = sum(L) { p0(L) }, p1(D, B), E = count { p1(D, I), I > 0 }, F = -1 * (E - C)?
+1 = F, A = min(G) { p0(J), p0(G) }, p1(C, B), not p1(B, A), not p0(C), F * 2 <= A?
+p1(A, B), C = count { p0(A) }, C + 0 mod 2 = D, E = (D - 0) * -2, 1 != C?
+B + A / 3 = C, p1(A, B)?

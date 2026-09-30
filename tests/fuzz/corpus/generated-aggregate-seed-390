@@ -1,0 +1,15 @@
+p2(C, B) :- p1(C, A, D), p1(A, A, B).
+p0(c, "a").
+p1(C, A, B) :- p2(C, A), p1(A, B, A), B = C, C > 9223372036854775807.
+p2(C, D) :- p1(D, B, _), p1(C, F, F).
+p0("a", "a").
+p2(C, E) :- p0(C, E).
+p0(d, d).
+p1(0, D, F) :- p2(F, F), p2(B, A), E = A, p0(C, 0), D = min(G) { p0(G, B), p0(G, C), not p0(c, 0), d > C }, E >= A, A >= E.
+p0(a, 0).
+p1(D, E, D) :- p0(E, D).
+p0(0, a).
+B = count { p2(G, _), p2(G, G) }, p0(D, D)?
+p1(C, B, A)?
+p2(A, A), E = max(H) { p1(H, H, G) }?
+B = A, p2(A, A)?

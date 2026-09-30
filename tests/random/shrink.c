@@ -9,6 +9,7 @@
 #include <err.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "random.h"
@@ -18,20 +19,22 @@
  * way.
  *
  * It is greedy.  A pass tries every deletion the program allows -- each
- * query, each rule or fact, each body literal, each argument position of
- * each predicate -- and keeps a deletion whenever the smaller program still
- * fails with the same kind of failure under the same strategy, and for a
- * crash or an abnormal exit with the same signal or status.  Passes repeat
- * until one keeps nothing, so the result is a program from which no single
- * deletion leaves the failure in place.
+ * query, each rule or fact, each body literal, each literal inside an
+ * aggregate's braces, each argument position of each predicate -- and keeps
+ * a deletion whenever the smaller program still fails with the same kind
+ * of failure under the same strategy, and for a crash or an abnormal exit
+ * with the same signal or status.  Passes repeat until one keeps nothing,
+ * so the result is a program from which no single deletion leaves the
+ * failure in place.
  *
  * Holding the failure fixed is what keeps a reduction on one bug.  A
  * deletion that turned a wrong answer into a crash, or made the program one
  * the library rightly refuses, is a different failure and is not kept.
  * Deletions add no dependency, so a stratified program stays stratified,
  * and add no operator, so a program whose arithmetic is bounded stays
- * bounded; a deletion that leaves a variable unbound is recognized by the
- * model's safety check and never run, and the bound is checked as well.
+ * bounded; a deletion that leaves a variable unbound, or a group body
+ * empty, is recognized by the model's safety check and never run, and the
+ * bound is checked as well.
  *
  * Every candidate is run in a child, exactly as the driver runs a program,
  * so a crash or a hang shrinks as readily as a wrong answer.
@@ -47,6 +50,9 @@ struct shrink_state {
 };
 
 static bool	 keep_if_still_failing(shrink_state_t *state);
+static bool	 shrink_body(shrink_state_t *state, size_t rule, size_t query);
+static random_body_t *state_body(random_program_t *program, size_t rule,
+		    size_t query);
 static bool	 shrink_columns(shrink_state_t *state);
 static bool	 shrink_literals(shrink_state_t *state);
 static bool	 shrink_queries(shrink_state_t *state);
@@ -126,28 +132,64 @@ shrink_literals(shrink_state_t *state)
 	bool changed = false;
 
 	for (size_t r = state->program->rule_count; r-- > 0;) {
-		size_t length = state->program->rules[r].body.length;
-
-		for (size_t i = length; i-- > 0;) {
-			*state->candidate = *state->program;
-			random_remove_literal(&state->candidate->rules[r].body,
-			    i);
-			if (keep_if_still_failing(state))
-				changed = true;
-		}
+		if (shrink_body(state, r, SIZE_MAX))
+			changed = true;
 	}
-
 	for (size_t q = state->program->query_count; q-- > 0;) {
-		size_t length = state->program->queries[q].length;
-
-		for (size_t i = length; i-- > 0;) {
-			*state->candidate = *state->program;
-			random_remove_literal(&state->candidate->queries[q], i);
-			if (keep_if_still_failing(state))
-				changed = true;
-		}
+		if (shrink_body(state, SIZE_MAX, q))
+			changed = true;
 	}
 	return (changed);
+}
+
+/*
+ * Try deleting each literal of one body, rule `rule`'s or, when that is
+ * SIZE_MAX, query `query`'s: those inside each aggregate's braces first,
+ * then the body's own, among them the aggregates.  A group body's literals
+ * are found through the aggregate that names it, since a group no literal
+ * names is never read.
+ */
+static bool
+shrink_body(shrink_state_t *state, size_t rule, size_t query)
+{
+	const random_body_t *body = state_body(state->program, rule, query);
+	bool changed = false;
+
+	for (size_t i = body->length; i-- > 0;) {
+		const random_literal_t *literal = &body->literals[i];
+		size_t group = literal->group;
+
+		if (literal->kind != LITERAL_AGGREGATE)
+			continue;
+		for (size_t g = body->groups[group].length; g-- > 0;) {
+			random_body_t *candidate_body =
+			    state_body(state->candidate, rule, query);
+
+			*state->candidate = *state->program;
+			random_remove_group_literal(
+			    &candidate_body->groups[group], g);
+			if (keep_if_still_failing(state))
+				changed = true;
+		}
+	}
+
+	for (size_t i = body->length; i-- > 0;) {
+		*state->candidate = *state->program;
+		random_remove_literal(state_body(state->candidate, rule, query),
+		    i);
+		if (keep_if_still_failing(state))
+			changed = true;
+	}
+	return (changed);
+}
+
+/* Rule `rule`'s body, or when that is SIZE_MAX query `query`. */
+static random_body_t *
+state_body(random_program_t *program, size_t rule, size_t query)
+{
+	if (rule != SIZE_MAX)
+		return (&program->rules[rule].body);
+	return (&program->queries[query]);
 }
 
 static bool

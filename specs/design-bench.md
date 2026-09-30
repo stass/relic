@@ -155,6 +155,7 @@ The data sets of `bench/run.sh`, queried as a user would query them:
 | `chain-closure` | the chain | free; the whole closure, two million tuples |
 | `graph-reach` | 20000 nodes, 100000 edges | reachability from one node |
 | `graph-left` | the graph | bound; left-recursive closure from one node |
+| `degree-count` | the graph | free; each node's out-degree and in-degree, two `count` aggregates |
 | `grid-reach` | a 150 by 150 grid | reachability from a corner |
 | `tree-sg-bound` | a complete binary tree of depth 12 | bound; same generation |
 | `tree-sg-all` | a tree of depth 9 | free; same generation |

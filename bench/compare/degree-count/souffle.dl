@@ -1,0 +1,12 @@
+.decl edge(x: symbol, y: symbol)
+.input edge(filename="edge.tsv")
+
+.decl node(x: symbol)
+node(X) :- edge(X, _).
+node(Y) :- edge(_, Y).
+
+.decl degree(x: symbol, o: number, i: number)
+degree(X, O, I) :- node(X), O = count : { edge(X, _) },
+    I = count : { edge(_, X) }.
+
+.output degree(filename="answer.csv")

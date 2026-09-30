@@ -21,17 +21,42 @@
  * edits can break, and the edits themselves.
  */
 
-static uint64_t	 assigned_variables(const random_body_t *body,
-		    uint64_t bound_variables);
+static uint64_t	 assigned_variables(const random_literal_t *literals,
+		    size_t length, uint64_t bound_variables);
+static uint64_t	 bound_by_closure(const random_body_t *body,
+		    const uint64_t *shared, uint64_t bound_variables);
+static bool	 body_computes(const random_body_t *body);
 static bool	 body_is_bounded(const random_program_t *program,
 		    const random_body_t *body, bool query, uint8_t level);
 static bool	 body_is_safe(const random_program_t *program,
-		    const random_body_t *body, uint64_t *bound_variables);
+		    const random_body_t *body, uint64_t head_variables,
+		    uint64_t *bound_variables);
 static bool	 body_states_small(const random_program_t *program,
 		    const random_body_t *body);
+static size_t	 count_operator_literals(const random_literal_t *literals,
+		    size_t length);
+static bool	 group_is_safe(const random_program_t *program,
+		    const random_group_t *group,
+		    const random_literal_t *aggregate);
+static bool	 group_reads_facts(const random_program_t *program,
+		    const random_group_t *group);
+static uint64_t	 group_variables(const random_program_t *program,
+		    const random_group_t *group,
+		    const random_literal_t *aggregate);
 static bool	 literal_has_operator(const random_literal_t *literal);
+static bool	 literals_have_anonymous(const random_program_t *program,
+		    const random_literal_t *literals, size_t length);
+static bool	 literals_state_small(const random_program_t *program,
+		    const random_literal_t *literals, size_t length);
+static uint64_t	 positive_variables(const random_program_t *program,
+		    const random_literal_t *literals, size_t length);
 static bool	 program_computes(const random_program_t *program);
+static void	 shared_variables(const random_program_t *program,
+		    const random_body_t *body, uint64_t head_variables,
+		    uint64_t *shared);
 static bool	 terms_are_small(const random_term_t *terms, size_t count);
+static uint64_t	 terms_variables(const random_term_t *terms,
+		    size_t count);
 static bool	 expression_is_variable(const random_expression_t *expression,
 		    uint8_t *variablep);
 static size_t	 expression_leaves(const random_expression_t *expression);
@@ -43,13 +68,26 @@ static int	 operator_precedence(random_operator_t operator);
 static void	 remove_argument(random_term_t *args, size_t column);
 static void	 remove_column_in_body(random_body_t *body, size_t predicate,
 		    size_t column);
+static void	 remove_column_in_literals(random_literal_t *literals,
+		    size_t length, size_t predicate, size_t column);
 static bool	 term_is_bound(random_term_t term, uint64_t positive_variables);
+static bool	 terms_are_bound(const random_term_t *terms, size_t count,
+		    uint64_t bound_variables);
+static bool	 test_is_safe(const random_program_t *program,
+		    const random_literal_t *literal, uint64_t bound_variables);
+static uint64_t	 variable_bit(uint8_t variable);
+static void	 write_aggregate(FILE *out, const random_program_t *program,
+		    const random_body_t *body,
+		    const random_literal_t *aggregate);
 static void	 write_atom(FILE *out, const random_program_t *program,
 		    uint8_t predicate, const random_term_t *args);
 static void	 write_body(FILE *out, const random_program_t *program,
 		    const random_body_t *body);
 static void	 write_expression(FILE *out,
 		    const random_expression_t *expression);
+static void	 write_literals(FILE *out, const random_program_t *program,
+		    const random_body_t *body, const random_literal_t *literals,
+		    size_t length);
 static void	 write_operation(FILE *out, random_term_t left,
 		    random_operator_t operator, random_term_t right);
 static void	 write_rule(FILE *out, const random_program_t *program,
@@ -73,12 +111,21 @@ static const char *const comparator_spellings[COMPARE_COUNT] = {
 	[COMPARE_GE] = ">=",
 };
 
+static const char *const function_spellings[FUNCTION_KINDS] = {
+	[FUNCTION_COUNT] = "count",
+	[FUNCTION_SUM] = "sum",
+	[FUNCTION_MIN] = "min",
+	[FUNCTION_MAX] = "max",
+};
+
 /*
  * Whether every rule and query satisfies the safety condition: every
  * variable of a head, a negated literal or a comparison is bound, by a
- * positive relational literal of the same body or by an assignment, and `_`
- * occurs nowhere else.  A query must also have a body, since its body is
- * all it is.
+ * positive relational literal of the same body, by an assignment or by an
+ * aggregate, and `_` occurs nowhere else.  An aggregate's shared variables
+ * and its result must be bound as well, and its group body must be safe as
+ * a rule of its own.  A query must also have a body, since its body is all
+ * it is.
  */
 bool
 random_program_is_safe(const random_program_t *program)
@@ -88,7 +135,8 @@ random_program_is_safe(const random_program_t *program)
 		uint8_t arity = program->predicates[rule->head_predicate].arity;
 		uint64_t bound_variables;
 
-		if (!body_is_safe(program, &rule->body, &bound_variables))
+		if (!body_is_safe(program, &rule->body,
+		    terms_variables(rule->head, arity), &bound_variables))
 			return (false);
 		for (size_t a = 0; a < arity; a++) {
 			if (!term_is_bound(rule->head[a], bound_variables))
@@ -101,7 +149,7 @@ random_program_is_safe(const random_program_t *program)
 
 		if (program->queries[q].length == 0)
 			return (false);
-		if (!body_is_safe(program, &program->queries[q],
+		if (!body_is_safe(program, &program->queries[q], 0,
 		    &bound_variables))
 			return (false);
 	}
@@ -111,11 +159,13 @@ random_program_is_safe(const random_program_t *program)
 
 /*
  * Whether the program's arithmetic is bounded as the generator builds it: a
- * literal holding an operator stands only in a query or in a rule whose
- * positive literals all read levels below its head's, at most
- * RANDOM_MAX_OPERATOR_LITERALS of them in a body, and a program holding one
- * states no integer beyond RANDOM_INTEGER_SMALL in magnitude.  generate.c
- * explains why such a program is defined and finite under every strategy.
+ * literal holding an operator stands only in a query, in a rule whose
+ * positive literals all read levels below its head's, or inside an
+ * aggregate's braces, at most RANDOM_MAX_OPERATOR_LITERALS of them in a
+ * statement's body and group bodies together; a sum's group body reads
+ * facts alone; and a program holding an operator or a sum states no integer
+ * beyond RANDOM_INTEGER_SMALL in magnitude.  generate.c explains why such a
+ * program is defined and finite under every strategy.
  */
 bool
 random_program_is_bounded(const random_program_t *program)
@@ -147,51 +197,112 @@ random_program_is_bounded(const random_program_t *program)
 }
 
 /*
- * Whether a body holds no more literals with an operator than a body may,
- * and none unless it is a query's or its positive literals all read below
- * `level`, its head's.
+ * Whether a body and its group bodies hold no more literals with an
+ * operator than a statement may; whether the body's own hold none unless it
+ * is a query's or its positive literals all read below `level`, its
+ * head's; and whether every sum's group body reads facts alone.  A group
+ * body reads below its head's level by construction, so the operators in
+ * it are allowed wherever the aggregate is.
  */
 static bool
 body_is_bounded(const random_program_t *program, const random_body_t *body,
     bool query, uint8_t level)
 {
-	size_t operator_literals = 0;
+	size_t body_operators, operator_literals;
 	bool reads_below = true;
+
+	body_operators = count_operator_literals(body->literals, body->length);
+	operator_literals = body_operators;
 
 	for (size_t i = 0; i < body->length; i++) {
 		const random_literal_t *literal = &body->literals[i];
+		const random_group_t *group;
 
-		if (literal_has_operator(literal))
-			operator_literals++;
 		if (literal->kind == LITERAL_POSITIVE &&
 		    program->predicates[literal->predicate].level >= level)
 			reads_below = false;
+		if (literal->kind != LITERAL_AGGREGATE)
+			continue;
+
+		group = &body->groups[literal->group];
+		operator_literals += count_operator_literals(group->literals,
+		    group->length);
+		if (literal->function == FUNCTION_SUM &&
+		    !group_reads_facts(program, group))
+			return (false);
 	}
 
 	if (operator_literals > RANDOM_MAX_OPERATOR_LITERALS)
 		return (false);
-	return (operator_literals == 0 || query || reads_below);
+	return (body_operators == 0 || query || reads_below);
 }
 
-/* Whether any literal of the program holds an operator. */
+/* How many of the literals are comparisons holding an operator. */
+static size_t
+count_operator_literals(const random_literal_t *literals, size_t length)
+{
+	size_t count = 0;
+
+	for (size_t i = 0; i < length; i++) {
+		if (literal_has_operator(&literals[i]))
+			count++;
+	}
+	return (count);
+}
+
+/*
+ * Whether every positive literal of a group body reads a level-zero
+ * predicate, one that holds facts alone.
+ */
+static bool
+group_reads_facts(const random_program_t *program, const random_group_t *group)
+{
+	for (size_t i = 0; i < group->length; i++) {
+		const random_literal_t *literal = &group->literals[i];
+
+		if (literal->kind == LITERAL_POSITIVE &&
+		    program->predicates[literal->predicate].level != 0)
+			return (false);
+	}
+	return (true);
+}
+
+/*
+ * Whether the program computes integers it does not state: whether any
+ * literal, in a body or in a group body, holds an operator, or any
+ * aggregate sums.  A count computes an integer too, but one no larger than
+ * a relation, whatever integers the program states.
+ */
 static bool
 program_computes(const random_program_t *program)
 {
 	for (size_t r = 0; r < program->rule_count; r++) {
-		const random_body_t *body = &program->rules[r].body;
-
-		for (size_t i = 0; i < body->length; i++) {
-			if (literal_has_operator(&body->literals[i]))
-				return (true);
-		}
+		if (body_computes(&program->rules[r].body))
+			return (true);
 	}
 	for (size_t q = 0; q < program->query_count; q++) {
-		const random_body_t *body = &program->queries[q];
+		if (body_computes(&program->queries[q]))
+			return (true);
+	}
+	return (false);
+}
 
-		for (size_t i = 0; i < body->length; i++) {
-			if (literal_has_operator(&body->literals[i]))
-				return (true);
-		}
+static bool
+body_computes(const random_body_t *body)
+{
+	for (size_t i = 0; i < body->length; i++) {
+		const random_literal_t *literal = &body->literals[i];
+		const random_group_t *group;
+
+		if (literal_has_operator(literal))
+			return (true);
+		if (literal->kind != LITERAL_AGGREGATE)
+			continue;
+
+		group = &body->groups[literal->group];
+		if (literal->function == FUNCTION_SUM ||
+		    count_operator_literals(group->literals, group->length) > 0)
+			return (true);
 	}
 	return (false);
 }
@@ -212,12 +323,33 @@ literal_has_operator(const random_literal_t *literal)
 	return (false);
 }
 
-/* Whether every constant a body states is small. */
+/* Whether every constant a body and its group bodies state is small. */
 static bool
 body_states_small(const random_program_t *program, const random_body_t *body)
 {
+	if (!literals_state_small(program, body->literals, body->length))
+		return (false);
+
 	for (size_t i = 0; i < body->length; i++) {
 		const random_literal_t *literal = &body->literals[i];
+		const random_group_t *group;
+
+		if (literal->kind != LITERAL_AGGREGATE)
+			continue;
+		group = &body->groups[literal->group];
+		if (!literals_state_small(program, group->literals,
+		    group->length))
+			return (false);
+	}
+	return (true);
+}
+
+static bool
+literals_state_small(const random_program_t *program,
+    const random_literal_t *literals, size_t length)
+{
+	for (size_t i = 0; i < length; i++) {
+		const random_literal_t *literal = &literals[i];
 
 		if (literal->kind != LITERAL_COMPARISON) {
 			if (!terms_are_small(literal->args,
@@ -266,48 +398,43 @@ random_constant_is_small(size_t index)
 }
 
 /*
- * Whether a body's negated literals and comparisons use only variables it
- * binds: those its positive literals mention, and those its assignments
- * bind from them.  The bound variables are returned as a bit set, for the
- * caller to check a head against.
+ * Whether a body is safe, given the variables its head mentions.  The body
+ * binds the variables its positive literals mention, and then, by the
+ * closure of bound_by_closure(), those its assignments and aggregates bind
+ * from them.  Every negated literal and comparison must use only bound
+ * variables, and every aggregate needs its shared variables and its result
+ * bound and its group body safe.  The bound variables are returned as a
+ * bit set, for the caller to check a head against.
  */
 static bool
 body_is_safe(const random_program_t *program, const random_body_t *body,
-    uint64_t *bound_variables)
+    uint64_t head_variables, uint64_t *bound_variables)
 {
-	uint64_t positive_variables = 0;
+	uint64_t shared[RANDOM_MAX_AGGREGATES];
+
+	shared_variables(program, body, head_variables, shared);
+	*bound_variables = bound_by_closure(body, shared,
+	    positive_variables(program, body->literals, body->length));
 
 	for (size_t i = 0; i < body->length; i++) {
 		const random_literal_t *literal = &body->literals[i];
-
-		if (literal->kind != LITERAL_POSITIVE)
-			continue;
-		for (size_t a = 0; a < literal_arity(program, literal); a++) {
-			if (literal->args[a].kind == TERM_VARIABLE)
-				positive_variables |=
-				    UINT64_C(1) << literal->args[a].index;
-		}
-	}
-	*bound_variables = assigned_variables(body, positive_variables);
-
-	for (size_t i = 0; i < body->length; i++) {
-		const random_literal_t *literal = &body->literals[i];
+		uint64_t required;
 
 		switch (literal->kind) {
 		case LITERAL_POSITIVE:
 			break;
 		case LITERAL_NEGATED:
-			for (size_t a = 0; a < literal_arity(program, literal);
-			    a++) {
-				if (!term_is_bound(literal->args[a],
-				    *bound_variables))
-					return (false);
-			}
-			break;
 		case LITERAL_COMPARISON:
-			if (((expression_variables(&literal->sides[0]) |
-			    expression_variables(&literal->sides[1])) &
-			    ~*bound_variables) != 0)
+			if (!test_is_safe(program, literal, *bound_variables))
+				return (false);
+			break;
+		case LITERAL_AGGREGATE:
+			if (!group_is_safe(program,
+			    &body->groups[literal->group], literal))
+				return (false);
+			required = shared[literal->group] |
+			    variable_bit(literal->result);
+			if ((required & ~*bound_variables) != 0)
 				return (false);
 			break;
 		}
@@ -317,21 +444,197 @@ body_is_safe(const random_program_t *program, const random_body_t *body,
 }
 
 /*
- * The variables bound once a body's assignments have run, starting from
- * `bound_variables`: an equality one of whose sides is a variable alone,
- * not yet bound, and whose other side reads only bound variables binds
- * it.  An assignment may read what another binds, in whatever order they
- * are written, so the rule is applied until it binds nothing more.
+ * Each aggregate's shared variables, indexed by its group: those of its
+ * group body that occur anywhere else in the statement -- in the head, in
+ * a literal outside every aggregate, as an aggregate's result, or in
+ * another group body.  The rest of a group body's variables are local to
+ * it.  This is the library's rule, stated by occurrence, so a variable two
+ * group bodies mention is shared by both.
+ */
+static void
+shared_variables(const random_program_t *program, const random_body_t *body,
+    uint64_t head_variables, uint64_t *shared)
+{
+	uint64_t outside = head_variables;
+	uint64_t inside[RANDOM_MAX_AGGREGATES] = { 0 };
+
+	for (size_t i = 0; i < body->length; i++) {
+		const random_literal_t *literal = &body->literals[i];
+
+		outside |= random_literal_variables(program, literal);
+		if (literal->kind == LITERAL_AGGREGATE)
+			inside[literal->group] = group_variables(program,
+			    &body->groups[literal->group], literal);
+	}
+
+	for (size_t g = 0; g < RANDOM_MAX_AGGREGATES; g++) {
+		uint64_t elsewhere = outside;
+
+		for (size_t other = 0; other < RANDOM_MAX_AGGREGATES; other++) {
+			if (other != g)
+				elsewhere |= inside[other];
+		}
+		shared[g] = inside[g] & elsewhere;
+	}
+}
+
+/*
+ * The variables a body binds, starting from `bound_variables`, those its
+ * positive literals mention: an assignment binds its variable once the
+ * other side's are bound, and an aggregate binds its result once its
+ * shared variables are.  Either may read what the other binds, in whatever
+ * order they are written, so both rules are applied until they bind
+ * nothing more.
  */
 static uint64_t
-assigned_variables(const random_body_t *body, uint64_t bound_variables)
+bound_by_closure(const random_body_t *body, const uint64_t *shared,
+    uint64_t bound_variables)
+{
+	uint64_t before;
+
+	do {
+		before = bound_variables;
+		bound_variables = assigned_variables(body->literals,
+		    body->length, bound_variables);
+		for (size_t i = 0; i < body->length; i++) {
+			const random_literal_t *literal = &body->literals[i];
+
+			if (literal->kind == LITERAL_AGGREGATE &&
+			    (shared[literal->group] & ~bound_variables) == 0)
+				bound_variables |=
+				    variable_bit(literal->result);
+		}
+	} while (bound_variables != before);
+
+	return (bound_variables);
+}
+
+/*
+ * Whether an aggregate's group body is safe as the rule the library
+ * compiles it to, whose head names every variable of the group body, the
+ * aggregated one among them: the body is not empty, holds no aggregate, and
+ * binds each of those variables by a positive literal or an assignment
+ * inside the braces, and `_` stands only in its positive literals.
+ */
+static bool
+group_is_safe(const random_program_t *program, const random_group_t *group,
+    const random_literal_t *aggregate)
+{
+	uint64_t bound_variables;
+
+	if (group->length == 0)
+		return (false);
+
+	bound_variables = assigned_variables(group->literals, group->length,
+	    positive_variables(program, group->literals, group->length));
+	if ((group_variables(program, group, aggregate) &
+	    ~bound_variables) != 0)
+		return (false);
+
+	for (size_t i = 0; i < group->length; i++) {
+		const random_literal_t *literal = &group->literals[i];
+
+		if (literal->kind == LITERAL_AGGREGATE)
+			return (false);
+		if (literal->kind != LITERAL_POSITIVE &&
+		    !test_is_safe(program, literal, bound_variables))
+			return (false);
+	}
+	return (true);
+}
+
+/*
+ * The variables of a group body: those its literals mention, and the
+ * aggregated variable, which is an occurrence inside the braces.
+ */
+static uint64_t
+group_variables(const random_program_t *program, const random_group_t *group,
+    const random_literal_t *aggregate)
+{
+	uint64_t variables = 0;
+
+	for (size_t i = 0; i < group->length; i++)
+		variables |= random_literal_variables(program,
+		    &group->literals[i]);
+	if (aggregate->function != FUNCTION_COUNT)
+		variables |= variable_bit(aggregate->aggregated);
+	return (variables);
+}
+
+/*
+ * The variables a literal mentions where it stands.  An aggregate's result
+ * stands in the enclosing body; its group body's variables do not.
+ */
+uint64_t
+random_literal_variables(const random_program_t *program,
+    const random_literal_t *literal)
+{
+	switch (literal->kind) {
+	case LITERAL_POSITIVE:
+	case LITERAL_NEGATED:
+		return (terms_variables(literal->args,
+		    literal_arity(program, literal)));
+	case LITERAL_COMPARISON:
+		return (expression_variables(&literal->sides[0]) |
+		    expression_variables(&literal->sides[1]));
+	case LITERAL_AGGREGATE:
+		return (variable_bit(literal->result));
+	}
+	return (0);
+}
+
+/* The variables the positive literals among `literals` mention. */
+static uint64_t
+positive_variables(const random_program_t *program,
+    const random_literal_t *literals, size_t length)
+{
+	uint64_t variables = 0;
+
+	for (size_t i = 0; i < length; i++) {
+		if (literals[i].kind == LITERAL_POSITIVE)
+			variables |= random_literal_variables(program,
+			    &literals[i]);
+	}
+	return (variables);
+}
+
+/* The variables among `terms`, as a bit set. */
+static uint64_t
+terms_variables(const random_term_t *terms, size_t count)
+{
+	uint64_t variables = 0;
+
+	for (size_t i = 0; i < count; i++) {
+		if (terms[i].kind == TERM_VARIABLE)
+			variables |= variable_bit(terms[i].index);
+	}
+	return (variables);
+}
+
+static uint64_t
+variable_bit(uint8_t variable)
+{
+	return (UINT64_C(1) << variable);
+}
+
+/*
+ * The variables bound once the assignments among `literals` have run,
+ * starting from `bound_variables`: an equality one of whose sides is a
+ * variable alone, not yet bound, and whose other side reads only bound
+ * variables binds it.  An assignment may read what another binds, in
+ * whatever order they are written, so the rule is applied until it binds
+ * nothing more.
+ */
+static uint64_t
+assigned_variables(const random_literal_t *literals, size_t length,
+    uint64_t bound_variables)
 {
 	bool bound_more;
 
 	do {
 		bound_more = false;
-		for (size_t i = 0; i < body->length; i++) {
-			const random_literal_t *literal = &body->literals[i];
+		for (size_t i = 0; i < length; i++) {
+			const random_literal_t *literal = &literals[i];
 
 			if (literal->kind != LITERAL_COMPARISON ||
 			    literal->comparator != COMPARE_EQ)
@@ -344,10 +647,10 @@ assigned_variables(const random_body_t *body, uint64_t bound_variables)
 				if (!expression_is_variable(
 				    &literal->sides[side], &variable) ||
 				    (bound_variables &
-				    (UINT64_C(1) << variable)) != 0 ||
+				    variable_bit(variable)) != 0 ||
 				    (other & ~bound_variables) != 0)
 					continue;
-				bound_variables |= UINT64_C(1) << variable;
+				bound_variables |= variable_bit(variable);
 				bound_more = true;
 			}
 		}
@@ -377,13 +680,8 @@ expression_is_variable(const random_expression_t *expression,
 static uint64_t
 expression_variables(const random_expression_t *expression)
 {
-	uint64_t variables = 0;
-
-	for (size_t i = 0; i < expression_leaves(expression); i++) {
-		if (expression->leaves[i].kind == TERM_VARIABLE)
-			variables |= UINT64_C(1) << expression->leaves[i].index;
-	}
-	return (variables);
+	return (terms_variables(expression->leaves,
+	    expression_leaves(expression)));
 }
 
 /* How many leaves an expression's shape holds. */
@@ -405,14 +703,46 @@ expression_leaves(const random_expression_t *expression)
 /*
  * How many argument slots of a literal are in use: its predicate's arity for
  * a relational literal, and none for a comparison, whose operands are its
- * sides.  Slots past that hold whatever they last held and are never read.
+ * sides, or for an aggregate.  Slots past that hold whatever they last held
+ * and are never read.
  */
 static size_t
 literal_arity(const random_program_t *program, const random_literal_t *literal)
 {
-	if (literal->kind == LITERAL_COMPARISON)
+	if (literal->kind != LITERAL_POSITIVE &&
+	    literal->kind != LITERAL_NEGATED)
 		return (0);
 	return (program->predicates[literal->predicate].arity);
+}
+
+/*
+ * Whether a negated literal or a comparison is safe: every term it holds,
+ * each argument of the one and each leaf of the other's two sides, is a
+ * constant or a bound variable, and none is `_`, which nothing binds.
+ */
+static bool
+test_is_safe(const random_program_t *program, const random_literal_t *literal,
+    uint64_t bound_variables)
+{
+	if (literal->kind == LITERAL_NEGATED)
+		return (terms_are_bound(literal->args,
+		    literal_arity(program, literal), bound_variables));
+
+	return (terms_are_bound(literal->sides[0].leaves,
+	    expression_leaves(&literal->sides[0]), bound_variables) &&
+	    terms_are_bound(literal->sides[1].leaves,
+	    expression_leaves(&literal->sides[1]), bound_variables));
+}
+
+static bool
+terms_are_bound(const random_term_t *terms, size_t count,
+    uint64_t bound_variables)
+{
+	for (size_t i = 0; i < count; i++) {
+		if (!term_is_bound(terms[i], bound_variables))
+			return (false);
+	}
+	return (true);
 }
 
 /* Whether a term is safe outside a positive literal. */
@@ -426,7 +756,7 @@ term_is_bound(random_term_t term, uint64_t positive_variables)
 	case TERM_NUMBER:
 		return (true);
 	case TERM_VARIABLE:
-		return ((positive_variables & (UINT64_C(1) << term.index)) != 0);
+		return ((positive_variables & variable_bit(term.index)) != 0);
 	}
 	return (false);
 }
@@ -438,9 +768,10 @@ random_program_statements(const random_program_t *program)
 }
 
 /*
- * Whether any rule's body holds `_`.  A binding of such a body's variables
- * does not name the tuples that satisfy it, since the column `_` stands in
- * may hold several values under one binding.
+ * Whether any rule's body, or any group body in it, holds `_`.  A binding
+ * of such a body's variables does not name the tuples that satisfy it,
+ * since the column `_` stands in may hold several values under one
+ * binding.
  */
 bool
 random_program_has_anonymous(const random_program_t *program)
@@ -448,25 +779,60 @@ random_program_has_anonymous(const random_program_t *program)
 	for (size_t r = 0; r < program->rule_count; r++) {
 		const random_body_t *body = &program->rules[r].body;
 
+		if (literals_have_anonymous(program, body->literals,
+		    body->length))
+			return (true);
 		for (size_t i = 0; i < body->length; i++) {
 			const random_literal_t *literal = &body->literals[i];
+			const random_group_t *group;
 
-			for (size_t a = 0; a < literal_arity(program, literal);
-			    a++) {
-				if (literal->args[a].kind == TERM_ANONYMOUS)
-					return (true);
-			}
+			if (literal->kind != LITERAL_AGGREGATE)
+				continue;
+			group = &body->groups[literal->group];
+			if (literals_have_anonymous(program, group->literals,
+			    group->length))
+				return (true);
 		}
 	}
 	return (false);
 }
 
+static bool
+literals_have_anonymous(const random_program_t *program,
+    const random_literal_t *literals, size_t length)
+{
+	for (size_t i = 0; i < length; i++) {
+		const random_literal_t *literal = &literals[i];
+
+		for (size_t a = 0; a < literal_arity(program, literal); a++) {
+			if (literal->args[a].kind == TERM_ANONYMOUS)
+				return (true);
+		}
+	}
+	return (false);
+}
+
+/* How many aggregates a body holds. */
+size_t
+random_body_aggregates(const random_body_t *body)
+{
+	size_t count = 0;
+
+	for (size_t i = 0; i < body->length; i++) {
+		if (body->literals[i].kind == LITERAL_AGGREGATE)
+			count++;
+	}
+	return (count);
+}
+
 /*
  * The program's facts and rules, followed not by its queries but by one
- * query per rule with a body, asking for that body alone, in rule order.
- * A query's columns are its named variables, so each one's rows are the
- * distinct bindings of its rule's body variables.  The caller frees the
- * result.
+ * query per rule with a body, asking for that body alone, and after it one
+ * per aggregate of the body, in written order, asking for its group body
+ * alone.  A query's columns are its named variables, so each one's rows are
+ * the distinct bindings of its rule's body variables, or of the variables
+ * of the group rule the library compiles an aggregate's braces to.  The
+ * caller frees the result.
  */
 char *
 random_bindings_text(const random_program_t *program)
@@ -489,6 +855,18 @@ random_bindings_text(const random_program_t *program)
 			continue;
 		write_body(out, program, body);
 		fputs("?\n", out);
+
+		for (size_t i = 0; i < body->length; i++) {
+			const random_literal_t *literal = &body->literals[i];
+			const random_group_t *group;
+
+			if (literal->kind != LITERAL_AGGREGATE)
+				continue;
+			group = &body->groups[literal->group];
+			write_literals(out, program, body, group->literals,
+			    group->length);
+			fputs("?\n", out);
+		}
 	}
 
 	if (fclose(out) != 0)
@@ -546,8 +924,20 @@ static void
 write_body(FILE *out, const random_program_t *program,
     const random_body_t *body)
 {
-	for (size_t i = 0; i < body->length; i++) {
-		const random_literal_t *literal = &body->literals[i];
+	write_literals(out, program, body, body->literals, body->length);
+}
+
+/*
+ * Literals of `body`, its own or those of one of its group bodies, joined
+ * by commas.  The body is where an aggregate's group body is found.
+ */
+static void
+write_literals(FILE *out, const random_program_t *program,
+    const random_body_t *body, const random_literal_t *literals,
+    size_t length)
+{
+	for (size_t i = 0; i < length; i++) {
+		const random_literal_t *literal = &literals[i];
 
 		if (i > 0)
 			fputs(", ", out);
@@ -566,8 +956,32 @@ write_body(FILE *out, const random_program_t *program,
 			    comparator_spellings[literal->comparator]);
 			write_expression(out, &literal->sides[1]);
 			break;
+		case LITERAL_AGGREGATE:
+			write_aggregate(out, program, body, literal);
+			break;
 		}
 	}
+}
+
+/* `R = count { ... }`, or `R = sum(V) { ... }` and likewise min and max. */
+static void
+write_aggregate(FILE *out, const random_program_t *program,
+    const random_body_t *body, const random_literal_t *aggregate)
+{
+	const random_group_t *group = &body->groups[aggregate->group];
+	random_term_t result = { TERM_VARIABLE, aggregate->result };
+	random_term_t aggregated = { TERM_VARIABLE, aggregate->aggregated };
+
+	write_term(out, result);
+	fprintf(out, " = %s", function_spellings[aggregate->function]);
+	if (aggregate->function != FUNCTION_COUNT) {
+		fputc('(', out);
+		write_term(out, aggregated);
+		fputc(')', out);
+	}
+	fputs(" { ", out);
+	write_literals(out, program, body, group->literals, group->length);
+	fputs(" }", out);
 }
 
 /*
@@ -725,10 +1139,18 @@ random_remove_literal(random_body_t *body, size_t literal)
 	body->length--;
 }
 
+void
+random_remove_group_literal(random_group_t *group, size_t literal)
+{
+	for (size_t i = literal + 1; i < group->length; i++)
+		group->literals[i - 1] = group->literals[i];
+	group->length--;
+}
+
 /*
  * Remove one argument position of a predicate: from its arity, from the
  * head of every rule deriving it, and from every literal reading it, in the
- * rules and the queries alike.
+ * rules, the queries and their group bodies alike.
  */
 static void
 remove_argument(random_term_t *args, size_t column)
@@ -738,15 +1160,27 @@ remove_argument(random_term_t *args, size_t column)
 }
 
 static void
-remove_column_in_body(random_body_t *body, size_t predicate, size_t column)
+remove_column_in_literals(random_literal_t *literals, size_t length,
+    size_t predicate, size_t column)
 {
-	for (size_t i = 0; i < body->length; i++) {
-		random_literal_t *literal = &body->literals[i];
+	for (size_t i = 0; i < length; i++) {
+		random_literal_t *literal = &literals[i];
 
-		if (literal->kind != LITERAL_COMPARISON &&
+		if ((literal->kind == LITERAL_POSITIVE ||
+		    literal->kind == LITERAL_NEGATED) &&
 		    literal->predicate == predicate)
 			remove_argument(literal->args, column);
 	}
+}
+
+static void
+remove_column_in_body(random_body_t *body, size_t predicate, size_t column)
+{
+	remove_column_in_literals(body->literals, body->length, predicate,
+	    column);
+	for (size_t g = 0; g < body->group_count; g++)
+		remove_column_in_literals(body->groups[g].literals,
+		    body->groups[g].length, predicate, column);
 }
 
 void

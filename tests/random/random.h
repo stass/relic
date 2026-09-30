@@ -33,15 +33,32 @@
  * -- arity 32 and 64 variables per rule -- so no limit can refuse a generated
  * program, and small enough that every relation stays small and a program
  * runs in milliseconds under every strategy.  A body holds at most three
- * positive literals and two each of assignments, negated literals and
- * comparisons.
+ * positive literals, two aggregates, and two each of assignments, negated
+ * literals and comparisons, and two more comparisons that read what the
+ * aggregates bind.
  */
 #define	RANDOM_MAX_PREDICATES	8
 #define	RANDOM_MAX_ARITY	4
 #define	RANDOM_MAX_VARIABLES	6
-#define	RANDOM_MAX_BODY		9
+#define	RANDOM_MAX_BODY		13
 #define	RANDOM_MAX_RULES	96
 #define	RANDOM_MAX_QUERIES	4
+
+/*
+ * Aggregates.  A body holds at most RANDOM_MAX_AGGREGATES of them, and the
+ * body in each one's braces, its group body, at most two positive literals
+ * and one each of assignments, negated literals and comparisons.  A rule's
+ * own variables are the first RANDOM_MAX_VARIABLES; each aggregate of a body
+ * draws its local variables from RANDOM_GROUP_VARIABLES of its own after
+ * those, so that no variable is local to two aggregates, which would make
+ * it shared between them.  A group body's columns, its shared and local
+ * variables, number at most ten, far inside the 32 a predicate may have.
+ */
+#define	RANDOM_MAX_AGGREGATES	2
+#define	RANDOM_MAX_GROUP_BODY	5
+#define	RANDOM_GROUP_VARIABLES	4
+#define	RANDOM_VARIABLE_COUNT	(RANDOM_MAX_VARIABLES + \
+	RANDOM_MAX_AGGREGATES * RANDOM_GROUP_VARIABLES)
 
 /*
  * The integers an expression may be given as constants are those from
@@ -73,8 +90,21 @@ struct random_term {
 typedef enum random_literal_kind {
 	LITERAL_POSITIVE,
 	LITERAL_NEGATED,
-	LITERAL_COMPARISON
+	LITERAL_COMPARISON,
+	LITERAL_AGGREGATE
 } random_literal_kind_t;
+
+/*
+ * An aggregate's function.  count takes no variable; sum, min and max fold
+ * the aggregated variable over the group.
+ */
+typedef enum random_function {
+	FUNCTION_COUNT,
+	FUNCTION_SUM,
+	FUNCTION_MIN,
+	FUNCTION_MAX,
+	FUNCTION_KINDS		/* the number of functions */
+} random_function_t;
 
 typedef enum random_operator {
 	OPERATOR_ADD,
@@ -123,6 +153,13 @@ typedef enum random_comparator {
  * arguments.  A comparison holds its two operands as expressions; an
  * equality one of whose sides is a variable alone that nothing else binds
  * is an assignment, and binds it.
+ *
+ * An aggregate, `result = function { group body }`, names its group body by
+ * its index among the enclosing body's groups, which stays fixed however
+ * literals move or are removed.  Its result is a variable of the enclosing
+ * body, bound by the aggregate once every shared variable is, or already
+ * bound, when the aggregate compares instead.  A group body holds no
+ * aggregate.
  */
 typedef struct random_literal random_literal_t;
 
@@ -132,16 +169,32 @@ struct random_literal {
 	uint8_t			predicate;	/* relational literals only */
 	random_term_t		args[RANDOM_MAX_ARITY];
 	random_expression_t	sides[2];	/* comparisons only */
+	random_function_t	function;	/* aggregates only */
+	uint8_t			group;		/* aggregates only */
+	uint8_t			result;		/* aggregates only */
+	uint8_t			aggregated;	/* sum, min and max only */
+};
+
+/* The literals inside one aggregate's braces. */
+typedef struct random_group random_group_t;
+
+struct random_group {
+	size_t			length;
+	random_literal_t	literals[RANDOM_MAX_GROUP_BODY];
 };
 
 /*
- * A body is a rule's or a query's conjunction of literals.
+ * A body is a rule's or a query's conjunction of literals, and the group
+ * bodies of the aggregates among them.  A group no literal names, as one
+ * whose aggregate the shrinker removed, is never read.
  */
 typedef struct random_body random_body_t;
 
 struct random_body {
 	size_t			length;
 	random_literal_t	literals[RANDOM_MAX_BODY];
+	size_t			group_count;
+	random_group_t		groups[RANDOM_MAX_AGGREGATES];
 };
 
 /* A rule; a fact is a rule whose body is empty and whose head is ground. */
@@ -206,6 +259,8 @@ bool	random_program_is_safe(const random_program_t *program);
 bool	random_program_is_bounded(const random_program_t *program);
 bool	random_constant_is_small(size_t index);
 bool	random_program_has_anonymous(const random_program_t *program);
+uint64_t random_literal_variables(const random_program_t *program,
+	    const random_literal_t *literal);
 char	*random_bindings_text(const random_program_t *program);
 size_t	random_program_statements(const random_program_t *program);
 char	*random_program_text(const random_program_t *program);
@@ -214,6 +269,8 @@ void	random_program_write(const random_program_t *program, FILE *out);
 void	random_remove_query(random_program_t *program, size_t query);
 void	random_remove_rule(random_program_t *program, size_t rule);
 void	random_remove_literal(random_body_t *body, size_t literal);
+void	random_remove_group_literal(random_group_t *group, size_t literal);
+size_t	random_body_aggregates(const random_body_t *body);
 void	random_remove_column(random_program_t *program, size_t predicate,
 	    size_t column);
 

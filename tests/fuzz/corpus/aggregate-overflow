@@ -1,0 +1,8 @@
+% A sum whose partial totals leave the 64-bit integers in the order written
+% but whose total fits, and a sum over a threshold another fold computed,
+% which does not fit.
+big(9223372036854775807). big(1). big(-9223372036854775808). big(-1). big(2).
+s(S) :- S = sum(V) { big(V) }.
+t(S) :- s(S0), S = sum(V) { big(V), s(S0), V > S0 }.
+s(S)?
+t(S)?

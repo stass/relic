@@ -17,18 +17,6 @@ declined when it would make relic a database or a Prolog.
 
 ## Worth adding
 
-**Aggregates.** [High, component: language] `count`, `sum`, `min`, `max`,
-and in Souffle and LogiQL also `mean`, over a group of a relation's columns.
-Every engine compared has them. Without them a program cannot ask how many,
-the largest or the total, which is half of what people ask of relations.
-The second post-v1 feature of architecture section 69, specified in
-`specs/design-aggregates.md`: a body literal `N = count { p(X, Y) }` or
-`S = sum(Y) { p(X, Y) }` binding its left side as an assignment does, the
-body an ordinary generated rule whose relation is the group, its reader
-stratified above it as a negated literal's is, and a recursive aggregate
-excluded rather than given a monotonic treatment. `mean` is left out with
-floating point.
-
 **String operations.** [Medium, component: language, `lib/value.c`]
 Concatenation, length, substring, prefix and suffix tests, and a regular
 expression match. Souffle, LogiQL, Nemo and CodeQL have them; relic's

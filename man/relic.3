@@ -282,9 +282,11 @@ join positive literals in the order they are written;
 answer every query from the whole program rather than through its Magic
 Sets rewrite;
 .It Dv RELIC_F_NOTE_MIXED
-report, as a note pointing at the comparison, the first comparison in each
-rule that ordered values of different types or applied an arithmetic
-operator to a symbol or a string, which is false; a
+report, as a note pointing at it, the first comparison or aggregate in each
+rule that had no value: a comparison that ordered values of different types
+or applied an arithmetic operator to a symbol or a string, which is false,
+or an aggregate whose rows were not all integers for a sum, or not all of
+one type for a minimum or a maximum; a
 rule of the program is reported at most once for the life of the context,
 the rules a Magic Sets rewrite generates from it counting as that rule, and
 a query at most once each time it is answered;
@@ -485,13 +487,17 @@ or
 .Fn relic_check
 validates the program: rule safety, stratification, and warnings about
 variables named once and predicates nothing defines.
+A variable an aggregate shares with the rest of its rule must be bound
+both inside the aggregate's body and outside it, and a program recursive
+through an aggregate is rejected as one recursive through negation is.
 .Fn relic_materialize
 evaluates the whole program.
 Neither is needed before a query, which checks and evaluates what it needs.
 An evaluation fails, and the next starts again from the facts, when a limit
 refuses what it would hold, when memory runs out, or when an arithmetic
 expression has no defined result: one outside the 64-bit integers, or a
-division or remainder by zero.
+division or remainder by zero; a sum whose total is outside the 64-bit
+integers fails it in the same way.
 .Ss Queries
 .Fn relic_query_run
 answers
@@ -520,7 +526,8 @@ is complete, when the plan of the rule it runs, its own or its rewrite's,
 derives each row once and computes nothing: when it names every variable a
 relational literal of its body binds, matches no argument with
 .Ql _ ,
-and evaluates no arithmetic operator, any of which may fail.
+evaluates no arithmetic operator, and holds no aggregate, any of which may
+fail.
 Any other query's answer is computed whole, its duplicates dropped and the
 limits bounding it, before its first row is delivered.
 A diagnostic the evaluation reports may come between rows delivered as they
@@ -634,6 +641,11 @@ thread, and is the one counter that depends on the number of threads.
 counts the tuples rules derive and the facts copied into the relation of a
 predicate rules also derive, not the facts of a predicate no rule derives,
 which are read where they are stored.
+The rows of each aggregate's body are derived into a relation of their
+own, and are counted by
+.Fa derivations
+and
+.Fa tuples_inserted .
 .Fa storage_bytes
 counts relation and index storage and the table of integers together, as
 .Fa max_memory

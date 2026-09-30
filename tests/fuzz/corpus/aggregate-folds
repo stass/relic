@@ -1,0 +1,13 @@
+% Each function over a closure, a group keyed and unkeyed, a negation inside
+% a body, and a query folding its own group before calling a rewritten
+% predicate with the result.
+edge(a, b). edge(a, c). edge(b, c). edge(c, a). size(a, 3). size(b, -2).
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+has_out(X) :- edge(X, _).
+out(X, N) :- edge(X, _), N = count { edge(X, Y) }.
+far(X, M) :- edge(X, _), M = max(Y) { reach(X, Y) }.
+weight(X, S) :- edge(X, _), S = sum(W) { reach(X, Y), size(Y, W) }.
+lone(N) :- N = count { size(X, _), not has_out(X) }.
+out(a, N)?
+N = min(W) { size(X, W) }, weight(Y, S), S > N?

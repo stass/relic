@@ -782,8 +782,8 @@ against the unbounded closure's 0.47 s, 1.40 times, and over 4 000 edges in
 3.10 s against 2.46 s, 1.26 times, on an optimized `--disable-shared`
 build; the difference is mostly the third column's storage.
 
-**Aggregates,** specified in `specs/design-aggregates.md`, steps 1 to 4 of
-its section 17.
+**Aggregates,** specified in `specs/design-aggregates.md`, in its section 17
+order.
 
 | Component | State |
 | --- | --- |
@@ -795,6 +795,7 @@ its section 17.
 | `lib/magic.c` | step 3: a group predicate and everything its group rule reads are read completely; the rewrite copies, compares and hashes aggregate literals; a literal that negates or folds a predicate read on demand is an internal error |
 | `lib/round.c` | step 4: a round whose plans fold runs deferred like any other; the fold reads a relation of a lower stratum, which no round of the component writes |
 | `tests/` | `test_lex`: the braces; `test_parse`: each function's tree, the names as names, ten mistakes at their bytes; `test_rule`: the group rule's shape, name, origin and program-rule counts, names of several aggregates and rules, a query's reused name, nothing published from an unsafe statement; `test_stratify`: group components in the schedule and two rejected cycles, with the order oracle reading an aggregate as a strict edge; `test_plan`: placement after a later literal, compare mode, slot kinds, and the three access paths; `test_arith`: the accumulator in every order of twelve cases, 2^20 addends of each extreme in three orders, and states near its 2^95 bound against the compiler's 128-bit integers, mutation-checked against a dropped carry; `test_exhaustion`: an aggregate program checked and a query with a group answered with each allocation refused in turn, publishing whole statements and giving back every byte; `test_round`: five folds in the graph program, so every identity and limit sweep covers them, three aggregate queries through the rewrite, and an overflowing sum failing as serially; eighteen `aggregate-*` language tests, one pinned per strategy |
+| `tests/random/`, `tests/fuzz/`, `man/`, `bench/` (step 5) | the differential generator draws aggregates in half its programs, stratified and safe by construction: a group body reads only levels below its head, its shared variables are drawn from the outer positive ones and placed in a positive literal inside, its result is fresh and read by the head or a later comparison, a sum reads only stated integers of magnitude at most 7, and the model's safety check classifies variables by occurrence and applies the aggregate closure as the library does; the derivation oracle counts each group rule's derivations and the shrinker deletes literals inside braces; a million seeds agree; the fuzz dictionary gains the braces and the four names, the corpus two written and three generated aggregate programs; both manual pages describe the functions, the set reading of a group, the shared-variable rule, an aggregate with no value and the notes; `bench/compare/degree-count`, each node's out- and in-degree over the graph data set, 20 000 rows agreed by every engine, medians: relic 0.096 s, Souffle compiled 0.100 s and interpreted 0.195 s, DuckDB 0.178 s, SQLite 0.310 s, Nemo 0.397 s, clingo 0.947 s, SWI-Prolog 1.68 s; `bench/run.sh` gains `graph, degrees`, 0.09 s, and `bench/baseline.txt` is recorded again with every earlier counter unchanged |
 
 Step 2's gate holds: over `tc-cyclic`'s graph, `dep_count/2` materializes
 in 8.1 ms beyond the load against 8.6 ms for the join `node(T), par(T, D)`
@@ -1045,7 +1046,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-facts.md` | a program's facts as the tuples of their predicates' base stores: derived predicates and the relation each is read through, the all-or-nothing commit, seeding before the first pass, Magic over base views |
 | `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit |
 | `specs/design-arithmetic.md` | integer expressions as comparison operands, the equality that binds, the safety closure, computed integers in the frame and interned when stored, an undefined result as an evaluation error; implemented, step 4's speed-up gate missed |
-| `specs/design-aggregates.md` | `count`, `sum`, `min` and `max` over the rows a body denotes, the generated group rule, the aggregate edge, the fold, the exact sum, queries, Magic Sets and the frozen round; steps 1 to 4 implemented |
+| `specs/design-aggregates.md` | `count`, `sum`, `min` and `max` over the rows a body denotes, the generated group rule, the aggregate edge, the fold, the exact sum, queries, Magic Sets and the frozen round; implemented |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
