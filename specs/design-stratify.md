@@ -44,6 +44,19 @@ p -/> r    negative
 
 A comparison makes no edge: it reads values and no relation.
 
+An aggregate literal makes a third kind, the **aggregate edge**, from the
+rule's head to the aggregate's generated group predicate, and the group
+rule its body compiles to makes the ordinary edges of that body,
+`specs/design-aggregates.md` section 7:
+
+```text
+p(...) :- q(...), N = count { s(...) }.
+
+p -> q                 positive
+p =/> agg$p$1$0$2      aggregate
+agg$p$1$0$2 -> s       positive, from the group rule
+```
+
 The direction is "depends on": an edge points from what is derived to what it
 is derived from. That is the direction evaluation needs, because a predicate
 can be evaluated once everything its edges reach is complete.
@@ -108,18 +121,23 @@ component. When one does, the predicate depends negatively on something that
 depends on it, which is recursion through negation, and the program is
 rejected, per architecture section 9.
 
+**An aggregate edge counts as a negative edge** here and everywhere below: a
+fold needs its group relation complete, as an absence test needs its
+relation complete, so recursion through an aggregate is rejected as
+recursion through negation is, `specs/design-aggregates.md` section 4.7.
+
 A stratified program gets the least stratification: the stratum of a component
 is zero when it has no edge to another component, and otherwise the largest,
 over its edges to other components, of
 
 ```text
 stratum(target)          for a positive edge
-stratum(target) + 1      for a negative edge
+stratum(target) + 1      for a negative or an aggregate edge
 ```
 
-Every negative edge then points strictly downward and every positive edge
-points to the same stratum or lower, which is the definition architecture
-section 30 gives. The computation is one pass over the components in the order
+Every negative and aggregate edge then points strictly downward and every
+positive edge points to the same stratum or lower, which is the definition
+architecture section 30 gives. The computation is one pass over the components in the order
 they completed: an edge leaving a component always reaches one that completed
 earlier, so its stratum is already known when it is read.
 
@@ -165,6 +183,23 @@ is reported once, through its first negative edge. Distinct components are
 distinct mistakes and each gets its error, in the order of their first
 negative edges.
 
+**Through an aggregate.** The closing edge is the first negative or
+aggregate edge whose ends share a component, in rule and literal order over
+the rules the program states; a group rule's own negative edge is never
+chosen, since every cycle through a group predicate passes through the
+aggregate edge that reaches it, so the error points at the rule holding the
+aggregate. On the cycle every aggregate edge is followed by an edge of its
+group rule, and the pair is reported as one note, keeping the group edge's
+polarity and pointing at the literal inside the braces that continues the
+cycle. No generated name appears in a note, `specs/design-aggregates.md`
+section 7:
+
+```text
+paths.dl:9:1: error: program is not stratified
+paths.dl:9:36: note: shortest/3 depends on dist/3 through an aggregate
+paths.dl:12:5: note: dist/3 depends on shortest/3
+```
+
 Predicates are named `name/arity`, shortened as every predicate in a message
 is.
 
@@ -189,6 +224,13 @@ and a program's facts are in none of its components: loading facts adds
 nothing to the dependency graph, the strata or the rule counts. Every rule of
 the program belongs to exactly one component, the one containing its head,
 so the schedule lists each rule exactly once.
+
+A group predicate is derived by its one group rule and read by nothing but
+the aggregate that folds it, so in a stratified program it is a component of
+its own, never recursive, in the stratum its body's edges give it and
+strictly below every rule holding the aggregate,
+`specs/design-aggregates.md` section 7. A query's group rules belong to the
+query, as its own rule does, and are in no component.
 
 Rules are held as indexes rather than copies or pointers. A copy of each rule
 would double the memory of a program of a million rules, and a pointer into the

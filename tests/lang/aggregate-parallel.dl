@@ -1,0 +1,1346 @@
+% dep_count over a larger graph, evaluated in rounds the pool may share:
+% the answers, and which tasks are ready, are the same at every thread
+% count and under every strategy.
+task(t0).
+task(t1).
+task(t2).
+task(t3).
+task(t4).
+task(t5).
+task(t6).
+task(t7).
+task(t8).
+task(t9).
+task(t10).
+task(t11).
+task(t12).
+task(t13).
+task(t14).
+task(t15).
+task(t16).
+task(t17).
+task(t18).
+task(t19).
+task(t20).
+task(t21).
+task(t22).
+task(t23).
+task(t24).
+task(t25).
+task(t26).
+task(t27).
+task(t28).
+task(t29).
+task(t30).
+task(t31).
+task(t32).
+task(t33).
+task(t34).
+task(t35).
+task(t36).
+task(t37).
+task(t38).
+task(t39).
+task(t40).
+task(t41).
+task(t42).
+task(t43).
+task(t44).
+task(t45).
+task(t46).
+task(t47).
+task(t48).
+task(t49).
+task(t50).
+task(t51).
+task(t52).
+task(t53).
+task(t54).
+task(t55).
+task(t56).
+task(t57).
+task(t58).
+task(t59).
+task(t60).
+task(t61).
+task(t62).
+task(t63).
+task(t64).
+task(t65).
+task(t66).
+task(t67).
+task(t68).
+task(t69).
+task(t70).
+task(t71).
+task(t72).
+task(t73).
+task(t74).
+task(t75).
+task(t76).
+task(t77).
+task(t78).
+task(t79).
+task(t80).
+task(t81).
+task(t82).
+task(t83).
+task(t84).
+task(t85).
+task(t86).
+task(t87).
+task(t88).
+task(t89).
+task(t90).
+task(t91).
+task(t92).
+task(t93).
+task(t94).
+task(t95).
+task(t96).
+task(t97).
+task(t98).
+task(t99).
+task(t100).
+task(t101).
+task(t102).
+task(t103).
+task(t104).
+task(t105).
+task(t106).
+task(t107).
+task(t108).
+task(t109).
+task(t110).
+task(t111).
+task(t112).
+task(t113).
+task(t114).
+task(t115).
+task(t116).
+task(t117).
+task(t118).
+task(t119).
+task(t120).
+task(t121).
+task(t122).
+task(t123).
+task(t124).
+task(t125).
+task(t126).
+task(t127).
+task(t128).
+task(t129).
+task(t130).
+task(t131).
+task(t132).
+task(t133).
+task(t134).
+task(t135).
+task(t136).
+task(t137).
+task(t138).
+task(t139).
+task(t140).
+task(t141).
+task(t142).
+task(t143).
+task(t144).
+task(t145).
+task(t146).
+task(t147).
+task(t148).
+task(t149).
+task(t150).
+task(t151).
+task(t152).
+task(t153).
+task(t154).
+task(t155).
+task(t156).
+task(t157).
+task(t158).
+task(t159).
+task(t160).
+task(t161).
+task(t162).
+task(t163).
+task(t164).
+task(t165).
+task(t166).
+task(t167).
+task(t168).
+task(t169).
+task(t170).
+task(t171).
+task(t172).
+task(t173).
+task(t174).
+task(t175).
+task(t176).
+task(t177).
+task(t178).
+task(t179).
+task(t180).
+task(t181).
+task(t182).
+task(t183).
+task(t184).
+task(t185).
+task(t186).
+task(t187).
+task(t188).
+task(t189).
+task(t190).
+task(t191).
+task(t192).
+task(t193).
+task(t194).
+task(t195).
+task(t196).
+task(t197).
+task(t198).
+task(t199).
+task(t200).
+task(t201).
+task(t202).
+task(t203).
+task(t204).
+task(t205).
+task(t206).
+task(t207).
+task(t208).
+task(t209).
+task(t210).
+task(t211).
+task(t212).
+task(t213).
+task(t214).
+task(t215).
+task(t216).
+task(t217).
+task(t218).
+task(t219).
+task(t220).
+task(t221).
+task(t222).
+task(t223).
+task(t224).
+task(t225).
+task(t226).
+task(t227).
+task(t228).
+task(t229).
+task(t230).
+task(t231).
+task(t232).
+task(t233).
+task(t234).
+task(t235).
+task(t236).
+task(t237).
+task(t238).
+task(t239).
+task(t240).
+task(t241).
+task(t242).
+task(t243).
+task(t244).
+task(t245).
+task(t246).
+task(t247).
+task(t248).
+task(t249).
+task(t250).
+task(t251).
+task(t252).
+task(t253).
+task(t254).
+task(t255).
+task(t256).
+task(t257).
+task(t258).
+task(t259).
+task(t260).
+task(t261).
+task(t262).
+task(t263).
+task(t264).
+task(t265).
+task(t266).
+task(t267).
+task(t268).
+task(t269).
+task(t270).
+task(t271).
+task(t272).
+task(t273).
+task(t274).
+task(t275).
+task(t276).
+task(t277).
+task(t278).
+task(t279).
+task(t280).
+task(t281).
+task(t282).
+task(t283).
+task(t284).
+task(t285).
+task(t286).
+task(t287).
+task(t288).
+task(t289).
+task(t290).
+task(t291).
+task(t292).
+task(t293).
+task(t294).
+task(t295).
+task(t296).
+task(t297).
+task(t298).
+task(t299).
+task(t300).
+task(t301).
+task(t302).
+task(t303).
+task(t304).
+task(t305).
+task(t306).
+task(t307).
+task(t308).
+task(t309).
+task(t310).
+task(t311).
+task(t312).
+task(t313).
+task(t314).
+task(t315).
+task(t316).
+task(t317).
+task(t318).
+task(t319).
+task(t320).
+task(t321).
+task(t322).
+task(t323).
+task(t324).
+task(t325).
+task(t326).
+task(t327).
+task(t328).
+task(t329).
+task(t330).
+task(t331).
+task(t332).
+task(t333).
+task(t334).
+task(t335).
+task(t336).
+task(t337).
+task(t338).
+task(t339).
+task(t340).
+task(t341).
+task(t342).
+task(t343).
+task(t344).
+task(t345).
+task(t346).
+task(t347).
+task(t348).
+task(t349).
+task(t350).
+task(t351).
+task(t352).
+task(t353).
+task(t354).
+task(t355).
+task(t356).
+task(t357).
+task(t358).
+task(t359).
+task(t360).
+task(t361).
+task(t362).
+task(t363).
+task(t364).
+task(t365).
+task(t366).
+task(t367).
+task(t368).
+task(t369).
+task(t370).
+task(t371).
+task(t372).
+task(t373).
+task(t374).
+task(t375).
+task(t376).
+task(t377).
+task(t378).
+task(t379).
+task(t380).
+task(t381).
+task(t382).
+task(t383).
+task(t384).
+task(t385).
+task(t386).
+task(t387).
+task(t388).
+task(t389).
+task(t390).
+task(t391).
+task(t392).
+task(t393).
+task(t394).
+task(t395).
+task(t396).
+task(t397).
+task(t398).
+task(t399).
+depends(t0, t3).
+depends(t0, t3).
+depends(t0, t3).
+depends(t1, t4).
+depends(t1, t10).
+depends(t1, t34).
+depends(t2, t5).
+depends(t2, t17).
+depends(t2, t65).
+depends(t3, t6).
+depends(t3, t24).
+depends(t3, t96).
+depends(t4, t7).
+depends(t4, t31).
+depends(t4, t127).
+depends(t5, t8).
+depends(t5, t38).
+depends(t5, t158).
+depends(t6, t9).
+depends(t6, t45).
+depends(t6, t189).
+depends(t7, t10).
+depends(t7, t52).
+depends(t7, t220).
+depends(t8, t11).
+depends(t8, t59).
+depends(t8, t251).
+depends(t9, t12).
+depends(t9, t66).
+depends(t9, t282).
+depends(t10, t13).
+depends(t10, t73).
+depends(t10, t313).
+depends(t11, t14).
+depends(t11, t80).
+depends(t11, t344).
+depends(t12, t15).
+depends(t12, t87).
+depends(t12, t375).
+depends(t13, t16).
+depends(t13, t94).
+depends(t14, t17).
+depends(t14, t101).
+depends(t14, t37).
+depends(t15, t18).
+depends(t15, t108).
+depends(t15, t68).
+depends(t16, t19).
+depends(t16, t115).
+depends(t16, t99).
+depends(t17, t20).
+depends(t17, t122).
+depends(t17, t130).
+depends(t18, t21).
+depends(t18, t129).
+depends(t18, t161).
+depends(t19, t22).
+depends(t19, t136).
+depends(t19, t192).
+depends(t20, t23).
+depends(t20, t143).
+depends(t20, t223).
+depends(t21, t24).
+depends(t21, t150).
+depends(t21, t254).
+depends(t22, t25).
+depends(t22, t157).
+depends(t22, t285).
+depends(t23, t26).
+depends(t23, t164).
+depends(t23, t316).
+depends(t24, t27).
+depends(t24, t171).
+depends(t24, t347).
+depends(t25, t28).
+depends(t25, t178).
+depends(t25, t378).
+depends(t26, t29).
+depends(t26, t185).
+depends(t27, t30).
+depends(t27, t192).
+depends(t27, t40).
+depends(t28, t31).
+depends(t28, t199).
+depends(t28, t71).
+depends(t29, t32).
+depends(t29, t206).
+depends(t29, t102).
+depends(t30, t33).
+depends(t30, t213).
+depends(t30, t133).
+depends(t31, t34).
+depends(t31, t220).
+depends(t31, t164).
+depends(t32, t35).
+depends(t32, t227).
+depends(t32, t195).
+depends(t33, t36).
+depends(t33, t234).
+depends(t33, t226).
+depends(t34, t37).
+depends(t34, t241).
+depends(t34, t257).
+depends(t35, t38).
+depends(t35, t248).
+depends(t35, t288).
+depends(t36, t39).
+depends(t36, t255).
+depends(t36, t319).
+depends(t37, t40).
+depends(t37, t262).
+depends(t37, t350).
+depends(t38, t41).
+depends(t38, t269).
+depends(t38, t381).
+depends(t39, t42).
+depends(t39, t276).
+depends(t40, t43).
+depends(t40, t283).
+depends(t40, t43).
+depends(t41, t44).
+depends(t41, t290).
+depends(t41, t74).
+depends(t42, t45).
+depends(t42, t297).
+depends(t42, t105).
+depends(t43, t46).
+depends(t43, t304).
+depends(t43, t136).
+depends(t44, t47).
+depends(t44, t311).
+depends(t44, t167).
+depends(t45, t48).
+depends(t45, t318).
+depends(t45, t198).
+depends(t46, t49).
+depends(t46, t325).
+depends(t46, t229).
+depends(t47, t50).
+depends(t47, t332).
+depends(t47, t260).
+depends(t48, t51).
+depends(t48, t339).
+depends(t48, t291).
+depends(t49, t52).
+depends(t49, t346).
+depends(t49, t322).
+depends(t50, t53).
+depends(t50, t353).
+depends(t50, t353).
+depends(t51, t54).
+depends(t51, t360).
+depends(t51, t384).
+depends(t52, t55).
+depends(t52, t367).
+depends(t53, t56).
+depends(t53, t374).
+depends(t54, t57).
+depends(t54, t381).
+depends(t54, t77).
+depends(t55, t58).
+depends(t55, t388).
+depends(t55, t108).
+depends(t56, t59).
+depends(t56, t395).
+depends(t56, t139).
+depends(t57, t60).
+depends(t57, t170).
+depends(t58, t61).
+depends(t58, t201).
+depends(t59, t62).
+depends(t59, t232).
+depends(t60, t63).
+depends(t60, t263).
+depends(t61, t64).
+depends(t61, t294).
+depends(t62, t65).
+depends(t62, t325).
+depends(t63, t66).
+depends(t63, t356).
+depends(t64, t67).
+depends(t64, t387).
+depends(t65, t68).
+depends(t66, t69).
+depends(t67, t70).
+depends(t67, t72).
+depends(t67, t80).
+depends(t68, t71).
+depends(t68, t79).
+depends(t68, t111).
+depends(t69, t72).
+depends(t69, t86).
+depends(t69, t142).
+depends(t70, t73).
+depends(t70, t93).
+depends(t70, t173).
+depends(t71, t74).
+depends(t71, t100).
+depends(t71, t204).
+depends(t72, t75).
+depends(t72, t107).
+depends(t72, t235).
+depends(t73, t76).
+depends(t73, t114).
+depends(t73, t266).
+depends(t74, t77).
+depends(t74, t121).
+depends(t74, t297).
+depends(t75, t78).
+depends(t75, t128).
+depends(t75, t328).
+depends(t76, t79).
+depends(t76, t135).
+depends(t76, t359).
+depends(t77, t80).
+depends(t77, t142).
+depends(t77, t390).
+depends(t78, t81).
+depends(t78, t149).
+depends(t79, t82).
+depends(t79, t156).
+depends(t80, t83).
+depends(t80, t163).
+depends(t80, t83).
+depends(t81, t84).
+depends(t81, t170).
+depends(t81, t114).
+depends(t82, t85).
+depends(t82, t177).
+depends(t82, t145).
+depends(t83, t86).
+depends(t83, t184).
+depends(t83, t176).
+depends(t84, t87).
+depends(t84, t191).
+depends(t84, t207).
+depends(t85, t88).
+depends(t85, t198).
+depends(t85, t238).
+depends(t86, t89).
+depends(t86, t205).
+depends(t86, t269).
+depends(t87, t90).
+depends(t87, t212).
+depends(t87, t300).
+depends(t88, t91).
+depends(t88, t219).
+depends(t88, t331).
+depends(t89, t92).
+depends(t89, t226).
+depends(t89, t362).
+depends(t90, t93).
+depends(t90, t233).
+depends(t90, t393).
+depends(t91, t94).
+depends(t91, t240).
+depends(t92, t95).
+depends(t92, t247).
+depends(t93, t96).
+depends(t93, t254).
+depends(t94, t97).
+depends(t94, t261).
+depends(t94, t117).
+depends(t95, t98).
+depends(t95, t268).
+depends(t95, t148).
+depends(t96, t99).
+depends(t96, t275).
+depends(t96, t179).
+depends(t97, t100).
+depends(t97, t282).
+depends(t97, t210).
+depends(t98, t101).
+depends(t98, t289).
+depends(t98, t241).
+depends(t99, t102).
+depends(t99, t296).
+depends(t99, t272).
+depends(t100, t103).
+depends(t100, t303).
+depends(t100, t303).
+depends(t101, t104).
+depends(t101, t310).
+depends(t101, t334).
+depends(t102, t105).
+depends(t102, t317).
+depends(t102, t365).
+depends(t103, t106).
+depends(t103, t324).
+depends(t103, t396).
+depends(t104, t107).
+depends(t104, t331).
+depends(t105, t108).
+depends(t105, t338).
+depends(t106, t109).
+depends(t106, t345).
+depends(t107, t110).
+depends(t107, t352).
+depends(t107, t120).
+depends(t108, t111).
+depends(t108, t359).
+depends(t108, t151).
+depends(t109, t112).
+depends(t109, t366).
+depends(t109, t182).
+depends(t110, t113).
+depends(t110, t373).
+depends(t110, t213).
+depends(t111, t114).
+depends(t111, t380).
+depends(t111, t244).
+depends(t112, t115).
+depends(t112, t387).
+depends(t112, t275).
+depends(t113, t116).
+depends(t113, t394).
+depends(t113, t306).
+depends(t114, t117).
+depends(t114, t337).
+depends(t115, t118).
+depends(t115, t368).
+depends(t116, t119).
+depends(t116, t399).
+depends(t117, t120).
+depends(t118, t121).
+depends(t119, t122).
+depends(t120, t123).
+depends(t120, t123).
+depends(t121, t124).
+depends(t121, t154).
+depends(t122, t125).
+depends(t122, t185).
+depends(t123, t126).
+depends(t123, t216).
+depends(t124, t127).
+depends(t124, t247).
+depends(t125, t128).
+depends(t125, t278).
+depends(t126, t129).
+depends(t126, t309).
+depends(t127, t130).
+depends(t127, t340).
+depends(t128, t131).
+depends(t128, t371).
+depends(t129, t132).
+depends(t130, t133).
+depends(t131, t134).
+depends(t132, t135).
+depends(t133, t136).
+depends(t133, t134).
+depends(t134, t137).
+depends(t134, t141).
+depends(t134, t157).
+depends(t135, t138).
+depends(t135, t148).
+depends(t135, t188).
+depends(t136, t139).
+depends(t136, t155).
+depends(t136, t219).
+depends(t137, t140).
+depends(t137, t162).
+depends(t137, t250).
+depends(t138, t141).
+depends(t138, t169).
+depends(t138, t281).
+depends(t139, t142).
+depends(t139, t176).
+depends(t139, t312).
+depends(t140, t143).
+depends(t140, t183).
+depends(t140, t343).
+depends(t141, t144).
+depends(t141, t190).
+depends(t141, t374).
+depends(t142, t145).
+depends(t142, t197).
+depends(t143, t146).
+depends(t143, t204).
+depends(t144, t147).
+depends(t144, t211).
+depends(t145, t148).
+depends(t145, t218).
+depends(t146, t149).
+depends(t146, t225).
+depends(t147, t150).
+depends(t147, t232).
+depends(t147, t160).
+depends(t148, t151).
+depends(t148, t239).
+depends(t148, t191).
+depends(t149, t152).
+depends(t149, t246).
+depends(t149, t222).
+depends(t150, t153).
+depends(t150, t253).
+depends(t150, t253).
+depends(t151, t154).
+depends(t151, t260).
+depends(t151, t284).
+depends(t152, t155).
+depends(t152, t267).
+depends(t152, t315).
+depends(t153, t156).
+depends(t153, t274).
+depends(t153, t346).
+depends(t154, t157).
+depends(t154, t281).
+depends(t154, t377).
+depends(t155, t158).
+depends(t155, t288).
+depends(t156, t159).
+depends(t156, t295).
+depends(t157, t160).
+depends(t157, t302).
+depends(t158, t161).
+depends(t158, t309).
+depends(t159, t162).
+depends(t159, t316).
+depends(t160, t163).
+depends(t160, t323).
+depends(t160, t163).
+depends(t161, t164).
+depends(t161, t330).
+depends(t161, t194).
+depends(t162, t165).
+depends(t162, t337).
+depends(t162, t225).
+depends(t163, t166).
+depends(t163, t344).
+depends(t163, t256).
+depends(t164, t167).
+depends(t164, t351).
+depends(t164, t287).
+depends(t165, t168).
+depends(t165, t358).
+depends(t165, t318).
+depends(t166, t169).
+depends(t166, t365).
+depends(t166, t349).
+depends(t167, t170).
+depends(t167, t372).
+depends(t167, t380).
+depends(t168, t171).
+depends(t168, t379).
+depends(t169, t172).
+depends(t169, t386).
+depends(t170, t173).
+depends(t170, t393).
+depends(t171, t174).
+depends(t172, t175).
+depends(t173, t176).
+depends(t174, t177).
+depends(t174, t197).
+depends(t175, t178).
+depends(t175, t228).
+depends(t176, t179).
+depends(t176, t259).
+depends(t177, t180).
+depends(t177, t290).
+depends(t178, t181).
+depends(t178, t321).
+depends(t179, t182).
+depends(t179, t352).
+depends(t180, t183).
+depends(t180, t383).
+depends(t181, t184).
+depends(t182, t185).
+depends(t183, t186).
+depends(t184, t187).
+depends(t185, t188).
+depends(t186, t189).
+depends(t187, t190).
+depends(t187, t200).
+depends(t188, t191).
+depends(t188, t231).
+depends(t189, t192).
+depends(t189, t262).
+depends(t190, t193).
+depends(t190, t293).
+depends(t191, t194).
+depends(t191, t324).
+depends(t192, t195).
+depends(t192, t355).
+depends(t193, t196).
+depends(t193, t386).
+depends(t194, t197).
+depends(t195, t198).
+depends(t196, t199).
+depends(t197, t200).
+depends(t198, t201).
+depends(t199, t202).
+depends(t200, t203).
+depends(t200, t203).
+depends(t200, t203).
+depends(t201, t204).
+depends(t201, t210).
+depends(t201, t234).
+depends(t202, t205).
+depends(t202, t217).
+depends(t202, t265).
+depends(t203, t206).
+depends(t203, t224).
+depends(t203, t296).
+depends(t204, t207).
+depends(t204, t231).
+depends(t204, t327).
+depends(t205, t208).
+depends(t205, t238).
+depends(t205, t358).
+depends(t206, t209).
+depends(t206, t245).
+depends(t206, t389).
+depends(t207, t210).
+depends(t207, t252).
+depends(t208, t211).
+depends(t208, t259).
+depends(t209, t212).
+depends(t209, t266).
+depends(t210, t213).
+depends(t210, t273).
+depends(t211, t214).
+depends(t211, t280).
+depends(t212, t215).
+depends(t212, t287).
+depends(t213, t216).
+depends(t213, t294).
+depends(t214, t217).
+depends(t214, t301).
+depends(t214, t237).
+depends(t215, t218).
+depends(t215, t308).
+depends(t215, t268).
+depends(t216, t219).
+depends(t216, t315).
+depends(t216, t299).
+depends(t217, t220).
+depends(t217, t322).
+depends(t217, t330).
+depends(t218, t221).
+depends(t218, t329).
+depends(t218, t361).
+depends(t219, t222).
+depends(t219, t336).
+depends(t219, t392).
+depends(t220, t223).
+depends(t220, t343).
+depends(t221, t224).
+depends(t221, t350).
+depends(t222, t225).
+depends(t222, t357).
+depends(t223, t226).
+depends(t223, t364).
+depends(t224, t227).
+depends(t224, t371).
+depends(t225, t228).
+depends(t225, t378).
+depends(t226, t229).
+depends(t226, t385).
+depends(t227, t230).
+depends(t227, t392).
+depends(t227, t240).
+depends(t228, t231).
+depends(t228, t399).
+depends(t228, t271).
+depends(t229, t232).
+depends(t229, t302).
+depends(t230, t233).
+depends(t230, t333).
+depends(t231, t234).
+depends(t231, t364).
+depends(t232, t235).
+depends(t232, t395).
+depends(t233, t236).
+depends(t234, t237).
+depends(t235, t238).
+depends(t236, t239).
+depends(t237, t240).
+depends(t238, t241).
+depends(t239, t242).
+depends(t240, t243).
+depends(t240, t243).
+depends(t241, t244).
+depends(t241, t274).
+depends(t242, t245).
+depends(t242, t305).
+depends(t243, t246).
+depends(t243, t336).
+depends(t244, t247).
+depends(t244, t367).
+depends(t245, t248).
+depends(t245, t398).
+depends(t246, t249).
+depends(t247, t250).
+depends(t248, t251).
+depends(t249, t252).
+depends(t250, t253).
+depends(t251, t254).
+depends(t252, t255).
+depends(t253, t256).
+depends(t254, t257).
+depends(t254, t277).
+depends(t255, t258).
+depends(t255, t308).
+depends(t256, t259).
+depends(t256, t339).
+depends(t257, t260).
+depends(t257, t370).
+depends(t258, t261).
+depends(t259, t262).
+depends(t260, t263).
+depends(t261, t264).
+depends(t262, t265).
+depends(t263, t266).
+depends(t264, t267).
+depends(t265, t268).
+depends(t266, t269).
+depends(t267, t270).
+depends(t267, t272).
+depends(t267, t280).
+depends(t268, t271).
+depends(t268, t279).
+depends(t268, t311).
+depends(t269, t272).
+depends(t269, t286).
+depends(t269, t342).
+depends(t270, t273).
+depends(t270, t293).
+depends(t270, t373).
+depends(t271, t274).
+depends(t271, t300).
+depends(t272, t275).
+depends(t272, t307).
+depends(t273, t276).
+depends(t273, t314).
+depends(t274, t277).
+depends(t274, t321).
+depends(t275, t278).
+depends(t275, t328).
+depends(t276, t279).
+depends(t276, t335).
+depends(t277, t280).
+depends(t277, t342).
+depends(t278, t281).
+depends(t278, t349).
+depends(t279, t282).
+depends(t279, t356).
+depends(t280, t283).
+depends(t280, t363).
+depends(t280, t283).
+depends(t281, t284).
+depends(t281, t370).
+depends(t281, t314).
+depends(t282, t285).
+depends(t282, t377).
+depends(t282, t345).
+depends(t283, t286).
+depends(t283, t384).
+depends(t283, t376).
+depends(t284, t287).
+depends(t284, t391).
+depends(t285, t288).
+depends(t285, t398).
+depends(t286, t289).
+depends(t287, t290).
+depends(t288, t291).
+depends(t289, t292).
+depends(t290, t293).
+depends(t291, t294).
+depends(t292, t295).
+depends(t293, t296).
+depends(t294, t297).
+depends(t294, t317).
+depends(t295, t298).
+depends(t295, t348).
+depends(t296, t299).
+depends(t296, t379).
+depends(t297, t300).
+depends(t298, t301).
+depends(t299, t302).
+depends(t300, t303).
+depends(t301, t304).
+depends(t302, t305).
+depends(t303, t306).
+depends(t304, t307).
+depends(t305, t308).
+depends(t306, t309).
+depends(t307, t310).
+depends(t307, t320).
+depends(t308, t311).
+depends(t308, t351).
+depends(t309, t312).
+depends(t309, t382).
+depends(t310, t313).
+depends(t311, t314).
+depends(t312, t315).
+depends(t313, t316).
+depends(t314, t317).
+depends(t315, t318).
+depends(t316, t319).
+depends(t317, t320).
+depends(t318, t321).
+depends(t319, t322).
+depends(t320, t323).
+depends(t320, t323).
+depends(t321, t324).
+depends(t321, t354).
+depends(t322, t325).
+depends(t322, t385).
+depends(t323, t326).
+depends(t324, t327).
+depends(t325, t328).
+depends(t326, t329).
+depends(t327, t330).
+depends(t328, t331).
+depends(t329, t332).
+depends(t330, t333).
+depends(t331, t334).
+depends(t332, t335).
+depends(t333, t336).
+depends(t333, t334).
+depends(t334, t337).
+depends(t334, t341).
+depends(t334, t357).
+depends(t335, t338).
+depends(t335, t348).
+depends(t335, t388).
+depends(t336, t339).
+depends(t336, t355).
+depends(t337, t340).
+depends(t337, t362).
+depends(t338, t341).
+depends(t338, t369).
+depends(t339, t342).
+depends(t339, t376).
+depends(t340, t343).
+depends(t340, t383).
+depends(t341, t344).
+depends(t341, t390).
+depends(t342, t345).
+depends(t342, t397).
+depends(t343, t346).
+depends(t344, t347).
+depends(t345, t348).
+depends(t346, t349).
+depends(t347, t350).
+depends(t347, t360).
+depends(t348, t351).
+depends(t348, t391).
+depends(t349, t352).
+depends(t350, t353).
+depends(t351, t354).
+depends(t352, t355).
+depends(t353, t356).
+depends(t354, t357).
+depends(t355, t358).
+depends(t356, t359).
+depends(t357, t360).
+depends(t358, t361).
+depends(t359, t362).
+depends(t360, t363).
+depends(t360, t363).
+depends(t361, t364).
+depends(t361, t394).
+depends(t362, t365).
+depends(t363, t366).
+depends(t364, t367).
+depends(t365, t368).
+depends(t366, t369).
+depends(t367, t370).
+depends(t368, t371).
+depends(t369, t372).
+depends(t370, t373).
+depends(t371, t374).
+depends(t372, t375).
+depends(t373, t376).
+depends(t374, t377).
+depends(t374, t397).
+depends(t375, t378).
+depends(t376, t379).
+depends(t377, t380).
+depends(t378, t381).
+depends(t379, t382).
+depends(t380, t383).
+depends(t381, t384).
+depends(t382, t385).
+depends(t383, t386).
+depends(t384, t387).
+depends(t385, t388).
+depends(t386, t389).
+depends(t387, t390).
+depends(t388, t391).
+depends(t389, t392).
+depends(t390, t393).
+depends(t391, t394).
+depends(t392, t395).
+depends(t393, t396).
+depends(t394, t397).
+depends(t395, t398).
+depends(t396, t399).
+done(t0).
+done(t3).
+done(t6).
+done(t9).
+done(t12).
+done(t15).
+done(t18).
+done(t21).
+done(t24).
+done(t27).
+done(t30).
+done(t33).
+done(t36).
+done(t39).
+done(t42).
+done(t45).
+done(t48).
+done(t51).
+done(t54).
+done(t57).
+done(t60).
+done(t63).
+done(t66).
+done(t69).
+done(t72).
+done(t75).
+done(t78).
+done(t81).
+done(t84).
+done(t87).
+done(t90).
+done(t93).
+done(t96).
+done(t99).
+done(t102).
+done(t105).
+done(t108).
+done(t111).
+done(t114).
+done(t117).
+done(t120).
+done(t123).
+done(t126).
+done(t129).
+done(t132).
+done(t135).
+done(t138).
+done(t141).
+done(t144).
+done(t147).
+done(t150).
+done(t153).
+done(t156).
+done(t159).
+done(t162).
+done(t165).
+done(t168).
+done(t171).
+done(t174).
+done(t177).
+done(t180).
+done(t183).
+done(t186).
+done(t189).
+done(t192).
+done(t195).
+done(t198).
+done(t201).
+done(t204).
+done(t207).
+done(t210).
+done(t213).
+done(t216).
+done(t219).
+done(t222).
+done(t225).
+done(t228).
+done(t231).
+done(t234).
+done(t237).
+done(t240).
+done(t243).
+done(t246).
+done(t249).
+done(t252).
+done(t255).
+done(t258).
+done(t261).
+done(t264).
+done(t267).
+done(t270).
+done(t273).
+done(t276).
+done(t279).
+done(t282).
+done(t285).
+done(t288).
+done(t291).
+done(t294).
+done(t297).
+done(t300).
+done(t303).
+done(t306).
+done(t309).
+done(t312).
+done(t315).
+done(t318).
+done(t321).
+done(t324).
+done(t327).
+done(t330).
+done(t333).
+done(t336).
+done(t339).
+done(t342).
+done(t345).
+done(t348).
+done(t351).
+done(t354).
+done(t357).
+done(t360).
+done(t363).
+done(t366).
+done(t369).
+done(t372).
+done(t375).
+done(t378).
+done(t381).
+done(t384).
+done(t387).
+done(t390).
+done(t393).
+done(t396).
+done(t399).
+
+dep_count(T, N) :- task(T), N = count { depends(T, D) }.
+ready(T) :- task(T), N = count { depends(T, D), not done(D) }, N = 0.
+widest(M) :- M = max(N) { dep_count(T, N) }.
+total(S) :- S = sum(N) { dep_count(T, N) }.
+
+widest(M)?
+total(S)?
+R = count { ready(T) }?
+dep_count(t5, N)?

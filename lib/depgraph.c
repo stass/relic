@@ -84,20 +84,29 @@ static int	 build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
 static void	 descend(relic_search_t *search, uint32_t vertex);
 static int	 find_components(relic_arena_t *arena, relic_depgraph_t *graph);
 static int	 group_members(relic_arena_t *arena, relic_depgraph_t *graph);
-static bool	 literal_makes_edge(const relic_literal_t *literal);
+static enum relic_dep_kind literal_dep_kind(
+		    const relic_literal_t *literal);
 static void	 search_from(relic_search_t *search, uint32_t root);
 static bool	 vertex_is_pending(const relic_search_t *search,
 		    uint32_t vertex);
 
 /*
- * A relational literal, positive or negated, reads a relation and so makes an
- * edge; a comparison reads only values.
+ * The kind of the edge a literal that reads a relation makes.
  */
-static bool
-literal_makes_edge(const relic_literal_t *literal)
+static enum relic_dep_kind
+literal_dep_kind(const relic_literal_t *literal)
 {
-	return (literal->kind == RELIC_LITERAL_POSITIVE ||
-	    literal->kind == RELIC_LITERAL_NEGATED);
+	switch (literal->kind) {
+	case RELIC_LITERAL_NEGATED:
+		return (RELIC_DEP_NEGATIVE);
+	case RELIC_LITERAL_AGGREGATE:
+		return (RELIC_DEP_AGGREGATE);
+	case RELIC_LITERAL_POSITIVE:
+	case RELIC_LITERAL_COMPARISON:
+		break;
+	}
+
+	return (RELIC_DEP_POSITIVE);
 }
 
 /*
@@ -116,6 +125,7 @@ build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
 	const relic_rule_t *rule;
 	const relic_literal_t *literal;
 	relic_dep_edge_t *edge;
+	relic_pred_id_t target;
 	size_t *next;
 	size_t literal_index;
 	size_t rule_index;
@@ -137,7 +147,8 @@ build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
 
 		for (literal_index = 0; literal_index < rule->body_length;
 		    literal_index++) {
-			if (literal_makes_edge(&rule->body[literal_index]))
+			if (relic_literal_reads(&rule->body[literal_index],
+			    &target))
 				graph->first_edge[source + 1]++;
 		}
 	}
@@ -160,7 +171,7 @@ build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
 		for (literal_index = 0; literal_index < rule->body_length;
 		    literal_index++) {
 			literal = &rule->body[literal_index];
-			if (!literal_makes_edge(literal))
+			if (!relic_literal_reads(literal, &target))
 				continue;
 
 			edge = &graph->edges[next[source]];
@@ -169,9 +180,8 @@ build_edges(const relic_ruletab_t *rules, relic_arena_t *arena,
 			edge->rule_index = rule_index;
 			edge->literal_index = literal_index;
 			edge->source = source;
-			edge->target =
-			    relic_depgraph_vertex(literal->u.atom.pred);
-			edge->negative = literal->kind == RELIC_LITERAL_NEGATED;
+			edge->target = relic_depgraph_vertex(target);
+			edge->kind = literal_dep_kind(literal);
 		}
 	}
 

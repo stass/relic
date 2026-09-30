@@ -1178,7 +1178,7 @@ the_first_search_is_charged_what_it_reads(void)
 	}
 
 	relic_magic_init(&magic, ctx);
-	status = relic_magic_find_complete(&magic, &query->rule);
+	status = relic_magic_find_complete(&magic, query);
 	if (status == 0)
 		status = relic_magic_rewrite(&magic, &query->rule);
 
@@ -1252,7 +1252,7 @@ the_first_search_is_held_to_the_rule_limit(void)
 
 	preds_before = relic_pred_count(ctx);
 	relic_magic_init(&magic, ctx);
-	status = relic_magic_find_complete(&magic, &query->rule);
+	status = relic_magic_find_complete(&magic, query);
 	if (status == 0)
 		status = relic_magic_rewrite(&magic, &query->rule);
 

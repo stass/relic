@@ -196,8 +196,10 @@ therefore separate, and the planner is free to place the delta literal
 anywhere (section 4).
 
 A negated literal never reads a member, because that would be recursion
-through negation and the program would have been rejected; a comparison
-reads no relation. Neither has a view.
+through negation and the program would have been rejected; an aggregate
+literal never reads one either, since its group predicate is stratified
+below it as a negated predicate is, `specs/design-aggregates.md` section 7;
+a comparison reads no relation. None of the three has a view.
 
 ### 3.3 Each operation under a view
 
@@ -213,7 +215,8 @@ reads no relation. Neither has a view.
   store's find returns the identifier rather than a boolean for this
   purpose; `relic_relation_contains()` is that function compared against
   `RELIC_ID_NONE`.
-* `ANTI_MEMBER` and `FILTER` never read a member and are unchanged.
+* `ANTI_MEMBER`, `FILTER` and `AGGREGATE` never read a member and are
+  unchanged.
 * `EMIT` inserts, through the batch of section 6. The tuple it inserts
   takes an identifier past the relation's end, which is at or past every
   view's end, so **nothing in the round can see it**. That is not a rule

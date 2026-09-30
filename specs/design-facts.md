@@ -78,10 +78,19 @@ the context.
 to a rule table.** Both rule tables -- the program's, and the one a query's
 rewrite builds -- append through one function, whose infallible last step,
 after every allocation it makes has succeeded, stores the rule, advances the
-count and marks the head predicate derived. Nothing else sets the mark and
+count and marks the head predicate derived. The one other rule that writes a
+relation, an aggregate's group rule compiled with a query, is held by the
+query rather than by a table, and the query marks its head when it publishes
+it, `specs/design-aggregates.md` section 10. Nothing else sets the mark and
 nothing clears it. So every predicate a rule can write is derived, whichever
-table the rule is in, and a predicate that is derived has had a rule
-appended.
+table or query holds the rule, and a predicate that is derived has had a
+rule appended or published.
+
+**A group predicate is derived and has no base store.** An aggregate's
+group predicate, `specs/design-aggregates.md` section 5.2, is derived by the
+group rule its body compiles to, and its generated name holds `$`, which no
+identifier a program writes contains, so no fact can be stated for it and
+nothing stages or seeds a tuple of it.
 
 The mark outlives a rewrite's table, which is freed after its query. That
 is harmless: a predicate only a rewrite derives is one the rewrite

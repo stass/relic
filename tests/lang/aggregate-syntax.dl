@@ -1,0 +1,26 @@
+% Each of the four functions, a body of several literals holding a
+% negation, a comparison and an assignment, and the four names used as the
+% ordinary symbols and predicate names they are everywhere an aggregate is
+% not written: a function name is one only when an equality's right side is
+% the name followed by `(` or `{`.
+item(a, 3). item(b, 5). item(c, 5). item(d, 1).
+blocked(c).
+count(x). sum(y). min(1). max(2).
+label(count). label(sum). label(other).
+
+rows(N) :- N = count { item(I, V) }.
+total(S) :- S = sum(V) { item(I, V), not blocked(I), V > 1 }.
+least(M) :- M = min(V) { item(I, V) }.
+most(M) :- M = max(W) { item(I, V), W = V * 10 }.
+labelled(X) :- label(X), X = count.
+named(X) :- X = count.
+reused(X, Y) :- count(X), sum(Y), Y = y.
+
+rows(N)?
+total(S)?
+least(M)?
+most(M)?
+labelled(X)?
+named(X)?
+reused(X, Y)?
+min(A), max(B)?

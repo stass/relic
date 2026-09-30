@@ -21,8 +21,9 @@
  * its identifier less one.  relic_depgraph_vertex() and relic_depgraph_pred()
  * are the only places that translation is written.
  *
- * An edge runs from a rule's head to the predicate of one of its relational
- * body literals, and says the head depends on it.  Edges are grouped by
+ * An edge runs from a rule's head to the predicate a body literal reads --
+ * a relational literal's, or an aggregate's group predicate -- and says the
+ * head depends on it.  Edges are grouped by
  * source: the edges leaving vertex v are `edges[first_edge[v]]` up to but not
  * including `edges[first_edge[v + 1]]`, in rule order and then in literal
  * order, which is the order the program was written in.
@@ -41,6 +42,17 @@ typedef struct relic_dep_edge relic_dep_edge_t;
 typedef struct relic_depgraph relic_depgraph_t;
 
 /*
+ * How a rule's head depends on what a body literal reads: through a
+ * positive literal, a negated one, or an aggregate's fold of its group
+ * predicate.
+ */
+enum relic_dep_kind {
+	RELIC_DEP_POSITIVE,
+	RELIC_DEP_NEGATIVE,
+	RELIC_DEP_AGGREGATE
+};
+
+/*
  * One dependency, and the literal that created it: body literal
  * `literal_index` of rule `rule_index` of the table the graph was built from.
  * The strata and components do not depend on them; they say where the rules
@@ -48,12 +60,24 @@ typedef struct relic_depgraph relic_depgraph_t;
  * reports.
  */
 struct relic_dep_edge {
-	size_t		rule_index;
-	size_t		literal_index;
-	uint32_t	source;
-	uint32_t	target;
-	bool		negative;
+	size_t			rule_index;
+	size_t			literal_index;
+	uint32_t		source;
+	uint32_t		target;
+	enum relic_dep_kind	kind;
 };
+
+/*
+ * Whether an edge's target must be complete before its source's rules run:
+ * a negated literal needs the whole relation to test absence, and a fold
+ * the whole group.  Such an edge is strict: it may not lie on a cycle, and
+ * it puts its source in a stratum above its target's.
+ */
+static inline bool
+relic_dep_strict(const relic_dep_edge_t *edge)
+{
+	return (edge->kind != RELIC_DEP_POSITIVE);
+}
 
 struct relic_depgraph {
 	relic_dep_edge_t	*edges;

@@ -163,3 +163,50 @@ relic_arith_negate(int64_t operand, int64_t *resultp)
 
 	return (RELIC_ARITH_DEFINED);
 }
+
+/*
+ * Add a value to an exact sum.  The value's two's complement image in 128
+ * bits is its 64-bit image below a high word of all ones when it is
+ * negative and of zeros otherwise; the low words are added, and the carry
+ * out of them, which the wrapped low sum being below an addend shows, goes
+ * into the high word with the value's own high word.
+ */
+void
+relic_sum_add(relic_sum_t *sum, int64_t addend)
+{
+	uint64_t low;
+	uint64_t high;
+	uint64_t carry;
+
+	low = (uint64_t)addend;
+	high = addend < 0 ? UINT64_MAX : 0;
+
+	sum->lo += low;
+	carry = sum->lo < low ? 1 : 0;
+	sum->hi += high + carry;
+}
+
+bool
+relic_sum_fits(const relic_sum_t *sum)
+{
+	uint64_t sign_extension;
+
+	sign_extension = (sum->lo >> 63) != 0 ? UINT64_MAX : 0;
+
+	return (sum->hi == sign_extension);
+}
+
+/*
+ * The total of a sum that fits.  The low word is the total's two's
+ * complement image, converted to int64_t without the implementation-defined
+ * conversion of an out-of-range unsigned value: an image above INT64_MAX
+ * stands for the negative value that is that image less 2^64.
+ */
+int64_t
+relic_sum_value(const relic_sum_t *sum)
+{
+	if (sum->lo <= (uint64_t)INT64_MAX)
+		return ((int64_t)sum->lo);
+
+	return (-(int64_t)(UINT64_MAX - sum->lo) - 1);
+}

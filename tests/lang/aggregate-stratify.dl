@@ -1,0 +1,12 @@
+% An aggregate needs its group complete, so a rule may not aggregate over
+% a relation that depends on the rule's own head: directly, through a
+% longer cycle, or through a negation inside the braces.
+edge(a, b). dist(a, b, 1).
+
+shortest(X, Y, M) :- edge(X, Y), M = min(D) { shortest(X, Y, D) }.
+
+nearest(X, Y, M) :- edge(X, Y), M = min(D) { reach(X, Y, D) }.
+reach(X, Y, D) :- nearest(X, Y, D).
+
+quiet(X) :- edge(X, _), not loud(X).
+loud(X) :- edge(X, _), C = count { edge(Y, _), not quiet(Y) }, C > 0.

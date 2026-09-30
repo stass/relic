@@ -33,6 +33,7 @@
 #define	SCENARIO_COLUMNS	"a query's columns are its named variables"
 #define	SCENARIO_FACTS		"a fact costs its tuple and comes first"
 #define	SCENARIO_FOREIGN	"a query runs only in its own context"
+#define	SCENARIO_GROUPS		"a query's groups refused by a limit report once"
 #define	SCENARIO_GROWTH		"answering queries does not grow the context"
 #define	SCENARIO_LIMIT		"an answer refused by a limit is given back"
 #define	SCENARIO_LOADED		"the program's queries are enumerated"
@@ -178,6 +179,7 @@ static void	 a_query_warns_of_an_undefined_predicate(void);
 static void	 a_refused_query_leaves_the_program_valid(void);
 static void	 an_answer_refused_by_a_limit_is_given_back(void);
 static void	 planning_is_charged_to_the_memory_limit(void);
+static void	 a_querys_groups_refused_by_a_limit_report_once(void);
 static void	 an_unsafe_query_makes_the_program_invalid(void);
 static void	 answers_are_named_in_the_order_queries_compile(void);
 static void	 answering_queries_does_not_grow_the_context(void);
@@ -1300,6 +1302,71 @@ a_fact_costs_its_tuple_and_comes_first(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * A query holding many aggregates runs its group rules in an arena charged
+ * to the memory limit.  Under limits from one that refuses the first of its
+ * allocations to one that admits them all, each a sixty-fourth above the
+ * last, the query either
+ * delivers its one row or fails with exactly one error, and gives back
+ * what it charged: the refusal is the one diagnostic, and nothing the
+ * arena's failure then refuses reports again.  The sweep must reach a query
+ * that was prepared and then refused while it ran, where the group rules
+ * run, and one that is answered.
+ */
+static void
+a_querys_groups_refused_by_a_limit_report_once(void)
+{
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+	char text[1024];
+	size_t length;
+	size_t limit;
+	size_t evaluating;
+	size_t answered;
+	size_t rows;
+	int status;
+	int i;
+
+	length = 0;
+	for (i = 0; i < 31; i++)
+		length += (size_t)snprintf(text + length, sizeof(text) - length,
+		    "%sN%d = count { p(_) }", i == 0 ? "" : ", ", i);
+	snprintf(text + length, sizeof(text) - length, "?");
+
+	evaluating = 0;
+	answered = 0;
+	for (limit = 4096; limit <= 1024 * 1024; limit += limit / 64) {
+		ctx = limited_context(limit, "p(a).\n", &log);
+		if (ctx == NULL)
+			return;
+
+		rows = 0;
+		status = -1;
+		query = relic_query_prepare(ctx, NULL, text);
+		if (query != NULL)
+			status = relic_query_run(ctx, query, count_rows, &rows);
+		if (status != 0 && query != NULL)
+			evaluating++;
+		if (status == 0 && rows == 1)
+			answered++;
+
+		checkf(log.errors == (status != 0 ? 1u : 0u) &&
+		    ctx->account.arena_bytes == 0, SCENARIO_GROUPS,
+		    "under a memory limit of %zu, a query that %s should "
+		    "report %d error(s), not %zu, and give back its arenas",
+		    limit, status != 0 ? "failed" : "succeeded",
+		    status != 0 ? 1 : 0, log.errors);
+
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	checkf(evaluating > 0 && answered > 0, SCENARIO_GROUPS, "some limit "
+	    "should refuse the prepared query while it runs, not %zu, and some "
+	    "admit its one row, not %zu", evaluating, answered);
+}
+
 int
 main(void)
 {
@@ -1308,6 +1375,7 @@ main(void)
 	answering_queries_does_not_grow_the_context();
 	an_answer_refused_by_a_limit_is_given_back();
 	planning_is_charged_to_the_memory_limit();
+	a_querys_groups_refused_by_a_limit_report_once();
 	a_fact_costs_its_tuple_and_comes_first();
 	the_programs_queries_are_enumerated();
 	an_unsafe_query_makes_the_program_invalid();

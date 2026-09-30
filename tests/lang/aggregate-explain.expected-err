@@ -1,0 +1,47 @@
+stratum 0, component 0: agg$dir_size$2$0$2/3
+    rule agg$dir_size$2$0$2(Dir, F, Size) :- file(F, Dir), size(F, Size).
+        scan file(F, Dir)
+        lookup size(F, Size) key={0}
+        emit agg$dir_size$2$0$2(Dir, F, Size)
+stratum 0, component 1: has_out/1
+    rule has_out(X) :- edge(X, _).
+        scan edge(X, _)
+        emit has_out(X)
+stratum 1, component 2: dir_size/2
+    rule dir_size(Dir, S) :- dir(Dir), S = sum(Size) { file(F, Dir), size(F, Size) }.
+        scan dir(Dir)
+        aggregate S = sum(Size) agg$dir_size$2$0$2(Dir, F, Size) key={0}
+        emit dir_size(Dir, S)
+stratum 1, component 3: agg$largest$1$0$1/2
+    rule agg$largest$1$0$1(D, S) :- dir_size(D, S).
+        scan dir_size(D, S)
+        emit agg$largest$1$0$1(D, S)
+stratum 1, component 4: agg$leaves$1$0$1/1
+    rule agg$leaves$1$0$1(X) :- node(X), not has_out(X).
+        scan node(X)
+        anti-member has_out(X)
+        emit agg$leaves$1$0$1(X)
+stratum 2, component 5: largest/1
+    rule largest(M) :- M = max(S) { dir_size(D, S) }.
+        aggregate M = max(S) agg$largest$1$0$1(D, S)
+        emit largest(M)
+stratum 2, component 6: leaves/1
+    rule leaves(N) :- N = count { node(X), not has_out(X) }.
+        aggregate N = count agg$leaves$1$0$1(X)
+        emit leaves(N)
+query $q0(Dir, S) :- dir_size(Dir, S).
+    scan dir_size(Dir, S)
+    stream $q0(Dir, S)
+query $q1(M) :- largest(M).
+    scan largest(M)
+    stream $q1(M)
+query $q2(N) :- leaves(N).
+    scan leaves(N)
+    stream $q2(N)
+query $q3(X, N) :- node(X), N = count { edge(X, Y) }.
+    rule agg$$q0$2(X, Y) :- edge(X, Y).
+        scan edge(X, Y)
+        emit agg$$q0$2(X, Y)
+    scan node(X)
+    aggregate N = count agg$$q0$2(X, Y) key={0}
+    emit $q3(X, N)

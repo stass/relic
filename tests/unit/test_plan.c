@@ -38,6 +38,8 @@
 #include "internal.h"
 
 #define	SCENARIO_ACCESS		"each binding pattern gets its access path"
+#define	SCENARIO_AGGREGATE	"a fold goes where its key is bound"
+#define	SCENARIO_FOLD_ACCESS	"a fold reads its group by its key"
 #define	SCENARIO_ASSIGN		"an assignment binds a slot of its kind"
 #define	SCENARIO_EQUALITY	"an equality of two literals' variables assigns"
 #define	SCENARIO_COMPARISONS	"a comparison goes where its operands are bound"
@@ -151,6 +153,7 @@ static size_t	 reference_place_tests(relic_t *ctx, const relic_rule_t *rule,
 		    size_t count);
 static bool	 reference_test_ready(relic_t *ctx,
 		    const relic_literal_t *literal, uint64_t bound);
+static uint64_t	 reference_key_slots(const relic_aggregate_t *aggregate);
 static bool	 reference_assigns(const relic_literal_t *literal,
 		    uint64_t bound, uint16_t *slotp);
 static uint64_t	 reference_slots(const relic_arg_t *args, uint16_t count);
@@ -177,6 +180,10 @@ static void	 the_references_change_only_their_choice(void);
 static void	 the_ranking_is_the_step_by_step_order(void);
 static void	 the_smaller_estimate_goes_first(void);
 static void	 a_plan_keeping_every_binding_derives_distinct_rows(void);
+static void	 a_fold_goes_where_its_key_is_bound(void);
+static void	 a_fold_reads_its_group_by_its_key(void);
+static const relic_op_aggregate_t *fold_planned(fixture_t *fixture,
+		    const char *program, unsigned int flags, size_t op);
 
 static void
 count_error(void *callback_ctx, enum relic_diag_level level,
@@ -1944,17 +1951,44 @@ reference_better(uint16_t bound_args, size_t estimate,
 }
 
 /*
+ * The slots an aggregate's key reads.
+ */
+static uint64_t
+reference_key_slots(const relic_aggregate_t *aggregate)
+{
+	uint64_t slots;
+	uint16_t i;
+
+	slots = 0;
+	for (i = 0; i < aggregate->shared_count; i++)
+		slots |= UINT64_C(1) << aggregate->shared[i];
+
+	return (slots);
+}
+
+/*
  * Whether an equality assigns a variable where `bound` is bound: one side a
  * variable not in `bound`, the left one first, and the other side reading
- * only slots in it.  The slot assigned is stored in *slotp.
+ * only slots in it; or an aggregate binds its result, its key in `bound`
+ * and its result not.  The slot assigned is stored in *slotp.
  */
 static bool
 reference_assigns(const relic_literal_t *literal, uint64_t bound,
     uint16_t *slotp)
 {
 	const relic_comparison_t *comparison;
+	const relic_aggregate_t *aggregate;
 	const relic_expr_t *sides[2];
 	size_t i;
+
+	if (literal->kind == RELIC_LITERAL_AGGREGATE) {
+		aggregate = &literal->u.aggregate;
+		if ((reference_key_slots(aggregate) & ~bound) != 0 ||
+		    (bound & (UINT64_C(1) << aggregate->result)) != 0)
+			return (false);
+		*slotp = aggregate->result;
+		return (true);
+	}
 
 	if (literal->kind != RELIC_LITERAL_COMPARISON ||
 	    literal->u.comparison.op != RELIC_CMP_EQ)
@@ -1999,6 +2033,9 @@ reference_test_ready(relic_t *ctx, const relic_literal_t *literal,
 		pred = relic_pred_of(ctx, literal->u.atom.pred);
 		return (pred != NULL && (reference_slots(literal->u.atom.args,
 		    pred->arity) & ~bound) == 0);
+	case RELIC_LITERAL_AGGREGATE:
+		return ((reference_key_slots(&literal->u.aggregate) &
+		    ~bound) == 0);
 	case RELIC_LITERAL_POSITIVE:
 		break;
 	}
@@ -2298,6 +2335,141 @@ a_plan_keeping_every_binding_derives_distinct_rows(void)
 	}
 }
 
+/*
+ * Load `program` under `flags` and plan its last rule, which holds an
+ * aggregate and follows the group rule the aggregate reads; the fold is
+ * the operation at `op`.  Returns NULL, having failed the check, when the
+ * rule is not planned or the operation there is not a fold.
+ */
+static const relic_op_aggregate_t *
+fold_planned(fixture_t *fixture, const char *program, unsigned int flags,
+    size_t op)
+{
+	size_t outer;
+
+	if (!fixture_load(fixture, program, flags, false)) {
+		checkf(false, SCENARIO_AGGREGATE, "the program is accepted: %s",
+		    program);
+		return (NULL);
+	}
+
+	outer = fixture->ctx->program.rules.count - 1;
+	if (!fixture_plan_rule(fixture, outer, NULL) ||
+	    op >= fixture->plan.op_count ||
+	    fixture->plan.ops[op].kind != RELIC_OP_AGGREGATE) {
+		checkf(false, SCENARIO_AGGREGATE, "operation %zu of the rule "
+		    "is its fold: %s", op, program);
+		return (NULL);
+	}
+
+	return (&fixture->plan.ops[op].u.aggregate);
+}
+
+/*
+ * An aggregate is a test: it is placed where every shared variable is
+ * bound, which may be after a literal written later, and it binds its
+ * result unless an earlier operation bound it, when it compares.  A count
+ * and a sum bind a number slot; a min and a max a domain slot.
+ */
+static void
+a_fold_goes_where_its_key_is_bound(void)
+{
+	static const enum relic_op_kind later[] = {
+		RELIC_OP_SCAN, RELIC_OP_AGGREGATE, RELIC_OP_EMIT
+	};
+	const relic_op_aggregate_t *fold;
+	fixture_t fixture;
+
+	fold = fold_planned(&fixture, "e(a, b).\ns(a).\n"
+	    "r(X, N) :- N = count { e(X, Y) }, s(X).\n", TEXTUAL_FLAGS, 1);
+	if (fold != NULL) {
+		check(kinds_are(&fixture.plan, later, 3), SCENARIO_AGGREGATE,
+		    "a fold written first follows the scan binding its key");
+		check(fold->binds && fold->number && fold->fn ==
+		    RELIC_AGG_COUNT && fold->slot ==
+		    slot_named(&fixture, 1, "N"), SCENARIO_AGGREGATE,
+		    "a count binds its result as a number");
+		check(fold->key_count == 1 && fold->key_mask == 1 &&
+		    fold->key_slots[0] == slot_named(&fixture, 1, "X") &&
+		    fold->arity == 2, SCENARIO_AGGREGATE,
+		    "the key is the shared X, the group's first column");
+	}
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, "e(a, b).\ns(a, 1).\n"
+	    "r(X) :- s(X, N), N = count { e(X, Y) }.\n", TEXTUAL_FLAGS, 1);
+	if (fold != NULL)
+		check(!fold->binds && fold->slot ==
+		    slot_named(&fixture, 1, "N"), SCENARIO_AGGREGATE,
+		    "a fold whose result is bound compares");
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, "e(a, 1).\n"
+	    "r(M) :- M = min(V) { e(K, V) }.\n", TEXTUAL_FLAGS, 0);
+	if (fold != NULL)
+		check(fold->binds && !fold->number && fold->fn ==
+		    RELIC_AGG_MIN && fold->column == 1,
+		    SCENARIO_AGGREGATE, "a min binds a domain slot from the "
+		    "column of its variable");
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, "e(a, 1).\n"
+	    "r(S) :- S = sum(V) { e(K, V) }.\n", TEXTUAL_FLAGS, 0);
+	if (fold != NULL)
+		check(fold->binds && fold->number && fold->fn ==
+		    RELIC_AGG_SUM, SCENARIO_AGGREGATE,
+		    "a sum binds a number slot");
+	fixture_release(&fixture);
+}
+
+/*
+ * The access path of a fold: a whole-relation walk with no key; the index
+ * keyed on the key columns when there are local columns too; a probe when
+ * every column is a key column; and a walk whatever the key under
+ * RELIC_F_NO_INDEX, as a generator is scanned under it.
+ */
+static void
+a_fold_reads_its_group_by_its_key(void)
+{
+	static const char *const keyed = "e(a, b).\ns(a).\n"
+	    "r(X, N) :- s(X), N = count { e(X, Y) }.\n";
+	const relic_op_aggregate_t *fold;
+	fixture_t fixture;
+
+	fold = fold_planned(&fixture, "e(a, b).\n"
+	    "r(N) :- N = count { e(X, Y) }.\n", 0, 0);
+	if (fold != NULL)
+		check(fold->access == RELIC_FOLD_SCAN && fold->key_count == 0,
+		    SCENARIO_FOLD_ACCESS, "a fold with no key walks the "
+		    "relation");
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, keyed, 0, 1);
+	if (fold != NULL)
+		check(fold->access == RELIC_FOLD_LOOKUP &&
+		    fold->index_position < fold->relation->index_count &&
+		    fold->relation->indexes[fold->index_position].key_mask ==
+		    1, SCENARIO_FOLD_ACCESS, "a keyed fold reads the index "
+		    "keyed on its key");
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, "e(a, b).\ns(a, b).\n"
+	    "r(X, Y, N) :- s(X, Y), N = count { e(X, Y) }.\n", 0, 1);
+	if (fold != NULL)
+		check(fold->access == RELIC_FOLD_PROBE &&
+		    fold->key_count == 2 && fold->arity == 2,
+		    SCENARIO_FOLD_ACCESS,
+		    "a fold keyed on every column probes");
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, keyed, RELIC_F_NO_INDEX, 1);
+	if (fold != NULL)
+		check(fold->access == RELIC_FOLD_SCAN && fold->key_count == 1,
+		    SCENARIO_FOLD_ACCESS, "a keyed fold walks the relation "
+		    "without indexes");
+	fixture_release(&fixture);
+}
+
 int
 main(void)
 {
@@ -2322,6 +2494,8 @@ main(void)
 	the_references_change_only_their_choice();
 	the_ranking_is_the_step_by_step_order();
 	a_plan_keeping_every_binding_derives_distinct_rows();
+	a_fold_goes_where_its_key_is_bound();
+	a_fold_reads_its_group_by_its_key();
 
 	return (check_summary("test_plan"));
 }

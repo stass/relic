@@ -30,6 +30,8 @@
 #include "internal.h"
 
 #define	SCENARIO_ARGUMENTS	"a literal resolves to the arguments it names"
+#define	SCENARIO_GROUP		"an aggregate reads a group rule of its own"
+#define	SCENARIO_GROUP_NAME	"a group predicate is named for where it is"
 #define	SCENARIO_CACHED		"a check compiles only what is new"
 #define	SCENARIO_CLOSURE	"an assignment binds what the closure reaches"
 #define	SCENARIO_EXPRESSION	"a comparison compiles to two trees over slots"
@@ -76,6 +78,9 @@ static void	 a_rule_prints_as_text_that_reads_back_as_it(void);
 static void	 a_rule_at_the_nesting_bound_prints_within_it(void);
 static void	 an_anonymous_variable_takes_a_slot_only_where_illegal(void);
 static void	 variables_are_numbered_as_they_are_written(void);
+static void	 an_aggregate_reads_a_group_rule_of_its_own(void);
+static void	 a_group_predicate_is_named_for_where_it_is(void);
+static const char *pred_spelling(const relic_t *ctx, relic_pred_id_t pred);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -793,10 +798,166 @@ a_rule_at_the_nesting_bound_prints_within_it(void)
 	}
 }
 
+static const char *
+pred_spelling(const relic_t *ctx, relic_pred_id_t pred)
+{
+	const char *bytes;
+
+	bytes = relic_symbol_bytes(ctx, relic_pred_of(ctx, pred)->name, NULL);
+
+	return (bytes != NULL ? bytes : "");
+}
+
+/*
+ * An aggregate compiles to a group rule, published just before the rule
+ * holding it with the same origin.  The group rule's head is the shared
+ * variables in the order the outer rule numbered them, then the local
+ * variables in the order the body writes them: dir_size's group is
+ * (Dir, F, Size), keyed on its first column, folding its third.  The
+ * aggregated variable is local; the result variable is the outer rule's.
+ */
+static void
+an_aggregate_reads_a_group_rule_of_its_own(void)
+{
+	const relic_aggregate_t *aggregate;
+	const relic_rule_t *group;
+	const relic_rule_t *outer;
+	relic_t *ctx;
+	diag_log_t log;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	if (!load(ctx, "dir(src).\nfile(main, src).\nsize(main, 1200).\n"
+	    "dir_size(Dir, S) :- dir(Dir),\n"
+	    "    S = sum(Size) { file(F, Dir), size(F, Size) }.\n") ||
+	    relic_check(ctx) != 0 || rule_count(ctx) != 2) {
+		check(false, SCENARIO_GROUP, "the rule compiles to two rules");
+		relic_destroy(ctx);
+		return;
+	}
+
+	group = rule_at(ctx, 0);
+	outer = rule_at(ctx, 1);
+	if (outer->body_length != 2 ||
+	    outer->body[1].kind != RELIC_LITERAL_AGGREGATE) {
+		check(false, SCENARIO_GROUP, "the outer rule's second literal "
+		    "is the aggregate");
+		relic_destroy(ctx);
+		return;
+	}
+	aggregate = &outer->body[1].u.aggregate;
+
+	check(group->origin == outer->origin && group->head ==
+	    aggregate->group && aggregate->group_rule->head ==
+	    aggregate->group, SCENARIO_GROUP,
+	    "the group rule comes first, from the same statement");
+	check(strcmp(pred_spelling(ctx, group->head), "agg$dir_size$2$0$2") ==
+	    0 && group->head_arity == 3, SCENARIO_GROUP,
+	    "the group is agg$dir_size$2$0$2/3");
+	check(group->variable_count == 3 &&
+	    group->variables[0].name == symbol(ctx, "Dir") &&
+	    group->variables[1].name == symbol(ctx, "F") &&
+	    group->variables[2].name == symbol(ctx, "Size"), SCENARIO_GROUP,
+	    "the group's columns are Dir, F, Size");
+	check(group->head_args[0].kind == RELIC_ARG_VARIABLE &&
+	    group->head_args[0].u.slot == 0 &&
+	    group->head_args[2].kind == RELIC_ARG_VARIABLE &&
+	    group->head_args[2].u.slot == 2, SCENARIO_GROUP,
+	    "column c of the group is slot c of its rule");
+	check(aggregate->fn == RELIC_AGG_SUM && aggregate->shared_count == 1 &&
+	    aggregate->shared[0] == 0 && aggregate->column == 2,
+	    SCENARIO_GROUP, "the aggregate is keyed on the outer Dir and "
+	    "folds the group's third column");
+	check(outer->variable_count == 2 &&
+	    outer->variables[aggregate->result].name == symbol(ctx, "S"),
+	    SCENARIO_GROUP, "the outer rule numbers only Dir and S");
+	check(relic_pred_of(ctx, outer->head)->program_rules == 1 &&
+	    relic_pred_of(ctx, group->head)->program_rules == 1,
+	    SCENARIO_GROUP, "each rule counts among its own head's program "
+	    "rules");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A group predicate is named for the head's name and arity, the rule's
+ * position among the head's program rules, and the aggregate's position in
+ * the body, counted from 1: two aggregates in one rule and a second rule
+ * of the same head each get their own.  A query's group is named for its
+ * position alone, so every query reuses the one predicate at an arity, and
+ * preparing the same query again interns nothing.  A statement the checker
+ * rejects publishes none of its rules.
+ */
+static void
+a_group_predicate_is_named_for_where_it_is(void)
+{
+	static const char *const names[] = {
+		"agg$c$2$0$2", "agg$c$2$0$3", "agg$c$2$1$2"
+	};
+	relic_query_t *first;
+	relic_query_t *second;
+	relic_t *ctx;
+	diag_log_t log;
+	size_t preds;
+	size_t i;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	if (!load(ctx, "e(a, b).\n"
+	    "c(X, N) :- e(X, _), N = count { e(X, Y) },\n"
+	    "    N = count { e(Z, X) }.\n"
+	    "c(X, N) :- e(_, X), N = count { e(Y, X) }.\n") ||
+	    relic_check(ctx) != 0 || rule_count(ctx) != 5) {
+		check(false, SCENARIO_GROUP_NAME, "the two rules compile to "
+		    "five");
+		relic_destroy(ctx);
+		return;
+	}
+
+	for (i = 0; i < 3; i++)
+		checkf(strcmp(pred_spelling(ctx, rule_at(ctx, i < 2 ? i :
+		    3)->head), names[i]) == 0, SCENARIO_GROUP_NAME,
+		    "group %zu is %s, not %s", i, names[i],
+		    pred_spelling(ctx, rule_at(ctx, i < 2 ? i : 3)->head));
+
+	first = relic_query_prepare(ctx, NULL,
+	    "e(X, _), N = count { e(X, Y) }?");
+	preds = relic_pred_count(ctx);
+	second = relic_query_prepare(ctx, NULL,
+	    "e(X, _), N = count { e(X, Y) }?");
+	check(first != NULL && second != NULL && first->group_rule_count == 1 &&
+	    second->group_rule_count == 1 && first->group_rules[0].head ==
+	    second->group_rules[0].head && strcmp(pred_spelling(ctx,
+	    first->group_rules[0].head), "agg$$q0$2") == 0,
+	    SCENARIO_GROUP_NAME, "two queries fold one group predicate, "
+	    "agg$$q0$2");
+	check(relic_pred_count(ctx) == preds, SCENARIO_GROUP_NAME,
+	    "preparing the query again interns no predicate");
+	relic_query_destroy(first);
+	relic_query_destroy(second);
+
+	if (!load(ctx, "bad(N) :- N = count { e(X, Y) }, M > 1.\n")) {
+		check(false, SCENARIO_GROUP_NAME, "the unsafe rule loads");
+		relic_destroy(ctx);
+		return;
+	}
+	check(relic_check(ctx) != 0 && rule_count(ctx) == 5,
+	    SCENARIO_GROUP_NAME, "an unsafe statement publishes neither its "
+	    "rule nor its group rule");
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
 	variables_are_numbered_as_they_are_written();
+	an_aggregate_reads_a_group_rule_of_its_own();
+	a_group_predicate_is_named_for_where_it_is();
 	a_literal_resolves_to_the_arguments_it_names();
 	an_anonymous_variable_takes_a_slot_only_where_illegal();
 	a_rejected_statement_leaves_no_rule_behind();

@@ -359,7 +359,7 @@ written at every level. Each `-v` adds to them:
 | Level | Adds |
 | --- | --- |
 | 1, `-v` | a line to standard error after each query that succeeded, `query N: M rows`, or `1 row` |
-| 2, `-vv` | a note for the first ordering comparison in each rule that compared values of different types |
+| 2, `-vv` | a note, once per rule, for the first ordering comparison that compared values of different types or the first aggregate whose group mixed them |
 
 A third `-v` adds nothing more.
 
@@ -378,11 +378,24 @@ types:
 rules.dl:4:22: note: ordering comparison between an integer and a symbol is false
 ```
 
-It is reported by the library, which the tool asks for with the
-`RELIC_F_NOTE_MIXED` switch of `specs/design-api.md`, once per rule of the
-program for the whole run and once per query each time it is answered. The
+Level 2 also reports an aggregate with no value because its group mixes
+types, `specs/design-aggregates.md` section 4.4: a `sum` over a row that is
+not an integer, or a `min` or `max` over rows of more than one type. The
+note points at the function and names no type, since which row a fold meets
+first depends on the strategy:
+
+```text
+rules.dl:4:22: note: a row of sum(Size) holds a value that is not an integer; the aggregate has no value
+rules.dl:7:19: note: the rows of min(N) hold values of more than one type; the aggregate has no value
+```
+
+The notes are reported by the library, which the tool asks for with the
+`RELIC_F_NOTE_MIXED` switch of `specs/design-api.md`: one note, whichever
+of them is met first, per rule of the program for the whole run and per
+query each time it is answered. The
 rules a Magic rewrite generates from one rule, and the semi-naive variants of
-it, count as that rule.
+it, count as that rule, and so does the group rule of an aggregate the rule
+holds.
 
 ---
 

@@ -94,8 +94,9 @@ struct relic_exec_env {
  * order, so the lookup stops at the first tuple at or past `end`, exactly as
  * a scan stops at the end of its range.
  *
- * A test keeps no cursor, and a FILTER and the EMIT read no relation and
- * leave the view unset too.
+ * A test keeps no cursor, and a FILTER, an ASSIGN and the EMIT read no
+ * relation and leave the view unset too.  An AGGREGATE reads its group
+ * relation through the view `all`, resolved like the others.
  */
 struct relic_op_state {
 	relic_tuple_range_t	view;
@@ -135,22 +136,29 @@ relic_exec_work(uint64_t derivations, const relic_exec_counters_t *read)
 }
 
 /*
- * What made a comparison or an assignment false only because of a value's
- * type: an ordering comparison of two values of different types, or an
- * operand of an arithmetic operator that is not an integer.
+ * What made a comparison, an assignment or an aggregate false only because
+ * of a value's type: an ordering comparison of two values of different
+ * types, an operand of an arithmetic operator that is not an integer, a
+ * row of a sum that is not an integer, or the rows of a min or a max
+ * holding values of more than one type.
  */
 enum relic_note_kind {
 	RELIC_NOTE_ORDERING,
-	RELIC_NOTE_OPERAND
+	RELIC_NOTE_OPERAND,
+	RELIC_NOTE_SUM_TYPE,
+	RELIC_NOTE_EXTREME_TYPES
 };
 
 /*
- * The first comparison or assignment of the running plan that was false only
- * because of a value's type, when the environment asks for such, since the
- * caller last took the record.  `where` is the literal's location, NULL when
- * there has been none.  An ordering names the types of the two values it
- * compared, as the type bits of a domain identifier; an operand names its
- * operator's spelling and its own type.
+ * The first comparison, assignment or aggregate of the running plan that was
+ * false only because of a value's type, when the environment asks for such,
+ * since the caller last took the record.  `where` is the literal's location,
+ * NULL when there has been none.  An ordering names the types of the two
+ * values it compared, as the type bits of a domain identifier; an operand
+ * names its operator's spelling and its own type; an aggregate's note names
+ * the aggregate, whose function and aggregated variable it is about, and
+ * no type, since which row a fold meets first is not a fact about the
+ * group.
  *
  * The executor records and never reports, since reporting calls the
  * caller's diagnostic callback and marks the rule as reported, both of which
@@ -161,6 +169,7 @@ enum relic_note_kind {
  */
 struct relic_mixed_note {
 	const relic_location_t	*where;
+	const relic_aggregate_t	*aggregate;	/* SUM_TYPE, EXTREME_TYPES */
 	const char		*operator;	/* OPERAND */
 	relic_dom_t		 left_type;	/* ORDERING, and OPERAND's */
 	relic_dom_t		 right_type;	/* ORDERING */

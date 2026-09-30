@@ -122,6 +122,7 @@ typedef struct relic_component_plans relic_component_plans_t;
 typedef struct relic_delta_work relic_delta_work_t;
 typedef struct relic_emit_target relic_emit_target_t;
 typedef struct relic_evaluation relic_evaluation_t;
+typedef struct relic_group_run relic_group_run_t;
 typedef struct relic_member_entry relic_member_entry_t;
 typedef struct relic_rule_plans relic_rule_plans_t;
 typedef struct relic_row_sink relic_row_sink_t;
@@ -294,11 +295,17 @@ struct relic_component_plans {
 /*
  * One evaluation: the plans it runs and the executor's state.
  *
+ * `arena` is where the evaluation allocates, and what ending it releases:
+ * the context's evaluation arena, or the arena of a query's group run,
+ * whose plans outlast the evaluations that follow it until the query's own
+ * plan is explained beside them.  Both are charged to the context's
+ * account.
+ *
  * `rules` is the table the schedule's rule indexes refer to: the program's,
  * or those a query's Magic rewrite generated.  `components` holds the plans
  * of each component of the schedule, at the same position, or of the single
  * query an answer is computed for.  They and
- * everything they point at live in the evaluation arena.  A component's
+ * everything they point at live in the evaluation's arena.  A component's
  * plans are allocated before any of them runs, so nothing is allocated while
  * a plan runs; only the relation store grows then.
  *
@@ -340,6 +347,7 @@ struct relic_component_plans {
  */
 struct relic_evaluation {
 	relic_t			*ctx;
+	relic_arena_t		*arena;
 	const relic_ruletab_t	*rules;
 	relic_component_plans_t	*components;
 	size_t			 component_count;
@@ -354,6 +362,30 @@ struct relic_evaluation {
 	bool			 stopped;
 };
 
+/*
+ * The group rules of the query being answered, and what runs them.
+ *
+ * A query's group rules are its own, not the program's, so answering it
+ * runs them itself: once each, in body order, into their group relations,
+ * once the relations they read are complete and before any rule a rewrite
+ * generated runs, since a generated rule may hold a copy of the aggregate
+ * that folds one.  `eval` plans and runs them in `arena`, and is kept with
+ * its plans until the query's own plan has been explained, so that explain
+ * shows each group rule, with the plan that ran it, under the query's
+ * heading.  `begun` says `eval` holds an evaluation to end.
+ *
+ * The group relations are emptied when the answer is finished, as the
+ * answer relation is, so outside an answer a query holds nothing derived
+ * and running it again derives the same rows in the same order.
+ */
+struct relic_group_run {
+	relic_arena_t		 arena;
+	relic_evaluation_t	 eval;
+	const relic_rule_t	*rules;
+	size_t			 count;
+	bool			 begun;
+};
+
 static void	 advance_delta(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans, size_t member);
 static void	 advance_deltas(relic_evaluation_t *eval,
@@ -361,11 +393,20 @@ static void	 advance_deltas(relic_evaluation_t *eval,
 static int	 allocate_delta_work(relic_evaluation_t *eval,
 		    relic_delta_work_t *work, size_t variants, size_t members);
 static int	 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
+		    const relic_query_t *query, relic_group_run_t *groups);
+static void	 explain_group_rules(relic_t *ctx,
+		    const relic_group_run_t *groups);
+static void	 group_run_finish(relic_t *ctx, relic_group_run_t *groups);
+static void	 group_run_init(relic_group_run_t *groups, relic_t *ctx,
 		    const relic_query_t *query);
+static int	 plan_group_rules(relic_evaluation_t *eval,
+		    const relic_group_run_t *groups);
+static int	 run_group_rules(relic_t *ctx, relic_group_run_t *groups);
 static int	 answer_from_program(relic_t *ctx, const relic_query_t *query,
-		    const relic_row_sink_t *rows);
+		    relic_group_run_t *groups, const relic_row_sink_t *rows);
 static int	 answer_through_rewrite(relic_t *ctx,
-		    const relic_query_t *query, const relic_row_sink_t *rows);
+		    const relic_query_t *query, relic_group_run_t *groups,
+		    const relic_row_sink_t *rows);
 static bool	 query_answerable(relic_t *ctx, const relic_query_t *query,
 		    relic_row_cb callback);
 static int	 compute_answer(relic_t *ctx, const relic_query_t *query,
@@ -388,6 +429,7 @@ static size_t	 count_member_literals(const relic_evaluation_t *eval,
 static void	*evaluation_alloc(relic_evaluation_t *eval, size_t count,
 		    size_t size);
 static int	 evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
+		    relic_arena_t *arena,
 		    size_t component_count, uint16_t head_arity_max);
 static int	 evaluation_track_deltas(relic_evaluation_t *eval);
 static uint16_t	 widest_head(const relic_ruletab_t *rules);
@@ -461,6 +503,9 @@ static void	 report_undefined(relic_t *ctx, const relic_rule_t *rule,
 		    const relic_exec_error_t *error);
 static int	 resolve_pending(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
+static const char *describe_fold(const relic_t *ctx,
+		    const relic_aggregate_t *aggregate, char *buffer,
+		    size_t size);
 static const char *type_phrase(relic_dom_t type);
 static bool	 literal_reads_member(const relic_evaluation_t *eval,
 		    const relic_literal_t *literal);
@@ -504,7 +549,8 @@ static const relic_rule_t *rule_of(const relic_evaluation_t *eval,
 		    const relic_component_t *component, size_t i);
 static bool	 query_streams(const relic_t *ctx, const relic_plan_t *plan);
 static int	 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
-		    relic_relation_t *answer, const relic_row_sink_t *rows);
+		    relic_relation_t *answer, const relic_group_run_t *groups,
+		    const relic_row_sink_t *rows);
 static void	 count_empty_old_views(relic_component_plans_t *plans);
 static void	 empty_every_delta(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
@@ -599,6 +645,7 @@ static void
 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
     const relic_mixed_note_t *note)
 {
+	char folded[RELIC_NAME_TEXT_MAX + 8];
 	bool *noted;
 
 	noted = mixed_noted_flag(ctx, rule);
@@ -618,7 +665,45 @@ note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 		    "operand of %s is %s; the comparison is false",
 		    note->operator, type_phrase(note->left_type));
 		return;
+	case RELIC_NOTE_SUM_TYPE:
+		relic_diagf(ctx, RELIC_NOTE, note->where,
+		    "a row of %s holds a value that is not an integer; the "
+		    "aggregate has no value", describe_fold(ctx,
+		    note->aggregate, folded, sizeof(folded)));
+		return;
+	case RELIC_NOTE_EXTREME_TYPES:
+		relic_diagf(ctx, RELIC_NOTE, note->where,
+		    "the rows of %s hold values of more than one type; the "
+		    "aggregate has no value", describe_fold(ctx,
+		    note->aggregate, folded, sizeof(folded)));
+		return;
 	}
+}
+
+/*
+ * An aggregate's function and aggregated variable as the rule writes them,
+ * sum(Size) or min(N), for a note about its fold.  The variable is the
+ * group rule's, whose slot is the aggregated column; its spelling is all
+ * identifier bytes, so it is safe to quote.
+ */
+static const char *
+describe_fold(const relic_t *ctx, const relic_aggregate_t *aggregate,
+    char *buffer, size_t size)
+{
+	const relic_variable_t *variable;
+	const char *bytes;
+	char named[RELIC_NAME_TEXT_MAX];
+
+	variable = &aggregate->group_rule->variables[aggregate->column];
+	bytes = relic_symbol_bytes(ctx, variable->name, NULL);
+	if (bytes == NULL)
+		bytes = "?";
+
+	snprintf(buffer, size, "%s(%s)",
+	    relic_aggregate_spelling(aggregate->fn),
+	    relic_diag_name(bytes, named, sizeof(named)));
+
+	return (buffer);
 }
 
 /*
@@ -1478,7 +1563,7 @@ evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
 {
 	void *block;
 
-	block = relic_arena_allocarray(&eval->ctx->eval_arena, count, size);
+	block = relic_arena_allocarray(eval->arena, count, size);
 	if (block == NULL)
 		relic_diag_no_memory(eval->ctx);
 
@@ -1487,7 +1572,8 @@ evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
 
 /*
  * Begin an evaluation of `component_count` components, or of one query,
- * whose plans write heads of at most `head_arity_max` columns.  Returns 0,
+ * whose plans write heads of at most `head_arity_max` columns, allocating
+ * from `arena`.  Returns 0,
  * or -1 with a diagnostic reported.  Either way the caller ends the
  * evaluation with evaluation_end(), which releases what was allocated.
  *
@@ -1499,7 +1585,7 @@ evaluation_alloc(relic_evaluation_t *eval, size_t count, size_t size)
  * reaches need room, and only a plan that computes needs pending integers.
  */
 static int
-evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
+evaluation_begin(relic_evaluation_t *eval, relic_t *ctx, relic_arena_t *arena,
     size_t component_count, uint16_t head_arity_max)
 {
 	relic_dom_t *batch;
@@ -1507,6 +1593,7 @@ evaluation_begin(relic_evaluation_t *eval, relic_t *ctx,
 
 	bzero(eval, sizeof(*eval));
 	eval->ctx = ctx;
+	eval->arena = arena;
 	eval->env.ctx = ctx;
 	eval->env.note_mixed = (ctx->config.flags & RELIC_F_NOTE_MIXED) != 0;
 
@@ -1597,7 +1684,7 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 	relic_plan_t plan;
 
 	*runningp = NULL;
-	if (relic_plan_rule(eval->ctx, &eval->ctx->eval_arena, rule, target,
+	if (relic_plan_rule(eval->ctx, eval->arena, rule, target,
 	    eval->is_member, &plan) != 0)
 		return (-1);
 
@@ -1668,7 +1755,7 @@ make_pending_room(relic_evaluation_t *eval)
 	if (pending == NULL)
 		return (NULL);
 
-	if (relic_pending_map_init(&eval->pending_map, &eval->ctx->eval_arena,
+	if (relic_pending_map_init(&eval->pending_map, eval->arena,
 	    columns) != 0) {
 		relic_diag_no_memory(eval->ctx);
 		return (NULL);
@@ -1741,7 +1828,7 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 static void
 evaluation_end(relic_evaluation_t *eval)
 {
-	relic_arena_reset(&eval->ctx->eval_arena);
+	relic_arena_reset(eval->arena);
 	bzero(eval, sizeof(*eval));
 }
 
@@ -1919,7 +2006,7 @@ plan_variant(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 	variant->delta_literal = delta_literal;
 	target = head_relation_of(eval, plans, rule);
 
-	if (relic_plan_variant(eval->ctx, &eval->ctx->eval_arena, rule,
+	if (relic_plan_variant(eval->ctx, eval->arena, rule,
 	    target, delta_literal, eval->is_member, &variant_plans) != 0)
 		return (-1);
 	variant->threshold = variant_plans.threshold;
@@ -2619,8 +2706,8 @@ evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
 	if (i < schedule->component_count)
 		note_planning_component(ctx, schedule, i);
 
-	status = evaluation_begin(&eval, ctx, schedule->component_count,
-	    widest_head(rules));
+	status = evaluation_begin(&eval, ctx, &ctx->eval_arena,
+	    schedule->component_count, widest_head(rules));
 	eval.rules = rules;
 	if (status == 0)
 		status = evaluation_track_deltas(&eval);
@@ -2808,7 +2895,11 @@ gather_query_answer(relic_evaluation_t *eval,
  * Its derivations must be its rows already, each derived once, which the
  * planner decides from the plan.  It must compute nothing, since an
  * expression can meet an undefined result at any binding, which fails the
- * query, and a query that fails must deliver no row.  And no configured
+ * query, and a query that fails must deliver no row.  It must fold nothing
+ * either: a sum can fail as an expression can, a count can derive an
+ * integer a streamed row could not hold, and a min or a max is gathered
+ * with them, so that whether an aggregate streams does not depend on which
+ * one it is.  And no configured
  * limit may bound the relations.  Under a limit a query that is refused must
  * be refused before its first row, so that it delivers all of its rows or
  * none; a row that is delivered without being stored is never refused, so a
@@ -2825,7 +2916,7 @@ query_streams(const relic_t *ctx, const relic_plan_t *plan)
 	if (relic_limits_bound_relations(ctx))
 		return (false);
 
-	if (relic_plan_computes(plan))
+	if (relic_plan_computes(plan) || relic_plan_folds(plan))
 		return (false);
 
 	return (relic_plan_derives_distinct(plan));
@@ -2851,9 +2942,10 @@ choose_query_target(const relic_t *ctx, relic_running_plan_t *running,
 /*
  * Run a query's rule -- the one written, or the one its rewrite produced --
  * once, every relation it reads being complete, and deliver its rows to the
- * caller `rows` names.  One pass computes the answer completely, because no
- * body reads `answer`, the query's answer relation: it belongs to no
- * predicate, so no literal can name it.
+ * caller `rows` names.  Its explanation shows the group rules `groups` ran
+ * under the query's heading, before the query's plan.  One pass computes
+ * the answer completely, because no body reads `answer`, the query's answer
+ * relation: it belongs to no predicate, so no literal can name it.
  *
  * A plan that query_streams() admits delivers each tuple to the caller as
  * its EMIT derives it, and the answer relation is never written.  Its
@@ -2875,7 +2967,8 @@ choose_query_target(const relic_t *ctx, relic_running_plan_t *running,
  */
 static int
 run_query_rule(relic_t *ctx, const relic_rule_t *rule,
-    relic_relation_t *answer, const relic_row_sink_t *rows)
+    relic_relation_t *answer, const relic_group_run_t *groups,
+    const relic_row_sink_t *rows)
 {
 	relic_running_plan_t *running;
 	relic_evaluation_t eval;
@@ -2886,14 +2979,16 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 	note_query_activity(ctx, "planning", answer);
 
 	streams = false;
-	status = evaluation_begin(&eval, ctx, 1, answer->arity);
+	status = evaluation_begin(&eval, ctx, &ctx->eval_arena, 1,
+	    answer->arity);
 	if (status == 0)
 		status = plan_query(&eval, rule, answer, &eval.components[0]);
 	if (status == 0) {
 		running = eval.components[0].planned[0].base;
 		streams = choose_query_target(ctx, running, rows);
-		relic_explain_query(ctx, rule, answer, &running->plan,
-		    streams);
+		relic_explain_query(ctx, rule, answer);
+		explain_group_rules(ctx, groups);
+		relic_explain_query_plan(ctx, rule, &running->plan, streams);
 		if (streams)
 			status = stream_query_plan(&eval, running);
 		else
@@ -2910,6 +3005,165 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 		deliver_gathered_answer(ctx, answer, rows);
 
 	return (0);
+}
+
+/*
+ * Ready a query's group run: its group rules, and an arena charged to the
+ * context's account, as the evaluation arena is.
+ */
+static void
+group_run_init(relic_group_run_t *groups, relic_t *ctx,
+    const relic_query_t *query)
+{
+	bzero(groups, sizeof(*groups));
+	relic_arena_init_charged(&groups->arena, &ctx->account);
+	groups->rules = query->group_rules;
+	groups->count = query->group_rule_count;
+}
+
+/*
+ * Plan each group rule into its group relation, as a query's rule is
+ * planned: one pass, every literal reading its whole relation.  The plans
+ * are the one component of the run's evaluation, in body order.
+ */
+static int
+plan_group_rules(relic_evaluation_t *eval, const relic_group_run_t *groups)
+{
+	relic_component_plans_t *plans;
+	relic_rule_plans_t *rule_plans;
+	relic_relation_t *relation;
+	const relic_rule_t *rule;
+	size_t i;
+
+	plans = &eval->components[0];
+	plans->planned = evaluation_alloc(eval, groups->count,
+	    sizeof(*plans->planned));
+	if (plans->planned == NULL)
+		return (-1);
+
+	for (i = 0; i < groups->count; i++) {
+		rule = &groups->rules[i];
+		relation = relic_relation_written(eval->ctx, rule->head);
+		if (relation == NULL)
+			return (-1);
+
+		rule_plans = &plans->planned[i];
+		bzero(rule_plans, sizeof(*rule_plans));
+		rule_plans->rule = rule;
+		plans->planned_count++;
+		if (build_running_plan(eval, rule, relation,
+		    &rule_plans->base) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Run a query's group rules, step 3 of answering it: every relation they
+ * read is complete, so one round of one pass each derives each group
+ * relation whole.  A rule reads no group relation, so the round reads none
+ * of its targets and may wait for its end to insert.  Returns 0, or -1 with
+ * a diagnostic reported, and the run is then finished by its caller.
+ */
+static int
+run_group_rules(relic_t *ctx, relic_group_run_t *groups)
+{
+	relic_component_plans_t *plans;
+	relic_relation_t **targets;
+	relic_round_item_t *items;
+	relic_round_t round;
+	uint16_t widest;
+	size_t i;
+	int status;
+
+	if (groups->count == 0)
+		return (0);
+
+	widest = 0;
+	for (i = 0; i < groups->count; i++) {
+		if (groups->rules[i].head_arity > widest)
+			widest = groups->rules[i].head_arity;
+	}
+
+	status = evaluation_begin(&groups->eval, ctx, &groups->arena, 1,
+	    widest);
+	groups->begun = true;
+	if (status != 0 || plan_group_rules(&groups->eval, groups) != 0)
+		return (-1);
+
+	plans = &groups->eval.components[0];
+	items = evaluation_alloc(&groups->eval, groups->count, sizeof(*items));
+	if (items == NULL)
+		return (-1);
+	targets = evaluation_alloc(&groups->eval, groups->count,
+	    sizeof(*targets));
+	if (targets == NULL)
+		return (-1);
+
+	for (i = 0; i < groups->count; i++) {
+		bzero(&items[i], sizeof(items[i]));
+		items[i].plan = &plans->planned[i].base->plan;
+		items[i].rule = plans->planned[i].rule;
+		items[i].target = i;
+		targets[i] = plans->planned[i].base->target.relation;
+	}
+
+	round.items = items;
+	round.targets = targets;
+	round.env = &groups->eval.env;
+	round.item_count = groups->count;
+	round.item_capacity = groups->count;
+	round.target_count = groups->count;
+
+	return (run_round(&groups->eval, &round));
+}
+
+/*
+ * Show each group rule a query's run planned, with the plan that ran it,
+ * one level in, as the rules of a component are shown.
+ */
+static void
+explain_group_rules(relic_t *ctx, const relic_group_run_t *groups)
+{
+	const relic_component_plans_t *plans;
+	size_t i;
+
+	if (!groups->begun)
+		return;
+
+	plans = &groups->eval.components[0];
+	for (i = 0; i < plans->planned_count; i++) {
+		if (plans->planned[i].base != NULL)
+			relic_explain_rule(ctx, plans->planned[i].rule,
+			    &plans->planned[i].base->plan, 0);
+	}
+}
+
+/*
+ * Finish a query's group run: empty the group relations it wrote, and end
+ * its evaluation, releasing the plans.  The run is then as group_run_init()
+ * left it, so an answer that falls back to the whole program can run the
+ * group rules again.
+ */
+static void
+group_run_finish(relic_t *ctx, relic_group_run_t *groups)
+{
+	const relic_component_plans_t *plans;
+	size_t i;
+
+	if (!groups->begun)
+		return;
+
+	plans = groups->eval.components;
+	for (i = 0; plans != NULL && i < plans->planned_count; i++) {
+		if (plans->planned[i].base != NULL)
+			relic_relation_clear(ctx,
+			    plans->planned[i].base->target.relation);
+	}
+
+	evaluation_end(&groups->eval);
+	groups->begun = false;
 }
 
 /*
@@ -2970,8 +3224,11 @@ evaluate_read_completely(relic_t *ctx, relic_magic_t *magic,
 /*
  * Compute what a query's rewrite needs before its rewritten rule can run:
  * the relations the query reads completely, evaluated from the program's own
- * schedule, and then the fixed point of the rules the rewrite generates, or
- * of the program's rules for the components it found read completely.
+ * schedule, then the query's group relations, which read only those, and
+ * then the fixed point of the rules the rewrite generates, or of the
+ * program's rules for the components it found read completely.  The group
+ * relations come before the generated rules because a generated rule may
+ * fold one.
  * Finding what the query reads completely and generating the rules are the
  * rewrite's, and a refusal by the memory limit in either names the query;
  * the evaluations between them name what they plan.
@@ -2982,7 +3239,7 @@ evaluate_read_completely(relic_t *ctx, relic_magic_t *magic,
  */
 static int
 derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
-    const relic_query_t *query)
+    const relic_query_t *query, relic_group_run_t *groups)
 {
 	if (confirm_schedule_current(ctx) != 0)
 		return (-1);
@@ -2990,11 +3247,14 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 	relic_discard_derived(ctx);
 
 	note_query_activity(ctx, "rewriting", query->answer);
-	if (relic_magic_find_complete(magic, &query->rule) != 0)
+	if (relic_magic_find_complete(magic, query) != 0)
 		return (-1);
 
 	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
 	    magic->complete_components, 0) != 0)
+		return (-1);
+
+	if (run_group_rules(ctx, groups) != 0)
 		return (-1);
 
 	note_query_activity(ctx, "rewriting", query->answer);
@@ -3012,16 +3272,21 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 
 /*
  * Answer a query from the fixed point of the whole program, computing it
- * first if the relations do not hold it, and deliver its rows.
+ * first if the relations do not hold it, then its group relations, and
+ * deliver its rows.
  */
 static int
 answer_from_program(relic_t *ctx, const relic_query_t *query,
-    const relic_row_sink_t *rows)
+    relic_group_run_t *groups, const relic_row_sink_t *rows)
 {
 	if (materialize_program(ctx) != 0)
 		return (-1);
 
-	return (run_query_rule(ctx, &query->rule, query->answer, rows));
+	if (run_group_rules(ctx, groups) != 0)
+		return (-1);
+
+	return (run_query_rule(ctx, &query->rule, query->answer, groups,
+	    rows));
 }
 
 /*
@@ -3035,26 +3300,31 @@ answer_from_program(relic_t *ctx, const relic_query_t *query,
  * the abandoned rewrite derived is discarded with the rest, since it
  * recorded no materialized program.  No row has been delivered when the
  * whole program is turned to, because run_query_rule() delivers none unless
- * it succeeds, and a rewrite over its budget fails before it is run.
+ * it succeeds, and a rewrite over its budget fails before it is run.  The
+ * group run is finished before the whole program is evaluated, whose
+ * discard would empty the relations its plans index, and the group rules
+ * run again over the whole fixed point.
  */
 static int
 answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
-    const relic_row_sink_t *rows)
+    relic_group_run_t *groups, const relic_row_sink_t *rows)
 {
 	relic_magic_t magic;
 	bool over_budget;
 	int status;
 
 	relic_magic_init(&magic, ctx);
-	status = derive_for_rewrite(ctx, &magic, query);
+	status = derive_for_rewrite(ctx, &magic, query, groups);
 	if (status == 0)
 		status = run_query_rule(ctx, &magic.query, query->answer,
-		    rows);
+		    groups, rows);
 	over_budget = magic.over_budget;
 	relic_magic_reset(&magic);
 
-	if (status != 0 && over_budget)
-		return (answer_from_program(ctx, query, rows));
+	if (status != 0 && over_budget) {
+		group_run_finish(ctx, groups);
+		return (answer_from_program(ctx, query, groups, rows));
+	}
 
 	return (status);
 }
@@ -3152,22 +3422,30 @@ query_answerable(relic_t *ctx, const relic_query_t *query,
 /*
  * Answer the query and deliver its rows as `rows` says: from the relations
  * as they stand when the program is materialized or the rewrite is turned
- * off, and through the query's Magic rewrite otherwise.
+ * off, and through the query's Magic rewrite otherwise.  Either way the
+ * query's group relations are emptied once the answer is finished.
  */
 static int
 compute_answer(relic_t *ctx, const relic_query_t *query,
     const relic_row_sink_t *rows)
 {
+	relic_group_run_t groups;
+	int status;
+
 	if (relic_program_ready(ctx) != 0)
 		return (-1);
 
 	ctx->query_mixed_noted = false;
 
+	group_run_init(&groups, ctx, query);
 	if ((ctx->config.flags & RELIC_F_NO_MAGIC) != 0 ||
 	    relic_relations_current(ctx))
-		return (answer_from_program(ctx, query, rows));
+		status = answer_from_program(ctx, query, &groups, rows);
+	else
+		status = answer_through_rewrite(ctx, query, &groups, rows);
+	group_run_finish(ctx, &groups);
 
-	return (answer_through_rewrite(ctx, query, rows));
+	return (status);
 }
 
 void

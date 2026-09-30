@@ -1,0 +1,19 @@
+% The total size of each directory's files.  A directory with no file sums
+% to zero; two files of one size are two rows, since each file is named.
+dir(src). dir(doc). dir(empty).
+file(main, src). file(util, src). file(readme, doc). file(guide, doc).
+size(main, 1200). size(util, 300). size(readme, 300). size(guide, 300).
+
+dir_size(Dir, S) :-
+    dir(Dir),
+    S = sum(Size) { file(F, Dir), size(F, Size) }.
+
+% The sizes a directory holds, without naming the file: the group is a set
+% of rows, and doc's two files of 300 are one row of it.
+sizes_only(Dir, S) :-
+    dir(Dir),
+    S = sum(Size) { size_in(Dir, Size) }.
+size_in(Dir, Size) :- file(F, Dir), size(F, Size).
+
+dir_size(Dir, S)?
+sizes_only(Dir, S)?

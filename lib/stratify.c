@@ -18,12 +18,18 @@
  * the order a stratified program runs in.
  *
  * The dependency graph's components come out of Tarjan's algorithm with
- * every component after everything it depends on.  A negative edge between
- * two members of one component is recursion through negation, and the
+ * every component after everything it depends on.  A strict edge -- one
+ * from a negated literal or from an aggregate -- between two members of one
+ * component is recursion through negation or through an aggregate, and the
  * program is rejected with the cycle named.  Otherwise each component gets
- * the least stratum that puts every negative edge strictly below it, which one
+ * the least stratum that puts every strict edge strictly below it, which one
  * pass in completion order computes, because an edge leaving a component
  * always reaches one that completed earlier.
+ *
+ * An aggregate reaches what its body reads through its group predicate: an
+ * aggregate edge to the group predicate, and an edge of the group rule from
+ * there.  The writer never wrote the group predicate, so a diagnostic
+ * reports such a pair of edges as one dependency through an aggregate.
  *
  * The schedule is the components that have rules, sorted by stratum.  The
  * sort is stable, so each stratum keeps completion order, and the result is
@@ -39,7 +45,7 @@
  * through negation.
  */
 
-/* No edge: a component through which no negation recurses. */
+/* No edge: a component through which no strict edge recurses. */
 #define	RELIC_NO_EDGE	SIZE_MAX
 
 typedef struct relic_analysis relic_analysis_t;
@@ -85,7 +91,7 @@ static int	 assign_strata(relic_analysis_t *analysis);
 static int	 compare_written_order(const void *left, const void *right);
 static bool	 edge_written_before(const relic_dep_edge_t *a,
 		    const relic_dep_edge_t *b);
-static int	 find_negative_cycles(relic_analysis_t *analysis,
+static int	 find_strict_cycles(relic_analysis_t *analysis,
 		    relic_dep_edge_t **cyclesp, size_t *countp);
 static int	 build_schedule(relic_analysis_t *analysis,
 		    relic_schedule_t *schedule);
@@ -97,16 +103,24 @@ static void	 fill_schedule(const relic_analysis_t *analysis,
 		    relic_schedule_t *schedule);
 static void	 install_schedule(relic_program_t *program,
 		    relic_schedule_t *schedule);
+static bool	*mark_group_vertices(relic_analysis_t *analysis);
+static void	 note_aggregate(relic_analysis_t *analysis,
+		    const relic_dep_edge_t *aggregate,
+		    const relic_dep_edge_t *body);
 static void	 note_edge(relic_analysis_t *analysis,
 		    const relic_dep_edge_t *edge);
+static void	 note_path(relic_analysis_t *analysis,
+		    const relic_dep_edge_t *closing, size_t length);
 static int	 order_by_stratum(relic_analysis_t *analysis, uint32_t *order,
 		    size_t *countp);
 static void	 report_cycle(relic_analysis_t *analysis,
-		    const relic_dep_edge_t *negative);
-static enum relic_analysis_result report_negative_cycles(
+		    const relic_dep_edge_t *closing);
+static enum relic_analysis_result report_strict_cycles(
 		    relic_analysis_t *analysis);
 static void	 settle_component(relic_analysis_t *analysis,
 		    uint32_t component);
+static const relic_dep_edge_t *path_edge(const relic_analysis_t *analysis,
+		    size_t length, size_t *takenp);
 static size_t	 shortest_path(relic_analysis_t *analysis, uint32_t from,
 		    uint32_t to);
 
@@ -144,7 +158,89 @@ note_edge(relic_analysis_t *analysis, const relic_dep_edge_t *edge)
 
 	relic_diagf(analysis->ctx, RELIC_NOTE,
 	    &rule->body[edge->literal_index].where, "%s depends %son %s",
-	    source, edge->negative ? "negatively " : "", target);
+	    source, edge->kind == RELIC_DEP_NEGATIVE ? "negatively " : "",
+	    target);
+}
+
+/*
+ * One note for an aggregate edge and the edge of its group rule that
+ * follows it on a cycle: the rule holding the aggregate depends on what the
+ * aggregate's body reads, positively or negatively as the body reads it.
+ * The note points at the literal inside the braces.
+ */
+static void
+note_aggregate(relic_analysis_t *analysis, const relic_dep_edge_t *aggregate,
+    const relic_dep_edge_t *body)
+{
+	const relic_rule_t *group_rule;
+	char source[RELIC_PRED_TEXT_MAX];
+	char target[RELIC_PRED_TEXT_MAX];
+
+	group_rule = &analysis->rules->entries[body->rule_index];
+
+	relic_pred_describe(analysis->ctx,
+	    relic_depgraph_pred(aggregate->source), source, sizeof(source));
+	relic_pred_describe(analysis->ctx, relic_depgraph_pred(body->target),
+	    target, sizeof(target));
+
+	relic_diagf(analysis->ctx, RELIC_NOTE,
+	    &group_rule->body[body->literal_index].where,
+	    "%s depends %son %s through an aggregate", source,
+	    body->kind == RELIC_DEP_NEGATIVE ? "negatively " : "", target);
+}
+
+/*
+ * The notes for a cycle: the closing edge, then the `length` edges of the
+ * path the search stored, which leads from the closing edge's target back
+ * to its source.
+ *
+ * An aggregate edge leads to a group predicate, and only an edge of its
+ * group rule leads out of one, so on the cycle every aggregate edge is
+ * followed by an edge of its group rule, and the two make one note.  The
+ * cycle ends at the closing edge's source, which heads a rule the writer
+ * wrote, so it never ends on an aggregate edge; one that did would have
+ * that edge noted alone.
+ */
+static void
+note_path(relic_analysis_t *analysis, const relic_dep_edge_t *closing,
+    size_t length)
+{
+	const relic_dep_edge_t *edge;
+	const relic_dep_edge_t *next;
+	size_t taken;
+
+	edge = closing;
+	taken = 0;
+	while (edge != NULL) {
+		next = path_edge(analysis, length, &taken);
+
+		if (edge->kind == RELIC_DEP_AGGREGATE && next != NULL) {
+			note_aggregate(analysis, edge, next);
+			next = path_edge(analysis, length, &taken);
+		} else {
+			note_edge(analysis, edge);
+		}
+
+		edge = next;
+	}
+}
+
+/*
+ * The next of the `length` edges of the stored path, counting those taken
+ * in *takenp, or NULL once every one has been.
+ */
+static const relic_dep_edge_t *
+path_edge(const relic_analysis_t *analysis, size_t length, size_t *takenp)
+{
+	const relic_dep_edge_t *edge;
+
+	if (*takenp == length)
+		return (NULL);
+
+	edge = &analysis->graph.edges[analysis->search.path[*takenp]];
+	(*takenp)++;
+
+	return (edge);
 }
 
 /*
@@ -255,27 +351,22 @@ shortest_path(relic_analysis_t *analysis, uint32_t from, uint32_t to)
 }
 
 /*
- * Report one cycle through negation: an error at the rule holding the
- * negative literal, a note for that edge, and a note for each edge of the
+ * Report one cycle through a strict edge: an error at the rule holding the
+ * negated literal or the aggregate, and the notes for that edge and for the
  * shortest path from its target back to its source, which closes the cycle.
  */
 static void
-report_cycle(relic_analysis_t *analysis, const relic_dep_edge_t *negative)
+report_cycle(relic_analysis_t *analysis, const relic_dep_edge_t *closing)
 {
 	const relic_rule_t *rule;
 	size_t length;
-	size_t i;
 
-	rule = &analysis->rules->entries[negative->rule_index];
-	length = shortest_path(analysis, negative->target, negative->source);
+	rule = &analysis->rules->entries[closing->rule_index];
+	length = shortest_path(analysis, closing->target, closing->source);
 
 	relic_diagf(analysis->ctx, RELIC_ERROR, &rule->where,
 	    "program is not stratified");
-	note_edge(analysis, negative);
-
-	for (i = 0; i < length; i++)
-		note_edge(analysis,
-		    &analysis->graph.edges[analysis->search.path[i]]);
+	note_path(analysis, closing, length);
 }
 
 /*
@@ -304,14 +395,47 @@ compare_written_order(const void *left, const void *right)
 }
 
 /*
- * List the components that recursion through negation passes through, each
- * by the first negative edge inside it, in the order the program wrote those
- * edges.  Stores the edges in *cyclesp and their number in *countp.  Returns
- * -1 when the scratch arena refused.
+ * Mark the group predicates among the graph's vertices: the targets of
+ * aggregate edges.  Returns NULL when the scratch arena refused.
+ */
+static bool *
+mark_group_vertices(relic_analysis_t *analysis)
+{
+	const relic_depgraph_t *graph;
+	bool *group;
+	size_t e;
+
+	graph = &analysis->graph;
+
+	group = relic_arena_allocarray(&analysis->scratch, graph->vertex_count,
+	    sizeof(*group));
+	if (group == NULL)
+		return (NULL);
+	bzero(group, graph->vertex_count * sizeof(*group));
+
+	for (e = 0; e < graph->edge_count; e++) {
+		if (graph->edges[e].kind == RELIC_DEP_AGGREGATE)
+			group[graph->edges[e].target] = true;
+	}
+
+	return (group);
+}
+
+/*
+ * List the components that recursion through a strict edge passes through,
+ * each by its closing edge, in the order the program wrote those edges.
+ * Stores the edges in *cyclesp and their number in *countp.  Returns -1
+ * when the scratch arena refused.
  *
- * A negative edge whose source and target share a component lies on a cycle,
+ * The closing edge is the first strict edge inside the component of a rule
+ * the writer wrote.  A group rule's own negative edge is never chosen:
+ * every cycle through a group predicate enters it by the aggregate edge
+ * that reaches it, which is strict and belongs to a written rule, so a
+ * component with a strict edge inside it always holds one of those.
+ *
+ * A strict edge whose source and target share a component lies on a cycle,
  * since the target reaches the source.  The edges are read from the graph,
- * the one definition of what a dependency is and which are negative, so the
+ * the one definition of what a dependency is and which are strict, so the
  * rejection and the strata cannot disagree about an edge.  The graph groups
  * edges by source rather than by where they were written, so the first edge
  * of each component is found by comparing positions, and the handful found
@@ -319,13 +443,14 @@ compare_written_order(const void *left, const void *right)
  * position, so the order is total and the same on every run.
  */
 static int
-find_negative_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
+find_strict_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
     size_t *countp)
 {
 	const relic_depgraph_t *graph;
 	const relic_dep_edge_t *edge;
 	relic_dep_edge_t *cycles;
-	size_t *first_negative;
+	size_t *first_strict;
+	bool *group;
 	size_t count;
 	size_t e;
 	uint32_t c;
@@ -333,35 +458,36 @@ find_negative_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
 
 	graph = &analysis->graph;
 
-	first_negative = relic_arena_allocarray(&analysis->scratch,
-	    graph->component_count, sizeof(*first_negative));
+	first_strict = relic_arena_allocarray(&analysis->scratch,
+	    graph->component_count, sizeof(*first_strict));
 	cycles = relic_arena_allocarray(&analysis->scratch,
 	    graph->component_count, sizeof(*cycles));
-	if (first_negative == NULL || cycles == NULL)
+	group = mark_group_vertices(analysis);
+	if (first_strict == NULL || cycles == NULL || group == NULL)
 		return (-1);
 
 	for (c = 0; c < graph->component_count; c++)
-		first_negative[c] = RELIC_NO_EDGE;
+		first_strict[c] = RELIC_NO_EDGE;
 
 	for (e = 0; e < graph->edge_count; e++) {
 		edge = &graph->edges[e];
 		component = graph->component_of[edge->source];
-		if (!edge->negative ||
+		if (!relic_dep_strict(edge) || group[edge->source] ||
 		    graph->component_of[edge->target] != component)
 			continue;
 
-		if (first_negative[component] == RELIC_NO_EDGE ||
+		if (first_strict[component] == RELIC_NO_EDGE ||
 		    edge_written_before(edge,
-		    &graph->edges[first_negative[component]]))
-			first_negative[component] = e;
+		    &graph->edges[first_strict[component]]))
+			first_strict[component] = e;
 	}
 
 	count = 0;
 	for (c = 0; c < graph->component_count; c++) {
-		if (first_negative[c] == RELIC_NO_EDGE)
+		if (first_strict[c] == RELIC_NO_EDGE)
 			continue;
 
-		cycles[count] = graph->edges[first_negative[c]];
+		cycles[count] = graph->edges[first_strict[c]];
 		count++;
 	}
 
@@ -374,19 +500,19 @@ find_negative_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
 }
 
 /*
- * Report every component that recursion through negation passes through,
+ * Report every component that recursion through a strict edge passes through,
  * once each, in the order the program wrote the edges that show it.  Every
  * allocation happens before the first report, so an analysis that runs out
  * of memory has said nothing about the program.
  */
 static enum relic_analysis_result
-report_negative_cycles(relic_analysis_t *analysis)
+report_strict_cycles(relic_analysis_t *analysis)
 {
 	relic_dep_edge_t *cycles;
 	size_t count;
 	size_t i;
 
-	if (find_negative_cycles(analysis, &cycles, &count) != 0)
+	if (find_strict_cycles(analysis, &cycles, &count) != 0)
 		return (RELIC_ANALYSIS_INCOMPLETE);
 
 	if (count == 0)
@@ -408,9 +534,9 @@ report_negative_cycles(relic_analysis_t *analysis)
  * An edge that stays inside the component makes it recursive: some rule of
  * the component reads a member.  An edge that leaves it reaches a component
  * that completed earlier and is already settled, and asks for a stratum at
- * least that one's, or one above it when the edge is negative.  The stratum
+ * least that one's, or one above it when the edge is strict.  The stratum
  * is the least that satisfies every edge.  Edges inside the component are
- * all positive, because a program with a negative one was rejected before
+ * all positive, because a program with a strict one was rejected before
  * strata were assigned.
  */
 static void
@@ -445,7 +571,7 @@ settle_component(relic_analysis_t *analysis, uint32_t component)
 			}
 
 			required = analysis->strata[target_component];
-			if (edge->negative)
+			if (relic_dep_strict(edge))
 				required++;
 
 			if (required > stratum)
@@ -711,7 +837,7 @@ analyse_program(relic_analysis_t *analysis, relic_schedule_t *schedule)
 	    &analysis->scratch, &analysis->graph) != 0)
 		return (RELIC_ANALYSIS_INCOMPLETE);
 
-	result = report_negative_cycles(analysis);
+	result = report_strict_cycles(analysis);
 	if (result != RELIC_ANALYSIS_STRATIFIED)
 		return (result);
 

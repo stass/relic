@@ -212,6 +212,10 @@ expected_kind(unsigned char byte)
 		return (RELIC_TOKEN_LPAREN);
 	case ')':
 		return (RELIC_TOKEN_RPAREN);
+	case '{':
+		return (RELIC_TOKEN_LBRACE);
+	case '}':
+		return (RELIC_TOKEN_RBRACE);
 	case ',':
 		return (RELIC_TOKEN_COMMA);
 	case '.':
@@ -295,6 +299,8 @@ tokens_end_where_the_buffer_does(void)
 		{ "!=", RELIC_TOKEN_COMPARE, 2 },
 		{ "(", RELIC_TOKEN_LPAREN, 2 },
 		{ ")", RELIC_TOKEN_RPAREN, 2 },
+		{ "{", RELIC_TOKEN_LBRACE, 2 },
+		{ "}", RELIC_TOKEN_RBRACE, 2 },
 		{ ",", RELIC_TOKEN_COMMA, 2 },
 		{ ".", RELIC_TOKEN_DOT, 2 },
 		{ "?", RELIC_TOKEN_QUESTION, 2 },

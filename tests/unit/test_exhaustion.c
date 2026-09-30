@@ -61,6 +61,7 @@
 #include "internal.h"
 #include "programs.h"
 
+#define	SCENARIO_AGGREGATE	"an aggregate out of memory can be retried"
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_COMPUTE	"a computing round out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
@@ -195,6 +196,15 @@
  */
 #define	EVAL_CHAIN	40
 #define	EVAL_SWEEP	8192
+
+/*
+ * The aggregate sweep's program: an outer rule and its group rule per
+ * statement, AGGREGATE_RULES of them in all, the second folding what the
+ * first derives, and a query holding a group of its own.  Each sweep stops
+ * at the first run that needs no refusal.
+ */
+#define	AGGREGATE_RULES	4
+#define	AGGREGATE_SWEEP	4096
 
 /*
  * The computing sweep's program is the closure of a chain of this many
@@ -355,6 +365,11 @@ static void	 sweep_query_retry(const eval_sweep_t *sweep,
 static void	 a_materialization_out_of_memory_reports_once(void);
 static void	 an_abandoned_rewrite_out_of_memory_reports_once(void);
 static void	 an_added_fact_or_collected_answer_reports_once(void);
+static void	 an_aggregate_out_of_memory_can_be_retried(void);
+static void	 sweep_aggregate_check(void);
+static void	 sweep_aggregate_query(unsigned int flags, size_t threads,
+		    const char *strategy);
+static bool	 rules_are_whole_statements(relic_t *ctx);
 static int	 add_and_collect(relic_t *ctx, size_t *rowsp);
 static char	*wide_sweep_program(void);
 static int	 count_answer(void *callback_ctx, const relic_value_t *values,
@@ -2922,6 +2937,253 @@ an_added_fact_or_collected_answer_reports_once(void)
 	    "not %zu and %zu", refused, completed);
 }
 
+static const char aggregate_program[] =
+    "edge(a, b). edge(a, c). edge(b, c).\n"
+    "outdeg(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n"
+    "total(S) :- S = sum(N) { outdeg(X, N) }.\n";
+
+/*
+ * Whether the compiled rules are whole statements: every rule holding an
+ * aggregate follows the group rule it folds, the last rule is not a group
+ * rule left without its outer rule, and each predicate's count of program
+ * rules is the number of its rules in the table.  A statement's rules are
+ * appended all together or not at all, so no refusal may break this.
+ */
+static bool
+rules_are_whole_statements(relic_t *ctx)
+{
+	const relic_ruletab_t *rules;
+	const relic_literal_t *literal;
+	const relic_rule_t *rule;
+	const char *spelling;
+	size_t heads;
+	size_t i;
+	size_t j;
+
+	rules = &ctx->program.rules;
+
+	for (i = 0; i < rules->count; i++) {
+		rule = &rules->entries[i];
+		for (j = 0; j < rule->body_length; j++) {
+			literal = &rule->body[j];
+			if (literal->kind != RELIC_LITERAL_AGGREGATE)
+				continue;
+			if (i == 0 || rules->entries[i - 1].head !=
+			    literal->u.aggregate.group ||
+			    literal->u.aggregate.group_rule->head !=
+			    literal->u.aggregate.group)
+				return (false);
+		}
+
+		heads = 0;
+		for (j = 0; j < rules->count; j++)
+			if (rules->entries[j].head == rule->head)
+				heads++;
+		if (relic_pred_of(ctx, rule->head)->program_rules != heads)
+			return (false);
+	}
+
+	if (rules->count == 0)
+		return (true);
+
+	spelling = relic_symbol_bytes(ctx, relic_pred_of(ctx,
+	    rules->entries[rules->count - 1].head)->name, NULL);
+
+	return (spelling != NULL && strncmp(spelling, "agg$", 4) != 0);
+}
+
+/*
+ * Check, and answer queries of, a program holding aggregates with the nth
+ * allocation refused, then again with the allocator restored.
+ *
+ * A check that runs out of memory may stop between statements but never
+ * inside one: a statement's group rules and its outer rule are published
+ * together, so the table never holds a group rule its outer rule does not
+ * follow.  A query holding an aggregate derives its group into a relation of
+ * its own and folds it; one that runs out of memory must fail once, deliver
+ * nothing, and give back every byte it charged, and the retry must answer as
+ * an undisturbed run does and leave its group relation empty.  The query
+ * sweep runs serially and with every round deferred on four threads.
+ */
+static void
+an_aggregate_out_of_memory_can_be_retried(void)
+{
+	sweep_aggregate_check();
+	sweep_aggregate_query(0, 0, "serially");
+	sweep_aggregate_query(RELIC_F_PARALLEL_ALWAYS, 4, "on four threads");
+}
+
+static void
+sweep_aggregate_check(void)
+{
+	size_t completed;
+	size_t refused;
+	size_t before;
+	long budget;
+	bool undisturbed;
+
+	completed = 0;
+	refused = 0;
+	undisturbed = false;
+
+	for (budget = 0; budget < AGGREGATE_SWEEP && !undisturbed; budget++) {
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_AGGREGATE,
+			    "a context should be created");
+			return;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "sweep.dl",
+		    aggregate_program) != 0) {
+			check(false, SCENARIO_AGGREGATE,
+			    "the program should load before the sweep begins");
+			relic_destroy(ctx);
+			return;
+		}
+
+		errors_reported = 0;
+		before = allocations_made();
+		refuse_allocations_after(budget);
+		status = relic_check(ctx);
+		serve_every_allocation();
+		undisturbed = allocations_made() - before <= (size_t)budget;
+
+		if (status == 0)
+			completed++;
+		else
+			refused++;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_AGGREGATE, "a check that %s should report %d "
+		    "message(s), not %zu, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(!ctx->program.invalid &&
+		    ctx->program.rules.count % 2 == 0 &&
+		    rules_are_whole_statements(ctx), SCENARIO_AGGREGATE,
+		    "a check should publish whole statements, not %zu rules, "
+		    "with allocation %ld refused", ctx->program.rules.count,
+		    budget);
+		checkf(relic_check(ctx) == 0 &&
+		    ctx->program.rules.count == AGGREGATE_RULES &&
+		    rules_are_whole_statements(ctx), SCENARIO_AGGREGATE,
+		    "the retried check should compile every statement once, "
+		    "not %zu rules, with allocation %ld refused",
+		    ctx->program.rules.count, budget);
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0 && undisturbed, SCENARIO_AGGREGATE,
+	    "the check sweep should reach refused and undisturbed checks, "
+	    "not %zu and %zu", refused, completed);
+}
+
+static void
+sweep_aggregate_query(unsigned int flags, size_t threads,
+    const char *strategy)
+{
+	static const char query_text[] =
+	    "edge(X, _), N = count { edge(X, Y) }, total(S)?";
+	relic_config_t config;
+	const relic_relation_t *group;
+	relic_query_t *query;
+	size_t completed;
+	size_t refused;
+	size_t before;
+	size_t rows;
+	long budget;
+	bool undisturbed;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.threads = threads;
+	completed = 0;
+	refused = 0;
+	undisturbed = false;
+
+	for (budget = 0; budget < AGGREGATE_SWEEP && !undisturbed; budget++) {
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_AGGREGATE,
+			    "a context should be created");
+			return;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "sweep.dl",
+		    aggregate_program) != 0 || relic_check(ctx) != 0) {
+			check(false, SCENARIO_AGGREGATE, "the program should "
+			    "load and check before the sweep begins");
+			relic_destroy(ctx);
+			return;
+		}
+
+		errors_reported = 0;
+		rows = 0;
+		before = allocations_made();
+		refuse_allocations_after(budget);
+		query = relic_query_prepare(ctx, NULL, query_text);
+		status = -1;
+		if (query != NULL)
+			status = relic_query_run(ctx, query, count_answer,
+			    &rows);
+		serve_every_allocation();
+		undisturbed = allocations_made() - before <= (size_t)budget;
+
+		if (status == 0)
+			completed++;
+		else
+			refused++;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u) &&
+		    rows == (status != 0 ? 0u : 2u), SCENARIO_AGGREGATE,
+		    "a query answered %s that %s should report %d message(s) "
+		    "and deliver %d rows, not %zu and %zu, with allocation %ld "
+		    "refused", strategy, status != 0 ? "failed" : "succeeded",
+		    status != 0 ? 1 : 0, status != 0 ? 0 : 2, errors_reported,
+		    rows, budget);
+		checkf(ctx->account.arena_bytes == 0 &&
+		    ctx->account.round_bytes == 0 &&
+		    ctx->account.store_bytes == storage_by_hand(ctx),
+		    SCENARIO_AGGREGATE, "a query answered %s should leave "
+		    "only the relations' bytes charged, with allocation %ld "
+		    "refused", strategy, budget);
+
+		if (query == NULL)
+			query = relic_query_prepare(ctx, NULL, query_text);
+
+		rows = 0;
+		checkf(query != NULL &&
+		    relic_query_run(ctx, query, count_answer, &rows) == 0 &&
+		    rows == 2, SCENARIO_AGGREGATE, "the retry answered %s "
+		    "should answer 2 rows, not %zu, with allocation %ld "
+		    "refused", strategy, rows, budget);
+
+		group = relation_named(ctx, "agg$$q0$2", 2);
+		checkf(group != NULL && relic_relation_count(group) == 0,
+		    SCENARIO_AGGREGATE, "answered %s, the query's group "
+		    "relation should be empty after the run, with allocation "
+		    "%ld refused", strategy, budget);
+
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0 && undisturbed, SCENARIO_AGGREGATE,
+	    "answered %s, the query sweep should reach refused and "
+	    "undisturbed runs, not %zu and %zu", strategy, refused,
+	    completed);
+}
+
 int
 main(void)
 {
@@ -2947,6 +3209,7 @@ main(void)
 	a_materialization_out_of_memory_reports_once();
 	an_abandoned_rewrite_out_of_memory_reports_once();
 	an_added_fact_or_collected_answer_reports_once();
+	an_aggregate_out_of_memory_can_be_retried();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

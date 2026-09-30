@@ -1,0 +1,12 @@
+% A shared variable bound only outside the braces, the result variable
+% inside its own braces, a variable shared by two bodies and bound by
+% neither, an aggregated variable the body never binds, and `_` read inside
+% a body: each is reported, and none of the rules is kept.
+threshold(1). score(p, 2). q(1). r(1, 2).
+
+above(N) :- threshold(T), N = count { score(P, S), S > T }.
+same(N) :- N = count { q(N) }.
+pair(X) :- q(X), N = count { r(Y, Z) }, M = count { q(Y) }, N = M.
+total(S) :- S = sum(Z) { q(X) }.
+blank(N) :- N = count { q(X), _ > 1 }.
+unread(X) :- q(X), N = count { r(X, Y) }.

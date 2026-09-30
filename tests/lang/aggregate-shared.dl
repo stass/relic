@@ -1,0 +1,17 @@
+% A variable the rule binds and the body mentions is shared: the group is
+% taken for each of its values.  The body must bind it too, which the
+% threshold idiom does by naming the relation that gives it its values.
+threshold(4).
+score(p, 2). score(q, 5). score(r, 9).
+node(a). node(b).
+edge(a, b). edge(a, c). edge(b, c).
+
+above(N) :- threshold(T), N = count { score(P, S), threshold(T), S > T }.
+out(X, N) :- node(X), N = count { edge(X, Y) }.
+later(N, X) :- N = count { edge(X, Y) }, node(X).
+both(X, N, M) :- node(X), N = count { edge(X, Y) }, M = count { edge(Z, X) }.
+
+above(N)?
+out(X, N)?
+later(N, X)?
+both(X, N, M)?

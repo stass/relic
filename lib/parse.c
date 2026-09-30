@@ -52,7 +52,16 @@
  */
 #define	RELIC_READ_CHUNK	(64u * 1024u)
 
+typedef struct relic_function_name relic_function_name_t;
 typedef struct relic_parser relic_parser_t;
+
+/*
+ * An aggregate function's name as written, and the function it names.
+ */
+struct relic_function_name {
+	const char		*spelling;
+	enum relic_aggregate_fn	 fn;
+};
 
 /*
  * A parse in progress.
@@ -107,6 +116,12 @@ typedef struct relic_parser relic_parser_t;
  * is inside, which is the depth of its recursion into an expression.  Each
  * production that raises it lowers it again on every way out, so it is zero
  * between statements.
+ *
+ * `group_body` is the scratch array an aggregate's body is collected in, as
+ * `body` is for a statement's, and `in_aggregate` says that one is being
+ * read.  An aggregate is refused while another is open, before its body is
+ * entered, so one scratch array serves every body and the parser descends
+ * into at most one.
  */
 struct relic_parser {
 	relic_t			*ctx;
@@ -114,6 +129,9 @@ struct relic_parser {
 	relic_ast_literal_t	*body;
 	size_t			 body_length;
 	size_t			 body_capacity;
+	relic_ast_literal_t	*group_body;
+	size_t			 group_body_length;
+	size_t			 group_body_capacity;
 	relic_ast_stmt_list_t	 statements;
 	relic_staging_t		*staging;
 	size_t			 statement_count;
@@ -124,6 +142,7 @@ struct relic_parser {
 	uint32_t		 negation_symbol;
 	uint32_t		 anonymous_symbol;
 	unsigned int		 expression_descent;
+	bool			 in_aggregate;
 	bool			 reported;
 	bool			 failed;
 };
@@ -142,6 +161,23 @@ static bool	 atom_after_name(relic_parser_t *parser,
 		    relic_ast_term_t scratch[static RELIC_MAX_ARITY]);
 static bool	 body_append(relic_parser_t *parser,
 		    const relic_ast_literal_t *literal);
+static bool	 collect_group_body(relic_parser_t *parser,
+		    relic_ast_aggregate_t *aggregate);
+static bool	 group_append(relic_parser_t *parser,
+		    const relic_ast_literal_t *literal);
+static bool	 is_bare_variable(const relic_ast_expr_t *expr);
+static bool	 parse_aggregate(relic_parser_t *parser,
+		    relic_ast_literal_t *literal, const relic_ast_expr_t *left,
+		    enum relic_compare_op op, const relic_token_t *name,
+		    enum relic_aggregate_fn fn);
+static bool	 parse_aggregated_variable(relic_parser_t *parser,
+		    relic_ast_aggregate_t *aggregate);
+static bool	 parse_right_operand(relic_parser_t *parser,
+		    relic_ast_literal_t *literal);
+static bool	 refuse_misplaced_aggregate(relic_parser_t *parser,
+		    const relic_token_t *name);
+static bool	 token_function(const relic_token_t *token,
+		    enum relic_aggregate_fn *fnp);
 static bool	 check_operand(relic_parser_t *parser,
 		    const relic_ast_expr_t *operand, enum relic_arith_op op,
 		    bool negation);
@@ -312,6 +348,10 @@ describe_token(const relic_token_t *token)
 		return ("'('");
 	case RELIC_TOKEN_RPAREN:
 		return ("')'");
+	case RELIC_TOKEN_LBRACE:
+		return ("'{'");
+	case RELIC_TOKEN_RBRACE:
+		return ("'}'");
 	case RELIC_TOKEN_COMMA:
 		return ("','");
 	case RELIC_TOKEN_DOT:
@@ -501,6 +541,8 @@ token_begins_term(const relic_token_t *token)
 	case RELIC_TOKEN_IMPLIES:
 	case RELIC_TOKEN_LPAREN:
 	case RELIC_TOKEN_RPAREN:
+	case RELIC_TOKEN_LBRACE:
+	case RELIC_TOKEN_RBRACE:
 	case RELIC_TOKEN_COMMA:
 	case RELIC_TOKEN_DOT:
 	case RELIC_TOKEN_QUESTION:
@@ -552,6 +594,55 @@ token_operator(const relic_parser_t *parser, enum relic_arith_op *opp)
 		*opp = RELIC_ARITH_REMAINDER;
 		return (true);
 	}
+
+	return (false);
+}
+
+/*
+ * Whether the current token spells an aggregate function, and which.  Like
+ * `mod`, the four names are recognized by their spelling and only where the
+ * grammar lets a function stand -- after the `=` of an equality, followed by
+ * `(` or `{` -- so each remains an ordinary symbol everywhere else: a
+ * constant, or the name of a predicate.
+ */
+static bool
+token_function(const relic_token_t *token, enum relic_aggregate_fn *fnp)
+{
+	static const relic_function_name_t functions[] = {
+		{ "count", RELIC_AGG_COUNT },
+		{ "sum", RELIC_AGG_SUM },
+		{ "min", RELIC_AGG_MIN },
+		{ "max", RELIC_AGG_MAX }
+	};
+	size_t length;
+	size_t i;
+
+	if (token->kind != RELIC_TOKEN_SYMBOL)
+		return (false);
+
+	for (i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
+		length = strlen(functions[i].spelling);
+		if (token->text_length == length &&
+		    bcmp(token->text, functions[i].spelling, length) == 0) {
+			*fnp = functions[i].fn;
+			return (true);
+		}
+	}
+
+	return (false);
+}
+
+/*
+ * Refuse a function name followed by `(` or `{` where no aggregate may
+ * stand, with the form an aggregate does take.  In operand position a
+ * symbol is never legally followed by either, so the text can only have
+ * been meant as an aggregate.  Always returns false, having reported.
+ */
+static bool
+refuse_misplaced_aggregate(relic_parser_t *parser, const relic_token_t *name)
+{
+	parse_errorf(parser, &name->where,
+	    "an aggregate is written V = count { ... }");
 
 	return (false);
 }
@@ -636,6 +727,8 @@ term_from_token(relic_parser_t *parser, const relic_token_t *token,
 	case RELIC_TOKEN_IMPLIES:
 	case RELIC_TOKEN_LPAREN:
 	case RELIC_TOKEN_RPAREN:
+	case RELIC_TOKEN_LBRACE:
+	case RELIC_TOKEN_RBRACE:
 	case RELIC_TOKEN_COMMA:
 	case RELIC_TOKEN_DOT:
 	case RELIC_TOKEN_QUESTION:
@@ -900,7 +993,10 @@ parse_unary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 static bool
 parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 {
+	enum relic_aggregate_fn fn;
 	relic_ast_term_t term;
+	relic_token_t name;
+	bool function;
 
 	if (parser->token.kind == RELIC_TOKEN_LPAREN)
 		return (parse_parenthesized(parser, exprp));
@@ -912,8 +1008,15 @@ parse_primary(relic_parser_t *parser, relic_ast_expr_t **exprp)
 		return (false);
 	}
 
+	name = parser->token;
+	function = token_function(&name, &fn);
+
 	if (!parse_term(parser, &term))
 		return (false);
+
+	if (function && (parser->token.kind == RELIC_TOKEN_LPAREN ||
+	    parser->token.kind == RELIC_TOKEN_LBRACE))
+		return (refuse_misplaced_aggregate(parser, &name));
 
 	return (make_leaf(parser, &term, exprp));
 }
@@ -1212,9 +1315,9 @@ keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
 }
 
 /*
- * Keep a literal's atom, if it has one.  A comparison's expressions are
- * built in the tree's arena as they are parsed, so there is nothing of it
- * outside to copy.
+ * Keep a literal's atom, if it has one.  A comparison's expressions and an
+ * aggregate's body are built in the tree's arena as they are parsed, so
+ * there is nothing of either outside to copy.
  */
 static bool
 keep_literal(relic_parser_t *parser, relic_ast_literal_t *literal)
@@ -1224,6 +1327,7 @@ keep_literal(relic_parser_t *parser, relic_ast_literal_t *literal)
 	case RELIC_LITERAL_NEGATED:
 		return (keep_atom(parser, &literal->u.atom));
 	case RELIC_LITERAL_COMPARISON:
+	case RELIC_LITERAL_AGGREGATE:
 		return (true);
 	}
 
@@ -1295,11 +1399,237 @@ parse_comparison(relic_parser_t *parser, relic_ast_literal_t *literal,
 	if (!advance(parser))
 		return (false);
 
-	return (parse_expression(parser, &literal->u.comparison.right));
+	return (parse_right_operand(parser, literal));
 }
 
 /*
- * Parse one literal: a positive atom, a negated atom, or a comparison.
+ * The right operand of a comparison whose left operand and comparator are
+ * in `literal`: an expression, or the one place an aggregate may stand.
+ *
+ * A function name is an aggregate's only when the token after it is `(` or
+ * `{`, and the parser must consume the name to see that token.  So the name
+ * is taken first; followed by either, the literal becomes the aggregate,
+ * and otherwise the name is the symbol it always was, the first operand of
+ * the expression.  A symbol in operand position is never legally followed
+ * by `(` or `{`, so no program that parsed without aggregates reads
+ * differently with them.
+ */
+static bool
+parse_right_operand(relic_parser_t *parser, relic_ast_literal_t *literal)
+{
+	enum relic_aggregate_fn fn;
+	relic_ast_expr_t *leaf;
+	relic_ast_term_t term;
+	relic_token_t name;
+
+	if (!token_function(&parser->token, &fn))
+		return (parse_expression(parser, &literal->u.comparison.right));
+
+	name = parser->token;
+	if (!advance(parser))
+		return (false);
+
+	if (parser->token.kind == RELIC_TOKEN_LPAREN ||
+	    parser->token.kind == RELIC_TOKEN_LBRACE)
+		return (parse_aggregate(parser, literal,
+		    literal->u.comparison.left, literal->u.comparison.op,
+		    &name, fn));
+
+	if (!term_from_token(parser, &name, &term))
+		return (false);
+	if (!make_leaf(parser, &term, &leaf))
+		return (false);
+
+	return (continue_sum(parser, leaf, &literal->u.comparison.right));
+}
+
+/*
+ * Whether an expression is a variable alone, which is what may stand before
+ * the `=` of an aggregate.
+ */
+static bool
+is_bare_variable(const relic_ast_expr_t *expr)
+{
+	return (expr->kind == RELIC_AST_EXPR_TERM &&
+	    expr->u.term.kind == RELIC_TERM_VARIABLE);
+}
+
+/*
+ * Parse an aggregate from the token after its function name, `name`: the
+ * aggregated variable in parentheses when the function takes one, then the
+ * body in braces.  `left` and `op` are the comparison it was found in, which
+ * must be an equality whose left side is a bare variable, the result.
+ *
+ * An aggregate inside an open one is refused before its body is entered,
+ * which is what bounds the parser's descent at one level however the text
+ * is shaped: the body is the only production that parses literals from
+ * inside a literal.
+ */
+static bool
+parse_aggregate(relic_parser_t *parser, relic_ast_literal_t *literal,
+    const relic_ast_expr_t *left, enum relic_compare_op op,
+    const relic_token_t *name, enum relic_aggregate_fn fn)
+{
+	relic_ast_aggregate_t *aggregate;
+	relic_location_t where;
+	bool collected;
+
+	where = literal->where;
+
+	if (parser->in_aggregate) {
+		parse_errorf(parser, &name->where,
+		    "an aggregate body cannot hold an aggregate");
+		return (false);
+	}
+
+	if (op != RELIC_CMP_EQ || !is_bare_variable(left))
+		return (refuse_misplaced_aggregate(parser, name));
+
+	bzero(literal, sizeof(*literal));
+	literal->where = where;
+	literal->kind = RELIC_LITERAL_AGGREGATE;
+	aggregate = &literal->u.aggregate;
+	aggregate->result = left->u.term;
+	aggregate->where = name->where;
+	aggregate->fn = fn;
+
+	if (!parse_aggregated_variable(parser, aggregate))
+		return (false);
+
+	if (!expect(parser, RELIC_TOKEN_LBRACE, "'{'"))
+		return (false);
+
+	parser->in_aggregate = true;
+	collected = collect_group_body(parser, aggregate);
+	parser->in_aggregate = false;
+	if (!collected)
+		return (false);
+
+	return (expect(parser, RELIC_TOKEN_RBRACE, "',' or '}'"));
+}
+
+/*
+ * The aggregated variable of `sum`, `min` or `max`, in parentheses, into
+ * aggregate->column; `count` takes none.  The current token is the one after
+ * the function name, a `(` or a `{`.
+ *
+ * The variable names a column of the group, and `_` names none, so it is
+ * refused where it is written.
+ */
+static bool
+parse_aggregated_variable(relic_parser_t *parser,
+    relic_ast_aggregate_t *aggregate)
+{
+	const char *spelling;
+
+	spelling = relic_aggregate_spelling(aggregate->fn);
+
+	if (aggregate->fn == RELIC_AGG_COUNT) {
+		if (parser->token.kind != RELIC_TOKEN_LPAREN)
+			return (true);
+		parse_errorf(parser, &parser->token.where,
+		    "count takes no variable");
+		return (false);
+	}
+
+	if (parser->token.kind != RELIC_TOKEN_LPAREN) {
+		parse_errorf(parser, &parser->token.where,
+		    "%s takes one variable in parentheses", spelling);
+		return (false);
+	}
+	if (!advance(parser))
+		return (false);
+
+	if (parser->token.kind != RELIC_TOKEN_VARIABLE) {
+		parse_errorf(parser, &parser->token.where,
+		    "expected a variable, found %s",
+		    describe_token(&parser->token));
+		return (false);
+	}
+	if (parser->token.symbol == parser->anonymous_symbol) {
+		parse_errorf(parser, &parser->token.where,
+		    "%s takes a named variable, not _", spelling);
+		return (false);
+	}
+	if (!term_from_token(parser, &parser->token, &aggregate->column))
+		return (false);
+	if (!advance(parser))
+		return (false);
+
+	return (expect(parser, RELIC_TOKEN_RPAREN, "')'"));
+}
+
+/*
+ * Collect an aggregate's comma-separated body, at least one literal, into
+ * the group scratch array, and copy it into the tree's arena.  Each atom's
+ * arguments are read into a buffer here and kept before the next literal is
+ * read, as collect_body() keeps a statement's.
+ */
+static bool
+collect_group_body(relic_parser_t *parser, relic_ast_aggregate_t *aggregate)
+{
+	relic_ast_term_t scratch[RELIC_MAX_ARITY];
+	relic_ast_literal_t literal;
+	relic_ast_literal_t *body;
+
+	parser->group_body_length = 0;
+
+	for (;;) {
+		if (!parse_literal(parser, &literal, "a literal", scratch))
+			return (false);
+		if (!group_append(parser, &literal))
+			return (false);
+
+		if (parser->token.kind != RELIC_TOKEN_COMMA)
+			break;
+		if (!advance(parser))
+			return (false);
+	}
+
+	body = parse_alloc(parser, parser->group_body_length, sizeof(*body));
+	if (body == NULL)
+		return (false);
+	bcopy(parser->group_body, body,
+	    parser->group_body_length * sizeof(*body));
+
+	aggregate->body = body;
+	aggregate->body_length = parser->group_body_length;
+
+	return (true);
+}
+
+/*
+ * Append a literal to the group scratch array, keeping its atom's arguments
+ * in the tree, with the failure contract of body_append().
+ */
+static bool
+group_append(relic_parser_t *parser, const relic_ast_literal_t *literal)
+{
+	relic_ast_literal_t *body;
+	relic_ast_literal_t kept;
+
+	kept = *literal;
+	if (!keep_literal(parser, &kept))
+		return (false);
+
+	body = relic_grow_array(parser->group_body,
+	    &parser->group_body_capacity, parser->group_body_length + 1,
+	    sizeof(*parser->group_body));
+	if (body == NULL) {
+		relic_arena_fail(parser->arena);
+		return (false);
+	}
+	parser->group_body = body;
+
+	parser->group_body[parser->group_body_length] = kept;
+	parser->group_body_length++;
+
+	return (true);
+}
+
+/*
+ * Parse one literal: a positive atom, a negated atom, a comparison, or an
+ * aggregate, which is found as the right side of an equality.
  * `expected` names what the caller was looking for, so that the message for
  * a token that can begin no literal reads in the caller's terms.  An atom's
  * arguments are read into `scratch`, a buffer of RELIC_MAX_ARITY terms that
@@ -1310,6 +1640,7 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
     const char *expected,
     relic_ast_term_t scratch[static RELIC_MAX_ARITY])
 {
+	enum relic_aggregate_fn fn;
 	relic_ast_expr_t *left;
 	relic_ast_expr_t *leaf;
 	relic_ast_term_t term;
@@ -1352,6 +1683,10 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 		name = parser->token;
 		if (!advance(parser))
 			return (false);
+
+		if (parser->token.kind == RELIC_TOKEN_LBRACE &&
+		    token_function(&name, &fn))
+			return (refuse_misplaced_aggregate(parser, &name));
 
 		if (parser->token.kind != RELIC_TOKEN_COMPARE &&
 		    !token_operator(parser, &op)) {
@@ -1767,6 +2102,7 @@ parser_reset(relic_parser_t *parser)
 {
 	relic_lexer_reset(&parser->lexer);
 	relic_free_array(parser->body);
+	relic_free_array(parser->group_body);
 	bzero(parser, sizeof(*parser));
 }
 

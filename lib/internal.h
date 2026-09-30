@@ -228,6 +228,11 @@ struct relic_counters {
  * its constants belong to that context, so running it against another would
  * read identifiers that mean something else there.
  *
+ * `group_rules` are the group rules of the query's aggregates, in body
+ * order, `group_rule_count` of them, held in the arena that holds the
+ * query's rule.  Answering the query runs each once, into its group
+ * predicate's relation, and empties those relations again with the answer.
+ *
  * `running` is set while the query is being answered.  Destroying a query
  * reads nothing of its context, which a caller may have destroyed first,
  * except to refuse destroying the query being answered: while `running` is
@@ -241,6 +246,8 @@ struct relic_query {
 	relic_t			*ctx;
 	relic_arena_t		 arena;
 	relic_rule_t		 rule;		/* head RELIC_ID_NONE */
+	const relic_rule_t	*group_rules;
+	size_t			 group_rule_count;
 	relic_relation_t	*answer;
 	bool			 running;
 };
@@ -722,6 +729,8 @@ enum relic_token_kind {
 	RELIC_TOKEN_IMPLIES,	/* :- */
 	RELIC_TOKEN_LPAREN,
 	RELIC_TOKEN_RPAREN,
+	RELIC_TOKEN_LBRACE,	/* {, which opens an aggregate's body */
+	RELIC_TOKEN_RBRACE,
 	RELIC_TOKEN_COMMA,
 	RELIC_TOKEN_DOT,
 	RELIC_TOKEN_QUESTION,
@@ -893,7 +902,8 @@ const char *relic_source_name(relic_t *ctx, const char *name);
  * marks of struct relic_pred are set by relic_pred_name_head(),
  * relic_pred_mark_derived(), relic_pred_reference() and
  * relic_pred_make_view(), and read by relic_pred_is_derived() and
- * relic_pred_is_defined().
+ * relic_pred_is_defined().  relic_pred_count_program_rule() counts one more
+ * of the program's rules deriving the predicate.
  *
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
@@ -911,6 +921,7 @@ void	 relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
 	    const relic_location_t *where);
 void	 relic_pred_make_view(relic_t *ctx, relic_pred_id_t view,
 	    relic_pred_id_t viewed);
+void	 relic_pred_count_program_rule(relic_t *ctx, relic_pred_id_t id);
 bool	 relic_pred_is_derived(const relic_t *ctx, relic_pred_id_t id);
 bool	 relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id);
 const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
@@ -942,6 +953,28 @@ bool	 relic_comparison_assigns(const relic_comparison_t *comparison,
 bool	 relic_expr_equal(const relic_expr_t *a, const relic_expr_t *b);
 
 /*
+ * lib/literal.c
+ *
+ * Questions about a compiled literal that the checker, the stratifier, the
+ * planner and the Magic rewrite each ask, answered once.
+ *
+ * relic_literal_reads() says whether a literal reads a relation and which:
+ * the atom's predicate for a positive or a negated literal, the group
+ * predicate for an aggregate, and none for a comparison.  How it reads it
+ * is the literal's kind.  relic_aggregate_shared_slots() gives the slots an
+ * aggregate's key is built from, and relic_aggregate_binds() whether an
+ * aggregate placed where the slots in `bound` are bound binds its result
+ * rather than comparing with it: its key must be bound, and its result not.
+ * relic_aggregate_spelling() gives how an aggregate function is written.
+ */
+bool	 relic_literal_reads(const relic_literal_t *literal,
+	    relic_pred_id_t *predp);
+const char *relic_aggregate_spelling(enum relic_aggregate_fn fn);
+uint64_t relic_aggregate_shared_slots(const relic_aggregate_t *aggregate);
+bool	 relic_aggregate_binds(const relic_aggregate_t *aggregate,
+	    uint64_t bound);
+
+/*
  * lib/rule.c
  *
  * relic_program_init() prepares the empty program a context starts with,
@@ -954,12 +987,19 @@ bool	 relic_expr_equal(const relic_expr_t *a, const relic_expr_t *b);
  * preparing a query, handing out one of the program's own, or evaluating.
  * Returns 0, or -1 with at least one error reported by this call.
  *
- * relic_ruletab_append() is the one way a rule joins a rule table, the
- * program's or a rewrite's, and marks its head predicate derived.
+ * relic_ruletab_place() is the one way a rule joins a rule table, the
+ * program's or a rewrite's, and marks its head predicate derived.  It
+ * cannot fail: relic_ruletab_reserve() first makes room for `count` more
+ * rules, returning -1, reported, when memory ran out, and the table is then
+ * as it was.  relic_ruletab_append() is the two for one rule.
  */
 void	 relic_program_init(relic_program_t *program, uint64_t hash_seed);
 int	 relic_program_ready(relic_t *ctx);
 void	 relic_program_reset(relic_program_t *program);
+int	 relic_ruletab_reserve(relic_t *ctx, relic_ruletab_t *table,
+	    size_t count);
+void	 relic_ruletab_place(relic_t *ctx, relic_ruletab_t *table,
+	    const relic_rule_t *rule);
 int	 relic_ruletab_append(relic_t *ctx, relic_ruletab_t *table,
 	    const relic_rule_t *rule);
 
@@ -1053,7 +1093,8 @@ uint32_t relic_plan_bound_columns(const relic_atom_t *atom, uint16_t arity,
 /*
  * The slots a body literal binds when the planner places it where the slots
  * in `bound` are bound: every variable of a positive literal, the variable
- * of an equality that assigns it there, and nothing for any other test.
+ * of an equality that assigns it there, the result of an aggregate that
+ * binds it there, and nothing for any other test.
  * The planner decides what each literal binds through this, and so does the
  * Magic rewrite, walking a body in the order relic_plan_order() gave, so the
  * two cannot disagree about what is bound where.
@@ -1070,15 +1111,21 @@ bool	 relic_plan_derives_distinct(const relic_plan_t *plan);
 
 /*
  * Whether a plan computes an integer: whether some FILTER or ASSIGN runs a
- * program holding an operator.  Such a plan can meet an undefined result on
- * any binding, and can derive an integer the value table does not hold.
+ * program holding an operator, or some AGGREGATE counts or sums.  Such a
+ * plan can meet an undefined result on any binding, and can derive an
+ * integer the value table does not hold.
  */
 bool	 relic_plan_computes(const relic_plan_t *plan);
 
 /*
- * The atom of an operation over a relation -- a SCAN, a LOOKUP, a MEMBER,
- * an ANTI_MEMBER or the EMIT -- or NULL for one over none, a FILTER or an
- * ASSIGN, whose union holds no atom.  A question about the relation an
+ * Whether a plan holds an AGGREGATE.
+ */
+bool	 relic_plan_folds(const relic_plan_t *plan);
+
+/*
+ * The atom of an operation over a relation's tuple -- a SCAN, a LOOKUP, a
+ * MEMBER, an ANTI_MEMBER or the EMIT -- or NULL for a FILTER, an ASSIGN or
+ * an AGGREGATE, whose union holds no atom.  A question about the relation an
  * operation reads or writes asks this rather than the union, so that an
  * operation kind over no relation is answered by construction.
  */
@@ -1089,7 +1136,8 @@ const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
  *
  * A query's Magic rewrite.  relic_magic_find_complete() decides which
  * predicates the query reads completely, from the program's schedule, before
- * anything is evaluated.  Once the caller has evaluated those,
+ * anything is evaluated: among them, whatever the bodies of the query's group
+ * rules read.  Once the caller has evaluated those,
  * relic_magic_rewrite() generates the adorned and magic rules and the
  * rewritten query, ordering each rule's body with the planner, which then
  * measures what the caller evaluated; or, when no adornment it keeps binds
@@ -1103,7 +1151,7 @@ const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
 void	 relic_magic_init(relic_magic_t *magic, relic_t *ctx);
 void	 relic_magic_reset(relic_magic_t *magic);
 int	 relic_magic_find_complete(relic_magic_t *magic,
-	    const relic_rule_t *query);
+	    const relic_query_t *query);
 int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
 
 /*
@@ -1298,14 +1346,15 @@ enum relic_table_event_kind relic_table_next(relic_table_reader_t *reader,
  * gathering what it would show.  Each of the others shows one thing when a
  * callback is installed and nothing otherwise: a component's heading and fact
  * count, a rule with its plan, one delta variant of the rule last shown, a
- * query with its plan, its EMIT shown as `stream` when `streams` says it
- * delivers the query's rows as it derives them, and the heading of a query's
- * Magic rewrite.  A query's rule names no predicate, so the two that show
- * one are given the query's answer relation, whose name its head is written
- * with.  `depth` is the level a component's heading is indented to, one more
- * for a component of a rewritten program than for one of the program
- * itself; what belongs to the component is indented beneath it.  None can
- * fail.
+ * query's heading, a query's plan, its EMIT shown as `stream` when
+ * `streams` says it delivers the query's rows as it derives them, and the
+ * heading of a query's Magic rewrite.  The rules shown between a query's
+ * heading and its plan are its group rules.  A query's rule names no
+ * predicate, so the two that show one are given the query's answer
+ * relation, whose name its head is written with.  `depth` is the level a
+ * component's heading is indented to, one more for a component of a
+ * rewritten program than for one of the program itself; what belongs to
+ * the component is indented beneath it.  None can fail.
  */
 bool	 relic_explaining(const relic_t *ctx);
 void	 relic_explain_component(relic_t *ctx,
@@ -1318,8 +1367,9 @@ void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_plan_t *delta_first, uint64_t threshold,
 	    unsigned int depth);
 void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
-	    const relic_relation_t *answer, const relic_plan_t *plan,
-	    bool streams);
+	    const relic_relation_t *answer);
+void	 relic_explain_query_plan(relic_t *ctx, const relic_rule_t *rule,
+	    const relic_plan_t *plan, bool streams);
 void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	    const relic_relation_t *answer, const relic_magic_t *magic);
 

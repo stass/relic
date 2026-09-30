@@ -1,0 +1,12 @@
+% A group is the set of rows over the body's named variables.  Over
+% edge(a, b) and edge(a, c), the body edge(a, Y) has two rows, one for each
+% Y, and the body edge(a, _) has one row of no columns, as the query
+% edge(a, _)? prints one empty row.
+edge(a, b). edge(a, c).
+
+neighbours(N) :- N = count { edge(a, Y) }.
+connected(N) :- N = count { edge(a, _) }.
+
+neighbours(N)?
+connected(N)?
+edge(a, _)?

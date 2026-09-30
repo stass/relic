@@ -61,6 +61,7 @@ enum relic_op_kind {
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
 	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of two bound values hold? */
+	RELIC_OP_AGGREGATE,	/* fold a group relation's rows for a bound key */
 	RELIC_OP_EMIT		/* derive the head tuple */
 };
 ```
@@ -86,6 +87,7 @@ down this path, which is what makes it the last operation of every plan.
 | `MEMBER` | every column | nothing | once or never |
 | `ANTI_MEMBER` | every column | nothing | once or never |
 | `FILTER` | both operands | nothing | once or never |
+| `AGGREGATE` | the key slots, the group relation's tuples for that key | its result slot, or nothing when it compares | once or never |
 | `EMIT` | every head column | nothing | never |
 
 `MEMBER` exists separately from `SCAN` because a literal whose every argument
@@ -95,6 +97,14 @@ same question with the answer inverted, which is the whole of negation once
 stratification has guaranteed that the negated relation is complete; see
 architecture section 31.
 
+`AGGREGATE` is a test that binds. It folds the tuples of a complete group
+relation whose leading columns equal its key into one value, `count`,
+`sum`, `min` or `max`, and binds its result slot to that value, or, when
+the slot was bound before it, compares the two. It produces at most one
+match and fails when the function has no value over the group or the
+comparison does not hold. Its structure, its access modes and the fold are
+specified in `specs/design-aggregates.md` sections 8.2, 8.3 and 9.1.
+
 **An operation over a relation reads through a view of it**, fixed by the
 planner. Every operation of a rule's ordinary plan, of a query's plan and of
 the naive evaluator reads `all`, the relation as it stood when the plan
@@ -103,7 +113,8 @@ component being evaluated reads one of three narrower views derived from the
 member's delta: `delta`, `old` or `current`. A `SCAN` walks the view's range,
 a `LOOKUP` the part of its key's chain inside it, and a `MEMBER` holds only
 when the tuple it names lies inside it. An `ANTI_MEMBER` reads and an `EMIT`
-writes through `all`, and a `FILTER` reads no relation.
+writes through `all`, an `AGGREGATE` folds its group relation through
+`all`, and a `FILTER` reads no relation.
 `specs/design-evaluation-cost.md` section 3 defines the views and what each
 operation does under each; section 5.3 below says how a variant's are chosen.
 
@@ -153,7 +164,12 @@ rule, applied at the point the literal is placed:
   variables to the bound set;
 * a **comparison** becomes `FILTER`, and a **negated literal** becomes
   `ANTI_MEMBER`. Neither binds anything, so each must be placed where every
-  slot it reads is already bound.
+  slot it reads is already bound;
+* an **aggregate literal** becomes `AGGREGATE`, placed where every shared
+  slot it reads is bound, and adds its result slot to the bound set; when
+  the result slot is already bound it compares rather than binds, as an
+  equality over two bound sides is a filter. Placing it can make further
+  tests placeable. `specs/design-aggregates.md` section 8.1 gives the rule.
 
 The rule's safety, as `specs/design-program.md` section 5 defines it, is
 exactly what makes the last point always satisfiable: every slot a filter
@@ -293,8 +309,9 @@ Three invariants hold for every plan, and the executor relies on them without
 checking:
 
 * **the last operation is `EMIT`, and it is the only one;**
-* **every `BOUND` term reads a slot some earlier operation, or an earlier
-  column of the same operation, binds;**
+* **every `BOUND` term reads a slot some earlier operation -- a generator,
+  or a test that binds, `AGGREGATE` -- or an earlier column of the same
+  operation, binds;**
 * **every test reads only constants and bound slots.**
 
 A plan whose last operation is `EMIT` needs no end-of-plan case in the

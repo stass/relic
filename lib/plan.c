@@ -25,7 +25,10 @@
  * is a variable not yet bound while the other side is: that one is an
  * ASSIGN, and binds the variable.  Every other comparison is a FILTER and a
  * negated literal an ANTI_MEMBER, tests that can only be placed where every
- * slot they read is bound.  Tests and assignments are placed at the earliest
+ * slot they read is bound.  An aggregate is an AGGREGATE, placed where its
+ * key -- the slots it shares with its group -- is bound, which binds its
+ * result, or compares with it when something before it bound it.  Tests,
+ * aggregates and assignments are placed at the earliest
  * point they can be, and an assignment placed can make more of them
  * placeable, so they are placed until none more is before the next positive
  * literal is chosen.  The head becomes the EMIT that ends the plan, writing
@@ -272,6 +275,8 @@ static int	 place_assign(relic_planner_t *planner,
 		    const relic_literal_t *literal, uint16_t slot,
 		    const relic_expr_t *value);
 static int	 place_comparison(relic_planner_t *planner,
+		    const relic_literal_t *literal);
+static int	 place_aggregate(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 place_emit(relic_planner_t *planner);
 static int	 place_negated(relic_planner_t *planner,
@@ -771,6 +776,89 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 }
 
 /*
+ * How an AGGREGATE reaches its group's rows, from how many of the group
+ * relation's columns are key columns: all of its rows with no key, the one
+ * tuple the key names when every column is one, and otherwise those an
+ * index on the key columns holds, or, under RELIC_F_NO_INDEX, those a walk
+ * of the whole relation matches.
+ */
+static enum relic_fold_access
+fold_access(const relic_planner_t *planner, uint16_t key_count,
+    uint16_t arity)
+{
+	if (key_count == 0)
+		return (RELIC_FOLD_SCAN);
+
+	if (key_count == arity)
+		return (RELIC_FOLD_PROBE);
+
+	if ((planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
+		return (RELIC_FOLD_SCAN);
+
+	return (RELIC_FOLD_LOOKUP);
+}
+
+/*
+ * Place an aggregate literal, whose shared slots are bound, as an AGGREGATE
+ * over its group relation.  It binds its result slot when nothing has, a
+ * number slot for a count or a sum and a domain slot for a min or a max, and
+ * otherwise compares with it, reading it as the kind of slot it is.  A
+ * lookup names the index keyed on the shared columns, built here when the
+ * relation has none.
+ */
+static int
+place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
+{
+	const relic_aggregate_t *aggregate;
+	relic_op_aggregate_t *fold;
+	relic_relation_t *relation;
+	relic_op_t *op;
+	uint32_t index_position;
+	uint64_t result_bit;
+
+	aggregate = &literal->u.aggregate;
+	relation = relic_relation_read(planner->ctx, aggregate->group);
+	if (relation == NULL)
+		return (-1);
+
+	op = append_op(planner, RELIC_OP_AGGREGATE);
+	fold = &op->u.aggregate;
+	fold->relation = relation;
+	fold->aggregate = aggregate;
+	fold->key_slots = aggregate->shared;
+	fold->where = aggregate->where;
+	fold->fn = aggregate->fn;
+	fold->arity = relation->arity;
+	fold->key_count = aggregate->shared_count;
+	fold->column = aggregate->column;
+	fold->slot = aggregate->result;
+	fold->key_mask = all_columns(fold->key_count);
+	fold->access = fold_access(planner, fold->key_count, fold->arity);
+
+	if (fold->access == RELIC_FOLD_LOOKUP) {
+		if (relic_relation_index(planner->ctx, relation,
+		    fold->key_mask, &index_position) != 0)
+			return (-1);
+		fold->index_position = index_position;
+	}
+
+	result_bit = slot_bit(fold->slot);
+	fold->binds = (planner->bound & result_bit) == 0;
+	if (!fold->binds) {
+		fold->number = (planner->numbers & result_bit) != 0;
+		return (0);
+	}
+
+	fold->number = fold->fn == RELIC_AGG_COUNT ||
+	    fold->fn == RELIC_AGG_SUM;
+	planner->bound |= result_bit;
+	if (fold->number)
+		planner->numbers |= result_bit;
+
+	return (0);
+}
+
+/*
  * The slots a literal binds when placed where `bound` is bound, as
  * internal.h describes.
  */
@@ -793,6 +881,10 @@ relic_plan_literal_binds(const relic_t *ctx, const relic_literal_t *literal,
 		    &slot, &value))
 			return (0);
 		return (slot_bit(slot));
+	case RELIC_LITERAL_AGGREGATE:
+		if (!relic_aggregate_binds(&literal->u.aggregate, bound))
+			return (0);
+		return (slot_bit(literal->u.aggregate.result));
 	case RELIC_LITERAL_NEGATED:
 		break;
 	}
@@ -801,10 +893,11 @@ relic_plan_literal_binds(const relic_t *ctx, const relic_literal_t *literal,
 }
 
 /*
- * Whether a literal is a test -- a comparison or a negated literal -- that
- * can be placed now: an assignment, whose value reads only bound slots, or
- * a test every slot of which is bound.  This is the one place a literal is
- * classified as a test; a positive literal is never one.
+ * Whether a literal is a test -- a comparison, a negated literal or an
+ * aggregate -- that can be placed now: an assignment, whose value reads
+ * only bound slots, a test every slot of which is bound, or an aggregate
+ * whose key is bound.  This is the one place a literal is classified as a
+ * test; a positive literal is never one.
  *
  * A negated literal is ready exactly when it would be a membership test were
  * it positive, so the one question answers both.  One holding `_` is never
@@ -826,6 +919,9 @@ test_is_placeable(relic_t *ctx, const relic_literal_t *literal,
 		pred = relic_pred_of(ctx, literal->u.atom.pred);
 		return (pred != NULL &&
 		    atom_is_bound(&literal->u.atom, pred->arity, bound));
+	case RELIC_LITERAL_AGGREGATE:
+		return ((relic_aggregate_shared_slots(&literal->u.aggregate) &
+		    ~bound) == 0);
 	case RELIC_LITERAL_POSITIVE:
 		break;
 	}
@@ -847,6 +943,8 @@ place_test(relic_planner_t *planner, const relic_literal_t *literal)
 		return (place_comparison(planner, literal));
 	case RELIC_LITERAL_NEGATED:
 		return (place_negated(planner, &literal->u.atom));
+	case RELIC_LITERAL_AGGREGATE:
+		return (place_aggregate(planner, literal));
 	case RELIC_LITERAL_POSITIVE:
 		break;
 	}
@@ -1859,10 +1957,11 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
 
 /*
  * A plan derives each head tuple once when no generator has a wildcard and
- * its EMIT reads every slot a generator binds.  An ASSIGN binds a slot too,
- * but to a function of the slots bound before it, so two bindings that agree
- * on every slot a generator binds agree on it as well, and the EMIT need not
- * read it.
+ * its EMIT reads every slot a generator binds.  An ASSIGN and an AGGREGATE
+ * bind a slot too, but to a function of the slots bound before it -- a fold
+ * of a relation that does not change while the plan runs -- so two bindings
+ * that agree on every slot a generator binds agree on it as well, and the
+ * EMIT need not read it.
  *
  * Three facts about what a plan reads make that so, over relations that do
  * not change while it runs: a relation holds no tuple twice, a view lists
@@ -1908,6 +2007,7 @@ relic_plan_derives_distinct(const relic_plan_t *plan)
 		case RELIC_OP_ANTI_MEMBER:
 		case RELIC_OP_FILTER:
 		case RELIC_OP_ASSIGN:
+		case RELIC_OP_AGGREGATE:
 			break;
 		case RELIC_OP_EMIT:
 			(void)atom_slots(&op->u.atom, &binds, &reads);
@@ -1955,6 +2055,7 @@ relic_op_atom(const relic_op_t *op)
 		return (&op->u.atom);
 	case RELIC_OP_FILTER:
 	case RELIC_OP_ASSIGN:
+	case RELIC_OP_AGGREGATE:
 		break;
 	}
 
@@ -1980,6 +2081,11 @@ relic_plan_computes(const relic_plan_t *plan)
 			if (postfix_computes(&op->u.assign.value))
 				return (true);
 			break;
+		case RELIC_OP_AGGREGATE:
+			if (op->u.aggregate.fn == RELIC_AGG_COUNT ||
+			    op->u.aggregate.fn == RELIC_AGG_SUM)
+				return (true);
+			break;
 		case RELIC_OP_SCAN:
 		case RELIC_OP_LOOKUP:
 		case RELIC_OP_MEMBER:
@@ -1987,6 +2093,19 @@ relic_plan_computes(const relic_plan_t *plan)
 		case RELIC_OP_EMIT:
 			break;
 		}
+	}
+
+	return (false);
+}
+
+bool
+relic_plan_folds(const relic_plan_t *plan)
+{
+	size_t i;
+
+	for (i = 0; i < plan->op_count; i++) {
+		if (plan->ops[i].kind == RELIC_OP_AGGREGATE)
+			return (true);
 	}
 
 	return (false);

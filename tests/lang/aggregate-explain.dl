@@ -1,0 +1,19 @@
+% The aggregate literal as the rule writes it, the group rule under its
+% own component, the operation with the group relation's columns and key,
+% and a query's group rule under the query's heading.
+dir(src). dir(doc).
+file(main, src). file(util, src). file(readme, doc).
+size(main, 1200). size(util, 300). size(readme, 300).
+node(a). node(b). edge(a, b).
+
+dir_size(Dir, S) :-
+    dir(Dir),
+    S = sum(Size) { file(F, Dir), size(F, Size) }.
+largest(M) :- M = max(S) { dir_size(D, S) }.
+has_out(X) :- edge(X, _).
+leaves(N) :- N = count { node(X), not has_out(X) }.
+
+dir_size(Dir, S)?
+largest(M)?
+leaves(N)?
+node(X), N = count { edge(X, Y) }?

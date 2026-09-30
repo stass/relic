@@ -30,6 +30,9 @@
 #include "harness.h"
 #include "internal.h"
 
+#define	SCENARIO_AGGREGATE	"an aggregate is the literal it was written as"
+#define	SCENARIO_AGG_ERROR	"an aggregate's mistake is reported at its byte"
+#define	SCENARIO_AGG_NAMES	"a function name is one only before ( or {"
 #define	SCENARIO_APPEND		"loads append to one program"
 #define	SCENARIO_ATOMIC		"a failed load changes nothing"
 #define	SCENARIO_DEPTH		"an expression's nesting is bounded both ways"
@@ -89,6 +92,9 @@ static relic_t	*context_logging_to(diag_log_t *log);
 static size_t	 facts_held(relic_t *ctx, const char *name, uint16_t arity);
 static void	 statements_keep_the_shape_they_were_written_in(void);
 static void	 terms_hold_the_values_they_spell(void);
+static void	 aggregates_are_the_literals_they_were_written_as(void);
+static void	 function_names_are_names_elsewhere(void);
+static void	 aggregate_mistakes_are_reported_where_written(void);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
@@ -1044,6 +1050,159 @@ nesting_is_bounded_in_the_text_and_in_the_tree(void)
 	free(deep);
 }
 
+/*
+ * Each function, with and without its variable, becomes an aggregate
+ * literal holding its result, its column and its body; a body holds
+ * positive and negated literals, comparisons, assignments and `_`.
+ */
+static void
+aggregates_are_the_literals_they_were_written_as(void)
+{
+	static const struct {
+		const char		*text;
+		enum relic_aggregate_fn	 fn;
+		size_t			 body_length;
+	} rules[] = {
+		{ "r(N) :- N = count { p(X) }.\n", RELIC_AGG_COUNT, 1 },
+		{ "r(S) :- S = sum(V) { p(V), not q(V), V > 1 }.\n",
+		    RELIC_AGG_SUM, 3 },
+		{ "r(M) :- M = min(W) { p(V), W = V * 10 }.\n", RELIC_AGG_MIN,
+		    2 },
+		{ "r(M) :- M = max(V) { p(V, _) }.\n", RELIC_AGG_MAX, 1 }
+	};
+	const relic_ast_aggregate_t *aggregate;
+	relic_ast_stmt_t *statement;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t i;
+
+	for (i = 0; i < sizeof(rules) / sizeof(rules[0]); i++) {
+		ctx = context_logging_to(&log);
+		if (ctx == NULL)
+			return;
+
+		statement = NULL;
+		if (relic_load_string(ctx, "agg.dl", rules[i].text) == 0)
+			statement = statement_at(ctx, 0);
+		if (statement == NULL || statement->body_length != 1 ||
+		    statement->body[0].kind != RELIC_LITERAL_AGGREGATE) {
+			checkf(false, SCENARIO_AGGREGATE, "%s should be one "
+			    "aggregate literal", rules[i].text);
+			relic_destroy(ctx);
+			continue;
+		}
+
+		aggregate = &statement->body[0].u.aggregate;
+		checkf(aggregate->fn == rules[i].fn &&
+		    aggregate->body_length == rules[i].body_length &&
+		    aggregate->result.kind == RELIC_TERM_VARIABLE &&
+		    (rules[i].fn == RELIC_AGG_COUNT ||
+		    aggregate->column.kind == RELIC_TERM_VARIABLE),
+		    SCENARIO_AGGREGATE, "%s should hold its function, its "
+		    "variables and a body of %zu literals", rules[i].text,
+		    rules[i].body_length);
+		checkf(aggregate->where.column == 13, SCENARIO_AGGREGATE,
+		    "%s should be located at its function name, not column "
+		    "%u", rules[i].text, (unsigned int)aggregate->where.column);
+
+		if (rules[i].fn == RELIC_AGG_SUM)
+			check(aggregate->body[1].kind ==
+			    RELIC_LITERAL_NEGATED && aggregate->body[2].kind ==
+			    RELIC_LITERAL_COMPARISON, SCENARIO_AGGREGATE,
+			    "a body holds a negation and a comparison");
+
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * count, sum, min and max are ordinary names wherever an aggregate is not
+ * written: as predicates, as symbol arguments, and as the right side of an
+ * equality followed by `,` or `.`.
+ */
+static void
+function_names_are_names_elsewhere(void)
+{
+	relic_ast_stmt_t *statement;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	check(relic_load_string(ctx, "names.dl",
+	    "count(x). sum(y). label(min). label(max).\n"
+	    "a(X) :- label(X), X = count, sum(X).\n"
+	    "b(X) :- X = max.\n"
+	    "c(X) :- min(X), max(X).\n") == 0, SCENARIO_AGG_NAMES,
+	    "every use of the names should load");
+	check(facts_held(ctx, "count", 1) == 1 &&
+	    facts_held(ctx, "label", 1) == 2, SCENARIO_AGG_NAMES,
+	    "the names should be predicates and symbol arguments");
+
+	statement = statement_at(ctx, 0);
+	check(statement != NULL && statement->body_length == 3 &&
+	    statement->body[1].kind == RELIC_LITERAL_COMPARISON &&
+	    statement->body[2].kind == RELIC_LITERAL_POSITIVE,
+	    SCENARIO_AGG_NAMES, "X = count followed by , is a comparison");
+
+	statement = statement_at(ctx, 1);
+	check(statement != NULL && statement->body_length == 1 &&
+	    statement->body[0].kind == RELIC_LITERAL_COMPARISON,
+	    SCENARIO_AGG_NAMES, "X = max followed by . is a comparison");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Every mistake in writing an aggregate is reported once, at the byte it
+ * is at, and costs its own statement only.
+ */
+static void
+aggregate_mistakes_are_reported_where_written(void)
+{
+	static const struct {
+		const char	*text;
+		const char	*message;
+		uint32_t	 column;
+	} mistakes[] = {
+		{ "r(N) :- N < count { p(X) }.\n",
+		    "an aggregate is written V = count { ... }", 13 },
+		{ "r(N) :- count { p(X) } = N.\n",
+		    "an aggregate is written V = count { ... }", 9 },
+		{ "r(N) :- N = count(X) { p(X) }.\n",
+		    "count takes no variable", 18 },
+		{ "r(N) :- N = sum { p(X) }.\n",
+		    "sum takes one variable in parentheses", 17 },
+		{ "r(N) :- N = min(3) { p(X) }.\n",
+		    "expected a variable, found an integer literal", 17 },
+		{ "r(N) :- N = max(_) { p(X) }.\n",
+		    "max takes a named variable, not _", 17 },
+		{ "r(N) :- N = count { M = count { p(X) } }.\n",
+		    "an aggregate body cannot hold an aggregate", 25 },
+		{ "r(N) :- N = count { }.\n", "expected a literal, found '}'",
+		    21 },
+		{ "r(N) :- N = count { p(X) .\n", "expected ',' or '}'", 26 },
+		{ "r(N) :- 3 = count { p(X) }.\n",
+		    "an aggregate is written V = count { ... }", 13 }
+	};
+	diag_log_t log;
+	size_t i;
+
+	for (i = 0; i < sizeof(mistakes) / sizeof(mistakes[0]); i++) {
+		checkf(!loads_alone(mistakes[i].text, &log) &&
+		    log.errors == 1 && strstr(log.first,
+		    mistakes[i].message) != NULL &&
+		    log.first_column == mistakes[i].column,
+		    SCENARIO_AGG_ERROR, "%s should be refused once at column "
+		    "%u with \"%s\", not %zu time(s) at %u with \"%s\"",
+		    mistakes[i].text, (unsigned int)mistakes[i].column,
+		    mistakes[i].message, log.errors,
+		    (unsigned int)log.first_column, log.first);
+	}
+}
+
 int
 main(void)
 {
@@ -1059,6 +1218,9 @@ main(void)
 	mod_is_an_operator_only_after_an_operand();
 	expression_mistakes_are_reported_where_written();
 	nesting_is_bounded_in_the_text_and_in_the_tree();
+	aggregates_are_the_literals_they_were_written_as();
+	function_names_are_names_elsewhere();
+	aggregate_mistakes_are_reported_where_written();
 
 	return (check_summary("parse"));
 }

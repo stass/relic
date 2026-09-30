@@ -8,16 +8,17 @@
 # those again answering from the whole fixed point instead of through the
 # Magic rewrite, and rounds whose insertions wait for their end.  Every run
 # must agree with the default on standard output, the diagnostics on
-# standard error, and exit status.  Three diagnostics are left out.  The
+# standard error, and exit status.  Some diagnostics are left out.  The
 # warning that a rewrite outgrew its budget says which strategy answered,
 # which runs without the rewrite never report, and the answer it announces
 # is compared like any other.  The notes -vv gives about a comparison of
-# mixed types and about an arithmetic operand that is not an integer say
-# where evaluation first met one, which is earlier when a query evaluates
-# the whole program, and the answers they filtered are compared like any
-# other.  Rows are sorted with -s, because a strategy that derives the same
-# set of tuples in a different order is correct, and the comparison is of
-# sets.
+# mixed types, about an arithmetic operand that is not an integer, and
+# about an aggregate over rows that are not all integers or not all of one
+# type say where evaluation first met one, which is earlier when a query
+# evaluates the whole program, and the answers they filtered are compared
+# like any other.  Rows are sorted with -s, because a strategy that derives
+# the same set of tuples in a different order is correct, and the
+# comparison is of sets.
 #
 # Queries read only some relations, so each run also prints -X stats, and
 # runs that evaluate the same rules must agree on how many tuples every
@@ -96,6 +97,8 @@ run() {
 	grep -v -e '^stats: ' -e "Magic rewrite outgrew its budget" \
 	    -e "note: ordering comparison between " \
 	    -e "note: operand of .* is a .*; the comparison is false" \
+	    -e "note: a row of .* holds a value that is not an integer" \
+	    -e "note: the rows of .* hold values of more than one type" \
 	    "$work/$label.all" > "$work/$label.err" || true
 	grep -e '^stats: tuples held ' "$work/$label.all" \
 	    > "$work/$label.held" || true

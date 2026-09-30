@@ -1,0 +1,7 @@
+aggregate-mixed.dl:8:17: note: a row of sum(Z) holds a value that is not an integer; the aggregate has no value
+query 1: 0 rows
+aggregate-mixed.dl:9:17: note: the rows of min(N) hold values of more than one type; the aggregate has no value
+query 2: 0 rows
+aggregate-mixed.dl:10:35: note: the rows of min(N) hold values of more than one type; the aggregate has no value
+query 3: 0 rows
+query 4: 1 row

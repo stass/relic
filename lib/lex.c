@@ -722,6 +722,12 @@ scan_punctuation(relic_lexer_t *lexer, relic_token_t *token)
 	case ')':
 		token->kind = RELIC_TOKEN_RPAREN;
 		break;
+	case '{':
+		token->kind = RELIC_TOKEN_LBRACE;
+		break;
+	case '}':
+		token->kind = RELIC_TOKEN_RBRACE;
+		break;
 	case ',':
 		token->kind = RELIC_TOKEN_COMMA;
 		break;

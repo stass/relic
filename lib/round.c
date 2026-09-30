@@ -95,7 +95,8 @@ static relic_tuple_range_t item_view(const relic_round_t *round,
 		    const relic_round_item_t *item);
 static void	 job_begin(relic_round_job_t *job, relic_t *ctx,
 		    relic_pool_t *pool, const relic_round_t *round);
-static bool	 op_reads_as_it_runs(const relic_op_t *op);
+static const relic_relation_t *relation_read_as_it_runs(
+		    const relic_op_t *op);
 static int	 pool_prepare(relic_pool_t *pool, const relic_round_t *round);
 static void	 record_task_work(const relic_pool_t *pool,
 		    relic_round_t *round);
@@ -329,8 +330,8 @@ record_task_work(const relic_pool_t *pool, relic_round_t *round)
 static bool
 round_reads_no_target(const relic_round_t *round)
 {
+	const relic_relation_t *relation;
 	const relic_plan_t *plan;
-	const relic_op_t *op;
 	size_t i;
 	size_t k;
 	size_t t;
@@ -341,11 +342,11 @@ round_reads_no_target(const relic_round_t *round)
 			continue;
 
 		for (k = 0; k < plan->op_count; k++) {
-			op = &plan->ops[k];
-			if (!op_reads_as_it_runs(op))
+			relation = relation_read_as_it_runs(&plan->ops[k]);
+			if (relation == NULL)
 				continue;
 			for (t = 0; t < round->target_count; t++) {
-				if (op->u.atom.relation == round->targets[t])
+				if (relation == round->targets[t])
 					return (false);
 			}
 		}
@@ -355,28 +356,33 @@ round_reads_no_target(const relic_round_t *round)
 }
 
 /*
- * Whether an operation reads its relation as it stands when the plan
- * starts, which is past whatever the items before it in a round inserted,
- * rather than through a member's view, which the deltas fixed before the
- * round began.  A filter, an assignment and the EMIT read no relation.
+ * The relation an operation reads as it stands when the plan starts, which
+ * is past whatever the items before it in a round inserted, rather than
+ * through a member's view, which the deltas fixed before the round began;
+ * NULL for an operation that reads none that way.  A fold reads its group
+ * relation whole.  A filter, an assignment and the EMIT read no relation.
  * Every kind is named, so a new one does not compile until it is placed.
  */
-static bool
-op_reads_as_it_runs(const relic_op_t *op)
+static const relic_relation_t *
+relation_read_as_it_runs(const relic_op_t *op)
 {
 	switch (op->kind) {
 	case RELIC_OP_SCAN:
 	case RELIC_OP_LOOKUP:
 	case RELIC_OP_MEMBER:
 	case RELIC_OP_ANTI_MEMBER:
-		return (op->u.atom.view == RELIC_VIEW_ALL);
+		if (op->u.atom.view != RELIC_VIEW_ALL)
+			return (NULL);
+		return (op->u.atom.relation);
+	case RELIC_OP_AGGREGATE:
+		return (op->u.aggregate.relation);
 	case RELIC_OP_FILTER:
 	case RELIC_OP_ASSIGN:
 	case RELIC_OP_EMIT:
-		return (false);
+		break;
 	}
 
-	return (false);
+	return (NULL);
 }
 
 /*

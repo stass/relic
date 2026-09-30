@@ -1,0 +1,4 @@
+Full materialization evaluates over/1 before answering anything and fails,
+while the default answers exact(S)? and under(S)? from their own
+components first and fails only at over(S)?.  The golden file pins the
+default's output.

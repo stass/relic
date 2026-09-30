@@ -52,6 +52,32 @@ a diagnostic for an interning that names no relation, and the limit sweeps
 of `test_index`, which intern before they insert, taught that a value may
 be refused.
 
+**The v1 specs do not state arithmetic.** [Low, component: `specs/`]
+`specs/design-arithmetic.md` section 19 lists amendments to the other
+design documents that were never made, so the aggregate text those
+documents now carry sits beside v1 wording that omits assignments:
+`specs/design-parser.md` still says there are no expressions and has no
+operator token, and its section 5 counts five types;
+`specs/design-program.md` section 5 has no closure, its section 6 messages
+lack "or an assignment", and its section 4.1 says every slot is bound by a
+positive relational literal; `specs/design-plan.md` has no `ASSIGN`, and
+its section 9 says a comparison that binds is absent;
+`specs/design-eval.md` section 8 omits the undefined arithmetic result;
+`specs/design-magic.md` section 6.1 does not renumber expression trees;
+`specs/design-parallel.md` section 12 has no `integer_values` identity;
+`specs/design-cli.md` section 9 omits the arithmetic note; and
+`specs/architecture.md` section 13's grammar has no expression.
+
+**An arena refusal is reported by every caller that meets it.** [Low,
+component: `lib/eval.c`, `lib/diag.c`] `relic_diag_no_memory()` reports each
+call, and an arena that refused once refuses every later request, so a
+caller that makes two allocations before checking either reports one
+refusal twice, the second time as "out of memory" after the limit's
+message.  Every caller must check each allocation before the next, a
+convention held by enumeration; a query's group run once broke it.  An
+allocation helper that reports only the refusal that first failed its
+arena would make the convention unnecessary.
+
 ## Build and packaging
 
 **Continuous integration is not configured.** [High] `relic-plan.md` section 6
@@ -1189,7 +1215,10 @@ without it; the verdicts are provisional until a design exists.
   as an assignment is, the body an ordinary generated rule whose relation
   is the group, its reader a stratum above it as a negated literal's is,
   an exact sum that fails only when the total does not fit; five steps,
-  none started
+  of which the front end, the plan and executor, Magic Sets and the
+  frozen round are built and hardening remains: aggregates in the program
+  generator, the fuzz dictionary and corpus, the manual pages and a
+  degree-count workload in `bench/compare/`
 * relation export, in `docs/todo-language.md`
 * incremental insertion maintenance
 * DRed-style deletion maintenance

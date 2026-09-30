@@ -1032,6 +1032,13 @@ than the serial evaluator's would. What such an evaluation guarantees is
 one diagnostic and an account that holds what the relations hold, which
 the next evaluation discards.
 
+A program with aggregates is held to the same identities, after a
+successful run, after a run a tuple limit fails and after a run an
+overflowing sum fails: a fold reads a complete relation and writes only
+its task's scratch, a group rule's pass is shared as any one-pass
+component's is, and an overflow abandons the job so that the serial
+evaluator reports it, `specs/design-aggregates.md` sections 9.4 and 16.
+
 The golden tests are therefore run at one thread and at several, with
 `-X parallel`, and compared byte for byte, `parallel_rounds` aside;
 section 16.

@@ -36,10 +36,11 @@ LIBOBJDIR = compat/
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
-	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c lib/magic.c \
-	lib/merge.c lib/parse.c lib/plan.c lib/pool.c lib/pred.c \
-	lib/relation.c lib/result.c lib/round.c lib/rule.c lib/stratify.c \
-	lib/symbol.c lib/task.c lib/util.c lib/value.c
+	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c \
+	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
+	lib/pool.c lib/pred.c lib/relation.c lib/result.c lib/round.c \
+	lib/rule.c lib/stratify.c lib/symbol.c lib/task.c lib/util.c \
+	lib/value.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -532,7 +533,17 @@ endif
 ## a debugging session left behind, so langfiles.sh checks that too.
 ##
 
-RELIC_LANG_TESTS = tests/lang/arithmetic-binding.dl \
+RELIC_LANG_TESTS = \
+	tests/lang/aggregate-assign.dl tests/lang/aggregate-count.dl \
+	tests/lang/aggregate-explain.dl tests/lang/aggregate-limit.dl \
+	tests/lang/aggregate-magic.dl tests/lang/aggregate-minmax.dl \
+	tests/lang/aggregate-mixed.dl tests/lang/aggregate-nested.dl \
+	tests/lang/aggregate-overflow.dl tests/lang/aggregate-parallel.dl \
+	tests/lang/aggregate-project.dl tests/lang/aggregate-query.dl \
+	tests/lang/aggregate-shared.dl tests/lang/aggregate-shortest.dl \
+	tests/lang/aggregate-stratify.dl tests/lang/aggregate-sum.dl \
+	tests/lang/aggregate-syntax.dl tests/lang/aggregate-unsafe.dl \
+	tests/lang/arithmetic-binding.dl \
 	tests/lang/arithmetic-depth.dl tests/lang/arithmetic-explain.dl \
 	tests/lang/arithmetic-gathered.dl tests/lang/arithmetic-height.dl \
 	tests/lang/arithmetic-magic.dl tests/lang/arithmetic-magic-drafts.dl \

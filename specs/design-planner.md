@@ -182,7 +182,13 @@ arguments either all have one or none does.
 One thing is fixed before the greedy order starts, and it does not touch it:
 **tests are placed at the earliest point every slot they read is bound**,
 exactly as in the textual planner of `specs/design-plan.md` section 5.1,
-after whichever positive literal makes them placeable.
+after whichever positive literal makes them placeable. An aggregate literal
+is placed with the tests, at the earliest point its shared slots are bound,
+and its result slot joins the bound set, so placing it can make further
+tests placeable and the placement repeats until nothing more is, before the
+next positive literal is scored. A positive literal keyed on a result slot
+has a bound argument and is scored and accessed accordingly,
+`specs/design-aggregates.md` section 8.1.
 
 **A delta literal takes part in the order** like any other positive literal,
 scored by the estimate of its view (section 4), so a small complete relation
@@ -252,6 +258,14 @@ the bound columns when one exists -- would make the plan of one rule depend on
 which rules happened to be planned before it. The cost is memory: a relation
 looked up under several binding patterns carries an index for each, as
 `specs/design-index.md` section 8 counts.
+
+An `AGGREGATE` reaches its group by the same rule, its shared columns being
+its bound ones: the whole relation when there are none, **the index keyed on
+exactly the shared columns** when there are some, and one probe of the
+canonical index when every column is shared. Under `-X no-index` it walks
+the whole relation and matches the key columns of each tuple, as a
+generator with bound columns is scanned, `specs/design-aggregates.md`
+section 8.3.
 
 ---
 
@@ -371,14 +385,19 @@ query $q0(X) :- path(a, X).
   is not printed, so that the lines are a function of the plans and not of how
   many rounds ran.
 * A query is shown as the rule it compiles to, headed by its name,
-  `$q` and a serial.
+  `$q` and a serial. A query's aggregate group rules are shown under that
+  heading, before its plan, each as a rule with its plan; a program's group
+  rules are shown under their own components, as a rewrite's generated
+  rules are, `specs/design-aggregates.md` section 12.
 * A query answered through its Magic rewrite also shows the rewrite and the
   components of the rewritten rules, nested beneath it, in the layout
   `specs/design-magic.md` section 10 gives.
 
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
-`anti-member`, `filter` with its comparison, and `emit`. A query's `EMIT`
+`anti-member`, `filter` with its comparison, `aggregate` with the equality
+it stands for, the group relation with its columns named and its key
+columns, and `emit`. A query's `EMIT`
 that delivers its rows as they are derived rather than inserting them into
 the answer relation is shown as `stream`, `specs/design-comparison-cost.md`
 section 4. An operation over a

@@ -29,6 +29,7 @@
  */
 
 typedef struct relic_op relic_op_t;
+typedef struct relic_op_aggregate relic_op_aggregate_t;
 typedef struct relic_op_assign relic_op_assign_t;
 typedef struct relic_op_atom relic_op_atom_t;
 typedef struct relic_op_filter relic_op_filter_t;
@@ -55,7 +56,11 @@ typedef struct relic_variant_plans relic_variant_plans_t;
  * runs, so its absence is meaningful.  ASSIGN is a test that binds: it
  * computes one value from constants and bound slots and binds one slot to
  * it, succeeding once, or never when the value does not exist because an
- * operand was not an integer.  EMIT derives the head tuple, which
+ * operand was not an integer.  AGGREGATE is a test that binds too: it folds
+ * the rows of a complete group relation under the key its bound slots give
+ * and binds its result slot to the value, or, when the slot was bound
+ * before, holds exactly when the value equals it; it fails when its
+ * function has no value over the group.  EMIT derives the head tuple, which
  * the evaluation inserts, or delivers as a query's row, in batches, and
  * never succeeds, which is what makes it the last operation of every plan:
  * the deepest level of the join always rejects, so the executor always
@@ -68,6 +73,7 @@ enum relic_op_kind {
 	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of bound values hold? */
 	RELIC_OP_ASSIGN,	/* bind a slot to a value from bound ones */
+	RELIC_OP_AGGREGATE,	/* fold a group relation's rows for a key */
 	RELIC_OP_EMIT		/* derive the head tuple */
 };
 
@@ -84,10 +90,12 @@ enum relic_op_kind {
  * bound slots and nothing else.
  *
  * A slot is of one of two kinds, fixed by the operation that binds it.  A
- * domain slot is bound by a generator, or by an ASSIGN of a constant or of
- * another domain slot, and its frame entry is a domain identifier.  A number
- * slot is bound by an ASSIGN of a computed integer, or of another number
- * slot; the integer is kept beside the frame, and its frame entry is the
+ * domain slot is bound by a generator, by an ASSIGN of a constant or of
+ * another domain slot, or by the AGGREGATE of a `min` or a `max`, and its
+ * frame entry is a domain identifier.  A number slot is bound by an ASSIGN
+ * of a computed integer or of another number slot, or by the AGGREGATE of
+ * a `count` or a `sum`; the integer is kept beside the frame, and its frame
+ * entry is the
  * integer's identifier when the value table holds one and zero when it does
  * not.  Zero names no value and is in no tuple and no key, so every
  * operation over a relation reads a number slot through BOUND like any other
@@ -247,11 +255,61 @@ struct relic_op_assign {
 	bool			 number;
 };
 
+/*
+ * How an AGGREGATE reaches the rows of its group, the tuples of the group
+ * relation whose first `key_count` columns hold the key: by walking the
+ * whole relation, matching the key columns of each tuple when there are
+ * any; by walking the index keyed on exactly the key columns; or, when
+ * every column is a key column, by probing for the one tuple the key names.
+ * A fold with no key walks the whole relation, which is then the group, and
+ * so does one under RELIC_F_NO_INDEX, as a generator with bound columns is
+ * scanned under it.
+ */
+enum relic_fold_access {
+	RELIC_FOLD_SCAN,
+	RELIC_FOLD_LOOKUP,
+	RELIC_FOLD_PROBE
+};
+
+/*
+ * A fold of the group relation `relation`, of `arity` columns, for the key
+ * the slots `key_slots` hold, `key_count` of them, which are the relation's
+ * leading columns, bit c of `key_mask` for column c.  `access` says how
+ * the group's rows are reached, and for RELIC_FOLD_LOOKUP `index_position`
+ * names the index keyed on `key_mask` as a LOOKUP's does.  `fn` folds
+ * column `column` of each row, which `count` does not read.
+ *
+ * `binds` says whether the fold binds `slot` or, bound before, compares its
+ * value with it; `number` says the slot is a number slot, which a count or
+ * a sum binds and a min or a max does not, and which a compared slot is
+ * when the operation that bound it made it one.  `aggregate` is the literal
+ * as the rule holds it, which explain prints, and `where` is where its
+ * function is written, which a note about the fold and an overflowing sum
+ * point at.
+ */
+struct relic_op_aggregate {
+	const relic_relation_t	*relation;
+	const relic_aggregate_t	*aggregate;
+	const uint16_t		*key_slots;
+	relic_location_t	 where;
+	uint32_t		 key_mask;
+	uint32_t		 index_position;	/* RELIC_FOLD_LOOKUP */
+	enum relic_fold_access	 access;
+	enum relic_aggregate_fn	 fn;
+	uint16_t		 arity;
+	uint16_t		 key_count;
+	uint16_t		 column;
+	uint16_t		 slot;
+	bool			 binds;
+	bool			 number;
+};
+
 struct relic_op {
 	union {
-		relic_op_atom_t		atom;	/* all but FILTER and ASSIGN */
+		relic_op_atom_t		atom;	/* over a relation's tuple */
 		relic_op_filter_t	filter;	/* FILTER */
 		relic_op_assign_t	assign;	/* ASSIGN */
+		relic_op_aggregate_t	aggregate; /* AGGREGATE */
 	}			u;
 	enum relic_op_kind	kind;		/* which arm of u is live */
 };
@@ -261,9 +319,9 @@ struct relic_op {
  * and the executor relies on them without checking:
  *
  *	the last operation is EMIT, and it is the only one;
- *	every BOUND or NUMBER term and every slot a program reads is one an
- *	earlier operation, or an earlier column of the same operation, binds,
- *	a generator or an ASSIGN;
+ *	every BOUND or NUMBER term and every slot a program or a fold reads
+ *	is one an earlier operation, or an earlier column of the same
+ *	operation, binds, a generator, an ASSIGN or an AGGREGATE;
  *	every test reads only constants and bound slots.
  *
  * A plan that was built therefore always has `ops`; a plan left unbuilt, as

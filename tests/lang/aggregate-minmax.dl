@@ -1,0 +1,26 @@
+% min and max over integers, over symbols and over strings, each ordered
+% within its type; an empty group has no least or greatest element, so the
+% literal is false and the binding dropped, and a default is written as a
+% second rule.
+score(ann, 7). score(bob, -3). score(cat, 12).
+name(1, zoe). name(2, adam). name(3, mia).
+title(1, "Zebra"). title(2, "apple"). title(3, "Mango").
+node(ann). node(bob). node(cat). node(dan).
+
+low(M) :- M = min(S) { score(P, S) }.
+high(M) :- M = max(S) { score(P, S) }.
+first_name(M) :- M = min(N) { name(I, N) }.
+last_name(M) :- M = max(N) { name(I, N) }.
+first_title(M) :- M = min(T) { title(I, T) }.
+last_title(M) :- M = max(T) { title(I, T) }.
+
+best(X, M) :- node(X), M = max(S) { score(X, S) }.
+best(X, 0) :- node(X), N = count { score(X, S) }, N = 0.
+
+low(M)?
+high(M)?
+first_name(M)?
+last_name(M)?
+first_title(M)?
+last_title(M)?
+best(X, M)?

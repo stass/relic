@@ -679,7 +679,7 @@ struct relic_aggregate {
 	const uint16_t		*shared;	/* outer slot of each shared column, in column order */
 	relic_location_t	 where;		/* the function name */
 	relic_pred_id_t		 group;		/* the group predicate */
-	uint32_t		 group_rule;	/* index of the group rule in its owner's table */
+	const relic_rule_t	*group_rule;	/* the group rule, a copy in the owner's arena */
 	uint16_t		 shared_count;
 	uint16_t		 column;	/* the aggregated column; unused by COUNT */
 	uint16_t		 result;	/* the slot the literal binds */
@@ -689,18 +689,21 @@ struct relic_aggregate {
 
 `shared` lives in the program arena beside the rule, as its arguments do.
 The literal names its group predicate, through which the relation is
-reached as every relation is, and its group rule, by index rather than by
-pointer, since a rule table is a growable array and a pointer into one
-dangles when a load grows it, `specs/design-program.md` section 6. The
-index is relative to the table the statement's rules were built into: the
-program's rule table for a program statement, the query's own group rules
-for a query, section 10. Which table that is follows from the origin every
-compiled rule records, `specs/design-eval.md` section 2.3, and a copy of
-the literal the Magic rewrite makes keeps both the index and the origin, so
-the printer of section 12 and the walk of section 11 find the body through
-the literal alone. The predicate entry is not enough on its own: a query's
-group predicate is shared by every query with an aggregate at that position
-and arity, section 5.2, and each such query has a group rule of its own.
+reached as every relation is, and its group rule, through a pointer to a
+copy of that rule made in the same arena as the literal: the program arena
+for a program statement, the query's own arena for a query, section 10.
+The pointer is not into a rule table: a table is a growable array, and a
+pointer into one dangles when a load grows it, `specs/design-program.md`
+section 6. The copy is never moved or changed, and its arguments, body and
+variables are the arena blocks the table's entry holds too, so it lives as
+long as the literal does and costs one rule header. A copy of the literal
+the Magic rewrite makes keeps the pointer, so the printer of section 12,
+the walk of section 11 and the notes of section 9 find the body and the
+group's variable names through the literal alone, without knowing which
+table the group rule was published into. The predicate entry is not
+enough on its own: a query's group predicate is shared by every query with
+an aggregate at that position and arity, section 5.2, and each such query
+has a group rule of its own.
 The aggregated column is a column index into the group relation, resolved
 when the rule is compiled, so nothing downstream looks a variable up by
 name.

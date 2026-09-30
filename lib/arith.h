@@ -7,6 +7,7 @@
 #ifndef RELIC_ARITH_H
 #define RELIC_ARITH_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "ast.h"
@@ -33,5 +34,32 @@ enum relic_arith_status {
 enum relic_arith_status relic_arith_binary(enum relic_arith_op op,
 	    int64_t left, int64_t right, int64_t *resultp);
 enum relic_arith_status relic_arith_negate(int64_t operand, int64_t *resultp);
+
+/*
+ * An exact sum of int64_t values: a 128-bit two's complement integer held
+ * in two 64-bit words, `hi` the high word.
+ *
+ * A sum of fewer than 2^32 addends, each within 2^63 in magnitude, is
+ * within 2^95, so the accumulator never wraps and its total is exact
+ * whatever order the addends come in.  Whether the total fits int64_t is
+ * asked once, at the end, so a sum overflows exactly when the total over
+ * the integers does not fit.  Every operation is on unsigned words, whose
+ * wrapping is defined, so no signed overflow happens anywhere.
+ *
+ * A zeroed sum is zero.  relic_sum_add() adds one value.  relic_sum_fits()
+ * says whether the total fits int64_t, which is when the high word is the
+ * sign extension of the low one, and relic_sum_value() gives it when it
+ * does.
+ */
+typedef struct relic_sum relic_sum_t;
+
+struct relic_sum {
+	uint64_t	lo;
+	uint64_t	hi;
+};
+
+void	 relic_sum_add(relic_sum_t *sum, int64_t addend);
+bool	 relic_sum_fits(const relic_sum_t *sum);
+int64_t	 relic_sum_value(const relic_sum_t *sum);
 
 #endif /* RELIC_ARITH_H */

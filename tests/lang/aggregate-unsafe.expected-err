@@ -1,0 +1,10 @@
+aggregate-unsafe.dl:7:56: error: variable T in the aggregate of rule above/1 is not bound by a positive literal or an assignment of the aggregate body
+aggregate-unsafe.dl:7:56: note: a variable bound outside an aggregate must also be bound inside it
+aggregate-unsafe.dl:8:6: error: variable N in rule same/1 is not bound by a positive body literal or an assignment
+aggregate-unsafe.dl:9:18: error: variable N in rule pair/1 is not bound by a positive body literal or an assignment
+aggregate-unsafe.dl:9:32: error: variable Y in rule pair/1 is not bound by a positive body literal or an assignment
+aggregate-unsafe.dl:9:41: error: variable M in rule pair/1 is not bound by a positive body literal or an assignment
+aggregate-unsafe.dl:10:21: error: variable Z in the aggregate of rule total/1 is not bound by a positive literal or an assignment of the aggregate body
+aggregate-unsafe.dl:11:31: error: anonymous variable in the aggregate of rule blank/1 cannot be bound by a positive literal of the aggregate body
+aggregate-unsafe.dl:12:20: warning: variable N occurs only once in this rule
+aggregate-unsafe.dl:12:20: note: rename it to _N to silence this warning

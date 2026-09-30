@@ -82,6 +82,9 @@ static void	 put_arg(const relic_t *ctx, relic_explain_line_t *line,
 static void	 put_args(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_arg_t *args,
 		    uint16_t count);
+static void	 put_aggregate(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule,
+		    const relic_aggregate_t *aggregate);
 static void	 put_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_atom_t *atom);
 static void	 put_comparison(const relic_t *ctx, relic_explain_line_t *line,
@@ -97,6 +100,9 @@ static void	 put_operand(const relic_t *ctx, relic_explain_line_t *line,
 static void	 put_key(relic_explain_line_t *line, uint32_t key_mask);
 static void	 put_literal(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_literal_t *literal);
+static void	 put_op_aggregate(const relic_t *ctx,
+		    relic_explain_line_t *line, const relic_rule_t *rule,
+		    const relic_op_aggregate_t *fold);
 static void	 put_op(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_op_t *op,
 		    bool streams);
@@ -678,7 +684,43 @@ put_literal(const relic_t *ctx, relic_explain_line_t *line,
 	case RELIC_LITERAL_COMPARISON:
 		put_comparison(ctx, line, rule, &literal->u.comparison);
 		return;
+	case RELIC_LITERAL_AGGREGATE:
+		put_aggregate(ctx, line, rule, &literal->u.aggregate);
+		return;
 	}
+}
+
+/*
+ * An aggregate as the rule writes it: `N = count { ... }` or `S =
+ * sum(Size) { ... }`.  The result is a variable of the rule; the aggregated
+ * variable and the body are written from the group rule, whose variables
+ * they are, so the braces read back as the writer wrote them.
+ */
+static void
+put_aggregate(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_aggregate_t *aggregate)
+{
+	const relic_rule_t *group_rule;
+	size_t i;
+
+	group_rule = aggregate->group_rule;
+
+	put_variable(ctx, line, rule, aggregate->result);
+	line_put(line, " = ");
+	line_put(line, relic_aggregate_spelling(aggregate->fn));
+	if (aggregate->fn != RELIC_AGG_COUNT) {
+		line_put_byte(line, '(');
+		put_variable(ctx, line, group_rule, aggregate->column);
+		line_put_byte(line, ')');
+	}
+
+	line_put(line, " { ");
+	for (i = 0; i < group_rule->body_length; i++) {
+		if (i > 0)
+			line_put(line, ", ");
+		put_literal(ctx, line, group_rule, &group_rule->body[i]);
+	}
+	line_put(line, " }");
 }
 
 /*
@@ -854,6 +896,10 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 		line_put(line, " = ");
 		put_expr(ctx, line, rule, op->u.assign.expr);
 		return;
+	case RELIC_OP_AGGREGATE:
+		line_put(line, "aggregate ");
+		put_op_aggregate(ctx, line, rule, &op->u.aggregate);
+		return;
 	case RELIC_OP_EMIT:
 		line_put(line, streams ? "stream " : "emit ");
 		put_op_atom(ctx, line, rule, &op->u.atom);
@@ -861,6 +907,45 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 	}
 
 	line_put(line, "?");
+}
+
+/*
+ * A fold as the equality it stands for, then the group relation with its
+ * columns named after the group rule's variables, and its key columns when
+ * it has any: `N = count agg$p$1$0$2(X, Y) key={0}`.
+ */
+static void
+put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_op_aggregate_t *fold)
+{
+	const relic_rule_t *group_rule;
+	uint16_t column;
+
+	group_rule = fold->aggregate->group_rule;
+
+	put_variable(ctx, line, rule, fold->slot);
+	line_put(line, " = ");
+	line_put(line, relic_aggregate_spelling(fold->fn));
+	if (fold->fn != RELIC_AGG_COUNT) {
+		line_put_byte(line, '(');
+		put_variable(ctx, line, group_rule, fold->column);
+		line_put_byte(line, ')');
+	}
+	line_put_byte(line, ' ');
+
+	put_relation_name(ctx, line, fold->relation);
+	if (fold->arity > 0) {
+		line_put_byte(line, '(');
+		for (column = 0; column < fold->arity; column++) {
+			if (column > 0)
+				line_put(line, ", ");
+			put_variable(ctx, line, group_rule, column);
+		}
+		line_put_byte(line, ')');
+	}
+
+	if (fold->key_count > 0)
+		put_key(line, fold->key_mask);
 }
 
 /*
@@ -1028,7 +1113,7 @@ relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 
 void
 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
-    const relic_relation_t *answer, const relic_plan_t *plan, bool streams)
+    const relic_relation_t *answer)
 {
 	relic_explain_line_t line;
 
@@ -1039,6 +1124,17 @@ relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 	line_put(&line, "query ");
 	put_query_rule(ctx, &line, rule, answer);
 	line_finish(ctx, &line);
+}
+
+/*
+ * A query's plan, one level in under its heading.
+ */
+void
+relic_explain_query_plan(relic_t *ctx, const relic_rule_t *rule,
+    const relic_plan_t *plan, bool streams)
+{
+	if (!relic_explaining(ctx))
+		return;
 
 	put_plan(ctx, rule, plan, 1, streams);
 }

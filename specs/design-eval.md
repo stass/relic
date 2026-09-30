@@ -82,7 +82,10 @@ of `specs/design-index.md`):
 
 Beside them the scratch keeps what the executor hands back rather than
 uses: where the join stood when the batch filled, the work counted since
-the caller last took the counts, and the note described below.
+the caller last took the counts, and the note described below. It also
+holds the accumulator an `AGGREGATE` folds its group into, a fixed part of
+the scratch that is reset at each fold, and the error record an
+overflowing `sum` leaves, `specs/design-aggregates.md` sections 9.1 to 9.3.
 
 None is allocated in the loop. The frame is a fixed array, the batch is
 sized when the evaluation begins, for the widest head its rules can have,
@@ -96,6 +99,9 @@ the executor does can fail, and one executor serves every destination of a
 plan's derivations. A note about a mixed-type comparison is recorded in
 the scratch and reported by the caller when it takes the batch, since
 reporting calls the caller's diagnostic callback and changes the context.
+An overflowing `sum` is recorded the same way: it ends the plan as though
+every generator were exhausted, and the caller, taking the batch, discards
+it and fails the evaluation.
 
 ### 2.2 A generator never holds a tuple pointer
 
@@ -396,6 +402,14 @@ An evaluator that cannot give a negated literal that guarantee must refuse to
 plan one, naming the rule, rather than test absence against a relation that may
 still grow.
 
+An aggregate literal reads its group relation under the same guarantee.
+The group predicate is stratified strictly below the rule holding the
+aggregate, so its `AGGREGATE` folds a complete relation through `all`, as
+`ANTI_MEMBER` tests one: it never reads a member of its own component, has
+no delta variant of its own, and in a delta variant of another literal folds
+the same complete relation every round, `specs/design-aggregates.md`
+sections 7 and 8.3.
+
 ---
 
 ## 6. Materialization and when it is current
@@ -464,14 +478,19 @@ query object owns, per `specs/design-query.md`. Answering one is three steps:
    the rules the rewrite generates are evaluated from a schedule of their
    own, and the query rule is the rewritten one. A rewrite that outgrows its
    budget is abandoned, and the query answered from the materialized program
-   instead.
+   instead. A query holding an aggregate also owns the group rules of its
+   aggregates, which run once each, after the program's part is evaluated
+   and before any rule the rewrite generates, since a generated rule may
+   hold a copy of the aggregate literal; `specs/design-aggregates.md`
+   section 10 gives the sequence.
 2. **Run the query's plan once**, with the answer relation as its emit
    target. The answer is read by no rule, since it is no predicate's relation,
    so one pass computes it completely. Duplicate answers collapse on
    insertion, which is what gives a query set semantics. A plan that derives
    each row once, run in a context that sets no tuple or memory limit, emits
    to the caller's callback instead, and the query has no step 3
-   (`specs/design-comparison-cost.md` section 4).
+   (`specs/design-comparison-cost.md` section 4). A plan holding an
+   `AGGREGATE` is always gathered, `specs/design-aggregates.md` section 9.5.
 3. **Stream the answer relation** to the caller's callback, one row per tuple,
    in insertion order.
 
@@ -486,12 +505,13 @@ duration of the call. A callback that returns nonzero stops the stream, and the
 run still reports success: the caller asked to stop, and nothing failed.
 
 **No row is delivered until everything that can fail has succeeded.** Every
-step that can fail -- a limit, an allocation -- happens in step 1, in planning
-step 2 and in running it into the answer relation, and step 3 cannot fail. A
-plan run into the caller's callback allocates nothing and meets no limit once
-its first row is derived. A query that exceeds a limit therefore produces no
-rows and an error, never a truncated answer indistinguishable from a complete
-one, which is what architecture section 63 requires.
+step that can fail -- a limit, an allocation, a `sum` that does not fit --
+happens in step 1, in planning step 2 and in running it into the answer
+relation, and step 3 cannot fail. A plan run into the caller's callback
+allocates nothing and meets no limit once its first row is derived. A query
+that exceeds a limit therefore produces no rows and an error, never a
+truncated answer indistinguishable from a complete one, which is what
+architecture section 63 requires.
 
 The answer relation is emptied when the run ends, whether the rows were
 delivered, the callback stopped them or the answer failed part way, so
@@ -503,14 +523,17 @@ order.
 
 ## 8. Failure
 
-Evaluation fails for two reasons, both reported where they happen:
+Evaluation fails for these reasons, each reported where it happens:
 
 * a configured limit refused an insertion, with the message of
   `specs/design-relations.md` section 9;
-* an allocation failed.
+* an allocation failed;
+* an aggregate's `sum` did not fit `int64_t`, reported as an integer
+  overflow in the rule that holds it, `specs/design-aggregates.md` section
+  4.5, by the caller that took the batch, which discards the batch.
 
-Either stops the fixed point at once and returns -1. Planning a component can
-fail for the same two reasons -- memory, or the memory limit reached while an
+Each stops the fixed point at once and returns -1. Planning a component can
+fail for the first two reasons -- memory, or the memory limit reached while an
 index is built over a complete relation or while the evaluation arena grows,
 per `specs/design-planning-cost.md` section 7 -- and stops the evaluation at
 that component, before it runs. The relation that refused the tuple is exactly as

@@ -326,14 +326,16 @@ schedule_respects_dependencies(const relic_t *ctx)
 			if (literal->kind == RELIC_LITERAL_COMPARISON)
 				continue;
 
-			body_position = position[literal->u.atom.pred];
+			body_position = position[literal->kind ==
+			    RELIC_LITERAL_AGGREGATE ?
+			    literal->u.aggregate.group : literal->u.atom.pred];
 			if (body_position == 0)
 				continue;
 
 			if (body_position > head_position)
 				holds = false;
 
-			if (literal->kind == RELIC_LITERAL_NEGATED &&
+			if (literal->kind != RELIC_LITERAL_POSITIVE &&
 			    schedule->components[body_position - 1].stratum >=
 			    schedule->components[head_position - 1].stratum)
 				holds = false;
@@ -479,6 +481,22 @@ negation_reads_a_strictly_lower_stratum(void)
 	    "p(X) :- q(X), not missing(X).\n"
 	    "q(a).\n",
 	    "1:p/1");
+
+	/*
+	 * An aggregate reads its group predicate, a component of its own, from
+	 * a strictly lower stratum, as a negation reads what it negates; the
+	 * group rule's body reads positively.
+	 */
+	schedule_is(SCENARIO_STRATA,
+	    "dir_size(D, S) :- dir(D), S = sum(Z) { file(F, D), size(F, Z) }."
+	    "\n",
+	    "0:agg$dir_size$2$0$2/3 1:dir_size/2");
+	schedule_is(SCENARIO_STRATA,
+	    "d(X) :- c(X).\n"
+	    "b(X) :- c(X), not d(X).\n"
+	    "n(N) :- N = count { b(X) }.\n"
+	    "top(M) :- M = max(N) { n(N) }.\n",
+	    "0:d/1 1:b/1 1:agg$n$1$0$1/1 2:n/1 2:agg$top$1$0$1/1 3:top/1");
 }
 
 /*
@@ -695,6 +713,14 @@ recursion_through_negation_is_rejected(void)
 		  "q(X) :- r(X).\nq(X) :- s(X).\n"
 		  "r(X) :- t(X).\nt(X) :- p(X).\n"
 		  "s(X) :- p(X).\n", 1, 3 },
+		/*
+		 * An aggregate over its own head: the aggregate edge and the
+		 * group rule's edge back are one note.
+		 */
+		{ "c(1).\np(N) :- c(N).\np(N) :- N = count { p(X) }.\n", 1, 1 },
+		/* An aggregate edge and a negative edge in one cycle. */
+		{ "c(1).\na(N) :- c(N), N = count { b(X) }.\n"
+		  "b(X) :- c(X), not a(X).\n", 1, 2 },
 	};
 	relic_t *ctx;
 	diag_log_t log;

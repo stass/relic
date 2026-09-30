@@ -98,6 +98,11 @@ nothing.
 `relic_string()` reads the bytes of either back; `relic_value_compare()`
 orders any two values of one context.
 
+An aggregate adds no type. A `count` or a `sum` in a row is an integer and a
+`min` or a `max` is a value its group holds, so a caller reads an
+aggregate's result as it reads any other value,
+`specs/design-aggregates.md` section 15.
+
 ---
 
 ## 4. Programmatic facts
@@ -188,6 +193,13 @@ queries do not count against `max_tuples` and `max_memory` for the next one.
 A caller that wants to keep an answer copies it, which is what the collector
 does. Outside a query, `relic_stats()` finds no answers among the tuples
 held; from a row callback it counts the answer being delivered.
+
+The group relations of a query's aggregates are transient in the same way:
+they are filled when the query runs and emptied with its answer, so they
+count against the limits only while the query runs,
+`specs/design-aggregates.md` section 10. A `sum` whose total does not fit
+an `int64_t` fails the run, with no rows, as an undefined arithmetic result
+does, section 4.5 there.
 
 ### 5.2 The collector
 
@@ -296,8 +308,13 @@ default. A context created with the `RELIC_F_NOTE_MIXED` switch reports, as a
 note located at the comparison, the first such comparison in each rule of the
 program, once for the life of the context, and in a query once per answer;
 the rules a Magic rewrite generates from a rule, and its semi-naive variants,
-count as that rule. Asking for the note allocates nothing, so it cannot make
-an evaluation fail. It is a switch in
+count as that rule. The same switch reports an aggregate that has no value
+because its group mixes types -- a `sum` over a value that is not an
+integer, a `min` or `max` over values of more than one type,
+`specs/design-aggregates.md` section 4.4. A rule gets one note for
+whichever of these it meets first, and the group rule of an aggregate
+counts as the rule holding it. Asking for the note allocates nothing, so it
+cannot make an evaluation fail. It is a switch in
 `relic_config_t.flags` rather than a field, because the structure is frozen
 and a library that predates the switch ignores the bit, so a caller that sets
 it runs everywhere and loses only the notes. The tool sets it at `-vv`.
@@ -364,7 +381,10 @@ distcheck` runs it.
 
 * **A step or time limit.** Architecture section 63 defines none; adding one
   to `relic_config_t` later is an incompatible change and bumps the
-  version-info.
+  version-info. The limits bound what is stored, not what is computed: an
+  aggregate's group relation is charged to `max_tuples` and `max_memory`,
+  but the join that derives it is bounded by nothing, as any join is not,
+  `specs/design-aggregates.md` section 14.
 * **Sorted results.** A result keeps the stream's order; `relic_value_compare()`
   sorts it, as the tool does for `-s`.
 * **Thread safety within a context** (D-14). Contexts share nothing, so

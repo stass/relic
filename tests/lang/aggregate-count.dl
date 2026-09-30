@@ -1,0 +1,19 @@
+% How many dependencies each task has, and which tasks are ready.  A task
+% with no dependency counts zero, since the count of an empty group is
+% zero, which is what makes it ready.
+task(build). task(test). task(ship). task(docs).
+depends(test, build). depends(ship, test). depends(ship, docs).
+done(build).
+
+dep_count(T, N) :-
+    task(T),
+    N = count { depends(T, D) }.
+
+ready(T) :-
+    task(T),
+    N = count { depends(T, D), not done(D) },
+    N = 0.
+
+dep_count(T, N)?
+ready(T)?
+dep_count(ship, N)?

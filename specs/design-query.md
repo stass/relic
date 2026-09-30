@@ -102,6 +102,8 @@ struct relic_query {
 	relic_t			*ctx;
 	relic_arena_t		 arena;		/* text, syntax tree, rule parts */
 	relic_rule_t		 rule;		/* head RELIC_ID_NONE */
+	const relic_rule_t	*group_rules;	/* its aggregates' group rules */
+	size_t			 group_rule_count;
 	relic_relation_t	*answer;	/* the query's, of the output arity */
 	bool			 running;
 };
@@ -119,6 +121,21 @@ store's insertion, membership, iteration and limit checks are the same
 functions over the same struct. Two things about it differ, and both are
 settled below: it is named by its query rather than by a predicate (section
 5), and it is not in the relation table (section 3).
+
+**A query holding an aggregate also owns its group rules**, one per
+aggregate literal, compiled with the query's rule into the same arena and
+never appended to the program's rule table, so preparing such a query
+changes no program and discards nothing derived. Each fills a group
+relation that a run evaluates after the program's part and before any rule
+the rewrite generates, and that is emptied with the answer relation when
+the run ends, so outside a run the query holds nothing derived and counts
+nothing against the limits. The group predicates are interned, as a
+rewrite's generated predicates are, but named by the literal's position
+and the group's arity and never by the query's serial, so every query with
+an aggregate at the same position and of the same arity shares one entry:
+the table grows with the shapes of the queries, not with their number.
+`specs/design-aggregates.md` sections 5.2 and 10 give the names and the
+sequence.
 
 ---
 

@@ -82,7 +82,7 @@ string          "..." with escapes, holding arbitrary bytes
 integer         -?[0-9]+, converted to int64_t
 compare         = != < <= > >=, one token kind carrying which
 implies         :-
-( ) , . ?       punctuation
+( ) { } , . ?   punctuation
 end of input
 error           a byte sequence that is not a token
 ```
@@ -108,6 +108,16 @@ tidiness. A predicate of that name can never be *defined*, because a fact
 beginning `not` is read as a negation, so a reference to one is a typo that
 would otherwise reach every later stage looking like an ordinary predicate
 that simply has no rules.
+
+`count`, `sum`, `min` and `max` are ordinary symbol tokens by the same
+reasoning, and unlike `not` they cost no name. The parser reads one as an
+aggregate function only after the `=` of an equality and followed by `(` or
+`{`, which one token of lookahead decides, since a symbol in operand
+position is never otherwise followed by either. Anywhere else the word is
+the constant or the predicate name it always was, so `status(t, count).`
+stores a symbol and a predicate may be called `count`. The aggregate
+literal and what the parser checks of it are specified in
+`specs/design-aggregates.md` section 3.
 
 ### 3.3 Comments and whitespace
 
@@ -210,7 +220,7 @@ question, and what it produces should still be recognizable as the text.
 ```c
 term      := a constant's domain identifier, or a variable
 atom      := predicate name, arity, terms
-literal   := a positive atom, a negated atom, or a comparison
+literal   := a positive atom, a negated atom, a comparison, or an aggregate
 statement := a rule (head plus a possibly empty body), or a query (a body)
 program   := a list of statements
 ```
@@ -240,6 +250,14 @@ its name, for diagnostics and for the numbering the program model will do.
 of `_` is a distinct variable, while `_Unused` is an ordinary named one, so
 the distinction is a flag on the term rather than a string comparison repeated
 wherever variables are examined.
+
+**An aggregate is a literal that holds a body.** It records its function,
+its aggregated variable when the function takes one, its result variable,
+and its group body, an array of literals as a rule's body is, none of them
+an aggregate. Which variables of the body are shared with the rule is not a
+parser question and is not in the tree; `specs/design-aggregates.md`
+section 3.4 specifies the literal and section 5 what the program model
+builds from it.
 
 **Statements form a `TAILQ` rather than an array.** They are allocated from
 the program arena, which cannot resize a block, and a growable array would
@@ -418,6 +436,13 @@ bound lets an atom's terms be collected in a fixed buffer with no allocation
 and no failure path. The variable-count limit belongs to variable numbering
 and is enforced with it.
 
+Aggregates do not nest. A group body is entered only from an aggregate, and
+an aggregate met while one is already open is refused before its body is
+entered, so the parser's descent through a group body is one level deep
+however the text is shaped, and a program it accepts can be compiled and
+printed without a stack check, `specs/design-aggregates.md` sections 3.4
+and 14.
+
 Nothing else is bounded. A body may hold any number of literals and a file any
 number of statements; both are bounded by the text the caller supplied.
 
@@ -450,7 +475,10 @@ implements it:
   deferred, and a comparison is two terms and an operator.
 * **Recovery inside a statement.** Inserting a missing parenthesis and
   continuing produces a tree the writer did not write. Recovery discards to
-  the next terminator, which is the granularity the language already has.
+  the next terminator, which is the granularity the language already has. A
+  mistake inside a group body is no exception: the discard runs to the next
+  terminator, which the grammar never places inside the braces, so a group
+  body is recovered with the statement that holds it and never on its own.
 * **An error limit.** Recovery bounds the message count by the number of
   statements, so a cap would only truncate a report that is already
   proportional to the mistakes in the file.

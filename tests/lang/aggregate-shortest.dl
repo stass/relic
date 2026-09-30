@@ -1,0 +1,15 @@
+% The shortest distance between two nodes: a bounded recursion enumerates
+% every walk shorter than 8, and the minimum is taken over it once it is
+% complete, a stratum above it.
+node(a). node(b). node(c). node(d).
+edge(a, b, 1). edge(b, c, 2). edge(a, c, 5). edge(c, d, 1). edge(d, a, 1).
+
+dist(X, Y, D) :- edge(X, Y, D).
+dist(X, Z, D) :- dist(X, Y, D1), edge(Y, Z, D2), D = D1 + D2, D < 8.
+
+shortest(X, Y, M) :-
+    node(X), node(Y),
+    M = min(D) { dist(X, Y, D) }.
+
+shortest(a, Y, M)?
+shortest(X, a, M)?

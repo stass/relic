@@ -1,0 +1,12 @@
+% Aggregates in queries written in the program.  A query's output columns
+% are the rule's named variables, so a body's own variables take none.  Two
+% queries with an aggregate at the same position share nothing but the
+% generated predicate's entry, and each derives its own group.
+edge(a, b). edge(a, c). edge(b, c). edge(c, a).
+node(a). node(b). node(c). node(d).
+
+node(X), N = count { edge(X, Y) }?
+node(X), N = count { edge(Y, X) }?
+N = count { edge(X, Y) }?
+node(X), N = count { edge(X, Y) }, N > 1?
+S = sum(D) { edge(X, Y), node(Y), D = 1 }?

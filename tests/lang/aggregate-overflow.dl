@@ -1,0 +1,14 @@
+% A sum whose total does not fit a 64-bit integer is an error whatever
+% order its rows arrive in.  A sum whose partial totals pass the bound in
+% the order the rows are listed, but whose total fits, is exact.
+big(9223372036854775807). big(1).
+back(9223372036854775807). back(1). back(-1). back(0).
+low(-9223372036854775807). low(-1). low(-1).
+
+exact(S) :- S = sum(Z) { back(Z) }.
+over(S) :- S = sum(Z) { big(Z) }.
+under(S) :- S = sum(Z) { low(Z) }.
+
+exact(S)?
+under(S)?
+over(S)?

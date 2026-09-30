@@ -248,6 +248,11 @@ wildcard column, and its `EMIT` reads every slot a generator binds. The
 query rule that runs -- the one written, or the one its rewrite produced --
 streams when three things hold: its plan is distinct, the context sets
 neither `max_tuples` nor `max_memory`, and `RELIC_F_NO_STREAM` is clear.
+A plan holding an `AGGREGATE` is never distinct and is always gathered: a
+`sum` can fail on any binding, and a plan that can fail must not have
+delivered rows first, while a `count` may reach the head as an integer the
+value table does not yet hold, which only storing the answer resolves;
+`specs/design-aggregates.md` section 9.5.
 
 The property is decided on the built plan, by `relic_plan_derives_distinct()`
 in `lib/plan.c`, with a switch that names every kind of operation, so that a

@@ -52,6 +52,7 @@
 #define	RELIC_NAME_TEXT_MAX	44
 #define	RELIC_PRED_TEXT_MAX	50
 
+typedef struct relic_aggregate relic_aggregate_t;
 typedef struct relic_arg relic_arg_t;
 typedef struct relic_atom relic_atom_t;
 typedef struct relic_comparison relic_comparison_t;
@@ -101,9 +102,15 @@ typedef uint32_t relic_pred_id_t;
  * that first atom is: where the undefined-predicate warning points.  A
  * predicate interned only for facts a failed load never committed, or for a
  * rewrite that was abandoned, is referenced by nothing and never named.
+ *
+ * `program_rules` counts the program's rules deriving the predicate, which
+ * is the position the next one takes among them: what the group predicate
+ * of an aggregate in that rule is named after.  Rules are only appended, so
+ * a position once taken never shifts.
  */
 struct relic_pred {
 	relic_location_t	referenced_at;
+	size_t			program_rules;
 	uint32_t		name;	/* interned spelling */
 	relic_pred_id_t		views;
 	uint16_t		arity;
@@ -211,16 +218,57 @@ struct relic_comparison {
 };
 
 /*
+ * An aggregate literal, `result = fn(column) { ... }`, resolved.
+ *
+ * Its body is compiled into the group rule, an ordinary rule whose head is
+ * the group predicate: the variables the body shares with the rest of the
+ * rule, in the order of their slots in it, then the variables that are the
+ * body's own, in order of first occurrence.  The group predicate's relation
+ * then holds, under every binding of the shared columns, exactly the rows
+ * the body denotes, distinct because a relation is a set, and the literal
+ * folds the tuples of that relation whose first `shared_count` columns hold
+ * the shared slots' values.  Nothing else of the body is needed to evaluate
+ * the literal: the group relation is complete before any rule reading it
+ * runs, as a negated relation is.
+ *
+ * `shared` holds the slot of this rule that each shared column is bound
+ * from, in column order, and is NULL when there are none.  `column` is the
+ * aggregated column of the group relation, unused by COUNT, and `result`
+ * the slot the literal binds, or compares with when it is bound already.
+ * `where` is the function name.
+ *
+ * `group_rule` is the group rule as it was compiled, which explain prints
+ * the body from and the Magic rewrite reads what the body reads from.  It
+ * is a copy of its own in the arena that holds the literal, fixed from the
+ * moment the literal is, rather than a position in a rule table: the
+ * program's table grows and moves, and a query's group rules are held by
+ * the query, so the literal reaches its body the same way whoever holds it,
+ * a copy of it the rewrite made included.  Its slot c is column c.
+ */
+struct relic_aggregate {
+	const uint16_t		*shared;	/* shared_count of them */
+	const relic_rule_t	*group_rule;
+	relic_location_t	 where;
+	relic_pred_id_t		 group;
+	uint16_t		 shared_count;
+	uint16_t		 column;	/* not COUNT */
+	uint16_t		 result;
+	enum relic_aggregate_fn	 fn;
+};
+
+/*
  * One conjunct of a compiled body.
  *
- * The three cases are the parser's own classification, reused rather than
- * restated: a second enumeration of positive, negated and comparison would
- * be a second representation of one fact, and two such eventually disagree.
+ * The four cases are the parser's own classification, reused rather than
+ * restated: a second enumeration of positive, negated, comparison and
+ * aggregate would be a second representation of one fact, and two such
+ * eventually disagree.
  */
 struct relic_literal {
 	union {
 		relic_atom_t		 atom;
 		relic_comparison_t	 comparison;
+		relic_aggregate_t	 aggregate;
 	}				 u;
 	relic_location_t		 where;
 	enum relic_ast_literal_kind	 kind;	/* which arm of u is live */
@@ -274,7 +322,9 @@ struct relic_variable {
  * `origin` is the rule as the program wrote it: its position among the
  * program's rules, or RELIC_ORIGIN_QUERY for a query's rule.  A rule the
  * Magic rewrite generates takes the origin of the rule it was generated
- * from, so every copy of a rule leads back to the one the reader wrote.
+ * from, and a group rule the origin of the rule its aggregate was written
+ * in, so every copy of a rule, and every rule a statement compiled to,
+ * leads back to the one the reader wrote.
  * Every rule is compiled with RELIC_ORIGIN_QUERY, which is safe for any
  * rule, and a rule receives its position only as it joins the program's
  * rules, so no rule can hold a position that is not a program rule's.
@@ -318,10 +368,17 @@ struct relic_ruletab {
  * from text share one sequence of serial numbers in the order they were
  * compiled, and loads and preparations interleave, so a query's serial is
  * not its position among the program's queries and is recorded beside it.
+ *
+ * `group_rules` are the group rules of the query's aggregates, in body
+ * order, `group_rule_count` of them in the program arena.  They belong to
+ * the query rather than to the program's rules, so that preparing or
+ * running a query never changes the program.
  */
 struct relic_loaded_query {
-	relic_rule_t	rule;
-	size_t		serial;
+	relic_rule_t		 rule;
+	const relic_rule_t	*group_rules;
+	size_t			 group_rule_count;
+	size_t			 serial;
 };
 
 /*

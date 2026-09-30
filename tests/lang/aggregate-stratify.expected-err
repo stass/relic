@@ -1,0 +1,8 @@
+aggregate-stratify.dl:6:1: error: program is not stratified
+aggregate-stratify.dl:6:47: note: shortest/3 depends on shortest/3 through an aggregate
+aggregate-stratify.dl:8:1: error: program is not stratified
+aggregate-stratify.dl:8:46: note: nearest/3 depends on reach/3 through an aggregate
+aggregate-stratify.dl:9:19: note: reach/3 depends on nearest/3
+aggregate-stratify.dl:11:1: error: program is not stratified
+aggregate-stratify.dl:11:25: note: quiet/1 depends negatively on loud/1
+aggregate-stratify.dl:12:48: note: loud/1 depends negatively on quiet/1 through an aggregate

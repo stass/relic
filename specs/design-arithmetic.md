@@ -435,6 +435,12 @@ expression is a filter. The rule is simple to state, simple to plan and
 matches what every Datalog with arithmetic does; inverting an operator is
 left absent (section 19) rather than half-done for `+` and `-`.
 
+**An aggregate literal is a second form of assignment.** `N = count { ...
+}` binds `N` once every variable it shares with the rule is bound, and is
+a filter when `N` is bound before it, by the same rule of the plan's order;
+`specs/design-aggregates.md` section 4.6 states it, and section 4.5's
+argument below covers it unchanged.
+
 ### 4.5 Why the order of binding does not matter
 
 A body's comparisons are constraints, and the plan chooses which of the
@@ -552,6 +558,12 @@ computed and never used.
 
 The query rule is checked by the same closure, since its head is its output
 columns; `v(X), Y = X * 2?` has output columns `X` and `Y` and is safe.
+
+The closure has a second clause, for the aggregate literal of
+`specs/design-aggregates.md` section 5.3: an aggregate whose result
+variable is not in *B* and whose every shared slot is adds its result slot
+to *B*, and its shared and result slots join *R*. It is monotone like the
+first, so the bound on passes and the placement argument above stand.
 
 ---
 
@@ -671,6 +683,12 @@ therefore has two arrays, and every slot has a **kind** the plan fixes:
   another number slot; its `numbers` entry is the integer, and its frame
   entry is the integer's identifier when the value table holds one and zero
   otherwise (section 8.2).
+
+An aggregate literal binds a slot of one kind or the other by its
+function, `specs/design-aggregates.md` section 8.3: `count` and `sum` bind
+a number slot, their result being an integer the executor computed, and
+`min` and `max` bind a domain slot, their result being a value the group
+holds.
 
 The kind is static because the binding is: a slot is bound by exactly one
 operation of a plan, the first that reaches it, and every later occurrence
@@ -975,6 +993,12 @@ each with a record of its own:
   finds the record when it takes the batch, reports it through the
   diagnostic callback, discards the batch and fails the evaluation.
 
+An aggregate uses the same two records, `specs/design-aggregates.md`
+section 9.3: its note, for a `sum` over a value that is not an integer or
+a `min` or `max` over values of two types, is the note record, and a `sum`
+whose total does not fit is the error record, with the same marks and the
+same path to the caller.
+
 So "nothing the executor does can fail" becomes "the executor fails only by
 recording that it did", which is one more flag the caller looks at where it
 already looks for the note. In a parallel round a task that records an
@@ -1152,6 +1176,10 @@ and two change:
   derived twice, since `_` binds no variable to name;
 * a plan holding an **arithmetic step** is gathered, whatever its head
   names.
+
+A plan holding an aggregate is gathered for the same reason, whatever its
+head names: a `sum` can fail on any binding and a `count` binds a number
+slot, `specs/design-aggregates.md` section 9.5.
 
 So `v(X), Y = X?` streams whether or not `Y` is an output column,
 `v(X), Y = X * 2?` is gathered because it computes, `p(X, Y), Y = X?` with
@@ -1670,10 +1698,11 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
   pool.
 * **Floating point.** D-4's determinism and D-3's one-identifier-per-value
   both stand against it, and no workload asks.
-* **Aggregates.** `count`, `sum`, `min` over a relation change the
-  semantics of a rule from a conjunction to a computation over a set, need
-  their own stratification rule, and are the next feature of architecture
-  section 69, with a design of their own.
+* **Aggregates in this design.** `count`, `sum`, `min` over a relation
+  change the semantics of a rule from a conjunction to a computation over a
+  set and need their own stratification rule; they are specified in
+  `specs/design-aggregates.md`, which builds on the assignment, the two
+  kinds of slot and the pending integers here.
 * **Unboxed integer columns.** Storing a computed integer inline in a tuple
   rather than interning it would remove sections 8.3 and 9 and would be
   D-3's option B, rejected there for having two encodings of one value.

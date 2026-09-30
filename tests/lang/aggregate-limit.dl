@@ -1,0 +1,5 @@
+% A group relation is a relation: the tuple limit counts it and refuses the
+% insertion that would pass it, naming its generated predicate.
+n(1). n(2). n(3). n(4). n(5). n(6).
+pairs(C) :- C = count { n(X), n(Y) }.
+pairs(C)?

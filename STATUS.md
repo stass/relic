@@ -782,6 +782,27 @@ against the unbounded closure's 0.47 s, 1.40 times, and over 4 000 edges in
 3.10 s against 2.46 s, 1.26 times, on an optimized `--disable-shared`
 build; the difference is mostly the third column's storage.
 
+**Aggregates,** specified in `specs/design-aggregates.md`, steps 1 to 4 of
+its section 17.
+
+| Component | State |
+| --- | --- |
+| `lib/lex.c`, `lib/parse.c`, `lib/ast.h` | step 1: `{` and `}` are tokens; `count`, `sum`, `min` and `max` are functions only as the right side of an equality followed by `(` or `{`, and symbols and predicate names everywhere else; an aggregate literal holds its function, result, aggregated variable and body; a function name followed by `(` or `{` anywhere else, `count(X)`, `sum` without its variable, a constant or `_` as the variable, a nested aggregate and an empty body are each one error at their byte |
+| `lib/rule.c`, `lib/literal.c`, `lib/program.h`, `lib/pred.c` | a variable is local when every occurrence is inside one aggregate, from the statement's sorted occurrence pairs; each aggregate compiles to a group rule, its head the shared variables in the outer rule's slot order, the local ones in body order, named `agg$<pred>$<arity>$<rule>$<position>` or, for a query, `agg$$q0$<position>`, reused by every query; a statement's group rules and outer rule are reserved and then placed, so a load is whole or absent; the closure binds an aggregate's result once its shared variables are bound; a shared variable unbound inside the braces is reported with a note; `relic_aggregate_t` points at its group rule's copy in the owning arena |
+| `lib/depgraph.c`, `lib/stratify.c` | an aggregate edge, strict as a negative edge is; a cycle through one is reported with the aggregate edge and the group rule's edge collapsed into one note at the literal inside the braces |
+| `lib/plan.c`, `lib/plan.h`, `lib/exec.c`, `lib/arith.c` | step 2: `AGGREGATE` is a test placed once its shared variables are bound, binding its result or comparing with it; it walks the group relation, looks up the index keyed on the shared columns, or probes when every column is a key; `count` and `sum` bind a number slot, `min` and `max` a domain slot; `sum` folds into `relic_sum_t`, a 128-bit accumulator whose total is checked once; a sum over a non-integer and a min or max over two types note and drop the binding, and an overflowing sum fails the evaluation through the arithmetic error record |
+| `lib/eval.c`, `lib/explain.c`, `lib/round.c` | a query's group rules run in a charged arena of their own before its plan, their relations emptied at the end of the answer; a query whose plan folds is gathered; explain prints the literal as written, the operation as `aggregate N = count agg$...(X, Y) key={0}`, and a query's group rules under its heading |
+| `lib/magic.c` | step 3: a group predicate and everything its group rule reads are read completely; the rewrite copies, compares and hashes aggregate literals; a literal that negates or folds a predicate read on demand is an internal error |
+| `lib/round.c` | step 4: a round whose plans fold runs deferred like any other; the fold reads a relation of a lower stratum, which no round of the component writes |
+| `tests/` | `test_lex`: the braces; `test_parse`: each function's tree, the names as names, ten mistakes at their bytes; `test_rule`: the group rule's shape, name, origin and program-rule counts, names of several aggregates and rules, a query's reused name, nothing published from an unsafe statement; `test_stratify`: group components in the schedule and two rejected cycles, with the order oracle reading an aggregate as a strict edge; `test_plan`: placement after a later literal, compare mode, slot kinds, and the three access paths; `test_arith`: the accumulator in every order of twelve cases, 2^20 addends of each extreme in three orders, and states near its 2^95 bound against the compiler's 128-bit integers, mutation-checked against a dropped carry; `test_exhaustion`: an aggregate program checked and a query with a group answered with each allocation refused in turn, publishing whole statements and giving back every byte; `test_round`: five folds in the graph program, so every identity and limit sweep covers them, three aggregate queries through the rewrite, and an overflowing sum failing as serially; eighteen `aggregate-*` language tests, one pinned per strategy |
+
+Step 2's gate holds: over `tc-cyclic`'s graph, `dep_count/2` materializes
+in 8.1 ms beyond the load against 8.6 ms for the join `node(T), par(T, D)`
+alone, on an optimized `--disable-shared` build. Step 4's: over a graph ten
+times larger, the count takes 111 ms beyond the load at one thread and
+61 ms at eight under `-X parallel`, 1.84 times, against the join's 122 ms
+and 72 ms, 1.69 times, with every counter identical.
+
 ### Verified
 
 On macOS 15 with Apple clang, in-tree and out-of-tree:
@@ -1024,6 +1045,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-facts.md` | a program's facts as the tuples of their predicates' base stores: derived predicates and the relation each is read through, the all-or-nothing commit, seeding before the first pass, Magic over base views |
 | `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit |
 | `specs/design-arithmetic.md` | integer expressions as comparison operands, the equality that binds, the safety closure, computed integers in the frame and interned when stored, an undefined result as an evaluation error; implemented, step 4's speed-up gate missed |
+| `specs/design-aggregates.md` | `count`, `sum`, `min` and `max` over the rows a body denotes, the generated group rule, the aggregate edge, the fold, the exact sum, queries, Magic Sets and the frozen round; steps 1 to 4 implemented |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
@@ -1036,7 +1058,7 @@ release tarball.
 
 ## Decisions taken
 
-Recorded as D-1 through D-26 in `relic-plan.md`: D-1 to D-19 in section
+Recorded as D-1 through D-27 in `relic-plan.md`: D-1 to D-19 in section
 1, the later ones after section 9. The three that constrain everything
 else:
 

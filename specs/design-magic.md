@@ -88,6 +88,10 @@ A predicate is read completely when any of these holds:
 * **the query reaches it through negation**. Architecture section 37 keeps
   negation simple by materializing a negated relation in full in its lower
   stratum, so that absence means absence;
+* **the query reaches it through an aggregate**: the group predicate of an
+  aggregate literal, and every predicate a literal of its group rule's body
+  names, since a fold needs the whole group, `specs/design-aggregates.md`
+  section 11;
 * **something read completely depends on it**, positively or negatively. A
   relation is complete only if everything it is derived from is;
 * **the rewrite keeps only free adornments**: when no adornment the rewrite
@@ -106,6 +110,9 @@ visit the query's body:
 	a positive literal over any other predicate p: if p is not in
 	    demanded, add it and visit the body of every rule deriving p
 	a negated literal over q: add q to roots
+	an aggregate literal: add its group predicate to roots, and add
+	    every predicate a positive or negated literal of its group
+	    rule's body names to roots
 complete = roots and everything they depend on
 read on demand = demanded minus complete
 ```
@@ -284,7 +291,8 @@ rules will write them. The prefix starts as the guard `magic$p$α(...)` over
 the head's bound arguments, or empty when *α* binds no column. Each positive
 literal over a predicate read on demand is appended renamed to the adorned
 predicate for its own adornment; literals over complete predicates, negated
-literals and comparisons are appended as they are. The rewrite generates:
+literals, comparisons and aggregate literals are appended as they are. The
+rewrite generates:
 
 * **one magic rule per demand call**: its head is `magic$q$β(...)` over the
   call's bound arguments and its body is the prefix. The magic rule says:
@@ -385,6 +393,14 @@ magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
 The magic relation is the set of nodes reachable from `a`, and `path$bf` holds
 paths starting at those nodes only.
 
+**An aggregate literal is appended as it is**, `specs/design-aggregates.md`
+section 11. The order of section 5 places it where its shared slots are
+bound and reports that it binds its result slot, as it reports an
+assignment's binding, so a call after it whose argument is the result is
+adorned bound. The copy in a prefix has its shared and result slots
+renumbered and keeps its group predicate and group rule; the group
+predicate is read completely, section 3, and is never adorned.
+
 ### 6.1 A generated rule is a compiled rule
 
 Generated rules are ordinary `relic_rule_t` values, so nothing downstream
@@ -428,7 +444,10 @@ both give `magic$q$b(X) :- magic$p$b(X), a(X).` after renumbering. A
 generated rule is compared structurally with those already generated,
 through a hash table over their canonical forms, and a duplicate is not
 appended. Renumbering is what makes a plain structural comparison enough:
-two rules equal up to renaming have equal canonical forms. Supplementary
+two rules equal up to renaming have equal canonical forms. An aggregate
+literal enters the canonical form by its function, its group predicate, its
+aggregated column and its slots, `specs/design-aggregates.md` section 11.
+Supplementary
 predicates are named by their rule and call, so two source rules sharing a
 prefix beyond their first call binding a column generate distinct
 supplementary rules, and at most the magic rules before their first cut are
@@ -493,7 +512,10 @@ A program's derived predicates are the members of its schedule, and its
 size in literals is what one adorned copy of it holds: each rule's body plus
 one for its guard. A derived predicate whose base store holds facts counts
 as the one rule over its base view that each of its adornments is given,
-two literals (`specs/design-facts.md` section 6). Facts count nothing: the
+two literals (`specs/design-facts.md` section 6). An aggregate literal is
+one literal wherever a literal is counted: its body is a group rule read
+completely and never copied, `specs/design-aggregates.md` section 11.
+Facts count nothing: the
 rewrite copies none of them, so a thousand facts behind one rule rewrite as
 cheaply as one. Both budgets are fixed for a given program, so they are the
 same on every run.
@@ -595,7 +617,10 @@ a complete predicate, which no generated rule derives, so a negative edge
 always leaves the generated rules and can lie on no cycle. The rewrite checks
 the first half as it writes each body: a negated literal over a predicate read
 on demand would read an empty relation and succeed, so it fails the query with
-an internal error instead. Should the analysis
+an internal error instead. The check covers an aggregate literal, whose group
+predicate is read completely as a negated one is: one over a group predicate
+not read completely would fold an empty relation, and an aggregate edge,
+like a negative one, always leaves the generated rules. Should the analysis
 nevertheless find one, it reports the cycle as it would for a program, and the
 query fails with an internal error.
 
@@ -613,6 +638,13 @@ instead, as a query under `-X no-magic` does. The price is that each
 rewritten query derives again what it reads completely, seeding its derived
 predicates with their facts again. `TODO.md` records keeping complete
 relations across queries as an optimization.
+
+A query holding aggregates owns their group rules, and runs each once
+between the two phases, after the complete part has made what it reads
+complete and **before any generated rule runs**, since a magic or
+supplementary rule may hold a copy of the literal that folds the group;
+the group relations are emptied with the answer, `specs/design-aggregates.md`
+section 10.
 
 The discard runs before either phase begins, so no delta range spans it --
 the obligation `specs/design-relations.md` section 4 places on any operation
@@ -797,6 +829,10 @@ the same schedule, and byte-identical `-e` output.
   materialized in full. Propagating bindings into it would need the
   refinements of magic sets for stratified negation, which are correct only
   under conditions that are not obvious on first reading.
+* **Demand through an aggregate.** A group predicate is read completely,
+  as a negated predicate is, and is never adorned; adorning it on its
+  shared columns is left with demand through negation,
+  `specs/design-aggregates.md` section 20.
 * **Adorning a predicate no rule derives.** Section 3.
 * **A guarded copy of each fact.** Section 6.
 * **A supplementary predicate before the first call binding a column.** The

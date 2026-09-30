@@ -56,6 +56,7 @@
 #define	SCENARIO_NOTES		"notes come as the serial evaluator's do"
 #define	SCENARIO_ERRORS		"an undefined result fails as serially"
 #define	SCENARIO_COMPUTING	"a round computing integers is merged"
+#define	SCENARIO_SUM		"an overflowing sum fails as serially"
 
 /* Room for a generated program and for a context's diagnostics. */
 #define	PROGRAM_MAX		(256 * 1024)
@@ -129,6 +130,7 @@ static void	 limits_refuse_as_serially(const char *scenario,
 		    size_t threads);
 static void	 computing_rounds_merge(size_t threads);
 static void	 errors_fail_as_serially(size_t threads);
+static void	 sums_overflow_as_serially(size_t threads);
 static bool	 integers_agree(const relic_t *serial, const relic_t *deferred);
 static void	 notes_come_as_serially(size_t threads);
 static bool	 shared_as_expected(relic_t *deferred, size_t threads);
@@ -194,7 +196,11 @@ appendf(text_t *text, const char *format, ...)
  *	each edge, total/1 few of them each derived many times over, so that
  *	several workers compute one integer in one round, both/2 two in one
  *	tuple, near/2 integers the table holds, and dist/3 new integers round
- *	by round of a recursion.
+ *	by round of a recursion;
+ *	outdeg/2, reached/2, weight/2, closest/2 and widest/1 folding groups:
+ *	a count keyed on each node, a count and a sum over the closure, whose
+ *	groups a round derives in many pieces, a min over a recursion's
+ *	integers, and a max with no key over another fold's results.
  */
 static void
 graph_program(text_t *text)
@@ -237,7 +243,12 @@ graph_program(text_t *text)
 	    "near(X, K) :- idx(X, I), K = I + 1.\n"
 	    "dist(X, Y, 1000) :- edge(X, Y).\n"
 	    "dist(X, Z, D) :- dist(X, Y, E), edge(Y, Z), E < 1008,\n"
-	    "    D = E + 1.\n");
+	    "    D = E + 1.\n"
+	    "outdeg(X, N) :- node(X), N = count { edge(X, Y) }.\n"
+	    "reached(X, N) :- node(X), N = count { path(X, Y) }.\n"
+	    "weight(X, S) :- node(X), S = sum(I) { path(X, Y), idx(Y, I) }.\n"
+	    "closest(X, D) :- idx(X, _), D = min(E) { dist(X, n0, E) }.\n"
+	    "widest(M) :- M = max(N) { reached(X, N) }.\n");
 }
 
 /*
@@ -645,7 +656,8 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
  * Answer queries through their Magic rewrites, whose rounds run the seeds
  * the rewrite generates, and compare the rows in the order they came, the
  * relations and the counters.  A query that gathers its answer runs a
- * round of its own.
+ * round of its own, and so does one holding an aggregate, after the round
+ * that derives its group.
  */
 static void
 a_querys_rewrite_runs_deferred_rounds(size_t threads)
@@ -654,6 +666,8 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
 		"path(n3, Y)?", "hop(n5, Y)?", "odd(Y)?", "pair(X, n4)?",
 		"lonely(X)?", "done?", "path(X, Y), path(Y, X), X < Y?",
 		"dist(n3, Y, D)?", "total(S), S > 1070?",
+		"weight(n2, S)?", "closest(n4, D)?",
+		"node(X), N = count { path(X, Y), edge(Y, X) }?",
 	};
 	diagnostics_t serial_diagnostics;
 	diagnostics_t deferred_diagnostics;
@@ -1052,6 +1066,76 @@ errors_fail_as_serially(size_t threads)
 	}
 }
 
+/*
+ * A sum whose total does not fit fails the evaluation where the serial
+ * evaluator fails it, whatever order a deferred round's tasks derived its
+ * group in, and leaves what the serial run leaves.  The group of big/1 is
+ * four hundred values near 2^62, derived by a round of their own, cut into
+ * many pieces; small/1 folds the same group less its large values and
+ * fits.  Each context is then asked a query the failure left answerable.
+ */
+static void
+sums_overflow_as_serially(size_t threads)
+{
+	static const char message[] = "integer overflow in rule big/1";
+	diagnostics_t serial_diagnostics;
+	diagnostics_t deferred_diagnostics;
+	relic_t *serial;
+	relic_t *deferred;
+	int serial_status;
+	int deferred_status;
+	char what[96];
+	unsigned int i;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (i = 0; i < 400; i++)
+		appendf(&failing, "num(%u, %" PRIu64 ").\n", i,
+		    (UINT64_C(1) << 62) + i);
+	appendf(&failing,
+	    "val(K, V) :- num(K, V).\n"
+	    "big(S) :- S = sum(V) { val(K, V) }.\n"
+	    "small(S) :- S = sum(K) { val(K, V) }.\n");
+
+	snprintf(what, sizeof(what), "%s on %zu thread(s)", message, threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, 0, &deferred_diagnostics);
+
+	if (serial != NULL && deferred != NULL) {
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status != 0 && deferred_status != 0,
+		    SCENARIO_SUM, "%s: both fail", what);
+		checkf(strstr(serial_diagnostics.text, message) != NULL &&
+		    lines_in(&serial_diagnostics) == 1, SCENARIO_SUM,
+		    "%s: the serial run reports it alone: \"%s\"", what,
+		    serial_diagnostics.text);
+		checkf(strcmp(serial_diagnostics.text,
+		    deferred_diagnostics.text) == 0, SCENARIO_SUM,
+		    "%s: the diagnostics agree: \"%s\" and \"%s\"", what,
+		    serial_diagnostics.text, deferred_diagnostics.text);
+		checkf(merged_rounds(deferred) > 0, SCENARIO_SUM,
+		    "%s: the rounds before it are merged", what);
+		contexts_agree(SCENARIO_SUM, what, serial, deferred);
+		checkf(deferred->account.round_bytes == 0, SCENARIO_SUM,
+		    "%s: the round gave back its buffers", what);
+
+		serial_status = run_query(serial, "small(S)?", &serial_rows);
+		deferred_status = run_query(deferred, "small(S)?",
+		    &deferred_rows);
+		checkf(serial_status == 0 && deferred_status == 0 &&
+		    strstr(serial_rows.bytes, ":79800 \n") != NULL &&
+		    strcmp(serial_rows.bytes, deferred_rows.bytes) == 0,
+		    SCENARIO_SUM, "%s: small(S)? is then answered alike: "
+		    "\"%s\"", what, serial_rows.bytes);
+		contexts_agree(SCENARIO_SUM, "small(S)?", serial, deferred);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
 int
 main(void)
 {
@@ -1076,6 +1160,7 @@ main(void)
 		notes_come_as_serially(threads);
 		computing_rounds_merge(threads);
 		errors_fail_as_serially(threads);
+		sums_overflow_as_serially(threads);
 	}
 	computing_rounds_merge(MANY_THREADS);
 

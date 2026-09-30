@@ -139,7 +139,7 @@ Version 1 shall not implement:
 * unstratified negation;
 * well-founded semantics;
 * answer-set programming;
-* aggregates;
+* aggregates, specified for a later stage in `specs/design-aggregates.md`;
 * SQL;
 * transactions;
 * persistent database files;
@@ -260,7 +260,10 @@ A variable whose name begins with `_` but is longer than one character, such as
 singleton-variable warning below. This follows established logic-programming
 practice and lets a rule document a column it deliberately ignores.
 
-Variable scope is one rule or query.
+Variable scope is one rule or query. A variable every occurrence of which
+lies inside the braces of one aggregate body is local to that body instead;
+one that also occurs outside them belongs to the rule and is shared with
+the body, as `specs/design-aggregates.md` section 4.2 specifies.
 
 A variable occurring exactly once in a rule, and not beginning with `_`,
 produces a warning rather than an error:
@@ -475,6 +478,14 @@ body         := literal ("," literal)*
 literal      := atom
               | "not" atom
               | comparison
+              | aggregate
+
+aggregate    := variable "=" function "{" group "}"
+
+function     := "count"
+              | ("sum" | "min" | "max") "(" variable ")"
+
+group        := literal ("," literal)*
 
 atom         := identifier "(" [ term ("," term)* ] ")"
 
@@ -495,6 +506,12 @@ initialized.
 ```
 
 They are internally relations of arity zero.
+
+An aggregate stands only as the whole right side of an equality whose left
+side is a variable, and its group body holds no aggregate. `count`, `sum`,
+`min` and `max` are function names only in that position and ordinary
+symbols everywhere else. The aggregate literal is specified in
+`specs/design-aggregates.md` section 3.
 
 The lexical structure, the abstract syntax tree, the interning the front end
 performs, and the diagnostics and error recovery it produces are specified in
@@ -534,6 +551,12 @@ ready(X) :-
 
 Variables used by `<`, `>`, etc. must similarly be bindable from positive relational literals.
 
+An aggregate literal `V = count { ... }` binds its result variable `V` once
+every variable it shares with the rule is bound, and a shared variable must
+be bound inside the braces as well as outside them. The rule, and the
+safety of the body as a rule of its own, are specified in
+`specs/design-aggregates.md` section 5.3.
+
 Safety analysis occurs before evaluation.
 
 Predicate identity, variable numbering, the compiled form of a rule, the
@@ -559,6 +582,10 @@ Rules define intensional relations.
 The meaning of a positive recursive program is its least fixed point.
 
 Stratified programs are evaluated one stratum at a time.
+
+An aggregate is a function of a complete relation of a strictly lower
+stratum than the rule reading it, over the rows that agree with the values
+the rule has bound, `specs/design-aggregates.md` section 4.
 
 All relations use set semantics.
 
@@ -1076,10 +1103,13 @@ reported per offending component, are specified in
 Aggregates are outside v1. `count`, `sum`, `min` and `max` over the rows a
 body denotes, the equality that binds a variable to one, and the generated
 rule whose relation is the group are specified in
-`specs/design-aggregates.md`; a rule reads an aggregate from a strictly
-lower stratum as it reads a negated literal, so that design extends this
-section and sections 13 and 14 rather than changing what any v1 program
-means.
+`specs/design-aggregates.md`. A rule reads an aggregate from a strictly
+lower stratum as it reads a negated literal: the aggregate edge, from the
+rule's head to the generated predicate that holds the group, points
+strictly downward as a negative edge does, and one inside a dependency SCC
+is the same error, `specs/design-aggregates.md` section 7. That design
+extends this section and sections 13 and 14 rather than changing what any
+v1 program means.
 
 ---
 
@@ -1288,6 +1318,10 @@ ready(X) :-
 `blocked/1` may be fully materialized before specialized evaluation of `ready/1`.
 
 This keeps stratified negation straightforward and avoids complex magic transformations across negative edges.
+
+The group predicate an aggregate reads is treated as a relation referenced
+negatively is: it is evaluated completely in its lower stratum, with
+everything its body reads, per `specs/design-aggregates.md` section 11.
 
 Future versions may optimize this further if correctness remains obvious.
 
@@ -2233,6 +2267,10 @@ and enforces two structural limits that are not configurable:
 maximum predicate arity              32
 maximum distinct variables per rule  64
 ```
+
+The variables of an aggregate body, shared and local together, are the
+columns of the generated predicate that holds its group, so the arity limit
+bounds them, `specs/design-aggregates.md` section 5.4.
 
 Limits protect command-line and embedded users from accidental combinatorial
 explosion. The command-line tool exposes the configurable limits through

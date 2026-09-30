@@ -1488,3 +1488,27 @@ predicted from the table's count so that a parallel round publishes
 nothing before its last phase; the integer table is charged to the memory
 limit. Reverses the binding half of D-11 and the lexer's half of D-16.
 Specified in `specs/design-arithmetic.md`.
+
+### D-27 An aggregate folds a generated relation from a lower stratum
+
+`count`, `sum(V)`, `min(V)` and `max(V)` are written only as the right side
+of an equality, `N = count { body }`, and fold the set of rows the body
+denotes over the variables local to it: a variable is local when every
+occurrence is inside that aggregate, and shared otherwise. The body is
+compiled to a generated group rule whose head is the shared variables and
+then the local ones, named `agg$<pred>$<arity>$<rule>$<position>` for a
+program rule and `agg$$q0$<position>` for a query, and published with the
+rule that reads it or not at all. The reader depends on the group
+predicate through an aggregate edge, which stratification treats as a
+negative one, so a group is complete before it is folded and an aggregate
+in recursion is rejected. A shared variable must be bound inside the
+braces as well as outside. `sum` is exact over the group in a 128-bit
+accumulator and fails the evaluation only when the total does not fit
+`int64_t`, so its answer and its failure are functions of the group, not
+of the order its rows arrived in; a sum over a symbol and a min or max
+over values of two types have no value and are noted at verbosity 2. The
+unit test drives the accumulator with 2^20 addends of each extreme in
+three orders and checks the states near its 2^95 bound one addition at a
+time against the compiler's 128-bit integers, rather than 2^31 addends of
+each extreme, which takes minutes under a sanitizer. Specified in
+`specs/design-aggregates.md`.

@@ -58,6 +58,7 @@
  */
 
 typedef struct relic_cell relic_cell_t;
+typedef struct relic_fold relic_fold_t;
 
 /*
  * One cell of the stack a postfix program runs on: a domain identifier
@@ -70,6 +71,17 @@ struct relic_cell {
 		int64_t		number;
 	}		u;
 	bool		is_number;
+};
+
+/*
+ * The accumulator of one AGGREGATE's fold: the rows it has folded, the
+ * exact sum of their column for a sum, and for a min or a max the extreme
+ * value so far, meaningful once `rows` is not zero.
+ */
+struct relic_fold {
+	relic_sum_t	sum;
+	uint64_t	rows;
+	relic_dom_t	extreme;
 };
 
 /*
@@ -94,10 +106,27 @@ static relic_dom_t emit_column(relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
 static void	 emit_head(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom);
+static bool	 fold_group(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env,
+		    const relic_op_aggregate_t *aggregate,
+		    const relic_tuple_range_t *view, relic_fold_t *fold);
+static bool	 fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
+		    const relic_op_aggregate_t *aggregate, relic_fold_t *fold,
+		    const relic_dom_t *tuple);
+static bool	 fold_value(relic_scratch_t *scratch,
+		    const relic_op_aggregate_t *aggregate,
+		    const relic_fold_t *fold, relic_cell_t *valuep);
+static bool	 key_matches(const relic_scratch_t *scratch,
+		    const relic_op_aggregate_t *aggregate,
+		    const relic_dom_t *tuple);
 static relic_cell_t number_cell(int64_t number);
 static const char *operator_spelling(const relic_step_t *step);
 static bool	 order_satisfies(enum relic_compare_op compare,
 		    enum relic_order order);
+static void	 record_aggregate_note(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env,
+		    const relic_op_aggregate_t *aggregate,
+		    enum relic_note_kind kind);
 static void	 record_error(relic_scratch_t *scratch,
 		    const relic_location_t *where,
 		    enum relic_arith_status status);
@@ -114,6 +143,10 @@ static void	 resolve_views(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_plan_t *plan);
 static bool	 step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		    const relic_op_t *op, relic_op_state_t *state, bool resume);
+static bool	 step_aggregate(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env,
+		    const relic_op_aggregate_t *aggregate,
+		    const relic_tuple_range_t *view);
 static bool	 step_assign(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
 		    const relic_op_assign_t *assign);
@@ -364,6 +397,26 @@ record_operand_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
+ * Record, when the environment asks and nothing is recorded yet, that an
+ * aggregate had no value because of the types its group's rows hold.
+ */
+static void
+record_aggregate_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_op_aggregate_t *aggregate, enum relic_note_kind kind)
+{
+	relic_mixed_note_t *note;
+
+	note = &scratch->note;
+	if (!env->note_mixed || note->where != NULL)
+		return;
+
+	bzero(note, sizeof(*note));
+	note->where = &aggregate->where;
+	note->kind = kind;
+	note->aggregate = aggregate->aggregate;
+}
+
+/*
  * Record the first result of the running plan that arithmetic does not
  * define.
  */
@@ -541,6 +594,10 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		case RELIC_OP_ANTI_MEMBER:
 			scratch->states[level].view = relic_exec_view(env,
 			    &op->u.atom);
+			break;
+		case RELIC_OP_AGGREGATE:
+			scratch->states[level].view = relic_relation_all(
+			    op->u.aggregate.relation);
 			break;
 		case RELIC_OP_FILTER:
 		case RELIC_OP_ASSIGN:
@@ -740,6 +797,216 @@ step_assign(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
+ * Whether a row of an AGGREGATE's group relation holds the key: whether its
+ * leading columns hold what the key slots do.  A key slot that is a number
+ * slot holds the integer's identifier, or zero when the value table lacks
+ * the integer, which no column holds, as no relation holds such an integer.
+ */
+static bool
+key_matches(const relic_scratch_t *scratch,
+    const relic_op_aggregate_t *aggregate, const relic_dom_t *tuple)
+{
+	uint16_t column;
+
+	for (column = 0; column < aggregate->key_count; column++) {
+		if (tuple[column] !=
+		    scratch->frame[aggregate->key_slots[column]])
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Fold one row into the accumulator.  Returns false when the row puts the
+ * group outside the function's domain -- a sum's row that is not an
+ * integer, or a min's or a max's row of another type than the first --
+ * having recorded the note, and the fold then has no value.  A count reads
+ * no column: its group may have none, and then a tuple holds no value.
+ */
+static bool
+fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_op_aggregate_t *aggregate, relic_fold_t *fold,
+    const relic_dom_t *tuple)
+{
+	relic_dom_t value;
+	enum relic_order order;
+	int64_t integer;
+
+	switch (aggregate->fn) {
+	case RELIC_AGG_COUNT:
+		break;
+	case RELIC_AGG_SUM:
+		if (!relic_value_integer(env->ctx, tuple[aggregate->column],
+		    &integer)) {
+			record_aggregate_note(scratch, env, aggregate,
+			    RELIC_NOTE_SUM_TYPE);
+			return (false);
+		}
+		relic_sum_add(&fold->sum, integer);
+		break;
+	case RELIC_AGG_MIN:
+	case RELIC_AGG_MAX:
+		value = tuple[aggregate->column];
+		if (fold->rows == 0) {
+			fold->extreme = value;
+			break;
+		}
+		if ((value & RELIC_DOM_TYPE_MASK) !=
+		    (fold->extreme & RELIC_DOM_TYPE_MASK)) {
+			record_aggregate_note(scratch, env, aggregate,
+			    RELIC_NOTE_EXTREME_TYPES);
+			return (false);
+		}
+		order = relic_value_order(env->ctx, value, fold->extreme);
+		if ((aggregate->fn == RELIC_AGG_MIN &&
+		    order == RELIC_ORDER_LESS) ||
+		    (aggregate->fn == RELIC_AGG_MAX &&
+		    order == RELIC_ORDER_GREATER))
+			fold->extreme = value;
+		break;
+	}
+
+	fold->rows++;
+
+	return (true);
+}
+
+/*
+ * Fold every row of the group the key slots name, reached as the
+ * operation's access says, within `view`.  Returns false when a row put the
+ * group outside the function's domain.  The walk holds no tuple past the
+ * row it folds, and the relation is complete, so nothing inserts into it
+ * while the walk runs.
+ */
+static bool
+fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_op_aggregate_t *aggregate, const relic_tuple_range_t *view,
+    relic_fold_t *fold)
+{
+	const relic_index_t *index;
+	const relic_dom_t *tuple;
+	relic_dom_t key[RELIC_MAX_ARITY];
+	relic_tuple_id_t id;
+	uint16_t column;
+
+	for (column = 0; column < aggregate->key_count; column++)
+		key[column] = scratch->frame[aggregate->key_slots[column]];
+
+	switch (aggregate->access) {
+	case RELIC_FOLD_SCAN:
+		for (id = view->first; id < view->end; id++) {
+			scratch->counters.tuples_scanned++;
+			tuple = relic_relation_tuple(aggregate->relation, id);
+			if (key_matches(scratch, aggregate, tuple) &&
+			    !fold_row(scratch, env, aggregate, fold, tuple))
+				return (false);
+		}
+		return (true);
+	case RELIC_FOLD_LOOKUP:
+		index = relic_relation_index_at(aggregate->relation,
+		    aggregate->index_position);
+		assert(relic_index_key_mask(index) == aggregate->key_mask);
+		for (id = relic_index_first(index, aggregate->relation, key);
+		    id != RELIC_ID_NONE && id < view->end;
+		    id = relic_index_next(index, id)) {
+			scratch->counters.tuples_looked_up++;
+			tuple = relic_relation_tuple(aggregate->relation, id);
+			if (!fold_row(scratch, env, aggregate, fold, tuple))
+				return (false);
+		}
+		return (true);
+	case RELIC_FOLD_PROBE:
+		id = relic_relation_find(aggregate->relation, key);
+		if (id == RELIC_ID_NONE || id < view->first || id >= view->end)
+			return (true);
+		scratch->counters.tuples_looked_up++;
+		tuple = relic_relation_tuple(aggregate->relation, id);
+		return (fold_row(scratch, env, aggregate, fold, tuple));
+	}
+
+	return (true);
+}
+
+/*
+ * The value a completed fold gives: the row count for a count, the total
+ * for a sum, and the extreme for a min or a max, whose empty group has no
+ * value.  A total that does not fit int64_t records the overflow, which
+ * ends the plan.
+ */
+static bool
+fold_value(relic_scratch_t *scratch, const relic_op_aggregate_t *aggregate,
+    const relic_fold_t *fold, relic_cell_t *valuep)
+{
+	switch (aggregate->fn) {
+	case RELIC_AGG_COUNT:
+		*valuep = number_cell((int64_t)fold->rows);
+		return (true);
+	case RELIC_AGG_SUM:
+		if (!relic_sum_fits(&fold->sum)) {
+			record_error(scratch, &aggregate->where,
+			    RELIC_ARITH_OVERFLOW);
+			return (false);
+		}
+		*valuep = number_cell(relic_sum_value(&fold->sum));
+		return (true);
+	case RELIC_AGG_MIN:
+	case RELIC_AGG_MAX:
+		break;
+	}
+
+	if (fold->rows == 0)
+		return (false);
+
+	*valuep = dom_cell(fold->extreme);
+
+	return (true);
+}
+
+/*
+ * An AGGREGATE: fold the group its key names and bind the result slot to
+ * the value, an integer into a number slot, whose frame entry is then the
+ * integer's identifier or zero, and an identifier into a domain slot.  When
+ * the slot was bound before, the fold's value is compared with the slot's
+ * value instead, each read as the cell it is, so that a count of two equals
+ * a number slot holding two whether or not the value table holds the
+ * integer.  A fold with no value rejects the binding.
+ */
+static bool
+step_aggregate(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_op_aggregate_t *aggregate, const relic_tuple_range_t *view)
+{
+	relic_fold_t fold;
+	relic_cell_t bound;
+	relic_cell_t value;
+
+	bzero(&fold, sizeof(fold));
+	if (!fold_group(scratch, env, aggregate, view, &fold))
+		return (false);
+	if (!fold_value(scratch, aggregate, &fold, &value))
+		return (false);
+
+	if (!aggregate->binds) {
+		bound = aggregate->number ?
+		    number_cell(scratch->numbers[aggregate->slot]) :
+		    dom_cell(scratch->frame[aggregate->slot]);
+		return (cells_order(env, value, bound) == RELIC_ORDER_EQUAL);
+	}
+
+	assert(value.is_number == aggregate->number);
+	if (!aggregate->number) {
+		scratch->frame[aggregate->slot] = value.u.dom;
+		return (true);
+	}
+
+	scratch->numbers[aggregate->slot] = value.u.number;
+	scratch->frame[aggregate->slot] = relic_value_find_integer(env->ctx,
+	    value.u.number);
+
+	return (true);
+}
+
+/*
  * The value an EMIT writes for one column.  A number slot whose integer the
  * value table holds writes its identifier; one whose integer it does not
  * hold appends the integer to the scratch's pending integers and writes a
@@ -787,8 +1054,8 @@ emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
  * Ask one generator or test of the running plan for a match: a fresh one,
  * or the next one when resuming.
  *
- * A test and an ASSIGN succeed at most once, so resuming one always finds
- * nothing more.
+ * A test, an ASSIGN and an AGGREGATE succeed at most once, so resuming one
+ * always finds nothing more.
  * An ANTI_MEMBER is the membership test inverted: the binding survives when
  * the tuple is absent.  The EMIT is not asked here: the run loop appends its
  * tuple, and treats it as never matching, so nothing below it is ever
@@ -819,6 +1086,11 @@ step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		if (resume)
 			return (false);
 		return (step_assign(scratch, env, &op->u.assign));
+	case RELIC_OP_AGGREGATE:
+		if (resume)
+			return (false);
+		return (step_aggregate(scratch, env, &op->u.aggregate,
+		    &state->view));
 	case RELIC_OP_EMIT:
 		break;
 	}

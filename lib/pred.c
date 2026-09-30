@@ -273,7 +273,8 @@ relic_pred_name_head(relic_t *ctx, relic_pred_id_t id)
 
 /*
  * Record that a rule with this predicate as its head has been appended to a
- * rule table.  Only relic_ruletab_append() calls this.
+ * rule table.  Only relic_ruletab_place() calls this, and a query's
+ * compilation when it publishes the group rules the query holds.
  */
 void
 relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id)
@@ -283,6 +284,20 @@ relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id)
 	pred = pred_entry(ctx, id);
 	if (pred != NULL)
 		pred->derived = true;
+}
+
+/*
+ * Count one more of the program's rules deriving this predicate, which a
+ * program statement's compilation calls for each rule it appends.
+ */
+void
+relic_pred_count_program_rule(relic_t *ctx, relic_pred_id_t id)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, id);
+	if (pred != NULL)
+		pred->program_rules++;
 }
 
 /*

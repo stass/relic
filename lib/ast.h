@@ -61,6 +61,7 @@
  */
 #define	RELIC_MAX_EXPRESSION_DEPTH	32
 
+typedef struct relic_ast_aggregate relic_ast_aggregate_t;
 typedef struct relic_ast_atom relic_ast_atom_t;
 typedef struct relic_ast_comparison relic_ast_comparison_t;
 typedef struct relic_ast_expr relic_ast_expr_t;
@@ -95,6 +96,17 @@ enum relic_arith_op {
 	RELIC_ARITH_MULTIPLY,
 	RELIC_ARITH_DIVIDE,
 	RELIC_ARITH_REMAINDER
+};
+
+/*
+ * The four aggregate functions.  COUNT folds a group into its number of
+ * rows; SUM, MIN and MAX fold one column of it, the aggregated variable.
+ */
+enum relic_aggregate_fn {
+	RELIC_AGG_COUNT,
+	RELIC_AGG_SUM,
+	RELIC_AGG_MIN,
+	RELIC_AGG_MAX
 };
 
 enum relic_ast_term_kind {
@@ -193,17 +205,39 @@ struct relic_ast_comparison {
 enum relic_ast_literal_kind {
 	RELIC_LITERAL_POSITIVE,
 	RELIC_LITERAL_NEGATED,
-	RELIC_LITERAL_COMPARISON
+	RELIC_LITERAL_COMPARISON,
+	RELIC_LITERAL_AGGREGATE
+};
+
+/*
+ * An aggregate literal as written: `result = fn(column) { body }`, or
+ * `result = count { body }`, whose function has no column.
+ *
+ * `result` and `column` are variable terms, `column` meaningful for every
+ * function but COUNT.  `body` holds `body_length` literals, at least one,
+ * none of them an aggregate: the parser refuses an aggregate inside another
+ * before it enters the inner body.  `where` is the function name, which is
+ * what a message about the aggregate points at.
+ */
+struct relic_ast_aggregate {
+	relic_ast_literal_t	*body;
+	size_t			 body_length;
+	relic_ast_term_t	 result;
+	relic_ast_term_t	 column;	/* not COUNT */
+	relic_location_t	 where;
+	enum relic_aggregate_fn	 fn;
 };
 
 /*
  * One conjunct of a body, or the head of a rule.  `u.atom` is meaningful for
- * a positive or negated literal and `u.comparison` for a comparison.
+ * a positive or negated literal, `u.comparison` for a comparison and
+ * `u.aggregate` for an aggregate.
  */
 struct relic_ast_literal {
 	union {
 		relic_ast_atom_t	 atom;
 		relic_ast_comparison_t	 comparison;
+		relic_ast_aggregate_t	 aggregate;
 	}				 u;
 	relic_location_t		 where;
 	enum relic_ast_literal_kind	 kind;	/* which arm of u is live */

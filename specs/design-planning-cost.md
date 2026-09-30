@@ -106,7 +106,9 @@ The planner's state during ordering is the set of slots bound so far, a
 document rests on.
 
 * **It only grows.** Placing a positive literal adds the slots the literal
-  binds and removes nothing. Placing a test adds nothing.
+  binds and removes nothing. Placing a test adds nothing, except an
+  aggregate literal, a test that binds, which adds its result slot and
+  removes nothing either, `specs/design-aggregates.md` section 8.1.
 * **It has at most 65 states**, the one it starts from and one per bit that
   can still be set, because it is monotone over 64 bits. A rule of ten
   thousand literals still passes through at most 65 bound sets.

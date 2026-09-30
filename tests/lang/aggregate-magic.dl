@@ -1,0 +1,18 @@
+% A bound query over a rule holding an aggregate: the rewrite adorns the
+% rule and reads the group, and everything its body reads, completely.  A
+% query that folds a group and calls a rewritten predicate with the result
+% bound copies the aggregate into the seed of the call's magic rule, which
+% reads the query's group relation: the group is filled before any
+% generated rule runs.
+edge(a, b). edge(a, c). edge(b, c). edge(c, a). edge(c, b). edge(c, d).
+node(a). node(b). node(c). node(d).
+
+outdeg(X, N) :- node(X), N = count { edge(X, Y) }.
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+reach(X, N) :- node(X), N = count { path(X, Y) }.
+
+outdeg(a, N)?
+reach(d, N)?
+N = count { edge(X, _) }, outdeg(Y, N)?
+N = count { node(X) }, reach(Y, N)?

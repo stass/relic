@@ -1,0 +1,4 @@
+% An aggregate's body cannot hold an aggregate: the inner one is a rule of
+% its own.
+edge(a, b).
+n(N) :- N = count { edge(X, Y), M = count { edge(Y, Z) } }.

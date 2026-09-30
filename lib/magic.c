@@ -250,6 +250,8 @@ static void	 adornment_set_clear(relic_adornment_set_t *set);
 static void	 adornment_set_init(relic_adornment_set_t *set,
 		    uint64_t hash_seed);
 static void	 adornment_set_release(relic_adornment_set_t *set);
+static bool	 aggregates_equal(const relic_aggregate_t *a,
+		    const relic_aggregate_t *b);
 static int	 append_rule(relic_magic_t *magic, const relic_rule_t *rule,
 		    uint32_t hash);
 static uint64_t	 arg_slot(const relic_arg_t *arg);
@@ -294,6 +296,9 @@ static relic_arg_t *copy_args(relic_magic_t *magic,
 static relic_expr_t *copy_expr(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering,
 		    const relic_expr_t *source);
+static int	 copy_aggregate(relic_magic_t *magic,
+		    relic_renumbering_t *renumbering,
+		    const relic_aggregate_t *source, relic_aggregate_t *copy);
 static int	 copy_literal(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering,
 		    const relic_literal_t *source, relic_literal_t *copy);
@@ -311,6 +316,8 @@ static bool	 find_rule(const relic_magic_t *magic, const relic_rule_t *rule,
 		    uint32_t hash);
 static int	 guard_literal(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *head, relic_literal_t *guard);
+static uint32_t	 hash_aggregate(const relic_magic_t *magic, uint32_t hash,
+		    const relic_aggregate_t *aggregate);
 static uint32_t	 hash_arg(const relic_magic_t *magic, uint32_t hash,
 		    const relic_arg_t *arg);
 static uint32_t	 hash_expr(const relic_magic_t *magic, uint32_t hash,
@@ -341,12 +348,12 @@ static bool	 literals_equal(const relic_magic_t *magic,
 		    const relic_literal_t *a, const relic_literal_t *b);
 static void	*magic_alloc(relic_magic_t *magic, size_t count, size_t size);
 static int	 map_components(relic_magic_t *magic);
+static void	 mark_body_complete(relic_closure_t *closure,
+		    const relic_rule_t *rule);
 static void	 mark_complete(relic_closure_t *closure, size_t position);
 static int	 name_adornment(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound, relic_adornment_t *adornment);
 static int	 name_adornments(relic_magic_t *magic);
-static bool	 negates_on_demand(const relic_magic_t *magic,
-		    const relic_literal_t *literal);
 static void	 note_incomplete(relic_magic_t *magic);
 static int	 note_subsumed(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound);
@@ -365,6 +372,8 @@ static int	 reach_rules_of(relic_magic_t *magic,
 		    const relic_adornment_t *adornment);
 static int	 read_reached_completely(relic_magic_t *magic,
 		    const relic_rule_t *query);
+static bool	 reads_whole_on_demand(const relic_magic_t *magic,
+		    const relic_literal_t *literal);
 static bool	 reads_on_demand(const relic_magic_t *magic,
 		    const relic_literal_t *literal);
 static int	 record_call(relic_magic_t *magic, const relic_rule_t *rule,
@@ -666,11 +675,37 @@ mark_complete(relic_closure_t *closure, size_t position)
 }
 
 /*
- * Examine the relational literals of a body the query reaches.  A negated
- * literal's predicate is complete.  A positive literal's is complete when no
- * rule derives it, and otherwise read on demand, and the rules of its
- * component are visited in turn -- once, however many literals call it or
- * its fellow members.
+ * Mark complete the components of every predicate a rule's body reads,
+ * whatever it reads them for.
+ */
+static void
+mark_body_complete(relic_closure_t *closure, const relic_rule_t *rule)
+{
+	relic_pred_id_t pred;
+	size_t position;
+	size_t i;
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (!relic_literal_reads(&rule->body[i], &pred))
+			continue;
+
+		position = component_of(closure->magic, pred);
+		if (position != RELIC_NO_COMPONENT)
+			mark_complete(closure, position);
+	}
+}
+
+/*
+ * Examine the literals of a body the query reaches that read a relation.  A
+ * negated literal's predicate is complete, and so is an aggregate's group
+ * predicate, with everything the body of its group rule reads: a fold needs
+ * the whole group.  A query's group predicate is in no component, since the
+ * query runs its group rule itself, so what its body reads is marked
+ * directly; a program's is, and its body is reached by closing the complete
+ * set as well.  A positive literal's predicate is complete when no rule
+ * derives it, and otherwise read on demand, and the rules of its component
+ * are visited in turn -- once, however many literals call it or its fellow
+ * members.
  *
  * A predicate no rule derives is complete and empty, and there is nothing to
  * evaluate for it.  A predicate already complete needs no visit: whatever its
@@ -689,15 +724,18 @@ visit_body(relic_demand_t *demand, const relic_rule_t *rule)
 
 	for (i = 0; i < rule->body_length; i++) {
 		literal = &rule->body[i];
-		if (literal->kind == RELIC_LITERAL_COMPARISON)
+		if (!relic_literal_reads(literal, &pred))
 			continue;
 
-		pred = literal->u.atom.pred;
+		if (literal->kind == RELIC_LITERAL_AGGREGATE)
+			mark_body_complete(&demand->complete,
+			    literal->u.aggregate.group_rule);
+
 		position = component_of(magic, pred);
 		if (position == RELIC_NO_COMPONENT)
 			continue;
 
-		if (literal->kind == RELIC_LITERAL_NEGATED) {
+		if (literal->kind != RELIC_LITERAL_POSITIVE) {
 			mark_complete(&demand->complete, position);
 			continue;
 		}
@@ -730,8 +768,9 @@ visit_demanded(relic_demand_t *demand, size_t position)
 }
 
 /*
- * Mark complete everything a complete component depends on, positively or
- * negatively: a relation is complete only if what it is derived from is.
+ * Mark complete everything a complete component depends on, positively,
+ * negatively or through an aggregate: a relation is complete only if what
+ * it is derived from is.
  * Each component is queued when first marked and its rules followed once.
  */
 static void
@@ -739,11 +778,7 @@ close_complete(relic_closure_t *closure)
 {
 	const relic_magic_t *magic;
 	const relic_component_t *component;
-	const relic_literal_t *literal;
-	const relic_rule_t *rule;
-	size_t target;
 	size_t i;
-	size_t j;
 
 	magic = closure->magic;
 
@@ -751,20 +786,9 @@ close_complete(relic_closure_t *closure)
 		component = component_at(magic, closure->queue[closure->head]);
 		closure->head++;
 
-		for (i = 0; i < component->rule_count; i++) {
-			rule = component_rule(magic, component, i);
-
-			for (j = 0; j < rule->body_length; j++) {
-				literal = &rule->body[j];
-				if (literal->kind == RELIC_LITERAL_COMPARISON)
-					continue;
-
-				target = component_of(magic,
-				    literal->u.atom.pred);
-				if (target != RELIC_NO_COMPONENT)
-					mark_complete(closure, target);
-			}
-		}
+		for (i = 0; i < component->rule_count; i++)
+			mark_body_complete(closure,
+			    component_rule(magic, component, i));
 	}
 }
 
@@ -779,7 +803,7 @@ close_complete(relic_closure_t *closure)
  * predicate is something the predicate depends on, and complete already.
  */
 int
-relic_magic_find_complete(relic_magic_t *magic, const relic_rule_t *query)
+relic_magic_find_complete(relic_magic_t *magic, const relic_query_t *query)
 {
 	relic_demand_t demand;
 	size_t position;
@@ -798,7 +822,7 @@ relic_magic_find_complete(relic_magic_t *magic, const relic_rule_t *query)
 	if (demand_begin(&demand, magic) != 0)
 		return (-1);
 
-	visit_body(&demand, query);
+	visit_body(&demand, &query->rule);
 	while (demand.pending_count > 0) {
 		demand.pending_count--;
 		position = demand.pending[demand.pending_count];
@@ -1505,6 +1529,35 @@ copy_args(relic_magic_t *magic, relic_renumbering_t *renumbering,
 	return (copy);
 }
 
+/*
+ * A renumbered copy of an aggregate literal: its result slot, then its
+ * shared slots, in the rule being generated.  The group predicate and the
+ * group rule are the source's, since a group is read completely and never
+ * rewritten.
+ */
+static int
+copy_aggregate(relic_magic_t *magic, relic_renumbering_t *renumbering,
+    const relic_aggregate_t *source, relic_aggregate_t *copy)
+{
+	uint16_t *shared;
+	uint16_t i;
+
+	*copy = *source;
+	copy->result = renumber_slot(renumbering, source->result);
+
+	if (source->shared_count == 0)
+		return (0);
+
+	shared = magic_alloc(magic, source->shared_count, sizeof(*shared));
+	if (shared == NULL)
+		return (-1);
+	for (i = 0; i < source->shared_count; i++)
+		shared[i] = renumber_slot(renumbering, source->shared[i]);
+	copy->shared = shared;
+
+	return (0);
+}
+
 static int
 copy_literal(relic_magic_t *magic, relic_renumbering_t *renumbering,
     const relic_literal_t *source, relic_literal_t *copy)
@@ -1512,6 +1565,10 @@ copy_literal(relic_magic_t *magic, relic_renumbering_t *renumbering,
 	uint16_t arity;
 
 	*copy = *source;
+
+	if (source->kind == RELIC_LITERAL_AGGREGATE)
+		return (copy_aggregate(magic, renumbering, &source->u.aggregate,
+		    &copy->u.aggregate));
 
 	if (source->kind == RELIC_LITERAL_COMPARISON) {
 		copy->u.comparison.left = copy_expr(magic, renumbering,
@@ -1609,12 +1666,37 @@ args_equal(const relic_arg_t *a, const relic_arg_t *b, uint16_t count)
 	return (true);
 }
 
+/*
+ * Whether two aggregate literals of canonical rules are the same literal:
+ * the same function of the same column of the same group, binding or
+ * comparing the same slot for the same key.
+ */
+static bool
+aggregates_equal(const relic_aggregate_t *a, const relic_aggregate_t *b)
+{
+	uint16_t i;
+
+	if (a->fn != b->fn || a->group != b->group || a->column != b->column ||
+	    a->result != b->result || a->shared_count != b->shared_count)
+		return (false);
+
+	for (i = 0; i < a->shared_count; i++) {
+		if (a->shared[i] != b->shared[i])
+			return (false);
+	}
+
+	return (true);
+}
+
 static bool
 literals_equal(const relic_magic_t *magic, const relic_literal_t *a,
     const relic_literal_t *b)
 {
 	if (a->kind != b->kind)
 		return (false);
+
+	if (a->kind == RELIC_LITERAL_AGGREGATE)
+		return (aggregates_equal(&a->u.aggregate, &b->u.aggregate));
 
 	if (a->kind == RELIC_LITERAL_COMPARISON)
 		return (a->u.comparison.op == b->u.comparison.op &&
@@ -1725,6 +1807,25 @@ hash_expr(const relic_magic_t *magic, uint32_t hash, const relic_expr_t *expr)
 }
 
 /*
+ * Mix into `hash` what aggregates_equal() compares.
+ */
+static uint32_t
+hash_aggregate(const relic_magic_t *magic, uint32_t hash,
+    const relic_aggregate_t *aggregate)
+{
+	uint16_t i;
+
+	hash = hash_step(magic, hash, (uint32_t)aggregate->fn);
+	hash = hash_step(magic, hash, aggregate->group);
+	hash = hash_step(magic, hash, aggregate->column);
+	hash = hash_step(magic, hash, aggregate->result);
+	for (i = 0; i < aggregate->shared_count; i++)
+		hash = hash_step(magic, hash, aggregate->shared[i]);
+
+	return (hash);
+}
+
+/*
  * The hash of a canonical rule, over everything rules_equal() compares.
  */
 static uint32_t
@@ -1744,6 +1845,12 @@ rule_hash(const relic_magic_t *magic, const relic_rule_t *rule)
 	for (i = 0; i < rule->body_length; i++) {
 		literal = &rule->body[i];
 		hash = hash_step(magic, hash, (uint32_t)literal->kind);
+
+		if (literal->kind == RELIC_LITERAL_AGGREGATE) {
+			hash = hash_aggregate(magic, hash,
+			    &literal->u.aggregate);
+			continue;
+		}
 
 		if (literal->kind == RELIC_LITERAL_COMPARISON) {
 			hash = hash_step(magic, hash,
@@ -1948,21 +2055,29 @@ reads_on_demand(const relic_magic_t *magic, const relic_literal_t *literal)
 }
 
 /*
- * Whether a body literal negates a predicate the query does not read
- * completely.  None may: a negated literal is kept as written, so its
+ * Whether a body literal that reads its relation whole -- a negated literal,
+ * or an aggregate folding its group -- reads a predicate the query does not
+ * read completely.  None may: such a literal is kept as written, so its
  * relation must be whole before the rewrite runs, and nothing evaluates a
  * predicate read on demand except through its adornments.  The walk that
- * finds the complete predicates marks every negated one it reaches, and the
- * rewrite reaches only what that walk did, so this never holds; if the two
- * ever disagreed the negation would read an empty relation and succeed,
- * silently, and no later check -- not stratification, which sees no cycle
- * -- would notice.
+ * finds the complete predicates marks every negated and every group
+ * predicate it reaches, and the rewrite reaches only what that walk did, so
+ * this never holds; if the two ever disagreed the negation would read an
+ * empty relation and succeed, or the fold fold an empty group, silently,
+ * and no later check -- not stratification, which sees no cycle -- would
+ * notice.
  */
 static bool
-negates_on_demand(const relic_magic_t *magic, const relic_literal_t *literal)
+reads_whole_on_demand(const relic_magic_t *magic,
+    const relic_literal_t *literal)
 {
-	return (literal->kind == RELIC_LITERAL_NEGATED &&
-	    !pred_is_complete(magic, literal->u.atom.pred));
+	relic_pred_id_t pred;
+
+	if (literal->kind == RELIC_LITERAL_POSITIVE ||
+	    !relic_literal_reads(literal, &pred))
+		return (false);
+
+	return (!pred_is_complete(magic, pred));
 }
 
 /*
@@ -2054,7 +2169,7 @@ arg_slot(const relic_arg_t *arg)
 
 /*
  * The slots a literal reads: every variable among its arguments, whatever
- * its kind.
+ * its kind, and an aggregate's key and result.
  */
 static uint64_t
 literal_slots(const relic_magic_t *magic, const relic_literal_t *literal)
@@ -2066,6 +2181,10 @@ literal_slots(const relic_magic_t *magic, const relic_literal_t *literal)
 
 	if (literal->kind == RELIC_LITERAL_COMPARISON)
 		return (relic_comparison_slots(&literal->u.comparison));
+
+	if (literal->kind == RELIC_LITERAL_AGGREGATE)
+		return (relic_aggregate_shared_slots(&literal->u.aggregate) |
+		    (UINT64_C(1) << literal->u.aggregate.result));
 
 	args = literal->u.atom.args;
 	arity = pred_arity(magic, literal->u.atom.pred);
@@ -2364,10 +2483,10 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	for (i = 0; i < rule->body_length; i++) {
 		literal = rule->body[order[i]];
 
-		if (negates_on_demand(magic, &literal)) {
+		if (reads_whole_on_demand(magic, &literal)) {
 			relic_diagf(magic->ctx, RELIC_ERROR, &rule->where,
 			    "internal error: a query's Magic rewrite negates "
-			    "a predicate it does not read completely");
+			    "or folds a predicate it does not read completely");
 			return (-1);
 		}
 

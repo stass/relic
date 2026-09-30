@@ -1,0 +1,20 @@
+% Arithmetic inside a body, and an aggregate feeding an assignment and an
+% assignment feeding an aggregate's key.  A count compared with an integer
+% the rule computed holds whether or not the value table holds it.
+price(apple, 3). price(pear, 5). price(plum, 2).
+qty(apple, 4). qty(pear, 1). qty(plum, 10).
+basket(fruit).
+in(fruit, apple). in(fruit, pear). in(fruit, plum).
+
+cost(B, S) :- basket(B), S = sum(C) { in(B, I), price(I, P), qty(I, Q), C = P * Q }.
+mean(B, A) :- basket(B), S = sum(P) { in(B, I), price(I, P) },
+    N = count { in(B, J) }, A = S / N.
+three(B) :- basket(B), K = 1 + 2, K = count { in(B, I) }.
+shifted(M) :- M1 = min(P) { price(I, P) }, M = M1 + 100.
+keyed(X, N) :- price(X, P0), P = P0 + 0, N = count { price(Y, P), qty(Y, Q) }.
+
+cost(B, S)?
+mean(B, A)?
+three(B)?
+shifted(M)?
+keyed(X, N)?

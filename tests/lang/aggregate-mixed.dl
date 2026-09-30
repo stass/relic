@@ -1,0 +1,16 @@
+% A sum over a column holding a symbol, and a min over a column holding
+% values of two types, have no value: the literal is false and the binding
+% dropped, and -vv notes it once per rule without naming the types.
+size(f1, 10). size(f2, x). size(f3, 5).
+name(p, 1). name(q, bob).
+kind(p, a). kind(q, a).
+
+total(S) :- S = sum(Z) { size(F, Z) }.
+first(M) :- M = min(N) { name(P, N) }.
+per_kind(K, M) :- kind(_, K), M = min(N) { kind(P, K), name(P, N) }.
+fine(S) :- S = sum(Z) { size(F, Z), F != f2 }.
+
+total(S)?
+first(M)?
+per_kind(K, M)?
+fine(S)?
