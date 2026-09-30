@@ -162,7 +162,8 @@ symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t hash,
 	 * One byte past the recorded length holds a terminator, so a caller
 	 * that has no use for the length can treat the result as a C string.
 	 * A refused copy clears the arena's failure: the next symbol may fit
-	 * where this one did not.
+	 * where this one did not.  The empty string's `bytes` may be NULL,
+	 * which bcopy(3) may not be given even to copy nothing.
 	 */
 	copy = relic_arena_alloc(&table->strings, length + 1);
 	account_pool(ctx);
@@ -171,7 +172,8 @@ symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t hash,
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
-	bcopy(bytes, copy, length);
+	if (length > 0)
+		bcopy(bytes, copy, length);
 	copy[length] = '\0';
 
 	entry = &table->entries[table->count];

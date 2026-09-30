@@ -159,8 +159,8 @@ the_empty_string_interns_like_any_other(void)
 	if (ctx == NULL)
 		return;
 
-	check(relic_symbol_intern(ctx, "", 0, &empty) == 0, SCENARIO_EMPTY,
-	    "interning no bytes should succeed");
+	check(relic_symbol_intern(ctx, NULL, 0, &empty) == 0, SCENARIO_EMPTY,
+	    "interning no bytes from no object should succeed");
 	check(relic_symbol_intern(ctx, "", 0, &again) == 0, SCENARIO_EMPTY,
 	    "interning no bytes again should succeed");
 	check(empty == again, SCENARIO_EMPTY,
