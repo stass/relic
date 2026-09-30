@@ -2,8 +2,8 @@
 
 Two kinds of file live here, and they are governed by different rules.
 
-**Replacements.** `getentropy.c`, `reallocarray.c`, `strlcat.c`,
-`strlcpy.c` and `strtonum.c` are relic-owned implementations of BSD
+**Replacements.** `getentropy.c`, `memmem.c`, `reallocarray.c`,
+`strlcat.c`, `strlcpy.c` and `strtonum.c` are relic-owned implementations of BSD
 interfaces that some platforms lack. `configure` compiles one only where the
 C library does not provide the interface, through `AC_REPLACE_FUNCS`, so
 engine sources call each interface unconditionally and no source outside

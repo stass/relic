@@ -89,32 +89,47 @@ enum relic_op_kind {
  * never in a LOOKUP's key columns.  A test and an EMIT read constants and
  * bound slots and nothing else.
  *
- * A slot is of one of two kinds, fixed by the operation that binds it.  A
- * domain slot is bound by a generator, by an ASSIGN of a constant or of
- * another domain slot, or by the AGGREGATE of a `min` or a `max`, and its
- * frame entry is a domain identifier.  A number slot is bound by an ASSIGN
- * of a computed integer or of another number slot, or by the AGGREGATE of
- * a `count` or a `sum`; the integer is kept beside the frame, and its frame
- * entry is the
- * integer's identifier when the value table holds one and zero when it does
- * not.  Zero names no value and is in no tuple and no key, so every
- * operation over a relation reads a number slot through BOUND like any other
- * and matches nothing when the integer is new, which is right, since a
- * relation holds no integer the table lacks.  Only an EMIT needs the integer
- * itself, to store it, and reads a number slot through RELIC_PLAN_NUMBER.
+ * A slot is of one of three kinds, fixed by the operation that binds it
+ * (enum relic_slot_kind).  A domain slot is bound by a generator, by an
+ * ASSIGN of a constant or of another domain slot, or by the AGGREGATE of a
+ * `min` or a `max`, and its frame entry is a domain identifier.  A number
+ * slot is bound by an ASSIGN of a computed integer or of another number
+ * slot, or by the AGGREGATE of a `count` or a `sum`; the integer is kept
+ * beside the frame.  A text slot is bound by an ASSIGN of a string a
+ * function computed or of another text slot; its bytes are kept in the
+ * executor's text stack.  The frame entry of a number or a text slot is the
+ * value's identifier when the context has assigned the value one, and zero
+ * when it has not.  Zero names no value and is in no tuple and no key, so
+ * every operation over a relation reads such a slot through BOUND like any
+ * other and matches nothing when the value is new, which is right, since a
+ * relation holds no value the context has not assigned.  Only an EMIT needs
+ * the value itself, to store it, and reads a number slot through
+ * RELIC_PLAN_NUMBER and a text slot through RELIC_PLAN_TEXT.
  */
 enum relic_term_action {
 	RELIC_PLAN_CONSTANT,	/* must equal an interned constant */
 	RELIC_PLAN_BOUND,	/* must equal a slot bound before this column */
 	RELIC_PLAN_NUMBER,	/* an EMIT's number slot: its integer */
+	RELIC_PLAN_TEXT,	/* an EMIT's text slot: its bytes */
 	RELIC_PLAN_BIND,	/* binds its slot from the tuple */
 	RELIC_PLAN_ANY		/* `_`: matches anything, binds nothing */
+};
+
+/*
+ * The kind of a slot, as the paragraph above sets out, and so of the value
+ * a postfix program leaves: an identifier, a computed integer, or a
+ * computed string.
+ */
+enum relic_slot_kind {
+	RELIC_SLOT_DOMAIN,
+	RELIC_SLOT_NUMBER,
+	RELIC_SLOT_TEXT
 };
 
 struct relic_plan_term {
 	union {
 		relic_dom_t	constant;	/* RELIC_PLAN_CONSTANT */
-		uint16_t	slot;		/* BOUND, NUMBER and BIND */
+		uint16_t	slot;		/* BOUND, NUMBER, TEXT and BIND */
 	}			u;
 	enum relic_term_action	action;		/* which arm of u is live */
 };
@@ -186,23 +201,27 @@ struct relic_op_atom {
 };
 
 /*
- * One step of a postfix program: push a constant's identifier, a domain slot's
- * identifier or a number slot's integer, pop one integer and push its
- * negation, or pop two and push what a binary operator makes of them.
+ * One step of a postfix program: push a constant's identifier, a domain
+ * slot's identifier, a number slot's integer or a text slot's bytes, pop one
+ * integer and push its negation, pop two and push what a binary operator
+ * makes of them, or pop a function's arguments and push its result.
  */
 enum relic_step_kind {
 	RELIC_STEP_CONSTANT,
 	RELIC_STEP_DOMAIN_SLOT,
 	RELIC_STEP_NUMBER_SLOT,
+	RELIC_STEP_TEXT_SLOT,
 	RELIC_STEP_NEGATE,
-	RELIC_STEP_BINARY
+	RELIC_STEP_BINARY,
+	RELIC_STEP_CALL
 };
 
 struct relic_step {
 	union {
 		relic_dom_t		constant;	/* CONSTANT */
-		uint16_t		slot;		/* the two SLOTs */
+		uint16_t		slot;		/* the three SLOTs */
 		enum relic_arith_op	op;		/* BINARY */
+		enum relic_function	fn;		/* CALL */
 	}			u;
 	enum relic_step_kind	kind;
 };
@@ -211,10 +230,15 @@ struct relic_step {
  * An expression in the form the executor runs, a postfix program: its tree's
  * nodes in postfix order, each operand's steps before its operator's, so
  * that running the steps in order over a stack leaves the expression's value
- * as the one cell left.  A term is a postfix program of one step.  `depth`
- * is the stack cells the run needs, at most RELIC_POSTFIX_DEPTH_MAX:
- * evaluating a tree of height h holds at most h + 1 cells at once, since a
- * node's left operand leaves one cell while its right operand is evaluated.
+ * as the one cell left.  A term is a postfix program of one step.
+ *
+ * `depth` is the most cells the run holds at once.  A leaf holds one, and a
+ * node with arguments holds each earlier argument's cell while a later one
+ * is evaluated, so its need is the greatest of need(argument i) + i over
+ * its arguments, counting i from zero.  A level of a tree adds at most two
+ * cells, since no node has more than three arguments, so a tree of height
+ * h needs at most 2h - 1 cells, and RELIC_POSTFIX_DEPTH_MAX is that bound
+ * at the greatest height the parser admits.
  *
  * Which kind of slot each step reads is part of the step, decided with the
  * plan, since a slot's kind is a fact about the plan and not the rule.
@@ -225,34 +249,49 @@ struct relic_postfix {
 	uint8_t		 depth;
 };
 
-#define	RELIC_POSTFIX_DEPTH_MAX	(RELIC_MAX_EXPRESSION_DEPTH + 1)
+#define	RELIC_POSTFIX_DEPTH_MAX	(2 * RELIC_MAX_EXPRESSION_DEPTH - 1)
+
+_Static_assert(RELIC_MAX_FUNCTION_ARITY <= 3,
+    "a level of a tree adds at most two cells to a program's stack");
+
+/*
+ * Where the strings an operation's programs compute are built in the
+ * executor's text stack: above the string the last ASSIGN before the
+ * operation that binds a text slot keeps there, `text_base` being that
+ * ASSIGN's position in the plan plus one, or from the stack's start when
+ * `text_base` is zero because no ASSIGN before it binds one.  Every slot
+ * such an operation reads was bound at or before that ASSIGN, or by an
+ * operation that keeps nothing on the stack, so what it builds overwrites
+ * no string a slot it reads names.
+ */
 
 /*
  * A comparison of the values of two postfix programs.  `where` is where the
  * comparison was written, which a note about how it compared and an error in
  * computing it point at, and `comparison` is the comparison as the rule holds
- * it, which explain prints.
+ * it, which explain prints.  `text_base` is as the paragraph above says.
  */
 struct relic_op_filter {
 	relic_postfix_t			 left;
 	relic_postfix_t			 right;
 	const relic_comparison_t	*comparison;
 	relic_location_t		 where;
+	size_t				 text_base;
 	enum relic_compare_op		 compare;
 };
 
 /*
- * An assignment: bind `slot` to the value of `value`, a domain slot when
- * `number` is false and a number slot when it is true.  `expr` is the
- * expression as the rule holds it, which explain prints, and `where` is as
- * for a FILTER.
+ * An assignment: bind `slot`, of kind `kind`, to the value of `value`.
+ * `expr` is the expression as the rule holds it, which explain prints, and
+ * `where` and `text_base` are as for a FILTER.
  */
 struct relic_op_assign {
 	relic_postfix_t		 value;
 	const relic_expr_t	*expr;
 	relic_location_t	 where;
+	size_t			 text_base;
+	enum relic_slot_kind	 kind;
 	uint16_t		 slot;
-	bool			 number;
 };
 
 /*
@@ -280,12 +319,12 @@ enum relic_fold_access {
  * column `column` of each row, which `count` does not read.
  *
  * `binds` says whether the fold binds `slot` or, bound before, compares its
- * value with it; `number` says the slot is a number slot, which a count or
- * a sum binds and a min or a max does not, and which a compared slot is
- * when the operation that bound it made it one.  `aggregate` is the literal
- * as the rule holds it, which explain prints, and `where` is where its
- * function is written, which a note about the fold and an overflowing sum
- * point at.
+ * value with it; `kind` is the slot's kind, a number slot when a count or
+ * a sum binds it and a domain slot when a min or a max does, and whatever
+ * the operation that bound it made it when it is compared.  `aggregate` is
+ * the literal as the rule holds it, which explain prints, and `where` is
+ * where its function is written, which a note about the fold and an
+ * overflowing sum point at.
  */
 struct relic_op_aggregate {
 	const relic_relation_t	*relation;
@@ -299,9 +338,9 @@ struct relic_op_aggregate {
 	uint16_t		 arity;
 	uint16_t		 key_count;
 	uint16_t		 column;
+	enum relic_slot_kind	 kind;
 	uint16_t		 slot;
 	bool			 binds;
-	bool			 number;
 };
 
 struct relic_op {

@@ -108,8 +108,8 @@ struct relic_merge_part {
  * `projected` the bytes each target will hold once it has taken them.
  * `pending` holds the round's `pending_count` pending integers in task
  * order, `pending_map` the identifier each is promised, and
- * `table_projected` the bytes the integer table will hold once it has taken
- * the new ones; `pending_charged` is what the two arrays were charged.
+ * `table_projected` the bytes the value table and the pool will hold once
+ * they have taken the new ones; `pending_charged` is what the two arrays were charged.
  * `task_firsts[t * RELIC_STRIPES + s]` counts task t's firsts in stripe s,
  * and `task_starts[t]` is the position task t's first new tuple takes in
  * its target's append.  `classify_parts` and `apply_parts` list the parts
@@ -128,7 +128,7 @@ struct relic_merge {
 	size_t			 classify_part_count;
 	relic_merge_part_t	*apply_parts;
 	size_t			 apply_part_count;
-	int64_t			*pending;
+	relic_pending_t		*pending;
 	size_t			 pending_count;
 	relic_pending_map_t	 pending_map;
 	size_t			 pending_charged;
@@ -296,7 +296,7 @@ resolve_integers(relic_merge_t *merge)
 	gather_pending(merge);
 	assert(merge->pending_count == count);
 	merge->table_projected = relic_pending_measure(merge->ctx,
-	    merge->pending, merge->pending_count, &merge->pending_map);
+	    merge->pending, merge->pending_count, NULL, &merge->pending_map);
 	relic_pool_for(merge->pool, merge->pool->worker_count, rehash_worker,
 	    merge);
 
@@ -396,7 +396,9 @@ gather_pending(relic_merge_t *merge)
 
 				assert(tuple[column] <=
 				    candidates->integer_count);
-				merge->pending[merge->pending_count] =
+				merge->pending[merge->pending_count].kind =
+				    RELIC_PENDING_INTEGER;
+				merge->pending[merge->pending_count].u.integer =
 				    candidates->integers[tuple[column] - 1];
 				merge->pending_count++;
 				tuple[column] =
@@ -816,10 +818,10 @@ classify_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
  * Ask the memory limit of what every target holds while it takes its new
  * tuples -- exactly what it would hold once it had taken them, and beside
  * that the tables its growth replaces until they are freed -- and of what
- * the integer table holds once it has taken the new integers, with
- * everything the round holds still charged, and make that room.  Returns 0,
- * or -1 when the limit would refuse, a growth could not happen, or the
- * allocator refused one.  What a refused reservation obtained stays
+ * the value table and the pool hold once they have taken the new values,
+ * with everything the round holds still charged, and make that room.
+ * Returns 0, or -1 when the limit would refuse, a growth could not happen,
+ * or the allocator refused one.  What a refused reservation obtained stays
  * counted, the prepared tables until merge_end() releases them.
  */
 static int
@@ -832,7 +834,7 @@ reserve_room(relic_merge_t *merge)
 	size_t growth;
 	size_t t;
 
-	table_now = merge->ctx->account.value_bytes;
+	table_now = relic_value_storage_bytes(merge->ctx);
 	table_then = merge->pending_count > 0 ? merge->table_projected :
 	    table_now;
 
@@ -894,7 +896,7 @@ apply_merge(relic_merge_t *merge)
 
 	if (merge->pending_count > 0) {
 		relic_pending_append(merge->ctx, &merge->pending_map);
-		assert(relic_value_integer_bytes(merge->ctx) ==
+		assert(relic_value_storage_bytes(merge->ctx) ==
 		    merge->table_projected);
 	}
 

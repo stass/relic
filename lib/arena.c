@@ -39,8 +39,27 @@
 #define	RELIC_ARENA_FIRST_CHUNK	 4096u
 #define	RELIC_ARENA_MAX_CHUNK	 (256u * 1024u)
 
+typedef struct arena_placement arena_placement_t;
+
+/*
+ * Where an allocation goes: `needed` bytes, its size rounded to the
+ * arena's alignment, taken from the head chunk when `chunk_payload` is
+ * zero, and otherwise from a new chunk of that payload, which becomes the
+ * head when `becomes_head` says so and is linked behind it when not.
+ */
+struct arena_placement {
+	size_t	needed;
+	size_t	chunk_payload;
+	bool	becomes_head;
+};
+
 static relic_arena_chunk_t	*arena_add_chunk(relic_arena_t *arena,
-				    size_t size, bool oversize);
+				    const arena_placement_t *placement);
+static bool			 arena_place(size_t alignment, bool has_head,
+				    size_t head_room, size_t next_chunk_size,
+				    size_t size, arena_placement_t *placement);
+static size_t			 chunk_header_size(void);
+static size_t			 next_chunk_size_after(size_t size);
 static bool			 charge(relic_arena_t *arena, size_t bytes);
 static void			 uncharge(relic_arena_t *arena, size_t bytes);
 static unsigned char		*chunk_payload(relic_arena_chunk_t *chunk);
@@ -61,14 +80,79 @@ round_up(size_t size, size_t alignment)
 }
 
 /*
- * The first byte of a chunk's payload.  The header is rounded up to the
- * strictest alignment so that what follows it is aligned for any object.
+ * The bytes of a chunk's header, rounded up to the strictest alignment so
+ * that the payload after it is aligned for any object.
+ */
+static size_t
+chunk_header_size(void)
+{
+	return (round_up(sizeof(relic_arena_chunk_t), RELIC_ARENA_ANY_OBJECT));
+}
+
+/*
+ * The first byte of a chunk's payload.
  */
 static unsigned char *
 chunk_payload(relic_arena_chunk_t *chunk)
 {
-	return ((unsigned char *)chunk +
-	    round_up(sizeof(*chunk), RELIC_ARENA_ANY_OBJECT));
+	return ((unsigned char *)chunk + chunk_header_size());
+}
+
+/*
+ * The payload of the chunk after one of `size`: double, to a ceiling.  The
+ * progression tracks how fast the arena is filling rather than how large
+ * any one request was: an oversize chunk advances it by the same step as an
+ * ordinary one, and never to the oversize chunk's own size.
+ */
+static size_t
+next_chunk_size_after(size_t size)
+{
+	return (size < RELIC_ARENA_MAX_CHUNK ? size * 2 : size);
+}
+
+/*
+ * Decide where an allocation of `size` bytes goes, from the arena's state
+ * alone: whether it has a head chunk, the room the head has, and the
+ * payload the next chunk would have.  relic_arena_alloc() and a projection
+ * both decide here, so that a projection makes the choices the allocations
+ * will.  Returns false when the size, rounded or with a chunk's header,
+ * would not fit a size_t.
+ *
+ * A request of zero bytes is rounded up to one unit of alignment, so that
+ * it yields a distinct usable pointer.  A request that fits the head's room
+ * takes it from there.  One that does not takes a new chunk of the next
+ * size, or of its own size when it is larger than that.  A chunk made
+ * oversize for one large request is linked after the head rather than in
+ * front of it: pushing it to the head would abandon whatever space the
+ * current head still has, and since the oversize chunk is full the moment
+ * it is created, every small allocation that followed would need a chunk of
+ * its own.  Linking it behind leaves the partially used chunk in front,
+ * where the next small allocation finds its remaining space.
+ */
+static bool
+arena_place(size_t alignment, bool has_head, size_t head_room,
+    size_t next_chunk_size, size_t size, arena_placement_t *placement)
+{
+	bool oversize;
+
+	if (size > SIZE_MAX - (alignment - 1))
+		return (false);
+
+	placement->needed = round_up(size, alignment);
+	if (placement->needed == 0)
+		placement->needed = alignment;
+
+	placement->chunk_payload = 0;
+	placement->becomes_head = false;
+	if (has_head && placement->needed <= head_room)
+		return (true);
+
+	oversize = placement->needed > next_chunk_size;
+	placement->chunk_payload = oversize ? placement->needed :
+	    next_chunk_size;
+	placement->becomes_head = !has_head || !oversize;
+
+	return (placement->chunk_payload <= SIZE_MAX - chunk_header_size());
 }
 
 /*
@@ -90,35 +174,18 @@ uncharge(relic_arena_t *arena, size_t bytes)
 }
 
 /*
- * Obtain a chunk able to hold an aligned allocation of `size` bytes and link
- * it into the arena, or return NULL and mark the arena failed.  A chunk the
- * account does not admit is never asked of the allocator.
- *
- * A chunk that had to be made oversize for one large request is linked after
- * the head rather than in front of it.  Pushing it to the head would abandon
- * whatever space the current head still has, and since the oversize chunk is
- * full the moment it is created, every small allocation that followed would
- * need a chunk of its own.  Linking it behind leaves the partially used chunk
- * in front, where the next small allocation finds its remaining space.
+ * Obtain the chunk a placement asks for and link it where the placement
+ * says, or return NULL and mark the arena failed.  A chunk the account does
+ * not admit is never asked of the allocator.
  */
 static relic_arena_chunk_t *
-arena_add_chunk(relic_arena_t *arena, size_t size, bool oversize)
+arena_add_chunk(relic_arena_t *arena, const arena_placement_t *placement)
 {
 	relic_arena_chunk_t *chunk;
 	relic_arena_chunk_t *head;
-	size_t header_size;
-	size_t payload_size;
 	size_t total;
 
-	header_size = round_up(sizeof(*chunk), RELIC_ARENA_ANY_OBJECT);
-	payload_size = oversize ? size : arena->next_chunk_size;
-
-	if (payload_size > SIZE_MAX - header_size) {
-		arena->failed = true;
-		return (NULL);
-	}
-	total = header_size + payload_size;
-
+	total = chunk_header_size() + placement->chunk_payload;
 	if (!charge(arena, total)) {
 		arena->failed = true;
 		return (NULL);
@@ -131,25 +198,17 @@ arena_add_chunk(relic_arena_t *arena, size_t size, bool oversize)
 		return (NULL);
 	}
 
-	chunk->size = payload_size;
+	chunk->size = placement->chunk_payload;
 	chunk->used = 0;
 
 	head = SLIST_FIRST(&arena->chunks);
-	if (head != NULL && oversize)
-		SLIST_INSERT_AFTER(head, chunk, link);
-	else
+	if (placement->becomes_head)
 		SLIST_INSERT_HEAD(&arena->chunks, chunk, link);
+	else
+		SLIST_INSERT_AFTER(head, chunk, link);
 
 	arena->total_bytes += total;
-
-	/*
-	 * The progression doubles per chunk, to a ceiling, and it tracks how
-	 * fast the arena is filling rather than how large any one request
-	 * was: an oversize chunk advances it by the same step as an ordinary
-	 * one, and never to the oversize chunk's own size.
-	 */
-	if (arena->next_chunk_size < RELIC_ARENA_MAX_CHUNK)
-		arena->next_chunk_size *= 2;
+	arena->next_chunk_size = next_chunk_size_after(arena->next_chunk_size);
 
 	return (chunk);
 }
@@ -206,32 +265,29 @@ relic_arena_reset(relic_arena_t *arena)
 void *
 relic_arena_alloc(relic_arena_t *arena, size_t size)
 {
+	arena_placement_t placement;
 	relic_arena_chunk_t *chunk;
 	unsigned char *block;
-	size_t needed;
 
 	if (arena->failed)
 		return (NULL);
 
-	if (size > SIZE_MAX - (arena->alignment - 1)) {
+	chunk = SLIST_FIRST(&arena->chunks);
+	if (!arena_place(arena->alignment, chunk != NULL,
+	    chunk != NULL ? chunk->size - chunk->used : 0,
+	    arena->next_chunk_size, size, &placement)) {
 		arena->failed = true;
 		return (NULL);
 	}
 
-	needed = round_up(size, arena->alignment);
-	if (needed == 0)
-		needed = arena->alignment;
-
-	chunk = SLIST_FIRST(&arena->chunks);
-	if (chunk == NULL || needed > chunk->size - chunk->used) {
-		chunk = arena_add_chunk(arena, needed,
-		    needed > arena->next_chunk_size);
+	if (placement.chunk_payload > 0) {
+		chunk = arena_add_chunk(arena, &placement);
 		if (chunk == NULL)
 			return (NULL);
 	}
 
 	block = chunk_payload(chunk) + chunk->used;
-	chunk->used += needed;
+	chunk->used += placement.needed;
 
 	return (block);
 }
@@ -307,4 +363,93 @@ size_t
 relic_arena_total_bytes(const relic_arena_t *arena)
 {
 	return (arena->total_bytes);
+}
+
+void
+relic_arena_mark(const relic_arena_t *arena, relic_arena_mark_t *mark)
+{
+	mark->head = SLIST_FIRST(&arena->chunks);
+	mark->after_head = mark->head != NULL ?
+	    SLIST_NEXT(mark->head, link) : NULL;
+	mark->head_used = mark->head != NULL ? mark->head->used : 0;
+	mark->next_chunk_size = arena->next_chunk_size;
+	mark->total_bytes = arena->total_bytes;
+}
+
+void
+relic_arena_rewind(relic_arena_t *arena, const relic_arena_mark_t *mark)
+{
+	relic_arena_chunk_t *chunk;
+
+	while ((chunk = SLIST_FIRST(&arena->chunks)) != mark->head) {
+		assert(chunk != NULL);
+		SLIST_REMOVE_HEAD(&arena->chunks, link);
+		free(chunk);
+	}
+
+	if (mark->head != NULL) {
+		while ((chunk = SLIST_NEXT(mark->head, link)) !=
+		    mark->after_head) {
+			assert(chunk != NULL);
+			SLIST_REMOVE_AFTER(mark->head, link);
+			free(chunk);
+		}
+		mark->head->used = mark->head_used;
+	}
+
+	assert(arena->total_bytes >= mark->total_bytes);
+	uncharge(arena, arena->total_bytes - mark->total_bytes);
+	arena->total_bytes = mark->total_bytes;
+	arena->next_chunk_size = mark->next_chunk_size;
+}
+
+void
+relic_arena_project(const relic_arena_t *arena,
+    relic_arena_projection_t *projection)
+{
+	const relic_arena_chunk_t *head;
+
+	assert(!arena->failed);
+
+	head = SLIST_FIRST(&arena->chunks);
+	projection->alignment = arena->alignment;
+	projection->has_head = head != NULL;
+	projection->head_room = head != NULL ? head->size - head->used : 0;
+	projection->next_chunk_size = arena->next_chunk_size;
+	projection->total_bytes = arena->total_bytes;
+}
+
+/*
+ * One allocation's placement, decided as relic_arena_alloc() decides it,
+ * applied to the projection's state in place of the chunks.
+ */
+void
+relic_arena_project_alloc(relic_arena_projection_t *projection, size_t size)
+{
+	arena_placement_t placement;
+
+	if (projection->total_bytes == SIZE_MAX)
+		return;
+
+	if (!arena_place(projection->alignment, projection->has_head,
+	    projection->head_room, projection->next_chunk_size, size,
+	    &placement)) {
+		projection->total_bytes = SIZE_MAX;
+		return;
+	}
+
+	if (placement.chunk_payload == 0) {
+		projection->head_room -= placement.needed;
+		return;
+	}
+
+	projection->total_bytes = relic_saturating_sum(projection->total_bytes,
+	    chunk_header_size() + placement.chunk_payload);
+	if (placement.becomes_head) {
+		projection->head_room = placement.chunk_payload -
+		    placement.needed;
+		projection->has_head = true;
+	}
+	projection->next_chunk_size = next_chunk_size_after(
+	    projection->next_chunk_size);
 }

@@ -1,0 +1,13 @@
+% Explain prints a call as written, a primary never parenthesized, with
+% each argument a whole expression and each string constant escaped.
+file("src/a.c"). file("src/b\x01.h"). tested("src/b\x01.h").
+source(m, "main.c").
+
+untested(P) :- file(P), index(P, "src/") = 0, not tested(P),
+    substr(P, length(P) - 2) = ".c".
+object(M, O) :- source(M, S), O = cat(substr(S, 0, length(S) - 2), ".o").
+shapes(N, T) :- source(_, S), N = -length(S) + index(S, "\x01\n"),
+    T = str(N * 2).
+
+untested(P)?
+object(M, O)?

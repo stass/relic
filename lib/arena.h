@@ -22,6 +22,8 @@ typedef struct relic_account relic_account_t;
 typedef struct relic_arena relic_arena_t;
 typedef struct relic_arena_chunk relic_arena_chunk_t;
 typedef struct relic_arena_chunk_list relic_arena_chunk_list_t;
+typedef struct relic_arena_mark relic_arena_mark_t;
+typedef struct relic_arena_projection relic_arena_projection_t;
 
 /*
  * One allocation holding this header and, after it, the payload that
@@ -99,5 +101,61 @@ void	 relic_arena_init_charged(relic_arena_t *arena,
 	    relic_account_t *account);
 void	 relic_arena_reset(relic_arena_t *arena);
 size_t	 relic_arena_total_bytes(const relic_arena_t *arena);
+
+/*
+ * What an arena would obtain from the allocator for a sequence of
+ * allocations, found without making them, so that an owner can ask a limit
+ * about a growth before it happens.  relic_arena_project() starts a
+ * projection from the arena as it is, and relic_arena_project_alloc()
+ * advances it by one allocation of `size` bytes, deciding as
+ * relic_arena_alloc() would whether it takes a chunk and of what size.
+ * `total_bytes` is then what relic_arena_total_bytes() would give after
+ * the same allocations, or SIZE_MAX when a size would not have been
+ * countable.  A failed arena obtains nothing, since it refuses every
+ * request, so a projection is only asked of an arena that has not failed.
+ */
+struct relic_arena_projection {
+	size_t	alignment;
+	size_t	head_room;	/* free bytes in the chunk at the head */
+	size_t	next_chunk_size;
+	size_t	total_bytes;
+	bool	has_head;
+};
+
+void	 relic_arena_project(const relic_arena_t *arena,
+	    relic_arena_projection_t *projection);
+void	 relic_arena_project_alloc(relic_arena_projection_t *projection,
+	    size_t size);
+
+/*
+ * A point an arena can be returned to, for an owner that makes a sequence
+ * of allocations that must take effect together or not at all.
+ * relic_arena_mark() records the arena as it is; relic_arena_rewind()
+ * frees every chunk obtained since, gives back its charge, and restores the
+ * head chunk's room and the progression of chunk sizes, so that the arena
+ * is as it was at the mark and its next allocations are placed as they
+ * would have been.  Everything allocated since the mark is gone.  The
+ * failure flag is not part of the mark: an owner that rewinds after a
+ * refused allocation clears the failure itself.  Between
+ * the two the arena may only be allocated from: a reset, or a second rewind
+ * to an earlier mark, leaves the mark meaningless.
+ *
+ * A chunk obtained since the mark is either in front of the head chunk the
+ * mark recorded, or, made oversize, linked right behind whichever chunk was
+ * the head then, which is the recorded head itself or a chunk in front of
+ * it.  So the chunks to free are those in front of the recorded head and
+ * those between it and the chunk that followed it at the mark.
+ */
+struct relic_arena_mark {
+	relic_arena_chunk_t	*head;		/* NULL: the arena was empty */
+	relic_arena_chunk_t	*after_head;
+	size_t			 head_used;
+	size_t			 next_chunk_size;
+	size_t			 total_bytes;
+};
+
+void	 relic_arena_mark(const relic_arena_t *arena, relic_arena_mark_t *mark);
+void	 relic_arena_rewind(relic_arena_t *arena,
+	    const relic_arena_mark_t *mark);
 
 #endif /* RELIC_ARENA_H */

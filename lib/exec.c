@@ -16,6 +16,8 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "exec.h"
@@ -42,12 +44,21 @@
  * and continuing changes nothing it derives.
  *
  * An expression is a postfix program run on a stack of cells, each holding a
- * domain identifier or a computed integer.  An operator reads a cell as an
- * integer, decoding an identifier through the integer table, and a cell
- * that is a symbol or a string has no integer: the run has no value, and the
- * operation running it rejects the binding.  A result arithmetic does not
- * define ends the run with an error instead, recorded in the scratch, and
- * the plan ends as though every generator were exhausted.
+ * domain identifier, a computed integer or a computed string.  An operator
+ * or a function reads a cell as the type it wants, decoding an identifier
+ * through the integer table or the pool, and a cell of another type has no
+ * value of that type: the run has no value, and the operation running it
+ * rejects the binding.  A result that is not a value -- an integer that
+ * does not fit, a division by zero, a string too long -- ends the run with
+ * an error instead, recorded in the scratch, and the plan ends as though
+ * every generator were exhausted.
+ *
+ * A computed string is kept in the scratch's text stack, and a cell names
+ * it by offset and length.  Each operation builds the strings its programs
+ * compute above the string of the last text slot bound before it, so a
+ * string a slot names is overwritten only when the operation that bound the
+ * slot runs again and binds it anew (plan.h).  Nothing is saved on descent
+ * or restored on backtracking, for the reason nothing in the frame is.
  *
  * The context and every relation are read-only here, as frozen.h makes
  * them, and only the scratch is written.  The views of a plan are resolved
@@ -62,15 +73,23 @@ typedef struct relic_fold relic_fold_t;
 
 /*
  * One cell of the stack a postfix program runs on: a domain identifier
- * pushed from a constant or a domain slot, or an integer pushed from a
- * number slot or computed.
+ * pushed from a constant or a domain slot, an integer pushed from a number
+ * slot or computed, or a string pushed from a text slot or computed, named
+ * in the text stack.
  */
+enum relic_cell_kind {
+	RELIC_CELL_DOM,
+	RELIC_CELL_NUMBER,
+	RELIC_CELL_TEXT
+};
+
 struct relic_cell {
 	union {
 		relic_dom_t	dom;
 		int64_t		number;
-	}		u;
-	bool		is_number;
+		relic_text_t	text;
+	}			u;
+	enum relic_cell_kind	kind;
 };
 
 /*
@@ -86,25 +105,62 @@ struct relic_fold {
 
 /*
  * How a postfix program's run ended: with a value, with none because an
- * operand was not an integer, or with a result arithmetic does not define.
+ * operand was not of the type its operator or function wants, or with a
+ * failure recorded.
  */
 enum relic_run_end {
 	RELIC_RUN_VALUE,
 	RELIC_RUN_NO_VALUE,
-	RELIC_RUN_UNDEFINED
+	RELIC_RUN_FAILED
 };
 
+/*
+ * What an EMIT did with the head tuple: wrote it into the batch, found the
+ * batch's pending bytes too full for its strings, so that it must be asked
+ * again once the batch is taken, or recorded a failure to make room.
+ */
+enum relic_emit_end {
+	RELIC_EMIT_WRITTEN,
+	RELIC_EMIT_FULL,
+	RELIC_EMIT_FAILED
+};
+
+static bool	 buffer_make_room(relic_scratch_t *scratch,
+		    relic_text_buffer_t *buffer, size_t more,
+		    const relic_location_t *where);
 static void	 build_tuple(const relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, relic_dom_t *tuple);
-static relic_dom_t cell_type(relic_cell_t cell);
+static enum relic_run_end call_cat(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    const relic_cell_t *args, relic_cell_t *resultp);
+static enum relic_run_end call_function(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    enum relic_function fn, const relic_cell_t *args,
+		    relic_cell_t *resultp);
+static enum relic_run_end call_str(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    relic_cell_t value, relic_cell_t *resultp);
+static enum relic_run_end call_substr(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, const relic_location_t *where,
+		    const relic_cell_t *args, bool counted,
+		    relic_cell_t *resultp);
 static bool	 cell_integer(const relic_exec_env_t *env, relic_cell_t cell,
 		    int64_t *integerp);
-static enum relic_order cells_order(const relic_exec_env_t *env,
-		    relic_cell_t left, relic_cell_t right);
+static bool	 cell_is_kind(const relic_exec_env_t *env, relic_cell_t cell,
+		    enum relic_value_kind kind);
+static bool	 cell_string(const relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, relic_cell_t cell,
+		    const char **bytesp, size_t *lengthp);
+static relic_dom_t cell_type(relic_cell_t cell);
+static enum relic_order cells_order(const relic_scratch_t *scratch,
+		    const relic_exec_env_t *env, relic_cell_t left,
+		    relic_cell_t right);
 static relic_cell_t dom_cell(relic_dom_t dom);
 static relic_dom_t emit_column(relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
-static void	 emit_head(relic_scratch_t *scratch,
+static enum relic_emit_end emit_head(relic_scratch_t *scratch,
+		    const relic_op_atom_t *atom);
+static size_t	 emit_pending_bytes(const relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom);
 static bool	 fold_group(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
@@ -129,10 +185,10 @@ static void	 record_aggregate_note(relic_scratch_t *scratch,
 		    enum relic_note_kind kind);
 static void	 record_error(relic_scratch_t *scratch,
 		    const relic_location_t *where,
-		    enum relic_arith_status status);
+		    enum relic_exec_failure failure);
 static void	 record_operand_note(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_location_t *where,
-		    const relic_step_t *step, relic_cell_t operand);
+		    const char *spelling, relic_cell_t operand);
 static void	 record_ordering_note(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env, const relic_location_t *where,
 		    relic_cell_t left, relic_cell_t right);
@@ -149,7 +205,7 @@ static bool	 step_aggregate(relic_scratch_t *scratch,
 		    const relic_tuple_range_t *view);
 static bool	 step_assign(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
-		    const relic_op_assign_t *assign);
+		    const relic_op_assign_t *assign, relic_op_state_t *state);
 static bool	 step_filter(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
 		    const relic_op_filter_t *filter);
@@ -164,14 +220,21 @@ static bool	 step_scan(relic_scratch_t *scratch,
 		    bool resume);
 static relic_dom_t term_value(const relic_scratch_t *scratch,
 		    const relic_plan_term_t *term);
+static size_t	 text_base_top(const relic_scratch_t *scratch,
+		    size_t text_base);
+static relic_cell_t text_cell(size_t offset, size_t length);
+static relic_cell_t text_push(relic_scratch_t *scratch, size_t length);
 static bool	 tuple_matches(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, const relic_dom_t *tuple);
 static enum relic_exec_status yield_after_emit(relic_scratch_t *scratch,
 		    size_t level);
+static enum relic_exec_status yield_before_emit(relic_scratch_t *scratch,
+		    size_t level);
 
 void
 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
-    size_t op_room, relic_dom_t *batch, int64_t *pending, uint16_t arity_room)
+    size_t op_room, relic_dom_t *batch, relic_pending_t *pending,
+    uint16_t arity_room)
 {
 	bzero(scratch, sizeof(*scratch));
 	scratch->states = states;
@@ -180,6 +243,105 @@ relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
 	scratch->pending = pending;
 	scratch->arity_room = arity_room;
 	scratch->finished = true;
+}
+
+/*
+ * The two buffers are made together and freed together, so a scratch holds
+ * both or neither.
+ */
+int
+relic_scratch_begin_texts(relic_scratch_t *scratch, relic_account_t *account,
+    enum relic_exec_failure *failurep)
+{
+	const size_t bytes = RELIC_TEXT_STACK_INITIAL + RELIC_PENDING_BYTES;
+
+	assert(scratch->text_stack.bytes == NULL);
+
+	*failurep = RELIC_FAIL_LIMIT;
+	if (!relic_account_charge_round(account, bytes))
+		return (-1);
+
+	*failurep = RELIC_FAIL_NO_MEMORY;
+
+	scratch->text_stack.bytes = malloc(RELIC_TEXT_STACK_INITIAL);
+	scratch->pending_bytes.bytes = malloc(RELIC_PENDING_BYTES);
+	if (scratch->text_stack.bytes == NULL ||
+	    scratch->pending_bytes.bytes == NULL) {
+		free(scratch->text_stack.bytes);
+		free(scratch->pending_bytes.bytes);
+		scratch->text_stack.bytes = NULL;
+		scratch->pending_bytes.bytes = NULL;
+		relic_account_release_round(account, bytes);
+		return (-1);
+	}
+
+	scratch->account = account;
+	scratch->text_stack.used = 0;
+	scratch->text_stack.capacity = RELIC_TEXT_STACK_INITIAL;
+	scratch->pending_bytes.used = 0;
+	scratch->pending_bytes.capacity = RELIC_PENDING_BYTES;
+
+	return (0);
+}
+
+void
+relic_scratch_end_texts(relic_scratch_t *scratch)
+{
+	if (scratch->text_stack.bytes == NULL)
+		return;
+
+	relic_account_release_round(scratch->account,
+	    scratch->text_stack.capacity + scratch->pending_bytes.capacity);
+	free(scratch->text_stack.bytes);
+	free(scratch->pending_bytes.bytes);
+	bzero(&scratch->text_stack, sizeof(scratch->text_stack));
+	bzero(&scratch->pending_bytes, sizeof(scratch->pending_bytes));
+	scratch->account = NULL;
+}
+
+/*
+ * Make room in `buffer` for `more` bytes past those in use, growing it by
+ * the growable-array policy, the growth charged to the round.  Returns true,
+ * or false having recorded at `where` that the limit or the allocator
+ * refused the growth, the buffer as it was.  A growth moves the buffer, so a
+ * caller reads its bytes through offsets and takes pointers into it only
+ * after it has made the room it needs.
+ */
+static bool
+buffer_make_room(relic_scratch_t *scratch, relic_text_buffer_t *buffer,
+    size_t more, const relic_location_t *where)
+{
+	size_t capacity;
+	char *bytes;
+
+	if (more <= buffer->capacity - buffer->used)
+		return (true);
+
+	capacity = more > SIZE_MAX - buffer->used ? 0 :
+	    relic_grow_array_capacity(buffer->capacity, buffer->used + more);
+	if (capacity == 0) {
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+
+	if (!relic_account_charge_round(scratch->account,
+	    capacity - buffer->capacity)) {
+		record_error(scratch, where, RELIC_FAIL_LIMIT);
+		return (false);
+	}
+
+	bytes = realloc(buffer->bytes, capacity);
+	if (bytes == NULL) {
+		relic_account_release_round(scratch->account,
+		    capacity - buffer->capacity);
+		record_error(scratch, where, RELIC_FAIL_NO_MEMORY);
+		return (false);
+	}
+
+	buffer->bytes = bytes;
+	buffer->capacity = capacity;
+
+	return (true);
 }
 
 /*
@@ -217,6 +379,7 @@ tuple_matches(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 		case RELIC_PLAN_CONSTANT:
 		case RELIC_PLAN_BOUND:
 		case RELIC_PLAN_NUMBER:
+		case RELIC_PLAN_TEXT:
 			if (tuple[column] != term_value(scratch, term))
 				return (false);
 			break;
@@ -282,6 +445,7 @@ dom_cell(relic_dom_t dom)
 
 	bzero(&cell, sizeof(cell));
 	cell.u.dom = dom;
+	cell.kind = RELIC_CELL_DOM;
 
 	return (cell);
 }
@@ -293,9 +457,55 @@ number_cell(int64_t number)
 
 	bzero(&cell, sizeof(cell));
 	cell.u.number = number;
-	cell.is_number = true;
+	cell.kind = RELIC_CELL_NUMBER;
 
 	return (cell);
+}
+
+static relic_cell_t
+text_cell(size_t offset, size_t length)
+{
+	relic_cell_t cell;
+
+	bzero(&cell, sizeof(cell));
+	cell.u.text.offset = offset;
+	cell.u.text.length = length;
+	cell.kind = RELIC_CELL_TEXT;
+
+	return (cell);
+}
+
+/*
+ * A cell naming the `length` bytes past those in use in the text stack,
+ * which the caller has made room for and filled, and which are then in use.
+ */
+static relic_cell_t
+text_push(relic_scratch_t *scratch, size_t length)
+{
+	relic_text_buffer_t *stack;
+	relic_cell_t cell;
+
+	stack = &scratch->text_stack;
+	assert(length <= stack->capacity - stack->used);
+
+	cell = text_cell(stack->used, length);
+	stack->used += length;
+
+	return (cell);
+}
+
+/*
+ * Where the strings an operation computes begin in the text stack: past
+ * the string of the ASSIGN `text_base` names, or at the stack's start
+ * (plan.h).
+ */
+static size_t
+text_base_top(const relic_scratch_t *scratch, size_t text_base)
+{
+	if (text_base == 0)
+		return (0);
+
+	return (scratch->states[text_base - 1].text_top);
 }
 
 /*
@@ -305,12 +515,69 @@ number_cell(int64_t number)
 static bool
 cell_integer(const relic_exec_env_t *env, relic_cell_t cell, int64_t *integerp)
 {
-	if (cell.is_number) {
+	switch (cell.kind) {
+	case RELIC_CELL_NUMBER:
 		*integerp = cell.u.number;
 		return (true);
+	case RELIC_CELL_DOM:
+		return (relic_value_integer(env->ctx, cell.u.dom, integerp));
+	case RELIC_CELL_TEXT:
+		break;
 	}
 
-	return (relic_value_integer(env->ctx, cell.u.dom, integerp));
+	return (false);
+}
+
+/*
+ * The bytes a cell holds as a string, when it holds one: a computed
+ * string's in the text stack, or those of the string an identifier names.
+ * A symbol and an integer have none.  A pointer into the text stack is good
+ * until the stack next grows.
+ */
+static bool
+cell_string(const relic_scratch_t *scratch, const relic_exec_env_t *env,
+    relic_cell_t cell, const char **bytesp, size_t *lengthp)
+{
+	switch (cell.kind) {
+	case RELIC_CELL_TEXT:
+		*bytesp = scratch->text_stack.bytes + cell.u.text.offset;
+		*lengthp = cell.u.text.length;
+		return (true);
+	case RELIC_CELL_DOM:
+		if ((cell.u.dom & RELIC_DOM_TYPE_MASK) != RELIC_DOM_STRING)
+			return (false);
+		*bytesp = relic_value_bytes(env->ctx, cell.u.dom, lengthp);
+		return (*bytesp != NULL);
+	case RELIC_CELL_NUMBER:
+		break;
+	}
+
+	return (false);
+}
+
+/*
+ * Whether a cell holds a value of the kind a function's argument wants.
+ */
+static bool
+cell_is_kind(const relic_exec_env_t *env, relic_cell_t cell,
+    enum relic_value_kind kind)
+{
+	int64_t integer;
+
+	switch (kind) {
+	case RELIC_KIND_ANY:
+		return (true);
+	case RELIC_KIND_INTEGER:
+		return (cell_integer(env, cell, &integer));
+	case RELIC_KIND_STRING:
+		if (cell.kind == RELIC_CELL_TEXT)
+			return (true);
+		return (cell.kind == RELIC_CELL_DOM &&
+		    (cell.u.dom & RELIC_DOM_TYPE_MASK) == RELIC_DOM_STRING &&
+		    relic_value_bytes(env->ctx, cell.u.dom, NULL) != NULL);
+	}
+
+	return (false);
 }
 
 /*
@@ -319,26 +586,48 @@ cell_integer(const relic_exec_env_t *env, relic_cell_t cell, int64_t *integerp)
 static relic_dom_t
 cell_type(relic_cell_t cell)
 {
-	if (cell.is_number)
+	switch (cell.kind) {
+	case RELIC_CELL_NUMBER:
 		return (RELIC_DOM_INTEGER);
+	case RELIC_CELL_TEXT:
+		return (RELIC_DOM_STRING);
+	case RELIC_CELL_DOM:
+		break;
+	}
 
 	return (cell.u.dom & RELIC_DOM_TYPE_MASK);
 }
 
 /*
  * How two cells' values order, by the rules of comparison: two identifiers
- * as their values order, two integers numerically, and an integer against
- * an identifier as against the integer it names, unordered against a symbol
- * or a string.
+ * as their values order; two strings, computed or named, by their bytes;
+ * two integers, computed or named, numerically; and values of different
+ * types not at all.  A computed value is compared by what it is, never by
+ * interning it, which would write the context.
  */
 static enum relic_order
-cells_order(const relic_exec_env_t *env, relic_cell_t left, relic_cell_t right)
+cells_order(const relic_scratch_t *scratch, const relic_exec_env_t *env,
+    relic_cell_t left, relic_cell_t right)
 {
+	const char *left_bytes;
+	const char *right_bytes;
+	size_t left_length;
+	size_t right_length;
 	int64_t left_integer;
 	int64_t right_integer;
 
-	if (!left.is_number && !right.is_number)
+	if (left.kind == RELIC_CELL_DOM && right.kind == RELIC_CELL_DOM)
 		return (relic_value_order(env->ctx, left.u.dom, right.u.dom));
+
+	if (left.kind == RELIC_CELL_TEXT || right.kind == RELIC_CELL_TEXT) {
+		if (!cell_string(scratch, env, left, &left_bytes,
+		    &left_length) ||
+		    !cell_string(scratch, env, right, &right_bytes,
+		    &right_length))
+			return (RELIC_ORDER_UNORDERED);
+		return (relic_bytes_order(left_bytes, left_length, right_bytes,
+		    right_length));
+	}
 
 	if (!cell_integer(env, left, &left_integer) ||
 	    !cell_integer(env, right, &right_integer))
@@ -376,12 +665,12 @@ record_ordering_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
 
 /*
  * Record, when the environment asks and nothing is recorded yet, that the
- * operator of `step` at `where` was given an operand that is not an integer.
+ * operator or function spelled `spelling` at `where` was given an operand
+ * that is not of the type it wants.
  */
 static void
 record_operand_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
-    const relic_location_t *where, const relic_step_t *step,
-    relic_cell_t operand)
+    const relic_location_t *where, const char *spelling, relic_cell_t operand)
 {
 	relic_mixed_note_t *note;
 
@@ -392,7 +681,7 @@ record_operand_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	bzero(note, sizeof(*note));
 	note->where = where;
 	note->kind = RELIC_NOTE_OPERAND;
-	note->operator = operator_spelling(step);
+	note->operator = spelling;
 	note->left_type = cell_type(operand);
 }
 
@@ -417,18 +706,19 @@ record_aggregate_note(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
- * Record the first result of the running plan that arithmetic does not
- * define.
+ * Record the first failure of the running plan, at the literal `where`, or
+ * at none.
  */
 static void
 record_error(relic_scratch_t *scratch, const relic_location_t *where,
-    enum relic_arith_status status)
+    enum relic_exec_failure failure)
 {
-	if (scratch->error.where != NULL)
+	if (scratch->error.failed)
 		return;
 
 	scratch->error.where = where;
-	scratch->error.status = status;
+	scratch->error.failure = failure;
+	scratch->error.failed = true;
 }
 
 /*
@@ -457,12 +747,196 @@ operator_spelling(const relic_step_t *step)
 }
 
 /*
+ * `cat`: the bytes of the first string followed by those of the second,
+ * built past the text stack's top.  A result longer than a value can hold
+ * is the failure it is before a byte of it is copied.  The room is made
+ * before either operand's bytes are found, since making it may move the
+ * stack they are in.
+ */
+static enum relic_run_end
+call_cat(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, const relic_cell_t *args,
+    relic_cell_t *resultp)
+{
+	const char *left;
+	const char *right;
+	size_t left_length;
+	size_t right_length;
+	size_t length;
+	char *top;
+
+	if (!cell_string(scratch, env, args[0], &left, &left_length) ||
+	    !cell_string(scratch, env, args[1], &right, &right_length))
+		return (RELIC_RUN_NO_VALUE);
+
+	if (!relic_cat_fits(left_length, right_length, &length)) {
+		record_error(scratch, where, RELIC_FAIL_TOO_LONG);
+		return (RELIC_RUN_FAILED);
+	}
+	if (!buffer_make_room(scratch, &scratch->text_stack, length, where))
+		return (RELIC_RUN_FAILED);
+
+	(void)cell_string(scratch, env, args[0], &left, &left_length);
+	(void)cell_string(scratch, env, args[1], &right, &right_length);
+	top = scratch->text_stack.bytes + scratch->text_stack.used;
+	if (left_length > 0)
+		bcopy(left, top, left_length);
+	if (right_length > 0)
+		bcopy(right, top + left_length, right_length);
+
+	*resultp = text_push(scratch, length);
+
+	return (RELIC_RUN_VALUE);
+}
+
+/*
+ * `substr`: the bytes of a string that relic_substr_range() keeps.  A
+ * computed string's are named where they already are, since the stack
+ * holds them until this operation is done; a named string's are copied past
+ * the stack's top, where every computed string is.
+ */
+static enum relic_run_end
+call_substr(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, const relic_cell_t *args, bool counted,
+    relic_cell_t *resultp)
+{
+	const char *bytes;
+	size_t length;
+	size_t offset;
+	size_t kept;
+	int64_t start;
+	int64_t count;
+
+	count = 0;
+	if (!cell_string(scratch, env, args[0], &bytes, &length) ||
+	    !cell_integer(env, args[1], &start) ||
+	    (counted && !cell_integer(env, args[2], &count)))
+		return (RELIC_RUN_NO_VALUE);
+
+	relic_substr_range(length, start, count, counted, &offset, &kept);
+
+	if (args[0].kind == RELIC_CELL_TEXT) {
+		*resultp = text_cell(args[0].u.text.offset + offset, kept);
+		return (RELIC_RUN_VALUE);
+	}
+
+	if (!buffer_make_room(scratch, &scratch->text_stack, kept, where))
+		return (RELIC_RUN_FAILED);
+	if (kept > 0)
+		bcopy(bytes + offset, scratch->text_stack.bytes +
+		    scratch->text_stack.used, kept);
+	*resultp = text_push(scratch, kept);
+
+	return (RELIC_RUN_VALUE);
+}
+
+/*
+ * `str`: a computed string is itself; an integer, computed or named, is
+ * its decimal text; a named symbol or string is its bytes, copied past the
+ * stack's top.
+ */
+static enum relic_run_end
+call_str(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, relic_cell_t value, relic_cell_t *resultp)
+{
+	const char *bytes;
+	size_t length;
+	int64_t integer;
+
+	if (value.kind == RELIC_CELL_TEXT) {
+		*resultp = value;
+		return (RELIC_RUN_VALUE);
+	}
+
+	if (cell_integer(env, value, &integer)) {
+		if (!buffer_make_room(scratch, &scratch->text_stack,
+		    RELIC_INTEGER_TEXT_MAX, where))
+			return (RELIC_RUN_FAILED);
+		length = relic_integer_text(integer, scratch->text_stack.bytes +
+		    scratch->text_stack.used);
+		*resultp = text_push(scratch, length);
+		return (RELIC_RUN_VALUE);
+	}
+
+	bytes = relic_value_bytes(env->ctx, value.u.dom, &length);
+	assert(bytes != NULL);
+	if (!buffer_make_room(scratch, &scratch->text_stack, length, where))
+		return (RELIC_RUN_FAILED);
+	if (length > 0)
+		bcopy(bytes, scratch->text_stack.bytes +
+		    scratch->text_stack.used, length);
+	*resultp = text_push(scratch, length);
+
+	return (RELIC_RUN_VALUE);
+}
+
+/*
+ * Call `fn` on `args`, one cell per argument, leaving the result in
+ * *resultp.  An argument not of the kind the function wants gives the call
+ * no value, with the note recorded, before anything is computed.
+ */
+static enum relic_run_end
+call_function(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_location_t *where, enum relic_function fn,
+    const relic_cell_t *args, relic_cell_t *resultp)
+{
+	const relic_function_info_t *info;
+	const char *haystack;
+	const char *needle;
+	size_t haystack_length;
+	size_t needle_length;
+	uint8_t i;
+
+	info = relic_function_info(fn);
+	for (i = 0; i < info->arity; i++) {
+		if (!cell_is_kind(env, args[i], info->args[i])) {
+			record_operand_note(scratch, env, where,
+			    info->spelling, args[i]);
+			return (RELIC_RUN_NO_VALUE);
+		}
+	}
+
+	switch (fn) {
+	case RELIC_FN_LENGTH:
+		if (!cell_string(scratch, env, args[0], &haystack,
+		    &haystack_length))
+			return (RELIC_RUN_NO_VALUE);
+		*resultp = number_cell((int64_t)haystack_length);
+		return (RELIC_RUN_VALUE);
+	case RELIC_FN_INDEX:
+		if (!cell_string(scratch, env, args[0], &haystack,
+		    &haystack_length) ||
+		    !cell_string(scratch, env, args[1], &needle,
+		    &needle_length))
+			return (RELIC_RUN_NO_VALUE);
+		*resultp = number_cell(relic_index_of(haystack,
+		    haystack_length, needle, needle_length));
+		return (RELIC_RUN_VALUE);
+	case RELIC_FN_CAT:
+		return (call_cat(scratch, env, where, args, resultp));
+	case RELIC_FN_SUBSTR2:
+		return (call_substr(scratch, env, where, args, false,
+		    resultp));
+	case RELIC_FN_SUBSTR3:
+		return (call_substr(scratch, env, where, args, true, resultp));
+	case RELIC_FN_STR:
+		return (call_str(scratch, env, where, args[0], resultp));
+	case RELIC_FN_MATCH:
+		break;
+	}
+
+	assert(fn != RELIC_FN_MATCH);
+
+	return (RELIC_RUN_NO_VALUE);
+}
+
+/*
  * Run a postfix program of a literal written at `where`, leaving its value
  * in *valuep.  Each step pushes a cell or pops its operands and pushes its
  * result, and the planner sized the program so that the stack never holds
- * more than RELIC_POSTFIX_DEPTH_MAX cells.  An operand that is not an integer
- * ends the run with no value, and a result arithmetic does not define ends
- * it with the error recorded.
+ * more than RELIC_POSTFIX_DEPTH_MAX cells.  An operand that is not of the
+ * type its operator or function wants ends the run with no value, and a
+ * result that is not a value ends it with the failure recorded.
  */
 static enum relic_run_end
 run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -470,11 +944,14 @@ run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
     relic_cell_t *valuep)
 {
 	relic_cell_t stack[RELIC_POSTFIX_DEPTH_MAX];
+	const relic_function_info_t *info;
 	enum relic_arith_status status;
+	enum relic_run_end end;
 	const relic_step_t *step;
+	relic_cell_t result;
 	int64_t right;
 	int64_t left;
-	int64_t result;
+	int64_t number;
 	size_t held;
 	size_t i;
 
@@ -498,38 +975,56 @@ run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			stack[held++] = number_cell(
 			    scratch->numbers[step->u.slot]);
 			continue;
+		case RELIC_STEP_TEXT_SLOT:
+			assert(held < postfix->depth);
+			stack[held++] = text_cell(
+			    scratch->texts[step->u.slot].offset,
+			    scratch->texts[step->u.slot].length);
+			continue;
+		case RELIC_STEP_CALL:
+			info = relic_function_info(step->u.fn);
+			assert(held >= info->arity);
+			end = call_function(scratch, env, where, step->u.fn,
+			    &stack[held - info->arity], &result);
+			if (end != RELIC_RUN_VALUE)
+				return (end);
+			held -= info->arity - 1;
+			stack[held - 1] = result;
+			continue;
 		case RELIC_STEP_NEGATE:
 			assert(held >= 1);
 			if (!cell_integer(env, stack[held - 1], &right)) {
-				record_operand_note(scratch, env, where, step,
-				    stack[held - 1]);
+				record_operand_note(scratch, env, where,
+				    operator_spelling(step), stack[held - 1]);
 				return (RELIC_RUN_NO_VALUE);
 			}
-			status = relic_arith_negate(right, &result);
+			status = relic_arith_negate(right, &number);
 			break;
 		case RELIC_STEP_BINARY:
 			assert(held >= 2);
 			if (!cell_integer(env, stack[held - 2], &left)) {
-				record_operand_note(scratch, env, where, step,
-				    stack[held - 2]);
+				record_operand_note(scratch, env, where,
+				    operator_spelling(step), stack[held - 2]);
 				return (RELIC_RUN_NO_VALUE);
 			}
 			if (!cell_integer(env, stack[held - 1], &right)) {
-				record_operand_note(scratch, env, where, step,
-				    stack[held - 1]);
+				record_operand_note(scratch, env, where,
+				    operator_spelling(step), stack[held - 1]);
 				return (RELIC_RUN_NO_VALUE);
 			}
 			held--;
 			status = relic_arith_binary(step->u.op, left, right,
-			    &result);
+			    &number);
 			break;
 		}
 
 		if (status != RELIC_ARITH_DEFINED) {
-			record_error(scratch, where, status);
-			return (RELIC_RUN_UNDEFINED);
+			record_error(scratch, where,
+			    status == RELIC_ARITH_ZERO_DIVISOR ?
+			    RELIC_FAIL_ZERO_DIVISOR : RELIC_FAIL_OVERFLOW);
+			return (RELIC_RUN_FAILED);
 		}
-		stack[held - 1] = number_cell(result);
+		stack[held - 1] = number_cell(number);
 	}
 
 	assert(held == 1);
@@ -537,7 +1032,6 @@ run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
 
 	return (RELIC_RUN_VALUE);
 }
-
 /*
  * The identifiers an operation's view covers now: the whole relation, or a
  * range derived from the delta of the member being read, as plan.h sets out.
@@ -720,19 +1214,21 @@ step_member(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
 	return (id >= view->first && id < view->end);
 }
 
+
 /*
  * A FILTER: whether its comparison holds between the values of its two
  * postfix programs.  A side with no value makes the comparison false, so
- * the right side is not run once the left has none: an undefined result
- * the right side would meet is not met, as it is not when an earlier
- * filter drops the binding.
+ * the right side is not run once the left has none: a failure the right
+ * side would meet is not met, as it is not when an earlier filter drops the
+ * binding.
  *
  * Two identifiers are equal exactly when they are one identifier, since
  * every value is interned, so an equality of identifiers compares them
  * without decoding.  Otherwise the values are ordered, and when the
  * environment asks for them, a comparison that fails because it ordered
  * values of different types is recorded in the scratch for the caller to
- * report, when it is the first since the caller took the record.
+ * report, when it is the first since the caller took the record.  The
+ * strings the programs computed are dead once the comparison is made.
  */
 static bool
 step_filter(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -742,6 +1238,8 @@ step_filter(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	relic_cell_t left;
 	relic_cell_t right;
 
+	scratch->text_stack.used = text_base_top(scratch, filter->text_base);
+
 	if (run_postfix(scratch, env, &filter->left, &filter->where,
 	    &left) != RELIC_RUN_VALUE)
 		return (false);
@@ -750,13 +1248,13 @@ step_filter(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	    &right) != RELIC_RUN_VALUE)
 		return (false);
 
-	if (!left.is_number && !right.is_number &&
+	if (left.kind == RELIC_CELL_DOM && right.kind == RELIC_CELL_DOM &&
 	    (filter->compare == RELIC_CMP_EQ ||
 	    filter->compare == RELIC_CMP_NE))
 		return ((left.u.dom == right.u.dom) ==
 		    (filter->compare == RELIC_CMP_EQ));
 
-	order = cells_order(env, left, right);
+	order = cells_order(scratch, env, left, right);
 	if (order_satisfies(filter->compare, order))
 		return (true);
 
@@ -768,34 +1266,85 @@ step_filter(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
- * An ASSIGN: bind its slot to the value of its program, an identifier into
- * a domain slot or an integer into a number slot, whose frame entry is then
- * the integer's identifier when the value table holds one and zero when it
- * does not.  A program with no value binds nothing and rejects the binding.
+ * Bind text slot `slot` to the computed string `text`, which an ASSIGN
+ * whose strings begin at `base` in the text stack computed, and record in
+ * `state` the top the operations after it build above.
+ *
+ * A string computed by this ASSIGN lies at or past the base, and is moved
+ * down to it, so that the temporaries above it are given back.  One that
+ * lies wholly below the base -- another text slot's string, or a part of
+ * one -- is kept where it is: it lies below every top an operation after
+ * this one builds above, and when the operation that computed it runs again
+ * this one runs again before anything reads the slot.  Either way the frame
+ * entry is the string's identifier, when the context has assigned one.
+ */
+static void
+bind_text(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    uint16_t slot, relic_text_t text, size_t base, relic_op_state_t *state)
+{
+	relic_text_buffer_t *stack;
+
+	stack = &scratch->text_stack;
+
+	if (text.offset + text.length <= base) {
+		state->text_top = base;
+	} else {
+		assert(text.offset >= base);
+		if (text.offset != base)
+			memmove(stack->bytes + base, stack->bytes + text.offset,
+			    text.length);
+		text.offset = base;
+		state->text_top = base + text.length;
+	}
+	stack->used = state->text_top;
+
+	scratch->texts[slot] = text;
+	scratch->frame[slot] = relic_value_find_string(env->ctx,
+	    stack->bytes + text.offset, text.length);
+}
+
+/*
+ * An ASSIGN: bind its slot to the value of its program, by the slot's
+ * kind: an identifier into a domain slot, an integer into a number slot,
+ * or a string into a text slot, the frame entry of either of the last two
+ * being the value's identifier when the context has assigned one and zero
+ * when it has not.  A program with no value binds nothing and rejects the
+ * binding.
  */
 static bool
 step_assign(relic_scratch_t *scratch, const relic_exec_env_t *env,
-    const relic_op_assign_t *assign)
+    const relic_op_assign_t *assign, relic_op_state_t *state)
 {
 	relic_cell_t value;
+	size_t base;
+
+	base = text_base_top(scratch, assign->text_base);
+	scratch->text_stack.used = base;
 
 	if (run_postfix(scratch, env, &assign->value, &assign->where,
 	    &value) != RELIC_RUN_VALUE)
 		return (false);
 
-	assert(value.is_number == assign->number);
-	if (!assign->number) {
+	switch (assign->kind) {
+	case RELIC_SLOT_DOMAIN:
+		assert(value.kind == RELIC_CELL_DOM);
 		scratch->frame[assign->slot] = value.u.dom;
-		return (true);
+		break;
+	case RELIC_SLOT_NUMBER:
+		assert(value.kind == RELIC_CELL_NUMBER);
+		scratch->numbers[assign->slot] = value.u.number;
+		scratch->frame[assign->slot] = relic_value_find_integer(
+		    env->ctx, value.u.number);
+		break;
+	case RELIC_SLOT_TEXT:
+		assert(value.kind == RELIC_CELL_TEXT);
+		bind_text(scratch, env, assign->slot, value.u.text, base,
+		    state);
+		break;
 	}
-
-	scratch->numbers[assign->slot] = value.u.number;
-	scratch->frame[assign->slot] = relic_value_find_integer(env->ctx,
-	    value.u.number);
 
 	return (true);
 }
-
 /*
  * Whether a row of an AGGREGATE's group relation holds the key: whether its
  * leading columns hold what the key slots do.  A key slot that is a number
@@ -945,7 +1494,7 @@ fold_value(relic_scratch_t *scratch, const relic_op_aggregate_t *aggregate,
 	case RELIC_AGG_SUM:
 		if (!relic_sum_fits(&fold->sum)) {
 			record_error(scratch, &aggregate->where,
-			    RELIC_ARITH_OVERFLOW);
+			    RELIC_FAIL_OVERFLOW);
 			return (false);
 		}
 		*valuep = number_cell(relic_sum_value(&fold->sum));
@@ -970,7 +1519,8 @@ fold_value(relic_scratch_t *scratch, const relic_op_aggregate_t *aggregate,
  * the slot was bound before, the fold's value is compared with the slot's
  * value instead, each read as the cell it is, so that a count of two equals
  * a number slot holding two whether or not the value table holds the
- * integer.  A fold with no value rejects the binding.
+ * integer, and a min over strings equals a text slot holding the same
+ * bytes.  A fold with no value rejects the binding.
  */
 static bool
 step_aggregate(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -979,6 +1529,7 @@ step_aggregate(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	relic_fold_t fold;
 	relic_cell_t bound;
 	relic_cell_t value;
+	uint16_t slot;
 
 	bzero(&fold, sizeof(fold));
 	if (!fold_group(scratch, env, aggregate, view, &fold))
@@ -986,68 +1537,146 @@ step_aggregate(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	if (!fold_value(scratch, aggregate, &fold, &value))
 		return (false);
 
+	slot = aggregate->slot;
 	if (!aggregate->binds) {
-		bound = aggregate->number ?
-		    number_cell(scratch->numbers[aggregate->slot]) :
-		    dom_cell(scratch->frame[aggregate->slot]);
-		return (cells_order(env, value, bound) == RELIC_ORDER_EQUAL);
+		bound = dom_cell(scratch->frame[slot]);
+		switch (aggregate->kind) {
+		case RELIC_SLOT_NUMBER:
+			bound = number_cell(scratch->numbers[slot]);
+			break;
+		case RELIC_SLOT_TEXT:
+			bound = text_cell(scratch->texts[slot].offset,
+			    scratch->texts[slot].length);
+			break;
+		case RELIC_SLOT_DOMAIN:
+			break;
+		}
+		return (cells_order(scratch, env, value, bound) ==
+		    RELIC_ORDER_EQUAL);
 	}
 
-	assert(value.is_number == aggregate->number);
-	if (!aggregate->number) {
-		scratch->frame[aggregate->slot] = value.u.dom;
+	if (aggregate->kind == RELIC_SLOT_DOMAIN) {
+		assert(value.kind == RELIC_CELL_DOM);
+		scratch->frame[slot] = value.u.dom;
 		return (true);
 	}
 
-	scratch->numbers[aggregate->slot] = value.u.number;
-	scratch->frame[aggregate->slot] = relic_value_find_integer(env->ctx,
+	assert(aggregate->kind == RELIC_SLOT_NUMBER &&
+	    value.kind == RELIC_CELL_NUMBER);
+	scratch->numbers[slot] = value.u.number;
+	scratch->frame[slot] = relic_value_find_integer(env->ctx,
 	    value.u.number);
 
 	return (true);
 }
 
 /*
- * The value an EMIT writes for one column.  A number slot whose integer the
- * value table holds writes its identifier; one whose integer it does not
- * hold appends the integer to the scratch's pending integers and writes a
- * pending marker, the integer's position there counting from one, which has
- * no type bits and so is no identifier.
+ * The bytes the pending strings of the head tuple an EMIT is about to
+ * write take: those of its text slots whose strings the context has not
+ * assigned.
+ */
+static size_t
+emit_pending_bytes(const relic_scratch_t *scratch, const relic_op_atom_t *atom)
+{
+	const relic_plan_term_t *term;
+	uint16_t column;
+	size_t bytes;
+
+	bytes = 0;
+	for (column = 0; column < atom->arity; column++) {
+		term = &atom->terms[column];
+		if (term->action == RELIC_PLAN_TEXT &&
+		    scratch->frame[term->u.slot] == 0)
+			bytes = relic_saturating_sum(bytes,
+			    scratch->texts[term->u.slot].length);
+	}
+
+	return (bytes);
+}
+
+/*
+ * The value an EMIT writes for one column.  A number or text slot whose
+ * value the context has assigned writes its identifier.  One whose value
+ * it has not appends the value to the scratch's pending values -- a
+ * string's bytes to the pending bytes, which emit_head() has made room for
+ * -- and writes a pending marker, the value's position there counting from
+ * one, which has no type bits and so is no identifier.
  */
 static relic_dom_t
 emit_column(relic_scratch_t *scratch, const relic_plan_term_t *term)
 {
-	if (term->action != RELIC_PLAN_NUMBER ||
+	relic_text_buffer_t *bytes;
+	relic_pending_t *pending;
+	relic_text_t text;
+
+	if ((term->action != RELIC_PLAN_NUMBER &&
+	    term->action != RELIC_PLAN_TEXT) ||
 	    scratch->frame[term->u.slot] != 0)
 		return (term_value(scratch, term));
 
 	assert(scratch->pending != NULL && scratch->pending_count <
 	    (size_t)RELIC_INSERT_BATCH * scratch->arity_room);
-	scratch->pending[scratch->pending_count] =
-	    scratch->numbers[term->u.slot];
+	pending = &scratch->pending[scratch->pending_count];
 	scratch->pending_count++;
+
+	if (term->action == RELIC_PLAN_NUMBER) {
+		pending->kind = RELIC_PENDING_INTEGER;
+		pending->u.integer = scratch->numbers[term->u.slot];
+		return ((relic_dom_t)scratch->pending_count);
+	}
+
+	bytes = &scratch->pending_bytes;
+	text = scratch->texts[term->u.slot];
+	assert(text.length <= bytes->capacity - bytes->used);
+	if (text.length > 0)
+		bcopy(scratch->text_stack.bytes + text.offset,
+		    bytes->bytes + bytes->used, text.length);
+
+	pending->kind = RELIC_PENDING_TEXT;
+	pending->u.text.offset = bytes->used;
+	pending->u.text.length = text.length;
+	bytes->used += text.length;
 
 	return ((relic_dom_t)scratch->pending_count);
 }
 
 /*
- * An EMIT: append the head tuple to the batch.  The caller empties a full
- * batch before the executor runs again, so there is always room.
+ * An EMIT: append the head tuple to the batch.  The caller empties a batch
+ * of RELIC_INSERT_BATCH tuples before the executor runs again, so there is
+ * always room for the tuple's columns.  Its pending strings are measured
+ * before anything is written: when they do not fit what the pending bytes
+ * have left, a batch holding tuples is full, and is taken before the EMIT
+ * is asked again with the same bindings, and an empty batch's pending bytes
+ * grow to hold them, so that a tuple is written once and whole.
  */
-static void
+static enum relic_emit_end
 emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
 {
+	relic_text_buffer_t *bytes;
 	relic_dom_t *tuple;
 	uint16_t arity;
 	uint16_t column;
+	size_t needed;
 
 	arity = atom->arity;
 	assert(arity <= scratch->arity_room);
 	assert(scratch->batch_count < RELIC_INSERT_BATCH);
 
+	bytes = &scratch->pending_bytes;
+	needed = emit_pending_bytes(scratch, atom);
+	if (needed > bytes->capacity - bytes->used) {
+		if (scratch->batch_count > 0)
+			return (RELIC_EMIT_FULL);
+		if (!buffer_make_room(scratch, bytes, needed, NULL))
+			return (RELIC_EMIT_FAILED);
+	}
+
 	tuple = &scratch->batch[scratch->batch_count * arity];
 	for (column = 0; column < arity; column++)
 		tuple[column] = emit_column(scratch, &atom->terms[column]);
 	scratch->batch_count++;
+
+	return (RELIC_EMIT_WRITTEN);
 }
 
 /*
@@ -1085,7 +1714,7 @@ step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	case RELIC_OP_ASSIGN:
 		if (resume)
 			return (false);
-		return (step_assign(scratch, env, &op->u.assign));
+		return (step_assign(scratch, env, &op->u.assign, state));
 	case RELIC_OP_AGGREGATE:
 		if (resume)
 			return (false);
@@ -1103,7 +1732,7 @@ relic_exec_start(relic_scratch_t *scratch, const relic_exec_env_t *env,
     const relic_plan_t *plan)
 {
 	assert(plan->op_count <= scratch->op_room);
-	assert(scratch->note.where == NULL && scratch->error.where == NULL);
+	assert(scratch->note.where == NULL && !scratch->error.failed);
 
 	scratch->plan = plan;
 	scratch->env = env;
@@ -1111,6 +1740,8 @@ relic_exec_start(relic_scratch_t *scratch, const relic_exec_env_t *env,
 
 	scratch->batch_count = 0;
 	scratch->pending_count = 0;
+	scratch->pending_bytes.used = 0;
+	scratch->text_stack.used = 0;
 	scratch->level = 0;
 	scratch->resume = false;
 	scratch->finished = false;
@@ -1160,6 +1791,20 @@ yield_after_emit(relic_scratch_t *scratch, size_t level)
 }
 
 /*
+ * Record that the EMIT at `level` found the batch too full for its tuple,
+ * which it has not written: the join goes on by asking it again, with the
+ * same bindings, once the batch is taken.
+ */
+static enum relic_exec_status
+yield_before_emit(relic_scratch_t *scratch, size_t level)
+{
+	scratch->level = level;
+	scratch->resume = false;
+
+	return (RELIC_EXEC_BATCH_FULL);
+}
+
+/*
  * Run the plan from where it last stopped until the batch is full or the
  * first operation has nothing more.  `level` is the operation being asked
  * for a match, and `resume` says whether it is being asked for its next one
@@ -1168,7 +1813,7 @@ yield_after_emit(relic_scratch_t *scratch, size_t level)
  * A batch left full by the caller is reported full again rather than
  * appended to: the EMIT writes a tuple only into room the batch has, so the
  * caller's neglect costs it a turn and cannot write past the batch.  An
- * operation that records an error ends the run there, and the plan is
+ * operation that records a failure ends the run there, and the plan is
  * finished.
  */
 enum relic_exec_status
@@ -1196,14 +1841,22 @@ relic_exec_run(relic_scratch_t *scratch)
 		op = &plan->ops[level];
 
 		if (op->kind == RELIC_OP_EMIT) {
-			emit_head(scratch, &op->u.atom);
+			switch (emit_head(scratch, &op->u.atom)) {
+			case RELIC_EMIT_WRITTEN:
+				break;
+			case RELIC_EMIT_FULL:
+				return (yield_before_emit(scratch, level));
+			case RELIC_EMIT_FAILED:
+				scratch->finished = true;
+				return (RELIC_EXEC_FINISHED);
+			}
 			if (scratch->batch_count == RELIC_INSERT_BATCH)
 				return (yield_after_emit(scratch, level));
 			matched = false;
 		} else {
 			matched = step(scratch, env, op,
 			    &scratch->states[level], resume);
-			if (scratch->error.where != NULL)
+			if (scratch->error.failed)
 				break;
 		}
 

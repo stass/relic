@@ -18,7 +18,9 @@
  * was, its values interning to and decoding as the identifiers they had.
  * An evaluation computing more integers than the table can number is
  * refused so too, and a round run deferred is refused where the serial
- * round is, leaving what it leaves.
+ * round is, leaving what it leaves.  The longest string a value may hold is
+ * lowered as well, so that a concatenation past it, which the real limit of
+ * four gigabytes puts out of any test's reach, fails an evaluation.
  */
 
 #include "config.h"
@@ -36,6 +38,7 @@
 #define	SCENARIO_INTEGERS	"the integer table stops at its ceiling"
 #define	SCENARIO_SYMBOLS	"the symbol pool stops at its ceiling"
 #define	SCENARIO_DEFERRED	"a deferred round stops at the integer ceiling"
+#define	SCENARIO_TOO_LONG	"a string too long to be a value fails"
 
 /*
  * Forty integers loaded and a rule computing a new one from each, which
@@ -43,8 +46,23 @@
  */
 #define	COMPUTED_FACTS		40
 
+/*
+ * A string of half the longest length a value may have, which this program
+ * is compiled with at 64, and that length as text: twice the string is
+ * exactly the longest, and three times it is too long.
+ */
+#define	STRING_HALF		"0123456789abcdef0123456789abcdef"
+#define	STRING_LIMIT_TEXT	"64"
+
+_Static_assert(RELIC_STRING_LENGTH_MAX == 2 * (sizeof(STRING_HALF) - 1),
+    "twice the half string is the longest a value may be");
+
 static void	 a_deferred_round_stops_as_serially(size_t threads);
+static void	 a_string_too_long_fails_the_evaluation(void);
 static relic_t	*computing_context(unsigned int flags, size_t threads);
+static int	 count_row(void *callback_ctx, const relic_value_t *values,
+		    size_t count);
+static int	 query_rows(relic_t *ctx, const char *text, size_t *rowsp);
 
 #define	SYMBOL_TEXT_MAX		32
 
@@ -222,6 +240,92 @@ a_deferred_round_stops_as_serially(size_t threads)
 }
 
 /*
+ * A concatenation longer than a string value can be fails the evaluation
+ * with an error naming the rule, and derives nothing from the binding.  One
+ * reaching exactly the longest length is a value like any other.  Under
+ * negation the error is not a dropped binding: the rule negating the failed
+ * one derives nothing either, and a query over it fails with the query's
+ * own message when its plan is the one that fails.
+ */
+static void
+a_string_too_long_fails_the_evaluation(void)
+{
+	static const char program[] =
+	    "w(\"" STRING_HALF "\").\n"
+	    "twice(T) :- w(S), T = cat(S, S).\n"
+	    "thrice(T) :- twice(S), w(W), T = cat(S, W).\n"
+	    "long(S) :- w(S), cat(S, cat(S, S)) != \"\".\n"
+	    "short(S) :- w(S), not long(S).\n";
+	size_t rows;
+	relic_t *ctx;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_TOO_LONG, "a context should be created");
+	if (ctx == NULL)
+		return;
+	if (relic_load_string(ctx, "long.dl", program) != 0) {
+		check(false, SCENARIO_TOO_LONG, "the program should load");
+		relic_destroy(ctx);
+		return;
+	}
+
+	check(relic_materialize(ctx) != 0 &&
+	    diagnosed(ctx, "string too long in rule "), SCENARIO_TOO_LONG,
+	    "a materialization should fail on the long string");
+
+	check(query_rows(ctx, "twice(T), length(T) = " STRING_LIMIT_TEXT "?",
+	    &rows) == 0 && rows == 1, SCENARIO_TOO_LONG,
+	    "a string of exactly the longest length should be derived");
+	check(query_rows(ctx, "thrice(T)?", &rows) != 0 && rows == 0 &&
+	    diagnosed(ctx, "string too long in rule thrice/1"),
+	    SCENARIO_TOO_LONG, "a rule concatenating past the limit should "
+	    "fail its query, naming it, with no rows");
+	check(query_rows(ctx, "short(S)?", &rows) != 0 && rows == 0 &&
+	    diagnosed(ctx, "string too long in rule long/1"),
+	    SCENARIO_TOO_LONG, "the negation of a failed rule should derive "
+	    "nothing");
+	check(query_rows(ctx, "w(S), T = cat(S, cat(S, S))?", &rows) != 0 &&
+	    rows == 0 && diagnosed(ctx, "string too long in the query"),
+	    SCENARIO_TOO_LONG, "a query concatenating past the limit should "
+	    "fail with the query's message");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Answer a query, counting its rows into *rowsp.  Returns what
+ * relic_query_run() returns, or -1 when the query was not prepared.
+ */
+static int
+query_rows(relic_t *ctx, const char *text, size_t *rowsp)
+{
+	relic_query_t *query;
+	int status;
+
+	*rowsp = 0;
+	query = relic_query_prepare(ctx, NULL, text);
+	if (query == NULL)
+		return (-1);
+
+	status = relic_query_run(ctx, query, count_row, rowsp);
+	relic_query_destroy(query);
+
+	return (status);
+}
+
+static int
+count_row(void *callback_ctx, const relic_value_t *values RELIC_TEST_UNUSED,
+    size_t count RELIC_TEST_UNUSED)
+{
+	size_t *rowsp;
+
+	rowsp = callback_ctx;
+	(*rowsp)++;
+
+	return (0);
+}
+
+/*
  * A context holding the forty integers and the rule computing from them.
  */
 static relic_t *
@@ -280,6 +384,7 @@ main(void)
 	the_symbol_pool_stops_at_its_ceiling();
 	a_deferred_round_stops_as_serially(1);
 	a_deferred_round_stops_as_serially(4);
+	a_string_too_long_fails_the_evaluation();
 
 	return (check_summary("ceiling"));
 }

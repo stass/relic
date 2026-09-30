@@ -1,0 +1,11 @@
+% A name that is a function's is still free to name a predicate: at the
+% start of a body literal, length followed by a comparator or an operator is
+% a call, and followed by anything else an atom.  So length/1 is defined and
+% read beside the calls that share its name.
+length("ab").
+length(S) :- word(S), length(S) > 3.
+word("abc"). word("abcd"). word("abcdef").
+short(S) :- length(S), length(S) + 0 < 3.
+
+length(S)?
+short(S)?

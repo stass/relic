@@ -468,7 +468,7 @@ static void	 deliver_batch(relic_evaluation_t *eval,
 static int	 insert_batch(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
 static const relic_relation_t *plan_head(const relic_plan_t *plan);
-static int64_t	*make_pending_room(relic_evaluation_t *eval);
+static relic_pending_t *make_pending_room(relic_evaluation_t *eval);
 static int	 fit_scratch(relic_evaluation_t *eval,
 		    const relic_plan_t *plan);
 static void	 set_delta(relic_evaluation_t *eval, relic_relation_t *member,
@@ -499,8 +499,12 @@ static void	 explain_component(const relic_evaluation_t *eval,
 static bool	*mixed_noted_flag(relic_t *ctx, const relic_rule_t *rule);
 static void	 note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 		    const relic_mixed_note_t *note);
-static void	 report_undefined(relic_t *ctx, const relic_rule_t *rule,
+static void	 report_failure(relic_t *ctx, const relic_rule_t *rule,
+		    const relic_relation_t *relation,
 		    const relic_exec_error_t *error);
+static void	 report_texts_refused(relic_t *ctx,
+		    const relic_relation_t *relation,
+		    enum relic_exec_failure failure);
 static int	 resolve_pending(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
 static const char *describe_fold(const relic_t *ctx,
@@ -707,18 +711,35 @@ describe_fold(const relic_t *ctx, const relic_aggregate_t *aggregate,
 }
 
 /*
- * Report the result arithmetic did not define that a plan of `rule`
- * recorded, naming the program rule it came from, or the query.
+ * Report the failure a plan of `rule` recorded while deriving into
+ * `relation`.  A result that is not a value names the program rule it came
+ * from, or the query, at the literal that computed it.  A buffer the memory
+ * limit would not let grow is reported as the limit refusing an insertion
+ * into `relation` is, and one the allocator would not give as every
+ * allocation failure is.
  */
 static void
-report_undefined(relic_t *ctx, const relic_rule_t *rule,
-    const relic_exec_error_t *error)
+report_failure(relic_t *ctx, const relic_rule_t *rule,
+    const relic_relation_t *relation, const relic_exec_error_t *error)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 	const char *what;
 
-	what = error->status == RELIC_ARITH_ZERO_DIVISOR ? "division by zero" :
-	    "integer overflow";
+	what = "integer overflow";
+	switch (error->failure) {
+	case RELIC_FAIL_OVERFLOW:
+		break;
+	case RELIC_FAIL_ZERO_DIVISOR:
+		what = "division by zero";
+		break;
+	case RELIC_FAIL_TOO_LONG:
+		what = "string too long";
+		break;
+	case RELIC_FAIL_LIMIT:
+	case RELIC_FAIL_NO_MEMORY:
+		report_texts_refused(ctx, relation, error->failure);
+		return;
+	}
 
 	if (rule->origin == RELIC_ORIGIN_QUERY) {
 		relic_diagf(ctx, RELIC_ERROR, error->where, "%s in the query",
@@ -733,33 +754,62 @@ report_undefined(relic_t *ctx, const relic_rule_t *rule,
 }
 
 /*
- * Give the integers a batch derived into `relation` holds pending their
- * identifiers, interning those the value table lacks, and write the
+ * Report that a buffer for the strings a round's plans compute could not
+ * be had, for `failure`: the memory limit refusing it, as it refuses an
+ * insertion into `relation`, or the allocator.
+ */
+static void
+report_texts_refused(relic_t *ctx, const relic_relation_t *relation,
+    enum relic_exec_failure failure)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (failure != RELIC_FAIL_LIMIT) {
+		relic_diag_no_memory(ctx);
+		return;
+	}
+
+	relic_diagf(ctx, RELIC_ERROR, NULL,
+	    "limit exceeded: memory=%zu while deriving %s", ctx->account.limit,
+	    relic_relation_describe(ctx, relation, described,
+	    sizeof(described)));
+}
+
+/*
+ * Give the values a batch derived into `relation` holds pending their
+ * identifiers, interning those the context has not assigned, and write the
  * identifiers over the markers, so that the batch is a batch of tuples
- * again.  The memory limit is asked about the table's growth before anything
- * is interned, so a batch it refuses leaves the table as it was.  Returns 0,
- * or -1 with the refusal reported.
+ * again.  The memory limit is asked about the growth of the value table
+ * and the pool before anything is interned, so a batch it refuses leaves
+ * them as they were.  Returns 0, or -1 with the refusal reported.  The
+ * pending strings' bytes are read until the commit has copied them, and
+ * the batch's pending values are empty after it either way.
  */
 static int
 resolve_pending(relic_evaluation_t *eval, relic_relation_t *relation)
 {
 	relic_scratch_t *scratch;
 	size_t projected;
+	int status;
 
 	scratch = &eval->scratch;
 	if (scratch->pending_count == 0)
 		return (0);
 
 	projected = relic_pending_measure(eval->ctx, scratch->pending,
-	    scratch->pending_count, &eval->pending_map);
-	if (relic_relation_admit_integers(eval->ctx, relation, projected) != 0)
-		return (-1);
+	    scratch->pending_count, scratch->pending_bytes.bytes,
+	    &eval->pending_map);
+	status = relic_relation_admit_values(eval->ctx, relation, projected);
+	if (status == 0) {
+		relic_pending_rewrite(&eval->pending_map, scratch->batch,
+		    scratch->batch_count, relation->arity);
+		status = relic_pending_commit(eval->ctx, &eval->pending_map);
+	}
 
-	relic_pending_rewrite(&eval->pending_map, scratch->batch,
-	    scratch->batch_count, relation->arity);
 	scratch->pending_count = 0;
+	scratch->pending_bytes.used = 0;
 
-	return (relic_pending_commit(eval->ctx, &eval->pending_map));
+	return (status);
 }
 
 /*
@@ -868,11 +918,11 @@ relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
 /*
  * Take what the executor has gathered for a plan of `rule` since it was last
  * taken, and empty its batch: count its work, report the note it recorded,
- * and send its tuples to `target`, inserting them, their pending integers
+ * and send its tuples to `target`, inserting them, their pending values
  * interned first, or delivering them as rows.  Returns -1 when the plan met
- * a result arithmetic does not define, which is reported here and discards
- * the batch, or when an insertion or its integers were refused, which the
- * store has reported; a delivery cannot fail.
+ * a failure, which is reported here and discards the batch, or when an
+ * insertion or its values were refused, which the store has reported; a
+ * delivery cannot fail.
  *
  * This is the one place that tells the two kinds of target apart, so a
  * tuple is built the same way whichever it is for.  The note goes before
@@ -880,7 +930,7 @@ relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
  * later tuples were derived, and the counts go first of all, so that a row
  * callback reading the statistics finds the work that derived its row.  A
  * plan that streams computes nothing, so a batch delivered as rows holds no
- * pending integer and no error.
+ * pending value and no failure.
  */
 static int
 take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
@@ -892,11 +942,13 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 	take_counters(eval->ctx, scratch);
 	relic_report_mixed_note(eval->ctx, rule, &scratch->note);
 
-	if (scratch->error.where != NULL) {
-		report_undefined(eval->ctx, rule, &scratch->error);
-		scratch->error.where = NULL;
+	if (scratch->error.failed) {
+		report_failure(eval->ctx, rule, target->relation,
+		    &scratch->error);
+		bzero(&scratch->error, sizeof(scratch->error));
 		scratch->batch_count = 0;
 		scratch->pending_count = 0;
+		scratch->pending_bytes.used = 0;
 		return (-1);
 	}
 
@@ -1019,11 +1071,18 @@ confirm_planned(const relic_evaluation_t *eval,
  * the relations, the counters and what is reported come out the same.  A
  * context of one thread without the switch offers nothing, and its rounds
  * run here as they always have.
+ *
+ * A round run here whose plans call a function has the scratch's buffers
+ * for the strings they compute for as long as it runs, charged to the
+ * memory account from its start to its end, as a deferred round's are.
  */
 static int
 run_round(relic_evaluation_t *eval, relic_round_t *round)
 {
+	const relic_round_item_t *calling;
 	const relic_config_t *config;
+	enum relic_exec_failure failure;
+	int status;
 	size_t i;
 
 	config = &eval->ctx->config;
@@ -1033,12 +1092,22 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 			return (0);
 	}
 
-	for (i = 0; i < round->item_count; i++) {
-		if (run_item(eval, round, &round->items[i]) != 0)
-			return (-1);
+	calling = relic_round_first_call(round);
+	if (calling != NULL &&
+	    relic_scratch_begin_texts(&eval->scratch, &eval->ctx->account,
+	    &failure) != 0) {
+		report_texts_refused(eval->ctx, round->targets[calling->target],
+		    failure);
+		return (-1);
 	}
 
-	return (0);
+	status = 0;
+	for (i = 0; i < round->item_count && status == 0; i++)
+		status = run_item(eval, round, &round->items[i]);
+
+	relic_scratch_end_texts(&eval->scratch);
+
+	return (status);
 }
 
 /*
@@ -1694,7 +1763,7 @@ build_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 /*
  * Give the scratch room for the states of `plan`'s operations, when it has
  * less, and, when `plan` computes and the scratch has no room for pending
- * integers yet, room for a batch's worth of them and the map that resolves
+ * values yet, room for a batch's worth of them and the map that resolves
  * them.  Returns 0, or -1 with the arena's refusal reported.
  *
  * Plans are built before any of them runs -- a component's when it starts,
@@ -1710,7 +1779,7 @@ fit_scratch(relic_evaluation_t *eval, const relic_plan_t *plan)
 {
 	relic_scratch_t *scratch;
 	relic_op_state_t *states;
-	int64_t *pending;
+	relic_pending_t *pending;
 	size_t op_room;
 
 	scratch = &eval->scratch;
@@ -1740,14 +1809,14 @@ fit_scratch(relic_evaluation_t *eval, const relic_plan_t *plan)
 }
 
 /*
- * Room for the pending integers of a batch of the scratch's width, and the
- * map that resolves them: one pending integer per column at most.  Returns
+ * Room for the pending values of a batch of the scratch's width, and the
+ * map that resolves them: one pending value per column at most.  Returns
  * the pending array, or NULL with the arena's refusal reported.
  */
-static int64_t *
+static relic_pending_t *
 make_pending_room(relic_evaluation_t *eval)
 {
-	int64_t *pending;
+	relic_pending_t *pending;
 	size_t columns;
 
 	columns = (size_t)RELIC_INSERT_BATCH * eval->scratch.arity_room;
@@ -3462,7 +3531,7 @@ relic_stats(relic_t *ctx, relic_stats_t *stats)
 
 	stats->tuples = relic_relation_total_tuples(ctx);
 	stats->storage_bytes = relic_relation_total_bytes(ctx) +
-	    relic_value_integer_bytes(ctx);
+	    relic_value_storage_bytes(ctx);
 	stats->symbol_values = relic_value_count_of(ctx, RELIC_SYMBOL);
 	stats->string_values = relic_value_count_of(ctx, RELIC_STRING);
 	stats->integer_values = relic_value_count_of(ctx, RELIC_INTEGER);

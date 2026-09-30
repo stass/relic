@@ -64,7 +64,7 @@ static int	 compare_bytes(const relic_t *ctx, uint32_t left,
 static int	 compare_integers(int64_t left, int64_t right);
 static int	 compare_totally(const relic_t *ctx, const relic_value_t *left,
 		    const relic_value_t *right);
-static void	 account_integer_table(relic_t *ctx);
+static void	 account_value_table(relic_t *ctx);
 static int	 cover_symbol_uses(relic_t *ctx, uint32_t symbol);
 static bool	 decode_integer(const relic_valtab_t *table, uint32_t position,
 		    relic_value_t *value);
@@ -82,6 +82,11 @@ static uint32_t	 find_integer(const relic_valtab_t *table, int64_t integer,
 		    uint32_t hash);
 static size_t	 integer_table_bytes(const relic_valtab_t *table);
 static uint32_t	 integer_rehash(uint32_t id, void *ctx);
+static relic_dom_t measure_integer(const relic_valtab_t *table,
+		    relic_pending_map_t *map, int64_t integer, size_t mask);
+static relic_dom_t measure_string(const relic_t *ctx,
+		    relic_pending_map_t *map, const char *bytes, size_t length,
+		    size_t mask);
 static size_t	 seen_size(size_t count);
 static int	 integer_store(relic_t *ctx, int64_t integer, uint32_t *idp);
 static void	 record_symbol_use(relic_valtab_t *table, uint32_t symbol,
@@ -89,6 +94,9 @@ static void	 record_symbol_use(relic_valtab_t *table, uint32_t symbol,
 static uint8_t	 symbol_use_bit(enum relic_type type);
 static bool	 symbol_used_as(const relic_valtab_t *table, uint32_t symbol,
 		    enum relic_type type);
+static size_t	 uses_capacity_covering(const relic_valtab_t *table,
+		    uint32_t symbol);
+static size_t	 value_table_bytes(const relic_valtab_t *table);
 static int	 value_from_bytes(relic_t *ctx, enum relic_type type,
 		    const char *bytes, size_t length, relic_value_t *value);
 static unsigned int value_type_rank(enum relic_type type);
@@ -220,32 +228,35 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
 }
 
 /*
- * Make the record of uses cover `symbol`.  The entries a growth adds are
+ * Make the record of uses cover `symbol`, grown as uses_capacity_covering()
+ * projects: by the steps covering one more symbol at a time would take, so
+ * that the record reaches one capacity however its symbols arrive, one
+ * interning at a time or a batch's at once.  The entries a growth adds are
  * cleared, since a symbol whose entry held a stray bit would decode as a
- * value no one made, and a failed growth leaves every earlier record as it
- * was.
+ * value no one made.  Returns 0, or -1 with nothing reported when it could
+ * not grow, leaving the record as it was.
  */
 static int
 cover_symbol_uses(relic_t *ctx, uint32_t symbol)
 {
 	relic_valtab_t *table;
-	uint8_t *uses;
 	size_t old_capacity;
+	uint8_t *uses;
 
 	table = &ctx->values;
 	if (symbol <= table->symbol_use_capacity)
 		return (0);
 
 	old_capacity = table->symbol_use_capacity;
-	uses = relic_grow_array(table->symbol_uses, &table->symbol_use_capacity,
-	    symbol, sizeof(*uses));
-	if (uses == NULL) {
-		relic_diag_no_memory(ctx);
+	uses = relic_grow_array_stepwise(table->symbol_uses,
+	    &table->symbol_use_capacity, old_capacity, symbol - old_capacity,
+	    1, sizeof(*uses));
+	if (uses == NULL)
 		return (-1);
-	}
 
 	bzero(uses + old_capacity, table->symbol_use_capacity - old_capacity);
 	table->symbol_uses = uses;
+	account_value_table(ctx);
 
 	return (0);
 }
@@ -283,8 +294,10 @@ static int
 intern_symbol_value(relic_t *ctx, enum relic_type type, uint32_t symbol,
     relic_dom_t *domp)
 {
-	if (cover_symbol_uses(ctx, symbol) != 0)
+	if (cover_symbol_uses(ctx, symbol) != 0) {
+		relic_diag_no_memory(ctx);
 		return (-1);
+	}
 
 	record_symbol_use(&ctx->values, symbol, type);
 	*domp = dom_type_bits(type) | symbol;
@@ -318,7 +331,7 @@ integer_store(relic_t *ctx, int64_t integer, uint32_t *idp)
 		return (-1);
 	}
 	table->integers = integers;
-	account_integer_table(ctx);
+	account_value_table(ctx);
 
 	table->integers[table->integer_count] = integer;
 	table->integer_count++;
@@ -341,20 +354,32 @@ integer_table_bytes(const relic_valtab_t *table)
 }
 
 /*
- * Set the account's count of the integer table to what the table occupies,
+ * The bytes the value table occupies: the integer table, and the record of
+ * which symbols are values of each type, a byte per symbol it covers.
+ */
+static size_t
+value_table_bytes(const relic_valtab_t *table)
+{
+	return (relic_saturating_sum(integer_table_bytes(table),
+	    table->symbol_use_capacity * sizeof(*table->symbol_uses)));
+}
+
+/*
+ * Set the account's count of the value table to what the table occupies,
  * after anything that may have grown it.  The count is reconciled from the
  * table rather than adjusted by each growth, so it cannot drift from it.
  */
 static void
-account_integer_table(relic_t *ctx)
+account_value_table(relic_t *ctx)
 {
-	ctx->account.value_bytes = integer_table_bytes(&ctx->values);
+	ctx->account.value_bytes = value_table_bytes(&ctx->values);
 }
 
 size_t
-relic_value_integer_bytes(const relic_t *ctx)
+relic_value_storage_bytes(const relic_t *ctx)
 {
-	return (integer_table_bytes(&ctx->values));
+	return (relic_saturating_sum(value_table_bytes(&ctx->values),
+	    relic_symbol_pool_bytes(ctx)));
 }
 
 /*
@@ -408,7 +433,7 @@ intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
-	account_integer_table(ctx);
+	account_value_table(ctx);
 
 	if (integer_store(ctx, integer, &id) != 0)
 		return (-1);
@@ -546,6 +571,36 @@ relic_value_find_integer(const relic_t *ctx, int64_t integer)
 	return (RELIC_DOM_INTEGER | id);
 }
 
+/*
+ * The probe is the pool's own lookup, and then the string bit: bytes the
+ * pool holds only as a name, or as a symbol value's spelling, have no
+ * string identifier until interning one as a string sets the bit.
+ */
+relic_dom_t
+relic_value_find_string(const relic_t *ctx, const char *bytes, size_t length)
+{
+	uint32_t symbol;
+
+	symbol = relic_symbol_find(ctx, bytes, length,
+	    relic_symbol_hash(ctx, bytes, length));
+	if (!symbol_used_as(&ctx->values, symbol, RELIC_STRING))
+		return (0);
+
+	return (RELIC_DOM_STRING | symbol);
+}
+
+const char *
+relic_value_bytes(const relic_t *ctx, relic_dom_t dom, size_t *lengthp)
+{
+	relic_value_t value;
+
+	if ((dom & RELIC_DOM_TYPE_MASK) == RELIC_DOM_INTEGER ||
+	    !relic_value_decode(ctx, dom, &value))
+		return (NULL);
+
+	return (relic_symbol_bytes(ctx, value.v.id, lengthp));
+}
+
 bool
 relic_value_integer(const relic_t *ctx, relic_dom_t dom, int64_t *integerp)
 {
@@ -561,8 +616,8 @@ relic_value_integer(const relic_t *ctx, relic_dom_t dom, int64_t *integerp)
 }
 
 /*
- * The slots of a pending map's table of new integers for a batch of `count`
- * pending integers: the least power of two at least twice the count, so the
+ * The slots of a pending map's tables of new values for a batch of `count`
+ * pending values: the least power of two at least twice the count, so a
  * table is at most half full and every probe ends at an empty slot.
  */
 static size_t
@@ -588,7 +643,12 @@ relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 	map->fresh = relic_arena_allocarray(arena, room, sizeof(*map->fresh));
 	map->seen = relic_arena_allocarray(arena, seen_size(room),
 	    sizeof(*map->seen));
-	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL)
+	map->strings = relic_arena_allocarray(arena, room,
+	    sizeof(*map->strings));
+	map->strings_seen = relic_arena_allocarray(arena, seen_size(room),
+	    sizeof(*map->strings_seen));
+	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL ||
+	    map->strings == NULL || map->strings_seen == NULL)
 		return (-1);
 
 	return (0);
@@ -603,12 +663,17 @@ size_t
 relic_pending_map_bytes(size_t room)
 {
 	relic_pending_map_t *map;
+	size_t per_entry;
+	size_t per_slot;
 
 	assert(room <= RELIC_DOM_INDEX_MASK);
 
-	return (relic_saturating_sum(relic_saturating_product(room,
-	    sizeof(*map->ids) + sizeof(*map->fresh)),
-	    relic_saturating_product(seen_size(room), sizeof(*map->seen))));
+	per_entry = sizeof(*map->ids) + sizeof(*map->fresh) +
+	    sizeof(*map->strings);
+	per_slot = sizeof(*map->seen) + sizeof(*map->strings_seen);
+
+	return (relic_saturating_sum(relic_saturating_product(room, per_entry),
+	    relic_saturating_product(seen_size(room), per_slot)));
 }
 
 int
@@ -622,7 +687,10 @@ relic_pending_map_open(relic_pending_map_t *map, size_t room)
 	map->ids = calloc(room, sizeof(*map->ids));
 	map->fresh = calloc(room, sizeof(*map->fresh));
 	map->seen = calloc(seen_size(room), sizeof(*map->seen));
-	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL) {
+	map->strings = calloc(room, sizeof(*map->strings));
+	map->strings_seen = calloc(seen_size(room), sizeof(*map->strings_seen));
+	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL ||
+	    map->strings == NULL || map->strings_seen == NULL) {
 		relic_pending_map_close(map);
 		return (-1);
 	}
@@ -636,71 +704,178 @@ relic_pending_map_close(relic_pending_map_t *map)
 	free(map->ids);
 	free(map->fresh);
 	free(map->seen);
+	free(map->strings);
+	free(map->strings_seen);
 	bzero(map, sizeof(*map));
 }
 
 /*
- * Each pending integer is looked up in the table, and one the table lacks
- * in the map's own table of the batch's new integers, which is cleared for
- * the batch and then filled as they are first met, so that two pending
- * copies of one new integer are promised one identifier.  The identifiers
- * promised follow the table's count in order of first occurrence, which is
- * the order relic_pending_commit() appends them in.
+ * The identifier a pending integer is given: the one the integer table
+ * holds it under, or, for an integer it lacks, the one after the table's
+ * count that its position among the batch's new integers gives it.  The
+ * map's table of new integers is looked up first, so two pending copies of
+ * one new integer are promised one identifier.
  */
-size_t
-relic_pending_measure(const relic_t *ctx, const int64_t *pending, size_t count,
-    relic_pending_map_t *map)
+static relic_dom_t
+measure_integer(const relic_valtab_t *table, relic_pending_map_t *map,
+    int64_t integer, size_t mask)
 {
-	const relic_valtab_t *table;
-	size_t capacity;
-	size_t mask;
-	size_t slot;
-	size_t i;
 	uint32_t hash;
 	uint32_t id;
+	size_t slot;
+
+	hash = relic_hash_int64(table->hash_seed, integer);
+	id = find_integer(table, integer, hash);
+	if (id != RELIC_ID_NONE)
+		return (RELIC_DOM_INTEGER | id);
+
+	for (slot = hash & mask; map->seen[slot] != 0;
+	    slot = (slot + 1) & mask) {
+		if (map->fresh[map->seen[slot] - 1] == integer)
+			break;
+	}
+	if (map->seen[slot] == 0) {
+		map->fresh[map->fresh_count] = integer;
+		map->fresh_count++;
+		map->seen[slot] = (uint32_t)map->fresh_count;
+	}
+
+	return (RELIC_DOM_INTEGER |
+	    (uint32_t)(table->integer_count + map->seen[slot]));
+}
+
+/*
+ * The identifier a pending string of `length` bytes at `bytes` is given, a
+ * string value's in every case: the one the context has assigned it; or,
+ * when the pool holds the bytes under a symbol whose string bit is clear,
+ * that symbol's, which the commit makes a string value by setting the bit;
+ * or, for bytes the pool lacks, the one after the pool's count that their
+ * position among the batch's new strings gives them, found as a new
+ * integer's is.  The highest symbol promised is kept, since the commit
+ * sets the bit of every one and the bits must reach that far.
+ */
+static relic_dom_t
+measure_string(const relic_t *ctx, relic_pending_map_t *map,
+    const char *bytes, size_t length, size_t mask)
+{
+	const relic_fresh_string_t *fresh;
+	uint32_t symbol;
+	uint32_t hash;
+	size_t slot;
+
+	hash = relic_symbol_hash(ctx, bytes, length);
+	symbol = relic_symbol_find(ctx, bytes, length, hash);
+	if (symbol == RELIC_ID_NONE) {
+		for (slot = hash & mask; map->strings_seen[slot] != 0;
+		    slot = (slot + 1) & mask) {
+			fresh = &map->strings[map->strings_seen[slot] - 1];
+			if (fresh->hash == hash && fresh->length == length &&
+			    (length == 0 ||
+			    bcmp(fresh->bytes, bytes, length) == 0))
+				break;
+		}
+		if (map->strings_seen[slot] == 0) {
+			map->strings[map->string_count].bytes = bytes;
+			map->strings[map->string_count].copy = NULL;
+			map->strings[map->string_count].length = length;
+			map->strings[map->string_count].hash = hash;
+			map->string_count++;
+			map->strings_seen[slot] = (uint32_t)map->string_count;
+		}
+		symbol = (uint32_t)(relic_symbol_count(ctx) +
+		    map->strings_seen[slot]);
+	}
+
+	if (symbol > map->highest_string)
+		map->highest_string = symbol;
+
+	return (RELIC_DOM_STRING | symbol);
+}
+
+/*
+ * The capacity the record of symbol uses reaches when it is made to cover
+ * `symbol`, by doubling, or SIZE_MAX when the growth would be refused: the
+ * capacity a sequence of growths reaches is then the one the highest symbol
+ * they covered gives, however the growths were batched, so the serial
+ * evaluator and a merged round hold the same bytes.
+ */
+static size_t
+uses_capacity_covering(const relic_valtab_t *table, uint32_t symbol)
+{
+	size_t capacity;
+
+	if (symbol <= table->symbol_use_capacity)
+		return (table->symbol_use_capacity);
+
+	capacity = relic_grow_array_capacity_stepwise(
+	    table->symbol_use_capacity, table->symbol_use_capacity,
+	    symbol - table->symbol_use_capacity, 1);
+
+	return (capacity == 0 ? SIZE_MAX : capacity);
+}
+
+/*
+ * Each pending value is measured in batch order, so new values are
+ * promised identifiers in order of first occurrence, which is the order
+ * relic_pending_append() numbers them in.  The projection is of the value
+ * table and the pool together, each part at the capacity interning the new
+ * values one at a time would reach.
+ */
+size_t
+relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
+    size_t count, const char *bytes, relic_pending_map_t *map)
+{
+	const relic_valtab_t *table;
+	const relic_text_t *text;
+	size_t integers;
+	size_t capacity;
+	size_t uses;
+	size_t mask;
+	size_t i;
 
 	table = &ctx->values;
 	assert(count <= map->room);
 
 	map->count = count;
 	map->fresh_count = 0;
+	map->string_count = 0;
+	map->highest_string = 0;
 	mask = seen_size(count) - 1;
 	bzero(map->seen, (mask + 1) * sizeof(*map->seen));
+	bzero(map->strings_seen, (mask + 1) * sizeof(*map->strings_seen));
 
 	for (i = 0; i < count; i++) {
-		hash = relic_hash_int64(table->hash_seed, pending[i]);
-		id = find_integer(table, pending[i], hash);
-		if (id != RELIC_ID_NONE) {
-			map->ids[i] = RELIC_DOM_INTEGER | id;
-			continue;
+		switch (pending[i].kind) {
+		case RELIC_PENDING_INTEGER:
+			map->ids[i] = measure_integer(table, map,
+			    pending[i].u.integer, mask);
+			break;
+		case RELIC_PENDING_TEXT:
+			text = &pending[i].u.text;
+			map->ids[i] = measure_string(ctx, map,
+			    bytes + text->offset, text->length, mask);
+			break;
 		}
-
-		for (slot = hash & mask; map->seen[slot] != 0;
-		    slot = (slot + 1) & mask) {
-			if (map->fresh[map->seen[slot] - 1] == pending[i])
-				break;
-		}
-		if (map->seen[slot] == 0) {
-			map->fresh[map->fresh_count] = pending[i];
-			map->fresh_count++;
-			map->seen[slot] = (uint32_t)map->fresh_count;
-		}
-
-		map->ids[i] = RELIC_DOM_INTEGER |
-		    (uint32_t)(table->integer_count + map->seen[slot]);
 	}
 
-	if (map->fresh_count == 0)
-		return (integer_table_bytes(table));
+	integers = integer_table_bytes(table);
+	if (map->fresh_count > 0) {
+		capacity = relic_grow_array_capacity_stepwise(
+		    table->integer_capacity, table->integer_count,
+		    map->fresh_count, 1);
+		if (capacity == 0)
+			return (SIZE_MAX);
+		integers = relic_saturating_sum(relic_saturating_product(
+		    capacity, sizeof(*table->integers)),
+		    relic_idtab_bytes_after_reserve(&table->index,
+		    map->fresh_count));
+	}
 
-	capacity = relic_grow_array_capacity_stepwise(table->integer_capacity,
-	    table->integer_count, map->fresh_count, 1);
-	if (capacity == 0)
-		return (SIZE_MAX);
+	uses = uses_capacity_covering(table, map->highest_string);
 
-	return (relic_saturating_sum(relic_saturating_product(capacity,
-	    sizeof(*table->integers)),
-	    relic_idtab_bytes_after_reserve(&table->index, map->fresh_count)));
+	return (relic_saturating_sum(relic_saturating_sum(integers, uses),
+	    relic_symbol_pool_bytes_after(ctx, map->strings,
+	    map->string_count)));
 }
 
 void
@@ -719,45 +894,53 @@ relic_pending_rewrite(const relic_pending_map_t *map, relic_dom_t *tuples,
 }
 
 /*
- * The index is reserved and the array grown for all of the map's new
- * integers at once, each to the capacity appending them one at a time would
- * reach, so that the only step that can fail comes before any integer is
- * appended, as in intern_integer().  A growth that fails leaves the table's
- * contents as they were, and whatever it grew counted.
+ * Every part is grown for all of the map's new values at once, each to the
+ * capacity interning them one at a time would reach, so that the only step
+ * that can fail comes before any value is numbered, as in intern_integer()
+ * and relic_symbol_intern().  The integer table first, then the record of
+ * symbol uses, to cover the highest identifier the map promised, and the
+ * pool last, whose copies of the new strings are undone whole when one of
+ * them fails.  A growth that fails leaves every part's contents as they
+ * were, and whatever it grew counted.
  */
 int
-relic_pending_reserve(relic_t *ctx, const relic_pending_map_t *map)
+relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map)
 {
 	relic_valtab_t *table;
 	int64_t *integers;
 
 	table = &ctx->values;
-	if (map->fresh_count == 0)
-		return (0);
+	if (map->fresh_count > 0) {
+		if (map->fresh_count > RELIC_INTEGER_MAX - table->integer_count)
+			return (-1);
 
-	if (map->fresh_count > RELIC_INTEGER_MAX - table->integer_count)
-		return (-1);
+		if (relic_idtab_reserve(&table->index, map->fresh_count,
+		    integer_rehash, table) != 0) {
+			account_value_table(ctx);
+			return (-1);
+		}
 
-	if (relic_idtab_reserve(&table->index, map->fresh_count,
-	    integer_rehash, table) != 0) {
-		account_integer_table(ctx);
-		return (-1);
+		integers = relic_grow_array_stepwise(table->integers,
+		    &table->integer_capacity, table->integer_count,
+		    map->fresh_count, 1, sizeof(*table->integers));
+		if (integers != NULL)
+			table->integers = integers;
+		account_value_table(ctx);
+		if (integers == NULL)
+			return (-1);
 	}
 
-	integers = relic_grow_array_stepwise(table->integers,
-	    &table->integer_capacity, table->integer_count, map->fresh_count,
-	    1, sizeof(*table->integers));
-	if (integers != NULL)
-		table->integers = integers;
-	account_integer_table(ctx);
+	if (cover_symbol_uses(ctx, map->highest_string) != 0)
+		return (-1);
 
-	return (integers == NULL ? -1 : 0);
+	return (relic_symbol_reserve(ctx, map->strings, map->string_count));
 }
 
 void
 relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
 {
 	relic_valtab_t *table;
+	relic_dom_t id;
 	size_t i;
 
 	table = &ctx->values;
@@ -769,21 +952,37 @@ relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
 		    relic_hash_int64(table->hash_seed, map->fresh[i]),
 		    (uint32_t)table->integer_count);
 	}
+
+	relic_symbol_append(ctx, map->strings, map->string_count);
+
+	for (i = 0; i < map->count; i++) {
+		id = map->ids[i];
+		if ((id & RELIC_DOM_TYPE_MASK) != RELIC_DOM_STRING)
+			continue;
+
+		assert((id & RELIC_DOM_INDEX_MASK) <=
+		    table->symbol_use_capacity);
+		record_symbol_use(table, id & RELIC_DOM_INDEX_MASK,
+		    RELIC_STRING);
+	}
 }
 
 /*
- * A reservation fails for one of two reasons, which the diagnostic tells
- * apart: the table holds as many integers as an identifier can name, or the
- * allocator refused its growth.
+ * A reservation fails for one of three reasons, which the diagnostic tells
+ * apart: the integer table, or the pool, holds as many values as an
+ * identifier can name, or the allocator refused a growth.
  */
 int
-relic_pending_commit(relic_t *ctx, const relic_pending_map_t *map)
+relic_pending_commit(relic_t *ctx, relic_pending_map_t *map)
 {
 	if (relic_pending_reserve(ctx, map) != 0) {
 		if (map->fresh_count > RELIC_INTEGER_MAX -
 		    ctx->values.integer_count)
 			relic_diagf(ctx, RELIC_ERROR, NULL,
 			    "too many distinct integers");
+		else if (!relic_symbol_has_room(ctx, map->string_count))
+			relic_diagf(ctx, RELIC_ERROR, NULL,
+			    "too many distinct symbols and strings");
 		else
 			relic_diag_no_memory(ctx);
 		return (-1);
@@ -827,11 +1026,8 @@ compare_integers(int64_t left, int64_t right)
 
 /*
  * Order two interned byte strings bytewise, and not by locale collation, so
- * that a result never depends on the environment.
- *
- * memcmp gives the ordering over the bytes the two have in common; when those
- * are equal the shorter string is the smaller, which is what makes this a
- * lexicographic order over strings that may contain NUL bytes.
+ * that a result never depends on the environment: lexicographically, by
+ * relic_bytes_order(), over strings that may contain NUL bytes.
  *
  * A value in the table always names an interned symbol, because
  * relic_value_intern() rejects one that does not, but a value handed to
@@ -846,8 +1042,6 @@ compare_bytes(const relic_t *ctx, uint32_t left, uint32_t right)
 	const char *right_bytes;
 	size_t left_length;
 	size_t right_length;
-	size_t common;
-	int order;
 
 	left_bytes = relic_symbol_bytes(ctx, left, &left_length);
 	right_bytes = relic_symbol_bytes(ctx, right, &right_length);
@@ -859,16 +1053,43 @@ compare_bytes(const relic_t *ctx, uint32_t left, uint32_t right)
 		return (left_bytes == NULL ? -1 : 1);
 	}
 
+	switch (relic_bytes_order(left_bytes, left_length, right_bytes,
+	    right_length)) {
+	case RELIC_ORDER_LESS:
+		return (-1);
+	case RELIC_ORDER_GREATER:
+		return (1);
+	case RELIC_ORDER_EQUAL:
+	case RELIC_ORDER_UNORDERED:
+		break;
+	}
+
+	return (0);
+}
+
+/*
+ * memcmp gives the ordering over the bytes the two have in common; when
+ * those are equal the shorter is the smaller.  No bytes in common are not
+ * compared at all, so an empty string needs no object to point at.
+ */
+enum relic_order
+relic_bytes_order(const char *left, size_t left_length, const char *right,
+    size_t right_length)
+{
+	size_t common;
+	int order;
+
 	common = left_length < right_length ? left_length : right_length;
 
-	order = memcmp(left_bytes, right_bytes, common);
+	order = common == 0 ? 0 : memcmp(left, right, common);
 	if (order != 0)
-		return (order < 0 ? -1 : 1);
+		return (order < 0 ? RELIC_ORDER_LESS : RELIC_ORDER_GREATER);
 
 	if (left_length == right_length)
-		return (0);
+		return (RELIC_ORDER_EQUAL);
 
-	return (left_length < right_length ? -1 : 1);
+	return (left_length < right_length ? RELIC_ORDER_LESS :
+	    RELIC_ORDER_GREATER);
 }
 
 /*

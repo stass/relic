@@ -1,0 +1,14 @@
+% An aggregate beside computed strings: a max compared with a string the
+% rule computed, which it equals only when the fold's value is a string of
+% the same bytes, whether or not the context holds that string; a count
+% keyed on a computed string; and a computed string built from a fold.
+name(a, "ann"). name(b, "bob"). name(c, "cy").
+tag("ann!"). tag("bob!").
+
+loudest(X) :- name(X, N), T = cat(N, "!"), T = max(G) { tag(G) }.
+tagged(X, K) :- name(X, N), T = cat(N, "!"), K = count { tag(T) }.
+longest(S) :- M = max(N) { name(_, N) }, S = cat(str(M), "?").
+
+loudest(X)?
+tagged(X, K)?
+longest(S)?

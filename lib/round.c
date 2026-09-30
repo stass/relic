@@ -137,7 +137,8 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
 	if (!always && !round_is_worth_sharing(ctx, round))
 		return (false);
-	if (!round_reads_no_target(round))
+	if (!round_reads_no_target(round) ||
+	    relic_round_first_call(round) != NULL)
 		return (false);
 
 	if (ctx->pool == NULL) {
@@ -174,6 +175,26 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 		ctx->counters.parallel_rounds++;
 
 	return (true);
+}
+
+/*
+ * A task's executor keeps the strings it computes in a scratch of its own
+ * and has no candidate buffer to hand them to the merge in, so a round
+ * whose plans call a function is run serially.
+ */
+const relic_round_item_t *
+relic_round_first_call(const relic_round_t *round)
+{
+	const relic_round_item_t *item;
+	size_t i;
+
+	for (i = 0; i < round->item_count; i++) {
+		item = &round->items[i];
+		if (item->plan != NULL && relic_plan_calls(item->plan))
+			return (item);
+	}
+
+	return (NULL);
 }
 
 void
@@ -447,7 +468,7 @@ worker_fit(relic_worker_t *worker, size_t op_room, uint16_t arity_room)
 {
 	relic_op_state_t *states;
 	relic_dom_t *batch;
-	int64_t *pending;
+	relic_pending_t *pending;
 
 	states = relic_grow_array(worker->states, &worker->state_capacity,
 	    op_room, sizeof(*worker->states));
@@ -689,7 +710,7 @@ forget_worker_counters(relic_pool_t *pool)
 		bzero(&worker->scratch.counters,
 		    sizeof(worker->scratch.counters));
 		worker->scratch.note.where = NULL;
-		worker->scratch.error.where = NULL;
+		bzero(&worker->scratch.error, sizeof(worker->scratch.error));
 	}
 }
 

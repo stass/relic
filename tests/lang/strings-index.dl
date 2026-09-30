@@ -1,0 +1,23 @@
+% index gives the least position at which one string occurs in another, or
+% -1, so containment, its negation and a prefix are each a single
+% comparison; a suffix is a comparison of the string's tail, since index
+% finds the first occurrence and not the last.  The empty string occurs at
+% position 0 of every string, and a longer string never occurs in it.
+name("main.c"). name("util.h"). name("c"). name("a.c.orig"). name("").
+
+contains(N) :- name(N), index(N, ".c") >= 0.
+lacks(N) :- name(N), index(N, ".c") < 0.
+prefix(N) :- name(N), index(N, "ma") = 0.
+suffix(N) :- name(N), substr(N, length(N) - 2) = ".c".
+first(N, I) :- name(N), I = index(N, "c").
+empty(N, I) :- name(N), I = index(N, "").
+longer(N, I) :- name(N), I = index(N, "main.c.orig").
+
+contains(N)?
+lacks(N)?
+prefix(N)?
+suffix(N)?
+first(N, I)?
+empty(N, I)?
+longer(N, I)?
+I = index("aaab", "aab")?

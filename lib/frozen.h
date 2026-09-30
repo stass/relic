@@ -186,22 +186,51 @@ relic_tuple_id_t relic_index_next(const relic_index_t *index,
 	    relic_tuple_id_t id);
 
 /*
+ * The longest byte string a symbol or string value holds: its length fits
+ * a pool entry's, and the length with a terminator's byte fits a size_t
+ * however narrow.  The pool refuses to intern a longer one, and the
+ * executor refuses to compute one.  A test build may define it lower, so
+ * that both refusals can be reached, and never higher.
+ */
+#ifndef RELIC_STRING_LENGTH_MAX
+#define	RELIC_STRING_LENGTH_MAX	(UINT32_MAX - 1)
+#endif
+
+_Static_assert(RELIC_STRING_LENGTH_MAX <= UINT32_MAX - 1,
+    "a string's length must fit a pool entry's");
+
+/*
  * lib/value.c
  *
  * relic_value_order() orders two values of one type and calls two of
  * different types, or an identifier the context never assigned, unordered.
  *
+ * relic_bytes_order() orders two byte strings as the language orders
+ * strings: bytewise, the shorter first when one begins the other.
+ *
  * relic_value_integer() gives the integer an identifier names, and false
  * for a symbol, a string or an identifier never assigned.
- * relic_value_find_integer() gives the identifier the integer table holds
- * an integer under, or zero, which names no value, when it holds none: the
- * lookup half of interning, which writes nothing.
+ * relic_value_bytes() gives the bytes of the symbol or string an
+ * identifier names and their length, and NULL for an integer or an
+ * identifier never assigned; the bytes never move while the context
+ * exists.  relic_value_find_integer() and relic_value_find_string() give
+ * the identifier the context has assigned an integer or a string of some
+ * bytes, or zero, which names no value, when it has assigned none: the
+ * lookup half of interning, which writes nothing.  Bytes the pool holds
+ * only as a name or a symbol's spelling are no string the context has
+ * assigned.
  */
 enum relic_order relic_value_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
+enum relic_order relic_bytes_order(const char *left, size_t left_length,
+	    const char *right, size_t right_length);
 bool	 relic_value_integer(const relic_t *ctx, relic_dom_t dom,
 	    int64_t *integerp);
+const char *relic_value_bytes(const relic_t *ctx, relic_dom_t dom,
+	    size_t *lengthp);
 relic_dom_t relic_value_find_integer(const relic_t *ctx, int64_t integer);
+relic_dom_t relic_value_find_string(const relic_t *ctx, const char *bytes,
+	    size_t length);
 
 /*
  * lib/account.c

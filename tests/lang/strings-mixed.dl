@@ -1,0 +1,18 @@
+% A call one of whose operands is not of the type the function wants has
+% no value: a symbol or an integer where a string is wanted, a string where
+% an integer is.  The comparison or assignment over it is false and the
+% binding is dropped, which -vv notes once per rule.  str takes every type.
+item(a, "apple"). item(b, banana). item(c, 3). item(d, "dog").
+count(a, 1). count(d, "two").
+
+sized(X, N) :- item(X, S), N = length(S).
+joined(X, J) :- item(X, S), J = cat(S, "s").
+found(X) :- item(X, S), index(S, "a") >= 0.
+cut(X, T) :- item(X, S), count(X, N), T = substr(S, N).
+texts(X, T) :- item(X, S), T = str(S).
+
+sized(X, N)?
+joined(X, J)?
+found(X)?
+cut(X, T)?
+texts(X, T)?

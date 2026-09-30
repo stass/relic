@@ -209,7 +209,7 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
 
 	do {
 		status = relic_exec_run(scratch);
-		if (scratch->error.where != NULL)
+		if (scratch->error.failed)
 			return (-1);
 		if (screen_batch(job, worker, item->target) != 0)
 			return (-1);
@@ -289,8 +289,10 @@ mark_pending(relic_candidates_t *candidates, relic_account_t *account,
 			continue;
 
 		assert(*column >= 1 && *column <= scratch->pending_count);
+		assert(scratch->pending[*column - 1].kind ==
+		    RELIC_PENDING_INTEGER);
 		if (candidates_mark_integer(candidates, account,
-		    scratch->pending[*column - 1], column) != 0)
+		    scratch->pending[*column - 1].u.integer, column) != 0)
 			return (-1);
 	}
 	scratch->pending_count = 0;

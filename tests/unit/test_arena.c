@@ -11,7 +11,9 @@
  * correctly aligned and does not overlap its neighbours, a reset returns the
  * arena to a reusable empty state, a failure is both reported to the caller
  * and remembered on the arena, and a charged arena's account holds exactly
- * what the arena holds and refuses a chunk its limit does not admit.
+ * what the arena holds and refuses a chunk its limit does not admit.  A
+ * projection of allocations not yet made must give the bytes making them
+ * does, since the owner asks the limit with it before it allocates.
  */
 
 #include "config.h"
@@ -32,6 +34,8 @@
 #define	SCENARIO_FAILURE	"an impossible request fails stickily"
 #define	SCENARIO_MARKED		"an owner can record a failure of its own"
 #define	SCENARIO_PACKED		"an arena aligns to its own alignment"
+#define	SCENARIO_PROJECTED	"a projection gives what the allocations take"
+#define	SCENARIO_REWOUND	"a rewind returns the arena to its mark"
 #define	SCENARIO_RESET		"reset returns the arena to an empty state"
 #define	SCENARIO_ZERO		"a zero-byte request yields a usable pointer"
 
@@ -46,6 +50,14 @@ static void	 an_impossible_request_fails_and_stays_failed(void);
 static void	 an_arena_aligns_to_its_own_alignment(void);
 static void	 an_owner_can_record_a_refusal_it_made_itself(void);
 static void	 separate_allocations_do_not_overlap(void);
+static void	 a_projection_gives_what_the_allocations_take(void);
+static void	 a_rewind_returns_the_arena_to_its_mark(void);
+static void	 a_refused_sequence_is_rewound_and_retried(void);
+static unsigned char *allocate_before_mark(relic_arena_t *arena);
+static bool	 pattern_intact(const unsigned char *patterned);
+static size_t	 linked_payload_bytes(const relic_arena_t *arena);
+static void	 allocate_sizes(relic_arena_t *arena, const size_t *sizes,
+		    size_t count);
 
 static bool
 is_aligned(const void *block)
@@ -434,9 +446,298 @@ the_limit_refuses_a_chunk_before_it_is_obtained(void)
 	    "a projection past the size of memory exceeds any limit");
 }
 
+/*
+ * Allocations of sizes from nothing to many times a chunk, in an order that
+ * leaves chunks part full and asks for more than the next chunk holds, are
+ * projected before they are made: each window of WINDOW allocations as a
+ * whole, and each allocation alone.  Every projection gives the total the
+ * arena holds once the allocations are made, on an arena of either
+ * alignment.
+ */
+static void
+a_projection_gives_what_the_allocations_take(void)
+{
+	static const size_t sizes[] = {
+		0, 1, 7, 64, 1000, 4096, 5000, 70000, 300000, 3, 130000
+	};
+	static const size_t alignments[] = { 1, RELIC_ARENA_ANY_OBJECT };
+	enum { SIZES = sizeof(sizes) / sizeof(sizes[0]), STEPS = 200,
+	    WINDOW = 5 };
+	relic_arena_projection_t window;
+	relic_arena_projection_t one;
+	relic_arena_t arena;
+	uint32_t state;
+	size_t size[STEPS];
+	size_t first;
+	size_t end;
+	size_t a;
+	size_t i;
+	bool agreed;
+
+	state = 12345;
+	for (i = 0; i < STEPS; i++) {
+		state = state * 1103515245u + 12345u;
+		size[i] = sizes[(state >> 16) % SIZES];
+	}
+
+	for (a = 0; a < sizeof(alignments) / sizeof(alignments[0]); a++) {
+		relic_arena_init(&arena, alignments[a]);
+		agreed = true;
+		for (first = 0; first < STEPS && agreed; first += WINDOW) {
+			end = first + WINDOW < STEPS ? first + WINDOW : STEPS;
+			relic_arena_project(&arena, &window);
+			for (i = first; i < end; i++)
+				relic_arena_project_alloc(&window, size[i]);
+
+			for (i = first; i < end && agreed; i++) {
+				relic_arena_project(&arena, &one);
+				relic_arena_project_alloc(&one, size[i]);
+				agreed = relic_arena_alloc(&arena,
+				    size[i]) != NULL && one.total_bytes ==
+				    relic_arena_total_bytes(&arena);
+				checkf(agreed, SCENARIO_PROJECTED, "at "
+				    "alignment %zu, allocation %zu of %zu "
+				    "bytes should take the arena to %zu bytes, "
+				    "not %zu", alignments[a], i, size[i],
+				    one.total_bytes,
+				    relic_arena_total_bytes(&arena));
+			}
+
+			agreed = agreed && window.total_bytes ==
+			    relic_arena_total_bytes(&arena);
+			checkf(agreed, SCENARIO_PROJECTED, "at alignment %zu, "
+			    "allocations %zu to %zu should take the arena to "
+			    "%zu bytes, not %zu", alignments[a], first, end - 1,
+			    window.total_bytes,
+			    relic_arena_total_bytes(&arena));
+		}
+		relic_arena_reset(&arena);
+	}
+}
+
+/*
+ * Allocate each of `count` sizes from an arena, failing the check when one
+ * is refused.
+ */
+static void
+allocate_sizes(relic_arena_t *arena, const size_t *sizes, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++) {
+		if (relic_arena_alloc(arena, sizes[i]) == NULL) {
+			checkf(false, SCENARIO_REWOUND, "allocation %zu of %zu "
+			    "bytes should succeed", i, sizes[i]);
+			return;
+		}
+	}
+}
+
+/*
+ * The allocations made before a mark, the first of them filled with a
+ * pattern a rewind must not disturb, and the pattern's first byte.
+ */
+#define	REWIND_PATTERN_BYTES	100
+
+static unsigned char *
+allocate_before_mark(relic_arena_t *arena)
+{
+	static const size_t before[] = { 5000, 70000, 30 };
+	unsigned char *patterned;
+	size_t i;
+
+	patterned = relic_arena_alloc(arena, REWIND_PATTERN_BYTES);
+	if (patterned == NULL) {
+		check(false, SCENARIO_REWOUND, "the patterned allocation "
+		    "should succeed");
+		return (NULL);
+	}
+	for (i = 0; i < REWIND_PATTERN_BYTES; i++)
+		patterned[i] = (unsigned char)(i * 7 + 1);
+	allocate_sizes(arena, before, sizeof(before) / sizeof(before[0]));
+
+	return (patterned);
+}
+
+/*
+ * The payload bytes of the chunks the arena links, which a rewind that
+ * restored its totals but left a chunk linked would not give back.
+ */
+static size_t
+linked_payload_bytes(const relic_arena_t *arena)
+{
+	const relic_arena_chunk_t *chunk;
+	size_t bytes;
+
+	bytes = 0;
+	SLIST_FOREACH(chunk, &arena->chunks, link)
+		bytes += chunk->size;
+
+	return (bytes);
+}
+
+static bool
+pattern_intact(const unsigned char *patterned)
+{
+	size_t i;
+
+	for (i = 0; i < REWIND_PATTERN_BYTES; i++) {
+		if (patterned[i] != (unsigned char)(i * 7 + 1))
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Allocations made after a mark are undone by a rewind: the arena and its
+ * account hold what they held at the mark, bytes allocated before it keep
+ * their contents, the head chunk's room is where it was, and the same
+ * allocations made again take the arena where they took it the first time.
+ *
+ * The allocations after the mark cover both ways a chunk is obtained.  The
+ * first takes the recorded head's room; the next two are oversize, and so
+ * are linked directly behind the recorded head; the rest push new heads in
+ * front of it, and fill them.  From an empty arena the first allocation
+ * obtains the head instead, and a rewind returns the arena to empty.
+ */
+static void
+a_rewind_returns_the_arena_to_its_mark(void)
+{
+	static const size_t after[] = { 10, 300000, 600000, 4000, 130000,
+	    9000, 20, 7 };
+	enum { AFTER = sizeof(after) / sizeof(after[0]) };
+	relic_account_t account;
+	relic_arena_mark_t mark;
+	relic_arena_t arena;
+	unsigned char *patterned;
+	void *first_in_room;
+	size_t marked_total;
+	size_t marked_charge;
+	size_t marked_payload;
+	size_t first_total;
+	int start;
+
+	for (start = 0; start < 2; start++) {
+		relic_account_init(&account, 0);
+		relic_arena_init_charged(&arena, &account);
+		patterned = NULL;
+		if (start == 1)
+			patterned = allocate_before_mark(&arena);
+
+		relic_arena_mark(&arena, &mark);
+		marked_total = relic_arena_total_bytes(&arena);
+		marked_charge = account.arena_bytes;
+		marked_payload = linked_payload_bytes(&arena);
+
+		first_in_room = relic_arena_alloc(&arena, after[0]);
+		allocate_sizes(&arena, after + 1, AFTER - 1);
+		first_total = relic_arena_total_bytes(&arena);
+		relic_arena_rewind(&arena, &mark);
+		checkf(relic_arena_total_bytes(&arena) == marked_total &&
+		    account.arena_bytes == marked_charge, SCENARIO_REWOUND,
+		    "from %s arena, the rewind should return the arena to %zu "
+		    "bytes and its account to %zu, not %zu and %zu",
+		    start == 0 ? "an empty" : "a used", marked_total,
+		    marked_charge, relic_arena_total_bytes(&arena),
+		    account.arena_bytes);
+		checkf(linked_payload_bytes(&arena) == marked_payload,
+		    SCENARIO_REWOUND, "from %s arena, the rewind should leave "
+		    "chunks of %zu payload bytes linked, not %zu",
+		    start == 0 ? "an empty" : "a used", marked_payload,
+		    linked_payload_bytes(&arena));
+
+		/*
+		 * Only a used arena's first allocation lands in a chunk that
+		 * survives the rewind, so only there is its address the same.
+		 */
+		if (start == 1) {
+			check(pattern_intact(patterned), SCENARIO_REWOUND,
+			    "bytes allocated before the mark should keep "
+			    "their contents");
+			check(relic_arena_alloc(&arena, after[0]) ==
+			    first_in_room, SCENARIO_REWOUND, "the first "
+			    "allocation after the rewind should take the "
+			    "head's room where the first did");
+		} else {
+			(void)relic_arena_alloc(&arena, after[0]);
+		}
+		allocate_sizes(&arena, after + 1, AFTER - 1);
+		checkf(relic_arena_total_bytes(&arena) == first_total,
+		    SCENARIO_REWOUND, "from %s arena, the same allocations "
+		    "should take it to %zu bytes again, not %zu",
+		    start == 0 ? "an empty" : "a used", first_total,
+		    relic_arena_total_bytes(&arena));
+
+		relic_arena_reset(&arena);
+		check(account.arena_bytes == 0, SCENARIO_REWOUND,
+		    "the reset gives back every byte");
+	}
+}
+
+/*
+ * A sequence the limit refuses part way is rewound to its mark and made
+ * again once the limit allows it: the refusal leaves the arena failed, the
+ * rewind leaves the failure for the owner to clear, and after both the
+ * sequence takes the arena where an arena that was never refused goes.
+ */
+static void
+a_refused_sequence_is_rewound_and_retried(void)
+{
+	static const size_t after[] = { 10, 300000, 600000, 4000 };
+	enum { AFTER = sizeof(after) / sizeof(after[0]) };
+	relic_account_t account;
+	relic_account_t unrefused_account;
+	relic_arena_mark_t mark;
+	relic_arena_t arena;
+	relic_arena_t unrefused;
+	size_t marked_charge;
+	size_t i;
+	bool refused;
+
+	relic_account_init(&unrefused_account, 0);
+	relic_arena_init_charged(&unrefused, &unrefused_account);
+	(void)allocate_before_mark(&unrefused);
+	allocate_sizes(&unrefused, after, AFTER);
+
+	relic_account_init(&account, 0);
+	relic_arena_init_charged(&arena, &account);
+	(void)allocate_before_mark(&arena);
+	relic_arena_mark(&arena, &mark);
+	marked_charge = account.arena_bytes;
+
+	account.limit = marked_charge + 400000;
+	refused = false;
+	for (i = 0; i < AFTER && !refused; i++)
+		refused = relic_arena_alloc(&arena, after[i]) == NULL;
+	check(refused && i == 3, SCENARIO_REWOUND,
+	    "the limit should refuse the third allocation");
+
+	relic_arena_rewind(&arena, &mark);
+	check(relic_arena_failed(&arena), SCENARIO_REWOUND,
+	    "the rewind should leave the failure for the owner");
+	check(account.arena_bytes == marked_charge, SCENARIO_REWOUND,
+	    "the rewind should give back what the refused sequence took");
+
+	relic_arena_clear_failure(&arena);
+	account.limit = 0;
+	allocate_sizes(&arena, after, AFTER);
+	checkf(relic_arena_total_bytes(&arena) ==
+	    relic_arena_total_bytes(&unrefused), SCENARIO_REWOUND,
+	    "the retry should take the arena to %zu bytes, not %zu",
+	    relic_arena_total_bytes(&unrefused),
+	    relic_arena_total_bytes(&arena));
+
+	relic_arena_reset(&arena);
+	relic_arena_reset(&unrefused);
+}
+
 int
 main(void)
 {
+	a_projection_gives_what_the_allocations_take();
+	a_rewind_returns_the_arena_to_its_mark();
+	a_refused_sequence_is_rewound_and_retried();
 	a_reset_arena_allocates_again();
 	a_charged_arena_is_counted_in_its_account();
 	the_limit_refuses_a_chunk_before_it_is_obtained();

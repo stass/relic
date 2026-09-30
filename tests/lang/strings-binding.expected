@@ -1,0 +1,24 @@
+src "main.o"
+src "util.o"
+
+"src/main.c"
+"src/util.c"
+"doc/guide.md"
+
+"main" 4
+"util" 4
+"guide" 5
+
+"main" "ma"
+"util" "ut"
+"guide" "gu"
+
+"main" 2
+"util" 2
+"guide" 2
+
+src "main" "c" "mainc"
+src "util" "c" "utilc"
+doc "guide" "md" "guidemd"
+
+5 "ab"

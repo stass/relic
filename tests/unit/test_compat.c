@@ -41,6 +41,8 @@ static bool	tail_is_untouched(const char *buffer, size_t size,
 static void	an_empty_source_changes_nothing(void);
 static void	getentropy_fills_exactly_the_bytes_asked_for(void);
 static void	getentropy_refuses_more_than_it_may_hand_out(void);
+static void	memmem_finds_the_first_occurrence(void);
+static void	memmem_reads_only_the_ranges_it_is_given(void);
 static void	reallocarray_accepts_a_count_of_zero(void);
 static void	reallocarray_preserves_contents_when_it_grows(void);
 static void	reallocarray_refuses_an_overflowing_product(void);
@@ -126,6 +128,71 @@ getentropy_refuses_more_than_it_may_hand_out(void)
 
 	check(getentropy(buffer, sizeof(buffer)) == -1, scenario,
 	    "fails for 257 bytes");
+}
+
+/*
+ * The first occurrence is found wherever it is -- at the start, at the end,
+ * overlapping an earlier partial one -- and a needle that occurs nowhere, or
+ * is longer than the haystack, is not found.  Bytes are compared as bytes,
+ * a NUL and a byte above 0x7f among them.  What an empty needle gives is
+ * not asked: the C libraries disagree, and the caller answers it itself.
+ */
+static void
+memmem_finds_the_first_occurrence(void)
+{
+	const char *scenario = "memmem finds the first occurrence";
+	const char haystack[] = "aabaab\0\xff" "ab";
+	const size_t length = sizeof(haystack) - 1;
+
+	check(memmem(haystack, length, "aab", 3) == haystack, scenario,
+	    "finds a needle at the start");
+	check(memmem(haystack, length, "ab", 2) == haystack + 1, scenario,
+	    "finds the first of several occurrences");
+	check(memmem(haystack, length, "baa", 3) == haystack + 2, scenario,
+	    "finds a needle overlapping an earlier partial match");
+	check(memmem(haystack, length, "\0\xff" "ab", 4) == haystack + 6,
+	    scenario, "finds a needle holding a NUL at the end");
+	check(memmem(haystack, length, "abc", 3) == NULL, scenario,
+	    "does not find a needle that is absent");
+	check(memmem("ab", 2, "abc", 3) == NULL, scenario,
+	    "does not find a needle longer than the haystack");
+}
+
+/*
+ * The lengths bound what is read: a needle that would match only by reading
+ * one byte past the haystack's length is not found, and neither is one
+ * whose bytes past its own length would differ.  Each range is copied into
+ * an allocation of exactly its size, so a read past either is one the
+ * sanitizers report.
+ */
+static void
+memmem_reads_only_the_ranges_it_is_given(void)
+{
+	const char *scenario = "memmem reads only the ranges it is given";
+	char *haystack;
+	char *needle;
+
+	haystack = malloc(4);
+	needle = malloc(2);
+	check(haystack != NULL && needle != NULL, scenario,
+	    "the ranges should be allocated");
+	if (haystack == NULL || needle == NULL) {
+		free(haystack);
+		free(needle);
+		return;
+	}
+
+	bcopy("abcd", haystack, 4);
+	bcopy("dx", needle, 2);
+	check(memmem(haystack, 3, needle, 1) == NULL, scenario,
+	    "does not find a byte just past the haystack");
+	check(memmem(haystack, 4, needle, 1) == haystack + 3, scenario,
+	    "finds the needle's first byte at the haystack's last");
+	check(memmem(haystack, 4, needle, 2) == NULL, scenario,
+	    "does not find a needle running past the haystack");
+
+	free(haystack);
+	free(needle);
 }
 
 static void
@@ -606,6 +673,8 @@ main(void)
 	an_empty_source_changes_nothing();
 	getentropy_fills_exactly_the_bytes_asked_for();
 	getentropy_refuses_more_than_it_may_hand_out();
+	memmem_finds_the_first_occurrence();
+	memmem_reads_only_the_ranges_it_is_given();
 	reallocarray_accepts_a_count_of_zero();
 	reallocarray_preserves_contents_when_it_grows();
 	reallocarray_refuses_an_overflowing_product();

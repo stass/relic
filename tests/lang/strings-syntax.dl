@@ -1,0 +1,22 @@
+% Every function may stand wherever an expression may: as an operand of an
+% operator, as the argument of another call, and at the start of a body
+% literal, where the name followed by a comparator or an operator is a call
+% and not an atom.
+w("alpha"). w("be"). w("gamma").
+
+operand(S, N) :- w(S), N = length(S) * 10 + index(S, "a").
+nested(S, T) :- w(S), T = substr(cat(S, S), length(S) - 1, 2).
+starts(S) :- w(S), length(S) > 3.
+starts_op(S) :- w(S), length(S) + 1 = 3.
+starts_mod(S) :- w(S), length(S) mod 2 = 1.
+calls(S) :- w(S), index(S, "a") = 0, cat(S, "!") != "a!".
+strs(S) :- w(S), str(S) = S, substr(S, 1) < "f".
+
+operand(S, N)?
+nested(S, T)?
+starts(S)?
+starts_op(S)?
+starts_mod(S)?
+calls(S)?
+strs(S)?
+w(S), length(S) >= 5?

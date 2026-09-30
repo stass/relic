@@ -1,0 +1,9 @@
+% A query whose plan calls a function is gathered, since a call may fail on
+% any binding and no row may be delivered before nothing can; the same
+% query without the call streams.  One that only filters by a call is
+% gathered too, whatever its head holds.
+file("a.c"). file("b.h").
+
+file(P)?
+file(P), index(P, ".c") >= 0?
+file(P), N = length(P)?

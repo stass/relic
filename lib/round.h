@@ -201,7 +201,7 @@ struct relic_candidates {
 
 /*
  * What one worker holds: the scratch its tasks run in, with the storage for
- * its operation states, its batch and the batch's pending integers, which
+ * its operation states, its batch and the batch's pending values, which
  * is kept from one round to the next and never charged; its candidates,
  * which exist only while a round runs; and the derivations its tasks made,
  * which the scratch does not count.  The scratch's counters and the
@@ -212,7 +212,7 @@ struct relic_worker {
 	relic_scratch_t		 scratch;
 	relic_op_state_t	*states;
 	relic_dom_t		*batch;
-	int64_t			*pending;
+	relic_pending_t		*pending;
 	size_t			 state_capacity;
 	size_t			 batch_capacity;
 	size_t			 pending_capacity;
@@ -291,21 +291,24 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * round has given back its buffers, for the caller to run the round
  * serially; only a reservation the allocator refused part way leaves some
  * of a relation's arrays, or the integer table's, larger, counted in the
- * storage total, for the serial run to grow into.  A round is not run deferred when it reads a
- * relation it writes, when it is too small to repay sharing it among the
- * pool's threads -- unless RELIC_F_PARALLEL_ALWAYS asks for every round --
- * or when the pool could not be had, and is abandoned when a task could
- * not go on or its merge declined.  A deferred round's merge cannot fail:
- * whatever could refuse it is asked before anything is inserted, and a
- * refusal declines the round.
+ * storage total, for the serial run to grow into.  A round is not run
+ * deferred when it reads a relation it writes, when one of its plans calls
+ * a function, when it is too small to repay sharing it among the pool's
+ * threads -- unless RELIC_F_PARALLEL_ALWAYS asks for every round -- or when
+ * the pool could not be had, and is abandoned when a task could not go on
+ * or its merge declined.  A deferred round's merge cannot fail: whatever
+ * could refuse it is asked before anything is inserted, and a refusal
+ * declines the round.
  *
  * relic_round_record() records in an item's history, when it has one,
  * that its turn in a round run serially did `work`, the tuples it read and
- * derived.
+ * derived.  relic_round_first_call() gives the first item of a round whose
+ * plan calls a function, or NULL when none does.
  */
 bool	 relic_round_run(relic_t *ctx, relic_round_t *round);
 void	 relic_round_record(const relic_round_t *round,
 	    relic_round_item_t *item, uint64_t work);
+const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
 
 /*
  * lib/merge.c

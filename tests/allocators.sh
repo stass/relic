@@ -76,8 +76,8 @@ allocators="$allocators|getdelim|open_memstream|open_wmemstream|realpath"
 allocators="$allocators|getcwd|scandir|glob|tempnam"
 
 listed='abort|bcmp|bzero|fclose|ferror|fopen|fprintf|fputc|fputs|fread|free'
-listed="$listed|getpagesize|getpid|memcmp|memcpy|memmove|memset|munmap|qsort"
-listed="$listed|snprintf|stderr|strerror|strlcpy|strlen|vsnprintf"
+listed="$listed|getpagesize|getpid|memcmp|memcpy|memmem|memmove|memset|munmap"
+listed="$listed|qsort|snprintf|stderr|strerror|strlcpy|strlen|vsnprintf"
 
 # The worker pool's threads.  Starting a thread and initializing a mutex or
 # a condition variable may allocate for the thread library's own use, and

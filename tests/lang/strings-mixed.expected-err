@@ -1,0 +1,9 @@
+strings-mixed.dl:8:28: note: operand of length is a symbol; the comparison is false
+query 1: 2 rows
+strings-mixed.dl:9:29: note: operand of cat is a symbol; the comparison is false
+query 2: 2 rows
+strings-mixed.dl:10:25: note: operand of index is a symbol; the comparison is false
+query 3: 1 row
+strings-mixed.dl:11:39: note: operand of substr is a string; the comparison is false
+query 4: 1 row
+query 5: 4 rows

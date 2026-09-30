@@ -1,0 +1,23 @@
+% A computed string is looked up, tested for membership and tested for
+% absence like any value.  One the program never states as a string --
+% "zzc" below, and "bc", whose bytes the pool holds only as the symbol bc --
+% matches nothing and is absent from every relation, whether it is probed
+% through an index on its column or tested for membership.  str bridges
+% the two: the spelling of the symbol bc is the string "bc".  w/1 is the
+% smallest relation, so each plan scans it first and computes T from X.
+w("a"). w("b"). w("zz").
+s("ac"). s(bc). s("x").
+e("ac", 1). e(bc, 2). e("zc", 3).
+pair("ac", "a"). pair(bc, "b"). pair("ac", "b").
+
+member(X) :- w(X), T = cat(X, "c"), s(T).
+absent(X) :- w(X), T = cat(X, "c"), not s(T).
+looked_up(X, N) :- w(X), T = cat(X, "c"), e(T, N).
+both(X) :- w(X), T = cat(X, "c"), pair(T, X).
+spelled(X) :- w(X), T = cat(X, "c"), s(S), str(S) = T.
+
+member(X)?
+absent(X)?
+looked_up(X, N)?
+both(X)?
+spelled(X)?

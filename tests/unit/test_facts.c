@@ -67,6 +67,24 @@
 #define	SESSION_QUERY		"r(x)?"
 #define	GROWN_FACTS		"e(b, b, b).\ne(c, c, c).\ne(a, a, a).\n"
 
+/*
+ * The session of queries that must not accumulate indexes: each query binds
+ * a different column of e/3 and has the one row given, and the session asks
+ * all of them in each round with a load after it.
+ */
+#define	SESSION_QUERIES		3
+#define	SESSION_ROUNDS		2
+
+static const char *const session_queries[SESSION_QUERIES] = {
+	"p(1, Y, Z)?", "p(X, 2, Z)?", "p(X, Y, 3)?"
+};
+static const char *const session_rows[SESSION_QUERIES] = {
+	"1 1", "2 2", "3 3"
+};
+static const char *const session_loads[SESSION_ROUNDS] = {
+	"f(y).\n", "f(x).\n"
+};
+
 /* The facts of the small store beside c/2's in the multi-store refusal. */
 #define	SMALL_STORE_FACTS	8
 
@@ -145,6 +163,7 @@ static void	 falsified_through(unsigned int flags, bool materialized,
 		    const char *strategy);
 static void	 an_added_fact_the_limit_refuses_changes_nothing(void);
 static void	 queries_do_not_accumulate_indexes(void);
+static size_t	 session_name_bytes(const char *program);
 static char	*session_program(void);
 static size_t	 least_limit(const char *program, enum limit_kind kind,
 		    enum step step, const char *query_text);
@@ -811,16 +830,12 @@ an_added_fact_the_limit_refuses_changes_nothing(void)
  * derived, and the base store's indexes with it, so the indexes do not
  * accumulate: under a memory limit a few bytes above what the hungriest
  * query needs alone, every query is answered in turn, with a load between
- * them or without.  An index holds at least a slot per tuple, so a second
- * one kept beside the first would not fit.
+ * them or without.  The names the session interns do accumulate, since a
+ * name once interned stays, so the limit allows for them too.
  */
 static void
 queries_do_not_accumulate_indexes(void)
 {
-	static const char *const queries[] = {
-		"p(1, Y, Z)?", "p(X, 2, Z)?", "p(X, Y, 3)?"
-	};
-	static const char *const rows[] = { "1 1", "2 2", "3 3" };
 	relic_config_t config;
 	diag_log_t log;
 	relic_t *ctx;
@@ -836,36 +851,73 @@ queries_do_not_accumulate_indexes(void)
 		return;
 
 	need = 0;
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < SESSION_QUERIES; i++) {
 		least = least_limit(program, LIMIT_MEMORY, STEP_QUERY,
-		    queries[i]);
+		    session_queries[i]);
 		if (least > need)
 			need = least;
 	}
 
 	bzero(&config, sizeof(config));
-	config.max_memory = need + INDEX_SLACK;
+	config.max_memory = need + session_name_bytes(program) + INDEX_SLACK;
 	ctx = context_with(&config, program, &log);
 	free(program);
 	if (ctx == NULL)
 		return;
 
-	for (round = 0; round < 2; round++) {
-		for (i = 0; i < 3; i++) {
-			checkf(answers(ctx, queries[i], rows[i]),
-			    SCENARIO_SESSION, "%s should be answered under the "
-			    "limit in round %zu", queries[i], round);
+	for (round = 0; round < SESSION_ROUNDS; round++) {
+		for (i = 0; i < SESSION_QUERIES; i++) {
+			checkf(answers(ctx, session_queries[i],
+			    session_rows[i]), SCENARIO_SESSION, "%s should be "
+			    "answered under the limit in round %zu",
+			    session_queries[i], round);
 			checkf(indexes_of(ctx, "e", 3) == 1, SCENARIO_SESSION,
 			    "the base store should hold one index after %s, "
-			    "not %zu", queries[i], indexes_of(ctx, "e", 3));
+			    "not %zu", session_queries[i],
+			    indexes_of(ctx, "e", 3));
 		}
-		status = relic_load_string(ctx, "more.dl", round == 0 ?
-		    "f(y).\n" : "f(x).\n");
+		status = relic_load_string(ctx, "more.dl",
+		    session_loads[round]);
 		check(status == 0, SCENARIO_SESSION,
 		    "a load between the rounds is admitted");
 	}
 
 	relic_destroy(ctx);
+}
+
+/*
+ * The bytes the symbol pool grows by, past what loading `program` interns,
+ * over the session of queries_do_not_accumulate_indexes() run without a
+ * limit.  Each query's rewrite interns the names of the predicates it
+ * makes, and each load its symbols; a fresh context answering one query
+ * holds only that query's names, so the least limit of one query alone
+ * does not cover the others'.
+ */
+static size_t
+session_name_bytes(const char *program)
+{
+	rows_text_t rows;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t loaded;
+	size_t grown;
+	size_t round;
+	size_t i;
+
+	ctx = context_with(NULL, program, &log);
+	if (ctx == NULL)
+		return (0);
+
+	loaded = ctx->account.pool_bytes;
+	for (round = 0; round < SESSION_ROUNDS; round++) {
+		for (i = 0; i < SESSION_QUERIES; i++)
+			(void)rows_of(ctx, session_queries[i], &rows);
+		(void)relic_load_string(ctx, "more.dl", session_loads[round]);
+	}
+	grown = ctx->account.pool_bytes - loaded;
+	relic_destroy(ctx);
+
+	return (grown);
 }
 
 /*
@@ -1111,8 +1163,8 @@ a_load_over_the_limit_grows_no_store(void)
 
 /*
  * The bytes the memory limit counts against a context once it has loaded
- * b(0) and then `facts` -- its stores and the integer table the facts'
- * integers grew -- or SIZE_MAX when that could not be measured.
+ * b(0) and then `facts` -- its stores, the integer table the facts'
+ * integers grew and the symbol pool holding its names -- or SIZE_MAX when that could not be measured.
  */
 static size_t
 bytes_after_loading(const char *facts)
@@ -1127,7 +1179,8 @@ bytes_after_loading(const char *facts)
 
 	bytes = SIZE_MAX;
 	if (relic_load_string(ctx, "facts.dl", facts) == 0)
-		bytes = ctx->account.store_bytes + ctx->account.value_bytes;
+		bytes = ctx->account.store_bytes + ctx->account.value_bytes +
+		    ctx->account.pool_bytes;
 	relic_destroy(ctx);
 
 	return (bytes);

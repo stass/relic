@@ -334,13 +334,13 @@ done
 echo 'two(X, Z) :- edge(X, Y), edge(Y, Z).' >> "$work/chain.dl"
 
 status=0
-diagnostic=$("$RELIC" -a -l memory=3000 "$work/chain.dl" 2>&1 >/dev/null) ||
+diagnostic=$("$RELIC" -a -l memory=11000 "$work/chain.dl" 2>&1 >/dev/null) ||
     status=$?
 if [ "$status" -ne 1 ]; then
 	fail "refused plans exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=3000 while planning two/2"*)
+*"limit exceeded: memory=11000 while planning two/2"*)
 	;;
 *)
 	fail "refused plans were reported as '$diagnostic'"
@@ -348,13 +348,13 @@ case "$diagnostic" in
 esac
 
 status=0
-diagnostic=$("$RELIC" -a -l memory=7500 "$work/chain.dl" 2>&1 >/dev/null) ||
+diagnostic=$("$RELIC" -a -l memory=16000 "$work/chain.dl" 2>&1 >/dev/null) ||
     status=$?
 if [ "$status" -ne 1 ]; then
 	fail "a refused index build exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=7500 while indexing edge/2"*)
+*"limit exceeded: memory=16000 while indexing edge/2"*)
 	;;
 *)
 	fail "a refused index build was reported as '$diagnostic'"

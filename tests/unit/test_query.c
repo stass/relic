@@ -147,14 +147,13 @@ static bool	 answer_is_named(relic_t *ctx, relic_query_t *query,
 static context_size_t context_size(relic_t *ctx);
 static void	 growth_under(unsigned int flags, const char *strategy);
 static relic_t	*context_with(const char *program, diag_log_t *log);
-static relic_t	*limited_context(size_t max_memory, const char *program,
+static relic_t	*limited_context(size_t allowance, const char *program,
 		    diag_log_t *log);
 static bool	 ends_with(const char *text, const char *suffix);
 static char	*numbered_facts(size_t count);
 static char	*repeated(const char *first, const char *each, size_t count,
 		    const char *last);
-static bool	 refused_while(relic_t *ctx, size_t max_memory,
-		    const char *activity);
+static bool	 refused_while(relic_t *ctx, const char *activity);
 static int	 count_rows(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static int	 keep_integers(void *callback_ctx,
@@ -996,19 +995,21 @@ a_query_runs_only_in_its_own_context(void)
 }
 
 /*
- * A context with a memory limit, holding a program.
+ * A context holding a program, under a memory limit of `allowance` bytes
+ * past what its values -- the integer table and the symbol pool, which its
+ * names and constants fill -- hold once it is loaded.  The limit is set
+ * after the load, so that it measures what the scenarios exercise and not
+ * the few kilobytes a pool holding a handful of names takes, which a
+ * scenario's small limit would otherwise be spent on.
  */
 static relic_t *
-limited_context(size_t max_memory, const char *program, diag_log_t *log)
+limited_context(size_t allowance, const char *program, diag_log_t *log)
 {
-	relic_config_t config;
 	relic_t *ctx;
 
 	bzero(log, sizeof(*log));
-	bzero(&config, sizeof(config));
-	config.max_memory = max_memory;
 
-	ctx = relic_create_config(&config);
+	ctx = relic_create();
 	if (ctx == NULL) {
 		check(false, SCENARIO_PLANNING, "a context is created");
 		return (NULL);
@@ -1020,6 +1021,7 @@ limited_context(size_t max_memory, const char *program, diag_log_t *log)
 		relic_destroy(ctx);
 		return (NULL);
 	}
+	ctx->account.limit = relic_value_storage_bytes(ctx) + allowance;
 
 	return (ctx);
 }
@@ -1095,13 +1097,13 @@ repeated(const char *first, const char *each, size_t count, const char *last)
  * rewrite's once the operation has returned.
  */
 static bool
-refused_while(relic_t *ctx, size_t max_memory, const char *activity)
+refused_while(relic_t *ctx, const char *activity)
 {
 	char expected[128];
 	const char *reported;
 
 	snprintf(expected, sizeof(expected),
-	    "limit exceeded: memory=%zu while %s", max_memory, activity);
+	    "limit exceeded: memory=%zu while %s", ctx->account.limit, activity);
 	reported = relic_error(ctx);
 
 	checkf(reported != NULL && strcmp(reported, expected) == 0,
@@ -1145,7 +1147,7 @@ planning_is_charged_to_the_memory_limit(void)
 	ctx = limited_context(PLANNING_LIMIT, program, &log);
 	if (ctx != NULL) {
 		check(relic_materialize(ctx) != 0 &&
-		    refused_while(ctx, PLANNING_LIMIT, "planning p/1"),
+		    refused_while(ctx, "planning p/1"),
 		    SCENARIO_PLANNING, "a long recursive body's variants are "
 		    "refused while planning its component");
 		relic_destroy(ctx);
@@ -1159,7 +1161,7 @@ planning_is_charged_to_the_memory_limit(void)
 		check(query != NULL &&
 		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
 		    rows == 0 &&
-		    refused_while(ctx, PLANNING_LIMIT, "planning $q0/1"),
+		    refused_while(ctx, "planning $q0/1"),
 		    SCENARIO_PLANNING, "a long query's plan is refused while "
 		    "planning the query, the program's having fitted");
 		relic_query_destroy(query);
@@ -1167,8 +1169,8 @@ planning_is_charged_to_the_memory_limit(void)
 	}
 
 	/*
-	 * No fact, which a limit of one byte would refuse to load: e/1 and
-	 * f/1 derive each other and nothing else.
+	 * A limit a byte past the values: e/1 and f/1 derive each other and
+	 * nothing else, and the rewrite's first chunk does not fit.
 	 */
 	ctx = limited_context(1, "e(X) :- f(X).\nf(X) :- e(X).\n"
 	    "p(X) :- e(X).\n", &log);
@@ -1178,7 +1180,7 @@ planning_is_charged_to_the_memory_limit(void)
 		check(query != NULL &&
 		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
 		    rows == 0 && log.warnings == 0 &&
-		    refused_while(ctx, 1, "rewriting $q0/0"), SCENARIO_PLANNING,
+		    refused_while(ctx, "rewriting $q0/0"), SCENARIO_PLANNING,
 		    "a rewrite refused by the limit fails the query");
 		relic_query_destroy(query);
 		relic_destroy(ctx);
@@ -1200,7 +1202,7 @@ planning_is_charged_to_the_memory_limit(void)
 		check(query != NULL &&
 		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
 		    rows == 0 &&
-		    refused_while(ctx, FIRST_WANTED_LIMIT, "planning e/1"),
+		    refused_while(ctx, "planning e/1"),
 		    SCENARIO_PLANNING, "an evaluation for a rewrite names the "
 		    "first component it evaluates");
 		relic_query_destroy(query);
@@ -1353,8 +1355,9 @@ a_querys_groups_refused_by_a_limit_report_once(void)
 
 		checkf(log.errors == (status != 0 ? 1u : 0u) &&
 		    ctx->account.arena_bytes == 0, SCENARIO_GROUPS,
-		    "under a memory limit of %zu, a query that %s should "
-		    "report %d error(s), not %zu, and give back its arenas",
+		    "under a memory limit %zu past the values, a query that %s "
+		    "should report %d error(s), not %zu, and give back its "
+		    "arenas",
 		    limit, status != 0 ? "failed" : "succeeded",
 		    status != 0 ? 1 : 0, log.errors);
 

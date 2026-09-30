@@ -1,0 +1,17 @@
+% str gives a value's text: a string itself, a symbol's spelling, and an
+% integer in the decimal the output prints, so str(foo) is the string
+% "foo" and str(N) matches a printed N byte for byte.  A symbol and the
+% string of its spelling stay different values.
+v(foo). v("foo"). v(42). v(-7). v(0).
+v(9223372036854775807). v(-9223372036854775808). v("").
+
+text(V, T) :- v(V), T = str(V).
+same(V) :- v(V), str(V) = "foo".
+itself(V) :- v(V), str(V) = V.
+digits(V, N) :- v(V), N = length(str(V)).
+
+text(V, T)?
+same(V)?
+itself(V)?
+digits(V, N)?
+v(V), V = str(foo)?

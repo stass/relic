@@ -25,23 +25,26 @@
  * The memory account: the bytes a context holds on the user's behalf while
  * it works, which the configured memory limit is enforced against.
  *
- * Four kinds of holder contribute, each keeping its own part of the total
+ * Five kinds of holder contribute, each keeping its own part of the total
  * exact.  The relation store counts in `store_bytes` the capacity of every
  * relation's columns and indexes, an index being built included: the base
  * stores holding the program's facts and the relations evaluation derives
  * alike.  The value table counts in `value_bytes` the capacity of its
- * integer table, whose integers evaluation computes as well as the program
- * writes.  An arena initialized charged counts in `arena_bytes` every chunk
- * it holds from the allocator, and gives them back when it is reset.  Arenas
- * holding what the caller wrote -- the program's rules and queries, the
- * schedule, a query -- are not charged, and neither is the text being
- * loaded nor the staging a load holds its facts in until it commits, which
- * are proportional to that text and released when the load returns.  A
- * round of evaluation whose insertions wait for its end counts in
- * `round_bytes` the buffers holding what it has derived, from the moment
- * they grow until the round ends, when they are released.  So the account
- * is a bound on what the program's stores hold and on what running the
- * program does, and not on the program as it was written.
+ * integer table and of its record of which symbols are string values, and
+ * the symbol pool counts in `pool_bytes` its entries, its index and its
+ * bytes, whose integers and strings evaluation computes as well as the
+ * program writes.  An arena initialized charged counts in `arena_bytes`
+ * every chunk it holds from the allocator, and gives them back when it is
+ * reset.  Arenas holding what the caller wrote -- the program's rules and
+ * queries, the schedule, a query -- are not charged, and neither is the
+ * text being loaded nor the staging a load holds its facts in until it
+ * commits, which are proportional to that text and released when the load
+ * returns.  A round of evaluation counts in `round_bytes` the buffers it
+ * holds for its own length -- the strings its plans compute, and, when its
+ * insertions wait for its end, what it has derived -- from the moment they
+ * grow until the round ends, when they are released.  So the account is a
+ * bound on what the program's stores hold and on what running the program
+ * does, and not on the program as it was written.
  *
  * Every holder asks relic_account_exceeds() before it grows, against the
  * whole total, so the limit bounds the sum and no holder can spend what
@@ -66,7 +69,8 @@
 struct relic_account {
 	size_t	limit;		/* bytes; see relic_limit_set() */
 	size_t	store_bytes;	/* relation and index storage */
-	size_t	value_bytes;	/* the integer table */
+	size_t	value_bytes;	/* the integer table and the string bits */
+	size_t	pool_bytes;	/* the symbol pool */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
 	relic_atomic_size_t round_bytes; /* buffers of a deferred round */
 	bool	refused;

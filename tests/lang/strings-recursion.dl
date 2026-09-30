@@ -1,0 +1,13 @@
+% A recursion that computes new strings each round terminates when a
+% comparison bounds it: each round appends every letter to the strings of
+% the last, until they reach the bound.  The strings are interned as the
+% rounds derive them, and read back in later rounds as any value is.
+letter("a"). letter("b").
+word(L) :- letter(L).
+word(T) :- word(S), letter(L), length(S) < 3, T = cat(S, L).
+mirror(S, T) :- word(S), word(T), length(S) = 2,
+    T = cat(substr(S, 1), substr(S, 0, 1)).
+
+word(S)?
+mirror(S, T)?
+word(S), index(S, "ba") = 1?

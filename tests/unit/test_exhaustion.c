@@ -218,6 +218,14 @@
 #define	COMPUTE_CHAIN	24
 
 /*
+ * The string sweep's batch: STRING_SWEEP_COUNT strings of a little more
+ * than STRING_SWEEP_BYTES each, which take several of the pool arena's
+ * chunks between them, so that a refused chunk falls between two copies.
+ */
+#define	STRING_SWEEP_BYTES	3000
+#define	STRING_SWEEP_COUNT	8
+
+/*
  * The materialization sweep's program is a chain of this many predicates,
  * each copying the one before it.  An evaluation allocates its per-component
  * plans and then a delta range and a membership mark for every predicate.
@@ -354,8 +362,9 @@ static bool	 index_finds_every_tuple(const relic_relation_t *rel,
 		    uint32_t position);
 static size_t	 storage_by_hand(const relic_t *ctx);
 static void	 a_computing_round_out_of_memory_can_be_retried(void);
+static void	 a_string_batch_out_of_memory_can_be_retried(void);
 static char	*compute_sweep_program(void);
-static bool	 integer_tables_agree(const relic_t *ctx,
+static bool	 values_agree(const relic_t *ctx,
 		    const relic_t *reference);
 static void	 sweep_compute_retry(const char *program, size_t threads,
 		    const relic_t *reference);
@@ -2556,13 +2565,60 @@ wide_sweep_program(void)
  * with the allocator restored.
  *
  * A run that fails says so once, and leaves the account holding what the
- * relations and the integer table hold and nothing of a round's.  The
+ * relations and the values hold and nothing of a round's.  The
  * integers a failed run interned are the first ones an undisturbed run
  * interns, in its order, since a round either merged whole or ran serially
  * up to the failure; so the retry ends with the integer table an
  * undisturbed run ends with, the same integers under the same identifiers
  * in storage of the same size.
  */
+/*
+ * A batch of long computed strings interned with each allocation refused in
+ * turn, among them the arena chunks its strings are copied into, can be
+ * retried as a batch of integers can: the retry ends with the pool an
+ * undisturbed run ends with, the same strings under the same identifiers in
+ * storage of the same size.
+ */
+static void
+a_string_batch_out_of_memory_can_be_retried(void)
+{
+	relic_t *reference;
+	char *program;
+	size_t room;
+	size_t used;
+	int i;
+
+	room = STRING_SWEEP_BYTES + 512;
+	program = malloc(room);
+	if (program == NULL) {
+		check(false, SCENARIO_COMPUTE, "the program is written");
+		return;
+	}
+	used = (size_t)snprintf(program, room, "s(\"");
+	memset(program + used, 'x', STRING_SWEEP_BYTES);
+	used += STRING_SWEEP_BYTES;
+	used += (size_t)snprintf(program + used, room - used, "\").\n"
+	    "t(T) :- s(S), n(X), T = cat(S, str(X)).\n");
+	for (i = 0; i < STRING_SWEEP_COUNT; i++)
+		used += (size_t)snprintf(program + used, room - used,
+		    "n(%d).\n", i);
+
+	reference = relic_create();
+	if (reference == NULL ||
+	    relic_load_string(reference, "compute.dl", program) != 0 ||
+	    relic_materialize(reference) != 0) {
+		check(false, SCENARIO_COMPUTE, "the string program materializes");
+		relic_destroy(reference);
+		free(program);
+		return;
+	}
+
+	sweep_compute_retry(program, 1, reference);
+
+	relic_destroy(reference);
+	free(program);
+}
+
 static void
 a_computing_round_out_of_memory_can_be_retried(void)
 {
@@ -2653,9 +2709,10 @@ sweep_compute_retry(const char *program, size_t threads,
 		checkf(ctx->account.arena_bytes == 0 &&
 		    ctx->account.round_bytes == 0 &&
 		    ctx->account.store_bytes == storage_by_hand(ctx) &&
-		    ctx->account.value_bytes == relic_value_integer_bytes(ctx),
-		    SCENARIO_COMPUTE, "on %zu thread(s), the account should "
-		    "hold what the relations and the integer table hold and no "
+		    ctx->account.value_bytes + ctx->account.pool_bytes ==
+		    relic_value_storage_bytes(ctx), SCENARIO_COMPUTE,
+		    "on %zu thread(s), the account should "
+		    "hold what the relations and the values hold and no "
 		    "arena's or round's, with allocation %ld refused", threads,
 		    budget);
 
@@ -2666,8 +2723,8 @@ sweep_compute_retry(const char *program, size_t threads,
 		    "%zu, with allocation %ld refused", threads,
 		    relic_relation_total_tuples(reference),
 		    relic_relation_total_tuples(ctx), budget);
-		checkf(integer_tables_agree(ctx, reference), SCENARIO_COMPUTE,
-		    "on %zu thread(s), the retry should hold the integers an "
+		checkf(values_agree(ctx, reference), SCENARIO_COMPUTE,
+		    "on %zu thread(s), the retry should hold the values an "
 		    "undisturbed run holds, with allocation %ld refused",
 		    threads, budget);
 
@@ -2686,21 +2743,36 @@ sweep_compute_retry(const char *program, size_t threads,
 }
 
 /*
- * Whether a context holds the integers `reference` holds, under the same
- * identifiers, in a table of the same size.
+ * Whether a context holds the integers and strings `reference` holds, under
+ * the same identifiers, in a table and a pool of the same size.
  */
 static bool
-integer_tables_agree(const relic_t *ctx, const relic_t *reference)
+values_agree(const relic_t *ctx, const relic_t *reference)
 {
 	const relic_valtab_t *table;
 	const relic_valtab_t *expected;
+	const char *bytes;
+	const char *expected_bytes;
+	size_t length;
+	size_t expected_length;
+	uint32_t id;
 
 	table = &ctx->values;
 	expected = &reference->values;
 	if (table->integer_count != expected->integer_count ||
-	    relic_value_integer_bytes(ctx) !=
-	    relic_value_integer_bytes(reference))
+	    ctx->symbols.count != reference->symbols.count ||
+	    relic_value_storage_bytes(ctx) !=
+	    relic_value_storage_bytes(reference))
 		return (false);
+
+	for (id = 1; id <= ctx->symbols.count; id++) {
+		bytes = relic_symbol_bytes(ctx, id, &length);
+		expected_bytes = relic_symbol_bytes(reference, id,
+		    &expected_length);
+		if (length != expected_length || (length > 0 &&
+		    bcmp(bytes, expected_bytes, length) != 0))
+			return (false);
+	}
 
 	return (table->integer_count == 0 || bcmp(table->integers,
 	    expected->integers, table->integer_count *
@@ -2709,7 +2781,8 @@ integer_tables_agree(const relic_t *ctx, const relic_t *reference)
 
 /*
  * The computing sweep's program: the chain n0 -> n1 -> ... of COMPUTE_CHAIN
- * edges, each node's number, the closure, and the rules computing from it.
+ * edges, each node's number, the closure, and the rules computing integers
+ * and strings from it.
  */
 static char *
 compute_sweep_program(void)
@@ -2732,7 +2805,10 @@ compute_sweep_program(void)
 	    "width(W) :- path(X, Y), rank(X, I), rank(Y, J),\n"
 	    "    W = J - I + 5000.\n"
 	    "level(n0, D) :- rank(n0, I), D = I + 7000.\n"
-	    "level(Y, E) :- level(X, D), edge(X, Y), E = D + 1.\n");
+	    "level(Y, E) :- level(X, D), edge(X, Y), E = D + 1.\n"
+	    "label(L) :- path(X, Y), rank(Y, J),\n"
+	    "    L = cat(str(X), cat(\"-\", str(J + 900))).\n"
+	    "sized(L, N) :- label(L), N = length(L) + 600000.\n");
 
 	for (i = 0; i <= COMPUTE_CHAIN && used < size; i++) {
 		used += (size_t)snprintf(text + used, size - used,
@@ -3206,6 +3282,7 @@ main(void)
 	an_index_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
 	a_computing_round_out_of_memory_can_be_retried();
+	a_string_batch_out_of_memory_can_be_retried();
 	a_materialization_out_of_memory_reports_once();
 	an_abandoned_rewrite_out_of_memory_reports_once();
 	an_added_fact_or_collected_answer_reports_once();

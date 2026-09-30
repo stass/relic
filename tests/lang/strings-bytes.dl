@@ -1,0 +1,16 @@
+% Strings are bytes: a NUL, a line feed and bytes above 0x7f pass through
+% every function unchanged, count one each in a length, and are cut
+% between by substr, which can split a two-byte UTF-8 sequence in half.
+raw("a\0b"). raw("x\ny"). raw("caf\xc3\xa9"). raw("\xff").
+
+sized(S, N) :- raw(S), N = length(S).
+doubled(S, D) :- raw(S), D = cat(S, S).
+cut(S, C) :- raw(S), C = substr(S, length(S) - 1).
+found(S, I) :- raw(S), I = index(S, "\0").
+spelled(S, T) :- raw(S), T = str(S), T = S.
+
+sized(S, N)?
+doubled(S, D)?
+cut(S, C)?
+found(S, I)?
+spelled(S, T)?

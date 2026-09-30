@@ -1215,8 +1215,31 @@ without it; the verdicts are provisional until a design exists.
   tests as comparisons over the positions they return, a regular expression
   matcher of relic's own in `lib/regex.c`, computed strings on the
   pending-value mechanism with the symbol pool charged to the memory
-  limit; five steps, of which the front end is built and the planner
-  refuses a rule holding a call until the executor evaluates one
+  limit; five steps, of which the front end and the serial plan and
+  executor are built, `match` is refused by the planner until the matcher
+  exists, and a round whose rules call a function runs serially until the
+  frozen round carries pending strings. What remains beyond the steps:
+  * [Medium, performance, `lib/exec.c`, `lib/value.c`] the step-2 gate is
+    not met: over a million sources, `object/2` of the design's section 2
+    adds 0.60 s to the load where the same join assigning a constant adds
+    0.13 s, 4.6 times against the 2 the gate asks. Each computed string is
+    probed in the pool twice, when its text slot is bound and again by the
+    measure, which is most of the 0.32 s `str(M)` over the same sources
+    costs; interning a million new strings is most of the rest. Probing
+    only for a slot some later operation reads as a key, and not for one
+    only an `EMIT` or an expression reads, would halve the probes without
+    changing what the measure decides; it is a planner decision the
+    design's section 8.2 would record.
+  * [Low, `lib/exec.c`] a round whose rules call a function charges the
+    text stack and a megabyte of pending bytes when it begins, so under a
+    memory limit below about 1.1 MB such a program fails with the limit
+    before it derives anything. Allocating the pending bytes on the first
+    pending string would lift that floor at the cost of an allocation in
+    an `EMIT`, which the design rules out.
+  * [Low, tests] a string too long is exercised by `test_ceiling`, built
+    with the length limit lowered to 64 bytes, rather than by the
+    `strings-too-long` and `strings-negation` language tests the design's
+    section 15 lists, which would need four gigabytes of string.
 * relation export, in `docs/todo-language.md`
 * incremental insertion maintenance
 * DRed-style deletion maintenance

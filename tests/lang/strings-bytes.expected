@@ -1,0 +1,24 @@
+"a\0b" 3
+"x\ny" 3
+"café" 5
+"\xff" 1
+
+"a\0b" "a\0ba\0b"
+"x\ny" "x\nyx\ny"
+"café" "cafécafé"
+"\xff" "\xff\xff"
+
+"a\0b" "b"
+"x\ny" "y"
+"café" "\xa9"
+"\xff" "\xff"
+
+"a\0b" 1
+"x\ny" -1
+"café" -1
+"\xff" -1
+
+"a\0b" "a\0b"
+"x\ny" "x\ny"
+"café" "café"
+"\xff" "\xff"

@@ -1,0 +1,12 @@
+% The recursion of strings-recursion under the parallel evaluator on four
+% threads, which derives what one thread does, the same strings in the
+% same order.
+letter("a"). letter("b").
+word(L) :- letter(L).
+word(T) :- word(S), letter(L), length(S) < 3, T = cat(S, L).
+mirror(S, T) :- word(S), word(T), length(S) = 2,
+    T = cat(substr(S, 1), substr(S, 0, 1)).
+
+word(S)?
+mirror(S, T)?
+word(S), index(S, "ba") = 1?

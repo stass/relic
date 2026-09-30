@@ -949,34 +949,30 @@ the_tuple_limit_refuses_a_tuple_and_says_so(void)
 
 /*
  * The memory limit, which counts the bytes every relation's columns and index
- * slots hold.
+ * slots hold beside what the values hold.
  *
- * Where the refusal lands depends on how the two arrays happen to have
- * doubled, so the scenario asserts what the limit promises rather than a
- * tuple count: no insertion is accepted once the storage would pass the
- * allowance, the storage never does pass it, and the relation survives the
- * refusal.
+ * Every value the scenario inserts is interned first, and the limit is set
+ * to MEMORY_LIMIT bytes past what the values then hold, so that it is spent
+ * on the relation alone.  Where the refusal lands depends on how the two
+ * arrays happen to have doubled, so the scenario asserts what the limit
+ * promises rather than a tuple count: no insertion is accepted once the
+ * storage would pass the allowance, the storage never does pass it, and the
+ * relation survives the refusal.
  */
 static void
 the_memory_limit_refuses_a_tuple_and_says_so(void)
 {
-	static const char expected[] =
-	    "limit exceeded: memory=2048 while deriving edge/2";
-
 	relic_t *ctx;
 	relic_relation_t *rel;
-	relic_config_t config;
 	relic_dom_t columns[2];
 	relic_dom_t left;
+	char expected[128];
 	const char *reported;
 	unsigned int ordinal;
 	size_t accepted;
 	bool added;
 
-	bzero(&config, sizeof(config));
-	config.max_memory = MEMORY_LIMIT;
-
-	ctx = context(SCENARIO_MEMORY_LIMIT, &config);
+	ctx = context(SCENARIO_MEMORY_LIMIT, NULL);
 	if (ctx == NULL)
 		return;
 
@@ -985,6 +981,13 @@ the_memory_limit_refuses_a_tuple_and_says_so(void)
 		relic_destroy(ctx);
 		return;
 	}
+
+	for (ordinal = 0; ordinal <= LIMIT_ATTEMPTS; ordinal++)
+		(void)value(ctx, SCENARIO_MEMORY_LIMIT, ordinal);
+	ctx->account.limit = relic_value_storage_bytes(ctx) + MEMORY_LIMIT;
+	snprintf(expected, sizeof(expected),
+	    "limit exceeded: memory=%zu while deriving edge/2",
+	    ctx->account.limit);
 
 	left = value(ctx, SCENARIO_MEMORY_LIMIT, 0);
 	accepted = 0;

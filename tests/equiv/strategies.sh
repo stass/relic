@@ -29,8 +29,11 @@
 # delta is a range of its relation, so every match a variant finds, the
 # rule's full plan would find too.  Every tuple the default holds is then in
 # the least model, and holding as many as the model has, it holds all of
-# them.  The other counters describe the work done or the storage used,
-# differ between strategies by design, and are left out.
+# them.  The same runs must agree on how many strings the context holds as
+# values, since a string evaluation computes is interned only as a column
+# of a derived tuple, and the tuples are the model's.  The other counters
+# describe the work done or the storage used, differ between strategies by
+# design, and are left out.
 #
 # The rules evaluated are the same within each of two groups.  Answering from
 # the whole fixed point evaluates the program's rules, whatever the fixed
@@ -100,8 +103,8 @@ run() {
 	    -e "note: a row of .* holds a value that is not an integer" \
 	    -e "note: the rows of .* hold values of more than one type" \
 	    "$work/$label.all" > "$work/$label.err" || true
-	grep -e '^stats: tuples held ' "$work/$label.all" \
-	    > "$work/$label.held" || true
+	grep -e '^stats: tuples held ' -e '^stats: string values ' \
+	    "$work/$label.all" > "$work/$label.held" || true
 }
 
 # Run the strategy whose names `label` joins with `+`: jN as -j N, and

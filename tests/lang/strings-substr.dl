@@ -1,0 +1,15 @@
+% substr keeps the positions of its interval that lie in the string, so
+% every integer is a valid argument: a start before the string or past it,
+% a count reaching past either end, a count of zero or less, and the
+% extremes of the integers, where the interval's end lies past every 64-bit
+% integer and is still read over the integers.
+at(-5, 100). at(-1, 2). at(0, 3). at(1, 1). at(2, 5). at(3, 1). at(5, 1).
+at(1, -1). at(1, 0). at(-9223372036854775808, 9223372036854775807).
+at(9223372036854775807, 9223372036854775807). at(2, 9223372036854775807).
+at(-9223372036854775808, -9223372036854775808). at(-2, 9223372036854775807).
+
+cut(I, N, S) :- at(I, N), S = substr("abc", I, N).
+from(I, S) :- at(I, _), S = substr("abc", I).
+
+cut(I, N, S)?
+from(I, S)?

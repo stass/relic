@@ -1,0 +1,30 @@
+"main.c"
+"a.c.orig"
+
+"util.h"
+"c"
+""
+
+"main.c"
+
+"main.c"
+
+"main.c" 5
+"util.h" -1
+"c" 0
+"a.c.orig" 2
+"" -1
+
+"main.c" 0
+"util.h" 0
+"c" 0
+"a.c.orig" 0
+"" 0
+
+"main.c" -1
+"util.h" -1
+"c" -1
+"a.c.orig" -1
+"" -1
+
+1

@@ -1,0 +1,18 @@
+% A query binding a column a rule computes is answered through the Magic
+% rewrite: the bound string reaches the rule through the magic predicate,
+% and the call is copied into each rewritten rule with its arguments
+% renumbered.  A string computed in one rewritten rule and read by another
+% is interned when its tuple is stored, and so is equal to the string the
+% program states, and every answer is the one the program gives without
+% the rewrite.
+file(src, "main"). file(src, "util"). file(lib, "list").
+dep("main.o", "util.o").
+
+object(D, O) :- file(D, B), O = cat(B, ".o").
+needs(D, N) :- object(D, O), dep(O, N), object(_, N).
+chain(X, Y) :- needs(_, X), Y = cat("lib/", X).
+
+object(D, "main.o")?
+object(src, O)?
+needs(src, N)?
+chain("util.o", Y)?

@@ -147,6 +147,7 @@ installcheck-local:
 
 RELIC_COMPAT_RENAMES = \
 	-Dgetentropy=relic_replacement_getentropy \
+	-Dmemmem=relic_replacement_memmem \
 	-Dreallocarray=relic_replacement_reallocarray \
 	-Dstrlcat=relic_replacement_strlcat \
 	-Dstrlcpy=relic_replacement_strlcpy \
@@ -161,8 +162,9 @@ tests_unit_test_compat_SOURCES = tests/unit/test_compat.c \
 tests_unit_test_compat_LDADD = $(LTLIBOBJS)
 
 tests_unit_test_compat_replacements_SOURCES = tests/unit/test_compat.c \
-	tests/unit/harness.c compat/getentropy.c compat/reallocarray.c \
-	compat/strlcat.c compat/strlcpy.c compat/strtonum.c
+	tests/unit/harness.c compat/getentropy.c compat/memmem.c \
+	compat/reallocarray.c compat/strlcat.c compat/strlcpy.c \
+	compat/strtonum.c
 tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DRELIC_COMPAT_DECLARE_ALL -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
 	$(RELIC_COMPAT_RENAMES)
@@ -182,8 +184,8 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
 	tests/unit/test_relation tests/unit/test_round tests/unit/test_rule \
-	tests/unit/test_stratify tests/unit/test_symbol tests/unit/test_util \
-	tests/unit/test_value
+	tests/unit/test_stratify tests/unit/test_strfn tests/unit/test_symbol \
+	tests/unit/test_text tests/unit/test_util tests/unit/test_value
 
 ## test_api links the installed form of the library rather than the
 ## convenience library, so an entry point it calls that the export list or
@@ -260,8 +262,14 @@ tests_unit_test_stratify_SOURCES = tests/unit/test_stratify.c \
 tests_unit_test_stratify_CFLAGS = $(AM_CFLAGS) -pthread
 tests_unit_test_stratify_LDADD = librelic_internal.la $(LTLIBOBJS)
 
+tests_unit_test_strfn_SOURCES = tests/unit/test_strfn.c tests/unit/harness.c
+tests_unit_test_strfn_LDADD = librelic_internal.la $(LTLIBOBJS)
+
 tests_unit_test_symbol_SOURCES = tests/unit/test_symbol.c tests/unit/harness.c
 tests_unit_test_symbol_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_text_SOURCES = tests/unit/test_text.c tests/unit/harness.c
+tests_unit_test_text_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_util_SOURCES = tests/unit/test_util.c tests/unit/harness.c
 tests_unit_test_util_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -314,12 +322,15 @@ tests_unit_test_exhaustion_LDADD = $(LTLIBOBJS)
 ##
 ## The symbol pool and the integer table each number at most 2^30 - 1
 ## entries, below the type bits of a domain identifier, far more than a test
-## can intern.  This program compiles the library from source with both
-## ceilings lowered, as the allocation-failure suite compiles it with its
-## allocators renamed, so that the refusal at a ceiling is actually taken.
+## can intern, and a string value holds at most 2^32 - 2 bytes, more than a
+## test can concatenate.  This program compiles the library from source with
+## all three ceilings lowered, as the allocation-failure suite compiles it
+## with its allocators renamed, so that the refusal at a ceiling is actually
+## taken.
 ##
 
-RELIC_CEILING_DEFINES = -DRELIC_SYMBOL_MAX=64 -DRELIC_INTEGER_MAX=64
+RELIC_CEILING_DEFINES = -DRELIC_SYMBOL_MAX=64 -DRELIC_INTEGER_MAX=64 \
+	-DRELIC_STRING_LENGTH_MAX=64
 
 RELIC_TEST_BINARIES += tests/unit/test_ceiling
 tests_unit_test_ceiling_SOURCES = tests/unit/test_ceiling.c \
@@ -621,6 +632,14 @@ RELIC_LANG_TESTS = \
 	tests/lang/sort-mixed.dl tests/lang/stats-indexed.dl \
 	tests/lang/stats-magic.dl tests/lang/stats-naive.dl \
 	tests/lang/stats-semi-naive.dl tests/lang/string-escapes.dl \
+	tests/lang/strings-aggregate.dl tests/lang/strings-atom-or-call.dl \
+	tests/lang/strings-binding.dl tests/lang/strings-bytes.dl \
+	tests/lang/strings-explain.dl tests/lang/strings-gathered.dl \
+	tests/lang/strings-index.dl tests/lang/strings-magic.dl \
+	tests/lang/strings-memory.dl tests/lang/strings-mixed.dl \
+	tests/lang/strings-parallel.dl tests/lang/strings-probe.dl \
+	tests/lang/strings-recursion.dl tests/lang/strings-str.dl \
+	tests/lang/strings-substr.dl tests/lang/strings-syntax.dl \
 	tests/lang/success-criteria.dl tests/lang/trailing-comma.dl \
 	tests/lang/undefined-predicate.dl tests/lang/unexpected-token.dl \
 	tests/lang/unsafe-anonymous.dl tests/lang/unsafe-comparison.dl \

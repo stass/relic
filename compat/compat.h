@@ -48,6 +48,11 @@
 int getentropy(void *buf, size_t buflen);
 #endif
 
+#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_MEMMEM)
+void *memmem(const void *big, size_t big_length, const void *little,
+    size_t little_length);
+#endif
+
 #if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_REALLOCARRAY)
 void *reallocarray(void *optr, size_t nmemb, size_t size);
 #endif

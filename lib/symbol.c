@@ -6,6 +6,8 @@
 
 #include "config.h"
 
+#include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <strings.h>
 
@@ -41,12 +43,7 @@
 _Static_assert(RELIC_SYMBOL_MAX <= RELIC_DOM_INDEX_MASK,
     "a symbol identifier must stay below the type bits");
 
-/*
- * The longest byte string the pool holds: its length fits an entry's, and
- * the length with the terminator's byte fits a size_t however narrow.
- */
-#define	RELIC_SYMBOL_LENGTH_MAX	(UINT32_MAX - 1)
-
+static void	 account_pool(relic_t *ctx);
 static const relic_symbol_t *symbol_at(const relic_symtab_t *table,
 		    uint32_t id);
 static bool	 symbol_has_bytes(const relic_symtab_t *table, uint32_t id,
@@ -127,7 +124,7 @@ symbol_rehash(uint32_t id, void *ctx)
 /*
  * Copy bytes into the string arena, append them to the symbol array with
  * the hash they were placed by, and return the identifier assigned to them.
- * The length has been checked against RELIC_SYMBOL_LENGTH_MAX, so it fits
+ * The length has been checked against RELIC_STRING_LENGTH_MAX, so it fits
  * the entry and the terminator's byte cannot wrap the size.
  *
  * The array is grown and the copy is made before the count advances, so a
@@ -159,6 +156,7 @@ symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t hash,
 		return (-1);
 	}
 	table->entries = entries;
+	account_pool(ctx);
 
 	/*
 	 * One byte past the recorded length holds a terminator, so a caller
@@ -167,6 +165,7 @@ symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t hash,
 	 * where this one did not.
 	 */
 	copy = relic_arena_alloc(&table->strings, length + 1);
+	account_pool(ctx);
 	if (copy == NULL) {
 		relic_arena_clear_failure(&table->strings);
 		relic_diag_no_memory(ctx);
@@ -199,7 +198,6 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
     uint32_t *idp)
 {
 	relic_symtab_t *table;
-	relic_idprobe_t probe;
 	uint32_t hash;
 	uint32_t id;
 
@@ -209,22 +207,19 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	 * Checked before the bytes are read: the length is the caller's, and
 	 * hashing them is the first thing that would read them.
 	 */
-	if (length > RELIC_SYMBOL_LENGTH_MAX) {
+	if (length > RELIC_STRING_LENGTH_MAX) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "a symbol or string of %zu bytes is longer than the %lu "
 		    "a value may hold", length,
-		    (unsigned long)RELIC_SYMBOL_LENGTH_MAX);
+		    (unsigned long)RELIC_STRING_LENGTH_MAX);
 		return (-1);
 	}
 
-	hash = relic_hash_bytes(table->hash_seed, bytes, length);
-
-	relic_idprobe_open(&probe, &table->index, hash);
-	while (relic_idprobe_next(&probe, &id)) {
-		if (symbol_has_bytes(table, id, bytes, length)) {
-			*idp = id;
-			return (0);
-		}
+	hash = relic_symbol_hash(ctx, bytes, length);
+	id = relic_symbol_find(ctx, bytes, length, hash);
+	if (id != RELIC_ID_NONE) {
+		*idp = id;
+		return (0);
 	}
 
 	/*
@@ -237,9 +232,11 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	 * relies on.
 	 */
 	if (relic_idtab_reserve(&table->index, 1, symbol_rehash, table) != 0) {
+		account_pool(ctx);
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
+	account_pool(ctx);
 
 	if (symbol_store(ctx, bytes, length, hash, &id) != 0)
 		return (-1);
@@ -279,4 +276,182 @@ const char *
 relic_string(relic_t *ctx, uint32_t id, size_t *lenp)
 {
 	return (relic_symbol_bytes(ctx, id, lenp));
+}
+
+uint32_t
+relic_symbol_hash(const relic_t *ctx, const void *bytes, size_t length)
+{
+	return (relic_hash_bytes(ctx->symbols.hash_seed, bytes, length));
+}
+
+uint32_t
+relic_symbol_find(const relic_t *ctx, const void *bytes, size_t length,
+    uint32_t hash)
+{
+	relic_idprobe_t probe;
+	uint32_t id;
+
+	relic_idprobe_open(&probe, &ctx->symbols.index, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		if (symbol_has_bytes(&ctx->symbols, id, bytes, length))
+			return (id);
+	}
+
+	return (RELIC_ID_NONE);
+}
+
+size_t
+relic_symbol_pool_bytes(const relic_t *ctx)
+{
+	const relic_symtab_t *table;
+
+	table = &ctx->symbols;
+
+	return (relic_saturating_sum(relic_saturating_sum(
+	    relic_saturating_product(table->capacity, sizeof(*table->entries)),
+	    relic_idtab_bytes(&table->index)),
+	    relic_arena_total_bytes(&table->strings)));
+}
+
+/*
+ * Set the account's count of the pool to what the pool occupies, after
+ * anything that may have grown it.  The count is reconciled from the pool
+ * rather than adjusted by each growth, so it cannot drift from it.
+ */
+static void
+account_pool(relic_t *ctx)
+{
+	ctx->account.pool_bytes = relic_symbol_pool_bytes(ctx);
+}
+
+/*
+ * Each part of the pool is projected as interning the strings one at a
+ * time would grow it: the entries a step at a time, the index for all of
+ * them, which reaches what reserving one at a time reaches, and the arena
+ * one copy at a time, each with its terminator, as symbol_store() makes it.
+ */
+size_t
+relic_symbol_pool_bytes_after(const relic_t *ctx,
+    const relic_fresh_string_t *fresh, size_t count)
+{
+	const relic_symtab_t *table;
+	relic_arena_projection_t strings;
+	size_t capacity;
+	size_t i;
+
+	table = &ctx->symbols;
+	if (count == 0)
+		return (relic_symbol_pool_bytes(ctx));
+
+	capacity = relic_grow_array_capacity_stepwise(table->capacity,
+	    table->count, count, 1);
+	if (capacity == 0)
+		return (SIZE_MAX);
+
+	relic_arena_project(&table->strings, &strings);
+	for (i = 0; i < count; i++)
+		relic_arena_project_alloc(&strings, fresh[i].length + 1);
+
+	return (relic_saturating_sum(relic_saturating_sum(
+	    relic_saturating_product(capacity, sizeof(*table->entries)),
+	    relic_idtab_bytes_after_reserve(&table->index, count)),
+	    strings.total_bytes));
+}
+
+bool
+relic_symbol_has_room(const relic_t *ctx, size_t count)
+{
+	return (count <= RELIC_SYMBOL_MAX - ctx->symbols.count);
+}
+
+/*
+ * The index and the entries are grown first and the copies made after, in
+ * the order the strings are numbered, which is the order interning them one
+ * at a time would make them in, so the arena ends as it would have.  A copy
+ * the arena refuses rewinds it to where the copies began, so a reservation
+ * that fails leaves no copy behind and the arena placing a retry's copies
+ * exactly where an undisturbed reservation would.
+ */
+/*
+ * Clear the copies a failed reservation made before the arena is rewound
+ * past them, so that no string holds a pointer into memory the arena has
+ * freed or will hand out again.
+ */
+static void
+forget_copies(relic_fresh_string_t *fresh, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++)
+		fresh[i].copy = NULL;
+}
+
+int
+relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count)
+{
+	relic_arena_mark_t mark;
+	relic_symtab_t *table;
+	relic_symbol_t *entries;
+	size_t i;
+
+	table = &ctx->symbols;
+	if (count == 0)
+		return (0);
+	if (!relic_symbol_has_room(ctx, count))
+		return (-1);
+
+	if (relic_idtab_reserve(&table->index, count, symbol_rehash,
+	    table) != 0) {
+		account_pool(ctx);
+		return (-1);
+	}
+
+	entries = relic_grow_array_stepwise(table->entries, &table->capacity,
+	    table->count, count, 1, sizeof(*table->entries));
+	if (entries == NULL) {
+		account_pool(ctx);
+		return (-1);
+	}
+	table->entries = entries;
+
+	relic_arena_mark(&table->strings, &mark);
+	for (i = 0; i < count; i++) {
+		assert(fresh[i].length <= RELIC_STRING_LENGTH_MAX);
+		fresh[i].copy = relic_arena_alloc(&table->strings,
+		    fresh[i].length + 1);
+		if (fresh[i].copy == NULL) {
+			forget_copies(fresh, i);
+			relic_arena_rewind(&table->strings, &mark);
+			relic_arena_clear_failure(&table->strings);
+			account_pool(ctx);
+			return (-1);
+		}
+		if (fresh[i].length > 0)
+			bcopy(fresh[i].bytes, fresh[i].copy, fresh[i].length);
+		fresh[i].copy[fresh[i].length] = '\0';
+	}
+	account_pool(ctx);
+
+	return (0);
+}
+
+void
+relic_symbol_append(relic_t *ctx, const relic_fresh_string_t *fresh,
+    size_t count)
+{
+	relic_symtab_t *table;
+	relic_symbol_t *entry;
+	size_t i;
+
+	table = &ctx->symbols;
+	for (i = 0; i < count; i++) {
+		assert(table->count < table->capacity);
+		entry = &table->entries[table->count];
+		entry->bytes = fresh[i].copy;
+		entry->length = (uint32_t)fresh[i].length;
+		entry->hash = fresh[i].hash;
+		table->count++;
+		relic_idtab_place(&table->index, fresh[i].hash,
+		    (uint32_t)table->count);
+	}
 }

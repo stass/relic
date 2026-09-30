@@ -1,0 +1,21 @@
+% An equality one side of which is a variable nothing else binds and the
+% other a call over bound variables assigns the call's value: a string for
+% cat, substr and str, an integer for length and index.  The variable then
+% holds a value like any other, printed, compared and stored.
+file(src, "main", "c").
+file(src, "util", "c").
+file(doc, "guide", "md").
+
+object(D, O) :- file(D, B, "c"), O = cat(B, ".o").
+path(P) :- file(D, B, E), P = cat(cat(str(D), "/"), cat(B, cat(".", E))).
+size(B, N) :- file(_, B, _), N = length(B).
+stem(B, S) :- file(_, B, _), S = substr(B, 0, 2).
+where(B, I) :- file(_, B, _), I = index(B, "i").
+
+object(D, O)?
+path(P)?
+size(B, N)?
+stem(B, S)?
+where(B, I)?
+file(D, B, E), P = cat(B, E)?
+N = length("hello"), S = cat("a", "b")?

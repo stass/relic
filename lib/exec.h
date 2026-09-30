@@ -17,6 +17,7 @@
 #include "frozen.h"
 #include "plan.h"
 #include "program.h"
+#include "strfn.h"
 #include "util.h"
 
 /*
@@ -37,9 +38,9 @@
  * batch goes -- inserted into the relation the EMIT names, delivered to a
  * caller as rows, or kept aside -- and empties it before resuming.  So one
  * executor serves every way a plan's derivations are used.  It fails only by
- * recording that it did: an expression whose result is not defined records
- * an error in the scratch and ends the plan, and the caller reports it when
- * it takes the batch.
+ * recording that it did: an expression whose result is not defined, and a
+ * buffer of the scratch that could not grow, record an error in the scratch
+ * and end the plan, and the caller reports it when it takes the batch.
  *
  * Between two calls the caller may insert into the relations, the plan's
  * own among them, which appends tuples and may move the storage holding
@@ -60,12 +61,47 @@
  */
 #define	RELIC_INSERT_BATCH	64u
 
+/*
+ * The room the scratch's text stack and pending bytes start with in a
+ * round, each grown past it only for data that needs more: a text stack of
+ * a few pages holds the strings an ordinary rule computes, and the pending
+ * bytes of a megabyte a batch of their tuples.
+ */
+#define	RELIC_TEXT_STACK_INITIAL	4096u
+#define	RELIC_PENDING_BYTES		(1024u * 1024u)
+
 typedef struct relic_exec_counters relic_exec_counters_t;
 typedef struct relic_exec_env relic_exec_env_t;
 typedef struct relic_exec_error relic_exec_error_t;
 typedef struct relic_mixed_note relic_mixed_note_t;
 typedef struct relic_op_state relic_op_state_t;
+typedef struct relic_pending relic_pending_t;
 typedef struct relic_scratch relic_scratch_t;
+typedef struct relic_text relic_text_t;
+typedef struct relic_text_buffer relic_text_buffer_t;
+
+/*
+ * Bytes in one of the scratch's byte buffers -- a computed string in the
+ * text stack, or a pending string in the pending bytes -- named by where
+ * they begin and how many there are, since the buffer may move when it
+ * grows.
+ */
+struct relic_text {
+	size_t	offset;
+	size_t	length;
+};
+
+/*
+ * A byte buffer of the scratch, `used` of its `capacity` bytes in use.  It
+ * belongs to the round it was made for, which charges its capacity to the
+ * memory account as a round's buffer and gives the charge back when it
+ * frees it.
+ */
+struct relic_text_buffer {
+	char	*bytes;
+	size_t	 used;
+	size_t	 capacity;
+};
 
 /*
  * What a running plan reads besides its relations: the context, for
@@ -97,10 +133,15 @@ struct relic_exec_env {
  * A test keeps no cursor, and a FILTER, an ASSIGN and the EMIT read no
  * relation and leave the view unset too.  An AGGREGATE reads its group
  * relation through the view `all`, resolved like the others.
+ *
+ * `text_top` is set by an ASSIGN that binds a text slot, each time it
+ * succeeds: the end of its string in the text stack, above which the
+ * operations after it build theirs (plan.h).
  */
 struct relic_op_state {
 	relic_tuple_range_t	view;
 	relic_tuple_range_t	cursor;
+	size_t			text_top;
 };
 
 /*
@@ -177,16 +218,50 @@ struct relic_mixed_note {
 };
 
 /*
- * The first expression of the running plan whose result was not defined:
- * `where` is the literal's location, NULL when there has been none, and
- * `status` says which way the result was undefined.  Recording one ends the
- * plan, which is left finished; the caller reports it when it takes the
- * batch, discards the batch and fails the evaluation.  It is kept apart from
- * the note, which records nothing that fails anything.
+ * Why a binding stopped the plan: an integer result that does not fit, a
+ * division by zero, a string result longer than a value can be, or a
+ * buffer of the scratch that could not grow, because the memory limit
+ * refused it or because the allocator did.
+ */
+enum relic_exec_failure {
+	RELIC_FAIL_OVERFLOW,
+	RELIC_FAIL_ZERO_DIVISOR,
+	RELIC_FAIL_TOO_LONG,
+	RELIC_FAIL_LIMIT,
+	RELIC_FAIL_NO_MEMORY
+};
+
+/*
+ * The first failure the running plan met, when `failed` says there has
+ * been one: `failure` says what it was, and `where` is the location of the
+ * literal being evaluated, or NULL for a buffer the EMIT could not grow,
+ * which is no literal's.  Recording one ends the plan, which is left
+ * finished; the caller reports it when it takes the batch, discards the
+ * batch and fails the evaluation.  It is kept apart from the note, which
+ * records nothing that fails anything.
  */
 struct relic_exec_error {
 	const relic_location_t	*where;
-	enum relic_arith_status	 status;
+	enum relic_exec_failure	 failure;
+	bool			 failed;
+};
+
+/*
+ * A value an EMIT derived that the context had not assigned an identifier
+ * when it was computed: an integer, or a string whose bytes are `text` in
+ * the batch's pending bytes.
+ */
+enum relic_pending_kind {
+	RELIC_PENDING_INTEGER,
+	RELIC_PENDING_TEXT
+};
+
+struct relic_pending {
+	union {
+		int64_t		integer;	/* INTEGER */
+		relic_text_t	text;		/* TEXT */
+	}			u;
+	enum relic_pending_kind	kind;
 };
 
 /*
@@ -202,14 +277,25 @@ struct relic_exec_error {
  * simply overwrites the old: nothing is saved on descending and nothing
  * restored on backtracking, because no operation reads a slot a later one
  * binds.  A number slot (plan.h) holds its integer in `numbers` beside its
- * frame entry, which is the integer's identifier or zero.
+ * frame entry, and a text slot names its bytes in the text stack in
+ * `texts`; the frame entry of either is the value's identifier or zero.
  *
- * `pending` holds the integers of the head tuples in the batch that the
- * value table did not hold when they were computed, `pending_count` of
- * them, with room for one per column of the batch.  Such a column holds a
- * pending marker, the integer's position in `pending` counting from one,
- * with no type bits, which no identifier is; the caller resolves every
- * marker before the batch goes anywhere.
+ * `text_stack` holds every string the running plan has computed and may
+ * still read: the strings of the text slots bound, and above them the
+ * temporaries of the operation running (plan.h).
+ *
+ * `pending` holds the values of the head tuples in the batch that the
+ * context had not assigned when they were computed, `pending_count` of
+ * them, with room for one per column of the batch, and `pending_bytes` the
+ * bytes of those that are strings.  Such a column holds a pending marker,
+ * the value's position in `pending` counting from one, with no type bits,
+ * which no identifier is; the caller resolves every marker before the
+ * batch goes anywhere.
+ *
+ * The text stack and the pending bytes are the round's (relic_text_buffer_t):
+ * a plan that calls a function runs only on a scratch that has them, and
+ * one that does not never reads them.  `account` is what their growth is
+ * charged to.
  *
  * `states` has room for the operations of a plan of `op_room` operations,
  * one state each, so that the executor's level indexes a plan's operations
@@ -221,7 +307,9 @@ struct relic_exec_error {
  *
  * `level` and `resume` are where the join was when the executor returned
  * with a full batch: the operation to ask next and whether to ask it for
- * its next match rather than a first.  `finished` is set once the first
+ * its next match rather than a first.  A batch is full when it holds
+ * RELIC_INSERT_BATCH tuples, or when the next tuple's pending strings would
+ * not fit its pending bytes, and then the EMIT is asked again.  `finished` is set once the first
  * operation has nothing more, after which the plan has derived everything
  * it will; a scratch no plan has started on is finished too, so that
  * running it derives nothing.
@@ -239,9 +327,13 @@ struct relic_scratch {
 	const relic_exec_env_t	*env;
 	relic_dom_t		 frame[RELIC_MAX_VARIABLES];
 	int64_t			 numbers[RELIC_MAX_VARIABLES];
+	relic_text_t		 texts[RELIC_MAX_VARIABLES];
 	relic_op_state_t	*states;
 	relic_dom_t		*batch;
-	int64_t			*pending;
+	relic_pending_t		*pending;
+	relic_text_buffer_t	 text_stack;
+	relic_text_buffer_t	 pending_bytes;
+	relic_account_t		*account;
 	size_t			 op_room;
 	size_t			 batch_count;
 	size_t			 pending_count;
@@ -268,8 +360,15 @@ enum relic_exec_status {
  * relic_scratch_init() gives a scratch the storage it runs in: room for the
  * states of a plan of `op_room` operations, for a batch of
  * RELIC_INSERT_BATCH tuples of `arity_room` columns, and for as many pending
- * integers as the batch has columns, all owned by the caller.  The scratch
- * starts empty and finished.
+ * values as the batch has columns, all owned by the caller.  The scratch
+ * starts empty and finished, and holds no round's buffers.
+ *
+ * relic_scratch_begin_texts() gives the scratch a round's text stack and
+ * pending bytes, at their initial sizes, charged to `account` as a round's
+ * buffers, and returns 0, or -1 having given it nothing and set *failurep
+ * to say whether the limit or the allocator refused them.  relic_scratch_end_texts() frees them and
+ * gives back their charge, whatever they had grown to, and may be called
+ * on a scratch that holds none.
  *
  * relic_exec_start() readies the scratch to run `plan` from the beginning,
  * over what `env` gives it, resolving the view of every operation that
@@ -291,8 +390,11 @@ enum relic_exec_status {
  * run one after another derives what the whole plan does.
  */
 void	 relic_scratch_init(relic_scratch_t *scratch, relic_op_state_t *states,
-	    size_t op_room, relic_dom_t *batch, int64_t *pending,
+	    size_t op_room, relic_dom_t *batch, relic_pending_t *pending,
 	    uint16_t arity_room);
+int	 relic_scratch_begin_texts(relic_scratch_t *scratch,
+	    relic_account_t *account, enum relic_exec_failure *failurep);
+void	 relic_scratch_end_texts(relic_scratch_t *scratch);
 void	 relic_exec_start(relic_scratch_t *scratch,
 	    const relic_exec_env_t *env, const relic_plan_t *plan);
 void	 relic_exec_start_piece(relic_scratch_t *scratch,

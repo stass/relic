@@ -1,0 +1,11 @@
+% The symbol pool is charged to the memory limit with the relations, and a
+% string evaluation computes is interned only once the limit admits the
+% pool's growth.  Each round appends ten bytes to the last string, so the
+% strings of three hundred rounds hold some 450000 bytes between them while
+% their relation holds a few thousand.  A round that computes strings holds
+% a megabyte of buffers for them besides, so a limit of 1400000 admits the
+% buffers and the relation and not the pool.
+s("x").
+s(Y) :- s(X), length(X) < 3000, Y = cat(X, "abcdefghij").
+
+s(X), length(X) > 2990?

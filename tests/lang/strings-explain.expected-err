@@ -1,0 +1,24 @@
+stratum 0, component 0: object/2
+    rule object(M, O) :- source(M, S), O = cat(substr(S, 0, length(S) - 2), ".o").
+        scan source(M, S)
+        assign O = cat(substr(S, 0, length(S) - 2), ".o")
+        emit object(M, O)
+stratum 0, component 1: shapes/2
+    rule shapes(N, T) :- source(_, S), N = -length(S) + index(S, "\x01\x0a"), T = str(N * 2).
+        scan source(_, S)
+        assign N = -length(S) + index(S, "\x01\x0a")
+        assign T = str(N * 2)
+        emit shapes(N, T)
+stratum 1, component 2: untested/1
+    rule untested(P) :- file(P), index(P, "src/") = 0, not tested(P), substr(P, length(P) - 2) = ".c".
+        scan file(P)
+        filter index(P, "src/") = 0
+        anti-member tested(P)
+        filter substr(P, length(P) - 2) = ".c"
+        emit untested(P)
+query $q0(P) :- untested(P).
+    scan untested(P)
+    stream $q0(P)
+query $q1(M, O) :- object(M, O).
+    scan object(M, O)
+    stream $q1(M, O)

@@ -166,8 +166,11 @@ typedef struct relic_planner relic_planner_t;
  * indexed like the body.  `bound` is the set of slots bound so far: while the
  * order is decided, by the literals placed and the slots the caller started
  * with; while the operations are emitted, by the operations emitted.
- * `numbers` is the subset of those an ASSIGN emitted binds to a computed
- * integer, the number slots.
+ * `numbers` and `texts` are the subsets of those bound to a computed
+ * integer and to a computed string, the number slots and the text slots.
+ * `text_base` is where the texts the next operation computes begin: one
+ * more than the position of the last ASSIGN emitted that binds a text slot,
+ * whose string they are built above, or zero when none has been.
  *
  * `ranking` holds the pass in progress: the `ranking_count` positive
  * literals not yet placed when it began, best first.  It has room for every
@@ -204,6 +207,8 @@ struct relic_planner {
 	size_t			 delta_literal;
 	uint64_t		 bound;
 	uint64_t		 numbers;
+	uint64_t		 texts;
+	size_t			 text_base;
 	bool			 pin_delta;
 };
 
@@ -230,19 +235,22 @@ static relic_op_t *append_atom_op(relic_planner_t *planner,
 static relic_op_t *append_op(relic_planner_t *planner,
 		    enum relic_op_kind kind);
 static uint32_t	 all_columns(uint16_t arity);
-static void	 append_steps(const relic_planner_t *planner,
+static unsigned int append_steps(const relic_planner_t *planner,
 		    const relic_expr_t *expr, relic_postfix_t *postfix);
 static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
 static bool	 atom_is_bound(const relic_atom_t *atom, uint16_t arity,
 		    uint64_t bound);
 static bool	 atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp,
 		    uint64_t *readsp);
+static void	 bind_slot(relic_planner_t *planner, uint16_t slot,
+		    enum relic_slot_kind kind);
 static uint32_t	 bound_columns(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
 static uint16_t	 column_count(uint32_t columns);
 static int	 compare_candidates(const void *a, const void *b);
 static int	 compile_postfix(relic_planner_t *planner,
-		    const relic_expr_t *expr, relic_postfix_t *postfix);
+		    const relic_expr_t *expr, const relic_location_t *where,
+		    relic_postfix_t *postfix);
 static int	 confirm_delta_literal(const relic_planner_t *planner);
 static int	 confirm_order_complete(const relic_planner_t *planner);
 static int	 confirm_plan_complete(const relic_planner_t *planner);
@@ -259,7 +267,7 @@ static size_t	 estimate_unknown(uint16_t arity, uint32_t bound,
 		    enum relic_view view);
 static int	 estimate_measured(relic_t *ctx, relic_relation_t *relation,
 		    uint32_t columns, size_t *estimatep);
-static bool	 expr_is_number(const relic_planner_t *planner,
+static enum relic_slot_kind expr_kind(const relic_planner_t *planner,
 		    const relic_expr_t *expr);
 static bool	 is_incomplete(const bool *incomplete, relic_pred_id_t pred);
 static uint64_t	 multiply_estimates(uint64_t product, size_t estimate);
@@ -274,7 +282,6 @@ static int	 planning_status(relic_t *ctx, relic_arena_t *arena,
 static int	 place_assign(relic_planner_t *planner,
 		    const relic_literal_t *literal, uint16_t slot,
 		    const relic_expr_t *value);
-static bool	 expr_calls(const relic_expr_t *expr);
 static int	 place_comparison(relic_planner_t *planner,
 		    const relic_literal_t *literal);
 static int	 place_aggregate(relic_planner_t *planner,
@@ -289,6 +296,7 @@ static enum relic_view positive_view(const relic_planner_t *planner,
 		    size_t index);
 static uint64_t	 product_of_estimates(const relic_planner_t *planner,
 		    size_t first, size_t end);
+static bool	 postfix_calls(const relic_postfix_t *postfix);
 static bool	 postfix_computes(const relic_postfix_t *postfix);
 static int	 place_test(relic_planner_t *planner,
 		    const relic_literal_t *literal);
@@ -307,6 +315,9 @@ static int	 score_positive(relic_t *ctx, const bool *incomplete,
 		    const relic_atom_t *atom, enum relic_view view,
 		    uint64_t bound, relic_plan_score_t *scorep);
 static uint64_t	 slot_bit(uint16_t slot);
+static enum relic_slot_kind slot_kind(const relic_planner_t *planner,
+		    uint16_t slot);
+static enum relic_step_kind slot_step(enum relic_slot_kind kind);
 static relic_plan_term_t *terms_alloc(relic_planner_t *planner,
 		    uint16_t arity);
 static bool	 test_is_placeable(relic_t *ctx,
@@ -630,29 +641,78 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 }
 
 /*
- * Append an expression's steps to `postfix` in postfix order: each operand's
- * steps, then its operator's.  A variable is read as the kind of slot it is
- * at this point of the plan.  The recursion is as deep as the tree is tall,
- * which the parser bounds.
+ * The kind of slot `slot` is at this point of the plan.
  */
-static void
+static enum relic_slot_kind
+slot_kind(const relic_planner_t *planner, uint16_t slot)
+{
+	if ((planner->numbers & slot_bit(slot)) != 0)
+		return (RELIC_SLOT_NUMBER);
+	if ((planner->texts & slot_bit(slot)) != 0)
+		return (RELIC_SLOT_TEXT);
+
+	return (RELIC_SLOT_DOMAIN);
+}
+
+/*
+ * The step that reads a slot of `kind`.
+ */
+static enum relic_step_kind
+slot_step(enum relic_slot_kind kind)
+{
+	switch (kind) {
+	case RELIC_SLOT_NUMBER:
+		return (RELIC_STEP_NUMBER_SLOT);
+	case RELIC_SLOT_TEXT:
+		return (RELIC_STEP_TEXT_SLOT);
+	case RELIC_SLOT_DOMAIN:
+		break;
+	}
+
+	return (RELIC_STEP_DOMAIN_SLOT);
+}
+
+/*
+ * Append an expression's steps to `postfix` in postfix order -- each
+ * operand's or argument's steps, then its operator's or function's -- and
+ * give the stack cells running them needs, by the recurrence plan.h states
+ * over relic_postfix_t: a leaf needs one, and a node the greatest of what
+ * each operand or argument needs plus the cells of those before it.  A
+ * variable is read as the kind of slot it is at this point of the plan.
+ * The recursion is as deep as the tree is tall, which the parser bounds.
+ */
+static unsigned int
 append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
     relic_postfix_t *postfix)
 {
+	const relic_expr_call_t *call;
 	relic_step_t *step;
+	unsigned int need;
+	unsigned int held;
+	uint8_t i;
 
+	need = 1;
 	switch (expr->kind) {
 	case RELIC_EXPR_CONSTANT:
 	case RELIC_EXPR_VARIABLE:
 		break;
 	case RELIC_EXPR_NEGATE:
-		append_steps(planner, expr->u.operand, postfix);
+		need = append_steps(planner, expr->u.operand, postfix);
 		break;
 	case RELIC_EXPR_BINARY:
-		append_steps(planner, expr->u.binary.left, postfix);
-		append_steps(planner, expr->u.binary.right, postfix);
+		need = append_steps(planner, expr->u.binary.left, postfix);
+		held = append_steps(planner, expr->u.binary.right, postfix) + 1;
+		if (held > need)
+			need = held;
 		break;
 	case RELIC_EXPR_CALL:
+		call = &expr->u.call;
+		for (i = 0; i < call->argc; i++) {
+			held = append_steps(planner, call->args[i], postfix) +
+			    i;
+			if (held > need)
+				need = held;
+		}
 		break;
 	}
 
@@ -664,32 +724,42 @@ append_steps(const relic_planner_t *planner, const relic_expr_t *expr,
 	case RELIC_EXPR_CONSTANT:
 		step->kind = RELIC_STEP_CONSTANT;
 		step->u.constant = expr->u.constant;
-		return;
+		break;
 	case RELIC_EXPR_VARIABLE:
-		step->kind = (planner->numbers & slot_bit(expr->u.slot)) != 0 ?
-		    RELIC_STEP_NUMBER_SLOT : RELIC_STEP_DOMAIN_SLOT;
+		step->kind = slot_step(slot_kind(planner, expr->u.slot));
 		step->u.slot = expr->u.slot;
-		return;
+		break;
 	case RELIC_EXPR_NEGATE:
 		step->kind = RELIC_STEP_NEGATE;
-		return;
+		break;
 	case RELIC_EXPR_BINARY:
-	case RELIC_EXPR_CALL:
 		step->kind = RELIC_STEP_BINARY;
 		step->u.op = expr->u.binary.op;
-		return;
+		break;
+	case RELIC_EXPR_CALL:
+		step->kind = RELIC_STEP_CALL;
+		step->u.fn = expr->u.call.fn;
+		break;
 	}
+
+	return (need);
 }
 
 /*
  * Build the postfix program of an expression in the planner's arena: a step
- * per node of the tree, and a stack one cell deeper than the tree is tall.
- * Returns -1 when the arena refused, which the caller's boundary reports.
+ * per node of the tree, and the stack its run needs.  Returns -1 when the
+ * arena refused, which the caller's boundary reports, or with an internal
+ * error reported when the tree needs more stack than any tree the parser
+ * admits, which the executor's fixed stack could not hold, or with an error
+ * reported when the tree calls match, which the executor cannot run.
  */
 static int
 compile_postfix(relic_planner_t *planner, const relic_expr_t *expr,
-    relic_postfix_t *postfix)
+    const relic_location_t *where, relic_postfix_t *postfix)
 {
+	unsigned int need;
+	size_t i;
+
 	bzero(postfix, sizeof(*postfix));
 
 	postfix->steps = relic_arena_allocarray(planner->arena, expr->nodes,
@@ -697,78 +767,101 @@ compile_postfix(relic_planner_t *planner, const relic_expr_t *expr,
 	if (postfix->steps == NULL)
 		return (-1);
 
-	append_steps(planner, expr, postfix);
+	need = append_steps(planner, expr, postfix);
 	assert(postfix->step_count == expr->nodes);
-	postfix->depth = (uint8_t)(expr->height + 1);
+	if (need > RELIC_POSTFIX_DEPTH_MAX) {
+		relic_diagf(planner->ctx, RELIC_ERROR, where,
+		    "internal error: an expression needs more stack than any "
+		    "the parser admits");
+		return (-1);
+	}
+	postfix->depth = (uint8_t)need;
+
+	for (i = 0; i < postfix->step_count; i++) {
+		if (postfix->steps[i].kind == RELIC_STEP_CALL &&
+		    postfix->steps[i].u.fn == RELIC_FN_MATCH) {
+			relic_diagf(planner->ctx, RELIC_ERROR, where,
+			    "match is not implemented");
+			return (-1);
+		}
+	}
 
 	return (0);
 }
 
 /*
- * Whether an expression's value is a computed integer rather than a domain
- * identifier: whether it holds an operator, or is a number slot alone.
+ * The kind of value an expression leaves: an identifier for a constant or a
+ * domain slot, a computed integer for an operator, a number slot or a
+ * function whose result is an integer, and a computed string for a text
+ * slot or a function whose result is a string.
  */
-static bool
-expr_is_number(const relic_planner_t *planner, const relic_expr_t *expr)
+static enum relic_slot_kind
+expr_kind(const relic_planner_t *planner, const relic_expr_t *expr)
 {
 	switch (expr->kind) {
 	case RELIC_EXPR_CONSTANT:
-		return (false);
+		return (RELIC_SLOT_DOMAIN);
 	case RELIC_EXPR_VARIABLE:
-		return ((planner->numbers & slot_bit(expr->u.slot)) != 0);
+		return (slot_kind(planner, expr->u.slot));
 	case RELIC_EXPR_NEGATE:
 	case RELIC_EXPR_BINARY:
+		return (RELIC_SLOT_NUMBER);
 	case RELIC_EXPR_CALL:
 		break;
 	}
 
-	return (true);
+	if (relic_function_info(expr->u.call.fn)->result == RELIC_KIND_STRING)
+		return (RELIC_SLOT_TEXT);
+
+	return (RELIC_SLOT_NUMBER);
 }
 
 /*
- * Whether an expression holds a call.
+ * Record that `slot` is bound, as a slot of `kind`.
  */
-static bool
-expr_calls(const relic_expr_t *expr)
+static void
+bind_slot(relic_planner_t *planner, uint16_t slot, enum relic_slot_kind kind)
 {
-	switch (expr->kind) {
-	case RELIC_EXPR_CONSTANT:
-	case RELIC_EXPR_VARIABLE:
-		return (false);
-	case RELIC_EXPR_NEGATE:
-		return (expr_calls(expr->u.operand));
-	case RELIC_EXPR_BINARY:
-		return (expr_calls(expr->u.binary.left) ||
-		    expr_calls(expr->u.binary.right));
-	case RELIC_EXPR_CALL:
+	planner->bound |= slot_bit(slot);
+
+	switch (kind) {
+	case RELIC_SLOT_NUMBER:
+		planner->numbers |= slot_bit(slot);
+		break;
+	case RELIC_SLOT_TEXT:
+		planner->texts |= slot_bit(slot);
+		break;
+	case RELIC_SLOT_DOMAIN:
 		break;
 	}
-
-	return (true);
 }
 
 /*
  * Place an equality that assigns as an ASSIGN binding `slot` to `value`,
- * the equality's other side, whose slots are bound.  The slot is a number
- * slot exactly when the value is a computed integer.
+ * the equality's other side, whose slots are bound.  The slot is of the
+ * kind of value the expression leaves.  An ASSIGN that binds a text slot
+ * keeps its string on the text stack, so the texts of every operation
+ * after it begin above it.
  */
 static int
 place_assign(relic_planner_t *planner, const relic_literal_t *literal,
     uint16_t slot, const relic_expr_t *value)
 {
-	relic_op_t *op;
+	relic_op_assign_t *assign;
 
-	op = append_op(planner, RELIC_OP_ASSIGN);
-	op->u.assign.expr = value;
-	op->u.assign.where = literal->where;
-	op->u.assign.slot = slot;
-	op->u.assign.number = expr_is_number(planner, value);
-	if (compile_postfix(planner, value, &op->u.assign.value) != 0)
+	assign = &append_op(planner, RELIC_OP_ASSIGN)->u.assign;
+	assign->expr = value;
+	assign->where = literal->where;
+	assign->slot = slot;
+	assign->kind = expr_kind(planner, value);
+	assign->text_base = planner->text_base;
+	if (compile_postfix(planner, value, &literal->where,
+	    &assign->value) != 0)
 		return (-1);
 
-	planner->bound |= slot_bit(slot);
-	if (op->u.assign.number)
-		planner->numbers |= slot_bit(slot);
+	bind_slot(planner, slot, assign->kind);
+	if (assign->kind == RELIC_SLOT_TEXT)
+		planner->text_base = planner->op_count;
 
 	return (0);
 }
@@ -783,29 +876,24 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	const relic_comparison_t *comparison;
 	const relic_expr_t *value;
-	relic_op_t *op;
+	relic_op_filter_t *filter;
 	uint16_t slot;
 
 	comparison = &literal->u.comparison;
-	if (expr_calls(comparison->left) || expr_calls(comparison->right)) {
-		relic_diagf(planner->ctx, RELIC_ERROR, &literal->where,
-		    "internal error: string functions cannot be evaluated");
-		return (-1);
-	}
-
 	if (relic_comparison_assigns(comparison, planner->bound, &slot, &value))
 		return (place_assign(planner, literal, slot, value));
 
-	op = append_op(planner, RELIC_OP_FILTER);
-	op->u.filter.comparison = comparison;
-	op->u.filter.compare = comparison->op;
-	op->u.filter.where = literal->where;
-	if (compile_postfix(planner, comparison->left,
-	    &op->u.filter.left) != 0)
+	filter = &append_op(planner, RELIC_OP_FILTER)->u.filter;
+	filter->comparison = comparison;
+	filter->compare = comparison->op;
+	filter->where = literal->where;
+	filter->text_base = planner->text_base;
+	if (compile_postfix(planner, comparison->left, &literal->where,
+	    &filter->left) != 0)
 		return (-1);
 
-	return (compile_postfix(planner, comparison->right,
-	    &op->u.filter.right));
+	return (compile_postfix(planner, comparison->right, &literal->where,
+	    &filter->right));
 }
 
 /*
@@ -847,7 +935,6 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 	relic_relation_t *relation;
 	relic_op_t *op;
 	uint32_t index_position;
-	uint64_t result_bit;
 
 	aggregate = &literal->u.aggregate;
 	relation = relic_relation_read(planner->ctx, aggregate->group);
@@ -875,18 +962,15 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 		fold->index_position = index_position;
 	}
 
-	result_bit = slot_bit(fold->slot);
-	fold->binds = (planner->bound & result_bit) == 0;
+	fold->binds = (planner->bound & slot_bit(fold->slot)) == 0;
 	if (!fold->binds) {
-		fold->number = (planner->numbers & result_bit) != 0;
+		fold->kind = slot_kind(planner, fold->slot);
 		return (0);
 	}
 
-	fold->number = fold->fn == RELIC_AGG_COUNT ||
-	    fold->fn == RELIC_AGG_SUM;
-	planner->bound |= result_bit;
-	if (fold->number)
-		planner->numbers |= result_bit;
+	fold->kind = fold->fn == RELIC_AGG_COUNT || fold->fn == RELIC_AGG_SUM ?
+	    RELIC_SLOT_NUMBER : RELIC_SLOT_DOMAIN;
+	bind_slot(planner, fold->slot, fold->kind);
 
 	return (0);
 }
@@ -1484,6 +1568,8 @@ emit_body(relic_planner_t *planner)
 
 	planner->bound = 0;
 	planner->numbers = 0;
+	planner->texts = 0;
+	planner->text_base = 0;
 
 	for (i = 0; i < planner->order_count; i++) {
 		index = planner->order[i];
@@ -1647,9 +1733,19 @@ place_emit(relic_planner_t *planner)
 	for (i = 0; i < rule->head_arity; i++) {
 		term = &op->u.atom.terms[i];
 		read_term(&rule->head_args[i], term);
-		if (term->action == RELIC_PLAN_BOUND &&
-		    (planner->numbers & slot_bit(term->u.slot)) != 0)
+		if (term->action != RELIC_PLAN_BOUND)
+			continue;
+
+		switch (slot_kind(planner, term->u.slot)) {
+		case RELIC_SLOT_NUMBER:
 			term->action = RELIC_PLAN_NUMBER;
+			break;
+		case RELIC_SLOT_TEXT:
+			term->action = RELIC_PLAN_TEXT;
+			break;
+		case RELIC_SLOT_DOMAIN:
+			break;
+		}
 	}
 
 	return (0);
@@ -1974,6 +2070,7 @@ atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp, uint64_t *readsp)
 			break;
 		case RELIC_PLAN_BOUND:
 		case RELIC_PLAN_NUMBER:
+		case RELIC_PLAN_TEXT:
 			*readsp |= slot_bit(term->u.slot);
 			break;
 		case RELIC_PLAN_BIND:
@@ -2053,8 +2150,8 @@ relic_plan_derives_distinct(const relic_plan_t *plan)
 }
 
 /*
- * Whether a postfix program applies an operator, rather than reading one
- * term.
+ * Whether a postfix program applies an operator or a function, rather than
+ * reading one term.
  */
 static bool
 postfix_computes(const relic_postfix_t *postfix)
@@ -2066,10 +2163,60 @@ postfix_computes(const relic_postfix_t *postfix)
 		case RELIC_STEP_CONSTANT:
 		case RELIC_STEP_DOMAIN_SLOT:
 		case RELIC_STEP_NUMBER_SLOT:
+		case RELIC_STEP_TEXT_SLOT:
 			break;
 		case RELIC_STEP_NEGATE:
 		case RELIC_STEP_BINARY:
+		case RELIC_STEP_CALL:
 			return (true);
+		}
+	}
+
+	return (false);
+}
+
+/*
+ * Whether a postfix program calls a function.
+ */
+static bool
+postfix_calls(const relic_postfix_t *postfix)
+{
+	size_t i;
+
+	for (i = 0; i < postfix->step_count; i++) {
+		if (postfix->steps[i].kind == RELIC_STEP_CALL)
+			return (true);
+	}
+
+	return (false);
+}
+
+bool
+relic_plan_calls(const relic_plan_t *plan)
+{
+	const relic_op_t *op;
+	size_t i;
+
+	for (i = 0; i < plan->op_count; i++) {
+		op = &plan->ops[i];
+
+		switch (op->kind) {
+		case RELIC_OP_FILTER:
+			if (postfix_calls(&op->u.filter.left) ||
+			    postfix_calls(&op->u.filter.right))
+				return (true);
+			break;
+		case RELIC_OP_ASSIGN:
+			if (postfix_calls(&op->u.assign.value))
+				return (true);
+			break;
+		case RELIC_OP_SCAN:
+		case RELIC_OP_LOOKUP:
+		case RELIC_OP_MEMBER:
+		case RELIC_OP_ANTI_MEMBER:
+		case RELIC_OP_AGGREGATE:
+		case RELIC_OP_EMIT:
+			break;
 		}
 	}
 

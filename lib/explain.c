@@ -635,6 +635,7 @@ put_term(const relic_t *ctx, relic_explain_line_t *line,
 		return;
 	case RELIC_PLAN_BOUND:
 	case RELIC_PLAN_NUMBER:
+	case RELIC_PLAN_TEXT:
 	case RELIC_PLAN_BIND:
 		put_variable(ctx, line, rule, term->u.slot);
 		return;

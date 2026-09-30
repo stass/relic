@@ -1106,13 +1106,13 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation, uint64_t hash)
 }
 
 int
-relic_relation_admit_integers(relic_t *ctx, const relic_relation_t *relation,
+relic_relation_admit_values(relic_t *ctx, const relic_relation_t *relation,
     size_t projected_bytes)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
-	if (!relic_account_exceeds(&ctx->account, ctx->account.value_bytes,
-	    projected_bytes))
+	if (!relic_account_exceeds(&ctx->account,
+	    relic_value_storage_bytes(ctx), projected_bytes))
 		return (0);
 
 	report_limit(ctx, "memory", ctx->account.limit, "deriving",

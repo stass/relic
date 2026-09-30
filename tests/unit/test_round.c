@@ -412,8 +412,8 @@ integers_agree(const relic_t *serial, const relic_t *deferred)
 	left = &serial->values;
 	right = &deferred->values;
 	if (left->integer_count != right->integer_count ||
-	    relic_value_integer_bytes(serial) !=
-	    relic_value_integer_bytes(deferred))
+	    relic_value_storage_bytes(serial) !=
+	    relic_value_storage_bytes(deferred))
 		return (false);
 
 	return (left->integer_count == 0 || bcmp(left->integers,

@@ -306,7 +306,7 @@ a_refusal_by_the_limit_is_reported_as_the_limit(void)
 	relic_t *ctx;
 
 	bzero(&config, sizeof(config));
-	config.max_memory = 4096;
+	config.max_memory = 65536;
 	ctx = relic_create_config(&config);
 	check(ctx != NULL, SCENARIO_LIMIT, "a context should be created");
 	if (ctx == NULL)
@@ -320,7 +320,7 @@ a_refusal_by_the_limit_is_reported_as_the_limit(void)
 	ctx->account.refused = true;
 	relic_diag_no_memory(ctx);
 	checkf(last_error_is(ctx,
-	    "limit exceeded: memory=4096 while planning path/2"),
+	    "limit exceeded: memory=65536 while planning path/2"),
 	    SCENARIO_LIMIT, "the refusal should name the limit and the "
 	    "activity, not \"%s\"", relic_error(ctx));
 

@@ -88,6 +88,7 @@ typedef struct relic_magic_limit relic_magic_limit_t;
 typedef struct relic_staged_set relic_staged_set_t;
 typedef struct relic_staging relic_staging_t;
 typedef struct relic_materialized relic_materialized_t;
+typedef struct relic_fresh_string relic_fresh_string_t;
 typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
@@ -626,14 +627,63 @@ const char *relic_diag_byte(unsigned char byte, char *buffer, size_t size);
 
 /*
  * lib/symbol.c
+ *
+ * relic_symbol_hash() gives the hash the pool places bytes by, and
+ * relic_symbol_find() the identifier of the entry holding bytes of that
+ * hash, or RELIC_ID_NONE: the lookup half of interning, which writes
+ * nothing.  relic_symbol_pool_bytes() is what the pool occupies -- its
+ * entries, its index and its arena of bytes -- which the memory account
+ * counts as `pool_bytes`.
  */
 const char *relic_symbol_bytes(const relic_t *ctx, uint32_t id,
 	    size_t *lengthp);
 size_t	 relic_symbol_count(const relic_t *ctx);
+uint32_t relic_symbol_find(const relic_t *ctx, const void *bytes,
+	    size_t length, uint32_t hash);
+uint32_t relic_symbol_hash(const relic_t *ctx, const void *bytes,
+	    size_t length);
 int	 relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	    uint32_t *idp);
+size_t	 relic_symbol_pool_bytes(const relic_t *ctx);
 void	 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed);
 void	 relic_symtab_reset(relic_symtab_t *table);
+
+/*
+ * Interning, all at once, byte strings the pool does not hold, distinct
+ * from one another, each of which is to receive the identifier after the
+ * last: `count` of them, in the order they are to be numbered.  This is
+ * relic_symbol_intern() split into the steps a caller that must ask the
+ * memory limit first, and must not fail once it starts to write, needs.
+ *
+ * relic_symbol_pool_bytes_after() is what the pool would occupy once it
+ * held them, having grown as interning them one at a time would grow it,
+ * or SIZE_MAX when a size cannot count it.  It reads the pool and writes
+ * nothing.  relic_symbol_has_room() says whether identifiers remain for
+ * them.  relic_symbol_reserve() makes room for them all -- the index, the
+ * entries, and a copy of each one's bytes in the arena -- and returns -1,
+ * having reported nothing, when there is not the room or the allocator
+ * refuses; the index and the entries it grew stay grown and counted, no
+ * copy stays in the arena, and the pool's contents are as they were.
+ * relic_symbol_append() then numbers them, and cannot fail.
+ *
+ * A fresh string's `bytes` must stay readable until it is reserved, and
+ * `copy` is where the reservation put it, or NULL once a reservation has
+ * failed.
+ */
+struct relic_fresh_string {
+	const char	*bytes;
+	char		*copy;
+	size_t		 length;
+	uint32_t	 hash;
+};
+
+size_t	 relic_symbol_pool_bytes_after(const relic_t *ctx,
+	    const relic_fresh_string_t *fresh, size_t count);
+bool	 relic_symbol_has_room(const relic_t *ctx, size_t count);
+int	 relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh,
+	    size_t count);
+void	 relic_symbol_append(relic_t *ctx, const relic_fresh_string_t *fresh,
+	    size_t count);
 
 /*
  * lib/value.c
@@ -642,7 +692,9 @@ void	 relic_symtab_reset(relic_symtab_t *table);
  * and returns true, or returns false for an identifier the context never
  * assigned.  relic_value_total_order() and relic_value_order(), which
  * frozen.h declares, treat such an identifier as unordered and unequal
- * rather than reading past a table.
+ * rather than reading past a table.  relic_value_storage_bytes() is what
+ * the value table and the pool occupy together, which the memory account
+ * counts as `value_bytes` and `pool_bytes`.
  */
 size_t	 relic_value_count(const relic_t *ctx);
 size_t	 relic_value_count_of(const relic_t *ctx, enum relic_type type);
@@ -656,59 +708,72 @@ int	 relic_value_intern_bytes(relic_t *ctx, enum relic_type type,
 	    const void *bytes, size_t length, relic_dom_t *domp);
 int	 relic_value_intern_integer(relic_t *ctx, int64_t value,
 	    relic_dom_t *domp);
-size_t	 relic_value_integer_bytes(const relic_t *ctx);
+size_t	 relic_value_storage_bytes(const relic_t *ctx);
 void	 relic_valtab_init(relic_valtab_t *table, uint64_t hash_seed);
 void	 relic_valtab_reset(relic_valtab_t *table);
 
 /*
- * Interning the integers a batch of derived tuples holds pending, in three
- * steps that separate what reads the table from what writes it.
+ * Interning the values a batch of derived tuples holds pending, in three
+ * steps that separate what reads the value table and the pool from what
+ * writes them.
  *
- * An integer the executor computed and the table did not hold has no
- * identifier yet, and its column holds a pending marker (lib/exec.h).  The
- * table assigns identifiers in order, so the identifier a new integer will
- * receive is known before it is assigned: the table's count plus the
- * integer's position among the new integers of the batch, in order of first
+ * An integer or a string the executor computed and the context had not
+ * assigned has no identifier yet, and its column holds a pending marker
+ * (lib/exec.h), which names an entry of the batch's pending values; a
+ * string's bytes are in the batch's pending bytes.  The integer table and
+ * the pool assign identifiers in order, so the identifier a new value will
+ * receive is known before it is assigned: the count plus the value's
+ * position among the new values of its kind in the batch, in order of first
  * occurrence.
  *
- * relic_pending_measure() walks the batch's `count` pending integers and
- * fills `map` with each one's identifier, the one the table holds it under
- * or the one it will be given, and returns the bytes the integer table will
- * occupy once the new ones are appended: the capacity appending them one at
- * a time would reach, so that the table holds the same bytes however its
- * integers arrived.  It writes nothing but the map.
+ * relic_pending_measure() walks the batch's `count` pending values, the
+ * strings' bytes in `bytes`, and fills `map` with each one's identifier,
+ * the one the context has assigned it or the one it will be given, and
+ * returns the bytes the value table and the pool together will occupy once
+ * the new values are interned: the capacity interning them one at a time
+ * would reach, so that each holds the same bytes however its values
+ * arrived, or SIZE_MAX when a size cannot count it.  A string whose bytes
+ * the pool holds with no string value assigned to them -- a name, or a
+ * symbol's spelling -- is promised the pool's identifier for them, and the
+ * bytes must stay where they are until the commit.  It writes nothing but
+ * the map.
  *
  * relic_pending_rewrite() replaces every pending marker in `tuples` tuples
  * of `arity` columns with the identifier the map gives it.  It writes
  * nothing but the tuples.
  *
- * relic_pending_commit() appends the map's new integers to the table, each
- * under exactly the identifier the map promised.  It returns 0, or -1 with a
- * diagnostic reported when the table could not grow, for memory or because
- * it holds as many integers as an identifier can name; the table's contents
- * are then as they were.  It is two halves, for a caller that must make
- * every fallible step before it changes anything and must report nothing
- * itself: relic_pending_reserve() grows the table to hold the new integers,
- * returning -1, with no diagnostic and the contents unchanged, when it
- * could not, and relic_pending_append() then appends them, and cannot
- * fail.  Nothing may intern an integer between the two.
+ * relic_pending_commit() interns the map's new values, each under exactly
+ * the identifier the map promised, and makes every string it promised a
+ * string value.  It returns 0, or -1 with a diagnostic reported when the
+ * table or the pool could not grow, for memory or because it holds as many
+ * values as an identifier can name; their contents are then as they were.
+ * It is two halves, for a caller that must make every fallible step before
+ * it changes anything and must report nothing itself:
+ * relic_pending_reserve() grows the table and the pool to hold the new
+ * values, returning -1, with no diagnostic and the contents unchanged, when
+ * it could not, and relic_pending_append() then interns them, and cannot
+ * fail.  Nothing may intern a value between the two.
  *
- * A map is given room for `room` pending integers by
+ * A map is given room for `room` pending values by
  * relic_pending_map_init(), from `arena`, and returns -1 when the arena
  * refused, which the caller's boundary reports.  relic_pending_map_open()
  * gives it that room from the allocator instead, for a caller that charges
  * the map itself: relic_pending_map_bytes() is what the map then holds,
  * SIZE_MAX when a size cannot count it, and relic_pending_map_close()
- * frees it.  An opened map has room for at
- * least one pending integer and at most RELIC_DOM_INDEX_MASK.
+ * frees it.  An opened map has room for at least one pending value and at
+ * most RELIC_DOM_INDEX_MASK.
  */
 struct relic_pending_map {
-	relic_dom_t	*ids;		/* per pending integer, batch order */
-	int64_t		*fresh;		/* new integers, as first met */
-	uint32_t	*seen;		/* hash of fresh, holding index + 1 */
-	size_t		 room;
-	size_t		 count;
-	size_t		 fresh_count;
+	relic_dom_t		*ids;		/* per pending value, batch order */
+	int64_t			*fresh;		/* new integers, as first met */
+	uint32_t		*seen;		/* hash of fresh, holding index + 1 */
+	relic_fresh_string_t	*strings;	/* new strings, as first met */
+	uint32_t		*strings_seen;	/* hash of strings, index + 1 */
+	size_t			 room;
+	size_t			 count;
+	size_t			 fresh_count;
+	size_t			 string_count;
+	uint32_t		 highest_string; /* symbol, or RELIC_ID_NONE */
 };
 
 int	 relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
@@ -716,12 +781,13 @@ int	 relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 size_t	 relic_pending_map_bytes(size_t room);
 int	 relic_pending_map_open(relic_pending_map_t *map, size_t room);
 void	 relic_pending_map_close(relic_pending_map_t *map);
-size_t	 relic_pending_measure(const relic_t *ctx, const int64_t *pending,
-	    size_t count, relic_pending_map_t *map);
+size_t	 relic_pending_measure(const relic_t *ctx,
+	    const relic_pending_t *pending, size_t count, const char *bytes,
+	    relic_pending_map_t *map);
 void	 relic_pending_rewrite(const relic_pending_map_t *map,
 	    relic_dom_t *tuples, size_t count, uint16_t arity);
-int	 relic_pending_commit(relic_t *ctx, const relic_pending_map_t *map);
-int	 relic_pending_reserve(relic_t *ctx, const relic_pending_map_t *map);
+int	 relic_pending_commit(relic_t *ctx, relic_pending_map_t *map);
+int	 relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map);
 void	 relic_pending_append(relic_t *ctx, const relic_pending_map_t *map);
 
 /*
@@ -1126,12 +1192,19 @@ uint64_t relic_plan_literal_binds(const relic_t *ctx,
 bool	 relic_plan_derives_distinct(const relic_plan_t *plan);
 
 /*
- * Whether a plan computes an integer: whether some FILTER or ASSIGN runs a
- * program holding an operator, or some AGGREGATE counts or sums.  Such a
- * plan can meet an undefined result on any binding, and can derive an
- * integer the value table does not hold.
+ * Whether a plan computes a value: whether some FILTER or ASSIGN runs a
+ * program holding an operator or a function, or some AGGREGATE counts or
+ * sums.  Such a plan can meet an undefined result on any binding, and can
+ * derive a value the context has not assigned.
  */
 bool	 relic_plan_computes(const relic_plan_t *plan);
+
+/*
+ * Whether a plan calls a function: whether some FILTER or ASSIGN runs a
+ * program holding a call.  Such a plan needs the scratch's text stack, and
+ * can derive a string the context has not assigned.
+ */
+bool	 relic_plan_calls(const relic_plan_t *plan);
 
 /*
  * Whether a plan holds an AGGREGATE.
@@ -1512,10 +1585,11 @@ void	 relic_index_link_append(relic_index_t *index,
  * does the same with each tuple's hash given, as relic_relation_screen()
  * gave it.
  *
- * relic_relation_admit_integers() asks the memory limit whether the integer
- * table may grow from what it holds now to `projected_bytes`, which the
- * integers of a batch derived into `relation` need, and returns 0, or -1
- * having reported the refusal as an insertion into `relation` reports one.
+ * relic_relation_admit_values() asks the memory limit whether the value
+ * table and the pool may grow from what they hold now to `projected_bytes`,
+ * which the values a batch derived into `relation` holds pending need, and
+ * returns 0, or -1 having reported the refusal as an insertion into
+ * `relation` reports one.
  *
  * relic_relation_reserve() makes room in a relation without secondary
  * indexes, as a base store is when a load commits, for a growth: tuples by
@@ -1611,7 +1685,7 @@ int	 relic_relation_insert(relic_t *ctx, relic_relation_t *relation,
 int	 relic_relation_insert_batch(relic_t *ctx, relic_relation_t *relation,
 	    const relic_dom_t *tuples, size_t count, bool *added,
 	    size_t *completedp);
-int	 relic_relation_admit_integers(relic_t *ctx,
+int	 relic_relation_admit_values(relic_t *ctx,
 	    const relic_relation_t *relation, size_t projected_bytes);
 int	 relic_relation_insert_batch_hashed(relic_t *ctx,
 	    relic_relation_t *relation, const relic_dom_t *tuples,

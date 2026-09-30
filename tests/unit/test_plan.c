@@ -58,6 +58,8 @@
 #define	SCENARIO_RANKING	"passes choose the step-by-step greedy order"
 #define	SCENARIO_REFERENCES	"the reference switches change only their choice"
 #define	SCENARIO_TERMS		"a scan's columns bind, match or ignore"
+#define	SCENARIO_STACK		"a program holds the stack its shape needs"
+#define	SCENARIO_TEXTS		"each operation builds its strings above a base"
 
 /* The switches that make the default planner the textual one. */
 #define	TEXTUAL_FLAGS		(RELIC_F_NO_INDEX | RELIC_F_NO_REORDER)
@@ -182,6 +184,11 @@ static void	 the_smaller_estimate_goes_first(void);
 static void	 a_plan_keeping_every_binding_derives_distinct_rows(void);
 static void	 a_fold_goes_where_its_key_is_bound(void);
 static void	 a_fold_reads_its_group_by_its_key(void);
+static void	 a_program_holds_the_stack_its_shape_needs(void);
+static void	 expect_depth(const char *expression, unsigned int depth);
+static void	 nested_expression(char *text, size_t size, const char *open,
+		    const char *inner, unsigned int levels);
+static void	 each_operation_builds_its_strings_above_a_base(void);
 static const relic_op_aggregate_t *fold_planned(fixture_t *fixture,
 		    const char *program, unsigned int flags, size_t op);
 
@@ -571,8 +578,8 @@ an_assignment_binds_a_slot_of_its_kind(void)
 		checkf(op->u.assign.slot == slot_named(&fixture, 0, names[i]),
 		    SCENARIO_ASSIGN, "assignment %zu should bind %s", i,
 		    names[i]);
-		checkf(op->u.assign.number == numbers[i], SCENARIO_ASSIGN,
-		    "%s should be a %s slot", names[i],
+		checkf((op->u.assign.kind == RELIC_SLOT_NUMBER) == numbers[i],
+		    SCENARIO_ASSIGN, "%s should be a %s slot", names[i],
 		    numbers[i] ? "number" : "domain");
 	}
 
@@ -596,7 +603,7 @@ an_assignment_binds_a_slot_of_its_kind(void)
 	}
 	check(fixture.plan.op_count == 3 &&
 	    fixture.plan.ops[1].kind == RELIC_OP_ASSIGN &&
-	    !fixture.plan.ops[1].u.assign.number &&
+	    fixture.plan.ops[1].u.assign.kind == RELIC_SLOT_DOMAIN &&
 	    !relic_plan_computes(&fixture.plan), SCENARIO_ASSIGN,
 	    "a plan that copies a slot binds a domain slot and computes "
 	    "nothing");
@@ -627,7 +634,8 @@ an_equality_of_two_literals_variables_assigns(void)
 	    "the equality assigns Y and q(Y) is a membership test");
 	check(fixture.plan.op_count == 4 &&
 	    fixture.plan.ops[1].u.assign.slot == slot_named(&fixture, 0, "Y") &&
-	    !fixture.plan.ops[1].u.assign.number, SCENARIO_EQUALITY,
+	    fixture.plan.ops[1].u.assign.kind == RELIC_SLOT_DOMAIN,
+	    SCENARIO_EQUALITY,
 	    "Y is a domain slot");
 
 	fixture_release(&fixture);
@@ -2393,7 +2401,7 @@ a_fold_goes_where_its_key_is_bound(void)
 	if (fold != NULL) {
 		check(kinds_are(&fixture.plan, later, 3), SCENARIO_AGGREGATE,
 		    "a fold written first follows the scan binding its key");
-		check(fold->binds && fold->number && fold->fn ==
+		check(fold->binds && fold->kind == RELIC_SLOT_NUMBER && fold->fn ==
 		    RELIC_AGG_COUNT && fold->slot ==
 		    slot_named(&fixture, 1, "N"), SCENARIO_AGGREGATE,
 		    "a count binds its result as a number");
@@ -2415,7 +2423,7 @@ a_fold_goes_where_its_key_is_bound(void)
 	fold = fold_planned(&fixture, "e(a, 1).\n"
 	    "r(M) :- M = min(V) { e(K, V) }.\n", TEXTUAL_FLAGS, 0);
 	if (fold != NULL)
-		check(fold->binds && !fold->number && fold->fn ==
+		check(fold->binds && fold->kind == RELIC_SLOT_DOMAIN && fold->fn ==
 		    RELIC_AGG_MIN && fold->column == 1,
 		    SCENARIO_AGGREGATE, "a min binds a domain slot from the "
 		    "column of its variable");
@@ -2424,7 +2432,7 @@ a_fold_goes_where_its_key_is_bound(void)
 	fold = fold_planned(&fixture, "e(a, 1).\n"
 	    "r(S) :- S = sum(V) { e(K, V) }.\n", TEXTUAL_FLAGS, 0);
 	if (fold != NULL)
-		check(fold->binds && fold->number && fold->fn ==
+		check(fold->binds && fold->kind == RELIC_SLOT_NUMBER && fold->fn ==
 		    RELIC_AGG_SUM, SCENARIO_AGGREGATE,
 		    "a sum binds a number slot");
 	fixture_release(&fixture);
@@ -2478,6 +2486,150 @@ a_fold_reads_its_group_by_its_key(void)
 	fixture_release(&fixture);
 }
 
+/*
+ * The stack an assignment's program needs follows the recurrence over its
+ * tree: a leaf one cell, an operator the greater of its left operand's need
+ * and one more than its right's, and a call the greatest of each argument's
+ * need plus the cells of the arguments before it.  A call nested in its own
+ * third argument at the parser's height bound needs the most any tree the
+ * parser admits can, 63 cells, and operators nested to the right around
+ * a call need one cell per operator and one for the call.
+ */
+static void
+a_program_holds_the_stack_its_shape_needs(void)
+{
+	static const struct {
+		const char	*expression;
+		unsigned int	 depth;
+	} cases[] = {
+		{ "S", 1 },
+		{ "length(S)", 1 },
+		{ "cat(S, S)", 2 },
+		{ "substr(S, 1, 2)", 3 },
+		{ "cat(cat(S, S), S)", 2 },
+		{ "cat(S, cat(S, S))", 3 },
+		{ "1 + length(S)", 2 },
+		{ "length(S) + 1", 2 },
+		{ "substr(S, 0, index(S, cat(S, S)))", 5 },
+		{ "str(substr(cat(S, S), 1))", 2 }
+	};
+	char expression[512];
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+		expect_depth(cases[i].expression, cases[i].depth);
+
+	nested_expression(expression, sizeof(expression), "substr(S, 0, ",
+	    "S", RELIC_MAX_EXPRESSION_DEPTH - 1);
+	expect_depth(expression, RELIC_POSTFIX_DEPTH_MAX);
+
+	nested_expression(expression, sizeof(expression), "1 + (",
+	    "length(S)", RELIC_MAX_EXPRESSION_DEPTH - 2);
+	expect_depth(expression, RELIC_MAX_EXPRESSION_DEPTH - 1);
+}
+
+/*
+ * Write `levels` copies of `open`, then `inner`, then as many `)`.
+ */
+static void
+nested_expression(char *text, size_t size, const char *open,
+    const char *inner, unsigned int levels)
+{
+	size_t used;
+	unsigned int i;
+
+	used = 0;
+	for (i = 0; i < levels; i++)
+		used += (size_t)snprintf(text + used, size - used, "%s", open);
+	used += (size_t)snprintf(text + used, size - used, "%s", inner);
+	for (i = 0; i < levels; i++)
+		used += (size_t)snprintf(text + used, size - used, ")");
+}
+
+/*
+ * Plan `Y = expression` over a scanned S, and check that its program needs
+ * `depth` cells.
+ */
+static void
+expect_depth(const char *expression, unsigned int depth)
+{
+	char program[640];
+	fixture_t fixture;
+	unsigned int held;
+
+	snprintf(program, sizeof(program),
+	    "s(\"ab\").\nr(Y) :- s(S), Y = %s.\n", expression);
+	if (!fixture_plan(&fixture, program, 0) ||
+	    fixture.plan.op_count != 3 ||
+	    fixture.plan.ops[1].kind != RELIC_OP_ASSIGN) {
+		checkf(false, SCENARIO_STACK, "Y = %.40s... should plan to a "
+		    "scan, an assignment and an EMIT", expression);
+		fixture_release(&fixture);
+		return;
+	}
+
+	held = fixture.plan.ops[1].u.assign.value.depth;
+	checkf(held == depth, SCENARIO_STACK, "Y = %.40s... should need %u "
+	    "cells, not %u", expression, depth, held);
+	fixture_release(&fixture);
+}
+
+/*
+ * A text slot is bound by an assignment of a string-valued call, and each
+ * operation after it builds its strings above the last text assignment
+ * placed before it: a filter or an assignment records that assignment's
+ * position plus one as its base, or zero when there is none.  The EMIT
+ * writes a text slot's string through its own action.
+ */
+static void
+each_operation_builds_its_strings_above_a_base(void)
+{
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_FILTER, RELIC_OP_ASSIGN, RELIC_OP_FILTER,
+		RELIC_OP_ASSIGN, RELIC_OP_ASSIGN, RELIC_OP_FILTER, RELIC_OP_EMIT
+	};
+	static const char *const program = "s(\"ab\").\n"
+	    "r(T, N) :- s(S), length(S) > 0, T = cat(S, S), length(T) > 1, "
+	    "N = length(T), U = cat(T, S), index(U, T) = 0.\n";
+	const relic_plan_t *plan;
+	fixture_t fixture;
+
+	if (!fixture_plan(&fixture, program, 0)) {
+		check(false, SCENARIO_TEXTS, "the rule is planned");
+		fixture_release(&fixture);
+		return;
+	}
+
+	plan = &fixture.plan;
+	if (!kinds_are(plan, kinds, sizeof(kinds) / sizeof(kinds[0]))) {
+		check(false, SCENARIO_TEXTS, "the operations are placed in "
+		    "the order written");
+		fixture_release(&fixture);
+		return;
+	}
+
+	check(plan->ops[1].u.filter.text_base == 0, SCENARIO_TEXTS,
+	    "a filter before any text assignment builds from the bottom");
+	check(plan->ops[2].u.assign.kind == RELIC_SLOT_TEXT &&
+	    plan->ops[2].u.assign.text_base == 0, SCENARIO_TEXTS,
+	    "the first text assignment binds a text slot from the bottom");
+	check(plan->ops[3].u.filter.text_base == 3, SCENARIO_TEXTS,
+	    "a filter after it builds above its string");
+	check(plan->ops[4].u.assign.kind == RELIC_SLOT_NUMBER &&
+	    plan->ops[4].u.assign.text_base == 3, SCENARIO_TEXTS,
+	    "a number assignment after it builds above its string");
+	check(plan->ops[5].u.assign.kind == RELIC_SLOT_TEXT &&
+	    plan->ops[5].u.assign.text_base == 3, SCENARIO_TEXTS,
+	    "a second text assignment builds above the first's string");
+	check(plan->ops[6].u.filter.text_base == 6, SCENARIO_TEXTS,
+	    "a filter after both builds above the second's string");
+	check(plan->ops[7].u.atom.terms[0].action == RELIC_PLAN_TEXT &&
+	    plan->ops[7].u.atom.terms[1].action == RELIC_PLAN_NUMBER,
+	    SCENARIO_TEXTS, "the EMIT writes the text slot as a string");
+
+	fixture_release(&fixture);
+}
+
 int
 main(void)
 {
@@ -2504,6 +2656,8 @@ main(void)
 	a_plan_keeping_every_binding_derives_distinct_rows();
 	a_fold_goes_where_its_key_is_bound();
 	a_fold_reads_its_group_by_its_key();
+	a_program_holds_the_stack_its_shape_needs();
+	each_operation_builds_its_strings_above_a_base();
 
 	return (check_summary("test_plan"));
 }
