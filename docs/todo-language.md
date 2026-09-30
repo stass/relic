@@ -22,11 +22,14 @@ Concatenation, length, substring, prefix and suffix tests, and a regular
 expression match. Souffle, LogiQL, Nemo and CodeQL have them; relic's
 strings are opaque bytes that can only be compared. Text processing is an
 intended use, and the first program over file names or log lines needs
-`contains` or a prefix test. Concatenation makes new values, so it has the
-termination and interning questions arithmetic answered and would reuse the
-same pending-value machinery; the tests and matches create nothing and are
-plain filters. A regular expression engine is the one item that would need
-vendoring or a limit on the dialect, per the dependency policy.
+`contains` or a prefix test. Specified in `specs/design-strings.md`: six
+functions, `length`, `cat`, `substr`, `index`, `match` and `str`, as calls
+inside expressions in `awk`'s manner, every test a comparison over a
+position so that no name is reserved and no second kind of literal exists;
+concatenation rides on the pending-value machinery arithmetic built, with
+the symbol pool charged to the memory limit; and the regular expression
+engine is relic's own, a limited dialect decided by Thompson's simulation
+rather than a vendored engine or the platform's `<regex.h>`.
 
 **Provenance.** [Medium, component: `lib/eval.c`, `cmd/relic/`] Why was this
 tuple derived. Souffle's `-t explain`, Nemo's tracing and LogiQL's

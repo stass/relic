@@ -1512,3 +1512,30 @@ three orders and checks the states near its 2^95 bound one addition at a
 time against the compiler's 128-bit integers, rather than 2^31 addends of
 each extreme, which takes minutes under a sanitizer. Specified in
 `specs/design-aggregates.md`.
+
+### D-28 String operations are functions in expressions, and relic matches its own patterns
+
+`length(S)`, `cat(A, B)`, `substr(S, I)`, `substr(S, I, N)`, `index(S, T)`,
+`match(S, R)` and `str(V)` are calls that stand where a term stands in an
+expression, and so only in a comparison; a body literal beginning with
+`name(` is an atom or the first operand of a comparison by the token after
+its `)`, so no name is reserved. Every function is over bytes and total
+over operands of its types: positions count from zero, `substr` keeps the
+positions that exist, and `index` and `match` return -1 for none, so a
+test and its negation are both comparisons and no builtin literal exists.
+An operand of the wrong type makes the comparison false, as a symbol
+operand of `+` does; a result longer than a string value can hold, and a
+pattern that is not a regular expression, fail the evaluation as an
+undefined arithmetic result does, for D-26's reason. `match` is decided by
+a matcher in `lib/regex.c` of relic's own, over a dialect of POSIX extended
+expressions without counted repetition, classes, backreferences or
+captures, compiled to at most three instructions per pattern byte and run
+as Thompson's simulation, so that a pattern means the same on every
+platform and no pattern costs more than the string times the pattern;
+`<regex.h>` was rejected for depending on the platform's engine and its
+locale, a vendored engine for its audit size. A computed string lives in
+a text slot of the frame, is looked up read-only, and is interned only
+when a tuple holding it is stored, on D-26's measure, rewrite and commit
+with the pool's identifier predicted from its count; the symbol pool is
+charged to the memory limit whole. `str` is the one conversion because it
+is the one that cannot fail. Specified in `specs/design-strings.md`.

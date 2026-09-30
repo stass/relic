@@ -1210,6 +1210,12 @@ measuring before deciding, and what stays out on purpose with the reason.
 Each item names the engines that have it and what a relic program does
 without it; the verdicts are provisional until a design exists.
 
+* string operations, specified in `specs/design-strings.md`: `length`,
+  `cat`, `substr`, `index`, `match` and `str` as calls inside expressions,
+  tests as comparisons over the positions they return, a regular expression
+  matcher of relic's own in `lib/regex.c`, computed strings on the
+  pending-value mechanism with the symbol pool charged to the memory
+  limit; five steps, none started
 * relation export, in `docs/todo-language.md`
 * incremental insertion maintenance
 * DRed-style deletion maintenance

@@ -233,6 +233,13 @@ Integers are decimal signed integers.
 
 There are no floats, nulls, blobs, lists, or arbitrary structures in v1.
 
+Operations over strings are outside v1. The functions `length`, `cat`,
+`substr`, `index`, `match` and `str`, each a call inside an expression and
+so inside a comparison, over bytes and positions counted from zero, with
+relic's own regular expression matcher behind `match`, are specified in
+`specs/design-strings.md`; that design extends this section and sections
+10.1 and 13 rather than changing what any v1 program means.
+
 ---
 
 # 7. Variables
@@ -2644,6 +2651,7 @@ Potential additions, in approximate priority order:
 ```text
 arithmetic expressions
 aggregates
+string operations
 relation export
 incremental insertion maintenance
 DRed-style deletion maintenance
@@ -2670,6 +2678,12 @@ Aggregates -- `count`, `sum`, `min` and `max` over the rows a body denotes,
 the body materialized as a generated rule in a lower stratum, and the
 literal that folds its relation -- are specified in
 `specs/design-aggregates.md`.
+
+String operations -- six functions over bytes as calls inside expressions,
+tests as comparisons over the positions they return, a regular expression
+matcher of relic's own, and what a string evaluation computes does to the
+symbol pool and to a parallel round -- are specified in
+`specs/design-strings.md`.
 
 Parallel SCC evaluation -- the worker pool a context owns, the round that
 reads a frozen store and merges its results in the serial order, and the
