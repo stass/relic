@@ -97,13 +97,6 @@
 #define	DEFERRED_THREADS	4
 #define	MANY_THREADS		16
 
-/* Whether a context's pool can start threads of its own in this build. */
-#ifdef RELIC_THREADS
-#define	THREADS_AVAILABLE	true
-#else
-#define	THREADS_AVAILABLE	false
-#endif
-
 typedef struct diagnostics diagnostics_t;
 typedef struct text text_t;
 
@@ -636,7 +629,7 @@ shared_as_expected(relic_t *deferred, size_t threads)
 	relic_stats_t stats;
 
 	relic_stats(deferred, &stats);
-	if (THREADS_AVAILABLE && threads > 1)
+	if (relic_pool_size(threads) > 1)
 		return (stats.parallel_rounds == merged_rounds(deferred));
 
 	return (stats.parallel_rounds == 0 && thread_tasks(deferred) == 0);
@@ -825,7 +818,7 @@ a_deferred_round_inserts_in_serial_order(size_t threads)
 		relic_destroy(deferred);
 	}
 
-	checkf(!THREADS_AVAILABLE || threads < 2 || threaded > 0,
+	checkf(relic_pool_size(threads) < 2 || threaded > 0,
 	    SCENARIO_ORDER, "on %zu thread(s) the pool's threads run some of "
 	    "the tasks", threads);
 }
@@ -904,10 +897,13 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
  * memory limit's sweep moved up by the difference between the least limit
  * its serial run succeeds under and the storage it needs, so that the
  * sweep again runs from limits that refuse the evaluation early to limits
- * that admit it.  Every worker holds those buffers of its own, so on more
- * than one thread the sweep is moved up by the other workers' too.  Such a
- * sweep need not see a merge the limit declines: the workers' buffers are
- * released before the merge asks, and are more than the merge asks for.
+ * that admit it.  Every worker holds those buffers of its own, so with more
+ * than one worker the sweep is moved up by the other workers' too.  The
+ * workers are those the pool is sized to, which in a build without threads
+ * is one however many threads are asked for.
+ * Such a sweep need not see a merge the limit declines: the workers'
+ * buffers are released before the merge asks, and are more than the merge
+ * asks for.
  *
  * Otherwise the sweep must reach both ways a deferred round ends under a
  * limit: a round abandoned and run again serially, and a round merged.
@@ -929,6 +925,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	relic_stats_t needed;
 	relic_t *serial;
 	relic_t *deferred;
+	size_t workers;
 	size_t working;
 	size_t least;
 	size_t first;
@@ -955,13 +952,14 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	relic_stats(serial, &needed);
 	relic_destroy(serial);
 
+	workers = relic_pool_size(threads);
 	working = 0;
 	if (memory) {
 		least = least_memory_limit(program, loaded.storage_bytes,
 		    needed.storage_bytes * 2 + WORKING_MAX);
 		if (least > needed.storage_bytes * 2)
 			working = least - needed.storage_bytes +
-			    (threads - 1) * WORKER_TEXTS;
+			    (workers - 1) * WORKER_TEXTS;
 	}
 
 	first = memory ? loaded.storage_bytes + working : loaded.tuples;
@@ -1024,7 +1022,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	if (memory) {
 		checkf(recovered_seen, scenario, "on %zu thread(s), the sweep "
 		    "abandons a round whose serial run succeeds", threads);
-		checkf(declined_seen || (working > 0 && threads > 1), scenario,
+		checkf(declined_seen || (working > 0 && workers > 1), scenario,
 		    "on %zu thread(s), the sweep has the limit decline a "
 		    "merge", threads);
 	}
@@ -1104,7 +1102,7 @@ notes_come_as_serially(size_t threads)
 		    deferred_diagnostics.text);
 		checkf(merged_rounds(deferred) > 0, SCENARIO_NOTES,
 		    "on %zu thread(s), rounds are merged", threads);
-		contexts_agree(SCENARIO_NOTES, threads > 1 ?
+		contexts_agree(SCENARIO_NOTES, relic_pool_size(threads) > 1 ?
 		    "the notes' program shared" : "the notes' program",
 		    serial, deferred);
 	}
