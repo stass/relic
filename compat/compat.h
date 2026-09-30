@@ -8,24 +8,29 @@
 #define RELIC_COMPAT_H
 
 /*
- * Declarations for the BSD interfaces whose absence configure detected on
- * this platform.  Each has a replacement under compat/ that is compiled only
- * where the matching HAVE_ macro is undefined, so the rest of the tree calls
- * the interface unconditionally and contains no platform test.
+ * Declarations for the BSD interfaces this platform's headers do not
+ * declare.  Each interface has a replacement under compat/ that is compiled
+ * where the C library lacks it, so the rest of the tree calls the interface
+ * unconditionally and contains no platform test.  A MemorySanitizer build
+ * compiles the strlcat and strlcpy replacements everywhere, because the
+ * sanitizer cannot see what the C library's copies write.
  *
- * A build that defines RELIC_COMPAT_DECLARE_ALL gets every declaration
- * whatever the platform provides.  The test suite uses it to compile all of
- * the replacements everywhere, under private names, so that relic-owned code
- * is read by the compiler and the sanitizers on every platform instead of
- * only on the ones that happen to link it.
+ * An interface is declared here exactly where configure found no system
+ * declaration of it, which is a separate question from whether it links, so
+ * a declaration never repeats the system's.
  *
- * config.h defines those macros and must already have been included.  It is
- * the first include of every source file in the tree, so this header does not
- * include it; without it every HAVE_ macro would be undefined, every
- * declaration below would be emitted, and a platform that does provide an
- * interface would see a second declaration of it.  The check below turns that
- * into a compile error instead, PACKAGE_NAME being a macro config.h always
- * defines.
+ * The test suite also compiles every replacement on every platform, under a
+ * private name given by renaming the interface on the command line, so that
+ * relic-owned code is read by the compiler and the sanitizers everywhere
+ * instead of only on the platforms that happen to link it.  The renaming
+ * applies to the system's declaration as much as to this header's, so each
+ * replacement is declared under its private name either way.
+ *
+ * config.h defines the HAVE_DECL_ macros and must already have been
+ * included.  It is the first include of every source file in the tree, so
+ * this header does not include it; without it every macro would be
+ * undefined, which -Wundef reports and the check below turns into a compile
+ * error, PACKAGE_NAME being a macro config.h always defines.
  */
 
 #ifndef PACKAGE_NAME
@@ -35,37 +40,39 @@
 #include <stddef.h>
 
 /*
- * getentropy(2) is declared in one of two places depending on the platform.
- * Including both here is what lets a caller include this header and nothing
- * else, wherever the declaration lives.
+ * The headers that declare these interfaces where a platform does, so that
+ * a caller can include this header and nothing else.  getentropy(2) is
+ * declared in one of two places depending on the platform.
  */
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #ifdef HAVE_SYS_RANDOM_H
 #include <sys/random.h>
 #endif
 
-#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_GETENTROPY)
+#if !HAVE_DECL_GETENTROPY
 int getentropy(void *buf, size_t buflen);
 #endif
 
-#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_MEMMEM)
+#if !HAVE_DECL_MEMMEM
 void *memmem(const void *big, size_t big_length, const void *little,
     size_t little_length);
 #endif
 
-#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_REALLOCARRAY)
+#if !HAVE_DECL_REALLOCARRAY
 void *reallocarray(void *optr, size_t nmemb, size_t size);
 #endif
 
-#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_STRLCAT)
+#if !HAVE_DECL_STRLCAT
 size_t strlcat(char *dst, const char *src, size_t dstsize);
 #endif
 
-#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_STRLCPY)
+#if !HAVE_DECL_STRLCPY
 size_t strlcpy(char *dst, const char *src, size_t dstsize);
 #endif
 
-#if defined(RELIC_COMPAT_DECLARE_ALL) || !defined(HAVE_STRTONUM)
+#if !HAVE_DECL_STRTONUM
 long long strtonum(const char *numstr, long long minval, long long maxval,
     const char **errstrp);
 #endif

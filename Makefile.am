@@ -140,10 +140,17 @@ installcheck-local:
 ## private name and runs the same scenarios against those.  Without it, a
 ## replacement would be compiled only on the platforms whose C library lacks
 ## it, so relic-owned code could go unread by the compiler and unvisited by
-## the sanitizers on the machine it was written on.  Fortification is turned
-## off for that build because a C library may define these interfaces as
-## function-like macros, which take precedence over the renaming and leave
-## the replacement's own definition colliding with a compiler builtin.
+## the sanitizers on the machine it was written on.
+##
+## Fortification is turned off for that build.  A fortified C library header
+## may define these interfaces as function-like macros, which take
+## precedence over the renaming and leave the replacement's own definition
+## colliding with a compiler builtin, or as inline wrappers that call the C
+## library's own function by a name the renaming cannot reach, so that the
+## tests would check the C library and pass whatever the replacements did.
+## It is turned off by a header forced in with -include, which the compiler
+## reads after every -D and -U, so that a packager's hardening flags, which
+## come after this target's on the command line, cannot turn it back on.
 ##
 
 RELIC_COMPAT_RENAMES = \
@@ -163,12 +170,11 @@ tests_unit_test_compat_SOURCES = tests/unit/test_compat.c \
 tests_unit_test_compat_LDADD = $(LTLIBOBJS)
 
 tests_unit_test_compat_replacements_SOURCES = tests/unit/test_compat.c \
-	tests/unit/harness.c compat/getentropy.c compat/memmem.c \
-	compat/reallocarray.c compat/strlcat.c compat/strlcpy.c \
-	compat/strtonum.c
+	tests/unit/harness.c tests/unit/unfortified.h compat/getentropy.c \
+	compat/memmem.c compat/reallocarray.c compat/strlcat.c \
+	compat/strlcpy.c compat/strtonum.c
 tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
-	-DRELIC_COMPAT_DECLARE_ALL -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
-	$(RELIC_COMPAT_RENAMES)
+	-include $(top_srcdir)/tests/unit/unfortified.h $(RELIC_COMPAT_RENAMES)
 
 ##
 ## One test binary per module, driving each through the interface its callers
@@ -698,8 +704,8 @@ TESTS = $(RELIC_TEST_BINARIES) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 ##
 ## Sanitizer suites
 ##
-## Each suite configures a disposable build tree beside the current one.  The
-## sanitizers need compiler and link flags that the working tree does not
+## Each suite configures a disposable build tree under disposable/ in the
+## current one, from a copy of the distributed sources.  The sanitizers need compiler and link flags that the working tree does not
 ## have, and rebuilding in place would leave instrumented objects behind for
 ## the next ordinary build to link against.
 ##
@@ -712,19 +718,63 @@ TESTS = $(RELIC_TEST_BINARIES) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 ## runs an instrumented program to find out: a platform without it treats the
 ## request as an error and aborts every test before it starts.
 ##
+## Of the suites here, every one but UndefinedBehaviorSanitizer replaces the
+## allocator, and by default the replacement aborts the process on a request
+## it will not satisfy, such as reallocarray(3) of an overflowing product or
+## one above its own maximum size, where the C library would return NULL.
+## relic reports a failed allocation as an error, and the tests hold it to
+## that, so allocator_may_return_null=1 makes the replacement return NULL
+## too, for the suite to test what relic does with it.
+##
 
-RELIC_ASAN_OPTIONS = halt_on_error=1:detect_leaks=$(RELIC_ASAN_DETECT_LEAKS):detect_stack_use_after_return=1:check_initialization_order=1:strict_string_checks=1:detect_invalid_pointer_pairs=2:abort_on_error=1
-RELIC_LSAN_OPTIONS = exitcode=1
-RELIC_MSAN_OPTIONS = halt_on_error=1:abort_on_error=1
+RELIC_ASAN_OPTIONS = halt_on_error=1:detect_leaks=$(RELIC_ASAN_DETECT_LEAKS):detect_stack_use_after_return=1:check_initialization_order=1:strict_string_checks=1:detect_invalid_pointer_pairs=2:abort_on_error=1:allocator_may_return_null=1
+RELIC_LSAN_OPTIONS = exitcode=1:allocator_may_return_null=1
+RELIC_MSAN_OPTIONS = halt_on_error=1:abort_on_error=1:allocator_may_return_null=1
 RELIC_UBSAN_OPTIONS = halt_on_error=1:print_stacktrace=1
-RELIC_TSAN_OPTIONS = halt_on_error=1:abort_on_error=1:second_deadlock_stack=1
+RELIC_TSAN_OPTIONS = halt_on_error=1:abort_on_error=1:second_deadlock_stack=1:allocator_may_return_null=1
 
-# ThreadSanitizer runs a program about six times slower than the other
-# sanitizers do, and tests/perf.sh sizes its clock for those, so its
-# check-tsan budget is six times the default unless one is set.
+# tests/perf.sh sizes its clock for AddressSanitizer on a slow machine.
+# Unless a budget is set, check-msan and check-tsan give it more: three
+# times the default for MemorySanitizer, which runs a program about twice as
+# long as AddressSanitizer does, and six times for ThreadSanitizer, which
+# runs it about six times as long.
+RELIC_MSAN_PERF_BUDGET = 1800
 RELIC_TSAN_PERF_BUDGET = 3600
 
-# Configure, build and test in the tree named by $$tree using the configure
+# Create the disposable tree disposable/$$tree of this build directory
+# afresh, removing any earlier one, and change to its build directory:
+#
+#	disposable/$$tree/source	a copy of the distributed sources,
+#					RELIC_DISPOSABLE_SOURCE
+#	disposable/$$tree/build		empty; the caller configures here by
+#					running the copy's configure
+#
+# Both macros read the recipe's shell variable tree, a literal every target
+# sets.  Every disposable tree lies under the one directory disposable, so
+# that ignoring, cleaning and skipping them all takes its name alone.  The
+# value must be a plain name, without a slash and neither . nor .., so that
+# it names nothing outside disposable; an empty value stops the recipe rather
+# than naming disposable itself.
+#
+# The tree is built from a copy rather than from the source directory
+# itself, because configure refuses to build out of a source directory that
+# has been configured in place, which is how many developers build.  The
+# copy is the distribution's, as make distcheck's is, so a file a test
+# needs but the tarball lacks fails here too.  It keeps the permissions of
+# the files it copies rather than opening them to every user, as a tarball's
+# are.  The copy and the build directory are siblings rather than one inside
+# the other, so that the source paths recorded in the objects, which gcov
+# reads back, are the ones the file prefix map gives.
+RELIC_DISPOSABLE_TREE = $(abs_top_builddir)/disposable/$${tree:?}
+RELIC_DISPOSABLE_SOURCE = $(RELIC_DISPOSABLE_TREE)/source
+RELIC_ENTER_DISPOSABLE_TREE = \
+	rm -rf "$(RELIC_DISPOSABLE_TREE)" && \
+	$(MKDIR_P) "$(RELIC_DISPOSABLE_TREE)/build" && \
+	$(MAKE) $(AM_MAKEFLAGS) distdir am__skip_mode_fix=yes \
+	    distdir="$(RELIC_DISPOSABLE_SOURCE)" && \
+	cd "$(RELIC_DISPOSABLE_TREE)/build"
+
+# Configure, build and test in the tree disposable/$$tree using the configure
 # options in $$flags.  The calling target sets those, $$name for messages,
 # $$supported to say whether this toolchain has the sanitizer at all, and
 # optionally $$note for a limitation worth mentioning.
@@ -738,7 +788,7 @@ RELIC_TSAN_PERF_BUDGET = 3600
 # that has only some of them, and would make the sanitizer runs that the
 # working agreement asks for impossible rather than merely unavailable.
 #
-# The tree is configured afresh with nothing carried over but the compiler,
+# The tree is configured afresh with nothing carried over but the compilers,
 # so that a sanitizer run means the same thing whatever options the
 # surrounding build was configured with.
 RELIC_SANITIZER_CHECK = \
@@ -750,15 +800,14 @@ RELIC_SANITIZER_CHECK = \
 		exit 0; \
 	fi; \
 	if test -n "$$note"; then echo "note: $$note"; fi; \
-	rm -rf $(abs_top_builddir)/$$tree && \
-	$(MKDIR_P) $(abs_top_builddir)/$$tree && \
-	cd $(abs_top_builddir)/$$tree && \
-	$(abs_top_srcdir)/configure $$flags CC="$(CC)" && \
+	$(RELIC_ENTER_DISPOSABLE_TREE) && \
+	"$(RELIC_DISPOSABLE_SOURCE)/configure" $$flags CC="$(CC)" \
+	    CXX="$(CXX)" && \
 	$(MAKE) $(AM_MAKEFLAGS) && \
 	$(MAKE) $(AM_MAKEFLAGS) check
 
 check-asan:
-	@tree=build-asan; flags=--enable-asan; name=AddressSanitizer; \
+	@tree=asan; flags=--enable-asan; name=AddressSanitizer; \
 	supported='$(RELIC_ASAN_SUPPORTED)'; note=; \
 	test x'$(RELIC_ASAN_DETECT_LEAKS)' = x1 || \
 	    note='this platform cannot detect leaks; memory errors only'; \
@@ -766,26 +815,28 @@ check-asan:
 	$(RELIC_SANITIZER_CHECK)
 
 check-lsan:
-	@tree=build-lsan; flags=--enable-lsan; name=LeakSanitizer; \
+	@tree=lsan; flags=--enable-lsan; name=LeakSanitizer; \
 	supported='$(RELIC_LSAN_SUPPORTED)'; note=; \
 	LSAN_OPTIONS='$(RELIC_LSAN_OPTIONS)'; export LSAN_OPTIONS; \
 	$(RELIC_SANITIZER_CHECK)
 
 check-msan:
-	@tree=build-msan; flags=--enable-msan; name=MemorySanitizer; \
+	@tree=msan; flags=--enable-msan; name=MemorySanitizer; \
 	supported='$(RELIC_MSAN_SUPPORTED)'; note=; \
 	MSAN_OPTIONS='$(RELIC_MSAN_OPTIONS)'; export MSAN_OPTIONS; \
+	RELIC_PERF_BUDGET=$${RELIC_PERF_BUDGET:-$(RELIC_MSAN_PERF_BUDGET)}; \
+	export RELIC_PERF_BUDGET; \
 	$(RELIC_SANITIZER_CHECK)
 
 check-ubsan:
-	@tree=build-ubsan; flags=--enable-ubsan; \
+	@tree=ubsan; flags=--enable-ubsan; \
 	name=UndefinedBehaviorSanitizer; \
 	supported='$(RELIC_UBSAN_SUPPORTED)'; note=; \
 	UBSAN_OPTIONS='$(RELIC_UBSAN_OPTIONS)'; export UBSAN_OPTIONS; \
 	$(RELIC_SANITIZER_CHECK)
 
 check-tsan:
-	@tree=build-tsan; flags='--enable-tsan --enable-threads'; \
+	@tree=tsan; flags='--enable-tsan --enable-threads'; \
 	name=ThreadSanitizer; \
 	supported='$(RELIC_TSAN_SUPPORTED)'; note=; \
 	TSAN_OPTIONS='$(RELIC_TSAN_OPTIONS)'; export TSAN_OPTIONS; \
@@ -796,9 +847,10 @@ check-tsan:
 ##
 ## Coverage
 ##
-## make coverage configures a disposable tree beside this one, as the
+## make coverage configures a disposable tree inside this one, as the
 ## sanitizer suites do, builds it with gcov instrumentation, runs the suite
-## and writes the report to coverage.txt there as well as to the terminal.
+## and writes the report to disposable/coverage/build/coverage.txt as well
+## as to the terminal.
 ## The tree is built without shared libraries, so that every object and its
 ## counts sit beside its source's directory rather than in libtool's hidden
 ## one.  A failing suite stops the target: the coverage of a suite that
@@ -806,24 +858,21 @@ check-tsan:
 ##
 
 coverage:
-	@tree=build-coverage; \
-	rm -rf $(abs_top_builddir)/$$tree && \
-	$(MKDIR_P) $(abs_top_builddir)/$$tree && \
-	cd $(abs_top_builddir)/$$tree && \
-	$(abs_top_srcdir)/configure --enable-coverage --disable-shared \
-	    CC="$(CC)" && \
+	@tree=coverage; \
+	$(RELIC_ENTER_DISPOSABLE_TREE) && \
+	"$(RELIC_DISPOSABLE_SOURCE)/configure" --enable-coverage \
+	    --disable-shared CC="$(CC)" CXX="$(CXX)" && \
 	$(MAKE) $(AM_MAKEFLAGS) && \
 	$(MAKE) $(AM_MAKEFLAGS) check && \
-	$(SHELL) $(abs_top_srcdir)/tests/coverage-report.sh . \
-	    $(abs_top_srcdir) > coverage.txt && \
+	$(SHELL) "$(RELIC_DISPOSABLE_SOURCE)/tests/coverage-report.sh" . \
+	    "$(RELIC_DISPOSABLE_SOURCE)" > coverage.txt && \
 	cat coverage.txt
 
 # Two build products automake does not generate a rule for.
 #
-# The sanitizer trees belong to this build directory rather than to the
-# source directory, so they are removed relative to it.  They are matched by
-# pattern rather than listed, so that a suite added later is cleaned without
-# a second place to remember.
+# The disposable trees of the sanitizer and coverage suites belong to this
+# build directory rather than to the source directory, so they are removed
+# relative to it, all at once by their common parent.
 #
 # The compatibility objects come from AC_REPLACE_FUNCS rather than from a
 # _SOURCES variable, so automake never learns that libtool builds them in a
@@ -834,10 +883,10 @@ coverage:
 # directory.  Those records are build output and have no place in a release
 # tarball, so they are removed from the distribution after it is assembled.
 dist-hook:
-	-rm -f $(distdir)/tests/lang/*.log $(distdir)/tests/lang/*.trs
+	-rm -f "$(distdir)"/tests/lang/*.log "$(distdir)"/tests/lang/*.trs
 
 clean-local:
-	-cd $(top_builddir) && rm -rf build-*san build-coverage
+	-cd $(top_builddir) && rm -rf disposable
 	-rm -rf $(LIBOBJDIR).libs $(LIBOBJDIR)_libs
 
 .PHONY: check-asan check-lsan check-msan check-random check-tsan check-ubsan \

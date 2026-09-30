@@ -6,7 +6,7 @@ for open work see `TODO.md`, for the target design see `specs/architecture.md`.
 ## Implemented
 
 **The build skeleton, stage S0, milestone M0.** The tree configures, builds,
-tests, installs and distributes on macOS; `relic` prints its version and
+tests, installs and distributes on macOS and on Linux with glibc; `relic` prints its version and
 rejects anything else as a usage error.
 
 | Component | State |
@@ -688,7 +688,7 @@ section 15 order.
 | `lib/eval.c`, `include/relic.h`, `man/relic.3`, `cmd/relic/main.c`, `configure.ac` | the base pass, a semi-naive round, a component's single pass and a gathered query are each gathered as a round's items and run either item by item, inserting as they derive, or offered for deferral; `RELIC_F_PARALLEL_ALWAYS`, `-X parallel`, offers every round and cuts each as finely as the clamps allow, and a round that reads a relation it writes other than through a view fixed before it began -- a pass of the naive fixed point -- is declined and runs serially, which is decided from the round's plans in `lib/round.c` rather than by the caller; version-info `5:0:4`, an added interface |
 | `lib/relation.c`, `lib/index.c`, `lib/util.{h,c}`, `lib/account.{h,c}` | `relic_relation_screen()`; `relic_relation_insert_batch_hashed()`, the batch insertion by hashes already computed; `relic_grow_array_capacity_stepwise()`, the capacity one growth after another reaches; the account's third holder, `round_bytes`, which an operation must have given back when it leaves; the code running a round's tasks sees the account as an incomplete type and reaches it only through the round charge and release `lib/frozen.h` declares |
 | `tests/` | `test_round`: a serial context and a deferred one agree word for word on every derived relation, its identifiers and its bytes, and on every counter, under the default, textual and naive strategies, through queries' rewrites with rows in delivery order, under tuple and memory limits swept from what the load holds past what evaluation needs, and in the mixed-comparison notes; `test_eval` runs every scenario a second time with every round deferred; `test_exhaustion` sweeps allocation failures through deferred evaluation with and without the rewrite; `test_util` and `test_relation`: the stepwise projection is what one insertion after another reaches, and a screen finds what an insertion would; `test_exec`: the pieces of a view derive what the whole does; `tests/langtest.sh` runs every golden program again under `-X parallel -X stats` and requires the serial run's status, output, diagnostics and counters; the random differential suite, `tests/equiv/strategies.sh` and the eval fuzz target hold the deferred path to the serial one |
-| `lib/pool.c`, `lib/atomic.h`, `m4/relic_threads.m4` | step 3, the pool: a context of `threads` threads starts one thread for each worker but the calling thread the first time it shares a round, with every signal blocked but those a fault raises, and keeps them until it is destroyed, when it joins them; a pool carried into a child of `fork(2)` releases their memory without joining them, before its next job or when it is destroyed, and is the calling thread alone; the calling thread cannot be cancelled while it waits on the pool; a thread that cannot be started leaves the pool the threads that could be; a job is published under the pool's mutex by advancing a generation the threads spin on, then park on, and its end is a count of finished workers the calling thread spins on, then parks on, the last worker taking the mutex before it signals; the calling thread is worker 0 and claims tasks as the threads do, from one atomic counter; the words the workers share are C11 atomics behind `lib/atomic.h`, which a build without threads makes plain loads and stores; `configure` finds POSIX threads and C11 atomics, linking `libatomic` where the atomics need it, `--disable-threads` builds without them, `--enable-threads` makes their absence an error, and `librelic.pc` names the libraries for a static link; a context of a build without threads is configured with one |
+| `lib/pool.c`, `lib/atomic.h`, `m4/relic_threads.m4` | step 3, the pool: a context of `threads` threads starts one thread for each worker but the calling thread the first time it shares a round, with every signal blocked but those a fault raises, and keeps them until it is destroyed, when it joins them; a pool carried into a child of `fork(2)` releases their memory without joining them, before its next job or when it is destroyed, and is the calling thread alone; the calling thread cannot be cancelled while it waits on the pool; a thread that cannot be started leaves the pool the threads that could be; a job is published under the pool's mutex by advancing a generation the threads spin on, then park on, and its end is a count of finished workers the calling thread spins on, then parks on, the last worker taking the mutex before it signals; a pool whose workers outnumber the processors online, or that cannot learn their number, parks without spinning; the calling thread is worker 0 and claims tasks as the threads do, from one atomic counter; the words the workers share are C11 atomics behind `lib/atomic.h`, which a build without threads makes plain loads and stores; `configure` finds POSIX threads and C11 atomics, linking `libatomic` where the atomics need it, `--disable-threads` builds without them, `--enable-threads` makes their absence an error, and `librelic.pc` names the libraries for a static link; a context of a build without threads is configured with one |
 | `lib/round.c`, `lib/task.c`, `lib/eval.c` | a round is shared when the context has more than one thread and its items' estimated work is at least `RELIC_PARALLEL_MIN_WORK`, 65 536 units of tuples read and derivations: an item's estimate is the work its plan did the last time it ran, kept per running plan, scaled by how its first scan's view has grown, or that view's size before it has run; a cut item is cut into pieces of `RELIC_CHUNK_WORK`, 4096 units, between one and eight per worker; a worker abandons the round once its own candidates outnumber what the tuple limit admits; each task records the work it did, which becomes its item's history, in the one unit `relic_exec_work()` defines; `parallel_rounds` counts the merged rounds of more than one worker, and the pool counts the tasks its threads ran |
 | `lib/account.c`, `lib/index.c`, `lib/relation.h` | the account's round total is an atomic word, charged by compare-and-swap only when the whole total stays within the limit and released by an atomic subtraction; a key's frontier is a relaxed atomic identifier, loaded and stored by concurrent lookups, which all store the same stop |
 | `include/relic.h`, `man/relic.3`, `cmd/relic/main.c`, `man/relic.1`, `configure.ac` | `threads` in `relic_config_t`, at most `RELIC_THREADS_MAX`, 256, a larger count refusing the context; `parallel_rounds` in `relic_stats_t` and a `stats: parallel rounds` line in `-X stats`; `-j threads`, `-j 0` one per processor online; version-info `6:0:0`, an incompatible change to two complete types |
@@ -859,6 +859,25 @@ On macOS 15 with Apple clang, in-tree and out-of-tree:
   not reachable;
 * `make installcheck` builds and runs `examples/embed.c` against the installed
   library through `pkg-config`.
+
+On Debian 13 on x86-64 (glibc 2.41, GCC 14.2, clang 19.1, a KVM guest of
+one core and two hardware threads), out-of-tree:
+
+* `configure --enable-werror` builds and `make check` passes with both GCC
+  and clang, libedit found; the interactive mode was checked by hand through
+  a pseudo-terminal, with editing, history and the end of input at a prompt;
+* `make check-asan` and `make check-ubsan` pass with both compilers, `make
+  check-msan` with clang, and `make check-lsan` and `make check-tsan` with
+  GCC; ASan leak detection is on;
+* `make coverage` and `make distcheck` pass, from a tree configured in place
+  as well as out of it;
+* `--disable-shared --disable-threads --enable-werror` builds and tests
+  clean, and its tool refers to no `pthread_` symbol;
+* `make install`, `make installcheck` and `make uninstall` under a private
+  prefix leave nothing behind.
+
+GCC there has no C++ compiler of its own family, so its instrumented builds
+omit the C++ header test.
 
 The relation store's suites were confirmed the same way, by injecting each
 fault and rerunning:

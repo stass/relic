@@ -1077,9 +1077,13 @@ static void
 insert_literal(random_stream_t *stream, random_literal_t *literals,
     size_t *lengthp, size_t capacity, const random_literal_t *literal)
 {
-	size_t position = draw_below(stream, *lengthp + 1);
+	size_t position;
 
-	assert(*lengthp < capacity);
+	if (*lengthp >= capacity)
+		errx(1, "a body of %zu literals has no room for another",
+		    capacity);
+
+	position = draw_below(stream, *lengthp + 1);
 	for (size_t i = *lengthp; i > position; i--)
 		literals[i] = literals[i - 1];
 	literals[position] = *literal;

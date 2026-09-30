@@ -2499,8 +2499,13 @@ make coverage       build instrumented, run the suite, write a report
 ```text
 halt_on_error=1:detect_leaks=1:detect_stack_use_after_return=1
 check_initialization_order=1:strict_string_checks=1
-detect_invalid_pointer_pairs=2:abort_on_error=1
+detect_invalid_pointer_pairs=2:abort_on_error=1:allocator_may_return_null=1
 ```
+
+The last keeps the C library's answer to an allocation that cannot be
+satisfied, a null pointer, where the sanitizer's allocator would abort; the
+other allocator-replacing suites set it too, so that relic's handling of a
+failed allocation is what gets tested.
 
 A target that is unsupported on the current platform is a no-op that says so,
 not a failure.

@@ -7,8 +7,10 @@ Two kinds of file live here, and they are governed by different rules.
 interfaces that some platforms lack. `configure` compiles one only where the
 C library does not provide the interface, through `AC_REPLACE_FUNCS`, so
 engine sources call each interface unconditionally and no source outside
-this directory contains a platform test. `compat.h` declares whichever ones
-this platform needs.
+this directory contains a platform test. The exception is a
+MemorySanitizer build, which compiles `strlcat.c` and `strlcpy.c` everywhere,
+because the sanitizer cannot see what the C library's copies write.
+`compat.h` declares whichever interfaces the platform's headers do not.
 
 **Bundled upstream headers.** `queue.h` is a copy of an upstream file, not
 relic's work. It is bundled rather than probed because the macro set of a

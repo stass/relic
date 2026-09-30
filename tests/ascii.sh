@@ -34,12 +34,13 @@ is_generated() {
 
 # Every file whose suffix marks it as source, from anywhere in the tree except
 # the directories that hold version-control state, autotools auxiliary
-# scripts, build output and the disposable sanitizer trees.
+# scripts, build output and the disposable sanitizer and coverage trees,
+# whose copies of the sources are checked where they came from.
 owned_files() {
 	find "$RELIC_SRCDIR" \
 	    \( -name '.git' -o -name '.deps' -o -name '.libs' \
 	       -o -name 'autom4te.cache' -o -name 'build-aux' \
-	       -o -name 'build-*san' \) -prune -o \
+	       -o -name 'disposable' \) -prune -o \
 	    -type f \( -name '*.ac' -o -name '*.am' -o -name '*.c' \
 	       -o -name '*.h' -o -name '*.in' -o -name '*.m4' \
 	       -o -name '*.sh' -o -name '*.[1-9]' -o -name '*.dl' \

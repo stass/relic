@@ -150,9 +150,12 @@ install it. Do not work around a missing tool.
       strict_string_checks=1
       detect_invalid_pointer_pairs=2
       abort_on_error=1
+      allocator_may_return_null=1
 
   so leaks, use-after-return, dynamic-init-order fiascos, and a poisoned read
-  all fail the test instead of silently logging. ASan on macOS defaults to
+  all fail the test instead of silently logging, while an allocation the
+  sanitizer will not satisfy returns NULL, as the C library's would, for
+  relic's failure handling to be tested. ASan on macOS defaults to
   `halt_on_error=0` and `detect_leaks=0`, so the explicit options matter. When
   ASan fires, treat it as a HIGH finding and fix the root cause before
   committing. Mandatory before any commit touching allocation, relation or

@@ -103,26 +103,79 @@ AS_VAR_IF([relic_cv_strict_cflags], [none],
 AC_SUBST([RELIC_STRICT_CFLAGS])
 ])
 
+# _RELIC_COMPILER_FAMILY(LANGUAGE, RESULT-VAR)
+# --------------------------------------------
+# Set RESULT-VAR to clang, gnu or other, after the compiler of LANGUAGE.
+AC_DEFUN([_RELIC_COMPILER_FAMILY], [
+AC_LANG_PUSH([$1])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#ifndef __clang__
+#error not clang
+#endif
+]], [[]])],
+    [$2=clang],
+    [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#ifndef __GNUC__
+#error not GNU
+#endif
+]], [[]])],
+	[$2=gnu],
+	[$2=other])])
+AC_LANG_POP([$1])
+])
+
+# _RELIC_CXX_LINKS_INSTRUMENTED(RESULT-VAR)
+# -----------------------------------------
+# Set RESULT-VAR to yes when the C++ compiler links a program compiled and
+# linked with the build's instrumentation, RELIC_SAN_CFLAGS, and to no when
+# it cannot.
+AC_DEFUN([_RELIC_CXX_LINKS_INSTRUMENTED], [
+relic_saved_CXXFLAGS=$CXXFLAGS
+relic_saved_LDFLAGS=$LDFLAGS
+CXXFLAGS="$CXXFLAGS $RELIC_SAN_CFLAGS"
+LDFLAGS="$LDFLAGS $RELIC_SAN_CFLAGS"
+AC_LANG_PUSH([C++])
+AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])], [$1=yes], [$1=no])
+AC_LANG_POP([C++])
+CXXFLAGS=$relic_saved_CXXFLAGS
+LDFLAGS=$relic_saved_LDFLAGS
+])
+
 # RELIC_CHECK_CXX
 # ---------------
-# Decide whether a working C++ compiler is available.
+# Decide whether the C++ compiler can build the C++ header test, and set the
+# RELIC_HAVE_CXX conditional and relic_cxx_works accordingly.
 #
-# relic contains no C++ and must build without one; the compiler is wanted
+# relic contains no C++ and must build without it; the compiler is wanted
 # only to compile the test that proves the public header is includable from
-# C++.  Its absence therefore drops that one test instead of failing the
-# build, which is why the result is a conditional rather than an error.
+# C++.  A compiler that cannot build that test drops it instead of failing
+# the build, which is why the result is a conditional rather than an error.
+#
+# The test is compiled with the instrumentation of the rest of the build and
+# linked against the library the C compiler built.  So the probe links with
+# the same flags, and in an instrumented build it requires the C++ compiler
+# to be of the C compiler's family: a sanitizer's or gcov's runtime belongs
+# to its compiler, and objects instrumented by GCC linked by clang++, or the
+# other way round, fail to link or bring two runtimes into one process.
+#
+# The answer depends on the instrumentation options as well as on CXX, and
+# a cached answer is keyed on CXX alone, so it is worked out afresh every
+# time rather than cached.
 AC_DEFUN([RELIC_CHECK_CXX], [
-dnl Required rather than called, because libtool selects a C++ compiler for
-dnl its own language support and expanding the selection a second time here
-dnl would run the probes twice.
 AC_REQUIRE([AC_PROG_CXX])
-AC_CACHE_CHECK([whether $CXX can build a program], [relic_cv_cxx_works],
-    [AC_LANG_PUSH([C++])
-     AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])],
-	[relic_cv_cxx_works=yes],
-	[relic_cv_cxx_works=no])
-     AC_LANG_POP([C++])])
-AM_CONDITIONAL([RELIC_HAVE_CXX], [test "x$relic_cv_cxx_works" = xyes])
+AC_REQUIRE([RELIC_ARG_SANITIZERS])
+relic_cxx_works=yes
+AS_IF([test -n "$RELIC_SAN_CFLAGS"],
+    [_RELIC_COMPILER_FAMILY([C], [relic_cc_family])
+     _RELIC_COMPILER_FAMILY([C++], [relic_cxx_family])
+     AS_IF([test "x$relic_cc_family" != "x$relic_cxx_family"],
+	[AC_MSG_WARN([omitting the C++ header test: $CXX is not of the family of $CC])
+	 relic_cxx_works=no])])
+AS_VAR_IF([relic_cxx_works], [yes],
+    [_RELIC_CXX_LINKS_INSTRUMENTED([relic_cxx_works])])
+AC_MSG_CHECKING([whether $CXX can build the C++ header test])
+AC_MSG_RESULT([$relic_cxx_works])
+AM_CONDITIONAL([RELIC_HAVE_CXX], [test "x$relic_cxx_works" = xyes])
 ])
 
 # RELIC_CHECK_PREFIX_MAP

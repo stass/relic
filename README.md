@@ -64,10 +64,11 @@ make check-msan     the same under MemorySanitizer, where it is supported
 make check-ubsan    the same under UndefinedBehaviorSanitizer
 ```
 
-Each sanitizer suite configures a disposable build tree beside the current
-one, so it never leaves instrumented objects in the tree you work in. A
-sanitizer the platform does not support reports that and succeeds rather than
-failing the build.
+Each sanitizer suite configures a disposable build tree under `disposable/`
+in the current build directory, from a copy of the distributed sources, so it
+never leaves instrumented objects in the tree you work in and works whether
+that tree was configured in place or not. A sanitizer the platform does not
+support reports that and succeeds rather than failing the build.
 
 ## Embedding
 

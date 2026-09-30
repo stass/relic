@@ -516,10 +516,16 @@ reallocarray_refuses_an_overflowing_product(void)
 {
 	const char *scenario =
 	    "reallocarray refuses a product that would overflow";
+	volatile size_t count = SIZE_MAX;
 	void *result;
 
+	/*
+	 * The count is read through a volatile object, because a compiler
+	 * that sees the overflowing product at compile time warns about the
+	 * call this test makes on purpose.
+	 */
 	errno = 0;
-	result = reallocarray(NULL, SIZE_MAX, 2);
+	result = reallocarray(NULL, count, 2);
 
 	check(result == NULL, scenario, "returns NULL instead of a short array");
 	check(errno == ENOMEM, scenario, "reports ENOMEM");

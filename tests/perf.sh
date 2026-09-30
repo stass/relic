@@ -73,11 +73,11 @@
 #
 # RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
 # set, which leaves room for an AddressSanitizer build on a slow machine;
-# make check-tsan sets more for ThreadSanitizer, which is several times
-# slower.  For reachability the clock only guards against a run that never
-# ends.  The
-# cycle and the session each have a tenth of it, and each planning workload
-# a fortieth, but never less than five seconds.
+# make check-msan and make check-tsan set more for MemorySanitizer and
+# ThreadSanitizer, which are slower.  For reachability the clock only guards
+# against a run that never ends.  The cycle and the session each have a
+# tenth of it, and each planning workload a fortieth, but never less than
+# five seconds.
 
 set -eu
 

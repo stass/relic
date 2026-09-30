@@ -81,12 +81,13 @@ arena would make the convention unnecessary.
 ## Build and packaging
 
 **Continuous integration is not configured.** [High] `relic-plan.md` section 6
-specifies fifteen jobs; the repository has none, so every claim about a
-platform other than macOS is untested. The tarball job matters most, because
-it builds what users actually download, and the Linux jobs matter next,
-because leak detection does not work under AddressSanitizer on macOS and
-`make check-lsan` has therefore never run. The BSD and musl jobs need
-third-party VM actions and can follow.
+specifies fifteen jobs; the repository has none. Beyond macOS, only glibc
+Linux on x86-64 has been verified, by hand, and nothing reruns either check
+on a change. The tarball job matters most, because it builds what users
+actually download, and the Linux jobs matter next, because leak detection
+does not work under AddressSanitizer on macOS, so a change made there is
+checked for leaks only when someone runs the suite on Linux. The BSD and
+musl jobs need third-party VM actions and can follow.
 
 **Nothing enforces linking `$(LTLIBOBJS)` rather than `$(LIBOBJS)`.** [Low,
 component: `Makefile.am`] A program whose `LDADD` names the plain form
@@ -103,35 +104,24 @@ no replacements) needs checking first, and a check script rejecting
 section 65.3 lists no option to build with LeakSanitizer, so S0 added one to
 make the target implementable. Decide whether section 65.3 should record it.
 
-**Two tree checks behave differently on ELF and have never run there.**
-[High, component: `tests/globals.sh`] The no-mutable-global-state check has
-two branches, and only the Mach-O one has been exercised, because there is no
-Linux job yet. Two specific doubts to settle the first time it runs on ELF:
-GNU `nm` reports `.data.rel.ro` as type `d`, so a constant table holding
-pointers may be reported as mutable state and fail the build spuriously; and
-the claim that a thread-local object is reported as ordinary data or bss is
-inferred from how ELF places `.tdata` and `.tbss`, not observed. Settle both
-by injecting each case on Linux, as was done on macOS, rather than by reading
-the output once and assuming.
+**The compatibility declarations are verified only on glibc.** [Medium,
+component: `configure.ac`, `compat/compat.h`] `compat.h` declares each
+replaced interface exactly where `AC_CHECK_DECLS` found no system
+declaration, and the replacement test relies on the command-line renaming
+to rename the system's declaration where there is one. That has been built
+with `--enable-werror` on glibc 2.41 with GCC 14 and clang 19 only. Build
+`check` with `--enable-werror` on macOS, where `reallocarray` and
+`getentropy` are declared behind availability macros, and on musl, FreeBSD
+and OpenBSD.
 
-A third doubt joins them: the check now ignores symbols whose C identifier is
-reserved to the implementation, because AddressSanitizer emits a writable
-descriptor beside every global including a read-only one. The Mach-O form of
-that exclusion was verified by injection; the ELF form, which matches `__` or
-an underscore and a capital directly rather than after a prefix, has never
-run. Verify it catches an injected `static` counter on Linux under both a
-plain and an instrumented build.
-
-**The getentropy(2) configuration is verified only on macOS.** [Low,
-component: `configure.ac`, `compat/compat.h`] `AC_REPLACE_FUNCS` tests that
-`getentropy` links, not that a prototype is in scope; `compat.h` relies on
-`<unistd.h>` (the BSDs, glibc, musl) or `<sys/random.h>` (macOS) declaring
-it, which `AC_USE_SYSTEM_EXTENSIONS` should make true. Under
-`RELIC_COMPAT_DECLARE_ALL` the header redeclares the renamed interface after
-the system header has declared it, as it already does for `reallocarray`;
-GCC's `-Wredundant-decls` may reject that. Build `check` on glibc, musl,
-FreeBSD and OpenBSD, and switch to `AC_CHECK_DECLS` if a platform links the
-function without declaring it.
+Neither `AC_REPLACE_FUNCS` nor `AC_CHECK_DECLS` reads availability, so a
+macOS build whose `MACOSX_DEPLOYMENT_TARGET` is older than the SDK's
+`reallocarray` finds it linkable and declared, compiles no replacement, and
+weakly links a function that is absent on the older system: the call
+reaches a null address there, or `-Wunguarded-availability-new` fails an
+`--enable-werror` build. Unverified. A link probe built with
+`-Werror=unguarded-availability-new`, or the replacement chosen whenever
+the deployment target predates the SDK, would settle it.
 
 **The tarball carries no project documents.** [Low, component: `Makefile.am`]
 `EXTRA_DIST` ships `README.md` and `LICENSE` but not `specs/`, `relic-plan.md`,
@@ -258,16 +248,6 @@ precision, so a long string literal or identifier is silently cut short in a
 parse diagnostic. The two should agree. Parser text is not restricted to
 identifier bytes, so a shared helper has to leave escaping to
 `relic_diag_stderr()` as it does today; check that before merging them.
-
-**Sanitizer suites cannot run from an in-place build.** [Medium, component:
-`Makefile.am`] `make check-asan` and its siblings configure a fresh tree
-beside the current one, and `configure` refuses to build out of a source
-directory that has itself been configured, so from a tree built in place
-every one of them fails before compiling anything. They work from an
-out-of-tree build, which is how they were run for S5. Either the targets
-should detect the in-place case and say so, or they should configure from a
-pristine copy of the sources; the first is a few lines and removes a trap
-from a step the working agreement makes mandatory.
 
 **A check between loads can warn about a predicate a later load defines.**
 [Low, component: `lib/pred.c`] The undefined-predicate sweep answers a
@@ -688,9 +668,9 @@ is what said so.
 AddressSanitizer on Apple silicon reports that `detect_leaks` is unsupported
 and aborts, so `configure` probes for it and `make check-asan` asks for leak
 detection only where it works. `make check-lsan` is unavailable there for the
-same reason. Until the Linux continuous integration jobs exist, no leak check
-runs anywhere, which matters from S1 onward because that is where the tree
-starts allocating.
+same reason. Until the Linux continuous integration jobs exist, a leak is
+found only when someone runs `make check-asan` or `make check-lsan` on
+Linux, where both pass.
 
 **`librelic.pc` declares no private dependencies.** [Low, component:
 `librelic.pc.in`] There are none today. The moment the library links anything
@@ -835,6 +815,27 @@ cycles; `yield` on aarch64 is close to free, so a worker there parks
 within microseconds and a component of many small rounds pays a wake-up
 per round. A bound in time, the clock read every few hundred pauses,
 would hold on every processor. Unmeasured on aarch64.
+
+**A fortified MemorySanitizer build bypasses the instrumented copies.**
+[Low, component: `configure.ac`] Under `--enable-msan` the `strlcat` and
+`strlcpy` replacements are compiled so that MemorySanitizer sees what they
+write, but with `_FORTIFY_SOURCE` above zero glibc's inline wrappers call
+its own `__strlcpy_chk` and `__strlcat_chk` wherever the destination's size
+is known, which reintroduces the false reports. It needs fortification
+passed to a clang MSan build by hand; forcing it off in that build, as the
+replacement test does with `tests/unit/unfortified.h`, would close it.
+
+**The pool's spin decision sees processors online, not processors
+available.** [Low, component: `lib/pool.c`] A pool spins only when its
+workers fit on the processors `sysconf(_SC_NPROCESSORS_ONLN)` reports, since
+a waiter spinning on the processor the awaited worker needs delays it by a
+scheduling quantum per job. A process confined to fewer processors by an
+affinity mask (`taskset`, a container's `--cpuset-cpus`) or a CPU quota
+(`--cpus`) still sees them all and spins while oversubscribed. On Linux
+`sched_getaffinity(2)` would cover the mask, not the quota. The two SMT
+threads of one core are counted as two processors, and a spinning sibling
+slows the other: on a KVM guest of one core and two threads, `-X parallel
+-j 2` over 5000 one-tuple rounds took 1.3 s spinning and 0.13 s parking.
 
 **The words workers share are not on cache lines of their own.** [Low,
 component: `lib/round.h`] `specs/design-parallel.md` section 4.3 puts the

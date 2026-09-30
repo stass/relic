@@ -32,12 +32,8 @@
 /relic
 /librelic.la
 
-# Disposable trees made by the sanitizer suites.
-/build-asan/
-/build-lsan/
-/build-msan/
-/build-ubsan/
-/build-coverage/
+# Disposable trees made by the sanitizer and coverage suites.
+/disposable/
 
 # A fuzzing run's working corpus and the inputs it found.
 /fuzz-artifacts/

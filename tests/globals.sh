@@ -69,12 +69,18 @@ fi
 # differently, so the format is determined from the output rather than from
 # the platform.  An nm that produces neither shape leaves the check unable to
 # say anything, and it says so rather than passing.
+#
+# ELF is read in nm's System V format, whose seven columns separated by bars
+# include the section.  It is taken for ELF only once a line of that shape
+# is seen, so that an nm laying it out otherwise fails the check rather than
+# passing it having read nothing.
 first=$(echo "$objects" | sed -n '1p')
 
 if nm -m "$first" >/dev/null 2>&1 &&
     nm -m "$first" 2>/dev/null | grep -q '(__'; then
 	format=macho
-elif nm "$first" >/dev/null 2>&1; then
+elif nm -f sysv "$first" 2>/dev/null |
+    awk -F'|' 'NF == 7 { found = 1 } END { exit !found }'; then
 	format=elf
 else
 	fail "nm understands neither object format for $first"
@@ -90,10 +96,17 @@ fi
 # breaks the same property a plain one does, because two contexts on one
 # thread would share it.
 #
-# On ELF nm reports a one-letter type instead of a section.  The writable
-# ones are bss (b), common (c), data (d), small data (g) and small bss (s),
-# in either case; a thread-local object lands in .tdata or .tbss and is
-# reported as data or bss like any other, so the same set covers it.
+# On ELF nm reports a one-letter type as well as the section, in its System V
+# format.  The writable types are bss (b), common (c), data (d), small data
+# (g) and small bss (s), in either case, a weak object (V) and a GNU unique
+# one (u); a thread-local object lands in .tdata or .tbss and is reported as
+# data or bss like any other, so the same set covers it.  The type alone is
+# not enough: a constant that holds an address, such as a table of strings, is
+# reported as data because the dynamic linker must write the address into it,
+# but a position-independent object places it in .data.rel.ro, which is
+# read-only once relocated.  That section is the counterpart of Mach-O's
+# __DATA_CONST,__const and is exempt for the same reason.
+#
 # The object list is walked a line at a time rather than by word splitting,
 # because a build directory may have a space in its path.
 echo "$objects" | while read -r object; do
@@ -115,10 +128,23 @@ echo "$objects" | while read -r object; do
 		# ELF has no such prefix, but a compiler-generated object is a
 		# section-local label, whose name begins with a dot, and a
 		# reserved identifier is unchanged by the format.
-		found=$(nm "$object" 2>/dev/null |
-		    grep -E '^[0-9a-fA-F]* [BbCcDdGgSs] ' |
-		    grep -Ev ' \.' |
-		    grep -Ev ' (__|_[A-Z])[A-Za-z0-9_$]*$' || true)
+		found=$(nm -f sysv "$object" 2>/dev/null | awk -F'|' '
+		NF == 7 {
+			name = $1
+			letter = $3
+			section = $7
+			gsub(/[ \t]/, "", name)
+			gsub(/[ \t]/, "", letter)
+			gsub(/[ \t]/, "", section)
+
+			if (letter !~ /^[BbCcDdGgSsVu]$/)
+				next
+			if (section ~ /^\.data\.rel\.ro(\.|$)/)
+				next
+			if (name ~ /^\./ || name ~ /^(__|_[A-Z])/)
+				next
+			print letter " " name " " section
+		}' || true)
 		;;
 	esac
 
