@@ -28,6 +28,14 @@
  * quick succession do not each pay a sleep and a wake-up, and then parked
  * on a condition variable, where they cost nothing.
  *
+ * Spinning pays only while the thread being waited for runs on another
+ * processor.  A pool with more workers than the machine has processors
+ * would spin on the very processor the working thread needs, holding that
+ * thread off for as long as the spin lasts, or until the scheduler
+ * preempts the spinner, at every job; so such a pool parks at once.  The
+ * choice is made when the pool starts, from the processors online then
+ * and the workers asked for, which is never fewer than those started.
+ *
  * A job is a number of parts, each run once by whichever worker claims it
  * first.  It is published by worker 0 under the pool's mutex: it stores the
  * job and advances the generation, then wakes every parked thread.  A
@@ -80,15 +88,16 @@ struct relic_pool_job {
 
 static void	 job_work(relic_pool_job_t *job, size_t worker_index);
 
-#ifdef RELIC_THREADS
-
 /*
  * How many times a waiting worker looks at the word it waits on before it
- * parks, pausing between looks.  A constant of performance alone: long
- * enough to cover the merge between two rounds of one component, short
- * enough that a thread with no work gives its core back promptly.
+ * parks, pausing between looks, when every worker has a processor of its
+ * own.  A constant of performance alone: long enough to cover the merge
+ * between two rounds of one component, short enough that a thread with no
+ * work gives its core back promptly.
  */
 #define	RELIC_SPIN_LIMIT	4096u
+
+#ifdef RELIC_THREADS
 
 typedef struct relic_worker_start relic_worker_start_t;
 
@@ -108,7 +117,9 @@ struct relic_worker_start {
  * advances `generation`, and read by a thread after it has seen the
  * generation move, so every thread reads them as they were published.
  * `published` is the generation worker 0 last published, which only it
- * reads.  `owner` is the process that started the threads.
+ * reads.  `owner` is the process that started the threads.  `spin_limit`
+ * is how many looks a waiter takes before it parks, fixed before any
+ * thread starts.
  */
 struct relic_pool_threads {
 	pthread_mutex_t		 mutex;
@@ -121,6 +132,7 @@ struct relic_pool_threads {
 	uint64_t		 published;
 	size_t			 started;
 	pid_t			 owner;
+	unsigned int		 spin_limit;
 	bool			 stopping;
 };
 
@@ -140,6 +152,15 @@ static void	*worker_main(void *argument);
 #endif /* RELIC_THREADS */
 
 static void	 worker_release(relic_worker_t *worker);
+
+unsigned int
+relic_pool_spin_limit(size_t workers, long processors)
+{
+	if (processors < 1 || workers > (size_t)processors)
+		return (0);
+
+	return (RELIC_SPIN_LIMIT);
+}
 
 size_t
 relic_pool_size(size_t threads RELIC_UNUSED)
@@ -336,6 +357,8 @@ threads_start(relic_pool_t *pool, size_t workers)
 	}
 	relic_atomic_u64_init(&threads->generation, 0);
 	threads->owner = getpid();
+	threads->spin_limit = relic_pool_spin_limit(workers,
+	    sysconf(_SC_NPROCESSORS_ONLN));
 	pool->threads = threads;
 
 	/* A thread starts with its creator's mask, so the creator wears it. */
@@ -465,7 +488,7 @@ await_job(relic_pool_threads_t *threads, uint64_t seen)
 	uint64_t generation;
 	unsigned int spins;
 
-	for (spins = 0; spins < RELIC_SPIN_LIMIT; spins++) {
+	for (spins = 0; spins < threads->spin_limit; spins++) {
 		generation =
 		    relic_atomic_u64_load_acquire(&threads->generation);
 		if (generation != seen)
@@ -512,7 +535,7 @@ await_workers(relic_pool_threads_t *threads, relic_pool_job_t *job,
 {
 	unsigned int spins;
 
-	for (spins = 0; spins < RELIC_SPIN_LIMIT; spins++) {
+	for (spins = 0; spins < threads->spin_limit; spins++) {
 		if (relic_atomic_size_load_acquire(&job->finished) == workers)
 			return;
 		spin_pause();

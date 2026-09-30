@@ -75,9 +75,12 @@ allocators="$allocators|strdup|strndup|wcsdup|asprintf|vasprintf|getline"
 allocators="$allocators|getdelim|open_memstream|open_wmemstream|realpath"
 allocators="$allocators|getcwd|scandir|glob|tempnam"
 
+# A compiler may call a different stdio routine than the source names: GCC
+# turns an fputs(3) or an fprintf(3) of a constant string into fwrite(3).
 listed='abort|bcmp|bzero|fclose|ferror|fopen|fprintf|fputc|fputs|fread|free'
-listed="$listed|getpagesize|getpid|memchr|memcmp|memcpy|memmem|memmove|memset"
-listed="$listed|munmap|qsort|snprintf|stderr|strerror|strlcpy|strlen|vsnprintf"
+listed="$listed|fwrite|getpagesize|getpid|memchr|memcmp|memcpy|memmem"
+listed="$listed|memmove|memset|munmap|qsort|snprintf|stderr|strerror|strlcpy"
+listed="$listed|strlen|sysconf|vsnprintf"
 
 # The worker pool's threads.  Starting a thread and initializing a mutex or
 # a condition variable may allocate for the thread library's own use, and

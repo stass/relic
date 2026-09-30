@@ -357,6 +357,13 @@ bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
  *
  * relic_pool_free() stops and joins the pool's threads and releases the
  * pool and everything it kept.
+ *
+ * relic_pool_spin_limit() is how many times a waiting worker of a pool of
+ * `workers` looks for what it waits for before it parks.  `processors` is
+ * the count of processors online, or zero or less when it is unknown.
+ * Spinning pays only while the worker waited for runs on another
+ * processor, so a pool whose workers outnumber the processors, or that
+ * cannot tell, does not spin.
  */
 size_t	 relic_pool_size(size_t threads);
 int	 relic_pool_create(relic_pool_t **poolp, size_t workers,
@@ -365,6 +372,7 @@ void	 relic_pool_adopt(relic_pool_t *pool);
 void	 relic_pool_for(relic_pool_t *pool, size_t part_count,
 	    relic_pool_part_fn run_part, void *argument);
 void	 relic_pool_free(relic_pool_t *pool);
+unsigned int relic_pool_spin_limit(size_t workers, long processors);
 
 /*
  * lib/task.c

@@ -53,6 +53,8 @@
 	"the pool's threads block every signal but a fault's"
 #define	SCENARIO_FORK		"a pool carried into a child of fork"
 #define	SCENARIO_NO_THREADS	"a build without threads evaluates alone"
+#define	SCENARIO_SPIN \
+	"a waiter spins only when every worker has a processor"
 
 /*
  * The threads the test's contexts are configured with, and the length of
@@ -124,6 +126,7 @@ static void	 count_diagnostic(void *callback_ctx,
 		    const char *message);
 static uint64_t	 parallel_rounds(relic_t *ctx);
 static size_t	 tuples_held(relic_t *ctx);
+static void	 waiters_spin_only_on_processors_of_their_own(void);
 static void	 without_threads_rounds_run_alone(void);
 
 /* How many diagnostics every context has reported. */
@@ -602,6 +605,31 @@ without_threads_rounds_run_alone(void)
 #endif
 }
 
+/*
+ * A waiter spinning on the processor the worker it waits for needs delays
+ * that worker, so a pool whose workers outnumber the processors, or that
+ * cannot tell how many there are, parks at once.  Otherwise it spins.
+ */
+static void
+waiters_spin_only_on_processors_of_their_own(void)
+{
+	check(relic_pool_spin_limit(2, 2) > 0, SCENARIO_SPIN,
+	    "two workers on two processors spin");
+	check(relic_pool_spin_limit(4, 16) > 0, SCENARIO_SPIN,
+	    "four workers on sixteen processors spin");
+	check(relic_pool_spin_limit(4, 4) ==
+	    relic_pool_spin_limit(4, 16), SCENARIO_SPIN,
+	    "a worker per processor spins as long as spare processors do");
+	check(relic_pool_spin_limit(3, 2) == 0, SCENARIO_SPIN,
+	    "three workers on two processors park at once");
+	check(relic_pool_spin_limit(256, 16) == 0, SCENARIO_SPIN,
+	    "256 workers on sixteen processors park at once");
+	check(relic_pool_spin_limit(2, 0) == 0, SCENARIO_SPIN,
+	    "workers on no processor reported park at once");
+	check(relic_pool_spin_limit(2, -1) == 0, SCENARIO_SPIN,
+	    "workers on an unknown count of processors park at once");
+}
+
 int
 main(void)
 {
@@ -610,6 +638,7 @@ main(void)
 	a_refused_start_is_not_an_error();
 	a_pool_carried_into_a_child_of_fork();
 #endif
+	waiters_spin_only_on_processors_of_their_own();
 	without_threads_rounds_run_alone();
 
 	return (check_summary("test_pool"));
