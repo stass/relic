@@ -77,7 +77,7 @@ allocators="$allocators|getcwd|scandir|glob|tempnam"
 
 # A compiler may call a different stdio routine than the source names: GCC
 # turns an fputs(3) or an fprintf(3) of a constant string into fwrite(3).
-listed='abort|bcmp|bzero|fclose|ferror|fopen|fprintf|fputc|fputs|fread|free'
+listed='abort|bcmp|bcopy|bzero|fclose|ferror|fopen|fprintf|fputc|fputs|fread|free'
 listed="$listed|fwrite|getpagesize|getpid|memchr|memcmp|memcpy|memmem"
 listed="$listed|memmove|memset|munmap|qsort|snprintf|stderr|strerror|strlcpy"
 listed="$listed|strlen|sysconf|vsnprintf"
