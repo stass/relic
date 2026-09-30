@@ -1073,6 +1073,14 @@ literal that creates its edge. Which cycle is named, and why one error is
 reported per offending component, are specified in
 `specs/design-stratify.md`.
 
+Aggregates are outside v1. `count`, `sum`, `min` and `max` over the rows a
+body denotes, the equality that binds a variable to one, and the generated
+rule whose relation is the group are specified in
+`specs/design-aggregates.md`; a rule reads an aggregate from a strictly
+lower stratum as it reads a negated literal, so that design extends this
+section and sections 13 and 14 rather than changing what any v1 program
+means.
+
 ---
 
 # 31. Negation Execution
@@ -2619,6 +2627,11 @@ None should require changing basic language semantics.
 Arithmetic expressions -- integer expressions in comparisons, an equality
 that binds, and what a value evaluation computes does to the value table and
 to a parallel round -- are specified in `specs/design-arithmetic.md`.
+
+Aggregates -- `count`, `sum`, `min` and `max` over the rows a body denotes,
+the body materialized as a generated rule in a lower stratum, and the
+literal that folds its relation -- are specified in
+`specs/design-aggregates.md`.
 
 Parallel SCC evaluation -- the worker pool a context owns, the round that
 reads a frozen store and merges its results in the serial order, and the

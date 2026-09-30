@@ -1184,7 +1184,12 @@ measuring before deciding, and what stays out on purpose with the reason.
 Each item names the engines that have it and what a relic program does
 without it; the verdicts are provisional until a design exists.
 
-* aggregates, the first item of `docs/todo-language.md`
+* aggregates, specified in `specs/design-aggregates.md`: `count`, `sum`,
+  `min` and `max` over the rows a body denotes, bound through an equality
+  as an assignment is, the body an ordinary generated rule whose relation
+  is the group, its reader a stratum above it as a negated literal's is,
+  an exact sum that fails only when the total does not fit; five steps,
+  none started
 * relation export, in `docs/todo-language.md`
 * incremental insertion maintenance
 * DRed-style deletion maintenance
