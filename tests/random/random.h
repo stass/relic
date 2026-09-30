@@ -77,7 +77,8 @@ typedef enum random_term_kind {
 	TERM_VARIABLE,		/* index names the variable: A, B, ... */
 	TERM_ANONYMOUS,		/* `_`, a distinct variable at every occurrence */
 	TERM_CONSTANT,		/* index is a position in the constant pool */
-	TERM_NUMBER		/* index less RANDOM_NUMBER_MAX is an integer */
+	TERM_NUMBER,		/* index less RANDOM_NUMBER_MAX is an integer */
+	TERM_PATTERN		/* index is a position in the pattern list */
 } random_term_kind_t;
 
 typedef struct random_term random_term_t;
@@ -116,16 +117,55 @@ typedef enum random_operator {
 } random_operator_t;
 
 /*
- * An expression of one, two or three operands, the leaves, in one of four
+ * A string function, one of each arity of `substr`.  random_calls[] holds
+ * each one's spelling and what its arguments must be.
+ */
+typedef enum random_call {
+	CALL_LENGTH,
+	CALL_CAT,
+	CALL_SUBSTR,
+	CALL_SUBSTR_COUNT,
+	CALL_INDEX,
+	CALL_MATCH,
+	CALL_STR,
+	CALL_KINDS		/* the number of functions */
+} random_call_t;
+
+/*
+ * A function's spelling and signature: one letter per argument, `s` a
+ * string, `i` an integer, `p` a pattern and `v` a value of any type, and
+ * whether its value is a string.
+ */
+typedef struct random_call_info random_call_info_t;
+
+struct random_call_info {
+	const char	*spelling;
+	const char	*arguments;
+	bool		 text;
+};
+
+extern const random_call_info_t	random_calls[CALL_KINDS];
+
+/* The arguments a call holds at most, and so an expression's leaves. */
+#define	RANDOM_MAX_CALL_ARGUMENTS	3
+
+/*
+ * An expression of one, two or three operands, the leaves, in one of six
  * shapes: a leaf alone, `l0 op0 l1`, `(l0 op0 l1) op1 l2` and `l0 op0 (l1
- * op1 l2)`, each negated as a whole when `negated`.  A leaf is a variable or
- * a number; the text holds the parentheses the shape needs and no others.
+ * op1 l2)`, a call `c0(l0, ...)` and a call whose first argument is a call,
+ * `c0(c1(l0, ...), ...)`, the inner call's arguments the first leaves and
+ * the outer's others the rest.  Each is negated as a whole when `negated`.
+ * A leaf is a variable, a number, a constant of the pool or, as a call's
+ * pattern argument, a pattern; the text holds the parentheses the shape
+ * needs and no others.
  */
 typedef enum random_shape {
 	SHAPE_LEAF,
 	SHAPE_BINARY,
 	SHAPE_LEFT,
-	SHAPE_RIGHT
+	SHAPE_RIGHT,
+	SHAPE_CALL,
+	SHAPE_NESTED_CALL
 } random_shape_t;
 
 typedef struct random_expression random_expression_t;
@@ -133,7 +173,8 @@ typedef struct random_expression random_expression_t;
 struct random_expression {
 	random_shape_t		shape;
 	random_operator_t	operators[2];
-	random_term_t		leaves[3];
+	random_call_t		calls[2];	/* the outer call, the inner */
+	random_term_t		leaves[RANDOM_MAX_CALL_ARGUMENTS];
 	bool			negated;
 };
 
@@ -251,6 +292,13 @@ struct random_constant {
 extern const random_constant_t	random_constants[];
 extern const size_t		random_constant_count;
 
+/*
+ * The patterns a call of `match` is given, each valid in the dialect, as a
+ * program spells it.
+ */
+extern const char *const	random_patterns[];
+extern const size_t		random_pattern_count;
+
 /* generate.c */
 void	random_generate(random_program_t *program, uint64_t seed);
 
@@ -298,9 +346,10 @@ typedef enum random_strategy {
 } random_strategy_t;
 
 /*
- * The kinds of failure a run can end in.  compare.c finds the first five;
- * main.c, which runs the comparison in a child, finds the rest from how the
- * child ended.
+ * The kinds of failure a run can end in.  compare.c finds those up to
+ * FAILURE_LAST_VERDICT; main.c, which runs the comparison in a child, finds
+ * the rest from how the child ended.  The last three compare.c finds are
+ * the evaluation errors, which a generated program is built never to meet.
  */
 typedef enum random_failure_kind {
 	FAILURE_NONE,
@@ -309,7 +358,10 @@ typedef enum random_failure_kind {
 	FAILURE_ANSWERS,	/* a strategy's answer differs from default */
 	FAILURE_TOTALS,		/* a strategy's tuple total differs */
 	FAILURE_DERIVATIONS,	/* a derivation was made twice, or missed */
-	FAILURE_LAST_VERDICT = FAILURE_DERIVATIONS, /* the last compare.c finds */
+	FAILURE_UNDEFINED,	/* an arithmetic result was not defined */
+	FAILURE_TOO_LONG,	/* a string was longer than a value can be */
+	FAILURE_PATTERN,	/* a pattern was not a regular expression */
+	FAILURE_LAST_VERDICT = FAILURE_PATTERN, /* the last compare.c finds */
 	FAILURE_CRASH,		/* the child was killed by a signal */
 	FAILURE_HANG,		/* the child ran past its alarm */
 	FAILURE_ABNORMAL	/* the child exited without its verdict */

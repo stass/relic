@@ -171,16 +171,15 @@ is an operator only after an operand and `count` a function only after the
 `=` of an equality. `length(S) > 3` holds a call because `length(` stands
 where an operand does; `length(a, 4).` is a fact of `length/2`; and
 `p(X) :- length(X).` reads a predicate named `length`. Nothing is reserved,
-and no program that parses today parses differently, because no program
-that parses today has a name followed by `(` in operand position: the
-parser refuses that text now, with the message that an aggregate is
-written `V = count { ... }`, and section 3.5 keeps that message for the
-four aggregate names.
+and calls take no program from another meaning: without them, a name
+followed by `(` in operand position has none, and is refused with the
+message that an aggregate is written `V = count { ... }`, which section 3.4
+keeps for the four aggregate names.
 
 The six names, their arities and what each returns are the parser's to
 know, as the four aggregate names are: a call to a name that is not a
 function, or with the wrong number of arguments, is a parse error at the
-name, section 3.5. Every function has a fixed arity, at most three;
+name, section 3.4. Every function has a fixed arity, at most three;
 `substr` is two functions of one name, `substr/2` and `substr/3`, as `p/2`
 and `p/3` are two predicates. Section 7.4 says what a fixed arity buys.
 
@@ -224,7 +223,7 @@ know:
   wording does not change because the check moves from the argument parser
   to the atom's completion;
 * **a call's name must be a function and its arity that function's**,
-  section 3.5. A literal `r(X) = 3` where `r` is no function is reported
+  section 3.4. A literal `r(X) = 3` where `r` is no function is reported
   as `r is not a function` at `r`, where it was `expected ',' or '.',
   found '='` at the `=`. Both are errors; the new one names the mistake a
   reader is likelier to have made.
@@ -1324,11 +1323,11 @@ this design takes away:
   grows the pool, and the pool is charged to `max_memory`, section 9.1, as
   the text stack, the pending bytes, the pattern buffer and the matcher's
   work space are charged with the evaluation's working state, sections
-  8.1, 8.3 and 8.4; a pattern in a column costs its worker about 180 bytes
-  of charged scratch per byte of pattern while it is matched, which the
-  limit sees. Without a limit such a program runs
-  until the string limit, the pool's count limit or exhaustion stops it,
-  the position every unbounded program is in today;
+  8.1, 8.3 and 8.4; a pattern in a column costs its worker up to about
+  360 bytes of charged scratch per byte of pattern while it is matched,
+  which the limit sees. Without a limit such a program runs until the
+  string limit, the pool's count limit or exhaustion stops it, the
+  position every unbounded program is in today;
 * **unbounded time.** `match` is linear in the string times the pattern by
   construction, section 8.4, so no pattern is catastrophic; `index` is at
   worst the product of its operands' lengths, as `memmem(3)` is, and
@@ -1478,8 +1477,7 @@ strings-memory        -l memory= refusing the pool's growth
 strings-atom-or-call  length/1 as a predicate and length(S) > 3 in one program
 ```
 
-The memory-limit tests are re-recorded at their new totals, since the pool
-is now counted.
+The memory-limit tests are recorded at totals that count the pool.
 
 **Equivalences.** `tests/equiv/strategies.sh` runs the string corpus whose
 every program succeeds under every strategy, and the answers, the tuple
@@ -1494,10 +1492,9 @@ string error fails, `string_values` and `storage_bytes` included.
 calls, safe by construction and defined by construction: a call's string
 arguments are variables an earlier positive literal binds or constants
 from a small pool of short strings, its integer arguments small constants
-or variables an arithmetic assignment bound, its patterns drawn from a
-fixed list of valid ones, and the strings a generated program states are
-short enough that no `cat` of the depth it generates can reach the length
-limit. So no generated program meets an error, every strategy is compared
+or bound variables, its patterns drawn from a fixed list of valid ones,
+and the strings a generated program states are short enough that no `cat`
+of the depth it generates can reach the length limit. So no generated program meets an error, every strategy is compared
 on every program, and a disagreement is a bug. The fuzz dictionary gains
 the six names and the pattern metacharacters; the loader target exercises
 the parse and check errors, the evaluator target the two evaluation
@@ -1631,8 +1628,9 @@ tool has; 5 is what `CLAUDE.md` asks of every feature.
 * `specs/design-magic.md` section 6.1: renumbering walks call nodes, and a
   copied `match` keeps its compiled pattern, section 10 here.
 * `specs/design-hardening.md` section 2.4: calls generated safe and
-  defined by construction, section 15 here; section 3.4: two failure kinds
-  the driver names; section 4: the matcher's fuzz target.
+  defined by construction, section 15 here; section 3.4: three failure
+  kinds the driver names, the evaluation errors; section 5.1: the
+  matcher's fuzz target.
 * `specs/design-cli.md` section 9: the function note at level 2.
 * `specs/design-api.md` sections 3, 5.1, 7 and 11: the text of section 14
   here.

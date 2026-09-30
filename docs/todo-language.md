@@ -17,20 +17,6 @@ declined when it would make relic a database or a Prolog.
 
 ## Worth adding
 
-**String operations.** [Medium, component: language, `lib/value.c`]
-Concatenation, length, substring, prefix and suffix tests, and a regular
-expression match. Souffle, LogiQL, Nemo and CodeQL have them; relic's
-strings are opaque bytes that can only be compared. Text processing is an
-intended use, and the first program over file names or log lines needs
-`contains` or a prefix test. Specified in `specs/design-strings.md`: six
-functions, `length`, `cat`, `substr`, `index`, `match` and `str`, as calls
-inside expressions in `awk`'s manner, every test a comparison over a
-position so that no name is reserved and no second kind of literal exists;
-concatenation rides on the pending-value machinery arithmetic built, with
-the symbol pool charged to the memory limit; and the regular expression
-engine is relic's own, a limited dialect decided by Thompson's simulation
-rather than a vendored engine or the platform's `<regex.h>`.
-
 **Provenance.** [Medium, component: `lib/eval.c`, `cmd/relic/`] Why was this
 tuple derived. Souffle's `-t explain`, Nemo's tracing and LogiQL's
 provenance answer it; relic's `-e` shows plans, not derivations. For a tool

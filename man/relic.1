@@ -129,6 +129,138 @@ bounds
 .Ql dist
 above.
 .Pp
+An expression may also call one of six string functions wherever an
+operand stands:
+.Bl -tag -width "substr(S, I, N)"
+.It Fn length S
+the number of bytes in
+.Ar S ;
+.It Fn cat A B
+the bytes of
+.Ar A
+followed by those of
+.Ar B ;
+.It Fn substr S I
+the bytes of
+.Ar S
+from position
+.Ar I
+on;
+.It Fn substr S I N
+at most
+.Ar N
+bytes of
+.Ar S
+from position
+.Ar I ;
+.It Fn index S T
+the first position at which the bytes of
+.Ar T
+occur in
+.Ar S ,
+or \-1 when they do not;
+.It Fn match S R
+the first position at which the regular expression
+.Ar R
+matches in
+.Ar S ,
+or \-1 when it does not;
+.It Fn str V
+.Ar V
+as a string: a string itself, a symbol's name, or an integer in decimal.
+.El
+.Pp
+A string is its bytes and nothing more:
+.Ql length
+counts bytes rather than characters, a position is a byte offset counted
+from 0, and
+.Ql substr
+can cut a character of several bytes in half.
+.Ql substr
+keeps the positions of
+.Ar S
+from
+.Ar I ,
+up to
+.Ar I Ns + Ns Ar N ,
+that lie in the string, so every integer is a valid argument:
+.Ql substr("abc", \-1, 2)
+is
+.Ql \(dqa\(dq
+and
+.Ql substr("abc", 5)
+is empty.
+The empty string occurs in every string at position 0, and the empty
+pattern matches there.
+Tests are comparisons over what the functions give:
+.Bd -literal -offset indent
+unsafe(P) :- path(P), index(P, "..") >= 0.
+object(S, O) :- source(S), substr(S, length(S) - 2) = ".c",
+    O = cat(substr(S, 0, length(S) - 2), ".o").
+test_file(P) :- path(P), match(P, "^tests/.*\e\e.c$") >= 0.
+.Ed
+.Pp
+An argument that is not of the type the function takes, a symbol or an
+integer where it takes a string, or anything but an integer where it takes
+a position or a count, is rejected when the program is read if it is a
+constant, as in
+.Ql length(foo) ;
+a variable holding one when the call is evaluated makes the call no value,
+and a comparison or assignment over it false.
+.Ql str
+takes any value, and
+.Ql str(foo)
+is the string
+.Qq foo .
+A body literal that begins with a call is a comparison when an operator or
+a comparator follows the call's closing parenthesis, and an atom otherwise,
+so a predicate may be named
+.Ql length
+and read as
+.Ql length(X, N) .
+A string longer than 4294967294 bytes is an error, as an integer outside
+the 64-bit integers is, and so is a pattern that is not a regular
+expression: one written as a string constant rejects the program when it is
+loaded, and one read from a variable stops the evaluation that meets it.
+A rule computing a new string from one it derived, such as
+.Ql s(Y) :- s(X), Y = cat(X, \(dqa\(dq) ,
+derives until a limit stops it; bound it with a comparison, as
+.Ql length(X) < 20
+would.
+.Pp
+The regular expressions are those of
+.Xr grep 1
+.Fl E ,
+over bytes, less counted repetition, character classes and
+back-references:
+.Ql \&.
+matches any byte,
+.Ql [set]
+one byte of the set and
+.Ql [^set]
+one byte not in it, a set holding bytes and ranges such as
+.Ql a\-z ,
+.Ql |
+separates alternatives,
+.Ql * ,
+.Ql +
+and
+.Ql \&?
+repeat what precedes them any number of times, at least once and at most
+once, parentheses group,
+.Ql ^
+and
+.Ql $
+match at the start and the end of the string, and a backslash makes the
+byte after it stand for itself.
+A string constant's escapes are decoded before the pattern is read, so a
+pattern written as a constant doubles its backslashes, as
+.Ql \(dq\e\e.c$\(dq
+does above.
+Parentheses nest at most 32 deep.
+A match takes time linear in the string for a given pattern; no pattern
+makes it backtrack.
+.Pp
 An aggregate folds the rows of a body in braces into one value, and is
 written only as the right side of an equality:
 .Bd -literal -offset indent
@@ -304,7 +436,8 @@ queries, or else the program's own, continued in an interactive session as
 describes.
 Twice: also a note for the first comparison or aggregate in each rule that
 had no value and was easily unintended: a comparison that ordered values of
-different types or applied an operator to a symbol or a string, which is
+different types, applied an operator to a symbol or a string, or called a
+string function with an argument of a type it does not take, which is
 false, or an aggregate whose rows were not all integers or not all of one
 type.
 .It Fl X Ar debug
@@ -452,8 +585,9 @@ included; by default there is no limit.
 .It Cm memory
 the most bytes relation and index storage, the program's facts included,
 the table of the integers the program states and evaluation computes, the
-plans of an evaluation and the rewrite of a query may occupy together;
-by default there is no limit.
+symbols and strings the program states and evaluation computes, the
+buffers an evaluation computes strings in, the plans of an evaluation and
+the rewrite of a query may occupy together; by default there is no limit.
 A long rule's plans can need more memory than the data does.
 .It Cm magic-preds
 the most predicates the rewrite of one query may generate.
@@ -474,11 +608,11 @@ When neither
 .Cm magic
 limit is set, the rewrite has budgets in proportion to the program, on the
 predicates it generates and on the literals of the rules it drafts, a
-literal with an expression counting one more per operator and operand,
-which bound the rules it keeps as well, and a rewrite that outgrows one is
-abandoned with a warning and the query answered from the whole program,
-which never answers differently but may meet an arithmetic error the
-rewrite would not have.
+literal with an expression counting one more per operator, call and
+operand, which bound the rules it keeps as well, and a rewrite that
+outgrows one is abandoned with a warning and the query answered from the
+whole program, which never answers differently but may meet an arithmetic
+or string error the rewrite would not have.
 Setting either lifts every budget: a
 .Cm magic
 limit that is set is a limit like the others, and one left unset beside it

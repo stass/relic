@@ -429,7 +429,7 @@ and indexes are what actually grow:
 | Limit | Counts | Configured by |
 | --- | --- | --- |
 | `max_tuples` | tuples across every relation, base stores included | `-l tuples=N` |
-| `max_memory` | bytes of column and index storage, plus an operation's arenas and a round's candidate buffers | `-l memory=N` |
+| `max_memory` | bytes of column and index storage, the value table and the symbol pool, plus an operation's arenas and a round's buffers | `-l memory=N` |
 
 Zero means unlimited, so a zeroed configuration asks for the defaults.
 
@@ -441,12 +441,25 @@ the difference would let a relation hold twice what the user allowed, which
 would defeat the purpose of asking. A fact of a derived predicate is held
 twice, in its base store and in its derived relation, and counted twice.
 
+It also counts, whole, the value table's integers and string bits and the
+symbol pool -- its entries, its identifier table and its string arena --
+since arithmetic computes integers and the string functions compute
+strings, so each grows with what running the program does, not only with
+what the caller wrote: `s(Y) :- s(X), Y = cat(X, "a")` interns a string
+per derivation. Each is checked before evaluation grows it, by the
+measure that predicts the identifiers a batch's pending values will take,
+`specs/design-arithmetic.md` section 8.3 and `specs/design-strings.md`
+section 9.1, and refused with the store's message. What the program's text
+or the caller writes is interned as it is read, counted but not refused,
+since it is sized by what the caller wrote; the next load, rewrite or
+evaluation that finds the total past the limit is refused.
+
 It does not count the arrays of relation headers, a relation's array of index
-headers, the predicate table, the value table, the arenas that hold the
-program's rules, the schedule or a query as the caller wrote them, the text
-a load reads, or the staging a load holds its facts in until it commits.
-Those are sized by what the caller wrote, and the limit exists to bound what
-the program's stores hold and what running the program can do. The arenas
+headers, the predicate table, the arenas that hold the program's rules, the
+schedule or a query as the caller wrote them, the text a load reads, or the
+staging a load holds its facts in until it commits. Those are sized by what
+the caller wrote, and the limit exists to bound what the program's stores
+hold and what running the program can do. The arenas
 that hold an evaluation's plans and a query's rewrite are sized by the square
 of a body and are charged to the same total, per
 `specs/design-planning-cost.md` section 6; the check there is the arena's,
@@ -454,7 +467,9 @@ and this document's total is the part the store contributes. So are the
 buffers in which a round that defers its insertions gathers candidates,
 a third kind of holder that exists only until the round's merge and is
 released before anything else asks the limit for room
-(`specs/design-parallel.md` section 8). The workers of a round grow their
+(`specs/design-parallel.md` section 8), and the buffers an evaluation
+computes strings in, which live for one round,
+`specs/design-strings.md` section 8.1. The workers of a round grow their
 buffers at once, so that holder's total is one atomic word, raised by
 compare-and-swap only when the whole total stays within the limit.
 

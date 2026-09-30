@@ -61,6 +61,7 @@ enum relic_op_kind {
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
 	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
 	RELIC_OP_FILTER,	/* does a comparison of two bound values hold? */
+	RELIC_OP_ASSIGN,	/* bind a slot to a value computed from bound ones */
 	RELIC_OP_AGGREGATE,	/* fold a group relation's rows for a bound key */
 	RELIC_OP_EMIT		/* derive the head tuple */
 };
@@ -87,6 +88,7 @@ down this path, which is what makes it the last operation of every plan.
 | `MEMBER` | every column | nothing | once or never |
 | `ANTI_MEMBER` | every column | nothing | once or never |
 | `FILTER` | both operands | nothing | once or never |
+| `ASSIGN` | its expression's slots | its variable's slot | once or never |
 | `AGGREGATE` | the key slots, the group relation's tuples for that key | its result slot, or nothing when it compares | once or never |
 | `EMIT` | every head column | nothing | never |
 
@@ -96,6 +98,42 @@ is bound is a membership question, and the canonical full-tuple index of
 same question with the answer inverted, which is the whole of negation once
 stratification has guaranteed that the negated relation is complete; see
 architecture section 31.
+
+`ASSIGN` is the other test that binds. An equality whose one side is a
+bare variable not yet bound, and whose other side reads only bound slots,
+binds the variable to the other side's value where it is placed and adds
+it to the bound set; every other comparison is a `FILTER`. A value of the
+wrong type for an operator or a function leaves the expression without a
+value, and the assignment then rejects the binding. An undefined
+result -- an overflow, a zero divisor, a string too long, a pattern that is
+not one -- fails the evaluation rather than the binding.
+`specs/design-arithmetic.md` section 7 and `specs/design-strings.md`
+section 7.4.
+
+**An expression runs as a postfix program.** A `FILTER`'s operands and an
+`ASSIGN`'s expression are compiled with the plan to an array of steps in
+postfix order, run over a stack of cells:
+
+```c
+enum relic_step_kind {
+	RELIC_STEP_CONSTANT,	/* push a constant's identifier */
+	RELIC_STEP_DOMAIN_SLOT,	/* push a domain slot's identifier */
+	RELIC_STEP_NUMBER_SLOT,	/* push a number slot's integer */
+	RELIC_STEP_TEXT_SLOT,	/* push a text slot's bytes */
+	RELIC_STEP_NEGATE,
+	RELIC_STEP_BINARY,
+	RELIC_STEP_CALL		/* pop a function's arguments, push its result */
+};
+```
+
+Which kind of slot a step reads is decided with the plan, since a slot's
+kind is a fact about the plan and not the rule. A `CALL` of `match` whose
+pattern is a constant carries the pattern compiled with the rule. The
+stack a program needs is computed from its tree: a leaf needs one cell,
+and a node needs the greatest of its argument i's need plus i, counting
+from zero, so a tree of height h needs at most 2h - 1 cells and every
+program fits a stack of `RELIC_POSTFIX_DEPTH_MAX`, 63, sized once;
+`specs/design-strings.md` section 7.4.
 
 `AGGREGATE` is a test that binds. It folds the tuples of a complete group
 relation whose leading columns equal its key into one value, `count`,
@@ -129,6 +167,8 @@ not only what the column is but what the executor must do with it:
 enum relic_term_action {
 	RELIC_PLAN_CONSTANT,	/* must equal an interned constant */
 	RELIC_PLAN_BOUND,	/* must equal a slot bound before this column */
+	RELIC_PLAN_NUMBER,	/* an EMIT's number slot: its integer */
+	RELIC_PLAN_TEXT,	/* an EMIT's text slot: its bytes */
 	RELIC_PLAN_BIND,	/* binds its slot from the tuple */
 	RELIC_PLAN_ANY		/* `_`: matches anything, binds nothing */
 };
@@ -148,6 +188,20 @@ processes columns left to right, so that falls out without a case of its own.
 `BIND` and `ANY` occur only in a generator. A test reads bound values and
 constants and nothing else, and `EMIT` reads only what the rule's safety
 guarantees is bound by the time it runs.
+
+**A slot is of one of three kinds**, fixed by the operation that binds it.
+A domain slot's frame entry is a domain identifier. A number slot, bound
+by an `ASSIGN` of a computed integer or by a `count` or `sum`, keeps its
+integer beside the frame; a text slot, bound by an `ASSIGN` of a string a
+function computed, keeps its bytes in the executor's text stack. The frame
+entry of either is the value's identifier when the context has assigned
+the value one, and zero when it has not, so every operation over a
+relation reads it through `BOUND` like any other and matches nothing when
+the value is new, which is right: no relation holds a value the context has
+not assigned. Only an `EMIT` needs the value itself, to store it, and
+reads a number slot through `NUMBER` and a text slot through `TEXT`;
+`specs/design-arithmetic.md` section 7.2 and `specs/design-strings.md`
+section 7.2.
 
 ---
 
@@ -445,6 +499,3 @@ The plan contributes three things to the reproducibility of a run:
 * **Recursion in the plan.** A plan is flat; the nesting of the join is the
   order of the array, which is what lets the executor run it with a loop.
 * **Plan caching across evaluations.** Section 6.1.
-* **An operation for a comparison that binds.** Comparisons are filters, per
-  architecture section 10: `X = 42` does not bind `X`. Arithmetic and
-  assignment are post-v1.

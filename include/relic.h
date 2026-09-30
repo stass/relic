@@ -135,8 +135,9 @@ typedef struct relic_config relic_config_t;
  * prepared query are sized by what the caller wrote; the names, symbols,
  * strings and integers it writes are counted by the limit but refused only
  * when an evaluation computes them; and the tables and evaluation order of
- * a query's rewrite are a fraction of the rewrite the limit does count.  Nor is it a bound on peak usage, since
- * growing an array holds the old one until the new one is filled.
+ * a query's rewrite are a fraction of the rewrite the limit does count.
+ * Nor is it a bound on peak usage, since growing an array holds the old one
+ * until the new one is filled.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
  * single query: the adorned and magic predicates it generates, and the rules it
@@ -151,12 +152,13 @@ typedef struct relic_config relic_config_t;
  * from the whole program, as it would be with RELIC_F_NO_MAGIC: the rewrite
  * is an optimization, and without a limit the caller asked for it must not
  * decide whether a query is answered.  The whole program never answers
- * differently, but it may meet an undefined arithmetic result or a string
- * too long the rewrite would not have evaluated, and fail.  The budgets bound the rewrite, not
- * what its rules derive.  The rewrite searches for what to generate before it
- * generates anything, and the search is held to the same limits and budgets;
- * it can count predicates and rules the finished rewrite drops, so a limit may
- * refuse a query whose rewrite would have fit.
+ * differently, but it may meet an undefined arithmetic result, a string too
+ * long or an invalid pattern the rewrite would not have evaluated, and fail.
+ * The budgets bound the rewrite, not what its rules derive.  The rewrite
+ * searches for what to generate before it generates anything, and the
+ * search is held to the same limits and budgets; it can count predicates
+ * and rules the finished rewrite drops, so a limit may refuse a query whose
+ * rewrite would have fit.
  *
  * `threads` is how many threads an evaluation may share a round's work
  * among, the calling thread included; zero and one both mean the calling
@@ -237,10 +239,10 @@ struct relic_config {
  * Report, as a RELIC_NOTE pointing at the comparison, the first comparison
  * in each rule that ordered values of different types, that applied an
  * arithmetic operator to a symbol or a string, or that called a string
- * function with an argument of a type it does not take.  Such a comparison is false
- * and filters its binding out, which is the language's rule rather than a
- * mistake, so it is reported only when asked for; the note is how a column
- * holding types nobody meant to mix is discovered.
+ * function with an argument of a type it does not take.  Such a comparison
+ * is false and filters its binding out, which is the language's rule
+ * rather than a mistake, so it is reported only when asked for; the note
+ * is how a column holding types nobody meant to mix is discovered.
  *
  * A rule of the program is reported at most once for the life of the
  * context, and the rules a Magic Sets rewrite generates from it count as
@@ -604,8 +606,9 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * The program is checked first and must pass.  Evaluation fails when a
  * configured limit refuses a tuple, when memory runs out, when an
  * arithmetic expression has no defined result -- one outside the 64-bit
- * integers, or a division or remainder by zero -- or when a string function
- * would compute a string longer than a string value can be, and the next
+ * integers, or a division or remainder by zero -- when a string function
+ * would compute a string longer than a string value can be, or when `match`
+ * is given a pattern that is not a regular expression, and the next
  * evaluation starts again from the facts.
  *
  * Nothing is recomputed when the program has gained no rule and no fact
@@ -687,8 +690,9 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * derives is discarded by the next query or evaluation.  A rewrite that
  * outgrows its budget, when no Magic limit is configured, is abandoned with
  * a warning, and the query answered from the whole program instead, which
- * can fail on an undefined arithmetic result or a string too long the
- * rewrite would not have reached, and never answers differently.
+ * can fail on an undefined arithmetic result, a string too long or an
+ * invalid pattern the rewrite would not have reached, and never answers
+ * differently.
  *
  * No row is delivered until everything that can fail has succeeded.  A query
  * answered in a context whose max_tuples and max_memory each set no limit,
@@ -700,11 +704,10 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * computes nothing, since any computation may fail.  Any other query's
  * answer is gathered whole, its duplicates dropped and the limits bounding
  * it, before its first row is delivered.  A query that fails -- a limit
- * exceeded, say, an arithmetic result that is not defined, or a string too
- * long -- therefore delivers no rows at all rather
+ * exceeded, say, an arithmetic result that is not defined, a string too
+ * long or an invalid pattern -- therefore delivers no rows at all rather
  * than a truncated answer that would be indistinguishable from a complete
- * one.  A
- * diagnostic the query's evaluation reports, such as the note
+ * one.  A diagnostic the query's evaluation reports, such as the note
  * RELIC_F_NOTE_MIXED asks for, may come between rows delivered as they are
  * derived.
  *
@@ -714,9 +717,11 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * does not depend on that.
  *
  * The answer is transient.  Once its rows have been delivered, or the
- * callback has stopped them, the context keeps nothing of it, so answering
- * many queries does not grow the context and earlier answers do not count
- * against the tuple and memory limits.  An answer delivered as it is derived
+ * callback has stopped them, the context keeps nothing of it, so earlier
+ * answers do not count against the tuple limit.  The integers and strings
+ * a query computes are interned when its answer is gathered, and those
+ * stay for the life of the context, counted by the memory limit, as every
+ * value interned does.  An answer delivered as it is derived
  * is never held at all.  A caller that wants to keep an answer copies it, as
  * relic_query_collect() does.
  *

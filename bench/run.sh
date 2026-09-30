@@ -10,9 +10,9 @@
 # what -X stats counted: the tuples derived, the tuples held at the end, and
 # the tuples scanned and looked up, which say how the time was spent.
 # BENCH_SCALE, 1 by default, grows every workload: it multiplies the
-# chain's length, the graph's nodes and edges, the tasks and the facts, and
-# the grid's side, and deepens the trees by one level per step, which
-# doubles them.
+# chain's length, the graph's nodes and edges, the tasks, the facts, the
+# files and the grid's side, and deepens the trees by one level per step,
+# which doubles them.
 #
 # Nothing fails on a time.  Timing depends on the machine and is noisy;
 # tests/perf.sh is the test that bounds performance, on counters where it
@@ -106,6 +106,14 @@ ready(X) :- task(X), not done(X), not blocked(X).'
 # Over the facts, a join, so the workload is mostly loading.
 facts_rules='pair(A, B) :- row(A, V, 7), row(B, V, 13).'
 
+# Over the file paths, each file that is not a test with its directory and
+# extension, and the files counted per directory and extension: a string
+# computed per path, a pattern matched per path, and groups of strings.
+files_rules='kind(P, D, E) :- file(P), match(P, "/test_[0-9]+[.]") < 0,
+    D = substr(P, 0, 7), E = substr(P, index(P, ".") + 1).
+group(D, E) :- kind(_, D, E).
+grouped(D, E, N) :- group(D, E), N = count { kind(P, D, E) }.'
+
 # make_program NAME RULES: generate the data set NAME into its own directory
 # and write $work/NAME.dl, its facts followed by RULES.
 make_program() {
@@ -159,6 +167,7 @@ make_program tree "$tree_rules"
 make_program small-tree "$tree_rules"
 make_program tasks "$tasks_rules"
 make_program facts "$facts_rules"
+make_program files "$files_rules"
 
 printf '%-28s %8s %11s %10s %11s %11s\n' workload seconds derived held \
     scanned "looked up"
@@ -174,3 +183,4 @@ run "tree, same generation" "$work/tree.dl" -q 'sg(t2048, X)?'
 run "tree, all generations" "$work/small-tree.dl" -q 'sg(X, Y)?'
 run "tasks, ready" "$work/tasks.dl" -q 'ready(X)?'
 run "facts, load and join" "$work/facts.dl" -q 'pair(A, B)?'
+run "files, grouped" "$work/files.dl" -q 'grouped(D, E, N)?'

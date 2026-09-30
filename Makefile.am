@@ -81,7 +81,8 @@ EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
 	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
-	tests/fuzz/relic.dict tests/lang tests/langtest.sh
+	tests/fuzz/regex.dict tests/fuzz/relic.dict tests/lang \
+	tests/langtest.sh
 
 ##
 ## The example is built and run by make installcheck, against the installed
@@ -514,7 +515,8 @@ tests_fuzz_fuzz_regex_LDADD = librelic_internal.la $(LTLIBOBJS)
 # product whose tuples are all duplicates -- so a timeout from the eval
 # target needs reading before it is called a bug.  The import target reads
 # tables rather than programs, so it takes neither the language's dictionary
-# nor its seeds.
+# nor its seeds; the regex target takes a dictionary of the pattern
+# dialect's metacharacters.
 fuzz: $(noinst_PROGRAMS)
 	@for target in load eval; do \
 		corpus=fuzz-corpus/$$target; \
@@ -537,6 +539,7 @@ fuzz: $(noinst_PROGRAMS)
 	@echo "fuzzing regex for $(FUZZ_SECONDS) seconds"
 	@./tests/fuzz/fuzz_regex -max_total_time=$(FUZZ_SECONDS) \
 	    -max_len=4096 -timeout=10 \
+	    -dict=$(srcdir)/tests/fuzz/regex.dict \
 	    -artifact_prefix=fuzz-artifacts/regex/ fuzz-corpus/regex \
 	    $(srcdir)/tests/fuzz/corpus-regex
 else

@@ -281,7 +281,12 @@ Worker 0 reads them after the barrier, whose acquire covers them.
 
 A worker abandons a job when it cannot go on: its candidate buffer could
 not grow, for memory or because the memory limit refused it, or the round
-holds more candidates than the tuple limit could ever admit, section 8. It
+holds more candidates than the tuple limit could ever admit, section 8, or
+its plan met an evaluation error -- an integer overflow, a zero divisor, a
+string too long, a pattern that is not one, or a growth of the buffers it
+computes strings in that was refused. The serial rerun meets that error,
+or one before it in serial order, and reports it, so an evaluation error
+names the first error in serial order at every thread count. It
 sets the abandon word, drops its task and leaves its claim loop, reporting
 completion as any worker does; every other worker finishes the task it
 holds and leaves too, which bounds the wait at one task. Nothing is
@@ -430,6 +435,20 @@ inserted. In a parallel round it is **screened** twice:
    high half is what the stripes of section 6.3 are chosen by -- to the
    worker's **candidate buffer**.
 
+**A pending value is screened by value.** A head column holding a value
+the plan computed and the context has not assigned -- an integer, or a
+string with its bytes -- holds a pending marker, and the worker gives the
+value a marker of its own: its position among the distinct pending values
+the worker has derived this round, found through a per-worker table keyed
+by the integer or by the string's bytes, so that equal values hold equal
+markers and a candidate is compared by value as by identifier. The
+worker's candidate buffer carries those values, the strings' bytes beside
+them, charged as the buffer is. Against the frozen store such a candidate
+is new and is not looked up, since a value the context had not assigned
+when the round began is in no relation the round reads;
+`specs/design-arithmetic.md` section 9.2 and `specs/design-strings.md`
+section 9.2.
+
 The second screen is what keeps the candidates proportional to the
 worker's *distinct* new tuples rather than to its derivations. Without it
 a round whose target starts empty -- a base pass, a component that is not
@@ -454,6 +473,14 @@ round above the threshold of section 5.4 does not notice.
 The executor scratches, one per worker, belong to the pool as the task
 array does: sized by the longest plan of the evaluation, grown when a
 round needs more, not charged, and a failed growth runs the round
+serially. The exception is the four buffers sized by the data a plan
+meets rather than by the plan -- the text stack, the pending bytes and the
+two parts of the match space of `specs/design-strings.md` section 8. A
+round whose plans call a string function gives every worker's scratch its
+own before the job is published, charged to the account as a round's
+buffers, and releases them, charge and all, once the job completes and
+before the merge asks the limit for room; a round whose buffers the limit
+or the allocator would refuse is declined before it begins and runs
 serially.
 
 Every counter the executor advances -- tuples scanned, looked up,
@@ -553,6 +580,40 @@ fed from buffers instead of from the EMIT.
 The candidates carry their hashes, computed when they were screened, so
 the merge hashes nothing; it probes, and the probes of a batch are
 prefetched as they are today.
+
+**Pending values are resolved first.** Before phase 1 of section 6.3,
+worker 0 gathers every worker's pending values into one array in task
+order, each task's candidates in the order its worker derived them and
+each candidate's columns in order -- the order the serial evaluator meets
+them in -- copying each worker's string bytes once at that worker's own
+offset. It measures them, promising each value the identifier the serial
+run gives it: its own when the context has assigned one, and otherwise
+the next in order of first occurrence. The workers then rewrite their
+candidates' markers to those identifiers and hash each rewritten
+candidate again, so that the stripes and the screens read final
+identifiers. The value table's and the pool's growth join the relations'
+in the one question put to the memory limit; the commit's reservation is
+made with the relations' in phase 5, where it can fail only for memory,
+and a merge declined after it succeeded gives the reservation back,
+rewinding the pool's arena so that no copy of a new string is left
+behind; the values are appended in the phases that cannot fail, before
+the tuples that name them are. `specs/design-arithmetic.md` section 9.2
+and `specs/design-strings.md` section 9.2.
+
+**The workers' text buffers are counted as the serial run's would be.**
+The serial evaluator asks the limit with its text buffers charged at
+whatever capacity they have reached; the merge asks with the workers'
+already released. So the merge's admission adds, for each of the four
+buffers, the largest capacity any worker's reached. A buffer that doubles
+until it fits has a capacity that depends only on the largest request
+made of it, and the tasks together make every request the serial run
+makes, so that capacity is at least the serial run's at the round's end,
+and the admission is at least as strict as every question the serial run
+puts in the round. It can be larger for the pending bytes, since a string
+the serial run interned earlier in the round is no longer pending there
+while a worker, reading the frozen pool, still carries its bytes; a merge
+declined on that excess is run again serially, where the limit judges it
+exactly. `specs/design-strings.md` section 8.1.
 
 A candidate that another worker's candidate has already inserted is found
 as a duplicate in the ordinary way, and that is the whole treatment of
@@ -718,9 +779,12 @@ and cannot name a member of one, to read it or to write it. What it can do
 with them is exactly the functions that header declares --
 `relic_relation_tuple()`, `relic_relation_find()`, `relic_relation_all()`,
 `relic_relation_index_at()`, `relic_index_first()`, `relic_index_next()`,
-`relic_index_first_since()`, `relic_value_order()`, and the few more the
-screening needs -- each of which takes its operands `const` and hands back
-nothing that could be written through. What a plan needs of a relation for
+`relic_index_first_since()`, `relic_value_order()`,
+`relic_value_find_integer()` and `relic_value_find_string()`, the lookup
+half of interning, which a plan needs to tell a computed value the context
+holds from one it lacks, and the few more the screening needs -- each of
+which takes its operands `const` and hands back nothing that could be
+written through. What a plan needs of a relation for
 every tuple, its arity, the planner copies into the operation. The
 exception of section 7.2 reaches its mutable words inside `lib/index.c`,
 through a pointer the `const` does not cover, and the account's total of
@@ -816,9 +880,10 @@ later round, a merge or an index build -- ever asks the limit for room
 the buffers hold. `relic_leave()`'s check that an operation gave back
 every charged byte covers them.
 
-What the pool holds for itself -- the task array, the executor scratches,
-the threads -- is sized by the program and the thread count, not by the
-data, and is not charged, as the arrays of relation and index headers are
+What the pool holds for itself -- the task array, the executor scratches
+but for the buffers of section 5.3 sized by the data, the threads -- is
+sized by the program and the thread count, not by the data, and is not
+charged, as the arrays of relation and index headers are
 not; a growth of it that fails runs the round serially rather than
 failing the evaluation, section 4.4, so a memory limit that admits a
 program at one thread admits it at sixteen.
@@ -1038,6 +1103,17 @@ overflowing sum fails: a fold reads a complete relation and writes only
 its task's scratch, a group rule's pass is shared as any one-pass
 component's is, and an overflow abandons the job so that the serial
 evaluator reports it, `specs/design-aggregates.md` sections 9.4 and 16.
+
+A program that computes values is held to them too, and they include what
+the value table and the symbol pool hold: the merge interns the round's
+new integers and strings in the serial order of first occurrence among
+the candidates in task order, which is the serial derivation order with
+duplicates removed, under the identifiers the serial run gives them, and
+reserves the stepwise capacity the serial run reaches. So `integer_values`,
+`string_values` and `storage_bytes` agree at every thread count, after a
+successful run, after a run a tuple limit fails and after a run an
+evaluation error fails; `specs/design-arithmetic.md` section 9.2 and
+`specs/design-strings.md` sections 9.2 and 17.
 
 The golden tests are therefore run at one thread and at several, with
 `-X parallel`, and compared byte for byte, `parallel_rounds` aside;

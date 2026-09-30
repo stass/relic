@@ -2,10 +2,12 @@
 #
 # `dataset NAME DIR SCALE` writes one data set into DIR: one file per
 # relation, <relation>.tsv, one tuple per line with its columns separated by
-# tabs, symbols bare and integers in decimal.  That is the form Souffle,
-# Nemo, DuckDB and SQLite read directly; source_facts turns it into the fact
-# syntax relic, SWI-Prolog and clingo share.  The generators are awk programs over a fixed
-# sequence, so a data set is the same on every run and every platform.
+# tabs, symbols, strings and integers alike written as their text.  That is
+# the form Souffle, Nemo, DuckDB and SQLite read directly; source_facts turns
+# it into the fact syntax relic, SWI-Prolog and clingo share, telling a
+# symbol from a string by its spelling.  The generators are awk programs
+# over a fixed sequence, so a data set is the same on every run and every
+# platform.
 
 # dataset NAME DIR SCALE: generate the data set NAME into DIR, every size
 # multiplied by SCALE; a tree deepens by one level, doubling, per step.
@@ -29,6 +31,7 @@ dataset() {
 	small-tree) dataset_tree "$2" $((9 + $3 - 1)) ;;
 	tasks) dataset_tasks "$2" $((10000 * $3)) ;;
 	facts) dataset_facts "$2" $((300000 * $3)) ;;
+	files) dataset_files "$2" $((300000 * $3)) ;;
 	dense-cyclic) dataset_random "$2" $((1000 * $3)) $((50000 * $3)) cyclic ;;
 	dense-acyclic) dataset_random "$2" $((1000 * $3)) $((50000 * $3)) acyclic ;;
 	sparse-cyclic) dataset_random "$2" $((1000 * $3)) $((5000 * $3)) cyclic ;;
@@ -194,6 +197,32 @@ dataset_facts() {
 	}'
 }
 
+# dataset_files DIR N: N file paths, file(Path), each a string such as
+# "d07/s03/util_1234.py": a directory of two fixed-width levels, twenty by
+# ten, then a name, one of four prefixes and the file's number, so that
+# names vary in length, and one of six extensions.  ext(E) lists the
+# extensions, for an engine that finds a path's extension by trying each.
+dataset_files() {
+	dataset_dir=$1 awk -v n="$2" "$datasets_random_awk"'
+	BEGIN {
+		files = ENVIRON["dataset_dir"] "/file.tsv"
+		extensions = ENVIRON["dataset_dir"] "/ext.tsv"
+		split("c h py txt json md", extension, " ")
+		split("mod_ util_ test_ main", prefix, " ")
+		for (e = 1; e <= 6; e++)
+			print extension[e] > extensions
+		state = 11
+		for (i = 0; i < n; i++) {
+			top = next_random(20)
+			below = next_random(10)
+			kind = 1 + next_random(4)
+			suffix = 1 + next_random(6)
+			printf "d%02d/s%02d/%s%d.%s\n", top, below, \
+			    prefix[kind], i, extension[suffix] > files
+		}
+	}'
+}
+
 # dataset_random DIR N M SHAPE: a random graph of the kind OpenRuleBench uses,
 # par(From, To), over the nodes 0 to N-1 as integers, with M edges drawn
 # from the sequence; 1000 nodes and 50000 edges is the size of
@@ -328,15 +357,24 @@ dataset_cspa() {
 }
 
 # source_facts DIR: every relation in DIR as facts, relation(a, b, 7), a
-# syntax relic, SWI-Prolog and clingo all read.  The relations come in the
-# order of their file names, each whole, as SWI-Prolog wants a predicate's
+# syntax relic, SWI-Prolog and clingo all read.  A value spelled as neither
+# an integer nor a symbol is a string, and is quoted; no data set writes a
+# string holding a quote or a backslash.  The relations come in the order
+# of their file names, each whole, as SWI-Prolog wants a predicate's
 # clauses together.
 source_facts() {
 	for file in "$1"/*.tsv; do
-		awk -F '\t' -v relation="$(basename "$file" .tsv)" '{
-			printf "%s(%s", relation, $1
+		awk -F '\t' -v relation="$(basename "$file" .tsv)" '
+		function term(value) {
+			if (value ~ /^-?[0-9]+$/ ||
+			    value ~ /^[a-z][A-Za-z0-9_]*$/)
+				return value
+			return "\"" value "\""
+		}
+		{
+			printf "%s(%s", relation, term($1)
 			for (i = 2; i <= NF; i++)
-				printf ", %s", $i
+				printf ", %s", term($i)
 			print ")."
 		}' "$file"
 	done

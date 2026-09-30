@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <strings.h>
 
 #include "random.h"
@@ -99,6 +100,22 @@
  * the overflow would fail the query, a failure the harness reports, rather
  * than hide a disagreement.
  *
+ * A program that computes may also call the string functions, which the
+ * model counts as operators: a call is a literal holding one, drawn under
+ * the same budget and in the same bodies, so a computed string never feeds
+ * its own computation either.  Calls are defined by construction.  A
+ * pattern is drawn from a fixed list of valid ones, never from a variable,
+ * so no pattern fails to compile.  A string argument is a bound variable
+ * or a string of the constant pool, of at most three bytes; `str` of an
+ * integer spells at most twenty; and an expression holds at most three
+ * leaves, so a call's string is at most three times as long as the longest
+ * of its arguments, or twenty bytes.  Through the twelve literals a value
+ * passes at most, no string exceeds 20 * 3^12 bytes, some ten megabytes,
+ * far below the length limit, and no integer a call gives -- a length or a
+ * position -- exceeds that either, below the 2^24 the bound above allows
+ * a count.  An argument of the wrong type makes a call no value, which
+ * filters the binding under every strategy alike.
+ *
  * The random stream is splitmix64, which is defined by its arithmetic alone,
  * so a seed names the same program on every platform and C library.
  */
@@ -107,13 +124,14 @@ typedef struct random_stream random_stream_t;
 
 /*
  * The generator's state: the random stream, whether the program being
- * drawn computes, which decides the constants it may state, and whether its
- * bodies may hold aggregates.
+ * drawn computes, which decides the constants it may state, whether its
+ * bodies may hold aggregates, and whether what it computes may be strings.
  */
 struct random_stream {
 	uint64_t	state;
 	bool		computes;
 	bool		aggregates;
+	bool		strings;
 };
 
 /*
@@ -144,6 +162,29 @@ const random_constant_t random_constants[] = {
 };
 const size_t random_constant_count =
     sizeof(random_constants) / sizeof(random_constants[0]);
+
+/*
+ * The patterns, each valid in the dialect of `match`: literal bytes, both
+ * anchors, sets and their negation, alternation, repetition, a group, an
+ * escaped metacharacter, and the empty pattern, which every string matches.
+ * Most match some of the pool's strings, a few none.
+ */
+const char *const random_patterns[] = {
+	"\"a\"",
+	"\"^a\"",
+	"\"a$\"",
+	"\"^$\"",
+	"\"\"",
+	"\"[a-c]+\"",
+	"\"[^a ]\"",
+	"\"x|y\"",
+	"\"(a|b)*c\"",
+	"\".?\"",
+	"\"\\\\.\"",
+	"\"^-?[0-9]+$\"",
+};
+const size_t random_pattern_count =
+    sizeof(random_patterns) / sizeof(random_patterns[0]);
 
 #define	COMMON_CONSTANTS	7
 
@@ -188,6 +229,14 @@ static void		 draw_comparison(random_stream_t *stream,
 static void		 draw_expression(random_stream_t *stream,
 			    uint64_t bound_variables,
 			    random_expression_t *expression);
+static void		 draw_call(random_stream_t *stream,
+			    uint64_t bound_variables,
+			    random_expression_t *expression);
+static random_call_t	 draw_inner_call(random_stream_t *stream,
+			    random_call_t outer);
+static random_term_t	 draw_argument(random_stream_t *stream,
+			    uint64_t bound_variables, char kind);
+static random_term_t	 draw_string_constant(random_stream_t *stream);
 static random_function_t draw_function(random_stream_t *stream);
 static random_term_t	 draw_leaf(random_stream_t *stream,
 			    uint64_t bound_variables);
@@ -268,6 +317,7 @@ random_generate(random_program_t *program, uint64_t seed)
 	stream.state = seed;
 	stream.computes = draw_chance(&stream, 2);
 	stream.aggregates = draw_chance(&stream, 2);
+	stream.strings = stream.computes && draw_chance(&stream, 2);
 
 	generate_predicates(&stream, program, &extensional_count);
 
@@ -781,7 +831,8 @@ draw_assignment(random_stream_t *stream, random_literal_t *literals,
  * numbers, fitted so that it is defined whatever integers its variables
  * hold: each operator's operands are fitted where it is drawn.  An operator
  * whose right operand is a group never divides by it, so a division or a
- * remainder there is made an addition.
+ * remainder there is made an addition.  In a program that computes
+ * strings, half the expressions are calls instead.
  */
 static void
 draw_expression(random_stream_t *stream, uint64_t bound_variables,
@@ -789,6 +840,11 @@ draw_expression(random_stream_t *stream, uint64_t bound_variables,
 {
 	random_term_t *leaves = expression->leaves;
 	random_operator_t *operators = expression->operators;
+
+	if (stream->strings && draw_chance(stream, 2)) {
+		draw_call(stream, bound_variables, expression);
+		return;
+	}
 
 	bzero(expression, sizeof(*expression));
 	expression->shape = (random_shape_t)(SHAPE_BINARY +
@@ -804,6 +860,8 @@ draw_expression(random_stream_t *stream, uint64_t bound_variables,
 
 	switch (expression->shape) {
 	case SHAPE_LEAF:
+	case SHAPE_CALL:
+	case SHAPE_NESTED_CALL:
 		break;
 	case SHAPE_BINARY:
 		fit_operation(stream, &leaves[0], operators[0], &leaves[1]);
@@ -820,6 +878,125 @@ draw_expression(random_stream_t *stream, uint64_t bound_variables,
 		fit_operation(stream, &leaves[1], operators[1], &leaves[2]);
 		break;
 	}
+}
+
+/*
+ * Draw a call of any function, a third of the time with a call as its first
+ * argument, each argument drawn for the type the function takes there.
+ */
+static void
+draw_call(random_stream_t *stream, uint64_t bound_variables,
+    random_expression_t *expression)
+{
+	const char *arguments;
+	size_t leaf = 0;
+	size_t function;
+
+	bzero(expression, sizeof(*expression));
+	expression->negated = draw_chance(stream, 8);
+	function = draw_below(stream, CALL_KINDS);
+	expression->calls[0] = (random_call_t)function;
+	arguments = random_calls[function].arguments;
+
+	expression->shape = SHAPE_CALL;
+	if (draw_chance(stream, 3)) {
+		const char *inner_arguments;
+
+		expression->shape = SHAPE_NESTED_CALL;
+		expression->calls[1] = draw_inner_call(stream,
+		    expression->calls[0]);
+		inner_arguments = random_calls[expression->calls[1]].arguments;
+		for (size_t a = 0; inner_arguments[a] != '\0'; a++)
+			expression->leaves[leaf++] = draw_argument(stream,
+			    bound_variables, inner_arguments[a]);
+		arguments++;
+	}
+
+	for (size_t a = 0; arguments[a] != '\0'; a++)
+		expression->leaves[leaf++] = draw_argument(stream,
+		    bound_variables, arguments[a]);
+	assert(leaf <= RANDOM_MAX_CALL_ARGUMENTS);
+}
+
+/*
+ * A call to stand as the first argument of `outer`: one whose value is of
+ * the type `outer` takes there, a string unless it takes any value, and
+ * whose arguments fit beside the outer call's others among an expression's
+ * leaves.  `str` always qualifies.
+ */
+static random_call_t
+draw_inner_call(random_stream_t *stream, random_call_t outer)
+{
+	const char *outer_arguments = random_calls[outer].arguments;
+	size_t room = RANDOM_MAX_CALL_ARGUMENTS - (strlen(outer_arguments) - 1);
+	random_call_t candidates[CALL_KINDS];
+	size_t candidate_count = 0;
+
+	for (size_t c = 0; c < CALL_KINDS; c++) {
+		const random_call_info_t *inner = &random_calls[c];
+
+		if (strlen(inner->arguments) > room)
+			continue;
+		if (!inner->text && outer_arguments[0] != 'v')
+			continue;
+		candidates[candidate_count++] = (random_call_t)c;
+	}
+
+	assert(candidate_count > 0);
+	return (candidates[draw_below(stream, candidate_count)]);
+}
+
+/*
+ * An argument of the type a signature letter names: for a string, two
+ * times in three a bound variable, when there is one, and otherwise a
+ * string of the pool; for an integer, what draw_leaf() gives; for a
+ * pattern, one of the list; for any value, a bound variable or a constant.
+ * A bound variable may hold a value of another type, which makes the call
+ * no value.
+ */
+static random_term_t
+draw_argument(random_stream_t *stream, uint64_t bound_variables, char kind)
+{
+	random_term_t term;
+
+	switch (kind) {
+	case 's':
+		if (bound_variables == 0 || draw_chance(stream, 3))
+			return (draw_string_constant(stream));
+		break;
+	case 'i':
+		return (draw_leaf(stream, bound_variables));
+	case 'p':
+		term.kind = TERM_PATTERN;
+		term.index = (uint8_t)draw_below(stream, random_pattern_count);
+		return (term);
+	default:
+		if (bound_variables == 0 || draw_chance(stream, 3))
+			return (draw_constant(stream));
+		break;
+	}
+
+	term.kind = TERM_VARIABLE;
+	term.index = draw_member(stream, bound_variables);
+	return (term);
+}
+
+/* A string of the constant pool, each alike. */
+static random_term_t
+draw_string_constant(random_stream_t *stream)
+{
+	uint8_t strings[sizeof(random_constants) / sizeof(random_constants[0])];
+	size_t string_count = 0;
+	random_term_t term;
+
+	for (size_t i = 0; i < random_constant_count; i++) {
+		if (random_constants[i].type == CONSTANT_STRING)
+			strings[string_count++] = (uint8_t)i;
+	}
+
+	term.kind = TERM_CONSTANT;
+	term.index = strings[draw_below(stream, string_count)];
+	return (term);
 }
 
 /*

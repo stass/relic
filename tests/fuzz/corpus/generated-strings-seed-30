@@ -1,0 +1,38 @@
+% seed 30
+p6(A, D, 0) :- p1(C, B), p2(B), E = -2 - (-2 + D), F = E + (1 - B), p5(B, A), D = sum(I) { H = I, p1(B, I) }, not p5(E, C), not p0(A, 2), B >= A.
+p4(-1, A) :- p5(B, B), E = A, p6(E, B, B).
+p0(1, -2).
+p0(d, -3).
+p2(a).
+p2(1).
+p4(D, A) :- p1(B, A), 3 mod -3 = D, E = min(G) { p2(G), p5(_, B) }, not p2(A), not p5(E, B).
+p0(0, -1).
+p2(0).
+p1(2, 2).
+p7(-1, C, A) :- A = sum(L) { p1(_, L), p0(L, K), not p5(0, K), K <= L }, C = max(I) { p1(_, I), I mod -3 mod 1 < substr("x y", I) }, -1 = E, 1 = F, p0(B, _), not p5(d, B).
+p1(2, a).
+p0(a, 2).
+p5(A, 1) :- p2(A).
+p0(-3, -2).
+p7(B, A, C) :- p6(B, _, A), p6(C, C, C), not p5(B, A), not p0(C, B).
+p2(-3).
+p6(A, D, B) :- D = min(G) { p1(G, I) }, p4(_, B), p6(A, B, A).
+p6(D, B, F) :- p6(B, B, A), p4(B, A), D = B, 1 = F, p4(_, A).
+p5(B, 1) :- p0(A, B), D = index(A, B).
+p0("a", -2).
+p3(B, E) :- -3 * (0 * C) = E, p6(A, B, B), p0(C, _).
+p1(c, b).
+p1(0, 1).
+p0(-2, a).
+p5(A, B) :- B = count { I = index(str(H), "\t\x01\0"), p2(H), -(substr(I, H, 3)) <= H }, p2(A), B <= A.
+p0(2, -1).
+p7(C, 1, D) :- C = E, p4(A, A), p4(D, B), E = min(H) { p5(H, I) }, D != A.
+p4(-3, -3) :- -3 <= length("").
+p2(d).
+p2(a).
+p3(-2, -2).
+p2(0).
+p2(E), substr("\t\x01\0", 2, E) = D, D = E - E / 1?
+A = count { match(H, "") = I, p2(H) }, p2(C), E = min(K) { p3(_, K) }?
+cat(str(C), C) = B, p3(C, 2)?
+p2(F), F <= F?

@@ -407,6 +407,16 @@ operands, and the equality that binds a variable to one, are specified in
 `specs/design-arithmetic.md`; that design extends this section and sections
 13 and 14 rather than changing what any v1 program means.
 
+The string functions of `specs/design-strings.md` follow the same rules. A
+function operand of the wrong type -- a symbol given to `length`, a string
+given as `substr`'s position -- yields no value, so the comparison holding
+the call is false and the binding is filtered out, as a cross-type ordering
+is, and the same level-2 note reports it. A result longer than a string
+value can hold, and a pattern that is not a regular expression, fail the
+evaluation as an undefined arithmetic result does, since skipping the
+binding would make a negation over it true; `specs/design-strings.md`
+section 4.3.
+
 ---
 
 # 11. Queries
@@ -519,6 +529,19 @@ side is a variable, and its group body holds no aggregate. `count`, `sum`,
 `min` and `max` are function names only in that position and ordinary
 symbols everywhere else. The aggregate literal is specified in
 `specs/design-aggregates.md` section 3.
+
+A comparison's operands are expressions, `specs/design-arithmetic.md`
+section 3.2, and an expression's primary may be a call of one of the six
+string functions, `specs/design-strings.md` section 3.2:
+
+```text
+call         := name "(" expression ("," expression)* ")"
+```
+
+A body literal beginning `name(` is an atom or the first operand of a
+comparison, decided by the token after its `)`: an operator or a comparator
+continues a call, and anything else ends an atom. No name is reserved, so
+`length(a, 4).` is still a fact; `specs/design-strings.md` section 3.3.
 
 The lexical structure, the abstract syntax tree, the interning the front end
 performs, and the diagnostics and error recovery it produces are specified in
@@ -745,7 +768,8 @@ recorded in `relic-plan.md`, decisions D-3 and D-24. In summary:
 * a program with very many distinct integers pays eight bytes plus a tagged
   hash slot for each distinct integer, which is the representation's one real
   cost;
-* one context holds at most 2^30 - 1 symbols and 2^30 - 1 distinct integers.
+* one context holds at most 2^30 - 1 distinct byte strings, the spellings
+  of its symbols and its strings together, and 2^30 - 1 distinct integers.
 
 Domain identifiers are assigned in order of first appearance within each
 type, so they are reproducible, but their numeric order carries no meaning.
@@ -759,7 +783,11 @@ affecting library consumers.
 The identifier's encoding -- its type in its top bits, a symbol value being
 its symbol identifier, and a value table of integers only -- and the
 symbol pool's entry and byte packing are specified in
-`specs/design-comparison-cost.md` section 7. D-3 asks for the
+`specs/design-comparison-cost.md` section 7. The symbol pool holds every
+byte string, names and literals and the strings evaluation computes alike,
+one identifier per byte string, and its storage and the value table's bits
+over it are charged to the memory limit with relation storage,
+`specs/design-strings.md` section 9.1. D-3 asks for the
 representation to be revisited when a measured workload shows its cost;
 section 7.1 there is that revisit, and it keeps D-3's decision of one 32-bit
 interned domain and changes only the encoding behind its accessors.
@@ -2262,17 +2290,34 @@ The library configuration permits limits on:
 
 ```text
 maximum tuples
-maximum memory for relation and index storage and for the working state
-    of an evaluation or a query's rewrite
+maximum memory for relation and index storage, the value table and the
+    symbol pool, and for the working state of an evaluation or a query's
+    rewrite
 maximum generated Magic predicates
 maximum generated Magic rules
 ```
 
-and enforces two structural limits that are not configurable:
+and enforces structural limits that are not configurable:
 
 ```text
 maximum predicate arity              32
 maximum distinct variables per rule  64
+maximum expression nesting           32
+maximum string length                2^32 - 2 bytes
+maximum nesting of a pattern's ( )   32
+```
+
+The symbol pool is charged to the memory limit whole, names and literals
+and the strings evaluation computes alike, since a rule such as
+`s(Y) :- s(X), Y = cat(X, "a")` interns a string per derivation; so are
+the buffers an evaluation computes strings in. A string longer than the
+length limit and a pattern that is not a regular expression are not
+limits but evaluation errors, ordinary errors with a nonzero exit status
+that discard partial results as an exceeded limit does,
+`specs/design-strings.md` sections 4.3 and 13:
+
+```text
+rules.dl:9:35: error: invalid regular expression in rule hit/2: unmatched (
 ```
 
 The variables of an aggregate body, shared and local together, are the
@@ -2891,6 +2936,16 @@ The policy, in order of preference:
    for relations is a few hundred lines, is faster than a generic one because
    it stores 32-bit identifiers inline, and is auditable. Reimplementing a
    general-purpose container library would not be.
+
+`index` is an instance of the second rule: it is implemented over
+`memmem(3)`, which FreeBSD, macOS and glibc provide, with a replacement in
+`compat/` for a platform without it. `match` is an instance of the fourth:
+the regular expression matcher in `lib/regex.c` is relic's own, a
+Thompson simulation of under a thousand lines over a dialect fixed by
+`specs/design-strings.md` section 4.5, because `<regex.h>` would make a
+pattern's meaning depend on the platform's engine and locale and its time
+on the engine's backtracking, and a vendored engine would cost more to
+audit than the matcher costs to write.
 
 The one optional dependency is `libedit`, used only for line editing and
 history in the interactive mode. It is detected by `configure`, it is never

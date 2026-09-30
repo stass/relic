@@ -45,14 +45,16 @@
  * How deeply an expression may nest, counted two ways, each a bound on a
  * stack.
  *
- * The descent of the text: the parentheses and unary minuses the parser is
- * inside when it reads a token.  That is what bounds the parser's own
- * recursion, and it is counted in the text rather than in the tree because
- * `((((X))))` builds one node however many parentheses it has.
+ * The descent of the text: the parentheses, unary minuses and calls the
+ * parser is inside when it reads a token, a call counting once at its `(`.
+ * That is what bounds the parser's own recursion, and it is counted in the
+ * text rather than in the tree because `((((X))))` builds one node however
+ * many parentheses it has.
  *
- * The height of the tree, a leaf counting one and every operator and
- * negation one more than its tallest operand.  That is what bounds every
- * walk over a tree, and the stack an expression is evaluated on.
+ * The height of the tree, a leaf counting one and every operator, negation
+ * and call one more than its tallest operand or argument.  That is what
+ * bounds every walk over a tree, and the stack an expression is evaluated
+ * on.
  *
  * The limit is structural rather than configurable, as arity's is: a program
  * the parser accepts can then be walked and run with no stack check.  No

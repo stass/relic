@@ -7,8 +7,9 @@
 #
 # A workload is a directory beside this script holding one program per
 # engine and a file naming the data set, which bench/datasets.sh generates.
-# Only the SQL engines may lack a program, for a workload SQL cannot
-# express; they are reported n/a there.
+# The SQL engines may lack a program, for a workload SQL cannot express,
+# and so may an engine a workload's `absent` file names; they are reported
+# n/a there.
 # relic answers each workload first, and its answer becomes the reference;
 # every other engine runs the workload once under a time limit, and its
 # answer is checked against the reference.  An engine that agrees is then
@@ -119,6 +120,13 @@ require_positive() {
 # quote WORD: WORD in single quotes, as both sh and hyperfine read it.
 quote() {
 	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# joined WORD...: the words joined by spaces, as echo would print them.
+# echo decodes backslash escapes on some systems, which would turn a quoted
+# path's `\047` into a quote that ends its quoting.
+joined() {
+	printf '%s\n' "$*"
 }
 
 # dot_argument TEXT: TEXT as one argument of a dot-command of the DuckDB or
@@ -271,30 +279,39 @@ program_file() {
 	esac
 }
 
-# optional_program ENGINE: whether a workload may have no program for
-# ENGINE.  Every workload is written for every Datalog engine; DuckDB and
-# SQLite cannot express nonlinear recursion or recursion through two
-# relations.
+# optional_program ENGINE WORKLOAD: whether WORKLOAD may have no program
+# for ENGINE.  DuckDB and SQLite cannot express nonlinear recursion or
+# recursion through two relations, so neither needs a program for any
+# workload.  Every other engine needs one unless the workload's `absent`
+# file names it, one engine per line followed by why its language cannot
+# say what the workload asks.
 optional_program() {
 	case $1 in
 	duckdb | sqlite) return 0 ;;
-	*) return 1 ;;
 	esac
+	[ -f "$here/$2/absent" ] && awk -v engine="$1" '
+		$1 == engine { found = 1 }
+		END { exit !found }' "$here/$2/absent"
 }
 
 # relic_imports DIR: an -I option importing each relation file of DIR into
 # its relation, each column typed as source_facts would spell its values: a
-# column of decimal digits, signed or not, holds integers and any other
-# symbols.  The data sets write every column one way, so the first row
-# decides.  An empty relation file is not imported, as source_facts writes
-# no facts for one.
+# column of decimal digits, signed or not, holds integers, one spelled as a
+# symbol symbols, and any other strings.  The data sets write every column
+# one way, so the first row decides.  An empty relation file is not
+# imported, as source_facts writes no facts for one.
 relic_imports() (
 	for file in "$1"/*.tsv; do
 		[ -s "$file" ] || continue
 		columns=$(awk -F '\t' 'NR == 1 {
-			for (i = 1; i <= NF; i++)
-				printf "%s%s", (i > 1 ? "," : ""),
-				    ($i ~ /^-?[0-9]+$/ ? "integer" : "symbol")
+			for (i = 1; i <= NF; i++) {
+				type = "string"
+				if ($i ~ /^-?[0-9]+$/)
+					type = "integer"
+				else if ($i ~ /^[a-z][A-Za-z0-9_]*$/)
+					type = "symbol"
+				printf "%s%s", (i > 1 ? "," : ""), type
+			}
 			exit
 		}' "$file")
 		printf ' -I %s' "$(quote \
@@ -315,39 +332,39 @@ engine_command() (
 
 	case $1 in
 	relic)
-		echo "$(quote "$relic") $relic_switches" \
+		joined "$(quote "$relic") $relic_switches" \
 		    "$(relic_imports "$data") $(quote "$program")"
 		;;
 	swipl)
-		echo "$(quote "$swipl") $swipl_switches" \
+		joined "$(quote "$swipl") $swipl_switches" \
 		    "$(quote "$here/driver.pl") $(quote "$program")" \
 		    "$(quote "$data.pl")"
 		;;
 	souffle-interp)
-		echo "$(quote "$souffle") $souffle_switches" \
+		joined "$(quote "$souffle") $souffle_switches" \
 		    "-F $(quote "$data") -D $(quote "$out")" \
 		    "$(quote "$program")"
 		;;
 	souffle | souffle-magic)
-		echo "$(quote "$work/bin/$1") $souffle_switches" \
+		joined "$(quote "$work/bin/$1") $souffle_switches" \
 		    "-F $(quote "$data") -D $(quote "$out")"
 		;;
 	clingo)
-		echo "$(quote "$clingo") $clingo_switches" \
+		joined "$(quote "$clingo") $clingo_switches" \
 		    "$(quote "$data.pl") $(quote "$program")"
 		;;
 	nemo)
-		echo "$(quote "$nmo") $nemo_switches" \
+		joined "$(quote "$nmo") $nemo_switches" \
 		    "-I $(quote "$data") -D $(quote "$out")" \
 		    "$(quote "$program")"
 		;;
 	duckdb)
-		echo "$(quote "$duckdb") $duckdb_switches" \
+		joined "$(quote "$duckdb") $duckdb_switches" \
 		    "-cmd $(quote ".cd $(dot_argument "$data")")" \
 		    "-f $(quote "$program")"
 		;;
 	sqlite)
-		echo "$(quote "$sqlite") $sqlite_switches" \
+		joined "$(quote "$sqlite") $sqlite_switches" \
 		    "-cmd $(quote ".cd $(dot_argument "$data")") :memory:" \
 		    "$(quote ".read $(dot_argument "$program")")"
 		;;
@@ -621,7 +638,7 @@ run_engine() {
 	compile_seconds=-
 
 	if [ ! -f "$here/$workload/$(program_file "$engine")" ]; then
-		if optional_program "$engine"; then
+		if optional_program "$engine" "$workload"; then
 			status=n/a
 		else
 			status=failed

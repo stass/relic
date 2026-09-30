@@ -359,7 +359,7 @@ written at every level. Each `-v` adds to them:
 | Level | Adds |
 | --- | --- |
 | 1, `-v` | a line to standard error after each query that succeeded, `query N: M rows`, or `1 row` |
-| 2, `-vv` | a note, once per rule, for the first ordering comparison that compared values of different types or the first aggregate whose group mixed them |
+| 2, `-vv` | a note, once per rule, for the first ordering comparison that compared values of different types, the first operator or function given an operand of the wrong type, or the first aggregate whose group mixed them |
 
 A third `-v` adds nothing more.
 
@@ -376,6 +376,17 @@ types:
 
 ```text
 rules.dl:4:22: note: ordering comparison between an integer and a symbol is false
+```
+
+Level 2 also reports an operand of the wrong type under an arithmetic
+operator or in a string function's argument, which leaves the expression
+without a value and makes its comparison false,
+`specs/design-arithmetic.md` section 4.2 and `specs/design-strings.md`
+section 4.3. The note points at the operator or the function and names
+the type it was given:
+
+```text
+rules.dl:8:28: note: operand of length is a symbol; the comparison is false
 ```
 
 Level 2 also reports an aggregate with no value because its group mixes

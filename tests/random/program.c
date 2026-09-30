@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "random.h"
 
@@ -65,6 +66,7 @@ static uint64_t	 expression_variables(
 static size_t	 literal_arity(const random_program_t *program,
 		    const random_literal_t *literal);
 static int	 operator_precedence(random_operator_t operator);
+static size_t	 call_arity(random_call_t call);
 static void	 remove_argument(random_term_t *args, size_t column);
 static void	 remove_column_in_body(random_body_t *body, size_t predicate,
 		    size_t column);
@@ -81,6 +83,9 @@ static void	 write_aggregate(FILE *out, const random_program_t *program,
 		    const random_literal_t *aggregate);
 static void	 write_atom(FILE *out, const random_program_t *program,
 		    uint8_t predicate, const random_term_t *args);
+static void	 write_call(FILE *out, random_call_t call,
+		    const random_term_t *leaves, bool nested,
+		    random_call_t inner);
 static void	 write_body(FILE *out, const random_program_t *program,
 		    const random_body_t *body);
 static void	 write_expression(FILE *out,
@@ -109,6 +114,16 @@ static const char *const comparator_spellings[COMPARE_COUNT] = {
 	[COMPARE_LE] = "<=",
 	[COMPARE_GT] = ">",
 	[COMPARE_GE] = ">=",
+};
+
+const random_call_info_t random_calls[CALL_KINDS] = {
+	[CALL_LENGTH] = { "length", "s", false },
+	[CALL_CAT] = { "cat", "ss", true },
+	[CALL_SUBSTR] = { "substr", "si", true },
+	[CALL_SUBSTR_COUNT] = { "substr", "sii", true },
+	[CALL_INDEX] = { "index", "ss", false },
+	[CALL_MATCH] = { "match", "sp", false },
+	[CALL_STR] = { "str", "v", true },
 };
 
 static const char *const function_spellings[FUNCTION_KINDS] = {
@@ -164,8 +179,10 @@ random_program_is_safe(const random_program_t *program)
  * aggregate's braces, at most RANDOM_MAX_OPERATOR_LITERALS of them in a
  * statement's body and group bodies together; a sum's group body reads
  * facts alone; and a program holding an operator or a sum states no integer
- * beyond RANDOM_INTEGER_SMALL in magnitude.  generate.c explains why such a
- * program is defined and finite under every strategy.
+ * beyond RANDOM_INTEGER_SMALL in magnitude.  A call counts as an operator
+ * throughout, since it too computes a value the program does not state.
+ * generate.c explains why such a program is defined and finite under every
+ * strategy.
  */
 bool
 random_program_is_bounded(const random_program_t *program)
@@ -307,7 +324,10 @@ body_computes(const random_body_t *body)
 	return (false);
 }
 
-/* Whether a literal is a comparison one of whose sides has an operator. */
+/*
+ * Whether a literal is a comparison one of whose sides has an operator or a
+ * call, either of which computes a value the program does not state.
+ */
 static bool
 literal_has_operator(const random_literal_t *literal)
 {
@@ -696,8 +716,20 @@ expression_leaves(const random_expression_t *expression)
 	case SHAPE_LEFT:
 	case SHAPE_RIGHT:
 		return (3);
+	case SHAPE_CALL:
+		return (call_arity(expression->calls[0]));
+	case SHAPE_NESTED_CALL:
+		return (call_arity(expression->calls[0]) - 1 +
+		    call_arity(expression->calls[1]));
 	}
 	return (0);
+}
+
+/* How many arguments a function takes. */
+static size_t
+call_arity(random_call_t call)
+{
+	return (strlen(random_calls[call].arguments));
 }
 
 /*
@@ -754,6 +786,7 @@ term_is_bound(random_term_t term, uint64_t positive_variables)
 		return (false);
 	case TERM_CONSTANT:
 	case TERM_NUMBER:
+	case TERM_PATTERN:
 		return (true);
 	case TERM_VARIABLE:
 		return ((positive_variables & variable_bit(term.index)) != 0);
@@ -1037,6 +1070,14 @@ write_expression(FILE *out, const random_expression_t *expression)
 		if (group)
 			fputc(')', out);
 		break;
+	case SHAPE_CALL:
+		write_call(out, expression->calls[0], leaves, false,
+		    CALL_KINDS);
+		break;
+	case SHAPE_NESTED_CALL:
+		write_call(out, expression->calls[0], leaves, true,
+		    expression->calls[1]);
+		break;
 	}
 
 	if (expression->negated)
@@ -1067,6 +1108,32 @@ operator_precedence(random_operator_t operator)
 		break;
 	}
 	return (2);
+}
+
+/*
+ * A call, `name(argument, ...)`.  When `nested`, its first argument is the
+ * call `inner` over the first leaves, and its other arguments are the
+ * leaves after those.
+ */
+static void
+write_call(FILE *out, random_call_t call, const random_term_t *leaves,
+    bool nested, random_call_t inner)
+{
+	size_t arity = call_arity(call);
+	size_t first = 0;
+
+	fprintf(out, "%s(", random_calls[call].spelling);
+	if (nested) {
+		write_call(out, inner, leaves, false, CALL_KINDS);
+		first = call_arity(inner);
+		arity--;
+	}
+	for (size_t a = 0; a < arity; a++) {
+		if (nested || a > 0)
+			fputs(", ", out);
+		write_term(out, leaves[first + a]);
+	}
+	fputc(')', out);
 }
 
 /* A zero-arity atom is written as its bare name, as a program would. */
@@ -1104,6 +1171,9 @@ write_term(FILE *out, random_term_t term)
 		break;
 	case TERM_NUMBER:
 		fprintf(out, "%d", (int)term.index - RANDOM_NUMBER_MAX);
+		break;
+	case TERM_PATTERN:
+		fputs(random_patterns[term.index], out);
 		break;
 	}
 }

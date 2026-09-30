@@ -434,6 +434,32 @@ a second thing to keep in step. A literal is a positive atom, a negated atom,
 a comparison or an aggregate, and it reuses the parser's own classification
 enum rather than declaring a parallel one for the same four cases.
 
+A comparison, `relic_comparison_t`, holds two expression trees and its
+operator. An expression node, `relic_expr_t`, is a constant, a variable's
+slot, a negation, an arithmetic operator over two nodes, or a call of a
+string function over one to three argument nodes, and records its height
+and its node count, which bound every walk over it and are what the Magic
+rewrite's budgets charge; a term is a tree of one node.
+`specs/design-arithmetic.md` section 6 specifies the node and
+`specs/design-strings.md` section 6 the call:
+
+```c
+struct relic_expr_call {
+	relic_expr_t		*args[RELIC_MAX_FUNCTION_ARITY];	/* 3 */
+	const relic_pattern_t	*pattern;	/* MATCH with a constant */
+	enum relic_function	 fn;
+	uint8_t			 argc;
+};
+```
+
+**A constant pattern is compiled with the rule.** A `match` whose pattern
+is a string constant has the pattern compiled once, into the program arena
+beside the node, which keeps a pointer to it; a pattern that does not
+compile refuses the statement with a check error at the literal. A plan's
+step and a generated rule's copy of the node share the pointer, since the
+program arena outlives both. A pattern held in a variable has no compiled
+form here and is compiled when the call runs.
+
 An aggregate literal, `relic_aggregate_t` of `specs/design-aggregates.md`
 section 6, holds its function, the outer slots of its shared columns, the
 aggregated column as an index into the group relation, the slot it binds,

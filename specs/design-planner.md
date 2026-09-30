@@ -190,6 +190,22 @@ next positive literal is scored. A positive literal keyed on a result slot
 has a bound argument and is scored and accessed accordingly,
 `specs/design-aggregates.md` section 8.1.
 
+**An assignment is placed with the tests** by the same rule: an equality
+whose one side is a bare variable not yet bound, and whose other side's
+slots are all bound, becomes an `ASSIGN` once they are, and its variable
+joins the bound set, so the placement repeats as it does for an aggregate,
+`specs/design-arithmetic.md` section 7.1. What the assignment binds is a
+slot of the kind its expression's value has, fixed when the plan is built:
+a **domain slot** for a constant or another domain slot, a **number slot**
+for an integer the executor computed, `length`, `index` and `match`
+among them, and a **text slot** for a string it computed, the value of a
+`cat`, a `substr` or a `str`, whose bytes live in the executor's text
+stack. The result type of a call is its function's, read from the table
+the parser checks arguments against, so the kind is never asked at run
+time; `specs/design-arithmetic.md` section 7.2 and
+`specs/design-strings.md` section 7.2. A positive literal keyed on a slot
+an assignment bound, of any kind, has a bound argument.
+
 **A delta literal takes part in the order** like any other positive literal,
 scored by the estimate of its view (section 4), so a small complete relation
 that binds the columns the delta would be looked up by goes before it, as it
@@ -397,7 +413,20 @@ An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
 `anti-member`, `filter` with its comparison, `aggregate` with the equality
 it stands for, the group relation with its columns named and its key
-columns, and `emit`. A query's `EMIT`
+columns, `assign` with its equality, and `emit`. An expression prints from
+its tree by the rules of `specs/design-arithmetic.md` section 11, with the
+parentheses its shape needs and no more, and a call as written,
+`fn(arg, ...)`, never parenthesized since it is a primary; the printed text
+parses back to the tree that was printed, `specs/design-strings.md`
+section 11:
+
+```text
+rule object(M, O) :- source(M, S), O = cat(substr(S, 0, length(S) - 2), ".o").
+    scan source(M, S)
+    assign O = cat(substr(S, 0, length(S) - 2), ".o")
+    emit object(M, O)
+```
+ A query's `EMIT`
 that delivers its rows as they are derived rather than inserting them into
 the answer relation is shown as `stream`, `specs/design-comparison-cost.md`
 section 4. An operation over a

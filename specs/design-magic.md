@@ -417,6 +417,15 @@ binds; a supplementary rule's head reads only variables its prefix binds; and
 a test is placed only where its slots are bound. An adorned rule
 reads the variables its source rule did, through the same positive literals.
 
+A comparison is copied, renumbered, hashed and compared by walking its two
+expression trees, and a call node is walked as an operator node is, with
+its function and its arguments where the operator has its kind and its
+operands. A copied `match` keeps its pointer to the pattern compiled with
+its source rule, which lives in the program arena that every rewrite's
+rules are outlived by; `specs/design-arithmetic.md` section 10 and
+`specs/design-strings.md` section 10. A generated rule's budgets count a
+comparison's nodes, so a call costs what its nodes do.
+
 ---
 
 ## 7. Termination and duplicates

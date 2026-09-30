@@ -103,6 +103,14 @@ An aggregate adds no type. A `count` or a `sum` in a row is an integer and a
 aggregate's result as it reads any other value,
 `specs/design-aggregates.md` section 15.
 
+Nor does a computed value. An integer arithmetic computed is an integer,
+and a string a string function computed is a string whose bytes
+`relic_string()` returns, interned in the one pool with every other, so a
+computed `"a.o"` and a written one are one value; `relic_stats_t`'s
+`string_values` counts the strings evaluation computed as well as those the
+program wrote, and `storage_bytes` includes the pool,
+`specs/design-strings.md` section 14.
+
 ---
 
 ## 4. Programmatic facts
@@ -200,6 +208,14 @@ count against the limits only while the query runs,
 `specs/design-aggregates.md` section 10. A `sum` whose total does not fit
 an `int64_t` fails the run, with no rows, as an undefined arithmetic result
 does, section 4.5 there.
+
+`relic_materialize()` and `relic_query_run()` fail, with no rows, on an
+evaluation error: an undefined arithmetic result, a string longer than a
+string value can hold, or a pattern that is not a regular expression.
+A query whose plan holds an arithmetic step or calls a string function is
+gathered before its first row, whatever its head names, since either can
+fail on any binding; `specs/design-arithmetic.md` section 9.3 and
+`specs/design-strings.md` section 9.3.
 
 ### 5.2 The collector
 
@@ -311,7 +327,10 @@ the rules a Magic rewrite generates from a rule, and its semi-naive variants,
 count as that rule. The same switch reports an aggregate that has no value
 because its group mixes types -- a `sum` over a value that is not an
 integer, a `min` or `max` over values of more than one type,
-`specs/design-aggregates.md` section 4.4. A rule gets one note for
+`specs/design-aggregates.md` section 4.4, and an operand of the wrong type
+under an arithmetic operator or in a string function's argument, which
+leaves its expression without a value and its comparison false,
+`specs/design-strings.md` section 4.3. A rule gets one note for
 whichever of these it meets first, and the group rule of an aggregate
 counts as the rule holding it. Asking for the note allocates nothing, so it
 cannot make an evaluation fail. It is a switch in
@@ -384,7 +403,13 @@ distcheck` runs it.
   version-info. The limits bound what is stored, not what is computed: an
   aggregate's group relation is charged to `max_tuples` and `max_memory`,
   but the join that derives it is bounded by nothing, as any join is not,
-  `specs/design-aggregates.md` section 14.
+  `specs/design-aggregates.md` section 14. Arithmetic and the string
+  functions sharpen the question without answering it: a recursion that
+  computes a new value per derivation is bounded by `max_memory`, since
+  the value table and the pool are charged, but one that computes over
+  values it already holds runs until a limit or the caller stops it;
+  `specs/design-arithmetic.md` section 13 and `specs/design-strings.md`
+  section 13.
 * **Sorted results.** A result keeps the stream's order; `relic_value_compare()`
   sorts it, as the tool does for `-s`.
 * **Thread safety within a context** (D-14). Contexts share nothing, so

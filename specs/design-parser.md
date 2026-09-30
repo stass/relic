@@ -79,7 +79,8 @@ symbol          a lowercase-initial identifier: [a-z][A-Za-z0-9_]*
 variable        an uppercase- or underscore-initial identifier:
                 [A-Z_][A-Za-z0-9_]*
 string          "..." with escapes, holding arbitrary bytes
-integer         -?[0-9]+, converted to int64_t
+integer         [0-9]+, its magnitude, converted to int64_t by the parser
+operator        + - * /, one token kind carrying which
 compare         = != < <= > >=, one token kind carrying which
 implies         :-
 ( ) { } , . ?   punctuation
@@ -93,7 +94,9 @@ containing one cannot collide with a name a user could write.
 Comparison operators are one token kind with an operator field rather than six
 kinds. The parser never wants to know which operator it has until it stores
 it, and a single kind keeps the token switch from listing six cases that do
-the same thing.
+the same thing. The arithmetic operators are one kind for the same reason;
+the remainder operator is the symbol `mod`, recognized by position, and `%`
+still begins a comment everywhere, `specs/design-arithmetic.md` section 3.1.
 
 `not` is an ordinary symbol token. It is recognized as the negation keyword by
 the parser, and only where a literal may begin, so `status(foo, not).` stores
@@ -118,6 +121,12 @@ the constant or the predicate name it always was, so `status(t, count).`
 stores a symbol and a predicate may be called `count`. The aggregate
 literal and what the parser checks of it are specified in
 `specs/design-aggregates.md` section 3.
+
+The names of the six string functions, `length`, `cat`, `substr`, `index`,
+`match` and `str`, are ordinary symbol tokens by the same reasoning. A name
+followed by `(` is a call only where an operand may stand, so
+`length(a, 4).` is a fact of `length/2` and `p(X) :- length(X).` reads a
+predicate named `length`; `specs/design-strings.md` section 3.2.
 
 ### 3.3 Comments and whitespace
 
@@ -163,18 +172,21 @@ outside the range is an error that names the literal, so that
 diagnosed rather than wrapped. A leading zero is accepted: `007` is 7, and
 `-0` is 0.
 
-The rule is one function over a byte range, `relic_lex_integer()`, which
-the lexer and the table importer (`specs/design-import.md` section 4) both
-call. It accepts the range only when the whole range is `-?[0-9]+` and the
-value fits, and it reads nothing past the range. When it refuses, it says
-which way: the range is not an integer, or it is one outside `int64_t`,
-since each caller reports the two differently. The lexer finds a literal's
-extent first, an optional `-` and the digits after it, and then converts
-exactly that extent, so from the lexer only the second refusal can come.
+The literal is two tokens' work. The lexer reads the digits as a
+magnitude, and **the sign is the parser's**: a `-` is always a token of its
+own, since with arithmetic it may be a subtraction, and the parser joins a
+`-` followed by an integer token into a negative literal wherever a term or
+an operand may stand, applying the range check with the sign known.
+`offset(start, - 1).` is therefore the same fact as `offset(start, -1).`,
+and `X - -1` is `X - (-1)`; `specs/design-arithmetic.md` section 3.4.
 
-A `-` immediately preceding a digit is part of the literal token. This is
-unambiguous because v1 has no arithmetic, so a `-` cannot be an operator.
-A `-` anywhere else is not part of any token.
+The table importer (`specs/design-import.md` section 4) reads a field
+under the same rule through `relic_lex_integer()`, one function over a
+byte range composed of the two pieces the lexer and the parser each use: a
+magnitude conversion over a digit range, `relic_lex_magnitude()`, and the
+signed range check. It reads nothing past the range, and when it refuses
+it says which way: the range is not an integer, or it is one outside
+`int64_t`, since the importer reports the two differently.
 
 An identifier byte immediately following the digits is an error rather than
 the start of a new token. Without the check, `0x10` would lex as the integer
@@ -221,6 +233,9 @@ question, and what it produces should still be recognizable as the text.
 term      := a constant's domain identifier, or a variable
 atom      := predicate name, arity, terms
 literal   := a positive atom, a negated atom, a comparison, or an aggregate
+comparison := two expressions and a comparator
+expression := a term, a negation of one expression, an operator over two,
+             or a call of a function over one to three expressions
 statement := a rule (head plus a possibly empty body), or a query (a body)
 program   := a list of statements
 ```
@@ -258,6 +273,23 @@ an aggregate. Which variables of the body are shared with the rule is not a
 parser question and is not in the tree; `specs/design-aggregates.md`
 section 3.4 specifies the literal and section 5 what the program model
 builds from it.
+
+**A comparison holds two expression trees.** An expression is a
+transcription of the text as the rest of the tree is: a node is a term, a
+negation, an arithmetic operator over two nodes or a call of one of the six
+string functions over its argument nodes, with the shape the writer gave
+it, since it is what `-e` prints a rule from. A rule head, a fact and an
+atom argument hold terms, never expressions; `specs/design-arithmetic.md`
+section 3.3 says why, and `specs/design-strings.md` section 6 what a call
+node holds.
+
+**A body literal beginning `name(` is an atom or a call**, decided by the
+token after its closing parenthesis: an operator, `mod` or a comparator
+makes it the first operand of a comparison, and anything else leaves it the
+atom it has always been. The arguments are parsed as expressions in both
+cases and an atom takes each one-node tree as its term, so the decision
+costs one token of lookahead and no backtracking;
+`specs/design-strings.md` section 3.3.
 
 **Statements form a `TAILQ` rather than an array.** They are allocated from
 the program arena, which cannot resize a block, and a growable array would
@@ -342,6 +374,24 @@ it prints in any case, so this is about readability rather than safety. The
 backslash is the exception because the formatter doubles it, so that its own
 escapes cannot be mistaken for the text's: quoted as a character, a stray
 backslash would be shown as two.
+
+An expression adds messages of the same shape, each at the byte the reader
+should look at: a constant operand of the wrong type at the constant, an
+expression nested too deeply where the level opens, and a missing operand
+in the ordinary "expected an operand" form,
+`specs/design-arithmetic.md` section 3.5. A call adds two of its own at the
+function's name, and keeps the one an aggregate name in operand position
+has always had, `specs/design-strings.md` section 3.4:
+
+```text
+rules.dl:3:11: error: foo is not a function
+rules.dl:5:9: error: substr takes 2 or 3 arguments, not 4
+rules.dl:7:14: error: an aggregate is written V = count { ... }
+```
+
+An atom argument that is an operator node or a call is reported at that
+node's byte with the message an atom has always given there, `expected ','
+or ')', found '+'`, once the token after the atom has shown it is one.
 
 Text quoted from the source is truncated past forty bytes. A message names one
 thing and the reader needs enough of it to recognize which, not all of it; the
@@ -443,8 +493,20 @@ however the text is shaped, and a program it accepts can be compiled and
 printed without a stack check, `specs/design-aggregates.md` sections 3.4
 and 14.
 
-Nothing else is bounded. A body may hold any number of literals and a file any
-number of statements; both are bounded by the text the caller supplied.
+An expression is bounded twice by one constant, `RELIC_MAX_EXPRESSION_DEPTH`,
+32, since each bound is a stack: the **descent of the text**, which counts
+the parentheses, unary minuses and call parentheses the parser is inside
+and bounds its own recursion, refused where the 33rd opens; and the
+**height of the tree**, which counts every operator, negation and call node
+and bounds every walk over the tree and the evaluator's stack, refused
+where the node that would be the 33rd is written. `((((X))))` is one node
+four levels down, and `cat(cat(...))` counts at both.
+`specs/design-arithmetic.md` sections 3.5 and 13 and
+`specs/design-strings.md` section 3.4.
+
+Nothing else is bounded. A body may hold any number of literals, a file any
+number of statements and an expression any number of nodes under its height;
+all are bounded by the text the caller supplied.
 
 ---
 
@@ -471,8 +533,6 @@ implements it:
   things generated parsers are worst at.
 * **A token pushback buffer.** The grammar needs one token of lookahead, which
   the parser has as the token it holds; nothing needs two.
-* **A parse tree for expressions.** There are no expressions. Arithmetic is
-  deferred, and a comparison is two terms and an operator.
 * **Recovery inside a statement.** Inserting a missing parenthesis and
   continuing produces a tree the writer did not write. Recovery discards to
   the next terminator, which is the granularity the language already has. A

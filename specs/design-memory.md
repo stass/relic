@@ -213,6 +213,29 @@ the overflow check and the failure discipline are written once rather than at
 every array in the engine, while the array itself stays a plain typed pointer
 that the surrounding code indexes directly.
 
+**Two companions answer what a growth will reach** without making it, so
+that a limit can be asked before the growth, and each is what the growth
+itself uses, so the prediction and the policy cannot drift apart.
+`relic_grow_array_capacity()` gives the capacity one growth reaches, and
+`relic_grow_array_capacity_stepwise()` the capacity a sequence of growths,
+one insertion after another, reaches, which can be more than one growth
+for the whole, since a growth raises a capacity to the request only when
+doubling falls short. `relic_grow_array_stepwise()` grows to that
+capacity in one allocation, for an owner that makes many insertions' room
+at once and must hold exactly what one insertion at a time would.
+
+**A buffer sized by the data a plan meets doubles until it fits.** The
+text stack, the pending bytes and the matcher's two buffers of
+`specs/design-strings.md` section 8 are not arrays of items the engine
+counts but rooms a run asks for, and they grow by
+`relic_grow_capacity_doubling()`: doubling, from eight when smaller, and
+never raised to the request. A capacity is then a function of the largest
+request alone, whatever came before it. A parallel round's workers
+together make every request a serial run makes, so the largest capacity
+any of them reaches is at least what the serial run's buffer would reach,
+and a merge can ask the limit for that capacity without having run
+serially, `specs/design-strings.md` section 8.1.
+
 **Where an array lives.** An array whose bytes reach `RELIC_ARRAY_MAP_BYTES`,
 an eighth of a mebibyte, is given an anonymous private mapping of its own; a
 smaller one is a heap block. A small block grows by `realloc()`. Every other
@@ -427,6 +450,21 @@ string is stored, and a string past the limit is refused with a diagnostic
 rather than given an identifier that would run into the type bits and
 silently turn one value into another.
 
+**The pool is charged to `max_memory` whole** -- its entry array, its
+identifier table and its string arena -- since evaluation interns the
+strings it computes, `specs/design-strings.md` section 9.1. Evaluation
+grows it only at the commit of a batch's pending strings, to the capacity
+interning them one at a time would reach,
+`relic_grow_array_capacity_stepwise()`, so it holds the same bytes however
+its strings arrived, and the growth, with the string arena's next chunk,
+is projected and admitted before anything is copied. The names, symbols
+and strings a program's text or the caller writes are interned as they
+are read and counted, but not refused: they are sized by what the caller
+wrote, as the program's rules are, and the limit refuses the next load,
+rewrite or evaluation that finds them already past it. A reservation copies the new strings into the arena after a
+mark taken first; a caller that then declines to append rewinds the arena
+to the mark, so a declined reservation leaves no copy behind.
+
 Symbols and string literals share one pool. They are distinguished by the
 *value* that refers to them, not by the pool, so the symbol `foo` and the
 string `"foo"` intern to one symbol identifier and to two different domain
@@ -495,9 +533,29 @@ position past the integer table. No `relic_value_t` is stored, so there is
 nothing to return a pointer to; the comparisons, the sort and the
 formatters each decode the identifiers they read.
 
-**Limits.** A context holds at most 2^30 - 1 symbols, as section 7 gives,
-and 2^30 - 1 distinct integers, for the same reason: an index is thirty
-bits and zero is reserved. The integer table checks its count before it
+**Interning what evaluation computes.** An integer or a string an
+expression computed has no identifier while a plan runs, since the plan
+cannot write the context. `relic_value_find_integer()` and
+`relic_value_find_string()` are the lookup half of interning, which writes
+nothing: the identifier the context has assigned the value, or zero. A
+batch's values without one are interned by three steps before it is
+inserted, `specs/design-arithmetic.md` section 8.3 and
+`specs/design-strings.md` section 8.3: `relic_pending_measure()` promises
+each its identifier -- the one assigned, the pool's for bytes it holds only
+as a name or a symbol's spelling, or the next in order of first occurrence
+-- and gives the bytes the table, the string bits and the pool will
+occupy, which the limit is asked of; `relic_pending_rewrite()` replaces
+the markers; and `relic_pending_commit()` interns them under exactly the
+identifiers promised, in two halves, `relic_pending_reserve()`, which can
+fail and grows the integer table, the string bits and the pool together,
+and `relic_pending_append()`, which cannot. The string bits grow stepwise
+on every path, as the pool does, so that batching never changes their
+size.
+
+**Limits.** A context holds at most 2^30 - 1 byte strings, the spellings
+of its symbols and its strings together, as section 7 gives, and 2^30 - 1
+distinct integers, for the same reason: an index is thirty bits and zero
+is reserved. The integer table checks its count before it
 stores, as the pool does, and refuses with a diagnostic rather than let a
 position run into the type bits.
 

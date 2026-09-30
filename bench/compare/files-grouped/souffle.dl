@@ -1,0 +1,16 @@
+.decl file(path: symbol)
+.input file(filename="file.tsv")
+.decl ext(e: symbol)
+.input ext(filename="ext.tsv")
+
+// Souffle has no function giving a position, so a path's extension is the
+// one of ext/1 it ends with.
+.decl kind(p: symbol, d: symbol, e: symbol)
+kind(P, D, E) :- file(P), !match(".*/test_[0-9]+[.].*", P), ext(E),
+    L = strlen(E), substr(P, strlen(P) - L - 1, L + 1) = cat(".", E),
+    D = substr(P, 0, 7).
+
+.decl grouped(d: symbol, e: symbol, n: number)
+grouped(D, E, N) :- kind(_, D, E), N = count : { kind(_, D, E) }.
+
+.output grouped(filename="answer.csv")

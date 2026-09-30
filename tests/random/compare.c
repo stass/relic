@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include <relic.h>
@@ -36,9 +37,11 @@
  * is wrong but that no query reads.  Equal totals stand for equal relations
  * because the naive fixed point is complete, so its total is the size of the
  * least model of its rules, and every strategy inserts only tuples those
- * rules justify.  A strategy whose rules differ from every other's, because
- * its planner's order decides what the Magic rewrite generates, has no
- * reference.
+ * rules justify.  It must hold as many string values too: equal relations
+ * hold the same computed strings, and a string evaluation computes is
+ * interned only when a tuple holding it is stored.  A strategy whose rules
+ * differ from every other's, because its planner's order decides what the
+ * Magic rewrite generates, has no reference.
  *
  * And the semi-naive fixed point must make every derivation exactly once: to
  * materialize a program whose rules hold no `_`, one per fact and, for each
@@ -103,15 +106,28 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 };
 
 /*
- * What one strategy produced: an answer and a tuple total per query, and
- * for a strategy that materializes, the derivations that took.
+ * What one strategy produced: an answer, a tuple total and a count of
+ * string values per query, and for a strategy that materializes, the
+ * derivations that took.
  */
 typedef struct run run_t;
 
 struct run {
 	answer_t	answers[RANDOM_MAX_QUERIES];
 	size_t		totals[RANDOM_MAX_QUERIES];
+	size_t		strings[RANDOM_MAX_QUERIES];
 	uint64_t	derivations;
+};
+
+/*
+ * An evaluation error: the words the library's message about it opens
+ * with, and the kind of failure it is.
+ */
+typedef struct evaluation_error evaluation_error_t;
+
+struct evaluation_error {
+	const char		*opening;
+	random_failure_kind_t	 kind;
 };
 
 /* The diagnostic callback's state while a strategy loads the program. */
@@ -139,6 +155,7 @@ static bool	 fact_seeds(const random_program_t *program, size_t r);
 static const char *error_text(relic_t *ctx);
 static bool	 load_program(relic_t *ctx, const char *text,
 		    const diag_capture_t *capture);
+static random_failure_kind_t evaluation_failure(relic_t *ctx);
 static random_failure_kind_t run_strategy(const random_program_t *program,
 		    const char *text, random_strategy_t id,
 		    const random_options_t *options, run_t *run, FILE *report);
@@ -219,6 +236,18 @@ random_compare(const random_program_t *program,
 			    "%s holds %zu\n", q + 1, strategies[s].name,
 			    runs[s].totals[q], strategies[reference].name,
 			    runs[reference].totals[q]);
+			failure.kind = FAILURE_TOTALS;
+			failure.strategy = s;
+			goto done;
+		}
+		for (size_t q = 0; q < program->query_count; q++) {
+			if (runs[s].strings[q] == runs[reference].strings[q])
+				continue;
+			fprintf(report, "query %zu: %s holds %zu string "
+			    "values, %s holds %zu\n", q + 1,
+			    strategies[s].name, runs[s].strings[q],
+			    strategies[reference].name,
+			    runs[reference].strings[q]);
 			failure.kind = FAILURE_TOTALS;
 			failure.strategy = s;
 			goto done;
@@ -306,7 +335,7 @@ run_strategy(const random_program_t *program, const char *text,
 		if (relic_materialize(ctx) != 0) {
 			fprintf(report, "%s: materializing failed: %s\n",
 			    strategy->name, error_text(ctx));
-			kind = FAILURE_QUERY;
+			kind = evaluation_failure(ctx);
 			goto done;
 		}
 		relic_stats(ctx, &stats);
@@ -327,12 +356,13 @@ run_strategy(const random_program_t *program, const char *text,
 		if (!collected) {
 			fprintf(report, "%s: query %zu failed: %s\n",
 			    strategy->name, q + 1, error_text(ctx));
-			kind = FAILURE_QUERY;
+			kind = evaluation_failure(ctx);
 			goto done;
 		}
 
 		relic_stats(ctx, &stats);
 		run->totals[q] = stats.tuples;
+		run->strings[q] = stats.string_values;
 
 		if (options->inject_fault && id == STRATEGY_NAIVE)
 			drop_last_row(answer);
@@ -427,7 +457,7 @@ count_bindings(relic_t *ctx, size_t query, size_t rule, FILE *report,
 	if (result == NULL) {
 		fprintf(report, "bindings: a body of rule %zu failed: %s\n",
 		    rule + 1, error_text(ctx));
-		return (FAILURE_QUERY);
+		return (evaluation_failure(ctx));
 	}
 	*expectedp += relic_result_rows(result);
 	relic_result_destroy(result);
@@ -517,6 +547,31 @@ drop_last_row(answer_t *answer)
 		return;
 	answer->row_count--;
 	free(answer->rows[answer->row_count]);
+}
+
+/*
+ * The kind of failure the context's last error is: one of the evaluation
+ * errors, told by the message the library opens it with, or else a query
+ * that failed.
+ */
+static random_failure_kind_t
+evaluation_failure(relic_t *ctx)
+{
+	static const evaluation_error_t errors[] = {
+		{ "integer overflow in ", FAILURE_UNDEFINED },
+		{ "division by zero in ", FAILURE_UNDEFINED },
+		{ "string too long in ", FAILURE_TOO_LONG },
+		{ "invalid regular expression in ", FAILURE_PATTERN },
+	};
+	const char *error = relic_error(ctx);
+
+	for (size_t i = 0; error != NULL && i < sizeof(errors) /
+	    sizeof(errors[0]); i++) {
+		if (strncmp(error, errors[i].opening,
+		    strlen(errors[i].opening)) == 0)
+			return (errors[i].kind);
+	}
+	return (FAILURE_QUERY);
 }
 
 /* The library's account of the last error, for a report. */

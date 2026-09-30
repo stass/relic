@@ -1203,21 +1203,15 @@ Candidate features, in the priority order of `specs/architecture.md` section
 
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
-`docs/todo-language.md` into what is worth adding -- string operations and
-provenance first, then disjunction, file inclusion,
-constraints, relation export and per-rule profiling -- what is worth
+`docs/todo-language.md` into what is worth adding -- provenance first,
+then disjunction, file inclusion, constraints, relation export and
+per-rule profiling -- what is worth
 measuring before deciding, and what stays out on purpose with the reason.
 Each item names the engines that have it and what a relic program does
 without it; the verdicts are provisional until a design exists.
 
-* string operations, specified in `specs/design-strings.md`: `length`,
-  `cat`, `substr`, `index`, `match` and `str` as calls inside expressions,
-  tests as comparisons over the positions they return, a regular expression
-  matcher of relic's own in `lib/regex.c`, computed strings on the
-  pending-value mechanism with the symbol pool charged to the memory
-  limit; five steps, of which the front end, the serial plan and
-  executor, the matcher, and the frozen round carrying pending strings
-  are built. What remains beyond the steps:
+* string operations, specified in `specs/design-strings.md`, are built;
+  what remains:
   * [Medium, performance, `lib/exec.c`, `lib/value.c`] the step-2 gate is
     not met: over a million sources, `object/2` of the design's section 2
     adds 0.60 s to the load where the same join assigning a constant adds

@@ -1,0 +1,29 @@
+% seed 152
+p5(E) :- p1(B, C), cat(C, "a") = F, D = sum(K) { p0(C, C), p1(K, K) }, E = min(H) { p1(H, B), p0(B, G) }, p0(A, C), str(substr(B, A, A)) >= D, B = A.
+p0(3, 3).
+p0(0, 3).
+p4(C) :- C = count { p3(H, G), p7(G) }.
+p1(a, 2).
+p3(D, 0) :- F = length(B), p5(D), length(cat(A, "")) = E, p2(B), p1(A, A).
+p1(0, 1).
+p0(a, a).
+p4(E) :- p2(B), C = length(substr("q\"\\", A, A)), p0(B, B), p5(A), E = min(G) { p5(B), p3(G, G), not p1(b, G) }.
+p0(b, c).
+p2(D) :- F = E, p2(B), E = sum(L) { p0(L, L), not p1(0, L) }, D = A, D = max(H) { p0(B, H) }, B >= E.
+p2(A) :- E = -2, p0(C, A), not p1(A, E), not p1(C, A).
+p1("x y", b).
+p0(0, 1).
+p3(-3, d).
+p0(3, a).
+p0(3, c).
+p6(2, 0) :- p7(D), C = D.
+p1(-3, -2).
+p1(1, c).
+p4(-1) :- p4(A), p4(F), p2(F), F >= A.
+p7(E) :- p0(1, D), match("\xc3\xa9", "x|y") = E, not p1(E, -2), not p0("a", D), a = D / 2 * 1, E < D.
+p1(-2, d).
+p0(b, "a").
+p1("a", 1).
+p0(2, 1).
+p3(E, C), D = index("a", "x y"), p3(C, C), p2(E), E = C, length(substr("q\"\\", -2, D)) < D?
+D = B, p1(A, D), A != match(substr(A, 1), "x|y")?

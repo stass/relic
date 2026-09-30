@@ -252,7 +252,14 @@ A plan holding an `AGGREGATE` is never distinct and is always gathered: a
 `sum` can fail on any binding, and a plan that can fail must not have
 delivered rows first, while a `count` may reach the head as an integer the
 value table does not yet hold, which only storing the answer resolves;
-`specs/design-aggregates.md` section 9.5.
+`specs/design-aggregates.md` section 9.5. A plan holding an arithmetic
+step or a `CALL` is gathered for the same two reasons, whatever its head
+names: an expression can fail on any binding -- an overflow, a zero
+divisor, a string too long, a pattern that is not one -- and a value it
+computed reaches the head without an identifier until the answer is
+stored; `specs/design-arithmetic.md` section 9.3 and
+`specs/design-strings.md` section 9.3. So `file(P), index(P, "..") >= 0?`
+is gathered, and a streamed batch never holds a pending value.
 
 The property is decided on the built plan, by `relic_plan_derives_distinct()`
 in `lib/plan.c`, with a switch that names every kind of operation, so that a

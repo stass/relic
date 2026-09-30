@@ -87,9 +87,29 @@ holds the accumulator an `AGGREGATE` folds its group into, a fixed part of
 the scratch that is reset at each fold, and the error record an
 overflowing `sum` leaves, `specs/design-aggregates.md` sections 9.1 to 9.3.
 
-None is allocated in the loop. The frame is a fixed array, the batch is
-sized when the evaluation begins, for the widest head its rules can have,
-and the operation states as its plans are built, for the longest of them.
+**What an expression computes is kept beside the frame.** A number slot's
+integer is in the scratch's `numbers` array and a text slot's bytes in its
+**text stack**, located by its `texts` entry; an expression runs over a
+fixed **cell stack**, each cell an identifier, an integer or a string in
+the text stack; and a head tuple holding a value the context has not
+assigned holds a pending marker instead, naming an entry of the batch's
+**pending array**, an integer or a string whose bytes are in the batch's
+**pending bytes**, measured, rewritten and committed by the caller before
+the batch is inserted. A string pattern held in a variable is compiled
+per binding into the scratch's **match space**. Specified in
+`specs/design-arithmetic.md` sections 8.1 to 8.3 and
+`specs/design-strings.md` sections 8.1 to 8.4.
+
+Nothing else is allocated in the loop. The frame is a fixed array, the
+cell stack is sized for the deepest expression the parser admits, the
+batch is sized when the evaluation begins, for the widest head its rules
+can have, and the operation states as its plans are built, for the longest
+of them. The four buffers sized by the data a plan meets rather than by
+the plan -- the text stack, the pending bytes and the two parts of the
+match space -- are allocated when a round begins, grow by doubling when a
+string or a pattern does not fit, each growth charged to the memory limit
+before it is made, and are released when the round ends,
+`specs/design-strings.md` section 8.1.
 
 The executor does not insert. It returns when the batch is full, having
 kept its place in the scratch, and continues from there when called again;
@@ -101,7 +121,12 @@ the scratch and reported by the caller when it takes the batch, since
 reporting calls the caller's diagnostic callback and changes the context.
 An overflowing `sum` is recorded the same way: it ends the plan as though
 every generator were exhausted, and the caller, taking the batch, discards
-it and fails the evaluation.
+it and fails the evaluation. So is every other failure an expression can
+meet -- an integer overflow, a zero divisor, a string too long, a pattern
+that is not a regular expression, and a buffer growth the memory limit or
+the allocator refused -- in the one error record the scratch holds,
+`specs/design-arithmetic.md` section 8.4 and `specs/design-strings.md`
+section 8.5.
 
 ### 2.2 A generator never holds a tuple pointer
 
@@ -146,6 +171,18 @@ Per D-11 and architecture section 10.1:
   symbols and strings bytewise. Values of different types are unordered,
   and an unordered comparison is false, so the binding is filtered out
   rather than reported as an error.
+* An operand an expression computed has no identifier yet, so a comparison
+  with one compares values: a computed integer numerically against a
+  computed integer, and equal to or ordered against a term exactly when
+  the term is an integer; a computed string by bytes against a computed
+  string, and equal to or ordered against a term exactly when the term is
+  a string, whose identifier is decoded to its bytes rather than the
+  computed side interned. A computed integer and a computed string are
+  unequal and unordered. `specs/design-arithmetic.md` section 4.3 and
+  `specs/design-strings.md` section 4.4.
+* A function operand of the wrong type, a symbol given to `length`,
+  leaves its call without a value, and the comparison holding it is false,
+  as an unordered one is, `specs/design-strings.md` section 4.3.
 
 Verbosity level 2 reports the first cross-type ordering comparison per rule, so
 that unintended mixing is discoverable. The library reports it only when the
@@ -490,7 +527,11 @@ query object owns, per `specs/design-query.md`. Answering one is three steps:
    each row once, run in a context that sets no tuple or memory limit, emits
    to the caller's callback instead, and the query has no step 3
    (`specs/design-comparison-cost.md` section 4). A plan holding an
-   `AGGREGATE` is always gathered, `specs/design-aggregates.md` section 9.5.
+   `AGGREGATE` is always gathered, `specs/design-aggregates.md` section 9.5,
+   and so is one holding an arithmetic step or a `CALL`, whatever its
+   head names, since either can fail on any binding,
+   `specs/design-arithmetic.md` section 9.3 and `specs/design-strings.md`
+   section 9.3.
 3. **Stream the answer relation** to the caller's callback, one row per tuple,
    in insertion order.
 
@@ -530,7 +571,19 @@ Evaluation fails for these reasons, each reported where it happens:
 * an allocation failed;
 * an aggregate's `sum` did not fit `int64_t`, reported as an integer
   overflow in the rule that holds it, `specs/design-aggregates.md` section
-  4.5, by the caller that took the batch, which discards the batch.
+  4.5, by the caller that took the batch, which discards the batch;
+* an expression's result was undefined: an integer overflow or a zero
+  divisor, `specs/design-arithmetic.md` section 4.2, a string longer than a
+  string value can hold, or a pattern that is not a regular expression,
+  `specs/design-strings.md` section 4.3, each reported as a failure in the
+  rule that computed it, the pattern's with its reason:
+
+  ```text
+  rules.dl:9:35: error: invalid regular expression in rule hit/2: unmatched (
+  ```
+
+  Skipping the binding instead would make a negation over it true, which
+  no strategy could agree on.
 
 Each stops the fixed point at once and returns -1. Planning a component can
 fail for the first two reasons -- memory, or the memory limit reached while an
