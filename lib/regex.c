@@ -13,6 +13,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "cdefs.h"
 #include "regex.h"
 
 /*
@@ -610,8 +611,9 @@ set_holds(const uint8_t set[static 32], uint8_t byte)
  * wrap.
  */
 int64_t
-relic_regex_match(const relic_regex_inst_t *insts, uint32_t count,
-    relic_regex_work_t *work, const char *text, size_t length)
+relic_regex_match(const relic_regex_inst_t *insts,
+    uint32_t count RELIC_UNUSED, relic_regex_work_t *work, const char *text,
+    size_t length)
 {
 	const relic_regex_inst_t *inst;
 	thread_list_t current;

@@ -80,6 +80,13 @@ arena would make the convention unnecessary.
 
 ## Build and packaging
 
+**`lib/` headers can hide system headers of the same name.** [Low,
+component: `Makefile.am`] Every compile has `-I$(top_srcdir)/lib`, so
+`lib/regex.h` and `lib/util.h` would stand in for the system's `<regex.h>`
+and the BSDs' `<util.h>` in any angle-bracket include. Nothing includes
+either today. Including relic's headers by a quoted name alone, with no
+`-I` for `lib/`, or giving them a prefix, would remove the collision.
+
 **Continuous integration is not configured.** [High] `relic-plan.md` section 6
 specifies fifteen jobs; the repository has none. Beyond macOS, only glibc
 Linux on x86-64 has been verified, by hand, and nothing reruns either check

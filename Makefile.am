@@ -53,7 +53,7 @@ dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
-	lib/depgraph.h \
+	lib/cdefs.h lib/depgraph.h \
 	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
 	lib/relation.h lib/round.h lib/strfn.h lib/util.h tests/unit/harness.h \

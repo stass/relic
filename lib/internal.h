@@ -25,6 +25,7 @@
 #include "account.h"
 #include "arena.h"
 #include "ast.h"
+#include "cdefs.h"
 #include "compat.h"
 #include "exec.h"
 #include "frozen.h"
@@ -42,41 +43,6 @@
  * below has external linkage so that the modules can call one another, and
  * hidden visibility so that a program linked against librelic cannot.
  */
-
-/*
- * Mark a parameter the implementation does not use, or a local or a static
- * function read only by an assertion, which NDEBUG leaves unread.  A function
- * whose shape is fixed by a callback type will have some; writing the attribute
- * is clearer than a (void) cast in the body, which reads like a statement that
- * does something.
- */
-#if defined(__GNUC__)
-#define	RELIC_UNUSED	__attribute__((__unused__))
-#else
-#define	RELIC_UNUSED
-#endif
-
-/*
- * Ask the compiler to check a printf-style call against its format string.
- * The diagnostic interface is the one place in the library where a format
- * string and its arguments are separated by a call boundary.
- */
-#if defined(__GNUC__)
-#define	RELIC_PRINTFLIKE(fmt, args) \
-	__attribute__((__format__(__printf__, fmt, args)))
-#else
-#define	RELIC_PRINTFLIKE(fmt, args)
-#endif
-
-/*
- * Ask the compiler to reject a call whose result is ignored, for a function
- * whose result says whether its caller may go on.
- */
-#if defined(__GNUC__)
-#define	RELIC_MUST_CHECK	__attribute__((__warn_unused_result__))
-#else
-#define	RELIC_MUST_CHECK
-#endif
 
 typedef struct relic_adornment relic_adornment_t;
 typedef struct relic_adornment_set relic_adornment_set_t;
