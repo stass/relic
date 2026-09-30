@@ -1,0 +1,46 @@
+# macOS on Apple silicon: the suite with warnings as errors, then
+# AddressSanitizer and UndefinedBehaviorSanitizer.  AddressSanitizer cannot
+# detect leaks on this platform, so leaks are checked only by the Linux jobs.
+#
+# It runs only when started by hand: the development machines are macOS and
+# run the suite there, and a hosted macOS minute is billed at ten times a
+# Linux one for a private repository.  As in ci.yml, RELIC_STRICT_CHECK=yes
+# makes a skipped test or an unavailable sanitizer fail the job.
+
+name: macos
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELIC_STRICT_CHECK: 'yes'
+
+jobs:
+  macos:
+    name: macos clang
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The compiler and libedit come with the system.
+      - name: Install build tools
+        run: brew install autoconf automake libtool pkgconf mandoc
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure --enable-werror
+      - name: Build
+        run: make -j"$(sysctl -n hw.ncpu)"
+      - name: Test
+        run: |
+          make -j"$(sysctl -n hw.ncpu)" check ||
+              { cat test-suite.log; exit 1; }
+      - name: AddressSanitizer without leak detection
+        run: make -j"$(sysctl -n hw.ncpu)" check-asan
+      - name: UndefinedBehaviorSanitizer
+        run: make -j"$(sysctl -n hw.ncpu)" check-ubsan

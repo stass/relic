@@ -1,0 +1,124 @@
+# Slower and rarer configurations, run weekly and on demand: MemorySanitizer,
+# ThreadSanitizer, 32-bit pointers, no threads, and distcheck without shared
+# or without static libraries.  As in ci.yml, RELIC_STRICT_CHECK=yes makes a
+# skipped test or an unavailable sanitizer fail the job.
+
+name: extended
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELIC_STRICT_CHECK: 'yes'
+  LINUX_PACKAGES: >-
+    autoconf automake libtool pkg-config libedit-dev mandoc g++ clang
+
+jobs:
+  sanitizers:
+    name: linux clang ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [check-msan, check-tsan]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.LINUX_PACKAGES }}
+      # The runner's kernel randomizes more address bits than the
+      # sanitizers' shadow memory layout allows for; they abort at start-up
+      # under the default.
+      - name: Narrow address randomization for the sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure CC=clang CXX=clang++
+      - name: Run the suite under the sanitizer
+        run: make -j"$(nproc)" ${{ matrix.target }}
+
+  linux-variants:
+    name: linux ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # There is no 32-bit libedit on the runner, so line editing is
+          # left out of this build.
+          - name: gcc -m32
+            packages: gcc-multilib g++-multilib
+            cc: gcc -m32
+            cxx: g++ -m32
+            flags: --enable-werror --with-libedit=no
+          - name: gcc without threads
+            packages: ''
+            cc: gcc
+            cxx: g++
+            flags: --enable-werror --disable-threads
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ${{ env.LINUX_PACKAGES }} ${{ matrix.packages }}
+      # The compilers are passed through the environment so that a compiler
+      # with an option, such as gcc -m32, reaches configure as one argument.
+      - name: Configure
+        env:
+          CONFIGURE_CC: ${{ matrix.cc }}
+          CONFIGURE_CXX: ${{ matrix.cxx }}
+        run: |
+          ./autogen.sh
+          ./configure ${{ matrix.flags }} \
+              CC="$CONFIGURE_CC" CXX="$CONFIGURE_CXX"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Test
+        run: make -j"$(nproc)" check || { cat test-suite.log; exit 1; }
+
+  distcheck:
+    name: distcheck ${{ matrix.flags }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # With no shared library there is no export table to audit.
+          - flags: --disable-shared
+            allowed_skips: symbols.sh
+          - flags: --disable-static
+            allowed_skips: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.LINUX_PACKAGES }}
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure
+      - name: Build, install and test the release tarball out of tree
+        env:
+          RELIC_ALLOWED_SKIPS: ${{ matrix.allowed_skips }}
+        run: |
+          make -j"$(nproc)" distcheck \
+              DISTCHECK_CONFIGURE_FLAGS=${{ matrix.flags }}

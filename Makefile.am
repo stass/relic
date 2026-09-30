@@ -82,7 +82,7 @@ EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
 	tests/fuzz/regex.dict tests/fuzz/relic.dict tests/lang \
-	tests/langtest.sh
+	tests/langtest.sh tests/strict.sh
 
 ##
 ## The example is built and run by make installcheck, against the installed
@@ -96,15 +96,17 @@ EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
 ## the way it linked the library, and an instrumented library links an
 ## instrumented example.  Without pkg-config there is nothing to
 ## check the installation against, and the skip says so rather than passing
-## quietly; pkg-config is not required to build or install relic.  The
+## quietly, or fails under RELIC_STRICT_CHECK=yes unless RELIC_ALLOWED_SKIPS
+## names installcheck; pkg-config is not required to build or install relic.  The
 ## example is built in a directory of its own and removed with it, together
 ## with whatever else the compiler leaves beside an executable.
 ##
 installcheck-local:
 	@if ! command -v pkg-config >/dev/null 2>&1; then \
-		echo "SKIP: examples/embed.c: pkg-config is not installed," \
-		    "so the installed library was not checked"; \
-		exit 0; \
+		check=installcheck; \
+		reason="SKIP: examples/embed.c: pkg-config is not installed,"; \
+		reason="$$reason so the installed library was not checked"; \
+		$(RELIC_UNAVAILABLE_CHECK); \
 	fi; \
 	PKG_CONFIG_PATH='$(libdir)/pkgconfig'; export PKG_CONFIG_PATH; \
 	work=$$(mktemp -d) || exit 1; \
@@ -417,7 +419,8 @@ endif
 dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/cli.sh \
 	tests/globals.sh tests/langfiles.sh tests/magic.sh tests/man.sh \
 	tests/output.sh tests/perf.sh tests/pkgconfig.sh tests/reentry.sh \
-	tests/repl.sh tests/roundtrip.sh tests/symbols.sh tests/version.sh
+	tests/repl.sh tests/roundtrip.sh tests/skips.sh tests/symbols.sh \
+	tests/version.sh
 
 ##
 ## The equivalence suite runs every language test under each alternative
@@ -684,9 +687,27 @@ RELIC_LANG_TESTS = \
 	tests/lang/verbose-mixed.dl tests/lang/verbose-one.dl \
 	tests/lang/zero-arity.dl
 
+# Every test runs through tests/strict.sh, whatever its kind, so that
+# RELIC_STRICT_CHECK=yes in the environment turns a skipped test into a
+# failed one for make check, make distcheck and the sanitizer suites alike.
+RELIC_STRICT = $(SHELL) $(abs_top_srcdir)/tests/strict.sh
+
+# A whole check that cannot run, such as a sanitizer suite the compiler cannot
+# build, ends its recipe here with $$check naming it and $$reason saying why.
+# It is put to tests/strict.sh as a stand-in test that skips, so the one
+# policy decides: the recipe succeeds where a skip is allowed and fails where
+# strict mode forbids it, and RELIC_ALLOWED_SKIPS can name the check.
+RELIC_UNAVAILABLE_CHECK = \
+	status=0; \
+	$(RELIC_STRICT) $(SHELL) -c 'echo "$$0"; exit 77' \
+	    "$$reason" "$$check" || status=$$?; \
+	if test $$status -eq 77; then exit 0; fi; \
+	exit $$status
+
 TEST_EXTENSIONS = .dl .sh
-DL_LOG_COMPILER = $(SHELL) $(abs_top_srcdir)/tests/langtest.sh
-SH_LOG_COMPILER = $(SHELL)
+LOG_COMPILER = $(RELIC_STRICT)
+DL_LOG_COMPILER = $(RELIC_STRICT) $(SHELL) $(abs_top_srcdir)/tests/langtest.sh
+SH_LOG_COMPILER = $(RELIC_STRICT) $(SHELL)
 
 AM_TESTS_ENVIRONMENT = \
 	RELIC='$(abs_top_builddir)/relic$(EXEEXT)'; export RELIC; \
@@ -787,6 +808,9 @@ RELIC_ENTER_DISPOSABLE_TREE = \
 # succeed.  Failing instead would leave no way to run the suite on a platform
 # that has only some of them, and would make the sanitizer runs that the
 # working agreement asks for impossible rather than merely unavailable.
+# Under RELIC_STRICT_CHECK=yes it fails, unless RELIC_ALLOWED_SKIPS names the
+# target: a machine set up to run every check must not report one that ran
+# nothing as passed.
 #
 # The tree is configured afresh with nothing carried over but the compilers,
 # so that a sanitizer run means the same thing whatever options the
@@ -796,8 +820,9 @@ RELIC_SANITIZER_CHECK = \
 	  test -n "$$supported"; } || \
 	    { echo "sanitizer target is incompletely defined" >&2; exit 1; }; \
 	if test "x$$supported" != xyes; then \
-		echo "$$name is not available with $(CC); skipping."; \
-		exit 0; \
+		check='$@'; \
+		reason="$$name is not available with $(CC); skipping."; \
+		$(RELIC_UNAVAILABLE_CHECK); \
 	fi; \
 	if test -n "$$note"; then echo "note: $$note"; fi; \
 	$(RELIC_ENTER_DISPOSABLE_TREE) && \

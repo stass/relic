@@ -87,14 +87,26 @@ and the BSDs' `<util.h>` in any angle-bracket include. Nothing includes
 either today. Including relic's headers by a quoted name alone, with no
 `-I` for `lib/`, or giving them a prefix, would remove the collision.
 
-**Continuous integration is not configured.** [High] `relic-plan.md` section 6
-specifies fifteen jobs; the repository has none. Beyond macOS, only glibc
-Linux on x86-64 has been verified, by hand, and nothing reruns either check
-on a change. The tarball job matters most, because it builds what users
-actually download, and the Linux jobs matter next, because leak detection
-does not work under AddressSanitizer on macOS, so a change made there is
-checked for leaks only when someone runs the suite on Linux. The BSD and
-musl jobs need third-party VM actions and can follow.
+**Continuous integration is incomplete and has not run.** [High, component:
+`.github/workflows/`] `relic-plan.md` section 6 specifies fifteen jobs.
+`ci.yml` has the Linux compilers, AddressSanitizer with leak detection and
+UndefinedBehaviorSanitizer, distcheck, and the tarball built on glibc and
+musl without autotools; `extended.yml`, weekly, has MemorySanitizer,
+ThreadSanitizer, `-m32`, no threads and the two distcheck variants;
+`macos.yml` runs only by hand while the repository is private. None has run
+on GitHub yet, so each needs a first green run before it can be trusted.
+Missing:
+
+* FreeBSD, OpenBSD and NetBSD. GitHub has no BSD runners, and the vmactions
+  actions that boot one on a Linux runner fetch their helper script and disk
+  images at run time with no checksum, which was judged too much trust to
+  extend. A job that boots each system's official image, verified against
+  the checksum the project publishes, under QEMU on a Linux runner, or a
+  hosted service with native BSD machines, would close it.
+* valgrind. There is no `make check-valgrind` to call; a target that runs
+  each test under valgrind through the runner `tests/strict.sh` already puts
+  in front of every test would be the natural place.
+* macOS on every push, once minutes on it are free.
 
 **Nothing enforces linking `$(LTLIBOBJS)` rather than `$(LIBOBJS)`.** [Low,
 component: `Makefile.am`] A program whose `LDADD` names the plain form

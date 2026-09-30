@@ -62,6 +62,7 @@ make check-asan     reconfigure with AddressSanitizer, rebuild, run the suite
 make check-lsan     the same under LeakSanitizer, where it stands alone
 make check-msan     the same under MemorySanitizer, where it is supported
 make check-ubsan    the same under UndefinedBehaviorSanitizer
+make check-tsan     the same under ThreadSanitizer, with threads enabled
 ```
 
 Each sanitizer suite configures a disposable build tree under `disposable/`
@@ -69,6 +70,18 @@ in the current build directory, from a copy of the distributed sources, so it
 never leaves instrumented objects in the tree you work in and works whether
 that tree was configured in place or not. A sanitizer the platform does not
 support reports that and succeeds rather than failing the build.
+
+A few tests need a tool the build does not, such as `mandoc`, `nm` or
+`pkg-config`, and are skipped without it. On a machine set up to run every
+check, set `RELIC_STRICT_CHECK=yes` in the environment: a skipped test then
+fails, and so do a sanitizer suite the compiler cannot build and an
+`installcheck` without `pkg-config`. A skip that is expected there is named
+in `RELIC_ALLOWED_SKIPS`, a space-separated list of test file names and
+targets:
+
+```sh
+RELIC_STRICT_CHECK=yes RELIC_ALLOWED_SKIPS=symbols.sh make distcheck
+```
 
 ## Embedding
 
