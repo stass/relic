@@ -1101,15 +1101,21 @@ The Magic suites were confirmed the same way:
 | `specs/design-import.md` | facts read from csv and tsv tables: `-I` and `relic_import_t`, declared column types, each format as the inverse of its output, the header, a record at a time into the load's commit |
 | `specs/design-arithmetic.md` | integer expressions as comparison operands, the equality that binds, the safety closure, computed integers in the frame and interned when stored, an undefined result as an evaluation error; implemented, step 4's speed-up gate missed |
 | `specs/design-aggregates.md` | `count`, `sum`, `min` and `max` over the rows a body denotes, the generated group rule, the aggregate edge, the fold, the exact sum, queries, Magic Sets and the frozen round; implemented |
+| `specs/design-release.md` | the interface documentation, the documented examples as tests, the tarball, the packaging skeletons, the release procedure |
 | `specs/style.md` | code style, binding on all relic-owned code |
 | `relic-plan.md` | fifteen stages, six milestones, decision record |
 | `initial-spec.md` | the original Draft v1, kept for reference |
 
 ## Next
 
-Stage S14, documentation, packaging and release: the complete manual pages,
-a `README.md`, `NEWS`, `LICENSE`, the `contrib/` port skeletons and the
-release tarball.
+Stage S14, documentation, packaging and release. The manual pages have been
+audited against the code, `README.md` takes a reader to a first query and
+an embedding, the tarball carries the project's documents, and
+`tests/docs.sh` runs every example `relic(1)`, `relic(3)` and `README.md`
+show, the C example of `relic(3)` being `examples/query.c`, built by `make
+check`. Remaining: `NEWS`, the `contrib/` port skeletons, the arithmetic
+amendments to the v1 specs, the version and interface number of 1.0, and
+FreeBSD built and tested by hand.
 
 ## Decisions taken
 

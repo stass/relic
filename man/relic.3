@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd September 28, 2026
+.Dd October 1, 2026
 .Dt RELIC 3
 .Os
 .Sh NAME
@@ -161,6 +161,23 @@ and facts read from csv and tsv tables with
 and
 .Fn relic_import_path .
 Loads, facts and imports append to one program in the order they are made.
+.Fn relic_load_string
+takes NUL-terminated text,
+.Fn relic_load_file
+reads
+.Fa stream
+to its end and leaves it open, and
+.Fn relic_load_path
+opens
+.Fa path ,
+reads it and closes it; a
+.Dv NULL
+text, stream or path is refused.
+.Fa source_name
+names the text in diagnostics, is copied, and is
+.Qq <input>
+when
+.Dv NULL .
 A load or an import is all or nothing.
 A load, an import, or a call to
 .Fn relic_fact_add ,
@@ -168,8 +185,9 @@ whose facts would take the relations past
 .Fa max_tuples
 or
 .Fa max_memory
-is refused with nothing added, by an error naming the first predicate, in
-the order the text names them, that would gain facts:
+is refused with nothing added; when the facts are what do not fit, the
+error names the first predicate, in the order the text names them, that
+would gain facts:
 .Dq limit exceeded: tuples=4 while loading e/1 .
 Queries are prepared from text, such as
 .Qq path(a, X)?\& ,
@@ -186,7 +204,10 @@ or
 creates a context with every limit at its default, and
 .Fn relic_create_config
 one with the limits of
-.Fa config :
+.Fa config ,
+or the defaults when it is
+.Dv NULL
+or zeroed:
 .Bd -literal -offset indent
 struct relic_config {
 	size_t		max_memory;
@@ -208,6 +229,11 @@ computes, the symbol pool, which holds every name, symbol and string the
 program states and every string evaluation computes, the buffers an
 evaluation computes strings in, the plans of an evaluation and the rewrite
 of a query; zero leaves either unbounded.
+.Fa max_memory
+does not bound all the memory the library uses: the text being loaded, the
+program's rules and queries, the field of a table being imported and a
+prepared query are sized by what the caller wrote, and growing an array
+holds the old one until the new one is filled.
 .Fa max_magic_preds
 and
 .Fa max_magic_rules
@@ -241,7 +267,7 @@ destroyed.
 They block every signal but those a fault in them raises, so a signal sent
 to the process is taken by one of the caller's threads.
 The calling thread cannot be cancelled while it waits for them.
-Their stacks and the few kilobytes each keeps for running plans are not
+Their stacks and the working state each keeps for running plans are not
 counted by
 .Fa max_memory .
 A child of
@@ -267,11 +293,16 @@ the calling thread.
 .Pp
 .Fa flags
 holds switches, zero by default.
-The first four,
+.Dv RELIC_F_NAIVE ,
+.Dv RELIC_F_NO_INDEX ,
+.Dv RELIC_F_NO_REORDER ,
+.Dv RELIC_F_NO_MAGIC ,
 .Dv RELIC_F_NO_STREAM
 and
 .Dv RELIC_F_PARALLEL_ALWAYS
-select alternative evaluation strategies for testing:
+select alternative evaluation strategies for testing, and
+.Dv RELIC_F_NOTE_MIXED
+asks for a diagnostic:
 .Bl -tag -width RELIC_F_PARALLEL_ALWAYS
 .It Dv RELIC_F_NAIVE
 evaluate every recursive component by the naive fixed point rather than the
@@ -279,7 +310,8 @@ semi-naive one;
 .It Dv RELIC_F_NO_INDEX
 build no secondary index, scanning instead;
 .It Dv RELIC_F_NO_REORDER
-join positive literals in the order they are written;
+join positive literals in the order they are written, but for the one
+reading what the previous round derived, which goes first;
 .It Dv RELIC_F_NO_MAGIC
 answer every query from the whole program rather than through its Magic
 Sets rewrite;
@@ -320,8 +352,20 @@ No answer, identifier, limit or line of explain output depends on the seed.
 releases a context and everything it owns, and accepts
 .Dv NULL .
 .Fn relic_version
-returns the version of the library, as
-.Qq major.minor.patch .
+returns the version of the library the caller is linked against, as
+.Qq major.minor.patch ,
+in a static string.
+The header defines the version it belongs to as
+.Dv RELIC_VERSION_MAJOR ,
+.Dv RELIC_VERSION_MINOR ,
+.Dv RELIC_VERSION_PATCH ,
+the string
+.Dv RELIC_VERSION_STRING ,
+and
+.Dv RELIC_VERSION_NUMBER ,
+which is major \(mu 10000 + minor \(mu 100 + patch, so that a caller can
+require a version in one comparison; a shared library upgraded since the
+caller was compiled can make the two differ.
 .Ss Values
 A value is a symbol, a string or an integer:
 .Bd -literal -offset indent
@@ -345,13 +389,18 @@ bytes and fill
 .Fa value
 with their identifier, which is valid for the life of the context.
 A symbol must be a lowercase ASCII letter followed by ASCII letters, digits
-and underscores, as the language writes one; any other bytes, a NUL among
-them, make a string.
+and underscores, as the language writes one;
+.Fn relic_value_symbol
+refuses any other bytes, a NUL among them, which only
+.Fn relic_value_string
+takes.
 A context holds at most 2^30 \- 1 distinct byte strings, which symbols and
 strings share with predicate names, variable names and source names, and at
 most 2^30 \- 1 distinct integers; a byte string is at most 2^32 \- 2 bytes
 long.
-Interning past a limit fails with the reason reported.
+Interning past a limit, or past
+.Fa max_memory ,
+fails with the reason reported.
 .Fn relic_string
 returns the bytes of a symbol or string identifier, NUL-terminated, and
 stores their length in
@@ -380,7 +429,14 @@ may be
 only when
 .Fa arity
 is zero.
-The fact is stored with the program's other facts before the call returns.
+Each value must be an integer or an identifier the context assigned, and a
+value typed
+.Dv RELIC_SYMBOL
+must hold a symbol's bytes.
+A predicate is its name and its arity together, so a fact of a new arity
+starts a new predicate.
+The fact is stored with the program's other facts before the call returns,
+or refused with nothing added.
 Adding a fact the program does not hold changes the program, so everything
 derived before it is discarded and the next evaluation derives it again;
 adding one it holds changes nothing.
@@ -406,7 +462,10 @@ struct relic_import {
 is
 .Dv RELIC_FORMAT_CSV
 or
-.Dv RELIC_FORMAT_TSV ,
+.Dv RELIC_FORMAT_TSV ;
+both enumerations start at 1, so a zeroed description names no format and
+no column.
+The tables are
 each read as the exact inverse of the
 .Xr relic 1
 output format of the same name.
@@ -424,6 +483,9 @@ and no other.
 In both, a record ends at a line feed, or a carriage return and a line
 feed, outside quotes; the last needs no line end; and an empty line is a
 record of one empty field.
+A carriage return anywhere else outside quotes is an error, as is, in csv,
+a quote inside an unquoted field or anything but a comma or a line end
+after a closing quote.
 Bytes are data: no encoding is assumed and no space is trimmed.
 .Pp
 Each of the
@@ -486,10 +548,14 @@ does not define; and so is an import given a
 .Fa stream
 or
 .Fa path .
+The description is borrowed for the call.
 .Ss Evaluation
 .Fn relic_check
 validates the program: rule safety, stratification, and warnings about
 variables named once and predicates nothing defines.
+It checks only what was loaded since the previous check, so a second check
+with nothing loaded between reports nothing, and once the program has held
+a rejected rule it fails for good, since loading more cannot remove one.
 A variable an aggregate shares with the rest of its rule must be bound
 both inside the aggregate's body and outside it, and a program recursive
 through an aggregate is rejected as one recursive through negation is.
@@ -498,8 +564,9 @@ evaluates the whole program.
 Neither is needed before a query, which checks and evaluates what it needs.
 An evaluation fails, and the next starts again from the facts, when a limit
 refuses what it would hold, when memory runs out, when an arithmetic
-expression has no defined result: one outside the 64-bit integers, or a
-division or remainder by zero, when a string function would compute a
+expression has no defined result: one outside the 64-bit integers, a
+division or remainder by zero, or the remainder of the least integer by
+\-1, when a string function would compute a
 string longer than a string value can be, or when
 .Ql match
 is given a pattern that is not a regular expression; a sum whose total is
@@ -517,8 +584,17 @@ typedef int (*relic_row_cb)(void *callback_ctx,
 .Ed
 .Pp
 A row has one value per variable the query names, in the order they first
-occur.
-The callback returns zero for the next row and nonzero to stop.
+occur, but for
+.Ql _
+and the variables local to an aggregate's braces; a query with no variables has one row of no values when it
+holds and none when it does not.
+The values are borrowed for the call, and the bytes of a symbol or string
+belong to the context.
+Rows are distinct, in an order the language leaves unspecified but that is
+the same on every run over the same input.
+The callback returns zero for the next row and nonzero to stop, and
+.Fn relic_query_run
+then returns 0.
 No row is delivered until everything that can fail has succeeded, so a query
 that fails delivers no rows.
 In a context where
@@ -541,35 +617,58 @@ are derived.
 Once the rows have been delivered the context keeps nothing of the answer,
 so answers do not count against
 .Fa max_tuples
-or
+for later queries, and an answer delivered as it is derived is never held.
+The integers and strings a query computes stay interned for the life of the
+context, and count against
 .Fa max_memory
-for later queries; an answer delivered as it is derived is never held.
+as every interned value does.
 .Pp
 .Fn relic_query_collect
-copies the answer into a result the caller owns.
+copies the answer into a result the caller owns, whole or not at all.
 .Fn relic_result_rows
 and
 .Fn relic_result_columns
-give its size,
+give its size, the columns being the query's even when there are no rows,
 .Fn relic_result_row
-a row's values or
+a row's values, a pointer to no values for a query with no columns, or
 .Dv NULL
 past the last row, and
 .Fn relic_result_destroy
-releases it.
-A result may outlive later loads and the context itself.
+releases it, and accepts
+.Dv NULL .
+A result may outlive later loads and the context itself, though the bytes
+of its symbols and strings are read with
+.Fn relic_string
+only while the context lives.
 .Pp
+.Fn relic_query_prepare
+checks the program first, which must pass, and then
+.Fa text ,
+which must be exactly one query ending in
+.Ql \&? ,
+safe as a rule's body must be.
+.Fa source_name
+names it in diagnostics, is copied, and is
+.Qq <query>
+when
+.Dv NULL .
+Preparing adds nothing to the program, so a query refused leaves it as
+valid as it was.
 .Fn relic_query_count
 is the number of queries the program contains, and
 .Fn relic_query_loaded
 returns the one at
 .Fa index ,
-counting from zero.
+counting from zero, or
+.Dv NULL
+when the program fails its check or holds no such query.
+Every query belongs to the caller, and
 .Fn relic_query_destroy
-releases a query, and accepts
+releases one and accepts
 .Dv NULL .
 It may be called before or after
-.Fn relic_destroy .
+.Fn relic_destroy ,
+but a query cannot be run once its context is gone.
 .Ss Diagnostics
 Every note, warning and error goes to the callback installed with
 .Fn relic_diag_set ,
@@ -591,7 +690,11 @@ typedef void (*relic_diag_cb)(void *callback_ctx,
 .Fa where
 is
 .Dv NULL
-for a diagnostic that points at no text.
+for a diagnostic that points at no text; a location's line and column count
+from one, and its
+.Fa file
+may be
+.Dv NULL .
 The message and the location are borrowed for the call; the
 .Fa file
 name a location holds stays valid until the context is destroyed.
@@ -599,16 +702,36 @@ A message quotes program text as it was written, so a callback that writes
 it to a terminal escapes it first, as
 .Fn relic_diag_stderr
 does.
+A context has no callback until one is installed, and
+.Fn relic_diag_set
+with
+.Dv NULL
+removes it.
 .Fn relic_diag_stderr
-is a ready-made callback that writes each diagnostic to standard error,
-prefixed by the program name its callback context holds.
-.Fn relic_error
-returns the text of the most recent error, or
+is a ready-made callback that writes each diagnostic to standard error as
+.Ql file:line:column: level: message ,
+or, when it points at no text, as
+.Ql name: level: message ,
+where
+.Ar name
+is the NUL-terminated string its callback context points to, left out with
+the colon after it when that is
 .Dv NULL .
+It writes a backslash as two and any other byte outside printable ASCII as
+.Ql \exHH ,
+in the file name as in the message.
+.Fn relic_error
+returns the text of the most recent error, cut to 511 bytes, or
+.Dv NULL
+when there has been none.
+A later success does not clear it, and the string belongs to the context
+and is replaced by the next error.
 .Pp
 .Fn relic_explain_set
 installs a callback that receives the plans evaluation runs, one line of
-printable ASCII at a time, of at most 1023 bytes and with no newline:
+printable ASCII at a time, of at most 1023 bytes and with no newline, a
+longer line being cut to end in
+.Ql ... :
 .Bd -literal -offset indent
 typedef void (*relic_explain_cb)(void *callback_ctx, const char *line);
 .Ed
@@ -617,10 +740,14 @@ Each part of the program is shown as it is planned, and one whose
 predicates have facts counts them in a line
 .Ql facts: N ;
 a predicate of facts alone needs no evaluation and is not shown.
+A query answered through its rewrite shows the rewrite before its plan.
 .Pp
 .Fn relic_stats
-fills a
+fills the
 .Vt relic_stats_t
+.Fa stats
+points to, which must not be
+.Dv NULL ,
 with counters of the work done and of what the context holds:
 .Bd -literal -offset indent
 struct relic_stats {
@@ -638,14 +765,28 @@ struct relic_stats {
 };
 .Ed
 .Pp
-The first six count evaluation's work since the context was created; the
-rest describe what it holds when read.
+The first six count evaluation's work since the context was created, over
+the program's rules and every query's alike:
+.Fa iterations
+the rounds of the fixed point of recursive components,
+.Fa derivations
+the head tuples rules produce,
+.Fa tuples_inserted
+those that added a tuple to its relation, which a row delivered as it is
+derived never does, and
+.Fa tuples_scanned
+and
+.Fa tuples_looked_up
+the tuples read by scanning a relation and through an index.
+The rest describe what it holds when read: the tuples across every
+relation, the bytes they and the values occupy, and the distinct symbols,
+strings and integers interned.
 .Fa parallel_rounds
 counts the rounds of evaluation whose work was shared among more than one
 thread, and is the one counter that depends on the number of threads.
 .Fa derivations
-counts the tuples rules derive and the facts copied into the relation of a
-predicate rules also derive, not the facts of a predicate no rule derives,
+also counts the facts copied into the relation of a predicate rules
+derive, not the facts of a predicate no rule derives,
 which are read where they are stored.
 The rows of each aggregate's body are derived into a relation of their
 own, and are counted by
@@ -673,6 +814,8 @@ or
 .Fn relic_import_file ,
 which may be the caller's own, as
 .Xr funopen 3
+or
+.Xr fopencookie 3
 makes one.
 Such code may call
 .Fn relic_string ,
@@ -688,10 +831,12 @@ or does nothing, and
 .Fn relic_error
 describes the refusal until the next error or until the operation the
 caller code runs inside returns.
-The diagnostic callback is not called for a refusal.
+The diagnostic callback is not called for a refusal, and a refused
+.Fn relic_destroy
+releases nothing, so a callback that destroys its own context leaks it.
 A callback must return: one that leaves by
 .Xr longjmp 3
-leaves its context refusing every later call.
+or an exception leaves its context refusing every later call.
 .Sh RETURN VALUES
 Functions returning
 .Vt int
@@ -700,10 +845,19 @@ return 0 on success and \-1 on failure, except
 which returns a value less than, equal to or greater than zero.
 Functions returning a pointer return
 .Dv NULL
-on failure.
+on failure, and
+.Fn relic_result_row ,
+.Fn relic_string
+and
+.Fn relic_error
+also return it when there is no row, identifier or error to return;
+.Fn relic_version
+never does.
 Every failure is explained by an error diagnostic, whose text
 .Fn relic_error
-returns, except that of
+returns, except a call refused while caller code runs, which
+.Fn relic_error
+alone describes, and that of
 .Fn relic_create
 and
 .Fn relic_create_config ,
@@ -722,35 +876,70 @@ and
 cannot fail.
 .Pp
 No function terminates the process on an ordinary failure.
-The library calls
+A library built for release calls
 .Xr abort 3
 only when it finds its own memory already corrupted, such as a storage
 header overwritten by a stray write, where continuing would release memory
 it cannot prove it owns.
 .Sh EXAMPLES
-Answer a query and print the first column of each row.
+A complete program that loads a program, answers a query and prints the
+first column of each row, reporting any mistake on the standard error.
 A symbol is an identifier and is safe to print as it is; a string may hold
 any bytes, and a program that prints one escapes it.
 .Bd -literal -offset indent
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <relic.h>
+
 static int
 print_row(void *ctx, const relic_value_t *values, size_t count)
 {
 	if (count > 0 && values[0].type == RELIC_SYMBOL)
 		puts(relic_string(ctx, values[0].v.id, NULL));
+
 	return (0);
 }
 
-static char name[] = "example";
+int
+main(void)
+{
+	static char name[] = "query";
+	relic_query_t *query;
+	relic_t *ctx;
+	int status;
 
-relic_t *ctx = relic_create();
-relic_diag_set(ctx, relic_diag_stderr, name);
-relic_load_string(ctx, "graph", "edge(a, b). edge(b, c).\en"
-    "path(X, Y) :- edge(X, Y).\en"
-    "path(X, Z) :- edge(X, Y), path(Y, Z).\en");
-relic_query_t *query = relic_query_prepare(ctx, NULL, "path(a, X)?");
-relic_query_run(ctx, query, print_row, ctx);
-relic_query_destroy(query);
-relic_destroy(ctx);
+	ctx = relic_create();
+	if (ctx == NULL)
+		return (EXIT_FAILURE);
+	relic_diag_set(ctx, relic_diag_stderr, name);
+
+	query = NULL;
+	status = relic_load_string(ctx, "graph",
+	    "edge(a, b). edge(b, c).\en"
+	    "path(X, Y) :- edge(X, Y).\en"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\en");
+	if (status == 0)
+		query = relic_query_prepare(ctx, NULL, "path(a, X)?");
+	if (query == NULL || relic_query_run(ctx, query, print_row, ctx) != 0)
+		status = -1;
+
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+
+	if (fflush(stdout) == EOF || ferror(stdout))
+		status = -1;
+
+	return (status == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+}
 .Ed
+.Pp
+Compiled against the installed library, as
+.Dl cc -o query query.c $(pkg-config --cflags --libs librelic)
+it prints
+.Ql b
+and
+.Ql c ,
+each on a line.
 .Sh STANDARDS
 The header is strict ISO C11 and may be included from C++.

@@ -77,7 +77,14 @@ pkgconfig_DATA = librelic.pc
 # The m4 macro files are distributed by automake already, as dependencies of
 # configure; listing them here as well would only create a list that a sixth
 # macro file could be left out of.
+#
+# The project's documents are distributed with the source, so that whoever
+# audits the code has its design beside it: the architecture and the design
+# of each subsystem, the plan, what exists and what remains open.  specs/ and
+# docs/ are named whole, as tests/lang is, so that a new design document
+# cannot be left out of the tarball.
 EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
+	STATUS.md TODO.md docs initial-spec.md relic-plan.md specs \
 	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
@@ -423,6 +430,24 @@ dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/cli.sh \
 	tests/version.sh
 
 ##
+## Every example the manual pages and README.md show is run by tests/docs.sh
+## against its entry in tests/examples/expected, in a copy of the files of
+## tests/examples it names.  The directory is not named tests/docs, as make's
+## built-in suffix rule would build a file of that name from tests/docs.sh
+## when make dist asks for it.  The C example of relic(3) is
+## examples/query.c, built here as an embedder builds it, with only the
+## public header on its include path.
+##
+
+dist_check_SCRIPTS += tests/docs.sh
+EXTRA_DIST += tests/examples
+
+RELIC_EXAMPLE_BINARIES = examples/query
+examples_query_SOURCES = examples/query.c
+examples_query_CPPFLAGS = -I$(top_srcdir)/include
+examples_query_LDADD = librelic.la
+
+##
 ## The equivalence suite runs every language test under each alternative
 ## evaluation strategy -X selects and compares it with the default, and
 ## again with every answer gathered before its rows are written, which must
@@ -716,10 +741,11 @@ AM_TESTS_ENVIRONMENT = \
 	RELIC_VERSION='$(PACKAGE_VERSION)'; export RELIC_VERSION; \
 	RELIC_LANG_TESTS='$(RELIC_LANG_TESTS)'; export RELIC_LANG_TESTS;
 
-# A test program runs as a test, with no arguments.  A replay driver is
-# built for make check too, but needs its corpus named, which the script that
-# runs it does.
-check_PROGRAMS = $(RELIC_TEST_BINARIES) $(RELIC_REPLAY_BINARIES)
+# A test program runs as a test, with no arguments.  A replay driver and an
+# example are built for make check too, but are run by the script that tests
+# them.
+check_PROGRAMS = $(RELIC_TEST_BINARIES) $(RELIC_REPLAY_BINARIES) \
+	$(RELIC_EXAMPLE_BINARIES)
 TESTS = $(RELIC_TEST_BINARIES) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 
 ##

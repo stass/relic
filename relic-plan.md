@@ -1162,7 +1162,16 @@ and Homebrew, and the release tarball.
 
 **Design notes.** The manual pages are mdoc and are linted in CI. They are the
 interface documentation; the architecture document is design documentation, and
-neither substitutes for the other.
+neither substitutes for the other. The test that runs every documented example,
+what the tarball carries, the `contrib/` skeletons and the release procedure
+are specified in `specs/design-release.md`.
+
+**Platforms for 1.0.** Criterion 10 of architecture section 72 names FreeBSD,
+OpenBSD and NetBSD beside macOS and Linux. Continuous integration has no BSD
+job, the actions that boot one having been judged too much unverified trust,
+so 1.0 is built and tested from its tarball on FreeBSD by hand, with the result
+recorded in `STATUS.md`. OpenBSD and NetBSD, and a BSD job that boots each
+system's own checksummed image, are 1.1 work in `TODO.md`.
 
 `STATUS.md` becomes accurate as of the release, and `TODO.md` becomes the 1.1
 agenda.

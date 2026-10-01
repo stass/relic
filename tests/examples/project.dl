@@ -1,0 +1,8 @@
+% Build tasks and the tasks each one needs first.
+needs(test, build).
+needs(package, build).
+needs(release, test).
+needs(release, package).
+depends(T, D) :- needs(T, D).
+depends(T, D) :- needs(T, M), depends(M, D).
+depends(release, D)?

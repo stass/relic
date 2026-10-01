@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd September 28, 2026
+.Dd October 1, 2026
 .Dt RELIC 1
 .Os
 .Sh NAME
@@ -30,17 +30,27 @@ The program is read from each
 in the order given, all of them forming one program, or from the standard
 input when no
 .Ar file
-is given and the standard input is not a terminal.
+is given.
+A program or a table that would be read from standard input when it is a
+terminal is a usage error instead, since
+.Nm
+would wait for it with nothing said; the terminal is for
+.Fl i
+to read.
 Facts may also be imported from CSV and TSV tables with
 .Fl I ,
 as described in
 .Sx IMPORTS .
 .Pp
 A program is a sequence of facts, rules and queries.
-A fact is an atom ending in a period; a rule is an atom, the
+A fact is an atom ending in a period, and holds no variable; a rule is an
+atom, the
 .Ql :-
 token and a body of literals separated by commas, ending in a period; a
-query is a body ending in a question mark:
+query is a body ending in a question mark.
+An atom is a predicate name and at most 32 arguments in parentheses, which
+may be left out when there are none, as in
+.Ql done. :
 .Bd -literal -offset indent
 edge(a, b).
 edge(b, c).
@@ -49,13 +59,15 @@ path(X, Z) :- edge(X, Y), path(Y, Z).
 path(a, X)?
 .Ed
 .Pp
-A symbol begins with a lowercase letter, a variable with an uppercase
-letter or an underscore, and
+Names are ASCII letters, digits and underscores.
+A symbol begins with a lowercase letter, and a variable with an uppercase
+letter or an underscore.
 .Ql _
-alone matches anything.
-Integers are decimal and may be negative.
-Strings are written in double quotes and may hold any bytes, spelled with
-the escapes
+alone matches anything in a positive atom of a body, and names no value, so
+it cannot stand in a rule's head or a negated atom.
+Integers are decimal, may be negative, and must fit in 64 bits.
+Strings are written in double quotes on one line and may hold any bytes,
+spelled with the escapes
 .Ql \e\e ,
 .Ql \e\(dq ,
 .Ql \en ,
@@ -74,6 +86,9 @@ or a comparison with one of
 .Ql >
 and
 .Ql >= .
+Values of one type compare as
+.Fl s
+sorts them: integers numerically, and symbols and strings bytewise.
 A comparison that orders values of different types is false.
 .Ql %
 begins a comment that runs to the end of the line.
@@ -99,8 +114,12 @@ a unary minus tighter than both, and every binary operator groups to the
 left.
 Arithmetic is on 64-bit integers: division truncates toward zero, and the
 remainder takes the sign of the dividend.
-An expression nests at most 32 deep, and stands only in a comparison, not
-in an atom's argument or a rule's head.
+An expression is at most 32 levels deep, each operand a level and each
+operator over it one more, so a chain such as
+.Ql X + 1 + 1
+joins at most 32 operands, and parentheses nest at most 32 deep.
+An expression stands only in a comparison, not in an atom's argument or a
+rule's head.
 An equality one side of which is a variable nothing else binds before it,
 and the other side of which reads only bound variables, assigns the
 variable that value, whichever side it is written on:
@@ -109,11 +128,14 @@ dist(X, Y, 1) :- edge(X, Y).
 dist(X, Z, D1) :- dist(X, Y, D), edge(Y, Z), D < 8, D1 = D + 1.
 .Ed
 .Pp
-An expression one of whose operands is a symbol or a string has no value,
-and a comparison or assignment over it is false, as an ordering of
-different types is.
-A result outside the 64-bit integers, or a division or remainder by zero,
-is an error instead: the evaluation stops, its query writes no rows, and
+A symbol or string constant written as an operand, as in
+.Ql X + foo ,
+rejects the program when it is read.
+An operand that is a variable holding a symbol or a string gives the
+expression no value, and a comparison or assignment over it is false, as an
+ordering of different types is.
+A result outside the 64-bit integers, a division or remainder by zero, and
+the remainder of \-9223372036854775808 by \-1 are errors instead: the evaluation stops, its query writes no rows, and
 .Nm
 exits with a nonzero status.
 Whether an evaluation meets such a result depends on the bindings it
@@ -252,7 +274,18 @@ once, parentheses group,
 and
 .Ql $
 match at the start and the end of the string, and a backslash makes the
-byte after it stand for itself.
+byte after it stand for itself, inside a set too.
+A
+.Ql \&]
+first in a set is a member of it, a set ends at the next, so
+.Ql [[:alpha:]]
+is a set of six bytes followed by
+.Ql \&] ,
+and
+.Ql {
+and
+.Ql }
+are ordinary bytes.
 A string constant's escapes are decoded before the pattern is read, so a
 pattern written as a constant doubles its backslashes, as
 .Ql \(dq\e\e.c$\(dq
@@ -262,7 +295,8 @@ A match takes time linear in the string for a given pattern; no pattern
 makes it backtrack.
 .Pp
 An aggregate folds the rows of a body in braces into one value, and is
-written only as the right side of an equality:
+written only as the right side of an equality whose left side is a
+variable:
 .Bd -literal -offset indent
 dep_count(T, N) :- task(T), N = count { depends(T, D) }.
 dir_size(Dir, S) :- dir(Dir),
@@ -285,7 +319,9 @@ the braces, the variable of
 .Ql min
 or
 .Ql max
-among them, so
+among them, which must be named rather than
+.Ql _ ,
+so
 .Ql count { edge(a, Y) }
 counts the distinct
 .Ar Y
@@ -314,13 +350,21 @@ and an error only when the total is outside the 64-bit integers.
 The body holds atoms, negated atoms, comparisons and assignments, but no
 aggregate, and an aggregate may not read a relation that depends on the
 rule it is in.
-The four names are symbols and predicate names everywhere else.
+The four names, and
+.Ql mod ,
+are symbols and predicate names everywhere else;
+.Ql not
+names no predicate.
+A query's columns are its variables outside any braces.
 .Pp
 Every variable of a rule's head, of a negated literal and of a comparison
 must also occur in a positive atom of the body or be assigned by an
 equality or an aggregate, and a program may not be recursive through
 negation or an aggregate.
 A program that breaks either rule is rejected and nothing is evaluated.
+A variable a rule names only once, and a predicate the program reads and
+never defines, are reported as warnings, which change nothing else; a
+variable whose name begins with an underscore is not warned about.
 .Pp
 The options are as follows:
 .Bl -tag -width Ds
@@ -334,9 +378,14 @@ Check the program and its queries, and evaluate nothing.
 Every table named with
 .Fl I
 is read and checked too.
+It cannot be combined with
+.Fl a
+or
+.Fl i .
 .It Fl e
 Write the plan of everything evaluated to the standard error: each part of
-the program as it is planned, and each query's plan before its rows.
+the program as it is planned, and each query's rewrite and plan before its
+rows.
 A part whose predicates have facts counts them as
 .Ql facts: N ;
 a predicate of facts alone needs no evaluation and is not shown.
@@ -377,7 +426,8 @@ Share the work of evaluation among as many as
 .Ar threads
 threads, the one running
 .Nm
-included; 0 asks for one per processor online, and the default is 1.
+included; 0 asks for one per processor online, up to 256, and the default
+is 1.
 A round of evaluation is shared only when it holds enough work to repay the
 threads, so a program of small rounds runs as it would on one thread.
 The answers, their order, every diagnostic and every counter
@@ -429,13 +479,16 @@ Print the version and exit.
 Say more on the standard error.
 Once: after each query that succeeds, a line
 .Ql query N: M rows ,
+or
+.Ql row
+when M is 1,
 where N is the query's number: its position among the
 .Fl q
 queries, or else the program's own, continued in an interactive session as
 .Sx INTERACTIVE MODE
 describes.
-Twice: also a note for the first comparison or aggregate in each rule that
-had no value and was easily unintended: a comparison that ordered values of
+Twice: also a note for the first comparison or aggregate in each rule, and
+in each query each time it is answered, that had no value and was easily unintended: a comparison that ordered values of
 different types, applied an operator to a symbol or a string, or called a
 string function with an argument of a type it does not take, which is
 false, or an aggregate whose rows were not all integers or not all of one
@@ -452,7 +505,8 @@ build no index, scanning instead;
 .It Cm no-magic
 answer every query from the whole program;
 .It Cm no-reorder
-join a rule's atoms in the order they are written;
+join a rule's atoms in the order they are written, but for the one reading
+what the previous round derived, which goes first;
 .It Cm no-stream
 gather every query's answer whole before writing its first row, as a query
 whose plan may derive a row twice is answered, rather than writing the rows
@@ -465,7 +519,8 @@ gives: its rules' derivations gathered as they run and inserted when the
 round ends, in the order they would have been inserted as they were
 derived;
 .It Cm stats
-write the evaluation counters to the standard error when the run ends;
+write the evaluation counters to the standard error when the run ends,
+whether or not it succeeded;
 the derivations count what rules derive and the facts copied into a
 predicate that rules also derive, not the facts of a predicate no rule
 derives, and the parallel rounds the rounds whose work was shared among
@@ -522,7 +577,8 @@ Bytes are data: no encoding is assumed and no space is trimmed.
 .It Cm csv
 Fields are separated by commas.
 A field that begins with a double quote ends at the next quote not doubled;
-inside it a doubled quote is one quote, and commas and line ends are data.
+inside it a doubled quote is one quote, and commas and line ends are data,
+and a comma or a line end must follow it.
 A quote inside an unquoted field is an error.
 .It Cm tsv
 Fields are separated by tabs.
@@ -539,7 +595,8 @@ Outside a quoted field, a carriage return that does not end a line is an
 error.
 With
 .Cm header ,
-the first record is a header of one field per column, and is not imported.
+the first record is a header of one field per column, and is not imported;
+a table with no header is an error.
 .Pp
 Each
 .Ar column
@@ -571,13 +628,15 @@ or one import of
 When an import or the session reads it, the program is the
 .Ar file
 operands, and with none it is empty.
+Two readers of the standard input are a usage error.
 .Sh RESOURCE LIMITS
 Each
 .Fl l
 limit is a decimal
 .Ar value
-from 0, which asks for the default, to the largest size the platform can
-hold.
+from 0, which asks for the default, to the largest both a size and a
+.Vt long long
+can hold, 9223372036854775807 on a 64-bit system.
 .Bl -tag -width magic-preds
 .It Cm tuples
 the most tuples all relations together may hold, the program's facts
@@ -589,10 +648,16 @@ symbols and strings the program states and evaluation computes, the
 buffers an evaluation computes strings in, the plans of an evaluation and
 the rewrite of a query may occupy together; by default there is no limit.
 A long rule's plans can need more memory than the data does.
+The limit is not a bound on all the memory
+.Nm
+uses: the text being loaded, the program's rules and queries, and the
+field of a table being imported are sized by what was written, and growing
+an array holds the old one until the new one is filled.
 .It Cm magic-preds
-the most predicates the rewrite of one query may generate.
+the most adorned and magic predicates the rewrite of one query may
+generate.
 .It Cm magic-rules
-the most rules the rewrite of one query may generate.
+the most distinct rules the rewrite of one query may generate.
 .El
 .Pp
 A query or evaluation that exceeds
@@ -600,9 +665,10 @@ A query or evaluation that exceeds
 or
 .Cm memory
 fails, and writes no rows.
-A file whose facts would exceed either is refused when it is loaded, with
-nothing of it added, and the diagnostic names the first predicate, in the
-order the file names them, that would gain facts:
+A file or a table that would exceed either is refused when it is loaded,
+with nothing of it added.
+When its facts are what exceed the limit, the diagnostic names the first
+predicate, in the order the file names them, that would gain facts:
 .Dl relic: error: limit exceeded: tuples=4 while loading e/1
 When neither
 .Cm magic
@@ -655,6 +721,9 @@ End the session.
 Write the evaluation counters.
 .El
 .Pp
+A command takes nothing after its name but
+.Ic .plan ,
+and a line beginning with a period that names no command is refused.
 A command's reply is written to the standard output, never to the
 .Fl o
 file.
@@ -679,7 +748,10 @@ Everything answered is written out before the session waits for the next
 line.
 .Sh OUTPUT
 Every format writes one row per answer.
-A row's columns are the query's variables, in the order they first occur.
+A row's columns are the query's variables, in the order they first occur,
+but for
+.Ql _
+and the variables of an aggregate's braces.
 A query with no variables writes one empty row when it holds and nothing
 when it does not.
 In
@@ -731,8 +803,11 @@ see
 .Sh EXIT STATUS
 .Ex -std
 It exits 1 when the program or a query was rejected, when evaluation failed,
-when anything in an interactive session failed, or when input or output
-failed, and 2 when the command line is malformed.
+when anything in an interactive session failed, when input or output
+failed, or when the library could not start for want of memory or of a
+random device, and 2 when the command line is malformed or asks to read a
+program or a table from standard input when it is a terminal.
+Warnings do not change the status.
 .Sh EXAMPLES
 Check a program without evaluating it:
 .Pp
@@ -757,7 +832,7 @@ Bound the work a query may do:
 Answer a program's queries over a table of edges, and over a CSV file with a
 header whose second column is not needed:
 .Pp
-.Dl $ relic -I tsv:edge:symbol,symbol=edge.tsv graph.dl
+.Dl $ relic -I tsv:edge:symbol,symbol=edge.tsv reach.dl
 .Dl $ relic -I csv,header:person:symbol,_,integer=people.csv rules.dl
 .Pp
 Query a table read from the standard input, with no program file:
@@ -775,7 +850,18 @@ relic> .quit
 .Sh DIAGNOSTICS
 A diagnostic about the program or a table names the file, line and column it
 concerns, as
-.Ql graph.dl:4:22: error: message .
+.Ql graph.dl:4:22: error: message ,
+and is an
+.Ql error ,
+a
+.Ql warning ,
+or a
+.Ql note
+adding to the one before it.
+The standard input is named
+.Ql <stdin> .
+A diagnostic about anything else begins with the program's name, as
+.Ql relic: error: message .
 Any byte that is not printable ASCII in a diagnostic is escaped.
 .Sh SEE ALSO
 .Xr relic 3 ,

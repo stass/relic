@@ -2462,6 +2462,7 @@ milestone.
 --disable-threads       evaluate on the calling thread alone   (default: threads)
 --enable-asan           AddressSanitizer                       (default: no)
 --enable-ubsan          UndefinedBehaviorSanitizer             (default: no)
+--enable-lsan           LeakSanitizer, where it stands alone   (default: no)
 --enable-msan           MemorySanitizer, clang on Linux        (default: no)
 --enable-tsan           ThreadSanitizer                        (default: no)
 --enable-coverage       gcov or llvm-cov instrumentation       (default: no)
@@ -2525,7 +2526,9 @@ With the default `--prefix=/usr/local`:
 ```
 
 Every path derives from an autoconf directory variable, so packagers relocate
-the whole install with `--prefix`, `--libdir`, `--mandir` and `DESTDIR`.
+the whole install with `--prefix`, `--libdir`, `--mandir` and `DESTDIR`. What
+the release tarball carries, the packaging skeletons under `contrib/` and the
+release procedure are specified in `specs/design-release.md`.
 
 ## 65.6 Shared library versioning
 
@@ -2596,8 +2599,14 @@ tests/equiv/    differential harness across -X strategies
 tests/random/   seeded program generator, differential driver and shrinker
 tests/fuzz/     libFuzzer entry points, built with --enable-fuzzers, and a
                 replay driver that runs their corpus in every build
+tests/examples/ the files the documented examples name, and what each
+                example must print
 bench/          generated workloads and a timing harness
 ```
+
+Every example the manual pages and `README.md` show is run by
+`tests/docs.sh`, which fails when an example has no expectation or an
+expectation no example; specified in `specs/design-release.md`.
 
 `make check` runs the unit, language and equivalence suites, the random
 driver's fault-injection self-test and a small fixed set of seeds, and replays

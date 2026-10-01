@@ -1,0 +1,3 @@
+% The people old enough to vote.
+adult(P) :- person(P, Age), Age >= 18.
+adult(P)?

@@ -104,11 +104,6 @@ empty convenience library builds cleanly on every platform (a platform with
 no replacements) needs checking first, and a check script rejecting
 `$(LIBOBJS)` is the cheaper fallback.
 
-**`--enable-lsan` is not in the architecture's option list.** [Low, component:
-`specs/architecture.md`] Section 65.4 specifies a `make check-lsan` target but
-section 65.3 lists no option to build with LeakSanitizer, so S0 added one to
-make the target implementable. Decide whether section 65.3 should record it.
-
 **The compatibility declarations are verified only on glibc.** [Medium,
 component: `configure.ac`, `compat/compat.h`] `compat.h` declares each
 replaced interface exactly where `AC_CHECK_DECLS` found no system
@@ -128,18 +123,30 @@ reaches a null address there, or `-Wunguarded-availability-new` fails an
 `-Werror=unguarded-availability-new`, or the replacement chosen whenever
 the deployment target predates the SDK, would settle it.
 
-**The tarball carries no project documents.** [Low, component: `Makefile.am`]
-`EXTRA_DIST` ships `README.md` and `LICENSE` but not `specs/`, `relic-plan.md`,
-`STATUS.md` or `TODO.md`. For a tool whose selling point is that it can be
-audited, shipping the architecture document with the source is worth
-considering. Decide at S14 with the rest of packaging.
-
 **`librelic` name collision.** [Low] An unrelated cryptographic toolkit
 publishes `librelic` and a `relic.h`. Only matters if both install under one
 prefix. Remedies are `--program-prefix` and a renamed pkg-config module.
 Revisit if a distribution reports it.
 
+**`relic(1)` may owe an ENVIRONMENT section for `EDITRC`.** [Low,
+component: `man/relic.1`] FILES names `~/.editrc` as libedit's
+configuration. libedit's `el_source(NULL)` reads the file `EDITRC` names
+before `~/.editrc` in the releases that support it, but whether the
+libedit relic links on each platform does is unverified. Settle it per
+platform and document what holds.
+
 ## Engine
+
+**A path load or import whose file fails to close fails having added its
+facts.** [Medium, component: `lib/parse.c` `load_named_file`,
+`lib/import.c` `import_named_file`] Each commits what it read, then
+closes the stream, and returns -1 when `fclose` fails, so a caller told
+the load failed holds its facts, against the all-or-nothing contract of
+`relic(3)` and `relic.h`. The stream was read to its end without error by
+then, so either the close comes before the commit, or a close failure of a
+stream opened only for reading is not a failure of the load. A regression
+test needs a way to make the library's own `fclose` fail, which nothing
+provides yet.
 
 **A round's merge scans its arrays once per stripe.** [Low, component:
 `lib/merge.c`, `lib/relation.c`, `lib/index.c`] Each part of finding the

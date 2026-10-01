@@ -129,13 +129,16 @@ typedef struct relic_config relic_config_t;
  * buffers an evaluation computes strings in; and the plans of an evaluation
  * and the rewritten rules of a query, which grow with the square of a rule's
  * length.  A limit that fits a program's data may therefore refuse its
- * plans, before any tuple is derived.  It does not bound the memory the
- * library uses in total: the program's rules and queries, the text being
- * loaded, the field of a table being imported, the evaluation order and a
- * prepared query are sized by what the caller wrote; the names, symbols,
- * strings and integers it writes are counted by the limit but refused only
- * when an evaluation computes them; and the tables and evaluation order of
- * a query's rewrite are a fraction of the rewrite the limit does count.
+ * plans, before any tuple is derived.  The names, symbols, strings and
+ * integers the caller writes are counted as those evaluation computes are,
+ * so a load, an import, a fact or a query whose values would grow the table
+ * or the pool past the limit is refused as it interns them, with "limit
+ * exceeded: memory=N".  The limit does not bound the memory the library
+ * uses in total: the program's rules and queries, the text being loaded,
+ * the field of a table being imported, the evaluation order and a prepared
+ * query are sized by what the caller wrote, and the tables and evaluation
+ * order of a query's rewrite are a fraction of the rewrite the limit does
+ * count.
  * Nor is it a bound on peak usage, since growing an array holds the old one
  * until the new one is filled.
  *

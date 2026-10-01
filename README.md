@@ -41,11 +41,14 @@ only:
 ```text
 --enable-debug          assertions, -O0 -g3                    (default: no)
 --enable-werror         treat warnings as errors               (default: no)
+--disable-threads       evaluate on the calling thread alone   (default: threads)
 --enable-asan           AddressSanitizer                       (default: no)
---enable-lsan           LeakSanitizer                          (default: no)
---enable-msan           MemorySanitizer, clang on Linux        (default: no)
 --enable-ubsan          UndefinedBehaviorSanitizer             (default: no)
+--enable-lsan           LeakSanitizer, where it stands alone   (default: no)
+--enable-msan           MemorySanitizer, clang on Linux        (default: no)
+--enable-tsan           ThreadSanitizer                        (default: no)
 --enable-coverage       gcov or llvm-cov instrumentation       (default: no)
+--enable-fuzzers        build tests/fuzz, clang only           (default: no)
 --with-libedit=auto|yes|no
                         line editing and history in the REPL   (default: auto)
 ```
@@ -83,21 +86,53 @@ targets:
 RELIC_STRICT_CHECK=yes RELIC_ALLOWED_SKIPS=symbols.sh make distcheck
 ```
 
+## A first query
+
+A program is a sequence of facts, rules and queries. This one states two
+edges of a graph and derives the paths they form:
+
+```text graph.dl
+% A small graph and its transitive closure.
+edge(a, b).
+edge(b, c).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+```
+
+A query names the rows it wants, with variables where any value will do:
+
+```sh
+$ relic -q 'path(a, X)?' graph.dl
+b
+c
+```
+
+A query can also be written in the program itself, ending in `?` as above,
+and `relic -i graph.dl` answers queries typed one per line. `relic(1)`
+describes the language, the options, and the import of facts from CSV and
+TSV tables.
+
 ## Embedding
 
 `librelic` installs a single public header, `<relic.h>`, and a pkg-config
-module:
+module, `librelic`. `examples/query.c` is a complete program that loads a
+program, answers a query and prints the rows, and is the example `relic(3)`
+shows:
 
 ```sh
-cc $(pkg-config --cflags librelic) embed.c $(pkg-config --libs librelic)
+cc -o query examples/query.c $(pkg-config --cflags --libs librelic)
+./query
 ```
 
-Only symbols matching `relic_` are exported.
+Only symbols matching `relic_` are exported. `relic(3)` describes the
+interface.
 
 ## Documentation
 
 | File | Contents |
 | --- | --- |
+| [man/relic.1](man/relic.1) | the tool and the language |
+| [man/relic.3](man/relic.3) | the library |
 | [specs/architecture.md](specs/architecture.md) | the target design of the system |
 | [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
 | [relic-plan.md](relic-plan.md) | the staged implementation plan and decision record |
