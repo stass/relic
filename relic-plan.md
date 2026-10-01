@@ -1171,7 +1171,9 @@ OpenBSD and NetBSD beside macOS and Linux. Continuous integration has no BSD
 job, the actions that boot one having been judged too much unverified trust,
 so 1.0 is built and tested from its tarball on FreeBSD by hand, with the result
 recorded in `STATUS.md`. OpenBSD and NetBSD, and a BSD job that boots each
-system's own checksummed image, are 1.1 work in `TODO.md`.
+system's own checksummed image, are 1.1 work in `TODO.md`. Of the `contrib/`
+skeletons, 1.0 carries the Homebrew formula alone; the FreeBSD and OpenBSD
+ports and the pkgsrc package are 1.1 work in `TODO.md`.
 
 `STATUS.md` becomes accurate as of the release, and `TODO.md` becomes the 1.1
 agenda.

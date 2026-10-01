@@ -1113,9 +1113,11 @@ audited against the code, `README.md` takes a reader to a first query and
 an embedding, the tarball carries the project's documents, and
 `tests/docs.sh` runs every example `relic(1)`, `relic(3)` and `README.md`
 show, the C example of `relic(3)` being `examples/query.c`, built by `make
-check`. Remaining: `NEWS`, the `contrib/` port skeletons, the arithmetic
-amendments to the v1 specs, the version and interface number of 1.0, and
-FreeBSD built and tested by hand.
+check`. `NEWS` holds the 1.0.0 entry, undated until the release, and
+`contrib/homebrew/relic.rb` is a formula whose checksum is written once the
+tarball is published. Remaining: the arithmetic amendments to the v1
+specs, the version and interface number of 1.0, and FreeBSD built and
+tested by hand.
 
 ## Decisions taken
 

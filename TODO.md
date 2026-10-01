@@ -73,15 +73,15 @@ and the BSDs' `<util.h>` in any angle-bracket include. Nothing includes
 either today. Including relic's headers by a quoted name alone, with no
 `-I` for `lib/`, or giving them a prefix, would remove the collision.
 
-**Continuous integration is incomplete and has not run.** [High, component:
+**Continuous integration is incomplete.** [High, component:
 `.github/workflows/`] `relic-plan.md` section 6 specifies fifteen jobs.
 `ci.yml` has the Linux compilers, AddressSanitizer with leak detection and
 UndefinedBehaviorSanitizer, distcheck, and the tarball built on glibc and
 musl without autotools; `extended.yml`, weekly, has MemorySanitizer,
 ThreadSanitizer, `-m32`, no threads and the two distcheck variants;
-`macos.yml` runs only by hand while the repository is private. None has run
-on GitHub yet, so each needs a first green run before it can be trusted.
-Missing:
+`macos.yml` runs only by hand while the repository is private. `ci.yml`
+has passed on GitHub; `extended.yml` and `macos.yml` each need a first
+green run before they can be trusted. Missing:
 
 * FreeBSD, OpenBSD and NetBSD. GitHub has no BSD runners, and the vmactions
   actions that boot one on a Linux runner fetch their helper script and disk
@@ -93,6 +93,13 @@ Missing:
   each test under valgrind through the runner `tests/strict.sh` already puts
   in front of every test would be the natural place.
 * macOS on every push, once minutes on it are free.
+
+**`contrib/` has no BSD port skeletons.** [Low, component: `contrib/`,
+`specs/design-release.md` section 4] Only the Homebrew formula exists. The
+FreeBSD and OpenBSD ports and the pkgsrc package the design lists come with
+those systems' testing; each fetches the published tarball, runs `make
+check` where the system has a test target, and lists the installed paths
+exactly.
 
 **Nothing enforces linking `$(LTLIBOBJS)` rather than `$(LIBOBJS)`.** [Low,
 component: `Makefile.am`] A program whose `LDADD` names the plain form
