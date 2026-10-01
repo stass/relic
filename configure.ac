@@ -1,5 +1,5 @@
 AC_PREREQ([2.69])
-AC_INIT([relic], [0.1.0], [stas@deglitch.com], [relic])
+AC_INIT([relic], [1.0.0], [stas@deglitch.com], [relic])
 AC_CONFIG_SRCDIR([lib/api.c])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
@@ -28,7 +28,7 @@ dnl libtool's rules an added entry point is current+1:0:age+1, a removed or
 dnl changed one -- a field added to a complete type among them -- is
 dnl current+1:0:0, and a change inside the library alone is
 dnl current:revision+1:age.
-RELIC_ABI_CURRENT=6
+RELIC_ABI_CURRENT=1
 RELIC_ABI_REVISION=0
 RELIC_ABI_AGE=0
 AC_SUBST([RELIC_ABI_CURRENT])

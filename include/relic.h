@@ -31,8 +31,8 @@ extern "C" {
  * The minor and patch fields are allotted two decimal digits each, so a
  * release must keep them below 100.
  */
-#define	RELIC_VERSION_MAJOR	0
-#define	RELIC_VERSION_MINOR	1
+#define	RELIC_VERSION_MAJOR	1
+#define	RELIC_VERSION_MINOR	0
 #define	RELIC_VERSION_PATCH	0
 
 #define	RELIC_VERSION_TEXT_(v)	#v

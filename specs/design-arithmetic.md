@@ -518,8 +518,9 @@ R = slots of the head, of every negated literal, of every comparison
 safe exactly when R \ B = {}
 ```
 
-Each pass either adds a slot or ends, so there are at most 64 passes over
-the comparisons; a rule with no assignment ends after one, at the cost the
+Each pass either adds a slot or ends, so there are at most 65 passes over
+the comparisons, 64 that add a slot and one that finds nothing to add; a
+rule with no assignment ends after one, at the cost the
 check has today. The closure is monotone, so its result is the same in
 whatever order the equalities are tried, and the order written is used
 because it is the one a reader can reconstruct.

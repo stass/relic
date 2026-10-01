@@ -6,11 +6,10 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Release relic 1.0.** [Critical, component: `specs/design-release.md`]
-What remains: the arithmetic amendments still missing from the specs (the
-item below); the version and interface number of 1.0; a green run of
-`extended.yml` and `macos.yml` on the release commit, which architecture
-section 68 requires of every job; FreeBSD built and tested from the
-tarball by hand; and the release procedure of the design's section 5.
+What remains: a green run of `extended.yml` and `macos.yml` on the release
+commit, which architecture section 68 requires of every job; FreeBSD built
+and tested from the tarball by hand; and the release procedure of the
+design's section 5.
 
 **Close the comparison gaps.** [Medium, component:
 `specs/design-comparison-cost.md`] The design's section 10 gates each of its
@@ -29,15 +28,6 @@ an idle run under Benchmarks).
 missing the step 4 gate of `specs/design-arithmetic.md` as well. Steps 5
 and 6 are not started. The causes and what to try are sorted in
 `docs/todo-parallel.md`.
-
-**The v1 specs do not state arithmetic.** [Low, component: `specs/`]
-`specs/design-arithmetic.md` section 18 lists the amendments arithmetic
-makes to the other design documents. These remain:
-`specs/design-program.md` section 4.1 says every slot of a checked rule is
-bound by a positive relational literal, section 5 opens by requiring every
-variable be bindable from one, and section 6's example messages lack the
-"or an assignment" the compiler prints; `specs/design-parser.md` section 5
-says `lib/ast.h` defines five types, though the tree lists seven.
 
 **An arena refusal is reported by every caller that meets it.** [Low,
 component: `lib/eval.c`, `lib/diag.c`] `relic_diag_no_memory()` reports each

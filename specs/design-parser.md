@@ -224,7 +224,7 @@ name.
 
 ## 5. The tree
 
-`lib/ast.h` defines five types. They are a transcription of the grammar of
+`lib/ast.h` defines the types below. They are a transcription of the grammar of
 architecture section 13 and deliberately nothing more: no predicate table, no
 variable numbering, no reordering. What the parser accepts is a syntactic
 question, and what it produces should still be recognizable as the text.

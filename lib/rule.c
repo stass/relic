@@ -1743,8 +1743,8 @@ literal_assigns(const relic_literal_t *literal, uint64_t bound,
  * slot of every literal literal_assigns() says binds one, given the slots B
  * holds, until a pass over the body adds nothing.
  *
- * Each pass adds a slot or is the last, so there are at most as many passes
- * as slots, and a body with no assignment takes one.  `_` is never added:
+ * Each pass adds a slot or is the last, so there is at most one pass more
+ * than there are slots, and a body with no assignment takes one.  `_` is never added:
  * each occurrence is a distinct variable, and one computed and discarded is
  * no binding anything could read, so it stays unbound and is reported with
  * the message that says so.

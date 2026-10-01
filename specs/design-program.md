@@ -188,8 +188,10 @@ the named variables and in the same textual order. The rule is always
 rejected, so those slots never reach the evaluator.
 
 The result is an invariant worth stating plainly: **in a rule that passes the
-check, every slot is bound by some positive relational body literal.** The
-evaluator therefore has no unbound-slot case to handle.
+check, every slot is bound by some positive relational body literal or by an
+assignment** -- an equality one side of which is the bare variable and the
+other bound, or an aggregate's result, section 5. The evaluator therefore has
+no unbound-slot case to handle.
 
 ---
 
@@ -197,27 +199,33 @@ evaluator therefore has no unbound-slot case to handle.
 
 Architecture section 14 requires range restriction: every head variable, every
 variable of a negated literal and every variable of a comparison must be
-bindable from a positive relational body literal.
+bindable from a positive relational body literal, or assigned from variables
+that are, `specs/design-arithmetic.md` section 5.
 
 Let *B* be the set of slots occurring in an argument of a positive relational
-body literal, and *R* the set of slots occurring in the head, in a negated
-literal or in a comparison. The rule is safe exactly when
+body literal, closed under assignment: the variable an equality assigns joins
+*B* once every variable of its other side is in it. *R* is the set of slots
+occurring in the head, in a negated literal or in a comparison. The rule is
+safe exactly when
 
 ```text
 R \ B = {}
 ```
 
 and the offending variables are precisely the members of `R & ~B`. Both sets
-are `uint64_t` masks, so the whole analysis is two accumulating ors and one
-and-not.
+are `uint64_t` masks, so the whole analysis is accumulating ors, a closure
+of at most 65 passes over the assignments, and one and-not.
 
 **No reordering search is required**, and this is the reason the check is a
 few lines rather than a fixed point over literal orderings. Every positive
 relational literal can always be scheduled before every negated literal and
 every comparison, because a positive literal needs nothing bound in order to
-be scanned. So if a binding order exists at all, that one is such an order,
-and asking whether a variable is bindable reduces to asking whether any
-positive literal mentions it.
+be scanned. So if a binding order exists at all, one that places the
+positive literals first is such an order: they seed *B*, the assignments
+extend it to its closure, each placed once the other side is bound, and
+every other comparison and negated literal follows once its variables are.
+Asking whether a variable is bindable therefore reduces to asking whether it
+is in that closure.
 
 **An aggregate literal adds one clause.** Its shared slots and its result
 slot join *R*, and its result slot joins *B* once every shared slot is in
@@ -263,8 +271,8 @@ singleton warning's suggested rename is the case that exists -- is visibly
 incomplete rather than quietly naming a variable that does not exist.
 
 ```text
-graph.dl:1:6: error: variable X in fact edge/2 is not bound by a positive body literal
-graph.dl:5:18: error: variable Y in rule ready/1 is not bound by a positive body literal
+graph.dl:1:6: error: variable X in fact edge/2 is not bound by a positive body literal or an assignment
+graph.dl:5:18: error: variable Y in rule ready/1 is not bound by a positive body literal or an assignment
 graph.dl:3:5: error: anonymous variable in rule foo/1 cannot be bound by a positive body literal
 graph.dl:9:412: error: rule wide/1 uses more than 64 distinct variables
 ```
