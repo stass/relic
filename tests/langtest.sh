@@ -31,6 +31,15 @@
 # file, or else empty, so that no test reads whatever the harness was given:
 # an interactive session driven from a file is compared like any other run,
 # and one that found a terminal instead would wait for it.
+#
+# The one value of -X stats a golden file cannot hold is the storage total:
+# the bytes a context holds depend on the width of a pointer and on the
+# alignment an allocation is rounded to, so the same program holds a
+# different total on a 32-bit build and on Apple silicon.  Its number is
+# replaced by N before the comparison with the .expected-err file, which
+# states the line as "stats: storage bytes N", so that the line is still
+# held to appearing once and in its form; the unit tests hold the total to
+# what the stores and tables allocate.
 
 set -eu
 
@@ -77,7 +86,9 @@ trap 'exit 1' HUP INT TERM
 # nonzero one is what several of these tests expect.
 status=0
 ( cd "$directory" && $RELIC $args "$program" ) < "$input" \
-    > "$work/stdout" 2> "$work/stderr" || status=$?
+    > "$work/stdout" 2> "$work/stderr.raw" || status=$?
+sed 's/^stats: storage bytes [0-9][0-9]*$/stats: storage bytes N/' \
+    "$work/stderr.raw" > "$work/stderr"
 
 failures=0
 
