@@ -4,7 +4,7 @@
 some of its arguments is turned into a program that derives only what the
 query can reach, how that program is evaluated by the existing engine, and how
 the rewrite is shown to a person. Forward-looking, like every document under
-`specs/`; `STATUS.md` records what is implemented.
+`specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 32 to 39, 60, 61 and 63;
 `specs/design-plan.md` for the query rule this rewrites;

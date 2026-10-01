@@ -3,8 +3,8 @@
 **Status.** Design document for the harness that runs one set of workloads
 through relic, through other Datalog and tabled-Prolog engines and through
 SQL databases, checks that every engine gives the same answer, and times
-them. Forward-looking, like every document under `specs/`; `STATUS.md`
-records what is implemented.
+them. Forward-looking, like every document under `specs/`; `TODO.md`
+records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 62 and 66;
 `specs/design-hardening.md` section 7, which specifies `bench/run.sh`, the

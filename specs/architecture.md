@@ -12,8 +12,8 @@
 **Code style:** `specs/style.md`
 
 This document describes the target design of the system, not its current
-implementation status. For what exists today see `STATUS.md`; for open work see
-`TODO.md`. Changes relative to Draft v1 are listed in section 76.
+implementation status. For open work, and what of this design is not yet
+built, see `TODO.md`. Changes relative to Draft v1 are listed in section 76.
 
 ---
 
@@ -94,32 +94,6 @@ The implementation should remain comprehensible enough that a systems programmer
    third-party library. The sole optional dependency is `libedit`, used
    for REPL line editing when `configure` finds it.
 9. Build naturally on BSD systems using BSD libc facilities.
-10. Remain small enough that the entire engine is realistically auditable.
-
-## 2.2 Size goal
-
-The target is approximately:
-
-```text
-parser / lexer             600–900 LOC
-symbols / values           400–600
-relations / indexes        700–1000
-rules / analysis           500–700
-stratification             250–400
-Magic Sets                 500–800
-planner                    400–700
-semi-naive evaluator       600–900
-CLI / formatter            400–600
-compatibility layer        100–300
------------------------------------
-core                      ~4–7 KLOC
-```
-
-Tests are not included in this budget.
-
-Code size is a design constraint, not merely a statistic.
-
-Features requiring disproportionately large machinery should normally be omitted.
 
 ---
 
@@ -139,17 +113,26 @@ Version 1 shall not implement:
 * unstratified negation;
 * well-founded semantics;
 * answer-set programming;
-* aggregates, specified for a later stage in `specs/design-aggregates.md`;
+* declarations of a relation's columns or their types;
+* floating-point or unsigned integers;
+* subsumption: rules that delete a tuple another dominates;
 * SQL;
 * transactions;
 * persistent database files;
 * incremental maintenance across arbitrary insertions/deletions;
 * distributed execution;
-* parallel execution, specified for a later stage in
-  `specs/design-parallel.md`;
 * cost-based optimization comparable to an SQL database.
 
 Some of these may be added later if they preserve the character of the system.
+Three are left out for reasons of this design rather than of Datalog.
+Declarations would cost a line per relation in every program, most of the
+text of a small one, for checks `-vv` and the undefined-predicate warning
+already give; columns stay untyped, per section 10.1. A floating-point value
+would break the determinism of decision D-4 across platforms and the one
+identifier per value of D-3, and an unsigned integer is a second numeric type
+with overflow rules of its own for a use no workload has shown. Subsumption
+deletes tuples, which the append-only store that semi-naive deltas and the
+frozen round rest on cannot do (`specs/design-relations.md` section 4).
 
 ---
 
@@ -2941,8 +2924,7 @@ That simplicity is the central feature of `relic`.
 relic has no third-party runtime dependencies. The engine and the tool use the
 C11 standard library and the BSD interfaces of section 45, and nothing else.
 This is a product requirement, not an aesthetic preference: the tool is meant
-to be as easy to install and audit as `awk` or `grep`, and section 2.2 treats
-code size as a design constraint.
+to be as easy to install and audit as `awk` or `grep`.
 
 The policy, in order of preference:
 
@@ -2988,18 +2970,17 @@ specs/architecture.md    this document: the target design of the system
 specs/style.md           code style, binding on all relic-owned code
 specs/decisions.md       the numbered decisions the design rests on
 specs/design-*.md        one per subsystem, written before it is implemented
-STATUS.md                what exists today; a snapshot, not a roadmap
 TODO.md                  forward-looking index of open work, by severity
 NEWS                     what changed in each release, for its users
 ```
 
 This document and the `specs/design-*.md` documents are forward-looking. They
 describe the system being built, not the subset that has shipped. They change
-when a decision changes, not when a stage lands. What shipped belongs in
-`STATUS.md`, and what remains, in the order it should be done, belongs in
-`TODO.md`. Trimming a design document to match a partial implementation
-would erode the record of intent and force a later reader to reconstruct it
-from commit history.
+when a decision changes, not when code lands. What shipped belongs in
+`NEWS` and the history of the repository, and what remains, in the order it
+should be done, belongs in `TODO.md`. Trimming a design document to match a
+partial implementation would erode the record of intent and force a later
+reader to reconstruct it from commit history.
 
 Before a subsystem is implemented it gets a `specs/design-<subsystem>.md` and a
 reference from this document.

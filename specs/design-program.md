@@ -3,7 +3,7 @@
 **Status.** Design document for the program model: predicate identity,
 variable numbering, the compiled form of a rule, the safety analysis and the
 warnings that go with it. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 7, 14, 15, 17, 25, 51 and 63;
 `specs/design-parser.md` for the tree this consumes; `specs/design-memory.md`
@@ -531,9 +531,6 @@ synthetic rule, against
 the same rule this document states, because the synthetic rule's head *is* the
 list of output columns and "every head variable is bound" is exactly "every
 output column is bound".
-
-Until then `relic_check()` does not reject an unsafe query. `STATUS.md` says
-so, and `TODO.md` records it.
 
 ---
 

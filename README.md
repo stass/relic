@@ -136,7 +136,7 @@ interface.
 | [specs/architecture.md](specs/architecture.md) | the target design of the system |
 | [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
 | [specs/decisions.md](specs/decisions.md) | the numbered decisions the design rests on |
-| [STATUS.md](STATUS.md) | what exists today |
+| [NEWS](NEWS) | what changed in each release |
 | [TODO.md](TODO.md) | open work, by severity |
 
 ## License

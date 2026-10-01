@@ -4,7 +4,7 @@
 dependency graph, its strongly connected components, the strata, the rejection
 of recursion through negation, and the evaluation order the analysis hands to
 the evaluator. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 9, 15, 26, 29, 30, 51 and 61;
 `specs/design-program.md` for the compiled rules this reads and the check it

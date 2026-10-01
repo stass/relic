@@ -56,44 +56,22 @@ lacks:
   more queries than the table's first capacity, and `relic_query_loaded()`,
   which the sweep never calls.
 
-## The tool has no fault injection
-
-[Low, component: `cmd/relic/`] The tool is never run under a refusing
-allocator, so its own allocation failures are untested: the query arrays in
-`prepare_queries` and `main`, `relic_create_config()` failing in
-`invocation_open`, `write_sorted_rows` under `-s`, and `line_reader_open`.
-Linking the tool's objects against the exhaustion suite's allocator, as the
-library's are, would reach them; an interposed `malloc` would too, but not
-portably.
-
-## Failures no portable test can cause
-
-[Low] `load_named_file` in `lib/parse.c` and `output_close` in
-`cmd/relic/output.c` report `fclose(3)` failing. No local file system makes
-closing a stream opened for reading fail, and `/dev/full` fails the flush
-before the close. Both stay untested.
-
 ## Branches unreachable by construction
 
 [Low] About seventy ranges are defensive: the `default` of a switch over
 every enumerator, a lookup of an identifier a live plan holds, an overflow
 guard on a product that fits a 64-bit `size_t`, a table reaching 2^32
-entries, a check that a checked rule is safe. They are kept deliberately.
-Three are worth a second look, since each is a branch whose reason for
-existing has gone rather than a guard:
+entries, a check that a checked rule is safe, and
+`reads_whole_on_demand()` in `lib/magic.c`, which guards a negation or an
+aggregate against reading a predicate the rewrite evaluates only on demand.
+They are kept deliberately.
 
-* `comparison_holds` in `lib/eval.c` answers `=` and `!=` before its
-  switch, whose cases for them exist only to name every operator; ordering
-  the switch over the ordering operators alone would remove the dead lines;
-* `rewrite_body` in `lib/magic.c` tests `negates_on_demand`, which cannot
-  hold, since `relic_magic_find_complete` marks every predicate reached
-  through a negation complete;
-* `relic_diag_no_memory` in `lib/diag.c` formats a memory refusal with no
-  activity recorded, and every allocation charged to a limit follows an
-  activity note.
+One is worth a second look, since its reason for existing may have gone
+rather than being a guard: `relic_diag_no_memory()` in `lib/diag.c` formats
+a memory refusal with no activity recorded, and every allocation charged to
+a limit follows an activity note. Deleting the branch or turning it into an
+assertion is the choice to make.
 
-Restructuring or deleting each, or turning it into an assertion, is the
-choice to make.
 `write_json_string` in `cmd/relic/output.c` escapes bytes no symbol can
 hold, since strings reach JSON through `put_literal`; it is a generic
 escaper kept generic.
@@ -102,11 +80,3 @@ The overflow guards in `lib/arena.c`, `lib/util.c`, `lib/relation.c` and
 `lib/index.c` can be reached from a unit test by a direct call with a size
 near `SIZE_MAX` or a forged table; the existing arena test passes `SIZE_MAX`
 itself, which an earlier check catches first.
-
-## The terminal path
-
-The libedit path in `cmd/relic/input.c` runs only with a terminal on both
-standard input and standard error; `TODO.md`'s item on the interactive
-mode's terminal path covers it, and the usage message `run` in
-`cmd/relic/main.c` prints when standard input is a terminal waits on the
-same pty driver.

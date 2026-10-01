@@ -3,7 +3,7 @@
 **Status.** Design document for the query object: what a prepared query owns,
 where its answer is stored, how the answer is named, accounted and released,
 and what that leaves in the context afterwards. Forward-looking, like every
-document under `specs/`; `STATUS.md` records what is implemented.
+document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 11, 17, 20, 49 and 52;
 `specs/design-plan.md` section 7, which compiles a query into its rule;

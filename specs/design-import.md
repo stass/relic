@@ -5,8 +5,8 @@ an import is named on the command line and through the library, how each
 field becomes a value of the type its column declares, the two formats as
 they are read, and how an import reaches the base stores. The language does
 not change: an imported fact is a fact, exactly as though the program had
-stated it. Forward-looking, like every document under `specs/`; `STATUS.md`
-records what is implemented.
+stated it. Forward-looking, like every document under `specs/`; `TODO.md`
+records what is not yet implemented.
 
 **Companions.** `specs/design-facts.md` sections 4 and 13, the staging and
 the commit an import feeds; `specs/design-cli.md` sections 2 and 4, the
@@ -851,7 +851,7 @@ plans, rows and diagnostics, in the same order.
 * `specs/design-hardening.md` section 5: the import target and its corpus.
 * `specs/design-bench.md`: relic reads the data sets' TSV through `-I`.
 * `include/relic.h`, `man/relic.1` and `man/relic.3`.
-* `STATUS.md` and `TODO.md` follow the implementation.
+* `TODO.md` follows the implementation.
 
 ---
 

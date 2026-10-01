@@ -4,7 +4,7 @@
 planned, what the planner knows about the relations it reads, how it orders a
 body, how it chooses between a scan, a lookup and a membership test, and how
 the plan it chose is shown to a person. Forward-looking, like every document
-under `specs/`; `STATUS.md` records what is implemented.
+under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 23, 24, 35, 58, 60 and 61;
 `specs/design-plan.md` for the shape every plan has, which this document

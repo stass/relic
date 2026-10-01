@@ -5,7 +5,7 @@ may apply to strings inside a comparison, what each is worth over bytes,
 the regular expression matcher relic carries for one of them, and what a
 string the evaluator computes rather than reads does to the symbol pool,
 the executor and a parallel round. Forward-looking, like every document
-under `specs/`; `STATUS.md` records what is implemented.
+under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 6, 10.1, 13, 14, 19, 61,
 63, 66, 69 and 74; `specs/design-parser.md` for the front end this extends;

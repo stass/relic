@@ -4,7 +4,7 @@
 ordering a body costs what its plan holds rather than the square of its
 length, and why the memory an evaluation's plans and a query's rewrite occupy
 is charged to the same limit the data is. Forward-looking, like every
-document under `specs/`; `STATUS.md` records what is implemented.
+document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/design-planner.md` section 5.1 for the order this
 document computes more cheaply and never changes; `specs/design-eval.md` for

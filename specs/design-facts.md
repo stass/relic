@@ -5,7 +5,7 @@ tuples of a per-predicate base store, with nothing per fact in the syntax
 tree, the rule table or the schedule. In the language a fact is a rule with
 an empty body; this document settles where the facts a program states are
 kept, and nothing about what they mean. Forward-looking, like every
-document under `specs/`; `STATUS.md` records what is implemented.
+document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/design-evaluation-cost.md` section 7, which traces
 the cost of loading facts to their representation; `specs/design-parser.md`
@@ -570,7 +570,7 @@ of a load's facts are interned before its rules' predicates.
   asserts that a discard leaves the store empty; among them
   `lib/account.h`'s statement of what the account bounds, which the
   design-memory amendment above restates.
-* `STATUS.md` and `TODO.md` follow the implementation.
+* `TODO.md` follows the implementation.
 
 ---
 

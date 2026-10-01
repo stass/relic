@@ -3,7 +3,7 @@
 What makes a relic release: the interface documentation, the test that keeps
 it true, the tarball and what it carries, the packaging skeletons, and the
 steps that produce a release. Forward-looking, like every document under
-`specs/`; what has shipped is in `STATUS.md`.
+`specs/`; what is not yet done is in `TODO.md`.
 
 ## 1. The interface documentation
 
@@ -114,8 +114,8 @@ distcheck` runs it from the tarball, which therefore carries the fixtures.
 `make dist` produces `relic-VERSION.tar.gz`. It carries the sources, the
 generated `configure` and makefiles, the tests and their data, the manual
 pages, `README.md`, `NEWS` and `LICENSE`, and the project's documents --
-`specs/`, `docs/`, `STATUS.md` and `TODO.md` -- so that whoever audits the
-code has its design and its open questions beside it. `specs/` and `docs/`
+`specs/`, `docs/` and `TODO.md` -- so that whoever audits the code has its
+design and its open questions beside it. `specs/` and `docs/`
 are distributed whole, so a new document cannot be left out.
 
 It builds with a C11 compiler, `make` and a POSIX shell, and nothing else:
@@ -149,11 +149,12 @@ are written once it exists.
 1. `configure.ac`'s version becomes the release's, and its interface
    version is checked against the rules written beside it: a release
    carries whatever interface change was made since the last.
-2. `NEWS` gains the release's entry; `STATUS.md` is brought up to date as of
-   the release, and `TODO.md` becomes the next release's agenda.
+2. `NEWS` gains the release's entry, and `TODO.md` becomes the next
+   release's agenda.
 3. Every continuous integration job passes on the commit to be released,
    and the platforms CI does not reach are built and tested from the
-   tarball by hand, with the result recorded in `STATUS.md`.
+   tarball by hand, with the result recorded in the release's `NEWS`
+   entry.
 4. The commit is tagged `vVERSION`, and `make distcheck` on the tag
    produces the tarball, which is published with its SHA-256 as the GitHub
    release of that tag.

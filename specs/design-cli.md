@@ -3,7 +3,7 @@
 **Status.** Design document for the `relic` tool: what an invocation does and
 in what order, which queries it runs, what it exits with, and the exact form of
 every output format. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 40 to 44 and 61;
 `specs/design-eval.md` for how a query is answered; `specs/decisions.md` D-5

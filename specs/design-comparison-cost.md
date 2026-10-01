@@ -6,7 +6,7 @@ interpreter, DuckDB and SQLite: how a row reaches the output, when an answer
 is streamed rather than stored, which adornments a free query keeps, what a
 secondary index stores for a key, how a symbol and a value are represented,
 and how a large array grows. Forward-looking, like every document under
-`specs/`; `STATUS.md` records what is implemented.
+`specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 18, 19, 20, 22, 33, 39, 43,
 47, 52 and 62; `specs/design-cli.md` sections 4 and 7 for the formats the

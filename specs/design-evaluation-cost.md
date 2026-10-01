@@ -6,7 +6,7 @@ literal is placed and reached wherever the planner puts it, why the
 identifier table keeps its four-byte slot and how insertion overlaps the
 misses of its duplicate check instead, and why the fact-loading gap needs a
 design of its own. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/design-eval.md` sections 2 and 4, whose delta variants
 this document bounds; `specs/design-plan.md` sections 3 to 5, whose
@@ -1056,7 +1056,7 @@ On acceptance the durable record changes in these places, and nowhere else:
 * `specs/design-memory.md` section 6: the stored hash measured and not
   adopted, section 5.2, as a reason the slot holds an identifier alone.
 * `specs/architecture.md` section 28 points here.
-* `STATUS.md` and `TODO.md` follow the implementation.
+* `TODO.md` follows the implementation.
 
 ---
 

@@ -3,8 +3,8 @@
 **Status.** Design document for the plan representation: what a rule becomes
 once the planner has decided how to execute it, what each operation means,
 and how a query is turned into a rule so that it can be planned at all.
-Forward-looking, like every document under `specs/`; `STATUS.md` records what
-is implemented.
+Forward-looking, like every document under `specs/`; `TODO.md` records what
+is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 11, 23, 25, 58 and 59;
 `specs/design-program.md` for the compiled rule this consumes;

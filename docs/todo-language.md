@@ -1,13 +1,13 @@
 # Language and tooling gaps
 
 What other Datalog systems offer that relic does not, sorted into what is
-worth adding, what is worth measuring first, and what stays out on purpose.
+worth adding and what is worth measuring first. What relic leaves out on
+purpose is in architecture section 3.
 The engines compared are the ones a relic user might otherwise reach for:
 Souffle, LogicBlox's LogiQL, Nemo, clingo, CodeQL, DDlog and the tabling
 Prologs. Each item names the engines that have the feature, what a relic
 program does without it, and the reason for the verdict. Verdicts are
-provisional until a design exists; a "declined" item can be reopened by a
-workload that needs it.
+provisional until a design exists.
 
 The rule the verdicts follow is architecture section 73: relic is one
 relational engine with no hidden second one, and its simplicity is the
@@ -63,6 +63,14 @@ have statistics per predicate. relic's `-X stats` counts the run as a
 whole. The counters exist per plan run already, so a per-rule report is
 mostly output, and it is what a user reads before rewriting a slow rule.
 
+**The README does not say why a program cannot name its data files.**
+[Low, component: `README.md`] Souffle's `.input` and `.output` directives
+name files in the program text; relic declines them
+(`specs/design-import.md` section 3.3) so that a program cannot read a file
+its runner did not name, and imports tables with `-I` instead. A Souffle
+user will look for the directives, and the README should say where they
+went.
+
 ## Worth measuring before deciding
 
 **Equivalence relations.** [Low, component: `lib/relation.c`] Souffle's
@@ -71,52 +79,3 @@ union-find structure, so an alias analysis that would hold a quadratic
 closure holds a linear one. Valuable for exactly one shape of program and a
 second kind of relation everywhere else in the engine. Measure `cspa`'s
 memory against Souffle's with `eqrel` before deciding.
-
-**Incremental insertion.** [Medium, component: `lib/eval.c`] Adding a fact
-after materialization discards everything derived. DDlog and LogiQL
-maintain the fixed point across changes; Datomic is a database. The cheap
-half, a new base fact as a delta of its predicate that the semi-naive
-machinery already understands, is item four of architecture section 69 and
-is sound for a program without negation; with negation a new fact can
-retract a derived one, which is the expensive half. Measure how often a
-session adds facts between queries before building either.
-
-## Declined, with the reason
-
-**Type declarations.** Souffle, LogiQL, Nemo and CodeQL declare relations
-and column types; relic infers relations from use and leaves columns
-untyped, per architecture section 10.1. Declarations would turn an
-undefined-predicate warning into an error and a mixed-type comparison into a
-compile-time complaint, at the cost of a declaration per relation in every
-program, which is most of the text of a small Datalog program. A program
-that wants the check can get most of it from `-vv`.
-
-**Floats and unsigned integers.** Souffle and LogiQL have both. Floating
-point breaks the determinism of D-4 across platforms and the one
-identifier per value of D-3; unsigned integers are a second numeric type
-with its own overflow rules for a use no workload has shown.
-
-**Records, algebraic data types and lists.** Souffle records and ADTs,
-Prolog terms, clingo function terms. Architecture section 3 rules out
-compound terms; they are the line between Datalog and Prolog, and the tuple
-store is built on four-byte columns.
-
-**Subsumption.** Souffle's `<=` rules delete a tuple another dominates, for
-lattice-style analyses. It conflicts with the append-only store that
-semi-naive deltas and the frozen round rest on, `specs/design-relations.md`
-section 4.
-
-**Unstratified negation, well-founded semantics, answer sets.** Non-goals
-of architecture section 3. clingo exists for the last.
-
-**Persistence and transactions.** Datomic and LogiQL store data; relic
-recomputes from files each run, like `awk`. Non-goals.
-
-**Data file names in program text.** Souffle's `.input` and `.output`
-directives. Declined in `specs/design-import.md` section 3.3 so that a
-program cannot read a file its runner did not name; the README should say
-so where a Souffle user will look for it.
-
-**Functions with side effects and foreign calls.** Souffle functors and
-clingo's `@` functions. Non-goals; a function with an effect is not a
-relation.

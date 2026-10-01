@@ -4,7 +4,7 @@
 in comparisons, the equality that binds a variable to one, and what a value
 evaluation computes rather than reads does to the value table, the executor
 and a parallel round. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 6, 10, 13, 14, 19, 25, 61,
 63, 66 and 69; `specs/design-parser.md` for the front end this extends;

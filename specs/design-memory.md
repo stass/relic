@@ -3,7 +3,7 @@
 **Status.** Design document for the storage primitives every other subsystem
 sits on: arenas, growable arrays, the open-addressing identifier table, the
 symbol pool and the value table. Forward-looking, like every document under
-`specs/`; `STATUS.md` records what is implemented.
+`specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 18, 19, 20, 46, 47 and 63;
 `specs/decisions.md` D-3, D-4, D-6, D-7 and D-14.

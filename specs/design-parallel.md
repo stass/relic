@@ -6,7 +6,7 @@ round is partitioned and its results merged in the order a single thread
 would have produced them, what the relation store guarantees a concurrent
 reader, how the limits and diagnostics stay exact, and what each step is
 measured against. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 2.1, 26 to 28, 63, 69 and
 74; `specs/design-eval.md` for the executor and the two fixed points this

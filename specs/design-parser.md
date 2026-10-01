@@ -3,7 +3,7 @@
 **Status.** Design document for the front end: the byte-oriented lexer, the
 recursive-descent parser, the abstract syntax tree they produce and the
 diagnostics they emit. Forward-looking, like every document under `specs/`;
-`STATUS.md` records what is implemented.
+`TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 5 through 13, 17, 18, 50, 56
 and 67; `specs/design-memory.md` for the arenas and the interning tables;

@@ -3,7 +3,7 @@
 **Status.** Design document for evaluation: the executor that runs a plan,
 the fixed points built on it, what a materialized program is and when it is
 current, and how a query's answers reach a caller. Forward-looking, like every
-document under `specs/`; `STATUS.md` records what is implemented.
+document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 15, 25 to 31, 39, 52, 53, 61
 and 63; `specs/design-plan.md` for the plans this runs, and

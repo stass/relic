@@ -4,7 +4,7 @@
 hashes with: why it is drawn at random once per context rather than fixed at
 compile time, what that costs determinism (nothing observable), and how the
 seed reaches the tables. Forward-looking, like every document under
-`specs/`; `STATUS.md` records what is implemented.
+`specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/design-memory.md` sections 6, 9 and 10 for the
 identifier table, the determinism it contributes to and the absence of global

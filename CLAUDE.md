@@ -199,7 +199,6 @@ Project documents and what each is for:
 | [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
 | [specs/decisions.md](specs/decisions.md) | the numbered decisions (D-N) the design rests on |
 | `specs/design-<feature>.md` | one per subsystem, written before its code |
-| [STATUS.md](STATUS.md) | what exists today; a snapshot, not a roadmap |
 | [TODO.md](TODO.md) | forward-looking index of open work, by severity |
 | [NEWS](NEWS) | what changed in each release, for its users |
 
@@ -213,7 +212,7 @@ Project documents and what each is for:
   architecture or design itself changes (a new subsystem, a reversed decision,
   a renamed primitive). Do **not** rewrite them to record what shipped in a
   given change, what was deferred for scheduling reasons, or which parts of the
-  design are not yet implemented - that belongs in `STATUS.md` or `TODO.md`.
+  design are not yet implemented - that belongs in `TODO.md`.
   If a change ships a subset of a design doc, the design doc stays unchanged
   and the deferral is recorded in `TODO.md`.
   Trimming a design doc to match a partial implementation erodes the durable

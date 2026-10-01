@@ -3,8 +3,8 @@
 **Status.** Design document for secondary indexes: what an index over some of
 a relation's columns holds, how a lookup walks it, how it is kept in step with
 insertion, when it is built, and what it costs against the memory limit.
-Forward-looking, like every document under `specs/`; `STATUS.md` records what
-is implemented.
+Forward-looking, like every document under `specs/`; `TODO.md` records what
+is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 20, 22, 58 and 63;
 `specs/design-relations.md` for the store an index points into and the

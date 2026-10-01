@@ -4,7 +4,7 @@
 on: the entry points `<relic.h>` exports, the values, facts, queries and
 results that cross it, what a callback may do, how a mistake is reported, and
 how the binary interface is versioned and audited. Forward-looking, like
-every document under `specs/`; `STATUS.md` records what is implemented.
+every document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 19, 48 to 57, 63 and 65.6;
 `specs/design-eval.md` for how a query is answered; `specs/design-magic.md`

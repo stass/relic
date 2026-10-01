@@ -4,7 +4,7 @@
 curated corpus cannot find: a generator of random programs with a
 differential driver and a shrinker, fuzz targets over the loader and the
 evaluator, a coverage report, and a benchmark harness. Forward-looking, like
-every document under `specs/`; `STATUS.md` records what is implemented.
+every document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 65.3, 65.4, 66 and 67;
 `specs/design-api.md`, whose public interface everything here drives;

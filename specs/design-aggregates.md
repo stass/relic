@@ -4,7 +4,7 @@
 over the rows a body denotes, the literal that binds a variable to one, the
 generated rule that materializes the body, and where the reader of an
 aggregate sits in the stratification. Forward-looking, like every document
-under `specs/`; `STATUS.md` records what is implemented.
+under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 3, 7, 9, 10.1, 11, 13, 14,
 15, 30, 31, 37, 61, 63, 66, 69 and 73; `specs/design-parser.md` for the

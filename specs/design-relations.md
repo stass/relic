@@ -3,7 +3,7 @@
 **Status.** Design document for the relation store: where a predicate's tuples
 live, how a tuple is found, what makes an insertion report newness, and what
 the tuple and memory limits are enforced against. Forward-looking, like every
-document under `specs/`; `STATUS.md` records what is implemented.
+document under `specs/`; `TODO.md` records what is not yet implemented.
 
 **Companions.** `specs/architecture.md` sections 20, 21, 24, 47 and 63;
 `specs/design-facts.md` for the base stores and the commit that fills them;
