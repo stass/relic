@@ -172,6 +172,8 @@ static void	 facts_after(const char *program, const char *grown,
 		    enum limit_kind kind, enum step step);
 static void	 a_load_over_the_limit_grows_no_store(void);
 static size_t	 bytes_after_loading(const char *facts);
+static size_t	 bytes_held(const relic_t *ctx);
+static void	 intern_symbols(relic_t *ctx, const char *const *names);
 static void	 the_rewrite_reads_facts_through_a_view(void);
 static void	 an_abandoned_rewrite_leaves_no_warning(void);
 static void	 a_fact_of_no_columns_is_a_fact(void);
@@ -538,8 +540,12 @@ a_refused_load_leaves_the_program_as_it_was(void)
  * The refusal scenario under a limit of `kind`.  The tuple limit, 4,
  * admits the program's two facts and its two derived tuples, so the program
  * is materialized first, and loading the facts again, which changes
- * nothing, is seen to keep the relations current.  The memory limit, one
- * byte, admits no fact, so that context holds the rule alone.
+ * nothing, is seen to keep the relations current.  The memory limit is set
+ * once the rule is loaded, at what the context then holds, so that it
+ * admits no fact and the context holds the rule alone.  The pool counts
+ * against the limit, so the names the refused load uses are interned
+ * before the limit is set: what it refuses is then the first store to grow,
+ * not a name.
  */
 static void
 refused_by(enum limit_kind kind)
@@ -547,12 +553,13 @@ refused_by(enum limit_kind kind)
 	static const char program[] = "p(X) :- e(X).\n";
 	static const char facts[] = "e(a).\ne(b).\n";
 	static const char more[] = "e(c).\ne(d).\ng(a).\n";
+	static const char *const more_names[] = { "a", "c", "d", "g", NULL };
 	relic_config_t config;
 	diag_log_t control_log;
 	diag_log_t log;
 	relic_t *control;
 	relic_t *ctx;
-	const char *expected;
+	char expected[MESSAGE_MAX];
 	size_t statements;
 	size_t facts_before;
 	int status;
@@ -560,13 +567,9 @@ refused_by(enum limit_kind kind)
 	bzero(&config, sizeof(config));
 	if (kind == LIMIT_TUPLES) {
 		config.max_tuples = 4;
-		expected = "limit exceeded: tuples=4 while loading e/1";
 		facts_before = 2;
-	} else {
-		config.max_memory = 1;
-		expected = "limit exceeded: memory=1 while loading e/1";
+	} else
 		facts_before = 0;
-	}
 
 	ctx = context_with(&config, program, &log);
 	control = context_with(&config, program, &control_log);
@@ -574,6 +577,19 @@ refused_by(enum limit_kind kind)
 		relic_destroy(ctx);
 		relic_destroy(control);
 		return;
+	}
+
+	if (kind == LIMIT_TUPLES)
+		snprintf(expected, sizeof(expected),
+		    "limit exceeded: tuples=4 while loading e/1");
+	else {
+		intern_symbols(ctx, more_names);
+		intern_symbols(control, more_names);
+		ctx->account.limit = bytes_held(ctx);
+		control->account.limit = bytes_held(control);
+		snprintf(expected, sizeof(expected),
+		    "limit exceeded: memory=%zu while loading e/1",
+		    ctx->account.limit);
 	}
 
 	if (kind == LIMIT_TUPLES) {
@@ -1180,11 +1196,36 @@ bytes_after_loading(const char *facts)
 
 	bytes = SIZE_MAX;
 	if (relic_load_string(ctx, "facts.dl", facts) == 0)
-		bytes = ctx->account.store_bytes + ctx->account.value_bytes +
-		    ctx->account.pool_bytes;
+		bytes = bytes_held(ctx);
 	relic_destroy(ctx);
 
 	return (bytes);
+}
+
+/*
+ * Intern each of a NULL-terminated list of names as a symbol value.
+ */
+static void
+intern_symbols(relic_t *ctx, const char *const *names)
+{
+	relic_dom_t dom;
+
+	for (; *names != NULL; names++)
+		check(relic_value_intern_bytes(ctx, RELIC_SYMBOL, *names,
+		    strlen(*names), &dom) == 0, SCENARIO_REFUSED,
+		    "a name is interned");
+}
+
+/*
+ * The bytes a context's stores, value table and pool hold between
+ * operations, when no arena or round holds any: the total the memory limit
+ * is enforced against.
+ */
+static size_t
+bytes_held(const relic_t *ctx)
+{
+	return (ctx->account.store_bytes + ctx->account.value_bytes +
+	    ctx->account.pool_bytes);
 }
 
 /*

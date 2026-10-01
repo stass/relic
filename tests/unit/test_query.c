@@ -39,6 +39,7 @@
 #define	SCENARIO_LOADED		"the program's queries are enumerated"
 #define	SCENARIO_NAMES		"answers are named in the order queries compile"
 #define	SCENARIO_PLANNING	"planning is charged to the memory limit"
+#define	SCENARIO_PREPARING	"preparing queries stays within the memory limit"
 #define	SCENARIO_REFUSED	"a refused query leaves the program valid"
 #define	SCENARIO_STOP		"a callback can stop the rows"
 #define	SCENARIO_STREAMED	"a streamed answer holds nothing"
@@ -56,6 +57,8 @@
  */
 #define	PLANNING_LIMIT		65536
 #define	PLANNING_RECURSIVE	200
+#define	PREPARING_LIMIT		65536
+#define	PREPARING_MOST		1000000
 #define	PLANNING_QUERY		4000
 
 /*
@@ -178,6 +181,7 @@ static void	 a_query_warns_of_an_undefined_predicate(void);
 static void	 a_refused_query_leaves_the_program_valid(void);
 static void	 an_answer_refused_by_a_limit_is_given_back(void);
 static void	 planning_is_charged_to_the_memory_limit(void);
+static void	 preparing_queries_stays_within_the_memory_limit(void);
 static void	 a_querys_groups_refused_by_a_limit_report_once(void);
 static void	 an_unsafe_query_makes_the_program_invalid(void);
 static void	 answers_are_named_in_the_order_queries_compile(void);
@@ -1115,6 +1119,60 @@ refused_while(relic_t *ctx, const char *activity)
 }
 
 /*
+ * Preparing a query interns its constants, and destroying it gives none of
+ * them back, since the tables are never shrunk; so a caller preparing
+ * queries with distinct constants grows the tables with each one.  Each
+ * query here holds a new integer and a new string, so that both the
+ * integer table and the pool grow.  The limit bounds both whole, and must
+ * refuse a preparation before the total passes it, naming the limit,
+ * however many preparations come first.
+ */
+static void
+preparing_queries_stays_within_the_memory_limit(void)
+{
+	char expected[64];
+	char text[64];
+	relic_query_t *query;
+	const char *reported;
+	diag_log_t log;
+	relic_t *ctx;
+	bool within;
+	long n;
+
+	ctx = limited_context(PREPARING_LIMIT, "p(0).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	within = true;
+	query = NULL;
+	for (n = 1; n <= PREPARING_MOST; n++) {
+		snprintf(text, sizeof(text), "p(%ld), p(\"s%ld\")?", n, n);
+		query = relic_query_prepare(ctx, NULL, text);
+		if (relic_account_exceeds(&ctx->account, 0, 0))
+			within = false;
+		if (query == NULL)
+			break;
+		relic_query_destroy(query);
+	}
+
+	checkf(query == NULL, SCENARIO_PREPARING,
+	    "a preparation should be refused once the tables fill the limit, "
+	    "and %ld were prepared", n - 1);
+	checkf(within, SCENARIO_PREPARING,
+	    "the account should stay within %zu bytes, and the tables hold %zu",
+	    ctx->account.limit, relic_value_storage_bytes(ctx));
+
+	snprintf(expected, sizeof(expected), "limit exceeded: memory=%zu",
+	    ctx->account.limit);
+	reported = relic_error(ctx);
+	checkf(reported != NULL && strcmp(reported, expected) == 0,
+	    SCENARIO_PREPARING, "the diagnostic should read \"%s\", not \"%s\"",
+	    expected, reported == NULL ? "(none)" : reported);
+
+	relic_destroy(ctx);
+}
+
+/*
  * The evaluation arena and the arena of a query's rewrite are charged to the
  * memory limit, so a limit that admits every tuple a program derives still
  * refuses plans that do not fit, before any is built, and names what was
@@ -1169,13 +1227,17 @@ planning_is_charged_to_the_memory_limit(void)
 	}
 
 	/*
-	 * A limit a byte past the values: e/1 and f/1 derive each other and
-	 * nothing else, and the rewrite's first chunk does not fit.
+	 * A limit a byte past the values once the query is prepared: e/1 and
+	 * f/1 derive each other and nothing else, and the rewrite's first
+	 * chunk does not fit.  The limit is lowered after the preparation,
+	 * which interns the query's constant and would itself be refused a
+	 * byte past the program's values.
 	 */
-	ctx = limited_context(1, "e(X) :- f(X).\nf(X) :- e(X).\n"
+	ctx = limited_context(PLANNING_LIMIT, "e(X) :- f(X).\nf(X) :- e(X).\n"
 	    "p(X) :- e(X).\n", &log);
 	if (ctx != NULL) {
 		query = relic_query_prepare(ctx, NULL, "p(a)?");
+		ctx->account.limit = relic_value_storage_bytes(ctx) + 1;
 		rows = 0;
 		check(query != NULL &&
 		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
@@ -1378,6 +1440,7 @@ main(void)
 	answering_queries_does_not_grow_the_context();
 	an_answer_refused_by_a_limit_is_given_back();
 	planning_is_charged_to_the_memory_limit();
+	preparing_queries_stays_within_the_memory_limit();
 	a_querys_groups_refused_by_a_limit_report_once();
 	a_fact_costs_its_tuple_and_comes_first();
 	the_programs_queries_are_enumerated();

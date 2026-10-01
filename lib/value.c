@@ -88,7 +88,17 @@ static relic_dom_t measure_string(const relic_t *ctx,
 		    relic_pending_map_t *map, const char *bytes, size_t length,
 		    size_t mask);
 static size_t	 seen_size(size_t count);
-static int	 integer_store(relic_t *ctx, int64_t integer, uint32_t *idp);
+static bool	 admit_value_table(relic_t *ctx, size_t fresh_integers,
+		    uint32_t symbol);
+static void	 append_integer(relic_valtab_t *table, int64_t integer,
+		    uint32_t hash);
+static size_t	 integer_table_bytes_after(const relic_valtab_t *table,
+		    size_t fresh_integers);
+static bool	 integer_table_has_room(const relic_valtab_t *table,
+		    size_t count);
+static int	 reserve_integers(relic_t *ctx, size_t count);
+static size_t	 value_table_bytes_after(const relic_valtab_t *table,
+		    size_t fresh_integers, uint32_t symbol);
 static void	 record_symbol_use(relic_valtab_t *table, uint32_t symbol,
 		    enum relic_type type);
 static uint8_t	 symbol_use_bit(enum relic_type type);
@@ -233,8 +243,9 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
  * that the record reaches one capacity however its symbols arrive, one
  * interning at a time or a batch's at once.  The entries a growth adds are
  * cleared, since a symbol whose entry held a stray bit would decode as a
- * value no one made.  Returns 0, or -1 with nothing reported when it could
- * not grow, leaving the record as it was.
+ * value no one made.  Returns 0, or -1 with nothing reported when the memory
+ * limit refused the growth or it could not happen, leaving the record as it
+ * was.
  */
 static int
 cover_symbol_uses(relic_t *ctx, uint32_t symbol)
@@ -246,6 +257,9 @@ cover_symbol_uses(relic_t *ctx, uint32_t symbol)
 	table = &ctx->values;
 	if (symbol <= table->symbol_use_capacity)
 		return (0);
+
+	if (!admit_value_table(ctx, 0, symbol))
+		return (-1);
 
 	old_capacity = table->symbol_use_capacity;
 	uses = relic_grow_array_stepwise(table->symbol_uses,
@@ -306,39 +320,19 @@ intern_symbol_value(relic_t *ctx, enum relic_type type, uint32_t symbol,
 }
 
 /*
- * Append an integer to the integer table and return its position.  The
- * entry is written before the count advances, so nothing a caller can reach
- * is half initialized.
+ * Append an integer of hash `hash` to the integer table, which
+ * reserve_integers() has made room for, and index it at the position it now
+ * holds.  The entry is written before the count advances, so nothing a
+ * caller can reach is half initialized.
  */
-static int
-integer_store(relic_t *ctx, int64_t integer, uint32_t *idp)
+static void
+append_integer(relic_valtab_t *table, int64_t integer, uint32_t hash)
 {
-	relic_valtab_t *table;
-	int64_t *integers;
-
-	table = &ctx->values;
-
-	if (table->integer_count >= RELIC_INTEGER_MAX) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "too many distinct integers");
-		return (-1);
-	}
-
-	integers = relic_grow_array(table->integers, &table->integer_capacity,
-	    table->integer_count + 1, sizeof(*table->integers));
-	if (integers == NULL) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	table->integers = integers;
-	account_value_table(ctx);
+	assert(table->integer_count < table->integer_capacity);
 
 	table->integers[table->integer_count] = integer;
 	table->integer_count++;
-
-	*idp = (uint32_t)table->integer_count;
-
-	return (0);
+	relic_idtab_place(&table->index, hash, (uint32_t)table->integer_count);
 }
 
 /*
@@ -362,6 +356,118 @@ value_table_bytes(const relic_valtab_t *table)
 {
 	return (relic_saturating_sum(integer_table_bytes(table),
 	    table->symbol_use_capacity * sizeof(*table->symbol_uses)));
+}
+
+/*
+ * The bytes the integer table would occupy holding `fresh_integers` more:
+ * its array at the capacity appending them one at a time would reach, and
+ * its index after reserving them, which reaches what reserving one at a
+ * time reaches.  SIZE_MAX when no capacity could hold them.
+ */
+static size_t
+integer_table_bytes_after(const relic_valtab_t *table, size_t fresh_integers)
+{
+	size_t capacity;
+
+	if (fresh_integers == 0)
+		return (integer_table_bytes(table));
+
+	capacity = relic_grow_array_capacity_stepwise(table->integer_capacity,
+	    table->integer_count, fresh_integers, 1);
+	if (capacity == 0)
+		return (SIZE_MAX);
+
+	return (relic_saturating_sum(relic_saturating_product(capacity,
+	    sizeof(*table->integers)), relic_idtab_bytes_after_reserve(
+	    &table->index, fresh_integers)));
+}
+
+/*
+ * The bytes the value table would occupy holding `fresh_integers` more
+ * integers and with its record of uses covering `symbol`.
+ */
+static size_t
+value_table_bytes_after(const relic_valtab_t *table, size_t fresh_integers,
+    uint32_t symbol)
+{
+	return (relic_saturating_sum(
+	    integer_table_bytes_after(table, fresh_integers),
+	    relic_saturating_product(uses_capacity_covering(table, symbol),
+	    sizeof(*table->symbol_uses))));
+}
+
+/*
+ * Ask the memory limit whether the value table may grow as
+ * value_table_bytes_after() projects.  Every growth of the table asks
+ * here first, whether it interns one value or a batch's, so the limit
+ * bounds the table however its values arrive.  A refusal is recorded on the
+ * account, as a charged arena's is, so that the caller's
+ * relic_diag_no_memory() reports the limit rather than exhaustion.
+ */
+static bool
+admit_value_table(relic_t *ctx, size_t fresh_integers, uint32_t symbol)
+{
+	return (relic_account_admit(&ctx->account,
+	    value_table_bytes(&ctx->values),
+	    value_table_bytes_after(&ctx->values, fresh_integers, symbol)));
+}
+
+/*
+ * Whether the integer table's array and index already have room for `count`
+ * more integers, so that reserving them grows nothing.
+ */
+static bool
+integer_table_has_room(const relic_valtab_t *table, size_t count)
+{
+	return (count <= table->integer_capacity - table->integer_count &&
+	    relic_idtab_has_room(&table->index, count));
+}
+
+/*
+ * Make room in the integer table for `count` more integers: the index first
+ * and the array second, each to the capacity interning them one at a time
+ * would reach, once the memory limit has admitted both.  Interning one
+ * integer reserves one, and a batch reserves its new integers at once, so
+ * this is the one place the table grows.  Returns 0, or -1 with nothing
+ * reported when the table would hold more integers than a position can
+ * name, the limit refused, or the allocator did; the contents are as they
+ * were, and whatever grew is counted.
+ *
+ * Most reservations find the room already there.  Those grow nothing and
+ * add nothing to the total, so the limit is not asked about them: the
+ * projection it is asked with costs more than the reservation itself.  The
+ * growths still run, and each finds its own room, so the check decides
+ * only whether the limit is asked, never whether the table grows.
+ */
+static int
+reserve_integers(relic_t *ctx, size_t count)
+{
+	relic_valtab_t *table;
+	int64_t *integers;
+
+	table = &ctx->values;
+	if (count == 0)
+		return (0);
+	if (count > RELIC_INTEGER_MAX - table->integer_count)
+		return (-1);
+	if (!integer_table_has_room(table, count) &&
+	    !admit_value_table(ctx, count, 0))
+		return (-1);
+
+	if (relic_idtab_reserve(&table->index, count, integer_rehash,
+	    table) != 0) {
+		account_value_table(ctx);
+		return (-1);
+	}
+
+	integers = relic_grow_array_stepwise(table->integers,
+	    &table->integer_capacity, table->integer_count, count, 1,
+	    sizeof(*table->integers));
+	if (integers != NULL)
+		table->integers = integers;
+	account_value_table(ctx);
+
+	return (integers != NULL ? 0 : -1);
 }
 
 /*
@@ -422,24 +528,24 @@ intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
 	}
 
 	/*
-	 * Room in the index is taken before the integer is stored, so that
-	 * the only step that can fail happens while there is still nothing to
-	 * leave behind.  Storing first would, on a failed index growth, leave
-	 * an integer no lookup could reach, and the next intern of an equal
+	 * Room is reserved before the integer is stored, so that the only
+	 * step that can fail happens while there is still nothing to leave
+	 * behind.  Storing first would, on a failed index growth, leave an
+	 * integer no lookup could reach, and the next intern of an equal
 	 * integer would assign it a second identifier -- which the evaluator
 	 * would then treat as a different value.
 	 */
-	if (relic_idtab_reserve(&table->index, 1, integer_rehash, table) != 0) {
-		relic_diag_no_memory(ctx);
+	if (reserve_integers(ctx, 1) != 0) {
+		if (table->integer_count >= RELIC_INTEGER_MAX)
+			relic_diagf(ctx, RELIC_ERROR, NULL,
+			    "too many distinct integers");
+		else
+			relic_diag_no_memory(ctx);
 		return (-1);
 	}
-	account_value_table(ctx);
 
-	if (integer_store(ctx, integer, &id) != 0)
-		return (-1);
-
-	relic_idtab_place(&table->index, hash, id);
-	*domp = RELIC_DOM_INTEGER | id;
+	append_integer(table, integer, hash);
+	*domp = RELIC_DOM_INTEGER | (relic_dom_t)table->integer_count;
 
 	return (0);
 }
@@ -827,9 +933,6 @@ relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
 {
 	const relic_valtab_t *table;
 	const relic_text_t *text;
-	size_t integers;
-	size_t capacity;
-	size_t uses;
 	size_t mask;
 	size_t i;
 
@@ -858,22 +961,8 @@ relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
 		}
 	}
 
-	integers = integer_table_bytes(table);
-	if (map->fresh_count > 0) {
-		capacity = relic_grow_array_capacity_stepwise(
-		    table->integer_capacity, table->integer_count,
-		    map->fresh_count, 1);
-		if (capacity == 0)
-			return (SIZE_MAX);
-		integers = relic_saturating_sum(relic_saturating_product(
-		    capacity, sizeof(*table->integers)),
-		    relic_idtab_bytes_after_reserve(&table->index,
-		    map->fresh_count));
-	}
-
-	uses = uses_capacity_covering(table, map->highest_string);
-
-	return (relic_saturating_sum(relic_saturating_sum(integers, uses),
+	return (relic_saturating_sum(value_table_bytes_after(table,
+	    map->fresh_count, map->highest_string),
 	    relic_symbol_pool_bytes_after(ctx, map->strings,
 	    map->string_count)));
 }
@@ -895,40 +984,20 @@ relic_pending_rewrite(const relic_pending_map_t *map, relic_dom_t *tuples,
 
 /*
  * Every part is grown for all of the map's new values at once, each to the
- * capacity interning them one at a time would reach, so that the only step
- * that can fail comes before any value is numbered, as in intern_integer()
- * and relic_symbol_intern().  The integer table first, then the record of
- * symbol uses, to cover the highest identifier the map promised, and the
- * pool last, whose copies of the new strings are undone whole when one of
- * them fails.  A growth that fails leaves every part's contents as they
- * were, and whatever it grew counted.
+ * capacity interning them one at a time would reach and through the
+ * reservation interning one value uses, so that the memory limit admits
+ * each growth and the only step that can fail comes before any value is
+ * numbered.  The integer table first, then the record of symbol uses, to
+ * cover the highest identifier the map promised, and the pool last, whose
+ * copies of the new strings are undone whole when one of them fails.  A
+ * growth that fails leaves every part's contents as they were, and whatever
+ * it grew counted.
  */
 int
 relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map)
 {
-	relic_valtab_t *table;
-	int64_t *integers;
-
-	table = &ctx->values;
-	if (map->fresh_count > 0) {
-		if (map->fresh_count > RELIC_INTEGER_MAX - table->integer_count)
-			return (-1);
-
-		if (relic_idtab_reserve(&table->index, map->fresh_count,
-		    integer_rehash, table) != 0) {
-			account_value_table(ctx);
-			return (-1);
-		}
-
-		integers = relic_grow_array_stepwise(table->integers,
-		    &table->integer_capacity, table->integer_count,
-		    map->fresh_count, 1, sizeof(*table->integers));
-		if (integers != NULL)
-			table->integers = integers;
-		account_value_table(ctx);
-		if (integers == NULL)
-			return (-1);
-	}
+	if (reserve_integers(ctx, map->fresh_count) != 0)
+		return (-1);
 
 	if (cover_symbol_uses(ctx, map->highest_string) != 0)
 		return (-1);
@@ -952,14 +1021,9 @@ relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
 	size_t i;
 
 	table = &ctx->values;
-	for (i = 0; i < map->fresh_count; i++) {
-		assert(table->integer_count < table->integer_capacity);
-		table->integers[table->integer_count] = map->fresh[i];
-		table->integer_count++;
-		relic_idtab_place(&table->index,
-		    relic_hash_int64(table->hash_seed, map->fresh[i]),
-		    (uint32_t)table->integer_count);
-	}
+	for (i = 0; i < map->fresh_count; i++)
+		append_integer(table, map->fresh[i],
+		    relic_hash_int64(table->hash_seed, map->fresh[i]));
 
 	relic_symbol_append(ctx, map->strings, map->string_count);
 

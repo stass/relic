@@ -54,14 +54,15 @@
  * within the limit; the store and the arenas change only on the calling
  * thread, while no round's workers run.
  *
- * `refused` records that the limit refused an arena a chunk.  A refused
- * round is not recorded, because nothing reports it: the round is run
- * again inserting as it derives, which holds no buffers, and whatever
- * refuses that run reports itself.  The arena
- * fails as it would had the allocator refused, and its caller reports the
- * failure through relic_diag_no_memory() as every allocation failure is
- * reported; that function takes the record with relic_account_take_refusal()
- * and reports the limit instead of exhaustion.  Nothing else reads it.  The
+ * `refused` records that the limit refused an arena a chunk, or the value
+ * table or the symbol pool a growth.  A refused round is not recorded,
+ * because nothing reports it: the round is run again inserting as it
+ * derives, which holds no buffers, and whatever refuses that run reports
+ * itself.  The arena or the table fails as it would had the allocator
+ * refused, and its caller reports the failure through relic_diag_no_memory()
+ * as every allocation failure is reported; that function takes the record
+ * with relic_account_take_refusal() and reports the limit instead of
+ * exhaustion.  Nothing else reads it.  The
  * beginning of an operation, and of each activity within one, clears a
  * record nobody reported, so that no later failure is blamed on it.
  */
@@ -84,6 +85,11 @@ struct relic_account {
  * tuples reaches it, and a total of bytes passing it is one no allocation
  * could have produced.
  *
+ * relic_account_admit() asks relic_account_exceeds() for a holder that
+ * counts itself, such as the value table or the symbol pool, and records a
+ * refusal as relic_account_charge() does, so that the failure the holder
+ * then reports through relic_diag_no_memory() is reported as the limit.
+ *
  * relic_account_charge() admits `bytes` more for an arena and counts them,
  * or records the refusal and returns false having counted nothing.
  * relic_account_release() gives back bytes an arena counted.  A round's
@@ -94,6 +100,8 @@ void	 relic_account_init(relic_account_t *account, size_t limit);
 bool	 relic_limit_set(size_t limit);
 bool	 relic_account_exceeds(const relic_account_t *account,
 	    size_t current_bytes, size_t projected_bytes);
+bool	 relic_account_admit(relic_account_t *account, size_t current_bytes,
+	    size_t projected_bytes);
 bool	 relic_account_charge(relic_account_t *account, size_t bytes);
 void	 relic_account_release(relic_account_t *account, size_t bytes);
 bool	 relic_account_take_refusal(relic_account_t *account);

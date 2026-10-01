@@ -414,6 +414,13 @@ int	 relic_idtab_reserve(relic_idtab_t *table, size_t added,
 void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
 
 /*
+ * Whether the table already has room for `added` more entries, so that
+ * relic_idtab_reserve() would grow nothing: an owner that asks a limit
+ * about each growth need not ask about a reservation that makes none.
+ */
+bool	 relic_idtab_has_room(const relic_idtab_t *table, size_t added);
+
+/*
  * A reservation in two halves, for an owner that allocates while it may
  * still fail and moves the entries later, possibly on another thread and
  * alongside other tables' moves.

@@ -285,10 +285,9 @@ esac
 
 # -l sets each limit the library enforces, by the key the diagnostic names
 # it by, and zero asks for the default.  A repeated key takes its later value.
-# The memory limit counts the facts a load stores, so a limit of one byte
-# refuses graph.dl's load, naming the first predicate its facts would grow.
-# It also counts the working state of a query's Magic rewrite, so the same
-# limit refuses the rewrite's first allocation for a program with no facts.
+# The memory limit counts the symbol pool a load's names fill, so a limit of
+# one byte refuses graph.dl's load at its first name, before any predicate
+# has a store to name.
 status=0
 diagnostic=$("$RELIC" -l memory=1 "$work/graph.dl" 2>&1 >/dev/null) ||
     status=$?
@@ -296,21 +295,28 @@ if [ "$status" -ne 1 ]; then
 	fail "an exceeded memory limit exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=1 while loading edge/2"*)
+*"limit exceeded: memory=1")
 	;;
 *)
 	fail "an exceeded memory limit was reported as '$diagnostic'"
 	;;
 esac
 
+# The limit also counts the working state of a query's Magic rewrite.  A
+# kilobyte past what the program holds without its query has room for the
+# query's names and not for the rewrite's first allocation, which is
+# refused, naming the query.
+rules=$(printf '%s\n' 'p(X) :- q(X).' 'q(X) :- p(X).')
+held=$(printf '%s\n' "$rules" | "$RELIC" -X stats 2>&1 >/dev/null |
+    sed -n 's/^stats: storage bytes //p')
 status=0
-diagnostic=$(printf 'p(X) :- q(X).\nq(X) :- p(X).\np(a)?\n' |
-    "$RELIC" -l memory=1 2>&1 >/dev/null) || status=$?
+diagnostic=$(printf '%s\n' "$rules" 'p(a)?' |
+    "$RELIC" -l memory=$((held + 1024)) 2>&1 >/dev/null) || status=$?
 if [ "$status" -ne 1 ]; then
 	fail "an exceeded memory limit in a rewrite exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=1 while rewriting \$q0/"*)
+*"limit exceeded: memory=$((held + 1024)) while rewriting \$q0/"*)
 	;;
 *)
 	fail "an exceeded memory limit in a rewrite was reported as '$diagnostic'"
@@ -362,9 +368,10 @@ case "$diagnostic" in
 esac
 
 # A refusal is reported once, as the limit it is, wherever it falls: while
-# the plans of the rules are allocated one after another, while tuples are
-# derived, or while an index is built.  Each limit of the sweep refuses the
-# program somewhere, and a second diagnostic after the first -- an allocation
+# the program's names are interned, which names no activity, while the plans
+# of the rules are allocated one after another, while tuples are derived, or
+# while an index is built.  Each limit of the sweep refuses the program
+# somewhere, and a second diagnostic after the first -- an allocation
 # attempted after a refused one, say -- would misreport the refusal as the
 # allocator running out.
 {
@@ -381,7 +388,8 @@ while [ "$limit" -le 10000 ]; do
 	diagnostic=$("$RELIC" -a -l memory=$limit "$work/rules.dl" 2>&1 \
 	    >/dev/null) || :
 	case "$diagnostic" in
-	""|"relic: error: limit exceeded: memory=$limit while "*/*)
+	""|"relic: error: limit exceeded: memory=$limit" | \
+	    "relic: error: limit exceeded: memory=$limit while "*/*)
 		case "$diagnostic" in
 		*"
 "*)

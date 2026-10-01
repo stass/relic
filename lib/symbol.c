@@ -48,9 +48,9 @@ static const relic_symbol_t *symbol_at(const relic_symtab_t *table,
 		    uint32_t id);
 static bool	 symbol_has_bytes(const relic_symtab_t *table, uint32_t id,
 		    const void *bytes, size_t length);
+static bool	 pool_has_room(const relic_symtab_t *table,
+		    const relic_fresh_string_t *fresh, size_t count);
 static uint32_t	 symbol_rehash(uint32_t id, void *ctx);
-static int	 symbol_store(relic_t *ctx, const void *bytes, size_t length,
-		    uint32_t hash, uint32_t *idp);
 
 void
 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed)
@@ -122,72 +122,6 @@ symbol_rehash(uint32_t id, void *ctx)
 }
 
 /*
- * Copy bytes into the string arena, append them to the symbol array with
- * the hash they were placed by, and return the identifier assigned to them.
- * The length has been checked against RELIC_STRING_LENGTH_MAX, so it fits
- * the entry and the terminator's byte cannot wrap the size.
- *
- * The array is grown and the copy is made before the count advances, so a
- * failure part way through leaves a table that is smaller than it might have
- * been but is entirely consistent: the entry a caller could reach is one that
- * was fully written.
- */
-static int
-symbol_store(relic_t *ctx, const void *bytes, size_t length, uint32_t hash,
-    uint32_t *idp)
-{
-	relic_symtab_t *table;
-	relic_symbol_t *entries;
-	relic_symbol_t *entry;
-	char *copy;
-
-	table = &ctx->symbols;
-
-	if (table->count >= RELIC_SYMBOL_MAX) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "too many distinct symbols and strings");
-		return (-1);
-	}
-
-	entries = relic_grow_array(table->entries, &table->capacity,
-	    table->count + 1, sizeof(*table->entries));
-	if (entries == NULL) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	table->entries = entries;
-	account_pool(ctx);
-
-	/*
-	 * One byte past the recorded length holds a terminator, so a caller
-	 * that has no use for the length can treat the result as a C string.
-	 * A refused copy clears the arena's failure: the next symbol may fit
-	 * where this one did not.  The empty string's `bytes` may be NULL,
-	 * which bcopy(3) may not be given even to copy nothing.
-	 */
-	copy = relic_arena_alloc(&table->strings, length + 1);
-	account_pool(ctx);
-	if (copy == NULL) {
-		relic_arena_clear_failure(&table->strings);
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	if (length > 0)
-		bcopy(bytes, copy, length);
-	copy[length] = '\0';
-
-	entry = &table->entries[table->count];
-	entry->bytes = copy;
-	entry->length = (uint32_t)length;
-	entry->hash = hash;
-	table->count++;
-
-	*idp = (uint32_t)table->count;
-
-	return (0);
-}
-
-/*
  * Intern bytes, storing the identifier in *idp.  Returns 0, or -1 with a
  * diagnostic already reported.
  *
@@ -200,6 +134,8 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
     uint32_t *idp)
 {
 	relic_symtab_t *table;
+	relic_fresh_string_t fresh;
+	relic_arena_mark_t copies;
 	uint32_t hash;
 	uint32_t id;
 
@@ -225,26 +161,29 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	}
 
 	/*
-	 * Room in the index is taken before the symbol is stored, so that the
-	 * only step that can fail happens while there is still nothing to
-	 * leave behind.  Storing first and indexing second would, on a failed
-	 * index growth, leave a symbol no lookup could reach, and the next
-	 * intern of the same bytes would assign it a second identifier --
+	 * A new symbol is a reservation of one, as a batch's are of many, so
+	 * the memory limit admits it and every growth happens before the
+	 * symbol is numbered.  Storing first and indexing second would, on a
+	 * failed index growth, leave a symbol no lookup could reach, and the
+	 * next intern of the same bytes would assign it a second identifier --
 	 * breaking, permanently and silently, the one property the evaluator
 	 * relies on.
 	 */
-	if (relic_idtab_reserve(&table->index, 1, symbol_rehash, table) != 0) {
-		account_pool(ctx);
-		relic_diag_no_memory(ctx);
+	fresh.bytes = bytes;
+	fresh.copy = NULL;
+	fresh.length = length;
+	fresh.hash = hash;
+	if (relic_symbol_reserve(ctx, &fresh, 1, &copies) != 0) {
+		if (!relic_symbol_has_room(ctx, 1))
+			relic_diagf(ctx, RELIC_ERROR, NULL,
+			    "too many distinct symbols and strings");
+		else
+			relic_diag_no_memory(ctx);
 		return (-1);
 	}
-	account_pool(ctx);
 
-	if (symbol_store(ctx, bytes, length, hash, &id) != 0)
-		return (-1);
-
-	relic_idtab_place(&table->index, hash, id);
-	*idp = id;
+	relic_symbol_append(ctx, &fresh, 1);
+	*idp = (uint32_t)table->count;
 
 	return (0);
 }
@@ -330,7 +269,8 @@ account_pool(relic_t *ctx)
  * Each part of the pool is projected as interning the strings one at a
  * time would grow it: the entries a step at a time, the index for all of
  * them, which reaches what reserving one at a time reaches, and the arena
- * one copy at a time, each with its terminator, as symbol_store() makes it.
+ * one copy at a time, each with its terminator, as relic_symbol_reserve()
+ * makes it.
  */
 size_t
 relic_symbol_pool_bytes_after(const relic_t *ctx,
@@ -360,6 +300,30 @@ relic_symbol_pool_bytes_after(const relic_t *ctx,
 	    strings.total_bytes));
 }
 
+/*
+ * Whether reserving the fresh strings would grow nothing: the entries and
+ * the index have room for them, and the string arena places every copy in
+ * the room its head chunk has, which a projection of the copies tells
+ * exactly, since it decides as the allocations would.
+ */
+static bool
+pool_has_room(const relic_symtab_t *table, const relic_fresh_string_t *fresh,
+    size_t count)
+{
+	relic_arena_projection_t strings;
+	size_t i;
+
+	if (count > table->capacity - table->count ||
+	    !relic_idtab_has_room(&table->index, count))
+		return (false);
+
+	relic_arena_project(&table->strings, &strings);
+	for (i = 0; i < count; i++)
+		relic_arena_project_alloc(&strings, fresh[i].length + 1);
+
+	return (strings.total_bytes == relic_arena_total_bytes(&table->strings));
+}
+
 bool
 relic_symbol_has_room(const relic_t *ctx, size_t count)
 {
@@ -381,13 +345,22 @@ forget_copies(relic_fresh_string_t *fresh, size_t count)
 }
 
 /*
+ * This is the one place the pool grows, for one new symbol or a batch's, so
+ * the memory limit is asked here, before anything grows, for the whole
+ * pool as relic_symbol_pool_bytes_after() projects it; a refusal is recorded
+ * on the account for the caller's relic_diag_no_memory() to report.  A
+ * reservation the pool has room for grows nothing and adds nothing to the
+ * total, and most find it, so the limit is asked only about one that grows.
+ *
  * The index and the entries are grown first and the copies made after, in
  * the order the strings are numbered, which is the order interning them one
  * at a time would make them in, so the arena ends as it would have.  A copy
  * the arena refuses rewinds it to where the copies began, as giving the
  * reservation back does, so a reservation that fails or is given back
  * leaves no copy behind and the arena placing a retry's copies exactly
- * where an undisturbed reservation would.
+ * where an undisturbed reservation would.  The arena's failure is cleared
+ * once the copies are rewound: the arena lives as long as the context, and
+ * a failure left standing would refuse every symbol after this one.
  */
 int
 relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count,
@@ -402,6 +375,10 @@ relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh, size_t count,
 	if (count == 0)
 		return (0);
 	if (!relic_symbol_has_room(ctx, count))
+		return (-1);
+	if (!pool_has_room(table, fresh, count) &&
+	    !relic_account_admit(&ctx->account, relic_symbol_pool_bytes(ctx),
+	    relic_symbol_pool_bytes_after(ctx, fresh, count)))
 		return (-1);
 
 	if (relic_idtab_reserve(&table->index, count, symbol_rehash,

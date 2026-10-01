@@ -38,20 +38,6 @@ gate of step 4 of `specs/design-arithmetic.md` too; and the page records a
 comparison with Souffle built with OpenMP, which leads on `tc-cyclic` and
 trails on `cspa` and `chain-closure`.
 
-**Interning outside evaluation grows the integer table unchecked.**
-[Medium, component: `lib/value.c`] `specs/design-arithmetic.md` section 9.1
-charges the integer table to the memory limit whole and checks it before
-each growth; only an evaluation's batch asks before growing it.  An integer
-a load, an import, `relic_fact_add()` or a prepared query interns is
-counted and not refused, so preparing and destroying queries with distinct
-integer constants grows the table past the limit, as the symbol and string
-tables already grow outside it.  A load's facts are refused by their
-store's growth, which counts the table.  The fix is one reservation path
-that asks the limit before either kind of interning grows the table, with
-a diagnostic for an interning that names no relation, and the limit sweeps
-of `test_index`, which intern before they insert, taught that a value may
-be refused.
-
 **The v1 specs do not state arithmetic.** [Low, component: `specs/`]
 `specs/design-arithmetic.md` section 19 lists amendments to the other
 design documents that were never made, so the aggregate text those
@@ -1178,9 +1164,11 @@ tautology as well.
 first.** [Medium, component: `lib/facts.c`, `specs/design-facts.md`,
 `specs/design-import.md`] The commit measures staged tuples against the
 base stores only once the input has been read, and checks the tuple and
-memory limits only then (`bases_fit()`). So a table or fact file of a
-billion distinct rows under `-l tuples=1000000` is staged and interned in
-full before it is refused, and nothing it interned is released. For an
+memory limits only then (`bases_fit()`). Interning is bounded by
+`max_memory`, which every growth of the value table and the pool asks, but
+not by `max_tuples`: a table or fact file of a billion distinct rows under
+`-l tuples=1000000` alone is staged and interned in full before it is
+refused, and nothing it interned is released. For an
 embedder feeding one long-lived context untrusted tables, each refused
 import permanently spends value identifiers. Nothing can change a base
 store while the context is busy, so staging could mark each tuple new or

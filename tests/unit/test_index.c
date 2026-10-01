@@ -1187,16 +1187,23 @@ the_memory_limit_refuses_a_build_whole(void)
 /*
  * Insert tuples into a relation indexed on {0} and on {1, 2}, both indexes
  * built while it is empty so that they grow only with insertions, until
- * LIMIT_SWEEP_TUPLES are held or the memory limit refuses one.
+ * LIMIT_SWEEP_TUPLES are held or the memory limit refuses one.  A step
+ * interns the tuple's values and then inserts it, and the limit may refuse
+ * either: the integer table counts against it as the relation does.
  *
- * With no limit (`max_memory` 0), the bytes charged after each insertion,
- * the relation's and its integers', are recorded in `unlimited`, which has
- * room for LIMIT_SWEEP_TUPLES.  Under a limit, each insertion must be
+ * With no limit (`max_memory` 0), the bytes charged after each step, the
+ * relation's, its integers' and the pool's, are recorded in `unlimited`,
+ * which has room for LIMIT_SWEEP_TUPLES.  Under a limit, each step must be
  * refused exactly when the unlimited run held more than the limit after it,
  * and must otherwise leave the same bytes charged: the limit neither lets
- * storage past it nor refuses a tuple that fits.  After every insertion the
- * storage total must also equal what the arrays hold.  Returns whether all
- * of that held throughout.
+ * storage past it nor refuses a tuple that fits.  That is exact for the
+ * step as a whole because nothing a step grows shrinks within it, so the
+ * bytes after its interning are at most the bytes after its insertion.
+ * After every step the storage total must also equal what the arrays hold.
+ * Returns whether all of that held throughout.
+ *
+ * The limit is set once the relation is named and indexed, so that the
+ * smallest limits of the sweep refuse tuples rather than the setup.
  */
 static bool
 fill_under_limit(size_t max_memory, size_t *unlimited)
@@ -1214,7 +1221,6 @@ fill_under_limit(size_t max_memory, size_t *unlimited)
 	bool within;
 
 	bzero(&config, sizeof(config));
-	config.max_memory = max_memory;
 	ctx = context(SCENARIO_LIMIT_SWEEP, &config);
 	if (ctx == NULL)
 		return (false);
@@ -1228,13 +1234,16 @@ fill_under_limit(size_t max_memory, size_t *unlimited)
 		relic_destroy(ctx);
 		return (false);
 	}
+	ctx->account.limit = max_memory;
 
 	within = true;
 	for (i = 0; within && i < LIMIT_SWEEP_TUPLES; i++) {
 		tuple[0] = value(ctx, i % SWEEP_VALUES);
 		tuple[1] = value(ctx, i % 5);
 		tuple[2] = value(ctx, i);
-		refused = relic_relation_insert(ctx, rel, tuple, &added) != 0;
+		refused = tuple[0] == RELIC_ID_NONE ||
+		    tuple[1] == RELIC_ID_NONE || tuple[2] == RELIC_ID_NONE ||
+		    relic_relation_insert(ctx, rel, tuple, &added) != 0;
 		held = charged_bytes(ctx);
 
 		if (max_memory == 0) {
@@ -1250,7 +1259,7 @@ fill_under_limit(size_t max_memory, size_t *unlimited)
 
 		if (!within)
 			checkf(false, SCENARIO_LIMIT_SWEEP, "under a limit of "
-			    "%zu, insertion %u was %s holding %zu bytes, with "
+			    "%zu, step %u was %s holding %zu bytes, with "
 			    "%zu in the arrays", max_memory, i,
 			    refused ? "refused" : "admitted", held,
 			    storage_by_hand(ctx));

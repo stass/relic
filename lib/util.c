@@ -887,6 +887,12 @@ idtab_allocate(const relic_idtab_t *table, size_t capacity,
 	return (0);
 }
 
+bool
+relic_idtab_has_room(const relic_idtab_t *table, size_t added)
+{
+	return (idtab_capacity_holds(table->capacity, table->count, added));
+}
+
 /*
  * A table grows by allocating its replacement, the half that can fail, and
  * then reinserting every entry and installing the replacement in one

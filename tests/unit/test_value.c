@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
@@ -33,6 +34,14 @@
 #define	SCENARIO_CLEARED	"a decoded value carries no stale bytes"
 #define	SCENARIO_EXTREMES	"the extremes of the integer range round trip"
 #define	SCENARIO_IDENTITY	"equal values intern to one identifier"
+#define	SCENARIO_LIMIT		"interning stays within the memory limit"
+
+/*
+ * The length of the long strings the limit scenario interns: long enough
+ * that the pool's string arena grows many times for each growth of its
+ * entries.
+ */
+#define	LONG_TEXT		1000
 #define	SCENARIO_MALFORMED	"a malformed value is refused"
 #define	SCENARIO_ORDER		"the comparison operators order within a type"
 #define	SCENARIO_TOTAL		"the sorting order covers every value"
@@ -41,6 +50,12 @@
 #define	SCENARIO_UNASSIGNED	"an identifier never assigned names no value"
 
 static relic_dom_t	 intern_integer(relic_t *ctx, int64_t value);
+static relic_dom_t	 intern_numbered(relic_t *ctx, enum relic_type type,
+			    int width, int64_t number);
+static void		 interning_stays_within_the_memory_limit(void);
+static void		 interning_type_stays_within_the_limit(
+			    enum relic_type type, const char *type_name,
+			    int width, size_t limit);
 static relic_dom_t	 intern_text(relic_t *ctx, enum relic_type type,
 			    const char *text);
 static void		 a_decoded_value_carries_no_stale_bytes(void);
@@ -79,6 +94,117 @@ intern_integer(relic_t *ctx, int64_t value)
 		return (RELIC_ID_NONE);
 
 	return (dom);
+}
+
+/*
+ * The `number`th distinct value of a type: the integer itself, or the
+ * symbol or string spelled with its digits, padded with zeros to `width`.
+ */
+static relic_dom_t
+intern_numbered(relic_t *ctx, enum relic_type type, int width, int64_t number)
+{
+	char text[LONG_TEXT + 32];
+
+	if (type == RELIC_INTEGER)
+		return (intern_integer(ctx, number));
+
+	snprintf(text, sizeof(text), "v%0*lld", width, (long long)number);
+
+	return (intern_text(ctx, type, text));
+}
+
+/*
+ * The memory limit bounds the value table and the symbol pool whole, so
+ * interning outside any evaluation -- what a load, an import, an added fact
+ * or a prepared query does -- must ask it before a table grows, as the
+ * relations do.  Distinct values are interned until one is refused, and the
+ * total must stay within the limit after every one.  The refusal names the
+ * limit, and leaves the identifiers already assigned as they were.
+ */
+static void
+interning_stays_within_the_memory_limit(void)
+{
+	relic_t *ctx;
+	size_t limit;
+
+	/*
+	 * A fresh context's tables are the same size every time, so one
+	 * measured without a limit gives the room the limited one starts
+	 * with: enough for thousands of values, few enough to fill quickly.
+	 */
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_LIMIT, "a context should be created");
+	if (ctx == NULL)
+		return;
+	limit = relic_value_storage_bytes(ctx) + 64 * 1024;
+	relic_destroy(ctx);
+
+	interning_type_stays_within_the_limit(RELIC_INTEGER, "integer", 0,
+	    limit);
+	interning_type_stays_within_the_limit(RELIC_SYMBOL, "symbol", 0, limit);
+	interning_type_stays_within_the_limit(RELIC_STRING, "string", 0, limit);
+
+	/*
+	 * Short values grow the pool's entries and index as often as its
+	 * string arena, and long ones grow the arena many times between
+	 * growths of the others, so that a growth of the arena alone must be
+	 * asked about too.
+	 */
+	interning_type_stays_within_the_limit(RELIC_STRING, "long string",
+	    LONG_TEXT, limit);
+}
+
+static void
+interning_type_stays_within_the_limit(enum relic_type type,
+    const char *type_name, int width, size_t limit)
+{
+	relic_config_t config;
+	char expected[64];
+	const char *error;
+	relic_t *ctx;
+	relic_dom_t first;
+	relic_dom_t dom;
+	bool within;
+	int64_t n;
+
+	bzero(&config, sizeof(config));
+	config.max_memory = limit;
+	ctx = relic_create_config(&config);
+	check(ctx != NULL, SCENARIO_LIMIT, "a limited context should be created");
+	if (ctx == NULL)
+		return;
+
+	first = intern_numbered(ctx, type, width, 1);
+	check(first != RELIC_ID_NONE, SCENARIO_LIMIT,
+	    "the first value should fit");
+
+	within = true;
+	dom = first;
+	for (n = 2; n <= 1000000 && dom != RELIC_ID_NONE; n++) {
+		dom = intern_numbered(ctx, type, width, n);
+		if (relic_account_exceeds(&ctx->account, 0, 0))
+			within = false;
+	}
+
+	checkf(dom == RELIC_ID_NONE, SCENARIO_LIMIT,
+	    "a %s should be refused once the tables fill the limit, and %lld "
+	    "were interned", type_name, (long long)(n - 1));
+	checkf(within, SCENARIO_LIMIT,
+	    "the account should stay within %zu bytes interning %ss, and the "
+	    "tables hold %zu", limit, type_name,
+	    relic_value_storage_bytes(ctx));
+
+	snprintf(expected, sizeof(expected), "limit exceeded: memory=%zu",
+	    limit);
+	error = relic_error(ctx) != NULL ? relic_error(ctx) : "no error";
+	checkf(strcmp(error, expected) == 0, SCENARIO_LIMIT,
+	    "the refusal should name the limit as \"%s\", not \"%s\"",
+	    expected, error);
+
+	check(intern_numbered(ctx, type, width, 1) == first, SCENARIO_LIMIT,
+	    "a value interned before the refusal should keep its identifier");
+
+	relic_destroy(ctx);
 }
 
 static void
@@ -552,6 +678,7 @@ main(void)
 	an_unassigned_identifier_names_no_value();
 	equal_values_intern_to_one_identifier();
 	every_integer_round_trips();
+	interning_stays_within_the_memory_limit();
 	the_comparison_order_holds_within_a_type();
 	the_sorting_order_ranks_types();
 	the_three_types_stay_distinct();

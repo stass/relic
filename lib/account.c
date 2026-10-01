@@ -72,6 +72,18 @@ total_exceeds(const relic_account_t *account, size_t round_bytes,
 	return (elsewhere_bytes + projected_bytes > account->limit);
 }
 
+bool
+relic_account_admit(relic_account_t *account, size_t current_bytes,
+    size_t projected_bytes)
+{
+	if (relic_account_exceeds(account, current_bytes, projected_bytes)) {
+		account->refused = true;
+		return (false);
+	}
+
+	return (true);
+}
+
 /*
  * The check comes before the allocation it admits, so a limit that fires
  * has prevented the chunk rather than reported it.
@@ -79,10 +91,8 @@ total_exceeds(const relic_account_t *account, size_t round_bytes,
 bool
 relic_account_charge(relic_account_t *account, size_t bytes)
 {
-	if (relic_account_exceeds(account, 0, bytes)) {
-		account->refused = true;
+	if (!relic_account_admit(account, 0, bytes))
 		return (false);
-	}
 
 	account->arena_bytes += bytes;
 
