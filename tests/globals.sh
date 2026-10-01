@@ -71,15 +71,17 @@ fi
 # say anything, and it says so rather than passing.
 #
 # ELF is read in nm's System V format, whose seven columns separated by bars
-# include the section.  It is taken for ELF only once a line of that shape
-# is seen, so that an nm laying it out otherwise fails the check rather than
-# passing it having read nothing.
+# include the section.  It is asked for as --format=sysv, the one spelling
+# GNU, LLVM and ELF Tool Chain nm all accept: the last reads -f as an option
+# of its own and sysv as a file to list.  It is taken for ELF only once a
+# line of that shape is seen, so that an nm laying it out otherwise fails the
+# check rather than passing it having read nothing.
 first=$(echo "$objects" | sed -n '1p')
 
 if nm -m "$first" >/dev/null 2>&1 &&
     nm -m "$first" 2>/dev/null | grep -q '(__'; then
 	format=macho
-elif nm -f sysv "$first" 2>/dev/null |
+elif nm --format=sysv "$first" 2>/dev/null |
     awk -F'|' 'NF == 7 { found = 1 } END { exit !found }'; then
 	format=elf
 else
@@ -128,7 +130,7 @@ echo "$objects" | while read -r object; do
 		# ELF has no such prefix, but a compiler-generated object is a
 		# section-local label, whose name begins with a dot, and a
 		# reserved identifier is unchanged by the format.
-		found=$(nm -f sysv "$object" 2>/dev/null | awk -F'|' '
+		found=$(nm --format=sysv "$object" 2>/dev/null | awk -F'|' '
 		NF == 7 {
 			name = $1
 			letter = $3
