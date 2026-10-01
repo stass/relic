@@ -79,12 +79,12 @@ pkgconfig_DATA = librelic.pc
 # macro file could be left out of.
 #
 # The project's documents are distributed with the source, so that whoever
-# audits the code has its design beside it: the architecture and the design
-# of each subsystem, the plan, what exists and what remains open.  specs/ and
-# docs/ are named whole, as tests/lang is, so that a new design document
-# cannot be left out of the tarball.
+# audits the code has its design beside it: the architecture, the decisions
+# and the design of each subsystem, what exists and what remains open.
+# specs/ and docs/ are named whole, as tests/lang is, so that a new design
+# document cannot be left out of the tarball.
 EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
-	STATUS.md TODO.md docs initial-spec.md relic-plan.md specs \
+	STATUS.md TODO.md docs specs \
 	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \

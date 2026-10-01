@@ -114,10 +114,9 @@ distcheck` runs it from the tarball, which therefore carries the fixtures.
 `make dist` produces `relic-VERSION.tar.gz`. It carries the sources, the
 generated `configure` and makefiles, the tests and their data, the manual
 pages, `README.md`, `NEWS` and `LICENSE`, and the project's documents --
-`specs/`, `docs/`, `relic-plan.md`, `STATUS.md`, `TODO.md` and
-`initial-spec.md` -- so that whoever audits the code has its design and its
-open questions beside it. `specs/` and `docs/` are distributed whole, so a
-new document cannot be left out.
+`specs/`, `docs/`, `STATUS.md` and `TODO.md` -- so that whoever audits the
+code has its design and its open questions beside it. `specs/` and `docs/`
+are distributed whole, so a new document cannot be left out.
 
 It builds with a C11 compiler, `make` and a POSIX shell, and nothing else:
 the autotools are maintainer tools, `libedit` is optional, and `mandoc`,

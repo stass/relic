@@ -7,7 +7,7 @@ warnings that go with it. Forward-looking, like every document under `specs/`;
 
 **Companions.** `specs/architecture.md` sections 7, 14, 15, 17, 25, 51 and 63;
 `specs/design-parser.md` for the tree this consumes; `specs/design-memory.md`
-for the arenas and the interning tables; `relic-plan.md` decisions D-4, D-5,
+for the arenas and the interning tables; `specs/decisions.md` D-4, D-5,
 D-6, D-7 and D-12.
 
 ---
@@ -517,9 +517,9 @@ last, so a rejected or incomplete statement leaves the table as it was.
 ## 9. Queries are not compiled here
 
 Architecture section 11 turns a query into a rule over a synthetic predicate
-whose arguments are the query's output columns. `relic-plan.md` places that
-transformation in S5, where the planner that consumes it lives, and it stays
-there.
+whose arguments are the query's output columns. That transformation belongs
+with the planner that consumes it, `specs/design-plan.md` section 7, not with
+the program model.
 
 The program model therefore interns the predicates a query's body names, so
 the table describes the whole program and the undefined-predicate warning

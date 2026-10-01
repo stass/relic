@@ -531,7 +531,7 @@ of a load's facts are interned before its rules' predicates.
   fact predicates interned as it leaves its symbols and values; section 8:
   a load stages its facts and commits them before it splices.
 * `specs/design-program.md` sections 3 and 11, and decision D-4 of
-  `relic-plan.md`: the rule table holds the rules a program states; the
+  `specs/decisions.md`: the rule table holds the rules a program states; the
   shared append marks a head derived; `defined` as a function and
   `referenced` as a mark with its location, and the warning that asks
   both; and a load's fact predicates are interned as its facts are read,

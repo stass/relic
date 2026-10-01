@@ -14,7 +14,7 @@ adds and where the planner puts it; `specs/design-eval.md` for the executor
 and the batch; `specs/design-parallel.md` for the frozen round a computed
 value must not write into; `specs/design-memory.md` section 8 and
 `specs/design-comparison-cost.md` section 7 for the integer table;
-`specs/design-magic.md` for the rewrite; `relic-plan.md` decisions D-3, D-4,
+`specs/design-magic.md` for the rewrite; `specs/decisions.md` D-3, D-4,
 D-7, D-11, D-16 and D-24.
 
 ---
@@ -1612,7 +1612,7 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
   memory limit, and an undefined result as an ordinary error; section 66.2:
   the equivalences hold on the answers of the strategies that succeed,
   section 4.2; section 69: arithmetic expressions point here.
-* `relic-plan.md` D-11: "`=` is a filter and does not bind" stands for an
+* `specs/decisions.md` D-11: "`=` is a filter and does not bind" stands for an
   equality whose both sides are bound; an equality with one free side and
   one bound side binds, section 4.4. D-16: a `-` is never part of a literal
   token; the parser joins the sign, section 3.4. A new decision records

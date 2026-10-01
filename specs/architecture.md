@@ -1,6 +1,6 @@
 # relic - Small General-Purpose Datalog for C
 
-**Status:** Engineering specification v0.2, derived from `initial-spec.md` (Draft v1)
+**Status:** Engineering specification v0.2, derived from Draft v1
 **Tool:** `relic`
 **Library:** `librelic`, public header `<relic.h>`
 **License target:** 2-clause BSD
@@ -8,7 +8,7 @@
 **Build system:** GNU autoconf / automake / libtool
 **Primary platforms:** FreeBSD, OpenBSD, NetBSD, macOS
 **Secondary platform:** Linux, glibc and musl
-**Implementation plan:** `relic-plan.md`
+**Decisions:** `specs/decisions.md`
 **Code style:** `specs/style.md`
 
 This document describes the target design of the system, not its current
@@ -760,7 +760,7 @@ Only comparison operators, sorting and output formatting decode an identifier
 into the value it names.
 
 The rationale, the alternatives considered and their measured trade-offs are
-recorded in `relic-plan.md`, decisions D-3 and D-24. In summary:
+recorded in `specs/decisions.md`, D-3 and D-24. In summary:
 
 * joins and duplicate elimination reduce to integer work on a dense array;
 * tuple storage is four bytes per column whatever the value type, which matters
@@ -2420,6 +2420,10 @@ No autotools, no Python, no perl, no CMake, no Meson and no network access. The
 tarball produced by `make dist` contains the generated `configure` and
 `Makefile.in`.
 
+The macros `configure` needs beyond autoconf's own are kept in `m4/` rather
+than taken from autoconf-archive, so that regenerating the build system needs
+no package beyond the three tools below.
+
 Regenerating the build system from a source checkout requires maintainer tools:
 
 ```text
@@ -2451,8 +2455,8 @@ mkdir build && cd build
 make
 ```
 
-`make distcheck` must pass; it runs in continuous integration at every
-milestone.
+`make distcheck` must pass; it runs in continuous integration, as section 68
+lists, and before every release.
 
 ## 65.3 configure options
 
@@ -2540,7 +2544,9 @@ release procedure are specified in `specs/design-release.md`.
 
 maintained in `configure.ac` independently of the release version. Symbols not
 matching `^relic_` are not exported, and the library is compiled with hidden
-visibility where the compiler supports it.
+visibility where the compiler supports it. It is linked with `-no-undefined`,
+which makes a shared build fail loudly rather than quietly on a platform that
+requires a library to name every library it needs.
 
 ## 65.7 Makefile structure
 
@@ -2603,6 +2609,11 @@ tests/examples/ the files the documented examples name, and what each
                 example must print
 bench/          generated workloads and a timing harness
 ```
+
+A test is found by the harness rather than listed by hand where it can be, and
+held to its list where it cannot: every `.dl` file under `tests/lang/` is a
+test, and `tests/langfiles.sh` fails when one is not registered, so no test
+can be added and silently not run.
 
 Every example the manual pages and `README.md` show is run by
 `tests/docs.sh`, which fails when an example has no expectation or an
@@ -2668,38 +2679,36 @@ Their inputs, bounds and corpora are specified in `specs/design-hardening.md`.
 
 ---
 
-# 68. Development Phases
-Development is organized as fifteen stages, S0 through S14, specified in
-`relic-plan.md`. The phases of Draft v1 map onto them as follows:
+# 68. Continuous Integration
 
-```text
-Draft v1 phase                      stages
-------------------------------------------------------
-(new) build and project skeleton    S0
-(new) core runtime primitives       S1
-1  positive Datalog kernel          S2, S3, S4, S5
-2  semi-naive execution             S6, S7
-3  stratified negation              S8, with its analysis in S6
-4  relational optimization          S9
-5  Magic Sets                       S10
-6  library stabilization            S11, S12
-(new) differential and fuzz         S13
-(new) documentation and release     S14
-```
+The matrix below is what continuous integration builds and tests. The jobs
+that are cheap run on every push to the main branch and every pull request;
+the sanitizer, `-m32`, no-threads and distcheck variants may run on a
+schedule, and a platform's job by hand while its runners are costly, as long
+as every job passes on the commit a release is made from. A job that cannot
+run what it is for fails rather than skips: `RELIC_STRICT_CHECK=yes` turns every skipped test into a failure, and
+`RELIC_ALLOWED_SKIPS` names the few a job expects.
 
-Milestones:
+| Job | Purpose |
+| --- | --- |
+| Linux gcc, glibc | primary, `--enable-werror` |
+| Linux clang | second front end's warnings |
+| Linux clang, ASan + UBSan | `make check-asan`, `make check-ubsan` |
+| Linux clang, MSan | uninitialized reads ASan cannot see |
+| Linux clang, TSan | `make check-tsan`, the pool's threads under ThreadSanitizer |
+| Linux gcc, valgrind | a third opinion on memory |
+| Linux gcc, no threads | `--disable-threads`: the pool is the calling thread alone |
+| Linux gcc `-m32` | catches `size_t` and pointer-width assumptions |
+| Alpine, musl | exercises the `compat/` paths |
+| macOS clang | the development platform |
+| FreeBSD, OpenBSD, NetBSD | the primary target platforms |
+| tarball | `make dist` on Linux, then build it everywhere with no autotools |
+| distcheck | out-of-tree, `DESTDIR`, `--disable-shared`, `--disable-static` |
+| ascii | no byte above 0x7f in a source file |
+| mandoc | `-Tlint` on both manual pages |
 
-```text
-M0  after S0    configure, make, make check and make distcheck all succeed
-M1  after S5    positive recursive Datalog answers queries end to end
-M2  after S7    semi-naive evaluation agrees with the naive oracle
-M3  after S9    indexed, reordered joins; -e explains the chosen plan
-M4  after S10   Magic Sets agree with full materialization
-M5  after S14   relic 1.0
-```
-
-Every stage lands with its own tests. No stage is complete while `make check`
-is red.
+The tarball job is the one most likely to catch a real user-visible break,
+because it is the only job that builds what users actually download.
 
 ---
 
@@ -2977,30 +2986,30 @@ generated source is committed and the grammar lives where its diagnostics do.
 ```text
 specs/architecture.md    this document: the target design of the system
 specs/style.md           code style, binding on all relic-owned code
+specs/decisions.md       the numbered decisions the design rests on
 specs/design-*.md        one per subsystem, written before it is implemented
-relic-plan.md            the staged implementation plan
 STATUS.md                what exists today; a snapshot, not a roadmap
 TODO.md                  forward-looking index of open work, by severity
-initial-spec.md          the original Draft v1, kept for reference
+NEWS                     what changed in each release, for its users
 ```
 
 This document and the `specs/design-*.md` documents are forward-looking. They
 describe the system being built, not the subset that has shipped. They change
 when a decision changes, not when a stage lands. What shipped belongs in
-`STATUS.md`, what remains belongs in `TODO.md`, and sequencing belongs in
-`relic-plan.md`. Trimming a design document to match a partial implementation
+`STATUS.md`, and what remains, in the order it should be done, belongs in
+`TODO.md`. Trimming a design document to match a partial implementation
 would erode the record of intent and force a later reader to reconstruct it
 from commit history.
 
 Before a subsystem is implemented it gets a `specs/design-<subsystem>.md` and a
-reference from this document. The stage descriptions in `relic-plan.md` name
-which design documents each stage owes.
+reference from this document.
 
 ---
 
 # 76. Amendment Log
 
-Changes relative to `initial-spec.md`, Draft v1.
+Changes relative to Draft v1, the original specification this document was
+derived from. The repository's history holds it as `initial-spec.md`.
 
 **Naming.** The tool, library, header and symbol prefix are `relic`,
 `librelic`, `<relic.h>` and `relic_` / `RELIC_`. Note that an unrelated
@@ -3029,7 +3038,7 @@ alphabetical order.
 **Value representation, section 19.** The internal representation is specified:
 all values, integers included, are interned into one table and tuples are dense
 arrays of 32-bit domain identifiers. The public ABI is unchanged. The
-alternatives and their trade-offs are recorded in `relic-plan.md` decision D-3.
+alternatives and their trade-offs are recorded in `specs/decisions.md`, D-3.
 
 **Types.** Every struct has a matching `_t` typedef and the typedef is used in
 declarations, per `specs/style.md`.
@@ -3074,23 +3083,25 @@ specified to discard partial results.
 rather than being reimplemented in the test suite. The harness and the
 equivalences under test are specified.
 
-**Development phases, section 68.** Replaced by a pointer to the fifteen stages
-and six milestones of `relic-plan.md`.
+**Development phases, section 68.** Replaced by the continuous integration
+matrix. A schedule is not design; the staged plan that sequenced the work to
+1.0 is kept by the repository's history as `relic-plan.md`.
 
 **Success criteria, section 72.** Added index and reordering equivalence, a
 diagnostic quality requirement for the unstratified case, a tarball-build
 requirement, and a sanitizer-clean requirement.
 
 **Queries, section 11.** The synthetic query rule is named `$q0` rather than
-`__query`, per `relic-plan.md` decision D-12: `$` cannot occur in an
+`__query`, per decision D-12 of `specs/decisions.md`: `$` cannot occur in an
 identifier, so the name cannot be mistaken for a user predicate. The rule's
 head names no predicate; the query object owns the relation it is answered
 into, per decision D-17 and `specs/design-query.md`.
 
-**Plan representation, sections 58 and 59.** The operation set is the six of
-decision D-8. `MEMBER` answers a literal whose every argument is bound through
-the canonical full-tuple index, and negation is `ANTI_MEMBER`, the same test
-inverted, rather than a lookup.
+**Plan representation, sections 58 and 59.** The executor runs a plan, per
+decision D-8, over the operations `specs/design-plan.md` specifies. `MEMBER`
+answers a literal whose every argument is bound through the canonical
+full-tuple index, and negation is `ANTI_MEMBER`, the same test inverted,
+rather than a lookup.
 
 **Queries, section 52.** `relic_query_prepare()` takes a source name, as
 `relic_load_string()` does. Query text comes from no file, and without a name
@@ -3117,7 +3128,7 @@ time as each plan is built, and the tool writes it to standard error, so that
 standard output carries only query results in every format.
 
 **Magic Sets, sections 34, 37, 39 and 60.** Generated predicates are named
-`path$bf` and `magic$path$bf`, per D-12 of the plan, rather than the
+`path$bf` and `magic$path$bf`, per decision D-12, rather than the
 `path_bf` and `magic_path_bf` of the examples, which a program could collide
 with. A query reads a predicate no rule derives from its base store, and
 negated relations and everything a completely read relation depends on in

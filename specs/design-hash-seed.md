@@ -11,7 +11,7 @@ identifier table, the determinism it contributes to and the absence of global
 state; `specs/design-relations.md` section 10 for what the relation store
 contributes; `specs/architecture.md` sections 45, 46, 61 and 63 for the BSD
 interfaces, the portability layer, determinism and resource limits;
-`relic-plan.md` decisions D-4 and D-19.
+`specs/decisions.md` D-4 and D-19.
 
 ---
 
@@ -32,7 +32,7 @@ interfaces, the portability layer, determinism and resource limits;
 * the tests that hold the property.
 
 It adds no configuration field, no limit and no command-line option.
-`relic_config_t` stays as S11 froze it.
+`relic_config_t` is unchanged.
 
 ---
 
@@ -146,8 +146,8 @@ which both copy from the context.
 A caller cannot set the seed. There is nothing a caller could want from a
 chosen seed that a random one does not give: results do not depend on it,
 and a test of probe behaviour calls the hash functions with a seed of its
-choosing directly. Adding a field to `relic_config_t` would break the ABI
-S11 froze for a knob with no use.
+choosing directly. Adding a field to `relic_config_t` would break the
+library's binary interface for a knob with no use.
 
 ---
 

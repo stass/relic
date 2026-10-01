@@ -9,8 +9,8 @@ the evaluator. Forward-looking, like every document under `specs/`;
 **Companions.** `specs/architecture.md` sections 9, 15, 26, 29, 30, 51 and 61;
 `specs/design-program.md` for the compiled rules this reads and the check it
 runs inside; `specs/design-eval.md` for the evaluator that consumes the
-schedule; `specs/design-memory.md` for the arenas; `relic-plan.md` decisions
-D-4, D-6 and D-9.
+schedule; `specs/design-memory.md` for the arenas; `specs/decisions.md` D-4,
+D-6 and D-9.
 
 ---
 

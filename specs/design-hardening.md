@@ -8,7 +8,7 @@ every document under `specs/`; `STATUS.md` records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 65.3, 65.4, 66 and 67;
 `specs/design-api.md`, whose public interface everything here drives;
-`relic-plan.md` stage S13 and decisions D-4, D-9 and D-19.
+`specs/decisions.md` D-4, D-9 and D-19.
 
 ---
 

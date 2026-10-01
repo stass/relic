@@ -7,7 +7,7 @@ document under `specs/`; `STATUS.md` records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 20, 21, 24, 47 and 63;
 `specs/design-facts.md` for the base stores and the commit that fills them;
-`relic-plan.md` decisions D-3, D-4, D-6, D-7 and D-10.
+`specs/decisions.md` D-3, D-4, D-6, D-7 and D-10.
 
 ---
 

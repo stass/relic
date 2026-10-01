@@ -5,17 +5,18 @@ what was done. Each item carries a severity and a component pointer.
 
 ## Major initiatives
 
-**Implement relic 1.0.** [Critical] Fifteen stages S0 through S14, specified in
-`relic-plan.md`. Current position: S13, differential and fuzz hardening,
-landed; S14, documentation, packaging and release, next.
+**Release relic 1.0.** [Critical, component: `specs/design-release.md`]
+What remains: the arithmetic amendments to the v1 specs, the version and
+interface number of 1.0, FreeBSD built and tested from the tarball by hand,
+and the release procedure of the design's section 5.
 
-**Close the comparison gaps.** [Medium] Stage S15 of `relic-plan.md`,
-specified in `specs/design-comparison-cost.md`. The six changes of the
+**Close the comparison gaps.** [Medium] Specified in
+`specs/design-comparison-cost.md`. The six changes of the
 design's section 10 are in, each measured against the one before it in
 `STATUS.md`. At scale 1 relic is ahead of every interpreter and SQL
 engine of `bench/compare/run.sh` on all 25 workloads, and behind compiled
 Souffle on `tc-cyclic`, `tc-cyclic-bf` and `grid-reach`. Three of the
-section 10 gates are missed, and the stage is not done until they hold and
+section 10 gates are missed, and the work is not done until they hold and
 the comparison is recorded on an idle machine. Step 1's writer is 11 per
 cent of `chain-closure` against the 5 its gate asks for; what remains is
 formatting 24 MB of rows rather than the stream's lock, and no cheaper
@@ -74,7 +75,8 @@ either today. Including relic's headers by a quoted name alone, with no
 `-I` for `lib/`, or giving them a prefix, would remove the collision.
 
 **Continuous integration is incomplete.** [High, component:
-`.github/workflows/`] `relic-plan.md` section 6 specifies fifteen jobs.
+`.github/workflows/`] `specs/architecture.md` section 68 specifies fifteen
+jobs.
 `ci.yml` has the Linux compilers, AddressSanitizer with leak detection and
 UndefinedBehaviorSanitizer, distcheck, and the tarball built on glibc and
 musl without autotools; `extended.yml`, weekly, has MemorySanitizer,
@@ -83,12 +85,15 @@ ThreadSanitizer, `-m32`, no threads and the two distcheck variants;
 has passed on GitHub; `extended.yml` and `macos.yml` each need a first
 green run before they can be trusted. Missing:
 
-* FreeBSD, OpenBSD and NetBSD. GitHub has no BSD runners, and the vmactions
-  actions that boot one on a Linux runner fetch their helper script and disk
-  images at run time with no checksum, which was judged too much trust to
-  extend. A job that boots each system's official image, verified against
-  the checksum the project publishes, under QEMU on a Linux runner, or a
-  hosted service with native BSD machines, would close it.
+* FreeBSD, OpenBSD and NetBSD. Success criterion 10 of architecture section 72
+  asks for each. Release 1.0 is excepted: it is built and tested from its
+  tarball on FreeBSD by hand, and OpenBSD and NetBSD, with this job, are 1.1
+  work. GitHub has no BSD runners, and the vmactions actions that boot one on
+  a Linux runner fetch their helper script and disk images at run time with no
+  checksum, which was judged too much trust to extend. A job that boots each
+  system's official image, verified against the checksum the project
+  publishes, under QEMU on a Linux runner, or a hosted service with native BSD
+  machines, would close it.
 * valgrind. There is no `make check-valgrind` to call; a target that runs
   each test under valgrind through the runner `tests/strict.sh` already puts
   in front of every test would be the natural place.
@@ -96,9 +101,9 @@ green run before they can be trusted. Missing:
 
 **`contrib/` has no BSD port skeletons.** [Low, component: `contrib/`,
 `specs/design-release.md` section 4] Only the Homebrew formula exists. The
-FreeBSD and OpenBSD ports and the pkgsrc package the design lists come with
-those systems' testing; each fetches the published tarball, runs `make
-check` where the system has a test target, and lists the installed paths
+FreeBSD and OpenBSD ports and the pkgsrc package the design lists are 1.1
+work, with those systems' testing; each fetches the published tarball, runs
+`make check` where the system has a test target, and lists the installed paths
 exactly.
 
 **Nothing enforces linking `$(LTLIBOBJS)` rather than `$(LIBOBJS)`.** [Low,
@@ -544,86 +549,21 @@ evaluator inserts into derived relations, which is what makes every derived
 tuple re-derivable and the discard safe. `specs/design-relations.md`
 section 2 states it.
 
-**Size budget.** [Medium] `relic-plan.md` totals about 7.5 KLOC against the 4
-to 7 KLOC of `specs/architecture.md` section 2.2, which treats size as a design
-constraint. Track actual lines per stage against the budget; the levers are
-listed under risk R7.
-
-S2 came in at about 1200 non-comment lines against a budget of 880, roughly
-a third over. Most of the excess is the three loading entry points, the
-whole-stream reader and the `-c` handling, which the stage's delivery list did
-not enumerate because it assumed `relic -c` came free. Decide at S5, when the
-tool's real size is known, whether to record the front end's budget as having
-been understated or to find the lines back.
-
-S3 came in at about 700 non-comment lines against a budget of 600, a sixth
-over, which is inside the plan's stated tolerance. Risk R7's first lever is to
-merge `lib/pred.c` into `lib/rule.c`, which architecture section 64 already
-permits; that would save the file header and a handful of accessors and is
-worth doing only if a later stage needs the lines.
-
-S4 came in at about 400 non-comment lines against a budget of 600, a third
-under, which gives back most of what S3 overran. The store is small because
-the identifier table and the growable array were already there and the memory
-limit needed two pure projections from them rather than a mechanism of its
-own.
-
-S5 came in at about 1910 non-comment lines against a budget of 1670, a seventh
-over. The library is about 1060 against the 1070 its share implies, and the
-tool about 850 against 600, most of it `cmd/relic/output.c`: four formats
-that each escape differently, a UTF-8 validator for json and a merge sort for
-`-s`. The S2 question is therefore answered: the tool's budget was understated
-along with the front end's, by the formats rather than the option parsing.
-Risk R7's second lever, dropping one of csv and json, is the place to find the
-lines back if a later stage needs them; neither has proved redundant yet.
-
-S6 came in at about 870 non-comment lines against a budget of 500, three
-quarters over. The graph and its iterative search are about 280, close to what
-the budget imagined for the whole stage. The excess is in `lib/stratify.c`:
-about 180 lines for the unstratified diagnostic, which picks the first
-offending edge of each component in text order and finds the shortest cycle
-through it by a breadth-first search, and about 150 for the schedule, which is
-built completely before it replaces the old one so that running out of memory
-leaves a consistent program. The diagnostic was specified by the plan and the
-atomic replacement by the working agreement's exhaustion rules, so neither is
-a lever; the budget understated them.
-
-S7 came in at about 360 non-comment lines against a budget of 350. Most of
-it is `lib/eval.c`, where a component's plans became a structure of their own
--- base plans, delta variants and the members' relations -- and the rest is
-`-X` and the counters in the tool and the header.
-
-S8 came in at about 85 net non-comment lines in the library against a budget
-of 150, as the plan predicted: negation added one operation and a placement
-rule the comparisons already had. `-l`, brought forward from S12, added about
-60 to the tool, which S12's budget of 450 was to give back.
-
-S10 came in at about 1550 non-comment lines against a budget of 800, nearly
-double, counting the budget on the rewrite and the linear walks it needed
-once review found a 2^14-adornment program and a quadratic cycle.
-`lib/magic.c` is about 1100 of them: finding what a query reads
-completely, the adornment memo, renumbering generated rules into a canonical
-form, and structural duplicate detection with a hash of its own. The rest is
-splitting the planner's ordering from its emission, giving the analysis and
-the evaluator a rule table to work over, and nested explain. Generated rules
-are ordinary compiled rules, which is what kept the evaluator unchanged; a
-lighter representation for them is not a lever while that holds.
-
-S11 came in at about 390 non-comment lines against a budget of 250, about
-430 in the library less about 40 the tool gave back by collecting through
-it. The interface itself is small; the lines are the entry and exit at
-every mutating entry point with the workers that let entry points share
-code, argument validation for the entry points taking caller data, and the
-collector.
-
-S12 came in at about 610 non-comment lines against a budget of 450, and
-did not give back the 60 of `-l`: about 520 in the tool, 240 of them the
-session and its commands in `cmd/relic/repl.c` and 190 the line reader in
-`cmd/relic/input.c`, most of which is the two ways of reading a line and
-libedit's setup; and about 90 in the library for the mixed-type note. The
-tool now stands near 1,650 against the architecture's 400 to 600, the
-overrun of risk R7 concentrated in its output formats and its interactive
-mode.
+**The code is several times its size goal.** [Medium, component: `lib/`,
+`cmd/relic/`, `specs/architecture.md` section 2.2] Section 2.2 sets about 4
+to 7 thousand non-comment lines for the core and makes size a design
+constraint. The library holds about 24,000 non-comment, non-blank lines and
+the tool about 2,200; the evaluator, the parser, the Magic rewrite, the rule
+compiler, the executor, the relation store and the planner are 1,300 to
+2,100 each. The goal predates arithmetic, aggregates, the string functions,
+imports, parallel evaluation and the comparison work, each designed in a
+document of its own. Either the goal is restated for the engine 1.0 is,
+with a budget per subsystem a change is measured against, or the code is
+cut back toward it. The small levers -- `lib/pred.c` merged into
+`lib/rule.c` and `lib/stratify.c` into `lib/depgraph.c`, which section 64
+permits, one of csv and json dropped, one index key shape -- save hundreds
+of lines rather than thousands. Cutting Magic Sets is not a lever: it is
+the feature.
 
 **A later load's second unstratified cycle is not reported.** [Low,
 component: `lib/stratify.c`] A program found unstratified is refused by every

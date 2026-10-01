@@ -12,7 +12,7 @@ never changes; `specs/design-index.md` for the indexes a lookup reads;
 `specs/design-eval.md` for the fixed points that run the plans;
 `specs/design-evaluation-cost.md` sections 3 and 4 for the views a variant
 reads and the placement of its delta literal;
-`relic-plan.md` decisions D-4, D-8 and D-10.
+`specs/decisions.md` D-4, D-8 and D-10.
 
 ---
 

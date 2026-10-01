@@ -12,7 +12,7 @@ the rewrite is shown to a person. Forward-looking, like every document under
 `specs/design-stratify.md` for the analysis the rewritten rules pass through;
 `specs/design-eval.md` for the fixed points that run them;
 `specs/design-facts.md` for the base stores a rewrite reads facts from;
-`relic-plan.md` decisions D-4, D-7, D-8 and D-12.
+`specs/decisions.md` D-4, D-7, D-8 and D-12.
 
 ---
 
@@ -617,9 +617,9 @@ more rules than the budget admits.
 ### 9.1 Stratification is a guard
 
 The generated rules are analysed by the same dependency analysis as the
-program, into a schedule of their own. That is the check `relic-plan.md` asks
-for: a rewrite that produced recursion through negation would be caught there
-rather than evaluated into nonsense.
+program, into a schedule of their own, as a check: a rewrite that produced
+recursion through negation would be caught there rather than evaluated into
+nonsense.
 
 By construction it never does. Every negated literal in a generated rule reads
 a complete predicate, which no generated rule derives, so a negative edge
@@ -689,7 +689,10 @@ literal of the adorned rule then holds, and it derives `p$α(t)`. Applied to the
 query, whose rewrite has no guard, this gives every answer.
 
 The equivalence `magic(Q, P) == Q(full_materialize(P))` is what the test suite
-checks, over the language corpus and under every strategy.
+checks, over the language corpus and under every strategy. Equal answers do
+not show that the rewrite restricted anything, so the suite also holds a bound
+query's evaluation, through the `-X stats` counters, to a fraction of what the
+whole fixed point holds: a rewrite that is correct but ineffective fails.
 
 ---
 

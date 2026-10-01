@@ -16,8 +16,8 @@ it adds an edge kind to; `specs/design-plan.md` and `specs/design-planner.md`
 for the operation it adds and where the planner puts it;
 `specs/design-eval.md` for the executor; `specs/design-magic.md` for what a
 rewrite does with it; `specs/design-query.md` for the query that holds one;
-`specs/design-parallel.md` for the frozen round; `relic-plan.md` decisions
-D-3, D-4, D-7, D-11, D-12, D-20 and D-26.
+`specs/design-parallel.md` for the frozen round; `specs/decisions.md` D-3,
+D-4, D-7, D-11, D-12, D-20 and D-26.
 
 ---
 
@@ -1512,7 +1512,7 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
   negative edge does, section 7; section 37: a group predicate is read
   completely, section 11; section 63: the arity limit on a group body;
   section 69: aggregates point here.
-* `relic-plan.md`: a new decision records the set reading of a group, the
+* `specs/decisions.md`: decision D-27 records the set reading of a group, the
   generated group rule, stratification below the reader, the exact sum,
   and the spelling.
 * `specs/design-parser.md` section 3.2: the brace tokens and the four

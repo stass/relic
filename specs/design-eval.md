@@ -10,7 +10,7 @@ and 63; `specs/design-plan.md` for the plans this runs, and
 `specs/design-planner.md` for when they are built;
 `specs/design-relations.md` and `specs/design-index.md` for the store it
 reads and writes; `specs/design-facts.md` for the base stores it seeds from;
-`relic-plan.md` decisions D-6, D-7, D-8, D-9, D-10 and D-11.
+`specs/decisions.md` D-6, D-7, D-8, D-9, D-10 and D-11.
 
 ---
 

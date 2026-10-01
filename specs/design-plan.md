@@ -10,7 +10,7 @@ is implemented.
 `specs/design-program.md` for the compiled rule this consumes;
 `specs/design-eval.md` for the executor that runs a plan;
 `specs/design-relations.md` for the relations a plan refers to;
-`relic-plan.md` decisions D-4, D-7, D-8, D-10 and D-12.
+`specs/decisions.md` D-4, D-7, D-8, D-10 and D-12.
 
 ---
 

@@ -8,7 +8,7 @@ every document under `specs/`; `STATUS.md` records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 19, 48 to 57, 63 and 65.6;
 `specs/design-eval.md` for how a query is answered; `specs/design-magic.md`
-for the rewrite a query goes through; `relic-plan.md` decisions D-5, D-7 and
+for the rewrite a query goes through; `specs/decisions.md` D-5, D-7 and
 D-14.
 
 ---

@@ -11,7 +11,7 @@ is implemented.
 canonical full-tuple index beside it; `specs/design-planner.md` for which
 indexes a plan asks for; `specs/design-plan.md` for the `LOOKUP` operation
 that reads one; `specs/design-evaluation-cost.md` section 4 for the lookup
-of a delta the frontier serves; `relic-plan.md` decisions D-3, D-4, D-6, D-7
+of a delta the frontier serves; `specs/decisions.md` D-3, D-4, D-6, D-7
 and D-10.
 
 ---
@@ -392,7 +392,7 @@ and against the memory limit, are the ones asked for since the program last
 changed. A query or rule of an earlier program that looked a relation up on
 another binding pattern does not tax every later evaluation, and whether an
 evaluation fits a limit does not depend on what an earlier one asked
-(`relic-plan.md` decision D-4).
+(`specs/decisions.md` D-4).
 
 A relation's indexes are held in a growable array, so an index's address
 moves when another is built. A plan does not hold the address. A `LOOKUP`

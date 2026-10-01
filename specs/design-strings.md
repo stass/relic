@@ -17,8 +17,8 @@ table; `specs/design-comparison-cost.md` section 7 for the identifier a
 string value carries; `specs/design-plan.md` and `specs/design-planner.md`
 for the operations; `specs/design-eval.md` for the executor and the batch;
 `specs/design-parallel.md` for the frozen round a computed string must not
-write into; `specs/design-magic.md` for the rewrite; `relic-plan.md`
-decisions D-3, D-4, D-7, D-11, D-15, D-24 and D-26.
+write into; `specs/design-magic.md` for the rewrite; `specs/decisions.md`
+D-3, D-4, D-7, D-11, D-15, D-24 and D-26.
 
 ---
 
@@ -1586,7 +1586,7 @@ tool has; 5 is what `CLAUDE.md` asks of every feature.
   ordinary errors; section 69: string operations point here; section 74:
   the matcher as an instance of the policy's fourth rule, and `memmem` of
   its second.
-* `relic-plan.md`: a new decision records that string operations are
+* `specs/decisions.md`: decision D-28 records that string operations are
   functions in expressions, that tests are comparisons over positions,
   that positions count from zero with -1 for none, that the matcher is
   relic's own with the dialect of section 4.5, and that a computed string

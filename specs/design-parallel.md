@@ -16,7 +16,7 @@ sections 4 and 6 and `specs/design-index.md` sections 4.1 and 5 for the
 store it freezes; `specs/design-memory.md` sections 6 and 10 for the tables
 it stripes and the rule it keeps; `specs/design-api.md` section 6 for the
 busy state; `specs/design-facts.md` section 4 and `specs/design-import.md`
-for the load this design parallelizes last; `relic-plan.md` decisions D-4,
+for the load this design parallelizes last; `specs/decisions.md` D-4,
 D-6, D-7, D-10 and D-14.
 
 ---
@@ -1035,7 +1035,8 @@ calling thread alone and whose `-j` is accepted and ignored, for a
 platform or a packager that wants no thread; a build where
 `__STDC_NO_ATOMICS__` is defined is such a build. Nothing in the language
 or the store depends on which was built, and the continuous-integration
-matrix of `relic-plan.md` section 6 gains one job that builds that way.
+matrix of `specs/architecture.md` section 68 holds one job that builds that
+way.
 
 `--enable-tsan` and `make check-tsan` run the suite under
 ThreadSanitizer. The tests that exercise deferred rounds ask for the pool
@@ -1295,7 +1296,7 @@ was.
 
 ## 17. Amendments this design makes
 
-* `relic-plan.md` D-14: "A `relic_t` is not thread-safe" stands for the
+* `specs/decisions.md` D-14: "A `relic_t` is not thread-safe" stands for the
   caller; the context may own threads of its own that run only inside an
   operation, section 4. A new decision records it.
 * `specs/design-eval.md` section 2.1: the executor's state is the
@@ -1324,7 +1325,7 @@ was.
 * `specs/architecture.md` section 2.1: parallel execution stays outside
   v1 and is specified here; section 69: "parallel SCC evaluation" points
   here; sections 65.3 and 65.4: `--enable-tsan`, `--disable-threads` and
-  `check-tsan`; `relic-plan.md` section 6: a job without threads.
+  `check-tsan`; section 68: a job without threads.
 
 ---
 

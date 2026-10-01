@@ -7,7 +7,7 @@ diagnostics they emit. Forward-looking, like every document under `specs/`;
 
 **Companions.** `specs/architecture.md` sections 5 through 13, 17, 18, 50, 56
 and 67; `specs/design-memory.md` for the arenas and the interning tables;
-`relic-plan.md` decisions D-1, D-2, D-4, D-5, D-6, D-12, D-15 and D-16.
+`specs/decisions.md` D-1, D-2, D-4, D-5, D-6, D-12, D-15 and D-16.
 
 ---
 

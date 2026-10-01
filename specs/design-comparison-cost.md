@@ -17,12 +17,16 @@ for the index this design extends; `specs/design-memory.md` sections 6, 7
 and 8 for the tables this design changes; `specs/design-relations.md`
 section 3 and `specs/design-facts.md` section 4.3 for the growth and the
 commit; `specs/design-evaluation-cost.md` sections 2 and 5.2 for the earlier
-measurement this one continues; `relic-plan.md` decisions D-3, D-4, D-17 and
+measurement this one continues; `specs/decisions.md` D-3, D-4, D-17 and
 D-22 to D-24.
 
 ---
 
 ## 1. What this document settles
+
+The goal is that relic trails no engine of `bench/compare/run.sh` on time
+at scale 1, and holds one copy of a relation it answers with. This document
+settles:
 
 * where the time goes on the four workloads where relic trails or ties
   another engine, measured by phase and by profile;

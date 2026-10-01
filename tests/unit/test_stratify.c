@@ -390,7 +390,8 @@ schedule_is(const char *scenario, const char *program, const char *expected)
 }
 
 /*
- * Each shape the plan names, written so that first-mention order and
+ * A chain, a diamond, a self-loop, mutual recursion and two recursive
+ * components in sequence, each written so that first-mention order and
  * dependency order disagree wherever they can: a naive "in the order
  * written" would get every one of these wrong.
  */

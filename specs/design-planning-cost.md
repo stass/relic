@@ -12,7 +12,7 @@ the delta variants that multiply a rule's plans; `specs/design-magic.md`
 sections 8 and 11 for the rewrite's copies, its magic rules and its arena;
 `specs/design-relations.md` section 9 for the memory limit;
 `specs/design-memory.md` sections 2 and 4 for the arena lifetimes and the
-failure flag; `relic-plan.md` decisions D-6, D-7, D-10 and D-18.
+failure flag; `specs/decisions.md` D-6, D-7, D-10 and D-18.
 
 ---
 

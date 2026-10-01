@@ -6,8 +6,8 @@ every output format. Forward-looking, like every document under `specs/`;
 `STATUS.md` records what is implemented.
 
 **Companions.** `specs/architecture.md` sections 40 to 44 and 61;
-`specs/design-eval.md` for how a query is answered; `relic-plan.md` decisions
-D-5 and D-15.
+`specs/design-eval.md` for how a query is answered; `specs/decisions.md` D-5
+and D-15.
 
 ---
 

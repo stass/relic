@@ -1,7 +1,11 @@
 # relic status
 
-A snapshot of what exists. Not a roadmap: for sequencing see `relic-plan.md`,
-for open work see `TODO.md`, for the target design see `specs/architecture.md`.
+A snapshot of what exists. Not a roadmap: for open work see `TODO.md`, for the
+target design see `specs/architecture.md` and `specs/decisions.md`.
+
+The work is described below in the stages it landed in, S0 to S15, and the
+milestones M0 to M5 they reached. The staged plan that named them is kept by
+the repository's history as `relic-plan.md`.
 
 ## Implemented
 
@@ -1103,8 +1107,7 @@ The Magic suites were confirmed the same way:
 | `specs/design-aggregates.md` | `count`, `sum`, `min` and `max` over the rows a body denotes, the generated group rule, the aggregate edge, the fold, the exact sum, queries, Magic Sets and the frozen round; implemented |
 | `specs/design-release.md` | the interface documentation, the documented examples as tests, the tarball, the packaging skeletons, the release procedure |
 | `specs/style.md` | code style, binding on all relic-owned code |
-| `relic-plan.md` | fifteen stages, six milestones, decision record |
-| `initial-spec.md` | the original Draft v1, kept for reference |
+| `specs/decisions.md` | the numbered decisions the design rests on, D-1 to D-28 |
 
 ## Next
 
@@ -1121,11 +1124,10 @@ tested by hand.
 
 ## Decisions taken
 
-Recorded as D-1 through D-27 in `relic-plan.md`: D-1 to D-19 in section
-1, the later ones after section 9. The three that constrain everything
-else:
+Recorded as D-1 through D-28 in `specs/decisions.md`. The three that
+constrain everything else:
 
 * **D-3** tuples are dense arrays of 32-bit interned value identifiers;
-* **D-8** the plan representation and the executor exist from S5 and are not
-  rewritten by later optimization stages;
+* **D-8** the executor runs a plan and is written once: optimizations change
+  what the planner emits, never how the executor runs;
 * **D-9** the naive evaluator ships in the library as the differential oracle.

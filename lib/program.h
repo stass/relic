@@ -126,9 +126,9 @@ struct relic_pred {
  * Predicates interned to identifiers, found at index `id - 1`.
  *
  * The table is context-lifetime state rather than something a check derives
- * and discards: identifiers are stable indexes that every later stage uses,
- * and from S4 onward the relation holding a predicate's tuples hangs off its
- * entry and outlives any one query.
+ * and discards: identifiers are stable indexes that every later pass uses,
+ * and the relation holding a predicate's tuples hangs off its entry and
+ * outlives any one query.
  */
 struct relic_predtab {
 	relic_pred_t	*entries;	/* indexed by id - 1 */

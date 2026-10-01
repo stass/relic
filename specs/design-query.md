@@ -9,7 +9,7 @@ document under `specs/`; `STATUS.md` records what is implemented.
 `specs/design-plan.md` section 7, which compiles a query into its rule;
 `specs/design-eval.md` section 7, which answers it; `specs/design-relations.md`
 sections 2 and 4, which own and discard every other relation;
-`specs/design-api.md` sections 5 and 6; `relic-plan.md` decisions D-4, D-6,
+`specs/design-api.md` sections 5 and 6; `specs/decisions.md` D-4, D-6,
 D-12 and D-17.
 
 ---

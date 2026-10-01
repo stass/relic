@@ -197,11 +197,11 @@ Project documents and what each is for:
 | --- | --- |
 | [specs/architecture.md](specs/architecture.md) | the target design of the system |
 | [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
+| [specs/decisions.md](specs/decisions.md) | the numbered decisions (D-N) the design rests on |
 | `specs/design-<feature>.md` | one per subsystem, written before its code |
-| [relic-plan.md](relic-plan.md) | staged implementation plan and decision record |
 | [STATUS.md](STATUS.md) | what exists today; a snapshot, not a roadmap |
 | [TODO.md](TODO.md) | forward-looking index of open work, by severity |
-| `initial-spec.md` | the original Draft v1, kept for reference |
+| [NEWS](NEWS) | what changed in each release, for its users |
 
 * For every major feature, write `specs/design-<feature>.md` first and
   reference it from `specs/architecture.md` before implementation. This keeps
@@ -212,13 +212,16 @@ Project documents and what each is for:
   design we are building toward. Only edit them when the long-term
   architecture or design itself changes (a new subsystem, a reversed decision,
   a renamed primitive). Do **not** rewrite them to record what shipped in a
-  given stage, what was deferred for scheduling reasons, or which parts of the
-  design are not yet implemented - that belongs in `STATUS.md`, `TODO.md`, or
-  `relic-plan.md`. If a stage ships a subset of a design doc, the design doc
-  stays unchanged and the deferral is recorded in the plan and `TODO.md`.
+  given change, what was deferred for scheduling reasons, or which parts of the
+  design are not yet implemented - that belongs in `STATUS.md` or `TODO.md`.
+  If a change ships a subset of a design doc, the design doc stays unchanged
+  and the deferral is recorded in `TODO.md`.
   Trimming a design doc to match a partial implementation erodes the durable
   architecture record and forces future readers to reconstruct intent from
   commit history.
+* A decision that constrains more than one subsystem gets the next number in
+  `specs/decisions.md`. Decisions are never renumbered; one that reverses
+  another says which.
 * `TODO.md` is split into categories (major initiatives, bugs by subsystem,
   security residuals, planned features). Each item has a `[Severity]` tag
   (Critical / High / Medium / Low) and a component pointer. Small items live

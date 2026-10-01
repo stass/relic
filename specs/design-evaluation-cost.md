@@ -16,7 +16,7 @@ estimate and order the delta literal now takes part in;
 `specs/design-memory.md` section 6, whose table section 5 measures;
 `specs/design-relations.md` section 5 for the canonical index;
 `specs/design-bench.md` for the comparison that found the gaps;
-`relic-plan.md` decisions D-4, D-8, D-9 and D-10, the last of which this
+`specs/decisions.md` D-4, D-8, D-9 and D-10, the last of which this
 document amends.
 
 ---
@@ -1023,8 +1023,8 @@ steps 1 and 2 for the semi-naive evaluator, and step 4 for `-X naive`.
 
 On acceptance the durable record changes in these places, and nowhere else:
 
-* `relic-plan.md` D-10: the delta remains a range of tuple identifiers; the
-  sentence pinning it first is replaced by section 4.
+* `specs/decisions.md` D-10: the delta remains a range of tuple identifiers;
+  the sentence pinning it first is replaced by section 4.
 * `specs/design-eval.md` sections 2.1 and 2.2, where an `EMIT` inserts
   through the batch and the `all` view is fixed when the plan starts;
   sections 3, 4, 4.1, 4.2 and 4.3: a naive pass does not see a rule's own
