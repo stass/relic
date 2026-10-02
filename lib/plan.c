@@ -1690,7 +1690,7 @@ confirm_target_fits(const relic_planner_t *planner)
 	relic_diagf(planner->ctx, RELIC_ERROR, &planner->rule->where,
 	    "internal error: a rule of %u head arguments was planned into "
 	    "relation %s", (unsigned int)planner->rule->head_arity,
-	    relic_relation_describe(planner->ctx, planner->target, described,
+	    relic_relation_identify(planner->ctx, planner->target, described,
 	    sizeof(described)));
 
 	return (-1);

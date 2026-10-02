@@ -330,7 +330,8 @@ static int	 index_rules_by_head(relic_magic_t *magic);
 static int	 intern_base_views(relic_magic_t *magic);
 static int	 intern_generated(relic_magic_t *magic, const char *name,
 		    size_t length, uint16_t arity,
-		    const relic_location_t *where, relic_pred_id_t *idp);
+		    const relic_location_t *where, relic_pred_id_t source,
+		    relic_pred_id_t *idp);
 static int	 intern_supplementary(relic_magic_t *magic,
 		    const relic_prefix_t *prefix, size_t call_ordinal,
 		    uint16_t arity, relic_pred_id_t *idp);
@@ -1023,11 +1024,14 @@ charge_literals(relic_magic_t *magic, size_t *spent, size_t size,
 /*
  * Intern a generated predicate's name and the predicate, which is defined
  * from the start: it is the head of a rule the rewrite generates, and the
- * undefined-predicate warning must never name it.
+ * undefined-predicate warning must never name it.  It is part of the
+ * program's predicate `source`, which diagnostics name in its place, or of
+ * the query when `source` is RELIC_ID_NONE.
  */
 static int
 intern_generated(relic_magic_t *magic, const char *name, size_t length,
-    uint16_t arity, const relic_location_t *where, relic_pred_id_t *idp)
+    uint16_t arity, const relic_location_t *where, relic_pred_id_t source,
+    relic_pred_id_t *idp)
 {
 	uint32_t symbol;
 
@@ -1037,7 +1041,7 @@ intern_generated(relic_magic_t *magic, const char *name, size_t length,
 	if (relic_pred_intern(magic->ctx, symbol, arity, where, idp) != 0)
 		return (-1);
 
-	relic_pred_name_head(magic->ctx, *idp);
+	relic_pred_name_generated(magic->ctx, *idp, source);
 
 	return (0);
 }
@@ -1229,7 +1233,7 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	adornment->magic = RELIC_ID_NONE;
 
 	if (intern_generated(magic, text + MAGIC_PREFIX_LENGTH,
-	    length - MAGIC_PREFIX_LENGTH, arity, NULL,
+	    length - MAGIC_PREFIX_LENGTH, arity, NULL, source,
 	    &adornment->adorned) != 0)
 		return (-1);
 
@@ -1237,7 +1241,7 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 		return (0);
 
 	return (intern_generated(magic, text, length, column_count(bound),
-	    NULL, &adornment->magic));
+	    NULL, source, &adornment->magic));
 }
 
 /*
@@ -2304,7 +2308,7 @@ intern_supplementary(relic_magic_t *magic, const relic_prefix_t *prefix,
 	length += (size_t)written;
 
 	return (intern_generated(magic, text, length, arity,
-	    &prefix->rule->where, idp));
+	    &prefix->rule->where, prefix->adornment->source, idp));
 }
 
 /*

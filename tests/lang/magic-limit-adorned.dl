@@ -1,0 +1,8 @@
+% A limit that refuses a relation the Magic rewrite generated names the
+% predicate the program wrote, which is what a reader can change.  The
+% query's binding of path's first argument is answered through path$bf,
+% which holds part of path, and the refusal names path/2.
+edge(a, b). edge(b, c). edge(c, d). edge(d, e).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+path(a, X)?

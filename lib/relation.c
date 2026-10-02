@@ -1174,7 +1174,7 @@ relation_grow(relic_t *ctx, relic_relation_t *relation,
 	if (relation->index_count != 0) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "internal error: %s was reserved for many tuples while "
-		    "it has secondary indexes", relic_relation_describe(ctx,
+		    "it has secondary indexes", relic_relation_identify(ctx,
 		    relation, described, sizeof(described)));
 		return (-1);
 	}
@@ -1845,7 +1845,7 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	if (!key_mask_fits(relation, key_mask)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "internal error: an index of %s was asked for on columns "
-		    "it cannot be keyed on", relic_relation_describe(ctx,
+		    "it cannot be keyed on", relic_relation_identify(ctx,
 		    relation, described, sizeof(described)));
 		return (-1);
 	}
@@ -1978,7 +1978,7 @@ relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 	if (column >= relation->arity) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "internal error: the statistics of %s were asked for a "
-		    "column it does not have", relic_relation_describe(ctx,
+		    "column it does not have", relic_relation_identify(ctx,
 		    relation, described, sizeof(described)));
 		return (-1);
 	}
@@ -2097,7 +2097,7 @@ relic_relation_written(relic_t *ctx, relic_pred_id_t pred)
 	if (!relic_pred_is_derived(ctx, pred)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
 		    "internal error: a rule writes %s, which no rule derives",
-		    relic_pred_describe(ctx, pred, described,
+		    relic_pred_identify(ctx, pred, described,
 		    sizeof(described)));
 		return (NULL);
 	}
@@ -2449,10 +2449,30 @@ relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
  * Write "name/arity" into `buffer`, which must hold RELIC_PRED_TEXT_MAX
  * bytes, and return it, for a message about a relation.  A predicate's
  * relation is described exactly as relic_pred_describe() describes the
- * predicate.
+ * predicate, so the relation of a generated predicate is described as the
+ * program's predicate it stands for.
  */
 const char *
 relic_relation_describe(const relic_t *ctx, const relic_relation_t *relation,
+    char *buffer, size_t size)
+{
+	const relic_pred_t *pred;
+
+	pred = relic_pred_of(ctx, relation->pred);
+	if (pred != NULL && pred->stands_for != RELIC_ID_NONE)
+		return (relic_pred_describe(ctx, relation->pred, buffer, size));
+
+	return (relic_relation_identify(ctx, relation, buffer, size));
+}
+
+/*
+ * Write "name/arity" of the relation itself into `buffer`, which must hold
+ * RELIC_PRED_TEXT_MAX bytes, and return it: a generated predicate's relation
+ * by its own name, for an internal error, where what a maintainer needs is
+ * the relation the code reached.
+ */
+const char *
+relic_relation_identify(const relic_t *ctx, const relic_relation_t *relation,
     char *buffer, size_t size)
 {
 	char name[RELIC_NAME_TEXT_MAX];

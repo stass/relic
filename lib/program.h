@@ -109,12 +109,20 @@ typedef uint32_t relic_pred_id_t;
  * is the position the next one takes among them: what the group predicate
  * of an aggregate in that rule is named after.  Rules are only appended, so
  * a position once taken never shifts.
+ *
+ * `stands_for` is, for a predicate the Magic rewrite generates, the
+ * program's predicate it is part of: the predicate adorned, for an adorned,
+ * a magic or a supplementary predicate.  A diagnostic names that one in its
+ * place, since it is what the reader can change.  It is RELIC_ID_NONE for a
+ * predicate a program writes, and for one generated from a query, which no
+ * predicate of the program stands behind.
  */
 struct relic_pred {
 	relic_location_t	referenced_at;
 	size_t			program_rules;
 	uint32_t		name;	/* interned spelling */
 	relic_pred_id_t		views;
+	relic_pred_id_t		stands_for;
 	uint16_t		arity;
 	bool			head_named;
 	bool			derived;

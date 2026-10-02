@@ -677,8 +677,9 @@ RELIC_LANG_TESTS = \
 	tests/lang/magic-budget-subsumed.dl \
 	tests/lang/magic-budget-wide-cut.dl tests/lang/magic-budget.dl \
 	tests/lang/magic-cspa.dl \
-	tests/lang/magic-duplicate-rules.dl tests/lang/magic-limit-preds.dl \
-	tests/lang/magic-limit-rules.dl \
+	tests/lang/magic-duplicate-rules.dl \
+	tests/lang/magic-limit-adorned.dl tests/lang/magic-limit-demand.dl \
+	tests/lang/magic-limit-preds.dl tests/lang/magic-limit-rules.dl \
 	tests/lang/magic-limit-supplementary.dl tests/lang/magic-mixed.dl \
 	tests/lang/magic-mutual.dl tests/lang/magic-negation.dl \
 	tests/lang/magic-rules-read.dl \

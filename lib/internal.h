@@ -1028,14 +1028,18 @@ const char *relic_source_name(relic_t *ctx, const char *name);
  * relic_pred_intern() assigns an identifier to a (name, arity) pair, or
  * returns the one it already has; `where` is what a refusal names.  The
  * marks of struct relic_pred are set by relic_pred_name_head(),
- * relic_pred_mark_derived(), relic_pred_reference() and
+ * relic_pred_name_generated(), relic_pred_mark_derived(),
+ * relic_pred_reference() and
  * relic_pred_make_view(), and read by relic_pred_is_derived() and
  * relic_pred_is_defined().  relic_pred_count_program_rule() counts one more
  * of the program's rules deriving the predicate.
  *
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
- * stand as an argument of the message it decorates.
+ * stand as an argument of the message it decorates; a predicate the Magic
+ * rewrite generated is described as the program's predicate it stands for.
+ * relic_pred_identify() writes the predicate itself, generated or not, for
+ * an internal error.
  */
 void	 relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed);
 void	 relic_predtab_reset(relic_predtab_t *table);
@@ -1044,6 +1048,8 @@ int	 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 const relic_pred_t *relic_pred_of(const relic_t *ctx, relic_pred_id_t id);
 size_t	 relic_pred_count(const relic_t *ctx);
 void	 relic_pred_name_head(relic_t *ctx, relic_pred_id_t id);
+void	 relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
+	    relic_pred_id_t stands_for);
 void	 relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id);
 void	 relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
 	    const relic_location_t *where);
@@ -1053,6 +1059,8 @@ void	 relic_pred_count_program_rule(relic_t *ctx, relic_pred_id_t id);
 bool	 relic_pred_is_derived(const relic_t *ctx, relic_pred_id_t id);
 bool	 relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id);
 const char *relic_pred_describe(const relic_t *ctx, relic_pred_id_t id,
+	    char *buffer, size_t size);
+const char *relic_pred_identify(const relic_t *ctx, relic_pred_id_t id,
 	    char *buffer, size_t size);
 void	 relic_pred_report_undefined(relic_t *ctx);
 
@@ -1706,8 +1714,10 @@ void	 relic_index_link_append(relic_index_t *index,
  * relic_relation_name() writes what a relation is called: its predicate's
  * name, or `$q` and the serial number of the query whose answer it is.
  * relic_relation_describe() writes "name/arity" for a message, into a
- * buffer of RELIC_PRED_TEXT_MAX bytes.  They are the only way a relation is
- * named, in explain output and in diagnostics alike.
+ * buffer of RELIC_PRED_TEXT_MAX bytes, a generated predicate's relation as
+ * the program's predicate it stands for; relic_relation_identify() writes
+ * the relation itself, for an internal error.  They are the only way a
+ * relation is named, in explain output and in diagnostics alike.
  *
  * The two totals are what the configurable tuple and memory limits are
  * enforced against: tuples across every relation, and the bytes their columns
@@ -1790,6 +1800,8 @@ int	 relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 const char *relic_relation_name(const relic_t *ctx,
 	    const relic_relation_t *relation, char *buffer, size_t size);
 const char *relic_relation_describe(const relic_t *ctx,
+	    const relic_relation_t *relation, char *buffer, size_t size);
+const char *relic_relation_identify(const relic_t *ctx,
 	    const relic_relation_t *relation, char *buffer, size_t size);
 size_t	 relic_relation_total_bytes(const relic_t *ctx);
 size_t	 relic_relation_total_tuples(const relic_t *ctx);

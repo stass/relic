@@ -2034,7 +2034,7 @@ confirm_seed(const relic_evaluation_t *eval,
 
 	relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
 	    "internal error: a seed of %s holds something other than one "
-	    "constant per column", relic_pred_describe(eval->ctx, rule->head,
+	    "constant per column", relic_pred_identify(eval->ctx, rule->head,
 	    described, sizeof(described)));
 
 	return (-1);

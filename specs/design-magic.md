@@ -493,7 +493,12 @@ relic: limit exceeded: magic-rules=1000 while adorning path/2
 A generated rule is attributed to the source predicate its head belongs to:
 an adorned rule and a supplementary rule to the predicate adorned, and a
 magic rule to the predicate whose demand it records, so a seed is attributed
-to the predicate the query calls. Supplementary predicates are not counted
+to the predicate the query calls. A generated predicate is attributed the
+same way, so every diagnostic about one -- a tuple or memory limit refusing
+its relation, or the memory its plans take -- names the source predicate:
+`limit exceeded: tuples=10 while deriving path/2`, where the relation is
+`path$bf`. The explanation of a plan, which shows the rewrite, names the
+generated predicates themselves. Supplementary predicates are not counted
 by the predicate limit or its budget: each has exactly one rule, which the
 rule limit and the literal budget count, so bounding rules bounds them, and
 the predicate limit bounds adornments, of which the arity admits 2^n.

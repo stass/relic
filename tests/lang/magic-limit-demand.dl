@@ -1,0 +1,7 @@
+% The relation of the demand for an adornment, magic$path$bf here, holds
+% the bindings path is asked about, and a limit that refuses it names path/2,
+% the predicate whose demand it records.
+edge(a, b). edge(b, c). edge(c, d). edge(d, e).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+path(a, X)?

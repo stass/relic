@@ -140,6 +140,7 @@ pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 	bzero(stored, sizeof(*stored));
 	stored->name = name;
 	stored->views = RELIC_ID_NONE;
+	stored->stands_for = RELIC_ID_NONE;
 	stored->arity = arity;
 
 	table->count++;
@@ -272,6 +273,25 @@ relic_pred_name_head(relic_t *ctx, relic_pred_id_t id)
 }
 
 /*
+ * Record that the Magic rewrite generated this predicate, as part of
+ * `stands_for`: a rule's head names it, and a diagnostic names `stands_for`
+ * in its place.
+ */
+void
+relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
+    relic_pred_id_t stands_for)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, id);
+	if (pred == NULL)
+		return;
+
+	pred->head_named = true;
+	pred->stands_for = stands_for;
+}
+
+/*
  * Record that a rule with this predicate as its head has been appended to a
  * rule table.  Only relic_ruletab_place() calls this, and a query's
  * compilation when it publishes the group rules the query holds.
@@ -369,9 +389,32 @@ relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id)
  * long and a message names one thing.  An identifier the context never
  * assigned cannot arise from a compiled program, but the accessor is total
  * so that a message can never be the thing that faults.
+ *
+ * A predicate the Magic rewrite generated is described as the program's
+ * predicate it stands for, which is what a reader of the message wrote and
+ * can change; the explanation of a plan names generated predicates by
+ * their own names, through relic_relation_name().
  */
 const char *
 relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
+    size_t size)
+{
+	const relic_pred_t *pred;
+
+	pred = relic_pred_of(ctx, id);
+	if (pred != NULL && pred->stands_for != RELIC_ID_NONE)
+		id = pred->stands_for;
+
+	return (relic_pred_identify(ctx, id, buffer, size));
+}
+
+/*
+ * Write "name/arity" of the predicate itself into `buffer` and return it, a
+ * generated predicate by its own name, for an internal error, where what a
+ * maintainer needs is the predicate the code reached.
+ */
+const char *
+relic_pred_identify(const relic_t *ctx, relic_pred_id_t id, char *buffer,
     size_t size)
 {
 	const relic_pred_t *pred;

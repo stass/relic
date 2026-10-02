@@ -190,18 +190,16 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**A limit refusal can name a generated predicate.** [Low, component:
-`lib/magic.c`, `lib/relation.c`, `lib/eval.c`] `relic -l tuples=10 -q
-'path(a, X)?'` reports `limit exceeded: tuples=10 while deriving path$bf/2`,
-where `-X no-magic` says `path/2`, and a memory limit refusing the plans of
-a rewritten program reads `while planning magic$p$b/1`, since a component
-is named by its first member. The names are unambiguous -- `$` cannot
-occur in a name a program writes -- and `-e` shows what they mean, but
-`specs/design-magic.md` section 8 asks a diagnostic to name what the reader
-has to change. Recording the source predicate on a generated predicate's
-entry and describing it from that would say `path/2`; a component of a
-rewritten program could name the query instead, which needs the evaluation
-of a schedule to be told whose it is.
+**A limit refusal in a query's own relations names them, not the query.**
+[Low, component: `lib/magic.c`, `lib/eval.c`] A relation the Magic rewrite
+generates for the query rather than for a predicate of the program -- a
+supplementary predicate cutting the query's body, `sup$$q0$...` -- has no
+source predicate to be named by, and a limit refusing it names it. The
+names are unambiguous, since `$` cannot occur in a name a program writes,
+and `-e` shows what they mean, but `specs/design-magic.md` section 8 asks a
+diagnostic to name what the reader has to change, which here is the query.
+Naming it needs the evaluation of a schedule to be told which query it
+evaluates for.
 
 **Coverage gaps.** [Low, component: `tests/`] `make coverage` reaches 96
 percent of the library's and the tool's lines. What it does not reach is
