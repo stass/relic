@@ -93,6 +93,14 @@ listed="$listed|pthread_join|pthread_mutex_destroy|pthread_mutex_init"
 listed="$listed|pthread_mutex_lock|pthread_mutex_unlock"
 listed="$listed|pthread_setcancelstate|pthread_sigmask|sigdelset|sigfillset"
 
+# The runtime clang's --coverage instrumentation calls to register each
+# object and write its counters to a .gcda file at exit.  It works for its
+# own use and hands no memory to the library.  GCC's runtime spells its
+# names __gcov_*, which are reserved and pass as such.
+listed="$listed|llvm_gcda_emit_arcs|llvm_gcda_emit_function"
+listed="$listed|llvm_gcda_end_file|llvm_gcda_start_file"
+listed="$listed|llvm_gcda_summary_info|llvm_gcov_init"
+
 for object in $objects; do
 	if ! nm -u "$object" > "$listing" 2>/dev/null; then
 		echo "$object: nm cannot read it"

@@ -220,8 +220,9 @@ a_zero_byte_request_returns_a_distinct_pointer(void)
 }
 
 /*
- * A size that cannot be rounded up without overflowing a size_t is refused.
- * No allocator could satisfy it, so this exercises the failure path without
+ * A size that cannot be rounded up without overflowing a size_t is refused,
+ * and so is an array whose count and element size multiply past one.  No
+ * allocator could satisfy either, so this exercises the failure path without
  * depending on how much memory the machine running the test has.
  *
  * The flag is what the test is really about.  After a refusal the arena
@@ -250,6 +251,13 @@ an_impossible_request_fails_and_stays_failed(void)
 	relic_arena_reset(&arena);
 	check(!relic_arena_failed(&arena), SCENARIO_FAILURE,
 	    "a reset should clear the failure");
+
+	refused = relic_arena_allocarray(&arena, SIZE_MAX / 2 + 1, 2);
+	check(refused == NULL && relic_arena_failed(&arena), SCENARIO_FAILURE,
+	    "an array whose bytes a size_t cannot hold should fail the "
+	    "arena");
+
+	relic_arena_reset(&arena);
 }
 
 /*
@@ -452,7 +460,8 @@ the_limit_refuses_a_chunk_before_it_is_obtained(void)
  * projected before they are made: each window of WINDOW allocations as a
  * whole, and each allocation alone.  Every projection gives the total the
  * arena holds once the allocations are made, on an arena of either
- * alignment.
+ * alignment.  A size no chunk could be counted for leaves the projection at
+ * SIZE_MAX, where every allocation after it leaves it.
  */
 static void
 a_projection_gives_what_the_allocations_take(void)
@@ -511,6 +520,13 @@ a_projection_gives_what_the_allocations_take(void)
 			    window.total_bytes,
 			    relic_arena_total_bytes(&arena));
 		}
+
+		relic_arena_project(&arena, &window);
+		relic_arena_project_alloc(&window, SIZE_MAX);
+		relic_arena_project_alloc(&window, 1);
+		checkf(window.total_bytes == SIZE_MAX, SCENARIO_PROJECTED,
+		    "at alignment %zu, a projection past SIZE_MAX should stay "
+		    "at SIZE_MAX, not %zu", alignments[a], window.total_bytes);
 		relic_arena_reset(&arena);
 	}
 }

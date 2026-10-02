@@ -2679,7 +2679,6 @@ run what it is for fails rather than skips: `RELIC_STRICT_CHECK=yes` turns every
 | Linux clang, ASan + UBSan | `make check-asan`, `make check-ubsan` |
 | Linux clang, MSan | uninitialized reads ASan cannot see |
 | Linux clang, TSan | `make check-tsan`, the pool's threads under ThreadSanitizer |
-| Linux gcc, valgrind | a third opinion on memory |
 | Linux gcc, no threads | `--disable-threads`: the pool is the calling thread alone |
 | Linux gcc `-m32` | catches `size_t` and pointer-width assumptions |
 | Alpine, musl | exercises the `compat/` paths |

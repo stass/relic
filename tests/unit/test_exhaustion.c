@@ -77,6 +77,7 @@
 #define	SCENARIO_INTEGER	"interning an integer survives a failed allocation"
 #define	SCENARIO_INTERFACE	"an added fact or collected answer reports once"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
+#define	SCENARIO_LOADED		"a loaded query out of memory reports once"
 #define	SCENARIO_LOOKAHEAD	"a refusal in the lookahead reports once"
 #define	SCENARIO_MATERIALIZE	"a materialization out of memory reports once"
 #define	SCENARIO_SHIM		"the test allocator is the one being used"
@@ -122,9 +123,11 @@
  * place and the cursor would never be asked to resume anywhere else.  A
  * chain of a couple of hundred rules doubles each of those arrays several
  * times and needs fresh arena chunks, so the refusals are spread across the
- * whole program.
+ * whole program.  Its queries outnumber the first capacity of the table the
+ * check publishes them into, so that table grows during the check too.
  */
 #define	CHECK_RULES	200
+#define	CHECK_QUERIES	12
 #define	CHECK_SWEEP	60
 
 /*
@@ -307,6 +310,18 @@ struct eval_sweep {
 #define	THREADS_AVAILABLE	false
 #endif
 
+/*
+ * A program the load sweep loads, named for the path through the parser
+ * it takes, and what a load of it that succeeds adds: its statements, which
+ * a fact is not, and its facts.
+ */
+typedef struct load_case {
+	const char	*what;
+	const char	*program;
+	size_t		 statements;
+	size_t		 facts;
+} load_case_t;
+
 static relic_atomic_size_t allocations_remaining = SERVE_EVERY;
 static relic_atomic_size_t allocations_seen;
 static relic_atomic_size_t worker_refusals;
@@ -357,7 +372,7 @@ static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 interning_an_integer_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
-static void	 sweep_load(bool from_stream);
+static void	 sweep_load(const load_case_t *load, bool from_stream);
 static int	 load_sweep_program(relic_t *ctx, const char *program,
 		    bool from_stream);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
@@ -386,12 +401,14 @@ static void	 sweep_query_retry(const eval_sweep_t *sweep,
 static void	 a_materialization_out_of_memory_reports_once(void);
 static void	 an_abandoned_rewrite_out_of_memory_reports_once(void);
 static void	 an_added_fact_or_collected_answer_reports_once(void);
+static void	 sweep_interface(bool integer);
+static void	 a_loaded_query_out_of_memory_reports_once(void);
 static void	 an_aggregate_out_of_memory_can_be_retried(void);
 static void	 sweep_aggregate_check(void);
 static void	 sweep_aggregate_query(unsigned int flags, size_t threads,
 		    const char *strategy);
 static bool	 rules_are_whole_statements(relic_t *ctx);
-static int	 add_and_collect(relic_t *ctx, size_t *rowsp);
+static int	 add_and_collect(relic_t *ctx, bool integer, size_t *rowsp);
 static char	*wide_sweep_program(void);
 static int	 count_answer(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
@@ -863,27 +880,55 @@ interning_an_integer_survives_a_failed_allocation(void)
  *
  * The sweep runs once over text in memory and once over a stream, whose
  * load also grows the buffer the stream is read into and releases the text
- * between the parse and the commit.
+ * between the parse and the commit.  Each program takes a path where a
+ * scratch buffer grows: the first holds every kind of statement, the
+ * second decodes an escape as the first byte of the load's first string,
+ * and the third's body outgrows the body array's first capacity.
  */
 static void
 a_load_that_ran_out_of_memory_adds_nothing(void)
 {
-	sweep_load(false);
-	sweep_load(true);
+	static const load_case_t loads[] = {
+		{
+			"every kind of statement",
+			"edge(a, 2).\n"
+			"path(X, Y) :- edge(X, Y), not blocked(X), "
+			"Y != \"stop\".\n"
+			"path(a, Z)?\n",
+			2, 1,
+		},
+		{
+			"a first string that begins with an escape",
+			"name(\"\\tx\").\n"
+			"named(X) :- name(X).\n",
+			1, 1,
+		},
+		{
+			"a body of thirty literals",
+			"p(X) :- q(X, 1), q(X, 2), q(X, 3), q(X, 4), q(X, 5), "
+			"q(X, 6), q(X, 7), q(X, 8), q(X, 9), q(X, 10), "
+			"q(X, 11), q(X, 12), q(X, 13), q(X, 14), q(X, 15), "
+			"q(X, 16), q(X, 17), q(X, 18), q(X, 19), q(X, 20), "
+			"q(X, 21), q(X, 22), q(X, 23), q(X, 24), q(X, 25), "
+			"q(X, 26), q(X, 27), q(X, 28), q(X, 29), q(X, 30).\n",
+			1, 0,
+		},
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(loads) / sizeof(loads[0]); i++) {
+		sweep_load(&loads[i], false);
+		sweep_load(&loads[i], true);
+	}
 }
 
 /*
- * Load the sweep's program with the nth allocation refused, for every n
- * across the load, from a string or from a stream holding the same text.
+ * Load `load`'s program with the nth allocation refused, for every n across
+ * the load, from a string or from a stream holding the same text.
  */
 static void
-sweep_load(bool from_stream)
+sweep_load(const load_case_t *load, bool from_stream)
 {
-	static const char program[] =
-	    "edge(a, 2).\n"
-	    "path(X, Y) :- edge(X, Y), not blocked(X), Y != \"stop\".\n"
-	    "path(a, Z)?\n";
-
 	size_t refused;
 	size_t completed;
 	long budget;
@@ -906,7 +951,7 @@ sweep_load(bool from_stream)
 		errors_reported = 0;
 
 		refuse_allocations_after(budget);
-		status = load_sweep_program(ctx, program, from_stream);
+		status = load_sweep_program(ctx, load->program, from_stream);
 		serve_every_allocation();
 
 		/*
@@ -919,8 +964,8 @@ sweep_load(bool from_stream)
 		 */
 		checkf(errors_reported == (status != 0 ? 1u : 0u),
 		    SCENARIO_LOAD,
-		    "a load that %s should report %d message(s), not %zu, "
-		    "with allocation %ld refused",
+		    "a load of %s that %s should report %d message(s), not "
+		    "%zu, with allocation %ld refused", load->what,
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
 
@@ -928,24 +973,26 @@ sweep_load(bool from_stream)
 			refused++;
 			checkf(ctx->ast.count == 0 &&
 			    relic_base_total(ctx) == 0, SCENARIO_LOAD,
-			    "a failed load should add no statements and no "
-			    "facts, not %zu and %zu, with allocation %ld "
-			    "refused", ctx->ast.count,
+			    "a failed load of %s should add no statements and "
+			    "no facts, not %zu and %zu, with allocation %ld "
+			    "refused", load->what, ctx->ast.count,
 			    relic_base_total(ctx), budget);
 		} else {
 			completed++;
-			checkf(ctx->ast.count == 2 &&
-			    relic_base_total(ctx) == 1, SCENARIO_LOAD,
-			    "a load that reported success should have added "
-			    "two statements and one fact, not %zu and %zu, "
-			    "with allocation %ld refused", ctx->ast.count,
+			checkf(ctx->ast.count == load->statements &&
+			    relic_base_total(ctx) == load->facts,
+			    SCENARIO_LOAD,
+			    "a load of %s that reported success should have "
+			    "added %zu statements and %zu facts, not %zu and "
+			    "%zu, with allocation %ld refused", load->what,
+			    load->statements, load->facts, ctx->ast.count,
 			    relic_base_total(ctx), budget);
 		}
 
-		checkf(load_sweep_program(ctx, program, from_stream) == 0,
-		    SCENARIO_LOAD,
-		    "loading should succeed once the allocator recovers, with "
-		    "allocation %ld refused", budget);
+		checkf(load_sweep_program(ctx, load->program,
+		    from_stream) == 0, SCENARIO_LOAD,
+		    "loading %s should succeed once the allocator recovers, "
+		    "with allocation %ld refused", load->what, budget);
 
 		relic_destroy(ctx);
 	}
@@ -958,11 +1005,11 @@ sweep_load(bool from_stream)
 	 * reported here rather than left to be noticed.
 	 */
 	checkf(refused > 0, SCENARIO_LOAD,
-	    "the sweep should reach a load that runs out of memory, in %d "
-	    "attempts", LOAD_SWEEP);
+	    "the sweep should reach a load of %s that runs out of memory, in "
+	    "%d attempts", load->what, LOAD_SWEEP);
 	checkf(completed > 0, SCENARIO_LOAD,
-	    "the sweep should reach a load that completes, in %d attempts",
-	    LOAD_SWEEP);
+	    "the sweep should reach a load of %s that completes, in %d "
+	    "attempts", load->what, LOAD_SWEEP);
 }
 
 /*
@@ -1304,8 +1351,10 @@ sweep_lookahead(const char *program, bool well_formed)
 }
 
 /*
- * Build the check sweep's program: a chain of rules long enough that
- * compiling it allocates many times over.
+ * Build the check sweep's program: a fact, CHECK_QUERIES queries, and a
+ * chain of rules long enough that compiling it allocates many times over.
+ * The queries come before the rules, so a check refused once every rule is
+ * compiled was refused in the dependency analysis.
  *
  * `excluded/1` is referenced by the first rule and defined nowhere, so it
  * sits in the predicate table long before the last statement is compiled.
@@ -1324,13 +1373,18 @@ check_sweep_program(void)
 	size_t size;
 	unsigned int i;
 
-	size = (CHECK_RULES + 2) * 48;
+	size = (CHECK_RULES + CHECK_QUERIES + 2) * 48;
 	text = malloc(size);
 	if (text == NULL)
 		return (NULL);
 
-	used = (size_t)snprintf(text, size,
-	    "edge(a, b).\n"
+	used = (size_t)snprintf(text, size, "edge(a, b).\n");
+
+	for (i = 0; i < CHECK_QUERIES; i++)
+		used += (size_t)snprintf(text + used, size - used,
+		    "p%u(a, X)?\n", i);
+
+	used += (size_t)snprintf(text + used, size - used,
 	    "p0(X, Y) :- edge(X, Y), not excluded(Y).\n");
 
 	for (i = 1; i < CHECK_RULES; i++) {
@@ -1484,6 +1538,10 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 		    "every statement should end up compiled exactly once, "
 		    "not %zu of %d, with allocation %ld refused",
 		    ctx->program.rules.count, CHECK_RULES, budget);
+		checkf(relic_query_count(ctx) == CHECK_QUERIES, SCENARIO_CHECK,
+		    "every query should end up published exactly once, not "
+		    "%zu of %d, with allocation %ld refused",
+		    relic_query_count(ctx), CHECK_QUERIES, budget);
 
 		relic_destroy(ctx);
 	}
@@ -2361,7 +2419,10 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
  * free reads it completely instead of rewriting, into the path relation.
  * And a query that calls sink bound before calling it free finds its
  * adornments in a second search, which reads sink through sink$f whatever
- * the call binds.
+ * the call binds.  Three queries read a predicate nothing states or
+ * derives, so that its empty relation is first made while the query is
+ * planned: positively, where ordering the body reads it first, negated, and
+ * positively in body order, where placing the literal reads it first.
  *
  * Two strategies run again with every round deferred, on the calling
  * thread and then on four.  A refusal can then land in a round's buffers,
@@ -2387,6 +2448,14 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 		    EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 - EVAL_CHAIN },
 		{ "through a second search", "path(n0, X), sink(X), sink(Y)?",
 		    "path$bf", "sink$f", 0, 0, 1 },
+		{ "naming a predicate nothing states", "path(n0, X), ghost(X)?",
+		    "path", "sink", RELIC_F_NO_MAGIC, 0, 0 },
+		{ "negating a predicate nothing states",
+		    "path(n0, X), not ghost(X)?", "path", "sink",
+		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN },
+		{ "naming a predicate nothing states, in body order",
+		    "path(n0, X), ghost(X)?", "path", "sink",
+		    RELIC_F_NO_MAGIC | RELIC_F_NO_REORDER, 0, 0 },
 		{ "from the whole fixed point, deferred", "path(n0, X)?",
 		    "path", "sink", RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS,
 		    0, EVAL_CHAIN },
@@ -3088,18 +3157,21 @@ a_materialization_out_of_memory_reports_once(void)
 }
 
 /*
- * Build the value `alpha`, add f(alpha) and collect f(X)? into a result,
- * storing its row count in *rowsp.  Returns 0, or -1 at the first call that
- * failed.
+ * Build the value `alpha`, or the integer 7, add it as the fact of f/1 and
+ * collect f(X)? into a result, storing its row count in *rowsp.  Returns 0,
+ * or -1 at the first call that failed.
  */
 static int
-add_and_collect(relic_t *ctx, size_t *rowsp)
+add_and_collect(relic_t *ctx, bool integer, size_t *rowsp)
 {
 	relic_value_t value;
 	relic_query_t *query;
 	relic_result_t *result;
 
-	if (relic_value_symbol(ctx, "alpha", 5, &value) != 0)
+	if (integer) {
+		value.type = RELIC_INTEGER;
+		value.v.integer = 7;
+	} else if (relic_value_symbol(ctx, "alpha", 5, &value) != 0)
 		return (-1);
 	if (relic_fact_add(ctx, "f", 1, &value) != 0)
 		return (-1);
@@ -3130,16 +3202,32 @@ add_and_collect(relic_t *ctx, size_t *rowsp)
  * Wherever it lands, the call it lands in fails with exactly one error, and
  * the retry answers the one row an undisturbed run does: the fact added
  * twice is one tuple, and nothing half-added is left behind.
+ *
+ * The sweep runs once with a symbol and once with an integer.  An integer
+ * interns nothing in the symbol table, so with it the fact's predicate is
+ * the first name the context interns, and a refusal can land there.
  */
 static void
 an_added_fact_or_collected_answer_reports_once(void)
 {
+	sweep_interface(false);
+	sweep_interface(true);
+}
+
+/*
+ * One value's sweep of an_added_fact_or_collected_answer_reports_once().
+ */
+static void
+sweep_interface(bool integer)
+{
+	const char *kind;
 	size_t undisturbed;
 	size_t refused;
 	size_t completed;
 	size_t rows;
 	long budget;
 
+	kind = integer ? "an integer" : "a symbol";
 	undisturbed = 0;
 	refused = 0;
 	completed = 0;
@@ -3163,7 +3251,7 @@ an_added_fact_or_collected_answer_reports_once(void)
 
 		before = allocations_made();
 		refuse_allocations_after(budget);
-		status = add_and_collect(ctx, &rows);
+		status = add_and_collect(ctx, integer, &rows);
 		serve_every_allocation();
 
 		if (status == 0) {
@@ -3175,21 +3263,116 @@ an_added_fact_or_collected_answer_reports_once(void)
 
 		checkf(errors_reported == (status != 0 ? 1u : 0u),
 		    SCENARIO_INTERFACE,
-		    "a run that %s should report %d error(s), not %zu, with "
-		    "allocation %ld refused", status != 0 ? "failed" :
-		    "succeeded", status != 0 ? 1 : 0, errors_reported, budget);
+		    "a run adding %s that %s should report %d error(s), not "
+		    "%zu, with allocation %ld refused", kind,
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
 
 		rows = 0;
-		checkf(add_and_collect(ctx, &rows) == 0 && rows == 1,
+		checkf(add_and_collect(ctx, integer, &rows) == 0 && rows == 1,
 		    SCENARIO_INTERFACE,
-		    "the retry should collect 1 row, not %zu, with allocation "
-		    "%ld refused", rows, budget);
+		    "the retry adding %s should collect 1 row, not %zu, with "
+		    "allocation %ld refused", kind, rows, budget);
 
 		relic_destroy(ctx);
 	}
 
 	checkf(refused > 0 && completed > 0, SCENARIO_INTERFACE,
-	    "the sweep should reach both a refused run and a completed one, "
+	    "the sweep adding %s should reach both a refused run and a "
+	    "completed one, not %zu and %zu", kind, refused, completed);
+}
+
+/*
+ * Take the query a checked program holds with the nth allocation refused,
+ * for every allocation an undisturbed call makes, then take it again with
+ * the allocator restored.
+ *
+ * relic_query_loaded() makes the caller's copy of the query and its answer
+ * relation.  A copy refused part way is released and reported once, and
+ * leaves the program's own queries as they were, so the retry's copy
+ * answers the one row the program's query does.
+ */
+static void
+a_loaded_query_out_of_memory_reports_once(void)
+{
+	static const char program[] =
+	    "edge(a, b).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(a, X)?\n";
+
+	size_t undisturbed;
+	size_t refused;
+	size_t completed;
+	long budget;
+
+	undisturbed = 0;
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < INTERFACE_SWEEP &&
+	    (undisturbed == 0 || budget <= (long)undisturbed); budget++) {
+		relic_query_t *query;
+		relic_t *ctx;
+		size_t before;
+		size_t rows;
+
+		ctx = relic_create();
+		if (ctx == NULL) {
+			check(false, SCENARIO_LOADED,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "sweep.dl", program) != 0 ||
+		    relic_check(ctx) != 0) {
+			check(false, SCENARIO_LOADED,
+			    "the program should load and check before the "
+			    "sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+
+		before = allocations_made();
+		refuse_allocations_after(budget);
+		query = relic_query_loaded(ctx, 0);
+		serve_every_allocation();
+
+		if (query != NULL) {
+			completed++;
+			if (undisturbed == 0)
+				undisturbed = allocations_made() - before;
+		} else
+			refused++;
+
+		checkf(errors_reported == (query == NULL ? 1u : 0u),
+		    SCENARIO_LOADED,
+		    "a copy that %s should report %d error(s), not %zu, with "
+		    "allocation %ld refused", query == NULL ? "failed" :
+		    "succeeded", query == NULL ? 1 : 0, errors_reported,
+		    budget);
+		checkf(relic_query_count(ctx) == 1, SCENARIO_LOADED,
+		    "the program should still hold 1 query, not %zu, with "
+		    "allocation %ld refused", relic_query_count(ctx), budget);
+
+		if (query == NULL)
+			query = relic_query_loaded(ctx, 0);
+
+		rows = 0;
+		checkf(query != NULL &&
+		    relic_query_run(ctx, query, count_answer, &rows) == 0 &&
+		    rows == 1, SCENARIO_LOADED,
+		    "the copy should answer 1 row, not %zu, with allocation "
+		    "%ld refused", rows, budget);
+
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0, SCENARIO_LOADED,
+	    "the sweep should reach both a refused copy and a completed one, "
 	    "not %zu and %zu", refused, completed);
 }
 
@@ -3467,6 +3650,7 @@ main(void)
 	a_materialization_out_of_memory_reports_once();
 	an_abandoned_rewrite_out_of_memory_reports_once();
 	an_added_fact_or_collected_answer_reports_once();
+	a_loaded_query_out_of_memory_reports_once();
 	an_aggregate_out_of_memory_can_be_retried();
 
 	/*

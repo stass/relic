@@ -42,7 +42,7 @@ arena would make the convention unnecessary.
 ## Build and packaging
 
 **Continuous integration is incomplete.** [High, component:
-`.github/workflows/`] `specs/architecture.md` section 68 specifies fifteen
+`.github/workflows/`] `specs/architecture.md` section 68 specifies fourteen
 jobs.
 `ci.yml` has the Linux compilers, AddressSanitizer with leak detection and
 UndefinedBehaviorSanitizer, distcheck, and the tarball built on glibc and
@@ -61,10 +61,14 @@ green run before they can be trusted. Missing:
   system's official image, verified against the checksum the project
   publishes, under QEMU on a Linux runner, or a hosted service with native BSD
   machines, would close it.
-* valgrind. There is no `make check-valgrind` to call; a target that runs
-  each test under valgrind through the runner `tests/strict.sh` already puts
-  in front of every test would be the natural place.
 * macOS on every push, once minutes on it are free.
+
+**`tests/perf.sh` can miss its clock under `make coverage`.** [Low,
+component: `tests/perf.sh`] The session of 100 000 queries takes 45 s of its
+60 s budget in a coverage build with nothing else running, and ran past it
+with the rest of the suite running beside it under `make -j8`. A budget
+scaled for an instrumented build, or the workload skipped there, would keep
+the coverage target from failing on load.
 
 **`contrib/` has no BSD port skeletons.** [Low, component: `contrib/`,
 `specs/design-release.md` section 4] Only the Homebrew formula exists. The
@@ -78,20 +82,6 @@ component: `lib/parse.c` `relic_open_input`] Such a file is opened with
 `O_LARGEFILE` and read through stdio, which glibc and musl track with 64-bit
 offsets internally; nothing has run it. A 32-bit build loading a sparse file
 of facts past 2 GiB would confirm it.
-
-**An older macOS deployment target may weakly link `reallocarray`.**
-[Medium, component: `configure.ac`, `compat/compat.h`] Neither
-`AC_REPLACE_FUNCS` nor `AC_CHECK_DECLS` reads availability, so a macOS build
-whose `MACOSX_DEPLOYMENT_TARGET` is older than the SDK's `reallocarray`
-finds it linkable and declared, compiles no replacement, and weakly links a
-function that is absent on the older system: the call reaches a null
-address there, or `-Wunguarded-availability-new` fails an `--enable-werror`
-build. Unverified. A link probe built with
-`-Werror=unguarded-availability-new`, or the replacement chosen whenever
-the deployment target predates the SDK, would settle it. The declarations
-`compat.h` makes are otherwise built with `--enable-werror` on glibc, musl
-and macOS by continuous integration, and on FreeBSD and OpenBSD once their
-jobs exist.
 
 ## Engine
 
@@ -243,21 +233,6 @@ prompt, the end of input and the refusals at a terminal, but no test presses
 an editing key or recalls a line from the history. The driver types bytes,
 so a test of them is a matter of typing the keys' sequences and checking
 the line the session answers.
-
-**A query's width is known only once it is collected.** [Low, component:
-`include/relic.h`, `lib/rule.c`] `relic_result_columns()` gives a query's
-number of output columns, but only after collecting it; a caller streaming
-rows who wants to write a header first has neither the width nor the
-variable names the columns stand for. `relic_query_columns()` and
-`relic_query_column_name()` would supply both. Adding functions is a
-compatible change, so this can wait for a caller that needs it.
-
-**The manual's prototypes are not checked against the header.** [Low,
-component: `tests/man.sh`] The test holds the `NAME` list of `man/relic.3` to
-the header's exported functions, but not the `SYNOPSIS` prototypes or the
-structures the page reproduces, so a changed parameter would leave the page
-wrong without failing anything. Comparing each `.Fn`/`.Fo` block's types
-with the header's declaration would close it.
 
 **A caller tells a limit's refusal from another failure only by its
 text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is

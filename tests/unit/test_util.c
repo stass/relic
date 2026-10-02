@@ -430,23 +430,51 @@ an_array_grows_without_losing_its_contents(void)
 /*
  * A count that cannot be allocated leaves the caller's array and capacity
  * exactly as they were, so a failed growth loses nothing already stored.
+ *
+ * Each refusal is a different guard: items whose bytes a size_t cannot
+ * hold, a capacity past half of SIZE_MAX that cannot double, bytes a
+ * mapping's header and page rounding would carry past SIZE_MAX, and
+ * stepwise requests whose total a size_t cannot hold.  None of the arrays
+ * exists, so the capacities are given without one; a growth refused before
+ * it allocates never reads the items.
  */
 static void
 an_array_refuses_an_impossible_size(void)
 {
-	uint32_t *items;
 	uint32_t *grown;
 	size_t capacity;
 
-	items = NULL;
 	capacity = 0;
+	grown = relic_grow_array(NULL, &capacity, SIZE_MAX, sizeof(*grown));
+	check(grown == NULL && capacity == 0, SCENARIO_OVERFLOW,
+	    "an array of more bytes than a size_t holds should be refused, "
+	    "leaving the capacity unchanged");
 
-	grown = relic_grow_array(items, &capacity, SIZE_MAX, sizeof(*items));
+	capacity = SIZE_MAX / 2 + 1;
+	grown = relic_grow_array(NULL, &capacity, SIZE_MAX, 1);
+	check(grown == NULL && capacity == SIZE_MAX / 2 + 1, SCENARIO_OVERFLOW,
+	    "a capacity that cannot double should be refused, leaving the "
+	    "capacity unchanged");
 
-	check(grown == NULL, SCENARIO_OVERFLOW,
-	    "an unrepresentable array should not be allocated");
-	check(capacity == 0, SCENARIO_OVERFLOW,
-	    "a refused growth should leave the capacity unchanged");
+	capacity = 0;
+	grown = relic_grow_array(NULL, &capacity, 1, SIZE_MAX / 8);
+	check(grown == NULL && capacity == 0, SCENARIO_OVERFLOW,
+	    "an array too large for a mapping's header should be refused, "
+	    "leaving the capacity unchanged");
+
+	capacity = 0;
+	grown = relic_grow_array_stepwise(NULL, &capacity, 0, SIZE_MAX, 2,
+	    sizeof(*grown));
+	check(grown == NULL && capacity == 0, SCENARIO_OVERFLOW,
+	    "stepwise requests of more items than a size_t holds should be "
+	    "refused, leaving the capacity unchanged");
+
+	check(relic_grow_capacity_doubling(16, 4) == 16, SCENARIO_OVERFLOW,
+	    "a doubling growth should keep a capacity that already holds "
+	    "the count");
+	check(relic_grow_capacity_doubling(16, SIZE_MAX) == 0,
+	    SCENARIO_OVERFLOW,
+	    "a doubling growth past SIZE_MAX should give zero");
 }
 
 /*

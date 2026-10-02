@@ -63,14 +63,6 @@ have statistics per predicate. relic's `-X stats` counts the run as a
 whole. The counters exist per plan run already, so a per-rule report is
 mostly output, and it is what a user reads before rewriting a slow rule.
 
-**The README does not say why a program cannot name its data files.**
-[Low, component: `README.md`] Souffle's `.input` and `.output` directives
-name files in the program text; relic declines them
-(`specs/design-import.md` section 3.3) so that a program cannot read a file
-its runner did not name, and imports tables with `-I` instead. A Souffle
-user will look for the directives, and the README should say where they
-went.
-
 ## Worth measuring before deciding
 
 **Equivalence relations.** [Low, component: `lib/relation.c`] Souffle's

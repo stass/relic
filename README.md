@@ -112,6 +112,25 @@ and `relic -i graph.dl` answers queries typed one per line. `relic(1)`
 describes the language, the options, and the import of facts from CSV and
 TSV tables.
 
+## Data files
+
+A program cannot name a file: relic has no counterpart of Souffle's `.input`
+and `.output` directives or Nemo's `@import`. A program may come from someone
+else, and loading one gives it no capability but computation, so it cannot
+read a file its runner did not name, and it means the same thing on every
+machine it is loaded on. Whoever runs the tool names the data instead. `-I`
+imports a CSV or TSV table as the facts of a predicate; here `edge.tsv`
+holds the two edges of `graph.dl` and `reach.dl` its rules and query:
+
+```sh
+$ relic -I tsv:edge:symbol,symbol=edge.tsv reach.dl
+b
+c
+```
+
+`-F` and `-o` choose the format of a query's answer and the file it is
+written to.
+
 ## Embedding
 
 `librelic` installs a single public header, `<relic.h>`, and a pkg-config
