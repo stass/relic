@@ -12,7 +12,10 @@
 # BENCH_SCALE, 1 by default, grows every workload: it multiplies the
 # chain's length, the graph's nodes and edges, the tasks, the facts, the
 # files and the grid's side, and deepens the trees by one level per step,
-# which doubles them.
+# which doubles them.  BENCH_THREADS, `1` by default, lists the thread
+# counts to run each workload at, each with -j, in a row of its own: with
+# "1 16", the rows of a workload show what sixteen threads gain it.  The
+# counters are the same at every count.
 #
 # Nothing fails on a time.  Timing depends on the machine and is noisy;
 # tests/perf.sh is the test that bounds performance, on counters where it
@@ -24,6 +27,7 @@ set -eu
 
 relic=${1:-${RELIC:-relic}}
 scale=${BENCH_SCALE:-1}
+threads=${BENCH_THREADS:-1}
 
 if [ ! -x /usr/bin/time ]; then
 	echo "bench: /usr/bin/time is needed to time the workloads" >&2
@@ -47,6 +51,39 @@ case $scale in
 	exit 2
 	;;
 esac
+
+# Whether BENCH_THREADS lists at least one thread count and nothing but
+# counts -j accepts, from 1 to 256, written without leading zeros.  The
+# list is split into words where it is expanded unquoted, so it is first
+# held to digits, spaces and tabs: a pattern character in it would be
+# expanded to file names.  A count of more than three digits is refused
+# before it is compared, so that the comparison cannot overflow.
+lists_thread_counts() {
+	case $threads in
+	*[![:digit:][:blank:]]*)
+		return 1
+		;;
+	esac
+
+	listed=false
+	for count in $threads; do
+		case $count in
+		0* | ????*)
+			return 1
+			;;
+		esac
+		if [ "$count" -gt 256 ]; then
+			return 1
+		fi
+		listed=true
+	done
+	$listed
+}
+
+if ! lists_thread_counts; then
+	echo "bench: BENCH_THREADS must list thread counts from 1 to 256" >&2
+	exit 2
+fi
 
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT
@@ -131,31 +168,35 @@ write_program() {
 	} > "$work/$1.dl"
 }
 
-# Run one workload: its name, the program's file, and relic's options.  The
-# run's standard error holds both the counters and time(1)'s report, and is
-# shown whole if the run fails.
+# Run one workload at each thread count: its name, the program's file, and
+# relic's options.  A run's standard error holds both the counters and
+# time(1)'s report, and is shown whole if the run fails.
 run() {
 	name=$1
 	program=$2
 	shift 2
 
-	if ! /usr/bin/time -p "$relic" -X stats "$@" "$program" > /dev/null \
-	    2> "$work/stats"; then
-		echo "bench: the $name workload failed:" >&2
-		cat "$work/stats" >&2
-		exit 1
-	fi
+	for count in $threads; do
+		if ! /usr/bin/time -p "$relic" -j "$count" -X stats "$@" \
+		    "$program" > /dev/null 2> "$work/stats"; then
+			echo "bench: the $name workload failed on $count" \
+			    "threads:" >&2
+			cat "$work/stats" >&2
+			exit 1
+		fi
 
-	awk -v name="$name" '
-		/^real / { seconds = $2 }
-		/^stats: derivations / { derived = $3 }
-		/^stats: tuples held / { held = $4 }
-		/^stats: tuples scanned / { scanned = $4 }
-		/^stats: tuples looked up / { looked = $5 }
-		END {
-			printf "%-28s %8.2f %11d %10d %11d %11d\n", name, \
-			    seconds, derived, held, scanned, looked
-		}' "$work/stats"
+		awk -v name="$name" -v threads="$count" '
+			/^real / { seconds = $2 }
+			/^stats: derivations / { derived = $3 }
+			/^stats: tuples held / { held = $4 }
+			/^stats: tuples scanned / { scanned = $4 }
+			/^stats: tuples looked up / { looked = $5 }
+			END {
+				printf "%-28s %7d %8.2f %11d %10d %11d %11d\n", \
+				    name, threads, seconds, derived, held, \
+				    scanned, looked
+			}' "$work/stats"
+	done
 }
 
 make_program chain "$chain_rules"
@@ -169,8 +210,8 @@ make_program tasks "$tasks_rules"
 make_program facts "$facts_rules"
 make_program files "$files_rules"
 
-printf '%-28s %8s %11s %10s %11s %11s\n' workload seconds derived held \
-    scanned "looked up"
+printf '%-28s %7s %8s %11s %10s %11s %11s\n' workload threads seconds \
+    derived held scanned "looked up"
 run "chain, right-recursive" "$work/chain.dl" -q 'path(n0, X)?'
 run "chain, left-recursive" "$work/chain.dl" -q 'from(n0, X)?'
 run "chain, whole closure" "$work/chain.dl" -X no-magic -q 'path(n0, X)?'

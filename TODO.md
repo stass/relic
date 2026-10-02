@@ -248,11 +248,6 @@ slows the other: on a KVM guest of one core and two threads, `-X parallel
 
 ## Benchmarks
 
-**`bench/run.sh` has no thread count.** [Low, component: `bench/`]
-`specs/design-parallel.md` section 16 asks for a column giving the thread
-count and a run at sixteen in `bench/baseline.txt`, so that a regression
-in the speed-up is visible where every other performance regression is.
-
 **`bench/compare/run.sh` compares on one thread only.** [Low, component:
 `bench/compare/run.sh`] The harness runs every engine on one thread, Souffle
 with `-j1` and DuckDB with `threads = 1`, so nothing records how relic's
