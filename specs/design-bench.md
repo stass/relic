@@ -159,7 +159,7 @@ The data sets of `bench/run.sh`, queried as a user would query them:
 | `grid-reach` | a 150 by 150 grid | reachability from a corner |
 | `tree-sg-bound` | a complete binary tree of depth 12 | bound; same generation |
 | `tree-sg-all` | a tree of depth 9 | free; same generation |
-| `tasks-ready` | 10000 tasks and their dependencies | stratified negation |
+| `tasks-ready` | 50000 tasks and their dependencies, half worked through | stratified negation |
 | `facts-join` | 300000 ternary facts | a join with integer constants; mostly loading |
 
 Every size is multiplied by `BENCH_SCALE`, as in `bench/run.sh`, so the same

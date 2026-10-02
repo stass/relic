@@ -18,6 +18,6 @@ graph, degrees                   0.09      439976     339982      439976      19
 grid, reachability               0.03       67199      67199       44998       44700
 tree, same generation            0.01        3093      10249         156        4236
 tree, all generations            0.03      350544     175784      350546      262140
-tasks, ready                     0.08      721348     380347      715747      361176
+tasks, ready                     0.09      155377     240232      267899       47002
 facts, load and join             0.21       17572     308786        8786       11743
 files, grouped                   0.33      676938     752098      752092      224846

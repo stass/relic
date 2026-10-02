@@ -424,15 +424,6 @@ walking the entries in identifier order and placing each by its stored
 hash; and checking an imported symbol field once, where the import checks
 it is a symbol and interning the value checks again.
 
-**The tasks data set has almost no done tasks.** [Low, component:
-`bench/datasets.sh`] `dataset_tasks` makes a task done two times in three,
-and only if every task it depends on is done, so the done set dies out
-early: at scale 1, 54 of 10000 tasks are done, and `tasks-ready` asks for
-a frontier far smaller than the project the generator's comment describes.
-Choose a rule that keeps a real share of the project done -- a higher
-chance, or dependencies drawn mostly from recent tasks -- and record the
-counters again.
-
 ## Security residuals
 
 **Mapped arrays are outside AddressSanitizer's quarantine and leak check.**

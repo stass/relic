@@ -29,7 +29,7 @@ dataset() {
 	grid) dataset_grid "$2" $((150 * $3)) ;;
 	tree) dataset_tree "$2" $((12 + $3 - 1)) ;;
 	small-tree) dataset_tree "$2" $((9 + $3 - 1)) ;;
-	tasks) dataset_tasks "$2" $((10000 * $3)) ;;
+	tasks) dataset_tasks "$2" $((50000 * $3)) ;;
 	facts) dataset_facts "$2" $((300000 * $3)) ;;
 	files) dataset_files "$2" $((300000 * $3)) ;;
 	dense-cyclic) dataset_random "$2" $((1000 * $3)) $((50000 * $3)) cyclic ;;
@@ -147,11 +147,20 @@ dataset_tree() {
 }
 
 # dataset_tasks DIR N: N tasks, k0 to kN-1, each after the first depending on
-# one or two earlier ones.  A task is done only if every task it depends on
-# is done, and then two times in three; k0, which depends on nothing, is
-# done.  The done tasks are therefore closed under dependency, as in a real
-# project, and the tasks that are ready -- not done, with every dependency
-# done -- are the frontier between the done tasks and the rest.
+# one or two earlier ones.  The project has worked through the first half of
+# its tasks in the order they were made: one of those is done if every task
+# it depends on is done, and then 99 times in 100; k0, which depends on
+# nothing, is done.  The done tasks are therefore closed under dependency,
+# as in a real project, and the tasks that are ready -- not done, with every
+# dependency done -- are the frontier between the done tasks and the rest.
+#
+# Completion has to be all but certain within the worked half.  If a task
+# is done with chance p once its one or two dependencies, drawn from the
+# tasks before it, are done, the share d of tasks done can hold steady only
+# where d = p(d + d^2)/2, which for p below 1 is d = 0 alone: the share
+# falls along the project, the faster the further p is below 1.  At two in
+# three, 54 of the first 10000 tasks are done; at 99 in 100 the share falls
+# slowly enough that most of the worked half is done.
 dataset_tasks() {
 	dataset_dir=$1 awk -v n="$2" "$datasets_random_awk"'
 	BEGIN {
@@ -174,7 +183,7 @@ dataset_tasks() {
 				printf "k%d\tk%d\n", i, second > depends
 				ready = ready && done[second]
 			}
-			if (next_random(3) != 0 && ready) {
+			if (ready && i < n / 2 && next_random(100) != 0) {
 				printf "k%d\n", i > finished
 				done[i] = 1
 			}
