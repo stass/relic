@@ -160,31 +160,6 @@ cap on adornments per predicate, falling back to the free one, would bound
 the multiple. The rewrite is correct as it stands, and the tuples count
 against `max_tuples` and `max_memory`.
 
-**A doubly recursive closure keeps a copy of its adorned relation.**
-[Medium, component: `lib/magic.c`, `lib/plan.c`, `specs/design-magic.md`]
-`p(X, Z) :- p(X, Y), p(Y, Z).` adorned `bf` has its first call restate the
-head, which records no demand but counts among the calls binding a column,
-so the second call is cut: `sup$p$bf$1$2(X, Y)` holds every tuple of
-`p$bf` again. Not counting the restating call removes the cut and gives the
-plain construction, with about 40% less memory on a random graph (27 MB
-against 45 MB), but about 30% more time (40 s against 31 s): the adorned
-rule's innermost loop then probes `magic$p$bf(X)` for every joined tuple,
-a probe the restating call already implies, since every tuple of `p$bf`
-has its bound part in `magic$p$bf`. Leaving the guard out of the rewritten
-rule recovers the time but is unsafe however it is narrowed, because the
-rule is planned again without it: a comparison or aggregate can then run
-over values no query asked for (`p(X, Z) :- p(X, Y), edge(Y, Z), Z / Z =
-1.` divides by an unrelated `edge(99, 0)`), and an all-atom body can be
-planned into a cross product the guard would have pruned (`p(X, Z) :-
-p(X, Y), edge(X, Z), u(U), v(V).`), work the tuple and memory limits do not
-count. The remedy that holds by construction is in the planner: keep the
-guard, and skip its membership probe once a literal implying it is placed,
-which needs a design for what the semi-naive `old` and `delta` views of the
-two relations guarantee. Not counting the call also moves arithmetic that a
-cut kept in a supplementary rule into the adorned rule, where a plan
-started from another relation's delta can reach it, as the rewrite already
-allows for a rule with one demand call.
-
 **The adornment search and the draft each walk a body.** [Medium, component:
 `lib/magic.c`] The search for the adornments a query reaches
 (`reach_calls_in_order()`) and the draft of the rewritten rules

@@ -146,6 +146,25 @@ cc -o query examples/query.c $(pkg-config --cflags --libs librelic)
 Only symbols matching `relic_` are exported. `relic(3)` describes the
 interface.
 
+## Limitations
+
+A query that binds an argument is answered through a Magic Sets rewrite,
+which derives only what the query can reach. A recursive rule that calls
+its own predicate twice, with the bound argument passed to the first call,
+costs that rewrite a second relation as large as the closure it derives. Of
+these two definitions of a path, called as `path(a, X)?`:
+
+```prolog
+path(X, Z) :- path(X, Y), path(Y, Z).
+path(X, Z) :- path(X, Y), edge(Y, Z).
+```
+
+the first keeps a second relation holding a copy of every path the rewrite
+derives, and the second does not. Both give the same answers, and the copy
+counts against the memory limit like any other relation. `relic -e` shows
+the copy as a predicate named `sup$...`. Where memory matters, prefer the
+linear form.
+
 ## Documentation
 
 | File | Contents |
