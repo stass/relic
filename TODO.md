@@ -217,14 +217,6 @@ sorted in `docs/todo-coverage.md`: arena allocation failures the exhaustion
 sweep cannot land on, which one arena-level fault point would reach, and
 defensive branches, one of which may have lost its reason to exist.
 
-**libedit's editing and history are not tested automatically.** [Low,
-component: `tests/terminal.sh`, `cmd/relic/input.c`] `tests/terminal.sh`
-types whole lines into a session through `tests/pty`, which covers the
-prompt, the end of input and the refusals at a terminal, but no test presses
-an editing key or recalls a line from the history. The driver types bytes,
-so a test of them is a matter of typing the keys' sequences and checking
-the line the session answers.
-
 **A caller tells a limit's refusal from another failure only by its
 text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is
 reported through `relic_diag_limit()` with the prefix `limit exceeded:`, and

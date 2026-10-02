@@ -451,12 +451,13 @@ examples_query_CPPFLAGS = -I$(top_srcdir)/include
 examples_query_LDADD = librelic.la
 
 ##
-## What the tool does at a terminal is checked by tests/terminal.sh through
-## tests/pty, which runs a command on a pseudo-terminal and types its input a
-## line at a time, since a pseudo-terminal cannot be driven portably from sh.
+## What the tool does at a terminal is checked by tests/terminal.sh, and its
+## line editing by tests/editing.sh, through tests/pty, which runs a command
+## on a pseudo-terminal and types its input a line at a time, since a
+## pseudo-terminal cannot be driven portably from sh.
 ##
 
-dist_check_SCRIPTS += tests/terminal.sh
+dist_check_SCRIPTS += tests/terminal.sh tests/editing.sh
 
 RELIC_DRIVER_BINARIES = tests/pty
 tests_pty_SOURCES = tests/pty.c
