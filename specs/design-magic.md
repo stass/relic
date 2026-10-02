@@ -497,8 +497,11 @@ to the predicate the query calls. A generated predicate is attributed the
 same way, so every diagnostic about one -- a tuple or memory limit refusing
 its relation, or the memory its plans take -- names the source predicate:
 `limit exceeded: tuples=10 while deriving path/2`, where the relation is
-`path$bf`. The explanation of a plan, which shows the rewrite, names the
-generated predicates themselves. Supplementary predicates are not counted
+`path$bf`. A predicate generated for the query itself, a supplementary
+predicate cutting the query's body, has no source predicate and is
+attributed to the query, as the query's answer is: `limit exceeded:
+tuples=7 while deriving the query`. The explanation of a plan, which shows
+the rewrite, names the generated predicates themselves. Supplementary predicates are not counted
 by the predicate limit or its budget: each has exactly one rule, which the
 rule limit and the literal budget count, so bounding rules bounds them, and
 the predicate limit bounds adornments, of which the arity admits 2^n.

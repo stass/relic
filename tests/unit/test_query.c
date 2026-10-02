@@ -537,9 +537,9 @@ an_answer_refused_by_a_limit_is_given_back(void)
 	char *program;
 
 	refused_under(4, 0, "e(a).\ne(b).\ne(c).\n", "e(X), e(_)?",
-	    "tuples=4 while deriving $q0/1");
+	    "tuples=4 while deriving the query");
 	refused_under(4, 0, "e(a).\ne(b).\ne(c).\n", "e(X), e(Y)?",
-	    "tuples=4 while deriving $q0/2");
+	    "tuples=4 while deriving the query");
 
 	program = numbered_facts(LIMITED_FACTS);
 	if (program == NULL) {
@@ -547,7 +547,7 @@ an_answer_refused_by_a_limit_is_given_back(void)
 		return;
 	}
 	refused_under(0, LIMITED_MEMORY, program, "e(A), e(B), e(C), e(D)?",
-	    "memory=1048576 while deriving $q0/4");
+	    "memory=1048576 while deriving the query");
 	free(program);
 }
 
@@ -1220,7 +1220,7 @@ planning_is_charged_to_the_memory_limit(void)
 		check(query != NULL &&
 		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
 		    rows == 0 &&
-		    refused_while(ctx, "planning $q0/1"),
+		    refused_while(ctx, "planning the query"),
 		    SCENARIO_PLANNING, "a long query's plan is refused while "
 		    "planning the query, the program's having fitted");
 		relic_query_destroy(query);
@@ -1243,7 +1243,7 @@ planning_is_charged_to_the_memory_limit(void)
 		check(query != NULL &&
 		    relic_query_run(ctx, query, count_rows, &rows) != 0 &&
 		    rows == 0 && log.warnings == 0 &&
-		    refused_while(ctx, "rewriting $q0/0"), SCENARIO_PLANNING,
+		    refused_while(ctx, "rewriting the query"), SCENARIO_PLANNING,
 		    "a rewrite refused by the limit fails the query");
 		relic_query_destroy(query);
 		relic_destroy(ctx);

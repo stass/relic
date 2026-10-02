@@ -147,6 +147,7 @@ pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 	stored->name = name;
 	stored->views = RELIC_ID_NONE;
 	stored->stands_for = RELIC_ID_NONE;
+	stored->kind = RELIC_PRED_WRITTEN;
 	stored->arity = arity;
 
 	table->count++;
@@ -280,8 +281,9 @@ relic_pred_name_head(relic_t *ctx, relic_pred_id_t id)
 
 /*
  * Record that the Magic rewrite generated this predicate, as part of
- * `stands_for`: a rule's head names it, and a diagnostic names `stands_for`
- * in its place.
+ * `stands_for`, or of the query when `stands_for` is RELIC_ID_NONE: a
+ * rule's head names it, and a diagnostic names what it is part of in its
+ * place.
  */
 void
 relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
@@ -294,6 +296,7 @@ relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
 		return;
 
 	pred->head_named = true;
+	pred->kind = RELIC_PRED_REWRITTEN;
 	pred->stands_for = stands_for;
 }
 
@@ -313,7 +316,7 @@ relic_pred_name_group(relic_t *ctx, relic_pred_id_t id,
 		return;
 
 	pred->head_named = true;
-	pred->aggregate_group = true;
+	pred->kind = RELIC_PRED_GROUP;
 	pred->stands_for = holder;
 }
 
@@ -418,13 +421,13 @@ relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id)
  *
  * A predicate is described in the terms of what the reader of the message
  * wrote and can change.  One the Magic rewrite generated is described as
- * the program's predicate it stands for, and the group predicate of an
- * aggregate as that aggregate: "an aggregate of p/1", or "an aggregate of
- * the query".  The predicate a Magic-generated one stands for is one the
- * rewrite did not generate, and is described as any other is, so that the
- * rewrite adorning a group predicate would leave its adorned form described
- * as the aggregate.  The explanation of a plan names generated predicates
- * by their own names, through relic_relation_name().
+ * the program's predicate it is part of, or as the query, and the group
+ * predicate of an aggregate as that aggregate: "an aggregate of p/1", or
+ * "an aggregate of the query".  The predicate a rewritten one is part of
+ * is one the rewrite did not generate, and is described as any other is,
+ * so that the rewrite adorning a group predicate would leave its adorned
+ * form described as the aggregate.  The explanation of a plan names
+ * generated predicates by their own names, through relic_relation_name().
  */
 const char *
 relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
@@ -433,13 +436,16 @@ relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
 	const relic_pred_t *pred;
 
 	pred = relic_pred_of(ctx, id);
-	if (pred != NULL && !pred->aggregate_group &&
-	    pred->stands_for != RELIC_ID_NONE) {
+	if (pred != NULL && pred->kind == RELIC_PRED_REWRITTEN) {
+		if (pred->stands_for == RELIC_ID_NONE) {
+			strlcpy(buffer, RELIC_QUERY_DESCRIPTION, size);
+			return (buffer);
+		}
 		id = pred->stands_for;
 		pred = relic_pred_of(ctx, id);
 	}
 
-	if (pred != NULL && pred->aggregate_group)
+	if (pred != NULL && pred->kind == RELIC_PRED_GROUP)
 		return (describe_aggregate_group(ctx, pred, buffer, size));
 
 	return (relic_pred_identify(ctx, id, buffer, size));
@@ -463,7 +469,7 @@ describe_aggregate_group(const relic_t *ctx, const relic_pred_t *group,
 	char holder[RELIC_PRED_TEXT_MAX];
 
 	if (group->stands_for == RELIC_ID_NONE) {
-		strlcpy(buffer, AGGREGATE_PREFIX "the query", size);
+		strlcpy(buffer, AGGREGATE_PREFIX RELIC_QUERY_DESCRIPTION, size);
 		return (buffer);
 	}
 

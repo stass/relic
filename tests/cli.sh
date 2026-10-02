@@ -318,7 +318,7 @@ if [ "$status" -ne 1 ]; then
 	fail "an exceeded memory limit in a rewrite exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=$((held + 1024)) while rewriting \$q0/"*)
+*"limit exceeded: memory=$((held + 1024)) while rewriting the query"*)
 	;;
 *)
 	fail "an exceeded memory limit in a rewrite was reported as '$diagnostic'"

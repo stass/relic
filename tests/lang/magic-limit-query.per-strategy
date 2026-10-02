@@ -1,0 +1,4 @@
+The Magic rewrite cuts the query's body into supplementary predicates of
+the query's own, and the limit refuses one of them, named as the query;
+full materialization has no such predicates and is refused while deriving
+path/2.  The golden file pins the default's message.

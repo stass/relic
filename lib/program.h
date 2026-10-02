@@ -72,6 +72,22 @@ typedef struct relic_schedule relic_schedule_t;
 typedef struct relic_variable relic_variable_t;
 
 /*
+ * What a predicate is.  A written one, the program's or the base view of
+ * one, is described by its own name.  One the Magic rewrite generates is
+ * part of the predicate it adorns, for an adorned, a magic or a
+ * supplementary predicate, or of the query, and is described as that
+ * predicate or as the query.  The group predicate of an aggregate is part of the predicate
+ * whose rule holds the aggregate, or of the query, but holds the rows of
+ * the aggregate's body rather than tuples of either, and is described as an
+ * aggregate of the one or the other.
+ */
+enum relic_pred_kind {
+	RELIC_PRED_WRITTEN,
+	RELIC_PRED_REWRITTEN,
+	RELIC_PRED_GROUP
+};
+
+/*
  * A predicate, identified by its position in the predicate table.
  *
  * The typedef says, by convention rather than by anything the compiler
@@ -110,18 +126,13 @@ typedef uint32_t relic_pred_id_t;
  * of an aggregate in that rule is named after.  Rules are only appended, so
  * a position once taken never shifts.
  *
- * `stands_for` is, for a predicate the Magic rewrite generates, the
- * program's predicate it is part of: the predicate adorned, for an adorned,
- * a magic or a supplementary predicate.  A diagnostic names that one in its
- * place, since it is what the reader can change.  It is RELIC_ID_NONE for a
- * predicate a program writes, and for one generated from a query, which no
- * predicate of the program stands behind.
- *
- * `aggregate_group` marks the group predicate of an aggregate, whose
- * `stands_for` is the predicate of the rule holding the aggregate, or
- * RELIC_ID_NONE for an aggregate of a query.  Its tuples are the rows of
- * the aggregate's body rather than tuples of that predicate, so a
- * diagnostic names it as an aggregate of that predicate, or of the query.
+ * `kind` says whether a diagnostic names the predicate by its own name, as
+ * it does one the program writes and the base view of one, or which part
+ * of the library generated it, and `stands_for` what a generated predicate
+ * is part of: a predicate the program writes, or the query when it is
+ * RELIC_ID_NONE, which it always is for a predicate named by its own name.
+ * A diagnostic names a generated predicate by what it is part of, since
+ * that is what the reader wrote and can change.
  */
 struct relic_pred {
 	relic_location_t	referenced_at;
@@ -129,8 +140,8 @@ struct relic_pred {
 	uint32_t		name;	/* interned spelling */
 	relic_pred_id_t		views;
 	relic_pred_id_t		stands_for;
+	enum relic_pred_kind	kind;
 	uint16_t		arity;
-	bool			aggregate_group;
 	bool			head_named;
 	bool			derived;
 	bool			referenced;

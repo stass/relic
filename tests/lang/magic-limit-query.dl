@@ -1,0 +1,7 @@
+% The Magic rewrite cuts a query of three calls into supplementary
+% predicates of the query's own, which a limit refusing one names as the
+% query, since the query is what the reader wrote there.
+edge(a, b). edge(b, c). edge(c, d). edge(d, e).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+path(a, X), path(X, Y), path(Y, Z)?

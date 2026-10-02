@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "internal.h"
@@ -2471,13 +2472,19 @@ is_called_by_predicate(const relic_t *ctx, const relic_relation_t *relation)
  * hold RELIC_PRED_TEXT_MAX bytes, and return it.  A relation called by its
  * predicate's name is described exactly as relic_pred_describe() describes
  * the predicate, so the relation of a generated predicate is described in
- * the terms of the program; a query's answer and a base view's store, which
- * have names of their own, are described by those.
+ * the terms of the program.  A query's answer is described as the query,
+ * as the relations the Magic rewrite generates for the query are, and a
+ * base view's store by its own name.
  */
 const char *
 relic_relation_describe(const relic_t *ctx, const relic_relation_t *relation,
     char *buffer, size_t size)
 {
+	if (relation->pred == RELIC_ID_NONE) {
+		strlcpy(buffer, RELIC_QUERY_DESCRIPTION, size);
+		return (buffer);
+	}
+
 	if (is_called_by_predicate(ctx, relation))
 		return (relic_pred_describe(ctx, relation->pred, buffer, size));
 

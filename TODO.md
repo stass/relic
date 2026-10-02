@@ -191,19 +191,6 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**A limit refusal in a query's own relations names them, not the query.**
-[Low, component: `lib/magic.c`, `lib/eval.c`] A relation the Magic rewrite
-generates for the query rather than for a predicate of the program -- a
-supplementary predicate cutting the query's body, `sup$$q0$...` -- has no
-source predicate to be named by, and a limit refusing it names it. The
-names are unambiguous, since `$` cannot occur in a name a program writes,
-and `-e` shows what they mean, but `specs/design-magic.md` section 8 asks a
-diagnostic to name what the reader has to change, which here is the query.
-Naming which query needs the evaluation of a schedule to be told which one
-it evaluates for; describing the relation as part of the query, as the
-group of a query's aggregate is described as an aggregate of the query,
-needs only a mark on the predicate entry the rewrite generates.
-
 **Coverage gaps.** [Low, component: `tests/`] `make coverage` reaches 96
 percent of the library's and the tool's lines. What it does not reach is
 sorted in `docs/todo-coverage.md`: arena allocation failures the exhaustion

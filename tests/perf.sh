@@ -358,7 +358,8 @@ refused_within() {
 
 refused_within "limit exceeded: memory=$planning_memory while planning p/1" \
     -X no-magic -q 'p(X)?' "$work/long.dl"
-refused_within "limit exceeded: memory=$planning_memory while rewriting \$q0/1" \
+refused_within \
+    "limit exceeded: memory=$planning_memory while rewriting the query" \
     -l magic-rules=1000000 -q 'all(X)?' "$work/patterns.dl"
 
 awk -v calls="$demand_calls" 'BEGIN {

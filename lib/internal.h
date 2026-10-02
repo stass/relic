@@ -1038,12 +1038,15 @@ const char *relic_source_name(relic_t *ctx, const char *name);
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
  * stand as an argument of the message it decorates; a predicate the Magic
- * rewrite generated is described as the program's predicate it stands for,
- * and the group predicate of an aggregate as an aggregate of its rule's
- * predicate.
+ * rewrite generated is described as the program's predicate it is part of,
+ * or as RELIC_QUERY_DESCRIPTION when it is part of the query, and the group
+ * predicate of an aggregate as an aggregate of its rule's predicate or of
+ * the query.
  * relic_pred_identify() writes the predicate itself, generated or not, for
  * an internal error.
  */
+#define	RELIC_QUERY_DESCRIPTION	"the query"
+
 void	 relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed);
 void	 relic_predtab_reset(relic_predtab_t *table);
 int	 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
