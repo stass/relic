@@ -237,18 +237,6 @@ within microseconds and a component of many small rounds pays a wake-up
 per round. A bound in time, the clock read every few hundred pauses,
 would hold on every processor. Unmeasured on aarch64.
 
-**The pool's spin decision sees processors online, not processors
-available.** [Low, component: `lib/pool.c`] A pool spins only when its
-workers fit on the processors `sysconf(_SC_NPROCESSORS_ONLN)` reports, since
-a waiter spinning on the processor the awaited worker needs delays it by a
-scheduling quantum per job. A process confined to fewer processors by an
-affinity mask (`taskset`, a container's `--cpuset-cpus`) or a CPU quota
-(`--cpus`) still sees them all and spins while oversubscribed. On Linux
-`sched_getaffinity(2)` would cover the mask, not the quota. The two SMT
-threads of one core are counted as two processors, and a spinning sibling
-slows the other: on a KVM guest of one core and two threads, `-X parallel
--j 2` over 5000 one-tuple rounds took 1.3 s spinning and 0.13 s parking.
-
 ## Benchmarks
 
 **`bench/compare/run.sh` compares on one thread only.** [Low, component:
