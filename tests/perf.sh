@@ -27,17 +27,18 @@
 # cost what changed in the previous one, and finding what the query reads and
 # generating each adornment's rules must cost what the rules hold; any of the
 # three done by searching the whole component makes the run quadratic, about
-# 10^10 steps.  No counter measures that, so this workload is on the clock:
-# linear, it takes a second or two, and quadratic, many minutes.
+# 10^10 steps.  No counter measures that, so this workload is held to a
+# budget of CPU time: linear, it takes a second or two, and quadratic, many
+# minutes.
 #
 # An interactive session of 100 000 lines, each the same query over a small
 # graph, prepares, answers and destroys a query per line.  A query's answer
 # belongs to the query rather than to a predicate of the program, so every
 # line costs what the program holds.  Were each query to leave anything
 # behind that later answers walk, each line would cost every line before it,
-# about 10^10 steps.  No counter measures such a walk, so this workload is on
-# the clock like the cycle: linear, it takes a few seconds, and quadratic,
-# many minutes.
+# about 10^10 steps.  No counter measures such a walk, so this workload is
+# held to a budget of CPU time like the cycle: linear, it takes a few
+# seconds, and quadratic, many minutes.
 #
 # Two workloads plan long bodies, and must plan them in time proportional to
 # the plans they produce rather than to the square of a body.  A recursive
@@ -71,13 +72,17 @@
 # rewrite abandoned over its budget would still answer, from the whole
 # program, and say so.
 #
-# RELIC_PERF_BUDGET is how many seconds reachability may take, 600 unless
-# set, which leaves room for an AddressSanitizer build on a slow machine;
-# make check-msan and make check-tsan set more for MemorySanitizer and
-# ThreadSanitizer, which are slower.  For reachability the clock only guards
-# against a run that never ends.  The cycle and the session each have a
-# tenth of it, and each planning workload a fortieth, but never less than
-# five seconds.
+# RELIC_PERF_BUDGET is how many seconds of CPU time reachability may take,
+# 600 unless set, which leaves room for an AddressSanitizer build on a slow
+# machine; make check-msan and make check-tsan set more for MemorySanitizer
+# and ThreadSanitizer, which are slower.  For reachability the budget only
+# guards against a run that never ends.  The cycle and the session each have
+# a tenth of it, and each planning workload a fortieth, but never less than
+# five seconds.  The budgets are CPU time rather than time by the clock, so
+# that a machine busy with other work, which stretches a run's time by the
+# clock and not its CPU time, fails a run that is linear only when it
+# stretches it past the whole budget, which every workload is also held to
+# by the clock.
 
 set -eu
 
@@ -109,22 +114,45 @@ work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
 
+# The seconds of CPU time a run may take: `seconds`, or the hard limit on CPU
+# time this test inherited when that is lower, since a soft limit cannot be
+# raised past the hard one.
+cpu_seconds() {
+	hard=$(ulimit -H -t)
+	if [ "$hard" != unlimited ] && [ "$hard" -lt "$1" ]; then
+		echo "$hard"
+	else
+		echo "$1"
+	fi
+}
+
 # Run a command with its output going to the files named by the first two
-# arguments, killing it if it has not finished within as many seconds as the
-# third says, and return its exit status.  Polling rather than a watchdog
-# process, which would outlive the run it guards unless it too were killed.
+# arguments, and return its exit status.  The command may use as many
+# seconds of CPU time as the third argument says, which a soft limit set by
+# ulimit holds it to: past them the system stops it with SIGXCPU.  A command
+# that waits rather than computes uses no CPU time, so it is also killed once
+# the whole budget has passed by the clock, which bounds every workload by
+# what the sanitizer jobs' time allows.  The clock is polled rather than
+# watched by a second process, which would outlive the run it guards unless
+# it too were killed.
 run_within() {
 	out=$1
 	err=$2
-	seconds=$3
+	limit=$(cpu_seconds "$3")
 	shift 3
 
-	"$@" > "$out" 2> "$err" &
+	(
+		if ! ulimit -S -t "$limit"; then
+			echo "CPU time cannot be limited to $limit seconds" >&2
+			exit 125
+		fi
+		exec "$@"
+	) > "$out" 2> "$err" &
 	pid=$!
 
 	elapsed=0
 	while kill -0 "$pid" 2>/dev/null; do
-		if [ "$elapsed" -ge "$seconds" ]; then
+		if [ "$elapsed" -ge "$budget" ]; then
 			kill "$pid" 2>/dev/null || true
 			break
 		fi
@@ -160,7 +188,7 @@ run_within "$work/rows" "$work/stats" "$budget" \
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/stats" >&2
-	fail "reachability exited $status within a budget of $budget seconds"
+	fail "reachability exited $status within a budget of $budget CPU seconds"
 fi
 
 rows=$(wc -l < "$work/rows" | tr -d ' ')
@@ -199,7 +227,7 @@ run_within "$work/cycle-rows" "$work/cycle-err" "$cycle_budget" \
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/cycle-err" >&2
-	fail "the recursive cycle exited $status within a budget of $cycle_budget seconds"
+	fail "the recursive cycle exited $status within a budget of $cycle_budget CPU seconds"
 fi
 
 if [ "$(cat "$work/cycle-rows")" != "a" ]; then
@@ -229,7 +257,7 @@ run_within "$work/session-rows" "$work/session-err" "$cycle_budget" \
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/session-err" >&2
-	fail "the session of $session_lines queries exited $status within a budget of $cycle_budget seconds"
+	fail "the session of $session_lines queries exited $status within a budget of $cycle_budget CPU seconds"
 fi
 
 rows=$(grep -c . "$work/session-rows" || true)
@@ -255,7 +283,7 @@ run_within "$work/long-rows" "$work/long-err" "$planning_budget" \
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/long-err" >&2
-	fail "a recursive body of $body_length literals exited $status within a budget of $planning_budget seconds"
+	fail "a recursive body of $body_length literals exited $status within a budget of $planning_budget CPU seconds"
 fi
 
 if [ "$(cat "$work/long-rows")" != "a" ]; then
@@ -290,7 +318,7 @@ run_within "$work/patterns-rows" "$work/patterns-err" "$planning_budget" \
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/patterns-err" >&2
-	fail "a body of $body_length literals under $patterns patterns exited $status within a budget of $planning_budget seconds"
+	fail "a body of $body_length literals under $patterns patterns exited $status within a budget of $planning_budget CPU seconds"
 fi
 
 if [ "$(cat "$work/patterns-rows")" != "a" ]; then
@@ -315,7 +343,7 @@ refused_within() {
 
 	if [ "$status" -ne 1 ]; then
 		cat "$work/limited-err" >&2
-		fail "$* under a memory limit exited $status within a budget of $planning_budget seconds, expected 1"
+		fail "$* under a memory limit exited $status within a budget of $planning_budget CPU seconds, expected 1"
 	fi
 
 	if [ "$(cat "$work/limited-err")" != "relic: error: $expected" ]; then
@@ -350,7 +378,7 @@ run_within "$work/calls-rows" "$work/calls-err" "$planning_budget" \
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/calls-err" >&2
-	fail "a rule of $demand_calls demand calls exited $status under a memory limit within a budget of $planning_budget seconds"
+	fail "a rule of $demand_calls demand calls exited $status under a memory limit within a budget of $planning_budget CPU seconds"
 fi
 
 # r(1)? binds every column, so its one answer is the empty row.

@@ -802,7 +802,8 @@ RELIC_MSAN_OPTIONS = halt_on_error=1:abort_on_error=1:allocator_may_return_null=
 RELIC_UBSAN_OPTIONS = halt_on_error=1:print_stacktrace=1
 RELIC_TSAN_OPTIONS = halt_on_error=1:abort_on_error=1:second_deadlock_stack=1:allocator_may_return_null=1
 
-# tests/perf.sh sizes its clock for AddressSanitizer on a slow machine.
+# tests/perf.sh sizes its CPU time budget for AddressSanitizer on a slow
+# machine.
 # Unless a budget is set, check-msan and check-tsan give it more: three
 # times the default for MemorySanitizer, which runs a program about twice as
 # long as AddressSanitizer does, and six times for ThreadSanitizer, which
