@@ -798,6 +798,18 @@ a string value and any other is a symbol.
 Diagnostics, plans, counts and counters are written to the standard error,
 so the standard output holds only results and, in an interactive session,
 the replies to its commands.
+.Sh ENVIRONMENT
+.Bl -tag -width LC_CTYPE
+.It Ev LC_ALL , LC_CTYPE , LANG
+The character encoding of the lines an interactive session edits, chosen
+as
+.Xr setlocale 3
+chooses it, the first of these that is set and not empty deciding; ASCII
+when none is.
+Bytes typed that are not text in the encoding are dropped, or the line
+holding them is refused, as libedit chooses; a refused line takes with it
+whatever had been typed or pasted after it and not yet read.
+.El
 .Sh FILES
 .Bl -tag -width ~/.editrc
 .It Pa ~/.editrc

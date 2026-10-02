@@ -245,22 +245,35 @@ void	import_operand_free(import_operand_t *parsed);
 typedef struct line_reader line_reader_t;
 
 /*
+ * What reading the next line came to: a line; a line refused, after which
+ * the one following it can still be read; the end of input; or a read that
+ * failed, after which nothing more can be.
+ */
+enum line_read {
+	LINE_READ,
+	LINE_REFUSED,
+	LINE_AT_END,
+	LINE_FAILED
+};
+
+/*
  * cmd/relic/input.c
  *
  * Standard input a line at a time, edited with libedit and prompted for when
  * it is a terminal and the build has libedit, and read plainly otherwise.
  * The structure is private to input.c; line_reader_open() allocates it.
  *
- * line_reader_next() returns 1 with the next line, without its newline, at
- * *linep and its length at *lengthp; 0 at the end of input; and -1 having
- * reported a read that failed.  The line belongs to the reader and is valid
- * until the next call, and the caller may change its bytes in place.
- * line_reader_number() is the number of the line last returned, counting
- * from one.  line_reader_prompts() is whether a prompt is written before each
- * line is read, which is when someone is typing.
+ * line_reader_next() returns LINE_READ with the next line, without its
+ * newline, at *linep and its length at *lengthp.  The line belongs to the
+ * reader and is valid until the next call, and the caller may change its
+ * bytes in place.  A refused line and a failed read are reported before
+ * line_reader_next() returns.  line_reader_number() is the number of the
+ * line last read or refused, counting from one.  line_reader_prompts() is
+ * whether a prompt is written before each line is read, which is when
+ * someone is typing.
  */
 line_reader_t	*line_reader_open(const char *program_name);
-int		 line_reader_next(line_reader_t *reader, char **linep,
+enum line_read	 line_reader_next(line_reader_t *reader, char **linep,
 		    size_t *lengthp);
 size_t		 line_reader_number(const line_reader_t *reader);
 bool		 line_reader_prompts(const line_reader_t *reader);

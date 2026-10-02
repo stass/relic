@@ -118,14 +118,15 @@ A fix is a source name that is not interned (diagnostics copy it) and a
 per-query scope for the symbols, values and generated predicates only one
 query uses; that is a change to interning and wants a design note first.
 
-**A session's line editing drops bytes outside ASCII.** [Low, component:
-`cmd/relic/input.c`] The tool never calls setlocale(3), so libedit runs in
-the C locale and does not accept a typed byte above 0x7f; a string literal
-holding UTF-8 cannot be typed at the prompt, though it can be piped. Setting
-`LC_CTYPE` from the environment before libedit starts would fix it; neither
-the tool nor the library classifies bytes through `<ctype.h>`, so nothing
-else would follow the locale. What needs checking first is how libedit in a
-UTF-8 locale treats a typed byte that is not valid UTF-8.
+**The end of typed input may be taken for a refused line.** [Medium,
+component: `cmd/relic/input.c`] `read_edited()` takes a NULL from
+`el_gets()` with `errno` EILSEQ for a line libedit could not read in the
+locale's encoding. A libedit that discards a byte that is not text, as the
+NetBSD one on glibc does, may leave EILSEQ in `errno` from that discard and
+return NULL for a Ctrl-D typed after it, which relic would report as a
+refused line, needing a second Ctrl-D to end the session. Read from the
+source, not seen on macOS's libedit, which ends the read itself; confirm on
+Linux, and if so, tell the two apart by what else `el_gets()` returns.
 
 **An interrupt ends the session.** [Low, component: `cmd/relic/repl.c`,
 `include/relic.h`] Ctrl-C at the prompt or during a long query ends the

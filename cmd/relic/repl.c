@@ -304,23 +304,32 @@ answer_line(repl_t *repl, char *line, size_t length, size_t line_number)
 }
 
 /*
- * Read the next line and answer it.  The end of input ends the session, and
- * so does a read that failed, which is reported.
+ * Read the next line and answer it.  A line the reader refused fails as a
+ * line answered would, and the session goes on.  The end of input ends the
+ * session, and so does a read that failed.
  */
 static int
 answer_next_line(repl_t *repl, line_reader_t *reader)
 {
 	char *line;
 	size_t length;
-	int got_line;
 
-	got_line = line_reader_next(reader, &line, &length);
-	if (got_line <= 0) {
+	switch (line_reader_next(reader, &line, &length)) {
+	case LINE_READ:
+		return (answer_line(repl, line, length,
+		    line_reader_number(reader)));
+	case LINE_REFUSED:
+		return (-1);
+	case LINE_AT_END:
 		repl->done = true;
-		return (got_line);
+		return (0);
+	case LINE_FAILED:
+		break;
 	}
 
-	return (answer_line(repl, line, length, line_reader_number(reader)));
+	repl->done = true;
+
+	return (-1);
 }
 
 /*

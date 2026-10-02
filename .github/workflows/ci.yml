@@ -132,6 +132,7 @@ jobs:
           - image: alpine:latest
             install: >-
               apk add --no-cache build-base pkgconf libedit-dev mandoc
+              musl-locales
     container: ${{ matrix.image }}
     steps:
       - name: Install a compiler and the suite's tools, and no autotools
