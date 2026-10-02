@@ -95,18 +95,6 @@ jobs exist.
 
 ## Engine
 
-**A path load or import whose file fails to close fails having added its
-facts.** [Low, component: `lib/parse.c` `load_named_file`,
-`lib/import.c` `import_named_file`] `relic_load_path()` and
-`relic_import_path()` commit what they read, then close the stream, and
-return -1 when `fclose` fails, so a caller told the load failed holds its
-facts, against the all-or-nothing contract of `relic(3)` and `relic.h`. A
-close of a stream opened only for reading fails only on a network or
-user-space file system, and the stream was read to its end without error by
-then, so either the close comes before the commit, or such a close failure
-is not a failure of the load. A regression test needs a way to make the
-library's own `fclose` fail, which nothing provides.
-
 **Striped tables multiply the number of mappings.** [Low, component:
 `lib/util.c`] Every stripe's arrays are mapped once they reach
 `RELIC_ARRAY_MAP_BYTES`, so a large program holds several times the
@@ -129,13 +117,6 @@ exactly when the tuple total differs from the base total or an index
 exists. The same count makes `relic_base_total()`, which
 `relic_relations_current()` walks the base stores for on every query,
 constant time.
-
-**A load holds its text through the commit.** [Low, component:
-`lib/parse.c` `load_stream`] A stream is read whole for the lexer, and the
-text, about 24 bytes per fact, is released only once `load_text()` has
-committed, though nothing reads it once the parse ends. Releasing it between
-the parse and the commit would lower a large load's peak by the size of its
-input.
 
 **An interactive session accepts only queries.** [Low, component:
 `cmd/relic/repl.c`, `include/relic.h`] A session cannot add a fact or a rule,

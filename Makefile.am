@@ -311,7 +311,9 @@ tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 ##
 ## getentropy(2) is renamed the same way, and for the same reason: a context
 ## that cannot draw its hash seed is not created, and only a replacement that
-## fails on demand can show that it is not.
+## fails on demand can show that it is not.  So is fclose(3): a load or an
+## import whose file fails to close must add nothing, and no file a test can
+## make fails to close on its own.
 ##
 ## The renaming follows the pattern the compat suite already uses.  It is
 ## confined to this program; nothing that ships is built this way.  The
@@ -324,6 +326,7 @@ tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 RELIC_EXHAUSTION_RENAMES = \
 	-Dcalloc=relic_test_calloc \
+	-Dfclose=relic_test_fclose \
 	-Dgetentropy=relic_test_getentropy \
 	-Dmalloc=relic_test_malloc \
 	-Dmmap=relic_test_mmap \

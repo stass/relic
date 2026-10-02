@@ -134,6 +134,9 @@ static bool	 import_plan_init(relic_t *ctx, const relic_import_t *import,
 static void	 import_plan_reset(import_plan_t *plan);
 static int	 import_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream, const import_plan_t *plan);
+static void	 importer_init(importer_t *importer, relic_t *ctx,
+		    const import_plan_t *plan);
+static void	 importer_reset(importer_t *importer);
 static bool	 is_delimiter(const relic_table_reader_t *reader,
 		    unsigned char byte);
 static size_t	 kept_columns(const enum relic_column *columns,
@@ -147,6 +150,8 @@ static int	 read_table(importer_t *importer, const char *source_name,
 static void	 report_mistake(relic_t *ctx, const import_plan_t *plan,
 		    const relic_table_event_t *event);
 static unsigned char separator_of(enum relic_format format);
+static int	 stage_table(importer_t *importer, const char *source_name,
+		    FILE *stream);
 static enum relic_table_event_kind step(relic_table_reader_t *reader,
 		    unsigned char byte, const relic_location_t *here,
 		    relic_table_event_t *event);
@@ -757,11 +762,14 @@ import_plan_reset(import_plan_t *plan)
 }
 
 /*
- * Open, import and close the file at `path`, naming it by its path.
+ * Open the file at `path`, stage its table and close it, then commit what
+ * it held, naming it by its path.  The file is closed before the commit, so
+ * a close that fails fails the import with nothing added.
  */
 static int
 import_named_file(relic_t *ctx, const char *path, const import_plan_t *plan)
 {
+	importer_t importer;
 	FILE *stream;
 	int status;
 
@@ -769,13 +777,15 @@ import_named_file(relic_t *ctx, const char *path, const import_plan_t *plan)
 	if (stream == NULL)
 		return (-1);
 
-	status = import_stream(ctx, path, stream, plan);
-
-	if (fclose(stream) != 0 && status == 0) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot close %s: %s", path,
-		    strerror(errno));
-		status = -1;
-	}
+	importer_init(&importer, ctx, plan);
+	status = stage_table(&importer, path, stream);
+	if (status != 0)
+		fclose(stream);
+	else
+		status = relic_close_input(ctx, path, stream);
+	if (status == 0)
+		status = relic_staging_commit(&importer.staging);
+	importer_reset(&importer);
 
 	return (status);
 }
@@ -867,45 +877,68 @@ validate_import(relic_t *ctx, const relic_import_t *import)
 }
 
 /*
- * Import a table from a stream by `plan`.
- *
- * The predicate is interned before the table is read, and so before any of
- * its values, as a load interns a fact's predicate when it stages the fact.
- * Like the values its fields intern, it stays interned if the import fails.
+ * Import a table from a stream by `plan`: stage every record, then commit.
  */
 static int
 import_stream(relic_t *ctx, const char *source_name, FILE *stream,
     const import_plan_t *plan)
 {
 	importer_t importer;
-	const char *name;
 	int status;
 
-	name = relic_source_name(ctx, source_name);
+	importer_init(&importer, ctx, plan);
+	status = stage_table(&importer, source_name, stream);
+	if (status == 0)
+		status = relic_staging_commit(&importer.staging);
+	importer_reset(&importer);
+
+	return (status);
+}
+
+static void
+importer_init(importer_t *importer, relic_t *ctx, const import_plan_t *plan)
+{
+	bzero(importer, sizeof(*importer));
+	importer->ctx = ctx;
+	importer->plan = plan;
+	importer->header_pending = plan->header;
+	relic_staging_init(&importer->staging, ctx);
+}
+
+static void
+importer_reset(importer_t *importer)
+{
+	relic_table_reader_reset(&importer->reader);
+	relic_staging_reset(&importer->staging);
+}
+
+/*
+ * Read the table from `stream` and stage its records, none yet committed.
+ * Returns 0, or -1 having reported why the table cannot be imported.
+ *
+ * The predicate is interned before the table is read, and so before any of
+ * its values, as a load interns a fact's predicate when it stages the fact.
+ * Like the values its fields intern, it stays interned if the import fails.
+ */
+static int
+stage_table(importer_t *importer, const char *source_name, FILE *stream)
+{
+	const import_plan_t *plan;
+	const char *name;
+
+	plan = importer->plan;
+	name = relic_source_name(importer->ctx, source_name);
 	if (name == NULL)
 		return (-1);
 
-	bzero(&importer, sizeof(importer));
-	importer.ctx = ctx;
-	importer.plan = plan;
-	importer.header_pending = plan->header;
-
-	if (relic_pred_intern(ctx, plan->predicate_name, (uint16_t)plan->arity,
-	    NULL, &importer.pred) != 0)
+	if (relic_pred_intern(importer->ctx, plan->predicate_name,
+	    (uint16_t)plan->arity, NULL, &importer->pred) != 0)
 		return (-1);
 
-	relic_staging_init(&importer.staging, ctx);
-	relic_table_reader_init(&importer.reader, plan->format,
+	relic_table_reader_init(&importer->reader, plan->format,
 	    plan->column_count, name);
 
-	status = read_table(&importer, name, stream);
-	if (status == 0)
-		status = relic_staging_commit(&importer.staging);
-
-	relic_table_reader_reset(&importer.reader);
-	relic_staging_reset(&importer.staging);
-
-	return (status);
+	return (read_table(importer, name, stream));
 }
 
 /*

@@ -69,6 +69,7 @@ typedef struct relic_argument_offense relic_argument_offense_t;
 typedef struct relic_function_name relic_function_name_t;
 typedef struct relic_literal_argument relic_literal_argument_t;
 typedef struct relic_literal_arguments relic_literal_arguments_t;
+typedef struct relic_load relic_load_t;
 typedef struct relic_parser relic_parser_t;
 
 /*
@@ -198,6 +199,15 @@ struct relic_parser {
 	bool			 failed;
 };
 
+/*
+ * A load parsed and not yet committed: its statements, on the parser's own
+ * list, and its facts, staged.
+ */
+struct relic_load {
+	relic_parser_t	 parser;
+	relic_staging_t	 staging;
+};
+
 static int	 add_fact(relic_t *ctx, const char *predicate, size_t arity,
 		    const relic_value_t *values);
 static bool	 advance(relic_parser_t *parser) RELIC_MUST_CHECK;
@@ -277,11 +287,17 @@ static bool	 is_ground(const relic_ast_atom_t *atom);
 static bool	 keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
 static bool	 keep_literal(relic_parser_t *parser,
 		    relic_ast_literal_t *literal);
-static int	 load_text(relic_t *ctx, const char *source_name,
-		    const char *text, size_t length);
+static int	 load_commit(relic_load_t *load);
 static int	 load_named_file(relic_t *ctx, const char *path);
+static int	 load_parse(relic_load_t *load, relic_t *ctx,
+		    const char *source_name, const char *text, size_t length);
+static int	 load_read_text(relic_t *ctx, const char *source_name,
+		    char *text, size_t length);
+static void	 load_reset(relic_load_t *load);
 static int	 load_stream(relic_t *ctx, const char *source_name,
 		    FILE *stream);
+static int	 load_text(relic_t *ctx, const char *source_name,
+		    const char *text, size_t length);
 static bool	 make_binary(relic_parser_t *parser, enum relic_arith_op op,
 		    const relic_location_t *where, relic_ast_expr_t *left,
 		    relic_ast_expr_t *right, relic_ast_expr_t **exprp);
@@ -2889,27 +2905,82 @@ static int
 load_text(relic_t *ctx, const char *source_name, const char *text,
     size_t length)
 {
-	relic_parser_t parser;
-	relic_staging_t staging;
+	relic_load_t load;
 	int status;
 
-	relic_staging_init(&staging, ctx);
-
-	status = parse_text(&parser, ctx, &ctx->program_arena, &staging,
-	    source_name, text, length);
+	status = load_parse(&load, ctx, source_name, text, length);
 	if (status == 0)
-		status = relic_staging_commit(&staging);
+		status = load_commit(&load);
 
-	if (status == 0) {
-		TAILQ_CONCAT(&ctx->ast.statements, &parser.statements, link);
-		ctx->ast.count += parser.statement_count;
-		ctx->ast.query_count += parser.query_count;
-	}
-
-	relic_staging_reset(&staging);
-	parser_reset(&parser);
+	load_reset(&load);
 
 	return (status);
+}
+
+/*
+ * Load text read from a stream, which the load owns and releases once it is
+ * parsed, so that the commit, which grows the base stores, runs without it.
+ * The parse produced identifiers, interned names and locations naming an
+ * interned source, never pointers into the text; the lexer's state still
+ * points there, and neither the commit nor the reset reads it.
+ */
+static int
+load_read_text(relic_t *ctx, const char *source_name, char *text,
+    size_t length)
+{
+	relic_load_t load;
+	int status;
+
+	status = load_parse(&load, ctx, source_name, text, length);
+	relic_free_array(text);
+	if (status == 0)
+		status = load_commit(&load);
+
+	load_reset(&load);
+
+	return (status);
+}
+
+/*
+ * Parse text into `load`: its statements onto the load's own list and its
+ * facts into the load's staging, neither yet in the program.  Returns 0, or
+ * -1 having reported every mistake; the caller resets `load` either way.
+ */
+static int
+load_parse(relic_load_t *load, relic_t *ctx, const char *source_name,
+    const char *text, size_t length)
+{
+	relic_staging_init(&load->staging, ctx);
+
+	return (parse_text(&load->parser, ctx, &ctx->program_arena,
+	    &load->staging, source_name, text, length));
+}
+
+/*
+ * Commit a parsed load's facts to their base stores and, only when that
+ * succeeds, splice its statements into the program.
+ */
+static int
+load_commit(relic_load_t *load)
+{
+	relic_t *ctx;
+
+	ctx = load->parser.ctx;
+	if (relic_staging_commit(&load->staging) != 0)
+		return (-1);
+
+	TAILQ_CONCAT(&ctx->ast.statements, &load->parser.statements, link);
+	ctx->ast.count += load->parser.statement_count;
+	ctx->ast.query_count += load->parser.query_count;
+
+	return (0);
+}
+
+static void
+load_reset(relic_load_t *load)
+{
+	relic_staging_reset(&load->staging);
+	parser_reset(&load->parser);
 }
 
 /*
@@ -3103,7 +3174,6 @@ load_stream(relic_t *ctx, const char *source_name, FILE *stream)
 	const char *name;
 	char *text;
 	size_t length;
-	int status;
 
 	if (stream == NULL) {
 		relic_diagf(ctx, RELIC_ERROR, NULL,
@@ -3116,10 +3186,7 @@ load_stream(relic_t *ctx, const char *source_name, FILE *stream)
 	if (read_stream(ctx, name, stream, &text, &length) != 0)
 		return (-1);
 
-	status = load_text(ctx, name, text, length);
-	relic_free_array(text);
-
-	return (status);
+	return (load_read_text(ctx, name, text, length));
 }
 
 int
@@ -3169,14 +3236,29 @@ relic_open_input(relic_t *ctx, const char *path)
 	return (stream);
 }
 
+int
+relic_close_input(relic_t *ctx, const char *path, FILE *stream)
+{
+	if (fclose(stream) != 0) {
+		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot close %s: %s", path,
+		    strerror(errno));
+		return (-1);
+	}
+
+	return (0);
+}
+
 /*
- * Open, load and close the file at `path`, naming it by its path.
+ * Open the file at `path`, read it whole and close it, then load what it
+ * held, naming it by its path.  The file is closed before anything is
+ * parsed, so a close that fails fails the load with nothing added.
  */
 static int
 load_named_file(relic_t *ctx, const char *path)
 {
 	FILE *stream;
-	int status;
+	char *text;
+	size_t length;
 
 	if (path == NULL) {
 		relic_diagf(ctx, RELIC_ERROR, NULL, "no path was given");
@@ -3187,15 +3269,17 @@ load_named_file(relic_t *ctx, const char *path)
 	if (stream == NULL)
 		return (-1);
 
-	status = load_stream(ctx, path, stream);
-
-	if (fclose(stream) != 0 && status == 0) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot close %s: %s", path,
-		    strerror(errno));
-		status = -1;
+	if (read_stream(ctx, path, stream, &text, &length) != 0) {
+		fclose(stream);
+		return (-1);
 	}
 
-	return (status);
+	if (relic_close_input(ctx, path, stream) != 0) {
+		relic_free_array(text);
+		return (-1);
+	}
+
+	return (load_read_text(ctx, path, text, length));
 }
 
 /*

@@ -26,12 +26,13 @@
 
 /*
  * The library sources in this program are compiled with their allocator
- * calls and their entropy source renamed, and this file supplies the
- * replacements.  Undefining the names here, before anything is included,
+ * calls, their entropy source and their closing of a stream renamed, and
+ * this file supplies the replacements.  Undefining the names here, before anything is included,
  * lets this one translation unit reach the real interfaces to implement
  * them.
  */
 #undef calloc
+#undef fclose
 #undef getentropy
 #undef malloc
 #undef mmap
@@ -55,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "compat.h"
 #include "harness.h"
@@ -63,6 +65,7 @@
 
 #define	SCENARIO_AGGREGATE	"an aggregate out of memory can be retried"
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
+#define	SCENARIO_CLOSE		"a path whose file fails to close adds nothing"
 #define	SCENARIO_COMPUTE	"a computing round out of memory can be retried"
 #define	SCENARIO_CREATE		"context creation reports a failed allocation"
 #define	SCENARIO_ENTROPY	"context creation fails without entropy"
@@ -330,7 +333,11 @@ static bool	 entropy_unavailable;
 /* How many of the next requests relic_test_getentropy() fills with zeros. */
 static unsigned int zero_draws_remaining;
 
+/* Whether the next relic_test_fclose() fails. */
+static bool	 next_close_fails;
+
 void		*relic_test_calloc(size_t count, size_t size);
+int		 relic_test_fclose(FILE *stream);
 int		 relic_test_getentropy(void *buffer, size_t length);
 void		*relic_test_malloc(size_t size);
 void		*relic_test_mmap(void *address, size_t length, int protection,
@@ -350,7 +357,12 @@ static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 interning_an_integer_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
+static void	 sweep_load(bool from_stream);
+static int	 load_sweep_program(relic_t *ctx, const char *program,
+		    bool from_stream);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
+static void	 a_path_whose_close_fails_adds_nothing(void);
+static bool	 write_temporary(const char *text, char *path, size_t size);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
 static void	 sweep_lookahead(const char *program, bool well_formed);
 static void	 a_check_that_ran_out_of_memory_can_be_retried(void);
@@ -477,6 +489,24 @@ relic_test_getentropy(void *buffer, size_t length)
 	}
 
 	return (getentropy(buffer, length));
+}
+
+/*
+ * A close told to fail releases the stream, as fclose(3) does whatever it
+ * returns, and then fails as it does when the file system reports an error
+ * at the close, with EOF and EIO.
+ */
+int
+relic_test_fclose(FILE *stream)
+{
+	if (next_close_fails) {
+		next_close_fails = false;
+		fclose(stream);
+		errno = EIO;
+		return (EOF);
+	}
+
+	return (fclose(stream));
 }
 
 void *
@@ -830,9 +860,24 @@ interning_an_integer_survives_a_failed_allocation(void)
  * failure flag is sticky, so a load that did not clear it after reporting would
  * leave a context that can never load anything again; the second load is what
  * proves it was cleared.
+ *
+ * The sweep runs once over text in memory and once over a stream, whose
+ * load also grows the buffer the stream is read into and releases the text
+ * between the parse and the commit.
  */
 static void
 a_load_that_ran_out_of_memory_adds_nothing(void)
+{
+	sweep_load(false);
+	sweep_load(true);
+}
+
+/*
+ * Load the sweep's program with the nth allocation refused, for every n
+ * across the load, from a string or from a stream holding the same text.
+ */
+static void
+sweep_load(bool from_stream)
 {
 	static const char program[] =
 	    "edge(a, 2).\n"
@@ -861,7 +906,7 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 		errors_reported = 0;
 
 		refuse_allocations_after(budget);
-		status = relic_load_string(ctx, "sweep.dl", program);
+		status = load_sweep_program(ctx, program, from_stream);
 		serve_every_allocation();
 
 		/*
@@ -897,7 +942,7 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 			    relic_base_total(ctx), budget);
 		}
 
-		checkf(relic_load_string(ctx, "sweep.dl", program) == 0,
+		checkf(load_sweep_program(ctx, program, from_stream) == 0,
 		    SCENARIO_LOAD,
 		    "loading should succeed once the allocator recovers, with "
 		    "allocation %ld refused", budget);
@@ -918,6 +963,38 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 	checkf(completed > 0, SCENARIO_LOAD,
 	    "the sweep should reach a load that completes, in %d attempts",
 	    LOAD_SWEEP);
+}
+
+/*
+ * Load `program` as sweep.dl, from the string itself or from a temporary
+ * stream holding it.  The C library's allocations for the stream are its
+ * own, not the load's, and no refusal reaches them.  Returns what the load
+ * returns, or -1 having failed a check when the stream cannot be made.
+ */
+static int
+load_sweep_program(relic_t *ctx, const char *program, bool from_stream)
+{
+	FILE *stream;
+	size_t length;
+	int status;
+
+	if (!from_stream)
+		return (relic_load_string(ctx, "sweep.dl", program));
+
+	length = strlen(program);
+	stream = tmpfile();
+	if (stream == NULL || fwrite(program, 1, length, stream) != length) {
+		check(false, SCENARIO_LOAD, "a stream should be written");
+		if (stream != NULL)
+			fclose(stream);
+		return (-1);
+	}
+
+	rewind(stream);
+	status = relic_load_file(ctx, "sweep.dl", stream);
+	fclose(stream);
+
+	return (status);
 }
 
 /*
@@ -1016,6 +1093,109 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 	checkf(completed > 0, SCENARIO_IMPORT,
 	    "the sweep should reach an import that completes, in %d attempts",
 	    LOAD_SWEEP);
+}
+
+/*
+ * A load or an import by path whose file fails to close fails having added
+ * nothing.  The file was read to its end before the close, but a caller
+ * told the call failed must find the program as it was: the fact it already
+ * held, and no rule or fact from the file.  The same call then succeeds once
+ * the file closes.
+ */
+static void
+a_path_whose_close_fails_adds_nothing(void)
+{
+	static const enum relic_column columns[] = { RELIC_COLUMN_SYMBOL };
+	relic_import_t import;
+	char path[64];
+	relic_t *ctx;
+	int status;
+
+	bzero(&import, sizeof(import));
+	import.predicate = "person";
+	import.columns = columns;
+	import.column_count = 1;
+	import.format = RELIC_FORMAT_CSV;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_CLOSE, "a context should be created");
+	if (ctx == NULL)
+		return;
+	relic_diag_set(ctx, count_error, NULL);
+	check(relic_load_string(ctx, "held.dl", "person(cy).\n") == 0,
+	    SCENARIO_CLOSE, "the fact held beforehand should load");
+
+	if (write_temporary("person(ann).\nperson(bob).\n"
+	    "known(X) :- person(X).\n", path, sizeof(path))) {
+		errors_reported = 0;
+		next_close_fails = true;
+		status = relic_load_path(ctx, path);
+		checkf(!next_close_fails && status != 0 &&
+		    errors_reported == 1 && relic_base_total(ctx) == 1 &&
+		    ctx->ast.count == 0, SCENARIO_CLOSE, "a load whose file "
+		    "fails to close should fail once having added nothing, "
+		    "not %zu facts and %zu statements",
+		    relic_base_total(ctx) - 1, ctx->ast.count);
+
+		check(relic_load_path(ctx, path) == 0 &&
+		    relic_base_total(ctx) == 3 && ctx->ast.count == 1,
+		    SCENARIO_CLOSE, "the load should succeed once its file "
+		    "closes");
+		unlink(path);
+	}
+
+	if (write_temporary("dee\neve\n", path, sizeof(path))) {
+		errors_reported = 0;
+		next_close_fails = true;
+		status = relic_import_path(ctx, path, &import);
+		checkf(!next_close_fails && status != 0 &&
+		    errors_reported == 1 && relic_base_total(ctx) == 3,
+		    SCENARIO_CLOSE, "an import whose file fails to close "
+		    "should fail once having added nothing, not %zu facts",
+		    relic_base_total(ctx) - 3);
+
+		check(relic_import_path(ctx, path, &import) == 0 &&
+		    relic_base_total(ctx) == 5, SCENARIO_CLOSE,
+		    "the import should succeed once its file closes");
+		unlink(path);
+	}
+
+	next_close_fails = false;
+	relic_destroy(ctx);
+}
+
+/*
+ * Write `text` to a new temporary file, whose path is put in `path`.
+ * Returns false having reported the failure as a check.
+ */
+static bool
+write_temporary(const char *text, char *path, size_t size)
+{
+	FILE *stream;
+	size_t length;
+	int descriptor;
+	bool written;
+
+	length = strlen(text);
+	if (strlcpy(path, "/tmp/relic-close.XXXXXX", size) >= size) {
+		check(false, SCENARIO_CLOSE, "a temporary path should fit");
+		return (false);
+	}
+
+	descriptor = mkstemp(path);
+	stream = descriptor != -1 ? fdopen(descriptor, "w") : NULL;
+	if (stream == NULL && descriptor != -1)
+		close(descriptor);
+
+	written = stream != NULL && fwrite(text, 1, length, stream) == length;
+	if (stream != NULL && fclose(stream) != 0)
+		written = false;
+
+	check(written, SCENARIO_CLOSE, "a temporary file should be written");
+	if (!written && descriptor != -1)
+		unlink(path);
+
+	return (written);
 }
 
 /*
@@ -3274,6 +3454,7 @@ main(void)
 	interning_an_integer_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
 	an_import_that_ran_out_of_memory_adds_nothing();
+	a_path_whose_close_fails_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();
 	a_check_that_ran_out_of_memory_can_be_retried();
 	an_analysis_that_ran_out_of_memory_says_nothing();

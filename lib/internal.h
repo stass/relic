@@ -961,6 +961,14 @@ int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
 FILE	*relic_open_input(relic_t *ctx, const char *path);
 
 /*
+ * Close a file relic_open_input() opened, once what it holds has been read
+ * and before any of it is committed, so that a close that fails fails the
+ * load or the import with nothing added.  Returns 0, or -1 having reported
+ * the failure.
+ */
+int	 relic_close_input(relic_t *ctx, const char *path, FILE *stream);
+
+/*
  * The stable name a location may point at for the life of the context: the
  * source name interned, or "<input>" for NULL.  Returns NULL having reported
  * that memory ran out.
