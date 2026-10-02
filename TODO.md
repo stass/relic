@@ -29,16 +29,6 @@ missing the step 4 gate of `specs/design-arithmetic.md` as well. Steps 5
 and 6 are not started. The causes and what to try are sorted in
 `docs/todo-parallel.md`.
 
-**An arena refusal is reported by every caller that meets it.** [Low,
-component: `lib/eval.c`, `lib/diag.c`] `relic_diag_no_memory()` reports each
-call, and an arena that refused once refuses every later request, so a
-caller that makes two allocations before checking either reports one
-refusal twice, the second time as "out of memory" after the limit's
-message.  Every caller must check each allocation before the next, a
-convention held by enumeration; a query's group run once broke it.  An
-allocation helper that reports only the refusal that first failed its
-arena would make the convention unnecessary.
-
 ## Build and packaging
 
 **Continuous integration is incomplete.** [High, component:

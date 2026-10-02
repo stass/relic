@@ -146,12 +146,11 @@ struct relic_function_name {
  *			continuing against a context that can no longer
  *			intern or a load that can no longer commit.  Once it
  *			is set advance() returns false, and every caller
- *			returns false at once.  That is what keeps a refusal
- *			to one message: the token of lookahead is interned
- *			before the parser is done with what precedes it, so
- *			a fact or a term can still be in hand when the
- *			refusal comes, and finishing it would report the
- *			same exhaustion a second time.
+ *			returns false at once.  The token of lookahead is
+ *			interned before the parser is done with what
+ *			precedes it, so a fact or a term can still be in
+ *			hand when the refusal comes, and finishing it would
+ *			go on working against the refusal.
  *
  *	the arena	an allocation was refused and nobody reported it.
  *			Every allocation the parser makes marks the arena when

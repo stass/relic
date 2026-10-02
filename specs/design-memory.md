@@ -190,6 +190,17 @@ is reset.
 Exhaustion is reported as an ordinary diagnostic and a `-1` return. The
 library never aborts: it must not terminate its host.
 
+**An operation reports running out of memory once.** A flag that refuses
+every later request means one exhaustion can be met many times: by a caller
+that makes a second allocation before checking the first, by a construction
+whose helpers each return early, by the boundary that confirms the flag
+after a helper already reported. The reporting function remembers, for the
+operation in progress, that it has reported, and stays silent for the rest
+of the operation, so the message is the first failure's whichever caller
+reaches it first. That makes "check each allocation before the next" a
+matter of style rather than of correctness. The next operation reports its
+own.
+
 ---
 
 ## 5. Growable arrays

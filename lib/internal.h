@@ -78,7 +78,9 @@ typedef struct relic_activity relic_activity_t;
  * `activity` says what the operation in progress is doing, for a refusal by
  * the memory limit to name.  It is written when an operation begins and
  * again when a phase that uses a charged arena begins, and read only when
- * the account records such a refusal.
+ * the account records such a refusal.  `memory_reported` records that the
+ * operation in progress has reported running out of memory, which it does
+ * once.
  */
 #define	RELIC_ACTIVITY_SUBJECT_MAX	256
 
@@ -101,6 +103,7 @@ struct relic_diag {
 	relic_activity_t activity;
 	bool		 has_error;
 	bool		 refused;
+	bool		 memory_reported;
 };
 
 /*
@@ -534,6 +537,14 @@ void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
  * records that the limit refused, the report is the limit's, in the form
  * every limit shares, naming the activity in progress, and the record is
  * taken so that it is reported once.
+ *
+ * An operation reports running out of memory once.  An arena that refused
+ * refuses every later request, so the caller that makes a second allocation
+ * before checking the first, or the construction that meets one exhaustion
+ * in several arenas, calls this again for the same failure; every call
+ * after the operation's first reports nothing and takes the account's
+ * record, which says nothing the first report did not.  No caller has to
+ * check one allocation before making the next for the report to be right.
  */
 void	 relic_diag_no_memory(relic_t *ctx);
 
@@ -555,13 +566,21 @@ void	 relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
  * arena.  The verb is kept by reference, so it must be a string literal; the
  * subject is copied, cut and marked when it is longer than
  * RELIC_ACTIVITY_SUBJECT_MAX.  A NULL verb records that nothing is named,
- * and the subject is then ignored.  An operation calls this as it begins,
- * through relic_enter(), and a phase that allocates from a charged arena
- * calls it before it allocates.  A refusal the account recorded and nothing
+ * and the subject is then ignored.  An operation records its activity as
+ * it begins, through relic_enter() and relic_diag_begin_operation(), and a
+ * phase that allocates from a charged arena calls this before it
+ * allocates.  A refusal the account recorded and nothing
  * reported is forgotten, so that no failure of this activity is blamed on an
  * earlier one.
  */
 void	 relic_diag_activity(relic_t *ctx, const char *verb,
+	    const char *subject);
+
+/*
+ * Begin an operation: it has reported nothing about memory yet, and its
+ * activity is `verb` and `subject`, as relic_diag_activity() takes them.
+ */
+void	 relic_diag_begin_operation(relic_t *ctx, const char *verb,
 	    const char *subject);
 
 /*

@@ -143,6 +143,12 @@ relic_diag_record_refusal(relic_t *ctx)
 void
 relic_diag_no_memory(relic_t *ctx)
 {
+	if (ctx->diag.memory_reported) {
+		relic_account_take_refusal(&ctx->account);
+		return;
+	}
+	ctx->diag.memory_reported = true;
+
 	if (!relic_account_take_refusal(&ctx->account)) {
 		relic_diagf(ctx, RELIC_ERROR, NULL, "out of memory");
 		return;
@@ -165,6 +171,14 @@ relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
 	relic_diagf(ctx, RELIC_ERROR, NULL,
 	    "limit exceeded: %s=%zu while %s %s", limit, configured, verb,
 	    subject);
+}
+
+void
+relic_diag_begin_operation(relic_t *ctx, const char *verb,
+    const char *subject)
+{
+	ctx->diag.memory_reported = false;
+	relic_diag_activity(ctx, verb, subject);
 }
 
 void

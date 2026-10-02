@@ -38,7 +38,7 @@ relic_enter(relic_t *ctx, const char *verb, const char *subject)
 	}
 
 	ctx->busy = true;
-	relic_diag_activity(ctx, verb, subject);
+	relic_diag_begin_operation(ctx, verb, subject);
 
 	return (0);
 }

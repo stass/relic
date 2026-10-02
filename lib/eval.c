@@ -1716,9 +1716,9 @@ widest_head(const relic_ruletab_t *rules)
  * Give the evaluation the per-predicate delta ranges and membership marks
  * its fixed points need.  Returns 0, or -1 with a diagnostic reported.
  *
- * Each allocation is checked before the next is made: the arena's failure is
- * sticky, so a second request after a refused one would be refused too and
- * report the same exhaustion again.
+ * Each allocation is checked before the next is made, so that the work
+ * stops at the first refusal rather than asking more of an arena whose
+ * failure is sticky.
  */
 static int
 evaluation_track_deltas(relic_evaluation_t *eval)
@@ -2235,9 +2235,8 @@ delta_member_of(const relic_evaluation_t *eval, const relic_variant_t *variant)
 }
 
 /*
- * Allocate the sets of a component's delta work, each checked before the
- * next is asked for, since a refused request leaves the arena refusing and
- * each refusal would be reported again.
+ * Allocate the sets of a component's delta work, stopping at the first the
+ * arena refuses, since a refused request leaves the arena refusing.
  */
 static int
 allocate_delta_work(relic_evaluation_t *eval, relic_delta_work_t *work,
