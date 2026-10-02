@@ -195,7 +195,7 @@ query already is, would remove both branches and the second closure.
 percent of the library's and the tool's lines. What it does not reach is
 sorted in `docs/todo-coverage.md`: arena allocation failures the exhaustion
 sweep cannot land on, which one arena-level fault point would reach, and
-defensive branches, one of which may have lost its reason to exist.
+defensive branches kept deliberately.
 
 **A caller tells a limit's refusal from another failure only by its
 text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is
