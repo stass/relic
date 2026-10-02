@@ -315,6 +315,12 @@ tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 ## import whose file fails to close must add nothing, and no file a test can
 ## make fails to close on its own.
 ##
+## RELIC_ARENA_FAULT names the function lib/arena.c asks before serving any
+## request.  An arena calls the allocator only when a request opens a chunk,
+## so a sweep of the allocator's requests reaches only the callers whose
+## requests happen to fall on a chunk boundary; the suite sweeps the arena's
+## requests through this point as well, which reaches every caller.
+##
 ## The renaming follows the pattern the compat suite already uses.  It is
 ## confined to this program; nothing that ships is built this way.  The
 ## threshold from which a growable array is mapped is lowered with it, so
@@ -332,6 +338,7 @@ RELIC_EXHAUSTION_RENAMES = \
 	-Dmmap=relic_test_mmap \
 	-Drealloc=relic_test_realloc \
 	-Dreallocarray=relic_test_reallocarray \
+	-DRELIC_ARENA_FAULT=relic_test_arena_refuses \
 	-DRELIC_ARRAY_MAP_BYTES=4096
 
 RELIC_TEST_BINARIES += tests/unit/test_exhaustion

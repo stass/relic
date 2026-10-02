@@ -65,6 +65,10 @@ static void			 uncharge(relic_arena_t *arena, size_t bytes);
 static unsigned char		*chunk_payload(relic_arena_chunk_t *chunk);
 static size_t			 round_up(size_t size, size_t alignment);
 
+#ifdef RELIC_ARENA_FAULT
+bool				 RELIC_ARENA_FAULT(void);
+#endif
+
 /*
  * Round size up to a multiple of alignment, which must be a power of two.
  *
@@ -271,6 +275,22 @@ relic_arena_alloc(relic_arena_t *arena, size_t size)
 
 	if (arena->failed)
 		return (NULL);
+
+#ifdef RELIC_ARENA_FAULT
+	/*
+	 * The exhaustion suite's fault point.  A request is refused by the
+	 * allocator only when it opens a chunk, so which requests a sweep of
+	 * allocator refusals reaches depends on how a program's sizes fall
+	 * on chunk boundaries.  The suite's build names a function here that
+	 * can refuse any request as though it had opened a chunk the
+	 * allocator refused, so that every caller's failure path can be
+	 * reached.  No other build defines it.
+	 */
+	if (RELIC_ARENA_FAULT()) {
+		arena->failed = true;
+		return (NULL);
+	}
+#endif
 
 	chunk = SLIST_FIRST(&arena->chunks);
 	if (!arena_place(arena->alignment, chunk != NULL,

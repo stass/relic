@@ -8,10 +8,12 @@
  * The library's behaviour when an allocation fails.
  *
  * Every other suite runs with an allocator that always succeeds, so the
- * failure paths that the arena contract of specs/design-memory.md is built
- * around are never taken.  This one compiles the library against a
- * replacement allocator that can be told to refuse the nth request, and
- * sweeps n across the whole of an operation.
+ * failure paths the library's allocation contracts are built around are
+ * never taken.  This one compiles the library against a replacement
+ * allocator that can be told to refuse the nth request, and sweeps n across
+ * the whole of an operation; and, through the fault point every arena asks
+ * before it serves a request, sweeps the arenas' requests the same way,
+ * since an arena asks the allocator only for a new chunk.
  *
  * What it checks is not that a failure is reported -- that much a return
  * value would show -- but that a context which reported one is still
@@ -64,6 +66,7 @@
 #include "programs.h"
 
 #define	SCENARIO_AGGREGATE	"an aggregate out of memory can be retried"
+#define	SCENARIO_ARENA		"an arena refusal anywhere is reported once"
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
 #define	SCENARIO_CLOSE		"a path whose file fails to close adds nothing"
 #define	SCENARIO_COMPUTE	"a computing round out of memory can be retried"
@@ -269,6 +272,48 @@
  */
 #define	INTERFACE_SWEEP	512
 
+/*
+ * The arena sweep's program and queries.  The program recurses, negates and
+ * aggregates, and the queries are answered through the Magic rewrite, one
+ * of them cut into supplementary predicates of its own, and then from the
+ * whole fixed point, so that loading, checking, rewriting, planning and
+ * evaluating each make arena requests.  The sweep refuses every one of
+ * them in turn, which a sweep of the allocator's requests cannot: an arena
+ * asks the allocator only when a request opens a chunk.
+ */
+static const char arena_program[] =
+    "edge(a, b). edge(b, c). edge(c, d). edge(d, a). edge(d, e).\n"
+    "blocked(c).\n"
+    "path(X, Y) :- edge(X, Y).\n"
+    "path(X, Z) :- edge(X, Y), path(Y, Z).\n"
+    "open(X, Y) :- path(X, Y), not blocked(Y).\n"
+    "degree(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n";
+
+static const char *const arena_queries[] = {
+	"path(a, X), path(X, Y), path(Y, Z)?",
+	"open(a, X)?",
+	"degree(X, N)?",
+	"N = count { path(X, Y) }?",
+};
+
+#define	ARENA_QUERIES	(sizeof(arena_queries) / sizeof(arena_queries[0]))
+
+typedef struct arena_progress arena_progress_t;
+
+/*
+ * How far the arena sweep's steps have come: the program loaded and
+ * checked, and the queries prepared and answered, in order, with the rows
+ * of each answered one.  A step that fails is retried from where it
+ * stopped, as a caller would retry it.
+ */
+struct arena_progress {
+	relic_query_t	*queries[ARENA_QUERIES];
+	size_t		 rows[ARENA_QUERIES];
+	size_t		 answered;
+	bool		 loaded;
+	bool		 checked;
+};
+
 typedef struct eval_sweep eval_sweep_t;
 
 /*
@@ -322,6 +367,20 @@ typedef struct load_case {
 	size_t		 facts;
 } load_case_t;
 
+/*
+ * Which requests a sweep counts and refuses: the allocator's, which the
+ * library reaches through the renamed allocator, or an arena's, which it
+ * reaches through RELIC_ARENA_FAULT whether or not the request opens a
+ * chunk.  Requests of the other kind are served and not counted, so a
+ * budget and a count of the requests made mean the same in either.
+ */
+enum refused_requests {
+	REFUSE_ALLOCATOR,
+	REFUSE_ARENA
+};
+
+static enum refused_requests refusing = REFUSE_ALLOCATOR;
+
 static relic_atomic_size_t allocations_remaining = SERVE_EVERY;
 static relic_atomic_size_t allocations_seen;
 static relic_atomic_size_t worker_refusals;
@@ -363,7 +422,8 @@ void		*relic_test_reallocarray(void *items, size_t count,
 
 static size_t	 allocations_made(void);
 static void	 count_worker_refusal(void);
-static bool	 refuse_this_allocation(void);
+bool		 relic_test_arena_refuses(void);
+static bool	 refuse_this_request(enum refused_requests kind);
 static void	 serve_every_allocation(void);
 static void	 refuse_allocations_after(long served);
 static void	 context_creation_reports_a_failed_allocation(void);
@@ -407,6 +467,10 @@ static void	 an_aggregate_out_of_memory_can_be_retried(void);
 static void	 sweep_aggregate_check(void);
 static void	 sweep_aggregate_query(unsigned int flags, size_t threads,
 		    const char *strategy);
+static void	 an_arena_refusal_anywhere_is_reported_once(void);
+static void	 sweep_arena(unsigned int flags, const char *strategy);
+static int	 advance_arena_steps(relic_t *ctx, arena_progress_t *progress);
+static void	 end_arena_steps(arena_progress_t *progress);
 static bool	 rules_are_whole_statements(relic_t *ctx);
 static int	 add_and_collect(relic_t *ctx, bool integer, size_t *rowsp);
 static char	*wide_sweep_program(void);
@@ -428,9 +492,12 @@ static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
 
 static bool
-refuse_this_allocation(void)
+refuse_this_request(enum refused_requests kind)
 {
 	size_t remaining;
+
+	if (kind != refusing)
+		return (false);
 
 	relic_atomic_size_add_relaxed(&allocations_seen, 1);
 
@@ -475,10 +542,16 @@ refuse_allocations_after(long served)
 	relic_atomic_size_store(&allocations_remaining, (size_t)served);
 }
 
+bool
+relic_test_arena_refuses(void)
+{
+	return (refuse_this_request(REFUSE_ARENA));
+}
+
 void *
 relic_test_calloc(size_t count, size_t size)
 {
-	if (refuse_this_allocation())
+	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
 	return (calloc(count, size));
@@ -529,7 +602,7 @@ relic_test_fclose(FILE *stream)
 void *
 relic_test_malloc(size_t size)
 {
-	if (refuse_this_allocation())
+	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
 	return (malloc(size));
@@ -543,7 +616,7 @@ void *
 relic_test_mmap(void *address, size_t length, int protection, int flags,
     int descriptor, off_t offset)
 {
-	if (refuse_this_allocation()) {
+	if (refuse_this_request(REFUSE_ALLOCATOR)) {
 		errno = ENOMEM;
 		return (MAP_FAILED);
 	}
@@ -554,7 +627,7 @@ relic_test_mmap(void *address, size_t length, int protection, int flags,
 void *
 relic_test_realloc(void *block, size_t size)
 {
-	if (refuse_this_allocation())
+	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
 	return (realloc(block, size));
@@ -563,7 +636,7 @@ relic_test_realloc(void *block, size_t size)
 void *
 relic_test_reallocarray(void *items, size_t count, size_t size)
 {
-	if (refuse_this_allocation())
+	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
 	return (reallocarray(items, count, size));
@@ -3623,6 +3696,169 @@ sweep_aggregate_query(unsigned int flags, size_t threads,
 	    completed);
 }
 
+/*
+ * Load, check and answer the arena sweep's program with each arena request
+ * refused in turn, the allocator serving every one of its own.  Whichever
+ * request is refused, the steps either complete or fail with one message,
+ * and retried with nothing refused they complete and answer what an
+ * undisturbed run answers.
+ */
+static void
+an_arena_refusal_anywhere_is_reported_once(void)
+{
+	refusing = REFUSE_ARENA;
+	sweep_arena(0, "through the Magic rewrite");
+	sweep_arena(RELIC_F_NO_MAGIC, "from the whole fixed point");
+	refusing = REFUSE_ALLOCATOR;
+}
+
+static void
+sweep_arena(unsigned int flags, const char *strategy)
+{
+	relic_config_t config;
+	arena_progress_t expected;
+	arena_progress_t progress;
+	relic_t *ctx;
+	size_t requests;
+	size_t refused;
+	size_t before;
+	size_t budget;
+	size_t i;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+
+	/*
+	 * An undisturbed run gives the answers and the number of requests the
+	 * steps make, which is how far the sweep goes: one run per request.
+	 */
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_ARENA, "a context should be created");
+		return;
+	}
+	bzero(&expected, sizeof(expected));
+	before = allocations_made();
+	status = advance_arena_steps(ctx, &expected);
+	requests = allocations_made() - before;
+	end_arena_steps(&expected);
+	relic_destroy(ctx);
+	if (status != 0) {
+		checkf(false, SCENARIO_ARENA, "%s, the undisturbed steps "
+		    "should complete", strategy);
+		return;
+	}
+
+	/*
+	 * Steps that made no arena request through the fault point would
+	 * leave nothing to sweep and pass, as a build that lost the fault
+	 * point would; they must have made some.
+	 */
+	if (requests == 0) {
+		checkf(false, SCENARIO_ARENA, "%s, the steps should make arena "
+		    "requests through the fault point", strategy);
+		return;
+	}
+
+	refused = 0;
+	for (budget = 0; budget < requests; budget++) {
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_ARENA,
+			    "a context should be created");
+			return;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+		bzero(&progress, sizeof(progress));
+
+		errors_reported = 0;
+		refuse_allocations_after((long)budget);
+		status = advance_arena_steps(ctx, &progress);
+		serve_every_allocation();
+		if (status != 0)
+			refused++;
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_ARENA, "%s, steps that %s should report %d "
+		    "message(s), not %zu, with arena request %zu refused",
+		    strategy, status != 0 ? "failed" : "completed",
+		    status != 0 ? 1 : 0, errors_reported, budget);
+
+		errors_reported = 0;
+		status = advance_arena_steps(ctx, &progress);
+		checkf(status == 0 && errors_reported == 0, SCENARIO_ARENA,
+		    "%s, the retried steps should complete without a "
+		    "message, with arena request %zu refused", strategy,
+		    budget);
+		for (i = 0; status == 0 && i < ARENA_QUERIES; i++) {
+			checkf(progress.rows[i] == expected.rows[i],
+			    SCENARIO_ARENA, "%s, %s should answer %zu rows, "
+			    "not %zu, with arena request %zu refused",
+			    strategy, arena_queries[i], expected.rows[i],
+			    progress.rows[i], budget);
+		}
+
+		end_arena_steps(&progress);
+		relic_destroy(ctx);
+	}
+
+	checkf(refused == requests, SCENARIO_ARENA, "%s, every one of the "
+	    "%zu arena requests refused should fail the steps, not %zu",
+	    strategy, requests, refused);
+}
+
+/*
+ * Take the arena sweep's steps from where `progress` says they stopped,
+ * stopping at the first that fails.  Returns -1 when one failed.
+ */
+static int
+advance_arena_steps(relic_t *ctx, arena_progress_t *progress)
+{
+	relic_query_t **query;
+	size_t *rows;
+
+	if (!progress->loaded) {
+		if (relic_load_string(ctx, "sweep.dl", arena_program) != 0)
+			return (-1);
+		progress->loaded = true;
+	}
+
+	if (!progress->checked) {
+		if (relic_check(ctx) != 0)
+			return (-1);
+		progress->checked = true;
+	}
+
+	while (progress->answered < ARENA_QUERIES) {
+		query = &progress->queries[progress->answered];
+		rows = &progress->rows[progress->answered];
+
+		if (*query == NULL) {
+			*query = relic_query_prepare(ctx, NULL,
+			    arena_queries[progress->answered]);
+			if (*query == NULL)
+				return (-1);
+		}
+
+		*rows = 0;
+		if (relic_query_run(ctx, *query, count_answer, rows) != 0)
+			return (-1);
+		progress->answered++;
+	}
+
+	return (0);
+}
+
+static void
+end_arena_steps(arena_progress_t *progress)
+{
+	size_t i;
+
+	for (i = 0; i < ARENA_QUERIES; i++)
+		relic_query_destroy(progress->queries[i]);
+}
+
 int
 main(void)
 {
@@ -3652,6 +3888,7 @@ main(void)
 	an_added_fact_or_collected_answer_reports_once();
 	a_loaded_query_out_of_memory_reports_once();
 	an_aggregate_out_of_memory_can_be_retried();
+	an_arena_refusal_anywhere_is_reported_once();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the

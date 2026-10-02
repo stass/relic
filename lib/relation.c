@@ -2449,17 +2449,17 @@ relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
 }
 
 /*
- * Whether a relation is called by its predicate's name: every relation but
- * a query's answer, which has no predicate, and the base store of a derived
- * predicate, called by its base view's name.
+ * Whether a relation of a predicate is called by the predicate's name:
+ * every one but the base store of a derived predicate, called by its base
+ * view's name.  A query's answer has no predicate, and both callers name it
+ * before they ask.
  */
 static bool
 is_called_by_predicate(const relic_t *ctx, const relic_relation_t *relation)
 {
 	const relic_pred_t *pred;
 
-	if (relation->pred == RELIC_ID_NONE)
-		return (false);
+	assert(relation->pred != RELIC_ID_NONE);
 
 	pred = relic_pred_of(ctx, relation->pred);
 

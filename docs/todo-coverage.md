@@ -7,39 +7,16 @@ each gap is named by its function.
 
 ## Allocation failures the sweep cannot reach
 
-[Medium, component: `tests/unit/test_exhaustion.c`] Most of the uncovered
-failure branches in the library are a failed arena allocation followed by
-its propagation:
-
-* `lib/eval.c`: `evaluation_track_deltas`, `build_running_plan`,
-  `plan_members`, `plan_base`, `plan_variants`, `allocate_delta_work`,
-  `plan_delta_work`, `plan_query`;
-* `lib/magic.c`: `index_rules_by_head`, `demand_begin`,
-  `relic_magic_find_complete`, `name_adornment`, `canonicalize`,
-  `bound_args` and its callers `guard_literal` and `record_call`,
-  `later_slots`, `intern_supplementary`, `supplementary_literal`,
-  `cut_prefix`, `rewrite_body`;
-* `lib/plan.c`: `place_atom`, `place_negated`, `emit_body`,
-  `planner_init`;
-* `lib/rule.c`: `compile_atom`, `compile_head`, `store_variables` and their
-  callers, `compile_query_head`, `prepare_query`;
-* `lib/stratify.c`: `assign_strata`, `order_by_stratum`, `build_schedule`,
-  `analyse_program`;
-* `lib/parse.c`: `append_statement`.
-
-The exhaustion suite refuses the nth `malloc`, and an arena calls `malloc`
-only when it opens a chunk, so each of these fails only when a program
-happens to be sized to open a chunk at that request; `-l memory=N` sweeps
-land on the same boundaries. One fault point in the exhaustion build that
-refuses the kth `relic_arena_alloc` of any arena, swept across the existing
-scenarios, would reach nearly all of them at once, and would keep reaching
-new ones as the code grows, which sizing a program per branch would not.
-
-A few are reachable with the present `malloc` sweep given a scenario it
-lacks: `lib/parse.c` `parse_literal`, `parser_init`, and the `advance` of
-`collect_body`, which fail only when a load's constant, or its interning of
-`not` or `_`, lands on the value or symbol table's growth point. A context
-filled to one entry short of a growth before the load would reach them.
+[Low, component: `tests/unit/test_exhaustion.c`] The exhaustion suite
+refuses the allocator's requests, and through the arena fault point every
+arena request of a program loaded, checked and answered both through the
+Magic rewrite and from the whole fixed point. What neither reaches is an
+intern that fails only when it lands on a table's growth point: in
+`lib/parse.c`, `parse_literal` and the `advance` of `collect_body`, for a
+load's constant or its interning of `not` or `_`; in `lib/magic.c`,
+`relic_magic_find_complete` interning a base view; and in `lib/rule.c`,
+`compile_head` interning a head's constant. A context filled to one entry
+short of a growth before the operation would reach them.
 
 ## Branches unreachable by construction
 

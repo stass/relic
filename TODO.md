@@ -191,11 +191,10 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**Coverage gaps.** [Low, component: `tests/`] `make coverage` reaches 96
+**Coverage gaps.** [Low, component: `tests/`] `make coverage` reaches 97
 percent of the library's and the tool's lines. What it does not reach is
-sorted in `docs/todo-coverage.md`: arena allocation failures the exhaustion
-sweep cannot land on, which one arena-level fault point would reach, and
-defensive branches kept deliberately.
+sorted in `docs/todo-coverage.md`: interning failures only a table's
+growth point reaches, and defensive branches kept deliberately.
 
 **A caller tells a limit's refusal from another failure only by its
 text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is
