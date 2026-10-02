@@ -73,7 +73,7 @@ relic_diag_init(relic_diag_t *diag)
 void
 relic_diag_set(relic_t *ctx, relic_diag_cb callback, void *callback_ctx)
 {
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return;
 
 	ctx->diag.callback = callback;
@@ -149,7 +149,7 @@ relic_diag_no_memory(relic_t *ctx)
 	}
 
 	relic_diag_limit(ctx, "memory", ctx->account.limit,
-	    ctx->diag.activity_verb, ctx->diag.activity_subject);
+	    ctx->diag.activity.verb, ctx->diag.activity.subject);
 }
 
 void
@@ -168,19 +168,25 @@ relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
 }
 
 void
-relic_diag_begin_operation(relic_t *ctx)
+relic_diag_activity(relic_t *ctx, const char *verb, const char *subject)
 {
-	ctx->diag.activity_verb = NULL;
+	ctx->diag.activity.verb = verb;
+	if (verb != NULL)
+		relic_diag_name(subject, ctx->diag.activity.subject,
+		    sizeof(ctx->diag.activity.subject));
 	relic_account_take_refusal(&ctx->account);
 }
 
 void
-relic_diag_activity(relic_t *ctx, const char *verb, const char *subject)
+relic_diag_save_activity(const relic_t *ctx, relic_activity_t *saved)
 {
-	ctx->diag.activity_verb = verb;
-	strlcpy(ctx->diag.activity_subject, subject,
-	    sizeof(ctx->diag.activity_subject));
-	relic_account_take_refusal(&ctx->account);
+	*saved = ctx->diag.activity;
+}
+
+void
+relic_diag_restore_activity(relic_t *ctx, const relic_activity_t *saved)
+{
+	ctx->diag.activity = *saved;
 }
 
 /*

@@ -30,7 +30,7 @@
 static int	 draw_hash_seed(uint64_t *seedp);
 
 int
-relic_enter(relic_t *ctx)
+relic_enter(relic_t *ctx, const char *verb, const char *subject)
 {
 	if (ctx->busy) {
 		relic_diag_record_refusal(ctx);
@@ -38,7 +38,7 @@ relic_enter(relic_t *ctx)
 	}
 
 	ctx->busy = true;
-	relic_diag_begin_operation(ctx);
+	relic_diag_activity(ctx, verb, subject);
 
 	return (0);
 }
@@ -71,7 +71,7 @@ relic_leave(relic_t *ctx)
 void
 relic_destroy(relic_t *ctx)
 {
-	if (ctx == NULL || relic_enter(ctx) != 0)
+	if (ctx == NULL || relic_enter(ctx, NULL, NULL) != 0)
 		return;
 
 	relic_pool_free(ctx->pool);

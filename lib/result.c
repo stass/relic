@@ -77,7 +77,7 @@ relic_query_collect(relic_t *ctx, relic_query_t *query)
 {
 	relic_result_t *result;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (NULL);
 
 	result = collect(ctx, query);

@@ -1124,13 +1124,13 @@ refused_while(relic_t *ctx, const char *activity)
  * queries with distinct constants grows the tables with each one.  Each
  * query here holds a new integer and a new string, so that both the
  * integer table and the pool grow.  The limit bounds both whole, and must
- * refuse a preparation before the total passes it, naming the limit,
- * however many preparations come first.
+ * refuse a preparation before the total passes it, naming the limit and the
+ * query being prepared, however many preparations come first.
  */
 static void
 preparing_queries_stays_within_the_memory_limit(void)
 {
-	char expected[64];
+	char expected[96];
 	char text[64];
 	relic_query_t *query;
 	const char *reported;
@@ -1162,7 +1162,8 @@ preparing_queries_stays_within_the_memory_limit(void)
 	    "the account should stay within %zu bytes, and the tables hold %zu",
 	    ctx->account.limit, relic_value_storage_bytes(ctx));
 
-	snprintf(expected, sizeof(expected), "limit exceeded: memory=%zu",
+	snprintf(expected, sizeof(expected),
+	    "limit exceeded: memory=%zu while preparing <query>",
 	    ctx->account.limit);
 	reported = relic_error(ctx);
 	checkf(reported != NULL && strcmp(reported, expected) == 0,

@@ -325,24 +325,40 @@ what was being done. Every place that turns a failed arena into a diagnostic
 already does so through one function, the one that reports exhaustion, and
 that function is where the difference lives. **When the account refuses, it
 records on the context that the memory limit did**, together with the
-operation in progress, which the context records once when an operation
-begins: evaluating a component, named by its first member; planning a
-query's rule, named as the query is in diagnostics; rewriting a query. The
-reporting function, finding that record, formats
+activity in progress. Every operation states its activity as it begins, as
+an argument of the one function that begins an operation, so no operation
+can begin without saying what it does: loading a program or importing a
+table, named by its source; adding a fact, named by its predicate;
+preparing a query, named as the query is in diagnostics. A check of the
+program, which runs alone and at the start of every operation that uses
+the program, records itself for as long as it runs and then gives the
+operation its own activity back. An evaluation records each phase as it
+reaches it: planning a component, named by its first member; planning a
+query's rule; rewriting a query. Building a value is the one operation
+with nothing to name, and states none. The reporting function, finding
+that record, formats
 
 ```text
+limit exceeded: memory=N while loading <source>
+limit exceeded: memory=N while importing <source>
+limit exceeded: memory=N while adding <predicate>
+limit exceeded: memory=N while preparing <query>
+limit exceeded: memory=N while checking the program
 limit exceeded: memory=N while planning <predicate>
 limit exceeded: memory=N while planning <query>
 limit exceeded: memory=N while rewriting <query>
 ```
 
-instead of out of memory, and consumes the record. No site that reports an
+instead of out of memory, or `limit exceeded: memory=N` alone when no
+activity is stated, and consumes the record. A name too long for the
+message is cut and marked as cut, as every name a diagnostic quotes is. No
+site that reports an
 allocation failure changes, whichever arena it confirms and whether it
 reports at a boundary or at the allocation, because the account and the
 reporting function are the only two parties to the record. An arena reset,
 or the clearing of a flag, does not touch the record: it belongs to the
-refusal, not to the arena. An operation clears the record and the recorded
-operation when it begins, so that a refusal in the allocations an evaluation
+refusal, not to the arena. An operation clears the record and states its
+activity when it begins, so that a refusal in the allocations an evaluation
 makes before its first component is reported as the evaluation's, and a
 record no diagnostic consumed cannot be reported by a later operation as its
 own.

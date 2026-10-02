@@ -63,12 +63,13 @@ green run before they can be trusted. Missing:
   machines, would close it.
 * macOS on every push, once minutes on it are free.
 
-**`tests/perf.sh` can miss its clock under `make coverage`.** [Low,
-component: `tests/perf.sh`] The session of 100 000 queries takes 45 s of its
-60 s budget in a coverage build with nothing else running, and ran past it
-with the rest of the suite running beside it under `make -j8`. A budget
-scaled for an instrumented build, or the workload skipped there, would keep
-the coverage target from failing on load.
+**`tests/perf.sh` can miss its clock on a loaded machine.** [Low,
+component: `tests/perf.sh`] The session of 100 000 queries has a 60 s
+budget. It takes about 6 s of CPU in a debug build and 45 s of wall time in
+a coverage build, and has run past the budget in both under `make -j8 check`
+on a machine whose load average was near 10. Bounding the session's CPU
+time rather than its wall time, or scaling the budget for an instrumented
+build, would keep the check from failing on load.
 
 **`contrib/` has no BSD port skeletons.** [Low, component: `contrib/`,
 `specs/design-release.md` section 4] Only the Homebrew formula exists. The

@@ -60,6 +60,7 @@ typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
 typedef struct relic_pending_map relic_pending_map_t;
 typedef struct relic_valtab relic_valtab_t;
+typedef struct relic_activity relic_activity_t;
 
 /*
  * Where diagnostics go, and the text of the last error.
@@ -74,19 +75,30 @@ typedef struct relic_valtab relic_valtab_t;
  * busy; relic_error() then describes the refusal in place of `last_error`
  * until the operation returns.
  *
- * `activity_verb` and `activity_subject` say what the operation in progress
- * is doing, such as "planning" and "path/2", for a refusal by the memory
- * limit to name; the verb is NULL while nothing is recorded.  They are
- * written when a phase that uses a charged arena begins, and read only when
+ * `activity` says what the operation in progress is doing, for a refusal by
+ * the memory limit to name.  It is written when an operation begins and
+ * again when a phase that uses a charged arena begins, and read only when
  * the account records such a refusal.
  */
+#define	RELIC_ACTIVITY_SUBJECT_MAX	256
+
+/*
+ * What an operation is doing, as a verb and the description of what it acts
+ * on, such as "loading" and "graph.dl" or "planning" and "path/2".  The verb
+ * is a string literal, NULL while nothing is recorded.  The subject is cut to
+ * RELIC_ACTIVITY_SUBJECT_MAX bytes, room for a source's path.
+ */
+struct relic_activity {
+	const char	*verb;
+	char		 subject[RELIC_ACTIVITY_SUBJECT_MAX];
+};
+
 struct relic_diag {
 	relic_diag_cb	 callback;
 	void		*callback_ctx;
 	size_t		 error_count;
 	char		 last_error[512];
-	const char	*activity_verb;
-	char		 activity_subject[RELIC_PRED_TEXT_MAX];
+	relic_activity_t activity;
 	bool		 has_error;
 	bool		 refused;
 };
@@ -477,8 +489,14 @@ struct relic {
  * refusal, and the entry point returns its failure at once.  Entry points
  * never call one another inside the library, since the inner one would be
  * refused; each has a worker the others share instead.
+ *
+ * An operation states its activity as it enters, as relic_diag_activity()
+ * takes it: a verb and what it acts on, such as "loading" and the source's
+ * name, which a refusal by the memory limit names.  An operation with
+ * nothing of its own to name -- one that only reads, or an evaluation, whose
+ * phases record their own -- passes a NULL verb and subject.
  */
-int	 relic_enter(relic_t *ctx);
+int	 relic_enter(relic_t *ctx, const char *verb, const char *subject);
 void	 relic_leave(relic_t *ctx);
 
 /*
@@ -534,21 +552,29 @@ void	 relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
  * Record what the operation in progress is now doing, as a verb and the
  * description of what it acts on -- "planning" and "path/2" -- which
  * relic_diag_no_memory() names when the memory limit refused a charged
- * arena.  The verb is kept by reference, so it must be a string literal.  A
- * phase that allocates from a charged arena calls this before it allocates.
- * A refusal the account recorded and nothing reported is forgotten, so that
- * no failure of this phase is blamed on an earlier one.
+ * arena.  The verb is kept by reference, so it must be a string literal; the
+ * subject is copied, cut and marked when it is longer than
+ * RELIC_ACTIVITY_SUBJECT_MAX.  A NULL verb records that nothing is named,
+ * and the subject is then ignored.  An operation calls this as it begins,
+ * through relic_enter(), and a phase that allocates from a charged arena
+ * calls it before it allocates.  A refusal the account recorded and nothing
+ * reported is forgotten, so that no failure of this activity is blamed on an
+ * earlier one.
  */
 void	 relic_diag_activity(relic_t *ctx, const char *verb,
 	    const char *subject);
 
 /*
- * Begin an operation with no activity recorded and no refusal: what the last
- * operation recorded and never reported belongs to it.  A charged arena used
- * before any activity is recorded is then reported as the limit without an
- * activity, rather than with the name of something an earlier operation did.
+ * A phase that runs inside more than one kind of operation, as a check runs
+ * inside a query's preparation, records an activity of its own and puts the
+ * operation's back when it ends.  relic_diag_save_activity() copies the
+ * activity in progress into *saved, and relic_diag_restore_activity() makes
+ * it current again; restoring forgets nothing, since a refusal in the phase
+ * has been reported by the time the phase returns.
  */
-void	 relic_diag_begin_operation(relic_t *ctx);
+void	 relic_diag_save_activity(const relic_t *ctx, relic_activity_t *saved);
+void	 relic_diag_restore_activity(relic_t *ctx,
+	    const relic_activity_t *saved);
 
 /*
  * Record that a call was refused because its context was busy.  relic_error()

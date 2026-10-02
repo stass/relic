@@ -2847,7 +2847,7 @@ relic_materialize(relic_t *ctx)
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (-1);
 
 	status = relic_program_ready(ctx);
@@ -3436,7 +3436,7 @@ relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (-1);
 
 	status = relic_query_answer(ctx, query, callback, callback_ctx);

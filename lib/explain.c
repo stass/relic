@@ -150,7 +150,7 @@ static bool	 reads_as_negation(const relic_t *ctx,
 void
 relic_explain_set(relic_t *ctx, relic_explain_cb callback, void *callback_ctx)
 {
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return;
 
 	ctx->explain = callback;

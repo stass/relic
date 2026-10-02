@@ -675,7 +675,8 @@ relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
 	import_plan_t plan;
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "importing",
+	    source_name != NULL ? source_name : RELIC_UNNAMED_SOURCE) != 0)
 		return (-1);
 
 	status = -1;
@@ -698,7 +699,8 @@ relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
 	import_plan_t plan;
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "importing",
+	    path != NULL ? path : RELIC_UNNAMED_SOURCE) != 0)
 		return (-1);
 
 	status = -1;

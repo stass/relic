@@ -273,6 +273,7 @@ static enum relic_compile_result append_program_rules(relic_t *ctx,
 		    relic_compiled_statement_t *compiled);
 static void	 bind_by_assignment(relic_compiler_t *compiler);
 static int	 check_program(relic_t *ctx);
+static int	 compile_and_analyse(relic_t *ctx);
 static enum relic_compile_result classify_scopes(relic_t *ctx,
 		    const relic_ast_stmt_t *statement, relic_scopes_t *scopes);
 static void	 collect_group_columns(const relic_ast_aggregate_t *aggregate,
@@ -2407,7 +2408,7 @@ relic_check(relic_t *ctx)
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (-1);
 
 	status = check_program(ctx);
@@ -2420,10 +2421,31 @@ relic_check(relic_t *ctx)
 /*
  * relic_check() inside an operation already entered: compile what was loaded
  * since the last check, then analyse the program and sweep for undefined
- * predicates.
+ * predicates.  A check runs alone and at the start of every operation that
+ * uses the program, so it names itself to the memory limit for as long as
+ * it runs and then gives the operation its own activity back.
  */
 static int
 check_program(relic_t *ctx)
+{
+	relic_activity_t operation;
+	int status;
+
+	relic_diag_save_activity(ctx, &operation);
+	relic_diag_activity(ctx, "checking", "the program");
+
+	status = compile_and_analyse(ctx);
+
+	relic_diag_restore_activity(ctx, &operation);
+
+	return (status);
+}
+
+/*
+ * The body of check_program().
+ */
+static int
+compile_and_analyse(relic_t *ctx)
 {
 	bool completed;
 
@@ -2551,7 +2573,8 @@ relic_query_prepare(relic_t *ctx, const char *source_name, const char *text)
 {
 	relic_query_t *query;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "preparing",
+	    source_name != NULL ? source_name : RELIC_QUERY_SOURCE) != 0)
 		return (NULL);
 
 	query = prepare_query(ctx, source_name, text);
@@ -2650,7 +2673,7 @@ relic_query_loaded(relic_t *ctx, size_t index)
 {
 	relic_query_t *query;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (NULL);
 
 	query = copy_loaded_query(ctx, index);

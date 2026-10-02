@@ -36,6 +36,9 @@
 #define	SCENARIO_SILENT		"a context with no callback stays silent"
 #define	SCENARIO_QUOTE		"a quoted string is written as its literal"
 
+/* How many aggregates the refused check's program compiles. */
+#define	CHECK_AGGREGATES	40
+
 /*
  * What the recording callback saw.  Only the last diagnostic is kept in
  * full, since that is what the tests ask about; the counts prove nothing was
@@ -44,7 +47,7 @@
 typedef struct record record_t;
 
 struct record {
-	char			 message[256];
+	char			 message[512];
 	relic_location_t	 where;
 	enum relic_diag_level	 level;
 	unsigned int		 total;
@@ -59,6 +62,12 @@ static void	 record_diagnostic(void *ctx, enum relic_diag_level level,
 static void	 a_callback_sees_level_location_and_text(void);
 static void	 a_silent_context_still_remembers_its_error(void);
 static void	 a_refusal_by_the_limit_is_reported_as_the_limit(void);
+static void	 an_operation_names_itself_in_a_refusal(void);
+static void	 a_refused_check_names_the_check(void);
+static relic_t	*create_limited(size_t max_memory, record_t *record);
+static void	 check_refusal(relic_t *ctx, int status, const char *expected,
+		    const char *what);
+static FILE	*table_stream(const char *table);
 static bool	 last_error_is(relic_t *ctx, const char *expected);
 static void	 the_stderr_formatter_escapes_unprintable_bytes(void);
 
@@ -343,6 +352,218 @@ a_refusal_by_the_limit_is_reported_as_the_limit(void)
 }
 
 /*
+ * A context whose memory limit is `max_memory` bytes and whose diagnostics
+ * are recorded in `record`.
+ */
+static relic_t *
+create_limited(size_t max_memory, record_t *record)
+{
+	relic_config_t config;
+	relic_t *ctx;
+
+	bzero(&config, sizeof(config));
+	config.max_memory = max_memory;
+	ctx = relic_create_config(&config);
+	if (ctx != NULL) {
+		bzero(record, sizeof(*record));
+		relic_diag_set(ctx, record_diagnostic, record);
+	}
+
+	return (ctx);
+}
+
+/*
+ * Check that an operation which returned `status` failed with `expected` as
+ * its error, describing the operation as `what`.  A context that could not
+ * be created fails the check rather than being used.
+ */
+static void
+check_refusal(relic_t *ctx, int status, const char *expected,
+    const char *what)
+{
+	const char *error;
+
+	error = ctx != NULL ? relic_error(ctx) : NULL;
+	checkf(status != 0 && error != NULL && strcmp(error, expected) == 0,
+	    SCENARIO_LIMIT, "%s should be refused as \"%s\", not \"%s\"", what,
+	    expected, error != NULL ? error : "(none)");
+}
+
+/*
+ * A stream holding `table`, positioned at its start, or NULL when the
+ * temporary file could not be made.
+ */
+static FILE *
+table_stream(const char *table)
+{
+	FILE *stream;
+
+	stream = tmpfile();
+	if (stream == NULL)
+		return (NULL);
+
+	if (fputs(table, stream) < 0 || fseek(stream, 0, SEEK_SET) != 0) {
+		fclose(stream);
+		return (NULL);
+	}
+
+	return (stream);
+}
+
+/*
+ * Every operation that can intern names itself when the memory limit
+ * refuses one of its names, as an evaluation names what it plans: a load
+ * and an import by their source, an added fact by its predicate, and a
+ * query being prepared by the name diagnostics give it.  A limit of one
+ * byte refuses the first name each interns, before anything else can.
+ * Preparing a query checks the program first, and the query's own activity
+ * stands once that check is done.  Building a value is an operation with
+ * nothing to name, and reports the limit alone.  A source name too long for
+ * the message is cut and marked, and the callback receives the message
+ * whole.
+ */
+static void
+an_operation_names_itself_in_a_refusal(void)
+{
+	static const enum relic_column column = RELIC_COLUMN_SYMBOL;
+	relic_import_t import;
+	relic_value_t value;
+	record_t record;
+	relic_t *ctx;
+	FILE *stream;
+	char long_name[300];
+	const char *error;
+	int status;
+
+	ctx = create_limited(1, &record);
+	status = ctx != NULL ? relic_load_string(ctx, "graph.dl",
+	    "edge(a, b).\n") : -1;
+	check_refusal(ctx, status,
+	    "limit exceeded: memory=1 while loading graph.dl", "a load");
+	relic_destroy(ctx);
+
+	bzero(&import, sizeof(import));
+	import.predicate = "edge";
+	import.columns = &column;
+	import.column_count = 1;
+	import.format = RELIC_FORMAT_TSV;
+	ctx = create_limited(1, &record);
+	stream = table_stream("a\n");
+	status = ctx != NULL && stream != NULL ?
+	    relic_import_file(ctx, "edge.tsv", stream, &import) : -1;
+	check_refusal(ctx, status,
+	    "limit exceeded: memory=1 while importing edge.tsv", "an import");
+	if (stream != NULL)
+		fclose(stream);
+	relic_destroy(ctx);
+
+	value.type = RELIC_INTEGER;
+	value.v.integer = 7;
+	ctx = create_limited(1, &record);
+	status = ctx != NULL ? relic_fact_add(ctx, "f", 1, &value) : -1;
+	check_refusal(ctx, status,
+	    "limit exceeded: memory=1 while adding f/1", "an added fact");
+	relic_destroy(ctx);
+
+	ctx = create_limited(1, &record);
+	status = ctx != NULL &&
+	    relic_query_prepare(ctx, NULL, "e(a)?") != NULL ? 0 : -1;
+	check_refusal(ctx, status,
+	    "limit exceeded: memory=1 while preparing <query>",
+	    "a query with no source name");
+	status = ctx != NULL &&
+	    relic_query_prepare(ctx, "<query 2>", "e(a)?") != NULL ? 0 : -1;
+	check_refusal(ctx, status,
+	    "limit exceeded: memory=1 while preparing <query 2>",
+	    "a query with a source name");
+	relic_destroy(ctx);
+
+	ctx = create_limited(1, &record);
+	status = ctx != NULL ? relic_value_symbol(ctx, "alpha", 5, &value) : -1;
+	check_refusal(ctx, status, "limit exceeded: memory=1",
+	    "building a value");
+	relic_destroy(ctx);
+
+	memset(long_name, 'n', sizeof(long_name) - 1);
+	long_name[sizeof(long_name) - 1] = '\0';
+	ctx = create_limited(1, &record);
+	status = ctx != NULL ? relic_load_string(ctx, long_name, "e(a).\n") :
+	    -1;
+	error = ctx != NULL ? relic_error(ctx) : NULL;
+	checkf(status != 0 && error != NULL && strncmp(error,
+	    "limit exceeded: memory=1 while loading nnn", 42) == 0 &&
+	    strlen(error) > 3 && strcmp(error + strlen(error) - 3, "...") == 0,
+	    SCENARIO_LIMIT, "a long source name should be cut and marked, "
+	    "not \"%s\"", error != NULL ? error : "(none)");
+	check(error != NULL && !record.overflowed &&
+	    strcmp(record.message, error) == 0, SCENARIO_LIMIT,
+	    "the callback should receive the cut message whole");
+	relic_destroy(ctx);
+}
+
+/*
+ * A check the memory limit refuses names the check.  Compiling an aggregate
+ * interns the predicate that holds its groups, so a program of
+ * CHECK_AGGREGATES of them interns more while it is checked than its load
+ * left room for.  The limits swept run from one the load alone fits under
+ * past one the whole check fits under, and some of them refuse the check
+ * part way.
+ */
+static void
+a_refused_check_names_the_check(void)
+{
+	char program[CHECK_AGGREGATES * 64 + 16];
+	char expected[96];
+	record_t record;
+	relic_t *ctx;
+	size_t refused;
+	size_t limit;
+	size_t used;
+	int i;
+	int status;
+
+	used = (size_t)snprintf(program, sizeof(program), "edge(a, b).\n");
+	for (i = 0; i < CHECK_AGGREGATES; i++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "d%d(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n", i);
+	if (used >= sizeof(program)) {
+		check(false, SCENARIO_LIMIT, "the program should be built");
+		return;
+	}
+
+	refused = 0;
+	status = -1;
+	for (limit = 64; limit <= 65536 && status != 0; limit += 64) {
+		ctx = create_limited(limit, &record);
+		if (ctx == NULL) {
+			check(false, SCENARIO_LIMIT, "a context should be created");
+			return;
+		}
+
+		if (relic_load_string(ctx, "graph.dl", program) != 0) {
+			relic_destroy(ctx);
+			continue;
+		}
+
+		status = relic_check(ctx);
+		if (status != 0) {
+			refused++;
+			snprintf(expected, sizeof(expected),
+			    "limit exceeded: memory=%zu while checking the "
+			    "program", limit);
+			check_refusal(ctx, status, expected, "a check");
+		}
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && status == 0, SCENARIO_LIMIT,
+	    "the sweep should reach a refused check and a completed one, not "
+	    "%zu refusals and %s", refused,
+	    status == 0 ? "a completion" : "no completion");
+}
+
+/*
  * Whether relic_diag_string() writes `length` bytes of `bytes` into a
  * buffer of `size` bytes as exactly `expected`.  The buffer is one byte
  * longer than it is said to be, and that byte must be left alone.
@@ -406,6 +627,8 @@ main(void)
 	a_callback_sees_level_location_and_text();
 	a_silent_context_still_remembers_its_error();
 	a_refusal_by_the_limit_is_reported_as_the_limit();
+	an_operation_names_itself_in_a_refusal();
+	a_refused_check_names_the_check();
 	the_stderr_formatter_escapes_unprintable_bytes();
 	a_quoted_string_is_escaped_and_cut_whole();
 

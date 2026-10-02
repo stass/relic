@@ -287,15 +287,17 @@ esac
 # it by, and zero asks for the default.  A repeated key takes its later value.
 # The memory limit counts the symbol pool a load's names fill, so a limit of
 # one byte refuses graph.dl's load at its first name, before any predicate
-# has a store to name.
+# has a store to name, and the refusal names the file being loaded.  The run
+# names it relative to the work directory, so the message holds the name as
+# written whatever the temporary directory's path.
 status=0
-diagnostic=$("$RELIC" -l memory=1 "$work/graph.dl" 2>&1 >/dev/null) ||
+diagnostic=$(cd "$work" && "$RELIC" -l memory=1 graph.dl 2>&1 >/dev/null) ||
     status=$?
 if [ "$status" -ne 1 ]; then
 	fail "an exceeded memory limit exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=1")
+*"limit exceeded: memory=1 while loading graph.dl")
 	;;
 *)
 	fail "an exceeded memory limit was reported as '$diagnostic'"
@@ -367,11 +369,12 @@ case "$diagnostic" in
 	;;
 esac
 
-# A refusal is reported once, as the limit it is, wherever it falls: while
-# the program's names are interned, which names no activity, while the plans
-# of the rules are allocated one after another, while tuples are derived, or
-# while an index is built.  Each limit of the sweep refuses the program
-# somewhere, and a second diagnostic after the first -- an allocation
+# A refusal is reported once, as the limit it is, naming what it fell in:
+# the load interning the program's names, the check compiling its rules, the
+# plans of the rules allocated one after another, tuples being derived, or an
+# index being built.  Each limit of the sweep refuses the program somewhere,
+# so each run fails with exactly one such message: none would be a failure
+# in silence, and a second diagnostic after the first -- an allocation
 # attempted after a refused one, say -- would misreport the refusal as the
 # allocator running out.
 {
@@ -385,20 +388,22 @@ esac
 
 limit=3000
 while [ "$limit" -le 10000 ]; do
-	diagnostic=$("$RELIC" -a -l memory=$limit "$work/rules.dl" 2>&1 \
-	    >/dev/null) || :
+	status=0
+	diagnostic=$(cd "$work" && "$RELIC" -a -l memory=$limit rules.dl 2>&1 \
+	    >/dev/null) || status=$?
+	refused="relic: error: limit exceeded: memory=$limit while"
 	case "$diagnostic" in
-	""|"relic: error: limit exceeded: memory=$limit" | \
-	    "relic: error: limit exceeded: memory=$limit while "*/*)
-		case "$diagnostic" in
-		*"
+	*"
 "*)
-			fail "memory=$limit was reported more than once: '$diagnostic'"
-			;;
-		esac
+		fail "memory=$limit was reported more than once: '$diagnostic'"
+		;;
+	esac
+	case "$status:$diagnostic" in
+	1:"$refused loading rules.dl" | 1:"$refused checking the program" | \
+	    1:"$refused "[a-z]*" "[a-z]*/[0-9]*)
 		;;
 	*)
-		fail "memory=$limit was reported as '$diagnostic'"
+		fail "memory=$limit exited $status, reported as '$diagnostic'"
 		;;
 	esac
 	limit=$((limit + 100))

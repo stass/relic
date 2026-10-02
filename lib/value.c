@@ -1293,7 +1293,7 @@ value_from_bytes(relic_t *ctx, enum relic_type type, const char *bytes,
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (-1);
 
 	status = intern_bytes(ctx, type, bytes, length, value);

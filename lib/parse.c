@@ -208,6 +208,8 @@ struct relic_load {
 	relic_staging_t	 staging;
 };
 
+static const char	*describe_added_fact(const char *predicate,
+		    size_t arity, char *buffer, size_t size);
 static int	 add_fact(relic_t *ctx, const char *predicate, size_t arity,
 		    const relic_value_t *values);
 static bool	 advance(relic_parser_t *parser) RELIC_MUST_CHECK;
@@ -3132,7 +3134,8 @@ relic_load_string(relic_t *ctx, const char *source_name, const char *text)
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "loading",
+	    source_name != NULL ? source_name : RELIC_UNNAMED_SOURCE) != 0)
 		return (-1);
 
 	if (text != NULL) {
@@ -3153,7 +3156,8 @@ relic_load_file(relic_t *ctx, const char *source_name, FILE *stream)
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "loading",
+	    source_name != NULL ? source_name : RELIC_UNNAMED_SOURCE) != 0)
 		return (-1);
 
 	status = load_stream(ctx, source_name, stream);
@@ -3194,7 +3198,8 @@ relic_load_path(relic_t *ctx, const char *path)
 {
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "loading",
+	    path != NULL ? path : RELIC_UNNAMED_SOURCE) != 0)
 		return (-1);
 
 	status = load_named_file(ctx, path);
@@ -3295,9 +3300,11 @@ int
 relic_fact_add(relic_t *ctx, const char *predicate, size_t arity,
     const relic_value_t *values)
 {
+	char described[RELIC_PRED_TEXT_MAX];
 	int status;
 
-	if (relic_enter(ctx) != 0)
+	if (relic_enter(ctx, "adding", describe_added_fact(predicate, arity,
+	    described, sizeof(described))) != 0)
 		return (-1);
 
 	status = add_fact(ctx, predicate, arity, values);
@@ -3305,6 +3312,25 @@ relic_fact_add(relic_t *ctx, const char *predicate, size_t arity,
 	relic_leave(ctx);
 
 	return (status);
+}
+
+/*
+ * Write the predicate relic_fact_add() is asked to add to as "name/arity"
+ * into `buffer`, the name cut as relic_pred_describe() cuts one, and return
+ * the buffer.  A missing name, which add_fact() refuses before it interns
+ * anything, is written "?".
+ */
+static const char *
+describe_added_fact(const char *predicate, size_t arity, char *buffer,
+    size_t size)
+{
+	char shortened[RELIC_NAME_TEXT_MAX];
+
+	snprintf(buffer, size, "%s/%zu", predicate != NULL ?
+	    relic_diag_name(predicate, shortened, sizeof(shortened)) : "?",
+	    arity);
+
+	return (buffer);
 }
 
 static int
