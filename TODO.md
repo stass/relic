@@ -273,18 +273,13 @@ sorted in `docs/todo-coverage.md`: arena allocation failures the exhaustion
 sweep cannot land on, which one arena-level fault point would reach, and
 defensive branches, one of which may have lost its reason to exist.
 
-**The terminal paths are not tested automatically.** [Low, component:
-`tests/`, `cmd/relic/input.c`, `cmd/relic/main.c`] The prompt, libedit's
-editing and history, and the end of input at a prompt happen only when
-standard input and standard error are terminals; the usage message `run`
-prints when standard input is a terminal, and both branches of
-`refuse_terminal_input()`, which refuses a program or an import of `-` read
-from a terminal, likewise. They were checked by hand through a
-pseudo-terminal in builds with and without libedit, but driving one needs
-more than `sh`: `script(1)` takes different arguments on the BSDs and
-Linux, and on macOS it forwards the end of its own input before the session
-has started. A small pty driver built as a check program would cover all of
-them.
+**libedit's editing and history are not tested automatically.** [Low,
+component: `tests/terminal.sh`, `cmd/relic/input.c`] `tests/terminal.sh`
+types whole lines into a session through `tests/pty`, which covers the
+prompt, the end of input and the refusals at a terminal, but no test presses
+an editing key or recalls a line from the history. The driver types bytes,
+so a test of them is a matter of typing the keys' sequences and checking
+the line the session answers.
 
 **A query's width is known only once it is collected.** [Low, component:
 `include/relic.h`, `lib/rule.c`] `relic_result_columns()` gives a query's

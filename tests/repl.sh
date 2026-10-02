@@ -5,8 +5,8 @@
 # and a write that fails part way through.  The golden language tests cover
 # what a session prints; these cover what a golden file cannot express.
 #
-# A session's prompt and line editing belong to a terminal and are not
-# exercised here: a pseudo-terminal cannot be driven portably from sh.
+# A session's prompt and line editing belong to a terminal and are
+# exercised by tests/terminal.sh, through a pseudo-terminal sh cannot drive.
 
 set -eu
 

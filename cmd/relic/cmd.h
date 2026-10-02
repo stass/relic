@@ -83,8 +83,9 @@ typedef struct invocation invocation_t;
  * -n asks for; output_attach() gives it one to write to.  The rows of one
  * query are written as they are delivered, or collected and sorted first
  * when `sorted` is set.  `queries_written` is what decides whether a query's
- * results need a separator before them; `rows_written` and `begun` belong to
- * the query being answered.
+ * results need a separator before them, and `separated` whether the format's
+ * separator is written at all; `rows_written` and `begun` belong to the query
+ * being answered.
  *
  * What is written gathers in `buffer`, whose first `filled` bytes wait to be
  * handed to the stream a block at a time; an output with a stream owns one.
@@ -102,6 +103,7 @@ struct output {
 	size_t			 rows_written;
 	enum output_format	 format;
 	bool			 begun;
+	bool			 separated;
 	bool			 sorted;
 	bool			 write_failed;
 };
@@ -172,6 +174,10 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * and closes the stream unless it is standard output.
  * output_is_stdout() is whether the stream is standard output, which other
  * writers to standard output share.
+ *
+ * output_prompted() tells the output that a prompt is written before every
+ * query, and leaves out the blank line between queries' results when the
+ * stream is a terminal, where the prompt already marks where each begins.
  */
 int	output_format_named(const char *name, enum output_format *formatp);
 void	output_init(output_t *out, const char *program_name, relic_t *ctx);
@@ -181,6 +187,7 @@ int	output_query(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_discard(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_flush(output_t *out);
 bool	output_is_stdout(const output_t *out);
+void	output_prompted(output_t *out);
 int	output_close(output_t *out);
 
 /*
@@ -249,12 +256,14 @@ typedef struct line_reader line_reader_t;
  * reported a read that failed.  The line belongs to the reader and is valid
  * until the next call, and the caller may change its bytes in place.
  * line_reader_number() is the number of the line last returned, counting
- * from one.
+ * from one.  line_reader_prompts() is whether a prompt is written before each
+ * line is read, which is when someone is typing.
  */
 line_reader_t	*line_reader_open(const char *program_name);
 int		 line_reader_next(line_reader_t *reader, char **linep,
 		    size_t *lengthp);
 size_t		 line_reader_number(const line_reader_t *reader);
+bool		 line_reader_prompts(const line_reader_t *reader);
 void		 line_reader_close(line_reader_t *reader);
 
 #endif /* RELIC_CMD_H */

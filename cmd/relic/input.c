@@ -292,6 +292,12 @@ line_reader_number(const line_reader_t *reader)
 	return (reader->number);
 }
 
+bool
+line_reader_prompts(const line_reader_t *reader)
+{
+	return (reader->typed);
+}
+
 void
 line_reader_close(line_reader_t *reader)
 {

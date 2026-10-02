@@ -1,0 +1,120 @@
+#!/bin/sh
+#
+# What the tool does when someone is at a terminal, driven through the
+# pseudo-terminal of tests/pty, which types each line of a session once the
+# prompt is written.
+#
+# What comes back is the terminal's output: carriage returns before every
+# newline, the prompt, and, where libedit edits the line, the line as it was
+# typed, which libedit writes back.  Each check therefore removes those
+# before comparing, and asserts on what remains: the answers and the lines
+# between them.
+
+set -eu
+
+: "${RELIC:?RELIC must name the relic executable}"
+: "${RELIC_BUILDDIR:?RELIC_BUILDDIR must name the build directory}"
+
+pty="$RELIC_BUILDDIR/tests/pty"
+
+fail() {
+	echo "$*" >&2
+	exit 1
+}
+
+work=$(mktemp -d) || exit 1
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
+
+# libedit reads the editrc of $EDITRC or of the home directory, which may
+# bind control-D or the return key to something else, and draws the line for
+# the terminal $TERM names; each is fixed here so that what the checks see
+# is relic's and not the configuration of whoever runs them.
+HOME=$work
+TERM=vt100
+export HOME TERM
+unset EDITRC
+
+# A system with no pseudo-terminal to give, such as a container without
+# devpts, cannot run these checks, and says so rather than failing them.
+status=0
+"$pty" true < /dev/null > /dev/null 2>&1 || status=$?
+if [ "$status" -eq 124 ]; then
+	echo "no pseudo-terminal is available; skipping the terminal checks" >&2
+	exit 77
+fi
+
+cat > "$work/graph.dl" <<'EOF'
+edge(a, b).
+edge(b, c).
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- edge(X, Y), path(Y, Z).
+EOF
+
+# The answers a session wrote to the terminal, with the terminal's carriage
+# returns, the prompts, the typed lines libedit writes back -- every one a
+# query, ending in a question mark -- and the end-of-input mark removed, and
+# the empty lines that end the session after the last answer dropped.  The
+# terminal and libedit may each write the mark as ^D, and libedit may back
+# over one with backspaces, so all three are deleted wherever they are.
+answers_of() {
+	tr -d '\r\b' < "$1" | sed -e 's/relic> //g' -e 's/\^D//g' |
+	    grep -v '?$' |
+	    awk '{ lines[NR] = $0 } END {
+		last = NR
+		while (last > 0 && lines[last] == "")
+			last--
+		for (i = 1; i <= last; i++)
+			print lines[i]
+	    }'
+}
+
+# At a terminal the prompt marks where each query's answer begins, so the
+# blank line that sets one answer off from the last in a file is not
+# written: the answers of two queries follow each other with nothing between.
+printf 'path(a, X)?\nN = count { path(X, c) }?\n' |
+    "$pty" -p 'relic> ' "$RELIC" -i "$work/graph.dl" > "$work/typed" ||
+    fail "a session at a terminal exited $?"
+answers_of "$work/typed" > "$work/answers"
+printf 'b\nc\n2\n' > "$work/expected"
+if ! cmp -s "$work/expected" "$work/answers"; then
+	echo "a session at a terminal wrote these answers:" >&2
+	cat "$work/answers" >&2
+	fail "two answers at a terminal are separated, or wrong"
+fi
+
+# Answers sent to a file under -o are read later, by a program or a person
+# with no prompt to go by, so they keep the blank line between queries even
+# when the session is typed at a terminal.
+printf 'path(a, X)?\nN = count { path(X, c) }?\n' |
+    "$pty" -p 'relic> ' "$RELIC" -i -o "$work/file" "$work/graph.dl" \
+    > /dev/null || fail "a session writing to a file exited $?"
+printf 'b\nc\n\n2\n' > "$work/expected"
+if ! cmp -s "$work/expected" "$work/file"; then
+	echo "a session at a terminal wrote this to its -o file:" >&2
+	cat "$work/file" >&2
+	fail "the answers in an -o file are not separated"
+fi
+
+# A program read from a terminal would be waited for with nothing said, so
+# the tool prints its usage and exits 2 instead.
+status=0
+"$pty" "$RELIC" > "$work/usage" < /dev/null || status=$?
+if [ "$status" -ne 2 ] || ! grep -q 'usage: relic' "$work/usage"; then
+	cat "$work/usage" >&2
+	fail "relic with no operand at a terminal exited $status"
+fi
+
+# So is a table read from a terminal with -I and `-`, and the refusal names
+# the import.
+status=0
+"$pty" "$RELIC" -I 'tsv:edge:symbol,symbol=-' -q 'edge(a, X)?' \
+    > "$work/import" < /dev/null || status=$?
+if [ "$status" -ne 2 ] ||
+    ! grep -q 'standard input is a terminal, and -I .* would read a table' \
+    "$work/import"; then
+	cat "$work/import" >&2
+	fail "an import of - at a terminal exited $status"
+fi
+
+exit 0

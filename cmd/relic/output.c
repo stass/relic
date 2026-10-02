@@ -35,7 +35,9 @@
  *
  * The results of successive queries are told apart by a blank line before
  * every query's results but the first in text, csv and tsv, and by each
- * query's being a JSON document of its own in json.  What a query writes
+ * query's being a JSON document of its own in json.  An interactive session
+ * at a terminal writes a prompt before each query, which tells them apart
+ * already, so there the blank line is left out.  What a query writes
  * first -- that separator, or the opening bracket -- is written only with
  * the query's first row or once the query has succeeded, and the library
  * delivers no row until everything that can fail has succeeded.  A query
@@ -170,6 +172,7 @@ output_init(output_t *out, const char *program_name, relic_t *ctx)
 	out->ctx = ctx;
 	out->program_name = program_name;
 	out->format = OUTPUT_TEXT;
+	out->separated = true;
 }
 
 /*
@@ -802,7 +805,7 @@ begin_query(output_t *out)
 
 	if (out->format == OUTPUT_JSON)
 		put_byte(out, '[');
-	else if (out->queries_written > 0)
+	else if (out->separated && out->queries_written > 0)
 		put_byte(out, '\n');
 }
 
@@ -1045,6 +1048,17 @@ bool
 output_is_stdout(const output_t *out)
 {
 	return (out->stream == stdout);
+}
+
+/*
+ * Results written to a file or a pipe keep the blank line even in a
+ * prompting session: whoever reads them later has no prompt to go by.
+ */
+void
+output_prompted(output_t *out)
+{
+	if (out->stream != NULL && isatty(fileno(out->stream)) == 1)
+		out->separated = false;
 }
 
 /*

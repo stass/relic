@@ -265,7 +265,12 @@ are no rows.
 ### 4.6 Several queries
 
 In text, csv and tsv, a blank line is written before the results of every
-query but the first, whether or not either query had any rows. In json each
+query but the first, whether or not either query had any rows. The one
+exception is an interactive session that prompts and writes its results to
+a terminal, section 10: the prompt before each query already marks where its
+results begin, and a blank line there only spaces the screen out. Results a
+prompting session writes to a file or a pipe keep the blank line, since
+whoever reads them later has no prompt to go by. In json each
 query's document ends with a newline and needs no other separator, so the
 output of several queries is a sequence of documents, one per query, that a
 streaming JSON reader consumes in turn.
@@ -431,7 +436,8 @@ Each line is exactly one of:
 A query is prepared and run exactly as a `-q` would be, named `<query N>` by
 the numbering of section 2.2, and its rows written to the output under the
 same `-F`, `-s`, `-n` and `-o`, with the same separators: a blank line before
-every query's rows but the first, counting the queries of phase 8. A query
+every query's rows but the first, counting the queries of phase 8, unless
+the session prompts and its results go to a terminal, section 4.6. A query
 must fit on one line. A line that is not a query, or not a whole one, is
 refused with the parser's own diagnostic, and text left without a newline at
 the end of input is a line like any other.

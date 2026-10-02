@@ -759,7 +759,9 @@ In
 .Cm csv
 and
 .Cm tsv ,
-the rows of each query but the first are preceded by an empty line.
+the rows of each query but the first are preceded by an empty line, except
+in an interactive session whose prompt and results share a terminal, where
+the prompt marks where each query's rows begin.
 .Bl -tag -width Ds
 .It Cm text
 Values separated by one space, each written as a program would write it:

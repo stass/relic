@@ -366,6 +366,8 @@ repl_run(invocation_t *invocation, output_t *output, size_t first_number)
 	reader = line_reader_open(invocation->program_name);
 	if (reader == NULL)
 		return (-1);
+	if (line_reader_prompts(reader))
+		output_prompted(output);
 
 	bzero(&repl, sizeof(repl));
 	repl.invocation = invocation;

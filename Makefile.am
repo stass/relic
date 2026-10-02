@@ -448,6 +448,17 @@ examples_query_CPPFLAGS = -I$(top_srcdir)/include
 examples_query_LDADD = librelic.la
 
 ##
+## What the tool does at a terminal is checked by tests/terminal.sh through
+## tests/pty, which runs a command on a pseudo-terminal and types its input a
+## line at a time, since a pseudo-terminal cannot be driven portably from sh.
+##
+
+dist_check_SCRIPTS += tests/terminal.sh
+
+RELIC_DRIVER_BINARIES = tests/pty
+tests_pty_SOURCES = tests/pty.c
+
+##
 ## The equivalence suite runs every language test under each alternative
 ## evaluation strategy -X selects and compares it with the default, and
 ## again with every answer gathered before its rows are written, which must
@@ -741,11 +752,11 @@ AM_TESTS_ENVIRONMENT = \
 	RELIC_VERSION='$(PACKAGE_VERSION)'; export RELIC_VERSION; \
 	RELIC_LANG_TESTS='$(RELIC_LANG_TESTS)'; export RELIC_LANG_TESTS;
 
-# A test program runs as a test, with no arguments.  A replay driver and an
-# example are built for make check too, but are run by the script that tests
-# them.
+# A test program runs as a test, with no arguments.  A replay driver, an
+# example and the terminal driver are built for make check too, but are run
+# by the script that tests them.
 check_PROGRAMS = $(RELIC_TEST_BINARIES) $(RELIC_REPLAY_BINARIES) \
-	$(RELIC_EXAMPLE_BINARIES)
+	$(RELIC_EXAMPLE_BINARIES) $(RELIC_DRIVER_BINARIES)
 TESTS = $(RELIC_TEST_BINARIES) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 
 ##
