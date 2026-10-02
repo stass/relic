@@ -1177,8 +1177,8 @@ share_variable(void *state, const relic_ast_term_t *term)
 
 /*
  * Intern the group predicate of the aggregate at `position` in the body of
- * the statement being compiled, with `arity` columns, and name it as a
- * head.
+ * the statement being compiled, with `arity` columns, and name it as the
+ * group of an aggregate in that statement.
  *
  * The name is built from positions and never from a counter, so the same
  * program always gives the same names.  The aggregate at position P of the
@@ -1198,6 +1198,7 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
     uint16_t arity, const relic_location_t *where, relic_pred_id_t *idp)
 {
 	const relic_pred_t *head;
+	relic_pred_id_t holder;
 	const char *name;
 	char *text;
 	size_t name_length;
@@ -1207,10 +1208,12 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
 	int written;
 
 	head = NULL;
+	holder = RELIC_ID_NONE;
 	name = GROUP_QUERY_NAME;
 	name_length = sizeof(GROUP_QUERY_NAME) - 1;
 	if (compiler->statement->kind == RELIC_STMT_RULE) {
-		head = relic_pred_of(compiler->ctx, compiler->rule.head);
+		holder = compiler->rule.head;
+		head = relic_pred_of(compiler->ctx, holder);
 		name = relic_symbol_bytes(compiler->ctx, head->name,
 		    &name_length);
 	}
@@ -1243,7 +1246,7 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
 
 	if (relic_pred_intern(compiler->ctx, symbol, arity, where, idp) != 0)
 		return (RELIC_COMPILE_INCOMPLETE);
-	relic_pred_name_head(compiler->ctx, *idp);
+	relic_pred_name_group(compiler->ctx, *idp, holder);
 
 	return (RELIC_COMPILE_OK);
 }

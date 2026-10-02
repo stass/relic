@@ -1,0 +1,4 @@
+% The group relation of a query's aggregate is refused as one of a rule's,
+% and named as an aggregate of the query.
+n(1). n(2). n(3). n(4). n(5). n(6).
+C = count { n(X), n(Y) }?

@@ -206,7 +206,7 @@ render_component(const relic_t *ctx, const relic_component_t *component,
 		count = 16;
 
 	for (i = 0; i < count; i++) {
-		relic_pred_describe(ctx,
+		relic_pred_identify(ctx,
 		    schedule->members[component->first_member + i], names[i],
 		    sizeof(names[i]));
 		ordered[i] = names[i];

@@ -6,8 +6,10 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 
 #include "internal.h"
@@ -41,6 +43,10 @@ static uint32_t	 pred_rehash(uint32_t id, void *ctx);
 static int	 pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
 static relic_pred_t *pred_entry(relic_t *ctx, relic_pred_id_t id);
+static const char *describe_aggregate_group(const relic_t *ctx,
+		    const relic_pred_t *group, char *buffer, size_t size);
+static const char *write_pred(const relic_t *ctx, relic_pred_id_t id,
+		    size_t name_max, char *buffer, size_t size);
 
 void
 relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed)
@@ -292,6 +298,26 @@ relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
 }
 
 /*
+ * Record that this predicate is the group predicate of an aggregate in a
+ * rule deriving `holder`, or in a query when `holder` is RELIC_ID_NONE: the
+ * group rule's head names it, and a diagnostic names it as that aggregate.
+ */
+void
+relic_pred_name_group(relic_t *ctx, relic_pred_id_t id,
+    relic_pred_id_t holder)
+{
+	relic_pred_t *pred;
+
+	pred = pred_entry(ctx, id);
+	if (pred == NULL)
+		return;
+
+	pred->head_named = true;
+	pred->aggregate_group = true;
+	pred->stands_for = holder;
+}
+
+/*
  * Record that a rule with this predicate as its head has been appended to a
  * rule table.  Only relic_ruletab_place() calls this, and a query's
  * compilation when it publishes the group rules the query holds.
@@ -390,10 +416,15 @@ relic_pred_is_defined(const relic_t *ctx, relic_pred_id_t id)
  * assigned cannot arise from a compiled program, but the accessor is total
  * so that a message can never be the thing that faults.
  *
- * A predicate the Magic rewrite generated is described as the program's
- * predicate it stands for, which is what a reader of the message wrote and
- * can change; the explanation of a plan names generated predicates by
- * their own names, through relic_relation_name().
+ * A predicate is described in the terms of what the reader of the message
+ * wrote and can change.  One the Magic rewrite generated is described as
+ * the program's predicate it stands for, and the group predicate of an
+ * aggregate as that aggregate: "an aggregate of p/1", or "an aggregate of
+ * the query".  The predicate a Magic-generated one stands for is one the
+ * rewrite did not generate, and is described as any other is, so that the
+ * rewrite adorning a group predicate would leave its adorned form described
+ * as the aggregate.  The explanation of a plan names generated predicates
+ * by their own names, through relic_relation_name().
  */
 const char *
 relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
@@ -402,10 +433,44 @@ relic_pred_describe(const relic_t *ctx, relic_pred_id_t id, char *buffer,
 	const relic_pred_t *pred;
 
 	pred = relic_pred_of(ctx, id);
-	if (pred != NULL && pred->stands_for != RELIC_ID_NONE)
+	if (pred != NULL && !pred->aggregate_group &&
+	    pred->stands_for != RELIC_ID_NONE) {
 		id = pred->stands_for;
+		pred = relic_pred_of(ctx, id);
+	}
+
+	if (pred != NULL && pred->aggregate_group)
+		return (describe_aggregate_group(ctx, pred, buffer, size));
 
 	return (relic_pred_identify(ctx, id, buffer, size));
+}
+
+/*
+ * Describe the group predicate of an aggregate as that aggregate, within
+ * the RELIC_PRED_TEXT_MAX bytes any description takes.  The name of the
+ * rule's predicate is given the room the prefix and the widest arity leave
+ * it, and is shortened to it, so that the arity is never what is cut.
+ */
+#define	AGGREGATE_PREFIX	"an aggregate of "
+#define	AGGREGATE_NAME_MAX						\
+	(RELIC_PRED_TEXT_MAX - (sizeof(AGGREGATE_PREFIX) - 1) -		\
+	(sizeof("/65535") - 1))
+
+static const char *
+describe_aggregate_group(const relic_t *ctx, const relic_pred_t *group,
+    char *buffer, size_t size)
+{
+	char holder[RELIC_PRED_TEXT_MAX];
+
+	if (group->stands_for == RELIC_ID_NONE) {
+		strlcpy(buffer, AGGREGATE_PREFIX "the query", size);
+		return (buffer);
+	}
+
+	snprintf(buffer, size, AGGREGATE_PREFIX "%s", write_pred(ctx,
+	    group->stands_for, AGGREGATE_NAME_MAX, holder, sizeof(holder)));
+
+	return (buffer);
 }
 
 /*
@@ -417,9 +482,22 @@ const char *
 relic_pred_identify(const relic_t *ctx, relic_pred_id_t id, char *buffer,
     size_t size)
 {
+	return (write_pred(ctx, id, RELIC_NAME_TEXT_MAX, buffer, size));
+}
+
+/*
+ * Write "name/arity" into `buffer` and return it, the name shortened to fit
+ * `name_max` bytes, its terminator included.
+ */
+static const char *
+write_pred(const relic_t *ctx, relic_pred_id_t id, size_t name_max,
+    char *buffer, size_t size)
+{
 	const relic_pred_t *pred;
 	const char *name;
 	char shortened[RELIC_NAME_TEXT_MAX];
+
+	assert(name_max <= sizeof(shortened));
 
 	pred = relic_pred_of(ctx, id);
 	if (pred == NULL) {
@@ -432,7 +510,7 @@ relic_pred_identify(const relic_t *ctx, relic_pred_id_t id, char *buffer,
 		name = "?";
 
 	snprintf(buffer, size, "%s/%u",
-	    relic_diag_name(name, shortened, sizeof(shortened)),
+	    relic_diag_name(name, shortened, name_max),
 	    (unsigned int)pred->arity);
 
 	return (buffer);

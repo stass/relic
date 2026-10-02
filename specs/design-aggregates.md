@@ -519,7 +519,9 @@ generated predicate does, `specs/design-program.md` section 3, interned
 when the aggregate literal is reached in the body walk and before the
 atoms inside its braces, so identifiers keep first-appearance order. It is
 marked `head_named` when generated and `derived` when its rule is
-appended; it has no base store, since nothing can state a fact for it.
+appended; it has no base store, since nothing can state a fact for it. It
+records the predicate whose rule holds the aggregate, none for a query's,
+which is what a diagnostic names it by, section 14.
 
 ### 5.3 Safety
 
@@ -1266,9 +1268,12 @@ which this design takes away:
   overflow; the parser's descent through a group body is one level deep,
   section 3.4, so no text overflows the C stack.
 * **unbounded memory.** A group relation is a relation and is charged to
-  the tuple and memory limits before it grows, with the message that names
-  its generated predicate; a fold allocates nothing, its accumulator being
-  a fixed part of the scratch.
+  the tuple and memory limits before it grows; the message names it as the
+  reader wrote it, as an aggregate of the predicate whose rule holds it --
+  `limit exceeded: tuples=20 while deriving an aggregate of pairs/1` -- or
+  as an aggregate of the query, since its generated name says nothing the
+  reader can change and `-e` shows it. A fold allocates nothing, its
+  accumulator being a fixed part of the scratch.
 * **unbounded time.** A fold is linear in its group, and a group is a
   relation the limits bound. What the limits do not bound is the work of
   deriving a group: `count { b(_), b(_), b(_) }` joins `b` with itself

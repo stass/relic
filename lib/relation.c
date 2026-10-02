@@ -85,6 +85,8 @@ static int	 index_build(relic_t *ctx, const relic_relation_t *relation,
 		    relic_index_t *index);
 static int	 index_make_room(relic_t *ctx, const relic_relation_t *relation,
 		    relic_index_t *index);
+static bool	 is_called_by_predicate(const relic_t *ctx,
+		    const relic_relation_t *relation);
 static bool	 key_mask_fits(const relic_relation_t *relation,
 		    uint32_t key_mask);
 static void	 place_append_stripe(relic_relation_t *relation,
@@ -1134,7 +1136,8 @@ relation_too_large(relic_t *ctx, const relic_relation_t *relation,
 	if (relation_columns_after_reserve(relation, added, columnsp))
 		return (false);
 
-	relic_diagf(ctx, RELIC_ERROR, NULL, "relation %s is too large to grow",
+	relic_diagf(ctx, RELIC_ERROR, NULL,
+	    "the relation of %s is too large to grow",
 	    relic_relation_describe(ctx, relation, described,
 	    sizeof(described)));
 
@@ -2304,7 +2307,7 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 		    added > SIZE_MAX - added_total ||
 		    projected > SIZE_MAX - bytes_after) {
 			relic_diagf(ctx, RELIC_ERROR, NULL,
-			    "relation %s is too large to grow",
+			    "the relation of %s is too large to grow",
 			    relic_pred_describe(ctx, growths[i].pred,
 			    described, sizeof(described)));
 			return (-1);
@@ -2435,8 +2438,7 @@ relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
 	if (name == NULL)
 		name = "?";
 
-	if (pred == NULL || !pred->derived ||
-	    relation != relic_base_store(ctx, relation->pred))
+	if (is_called_by_predicate(ctx, relation))
 		return (relic_diag_name(name, buffer, size));
 
 	if ((size_t)snprintf(buffer, size, "%s$base", name) >= size)
@@ -2446,20 +2448,37 @@ relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
 }
 
 /*
- * Write "name/arity" into `buffer`, which must hold RELIC_PRED_TEXT_MAX
- * bytes, and return it, for a message about a relation.  A predicate's
- * relation is described exactly as relic_pred_describe() describes the
- * predicate, so the relation of a generated predicate is described as the
- * program's predicate it stands for.
+ * Whether a relation is called by its predicate's name: every relation but
+ * a query's answer, which has no predicate, and the base store of a derived
+ * predicate, called by its base view's name.
+ */
+static bool
+is_called_by_predicate(const relic_t *ctx, const relic_relation_t *relation)
+{
+	const relic_pred_t *pred;
+
+	if (relation->pred == RELIC_ID_NONE)
+		return (false);
+
+	pred = relic_pred_of(ctx, relation->pred);
+
+	return (pred == NULL || !pred->derived ||
+	    relation != relic_base_store(ctx, relation->pred));
+}
+
+/*
+ * Write what a message about a relation calls it into `buffer`, which must
+ * hold RELIC_PRED_TEXT_MAX bytes, and return it.  A relation called by its
+ * predicate's name is described exactly as relic_pred_describe() describes
+ * the predicate, so the relation of a generated predicate is described in
+ * the terms of the program; a query's answer and a base view's store, which
+ * have names of their own, are described by those.
  */
 const char *
 relic_relation_describe(const relic_t *ctx, const relic_relation_t *relation,
     char *buffer, size_t size)
 {
-	const relic_pred_t *pred;
-
-	pred = relic_pred_of(ctx, relation->pred);
-	if (pred != NULL && pred->stands_for != RELIC_ID_NONE)
+	if (is_called_by_predicate(ctx, relation))
 		return (relic_pred_describe(ctx, relation->pred, buffer, size));
 
 	return (relic_relation_identify(ctx, relation, buffer, size));

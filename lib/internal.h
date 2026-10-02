@@ -1028,7 +1028,8 @@ const char *relic_source_name(relic_t *ctx, const char *name);
  * relic_pred_intern() assigns an identifier to a (name, arity) pair, or
  * returns the one it already has; `where` is what a refusal names.  The
  * marks of struct relic_pred are set by relic_pred_name_head(),
- * relic_pred_name_generated(), relic_pred_mark_derived(),
+ * relic_pred_name_generated(), relic_pred_name_group(),
+ * relic_pred_mark_derived(),
  * relic_pred_reference() and
  * relic_pred_make_view(), and read by relic_pred_is_derived() and
  * relic_pred_is_defined().  relic_pred_count_program_rule() counts one more
@@ -1037,7 +1038,9 @@ const char *relic_source_name(relic_t *ctx, const char *name);
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
  * must hold RELIC_PRED_TEXT_MAX bytes, and returns it so that the call can
  * stand as an argument of the message it decorates; a predicate the Magic
- * rewrite generated is described as the program's predicate it stands for.
+ * rewrite generated is described as the program's predicate it stands for,
+ * and the group predicate of an aggregate as an aggregate of its rule's
+ * predicate.
  * relic_pred_identify() writes the predicate itself, generated or not, for
  * an internal error.
  */
@@ -1050,6 +1053,8 @@ size_t	 relic_pred_count(const relic_t *ctx);
 void	 relic_pred_name_head(relic_t *ctx, relic_pred_id_t id);
 void	 relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
 	    relic_pred_id_t stands_for);
+void	 relic_pred_name_group(relic_t *ctx, relic_pred_id_t id,
+	    relic_pred_id_t holder);
 void	 relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id);
 void	 relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
 	    const relic_location_t *where);

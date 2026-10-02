@@ -620,6 +620,8 @@ endif
 RELIC_LANG_TESTS = \
 	tests/lang/aggregate-assign.dl tests/lang/aggregate-count.dl \
 	tests/lang/aggregate-explain.dl tests/lang/aggregate-limit.dl \
+	tests/lang/aggregate-limit-long-name.dl \
+	tests/lang/aggregate-limit-query.dl \
 	tests/lang/aggregate-magic.dl tests/lang/aggregate-minmax.dl \
 	tests/lang/aggregate-mixed.dl tests/lang/aggregate-nested.dl \
 	tests/lang/aggregate-overflow.dl tests/lang/aggregate-parallel.dl \

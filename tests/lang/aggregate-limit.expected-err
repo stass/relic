@@ -1,1 +1,1 @@
-relic: error: limit exceeded: tuples=20 while deriving agg$pairs$1$0$1/2
+relic: error: limit exceeded: tuples=20 while deriving an aggregate of pairs/1

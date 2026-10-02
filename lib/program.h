@@ -116,6 +116,12 @@ typedef uint32_t relic_pred_id_t;
  * place, since it is what the reader can change.  It is RELIC_ID_NONE for a
  * predicate a program writes, and for one generated from a query, which no
  * predicate of the program stands behind.
+ *
+ * `aggregate_group` marks the group predicate of an aggregate, whose
+ * `stands_for` is the predicate of the rule holding the aggregate, or
+ * RELIC_ID_NONE for an aggregate of a query.  Its tuples are the rows of
+ * the aggregate's body rather than tuples of that predicate, so a
+ * diagnostic names it as an aggregate of that predicate, or of the query.
  */
 struct relic_pred {
 	relic_location_t	referenced_at;
@@ -124,6 +130,7 @@ struct relic_pred {
 	relic_pred_id_t		views;
 	relic_pred_id_t		stands_for;
 	uint16_t		arity;
+	bool			aggregate_group;
 	bool			head_named;
 	bool			derived;
 	bool			referenced;

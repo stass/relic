@@ -1,0 +1,6 @@
+% An aggregate is named within the room any predicate's description takes:
+% a long name of its rule's predicate is cut, and its arity kept.
+n(1). n(2). n(3). n(4). n(5). n(6).
+pairs_of_every_number_with_every_other_number(C) :-
+    C = count { n(X), n(Y) }.
+pairs_of_every_number_with_every_other_number(C)?

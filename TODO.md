@@ -199,8 +199,10 @@ source predicate to be named by, and a limit refusing it names it. The
 names are unambiguous, since `$` cannot occur in a name a program writes,
 and `-e` shows what they mean, but `specs/design-magic.md` section 8 asks a
 diagnostic to name what the reader has to change, which here is the query.
-Naming it needs the evaluation of a schedule to be told which query it
-evaluates for.
+Naming which query needs the evaluation of a schedule to be told which one
+it evaluates for; describing the relation as part of the query, as the
+group of a query's aggregate is described as an aggregate of the query,
+needs only a mark on the predicate entry the rewrite generates.
 
 **Coverage gaps.** [Low, component: `tests/`] `make coverage` reaches 96
 percent of the library's and the tool's lines. What it does not reach is

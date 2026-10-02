@@ -1643,7 +1643,8 @@ static void
 refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
     const char *what)
 {
-	static const char expected[] = "relation r/2 is too large to grow";
+	static const char expected[] =
+	    "the relation of r/2 is too large to grow";
 
 	relic_tuple_growth_t growth;
 	const char *reported;
