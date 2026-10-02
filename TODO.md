@@ -360,33 +360,6 @@ No attack has been built. Decide whether a context used this way should be
 documented as trusting its input, or whether a stronger keyed hash for the
 byte strings the symbol table interns is worth its cost there.
 
-**A dropped rule's body stays in the rewrite arena.** [Low, component:
-`lib/magic.c`] `publish_rule()` canonicalizes a draft, which copies its
-body into the arena, before `rule_derives_nothing()` and the duplicate
-check, so a rule that is then dropped still costs its body in memory.
-Supplementary predicates keep every magic rule's prefix after a body's
-first demand call to one literal, wherever its live variables fit a
-predicate, so what a dropped rule can cost is the prefix before the first
-demand call, or an adorned rule copied whole. A cut can also hide a
-tautology: in `p(X) :- q(X), p(X).` adorned `b`, with q derived by a rule
-and so read on demand, the call on p is the second demand call, and its
-magic rule reads the cut rather than the guard,
-`magic$p$b(X) :- sup$p$b$1$2(X).`, and is kept, with a supplementary
-relation that holds nothing the guard does not and a recursive component
-of the two; the answers are right and the work is wasted. With
-no Magic limit configured, the literal budget charges every draft, dropped
-or not, so this is bounded with the rest of the rewrite and is a matter of
-memory efficiency: the arena is charged to `max_memory` (D-18), and a
-dropped rule's body is memory the user pays for and gets nothing from. A
-configured limit lifts the budget and counts only the rules kept, so there
-nothing bounds the drafts but `max_memory`: a rule of two thousand
-constant literals deriving p/11 from itself, behind the widening rules of
-`tests/unit/programs.c`, takes 1.9 GB under `-l magic-rules=100000`.
-Deciding derives-nothing on the draft before `canonicalize()` closes the
-memory by construction; not recording, and not cutting before, a call whose
-adornment and bound arguments are the head's own closes the hidden
-tautology as well.
-
 **A load or import refused by a limit stages and interns its whole input
 first.** [Medium, component: `lib/facts.c`, `specs/design-facts.md`,
 `specs/design-import.md`] The commit measures staged tuples against the

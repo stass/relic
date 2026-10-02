@@ -1,0 +1,15 @@
+% -e over a rule that derives nothing, its head restated in its body behind
+% a demand call: p(a)? adorns p with its column bound, and the call p(X),
+% made after q(X), reads p's b adornment with the head's own argument.  The
+% call has no magic rule and no cut before it, so the adorned rule reads its
+% head and is dropped, and p is derived by its fact alone.
+
+r(a).
+r(b).
+
+q(X) :- r(X).
+
+p(a).
+p(X) :- q(X), p(X).
+
+p(a)?

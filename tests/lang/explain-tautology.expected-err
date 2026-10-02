@@ -1,0 +1,23 @@
+magic rewrite of $q0 :- p(a).
+    adorn p/1 b
+    adorn q/1 b
+    seed magic$p$b(a).
+    stratum 0, component 0: magic$p$b/1
+        facts: 1
+    stratum 0, component 1: p$b/1
+        rule p$b(X1) :- magic$p$b(X1), p$base(X1).
+            scan magic$p$b(X1)
+            member p$base(X1)
+            emit p$b(X1)
+    stratum 0, component 2: magic$q$b/1
+        rule magic$q$b(X) :- magic$p$b(X).
+            scan magic$p$b(X)
+            emit magic$q$b(X)
+    stratum 0, component 3: q$b/1
+        rule q$b(X) :- magic$q$b(X), r(X).
+            scan magic$q$b(X)
+            member r(X)
+            emit q$b(X)
+query $q0 :- p$b(a).
+    member p$b(a)
+    stream $q0

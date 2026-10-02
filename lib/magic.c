@@ -348,6 +348,7 @@ static uint64_t	 literal_slots(const relic_magic_t *magic,
 static bool	 literals_equal(const relic_magic_t *magic,
 		    const relic_literal_t *a, const relic_literal_t *b);
 static void	*magic_alloc(relic_magic_t *magic, size_t count, size_t size);
+static void	*draft_alloc(relic_magic_t *magic, size_t count, size_t size);
 static int	 map_components(relic_magic_t *magic);
 static void	 mark_body_complete(relic_closure_t *closure,
 		    const relic_rule_t *rule);
@@ -389,6 +390,9 @@ static uint16_t	 renumber_slot(relic_renumbering_t *renumbering,
 		    uint16_t slot);
 static void	 report_limit(relic_magic_t *magic, const char *limit,
 		    size_t configured, relic_pred_id_t source);
+static bool	 restates_head(const relic_rule_t *rule,
+		    const relic_adornment_t *head, const relic_literal_t *call,
+		    uint32_t columns);
 static int	 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *head, size_t rule_ordinal,
 		    relic_draft_t *draft);
@@ -449,6 +453,26 @@ magic_alloc(relic_magic_t *magic, size_t count, size_t size)
 	void *block;
 
 	block = relic_arena_allocarray(&magic->arena, count, size);
+	if (block == NULL)
+		relic_diag_no_memory(magic->ctx);
+
+	return (block);
+}
+
+/*
+ * Allocate what drafting one rule needs from the scratch arena, reporting
+ * exhaustion: the body's order and prefix, the planner's work, and the
+ * literals and arguments of the drafts, which publish_rule() copies into
+ * the rewrite's arena when it keeps a rule.  The scratch arena is emptied
+ * once the rule is drafted, so the rewrite's arena holds only the rules
+ * kept and the rewrite's own tables, however many drafts were made.
+ */
+static void *
+draft_alloc(relic_magic_t *magic, size_t count, size_t size)
+{
+	void *block;
+
+	block = relic_arena_allocarray(&magic->scratch, count, size);
 	if (block == NULL)
 		relic_diag_no_memory(magic->ctx);
 
@@ -1144,14 +1168,14 @@ base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
 	assert(view <= magic->predicate_count);
 
 	arity = relic_pred_of(magic->ctx, source)->arity;
-	literal = magic_alloc(magic, 1, sizeof(*literal));
+	literal = draft_alloc(magic, 1, sizeof(*literal));
 	if (literal == NULL)
 		return (-1);
 	args = NULL;
 	variables = NULL;
 	if (arity > 0) {
-		args = magic_alloc(magic, arity, sizeof(*args));
-		variables = magic_alloc(magic, arity, sizeof(*variables));
+		args = draft_alloc(magic, arity, sizeof(*args));
+		variables = draft_alloc(magic, arity, sizeof(*variables));
 		if (args == NULL || variables == NULL)
 			return (-1);
 	}
@@ -1959,13 +1983,16 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
  *
  * The literal budget is charged on entry, for every draft: whether a rule
  * is kept is known only once it is built, and a long body calling its own
- * predicate drafts copies that are all dropped, each costing the arena its
- * length.  Charging what is kept would never see them.  The rule limit
- * measures the rewritten program, so it counts only the rules kept.
+ * predicate drafts copies that are all dropped, each costing the time to
+ * build and compare.  Charging what is kept would never see them.  The rule
+ * limit measures the rewritten program, so it counts only the rules kept.
+ * A dropped copy is rewound out of the arena, which so holds only the rules
+ * kept.
  */
 static int
 publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 {
+	relic_arena_mark_t before_copy;
 	relic_rule_t rule;
 	uint32_t hash;
 
@@ -1974,15 +2001,15 @@ publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 	    draft->attributed) != 0)
 		return (-1);
 
+	relic_arena_mark(&magic->arena, &before_copy);
 	if (canonicalize(magic, draft, &rule) != 0)
 		return (-1);
 
-	if (rule_derives_nothing(&rule))
-		return (0);
-
 	hash = rule_hash(magic, &rule);
-	if (find_rule(magic, &rule, hash))
+	if (rule_derives_nothing(&rule) || find_rule(magic, &rule, hash)) {
+		relic_arena_rewind(&magic->arena, &before_copy);
 		return (0);
+	}
 
 	if (confirm_rule_limit(magic, draft->attributed) != 0)
 		return (-1);
@@ -2002,7 +2029,7 @@ bound_args(relic_magic_t *magic, const relic_arg_t *args, uint16_t arity,
 	uint16_t count;
 	uint16_t column;
 
-	chosen = magic_alloc(magic, column_count(columns), sizeof(*chosen));
+	chosen = draft_alloc(magic, column_count(columns), sizeof(*chosen));
 	if (chosen == NULL)
 		return (NULL);
 
@@ -2109,6 +2136,35 @@ call_columns(const relic_magic_t *magic, const relic_literal_t *call,
 {
 	return (relic_plan_bound_columns(&call->u.atom,
 	    pred_arity(magic, call->u.atom.pred), bound));
+}
+
+/*
+ * Whether a call binding `columns`, in `rule` rewritten for `head`, restates
+ * the head: it calls the head's predicate, binds the head's bound columns
+ * and no others, and holds the head's own arguments in them.  Such a call
+ * reads the adornment the rule is rewritten for with the tuple of the
+ * guard's magic predicate that the rule is evaluated for, so the demand it
+ * makes is already recorded.
+ */
+static bool
+restates_head(const relic_rule_t *rule, const relic_adornment_t *head,
+    const relic_literal_t *call, uint32_t columns)
+{
+	const relic_arg_t *args;
+	uint16_t column;
+
+	if (columns == 0 || columns != head->bound ||
+	    call->u.atom.pred != head->source)
+		return (false);
+
+	args = call->u.atom.args;
+	for (column = 0; column < rule->head_arity; column++) {
+		if ((columns & (UINT32_C(1) << column)) != 0 &&
+		    !args_equal(&args[column], &rule->head_args[column], 1))
+			return (false);
+	}
+
+	return (true);
 }
 
 /*
@@ -2230,7 +2286,7 @@ later_slots(relic_magic_t *magic, const relic_rule_t *rule,
 	uint16_t column;
 	size_t i;
 
-	later = magic_alloc(magic, rule->body_length + 1, sizeof(*later));
+	later = draft_alloc(magic, rule->body_length + 1, sizeof(*later));
 	if (later == NULL)
 		return (NULL);
 
@@ -2290,7 +2346,7 @@ intern_supplementary(relic_magic_t *magic, const relic_prefix_t *prefix,
 	}
 
 	room = SUPPLEMENTARY_PREFIX_LENGTH + name_length + ORDINALS_MAX + 1;
-	text = magic_alloc(magic, room, 1);
+	text = draft_alloc(magic, room, 1);
 	if (text == NULL)
 		return (-1);
 
@@ -2337,7 +2393,7 @@ supplementary_literal(relic_magic_t *magic, const relic_prefix_t *prefix,
 
 	args = NULL;
 	if (arity > 0) {
-		args = magic_alloc(magic, arity, sizeof(*args));
+		args = draft_alloc(magic, arity, sizeof(*args));
 		if (args == NULL)
 			return (-1);
 	}
@@ -2437,8 +2493,17 @@ cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
  * call's magic rule, every later rule and the draft read it through one
  * literal.
  *
- * Where the prefix is cut depends on the source rule and `bound`, never on
- * the adornment a call reads.  A call the free adornment subsumes binds its
+ * A call restating the head, as restates_head() defines it, has no magic
+ * rule and no cut before it.  Its magic rule would derive only the guard's
+ * own tuple, from a prefix starting at the guard; behind a cut it would read
+ * the supplementary predicate rather than the guard, rule_derives_nothing()
+ * could not see the restatement, and the magic and supplementary relations
+ * would be derived from each other to no end.  The cut would serve only the
+ * rules after the call, which read the prefix written out instead, up to the
+ * next call binding a column, where it is cut as it would have been.
+ *
+ * Where else the prefix is cut depends on the source rule and `bound`, never
+ * on the adornment a call reads.  A call the free adornment subsumes binds its
  * columns like any other and has the prefix cut before it, though it reads
  * the free adornment and has no magic rule.  So every rule drafted for an
  * adornment is as long as it would be were each call read through the
@@ -2471,6 +2536,7 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	uint64_t bound;
 	uint64_t live;
 	uint32_t columns;
+	bool restated;
 
 	bzero(&prefix, sizeof(prefix));
 	prefix.rule = rule;
@@ -2478,16 +2544,16 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	prefix.rule_ordinal = rule_ordinal;
 	binding_calls = 0;
 
-	order = magic_alloc(magic, rule->body_length, sizeof(*order));
+	order = draft_alloc(magic, rule->body_length, sizeof(*order));
 	if (order == NULL)
 		return (-1);
-	prefix.body = magic_alloc(magic, rule->body_length + 1,
+	prefix.body = draft_alloc(magic, rule->body_length + 1,
 	    sizeof(*prefix.body));
 	if (prefix.body == NULL)
 		return (-1);
 
 	bound = head_bound_slots(rule, head);
-	if (relic_plan_order(magic->ctx, &magic->arena, rule, bound,
+	if (relic_plan_order(magic->ctx, &magic->scratch, rule, bound,
 	    magic->incomplete, order) != 0)
 		return (-1);
 	later = later_slots(magic, rule, order);
@@ -2512,10 +2578,11 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 
 		if (reads_on_demand(magic, &literal)) {
 			columns = call_columns(magic, &literal, bound);
+			restated = restates_head(rule, head, &literal, columns);
 			if (columns != 0)
 				binding_calls++;
 
-			if (columns != 0 && binding_calls > 1) {
+			if (columns != 0 && binding_calls > 1 && !restated) {
 				live = bound & later[i];
 				if (cut_prefix(magic, &prefix, binding_calls,
 				    live, literal.u.atom.pred) != 0)
@@ -2525,7 +2592,7 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 			if (adornment_of_call(magic, &literal, columns,
 			    &called) != 0)
 				return (-1);
-			if (record_call(magic, rule, prefix.body,
+			if (!restated && record_call(magic, rule, prefix.body,
 			    prefix.length, &literal, &called) != 0)
 				return (-1);
 			literal.u.atom.pred = called.adorned;
@@ -2556,14 +2623,17 @@ adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
     size_t rule_ordinal, const relic_adornment_t *adornment)
 {
 	relic_draft_t draft;
+	int status;
 
-	if (rewrite_body(magic, rule, adornment, rule_ordinal, &draft) != 0)
-		return (-1);
+	status = rewrite_body(magic, rule, adornment, rule_ordinal, &draft);
+	if (status == 0) {
+		draft.head = adornment->adorned;
+		draft.attributed = adornment->source;
+		status = publish_rule(magic, &draft);
+	}
+	relic_arena_reset(&magic->scratch);
 
-	draft.head = adornment->adorned;
-	draft.attributed = adornment->source;
-
-	return (publish_rule(magic, &draft));
+	return (status);
 }
 
 /*
@@ -2586,6 +2656,7 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 {
 	relic_adornment_t unbound;
 	relic_draft_t draft;
+	int status;
 
 	bzero(&unbound, sizeof(unbound));
 	unbound.source = query->head;
@@ -2593,12 +2664,14 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 	unbound.magic = RELIC_ID_NONE;
 	unbound.bound = 0;
 
-	if (rewrite_body(magic, query, &unbound, 0, &draft) != 0)
-		return (-1);
+	status = rewrite_body(magic, query, &unbound, 0, &draft);
+	if (status == 0) {
+		draft.head = query->head;
+		status = canonicalize(magic, &draft, &magic->query);
+	}
+	relic_arena_reset(&magic->scratch);
 
-	draft.head = query->head;
-
-	return (canonicalize(magic, &draft, &magic->query));
+	return (status);
 }
 
 /*

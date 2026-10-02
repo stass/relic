@@ -44,7 +44,7 @@
 #define	SCENARIO_BUDGET		"a rewrite over its budget is abandoned"
 #define	SCENARIO_DEDUP		"equal generated rules are kept once"
 #define	SCENARIO_TREES		"rules equal but for an expression differ"
-#define	SCENARIO_DROPPED	"dropped rules are charged to the budget"
+#define	SCENARIO_DROPPED	"dropped rules are charged literals"
 #define	SCENARIO_EQUIVALENT	"the rewrite answers as the fixed point does"
 #define	SCENARIO_FACTS		"facts behind a rule fit the literal budget"
 #define	SCENARIO_LIMITS		"the rewrite's limits hold at their values"
@@ -56,6 +56,7 @@
 #define	SCENARIO_STATE		"what the rewrite derives does not leak"
 #define	SCENARIO_TAUTOLOGY	"a rule deriving its own head is dropped"
 #define	SCENARIO_SEARCHED	"the first search is charged what it reads"
+#define	SCENARIO_KEPT		"a rewrite holds only what it keeps"
 
 /*
  * The generated graphs: GRAPH_NODES nodes and GRAPH_EDGES edges drawn from a
@@ -84,6 +85,7 @@
 
 typedef struct diag_log diag_log_t;
 typedef struct rows rows_t;
+typedef struct self_calling_rewrite self_calling_rewrite_t;
 typedef struct text text_t;
 
 /* The errors and warnings a context reported, and the last of each. */
@@ -100,6 +102,18 @@ struct text {
 	size_t	 length;
 	size_t	 capacity;
 	bool	 failed;
+};
+
+/*
+ * What a rewrite of the self-calling program held and spent: the bytes of
+ * its arena and of its scratch arena once it is made, the rules it kept,
+ * and the literals it was charged for the rules it drafted.
+ */
+struct self_calling_rewrite {
+	size_t	arena_bytes;
+	size_t	scratch_bytes;
+	size_t	rules_kept;
+	size_t	literals_charged;
 };
 
 /* The rows of an answer, each rendered as one line, in delivery order. */
@@ -143,8 +157,10 @@ static void	 rules_differing_in_an_expression_are_both_kept(void);
 static void	 a_rule_deriving_its_own_head_is_dropped(void);
 static void	 a_rewrite_over_its_budget_is_abandoned(void);
 static void	 a_rewrite_over_its_literal_budget_is_abandoned(void);
-static void	 dropped_rules_are_charged_to_the_literal_budget(void);
 static void	 the_first_search_is_charged_what_it_reads(void);
+static void	 a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void);
+static int	 rewrite_self_calling(unsigned int length,
+		    self_calling_rewrite_t *rewritep);
 static void	 the_first_search_is_held_to_the_rule_limit(void);
 static void	 facts_behind_a_rule_fit_the_literal_budget(void);
 static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
@@ -1074,65 +1090,11 @@ a_rewrite_over_its_literal_budget_is_abandoned(void)
 }
 
 /*
- * The self-calling program's arities: one whose adornments the first search
- * reads within the literal budget, and one whose adornments it does not.
- * And its long rule's calls on f.
+ * The self-calling program's arity at which the first search cannot read
+ * its adornments within the literal budget, and its long rule's calls on f.
  */
-#define	SELF_CALLING_ARITY	5
 #define	SELF_CALLING_WIDE_ARITY	11
 #define	SELF_CALLING_LENGTH	2000
-
-/*
- * Every adornment of the self-calling program's p drafts two rules of some
- * two thousand literals and keeps neither.  Counting only the rules kept, a
- * rewrite would see a few short rules per adornment and complete, however
- * much its drafts had cost.  The budget charges every draft.  At arity 5 the
- * program's size in literals is 6 + 5 x 3 + 2002 + 200 x 2 = 2423, and its
- * literal budget 256 + 16 x 2423 = 39024.  The first search reads the rules of
- * p's 16 adornments, 16 x 2016 = 32256 literals, within the budget, so the
- * rewrite is abandoned while it drafts them, and the query answered from the
- * whole program.
- */
-static void
-dropped_rules_are_charged_to_the_literal_budget(void)
-{
-	static const char query[] = "p(c, Y2, Y3, Y4, Y5)?";
-	static const char expected[] = "c c c c\n";
-	static const char warning[] =
-	    "the query's Magic rewrite outgrew its budget of 39024 generated "
-	    "literals while adorning p/5; answering it from the whole program";
-	char *program;
-	diag_log_t log;
-	relic_t *ctx;
-	char *rows;
-
-	program = self_calling_program(SELF_CALLING_ARITY,
-	    SELF_CALLING_LENGTH);
-	if (program == NULL) {
-		check(false, SCENARIO_DROPPED,
-		    "the self-calling program is built");
-		return;
-	}
-
-	ctx = context_with(program, 0, 0, 0, &log);
-	free(program);
-	if (ctx == NULL)
-		return;
-
-	rows = answer(ctx, query);
-	checkf(rows != NULL && strcmp(rows, expected) == 0, SCENARIO_DROPPED,
-	    "the self-calling query should answer one row of c, not\n%s",
-	    rows != NULL ? rows : "(failed)");
-	free(rows);
-	checkf(log.errors == 0 && log.warnings == 1 &&
-	    strcmp(log.last_warning, warning) == 0, SCENARIO_DROPPED,
-	    "the rewrite should be abandoned with one warning naming its "
-	    "literals and no error, not %zu errors and %zu warnings, the "
-	    "last error \"%s\" and warning \"%s\"", log.errors, log.warnings,
-	    log.last, log.last_warning);
-
-	relic_destroy(ctx);
-}
 
 /*
  * The search that finds the adornments reads every rule of each, and is
@@ -1201,6 +1163,124 @@ the_first_search_is_charged_what_it_reads(void)
 	relic_magic_reset(&magic);
 	relic_query_destroy(query);
 	relic_destroy(ctx);
+}
+
+/*
+ * The arity at which a rewrite's drafts and memory are measured against what
+ * it keeps, whose query reaches KEPT_ADORNMENTS adornments of p, and the
+ * bytes the rewrite's arena may differ by between two lengths of the
+ * self-calling rule.
+ */
+#define	KEPT_ARITY	7
+#define	KEPT_ADORNMENTS	64
+#define	KEPT_SHORT	20
+#define	KEPT_SLACK	(64 * 1024)
+#define	KEPT_RULE_LIMIT	100000
+
+/*
+ * A configured rule limit lifts the literal budget, so nothing but memory
+ * bounds what a rewrite drafts.  Each adornment of the self-calling
+ * program's p drafts its long rule, whose head is its own first literal, and
+ * drops it; the call on p restates the head and so drafts no magic rule.
+ * The rules kept are the same whatever the long rule's length.
+ *
+ * The literals charged are counted for every draft, kept or dropped, so
+ * lengthening the rule by 1980 calls charges each of the 64 adornments
+ * 1980 more literals however few it keeps.  The rewrite's arena holds what
+ * is kept, and what drafting a rule needed is released once it is drafted,
+ * so neither the arena's size nor what the scratch arena still holds can
+ * depend on that length: at 2000 calls each is within a few pages of its
+ * size at 20, the difference being the per-predicate tables of the 198 more
+ * unary predicates the longer program declares.
+ */
+static void
+a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void)
+{
+	self_calling_rewrite_t shorter;
+	self_calling_rewrite_t longer;
+	size_t lengthened_by;
+
+	if (rewrite_self_calling(KEPT_SHORT, &shorter) != 0 ||
+	    rewrite_self_calling(SELF_CALLING_LENGTH, &longer) != 0)
+		return;
+
+	lengthened_by = KEPT_ADORNMENTS *
+	    (size_t)(SELF_CALLING_LENGTH - KEPT_SHORT);
+	checkf(longer.literals_charged >= shorter.literals_charged +
+	    lengthened_by, SCENARIO_DROPPED,
+	    "lengthening the dropped rule should charge at least %zu more "
+	    "literals, not %zu at %u calls and %zu at %u", lengthened_by,
+	    shorter.literals_charged, KEPT_SHORT, longer.literals_charged,
+	    SELF_CALLING_LENGTH);
+	checkf(longer.rules_kept == shorter.rules_kept, SCENARIO_KEPT,
+	    "the rewrite should keep the same rules whatever the long rule's "
+	    "length, not %zu and %zu", shorter.rules_kept, longer.rules_kept);
+	checkf(longer.arena_bytes <= shorter.arena_bytes + KEPT_SLACK,
+	    SCENARIO_KEPT,
+	    "the rewrite's arena should hold what it keeps, %zu bytes at %u "
+	    "calls, not %zu bytes at %u", shorter.arena_bytes, KEPT_SHORT,
+	    longer.arena_bytes, SELF_CALLING_LENGTH);
+	checkf(longer.scratch_bytes <= shorter.scratch_bytes + KEPT_SLACK,
+	    SCENARIO_KEPT,
+	    "the rewrite's scratch arena should be emptied of each rule's "
+	    "drafts, holding %zu bytes at %u calls, not %zu bytes at %u",
+	    shorter.scratch_bytes, KEPT_SHORT, longer.scratch_bytes,
+	    SELF_CALLING_LENGTH);
+}
+
+/*
+ * Rewrite the self-calling program's query at KEPT_ARITY, its long rule
+ * making `length` calls, under a rule limit, and measure the rewrite.
+ * Returns -1 when the rewrite could not be made.
+ */
+static int
+rewrite_self_calling(unsigned int length, self_calling_rewrite_t *rewritep)
+{
+	static const char text[] = "p(c, Y2, Y3, Y4, Y5, Y6, Y7)?";
+	relic_query_t *query;
+	relic_magic_t magic;
+	diag_log_t log;
+	relic_t *ctx;
+	char *program;
+	int status;
+
+	program = self_calling_program(KEPT_ARITY, length);
+	if (program == NULL) {
+		check(false, SCENARIO_KEPT, "the self-calling program is built");
+		return (-1);
+	}
+
+	ctx = context_with(program, 0, 0, KEPT_RULE_LIMIT, &log);
+	free(program);
+	if (ctx == NULL)
+		return (-1);
+
+	query = relic_query_prepare(ctx, NULL, text);
+	if (query == NULL || relic_program_ready(ctx) != 0) {
+		check(false, SCENARIO_KEPT, "the query is prepared");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+		return (-1);
+	}
+
+	relic_magic_init(&magic, ctx);
+	status = relic_magic_find_complete(&magic, query);
+	if (status == 0)
+		status = relic_magic_rewrite(&magic, &query->rule);
+	checkf(status == 0 && log.errors == 0, SCENARIO_KEPT,
+	    "the rewrite at %u calls should succeed, the last error \"%s\"",
+	    length, log.last);
+
+	rewritep->arena_bytes = relic_arena_total_bytes(&magic.arena);
+	rewritep->scratch_bytes = relic_arena_total_bytes(&magic.scratch);
+	rewritep->rules_kept = magic.rules.count;
+	rewritep->literals_charged = magic.generated_literals;
+
+	relic_magic_reset(&magic);
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+
+	return (status);
 }
 
 /*
@@ -1654,8 +1734,8 @@ main(void)
 	the_search_is_held_to_the_limits();
 	a_rewrite_over_its_budget_is_abandoned();
 	a_rewrite_over_its_literal_budget_is_abandoned();
-	dropped_rules_are_charged_to_the_literal_budget();
 	the_first_search_is_charged_what_it_reads();
+	a_rewrite_charges_its_drafts_and_holds_what_it_keeps();
 	the_first_search_is_held_to_the_rule_limit();
 	facts_behind_a_rule_fit_the_literal_budget();
 	the_rewrite_grows_linearly_in_a_bodys_calls();

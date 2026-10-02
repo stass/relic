@@ -663,8 +663,9 @@ RELIC_LANG_TESTS = \
 	tests/lang/explain-free.dl \
 	tests/lang/explain-graph.dl tests/lang/explain-long.dl \
 	tests/lang/explain-magic.dl tests/lang/explain-materialized.dl \
-	tests/lang/explain-ops.dl tests/lang/explain-subsumed.dl \
-	tests/lang/explain-supplementary.dl \
+	tests/lang/explain-ops.dl tests/lang/explain-restating.dl \
+	tests/lang/explain-subsumed.dl tests/lang/explain-supplementary.dl \
+	tests/lang/explain-tautology.dl \
 	tests/lang/explain-thresholds.dl tests/lang/explain-views.dl \
 	tests/lang/format-csv.dl tests/lang/format-integers.dl \
 	tests/lang/format-json.dl tests/lang/format-nul.dl \

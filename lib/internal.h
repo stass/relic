@@ -359,10 +359,11 @@ struct relic_magic_limit {
  * limits and budgets on its own: the adornments it keeps count in
  * `generated_preds`, the rules it reads for them in `searched_rules`,
  * against the rule limit, and their bodies in `searched_literals`, against
- * the literal budget.  `scratch` holds what reading one rule needs, its
- * body's order and the planner's work, and is emptied once the rule is
- * read, so that a search holds no more than its adornments however many
- * rules it reads.
+ * the literal budget.  `scratch` holds what reading or drafting one rule
+ * needs, its body's order, the planner's work and the drafts, and is emptied
+ * once the rule is read or drafted, so that a search holds no more than its
+ * adornments however many rules it reads, and `arena` no more than the rules
+ * kept however many are drafted.
  *
  * Everything variable-length is in `arena`, in `scratch` or in an array
  * grown with relic_grow_array(), and relic_magic_reset() releases all of

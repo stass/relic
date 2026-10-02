@@ -294,13 +294,15 @@ predicate for its own adornment; literals over complete predicates, negated
 literals, comparisons and aggregate literals are appended as they are. The
 rewrite generates:
 
-* **one magic rule per demand call**: its head is `magic$q$β(...)` over the
-  call's bound arguments and its body is the prefix. The magic rule says:
-  whenever the rule is called with these bound values, and the literals
-  before this one hold, this literal is called with these;
+* **one magic rule per demand call**, except a call that restates the head
+  (section 7): its head is `magic$q$β(...)` over the call's bound arguments
+  and its body is the prefix. The magic rule says: whenever the rule is
+  called with these bound values, and the literals before this one hold,
+  this literal is called with these;
 * **one supplementary rule before every call binding a column but the
-  first**, whether or not the call propagates demand, as a call the free
-  adornment subsumes (section 4) does not: the prefix is not written out
+  first and those restating the head**, whether or not the call propagates
+  demand, as a call the free adornment subsumes (section 4) does not: the
+  prefix is not written out
   again but derived once, into a **supplementary predicate** whose columns
   are the prefix's *live* variables -- those it binds that occur in the
   call, in a literal after it, or in the head -- by the one rule whose body
@@ -469,6 +471,30 @@ only derive a tuple that the relation already holds. It arises naturally:
 `magic$p$bf(X) :- magic$p$bf(X).`, which would otherwise make a recursive
 component out of nothing.
 
+**A call that restates the head has no magic rule and no cut before it.**
+A call on the head's predicate, binding the head's bound columns and no
+others to the head's own arguments there, reads the adornment its rule is
+rewritten for with the very tuple the guard holds. Its magic rule would
+derive only that tuple; written over the uncut prefix, which starts with
+the guard, it is dropped as above, but behind a cut it reads the
+supplementary predicate rather than the guard, and the restatement is
+hidden. In
+
+```prolog
+p(X, Y) :- q(X), p(X, Z), s(Z, Y).
+```
+
+as the first rule deriving *p*, adorned `bf`, with *q* derived by a rule and
+so read on demand, the call on *p* is the second call binding a column, and
+its magic rule would be
+`magic$p$bf(X) :- sup$p$bf$0$2(X).`, deriving the magic and supplementary
+relations from each other to no end. So the restating call records nothing,
+and no cut is made before it: the cut would serve only the rules after the
+call, which read the prefix written out instead up to the next call binding
+a column, where it is cut as it would have been. The call still counts
+among the calls binding a column, so the supplementary predicates after it
+keep their names.
+
 ---
 
 ## 8. Limits and budgets
@@ -579,9 +605,8 @@ subsumed, and nothing else that grows with the rules it reads.
 The literal budget counts every rule drafted, kept or dropped. A duplicate,
 or a rule that derives nothing, is built before it is recognized as one,
 and a long body calling its own predicate drafts copies that are all
-dropped: counting only what is kept would never see them, and their cost
-in the arena would grow as the square of the body until the memory limit,
-if any, refused it. The literal budget has no configurable limit behind
+dropped: counting only what is kept would never see them, and the work of
+building and comparing them grows as the square of the body. The literal budget has no configurable limit behind
 it: it is not a knob but the invariant that a rewrite nobody has sized is
 a constant multiple of the program, which counting rules cannot hold,
 because a rule is copied whole once per adornment and a program of few
@@ -820,7 +845,12 @@ ASCII, escaped constants, cut at 1023 bytes.
 The rewrite lives for one query run. Generated rules are held in a growable
 rule table, with their argument and body arrays and the scratch space for
 building names in an arena of the rewrite's own; the memo and duplicate
-tables are identifier tables over the rewrite's arrays. All of it is released
+tables are identifier tables over the rewrite's arrays. What drafting one
+rule needs, its order, the planner's working state and the drafts
+themselves, is built in a scratch arena emptied once the rule is drafted,
+and a rule found to be a duplicate or to derive nothing is released from the
+rewrite's arena as soon as it is recognized, so the arena holds the rules
+kept and the names generated, however many were drafted. All of it is released
 when the query has run, successfully or not, as is the schedule of the
 rewritten program. Symbol and predicate entries for generated names belong to
 the context, as every interned entry does.

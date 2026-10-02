@@ -1,0 +1,36 @@
+magic rewrite of $q0(Y) :- p(a, Y).
+    adorn p/2 bf
+    adorn q/1 b
+    seed magic$p$bf(a).
+    stratum 0, component 0: magic$p$bf/1
+        facts: 1
+    stratum 0, component 1: magic$q$b/1
+        rule magic$q$b(X) :- magic$p$bf(X).
+            scan magic$p$bf(X)
+            emit magic$q$b(X)
+    stratum 0, component 2: q$b/1
+        rule q$b(X) :- magic$q$b(X), r(X).
+            scan magic$q$b(X)
+            member r(X)
+            emit q$b(X)
+    stratum 0, component 3 (recursive): p$bf/2
+        rule p$bf(X1, X2) :- magic$p$bf(X1), p$base(X1, X2).
+            scan magic$p$bf(X1)
+            lookup p$base(X1, X2) key={0}
+            emit p$bf(X1, X2)
+        rule p$bf(X, Y) :- magic$p$bf(X), q$b(X), p$bf(X, Z), s(Z, Y).
+            delta p$bf(X, Z) when the delta holds more than 1 tuple:
+                scan magic$p$bf(X)
+                member q$b(X)
+                lookup delta p$bf(X, Z) key={0}
+                lookup s(Z, Y) key={0}
+                emit p$bf(X, Y)
+            delta p$bf(X, Z) otherwise:
+                scan delta p$bf(X, Z)
+                member magic$p$bf(X)
+                member q$b(X)
+                lookup s(Z, Y) key={0}
+                emit p$bf(X, Y)
+query $q0(Y) :- p$bf(a, Y).
+    lookup p$bf(a, Y) key={0}
+    stream $q0(Y)

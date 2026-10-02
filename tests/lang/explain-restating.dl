@@ -1,0 +1,18 @@
+% -e over a rule whose second demand call restates its head: p(a, Y)? adorns
+% p with its first column bound, and the call p(X, Z), made after q(X) has
+% bound X, reads p's bf adornment with the head's own bound argument.  Its
+% magic rule would derive only the guard's tuple, so it has none, and no cut
+% is made before it: the adorned rule reads the guard and q's call itself,
+% and no component is recursive through the magic predicate.
+
+r(a).
+r(b).
+s(a, b).
+s(b, c).
+
+q(X) :- r(X).
+
+p(a, a).
+p(X, Y) :- q(X), p(X, Z), s(Z, Y).
+
+p(a, Y)?
