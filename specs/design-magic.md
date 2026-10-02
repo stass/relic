@@ -772,6 +772,16 @@ query $q0(X) :- path$bf(a, X).
   adorn pointsTo/2 ff
   adorn pointsTo/2 bf, subsumed by pointsTo/2 ff
   ```
+* A rewrite abandoned over its budget shows no rewrite heading. Its phase 1
+  components come first, then a line marking the abandonment, then the
+  whole program's components and the query's plan, as full materialization
+  shows them. A component phase 1 evaluated appears on both sides of the
+  line, since answering from the whole program evaluates it again; the line
+  says why, and is shown even when that evaluation then fails:
+
+  ```text
+  abandoned magic rewrite of $q0(Y2, Y3) :- p(c, Y2, Y3), not h(d).
+  ```
 
 * A rewrite whose adornments bind nothing ends its heading with
   `read completely:` and the predicates the search reached, and is followed

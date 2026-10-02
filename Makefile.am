@@ -648,7 +648,8 @@ RELIC_LANG_TESTS = \
 	tests/lang/comments-only.dl tests/lang/components.dl \
 	tests/lang/constructs.dl tests/lang/empty.dl \
 	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
-	tests/lang/explain-check.dl tests/lang/explain-facts.dl \
+	tests/lang/explain-abandoned.dl tests/lang/explain-check.dl \
+	tests/lang/explain-facts.dl \
 	tests/lang/explain-free.dl \
 	tests/lang/explain-graph.dl tests/lang/explain-long.dl \
 	tests/lang/explain-magic.dl tests/lang/explain-materialized.dl \

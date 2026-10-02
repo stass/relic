@@ -3401,6 +3401,8 @@ answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
 
 	if (status != 0 && over_budget) {
 		group_run_finish(ctx, groups);
+		relic_explain_abandoned_rewrite(ctx, &query->rule,
+		    query->answer);
 		return (answer_from_program(ctx, query, groups, rows));
 	}
 

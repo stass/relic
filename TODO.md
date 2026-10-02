@@ -217,15 +217,6 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**An abandoned rewrite is not marked in explain output.** [Low, component:
-`lib/eval.c`, `lib/explain.c`] A rewrite over its budget is abandoned after
-the components it reads completely have been evaluated, and answering from
-the whole program then evaluates them again. `-e` prints each complete
-component twice with nothing between them to say why; the warning goes to
-standard error. An explain line marking the abandoned rewrite would say
-why. Keeping the complete relations, the item on evaluating them for every
-query, would also avoid the second pass.
-
 **A limit refusal can name a generated predicate.** [Low, component:
 `lib/magic.c`, `lib/relation.c`, `lib/eval.c`] `relic -l tuples=10 -q
 'path(a, X)?'` reports `limit exceeded: tuples=10 while deriving path$bf/2`,

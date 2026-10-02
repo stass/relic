@@ -1326,3 +1326,24 @@ relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 		line_finish(ctx, &line);
 	}
 }
+
+/*
+ * The line that marks a query's Magic rewrite abandoned over its budget.
+ * The components evaluated for the rewrite before it was abandoned are
+ * shown above it, and the whole program's, evaluated to answer the query
+ * instead, below it, so the same component can appear on both sides.
+ */
+void
+relic_explain_abandoned_rewrite(relic_t *ctx, const relic_rule_t *query,
+    const relic_relation_t *answer)
+{
+	relic_explain_line_t line;
+
+	if (!relic_explaining(ctx))
+		return;
+
+	line_begin(&line, 0);
+	line_put(&line, "abandoned magic rewrite of ");
+	put_query_rule(ctx, &line, query, answer);
+	line_finish(ctx, &line);
+}

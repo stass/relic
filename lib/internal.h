@@ -1437,11 +1437,13 @@ enum relic_table_event_kind relic_table_next(relic_table_reader_t *reader,
  * callback is installed and nothing otherwise: a component's heading and fact
  * count, a rule with its plan, one delta variant of the rule last shown, a
  * query's heading, a query's plan, its EMIT shown as `stream` when
- * `streams` says it delivers the query's rows as it derives them, and the
- * heading of a query's Magic rewrite.  The rules shown between a query's
- * heading and its plan are its group rules.  A query's rule names no
- * predicate, so the two that show one are given the query's answer
- * relation, whose name its head is written with.  `depth` is the level a
+ * `streams` says it delivers the query's rows as it derives them, the
+ * heading of a query's Magic rewrite, and the line that marks a rewrite
+ * abandoned over its budget, after which the whole program is evaluated
+ * and shown.  The rules shown between a query's heading and its plan are
+ * its group rules.  A query's rule names no predicate, so the functions
+ * that show a query are given its answer relation, whose name its head is
+ * written with.  `depth` is the level a
  * component's heading is indented to, one more for a component of a
  * rewritten program than for one of the program itself; what belongs to
  * the component is indented beneath it.  None can fail.
@@ -1462,6 +1464,8 @@ void	 relic_explain_query_plan(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_plan_t *plan, bool streams);
 void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	    const relic_relation_t *answer, const relic_magic_t *magic);
+void	 relic_explain_abandoned_rewrite(relic_t *ctx,
+	    const relic_rule_t *query, const relic_relation_t *answer);
 
 /*
  * lib/index.c

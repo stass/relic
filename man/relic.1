@@ -386,6 +386,9 @@ or
 Write the plan of everything evaluated to the standard error: each part of
 the program as it is planned, and each query's rewrite and plan before its
 rows.
+A rewrite abandoned over its budget is marked by a line
+.Ql abandoned magic rewrite of ,
+after which the whole program is planned as though there were none.
 A part whose predicates have facts counts them as
 .Ql facts: N ;
 a predicate of facts alone needs no evaluation and is not shown.

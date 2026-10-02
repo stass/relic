@@ -970,10 +970,12 @@ a_rewrite_over_its_budget_is_abandoned(void)
 	relic_destroy(ctx);
 
 	answered = explain_answer(program, query, 0, 0, &explained, &log);
-	checkf(answered && strstr(explained.bytes, "magic rewrite of") ==
-	    NULL, SCENARIO_BUDGET,
-	    "an abandoned rewrite should not be explained, but -e showed\n%s",
-	    explained.bytes);
+	checkf(answered && strstr(explained.bytes,
+	    "abandoned magic rewrite of ") != NULL &&
+	    strncmp(explained.bytes, "magic rewrite of", 16) != 0 &&
+	    strstr(explained.bytes, "\nmagic rewrite of") == NULL,
+	    SCENARIO_BUDGET, "an abandoned rewrite should be marked and not "
+	    "explained, but -e showed\n%s", explained.bytes);
 	free(explained.bytes);
 
 	answered = explain_answer(program, query, 1000000, 1000000, &explained,
