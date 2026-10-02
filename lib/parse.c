@@ -7,14 +7,26 @@
 #include "config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "internal.h"
+
+/*
+ * A 32-bit Linux system opens a file over 2 GiB only when asked to with
+ * O_LARGEFILE, and refuses it otherwise with EOVERFLOW; read(2) through the
+ * descriptor then needs nothing more.  Where the flag does not exist, off_t
+ * is 64 bits and every file opens without it.
+ */
+#ifndef O_LARGEFILE
+#define	O_LARGEFILE	0
+#endif
 
 /*
  * The parser, and the entry points that load text through it.
@@ -333,10 +345,10 @@ static int	 parser_init(relic_parser_t *parser, relic_t *ctx,
 		    relic_arena_t *arena, relic_staging_t *staging,
 		    const char *source_name, const char *text, size_t length);
 static void	 parser_reset(relic_parser_t *parser);
-static const char *predicate_name(const relic_parser_t *parser,
-		    uint32_t symbol);
 static bool	 refuse_call(relic_parser_t *parser,
 		    const relic_ast_expr_t *expr);
+static void	 report_arity_limit(relic_parser_t *parser,
+		    const relic_token_t *name);
 static int	 quoted_precision(const relic_token_t *token);
 static const char *quoted_suffix(const relic_token_t *token);
 static int	 read_stream(relic_t *ctx, const char *source_name,
@@ -469,19 +481,21 @@ quoted_suffix(const relic_token_t *token)
 }
 
 /*
- * The spelling of an interned predicate name, for a message about it.  Every
- * byte of it is an identifier byte, so it is safe to quote.
+ * Report an argument list, at the current token, that is one argument past
+ * the widest a predicate may have.  The predicate is named by `name`, cut and
+ * marked as relic_diag_name() cuts a name, so that a long one cannot crowd
+ * the limit out of the message.
  */
-static const char *
-predicate_name(const relic_parser_t *parser, uint32_t symbol)
+static void
+report_arity_limit(relic_parser_t *parser, const relic_token_t *name)
 {
 	const char *bytes;
+	char named[RELIC_NAME_TEXT_MAX];
 
-	bytes = relic_symbol_bytes(parser->ctx, symbol, NULL);
-	if (bytes == NULL)
-		return ("?");
-
-	return (bytes);
+	bytes = relic_symbol_bytes(parser->ctx, name->symbol, NULL);
+	relic_diag_name(bytes != NULL ? bytes : "?", named, sizeof(named));
+	parse_errorf(parser, &parser->token.where,
+	    "predicate %s has more than %d arguments", named, RELIC_MAX_ARITY);
 }
 
 /*
@@ -1675,10 +1689,7 @@ atom_after_name(relic_parser_t *parser, const relic_token_t *name,
 	if (parser->token.kind != RELIC_TOKEN_RPAREN) {
 		for (;;) {
 			if (term_count == RELIC_MAX_ARITY) {
-				parse_errorf(parser, &parser->token.where,
-				    "predicate %s has more than %d arguments",
-				    predicate_name(parser, name->symbol),
-				    RELIC_MAX_ARITY);
+				report_arity_limit(parser, name);
 				return (false);
 			}
 
@@ -2113,10 +2124,7 @@ parse_literal_arguments(relic_parser_t *parser, const relic_token_t *name,
 	if (parser->token.kind != RELIC_TOKEN_RPAREN) {
 		for (;;) {
 			if (arguments->count == RELIC_MAX_ARITY) {
-				parse_errorf(parser, &parser->token.where,
-				    "predicate %s has more than %d arguments",
-				    predicate_name(parser, name->symbol),
-				    RELIC_MAX_ARITY);
+				report_arity_limit(parser, name);
 				return (false);
 			}
 
@@ -2980,10 +2988,11 @@ relic_parse_query(relic_t *ctx, relic_arena_t *arena, const char *source_name,
 /*
  * Read a stream whole.
  *
- * A stream is read whole rather than incrementally because the parser needs
- * no more than one byte of lookahead but the tree it produces is as large as
- * the input anyway, so an incremental reader would bound a footprint that is
- * not the one that matters.
+ * A stream is read whole rather than incrementally because the lexer scans
+ * one contiguous range, so that every token, however long, is a pointer and
+ * a length into the text with no buffer to refill beneath it.  An incremental
+ * reader would bound only the text, while the load's staged facts, held until
+ * its all-or-nothing commit, grow with the input regardless.
  */
 static int
 read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
@@ -3129,6 +3138,38 @@ relic_load_path(relic_t *ctx, const char *path)
 }
 
 /*
+ * The descriptor is opened with O_CLOEXEC and wrapped, rather than opened by
+ * fopen(3) with the "e" mode, which POSIX gained only in its 2024 edition.
+ * The flag is set as the descriptor is made, so no fork(2) on another thread
+ * can come between the open and the marking.
+ */
+FILE *
+relic_open_input(relic_t *ctx, const char *path)
+{
+	FILE *stream;
+	int descriptor;
+	int saved_errno;
+
+	descriptor = open(path, O_RDONLY | O_CLOEXEC | O_LARGEFILE);
+	if (descriptor == -1) {
+		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot open %s: %s", path,
+		    strerror(errno));
+		return (NULL);
+	}
+
+	stream = fdopen(descriptor, "r");
+	if (stream == NULL) {
+		saved_errno = errno;
+		close(descriptor);
+		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot open %s: %s", path,
+		    strerror(saved_errno));
+		return (NULL);
+	}
+
+	return (stream);
+}
+
+/*
  * Open, load and close the file at `path`, naming it by its path.
  */
 static int
@@ -3142,12 +3183,9 @@ load_named_file(relic_t *ctx, const char *path)
 		return (-1);
 	}
 
-	stream = fopen(path, "r");
-	if (stream == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot open %s: %s", path,
-		    strerror(errno));
+	stream = relic_open_input(ctx, path);
+	if (stream == NULL)
 		return (-1);
-	}
 
 	status = load_stream(ctx, path, stream);
 

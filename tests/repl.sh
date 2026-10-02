@@ -114,6 +114,18 @@ case "$diagnostic" in
 	;;
 esac
 
+# A long unknown command's name is cut, and the cut is marked.
+long_name=$(printf '%080d' 0)
+diagnostic=$(printf '.%s\n' "$long_name" | "$RELIC" -i 2>&1 >/dev/null) ||
+    true
+case "$diagnostic" in
+*"unknown command .$(printf '%064d' 0)...;"*)
+	;;
+*)
+	fail "an 80-byte unknown command was reported as '$diagnostic'"
+	;;
+esac
+
 # Under -n the output is never opened, in a session as in a run.
 printf 'edge(a, X)?\n' | "$RELIC" -n -i -o "$work/never.txt" "$work/graph.dl"
 if [ -e "$work/never.txt" ]; then

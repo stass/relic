@@ -858,8 +858,7 @@ report_limit(relic_magic_t *magic, const char *limit, size_t configured,
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
-	relic_diagf(magic->ctx, RELIC_ERROR, NULL,
-	    "limit exceeded: %s=%zu while adorning %s", limit, configured,
+	relic_diag_limit(magic->ctx, limit, configured, "adorning",
 	    relic_pred_describe(magic->ctx, source, described,
 	    sizeof(described)));
 }

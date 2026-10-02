@@ -62,12 +62,6 @@ typedef struct relic_pending_map relic_pending_map_t;
 typedef struct relic_valtab relic_valtab_t;
 
 /*
- * The longest description of an activity: a verb of a few letters and the
- * description of a predicate or a query.
- */
-#define	RELIC_ACTIVITY_TEXT_MAX	(16 + RELIC_PRED_TEXT_MAX)
-
-/*
  * Where diagnostics go, and the text of the last error.
  *
  * With no callback installed, diagnostics are discarded and an error is still
@@ -80,8 +74,9 @@ typedef struct relic_valtab relic_valtab_t;
  * busy; relic_error() then describes the refusal in place of `last_error`
  * until the operation returns.
  *
- * `activity` says what the operation in progress is doing, such as
- * "planning path/2", for a refusal by the memory limit to name.  It is
+ * `activity_verb` and `activity_subject` say what the operation in progress
+ * is doing, such as "planning" and "path/2", for a refusal by the memory
+ * limit to name; the verb is NULL while nothing is recorded.  They are
  * written when a phase that uses a charged arena begins, and read only when
  * the account records such a refusal.
  */
@@ -90,7 +85,8 @@ struct relic_diag {
 	void		*callback_ctx;
 	size_t		 error_count;
 	char		 last_error[512];
-	char		 activity[RELIC_ACTIVITY_TEXT_MAX];
+	const char	*activity_verb;
+	char		 activity_subject[RELIC_PRED_TEXT_MAX];
 	bool		 has_error;
 	bool		 refused;
 };
@@ -524,12 +520,24 @@ void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
 void	 relic_diag_no_memory(relic_t *ctx);
 
 /*
+ * Report a configured limit refusing something, in the form every limit
+ * shares: "limit exceeded: memory=1048576 while deriving path/2" -- the
+ * limit, what it was set to, and what was being done, as a verb and the
+ * description of what it acts on.  With a NULL verb the clause naming the
+ * activity is left out.  A caller telling a limit's refusal from another
+ * failure by its text relies on the prefix "limit exceeded:".
+ */
+void	 relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
+	    const char *verb, const char *subject);
+
+/*
  * Record what the operation in progress is now doing, as a verb and the
  * description of what it acts on -- "planning" and "path/2" -- which
  * relic_diag_no_memory() names when the memory limit refused a charged
- * arena.  A phase that allocates from a charged arena calls this before it
- * allocates.  A refusal the account recorded and nothing reported is
- * forgotten, so that no failure of this phase is blamed on an earlier one.
+ * arena.  The verb is kept by reference, so it must be a string literal.  A
+ * phase that allocates from a charged arena calls this before it allocates.
+ * A refusal the account recorded and nothing reported is forgotten, so that
+ * no failure of this phase is blamed on an earlier one.
  */
 void	 relic_diag_activity(relic_t *ctx, const char *verb,
 	    const char *subject);
@@ -944,6 +952,13 @@ void	 relic_ast_program_init(relic_ast_program_t *program);
 int	 relic_parse_query(relic_t *ctx, relic_arena_t *arena,
 	    const char *source_name, const char *text,
 	    const relic_ast_stmt_t **statementp);
+
+/*
+ * Open the file at `path` for a load or an import to read, closed on exec so
+ * that a child an embedder starts meanwhile does not inherit it.  Returns
+ * NULL having reported why it could not be opened.
+ */
+FILE	*relic_open_input(relic_t *ctx, const char *path);
 
 /*
  * The stable name a location may point at for the life of the context: the

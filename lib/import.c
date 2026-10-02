@@ -765,12 +765,9 @@ import_named_file(relic_t *ctx, const char *path, const import_plan_t *plan)
 	FILE *stream;
 	int status;
 
-	stream = fopen(path, "r");
-	if (stream == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot open %s: %s", path,
-		    strerror(errno));
+	stream = relic_open_input(ctx, path);
+	if (stream == NULL)
 		return (-1);
-	}
 
 	status = import_stream(ctx, path, stream, plan);
 

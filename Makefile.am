@@ -638,7 +638,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/arithmetic-syntax.dl tests/lang/arithmetic-unsafe.dl \
 	tests/lang/arithmetic-zero.dl tests/lang/arithmetic-zero-query.dl \
 	tests/lang/arity-32.dl tests/lang/arity-limit.dl \
-	tests/lang/bad-backslash.dl \
+	tests/lang/arity-limit-name.dl tests/lang/bad-backslash.dl \
 	tests/lang/bad-byte.dl tests/lang/bad-escape-at-end.dl \
 	tests/lang/bad-escape.dl tests/lang/check-queries.dl \
 	tests/lang/closure-double.dl tests/lang/closure-graphs.dl \
@@ -784,6 +784,12 @@ TESTS = $(RELIC_TEST_BINARIES) $(dist_check_SCRIPTS) $(RELIC_LANG_TESTS)
 ## that, so allocator_may_return_null=1 makes the replacement return NULL
 ## too, for the suite to test what relic does with it.
 ##
+## On macOS the sanitizer's reservations leave the system allocator no room
+## for its nano zone, and the allocator says so on standard error, which a
+## test reading the output of a terminal sees among the answers.
+## MallocNanoZone=0 turns the zone off, so there is nothing to say; other
+## systems ignore the variable.
+##
 
 RELIC_ASAN_OPTIONS = halt_on_error=1:detect_leaks=$(RELIC_ASAN_DETECT_LEAKS):detect_stack_use_after_return=1:check_initialization_order=1:strict_string_checks=1:detect_invalid_pointer_pairs=2:abort_on_error=1:allocator_may_return_null=1
 RELIC_LSAN_OPTIONS = exitcode=1:allocator_may_return_null=1
@@ -874,6 +880,7 @@ check-asan:
 	test x'$(RELIC_ASAN_DETECT_LEAKS)' = x1 || \
 	    note='this platform cannot detect leaks; memory errors only'; \
 	ASAN_OPTIONS='$(RELIC_ASAN_OPTIONS)'; export ASAN_OPTIONS; \
+	MallocNanoZone=0; export MallocNanoZone; \
 	$(RELIC_SANITIZER_CHECK)
 
 check-lsan:

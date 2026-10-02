@@ -1,0 +1,2 @@
+arity-limit-name.dl:4:598: error: predicate wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww... has more than 32 arguments
+arity-limit-name.dl:5:606: error: predicate bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb... has more than 32 arguments

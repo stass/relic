@@ -73,6 +73,12 @@ work, with those systems' testing; each fetches the published tarball, runs
 `make check` where the system has a test target, and lists the installed paths
 exactly.
 
+**No file over 2 GiB has been loaded on a 32-bit Linux system.** [Low,
+component: `lib/parse.c` `relic_open_input`] Such a file is opened with
+`O_LARGEFILE` and read through stdio, which glibc and musl track with 64-bit
+offsets internally; nothing has run it. A 32-bit build loading a sparse file
+of facts past 2 GiB would confirm it.
+
 **An older macOS deployment target may weakly link `reallocarray`.**
 [Medium, component: `configure.ac`, `compat/compat.h`] Neither
 `AC_REPLACE_FUNCS` nor `AC_CHECK_DECLS` reads availability, so a macOS build
@@ -86,12 +92,6 @@ the deployment target predates the SDK, would settle it. The declarations
 `compat.h` makes are otherwise built with `--enable-werror` on glibc, musl
 and macOS by continuous integration, and on FreeBSD and OpenBSD once their
 jobs exist.
-
-**A 32-bit build cannot load or import a file over 2 GiB.** [Low,
-component: `configure.ac`, `lib/parse.c`, `lib/import.c`] `configure.ac`
-has no `AC_SYS_LARGEFILE`, so on a 32-bit glibc system `off_t` is 32 bits
-and `fopen(3)` of a larger file fails with `EOVERFLOW`. Adding the macro
-selects the 64-bit file interfaces where the platform needs them.
 
 ## Engine
 
@@ -130,16 +130,12 @@ exists. The same count makes `relic_base_total()`, which
 `relic_relations_current()` walks the base stores for on every query,
 constant time.
 
-**The reason given for reading a load whole is out of date.** [Low,
-component: `lib/parse.c`, `specs/design-parser.md`] `read_stream()`'s
-comment and `specs/design-parser.md` section 8 say a stream is read whole
-because the syntax tree a load produces is as large as its input. A load's
-facts are staged rather than built into the tree (`specs/design-facts.md`),
-so for a file of facts the tree is nearly empty and the text, about 24
-bytes per fact, is held only for the lexer, which scans one contiguous
-range, and is kept until the commit though nothing reads it once the parse
-ends. State the reason that holds, and decide whether the parse should
-release the text before the commit.
+**A load holds its text through the commit.** [Low, component:
+`lib/parse.c` `load_stream`] A stream is read whole for the lexer, and the
+text, about 24 bytes per fact, is released only once `load_text()` has
+committed, though nothing reads it once the parse ends. Releasing it between
+the parse and the commit would lower a large load's peak by the size of its
+input.
 
 **An interactive session accepts only queries.** [Low, component:
 `cmd/relic/repl.c`, `include/relic.h`] A session cannot add a fact or a rule,
@@ -150,11 +146,6 @@ added entry point, a compatible change, and the session would then load a
 line ending in `.` through it. A session would then pay for re-evaluating
 the whole program after each addition (incremental insertion, under
 Post-1.0) and for the complete relations evaluated again for every query.
-
-**A session names an unknown command without marking the cut.** [Low,
-component: `cmd/relic/repl.c`] `unknown command .%.*s` shortens a long
-command name to `COMMAND_NAME_SHOWN` bytes with no `...`, where every other
-shortened name in a diagnostic ends in one.
 
 **A long-lived context's tables only grow.** [Low, component:
 `lib/parse.c`, `lib/magic.c`, `lib/symbol.c`, `lib/value.c`,
@@ -296,15 +287,11 @@ structures the page reproduces, so a changed parameter would leave the page
 wrong without failing anything. Comparing each `.Fn`/`.Fo` block's types
 with the header's declaration would close it.
 
-**The limit message is formatted in four places.** [Low, component:
-`lib/relation.c`, `lib/magic.c`, `lib/eval.c`, `lib/diag.c`] `limit
-exceeded: %s=%zu while %s` is written by the relation store, the Magic
-rewrite, the evaluator's refusal while deriving and
-`relic_diag_no_memory()`. One `relic_diag_limit()` would make "the form every
-limit shares" hold by construction. The eval fuzz target already depends on
-the form, telling a limit's refusal from a failure by the prefix `limit
-exceeded:`, so a limit worded otherwise would read as a finding there; an
-error class a caller can ask for would free both from the text.
+**A caller tells a limit's refusal from another failure only by its
+text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is
+reported through `relic_diag_limit()` with the prefix `limit exceeded:`, and
+the eval fuzz target tells a limit's refusal from a failure by that prefix.
+An error class a caller can ask for would free both from the wording.
 
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
@@ -480,14 +467,6 @@ such a stale pointer would need. A sanitizer build that kept every array in
 the heap would catch both, at the cost of not exercising the mapped path
 under the sanitizer.
 
-**Files a load or import opens are inherited by child processes.** [Low,
-component: `lib/parse.c`, `lib/import.c`] `relic_load_path()` and
-`relic_import_path()` open with `fopen(path, "r")`, without close-on-exec, so
-a multithreaded embedder that forks and executes while one is open passes
-the descriptor on. `"re"` asks for close-on-exec on FreeBSD, glibc and
-current macOS; confirm every supported platform accepts it, or open with
-`open(2)` and `O_CLOEXEC` and `fdopen(3)`, before changing both.
-
 **A long-lived context gives a timing oracle on its hash seed.** [Low,
 component: `lib/util.c`] The seed defeats crafted collisions because an
 author cannot learn it, and a batch run gives nothing to learn from. A REPL
@@ -497,14 +476,6 @@ one fixed seed and, in principle, search for keys that share a cluster.
 No attack has been built. Decide whether a context used this way should be
 documented as trusting its input, or whether a stronger keyed hash for the
 byte strings the symbol table interns is worth its cost there.
-
-**The arity-limit message quotes a predicate name of any length.** [Low,
-component: `lib/parse.c`] `predicate has more than 32 arguments` names the
-predicate through `predicate_name()`, which is not clamped to
-`RELIC_QUOTED_TEXT_MAX` as quoted token text is, so a 500-byte name makes a
-624-byte message. The bytes are identifier characters and nothing leaks, but
-a message should name its subject in a bounded length; `relic_diag_name()`,
-which the parser already uses elsewhere, would bound it.
 
 **A dropped rule's body stays in the rewrite arena.** [Low, component:
 `lib/magic.c`] `publish_rule()` canonicalizes a draft, which copies its

@@ -148,29 +148,38 @@ relic_diag_no_memory(relic_t *ctx)
 		return;
 	}
 
-	if (ctx->diag.activity[0] == '\0') {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "limit exceeded: memory=%zu", ctx->account.limit);
+	relic_diag_limit(ctx, "memory", ctx->account.limit,
+	    ctx->diag.activity_verb, ctx->diag.activity_subject);
+}
+
+void
+relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
+    const char *verb, const char *subject)
+{
+	if (verb == NULL) {
+		relic_diagf(ctx, RELIC_ERROR, NULL, "limit exceeded: %s=%zu",
+		    limit, configured);
 		return;
 	}
 
 	relic_diagf(ctx, RELIC_ERROR, NULL,
-	    "limit exceeded: memory=%zu while %s", ctx->account.limit,
-	    ctx->diag.activity);
+	    "limit exceeded: %s=%zu while %s %s", limit, configured, verb,
+	    subject);
 }
 
 void
 relic_diag_begin_operation(relic_t *ctx)
 {
-	ctx->diag.activity[0] = '\0';
+	ctx->diag.activity_verb = NULL;
 	relic_account_take_refusal(&ctx->account);
 }
 
 void
 relic_diag_activity(relic_t *ctx, const char *verb, const char *subject)
 {
-	snprintf(ctx->diag.activity, sizeof(ctx->diag.activity), "%s %s", verb,
-	    subject);
+	ctx->diag.activity_verb = verb;
+	strlcpy(ctx->diag.activity_subject, subject,
+	    sizeof(ctx->diag.activity_subject));
 	relic_account_take_refusal(&ctx->account);
 }
 

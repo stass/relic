@@ -779,8 +779,7 @@ report_texts_refused(relic_t *ctx, const relic_relation_t *relation,
 		return;
 	}
 
-	relic_diagf(ctx, RELIC_ERROR, NULL,
-	    "limit exceeded: memory=%zu while deriving %s", ctx->account.limit,
+	relic_diag_limit(ctx, "memory", ctx->account.limit, "deriving",
 	    relic_relation_describe(ctx, relation, described,
 	    sizeof(described)));
 }

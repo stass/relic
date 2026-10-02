@@ -91,9 +91,6 @@ static void	 place_append_stripe(relic_relation_t *relation,
 		    relic_append_t *append, size_t s);
 static void	 prefetch_first_candidate(const relic_relation_t *relation,
 		    uint64_t hash);
-static void	 report_limit(relic_t *ctx, const char *limit,
-		    size_t configured, const char *activity,
-		    const char *described);
 static bool	 relation_columns_after_reserve(
 		    const relic_relation_t *relation, size_t added,
 		    size_t *columnsp);
@@ -1087,8 +1084,8 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation, uint64_t hash)
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (exceeds_tuple_limit(ctx)) {
-		report_limit(ctx, "tuples", ctx->config.max_tuples, "deriving",
-		    relic_relation_describe(ctx, relation, described,
+		relic_diag_limit(ctx, "tuples", ctx->config.max_tuples,
+		    "deriving", relic_relation_describe(ctx, relation, described,
 		    sizeof(described)));
 		return (-1);
 	}
@@ -1096,7 +1093,7 @@ enforce_limits(relic_t *ctx, const relic_relation_t *relation, uint64_t hash)
 	if (relic_account_exceeds(&ctx->account,
 	    insertion_parts_bytes(relation, hash),
 	    insertion_parts_bytes_after(relation, hash))) {
-		report_limit(ctx, "memory", ctx->account.limit, "deriving",
+		relic_diag_limit(ctx, "memory", ctx->account.limit, "deriving",
 		    relic_relation_describe(ctx, relation, described,
 		    sizeof(described)));
 		return (-1);
@@ -1115,26 +1112,11 @@ relic_relation_admit_values(relic_t *ctx, const relic_relation_t *relation,
 	    relic_value_storage_bytes(ctx), projected_bytes))
 		return (0);
 
-	report_limit(ctx, "memory", ctx->account.limit, "deriving",
+	relic_diag_limit(ctx, "memory", ctx->account.limit, "deriving",
 	    relic_relation_describe(ctx, relation, described,
 	    sizeof(described)));
 
 	return (-1);
-}
-
-/*
- * Report a configured limit refusing something, in the form every limit
- * shares: the limit, what it was set to, and what was being done to which
- * relation, as "name/arity" -- deriving into it, indexing it, or loading
- * facts into it.
- */
-static void
-report_limit(relic_t *ctx, const char *limit, size_t configured,
-    const char *activity, const char *described)
-{
-	relic_diagf(ctx, RELIC_ERROR, NULL,
-	    "limit exceeded: %s=%zu while %s %s", limit, configured, activity,
-	    described);
 }
 
 /*
@@ -1787,7 +1769,7 @@ index_make_room(relic_t *ctx, const relic_relation_t *relation,
 
 	if (relic_account_exceeds(&ctx->account, bytes_before,
 	    relic_index_pending_bytes_after(index))) {
-		report_limit(ctx, "memory", ctx->account.limit, "indexing",
+		relic_diag_limit(ctx, "memory", ctx->account.limit, "indexing",
 		    relic_relation_describe(ctx, relation, described,
 		    sizeof(described)));
 		return (-1);
@@ -2355,7 +2337,7 @@ refuse_load(relic_t *ctx, const char *key, size_t limit, relic_pred_id_t pred)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
-	report_limit(ctx, key, limit, "loading",
+	relic_diag_limit(ctx, key, limit, "loading",
 	    relic_pred_describe(ctx, pred, described, sizeof(described)));
 
 	return (-1);

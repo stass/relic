@@ -428,9 +428,12 @@ int relic_load_path(relic_t *, const char *path);
 
 `relic_load_path()` opens the file and delegates; `relic_load_file()` reads the
 stream into one buffer and delegates. A stream is read whole rather than
-incrementally because the lexer needs to look one byte past a token, the parser
-needs no more input than that, and an incremental reader would buy a bounded
-footprint that a program's abstract syntax tree does not have anyway.
+incrementally because the lexer scans one contiguous range, so every token,
+however long, is a pointer and a length into the text with no buffer to
+refill beneath it. An incremental reader would bound only the text: a load's
+facts are staged rather than built into the tree (`specs/design-facts.md`),
+and the staging, held until the load's all-or-nothing commit, grows with the
+input regardless.
 
 Multiple loads append to one logical program, which is what lets facts and
 rules be split across files on a command line.

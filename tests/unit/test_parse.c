@@ -18,6 +18,7 @@
 
 #include "config.h"
 
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -36,6 +37,7 @@
 #define	SCENARIO_CALL		"a call is the tree its arguments give it"
 #define	SCENARIO_CALL_DEPTH	"a call counts toward both nesting bounds"
 #define	SCENARIO_CALL_ERROR	"a call's mistake is reported where written"
+#define	SCENARIO_CLOEXEC	"a file opened to read is closed on exec"
 #define	SCENARIO_APPEND		"loads append to one program"
 #define	SCENARIO_ATOM_OR_CALL	"what follows `name(...)` makes it an atom or a call"
 #define	SCENARIO_ATOMIC		"a failed load changes nothing"
@@ -97,6 +99,7 @@ static size_t	 facts_held(relic_t *ctx, const char *name, uint16_t arity);
 static void	 statements_keep_the_shape_they_were_written_in(void);
 static void	 terms_hold_the_values_they_spell(void);
 static void	 aggregates_are_the_literals_they_were_written_as(void);
+static void	 an_opened_input_is_closed_on_exec(void);
 static void	 function_names_are_names_elsewhere(void);
 static void	 aggregate_mistakes_are_reported_where_written(void);
 static void	 atoms_and_calls_are_told_apart_by_what_follows(void);
@@ -1595,6 +1598,43 @@ calls_count_toward_both_nesting_bounds(void)
 	}
 }
 
+/*
+ * A file a load or an import opens is not inherited by a child an embedder
+ * starts while it is open, and one that cannot be opened is reported.
+ */
+static void
+an_opened_input_is_closed_on_exec(void)
+{
+	diag_log_t log;
+	FILE *stream;
+	relic_t *ctx;
+	int descriptor_flags;
+
+	ctx = context_logging_to(&log);
+	check(ctx != NULL, SCENARIO_CLOEXEC, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	stream = relic_open_input(ctx, "/dev/null");
+	check(stream != NULL, SCENARIO_CLOEXEC, "/dev/null should open");
+	if (stream != NULL) {
+		descriptor_flags = fcntl(fileno(stream), F_GETFD);
+		check(descriptor_flags != -1 &&
+		    (descriptor_flags & FD_CLOEXEC) != 0, SCENARIO_CLOEXEC,
+		    "its descriptor should be closed on exec");
+		fclose(stream);
+	}
+
+	stream = relic_open_input(ctx, "/nonexistent/input.dl");
+	check(stream == NULL && log.errors == 1 &&
+	    strstr(log.first, "cannot open /nonexistent/input.dl") != NULL,
+	    SCENARIO_CLOEXEC, "a missing file should be reported");
+	if (stream != NULL)
+		fclose(stream);
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -1617,6 +1657,7 @@ main(void)
 	atoms_and_calls_are_told_apart_by_what_follows();
 	call_mistakes_are_reported_where_written();
 	calls_count_toward_both_nesting_bounds();
+	an_opened_input_is_closed_on_exec();
 
 	return (check_summary("parse"));
 }

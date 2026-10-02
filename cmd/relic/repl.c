@@ -45,9 +45,6 @@
  */
 #define	BLANKS			" \t\r\v\f"
 
-/* The most of an unknown command's name a diagnostic repeats. */
-#define	COMMAND_NAME_SHOWN	64
-
 typedef struct repl repl_t;
 typedef struct repl_command repl_command_t;
 
@@ -246,6 +243,7 @@ run_command(repl_t *repl, char *line, char *dot)
 	const char *name;
 	const char *rest;
 	size_t name_length;
+	cmd_quoted_t quoted_name;
 
 	name = dot + 1;
 	name_length = strcspn(name, BLANKS);
@@ -254,9 +252,8 @@ run_command(repl_t *repl, char *line, char *dot)
 	command = command_named(name, name_length);
 	if (command == NULL) {
 		report_error(repl->invocation->program_name,
-		    "unknown command .%.*s; .help lists the commands",
-		    name_length < COMMAND_NAME_SHOWN ?
-		    (int)name_length : COMMAND_NAME_SHOWN, name);
+		    "unknown command .%s; .help lists the commands",
+		    cmd_quote(name, name_length, &quoted_name));
 		return (-1);
 	}
 
