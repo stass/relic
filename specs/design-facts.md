@@ -205,19 +205,49 @@ through a small open-addressing table keyed by predicate identifier.
 A tuple's hash is computed once, as the fact is staged, under the context's
 seed and exactly as every relation of the context hashes a tuple, so it is
 the hash the predicate's base store would compute. The set's table rehashes
-from the kept hashes when it grows, reading no columns, and the commit's
-measure and append (section 4.3) take them rather than hash each tuple
+from the kept hashes when it grows, reading no columns, and the measure and
+the commit's append (section 4.3) take them rather than hash each tuple
 again.
+
+**Staging measures each fact against the limits.** As it stages a tuple
+the set lacks, staging looks it up in its predicate's base store by its
+staged hash, `relic_relation_contains_hashed()`, an absent store counting
+as empty, and marks it new or not. Nothing can change a base store while a
+load runs, so the mark holds until the commit, which trusts it. A new tuple
+is staged only if the load, with it, can still fit both limits:
+
+* **tuples:** the facts the base stores held when the load began, plus the
+  new tuples, within `max_tuples`;
+* **memory:** a floor under what the commit will hold within `max_memory`:
+  the value table and the symbol pool as they stand, plus the columns of
+  each loaded predicate's base store at its count and its new tuples. The
+  value table and the pool only grow while a load runs, and the commit
+  discards the derived relations before it reserves, so for any growth the
+  stores can hold the floor never exceeds what the commit measures, and
+  staging refuses no load the commit would admit; a growth past what a store
+  can hold the reservation refuses in any case. The floor leaves out the canonical indexes, whose growth
+  depends on how the new tuples fall in the stripes; the commit measures
+  them exactly and can refuse what the floor let through.
+
+A refusal is reported as the commit reports one (section 4.3), naming the
+first predicate whose store the facts staged so far would grow, and ends
+the load: the parser stages a fact before it reads the token after it, and
+stops there, and an import stops at the record. So a load the limits refuse
+stages and interns no more of its input than the fact that shows it, and
+what is derived is not discarded, since nothing in the program changes.
+What staging bounds is the parse, not the read: a file is read whole before
+it is parsed, and an import may have read a chunk of its stream past the
+record that ends it.
 
 Staging is the load's working storage rather than the program's. Its
 packed tuples grow by doubling, and its identifier tables are allocated as
 every identifier table is and hash with the context's seeded hash, since
 the text is untrusted. Staging is charged to no limit. It is proportional
 to the text being loaded, as the text itself and the program arena are,
-which no limit bounds either, and it is gone when the load returns;
-charged, it would count against a limit while the derived relations the
-commit is about to discard still did, and they could refuse a load that
-fits without them. A failed allocation is reported as the load's arena
+which no limit bounds either, except through the new facts the limits
+admit, and it is gone when the load returns; charged, it would count
+against a limit while the derived relations the commit is about to discard
+still did, and they could refuse a load that fits without them. A failed allocation is reported as the load's arena
 exhaustion is. One function releases staging, and it is the load's only
 exit: a load that fails to parse, one the commit refuses and one that
 commits all end there.
@@ -228,18 +258,16 @@ A load is all or nothing in what it adds to the program,
 `specs/design-parser.md` section 8. When the whole input has parsed, the
 load commits its facts, then splices its statements:
 
-1. **Measure.** For each staged tuple, look it up in its predicate's base
-   store by its staged hash, `relic_relation_contains_hashed()`, an absent
-   store counting as empty, and mark the tuple new or not. Every mark is
-   written here, and the append trusts them. Count the new tuples of each
-   set. Nothing but the marks changes, and nothing can fail.
-2. **Discard.** If any tuple is new, the program is about to change, so
+Staging has marked every tuple new or not (section 4.2). A load with no new
+tuple commits no fact, and its facts' commit returns at once.
+
+1. **Discard.** If any tuple is new, the program is about to change, so
    what was derived from it is discarded (section 5.3): the derived
    relations, the base stores' secondary indexes, and the record of what
    was materialized. The discard cannot fail, and it leaves the store
    holding exactly the base stores' columns and canonical indexes, so the
    limits of the next step count the program's facts and nothing derived.
-3. **Reserve.** Compute what the load adds: its new tuples, and the bytes
+2. **Reserve.** Compute what the load adds: its new tuples, and the bytes
    each base store's columns and canonical index occupy once grown for its
    new count, an absent store counting as empty. Check both limits once,
    against the account's totals plus those. A refusal reports `limit
@@ -252,14 +280,14 @@ load commits its facts, then splices its statements:
    its new count. A failed allocation among these fails the load the same
    way, and a store that had grown keeps its capacity, accounted, as any
    relation that failed to grow does.
-4. **Append.** Append each set's new tuples to its base store in the
+3. **Append.** Append each set's new tuples to its base store in the
    order they were staged, placing each in the canonical index by its
    staged hash, `relic_base_append_hashed()`. Room is reserved, every
    appended tuple is one the store lacks, and no secondary index remains to
    be linked, so no append looks anything up and none can fail.
 
-The measure and the append trust the staged hash, as the append trusts the
-marks. A debug build computes each tuple's hash as the store would, in
+Staging's measure and the commit's append trust the staged hash, as the
+append trusts the marks. A debug build computes each tuple's hash as the store would, in
 both, and asserts that it matches the staged one, so it still checks what
 a release build trusts.
 
@@ -408,7 +436,7 @@ components are numbered without it.
 * `tuples held` and `storage bytes` count the base stores and the derived
   relations alike, a fact held in both counted in both.
 * The tuple and memory limits count every store, base stores included, and
-  refuse a commit as section 4.3 describes, with `while loading`; the
+  refuse a load as sections 4.2 and 4.3 describe, with `while loading`; the
   activity a limit names is a parameter of the store's refusal.
 * A load needs its staging and the room its commit reserves at once, about
   twice the new facts' storage, until it returns; only the room counts
@@ -435,9 +463,10 @@ twice.
   first literal is ground is kept as a query; a load that fails to parse
   commits no fact; a load refused by the tuple limit, and one refused by the
   memory limit, grow no base store, and leave the program, every base store's
-  contents and the warnings as they were, and its derived relations discarded
-  only when it held a new fact; a load of duplicates alone leaves the
-  relations current; a fact in a query's text is reported as a fact where a
+  contents and the warnings as they were; one refused as it stages stops at
+  the fact that shows it and leaves the relations as current as they were,
+  and one the commit refuses has discarded them; a load of duplicates alone
+  leaves the relations current; a fact in a query's text is reported as a fact where a
   query was expected.
 * **The funnel.** Asking the write side for a predicate that is not
   derived is refused; a predicate named only in a query reads as empty; a

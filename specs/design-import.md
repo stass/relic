@@ -462,22 +462,25 @@ Neither a record's text nor the file's is ever held.
 ### 6.2 Staging and the commit
 
 An import is a load whose text is a table. It stages its facts as it reads
-them. When the whole input has been read, it commits them through the
-commit of `specs/design-facts.md` section 4.3, which that document's
+them, each measured against the limits as it is staged
+(`specs/design-facts.md` section 4.2). When the whole input has been read,
+it commits them through the commit of `specs/design-facts.md` section 4.3, which that document's
 section 13 describes as "the same commit fed by a different reader". It
 follows that:
 
 * **An import is all or nothing.** A read error, a malformed record, a
   field its column refuses, or a limit that refuses the commit adds no fact,
   and the base stores stay as they were.
-* **A limit refuses at the commit, with a load's message,**
+* **A limit refuses with a load's message,**
   `limit exceeded: tuples=N while loading edge/2`, before anything has
-  grown.
+  grown: as staging stages the record that shows the import cannot fit,
+  which ends the read, or at the commit.
 * **Duplicates are held once.** This holds within an import and against
   the facts a base store already has. An import that adds nothing new
   leaves the relations current (`specs/design-facts.md` section 5.4).
-* **Staging is charged to no limit,** as a load's is. It is proportional to
-  the input the caller chose (section 9).
+* **Staging is charged to no limit,** as a load's is. The limits bound it
+  through the new facts they admit, and otherwise it is proportional to the
+  input the caller chose (section 9).
 * **What a failed import interned stays interned.** The predicate is
   interned when the import begins reading, as a fact's predicate is when the
   parser stages it, and values as their fields are read. A failed import

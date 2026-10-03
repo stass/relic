@@ -39,6 +39,7 @@
 #include "internal.h"
 
 #define	SCENARIO_ALL_OR_NOTHING	"an import is all or nothing"
+#define	SCENARIO_BOUNDED	"a refused import stops reading"
 #define	SCENARIO_DERIVED	"an import discards what was derived"
 #define	SCENARIO_DESCRIPTION	"a malformed description is refused unread"
 #define	SCENARIO_DUPLICATES	"a fact is held once"
@@ -104,6 +105,11 @@ static ssize_t	 reenter_and_read(reentering_read_t *reading, char *buffer,
 		    size_t size);
 static FILE	*reentering_stream(reentering_read_t *reading);
 static size_t	 rows_of(relic_t *ctx, const char *query);
+static int	 import_counting(relic_t *ctx, const char *table,
+		    size_t length, long *readp);
+static char	*pairs_table(size_t rows, size_t values, size_t *lengthp);
+static bool	 interned(const relic_t *ctx, const char *name);
+static size_t	 row_offset(const char *table, size_t rows);
 static FILE	*table_stream(const char *table, size_t length);
 static void	 transcribe(const reader_case_t *table, size_t piece,
 		    char *out, size_t size);
@@ -112,6 +118,7 @@ static void	 csv_is_read_by_its_rules(void);
 static void	 every_refusal_reads_nothing(void);
 static void	 facts_are_held_once(void);
 static void	 a_failed_import_adds_nothing(void);
+static void	 a_refused_import_stops_reading(void);
 static void	 a_header_is_skipped(void);
 static void	 a_long_field_crosses_reads(void);
 static void	 a_description_is_read_once(void);
@@ -1114,6 +1121,197 @@ a_failed_import_adds_nothing(void)
 }
 
 /*
+ * The rows a refused import is given, and the distinct values of each of
+ * its columns.
+ */
+#define	BOUNDED_ROWS	40000
+#define	BOUNDED_VALUES	200
+
+/* The limit on tuples the first refusal is held to. */
+#define	BOUNDED_TUPLES	10
+
+/*
+ * An import a limit refuses stops as soon as the facts it has read take the
+ * base stores past the limit, rather than staging and interning the whole
+ * table first.  Each table ends in a malformed record, which an import
+ * reading on would reach and report in place of the limit, and where the
+ * import stopped is read from the stream, which it reads a chunk at a time.
+ *
+ * Under the tuple limit, a table whose every row is new is refused at its
+ * eleventh row, having interned the predicate's name and that row's symbols
+ * but no later row's: e, a0 and b0 to b10.  Under the memory limit, a table
+ * of distinct pairs over a few values, all interned beforehand so that the
+ * import interns nothing, is refused at the row whose columns take the floor
+ * past what the limit leaves, the one after half the table.
+ */
+static void
+a_refused_import_stops_reading(void)
+{
+	char expected[TRANSCRIPT_MAX];
+	char name[32];
+	relic_config_t config;
+	capture_t capture;
+	relic_dom_t dom;
+	relic_t *ctx;
+	size_t symbols;
+	size_t length;
+	size_t cutoff;
+	size_t i;
+	long read;
+	char *table;
+	int status;
+
+	table = pairs_table(BOUNDED_ROWS, BOUNDED_ROWS, &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BOUNDED, "the table is built");
+		return;
+	}
+	bzero(&config, sizeof(config));
+	config.max_tuples = BOUNDED_TUPLES;
+	ctx = context_with_capture(&config, &capture);
+	if (ctx != NULL) {
+		symbols = relic_symbol_count(ctx);
+		status = import_counting(ctx, table, length, &read);
+		checkf(status == -1 && strcmp(capture.message,
+		    "limit exceeded: tuples=10 while loading e/2") == 0,
+		    SCENARIO_BOUNDED, "the tuple limit should refuse the "
+		    "import, not \"%s\"", capture.message);
+		checkf(relic_symbol_count(ctx) - symbols ==
+		    BOUNDED_TUPLES + 3 && interned(ctx, "e") &&
+		    interned(ctx, "b10") && !interned(ctx, "b11"),
+		    SCENARIO_BOUNDED, "the refused import should intern e, a0 "
+		    "and b0 to b10, %d symbols, not %zu", BOUNDED_TUPLES + 3,
+		    relic_symbol_count(ctx) - symbols);
+		checkf(read >= 0 && (size_t)read <= RELIC_IMPORT_READ_CHUNK,
+		    SCENARIO_BOUNDED, "the refused import should read one "
+		    "chunk of the table, not %ld bytes", read);
+		relic_destroy(ctx);
+	}
+	free(table);
+
+	table = pairs_table(BOUNDED_ROWS, BOUNDED_VALUES, &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BOUNDED, "the table is built");
+		return;
+	}
+	ctx = context_with_capture(NULL, &capture);
+	if (ctx != NULL) {
+		for (i = 0; i < BOUNDED_VALUES; i++) {
+			snprintf(name, sizeof(name), "a%zu", i);
+			check(relic_value_intern_bytes(ctx, RELIC_SYMBOL, name,
+			    strlen(name), &dom) == 0, SCENARIO_BOUNDED,
+			    "a value is interned");
+			snprintf(name, sizeof(name), "b%zu", i);
+			check(relic_value_intern_bytes(ctx, RELIC_SYMBOL, name,
+			    strlen(name), &dom) == 0, SCENARIO_BOUNDED,
+			    "a value is interned");
+		}
+		ctx->account.limit = ctx->account.store_bytes +
+		    ctx->account.value_bytes + ctx->account.pool_bytes +
+		    BOUNDED_ROWS / 2 * 2 * sizeof(relic_dom_t);
+		snprintf(expected, sizeof(expected),
+		    "limit exceeded: memory=%zu while loading e/2",
+		    ctx->account.limit);
+		status = import_counting(ctx, table, length, &read);
+		checkf(status == -1 && strcmp(capture.message, expected) == 0,
+		    SCENARIO_BOUNDED, "the memory limit should refuse the "
+		    "import with \"%s\", not \"%s\"", expected,
+		    capture.message);
+		cutoff = row_offset(table, BOUNDED_ROWS / 2 + 1);
+		checkf(read >= 0 && (size_t)read >= cutoff &&
+		    (size_t)read <= cutoff + RELIC_IMPORT_READ_CHUNK,
+		    SCENARIO_BOUNDED, "the refused import should stop within "
+		    "a chunk of row %d, byte %zu, not at byte %ld",
+		    BOUNDED_ROWS / 2 + 1, cutoff, read);
+		relic_destroy(ctx);
+	}
+	free(table);
+}
+
+/*
+ * Import a table held in memory as e/2, of two symbol columns, and give in
+ * *readp how many of its bytes the import read.  Returns the import's
+ * status, or -2 when the table could not be put in a stream.
+ */
+static int
+import_counting(relic_t *ctx, const char *table, size_t length, long *readp)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SYMBOL
+	};
+	relic_import_t import;
+	FILE *stream;
+	int status;
+
+	*readp = -1;
+	stream = table_stream(table, length);
+	if (stream == NULL)
+		return (-2);
+
+	bzero(&import, sizeof(import));
+	import.predicate = "e";
+	import.columns = columns;
+	import.column_count = 2;
+	import.format = RELIC_FORMAT_TSV;
+
+	status = relic_import_file(ctx, "e", stream, &import);
+	*readp = ftell(stream);
+	fclose(stream);
+
+	return (status);
+}
+
+/* Whether `name` has been interned as a symbol of the context. */
+static bool
+interned(const relic_t *ctx, const char *name)
+{
+	return (relic_symbol_find(ctx, name, strlen(name),
+	    relic_symbol_hash(ctx, name, strlen(name))) != RELIC_ID_NONE);
+}
+
+/* The offset of the byte after the first `rows` rows of a table. */
+static size_t
+row_offset(const char *table, size_t rows)
+{
+	const char *end;
+	size_t i;
+
+	end = table;
+	for (i = 0; i < rows; i++)
+		end = strchr(end, '\n') + 1;
+
+	return ((size_t)(end - table));
+}
+
+/*
+ * A table of `rows` distinct pairs a<i>, b<j> over `values` values of each
+ * column, followed by a malformed record of one field, in a new string whose
+ * length is in *lengthp, or NULL when memory ran out.
+ */
+static char *
+pairs_table(size_t rows, size_t values, size_t *lengthp)
+{
+	size_t capacity;
+	size_t length;
+	size_t i;
+	char *table;
+
+	capacity = rows * 48 + 8;
+	table = malloc(capacity);
+	if (table == NULL)
+		return (NULL);
+
+	length = 0;
+	for (i = 0; i < rows; i++)
+		length += (size_t)snprintf(table + length, capacity - length,
+		    "a%zu\tb%zu\n", i / values % values, i % values);
+	length += (size_t)snprintf(table + length, capacity - length, "x\n");
+
+	*lengthp = length;
+	return (table);
+}
+
+/*
  * A fact is held once, within an import and against the facts the program
  * already states, and an import of nothing new leaves the relations as
  * current as they were.
@@ -1542,6 +1740,7 @@ main(void)
 	a_header_is_skipped();
 	every_refusal_reads_nothing();
 	a_failed_import_adds_nothing();
+	a_refused_import_stops_reading();
 	facts_are_held_once();
 	an_import_discards_derived_facts();
 	a_long_field_crosses_reads();

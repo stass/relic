@@ -360,28 +360,18 @@ No attack has been built. Decide whether a context used this way should be
 documented as trusting its input, or whether a stronger keyed hash for the
 byte strings the symbol table interns is worth its cost there.
 
-**A load or import refused by a limit stages and interns its whole input
-first.** [Medium, component: `lib/facts.c`, `specs/design-facts.md`,
-`specs/design-import.md`] The commit measures staged tuples against the
-base stores only once the input has been read, and checks the tuple and
-memory limits only then (`bases_fit()`). Interning is bounded by
-`max_memory`, which every growth of the value table and the pool asks, but
-not by `max_tuples`: a table or fact file of a billion distinct rows under
-`-l tuples=1000000` alone is staged and interned in full before it is
-refused, and nothing it interned is released. For an
-embedder feeding one long-lived context untrusted tables, each refused
-import permanently spends value identifiers. Nothing can change a base
-store while the context is busy, so staging could mark each tuple new or
-not as it stages it -- the commit's measure step, moved earlier -- and
-refuse as soon as the base stores' tuples plus the new ones exceed
-`max_tuples` (`relic_base_total()` gives the first term), or their
-projected bytes exceed `max_memory`. That bounds staging and interning by
-the limits, by construction. A load would still read its text whole before
-staging any of it; an import reads a record at a time and would stop
-reading too. Still to settle is the message of a refusal part way through a
-load naming several predicates: it names the first predicate in load order
-that would grow, which a refusal before the end of the load cannot yet
-know.
+**A load's input buffers are charged to no limit.** [Low, component:
+`lib/parse.c`, `lib/import.c`, `lib/lex.c`] Staging refuses a load at the
+first fact the limits cannot admit, but three buffers grow before any fact
+is measured and count against neither limit: `relic_load_file()` reads its
+whole stream before parsing it (`read_stream()`), the table reader grows a
+single field without bound, a skipped column's and a header's included,
+and the lexer decodes a string literal into a scratch buffer of any length.
+A caller feeding a context untrusted input bounds them only by what it
+hands over. And each refused load still interns the values of the fact
+that shows it, so a long-lived context refusing load after load spends a
+few identifiers per attempt. Charging the buffers to the memory limit, as
+staging is not, would let the read itself be refused.
 
 **No limit bounds the work of a join.** [Low, component: `lib/eval.c`,
 `include/relic.h`] The limits count tuples held and bytes allocated, and a

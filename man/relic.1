@@ -669,9 +669,11 @@ or
 .Cm memory
 fails, and writes no rows.
 A file or a table that would exceed either is refused when it is loaded,
-with nothing of it added.
+with nothing of it added, and is parsed no further than the first fact
+shown not to fit.
 When its facts are what exceed the limit, the diagnostic names the first
-predicate, in the order the file names them, that would gain facts:
+predicate, in the order the file names them, that the facts read would add
+to:
 .Dl relic: error: limit exceeded: tuples=4 while loading e/1
 When neither
 .Cm magic

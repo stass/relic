@@ -2617,20 +2617,26 @@ stage_fact(relic_parser_t *parser, const relic_ast_atom_t *fact)
  * Entered on the `.`, which ends the statement.
  *
  * A fact a load reads whose arguments are all constants is a tuple, and is
- * staged rather than kept.  Any other fact is kept as what it means, a rule
- * with no body: one with a variable, for the check to reject as unsafe with
- * the message an unsafe rule receives, and one in a query's text, for the
- * query parser to refuse as a fact.
+ * staged rather than kept.  It is staged before the token after the `.` is
+ * read, so a fact the limits refuse is the last thing the load reads: the
+ * lexer interns nothing past it.  Any other fact is kept as what it means, a
+ * rule with no body: one with a variable, for the check to reject as unsafe
+ * with the message an unsafe rule receives, and one in a query's text, for
+ * the query parser to refuse as a fact.
  */
 static bool
 finish_fact(relic_parser_t *parser, const relic_ast_atom_t *head,
     const relic_location_t *where)
 {
+	if (parser->staging != NULL && is_ground(head)) {
+		if (!stage_fact(parser, head))
+			return (false);
+
+		return (advance(parser));
+	}
+
 	if (!advance(parser))
 		return (false);
-
-	if (parser->staging != NULL && is_ground(head))
-		return (stage_fact(parser, head));
 
 	return (append_statement(parser, head, NULL, 0, where));
 }

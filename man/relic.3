@@ -185,9 +185,10 @@ whose facts would take the relations past
 .Fa max_tuples
 or
 .Fa max_memory
-is refused with nothing added; when the facts are what do not fit, the
-error names the first predicate, in the order the text names them, that
-would gain facts:
+is refused with nothing added, and is parsed no further than the first fact
+shown not to fit; when the facts are what do not fit, the error names the
+first predicate, in the order the text names them, that the facts read
+would add to:
 .Dq limit exceeded: tuples=4 while loading e/1 .
 Queries are prepared from text, such as
 .Qq path(a, X)?\& ,

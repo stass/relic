@@ -124,8 +124,6 @@ static void	 reltab_reset(relic_reltab_t *table);
 static size_t	 base_bytes(const relic_t *ctx) RELIC_UNUSED;
 static int	 bases_fit(relic_t *ctx, const relic_base_growth_t *growths,
 		    size_t count);
-static int	 refuse_load(relic_t *ctx, const char *key, size_t limit,
-		    relic_pred_id_t pred);
 static void	 tuple_append(relic_relation_t *relation,
 		    const relic_dom_t *columns, uint64_t hash);
 static relic_dom_t *tuple_at(const relic_relation_t *relation,
@@ -2162,19 +2160,7 @@ relic_base_count(const relic_t *ctx, relic_pred_id_t pred)
 size_t
 relic_base_total(const relic_t *ctx)
 {
-	const relic_reltab_t *table;
-	size_t total;
-	size_t position;
-
-	table = &ctx->store.bases;
-	total = 0;
-
-	for (position = 0; position < table->count; position++) {
-		if (table->entries[position] != NULL)
-			total += table->entries[position]->count;
-	}
-
-	return (total);
+	return (ctx->store.base_tuple_count);
 }
 
 /*
@@ -2322,11 +2308,11 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 	if (relic_limit_set(ctx->config.max_tuples) &&
 	    (ctx->store.tuple_count > ctx->config.max_tuples ||
 	    added_total > ctx->config.max_tuples - ctx->store.tuple_count))
-		return (refuse_load(ctx, "tuples", ctx->config.max_tuples,
-		    growths[0].pred));
+		return (relic_bases_refuse(ctx, "tuples",
+		    ctx->config.max_tuples, growths[0].pred));
 
 	if (relic_account_exceeds(&ctx->account, bytes_before, bytes_after))
-		return (refuse_load(ctx, "memory", ctx->account.limit,
+		return (relic_bases_refuse(ctx, "memory", ctx->account.limit,
 		    growths[0].pred));
 
 	return (0);
@@ -2336,8 +2322,9 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
  * Report that the limit `key`, of `limit`, refuses a load whose first
  * growing store is `pred`'s, and return -1.
  */
-static int
-refuse_load(relic_t *ctx, const char *key, size_t limit, relic_pred_id_t pred)
+int
+relic_bases_refuse(relic_t *ctx, const char *key, size_t limit,
+    relic_pred_id_t pred)
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
@@ -2408,6 +2395,7 @@ relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
 
 	tuple_append(store, columns, hash);
 	ctx->store.tuple_count++;
+	ctx->store.base_tuple_count++;
 }
 
 /*

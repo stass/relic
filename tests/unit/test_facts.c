@@ -156,6 +156,8 @@ static void	 a_failed_load_commits_no_fact(void);
 static void	 a_refused_load_leaves_the_program_as_it_was(void);
 static void	 refused_by(enum limit_kind kind);
 static void	 a_refusal_names_the_first_store_that_grows(void);
+static void	 a_refused_load_stops_parsing(void);
+static bool	 symbol_interned(const relic_t *ctx, const char *name);
 static void	 a_predicate_is_read_from_the_store_it_has(void);
 static void	 an_added_fact_is_seen_and_kept_once(void);
 static void	 an_added_fact_can_falsify_a_negation(void);
@@ -525,8 +527,8 @@ a_failed_load_commits_no_fact(void)
  * store and leaves the program as it was: no statement added, and its new
  * predicate g/1, which no rule reads, neither defined nor warned about, so a
  * check gives the warnings it gives a context the load was never tried in.
- * A refused load that held a new fact discards the derived relations, since
- * the discard precedes the reservation that refuses it.
+ * Either limit refuses the load as it stages its facts, before the commit
+ * would discard anything, so the relations stay as current as they were.
  */
 static void
 a_refused_load_leaves_the_program_as_it_was(void)
@@ -534,6 +536,7 @@ a_refused_load_leaves_the_program_as_it_was(void)
 	refused_by(LIMIT_TUPLES);
 	refused_by(LIMIT_MEMORY);
 	a_refusal_names_the_first_store_that_grows();
+	a_refused_load_stops_parsing();
 }
 
 /*
@@ -562,6 +565,7 @@ refused_by(enum limit_kind kind)
 	char expected[MESSAGE_MAX];
 	size_t statements;
 	size_t facts_before;
+	bool current;
 	int status;
 
 	bzero(&config, sizeof(config));
@@ -611,6 +615,7 @@ refused_by(enum limit_kind kind)
 	}
 
 	statements = ctx->ast.count;
+	current = relic_relations_current(ctx);
 	log.errors = 0;
 	log.warnings = 0;
 	control_log.warnings = 0;
@@ -625,8 +630,9 @@ refused_by(enum limit_kind kind)
 	    facts_held(ctx, "g", 1) == 0, SCENARIO_REFUSED,
 	    "no statement should be added and no base store grow, under %s",
 	    kind == LIMIT_TUPLES ? "a tuple limit" : "a memory limit");
-	check(!relic_relations_current(ctx), SCENARIO_REFUSED,
-	    "a refused load holding a new fact discards the derived relations");
+	check(relic_relations_current(ctx) == current, SCENARIO_REFUSED,
+	    "a load refused as it stages leaves the relations as current as "
+	    "they were");
 	check(!relic_pred_is_defined(ctx, predicate(ctx, "g", 1)),
 	    SCENARIO_REFUSED, "g/1 stays undefined");
 
@@ -670,6 +676,88 @@ a_refusal_names_the_first_store_that_grows(void)
 	    "\"%s\"", expected, log.last_error);
 
 	relic_destroy(ctx);
+}
+
+/*
+ * A load the tuple limit refuses stops parsing at the fact that takes the
+ * base stores past the limit, rather than staging the whole text first, and
+ * reads nothing after that fact.  Of a thousand facts e(s0) to e(s999)
+ * under a limit of ten, the eleventh is refused: the lexer has interned its
+ * s10 and no later symbol, and the unfinished statement that ends the text,
+ * which a parse reading on would reach and report in place of the limit, is
+ * never read.  Nor is a token the lexer refuses right after the refused
+ * fact.
+ */
+static void
+a_refused_load_stops_parsing(void)
+{
+	static const char expected[] =
+	    "limit exceeded: tuples=10 while loading e/1";
+	static const char tail_expected[] =
+	    "limit exceeded: tuples=1 while loading e/1";
+	char name[32];
+	relic_config_t config;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t capacity;
+	size_t length;
+	size_t i;
+	char *text;
+	int status;
+
+	capacity = 1000 * 16 + 8;
+	text = malloc(capacity);
+	if (text == NULL) {
+		check(false, SCENARIO_REFUSED, "the text is built");
+		return;
+	}
+	length = 0;
+	for (i = 0; i < 1000; i++)
+		length += (size_t)snprintf(text + length, capacity - length,
+		    "e(s%zu).\n", i);
+	snprintf(text + length, capacity - length, "e(");
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = 10;
+	ctx = context_with(&config, "", &log);
+	if (ctx != NULL) {
+		status = relic_load_string(ctx, "many.dl", text);
+		checkf(status != 0 && log.errors == 1 &&
+		    strcmp(log.last_error, expected) == 0, SCENARIO_REFUSED,
+		    "the load should be refused with \"%s\" alone, not %zu "
+		    "errors, the last \"%s\"", expected, log.errors,
+		    log.last_error);
+		snprintf(name, sizeof(name), "s%d", 10);
+		check(symbol_interned(ctx, name), SCENARIO_REFUSED,
+		    "the refused fact's symbol is interned");
+		snprintf(name, sizeof(name), "s%d", 11);
+		check(!symbol_interned(ctx, name), SCENARIO_REFUSED,
+		    "no symbol after the refused fact is interned");
+		relic_destroy(ctx);
+	}
+	free(text);
+
+	config.max_tuples = 1;
+	ctx = context_with(&config, "", &log);
+	if (ctx != NULL) {
+		status = relic_load_string(ctx, "tail.dl",
+		    "e(s0).\ne(s1). @\n");
+		checkf(status != 0 && log.errors == 1 &&
+		    strcmp(log.last_error, tail_expected) == 0,
+		    SCENARIO_REFUSED, "a refused fact followed by a token the "
+		    "lexer refuses should be refused with \"%s\" alone, not "
+		    "%zu errors, the last \"%s\"", tail_expected, log.errors,
+		    log.last_error);
+		relic_destroy(ctx);
+	}
+}
+
+/* Whether `name` has been interned as a symbol of the context. */
+static bool
+symbol_interned(const relic_t *ctx, const char *name)
+{
+	return (relic_symbol_find(ctx, name, strlen(name),
+	    relic_symbol_hash(ctx, name, strlen(name))) != RELIC_ID_NONE);
 }
 
 /*

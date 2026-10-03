@@ -43,12 +43,6 @@
  */
 
 /*
- * How much of the stream is read per call.  Only the number of read calls
- * depends on it: the reader holds one field, not the chunk.
- */
-#define	IMPORT_READ_CHUNK	(64u * 1024u)
-
-/*
  * How much of a field a message may quote.  A message names one field, and
  * the reader needs enough of it to find it, not all of it.
  */
@@ -956,7 +950,7 @@ read_table(importer_t *importer, const char *source_name, FILE *stream)
 	enum import_progress progress;
 	char *chunk;
 
-	chunk = malloc(IMPORT_READ_CHUNK);
+	chunk = malloc(RELIC_IMPORT_READ_CHUNK);
 	if (chunk == NULL) {
 		relic_diag_no_memory(importer->ctx);
 		return (-1);
@@ -996,10 +990,10 @@ feed_chunk(importer_t *importer, const char *source_name, FILE *stream,
 	int read_errno;
 
 	errno = 0;
-	got = fread(chunk, 1, IMPORT_READ_CHUNK, stream);
+	got = fread(chunk, 1, RELIC_IMPORT_READ_CHUNK, stream);
 	read_errno = errno;
 
-	if (got < IMPORT_READ_CHUNK && ferror(stream)) {
+	if (got < RELIC_IMPORT_READ_CHUNK && ferror(stream)) {
 		relic_diagf(importer->ctx, RELIC_ERROR, NULL,
 		    "cannot read %s: %s", source_name,
 		    strerror(read_errno != 0 ? read_errno : EIO));
@@ -1007,7 +1001,7 @@ feed_chunk(importer_t *importer, const char *source_name, FILE *stream,
 	}
 
 	relic_table_feed(&importer->reader, chunk, got,
-	    got < IMPORT_READ_CHUNK);
+	    got < RELIC_IMPORT_READ_CHUNK);
 
 	return (IMPORT_READ_ON);
 }

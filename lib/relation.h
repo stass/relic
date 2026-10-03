@@ -286,6 +286,11 @@ struct relic_reltab {
  * array of index headers, which are sized by the program rather than by the
  * data.
  *
+ * `base_tuple_count` is how many of those tuples the base stores hold.  A
+ * base store gains a tuple only through relic_base_append_hashed(), which
+ * counts it, and loses none until the store is reset, so the count is kept
+ * where the tuples arrive rather than summed over every store when asked.
+ *
  * `holds_derived` is set whenever the store hands out a derived relation to
  * be written or builds a secondary index, the only two things a discard
  * removes, and cleared by the discard.  A discard with it clear has nothing
@@ -295,6 +300,7 @@ struct relic_store {
 	relic_reltab_t	derived;
 	relic_reltab_t	bases;
 	size_t		tuple_count;
+	size_t		base_tuple_count;
 	bool		holds_derived;
 };
 

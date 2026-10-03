@@ -1342,7 +1342,9 @@ void	 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
  * or, refused by a limit or by memory, reports why and adds none.
  * relic_staging_reset() releases the staging, and is every load's exit.
  * `last` is the set the previous fact used, and `by_pred` holds each set's
- * position plus one, keyed by its predicate.
+ * position plus one, keyed by its predicate.  `base_tuples`, `new_tuples`
+ * and `columns_floor` are what staging measures a new fact against the
+ * limits with, as lib/facts.c describes.
  */
 struct relic_staging {
 	relic_t			*ctx;
@@ -1351,6 +1353,9 @@ struct relic_staging {
 	size_t			 set_capacity;
 	size_t			 last;
 	relic_idtab_t		 by_pred;
+	size_t			 base_tuples;	/* held as the load began */
+	size_t			 new_tuples;	/* staged, not yet held */
+	size_t			 columns_floor;	/* bytes; see facts.c */
 };
 
 void	 relic_staging_init(relic_staging_t *staging, relic_t *ctx);
@@ -1361,6 +1366,11 @@ int	 relic_staging_commit(relic_staging_t *staging);
 
 /*
  * lib/import.c
+ *
+ * RELIC_IMPORT_READ_CHUNK is how much of the stream an import reads per
+ * call.  Only the number of read calls depends on it, since the reader holds
+ * one field, not the chunk, and it bounds how far an import may have read
+ * past the record that ends it.
  *
  * The table reader: the state machine that alone decides where the fields
  * and records of a csv or tsv table end, and what bytes each field holds
@@ -1396,6 +1406,9 @@ int	 relic_staging_commit(relic_staging_t *staging);
  *
  * relic_table_reader_reset() releases the field buffer.
  */
+
+#define	RELIC_IMPORT_READ_CHUNK	(64u * 1024u)
+
 enum relic_table_event_kind {
 	RELIC_TABLE_MORE,
 	RELIC_TABLE_FIELD,
@@ -1633,7 +1646,9 @@ void	 relic_index_link_append(relic_index_t *index,
  * relic_bases_reserve() makes room for a commit's new facts, checking both
  * limits once over every store it grows before growing any, and
  * relic_base_append_hashed() then appends one fact the store lacks without
- * looking anything up.
+ * looking anything up.  relic_bases_refuse() reports a limit refusing a
+ * load, naming the first predicate whose store the load would grow, as the
+ * reservation and staging both do.
  *
  * relic_relation_insert() reports through *addedp whether the tuple was not
  * already present, which is what fixed-point detection reads, and returns -1
@@ -1741,6 +1756,8 @@ const relic_relation_t *relic_base_store(const relic_t *ctx,
 	    relic_pred_id_t pred);
 size_t	 relic_base_count(const relic_t *ctx, relic_pred_id_t pred);
 size_t	 relic_base_total(const relic_t *ctx);
+int	 relic_bases_refuse(relic_t *ctx, const char *key, size_t limit,
+	    relic_pred_id_t pred);
 int	 relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 	    size_t count);
 void	 relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
