@@ -760,6 +760,8 @@ and the session goes on to the next line.
 Rows written before the interrupt stay written; the
 .Cm json
 format's closing bracket is not.
+An interrupt does not end a write that blocks, such as one to a pipe whose
+reader has stopped reading.
 While the session waits for a line, and at any time in a run that does not
 prompt, an interrupt ends
 .Nm

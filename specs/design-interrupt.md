@@ -218,6 +218,15 @@ second Ctrl-C. Closing it would take an interrupt the library keeps across
 operations, which section 2 declines for the sake of the interrupt made
 while no operation runs; the window is the few instructions of a call.
 
+An interrupt does not end a write. The handler restarts the write it
+interrupts, so a session whose output goes to a pipe its reader has
+stopped draining stays blocked in that write, or in the flush of its rows
+before a diagnostic, and Ctrl-C does not return it to the prompt. Ending
+the write would mean catching the signal without restarting system calls
+and telling every write of the session that may be cut short apart from
+those that may not, for a case where the reader, not the query, is what
+stopped the session.
+
 An interrupted line fails like any other: its diagnostic is reported, the
 session goes on to the next line, and the exit status is 1, as for any line
 that failed (`specs/design-cli.md` section 10.4). Rows written before the
