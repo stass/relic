@@ -230,3 +230,7 @@ Project documents and what each is for:
   small items inline, anything beyond about a page splits into its own file
   linked from the category doc. When an item is closed, delete it - git
   history is the record of completed work.
+* `TODO.md` holds only work worth doing. Do not add an item for something
+  not worth fixing, or for behaviour a man page or design doc already states
+  as a contract or limitation. A limitation users should know about belongs
+  in the user-facing docs (README, man pages), not in `TODO.md`.
