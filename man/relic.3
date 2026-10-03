@@ -235,6 +235,10 @@ does not bound all the memory the library uses: the text being loaded, the
 program's rules and queries, the field of a table being imported and a
 prepared query are sized by what the caller wrote, and growing an array
 holds the old one until the new one is filled.
+No limit bounds the time an evaluation takes: a join over a few small
+relations whose every result is a duplicate stays inside both however long
+it runs, so a caller evaluating a program it does not trust must bound the
+time itself.
 .Fa max_magic_preds
 and
 .Fa max_magic_rules
@@ -348,6 +352,11 @@ Each context keys its hash tables with a seed drawn from
 when it is created, so that a program cannot be written to crowd its keys
 into one part of a table and make every lookup slow.
 No answer, identifier, limit or line of explain output depends on the seed.
+The seed defends a context against input written before it was created.
+A party that feeds one long-lived context input over time, and can time
+the requests it makes, may in principle learn which of its keys share part
+of a table and so make the context slow; a context used that way trusts
+its input not to do so.
 .Pp
 .Fn relic_destroy
 releases a context and everything it owns, and accepts
@@ -587,8 +596,8 @@ typedef int (*relic_row_cb)(void *callback_ctx,
 A row has one value per variable the query names, in the order they first
 occur, but for
 .Ql _
-and the variables local to an aggregate's braces; a query with no variables has one row of no values when it
-holds and none when it does not.
+and the variables local to an aggregate's braces; a query with no variables
+has one row of no values when it holds and none when it does not.
 The values are borrowed for the call, and the bytes of a symbol or string
 belong to the context.
 Rows are distinct, in an order the language leaves unspecified but that is

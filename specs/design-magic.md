@@ -678,8 +678,7 @@ counters and its memory are the same whatever ran before it. A query whose
 rewrite is abandoned over its budget leaves the whole program's fixed point
 instead, as a query under `-X no-magic` does. The price is that each
 rewritten query derives again what it reads completely, seeding its derived
-predicates with their facts again. `TODO.md` records keeping complete
-relations across queries as an optimization.
+predicates with their facts again.
 
 A query holding aggregates owns their group rules, and runs each once
 between the two phases, after the complete part has made what it reads

@@ -135,17 +135,6 @@ a query part way and a session that caught the signal would have nothing to
 stop. Once evaluation can be cancelled, a session should cancel the query
 running and return to the prompt.
 
-**Complete relations are evaluated again for every query.** [Low,
-component: `lib/eval.c`] A query answered through its Magic rewrite discards
-every derived relation first and evaluates again the components it reads
-completely, so a caller running many bound queries over one program seeds
-their facts and evaluates the negated part once per query. What that part
-holds depends only on the program, so it could be kept until the program
-changes, with only the generated relations and the answer discarded between
-queries. `specs/design-magic.md` section 9.2 chose the simpler rule so that
-what a context holds after a query depends on that query alone; measure a
-REPL or embedder workload before changing it.
-
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of
 its own, and the budget bounds the rules generated, not the tuples those
@@ -191,10 +180,19 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**Coverage gaps.** [Low, component: `tests/`] `make coverage` reaches 97
-percent of the library's and the tool's lines. What it does not reach is
-sorted in `docs/todo-coverage.md`: interning failures only a table's
-growth point reaches, and defensive branches kept deliberately.
+**Coverage gaps.** [Low, component: `tests/unit/test_exhaustion.c`]
+`make coverage` reaches 97 percent of the library's and the tool's lines;
+the rest are defensive branches kept deliberately and the allocation
+failures the exhaustion suite cannot reach. The suite refuses the
+allocator's requests, and through the arena fault point every arena request
+of a program loaded, checked and answered both through the Magic rewrite
+and from the whole fixed point. What neither reaches is an intern that
+fails only when it lands on a table's growth point: in `lib/parse.c`,
+`parse_literal` and the `advance` of `collect_body`, for a load's constant
+or its interning of `not` or `_`; in `lib/magic.c`,
+`relic_magic_find_complete` interning a base view; and in `lib/rule.c`,
+`compile_head` interning a head's constant. A context filled to one entry
+short of a growth before the operation would reach them.
 
 **A caller tells a limit's refusal from another failure only by its
 text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is
@@ -349,27 +347,6 @@ evaluator holds no pointer into a relation across a growth, which is what
 such a stale pointer would need. A sanitizer build that kept every array in
 the heap would catch both, at the cost of not exercising the mapped path
 under the sanitizer.
-
-**A long-lived context gives a timing oracle on its hash seed.** [Low,
-component: `lib/util.c`] The seed defeats crafted collisions because an
-author cannot learn it, and a batch run gives nothing to learn from. A REPL
-session (`-i`), or an embedding that feeds one context facts from an
-untrusted party over time, lets that party time its own insertions against
-one fixed seed and, in principle, search for keys that share a cluster.
-No attack has been built. Decide whether a context used this way should be
-documented as trusting its input, or whether a stronger keyed hash for the
-byte strings the symbol table interns is worth its cost there.
-
-**No limit bounds the work of a join.** [Low, component: `lib/eval.c`,
-`include/relic.h`] The limits count tuples held and bytes allocated, and a
-join over small relations whose every result is a duplicate -- a cross
-product of a few thousand tuples projected onto one column -- stays inside
-both while its time grows with the product. `specs/design-api.md` leaves a
-step or time limit out deliberately, so an embedder evaluating untrusted
-programs has to bound the time itself, and the eval fuzz target leans on
-libFuzzer's `-timeout` for the same reason. Adding one appends a field to
-`relic_config_t`, which the caller allocates, so it is a new major version
-of the interface.
 
 ## Post-1.0
 
