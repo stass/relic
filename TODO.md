@@ -79,17 +79,21 @@ worth measuring on Linux before a release that promises tens of gigabytes.
 **The discard's mark is set where a relation is handed out, not derived.**
 [Low, component: `lib/relation.c`] `holds_derived` is set by the write
 funnel and by an index build, and the discard returns at once when it is
-clear. That is right because nothing writes a derived relation through a
-pointer handed out before a discard, which holds today since every
+clear, which keeps a one-fact `relic_fact_add()` from walking every
+predicate. That is right because nothing writes a derived relation through
+a pointer handed out before a discard, which holds today since every
 evaluation discards before it plans and nothing commits while one runs; a
 future path that kept such a pointer would leave derived tuples the next
-discard skips. Derive the property instead: count the base stores' tuples
-in the store, bumped only by `relic_base_append_hashed()`, and the secondary
-indexes where one is published or dropped, so that something is derived
-exactly when the tuple total differs from the base total or an index
-exists. The same count makes `relic_base_total()`, which
-`relic_relations_current()` walks the base stores for on every query,
-constant time.
+discard skips, and a query would read them as current. The discard empties
+the derived relations but keeps them, promising that a pointer to one still
+names the same relation, and that is why whether anything is derived has to
+be remembered beside them. Free them instead, and the indexes of the base
+stores with them, creating each again on first use as it is created now:
+something is derived exactly when a derived relation or a base store's
+index exists, a count kept where they are created and freed makes the
+discard's early return a structural fact, and a write through a stale
+pointer becomes a use after free the sanitizers report. First find what
+relies on a derived relation's pointer outliving a discard.
 
 **An interactive session accepts only queries.** [Low, component:
 `cmd/relic/repl.c`, `include/relic.h`] A session cannot add a fact or a rule,
