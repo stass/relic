@@ -208,6 +208,9 @@ argument, `fb` the second.
 | `dist-bounded` | sparse, cyclic | free; `dist(X, Y, D)`, every length up to 5 of a walk from `X` to `Y`, computed by `E = D + 1` |
 | `andersen` | a generated program of 2000 functions | free; every points-to fact |
 | `cspa` | a generated program of 1000 functions | free; the value-flow relation, which needs the other two |
+| `cspa-httpd` | Graspan's Apache httpd 2.2.18, 1.5 million facts | free; as `cspa` |
+| `cspa-postgresql` | Graspan's PostgreSQL 8.3.9, 4.7 million facts | free; as `cspa` |
+| `cspa-linux` | Graspan's Linux 4.4.0-rc5, 9.5 million facts | free; as `cspa` |
 
 The nonlinear closure runs on the sparse acyclic graph only: its cost is
 cubic in the nodes a cycle joins, and on a cyclic graph of this size it runs
@@ -221,13 +224,18 @@ drawn uniformly across the program would not do: past a threshold density
 they join nearly every variable into one set of aliases, and the answer
 jumps from linear to quadratic in the program's size at a point that
 depends on the draws, so the scale sweep would measure the draws. The
-Graspan data sets remain the real-world case, run from the download cache of
-section 9.
+Graspan data sets are the real-world case, run from the download cache of
+section 9. The three share one set of programs, each engine's that of the
+generated workload, except that Souffle's declares `number` columns where
+the generated program's declares `symbol`: the Graspan identifiers are
+integers, and as symbols they cost Souffle a symbol table the papers it is
+compared with do not pay for.
 
 ### 4.4 Programs
 
 Each workload's rules are written by hand, once per engine, in that engine's
-own syntax, and kept beside each other in the workload's directory. A
+own syntax, and kept beside each other in the workload's directory, or in
+the one directory that workloads differing only in their data share. A
 translator from one dialect to the others would be a second compiler to
 trust; short programs are easier to read and to check against each other.
 relic's program ends with the query itself, as a relic user writes it. Every
@@ -377,6 +385,20 @@ hand, and the harness checks it against its checksum the same way. Data is
 never committed, and a workload whose data is absent is skipped with a note
 rather than failing the run.
 
+A workload of downloaded data runs only when `-w` names it. Its data does
+not scale, and the Graspan workloads take each engine minutes where the
+generated ones take seconds, so a default run is one of generated data that
+needs no network and stays short.
+
+Graspan's own release has no working download. The harness takes the
+inputs the papers comparing Datalog engines on CSPA use instead: the
+FlowLog benchmark collection's archives, one per program, each holding
+`Assign.csv` and `Dereference.csv`, published under the Apache License 2.0
+on Hugging Face. The harness's URL names the revision whose archives its
+checksums are of; the checksum, not the URL, decides that an archive is the
+one recorded. Unpacking turns each comma-separated file into the relation
+file of section 5.
+
 ---
 
 ## 10. Layout and running
@@ -387,7 +409,10 @@ bench/run.sh                 the relic-only instrument
 bench/compare/run.sh         this harness
 bench/compare/driver.pl      prints SWI-Prolog's answer relation
 bench/compare/<workload>/    dataset, relic.dl, swipl.pl, souffle.dl,
-                             clingo.lp, nemo.rls, duckdb.sql, sqlite.sql
+                             clingo.lp, nemo.rls, duckdb.sql, sqlite.sql;
+                             or dataset and programs, naming the directory
+                             whose programs the workload runs
+bench/compare/cspa-graspan/  the programs of the three Graspan workloads
 bench/compare/results.txt    one recorded run
 bench/compare/cache/         downloaded data sets, not committed
 ```
@@ -397,7 +422,7 @@ bench/compare/run.sh [-e engines] [-o results.tsv] [-w workloads]
 ```
 
 `-e` and `-w` take comma-separated names and restrict the run; by default it
-covers every workload and every engine found. relic is required; any other
+covers every workload of generated data, section 9, and every engine found. relic is required; any other
 engine that is not installed is skipped with a note. Each engine's command
 can be named by an environment variable -- `RELIC`, `SWIPL`, `SOUFFLE`,
 `CLINGO`, `NMO`, `DUCKDB`, `SQLITE`, and `CXX` for Souffle's compiler -- and

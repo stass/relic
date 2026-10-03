@@ -135,6 +135,18 @@ a query part way and a session that caught the signal would have nothing to
 stop. Once evaluation can be cancelled, a session should cancel the query
 running and return to the prompt.
 
+**An aggregate over one atom copies the atom's relation.** [Medium,
+component: `lib/rule.c`, `lib/eval.c`, `specs/design-aggregates.md`] Each
+aggregate folds a group predicate its group rule fills, so
+`N = count { valueAlias(A, B) }` first copies every `valueAlias` tuple into
+`agg$$q0$1(A, B)`, with its index. On Graspan's httpd, on 16 threads, a
+query counting the three CSPA relations this way peaks at 30 GB, where
+answering `valueFlow` over the same fixed point peaks at 7.8 GB.
+A group rule whose body is one positive atom of distinct variables, its
+head those variables, holds exactly the atom's relation, so the aggregate
+could fold that relation through an index on its shared columns and the
+group predicate need not exist.
+
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of
 its own, and the budget bounds the rules generated, not the tuples those
@@ -247,18 +259,11 @@ write their answers to files where the other engines write to a discarded
 standard output, pay for it: under load a Souffle run writing its file
 showed wall time far above its CPU time, within the noise of a busy
 machine. If the file costs a measurable amount, time Souffle with `-D -`
-and find Nemo an equivalent.
-
-**CSPA has not run on the Graspan data sets.** [Low, component:
-`bench/compare/`] `specs/design-bench.md` sections 4.3 and 9 run CSPA over
-the Graspan inputs from a download cache with checksums; only the generated
-program of section 4.3 is run, and the cache, its checksums and its
-`.gitignore` entry come with the first external data set. The inputs have
-no stable public URL -- the papers that use them got them from the RecStep
-authors -- and the smallest, httpd, derives about 2.3e8 `valueAlias` and
-8.9e7 `memoryAlias` tuples from 1.5 million facts, 3.2e8 with the 1.4e6
-of `valueFlow`: 15 to 30 GB at the 47 to 92 bytes of peak memory per held
-tuple relic reached on generated Andersen programs.
+and find Nemo an equivalent. The run should include the Graspan workloads,
+`-w cspa-httpd,cspa-postgresql,cspa-linux`, which a default run leaves out.
+Single runs of each, one thread on a quiet machine, gave relic 210, 190 and
+50 seconds against compiled Souffle's 171, 195 and 54, at peaks of 6.2, 6.6
+and 2.1 GB against 5.5, 7.2 and 1.3.
 
 **A bound right-recursive closure costs relic more than the whole
 closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]

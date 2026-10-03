@@ -6,7 +6,9 @@
 # usage: bench/compare/run.sh [-e engines] [-o results.tsv] [-w workloads]
 #
 # A workload is a directory beside this script holding one program per
-# engine and a file naming the data set, which bench/datasets.sh generates.
+# engine and a file naming the data set, which bench/datasets.sh generates;
+# or, in place of the programs, a `programs` file naming the directory
+# whose programs it runs, for workloads that differ only in their data.
 # The SQL engines may lack a program, for a workload SQL cannot express,
 # and so may an engine a workload's `absent` file names; they are reported
 # n/a there.
@@ -27,6 +29,14 @@
 # bench/run.sh; BENCH_RUNS, 5, is the number of timed runs; and
 # BENCH_TIMEOUT, 300, the seconds each engine is given to answer.
 #
+# A workload whose data set is downloaded rather than generated, as the
+# Graspan points-to inputs are, runs only when -w names it.  Its archive is
+# kept in bench/compare/cache/ and checked against the SHA-256 checksum
+# recorded here before every use; one that is missing or does not match is
+# downloaded, a download that does not match is discarded, and a workload
+# whose data cannot be had is skipped with a note.  BENCH_SCALE does not
+# change a downloaded data set.
+#
 # Nothing fails on a time, and an engine that runs out of time is reported,
 # not failed.  The exit status is 1 if an engine failed or answered
 # differently from relic, or relic's answer was empty, and 2 on a usage
@@ -46,6 +56,7 @@ duckdb=${DUCKDB:-duckdb}
 sqlite=${SQLITE:-sqlite3}
 cxx=${CXX:-c++}
 scale=${BENCH_SCALE:-1}
+cache=$here/cache
 runs=${BENCH_RUNS:-5}
 limit=${BENCH_TIMEOUT:-300}
 
@@ -156,11 +167,16 @@ home_relative() {
 	printf '%s\n' "$1"
 }
 
-# workload_names: every directory beside this script that holds a workload,
-# in the order of their names.
+# workload_names: every directory beside this script that holds a workload
+# whose data set is generated, in the order of their names.  A workload of
+# a downloaded data set runs only when it is named.
 workload_names() {
 	for dataset_file in "$here"/*/dataset; do
-		basename "$(dirname "$dataset_file")"
+		workload=$(basename "$(dirname "$dataset_file")")
+		if ! external_checksum "$(dataset_of "$workload")" > /dev/null
+		then
+			printf '%s\n' "$workload"
+		fi
 	done
 }
 
@@ -251,8 +267,187 @@ machine() {
 	printf '%s\n' "${processor:-$(uname -m)}"
 }
 
-# prepare_dataset NAME: generate the data set NAME into $work/data/NAME,
-# once, and its facts as source text into $work/data/NAME.pl.
+# The Graspan data sets: the pointer-assignment and dereference relations
+# Graspan extracted from Apache httpd 2.2.18, PostgreSQL 8.3.9 and Linux
+# 4.4.0-rc5, as the FlowLog benchmark collection publishes them under the
+# Apache License 2.0, one archive per program holding Assign.csv and
+# Dereference.csv.  The URL names one revision of the collection, the one
+# whose archives the checksums are of; the checksum, not the URL, decides
+# that an archive is the one recorded.
+graspan_url=https://huggingface.co/datasets/NemoYuu/flowlog_benchmark
+graspan_url=$graspan_url/resolve/da9e91b3ff75d94604f57ba2b21ef3aa97e241ec
+graspan_url=$graspan_url/dataset/csv
+graspan_checksums='
+httpd 881ab8a5c1bd654a82806b4b618a94ac2f5b02cee18caed77cd2d81c736b8f5a
+postgresql 567bc58b4c0fe50f74774208ebcc75956260b9671073d1082ccd378d95748d9c
+linux c4f3f9bc393b34e04ccbef5864e2dbbb82b9fe57cc26ed9b4aac73b9ac85877d
+'
+
+# The seconds a download may take before it is abandoned.
+download_limit=600
+
+# external_checksum NAME: the SHA-256 checksum of the archive of the
+# downloaded data set NAME, graspan-<program>, or a failure if NAME is
+# generated.
+external_checksum() {
+	case $1 in
+	graspan-*) ;;
+	*) return 1 ;;
+	esac
+	printf '%s\n' "$graspan_checksums" | awk -v program="${1#graspan-}" '
+		$1 == program { print $2; found = 1 }
+		END { exit !found }'
+}
+
+# sha256_of FILE: FILE's SHA-256 checksum, by whichever tool the system has.
+# The digest is taken from the tool's output by the shell rather than by a
+# pipeline, so that the tool's failure is the function's.
+sha256_of() {
+	if command -v sha256sum > /dev/null 2>&1; then
+		digest=$(sha256sum < "$1") || return 1
+	elif command -v shasum > /dev/null 2>&1; then
+		digest=$(shasum -a 256 < "$1") || return 1
+	elif command -v sha256 > /dev/null 2>&1; then
+		digest=$(sha256 -q < "$1") || return 1
+	else
+		echo "compare: no sha256sum, shasum or sha256 to check a" \
+		    "download" >&2
+		return 1
+	fi
+	printf '%s\n' "${digest%% *}"
+}
+
+# matches_checksum FILE NAME: whether FILE is the archive recorded for the
+# downloaded data set NAME.
+matches_checksum() {
+	actual=$(sha256_of "$1") || return 1
+	[ "$actual" = "$(external_checksum "$2")" ]
+}
+
+# download URL FILE: fetch URL into FILE within download_limit seconds, by
+# curl, or by fetch(1) where FreeBSD's base system has no curl.  curl reads
+# no configuration file, which could weaken its checks, and takes HTTPS
+# alone, redirects included.  The checksum, not the transport, is what
+# authenticates the archive.
+download() {
+	if command -v curl > /dev/null 2>&1; then
+		"$timeout" -k 10 "$download_limit" curl -q --proto =https \
+		    --proto-redir =https -fsSL -o "$2" "$1"
+	elif command -v fetch > /dev/null 2>&1; then
+		"$timeout" -k 10 "$download_limit" fetch -q -o "$2" "$1"
+	else
+		echo "compare: no curl or fetch to download $1" >&2
+		return 1
+	fi
+}
+
+# download_to_cache NAME: download the archive of the data set NAME into
+# the cache, replacing any archive there.  It is written to a file of this
+# run's own, cache_part, checked, and only then renamed into place, so that
+# the cache holds a complete, verified archive or none, no other run can be
+# writing the file it names, and nothing is ever removed from it.  The exit
+# trap removes cache_part if the run ends before the rename.
+download_to_cache() {
+	echo "compare: downloading the data set $1" >&2
+	if ! mkdir -p "$cache"; then
+		return 1
+	fi
+	if ! cache_part=$(mktemp "$cache/$1.XXXXXX"); then
+		cache_part=
+		return 1
+	fi
+
+	if ! download "$graspan_url/cspa-${1#graspan-}.zip" "$cache_part"
+	then
+		rm -f "$cache_part"
+		cache_part=
+		return 1
+	fi
+	if ! matches_checksum "$cache_part" "$1"; then
+		echo "compare: the download of $1 does not match its" \
+		    "checksum" >&2
+		rm -f "$cache_part"
+		cache_part=
+		return 1
+	fi
+	if ! mv "$cache_part" "$cache/$1.zip"; then
+		rm -f "$cache_part"
+		cache_part=
+		return 1
+	fi
+	cache_part=
+}
+
+# copy_checked NAME: copy the cached archive of the data set NAME to
+# $work/archives/NAME.zip and check the copy, which is the only file the
+# run reads it from: what is read is then what was checked, whatever
+# happens to the cache meanwhile.  Fails, leaving no copy, if the cache
+# holds no archive or one that does not match.
+copy_checked() {
+	cached=$cache/$1.zip
+	copy=$work/archives/$1.zip
+	if [ ! -f "$cached" ]; then
+		return 1
+	fi
+	if ! mkdir -p "$work/archives"; then
+		return 1
+	fi
+	if ! cp "$cached" "$copy.part"; then
+		rm -f "$copy.part"
+		return 1
+	fi
+	if ! matches_checksum "$copy.part" "$1"; then
+		rm -f "$copy.part"
+		return 1
+	fi
+	mv "$copy.part" "$copy"
+}
+
+# fetch_archive NAME: make $work/archives/NAME.zip a checked copy of the
+# archive of the downloaded data set NAME, from the cache, or from a fresh
+# download into the cache if the cache lacks the archive or holds one that
+# does not match.  Fails, having said why, if the archive cannot be had.
+# Called as a condition, where errexit does not apply, so every step's
+# failure is tested.
+fetch_archive() {
+	if [ -f "$work/archives/$1.zip" ]; then
+		return 0
+	fi
+	if ! command -v unzip > /dev/null 2>&1; then
+		echo "compare: unzip is needed to unpack $1" >&2
+		return 1
+	fi
+
+	if copy_checked "$1"; then
+		return 0
+	fi
+	if [ -f "$cache/$1.zip" ]; then
+		echo "compare: $(home_relative "$cache/$1.zip") does not" \
+		    "match its checksum" >&2
+	fi
+	if ! download_to_cache "$1"; then
+		return 1
+	fi
+	copy_checked "$1"
+}
+
+# unpack_member ARCHIVE MEMBER FILE: the comma-separated relation MEMBER of
+# ARCHIVE as FILE, a relation file whose columns are separated by tabs.
+# unzip writes the member to its standard output, so nothing in the archive
+# names a path that is written, and it is written whole before it is
+# converted, so that a failure of unzip is not hidden by a pipeline.
+unpack_member() {
+	unzip -p "$1" "$2" > "$3.csv"
+	tr ',' '\t' < "$3.csv" > "$3"
+	rm "$3.csv"
+}
+
+# prepare_dataset NAME: make the data set NAME in $work/data/NAME, once,
+# and its facts as source text in $work/data/NAME.pl: generated, or
+# unpacked from the archive fetch_archive has checked.  A downloaded
+# relation may repeat a row, and unique_rows keeps only its first
+# occurrence, as a generator's relation files are sets.  Runs under
+# errexit, so a step that fails ends the run.
 prepare_dataset() {
 	dir=$work/data/$1
 	if [ -d "$dir" ]; then
@@ -260,12 +455,37 @@ prepare_dataset() {
 	fi
 
 	mkdir -p "$dir"
-	dataset "$1" "$dir" "$scale"
+	if external_checksum "$1" > /dev/null; then
+		archive=$work/archives/$1.zip
+		member=cspa-${1#graspan-}
+		unpack_member "$archive" "$member/Assign.csv" "$dir/assign.tsv"
+		unpack_member "$archive" "$member/Dereference.csv" \
+		    "$dir/dereference.tsv"
+		unique_rows "$dir"
+	else
+		dataset "$1" "$dir" "$scale"
+	fi
 	source_facts "$dir" > "$dir.pl"
 }
 
+# programs_of WORKLOAD: the directory holding WORKLOAD's programs and its
+# `absent` file: the workload's own, or the one its `programs` file names,
+# for workloads that run the same programs over different data sets.
+programs_of() {
+	if [ ! -f "$here/$1/programs" ]; then
+		printf '%s\n' "$here/$1"
+		return 0
+	fi
+
+	read -r programs_name < "$here/$1/programs"
+	case $programs_name in
+	'' | */* | .*) die "$1 names no valid directory of programs" ;;
+	esac
+	printf '%s\n' "$here/$programs_name"
+}
+
 # program_file ENGINE: the name of ENGINE's program in a workload's
-# directory.
+# directory of programs.
 program_file() {
 	case $1 in
 	relic) echo relic.dl ;;
@@ -289,9 +509,10 @@ optional_program() {
 	case $1 in
 	duckdb | sqlite) return 0 ;;
 	esac
-	[ -f "$here/$2/absent" ] && awk -v engine="$1" '
+	absent=$(programs_of "$2")/absent
+	[ -f "$absent" ] && awk -v engine="$1" '
 		$1 == engine { found = 1 }
-		END { exit !found }' "$here/$2/absent"
+		END { exit !found }' "$absent"
 }
 
 # relic_imports DIR: an -I option importing each relation file of DIR into
@@ -326,7 +547,7 @@ relic_imports() (
 # where the program names its relation files and DuckDB writes any data it
 # spills to disk.
 engine_command() (
-	program=$here/$2/$(program_file "$1")
+	program=$(programs_of "$2")/$(program_file "$1")
 	data=$work/data/$(dataset_of "$2")
 	out=$work/out/$1
 
@@ -407,7 +628,7 @@ succeeded() {
 compile_souffle() (
 	source=$work/bin/$1.cpp
 	binary=$work/bin/$1
-	program=$here/$2/$(program_file "$1")
+	program=$(programs_of "$2")/$(program_file "$1")
 	mkdir -p "$work/bin"
 
 	translate="$(quote "$souffle")"
@@ -610,7 +831,8 @@ print_result() {
 		if (spread != "-")
 			spread = sprintf("%.3f", spread)
 		if ($col["status"] == "ok")
-			printf first_column "%-14s %8.3f %8.3f %7s %8.3f %8.1f", \
+			printf first_column \
+			    "%-14s %8.3f %8.3f %7s %8.3f %8.1f", \
 			    $col["workload"], $col["engine"], $col["median"], \
 			    $col["fastest"], spread, $col["user"], \
 			    $col["peak_bytes"] / 1048576
@@ -623,11 +845,9 @@ print_result() {
 	}'
 }
 
-# run_engine: compile if $engine needs it, answer $workload, judge the
-# answer, time the engine if it agrees, and record the result.  A workload
-# with no program for the engine is n/a if the engine's programs are
-# optional, and a failure otherwise.
-run_engine() {
+# reset_result: a result of no measurement, whose status is ok until a
+# step sets another.
+reset_result() {
 	status=ok
 	rows=-
 	median=-
@@ -636,8 +856,25 @@ run_engine() {
 	user=-
 	peak_bytes=-
 	compile_seconds=-
+}
 
-	if [ ! -f "$here/$workload/$(program_file "$engine")" ]; then
+# record_result: append the result being recorded to the results and print
+# it as a line of the report.
+record_result() {
+	row=$(result_row)
+	printf '%s\n' "$row" >> "$work/results.tsv"
+	print_result "$row"
+}
+
+# run_engine: compile if $engine needs it, answer $workload, judge the
+# answer, time the engine if it agrees, and record the result.  A workload
+# with no program for the engine is n/a if the engine's programs are
+# optional, and a failure otherwise.
+run_engine() {
+	reset_result
+
+	if [ ! -f "$(programs_of "$workload")/$(program_file "$engine")" ]
+	then
 		if optional_program "$engine" "$workload"; then
 			status=n/a
 		else
@@ -658,9 +895,7 @@ run_engine() {
 		measure "$engine" "$workload"
 	fi
 
-	row=$(result_row)
-	printf '%s\n' "$row" >> "$work/results.tsv"
-	print_result "$row"
+	record_result
 }
 
 # summarize: every engine's median as a multiple of relic's, one row per
@@ -762,6 +997,8 @@ for workload in $workloads; do
 	*/* | .*) die "unknown workload $workload" ;;
 	esac
 	[ -f "$here/$workload/dataset" ] || die "unknown workload $workload"
+	[ -d "$(programs_of "$workload")" ] ||
+	    die "$workload names no directory of programs"
 done
 
 # The report's first column is as wide as the longest workload name, or its
@@ -815,13 +1052,25 @@ if member souffle $engines || member souffle-magic $engines; then
 fi
 
 work=$(mktemp -d) || exit 1
-trap 'rm -rf "$work"' EXIT
+cache_part=
+trap 'rm -rf "$work"; [ -z "$cache_part" ] || rm -f "$cache_part"' EXIT
 trap 'exit 1' HUP INT TERM
 : > "$work/results.tsv"
 
 print_header
 for workload in $workloads; do
-	prepare_dataset "$(dataset_of "$workload")"
+	dataset_name=$(dataset_of "$workload")
+	if external_checksum "$dataset_name" > /dev/null &&
+	    ! fetch_archive "$dataset_name"; then
+		echo "compare: the data set of $workload is not available;" \
+		    "skipping it" >&2
+		engine=relic
+		reset_result
+		status=no-data
+		record_result
+		continue
+	fi
+	prepare_dataset "$dataset_name"
 	rm -f "$work/reference"
 
 	engine=relic

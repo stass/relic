@@ -39,6 +39,9 @@
 /fuzz-artifacts/
 /fuzz-corpus/
 
+# The comparison harness's downloaded data sets.
+/bench/compare/cache/
+
 # Automake's per-directory build marker, one per directory holding objects.
 .dirstamp
 
