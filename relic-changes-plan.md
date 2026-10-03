@@ -5,20 +5,18 @@ unreleased and untagged, so every "before 1.0" item is still open and a new
 entry point, flag bit or configuration field still costs nothing.
 
 The brief's section and file pointers were checked against the tree. Where
-the tree disagrees with the brief, section 1 says so; those points need an
-answer before the step that depends on them. Everything else is ready to
-build in the order of section 2.
+the tree disagrees with the brief, section 1 says so. Section 3 records
+the answers to the questions that raised, so every step of section 2 is
+ready to build in order.
 
 Three design documents accompany this plan, one per area where the design
-carries real risk. Each takes the recommended answer to the question it
-depends on and says so in section 3 below; a different answer changes a
-section of the document, not its shape.
+carries real risk. Each is written to the answers of section 3.
 
-| Document | Covers | Assumes |
-| --- | --- | --- |
-| `specs/design-negation.md` | `_` under `not`: meaning, safety, the keyed existence probe, the no-index fallback, explain, the helper-relation property | nothing open |
-| `specs/design-errors.md` | the error class: nine classes, the by-construction funnel, the entry point, what the tests read | question 4's list, with INTERRUPTED added for `relic_interrupt()` |
-| `specs/design-floats.md` | the future float type in full: syntax, the split number tag, identity equality, exact ordering, arithmetic, the exact `total` accumulator, functions, I/O, determinism | question 1's option 1 |
+| Document | Covers |
+| --- | --- |
+| `specs/design-negation.md` | `_` under `not`: meaning, safety, the keyed existence probe, the no-index fallback, explain, the helper-relation property |
+| `specs/design-errors.md` | the error class: nine classes, the by-construction funnel, the entry point, what the tests read |
+| `specs/design-floats.md` | the future float type in full: syntax, the split number tag, identity equality, exact ordering, arithmetic, the exact `total` accumulator, functions, I/O, determinism |
 
 The lexer change of step 2.1 and the reserved bytes of step 2.2 are
 edits to `specs/design-parser.md` rather than a document of their own;
@@ -51,8 +49,8 @@ Options for the record, in order of preference:
    the merge, the measure and the commit; the widest change for the least
    gain.
 
-The float record should say which, and should drop "no tag is left after
-it". **Question 1 for you:** is option 1 acceptable to record?
+The float record says which, and drops "no tag is left after it".
+Settled: option 1 (section 3).
 
 ### 1.2 The work-bound item was closed today
 
@@ -64,9 +62,9 @@ as deliberately absent, with the reason that adding a configuration field
 after 1.0 is an incompatible change.
 
 That reason cuts the other way before 1.0: a `max_work` field is free now
-and a major ABI bump later. **Question 2 for you:** reopen it and build it
-before 1.0, or leave the contract as written? The design is small either
-way (section 2.8), and the unit of work already exists.
+and a major ABI bump later. Settled: the contract stands and the bound is
+not built (section 3); section 2.8 keeps the design in case it is ever
+reopened, which after 1.0 costs a major version of the interface.
 
 ### 1.3 Points to settle in the decision texts, not conflicts
 
@@ -126,17 +124,15 @@ way (section 2.8), and the unit of work already exists.
 Each step is one commit, gated as the working agreement requires: design
 text first, then code, then the reviewer pass, then `make check`, with
 `check-asan` and `check-ubsan` where the step touches the lexer,
-evaluator or allocation. Steps 2.1 to 2.3 and 2.9 are the pre-1.0 set.
-Steps 2.4 and 2.5 are recommended before 1.0 as well, because they are
-cheaper to ship inside the first release than as a 1.1 change with a
-compatibility note. Steps 2.6 to 2.8 wait on your answers.
+evaluator or allocation. Steps 2.1 to 2.5 and 2.7 are built, all before
+1.0: 2.4 and 2.5 are cheaper inside the first release than as a 1.1
+change with a compatibility note. Steps 2.6 and 2.8 are not built; their
+sections stay as the record of what was considered.
 
-Decision numbers: the next free one is D-30, since D-29 is the interrupt. The proposal below spends
-D-30 on reserved syntax (steps 2.1 and 2.2 together, since both exist for
-the same reason), D-31 on `_` under negation, D-32 on the error class, and
-D-33 on floats. Warnings as errors and a work bound, if built, each take
-the next number. **Question 3 for you:** one decision for 1.1 and 1.2, or
-two?
+Decision numbers: the next free one is D-30, since D-29 is the interrupt.
+D-30 covers reserved syntax (steps 2.1 and 2.2 together, since both exist
+for the same reason), D-31 `_` under negation, D-32 the error class, and
+D-33 floats.
 
 ### 2.1 Reject a period directly between two digits (brief 1.1)
 
@@ -395,7 +391,7 @@ It needs a reference from `specs/architecture.md` section 57 and
 `specs/design-api.md` section 7. D-32 amends D-5: an error has a class,
 read by a new entry point; the text stays the human message and nothing
 in the library's contract depends on its wording. The class list, as the
-design records it, **question 4 for you**:
+design records it and section 3 confirms:
 
 | Class | Meaning |
 | --- | --- |
@@ -440,7 +436,7 @@ MEMORY against LIMIT where it already tells them apart by text.
 Size: medium, mostly mechanical. The by-construction rename is wide and
 shallow, which is the working agreement's preferred shape.
 
-### 2.6 Warnings as errors (brief 2.3, optional; needs your go-ahead)
+### 2.6 Warnings as errors (brief 2.3; not built)
 
 **Today.** Three warnings: the singleton variable
 (`report_singleton_variables()`, `lib/rule.c:1903`), the undefined
@@ -472,7 +468,7 @@ section 40's synopsis change together.
 
 Size: small.
 
-### 2.7 Mark the language-only tests (brief 2.5, optional; recommended)
+### 2.7 Mark the language-only tests (brief 2.5)
 
 **Today.** 207 tests under `tests/lang`, registered by an explicit list at
 `Makefile.am:627`. 51 have no `.args`, 43 have exactly `-c` and 29 exactly
@@ -499,9 +495,9 @@ or `architecture.md` section 72 gets one sentence naming the manifest.
 
 Size: small, mostly review of 123 tests.
 
-### 2.8 A bound on work (brief 2.4, optional; see question 2)
+### 2.8 A bound on work (brief 2.4; not built)
 
-If reopened: a `max_work` field in `relic_config_t`, a `-l work=N` key in
+If ever reopened: a `max_work` field in `relic_config_t`, a `-l work=N` key in
 `limit_named()` (`cmd/relic/main.c:775`), counted in the unit that already
 exists, `relic_exec_work()` = derivations + tuples scanned + tuples looked
 up (`lib/exec.h:187`), which langtest.sh already proves identical across
@@ -525,36 +521,38 @@ batch past N", which the man page states.
 | 2.3 floats record | 3 | before 2.1, docs only | D-33 | medium prose |
 | 2.1 reject `1.2` | 1.1 | before 1.0 | D-30 | small |
 | 2.2 reserve `#` `$` | 1.2 | with 2.1 | D-30 | tiny |
-| 2.4 `_` under `not` | 2.1 | recommended before 1.0 | D-31 | medium |
-| 2.5 error class | 2.2 | recommended before 1.0 | D-32 | medium |
-| 2.7 manifest | 2.5 | any time | none | small |
-| 2.6 warnings fatal | 2.3 | on your word | next | small |
-| 2.8 work bound | 2.4 | on your word, before 1.0 if at all | next | small |
+| 2.4 `_` under `not` | 2.1 | before 1.0 | D-31 | medium |
+| 2.5 error class | 2.2 | before 1.0 | D-32 | medium |
+| 2.7 manifest | 2.5 | before 1.0 | none | small |
+| 2.6 warnings fatal | 2.3 | not built | -- | -- |
+| 2.8 work bound | 2.4 | not built | -- | -- |
 
 Every step: reviewer agent first with the security and readability
-framing, then `make check`; `check-asan` and `check-ubsan` for 2.1, 2.4,
-2.5 and 2.8; `make check-random` with a few thousand programs after 2.4.
+framing, then `make check`; `check-asan` and `check-ubsan` for 2.1, 2.4
+and 2.5; `make check-random` with a few thousand programs after 2.4.
 NEWS is one unreleased section, so each step edits the 1.0.0 bullets
 rather than adding a release.
 
-## 3. Questions, collected
+## 3. Answers (2026-10-03)
 
-1. Floats: record option 1 of section 1.1 (split the number tag's index
-   space) in place of "the fourth and last tag"?
-2. Work bound: reopen the item closed today and build it before 1.0, or
-   keep the documented contract?
-3. One decision number for 1.1 and 1.2 together, or two?
-4. The error class list of 2.5, in particular the three classes the brief
-   does not name, INTERRUPTED, ARGUMENT and INTERNAL.
-5. Build 2.6 (warnings as errors)? Build 2.7 (the manifest)? I recommend
-   2.7 and have no strong view on 2.6.
-6. Do 2.4 and 2.5 go before 1.0, as recommended?
+1. **Float identifier:** the number tag's index space is split, option 1
+   of section 1.1. `specs/design-floats.md` section 3.2 records it.
+2. **Work bound:** not built. The relic(3) contract stands; section 2.8
+   stays as the design should it ever be reopened.
+3. **Decision numbering:** one decision, D-30, for the reserved float
+   form and the reserved `#` and `$` bytes.
+4. **Error classes:** the nine of section 2.5, INTERRUPTED, ARGUMENT and
+   INTERNAL included, as `specs/design-errors.md` records.
+5. **Optional items:** the language-test manifest (2.7) is built;
+   warnings as errors (2.6) is not.
+6. **Timing:** `_` under negation (2.4) and the error class (2.5) land
+   before 1.0.
 
 ## 4. Decision drafts
 
 Texts for `specs/decisions.md`, in its format: an `### D-N Title` heading
 and prose, with the reversal or amendment named in a sentence and the
-specifying document named last. Numbers follow question 3's answer.
+specifying document named last.
 
 ### D-30 Syntax reserved for extension
 
