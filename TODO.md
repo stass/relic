@@ -135,9 +135,11 @@ a query part way and a session that caught the signal would have nothing to
 stop. Once evaluation can be cancelled, a session should cancel the query
 running and return to the prompt.
 
-**An aggregate over one atom copies the atom's relation.** [Medium,
+**An aggregate over one atom copies the atom's relation.** [Low,
 component: `lib/rule.c`, `lib/eval.c`, `specs/design-aggregates.md`] Each
-aggregate folds a group predicate its group rule fills, so
+aggregate folds a group predicate its group rule fills, the cost of storing
+the body's relation once that `specs/design-aggregates.md` section 5.1
+accepts, so
 `N = count { valueAlias(A, B) }` first copies every `valueAlias` tuple into
 `agg$$q0$1(A, B)`, with its index. On Graspan's httpd, on 16 threads, a
 query counting the three CSPA relations this way peaks at 30 GB, where
