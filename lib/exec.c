@@ -63,7 +63,7 @@
  * The context and every relation are read-only here, as frozen.h makes
  * them, and only the scratch is written.  The views of a plan are resolved
  * when it starts, and no view reaches past the end its relation had then,
- * so whatever the caller does with a full batch before continuing -- insert
+ * so whatever the caller does with a batch when the plan pauses -- insert
  * it into the relation the plan reads, even -- lies past every view and
  * changes nothing the plan reads.
  */
@@ -158,6 +158,7 @@ static bool	 cell_string(const relic_scratch_t *scratch,
 static relic_dom_t cell_type(relic_cell_t cell);
 static bool	 charge_growth(relic_scratch_t *scratch, size_t old_bytes,
 		    size_t new_bytes, const relic_location_t *where);
+static void	 charge_fold_read(relic_scratch_t *scratch);
 static bool	 compile_pattern(relic_scratch_t *scratch,
 		    const relic_location_t *where, const char *bytes,
 		    size_t length, relic_pattern_t *patternp);
@@ -1399,10 +1400,33 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
+ * Count a tuple a fold read against the reads the call may still make.
+ * Once they are spent the fold asks the call to pause, but finishes all
+ * the same, since its running value cannot be kept: the call pauses when
+ * the fold's step returns, having read at most one fold's walk past its
+ * reads: its group's chain through an index, or the whole relation when
+ * the fold has no key or no index.
+ */
+static void
+charge_fold_read(relic_scratch_t *scratch)
+{
+	if (scratch->reads_left == 0) {
+		scratch->paused = true;
+		return;
+	}
+	scratch->reads_left--;
+}
+
+/*
  * A SCAN: find the next tuple of its view that matches, starting from the
  * beginning of the view when not resuming.  The tuple is fetched afresh by
  * identifier each time rather than held, because the caller may insert into
- * the relation, and move its storage, between two calls.
+ * the relation, and move its storage, between two calls.  Each tuple the
+ * scan rejects is one of the reads the call may make -- one it accepts is
+ * paid for by the turns that follow -- and a scan that has used them up
+ * before finding a match pauses, its cursor past the last tuple it
+ * rejected, where the next call resumes it.  The count is kept in a local
+ * while the scan runs and given back as it returns.
  */
 static bool
 step_scan(relic_scratch_t *scratch, const relic_op_atom_t *atom,
@@ -1411,22 +1435,35 @@ step_scan(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 	relic_tuple_range_t *cursor;
 	const relic_dom_t *tuple;
 	relic_tuple_id_t id;
+	uint64_t reads_left;
+	bool matched;
 
 	cursor = &state->cursor;
 	if (!resume)
 		*cursor = state->view;
 
+	matched = false;
+	reads_left = scratch->reads_left;
 	while (cursor->first < cursor->end) {
 		id = cursor->first;
 		cursor->first++;
 		scratch->counters.tuples_scanned++;
 
 		tuple = relic_relation_tuple(atom->relation, id);
-		if (tuple_matches(scratch, atom, tuple))
-			return (true);
-	}
+		if (tuple_matches(scratch, atom, tuple)) {
+			matched = true;
+			break;
+		}
 
-	return (false);
+		if (reads_left == 0) {
+			scratch->paused = true;
+			break;
+		}
+		reads_left--;
+	}
+	scratch->reads_left = reads_left;
+
+	return (matched);
 }
 
 /*
@@ -1445,7 +1482,8 @@ step_scan(relic_scratch_t *scratch, const relic_op_atom_t *atom,
  * the lookup was planned with, which is its index's; the index reads no
  * other column, and the rest are left unset.  The index is found by
  * position each time, since the array holding it can grow while the plan
- * exists.
+ * exists.  A lookup counts what it rejects and pauses as a scan does, its
+ * cursor on the chain.
  */
 static bool
 step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
@@ -1456,7 +1494,9 @@ step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 	const relic_dom_t *tuple;
 	relic_dom_t probe[RELIC_MAX_ARITY];
 	relic_tuple_id_t id;
+	uint64_t reads_left;
 	uint16_t column;
+	bool matched;
 
 	cursor = &state->cursor;
 	index = relic_relation_index_at(atom->relation, atom->index_position);
@@ -1478,17 +1518,28 @@ step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 		cursor->end = state->view.end;
 	}
 
+	matched = false;
+	reads_left = scratch->reads_left;
 	while (cursor->first != RELIC_ID_NONE && cursor->first < cursor->end) {
 		id = cursor->first;
 		cursor->first = relic_index_next(index, id);
 		scratch->counters.tuples_looked_up++;
 
 		tuple = relic_relation_tuple(atom->relation, id);
-		if (tuple_matches(scratch, atom, tuple))
-			return (true);
-	}
+		if (tuple_matches(scratch, atom, tuple)) {
+			matched = true;
+			break;
+		}
 
-	return (false);
+		if (reads_left == 0) {
+			scratch->paused = true;
+			break;
+		}
+		reads_left--;
+	}
+	scratch->reads_left = reads_left;
+
+	return (matched);
 }
 
 /*
@@ -1723,7 +1774,9 @@ fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
  * operation's access says, within `view`.  Returns false when a row put the
  * group outside the function's domain.  The walk holds no tuple past the
  * row it folds, and the relation is complete, so nothing inserts into it
- * while the walk runs.
+ * while the walk runs.  A fold cannot pause part way, since its running
+ * value lives in its caller's frame, so it charges the rows it reads to
+ * the call's reads and goes on, and the call pauses once its step returns.
  */
 static bool
 fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -1742,6 +1795,7 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	switch (aggregate->access) {
 	case RELIC_FOLD_SCAN:
 		for (id = view->first; id < view->end; id++) {
+			charge_fold_read(scratch);
 			scratch->counters.tuples_scanned++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
 			if (key_matches(scratch, aggregate, tuple) &&
@@ -1756,6 +1810,7 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		for (id = relic_index_first(index, aggregate->relation, key);
 		    id != RELIC_ID_NONE && id < view->end;
 		    id = relic_index_next(index, id)) {
+			charge_fold_read(scratch);
 			scratch->counters.tuples_looked_up++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
 			if (!fold_row(scratch, env, aggregate, fold, tuple))
@@ -2041,6 +2096,7 @@ relic_exec_start(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	scratch->text_stack.used = 0;
 	scratch->level = 0;
 	scratch->resume = false;
+	scratch->paused = false;
 	scratch->finished = false;
 }
 
@@ -2084,7 +2140,7 @@ yield_after_emit(relic_scratch_t *scratch, size_t level)
 	scratch->level = level - 1;
 	scratch->resume = true;
 
-	return (RELIC_EXEC_BATCH_FULL);
+	return (RELIC_EXEC_PAUSED);
 }
 
 /*
@@ -2098,20 +2154,51 @@ yield_before_emit(relic_scratch_t *scratch, size_t level)
 	scratch->level = level;
 	scratch->resume = false;
 
-	return (RELIC_EXEC_BATCH_FULL);
+	return (RELIC_EXEC_PAUSED);
 }
 
 /*
- * Run the plan from where it last stopped until the batch is full or the
- * first operation has nothing more.  `level` is the operation being asked
- * for a match, and `resume` says whether it is being asked for its next one
- * or started afresh.
+ * Record that a quantum of work is done with the join about to ask the
+ * operation at `level`, afresh or for its next match as `resume` says.
+ * That pair is all the loop of relic_exec_run() carries from one turn to
+ * the next -- the frame and every operation's cursor are already in the
+ * scratch -- so the join goes on from it exactly as it would have.
+ */
+static enum relic_exec_status
+yield_after_quantum(relic_scratch_t *scratch, size_t level, bool resume)
+{
+	scratch->level = level;
+	scratch->resume = resume;
+
+	return (RELIC_EXEC_PAUSED);
+}
+
+/*
+ * Run the plan from where it last stopped until the batch is full, a
+ * quantum of work is done, or the first operation has nothing more.
+ * `level` is the operation being asked for a match, and `resume` says
+ * whether it is being asked for its next one or started afresh.
  *
- * A batch left full by the caller is reported full again rather than
- * appended to: the EMIT writes a tuple only into room the batch has, so the
- * caller's neglect costs it a turn and cannot write past the batch.  An
- * operation that records a failure ends the run there, and the plan is
- * finished.
+ * A quantum is counted two ways, each up to RELIC_EXEC_QUANTUM, so that
+ * neither a join of many cheap bindings nor one whose scans reject relation
+ * after relation keeps the caller waiting long.  The loop counts its
+ * backtracks: every turn either descends, which it can do only as many
+ * times as the plan has operations, or ends in one, so the backtracks bound
+ * the turns.  The scans and lookups count the tuples they reject, in
+ * `reads_left`, and one that runs out mid-way stops inside its step and
+ * sets `paused`.  A fold charges the tuples it reads to the same count and
+ * sets `paused` once it has spent them, but finishes its walk.  Every
+ * other step does a bounded amount of work.  The loop pauses after a step
+ * that set `paused`: at the next operation when the step matched, which
+ * only a fold can have, and otherwise at the step's own operation, to be
+ * asked for its next match.  So a call overruns its reads by at most one
+ * fold's walk.  A call backtracks or reads at least once before pausing, so
+ * every call makes progress.
+ *
+ * A batch left full by the caller is reported again rather than appended
+ * to: the EMIT writes a tuple only into room the batch has, so the caller's
+ * neglect costs it a turn and cannot write past the batch.  An operation
+ * that records a failure ends the run there, and the plan is finished.
  */
 enum relic_exec_status
 relic_exec_run(relic_scratch_t *scratch)
@@ -2119,6 +2206,7 @@ relic_exec_run(relic_scratch_t *scratch)
 	const relic_exec_env_t *env;
 	const relic_plan_t *plan;
 	const relic_op_t *op;
+	uint64_t backtracks_left;
 	size_t level;
 	bool matched;
 	bool resume;
@@ -2126,13 +2214,15 @@ relic_exec_run(relic_scratch_t *scratch)
 	if (scratch->finished)
 		return (RELIC_EXEC_FINISHED);
 	if (scratch->batch_count == RELIC_INSERT_BATCH)
-		return (RELIC_EXEC_BATCH_FULL);
+		return (RELIC_EXEC_PAUSED);
 
 	plan = scratch->plan;
 	env = scratch->env;
 
 	level = scratch->level;
 	resume = scratch->resume;
+	backtracks_left = RELIC_EXEC_QUANTUM;
+	scratch->reads_left = RELIC_EXEC_QUANTUM;
 
 	for (;;) {
 		op = &plan->ops[level];
@@ -2155,6 +2245,14 @@ relic_exec_run(relic_scratch_t *scratch)
 			    &scratch->states[level], resume);
 			if (scratch->error.failed)
 				break;
+			if (scratch->paused) {
+				scratch->paused = false;
+				if (matched)
+					return (yield_after_quantum(scratch,
+					    level + 1, false));
+				return (yield_after_quantum(scratch, level,
+				    true));
+			}
 		}
 
 		if (matched) {
@@ -2168,6 +2266,10 @@ relic_exec_run(relic_scratch_t *scratch)
 
 		level--;
 		resume = true;
+
+		backtracks_left--;
+		if (backtracks_left == 0)
+			return (yield_after_quantum(scratch, level, resume));
 	}
 
 	scratch->finished = true;

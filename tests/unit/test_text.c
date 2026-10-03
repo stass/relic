@@ -298,7 +298,7 @@ run_to_end(fixture_t *fixture, const char *scenario,
 		scratch->batch_count = 0;
 		scratch->pending_count = 0;
 		scratch->pending_bytes.used = 0;
-	} while (status == RELIC_EXEC_BATCH_FULL);
+	} while (status == RELIC_EXEC_PAUSED);
 
 	if (scratch->error.failed) {
 		check(false, scenario, "the plan should not fail");
@@ -864,7 +864,7 @@ an_invalid_pattern_fails_on_its_binding(void)
 			scratch->batch_count = 0;
 			scratch->pending_count = 0;
 			scratch->pending_bytes.used = 0;
-		} while (status == RELIC_EXEC_BATCH_FULL);
+		} while (status == RELIC_EXEC_PAUSED);
 
 		check(scratch->error.failed &&
 		    scratch->error.failure == RELIC_FAIL_PATTERN &&

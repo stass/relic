@@ -751,6 +751,19 @@ Otherwise there is no prompt, so that a session read from a file or a pipe
 writes its answers and nothing else.
 Everything answered is written out before the session waits for the next
 line.
+.Pp
+In a session that prompts, an interrupt from the terminal, usually
+control-C, while a line is answered stops its query, which fails with the
+diagnostic
+.Qq interrupted ,
+and the session goes on to the next line.
+Rows written before the interrupt stay written; the
+.Cm json
+format's closing bracket is not.
+While the session waits for a line, and at any time in a run that does not
+prompt, an interrupt ends
+.Nm
+as it ends any program.
 .Sh OUTPUT
 Every format writes one row per answer.
 A row's columns are the query's variables, in the order they first occur,

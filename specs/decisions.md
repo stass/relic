@@ -481,3 +481,22 @@ when a tuple holding it is stored, on D-26's measure, rewrite and commit
 with the pool's identifier predicted from its count; the symbol pool is
 charged to the memory limit whole. `str` is the one conversion because it
 is the one that cannot fail. Specified in `specs/design-strings.md`.
+
+### D-29 An interrupt fails the evaluation in progress where it can already fail
+
+`relic_interrupt()` raises a flag the context holds, a lock-free atomic or a
+`volatile sig_atomic_t`, so a signal handler, another thread or a callback
+may call it; it enters nothing and cannot fail. Entering an operation lowers
+the flag, so an interrupt made while no operation runs is forgotten rather
+than failing the next one. Only evaluation heeds it, because only
+evaluation's time is unbounded by its input: the executor returns at least
+every fixed quantum of steps as well as with a full batch, the serial
+evaluator reads the flag after every return and a worker abandons its job
+when it finds the flag raised, so the round is rerun serially and the
+calling thread reports the interrupt, and a gathered answer reads it before
+each row. The interrupted operation returns -1 with a diagnostic and leaves
+the context as any failed evaluation does. Rows a query delivered before
+the interrupt stay delivered: it is the one failure that may follow the
+first row, and the run's -1 tells the caller the rows are a prefix. The
+tool catches `SIGINT` only while an interactive session at a terminal
+answers a line. Specified in `specs/design-interrupt.md`.

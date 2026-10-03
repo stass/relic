@@ -62,6 +62,17 @@
 #define	RELIC_INSERT_BATCH	64u
 
 /*
+ * How much work relic_exec_run() does before it returns to its caller
+ * whether or not its batch is full: as many backtracks of its join, and as
+ * many tuples its scans and lookups reject.  It bounds how long a join that
+ * derives nothing goes without its caller looking for an interrupt.  A
+ * backtrack or a rejected tuple costs a few nanoseconds, so a quantum takes
+ * well under a millisecond, while taking a batch, often an empty one, once
+ * a quantum costs nothing measurable.
+ */
+#define	RELIC_EXEC_QUANTUM	16384u
+
+/*
  * The room the scratch's text stack and pending bytes start with in a
  * round, each grown past it only for data that needs more: a text stack of
  * a few pages holds the strings an ordinary rule computes, and the pending
@@ -337,9 +348,13 @@ struct relic_pending {
  * caller has not yet taken, packed at the arity of the relation the EMIT
  * names, with room for RELIC_INSERT_BATCH tuples of `arity_room` columns.
  *
- * `level` and `resume` are where the join was when the executor returned
- * with a full batch: the operation to ask next and whether to ask it for
- * its next match rather than a first.  A batch is full when it holds
+ * `level` and `resume` are where the join was when the executor paused:
+ * the operation to ask next and whether to ask it for its next match
+ * rather than a first.  `reads_left` is how many more tuples the scans and
+ * lookups may reject, and the folds read, in the call under way, and
+ * `paused` is set by a step that has spent them: a scan or lookup that
+ * stopped, its cursor where the next call resumes, or a fold that read its
+ * whole walk regardless.  A batch is full when it holds
  * RELIC_INSERT_BATCH tuples, or when the next tuple's pending strings would
  * not fit its pending bytes, and then the EMIT is asked again.  `finished`
  * is set once the first operation has nothing more, after which the plan
@@ -371,21 +386,24 @@ struct relic_scratch {
 	size_t			 batch_count;
 	size_t			 pending_count;
 	size_t			 level;
+	uint64_t		 reads_left;
 	relic_exec_counters_t	 counters;
 	relic_mixed_note_t	 note;
 	relic_exec_error_t	 error;
 	uint16_t		 arity_room;
 	bool			 resume;
+	bool			 paused;
 	bool			 finished;
 };
 
 /*
- * Why relic_exec_run() returned: the batch is full and the plan has more to
- * derive, or the plan has derived everything it will.  Either way the batch
- * may hold tuples, which the caller takes before anything else.
+ * Why relic_exec_run() returned: the plan has more to derive and paused,
+ * because the batch is full or a quantum of work is done, or the plan has
+ * derived everything it will.  Either way the batch may hold tuples, which
+ * the caller takes before anything else.
  */
 enum relic_exec_status {
-	RELIC_EXEC_BATCH_FULL,
+	RELIC_EXEC_PAUSED,
 	RELIC_EXEC_FINISHED
 };
 
@@ -418,9 +436,10 @@ enum relic_exec_status {
  * reads a relation, with an empty batch.  The plan must fit the scratch,
  * and `plan` and `env` must stay valid until the plan has finished or is
  * abandoned.  relic_exec_run() then runs it, from where it last returned,
- * until the batch is full or the plan has finished, and says which; a
- * caller that runs it again without emptying a full batch is told the batch
- * is full, and nothing is derived.  Between two calls the relations may be
+ * until the batch is full, RELIC_EXEC_QUANTUM of work is done or the plan
+ * has finished, and says whether it paused or finished; a caller that runs
+ * it again without emptying a full batch is told it paused again, and
+ * nothing is derived.  Between two calls the relations may be
  * appended to and nothing else, as the executor's description above says.
  *
  * relic_exec_view() gives the range of identifiers an operation's view

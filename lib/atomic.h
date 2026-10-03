@@ -16,18 +16,21 @@
  *
  * They are few: the claim, abandon and completion words of a job, the
  * generation a job is published by, the memory account's total for a
- * round's buffers, and the frontiers of an index's keys.  Each operation's
- * name gives the ordering it makes, so the reader of a call sees what it
- * synchronizes without looking here: a relaxed operation is atomic and
- * orders nothing, an acquire load sees everything written before the
- * release store or read-modify-write it reads from, and an operation whose
- * name gives no ordering is sequentially consistent.  Only the account's
+ * round's buffers, the frontiers of an index's keys, and the flag a caller
+ * interrupts its context's evaluation by.  Each operation's name gives the
+ * ordering it makes, so the reader of a call sees what it synchronizes
+ * without looking here: a relaxed operation is atomic and orders nothing,
+ * an acquire load sees everything written before the release store or
+ * read-modify-write it reads from, and an operation whose name gives no
+ * ordering is sequentially consistent.  Only the account's and the flag's
  * are, since they are rare.  An initialization is not atomic, and is made
  * before any other thread can see the word.
  *
  * A build with threads (RELIC_THREADS) uses C11 atomics.  A build without
  * them has one worker and nothing shared, and the same operations are
  * plain loads and stores, so no code but this header tells the two apart.
+ * The interrupt flag, at the end, is shared with the caller rather than
+ * with the pool, and is the same in either build.
  */
 
 #ifdef RELIC_THREADS
@@ -259,5 +262,80 @@ relic_atomic_u64_store_release(relic_atomic_u64_t *word, uint64_t value)
 }
 
 #endif /* RELIC_THREADS */
+
+/*
+ * A flag raised from outside the operation that reads it: by a signal
+ * handler, by another thread, or by caller code the operation calls.
+ * Raising it is all such a caller does, so the flag must be a word a signal
+ * handler may store to.  Where the compiler has C11 atomics it is a
+ * lock-free atomic_bool, in a build without threads as well, since the
+ * thread raising it is the caller's and not the pool's; where it has none
+ * it is a volatile sig_atomic_t, the one type C promises a handler may
+ * store to, and the flag is then for a handler and a callback alone: a
+ * store from another thread would race with the evaluation's loads.
+ */
+#if !defined(__STDC_NO_ATOMICS__)
+#include <stdatomic.h>
+#endif
+
+#if !defined(__STDC_NO_ATOMICS__) && ATOMIC_BOOL_LOCK_FREE == 2
+
+typedef atomic_bool		relic_signal_flag_t;
+
+static inline void
+relic_signal_flag_init(relic_signal_flag_t *flag)
+{
+	atomic_init(flag, false);
+}
+
+static inline void
+relic_signal_flag_raise(relic_signal_flag_t *flag)
+{
+	atomic_store(flag, true);
+}
+
+static inline void
+relic_signal_flag_lower(relic_signal_flag_t *flag)
+{
+	atomic_store(flag, false);
+}
+
+static inline bool
+relic_signal_flag_raised(const relic_signal_flag_t *flag)
+{
+	return (atomic_load(flag));
+}
+
+#else /* no lock-free atomic_bool */
+
+#include <signal.h>
+
+typedef volatile sig_atomic_t	relic_signal_flag_t;
+
+static inline void
+relic_signal_flag_init(relic_signal_flag_t *flag)
+{
+	*flag = 0;
+}
+
+static inline void
+relic_signal_flag_raise(relic_signal_flag_t *flag)
+{
+	*flag = 1;
+}
+
+static inline void
+relic_signal_flag_lower(relic_signal_flag_t *flag)
+{
+	*flag = 0;
+}
+
+static inline bool
+relic_signal_flag_raised(const relic_signal_flag_t *flag)
+{
+	return (*flag != 0);
+}
+
+#endif /* lock-free atomic_bool */
 
 #endif /* RELIC_ATOMIC_H */

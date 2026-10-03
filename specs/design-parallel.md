@@ -284,12 +284,15 @@ not grow, for memory or because the memory limit refused it, or the round
 holds more candidates than the tuple limit could ever admit, section 8, or
 its plan met an evaluation error -- an integer overflow, a zero divisor, a
 string too long, a pattern that is not one, or a growth of the buffers it
-computes strings in that was refused. The serial rerun meets that error,
+computes strings in that was refused, or the context was interrupted,
+which every worker looks for after each return of the executor,
+`specs/design-interrupt.md` section 4. The serial rerun meets that error,
 or one before it in serial order, and reports it, so an evaluation error
 names the first error in serial order at every thread count. It
 sets the abandon word, drops its task and leaves its claim loop, reporting
 completion as any worker does; every other worker finishes the task it
-holds and leaves too, which bounds the wait at one task. Nothing is
+holds and leaves too, which bounds the wait at one task, and at one
+quantum of the executor when the context was interrupted. Nothing is
 recorded about why, because nothing is reported: after the barrier, worker
 0 finds the abandon word set, releases every worker's candidates, discards
 the workers' counters, and runs the round serially, section 3. The records
@@ -1363,5 +1366,7 @@ was.
   handler would be the global state section 4.1 rules out.
 * **C11 `<threads.h>`.** Not on every platform relic builds for; POSIX
   threads are, and are a BSD interface in the sense of section 74.
-* **Cancelling a running evaluation.** No step or time limit exists
-  (`specs/design-api.md` section 11), and a worker is never interrupted.
+* **Cancelling a worker's thread.** An interrupt reaches a worker as a flag
+  it reads between two returns of the executor, and ends its task as any
+  other reason to abandon the job does, section 4.4; no thread is
+  cancelled or signalled.

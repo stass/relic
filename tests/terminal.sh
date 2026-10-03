@@ -96,6 +96,28 @@ if ! cmp -s "$work/expected" "$work/file"; then
 	fail "the answers in an -o file are not separated"
 fi
 
+# Control-C while a query runs interrupts it and returns to the prompt: the
+# query fails with the library's diagnostic, the next line is answered, and
+# the session, having had a line fail, exits 1.  The recursion counts up
+# without end, so only the interrupt finishes the first query.
+cat > "$work/count.dl" <<'EOF'
+n(0).
+n(Y) :- n(X), Y = X + 1.
+EOF
+status=0
+printf 'n(X), X < 0?\n\003\nN = count { path(a, X) }?\n' |
+    "$pty" -p 'relic> ' "$RELIC" -i "$work/count.dl" "$work/graph.dl" \
+    > "$work/interrupted" || status=$?
+answers_of "$work/interrupted" > "$work/answers"
+if [ "$status" -ne 1 ] ||
+    ! grep -q 'relic: error: interrupted while deriving n/1' \
+    "$work/answers" ||
+    [ "$(tail -n 1 "$work/answers")" != 2 ]; then
+	echo "a session interrupted at a terminal wrote this:" >&2
+	cat "$work/answers" >&2
+	fail "an interrupted query did not return to the prompt (status $status)"
+fi
+
 # A program read from a terminal would be waited for with nothing said, so
 # the tool prints its usage and exits 2 instead.
 status=0

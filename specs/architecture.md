@@ -1602,6 +1602,10 @@ Input history should use `libedit` only if available at compile time.
 
 Without it, the REPL uses standard input normally.
 
+Ctrl-C while a query runs at a prompt interrupts the query and returns to
+the prompt; the library's `relic_interrupt()` and how an evaluation stops
+are specified in `specs/design-interrupt.md`.
+
 ---
 
 # 43. Output

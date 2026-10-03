@@ -266,16 +266,21 @@ struct relic_pool {
  * frozen.h declares.  `admissible` is how many more tuples the tuple
  * limit can admit, SIZE_MAX when none is set: a worker gathering more
  * candidates than that holds a round the merge would refuse part way, and
- * abandons it rather than fill memory first.  `abandoned` is set by a
- * worker whose task cannot go on, after which a task claimed is not run.
+ * abandons it rather than fill memory first.  `interrupted` is the
+ * context's interrupt flag, which a worker reads after each return of the
+ * executor and abandons the job on finding raised, so that the calling
+ * thread meets the interrupt in the round's serial run and reports it.
+ * `abandoned` is set by a worker whose task cannot go on, after which a
+ * task claimed is not run.
  */
 struct relic_round_job {
-	const relic_round_t	*round;
-	relic_round_task_t	*tasks;
-	relic_worker_t		*workers;
-	relic_account_t		*account;
-	size_t			 admissible;
-	relic_atomic_bool_t	 abandoned;
+	const relic_round_t		*round;
+	relic_round_task_t		*tasks;
+	relic_worker_t			*workers;
+	relic_account_t			*account;
+	const relic_signal_flag_t	*interrupted;
+	size_t				 admissible;
+	relic_atomic_bool_t		 abandoned;
 };
 
 /*

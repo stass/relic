@@ -73,7 +73,8 @@ RELIC_EXPORT const char *relic_version(void);
 /*
  * A relic context: a loaded program, the values it mentions, and the
  * relations derived from it.  Contexts share nothing, so a program may hold
- * as many as it likes, but one context is not itself thread-safe.
+ * as many as it likes, but one context is not itself thread-safe:
+ * relic_interrupt() is the one call another thread may make on it.
  *
  * A function that takes a context and can fail returns -1 or NULL when it
  * does, and 0 or a pointer otherwise, and a failure is always explained by a
@@ -86,7 +87,9 @@ RELIC_EXPORT const char *relic_version(void);
  * four ways: the diagnostic, explain and row callbacks, and the read
  * function of a stream given to relic_load_file() or relic_import_file().
  * It may read through the context with the functions above and
- * relic_error().  Any other call on the same context is refused: a call
+ * relic_error(), and may call relic_interrupt(), which a signal handler or
+ * another thread may call too.  Any other call on the same context is
+ * refused: a call
  * that returns a status fails with -1 or NULL, one that returns nothing
  * does nothing, and relic_error() describes the refusal until the next
  * error or until the operation the caller code runs inside returns; the
@@ -410,7 +413,8 @@ RELIC_EXPORT void relic_diag_set(relic_t *ctx, relic_diag_cb callback,
 
 /*
  * A diagnostic callback that writes to stderr, for a program that wants one
- * and has no opinion about the format.  This is what the relic tool installs.
+ * and has no opinion about the format.  The relic tool reports every
+ * diagnostic through it.
  *
  * A located diagnostic is written as "file:line:column: level: message" and
  * an unlocated one as "prefix: level: message", where the prefix is the
@@ -611,8 +615,9 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * arithmetic expression has no defined result -- one outside the 64-bit
  * integers, or a division or remainder by zero -- when a string function
  * would compute a string longer than a string value can be, or when `match`
- * is given a pattern that is not a regular expression, and the next
- * evaluation starts again from the facts.
+ * is given a pattern that is not a regular expression, or when
+ * relic_interrupt() asks it to stop, and the next evaluation starts again
+ * from the facts.
  *
  * Nothing is recomputed when the program has gained no rule and no fact
  * since the last evaluation that succeeded.  When it has, every derived
@@ -624,6 +629,27 @@ RELIC_EXPORT int relic_check(relic_t *ctx);
  * only queries need not call this.
  */
 RELIC_EXPORT int relic_materialize(relic_t *ctx);
+
+/*
+ * Ask the operation in progress on the context to stop.  An evaluation --
+ * relic_materialize(), relic_query_run() or relic_query_collect() -- looks
+ * for the request after every few thousand steps of a join and before each
+ * row of a gathered answer, and on finding it fails with "interrupted" in
+ * its diagnostic, leaving the context as any failed evaluation does: the
+ * next one starts again from the facts.  Every other operation runs to its
+ * end.
+ *
+ * This only records the request: it enters nothing, allocates nothing and
+ * cannot fail, so it may be called from a signal handler, from another
+ * thread, or from a callback of the operation itself, while the caller
+ * keeps the context alive.  The request is a C11 atomic; a library built by
+ * a compiler without C11 atomics, which no system relic supports has,
+ * records it in a volatile sig_atomic_t instead, which a signal handler or
+ * a callback may still set and another thread may not.  Each operation forgets any request made before
+ * it began, so an interrupt with no operation in progress stops nothing.
+ * Accepts NULL.
+ */
+RELIC_EXPORT void relic_interrupt(relic_t *ctx);
 
 /*
  * A query, compiled and ready to run as often as the caller likes.
@@ -710,7 +736,9 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * exceeded, say, an arithmetic result that is not defined, a string too
  * long or an invalid pattern -- therefore delivers no rows at all rather
  * than a truncated answer that would be indistinguishable from a complete
- * one.  A diagnostic the query's evaluation reports, such as the note
+ * one.  The exception is relic_interrupt(): a query interrupted after its
+ * first row fails all the same, and the rows already delivered are a prefix
+ * of its answer.  A diagnostic the query's evaluation reports, such as the note
  * RELIC_F_NOTE_MIXED asks for, may come between rows delivered as they are
  * derived.
  *

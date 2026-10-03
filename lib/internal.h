@@ -25,6 +25,7 @@
 #include "account.h"
 #include "arena.h"
 #include "ast.h"
+#include "atomic.h"
 #include "cdefs.h"
 #include "compat.h"
 #include "exec.h"
@@ -461,6 +462,14 @@ struct relic_materialized {
  * callback, or the read function of a stream handed to relic_load_file() --
  * and whatever it calls finds the context busy.  So no operation can find
  * its state changed under it, however the caller's code came to run.
+ *
+ * `interrupted` is raised by relic_interrupt(), from a signal handler,
+ * another thread or caller code, and lowered by relic_enter() as each
+ * operation begins, so it asks only the operation in progress to stop.  It
+ * is the one member written from outside an operation.  An evaluation
+ * reads it after every return of the executor, a worker of a shared round
+ * likewise, through the job, and the delivery of a gathered answer before
+ * each row; elsewhere it is ignored.
  */
 struct relic {
 	relic_arena_t		 program_arena;	/* the parsed program */
@@ -479,6 +488,7 @@ struct relic {
 	uint64_t		 hash_seed;
 	relic_materialized_t	 materialized;
 	relic_pool_t		*pool;
+	relic_signal_flag_t	 interrupted;
 	bool			 query_mixed_noted;
 	bool			 busy;
 };

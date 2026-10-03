@@ -499,6 +499,13 @@ when a write fails, to the output or of a reply, since nothing it answers
 after that could be seen. A query or
 command that fails is reported and the session goes on to the next line.
 
+A session that prompts catches `SIGINT` while it answers a line: Ctrl-C
+interrupts the query running, which fails with its diagnostic, and the
+session goes on to the next line. Rows written before the interrupt stay
+written, ending at a row boundary. While the session waits for a line, and
+throughout a run with no session that prompts, `SIGINT` keeps the
+disposition the tool started with. `specs/design-interrupt.md` section 5.
+
 The exit status is 1 when anything in the session failed and 0 otherwise, so a
 scripted session reports its mistakes as a run of `-q` options would.
 

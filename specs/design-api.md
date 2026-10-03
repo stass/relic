@@ -304,6 +304,11 @@ A few entry points only read, and a callback may call them:
 result accessors. They do not enter the context, and nothing they read moves
 while an operation is running.
 
+`relic_interrupt()` does not enter the context either: it raises a flag the
+operation in progress looks for, and a callback, a signal handler or another
+thread may call it while the context is busy. An evaluation that finds it
+raised fails, `specs/design-interrupt.md`.
+
 ---
 
 ## 7. Diagnostics
@@ -400,7 +405,8 @@ distcheck` runs it.
 
 * **A step or time limit.** Architecture section 63 defines none; adding one
   to `relic_config_t` later is an incompatible change and bumps the
-  version-info. The limits bound what is stored, not what is computed: an
+  version-info. A caller that wants a deadline interrupts the evaluation
+  from a timer with `relic_interrupt()`, `specs/design-interrupt.md`. The limits bound what is stored, not what is computed: an
   aggregate's group relation is charged to `max_tuples` and `max_memory`,
   but the join that derives it is bounded by nothing, as any join is not,
   `specs/design-aggregates.md` section 14. Arithmetic and the string

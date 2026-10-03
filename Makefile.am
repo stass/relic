@@ -197,6 +197,7 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_arith tests/unit/test_compute tests/unit/test_diag \
 	tests/unit/test_eval tests/unit/test_exec \
 	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
+	tests/unit/test_interrupt \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
 	tests/unit/test_regex tests/unit/test_relation tests/unit/test_round \
@@ -209,6 +210,13 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 ## hidden visibility left out fails to link.
 tests_unit_test_api_SOURCES = tests/unit/test_api.c tests/unit/harness.c
 tests_unit_test_api_LDADD = librelic.la
+
+## test_interrupt, too, is written as an embedder writes it.  Its deadline
+## scenario interrupts from a thread of its own.
+tests_unit_test_interrupt_SOURCES = tests/unit/test_interrupt.c \
+	tests/unit/harness.c
+tests_unit_test_interrupt_CFLAGS = $(AM_CFLAGS) -pthread
+tests_unit_test_interrupt_LDADD = librelic.la
 
 tests_unit_test_arena_SOURCES = tests/unit/test_arena.c tests/unit/harness.c
 tests_unit_test_arena_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -927,6 +935,7 @@ check-tsan:
 	name=ThreadSanitizer; \
 	supported='$(RELIC_TSAN_SUPPORTED)'; note=; \
 	TSAN_OPTIONS='$(RELIC_TSAN_OPTIONS)'; export TSAN_OPTIONS; \
+	MallocNanoZone=0; export MallocNanoZone; \
 	RELIC_PERF_BUDGET=$${RELIC_PERF_BUDGET:-$(RELIC_TSAN_PERF_BUDGET)}; \
 	export RELIC_PERF_BUDGET; \
 	$(RELIC_SANITIZER_CHECK)

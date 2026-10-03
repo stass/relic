@@ -38,6 +38,7 @@ relic_enter(relic_t *ctx, const char *verb, const char *subject)
 	}
 
 	ctx->busy = true;
+	relic_signal_flag_lower(&ctx->interrupted);
 	relic_diag_begin_operation(ctx, verb, subject);
 
 	return (0);
@@ -62,6 +63,20 @@ relic_leave(relic_t *ctx)
 
 	ctx->busy = false;
 	ctx->diag.refused = false;
+}
+
+/*
+ * Ask the operation in progress to stop.  Raising the flag is all this
+ * does, so a signal handler, another thread or caller code the operation
+ * runs may call it: it neither enters the context nor reads anything else
+ * of it.  An operation that begins afterwards lowers the flag, so an
+ * interrupt with no operation in progress stops nothing.
+ */
+void
+relic_interrupt(relic_t *ctx)
+{
+	if (ctx != NULL)
+		relic_signal_flag_raise(&ctx->interrupted);
 }
 
 /*
@@ -162,6 +177,7 @@ relic_create_config(const relic_config_t *config)
 	relic_program_init(&ctx->program, ctx->hash_seed);
 	relic_store_init(&ctx->store);
 	relic_diag_init(&ctx->diag);
+	relic_signal_flag_init(&ctx->interrupted);
 
 	return (ctx);
 }

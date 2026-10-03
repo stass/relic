@@ -10,8 +10,8 @@
  *	pty [-p prompt] command [argument ...]
  *
  * The command's standard input, output and error are the terminal, which is
- * its controlling terminal, so it sees what it would see in an interactive
- * shell.  The lines of this program's standard input are typed into it, and
+ * its controlling terminal, and SIGINT and SIGQUIT have their default
+ * dispositions, so it sees what it would see in an interactive shell.  The lines of this program's standard input are typed into it, and
  * everything it writes to the terminal is copied to this program's standard
  * output, carriage returns and all.  The terminal does not echo, so what
  * comes back is what the command wrote.
@@ -27,6 +27,12 @@
  * stalls for that long between its prompt and its read is typed into early.
  * Without -p everything is typed at once, for a command that reads no input
  * or exits first.
+ *
+ * A line beginning with control-C, the interrupt character of a terminal in
+ * its default modes, is typed as that one character, without the rest of
+ * the line, once the command has written nothing for QUIET_MILLISECONDS
+ * since the line before, whether or not it has prompted: it interrupts a
+ * command busy with the line before, which is quiet without prompting.
  *
  * The options of this program end at the command, so that options of the
  * command's own are passed to it rather than read here, by a getopt(3) that
@@ -70,6 +76,7 @@
 #define	EXIT_NO_TERMINAL	124
 #define	EXIT_TIMEOUT		125
 #define	END_OF_FILE		'\004'	/* control-D */
+#define	INTERRUPT		'\003'	/* control-C */
 
 /*
  * What this program's standard input holds, to be typed a line at a time.
@@ -99,6 +106,7 @@ static pid_t	 start_command(int master, const char *slave_name,
 		    char *argv[]);
 static bool	 prompt_seen(prompt_watch_t *watch, const char *bytes,
 		    size_t count);
+static bool	 next_interrupts(const typing_t *typing);
 static void	 type_next(int master, typing_t *typing);
 static void	 write_all(int fd, const char *bytes, size_t count);
 static int	 command_status(pid_t pid);
@@ -218,6 +226,16 @@ start_command(int master, const char *slave_name, char *argv[])
 	if (slave > STDERR_FILENO)
 		close(slave);
 
+	/*
+	 * A shell that is not interactive starts a command run in the
+	 * background with SIGINT and SIGQUIT ignored, and an ignored signal
+	 * stays ignored across exec.  The foreground job of an interactive
+	 * shell has neither ignored, so neither is here, whoever started
+	 * this program.
+	 */
+	(void)signal(SIGINT, SIG_DFL);
+	(void)signal(SIGQUIT, SIG_DFL);
+
 	execvp(argv[0], argv);
 	err(126, "%s", argv[0]);
 }
@@ -249,7 +267,18 @@ prompt_seen(prompt_watch_t *watch, const char *bytes, size_t count)
 }
 
 /*
- * Type the next line of the input, or, when every line has been typed, the
+ * Whether the next line to type begins with the interrupt character.
+ */
+static bool
+next_interrupts(const typing_t *typing)
+{
+	return (typing->typed < typing->length &&
+	    typing->text[typing->typed] == INTERRUPT);
+}
+
+/*
+ * Type the next line of the input -- only its interrupt character, for a
+ * line that begins with one -- or, when every line has been typed, the
  * end-of-file character.
  */
 static void
@@ -258,13 +287,16 @@ type_next(int master, typing_t *typing)
 	const char end_of_file = END_OF_FILE;
 	const char *newline;
 	size_t count;
+	bool interrupts;
 
 	if (typing->typed < typing->length) {
+		interrupts = next_interrupts(typing);
 		newline = memchr(typing->text + typing->typed, '\n',
 		    typing->length - typing->typed);
 		count = newline == NULL ? typing->length - typing->typed :
 		    (size_t)(newline - (typing->text + typing->typed)) + 1;
-		write_all(master, typing->text + typing->typed, count);
+		write_all(master, typing->text + typing->typed,
+		    interrupts ? 1 : count);
 		typing->typed += count;
 		return;
 	}
@@ -365,7 +397,8 @@ main(int argc, char *argv[])
 
 	/*
 	 * Without a prompt to wait for, everything is typed now; with one,
-	 * each line waits for the prompt and the quiet after it.  The
+	 * each line waits for the prompt and the quiet after it, and a line
+	 * that interrupts for the quiet alone.  The
 	 * command's output is copied until its side of the terminal is
 	 * closed, which a read reports as the end of input or, on Linux, as
 	 * EIO; any other error is this program's.  The waiting is select(2)'s,
@@ -383,7 +416,8 @@ main(int argc, char *argv[])
 		quiet.tv_sec = 0;
 		quiet.tv_usec = QUIET_MILLISECONDS * 1000;
 		ready = select(master + 1, &readable, NULL, NULL,
-		    prompted ? &quiet : NULL);
+		    prompted || (watch.prompt != NULL &&
+		    next_interrupts(&typing)) ? &quiet : NULL);
 		if (ready < 0 && errno == EINTR)
 			continue;
 		if (ready < 0)

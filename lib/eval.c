@@ -457,6 +457,8 @@ static int	 confirm_seed(const relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
 static bool	 seed_head_is_constant(const relic_rule_t *rule);
+static int	 refuse_interrupted(relic_t *ctx, const char *verb,
+		    const relic_relation_t *relation);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_plan_t *plan, const relic_rule_t *rule,
 		    const relic_emit_target_t *target);
@@ -591,7 +593,7 @@ static void	 start_deltas(relic_evaluation_t *eval,
 static bool	 choose_query_target(const relic_t *ctx,
 		    relic_running_plan_t *running,
 		    const relic_row_sink_t *rows);
-static void	 deliver_gathered_answer(relic_t *ctx,
+static int	 deliver_gathered_answer(relic_t *ctx,
 		    const relic_relation_t *answer,
 		    const relic_row_sink_t *sink);
 static int	 stream_query_plan(relic_evaluation_t *eval,
@@ -991,14 +993,45 @@ count_derivation(relic_evaluation_t *eval, bool added)
 }
 
 /*
+ * Fail the operation when the caller has interrupted it, reporting what it
+ * was doing: `verb` -- deriving, delivering -- and the relation it was
+ * doing it to.  Returns 0 when it has not been interrupted.  It is called
+ * only where the operation could already fail, so a failure here leaves
+ * the context as any other failure there does.
+ */
+static int
+refuse_interrupted(relic_t *ctx, const char *verb,
+    const relic_relation_t *relation)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	if (!relic_signal_flag_raised(&ctx->interrupted))
+		return (0);
+
+	relic_diagf(ctx, RELIC_ERROR, NULL, "interrupted while %s %s", verb,
+	    relic_relation_describe(ctx, relation, described,
+	    sizeof(described)));
+
+	return (-1);
+}
+
+/*
  * Run a plan of `rule` to its end, its EMIT's tuples going to `target`:
  * every batch the executor fills is taken as it fills, and the last one
  * before the plan returns, so a caller reading `derived` reads the whole
- * plan's result.  Returns 0, or -1 when an
- * insertion was refused, which the relation store has reported; what the
- * refused batch held after the refused tuple is discarded, as the failed
- * evaluation discards everything else.  The plan ends early when the caller
- * it delivers rows to has asked for no more.
+ * plan's result.  Returns 0, or -1 when an insertion was refused, which the
+ * relation store has reported, or the caller interrupted the evaluation;
+ * what the refused batch held after the refused tuple is discarded, as the
+ * failed evaluation discards everything else.  The plan ends early when the
+ * caller it delivers rows to has asked for no more.
+ *
+ * The executor pauses at least every quantum of work, with its batch full
+ * or not, and the interrupt is looked for at every return, the last
+ * included: an evaluation of many plans that each finish within a quantum
+ * is stopped between them as a long plan is stopped within one.  A caller
+ * that has asked for no more rows has had its answer, and the plan ends
+ * with success whether or not an interrupt came too, as a gathered answer's
+ * delivery does.
  */
 static int
 execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan,
@@ -1012,7 +1045,12 @@ execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan,
 		status = relic_exec_run(&eval->scratch);
 		if (take_batch(eval, rule, target) != 0)
 			return (-1);
-	} while (status == RELIC_EXEC_BATCH_FULL && !eval->stopped);
+		if (eval->stopped)
+			return (0);
+		if (refuse_interrupted(eval->ctx, "deriving",
+		    target->relation) != 0)
+			return (-1);
+	} while (status == RELIC_EXEC_PAUSED);
 
 	return (0);
 }
@@ -2860,10 +2898,14 @@ relic_materialize(relic_t *ctx)
 
 /*
  * Pass every tuple of a gathered answer relation to the caller as a row of
- * values, in insertion order, until the callback asks to stop.
+ * values, in insertion order, until the callback asks to stop.  Returns 0,
+ * or -1 when the caller interrupted the delivery, which is looked for
+ * before each row, so that a callback writing a large answer somewhere slow
+ * can be stopped.
  *
- * Nothing here can fail, which is what lets a query promise that no row is
- * delivered unless every row can be.
+ * Nothing else here can fail, which is what lets a query promise that no
+ * row is delivered unless every row can be; an interrupt is the caller's
+ * own request, and the rows delivered before it are a prefix of the answer.
  *
  * The context is busy while the callback runs, so a callback that calls
  * back to load or query is refused, and the answer relation cannot be
@@ -2872,7 +2914,7 @@ relic_materialize(relic_t *ctx)
  * call out of the library, and the loop stops at an identifier the relation
  * does not hold rather than read past it, should that ever stop being true.
  */
-static void
+static int
 deliver_gathered_answer(relic_t *ctx, const relic_relation_t *answer,
     const relic_row_sink_t *sink)
 {
@@ -2884,14 +2926,19 @@ deliver_gathered_answer(relic_t *ctx, const relic_relation_t *answer,
 	range = relic_relation_all(answer);
 
 	for (id = range.first; id < range.end; id++) {
+		if (refuse_interrupted(ctx, "delivering", answer) != 0)
+			return (-1);
+
 		tuple = relic_relation_tuple(answer, id);
 		if (tuple == NULL)
-			return;
+			return (0);
 
 		decode_row(ctx, tuple, answer->arity, row);
 		if (sink->callback(sink->callback_ctx, row, answer->arity) != 0)
-			return;
+			return (0);
 	}
+
+	return (0);
 }
 
 /*
@@ -2900,13 +2947,14 @@ deliver_gathered_answer(relic_t *ctx, const relic_relation_t *answer,
  * Such a run inserts nothing and allocates nothing: its plan, and the
  * states the scratch holds for it, were allocated when it was planned,
  * every index it looks up was built then, and its EMIT writes no relation.
- * So it cannot fail, and the only way it ends early is the caller's asking
- * for no more rows.  The count of inserted tuples and the account's totals
- * are asserted to be what they were before it; the totals move when a
- * relation's storage grows or an arena takes a new chunk, so an allocation
- * that fits a chunk already taken passes unseen.  Its status is returned all
- * the same, so that a build without assertions reports a failure that
- * should be impossible rather than hide it.
+ * So it fails only when the caller interrupts it, and otherwise ends early
+ * only when the caller asks for no more rows.  The count of inserted
+ * tuples and the account's totals are asserted to be what they were before
+ * it; the totals move when a relation's storage grows or an arena takes a
+ * new chunk, so an allocation that fits a chunk already taken passes
+ * unseen.  Its status is returned all the same, so that a build without
+ * assertions reports a failure that should be impossible rather than hide
+ * it.
  */
 static int
 stream_query_plan(relic_evaluation_t *eval,
@@ -2926,7 +2974,8 @@ stream_query_plan(relic_evaluation_t *eval,
 	status = execute_plan(eval, &running->plan, running->rule,
 	    &running->target);
 
-	assert(status == 0);
+	assert(status == 0 ||
+	    relic_signal_flag_raised(&eval->ctx->interrupted));
 	assert(eval->ctx->account.store_bytes == account_before.store_bytes);
 	assert(eval->ctx->account.arena_bytes == account_before.arena_bytes);
 	assert(eval->ctx->counters.tuples_inserted == inserted_before);
@@ -2972,7 +3021,8 @@ gather_query_answer(relic_evaluation_t *eval,
  * Its derivations must be its rows already, each derived once, which the
  * planner decides from the plan.  It must compute nothing, since an
  * expression can meet an undefined result at any binding, which fails the
- * query, and a query that fails must deliver no row.  It must fold nothing
+ * query, and a query that fails must deliver no row; only an interrupt the
+ * caller makes may follow one.  It must fold nothing
  * either: a sum can fail as an expression can, a count can derive an
  * integer a streamed row could not hold, and a min or a max is gathered
  * with them, so that whether an aggregate streams does not depend on which
@@ -3030,7 +3080,8 @@ choose_query_target(const relic_t *ctx, relic_running_plan_t *running,
  * and listed them in the order they were derived: the rows are the ones it
  * would have held, in its order.  Every step that can fail -- beginning the
  * evaluation, planning, building the indexes the plan looks up -- comes
- * before the first row, so a query that fails delivers nothing.
+ * before the first row, so a query that fails delivers nothing, unless the
+ * caller interrupts it after its first row.
  *
  * Any other plan fills the answer relation, which drops duplicates as they
  * are inserted and counts against the limits, and the rows the relation
@@ -3079,7 +3130,7 @@ run_query_rule(relic_t *ctx, const relic_rule_t *rule,
 	}
 
 	if (!streams)
-		deliver_gathered_answer(ctx, answer, rows);
+		return (deliver_gathered_answer(ctx, answer, rows));
 
 	return (0);
 }
@@ -3376,8 +3427,10 @@ answer_from_program(relic_t *ctx, const relic_query_t *query,
  * optimization, and must not decide whether a query can be answered.  What
  * the abandoned rewrite derived is discarded with the rest, since it
  * recorded no materialized program.  No row has been delivered when the
- * whole program is turned to, because run_query_rule() delivers none unless
- * it succeeds, and a rewrite over its budget fails before it is run.  The
+ * whole program is turned to, because run_query_rule() delivers none
+ * before everything but an interrupt has stopped being able to fail it, an
+ * interrupt is not a rewrite over its budget, and a rewrite over its budget
+ * fails before it is run.  The
  * group run is finished before the whole program is evaluated, whose
  * discard would empty the relations its plans index, and the group rules
  * run again over the whole fixed point.
@@ -3427,7 +3480,8 @@ answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
  * The rows are distinct, which is what gives a query set semantics: a rule
  * that streams derives no row twice, and any other's duplicates collapse as
  * they are inserted.  Every step that can fail comes before the first row is
- * delivered, so a query either delivers its whole answer or none of it.
+ * delivered, so a query either delivers its whole answer or none of it, but
+ * for one the caller interrupts, which delivers a prefix of it and fails.
  */
 int
 relic_query_run(relic_t *ctx, relic_query_t *query, relic_row_cb callback,

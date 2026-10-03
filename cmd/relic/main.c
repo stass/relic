@@ -161,6 +161,9 @@ static int		 prepare_queries(invocation_t *invocation,
 			    const options_t *options);
 static bool		 refuse_terminal_input(const char *program_name,
 			    const options_t *options);
+static void		 report_diagnostic(void *callback_ctx,
+			    enum relic_diag_level level,
+			    const relic_location_t *where, const char *message);
 static void		 report_two_readers(const char *program_name,
 			    const options_t *options,
 			    const import_operand_t *second);
@@ -287,6 +290,28 @@ static void *
 diag_context(const char *program_name)
 {
 	return ((void *)(uintptr_t)program_name);
+}
+
+/*
+ * The context's diagnostic callback: hand the rows the output has gathered
+ * to its stream, then write the diagnostic as relic_diag_stderr() does.  A
+ * diagnostic reported while a query delivers rows -- an interrupt, a note
+ * -vv asks for -- then follows every row delivered before it on a terminal,
+ * as it would were the output not buffered.  The library calls it between
+ * rows, never inside one, so the rows handed over end where a row does.
+ */
+static void
+report_diagnostic(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	const invocation_t *invocation;
+
+	invocation = callback_ctx;
+	if (invocation->output != NULL)
+		output_write_buffered(invocation->output);
+
+	relic_diag_stderr(diag_context(invocation->program_name), level, where,
+	    message);
 }
 
 void
@@ -537,6 +562,7 @@ evaluate(invocation_t *invocation, const options_t *options)
 	output_init(&output, invocation->program_name, invocation->ctx);
 	if (open_output(invocation->program_name, options, &output) != 0)
 		return (-1);
+	invocation->output = &output;
 
 	status = run_queries(invocation, &output);
 
@@ -544,6 +570,7 @@ evaluate(invocation_t *invocation, const options_t *options)
 		status = repl_run(invocation, &output,
 		    invocation->query_count + 1);
 
+	invocation->output = NULL;
 	if (output_close(&output) != 0)
 		status = -1;
 
@@ -579,6 +606,7 @@ invocation_open(invocation_t *invocation, const char *program_name,
 {
 	invocation->queries = NULL;
 	invocation->query_count = 0;
+	invocation->output = NULL;
 	invocation->program_name = program_name;
 	invocation->verbosity = options->verbosity;
 	invocation->explain_stream = options->explain ? stderr : NULL;
@@ -593,8 +621,7 @@ invocation_open(invocation_t *invocation, const char *program_name,
 		    "cannot create a context: out of memory or no random device");
 		return (-1);
 	}
-	relic_diag_set(invocation->ctx, relic_diag_stderr,
-	    diag_context(program_name));
+	relic_diag_set(invocation->ctx, report_diagnostic, invocation);
 
 	explain_into(invocation->ctx, invocation->explain_stream);
 

@@ -122,6 +122,16 @@ A fix is a source name that is not interned (diagnostics copy it) and a
 per-query scope for the symbols, values and generated predicates only one
 query uses; that is a change to interning and wants a design note first.
 
+**An interrupt cannot stop a write that blocks.** [Low, component:
+`cmd/relic/repl.c`, `cmd/relic/output.c`] A session that prompts catches
+SIGINT with SA_RESTART, and `write_block()` retries EINTR, so a session
+whose standard output is a pipe the reader has stopped draining blocks in
+a write that Ctrl-C restarts rather than ends; the diagnostic's flush of the
+buffered rows can block the same way. Ctrl-C then cannot return to the
+prompt. A fix lets the handler's record end a write it interrupted, which
+means catching SIGINT without SA_RESTART and telling every stdio writer of
+the session apart from the output's own.
+
 **The end of typed input may be taken for a refused line.** [Medium,
 component: `cmd/relic/input.c`] `read_edited()` takes a NULL from
 `el_gets()` with `errno` EILSEQ for a line libedit could not read in the
@@ -131,13 +141,6 @@ return NULL for a Ctrl-D typed after it, which relic would report as a
 refused line, needing a second Ctrl-D to end the session. Read from the
 source, not seen on macOS's libedit, which ends the read itself; confirm on
 Linux, and if so, tell the two apart by what else `el_gets()` returns.
-
-**An interrupt ends the session.** [Low, component: `cmd/relic/repl.c`,
-`include/relic.h`] Ctrl-C at the prompt or during a long query ends the
-process, as it would a batch run, because the library has no way to abandon
-a query part way and a session that caught the signal would have nothing to
-stop. Once evaluation can be cancelled, a session should cancel the query
-running and return to the prompt.
 
 **An aggregate over one atom copies the atom's relation.** [Low,
 component: `lib/rule.c`, `lib/eval.c`, `specs/design-aggregates.md`] Each

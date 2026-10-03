@@ -197,10 +197,11 @@ place_seed(relic_scratch_t *scratch, const relic_rule_t *rule)
 
 /*
  * Run a task's plan over its piece, or over its whole first view when it is
- * not cut, screening each batch as it fills.  A plan that met an evaluation
- * error has ended, and what its batch holds is not screened: the round is
- * abandoned, and its serial run meets the error, or one before it, and
- * reports it.
+ * not cut, screening each batch as the executor pauses.  A plan that met an
+ * evaluation error has ended, and what its batch holds is not screened: the
+ * round is abandoned, and its serial run meets the error, or one before it,
+ * and reports it.  An interrupt is looked for at every return of the
+ * executor and abandons the round alike, to be reported by its serial run.
  */
 static int
 run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
@@ -222,7 +223,9 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
 			return (-1);
 		if (screen_batch(job, worker, item->target) != 0)
 			return (-1);
-	} while (status == RELIC_EXEC_BATCH_FULL);
+		if (relic_signal_flag_raised(job->interrupted))
+			return (-1);
+	} while (status == RELIC_EXEC_PAUSED);
 
 	return (0);
 }

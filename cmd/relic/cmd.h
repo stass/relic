@@ -7,6 +7,7 @@
 #ifndef RELIC_CMD_H
 #define RELIC_CMD_H
 
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -115,11 +116,14 @@ struct output {
  * own, NULL where one could not be prepared.  `program_name` is what the
  * tool's own messages begin with.  `verbosity` is how many -v were given,
  * and `explain_stream` is where -e sends plans, standard error, or NULL
- * without -e.
+ * without -e.  `output` is where query results go while queries run, and
+ * NULL before and after; a diagnostic hands its gathered rows to the stream
+ * before it is written.
  */
 struct invocation {
 	relic_t		 *ctx;
 	relic_query_t	**queries;
+	output_t	 *output;
 	const char	 *program_name;
 	size_t		  query_count;
 	unsigned int	  verbosity;
@@ -166,11 +170,13 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * stream before it returns, and output_discard() runs one and writes nothing
  * whatever the output is.  Each sets *rowsp to the number of rows and
  * returns 0, or returns -1 when the query failed or a write did, either
- * having been reported.
+ * having been reported.  A query interrupted after its first row leaves the
+ * rows written before the interrupt, ending at a row boundary.
  *
  * output_flush() flushes the stream and returns -1 when a write to it failed
  * at any point, the output's own or another writer's through the same
- * stream, reported once.  output_close() does the same, releases the buffer,
+ * stream, reported once.  output_write_buffered() only hands the stream
+ * what the output has gathered, a write failure reported as a row's is.  output_close() does the same, releases the buffer,
  * and closes the stream unless it is standard output.
  * output_is_stdout() is whether the stream is standard output, which other
  * writers to standard output share.
@@ -186,6 +192,7 @@ int	output_attach(output_t *out, FILE *stream, const char *name,
 int	output_query(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_discard(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_flush(output_t *out);
+void	output_write_buffered(output_t *out);
 bool	output_is_stdout(const output_t *out);
 void	output_prompted(output_t *out);
 int	output_close(output_t *out);
@@ -200,6 +207,15 @@ int	output_close(output_t *out);
  */
 int	repl_run(invocation_t *invocation, output_t *output,
 	    size_t first_number);
+
+/*
+ * Set by SIGINT while a session that prompts answers a line, and cleared as
+ * each line begins.  The same signal interrupts the library's evaluation;
+ * this is for what a line does outside one -- preparing its query, writing
+ * sorted rows -- which stops on finding it set.  It is zero in a run with
+ * no such session.
+ */
+extern volatile sig_atomic_t repl_interrupted;
 
 typedef struct import_operand import_operand_t;
 

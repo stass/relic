@@ -51,7 +51,8 @@
  * grow, for memory or for the memory limit, more candidates than the tuple
  * limit could still admit, new tuples or integers a limit would refuse,
  * room the allocator would not give, storage the pool itself could not
- * get, or an evaluation error a task met -- is abandoned: its candidates
+ * get, an evaluation error a task met, or an interrupt a task found -- is
+ * abandoned: its candidates
  * are released, its counts forgotten, and the caller runs the round
  * serially, where whatever refuses it refuses it as it always would.  So a
  * limit or an error is reported only in a round run serially, at the tuple
@@ -317,6 +318,7 @@ job_begin(relic_round_job_t *job, relic_t *ctx, relic_pool_t *pool,
 	job->workers = pool->workers;
 	job->account = &ctx->account;
 	job->admissible = relic_tuples_admissible(ctx);
+	job->interrupted = &ctx->interrupted;
 	relic_atomic_bool_init(&job->abandoned, false);
 }
 

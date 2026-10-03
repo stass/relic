@@ -11,7 +11,8 @@
 #
 # So every function the header declares with RELIC_EXPORT must be either
 # one of the few that never enter a context -- the reads a callback may make,
-# and the functions that take no context -- or called by the test's
+# relic_interrupt(), which only raises a flag, and the functions that take
+# no context -- or called by the test's
 # re-entering code.  The first list is short and changes only with the
 # callback rule; a new entry point fails here until one of the two names it.
 
@@ -23,10 +24,11 @@ header="$RELIC_SRCDIR/include/relic.h"
 test_source="$RELIC_SRCDIR/tests/unit/test_api.c"
 
 # The entry points that never enter a context: the reads a callback may
-# make, and the functions that take no context at all.
+# make, relic_interrupt(), and the functions that take no context at all.
 never_enter="relic_create relic_create_config relic_diag_stderr relic_error
-relic_query_count relic_result_columns relic_result_destroy relic_result_row
-relic_result_rows relic_stats relic_string relic_value_compare relic_version"
+relic_interrupt relic_query_count relic_result_columns relic_result_destroy
+relic_result_row relic_result_rows relic_stats relic_string
+relic_value_compare relic_version"
 
 fail() {
 	echo "$1" >&2

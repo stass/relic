@@ -6,7 +6,6 @@
 
 #include "config.h"
 
-#include <assert.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -936,7 +935,9 @@ merge_sort(const row_order_t *order, const relic_value_t **rows,
 
 /*
  * Sort a collected answer and write it, stopping once a write has failed.
- * Returns 0, or -1 having reported that memory ran out.
+ * Returns 0, or -1 having reported that memory ran out or that the session
+ * was interrupted while the rows were written, which is looked for before
+ * each row, as the library looks before each row it delivers.
  *
  * The sort moves pointers to rows rather than the rows, so a row of any
  * width costs the same to move.
@@ -949,6 +950,7 @@ write_sorted_rows(output_t *out, const relic_result_t *result)
 	const relic_value_t **scratch;
 	size_t rows;
 	size_t i;
+	int status;
 
 	rows = relic_result_rows(result);
 	if (rows == 0)
@@ -970,13 +972,22 @@ write_sorted_rows(output_t *out, const relic_result_t *result)
 	order.width = relic_result_columns(result);
 	merge_sort(&order, sorted, scratch, rows);
 
-	for (i = 0; i < rows && !out->write_failed; i++)
+	status = 0;
+	for (i = 0; i < rows && !out->write_failed; i++) {
+		if (repl_interrupted) {
+			flush_buffer(out);
+			report_error(out->program_name,
+			    "interrupted while writing the rows");
+			status = -1;
+			break;
+		}
 		write_row(out, sorted[i], order.width);
+	}
 
 	free(sorted);
 	free(scratch);
 
-	return (0);
+	return (status);
 }
 
 /*
@@ -1044,6 +1055,13 @@ output_discard(output_t *out, relic_query_t *query, size_t *rowsp)
 	return (0);
 }
 
+void
+output_write_buffered(output_t *out)
+{
+	if (out->stream != NULL)
+		flush_buffer(out);
+}
+
 bool
 output_is_stdout(const output_t *out)
 {
@@ -1066,10 +1084,17 @@ output_prompted(output_t *out)
  * returning.  Returns 0, or -1 with the failure reported: the query's,
  * the library's, or a write's.
  *
- * Nothing is written for a query that fails, because the library delivers no
- * row until everything that can fail has succeeded and what comes before the
- * first row is written only with it.  When sorting, the answer is collected
- * whole and written once it has been sorted.
+ * Nothing is written for a query that fails before its first row, and the
+ * library delivers no row until everything that can fail has succeeded,
+ * what comes before the first row being written only with it.  The one
+ * failure that can follow a row is an interrupt.  The rows delivered before
+ * it are handed to the stream, so that the output ends where a row does,
+ * and nothing more: the format's closing bracket would make a truncated
+ * answer look complete, and the count of -v would claim one.  The query
+ * still counts as written, so that the next query's results are separated
+ * from its rows.  When sorting, the answer is collected whole and written
+ * once it has been sorted, and an interrupt while it is written stops it
+ * between two rows in the same way.
  */
 int
 output_query(output_t *out, relic_query_t *query, size_t *rowsp)
@@ -1087,18 +1112,10 @@ output_query(output_t *out, relic_query_t *query, size_t *rowsp)
 	else
 		status = relic_query_run(out->ctx, query, receive_row, out);
 
-	/*
-	 * The library returns nonzero only for a query that delivered no row,
-	 * a write that fails stops the rows while the run still returns 0, and
-	 * write_collected() fails only before it writes a row.  So nothing of
-	 * this query is buffered, and the buffer is as empty as the output was
-	 * attached or the last query's flush left it.  It is emptied all the
-	 * same, so that a failed query writes nothing even if that stops being
-	 * true.
-	 */
 	if (status != 0) {
-		assert(out->filled == 0);
-		out->filled = 0;
+		if (out->begun)
+			out->queries_written++;
+		flush_buffer(out);
 		return (-1);
 	}
 

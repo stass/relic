@@ -6,10 +6,13 @@
 
 #include "config.h"
 
+#include <errno.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include <relic.h>
 
@@ -37,6 +40,14 @@
  *
  * A command's reply goes to standard output and never to the -o file, which
  * holds query results and nothing else.
+ *
+ * A session that prompts has someone at the terminal to return to, so while
+ * it answers a line, Ctrl-C interrupts the evaluation rather than ending
+ * the process: the line fails with the library's diagnostic and the session
+ * reads the next.  While it waits for a line, SIGINT keeps the disposition
+ * the tool started with.  A line editor waiting for a key does not give up
+ * its read for a signal it survives, so catching SIGINT there could not
+ * discard the line being typed.
  */
 
 /*
@@ -53,14 +64,26 @@ typedef struct repl_command repl_command_t;
  * context it answers from.  `next_number` is the number the next query is
  * given, continuing the numbering of the queries that ran before the
  * session.  `done` is set once no further line is to be read: by .quit, at
- * the end of input, and when a read fails.
+ * the end of input, and when a read fails.  `interruptible` is whether
+ * SIGINT interrupts the answer to a line, which it does when the session
+ * prompts.
  */
 struct repl {
 	invocation_t	*invocation;
 	output_t	*output;
 	size_t		 next_number;
 	bool		 done;
+	bool		 interruptible;
 };
+
+/*
+ * The context SIGINT interrupts.  A signal handler reaches only what is at
+ * file scope; this is set before the handler is installed and not changed
+ * while it is.
+ */
+static relic_t	*interrupted_ctx;
+
+volatile sig_atomic_t repl_interrupted;
 
 /*
  * One command: its name without the dot, how .help shows it and what it
@@ -76,8 +99,11 @@ struct repl_command {
 	bool		 takes_query;
 };
 
+static int	 answer_interruptibly(repl_t *repl, char *line,
+		    size_t length, size_t line_number);
 static int	 answer_line(repl_t *repl, char *line, size_t length,
 		    size_t line_number);
+static void	 interrupt_answer(int signal_number);
 static int	 answer_next_line(repl_t *repl, line_reader_t *reader);
 static int	 answer_query(repl_t *repl, const char *text);
 static int	 command_help(repl_t *repl, const char *argument);
@@ -104,18 +130,30 @@ static const repl_command_t commands[] = {
  * Prepare a query from text, naming it by the next number whether or not it
  * can be prepared, so that the diagnostics about two lines never share a
  * name.
+ *
+ * Preparing does not heed an interrupt, and the run that follows forgets
+ * one made before it began, so an interrupt that came while the query was
+ * prepared fails the line here instead.
  */
 static relic_query_t *
 prepare_numbered(repl_t *repl, const char *text, size_t *numberp)
 {
 	char name[CMD_QUERY_NAME_MAX];
+	relic_query_t *query;
 
 	*numberp = repl->next_number;
 	repl->next_number++;
 
 	snprintf(name, sizeof(name), "<query %zu>", *numberp);
 
-	return (relic_query_prepare(repl->invocation->ctx, name, text));
+	query = relic_query_prepare(repl->invocation->ctx, name, text);
+	if (query != NULL && repl_interrupted) {
+		report_error(repl->invocation->program_name, "interrupted");
+		relic_query_destroy(query);
+		return (NULL);
+	}
+
+	return (query);
 }
 
 /*
@@ -304,6 +342,67 @@ answer_line(repl_t *repl, char *line, size_t length, size_t line_number)
 }
 
 /*
+ * The SIGINT handler while a line is answered: ask the evaluation to stop,
+ * record the interrupt for what the line does outside the library, and end
+ * the line the terminal echoed ^C on, so that the diagnostic the evaluation
+ * reports begins a line of its own.  Each is safe in a handler:
+ * relic_interrupt() only raises a flag, the record is a volatile
+ * sig_atomic_t, and write(2) is async-signal-safe.  The session prompts only when standard error is a
+ * terminal, so the newline goes where the echo went.
+ */
+static void
+interrupt_answer(int signal_number RELIC_CMD_UNUSED)
+{
+	int saved_errno;
+
+	saved_errno = errno;
+	relic_interrupt(interrupted_ctx);
+	repl_interrupted = 1;
+	(void)write(STDERR_FILENO, "\n", 1);
+	errno = saved_errno;
+}
+
+/*
+ * Answer a line with SIGINT interrupting the evaluation, then give SIGINT
+ * back the disposition it had.  The handler restarts the system calls it
+ * interrupts, so that a write of the answer or of a diagnostic is not cut
+ * short by it.  A SIGINT the session was started ignoring stays ignored, as
+ * whoever started it asked; and should the handler not install, the line is
+ * answered all the same, with SIGINT doing what it did before.
+ *
+ * An interrupt made after the evaluation has ended and before SIGINT is
+ * given back finds no operation to stop, and the next operation forgets it.
+ */
+static int
+answer_interruptibly(repl_t *repl, char *line, size_t length,
+    size_t line_number)
+{
+	struct sigaction interrupting;
+	struct sigaction previous;
+	int status;
+
+	if (sigaction(SIGINT, NULL, &previous) != 0 ||
+	    previous.sa_handler == SIG_IGN)
+		return (answer_line(repl, line, length, line_number));
+
+	bzero(&interrupting, sizeof(interrupting));
+	interrupting.sa_handler = interrupt_answer;
+	interrupting.sa_flags = SA_RESTART;
+	sigemptyset(&interrupting.sa_mask);
+
+	interrupted_ctx = repl->invocation->ctx;
+	repl_interrupted = 0;
+	if (sigaction(SIGINT, &interrupting, NULL) != 0)
+		return (answer_line(repl, line, length, line_number));
+
+	status = answer_line(repl, line, length, line_number);
+
+	(void)sigaction(SIGINT, &previous, NULL);
+
+	return (status);
+}
+
+/*
  * Read the next line and answer it.  A line the reader refused fails as a
  * line answered would, and the session goes on.  The end of input ends the
  * session, and so does a read that failed.
@@ -316,6 +415,9 @@ answer_next_line(repl_t *repl, line_reader_t *reader)
 
 	switch (line_reader_next(reader, &line, &length)) {
 	case LINE_READ:
+		if (repl->interruptible)
+			return (answer_interruptibly(repl, line, length,
+			    line_reader_number(reader)));
 		return (answer_line(repl, line, length,
 		    line_reader_number(reader)));
 	case LINE_REFUSED:
@@ -372,13 +474,14 @@ repl_run(invocation_t *invocation, output_t *output, size_t first_number)
 	reader = line_reader_open(invocation->program_name);
 	if (reader == NULL)
 		return (-1);
-	if (line_reader_prompts(reader))
-		output_prompted(output);
-
 	bzero(&repl, sizeof(repl));
 	repl.invocation = invocation;
 	repl.output = output;
 	repl.next_number = first_number;
+	repl.interruptible = line_reader_prompts(reader);
+
+	if (line_reader_prompts(reader))
+		output_prompted(output);
 
 	status = 0;
 	for (;;) {

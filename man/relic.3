@@ -25,6 +25,7 @@
 .Nm relic_value_compare ,
 .Nm relic_check ,
 .Nm relic_materialize ,
+.Nm relic_interrupt ,
 .Nm relic_query_prepare ,
 .Nm relic_query_count ,
 .Nm relic_query_loaded ,
@@ -110,6 +111,8 @@ relic library
 .Fn relic_check "relic_t *ctx"
 .Ft int
 .Fn relic_materialize "relic_t *ctx"
+.Ft void
+.Fn relic_interrupt "relic_t *ctx"
 .Ft relic_query_t *
 .Fn relic_query_prepare "relic_t *ctx" "const char *source_name" "const char *text"
 .Ft size_t
@@ -581,6 +584,32 @@ string longer than a string value can be, or when
 .Ql match
 is given a pattern that is not a regular expression; a sum whose total is
 outside the 64-bit integers fails it in the same way.
+.Pp
+.Fn relic_interrupt
+asks the operation in progress on
+.Fa ctx
+to stop.
+An evaluation, by
+.Fn relic_materialize ,
+.Fn relic_query_run
+or
+.Fn relic_query_collect ,
+looks for the request every few thousand steps of a join and before each
+row of an answer computed whole, and fails on finding it, reporting
+.Qq interrupted
+and what it was deriving or delivering; the next evaluation starts again
+from the facts.
+Every other operation runs to its end.
+.Fn relic_interrupt
+only records the request: it may be called from a signal handler, from
+another thread, or from a callback of the operation, while the caller keeps
+the context alive.
+A library built by a compiler without C11 atomics may be interrupted from a
+signal handler or a callback but not from another thread.
+An operation forgets any request made before it began, so an interrupt
+with no operation in progress stops nothing.
+It accepts
+.Dv NULL .
 .Ss Queries
 .Fn relic_query_run
 answers
@@ -606,7 +635,10 @@ The callback returns zero for the next row and nonzero to stop, and
 .Fn relic_query_run
 then returns 0.
 No row is delivered until everything that can fail has succeeded, so a query
-that fails delivers no rows.
+that fails delivers no rows, but for one interrupted by
+.Fn relic_interrupt
+after its first row: it fails all the same, and the rows it delivered are a
+prefix of its answer.
 In a context where
 .Fa max_tuples
 and
@@ -831,9 +863,10 @@ Such code may call
 .Fn relic_string ,
 .Fn relic_error ,
 .Fn relic_value_compare ,
-.Fn relic_stats
-and
+.Fn relic_stats ,
 .Fn relic_query_count
+and
+.Fn relic_interrupt
 on its context, and may destroy any query but one being answered.
 Any other call on the same context is refused: it returns \-1 or
 .Dv NULL ,

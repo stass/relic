@@ -552,7 +552,9 @@ relation, and step 3 cannot fail. A plan run into the caller's callback
 allocates nothing and meets no limit once its first row is derived. A query
 that exceeds a limit therefore produces no rows and an error, never a
 truncated answer indistinguishable from a complete one, which is what
-architecture section 63 requires.
+architecture section 63 requires. The one failure that may follow the first
+row is an interrupt the caller made, `specs/design-interrupt.md` section 3:
+the run still fails, so the caller knows the rows it has are a prefix.
 
 The answer relation is emptied when the run ends, whether the rows were
 delivered, the callback stopped them or the answer failed part way, so
@@ -584,6 +586,9 @@ Evaluation fails for these reasons, each reported where it happens:
 
   Skipping the binding instead would make a negation over it true, which
   no strategy could agree on.
+* the caller interrupted the evaluation with `relic_interrupt()`, reported
+  by the serial evaluator after the executor returns and before each row of
+  a gathered answer, `specs/design-interrupt.md` section 4.
 
 Each stops the fixed point at once and returns -1. Planning a component can
 fail for the first two reasons -- memory, or the memory limit reached while an
