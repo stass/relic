@@ -14,12 +14,12 @@
  * caller code that calls back into its context is refused and changes
  * nothing, a refusal does not hide why an operation failed, an answer does
  * not outlive its delivery, every diagnostic reaches the callback and none
- * reaches standard error, a value is built only from bytes its type can
- * hold, a fact added through the interface is the fact its text would load,
- * a collected result is the stream, kept, a mixed-type comparison is noted
- * once per rule and only when asked for, a missing argument is reported
- * rather than followed, and a prepared query runs over the program as it
- * stands when it runs.
+ * reaches standard error, a failure says what kind of failure it is, a
+ * value is built only from bytes its type can hold, a fact added through
+ * the interface is the fact its text would load, a collected result is the
+ * stream, kept, a mixed-type comparison is noted once per rule and only
+ * when asked for, a missing argument is reported rather than followed, and
+ * a prepared query runs over the program as it stands when it runs.
  */
 
 #include "config.h"
@@ -46,6 +46,7 @@
 #define	SCENARIO_COLLECT	"a collected result is the stream, kept"
 #define	SCENARIO_FACT		"an added fact is the fact its text loads"
 #define	SCENARIO_INVALIDATE	"an added fact invalidates what was derived"
+#define	SCENARIO_KIND		"a failure says what kind it is"
 #define	SCENARIO_LATER_LOAD \
 	"a prepared query runs over the program as it stands"
 #define	SCENARIO_MIXED		"a mixed comparison is noted once per rule"
@@ -69,6 +70,14 @@
 
 /* The text relic_error() holds after a refused re-entry. */
 #define	REENTRY_ERROR	"the context was called from one of its own callbacks"
+
+/* More arguments than a predicate may have. */
+#define	ARITY_PAST_MAX		33
+
+/* The text of a check that fails with nothing new to report. */
+#define	UNUSABLE_ERROR \
+	"the program cannot be used: its errors were reported when it was " \
+	"checked"
 
 /*
  * The program every re-entry scenario starts from: b(X)? answers x and y
@@ -194,6 +203,10 @@ static void	 an_added_fact_invalidates_what_was_derived(void);
 static void	 an_added_fact_is_the_fact_its_text_loads(void);
 static void	 an_answer_does_not_outlive_its_delivery(void);
 static void	 every_diagnostic_reaches_the_callback(void);
+static void	 a_failure_says_what_kind_it_is(void);
+static void	 check_failure_kind(relic_t *ctx, int status,
+		    enum relic_error_class expected, const char *what);
+static const char *class_name(enum relic_error_class error_class);
 static void	 a_context_takes_at_most_the_maximum_threads(void);
 static void	 a_mixed_comparison_is_noted_once_per_rule(void);
 static void	 a_mixed_note_follows_the_rule_not_its_place(void);
@@ -292,6 +305,7 @@ refused(reentry_t *reentry, int status, const char *call)
 	error = relic_error(reentry->ctx);
 	ok = status == -1 && error != NULL &&
 	    strcmp(error, REENTRY_ERROR) == 0 &&
+	    relic_error_class(reentry->ctx) == RELIC_ERROR_ARGUMENT &&
 	    reentry->log.errors == reentry->errors_seen;
 	checkf(ok, SCENARIO_REENTRY,
 	    "%s from %s should be refused with \"%s\", not return %d with "
@@ -797,6 +811,153 @@ every_diagnostic_reaches_the_callback(void)
 	checkf(written == 0, SCENARIO_CLASSES,
 	    "the library should write nothing to standard error, not %ld "
 	    "bytes", written);
+}
+
+/* The enumerator's name of an error class, for a message. */
+static const char *
+class_name(enum relic_error_class error_class)
+{
+	switch (error_class) {
+	case RELIC_ERROR_NONE:
+		return ("NONE");
+	case RELIC_ERROR_REJECTED:
+		return ("REJECTED");
+	case RELIC_ERROR_EVALUATION:
+		return ("EVALUATION");
+	case RELIC_ERROR_LIMIT:
+		return ("LIMIT");
+	case RELIC_ERROR_IO:
+		return ("IO");
+	case RELIC_ERROR_MEMORY:
+		return ("MEMORY");
+	case RELIC_ERROR_INTERRUPTED:
+		return ("INTERRUPTED");
+	case RELIC_ERROR_ARGUMENT:
+		return ("ARGUMENT");
+	case RELIC_ERROR_INTERNAL:
+		return ("INTERNAL");
+	}
+	return ("an unknown class");
+}
+
+/*
+ * Check that a call failed with an error of class `expected`.
+ */
+static void
+check_failure_kind(relic_t *ctx, int status, enum relic_error_class expected,
+    const char *what)
+{
+	enum relic_error_class actual;
+	const char *error;
+
+	error = relic_error(ctx);
+	actual = relic_error_class(ctx);
+	checkf(status == -1 && error != NULL && actual == expected,
+	    SCENARIO_KIND, "%s should fail as %s, not return %d as %s with "
+	    "\"%s\"", what, class_name(expected), status, class_name(actual),
+	    error != NULL ? error : "(none)");
+}
+
+/*
+ * A failure says what kind of failure it is, which a caller reads without
+ * matching its text: a program that does not check, a symbol that is not
+ * one, a table field that is not an integer, and a predicate name or
+ * arity no predicate can have were rejected, though the last two arrived
+ * as parameters, while a name that is NULL is a malformed call; a division
+ * by zero is the evaluation's, a limit refused the facts a load would add,
+ * and a file could not be opened.  A program checked again still fails as
+ * rejected, though its mistakes were reported by the first check and
+ * something else failed since.  The class lasts as the text does, so a
+ * later success leaves both as they were.
+ */
+static void
+a_failure_says_what_kind_it_is(void)
+{
+	static const enum relic_column integer_column[] = {
+		RELIC_COLUMN_INTEGER
+	};
+	static const relic_import_t integers = {
+		.predicate = "n",
+		.columns = integer_column,
+		.column_count = 1,
+		.format = RELIC_FORMAT_CSV,
+		.flags = 0
+	};
+	relic_value_t arguments[ARITY_PAST_MAX];
+	relic_config_t config;
+	relic_value_t value;
+	diag_log_t log;
+	relic_t *ctx;
+	FILE *table;
+
+	ctx = context_with("p(X) :- q(Y).\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+	check(relic_error_class(ctx) == RELIC_ERROR_NONE, SCENARIO_KIND,
+	    "a context that has not failed has no class of error");
+	check_failure_kind(ctx, relic_check(ctx), RELIC_ERROR_REJECTED,
+	    "checking an unsafe rule");
+	check_failure_kind(ctx, relic_value_symbol(ctx, "Upper", 5, &value),
+	    RELIC_ERROR_REJECTED, "a symbol of bytes no symbol is spelled "
+	    "with");
+	check_failure_kind(ctx,
+	    relic_load_path(ctx, "/nonexistent/relic/none.dl"),
+	    RELIC_ERROR_IO, "loading a file that does not exist");
+	check_failure_kind(ctx, relic_check(ctx), RELIC_ERROR_REJECTED,
+	    "checking the unsafe rule again after an unrelated failure");
+	check(relic_error(ctx) != NULL &&
+	    strcmp(relic_error(ctx), UNUSABLE_ERROR) == 0, SCENARIO_KIND,
+	    "and say that the program cannot be used");
+	relic_destroy(ctx);
+
+	ctx = context_with("", NULL, &log);
+	if (ctx == NULL)
+		return;
+	table = tmpfile();
+	if (table != NULL && fputs("12\nseven\n", table) >= 0 &&
+	    fseek(table, 0, SEEK_SET) == 0)
+		check_failure_kind(ctx, relic_import_file(ctx, "n.csv", table,
+		    &integers), RELIC_ERROR_REJECTED,
+		    "importing a field that is not an integer");
+	else
+		check(false, SCENARIO_KIND, "a table is written");
+	if (table != NULL)
+		fclose(table);
+
+	bzero(arguments, sizeof(arguments));
+	for (size_t i = 0; i < ARITY_PAST_MAX; i++)
+		arguments[i].type = RELIC_INTEGER;
+	check_failure_kind(ctx, relic_fact_add(ctx, "Edge", 0, NULL),
+	    RELIC_ERROR_REJECTED, "adding a fact of a name no predicate has");
+	check_failure_kind(ctx, relic_fact_add(ctx, "edge",
+	    ARITY_PAST_MAX, arguments), RELIC_ERROR_REJECTED,
+	    "adding a fact of more arguments than a predicate may have");
+	check_failure_kind(ctx, relic_fact_add(ctx, NULL, 0, NULL),
+	    RELIC_ERROR_ARGUMENT, "adding a fact of no name");
+	relic_destroy(ctx);
+
+	ctx = context_with("n(0).\nr(Y) :- n(X), Y = 12 / X.\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+	check_failure_kind(ctx, relic_materialize(ctx),
+	    RELIC_ERROR_EVALUATION, "dividing by zero");
+	relic_destroy(ctx);
+
+	bzero(&config, sizeof(config));
+	config.max_tuples = 1;
+	ctx = context_with("e(a).\n", &config, &log);
+	if (ctx == NULL)
+		return;
+	check_failure_kind(ctx, relic_load_string(ctx, "more.dl", "e(b).\n"),
+	    RELIC_ERROR_LIMIT, "loading a fact past the tuple limit");
+
+	check_failure_kind(ctx,
+	    relic_load_path(ctx, "/nonexistent/relic/none.dl"),
+	    RELIC_ERROR_IO, "loading a file that does not exist");
+	check(relic_load_string(ctx, "nothing.dl", "% nothing\n") == 0 &&
+	    relic_error_class(ctx) == RELIC_ERROR_IO, SCENARIO_KIND,
+	    "a later success should leave the class of the last error");
+	relic_destroy(ctx);
 }
 
 /*
@@ -1413,7 +1574,8 @@ check_argument_refused(relic_t *ctx, const first_error_t *first, int status,
 
 	error = relic_error(ctx);
 	checkf(status == -1 && first->errors == 1 && error != NULL &&
-	    strcmp(error, expected_error) == 0, SCENARIO_ARGUMENTS,
+	    strcmp(error, expected_error) == 0 &&
+	    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT, SCENARIO_ARGUMENTS,
 	    "%s should fail with \"%s\", not return %d with \"%s\" and %zu "
 	    "errors", call, expected_error, status,
 	    error != NULL ? error : "(none)", first->errors);
@@ -1582,6 +1744,7 @@ main(void)
 	a_refusal_does_not_hide_why_an_operation_failed();
 	an_answer_does_not_outlive_its_delivery();
 	every_diagnostic_reaches_the_callback();
+	a_failure_says_what_kind_it_is();
 	a_mixed_comparison_is_noted_once_per_rule();
 
 	/*

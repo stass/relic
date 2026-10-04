@@ -156,7 +156,7 @@ note_edge(relic_analysis_t *analysis, const relic_dep_edge_t *edge)
 	relic_pred_describe(analysis->ctx, relic_depgraph_pred(edge->target),
 	    target, sizeof(target));
 
-	relic_diagf(analysis->ctx, RELIC_NOTE,
+	relic_diag_note(analysis->ctx,
 	    &rule->body[edge->literal_index].where, "%s depends %son %s",
 	    source, edge->kind == RELIC_DEP_NEGATIVE ? "negatively " : "",
 	    target);
@@ -183,7 +183,7 @@ note_aggregate(relic_analysis_t *analysis, const relic_dep_edge_t *aggregate,
 	relic_pred_describe(analysis->ctx, relic_depgraph_pred(body->target),
 	    target, sizeof(target));
 
-	relic_diagf(analysis->ctx, RELIC_NOTE,
+	relic_diag_note(analysis->ctx,
 	    &group_rule->body[body->literal_index].where,
 	    "%s depends %son %s through an aggregate", source,
 	    body->kind == RELIC_DEP_NEGATIVE ? "negatively " : "", target);
@@ -364,7 +364,7 @@ report_cycle(relic_analysis_t *analysis, const relic_dep_edge_t *closing)
 	rule = &analysis->rules->entries[closing->rule_index];
 	length = shortest_path(analysis, closing->target, closing->source);
 
-	relic_diagf(analysis->ctx, RELIC_ERROR, &rule->where,
+	relic_diag_error(analysis->ctx, RELIC_ERROR_REJECTED, &rule->where,
 	    "program is not stratified");
 	note_path(analysis, closing, length);
 }

@@ -49,10 +49,25 @@ fuzz_load(relic_t *ctx, const uint8_t *data, size_t size)
 	return (status);
 }
 
+/*
+ * The class is read from inside the callback, which relic_error_class()
+ * allows, and is already the class of the error being delivered.
+ */
 void
-fuzz_discard_diagnostic(void *callback_ctx RELIC_TEST_UNUSED,
-    enum relic_diag_level level RELIC_TEST_UNUSED,
+fuzz_refuse_internal(relic_t *ctx, enum relic_diag_level level)
+{
+	if (level != RELIC_ERROR ||
+	    relic_error_class(ctx) != RELIC_ERROR_INTERNAL)
+		return;
+
+	fprintf(stderr, "%s\n", relic_error(ctx));
+	abort();
+}
+
+void
+fuzz_watch_diagnostic(void *callback_ctx, enum relic_diag_level level,
     const relic_location_t *where RELIC_TEST_UNUSED,
     const char *message RELIC_TEST_UNUSED)
 {
+	fuzz_refuse_internal(callback_ctx, level);
 }

@@ -818,9 +818,9 @@ compile_postfix(relic_planner_t *planner, const relic_expr_t *expr,
 	need = append_steps(planner, expr, postfix);
 	assert(postfix->step_count == expr->nodes);
 	if (need > RELIC_POSTFIX_DEPTH_MAX) {
-		relic_diagf(planner->ctx, RELIC_ERROR, where,
-		    "internal error: an expression needs more stack than any "
-		    "the parser admits");
+		relic_diag_internal(planner->ctx, where,
+		    "an expression needs more stack than any the parser "
+		    "admits");
 		return (-1);
 	}
 	postfix->depth = (uint8_t)need;
@@ -1104,8 +1104,8 @@ place_test(relic_planner_t *planner, const relic_literal_t *literal)
 		break;
 	}
 
-	relic_diagf(planner->ctx, RELIC_ERROR, &literal->where,
-	    "internal error: a positive literal was placed as a test");
+	relic_diag_internal(planner->ctx, &literal->where,
+	    "a positive literal was placed as a test");
 
 	return (-1);
 }
@@ -1287,8 +1287,8 @@ score_positive(relic_t *ctx, const bool *incomplete, const relic_atom_t *atom,
 
 	pred = relic_pred_of(ctx, atom->pred);
 	if (pred == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, &atom->where,
-		    "internal error: a literal names no predicate");
+		relic_diag_internal(ctx, &atom->where,
+		    "a literal names no predicate");
 		return (-1);
 	}
 
@@ -1655,9 +1655,8 @@ confirm_plan_complete(const relic_planner_t *planner)
 	if (planner->op_count == rule->body_length && unbound == 0)
 		return (0);
 
-	relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
-	    "internal error: the plan leaves a literal out or reads a "
-	    "variable nothing binds");
+	relic_diag_internal(planner->ctx, &rule->where,
+	    "the plan leaves a literal out or reads a variable nothing binds");
 
 	return (-1);
 }
@@ -1673,8 +1672,8 @@ confirm_order_complete(const relic_planner_t *planner)
 	if (planner->order_count == planner->rule->body_length)
 		return (0);
 
-	relic_diagf(planner->ctx, RELIC_ERROR, &planner->rule->where,
-	    "internal error: the planner could not place every literal");
+	relic_diag_internal(planner->ctx, &planner->rule->where,
+	    "the planner could not place every literal");
 
 	return (-1);
 }
@@ -1702,17 +1701,17 @@ confirm_delta_literal(const relic_planner_t *planner)
 
 	if (index >= rule->body_length ||
 	    rule->body[index].kind != RELIC_LITERAL_POSITIVE) {
-		relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
-		    "internal error: a delta variant was asked for a literal "
-		    "that is not a positive literal of the rule");
+		relic_diag_internal(planner->ctx, &rule->where,
+		    "a delta variant was asked for a literal that is not a "
+		    "positive literal of the rule");
 		return (-1);
 	}
 
 	if (!is_incomplete(planner->incomplete,
 	    rule->body[index].u.atom.pred)) {
-		relic_diagf(planner->ctx, RELIC_ERROR, &rule->where,
-		    "internal error: a delta variant was asked for a literal "
-		    "over a relation not being derived");
+		relic_diag_internal(planner->ctx, &rule->where,
+		    "a delta variant was asked for a literal over a relation "
+		    "not being derived");
 		return (-1);
 	}
 
@@ -1735,9 +1734,9 @@ confirm_target_fits(const relic_planner_t *planner)
 	if (planner->target->arity == planner->rule->head_arity)
 		return (0);
 
-	relic_diagf(planner->ctx, RELIC_ERROR, &planner->rule->where,
-	    "internal error: a rule of %u head arguments was planned into "
-	    "relation %s", (unsigned int)planner->rule->head_arity,
+	relic_diag_internal(planner->ctx, &planner->rule->where,
+	    "a rule of %u head arguments was planned into relation %s",
+	    (unsigned int)planner->rule->head_arity,
 	    relic_relation_identify(planner->ctx, planner->target, described,
 	    sizeof(described)));
 
@@ -2019,7 +2018,7 @@ relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
 	bzero(&placed, sizeof(placed));
 	bzero(&pinned, sizeof(pinned));
 	if (delta_literal == RELIC_PLAN_NO_DELTA) {
-		relic_diagf(ctx, RELIC_ERROR, &rule->where, "internal error: "
+		relic_diag_internal(ctx, &rule->where,
 		    "a delta variant was asked for with no delta literal");
 		return (-1);
 	}

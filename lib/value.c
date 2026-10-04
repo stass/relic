@@ -208,7 +208,7 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
 	case RELIC_STRING:
 		bytes = relic_symbol_bytes(ctx, value->v.id, &length);
 		if (bytes == NULL) {
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 			    "value refers to symbol %lu, which this context "
 			    "has not interned",
 			    (unsigned long)value->v.id);
@@ -216,7 +216,8 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
 		}
 		if (value->type == RELIC_SYMBOL &&
 		    !relic_lex_is_symbol(bytes, length)) {
-			relic_diagf(ctx, RELIC_ERROR, NULL, RELIC_NOT_A_SYMBOL);
+			relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+			    RELIC_NOT_A_SYMBOL);
 			return (false);
 		}
 		return (true);
@@ -231,8 +232,8 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
 	 * on the compilers anyone will use, which is worth more than the
 	 * three lines it costs.
 	 */
-	relic_diagf(ctx, RELIC_ERROR, NULL, "value has unknown type %d",
-	    (int)value->type);
+	relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+	    "value has unknown type %d", (int)value->type);
 
 	return (false);
 }
@@ -537,7 +538,7 @@ intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
 	 */
 	if (reserve_integers(ctx, 1) != 0) {
 		if (table->integer_count >= RELIC_INTEGER_MAX)
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct integers");
 		else
 			relic_diag_no_memory(ctx);
@@ -580,7 +581,7 @@ relic_value_intern_bytes(relic_t *ctx, enum relic_type type, const void *bytes,
 	uint32_t symbol;
 
 	if (type != RELIC_SYMBOL && type != RELIC_STRING) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_internal(ctx, NULL,
 		    "bytes cannot be interned as type %d", (int)type);
 		return (-1);
 	}
@@ -1050,10 +1051,10 @@ relic_pending_commit(relic_t *ctx, relic_pending_map_t *map)
 	if (relic_pending_reserve(ctx, map) != 0) {
 		if (map->fresh_count > RELIC_INTEGER_MAX -
 		    ctx->values.integer_count)
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct integers");
 		else if (!relic_symbol_has_room(ctx, map->string_count))
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct symbols and strings");
 		else
 			relic_diag_no_memory(ctx);
@@ -1314,13 +1315,14 @@ intern_bytes(relic_t *ctx, enum relic_type type, const char *bytes,
 	uint32_t symbol;
 
 	if ((bytes == NULL && length > 0) || value == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "a value needs its bytes and somewhere to be stored");
 		return (-1);
 	}
 
 	if (type == RELIC_SYMBOL && !relic_lex_is_symbol(bytes, length)) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, RELIC_NOT_A_SYMBOL);
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
+		    RELIC_NOT_A_SYMBOL);
 		return (-1);
 	}
 

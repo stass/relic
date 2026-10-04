@@ -78,20 +78,21 @@ RELIC_EXPORT const char *relic_version(void);
  *
  * A function that takes a context and can fail returns -1 or NULL when it
  * does, and 0 or a pointer otherwise, and a failure is always explained by a
- * RELIC_ERROR diagnostic, the last of which relic_error() returns.  The
- * functions that only read -- relic_string(), relic_value_compare(),
- * relic_query_count(), relic_stats() -- cannot fail and report nothing;
- * relic_string() returns NULL for an identifier it does not know.
+ * RELIC_ERROR diagnostic, the last of which relic_error() returns, and
+ * relic_error_class() what kind of failure it was.  The functions that only
+ * read -- relic_string(), relic_value_compare(), relic_query_count(),
+ * relic_stats() -- cannot fail and report nothing; relic_string() returns
+ * NULL for an identifier it does not know.
  *
  * Caller code runs while the context is part way through an operation in
  * four ways: the diagnostic, explain and row callbacks, and the read
  * function of a stream given to relic_load_file() or relic_import_file().
- * It may read through the context with the functions above and
- * relic_error(), and may call relic_interrupt(), which a signal handler or
- * another thread may call too.  Any other call on the same context is
- * refused: a call
- * that returns a status fails with -1 or NULL, one that returns nothing
- * does nothing, and relic_error() describes the refusal until the next
+ * It may read through the context with the functions above,
+ * relic_error() and relic_error_class(), and may call relic_interrupt(),
+ * which a signal handler or another thread may call too.  Any other call
+ * on the same context is refused: a call that returns a status fails with
+ * -1 or NULL, one that returns nothing does nothing, and relic_error() and
+ * relic_error_class() describe the refusal until the next
  * error or until the operation the caller code runs inside returns; the
  * diagnostic callback is not called for it.  A refused relic_destroy()
  * releases nothing, so a callback that tries to destroy its context leaks
@@ -592,9 +593,11 @@ RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
  * and never defines.
  *
  * A check compiles only the statements loaded since the previous one, so
- * calling it twice with nothing loaded in between reports nothing the second
- * time and returns the same answer. It stays -1 once a program has contained
- * a rejected rule: loading more cannot repair one already loaded.
+ * calling it twice with nothing loaded in between repeats none of the first
+ * call's messages and returns the same answer. It stays -1 once a program
+ * has contained a rejected rule: loading more cannot repair one already
+ * loaded. A failing check whose mistakes were reported before reports only
+ * that the program cannot be used.
  *
  * The queries a program contains are part of it and are checked the same
  * way: every output column of a query, which is to say every variable it
@@ -918,6 +921,66 @@ RELIC_EXPORT void relic_explain_set(relic_t *ctx, relic_explain_cb callback,
  * way.
  */
 RELIC_EXPORT const char *relic_error(relic_t *ctx);
+
+/*
+ * What kind of failure an error is, which says what the caller can do about
+ * it.  The text says what happened and is for a person; the class is for a
+ * program, and no caller need match the text to learn it.
+ *
+ *	NONE		no error has been recorded
+ *	REJECTED	something the language spells was refused, in text, a
+ *			table or a call: a syntax, safety or stratification
+ *			error, a query that does not parse or check, a
+ *			statement past a structural limit such as 32
+ *			arguments, a constant pattern that is not a regular
+ *			expression, a table field that is not a value of its
+ *			column's type, bytes that are not a symbol, a
+ *			predicate name or arity no predicate can have
+ *	EVALUATION	evaluation met a result the language leaves undefined:
+ *			integer overflow, division by zero, a string longer than
+ *			a value can hold, a pattern computed during evaluation
+ *			that is not a regular expression
+ *	LIMIT		a configured limit refused the operation, or a fixed
+ *			capacity was reached, such as the number of distinct
+ *			symbols a context can hold
+ *	IO		a file could not be opened, read or closed
+ *	MEMORY		the allocator refused, and no limit was the cause
+ *	INTERRUPTED	relic_interrupt() stopped the operation
+ *	ARGUMENT	the call was malformed in C's terms: a NULL argument,
+ *			an index, enumerator or flag the library does not
+ *			know, a value whose type or identifier is not one the
+ *			context made, a value or query of another context, or
+ *			a call made from one of the context's own callbacks
+ *	INTERNAL	an invariant the library checks was false, which is a
+ *			bug in relic
+ *
+ * A value is never renumbered or removed.  A class added later takes the
+ * next value, and a caller meeting one it does not know treats it as a
+ * failure it cannot classify.  In C++ the function's name hides the tag, so
+ * a variable of the type is declared as `enum relic_error_class`.
+ */
+enum relic_error_class {
+	RELIC_ERROR_NONE,
+	RELIC_ERROR_REJECTED,
+	RELIC_ERROR_EVALUATION,
+	RELIC_ERROR_LIMIT,
+	RELIC_ERROR_IO,
+	RELIC_ERROR_MEMORY,
+	RELIC_ERROR_INTERRUPTED,
+	RELIC_ERROR_ARGUMENT,
+	RELIC_ERROR_INTERNAL
+};
+
+/*
+ * The class of the error relic_error() returns the text of, and
+ * RELIC_ERROR_NONE when it returns NULL.  The two have one lifetime: both
+ * are set when an error is reported and stand until the next one, and a
+ * later success clears neither, so a caller reads them right after the
+ * call that failed.  A call refused because the context was busy is
+ * RELIC_ERROR_ARGUMENT.  Like relic_error(), it may be called from a
+ * callback.
+ */
+RELIC_EXPORT enum relic_error_class relic_error_class(relic_t *ctx);
 
 #ifdef __cplusplus
 }

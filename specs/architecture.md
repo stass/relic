@@ -2143,7 +2143,14 @@ Detailed errors are available through diagnostics and optionally:
 ```c
 const char *
 relic_error(relic_t *);
+
+enum relic_error_class
+relic_error_class(relic_t *);
 ```
+
+The text is for a person; the class says what kind of failure it was, for
+a program to act on without matching the text. The classes and how every
+error carries one by construction are `specs/design-errors.md` (D-32).
 
 No `errno` overloading for semantic errors.
 

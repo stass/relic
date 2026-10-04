@@ -350,8 +350,8 @@ typedef enum random_strategy {
 /*
  * The kinds of failure a run can end in.  compare.c finds those up to
  * FAILURE_LAST_VERDICT; main.c, which runs the comparison in a child, finds
- * the rest from how the child ended.  The last three compare.c finds are
- * the evaluation errors, which a generated program is built never to meet.
+ * the rest from how the child ended.  The last compare.c finds is an
+ * evaluation error, which a generated program is built never to meet.
  */
 typedef enum random_failure_kind {
 	FAILURE_NONE,
@@ -361,10 +361,8 @@ typedef enum random_failure_kind {
 	FAILURE_TOTALS,		/* a strategy's tuple total differs */
 	FAILURE_DERIVATIONS,	/* a derivation was made twice, or missed */
 	FAILURE_HELPER,		/* the helper rendering answers otherwise */
-	FAILURE_UNDEFINED,	/* an arithmetic result was not defined */
-	FAILURE_TOO_LONG,	/* a string was longer than a value can be */
-	FAILURE_PATTERN,	/* a pattern was not a regular expression */
-	FAILURE_LAST_VERDICT = FAILURE_PATTERN, /* the last compare.c finds */
+	FAILURE_EVALUATION,	/* an evaluation met an undefined result */
+	FAILURE_LAST_VERDICT = FAILURE_EVALUATION, /* the last of compare.c's */
 	FAILURE_CRASH,		/* the child was killed by a signal */
 	FAILURE_HANG,		/* the child ran past its alarm */
 	FAILURE_ABNORMAL	/* the child exited without its verdict */

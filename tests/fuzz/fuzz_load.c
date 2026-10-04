@@ -36,7 +36,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	ctx = relic_create();
 	if (ctx == NULL)
 		abort();
-	relic_diag_set(ctx, fuzz_discard_diagnostic, NULL);
+	relic_diag_set(ctx, fuzz_watch_diagnostic, ctx);
 
 	if (fuzz_load(ctx, data, size) == 0)
 		relic_check(ctx);

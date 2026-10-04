@@ -1135,7 +1135,7 @@ relation_too_large(relic_t *ctx, const relic_relation_t *relation,
 	if (relation_columns_after_reserve(relation, added, columnsp))
 		return (false);
 
-	relic_diagf(ctx, RELIC_ERROR, NULL,
+	relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 	    "the relation of %s is too large to grow",
 	    relic_relation_describe(ctx, relation, described,
 	    sizeof(described)));
@@ -1174,10 +1174,10 @@ relation_grow(relic_t *ctx, relic_relation_t *relation,
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (relation->index_count != 0) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "internal error: %s was reserved for many tuples while "
-		    "it has secondary indexes", relic_relation_identify(ctx,
-		    relation, described, sizeof(described)));
+		relic_diag_internal(ctx, NULL,
+		    "%s was reserved for many tuples while it has secondary "
+		    "indexes", relic_relation_identify(ctx, relation, described,
+		    sizeof(described)));
 		return (-1);
 	}
 
@@ -1845,10 +1845,10 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (!key_mask_fits(relation, key_mask)) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "internal error: an index of %s was asked for on columns "
-		    "it cannot be keyed on", relic_relation_identify(ctx,
-		    relation, described, sizeof(described)));
+		relic_diag_internal(ctx, NULL,
+		    "an index of %s was asked for on columns it cannot be "
+		    "keyed on", relic_relation_identify(ctx, relation,
+		    described, sizeof(described)));
 		return (-1);
 	}
 
@@ -1978,10 +1978,10 @@ relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (column >= relation->arity) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "internal error: the statistics of %s were asked for a "
-		    "column it does not have", relic_relation_identify(ctx,
-		    relation, described, sizeof(described)));
+		relic_diag_internal(ctx, NULL,
+		    "the statistics of %s were asked for a column it does not "
+		    "have", relic_relation_identify(ctx, relation, described,
+		    sizeof(described)));
 		return (-1);
 	}
 
@@ -2062,7 +2062,7 @@ reltab_relation(relic_t *ctx, relic_reltab_t *table, relic_pred_id_t pred)
 	relic_relation_t *relation;
 
 	if (relic_pred_of(ctx, pred) == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_internal(ctx, NULL,
 		    "no relation for predicate %lu, which this context has "
 		    "not interned", (unsigned long)pred);
 		return (NULL);
@@ -2097,8 +2097,8 @@ relic_relation_written(relic_t *ctx, relic_pred_id_t pred)
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (!relic_pred_is_derived(ctx, pred)) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
-		    "internal error: a rule writes %s, which no rule derives",
+		relic_diag_internal(ctx, NULL,
+		    "a rule writes %s, which no rule derives",
 		    relic_pred_identify(ctx, pred, described,
 		    sizeof(described)));
 		return (NULL);
@@ -2293,7 +2293,7 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 		if (added > RELIC_TUPLE_MAX - store->count ||
 		    added > SIZE_MAX - added_total ||
 		    projected > SIZE_MAX - bytes_after) {
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "the relation of %s is too large to grow",
 			    relic_pred_describe(ctx, growths[i].pred,
 			    described, sizeof(described)));

@@ -35,6 +35,10 @@ relic 1.0.0 (unreleased)
     only relic_ symbols exported.  A failed call returns -1 or NULL, and an
     operation on a context explains its failure through a diagnostic
     callback and relic_error(); no ordinary failure exits the process.
+    relic_error_class() says what kind of failure it was -- input the
+    language rejects, an evaluation error, a limit, a file, memory, an
+    interrupt, a malformed call or a bug in relic -- so that a program
+    need not read the text.
     relic_interrupt() stops an evaluation in progress, from a signal
     handler, another thread or a callback, and leaves the context ready
     for the next.

@@ -449,7 +449,7 @@ set_add(relic_staging_t *staging, relic_staged_set_t *set,
 		return (-1);
 
 	if (set->count >= UINT32_MAX - 1) {
-		relic_diagf(staging->ctx, RELIC_ERROR, NULL,
+		relic_diag_error(staging->ctx, RELIC_ERROR_LIMIT, NULL,
 		    "too many facts of %s in one load",
 		    relic_pred_describe(staging->ctx, set->pred, described,
 		    sizeof(described)));

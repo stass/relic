@@ -898,7 +898,7 @@ abandon_over_budget(relic_magic_t *magic, const char *what, size_t budget,
 {
 	char described[RELIC_PRED_TEXT_MAX];
 
-	relic_diagf(magic->ctx, RELIC_WARNING, NULL,
+	relic_diag_warning(magic->ctx, NULL,
 	    "the query's Magic rewrite outgrew its budget of %zu %s while "
 	    "adorning %s; answering it from the whole program", budget, what,
 	    relic_pred_describe(magic->ctx, source, described,
@@ -1358,7 +1358,7 @@ add_adornment(relic_magic_t *magic, relic_adornment_set_t *set,
 	relic_adornment_t *recorded;
 
 	if (set->count >= UINT32_MAX - 1) {
-		relic_diagf(magic->ctx, RELIC_ERROR, NULL,
+		relic_diag_error(magic->ctx, RELIC_ERROR_LIMIT, NULL,
 		    "a query's Magic rewrite generated more adornments than it "
 		    "can index");
 		return (-1);
@@ -1955,7 +1955,7 @@ static int
 append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 {
 	if (magic->rules.count >= UINT32_MAX - 1) {
-		relic_diagf(magic->ctx, RELIC_ERROR, NULL,
+		relic_diag_error(magic->ctx, RELIC_ERROR_LIMIT, NULL,
 		    "a query's Magic rewrite generated more rules than it can "
 		    "index");
 		return (-1);
@@ -2190,9 +2190,8 @@ adornment_of_call(relic_magic_t *magic, const relic_literal_t *call,
 	found = find_adornment(&magic->kept, source, adorned_columns,
 	    adornment_hash(&magic->kept, source, adorned_columns));
 	if (found == NULL) {
-		relic_diagf(magic->ctx, RELIC_ERROR, &call->where,
-		    "internal error: a query's Magic rewrite drafted a call "
-		    "it did not adorn");
+		relic_diag_internal(magic->ctx, &call->where,
+		    "a query's Magic rewrite drafted a call it did not adorn");
 		return (-1);
 	}
 
@@ -2356,9 +2355,8 @@ intern_supplementary(relic_magic_t *magic, const relic_prefix_t *prefix,
 	written = snprintf(text + length, room - length, "$%zu$%zu",
 	    prefix->rule_ordinal, call_ordinal);
 	if (written < 0 || (size_t)written >= room - length) {
-		relic_diagf(magic->ctx, RELIC_ERROR, NULL,
-		    "internal error: a supplementary predicate's name does "
-		    "not fit");
+		relic_diag_internal(magic->ctx, NULL,
+		    "a supplementary predicate's name does not fit");
 		return (-1);
 	}
 	length += (size_t)written;
@@ -2570,9 +2568,9 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 		literal = rule->body[order[i]];
 
 		if (reads_whole_on_demand(magic, &literal)) {
-			relic_diagf(magic->ctx, RELIC_ERROR, &rule->where,
-			    "internal error: a query's Magic rewrite negates "
-			    "or folds a predicate it does not read completely");
+			relic_diag_internal(magic->ctx, &rule->where,
+			    "a query's Magic rewrite negates or folds a "
+			    "predicate it does not read completely");
 			return (-1);
 		}
 
@@ -2768,9 +2766,8 @@ confirm_pred_indexed(relic_magic_t *magic, relic_pred_id_t source)
 	if (source != RELIC_ID_NONE && source <= magic->predicate_count)
 		return (0);
 
-	relic_diagf(magic->ctx, RELIC_ERROR, NULL,
-	    "internal error: a query's Magic rewrite met a predicate it had "
-	    "not indexed");
+	relic_diag_internal(magic->ctx, NULL,
+	    "a query's Magic rewrite met a predicate it had not indexed");
 
 	return (-1);
 }
@@ -3077,9 +3074,9 @@ read_reached_completely(relic_magic_t *magic, const relic_rule_t *query)
 	for (i = 0; i < magic->kept.count; i++) {
 		position = component_of(magic, magic->kept.entries[i].source);
 		if (position == RELIC_NO_COMPONENT) {
-			relic_diagf(magic->ctx, RELIC_ERROR, NULL,
-			    "internal error: a query's Magic rewrite adorned "
-			    "a predicate no rule derives");
+			relic_diag_internal(magic->ctx, NULL,
+			    "a query's Magic rewrite adorned a predicate no "
+			    "rule derives");
 			return (-1);
 		}
 		mark_complete(&closure, position);

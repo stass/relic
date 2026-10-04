@@ -26,9 +26,9 @@ test_source="$RELIC_SRCDIR/tests/unit/test_api.c"
 # The entry points that never enter a context: the reads a callback may
 # make, relic_interrupt(), and the functions that take no context at all.
 never_enter="relic_create relic_create_config relic_diag_stderr relic_error
-relic_interrupt relic_query_count relic_result_columns relic_result_destroy
-relic_result_row relic_result_rows relic_stats relic_string
-relic_value_compare relic_version"
+relic_error_class relic_interrupt relic_query_count relic_result_columns
+relic_result_destroy relic_result_row relic_result_rows relic_stats
+relic_string relic_value_compare relic_version"
 
 fail() {
 	echo "$1" >&2

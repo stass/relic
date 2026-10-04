@@ -352,7 +352,7 @@ arena and are never freed while the context is, so it cannot dangle.
 
 Three consequences follow, none of which needs a flag of its own:
 
-* a check with nothing new to do compiles nothing and reports nothing, which
+* a check with nothing new to do compiles nothing and repeats nothing, which
   is exactly the caching architecture section 51 asks for;
 * each statement is compiled once for the life of the context, so a
   load-check-load-check sequence costs the program once rather than once per
@@ -362,7 +362,13 @@ Three consequences follow, none of which needs a flag of its own:
 What does need to be remembered is whether anything has ever failed, because
 an unsafe rule stays in the tree and stays unsafe: a later load cannot repair
 it. A sticky flag on the program records that, and `relic_check()` returns -1
-while it is set even when the statements it just compiled were all fine.
+while it is set even when the statements it just compiled were all fine. A
+check that fails on the flag having reported nothing new reports one error,
+that the program cannot be used because its errors were reported when it
+was checked, so that its failure, like every failure, explains itself (D-5)
+and `relic_error_class()` reads REJECTED rather than the class of whatever
+failed last. A silent failure with the flag clear has no such reason and is
+reported as an internal error.
 
 The undefined-predicate sweep runs at the end of every check, over the whole
 table, skipping predicates already reported. It is not incremental because

@@ -925,7 +925,10 @@ a_header_is_skipped(void)
 
 /*
  * Every refusal of a description: nothing is read from the stream, nothing
- * is added, and the reason is reported.
+ * is added, and the reason is reported.  A predicate name or a number of
+ * columns the language cannot have is rejected, as it would be in text;
+ * every other mistake is in how the description was filled in, and is a
+ * malformed call.
  */
 static void
 every_refusal_reads_nothing(void)
@@ -969,21 +972,25 @@ every_refusal_reads_nothing(void)
 	}
 
 	for (i = 0;; i++) {
+		enum relic_error_class expected_class;
 		const char *expected;
 
 		import = good;
+		expected_class = RELIC_ERROR_ARGUMENT;
 		switch (i) {
 		case 0:
 			bzero(&import, sizeof(import));
-			expected = "a predicate name is";
+			expected = "an import needs a predicate name";
 			break;
 		case 1:
 			import.predicate = "Edge";
 			expected = "a predicate name is";
+			expected_class = RELIC_ERROR_REJECTED;
 			break;
 		case 2:
 			import.predicate = "not";
 			expected = "a predicate name is";
+			expected_class = RELIC_ERROR_REJECTED;
 			break;
 		case 3:
 			import.column_count = 0;
@@ -1005,6 +1012,7 @@ every_refusal_reads_nothing(void)
 			import.columns = wide;
 			import.column_count = RELIC_MAX_ARITY + 2;
 			expected = "an import may keep at most 32 columns";
+			expected_class = RELIC_ERROR_REJECTED;
 			break;
 		case 8:
 			import.format = 0;
@@ -1033,6 +1041,11 @@ every_refusal_reads_nothing(void)
 		    SCENARIO_DESCRIPTION, "description %zu should be refused "
 		    "with '%s' and nothing read, not '%s'", i, expected,
 		    capture.message);
+		checkf(relic_error_class(ctx) == expected_class,
+		    SCENARIO_DESCRIPTION, "description %zu should be refused "
+		    "as %s", i, expected_class == RELIC_ERROR_REJECTED ?
+		    "a name or arity the language rejects" :
+		    "a malformed call");
 	}
 
 	check(relic_import_file(ctx, "e", stream, NULL) == -1 &&

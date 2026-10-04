@@ -125,7 +125,7 @@ emits at least one `RELIC_ERROR` diagnostic through the context callback, and
 semantic errors and is preserved for system-call failures. The tool maps
 everything to three exit statuses: 0 success, 1 program or query error, 2 usage.
 `<sysexits.h>` may be used internally but does not reach the documented
-interface.
+interface. D-32 gives every error a class beside its text.
 
 ### D-6 Memory
 
@@ -550,6 +550,23 @@ when every column is named, a secondary index built on demand when some
 are, and the relation's emptiness when none is. Stratification and the
 Magic rewrite are untouched: both read the literal's predicate and never
 its arguments. Specified in `specs/design-negation.md`.
+
+### D-32 Every error has a class, by construction
+
+Every error carries an `enum relic_error_class`, which
+`relic_error_class()` returns beside `relic_error()`'s text: input the
+language rejects, an evaluation error, a limit, a file, memory, an
+interrupt, a malformed call, or an internal error. A class says what the caller can do
+about the failure; the text stays the message for a person, and nothing in
+the library's contract depends on its wording. The library reports an
+error only through functions that take its class, so no error can be
+recorded without one, and an internal error's prefix and class come from
+one function. The class is recorded with the text before the callback
+runs and has its lifetime, and a call refused because its context was
+busy reads as a malformed call. The enumeration is part of the interface:
+a value is never renumbered or removed. The tool's exit statuses stay
+D-5's and do not follow the class. Amends D-5. Specified in
+`specs/design-errors.md`.
 
 ### D-33 Floating point, when added, is a fourth type equal only to itself
 

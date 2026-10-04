@@ -661,24 +661,24 @@ note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 
 	switch (note->kind) {
 	case RELIC_NOTE_ORDERING:
-		relic_diagf(ctx, RELIC_NOTE, note->where,
+		relic_diag_note(ctx, note->where,
 		    "ordering comparison between %s and %s is false",
 		    type_phrase(note->left_type),
 		    type_phrase(note->right_type));
 		return;
 	case RELIC_NOTE_OPERAND:
-		relic_diagf(ctx, RELIC_NOTE, note->where,
+		relic_diag_note(ctx, note->where,
 		    "operand of %s is %s; the comparison is false",
 		    note->operator, type_phrase(note->left_type));
 		return;
 	case RELIC_NOTE_SUM_TYPE:
-		relic_diagf(ctx, RELIC_NOTE, note->where,
+		relic_diag_note(ctx, note->where,
 		    "a row of %s holds a value that is not an integer; the "
 		    "aggregate has no value", describe_fold(ctx,
 		    note->aggregate, folded, sizeof(folded)));
 		return;
 	case RELIC_NOTE_EXTREME_TYPES:
-		relic_diagf(ctx, RELIC_NOTE, note->where,
+		relic_diag_note(ctx, note->where,
 		    "the rows of %s hold values of more than one type; the "
 		    "aggregate has no value", describe_fold(ctx,
 		    note->aggregate, folded, sizeof(folded)));
@@ -754,13 +754,13 @@ report_failure(relic_t *ctx, const relic_rule_t *rule,
 	}
 
 	if (rule->origin == RELIC_ORIGIN_QUERY) {
-		relic_diagf(ctx, RELIC_ERROR, error->where,
+		relic_diag_error(ctx, RELIC_ERROR_EVALUATION, error->where,
 		    "%s in the query%s%s", what, separator, detail);
 		return;
 	}
 
-	relic_diagf(ctx, RELIC_ERROR, error->where, "%s in rule %s%s%s", what,
-	    relic_pred_describe(ctx,
+	relic_diag_error(ctx, RELIC_ERROR_EVALUATION, error->where,
+	    "%s in rule %s%s%s", what, relic_pred_describe(ctx,
 	    ctx->program.rules.entries[rule->origin].head, described,
 	    sizeof(described)), separator, detail);
 }
@@ -1008,9 +1008,9 @@ refuse_interrupted(relic_t *ctx, const char *verb,
 	if (!relic_signal_flag_raised(&ctx->interrupted))
 		return (0);
 
-	relic_diagf(ctx, RELIC_ERROR, NULL, "interrupted while %s %s", verb,
-	    relic_relation_describe(ctx, relation, described,
-	    sizeof(described)));
+	relic_diag_error(ctx, RELIC_ERROR_INTERRUPTED, NULL,
+	    "interrupted while %s %s", verb, relic_relation_describe(ctx,
+	    relation, described, sizeof(described)));
 
 	return (-1);
 }
@@ -1096,8 +1096,8 @@ confirm_planned(const relic_evaluation_t *eval,
 	    plans->planned[planned].rule == rule)
 		return (0);
 
-	relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
-	    "internal error: a rule's plans are out of step with the program");
+	relic_diag_internal(eval->ctx, &rule->where,
+	    "a rule's plans are out of step with the program");
 
 	return (-1);
 }
@@ -1907,15 +1907,14 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 	*runningp = NULL;
 	if (plan_head(plan) != target) {
-		relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
-		    "internal error: a rule's plan writes other than the "
-		    "relation it was planned for");
+		relic_diag_internal(eval->ctx, &rule->where,
+		    "a rule's plan writes other than the relation it was "
+		    "planned for");
 		return (-1);
 	}
 	if (target->arity > eval->scratch.arity_room) {
-		relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
-		    "internal error: a rule's plan does not fit the scratch "
-		    "it runs in");
+		relic_diag_internal(eval->ctx, &rule->where,
+		    "a rule's plan does not fit the scratch it runs in");
 		return (-1);
 	}
 
@@ -2070,10 +2069,10 @@ confirm_seed(const relic_evaluation_t *eval,
 	    seed_head_is_constant(rule))
 		return (0);
 
-	relic_diagf(eval->ctx, RELIC_ERROR, &rule->where,
-	    "internal error: a seed of %s holds something other than one "
-	    "constant per column", relic_pred_identify(eval->ctx, rule->head,
-	    described, sizeof(described)));
+	relic_diag_internal(eval->ctx, &rule->where,
+	    "a seed of %s holds something other than one constant per column",
+	    relic_pred_identify(eval->ctx, rule->head, described,
+	    sizeof(described)));
 
 	return (-1);
 }
@@ -2621,9 +2620,8 @@ evaluate_component(relic_evaluation_t *eval, relic_component_plans_t *plans)
 		return (semi_naive_fixed_point(eval, plans));
 	}
 
-	relic_diagf(eval->ctx, RELIC_ERROR, NULL,
-	    "internal error: a component was planned with no way to reach its "
-	    "fixed point");
+	relic_diag_internal(eval->ctx, NULL,
+	    "a component was planned with no way to reach its fixed point");
 
 	return (-1);
 }
@@ -2699,9 +2697,8 @@ confirm_schedule_current(relic_t *ctx)
 	if (relic_schedule_is_current(&ctx->program))
 		return (0);
 
-	relic_diagf(ctx, RELIC_ERROR, NULL,
-	    "internal error: the evaluation order does not cover the "
-	    "program's rules");
+	relic_diag_internal(ctx, NULL,
+	    "the evaluation order does not cover the program's rules");
 
 	return (-1);
 }
@@ -3320,7 +3317,7 @@ evaluate_rewrite(relic_t *ctx, relic_magic_t *magic, const relic_query_t *query)
 		    1);
 		break;
 	case RELIC_ANALYSIS_UNSTRATIFIED:
-		relic_diagf(ctx, RELIC_ERROR, NULL, "internal error: "
+		relic_diag_internal(ctx, NULL,
 		    "a query's Magic rewrite is not stratified");
 		break;
 	case RELIC_ANALYSIS_INCOMPLETE:
@@ -3538,13 +3535,13 @@ query_answerable(relic_t *ctx, const relic_query_t *query,
     relic_row_cb callback)
 {
 	if (query == NULL || callback == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "a query and a row callback must both be given");
 		return (false);
 	}
 
 	if (query->ctx != ctx) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "the query belongs to a different context");
 		return (false);
 	}

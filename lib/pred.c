@@ -129,7 +129,7 @@ pred_store(relic_t *ctx, uint32_t name, uint16_t arity,
 	table = &ctx->program.predicates;
 
 	if (table->count >= RELIC_PRED_MAX) {
-		relic_diagf(ctx, RELIC_ERROR, where,
+		relic_diag_error(ctx, RELIC_ERROR_LIMIT, where,
 		    "too many distinct predicates");
 		return (-1);
 	}
@@ -187,9 +187,9 @@ relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
 	uint32_t id;
 
 	if (arity > RELIC_MAX_ARITY) {
-		relic_diagf(ctx, RELIC_ERROR, where,
-		    "a predicate may have at most %d arguments",
-		    RELIC_MAX_ARITY);
+		relic_diag_internal(ctx, where,
+		    "a predicate of %u arguments was interned, more than the "
+		    "%d any may have", (unsigned int)arity, RELIC_MAX_ARITY);
 		return (-1);
 	}
 
@@ -556,7 +556,7 @@ relic_pred_report_undefined(relic_t *ctx)
 
 		pred->reported_undefined = true;
 
-		relic_diagf(ctx, RELIC_WARNING, &pred->referenced_at,
+		relic_diag_warning(ctx, &pred->referenced_at,
 		    "predicate %s is referenced but never defined",
 		    relic_pred_describe(ctx,
 		    (relic_pred_id_t)(position + 1), described,

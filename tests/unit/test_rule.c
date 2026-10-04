@@ -46,6 +46,11 @@
 /* The longest line an explain callback is given, and its NUL. */
 #define	PRINTED_LINE_MAX	1024
 
+/* The text of a check that fails with nothing new to report. */
+#define	UNUSABLE_ERROR \
+	"the program cannot be used: its errors were reported when it was " \
+	"checked"
+
 typedef struct diag_log diag_log_t;
 
 /*
@@ -502,7 +507,9 @@ a_check_compiles_only_what_is_new(void)
 
 /*
  * An unsafe rule stays in the tree and stays unsafe, so loading good rules
- * after it cannot make the program usable again.
+ * after it cannot make the program usable again.  The rule is reported once;
+ * the later check, with nothing new to report, says only that the program
+ * cannot be used, so that its failure too reports an error.
  */
 static void
 a_program_that_held_a_bad_rule_stays_refused(void)
@@ -520,8 +527,8 @@ a_program_that_held_a_bad_rule_stays_refused(void)
 		return;
 	}
 
-	check(relic_check(ctx) != 0, SCENARIO_STICKY,
-	    "the unsafe rule is refused");
+	check(relic_check(ctx) != 0 && log.errors == 1, SCENARIO_STICKY,
+	    "the unsafe rule is refused, with one error");
 
 	if (!load(ctx, "good(X) :- bar(X).\n")) {
 		check(false, SCENARIO_STICKY, "the second program loads");
@@ -532,8 +539,11 @@ a_program_that_held_a_bad_rule_stays_refused(void)
 	check(relic_check(ctx) != 0, SCENARIO_STICKY,
 	    "a blameless load does not repair the program");
 
-	checkf(log.errors == 1, SCENARIO_STICKY,
-	    "the unsafe rule was reported %zu times", log.errors);
+	checkf(log.errors == 2 && relic_error(ctx) != NULL &&
+	    strcmp(relic_error(ctx), UNUSABLE_ERROR) == 0, SCENARIO_STICKY,
+	    "the later check should report only that the program cannot be "
+	    "used, not %zu errors in all ending with \"%s\"", log.errors,
+	    relic_error(ctx) != NULL ? relic_error(ctx) : "(none)");
 
 	relic_destroy(ctx);
 }

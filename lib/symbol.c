@@ -146,7 +146,7 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	 * hashing them is the first thing that would read them.
 	 */
 	if (length > RELIC_STRING_LENGTH_MAX) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
 		    "a symbol or string of %zu bytes is longer than the %lu "
 		    "a value may hold", length,
 		    (unsigned long)RELIC_STRING_LENGTH_MAX);
@@ -175,7 +175,7 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	fresh.hash = hash;
 	if (relic_symbol_reserve(ctx, &fresh, 1, &copies) != 0) {
 		if (!relic_symbol_has_room(ctx, 1))
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct symbols and strings");
 		else
 			relic_diag_no_memory(ctx);

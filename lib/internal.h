@@ -71,10 +71,11 @@ typedef struct relic_activity relic_activity_t;
  * library: a caller must not be made to accept output on its stderr.
  *
  * `error_count` counts every error reported, which is how an operation that
- * failed learns whether anything said why.  `refused` records that a call
- * was refused during the operation in progress, because the context was
- * busy; relic_error() then describes the refusal in place of `last_error`
- * until the operation returns.
+ * failed learns whether anything said why.  `last_class` is the class of
+ * the error `last_error` holds, recorded with it.  `refused` records that a
+ * call was refused during the operation in progress, because the context
+ * was busy; relic_error() and relic_error_class() then describe the refusal
+ * in place of the last error until the operation returns.
  *
  * `activity` says what the operation in progress is doing, for a refusal by
  * the memory limit to name.  It is written when an operation begins and
@@ -101,6 +102,7 @@ struct relic_diag {
 	void		*callback_ctx;
 	size_t		 error_count;
 	char		 last_error[512];
+	enum relic_error_class last_class;
 	relic_activity_t activity;
 	bool		 has_error;
 	bool		 refused;
@@ -516,26 +518,47 @@ void	 relic_leave(relic_t *ctx);
 /*
  * lib/diag.c
  *
- * relic_diagf() formats a diagnostic, records it as the last error when its
- * level is RELIC_ERROR, and hands it to the installed callback.  A message
- * longer than the buffer is truncated rather than allocated for: a
- * diagnostic reports a failure and must not be able to cause one.
+ * Each of these formats a diagnostic and hands it to the installed
+ * callback.  A note and a warning take no class, since neither is a
+ * failure.  An error is reported only through a function that names its
+ * class, as an argument or, for relic_diag_internal(), by being that
+ * class's function, so no error can be reported without one; the class is
+ * recorded with the text as the last error before the callback runs, and
+ * an error of class RELIC_ERROR_INTERNAL begins "internal error: " however
+ * it was reported.  A message longer than the buffer is truncated rather
+ * than allocated for: a diagnostic reports a failure and must not be able
+ * to cause one.
  */
 void	 relic_diag_init(relic_diag_t *diag);
-void	 relic_diagf(relic_t *ctx, enum relic_diag_level level,
+void	 relic_diag_note(relic_t *ctx, const relic_location_t *where,
+	    const char *format, ...)
+	    RELIC_PRINTFLIKE(3, 4);
+void	 relic_diag_warning(relic_t *ctx, const relic_location_t *where,
+	    const char *format, ...)
+	    RELIC_PRINTFLIKE(3, 4);
+void	 relic_diag_error(relic_t *ctx, enum relic_error_class error_class,
 	    const relic_location_t *where, const char *format, ...)
 	    RELIC_PRINTFLIKE(4, 5);
 
 /*
- * The same, for a caller that already holds a va_list.  The parser formats
- * its own messages through this because it decides whether a diagnostic is
- * reported at all, and that decision has to sit in front of the call rather
- * than inside it.
+ * relic_diag_error() for a caller that already holds a va_list.  The parser
+ * formats its own messages through this because it decides whether a
+ * diagnostic is reported at all, and that decision has to sit in front of
+ * the call rather than inside it.
  */
-void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
+void	 relic_diag_verror(relic_t *ctx, enum relic_error_class error_class,
 	    const relic_location_t *where, const char *format,
 	    va_list arguments)
 	    RELIC_PRINTFLIKE(4, 0);
+
+/*
+ * Report that an invariant the library checks at run time is false, as an
+ * error of class RELIC_ERROR_INTERNAL, whose text begins "internal error: "
+ * as that class's always does.
+ */
+void	 relic_diag_internal(relic_t *ctx, const relic_location_t *where,
+	    const char *format, ...)
+	    RELIC_PRINTFLIKE(3, 4);
 
 /*
  * Report that an allocation failed, in the one wording the whole library
@@ -545,9 +568,10 @@ void	 relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
  * A charged arena refused by the memory limit fails exactly as one refused
  * by the allocator, and every caller reports it here like any other failed
  * allocation.  So this is where the two are told apart: when the account
- * records that the limit refused, the report is the limit's, in the form
- * every limit shares, naming the activity in progress, and the record is
- * taken so that it is reported once.
+ * records that the limit refused, the report is the limit's, of class
+ * RELIC_ERROR_LIMIT and in the form every limit shares, naming the activity
+ * in progress, and the record is taken so that it is reported once;
+ * otherwise it is of class RELIC_ERROR_MEMORY.
  *
  * An operation reports running out of memory once.  An arena that refused
  * refuses every later request, so the caller that makes a second allocation
@@ -564,8 +588,7 @@ void	 relic_diag_no_memory(relic_t *ctx);
  * shares: "limit exceeded: memory=1048576 while deriving path/2" -- the
  * limit, what it was set to, and what was being done, as a verb and the
  * description of what it acts on.  With a NULL verb the clause naming the
- * activity is left out.  A caller telling a limit's refusal from another
- * failure by its text relies on the prefix "limit exceeded:".
+ * activity is left out.  The error's class is RELIC_ERROR_LIMIT.
  */
 void	 relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
 	    const char *verb, const char *subject);
@@ -1139,9 +1162,10 @@ bool	 relic_aggregate_binds(const relic_aggregate_t *aggregate,
  * arena among it.
  * The public entry point into this module is relic_check().
  *
- * relic_program_ready() is the check every use of the program begins with:
- * preparing a query, handing out one of the program's own, or evaluating.
- * Returns 0, or -1 with at least one error reported by this call.
+ * relic_program_ready() is the check relic_check() makes and every use of
+ * the program begins with: preparing a query, handing out one of the
+ * program's own, or evaluating.  Returns 0, or -1 with at least one error
+ * reported by this call.
  *
  * relic_ruletab_place() is the one way a rule joins a rule table, the
  * program's or a rewrite's, and marks its head predicate derived.  It

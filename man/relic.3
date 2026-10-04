@@ -13,6 +13,7 @@
 .Nm relic_diag_set ,
 .Nm relic_diag_stderr ,
 .Nm relic_error ,
+.Nm relic_error_class ,
 .Nm relic_load_string ,
 .Nm relic_load_file ,
 .Nm relic_load_path ,
@@ -63,6 +64,8 @@ relic library
 .Fc
 .Ft const char *
 .Fn relic_error "relic_t *ctx"
+.Ft enum relic_error_class
+.Fn relic_error_class "relic_t *ctx"
 .Ft int
 .Fn relic_load_string "relic_t *ctx" "const char *source_name" "const char *text"
 .Ft int
@@ -567,8 +570,10 @@ The description is borrowed for the call.
 validates the program: rule safety, stratification, and warnings about
 variables named once and predicates nothing defines.
 It checks only what was loaded since the previous check, so a second check
-with nothing loaded between reports nothing, and once the program has held
-a rejected rule it fails for good, since loading more cannot remove one.
+with nothing loaded between repeats none of the first's messages, and once
+the program has held a rejected rule it fails for good, since loading more
+cannot remove one; a failing check whose mistakes were reported before
+reports only that the program cannot be used.
 A variable an aggregate shares with the rest of its rule must be bound
 both inside the aggregate's body and outside it, and a program recursive
 through an aggregate is rejected as one recursive through negation is.
@@ -770,6 +775,71 @@ when there has been none.
 A later success does not clear it, and the string belongs to the context
 and is replaced by the next error.
 .Pp
+.Fn relic_error_class
+returns what kind of failure that error was, so that a program can tell
+without reading the text, which is for a person and may be worded
+differently from one release to the next:
+.Bd -literal -offset indent
+enum relic_error_class {
+	RELIC_ERROR_NONE,
+	RELIC_ERROR_REJECTED,
+	RELIC_ERROR_EVALUATION,
+	RELIC_ERROR_LIMIT,
+	RELIC_ERROR_IO,
+	RELIC_ERROR_MEMORY,
+	RELIC_ERROR_INTERRUPTED,
+	RELIC_ERROR_ARGUMENT,
+	RELIC_ERROR_INTERNAL
+};
+.Ed
+.Bl -tag -width RELIC_ERROR_INTERRUPTED
+.It Dv RELIC_ERROR_NONE
+there has been no error, and
+.Fn relic_error
+returns
+.Dv NULL ;
+.It Dv RELIC_ERROR_REJECTED
+something the language spells was refused, whether in text, a table or a
+call: a program or query that does not parse or does not check, a statement
+past a structural limit such as 32 arguments, a constant pattern that is not
+a regular expression, a table field that is not a value of its column's
+type, bytes no symbol is spelled with, a predicate name or number of
+arguments no predicate can have;
+.It Dv RELIC_ERROR_EVALUATION
+evaluation met a result the language leaves undefined: an integer overflow,
+a zero divisor, a string longer than a value can hold, or a pattern computed
+during evaluation that is not a regular expression;
+.It Dv RELIC_ERROR_LIMIT
+.Fa max_tuples
+or
+.Fa max_memory
+refused the operation, or a capacity of the context was reached, such as
+the number of distinct symbols and strings it can hold;
+.It Dv RELIC_ERROR_IO
+a file could not be opened, read or closed;
+.It Dv RELIC_ERROR_MEMORY
+an allocation failed and no limit was the cause;
+.It Dv RELIC_ERROR_INTERRUPTED
+.Fn relic_interrupt
+stopped the operation;
+.It Dv RELIC_ERROR_ARGUMENT
+the call was malformed in C's terms: a
+.Dv NULL
+argument, an index, enumerator or flag the library does not know, a value
+whose type or identifier is not one the context made, a value or query of
+another context, or a call refused while caller code runs;
+.It Dv RELIC_ERROR_INTERNAL
+the library found one of its own invariants false, which is a bug in relic;
+the text begins
+.Ql internal error:\& .
+.El
+.Pp
+The class lasts as the text does: both are set by an error, stand until the
+next, and are cleared by no success.
+A class added in a later release takes a value after these, so a caller
+that switches on the class treats one it does not know as a failure it
+cannot classify.
+.Pp
 .Fn relic_explain_set
 installs a callback that receives the plans evaluation runs, one line of
 printable ASCII at a time, of at most 1023 bytes and with no newline, a
@@ -863,6 +933,7 @@ makes one.
 Such code may call
 .Fn relic_string ,
 .Fn relic_error ,
+.Fn relic_error_class ,
 .Fn relic_value_compare ,
 .Fn relic_stats ,
 .Fn relic_query_count
@@ -873,8 +944,12 @@ Any other call on the same context is refused: it returns \-1 or
 .Dv NULL ,
 or does nothing, and
 .Fn relic_error
-describes the refusal until the next error or until the operation the
-caller code runs inside returns.
+describes the refusal, and
+.Fn relic_error_class
+answers
+.Dv RELIC_ERROR_ARGUMENT ,
+until the next error or until the operation the caller code runs inside
+returns.
 The diagnostic callback is not called for a refusal, and a refused
 .Fn relic_destroy
 releases nothing, so a callback that destroys its own context leaks it.
@@ -899,9 +974,10 @@ also return it when there is no row, identifier or error to return;
 never does.
 Every failure is explained by an error diagnostic, whose text
 .Fn relic_error
-returns, except a call refused while caller code runs, which
-.Fn relic_error
-alone describes, and that of
+and whose class
+.Fn relic_error_class
+return, except a call refused while caller code runs, which those two
+alone describe, and that of
 .Fn relic_create
 and
 .Fn relic_create_config ,
@@ -914,7 +990,8 @@ when memory is exhausted, or when
 fails.
 .Fn relic_string ,
 .Fn relic_value_compare ,
-.Fn relic_query_count
+.Fn relic_query_count ,
+.Fn relic_error_class
 and
 .Fn relic_stats
 cannot fail.

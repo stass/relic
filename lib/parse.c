@@ -407,7 +407,8 @@ parse_errorf(relic_parser_t *parser, const relic_location_t *where,
 	parser->error_count++;
 
 	va_start(arguments, format);
-	relic_vdiagf(parser->ctx, RELIC_ERROR, where, format, arguments);
+	relic_diag_verror(parser->ctx, RELIC_ERROR_REJECTED, where, format,
+	    arguments);
 	va_end(arguments);
 }
 
@@ -3010,21 +3011,23 @@ only_query(relic_parser_t *parser)
 
 	statement = TAILQ_FIRST(&parser->statements);
 	if (statement == NULL) {
-		relic_diagf(parser->ctx, RELIC_ERROR, &parser->token.where,
+		relic_diag_error(parser->ctx, RELIC_ERROR_REJECTED,
+		    &parser->token.where,
 		    "expected a query, found end of input");
 		return (NULL);
 	}
 
 	if (statement->kind != RELIC_STMT_QUERY) {
-		relic_diagf(parser->ctx, RELIC_ERROR, &statement->where,
-		    "expected a query, found a %s",
+		relic_diag_error(parser->ctx, RELIC_ERROR_REJECTED,
+		    &statement->where, "expected a query, found a %s",
 		    statement->body_length == 0 ? "fact" : "rule");
 		return (NULL);
 	}
 
 	second = TAILQ_NEXT(statement, link);
 	if (second != NULL) {
-		relic_diagf(parser->ctx, RELIC_ERROR, &second->where,
+		relic_diag_error(parser->ctx, RELIC_ERROR_REJECTED,
+		    &second->where,
 		    "expected one query, found another statement after it");
 		return (NULL);
 	}
@@ -3122,7 +3125,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 			continue;
 
 		if (ferror(stream)) {
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_IO, NULL,
 			    "cannot read %s: %s", source_name,
 			    strerror(read_errno != 0 ? read_errno : EIO));
 			relic_free_array(text);
@@ -3150,7 +3153,7 @@ relic_load_string(relic_t *ctx, const char *source_name, const char *text)
 	if (text != NULL) {
 		status = load_text(ctx, source_name, text, strlen(text));
 	} else {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no program text was given");
 		status = -1;
 	}
@@ -3189,7 +3192,7 @@ load_stream(relic_t *ctx, const char *source_name, FILE *stream)
 	size_t length;
 
 	if (stream == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no input stream was given");
 		return (-1);
 	}
@@ -3233,8 +3236,8 @@ relic_open_input(relic_t *ctx, const char *path)
 
 	descriptor = open(path, O_RDONLY | O_CLOEXEC | O_LARGEFILE);
 	if (descriptor == -1) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot open %s: %s", path,
-		    strerror(errno));
+		relic_diag_error(ctx, RELIC_ERROR_IO, NULL,
+		    "cannot open %s: %s", path, strerror(errno));
 		return (NULL);
 	}
 
@@ -3242,8 +3245,8 @@ relic_open_input(relic_t *ctx, const char *path)
 	if (stream == NULL) {
 		saved_errno = errno;
 		close(descriptor);
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot open %s: %s", path,
-		    strerror(saved_errno));
+		relic_diag_error(ctx, RELIC_ERROR_IO, NULL,
+		    "cannot open %s: %s", path, strerror(saved_errno));
 		return (NULL);
 	}
 
@@ -3254,8 +3257,8 @@ int
 relic_close_input(relic_t *ctx, const char *path, FILE *stream)
 {
 	if (fclose(stream) != 0) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "cannot close %s: %s", path,
-		    strerror(errno));
+		relic_diag_error(ctx, RELIC_ERROR_IO, NULL,
+		    "cannot close %s: %s", path, strerror(errno));
 		return (-1);
 	}
 
@@ -3275,7 +3278,8 @@ load_named_file(relic_t *ctx, const char *path)
 	size_t length;
 
 	if (path == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "no path was given");
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "no path was given");
 		return (-1);
 	}
 
@@ -3354,20 +3358,20 @@ add_fact(relic_t *ctx, const char *predicate, size_t arity,
 	int status;
 
 	if (predicate == NULL || (values == NULL && arity > 0)) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "a fact needs a predicate name and a value per argument");
 		return (-1);
 	}
 
 	if (!relic_lex_is_predicate_name(predicate, strlen(predicate))) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
 		    "a predicate name is a lowercase letter followed by "
 		    "letters, digits and underscores, and is not `not`");
 		return (-1);
 	}
 
 	if (arity > RELIC_MAX_ARITY) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
 		    "a predicate may have at most %d arguments",
 		    RELIC_MAX_ARITY);
 		return (-1);

@@ -7,13 +7,14 @@
 /*
  * Contract tests for diagnostics.
  *
- * Three obligations are checked.  A caller that installs no callback still
+ * Four obligations are checked.  A caller that installs no callback still
  * gets nothing on its stderr and can still recover the reason for a failure.
  * A caller that installs one receives every diagnostic with its level and its
- * location intact.  And the formatter the tool installs never passes an
- * unprintable byte through to whoever is reading, because both the message
- * and the file name in a diagnostic can quote text that came out of a source
- * file or a command line.
+ * location intact.  Every error carries the class it was reported with, which
+ * a caller reads beside its text.  And the formatter the tool installs never
+ * passes an unprintable byte through to whoever is reading, because both the
+ * message and the file name in a diagnostic can quote text that came out of
+ * a source file or a command line.
  */
 
 #include "config.h"
@@ -31,6 +32,7 @@
 #include "internal.h"
 
 #define	SCENARIO_CALLBACK	"a callback receives every diagnostic"
+#define	SCENARIO_CLASS		"every error carries its class"
 #define	SCENARIO_ESCAPE		"the stderr formatter escapes what it prints"
 #define	SCENARIO_LIMIT		"a refusal by the memory limit is reported as one"
 #define	SCENARIO_SILENT		"a context with no callback stays silent"
@@ -44,7 +46,17 @@
  * full, since that is what the tests ask about; the counts prove nothing was
  * dropped along the way.
  */
+typedef struct class_seen class_seen_t;
 typedef struct record record_t;
+
+/*
+ * The class relic_error_class() gave from inside the callback, when it was
+ * last handed an error by `ctx`.
+ */
+struct class_seen {
+	relic_t			*ctx;
+	enum relic_error_class	 seen;
+};
 
 struct record {
 	char			 message[512];
@@ -59,8 +71,11 @@ static bool	 capture_diagnostic(char *buffer, size_t size,
 		    const relic_location_t *where, const char *message);
 static void	 record_diagnostic(void *ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
+static void	 record_class(void *callback_ctx, enum relic_diag_level level,
+		    const relic_location_t *where, const char *message);
 static void	 a_callback_sees_level_location_and_text(void);
 static void	 a_silent_context_still_remembers_its_error(void);
+static void	 every_error_carries_its_class(void);
 static void	 a_refusal_by_the_limit_is_reported_as_the_limit(void);
 static void	 an_operation_reports_running_out_of_memory_once(void);
 static void	 an_operation_names_itself_in_a_refusal(void);
@@ -71,6 +86,9 @@ static void	 check_refusal(relic_t *ctx, int status, const char *expected,
 static FILE	*table_stream(const char *table);
 static bool	 last_error_is(relic_t *ctx, const char *expected);
 static void	 the_stderr_formatter_escapes_unprintable_bytes(void);
+static bool	 quotes_as(const char *bytes, size_t length, size_t size,
+		    const char *expected);
+static void	 a_quoted_string_is_escaped_and_cut_whole(void);
 
 static void
 record_diagnostic(void *ctx, enum relic_diag_level level,
@@ -110,7 +128,7 @@ a_callback_sees_level_location_and_text(void)
 	bzero(&record, sizeof(record));
 	relic_diag_set(ctx, record_diagnostic, &record);
 
-	relic_diagf(ctx, RELIC_NOTE, NULL, "a note about %s", "nothing");
+	relic_diag_note(ctx, NULL, "a note about %s", "nothing");
 	check(record.total == 1 && record.level == RELIC_NOTE,
 	    SCENARIO_CALLBACK, "a note should arrive with its level");
 	check(strcmp(record.message, "a note about nothing") == 0,
@@ -118,8 +136,8 @@ a_callback_sees_level_location_and_text(void)
 	check(record.located == 0, SCENARIO_CALLBACK,
 	    "an unlocated diagnostic should carry no location");
 
-	relic_diagf(ctx, RELIC_ERROR, &at_rule, "%s/%d is not stratified",
-	    "ready", 1);
+	relic_diag_error(ctx, RELIC_ERROR_REJECTED, &at_rule,
+	    "%s/%d is not stratified", "ready", 1);
 	check(record.total == 2 && record.level == RELIC_ERROR,
 	    SCENARIO_CALLBACK, "an error should arrive with its level");
 	check(record.located == 1 && record.where.line == 18 &&
@@ -137,7 +155,7 @@ a_callback_sees_level_location_and_text(void)
 	    strcmp(relic_error(ctx), "ready/1 is not stratified") == 0,
 	    SCENARIO_CALLBACK, "the error should be the recoverable one");
 
-	relic_diagf(ctx, RELIC_WARNING, NULL, "a warning");
+	relic_diag_warning(ctx, NULL, "a warning");
 	check(relic_error(ctx) != NULL &&
 	    strcmp(relic_error(ctx), "ready/1 is not stratified") == 0,
 	    SCENARIO_CALLBACK, "a later warning should not replace it");
@@ -147,7 +165,7 @@ a_callback_sees_level_location_and_text(void)
 	 * already recorded.
 	 */
 	relic_diag_set(ctx, NULL, NULL);
-	relic_diagf(ctx, RELIC_ERROR, NULL, "unheard");
+	relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL, "unheard");
 	check(record.total == 3, SCENARIO_CALLBACK,
 	    "no diagnostic should arrive after the callback is removed");
 	check(!record.overflowed, SCENARIO_CALLBACK,
@@ -169,15 +187,123 @@ a_silent_context_still_remembers_its_error(void)
 	check(relic_error(ctx) == NULL, SCENARIO_SILENT,
 	    "a fresh context should report no error");
 
-	relic_diagf(ctx, RELIC_WARNING, NULL, "only a warning");
+	relic_diag_warning(ctx, NULL, "only a warning");
 	check(relic_error(ctx) == NULL, SCENARIO_SILENT,
 	    "a warning alone should not make the context look failed");
 
-	relic_diagf(ctx, RELIC_ERROR, NULL, "could not open %s", "graph.dl");
+	relic_diag_error(ctx, RELIC_ERROR_IO, NULL, "could not open %s",
+	    "graph.dl");
 	check(relic_error(ctx) != NULL &&
 	    strcmp(relic_error(ctx), "could not open graph.dl") == 0,
 	    SCENARIO_SILENT,
 	    "the error should be recoverable with no callback installed");
+
+	relic_destroy(ctx);
+}
+
+static void
+record_class(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where RELIC_TEST_UNUSED,
+    const char *message RELIC_TEST_UNUSED)
+{
+	class_seen_t *class_seen;
+
+	class_seen = callback_ctx;
+	if (level == RELIC_ERROR)
+		class_seen->seen = relic_error_class(class_seen->ctx);
+}
+
+/*
+ * Every error carries the class it was reported with, recorded with its
+ * text before the callback is handed it, and a note or a warning, which is
+ * not a failure, leaves the last error's class alone.  The funnels name
+ * their classes: an internal error is INTERNAL and carries its prefix, as
+ * every error of that class does, a limit's refusal is LIMIT and the
+ * parser's errors are REJECTED.  A call
+ * refused because the context was busy reads as a misuse of the interface
+ * until the operation it was made inside returns, and then the last error
+ * reads again.
+ */
+static void
+every_error_carries_its_class(void)
+{
+	static const char refused[] =
+	    "the context was called from one of its own callbacks";
+	class_seen_t class_seen;
+	relic_t *ctx;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_CLASS, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	bzero(&class_seen, sizeof(class_seen));
+	class_seen.ctx = ctx;
+	relic_diag_set(ctx, record_class, &class_seen);
+
+	check(relic_error_class(ctx) == RELIC_ERROR_NONE, SCENARIO_CLASS,
+	    "a fresh context should have no error class");
+
+	relic_diag_note(ctx, NULL, "a note");
+	relic_diag_warning(ctx, NULL, "a warning");
+	check(relic_error(ctx) == NULL &&
+	    relic_error_class(ctx) == RELIC_ERROR_NONE, SCENARIO_CLASS,
+	    "a note and a warning should record no error");
+
+	relic_diag_error(ctx, RELIC_ERROR_IO, NULL, "cannot open %s",
+	    "graph.dl");
+	check(last_error_is(ctx, "cannot open graph.dl") &&
+	    relic_error_class(ctx) == RELIC_ERROR_IO, SCENARIO_CLASS,
+	    "an error should be recorded with the class it was reported with");
+	check(class_seen.seen == RELIC_ERROR_IO, SCENARIO_CLASS,
+	    "the callback should read the class of the error it is handed");
+
+	relic_diag_warning(ctx, NULL, "a later warning");
+	check(relic_error_class(ctx) == RELIC_ERROR_IO, SCENARIO_CLASS,
+	    "a later warning should leave the class alone");
+
+	relic_diag_internal(ctx, NULL, "a plan of %d steps reads past its end",
+	    3);
+	check(last_error_is(ctx,
+	    "internal error: a plan of 3 steps reads past its end") &&
+	    relic_error_class(ctx) == RELIC_ERROR_INTERNAL, SCENARIO_CLASS,
+	    "an internal error should carry its prefix and its class");
+	relic_diag_error(ctx, RELIC_ERROR_INTERNAL, NULL, "a plan of %d steps",
+	    4);
+	check(last_error_is(ctx, "internal error: a plan of 4 steps"),
+	    SCENARIO_CLASS, "every error of that class should carry the "
+	    "prefix, however it was reported");
+
+	relic_diag_limit(ctx, "tuples", 5, "deriving", "path/2");
+	check(last_error_is(ctx, "limit exceeded: tuples=5 while deriving "
+	    "path/2") && relic_error_class(ctx) == RELIC_ERROR_LIMIT,
+	    SCENARIO_CLASS, "a limit's refusal should be of the limit's class");
+
+	check(relic_load_string(ctx, "bad.dl", "p(X :- q(X).\n") == -1 &&
+	    relic_error_class(ctx) == RELIC_ERROR_REJECTED &&
+	    class_seen.seen == RELIC_ERROR_REJECTED, SCENARIO_CLASS,
+	    "a syntax error should be rejected text");
+
+	if (relic_enter(ctx, NULL, NULL) == 0) {
+		relic_diag_record_refusal(ctx);
+		check(last_error_is(ctx, refused) &&
+		    relic_error_class(ctx) == RELIC_ERROR_ARGUMENT,
+		    SCENARIO_CLASS,
+		    "a refused call should read as a misuse of the interface");
+
+		relic_diag_error(ctx, RELIC_ERROR_EVALUATION, NULL,
+		    "division by zero");
+		check(relic_error_class(ctx) == RELIC_ERROR_EVALUATION,
+		    SCENARIO_CLASS,
+		    "an error after a refusal should replace it");
+
+		relic_diag_record_refusal(ctx);
+		relic_leave(ctx);
+		check(last_error_is(ctx, "division by zero") &&
+		    relic_error_class(ctx) == RELIC_ERROR_EVALUATION,
+		    SCENARIO_CLASS, "once the operation returns, its last "
+		    "error should read again");
+	}
 
 	relic_destroy(ctx);
 }
@@ -323,7 +449,8 @@ a_refusal_by_the_limit_is_reported_as_the_limit(void)
 
 	if (relic_enter(ctx, NULL, NULL) == 0) {
 		relic_diag_no_memory(ctx);
-		check(last_error_is(ctx, "out of memory"), SCENARIO_LIMIT,
+		check(last_error_is(ctx, "out of memory") &&
+		    relic_error_class(ctx) == RELIC_ERROR_MEMORY, SCENARIO_LIMIT,
 		    "without a refusal, exhaustion is reported");
 		relic_leave(ctx);
 	}
@@ -335,6 +462,8 @@ a_refusal_by_the_limit_is_reported_as_the_limit(void)
 		    "limit exceeded: memory=65536 while planning path/2"),
 		    SCENARIO_LIMIT, "the refusal should name the limit and the "
 		    "activity, not \"%s\"", relic_error(ctx));
+		check(relic_error_class(ctx) == RELIC_ERROR_LIMIT,
+		    SCENARIO_LIMIT, "and be of the limit's class");
 		relic_leave(ctx);
 	}
 
@@ -430,9 +559,9 @@ create_limited(size_t max_memory, record_t *record)
 }
 
 /*
- * Check that an operation which returned `status` failed with `expected` as
- * its error, describing the operation as `what`.  A context that could not
- * be created fails the check rather than being used.
+ * Check that an operation which returned `status` was refused by a limit,
+ * with `expected` as its error, describing the operation as `what`.  A
+ * context that could not be created fails the check rather than being used.
  */
 static void
 check_refusal(relic_t *ctx, int status, const char *expected,
@@ -441,8 +570,9 @@ check_refusal(relic_t *ctx, int status, const char *expected,
 	const char *error;
 
 	error = ctx != NULL ? relic_error(ctx) : NULL;
-	checkf(status != 0 && error != NULL && strcmp(error, expected) == 0,
-	    SCENARIO_LIMIT, "%s should be refused as \"%s\", not \"%s\"", what,
+	checkf(status != 0 && error != NULL && strcmp(error, expected) == 0 &&
+	    relic_error_class(ctx) == RELIC_ERROR_LIMIT, SCENARIO_LIMIT,
+	    "%s should be refused by the limit as \"%s\", not \"%s\"", what,
 	    expected, error != NULL ? error : "(none)");
 }
 
@@ -683,6 +813,7 @@ main(void)
 {
 	a_callback_sees_level_location_and_text();
 	a_silent_context_still_remembers_its_error();
+	every_error_carries_its_class();
 	a_refusal_by_the_limit_is_reported_as_the_limit();
 	an_operation_reports_running_out_of_memory_once();
 	an_operation_names_itself_in_a_refusal();

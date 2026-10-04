@@ -322,6 +322,14 @@ installs. Every diagnostic the library produces, at every level, goes through
 the one callback, so a caller that installs one sees all of them and its
 standard error sees none.
 
+Every error also has a class, read with `relic_error_class()` beside
+`relic_error()`: what kind of failure it was -- input rejected, an
+evaluation error, a limit, a file, memory, an interrupt, a malformed call,
+or a bug in relic -- so that a program driving the library learns it
+without matching the text, which stays free to improve. The classes, the
+rule that decides between two, and how every error carries one by
+construction are `specs/design-errors.md`.
+
 One diagnostic is produced only on request. An ordering comparison between
 values of different types is false and filters its binding out, which is the
 language's rule and not a mistake, so the library does not report it by

@@ -11,7 +11,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <strings.h>
 
 #include <relic.h>
@@ -53,17 +52,16 @@
 #define	EVAL_MAX_MEMORY		((size_t)64 * 1024 * 1024)
 
 /*
- * The errors a context reported during one call: how many, and whether the
- * last was one that may stop a query without being a finding: a limit's
- * refusal or an evaluation error.  Reset before each call, so
- * that a call that fails without reporting anything is seen as the finding
- * it is rather than excused by an error some earlier call left behind.
+ * A context, and how many errors it reported during one call.  The count is
+ * reset before each call, so that a call that fails without reporting
+ * anything is seen as the finding it is rather than excused by an error
+ * some earlier call left behind.
  */
 typedef struct error_capture error_capture_t;
 
 struct error_capture {
-	size_t		count;
-	bool		stopped;
+	relic_t		*ctx;
+	size_t		 count;
 };
 
 static void	 capture_error(void *capture_ctx,
@@ -137,8 +135,8 @@ open_context(const uint8_t *data, size_t size, unsigned int flags,
 	ctx = relic_create_config(&config);
 	if (ctx == NULL)
 		abort();
+	errors->ctx = ctx;
 	errors->count = 0;
-	errors->stopped = false;
 	relic_diag_set(ctx, capture_error, errors);
 	if (explain)
 		relic_explain_set(ctx, discard_explain, NULL);
@@ -223,19 +221,22 @@ compare_answers(size_t index, const char *strategy, const answer_t *answer,
 
 /*
  * Answer query `index` in ctx.  Returns false when a limit refused it or
- * it met an evaluation error, and aborts when it failed any other
- * way, or without saying why: with nothing but those to stop it, a query
- * over a program that checked must be answered.
+ * it met an evaluation error -- an undefined arithmetic result, a string
+ * too long to be a value, or a pattern arriving in a variable that is not
+ * a regular expression -- and aborts when it failed any other way, an
+ * internal error among them, or without saying why: with nothing but those
+ * to stop it, a query over a program that checked must be answered.  The
+ * class read is the last error's, the one that stopped the query.
  */
 static bool
 collect_unless_stopped(relic_t *ctx, error_capture_t *errors, size_t index,
     answer_t *answer, const char *strategy)
 {
+	enum relic_error_class error_class;
 	relic_query_t *query;
 	bool collected = false;
 
 	errors->count = 0;
-	errors->stopped = false;
 	query = relic_query_loaded(ctx, index);
 	if (query != NULL) {
 		collected = answer_collect(ctx, query, answer);
@@ -249,7 +250,9 @@ collect_unless_stopped(relic_t *ctx, error_capture_t *errors, size_t index,
 		    index + 1, strategy);
 		abort();
 	}
-	if (errors->stopped)
+	error_class = relic_error_class(ctx);
+	if (error_class == RELIC_ERROR_LIMIT ||
+	    error_class == RELIC_ERROR_EVALUATION)
 		return (false);
 	fprintf(stderr, "query %zu failed under %s: %s\n", index + 1, strategy,
 	    relic_error(ctx));
@@ -257,35 +260,19 @@ collect_unless_stopped(relic_t *ctx, error_capture_t *errors, size_t index,
 }
 
 /*
- * Count an error and note whether it may stop a query: a limit's refusal,
- * which every limit words the same way, or an evaluation error -- an
- * undefined arithmetic result, a string too long to be a value, or a
- * pattern arriving in a variable that is not a regular expression -- which
- * names its failure first.  A constant pattern that is not one is refused
- * at load, alike in every context, and is worded without the " in ".
- * Warnings and notes are discarded.
+ * Count an error, and abort on an internal one.  Warnings and notes are
+ * discarded.
  */
 static void
 capture_error(void *capture_ctx, enum relic_diag_level level,
-    const relic_location_t *where RELIC_TEST_UNUSED, const char *message)
+    const relic_location_t *where RELIC_TEST_UNUSED,
+    const char *message RELIC_TEST_UNUSED)
 {
-	static const char *const stops[] = {
-		"limit exceeded:",
-		"integer overflow in ",
-		"division by zero in ",
-		"string too long in ",
-		"invalid regular expression in "
-	};
 	error_capture_t *errors = capture_ctx;
 
-	if (level != RELIC_ERROR)
-		return;
-	errors->count++;
-	errors->stopped = false;
-	for (size_t i = 0; i < sizeof(stops) / sizeof(stops[0]); i++) {
-		if (strncmp(message, stops[i], strlen(stops[i])) == 0)
-			errors->stopped = true;
-	}
+	fuzz_refuse_internal(errors->ctx, level);
+	if (level == RELIC_ERROR)
+		errors->count++;
 }
 
 static void

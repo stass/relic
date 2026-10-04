@@ -288,8 +288,10 @@ an_interrupted_materialization_fails(unsigned int flags, size_t threads)
 	    "fail as interrupted, not with \"%s\"", threads,
 	    interrupter.last_error);
 	check(relic_error(ctx) != NULL &&
-	    strcmp(relic_error(ctx), interrupter.last_error) == 0,
-	    SCENARIO_MATERIALIZE, "relic_error() gives the interrupt");
+	    strcmp(relic_error(ctx), interrupter.last_error) == 0 &&
+	    relic_error_class(ctx) == RELIC_ERROR_INTERRUPTED,
+	    SCENARIO_MATERIALIZE,
+	    "relic_error() and relic_error_class() give the interrupt");
 
 	relic_explain_set(ctx, NULL, NULL);
 	check(relic_materialize(ctx) == 0, SCENARIO_MATERIALIZE,
@@ -328,11 +330,10 @@ an_interrupted_query_fails(unsigned int flags, size_t threads)
 	relic_explain_set(ctx, interrupt_from_explain, &interrupter);
 	rows = 0;
 	checkf(relic_query_run(ctx, query, count_rows, &rows) == -1 &&
-	    rows == 0 && strncmp(interrupter.last_error, "interrupted while ",
-	    strlen("interrupted while ")) == 0, SCENARIO_QUERY,
-	    "at %zu threads the query should fail as interrupted with no "
-	    "rows, not %zu rows and \"%s\"", threads, rows,
-	    interrupter.last_error);
+	    rows == 0 && relic_error_class(ctx) == RELIC_ERROR_INTERRUPTED,
+	    SCENARIO_QUERY, "at %zu threads the query should fail as "
+	    "interrupted with no rows, not %zu rows and \"%s\"", threads,
+	    rows, interrupter.last_error);
 
 	relic_explain_set(ctx, NULL, NULL);
 	rows = 0;

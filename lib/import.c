@@ -675,7 +675,7 @@ relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
 
 	status = -1;
 	if (stream == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no input stream was given");
 	} else if (import_plan_init(ctx, import, &plan)) {
 		status = import_stream(ctx, source_name, stream, &plan);
@@ -699,7 +699,8 @@ relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
 
 	status = -1;
 	if (path == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "no path was given");
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "no path was given");
 	} else if (import_plan_init(ctx, import, &plan)) {
 		status = import_named_file(ctx, path, &plan);
 		import_plan_reset(&plan);
@@ -819,22 +820,27 @@ validate_import(relic_t *ctx, const relic_import_t *import)
 	size_t i;
 
 	if (import == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no import description was given");
 		return (false);
 	}
 
-	if (import->predicate == NULL ||
-	    !relic_lex_is_predicate_name(import->predicate,
+	if (import->predicate == NULL) {
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "an import needs a predicate name");
+		return (false);
+	}
+
+	if (!relic_lex_is_predicate_name(import->predicate,
 	    strlen(import->predicate))) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
 		    "a predicate name is a lowercase letter followed by "
 		    "letters, digits and underscores, and is not `not`");
 		return (false);
 	}
 
 	if (import->columns == NULL || import->column_count == 0) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "an import needs at least one column");
 		return (false);
 	}
@@ -842,7 +848,7 @@ validate_import(relic_t *ctx, const relic_import_t *import)
 	for (i = 0; i < import->column_count; i++) {
 		if (import->columns[i] < RELIC_COLUMN_SYMBOL ||
 		    import->columns[i] > RELIC_COLUMN_SKIP) {
-			relic_diagf(ctx, RELIC_ERROR, NULL,
+			relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 			    "column %zu of the import has no type", i + 1);
 			return (false);
 		}
@@ -850,20 +856,20 @@ validate_import(relic_t *ctx, const relic_import_t *import)
 
 	if (kept_columns(import->columns, import->column_count) >
 	    RELIC_MAX_ARITY) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
 		    "an import may keep at most %d columns", RELIC_MAX_ARITY);
 		return (false);
 	}
 
 	if (import->format != RELIC_FORMAT_CSV &&
 	    import->format != RELIC_FORMAT_TSV) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "the import's format is neither csv nor tsv");
 		return (false);
 	}
 
 	if ((import->flags & ~RELIC_IMPORT_HEADER) != 0) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "the import's flags hold bits this library does not "
 		    "define: 0x%x", import->flags & ~RELIC_IMPORT_HEADER);
 		return (false);
@@ -994,7 +1000,7 @@ feed_chunk(importer_t *importer, const char *source_name, FILE *stream,
 	read_errno = errno;
 
 	if (got < RELIC_IMPORT_READ_CHUNK && ferror(stream)) {
-		relic_diagf(importer->ctx, RELIC_ERROR, NULL,
+		relic_diag_error(importer->ctx, RELIC_ERROR_IO, NULL,
 		    "cannot read %s: %s", source_name,
 		    strerror(read_errno != 0 ? read_errno : EIO));
 		return (IMPORT_FAILED);
@@ -1086,8 +1092,8 @@ field_value(relic_t *ctx, enum relic_column column,
 	switch (column) {
 	case RELIC_COLUMN_SYMBOL:
 		if (!relic_lex_is_symbol(event->bytes, event->length)) {
-			relic_diagf(ctx, RELIC_ERROR, &event->where,
-			    "expected a symbol, found %s",
+			relic_diag_error(ctx, RELIC_ERROR_REJECTED,
+			    &event->where, "expected a symbol, found %s",
 			    describe_field(event->bytes, event->length,
 			    described, sizeof(described)));
 			return (false);
@@ -1104,14 +1110,14 @@ field_value(relic_t *ctx, enum relic_column column,
 			return (relic_value_intern_integer(ctx, integer,
 			    valuep) == 0);
 		case RELIC_INTEGER_MALFORMED:
-			relic_diagf(ctx, RELIC_ERROR, &event->where,
-			    "expected an integer, found %s",
+			relic_diag_error(ctx, RELIC_ERROR_REJECTED,
+			    &event->where, "expected an integer, found %s",
 			    describe_field(event->bytes, event->length,
 			    described, sizeof(described)));
 			return (false);
 		case RELIC_INTEGER_OUT_OF_RANGE:
-			relic_diagf(ctx, RELIC_ERROR, &event->where,
-			    "integer out of range: %s",
+			relic_diag_error(ctx, RELIC_ERROR_REJECTED,
+			    &event->where, "integer out of range: %s",
 			    describe_field(event->bytes, event->length,
 			    described, sizeof(described)));
 			return (false);
@@ -1161,7 +1167,7 @@ take_end(importer_t *importer, const relic_table_event_t *event)
 	if (!importer->header_pending)
 		return (IMPORT_TABLE_ENDED);
 
-	relic_diagf(importer->ctx, RELIC_ERROR, &event->where,
+	relic_diag_error(importer->ctx, RELIC_ERROR_REJECTED, &event->where,
 	    "expected a header, found the end of the input");
 
 	return (IMPORT_FAILED);
@@ -1181,40 +1187,40 @@ report_mistake(relic_t *ctx, const import_plan_t *plan,
 
 	switch (event->mistake) {
 	case RELIC_TABLE_TOO_MANY_FIELDS:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "expected %zu field%s, found more than %zu",
 		    plan->column_count, plural, plan->column_count);
 		break;
 	case RELIC_TABLE_TOO_FEW_FIELDS:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "expected %zu field%s, found %zu", plan->column_count,
 		    plural, event->fields_found);
 		break;
 	case RELIC_TABLE_UNKNOWN_ESCAPE:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "unknown escape: a backslash followed by %s",
 		    relic_diag_byte(event->byte, described, sizeof(described)));
 		break;
 	case RELIC_TABLE_ESCAPE_AT_END:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "unknown escape: a backslash at the end of the input");
 		break;
 	case RELIC_TABLE_STRAY_RETURN:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "carriage return inside a field");
 		break;
 	case RELIC_TABLE_QUOTE_IN_UNQUOTED:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "quote inside an unquoted field");
 		break;
 	case RELIC_TABLE_AFTER_CLOSING_QUOTE:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "expected ',' or the end of the line after a closing "
 		    "quote, found %s",
 		    relic_diag_byte(event->byte, described, sizeof(described)));
 		break;
 	case RELIC_TABLE_UNTERMINATED_QUOTE:
-		relic_diagf(ctx, RELIC_ERROR, &event->where,
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
 		    "unterminated quoted field");
 		break;
 	}

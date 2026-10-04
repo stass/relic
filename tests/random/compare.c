@@ -13,7 +13,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <strings.h>
 
 #include <relic.h>
@@ -138,17 +137,6 @@ struct run {
 	size_t		totals[RANDOM_MAX_QUERIES];
 	size_t		strings[RANDOM_MAX_QUERIES];
 	uint64_t	derivations;
-};
-
-/*
- * An evaluation error: the words the library's message about it opens
- * with, and the kind of failure it is.
- */
-typedef struct evaluation_error evaluation_error_t;
-
-struct evaluation_error {
-	const char		*opening;
-	random_failure_kind_t	 kind;
 };
 
 /* The diagnostic callback's state while a strategy loads the program. */
@@ -662,27 +650,14 @@ drop_last_row(answer_t *answer)
 }
 
 /*
- * The kind of failure the context's last error is: one of the evaluation
- * errors, told by the message the library opens it with, or else a query
- * that failed.
+ * The kind of failure the context's last error is: an evaluation error,
+ * which the library classes as one, or else a query that failed.
  */
 static random_failure_kind_t
 evaluation_failure(relic_t *ctx)
 {
-	static const evaluation_error_t errors[] = {
-		{ "integer overflow in ", FAILURE_UNDEFINED },
-		{ "division by zero in ", FAILURE_UNDEFINED },
-		{ "string too long in ", FAILURE_TOO_LONG },
-		{ "invalid regular expression in ", FAILURE_PATTERN },
-	};
-	const char *error = relic_error(ctx);
-
-	for (size_t i = 0; error != NULL && i < sizeof(errors) /
-	    sizeof(errors[0]); i++) {
-		if (strncmp(error, errors[i].opening,
-		    strlen(errors[i].opening)) == 0)
-			return (errors[i].kind);
-	}
+	if (relic_error_class(ctx) == RELIC_ERROR_EVALUATION)
+		return (FAILURE_EVALUATION);
 	return (FAILURE_QUERY);
 }
 

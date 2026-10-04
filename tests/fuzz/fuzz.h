@@ -34,8 +34,20 @@ int	LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
  */
 int	fuzz_load(relic_t *ctx, const uint8_t *data, size_t size);
 
-/* A diagnostic callback that discards every message. */
-void	fuzz_discard_diagnostic(void *callback_ctx,
+/*
+ * Abort when the diagnostic `ctx` is reporting at `level` is an internal
+ * error: an invariant the library checks was false, which only a bug
+ * reaches.  Every target's diagnostic callback calls this for each message,
+ * so an internal error is a finding wherever it is reported, in a load or a
+ * check as much as in a query.
+ */
+void	fuzz_refuse_internal(relic_t *ctx, enum relic_diag_level level);
+
+/*
+ * A diagnostic callback whose callback context is the context reporting:
+ * it discards every message, but aborts on an internal error.
+ */
+void	fuzz_watch_diagnostic(void *callback_ctx,
 	    enum relic_diag_level level, const relic_location_t *where,
 	    const char *message);
 

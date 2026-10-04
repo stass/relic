@@ -490,6 +490,7 @@ static uint64_t	 schedule_digest(const relic_schedule_t *schedule);
 static bool	 schedule_then_extend(relic_t *ctx, const char *program);
 static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
+static bool	 out_of_memory(relic_t *ctx);
 
 static bool
 refuse_this_request(enum refused_requests kind)
@@ -640,6 +641,17 @@ relic_test_reallocarray(void *items, size_t count, size_t size)
 		return (NULL);
 
 	return (reallocarray(items, count, size));
+}
+
+/*
+ * Whether the context's last error is that it ran out of memory, as a
+ * refused allocation reports.  No context these sweeps create sets a limit,
+ * so the memory limit cannot have refused instead.
+ */
+static bool
+out_of_memory(relic_t *ctx)
+{
+	return (relic_error_class(ctx) == RELIC_ERROR_MEMORY);
 }
 
 /*
@@ -1041,6 +1053,9 @@ sweep_load(const load_case_t *load, bool from_stream)
 		    "%zu, with allocation %ld refused", load->what,
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
+		checkf(status == 0 || out_of_memory(ctx), SCENARIO_LOAD,
+		    "a load of %s that failed should fail out of memory, with "
+		    "allocation %ld refused", load->what, budget);
 
 		if (status != 0) {
 			refused++;
@@ -1182,6 +1197,9 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 		    "with allocation %ld refused",
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
+		checkf(status == 0 || out_of_memory(ctx), SCENARIO_IMPORT,
+		    "an import that failed should fail out of memory, with "
+		    "allocation %ld refused", budget);
 
 		if (status != 0) {
 			refused++;
@@ -1251,7 +1269,9 @@ a_path_whose_close_fails_adds_nothing(void)
 		next_close_fails = true;
 		status = relic_load_path(ctx, path);
 		checkf(!next_close_fails && status != 0 &&
-		    errors_reported == 1 && relic_base_total(ctx) == 1 &&
+		    errors_reported == 1 &&
+		    relic_error_class(ctx) == RELIC_ERROR_IO &&
+		    relic_base_total(ctx) == 1 &&
 		    ctx->ast.count == 0, SCENARIO_CLOSE, "a load whose file "
 		    "fails to close should fail once having added nothing, "
 		    "not %zu facts and %zu statements",
@@ -1269,7 +1289,9 @@ a_path_whose_close_fails_adds_nothing(void)
 		next_close_fails = true;
 		status = relic_import_path(ctx, path, &import);
 		checkf(!next_close_fails && status != 0 &&
-		    errors_reported == 1 && relic_base_total(ctx) == 3,
+		    errors_reported == 1 &&
+		    relic_error_class(ctx) == RELIC_ERROR_IO &&
+		    relic_base_total(ctx) == 3,
 		    SCENARIO_CLOSE, "an import whose file fails to close "
 		    "should fail once having added nothing, not %zu facts",
 		    relic_base_total(ctx) - 3);
@@ -1411,6 +1433,9 @@ sweep_lookahead(const char *program, bool well_formed)
 		    well_formed ? "well-formed" : "malformed",
 		    unrefused ? "no" : "a",
 		    well_formed && unrefused ? "succeed" : "fail", budget);
+		checkf(!well_formed || status == 0 || out_of_memory(ctx),
+		    SCENARIO_LOOKAHEAD, "a well-formed load that failed should "
+		    "fail out of memory, with allocation %ld refused", budget);
 
 		if (unrefused)
 			reached_unrefused = true;
@@ -1563,6 +1588,9 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 		    "with allocation %ld refused",
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
+		checkf(status == 0 || out_of_memory(ctx), SCENARIO_CHECK,
+		    "a check that failed should fail out of memory, with "
+		    "allocation %ld refused", budget);
 
 		if (status != 0) {
 			refused++;
@@ -1684,9 +1712,10 @@ stratify_sweep_program(void)
  * notes, and the program neither condemned nor marked unstratified.  Whether
  * or not the first check got that far, the cycle is then reported exactly
  * once across all three checks -- one error and a note per edge -- and the
- * program stays refused.  A partial report left behind by a failed analysis,
- * or a report repeated by a later check, would each show as a count that is
- * off.
+ * program stays refused: each later check fails with one error, the cycle's
+ * or, once it has been reported, that the program cannot be used.  A
+ * partial report left behind by a failed analysis, or a report repeated by
+ * a later check, would each show as a count that is off.
  */
 static void
 an_analysis_that_ran_out_of_memory_says_nothing(void)
@@ -1695,6 +1724,7 @@ an_analysis_that_ran_out_of_memory_says_nothing(void)
 	size_t analysed;
 	size_t completed;
 	long budget;
+	int later;
 	int status;
 
 	program = stratify_sweep_program();
@@ -1737,9 +1767,13 @@ an_analysis_that_ran_out_of_memory_says_nothing(void)
 
 		if (ctx->program.unstratified) {
 			completed++;
+			checkf(errors_reported == 1, SCENARIO_STRATIFY,
+			    "a check that completed should report the cycle "
+			    "as one error, not %zu, with allocation %ld "
+			    "refused", errors_reported, budget);
 		} else {
-			checkf(errors_reported == 1 && notes_reported == 0,
-			    SCENARIO_STRATIFY,
+			checkf(errors_reported == 1 && notes_reported == 0 &&
+			    out_of_memory(ctx), SCENARIO_STRATIFY,
 			    "a check that ran out of memory should report that "
 			    "alone, not %zu error(s) and %zu note(s), with "
 			    "allocation %ld refused", errors_reported,
@@ -1754,26 +1788,25 @@ an_analysis_that_ran_out_of_memory_says_nothing(void)
 			errors_reported = 0;
 		}
 
-		status = relic_check(ctx);
-		checkf(status != 0, SCENARIO_STRATIFY,
-		    "the program should be refused once the allocator "
-		    "recovers, with allocation %ld refused", budget);
-
-		status = relic_check(ctx);
-		checkf(status != 0, SCENARIO_STRATIFY,
-		    "the program should stay refused on a later check, with "
-		    "allocation %ld refused", budget);
+		for (later = 0; later < 2; later++) {
+			errors_reported = 0;
+			status = relic_check(ctx);
+			checkf(status != 0 && errors_reported == 1,
+			    SCENARIO_STRATIFY, "check %d should be refused "
+			    "with one error once the allocator recovers, not "
+			    "%zu, with allocation %ld refused", later + 2,
+			    errors_reported, budget);
+		}
 
 		checkf(ctx->program.unstratified && ctx->program.invalid,
 		    SCENARIO_STRATIFY,
 		    "the program should end up marked unstratified, with "
 		    "allocation %ld refused", budget);
 
-		checkf(errors_reported == 1 && notes_reported == STRATIFY_CYCLE,
-		    SCENARIO_STRATIFY,
-		    "the cycle should be reported once, as 1 error and %d "
-		    "notes, not %zu and %zu, with allocation %ld refused",
-		    STRATIFY_CYCLE, errors_reported, notes_reported, budget);
+		checkf(notes_reported == STRATIFY_CYCLE, SCENARIO_STRATIFY,
+		    "the cycle should be reported once, with %d notes, not "
+		    "%zu, with allocation %ld refused", STRATIFY_CYCLE,
+		    notes_reported, budget);
 
 		relic_destroy(ctx);
 	}
@@ -1941,7 +1974,8 @@ a_schedule_that_could_not_be_rebuilt_is_kept(void)
 		if (status == 0) {
 			completed++;
 		} else {
-			checkf(errors_reported == 1, SCENARIO_SCHEDULE,
+			checkf(errors_reported == 1 && out_of_memory(ctx),
+			    SCENARIO_SCHEDULE,
 			    "a check that ran out of memory should report that "
 			    "alone, not %zu errors, with allocation %ld "
 			    "refused", errors_reported, budget);
@@ -2125,6 +2159,7 @@ an_index_survives_a_failed_allocation(void)
 		size_t inserted;
 		int built;
 		bool added;
+		bool refused_here;
 
 		ctx = relic_create();
 		if (ctx == NULL) {
@@ -2172,10 +2207,14 @@ an_index_survives_a_failed_allocation(void)
 		}
 		serve_every_allocation();
 
-		checkf(errors_reported == (built != 0 ||
-		    inserted < INDEX_BATCH ? 1u : 0u), SCENARIO_INDEX,
-		    "a refusal should be reported once, and %zu errors were, "
-		    "with allocation %ld refused", errors_reported, budget);
+		refused_here = built != 0 || inserted < INDEX_BATCH;
+		checkf(errors_reported == (refused_here ? 1u : 0u),
+		    SCENARIO_INDEX, "a refusal should be reported once, and "
+		    "%zu errors were, with allocation %ld refused",
+		    errors_reported, budget);
+		checkf(!refused_here || out_of_memory(ctx), SCENARIO_INDEX,
+		    "a refusal should be reported as running out of memory, "
+		    "with allocation %ld refused", budget);
 		checkf(relic_relation_total_bytes(ctx) == storage_by_hand(ctx),
 		    SCENARIO_INDEX, "the storage total should be %zu, not %zu, "
 		    "with allocation %ld refused", storage_by_hand(ctx),
@@ -2637,6 +2676,10 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 		    "not %zu, with allocation %ld refused", sweep->strategy,
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
+		checkf(status == 0 || out_of_memory(ctx), SCENARIO_EVALUATE,
+		    "a query answered %s that failed should fail out of "
+		    "memory, with allocation %ld refused", sweep->strategy,
+		    budget);
 		checkf(rows == (status != 0 ? 0u : sweep->rows),
 		    SCENARIO_EVALUATE,
 		    "a query answered %s that %s should deliver %zu rows, not "

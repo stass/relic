@@ -616,12 +616,8 @@ random_failure_name(random_failure_kind_t kind)
 		return ("derivations miscounted");
 	case FAILURE_HELPER:
 		return ("helper rendering differs");
-	case FAILURE_UNDEFINED:
-		return ("arithmetic undefined");
-	case FAILURE_TOO_LONG:
-		return ("string too long");
-	case FAILURE_PATTERN:
-		return ("invalid pattern");
+	case FAILURE_EVALUATION:
+		return ("evaluation error");
 	case FAILURE_CRASH:
 		return ("crashed");
 	case FAILURE_HANG:

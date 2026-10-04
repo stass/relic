@@ -205,12 +205,6 @@ or its interning of `not` or `_`; in `lib/magic.c`,
 `compile_head` interning a head's constant. A context filled to one entry
 short of a growth before the operation would reach them.
 
-**A caller tells a limit's refusal from another failure only by its
-text.** [Low, component: `include/relic.h`, `lib/diag.c`] Every limit is
-reported through `relic_diag_limit()` with the prefix `limit exceeded:`, and
-the eval fuzz target tells a limit's refusal from a failure by that prefix.
-An error class a caller can ask for would free both from the wording.
-
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
 and with identical counters, `tc-cyclic` takes 2.62 s against 2.24 s,

@@ -489,7 +489,7 @@ report_variable_limit(relic_compiler_t *compiler,
 {
 	char described[RELIC_STATEMENT_TEXT_MAX];
 
-	relic_diagf(compiler->ctx, RELIC_ERROR, where,
+	relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED, where,
 	    "%s%s uses more than %d distinct variables",
 	    compiler->outer != NULL ? "the aggregate in " : "",
 	    describe_statement(compiler, described, sizeof(described)),
@@ -730,8 +730,8 @@ compile_expr(relic_compiler_t *compiler, const relic_ast_expr_t *source,
 	 * rather than assumed, as compile_literal() reports a literal of no
 	 * known kind.
 	 */
-	relic_diagf(compiler->ctx, RELIC_ERROR, &source->where,
-	    "internal error: an expression holds a node of no known kind");
+	relic_diag_internal(compiler->ctx, &source->where,
+	    "an expression holds a node of no known kind");
 
 	return (RELIC_COMPILE_REJECTED);
 }
@@ -753,9 +753,8 @@ compile_call(relic_compiler_t *compiler, const relic_ast_call_t *source,
 
 	if (!source->resolved ||
 	    source->argc != relic_function_info(source->fn)->arity) {
-		relic_diagf(compiler->ctx, RELIC_ERROR, &source->open,
-		    "internal error: a call of no function reached the "
-		    "compiler");
+		relic_diag_internal(compiler->ctx, &source->open,
+		    "a call of no function reached the compiler");
 		return (RELIC_COMPILE_REJECTED);
 	}
 
@@ -827,7 +826,7 @@ compile_constant_pattern(relic_compiler_t *compiler,
 
 	count = relic_regex_compile(bytes, length, insts, &error);
 	if (count == 0) {
-		relic_diagf(compiler->ctx, RELIC_ERROR, where,
+		relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED, where,
 		    "invalid regular expression: %s",
 		    relic_regex_message(error.failure));
 		return (RELIC_COMPILE_REJECTED);
@@ -1355,7 +1354,7 @@ compile_aggregate(relic_compiler_t *compiler,
 
 	collect_group_columns(source, &columns);
 	if (columns.count > RELIC_MAX_ARITY) {
-		relic_diagf(compiler->ctx, RELIC_ERROR,
+		relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED,
 		    &columns.where[RELIC_MAX_ARITY],
 		    "the aggregate in %s mentions more than %d variables",
 		    describe_statement(compiler, described, sizeof(described)),
@@ -1469,7 +1468,7 @@ report_group_unbound(relic_compiler_t *compiler,
 		variable = &compiler->variables[slot];
 
 		if (variable->anonymous) {
-			relic_diagf(compiler->ctx, RELIC_ERROR,
+			relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED,
 			    &variable->where,
 			    "anonymous variable in the aggregate of %s cannot "
 			    "be bound by a positive literal of the aggregate "
@@ -1477,13 +1476,14 @@ report_group_unbound(relic_compiler_t *compiler,
 			continue;
 		}
 
-		relic_diagf(compiler->ctx, RELIC_ERROR, &variable->where,
+		relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED,
+		    &variable->where,
 		    "variable %s in the aggregate of %s is not bound by a "
 		    "positive literal or an assignment of the aggregate body",
 		    variable_name(compiler, variable, named, sizeof(named)),
 		    described);
 		if (slot < aggregate->shared_count)
-			relic_diagf(compiler->ctx, RELIC_NOTE, &variable->where,
+			relic_diag_note(compiler->ctx, &variable->where,
 			    "a variable bound outside an aggregate must also "
 			    "be bound inside it");
 	}
@@ -1661,8 +1661,8 @@ compile_literal(relic_compiler_t *compiler,
 	 * nowhere to go, and because assertions are compiled out of an
 	 * ordinary build.
 	 */
-	relic_diagf(compiler->ctx, RELIC_ERROR, &source->where,
-	    "internal error: the body holds a literal of no known kind");
+	relic_diag_internal(compiler->ctx, &source->where,
+	    "the body holds a literal of no known kind");
 
 	return (RELIC_COMPILE_REJECTED);
 }
@@ -1857,14 +1857,15 @@ report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
 		 * one would be wrong.
 		 */
 		if (variable->anonymous) {
-			relic_diagf(compiler->ctx, RELIC_ERROR,
+			relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED,
 			    &variable->where,
 			    "anonymous variable in %s cannot be bound by a "
 			    "positive body literal", described);
 			continue;
 		}
 
-		relic_diagf(compiler->ctx, RELIC_ERROR, &variable->where,
+		relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED,
+		    &variable->where,
 		    "variable %s in %s is not bound by a positive body literal "
 		    "or an assignment",
 		    variable_name(compiler, variable, named, sizeof(named)),
@@ -1925,9 +1926,9 @@ report_singleton_variables(relic_compiler_t *compiler, uint64_t unbound)
 
 		variable_name(compiler, variable, named, sizeof(named));
 
-		relic_diagf(compiler->ctx, RELIC_WARNING, &variable->where,
+		relic_diag_warning(compiler->ctx, &variable->where,
 		    "variable %s occurs only once in this rule", named);
-		relic_diagf(compiler->ctx, RELIC_NOTE, &variable->where,
+		relic_diag_note(compiler->ctx, &variable->where,
 		    "rename it to _%s to silence this warning", named);
 	}
 }
@@ -2261,7 +2262,7 @@ compile_query_head(relic_compiler_t *compiler)
 			continue;
 
 		if (columns == RELIC_MAX_ARITY) {
-			relic_diagf(compiler->ctx, RELIC_ERROR,
+			relic_diag_error(compiler->ctx, RELIC_ERROR_REJECTED,
 			    &variable->where,
 			    "the query has more than %d output columns",
 			    RELIC_MAX_ARITY);
@@ -2439,7 +2440,7 @@ relic_check(relic_t *ctx)
 	if (relic_enter(ctx, NULL, NULL) != 0)
 		return (-1);
 
-	status = check_program(ctx);
+	status = relic_program_ready(ctx);
 
 	relic_leave(ctx);
 
@@ -2447,11 +2448,14 @@ relic_check(relic_t *ctx)
 }
 
 /*
- * relic_check() inside an operation already entered: compile what was loaded
- * since the last check, then analyse the program and sweep for undefined
- * predicates.  A check runs alone and at the start of every operation that
- * uses the program, so it names itself to the memory limit for as long as
- * it runs and then gives the operation its own activity back.
+ * The check itself, inside an operation already entered: compile what was
+ * loaded since the last check, then analyse the program and sweep for
+ * undefined predicates.  It reports each mistake once, and so fails without
+ * a word on a program whose mistakes an earlier check reported;
+ * relic_program_ready() is the caller that says so.  A check runs alone and
+ * at the start of every operation that uses the program, so it names itself
+ * to the memory limit for as long as it runs and then gives the operation
+ * its own activity back.
  */
 static int
 check_program(relic_t *ctx)
@@ -2518,14 +2522,19 @@ compile_and_analyse(relic_t *ctx)
 }
 
 /*
- * Check the program before it is used, and say so when it cannot be.
+ * Check the program, and say so when it cannot be used.
  *
- * relic_check() reports each mistake once and then refuses the program in
- * silence, which is right for a check -- repeating a message says nothing new
- * -- and wrong for an operation that fails because of it: every failure must
- * report at least one error, or a caller is left with -1 and no reason.  So
- * when a check fails having reported nothing this time, the reason is given
- * here as a pointer to the messages that came before.
+ * A check reports each mistake once, since repeating a message says nothing
+ * new, so a program that held a rejected statement fails every later check
+ * with nothing left to report.  Every failure must report at least one
+ * error, or a caller is left with -1 and, from relic_error(), the reason
+ * for some earlier failure.  So when a check fails having reported nothing
+ * this time, the reason is given here: a pointer to the messages that came
+ * before, when the program is marked as having held a rejected statement.
+ * A silent failure of a program not so marked has no reason this function
+ * knows, and is reported as the library's own mistake rather than blamed on
+ * the program.  relic_check() and every operation that uses the program
+ * check it through here.
  */
 int
 relic_program_ready(relic_t *ctx)
@@ -2537,10 +2546,16 @@ relic_program_ready(relic_t *ctx)
 	if (check_program(ctx) == 0)
 		return (0);
 
-	if (ctx->diag.error_count == errors_before)
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+	if (ctx->diag.error_count != errors_before)
+		return (-1);
+
+	if (ctx->program.invalid)
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
 		    "the program cannot be used: its errors were reported "
 		    "when it was checked");
+	else
+		relic_diag_internal(ctx, NULL,
+		    "a check of the program failed without saying why");
 
 	return (-1);
 }
@@ -2621,7 +2636,8 @@ prepare_query(relic_t *ctx, const char *source_name, const char *text)
 	enum relic_compile_result result;
 
 	if (text == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "no query text was given");
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "no query text was given");
 		return (NULL);
 	}
 
@@ -2722,7 +2738,7 @@ copy_loaded_query(relic_t *ctx, size_t index)
 
 	queries = &ctx->program.queries;
 	if (index >= queries->count) {
-		relic_diagf(ctx, RELIC_ERROR, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 		    "no query at index %zu: the program's queries number %zu",
 		    index, queries->count);
 		return (NULL);

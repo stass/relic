@@ -280,18 +280,17 @@ A failure is a kind and, where one applies, the strategy that disagreed:
 * **abnormal** -- the child exited with a nonzero status or without a
   verdict, which is how a sanitizer that reports and exits, rather than
   aborting, shows up;
-* **undefined** -- an evaluation failed on an undefined arithmetic result,
-  an integer overflow or a zero divisor;
-* **too long** -- an evaluation failed on a string longer than a string
-  value can hold;
-* **pattern** -- an evaluation failed on a pattern that is not a regular
-  expression.
+* **evaluation** -- an evaluation failed on a result the language leaves
+  undefined: an integer overflow, a zero divisor, a string longer than a
+  string value can hold, or a pattern that is not a regular expression.
 
-The last three are the evaluation errors of `specs/design-arithmetic.md`
-section 4.2 and `specs/design-strings.md` section 4.3. A generated program
-is defined by construction, section 2.4, so each is a failure of the
-generator's construction or of the library's evaluation, and naming it
-tells a reader which without reading the reduced program.
+The last kind covers the evaluation errors of `specs/design-arithmetic.md`
+section 4.2 and `specs/design-strings.md` section 4.3, told apart from a
+query that failed for another reason by the error's class,
+`specs/design-errors.md` section 3, and not by its text. A generated
+program is defined by construction, section 2.4, so an evaluation error is
+a failure of the generator's construction or of the library's evaluation;
+the report quotes the error, which says which of the four it met.
 
 A crash also records its signal and an abnormal exit its status, so that a
 reduction keeps, say, a failed assertion from sliding into a plain
@@ -314,7 +313,8 @@ reduction from sliding from one bug to an easier, unrelated one -- or to a
 candidate that fails only because a deletion made it invalid. A refused
 program is the exception: the first strategy to load it always refuses it,
 so its reduction holds only the kind, and may move from one reason for
-refusing to another.
+refusing to another. An evaluation error is held the same way, by its kind
+and strategy, and may move from one of the four errors to another.
 
 ### 4.2 Edits
 
@@ -409,11 +409,12 @@ small relation and a large join -- a cross product whose tuples are all
 duplicates -- stays inside every limit and can still run long, because no
 limit counts steps; `-timeout` is the bound there, and a timeout on such an
 input is not a bug in the engine. A query that fails for any reason but a
-limit or an evaluation error is a finding, and aborts. An evaluation error
--- an integer overflow, a zero divisor, a string too long, a pattern that
-is not one -- is excused as a limit is: the naive strategy evaluates
-bindings the optimized one never reaches, so one may meet an error the
-other does not, which `specs/design-arithmetic.md` section 4.2 allows.
+limit or an evaluation error, which the error's class tells apart, is a
+finding, and aborts. An evaluation error -- an integer overflow, a zero
+divisor, a string too long, a pattern that is not one -- is excused as a
+limit is: the naive strategy evaluates bindings the optimized one never
+reaches, so one may meet an error the other does not, which
+`specs/design-arithmetic.md` section 4.2 allows.
 
 ### 5.2 Replayed by every build
 

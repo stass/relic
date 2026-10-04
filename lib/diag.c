@@ -6,6 +6,7 @@
 
 #include "config.h"
 
+#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,22 +17,36 @@
 /*
  * Diagnostics.
  *
- * Every failure in the library reports through relic_diagf() and returns a
- * failure status; nothing in lib/ writes to stderr.  Where a diagnostic ends
- * up is the caller's decision, made once by installing a callback, and the
- * tool is an ordinary caller that happens to install the formatter below.
+ * Every failure in the library reports an error through relic_diag_verror(),
+ * directly or through a function built on it, and returns a failure status;
+ * nothing in lib/ writes to stderr.  Where a diagnostic ends up is the
+ * caller's decision, made once by installing a callback, and the tool is an
+ * ordinary caller that happens to install the formatter below.
  *
- * The last RELIC_ERROR message is also kept in the context, so a caller that
- * wants only the reason for a failure can read relic_error() and install no
- * callback at all.
+ * The last RELIC_ERROR message is also kept in the context with its class,
+ * so a caller that wants only the reason for a failure can read
+ * relic_error() and relic_error_class() and install no callback at all.
  */
 
 /* What relic_error() says of a call refused because its context was busy. */
 #define	RELIC_REFUSED_ERROR \
 	"the context was called from one of its own callbacks"
 
+/* What the text of every error of class RELIC_ERROR_INTERNAL begins with. */
+#define	RELIC_INTERNAL_PREFIX	"internal error: "
+
 static const char	*level_name(enum relic_diag_level level);
-static void		 record_error(relic_t *ctx, const char *message);
+static enum relic_error_class
+			 class_or_internal(enum relic_error_class error_class);
+static void		 format_message(char *message, size_t size,
+			    const char *prefix, const char *format,
+			    va_list arguments)
+			    RELIC_PRINTFLIKE(4, 0);
+static void		 record_error(relic_t *ctx,
+			    enum relic_error_class error_class,
+			    const char *message);
+static void		 deliver(relic_t *ctx, enum relic_diag_level level,
+			    const relic_location_t *where, const char *message);
 static size_t		 string_piece(unsigned char byte, char *piece,
 			    size_t size);
 static void		 write_escaped(FILE *stream, const char *text);
@@ -53,12 +68,70 @@ level_name(enum relic_diag_level level)
 }
 
 /*
- * Make `message` the context's last error, which relic_error() returns.
+ * The class an error is reported as: the one it was reported with, or
+ * INTERNAL for a value that names no failure -- NONE, or a number outside
+ * the enumeration -- which only a mistake in the library can pass.  The
+ * assertion finds that site in a debug build.  The substitution keeps a
+ * recorded error's class and text consistent in any build: NONE means there
+ * is no error, and an INTERNAL error's text begins with its prefix.
+ */
+static enum relic_error_class
+class_or_internal(enum relic_error_class error_class)
+{
+	switch (error_class) {
+	case RELIC_ERROR_REJECTED:
+	case RELIC_ERROR_EVALUATION:
+	case RELIC_ERROR_LIMIT:
+	case RELIC_ERROR_IO:
+	case RELIC_ERROR_MEMORY:
+	case RELIC_ERROR_INTERRUPTED:
+	case RELIC_ERROR_ARGUMENT:
+	case RELIC_ERROR_INTERNAL:
+		return (error_class);
+	case RELIC_ERROR_NONE:
+		break;
+	}
+
+	assert(!"an error was reported with no class");
+	return (RELIC_ERROR_INTERNAL);
+}
+
+/*
+ * Write `prefix` followed by `format` applied to `arguments` into the `size`
+ * bytes of `message`, cutting what does not fit.  A diagnostic reports a
+ * failure and must not be able to cause one, so it does not allocate; every
+ * message the library produces names one thing and fits comfortably.
+ *
+ * vsnprintf(3) leaves the buffer's contents unspecified, and need not
+ * terminate them, when it returns a negative value.  What is handed to the
+ * callback and to relic_error() would then be whatever the stack held, so
+ * the message is cut back to its prefix rather than assumed terminated.
  */
 static void
-record_error(relic_t *ctx, const char *message)
+format_message(char *message, size_t size, const char *prefix,
+    const char *format, va_list arguments)
+{
+	size_t prefix_length;
+
+	prefix_length = strlcpy(message, prefix, size);
+	if (prefix_length >= size)
+		return;
+
+	if (vsnprintf(message + prefix_length, size - prefix_length, format,
+	    arguments) < 0)
+		message[prefix_length] = '\0';
+}
+
+/*
+ * Make `message` the context's last error, which relic_error() returns, and
+ * `error_class` its class, which relic_error_class() returns.
+ */
+static void
+record_error(relic_t *ctx, enum relic_error_class error_class,
+    const char *message)
 {
 	strlcpy(ctx->diag.last_error, message, sizeof(ctx->diag.last_error));
+	ctx->diag.last_class = error_class;
 	ctx->diag.has_error = true;
 	ctx->diag.refused = false;
 	ctx->diag.error_count++;
@@ -94,44 +167,100 @@ relic_error(relic_t *ctx)
 	return (ctx->diag.last_error);
 }
 
+enum relic_error_class
+relic_error_class(relic_t *ctx)
+{
+	if (ctx->diag.refused)
+		return (RELIC_ERROR_ARGUMENT);
+
+	if (!ctx->diag.has_error)
+		return (RELIC_ERROR_NONE);
+
+	return (ctx->diag.last_class);
+}
+
+/* Hand a diagnostic to the callback, when one is installed. */
+static void
+deliver(relic_t *ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	if (ctx->diag.callback != NULL)
+		ctx->diag.callback(ctx->diag.callback_ctx, level, where,
+		    message);
+}
+
 void
-relic_diagf(relic_t *ctx, enum relic_diag_level level,
+relic_diag_note(relic_t *ctx, const relic_location_t *where,
+    const char *format, ...)
+{
+	char message[sizeof(ctx->diag.last_error)];
+	va_list arguments;
+
+	va_start(arguments, format);
+	format_message(message, sizeof(message), "", format, arguments);
+	va_end(arguments);
+
+	deliver(ctx, RELIC_NOTE, where, message);
+}
+
+void
+relic_diag_warning(relic_t *ctx, const relic_location_t *where,
+    const char *format, ...)
+{
+	char message[sizeof(ctx->diag.last_error)];
+	va_list arguments;
+
+	va_start(arguments, format);
+	format_message(message, sizeof(message), "", format, arguments);
+	va_end(arguments);
+
+	deliver(ctx, RELIC_WARNING, where, message);
+}
+
+void
+relic_diag_error(relic_t *ctx, enum relic_error_class error_class,
     const relic_location_t *where, const char *format, ...)
 {
 	va_list arguments;
 
 	va_start(arguments, format);
-	relic_vdiagf(ctx, level, where, format, arguments);
+	relic_diag_verror(ctx, error_class, where, format, arguments);
 	va_end(arguments);
 }
 
+/*
+ * Every error is reported here.  The class decides the prefix, so an
+ * INTERNAL error begins "internal error: " whichever function reported it,
+ * and is recorded with the text before the callback runs, so that a
+ * callback reading relic_error_class() reads the class of the error it was
+ * handed.
+ */
 void
-relic_vdiagf(relic_t *ctx, enum relic_diag_level level,
+relic_diag_verror(relic_t *ctx, enum relic_error_class error_class,
     const relic_location_t *where, const char *format, va_list arguments)
 {
 	char message[sizeof(ctx->diag.last_error)];
+	const char *prefix;
 
-	/*
-	 * A message longer than the buffer is truncated.  A diagnostic
-	 * reports a failure and must not be able to cause one, so it does not
-	 * allocate; every message the library produces names one thing and
-	 * fits comfortably.
-	 *
-	 * The buffer is emptied first because vsnprintf(3) leaves its
-	 * contents unspecified, and need not terminate them, when it returns
-	 * a negative value.  What is copied out below and handed to
-	 * relic_error() would then be whatever the stack held here, so the
-	 * terminator is placed before the call rather than assumed after it.
-	 */
-	message[0] = '\0';
-	vsnprintf(message, sizeof(message), format, arguments);
+	error_class = class_or_internal(error_class);
+	prefix = error_class == RELIC_ERROR_INTERNAL ?
+	    RELIC_INTERNAL_PREFIX : "";
 
-	if (level == RELIC_ERROR)
-		record_error(ctx, message);
+	format_message(message, sizeof(message), prefix, format, arguments);
+	record_error(ctx, error_class, message);
+	deliver(ctx, RELIC_ERROR, where, message);
+}
 
-	if (ctx->diag.callback != NULL)
-		ctx->diag.callback(ctx->diag.callback_ctx, level, where,
-		    message);
+void
+relic_diag_internal(relic_t *ctx, const relic_location_t *where,
+    const char *format, ...)
+{
+	va_list arguments;
+
+	va_start(arguments, format);
+	relic_diag_verror(ctx, RELIC_ERROR_INTERNAL, where, format,
+	    arguments);
+	va_end(arguments);
 }
 
 void
@@ -150,7 +279,8 @@ relic_diag_no_memory(relic_t *ctx)
 	ctx->diag.memory_reported = true;
 
 	if (!relic_account_take_refusal(&ctx->account)) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "out of memory");
+		relic_diag_error(ctx, RELIC_ERROR_MEMORY, NULL,
+		    "out of memory");
 		return;
 	}
 
@@ -163,12 +293,12 @@ relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
     const char *verb, const char *subject)
 {
 	if (verb == NULL) {
-		relic_diagf(ctx, RELIC_ERROR, NULL, "limit exceeded: %s=%zu",
-		    limit, configured);
+		relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
+		    "limit exceeded: %s=%zu", limit, configured);
 		return;
 	}
 
-	relic_diagf(ctx, RELIC_ERROR, NULL,
+	relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 	    "limit exceeded: %s=%zu while %s %s", limit, configured, verb,
 	    subject);
 }

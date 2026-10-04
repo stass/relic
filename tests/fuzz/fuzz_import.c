@@ -40,6 +40,7 @@
 #define	IMPORT_WIDEST		32
 
 typedef struct column_list column_list_t;
+typedef struct error_count error_count_t;
 typedef struct table_source table_source_t;
 
 /*
@@ -48,6 +49,12 @@ typedef struct table_source table_source_t;
 struct column_list {
 	const enum relic_column	*columns;
 	size_t			 count;
+};
+
+/* The context an import runs in, and how many errors it reported. */
+struct error_count {
+	relic_t		*ctx;
+	size_t		 errors;
 };
 
 /*
@@ -112,9 +119,9 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	const column_list_t *list;
 	table_source_t source;
 	relic_import_t import;
+	error_count_t count;
 	relic_t *ctx;
 	FILE *stream;
-	size_t errors;
 	unsigned int choice;
 	int status;
 
@@ -149,11 +156,12 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	ctx = relic_create();
 	if (ctx == NULL)
 		abort();
-	errors = 0;
-	relic_diag_set(ctx, count_error, &errors);
+	count.ctx = ctx;
+	count.errors = 0;
+	relic_diag_set(ctx, count_error, &count);
 
 	status = relic_import_file(ctx, "fuzz.csv", stream, &import);
-	if (status != 0 && errors == 0)
+	if (status != 0 && count.errors == 0)
 		abort();
 
 	relic_destroy(ctx);
@@ -163,17 +171,18 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	return (0);
 }
 
-/* Count each error a context reports. */
+/* Count each error a context reports, and abort on an internal one. */
 static void
 count_error(void *callback_ctx, enum relic_diag_level level,
     const relic_location_t *where RELIC_TEST_UNUSED,
     const char *message RELIC_TEST_UNUSED)
 {
-	size_t *errors;
+	error_count_t *count;
 
-	errors = callback_ctx;
+	count = callback_ctx;
+	fuzz_refuse_internal(count->ctx, level);
 	if (level == RELIC_ERROR)
-		(*errors)++;
+		count->errors++;
 }
 
 /* Serve the next part of the table, at most `size` bytes of it. */

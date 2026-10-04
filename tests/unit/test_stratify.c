@@ -750,7 +750,10 @@ recursion_through_negation_is_rejected(void)
 		    SCENARIO_REJECTED, "case %zu should be marked unstratified",
 		    i);
 
-		/* A later load and check: refused again, and silently. */
+		/*
+		 * A later load and check: refused again, saying only that the
+		 * program cannot be used, with none of the cycle's notes.
+		 */
 		bzero(&log, sizeof(log));
 		if (!load(ctx, "extra(y).\n")) {
 			checkf(false, SCENARIO_REJECTED,
@@ -761,9 +764,11 @@ recursion_through_negation_is_rejected(void)
 
 		checkf(relic_check(ctx) != 0, SCENARIO_REJECTED,
 		    "case %zu should stay refused after a later load", i);
-		checkf(log.errors == 0 && log.notes == 0, SCENARIO_REJECTED,
-		    "case %zu should not repeat itself, but said %zu error(s) "
-		    "and %zu note(s)", i, log.errors, log.notes);
+		checkf(log.errors == 1 && log.notes == 0 &&
+		    relic_error_class(ctx) == RELIC_ERROR_REJECTED,
+		    SCENARIO_REJECTED, "case %zu should not repeat itself, but "
+		    "said %zu error(s) and %zu note(s)", i, log.errors,
+		    log.notes);
 
 		relic_destroy(ctx);
 	}
