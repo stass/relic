@@ -304,12 +304,12 @@ and never read after it completes, so no record outlives the job.
 A job is published under the pool's mutex: worker 0 stores the job
 pointer, bumps the generation and broadcasts the condition variable, then
 releases the mutex and runs tasks itself. A worker waiting for a job spins
-on the generation for a bounded number of iterations with the processor's
-pause instruction, and then takes the mutex, re-checks the generation, and
-waits on the condition variable while it is unchanged. Publication and
-parking are ordered by one mutex, so no wake-up is lost and no argument
-about the ordering of two flags is needed; the mutex is taken once per job
-and once per park, never per task or per tuple.
+on the generation for a bounded time, with the processor's pause
+instruction between looks, and then takes the mutex, re-checks the
+generation, and waits on the condition variable while it is unchanged.
+Publication and parking are ordered by one mutex, so no wake-up is lost
+and no argument about the ordering of two flags is needed; the mutex is
+taken once per job and once per park, never per task or per tuple.
 
 The barrier is the same shape the other way round. Worker 0, out of tasks,
 spins on the completion counter for the same bound and then takes the

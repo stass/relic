@@ -613,20 +613,20 @@ without_threads_rounds_run_alone(void)
 static void
 waiters_spin_only_on_processors_of_their_own(void)
 {
-	check(relic_pool_spin_limit(2, 2) > 0, SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(2, 2) > 0, SCENARIO_SPIN,
 	    "two workers on two processors spin");
-	check(relic_pool_spin_limit(4, 16) > 0, SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(4, 16) > 0, SCENARIO_SPIN,
 	    "four workers on sixteen processors spin");
-	check(relic_pool_spin_limit(4, 4) ==
-	    relic_pool_spin_limit(4, 16), SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(4, 4) ==
+	    relic_pool_spin_nanoseconds(4, 16), SCENARIO_SPIN,
 	    "a worker per processor spins as long as spare processors do");
-	check(relic_pool_spin_limit(3, 2) == 0, SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(3, 2) == 0, SCENARIO_SPIN,
 	    "three workers on two processors park at once");
-	check(relic_pool_spin_limit(256, 16) == 0, SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(256, 16) == 0, SCENARIO_SPIN,
 	    "256 workers on sixteen processors park at once");
-	check(relic_pool_spin_limit(2, 0) == 0, SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(2, 0) == 0, SCENARIO_SPIN,
 	    "workers on no processor reported park at once");
-	check(relic_pool_spin_limit(2, -1) == 0, SCENARIO_SPIN,
+	check(relic_pool_spin_nanoseconds(2, -1) == 0, SCENARIO_SPIN,
 	    "workers on an unknown count of processors park at once");
 }
 

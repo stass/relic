@@ -226,14 +226,6 @@ pool can give, and it is what the threshold of
 the screen from what the round's items estimate, rather than growing it
 from nothing, is the first thing to try.
 
-**The pool's spin bound counts iterations, not time.** [Low, component:
-`lib/pool.c`] `RELIC_SPIN_LIMIT` pauses 4096 times before a waiting worker
-parks, which was sized on x86, where `pause` takes tens to a hundred
-cycles; `yield` on aarch64 is close to free, so a worker there parks
-within microseconds and a component of many small rounds pays a wake-up
-per round. A bound in time, the clock read every few hundred pauses,
-would hold on every processor. Unmeasured on aarch64.
-
 ## Benchmarks
 
 **`bench/compare/run.sh` compares on one thread only.** [Low, component:

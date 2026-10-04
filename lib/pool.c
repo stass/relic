@@ -13,6 +13,7 @@
 #ifdef RELIC_THREADS
 #include <pthread.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -89,17 +90,40 @@ struct relic_pool_job {
 static void	 job_work(relic_pool_job_t *job, size_t worker_index);
 
 /*
- * How many times a waiting worker looks at the word it waits on before it
- * parks, pausing between looks, when every worker has a processor of its
- * own.  A constant of performance alone: long enough to cover the merge
- * between two rounds of one component, short enough that a thread with no
- * work gives its core back promptly.
+ * How long, in nanoseconds, a waiting worker looks at the word it waits on
+ * before it parks, pausing between looks, when every worker has a processor
+ * of its own.  A constant of performance alone: long enough to cover the
+ * merge between two rounds of one component, short enough that a thread
+ * with no work gives its core back promptly.  The bound is a time rather
+ * than a count of looks because the pause between looks lasts as long as
+ * the processor makes it: tens of cycles on x86 and close to none on
+ * aarch64, where a count sized on x86 would park a worker almost at once.
+ * 50 microseconds is some 4096 looks on the x86 server it was sized on.
  */
-#define	RELIC_SPIN_LIMIT	4096u
+#define	RELIC_SPIN_NANOSECONDS	50000u
 
 #ifdef RELIC_THREADS
 
+/*
+ * How many looks a spin takes between readings of the clock, so that
+ * reading it costs little beside the pauses.
+ */
+#define	RELIC_SPIN_LOOKS_PER_CLOCK	128u
+
+typedef struct relic_spin relic_spin_t;
 typedef struct relic_worker_start relic_worker_start_t;
+
+/*
+ * A waiter's spin: the monotonic time at which it gives up, and how many
+ * looks remain before it next reads the clock to see whether that time has
+ * come.  `spent` is set once it has, or at the start when the spin has no
+ * time to spend or the clock cannot be read.
+ */
+struct relic_spin {
+	uint64_t	 deadline;
+	unsigned int	 looks_until_clock;
+	bool		 spent;
+};
 
 /*
  * What a thread is started with: its pool and its place among the pool's
@@ -117,9 +141,9 @@ struct relic_worker_start {
  * advances `generation`, and read by a thread after it has seen the
  * generation move, so every thread reads them as they were published.
  * `published` is the generation worker 0 last published, which only it
- * reads.  `owner` is the process that started the threads.  `spin_limit`
- * is how many looks a waiter takes before it parks, fixed before any
- * thread starts.
+ * reads.  `owner` is the process that started the threads.
+ * `spin_nanoseconds` is how long a waiter spins before it parks, fixed
+ * before any thread starts.
  */
 struct relic_pool_threads {
 	pthread_mutex_t		 mutex;
@@ -132,7 +156,7 @@ struct relic_pool_threads {
 	uint64_t		 published;
 	size_t			 started;
 	pid_t			 owner;
-	unsigned int		 spin_limit;
+	uint64_t		 spin_nanoseconds;
 	bool			 stopping;
 };
 
@@ -143,7 +167,10 @@ static void	 finish_job(relic_pool_threads_t *threads,
 		    relic_pool_job_t *job, size_t workers);
 static void	 publish(relic_pool_threads_t *threads, relic_pool_job_t *job,
 		    bool stopping);
+static bool	 monotonic_nanoseconds(uint64_t *nowp);
+static bool	 spin_over(relic_spin_t *spin);
 static void	 spin_pause(void);
+static void	 spin_start(relic_spin_t *spin, uint64_t nanoseconds);
 static int	 threads_start(relic_pool_t *pool, size_t workers);
 static void	 threads_stop(relic_pool_threads_t *threads);
 static void	 worker_signal_mask(sigset_t *mask);
@@ -153,13 +180,13 @@ static void	*worker_main(void *argument);
 
 static void	 worker_release(relic_worker_t *worker);
 
-unsigned int
-relic_pool_spin_limit(size_t workers, long processors)
+uint64_t
+relic_pool_spin_nanoseconds(size_t workers, long processors)
 {
 	if (processors < 1 || workers > (size_t)processors)
 		return (0);
 
-	return (RELIC_SPIN_LIMIT);
+	return (RELIC_SPIN_NANOSECONDS);
 }
 
 size_t
@@ -357,7 +384,7 @@ threads_start(relic_pool_t *pool, size_t workers)
 	}
 	relic_atomic_u64_init(&threads->generation, 0);
 	threads->owner = getpid();
-	threads->spin_limit = relic_pool_spin_limit(workers,
+	threads->spin_nanoseconds = relic_pool_spin_nanoseconds(workers,
 	    sysconf(_SC_NPROCESSORS_ONLN));
 	pool->threads = threads;
 
@@ -485,14 +512,17 @@ publish(relic_pool_threads_t *threads, relic_pool_job_t *job, bool stopping)
 static uint64_t
 await_job(relic_pool_threads_t *threads, uint64_t seen)
 {
+	relic_spin_t spin;
 	uint64_t generation;
-	unsigned int spins;
 
-	for (spins = 0; spins < threads->spin_limit; spins++) {
+	spin_start(&spin, threads->spin_nanoseconds);
+	for (;;) {
 		generation =
 		    relic_atomic_u64_load_acquire(&threads->generation);
 		if (generation != seen)
 			return (generation);
+		if (spin_over(&spin))
+			break;
 		spin_pause();
 	}
 
@@ -533,11 +563,14 @@ static void
 await_workers(relic_pool_threads_t *threads, relic_pool_job_t *job,
     size_t workers)
 {
-	unsigned int spins;
+	relic_spin_t spin;
 
-	for (spins = 0; spins < threads->spin_limit; spins++) {
+	spin_start(&spin, threads->spin_nanoseconds);
+	for (;;) {
 		if (relic_atomic_size_load_acquire(&job->finished) == workers)
 			return;
+		if (spin_over(&spin))
+			break;
 		spin_pause();
 	}
 
@@ -545,6 +578,65 @@ await_workers(relic_pool_threads_t *threads, relic_pool_job_t *job,
 	while (relic_atomic_size_load_acquire(&job->finished) < workers)
 		pthread_cond_wait(&threads->done, &threads->mutex);
 	pthread_mutex_unlock(&threads->mutex);
+}
+
+/*
+ * Begin a spin of `nanoseconds` from now.  A spin with no time to spend, or
+ * whose start the clock cannot tell, is over before it begins.
+ */
+static void
+spin_start(relic_spin_t *spin, uint64_t nanoseconds)
+{
+	uint64_t now;
+
+	spin->looks_until_clock = RELIC_SPIN_LOOKS_PER_CLOCK;
+	spin->deadline = 0;
+	spin->spent = true;
+	if (nanoseconds == 0 || !monotonic_nanoseconds(&now))
+		return;
+
+	spin->deadline = now + nanoseconds;
+	spin->spent = false;
+}
+
+/*
+ * Whether a waiter that has just looked in vain should stop spinning and
+ * park.  The clock is read only every RELIC_SPIN_LOOKS_PER_CLOCK looks, so
+ * a spin may run that many looks past its deadline; a clock that cannot be
+ * read ends the spin.
+ */
+static bool
+spin_over(relic_spin_t *spin)
+{
+	uint64_t now;
+
+	if (spin->spent)
+		return (true);
+
+	spin->looks_until_clock--;
+	if (spin->looks_until_clock > 0)
+		return (false);
+
+	spin->looks_until_clock = RELIC_SPIN_LOOKS_PER_CLOCK;
+	if (!monotonic_nanoseconds(&now) || now >= spin->deadline)
+		spin->spent = true;
+
+	return (spin->spent);
+}
+
+/*
+ * The monotonic clock in nanoseconds, or false when it cannot be read.
+ */
+static bool
+monotonic_nanoseconds(uint64_t *nowp)
+{
+	struct timespec now;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0)
+		return (false);
+
+	*nowp = (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+	return (true);
 }
 
 /*
