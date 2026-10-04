@@ -88,16 +88,6 @@ discard's early return a structural fact, and a write through a stale
 pointer becomes a use after free the sanitizers report. First find what
 relies on a derived relation's pointer outliving a discard.
 
-**An interactive session accepts only queries.** [Low, component:
-`cmd/relic/repl.c`, `include/relic.h`] A session cannot add a fact or a rule,
-because a load that fails its check leaves the program rejected for good, and
-the tool cannot check text without loading it. Accepting statements needs a
-load that is checked as one step and undone when the check fails; that is an
-added entry point, a compatible change, and the session would then load a
-line ending in `.` through it. A session would then pay for re-evaluating
-the whole program after each addition (incremental insertion, under
-Post-1.0) and for the complete relations evaluated again for every query.
-
 **Nothing keeps a language test from hiding which of its answers held.**
 [Medium, component: `tests/lang/LANGUAGE`, `cmd/relic/output.c`] In text,
 csv and tsv a query of no variables that holds writes an empty line, and
@@ -129,24 +119,6 @@ so the cost is memory, bounded by the distinct text and query shapes seen.
 A fix is a source name that is not interned (diagnostics copy it) and a
 per-query scope for the symbols, values and generated predicates only one
 query uses; that is a change to interning and wants a design note first.
-
-**The end of typed input may be taken for a refused line.** [Low,
-component: `cmd/relic/input.c`] `read_edited()` takes a NULL from
-`el_gets()` with `errno` EILSEQ for a line libedit could not read in the
-locale's encoding. The portable libedit that Linux distributions and
-Homebrew ship drops a byte that is not text and reads on, but
-`mbrtowc(3)` leaves EILSEQ in `errno` from the drop, so a Ctrl-D then
-typed on the empty line returns NULL with a count of 0 and relic reports a
-refused line: the session's status becomes 1 and a second Ctrl-D ends it.
-Seen with Homebrew's libedit 20260512-3.1 by typing byte 0xc3 and then
-Ctrl-D. That libedit reports a failed read with a count of -1, as
-editline(3) documents, so there a refusal is `count < 0`; macOS's libedit
-refuses a line with a count of 0, so no one test serves both, and nothing
-returned at run time tells them apart. A configure check could select the
-test, such as whether `<histedit.h>` defines `el_rfunc_t`, which macOS's
-lacks; flushing the terminal at any end of input with EILSEQ would keep a
-libedit taken for the wrong kind from leaving a pasted line's tail to the
-shell.
 
 **An aggregate over one atom copies the atom's relation.** [Low,
 component: `lib/rule.c`, `lib/eval.c`, `specs/design-aggregates.md`] Each

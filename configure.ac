@@ -35,8 +35,6 @@ AC_SUBST([RELIC_ABI_CURRENT])
 AC_SUBST([RELIC_ABI_REVISION])
 AC_SUBST([RELIC_ABI_AGE])
 
-AC_CHECK_HEADERS([err.h sysexits.h])
-
 dnl getentropy(2) is declared by <unistd.h> on the BSDs, glibc and musl, and
 dnl by <sys/random.h> on macOS.  compat.h includes whichever exists, so no
 dnl engine source has to know which one it is.
