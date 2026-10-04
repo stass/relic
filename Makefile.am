@@ -631,6 +631,10 @@ endif
 ## notices.  What a directory cannot do is tell a golden file from something
 ## a debugging session left behind, so langfiles.sh checks that too.
 ##
+## tests/lang/LANGUAGE names the tests whose expectation the language alone
+## fixes, which another implementation of the language can run, and
+## langfiles.sh holds it to the tests in both directions as well.
+##
 
 RELIC_LANG_TESTS = \
 	tests/lang/aggregate-anonymous.dl \
@@ -645,6 +649,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/aggregate-shared.dl tests/lang/aggregate-shortest.dl \
 	tests/lang/aggregate-stratify.dl tests/lang/aggregate-sum.dl \
 	tests/lang/aggregate-syntax.dl tests/lang/aggregate-unsafe.dl \
+	tests/lang/aggregate-variable-limit.dl \
 	tests/lang/arithmetic-binding.dl \
 	tests/lang/arithmetic-depth.dl tests/lang/arithmetic-explain.dl \
 	tests/lang/arithmetic-gathered.dl tests/lang/arithmetic-height.dl \

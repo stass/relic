@@ -32,10 +32,11 @@ is_generated() {
 	return 1
 }
 
-# Every file whose suffix marks it as source, from anywhere in the tree except
-# the directories that hold version-control state, autotools auxiliary
-# scripts, build output and the disposable sanitizer and coverage trees,
-# whose copies of the sources are checked where they came from.
+# Every file whose suffix marks it as source, and the language tests'
+# manifest, from anywhere in the tree except the directories that hold
+# version-control state, autotools auxiliary scripts, build output and the
+# disposable sanitizer and coverage trees, whose copies of the sources are
+# checked where they came from.
 owned_files() {
 	find "$RELIC_SRCDIR" \
 	    \( -name '.git' -o -name '.deps' -o -name '.libs' \
@@ -45,7 +46,7 @@ owned_files() {
 	       -o -name '*.h' -o -name '*.in' -o -name '*.m4' \
 	       -o -name '*.sh' -o -name '*.[1-9]' -o -name '*.dl' \
 	       -o -name '*.pl' -o -name '*.lp' -o -name '*.rls' \
-	       -o -name '*.sql' \) -print
+	       -o -name '*.sql' -o -name 'LANGUAGE' \) -print
 }
 
 candidates=$(mktemp) || exit 1

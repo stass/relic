@@ -34,8 +34,9 @@ customer(C), not order(_, _, _)?
 N = count { customer(C), not order(_, C, _) }?
 
 % Bound queries, answered through the rewrite.  cat is idle and bought no
-% pen, and ann is not idle, so they answer true, false and true: a row of
-% no values, then none, then one.
-idle(cat)?
-idle(ann)?
-no_pen(cat)?
+% pen, and ann is not idle, so the first and third queries hold and the
+% second does not.  Each names its customer in a column, so that which of
+% them held shows in the output.
+idle(cat), Who = cat?
+idle(ann), Who = ann?
+no_pen(cat), Who = cat?

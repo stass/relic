@@ -158,7 +158,8 @@ An operand that is a variable holding a symbol or a string gives the
 expression no value, and a comparison or assignment over it is false, as an
 ordering of different types is.
 A result outside the 64-bit integers, a division or remainder by zero, and
-the remainder of \-9223372036854775808 by \-1 are errors instead: the evaluation stops, its query writes no rows, and
+the remainder of \-9223372036854775808 by \-1 are errors instead: the
+evaluation stops, its query writes no rows, and
 .Nm
 exits with a nonzero status.
 Whether an evaluation meets such a result depends on the bindings it
@@ -378,7 +379,11 @@ The four names, and
 are symbols and predicate names everywhere else;
 .Ql not
 names no predicate.
-A query's columns are its variables outside any braces.
+A query's columns are its variables outside any braces, at most 32 of
+them.
+A rule or a query names at most 64 distinct variables, not counting those
+that occur only inside an aggregate's braces, and the braces of an
+aggregate name at most 32, those shared with the rule included.
 .Pp
 Every variable of a rule's head and of a comparison, and every named
 variable of a negated literal, must also occur in a positive atom of the
@@ -514,7 +519,8 @@ queries, or else the program's own, continued in an interactive session as
 .Sx INTERACTIVE MODE
 describes.
 Twice: also a note for the first comparison or aggregate in each rule, and
-in each query each time it is answered, that had no value and was easily unintended: a comparison that ordered values of
+in each query each time it is answered, that had no value and was easily
+unintended: a comparison that ordered values of
 different types, applied an operator to a symbol or a string, or called a
 string function with an argument of a type it does not take, which is
 false, or an aggregate whose rows were not all integers or not all of one
@@ -805,6 +811,10 @@ and
 the rows of each query but the first are preceded by an empty line, except
 in an interactive session whose prompt and results share a terminal, where
 the prompt marks where each query's rows begin.
+The empty row and that empty line look alike, so successive queries with no
+variables show how many of them held but not which;
+.Cm json
+tells them apart.
 .Bl -tag -width Ds
 .It Cm text
 Values separated by one space, each written as a program would write it:

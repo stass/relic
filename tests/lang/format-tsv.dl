@@ -17,6 +17,6 @@ v(13, "bad \xc0\xaf \xed\xa0\x80 \xf4\x90\x80\x80 \xe2\x82").
 v(14, "carriage\rreturn").
 v(15, "cut \xc3A \xe2\x82A").
 
-v(N, V)?
 v(99, _)?
+v(N, V)?
 v(1, plain)?

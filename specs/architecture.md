@@ -2656,6 +2656,14 @@ held to its list where it cannot: every `.dl` file under `tests/lang/` is a
 test, and `tests/langfiles.sh` fails when one is not registered, so no test
 can be added and silently not run.
 
+`tests/lang/LANGUAGE` names the language tests whose expectation the
+language alone fixes -- a failure's status, and each query's rows, in
+program order, compared as values whatever their order -- so that another
+implementation can run them as a conformance suite;
+`tests/langfiles.sh` fails when a test that runs the program alone is
+neither listed there nor omitted with a reason, or a test named there does
+not run the program alone.
+
 Every example the manual pages and `README.md` show is run by
 `tests/docs.sh`, which fails when an example has no expectation or an
 expectation no example; specified in `specs/design-release.md`.

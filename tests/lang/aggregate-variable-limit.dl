@@ -1,0 +1,25 @@
+% The braces of an aggregate name at most 32 distinct variables, because
+% the aggregate is computed over a relation holding a column for each of
+% them, and a variable the braces share with the rule is one of the 32.
+% The 33rd is reported where it first appears.  The names are `_`-prefixed
+% so that the file tests the limit and not the singleton warning.
+w(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1).
+u(1).
+
+fits(N) :-
+    N = count { w(_V0, _V1, _V2, _V3, _V4, _V5, _V6, _V7, _V8, _V9, _V10,
+        _V11, _V12, _V13, _V14, _V15, _V16, _V17, _V18, _V19, _V20, _V21,
+        _V22, _V23, _V24, _V25, _V26, _V27, _V28, _V29, _V30, _V31) }.
+
+counted(N) :-
+    N = count { w(_V0, _V1, _V2, _V3, _V4, _V5, _V6, _V7, _V8, _V9, _V10,
+        _V11, _V12, _V13, _V14, _V15, _V16, _V17, _V18, _V19, _V20, _V21,
+        _V22, _V23, _V24, _V25, _V26, _V27, _V28, _V29, _V30, _V31),
+        u(_V32) }.
+
+shared(X, N) :-
+    u(X),
+    N = count { w(X, _V1, _V2, _V3, _V4, _V5, _V6, _V7, _V8, _V9, _V10, _V11,
+        _V12, _V13, _V14, _V15, _V16, _V17, _V18, _V19, _V20, _V21, _V22,
+        _V23, _V24, _V25, _V26, _V27, _V28, _V29, _V30, _V31), u(_V32) }.

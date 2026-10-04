@@ -21,9 +21,9 @@ path(X, Y)?
 path(X, X)?
 
 % Both bound: a query that holds has one row of no values, and one that does
-% not has no rows at all.
+% not has no rows at all.  A query with rows stands between the two, since
+% the empty row is otherwise the empty line that separates answers; its
+% first column is `_`, and an anonymous variable is not an output column.
 path(a, c)?
-path(d, a)?
-
-% An anonymous variable is not an output column.
 path(_, X)?
+path(d, a)?

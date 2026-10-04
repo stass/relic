@@ -105,6 +105,21 @@ line ending in `.` through it. A session would then pay for re-evaluating
 the whole program after each addition (incremental insertion, under
 Post-1.0) and for the complete relations evaluated again for every query.
 
+**Nothing keeps a language test from hiding which of its answers held.**
+[Medium, component: `tests/lang/LANGUAGE`, `cmd/relic/output.c`] In text,
+csv and tsv a query of no variables that holds writes an empty line, and
+so does the separator before the next query's rows, so successive queries
+of no variables show how many held but not which: a true and a false
+answer swapped pass the golden comparison, and an outside runner cannot
+split the answers. The tests listed in `tests/lang/LANGUAGE` avoid two
+such queries that answer differently with no answer of rows between them,
+but only by their authors' care. Giving the empty row a spelling of its
+own in the text formats removes the problem for every test and every
+reader, and changes what the tool writes; short of that, the language
+test runner could run each listed test with `-F json` and refuse a run of
+answers with no visible rows that mixes `[]` and `[[]]`, which would first
+need negation-forms and magic-bindings reordered.
+
 **A long-lived context's tables only grow.** [Low, component:
 `lib/parse.c`, `lib/magic.c`, `lib/symbol.c`, `lib/value.c`,
 `cmd/relic/repl.c`] No table releases an entry, and two kinds of entry

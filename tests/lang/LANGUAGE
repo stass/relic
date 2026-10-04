@@ -1,0 +1,167 @@
+# The language tests: those whose expectation the language alone fixes, so
+# that another implementation of the language can run them.
+#
+# A test listed here is a program and what any correct implementation must
+# do with it.  If its .exit holds 1, it promises that status and nothing
+# else, neither its messages nor anything written before the failure: with
+# -c among its .args, that the program is rejected before anything is
+# evaluated; without it, only that running the program fails; and where it
+# holds several faulty cases, only that one of them was refused.  Any other
+# test promises status 0 and the answers its .expected holds, one for each
+# query, in the order the program asks them.  An answer is compared as a
+# collection of rows whose order does not count but in which a row written
+# twice does, and a row as its values, each the value its literal denotes
+# rather than the literal's spelling.  What a test writes to the standard
+# error, warnings included, is relic's own and no part of the promise.
+#
+# The .expected is in relic(1)'s text format: one row per line, its values
+# written as literals of the language and separated by a space, so that a
+# reader takes a row apart as the language's lexer would; and an empty line
+# between one query's answer and the next.  A query of no columns that
+# holds answers one row of no values, an empty line, so telling the answers
+# apart takes each query's number of columns, which the program gives.  No
+# test here asks two queries of no columns that answer differently unless
+# an answer with rows stands between them, since the empty lines would show
+# how many held but not which.  The option -s sorts each answer's rows, and
+# -c checks the program without evaluating it, so that nothing is answered.
+#
+# A listed test runs the program alone, so it is its .dl and nothing beside
+# it but an .expected, an .expected-err, an .exit holding 0 or 1, and .args
+# holding only -c and -s.  tests/langfiles.sh holds this list to the
+# directory in both directions: every test it names must qualify, and every
+# test that qualifies must be named, as a line of its own or after `omit`
+# with the reason it is left out.  A test is omitted only when what it
+# expects, cut to its status and its answers, is not the language's to
+# decide.
+#
+# The names are in byte order, and so are the omissions.
+
+aggregate-anonymous
+aggregate-assign
+aggregate-count
+aggregate-magic
+aggregate-minmax
+aggregate-nested
+aggregate-project
+aggregate-query
+aggregate-shared
+aggregate-shortest
+aggregate-stratify
+aggregate-sum
+aggregate-syntax
+aggregate-unsafe
+aggregate-variable-limit
+arithmetic-binding
+arithmetic-depth
+arithmetic-height
+arithmetic-magic
+arithmetic-magic-drafts
+arithmetic-magic-wide
+arithmetic-negation
+arithmetic-negative
+arithmetic-order
+arithmetic-overflow
+arithmetic-probe
+arithmetic-recursion
+arithmetic-syntax
+arithmetic-unsafe
+arithmetic-zero
+arithmetic-zero-query
+arity-32
+arity-limit
+arity-limit-name
+bad-backslash
+bad-byte
+bad-escape
+bad-escape-at-end
+closure-double
+closure-graphs
+comments-only
+components
+constructs
+empty
+error-after-recovery
+error-first-token
+float-exponent
+float-literal
+float-period
+format-integers
+format-nul
+format-text
+head-not-atom
+incomplete-operator
+integer-range
+integer-trailing
+magic-bindings
+magic-budget
+magic-budget-adornments
+magic-budget-literals
+magic-budget-subsumed
+magic-budget-wide-cut
+magic-cspa
+magic-duplicate-rules
+magic-mixed
+magic-mutual
+magic-negation
+magic-same-generation
+magic-subsumed
+magic-supplementary
+magic-supplementary-wide
+missing-terminator
+negation-anonymous
+negation-forms
+negation-recursive
+negation-strata
+negation-tasks
+not-as-predicate
+not-symbol
+predicate-identity
+query-bindings
+query-columns
+query-columns-limit
+query-comparisons
+query-duplicates
+query-none
+query-recursion
+query-undefined
+query-unsafe
+query-zero-arity
+recovery
+reserved-bytes
+safe-rules
+singleton
+sort-mixed
+string-escapes
+strings-aggregate
+strings-atom-or-call
+strings-binding
+strings-bytes
+strings-gathered
+strings-index
+strings-magic
+strings-match
+strings-match-bad
+strings-match-fails
+strings-probe
+strings-recursion
+strings-str
+strings-substr
+strings-syntax
+success-criteria
+trailing-comma
+undefined-predicate
+unexpected-token
+unsafe-anonymous
+unsafe-comparison
+unsafe-fact
+unsafe-head
+unsafe-negation
+unstratified
+unstratified-cycles
+unstratified-policy
+unstratified-unsafe
+unterminated-escape
+unterminated-string
+variable-limit
+variable-limit-max
+zero-arity

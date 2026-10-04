@@ -20,6 +20,6 @@ open(X) :- item(X), not closed.
 unsold(X)?
 stocked(X)?
 open(X)?
-item(X), not unsold(X)?
 not sold(pen)?
+item(X), not unsold(X)?
 not sold(ink)?

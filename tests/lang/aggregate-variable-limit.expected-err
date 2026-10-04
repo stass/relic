@@ -1,0 +1,2 @@
+aggregate-variable-limit.dl:19:11: error: the aggregate in rule counted/1 mentions more than 32 variables
+aggregate-variable-limit.dl:25:66: error: the aggregate in rule shared/2 mentions more than 32 variables

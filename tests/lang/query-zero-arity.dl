@@ -1,7 +1,12 @@
-% Predicates of arity zero hold or do not hold.
+% Predicates of arity zero hold or do not hold.  One that holds answers a
+% row of no values, written as an empty line, and one that does not answers
+% no rows; a query with a row stands between them, since the empty row is
+% otherwise the empty line that separates one answer from the next.
 initialized.
+phase(running).
 started :- initialized.
 
 started?
+phase(P)?
 stopped :- initialized, 1 > 2.
 stopped?
