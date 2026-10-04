@@ -1,0 +1,15 @@
+% The partial probe names the index it reads, as a lookup does; the full
+% probe reads the canonical index and the empty one scans, so their lines
+% show the atom alone.  The queries are answered without the Magic rewrite,
+% which would repeat each rule under a generated name.
+customer(ann).
+customer(bob).
+order(o1, ann, book).
+
+idle(C) :- customer(C), not order(_, C, _).
+unbought(C) :- customer(C), not order(o1, C, book).
+nothing(C) :- customer(C), not order(_, _, _).
+
+idle(C)?
+unbought(C)?
+nothing(C)?

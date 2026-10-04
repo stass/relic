@@ -141,18 +141,21 @@ caller resumes it exactly as it resumes a full batch. So a join that derives
 nothing for hours -- a filter that rejects every binding, a scan that rejects
 every tuple of a large relation, a scan whose duplicates all collapse --
 returns to its caller as often as one that derives a batch every few steps.
-Only an aggregate's fold cannot stop part way, since its running value is
-not kept between calls; it charges the tuples it reads to the second count
-and, once that is spent, finishes its walk and has the join pause as its
-step returns -- at the next operation when the fold matched, and otherwise
-at the fold, which has no next match -- so a call overruns its quantum by at
-most one fold's walk: the group's chain where an index reaches it, and the
-whole relation where the fold has no key or `RELIC_F_NO_INDEX` leaves it no
-index. The quantum is a constant of the executor, a few thousand units,
-small enough that a call takes well under a millisecond and large enough
-that taking a batch, often empty, costs nothing measurable. The counts are
-kept where they cost least: the backtracks in a register of the join's
-loop, and the rejections in a local of the scan, given back as it returns.
+Only a step with no cursor to resume from cannot stop part way: an
+aggregate's fold, whose running value is not kept between calls, and a
+negated literal's probe that scans its view, a test with no tuple to resume
+at, `specs/design-negation.md` section 4. Such a step charges the tuples it
+reads to the second count and, once that is spent, finishes its walk and has
+the join pause as its step returns -- at the next operation when the step
+matched, and otherwise at the step, which has no next match -- so a call
+overruns its quantum by at most one such walk: for a fold, the group's chain
+where an index reaches it, and the whole relation where the fold has no key
+or `RELIC_F_NO_INDEX` leaves it no index; for a probe, its view. The quantum
+is a constant of the executor, a few thousand units, small enough that a call
+takes well under a millisecond and large enough that taking a batch, often
+empty, costs nothing measurable. The counts are kept where they cost least:
+the backtracks in a register of the join's loop, and the rejections in a
+local of the scan, given back as it returns.
 
 **The caller that takes a batch looks after every return.** The serial
 evaluator, after it takes a batch, reads the flag and fails with the
@@ -261,9 +264,11 @@ did.
 * `tests/unit/test_exec.c`: a plan whose join derives nothing for more than a
   quantum returns paused with an empty batch, and running it to its end
   derives what an unpaused run derives; consecutive folds over groups larger
-  than a quantum overrun it by at most one fold's walk; a fold that pauses
-  the call has its value emitted by the next; a lookup whose chain rejects
-  more than a quantum pauses inside the chain.
+  than a quantum overrun it by at most one fold's walk, and consecutive
+  negated probes that scan a relation larger than a quantum by at most one
+  probe's walk; a fold that pauses the call has its value emitted by the
+  next; a lookup whose chain rejects more than a quantum pauses inside the
+  chain.
 * `tests/terminal.sh`, at a pseudo-terminal: Ctrl-C during a query that
   would not end returns to the prompt, the next query answers, and the
   session exits with status 1.

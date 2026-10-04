@@ -51,27 +51,27 @@ typedef struct relic_variant_plans relic_variant_plans_t;
  * order, and differs only in what it reads to find them.
  *
  * MEMBER, ANTI_MEMBER and FILTER are tests: they read only constants and
- * bound slots, bind nothing, and succeed at most once.  ANTI_MEMBER is MEMBER
- * with the answer inverted, which is the whole of negation: the schedule
- * evaluates a negated relation completely before any rule that reads it
- * runs, so its absence is meaningful.  ASSIGN is a test that binds: it
- * computes one value from constants and bound slots and binds one slot to
- * it, succeeding once, or never when the value does not exist because an
- * operand was not an integer.  AGGREGATE is a test that binds too: it folds
- * the rows of a complete group relation under the key its bound slots give
- * and binds its result slot to the value, or, when the slot was bound
- * before, holds exactly when the value equals it; it fails when its
- * function has no value over the group.  EMIT derives the head tuple, which
- * the evaluation inserts, or delivers as a query's row, in batches, and
- * never succeeds, which is what makes it the last operation of every plan:
- * the deepest level of the join always rejects, so the executor always
- * backtracks from it.
+ * bound slots, bind nothing, and succeed at most once.  ANTI_MEMBER asks
+ * whether the relation holds a tuple agreeing with it on every column that is
+ * not `_`, and succeeds when it does not, which is the whole of negation: the
+ * schedule evaluates a negated relation completely before any rule that reads
+ * it runs, so its absence is meaningful.  ASSIGN is a test that binds: it
+ * computes one value from constants and bound slots and binds one slot to it,
+ * succeeding once, or never when the value does not exist because an operand
+ * was not an integer.  AGGREGATE is a test that binds too: it folds the rows
+ * of a complete group relation under the key its bound slots give and binds
+ * its result slot to the value, or, when the slot was bound before, holds
+ * exactly when the value equals it; it fails when its function has no value
+ * over the group.  EMIT derives the head tuple, which the evaluation inserts,
+ * or delivers as a query's row, in batches, and never succeeds, which is what
+ * makes it the last operation of every plan: the deepest level of the join
+ * always rejects, so the executor always backtracks from it.
  */
 enum relic_op_kind {
 	RELIC_OP_SCAN,		/* match and bind every tuple of a relation */
 	RELIC_OP_LOOKUP,	/* the same, by an index on bound columns */
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
-	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
+	RELIC_OP_ANTI_MEMBER,	/* does no tuple agree on the named columns? */
 	RELIC_OP_FILTER,	/* does a comparison of bound values hold? */
 	RELIC_OP_ASSIGN,	/* bind a slot to a value from bound ones */
 	RELIC_OP_AGGREGATE,	/* fold a group relation's rows for a key */
@@ -86,9 +86,10 @@ enum relic_op_kind {
  * binds it.  The planner therefore settles which of these applies to every
  * column, and the executor carries no bound-mask and never asks.
  *
- * RELIC_PLAN_BIND and RELIC_PLAN_ANY occur only in a SCAN or a LOOKUP, and
- * never in a LOOKUP's key columns.  A test and an EMIT read constants and
- * bound slots and nothing else.
+ * RELIC_PLAN_BIND occurs only in a SCAN or a LOOKUP.  RELIC_PLAN_ANY occurs
+ * in those and in an ANTI_MEMBER, for a `_` its probe does not read.  Neither
+ * ever occurs in a key column.  Every other test and an EMIT read constants
+ * and bound slots and nothing else.
  *
  * A slot is of one of three kinds, fixed by the operation that binds it
  * (enum relic_slot_kind).  A domain slot is bound by a generator, by an
@@ -186,17 +187,20 @@ enum relic_view {
  * the next, so the evaluation resolves it when the plan starts.  An EMIT
  * writes past the end of every view of its relation.
  *
- * `key_mask` and `index_position` are set only on a LOOKUP: the columns it
- * looks up by, bit c for column c, and the position in relation->indexes of
- * the index keyed on exactly those columns.  The index is named by position
- * because positions are fixed until the relations are next discarded, which
- * no plan outlives, and addresses are not.
+ * `key_mask` and `index_position` are set on a LOOKUP and an ANTI_MEMBER:
+ * the columns it looks up by, bit c for column c, and the position in
+ * relation->indexes of the index keyed on exactly those columns.  The index
+ * is named by position because positions are fixed until the relations are
+ * next discarded, which no plan outlives, and addresses are not.  An
+ * ANTI_MEMBER's mask is one of the three shapes of enum relic_probe_shape,
+ * which the planner chooses and the executor and explain read back through
+ * relic_plan_probe_shape() alone.
  */
 struct relic_op_atom {
 	const relic_relation_t	*relation;
 	relic_plan_term_t	*terms;
-	uint32_t		 key_mask;		/* LOOKUP only */
-	uint32_t		 index_position;	/* LOOKUP only */
+	uint32_t		 key_mask;
+	uint32_t		 index_position;
 	enum relic_view		 view;
 	uint16_t		 arity;
 };
@@ -429,5 +433,54 @@ struct relic_variant_plans {
 #define	RELIC_PLAN_UNKNOWN_TUPLES	1000u
 #define	RELIC_PLAN_UNKNOWN_DISTINCT	10u
 #define	RELIC_PLAN_DELTAS_HELD		10u
+
+/*
+ * Every column of a relation of this arity, bit c for column c.
+ */
+static inline uint32_t
+relic_plan_all_columns(uint16_t arity)
+{
+	if (arity >= 32)
+		return (UINT32_MAX);
+
+	return ((UINT32_C(1) << arity) - 1);
+}
+
+/*
+ * How an ANTI_MEMBER asks whether its relation holds, inside its view, a
+ * tuple that agrees with its terms on the columns its key names:
+ *
+ *	MEMBER	the key is every column: find the tuple through the canonical
+ *		index, as a MEMBER does
+ *	INDEX	the key is a nonempty proper subset: read the first tuple of
+ *		the key's chain in the secondary index at `index_position`
+ *	SCAN	no key: scan the view for the first tuple the terms match, `_`
+ *		matching anything, which is how a probe naming no column is
+ *		asked, and one naming some under RELIC_F_NO_INDEX
+ *
+ * A relation of arity zero has no column, so its every-column key is the
+ * empty one, and it is a MEMBER.
+ */
+enum relic_probe_shape {
+	RELIC_PROBE_MEMBER,
+	RELIC_PROBE_INDEX,
+	RELIC_PROBE_SCAN
+};
+
+/*
+ * The shape of the probe an ANTI_MEMBER keyed on `key_mask` over a relation
+ * of this arity makes.
+ */
+static inline enum relic_probe_shape
+relic_plan_probe_shape(uint32_t key_mask, uint16_t arity)
+{
+	if (key_mask == relic_plan_all_columns(arity))
+		return (RELIC_PROBE_MEMBER);
+
+	if (key_mask != 0)
+		return (RELIC_PROBE_INDEX);
+
+	return (RELIC_PROBE_SCAN);
+}
 
 #endif /* RELIC_PLAN_H */

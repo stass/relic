@@ -234,12 +234,9 @@ static relic_op_t *append_atom_op(relic_planner_t *planner,
 		    enum relic_op_kind kind, relic_relation_t *relation);
 static relic_op_t *append_op(relic_planner_t *planner,
 		    enum relic_op_kind kind);
-static uint32_t	 all_columns(uint16_t arity);
 static unsigned int append_steps(const relic_planner_t *planner,
 		    const relic_expr_t *expr, relic_postfix_t *postfix);
 static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
-static bool	 atom_is_bound(const relic_atom_t *atom, uint16_t arity,
-		    uint64_t bound);
 static bool	 atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp,
 		    uint64_t *readsp);
 static void	 bind_slot(relic_planner_t *planner, uint16_t slot,
@@ -271,6 +268,9 @@ static enum relic_slot_kind expr_kind(const relic_planner_t *planner,
 		    const relic_expr_t *expr);
 static bool	 is_incomplete(const bool *incomplete, relic_pred_id_t pred);
 static uint64_t	 multiply_estimates(uint64_t product, size_t estimate);
+static uint32_t	 named_columns(const relic_atom_t *atom, uint16_t arity);
+static uint32_t	 negated_key(const relic_planner_t *planner,
+		    const relic_relation_t *relation, uint32_t named);
 static int	 order_body(relic_planner_t *planner);
 static void	 order_positive(relic_planner_t *planner, size_t index);
 static void	 order_ranked(relic_planner_t *planner);
@@ -290,6 +290,8 @@ static int	 place_emit(relic_planner_t *planner);
 static int	 place_negated(relic_planner_t *planner,
 		    const relic_atom_t *atom);
 static size_t	 positive_count(const relic_rule_t *rule);
+static bool	 probe_is_bound(const relic_atom_t *atom, uint16_t arity,
+		    uint64_t bound);
 static enum relic_op_kind positive_kind(const relic_planner_t *planner,
 		    const relic_relation_t *relation, uint32_t bound);
 static enum relic_view positive_view(const relic_planner_t *planner,
@@ -385,14 +387,14 @@ append_atom_op(relic_planner_t *planner, enum relic_op_kind kind,
 }
 
 /*
- * The term a test or an EMIT reads for an argument: a constant, or a slot.
- * The caller places the reader only where its slots are bound, which
- * confirm_plan_complete() checks once per plan.
+ * The term a test or an EMIT reads for an argument: a constant, a slot, or
+ * for `_` a column the reader does not read.  The caller places the reader
+ * only where its slots are bound, which confirm_plan_complete() checks once
+ * per plan.
  *
- * A reader never meets `_`.  Safety rejects `_` anywhere but a positive
- * literal, and a literal holding one is never a test, because atom_is_bound()
- * says it is not bound.  Should one arrive regardless, it reads as matching
- * anything rather than as a slot it does not have.
+ * Of the readers only an ANTI_MEMBER meets `_`, the columns its probe
+ * leaves out.  Safety rejects `_` in the head and in a comparison, and a
+ * MEMBER is placed only where every column is a constant or a bound slot.
  */
 static void
 read_term(const relic_arg_t *arg, relic_plan_term_t *term)
@@ -452,18 +454,6 @@ scan_term(relic_planner_t *planner, const relic_arg_t *arg,
 	planner->bound |= slot_bit(arg->u.slot);
 }
 
-/*
- * Every column of a relation of this arity, bit c for column c.
- */
-static uint32_t
-all_columns(uint16_t arity)
-{
-	if (arity >= 32)
-		return (UINT32_MAX);
-
-	return ((UINT32_C(1) << arity) - 1);
-}
-
 static uint16_t
 column_count(uint32_t columns)
 {
@@ -514,14 +504,33 @@ bound_columns(const relic_planner_t *planner, const relic_atom_t *atom,
 }
 
 /*
- * Whether every argument of an atom is a constant or a bound slot, which is
- * what makes it a membership test rather than a generator.
+ * The columns of an atom that are not `_`, which are the columns a negated
+ * literal reads.
+ */
+static uint32_t
+named_columns(const relic_atom_t *atom, uint16_t arity)
+{
+	uint32_t columns;
+	uint16_t i;
+
+	columns = 0;
+	for (i = 0; i < arity; i++) {
+		if (atom->args[i].kind != RELIC_ARG_WILDCARD)
+			columns |= UINT32_C(1) << i;
+	}
+
+	return (columns);
+}
+
+/*
+ * Whether every column a negated literal reads holds a constant or a bound
+ * slot, which is when its probe can be asked.
  */
 static bool
-atom_is_bound(const relic_atom_t *atom, uint16_t arity, uint64_t bound)
+probe_is_bound(const relic_atom_t *atom, uint16_t arity, uint64_t bound)
 {
 	return (relic_plan_bound_columns(atom, arity, bound) ==
-	    all_columns(arity));
+	    named_columns(atom, arity));
 }
 
 /*
@@ -534,7 +543,7 @@ static enum relic_op_kind
 positive_kind(const relic_planner_t *planner,
     const relic_relation_t *relation, uint32_t bound)
 {
-	if (bound == all_columns(relation->arity))
+	if (bound == relic_plan_all_columns(relation->arity))
 		return (RELIC_OP_MEMBER);
 
 	if (bound == 0 ||
@@ -615,24 +624,64 @@ arg_slots(const relic_arg_t *args, uint16_t count)
 }
 
 /*
- * Place a negated literal as an ANTI_MEMBER that reads every column.  The
- * caller places it only where every argument is bound, so each column is a
- * constant or a bound slot.
+ * The key an ANTI_MEMBER probes by, given `named`, the columns its atom does
+ * not leave as `_`: every column when all are named, answered through the
+ * canonical index; the named columns when they are a nonempty proper
+ * subset, answered through the secondary index on them; and none, answered
+ * by a scan of the view, when no column is named or when such a subset is
+ * planned under RELIC_F_NO_INDEX, as a lookup is planned as a scan.
+ */
+static uint32_t
+negated_key(const relic_planner_t *planner, const relic_relation_t *relation,
+    uint32_t named)
+{
+	if (named == relic_plan_all_columns(relation->arity))
+		return (named);
+
+	if ((planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
+		return (0);
+
+	return (named);
+}
+
+/*
+ * Place a negated literal as an ANTI_MEMBER keyed on the columns it reads.
+ * The caller places it only where every column that is not `_` is bound, so
+ * each of those is a constant or a bound slot, and each `_` is a column the
+ * probe does not read.  A key that names some columns takes the index on
+ * exactly them, built here when the relation has none, as place_atom() does
+ * for a lookup.
  */
 static int
 place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 {
+	enum relic_probe_shape shape;
 	relic_relation_t *relation;
 	relic_op_t *op;
+	uint32_t key;
+	uint32_t index_position;
 	uint16_t i;
 
 	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
 
+	key = negated_key(planner, relation,
+	    named_columns(atom, relation->arity));
+
+	index_position = 0;
+	shape = relic_plan_probe_shape(key, relation->arity);
+	if (shape == RELIC_PROBE_INDEX) {
+		if (relic_relation_index(planner->ctx, relation, key,
+		    &index_position) != 0)
+			return (-1);
+	}
+
 	op = append_atom_op(planner, RELIC_OP_ANTI_MEMBER, relation);
 	if (op == NULL)
 		return (-1);
+	op->u.atom.key_mask = key;
+	op->u.atom.index_position = index_position;
 
 	for (i = 0; i < relation->arity; i++)
 		read_term(&atom->args[i], &op->u.atom.terms[i]);
@@ -942,7 +991,7 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 	fold->key_count = aggregate->shared_count;
 	fold->column = aggregate->column;
 	fold->slot = aggregate->result;
-	fold->key_mask = all_columns(fold->key_count);
+	fold->key_mask = relic_plan_all_columns(fold->key_count);
 	fold->access = fold_access(planner, fold->key_count, fold->arity);
 
 	if (fold->access == RELIC_FOLD_LOOKUP) {
@@ -1006,10 +1055,9 @@ relic_plan_literal_binds(const relic_t *ctx, const relic_literal_t *literal,
  * whose key is bound.  This is the one place a literal is classified as a
  * test; a positive literal is never one.
  *
- * A negated literal is ready exactly when it would be a membership test were
- * it positive, so the one question answers both.  One holding `_` is never
- * ready; safety rejects such a rule, and should one arrive regardless it is
- * left out of the plan, which confirm_plan_complete() reports.
+ * A negated literal is ready once every column it reads, every one that is
+ * not `_`, is a constant or a bound slot; `_` is a column its probe leaves
+ * out, so nothing need bind it.
  */
 static bool
 test_is_placeable(relic_t *ctx, const relic_literal_t *literal,
@@ -1025,7 +1073,7 @@ test_is_placeable(relic_t *ctx, const relic_literal_t *literal,
 	case RELIC_LITERAL_NEGATED:
 		pred = relic_pred_of(ctx, literal->u.atom.pred);
 		return (pred != NULL &&
-		    atom_is_bound(&literal->u.atom, pred->arity, bound));
+		    probe_is_bound(&literal->u.atom, pred->arity, bound));
 	case RELIC_LITERAL_AGGREGATE:
 		return ((relic_aggregate_shared_slots(&literal->u.aggregate) &
 		    ~bound) == 0);

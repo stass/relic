@@ -43,15 +43,22 @@
  * differ from every other's, because its planner's order decides what the
  * Magic rewrite generates, has no reference.
  *
+ * A program whose negated literals hold `_` is also loaded in its helper
+ * rendering, random_helper_text(), where each such literal negates instead
+ * a helper relation of the columns it names, derived by a positive literal
+ * holding the `_`.  It must give the default's answers under the default
+ * strategy, which holds the probe a negated literal makes to the meaning of
+ * `_` under `not` by a path that never takes the probe.
+ *
  * And the semi-naive fixed point must make every derivation exactly once: to
- * materialize a program whose rules hold no `_`, one per fact and, for each
- * other rule, one per distinct binding of its body's variables over the
- * fixed point.  An aggregate's braces are compiled to a rule of their own,
- * the group rule, which derives once per distinct binding of the group
- * body's variables.  The bindings are counted in a context of their own
- * under the naive fixed point, as the rows of one query per rule body and
- * one per group body.  No answer shows a derivation made twice, since a
- * duplicate changes none, so this is the only comparison that can.
+ * materialize a program whose positive literals hold no `_`, one per fact
+ * and, for each other rule, one per distinct binding of its body's variables
+ * over the fixed point.  An aggregate's braces are compiled to a rule of
+ * their own, the group rule, which derives once per distinct binding of the
+ * group body's variables.  The bindings are counted in a context of their own
+ * under the naive fixed point, as the rows of one query per rule body and one
+ * per group body.  No answer shows a derivation made twice, since a duplicate
+ * changes none, so this is the only comparison that can.
  */
 
 typedef struct strategy strategy_t;
@@ -65,6 +72,8 @@ struct strategy {
 	random_strategy_t total_reference;
 	/* The threads its rounds are shared among; zero is one. */
 	size_t		 threads;
+	/* The fault that drops a row from its answers in the self-test. */
+	random_fault_t	 fault;
 };
 
 /*
@@ -75,35 +84,47 @@ struct strategy {
 
 static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_DEFAULT] = {
-		"default", 0, false, STRATEGY_NONE, 0 },
+		"default", 0, false, STRATEGY_NONE, 0, FAULT_NONE },
 	[STRATEGY_NAIVE] = {
-		"naive", RELIC_F_NAIVE, false, STRATEGY_DEFAULT, 0 },
+		"naive", RELIC_F_NAIVE, false, STRATEGY_DEFAULT, 0,
+		FAULT_NAIVE },
 	[STRATEGY_NO_INDEX] = {
-		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT, 0 },
+		"no-index", RELIC_F_NO_INDEX, false, STRATEGY_DEFAULT, 0,
+		FAULT_NONE },
 	[STRATEGY_NO_STREAM] = {
-		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT, 0 },
+		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT, 0,
+		FAULT_NONE },
 	[STRATEGY_PARALLEL] = {
 		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT,
-		PARALLEL_THREADS },
+		PARALLEL_THREADS, FAULT_NONE },
 	[STRATEGY_NO_REORDER] = {
-		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE, 0 },
+		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE, 0,
+		FAULT_NONE },
 	[STRATEGY_NO_MAGIC] = {
-		"no-magic", RELIC_F_NO_MAGIC, false, STRATEGY_NONE, 0 },
+		"no-magic", RELIC_F_NO_MAGIC, false, STRATEGY_NONE, 0,
+		FAULT_NONE },
 	[STRATEGY_NAIVE_NO_MAGIC] = {
 		"naive+no-magic", RELIC_F_NAIVE | RELIC_F_NO_MAGIC, false,
-		STRATEGY_NO_MAGIC, 0 },
+		STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_NO_INDEX_NO_MAGIC] = {
 		"no-index+no-magic", RELIC_F_NO_INDEX | RELIC_F_NO_MAGIC, false,
-		STRATEGY_NO_MAGIC, 0 },
+		STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_NO_REORDER_NO_MAGIC] = {
 		"no-reorder+no-magic", RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC,
-		false, STRATEGY_NO_MAGIC, 0 },
+		false, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_PARALLEL_NO_MAGIC] = {
 		"parallel+no-magic", RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_MAGIC,
-		false, STRATEGY_NO_MAGIC, PARALLEL_THREADS },
+		false, STRATEGY_NO_MAGIC, PARALLEL_THREADS, FAULT_NONE },
 	[STRATEGY_MATERIALIZED] = {
-		"materialized", 0, true, STRATEGY_NO_MAGIC, 0 },
+		"materialized", 0, true, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 };
+
+/*
+ * The default strategy, run over the helper rendering rather than the
+ * program, and named for it in a report.
+ */
+static const strategy_t helper_rendering = {
+	"helper", 0, false, STRATEGY_NONE, 0, FAULT_HELPER };
 
 /*
  * What one strategy produced: an answer, a tuple total and a count of
@@ -143,6 +164,9 @@ static void	 capture_diagnostic(void *capture_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static void	 drop_last_row(answer_t *answer);
+static random_failure_kind_t compare_helper_rendering(
+		    const random_program_t *program, const run_t *expected,
+		    const random_options_t *options, FILE *report);
 static random_failure_kind_t count_bindings(relic_t *ctx, size_t query,
 		    size_t rule, FILE *report, uint64_t *expectedp);
 static random_failure_kind_t count_derivations(
@@ -159,7 +183,7 @@ static bool	 load_program(relic_t *ctx, const char *text,
 		    const diag_capture_t *capture);
 static random_failure_kind_t evaluation_failure(relic_t *ctx);
 static random_failure_kind_t run_strategy(const random_program_t *program,
-		    const char *text, random_strategy_t id,
+		    const char *text, const strategy_t *strategy,
 		    const random_options_t *options, run_t *run, FILE *report);
 
 /*
@@ -234,8 +258,8 @@ random_compare(const random_program_t *program,
 
 	for (random_strategy_t s = 0; s < STRATEGY_COUNT; s++) {
 		announce(announce_ctx, s);
-		failure.kind = run_strategy(program, text, s, options, &runs[s],
-		    report);
+		failure.kind = run_strategy(program, text, &strategies[s],
+		    options, &runs[s], report);
 		if (failure.kind != FAILURE_NONE) {
 			failure.strategy = s;
 			break;
@@ -294,7 +318,12 @@ random_compare(const random_program_t *program,
 		}
 	}
 
-	if (!random_program_has_anonymous(program)) {
+	failure.kind = compare_helper_rendering(program, expected, options,
+	    report);
+	if (failure.kind != FAILURE_NONE)
+		goto done;
+
+	if (!random_program_has_positive_anonymous(program)) {
 		uint64_t expected_derivations;
 		uint64_t made;
 
@@ -325,17 +354,59 @@ done:
 }
 
 /*
- * Load, check and answer the program under one strategy, recording each
- * query's answer and the tuples held once it has run.  A refusal of the
- * program, or a query failing with no limit configured, is a failure of its
- * own: nothing a generated program does should cause either.
+ * Run the helper rendering under the default strategy and compare its
+ * answer to every query with the default's.  A program none of whose
+ * negated literals holds `_` has no rendering to run.  Tuple totals are not
+ * compared, since the helper relations hold tuples the program has nowhere.
+ * The run is charged to no strategy, since every strategy agreed.
+ */
+static random_failure_kind_t
+compare_helper_rendering(const random_program_t *program,
+    const run_t *expected, const random_options_t *options, FILE *report)
+{
+	random_failure_kind_t kind;
+	run_t rendered;
+	char *text;
+
+	text = random_helper_text(program);
+	if (text == NULL)
+		return (FAILURE_NONE);
+
+	bzero(&rendered, sizeof(rendered));
+	kind = run_strategy(program, text, &helper_rendering, options,
+	    &rendered, report);
+
+	for (size_t q = 0; kind == FAILURE_NONE && q < program->query_count;
+	    q++) {
+		const answer_t *want = &expected->answers[q];
+		const answer_t *got = &rendered.answers[q];
+
+		if (answer_equal(want, got))
+			continue;
+		fprintf(report, "query %zu: the helper rendering answers %zu "
+		    "rows, default %zu\n", q + 1, got->row_count,
+		    want->row_count);
+		answer_report_difference(report, want, got);
+		kind = FAILURE_HELPER;
+	}
+
+	for (size_t q = 0; q < RANDOM_MAX_QUERIES; q++)
+		answer_free(&rendered.answers[q]);
+	free(text);
+	return (kind);
+}
+
+/*
+ * Load, check and answer a program's text under one strategy, recording
+ * each query's answer and the tuples held once it has run.  A refusal of
+ * the text, or a query failing with no limit configured, is a failure of
+ * its own: nothing a generated program does should cause either.
  */
 static random_failure_kind_t
 run_strategy(const random_program_t *program, const char *text,
-    random_strategy_t id, const random_options_t *options, run_t *run,
+    const strategy_t *strategy, const random_options_t *options, run_t *run,
     FILE *report)
 {
-	const strategy_t *strategy = &strategies[id];
 	random_failure_kind_t kind = FAILURE_NONE;
 	diag_capture_t capture;
 	relic_config_t config;
@@ -404,7 +475,8 @@ run_strategy(const random_program_t *program, const char *text,
 		run->totals[q] = stats.tuples;
 		run->strings[q] = stats.string_values;
 
-		if (options->inject_fault && id == STRATEGY_NAIVE)
+		if (options->fault != FAULT_NONE &&
+		    options->fault == strategy->fault)
 			drop_last_row(answer);
 	}
 

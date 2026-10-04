@@ -1,2 +1,2 @@
 query-unsafe.dl:7:13: error: variable Y in the query is not bound by a positive body literal or an assignment
-query-unsafe.dl:8:22: error: anonymous variable in the query cannot be bound by a positive body literal
+query-unsafe.dl:8:13: error: anonymous variable in the query cannot be bound by a positive body literal

@@ -145,9 +145,10 @@ group        := literal ("," literal)*
 The variable before `=` is the **result**, the variable in parentheses the
 **aggregated variable**, and the literals in braces the **group body**. The
 group body is a rule body: positive literals, negated literals, comparisons
-and assignments, in any order, with `_` where a positive literal admits it.
-The one production it does not admit is `aggregate` itself; section 3.4
-refuses the nesting, and section 20 says why.
+and assignments, in any order, with `_` where a positive or a negated
+literal admits it, `specs/design-negation.md` section 2. The one production
+it does not admit is `aggregate` itself; section 3.4 refuses the nesting,
+and section 20 says why.
 
 `count` takes no variable, because the cardinality of a set of rows needs
 no column named; `sum`, `min` and `max` take exactly one, the column they

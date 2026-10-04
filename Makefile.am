@@ -633,6 +633,7 @@ endif
 ##
 
 RELIC_LANG_TESTS = \
+	tests/lang/aggregate-anonymous.dl \
 	tests/lang/aggregate-assign.dl tests/lang/aggregate-count.dl \
 	tests/lang/aggregate-explain.dl tests/lang/aggregate-limit.dl \
 	tests/lang/aggregate-limit-long-name.dl \
@@ -707,7 +708,10 @@ RELIC_LANG_TESTS = \
 	tests/lang/magic-same-generation.dl tests/lang/magic-subsumed.dl \
 	tests/lang/magic-supplementary-wide.dl \
 	tests/lang/magic-supplementary.dl tests/lang/materialize.dl \
-	tests/lang/missing-terminator.dl tests/lang/negation-forms.dl \
+	tests/lang/missing-terminator.dl \
+	tests/lang/negation-anonymous.dl \
+	tests/lang/negation-anonymous-explain.dl \
+	tests/lang/negation-forms.dl \
 	tests/lang/negation-recursive.dl tests/lang/negation-strata.dl \
 	tests/lang/negation-tasks.dl tests/lang/not-as-predicate.dl \
 	tests/lang/not-symbol.dl tests/lang/predicate-identity.dl \

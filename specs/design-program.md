@@ -181,8 +181,16 @@ slot for it would be a frame entry nothing ever reads while counting against
 the limit of 64. A rule scanning two wide relations with nothing but `_` would
 otherwise exceed the limit for no reason a reader could see.
 
-`_` anywhere else -- in the head, in a negated literal, or in a comparison --
-is unsafe, because nothing can ever bind it. Such an occurrence **does** take
+`_` in an argument of a negated literal is a wildcard for the same reason: it
+is a column the literal's probe does not read, so nothing reads it either,
+`specs/design-negation.md` section 3. The compiler tells the positions apart
+by where it compiles an argument: **binding** for a positive literal,
+**probed** for a negated one, and **required** for the head and a
+comparison. A named variable is bindable in the first and required in the
+other two, and `_` is a wildcard in the first two.
+
+`_` anywhere else -- in the head or in a comparison -- is unsafe, because it
+would be read and nothing can ever bind it. Such an occurrence **does** take
 a slot, so that the one safety computation of section 5 reports it alongside
 the named variables and in the same textual order. The rule is always
 rejected, so those slots never reach the evaluator.
@@ -198,14 +206,15 @@ no unbound-slot case to handle.
 ## 5. Safety is one set computation
 
 Architecture section 14 requires range restriction: every head variable, every
-variable of a negated literal and every variable of a comparison must be
+named variable of a negated literal and every variable of a comparison must be
 bindable from a positive relational body literal, or assigned from variables
 that are, `specs/design-arithmetic.md` section 5.
 
 Let *B* be the set of slots occurring in an argument of a positive relational
 body literal, closed under assignment: the variable an equality assigns joins
 *B* once every variable of its other side is in it. *R* is the set of slots
-occurring in the head, in a negated literal or in a comparison. The rule is
+occurring in the head, in a negated literal or in a comparison; a wildcard
+has no slot, so a negated literal's `_` is in neither set. The rule is
 safe exactly when
 
 ```text

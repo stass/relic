@@ -72,13 +72,13 @@ typedef struct relic_schedule relic_schedule_t;
 typedef struct relic_variable relic_variable_t;
 
 /*
- * What a predicate is.  A written one, the program's or the base view of
- * one, is described by its own name.  One the Magic rewrite generates is
- * part of the predicate it adorns, for an adorned, a magic or a
- * supplementary predicate, or of the query, and is described as that
- * predicate or as the query.  The group predicate of an aggregate is part of the predicate
- * whose rule holds the aggregate, or of the query, but holds the rows of
- * the aggregate's body rather than tuples of either, and is described as an
+ * What a predicate is.  A written one, the program's or the base view of one,
+ * is described by its own name.  One the Magic rewrite generates is part of
+ * the predicate it adorns, for an adorned, a magic or a supplementary
+ * predicate, or of the query, and is described as that predicate or as the
+ * query.  The group predicate of an aggregate is part of the predicate whose
+ * rule holds the aggregate, or of the query, but holds the rows of the
+ * aggregate's body rather than tuples of either, and is described as an
  * aggregate of the one or the other.
  */
 enum relic_pred_kind {
@@ -173,9 +173,11 @@ enum relic_arg_kind {
 /*
  * One argument of a compiled atom.
  *
- * A wildcard appears only in an argument of a positive relational body
- * literal, because that is the only position where `_` is legal; elsewhere
- * nothing could ever bind it and the rule is rejected before it is built.
+ * A wildcard appears only in an argument of a positive or a negated body
+ * literal, the positions where `_` is legal: a positive literal matches any
+ * value there, and a negated one does not read the column.  In the head
+ * `_` would be read and nothing could ever bind it, so the rule is rejected
+ * before it is built.
  */
 struct relic_arg {
 	union {
@@ -332,10 +334,11 @@ struct relic_literal {
  * what the singleton check reads.
  *
  * `anonymous` marks a slot taken by a bare `_`.  Such a slot exists only in
- * a rule that is being rejected: `_` in a positive body literal compiles to
- * a wildcard and takes no slot, and `_` anywhere else can never be bound.
- * It is given a slot so that the one safety computation reports it in the
- * same order as the named variables around it.
+ * a rule that is being rejected: `_` in a positive or a negated body
+ * literal compiles to a wildcard and takes no slot, and `_` in the head or
+ * a comparison is read and can never be bound.  It is given a slot so that
+ * the one safety computation reports it in the same order as the named
+ * variables around it.
  */
 struct relic_variable {
 	relic_location_t	where;

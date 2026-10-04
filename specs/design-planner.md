@@ -283,6 +283,14 @@ the whole relation and matches the key columns of each tuple, as a
 generator with bound columns is scanned, `specs/design-aggregates.md`
 section 8.3.
 
+A negated literal's `ANTI_MEMBER` reaches its relation by the same rule over
+the columns it names, those that are not `_`, all of which are bound where it
+is placed: one probe of the canonical index when it names every column, a
+probe of **the index keyed on exactly the named columns** when it names
+some, and whether the relation is empty when it names none. Under
+`-X no-index` the probe of some columns scans the relation for the first
+tuple that agrees with them instead, `specs/design-negation.md` section 4.
+
 ---
 
 ## 6. The references
@@ -297,9 +305,11 @@ equivalences of architecture section 66.2:
 
 Both leave everything else as it is: `MEMBER` still answers a fully bound
 literal, because the canonical index is not a secondary one, and tests are
-still placed as early as they can be. With both switches the planner is the
-textual planner of `specs/design-plan.md` section 5.1, and a delta variant is
-the textbook semi-naive scheme.
+still placed as early as they can be. An `ANTI_MEMBER` naming some columns of
+its relation scans under `-X no-index`, as section 5.2 says, since its answer
+is a yes or a no and it cannot become a different operation. With both
+switches the planner is the textual planner of `specs/design-plan.md` section
+5.1, and a delta variant is the textbook semi-naive scheme.
 
 Each must give the default's answers, and `tests/equiv/strategies.sh` runs the
 language corpus under each to show it.
@@ -411,7 +421,8 @@ query $q0(X) :- path(a, X).
 
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
-`anti-member`, `filter` with its comparison, `aggregate` with the equality
+`anti-member`, with its key columns when it probes a secondary index,
+`filter` with its comparison, `aggregate` with the equality
 it stands for, the group relation with its columns named and its key
 columns, `assign` with its equality, and `emit`. An expression prints from
 its tree by the rules of `specs/design-arithmetic.md` section 11, with the

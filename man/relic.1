@@ -68,8 +68,19 @@ and
 .Ql $
 are reserved, and are errors outside a string or a comment.
 .Ql _
-alone matches anything in a positive atom of a body, and names no value, so
-it cannot stand in a rule's head or a negated atom.
+alone matches anything in an atom of a body, and names no value, so it
+cannot stand in a rule's head or a comparison.
+Under
+.Ql not
+it is a column the atom does not test:
+.Ql not order(_, C, _)
+holds when no order has
+.Ar C
+in its second column, and
+.Ql not p(_, _)
+holds when
+.Ar p
+is empty.
 Integers are decimal, may be negative, and must fit in 64 bits.
 Digits followed by a period and a digit, as in
 .Ql 1.5 ,
@@ -369,10 +380,10 @@ are symbols and predicate names everywhere else;
 names no predicate.
 A query's columns are its variables outside any braces.
 .Pp
-Every variable of a rule's head, of a negated literal and of a comparison
-must also occur in a positive atom of the body or be assigned by an
-equality or an aggregate, and a program may not be recursive through
-negation or an aggregate.
+Every variable of a rule's head and of a comparison, and every named
+variable of a negated literal, must also occur in a positive atom of the
+body or be assigned by an equality or an aggregate, and a program may not
+be recursive through negation or an aggregate.
 A program that breaks either rule is rejected and nothing is evaluated.
 A variable a rule names only once, and a predicate the program reads and
 never defines, are reported as warnings, which change nothing else; a

@@ -532,6 +532,25 @@ keyword. D-16's one integer rule is unchanged. Specified in
 `specs/design-parser.md` sections 3.1 and 3.5 and `specs/design-floats.md`
 section 2.
 
+### D-31 `_` in a negated literal is a column the literal does not read
+
+A negated literal holds exactly when no tuple of its relation agrees with
+it on the columns that are not `_`. Each `_` is quantified inside the
+negation, `not p(_, _)` holds exactly when `p` is empty, and the literal is
+equivalent to negating a helper relation projected onto its named columns.
+Such a `_` is a wildcard that takes no slot, as in a positive literal, so
+the safety invariant of `specs/design-program.md` section 4.1 is unchanged:
+every slot of a rule that passes the check is bound by a positive literal
+or an assignment. A named variable of a negated literal must still be
+bound, since a name used once is more often a misspelling than an
+existential, and `_` in a head, in a comparison or as an aggregated
+variable is still rejected, since each would be read. The literal is an
+existence probe keyed on its named columns, through the canonical index
+when every column is named, a secondary index built on demand when some
+are, and the relation's emptiness when none is. Stratification and the
+Magic rewrite are untouched: both read the literal's predicate and never
+its arguments. Specified in `specs/design-negation.md`.
+
 ### D-33 Floating point, when added, is a fourth type equal only to itself
 
 A float is an IEEE 754 double and a type beside symbol, string and

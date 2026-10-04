@@ -86,12 +86,15 @@
 /*
  * Where an argument sits, which is the whole of what safety turns on.
  *
- * A positive relational body literal binds its arguments.  Everywhere else
- * -- the head, a negated literal, a comparison -- an argument is read and
- * must already have been bound by one of those.
+ * A positive relational body literal binds its arguments.  A negated
+ * literal probes its relation by its arguments: each named one is read and
+ * must already be bound, and `_` is a column the probe does not read.  In
+ * the head and a comparison every argument is read, `_` included, and must
+ * already have been bound.
  */
 enum relic_arg_position {
 	RELIC_POSITION_BINDING,
+	RELIC_POSITION_PROBED,
 	RELIC_POSITION_REQUIRED
 };
 
@@ -267,6 +270,7 @@ struct relic_compiled_statement {
 	size_t			 group_rule_count;
 };
 
+static bool	 anonymous_is_read(enum relic_arg_position position);
 static enum relic_compile_result append_loaded_query(relic_t *ctx,
 		    const relic_compiled_statement_t *compiled, size_t serial);
 static enum relic_compile_result append_program_rules(relic_t *ctx,
@@ -563,18 +567,19 @@ compile_term(relic_compiler_t *compiler, const relic_ast_term_t *term,
 	variable = &term->u.variable;
 
 	/*
-	 * `_` in an argument of a positive body literal is a wildcard: it
-	 * binds nothing and nothing reads it, so a slot for it would be a
-	 * frame entry counting against the limit of 64 for no reason a reader
-	 * could see.  A rule scanning two wide relations with nothing but `_`
-	 * would otherwise exceed the limit without holding a single variable.
+	 * `_` in an argument of a positive or a negated body literal is a
+	 * wildcard: it binds nothing and nothing reads it, so a slot for it
+	 * would be a frame entry counting against the limit of 64 for no
+	 * reason a reader could see.  A rule scanning two wide relations with
+	 * nothing but `_` would otherwise exceed the limit without holding a
+	 * single variable.
 	 *
-	 * Everywhere else `_` can never be bound, so it does take a slot, and
-	 * the one computation below reports it alongside the named variables
-	 * and in the same textual order.  The rule is always rejected, so
-	 * such a slot never reaches the evaluator.
+	 * In the head and a comparison `_` is read and can never be bound, so
+	 * it does take a slot, and the one computation below reports it
+	 * alongside the named variables and in the same textual order.  The
+	 * rule is always rejected, so such a slot never reaches the evaluator.
 	 */
-	if (variable->anonymous && position == RELIC_POSITION_BINDING) {
+	if (variable->anonymous && !anonymous_is_read(position)) {
 		arg->kind = RELIC_ARG_WILDCARD;
 
 		return (RELIC_COMPILE_OK);
@@ -593,6 +598,26 @@ compile_term(relic_compiler_t *compiler, const relic_ast_term_t *term,
 	arg->u.slot = slot;
 
 	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Whether `_` as an argument in this position would be read, a value that
+ * nothing binds: in the head and in a comparison.  A positive literal
+ * matches any value where `_` stands, and a negated literal's probe leaves
+ * the column out, so neither reads it, and there `_` is a wildcard.
+ */
+static bool
+anonymous_is_read(enum relic_arg_position position)
+{
+	switch (position) {
+	case RELIC_POSITION_BINDING:
+	case RELIC_POSITION_PROBED:
+		return (false);
+	case RELIC_POSITION_REQUIRED:
+		break;
+	}
+
+	return (true);
 }
 
 /*
@@ -1613,7 +1638,7 @@ compile_literal(relic_compiler_t *compiler,
 		    RELIC_POSITION_BINDING, &literal->u.atom));
 	case RELIC_LITERAL_NEGATED:
 		return (compile_atom(compiler, &source->u.atom,
-		    RELIC_POSITION_REQUIRED, &literal->u.atom));
+		    RELIC_POSITION_PROBED, &literal->u.atom));
 	case RELIC_LITERAL_COMPARISON:
 		return (compile_comparison(compiler, &source->u.comparison,
 		    &literal->u.comparison));
@@ -1748,10 +1773,10 @@ literal_assigns(const relic_literal_t *literal, uint64_t bound,
  * holds, until a pass over the body adds nothing.
  *
  * Each pass adds a slot or is the last, so there is at most one pass more
- * than there are slots, and a body with no assignment takes one.  `_` is never added:
- * each occurrence is a distinct variable, and one computed and discarded is
- * no binding anything could read, so it stays unbound and is reported with
- * the message that says so.
+ * than there are slots, and a body with no assignment takes one.  `_` is
+ * never added: each occurrence is a distinct variable, and one computed and
+ * discarded is no binding anything could read, so it stays unbound and is
+ * reported with the message that says so.
  */
 static void
 bind_by_assignment(relic_compiler_t *compiler)
@@ -2206,9 +2231,9 @@ compile_rule(relic_compiler_t *compiler, relic_compiled_statement_t *compiled)
 /*
  * Build the head of a query's rule: one argument for every named variable, in
  * slot order, which is the order of first occurrence.  `_` contributes no
- * column.  In a positive literal it is a wildcard with no slot at all, and a
- * slot it takes anywhere else belongs to a query about to be rejected as
- * unsafe.
+ * column.  In a positive or a negated literal it is a wildcard with no slot
+ * at all, and a slot it takes anywhere else belongs to a query about to be
+ * rejected as unsafe.
  *
  * The head counts as one occurrence of each variable it names and requires
  * each one to be bound, exactly as a written head would.  That is what makes

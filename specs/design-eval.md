@@ -424,7 +424,10 @@ interface.
 ## 5. Negation
 
 A negated literal becomes `ANTI_MEMBER`: once its variables are bound, the tuple
-it names is looked up, and the binding survives only if it is absent.
+it names is looked up, and the binding survives only if it is absent. A
+literal holding `_` asks the same question of the columns it names: the
+binding survives only if no tuple agrees with it there, which a probe of the
+index on those columns answers, `specs/design-negation.md` section 4.
 Stratification guarantees that the negated relation belongs to a lower stratum
 and is complete by the time the test runs, so absence is meaningful. The
 schedule evaluates every component after everything it depends on, negatively

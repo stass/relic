@@ -181,9 +181,9 @@ built. The parser reads a head's terms into its scratch array of
 * followed by `.`, with a variable among the terms, the head is copied and
   kept as a statement, and the check rejects it as it rejects any unsafe
   rule, with the diagnostic an unsafe fact receives: `variable X in fact
-  edge/2 is not bound by a positive body literal`. A fact that cannot be a
-  tuple is an error, and keeping its statement keeps that error exact. A
-  rejected statement is never appended to the rule table.
+  edge/2 is not bound by a positive body literal or an assignment`. A fact
+  that cannot be a tuple is an error, and keeping its statement keeps that
+  error exact. A rejected statement is never appended to the rule table.
 
 Only a load stages. The parser also reads a query's text, where a fact is
 an error; there it keeps a fact as a statement, and the query parser

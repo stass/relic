@@ -1,0 +1,3 @@
+aggregate-anonymous.dl:6:21: error: sum takes a named variable, not _
+aggregate-anonymous.dl:7:22: error: min takes a named variable, not _
+aggregate-anonymous.dl:8:23: error: max takes a named variable, not _

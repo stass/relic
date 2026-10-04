@@ -6,7 +6,9 @@ relic 1.0.0 (unreleased)
   command-line tool, relic(1).
 
   * The language: facts, rules and queries over symbols, strings and 64-bit
-    integers, with stratified negation; integer arithmetic in comparisons;
+    integers, with stratified negation, where _ in a negated atom is a
+    column it does not test, so that not order(_, C, _) holds when C has
+    no order at all; integer arithmetic in comparisons;
     the string functions length, cat, substr, index, match and str, match
     taking a linear-time regular expression; and the aggregates count, sum,
     min and max.  Digits followed by a period and a digit, or by an

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "random.h"
 
@@ -21,6 +22,21 @@
  * checking the safety condition the generator builds in and the shrinker's
  * edits can break, and the edits themselves.
  */
+
+/*
+ * The helper predicates a text in the helper rendering of
+ * random_helper_text() reads, by predicate and by wildcard columns, bit c
+ * for column c.  The writer takes one, or NULL to write the program as it
+ * states: given one, it spells each negated literal holding `_` over its
+ * helper and records the helper, so the helper rules the text ends with
+ * are exactly those it reads.
+ */
+typedef struct helper_set helper_set_t;
+
+struct helper_set {
+	bool	used[RANDOM_MAX_PREDICATES][1u << RANDOM_MAX_ARITY];
+	bool	any;
+};
 
 static uint64_t	 assigned_variables(const random_literal_t *literals,
 		    size_t length, uint64_t bound_variables);
@@ -46,7 +62,8 @@ static uint64_t	 group_variables(const random_program_t *program,
 		    const random_literal_t *aggregate);
 static bool	 literal_has_operator(const random_literal_t *literal);
 static bool	 literals_have_anonymous(const random_program_t *program,
-		    const random_literal_t *literals, size_t length);
+		    const random_literal_t *literals, size_t length,
+		    random_literal_kind_t kind);
 static bool	 literals_state_small(const random_program_t *program,
 		    const random_literal_t *literals, size_t length);
 static uint64_t	 positive_variables(const random_program_t *program,
@@ -65,6 +82,8 @@ static uint64_t	 expression_variables(
 		    const random_expression_t *expression);
 static size_t	 literal_arity(const random_program_t *program,
 		    const random_literal_t *literal);
+static unsigned int literal_wildcards(const random_program_t *program,
+		    const random_literal_t *literal);
 static int	 operator_precedence(random_operator_t operator);
 static size_t	 call_arity(random_call_t call);
 static void	 remove_argument(random_term_t *args, size_t column);
@@ -80,23 +99,28 @@ static bool	 test_is_safe(const random_program_t *program,
 static uint64_t	 variable_bit(uint8_t variable);
 static void	 write_aggregate(FILE *out, const random_program_t *program,
 		    const random_body_t *body,
-		    const random_literal_t *aggregate);
+		    const random_literal_t *aggregate, helper_set_t *helpers);
 static void	 write_atom(FILE *out, const random_program_t *program,
 		    uint8_t predicate, const random_term_t *args);
 static void	 write_call(FILE *out, random_call_t call,
 		    const random_term_t *leaves, bool nested,
 		    random_call_t inner);
 static void	 write_body(FILE *out, const random_program_t *program,
-		    const random_body_t *body);
+		    const random_body_t *body, helper_set_t *helpers);
 static void	 write_expression(FILE *out,
 		    const random_expression_t *expression);
+static void	 write_helper_atom(FILE *out, uint8_t predicate,
+		    const random_term_t *args, size_t arity,
+		    unsigned int wildcards);
+static void	 write_helper_rule(FILE *out, const random_program_t *program,
+		    uint8_t predicate, unsigned int wildcards);
 static void	 write_literals(FILE *out, const random_program_t *program,
 		    const random_body_t *body, const random_literal_t *literals,
-		    size_t length);
+		    size_t length, helper_set_t *helpers);
 static void	 write_operation(FILE *out, random_term_t left,
 		    random_operator_t operator, random_term_t right);
 static void	 write_rule(FILE *out, const random_program_t *program,
-		    const random_rule_t *rule);
+		    const random_rule_t *rule, helper_set_t *helpers);
 static void	 write_term(FILE *out, random_term_t term);
 
 static const char *const operator_spellings[OPERATOR_COUNT] = {
@@ -134,13 +158,13 @@ static const char *const function_spellings[FUNCTION_KINDS] = {
 };
 
 /*
- * Whether every rule and query satisfies the safety condition: every
- * variable of a head, a negated literal or a comparison is bound, by a
- * positive relational literal of the same body, by an assignment or by an
- * aggregate, and `_` occurs nowhere else.  An aggregate's shared variables
- * and its result must be bound as well, and its group body must be safe as
- * a rule of its own.  A query must also have a body, since its body is all
- * it is.
+ * Whether every rule and query satisfies the safety condition: every variable
+ * of a head, a negated literal or a comparison is bound, by a positive
+ * relational literal of the same body, by an assignment or by an aggregate,
+ * and `_` occurs only in a positive or a negated literal, where nothing reads
+ * it.  An aggregate's shared variables and its result must be bound as well,
+ * and its group body must be safe as a rule of its own.  A query must also
+ * have a body, since its body is all it is.
  */
 bool
 random_program_is_safe(const random_program_t *program)
@@ -534,7 +558,8 @@ bound_by_closure(const random_body_t *body, const uint64_t *shared,
  * compiles it to, whose head names every variable of the group body, the
  * aggregated one among them: the body is not empty, holds no aggregate, and
  * binds each of those variables by a positive literal or an assignment
- * inside the braces, and `_` stands only in its positive literals.
+ * inside the braces, and `_` stands only in its positive and negated
+ * literals.
  */
 static bool
 group_is_safe(const random_program_t *program, const random_group_t *group,
@@ -748,17 +773,41 @@ literal_arity(const random_program_t *program, const random_literal_t *literal)
 }
 
 /*
- * Whether a negated literal or a comparison is safe: every term it holds,
- * each argument of the one and each leaf of the other's two sides, is a
- * constant or a bound variable, and none is `_`, which nothing binds.
+ * The columns of a relational literal that are `_`, bit c for column c; none
+ * for a comparison or an aggregate, which have no columns.
+ */
+static unsigned int
+literal_wildcards(const random_program_t *program,
+    const random_literal_t *literal)
+{
+	unsigned int wildcards = 0;
+
+	for (size_t a = 0; a < literal_arity(program, literal); a++) {
+		if (literal->args[a].kind == TERM_ANONYMOUS)
+			wildcards |= 1u << a;
+	}
+	return (wildcards);
+}
+
+/*
+ * Whether a negated literal or a comparison is safe: every term it reads,
+ * each argument of the one that is not `_` and each leaf of the other's two
+ * sides, is a constant or a bound variable.  A negated literal's `_` is a
+ * column its probe leaves out, so nothing need bind it; a comparison reads
+ * every leaf, and nothing binds `_`.
  */
 static bool
 test_is_safe(const random_program_t *program, const random_literal_t *literal,
     uint64_t bound_variables)
 {
-	if (literal->kind == LITERAL_NEGATED)
-		return (terms_are_bound(literal->args,
-		    literal_arity(program, literal), bound_variables));
+	if (literal->kind == LITERAL_NEGATED) {
+		for (size_t a = 0; a < literal_arity(program, literal); a++) {
+			if (literal->args[a].kind != TERM_ANONYMOUS &&
+			    !term_is_bound(literal->args[a], bound_variables))
+				return (false);
+		}
+		return (true);
+	}
 
 	return (terms_are_bound(literal->sides[0].leaves,
 	    expression_leaves(&literal->sides[0]), bound_variables) &&
@@ -777,7 +826,10 @@ terms_are_bound(const random_term_t *terms, size_t count,
 	return (true);
 }
 
-/* Whether a term is safe outside a positive literal. */
+/*
+ * Whether a term is safe where it is read: in a head, in a comparison, or in
+ * a column a negated literal probes.  `_` is never bound.
+ */
 static bool
 term_is_bound(random_term_t term, uint64_t positive_variables)
 {
@@ -801,19 +853,20 @@ random_program_statements(const random_program_t *program)
 }
 
 /*
- * Whether any rule's body, or any group body in it, holds `_`.  A binding
- * of such a body's variables does not name the tuples that satisfy it,
- * since the column `_` stands in may hold several values under one
- * binding.
+ * Whether any rule's body, or any group body in it, holds `_` in a positive
+ * literal.  A binding of such a body's variables does not name the tuples
+ * that satisfy it, since the column `_` stands in may hold several values
+ * under one binding.  `_` in a negated literal multiplies nothing: the
+ * literal is a test, which lets a binding through at most once.
  */
 bool
-random_program_has_anonymous(const random_program_t *program)
+random_program_has_positive_anonymous(const random_program_t *program)
 {
 	for (size_t r = 0; r < program->rule_count; r++) {
 		const random_body_t *body = &program->rules[r].body;
 
 		if (literals_have_anonymous(program, body->literals,
-		    body->length))
+		    body->length, LITERAL_POSITIVE))
 			return (true);
 		for (size_t i = 0; i < body->length; i++) {
 			const random_literal_t *literal = &body->literals[i];
@@ -823,24 +876,25 @@ random_program_has_anonymous(const random_program_t *program)
 				continue;
 			group = &body->groups[literal->group];
 			if (literals_have_anonymous(program, group->literals,
-			    group->length))
+			    group->length, LITERAL_POSITIVE))
 				return (true);
 		}
 	}
 	return (false);
 }
 
+/* Whether any literal of the given kind among `literals` holds `_`. */
 static bool
 literals_have_anonymous(const random_program_t *program,
-    const random_literal_t *literals, size_t length)
+    const random_literal_t *literals, size_t length,
+    random_literal_kind_t kind)
 {
 	for (size_t i = 0; i < length; i++) {
 		const random_literal_t *literal = &literals[i];
 
-		for (size_t a = 0; a < literal_arity(program, literal); a++) {
-			if (literal->args[a].kind == TERM_ANONYMOUS)
-				return (true);
-		}
+		if (literal->kind == kind &&
+		    literal_wildcards(program, literal) != 0)
+			return (true);
 	}
 	return (false);
 }
@@ -879,14 +933,14 @@ random_bindings_text(const random_program_t *program)
 		err(1, "open_memstream");
 
 	for (size_t r = 0; r < program->rule_count; r++)
-		write_rule(out, program, &program->rules[r]);
+		write_rule(out, program, &program->rules[r], NULL);
 
 	for (size_t r = 0; r < program->rule_count; r++) {
 		const random_body_t *body = &program->rules[r].body;
 
 		if (body->length == 0)
 			continue;
-		write_body(out, program, body);
+		write_body(out, program, body, NULL);
 		fputs("?\n", out);
 
 		for (size_t i = 0; i < body->length; i++) {
@@ -897,7 +951,7 @@ random_bindings_text(const random_program_t *program)
 				continue;
 			group = &body->groups[literal->group];
 			write_literals(out, program, body, group->literals,
-			    group->length);
+			    group->length, NULL);
 			fputs("?\n", out);
 		}
 	}
@@ -930,6 +984,74 @@ random_program_text(const random_program_t *program)
 }
 
 /*
+ * The helper rendering of the program, or NULL when no negated literal of it
+ * holds `_`, since the rendering would then be the program itself.  Each
+ * negated literal holding `_` is written over a helper predicate of the
+ * columns it names, which one rule derives from the literal's predicate
+ * with `_` in the other columns:
+ *
+ *	p1(A) :- p0(A), not p2(_, A).
+ *
+ *	p1(A) :- p0(A), not p2_w1(A).
+ *	p2_w1(B) :- p2(_, B).
+ *
+ * The two answer every query alike, since that is what `_` under `not`
+ * means, and the second asks the question of a positive literal instead.
+ * A helper is named for its predicate and its wildcard columns, bit c for
+ * column c, so the literals that leave out the same columns of one
+ * predicate share one, and a name holding `_` is none the generator draws.
+ * A helper reads its predicate positively and is read only under `not`,
+ * where its predicate was, so the rendering is stratified as the program
+ * is.  The helper rules follow the program's rules and precede its
+ * queries, and are those the rules and queries were written over, which
+ * the writer records as it writes them.  The caller frees the result.
+ */
+char *
+random_helper_text(const random_program_t *program)
+{
+	helper_set_t helpers;
+	FILE *out;
+	FILE *queries_out;
+	char *text = NULL;
+	char *queries = NULL;
+	size_t length = 0;
+	size_t queries_length = 0;
+
+	bzero(&helpers, sizeof(helpers));
+	out = open_memstream(&text, &length);
+	queries_out = open_memstream(&queries, &queries_length);
+	if (out == NULL || queries_out == NULL)
+		err(1, "open_memstream");
+
+	for (size_t r = 0; r < program->rule_count; r++)
+		write_rule(out, program, &program->rules[r], &helpers);
+	for (size_t q = 0; q < program->query_count; q++) {
+		write_body(queries_out, program, &program->queries[q],
+		    &helpers);
+		fputs("?\n", queries_out);
+	}
+	if (fclose(queries_out) != 0)
+		err(1, "writing a program");
+
+	for (uint8_t p = 0; p < program->predicate_count; p++) {
+		for (unsigned int w = 0; w < (1u << RANDOM_MAX_ARITY); w++) {
+			if (helpers.used[p][w])
+				write_helper_rule(out, program, p, w);
+		}
+	}
+	fputs(queries, out);
+	free(queries);
+	if (fclose(out) != 0)
+		err(1, "writing a program");
+
+	if (!helpers.any) {
+		free(text);
+		return (NULL);
+	}
+	return (text);
+}
+
+/*
  * Every statement ends in a period or a question mark and a newline, and the
  * only spellings that hold a period are string patterns, inside quotes, so
  * the text never puts a digit, a period and a digit in a row outside a
@@ -942,44 +1064,48 @@ void
 random_program_write(const random_program_t *program, FILE *out)
 {
 	for (size_t r = 0; r < program->rule_count; r++)
-		write_rule(out, program, &program->rules[r]);
+		write_rule(out, program, &program->rules[r], NULL);
 
 	for (size_t q = 0; q < program->query_count; q++) {
-		write_body(out, program, &program->queries[q]);
+		write_body(out, program, &program->queries[q], NULL);
 		fputs("?\n", out);
 	}
 }
 
 static void
 write_rule(FILE *out, const random_program_t *program,
-    const random_rule_t *rule)
+    const random_rule_t *rule, helper_set_t *helpers)
 {
 	write_atom(out, program, rule->head_predicate, rule->head);
 	if (rule->body.length > 0) {
 		fputs(" :- ", out);
-		write_body(out, program, &rule->body);
+		write_body(out, program, &rule->body, helpers);
 	}
 	fputs(".\n", out);
 }
 
 static void
 write_body(FILE *out, const random_program_t *program,
-    const random_body_t *body)
+    const random_body_t *body, helper_set_t *helpers)
 {
-	write_literals(out, program, body, body->literals, body->length);
+	write_literals(out, program, body, body->literals, body->length,
+	    helpers);
 }
 
 /*
  * Literals of `body`, its own or those of one of its group bodies, joined
- * by commas.  The body is where an aggregate's group body is found.
+ * by commas.  The body is where an aggregate's group body is found.  With
+ * `helpers`, each negated literal holding `_` is written over its helper,
+ * which is recorded there.
  */
 static void
 write_literals(FILE *out, const random_program_t *program,
     const random_body_t *body, const random_literal_t *literals,
-    size_t length)
+    size_t length, helper_set_t *helpers)
 {
 	for (size_t i = 0; i < length; i++) {
 		const random_literal_t *literal = &literals[i];
+		unsigned int wildcards;
 
 		if (i > 0)
 			fputs(", ", out);
@@ -987,7 +1113,18 @@ write_literals(FILE *out, const random_program_t *program,
 		switch (literal->kind) {
 		case LITERAL_NEGATED:
 			fputs("not ", out);
-			/* FALLTHROUGH */
+			wildcards = literal_wildcards(program, literal);
+			if (helpers == NULL || wildcards == 0) {
+				write_atom(out, program, literal->predicate,
+				    literal->args);
+				break;
+			}
+			write_helper_atom(out, literal->predicate,
+			    literal->args, literal_arity(program, literal),
+			    wildcards);
+			helpers->used[literal->predicate][wildcards] = true;
+			helpers->any = true;
+			break;
 		case LITERAL_POSITIVE:
 			write_atom(out, program, literal->predicate,
 			    literal->args);
@@ -999,7 +1136,8 @@ write_literals(FILE *out, const random_program_t *program,
 			write_expression(out, &literal->sides[1]);
 			break;
 		case LITERAL_AGGREGATE:
-			write_aggregate(out, program, body, literal);
+			write_aggregate(out, program, body, literal,
+			    helpers);
 			break;
 		}
 	}
@@ -1008,7 +1146,8 @@ write_literals(FILE *out, const random_program_t *program,
 /* `R = count { ... }`, or `R = sum(V) { ... }` and likewise min and max. */
 static void
 write_aggregate(FILE *out, const random_program_t *program,
-    const random_body_t *body, const random_literal_t *aggregate)
+    const random_body_t *body, const random_literal_t *aggregate,
+    helper_set_t *helpers)
 {
 	const random_group_t *group = &body->groups[aggregate->group];
 	random_term_t result = { TERM_VARIABLE, aggregate->result };
@@ -1022,7 +1161,8 @@ write_aggregate(FILE *out, const random_program_t *program,
 		fputc(')', out);
 	}
 	fputs(" { ", out);
-	write_literals(out, program, body, group->literals, group->length);
+	write_literals(out, program, body, group->literals, group->length,
+	    helpers);
 	fputs(" }", out);
 }
 
@@ -1163,6 +1303,57 @@ write_atom(FILE *out, const random_program_t *program, uint8_t predicate,
 		write_term(out, args[a]);
 	}
 	fputc(')', out);
+}
+
+/*
+ * The helper predicate of `predicate` and the columns `wildcards` over the
+ * arguments of the other columns, in their order: `p2_w1(A)` for
+ * `p2(_, A)`.  A helper of no column is written as its bare name.
+ */
+static void
+write_helper_atom(FILE *out, uint8_t predicate, const random_term_t *args,
+    size_t arity, unsigned int wildcards)
+{
+	bool opened = false;
+
+	fprintf(out, "p%u_w%u", (unsigned)predicate, wildcards);
+	for (size_t a = 0; a < arity; a++) {
+		if ((wildcards & (1u << a)) != 0)
+			continue;
+		fputs(opened ? ", " : "(", out);
+		write_term(out, args[a]);
+		opened = true;
+	}
+	if (opened)
+		fputc(')', out);
+}
+
+/*
+ * The rule deriving a helper predicate from its predicate: the predicate's
+ * atom with `_` in the wildcard columns and the variable of index c in each
+ * other column c, and the helper over those variables.
+ */
+static void
+write_helper_rule(FILE *out, const random_program_t *program,
+    uint8_t predicate, unsigned int wildcards)
+{
+	uint8_t arity = program->predicates[predicate].arity;
+	random_term_t args[RANDOM_MAX_ARITY];
+
+	for (uint8_t a = 0; a < arity; a++) {
+		if ((wildcards & (1u << a)) != 0) {
+			args[a].kind = TERM_ANONYMOUS;
+			args[a].index = 0;
+		} else {
+			args[a].kind = TERM_VARIABLE;
+			args[a].index = a;
+		}
+	}
+
+	write_helper_atom(out, predicate, args, arity, wildcards);
+	fputs(" :- ", out);
+	write_atom(out, program, predicate, args);
+	fputs(".\n", out);
 }
 
 static void

@@ -1,1 +1,2 @@
-unsafe-negation.dl:4:7: error: variable X in rule ready/1 is not bound by a positive body literal or an assignment
+unsafe-negation.dl:9:7: error: variable X in rule ready/1 is not bound by a positive body literal or an assignment
+unsafe-negation.dl:12:35: error: variable O in rule idle/1 is not bound by a positive body literal or an assignment

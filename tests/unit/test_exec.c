@@ -16,9 +16,10 @@
  * reads, runs it a call at a time, and checks every batch it is handed
  * against the relation it scanned: every tuple once, in identifier order,
  * a full batch exactly full, and nothing written past the batch.  The
- * rest join a second scan, lookup or aggregate fold that does a quantum of
- * work and more for each binding, to see the executor pause with its batch
- * empty once a quantum is done, and resume where it paused.
+ * rest join a second scan, lookup, aggregate fold or negated probe that
+ * does a quantum of work and more for each binding, to see the executor
+ * pause with its batch empty once a quantum is done, and resume where it
+ * paused.
  */
 
 #include "config.h"
@@ -37,6 +38,7 @@
 #define	SCENARIO_GROWTH		"what is appended between calls is not read"
 #define	SCENARIO_NEGLECT	"a batch left full is not written past"
 #define	SCENARIO_PIECES		"pieces of a view derive what the whole does"
+#define	SCENARIO_PROBES		"a probe's scan counts toward the quantum"
 #define	SCENARIO_FOLDS		"a fold's reads count toward the quantum"
 #define	SCENARIO_FOLD_EMIT	"a fold that pauses emits its value next call"
 #define	SCENARIO_LOOKUP		"a lookup rejecting its chain pauses inside it"
@@ -81,6 +83,7 @@ static void	 a_plan_deriving_nothing_pauses_every_quantum(void);
 static void	 a_folds_reads_count_toward_the_quantum(void);
 static void	 a_fold_that_pauses_emits_its_value_next_call(void);
 static void	 a_lookup_rejecting_its_chain_pauses_inside_it(void);
+static void	 a_probes_scan_counts_toward_the_quantum(void);
 static bool	 fill(fixture_t *fixture, const char *scenario, int64_t first,
 		    size_t count);
 static void	 fixture_close(fixture_t *fixture);
@@ -756,6 +759,107 @@ a_folds_reads_count_toward_the_quantum(void)
 }
 
 /*
+ * A negated literal's probe that scans has no cursor to resume from, so it
+ * charges the tuples it reads to the call as a fold does.  The plan scans
+ * r, then three times over for each of r's tuples asks whether p, a
+ * relation a quantum large, holds a tuple whose first column is that value
+ * and whose second is anything -- the probe of `not p(X, _)` without an
+ * index -- which none does, so each probe reads all of p; then it scans the
+ * empty z, which rejects every binding.  A call may read one probe's walk
+ * past its quantum and no more.
+ */
+static void
+a_probes_scan_counts_toward_the_quantum(void)
+{
+	relic_op_state_t states[6];
+	relic_plan_term_t probe_terms[2];
+	relic_scratch_t scratch;
+	relic_relation_t *empty;
+	relic_relation_t *probed;
+	relic_op_t ops[6];
+	relic_plan_t plan;
+	fixture_t fixture;
+	relic_dom_t tuple[2];
+	relic_dom_t batch[RELIC_INSERT_BATCH];
+	enum relic_exec_status status;
+	uint64_t read_before;
+	uint64_t most_read;
+	size_t outer;
+	size_t walk;
+	size_t i;
+	bool added;
+
+	if (!fixture_open(&fixture, SCENARIO_PROBES))
+		return;
+
+	outer = 64;
+	walk = RELIC_EXEC_QUANTUM;
+	empty = relation(fixture.ctx, SCENARIO_PROBES, "z", 1);
+	probed = relation(fixture.ctx, SCENARIO_PROBES, "p", 2);
+	if (empty == NULL || probed == NULL ||
+	    !fill(&fixture, SCENARIO_PROBES, 1, outer)) {
+		fixture_close(&fixture);
+		return;
+	}
+	for (i = 0; i < walk; i++) {
+		if (relic_value_intern_integer(fixture.ctx,
+		    (int64_t)(1000000 + i), &tuple[0]) != 0 ||
+		    relic_value_intern_integer(fixture.ctx, (int64_t)i,
+		    &tuple[1]) != 0 ||
+		    relic_relation_insert(fixture.ctx, probed, tuple,
+		    &added) != 0) {
+			check(false, SCENARIO_PROBES, "p fills");
+			fixture_close(&fixture);
+			return;
+		}
+	}
+
+	bzero(probe_terms, sizeof(probe_terms));
+	probe_terms[0] = fixture.read;
+	probe_terms[1].action = RELIC_PLAN_ANY;
+
+	bzero(ops, sizeof(ops));
+	ops[0] = fixture.ops[0];
+	for (i = 1; i <= 3; i++) {
+		ops[i].kind = RELIC_OP_ANTI_MEMBER;
+		ops[i].u.atom.relation = probed;
+		ops[i].u.atom.terms = probe_terms;
+		ops[i].u.atom.arity = 2;
+		ops[i].u.atom.key_mask = 0;
+		ops[i].u.atom.view = RELIC_VIEW_ALL;
+	}
+	ops[4] = fixture.ops[0];
+	ops[4].u.atom.relation = empty;
+	ops[4].u.atom.terms = &fixture.read;
+	ops[5] = fixture.ops[1];
+	plan.ops = ops;
+	plan.op_count = 6;
+
+	relic_scratch_init(&scratch, states, 6, batch, NULL, 1);
+	relic_exec_start(&scratch, &fixture.env, &plan);
+
+	most_read = 0;
+	do {
+		read_before = scratch.counters.tuples_scanned;
+		status = relic_exec_run(&scratch);
+		if (scratch.counters.tuples_scanned - read_before > most_read)
+			most_read = scratch.counters.tuples_scanned -
+			    read_before;
+		scratch.batch_count = 0;
+	} while (status == RELIC_EXEC_PAUSED);
+
+	checkf(most_read <= 2 * RELIC_EXEC_QUANTUM + 1, SCENARIO_PROBES,
+	    "a call should read at most a walk past its quantum, not %llu",
+	    (unsigned long long)most_read);
+	checkf(scratch.counters.tuples_scanned == outer * (3 * walk + 1),
+	    SCENARIO_PROBES, "the plan should read %zu tuples, not %llu",
+	    outer * (3 * walk + 1),
+	    (unsigned long long)scratch.counters.tuples_scanned);
+
+	fixture_close(&fixture);
+}
+
+/*
  * A fold that spends the call's reads and matches pauses the call at the
  * operation after it, its value bound in the frame, and the next call
  * resumes there.  The plan scans r, counts q -- a quantum and more -- and
@@ -981,6 +1085,7 @@ main(void)
 	a_plan_deriving_nothing_pauses_every_quantum();
 	a_folds_reads_count_toward_the_quantum();
 	a_fold_that_pauses_emits_its_value_next_call();
+	a_probes_scan_counts_toward_the_quantum();
 	a_lookup_rejecting_its_chain_pauses_inside_it();
 
 	return (check_summary("test_exec"));

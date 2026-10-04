@@ -306,10 +306,12 @@ void	random_generate(random_program_t *program, uint64_t seed);
 bool	random_program_is_safe(const random_program_t *program);
 bool	random_program_is_bounded(const random_program_t *program);
 bool	random_constant_is_small(size_t index);
-bool	random_program_has_anonymous(const random_program_t *program);
+bool	random_program_has_positive_anonymous(
+	    const random_program_t *program);
 uint64_t random_literal_variables(const random_program_t *program,
 	    const random_literal_t *literal);
 char	*random_bindings_text(const random_program_t *program);
+char	*random_helper_text(const random_program_t *program);
 size_t	random_program_statements(const random_program_t *program);
 char	*random_program_text(const random_program_t *program);
 void	random_program_write(const random_program_t *program, FILE *out);
@@ -358,6 +360,7 @@ typedef enum random_failure_kind {
 	FAILURE_ANSWERS,	/* a strategy's answer differs from default */
 	FAILURE_TOTALS,		/* a strategy's tuple total differs */
 	FAILURE_DERIVATIONS,	/* a derivation was made twice, or missed */
+	FAILURE_HELPER,		/* the helper rendering answers otherwise */
 	FAILURE_UNDEFINED,	/* an arithmetic result was not defined */
 	FAILURE_TOO_LONG,	/* a string was longer than a value can be */
 	FAILURE_PATTERN,	/* a pattern was not a regular expression */
@@ -380,14 +383,21 @@ struct random_failure {
 	int			code;		/* signal or exit status */
 };
 
+/*
+ * A fault the self-test injects: one row dropped from every answer that has
+ * one, of the naive strategy or of the helper rendering, so that it can show
+ * that each comparison finds a disagreement and reports it as its own.
+ */
+typedef enum random_fault {
+	FAULT_NONE,
+	FAULT_NAIVE,
+	FAULT_HELPER
+} random_fault_t;
+
 typedef struct random_options random_options_t;
 
 struct random_options {
-	/*
-	 * Drop one row from the naive strategy's answer to every query that
-	 * has one, so that the self-test can show a disagreement is found.
-	 */
-	bool		inject_fault;
+	random_fault_t	fault;		/* FAULT_NONE but in the self-test */
 	unsigned int	timeout_seconds;
 };
 

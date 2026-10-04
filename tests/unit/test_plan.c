@@ -55,6 +55,7 @@
 #define	SCENARIO_INCOMPLETE	"a relation being derived is assumed, not measured"
 #define	SCENARIO_MEMBER		"a fully bound literal is a membership test"
 #define	SCENARIO_NEGATION	"a negated literal is an ANTI_MEMBER, placed early"
+#define	SCENARIO_PROBE		"a negated literal probes by its named columns"
 #define	SCENARIO_RANKING	"passes choose the step-by-step greedy order"
 #define	SCENARIO_REFERENCES	"the reference switches change only their choice"
 #define	SCENARIO_TERMS		"a scan's columns bind, match or ignore"
@@ -172,6 +173,7 @@ static void	 the_emit_writes_the_relation_it_is_given(void);
 static void	 a_bodyless_rule_is_a_lone_emit_of_constants(void);
 static void	 a_fully_bound_literal_is_a_membership_test(void);
 static void	 a_negated_literal_is_placed_once_bound(void);
+static void	 a_negated_literal_probes_by_its_named_columns(void);
 static void	 a_relation_being_derived_is_assumed(void);
 static void	 an_assumed_relation_divides_per_bound_column(void);
 static void	 a_scans_columns_bind_match_or_ignore(void);
@@ -1191,6 +1193,102 @@ a_negated_literal_is_placed_once_bound(void)
 	    SCENARIO_NEGATION, "no negated literal reads a delta");
 
 	fixture_release(&fixture);
+}
+
+/*
+ * A negated literal's ANTI_MEMBER is keyed on the columns that are not `_`
+ * and reads no `_`: every column is a key the canonical index answers, some
+ * columns are the key of the index the relation built on exactly them, and
+ * none is a probe that scans.  Without indexes, a key of some columns is
+ * dropped and the probe scans, matching the named columns by its terms.  A
+ * relation of no columns is probed through the canonical index, its every
+ * column being none.
+ */
+static void
+a_negated_literal_probes_by_its_named_columns(void)
+{
+	static const struct {
+		const char		*literal;
+		unsigned int		 flags;
+		uint32_t		 wildcards;	/* the `_` columns */
+		uint32_t		 key_mask;
+		enum relic_probe_shape	 shape;
+	} cases[] = {
+		{ "not t(X, b, c)", 0, 0, 7, RELIC_PROBE_MEMBER },
+		{ "not t(_, X, _)", 0, 5, 2, RELIC_PROBE_INDEX },
+		{ "not t(a, _, X)", 0, 2, 5, RELIC_PROBE_INDEX },
+		{ "not t(_, _, _)", 0, 7, 0, RELIC_PROBE_SCAN },
+		{ "not t(X, b, c)", RELIC_F_NO_INDEX, 0, 7,
+		    RELIC_PROBE_MEMBER },
+		{ "not t(_, X, _)", RELIC_F_NO_INDEX, 5, 0, RELIC_PROBE_SCAN },
+		{ "not z", 0, 0, 0, RELIC_PROBE_MEMBER },
+	};
+	enum relic_probe_shape shape;
+	const relic_op_atom_t *probe;
+	fixture_t fixture;
+	char rule[128];
+	uint16_t column;
+	size_t i;
+	size_t op;
+	bool wildcard;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		snprintf(rule, sizeof(rule), "t(a, b, c).\ns(a).\nz.\n"
+		    "p(X) :- s(X), %s.\n", cases[i].literal);
+
+		if (!fixture_load(&fixture, rule, cases[i].flags, false) ||
+		    !fixture_plan_rule(&fixture, 0, NULL)) {
+			checkf(false, SCENARIO_PROBE, "%s should be planned",
+			    cases[i].literal);
+			fixture_release(&fixture);
+			continue;
+		}
+
+		probe = NULL;
+		for (op = 0; op < fixture.plan.op_count; op++) {
+			if (fixture.plan.ops[op].kind == RELIC_OP_ANTI_MEMBER)
+				probe = &fixture.plan.ops[op].u.atom;
+		}
+		if (probe == NULL) {
+			checkf(false, SCENARIO_PROBE, "%s should be an "
+			    "ANTI_MEMBER", cases[i].literal);
+			fixture_release(&fixture);
+			continue;
+		}
+
+		checkf(probe->key_mask == cases[i].key_mask, SCENARIO_PROBE,
+		    "%s%s should be keyed on mask %u, not %u",
+		    cases[i].literal,
+		    cases[i].flags != 0 ? " without indexes" : "",
+		    (unsigned int)cases[i].key_mask,
+		    (unsigned int)probe->key_mask);
+		shape = relic_plan_probe_shape(probe->key_mask, probe->arity);
+		checkf(shape == cases[i].shape, SCENARIO_PROBE,
+		    "%s%s should be probed in shape %u, not %u",
+		    cases[i].literal,
+		    cases[i].flags != 0 ? " without indexes" : "",
+		    (unsigned int)cases[i].shape, (unsigned int)shape);
+
+		if (cases[i].shape == RELIC_PROBE_INDEX)
+			checkf(probe->index_position <
+			    probe->relation->index_count &&
+			    probe->relation->indexes[probe->index_position]
+			    .key_mask == cases[i].key_mask, SCENARIO_PROBE,
+			    "%s should probe the index on its key",
+			    cases[i].literal);
+
+		for (column = 0; column < probe->arity; column++) {
+			wildcard = (cases[i].wildcards &
+			    (UINT32_C(1) << column)) != 0;
+			checkf((probe->terms[column].action ==
+			    RELIC_PLAN_ANY) == wildcard, SCENARIO_PROBE,
+			    "%s should read column %u %s", cases[i].literal,
+			    (unsigned int)column,
+			    wildcard ? "as ANY" : "by its value");
+		}
+
+		fixture_release(&fixture);
+	}
 }
 
 /*
@@ -2645,6 +2743,7 @@ main(void)
 	the_emit_writes_the_relation_it_is_given();
 	a_bodyless_rule_is_a_lone_emit_of_constants();
 	a_negated_literal_is_placed_once_bound();
+	a_negated_literal_probes_by_its_named_columns();
 	each_binding_pattern_gets_its_access_path();
 	bound_arguments_then_small_relations_go_first();
 	a_bound_argument_outranks_a_smaller_estimate();

@@ -1,17 +1,13 @@
-% `_` is a wildcard in an argument of a positive body literal and can never
-% be bound anywhere else.  Each occurrence denotes a distinct variable, so a
-% head holding two of them is reported twice, and each message says that no
-% literal could help rather than advising one be added.
+% `_` is a wildcard in an argument of a body literal, positive or negated,
+% and can never be bound anywhere else.  Each occurrence denotes a distinct
+% variable, so a head holding two of them is reported twice, and each
+% message says that no literal could help rather than advising one be added.
 q(a).
 r(a).
 
 head(_, _) :-
     q(X),
     r(X).
-
-negated(X) :-
-    q(X),
-    not r(_).
 
 compared(X) :-
     q(X),

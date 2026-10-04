@@ -40,9 +40,10 @@
  * status exited abnormally, and an alarm turns a child that never finishes
  * into a failure of its own kind.
  *
- * With -F the run is the suite's self-test: a fault is injected into one
- * strategy, and the run succeeds only if the fault is found, reported as the
- * disagreement it is, and shrunk to a handful of statements.
+ * With -F the run is the suite's self-test: a fault is injected into the
+ * answers of one comparison after another, and the run succeeds only if
+ * each fault is found, reported as the disagreement it is, and shrunk to a
+ * handful of statements.
  */
 
 /* The largest program the self-test accepts as shrunk. */
@@ -83,7 +84,30 @@ struct driver {
 	uint64_t		 first_seed;
 	uint64_t		 seed_count;
 	bool			 print_only;
+	bool			 selftest;
 	bool			 verbose;
+};
+
+/*
+ * A fault the self-test injects, and the failure it must be reported as:
+ * the comparison's own kind, charged to the strategy whose answers lost a
+ * row, or to none for the helper rendering, which is no strategy.
+ */
+typedef struct selftest_case selftest_case_t;
+
+struct selftest_case {
+	const char		*name;
+	random_fault_t		 fault;
+	random_failure_kind_t	 kind;
+	random_strategy_t	 strategy;
+};
+
+/* One fault for each comparison of answers that can disagree. */
+static const selftest_case_t selftest_cases[] = {
+	{ "a row dropped from the naive strategy's answers", FAULT_NAIVE,
+	    FAILURE_ANSWERS, STRATEGY_NAIVE },
+	{ "a row dropped from the helper rendering's answers", FAULT_HELPER,
+	    FAILURE_HELPER, STRATEGY_NONE },
 };
 
 static void	 announce_strategy(void *announce_ctx,
@@ -95,8 +119,8 @@ static void	 parse_options(int argc, char **argv, driver_t *driver);
 static progress_t read_progress(int fd);
 static void	 redirect_stderr_to_null(void);
 static random_program_t *report_failure(const driver_t *driver,
-		    uint64_t seed, const random_program_t *program,
-		    random_failure_t failure);
+		    const random_options_t *options, uint64_t seed,
+		    const random_program_t *program, random_failure_t failure);
 static void	 run_child(const random_program_t *program,
 		    const random_options_t *options, bool show_report,
 		    int progress_fd);
@@ -104,8 +128,10 @@ static void	 generate_checked(random_program_t *program, uint64_t seed);
 static int	 print_programs(const driver_t *driver);
 static int	 run_seeds(const driver_t *driver);
 static int	 run_selftest(const driver_t *driver);
-static bool	 selftest_passed(random_failure_t failure,
-		    const random_program_t *shrunk);
+static bool	 run_selftest_case(const driver_t *driver,
+		    const selftest_case_t *test);
+static bool	 selftest_passed(const selftest_case_t *test,
+		    random_failure_t failure, const random_program_t *shrunk);
 static void	 usage(void);
 static void	 write_progress(int fd, progress_record_t record);
 static void	 write_program_file(const char *directory, uint64_t seed,
@@ -119,7 +145,7 @@ main(int argc, char **argv)
 	parse_options(argc, argv, &driver);
 	if (driver.print_only)
 		return (print_programs(&driver));
-	if (driver.options.inject_fault)
+	if (driver.selftest)
 		return (run_selftest(&driver));
 	return (run_seeds(&driver));
 }
@@ -130,18 +156,19 @@ parse_options(int argc, char **argv, driver_t *driver)
 	const char *error;
 	int ch;
 
-	driver->options.inject_fault = false;
+	driver->options.fault = FAULT_NONE;
 	driver->options.timeout_seconds = 60;
 	driver->output_directory = NULL;
 	driver->first_seed = 1;
 	driver->seed_count = 50;
 	driver->print_only = false;
+	driver->selftest = false;
 	driver->verbose = false;
 
 	while ((ch = getopt(argc, argv, "Fn:o:ps:t:v")) != -1) {
 		switch (ch) {
 		case 'F':
-			driver->options.inject_fault = true;
+			driver->selftest = true;
 			break;
 		case 'n':
 			driver->seed_count = (uint64_t)strtonum(optarg, 1,
@@ -233,7 +260,8 @@ run_seeds(const driver_t *driver)
 			continue;
 
 		failures++;
-		free(report_failure(driver, seed, program, failure));
+		free(report_failure(driver, &driver->options, seed, program,
+		    failure));
 	}
 	free(program);
 
@@ -243,16 +271,34 @@ run_seeds(const driver_t *driver)
 }
 
 /*
- * The self-test: run seeds with the fault injected until one fails, and
- * succeed only if that failure is the fault, reported and shrunk as it
- * should be.  Returns the exit status.
+ * The self-test: run every case of selftest_cases[], and succeed only if
+ * each passes.  Returns the exit status.
  */
 static int
 run_selftest(const driver_t *driver)
 {
+	int status = 0;
+
+	for (size_t c = 0; c < sizeof(selftest_cases) /
+	    sizeof(selftest_cases[0]); c++) {
+		if (!run_selftest_case(driver, &selftest_cases[c]))
+			status = 1;
+	}
+	return (status);
+}
+
+/*
+ * Run seeds with the case's fault injected until one fails, and say
+ * whether that failure is the fault, reported and shrunk as it should be.
+ */
+static bool
+run_selftest_case(const driver_t *driver, const selftest_case_t *test)
+{
+	random_options_t options = driver->options;
 	random_program_t *program, *shrunk;
 	bool passed;
 
+	options.fault = test->fault;
 	program = malloc(sizeof(*program));
 	if (program == NULL)
 		err(1, "malloc");
@@ -262,24 +308,24 @@ run_selftest(const driver_t *driver)
 		random_failure_t failure;
 
 		generate_checked(program, seed);
-		failure = random_run_isolated(program, &driver->options, false);
+		failure = random_run_isolated(program, &options, false);
 		if (failure.kind == FAILURE_NONE)
 			continue;
 
-		shrunk = report_failure(driver, seed, program, failure);
-		passed = selftest_passed(failure, shrunk);
-		printf("self-test: %s\n", passed ?
-		    "the injected fault was detected and shrunk" :
-		    "the injected fault was not reported as expected");
+		shrunk = report_failure(driver, &options, seed, program,
+		    failure);
+		passed = selftest_passed(test, failure, shrunk);
+		printf("self-test: %s: %s\n", test->name, passed ?
+		    "detected and shrunk" : "not reported as expected");
 		free(shrunk);
 		free(program);
-		return (passed ? 0 : 1);
+		return (passed);
 	}
 	free(program);
 
-	printf("self-test: the injected fault was not detected in %" PRIu64
-	    " seeds\n", driver->seed_count);
-	return (1);
+	printf("self-test: %s: not detected in %" PRIu64 " seeds\n",
+	    test->name, driver->seed_count);
+	return (false);
 }
 
 /*
@@ -305,8 +351,8 @@ generate_checked(random_program_t *program, uint64_t seed)
  * the caller frees.
  */
 static random_program_t *
-report_failure(const driver_t *driver, uint64_t seed,
-    const random_program_t *program, random_failure_t failure)
+report_failure(const driver_t *driver, const random_options_t *options,
+    uint64_t seed, const random_program_t *program, random_failure_t failure)
 {
 	random_program_t *shrunk;
 
@@ -322,14 +368,14 @@ report_failure(const driver_t *driver, uint64_t seed,
 	if (shrunk == NULL)
 		err(1, "malloc");
 	*shrunk = *program;
-	random_shrink(shrunk, failure, &driver->options);
+	random_shrink(shrunk, failure, options);
 
 	printf("%% shrunk from %zu statements to %zu:\n",
 	    random_program_statements(program),
 	    random_program_statements(shrunk));
 	random_program_write(shrunk, stdout);
 	fflush(stdout);
-	random_run_isolated(shrunk, &driver->options, true);
+	random_run_isolated(shrunk, options, true);
 
 	if (driver->output_directory != NULL) {
 		write_program_file(driver->output_directory, seed, "", program);
@@ -340,15 +386,15 @@ report_failure(const driver_t *driver, uint64_t seed,
 }
 
 /*
- * Whether the self-test's failure is the injected fault -- the naive
- * strategy's answers differing -- shrunk far enough to show the shrinker
- * works.
+ * Whether a self-test case's failure is its injected fault, reported as
+ * the case says, and shrunk far enough to show the shrinker works.
  */
 static bool
-selftest_passed(random_failure_t failure, const random_program_t *shrunk)
+selftest_passed(const selftest_case_t *test, random_failure_t failure,
+    const random_program_t *shrunk)
 {
-	return (failure.kind == FAILURE_ANSWERS &&
-	    failure.strategy == STRATEGY_NAIVE &&
+	return (failure.kind == test->kind &&
+	    failure.strategy == test->strategy &&
 	    random_program_statements(shrunk) <= SELFTEST_MAX_STATEMENTS);
 }
 
@@ -568,6 +614,8 @@ random_failure_name(random_failure_kind_t kind)
 		return ("tuple totals differ");
 	case FAILURE_DERIVATIONS:
 		return ("derivations miscounted");
+	case FAILURE_HELPER:
+		return ("helper rendering differs");
 	case FAILURE_UNDEFINED:
 		return ("arithmetic undefined");
 	case FAILURE_TOO_LONG:

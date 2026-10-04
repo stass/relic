@@ -1,5 +1,12 @@
-% Architecture section 14: a negated literal cannot bind anything, so a rule
-% whose only mention of X is inside one is unsafe.
+% A negated literal cannot bind anything, so a rule whose only mention of X
+% is inside one is unsafe.  A named variable under `not` is never read as
+% `_`, even beside one: O below is a misspelling or a missing literal, and
+% is reported as one.
 blocked(a).
+customer(ann).
+order(o1, ann, book).
+
 ready(X) :-
     not blocked(X).
+
+idle(C) :- customer(C), not order(O, C, _).

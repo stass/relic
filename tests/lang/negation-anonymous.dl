@@ -1,0 +1,41 @@
+% `_` in a negated atom is a column the atom does not read: the literal holds
+% when no tuple agrees with it on the other columns, and each `_` is
+% quantified inside the negation.  The probe takes three shapes: some
+% columns named, a constant and a bound variable among them, and none.  Each
+% form is asked once through a rule and once as a query, and a bound query
+% reaches the rules through the Magic rewrite, which copies the literal into
+% a rewritten rule.
+customer(ann).
+customer(bob).
+customer(cat).
+order(o1, ann, book).
+order(o2, ann, pen).
+order(o3, bob, pen).
+
+% Defined and empty, so that `not` over it holds.
+refund(O, C) :- order(O, C, car).
+
+idle(C) :- customer(C), not order(_, C, _).
+no_pen(C) :- customer(C), not order(_, C, pen).
+none_refunded(C) :- customer(C), not refund(_, _).
+none_ordered(C) :- customer(C), not order(_, _, _).
+idle_count(N) :- N = count { customer(C), not order(_, C, _) }.
+
+idle(C)?
+no_pen(C)?
+none_refunded(C)?
+none_ordered(C)?
+idle_count(N)?
+
+customer(C), not order(_, C, _)?
+customer(C), not order(_, C, pen)?
+customer(C), not refund(_, _)?
+customer(C), not order(_, _, _)?
+N = count { customer(C), not order(_, C, _) }?
+
+% Bound queries, answered through the rewrite.  cat is idle and bought no
+% pen, and ann is not idle, so they answer true, false and true: a row of
+% no values, then none, then one.
+idle(cat)?
+idle(ann)?
+no_pen(cat)?

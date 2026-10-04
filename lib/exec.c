@@ -158,7 +158,7 @@ static bool	 cell_string(const relic_scratch_t *scratch,
 static relic_dom_t cell_type(relic_cell_t cell);
 static bool	 charge_growth(relic_scratch_t *scratch, size_t old_bytes,
 		    size_t new_bytes, const relic_location_t *where);
-static void	 charge_fold_read(relic_scratch_t *scratch);
+static void	 charge_unresumable_read(relic_scratch_t *scratch);
 static bool	 compile_pattern(relic_scratch_t *scratch,
 		    const relic_location_t *where, const char *bytes,
 		    size_t length, relic_pattern_t *patternp);
@@ -191,6 +191,12 @@ static const char *operator_spelling(const relic_step_t *step);
 static bool	 order_satisfies(enum relic_compare_op compare,
 		    enum relic_order order);
 static size_t	 peak(size_t held, size_t capacity);
+static bool	 probe_index(relic_scratch_t *scratch,
+		    const relic_op_atom_t *atom,
+		    const relic_tuple_range_t *view);
+static bool	 probe_scan(relic_scratch_t *scratch,
+		    const relic_op_atom_t *atom,
+		    const relic_tuple_range_t *view);
 static bool	 program_make_room(relic_scratch_t *scratch, size_t count,
 		    const relic_location_t *where);
 static size_t	 program_room_bytes(size_t capacity);
@@ -231,6 +237,9 @@ static bool	 step_lookup(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom, relic_op_state_t *state,
 		    bool resume);
 static bool	 step_member(const relic_scratch_t *scratch,
+		    const relic_op_atom_t *atom,
+		    const relic_tuple_range_t *view);
+static bool	 step_probe(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom,
 		    const relic_tuple_range_t *view);
 static bool	 step_scan(relic_scratch_t *scratch,
@@ -1400,15 +1409,17 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 }
 
 /*
- * Count a tuple a fold read against the reads the call may still make.
- * Once they are spent the fold asks the call to pause, but finishes all
- * the same, since its running value cannot be kept: the call pauses when
- * the fold's step returns, having read at most one fold's walk past its
- * reads: its group's chain through an index, or the whole relation when
- * the fold has no key or no index.
+ * Count a tuple against the reads the call may still make, for a step that
+ * has no cursor to resume from: what it has computed so far cannot be kept
+ * between calls.  Once the reads are spent the step asks the call to
+ * pause, but finishes all the same, and the call pauses when the step
+ * returns, having read at most one such step's walk past its reads.  A
+ * fold is such a step, its walk its group's chain through an index or the
+ * whole relation when it has no key or no index, and so is a negated
+ * literal's probe that scans its view.
  */
 static void
-charge_fold_read(relic_scratch_t *scratch)
+charge_unresumable_read(relic_scratch_t *scratch)
 {
 	if (scratch->reads_left == 0) {
 		scratch->paused = true;
@@ -1543,8 +1554,9 @@ step_lookup(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 }
 
 /*
- * A MEMBER, and the test an ANTI_MEMBER inverts: whether the relation holds
- * the tuple the terms name, at an identifier inside the operation's view.
+ * A MEMBER, and an ANTI_MEMBER's probe of every column: whether the relation
+ * holds the tuple the terms name, at an identifier inside the operation's
+ * view.
  */
 static bool
 step_member(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
@@ -1560,6 +1572,88 @@ step_member(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
 		return (false);
 
 	return (id >= view->first && id < view->end);
+}
+
+/*
+ * The question an ANTI_MEMBER inverts: whether the relation holds, inside
+ * the operation's view, a tuple that agrees with the terms on every column
+ * the key reads, asked in the shape the planner chose for the key.
+ */
+static bool
+step_probe(relic_scratch_t *scratch, const relic_op_atom_t *atom,
+    const relic_tuple_range_t *view)
+{
+	switch (relic_plan_probe_shape(atom->key_mask, atom->arity)) {
+	case RELIC_PROBE_MEMBER:
+		return (step_member(scratch, atom, view));
+	case RELIC_PROBE_INDEX:
+		return (probe_index(scratch, atom, view));
+	case RELIC_PROBE_SCAN:
+		break;
+	}
+
+	return (probe_scan(scratch, atom, view));
+}
+
+/*
+ * A probe through the secondary index keyed on the columns the atom names.
+ * A chain lists its tuples in increasing identifier order, so its first is
+ * its lowest, and some tuple of the key lies in the view exactly when that
+ * one does: an ANTI_MEMBER reads through `all`, which begins at the
+ * relation's first identifier, so only the view's end can exclude it.
+ */
+static bool
+probe_index(relic_scratch_t *scratch, const relic_op_atom_t *atom,
+    const relic_tuple_range_t *view)
+{
+	const relic_index_t *index;
+	relic_dom_t probe[RELIC_MAX_ARITY];
+	relic_tuple_id_t id;
+	uint16_t column;
+
+	assert(atom->view == RELIC_VIEW_ALL);
+	index = relic_relation_index_at(atom->relation, atom->index_position);
+	assert(relic_index_key_mask(index) == atom->key_mask);
+
+	for (column = 0; column < atom->arity; column++) {
+		if ((atom->key_mask & (UINT32_C(1) << column)) != 0)
+			probe[column] = term_value(scratch,
+			    &atom->terms[column]);
+	}
+
+	id = relic_index_first(index, atom->relation, probe);
+	if (id == RELIC_ID_NONE || id >= view->end)
+		return (false);
+
+	assert(id >= view->first);
+	scratch->counters.tuples_looked_up++;
+
+	return (true);
+}
+
+/*
+ * A probe by scanning the view for the first tuple the terms match, `_`
+ * matching anything: the whole question when the atom names no column,
+ * which the first tuple of a nonempty view answers, and the question of a
+ * key that names some under RELIC_F_NO_INDEX.  A test has no cursor to
+ * resume from, so the scan charges its reads as a fold does and finishes
+ * before the call may pause.
+ */
+static bool
+probe_scan(relic_scratch_t *scratch, const relic_op_atom_t *atom,
+    const relic_tuple_range_t *view)
+{
+	relic_tuple_id_t id;
+
+	for (id = view->first; id < view->end; id++) {
+		charge_unresumable_read(scratch);
+		scratch->counters.tuples_scanned++;
+		if (tuple_matches(scratch, atom,
+		    relic_relation_tuple(atom->relation, id)))
+			return (true);
+	}
+
+	return (false);
 }
 
 
@@ -1795,7 +1889,7 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	switch (aggregate->access) {
 	case RELIC_FOLD_SCAN:
 		for (id = view->first; id < view->end; id++) {
-			charge_fold_read(scratch);
+			charge_unresumable_read(scratch);
 			scratch->counters.tuples_scanned++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
 			if (key_matches(scratch, aggregate, tuple) &&
@@ -1810,7 +1904,7 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		for (id = relic_index_first(index, aggregate->relation, key);
 		    id != RELIC_ID_NONE && id < view->end;
 		    id = relic_index_next(index, id)) {
-			charge_fold_read(scratch);
+			charge_unresumable_read(scratch);
 			scratch->counters.tuples_looked_up++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
 			if (!fold_row(scratch, env, aggregate, fold, tuple))
@@ -2037,10 +2131,10 @@ emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
  *
  * A test, an ASSIGN and an AGGREGATE succeed at most once, so resuming one
  * always finds nothing more.
- * An ANTI_MEMBER is the membership test inverted: the binding survives when
- * the tuple is absent.  The EMIT is not asked here: the run loop appends its
- * tuple, and treats it as never matching, so nothing below it is ever
- * entered and nothing backtracks into it.
+ * An ANTI_MEMBER is its probe inverted: the binding survives when no tuple
+ * agrees with it on the columns it reads.  The EMIT is not asked here: the
+ * run loop appends its tuple, and treats it as never matching, so nothing
+ * below it is ever entered and nothing backtracks into it.
  */
 static bool
 step(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -2058,7 +2152,7 @@ step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	case RELIC_OP_ANTI_MEMBER:
 		if (resume)
 			return (false);
-		return (!step_member(scratch, &op->u.atom, &state->view));
+		return (!step_probe(scratch, &op->u.atom, &state->view));
 	case RELIC_OP_FILTER:
 		if (resume)
 			return (false);
@@ -2186,14 +2280,15 @@ yield_after_quantum(relic_scratch_t *scratch, size_t level, bool resume)
  * times as the plan has operations, or ends in one, so the backtracks bound
  * the turns.  The scans and lookups count the tuples they reject, in
  * `reads_left`, and one that runs out mid-way stops inside its step and
- * sets `paused`.  A fold charges the tuples it reads to the same count and
- * sets `paused` once it has spent them, but finishes its walk.  Every
- * other step does a bounded amount of work.  The loop pauses after a step
- * that set `paused`: at the next operation when the step matched, which
- * only a fold can have, and otherwise at the step's own operation, to be
- * asked for its next match.  So a call overruns its reads by at most one
- * fold's walk.  A call backtracks or reads at least once before pausing, so
- * every call makes progress.
+ * sets `paused`.  A step with no cursor to resume from charges the tuples
+ * it reads to the same count through charge_unresumable_read() and sets
+ * `paused` once it has spent them, but finishes its walk.  Every other step
+ * does a bounded amount of work.  The loop pauses after a step that set
+ * `paused`: at the next operation when the step matched, which only a step
+ * with no cursor can have, and otherwise at the step's own operation, to
+ * be asked for its next match.  So a call overruns its reads by at most
+ * one such step's walk.  A call backtracks or reads at least once before
+ * pausing, so every call makes progress.
  *
  * A batch left full by the caller is reported again rather than appended
  * to: the EMIT writes a tuple only into room the batch has, so the caller's

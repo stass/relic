@@ -915,6 +915,16 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 	case RELIC_OP_ANTI_MEMBER:
 		line_put(line, "anti-member ");
 		put_op_atom(ctx, line, rule, &op->u.atom);
+
+		/*
+		 * The atom shows which columns are `_`, so the key is printed
+		 * only where it names the secondary index the probe took, as a
+		 * lookup's does; a probe that scans prints without one, as a
+		 * lookup planned without indexes prints as a scan.
+		 */
+		if (relic_plan_probe_shape(op->u.atom.key_mask,
+		    op->u.atom.arity) == RELIC_PROBE_INDEX)
+			put_key(line, op->u.atom.key_mask);
 		return;
 	case RELIC_OP_FILTER:
 		line_put(line, "filter ");

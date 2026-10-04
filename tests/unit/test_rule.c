@@ -299,22 +299,26 @@ a_literal_resolves_to_the_arguments_it_names(void)
 }
 
 /*
- * `_` in an argument of a positive body literal is a wildcard and takes no
- * slot, so a rule full of them holds no variables at all.  Anywhere else it
- * can never be bound, and the rule is rejected.
+ * `_` in an argument of a positive or a negated body literal is a wildcard
+ * and takes no slot, so a rule full of them holds no variables at all, and
+ * one beside a named variable under `not` leaves that variable the only
+ * slot.  In the head it would be read and can never be bound, so it takes a
+ * slot there and the rule is rejected.
  */
 static void
 an_anonymous_variable_takes_a_slot_only_where_illegal(void)
 {
 	relic_t *ctx;
 	const relic_rule_t *rule;
+	const relic_literal_t *negated;
 	diag_log_t log;
 
 	ctx = context_logging_to(&log);
 	if (ctx == NULL)
 		return;
 
-	if (!load(ctx, "edge(a, b).\nany :- edge(_, _).\n") ||
+	if (!load(ctx, "edge(a, b).\nany :- edge(_, _).\n"
+	    "source(X) :- edge(X, _), not edge(_, X).\n") ||
 	    relic_check(ctx) != 0) {
 		check(false, SCENARIO_WILDCARD, "the program is accepted");
 		relic_destroy(ctx);
@@ -335,9 +339,43 @@ an_anonymous_variable_takes_a_slot_only_where_illegal(void)
 	    rule->body[0].u.atom.args[1].kind == RELIC_ARG_WILDCARD,
 	    SCENARIO_WILDCARD, "both arguments compiled to wildcards");
 
+	rule = rule_at(ctx, 1);
+	if (rule == NULL || rule->body_length != 2) {
+		check(false, SCENARIO_WILDCARD,
+		    "the negated rule was compiled");
+		relic_destroy(ctx);
+		return;
+	}
+
+	checkf(rule->variable_count == 1, SCENARIO_WILDCARD,
+	    "X and two wildcards took %u slots",
+	    (unsigned int)rule->variable_count);
+
+	negated = &rule->body[1];
+	check(negated->kind == RELIC_LITERAL_NEGATED &&
+	    negated->u.atom.args[0].kind == RELIC_ARG_WILDCARD &&
+	    negated->u.atom.args[1].kind == RELIC_ARG_VARIABLE &&
+	    negated->u.atom.args[1].u.slot == 0,
+	    SCENARIO_WILDCARD, "the negated `_` compiled to a wildcard and X "
+	    "to its slot");
+
 	checkf(log.errors == 0 && log.warnings == 0, SCENARIO_WILDCARD,
 	    "a wildcard is neither an error nor a singleton: %zu and %zu",
 	    log.errors, log.warnings);
+
+	relic_destroy(ctx);
+
+	ctx = context_logging_to(&log);
+	if (ctx == NULL)
+		return;
+
+	check(load(ctx, "edge(a, b).\nhead(_) :- edge(_, _).\n") &&
+	    relic_check(ctx) != 0, SCENARIO_WILDCARD,
+	    "`_` in the head is rejected");
+	checkf(log.errors == 1, SCENARIO_WILDCARD,
+	    "the head's `_` is one error, not %zu", log.errors);
+	check(rule_at(ctx, 0) == NULL, SCENARIO_WILDCARD,
+	    "the rejected rule was not compiled");
 
 	relic_destroy(ctx);
 }

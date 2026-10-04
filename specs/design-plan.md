@@ -59,7 +59,7 @@ enum relic_op_kind {
 	RELIC_OP_SCAN,		/* every tuple of a relation, matching and binding */
 	RELIC_OP_LOOKUP,	/* the tuples an index finds for a bound key */
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
-	RELIC_OP_ANTI_MEMBER,	/* is this fully bound tuple absent? */
+	RELIC_OP_ANTI_MEMBER,	/* does no tuple agree on the named columns? */
 	RELIC_OP_FILTER,	/* does a comparison of two bound values hold? */
 	RELIC_OP_ASSIGN,	/* bind a slot to a value computed from bound ones */
 	RELIC_OP_AGGREGATE,	/* fold a group relation's rows for a bound key */
@@ -86,7 +86,7 @@ down this path, which is what makes it the last operation of every plan.
 | `SCAN` | bound columns, constants | unbound columns | once per matching tuple |
 | `LOOKUP` | the key columns, then as `SCAN` | unbound columns | once per matching tuple |
 | `MEMBER` | every column | nothing | once or never |
-| `ANTI_MEMBER` | every column | nothing | once or never |
+| `ANTI_MEMBER` | every column that is not `_` | nothing | once or never |
 | `FILTER` | both operands | nothing | once or never |
 | `ASSIGN` | its expression's slots | its variable's slot | once or never |
 | `AGGREGATE` | the key slots, the group relation's tuples for that key | its result slot, or nothing when it compares | once or never |
@@ -97,7 +97,10 @@ is bound is a membership question, and the canonical full-tuple index of
 `specs/design-relations.md` answers it in constant time. `ANTI_MEMBER` is the
 same question with the answer inverted, which is the whole of negation once
 stratification has guaranteed that the negated relation is complete; see
-architecture section 31.
+architecture section 31. A negated literal holding `_` asks it of the columns
+it names only, so its `ANTI_MEMBER` carries a key as a `LOOKUP` does and
+probes the index on those columns, or asks whether the relation is empty
+when it names none, `specs/design-negation.md` section 4.
 
 `ASSIGN` is the other test that binds. An equality whose one side is a
 bare variable not yet bound, and whose other side reads only bound slots,
@@ -185,9 +188,11 @@ The same variable twice in one atom, `edge(X, X)`, is two terms: the first
 column binds `X` and the second requires the value it just bound. The executor
 processes columns left to right, so that falls out without a case of its own.
 
-`BIND` and `ANY` occur only in a generator. A test reads bound values and
-constants and nothing else, and `EMIT` reads only what the rule's safety
-guarantees is bound by the time it runs.
+`BIND` occurs only in a generator. `ANY` occurs in a generator and in an
+`ANTI_MEMBER`, for a `_` its probe does not read, and neither ever occurs in
+a key column. Every other test reads bound values and constants and nothing
+else, and `EMIT` reads only what the rule's safety guarantees is bound by
+the time it runs.
 
 **A slot is of one of three kinds**, fixed by the operation that binds it.
 A domain slot's frame entry is a domain identifier. A number slot, bound
@@ -409,9 +414,9 @@ name the query is called by rather than a predicate in the program's table.
 **The output columns are the named variables in order of first occurrence,
 and `_` contributes none.** Variables are numbered into slots in exactly that
 order already -- `specs/design-program.md` section 4 -- so the head is simply
-every named slot in slot order. `_` in a positive literal is a wildcard with
-no slot, and `_` anywhere else is unsafe and rejected, so nothing needs
-skipping.
+every named slot in slot order. `_` in a positive or a negated literal is a
+wildcard with no slot, and `_` anywhere else is unsafe and rejected, so
+nothing needs skipping.
 
 **A query is checked by the same safety computation as a rule.** Every head
 variable must be bound by a positive literal, and the head is the list of
@@ -420,7 +425,7 @@ variable that occurs only in a comparison or a negated literal is reported by
 the ordinary message, worded for a query:
 
 ```text
-<query>:1:1: error: variable X in the query is not bound by a positive body literal
+<query>:1:1: error: variable X in the query is not bound by a positive body literal or an assignment
 ```
 
 The synthetic head counts as one occurrence of each output variable. That is

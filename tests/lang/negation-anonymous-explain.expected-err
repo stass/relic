@@ -1,0 +1,24 @@
+stratum 1, component 0: idle/1
+    rule idle(C) :- customer(C), not order(_, C, _).
+        scan customer(C)
+        anti-member order(_, C, _) key={1}
+        emit idle(C)
+stratum 1, component 1: unbought/1
+    rule unbought(C) :- customer(C), not order(o1, C, book).
+        scan customer(C)
+        anti-member order(o1, C, book)
+        emit unbought(C)
+stratum 1, component 2: nothing/1
+    rule nothing(C) :- customer(C), not order(_, _, _).
+        anti-member order(_, _, _)
+        scan customer(C)
+        emit nothing(C)
+query $q0(C) :- idle(C).
+    scan idle(C)
+    stream $q0(C)
+query $q1(C) :- unbought(C).
+    scan unbought(C)
+    stream $q1(C)
+query $q2(C) :- nothing(C).
+    scan nothing(C)
+    stream $q2(C)

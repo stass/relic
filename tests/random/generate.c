@@ -34,11 +34,13 @@
  * literals are drawn first, and the variables they mention are then the only
  * variables anything later may use: the head, the negated literals and the
  * comparisons.  That is the whole of the safety condition, so no unsafe rule
- * can be drawn.  `_` appears only in positive literals.  An assignment binds
- * a variable no positive literal mentions from what those bind, and is
- * drawn before anything else reads it, so the variables it binds join the
- * safe ones; the text places it anywhere in its body, since the library
- * binds by the closure and not by the written order.
+ * can be drawn.  `_` appears only in positive and negated literals, where
+ * nothing reads it: a positive literal matches any value there, and a
+ * negated one leaves the column out of its probe.  An assignment binds a
+ * variable no positive literal mentions from what those bind, and is drawn
+ * before anything else reads it, so the variables it binds join the safe
+ * ones; the text places it anywhere in its body, since the library binds by
+ * the closure and not by the written order.
  *
  * An aggregate is drawn after the positive literals and before the
  * assignments, and follows the same discipline inside its braces.  Its
@@ -607,16 +609,29 @@ draw_positive(random_stream_t *stream, const random_program_t *program,
 		    positive_variables);
 }
 
-/* Draw a negated literal of a predicate in `range`, over bound terms. */
+/*
+ * Draw a negated literal of a predicate in `range`, over bound terms, each
+ * argument then `_` one time in twenty, as often as a positive literal's
+ * is: a column the literal leaves out of its probe, which nothing need
+ * bind.
+ */
 static void
 draw_negated(random_stream_t *stream, const random_program_t *program,
     predicate_range_t range, uint8_t level, uint64_t bound_variables,
     random_literal_t *literal)
 {
+	uint8_t arity;
+
 	literal->kind = LITERAL_NEGATED;
 	literal->predicate = pick_predicate(stream, program, range, level);
-	draw_bound_terms(stream, bound_variables, literal->args,
-	    program->predicates[literal->predicate].arity);
+	arity = program->predicates[literal->predicate].arity;
+	draw_bound_terms(stream, bound_variables, literal->args, arity);
+	for (size_t a = 0; a < arity; a++) {
+		if (draw_chance(stream, 20)) {
+			literal->args[a].kind = TERM_ANONYMOUS;
+			literal->args[a].index = 0;
+		}
+	}
 }
 
 /*

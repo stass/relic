@@ -4,11 +4,13 @@
 #
 # A comparison that never disagrees passes forever, whether the engine is
 # right or the comparison is broken.  Under -F the driver drops one row from
-# the naive strategy's answers and succeeds only if a seed exposes it, the
-# failure is reported as the naive strategy's answers differing from the
-# default's, and the shrinker reduces the program to a handful of statements.
-# That connects every part of the suite: generation, the child that runs the
-# strategies, the comparison, the status the child reports and the shrinker.
+# the answers of each comparison in turn -- the naive strategy's, compared
+# with the default's, and the helper rendering's, compared with the
+# program's -- and succeeds only if a seed exposes each, the failure is
+# reported as that comparison's own kind, and the shrinker reduces the
+# program to a handful of statements.  That connects every part of the
+# suite: generation, the child that runs the strategies, the comparisons,
+# the status the child reports and the shrinker.
 
 set -eu
 

@@ -1,0 +1,8 @@
+% An aggregated variable is the value the function folds, so it must be
+% named: `_` names no value.  The parser says so for each function that
+% takes one, and recovers at the end of each statement to report the next.
+score(p, 2).
+
+total(S) :- S = sum(_) { score(P, _) }.
+lowest(S) :- S = min(_) { score(P, _) }.
+highest(S) :- S = max(_) { score(P, _) }.

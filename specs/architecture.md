@@ -323,6 +323,19 @@ ready(X) :-
     not blocked(X).
 ```
 
+An argument of a negated literal may be `_`, a column the literal does not
+read. The literal holds when no tuple agrees with it on the other columns:
+
+```prolog
+idle(C) :-
+    customer(C),
+    not order(_, C, _).
+```
+
+derives each customer with no order at all, and `not p(_, _)` holds exactly
+when `p` is empty. The meaning, and the probe a negated literal becomes, are
+specified in `specs/design-negation.md`.
+
 Programs containing recursion through negation are rejected.
 
 For example:
@@ -561,7 +574,9 @@ foo(X) :-
     bar(Y).
 ```
 
-Variables occurring in a negated literal must be bound by preceding or reorderable positive literals.
+Named variables occurring in a negated literal must be bound by preceding or reorderable positive literals.
+`_` in a negated literal is a column the literal does not read, and needs no
+binding; `specs/design-negation.md` section 3.
 
 Example accepted:
 
@@ -611,6 +626,10 @@ Rules define intensional relations.
 The meaning of a positive recursive program is its least fixed point.
 
 Stratified programs are evaluated one stratum at a time.
+
+A negated literal holds when no tuple of its relation, complete in a lower
+stratum, agrees with it on every column that is not `_`,
+`specs/design-negation.md` section 2.
 
 An aggregate is a function of a complete relation of a strictly lower
 stratum than the rule reading it, over the rows that agree with the values
@@ -1175,6 +1194,10 @@ absent      → continue
 ```
 
 Because lower strata are complete before upper strata execute, absence is semantically meaningful.
+
+A negated literal holding `_` probes by the columns it names, through the
+secondary index on them, and one naming none asks whether the relation is
+empty; `specs/design-negation.md` section 4.
 
 ---
 
@@ -3117,7 +3140,8 @@ into, per decision D-17 and `specs/design-query.md`.
 decision D-8, over the operations `specs/design-plan.md` specifies. `MEMBER`
 answers a literal whose every argument is bound through the canonical
 full-tuple index, and negation is `ANTI_MEMBER`, the same test inverted,
-rather than a lookup.
+rather than a lookup; one holding `_` probes the index on its named
+columns instead, `specs/design-negation.md` section 4.
 
 **Queries, section 52.** `relic_query_prepare()` takes a source name, as
 `relic_load_string()` does. Query text comes from no file, and without a name

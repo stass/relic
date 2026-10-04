@@ -648,7 +648,8 @@ each set no limit, being zero or
 a query delivers its rows as it derives them, once every relation it reads
 is complete, when the plan of the rule it runs, its own or its rewrite's,
 derives each row once and computes nothing: when it names every variable a
-relational literal of its body binds, matches no argument with
+relational literal of its body binds, matches no argument of a positive
+atom with
 .Ql _ ,
 evaluates no arithmetic operator, calls no function, and holds no
 aggregate, any of which may fail.

@@ -158,14 +158,15 @@ an `ANTI_MEMBER`; neither ever occurs in a key column.
 **Without indexes.** Under `RELIC_F_NO_INDEX` a `LOOKUP` is planned as a
 `SCAN`. The partial probe cannot become a different operation, since its
 answer is a yes or a no, so the executor answers it by scanning the view
-for the first tuple that matches the terms, with the matcher a `SCAN` uses,
-which already treats `ANY` as matching anything, and stops at the first
-match. The scan charges the tuples it reads as a `SCAN` charges them and
-finishes its walk before the executor may pause, as an aggregate's fold
-does, `specs/design-interrupt.md`: a test has no cursor to resume from, so
-a call overruns its quantum by at most one such scan, and the strategy
-exists to check the indexed answer, not to be fast. The full and empty
-shapes need no index and are unchanged by the flag.
+for the first tuple that matches the terms, with the matcher a `SCAN`
+uses, which already treats `ANY` as matching anything, and stops at the
+first match. A test has no cursor to resume from, so the scan charges
+every tuple it reads to the call's quantum and finishes its walk before
+the executor may pause, as an aggregate's fold does,
+`specs/design-interrupt.md`: a call overruns its quantum by at most one
+such scan, and the strategy exists to check the indexed answer, not to be
+fast. The full and empty shapes need no index and are unchanged by the
+flag.
 
 **Counters.** A probe counts one tuple looked up, as a `LOOKUP`'s probe
 does, and the full shape counts as a `MEMBER` does. The counts are a
@@ -210,8 +211,12 @@ variable are those of `specs/design-program.md` section 6 and
 `specs/design-aggregates.md` section 4, unchanged in text. The message for
 a named variable of a negated literal that nothing binds is unchanged too:
 
+```prolog
+idle(C) :- customer(C), not order(O, C, _).
+```
+
 ```text
-rules.dl:3:28: error: variable Y in rule idle/1 cannot be bound by a positive body literal
+rules.dl:3:35: error: variable O in rule idle/1 is not bound by a positive body literal or an assignment
 ```
 
 No new message exists, since the change removes a rejection and adds none.
@@ -251,7 +256,11 @@ fallback would show, and `langtest.sh` reruns them in parallel.
 
 **Unit tests** check the compiler's three positions: a wildcard in a
 negated argument takes no slot and enters neither set, and `_` in a head
-still takes one.
+still takes one. They check the planner's key for each shape, the index a
+partial key probes and the `ANY` of each wildcard column, with and without
+indexes, and that a probe that scans charges its reads to the call's
+quantum, so that consecutive scans over a large relation overrun it by at
+most one scan.
 
 **The random suite** generates `_` in negated atoms, in rule bodies and
 in groups, with the frequency it gives a positive atom's arguments, and
@@ -270,30 +279,35 @@ tests the probe of section 4 against the ordinary positive-literal path
 that has been exercised since the suite existed.
 
 For a generated program, the **helper rendering** replaces each negated
-literal that holds a wildcard with a negated literal over a fresh helper
-predicate of the named columns, and adds one rule deriving the helper from
-the original atom:
+literal that holds a wildcard with a negated literal over a helper
+predicate of the columns it names, and adds one rule deriving each helper
+from its predicate, with `_` in the other columns:
 
 ```prolog
 idle(C) :- customer(C), not order(_, C, _).
 
-idle(C) :- customer(C), not order_h1(C).
-order_h1(C) :- order(_, C, _).
+idle(C) :- customer(C), not order_w5(C).
+order_w5(B) :- order(_, B, _).
 ```
 
-A helper's level is its atom's predicate's level, so the generator's
-stratification argument, `specs/design-hardening.md` section 2.3, holds
-for the transformed program unchanged, and the helper count stays inside
-the predicate and rule limits of section 2.5, since a helper is added per
-distinct literal and the body limit bounds those. The helper's name is one
-the generator never draws for a predicate, so it cannot collide with one.
+A helper is named for its predicate and its wildcard columns, bit c for
+column c, so the literals that leave out the same columns of one predicate
+share one, and the name, holding `_`, is one the generator never draws for
+a predicate. A helper reads its predicate positively and is read only under
+`not`, where its predicate was, so its level is its predicate's and the
+generator's stratification argument, `specs/design-hardening.md` section
+2.3, holds for the rendering unchanged. The rendering is text the harness
+writes rather than a program of the model, so the helpers count against
+none of the model's sizes.
 
 The harness loads the helper rendering under the default strategy and
 compares each query's answer with the original's, as it compares strategy
-against strategy, section 3.2. Tuple totals are not compared: the helper
-relations hold tuples the original has nowhere. A disagreement is a new
-failure kind, **helper**, in section 3.4's list, charged to no strategy
-and shrunk like any other.
+against strategy, `specs/design-hardening.md` section 3.2. Tuple totals are
+not compared: the helper relations hold tuples the original has nowhere. A
+disagreement is a failure kind of its own, **helper**, in that document's
+section 3.4, charged to no strategy and shrunk like any other, and the
+self-test of its section 4.3 drops a row from the rendering's answers to
+show that the comparison can fail.
 
 ---
 
