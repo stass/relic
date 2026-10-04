@@ -1170,7 +1170,9 @@ body denotes, the equality that binds a variable to one, and the generated
 rule whose relation is the group are specified in
 `specs/design-aggregates.md`. A rule reads an aggregate from a strictly
 lower stratum as it reads a negated literal: the aggregate edge, from the
-rule's head to the generated predicate that holds the group, points
+rule's head to the predicate whose relation the fold reads -- the generated
+predicate that holds the group, or the atom's own when the body is one
+atom of distinct variables and is folded in place -- points
 strictly downward as a negative edge does, and one inside a dependency SCC
 is the same error, `specs/design-aggregates.md` section 7. That design
 extends this section and sections 13 and 14 rather than changing what any
@@ -1388,9 +1390,10 @@ ready(X) :-
 
 This keeps stratified negation straightforward and avoids complex magic transformations across negative edges.
 
-The group predicate an aggregate reads is treated as a relation referenced
-negatively is: it is evaluated completely in its lower stratum, with
-everything its body reads, per `specs/design-aggregates.md` section 11.
+The relation an aggregate folds, a group predicate's or an atom's own, is
+treated as a relation referenced negatively is: it is evaluated completely
+in its lower stratum, with everything the aggregate's body reads, per
+`specs/design-aggregates.md` section 11.
 
 Future versions may optimize this further if correctness remains obvious.
 

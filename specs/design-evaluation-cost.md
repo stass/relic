@@ -197,7 +197,7 @@ anywhere (section 4).
 
 A negated literal never reads a member, because that would be recursion
 through negation and the program would have been rejected; an aggregate
-literal never reads one either, since its group predicate is stratified
+literal never reads one either, since the predicate it folds is stratified
 below it as a negated predicate is, `specs/design-aggregates.md` section 7;
 a comparison reads no relation. None of the three has a view.
 

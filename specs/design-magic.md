@@ -88,10 +88,10 @@ A predicate is read completely when any of these holds:
 * **the query reaches it through negation**. Architecture section 37 keeps
   negation simple by materializing a negated relation in full in its lower
   stratum, so that absence means absence;
-* **the query reaches it through an aggregate**: the group predicate of an
-  aggregate literal, and every predicate a literal of its group rule's body
-  names, since a fold needs the whole group, `specs/design-aggregates.md`
-  section 11;
+* **the query reaches it through an aggregate**: the predicate an
+  aggregate literal folds, a group predicate or the atom's own, and every
+  predicate a literal of the aggregate's body names, since a fold needs
+  the whole group, `specs/design-aggregates.md` section 11;
 * **something read completely depends on it**, positively or negatively. A
   relation is complete only if everything it is derived from is;
 * **the rewrite keeps only free adornments**: when no adornment the rewrite
@@ -110,9 +110,9 @@ visit the query's body:
 	a positive literal over any other predicate p: if p is not in
 	    demanded, add it and visit the body of every rule deriving p
 	a negated literal over q: add q to roots
-	an aggregate literal: add its group predicate to roots, and add
-	    every predicate a positive or negated literal of its group
-	    rule's body names to roots
+	an aggregate literal: add the predicate it folds to roots, and add
+	    every predicate a positive or negated literal of its body
+	    names to roots
 complete = roots and everything they depend on
 read on demand = demanded minus complete
 ```
@@ -400,8 +400,9 @@ section 11. The order of section 5 places it where its shared slots are
 bound and reports that it binds its result slot, as it reports an
 assignment's binding, so a call after it whose argument is the result is
 adorned bound. The copy in a prefix has its shared and result slots
-renumbered and keeps its group predicate and group rule; the group
-predicate is read completely, section 3, and is never adorned.
+renumbered and keeps the predicate it folds, its key columns and its
+compiled body; the folded predicate is read completely, section 3, and is
+never adorned.
 
 ### 6.1 A generated rule is a compiled rule
 
@@ -456,8 +457,9 @@ generated rule is compared structurally with those already generated,
 through a hash table over their canonical forms, and a duplicate is not
 appended. Renumbering is what makes a plain structural comparison enough:
 two rules equal up to renaming have equal canonical forms. An aggregate
-literal enters the canonical form by its function, its group predicate, its
-aggregated column and its slots, `specs/design-aggregates.md` section 11.
+literal enters the canonical form by its function, the predicate it folds,
+its key columns, its aggregated column and its slots,
+`specs/design-aggregates.md` section 11.
 Supplementary
 predicates are named by their rule and call, so two source rules sharing a
 prefix beyond their first call binding a column generate distinct
@@ -556,8 +558,9 @@ size in literals is what one adorned copy of it holds: each rule's body plus
 one for its guard. A derived predicate whose base store holds facts counts
 as the one rule over its base view that each of its adornments is given,
 two literals (`specs/design-facts.md` section 6). An aggregate literal is
-one literal wherever a literal is counted: its body is a group rule read
-completely and never copied, `specs/design-aggregates.md` section 11.
+one literal wherever a literal is counted: what it folds is read
+completely and its body is never copied, `specs/design-aggregates.md`
+section 11.
 Facts count nothing: the
 rewrite copies none of them, so a thousand facts behind one rule rewrite as
 cheaply as one. Both budgets are fixed for a given program, so they are the
@@ -659,9 +662,9 @@ a complete predicate, which no generated rule derives, so a negative edge
 always leaves the generated rules and can lie on no cycle. The rewrite checks
 the first half as it writes each body: a negated literal over a predicate read
 on demand would read an empty relation and succeed, so it fails the query with
-an internal error instead. The check covers an aggregate literal, whose group
-predicate is read completely as a negated one is: one over a group predicate
-not read completely would fold an empty relation, and an aggregate edge,
+an internal error instead. The check covers an aggregate literal, whose
+folded predicate is read completely as a negated one is: one over a
+predicate not read completely would fold an empty relation, and an aggregate edge,
 like a negative one, always leaves the generated rules. Should the analysis
 nevertheless find one, it reports the cycle as it would for a program, and the
 query fails with an internal error.
@@ -888,8 +891,9 @@ the same schedule, and byte-identical `-e` output.
   materialized in full. Propagating bindings into it would need the
   refinements of magic sets for stratified negation, which are correct only
   under conditions that are not obvious on first reading.
-* **Demand through an aggregate.** A group predicate is read completely,
-  as a negated predicate is, and is never adorned; adorning it on its
+* **Demand through an aggregate.** The predicate an aggregate folds is
+  read completely, as a negated predicate is, and is never adorned;
+  adorning it on its
   shared columns is left with demand through negation,
   `specs/design-aggregates.md` section 20.
 * **Adorning a predicate no rule derives.** Section 3.

@@ -442,9 +442,10 @@ An evaluator that cannot give a negated literal that guarantee must refuse to
 plan one, naming the rule, rather than test absence against a relation that may
 still grow.
 
-An aggregate literal reads its group relation under the same guarantee.
-The group predicate is stratified strictly below the rule holding the
-aggregate, so its `AGGREGATE` folds a complete relation through `all`, as
+An aggregate literal reads the relation it folds, a group's or an atom's
+own, under the same guarantee. That predicate is stratified strictly below
+the rule holding the aggregate, so its `AGGREGATE` folds a complete
+relation through `all`, as
 `ANTI_MEMBER` tests one: it never reads a member of its own component, has
 no delta variant of its own, and in a delta variant of another literal folds
 the same complete relation every round, `specs/design-aggregates.md`

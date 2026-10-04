@@ -154,8 +154,8 @@ component being evaluated reads one of three narrower views derived from the
 member's delta: `delta`, `old` or `current`. A `SCAN` walks the view's range,
 a `LOOKUP` the part of its key's chain inside it, and a `MEMBER` holds only
 when the tuple it names lies inside it. An `ANTI_MEMBER` reads and an `EMIT`
-writes through `all`, an `AGGREGATE` folds its group relation through
-`all`, and a `FILTER` reads no relation.
+writes through `all`, an `AGGREGATE` folds the relation it reads, a
+group's or an atom's own, through `all`, and a `FILTER` reads no relation.
 `specs/design-evaluation-cost.md` section 3 defines the views and what each
 operation does under each; section 5.3 below says how a variant's are chosen.
 

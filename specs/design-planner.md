@@ -275,13 +275,15 @@ which rules happened to be planned before it. The cost is memory: a relation
 looked up under several binding patterns carries an index for each, as
 `specs/design-index.md` section 8 counts.
 
-An `AGGREGATE` reaches its group by the same rule, its shared columns being
+An `AGGREGATE` reaches its group by the same rule, its key columns being
 its bound ones: the whole relation when there are none, **the index keyed on
-exactly the shared columns** when there are some, and one probe of the
-canonical index when every column is shared. Under `-X no-index` it walks
-the whole relation and matches the key columns of each tuple, as a
-generator with bound columns is scanned, `specs/design-aggregates.md`
-section 8.3.
+exactly the key columns** when there are some, and one probe of the
+canonical index when every column is one. The key columns are the leading
+columns of a group relation and whichever columns hold the shared variables
+of an atom folded in place, a set rather than a prefix, as a positive
+literal's bound columns are. Under `-X no-index` it walks the whole
+relation and matches the key columns of each tuple, as a generator with
+bound columns is scanned, `specs/design-aggregates.md` section 8.3.
 
 A negated literal's `ANTI_MEMBER` reaches its relation by the same rule over
 the columns it names, those that are not `_`, all of which are bound where it
@@ -423,7 +425,7 @@ An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
 `anti-member`, with its key columns when it probes a secondary index,
 `filter` with its comparison, `aggregate` with the equality
-it stands for, the group relation with its columns named and its key
+it stands for, the relation it folds with its columns named and its key
 columns, `assign` with its equality, and `emit`. An expression prints from
 its tree by the rules of `specs/design-arithmetic.md` section 11, with the
 parentheses its shape needs and no more, and a call as written,

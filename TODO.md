@@ -116,8 +116,10 @@ query counting the three CSPA relations this way peaks at 30 GB, where
 answering `valueFlow` over the same fixed point peaks at 7.8 GB.
 A group rule whose body is one positive atom of distinct variables, its
 head those variables, holds exactly the atom's relation, so the aggregate
-could fold that relation through an index on its shared columns and the
-group predicate need not exist.
+folds that relation through an index on the columns its shared variables
+stand in and the group predicate need not exist. Designed:
+`specs/design-aggregates.md` section 5.6, with the order of work in its
+section 17 step 6.
 
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of

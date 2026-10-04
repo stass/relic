@@ -484,11 +484,14 @@ program arena outlives both. A pattern held in a variable has no compiled
 form here and is compiled when the call runs.
 
 An aggregate literal, `relic_aggregate_t` of `specs/design-aggregates.md`
-section 6, holds its function, the outer slots of its shared columns, the
-aggregated column as an index into the group relation, the slot it binds,
-its group predicate, and a pointer to a copy of its group rule made in the
-arena that holds the literal. The pointer is not into the rule table, which
-is a growable array and moves when a load grows it.
+section 6, holds its function, the predicate whose relation it folds, the
+columns of that relation its key is matched against and the outer slot
+each is bound from, the aggregated column as an index into that relation,
+the slot it binds, and a pointer to a copy of its body as compiled, made
+in the arena that holds the literal: the group rule, or, for a body that
+is one atom of distinct variables and is folded in place, a headless rule
+of that one literal. The pointer is not into the rule table, which is a
+growable array and moves when a load grows it.
 
 A variable record keeps the interned spelling, the location of its first
 occurrence and how many times the rule mentions it. The first two are what a

@@ -45,16 +45,20 @@ p -/> r    negative
 A comparison makes no edge: it reads values and no relation.
 
 An aggregate literal makes a third kind, the **aggregate edge**, from the
-rule's head to the aggregate's generated group predicate, and the group
-rule its body compiles to makes the ordinary edges of that body,
-`specs/design-aggregates.md` section 7:
+rule's head to the predicate whose relation the fold reads: the generated
+group predicate of a body compiled to a group rule, whose rule then makes
+the ordinary edges of that body, or the atom's own predicate of a body that
+is one atom of distinct variables and is folded in place,
+`specs/design-aggregates.md` sections 5.6 and 7:
 
 ```text
-p(...) :- q(...), N = count { s(...) }.
+p(X) :- q(X), N = count { s(X, Y), t(Y) }, M = count { u(X, Z) }.
 
 p -> q                 positive
-p =/> agg$p$1$0$2      aggregate
+p =/> agg$p$1$0$2      aggregate, to the group predicate
 agg$p$1$0$2 -> s       positive, from the group rule
+agg$p$1$0$2 -> t       positive, from the group rule
+p =/> u                aggregate, to the atom folded in place
 ```
 
 The direction is "depends on": an edge points from what is derived to what it
@@ -188,11 +192,14 @@ aggregate edge whose ends share a component, in rule and literal order over
 the rules the program states; a group rule's own negative edge is never
 chosen, since every cycle through a group predicate passes through the
 aggregate edge that reaches it, so the error points at the rule holding the
-aggregate. On the cycle every aggregate edge is followed by an edge of its
-group rule, and the pair is reported as one note, keeping the group edge's
-polarity and pointing at the literal inside the braces that continues the
-cycle. No generated name appears in a note, `specs/design-aggregates.md`
-section 7:
+aggregate. On the cycle an aggregate edge to a group predicate is followed
+by an edge of its group rule, and the pair is reported as one note, keeping
+the group edge's polarity and pointing at the literal inside the braces
+that continues the cycle; an aggregate edge to an atom folded in place is
+one note by itself, pointing at that atom, and reads the same. A vertex is
+known to be a group predicate by its predicate's kind, not by being an
+aggregate edge's target. No generated name appears in a note,
+`specs/design-aggregates.md` section 7:
 
 ```text
 paths.dl:9:1: error: program is not stratified

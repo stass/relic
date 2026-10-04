@@ -480,7 +480,9 @@ group rule gets all of that from machinery that exists -- duplicates
 collapse on insertion, the tuple and memory limits count the relation, the
 schedule orders it, `-e` shows it, a parallel round shares its pass -- at
 the cost of storing the body's relation once, which the memory limit
-bounds as it bounds any relation.
+bounds as it bounds any relation. One body shape pays that cost for
+nothing: a body that is already a relation, section 5.6, is folded in
+place and gets no rule.
 
 ### 5.2 Names
 
@@ -663,6 +665,162 @@ the pair of `specs/design-eval.md` section 6, they are in the dependency
 graph and the schedule, and `relic_materialize()` evaluates them. A
 query's are the query's, section 10.
 
+### 5.6 A body that is already a relation
+
+The commonest aggregate body is one atom:
+
+```prolog
+outdeg(X, N) :- node(X), N = count { edge(X, Y) }.
+total(N) :- N = count { valueAlias(A, B) }.
+```
+
+Its group rule is `agg$outdeg$2$0$2(X, Y) :- edge(X, Y).`, a rule that
+copies `edge` into a second relation column for column and then indexes
+the copy on `X`. The copy is exact and useless: when every argument of the
+one atom is a distinct named variable, the body denotes the atom's
+relation itself, up to the order of its columns, so the group of section
+4.1 under a binding of the shared variables is the set of the atom's
+tuples that hold that binding in the columns the shared variables stand
+in. Nothing about the fold needs the copy. It needs a relation to walk,
+the columns of that relation its key is matched against, and the column
+it aggregates, and the atom's relation supplies all three.
+
+**Such a body is folded in place.** A body is a relation when it is
+exactly one positive literal whose arguments are pairwise distinct named
+variables -- no constant, no `_`, no variable twice, and no comparison,
+assignment or negated literal beside it. A nullary atom qualifies, its
+zero arguments being distinct. For that body the compiler generates no
+group predicate and no group rule. The aggregate literal reads the atom's
+predicate as the relation it folds, its **key columns** are the atom's
+columns that hold shared variables, each bound from the outer slot of its
+variable, and its aggregated column is the column of the aggregated
+variable:
+
+```text
+N = count { edge(X, Y) }        X shared, Y local:   fold edge, key column 0 from X's slot
+N = count { edge(Y, X) }        X shared, Y local:   fold edge, key column 1 from X's slot
+S = sum(W) { weight(X, Y, W) }  X and Y shared:      fold weight, key columns 0 and 1, aggregated column 2
+N = count { valueAlias(A, B) }  nothing shared:      fold valueAlias whole, no key, no index
+```
+
+The key is no longer a prefix of the relation's columns, as a group
+relation's is by section 5.4, but a set of them, and the planner and the
+executor already handle sets: a positive literal with some arguments bound
+is looked up through the index keyed on exactly those columns, whatever
+their positions, `specs/design-planner.md` section 5.2, and an index probe
+is laid out as a tuple of the relation with only the key columns read,
+`specs/design-index.md`. The fold uses the same index and the same probe,
+section 8.3. With no shared variable it walks the relation and builds
+nothing at all, which is the `valueAlias` case above, where the copy was
+the whole of the cost.
+
+**The identity is exact, so the answers do not change.** A relation is a
+set, and the group rule's relation is the atom's relation under a
+permutation of columns, so every function gives the same value over the
+same rows, and section 4.5's independence of row order makes the walk's
+order irrelevant. Stratification gives the reader the same stratum: the
+aggregate edge, section 7, now points at the atom's predicate instead of a
+group predicate whose one positive edge pointed there, and a strict edge
+followed by a positive one places its source where one strict edge to the
+positive edge's target does. Magic Sets marks the atom's predicate
+complete, as it marked the group predicate and everything its body read,
+section 11. The frozen round reads a complete relation, as it did.
+
+What does change is what surrounds the answer, and each difference is one
+the two forms are entitled to. `-e` shows the operation over the atom's
+relation and no group rule, section 12. The tuple count no longer includes
+a copy, so a `-l tuples=` limit a copy would have passed is not reached,
+and a `-l memory=` limit that refuses the fold's index names the relation
+indexed rather than an aggregate derived, section 14. An unstratified
+program's cycle is found by a breadth-first search, `specs/design-stratify.md`
+section 5, and an aggregate that is one edge rather than two can make a
+different, equally valid, cycle the shortest, so the notes may differ. And
+two aggregates of two rules that are structurally equal, which the Magic
+rewrite's deduplication, section 11, told apart only by their distinct
+group predicates, now fold one predicate with one key and merge, so a note
+about them is issued once and names the surviving rule's variables; the
+answers are the same.
+
+**The key columns are in column order.** `shared[i]` is the outer slot of
+the `i`th key column counted from the lowest, section 6, and not the
+`i`th shared variable in the outer rule's slot order, which is what a group
+rule's leading columns happen to coincide with. `S = sum(W) { w(Y, X, W) }`
+with `X` in slot 0 and `Y` in slot 1 has key columns 0 and 1 bound from
+slots 1 and 0, in that order; filling `shared` in slot order would fold
+the wrong groups silently, which section 16 tests for.
+
+**What the compiler keeps of the body.** The aggregate literal still
+carries the body as compiled, section 6, so that `-e` prints the braces as
+they were written, the Magic walk visits what the body reads, and a note
+names the aggregated variable. For a body folded in place that compiled
+body is a `relic_rule_t` with no head: `head` is `RELIC_ID_NONE`,
+`head_arity` is zero and `head_args` is `NULL`, which is less than a
+query's rule has, a query's head being none but its output columns being
+head arguments; `origin` is the statement's, as a group rule's is; the
+body is the one literal, and its variables are numbered in the order the
+atom's arguments are written, so that **its slot `c` is column `c` of the
+relation the fold reads**, which is the invariant section 6 states for a
+group rule's variables too. The aggregated column is found among those
+variables by name, as a group rule's is found among its head columns. The
+body is never published to a rule table, never derives anything and is in
+no graph; it is a description, held by the literal and nothing else, in
+the arena the literal lives in. The group predicate's name of section 5.2
+is not interned for it: a predicate nothing derives and nothing reads
+would be a table entry with no purpose.
+
+The alternative was the identity rule, `edge(X, Y) :- edge(X, Y)`, as the
+body of a fold in place: then the predicate a literal folds would always be
+its body's head, one field fewer. It was rejected because a rule whose head
+is a predicate the program wrote, held where rules are held, says "this
+derives `edge`" to every reader that does not know the convention, and
+the one field it saves is the one that makes the convention unnecessary. A
+body with no head cannot be mistaken for a derivation.
+
+**Why `source` and `key_mask` are stored.** Both follow from the body: a
+group rule's head is what it derives and its key is its leading columns,
+and a fold in place reads its one atom's predicate through the columns its
+shared variables stand in. Storing them spares every reader -- the
+dependency graph, the planner, the walk, the hash -- the two-way question
+of which body it holds, so that the two forms are one to everything but
+the compiler that makes them and the printer that shows them.
+
+**What does not qualify, and why it stays a rule.** `count { edge(X, _) }`
+is a projection: its group holds the distinct values of `X`, which `edge`
+does not. `count { edge(X, a) }` is a selection, and `count { edge(X, X) }`
+too. Each is a different relation from the atom's and needs the rule that
+computes it. A selection by a constant could be folded in place through an
+index keyed on the shared columns and the constant's column, with the
+constant in the probe; a projection under `min` or `max` could too, since
+the extreme of a projection is the extreme of the relation; section 20
+leaves both out until a workload shows them, because each is a second way
+to build a key and the one atom of distinct variables is the shape every
+degree count, total and extreme over a relation is written in.
+
+**For testing, the rule can be forced.** `RELIC_F_GROUP_RULES`, spelled
+`-X group-rules`, compiles every body to a group rule as sections 5.1 to
+5.5 describe, folding none in place. It is a strategy in the sense of
+`specs/design-hardening.md` section 3.1: its answers must equal the
+default's over every program, except where a limit refuses one of them,
+and the generator there, whose bodies are drawn at random, produces
+single-atom bodies often enough that the column map of every fold is
+checked against the copy it replaces. It evaluates more rules than the
+default, so its tuple total is held to nothing, as `no-reorder`'s and
+`no-magic`'s are not, and `tests/equiv/strategies.sh` compares its
+answers and exit status but not its standard error, which the limit
+messages and the cycle notes above may change.
+
+The flag has a second user that settles whether it is worth a public
+flag: the random tester's derivation oracle, `tests/random/compare.c`,
+counts one set of derivations per group body, and under this design a body
+that is a relation derives nothing. Rather than give the tester a copy of
+the compiler's test for a relation -- a second statement of one rule, which
+would drift -- the oracle runs under `RELIC_F_GROUP_RULES`, where every
+body derives, and the equivalence runs compare the default against it. The
+alternative of rendering each single-atom body twice, once doubled as
+`count { edge(X, Y), edge(X, Y) }`, which the same relation denotes and
+which no rule folds in place, would check the column map without a flag,
+but would still leave the oracle needing to know which bodies derive.
+
 ---
 
 ## 6. The compiled rule
@@ -679,37 +837,57 @@ enum relic_aggregate_fn {
 };
 
 struct relic_aggregate {
-	const uint16_t		*shared;	/* outer slot of each shared column, in column order */
+	const uint16_t		*shared;	/* outer slot of each key column, in column order */
+	const relic_rule_t	*body;		/* the body as compiled, a copy in the owner's arena */
 	relic_location_t	 where;		/* the function name */
-	relic_pred_id_t		 group;		/* the group predicate */
-	const relic_rule_t	*group_rule;	/* the group rule, a copy in the owner's arena */
-	uint16_t		 shared_count;
+	relic_pred_id_t		 source;	/* the predicate whose relation the fold reads */
+	uint32_t		 key_mask;	/* the source's columns the key is matched against */
+	uint16_t		 shared_count;	/* the key columns, popcount(key_mask) */
 	uint16_t		 column;	/* the aggregated column; unused by COUNT */
 	uint16_t		 result;	/* the slot the literal binds */
 	enum relic_aggregate_fn	 fn;
 };
 ```
 
-`shared` lives in the program arena beside the rule, as its arguments do.
-The literal names its group predicate, through which the relation is
-reached as every relation is, and its group rule, through a pointer to a
-copy of that rule made in the same arena as the literal: the program arena
-for a program statement, the query's own arena for a query, section 10.
-The pointer is not into a rule table: a table is a growable array, and a
-pointer into one dangles when a load grows it, `specs/design-program.md`
-section 6. The copy is never moved or changed, and its arguments, body and
-variables are the arena blocks the table's entry holds too, so it lives as
-long as the literal does and costs one rule header. A copy of the literal
-the Magic rewrite makes keeps the pointer, so the printer of section 12,
-the walk of section 11 and the notes of section 9 find the body and the
-group's variable names through the literal alone, without knowing which
-table the group rule was published into. The predicate entry is not
-enough on its own: a query's group predicate is shared by every query with
-an aggregate at that position and arity, section 5.2, and each such query
-has a group rule of its own.
-The aggregated column is a column index into the group relation, resolved
-when the rule is compiled, so nothing downstream looks a variable up by
-name.
+The literal names what it folds and carries what it was written as, and
+the two are distinct fields because they coincide for one body shape and
+not for the other.
+
+**What it folds** is the relation of `source`, reached through the
+predicate as every relation is: the group predicate when the body was
+compiled to a group rule, and the atom's own predicate when the body is
+one atom folded in place, section 5.6. The fold visits the tuples whose
+`key_mask` columns hold the key, and `shared[i]` is the slot of the outer
+rule the `i`th key column, in increasing column order, is bound from; for
+a group relation `key_mask` is the leading `shared_count` columns, by
+section 5.4, and for an atom folded in place it is the columns its shared
+variables stand in. `shared` lives in the arena that holds the literal,
+beside the rule's arguments. The aggregated column is a column index into the
+source relation, resolved when the rule is compiled, so nothing downstream
+looks a variable up by name.
+
+**What it was written as** is `body`, the rule the braces compiled to,
+through a pointer to a copy made in the same arena as the literal: the
+program arena for a program statement, the query's own arena for a query,
+section 10. For a body compiled to a group rule the copy is the group rule;
+for one folded in place it is the headless one-literal rule of section 5.6,
+the only instance there is. In both the variables are numbered so that
+**slot `c` is column `c` of the source relation**, which is what lets the
+printer name the relation's columns and the aggregated column from the
+body alone. The pointer is not into a rule table: a table is a growable
+array, and a pointer into one dangles when a load grows it,
+`specs/design-program.md` section 6. The copy is never moved or changed,
+and a group rule copy's arguments, body and variables are the arena
+blocks the table's entry holds too, so it lives as long as the literal
+does and costs one rule header. A copy of the literal the Magic rewrite
+makes keeps the pointer, so the printer of section 12, the walk of section
+11 and the notes of section 9 find the body and its variable names through
+the literal alone, without knowing which table, if any, the body was
+published into. The predicate entry is not enough on its own: a query's
+group predicate is shared by every query with an aggregate at that
+position and arity, section 5.2, and each such query has a group rule of
+its own; an atom's predicate says nothing about which variables the
+braces named.
 
 ---
 
@@ -719,24 +897,34 @@ name.
 literal, positive or negative. An aggregate literal makes a third kind:
 
 ```text
-p(...) :- q(...), not r(...), N = count { s(...) }.
+p(X) :- q(X), not r(X), N = count { s(X, Y), t(Y) }, M = count { u(X, Z) }.
 
 p -> q                    positive
 p -/> r                   negative
-p =/> agg$p$1$0$3           aggregate
+p =/> agg$p$1$0$3           aggregate, to the group predicate
 agg$p$1$0$3 -> s            positive, from the group rule
+agg$p$1$0$3 -> t            positive, from the group rule
+p =/> u                   aggregate, to the atom folded in place
 ```
+
+The edge's target is the predicate the fold reads, section 6: the group
+predicate of a body compiled to a group rule, and the atom's predicate of
+a body folded in place, section 5.6, which the group rule's one positive
+edge would have led to.
 
 **An aggregate edge is a negative edge for every purpose of the analysis.**
 A program is stratified when no negative and no aggregate edge has both
 ends in one component; the stratum of a component is the largest over its
 edges to other components of `stratum(target)` for a positive edge and
 `stratum(target) + 1` for a negative or an aggregate one; and the schedule
-is the components sorted by stratum, stably. So a group predicate is
-complete before any rule holding its aggregate runs, exactly as a negated
-predicate is, and the fold reads a relation that will not change. Section
-7 of the stratification design, that a component's rules read only
-complete relations or its own, holds with "reads" covering the fold.
+is the components sorted by stratum, stably. So the relation a fold reads
+is complete before any rule holding its aggregate runs, exactly as a
+negated predicate is, and the fold reads a relation that will not change.
+Section 7 of the stratification design, that a component's rules read only
+complete relations or its own, holds with "reads" covering the fold. The
+two forms of the edge place the reader alike: a strict edge to a group
+predicate whose one positive edge leads to `u` puts the reader at
+`stratum(u) + 1`, and a strict edge to `u` puts it there too.
 
 The group predicate itself is derived by one rule and read positively by
 nothing, so in a stratified program it is a component of its own, never
@@ -759,13 +947,23 @@ error points at that rule as it points at the rule holding a negated
 literal today. The cycle is the shortest one through the closing edge,
 found by the same search, and it is a sequence that begins at the closing
 edge's target and ends at its source, which is an outer rule's head. In
-that sequence **every aggregate edge is followed by an edge of its group
-rule**: an aggregate edge leads to a group predicate, only an edge of the
-group's one rule leads out of it, and the sequence cannot end there. Each
-such pair is reported as one note, in the program's vocabulary, keeping
-the group edge's polarity and pointing at the literal inside the braces
-that continues the cycle -- `depends on` for a positive literal there and
-`depends negatively on` for a negated one:
+that sequence **an aggregate edge to a group predicate is followed by an
+edge of its group rule**: only an edge of the group's one rule leads out
+of a group predicate, and the sequence cannot end there. Each such pair is
+reported as one note, in the program's vocabulary, keeping the group
+edge's polarity and pointing at the literal inside the braces that
+continues the cycle -- `depends on` for a positive literal there and
+`depends negatively on` for a negated one. **An aggregate edge to an atom
+folded in place is one note by itself**, `<source> depends on <target>
+through an aggregate`, pointing at that atom, which is the one literal of
+the aggregate's compiled body, section 6, and not at the aggregate literal
+of the outer rule where the edge was made; it reads as the pair would
+have, the pair's second edge being the copy of that atom, and for a
+self-cycle, section 4.7, it is the whole report under the error, the path
+beyond the closing edge being empty. The analysis knows a vertex is a group predicate by
+the predicate's kind, which the compiler marked when it named it, section
+5.2, and not by its being an aggregate edge's target, which an ordinary
+predicate now can be:
 
 ```text
 paths.dl:9:1: error: program is not stratified
@@ -845,11 +1043,11 @@ enum relic_op_kind {
 };
 
 struct relic_op_aggregate {
-	relic_relation_t	*relation;	/* the group relation, complete */
-	const uint16_t		*key_slots;	/* the shared columns' slots, in column order */
+	relic_relation_t	*relation;	/* the source relation, complete */
+	const uint16_t		*key_slots;	/* the key columns' slots, in column order */
 	relic_location_t	 where;
-	uint32_t		 key_mask;	/* columns 0 .. key_count - 1 */
-	uint32_t		 index_position;	/* when key_count > 0 */
+	uint32_t		 key_mask;	/* the key columns, the literal's */
+	uint32_t		 index_position;	/* when the access is a lookup */
 	uint16_t		 key_count;
 	uint16_t		 column;	/* the aggregated column */
 	uint16_t		 slot;		/* the result */
@@ -881,24 +1079,32 @@ component, section 7, so it has no delta variant of its own and, in a
 delta variant of another literal, folds the same complete relation every
 round, as `ANTI_MEMBER` tests the same one.
 
-The rows the fold visits are the tuples whose first `key_count` columns
-equal the key, and the planner chooses how they are reached by the rule
-of `specs/design-planner.md` section 5.2, as it does for a positive
-literal with the same bound columns:
+The rows the fold visits are the tuples whose key columns, the literal's
+`key_mask`, hold the key, and the planner chooses how they are reached by
+the rule of `specs/design-planner.md` section 5.2, as it does for a
+positive literal with the same bound columns:
 
-* with **no shared column** the fold walks the whole relation, since the
+* with **no key column** the fold walks the whole relation, since the
   group is then the whole of it;
-* with **some shared columns** it walks **the index keyed on exactly the
-  shared columns**, built by the relation on first use as one is for a
-  `LOOKUP`; under `RELIC_F_NO_INDEX` it walks the whole relation and
-  matches the key columns of each tuple, as a generator with bound
-  columns is scanned under it, so the reference strategy has no index the
-  optimized one lacks;
-* with **every column shared** the group is the tuple the key names or
-  nothing, and the walk is one probe of the canonical full-tuple index,
+* with **some key columns** it walks **the index keyed on exactly the key
+  columns**, built by the relation on first use as one is for a `LOOKUP`,
+  and kept with the relation's other indexes, so a program's or a query's
+  fold over the same relation on the same columns finds it built; under
+  `RELIC_F_NO_INDEX` it walks the whole relation and matches the key
+  columns of each tuple, as a generator with bound columns is scanned
+  under it, so the reference strategy has no index the optimized one
+  lacks;
+* with **every column a key column** the group is the tuple the key names
+  or nothing, and the walk is one probe of the canonical full-tuple index,
   as a `MEMBER` is.
 
-`index_position` names the index in the first case and none in the
+For a group relation the key columns are its leading ones; for an atom
+folded in place they are whichever columns hold the shared variables,
+section 5.6, which is the position a `LOOKUP` with the same bound
+arguments is in, and an index is keyed on a set of columns, not on a
+prefix.
+
+`index_position` names the index in the second case and none in the
 others, and which case applies is written into the operation, so the
 executor has no branch on the strategy.
 
@@ -917,10 +1123,12 @@ section 8.2 there.
 
 ### 9.1 The fold
 
-An `AGGREGATE` builds its key from the key slots' frame entries, walks the
-chain the index holds for it -- or the relation's range when there is no
-key -- and folds each tuple's aggregated column into an accumulator in the
-executor scratch:
+An `AGGREGATE` builds its key from the key slots' frame entries, laid out
+as a tuple of the relation with the key columns filled and the others
+unread, which is how an index is probed, walks the chain the index holds
+for it -- or the relation's range when there is no key, matching each
+tuple's key columns -- and folds each tuple's aggregated column into an
+accumulator in the executor scratch:
 
 ```text
 count:      rows = rows + 1
@@ -1064,7 +1272,8 @@ refining step 1 of `specs/design-eval.md` section 7:
    schedule;
 3. **run each of the query's group rules once**, in body order, each into
    its group relation, a derived relation of a generated predicate as a
-   rewrite's are;
+   rewrite's are; an aggregate folded in place, section 5.6, has none to
+   run, its relation being one step 2 made complete;
 4. **evaluate the rewrite's generated rules**, when the query is
    rewritten, from their own schedule;
 5. run the query's plan once, or stream it;
@@ -1085,10 +1294,13 @@ budget falls back to the whole program's fixed point in step 2 and has no
 step 4, and the sequence stands.
 
 **The group relations are emptied when the run ends**, with the answer
-relation, so outside a run a query holds nothing derived and counts
-nothing against the limits, and running it again derives the same rows in
-the same order. A run that fails in step 3 fails as an evaluation fails,
-before any row.
+relation, so outside a run a query holds nothing derived, and running it
+again derives the same rows in the same order. What a run may leave behind
+is an index: a fold in place over a program relation or a base store
+builds the index on its key columns in that relation, section 8.3, which
+stays with the relation and is counted against the memory limit as the
+index a query's `LOOKUP` builds is, until the relation is discarded. A run
+that fails in step 3 fails as an evaluation fails, before any row.
 
 Under `-a`, or after `relic_materialize()`, the program's own group rules
 have been evaluated with the program and the query's are evaluated by the
@@ -1105,11 +1317,15 @@ treats a negated one, and for the same reason: a fold needs the whole
 group, and architecture section 37's rule that a relation read whole is
 materialized in its lower stratum keeps the rewrite simple.
 
-**The group predicate is read completely**, and so is everything its body
-reads. The walk of section 3 there gains one case: an aggregate literal
-adds its group predicate to the roots and visits the group rule's body,
-adding every predicate a positive or a negated literal of it names to the
-roots. The complete part is closed over components as before, so a
+**The relation a fold reads is read completely**, and so is everything the
+body reads. The walk of section 3 there gains one case: an aggregate
+literal adds the predicate it folds, section 6, to the roots and visits
+its compiled body, adding every predicate a positive or a negated literal
+of it names to the roots. For a body compiled to a group rule that is the
+group predicate and what the group rule reads; for an atom folded in place
+the two are the same predicate, named once by the literal and once by its
+one-literal body, and the walk needs no case to tell them apart. The
+complete part is closed over components as before, so a
 program rule's group rule and the components its body depends on are
 evaluated in phase 1 from the program's schedule; a query's group rule is
 run by the query, after phase 1 has made what it reads complete and
@@ -1125,16 +1341,16 @@ slots are bound, and the order function reports that it binds its result
 slot, as it reports an assignment's binding, `specs/design-arithmetic.md`
 section 10; a call after it whose argument is the result is adorned bound.
 The rewrite copies the literal into prefixes with its shared and result
-slots renumbered and its group predicate unchanged, never adorns a group
-predicate, and hashes and compares the literal structurally -- function,
-group predicate, column, slots -- when generated rules are deduplicated.
-The check that a negated literal in a generated rule reads a complete
-predicate covers an aggregate literal too: one over a group predicate not
-read completely would fold an empty relation, and fails the query with an
-internal error instead.
+slots renumbered and the predicate it folds unchanged, never adorns one,
+and hashes and compares the literal structurally -- function, folded
+predicate, key columns, aggregated column, slots -- when generated rules
+are deduplicated. The check that a negated literal in a generated rule
+reads a complete predicate covers an aggregate literal too: one over a
+predicate not read completely would fold an empty relation, or a demanded
+part of one, and fails the query with an internal error instead.
 
 **A literal's size is one.** The literal holds no expression tree and its
-body is not copied, since the group rule is read completely and never
+body is not copied, since what it folds is read completely and never
 rewritten, so the budgets of `specs/design-magic.md` section 8 charge it
 one literal wherever they charge a literal.
 
@@ -1149,21 +1365,28 @@ for exactly the bindings it holds for there.
 
 A rule is shown as written, its aggregate literals as `N = count { ... }`,
 `S = sum(Size) { ... }`, `M = min(D) { ... }` and `M = max(D) { ... }`,
-with the body printed from the group rule's body under the variable names
-it carries; `_` is written `_` and constants as the text output format
-writes them. A group rule is shown as the generated rule it is, under its
-own component, as a rewrite's generated rules are. The operation prints
-as its kind, the equality it stands for, the group relation with its
-columns named, and its key columns:
+with the body printed from the literal's compiled body under the variable
+names it carries; `_` is written `_` and constants as the text output
+format writes them. A group rule is shown as the generated rule it is,
+under its own component, as a rewrite's generated rules are; an atom
+folded in place has no rule to show. The operation prints as its kind,
+the equality it stands for, the relation it folds with its columns named
+from the compiled body, and its key columns:
 
 ```text
-aggregate N = count agg$dep_count$2$0$2(T, D) key={0}
 aggregate S = sum(Size) agg$dir_size$2$0$2(Dir, F, Size) key={0}
-aggregate M = min(D) agg$shortest$3$0$3(X, Y, D) key={0,1}
-aggregate N = count agg$total$1$0$1(P, Y)
+aggregate N = count agg$leaves$1$0$1(X)
+aggregate M = min(D) dist(X, Y, D) key={0,1}
+aggregate N = count depends(T, D) key={0}
+aggregate N = count edge(Y, X) key={1}
+aggregate N = count valueAlias(A, B)
 ```
 
-The last folds the whole relation, having no key. For section 2's
+The first two fold group relations, of a body of two atoms and of a body
+with a negated literal; the rest fold the atom's own relation, section 5.6:
+the third, section 2's `shortest/3`, with every column a key column, the
+fifth keyed on its second column because that is where the shared variable
+stands, and the last the whole relation, having no key. For section 2's
 `dir_size/2` under `-a`:
 
 ```text
@@ -1180,16 +1403,22 @@ stratum 1, component 1: dir_size/2
 ```
 
 A query's group rules are shown under the query's heading, before its
-plan, each as a rule with its plan:
+plan, each as a rule with its plan; a query whose aggregates are all folded
+in place shows only its own:
 
 ```text
-query $q0(X, N) :- node(X), N = count { edge(X, Y) }.
-    rule agg$$q0$2(X, Y) :- edge(X, Y).
+query $q0(X, N) :- node(X), N = count { edge(X, Y), not blocked(Y) }.
+    rule agg$$q0$2(X, Y) :- edge(X, Y), not blocked(Y).
         scan edge(X, Y)
+        anti-member blocked(Y)
         emit agg$$q0$2(X, Y)
     scan node(X)
     aggregate N = count agg$$q0$2(X, Y) key={0}
     emit $q0(X, N)
+query $q1(X, N) :- node(X), N = count { edge(X, Y) }.
+    scan node(X)
+    aggregate N = count edge(X, Y) key={0}
+    emit $q1(X, N)
 ```
 
 Every line is printable ASCII, per `specs/design-planner.md` section 8.3:
@@ -1273,7 +1502,11 @@ which this design takes away:
   reader wrote it, as an aggregate of the predicate whose rule holds it --
   `limit exceeded: tuples=20 while deriving an aggregate of pairs/1` -- or
   as an aggregate of the query, since its generated name says nothing the
-  reader can change and `-e` shows it. A fold allocates nothing, its
+  reader can change and `-e` shows it. An atom folded in place, section
+  5.6, stores nothing but the index on its key columns, charged to the
+  memory limit as every index is, refused with the message a `LOOKUP`'s
+  index is refused with, which names the relation indexed, and kept with
+  the relation as a `LOOKUP`'s is. A fold allocates nothing, its
   accumulator being a fixed part of the scratch.
 * **unbounded time.** A fold is linear in its group, and a group is a
   relation the limits bound. What the limits do not bound is the work of
@@ -1299,9 +1532,13 @@ in a message is.
 
 ## 15. Interface
 
-**The library's interface does not change.** No function, type, flag or
-structure field is added: values are still symbols, strings and integers,
-and an aggregate's result in a row is one of them. What changes is text:
+**The library's interface gains one flag and no other change.**
+`RELIC_F_GROUP_RULES` joins the strategy flags of `include/relic.h`,
+documented beside `RELIC_F_NO_INDEX` and the others as what it is: a
+switch that compiles every aggregate body to a group rule, for comparing
+the two forms, which no program needs. No function, type or structure
+field is added: values are still symbols, strings and integers, and an
+aggregate's result in a row is one of them. What else changes is text:
 
 * `relic_check()`'s description of range restriction gains the aggregate
   literal, the shared-variable rule of section 5.3, and recursion through
@@ -1311,8 +1548,12 @@ and an aggregate's result in a row is one of them. What changes is text:
   arithmetic result does;
 * `RELIC_F_NOTE_MIXED`'s description names the aggregate notes;
 * `relic_stats_t`'s `derivations` and `tuples_inserted` are described as
-  counting group relations, which every program with an aggregate now
-  derives.
+  counting group relations, which a program with an aggregate over a body
+  of more than one atom derives; a body that is one atom of distinct
+  variables derives nothing, section 5.6.
+* `-X group-rules` in the tool is `RELIC_F_GROUP_RULES`, listed in
+  `relic(1)` with the other `-X` behaviours, which are not part of the
+  tool's stable interface.
 
 The library's interface version is not bumped, since the binary interface
 is unchanged.
@@ -1377,6 +1618,38 @@ group relations filled in step 3, before any generated rule runs, and
 empty after the run; a query with an
 aggregate gathered.
 
+**Folding in place.** Which bodies are relations: one atom of distinct
+variables, nullary included, folded in place; a wildcard, a constant, a
+repeated variable, a second literal, a comparison or a negation, each
+compiled to a group rule. The literal's folded predicate, key columns and
+aggregated column for a shared variable in the first, a middle and the
+last column, for two shared variables out of order with their slots, and
+for none; the compiled body headless with slot `c` as column `c`; no
+group predicate interned and no rule appended for such a statement, and
+the rule table and predicate table counts saying so. The planner's access
+for a key that is not a prefix: the lookup's index keyed on exactly those
+columns, found again by a second fold on the same columns, the scan under
+`RELIC_F_NO_INDEX` matching those columns, and the probe when every
+column is a key column. The executor's probe tuple with the key in the
+right columns, against a relation whose rows differ only in a non-key
+column. Stratification: an aggregate edge to an ordinary predicate placing
+the reader one stratum above it, the same stratum the group rule gave; a
+recursion through an in-place fold rejected with the one note pointing at
+the atom, `shortest/3 depends on shortest/3 through an aggregate`; a
+group vertex recognized by its predicate's kind when another aggregate
+edge ends at an ordinary predicate of the same component. Magic: the atom
+read completely when the query also calls it bound, a seed rule folding it
+in place before any generated rule runs, and two literals folding one
+predicate with different key columns kept distinct by the deduplication.
+The same answers under `RELIC_F_GROUP_RULES`, with the group rule back in
+`-e`. The exhaustion sweep of `tests/unit/test_exhaustion.c` keeps a body
+of two atoms among its aggregates, so that the all-or-nothing append and
+the query's group run stay under allocation failure, and gains the fold's
+index build as a point where memory runs out; its whole-statement check
+reads the literal's `source` and `body`, and expects a group rule only
+when the body has a head. The random tester's derivation oracle runs under
+`RELIC_F_GROUP_RULES`, section 5.6.
+
 **Language tests**, each a golden file:
 
 ```text
@@ -1398,11 +1671,12 @@ aggregate-explain       -e over section 12's program and query
 aggregate-parallel      dep_count over a large graph at one thread and with -X parallel
 aggregate-limit         -l tuples= refused while deriving a group relation
 aggregate-assign        arithmetic inside a body, and an aggregate feeding an assignment
+aggregate-relation      bodies folded in place and bodies that are not, with -e showing which, and the key on a middle column
 ```
 
 **Equivalences.** `tests/equiv/strategies.sh` runs the aggregate corpus
 under every strategy -- naive, no-index, no-reorder, no-magic, parallel,
-and their combinations -- and compares what it compares today, in the
+their combinations, and group-rules alone -- and compares what it compares today, in the
 groups `specs/design-hardening.md` section 3.1 states: every strategy's
 answers equal the default's as sorted sets, and the tuple total of a
 strategy that evaluates the same rules as its reference equals the
@@ -1472,9 +1746,23 @@ Each step lands with its tests and is measured against the one before it.
    fuzz dictionary and corpus, the manual pages, a degree-count workload
    in `bench/compare/` measured against Souffle, which has aggregates, and
    `bench/baseline.txt` recorded again.
+6. **Folding in place** (section 5.6, and its traces through sections 6,
+   7, 8.3, 11 and 12). First the literal's `source`, `key_mask` and
+   compiled body in the program model, with every body still compiled to
+   a group rule, so the planner, the executor, the stratifier, the walk
+   and the printer are moved to the new fields while nothing observable
+   changes; then the compiler's one decision and `RELIC_F_GROUP_RULES`,
+   with the tests of section 16 and the golden files whose `-e` output
+   loses a group rule. Gate: a query counting the three CSPA relations of
+   Graspan's httpd, `N = count { valueAlias(A, B) }` and its two
+   companions, peaks at the memory of the fixed point it is folded over,
+   which answering `valueFlow` over the same fixed point measures, where
+   the copies peaked at four times it; `dep_count/2` within the time of
+   step 2's gate.
 
 Steps 1 and 2 are the feature; 3 and 4 make it complete under every mode
-the tool has; 5 is what `CLAUDE.md` asks of every feature.
+the tool has; 5 is what `CLAUDE.md` asks of every feature; 6 removes a
+cost the first five accepted.
 
 ---
 
@@ -1482,7 +1770,9 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
 
 * Which variables are local is a function of the statement's text, and
   the group rule's columns, its name and its position in the rule table
-  follow from the text and the load order.
+  follow from the text and the load order. Whether a body is folded in
+  place is a function of its text and of `RELIC_F_GROUP_RULES`, section
+  5.6, and never of what the relations hold.
 * A group relation's tuples are inserted in the order the strategy
   derives them, per D-4, and every function's value is independent of
   that order: `count`, `min` and `max` trivially, and `sum` because it is
@@ -1577,6 +1867,20 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
 * `specs/design-api.md` sections 3, 5.1, 7 and 11: the text of section 15
   here.
 * `docs/todo-language.md`: the aggregates item points here.
+* Folding in place, section 5.6: `specs/architecture.md` sections 30 and
+  37 say the aggregate edge and the complete read are of the relation the
+  fold reads, a group predicate or the atom's own; `specs/decisions.md`
+  D-27 says which bodies get a group rule; `specs/design-stratify.md`
+  section 5: the single note for an aggregate edge to an ordinary
+  predicate, and a group vertex known by its predicate's kind;
+  `specs/design-hardening.md` section 3.1: the `group-rules` strategy,
+  and the derivation oracle under it; `specs/design-magic.md` sections 3,
+  6, 7, 8 and 13 and `specs/design-program.md` section 8: the predicate a
+  literal folds and its compiled body in place of the group predicate and
+  the group rule; `specs/design-planner.md` sections 5.2 and 8.2,
+  `specs/design-plan.md` section 3, `specs/design-eval.md` section 5 and
+  `specs/design-evaluation-cost.md` section 3.2: the fold reads the
+  relation it folds, a group's or an atom's own.
 
 ---
 
@@ -1614,6 +1918,14 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
   prefix construction of `specs/design-magic.md` section 6 would supply it,
   at the cost of a relation per aggregate or a prefix evaluated twice, for
   a rule shape the idiom expresses.
+* **Folding a selection or a projection in place.** Section 5.6: an atom
+  with a constant could be folded through an index keyed on the shared
+  columns and the constant's, and an atom with a wildcard under `min` or
+  `max` through the relation it projects, since the extreme survives the
+  projection. Each is a second way to build a key or a per-function case,
+  for shapes the degree counts and totals that motivated section 5.6 do
+  not take. Reopened when a workload shows one of them copying a large
+  relation.
 * **A relation of folded results.** Section 9.1: a second generated rule
   folding each group once, read by the outer rule with a default for an
   empty group. It would make a fold cost one lookup per binding rather

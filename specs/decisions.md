@@ -443,11 +443,15 @@ occurrence is inside that aggregate, and shared otherwise. The body is
 compiled to a generated group rule whose head is the shared variables and
 then the local ones, named `agg$<pred>$<arity>$<rule>$<position>` for a
 program rule and `agg$$q0$<position>` for a query, and published with the
-rule that reads it or not at all. The reader depends on the group
-predicate through an aggregate edge, which stratification treats as a
-negative one, so a group is complete before it is folded and an aggregate
-in recursion is rejected. A shared variable must be bound inside the
-braces as well as outside. `sum` is exact over the group in a 128-bit
+rule that reads it or not at all -- except a body that is one atom of
+pairwise distinct named variables, which denotes the atom's relation
+itself and is folded in place, through an index on the columns its shared
+variables stand in, with no group rule and no group predicate. The reader
+depends on the predicate it folds through an aggregate edge, which
+stratification treats as a negative one, so a group is complete before it
+is folded and an aggregate in recursion is rejected. A shared variable
+must be bound inside the braces as well as outside. `sum` is exact over
+the group in a 128-bit
 accumulator and fails the evaluation only when the total does not fit
 `int64_t`, so its answer and its failure are functions of the group, not
 of the order its rows arrived in; a sum over a symbol and a min or max

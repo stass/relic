@@ -178,6 +178,15 @@ with `relic_query_collect()`. The strategies are those of
 | parallel | `RELIC_F_PARALLEL_ALWAYS` | default |
 | no-reorder | `RELIC_F_NO_REORDER` | -- |
 | no-magic | `RELIC_F_NO_MAGIC` | -- |
+| group-rules | `RELIC_F_GROUP_RULES` | -- |
+
+The `group-rules` strategy compiles every aggregate body to a group rule
+where the default folds a body that is one atom of distinct variables in
+place, `specs/design-aggregates.md` section 5.6, so a fold's column map is
+checked against the copy it replaces on every generated program. The
+derivation oracle of `tests/random/compare.c`, which counts one set of
+derivations per group body, runs under this flag, where every body
+derives, rather than knowing which bodies the compiler folds in place.
 | naive+no-magic | `RELIC_F_NAIVE \| RELIC_F_NO_MAGIC` | no-magic |
 | no-index+no-magic | `RELIC_F_NO_INDEX \| RELIC_F_NO_MAGIC` | no-magic |
 | no-reorder+no-magic | `RELIC_F_NO_REORDER \| RELIC_F_NO_MAGIC` | no-magic |
