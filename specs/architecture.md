@@ -127,12 +127,16 @@ Some of these may be added later if they preserve the character of the system.
 Three are left out for reasons of this design rather than of Datalog.
 Declarations would cost a line per relation in every program, most of the
 text of a small one, for checks `-vv` and the undefined-predicate warning
-already give; columns stay untyped, per section 10.1. A floating-point value
-would break the determinism of decision D-4 across platforms and the one
-identifier per value of D-3, and an unsigned integer is a second numeric type
-with overflow rules of its own for a use no workload has shown. Subsumption
-deletes tuples, which the append-only store that semi-naive deltas and the
-frozen round rest on cannot do (`specs/design-relations.md` section 4).
+already give; columns stay untyped, per section 10.1. An unsigned integer is
+a second numeric type with overflow rules of its own for a use no workload
+has shown. Subsumption deletes tuples, which the append-only store that
+semi-naive deltas and the frozen round rest on cannot do
+(`specs/design-relations.md` section 4).
+
+Floating point is deferred rather than declined. A float could break the
+determinism of decision D-4 across platforms and the one identifier per value
+of D-3; `specs/design-floats.md` shows how both are kept, and D-33 records
+the decisions that design rests on.
 
 ---
 
@@ -222,6 +226,12 @@ so inside a comparison, over bytes and positions counted from zero, with
 relic's own regular expression matcher behind `match`, are specified in
 `specs/design-strings.md`; that design extends this section and sections
 10.1 and 13 rather than changing what any v1 program means.
+
+Floating-point numbers are outside v1. A fourth type, an IEEE 754 double
+that equals only itself and orders exactly against the integers, is
+specified in `specs/design-floats.md`; that design extends this section and
+sections 10.1, 13, 19 and 61 rather than changing what any v1 program
+means.
 
 ---
 
@@ -399,6 +409,12 @@ value can hold, and a pattern that is not a regular expression, fail the
 evaluation as an undefined arithmetic result does, since skipping the
 binding would make a negation over it true; `specs/design-strings.md`
 section 4.3.
+
+A float, specified for a later version in `specs/design-floats.md`, is a
+fourth type under these rules with one exception. It equals only itself,
+as every value does, so `1 = 1.0` is false; but it orders against an
+integer exactly by value, the one ordering between two types that is
+defined rather than false (sections 4 and 5 there).
 
 ---
 
@@ -774,6 +790,12 @@ over it are charged to the memory limit with relation storage,
 representation to be revisited when a measured workload shows its cost;
 section 7.1 there is that revisit, and it keeps D-3's decision of one 32-bit
 interned domain and changes only the encoding behind its accessors.
+
+A float type, specified for a later version in `specs/design-floats.md`
+section 3, adds `RELIC_FLOAT` to the public enumeration and an arm to the
+union, and its identifier is the integer's type bits with the top bit of
+the index set. The integers keep half of their index space, 2^29 - 1
+distinct values, and no other capacity moves.
 
 ---
 
@@ -2243,7 +2265,9 @@ and why the promise above survives it.
 on that guarantee. Because a column may hold more than one type, sorting uses a
 total order: values are ordered first by type rank, integer then symbol then
 string, and then by the ordering of section 10.1. This order exists only to
-stabilize output and is not visible to the language.
+stabilize output and is not visible to the language. A float,
+`specs/design-floats.md` section 9, shares the integers' rank, ordered by
+value with an integer before a float that equals it.
 
 ---
 
@@ -2713,6 +2737,7 @@ parallel SCC evaluation
 persistent compiled rule plans
 more sophisticated cardinality estimation
 additional Magic/negation optimization
+floating point
 ```
 
 The language comes first: arithmetic and aggregates decide which programs
@@ -2720,7 +2745,10 @@ can be written at all, and relation export is the counterpart of the CSV
 and TSV import of `specs/design-import.md`, a small step past what a query
 written with `-F csv` or `-F tsv` already produces. Incremental
 maintenance and parallel evaluation change the engine rather than the
-language, cost the most to build, and follow.
+language, cost the most to build, and follow. Floating point is the one
+language feature that comes last: no workload measured here needs a
+number with a fraction, and its design is recorded so that a later
+version adds it in one way.
 
 None should require changing basic language semantics.
 
@@ -2743,6 +2771,10 @@ Parallel SCC evaluation -- the worker pool a context owns, the round that
 reads a frozen store and merges its results in the serial order, and the
 measurement each step is gated by -- is specified in
 `specs/design-parallel.md`.
+
+Floating point -- a fourth type equal only to itself, ordered exactly
+against the integers, an exact `total`, and what keeps every platform's
+bytes the same -- is specified in `specs/design-floats.md`.
 
 ---
 

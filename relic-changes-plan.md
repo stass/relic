@@ -21,7 +21,7 @@ carries real risk. Each is written to the answers of section 3.
 The lexer change of step 2.1 and the reserved bytes of step 2.2 are
 edits to `specs/design-parser.md` rather than a document of their own;
 the float design's section 2 states the syntax they reserve. Section 4
-holds draft texts for the four decisions.
+holds draft texts for D-30 to D-32; D-33 is in `specs/decisions.md`.
 
 ## 1. What the survey found that the brief did not expect
 
@@ -607,22 +607,4 @@ nothing in the library's contract depends on its wording. Specified in
 
 ### D-33 Floating point, when added, is a fourth type equal only to itself
 
-A float is an IEEE 754 double and a type beside symbol, string and
-integer, interned by bit pattern in a table of its own with negative zero
-normalized, so D-3's one identifier per value holds; its identifier is
-tag 3 of D-24 with the top index bit set, which leaves 2^29 - 1 distinct
-integers and as many floats and moves no other limit. No NaN and no
-infinity can be written, imported or computed: a result that is not
-finite is an evaluation error of D-26's class. An integer never equals a
-float, which the assignment proof of `specs/design-arithmetic.md` section
-4.5 requires, so D-11 stands; an integer and a float order exactly by
-their mathematical values. `sum` is unchanged and `total` sums in
-floating point exactly and rounds once, so D-27's function-of-the-set
-promise extends to it. `float()` is total and `int()` fails as an
-overflow fails, which amends D-28's closing sentence: `str` and `float`
-are the conversions that cannot fail, and `int` is the one that fails as
-arithmetic does. Determinism rests on `FLT_EVAL_METHOD` 0, no
-contraction, no fast math, relic's own correctly rounded parser and
-printer and no libm function, so D-4 stands. Architecture section 3's
-two objections are answered by these mechanisms, and floats stay out of
-version 1. Specified in `specs/design-floats.md`.
+Recorded in `specs/decisions.md`, which holds the text.

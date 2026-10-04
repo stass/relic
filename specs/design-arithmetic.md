@@ -1697,8 +1697,11 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
 * **String operations.** Concatenation, length, substring: a different
   feature over a different type, with its own questions about the symbol
   pool.
-* **Floating point.** D-4's determinism and D-3's one-identifier-per-value
-  both stand against it, and no workload asks.
+* **Floating point in this design.** A second numeric type, with a
+  rounding and a domain of its own. It is specified in
+  `specs/design-floats.md`, which keeps `=` the identity of values so that
+  section 4.5 holds and shows how D-4's determinism and D-3's one
+  identifier per value are both kept.
 * **Aggregates in this design.** `count`, `sum`, `min` over a relation
   change the semantics of a rule from a conjunction to a computation over a
   set and need their own stratification rule; they are specified in

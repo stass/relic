@@ -126,7 +126,9 @@ a second kind of literal in every one of those places.
 value has a spelling. Text is what a program builds from other values, and
 a message that names a count needs the count as text. The conversions the
 other way, a string to the symbol or the integer it spells, can fail on
-their input and are left absent, section 19.
+their input and are left absent, section 19. The float type of
+`specs/design-floats.md` section 8 adds two numeric conversions: `float`,
+which cannot fail either, and `int`, which fails as an overflow does.
 
 Architecture section 71 asks for no feature without a clear Datalog use,
 and that is why the list stops here. Each of the things left out, from

@@ -1591,7 +1591,8 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
   semantics with conditions that are not obvious on first reading.
 * **`mean`.** An integer mean is `sum` over `count` with the truncation of
   `specs/design-arithmetic.md` section 4.1, written in two literals; a
-  real one needs floating point, which `docs/todo-language.md` declines.
+  mean with a fraction is `avg` of `specs/design-floats.md` section 7, a
+  float over integer and float rows alike.
 * **Nested aggregates.** Section 3.4. An inner aggregate is a rule of its
   own, named, and the nesting bound stays one.
 * **Aggregates in heads, in expressions and as comparison operands.**

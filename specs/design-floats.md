@@ -13,7 +13,7 @@ implemented.
 `specs/design-arithmetic.md` sections 4 and 8 for the expression evaluator
 and the pending value; `specs/design-comparison-cost.md` section 7 for the
 domain identifier; `specs/design-aggregates.md` sections 4 and 9 for the
-folds; `specs/design-strings.md` sections 3 and 5 for `str` and the
+folds; `specs/design-strings.md` sections 3 and 4.2 for `str` and the
 functions; `specs/design-import.md` section 4 for column types;
 `specs/design-cli.md` sections 4, 5 and 9 for output; `specs/decisions.md`
 D-3, D-4, D-11, D-24, D-26, D-27, D-28, D-30 and D-33.
@@ -36,11 +36,12 @@ D-3, D-4, D-11, D-24, D-26, D-27, D-28, D-30 and D-33.
 * what makes the same program give the same bytes on every platform;
 * what this design does not change.
 
-Architecture section 3 keeps floats out of version 1 for two reasons: a
-float would break the determinism of D-4 across platforms and the one
-identifier per value of D-3. Sections 3 and 10 answer the first, section 3
-the second. Neither objection is retired by hand-waving: each has a
-mechanism here, and the mechanism is what the tests of section 12 check.
+Architecture section 3 keeps floats out of version 1 and records the two
+objections to them: a float could break the determinism of D-4 across
+platforms and the one identifier per value of D-3. Sections 3 and 10
+answer the first, section 3 the second. Neither objection is retired by
+hand-waving: each has a mechanism here, and the mechanism is what the
+tests of section 12 check.
 
 ---
 
@@ -66,8 +67,8 @@ rules.dl:4:12: error: floating-point literal out of range: 1.0e400
 
 Until the type exists, the lexer rejects the same text with
 "floating-point numbers are not supported", pointing at the number's start,
-D-30. That is what keeps every program relic accepts today meaning the
-same thing once floats arrive: no accepted program contains the form. A
+D-30. That is what keeps every program relic accepts without floats
+meaning the same thing with them: no accepted program contains the form. A
 period directly after digits with no digit after it is still the
 terminator, so `X = 1. 2 > 1?` is two statements under both rules. `1e5`
 is an error under both as well: before the type exists it gets the same
@@ -98,19 +99,40 @@ the integer table is, `specs/design-arithmetic.md` section 9.1. The key is
 the value's bit pattern, which is what makes equality identity: two floats
 get one identifier exactly when their bits agree.
 
-Two patterns would break that, and both are kept out at the door:
+Two patterns would break that, and the one function below keeps both out:
 
-* **Negative zero is normalized to zero** before interning, before
-  comparison and before output, so `0.0` and `-0.0`, which IEEE 754 calls
+* **Negative zero becomes zero**, so `0.0` and `-0.0`, which IEEE 754 calls
   equal, have one identifier and print once. Nothing can observe the sign
   of a zero, because the one operation that distinguishes them, division,
   is an error on a zero divisor.
-* **No NaN and no infinity exist in the language.** None can be written
-  (section 2), imported (section 9) or computed (section 6). The table
-  never holds one, so there is no value that is unequal to itself and no
-  pair of infinities to order against the finite values. D-3's hazard, two
+* **No NaN and no infinity exist in the language.** The table never holds
+  one, so there is no value that is unequal to itself and no pair of
+  infinities to order against the finite values. D-3's hazard, two
   encodings for one value, cannot return, because every value the table
   holds is a finite double with one bit pattern.
+
+**One function makes a float.** A double becomes a relic float only
+through one function, which refuses a value that is not finite and turns
+negative zero into zero. It returns a type of its own, a struct around the
+double, and the float table, the comparison of section 5, `int` and the
+formatter take that type rather than a `double`, so a site that passes
+them a raw double does not compile. Every source of a double reaches the
+table through it: a literal (section 2), an import (section 9), the
+executor's result (section 6), the fold of `total` (section 7) and a value
+the caller supplies.
+
+A caller supplies a float in a `relic_value_t`, and nothing stops that
+value from holding a NaN, an infinity or a negative zero.
+`relic_fact_add()` and every other entry point that takes a value pass it
+through the function: a negative zero is stored as zero, and a value that
+is not finite is refused with an error of the argument class,
+`specs/design-errors.md`. `relic_value_compare()` passes a float through
+it too, so a negative zero compares as zero, but it cannot fail and so
+cannot refuse one that is not finite. It places such a float after every
+integer and every finite float, and orders two of them by their bit
+patterns read as unsigned 64-bit integers. Its order stays total, so a
+caller who sorts with it gets a meaningless position for a value relic
+never made, and never undefined behaviour.
 
 ### 3.2 The identifier
 
@@ -164,8 +186,8 @@ and a plan that streams holds no float slot, as it holds no number slot.
 
 **An integer never equals a float.** `1 = 1.0` is false, `1 != 1.0` is
 true, and `p(X), q(X)` does not join a `1` of `p` with a `1.0` of `q`.
-D-11 stands as written: equality is domain-identifier equality, and the
-two values have different identifiers.
+D-11's equality stands as written: it is domain-identifier equality, and
+the two values have different identifiers.
 
 This is forced, not chosen. `specs/design-arithmetic.md` section 4.4 lets
 an equality with one bound side bind the other, and section 4.5 proves
@@ -179,7 +201,7 @@ section 5 inherits its consequence.
 
 A program that means numeric equality across the types writes it as two
 orderings, `X <= Y, X >= Y`, or converts one side with `float()`, section
-8. Under `-vv`, the note that today reports the first ordering between an
+8. Under `-vv`, the note that reports the first ordering between an
 integer and a symbol in a rule reports an equality between an integer and a
 float as well, worded for it:
 
@@ -196,17 +218,31 @@ and exactly**, by the mathematical values, not by converting the integer
 to a double first: `9007199254740993 > 9007199254740992.0` holds, where a
 conversion would round the integer to the float and call them equal.
 
-The comparison costs nothing a double comparison does not. For an integer
-`i` and a finite float `d`: if `d >= 2^63`, `i < d`; if `d < -2^63`,
-`i > d`; otherwise truncate `d` toward zero to an integer `t`, which is
-exact and in range, and `i < d` exactly when `i < t`, or `i == t` and
-`d > t`. The same three cases give `>`. There is no NaN to make the order
-partial.
+**Every comparison is integer arithmetic on bit patterns**, so it is exact
+and the floating-point environment of section 10 cannot reach it. Two
+floats compare by keys made from their patterns, read as unsigned 64-bit
+integers: a non-negative float's key is its pattern with the top bit set,
+and a negative float's is its pattern with every bit flipped. Every
+negative key is then below every non-negative one, and within each sign
+the keys order as the values do; the one function of section 3.1 has
+already removed negative zero, which would otherwise take a key of its own
+beside zero's. An integer `i` and a float `d` compare by decomposing `d`
+into sign, exponent and significand: if `d >= 2^63`, `i < d`; if
+`d < -2^63`, `i > d`; otherwise `d` truncated toward zero is an integer
+`t`, exact and in range, and `i < d` exactly when `i < t`, or `i == t` and
+`d` is positive with a nonzero fraction, and `i > d` exactly when `i > t`,
+or `i == t` and `d` is negative with a nonzero fraction. The magnitude of
+`t` is the significand shifted right by the exponent and compared as
+unsigned, since at `d = -2^63` it does not fit a signed integer; a shift
+of 64 or more, which every `d` smaller than 2^-11 in magnitude needs, is
+not made, and gives `t = 0` with a nonzero fraction exactly when `d` is
+not zero. It costs a few shifts and compares, and there is no NaN to make
+the order partial.
 
 The accepted consequence, which section 4 forces: for `X = 1` and
 `Y = 1.0`, `X <= Y` and `X >= Y` both hold while `X = Y` does not. A
 comparison of a number with a symbol or a string stays false, and the
-note of `specs/design-cli.md` section 9 reports it as it does now.
+note of `specs/design-cli.md` section 9 reports it.
 
 The total order that `-s` sorts by, which the language cannot observe,
 changes in one way: numbers first, ordered by the rule above, an integer
@@ -226,14 +262,15 @@ The operators of `specs/design-arithmetic.md` section 4.1 extend to floats:
 | `-A` | the negation | -- |
 | `A mod B` | no value | no value |
 
-Two integers keep today's rules: `/` truncates and `mod` is defined.
-`mod` is integer-only; a float operand gives the expression no value when
-the operand is a variable and rejects the program when it is a constant,
-exactly as a symbol operand does, section 3.5 of the arithmetic design.
-The conversion of an integer operand rounds when its magnitude exceeds
-2^53, and that rounding is the ordinary rounding of a float operation,
-not a comparison: ordering is exact because an exact answer is free there,
-and arithmetic converts because its result is a float in any case.
+Two integers keep the arithmetic design's rules: `/` truncates and `mod`
+is defined. `mod` is integer-only; a float operand gives the expression no
+value when the operand is a variable and rejects the program when it is a
+constant, exactly as a symbol operand does, section 3.5 of the arithmetic
+design. The conversion of an integer operand rounds when its magnitude
+exceeds 2^53, and that rounding is the ordinary rounding of a float
+operation, not a comparison: ordering is exact because an exact answer is
+free there, and arithmetic converts because its result is a float in any
+case.
 
 **A result that is not finite is an evaluation error**, in the class of an
 integer overflow: an overflow to infinity, and a division by zero, which
@@ -265,7 +302,14 @@ gains a float kind beside integer and identifier.
 `count`, `min` and `max` are unchanged. `min` and `max` order within a
 type, so a group mixing integers and floats has no value, as any group of
 two types has none, `specs/design-aggregates.md` section 4.4, and the
-`-vv` note reports it.
+`-vv` note reports it. They do not take up the ordering of section 5
+across the two types, although `<` does: `min` returns a value the group
+holds, and over `1` and `1.0` both are least, so the answer would rest on
+a tie-break between two values that are not equal, which only the `-s`
+order has and the language cannot observe. A group of `1` and `2.5` has no
+such tie, but a rule that gave a mixed group a value only when it had none
+would make whether an answer exists depend on the data's ties, so every
+mixed group has none.
 
 **`sum(V)` is unchanged and adds integers only.** A float row gives it no
 value, as a symbol row does. It is not extended because an aggregate's
@@ -290,7 +334,8 @@ exactly and rounds once:
   which no group can reach, and a sign: 2176 bits, 34 words of 64;
 * adding a double is shifting its 53-bit significand to its exponent's
   position and adding with carry, 34 word operations at most and usually
-  three; adding an integer row is adding the integer at position zero;
+  three; adding an integer row is adding the integer with its units bit
+  at the position of 2^0, bit 1074 of the accumulator;
 * at the end the accumulator is rounded once to the nearest double, ties
   to even, and a magnitude past the largest finite double is the overflow
   error.
@@ -323,9 +368,11 @@ and before `{`, as the four names are; a predicate may be called `total`.
   so `str` and the lexer agree byte for byte, as they do for integers. The
   plain form is used when the decimal exponent is between -5 and 16
   inclusive, which is where a reader counts zeros without losing track,
-  and the exponent form `d.ddde[+-]dd` otherwise, with at least one digit
-  after the period in both: `1.5`, `100.0`, `1.0e17`, `2.5e-7`. Zero is
-  `0.0`.
+  and the exponent form otherwise: one digit, a period, the remaining
+  digits, `e`, a `-` when the exponent is negative and no sign when it is
+  not, and the exponent's digits with no leading zero. Both forms have at
+  least one digit after the period: `1.5`, `100.0`, `1.0e17`, `2.5e-7`.
+  Zero is `0.0`.
 * **`float(V)`** converts an integer to the nearest double, is the
   identity on a float, and has no value on a symbol or a string.
 * **`int(V)`** truncates a float toward zero, is the identity on an
@@ -372,13 +419,19 @@ symbols and strings.
 ## 10. Determinism
 
 D-4 asks that the same program give the same bytes on every platform. For
-floats that is a property of the compiler and the library, and each part
-of it is a check, not a hope:
+floats that is a property of the compiler, the library and the thread the
+arithmetic runs on, and each part of it is a check, not a hope. Most of
+the work never reaches the floating-point unit: comparisons (section 5),
+the conversions of section 8 and of an integer operand in section 6, the
+fold of `total` and relic's parser and printer are integer arithmetic on
+bit patterns, exact by construction under every compiler and environment.
+Only the four operations of section 6 use the hardware, and the first four
+items below are about them.
 
 * **No excess precision.** `configure` requires `FLT_EVAL_METHOD` to be 0
   and fails otherwise. On i386 that means SSE2 arithmetic, which
   `configure` asks for; the x87 unit, which evaluates in 80 bits and rounds
-  when it pleases, is the platform `specs/design-planner.md` section 3
+  when it pleases, is the platform `specs/design-planner.md` section 4
   already names as the reason an estimate uses no floating point.
 * **No contraction.** The build passes `-ffp-contract=off`, so `a * b + c`
   is two roundings everywhere and never one fused multiply-add. A test
@@ -387,6 +440,33 @@ of it is a check, not a hope:
 * **No fast math.** The build never enables it, and a test that depends on
   a subnormal result and on the sign of zero before normalization would
   catch a toolchain that did.
+* **The floating-point environment.** The rounding mode and the flushing
+  of subnormals to zero are state each thread holds, in MXCSR on x86 and
+  FPCR on AArch64. A caller may change the rounding mode with
+  `fesetround()`, and loading a library built with fast math turns on
+  flushing in the thread that loads it and in every thread that thread
+  creates afterwards. Every operation therefore saves the caller's
+  environment on entry, where D-29 lowers the interrupt flag, installs the
+  default one, `FE_DFL_ENV`, and restores the caller's on return,
+  exception flags included. Each job a worker of D-25 runs installs the
+  default as well, since a worker holds the environment its thread was
+  created with and a parallel round must compute what the serial one does.
+
+  Caller code that runs part way through an operation -- the diagnostic,
+  explain and row callbacks and a stream's read function, relic(3) -- runs
+  in the default environment and must leave it as it found it. relic does
+  not reinstall it after each call. A callback that changes it, itself or
+  through a library it loads, changes the rest of the operation's
+  arithmetic on the calling thread and not on the workers, and relic(3)
+  states the rule beside the other limits on what a callback may do.
+
+  A self-test at entry refuses the operation on a platform where the
+  default environment does not take: `fesetenv()` returned zero,
+  `fegetround()` is `FE_TONEAREST`, the smallest normal double halved is
+  not zero, and a subnormal doubled is not zero, each over `volatile`
+  operands so that the compiler cannot fold it. The refusal is of the
+  internal class, `specs/design-errors.md`, since a library that cannot
+  set its own arithmetic runs on a platform it does not support.
 * **relic's own parser and printer.** The correctly rounded conversion
   from decimal to double and the shortest round-trip conversion back are
   relic's, in `lib/float.c`, written over exact big-integer arithmetic:
@@ -395,6 +475,23 @@ of it is a check, not a hope:
   imports and output rows are not where time goes. `strtod` and `printf`
   are not used for a value, since a C library's are correct on the major
   platforms and promised nowhere.
+
+  "Slow" is bounded by construction rather than by the length of the text,
+  since a literal comes from a program or a table that may be untrusted
+  and the parser's arenas are outside the memory limit, D-18. A halfway
+  point between two doubles has at most 768 significant digits, so
+  significant digits past the 768th fold into one sticky digit, nonzero
+  when any of them is: the input's first 768 digits either differ from the
+  halfway point's, which decides the comparison, or equal them, and then
+  the input lies above it exactly when a later digit is nonzero. The
+  exponent saturates at +-2^62 as it is read, past any count of digits a
+  text can hold, so the decimal position of the leading digit, the
+  exponent adjusted by where that digit stands in the text, is exact or
+  still beyond the range. A value whose leading digit stands at 10^309 or
+  above is out of range, and one whose leading digit stands below 10^-325
+  rounds to zero, both decided before any big-integer arithmetic. So the
+  largest big integer a literal costs is a few kilobytes, whatever its
+  length, and the tests of section 12 pin each bound.
 * **No libm.** The operations are the four of section 6 and the
   conversions of section 8, all of which IEEE 754 defines exactly. No
   `sqrt`, `pow`, `exp` or trigonometric function exists, since each
@@ -426,6 +523,22 @@ enumerator.
 * **Lexer and parser:** every form of section 2 accepted, every excluded
   form rejected with its message and position; a literal that rounds to
   infinity rejected; `-` joined; `X = 1. 2 > 1?` still two statements.
+* **The parser's bounds:** a literal of a million significant digits whose
+  first 768 are a halfway point with the lower double even, then zeros,
+  then a final nonzero digit, which must round up where a parser that
+  dropped the sticky digit rounds down; `1.0e999999999999999999` out of
+  range, `1.0e-999999999999999999` zero, and `0.` with 200000 zeros, then
+  `1` and `e200100`, read as `1.0e99`, each within a fixed memory bound.
+* **The one function:** a `relic_value_t` holding a NaN, an infinity and
+  a negative zero given to `relic_fact_add()`, the first two refused with
+  the argument class and the third stored as `0.0`; `relic_value_compare()`
+  under `check-ubsan` on a NaN and on negative infinity against an integer
+  and a finite float, with the three orders transitive.
+* **The environment:** a query run after the caller set `FE_UPWARD`, and
+  with flushing on where the platform has it, gives the bytes of the
+  default environment, serially and in a parallel round, and leaves the
+  caller's mode and flags as they were; the self-test refuses under a test
+  hook that makes installing the default fail.
 * **Interning:** `0.0` and `-0.0` one identifier; `1` and `1.0` two; the
   table charged to the limit; the capacity of 2^29 - 1 reported as the
   integer table's is.

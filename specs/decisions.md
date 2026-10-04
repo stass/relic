@@ -211,7 +211,8 @@ interned. Ordering of symbols and strings is bytewise, not locale collation.
 Cross-type equality is false; cross-type ordering filters the binding out and
 is reported once per rule at verbosity 2. `=` is a filter and does not bind
 when both of its sides are bound; an equality with one free side and one
-bound side binds, per D-26.
+bound side binds, per D-26. An integer and a float order by value, per
+D-33.
 
 ### D-12 Generated names cannot collide
 
@@ -390,8 +391,9 @@ without alignment, and the identifier table gains a tag byte per slot for
 the tables whose searches are mostly unsuccessful. Measured at scale 10 of
 `facts-join`, a symbol cost 70 bytes and two probes; the estimate under
 this decision is 30 to 40 bytes and one. A context holds at most 2^30 - 1
-symbols and 2^30 - 1 distinct integers rather than 2^32 - 1 values.
-Specified in `specs/design-comparison-cost.md` sections 6.2 and 7.
+symbols and 2^30 - 1 distinct integers rather than 2^32 - 1 values; a
+float type, D-33, halves the integers' index space and takes the other
+half. Specified in `specs/design-comparison-cost.md` sections 6.2 and 7.
 
 ### D-25 A context's rounds may be shared among threads it owns
 
@@ -429,7 +431,8 @@ is interned only when a tuple holding it is stored, with its identifier
 predicted from the table's count so that a parallel round publishes
 nothing before its last phase; the integer table is charged to the memory
 limit. Reverses the binding half of D-11 and the lexer's half of D-16.
-Specified in `specs/design-arithmetic.md`.
+D-33 makes a float an operand as well. Specified in
+`specs/design-arithmetic.md`.
 
 ### D-27 An aggregate folds a generated relation from a lower stratum
 
@@ -452,8 +455,8 @@ over values of two types have no value and are noted at verbosity 2. The
 unit test drives the accumulator with 2^20 addends of each extreme in
 three orders and checks the states near its 2^95 bound one addition at a
 time against the compiler's 128-bit integers, rather than 2^31 addends of
-each extreme, which takes minutes under a sanitizer. Specified in
-`specs/design-aggregates.md`.
+each extreme, which takes minutes under a sanitizer. D-33 adds `total`
+and `avg`. Specified in `specs/design-aggregates.md`.
 
 ### D-28 String operations are functions in expressions, and relic matches its own patterns
 
@@ -480,7 +483,9 @@ a text slot of the frame, is looked up read-only, and is interned only
 when a tuple holding it is stored, on D-26's measure, rewrite and commit
 with the pool's identifier predicted from its count; the symbol pool is
 charged to the memory limit whole. `str` is the one conversion because it
-is the one that cannot fail. Specified in `specs/design-strings.md`.
+is the one that cannot fail. D-33 amends this sentence for floats:
+`float` cannot fail either, and `int` fails as arithmetic does.
+Specified in `specs/design-strings.md`.
 
 ### D-29 An interrupt fails the evaluation in progress where it can already fail
 
@@ -500,3 +505,43 @@ the interrupt stay delivered: it is the one failure that may follow the
 first row, and the run's -1 tells the caller the rows are a prefix. The
 tool catches `SIGINT` only while an interactive session at a terminal
 answers a line. Specified in `specs/design-interrupt.md`.
+
+### D-33 Floating point, when added, is a fourth type equal only to itself
+
+A float is an IEEE 754 double and a type beside symbol, string and
+integer, interned by bit pattern in a table of its own. D-24's three tags
+are taken and zero type bits are the identifier that is never a value, so
+a float shares tag 3 with the integers and the top bit of the index says
+which: the integers keep 2^29 - 1 distinct values, which amends D-24's
+limit, the floats get as many, and no other limit moves. One function
+makes a float of a double, refusing one that is not finite and turning
+negative zero into zero, and the literal, the import, the executor, the
+fold and the interface reach the float table only through it, so no NaN or
+infinity is ever a value and D-3's one identifier per value holds by
+construction. A literal's parse is bounded whatever its length, because
+the parser's arenas are outside D-18's limit.
+
+An integer never equals a float, so D-11's equality stands: the proof of
+`specs/design-arithmetic.md` section 4.5 that the order of binding does
+not matter needs `=` to be the identity of values. An integer and a float
+order exactly by their mathematical values, which amends D-11's cross-type
+ordering for that one pair. A float is an operand of D-26's arithmetic, an
+integer beside it converted to the nearest double, which amends D-26's
+rule that an operand that is not an integer makes the comparison false,
+and a result that is not finite fails the evaluation as D-26's overflow
+does. `sum` is unchanged, and D-27 gains `total` and `avg`: `total` sums
+integers and floats exactly and rounds once, so D-27's promise that a fold
+is a function of the group's set of rows extends to both. `float` cannot
+fail and `int` fails as an overflow does, which amends D-28's closing
+sentence.
+
+D-4 stands. Comparisons, conversions, the fold of `total` and relic's own
+correctly rounded parser and printer are integer arithmetic on bit
+patterns, and no libm function is used. Only `+`, `-`, `*` and `/` run on
+the hardware, with `FLT_EVAL_METHOD` 0, no contraction and no fast math,
+under the default floating-point environment, which every operation and
+every worker's job installs, so D-25's rounds stay the same at every
+thread count; caller code that runs inside an operation must leave that
+environment as it found it. Of the two objections architecture section 3
+records, these mechanisms answer D-4's and the one function D-3's, and
+floats stay out of version 1. Specified in `specs/design-floats.md`.

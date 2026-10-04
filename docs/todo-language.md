@@ -63,6 +63,19 @@ have statistics per predicate. relic's `-X stats` counts the run as a
 whole. The counters exist per plan run already, so a per-rule report is
 mostly output, and it is what a user reads before rewriting a slow rule.
 
+**Floating point.** [Low, component: language, `lib/value.c`] Numbers with
+a fraction: a ratio, a weight, a measurement imported from a table.
+Souffle, LogiQL, Nemo, CodeQL, DDlog and the Prologs have a float type;
+clingo, like relic, has integers only. A relic program scales to an
+integer, cents or parts per thousand, and divides with truncation. The
+design is `specs/design-floats.md` and the decision D-33: a fourth type
+equal only to itself, ordered exactly against the integers, an exact
+`total` aggregate, and what keeps every platform's bytes the same. It
+stays out of version 1, architecture section 3, and comes last in
+section 69 because no workload measured here asks for it; the design is
+recorded so that a later version, or a language built as a superset of
+relic's, adds floats in one way.
+
 ## Worth measuring before deciding
 
 **Equivalence relations.** [Low, component: `lib/relation.c`] Souffle's

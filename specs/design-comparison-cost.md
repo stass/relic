@@ -695,7 +695,10 @@ seed; the fold's state is twice a column's width for that reason,
 **Limits.** A context holds at most 2^30 - 1 symbols and 2^30 - 1 distinct
 integers, in place of 2^32 - 1 values of every type together. The
 diagnostic for a table that is full is the one the pool and the value
-table give now, and `RELIC_SYMBOL_MAX` moves to the index mask.
+table give now, and `RELIC_SYMBOL_MAX` moves to the index mask. A float
+type, `specs/design-floats.md` section 3.2, takes the integer tag with the
+top bit of the index set, which halves the integer limit and moves no
+other.
 
 ### 7.2 The pool's entry and its bytes
 

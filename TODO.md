@@ -360,11 +360,12 @@ Candidate features, in the priority order of `specs/architecture.md` section
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
 `docs/todo-language.md` into what is worth adding -- provenance first,
-then disjunction, file inclusion, constraints, relation export and
-per-rule profiling -- what is worth measuring before deciding, and what
-stays out on purpose with the reason. Each item names the engines that
-have it and what a relic program does without it; the verdicts are
-provisional until a design exists.
+then disjunction, file inclusion, constraints, relation export,
+per-rule profiling and floating point -- and what is worth measuring
+before deciding; what stays out on purpose is in architecture
+section 3. Each item names the engines that have it and what a relic
+program does without it; the verdicts are provisional until a design
+exists.
 
 * string operations, specified in `specs/design-strings.md`, are built;
   what remains:
@@ -411,3 +412,5 @@ provisional until a design exists.
 * persistent compiled rule plans
 * better cardinality estimation
 * further Magic Sets and negation optimization
+* floating point [Low, component: language], in `docs/todo-language.md`,
+  specified in `specs/design-floats.md`
