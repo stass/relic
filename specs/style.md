@@ -3,7 +3,7 @@
 relic follows FreeBSD `style(9)` (Kernel Normal Form), with the project
 conventions below. These rules apply to relic-owned code; preserve upstream
 style and license notices in bundled and vendored sources, such as
-`compat/queue.h` and `compat/tree.h`.
+`compat/queue.h`.
 
 **Human readability is a requirement.** Code should make its purpose, data
 flow, invariants and failure paths understandable to another developer.

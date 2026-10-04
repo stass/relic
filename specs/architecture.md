@@ -1719,7 +1719,7 @@ Expected headers and APIs include:
 #include <sysexits.h>
 #include <unistd.h>
 
-#include "compat.h"		/* queue.h, tree.h, missing functions */
+#include "compat.h"		/* queue.h, missing functions */
 ```
 
 Use:
@@ -1758,22 +1758,21 @@ never decided by a platform test inside the engine.
 compat/
     compat.h          the single internal header that hides all of the below
     queue.h           bundled unconditionally
-    tree.h            bundled unconditionally
     reallocarray.c    compiled only where reallocarray(3) is missing
     strlcpy.c         compiled only where strlcpy(3) is missing
     strlcat.c         compiled only where strlcat(3) is missing
     strtonum.c        compiled only where strtonum(3) is missing
     getentropy.c      compiled only where getentropy(2) is missing
+    memmem.c          compiled only where memmem(3) is missing
 ```
 
-`queue.h` and `tree.h` are bundled rather than probed. They are header-only and
-small, and the macro set provided by the system copy differs between glibc,
-musl, macOS and the BSDs in ways that are tedious to probe correctly and easy
-to probe incompletely. Using one known copy everywhere removes a class of
-portability defect outright and makes list and tree behaviour identical on all
-platforms. Each bundled copy keeps the upstream license header it arrived
-with: `queue.h` carries the 3-clause BSD notice of the Regents of the
-University of California, and `tree.h` the ISC notice of its author. Both are
+`queue.h` is bundled rather than probed. It is header-only and small, and the
+macro set provided by the system copy differs between glibc, musl, macOS and
+the BSDs in ways that are tedious to probe correctly and easy to probe
+incompletely. Using one known copy everywhere removes a class of portability
+defect outright and makes list behaviour identical on all platforms. The
+bundled copy keeps the upstream license header it arrived with, the 3-clause
+BSD notice of the Regents of the University of California, which is
 compatible with the 2-clause BSD license of the project. `compat/README.md`
 records each copy's upstream origin, revision, checksum and the patches
 applied to it.
@@ -3085,8 +3084,8 @@ interface. Section 64 is adjusted for a single non-recursive `Makefile.am`,
 and the tool moves from `usr.bin/relic/` to `cmd/relic/`.
 
 **Portability, section 46.** Feature availability is decided by `configure`
-and `AC_REPLACE_FUNCS`. `queue.h` and `tree.h` are bundled unconditionally
-instead of probed, each under its own upstream license.
+and `AC_REPLACE_FUNCS`. `queue.h` is bundled unconditionally instead of
+probed, under its own upstream license.
 
 **Command line, section 40.** Added a repeatable `-l key=value` for resource
 limits, so new limits never consume option letters, and a repeatable
