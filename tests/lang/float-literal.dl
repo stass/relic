@@ -1,0 +1,11 @@
+% Digits, a period and a digit are reserved for a floating-point literal and
+% rejected at the number's first digit, after any sign.  The whole form is
+% consumed, so the period inside it never ends the statement and each
+% statement reports once.  Without the reservation the second rule would be
+% a rule and a query.  Too many digits for an integer get the same message.
+p(1.5).
+q(X) :- p(X), X = 1.2.
+2.5 > 1?
+p(-1.5).
+r(X) :- p(X), X = 1.2 > 1?
+big(99999999999999999999.5).

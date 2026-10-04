@@ -62,10 +62,22 @@ path(a, X)?
 Names are ASCII letters, digits and underscores.
 A symbol begins with a lowercase letter, and a variable with an uppercase
 letter or an underscore.
+The characters
+.Ql #
+and
+.Ql $
+are reserved, and are errors outside a string or a comment.
 .Ql _
 alone matches anything in a positive atom of a body, and names no value, so
 it cannot stand in a rule's head or a negated atom.
 Integers are decimal, may be negative, and must fit in 64 bits.
+Digits followed by a period and a digit, as in
+.Ql 1.5 ,
+or by an exponent, as in
+.Ql 1e5 ,
+are an error: there are no floating-point numbers, and
+.Ql 1.5
+is reserved for them.
 Strings are written in double quotes on one line and may hold any bytes,
 spelled with the escapes
 .Ql \e\e ,

@@ -1,0 +1,8 @@
+float-exponent.dl:4:3: error: floating-point numbers are not supported
+float-exponent.dl:5:3: error: floating-point numbers are not supported
+float-exponent.dl:6:3: error: floating-point numbers are not supported
+float-exponent.dl:7:3: error: floating-point numbers are not supported
+float-exponent.dl:8:3: error: floating-point numbers are not supported
+float-exponent.dl:9:4: error: unexpected character 'x' after an integer literal
+float-exponent.dl:10:4: error: unexpected character 'e' after an integer literal
+float-exponent.dl:11:4: error: unexpected character 'e' after an integer literal

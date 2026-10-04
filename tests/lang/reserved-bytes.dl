@@ -1,0 +1,9 @@
+% `$` and `#` are reserved outside a string or a comment: each is an
+% unexpected character wherever it stands, and inside a string it is data.
+% A comment may hold either: $ and # here are not read.
+p($x).
+$p(a).
+q(X) :- p(X), X = #max.
+s(X) :- p(X), $t(X).
+#include "rules.dl".
+r("$x#").

@@ -1,0 +1,9 @@
+% A period after digits that is not followed by a digit ends the statement,
+% whatever follows it: a space, another statement, a comment or a newline.
+p(1).2 > 1?
+q(X) :- p(X), X = 1. 2 > 1?
+r(1).% a comment
+s(2).
+q(X)?
+r(X)?
+s(X)?

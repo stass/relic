@@ -33,6 +33,7 @@
 
 #define	SCENARIO_CLASSIFY	"a byte begins the token the language says"
 #define	SCENARIO_COMMENT	"a comment runs to the end of its line"
+#define	SCENARIO_FLOAT		"a floating-point form is reserved and consumed"
 #define	SCENARIO_INTEGER	"an integer literal is a magnitude, its sign a token"
 #define	SCENARIO_INTEGER_RULE	"a byte range is an integer by the language's rule"
 #define	SCENARIO_LOCATION	"a token points at its first byte"
@@ -59,6 +60,7 @@ struct scan {
 	size_t		 count;
 };
 
+static void	 a_float_form_is_reserved_and_consumed_whole(void);
 static void	 a_rejected_literal_is_consumed_whole(void);
 static void	 comments_run_to_the_end_of_a_line(void);
 static enum relic_token_kind expected_kind(unsigned char byte);
@@ -577,6 +579,8 @@ integer_rule_holds_at_its_boundaries(void)
 		RULE_CASE("1-", RELIC_INTEGER_MALFORMED, 0),
 		RULE_CASE("--1", RELIC_INTEGER_MALFORMED, 0),
 		RULE_CASE("0x10", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("1.2", RELIC_INTEGER_MALFORMED, 0),
+		RULE_CASE("1e5", RELIC_INTEGER_MALFORMED, 0),
 		RULE_CASE("99999999999999999999x", RELIC_INTEGER_MALFORMED, 0),
 		RULE_CASE("1\0", RELIC_INTEGER_MALFORMED, 0),
 		RULE_CASE("\0" "1", RELIC_INTEGER_MALFORMED, 0),
@@ -740,9 +744,13 @@ malformed_tokens_report_their_reason(void)
 		{ "\"\\xg0\"", RELIC_LEX_BAD_HEX_ESCAPE },
 		{ "\"\\x7\"", RELIC_LEX_BAD_HEX_ESCAPE },
 		{ "0x10", RELIC_LEX_INTEGER_TRAILING },
+		{ "1e", RELIC_LEX_INTEGER_TRAILING },
+		{ "1.2", RELIC_LEX_NUMBER_UNSUPPORTED },
+		{ "1e5", RELIC_LEX_NUMBER_UNSUPPORTED },
 		{ ": ", RELIC_LEX_EXPECTED_IMPLIES },
 		{ "! ", RELIC_LEX_EXPECTED_NE },
-		{ "$", RELIC_LEX_BAD_BYTE }
+		{ "$", RELIC_LEX_BAD_BYTE },
+		{ "#", RELIC_LEX_BAD_BYTE }
 	};
 
 	size_t i;
@@ -782,6 +790,100 @@ a_rejected_literal_is_consumed_whole(void)
 	scan_close(&scan);
 }
 
+/*
+ * Digits, a period and a digit, and digits with an exponent, are reserved
+ * for a floating-point literal.  The rejected token is the whole form and
+ * points at its first digit, so the period inside it never reaches the
+ * parser as a terminator; a period with no digit after it stays one.  Each
+ * input is scanned with nothing after it, so a lookahead that read past the
+ * input would fail under AddressSanitizer.
+ */
+static void
+a_float_form_is_reserved_and_consumed_whole(void)
+{
+	static const struct {
+		const char		*text;
+		size_t			 consumed;	/* the error's bytes */
+		enum relic_token_kind	 next;		/* the token after it */
+	} reserved[] = {
+		{ "1.2", 3, RELIC_TOKEN_END },
+		{ "12.34)", 5, RELIC_TOKEN_RPAREN },
+		{ "1.5.", 3, RELIC_TOKEN_DOT },
+		{ "1e5", 3, RELIC_TOKEN_END },
+		{ "1E5,", 3, RELIC_TOKEN_COMMA },
+		{ "1e+5", 4, RELIC_TOKEN_END },
+		{ "2e-50?", 5, RELIC_TOKEN_QUESTION },
+		{ "1.5e3", 5, RELIC_TOKEN_END },
+		{ "1.5e+5", 6, RELIC_TOKEN_END },
+		{ "1.5e-5)", 6, RELIC_TOKEN_RPAREN },
+		{ "1.5e", 3, RELIC_TOKEN_SYMBOL },
+		{ "1.5e+", 3, RELIC_TOKEN_SYMBOL }
+	};
+	static const struct {
+		const char		*text;
+		enum relic_token_kind	 kinds[4];	/* ending with END */
+	} unreserved[] = {
+		{ "1.", { RELIC_TOKEN_INTEGER, RELIC_TOKEN_DOT,
+		    RELIC_TOKEN_END } },
+		{ "1. 2", { RELIC_TOKEN_INTEGER, RELIC_TOKEN_DOT,
+		    RELIC_TOKEN_INTEGER, RELIC_TOKEN_END } },
+		{ "1.e5", { RELIC_TOKEN_INTEGER, RELIC_TOKEN_DOT,
+		    RELIC_TOKEN_SYMBOL, RELIC_TOKEN_END } },
+		{ "1.%2", { RELIC_TOKEN_INTEGER, RELIC_TOKEN_DOT,
+		    RELIC_TOKEN_END } }
+	};
+
+	size_t i;
+
+	for (i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
+		const relic_token_t *token;
+		scan_t scan;
+
+		scan_text(&scan, reserved[i].text, SCENARIO_FLOAT);
+		token = &scan.tokens[0];
+
+		checkf(scan.count >= 2 && token->kind == RELIC_TOKEN_ERROR &&
+		    token->error == RELIC_LEX_NUMBER_UNSUPPORTED,
+		    SCENARIO_FLOAT, "%s should be the reserved form",
+		    reserved[i].text);
+		checkf(scan.count >= 2 && token->where.column == 1 &&
+		    token->text_length == reserved[i].consumed,
+		    SCENARIO_FLOAT,
+		    "%s should be rejected at its first digit, %zu bytes long",
+		    reserved[i].text, reserved[i].consumed);
+		checkf(scan.count >= 2 &&
+		    scan.tokens[1].kind == reserved[i].next, SCENARIO_FLOAT,
+		    "the token after %s should be kind %d", reserved[i].text,
+		    (int)reserved[i].next);
+
+		scan_close(&scan);
+	}
+
+	for (i = 0; i < sizeof(unreserved) / sizeof(unreserved[0]); i++) {
+		const enum relic_token_kind *kinds;
+		scan_t scan;
+		size_t expected, k;
+		bool same;
+
+		kinds = unreserved[i].kinds;
+		expected = 1;
+		while (kinds[expected - 1] != RELIC_TOKEN_END)
+			expected++;
+
+		scan_text(&scan, unreserved[i].text, SCENARIO_FLOAT);
+
+		same = scan.count == expected;
+		for (k = 0; same && k < expected; k++)
+			same = scan.tokens[k].kind == kinds[k];
+
+		checkf(same, SCENARIO_FLOAT,
+		    "%s should end the integer at the period",
+		    unreserved[i].text);
+
+		scan_close(&scan);
+	}
+}
+
 int
 main(void)
 {
@@ -797,6 +899,7 @@ main(void)
 	string_literals_hold_arbitrary_bytes();
 	malformed_tokens_report_their_reason();
 	a_rejected_literal_is_consumed_whole();
+	a_float_form_is_reserved_and_consumed_whole();
 
 	return (check_summary("lex"));
 }

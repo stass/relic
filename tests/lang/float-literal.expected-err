@@ -1,0 +1,6 @@
+float-literal.dl:6:3: error: floating-point numbers are not supported
+float-literal.dl:7:19: error: floating-point numbers are not supported
+float-literal.dl:8:1: error: floating-point numbers are not supported
+float-literal.dl:9:4: error: floating-point numbers are not supported
+float-literal.dl:10:19: error: floating-point numbers are not supported
+float-literal.dl:11:5: error: floating-point numbers are not supported

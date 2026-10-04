@@ -89,7 +89,12 @@ static const unsigned char byte_class[256] = {
 #undef	UX
 
 static void	 advance_byte(relic_lexer_t *lexer);
+static void	 advance_bytes(relic_lexer_t *lexer, size_t count);
 static bool	 decoded_append(relic_lexer_t *lexer, unsigned char byte);
+static size_t	 digits_length(const relic_lexer_t *lexer, size_t ahead);
+static size_t	 exponent_marker_length(const relic_lexer_t *lexer,
+		    size_t ahead);
+static size_t	 float_form_length(const relic_lexer_t *lexer);
 static void	 fail_token(relic_token_t *token, enum relic_lex_error error);
 static bool	 in_class(unsigned char byte, unsigned int classes);
 static bool	 more_input(const relic_lexer_t *lexer);
@@ -158,6 +163,16 @@ advance_byte(relic_lexer_t *lexer)
 	} else {
 		lexer->where.column++;
 	}
+}
+
+/*
+ * Consume `count` bytes the caller has already examined through peek().
+ */
+static void
+advance_bytes(relic_lexer_t *lexer, size_t count)
+{
+	for (; count > 0; count--)
+		advance_byte(lexer);
 }
 
 void
@@ -295,8 +310,11 @@ scan_token(relic_lexer_t *lexer, relic_token_t *token)
 }
 
 /*
- * Mark the token as not being a token at all.  The scan position is left
- * where the error was found; the parser resumes from there.
+ * Mark the token as not being a token at all.  The parser resumes from the
+ * scan position, which the scanner leaves past what it consumed: at the
+ * offending byte for most errors, and past the whole literal for a string
+ * with a bad escape or a reserved floating-point form, so that nothing
+ * inside the literal is read as the next token.
  */
 static void
 fail_token(relic_token_t *token, enum relic_lex_error error)
@@ -423,30 +441,38 @@ relic_lex_integer(const char *bytes, size_t length, int64_t *valuep)
 }
 
 /*
- * Scan the digits of an integer literal into its magnitude.  A magnitude no
- * sign brings into range is recorded as RELIC_MAGNITUDE_MAX + 1 rather than
- * refused here, because whether a magnitude fits depends on a sign only the
- * parser sees, and the parser reports the range of the literal it makes.
+ * Scan the digits of an integer literal into its magnitude, or reject them
+ * when they begin a floating-point form or run into an identifier byte.  A
+ * magnitude no sign brings into range is recorded as RELIC_MAGNITUDE_MAX + 1
+ * rather than refused here, because whether a magnitude fits depends on a
+ * sign only the parser sees, and the parser reports the range of the literal
+ * it makes.
  */
 static int
 scan_integer(relic_lexer_t *lexer, relic_token_t *token)
 {
 	enum relic_integer_verdict verdict;
 	const char *digits;
-	size_t start;
+	size_t digit_count, float_length;
 	uint64_t magnitude;
 
-	start = lexer->offset;
-	digits = lexer->text + start;
+	digits = lexer->text + lexer->offset;
+	digit_count = digits_length(lexer, 0);
+	advance_bytes(lexer, digit_count);
 
-	while (in_class(peek(lexer, 0), LEX_DIGIT))
-		advance_byte(lexer);
-
-	verdict = relic_lex_magnitude(digits, lexer->offset - start,
-	    &magnitude);
-	assert(verdict != RELIC_INTEGER_MALFORMED);
-	if (verdict == RELIC_INTEGER_OUT_OF_RANGE)
-		magnitude = RELIC_MAGNITUDE_MAX + 1u;
+	/*
+	 * Digits followed by a period and a digit, or by an exponent, are no
+	 * integer.  The error points at the number's first digit, where the
+	 * token already points, and the whole form is consumed, so that the
+	 * period inside `1.5` is not taken for the end of the statement when
+	 * the parser resumes after it.
+	 */
+	float_length = float_form_length(lexer);
+	if (float_length > 0) {
+		advance_bytes(lexer, float_length);
+		fail_token(token, RELIC_LEX_NUMBER_UNSUPPORTED);
+		return (0);
+	}
 
 	/*
 	 * An identifier byte immediately after the digits ends the literal in
@@ -462,10 +488,79 @@ scan_integer(relic_lexer_t *lexer, relic_token_t *token)
 		return (0);
 	}
 
+	verdict = relic_lex_magnitude(digits, digit_count, &magnitude);
+	assert(verdict != RELIC_INTEGER_MALFORMED);
+	if (verdict == RELIC_INTEGER_OUT_OF_RANGE)
+		magnitude = RELIC_MAGNITUDE_MAX + 1u;
+
 	token->kind = RELIC_TOKEN_INTEGER;
 	token->magnitude = magnitude;
 
 	return (0);
+}
+
+/*
+ * The number of digits starting `ahead` bytes past the scan position.
+ */
+static size_t
+digits_length(const relic_lexer_t *lexer, size_t ahead)
+{
+	size_t length;
+
+	length = 0;
+	while (in_class(peek(lexer, ahead + length), LEX_DIGIT))
+		length++;
+
+	return (length);
+}
+
+/*
+ * The length of the exponent marker `ahead` bytes past the scan position --
+ * `e` or `E` and an optional sign -- when a digit follows it, and zero when
+ * the bytes there do not begin an exponent.  `1e` and `1ex` are therefore
+ * not exponents and stay the integer's trailing-byte error.
+ */
+static size_t
+exponent_marker_length(const relic_lexer_t *lexer, size_t ahead)
+{
+	unsigned char byte;
+	size_t length;
+
+	byte = peek(lexer, ahead);
+	if (byte != 'e' && byte != 'E')
+		return (0);
+	length = 1;
+
+	byte = peek(lexer, ahead + length);
+	if (byte == '+' || byte == '-')
+		length++;
+
+	return (in_class(peek(lexer, ahead + length), LEX_DIGIT) ? length : 0);
+}
+
+/*
+ * The length of the floating-point form that follows an integer's digits,
+ * or zero when none does.  The form is a period and digits with an optional
+ * exponent, the spelling a floating-point literal would take, or an exponent
+ * alone, which no literal takes but which a writer means as a number.  A
+ * period not followed by a digit is the statement's terminator and is no
+ * part of the form.  Nothing past the input is read, since peek() answers
+ * NUL there and NUL is no digit.
+ */
+static size_t
+float_form_length(const relic_lexer_t *lexer)
+{
+	size_t length, marker;
+
+	length = 0;
+	if (peek(lexer, 0) == '.' && in_class(peek(lexer, 1), LEX_DIGIT))
+		length = 1 + digits_length(lexer, 1);
+
+	marker = exponent_marker_length(lexer, length);
+	if (marker > 0)
+		length += marker + digits_length(lexer, length + marker);
+
+	return (length);
 }
 
 /*

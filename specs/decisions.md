@@ -506,6 +506,32 @@ first row, and the run's -1 tells the caller the rows are a prefix. The
 tool catches `SIGINT` only while an interactive session at a terminal
 answers a line. Specified in `specs/design-interrupt.md`.
 
+### D-30 Syntax reserved for extension
+
+Three forms the lexer rejects are reserved rather than merely absent, so
+that a later version, or a language built as a superset of this one, can
+give them a meaning without changing what any accepted program means.
+Digits followed by a period and a digit begin a floating-point literal,
+rejected until the type of D-33 exists, and digits followed by an exponent
+are rejected with them, since a writer means them as a number and no float
+is spelled without its period; a period after digits followed by anything
+else is the statement's terminator. `$` followed by a name is a parameter,
+a value supplied from outside the program. `$q0`, the name D-12 and D-17
+give a query, has the same shape, so a design that adds parameters must
+keep the two apart wherever both can appear, in a plan and in `-e` output,
+whether by substituting a parameter before planning or by printing it in a
+form no generated name takes. `#` followed by a name is a built-in
+constant or a directive, and a file inclusion, if designed, is spelled
+`#include`. That design must answer the argument of
+`specs/design-import.md` section 3.3 that program text is untrusted and
+may not open a path of its choosing, through the constraints
+`docs/todo-language.md` lists: a name resolved relative to the including
+file, no `..` and no absolute path, and a bounded depth. Nothing else is
+reserved: `true`, `false` and `null` stay symbols, and no word becomes a
+keyword. D-16's one integer rule is unchanged. Specified in
+`specs/design-parser.md` sections 3.1 and 3.5 and `specs/design-floats.md`
+section 2.
+
 ### D-33 Floating point, when added, is a fourth type equal only to itself
 
 A float is an IEEE 754 double and a type beside symbol, string and

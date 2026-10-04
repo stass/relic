@@ -9,7 +9,10 @@ relic 1.0.0 (unreleased)
     integers, with stratified negation; integer arithmetic in comparisons;
     the string functions length, cat, substr, index, match and str, match
     taking a linear-time regular expression; and the aggregates count, sum,
-    min and max.
+    min and max.  Digits followed by a period and a digit, or by an
+    exponent, as in 1.5 or 1e5, are an error: there are no floating-point
+    numbers, and 1.5 is reserved for them, as are # and $ outside a string
+    or a comment.
   * Evaluation: semi-naive fixed points, secondary indexes built when a plan
     first asks for one, joins ordered by estimated cost, and queries
     answered through a Magic Sets rewrite, which restricts what is derived

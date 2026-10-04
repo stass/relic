@@ -1,0 +1,5 @@
+reserved-bytes.dl:4:3: error: unexpected character '$'
+reserved-bytes.dl:5:1: error: unexpected character '$'
+reserved-bytes.dl:6:19: error: unexpected character '#'
+reserved-bytes.dl:7:15: error: unexpected character '$'
+reserved-bytes.dl:8:1: error: unexpected character '#'

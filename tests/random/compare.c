@@ -152,6 +152,8 @@ static bool	 constants_equal(random_term_t left, random_term_t right);
 static bool	 fact_repeats_earlier(const random_program_t *program,
 		    size_t r);
 static bool	 fact_seeds(const random_program_t *program, size_t r);
+static bool	 holds_reserved_float_form(const char *text);
+static bool	 is_decimal_digit(char byte);
 static const char *error_text(relic_t *ctx);
 static bool	 load_program(relic_t *ctx, const char *text,
 		    const diag_capture_t *capture);
@@ -159,6 +161,41 @@ static random_failure_kind_t evaluation_failure(relic_t *ctx);
 static random_failure_kind_t run_strategy(const random_program_t *program,
 		    const char *text, random_strategy_t id,
 		    const random_options_t *options, run_t *run, FILE *report);
+
+/*
+ * Whether the text holds a digit, a period and a digit in a row outside a
+ * string literal, which the lexer reserves for a floating-point literal.
+ * The program writer never produces one, so a generated program that does
+ * was written wrongly, and every strategy would reject it alike rather than
+ * disagree.  Inside a string the bytes are data, so the scan steps over a
+ * literal and the escaped byte after each backslash in it.
+ */
+static bool
+holds_reserved_float_form(const char *text)
+{
+	bool in_string = false;
+
+	for (const char *p = text; *p != '\0'; p++) {
+		if (in_string) {
+			if (*p == '\\' && p[1] != '\0')
+				p++;
+			else if (*p == '"')
+				in_string = false;
+		} else if (*p == '"') {
+			in_string = true;
+		} else if (*p == '.' && p > text && is_decimal_digit(p[-1]) &&
+		    is_decimal_digit(p[1])) {
+			return (true);
+		}
+	}
+	return (false);
+}
+
+static bool
+is_decimal_digit(char byte)
+{
+	return (byte >= '0' && byte <= '9');
+}
 
 const char *
 random_strategy_name(random_strategy_t strategy)
@@ -190,6 +227,9 @@ random_compare(const random_program_t *program,
 	if (runs == NULL)
 		err(1, "calloc");
 	text = random_program_text(program);
+	if (holds_reserved_float_form(text))
+		errx(1, "the generated program holds a digit, a period and a "
+		    "digit, which the lexer rejects:\n%s", text);
 	expected = &runs[STRATEGY_DEFAULT];
 
 	for (random_strategy_t s = 0; s < STRATEGY_COUNT; s++) {

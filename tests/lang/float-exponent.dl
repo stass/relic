@@ -1,0 +1,11 @@
+% An exponent after the digits is reserved with the period form and gets the
+% same message at the number's start.  Any other identifier byte after the
+% digits is the integer's own error, at that byte.
+p(1e5).
+p(1E5).
+p(1e+5).
+p(2e-5).
+p(1.5e3).
+p(0x10).
+p(1e).
+p(1e+).

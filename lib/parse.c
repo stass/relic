@@ -551,6 +551,10 @@ report_lex_error(relic_parser_t *parser)
 		    "unexpected character %s after an integer literal",
 		    relic_diag_byte(token->byte, described, sizeof(described)));
 		break;
+	case RELIC_LEX_NUMBER_UNSUPPORTED:
+		parse_errorf(parser, &token->where,
+		    "floating-point numbers are not supported");
+		break;
 	case RELIC_LEX_UNTERMINATED_STRING:
 		parse_errorf(parser, &token->where,
 		    "unterminated string literal");

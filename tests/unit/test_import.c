@@ -652,6 +652,10 @@ integer_columns_hold_the_language_integers(void)
 		    "expected an integer, found \"7x\"" },
 		{ "1-", RELIC_FORMAT_TSV, NULL,
 		    "expected an integer, found \"1-\"" },
+		{ "1.2", RELIC_FORMAT_TSV, NULL,
+		    "expected an integer, found \"1.2\"" },
+		{ "1e5", RELIC_FORMAT_TSV, NULL,
+		    "expected an integer, found \"1e5\"" },
 		{ "", RELIC_FORMAT_CSV, NULL,
 		    "expected an integer, found an empty field" }
 	};

@@ -70,7 +70,11 @@ identifier scanning needs no special case for it.
 A byte with none of them is part of no token: that is every byte above 0x7f,
 every control byte, and the punctuation, which is recognized by value because
 each mark means one thing. Outside a string literal, such a byte is an error;
-inside one it is data and is not classified at all.
+inside one it is data and is not classified at all. Two of them, `#` and `$`,
+are reserved as well as rejected, D-30: `$` followed by a name is kept for a
+parameter, a value supplied from outside the program, and `#` followed by a
+name for a built-in constant or a directive, so neither may be given another
+meaning.
 
 ### 3.2 Tokens
 
@@ -85,7 +89,8 @@ compare         = != < <= > >=, one token kind carrying which
 implies         :-
 ( ) { } , . ?   punctuation
 end of input
-error           a byte sequence that is not a token
+error           a byte sequence that is not a token, including the
+                floating-point forms section 3.5 reserves
 ```
 
 Identifiers are ASCII, so `$` is not an identifier byte and a generated name
@@ -191,9 +196,35 @@ it says which way: the range is not an integer, or it is one outside
 An identifier byte immediately following the digits is an error rather than
 the start of a new token. Without the check, `0x10` would lex as the integer
 `0` followed by the symbol `x10`, and the complaint would be about a missing
-comma several bytes later. This is the one place the lexer looks past the
-token it has just recognized, and it does so to make a misspelled literal
-report itself.
+comma several bytes later.
+
+Digits followed by a period and a digit are reserved for a floating-point
+literal, D-30, whose syntax `specs/design-floats.md` section 2 gives. Digits
+followed by an exponent -- `e` or `E`, an optional sign and a digit -- are
+rejected with them, since the writer means a number and no float is spelled
+without its period. Until the type exists the lexer rejects either form with
+one message, at the number's first digit rather than at the byte after the
+digits, since the writer meant one number:
+
+```text
+rules.dl:4:12: error: floating-point numbers are not supported
+```
+
+The rejected token is the whole form, digits, period, digits and exponent, so
+the period inside `1.5` is not taken for the terminator at which the parser
+resumes, and the statement reports once, as a string literal with a bad escape
+is consumed whole for the same reason. A period after digits followed by
+anything but a digit is the terminator it always is: `p(1).2 > 1?` is a fact
+and a query, `X = 1. 2 > 1?` ends a statement at the period, and so does a
+period followed by a comment or a newline. `1e` and `1ex` are not exponents
+and get the identifier-byte error above, at the `e`.
+
+An integer is therefore the one token after which the lexer looks past what it
+has recognized, deciding on at most a period and a digit, or an `e`, a sign
+and a digit, and it does so to make a misspelled literal report itself and to
+keep the floating-point spelling free. The table importer is unaffected:
+`relic_lex_magnitude()` refuses any byte that is not a digit, so a field `1.5`
+or `1e5` is not an integer there either.
 
 ### 3.6 The input
 

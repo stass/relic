@@ -929,6 +929,15 @@ random_program_text(const random_program_t *program)
 	return (text);
 }
 
+/*
+ * Every statement ends in a period or a question mark and a newline, and the
+ * only spellings that hold a period are string patterns, inside quotes, so
+ * the text never puts a digit, a period and a digit in a row outside a
+ * string, the form the lexer reserves for a floating-point literal.
+ * random_compare() checks the rendered text for it, so a spelling that broke
+ * this would fail loudly rather than turn every run of a program into the
+ * same parse error.
+ */
 void
 random_program_write(const random_program_t *program, FILE *out)
 {

@@ -869,6 +869,7 @@ enum relic_lex_error {
 	RELIC_LEX_EXPECTED_IMPLIES,	/* : not followed by - */
 	RELIC_LEX_EXPECTED_NE,		/* ! not followed by = */
 	RELIC_LEX_INTEGER_TRAILING,	/* identifier byte after the digits */
+	RELIC_LEX_NUMBER_UNSUPPORTED,	/* the reserved floating-point form */
 	RELIC_LEX_UNTERMINATED_STRING
 };
 

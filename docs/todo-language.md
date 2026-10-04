@@ -40,9 +40,10 @@ Souffle's `#include`, clingo's `#include`, CodeQL's `import`. Today files
 combine only on the command line, so a shared library of rules cannot be
 named from a program. The import design keeps data file names out of program
 text for reproducibility and safety, and the same argument applies less to
-rules: a rule file names other rule files, not data. The safe form resolves
-a name relative to the including file, refuses `..` and absolute paths, and
-bounds the depth.
+rules: a rule file names other rule files, not data. It is spelled
+`#include`, which D-30 reserves. The safe form resolves a name relative
+to the including file, refuses `..` and absolute paths, and bounds the
+depth.
 
 **Constraints.** [Low, component: language] A rule with no head,
 `:- task(T), not owner(T, _).`, meaning "this must not hold". LogiQL's
