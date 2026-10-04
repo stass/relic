@@ -116,6 +116,8 @@ Version 1 shall not implement:
 * declarations of a relation's columns or their types;
 * floating-point or unsigned integers;
 * subsumption: rules that delete a tuple another dominates;
+* a second representation of a relation, such as a union-find store for an
+  equivalence relation;
 * SQL;
 * transactions;
 * persistent database files;
@@ -124,14 +126,18 @@ Version 1 shall not implement:
 * cost-based optimization comparable to an SQL database.
 
 Some of these may be added later if they preserve the character of the system.
-Three are left out for reasons of this design rather than of Datalog.
+Four are left out for reasons of this design rather than of Datalog.
 Declarations would cost a line per relation in every program, most of the
 text of a small one, for checks `-vv` and the undefined-predicate warning
 already give; columns stay untyped, per section 10.1. An unsigned integer is
 a second numeric type with overflow rules of its own for a use no workload
 has shown. Subsumption deletes tuples, which the append-only store that
 semi-naive deltas and the frozen round rest on cannot do
-(`specs/design-relations.md` section 4).
+(`specs/design-relations.md` section 4). An equivalence relation stored as a
+union-find, Souffle's `eqrel`, holds an alias analysis's quadratic closure in
+linear space, but it is a second kind of relation that every join, index,
+delta and merge would have to read, for one shape of program; section 73
+keeps one relational engine.
 
 Floating point is deferred rather than declined. A float could break the
 determinism of decision D-4 across platforms and the one identifier per value
@@ -2772,7 +2778,6 @@ relation export
 incremental insertion maintenance
 DRed-style deletion maintenance
 parallel SCC evaluation
-persistent compiled rule plans
 more sophisticated cardinality estimation
 additional Magic/negation optimization
 floating point

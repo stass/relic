@@ -1,8 +1,7 @@
 # Language and tooling gaps
 
-What other Datalog systems offer that relic does not, sorted into what is
-worth adding and what is worth measuring first. What relic leaves out on
-purpose is in architecture section 3.
+What other Datalog systems offer that relic does not and is worth adding.
+What relic leaves out on purpose is in architecture section 3.
 The engines compared are the ones a relic user might otherwise reach for:
 Souffle, LogicBlox's LogiQL, Nemo, clingo, CodeQL, DDlog and the tabling
 Prologs. Each item names the engines that have the feature, what a relic
@@ -76,12 +75,3 @@ stays out of version 1, architecture section 3, and comes last in
 section 69 because no workload measured here asks for it; the design is
 recorded so that a later version, or a language built as a superset of
 relic's, adds floats in one way.
-
-## Worth measuring before deciding
-
-**Equivalence relations.** [Low, component: `lib/relation.c`] Souffle's
-`eqrel` stores a relation declared symmetric, reflexive and transitive as a
-union-find structure, so an alias analysis that would hold a quadratic
-closure holds a linear one. Valuable for exactly one shape of program and a
-second kind of relation everywhere else in the engine. Measure `cspa`'s
-memory against Souffle's with `eqrel` before deciding.

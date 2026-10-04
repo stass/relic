@@ -40,18 +40,17 @@ musl without autotools; `extended.yml`, weekly, has MemorySanitizer,
 ThreadSanitizer, `-m32`, no threads and the two distcheck variants;
 `macos.yml` runs only by hand while the repository is private. `ci.yml`
 has passed on GitHub; `extended.yml` and `macos.yml` each need a first
-green run before they can be trusted. Missing:
+green run before they can be trusted.
 
-* FreeBSD, OpenBSD and NetBSD. Success criterion 10 of architecture section 72
-  asks for each. Release 1.0 is excepted: it is built and tested from its
-  tarball on FreeBSD by hand, and OpenBSD and NetBSD, with this job, are 1.1
-  work. GitHub has no BSD runners, and the vmactions actions that boot one on
-  a Linux runner fetch their helper script and disk images at run time with no
-  checksum, which was judged too much trust to extend. A job that boots each
-  system's official image, verified against the checksum the project
-  publishes, under QEMU on a Linux runner, or a hosted service with native BSD
-  machines, would close it.
-* macOS on every push, once minutes on it are free.
+Missing are FreeBSD, OpenBSD and NetBSD, which success criterion 10 of
+architecture section 72 asks for. Release 1.0 is excepted: it is built and
+tested from its tarball on FreeBSD by hand, and OpenBSD and NetBSD, with this
+job, are 1.1 work. GitHub has no BSD runners, and the vmactions actions that
+boot one on a Linux runner fetch their helper script and disk images at run
+time with no checksum, which was judged too much trust to extend. A job that
+boots each system's official image, verified against the checksum the project
+publishes, under QEMU on a Linux runner, or a hosted service with native BSD
+machines, would close it.
 
 **`contrib/` has no BSD port skeletons.** [Low, component: `contrib/`,
 `specs/design-release.md` section 4] Only the Homebrew formula exists. The
@@ -59,12 +58,6 @@ FreeBSD and OpenBSD ports and the pkgsrc package the design lists are 1.1
 work, with those systems' testing; each fetches the published tarball, runs
 `make check` where the system has a test target, and lists the installed paths
 exactly.
-
-**No file over 2 GiB has been loaded on a 32-bit Linux system.** [Low,
-component: `lib/parse.c` `relic_open_input`] Such a file is opened with
-`O_LARGEFILE` and read through stdio, which glibc and musl track with 64-bit
-offsets internally; nothing has run it. A 32-bit build loading a sparse file
-of facts past 2 GiB would confirm it.
 
 ## Engine
 
@@ -368,11 +361,10 @@ Candidate features, in the priority order of `specs/architecture.md` section
 
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
-`docs/todo-language.md` into what is worth adding -- provenance first,
-then disjunction, file inclusion, constraints, relation export,
-per-rule profiling and floating point -- and what is worth measuring
-before deciding; what stays out on purpose is in architecture
-section 3. Each item names the engines that have it and what a relic
+`docs/todo-language.md` in the order worth adding them -- provenance
+first, then disjunction, file inclusion, constraints, relation export,
+per-rule profiling and floating point; what stays out on purpose is in
+architecture section 3. Each item names the engines that have it and what a relic
 program does without it; the verdicts are provisional until a design
 exists.
 
@@ -418,7 +410,6 @@ exists.
   thread, the pool and the parallel merge) are built; loading in parallel
   and components side by side remain, and the speed-up gates are a major
   initiative above
-* persistent compiled rule plans
 * better cardinality estimation
 * further Magic Sets and negation optimization
 * floating point [Low, component: language], in `docs/todo-language.md`,
