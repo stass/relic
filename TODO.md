@@ -130,15 +130,23 @@ A fix is a source name that is not interned (diagnostics copy it) and a
 per-query scope for the symbols, values and generated predicates only one
 query uses; that is a change to interning and wants a design note first.
 
-**The end of typed input may be taken for a refused line.** [Medium,
+**The end of typed input may be taken for a refused line.** [Low,
 component: `cmd/relic/input.c`] `read_edited()` takes a NULL from
 `el_gets()` with `errno` EILSEQ for a line libedit could not read in the
-locale's encoding. A libedit that discards a byte that is not text, as the
-NetBSD one on glibc does, may leave EILSEQ in `errno` from that discard and
-return NULL for a Ctrl-D typed after it, which relic would report as a
-refused line, needing a second Ctrl-D to end the session. Read from the
-source, not seen on macOS's libedit, which ends the read itself; confirm on
-Linux, and if so, tell the two apart by what else `el_gets()` returns.
+locale's encoding. The portable libedit that Linux distributions and
+Homebrew ship drops a byte that is not text and reads on, but
+`mbrtowc(3)` leaves EILSEQ in `errno` from the drop, so a Ctrl-D then
+typed on the empty line returns NULL with a count of 0 and relic reports a
+refused line: the session's status becomes 1 and a second Ctrl-D ends it.
+Seen with Homebrew's libedit 20260512-3.1 by typing byte 0xc3 and then
+Ctrl-D. That libedit reports a failed read with a count of -1, as
+editline(3) documents, so there a refusal is `count < 0`; macOS's libedit
+refuses a line with a count of 0, so no one test serves both, and nothing
+returned at run time tells them apart. A configure check could select the
+test, such as whether `<histedit.h>` defines `el_rfunc_t`, which macOS's
+lacks; flushing the terminal at any end of input with EILSEQ would keep a
+libedit taken for the wrong kind from leaving a pasted line's tail to the
+shell.
 
 **An aggregate over one atom copies the atom's relation.** [Low,
 component: `lib/rule.c`, `lib/eval.c`, `specs/design-aggregates.md`] Each
@@ -330,21 +338,6 @@ length, eight bytes rather than sixteen, about 23 MiB; growing the pool by
 walking the entries in identifier order and placing each by its stored
 hash; and checking an imported symbol field once, where the import checks
 it is a symbol and interning the value checks again.
-
-## Security residuals
-
-**Mapped arrays are outside AddressSanitizer's quarantine and leak check.**
-[Low, component: `lib/util.c`] A growable array of `RELIC_ARRAY_MAP_BYTES`,
-128 KiB, or more lives in a mapping of its own. The sanitizer reports a
-write just outside it, since the header before the first item and the
-bytes past the last are marked unaddressable, but a stale pointer into a
-mapping already released reads whatever is mapped there next instead of
-being reported as a use after free, and a mapping never released is not
-reported as a leak. The
-evaluator holds no pointer into a relation across a growth, which is what
-such a stale pointer would need. A sanitizer build that kept every array in
-the heap would catch both, at the cost of not exercising the mapped path
-under the sanitizer.
 
 ## Post-1.0
 
