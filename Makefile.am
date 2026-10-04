@@ -89,7 +89,7 @@ EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
 	tests/fuzz/regex.dict tests/fuzz/relic.dict tests/lang \
-	tests/langtest.sh tests/strict.sh
+	tests/hidden-answers.awk tests/langtest.sh tests/strict.sh
 
 ##
 ## The example is built and run by make installcheck, against the installed
@@ -442,10 +442,10 @@ tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
 dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/cli.sh \
-	tests/globals.sh tests/langfiles.sh tests/magic.sh tests/man.sh \
-	tests/output.sh tests/perf.sh tests/pkgconfig.sh tests/reentry.sh \
-	tests/repl.sh tests/roundtrip.sh tests/skips.sh tests/symbols.sh \
-	tests/version.sh
+	tests/globals.sh tests/hidden-answers.sh tests/langfiles.sh \
+	tests/magic.sh tests/man.sh tests/output.sh tests/perf.sh \
+	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/roundtrip.sh \
+	tests/skips.sh tests/symbols.sh tests/version.sh
 
 ##
 ## Every example the manual pages and README.md show is run by tests/docs.sh

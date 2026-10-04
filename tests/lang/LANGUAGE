@@ -20,10 +20,12 @@
 # between one query's answer and the next.  A query of no columns that
 # holds answers one row of no values, an empty line, so telling the answers
 # apart takes each query's number of columns, which the program gives.  No
-# test here asks two queries of no columns that answer differently unless
-# an answer with rows stands between them, since the empty lines would show
-# how many held but not which.  The option -s sorts each answer's rows, and
-# -c checks the program without evaluating it, so that nothing is answered.
+# test here has a run of answers without a row of values, bounded by
+# answers with one or by the ends of the output, in which one query holds
+# and another fails, since the empty lines would show how many held but not
+# which; tests/langtest.sh refuses a listed test that does.  The option -s sorts each answer's rows,
+# and -c checks the program without evaluating it, so that nothing is
+# answered.
 #
 # A listed test runs the program alone, so it is its .dl and nothing beside
 # it but an .expected, an .expected-err, an .exit holding 0 or 1, and .args

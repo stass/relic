@@ -114,6 +114,68 @@ if ! diff -u "$expected_stderr" "$work/stderr" >&2; then
 	failures=1
 fi
 
+# A test listed in tests/lang/LANGUAGE promises its answers to any reader
+# of its .expected, which holds them in the text format, and that format
+# cannot show which answers held in a run of answers with no row of values.
+# So a listed test whose answers are promised is run again with -F json,
+# which shows them, and refused when tests/hidden-answers.awk finds such a
+# run holding both a held and a failed answer.
+listed_in_language() {
+	listed_status=0
+	grep -qxF -- "$base" "$directory/LANGUAGE" || listed_status=$?
+	case $listed_status in
+	0)
+		return 0
+		;;
+	1)
+		return 1
+		;;
+	esac
+	echo "$test_path: $directory/LANGUAGE cannot be read" >&2
+	exit 1
+}
+
+# What a listed test promises is set out in tests/lang/LANGUAGE: one that
+# exits 1, or checks the program with -c, promises no answers.
+answers_promised() {
+	case " $args " in
+	*" -c "*)
+		return 1
+		;;
+	esac
+	[ "$expected_status" = 0 ]
+}
+
+if listed_in_language && answers_promised; then
+	json_status=0
+	( cd "$directory" && $RELIC -F json $args "$program" ) < "$input" \
+	    > "$work/json" 2> "$work/json.stderr" || json_status=$?
+	hidden_status=0
+	if [ "$json_status" = 0 ]; then
+		awk -f "${0%/*}/hidden-answers.awk" < "$work/json" \
+		    > "$work/hidden" || hidden_status=$?
+	fi
+
+	if [ "$json_status" != 0 ]; then
+		cat "$work/json.stderr" >&2
+		echo "$test_path: exited $json_status under -F json" >&2
+		failures=1
+	elif [ "$hidden_status" != 0 ]; then
+		while IFS= read -r line; do
+			echo "$test_path: $line"
+		done < "$work/hidden" >&2
+		if [ "$hidden_status" = 1 ]; then
+			echo "$test_path: the text format cannot show which of" \
+			    "those answers held; place an answer with rows" \
+			    "between them" >&2
+		else
+			echo "$test_path: the answers under -F json could not" \
+			    "be read" >&2
+		fi
+		failures=1
+	fi
+fi
+
 # Every test is run again with the evaluation counters: as it ran above,
 # and with -X parallel, which defers every round's insertions to the round's
 # end, on the calling thread alone and on pools of two, four and sixteen
