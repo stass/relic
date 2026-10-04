@@ -179,20 +179,6 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**Coverage gaps.** [Low, component: `tests/unit/test_exhaustion.c`]
-`make coverage` reaches 97 percent of the library's and the tool's lines;
-the rest are defensive branches kept deliberately and the allocation
-failures the exhaustion suite cannot reach. The suite refuses the
-allocator's requests, and through the arena fault point every arena request
-of a program loaded, checked and answered both through the Magic rewrite
-and from the whole fixed point. What neither reaches is an intern that
-fails only when it lands on a table's growth point: in `lib/parse.c`,
-`parse_literal` and the `advance` of `collect_body`, for a load's constant
-or its interning of `not` or `_`; in `lib/magic.c`,
-`relic_magic_find_complete` interning a base view; and in `lib/rule.c`,
-`compile_head` interning a head's constant. A context filled to one entry
-short of a growth before the operation would reach them.
-
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
 and with identical counters, `tc-cyclic` takes 2.62 s against 2.24 s,

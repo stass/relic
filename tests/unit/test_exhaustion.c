@@ -74,6 +74,7 @@
 #define	SCENARIO_ENTROPY	"context creation fails without entropy"
 #define	SCENARIO_EVALUATE	"a query that ran out of memory can be retried"
 #define	SCENARIO_FALLBACK	"an abandoned rewrite out of memory reports once"
+#define	SCENARIO_GROWTH	"an intern at a table's growth point reports once"
 #define	SCENARIO_IMPORT		"an import that ran out of memory adds nothing"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
@@ -273,42 +274,99 @@
 #define	INTERFACE_SWEEP	512
 
 /*
- * The arena sweep's program and queries.  The program recurses, negates and
- * aggregates, and the queries are answered through the Magic rewrite, one
- * of them cut into supplementary predicates of its own, and then from the
- * whole fixed point, so that loading, checking, rewriting, planning and
- * evaluating each make arena requests.  The sweep refuses every one of
- * them in turn, which a sweep of the allocator's requests cannot: an arena
- * asks the allocator only when a request opens a chunk.
+ * The growth sweep's fills, how far each fill's sweep goes, and how many of
+ * the steps' queries it answers.
+ *
+ * An intern allocates only when it lands on its table's growth point, where
+ * the entries or the index run out of room; an intern that finds room makes
+ * no request a sweep could refuse.  A fresh context reaches the same growth
+ * points on every run, so a sweep of its requests refuses only the interns
+ * that happen to land on one.  Filling a table with entries of its own
+ * before the steps moves its growth points across the steps' interns, one
+ * intern per entry filled.  The entries and the index double from first
+ * capacities of a dozen entries or fewer, so the gap from an entry to the
+ * next growth point is no more than the larger of the entries before it and
+ * that first capacity.  A fill that runs to GROWTH_FILL entries, more than
+ * either, therefore puts every one of the steps' interns on a growth point
+ * in some run, and the sweep checks that the steps leave no table larger
+ * than that.  The string arena's chunks hold far more than a fill adds, so
+ * the fills do not move them; the arena sweep refuses those requests
+ * wherever they fall.
+ *
+ * Each fill's sweep stops at the first run that no refusal reaches, and the
+ * bound only keeps a regression that fails every run from sweeping forever.
+ * Only the first query is answered.  It is cut into supplementary
+ * predicates and reads a derived predicate's facts, so its rewrite interns
+ * adorned, magic and supplementary predicates and a base view, the kinds of
+ * predicate the rewrite interns; answering the rest for every fill and
+ * refusal would multiply the sweep's cost for interns of the same kinds.
  */
-static const char arena_program[] =
+#define	GROWTH_FILL	64
+#define	GROWTH_SWEEP	4096
+#define	GROWTH_QUERIES	1
+
+/*
+ * The table the growth sweep fills: the symbol pool, the predicate table,
+ * whose every entry is named by a symbol of its own, or the integer table.
+ */
+enum filled_table {
+	FILL_SYMBOLS,
+	FILL_PREDICATES,
+	FILL_INTEGERS
+};
+
+/*
+ * The program and queries the arena and growth sweeps take their steps
+ * over.  The program recurses, negates, compares and aggregates, and one of
+ * its derived predicates holds facts of its own, which the Magic rewrite
+ * reads through a base view it interns.  The first query is cut into
+ * supplementary predicates of its own.  Loading, checking, rewriting,
+ * planning and evaluating each make arena requests and intern symbols,
+ * integers and predicates.
+ *
+ * Where a name first appears decides which part of the parser or the check
+ * interns it, so the program places first appearances where a growth point
+ * must be reachable: `weight` just after a `:-`, `z` just after a body's
+ * comma and as the left operand of a comparison, `goal` as a predicate a
+ * body names before any fact or head does, and `out` as one an aggregate's
+ * body names first.
+ */
+static const char steps_program[] =
     "edge(a, b). edge(b, c). edge(c, d). edge(d, a). edge(d, e).\n"
+    "heavy(X) :- weight(X, N), N > 2.\n"
     "blocked(c).\n"
+    "weight(a, 3). weight(b, 1). weight(e, 7).\n"
+    "path(e, b).\n"
     "path(X, Y) :- edge(X, Y).\n"
     "path(X, Z) :- edge(X, Y), path(Y, Z).\n"
-    "open(X, Y) :- path(X, Y), not blocked(Y).\n"
-    "degree(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n";
+    "open(X, Y) :- path(X, Y), not blocked(Y), z != Y.\n"
+    "reach(X) :- edge(X, Y), goal(Y).\n"
+    "goal(Y) :- blocked(Y).\n"
+    "degree(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n"
+    "fan(X, N) :- edge(X, _), N = count { out(X, Y) }.\n"
+    "out(X, Y) :- edge(X, Y).\n";
 
-static const char *const arena_queries[] = {
+static const char *const steps_queries[] = {
 	"path(a, X), path(X, Y), path(Y, Z)?",
 	"open(a, X)?",
 	"degree(X, N)?",
 	"N = count { path(X, Y) }?",
+	"heavy(X)?",
 };
 
-#define	ARENA_QUERIES	(sizeof(arena_queries) / sizeof(arena_queries[0]))
+#define	STEPS_QUERIES	(sizeof(steps_queries) / sizeof(steps_queries[0]))
 
-typedef struct arena_progress arena_progress_t;
+typedef struct steps_progress steps_progress_t;
 
 /*
- * How far the arena sweep's steps have come: the program loaded and
- * checked, and the queries prepared and answered, in order, with the rows
- * of each answered one.  A step that fails is retried from where it
- * stopped, as a caller would retry it.
+ * How far a sweep's steps have come: the program loaded and checked, and
+ * the queries prepared and answered, in order, with the rows of each
+ * answered one.  A step that fails is retried from where it stopped, as a
+ * caller would retry it.
  */
-struct arena_progress {
-	relic_query_t	*queries[ARENA_QUERIES];
-	size_t		 rows[ARENA_QUERIES];
+struct steps_progress {
+	relic_query_t	*queries[STEPS_QUERIES];
+	size_t		 rows[STEPS_QUERIES];
 	size_t		 answered;
 	bool		 loaded;
 	bool		 checked;
@@ -469,8 +527,17 @@ static void	 sweep_aggregate_query(unsigned int flags, size_t threads,
 		    const char *strategy);
 static void	 an_arena_refusal_anywhere_is_reported_once(void);
 static void	 sweep_arena(unsigned int flags, const char *strategy);
-static int	 advance_arena_steps(relic_t *ctx, arena_progress_t *progress);
-static void	 end_arena_steps(arena_progress_t *progress);
+static void	 an_intern_at_a_growth_point_reports_once(void);
+static void	 sweep_growth(enum filled_table table,
+		    const steps_progress_t *expected);
+static size_t	 refuse_and_retry_filled_steps(enum filled_table table,
+		    size_t fill, long budget, const steps_progress_t *expected);
+static const char *filled_table_name(enum filled_table table);
+static int	 fill_table(relic_t *ctx, enum filled_table table,
+		    size_t count);
+static int	 advance_steps(relic_t *ctx, steps_progress_t *progress,
+		    size_t queries);
+static void	 end_steps(steps_progress_t *progress);
 static bool	 rules_are_whole_statements(relic_t *ctx);
 static int	 add_and_collect(relic_t *ctx, bool integer, size_t *rowsp);
 static char	*wide_sweep_program(void);
@@ -3740,8 +3807,11 @@ sweep_aggregate_query(unsigned int flags, size_t threads,
 }
 
 /*
- * Load, check and answer the arena sweep's program with each arena request
- * refused in turn, the allocator serving every one of its own.  Whichever
+ * Take the steps with each arena request refused in turn, the allocator
+ * serving every one of its own.  An arena asks the allocator only when a
+ * request opens a chunk, so a sweep of the allocator's requests reaches
+ * only the callers whose requests happen to fall on a chunk boundary;
+ * refusing every arena request in turn reaches every caller.  Whichever
  * request is refused, the steps either complete or fail with one message,
  * and retried with nothing refused they complete and answer what an
  * undisturbed run answers.
@@ -3759,8 +3829,8 @@ static void
 sweep_arena(unsigned int flags, const char *strategy)
 {
 	relic_config_t config;
-	arena_progress_t expected;
-	arena_progress_t progress;
+	steps_progress_t expected;
+	steps_progress_t progress;
 	relic_t *ctx;
 	size_t requests;
 	size_t refused;
@@ -3783,9 +3853,9 @@ sweep_arena(unsigned int flags, const char *strategy)
 	}
 	bzero(&expected, sizeof(expected));
 	before = allocations_made();
-	status = advance_arena_steps(ctx, &expected);
+	status = advance_steps(ctx, &expected, STEPS_QUERIES);
 	requests = allocations_made() - before;
-	end_arena_steps(&expected);
+	end_steps(&expected);
 	relic_destroy(ctx);
 	if (status != 0) {
 		checkf(false, SCENARIO_ARENA, "%s, the undisturbed steps "
@@ -3817,7 +3887,7 @@ sweep_arena(unsigned int flags, const char *strategy)
 
 		errors_reported = 0;
 		refuse_allocations_after((long)budget);
-		status = advance_arena_steps(ctx, &progress);
+		status = advance_steps(ctx, &progress, STEPS_QUERIES);
 		serve_every_allocation();
 		if (status != 0)
 			refused++;
@@ -3829,20 +3899,20 @@ sweep_arena(unsigned int flags, const char *strategy)
 		    status != 0 ? 1 : 0, errors_reported, budget);
 
 		errors_reported = 0;
-		status = advance_arena_steps(ctx, &progress);
+		status = advance_steps(ctx, &progress, STEPS_QUERIES);
 		checkf(status == 0 && errors_reported == 0, SCENARIO_ARENA,
 		    "%s, the retried steps should complete without a "
 		    "message, with arena request %zu refused", strategy,
 		    budget);
-		for (i = 0; status == 0 && i < ARENA_QUERIES; i++) {
+		for (i = 0; status == 0 && i < STEPS_QUERIES; i++) {
 			checkf(progress.rows[i] == expected.rows[i],
 			    SCENARIO_ARENA, "%s, %s should answer %zu rows, "
 			    "not %zu, with arena request %zu refused",
-			    strategy, arena_queries[i], expected.rows[i],
+			    strategy, steps_queries[i], expected.rows[i],
 			    progress.rows[i], budget);
 		}
 
-		end_arena_steps(&progress);
+		end_steps(&progress);
 		relic_destroy(ctx);
 	}
 
@@ -3852,17 +3922,219 @@ sweep_arena(unsigned int flags, const char *strategy)
 }
 
 /*
- * Take the arena sweep's steps from where `progress` says they stopped,
- * stopping at the first that fails.  Returns -1 when one failed.
+ * Take the steps with one of the context's tables filled to each size below
+ * GROWTH_FILL, and with the nth allocation refused for every n up to the
+ * first run no refusal reaches.  Whichever table is filled and wherever the
+ * refusal lands, the steps either complete or fail out of memory with one
+ * message, and retried with nothing refused they complete and answer what
+ * an undisturbed run answers.
+ */
+static void
+an_intern_at_a_growth_point_reports_once(void)
+{
+	steps_progress_t expected;
+	relic_t *ctx;
+	int status;
+
+	ctx = relic_create();
+	if (ctx == NULL) {
+		check(false, SCENARIO_GROWTH, "a context should be created");
+		return;
+	}
+	bzero(&expected, sizeof(expected));
+	status = advance_steps(ctx, &expected, GROWTH_QUERIES);
+	end_steps(&expected);
+	if (status != 0) {
+		check(false, SCENARIO_GROWTH,
+		    "the undisturbed steps should complete");
+		relic_destroy(ctx);
+		return;
+	}
+
+	checkf(relic_symbol_count(ctx) <= GROWTH_FILL &&
+	    relic_pred_count(ctx) <= GROWTH_FILL &&
+	    relic_value_count_of(ctx, RELIC_INTEGER) <= GROWTH_FILL,
+	    SCENARIO_GROWTH, "the steps should leave no table larger than "
+	    "the %d entries a fill runs to, not %zu symbols, %zu predicates "
+	    "and %zu integers", GROWTH_FILL, relic_symbol_count(ctx),
+	    relic_pred_count(ctx), relic_value_count_of(ctx, RELIC_INTEGER));
+	relic_destroy(ctx);
+
+	sweep_growth(FILL_SYMBOLS, &expected);
+	sweep_growth(FILL_PREDICATES, &expected);
+	sweep_growth(FILL_INTEGERS, &expected);
+}
+
+/*
+ * The growth sweep over one table.  Each fill is swept from the first
+ * allocation refused up to the first run that made no more requests than
+ * its budget, which no refusal reached.  How many requests that undisturbed
+ * run made must differ between fills: a fill that moved no growth point
+ * would leave the steps' requests where a fresh context makes them, and the
+ * sweep would refuse nothing a sweep of a fresh context does not.
+ */
+static void
+sweep_growth(enum filled_table table, const steps_progress_t *expected)
+{
+	size_t unfilled_requests;
+	size_t requests;
+	bool requests_moved;
+	size_t fill;
+	long budget;
+
+	unfilled_requests = 0;
+	requests_moved = false;
+	for (fill = 0; fill < GROWTH_FILL; fill++) {
+		requests = SIZE_MAX;
+		for (budget = 0; budget < GROWTH_SWEEP; budget++) {
+			requests = refuse_and_retry_filled_steps(table, fill,
+			    budget, expected);
+			if (requests <= (size_t)budget)
+				break;
+		}
+
+		checkf(budget < GROWTH_SWEEP, SCENARIO_GROWTH, "with %zu %s "
+		    "filled, a run no refusal reaches should come within %d "
+		    "runs", fill, filled_table_name(table), GROWTH_SWEEP);
+
+		if (fill == 0)
+			unfilled_requests = requests;
+		else if (requests != unfilled_requests)
+			requests_moved = true;
+	}
+
+	checkf(requests_moved, SCENARIO_GROWTH, "filling %s should change how "
+	    "many requests the undisturbed steps make",
+	    filled_table_name(table));
+}
+
+/*
+ * One run of the growth sweep: a context with `fill` entries of its own in
+ * `table` takes the steps with allocation `budget` and every one after it
+ * refused, then retries them with nothing refused.  Returns how many
+ * requests the refused attempt made, which is no more than `budget` when
+ * no refusal reached it, or 0 having failed a check when the run could not
+ * be set up, which ends the fill's sweep.
+ */
+static size_t
+refuse_and_retry_filled_steps(enum filled_table table, size_t fill,
+    long budget, const steps_progress_t *expected)
+{
+	steps_progress_t progress;
+	relic_t *ctx;
+	size_t requests;
+	size_t before;
+	size_t i;
+	int status;
+
+	ctx = relic_create();
+	if (ctx == NULL || fill_table(ctx, table, fill) != 0) {
+		check(false, SCENARIO_GROWTH,
+		    "a context should be created and filled");
+		relic_destroy(ctx);
+		return (0);
+	}
+	relic_diag_set(ctx, count_error, NULL);
+	bzero(&progress, sizeof(progress));
+
+	errors_reported = 0;
+	before = allocations_made();
+	refuse_allocations_after(budget);
+	status = advance_steps(ctx, &progress, GROWTH_QUERIES);
+	serve_every_allocation();
+	requests = allocations_made() - before;
+
+	checkf(errors_reported == (status != 0 ? 1u : 0u), SCENARIO_GROWTH,
+	    "with %zu %s filled, steps that %s should report %d message(s), "
+	    "not %zu, with allocation %ld refused", fill,
+	    filled_table_name(table), status != 0 ? "failed" : "completed",
+	    status != 0 ? 1 : 0, errors_reported, budget);
+	checkf(status == 0 || out_of_memory(ctx), SCENARIO_GROWTH,
+	    "with %zu %s filled, steps that failed should fail out of "
+	    "memory, with allocation %ld refused", fill,
+	    filled_table_name(table), budget);
+
+	errors_reported = 0;
+	status = advance_steps(ctx, &progress, GROWTH_QUERIES);
+	checkf(status == 0 && errors_reported == 0, SCENARIO_GROWTH,
+	    "with %zu %s filled, the retried steps should complete without a "
+	    "message, with allocation %ld refused", fill,
+	    filled_table_name(table), budget);
+	for (i = 0; status == 0 && i < GROWTH_QUERIES; i++) {
+		checkf(progress.rows[i] == expected->rows[i], SCENARIO_GROWTH,
+		    "with %zu %s filled, %s should answer %zu rows, not %zu, "
+		    "with allocation %ld refused", fill,
+		    filled_table_name(table), steps_queries[i],
+		    expected->rows[i], progress.rows[i], budget);
+	}
+
+	end_steps(&progress);
+	relic_destroy(ctx);
+
+	return (requests);
+}
+
+static const char *
+filled_table_name(enum filled_table table)
+{
+	switch (table) {
+	case FILL_SYMBOLS:
+		return ("symbols");
+	case FILL_PREDICATES:
+		return ("predicates");
+	case FILL_INTEGERS:
+		return ("integers");
+	}
+
+	return ("entries");
+}
+
+/*
+ * Add `count` entries of the sweep's own to `table`: symbols and predicates
+ * named fill0, fill1 and so on, which the steps never name, or negative
+ * integers they never write.
  */
 static int
-advance_arena_steps(relic_t *ctx, arena_progress_t *progress)
+fill_table(relic_t *ctx, enum filled_table table, size_t count)
+{
+	char name[32];
+	relic_pred_id_t pred;
+	relic_dom_t integer;
+	uint32_t symbol;
+	size_t i;
+
+	for (i = 0; i < count; i++) {
+		if (table == FILL_INTEGERS) {
+			if (relic_value_intern_integer(ctx, -1000 - (int64_t)i,
+			    &integer) != 0)
+				return (-1);
+			continue;
+		}
+
+		snprintf(name, sizeof(name), "fill%zu", i);
+		if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
+			return (-1);
+		if (table == FILL_PREDICATES &&
+		    relic_pred_intern(ctx, symbol, 1, NULL, &pred) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Take a sweep's steps, the load, the check and the first `queries` of the
+ * steps' queries, from where `progress` says they stopped, stopping at the
+ * first that fails.  Returns -1 when one failed.
+ */
+static int
+advance_steps(relic_t *ctx, steps_progress_t *progress, size_t queries)
 {
 	relic_query_t **query;
 	size_t *rows;
 
 	if (!progress->loaded) {
-		if (relic_load_string(ctx, "sweep.dl", arena_program) != 0)
+		if (relic_load_string(ctx, "sweep.dl", steps_program) != 0)
 			return (-1);
 		progress->loaded = true;
 	}
@@ -3873,13 +4145,13 @@ advance_arena_steps(relic_t *ctx, arena_progress_t *progress)
 		progress->checked = true;
 	}
 
-	while (progress->answered < ARENA_QUERIES) {
+	while (progress->answered < queries) {
 		query = &progress->queries[progress->answered];
 		rows = &progress->rows[progress->answered];
 
 		if (*query == NULL) {
 			*query = relic_query_prepare(ctx, NULL,
-			    arena_queries[progress->answered]);
+			    steps_queries[progress->answered]);
 			if (*query == NULL)
 				return (-1);
 		}
@@ -3894,11 +4166,11 @@ advance_arena_steps(relic_t *ctx, arena_progress_t *progress)
 }
 
 static void
-end_arena_steps(arena_progress_t *progress)
+end_steps(steps_progress_t *progress)
 {
 	size_t i;
 
-	for (i = 0; i < ARENA_QUERIES; i++)
+	for (i = 0; i < STEPS_QUERIES; i++)
 		relic_query_destroy(progress->queries[i]);
 }
 
@@ -3932,6 +4204,7 @@ main(void)
 	a_loaded_query_out_of_memory_reports_once();
 	an_aggregate_out_of_memory_can_be_retried();
 	an_arena_refusal_anywhere_is_reported_once();
+	an_intern_at_a_growth_point_reports_once();
 
 	/*
 	 * If the renaming that puts this file's allocator in front of the
