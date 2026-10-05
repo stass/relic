@@ -1817,19 +1817,14 @@ deep helper that has already failed can return early without inventing an error
 path, and so each compilation phase can confirm at its boundary that no
 allocation failed. Arena exhaustion is reported as an ordinary diagnostic and a
 `-1` return, never an abort: a library must not terminate its host.
-The one exception is memory the library finds already corrupted. A growable
-array whose sealed header no longer matches, or whose mapping the system
-refuses to release, aborts the process: returning would leave the library
-freeing or unmapping memory it cannot prove it owns, and whatever corrupted
-the header has already broken the host.
 
 Avoid one `malloc()` per AST node or per tuple.
 
 The arena, the growable-array helper, the open-addressing identifier table,
 the symbol pool and the value table are specified in
-`specs/design-memory.md`. Arrays past a page threshold are mapped rather
-than malloced, so that a growth leaves nothing resident behind it; specified
-in `specs/design-comparison-cost.md` section 8.
+`specs/design-memory.md`. A growable array is a block of the system
+allocator, which owns what a growth leaves behind;
+`specs/design-comparison-cost.md` section 8 says why.
 
 ---
 
@@ -3236,9 +3231,8 @@ its rule's derivations with no answer relation; a free adornment subsumes
 the bound adornments of its predicate and a rewrite with no bound column
 reads the program's relations; a secondary index stores each key's values
 and its identifier table carries a tag byte per slot; a domain identifier
-carries its type, so the value table holds integers only and a symbol's
-bytes are packed; and arrays past a page threshold are mapped so a growth
-leaves no residue. D-3's decision stands with a new encoding. Specified in
+carries its type, so the value table holds integers only, and a symbol's
+bytes are packed. D-3's decision stands with a new encoding. Specified in
 `specs/design-comparison-cost.md`.
 
 **New sections.** 74 dependency policy, 75 repository and documentation

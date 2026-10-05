@@ -135,7 +135,7 @@ returns `NULL` and sets a sticky per-arena failure flag; callers check the
 pointer, and each phase confirms the flag at its boundary. Relation tuples and
 indexes are not arena allocated: they outlive queries, they shrink, and they
 are accounted against a limit, as are the two arenas of D-18. They grow
-through `relic_grow_array()`, which gives a large array a mapping of its own
+through `relic_grow_array()` over the system allocator
 (`specs/design-memory.md`). No `malloc()` per AST node or per tuple. The library never
 aborts on allocation failure.
 

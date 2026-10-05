@@ -322,7 +322,7 @@ relic_pool_free(relic_pool_t *pool)
 		worker_release(&pool->workers[i]);
 
 	free(pool->workers);
-	relic_free_array(pool->tasks);
+	free(pool->tasks);
 	free(pool);
 }
 
@@ -334,9 +334,9 @@ static void
 worker_release(relic_worker_t *worker)
 {
 	assert(worker->candidates.count == 0);
-	relic_free_array(worker->states);
-	relic_free_array(worker->batch);
-	relic_free_array(worker->pending);
+	free(worker->states);
+	free(worker->batch);
+	free(worker->pending);
 	relic_idtab_reset(&worker->candidates.screen);
 	relic_idtab_reset(&worker->candidates.value_screen);
 	worker->states = NULL;

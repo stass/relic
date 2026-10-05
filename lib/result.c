@@ -148,6 +148,6 @@ relic_result_destroy(relic_result_t *result)
 	if (result == NULL)
 		return;
 
-	relic_free_array(result->values);
+	free(result->values);
 	free(result);
 }

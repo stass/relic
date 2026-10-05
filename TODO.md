@@ -31,14 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**Striped tables multiply the number of mappings.** [Low, component:
-`lib/util.c`] Every stripe's arrays are mapped once they reach
-`RELIC_ARRAY_MAP_BYTES`, so a large program holds several times the
-mappings it did with unstriped tables. On Linux the default
-`vm.max_map_count` of 65530 would be reached with some 8 GB of arrays just
-past the 128 KiB threshold, rather than 64 GB at a mebibyte. Unverified;
-worth measuring on Linux before a release that promises tens of gigabytes.
-
 **The discard's mark is set where a relation is handed out, not derived.**
 [Low, component: `lib/relation.c`] `holds_derived` is set by the write
 funnel and by an index build, and the discard returns at once when it is
@@ -201,23 +193,20 @@ place, and whether a successful search visits enough slots past the first
 to make prefetching them pay.
 
 **A growth's slack and transient keep the peak above the live heap.**
-[Medium, component: `lib/util.c`] Mapped growth releases every outgrown
-generation, but `chain-closure` still peaks at 39.4 MB against a live heap
-of 33.6 MB, 17 per cent over the 10 per cent that
-`specs/design-comparison-cost.md` section 10 gates step 5 on. Two causes
-remain. An identifier table's capacity is a power of two because a probe
+[Medium, component: `lib/util.c`] `chain-closure`'s peak footprint runs
+from 34 to 49 MiB and its resident peak from 44 to 59 MiB, against a live
+heap of 33.6 MB. An identifier table's capacity is a power of two because a probe
 masks the hash, and a column array doubles because one policy serves every
-arity, so a relation just past a doubling is half empty on both. And a
-table's growth holds both generations of its slots while it rehashes, one
-and a half times the new size at that moment. Growth by three halves under
-a multiply-shift range reduction, `(hash * capacity) >> 32`, would keep a
-mask-free probe and halve the slack; rehashing a mapped table within its
-own extended mapping would remove the transient where the platform can
-extend one. Measure both on `chain-closure` and `facts-join` before
-changing either policy. The memory limit does not count the transient
-either: an insertion or a round's merge admitted at the limit holds one
-array's or one table's old generation beside the new one while it is
-copied, one at a time.
+arity, so a relation just past a doubling is half empty on both. A table's
+growth holds both generations of its slots while it rehashes, one and a
+half times the new size at that moment, and the allocator keeps the freed
+generation for reuse. Growth by three halves under a multiply-shift range
+reduction, `(hash * capacity) >> 32`, would keep a mask-free probe and
+halve the slack. Measure it on `chain-closure` and `facts-join`, by peak
+footprint as well as resident set, before changing the policy. The memory
+limit does not count the transient either: an insertion or a round's merge
+admitted at the limit holds one array's or one table's old generation
+beside the new one while it is copied, one at a time.
 
 **Importing facts misses the comparison's gate.** [Medium, component:
 `lib/symbol.c`, `lib/value.c`, `lib/facts.c`, `lib/import.c`,

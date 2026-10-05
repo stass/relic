@@ -39,7 +39,7 @@
 #include "harness.h"
 #include "internal.h"
 
-#define	SCENARIO_ACCOUNT	"the account follows a relation across the threshold"
+#define	SCENARIO_ACCOUNT	"the account follows a relation as it grows"
 #define	SCENARIO_ARITY_MAX	"a relation of the greatest arity is exact"
 #define	SCENARIO_BATCH		"a batch inserts what single insertions would"
 #define	SCENARIO_BATCH_LIMIT	"a limit refuses a batch where it would one"
@@ -158,7 +158,7 @@ static void	 the_memory_limit_refuses_a_tuple_and_says_so(void);
 static void	 a_refused_insertion_leaves_the_relation_whole(relic_t *ctx,
 		    relic_relation_t *rel, const char *scenario);
 static void	 a_million_tuples_fit_in_the_expected_memory(void);
-static void	 the_account_follows_a_relation_across_the_threshold(void);
+static void	 the_account_follows_a_relation_as_it_grows(void);
 static void	 a_relation_stays_where_it_was_put(void);
 static void	 a_batch_inserts_what_single_insertions_would(void);
 static bool	 insert_in_batches(relic_t *ctx, relic_relation_t *batched,
@@ -1097,20 +1097,19 @@ a_million_tuples_fit_in_the_expected_memory(void)
 }
 
 /*
- * The account keeps step with a relation whichever storage its growth
- * chose.  A relation grown until its columns and a stripe of its canonical
- * index are mapped is charged what relic_relation_bytes() reports for it;
- * cleared, it gives every byte back; grown again, its columns start in the
- * heap and are charged from nothing.  Both sides derive the bytes from
- * capacities, so this pins the account's updates across the move to a
- * mapping and back, not the byte formula itself.  A stripe holds about one
- * tuple in RELIC_STRIPES, so the relation grows to that many times the
- * tuples one stripe needs to be mapped, and its tuples are triples, for
- * values enough to be distinct.
+ * The account keeps step with a relation as its columns and the stripes of
+ * its canonical index double many times over.  A grown relation is charged
+ * what relic_relation_bytes() reports for it; cleared, it gives every byte
+ * back; grown again from nothing, it is charged afresh.  Both sides derive
+ * the bytes from capacities, so this pins the account's updates through
+ * growth and release, not the byte formula itself.  The tuples are triples,
+ * for values enough to be distinct.
  */
 static void
-the_account_follows_a_relation_across_the_threshold(void)
+the_account_follows_a_relation_as_it_grows(void)
 {
+	enum { TUPLE_COUNT = 100000 };
+
 	relic_t *ctx;
 	relic_relation_t *rel;
 	relic_dom_t values[ENVELOPE_VALUES];
@@ -1131,16 +1130,7 @@ the_account_follows_a_relation_across_the_threshold(void)
 	for (ordinal = 0; ordinal < ENVELOPE_VALUES; ordinal++)
 		values[ordinal] = value(ctx, SCENARIO_ACCOUNT, ordinal);
 
-	for (ordinal = 0; !relic_array_mapped(rel->columns) ||
-	    !relic_array_mapped(rel->index[0].slots); ordinal++) {
-		if (ordinal == ENVELOPE_VALUES * ENVELOPE_VALUES *
-		    ENVELOPE_VALUES) {
-			check(false, SCENARIO_ACCOUNT, "a relation of every "
-			    "triple of the values should have been mapped");
-			relic_destroy(ctx);
-			return;
-		}
-
+	for (ordinal = 0; ordinal < TUPLE_COUNT; ordinal++) {
 		columns[0] = values[ordinal / ENVELOPE_VALUES /
 		    ENVELOPE_VALUES];
 		columns[1] = values[ordinal / ENVELOPE_VALUES %
@@ -1174,8 +1164,6 @@ the_account_follows_a_relation_across_the_threshold(void)
 		return;
 	}
 
-	check(!relic_array_mapped(rel->columns), SCENARIO_ACCOUNT,
-	    "a relation grown again from nothing should start in the heap");
 	checkf(relic_relation_total_bytes(ctx) == relic_relation_bytes(rel),
 	    SCENARIO_ACCOUNT, "the account should hold the regrown "
 	    "relation's %zu bytes, not %zu", relic_relation_bytes(rel),
@@ -2138,7 +2126,7 @@ main(void)
 	the_tuple_limit_refuses_a_tuple_and_says_so();
 	the_memory_limit_refuses_a_tuple_and_says_so();
 	a_million_tuples_fit_in_the_expected_memory();
-	the_account_follows_a_relation_across_the_threshold();
+	the_account_follows_a_relation_as_it_grows();
 	a_relation_stays_where_it_was_put();
 	a_batch_inserts_what_single_insertions_would();
 	a_limit_refuses_a_batch_where_it_would_one();

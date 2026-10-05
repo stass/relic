@@ -138,7 +138,7 @@ relic_staging_reset(relic_staging_t *staging)
 	for (i = 0; i < staging->set_count; i++)
 		set_reset(&staging->sets[i]);
 
-	relic_free_array(staging->sets);
+	free(staging->sets);
 	relic_idtab_reset(&staging->by_pred);
 	bzero(staging, sizeof(*staging));
 }
@@ -557,9 +557,9 @@ set_rehash(uint32_t id, void *ctx)
 static void
 set_reset(relic_staged_set_t *set)
 {
-	relic_free_array(set->tuples);
-	relic_free_array(set->hashes);
-	relic_free_array(set->marks);
+	free(set->tuples);
+	free(set->hashes);
+	free(set->marks);
 	relic_idtab_reset(&set->index);
 	bzero(set, sizeof(*set));
 }

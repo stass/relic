@@ -166,7 +166,7 @@ relation_empty(relic_relation_t *relation)
 
 	for (s = 0; s < RELIC_STRIPES; s++)
 		relic_idtab_reset(&relation->index[s]);
-	relic_free_array(relation->columns);
+	free(relation->columns);
 	relation->columns = NULL;
 	relation->column_capacity = 0;
 	relation->count = 0;
@@ -249,7 +249,7 @@ relic_relation_free(relic_relation_t *relation)
 		return;
 
 	relation_empty(relation);
-	relic_free_array(relation->indexes);
+	free(relation->indexes);
 	free(relation);
 }
 
@@ -261,7 +261,7 @@ reltab_reset(relic_reltab_t *table)
 	for (position = 0; position < table->count; position++)
 		relic_relation_free(table->entries[position]);
 
-	relic_free_array(table->entries);
+	free(table->entries);
 	bzero(table, sizeof(*table));
 }
 
@@ -658,16 +658,16 @@ relic_relation_append_close(relic_t *ctx, relic_append_t *append)
 
 	for (index = 0; index < append->key_count; index++) {
 		keys = &append->keys[index];
-		relic_free_array(keys->hashes);
-		relic_free_array(keys->stripes);
-		relic_free_array(keys->key_ids);
+		free(keys->hashes);
+		free(keys->stripes);
+		free(keys->key_ids);
 		release_grown_tables(ctx, keys->grown);
 	}
 	free(append->keys);
 
-	relic_free_array(append->columns);
-	relic_free_array(append->hashes);
-	relic_free_array(append->stripes);
+	free(append->columns);
+	free(append->hashes);
+	free(append->stripes);
 	release_grown_tables(ctx, append->grown);
 	relic_account_release_round(&ctx->account, append->charged);
 

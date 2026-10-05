@@ -66,13 +66,8 @@ typedef uint32_t relic_dom_t;
  * leaving both the caller's array and *capacity untouched, so a failed growth
  * loses nothing that was already stored.
  *
- * items is NULL or an array this function returned, and the array is
- * released by relic_free_array() and by nothing else.  Its storage is not a
- * heap block the caller may pass to free(3) or realloc(3): a header in front
- * of the first item records how the storage was obtained.  An array whose
- * bytes reach RELIC_ARRAY_MAP_BYTES is given a mapping of its own, whose pages
- * go back to the system the moment it is released or outgrown, where a freed
- * heap block of that size may stay resident for the rest of the run.
+ * items is NULL or a heap block from malloc(3) or realloc(3), and the array
+ * returned is one too, released with free(3).
  *
  * A count of zero is treated as one.  Every caller asks for room for
  * `count + 1` items and so cannot produce a zero, and rounding it up rather
@@ -169,57 +164,6 @@ relic_saturating_product(size_t count, size_t size)
 
 	return (count * size);
 }
-
-/*
- * The bytes from which an array is mapped rather than taken from the heap.
- * Below it a mapping would cost a system call and a page of rounding for an
- * array whose residue in the heap is small.  Above it the residue is not
- * small: a heap block outgrown by a doubling array is kept by the allocator
- * for reuse, and a table split into stripes that grow one after another
- * leaves such a block behind for every stripe.  At an eighth of a
- * mebibyte the stripes of a large relation's tables are mapped, so their
- * outgrown arrays are returned rather than kept.  The allocation-failure
- * suite sets it lower, so that the small programs it sweeps grow arrays
- * onto and between mappings too.
- */
-#ifndef RELIC_ARRAY_MAP_BYTES
-#define	RELIC_ARRAY_MAP_BYTES	((size_t)1 << 17)
-#endif
-
-/*
- * Defined when AddressSanitizer instruments the build, which GCC and Clang
- * announce differently.  The header in front of a growable array's first
- * item is then marked unaddressable, as are the bytes of a mapping past the
- * array's last item, so the sanitizer reports a write just outside the array
- * as it would for a plain heap block.
- */
-#if defined(__SANITIZE_ADDRESS__)
-#define	RELIC_ADDRESS_SANITIZER	1
-#elif defined(__has_feature)
-#if __has_feature(address_sanitizer)
-#define	RELIC_ADDRESS_SANITIZER	1
-#endif
-#endif
-
-/*
- * Release a growable array: one relic_grow_array() returned, or the slots or
- * tags of an identifier table.  NULL is ignored, so an array that was never
- * grown needs no test.
- *
- * The header in front of the first item says how the storage was obtained,
- * and it is sealed against its own address.  A header that fails its seal --
- * overwritten by a stray write before the first item, say -- stops the
- * process with abort(3), since the length a damaged header claims could
- * release memory another array is using.
- */
-void	 relic_free_array(void *items);
-
-/*
- * Whether a growable array lives in a mapping of its own rather than in the
- * heap.  Nothing depends on the answer; it lets a test observe which storage
- * the growth chose.  The header is checked as relic_free_array() checks it.
- */
-bool	 relic_array_mapped(const void *items);
 
 /*
  * Hash functions keyed by a 64-bit seed.

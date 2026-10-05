@@ -78,8 +78,8 @@ allocators="$allocators|getcwd|scandir|glob|tempnam"
 # A compiler may call a different stdio routine than the source names: GCC
 # turns an fputs(3) or an fprintf(3) of a constant string into fwrite(3).
 listed='abort|bcmp|bcopy|bzero|clock_gettime|close|fclose|fdopen|ferror|fopen'
-listed="$listed|fprintf|fputc|fputs|fread|free|fwrite|getpagesize|getpid"
-listed="$listed|memchr|memcmp|memcpy|memmem|memmove|memset|munmap|open|qsort"
+listed="$listed|fprintf|fputc|fputs|fread|free|fwrite|getpid"
+listed="$listed|memchr|memcmp|memcpy|memmem|memmove|memset|open|qsort"
 listed="$listed|snprintf|stderr|strerror|strlcpy|strlen|sysconf|vsnprintf"
 
 # The worker pool's threads.  Starting a thread and initializing a mutex or

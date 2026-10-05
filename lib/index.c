@@ -189,7 +189,7 @@ relic_index_free(relic_index_t *index)
 
 	for (s = 0; s < RELIC_STRIPES; s++)
 		stripe_free(&index->stripes[s]);
-	relic_free_array(index->next);
+	free(index->next);
 	bzero(index, sizeof(*index));
 }
 
@@ -197,9 +197,9 @@ static void
 stripe_free(relic_index_stripe_t *stripe)
 {
 	relic_idtab_reset(&stripe->keys);
-	relic_free_array(stripe->entries);
-	relic_free_array(stripe->frontiers);
-	relic_free_array(stripe->key_values);
+	free(stripe->entries);
+	free(stripe->frontiers);
+	free(stripe->key_values);
 }
 
 /*

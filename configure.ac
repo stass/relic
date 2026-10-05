@@ -88,10 +88,6 @@ AC_CHECK_FUNCS([fopencookie funopen])
 RELIC_CHECK_PREFETCH
 RELIC_CHECK_OVERFLOW_BUILTINS
 
-dnl mmap(2) and munmap(2) are POSIX everywhere relic builds; only the name of
-dnl the anonymous mapping flag differs.
-RELIC_CHECK_MAP_ANON
-
 RELIC_ARG_DEBUG
 RELIC_ARG_THREADS
 RELIC_SET_ASSERTIONS

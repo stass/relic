@@ -66,7 +66,7 @@ relic_symtab_reset(relic_symtab_t *table)
 {
 	relic_idtab_reset(&table->index);
 	relic_arena_reset(&table->strings);
-	relic_free_array(table->entries);
+	free(table->entries);
 	bzero(table, sizeof(*table));
 }
 

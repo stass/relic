@@ -330,9 +330,7 @@ tests_unit_test_value_LDADD = librelic_internal.la $(LTLIBOBJS)
 ## requests through this point as well, which reaches every caller.
 ##
 ## The renaming follows the pattern the compat suite already uses.  It is
-## confined to this program; nothing that ships is built this way.  The
-## threshold from which a growable array is mapped is lowered with it, so
-## that the small programs the suite sweeps take the mapped paths as well.
+## confined to this program; nothing that ships is built this way.
 ## tests/allocators.sh checks the objects this program links, so that an
 ## allocator the renaming misses fails the build's checks rather than
 ## quietly narrowing what the suite refuses.
@@ -343,11 +341,9 @@ RELIC_EXHAUSTION_RENAMES = \
 	-Dfclose=relic_test_fclose \
 	-Dgetentropy=relic_test_getentropy \
 	-Dmalloc=relic_test_malloc \
-	-Dmmap=relic_test_mmap \
 	-Drealloc=relic_test_realloc \
 	-Dreallocarray=relic_test_reallocarray \
-	-DRELIC_ARENA_FAULT=relic_test_arena_refuses \
-	-DRELIC_ARRAY_MAP_BYTES=4096
+	-DRELIC_ARENA_FAULT=relic_test_arena_refuses
 
 RELIC_TEST_BINARIES += tests/unit/test_exhaustion
 tests_unit_test_exhaustion_SOURCES = tests/unit/test_exhaustion.c \

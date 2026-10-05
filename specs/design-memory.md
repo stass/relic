@@ -208,9 +208,10 @@ own.
 Every growable array in the tree resizes through one function:
 
 ```c
-items = relic_grow_array(items, &capacity, count + 1, sizeof(*items));
-if (items == NULL)
+grown = relic_grow_array(items, &capacity, count + 1, sizeof(*items));
+if (grown == NULL)
 	return (-1);
+items = grown;
 ```
 
 It returns the array unchanged when the existing capacity already suffices,
@@ -247,36 +248,13 @@ any of them reaches is at least what the serial run's buffer would reach,
 and a merge can ask the limit for that capacity without having run
 serially, `specs/design-strings.md` section 8.1.
 
-**Where an array lives.** An array whose bytes reach `RELIC_ARRAY_MAP_BYTES`,
-an eighth of a mebibyte, is given an anonymous private mapping of its own; a
-smaller one is a heap block. A small block grows by `realloc()`. Every other
-growth maps the new size, copies and unmaps the old, so the pages of an
-outgrown generation go back to the system at once instead of staying
-resident as a freed heap block of that size may. The identifier table of
-section 6 allocates its slot and tag arrays by the same rule. The threshold
-is low enough that the stripes of a large relation's tables
-(`specs/design-parallel.md` section 6.3), each a sixteenth of the table,
-are mapped as the whole table would be. Were they heap blocks, each stripe
-would leave its outgrown generations in the heap, one after another, and a
-striped table would hold more resident than the one table it replaces.
-
-A header in front of the first item records which storage an array got: the
-length of its mapping, or zero for a heap block, sealed against the record's
-own address. An array is released by
-
-```c
-relic_free_array(items);
-```
-
-which checks the seal and then unmaps or frees. The header is what makes the
-rule hold without any caller's help. No owner tracks which of its arrays are
-mapped, and none can release one the wrong way unnoticed: `free()` on an
-array of any size is handed a pointer the allocator never returned, which
-AddressSanitizer rejects the first time it runs, not only once some input
-makes the array large. A header damaged by a stray write fails its seal and
-stops the process, rather than unmap whatever length it claims; under
-AddressSanitizer the header is unaddressable, as a heap block's redzone is,
-so the stray write itself is reported.
+**An array is a block of the system allocator.** It grows by `realloc()`
+and is released by `free()`, and the identifier table of section 6 takes
+its slot and tag arrays from `calloc()`. What a growth leaves behind --- a
+freed generation the allocator keeps for reuse --- is the allocator's to
+manage and to give back to the system; relic does not keep a policy of its
+own for it. `specs/design-comparison-cost.md` section 8 gives the
+measurement and the reasons.
 
 ---
 

@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
@@ -129,7 +130,7 @@ relation(relic_t *ctx, const char *scenario, const char *name,
 	rule.head = pred;
 	rule.head_arity = arity;
 	appended = relic_ruletab_append(ctx, &rules, &rule);
-	relic_free_array(rules.entries);
+	free(rules.entries);
 
 	rel = appended == 0 ? relic_relation_written(ctx, pred) : NULL;
 	if (rel == NULL)

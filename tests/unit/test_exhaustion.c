@@ -37,14 +37,11 @@
 #undef fclose
 #undef getentropy
 #undef malloc
-#undef mmap
 #undef realloc
 #undef reallocarray
 
 #include "config.h"
 
-#include <sys/types.h>
-#include <sys/mman.h>
 
 #include <errno.h>
 #include <limits.h>
@@ -475,8 +472,6 @@ void		*relic_test_calloc(size_t count, size_t size);
 int		 relic_test_fclose(FILE *stream);
 int		 relic_test_getentropy(void *buffer, size_t length);
 void		*relic_test_malloc(size_t size);
-void		*relic_test_mmap(void *address, size_t length, int protection,
-		    int flags, int descriptor, off_t offset);
 void		*relic_test_realloc(void *block, size_t size);
 void		*relic_test_reallocarray(void *items, size_t count,
 		    size_t size);
@@ -677,22 +672,6 @@ relic_test_malloc(size_t size)
 		return (NULL);
 
 	return (malloc(size));
-}
-
-/*
- * A refused mapping fails as mmap(2) does when the system has no memory to
- * give, with MAP_FAILED and ENOMEM.
- */
-void *
-relic_test_mmap(void *address, size_t length, int protection, int flags,
-    int descriptor, off_t offset)
-{
-	if (refuse_this_request(REFUSE_ALLOCATOR)) {
-		errno = ENOMEM;
-		return (MAP_FAILED);
-	}
-
-	return (mmap(address, length, protection, flags, descriptor, offset));
 }
 
 void *

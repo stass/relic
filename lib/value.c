@@ -124,8 +124,8 @@ void
 relic_valtab_reset(relic_valtab_t *table)
 {
 	relic_idtab_reset(&table->index);
-	relic_free_array(table->integers);
-	relic_free_array(table->symbol_uses);
+	free(table->integers);
+	free(table->symbol_uses);
 	bzero(table, sizeof(*table));
 }
 

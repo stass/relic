@@ -435,7 +435,7 @@ relic_magic_reset(relic_magic_t *magic)
 
 	adornment_set_release(&magic->kept);
 	adornment_set_release(&magic->subsumed);
-	relic_free_array(magic->rules.entries);
+	free(magic->rules.entries);
 	relic_idtab_reset(&magic->rule_index);
 	relic_arena_reset(&magic->arena);
 	relic_arena_reset(&magic->scratch);
@@ -1294,7 +1294,7 @@ adornment_set_clear(relic_adornment_set_t *set)
 static void
 adornment_set_release(relic_adornment_set_t *set)
 {
-	relic_free_array(set->entries);
+	free(set->entries);
 	relic_idtab_reset(&set->index);
 	adornment_set_init(set, set->hash_seed);
 }

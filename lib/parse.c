@@ -2817,8 +2817,8 @@ static void
 parser_reset(relic_parser_t *parser)
 {
 	relic_lexer_reset(&parser->lexer);
-	relic_free_array(parser->body);
-	relic_free_array(parser->group_body);
+	free(parser->body);
+	free(parser->group_body);
 	bzero(parser, sizeof(*parser));
 }
 
@@ -2944,7 +2944,7 @@ load_read_text(relic_t *ctx, const char *source_name, char *text,
 	int status;
 
 	status = load_parse(&load, ctx, source_name, text, length);
-	relic_free_array(text);
+	free(text);
 	if (status == 0)
 		status = load_commit(&load);
 
@@ -3100,7 +3100,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		grown = relic_grow_array(text, &capacity,
 		    length + RELIC_READ_CHUNK, sizeof(*text));
 		if (grown == NULL) {
-			relic_free_array(text);
+			free(text);
 			relic_diag_no_memory(ctx);
 			return (-1);
 		}
@@ -3128,7 +3128,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 			relic_diag_error(ctx, RELIC_ERROR_IO, NULL,
 			    "cannot read %s: %s", source_name,
 			    strerror(read_errno != 0 ? read_errno : EIO));
-			relic_free_array(text);
+			free(text);
 			return (-1);
 		}
 
@@ -3293,7 +3293,7 @@ load_named_file(relic_t *ctx, const char *path)
 	}
 
 	if (relic_close_input(ctx, path, stream) != 0) {
-		relic_free_array(text);
+		free(text);
 		return (-1);
 	}
 

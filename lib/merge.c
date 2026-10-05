@@ -1146,7 +1146,7 @@ firsts_close(relic_account_t *account, relic_merge_firsts_t *firsts,
     size_t charged)
 {
 	relic_idtab_reset(&firsts->table);
-	relic_free_array(firsts->refs);
+	free(firsts->refs);
 	relic_account_release_round(account, charged);
 }
 
@@ -1181,6 +1181,6 @@ new_keys_close(relic_account_t *account, relic_new_keys_t *new_keys,
     size_t charged)
 {
 	relic_idtab_reset(&new_keys->table);
-	relic_free_array(new_keys->first);
+	free(new_keys->first);
 	relic_account_release_round(account, charged);
 }

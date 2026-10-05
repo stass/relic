@@ -45,8 +45,8 @@ settles:
 * that a domain identifier carries its type, so a symbol value is its
   symbol identifier and the value table holds integers only, and how a
   symbol's bytes are packed;
-* that arrays past a page threshold are mapped rather than malloced, so a
-  growth leaves nothing resident behind it;
+* that growable arrays stay blocks of the system allocator, which owns
+  what a growth leaves behind;
 * what each change does to the accounting, the counters, explain and the
   determinism promise, and in what order the changes land.
 
@@ -611,10 +611,10 @@ follows the measurement:
 | predicate table, rewrite tables | small | no |
 
 The canonical index is measured with a tag under the section 5.2 method,
-with section 8's mapped growth in place, since the peak that measurement
-weighs is the one section 8 changes. Tagged, `chain-closure` and
-`tc-sparse-cyclic` ran 6 and 8 per cent faster and peaked 15 to 19 per
-cent higher: the tag is a byte per slot of the largest table every
+with large arrays mapped so that the peaks compared hold no allocator
+residue, which would otherwise hide a table's own bytes. Tagged,
+`chain-closure` and `tc-sparse-cyclic` ran 6 and 8 per cent faster and
+peaked 15 to 19 per cent higher: the tag is a byte per slot of the largest table every
 relation has, and the successful search the canonical index mostly does is
 the one a tag helps least. It stays untagged. The decision is a flag at
 one creation site per owner, not a second table type, so a workload that
@@ -767,63 +767,48 @@ which `TODO.md` records separately. About 250 lines across `lib/value.c`,
 
 ---
 
-## 8. Growth without a residue
+## 8. Growth and the allocator's residue
 
 An identifier table grows by allocating new slots, rehashing into them and
-freeing the old; a column array grows by `reallocarray()`. Section 2
-measured that the second leaves nothing behind and the first leaves every
-generation resident on macOS, and glibc keeps a freed block below its
-dynamic threshold in the heap the same way. The reported peak of
-`chain-closure` is up to twice its live heap for that reason.
+freeing the old; a column array grows by `realloc()`. Section 2 measured
+that the first leaves every generation in the resident set on macOS, and
+glibc keeps a freed block below its dynamic threshold in the heap the same
+way. The reported peak of `chain-closure` is up to twice its live heap for
+that reason.
 
-**Large arrays are mapped.** A growable array whose bytes reach
-`RELIC_ARRAY_MAP_BYTES`, one mebibyte, is allocated with `mmap()` rather
-than `malloc()`, grown by mapping the new size, copying and unmapping the
-old, and freed by `munmap()`. An unmapped region is returned to the
-system at once and leaves the resident set with it, so a growth's cost in
-peak is the moment both generations exist, at most one and a half times
-the new size, and nothing after it. Below the threshold an array is
-malloced as now, where the residue is at most a mebibyte per array and a
-mapping would cost a system call and a page's rounding per small table.
+**Arrays stay blocks of the system allocator.** relic could map each array
+past a threshold itself, unmapping an outgrown generation at once. Measured
+against `malloc()` on macOS over ten of the comparison's workloads, mapping
+changed no time and cut the peak resident set by a third to a half, but by
+the peak physical footprint, which is what memory pressure charges, the
+heap build ranged from a quarter lower to under a half higher from run to
+run while the mapped build held steady. Most of the resident difference is
+freed blocks the allocator keeps for reuse and marks reclaimable, which the
+system takes back when it needs them.
 
-The rule lives in `relic_grow_array()` and in the slot allocation of the
-identifier table, the two places that allocate anything that grows, so
-every column array, slot array, tag array, entry array and `next` array
-gets it without knowing. A region records its mapped length beside the
-pointer, since `munmap()` needs it and `free()` did not. The record is a
-header in front of the first item, which `relic_free_array()` reads to
-unmap or free. A stray `free()` of a growable array of any size is then
-handed a pointer `malloc()` never returned, which AddressSanitizer reports
-on the first run rather than only once an input makes the array large.
+Against that, a policy of relic's own would be relic's to own on every
+system: a header in front of every array recording how its storage was
+obtained, a seal so that a damaged header could not unmap a neighbour, a
+process abort when the seal failed, and one mapping per large array, which
+the stripes of `specs/design-parallel.md` section 6.3 multiply sixteen
+times toward the per-process mapping limit Linux keeps. The system
+allocator is tuned for the system it ships with, and what it keeps is its
+to give back. So `relic_grow_array()` grows by `realloc()`, the identifier
+table allocates by `calloc()`, and both release by `free()`.
 
-The record is where a write just before the first item lands, and a
-length read from a damaged record would unmap a neighbour. So the record
-is sealed with its own address folded into its length, and a record that
-fails its seal stops the process before anything is released by it.
-Under AddressSanitizer the header is unaddressable, and so are a
-mapping's bytes past its last item, so a write just outside an array is
-reported as it is for a heap block. `mmap()` and `munmap()` with
-`MAP_ANON | MAP_PRIVATE` are BSD interfaces of architecture section 45 on
-every platform the tool builds for, and `configure` checks for `MAP_ANON`
-against the `MAP_ANONYMOUS` spelling.
-
-**Accounting does not change.** The memory limit charges an array its
-capacity in bytes, and a mapped array's capacity is what it charges. The
-transient second generation during a growth is not charged, as it is not
-now; the limit bounds what is held, not what a copy passes through.
+**Accounting.** The memory limit charges an array its capacity in bytes.
+The transient second generation during a growth is not charged; the limit
+bounds what is held, not what a copy passes through, nor what the
+allocator keeps after it.
 
 **The slack stays.** An identifier table's capacity is a power of two
 because its probe masks the hash, and a column array doubles because one
 growth policy serves every arity; a table at the moment after a doubling
-is half empty. This design does not change either policy. The residue it
-removes was as large as the slack; the slack alone is the remaining gap
-between relic's peak and its live heap, and a table that grew by three
-halves under a multiply-shift range reduction is the change that would
-halve it, recorded in `TODO.md` for measurement rather than made here.
-
-**Cost.** About 60 lines in `lib/util.c` and a `configure` check.
-`chain-closure`'s reported peak falls to its live heap, one relation of
-33.6 MB after section 4, against the interpreter's 46 MB.
+is half empty. This design does not change either policy. The slack and
+the allocator's residue are the gap between relic's peak and its live
+heap, and a table that grew by three halves under a multiply-shift range
+reduction is the change that would halve the first, recorded in `TODO.md`
+for measurement rather than made here.
 
 ---
 
@@ -869,9 +854,9 @@ tree before it, per `CLAUDE.md`.
   unequal, as now.
 * **Hash once.** A debug build asserts the carried hash against a
   recomputed one on every append; the load tests hold.
-* **Growth.** A unit test grows an array across the threshold and back
-  and checks the capacity and the account; the memory-limit tests hold at
-  their golden diagnostics.
+* **Growth.** A unit test grows a relation through many doublings, clears
+  it and grows it again, and checks the account at each; the memory-limit
+  tests hold at their golden diagnostics.
 
 The comparison run of `specs/design-bench.md` is repeated at the end with
 the four workloads of section 2 and the whole set, and `bench/baseline.txt`
@@ -892,16 +877,15 @@ because each is measured against the one before it:
    within 10 per cent of `-a`, explain shows one member.
 4. **Index keys** (section 6.1) and **tags** (section 6.2) for the index
    keys. Gate: `find_key()` off the top of `andersen`'s profile.
-5. **Mapped growth** (section 8). Gate: `chain-closure`'s reported peak
-   within 10 per cent of its live heap. Then the canonical index is
-   measured tagged, per section 6.2.
+5. **The canonical index, tagged** (section 6.2), measured with large
+   arrays mapped for the comparison only, as section 6.2 says. Section 8
+   keeps every array a block of the system allocator.
 6. **Tagged pool, typed identifiers, packed bytes, hash once** (section 7).
    Gate: `facts-join` at scale 10 under 2 s and 120 MB.
 
 Step 1 is the largest win for the least code and blocks nothing; steps 2
-and 3 are independent of each other and of 4 to 6; step 5 precedes the
-canonical-index measurement that step 4's tag makes possible; step 6 is
-last because it touches the most files and is measured on the import,
+and 3 are independent of each other and of 4 to 6; step 5 needs the tag
+of step 4; step 6 is last because it touches the most files and is measured on the import,
 which none of the others change.
 
 ---
@@ -919,7 +903,6 @@ which none of the others change.
   slots a probe skips and nothing a probe returns.
 * A domain identifier's type bits are fixed by the type; its index is the
   table's count at first appearance. Nothing reported depends on either.
-* A mapped array holds what a malloced one held; no address is reported.
 
 ---
 
@@ -950,8 +933,7 @@ which none of the others change.
   identifier and the integer table, section 7 here; section 9: first
   appearance within a type.
 * `specs/design-relations.md` section 3 and `specs/design-facts.md`
-  sections 4.2 and 4.3: the mapped growth of section 8 and the carried
-  hash of section 7.3.
+  sections 4.2 and 4.3: the carried hash of section 7.3.
 * `specs/design-evaluation-cost.md` section 5.2: the tag is the cheaper
   form it did not measure; its finding on the canonical index stands
   until section 10 step 5 measures it again.

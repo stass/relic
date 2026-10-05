@@ -16,6 +16,7 @@
 
 #include <assert.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <strings.h>
 
 #include "round.h"
@@ -721,12 +722,12 @@ void
 relic_candidates_release(relic_candidates_t *candidates,
     relic_account_t *account)
 {
-	relic_free_array(candidates->entries);
-	relic_free_array(candidates->stripes);
-	relic_free_array(candidates->words);
+	free(candidates->entries);
+	free(candidates->stripes);
+	free(candidates->words);
 	relic_idtab_reset(&candidates->screen);
-	relic_free_array(candidates->values);
-	relic_free_array(candidates->value_bytes);
+	free(candidates->values);
+	free(candidates->value_bytes);
 	relic_idtab_reset(&candidates->value_screen);
 	relic_account_release_round(account, candidates->charged);
 

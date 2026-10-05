@@ -996,12 +996,9 @@ and
 .Fn relic_stats
 cannot fail.
 .Pp
-No function terminates the process on an ordinary failure.
-A library built for release calls
-.Xr abort 3
-only when it finds its own memory already corrupted, such as a storage
-header overwritten by a stray write, where continuing would release memory
-it cannot prove it owns.
+No function terminates the process on a failure.
+A library built for release never calls
+.Xr abort 3 .
 .Sh EXAMPLES
 A complete program that loads a program, answers a query and prints the
 first column of each row, reporting any mistake on the standard error.
