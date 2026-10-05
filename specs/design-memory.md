@@ -58,7 +58,7 @@ queries, must be able to shrink, and are accounted against a limit. They are
 growable arrays (section 5) with explicit failure handling and are never
 arena allocated. The base stores that hold a program's facts are relations like
 any other, in the account with the relations evaluation derives
-(`specs/design-facts.md`); a discard empties the derived relations and drops
+(`specs/design-facts.md`); a discard frees the derived relations and drops
 the base stores' secondary indexes, and never shrinks a base store's tuples.
 The store records whether it holds anything a discard removes, so a discard
 with nothing derived to remove returns at once. A query's answer relation is

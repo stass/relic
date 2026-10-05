@@ -71,8 +71,8 @@ extending a table would move every one of them, and every holder would have
 to know not to keep a pointer across a call that might create a relation --
 correctness rested on a list of call sites that grows with every caller. Each
 relation is therefore its own allocation, so growth moves pointers and never
-relations, a relation's address is fixed for the life of the context, and
-there is no rule for a caller to obey.
+relations, a relation's address is fixed for as long as the relation exists,
+and there is no rule for a caller to obey.
 
 Relations are database state, not program structure. Keeping them in tables
 of their own rather than in a field of `relic_pred_t` is what lets the derived
@@ -175,7 +175,7 @@ The relation store offers insertion, a load's reservation and append into
 base stores, membership, reading a tuple by identifier, and two operations
 that remove anything, both of which empty a relation whole: **clearing one
 relation**, which a query's answer undergoes at both ends of a run, and
-**discarding everything derived at once**, which empties every derived
+**discarding everything derived at once**, which frees every derived
 relation and drops the base stores' secondary indexes. The evaluator
 discards when the program has changed since the relations last reached its
 fixed point, and a load's commit when it is about to add a fact. Nothing
@@ -188,22 +188,30 @@ range outlives the span it was taken in. The evaluator meets it by
 construction: every range lives in an evaluation's state, and a discard runs
 only outside an evaluation, before one begins or in a load's commit.
 
-A discard empties each derived relation in place and releases its columns
-and indexes, and releases each base store's secondary indexes. The relations
-themselves stay where they are, so a pointer to one remains valid and names
-the same relation. Each derived relation is emptied through
-`relic_relation_clear()`, and each index released gives back what it
-counted, so the totals are at every moment the sum of what every relation
-holds, in a table or not. A query's answer relation is outside the tables
+A discard frees each derived relation with its columns and indexes, and
+releases each base store's secondary indexes; a derived relation asked for
+afterwards is created empty, as on its first use. A pointer to a derived
+relation therefore names nothing after a discard, like a range or an index
+position, and the same construction that keeps ranges inside their span
+keeps pointers inside it: every plan lives in an evaluation's state. A
+write through a pointer kept across a discard is a use after free, which
+the sanitizers report, rather than tuples that outlive the discard
+unnoticed. Each derived relation is emptied through `relic_relation_clear()`
+before it is freed, and each index released gives back what it counted, so
+the totals are at every moment the sum of what every relation holds, in a
+table or not. A query's answer relation is outside the tables
 and empty whenever a discard runs, per `specs/design-query.md` sections 3
 and 6, so both totals count the base stores alone afterwards, which an
 assertion confirms.
 
 The store records whether it may hold anything a discard removes: the mark
-is set where it hands out a derived relation to be written or builds a
-secondary index, and cleared by the discard. A discard with the mark clear
-has nothing to do and returns without walking the tables, so a run of loads
-or `relic_fact_add()` calls between two queries pays for one discard.
+is set where it hands out a derived relation, the one way to create one, or
+builds a secondary index, and cleared by the discard once it has freed
+them. Nothing a discard removes exists while the mark is clear, by
+construction rather than by any rule its callers follow, so a discard with
+the mark clear has nothing to do and returns without walking the tables,
+and a run of loads or `relic_fact_add()` calls between two queries pays for
+one discard.
 
 D-10 is what rests on it. Semi-naive evaluation represents the tuples derived
 in one iteration as a half-open range of tuple identifiers rather than as a

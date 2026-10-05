@@ -1653,9 +1653,10 @@ void	 relic_index_link_append(relic_index_t *index,
  * relation an operation reads: the derived relation of a derived predicate,
  * and otherwise the base store of the predicate read, or of the one a base
  * view views.  Either is created empty the first time it is asked for, so
- * no caller decides whether a relation exists yet, and belongs to the
- * context and never moves, so a caller may hold as many of them as it likes
- * for as long as the context lives.
+ * no caller decides whether a relation exists yet, and never moves, so a
+ * caller may hold as many of them as it likes for as long as the relation
+ * lives: a base store as long as the context, a derived relation until the
+ * next discard.
  *
  * relic_base_store() finds a predicate's base store without creating it,
  * and relic_base_count() and relic_base_total() count the facts one or
@@ -1756,10 +1757,10 @@ void	 relic_index_link_append(relic_index_t *index,
  * walks, and relic_relation_end() is the mark a later delta is measured
  * from.
  *
- * relic_relation_discard_all() empties every derived relation and drops the
- * base stores' secondary indexes, which ends the span over which a range
- * means anything; no caller may hold a range across it, nor one of a
- * relation across that relation's clear.
+ * relic_relation_discard_all() frees every derived relation and drops the
+ * base stores' secondary indexes, which ends the span over which a derived
+ * relation, a range or an index position means anything; no caller may hold
+ * one across it, nor a range of a relation across that relation's clear.
  *
  * relic_relation_index() finds, or builds from the tuples the relation holds,
  * the secondary index keyed on the columns of a mask and gives its position

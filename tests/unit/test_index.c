@@ -41,7 +41,7 @@
 #define	SCENARIO_ACCOUNTING	"an index is charged exactly"
 #define	SCENARIO_BUILD		"an index built late matches one kept up"
 #define	SCENARIO_CHAINS		"a lookup visits a key's tuples in order"
-#define	SCENARIO_DISCARD	"a discard drops every index"
+#define	SCENARIO_DISCARD	"a discard frees every derived relation"
 #define	SCENARIO_DISTINCT	"a distinct count follows the tuples"
 #define	SCENARIO_FRONTIER	"a delta lookup starts where its delta does"
 #define	SCENARIO_FRONTIERS	"concurrent delta lookups leave one frontier"
@@ -133,7 +133,7 @@ static void	 a_lookup_visits_a_keys_tuples_in_order(void);
 static void	 an_index_built_late_matches_one_kept_up(void);
 static void	 a_lookup_walking_while_its_key_grows(void);
 static void	 a_delta_lookup_starts_where_its_delta_does(void);
-static void	 a_discard_drops_every_index(void);
+static void	 a_discard_frees_every_derived_relation(void);
 static void	 an_index_is_charged_exactly(void);
 static void	 the_memory_limit_refuses_a_build_whole(void);
 static bool	 fill_under_limit(size_t max_memory, size_t *unlimited);
@@ -991,16 +991,33 @@ concurrent_delta_lookups_leave_one_frontier(void)
 }
 
 /*
- * A discard drops every index with the tuples, so which indexes a relation
- * keeps up depends only on what was asked of it since, never on the plans
- * and queries of an earlier program.  Asked for again after a refill, an
- * index is built afresh and agrees with a scan.
+ * The derived relation the store holds for `pred`, or NULL when it holds
+ * none.
+ */
+static const relic_relation_t *
+derived_held(const relic_t *ctx, relic_pred_id_t pred)
+{
+	if (pred > ctx->store.derived.count)
+		return (NULL);
+
+	return (ctx->store.derived.entries[pred - 1]);
+}
+
+/*
+ * A discard frees every derived relation with its tuples and indexes, so
+ * which indexes a relation keeps up depends only on what was asked of it
+ * since, never on the plans and queries of an earlier program, and a
+ * pointer taken before the discard names nothing.  Asked for again, the
+ * relation is created empty, and an index asked of it after a refill is
+ * built afresh and agrees with a scan.  A relation created again, here
+ * through the read funnel, is freed by the next discard like the first.
  */
 static void
-a_discard_drops_every_index(void)
+a_discard_frees_every_derived_relation(void)
 {
 	relic_relation_t *rel;
 	relic_config_t config;
+	relic_pred_id_t pred;
 	uint32_t position;
 	relic_t *ctx;
 
@@ -1017,16 +1034,21 @@ a_discard_drops_every_index(void)
 		relic_destroy(ctx);
 		return;
 	}
+	pred = rel->pred;
 
 	relic_relation_discard_all(ctx);
 
-	checkf(rel->index_count == 0, SCENARIO_DISCARD,
-	    "a discard should leave no index, not %zu", rel->index_count);
+	checkf(derived_held(ctx, pred) == NULL, SCENARIO_DISCARD,
+	    "a discard should leave no derived relation for r/3");
 	checkf(relic_relation_total_bytes(ctx) == 0, SCENARIO_DISCARD,
 	    "a discard should leave no storage, not %zu bytes",
 	    relic_relation_total_bytes(ctx));
 
-	if (!fill(ctx, SCENARIO_DISCARD, rel, 1000, 300) ||
+	rel = relic_relation_written(ctx, pred);
+	checkf(rel != NULL && relic_relation_count(rel) == 0 &&
+	    rel->index_count == 0, SCENARIO_DISCARD,
+	    "r/3 asked for again should be empty and unindexed");
+	if (rel == NULL || !fill(ctx, SCENARIO_DISCARD, rel, 1000, 300) ||
 	    relic_relation_index(ctx, rel, 0x6, &position) != 0) {
 		check(false, SCENARIO_DISCARD,
 		    "the refilled relation is indexed");
@@ -1040,6 +1062,22 @@ a_discard_drops_every_index(void)
 	    (unsigned int)position);
 	check(index_agrees(rel, position, SCENARIO_DISCARD), SCENARIO_DISCARD,
 	    "the rebuilt index agrees with a scan");
+
+	relic_relation_discard_all(ctx);
+	rel = relic_relation_read(ctx, pred);
+	if (rel == NULL || !fill(ctx, SCENARIO_DISCARD, rel, 0, 200)) {
+		check(false, SCENARIO_DISCARD, "r/3 read again is refilled");
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_relation_discard_all(ctx);
+
+	checkf(derived_held(ctx, pred) == NULL, SCENARIO_DISCARD,
+	    "a second discard should free r/3 created through a read");
+	checkf(relic_relation_total_bytes(ctx) == 0, SCENARIO_DISCARD,
+	    "a second discard should leave no storage, not %zu bytes",
+	    relic_relation_total_bytes(ctx));
 
 	relic_destroy(ctx);
 }
@@ -1339,9 +1377,10 @@ an_index_is_keyed_on_columns_it_has(void)
 
 /*
  * A distinct count is right when it is first taken, stays right while the
- * relation does not change, and is right again after it grows.  A discard
- * followed by a refill to the same number of different tuples is the case a
- * cache keyed on the tuple count alone would get wrong, and must not.
+ * relation does not change, and is right again after it grows.  Clearing
+ * the relation in place and refilling it to the same number of different
+ * tuples is the case a cache keyed on the tuple count alone would get
+ * wrong, and must not.
  */
 static void
 a_distinct_count_follows_the_tuples(void)
@@ -1385,7 +1424,7 @@ a_distinct_count_follows_the_tuples(void)
 	 * Refill to the same 42 tuples, every one holding the same value in
 	 * column 0.
 	 */
-	relic_relation_discard_all(ctx);
+	relic_relation_clear(ctx, rel);
 	for (i = 0; i < 42; i++) {
 		tuple[0] = value(ctx, 0);
 		tuple[1] = value(ctx, 0);
@@ -1416,7 +1455,7 @@ main(void)
 	a_key_first_held_late_is_found_by_its_values();
 	a_delta_lookup_starts_where_its_delta_does();
 	concurrent_delta_lookups_leave_one_frontier();
-	a_discard_drops_every_index();
+	a_discard_frees_every_derived_relation();
 	an_index_is_charged_exactly();
 	the_memory_limit_refuses_a_build_whole();
 	the_memory_limit_holds_as_indexes_grow();

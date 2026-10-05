@@ -343,13 +343,16 @@ again. After a discard the store's accounted bytes are the base stores'
 columns and canonical indexes. Every discard clears the record of what was
 materialized (section 5.4).
 
-The store records whether it may hold anything derived: the mark is set
-where the write funnel hands out a derived relation, and where a secondary
-index is built, the only two things a discard removes, and cleared by the
-discard. It is set on every hand-out rather than on creation, since a
-discard empties a derived relation and keeps it for the next evaluation.
-A discard with the mark clear has nothing to do and returns without
-walking the relations.
+A discard frees the derived relations rather than emptying them, and the
+next evaluation creates each again on first use. The store records whether
+it may hold anything derived: the mark is set where a derived relation is
+handed out, the only way to create one, and where a secondary index is
+built, the only two things a discard removes, and cleared by the discard
+once it has removed them. Nothing derived exists while the mark is clear,
+so a discard with the mark clear has nothing to do and returns without
+walking the relations, and no later write can reach a derived relation the
+mark does not account for: a pointer kept across a discard names freed
+memory.
 
 ### 5.4 When a program is current
 

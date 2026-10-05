@@ -31,25 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**The discard's mark is set where a relation is handed out, not derived.**
-[Low, component: `lib/relation.c`] `holds_derived` is set by the write
-funnel and by an index build, and the discard returns at once when it is
-clear, which keeps a one-fact `relic_fact_add()` from walking every
-predicate. That is right because nothing writes a derived relation through
-a pointer handed out before a discard, which holds today since every
-evaluation discards before it plans and nothing commits while one runs; a
-future path that kept such a pointer would leave derived tuples the next
-discard skips, and a query would read them as current. The discard empties
-the derived relations but keeps them, promising that a pointer to one still
-names the same relation, and that is why whether anything is derived has to
-be remembered beside them. Free them instead, and the indexes of the base
-stores with them, creating each again on first use as it is created now:
-something is derived exactly when a derived relation or a base store's
-index exists, a count kept where they are created and freed makes the
-discard's early return a structural fact, and a write through a stale
-pointer becomes a use after free the sanitizers report. First find what
-relies on a derived relation's pointer outliving a discard.
-
 **A long-lived context's tables only grow.** [Low, component:
 `lib/parse.c`, `lib/magic.c`, `lib/symbol.c`, `lib/value.c`,
 `cmd/relic/repl.c`] No table releases an entry, and two kinds of entry

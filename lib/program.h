@@ -153,8 +153,8 @@ struct relic_pred {
  *
  * The table is context-lifetime state rather than something a check derives
  * and discards: identifiers are stable indexes that every later pass uses,
- * and the relation holding a predicate's tuples hangs off its entry and
- * outlives any one query.
+ * and the relation store is indexed by them, so a predicate's base store
+ * keeps its facts under the same identifier across every query.
  */
 struct relic_predtab {
 	relic_pred_t	*entries;	/* indexed by id - 1 */

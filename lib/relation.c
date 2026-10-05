@@ -31,7 +31,7 @@
  * reorders or renumbers one tuple, and the one that removes any removes all
  * of the relation's.  Semi-naive evaluation rests on it, because a delta is a
  * pair of identifiers and means nothing if the tuples under them can move;
- * an evaluation holds its ranges in its own state and empties relations only
+ * an evaluation holds its ranges in its own state and discards relations only
  * before it begins, so no range outlives the span it was taken in.  Future
  * incremental insertion or deletion support has to confront that before it
  * does anything else.
@@ -39,7 +39,9 @@
  * A relation is created once, in an allocation of its own, and never moves.
  * The store's tables hold pointers to the predicates' relations rather than
  * the relations, and a query holds a pointer to its answer's, which is what
- * lets a plan or an evaluation resolve a relation once and hold it.
+ * lets a plan or an evaluation resolve a relation once and hold it.  A base
+ * store lives as long as its context.  A derived relation lives until the
+ * next discard frees it, which no plan or evaluation outlives.
  *
  * A predicate has two relations at most: its base store, holding the facts
  * the program states for it, and its derived relation, which exists once a
@@ -114,6 +116,7 @@ static void	 relation_init(relic_relation_t *relation, const relic_t *ctx,
 		    relic_pred_id_t pred, size_t serial, uint16_t arity);
 static void	 relation_drop_indexes(relic_t *ctx,
 		    relic_relation_t *relation);
+static relic_relation_t *derived_relation(relic_t *ctx, relic_pred_id_t pred);
 static int	 reltab_cover(relic_t *ctx, relic_reltab_t *table,
 		    relic_pred_id_t pred);
 static relic_relation_t *reltab_find(const relic_reltab_t *table,
@@ -2052,9 +2055,9 @@ reltab_find(const relic_reltab_t *table, relic_pred_id_t pred)
  * predicate, which is a mistake in the caller rather than in the program
  * being run.
  *
- * The relation is owned by the context and lives as long as it does, so the
- * returned pointer stays valid however many relations are created
- * afterwards.  A caller may hold as many of them as it likes.
+ * The relation is owned by the table, so the returned pointer stays valid
+ * however many relations are created afterwards, until the table frees it:
+ * a base store with its context, a derived relation at the next discard.
  */
 static relic_relation_t *
 reltab_relation(relic_t *ctx, relic_reltab_t *table, relic_pred_id_t pred)
@@ -2086,6 +2089,20 @@ reltab_relation(relic_t *ctx, relic_reltab_t *table, relic_pred_id_t pred)
 }
 
 /*
+ * A derived predicate's relation, created empty if the last discard freed
+ * it or none was ever asked for.  This is the only way to the table of
+ * derived relations, and it marks the store as holding something derived,
+ * so no derived relation exists while the mark is clear.
+ */
+static relic_relation_t *
+derived_relation(relic_t *ctx, relic_pred_id_t pred)
+{
+	ctx->store.holds_derived = true;
+
+	return (reltab_relation(ctx, &ctx->store.derived, pred));
+}
+
+/*
  * The relation a rule deriving `pred` writes: its derived relation.  Asking
  * for a predicate no rule derives is an internal error rather than a
  * relation created on the spot, so no rule can write a base store and no
@@ -2104,9 +2121,7 @@ relic_relation_written(relic_t *ctx, relic_pred_id_t pred)
 		return (NULL);
 	}
 
-	ctx->store.holds_derived = true;
-
-	return (reltab_relation(ctx, &ctx->store.derived, pred));
+	return (derived_relation(ctx, pred));
 }
 
 /*
@@ -2123,7 +2138,7 @@ relic_relation_read(relic_t *ctx, relic_pred_id_t pred)
 
 	entry = relic_pred_of(ctx, pred);
 	if (entry != NULL && entry->derived)
-		return (reltab_relation(ctx, &ctx->store.derived, pred));
+		return (derived_relation(ctx, pred));
 
 	if (entry != NULL && entry->views != RELIC_ID_NONE)
 		pred = entry->views;
@@ -2202,16 +2217,17 @@ relation_drop_indexes(relic_t *ctx, relic_relation_t *relation)
 }
 
 /*
- * Discard everything evaluation derived: empty every derived relation and
+ * Discard everything evaluation derived: free every derived relation and
  * drop the base stores' secondary indexes, keeping the facts the base
- * stores hold.  The relations stay where they are, so a pointer to one
- * still names the same relation.  A store holding nothing derived has
- * nothing to discard, and the walk is skipped.
+ * stores hold.  A derived relation asked for afterwards is created empty.
+ * The mark is clear only while the store holds neither a derived relation
+ * nor a secondary index, since both are created only where it is set and a
+ * discard removes both, so a discard with the mark clear has nothing to do
+ * and skips the walk.
  *
- * Identifiers of a derived relation restart from the first afterwards, so a
- * range taken before the discard names nothing, or other tuples, after it,
- * and every secondary index is gone, so an index position taken before it
- * names nothing either.  The caller must hold neither across it, which the
+ * A pointer to a derived relation, a range of its identifiers and the
+ * position of any secondary index taken before the discard all name nothing
+ * after it.  The caller must hold none of them across it, which the
  * evaluator satisfies by discarding only before an evaluation begins: every
  * range and every plan lives in an evaluation's state and dies with it.
  *
@@ -2227,18 +2243,22 @@ relation_drop_indexes(relic_t *ctx, relic_relation_t *relation)
 void
 relic_relation_discard_all(relic_t *ctx)
 {
+	relic_relation_t *relation;
 	relic_store_t *store;
 	size_t position;
 
 	store = &ctx->store;
-	if (!store->holds_derived)
+	if (!store->holds_derived) {
+		assert(store->derived.count == 0);
 		return;
+	}
 
 	for (position = 0; position < store->derived.count; position++) {
-		if (store->derived.entries[position] != NULL)
-			relic_relation_clear(ctx,
-			    store->derived.entries[position]);
+		relation = store->derived.entries[position];
+		if (relation != NULL)
+			relic_relation_clear(ctx, relation);
 	}
+	reltab_reset(&store->derived);
 
 	for (position = 0; position < store->bases.count; position++) {
 		if (store->bases.entries[position] != NULL)

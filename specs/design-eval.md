@@ -493,9 +493,9 @@ add a fact the base stores lack, before it reserves room for it, so the
 limits it checks count the program's facts and nothing derived. One rule
 covers every way of changing the program.
 
-The discard empties the derived relations in place, so a pointer to one stays
-valid, and it happens before an evaluation begins or in a load's commit, so no
-delta range can span it -- the obligation `specs/design-relations.md` section
+The discard frees the derived relations, and it happens before an evaluation
+begins or in a load's commit, so no plan's pointer to a derived relation and
+no delta range can span it -- the obligation `specs/design-relations.md` section
 4 places on any operation that ends a span of the append-only store. A
 discard clears the recorded pair, and one with nothing derived to discard
 returns at once.

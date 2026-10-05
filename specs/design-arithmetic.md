@@ -1052,7 +1052,7 @@ few bytes more against its limit than it did; the golden tests of the
 memory limit are re-recorded at their new totals.
 
 **The table is not shrunk.** An integer once interned keeps its identifier
-for the life of the context, as every identifier does. A discard empties
+for the life of the context, as every identifier does. A discard frees
 the derived relations and leaves the table, so a context that has evaluated
 a program computing a million distinct integers holds them, about twenty
 bytes each, until it is destroyed -- whether or not the next program

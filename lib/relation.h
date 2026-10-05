@@ -173,12 +173,12 @@ struct relic_index {
  * asks for one and cached here.
  *
  * `distinct[c]` is meaningful for the columns whose bit is set in `known`,
- * and only while the relation holds `counted_at` tuples.  The store is
- * append-only between discards, so a relation holding as many tuples as it
- * did when a count was taken holds the same tuples and the count is still
- * true: the tuple count is the cache's version, and no insertion has to mark
- * anything stale.  A discard returns a relation to fewer tuples, possibly
- * to be refilled to the same number with different ones, so a discard clears
+ * and only while the relation holds `counted_at` tuples.  A relation is
+ * append-only until it is cleared, so one holding as many tuples as it did
+ * when a count was taken holds the same tuples and the count is still true:
+ * the tuple count is the cache's version, and no insertion has to mark
+ * anything stale.  Clearing returns a relation to no tuples, possibly to be
+ * refilled to the same number with different ones, so clearing it clears
  * `known`.
  */
 struct relic_relation_stats {
@@ -207,10 +207,11 @@ struct relic_relation_stats {
  * column's distinct values.
  *
  * `indexes` holds the secondary indexes plans have asked for, at most one per
- * key mask, in the order they were built.  Between discards an index is only
- * ever appended, so its position is fixed until the next discard and is how
- * a plan names it; its address is not, because the array grows.  A discard
- * drops every index along with the tuples.
+ * key mask, in the order they were built.  An index is only ever appended,
+ * so its position is fixed until the relation is cleared or the next discard
+ * and is how a plan names it; its address is not, because the array grows.
+ * Clearing a relation drops every index along with the tuples, and a discard
+ * drops a base store's indexes and frees a derived relation with its own.
  *
  * `pred` is the predicate whose tuples these are, or RELIC_ID_NONE for a
  * query's answer, which belongs to the query object rather than to any
@@ -260,8 +261,8 @@ struct relic_relation {
  * and each of those holders would have to know not to keep a pointer -- a
  * rule obeyed at a growing list of call sites, which is only ever as good as
  * its last entry.  Allocating each relation on its own means growth moves
- * pointers and never relations, so a relation's address is fixed for the life
- * of the context and no caller has anything to remember.
+ * pointers and never relations, so a relation's address is fixed for as long
+ * as the relation exists and no caller has anything to remember.
  */
 struct relic_reltab {
 	relic_relation_t	**entries;	/* null until created */
@@ -271,7 +272,7 @@ struct relic_reltab {
 
 /*
  * The relation store: a table of derived relations, which evaluation writes
- * and a discard empties, and a table of base stores, which hold the facts a
+ * and a discard frees, and a table of base stores, which hold the facts a
  * program states and which only a load's commit writes.  A predicate has
  * one of each at most, created when first asked for.
  *
@@ -291,10 +292,10 @@ struct relic_reltab {
  * counts it, and loses none until the store is reset, so the count is kept
  * where the tuples arrive rather than summed over every store when asked.
  *
- * `holds_derived` is set whenever the store hands out a derived relation to
- * be written or builds a secondary index, the only two things a discard
- * removes, and cleared by the discard.  A discard with it clear has nothing
- * to do.
+ * `holds_derived` is set whenever the store hands out a derived relation or
+ * builds a secondary index, the only two things a discard removes, and
+ * cleared by the discard once it has removed them all.  Nothing derived
+ * exists while it is clear, so a discard with it clear has nothing to do.
  */
 struct relic_store {
 	relic_reltab_t	derived;

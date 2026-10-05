@@ -3369,6 +3369,11 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 	if (confirm_schedule_current(ctx) != 0)
 		return (-1);
 
+	/*
+	 * A group run's plans would name relations the discard frees, so
+	 * none may have begun.
+	 */
+	assert(!groups->begun);
 	relic_discard_derived(ctx);
 
 	note_query_activity(ctx, "rewriting", query->answer);
@@ -3399,11 +3404,18 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
  * Answer a query from the fixed point of the whole program, computing it
  * first if the relations do not hold it, then its group relations, and
  * deliver its rows.
+ *
+ * A group run an abandoned rewrite began is finished first: its plans hold
+ * group relations the rewrite derived, which computing the fixed point
+ * discards and so frees, and the group rules run again over the whole
+ * fixed point.
  */
 static int
 answer_from_program(relic_t *ctx, const relic_query_t *query,
     relic_group_run_t *groups, const relic_row_sink_t *rows)
 {
+	group_run_finish(ctx, groups);
+
 	if (materialize_program(ctx) != 0)
 		return (-1);
 
@@ -3427,10 +3439,7 @@ answer_from_program(relic_t *ctx, const relic_query_t *query,
  * whole program is turned to, because run_query_rule() delivers none
  * before everything but an interrupt has stopped being able to fail it, an
  * interrupt is not a rewrite over its budget, and a rewrite over its budget
- * fails before it is run.  The
- * group run is finished before the whole program is evaluated, whose
- * discard would empty the relations its plans index, and the group rules
- * run again over the whole fixed point.
+ * fails before it is run.
  */
 static int
 answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
@@ -3449,7 +3458,6 @@ answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
 	relic_magic_reset(&magic);
 
 	if (status != 0 && over_budget) {
-		group_run_finish(ctx, groups);
 		relic_explain_abandoned_rewrite(ctx, &query->rule,
 		    query->answer);
 		return (answer_from_program(ctx, query, groups, rows));
