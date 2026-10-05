@@ -191,6 +191,7 @@ static void	 expect_depth(const char *expression, unsigned int depth);
 static void	 nested_expression(char *text, size_t size, const char *open,
 		    const char *inner, unsigned int levels);
 static void	 each_operation_builds_its_strings_above_a_base(void);
+static void	 a_fold_in_place_reads_its_key_columns(void);
 static const relic_op_aggregate_t *fold_planned(fixture_t *fixture,
 		    const char *program, unsigned int flags, size_t op);
 
@@ -2451,9 +2452,9 @@ a_plan_keeping_every_binding_derives_distinct_rows(void)
 
 /*
  * Load `program` under `flags` and plan its last rule, which holds an
- * aggregate and follows the group rule the aggregate reads; the fold is
- * the operation at `op`.  Returns NULL, having failed the check, when the
- * rule is not planned or the operation there is not a fold.
+ * aggregate, after the group rule the aggregate reads when it has one; the
+ * fold is the operation at `op`.  Returns NULL, having failed the check,
+ * when the rule is not planned or the operation there is not a fold.
  */
 static const relic_op_aggregate_t *
 fold_planned(fixture_t *fixture, const char *program, unsigned int flags,
@@ -2501,12 +2502,12 @@ a_fold_goes_where_its_key_is_bound(void)
 		    "a fold written first follows the scan binding its key");
 		check(fold->binds && fold->kind == RELIC_SLOT_NUMBER && fold->fn ==
 		    RELIC_AGG_COUNT && fold->slot ==
-		    slot_named(&fixture, 1, "N"), SCENARIO_AGGREGATE,
+		    slot_named(&fixture, 0, "N"), SCENARIO_AGGREGATE,
 		    "a count binds its result as a number");
 		check(fold->key_count == 1 && fold->key_mask == 1 &&
-		    fold->key_slots[0] == slot_named(&fixture, 1, "X") &&
+		    fold->key_slots[0] == slot_named(&fixture, 0, "X") &&
 		    fold->arity == 2, SCENARIO_AGGREGATE,
-		    "the key is the shared X, the group's first column");
+		    "the key is the shared X, the atom's first column");
 	}
 	fixture_release(&fixture);
 
@@ -2514,7 +2515,7 @@ a_fold_goes_where_its_key_is_bound(void)
 	    "r(X) :- s(X, N), N = count { e(X, Y) }.\n", TEXTUAL_FLAGS, 1);
 	if (fold != NULL)
 		check(!fold->binds && fold->slot ==
-		    slot_named(&fixture, 1, "N"), SCENARIO_AGGREGATE,
+		    slot_named(&fixture, 0, "N"), SCENARIO_AGGREGATE,
 		    "a fold whose result is bound compares");
 	fixture_release(&fixture);
 
@@ -2581,6 +2582,67 @@ a_fold_reads_its_group_by_its_key(void)
 		check(fold->access == RELIC_FOLD_SCAN && fold->key_count == 1,
 		    SCENARIO_FOLD_ACCESS, "a keyed fold walks the relation "
 		    "without indexes");
+	fixture_release(&fixture);
+}
+
+/*
+ * A fold in place is keyed on whichever columns its shared variables stand
+ * in, which need not be a prefix, and reaches its group as a positive
+ * literal bound in those columns would: through the index keyed on exactly
+ * them, which a second fold on the same columns finds built; by a walk
+ * matching them under RELIC_F_NO_INDEX; and by a probe when every column
+ * is a key column.  The relation it walks is the atom's own.
+ */
+static void
+a_fold_in_place_reads_its_key_columns(void)
+{
+	static const char *const program = "e(a, b).\ns(b).\nt(b, a).\n"
+	    "q(X, M) :- s(X), M = count { e(Z, X) }.\n"
+	    "r(X, N) :- s(X), N = count { e(Y, X) }.\n";
+	const relic_op_aggregate_t *fold;
+	const relic_relation_t *edges;
+	fixture_t fixture;
+	uint32_t first_position;
+	size_t first_count;
+
+	fold = fold_planned(&fixture, program, 0, 1);
+	if (fold != NULL) {
+		edges = fold->relation;
+		first_position = fold->index_position;
+		first_count = edges->index_count;
+		check(fold->access == RELIC_FOLD_LOOKUP && fold->key_mask ==
+		    0x2 && fold->key_count == 1 && fold->key_slots[0] ==
+		    slot_named(&fixture, 1, "X") && fold->arity == 2 &&
+		    fold->index_position < edges->index_count &&
+		    edges->indexes[fold->index_position].key_mask == 0x2,
+		    SCENARIO_FOLD_ACCESS, "a fold keyed on the atom's second "
+		    "column reads the index keyed on that column alone");
+		check(fixture_plan_rule(&fixture, 0, NULL) &&
+		    fixture.plan.ops[1].kind == RELIC_OP_AGGREGATE &&
+		    fixture.plan.ops[1].u.aggregate.relation == edges &&
+		    fixture.plan.ops[1].u.aggregate.index_position ==
+		    first_position && edges->index_count == first_count,
+		    SCENARIO_FOLD_ACCESS, "a second fold on the same columns "
+		    "finds the index built");
+	}
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, program, RELIC_F_NO_INDEX, 1);
+	if (fold != NULL)
+		check(fold->access == RELIC_FOLD_SCAN && fold->key_mask == 0x2,
+		    SCENARIO_FOLD_ACCESS, "without indexes a fold in place "
+		    "walks the atom's relation matching its second column");
+	fixture_release(&fixture);
+
+	fold = fold_planned(&fixture, "e(a, b).\nt(b, a).\n"
+	    "r(X, Y, N) :- t(X, Y), N = count { e(Y, X) }.\n", 0, 1);
+	if (fold != NULL)
+		check(fold->access == RELIC_FOLD_PROBE &&
+		    fold->key_mask == 0x3 &&
+		    fold->key_slots[0] == slot_named(&fixture, 0, "Y") &&
+		    fold->key_slots[1] == slot_named(&fixture, 0, "X"),
+		    SCENARIO_FOLD_ACCESS, "a fold in place keyed on every column "
+		    "probes, its key slots in column order");
 	fixture_release(&fixture);
 }
 
@@ -2755,6 +2817,7 @@ main(void)
 	a_plan_keeping_every_binding_derives_distinct_rows();
 	a_fold_goes_where_its_key_is_bound();
 	a_fold_reads_its_group_by_its_key();
+	a_fold_in_place_reads_its_key_columns();
 	a_program_holds_the_stack_its_shape_needs();
 	each_operation_builds_its_strings_above_a_base();
 

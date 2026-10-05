@@ -29,7 +29,12 @@
  * An aggregate reaches what its body reads through its group predicate: an
  * aggregate edge to the group predicate, and an edge of the group rule from
  * there.  The writer never wrote the group predicate, so a diagnostic
- * reports such a pair of edges as one dependency through an aggregate.
+ * reports such a pair of edges as one dependency through an aggregate.  An
+ * aggregate whose body is one atom folded in place makes one aggregate edge,
+ * straight to the atom's predicate, which is reported alone.  So a vertex
+ * is known to be a group predicate by the predicate's kind, which the
+ * compiler set when it named it, and never by its being an aggregate edge's
+ * target, which an ordinary predicate can be.
  *
  * The schedule is the components that have rules, sorted by stratum.  The
  * sort is stable, so each stratum keeps completion order, and the result is
@@ -103,12 +108,13 @@ static void	 fill_schedule(const relic_analysis_t *analysis,
 		    relic_schedule_t *schedule);
 static void	 install_schedule(relic_program_t *program,
 		    relic_schedule_t *schedule);
-static bool	*mark_group_vertices(relic_analysis_t *analysis);
 static void	 note_aggregate(relic_analysis_t *analysis,
 		    const relic_dep_edge_t *aggregate,
 		    const relic_dep_edge_t *body);
 static void	 note_edge(relic_analysis_t *analysis,
 		    const relic_dep_edge_t *edge);
+static void	 note_fold(relic_analysis_t *analysis,
+		    const relic_dep_edge_t *aggregate);
 static void	 note_path(relic_analysis_t *analysis,
 		    const relic_dep_edge_t *closing, size_t length);
 static int	 order_by_stratum(relic_analysis_t *analysis, uint32_t *order,
@@ -123,6 +129,8 @@ static const relic_dep_edge_t *path_edge(const relic_analysis_t *analysis,
 		    size_t length, size_t *takenp);
 static size_t	 shortest_path(relic_analysis_t *analysis, uint32_t from,
 		    uint32_t to);
+static bool	 vertex_is_group(const relic_analysis_t *analysis,
+		    uint32_t vertex);
 
 void
 relic_schedule_init(relic_schedule_t *schedule)
@@ -190,16 +198,43 @@ note_aggregate(relic_analysis_t *analysis, const relic_dep_edge_t *aggregate,
 }
 
 /*
+ * One note for an aggregate edge to the predicate of an atom folded in
+ * place: the rule holding the aggregate depends on that predicate.  It
+ * reads as the one note note_aggregate() makes of a group rule's pair of
+ * edges, and points, as that does, at the literal inside the braces, the
+ * one literal of the aggregate's compiled body.
+ */
+static void
+note_fold(relic_analysis_t *analysis, const relic_dep_edge_t *aggregate)
+{
+	const relic_rule_t *rule;
+	const relic_rule_t *body;
+	char source[RELIC_PRED_TEXT_MAX];
+	char target[RELIC_PRED_TEXT_MAX];
+
+	rule = &analysis->rules->entries[aggregate->rule_index];
+	body = rule->body[aggregate->literal_index].u.aggregate.body;
+
+	relic_pred_describe(analysis->ctx,
+	    relic_depgraph_pred(aggregate->source), source, sizeof(source));
+	relic_pred_describe(analysis->ctx,
+	    relic_depgraph_pred(aggregate->target), target, sizeof(target));
+
+	relic_diag_note(analysis->ctx, &body->body[0].where,
+	    "%s depends on %s through an aggregate", source, target);
+}
+
+/*
  * The notes for a cycle: the closing edge, then the `length` edges of the
  * path the search stored, which leads from the closing edge's target back
  * to its source.
  *
- * An aggregate edge leads to a group predicate, and only an edge of its
- * group rule leads out of one, so on the cycle every aggregate edge is
- * followed by an edge of its group rule, and the two make one note.  The
- * cycle ends at the closing edge's source, which heads a rule the writer
- * wrote, so it never ends on an aggregate edge; one that did would have
- * that edge noted alone.
+ * An aggregate edge to a group predicate is followed on the cycle by an
+ * edge of its group rule, since only such an edge leads out of a group
+ * predicate, and the two make one note.  An aggregate edge to any other
+ * predicate is one note by itself.  The cycle ends at the closing edge's
+ * source, which heads a rule the writer wrote, so it never ends on an edge
+ * to a group predicate; one that did would have that edge noted alone.
  */
 static void
 note_path(relic_analysis_t *analysis, const relic_dep_edge_t *closing,
@@ -214,7 +249,11 @@ note_path(relic_analysis_t *analysis, const relic_dep_edge_t *closing,
 	while (edge != NULL) {
 		next = path_edge(analysis, length, &taken);
 
-		if (edge->kind == RELIC_DEP_AGGREGATE && next != NULL) {
+		if (edge->kind != RELIC_DEP_AGGREGATE) {
+			note_edge(analysis, edge);
+		} else if (!vertex_is_group(analysis, edge->target)) {
+			note_fold(analysis, edge);
+		} else if (next != NULL) {
 			note_aggregate(analysis, edge, next);
 			next = path_edge(analysis, length, &taken);
 		} else {
@@ -395,30 +434,17 @@ compare_written_order(const void *left, const void *right)
 }
 
 /*
- * Mark the group predicates among the graph's vertices: the targets of
- * aggregate edges.  Returns NULL when the scratch arena refused.
+ * Whether a vertex is the group predicate of an aggregate, by the kind the
+ * compiler gave the predicate when it named it.
  */
-static bool *
-mark_group_vertices(relic_analysis_t *analysis)
+static bool
+vertex_is_group(const relic_analysis_t *analysis, uint32_t vertex)
 {
-	const relic_depgraph_t *graph;
-	bool *group;
-	size_t e;
+	const relic_pred_t *pred;
 
-	graph = &analysis->graph;
+	pred = relic_pred_of(analysis->ctx, relic_depgraph_pred(vertex));
 
-	group = relic_arena_allocarray(&analysis->scratch, graph->vertex_count,
-	    sizeof(*group));
-	if (group == NULL)
-		return (NULL);
-	bzero(group, graph->vertex_count * sizeof(*group));
-
-	for (e = 0; e < graph->edge_count; e++) {
-		if (graph->edges[e].kind == RELIC_DEP_AGGREGATE)
-			group[graph->edges[e].target] = true;
-	}
-
-	return (group);
+	return (pred != NULL && pred->kind == RELIC_PRED_GROUP);
 }
 
 /*
@@ -450,7 +476,6 @@ find_strict_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
 	const relic_dep_edge_t *edge;
 	relic_dep_edge_t *cycles;
 	size_t *first_strict;
-	bool *group;
 	size_t count;
 	size_t e;
 	uint32_t c;
@@ -462,8 +487,7 @@ find_strict_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
 	    graph->component_count, sizeof(*first_strict));
 	cycles = relic_arena_allocarray(&analysis->scratch,
 	    graph->component_count, sizeof(*cycles));
-	group = mark_group_vertices(analysis);
-	if (first_strict == NULL || cycles == NULL || group == NULL)
+	if (first_strict == NULL || cycles == NULL)
 		return (-1);
 
 	for (c = 0; c < graph->component_count; c++)
@@ -472,7 +496,8 @@ find_strict_cycles(relic_analysis_t *analysis, relic_dep_edge_t **cyclesp,
 	for (e = 0; e < graph->edge_count; e++) {
 		edge = &graph->edges[e];
 		component = graph->component_of[edge->source];
-		if (!relic_dep_strict(edge) || group[edge->source] ||
+		if (!relic_dep_strict(edge) ||
+		    vertex_is_group(analysis, edge->source) ||
 		    graph->component_of[edge->target] != component)
 			continue;
 

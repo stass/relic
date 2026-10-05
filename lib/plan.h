@@ -305,8 +305,8 @@ struct relic_op_assign {
 };
 
 /*
- * How an AGGREGATE reaches the rows of its group, the tuples of the group
- * relation whose first `key_count` columns hold the key: by walking the
+ * How an AGGREGATE reaches the rows of its group, the tuples of the
+ * relation it folds whose key columns hold the key: by walking the
  * whole relation, matching the key columns of each tuple when there are
  * any; by walking the index keyed on exactly the key columns; or, when
  * every column is a key column, by probing for the one tuple the key names.
@@ -321,12 +321,15 @@ enum relic_fold_access {
 };
 
 /*
- * A fold of the group relation `relation`, of `arity` columns, for the key
- * the slots `key_slots` hold, `key_count` of them, which are the relation's
- * leading columns, bit c of `key_mask` for column c.  `access` says how
- * the group's rows are reached, and for RELIC_FOLD_LOOKUP `index_position`
- * names the index keyed on `key_mask` as a LOOKUP's does.  `fn` folds
- * column `column` of each row, which `count` does not read.
+ * A fold of the relation `relation`, of `arity` columns, for the key the
+ * slots `key_slots` hold, `key_count` of them: the slot of each key column,
+ * in increasing column order, bit c of `key_mask` marking column c.  The
+ * relation is a group relation, whose key columns are its leading ones, or
+ * the relation of an atom folded in place, whose key columns are whichever
+ * its shared variables stand in.  `access` says how the group's rows are
+ * reached, and for RELIC_FOLD_LOOKUP `index_position` names the index
+ * keyed on `key_mask` as a LOOKUP's does.  `fn` folds column `column` of
+ * each row, which `count` does not read.
  *
  * `binds` says whether the fold binds `slot` or, bound before, compares its
  * value with it; `kind` is the slot's kind, a number slot when a count or

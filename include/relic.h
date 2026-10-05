@@ -281,6 +281,16 @@ struct relic_config {
 #define	RELIC_F_PARALLEL_ALWAYS	0x0040u
 
 /*
+ * Compile the body of every aggregate into a rule of its own, whose relation
+ * holds the body's rows and is what the aggregate folds, even a body that is
+ * one positive atom of distinct variables, which otherwise denotes the
+ * atom's relation and is folded where it stands.  The answers are the same;
+ * the copies are tuples held and counted, so a limit may refuse one of the
+ * two ways and not the other.
+ */
+#define	RELIC_F_GROUP_RULES	0x0080u
+
+/*
  * Create a context.  Returns NULL when the configuration asks for more than
  * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
  * cannot supply the random bytes the context keys its hash tables with, as
@@ -833,7 +843,10 @@ typedef struct relic_stats relic_stats_t;
  *			delivers as it derives them among them, and facts
  *			seeded into the relation of a predicate rules
  *			derive, whether or not the relation already held
- *			them
+ *			them; the rows of an aggregate's body are derived
+ *			into a relation of their own and count, except
+ *			those of a body that is one atom of distinct
+ *			variables, whose rows are the atom's relation
  *	tuples_inserted	derivations that added a tuple to its relation,
  *			which a row delivered as it is derived never does
  *	tuples_scanned	tuples read while scanning relations

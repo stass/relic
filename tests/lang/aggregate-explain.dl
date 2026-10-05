@@ -1,5 +1,6 @@
 % The aggregate literal as the rule writes it, the group rule under its
 % own component, the operation with the group relation's columns and key,
+% a body of one atom folded over the atom's relation with no group rule,
 % and a query's group rule under the query's heading.
 dir(src). dir(doc).
 file(main, src). file(util, src). file(readme, doc).
@@ -17,3 +18,4 @@ dir_size(Dir, S)?
 largest(M)?
 leaves(N)?
 node(X), N = count { edge(X, Y) }?
+node(X), N = count { edge(X, Y), not has_out(Y) }?

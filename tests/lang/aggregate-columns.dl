@@ -1,0 +1,29 @@
+% A body of one atom of distinct variables is the atom's relation, so the
+% group under a binding of the shared variables is the atom's tuples that
+% hold it in the columns those variables stand in, whichever they are.
+% Rows that differ only outside the key fall in one group, and rows that
+% differ in a key column in two.
+w(a, b, 1). w(a, b, 2). w(b, a, 4). w(a, c, 1). w(c, a, 16).
+s(a, b). s(b, a). s(a, c).
+n(a). n(b). n(c).
+
+% The key in the first, the second and the last column.
+out(X, N) :- n(X), N = count { w(X, Y, W) }.
+in(X, N) :- n(X), N = count { w(Y, X, W) }.
+weighted(W, N) :- w(_, _, W), N = count { w(X, Y, W) }.
+
+% Two shared variables standing in the atom in the opposite order to the
+% one the rule numbers them in: the group of s(a, b) is w(b, a, _).
+back(X, Y, S) :- s(X, Y), S = sum(W) { w(Y, X, W) }.
+
+% No shared variable, and every column shared.
+total(S) :- S = sum(W) { w(X, Y, W) }.
+present(X, Y, W, N) :- s(X, Y), w(X, Y, W), N = count { w(X, Y, W) }.
+
+out(X, N)?
+in(X, N)?
+weighted(W, N)?
+back(X, Y, S)?
+total(S)?
+present(X, Y, W, N)?
+n(X), N = count { w(Y, X, W) }, N > 1?

@@ -936,20 +936,20 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 }
 
 /*
- * How an AGGREGATE reaches its group's rows, from how many of the group
- * relation's columns are key columns: all of its rows with no key, the one
- * tuple the key names when every column is one, and otherwise those an
- * index on the key columns holds, or, under RELIC_F_NO_INDEX, those a walk
- * of the whole relation matches.
+ * How an AGGREGATE reaches its group's rows, from which of the relation's
+ * columns are key columns: all of its rows with no key, the one tuple the
+ * key names when every column is one, and otherwise those an index on the
+ * key columns holds, or, under RELIC_F_NO_INDEX, those a walk of the whole
+ * relation matches.
  */
 static enum relic_fold_access
-fold_access(const relic_planner_t *planner, uint16_t key_count,
+fold_access(const relic_planner_t *planner, uint32_t key_mask,
     uint16_t arity)
 {
-	if (key_count == 0)
+	if (key_mask == 0)
 		return (RELIC_FOLD_SCAN);
 
-	if (key_count == arity)
+	if (key_mask == relic_plan_all_columns(arity))
 		return (RELIC_FOLD_PROBE);
 
 	if ((planner->ctx->config.flags & RELIC_F_NO_INDEX) != 0)
@@ -960,11 +960,11 @@ fold_access(const relic_planner_t *planner, uint16_t key_count,
 
 /*
  * Place an aggregate literal, whose shared slots are bound, as an AGGREGATE
- * over its group relation.  It binds its result slot when nothing has, a
+ * over the relation it folds.  It binds its result slot when nothing has, a
  * number slot for a count or a sum and a domain slot for a min or a max, and
  * otherwise compares with it, reading it as the kind of slot it is.  A
- * lookup names the index keyed on the shared columns, built here when the
- * relation has none.
+ * lookup names the index keyed on the literal's key columns, built here
+ * when the relation has none.
  */
 static int
 place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
@@ -976,7 +976,7 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 	uint32_t index_position;
 
 	aggregate = &literal->u.aggregate;
-	relation = relic_relation_read(planner->ctx, aggregate->group);
+	relation = relic_relation_read(planner->ctx, aggregate->source);
 	if (relation == NULL)
 		return (-1);
 
@@ -991,8 +991,8 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 	fold->key_count = aggregate->shared_count;
 	fold->column = aggregate->column;
 	fold->slot = aggregate->result;
-	fold->key_mask = relic_plan_all_columns(fold->key_count);
-	fold->access = fold_access(planner, fold->key_count, fold->arity);
+	fold->key_mask = aggregate->key_mask;
+	fold->access = fold_access(planner, fold->key_mask, fold->arity);
 
 	if (fold->access == RELIC_FOLD_LOOKUP) {
 		if (relic_relation_index(planner->ctx, relation,

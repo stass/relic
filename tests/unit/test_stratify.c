@@ -328,7 +328,7 @@ schedule_respects_dependencies(const relic_t *ctx)
 
 			body_position = position[literal->kind ==
 			    RELIC_LITERAL_AGGREGATE ?
-			    literal->u.aggregate.group : literal->u.atom.pred];
+			    literal->u.aggregate.source : literal->u.atom.pred];
 			if (body_position == 0)
 				continue;
 
@@ -486,7 +486,10 @@ negation_reads_a_strictly_lower_stratum(void)
 	/*
 	 * An aggregate reads its group predicate, a component of its own, from
 	 * a strictly lower stratum, as a negation reads what it negates; the
-	 * group rule's body reads positively.
+	 * group rule's body reads positively.  A body of one atom of distinct
+	 * variables is folded in place, and the aggregate reads the atom's
+	 * predicate from a strictly lower stratum, the stratum its group rule
+	 * would have placed it in.
 	 */
 	schedule_is(SCENARIO_STRATA,
 	    "dir_size(D, S) :- dir(D), S = sum(Z) { file(F, D), size(F, Z) }."
@@ -497,6 +500,12 @@ negation_reads_a_strictly_lower_stratum(void)
 	    "b(X) :- c(X), not d(X).\n"
 	    "n(N) :- N = count { b(X) }.\n"
 	    "top(M) :- M = max(N) { n(N) }.\n",
+	    "0:d/1 1:b/1 2:n/1 3:top/1");
+	schedule_is(SCENARIO_STRATA,
+	    "d(X) :- c(X).\n"
+	    "b(X) :- c(X), not d(X).\n"
+	    "n(N) :- N = count { b(X), c(X) }.\n"
+	    "top(M) :- M = max(N) { n(N), N > 0 }.\n",
 	    "0:d/1 1:b/1 1:agg$n$1$0$1/1 2:n/1 2:agg$top$1$0$1/1 3:top/1");
 }
 
@@ -718,10 +727,25 @@ recursion_through_negation_is_rejected(void)
 		 * An aggregate over its own head: the aggregate edge and the
 		 * group rule's edge back are one note.
 		 */
+		{ "c(1).\np(N) :- c(N).\np(N) :- N = count { p(X), c(X) }.\n",
+		  1, 1 },
+		/*
+		 * An aggregate folding its own head in place: one edge, from
+		 * the head to itself, and one note.  The head is the target
+		 * of an aggregate edge and no group predicate, so its edges
+		 * are candidates for the closing edge.
+		 */
 		{ "c(1).\np(N) :- c(N).\np(N) :- N = count { p(X) }.\n", 1, 1 },
 		/* An aggregate edge and a negative edge in one cycle. */
 		{ "c(1).\na(N) :- c(N), N = count { b(X) }.\n"
 		  "b(X) :- c(X), not a(X).\n", 1, 2 },
+		/*
+		 * A fold in place and a group rule in one cycle: the edge to
+		 * the folded predicate is one note, the aggregate edge to the
+		 * group predicate and its group rule's edge another.
+		 */
+		{ "c(1).\na(N) :- c(N), N = count { b(X) }.\n"
+		  "b(X) :- c(X), X = count { a(Y), c(Y) }.\n", 1, 2 },
 	};
 	relic_t *ctx;
 	diag_log_t log;

@@ -756,8 +756,9 @@ names the aggregated variable. For a body folded in place that compiled
 body is a `relic_rule_t` with no head: `head` is `RELIC_ID_NONE`,
 `head_arity` is zero and `head_args` is `NULL`, which is less than a
 query's rule has, a query's head being none but its output columns being
-head arguments; `origin` is the statement's, as a group rule's is; the
-body is the one literal, and its variables are numbered in the order the
+head arguments; `origin`, which only the notes of a rule being evaluated
+read, is never read, since the body is never evaluated; the body is the
+one literal, and its variables are numbered in the order the
 atom's arguments are written, so that **its slot `c` is column `c` of the
 relation the fold reads**, which is the invariant section 6 states for a
 group rule's variables too. The aggregated column is found among those

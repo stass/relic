@@ -6,9 +6,14 @@
 # evaluator runs it, and once under each alternative -X selects -- the naive
 # fixed point, the planner without indexes and without reordering, each of
 # those again answering from the whole fixed point instead of through the
-# Magic rewrite, and rounds whose insertions wait for their end.  Every run
-# must agree with the default on standard output, the diagnostics on
-# standard error, and exit status.  Some diagnostics are left out.  The
+# Magic rewrite, rounds whose insertions wait for their end, and every
+# aggregate body compiled to a group rule.  Every run must agree with the
+# default on standard output, the diagnostics on standard error, and exit
+# status, but for the group rules, held to the default's output and status
+# alone: they hold copies the default does not, which a limit message
+# counts, and an unstratified program's cycle, found by the shortest path
+# through one aggregate edge rather than two, may be noted by another
+# equally valid path.  Some diagnostics are left out.  The
 # warning that a rewrite outgrew its budget says which strategy answered,
 # which runs without the rewrite never report, and the answer it announces
 # is compared like any other.  The notes -vv gives about a comparison of
@@ -72,12 +77,14 @@ set -eu
 # The strategies compared, each its -X names joined by `+`, among which jN
 # stands for -j N.  Those in `same_rules` evaluate the default's rules and
 # are held to its tuple total too, and those in `other_rules` only to its
-# answers.  The no-magic run is compared with the default on its answers,
-# and is the reference whose tuple total those in `whole_rules`, which
-# answer from the whole fixed point too, are held to.
+# answers and diagnostics.  The no-magic run is compared with the default
+# on its answers, and is the reference whose tuple total those in
+# `whole_rules`, which answer from the whole fixed point too, are held to.
+# Those in `answer_rules` are held to the default's answers and exit status.
 same_rules="naive no-index parallel j4+parallel"
 other_rules="no-reorder"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic"
+answer_rules="group-rules"
 
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT
@@ -199,6 +206,11 @@ for path in $RELIC_LANG_TESTS; do
 	for strategy in $other_rules; do
 		run_strategy "$strategy"
 		compare default "$strategy" out err status
+	done
+
+	for strategy in $answer_rules; do
+		run_strategy "$strategy"
+		compare default "$strategy" out status
 	done
 
 	run_strategy no-magic

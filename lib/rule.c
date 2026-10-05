@@ -58,7 +58,9 @@
  * group rule is checked as a rule, and the closure binds an aggregate's
  * result once B holds every shared slot of it, as it binds an assignment's
  * variable once B holds the other side.  A statement's rules are published
- * together or not at all.
+ * together or not at all.  A body that is one atom of distinct variables
+ * is the exception: it denotes the atom's own relation, so the literal
+ * folds that relation and no group rule copies it.
  *
  * A query is compiled by the same code into a rule of its own.  Its head
  * names no predicate, and its arguments are the query's named variables in
@@ -241,7 +243,8 @@ struct relic_share_walk {
  * own, whose `outer` is the compiler of the rule holding the aggregate and
  * whose `scopes` is NULL, since a group body holds no aggregate.
  * `group_rules` holds the statement's group rules once they are compiled,
- * one per aggregate, in body order.
+ * in body order, with room for one per aggregate; an aggregate whose body
+ * is folded in place has none.
  */
 struct relic_compiler {
 	relic_t			*ctx;
@@ -262,7 +265,8 @@ struct relic_compiler {
  * What compiling one statement produces: its rule, and the group rules of
  * its aggregates, `group_rule_count` of them in body order, in the arena the
  * statement was compiled into.  Each aggregate literal of the rule points
- * at its own group rule in that array.
+ * at its own group rule in that array, or at the body it folds in place,
+ * which is held beside it and published nowhere.
  */
 struct relic_compiled_statement {
 	relic_rule_t		 rule;
@@ -276,6 +280,10 @@ static enum relic_compile_result append_loaded_query(relic_t *ctx,
 static enum relic_compile_result append_program_rules(relic_t *ctx,
 		    relic_compiled_statement_t *compiled);
 static void	 bind_by_assignment(relic_compiler_t *compiler);
+static bool	 aggregate_is_grouped(const relic_compiler_t *compiler,
+		    const relic_aggregate_t *aggregate);
+static bool	 body_is_relation(const relic_compiler_t *compiler,
+		    const relic_ast_aggregate_t *aggregate);
 static int	 check_program(relic_t *ctx);
 static int	 compile_and_analyse(relic_t *ctx);
 static enum relic_compile_result classify_scopes(relic_t *ctx,
@@ -287,6 +295,12 @@ static void	*compile_alloc(relic_compiler_t *compiler, size_t count,
 static enum relic_compile_result compile_aggregate(relic_compiler_t *compiler,
 		    const relic_ast_aggregate_t *source, size_t position,
 		    relic_aggregate_t *aggregate);
+static enum relic_compile_result compile_aggregate_bodies(
+		    relic_compiler_t *compiler);
+static enum relic_compile_result compile_aggregate_body(
+		    relic_compiler_t *outer,
+		    const relic_ast_aggregate_t *source, size_t position,
+		    relic_aggregate_t *aggregate, relic_rule_t *body);
 static enum relic_compile_result compile_atom(relic_compiler_t *compiler,
 		    const relic_ast_atom_t *source,
 		    enum relic_arg_position position, relic_atom_t *atom);
@@ -302,11 +316,8 @@ static enum relic_compile_result compile_comparison(
 		    relic_comparison_t *comparison);
 static enum relic_compile_result compile_expr(relic_compiler_t *compiler,
 		    const relic_ast_expr_t *source, relic_expr_t **exprp);
-static enum relic_compile_result compile_group_rule(relic_compiler_t *outer,
-		    const relic_ast_aggregate_t *source, size_t position,
-		    relic_aggregate_t *aggregate, relic_rule_t *group_rule);
-static enum relic_compile_result compile_group_rules(
-		    relic_compiler_t *compiler);
+static enum relic_compile_result compile_group_head(
+		    relic_compiler_t *compiler, relic_pred_id_t group);
 static enum relic_compile_result compile_head(relic_compiler_t *compiler);
 static enum relic_compile_result compile_literal(relic_compiler_t *compiler,
 		    const relic_ast_literal_t *source, size_t position,
@@ -336,16 +347,30 @@ static enum relic_compile_result finish_rule(relic_compiler_t *compiler,
 		    relic_compiled_statement_t *compiled);
 static const relic_ast_stmt_t *first_pending_statement(const relic_t *ctx);
 static void	 fold_scopes(relic_scopes_t *scopes);
+static enum relic_compile_result intern_body_atom(
+		    relic_compiler_t *compiler, const relic_ast_atom_t *atom,
+		    relic_pred_id_t *predp);
 static enum relic_compile_result intern_body_predicates(
 		    relic_compiler_t *compiler,
 		    const relic_ast_aggregate_t *source);
 static enum relic_compile_result intern_group_predicate(
 		    relic_compiler_t *compiler, size_t position, uint16_t arity,
 		    const relic_location_t *where, relic_pred_id_t *idp);
+static enum relic_compile_result keep_aggregate_body(
+		    relic_compiler_t *compiler, const relic_rule_t *body,
+		    relic_aggregate_t *aggregate);
+static enum relic_compile_result key_atom_relation(
+		    relic_compiler_t *compiler, const relic_ast_atom_t *atom,
+		    size_t position, relic_aggregate_t *aggregate);
+static enum relic_compile_result key_group_relation(
+		    relic_compiler_t *compiler, uint64_t slots,
+		    uint16_t columns, relic_aggregate_t *aggregate);
 static bool	 literal_assigns(const relic_literal_t *literal,
 		    uint64_t bound, uint16_t *slotp);
 static void	 mark_group_predicates_derived(relic_t *ctx,
 		    const relic_compiled_statement_t *compiled);
+static uint16_t	 named_slot(const relic_compiler_t *compiler,
+		    uint32_t name);
 static void	 note_group_column(void *state, const relic_ast_term_t *term);
 static enum relic_compile_result occupy_slot(relic_compiler_t *compiler,
 		    const relic_ast_variable_t *variable,
@@ -368,9 +393,13 @@ static void	 report_unbound_variables(relic_compiler_t *compiler,
 static void	 report_variable_limit(relic_compiler_t *compiler,
 		    const relic_location_t *where);
 static int	 scope_compare(const void *left, const void *right);
+static void	 seed_atom_columns(relic_compiler_t *compiler,
+		    const relic_ast_atom_t *atom);
 static void	 seed_group_columns(relic_compiler_t *compiler,
 		    const relic_group_columns_t *columns,
 		    const relic_aggregate_t *aggregate, size_t position);
+static void	 seed_variable(relic_compiler_t *compiler, uint32_t name,
+		    const relic_location_t *where, uint32_t occurrences);
 static void	 share_variable(void *state, const relic_ast_term_t *term);
 static bool	 singleton_exempt(const relic_compiler_t *compiler,
 		    const relic_variable_t *variable);
@@ -1276,17 +1305,32 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
 }
 
 /*
+ * Intern and reference the predicate of an atom inside an aggregate's body.
+ */
+static enum relic_compile_result
+intern_body_atom(relic_compiler_t *compiler, const relic_ast_atom_t *atom,
+    relic_pred_id_t *predp)
+{
+	if (relic_pred_intern(compiler->ctx, atom->name, atom->arity,
+	    &atom->where, predp) != 0)
+		return (RELIC_COMPILE_INCOMPLETE);
+	relic_pred_reference(compiler->ctx, *predp, &atom->where);
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
  * Intern and reference the predicates the atoms of an aggregate's body
- * read, in the order they are written.  The group rule compiled later finds
- * them interned; doing it here keeps identifiers in the order predicates
- * are first written in, and makes an undefined predicate's warning point
- * at its first mention.
+ * read, in the order they are written.  The body compiled later finds them
+ * interned; doing it here keeps identifiers in the order predicates are
+ * first written in, and makes an undefined predicate's warning point at its
+ * first mention.
  */
 static enum relic_compile_result
 intern_body_predicates(relic_compiler_t *compiler,
     const relic_ast_aggregate_t *source)
 {
-	const relic_ast_atom_t *atom;
+	enum relic_compile_result result;
 	relic_pred_id_t pred;
 	size_t i;
 
@@ -1295,21 +1339,192 @@ intern_body_predicates(relic_compiler_t *compiler,
 		    source->body[i].kind != RELIC_LITERAL_NEGATED)
 			continue;
 
-		atom = &source->body[i].u.atom;
-		if (relic_pred_intern(compiler->ctx, atom->name, atom->arity,
-		    &atom->where, &pred) != 0)
-			return (RELIC_COMPILE_INCOMPLETE);
-		relic_pred_reference(compiler->ctx, pred, &atom->where);
+		result = intern_body_atom(compiler, &source->body[i].u.atom,
+		    &pred);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
 	}
 
 	return (RELIC_COMPILE_OK);
 }
 
 /*
+ * Whether an aggregate's body denotes a relation that already exists, so
+ * that the fold reads that relation where it stands rather than a group
+ * relation copying it: whether the body is exactly one positive atom whose
+ * arguments are pairwise distinct named variables, the aggregated variable
+ * among them unless the function is COUNT.
+ *
+ * Such a body's rows are the atom's tuples, column for column, so the group
+ * under a binding of the shared variables is the set of the atom's tuples
+ * holding that binding in the columns those variables stand in.  A constant
+ * makes the body a selection of the atom, `_` a projection, and a repeated
+ * variable a selection too, each a relation the atom's is not; and an
+ * aggregated variable the atom does not name is a mistake the group rule's
+ * check reports.  RELIC_F_GROUP_RULES compiles every body to a group rule,
+ * so that the two forms can be compared.
+ *
+ * compile_aggregate() asks this once and records the answer in the kind
+ * of predicate the literal folds, which aggregate_is_grouped() reads back.
+ */
+static bool
+body_is_relation(const relic_compiler_t *compiler,
+    const relic_ast_aggregate_t *aggregate)
+{
+	const relic_ast_atom_t *atom;
+	const relic_ast_term_t *term;
+	bool names_column;
+	uint16_t i;
+	uint16_t j;
+
+	if ((compiler->ctx->config.flags & RELIC_F_GROUP_RULES) != 0)
+		return (false);
+
+	if (aggregate->body_length != 1 ||
+	    aggregate->body[0].kind != RELIC_LITERAL_POSITIVE)
+		return (false);
+
+	atom = &aggregate->body[0].u.atom;
+	names_column = aggregate->fn == RELIC_AGG_COUNT;
+	for (i = 0; i < atom->arity; i++) {
+		term = &atom->terms[i];
+		if (term->kind != RELIC_TERM_VARIABLE ||
+		    term->u.variable.anonymous)
+			return (false);
+
+		for (j = 0; j < i; j++) {
+			if (atom->terms[j].u.variable.name ==
+			    term->u.variable.name)
+				return (false);
+		}
+
+		if (aggregate->fn != RELIC_AGG_COUNT &&
+		    term->u.variable.name == aggregate->column.u.variable.name)
+			names_column = true;
+	}
+
+	return (names_column);
+}
+
+/*
+ * Whether an aggregate compile_aggregate() has completed folds a group
+ * relation, which its body is compiled to a group rule to fill, rather than
+ * an atom's relation in place: whether the predicate it folds is the group
+ * predicate compile_aggregate() interned for it.  An atom's predicate is
+ * one the program names, never a group predicate, so the predicate's kind
+ * is the one record of the decision, which every later step reads.
+ */
+static bool
+aggregate_is_grouped(const relic_compiler_t *compiler,
+    const relic_aggregate_t *aggregate)
+{
+	const relic_pred_t *source;
+
+	source = relic_pred_of(compiler->ctx, aggregate->source);
+
+	return (source != NULL && source->kind == RELIC_PRED_GROUP);
+}
+
+/*
+ * The slot of the rule being compiled that the named variable `name`
+ * occupies, which it must already have been given.
+ */
+static uint16_t
+named_slot(const relic_compiler_t *compiler, uint32_t name)
+{
+	uint16_t slot;
+
+	for (slot = 0; slot < compiler->variable_count; slot++) {
+		if (!compiler->variables[slot].anonymous &&
+		    compiler->variables[slot].name == name)
+			break;
+	}
+	assert(slot < compiler->variable_count);
+
+	return (slot);
+}
+
+/*
+ * Key the fold of a group relation, whose leading columns are the shared
+ * variables in the slot order of the rule holding the aggregate: the key
+ * columns are the first of them, and `shared` lists the slots in `slots`
+ * in increasing order, which is the order of those columns.
+ */
+static enum relic_compile_result
+key_group_relation(relic_compiler_t *compiler, uint64_t slots,
+    uint16_t columns, relic_aggregate_t *aggregate)
+{
+	uint16_t *shared;
+	uint16_t slot;
+
+	if (slots == 0)
+		return (RELIC_COMPILE_OK);
+
+	shared = compile_alloc(compiler, columns, sizeof(*shared));
+	if (shared == NULL)
+		return (RELIC_COMPILE_INCOMPLETE);
+	for (slot = 0; slot < compiler->variable_count; slot++) {
+		if ((slots & (UINT64_C(1) << slot)) == 0)
+			continue;
+		shared[aggregate->shared_count] = slot;
+		aggregate->shared_count++;
+	}
+	aggregate->shared = shared;
+	aggregate->key_mask = relic_plan_all_columns(aggregate->shared_count);
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Key the fold of an atom's own relation, for a body body_is_relation()
+ * accepts: the key columns are the atom's columns that hold a variable
+ * shared with the rule holding the aggregate, and `shared` lists, in
+ * increasing column order, the slot of the rule each is bound from.  The
+ * order is the columns' and not the slots', since the fold matches column
+ * c against the slot `shared` pairs with it, and the shared variables need
+ * not stand in the atom in the order of their slots.
+ */
+static enum relic_compile_result
+key_atom_relation(relic_compiler_t *compiler, const relic_ast_atom_t *atom,
+    size_t position, relic_aggregate_t *aggregate)
+{
+	uint16_t *shared;
+	uint16_t column;
+	uint16_t key;
+
+	for (column = 0; column < atom->arity; column++) {
+		if (variable_is_local(compiler->scopes,
+		    atom->terms[column].u.variable.name, position))
+			continue;
+		aggregate->key_mask |= UINT32_C(1) << column;
+		aggregate->shared_count++;
+	}
+	if (aggregate->shared_count == 0)
+		return (RELIC_COMPILE_OK);
+
+	shared = compile_alloc(compiler, aggregate->shared_count,
+	    sizeof(*shared));
+	if (shared == NULL)
+		return (RELIC_COMPILE_INCOMPLETE);
+	key = 0;
+	for (column = 0; column < atom->arity; column++) {
+		if ((aggregate->key_mask & (UINT32_C(1) << column)) == 0)
+			continue;
+		shared[key] = named_slot(compiler,
+		    atom->terms[column].u.variable.name);
+		key++;
+	}
+	aggregate->shared = shared;
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
  * Compile an aggregate literal into the rule holding it: its result, the
- * slots of its shared variables, and the group predicate its fold reads.
- * Its body is compiled later, into its group rule, once every slot of this
- * rule is numbered; compile_group_rule() completes the literal then.
+ * slots of its shared variables, and the relation its fold reads, keyed on
+ * the columns those variables stand in.  Its body is compiled later, once
+ * every slot of this rule is numbered; compile_aggregate_body() completes
+ * the literal then.
  *
  * The variables inside the aggregate that are the rule's take their slots
  * here, in the order they are written, and are required, since the fold
@@ -1317,9 +1532,11 @@ intern_body_predicates(relic_compiler_t *compiler,
  * bind_by_assignment() is what binds it.  The aggregate's own variables
  * take no slot of this rule.
  *
- * The shared slots are listed in slot order, which is the order of the
- * group predicate's leading columns.  Every shared variable is named inside
- * the aggregate, so there are no more of them than the group has columns.
+ * A body that is a relation already is folded where it stands; any other
+ * gets a group predicate, interned here, before the atoms inside the
+ * braces, so that identifiers keep the order of first appearance.  Every
+ * shared variable is named inside the aggregate, so there are no more of
+ * them than the relation folded has columns.
  */
 static enum relic_compile_result
 compile_aggregate(relic_compiler_t *compiler,
@@ -1331,8 +1548,6 @@ compile_aggregate(relic_compiler_t *compiler,
 	enum relic_compile_result result;
 	relic_arg_t written;
 	char described[RELIC_STATEMENT_TEXT_MAX];
-	uint16_t *shared;
-	uint16_t slot;
 
 	bzero(aggregate, sizeof(*aggregate));
 	aggregate->fn = source->fn;
@@ -1362,8 +1577,18 @@ compile_aggregate(relic_compiler_t *compiler,
 		return (RELIC_COMPILE_REJECTED);
 	}
 
+	if (body_is_relation(compiler, source)) {
+		result = intern_body_atom(compiler, &source->body[0].u.atom,
+		    &aggregate->source);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
+
+		return (key_atom_relation(compiler, &source->body[0].u.atom,
+		    position, aggregate));
+	}
+
 	result = intern_group_predicate(compiler, position, columns.count,
-	    &source->where, &aggregate->group);
+	    &source->where, &aggregate->source);
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
@@ -1371,21 +1596,27 @@ compile_aggregate(relic_compiler_t *compiler,
 	if (result != RELIC_COMPILE_OK)
 		return (result);
 
-	if (walk.shared == 0)
-		return (RELIC_COMPILE_OK);
+	return (key_group_relation(compiler, walk.shared, columns.count,
+	    aggregate));
+}
 
-	shared = compile_alloc(compiler, columns.count, sizeof(*shared));
-	if (shared == NULL)
-		return (RELIC_COMPILE_INCOMPLETE);
-	for (slot = 0; slot < compiler->variable_count; slot++) {
-		if ((walk.shared & (UINT64_C(1) << slot)) == 0)
-			continue;
-		shared[aggregate->shared_count] = slot;
-		aggregate->shared_count++;
-	}
-	aggregate->shared = shared;
+/*
+ * Give a variable of an aggregate's body the next slot of the body's rule.
+ * `occurrences` counts the head's, one for a column of a group rule's head
+ * and none for a body with no head.
+ */
+static void
+seed_variable(relic_compiler_t *compiler, uint32_t name,
+    const relic_location_t *where, uint32_t occurrences)
+{
+	relic_variable_t *seeded;
 
-	return (RELIC_COMPILE_OK);
+	seeded = &compiler->variables[compiler->variable_count];
+	bzero(seeded, sizeof(*seeded));
+	seeded->name = name;
+	seeded->where = *where;
+	seeded->occurrences = occurrences;
+	compiler->variable_count++;
 }
 
 /*
@@ -1402,7 +1633,6 @@ seed_group_columns(relic_compiler_t *compiler,
     size_t position)
 {
 	const relic_compiler_t *outer;
-	relic_variable_t *seeded;
 	uint32_t name;
 	uint16_t column;
 	uint16_t i;
@@ -1418,12 +1648,7 @@ seed_group_columns(relic_compiler_t *compiler,
 		}
 		assert(column < columns->count);
 
-		seeded = &compiler->variables[compiler->variable_count];
-		bzero(seeded, sizeof(*seeded));
-		seeded->name = name;
-		seeded->where = columns->where[column];
-		seeded->occurrences = 1;
-		compiler->variable_count++;
+		seed_variable(compiler, name, &columns->where[column], 1);
 	}
 
 	for (column = 0; column < columns->count; column++) {
@@ -1431,13 +1656,24 @@ seed_group_columns(relic_compiler_t *compiler,
 		    position))
 			continue;
 
-		seeded = &compiler->variables[compiler->variable_count];
-		bzero(seeded, sizeof(*seeded));
-		seeded->name = columns->name[column];
-		seeded->where = columns->where[column];
-		seeded->occurrences = 1;
-		compiler->variable_count++;
+		seed_variable(compiler, columns->name[column],
+		    &columns->where[column], 1);
 	}
+}
+
+/*
+ * Number the variables of a body folded in place after the atom's
+ * arguments, each a distinct named variable, so that slot c is column c of
+ * the atom's relation.
+ */
+static void
+seed_atom_columns(relic_compiler_t *compiler, const relic_ast_atom_t *atom)
+{
+	uint16_t column;
+
+	for (column = 0; column < atom->arity; column++)
+		seed_variable(compiler, atom->terms[column].u.variable.name,
+		    &atom->terms[column].where, 0);
 }
 
 /*
@@ -1490,22 +1726,57 @@ report_group_unbound(relic_compiler_t *compiler,
 }
 
 /*
- * Compile an aggregate's body into its group rule, and complete the
- * aggregate literal of the rule holding it with the rule and the
- * aggregated column.
- *
- * The group rule's head is the group predicate over its columns, which
- * seed_group_columns() numbers so that column c is slot c; the aggregated
- * variable's slot is therefore its column.  The rule is checked as a rule:
- * every column must be bound inside the braces, a shared one included,
- * since the relation needs a value for it that only the body can give.  No
- * singleton warning arises from it, because each named variable occurs in
- * the head as well as in the body.
+ * Make the head of a group rule: the group predicate over every variable
+ * the columns were seeded as, column c holding slot c, each required, since
+ * the relation needs a value for it that only the body can give.
  */
 static enum relic_compile_result
-compile_group_rule(relic_compiler_t *outer,
+compile_group_head(relic_compiler_t *compiler, relic_pred_id_t group)
+{
+	uint16_t column;
+
+	compiler->rule.head = group;
+	compiler->rule.head_arity = compiler->variable_count;
+	if (compiler->rule.head_arity == 0)
+		return (RELIC_COMPILE_OK);
+
+	compiler->rule.head_args = compile_alloc(compiler,
+	    compiler->rule.head_arity, sizeof(*compiler->rule.head_args));
+	if (compiler->rule.head_args == NULL)
+		return (RELIC_COMPILE_INCOMPLETE);
+
+	for (column = 0; column < compiler->variable_count; column++) {
+		bzero(&compiler->rule.head_args[column],
+		    sizeof(compiler->rule.head_args[column]));
+		compiler->rule.head_args[column].kind = RELIC_ARG_VARIABLE;
+		compiler->rule.head_args[column].u.slot = column;
+		compiler->required |= UINT64_C(1) << column;
+	}
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Compile an aggregate's body into *body, and complete the aggregate
+ * literal of the rule holding it with the aggregated column.
+ *
+ * A body compiled to a group rule gets the group predicate as its head,
+ * over the columns seed_group_columns() numbers, and is checked as a rule:
+ * every column must be bound inside the braces, a shared one included.  No
+ * singleton warning arises from it, because each named variable occurs in
+ * the head as well as in the body.  A body folded in place gets no head:
+ * it describes the relation the fold reads, which no rule derives, and it
+ * is never evaluated, so its origin is never read.  Its one atom binds
+ * every variable it names, so it passes the same check with nothing to
+ * report.
+ *
+ * Either way slot c is column c of the relation folded, so the aggregated
+ * variable's slot is its column.
+ */
+static enum relic_compile_result
+compile_aggregate_body(relic_compiler_t *outer,
     const relic_ast_aggregate_t *source, size_t position,
-    relic_aggregate_t *aggregate, relic_rule_t *group_rule)
+    relic_aggregate_t *aggregate, relic_rule_t *body)
 {
 	relic_compiler_t compiler;
 	relic_group_columns_t columns;
@@ -1517,25 +1788,15 @@ compile_group_rule(relic_compiler_t *outer,
 	compiler_init(&compiler, outer->ctx, outer->arena, outer->statement);
 	compiler.outer = outer;
 	compiler.rule.where = source->where;
-	compiler.rule.head = aggregate->group;
 
-	collect_group_columns(source, &columns);
-	seed_group_columns(&compiler, &columns, aggregate, position);
-
-	compiler.rule.head_arity = compiler.variable_count;
-	if (compiler.rule.head_arity > 0) {
-		compiler.rule.head_args = compile_alloc(&compiler,
-		    compiler.rule.head_arity,
-		    sizeof(*compiler.rule.head_args));
-		if (compiler.rule.head_args == NULL)
-			return (RELIC_COMPILE_INCOMPLETE);
-	}
-	for (column = 0; column < compiler.variable_count; column++) {
-		bzero(&compiler.rule.head_args[column],
-		    sizeof(compiler.rule.head_args[column]));
-		compiler.rule.head_args[column].kind = RELIC_ARG_VARIABLE;
-		compiler.rule.head_args[column].u.slot = column;
-		compiler.required |= UINT64_C(1) << column;
+	if (!aggregate_is_grouped(outer, aggregate)) {
+		seed_atom_columns(&compiler, &source->body[0].u.atom);
+	} else {
+		collect_group_columns(source, &columns);
+		seed_group_columns(&compiler, &columns, aggregate, position);
+		result = compile_group_head(&compiler, aggregate->source);
+		if (result != RELIC_COMPILE_OK)
+			return (result);
 	}
 
 	compiler.rule.body_length = source->body_length;
@@ -1561,31 +1822,55 @@ compile_group_rule(relic_compiler_t *outer,
 		return (result);
 
 	if (source->fn != RELIC_AGG_COUNT) {
-		for (column = 0; column < compiler.variable_count; column++) {
-			if (compiler.variables[column].name ==
-			    source->column.u.variable.name)
-				break;
-		}
-		assert(column < compiler.rule.head_arity);
+		column = named_slot(&compiler, source->column.u.variable.name);
 		aggregate->column = column;
 	}
 
-	*group_rule = compiler.rule;
-	aggregate->group_rule = group_rule;
+	*body = compiler.rule;
 
 	return (RELIC_COMPILE_OK);
 }
 
 /*
- * Compile the group rule of every aggregate of the statement, into an
- * array of the compiler's arena, once the rule holding them is numbered.
- * Every one is compiled even after one is rejected, so that one run reports
- * every mistake.
+ * Keep a compiled aggregate body where the literal can reach it for as long
+ * as the literal lives: a group rule in the statement's array of group
+ * rules, which is published with the statement, and a body folded in place
+ * in a block of its own, which is published nowhere.
  */
 static enum relic_compile_result
-compile_group_rules(relic_compiler_t *compiler)
+keep_aggregate_body(relic_compiler_t *compiler, const relic_rule_t *body,
+    relic_aggregate_t *aggregate)
+{
+	relic_rule_t *kept;
+
+	if (aggregate_is_grouped(compiler, aggregate)) {
+		kept = &compiler->group_rules[compiler->group_rule_count];
+		compiler->group_rule_count++;
+	} else {
+		kept = compile_alloc(compiler, 1, sizeof(*kept));
+		if (kept == NULL)
+			return (RELIC_COMPILE_INCOMPLETE);
+	}
+
+	*kept = *body;
+	aggregate->body = kept;
+
+	return (RELIC_COMPILE_OK);
+}
+
+/*
+ * Compile the body of every aggregate of the statement, once the rule
+ * holding them is numbered, into the group rules of an array of the
+ * compiler's arena, which has room for one per aggregate, and the bodies
+ * folded in place beside it.  Every one is compiled even after one is
+ * rejected, so that one run reports every mistake.
+ */
+static enum relic_compile_result
+compile_aggregate_bodies(relic_compiler_t *compiler)
 {
 	const relic_ast_stmt_t *statement;
+	relic_aggregate_t *aggregate;
+	relic_rule_t body;
 	enum relic_compile_result verdict;
 	enum relic_compile_result result;
 	size_t count;
@@ -1606,15 +1891,16 @@ compile_group_rules(relic_compiler_t *compiler)
 		if (statement->body[i].kind != RELIC_LITERAL_AGGREGATE)
 			continue;
 
-		result = compile_group_rule(compiler,
-		    &statement->body[i].u.aggregate, i + 1,
-		    &compiler->rule.body[i].u.aggregate,
-		    &compiler->group_rules[compiler->group_rule_count]);
+		aggregate = &compiler->rule.body[i].u.aggregate;
+		result = compile_aggregate_body(compiler,
+		    &statement->body[i].u.aggregate, i + 1, aggregate, &body);
+		if (result == RELIC_COMPILE_OK)
+			result = keep_aggregate_body(compiler, &body,
+			    aggregate);
 		if (result == RELIC_COMPILE_INCOMPLETE)
 			return (result);
 		if (result == RELIC_COMPILE_REJECTED)
 			verdict = result;
-		compiler->group_rule_count++;
 	}
 
 	return (verdict);
@@ -2178,7 +2464,7 @@ finish_rule(relic_compiler_t *compiler, relic_compiled_statement_t *compiled)
 	report_unbound_variables(compiler, unbound);
 	report_singleton_variables(compiler, unbound);
 
-	groups = compile_group_rules(compiler);
+	groups = compile_aggregate_bodies(compiler);
 	if (groups == RELIC_COMPILE_INCOMPLETE)
 		return (groups);
 

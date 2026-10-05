@@ -530,6 +530,11 @@ Select an internal behaviour, for testing and debugging.
 The option may be repeated.
 These are not part of the stable interface:
 .Bl -tag -width no-reorder
+.It Cm group-rules
+compile the body of every aggregate into a rule of its own whose relation
+the aggregate folds, even a body of one atom whose arguments are distinct
+variables, which otherwise is folded over the atom's relation where it
+stands;
 .It Cm naive
 evaluate recursion by the naive fixed point;
 .It Cm no-index

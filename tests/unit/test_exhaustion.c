@@ -208,12 +208,15 @@
 #define	EVAL_SWEEP	8192
 
 /*
- * The aggregate sweep's program: an outer rule and its group rule per
- * statement, AGGREGATE_RULES of them in all, the second folding what the
- * first derives, and a query holding a group of its own.  Each sweep stops
- * at the first run that needs no refusal.
+ * The aggregate sweep's program: a statement whose aggregate folds an
+ * atom's relation in place, one rule, and one whose aggregate's body of two
+ * atoms gets a group rule, two rules, AGGREGATE_RULES of them in all, the
+ * second folding what the first derives; and a query holding one aggregate
+ * of each kind.  The folds in place are keyed, so each builds an index the
+ * refusals can reach.  Each sweep stops at the first run that needs no
+ * refusal.
  */
-#define	AGGREGATE_RULES	4
+#define	AGGREGATE_RULES	3
 #define	AGGREGATE_SWEEP	4096
 
 /*
@@ -3562,20 +3565,23 @@ a_loaded_query_out_of_memory_reports_once(void)
 static const char aggregate_program[] =
     "edge(a, b). edge(a, c). edge(b, c).\n"
     "outdeg(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n"
-    "total(S) :- S = sum(N) { outdeg(X, N) }.\n";
+    "total(S) :- S = sum(N) { outdeg(X, N), edge(X, _) }.\n";
 
 /*
  * Whether the compiled rules are whole statements: every rule holding an
- * aggregate follows the group rule it folds, the last rule is not a group
- * rule left without its outer rule, and each predicate's count of program
- * rules is the number of its rules in the table.  A statement's rules are
- * appended all together or not at all, so no refusal may break this.
+ * aggregate whose body has a head follows that body, the group rule it
+ * folds, and every one whose body has none folds the predicate of the
+ * body's one atom; the last rule is not a group rule left without its outer
+ * rule; and each predicate's count of program rules is the number of its
+ * rules in the table.  A statement's rules are appended all together or
+ * not at all, so no refusal may break this.
  */
 static bool
 rules_are_whole_statements(relic_t *ctx)
 {
 	const relic_ruletab_t *rules;
 	const relic_literal_t *literal;
+	const relic_aggregate_t *aggregate;
 	const relic_rule_t *rule;
 	const char *spelling;
 	size_t heads;
@@ -3590,10 +3596,17 @@ rules_are_whole_statements(relic_t *ctx)
 			literal = &rule->body[j];
 			if (literal->kind != RELIC_LITERAL_AGGREGATE)
 				continue;
+			aggregate = &literal->u.aggregate;
+			if (aggregate->body->head == RELIC_ID_NONE) {
+				if (aggregate->body->body_length != 1 ||
+				    aggregate->body->body[0].u.atom.pred !=
+				    aggregate->source)
+					return (false);
+				continue;
+			}
 			if (i == 0 || rules->entries[i - 1].head !=
-			    literal->u.aggregate.group ||
-			    literal->u.aggregate.group_rule->head !=
-			    literal->u.aggregate.group)
+			    aggregate->source ||
+			    aggregate->body->head != aggregate->source)
 				return (false);
 		}
 
@@ -3686,7 +3699,6 @@ sweep_aggregate_check(void)
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
 		checkf(!ctx->program.invalid &&
-		    ctx->program.rules.count % 2 == 0 &&
 		    rules_are_whole_statements(ctx), SCENARIO_AGGREGATE,
 		    "a check should publish whole statements, not %zu rules, "
 		    "with allocation %ld refused", ctx->program.rules.count,
@@ -3711,7 +3723,8 @@ sweep_aggregate_query(unsigned int flags, size_t threads,
     const char *strategy)
 {
 	static const char query_text[] =
-	    "edge(X, _), N = count { edge(X, Y) }, total(S)?";
+	    "edge(X, _), N = count { edge(X, Y), edge(Y, _) }, "
+	    "M = count { edge(Z, X) }, total(S)?";
 	relic_config_t config;
 	const relic_relation_t *group;
 	relic_query_t *query;

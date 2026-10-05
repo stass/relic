@@ -3,7 +3,10 @@
 % query that folds a group and calls a rewritten predicate with the result
 % bound copies the aggregate into the seed of the call's magic rule, which
 % reads the query's group relation: the group is filled before any
-% generated rule runs.
+% generated rule runs.  A body of one atom is folded over the atom's own
+% relation, which is read completely too, even where the query also calls
+% the atom's predicate bound; and two rules alike but for the column their
+% fold is keyed on are two rules, which the rewrite does not merge.
 edge(a, b). edge(a, c). edge(b, c). edge(c, a). edge(c, b). edge(c, d).
 node(a). node(b). node(c). node(d).
 
@@ -11,8 +14,12 @@ outdeg(X, N) :- node(X), N = count { edge(X, Y) }.
 path(X, Y) :- edge(X, Y).
 path(X, Z) :- path(X, Y), edge(Y, Z).
 reach(X, N) :- node(X), N = count { path(X, Y) }.
+degree(X, N) :- node(X), N = count { edge(X, Y) }.
+degree(X, N) :- node(X), N = count { edge(Y, X) }.
 
 outdeg(a, N)?
 reach(d, N)?
 N = count { edge(X, _) }, outdeg(Y, N)?
 N = count { node(X) }, reach(Y, N)?
+path(a, Y), N = count { path(Y, Z) }?
+degree(c, N)?

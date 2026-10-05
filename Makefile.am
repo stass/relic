@@ -638,7 +638,8 @@ endif
 
 RELIC_LANG_TESTS = \
 	tests/lang/aggregate-anonymous.dl \
-	tests/lang/aggregate-assign.dl tests/lang/aggregate-count.dl \
+	tests/lang/aggregate-assign.dl tests/lang/aggregate-columns.dl \
+	tests/lang/aggregate-count.dl \
 	tests/lang/aggregate-explain.dl tests/lang/aggregate-limit.dl \
 	tests/lang/aggregate-limit-long-name.dl \
 	tests/lang/aggregate-limit-query.dl \
@@ -646,6 +647,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/aggregate-mixed.dl tests/lang/aggregate-nested.dl \
 	tests/lang/aggregate-overflow.dl tests/lang/aggregate-parallel.dl \
 	tests/lang/aggregate-project.dl tests/lang/aggregate-query.dl \
+	tests/lang/aggregate-relation.dl \
 	tests/lang/aggregate-shared.dl tests/lang/aggregate-shortest.dl \
 	tests/lang/aggregate-stratify.dl tests/lang/aggregate-sum.dl \
 	tests/lang/aggregate-syntax.dl tests/lang/aggregate-unsafe.dl \

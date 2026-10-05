@@ -689,7 +689,7 @@ note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 /*
  * An aggregate's function and aggregated variable as the rule writes them,
  * sum(Size) or min(N), for a note about its fold.  The variable is the
- * group rule's, whose slot is the aggregated column; its spelling is all
+ * compiled body's, whose slot is the aggregated column; its spelling is all
  * identifier bytes, so it is safe to quote.
  */
 static const char *
@@ -700,7 +700,7 @@ describe_fold(const relic_t *ctx, const relic_aggregate_t *aggregate,
 	const char *bytes;
 	char named[RELIC_NAME_TEXT_MAX];
 
-	variable = &aggregate->group_rule->variables[aggregate->column];
+	variable = &aggregate->body->variables[aggregate->column];
 	bytes = relic_symbol_bytes(ctx, variable->name, NULL);
 	if (bytes == NULL)
 		bytes = "?";

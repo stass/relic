@@ -22,9 +22,9 @@
 /*
  * Whether a literal reads a relation, and the predicate it reads into
  * *predp: the atom's, whether it is tested for presence or for absence, or
- * an aggregate's group predicate, which it folds.  A comparison reads only
- * values.  Every kind is named, so that one added later is placed here
- * before it compiles.
+ * the predicate whose relation an aggregate folds, a group predicate or an
+ * atom's own.  A comparison reads only values.  Every kind is named, so
+ * that one added later is placed here before it compiles.
  */
 bool
 relic_literal_reads(const relic_literal_t *literal, relic_pred_id_t *predp)
@@ -35,7 +35,7 @@ relic_literal_reads(const relic_literal_t *literal, relic_pred_id_t *predp)
 		*predp = literal->u.atom.pred;
 		return (true);
 	case RELIC_LITERAL_AGGREGATE:
-		*predp = literal->u.aggregate.group;
+		*predp = literal->u.aggregate.source;
 		return (true);
 	case RELIC_LITERAL_COMPARISON:
 		break;
@@ -45,7 +45,7 @@ relic_literal_reads(const relic_literal_t *literal, relic_pred_id_t *predp)
 }
 
 /*
- * The slots an aggregate's key reads: those its shared columns are bound
+ * The slots an aggregate's key reads: those its key columns are bound
  * from.
  */
 uint64_t

@@ -270,37 +270,46 @@ struct relic_comparison {
 /*
  * An aggregate literal, `result = fn(column) { ... }`, resolved.
  *
- * Its body is compiled into the group rule, an ordinary rule whose head is
- * the group predicate: the variables the body shares with the rest of the
- * rule, in the order of their slots in it, then the variables that are the
- * body's own, in order of first occurrence.  The group predicate's relation
- * then holds, under every binding of the shared columns, exactly the rows
- * the body denotes, distinct because a relation is a set, and the literal
- * folds the tuples of that relation whose first `shared_count` columns hold
- * the shared slots' values.  Nothing else of the body is needed to evaluate
- * the literal: the group relation is complete before any rule reading it
- * runs, as a negated relation is.
+ * The literal folds the relation of `source`: the tuples whose `key_mask`
+ * columns hold the values of the shared slots, which are the variables the
+ * body shares with the rest of the rule.  Which relation that is depends on
+ * the body.  In general the body is compiled into a group rule, an ordinary
+ * rule whose head is a generated group predicate over the shared variables,
+ * in the order of their slots in this rule, then the body's own variables,
+ * in order of first occurrence; the group relation then holds, under every
+ * binding of the shared columns, exactly the rows the body denotes, distinct
+ * because a relation is a set, and its key columns are its leading ones.  A
+ * body that is one positive atom whose arguments are distinct named
+ * variables denotes the atom's own relation, so it gets no group rule: the
+ * literal folds the atom's predicate, keyed on the columns its shared
+ * variables stand in.  Either way the relation is complete before any rule
+ * reading it runs, as a negated relation is, and nothing else of the body
+ * is needed to evaluate the literal.
  *
- * `shared` holds the slot of this rule that each shared column is bound
- * from, in column order, and is NULL when there are none.  `column` is the
- * aggregated column of the group relation, unused by COUNT, and `result`
+ * `shared` holds the slot of this rule each key column is bound from, in
+ * increasing column order, `shared_count` of them, and is NULL when there
+ * are none; `key_mask` has bit c set for each key column c.  `column` is the
+ * aggregated column of the source relation, unused by COUNT, and `result`
  * the slot the literal binds, or compares with when it is bound already.
  * `where` is the function name.
  *
- * `group_rule` is the group rule as it was compiled, which explain prints
- * the body from and the Magic rewrite reads what the body reads from.  It
- * is a copy of its own in the arena that holds the literal, fixed from the
- * moment the literal is, rather than a position in a rule table: the
- * program's table grows and moves, and a query's group rules are held by
- * the query, so the literal reaches its body the same way whoever holds it,
- * a copy of it the rewrite made included.  Its slot c is column c.
+ * `body` is the body as it was compiled, which explain prints the braces
+ * from and the Magic rewrite reads what the body reads from: the group rule,
+ * or for a body folded in place a rule with no head and the one atom as its
+ * body, which is never evaluated.  In both, slot c is column c of the
+ * source relation.  It is a copy of its own in the arena that holds the
+ * literal, fixed from the moment the literal is, rather than a position in
+ * a rule table: the program's table grows and moves, and a query's group
+ * rules are held by the query, so the literal reaches its body the same way
+ * whoever holds it, a copy of it the rewrite made included.
  */
 struct relic_aggregate {
 	const uint16_t		*shared;	/* shared_count of them */
-	const relic_rule_t	*group_rule;
+	const relic_rule_t	*body;
 	relic_location_t	 where;
-	relic_pred_id_t		 group;
-	uint16_t		 shared_count;
+	relic_pred_id_t		 source;
+	uint32_t		 key_mask;
+	uint16_t		 shared_count;	/* popcount(key_mask) */
 	uint16_t		 column;	/* not COUNT */
 	uint16_t		 result;
 	enum relic_aggregate_fn	 fn;

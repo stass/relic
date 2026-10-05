@@ -32,6 +32,8 @@
 #define	SCENARIO_ARGUMENTS	"a literal resolves to the arguments it names"
 #define	SCENARIO_GROUP		"an aggregate reads a group rule of its own"
 #define	SCENARIO_GROUP_NAME	"a group predicate is named for where it is"
+#define	SCENARIO_IN_PLACE	"a body that is a relation is folded in place"
+#define	SCENARIO_KEY_COLUMNS	"a fold in place is keyed where its key stands"
 #define	SCENARIO_CACHED		"a check compiles only what is new"
 #define	SCENARIO_CALL		"a call compiles to a node over its arguments"
 #define	SCENARIO_PATTERN	"a constant pattern is compiled with its rule"
@@ -90,6 +92,10 @@ static void	 an_anonymous_variable_takes_a_slot_only_where_illegal(void);
 static void	 variables_are_numbered_as_they_are_written(void);
 static void	 an_aggregate_reads_a_group_rule_of_its_own(void);
 static void	 a_group_predicate_is_named_for_where_it_is(void);
+static void	 a_body_that_is_a_relation_is_folded_in_place(void);
+static void	 a_fold_in_place_is_keyed_where_its_key_stands(void);
+static const relic_aggregate_t *last_aggregate(const relic_t *ctx);
+static size_t	 group_predicates(const relic_t *ctx);
 static const char *pred_spelling(const relic_t *ctx, relic_pred_id_t pred);
 
 static void
@@ -1083,8 +1089,8 @@ an_aggregate_reads_a_group_rule_of_its_own(void)
 	aggregate = &outer->body[1].u.aggregate;
 
 	check(group->origin == outer->origin && group->head ==
-	    aggregate->group && aggregate->group_rule->head ==
-	    aggregate->group, SCENARIO_GROUP,
+	    aggregate->source && aggregate->body->head ==
+	    aggregate->source, SCENARIO_GROUP,
 	    "the group rule comes first, from the same statement");
 	check(strcmp(pred_spelling(ctx, group->head), "agg$dir_size$2$0$2") ==
 	    0 && group->head_arity == 3, SCENARIO_GROUP,
@@ -1100,9 +1106,9 @@ an_aggregate_reads_a_group_rule_of_its_own(void)
 	    group->head_args[2].u.slot == 2, SCENARIO_GROUP,
 	    "column c of the group is slot c of its rule");
 	check(aggregate->fn == RELIC_AGG_SUM && aggregate->shared_count == 1 &&
-	    aggregate->shared[0] == 0 && aggregate->column == 2,
-	    SCENARIO_GROUP, "the aggregate is keyed on the outer Dir and "
-	    "folds the group's third column");
+	    aggregate->shared[0] == 0 && aggregate->key_mask == 1 &&
+	    aggregate->column == 2, SCENARIO_GROUP, "the aggregate is keyed "
+	    "on the outer Dir in the group's first column and folds its third");
 	check(outer->variable_count == 2 &&
 	    outer->variables[aggregate->result].name == symbol(ctx, "S"),
 	    SCENARIO_GROUP, "the outer rule numbers only Dir and S");
@@ -1141,9 +1147,9 @@ a_group_predicate_is_named_for_where_it_is(void)
 		return;
 
 	if (!load(ctx, "e(a, b).\n"
-	    "c(X, N) :- e(X, _), N = count { e(X, Y) },\n"
-	    "    N = count { e(Z, X) }.\n"
-	    "c(X, N) :- e(_, X), N = count { e(Y, X) }.\n") ||
+	    "c(X, N) :- e(X, _), N = count { e(X, Y), e(Y, _) },\n"
+	    "    N = count { e(Z, X), e(_, Z) }.\n"
+	    "c(X, N) :- e(_, X), N = count { e(Y, X), e(_, Y) }.\n") ||
 	    relic_check(ctx) != 0 || rule_count(ctx) != 5) {
 		check(false, SCENARIO_GROUP_NAME, "the two rules compile to "
 		    "five");
@@ -1158,10 +1164,10 @@ a_group_predicate_is_named_for_where_it_is(void)
 		    pred_spelling(ctx, rule_at(ctx, i < 2 ? i : 3)->head));
 
 	first = relic_query_prepare(ctx, NULL,
-	    "e(X, _), N = count { e(X, Y) }?");
+	    "e(X, _), N = count { e(X, Y), e(Y, _) }?");
 	preds = relic_pred_count(ctx);
 	second = relic_query_prepare(ctx, NULL,
-	    "e(X, _), N = count { e(X, Y) }?");
+	    "e(X, _), N = count { e(X, Y), e(Y, _) }?");
 	check(first != NULL && second != NULL && first->group_rule_count == 1 &&
 	    second->group_rule_count == 1 && first->group_rules[0].head ==
 	    second->group_rules[0].head && strcmp(pred_spelling(ctx,
@@ -1173,7 +1179,7 @@ a_group_predicate_is_named_for_where_it_is(void)
 	relic_query_destroy(first);
 	relic_query_destroy(second);
 
-	if (!load(ctx, "bad(N) :- N = count { e(X, Y) }, M > 1.\n")) {
+	if (!load(ctx, "bad(N) :- N = count { e(X, Y), e(Y, _) }, M > 1.\n")) {
 		check(false, SCENARIO_GROUP_NAME, "the unsafe rule loads");
 		relic_destroy(ctx);
 		return;
@@ -1185,12 +1191,252 @@ a_group_predicate_is_named_for_where_it_is(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * The aggregate literal of the last rule in the table, the outer rule of
+ * the last statement, or NULL when it holds none.
+ */
+static const relic_aggregate_t *
+last_aggregate(const relic_t *ctx)
+{
+	const relic_rule_t *outer;
+	size_t i;
+
+	if (rule_count(ctx) == 0)
+		return (NULL);
+
+	outer = rule_at(ctx, rule_count(ctx) - 1);
+	for (i = 0; i < outer->body_length; i++) {
+		if (outer->body[i].kind == RELIC_LITERAL_AGGREGATE)
+			return (&outer->body[i].u.aggregate);
+	}
+
+	return (NULL);
+}
+
+/*
+ * The number of group predicates the context has interned.
+ */
+static size_t
+group_predicates(const relic_t *ctx)
+{
+	size_t count;
+	relic_pred_id_t id;
+
+	count = 0;
+	for (id = 1; id <= relic_pred_count(ctx); id++) {
+		if (relic_pred_of(ctx, id)->kind == RELIC_PRED_GROUP)
+			count++;
+	}
+
+	return (count);
+}
+
+/*
+ * A body that is exactly one positive atom of pairwise distinct named
+ * variables, a nullary atom included, denotes the atom's own relation, so
+ * the statement compiles to its outer rule alone, no group predicate is
+ * interned, and the literal folds the atom's predicate through a compiled
+ * body that has no head.  A wildcard, a constant, a repeated variable, a
+ * second literal, a comparison or a negation makes the body another
+ * relation, and it gets a group rule; so does every body under
+ * RELIC_F_GROUP_RULES.
+ */
+static void
+a_body_that_is_a_relation_is_folded_in_place(void)
+{
+	static const struct {
+		const char	*rule;
+		bool		 in_place;
+	} cases[] = {
+		{ "r(X, N) :- f(X), N = count { e(X, Y) }.\n", true },
+		{ "r(X, N) :- f(X), N = count { e(Y, X) }.\n", true },
+		{ "r(N) :- N = count { ready }.\n", true },
+		{ "r(M) :- M = max(Y) { e(X, Y) }.\n", true },
+		{ "r(X, N) :- f(X), N = count { e(X, _) }.\n", false },
+		{ "r(X, N) :- f(X), N = count { e(X, a) }.\n", false },
+		{ "r(X, N) :- f(X), N = count { e(X, X) }.\n", false },
+		{ "r(X, N) :- f(X), N = count { e(X, Y), f(Y) }.\n", false },
+		{ "r(X, N) :- f(X), N = count { e(X, Y), Y != a }.\n", false },
+		{ "r(X, N) :- f(X), N = count { e(X, Y), not f(Y) }.\n",
+		    false }
+	};
+	const relic_aggregate_t *aggregate;
+	relic_config_t config;
+	relic_t *ctx;
+	diag_log_t log;
+	unsigned int flags;
+	size_t i;
+	bool in_place;
+
+	bzero(&config, sizeof(config));
+	for (flags = 0; flags <= RELIC_F_GROUP_RULES;
+	    flags += RELIC_F_GROUP_RULES) {
+		for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+			in_place = cases[i].in_place && flags == 0;
+			config.flags = flags;
+			ctx = relic_create_config(&config);
+			if (ctx == NULL) {
+				check(false, SCENARIO_IN_PLACE,
+				    "a context is created");
+				return;
+			}
+			bzero(&log, sizeof(log));
+			relic_diag_set(ctx, record_diagnostic, &log);
+
+			aggregate = NULL;
+			if (load(ctx, "e(a, b).\nf(a).\nready.\n") &&
+			    load(ctx, cases[i].rule) && relic_check(ctx) == 0)
+				aggregate = last_aggregate(ctx);
+
+			checkf(aggregate != NULL &&
+			    rule_count(ctx) == (in_place ? 1u : 2u) &&
+			    group_predicates(ctx) == (in_place ? 0u : 1u),
+			    SCENARIO_IN_PLACE, "%s under flags %#x compiles to "
+			    "%s", cases[i].rule, flags, in_place ?
+			    "its rule alone" : "a group rule and its rule");
+			if (aggregate == NULL) {
+				relic_destroy(ctx);
+				continue;
+			}
+
+			checkf(in_place ? aggregate->body->head ==
+			    RELIC_ID_NONE && aggregate->body->head_arity == 0 &&
+			    aggregate->body->head_args == NULL &&
+			    aggregate->body->body_length == 1 &&
+			    aggregate->body->body[0].u.atom.pred ==
+			    aggregate->source :
+			    aggregate->body->head == aggregate->source &&
+			    rule_at(ctx, 0)->head == aggregate->source,
+			    SCENARIO_IN_PLACE, "%s under flags %#x folds %s",
+			    cases[i].rule, flags, in_place ? "the atom's "
+			    "relation through a body with no head" :
+			    "the group relation its group rule derives");
+
+			relic_destroy(ctx);
+		}
+
+		/*
+		 * An aggregated variable the atom does not name makes no
+		 * relation of the atom: the body goes to a group rule, whose
+		 * check reports the variable once, as it does under either
+		 * flag.
+		 */
+		config.flags = flags;
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_IN_PLACE, "a context is created");
+			return;
+		}
+		bzero(&log, sizeof(log));
+		relic_diag_set(ctx, record_diagnostic, &log);
+		checkf(load(ctx, "e(a, b).\nr(S) :- S = sum(W) { e(X, Y) }.\n") &&
+		    relic_check(ctx) != 0 && log.errors == 1 &&
+		    rule_count(ctx) == 0, SCENARIO_IN_PLACE, "under flags %#x "
+		    "a sum of a variable its atom does not name is refused "
+		    "once and publishes nothing", flags);
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * A fold in place is keyed on the columns of the atom its shared variables
+ * stand in, whichever they are, and `shared` lists the outer slot of each
+ * key column in increasing column order, not in slot order: in w(Y, X, W)
+ * under a rule numbering X before Y, column 0 is keyed from Y's slot.  The
+ * compiled body numbers the atom's variables in argument order, so slot c
+ * is column c of the relation folded and the aggregated column is the
+ * aggregated variable's position.
+ */
+static void
+a_fold_in_place_is_keyed_where_its_key_stands(void)
+{
+	static const struct {
+		const char	*rule;
+		uint32_t	 key_mask;
+		const char	*key_names[2];
+		uint16_t	 column;
+	} cases[] = {
+		{ "r(X, N) :- s(X, _), N = count { w(X, Y, Z) }.\n",
+		    0x1, { "X", NULL }, 0 },
+		{ "r(X, N) :- s(X, _), N = count { w(Y, X, Z) }.\n",
+		    0x2, { "X", NULL }, 0 },
+		{ "r(X, N) :- s(X, _), N = count { w(Y, Z, X) }.\n",
+		    0x4, { "X", NULL }, 0 },
+		{ "r(X, Y, S) :- s(X, Y), S = sum(W) { w(Y, X, W) }.\n",
+		    0x3, { "Y", "X" }, 2 },
+		{ "r(S) :- S = sum(W) { w(A, W, B) }.\n",
+		    0x0, { NULL, NULL }, 1 }
+	};
+	const relic_aggregate_t *aggregate;
+	const relic_rule_t *outer;
+	const relic_rule_t *body;
+	relic_t *ctx;
+	diag_log_t log;
+	size_t i;
+	uint16_t k;
+	uint16_t c;
+	bool keyed;
+	bool numbered;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		ctx = context_logging_to(&log);
+		if (ctx == NULL)
+			return;
+
+		aggregate = NULL;
+		if (load(ctx, "w(a, b, 1).\ns(a, b).\n") &&
+		    load(ctx, cases[i].rule) && relic_check(ctx) == 0 &&
+		    rule_count(ctx) == 1)
+			aggregate = last_aggregate(ctx);
+		if (aggregate == NULL) {
+			checkf(false, SCENARIO_KEY_COLUMNS, "%s compiles to "
+			    "one rule holding a fold", cases[i].rule);
+			relic_destroy(ctx);
+			continue;
+		}
+		outer = rule_at(ctx, 0);
+		body = aggregate->body;
+
+		keyed = aggregate->key_mask == cases[i].key_mask;
+		for (k = 0; k < 2; k++) {
+			if (cases[i].key_names[k] == NULL) {
+				keyed = keyed && aggregate->shared_count == k;
+				break;
+			}
+			keyed = keyed && aggregate->shared_count > k &&
+			    outer->variables[aggregate->shared[k]].name ==
+			    symbol(ctx, cases[i].key_names[k]);
+		}
+		checkf(keyed && (aggregate->shared_count > 0 ||
+		    aggregate->shared == NULL), SCENARIO_KEY_COLUMNS,
+		    "%s is keyed on columns %#x from the slots of its shared "
+		    "variables in column order", cases[i].rule,
+		    (unsigned int)cases[i].key_mask);
+
+		numbered = body->variable_count == 3 &&
+		    body->body[0].u.atom.pred == aggregate->source;
+		for (c = 0; numbered && c < 3; c++)
+			numbered = body->body[0].u.atom.args[c].kind ==
+			    RELIC_ARG_VARIABLE &&
+			    body->body[0].u.atom.args[c].u.slot == c;
+		checkf(numbered && (aggregate->fn == RELIC_AGG_COUNT ||
+		    aggregate->column == cases[i].column),
+		    SCENARIO_KEY_COLUMNS, "%s numbers slot c as column c and "
+		    "folds column %u", cases[i].rule,
+		    (unsigned int)cases[i].column);
+
+		relic_destroy(ctx);
+	}
+}
+
 int
 main(void)
 {
 	variables_are_numbered_as_they_are_written();
 	an_aggregate_reads_a_group_rule_of_its_own();
 	a_group_predicate_is_named_for_where_it_is();
+	a_body_that_is_a_relation_is_folded_in_place();
+	a_fold_in_place_is_keyed_where_its_key_stands();
 	a_literal_resolves_to_the_arguments_it_names();
 	an_anonymous_variable_takes_a_slot_only_where_illegal();
 	a_rejected_statement_leaves_no_rule_behind();

@@ -54,10 +54,17 @@
  * and, for each other rule, one per distinct binding of its body's variables
  * over the fixed point.  An aggregate's braces are compiled to a rule of
  * their own, the group rule, which derives once per distinct binding of the
- * group body's variables.  The bindings are counted in a context of their own
+ * group body's variables -- every aggregate's under RELIC_F_GROUP_RULES,
+ * which the strategy whose derivations are counted runs under, since by
+ * default a body of one atom of distinct variables is folded in place and
+ * derives nothing.  The bindings are counted in a context of their own
  * under the naive fixed point, as the rows of one query per rule body and one
  * per group body.  No answer shows a derivation made twice, since a duplicate
  * changes none, so this is the only comparison that can.
+ *
+ * The strategies under RELIC_F_GROUP_RULES hold the group relations the
+ * others fold in place without copying, so their tuple totals are held only
+ * to each other's.
  */
 
 typedef struct strategy strategy_t;
@@ -114,8 +121,15 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_PARALLEL_NO_MAGIC] = {
 		"parallel+no-magic", RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_MAGIC,
 		false, STRATEGY_NO_MAGIC, PARALLEL_THREADS, FAULT_NONE },
+	[STRATEGY_GROUP_RULES] = {
+		"group-rules", RELIC_F_GROUP_RULES, false, STRATEGY_NONE, 0,
+		FAULT_NONE },
+	[STRATEGY_GROUP_RULES_NO_MAGIC] = {
+		"group-rules+no-magic", RELIC_F_GROUP_RULES | RELIC_F_NO_MAGIC,
+		false, STRATEGY_NONE, 0, FAULT_NONE },
 	[STRATEGY_MATERIALIZED] = {
-		"materialized", 0, true, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
+		"materialized", RELIC_F_GROUP_RULES, true,
+		STRATEGY_GROUP_RULES_NO_MAGIC, 0, FAULT_NONE },
 };
 
 /*

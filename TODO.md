@@ -105,22 +105,6 @@ A fix is a source name that is not interned (diagnostics copy it) and a
 per-query scope for the symbols, values and generated predicates only one
 query uses; that is a change to interning and wants a design note first.
 
-**An aggregate over one atom copies the atom's relation.** [Low,
-component: `lib/rule.c`, `lib/eval.c`, `specs/design-aggregates.md`] Each
-aggregate folds a group predicate its group rule fills, the cost of storing
-the body's relation once that `specs/design-aggregates.md` section 5.1
-accepts, so
-`N = count { valueAlias(A, B) }` first copies every `valueAlias` tuple into
-`agg$$q0$1(A, B)`, with its index. On Graspan's httpd, on 16 threads, a
-query counting the three CSPA relations this way peaks at 30 GB, where
-answering `valueFlow` over the same fixed point peaks at 7.8 GB.
-A group rule whose body is one positive atom of distinct variables, its
-head those variables, holds exactly the atom's relation, so the aggregate
-folds that relation through an index on the columns its shared variables
-stand in and the group predicate need not exist. Designed:
-`specs/design-aggregates.md` section 5.6, with the order of work in its
-section 17 step 6.
-
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of
 its own, and the budget bounds the rules generated, not the tuples those

@@ -1,0 +1,77 @@
+stratum 0, component 0: agg$targets$1$0$1/1
+    rule agg$targets$1$0$1(Y) :- e(_, Y).
+        scan e(_, Y)
+        emit agg$targets$1$0$1(Y)
+stratum 0, component 1: agg$from_a$1$0$1/1
+    rule agg$from_a$1$0$1(Y) :- e(a, Y).
+        lookup e(a, Y) key={0}
+        emit agg$from_a$1$0$1(Y)
+stratum 0, component 2: agg$loops$1$0$1/1
+    rule agg$loops$1$0$1(X) :- e(X, X).
+        scan e(X, X)
+        emit agg$loops$1$0$1(X)
+stratum 0, component 3: agg$paths$2$0$2/3
+    rule agg$paths$2$0$2(X, Y, Z) :- e(X, Y), e(Y, Z).
+        scan e(X, Y)
+        lookup e(Y, Z) key={0}
+        emit agg$paths$2$0$2(X, Y, Z)
+stratum 1, component 4: out/2
+    rule out(X, N) :- node(X), N = count { e(X, Y) }.
+        scan node(X)
+        aggregate N = count e(X, Y) key={0}
+        emit out(X, N)
+stratum 1, component 5: in/2
+    rule in(X, N) :- node(X), N = count { e(Y, X) }.
+        scan node(X)
+        aggregate N = count e(Y, X) key={1}
+        emit in(X, N)
+stratum 1, component 6: mid/2
+    rule mid(Y, N) :- node(Y), N = count { t(X, Y, Z) }.
+        scan node(Y)
+        aggregate N = count t(X, Y, Z) key={1}
+        emit mid(Y, N)
+stratum 1, component 7: edges/1
+    rule edges(N) :- N = count { e(X, Y) }.
+        aggregate N = count e(X, Y)
+        emit edges(N)
+stratum 1, component 8: targets/1
+    rule targets(N) :- N = count { e(_, Y) }.
+        aggregate N = count agg$targets$1$0$1(Y)
+        emit targets(N)
+stratum 1, component 9: from_a/1
+    rule from_a(N) :- N = count { e(a, Y) }.
+        aggregate N = count agg$from_a$1$0$1(Y)
+        emit from_a(N)
+stratum 1, component 10: loops/1
+    rule loops(N) :- N = count { e(X, X) }.
+        aggregate N = count agg$loops$1$0$1(X)
+        emit loops(N)
+stratum 1, component 11: paths/2
+    rule paths(X, N) :- node(X), N = count { e(X, Y), e(Y, Z) }.
+        scan node(X)
+        aggregate N = count agg$paths$2$0$2(X, Y, Z) key={0}
+        emit paths(X, N)
+query $q0(X, N) :- out(X, N).
+    scan out(X, N)
+    stream $q0(X, N)
+query $q1(X, N) :- in(X, N).
+    scan in(X, N)
+    stream $q1(X, N)
+query $q2(Y, N) :- mid(Y, N).
+    scan mid(Y, N)
+    stream $q2(Y, N)
+query $q3(N) :- edges(N).
+    scan edges(N)
+    stream $q3(N)
+query $q4(N) :- targets(N).
+    scan targets(N)
+    stream $q4(N)
+query $q5(N) :- from_a(N).
+    scan from_a(N)
+    stream $q5(N)
+query $q6(N) :- loops(N).
+    scan loops(N)
+    stream $q6(N)
+query $q7(X, N) :- paths(X, N).
+    scan paths(X, N)
+    stream $q7(X, N)

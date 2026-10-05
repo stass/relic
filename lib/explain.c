@@ -723,32 +723,32 @@ put_literal(const relic_t *ctx, relic_explain_line_t *line,
 /*
  * An aggregate as the rule writes it: `N = count { ... }` or `S =
  * sum(Size) { ... }`.  The result is a variable of the rule; the aggregated
- * variable and the body are written from the group rule, whose variables
- * they are, so the braces read back as the writer wrote them.
+ * variable and the body are written from the compiled body, whose
+ * variables they are, so the braces read back as the writer wrote them.
  */
 static void
 put_aggregate(const relic_t *ctx, relic_explain_line_t *line,
     const relic_rule_t *rule, const relic_aggregate_t *aggregate)
 {
-	const relic_rule_t *group_rule;
+	const relic_rule_t *body;
 	size_t i;
 
-	group_rule = aggregate->group_rule;
+	body = aggregate->body;
 
 	put_variable(ctx, line, rule, aggregate->result);
 	line_put(line, " = ");
 	line_put(line, relic_aggregate_spelling(aggregate->fn));
 	if (aggregate->fn != RELIC_AGG_COUNT) {
 		line_put_byte(line, '(');
-		put_variable(ctx, line, group_rule, aggregate->column);
+		put_variable(ctx, line, body, aggregate->column);
 		line_put_byte(line, ')');
 	}
 
 	line_put(line, " { ");
-	for (i = 0; i < group_rule->body_length; i++) {
+	for (i = 0; i < body->body_length; i++) {
 		if (i > 0)
 			line_put(line, ", ");
-		put_literal(ctx, line, group_rule, &group_rule->body[i]);
+		put_literal(ctx, line, body, &body->body[i]);
 	}
 	line_put(line, " }");
 }
@@ -950,25 +950,27 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
- * A fold as the equality it stands for, then the group relation with its
- * columns named after the group rule's variables, and its key columns when
- * it has any: `N = count agg$p$1$0$2(X, Y) key={0}`.
+ * A fold as the equality it stands for, then the relation it folds with
+ * its columns named after the variables of the compiled body, whose slot c
+ * is column c, and its key columns when it has any: `N = count
+ * agg$p$1$0$2(X, Y) key={0}` for a group relation, `N = count edge(Y, X)
+ * key={1}` for an atom folded in place.
  */
 static void
 put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
     const relic_rule_t *rule, const relic_op_aggregate_t *fold)
 {
-	const relic_rule_t *group_rule;
+	const relic_rule_t *body;
 	uint16_t column;
 
-	group_rule = fold->aggregate->group_rule;
+	body = fold->aggregate->body;
 
 	put_variable(ctx, line, rule, fold->slot);
 	line_put(line, " = ");
 	line_put(line, relic_aggregate_spelling(fold->fn));
 	if (fold->fn != RELIC_AGG_COUNT) {
 		line_put_byte(line, '(');
-		put_variable(ctx, line, group_rule, fold->column);
+		put_variable(ctx, line, body, fold->column);
 		line_put_byte(line, ')');
 	}
 	line_put_byte(line, ' ');
@@ -979,7 +981,7 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 		for (column = 0; column < fold->arity; column++) {
 			if (column > 0)
 				line_put(line, ", ");
-			put_variable(ctx, line, group_rule, column);
+			put_variable(ctx, line, body, column);
 		}
 		line_put_byte(line, ')');
 	}

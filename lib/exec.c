@@ -182,10 +182,11 @@ static bool	 fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
 static bool	 fold_value(relic_scratch_t *scratch,
 		    const relic_op_aggregate_t *aggregate,
 		    const relic_fold_t *fold, relic_cell_t *valuep);
+static void	 gather_fold_key(const relic_scratch_t *scratch,
+		    const relic_op_aggregate_t *aggregate, relic_dom_t *probe);
 static size_t	 grown_capacity(size_t capacity, size_t needed, size_t unit);
-static bool	 key_matches(const relic_scratch_t *scratch,
-		    const relic_op_aggregate_t *aggregate,
-		    const relic_dom_t *tuple);
+static bool	 key_matches(const relic_op_aggregate_t *aggregate,
+		    const relic_dom_t *probe, const relic_dom_t *tuple);
 static relic_cell_t number_cell(int64_t number);
 static const char *operator_spelling(const relic_step_t *step);
 static bool	 order_satisfies(enum relic_compare_op compare,
@@ -1787,21 +1788,45 @@ step_assign(relic_scratch_t *scratch, const relic_exec_env_t *env,
 
 	return (true);
 }
+
 /*
- * Whether a row of an AGGREGATE's group relation holds the key: whether its
- * leading columns hold what the key slots do.  A key slot that is a number
- * slot holds the integer's identifier, or zero when the value table lacks
- * the integer, which no column holds, as no relation holds such an integer.
+ * Lay an AGGREGATE's key out as a tuple of the relation it folds, which is
+ * how an index is probed: each key column holds the value of the key slot
+ * paired with it, the slots being listed in increasing column order, and
+ * the other columns are left unwritten, since nothing reads them.  A key
+ * slot that is a number slot holds the integer's identifier, or zero when
+ * the value table lacks the integer, which no column holds, as no relation
+ * holds such an integer.
+ */
+static void
+gather_fold_key(const relic_scratch_t *scratch,
+    const relic_op_aggregate_t *aggregate, relic_dom_t *probe)
+{
+	uint16_t column;
+	uint16_t key;
+
+	key = 0;
+	for (column = 0; column < aggregate->arity; column++) {
+		if ((aggregate->key_mask & (UINT32_C(1) << column)) == 0)
+			continue;
+		probe[column] = scratch->frame[aggregate->key_slots[key]];
+		key++;
+	}
+}
+
+/*
+ * Whether a row of the relation an AGGREGATE folds holds the key `probe`
+ * lays out: whether it agrees with the probe on every key column.
  */
 static bool
-key_matches(const relic_scratch_t *scratch,
-    const relic_op_aggregate_t *aggregate, const relic_dom_t *tuple)
+key_matches(const relic_op_aggregate_t *aggregate, const relic_dom_t *probe,
+    const relic_dom_t *tuple)
 {
 	uint16_t column;
 
-	for (column = 0; column < aggregate->key_count; column++) {
-		if (tuple[column] !=
-		    scratch->frame[aggregate->key_slots[column]])
+	for (column = 0; column < aggregate->arity; column++) {
+		if ((aggregate->key_mask & (UINT32_C(1) << column)) != 0 &&
+		    tuple[column] != probe[column])
 			return (false);
 	}
 
@@ -1881,10 +1906,8 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	const relic_dom_t *tuple;
 	relic_dom_t key[RELIC_MAX_ARITY];
 	relic_tuple_id_t id;
-	uint16_t column;
 
-	for (column = 0; column < aggregate->key_count; column++)
-		key[column] = scratch->frame[aggregate->key_slots[column]];
+	gather_fold_key(scratch, aggregate, key);
 
 	switch (aggregate->access) {
 	case RELIC_FOLD_SCAN:
@@ -1892,7 +1915,7 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			charge_unresumable_read(scratch);
 			scratch->counters.tuples_scanned++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
-			if (key_matches(scratch, aggregate, tuple) &&
+			if (key_matches(aggregate, key, tuple) &&
 			    !fold_row(scratch, env, aggregate, fold, tuple))
 				return (false);
 		}

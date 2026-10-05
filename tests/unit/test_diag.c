@@ -690,16 +690,16 @@ an_operation_names_itself_in_a_refusal(void)
 
 /*
  * A check the memory limit refuses names the check.  Compiling an aggregate
- * interns the predicate that holds its groups, so a program of
- * CHECK_AGGREGATES of them interns more while it is checked than its load
- * left room for.  The limits swept run from one the load alone fits under
- * past one the whole check fits under, and some of them refuse the check
- * part way.
+ * whose body is not one atom interns the predicate that holds its groups,
+ * so a program of CHECK_AGGREGATES of them interns more while it is checked
+ * than its load left room for.  The limits swept run from one the load
+ * alone fits under past one the whole check fits under, and some of them
+ * refuse the check part way.
  */
 static void
 a_refused_check_names_the_check(void)
 {
-	char program[CHECK_AGGREGATES * 64 + 16];
+	char program[CHECK_AGGREGATES * 80 + 16];
 	char expected[96];
 	record_t record;
 	relic_t *ctx;
@@ -712,7 +712,8 @@ a_refused_check_names_the_check(void)
 	used = (size_t)snprintf(program, sizeof(program), "edge(a, b).\n");
 	for (i = 0; i < CHECK_AGGREGATES; i++)
 		used += (size_t)snprintf(program + used, sizeof(program) - used,
-		    "d%d(X, N) :- edge(X, _), N = count { edge(X, Y) }.\n", i);
+		    "d%d(X, N) :- edge(X, _), "
+		    "N = count { edge(X, Y), edge(Y, _) }.\n", i);
 	if (used >= sizeof(program)) {
 		check(false, SCENARIO_LIMIT, "the program should be built");
 		return;

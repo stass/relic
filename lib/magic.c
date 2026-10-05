@@ -722,9 +722,10 @@ mark_body_complete(relic_closure_t *closure, const relic_rule_t *rule)
 
 /*
  * Examine the literals of a body the query reaches that read a relation.  A
- * negated literal's predicate is complete, and so is an aggregate's group
- * predicate, with everything the body of its group rule reads: a fold needs
- * the whole group.  A query's group predicate is in no component, since the
+ * negated literal's predicate is complete, and so is the predicate an
+ * aggregate folds, with everything its compiled body reads: a fold needs
+ * the whole group.  For a body folded in place the two are the atom's one
+ * predicate.  A query's group predicate is in no component, since the
  * query runs its group rule itself, so what its body reads is marked
  * directly; a program's is, and its body is reached by closing the complete
  * set as well.  A positive literal's predicate is complete when no rule
@@ -754,7 +755,7 @@ visit_body(relic_demand_t *demand, const relic_rule_t *rule)
 
 		if (literal->kind == RELIC_LITERAL_AGGREGATE)
 			mark_body_complete(&demand->complete,
-			    literal->u.aggregate.group_rule);
+			    literal->u.aggregate.body);
 
 		position = component_of(magic, pred);
 		if (position == RELIC_NO_COMPONENT)
@@ -1568,9 +1569,9 @@ copy_args(relic_magic_t *magic, relic_renumbering_t *renumbering,
 
 /*
  * A renumbered copy of an aggregate literal: its result slot, then its
- * shared slots, in the rule being generated.  The group predicate and the
- * group rule are the source's, since a group is read completely and never
- * rewritten.
+ * shared slots, in the rule being generated.  The predicate it folds, its
+ * key columns and its compiled body are the source's, since what it folds
+ * is read completely and never rewritten.
  */
 static int
 copy_aggregate(relic_magic_t *magic, relic_renumbering_t *renumbering,
@@ -1705,15 +1706,18 @@ args_equal(const relic_arg_t *a, const relic_arg_t *b, uint16_t count)
 
 /*
  * Whether two aggregate literals of canonical rules are the same literal:
- * the same function of the same column of the same group, binding or
- * comparing the same slot for the same key.
+ * the same function of the same column of the same relation, binding or
+ * comparing the same slot for the same key in the same columns.  Two
+ * literals folding one atom's relation in place may key it on different
+ * columns from the same slots, and fold different groups.
  */
 static bool
 aggregates_equal(const relic_aggregate_t *a, const relic_aggregate_t *b)
 {
 	uint16_t i;
 
-	if (a->fn != b->fn || a->group != b->group || a->column != b->column ||
+	if (a->fn != b->fn || a->source != b->source ||
+	    a->key_mask != b->key_mask || a->column != b->column ||
 	    a->result != b->result || a->shared_count != b->shared_count)
 		return (false);
 
@@ -1860,7 +1864,8 @@ hash_aggregate(const relic_magic_t *magic, uint32_t hash,
 	uint16_t i;
 
 	hash = hash_step(magic, hash, (uint32_t)aggregate->fn);
-	hash = hash_step(magic, hash, aggregate->group);
+	hash = hash_step(magic, hash, aggregate->source);
+	hash = hash_step(magic, hash, aggregate->key_mask);
 	hash = hash_step(magic, hash, aggregate->column);
 	hash = hash_step(magic, hash, aggregate->result);
 	for (i = 0; i < aggregate->shared_count; i++)
@@ -2103,11 +2108,11 @@ reads_on_demand(const relic_magic_t *magic, const relic_literal_t *literal)
 
 /*
  * Whether a body literal that reads its relation whole -- a negated literal,
- * or an aggregate folding its group -- reads a predicate the query does not
+ * or an aggregate folding a relation -- reads a predicate the query does not
  * read completely.  None may: such a literal is kept as written, so its
  * relation must be whole before the rewrite runs, and nothing evaluates a
  * predicate read on demand except through its adornments.  The walk that
- * finds the complete predicates marks every negated and every group
+ * finds the complete predicates marks every negated and every folded
  * predicate it reaches, and the rewrite reaches only what that walk did, so
  * this never holds; if the two ever disagreed the negation would read an
  * empty relation and succeed, or the fold fold an empty group, silently,

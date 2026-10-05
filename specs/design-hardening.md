@@ -167,7 +167,7 @@ predicate never defined -- are expected and ignored.
 Each program is loaded and checked once per strategy, in a context of its own
 created with `relic_create_config()`, and each of its queries is collected
 with `relic_query_collect()`. The strategies are those of
-`tests/equiv/strategies.sh`, plus two:
+`tests/equiv/strategies.sh`, plus three:
 
 | Strategy | Flags | Tuple total held to |
 | --- | --- | --- |
@@ -179,19 +179,23 @@ with `relic_query_collect()`. The strategies are those of
 | no-reorder | `RELIC_F_NO_REORDER` | -- |
 | no-magic | `RELIC_F_NO_MAGIC` | -- |
 | group-rules | `RELIC_F_GROUP_RULES` | -- |
-
-The `group-rules` strategy compiles every aggregate body to a group rule
-where the default folds a body that is one atom of distinct variables in
-place, `specs/design-aggregates.md` section 5.6, so a fold's column map is
-checked against the copy it replaces on every generated program. The
-derivation oracle of `tests/random/compare.c`, which counts one set of
-derivations per group body, runs under this flag, where every body
-derives, rather than knowing which bodies the compiler folds in place.
 | naive+no-magic | `RELIC_F_NAIVE \| RELIC_F_NO_MAGIC` | no-magic |
 | no-index+no-magic | `RELIC_F_NO_INDEX \| RELIC_F_NO_MAGIC` | no-magic |
 | no-reorder+no-magic | `RELIC_F_NO_REORDER \| RELIC_F_NO_MAGIC` | no-magic |
 | parallel+no-magic | `RELIC_F_PARALLEL_ALWAYS \| RELIC_F_NO_MAGIC` | no-magic |
-| materialized | `relic_materialize()` before the queries | no-magic |
+| group-rules+no-magic | `RELIC_F_GROUP_RULES \| RELIC_F_NO_MAGIC` | -- |
+| materialized | `RELIC_F_GROUP_RULES`, and `relic_materialize()` before the queries | group-rules+no-magic |
+
+The `group-rules` strategies compile every aggregate body to a group rule
+where the default folds a body that is one atom of distinct variables in
+place, `specs/design-aggregates.md` section 5.6, so a fold's column map is
+checked against the copy it replaces on every generated program. They hold
+the copies the other strategies do not, so their totals are held to no
+other strategy's but each other's. The derivation oracle of
+`tests/random/compare.c`, which counts one set of derivations per group
+body, counts the materialized strategy's derivations, which runs under
+this flag, where every body derives, rather than knowing which bodies the
+compiler folds in place.
 
 Every strategy's answers must equal the default's. That covers all five
 equivalences: `semi-naive == naive`, `magic == full materialization`,

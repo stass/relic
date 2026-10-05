@@ -1,0 +1,30 @@
+% Which aggregate bodies are folded over their atom's relation where it
+% stands and which get a group rule: -e shows the group rules there are
+% and, for each fold, the relation it reads and its key columns.
+e(a, b). e(b, c). e(c, a). e(a, a).
+t(a, b, c). t(b, b, a).
+node(a). node(b). node(c).
+
+% Folded in place: one atom of distinct variables, keyed on the columns
+% the shared variable stands in -- the first, the second, the middle one
+% of three -- or on none.
+out(X, N) :- node(X), N = count { e(X, Y) }.
+in(X, N) :- node(X), N = count { e(Y, X) }.
+mid(Y, N) :- node(Y), N = count { t(X, Y, Z) }.
+edges(N) :- N = count { e(X, Y) }.
+
+% A group rule each: a wildcard, a constant, a repeated variable and a
+% second literal make a body that is not the atom's relation.
+targets(N) :- N = count { e(_, Y) }.
+from_a(N) :- N = count { e(a, Y) }.
+loops(N) :- N = count { e(X, X) }.
+paths(X, N) :- node(X), N = count { e(X, Y), e(Y, Z) }.
+
+out(X, N)?
+in(X, N)?
+mid(Y, N)?
+edges(N)?
+targets(N)?
+from_a(N)?
+loops(N)?
+paths(X, N)?
