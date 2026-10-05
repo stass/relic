@@ -29,36 +29,6 @@ missing the step 4 gate of `specs/design-arithmetic.md` as well. Steps 5
 and 6 are not started. The causes and what to try are sorted in
 `docs/todo-parallel.md`.
 
-## Build and packaging
-
-**Continuous integration is incomplete.** [High, component:
-`.github/workflows/`] `specs/architecture.md` section 68 specifies fourteen
-jobs.
-`ci.yml` has the Linux compilers, AddressSanitizer with leak detection and
-UndefinedBehaviorSanitizer, distcheck, and the tarball built on glibc and
-musl without autotools; `extended.yml`, weekly, has MemorySanitizer,
-ThreadSanitizer, `-m32`, no threads and the two distcheck variants;
-`macos.yml` runs only by hand while the repository is private. `ci.yml`
-has passed on GitHub; `extended.yml` and `macos.yml` each need a first
-green run before they can be trusted.
-
-Missing are FreeBSD, OpenBSD and NetBSD, which success criterion 10 of
-architecture section 72 asks for. Release 1.0 is excepted: it is built and
-tested from its tarball on FreeBSD by hand, and OpenBSD and NetBSD, with this
-job, are 1.1 work. GitHub has no BSD runners, and the vmactions actions that
-boot one on a Linux runner fetch their helper script and disk images at run
-time with no checksum, which was judged too much trust to extend. A job that
-boots each system's official image, verified against the checksum the project
-publishes, under QEMU on a Linux runner, or a hosted service with native BSD
-machines, would close it.
-
-**`contrib/` has no BSD port skeletons.** [Low, component: `contrib/`,
-`specs/design-release.md` section 4] Only the Homebrew formula exists. The
-FreeBSD and OpenBSD ports and the pkgsrc package the design lists are 1.1
-work, with those systems' testing; each fetches the published tarball, runs
-`make check` where the system has a test target, and lists the installed paths
-exactly.
-
 ## Engine
 
 **Striped tables multiply the number of mappings.** [Low, component:
