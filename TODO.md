@@ -32,21 +32,25 @@ and 6 are not started. The causes and what to try are sorted in
 ## Engine
 
 **A long-lived context's tables only grow.** [Low, component:
-`lib/parse.c`, `lib/magic.c`, `lib/symbol.c`, `lib/value.c`,
-`cmd/relic/repl.c`] No table releases an entry, and two kinds of entry
-outlive the query that made them. A query's text: a constant is interned as
-a value, a variable's spelling and the query's source name as symbols, so
-an embedder preparing a query per request over distinct constants grows the
-symbol pool or the integer table by one entry per distinct constant, and a
-session grows the symbol table by one entry per line, because the tool
-names each line's query `<query N>`. A rewrite's generated names: every
-adorned and magic predicate, and the symbol naming it, stays after the
-query; the same query reuses them, so the growth is bounded by the
-distinct adornments ever asked for. Nothing walks these tables per answer,
-so the cost is memory, bounded by the distinct text and query shapes seen.
-A fix is a source name that is not interned (diagnostics copy it) and a
-per-query scope for the symbols, values and generated predicates only one
-query uses; that is a change to interning and wants a design note first.
+`specs/design-segments.md`, `lib/lex.c`, `lib/parse.c`, `lib/facts.c`,
+`lib/import.c`, `lib/symbol.c`, `lib/value.c`, `lib/util.c`, `lib/pred.c`,
+`lib/eval.c`, `lib/magic.c`, `lib/result.c`, `include/relic.h`,
+`cmd/relic/output.c`] No table
+releases an entry, and three kinds of entry outlive the run that made
+them: the names the lexer interns, a query's source name among them, so a
+session grows the pool by one entry per line; a query's constants,
+interned when it is prepared, so an embedder preparing a query per request
+over distinct keys grows the pool or the integer table per key; and the
+rewrite's generated predicates and their symbols, which also size every
+per-answer walk from then on. The design is written and none of its four
+steps is implemented: the pool holds values only (section 4 and the
+predicate table's name store of section 7); results own their bytes
+through `relic_result_string()` (section 8); the segments, the program
+funnel, the run prologue, the sequence table's ordered growth and rewind,
+and instantiating a query's template at each run (sections 3, 5 and 6);
+the rewrite's predicates appended above the
+program's, rendered and released with the rewrite (section 7). Step 1
+alone closes the growth per line.
 
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of

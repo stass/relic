@@ -189,6 +189,13 @@ Only a load stages. The parser also reads a query's text, where a fact is
 an error; there it keeps a fact as a statement, and the query parser
 reports it as a fact where a query was expected.
 
+A fact's constants become domain identifiers as they are staged, through
+the program funnel of `specs/design-segments.md` section 3: a value the
+program holds is found below the pool's mark, and one it does not hold
+discards the run state and is appended above the program's entries, so a
+staged identifier is always the program's and never a run's. A load of
+facts the program holds therefore interns nothing and discards nothing.
+
 ### 4.2 Staging
 
 A load's staging holds a staging set per predicate its facts name, in the
@@ -297,8 +304,9 @@ a release build trusts.
 commits it as a load does. The fact is in the base store when the call
 returns, with nothing left for the next check. A limit can refuse it,
 which leaves the program as it was. A discard with nothing derived to
-discard returns at once (section 5.3), so a run of calls between two
-queries pays for one discard.
+discard only rewinds the tables (section 5.3), which costs nothing when
+nothing is above their mark, so a run of calls between two queries pays
+for one discard.
 
 ### 4.5 Identifiers and order
 
@@ -335,13 +343,18 @@ is rejected before it is appended; a rewrite's table holds its seeds,
 
 A changed program discards every derived relation and no base store, and
 so does every other discard, whatever calls it, through one function: the
-commit's, and the one that precedes each query's rewrite. The base stores'
+commit's, the run prologue's that precedes a materialization or a
+rewrite, and the interning function's when it appends a value the program
+lacks (`specs/design-segments.md` section 3). The base stores'
 secondary indexes are dropped with the derived relations, so an index a
 plan asked for over a base store lives exactly as long as one over a
 derived relation, and the next evaluation builds the ones it asks for
 again. After a discard the store's accounted bytes are the base stores'
 columns and canonical indexes. Every discard clears the record of what was
-materialized (section 5.4).
+materialized (section 5.4), and every discard rewinds the symbol pool and
+the value tables to their program mark, whether or not it found a derived
+relation to free, releasing the values a run introduced with the relations
+that held them; `specs/design-segments.md` section 3.
 
 A discard frees the derived relations rather than emptying them, and the
 next evaluation creates each again on first use. The store records whether
@@ -349,7 +362,7 @@ it may hold anything derived: the mark is set where a derived relation is
 handed out, the only way to create one, and where a secondary index is
 built, the only two things a discard removes, and cleared by the discard
 once it has removed them. Nothing derived exists while the mark is clear,
-so a discard with the mark clear has nothing to do and returns without
+so a discard with the mark clear rewinds the tables and returns without
 walking the relations, and no later write can reach a derived relation the
 mark does not account for: a pointer kept across a discard names freed
 memory.

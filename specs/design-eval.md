@@ -498,10 +498,21 @@ begins or in a load's commit, so no plan's pointer to a derived relation and
 no delta range can span it -- the obligation `specs/design-relations.md` section
 4 places on any operation that ends a span of the append-only store. A
 discard clears the recorded pair, and one with nothing derived to discard
-returns at once.
+rewinds the symbol pool and the value tables and returns.
 
 A failed evaluation records no pair, so the relations are stale and the next
 evaluation discards the part of a fixed point they hold before starting again.
+
+**A run discards in its prologue and nowhere else.** Every run --
+`relic_materialize()`, a query answered or collected -- begins by making
+the program ready, discarding if the relations are not current, taking
+the mark of the symbol pool and the value tables, and instantiating the
+query's template; the discard before a materialization and the one before
+a rewrite's derivation are this one, and a rewrite abandoned over budget
+re-enters the prologue before the whole program is materialized. A run
+that discarded leaves what it interned with its relations, for the next
+discard; a run over current relations releases it when it ends.
+`specs/design-segments.md` sections 3 and 5.
 
 ---
 
@@ -517,7 +528,9 @@ query object owns, per `specs/design-query.md`. Answering one is three steps:
    query is rewritten by Magic Sets, per `specs/design-magic.md`: the
    relations it reads completely are evaluated from the program's schedule,
    the rules the rewrite generates are evaluated from a schedule of their
-   own, and the query rule is the rewritten one. A rewrite that outgrows its
+   own, and the query rule is the rewritten one. The query rule read
+   either way is the run's instance of the query's template,
+   `specs/design-segments.md` section 5. A rewrite that outgrows its
    budget is abandoned, and the query answered from the materialized program
    instead. A query holding an aggregate also owns the group rules of its
    aggregates, which run once each, after the program's part is evaluated

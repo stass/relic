@@ -1051,9 +1051,11 @@ reconciled rather than bookkept. A program with a literal in it counts a
 few bytes more against its limit than it did; the golden tests of the
 memory limit are re-recorded at their new totals.
 
-**The table is not shrunk.** An integer once interned keeps its identifier
-for the life of the context, as every identifier does. A discard frees
-the derived relations and leaves the table, so a context that has evaluated
+**The table is rewound with the relations.** An integer the program wrote
+keeps its identifier for the life of the context; one a run computed sits
+above the table's mark and is released by the discard that frees the
+relations holding it, `specs/design-segments.md` section 6. Until that
+discard, a context that has evaluated
 a program computing a million distinct integers holds them, about twenty
 bytes each, until it is destroyed -- whether or not the next program
 computes them again. This is stated rather than hidden, and it is bounded:

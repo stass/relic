@@ -1138,12 +1138,14 @@ A program with a name in it counts a few bytes more against its limit than
 it did; the golden tests of the memory limit are re-recorded at their new
 totals, as they were when the integer table was charged.
 
-**The pool is not shrunk.** A string once interned keeps its identifier for
-the life of the context, and a discard leaves the pool, as it leaves the
-integer table; the memory limit bounds it with everything else, and what a
-derivation interned a derivation's tuple held. Reclaiming strings no
-relation and no statement holds is left absent, section 19, with the
-integer case.
+**The pool is rewound with the relations.** A string the program wrote
+keeps its identifier for the life of the context. A string a run interned
+sits above the pool's mark, and the discard that frees the derived
+relations holding it rewinds the pool, the integer table and their charge
+to the mark, `specs/design-segments.md` sections 3 and 6; between the
+derivation and that discard the memory limit bounds it with everything
+else. A collected result copies the bytes of the strings it holds, so a
+caller keeps an answer's strings without keeping the pool's entries.
 
 ### 9.2 The frozen round
 
@@ -1698,6 +1700,8 @@ tool has; 5 is what `CLAUDE.md` asks of every feature.
   order over the group that a set does not have, and
   `specs/design-aggregates.md` section 20 leaves it out with the set
   aggregates.
-* **Reclaiming interned strings.** Section 9.1, with the integer case.
+* **Reclaiming interned strings here.** A run's strings are released
+  with its derived relations by `specs/design-segments.md`, and a
+  program's are kept, section 9.1.
 * **Glob patterns.** `like` and `fnmatch`: a second pattern language for
   what `^` and `$` and `.*` say in the first.

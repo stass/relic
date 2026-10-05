@@ -711,7 +711,8 @@ struct relic_symbol {
 ```
 
 The entry keeps its pointer, so `relic_string()` returns a pointer that
-stays valid until the context is destroyed, as `include/relic.h` promises,
+stays valid as long as the entry does -- until the context is destroyed
+for a program value, `specs/design-segments.md` section 8 --
 and stays sixteen bytes: the `size_t` length becomes a `uint32_t`, and the
 hash takes the room. A symbol too long for the length to record is
 refused with a diagnostic by the pool, the one path every symbol takes,

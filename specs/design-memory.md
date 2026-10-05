@@ -36,11 +36,13 @@ rather than by size.
 **Grouped by phase.** Symbols, parsed rules, plans and join state are created
 in large numbers, are never freed individually, and all die at the same
 moment. They are allocated from an arena, which frees them in one operation.
-Seven arenas exist, one per lifetime:
+Nine arenas exist, one per lifetime:
 
 | Arena | Holds | Released when |
 | --- | --- | --- |
-| string | the symbol pool's bytes, packed (section 7) | the context is destroyed |
+| name | predicate names and the source names of retained locations (`specs/design-segments.md` section 7) | the context is destroyed |
+| run | a query's instance: its rule and group rules with their constants interned (`specs/design-segments.md` section 5) | the run ends |
+| string | the symbol pool's bytes, packed (section 7) | the context is destroyed; the chunks a run added, at the discard that rewinds the pool (`specs/design-segments.md`) |
 | program | rules, parsed terms | a new program replaces the loaded one |
 | analysis | the dependency graph and its component search | the analysis ends |
 | schedule | the evaluation order: components, their members and rules | a new schedule replaces it |
@@ -61,7 +63,9 @@ any other, in the account with the relations evaluation derives
 (`specs/design-facts.md`); a discard frees the derived relations and drops
 the base stores' secondary indexes, and never shrinks a base store's tuples.
 The store records whether it holds anything a discard removes, so a discard
-with nothing derived to remove returns at once. A query's answer relation is
+with nothing derived to remove only rewinds the pool and the value tables
+to their mark (`specs/design-segments.md` section 3), which costs nothing
+when nothing is above it. A query's answer relation is
 owned the same way but by the query object rather than the context, and is
 released with the query, per `specs/design-query.md`.
 
@@ -80,7 +84,8 @@ one: an arena cannot resize a block, and an array that doubles would otherwise
 leave every superseded generation of itself in the arena. Their *contents*
 --- the symbol bytes --- do live in an arena, the symbol pool's string
 arena, which is what keeps a pointer returned by `relic_string()` valid for
-the life of the context even though the array indexing it has since moved.
+the life of its entry -- the context's, for a program value -- even though
+the array indexing it has since moved.
 
 ---
 
@@ -391,11 +396,15 @@ correctly reported at the time.
 Splitting the operation makes that state unrepresentable rather than merely
 unlikely, which is why it is worth two functions instead of one.
 
-**No deletion.** Nothing in v1 removes an interned symbol or value, so the
-table has no tombstones. This is worth stating rather than leaving implicit:
-tombstones are what makes linear probing delicate, and their absence is a
-property of the workload, not an oversight. A future table that must delete
-should be a different type rather than a flag on this one.
+**No tombstones.** Nothing removes an entry from the middle of a table,
+so the table has no tombstones. This is worth stating rather than leaving
+implicit: tombstones are what makes linear probing delicate, and their
+absence is a property of the workload, not an oversight. A table that
+must delete is a different type rather than a flag on this one: the
+sequence table of `specs/design-segments.md` section 6, which wraps this
+one for the pool and the value tables, grows in identifier order and
+rewinds its tail, and the striped index tables, which cannot rewind, stay
+this type.
 
 ---
 
@@ -415,8 +424,10 @@ struct relic_symbol {
 Symbols are stored in a growable array indexed by `id - 1` and found through
 an identifier table. The bytes themselves are copied into the pool's
 **string arena**, where they never move, so the pointer `relic_string()`
-returns stays valid until the context is destroyed even after the array has
-been reallocated several times. The string arena has an alignment of one
+returns stays valid as long as the entry does -- until the context is
+destroyed for a program value, until the run's rewind for one a run
+introduced, `specs/design-segments.md` section 8 -- even after the array
+has been reallocated several times. The string arena has an alignment of one
 (section 3): a symbol's bytes are read as bytes and never as an object, so
 one symbol's bytes and terminator follow the previous symbol's with no
 padding.
@@ -459,6 +470,14 @@ Symbols and string literals share one pool. They are distinguished by the
 string `"foo"` intern to one symbol identifier and to two different domain
 identifiers. Storing one copy of the bytes is the point; keeping the types
 distinct is the domain identifier's job (section 8).
+
+**The pool holds values and nothing else**, and it is divided at a mark
+into a program segment and a run segment, `specs/design-segments.md`
+sections 3 and 4: a predicate's name, a variable's spelling and a source
+name live elsewhere, and the strings a run introduces, above the mark, are
+released by rewinding the count, the string arena and the index to the
+mark when the run's derived relations are released. A program entry is
+never rewound.
 
 ---
 
@@ -508,11 +527,15 @@ way.
 **Which identifiers were assigned.** The table keeps, per symbol
 identifier, two bits: whether the symbol has been interned as a symbol
 value, and whether as a string value. A symbol in the pool is not yet a
-value --- a predicate's name, a variable's spelling and a source name are
-interned there too --- and these bits are what make a symbol or string
+value of both types --- its bytes may have been interned as a symbol and
+never as a string --- and these bits are what make a symbol or string
 domain identifier one the context assigned. Setting one counts a distinct
 symbol or string value, as the integer table's length counts the integers,
-so the values are counted by type, which `relic_stats()` reports.
+so the values are counted by type, which `relic_stats()` reports. The
+bits above the pool's mark are cleared with the entries when the pool
+rewinds; a bit a run set on a program entry stays set,
+`specs/design-segments.md` section 6. The integer table rewinds with the
+pool, to a mark of its own.
 
 **Decoding.** `relic_value_decode(ctx, dom, &value)` fills a `relic_value_t`
 the caller provides with the value an identifier names and returns true, or

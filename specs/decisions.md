@@ -611,3 +611,40 @@ thread count; caller code that runs inside an operation must leave that
 environment as it found it. Of the two objections architecture section 3
 records, these mechanisms answer D-4's and the one function D-3's, and
 floats stay out of version 1. Specified in `specs/design-floats.md`.
+
+### D-34 A context's tables have a program segment and a run segment
+
+The symbol pool and the value tables are each divided at a mark into what
+the program wrote, kept for the life of the context, and what one run
+introduced, released whole by rewinding to the mark when the run's derived
+relations are released: at the run's end when it answered from current
+relations, otherwise by the next discard, which rewinds whether or not it
+finds a relation to free. One interning function serves both segments and
+the context's state picks the segment: while no run is open it finds a
+value at or below the mark or else discards the run state before it
+appends, so no load, import, fact addition or check needs to discard for
+the tables' sake; while a run is open, which its prologue declares when it
+takes the mark, it appends above the mark and never discards. Every run
+begins with that one prologue, which discards exactly when the run will
+derive into the store, takes the mark, and instantiates the query, so no
+run discards anywhere else. The pool, the integer table and the float
+table index themselves through a sequence table, an identifier table
+grown in identifier order, which is what makes unplacing its tail in
+decreasing identifier order sound; no tombstone, free list or reference
+count is added, and D-6's lifetimes gain two. The pool holds values only:
+a predicate's name lives in the context's name store, a variable's
+spelling and a source name in the arena of what was parsed, and the lexer
+and parser intern nothing. A compiled query is a template whose constants
+are values, instantiated into the run's arena at each run, so a query
+holds no identifier between runs. The Magic rewrite's predicates are
+appended above the program's and released with the rewrite, their names
+rendered from the entry rather than interned, which amends D-12's "the
+others are predicates" and returns the rewrite's share of the predicate
+table between runs, which D-17's bound did not foresee. A collected
+result interns the bytes it holds into a pool of its own, under
+identifiers no context assigns, and reads and orders them through its own
+accessors, so nothing outside the context holds a run identifier; a row
+callback's values and bytes last for the call, `relic_string()` and
+`relic_value_compare()` outside an operation refuse an identifier above
+the mark, and every interface that takes a value into the program refuses
+one. D-3, D-4 and D-24 stand. Specified in `specs/design-segments.md`.
