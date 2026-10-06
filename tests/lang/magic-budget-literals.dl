@@ -2,7 +2,7 @@
 % but every rule is padded to twenty literals with f literals over
 % variables of their own, which bind nothing p is called with.  Finding
 % the adornments reads every rule of each whole, and is charged what it
-% reads, so the rewrite outgrows its budget of generated literals well before
+% reads, so the rewrite outgrows its budget of searched literals well before
 % it runs out of adornments, and before it drafts a rule.  The program's
 % size in literals, each body and one for its guard, is 21 + 8 x 21 = 189,
 % and its literal budget 256 + 16 x 189 = 3280.  f's fact counts nothing,

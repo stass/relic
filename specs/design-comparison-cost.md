@@ -451,22 +451,20 @@ read for and on which predicates are read free, so every call the second
 makes the first made too, and every predicate it reaches free is already
 read free.
 
-Each search is held on its own to what bounds the draft: the predicate
-limit and budget count the adornments it keeps, the rule limit the rules
-it reads, and the literal budget their bodies, apart from the drafts,
-since a query can reach far more adornments than it could draft. A search
-keeps no more adornments than the rewrite without subsumption would adorn
-and reads no more literals than drafting them is charged, so the predicate
-limit and the literal budget refuse nothing that rewrite admits. The rule
-limit can: the search charges it every rule it reads, while the draft
-charges only the rules it keeps and drops duplicates and rules that derive
-nothing, so under a configured rule limit a program holding such rules can
-be refused where the rewrite without subsumption fit. A query whose first
-search reaches more than a limit admits is refused, as it is today, even
-when subsumption would have brought its rewrite within the limit. What a
-search needs to read one rule is released once the rule is read. A rewrite
-that outgrows a budget is abandoned as now, in the search where it
-outgrows it.
+Each search is held on its own to what bounds it: the predicate limit or
+budget counts the adornments it keeps, and a literal budget of its own the
+bodies of the rules it reads, apart from the drafts, since a query can reach
+far more adornments than it could draft. A search keeps no more adornments
+than the rewrite without subsumption would adorn and reads no more literals
+than drafting them is charged, so where both literal budgets are in force
+or both lifted, neither refuses anything that rewrite admits. The rule limit does not hold a search, since it counts the rules the
+draft keeps after dropping duplicates and rules that derive nothing; the
+search's budgets, which only the predicate limit lifts, bound it when the
+rule limit is the only one set (`specs/decisions.md` D-36). A query whose
+first search reaches more than a limit admits is refused even when
+subsumption would have brought its rewrite within the limit. What a search
+needs to read one rule is released once the rule is read. A rewrite that
+outgrows a budget is abandoned in the search where it outgrows it.
 
 ### 5.2 A rewrite with no bound column is no rewrite
 
@@ -921,8 +919,8 @@ which none of the others change.
 * `specs/design-magic.md` section 3: a fourth source of the complete set,
   the free adornments of section 5.2 here; section 4: the rule of section
   5.1 here after "An adornment with no bound column has no magic
-  predicate"; section 8: the search is charged the rules and literals it
-  walks, section 5.1 here; section 10: the explain lines of section 5.3
+  predicate"; section 8: the search is charged the adornments and literals
+  it walks, section 5.1 here; section 10: the explain lines of section 5.3
   here, and the query's `stream` line of section 4.
 * `specs/design-planner.md` section 8.2: an `EMIT` that streams is shown as
   `stream`; section 4 here.

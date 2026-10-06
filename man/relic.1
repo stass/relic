@@ -709,23 +709,29 @@ When its facts are what exceed the limit, the diagnostic names the first
 predicate, in the order the file names them, that the facts read would add
 to:
 .Dl relic: error: limit exceeded: tuples=4 while loading e/1
-When neither
+Unless a
 .Cm magic
-limit is set, the rewrite has budgets in proportion to the program, on the
-predicates it generates and on the literals of the rules it drafts, a
+limit lifts them, the rewrite has budgets in proportion to the program, on
+the predicates it generates, on the literals its search for what to
+generate reads, and on the literals of the rules it drafts, a
 literal with an expression counting one more per operator, call and
 operand, which bound the rules it keeps as well, and a rewrite that
 outgrows one is abandoned with a warning and the query answered from the
 whole program, which never answers differently but may meet an arithmetic
 or string error the rewrite would not have.
-Setting either lifts every budget: a
+A
 .Cm magic
-limit that is set is a limit like the others, and one left unset beside it
-bounds nothing.
-The rewrite searches for what to generate before it generates anything,
-and the search is held to the same limits and budgets; it can count
-predicates and rules the finished rewrite drops, so a limit may refuse a
-query whose rewrite would have fit.
+limit that is set is a limit like the others.
+.Cm magic-preds
+lifts the budgets on predicates and on literals read, and either limit
+lifts the budget on literals drafted.
+The rewrite searches for what to generate before it generates anything; the
+search can count predicates the finished rewrite drops, so
+.Cm magic-preds
+may refuse a query whose rewrite would have fit.
+.Cm magic-rules
+counts only the rules the rewrite keeps, and set alone leaves the search
+its budgets.
 .Sh INTERACTIVE MODE
 With
 .Fl i ,

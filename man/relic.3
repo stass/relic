@@ -268,20 +268,27 @@ and
 .Fa max_magic_rules
 bound the predicates and rules the Magic Sets rewrite of one query
 generates.
-With both zero, the rewrite has budgets in proportion to the program, on
-the predicates it generates and the literals of the rules it drafts, a
+Unless a limit lifts them, the rewrite has budgets in proportion to the
+program, on the predicates it generates, the literals its search for what
+to generate reads, and the literals of the rules it drafts, a
 literal with an expression counting one more per node of it, which bound
 the rules it keeps as well, and a rewrite outgrowing one is abandoned with
 a warning and the query answered from the whole program, which never
 answers differently but may meet an undefined arithmetic result, a string
-too long or an invalid pattern the rewrite would not have; setting
-either lifts every budget, and a limit left zero beside it bounds nothing.
-The rewrite searches for what to generate before it generates anything,
-and the search is held to the same limits and budgets; it can count
-predicates and rules the finished rewrite drops, so a limit may refuse a
-query whose rewrite would have fit.
+too long or an invalid pattern the rewrite would not have.
+.Fa max_magic_preds
+lifts the budgets on predicates and on literals read, and either limit
+lifts the budget on literals drafted.
+The rewrite searches for what to generate before it generates anything; the
+search can count predicates the finished rewrite drops, so
+.Fa max_magic_preds
+may refuse a query whose rewrite would have fit.
+.Fa max_magic_rules
+counts only the rules the rewrite keeps, and set alone leaves the search
+its budgets.
+A limit of
 .Dv SIZE_MAX
-sets no bound on anything.
+bounds nothing it counts, but lifts the same budgets as any other.
 .Pp
 .Fa threads
 is how many threads an evaluation may share a round's work among, the

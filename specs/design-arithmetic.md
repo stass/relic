@@ -1229,7 +1229,7 @@ thousand nodes copied into ten adornments' prefixes is ten thousand nodes
 of arena and of walking that a count of literals would not see, so every
 such count becomes a count of **sizes**, a literal's size being one plus the
 nodes of its expressions, which section 6 records on the node. The program's
-size in literals, the literal budget, the search's charge for the literals
+size in literals, the literal budgets, the search's charge for the literals
 it walks and the count a generated rule is measured by all use it, so a
 rewrite over a program of large expressions stays a constant multiple of
 that program's size in nodes, and the budgets bound the work as they did.

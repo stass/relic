@@ -31,18 +31,19 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**The Magic rule limit counts the rules a search reads.** [Medium,
-component: `lib/magic.c`] Each search for the adornments a query reaches is
-held to `magic-preds`, `magic-rules` and the literal budget on its own, and
-the rule limit counts every rule a search reads where the draft keeps
-fewer, dropping duplicates, rules that derive nothing and bound adornments
-a later free call subsumes. So a configured `magic-rules` can refuse a
-query whose finished rewrite would have fit
-(`tests/lang/magic-rules-read.dl`). The walks the last search records are
-exactly what the draft replays, so the limit could count what the rewrite
-keeps; but charging the rules read is what bounds a search when the rule
-limit is the only bound configured, so the search needs another bound
-first.
+**A configured Magic limit lets the draft grow faster than the search.**
+[Medium, component: `lib/magic.c`] Either Magic limit lifts the draft's
+literal budget, and the rule limit, when set, counts only rules kept.
+`cut_prefix()` declines to cut a prefix with more live slots than
+`RELIC_MAX_ARITY`, so every later magic rule of such a rule copies the whole
+prefix: a rule of L binding calls keeps about L rules of L^2/2 literals,
+recursive ones whose planning costs about L^3, though the search read L
+literals for it. A 10 KB rule of 1000 calls under `-l magic-rules=1000000`
+took 362 s and 53 GB; under `magic-preds` alone no rule count stops it, and
+only `-l memory` refuses it. Making the cut always possible, for instance by
+chaining cuts or letting a supplementary predicate exceed the arity limit,
+would hold drafted literals to a constant multiple of those searched and so
+bound the draft by what the search reads in every configuration.
 
 **Reading a query's reach completely is a mode beside the rewrite.** [Low,
 component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment

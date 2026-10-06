@@ -697,3 +697,32 @@ the query template, the rewrite's predicates as the run's, and the
 refusals of a run's identifier. D-12 and D-17 stand as they were before
 D-34 amended them, and D-3, D-4 and D-24 stand. Specified in
 `specs/design-vocabulary.md`.
+
+### D-36 The predicate limit sizes the search; either limit sizes the draft
+
+The rewrite finds the adornments a query reaches in a search that reads
+every rule of each adornment it keeps, then drafts their rules. D-7 and
+D-21 lifted every budget when either Magic limit was set, so with only the
+rule limit set the search was charged every rule it read against that
+limit. The rule limit counts the rules the draft keeps, after it drops
+duplicates and rules that derive nothing, so a query whose finished
+rewrite fit the limit could be refused in its search; and counting the
+rules read instead of kept was the only bound on the search.
+
+Each limit sizes the stage whose output it counts. The predicate limit
+sizes the search: it replaces the predicate budget and lifts the search's
+budget on the literals it reads. Either limit sizes the draft: it lifts the
+draft's budget on the literals it generates, which bounds the rules it
+keeps, and the rule limit counts only those rules. The predicate limit
+lifts the draft's budget too because drafting the adornments a search
+keeps is charged at least what the search read for them, so a draft
+budget left beside a lifted search would refuse what the caller sized. A rule limit set alone
+leaves the search held to both of its budgets, in proportion to the
+program; were it to lift the search's literal budget, the search would be
+bounded by the predicate budget alone, its work growing as the product of
+the program's derived predicates and its size. A caller who limits only
+rules and wants more adornments than the budgets admit limits predicates
+as well; a search outgrowing a budget abandons the rewrite with a warning,
+as it does when neither limit is set. Amends D-7 and D-21, which lifted
+every budget when either limit was set. Specified in
+`specs/design-magic.md` section 8.

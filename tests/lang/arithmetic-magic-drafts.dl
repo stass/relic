@@ -2,10 +2,10 @@
 % computes Z from an expression of 1023 nodes and then calls r/1 on it,
 % so each adornment of p/6 drafts the expression into its adorned rule and
 % again into the magic rule of that call.  Reading p/6's rule once per
-% adornment fits the rewrite's literal budget; drafting it twice does not,
-% since the budget counts a literal's size, one and one more per node of
-% its expressions, and the rewrite falls back to the whole program with
-% the same rows.
+% adornment fits the search's literal budget; drafting it twice does not
+% fit the draft's, since the budgets count a literal's size, one and one
+% more per node of its expressions, and the rewrite falls back to the
+% whole program with the same rows.
 b(1, 1, 1, 1, 1, 1).
 b(2, 1, 1, 1, 1, 1).
 s(1).

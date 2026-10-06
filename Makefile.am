@@ -698,6 +698,8 @@ RELIC_LANG_TESTS = \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
 	tests/lang/magic-budget-adornments.dl \
 	tests/lang/magic-budget-literals.dl \
+	tests/lang/magic-budget-rules-draft.dl \
+	tests/lang/magic-budget-rules-limit.dl \
 	tests/lang/magic-budget-subsumed.dl \
 	tests/lang/magic-budget-wide-cut.dl tests/lang/magic-budget.dl \
 	tests/lang/magic-cspa.dl \

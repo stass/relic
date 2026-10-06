@@ -542,27 +542,28 @@ attributed to the query, as the query's answer is: `limit exceeded:
 tuples=7 while deriving the query`. The explanation of a plan, which shows
 the rewrite, names the generated predicates themselves. Supplementary predicates are not counted
 by the predicate limit or its budget: each has exactly one rule, which the
-rule limit and the literal budget count, so bounding rules bounds them, and
+rule limit and the budget on generated literals count, so bounding rules bounds them, and
 the predicate limit bounds adornments, of which the arity admits 2^n.
 Counting them would abandon, against a budget of a few hundred predicates,
 the rewrite of a body of hundreds of calls that the construction of section
 6 exists to keep small. Exceeding a limit fails the query as any limit does: no rows, and a
 nonzero exit.
 
-**A rewrite nobody has sized has budgets.** Finite is not small: a program whose
+**The rewrite has budgets.** Finite is not small: a program whose
 rules each call a predicate with one more column bound than the head was
 called with reaches all 2^arity adornments. Three kilobytes of arity 14 do
 it, generating 16 384 adornments in 1.3 GB, where the query answered from the
 whole program takes a megabyte. The rewrite is an optimization, and an
 optimization must not decide whether a query is answered, nor generate a
-program unboundedly larger than the one it specializes. So when neither
-Magic limit is configured, the rewrite has budgets in proportion to the
-program:
+program unboundedly larger than the one it specializes. So the rewrite has
+budgets in proportion to the program, each in force until a limit the
+caller sets lifts it:
 
-| Budget | Counts | Is |
-| --- | --- | --- |
-| generated predicates | as `max_magic_preds` | 256 + 16 x the program's derived predicates |
-| generated literals | body literals of every rule drafted, kept or dropped, and of every rule a search for the adornments reads | 256 + 16 x the program's size in literals |
+| Budget | Counts | Is | Lifted by |
+| --- | --- | --- | --- |
+| generated predicates | as `max_magic_preds` | 256 + 16 x the program's derived predicates | `max_magic_preds` |
+| searched literals | body literals of every rule a search for the adornments reads | 256 + 16 x the program's size in literals | `max_magic_preds` |
+| generated literals | body literals of every rule drafted, kept or dropped | 256 + 16 x the program's size in literals | either Magic limit |
 
 A program's derived predicates are the members of its schedule, and its
 size in literals is what one adorned copy of it holds: each rule's body plus
@@ -574,11 +575,11 @@ completely and its body is never copied, `specs/design-aggregates.md`
 section 11.
 Facts count nothing: the
 rewrite copies none of them, so a thousand facts behind one rule rewrite as
-cheaply as one. Both budgets are fixed for a given program, so they are the
+cheaply as one. The budgets are fixed for a given program, so they are the
 same on every run.
 
-**The literal budget bounds the rules kept, so generated rules have a limit
-but no budget.** Every rule the rewrite generates is charged its body
+**The budget on generated literals bounds the rules kept, so generated rules
+have a limit but no budget.** Every rule the rewrite generates is charged its body
 literals before it is kept, and every one but a seed has at least one: an
 adorned rule its guard, a magic rule the literal it records a call from, a
 supplementary rule the prefix it cuts, a rule over a base view the view. A
@@ -596,40 +597,54 @@ budgets exist to admit.
 **The search is charged what it reads.** Finding the adornments reads every
 rule of each, and a query can reach far more adornments than its rewrite
 could draft: the program of 2^arity adornments above does it. So each
-search is held on its own to what bounds the draft: the adornments it keeps
-count against the predicate limit or budget, each rule it reads against the
-rule limit, and its body against the literal budget, counted apart from the
-drafts. A search that outgrows one refuses or abandons the rewrite before
-anything is drafted, whichever a configured limit or a budget does.
-Drafting an adornment drafts every rule of its source, whole or cut into
-pieces that hold at least its body between them, and the literal budget
-charges every draft, so a search reads no more literals than drafting what
-it keeps is charged. A search keeps no more adornments than the rewrite
-without subsumption would adorn, so neither the predicate limit nor the
-literal budget refuses a query that rewrite would admit. The rule limit
-counts only the rules the draft keeps, which drops duplicates and rules
-that derive nothing, so under a configured rule limit a search can refuse a
-query whose rewrite would have fit. A query whose first search reaches more
-than a limit admits is refused even when the adornments a free one subsumes
-would have brought the rewrite within it. The planner's working state for
-one rule is released once the rule is walked. A search holds its
-adornments, kept and subsumed, and the walk of each rule it reads, a step
-of a few words per body literal, for the draft to replay; the walks grow
-with the literals the search reads, which the literal budget bounds, are
-charged to the memory limit as the rest of the rewrite is, and are
-released once the rewrite has drafted.
+search is held on its own to what bounds it: the adornments it keeps count
+against the predicate limit or budget, and the body of each rule it reads
+against the budget on searched literals. A search that outgrows one
+refuses or abandons the rewrite before anything is drafted, whichever a
+configured limit or a budget does. Drafting an adornment drafts every rule
+of its source, whole or cut into pieces that hold at least its body
+between them, and the budget on generated literals charges every draft, so
+a search reads no more literals than drafting what it keeps is charged. A
+search keeps no more adornments than the rewrite without subsumption would
+adorn, so where the two literal budgets are both in force or both lifted,
+neither the predicate limit nor its budgets refuse a query that rewrite
+would admit. Under a rule limit alone only the draft's budget is lifted, and
+the search's can abandon a rewrite the draft would admit. A query whose first search reaches more than a limit
+admits is refused even when the adornments a free one subsumes would have
+brought the rewrite within it.
 
-The literal budget counts every rule drafted, kept or dropped. A duplicate,
+The rule limit does not hold a search: it counts only the rules the draft
+keeps, after it drops duplicates and rules that derive nothing, which the
+rules a search reads do not tell. So the predicate limit sizes the search
+and only it lifts the search's budgets; the rule limit sizes the draft
+(D-36). A caller who limits only rules leaves the search held to budgets in
+proportion to the program, and one who wants more adornments than those
+admit limits predicates as well. Were a rule limit alone to lift the
+search's literal budget, the search would be held to the predicate budget
+alone,
+and read every rule of each adornment that admits: work growing as the
+product of the program's derived predicates and its size.
+
+The planner's working state for one rule is released once the rule is
+walked. A search holds its adornments, kept and subsumed, and the walk of
+each rule it reads, a step of a few words per body literal, for the draft
+to replay; the walks grow with the literals the search reads, which its
+budget or the predicate limit bounds, are charged to the memory limit as
+the rest of the rewrite is, and are released once the rewrite has drafted.
+
+The budget on generated literals counts every rule drafted, kept or
+dropped. A duplicate,
 or a rule that derives nothing, is built before it is recognized as one,
 and a long body calling its own predicate drafts copies that are all
 dropped: counting only what is kept would never see them, and the work of
-building and comparing them grows as the square of the body. The literal budget has no configurable limit behind
-it: it is not a knob but the invariant that a rewrite nobody has sized is
-a constant multiple of the program, which counting rules cannot hold,
+building and comparing them grows as the square of the body. The literal
+budgets have no configurable limit behind them: they are not knobs but the
+invariant that each stage of a rewrite no limit has sized is a constant
+multiple of the program, which counting rules cannot hold,
 because a rule is copied whole once per adornment and a program of few
 long rules called with many patterns generates few rules holding many
-literals (`specs/design-planning-cost.md` section 2). The factor admits every rewrite that
-specializes the program -- a handful of adornments per predicate, each with
+literals (`specs/design-planning-cost.md` section 2). The factor admits
+every rewrite that specializes the program -- a handful of adornments per predicate, each with
 its rules and magic rules -- and the floor admits every rewrite of a small
 program outright; what it refuses is a rewrite that multiplies the program.
 What a rewrite within its budgets costs to order and to hold, and the memory
@@ -643,16 +658,19 @@ program's fixed point, exactly as `-X no-magic` answers it:
 relic: warning: the query's Magic rewrite outgrew its budget of 784 generated literals while adorning p/8; answering it from the whole program
 ```
 
-Configuring either limit replaces both budgets rather than joining
-them, so a caller who sets one gets precisely the limit asked for: a larger
-rewrite than the budgets admit if the limit is larger, and a failed query
-when it is exceeded. The literal budget is lifted with the other because
-the budgets are proportional to the program while the cost of answering
+A configured limit replaces the budgets on the stage it sizes rather than
+joining them, so a caller who sets one gets precisely the limit asked for:
+a larger rewrite than the budgets admit if the limit is larger, and a
+failed query when it is exceeded. The predicate limit sizes the search,
+replacing the predicate budget and lifting the budget on searched
+literals, and either limit sizes the draft, lifting the budget on
+generated literals, which bounds the rules kept. The budgets are lifted
+because they are proportional to the program while the cost of answering
 without the rewrite is proportional to the data: ten short rules over an
 8-ary predicate and a million facts rewrite to a few thousand literals,
 many times the program and trivially cheap, where the whole program's
-fixed point is not. A caller who sets a Magic limit has sized the rewrite,
-and the library does not overrule them.
+fixed point is not. A caller who sets a Magic limit has sized the stage
+it bounds, and the library does not overrule them there.
 
 The budget bounds the rewritten program, not what it derives. Adornments of
 one predicate with different bound columns each derive their own relation,

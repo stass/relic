@@ -51,6 +51,7 @@ typedef struct relic_counters relic_counters_t;
 typedef struct relic_diag relic_diag_t;
 typedef struct relic_lexer relic_lexer_t;
 typedef struct relic_magic relic_magic_t;
+typedef struct relic_magic_budget relic_magic_budget_t;
 typedef struct relic_magic_limit relic_magic_limit_t;
 typedef struct relic_staged_set relic_staged_set_t;
 typedef struct relic_staging relic_staging_t;
@@ -279,13 +280,26 @@ struct relic_adornment_set {
  * How much a query's Magic rewrite may generate of one thing: at most `most`,
  * and `configured` says whether that is a limit the caller set, which fails
  * the query when exceeded, or a budget the library chose, which abandons
- * the rewrite and leaves the query to be answered without it.  A caller who
- * sets either Magic limit leaves no budget in force, so a count they left
- * unset is then configured with `most` SIZE_MAX, and never exceeded.
+ * the rewrite and leaves the query to be answered without it.  The rules a
+ * rewrite keeps have a limit and no budget, so when the caller sets no rule
+ * limit `most` is SIZE_MAX, and never exceeded.
  */
 struct relic_magic_limit {
 	size_t	most;
 	bool	configured;
+};
+
+/*
+ * A budget on the body literals one stage of a query's Magic rewrite reads
+ * or drafts: at most `most`, of which `spent` has been charged, in the units
+ * relic_body_size() gives, and named `what` in the warning that abandons the
+ * rewrite when it is outgrown.  A budget a limit the caller set has lifted
+ * has `most` SIZE_MAX.
+ */
+struct relic_magic_budget {
+	size_t		 most;
+	size_t		 spent;
+	const char	*what;
 };
 
 /*
@@ -343,20 +357,17 @@ struct relic_magic_limit {
  *
  * `base_view_count` counts the derived predicates whose base stores hold
  * facts, each of which has a base view and gives each of its adornments one
- * rule over it; the literal budget counts each as a rule of two literals.
+ * rule over it; the literal budgets count each as a rule of two literals.
  *
- * `pred_limit` bounds the predicates the rewrite generates, by a limit or a
- * budget, and `generated_preds` counts the adorned and magic predicates of
- * the adornments kept so far.  `rule_limit` bounds the rules it keeps by a
- * limit alone, SIZE_MAX when none is set: the literal budget bounds them
- * otherwise.  `literal_budget` bounds the body literals of every rule
- * drafted, kept or dropped, which `generated_literals` counts.  The budget
- * and both of its counts, this one and `searched_literals`, are in the
- * units relic_body_size() gives, a literal counting one and one more per
- * node of its expressions, so that none of them counts in literals alone
- * while another counts nodes.  Configuring
- * either Magic limit lifts both budgets: an unset limit is then SIZE_MAX,
- * and so is the literal budget, which no limit configures.
+ * `pred_limit` bounds the predicates the rewrite generates, by the
+ * predicate limit or, when none is set, a budget, and `generated_preds`
+ * counts the adorned and magic predicates of the adornments kept so far.
+ * `rule_limit` bounds the rules the draft keeps by a limit alone, SIZE_MAX
+ * when none is set: the draft's literal budget bounds them otherwise.
+ * `search_literals` bounds the body literals of the rules a search reads,
+ * and `draft_literals` those of every rule drafted, kept or dropped.  Both
+ * count a literal as one and one more per node of its expressions, so that
+ * neither counts in literals alone while the other counts nodes.
  *
  * `rule_index` finds a generated rule by its canonical form, holding
  * positions in `rules` plus one.
@@ -365,21 +376,21 @@ struct relic_magic_limit {
  * drafted.  `reads_free`, indexed by predicate identifier minus one like
  * `incomplete`, marks the predicates every call reads through the free
  * adornment: a search marks one when a call first reaches it free, and a
- * second search keeps the marks the first made.  Each search is held to the
- * limits and budgets on its own: the adornments it keeps count in
- * `generated_preds`, the rules it reads for them in `searched_rules`,
- * against the rule limit, and their bodies in `searched_literals`, against
- * the literal budget.  A search records the walk of every rule it reads,
- * `query_walk` the query's and an adornment's `walks` the rest, and the
- * draft replays the walks of the last search rather than walking any body
- * itself.  `walked` holds the adornments the first search kept, with their
- * walks, while a second search reads its walks from them.  The walks, a
- * step per body literal read, are in `walk_arena`, which is emptied when
- * the rewrite returns.  `scratch` holds what walking or drafting one rule
- * needs, the planner's work and the drafts, and is emptied once the rule is
- * walked or drafted, so that a search holds no more than its adornments and
- * their walks however many rules it reads, and `arena` no more than the
- * rules kept however many are drafted.
+ * second search keeps the marks the first made.  Each search is held on its own
+ * to the predicate limit or budget, which the adornments it keeps count
+ * against in `generated_preds`, and to `search_literals`, which the bodies of
+ * the rules it reads for them count against.  The rule limit does not hold a
+ * search: it counts what the draft keeps.  A search records the walk of every
+ * rule it reads, `query_walk` the query's and an adornment's `walks` the rest,
+ * and the draft replays the walks of the last search rather than walking any
+ * body itself.  `walked` holds the adornments the first search kept, with their
+ * walks, while a second search reads its walks from them.  The walks, a step
+ * per body literal read, are in `walk_arena`, which is emptied when the
+ * rewrite returns.  `scratch` holds what walking or drafting one rule needs,
+ * the planner's work and the drafts, and is emptied once the rule is walked or
+ * drafted, so that a search holds no more than its adornments and their walks
+ * however many rules it reads, and `arena` no more than the rules kept however
+ * many are drafted.
  *
  * Everything variable-length is in `arena`, in `walk_arena`, in `scratch`
  * or in an array grown with relic_grow_array(), and relic_magic_reset()
@@ -409,12 +420,10 @@ struct relic_magic {
 	size_t			 predicate_count;
 	size_t			 base_view_count;
 	size_t			 generated_preds;
-	size_t			 generated_literals;
-	size_t			 searched_rules;
-	size_t			 searched_literals;
 	relic_magic_limit_t	 pred_limit;
 	relic_magic_limit_t	 rule_limit;
-	size_t			 literal_budget;
+	relic_magic_budget_t	 search_literals;
+	relic_magic_budget_t	 draft_literals;
 	bool			*reads_free;
 	relic_walk_t		*query_walk;
 	relic_adornment_set_t	 walked;

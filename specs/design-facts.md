@@ -403,9 +403,11 @@ each is 256 plus 16 per unit of the program.
 | Budget | Unit of the program |
 | --- | --- |
 | generated predicates | a member of the program's schedule |
+| searched literals | a rule's body length plus one |
 | generated literals | a rule's body length plus one |
 
-Generated rules have a limit and no budget: the literal budget bounds
+Generated rules have a limit and no budget: the budget on generated
+literals bounds
 them, since every generated rule but a seed has a body literal, and every
 seed but the query's follows a draft charged one. A derived predicate with
 facts counts as though the program held the rule its adornments are given,

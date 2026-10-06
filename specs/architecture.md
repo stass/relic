@@ -1438,11 +1438,12 @@ adornments for one predicate.
 For realistic Datalog arities this is naturally finite, but finite is not
 small: a program whose rules each ask for one more bound column reaches every
 one of them. The rewrite is therefore bounded in proportion to the program it
-rewrites. A caller that configures a Magic limit gets that limit, per section
-63, and no budget; one that configures neither gets budgets, and a rewrite
-outgrowing one is abandoned with a warning and the query answered from the
-whole program. The rewrite is an
-optimization and must not decide whether a query is answered.
+rewrites. The rewrite searches for the adornments a query reaches and then
+drafts their rules; each stage has budgets until a caller's limit sizes
+it, the predicate limit the search and either limit the draft, per section
+63, and a rewrite outgrowing a budget is abandoned with a warning and the
+query answered from the whole program. The rewrite is an optimization and
+must not decide whether a query is answered.
 
 Duplicate rewritten rules must be structurally deduplicated.
 
@@ -1941,8 +1942,9 @@ relic_t *
 relic_create_config(const relic_config_t *);
 ```
 
-A zero `max_memory` or `max_tuples` means unlimited; a zero Magic limit means
-the budget of section 63. The limits correspond one to one with the
+A zero `max_memory` or `max_tuples` means unlimited; a zero Magic limit lifts
+none of the budgets of section 63, which stay in force unless the other
+limit lifts them. The limits correspond one to one with the
 `-l key=value` options of section 40 and with the limits of section 63, so a
 limit exists in exactly one place and the tool merely parses into it.
 
@@ -2407,12 +2409,14 @@ Partial results are discarded: a query that exceeds a limit produces no rows
 and a nonzero exit status, because a truncated answer set would be
 indistinguishable from a complete one.
 
-The two Magic limits are the exception when both are left unset: the rewrite
-then has budgets proportional to the program, on the predicates it generates
-and the literals of the rules it drafts, which bound the rules it keeps as
-well, and a rewrite outgrowing one answers the query from the whole program
-rather than failing it, per section 38. Setting either limit lifts every
-budget.
+The two Magic limits are the exception when left unset: the rewrite then
+has budgets proportional to the program, on the predicates it generates, the
+literals its search for the adornments reads, and the literals of the rules
+it drafts, which bound the rules it keeps as well, and a rewrite outgrowing
+one answers the query from the whole program rather than failing it, per
+section 38. The predicate limit sizes the search, replacing the predicate
+budget and lifting the budget on literals read; either limit sizes the
+draft, lifting the budget on literals drafted (D-36).
 
 ---
 
@@ -3219,12 +3223,14 @@ A query against a program whose relations already hold its fixed point is not
 rewritten: it reads them directly. `specs/design-magic.md` records the
 reasoning.
 
-**Magic limits, sections 38, 49 and 63.** With both left unset, the limits on
+**Magic limits, sections 38, 49 and 63.** Left unset, the limits on
 generated Magic predicates and rules are replaced by budgets proportional to
-the program, one on generated predicates and one on the literals the rewrite
-drafts, which bounds the rules it keeps as well, rather than being unlimited,
-and a rewrite outgrowing one is abandoned with a warning and the query
-answered from the whole program; setting either lifts them all.
+the program, on generated predicates, on the literals the search for the
+adornments reads, and on the literals the rewrite drafts, which bounds the
+rules it keeps as well, rather than being unlimited, and a rewrite
+outgrowing one is abandoned with a warning and the query answered from the
+whole program; the predicate limit lifts the search's budgets, and either
+limit the draft's (D-36).
 Adornments are finite but can be exponential in the arity, and an optimization must neither decide whether a
 query is answered nor generate a program unboundedly larger than the one it
 specializes.

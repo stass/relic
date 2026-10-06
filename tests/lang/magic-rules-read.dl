@@ -1,11 +1,8 @@
-% The search for the adornments a query reaches is charged every rule it
-% reads against a configured rule limit, while the draft is charged only the
-% rules it keeps.  p's rule is written four times and the draft keeps one
-% copy, so the rewrite of this query generates three rules -- the seed
-% recording q's binding, q$bf's rule and p$ff's copy of p's -- and would fit a
-% limit of three; but the search reads q's rule and all four of p's, and
-% refuses the query before it drafts anything.  Charging what the search
-% reads is what bounds it when the rule limit is the only bound set.
+% The rule limit counts the rules the rewrite keeps, not the rules the search
+% for its adornments reads.  p's rule is written four times and the draft
+% keeps one copy, so the rewrite of this query generates three rules -- the
+% seed recording q's binding, q$bf's rule and p$ff's copy of p's -- and fits a
+% limit of three, though the search reads q's rule and all four of p's.
 
 e(a, b).
 e(b, c).

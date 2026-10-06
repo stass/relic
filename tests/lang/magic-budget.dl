@@ -2,11 +2,11 @@
 % its first column: f's leading constants make it bound in more columns than
 % p, so the planner places it first, and each rule then calls p with one
 % more column bound than its head was called with.  With no limit
-% configured, the rewrite has a budget proportional to the program, 256 +
-% 16 x 25 = 656 generated literals.  Finding the adornments reads the seven
-% rules of each, 576 literals in all, which the budget admits; drafting them
-% copies each rule with its guard and adds a magic rule for each call, which
-% outgrows it.  Outgrowing it abandons the rewrite with a warning; the query
+% configured, the rewrite has budgets proportional to the program, 256 +
+% 16 x 25 = 656 literals each for the search and the draft.  Finding the
+% adornments reads the seven rules of each, 576 literals in all, which the
+% search's budget admits; drafting them copies each rule with its guard and
+% adds a magic rule for each call, which outgrows the draft's.  Outgrowing it abandons the rewrite with a warning; the query
 % is answered from the whole program, as -X no-magic answers it.
 
 f(c, c, c, c, c, c, c, c, c, c).
