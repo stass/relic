@@ -74,7 +74,7 @@
  * plans, and the memory limit its query runs under.
  */
 #define	UNREACHED_LENGTH	2000u
-#define	UNREACHED_LIMIT		20000u
+#define	UNREACHED_LIMIT		24000u
 
 /*
  * The threads the scenarios' rounds are shared among the third time they
@@ -1119,8 +1119,9 @@ a_plan_reads_none_of_its_own_batches(void)
  * for no rule it never plans.  The program holds a rule of UNREACHED_LENGTH
  * literals that the query never reaches, so the query's evaluation plans
  * only the component it reads.  Room for the long rule's plan, sixteen
- * bytes an operation, would take more than UNREACHED_LIMIT bytes, of which
- * the query needs less than half.
+ * bytes an operation, would take more than UNREACHED_LIMIT bytes on its
+ * own, while everything the query needs, its rewrite included, fits within
+ * the limit.
  */
 static void
 a_rule_no_query_reaches_costs_it_no_memory(void)

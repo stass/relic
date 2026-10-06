@@ -31,26 +31,18 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**The adornment search and the draft each walk a body.** [Medium, component:
-`lib/magic.c`] The search for the adornments a query reaches
-(`reach_calls_in_order()`) and the draft of the rewritten rules
-(`rewrite_body()`) each plan a rule's body and walk it, and they must agree
-on the rules walked, the order, the columns each call binds and which calls
-read on demand. The only guard is the internal-error diagnostic
-`adornment_of_call()` gives for a call the search never recorded, so an edit
-to one walker would surface as a failed query on some program rather than as
-a failing test. Recording, per adornment and rule the search walks, the
-order and the calls it reached would let the draft replay the record by
-construction, and let the second search reuse the first's plans rather than
-plan each body again.
-
-The same record would let the Magic limits count what the rewrite keeps
-rather than what it explores. Each search is held to `magic-preds`,
-`magic-rules` and the literal budget on its own, and the rule limit counts
-every rule a search reads where the draft keeps fewer, dropping duplicates,
-rules that derive nothing and bound adornments a later free call
-subsumes. So a configured `magic-rules` can refuse a query whose finished
-rewrite would have fit (`tests/lang/magic-rules-read.dl`).
+**The Magic rule limit counts the rules a search reads.** [Medium,
+component: `lib/magic.c`] Each search for the adornments a query reaches is
+held to `magic-preds`, `magic-rules` and the literal budget on its own, and
+the rule limit counts every rule a search reads where the draft keeps
+fewer, dropping duplicates, rules that derive nothing and bound adornments
+a later free call subsumes. So a configured `magic-rules` can refuse a
+query whose finished rewrite would have fit
+(`tests/lang/magic-rules-read.dl`). The walks the last search records are
+exactly what the draft replays, so the limit could count what the rewrite
+keeps; but charging the rules read is what bounds a search when the rule
+limit is the only bound configured, so the search needs another bound
+first.
 
 **Reading a query's reach completely is a mode beside the rewrite.** [Low,
 component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment

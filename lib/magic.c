@@ -114,9 +114,13 @@
 #define	RELIC_MAGIC_BUDGET_FLOOR	256
 #define	RELIC_MAGIC_BUDGET_FACTOR	16
 
-/* No component derives the predicate; no slot has been assigned yet. */
+/*
+ * No component derives the predicate; no slot has been assigned yet; no
+ * search has reached the adornment a call reads.
+ */
 #define	RELIC_NO_COMPONENT	SIZE_MAX
 #define	RELIC_NO_SLOT		UINT16_MAX
+#define	RELIC_NOT_REACHED	UINT32_MAX
 
 /*
  * Every magic predicate is named after its adorned predicate with this in
@@ -158,6 +162,7 @@ typedef struct relic_demand relic_demand_t;
 typedef struct relic_draft relic_draft_t;
 typedef struct relic_prefix relic_prefix_t;
 typedef struct relic_renumbering relic_renumbering_t;
+typedef struct relic_walk_step relic_walk_step_t;
 
 /*
  * Components being marked complete and closed over what they depend on.
@@ -247,24 +252,50 @@ struct relic_renumbering {
 	uint16_t	count;
 };
 
+/*
+ * One literal of a walk: the `literal`th of its rule's body, placed where
+ * the slots of `bound` are bound.  `calls` says whether it calls a predicate
+ * read on demand.  Such a call binds the columns of `columns`, and reads the
+ * adornment at position `reached` among those the search kept, which is
+ * RELIC_NOT_REACHED until a search reaches it.
+ */
+struct relic_walk_step {
+	uint64_t	bound;
+	size_t		literal;
+	uint32_t	columns;
+	uint32_t	reached;
+	bool		calls;
+};
+
+/*
+ * A rule's body walked for one call of the rule: a step per body literal,
+ * in the order the planner evaluates the body with the call's bound columns
+ * known.  The search records the walk once and reaches the adornments of its
+ * calls from it, and the draft replays it, so the two cannot differ on the
+ * order, on what each literal finds bound or on the adornment a call reads.
+ */
+struct relic_walk {
+	relic_walk_step_t *steps;
+};
+
 static void	 abandon_over_budget(relic_magic_t *magic, const char *what,
 		    size_t budget, relic_pred_id_t source);
 static int	 add_adornment(relic_magic_t *magic,
 		    relic_adornment_set_t *set, relic_pred_id_t source,
 		    uint32_t bound, uint32_t hash);
 static int	 adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
-		    size_t rule_ordinal, const relic_adornment_t *adornment);
+		    const relic_walk_t *walk, size_t rule_ordinal,
+		    const relic_adornment_t *adornment);
 static int	 adorn_rules(relic_magic_t *magic,
 		    const relic_adornment_t *adornment);
 static uint32_t	 adornment_hash(const relic_adornment_set_t *set,
 		    relic_pred_id_t source, uint32_t bound);
-static int	 adornment_of_call(relic_magic_t *magic,
-		    const relic_literal_t *call, uint32_t columns,
-		    relic_adornment_t *adornmentp);
 static void	 adornment_set_clear(relic_adornment_set_t *set);
 static void	 adornment_set_init(relic_adornment_set_t *set,
 		    uint64_t hash_seed);
 static void	 adornment_set_release(relic_adornment_set_t *set);
+static void	 adornment_set_swap(relic_adornment_set_t *a,
+		    relic_adornment_set_t *b);
 static bool	 aggregates_equal(const relic_aggregate_t *a,
 		    const relic_aggregate_t *b);
 static int	 append_rule(relic_magic_t *magic, const relic_rule_t *rule,
@@ -351,10 +382,10 @@ static int	 intern_supplementary(relic_magic_t *magic,
 		    const relic_prefix_t *prefix, size_t call_ordinal,
 		    uint16_t arity, relic_pred_id_t *idp);
 static int	 keep_adornment(relic_magic_t *magic, relic_pred_id_t source,
-		    uint32_t bound);
+		    uint32_t bound, uint32_t *positionp);
 static bool	 kept_bound_adornment_of_free(const relic_magic_t *magic);
 static uint64_t	*later_slots(relic_magic_t *magic, const relic_rule_t *rule,
-		    const size_t *order);
+		    const relic_walk_t *walk);
 static relic_magic_limit_t limit_or_budget(size_t configured_limit,
 		    bool sized,
 		    size_t program_size);
@@ -364,6 +395,7 @@ static bool	 literals_equal(const relic_magic_t *magic,
 		    const relic_literal_t *a, const relic_literal_t *b);
 static void	*magic_alloc(relic_magic_t *magic, size_t count, size_t size);
 static void	*draft_alloc(relic_magic_t *magic, size_t count, size_t size);
+static void	*walk_alloc(relic_magic_t *magic, size_t count, size_t size);
 static int	 map_components(relic_magic_t *magic);
 static void	 mark_body_complete(relic_closure_t *closure,
 		    const relic_rule_t *rule);
@@ -380,13 +412,11 @@ static bool	 pred_is_complete(const relic_magic_t *magic,
 static size_t	 program_size(const relic_ruletab_t *rules);
 static int	 publish_rule(relic_magic_t *magic, const relic_draft_t *draft);
 static int	 reach_adornment(relic_magic_t *magic,
-		    relic_pred_id_t source, uint32_t bound);
-static int	 reach_calls(relic_magic_t *magic, const relic_rule_t *rule,
-		    uint64_t bound);
-static int	 reach_calls_in_order(relic_magic_t *magic,
-		    const relic_rule_t *rule, uint64_t bound);
-static int	 reach_rules_of(relic_magic_t *magic,
-		    const relic_adornment_t *adornment);
+		    relic_pred_id_t source, uint32_t bound,
+		    uint32_t *positionp);
+static int	 reach_rules_of(relic_magic_t *magic, uint32_t position);
+static int	 reach_walk(relic_magic_t *magic, const relic_rule_t *rule,
+		    relic_walk_t *walk);
 static int	 read_reached_completely(relic_magic_t *magic,
 		    const relic_rule_t *query);
 static bool	 reads_whole_on_demand(const relic_magic_t *magic,
@@ -399,6 +429,7 @@ static int	 record_call(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_adornment_t *adornment);
 static uint32_t	 rehash_adornment(uint32_t id, void *ctx);
 static uint32_t	 rehash_rule(uint32_t id, void *ctx);
+static void	 release_walks(relic_magic_t *magic);
 static void	 renumber_arg(relic_renumbering_t *renumbering,
 		    const relic_arg_t *source, relic_arg_t *copy);
 static uint16_t	 renumber_slot(relic_renumbering_t *renumbering,
@@ -408,9 +439,10 @@ static void	 report_limit(relic_magic_t *magic, const char *limit,
 static bool	 restates_head(const relic_rule_t *rule,
 		    const relic_adornment_t *head, const relic_literal_t *call,
 		    uint32_t columns);
+static int	 rewrite(relic_magic_t *magic, const relic_rule_t *query);
 static int	 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
-		    const relic_adornment_t *head, size_t rule_ordinal,
-		    relic_draft_t *draft);
+		    const relic_walk_t *walk, const relic_adornment_t *head,
+		    size_t rule_ordinal, relic_draft_t *draft);
 static int	 rewrite_query(relic_magic_t *magic,
 		    const relic_rule_t *query);
 static bool	 rule_derives_nothing(const relic_rule_t *rule);
@@ -425,8 +457,13 @@ static uint16_t	 slot_count(uint64_t slots);
 static int	 supplementary_literal(relic_magic_t *magic,
 		    const relic_prefix_t *prefix, size_t call_ordinal,
 		    uint64_t live, relic_literal_t *literal);
+static int	 view_walk(relic_magic_t *magic, relic_walk_t *walk);
 static void	 visit_body(relic_demand_t *demand, const relic_rule_t *rule);
 static void	 visit_demanded(relic_demand_t *demand, size_t position);
+static int	 walk_rule(relic_magic_t *magic, const relic_rule_t *rule,
+		    uint64_t bound, relic_walk_t *walk);
+static relic_walk_t *walks_for(relic_magic_t *magic,
+		    const relic_adornment_t *adornment);
 
 void
 relic_magic_init(relic_magic_t *magic, relic_t *ctx)
@@ -435,8 +472,10 @@ relic_magic_init(relic_magic_t *magic, relic_t *ctx)
 	magic->ctx = ctx;
 	relic_arena_init_charged(&magic->arena, &ctx->account);
 	relic_arena_init_charged(&magic->scratch, &ctx->account);
+	relic_arena_init_charged(&magic->walk_arena, &ctx->account);
 	adornment_set_init(&magic->kept, ctx->hash_seed);
 	adornment_set_init(&magic->subsumed, ctx->hash_seed);
+	adornment_set_init(&magic->walked, ctx->hash_seed);
 	relic_idtab_init(&magic->rule_index, false);
 	magic->hash_seed = ctx->hash_seed;
 }
@@ -450,10 +489,12 @@ relic_magic_reset(relic_magic_t *magic)
 
 	adornment_set_release(&magic->kept);
 	adornment_set_release(&magic->subsumed);
+	adornment_set_release(&magic->walked);
 	free(magic->rules.entries);
 	relic_idtab_reset(&magic->rule_index);
 	relic_arena_reset(&magic->arena);
 	relic_arena_reset(&magic->scratch);
+	relic_arena_reset(&magic->walk_arena);
 
 	relic_magic_init(magic, ctx);
 }
@@ -475,12 +516,13 @@ magic_alloc(relic_magic_t *magic, size_t count, size_t size)
 }
 
 /*
- * Allocate what drafting one rule needs from the scratch arena, reporting
- * exhaustion: the body's order and prefix, the planner's work, and the
- * literals and arguments of the drafts, which publish_rule() copies into
- * the rewrite's arena when it keeps a rule.  The scratch arena is emptied
- * once the rule is drafted, so the rewrite's arena holds only the rules
- * kept and the rewrite's own tables, however many drafts were made.
+ * Allocate what walking or drafting one rule needs from the scratch arena,
+ * reporting exhaustion: the body's order and the planner's work, the
+ * prefix, and the literals and arguments of the drafts, which publish_rule()
+ * copies into the rewrite's arena when it keeps a rule.  The scratch arena
+ * is emptied once the rule is walked or drafted, so the rewrite's arena
+ * holds only the rules kept and the rewrite's own tables, however many
+ * drafts were made.
  */
 static void *
 draft_alloc(relic_magic_t *magic, size_t count, size_t size)
@@ -488,6 +530,22 @@ draft_alloc(relic_magic_t *magic, size_t count, size_t size)
 	void *block;
 
 	block = relic_arena_allocarray(&magic->scratch, count, size);
+	if (block == NULL)
+		relic_diag_no_memory(magic->ctx);
+
+	return (block);
+}
+
+/*
+ * Allocate from the arena of the walks, reporting exhaustion.  The walks
+ * are released once the rewrite has drafted from them.
+ */
+static void *
+walk_alloc(relic_magic_t *magic, size_t count, size_t size)
+{
+	void *block;
+
+	block = relic_arena_allocarray(&magic->walk_arena, count, size);
 	if (block == NULL)
 		relic_diag_no_memory(magic->ctx);
 
@@ -1222,6 +1280,30 @@ base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
 }
 
 /*
+ * The walk of a rule base_view_rule() built, from the scratch arena as the
+ * rule is.  Its one literal reads the base view, which is complete, so that
+ * literal is the whole order, and as it calls nothing, nothing reads what it
+ * finds bound.
+ */
+static int
+view_walk(relic_magic_t *magic, relic_walk_t *walk)
+{
+	relic_walk_step_t *step;
+
+	step = draft_alloc(magic, 1, sizeof(*step));
+	if (step == NULL)
+		return (-1);
+
+	bzero(step, sizeof(*step));
+	step->literal = 0;
+	step->calls = false;
+	step->reached = RELIC_NOT_REACHED;
+	walk->steps = step;
+
+	return (0);
+}
+
+/*
  * Name and intern the predicates of an adornment: `name$` followed by a b or
  * an f per column for the adorned predicate, and the same after `magic$` for
  * the magic one, which holds only the bound columns and exists only when
@@ -1304,6 +1386,21 @@ adornment_set_release(relic_adornment_set_t *set)
 	free(set->entries);
 	relic_idtab_reset(&set->index);
 	adornment_set_init(set, set->hash_seed);
+}
+
+/*
+ * Exchange two sets, entries and index alike.  Nothing outside a set points
+ * into it, since its index holds positions and is rehashed through the set
+ * it is passed with.
+ */
+static void
+adornment_set_swap(relic_adornment_set_t *a, relic_adornment_set_t *b)
+{
+	relic_adornment_set_t held;
+
+	held = *a;
+	*a = *b;
+	*b = held;
 }
 
 static uint32_t
@@ -1401,19 +1498,25 @@ add_adornment(relic_magic_t *magic, relic_adornment_set_t *set,
 
 /*
  * Keep the adornment calling `source` with the columns of `bound` bound,
- * unless the search has kept it already.  A new one counts the predicates
- * naming it will generate -- the adorned one, and the magic one when a
- * column is bound -- against the limit on generated predicates.
+ * unless the search has kept it already, and give its position among those
+ * kept in *positionp.  A new one counts the predicates naming it will
+ * generate -- the adorned one, and the magic one when a column is bound --
+ * against the limit on generated predicates.
  */
 static int
-keep_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
+keep_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
+    uint32_t *positionp)
 {
+	const relic_adornment_t *found;
 	size_t generated;
 	uint32_t hash;
 
 	hash = adornment_hash(&magic->kept, source, bound);
-	if (find_adornment(&magic->kept, source, bound, hash) != NULL)
+	found = find_adornment(&magic->kept, source, bound, hash);
+	if (found != NULL) {
+		*positionp = (uint32_t)(found - magic->kept.entries);
 		return (0);
+	}
 
 	generated = bound == 0 ? 1 : 2;
 	if (confirm_pred_limit(magic, source, generated) != 0)
@@ -1422,6 +1525,7 @@ keep_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
 	if (add_adornment(magic, &magic->kept, source, bound, hash) != 0)
 		return (-1);
 	magic->generated_preds += generated;
+	*positionp = (uint32_t)(magic->kept.count - 1);
 
 	return (0);
 }
@@ -1999,7 +2103,8 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
  * build and compare.  Charging what is kept would never see them.  The rule
  * limit measures the rewritten program, so it counts only the rules kept.
  * A dropped copy is rewound out of the arena, which so holds only the rules
- * kept.
+ * kept; the walk the rule was drafted from is in the arena of the walks,
+ * which is released whole once the rewrite has drafted.
  */
 static int
 publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
@@ -2180,38 +2285,6 @@ restates_head(const relic_rule_t *rule, const relic_adornment_t *head,
 }
 
 /*
- * The adornment a call binding `columns` reads, as the search for the
- * adornments the query reaches found it: the free one when its predicate is
- * read free, and otherwise the one binding those columns.  The draft walks
- * every body in the order that search did, so it asks only for adornments
- * the search recorded, and one it did not find is an internal error.
- */
-static int
-adornment_of_call(relic_magic_t *magic, const relic_literal_t *call,
-    uint32_t columns, relic_adornment_t *adornmentp)
-{
-	const relic_adornment_t *found;
-	relic_pred_id_t source;
-	uint32_t adorned_columns;
-
-	source = call->u.atom.pred;
-	if (confirm_pred_indexed(magic, source) != 0)
-		return (-1);
-
-	adorned_columns = magic->reads_free[source - 1] ? 0 : columns;
-	found = find_adornment(&magic->kept, source, adorned_columns,
-	    adornment_hash(&magic->kept, source, adorned_columns));
-	if (found == NULL) {
-		relic_diag_internal(magic->ctx, &call->where,
-		    "a query's Magic rewrite drafted a call it did not adorn");
-		return (-1);
-	}
-
-	*adornmentp = *found;
-	return (0);
-}
-
-/*
  * Generate the magic rule recording `call`, made with `adornment`: the call's
  * bound arguments, derived from the `length` literals of `prefix`, which are
  * those before the call as the generated rules write them.  The body is in
@@ -2284,15 +2357,16 @@ literal_slots(const relic_magic_t *magic, const relic_literal_t *literal)
 }
 
 /*
- * For each position i of a body in the order `order`, the slots read at or
- * after it -- by the literal at i, by any literal placed later, or by the
- * head -- as `later[i]`, with `later[body_length]` the head's alone.  One
- * pass from the end: each position adds its literal to the one after it.
+ * For each step i of a walk of a body, the slots read at or after it -- by
+ * the literal at i, by any literal placed later, or by the head -- as
+ * `later[i]`, with `later[body_length]` the head's alone.  One pass from the
+ * end: each step adds its literal to the one after it.
  */
 static uint64_t *
 later_slots(relic_magic_t *magic, const relic_rule_t *rule,
-    const size_t *order)
+    const relic_walk_t *walk)
 {
+	const relic_literal_t *literal;
 	uint64_t *later;
 	uint16_t column;
 	size_t i;
@@ -2305,9 +2379,10 @@ later_slots(relic_magic_t *magic, const relic_rule_t *rule,
 	for (column = 0; column < rule->head_arity; column++)
 		later[rule->body_length] |= arg_slot(&rule->head_args[column]);
 
-	for (i = rule->body_length; i > 0; i--)
-		later[i - 1] = later[i] |
-		    literal_slots(magic, &rule->body[order[i - 1]]);
+	for (i = rule->body_length; i > 0; i--) {
+		literal = &rule->body[walk->steps[i - 1].literal];
+		later[i - 1] = later[i] | literal_slots(magic, literal);
+	}
 
 	return (later);
 }
@@ -2492,16 +2567,17 @@ cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
  * generating the magic rules of the calls it makes and the supplementary
  * rules of the cuts between them.
  *
- * The body is put in the order the planner would evaluate it with the head's
- * bound variables already known -- guard first, when the call binds anything
- * -- and walked in that order, keeping the prefix, the literals evaluated
- * so far as the generated rules write them, and `bound`, the slots the
- * literals walked so far bind.  Each call on a predicate read on demand is
- * renamed to the adornment it reads, and a demand call, one whose adornment
- * binds a column, has its magic rule generated from the prefix.  Before
- * every call binding a column but the first, the prefix is cut, so that the
- * call's magic rule, every later rule and the draft read it through one
- * literal.
+ * The body is replayed from `walk`, which the search recorded for this call
+ * of the rule: in the order the planner evaluates it with the head's bound
+ * variables known, each literal with the slots bound before it, and each
+ * call on a predicate read on demand with the columns it binds and the
+ * adornment it reads.  The replay keeps the prefix, the literals evaluated
+ * so far as the generated rules write them, guard first when the call binds
+ * anything.  Each call is renamed to the adornment it reads, and a demand
+ * call, one whose adornment binds a column, has its magic rule generated
+ * from the prefix.  Before every call binding a column but the first, the
+ * prefix is cut, so that the call's magic rule, every later rule and the
+ * draft read it through one literal.
  *
  * A call restating the head, as restates_head() defines it, has no magic
  * rule and no cut before it.  Its magic rule would derive only the guard's
@@ -2512,40 +2588,39 @@ cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix, size_t call_ordinal,
  * rules after the call, which read the prefix written out instead, up to the
  * next call binding a column, where it is cut as it would have been.
  *
- * Where else the prefix is cut depends on the source rule and `bound`, never
- * on the adornment a call reads.  A call the free adornment subsumes binds its
- * columns like any other and has the prefix cut before it, though it reads
- * the free adornment and has no magic rule.  So every rule drafted for an
- * adornment is as long as it would be were each call read through the
- * adornment binding its columns, and subsumption lengthens no rule; it
- * leaves out the magic rules of the calls it redirects.  Were the cut
- * before a subsumed call skipped, the prefix before it would run on into
- * the next rule and, past a later cut too wide to make, into every magic
- * rule after it and the draft.
+ * Where else the prefix is cut depends on the source rule and the columns
+ * its calls bind, never on the adornment a call reads.  A call the free
+ * adornment subsumes binds its columns like any other and has the prefix cut
+ * before it, though it reads the free adornment and has no magic rule.  So
+ * every rule drafted for an adornment is as long as it would be were each
+ * call read through the adornment binding its columns, and subsumption
+ * lengthens no rule; it leaves out the magic rules of the calls it
+ * redirects.  Were the cut before a subsumed call skipped, the prefix before
+ * it would run on into the next rule and, past a later cut too wide to make,
+ * into every magic rule after it and the draft.
  *
- * Why a cut loses nothing: it keeps the slots of `bound` that are read at or
- * after the call, `later[i]`.  A slot it drops is in `bound` and absent from
- * the prefix from then on, but no literal from position i onwards reads it,
- * and later[] only shrinks along the body, so no later cut asks for it
- * either.  `bound` keeps meaning what the source rule has bound, which is
- * what an adornment is computed from, and a skipped cut changes nothing.
+ * Why a cut loses nothing: it keeps the slots bound before the call that are
+ * read at or after it, `later[i]`.  A slot it drops is bound and absent from
+ * the prefix from then on, but no literal from step i onwards reads it, and
+ * later[] only shrinks along the body, so no later cut asks for it either.
+ * A step's slots are what the source rule has bound before it, whichever
+ * cuts were made or skipped, which is what an adornment is computed from.
  * The draft has the source rule's head arguments and head arity; its caller
  * names the head.
  */
 static int
 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
-    const relic_adornment_t *head, size_t rule_ordinal, relic_draft_t *draft)
+    const relic_walk_t *walk, const relic_adornment_t *head,
+    size_t rule_ordinal, relic_draft_t *draft)
 {
-	relic_adornment_t called;
+	const relic_adornment_t *called;
+	const relic_walk_step_t *step;
 	relic_literal_t literal;
 	relic_prefix_t prefix;
 	uint64_t *later;
-	size_t *order;
 	size_t binding_calls;
 	size_t i;
-	uint64_t bound;
 	uint64_t live;
-	uint32_t columns;
 	bool restated;
 
 	bzero(&prefix, sizeof(prefix));
@@ -2554,19 +2629,11 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	prefix.rule_ordinal = rule_ordinal;
 	binding_calls = 0;
 
-	order = draft_alloc(magic, rule->body_length, sizeof(*order));
-	if (order == NULL)
-		return (-1);
 	prefix.body = draft_alloc(magic, rule->body_length + 1,
 	    sizeof(*prefix.body));
 	if (prefix.body == NULL)
 		return (-1);
-
-	bound = head_bound_slots(rule, head);
-	if (relic_plan_order(magic->ctx, &magic->scratch, rule, bound,
-	    magic->incomplete, order) != 0)
-		return (-1);
-	later = later_slots(magic, rule, order);
+	later = later_slots(magic, rule, walk);
 	if (later == NULL)
 		return (-1);
 
@@ -2577,7 +2644,8 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 	}
 
 	for (i = 0; i < rule->body_length; i++) {
-		literal = rule->body[order[i]];
+		step = &walk->steps[i];
+		literal = rule->body[step->literal];
 
 		if (reads_whole_on_demand(magic, &literal)) {
 			relic_diag_internal(magic->ctx, &rule->where,
@@ -2586,31 +2654,30 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 			return (-1);
 		}
 
-		if (reads_on_demand(magic, &literal)) {
-			columns = call_columns(magic, &literal, bound);
-			restated = restates_head(rule, head, &literal, columns);
-			if (columns != 0)
+		if (step->calls) {
+			restated = restates_head(rule, head, &literal,
+			    step->columns);
+			if (step->columns != 0)
 				binding_calls++;
 
-			if (columns != 0 && binding_calls > 1 && !restated) {
-				live = bound & later[i];
+			if (step->columns != 0 && binding_calls > 1 &&
+			    !restated) {
+				live = step->bound & later[i];
 				if (cut_prefix(magic, &prefix, binding_calls,
 				    live, literal.u.atom.pred) != 0)
 					return (-1);
 			}
 
-			if (adornment_of_call(magic, &literal, columns,
-			    &called) != 0)
-				return (-1);
+			assert(step->reached < magic->kept.count);
+			called = &magic->kept.entries[step->reached];
 			if (!restated && record_call(magic, rule, prefix.body,
-			    prefix.length, &literal, &called) != 0)
+			    prefix.length, &literal, called) != 0)
 				return (-1);
-			literal.u.atom.pred = called.adorned;
+			literal.u.atom.pred = called->adorned;
 		}
 
 		prefix.body[prefix.length] = literal;
 		prefix.length++;
-		bound |= relic_plan_literal_binds(magic->ctx, &literal, bound);
 	}
 
 	bzero(draft, sizeof(*draft));
@@ -2625,17 +2692,19 @@ rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 
 /*
  * Generate the adorned rule of one rule deriving an adornment's source, the
- * `rule_ordinal`th of them in program order: the rewritten body over the
- * adorned head.
+ * `rule_ordinal`th of them in program order, walked as `walk`: the rewritten
+ * body over the adorned head.
  */
 static int
 adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
-    size_t rule_ordinal, const relic_adornment_t *adornment)
+    const relic_walk_t *walk, size_t rule_ordinal,
+    const relic_adornment_t *adornment)
 {
 	relic_draft_t draft;
 	int status;
 
-	status = rewrite_body(magic, rule, adornment, rule_ordinal, &draft);
+	status = rewrite_body(magic, rule, walk, adornment, rule_ordinal,
+	    &draft);
 	if (status == 0) {
 		draft.head = adornment->adorned;
 		draft.attributed = adornment->source;
@@ -2648,8 +2717,8 @@ adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
 
 /*
  * Rewrite the query, which is called with nothing bound and has no guard,
- * into the rule kept apart from the generated ones.  The magic rules its
- * calls generate are the seeds.
+ * into the rule kept apart from the generated ones, replaying the walk the
+ * search recorded for it.  The magic rules its calls generate are the seeds.
  *
  * The query's head names no predicate, so it is the source and the adorned
  * predicate of a pseudo-adornment with no bound column and no magic
@@ -2674,7 +2743,8 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 	unbound.magic = RELIC_ID_NONE;
 	unbound.bound = 0;
 
-	status = rewrite_body(magic, query, &unbound, 0, &draft);
+	status = rewrite_body(magic, query, magic->query_walk, &unbound, 0,
+	    &draft);
 	if (status == 0) {
 		draft.head = query->head;
 		status = canonicalize(magic, &draft, &magic->query);
@@ -2687,9 +2757,10 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 /*
  * Generate the rules of one adornment: the rule over its source's base view
  * first, when the source has facts, then every rule deriving the source, in
- * program order, each rewritten for that call.  The rule over the base view
- * is numbered after the program's rules, and calls nothing on demand, so it
- * cuts no prefix and names no supplementary predicate.
+ * program order, each rewritten for that call by replaying the walk the
+ * search recorded for it.  The rule over the base view is numbered after the
+ * program's rules, and calls nothing on demand, so it cuts no prefix and
+ * names no supplementary predicate.
  */
 static int
 adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
@@ -2697,6 +2768,7 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 	const relic_ruletab_t *rules;
 	const relic_location_t *where;
 	relic_rule_t over_facts;
+	relic_walk_t over_facts_walk;
 	size_t first;
 	size_t end;
 	size_t i;
@@ -2715,15 +2787,17 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 		if (base_view_rule(magic, adornment->source, where,
 		    &over_facts) != 0)
 			return (-1);
+		if (view_walk(magic, &over_facts_walk) != 0)
+			return (-1);
 
-		if (adorn_rule(magic, &over_facts, end - first,
-		    adornment) != 0)
+		if (adorn_rule(magic, &over_facts, &over_facts_walk,
+		    end - first, adornment) != 0)
 			return (-1);
 	}
 
 	for (i = first; i < end; i++) {
 		if (adorn_rule(magic, &rules->entries[magic->rules_by_head[i]],
-		    i - first, adornment) != 0)
+		    &adornment->walks[i - first], i - first, adornment) != 0)
 			return (-1);
 	}
 
@@ -2732,7 +2806,7 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 
 /*
  * Room for the searches that find the adornments the query reaches, no
- * predicate yet read free.
+ * predicate yet read free and the query not yet walked.
  */
 static int
 begin_searching(relic_magic_t *magic)
@@ -2746,6 +2820,11 @@ begin_searching(relic_magic_t *magic)
 	if (magic->reads_free == NULL)
 		return (-1);
 	bzero(magic->reads_free, count * sizeof(*magic->reads_free));
+
+	magic->query_walk = walk_alloc(magic, 1, sizeof(*magic->query_walk));
+	if (magic->query_walk == NULL)
+		return (-1);
+	bzero(magic->query_walk, sizeof(*magic->query_walk));
 
 	return (0);
 }
@@ -2786,7 +2865,8 @@ confirm_pred_indexed(relic_magic_t *magic, relic_pred_id_t source)
 
 /*
  * Reach the adornment a call on `source` binding the columns of `bound`
- * reads, applying subsumption.
+ * reads, applying subsumption, and give its position among those kept in
+ * *positionp.
  *
  * A predicate is read free from the first call that binds none of its
  * columns: that call and every later one read its free adornment, and a
@@ -2794,7 +2874,8 @@ confirm_pred_indexed(relic_magic_t *magic, relic_pred_id_t source)
  * call binding columns reaches the adornment binding them.
  */
 static int
-reach_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
+reach_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
+    uint32_t *positionp)
 {
 	bool *reads_free;
 
@@ -2806,76 +2887,97 @@ reach_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
 		*reads_free = true;
 
 	if (!*reads_free)
-		return (keep_adornment(magic, source, bound));
+		return (keep_adornment(magic, source, bound, positionp));
 
 	if (bound != 0) {
 		if (note_subsumed(magic, source, bound) != 0)
 			return (-1);
 	}
 
-	return (keep_adornment(magic, source, 0));
+	return (keep_adornment(magic, source, 0, positionp));
 }
 
 /*
- * Reach the adornment of each call of `rule` in the order it is drafted in
- * for a call binding the slots of `bound`, each call binding those slots and
- * those of every positive literal before it: the adornments rewrite_body()
- * asks for when it drafts the rule in that order.  The order, and the
- * planner's work in finding it, are taken from the scratch arena.
+ * Walk `rule` for a call that binds the slots of `bound`: order its body as
+ * the planner evaluates it from those slots, and record, for each literal in
+ * that order, the slots bound before it, whether it calls a predicate read
+ * on demand and, for a call, the columns it binds.  A literal placed binds
+ * what relic_plan_literal_binds() says it does, as it would in the plan.
+ *
+ * The walk depends on the rule, the slots bound, which predicates are read
+ * on demand and the measures of those read completely, none of which
+ * changes while the rewrite runs, so a rule walked once for a call is never
+ * walked again for it.  The steps are kept in the arena of the walks for
+ * the draft; the order and the planner's work are taken from the scratch
+ * arena and released.
  */
 static int
-reach_calls_in_order(relic_magic_t *magic, const relic_rule_t *rule,
-    uint64_t bound)
+walk_rule(relic_magic_t *magic, const relic_rule_t *rule, uint64_t bound,
+    relic_walk_t *walk)
 {
 	const relic_literal_t *literal;
+	relic_walk_step_t *steps;
+	relic_walk_step_t *step;
 	size_t *order;
-	uint32_t columns;
 	size_t i;
-
-	order = relic_arena_allocarray(&magic->scratch, rule->body_length,
-	    sizeof(*order));
-	if (order == NULL) {
-		relic_diag_no_memory(magic->ctx);
-		return (-1);
-	}
-
-	if (relic_plan_order(magic->ctx, &magic->scratch, rule, bound,
-	    magic->incomplete, order) != 0)
-		return (-1);
-
-	for (i = 0; i < rule->body_length; i++) {
-		literal = &rule->body[order[i]];
-
-		if (reads_on_demand(magic, literal)) {
-			columns = call_columns(magic, literal, bound);
-			if (reach_adornment(magic, literal->u.atom.pred,
-			    columns) != 0)
-				return (-1);
-		}
-
-		bound |= relic_plan_literal_binds(magic->ctx, literal, bound);
-	}
-
-	return (0);
-}
-
-/*
- * Reach the adornment of every call `rule` makes on a predicate read on
- * demand, for a call that binds the slots of `bound`.
- *
- * What ordering the rule took from the scratch arena is forgotten once the
- * rule is read: a search reads the rules of every adornment it keeps, and
- * keeps none of what it read them with.
- */
-static int
-reach_calls(relic_magic_t *magic, const relic_rule_t *rule, uint64_t bound)
-{
 	int status;
 
-	status = reach_calls_in_order(magic, rule, bound);
+	steps = walk_alloc(magic, rule->body_length, sizeof(*steps));
+	if (steps == NULL)
+		return (-1);
+
+	order = draft_alloc(magic, rule->body_length, sizeof(*order));
+	status = order == NULL ? -1 : relic_plan_order(magic->ctx,
+	    &magic->scratch, rule, bound, magic->incomplete, order);
+	if (status == 0) {
+		for (i = 0; i < rule->body_length; i++) {
+			literal = &rule->body[order[i]];
+			step = &steps[i];
+
+			bzero(step, sizeof(*step));
+			step->literal = order[i];
+			step->bound = bound;
+			step->calls = reads_on_demand(magic, literal);
+			step->columns = step->calls ?
+			    call_columns(magic, literal, bound) : 0;
+			step->reached = RELIC_NOT_REACHED;
+
+			bound |= relic_plan_literal_binds(magic->ctx, literal,
+			    bound);
+		}
+		walk->steps = steps;
+	}
 	relic_arena_reset(&magic->scratch);
 
 	return (status);
+}
+
+/*
+ * Reach the adornment each call of a walk of `rule` reads, recording its
+ * position in the call's step.  A later search reaching the same calls
+ * records its own positions over those of an earlier one, so the steps hold
+ * the positions the last search found, among the adornments it kept, which
+ * are the ones the draft replays.
+ */
+static int
+reach_walk(relic_magic_t *magic, const relic_rule_t *rule, relic_walk_t *walk)
+{
+	const relic_literal_t *call;
+	relic_walk_step_t *step;
+	size_t i;
+
+	for (i = 0; i < rule->body_length; i++) {
+		step = &walk->steps[i];
+		if (!step->calls)
+			continue;
+
+		call = &rule->body[step->literal];
+		if (reach_adornment(magic, call->u.atom.pred, step->columns,
+		    &step->reached) != 0)
+			return (-1);
+	}
+
+	return (0);
 }
 
 /*
@@ -2905,32 +3007,83 @@ charge_rule_read(relic_magic_t *magic, const relic_rule_t *rule,
 }
 
 /*
- * Reach the adornments the rules deriving an adornment's source call, each
- * rule ordered for the columns the adornment binds.  The rule over the
+ * The walks of the rules deriving an adornment's source, one per rule in
+ * program order: those the first search recorded for the adornment when a
+ * second search reads it, and otherwise room for walks not yet made.  Every
+ * predicate adorned is derived by some rule, so there is at least one.
+ */
+static relic_walk_t *
+walks_for(relic_magic_t *magic, const relic_adornment_t *adornment)
+{
+	const relic_adornment_t *walked;
+	relic_walk_t *walks;
+	size_t count;
+
+	walked = find_adornment(&magic->walked, adornment->source,
+	    adornment->bound, adornment_hash(&magic->walked, adornment->source,
+	    adornment->bound));
+	if (walked != NULL && walked->walks != NULL)
+		return (walked->walks);
+
+	count = magic->first_rule_of[adornment->source] -
+	    magic->first_rule_of[adornment->source - 1];
+	assert(count > 0);
+
+	walks = walk_alloc(magic, count, sizeof(*walks));
+	if (walks != NULL)
+		bzero(walks, count * sizeof(*walks));
+
+	return (walks);
+}
+
+/*
+ * Read the rules deriving the source of the adornment kept at `position`,
+ * each walked for the columns the adornment binds, and reach the adornments
+ * their calls read.  A rule is walked the first time any search reads it
+ * for this adornment, and its walk read thereafter.  The rule over the
  * source's base view reads only the base view, which is complete, and calls
- * nothing.
+ * nothing, so it is neither read nor walked here.
+ *
+ * Each rule is charged before anything is done for it, room for the walks
+ * included, so a limit refuses the search at the rule it is reached by.
+ * The adornment is copied out of the set, because reaching the calls of its
+ * rules may keep more adornments and move the set's entries.
  */
 static int
-reach_rules_of(relic_magic_t *magic, const relic_adornment_t *adornment)
+reach_rules_of(relic_magic_t *magic, uint32_t position)
 {
 	const relic_ruletab_t *rules;
 	const relic_rule_t *rule;
+	relic_adornment_t adornment;
+	relic_walk_t *walk;
 	size_t first;
 	size_t end;
 	size_t i;
 
+	adornment = magic->kept.entries[position];
 	rules = &magic->ctx->program.rules;
-	first = magic->first_rule_of[adornment->source - 1];
-	end = magic->first_rule_of[adornment->source];
+	first = magic->first_rule_of[adornment.source - 1];
+	end = magic->first_rule_of[adornment.source];
 
 	for (i = first; i < end; i++) {
 		rule = &rules->entries[magic->rules_by_head[i]];
 
-		if (charge_rule_read(magic, rule, adornment->source) != 0)
+		if (charge_rule_read(magic, rule, adornment.source) != 0)
 			return (-1);
 
-		if (reach_calls(magic, rule, head_bound_slots(rule,
-		    adornment)) != 0)
+		if (adornment.walks == NULL) {
+			adornment.walks = walks_for(magic, &adornment);
+			if (adornment.walks == NULL)
+				return (-1);
+			magic->kept.entries[position].walks = adornment.walks;
+		}
+		walk = &adornment.walks[i - first];
+
+		if (walk->steps == NULL && walk_rule(magic, rule,
+		    head_bound_slots(rule, &adornment), walk) != 0)
+			return (-1);
+
+		if (reach_walk(magic, rule, walk) != 0)
 			return (-1);
 	}
 
@@ -2940,24 +3093,24 @@ reach_rules_of(relic_magic_t *magic, const relic_adornment_t *adornment)
 /*
  * One search: reach the adornments of the query's calls, then those of the
  * rules of every adornment kept, in the order kept, which appends the
- * adornments their calls reach.  An adornment is copied out of the set
- * before its rules are read, because reading them may keep more and move
- * the set's entries.
+ * adornments their calls reach.  The query is walked the first time a
+ * search reads it.
  */
 static int
 search_once(relic_magic_t *magic, const relic_rule_t *query)
 {
-	relic_adornment_t adornment;
-	size_t i;
+	uint32_t position;
 
 	begin_search(magic);
 
-	if (reach_calls(magic, query, 0) != 0)
+	if (magic->query_walk->steps == NULL &&
+	    walk_rule(magic, query, 0, magic->query_walk) != 0)
+		return (-1);
+	if (reach_walk(magic, query, magic->query_walk) != 0)
 		return (-1);
 
-	for (i = 0; i < magic->kept.count; i++) {
-		adornment = magic->kept.entries[i];
-		if (reach_rules_of(magic, &adornment) != 0)
+	for (position = 0; position < magic->kept.count; position++) {
+		if (reach_rules_of(magic, position) != 0)
 			return (-1);
 	}
 
@@ -3013,6 +3166,12 @@ kept_bound_adornment_of_free(const relic_magic_t *magic)
  * stays free in the second even when only an adornment the second no longer
  * reaches called it free.
  *
+ * The second search reads the walks the first recorded rather than walking
+ * any rule again: within one rewrite a walk depends on the rule and on the
+ * adornment it is read for, and not on which predicates are read free,
+ * which decides only the adornment a call reaches.  So the first search's
+ * adornments are kept, with their walks, in `walked` while the second runs.
+ *
  * Each search keeps no more adornments than a rewrite without subsumption
  * would adorn, and is held on its own to the limits and budgets that rewrite
  * was held to, as charge_rule_read() describes.  The query's body is read
@@ -3030,6 +3189,7 @@ search_adornments(relic_magic_t *magic, const relic_rule_t *query)
 	if (!kept_bound_adornment_of_free(magic))
 		return (0);
 
+	adornment_set_swap(&magic->kept, &magic->walked);
 	if (search_once(magic, query) != 0)
 		return (-1);
 	assert(!kept_bound_adornment_of_free(magic));
@@ -3137,9 +3297,43 @@ read_reached_completely(relic_magic_t *magic, const relic_rule_t *query)
  * literals drafted plus the query's seeds.  The budgets are proportional to
  * the program while the cost of answering without the rewrite is proportional
  * to the data, which is why a caller who sets a limit is not overruled.
+ *
+ * The walks the searches record and the draft replays are released when the
+ * rewrite returns, whether or not it succeeded.
  */
 int
 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query)
+{
+	int status;
+
+	status = rewrite(magic, query);
+	release_walks(magic);
+
+	return (status);
+}
+
+/*
+ * Release the walks once the rewrite has drafted from them, or has failed:
+ * nothing after the rewrite reads them, and the query runs with the rewrite
+ * holding only what it hands on.  No adornment is left pointing at a walk.
+ */
+static void
+release_walks(relic_magic_t *magic)
+{
+	size_t i;
+
+	for (i = 0; i < magic->kept.count; i++)
+		magic->kept.entries[i].walks = NULL;
+	adornment_set_release(&magic->walked);
+	magic->query_walk = NULL;
+	relic_arena_reset(&magic->walk_arena);
+}
+
+/*
+ * The rewrite relic_magic_rewrite() describes, holding the walks.
+ */
+static int
+rewrite(relic_magic_t *magic, const relic_rule_t *query)
 {
 	const relic_config_t *config;
 	const relic_program_t *program;

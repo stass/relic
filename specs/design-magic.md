@@ -207,22 +207,30 @@ completely.
 
 **Adorn first, draft second.** A bound adornment of `p` may be reached
 before the free one, so the rewrite finds the adornments before it drafts
-any rule. The search reads each rule's body in the order
-`relic_plan_order()` gives it for the adornment of its head, which is the
-order its draft reads, reaches the adornment of each call on a predicate
-read on demand, and drafts nothing. A predicate is read free from the first
-call that reaches it free, and every later call on it, whatever it binds,
-reaches the free adornment. An adornment of `p` binding columns that an
-earlier call reached was reached on behalf of a call the draft will not
-make, and so was whatever only it reached; when the search kept one, it
-runs once more, with every predicate the first search read free read free
-from the start. No third search is needed. Which adornments a rule's calls
-reach depends on the adornment the rule is read for and on which predicates
-are read free, and on nothing else, so every call the second search makes
-the first made too, and every predicate it reaches free is one the first
-read free already. The adornments the last search kept are named and
-drafted. When none of them binds a column, the query reads every predicate
-the search adorned completely, per section 3, and nothing is drafted.
+any rule. The search walks each rule's body once for the adornment of its
+head: it puts the body in the order `relic_plan_order()` gives it, records
+for each literal the variables bound before it, whether it calls a
+predicate read on demand and which columns such a call binds, reaches the
+adornment each call reads, and drafts nothing. The draft replays the walks
+the search recorded, with the adornment each call reached, and orders no
+body itself, so the search and the draft cannot disagree on the order of a
+body, on the columns a call binds or on the adornment it reads. A predicate
+is read free from the first call that reaches it free, and every later call
+on it, whatever it binds, reaches the free adornment. An adornment of `p`
+binding columns that an earlier call reached was reached on behalf of a
+call the draft will not make, and so was whatever only it reached; when the
+search kept one, it runs once more, with every predicate the first search
+read free read free from the start. No third search is needed. Which
+adornments a rule's calls reach depends on the adornment the rule is read
+for and on which predicates are read free, and on nothing else, so every
+call the second search makes the first made too, and every predicate it
+reaches free is one the first read free already. Within one rewrite a walk
+depends on the rule and the adornment alone -- which predicates are read on
+demand, and the measures of those read completely, do not change while it
+runs -- so the second search reads the walks the first recorded and walks
+no rule again; only the adornment each call reaches is found afresh. The adornments the last search kept are named and drafted.
+When none of them binds a column, the query reads every predicate the
+search adorned completely, per section 3, and nothing is drafted.
 
 When some adornment binds a column, a free copy `p$ff` stays a copy: its
 rules may call a predicate `q` with a binding that nothing else asks for,
@@ -603,10 +611,13 @@ counts only the rules the draft keeps, which drops duplicates and rules
 that derive nothing, so under a configured rule limit a search can refuse a
 query whose rewrite would have fit. A query whose first search reaches more
 than a limit admits is refused even when the adornments a free one subsumes
-would have brought the rewrite within it. What a search needs
-to read one rule, the rule's order and the planner's working state, is
-released once the rule is read, so a search holds its adornments, kept and
-subsumed, and nothing else that grows with the rules it reads.
+would have brought the rewrite within it. The planner's working state for
+one rule is released once the rule is walked. A search holds its
+adornments, kept and subsumed, and the walk of each rule it reads, a step
+of a few words per body literal, for the draft to replay; the walks grow
+with the literals the search reads, which the literal budget bounds, are
+charged to the memory limit as the rest of the rewrite is, and are
+released once the rewrite has drafted.
 
 The literal budget counts every rule drafted, kept or dropped. A duplicate,
 or a rule that derives nothing, is built before it is recognized as one,
@@ -850,12 +861,15 @@ ASCII, escaped constants, cut at 1023 bytes.
 The rewrite lives for one query run. Generated rules are held in a growable
 rule table, with their argument and body arrays and the scratch space for
 building names in an arena of the rewrite's own; the memo and duplicate
-tables are identifier tables over the rewrite's arrays. What drafting one
-rule needs, its order, the planner's working state and the drafts
-themselves, is built in a scratch arena emptied once the rule is drafted,
-and a rule found to be a duplicate or to derive nothing is released from the
-rewrite's arena as soon as it is recognized, so the arena holds the rules
-kept and the names generated, however many were drafted. All of it is released
+tables are identifier tables over the rewrite's arrays. What walking or
+drafting one rule needs, the planner's working state and the drafts
+themselves, is built in a scratch arena emptied once the rule is walked or
+drafted. The walks the search records, a step per body literal of each rule
+it reads, are kept in an arena of their own, emptied when the rewrite
+returns, so the query runs without them. A rule found to be a duplicate or
+to derive nothing is released from the rewrite's arena as soon as it is
+recognized, so that arena holds the rules kept and the names generated,
+however many were drafted. All of it is released
 when the query has run, successfully or not, as is the schedule of the
 rewritten program. Predicate entries for generated names, and the names
 themselves in the predicate table's name store, belong to the context, as

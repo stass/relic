@@ -436,9 +436,9 @@ discovers an adornment, and a bound adornment of `p` may be discovered
 before the free one. Rather than drafting and then withdrawing, the
 rewrite finds the set of adornments the query reaches before it drafts
 any, applying the rule as it goes, and then drafts rules for the
-adornments that survive. The search reads each rule's body in the order
-`relic_plan_order()` gives it for each head adornment, which is what the
-draft would read, and drafts nothing. A predicate is read free from the
+adornments that survive. The search walks each rule's body in the order
+`relic_plan_order()` gives it for each head adornment and records the
+walk, which the draft replays, and drafts nothing. A predicate is read free from the
 first call that reaches it free. A bound adornment of `p` reached before
 that call was reached for nothing, and so was whatever only it reached, so
 a search that kept one runs once more with every predicate the first read

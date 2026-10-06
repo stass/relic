@@ -22,9 +22,10 @@ Five questions, once, so that no later subsystem answers them again:
 
 It does not cover relation and index storage. Those are sized by the data
 rather than by the program, they are what a memory limit is enforced against,
-and they get their own document with the tuple store. The two arenas that
-hold an operation's working state are charged to the same limit, for the
-reason `specs/design-planning-cost.md` section 6 gives.
+and they get their own document with the tuple store. The arenas that hold
+an operation's working state, evaluation's and a query rewrite's, are
+charged to the same limit, for the reason `specs/design-planning-cost.md`
+section 6 gives.
 
 ---
 
@@ -51,7 +52,7 @@ Eight arenas exist, one per lifetime:
 
 The name and string arenas are charged to `max_memory` as parts of the
 name store and the symbol pool, each growth admitted before it is made.
-The evaluation arena, and the arena of a query's rewrite that
+The evaluation arena, and the arenas of a query's rewrite that
 `specs/design-magic.md` section 11 describes, are charged as well and
 released when their operation ends. The others hold what the caller wrote
 and are not charged, per `specs/design-planning-cost.md` section 6.
@@ -70,7 +71,7 @@ released with the query, per `specs/design-query.md`.
 
 **What the account bounds** is what the program's stores hold -- its facts
 and what it derives, with their indexes -- and what running the program does,
-in the two charged arenas. It does not bound what the caller wrote: the
+in the evaluation and rewrite arenas. It does not bound what the caller wrote: the
 program's rules and queries, the text a load reads, and the staging a load
 holds its facts in until it commits. Staging is individually owned, grows by
 doubling, and is released when the load returns, whatever the outcome; it is

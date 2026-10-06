@@ -106,12 +106,14 @@ struct text {
 
 /*
  * What a rewrite of the self-calling program held and spent: the bytes of
- * its arena and of its scratch arena once it is made, the rules it kept,
- * and the literals it was charged for the rules it drafted.
+ * its arena, of its scratch arena and of the arena of its walks once it is
+ * made, the rules it kept, and the literals it was charged for the rules it
+ * drafted.
  */
 struct self_calling_rewrite {
 	size_t	arena_bytes;
 	size_t	scratch_bytes;
+	size_t	walk_bytes;
 	size_t	rules_kept;
 	size_t	literals_charged;
 };
@@ -1191,7 +1193,9 @@ the_first_search_is_charged_what_it_reads(void)
  * so neither the arena's size nor what the scratch arena still holds can
  * depend on that length: at 2000 calls each is within a few pages of its
  * size at 20, the difference being the per-predicate tables of the 198 more
- * unary predicates the longer program declares.
+ * unary predicates the longer program declares.  The walks the search
+ * recorded, a step per literal of every rule it read, are released once the
+ * rewrite has drafted from them, so the query runs without them.
  */
 static void
 a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void)
@@ -1226,6 +1230,11 @@ a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void)
 	    "drafts, holding %zu bytes at %u calls, not %zu bytes at %u",
 	    shorter.scratch_bytes, KEPT_SHORT, longer.scratch_bytes,
 	    SELF_CALLING_LENGTH);
+	checkf(shorter.walk_bytes == 0 && longer.walk_bytes == 0,
+	    SCENARIO_KEPT,
+	    "the rewrite should release its walks once it has drafted, not "
+	    "hold %zu bytes at %u calls and %zu at %u", shorter.walk_bytes,
+	    KEPT_SHORT, longer.walk_bytes, SELF_CALLING_LENGTH);
 }
 
 /*
@@ -1273,6 +1282,7 @@ rewrite_self_calling(unsigned int length, self_calling_rewrite_t *rewritep)
 
 	rewritep->arena_bytes = relic_arena_total_bytes(&magic.arena);
 	rewritep->scratch_bytes = relic_arena_total_bytes(&magic.scratch);
+	rewritep->walk_bytes = relic_arena_total_bytes(&magic.walk_arena);
 	rewritep->rules_kept = magic.rules.count;
 	rewritep->literals_charged = magic.generated_literals;
 

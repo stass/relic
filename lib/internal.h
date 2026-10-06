@@ -62,6 +62,7 @@ typedef struct relic_token relic_token_t;
 typedef struct relic_pending_map relic_pending_map_t;
 typedef struct relic_valtab relic_valtab_t;
 typedef struct relic_activity relic_activity_t;
+typedef struct relic_walk relic_walk_t;
 
 /*
  * Where diagnostics go, and the text of the last error.
@@ -246,13 +247,19 @@ struct relic_query {
  * this one: a kept adornment's own position among them, and for a subsumed
  * call the kept adornment explain lists it before, so that both are listed
  * in the order they were reached.
+ *
+ * `walks` holds, for a kept adornment, the walk of each rule deriving its
+ * source, in program order, which the search records as it reads the rules
+ * and the draft replays.  It is NULL until the search reads them, once the
+ * rewrite has returned, and for a subsumed call.
  */
 struct relic_adornment {
-	relic_pred_id_t	source;
-	relic_pred_id_t	adorned;
-	relic_pred_id_t	magic;
-	uint32_t	bound;
-	size_t		kept_before;
+	relic_pred_id_t	 source;
+	relic_pred_id_t	 adorned;
+	relic_pred_id_t	 magic;
+	uint32_t	 bound;
+	size_t		 kept_before;
+	relic_walk_t	*walks;
 };
 
 /*
@@ -362,15 +369,21 @@ struct relic_magic_limit {
  * limits and budgets on its own: the adornments it keeps count in
  * `generated_preds`, the rules it reads for them in `searched_rules`,
  * against the rule limit, and their bodies in `searched_literals`, against
- * the literal budget.  `scratch` holds what reading or drafting one rule
- * needs, its body's order, the planner's work and the drafts, and is emptied
- * once the rule is read or drafted, so that a search holds no more than its
- * adornments however many rules it reads, and `arena` no more than the rules
- * kept however many are drafted.
+ * the literal budget.  A search records the walk of every rule it reads,
+ * `query_walk` the query's and an adornment's `walks` the rest, and the
+ * draft replays the walks of the last search rather than walking any body
+ * itself.  `walked` holds the adornments the first search kept, with their
+ * walks, while a second search reads its walks from them.  The walks, a
+ * step per body literal read, are in `walk_arena`, which is emptied when
+ * the rewrite returns.  `scratch` holds what walking or drafting one rule
+ * needs, the planner's work and the drafts, and is emptied once the rule is
+ * walked or drafted, so that a search holds no more than its adornments and
+ * their walks however many rules it reads, and `arena` no more than the
+ * rules kept however many are drafted.
  *
- * Everything variable-length is in `arena`, in `scratch` or in an array
- * grown with relic_grow_array(), and relic_magic_reset() releases all of
- * it.
+ * Everything variable-length is in `arena`, in `walk_arena`, in `scratch`
+ * or in an array grown with relic_grow_array(), and relic_magic_reset()
+ * releases all of it.
  */
 struct relic_magic {
 	/* What the rewrite hands on. */
@@ -403,6 +416,9 @@ struct relic_magic {
 	relic_magic_limit_t	 rule_limit;
 	size_t			 literal_budget;
 	bool			*reads_free;
+	relic_walk_t		*query_walk;
+	relic_adornment_set_t	 walked;
+	relic_arena_t		 walk_arena;
 	relic_arena_t		 scratch;
 };
 
@@ -436,8 +452,8 @@ struct relic_materialized {
  * not counted here: relic_stats() measures it when asked.
  *
  * `account` is what the memory limit is enforced against: the relation
- * store's storage, the chunks of the two charged arenas, `eval_arena` and
- * the arena of a query's Magic rewrite, and the buffers of a deferred round
+ * store's storage, the chunks of the charged arenas, `eval_arena` and the
+ * arenas of a query's Magic rewrite, and the buffers of a deferred round
  * while it runs.  The other arenas hold what the caller wrote and are not
  * charged.
  *
