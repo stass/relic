@@ -36,6 +36,8 @@
 .Nm relic_result_rows ,
 .Nm relic_result_columns ,
 .Nm relic_result_row ,
+.Nm relic_result_string ,
+.Nm relic_result_compare ,
 .Nm relic_result_destroy ,
 .Nm relic_explain_set ,
 .Nm relic_stats
@@ -139,6 +141,10 @@ relic library
 .Fn relic_result_columns "const relic_result_t *result"
 .Ft const relic_value_t *
 .Fn relic_result_row "const relic_result_t *result" "size_t row"
+.Ft const char *
+.Fn relic_result_string "const relic_result_t *result" "uint32_t id" "size_t *lenp"
+.Ft int
+.Fn relic_result_compare "const relic_result_t *result" "const relic_value_t *a" "const relic_value_t *b"
 .Ft void
 .Fn relic_result_destroy "relic_result_t *result"
 .Ft void
@@ -426,10 +432,17 @@ when it is not
 .Dv NULL ;
 it returns
 .Dv NULL
-for an identifier the context never assigned.
+for an identifier the context never assigned, a collected result's among
+them.
+The bytes of a value the program holds, one it states or one a caller
+built, stay valid until the context is destroyed; those of a value a query
+computed are valid while the row callback receiving it runs.
 .Fn relic_value_compare
 orders two values: every integer before every symbol before every string,
 then numerically or bytewise.
+A value the context does not hold compares equal to everything, and is
+reported as an error unless caller code the library is running made the
+call.
 .Ss Facts
 .Fn relic_fact_add
 adds the fact
@@ -446,7 +459,8 @@ may be
 only when
 .Fa arity
 is zero.
-Each value must be an integer or an identifier the context assigned, and a
+Each value must be an integer or an identifier the context assigned, so a
+value read out of an answer is built again from its bytes, and a
 value typed
 .Dv RELIC_SYMBOL
 must hold a symbol's bytes.
@@ -633,8 +647,10 @@ occur, but for
 .Ql _
 and the variables local to an aggregate's braces; a query with no variables
 has one row of no values when it holds and none when it does not.
-The values are borrowed for the call, and the bytes of a symbol or string
-belong to the context.
+The values are borrowed for the call, and so are the bytes
+.Fn relic_string
+reads for a symbol or string among them: a callback that keeps a row
+copies the bytes, or the caller collects the answer instead.
 Rows are distinct, in an order the language leaves unspecified but that is
 the same on every run over the same input.
 The callback returns zero for the next row and nonzero to stop, and
@@ -685,10 +701,29 @@ past the last row, and
 .Fn relic_result_destroy
 releases it, and accepts
 .Dv NULL .
-A result may outlive later loads and the context itself, though the bytes
-of its symbols and strings are read with
+A result holds nothing of the context: it may outlive later loads and the
+context itself, and holds a copy of the bytes of its symbols and strings,
+whose identifiers are its own.
+.Fn relic_result_string
+reads the bytes of one, as
 .Fn relic_string
-only while the context lives.
+does for the context's, until the result is destroyed, returning
+.Dv NULL
+for an identifier the result did not assign, and
+.Fn relic_result_compare
+orders two of the result's values as
+.Fn relic_value_compare
+orders the context's, a value not the result's comparing equal to
+everything.
+A result's value is not the context's:
+.Fn relic_string
+returns
+.Dv NULL
+for it, and
+.Fn relic_value_compare
+and
+.Fn relic_fact_add
+refuse it.
 .Pp
 .Fn relic_query_prepare
 checks the program first, which must pass, and then
@@ -965,12 +1000,15 @@ or an exception leaves its context refusing every later call.
 Functions returning
 .Vt int
 return 0 on success and \-1 on failure, except
-.Fn relic_value_compare ,
-which returns a value less than, equal to or greater than zero.
+.Fn relic_value_compare
+and
+.Fn relic_result_compare ,
+which return a value less than, equal to or greater than zero.
 Functions returning a pointer return
 .Dv NULL
 on failure, and
 .Fn relic_result_row ,
+.Fn relic_result_string ,
 .Fn relic_string
 and
 .Fn relic_error

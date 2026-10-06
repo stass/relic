@@ -89,8 +89,8 @@ typedef struct row_order row_order_t;
  * string's bytes, and the number of values in each.
  */
 struct row_order {
-	relic_t	*ctx;
-	size_t	 width;
+	const relic_result_t	*result;
+	size_t			 width;
 };
 
 static void	 begin_query(output_t *out);
@@ -325,16 +325,21 @@ put_text(output_t *out, const char *text)
 }
 
 /*
- * The bytes a symbol or string value names.  An identifier the context does
- * not know -- which a query result never holds -- reads as no bytes rather
- * than as a fault.
+ * The bytes a symbol or string value names, read from the collected answer
+ * being written when there is one and from the context otherwise.  An
+ * identifier neither knows -- which no row holds -- reads as no bytes
+ * rather than as a fault.
  */
 static const char *
 value_bytes(const output_t *out, const relic_value_t *value, size_t *lengthp)
 {
 	const char *bytes;
 
-	bytes = relic_string(out->ctx, value->v.id, lengthp);
+	if (out->collected != NULL)
+		bytes = relic_result_string(out->collected, value->v.id,
+		    lengthp);
+	else
+		bytes = relic_string(out->ctx, value->v.id, lengthp);
 	if (bytes == NULL) {
 		*lengthp = 0;
 		return ("");
@@ -872,7 +877,7 @@ write_row(output_t *out, const relic_value_t *values, size_t count)
 
 /*
  * The order -s sorts by: column by column, each in the library's total order
- * over values.
+ * over values, of the collected result the rows belong to.
  */
 static int
 compare_rows(const row_order_t *order, const relic_value_t *left,
@@ -882,7 +887,7 @@ compare_rows(const row_order_t *order, const relic_value_t *left,
 	int sign;
 
 	for (column = 0; column < order->width; column++) {
-		sign = relic_value_compare(order->ctx, &left[column],
+		sign = relic_result_compare(order->result, &left[column],
 		    &right[column]);
 		if (sign != 0)
 			return (sign);
@@ -894,9 +899,9 @@ compare_rows(const row_order_t *order, const relic_value_t *left,
 /*
  * Sort an array of rows, using `scratch`, which has room for as many.
  *
- * A merge sort rather than qsort(3), because the order needs the context to
+ * A merge sort rather than qsort(3), because the order needs the result to
  * read a string's bytes and qsort's comparator receives no argument to carry
- * it; reaching the context through a global would make the sort the one
+ * it; reaching the result through a global would make the sort the one
  * piece of the tool that is not reentrant.  The recursion is as deep as the
  * logarithm of the row count.
  */
@@ -968,10 +973,11 @@ write_sorted_rows(output_t *out, const relic_result_t *result)
 	for (i = 0; i < rows; i++)
 		sorted[i] = relic_result_row(result, i);
 
-	order.ctx = out->ctx;
+	order.result = result;
 	order.width = relic_result_columns(result);
 	merge_sort(&order, sorted, scratch, rows);
 
+	out->collected = result;
 	status = 0;
 	for (i = 0; i < rows && !out->write_failed; i++) {
 		if (repl_interrupted) {
@@ -983,6 +989,7 @@ write_sorted_rows(output_t *out, const relic_result_t *result)
 		}
 		write_row(out, sorted[i], order.width);
 	}
+	out->collected = NULL;
 
 	free(sorted);
 	free(scratch);

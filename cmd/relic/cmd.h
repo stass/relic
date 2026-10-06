@@ -88,6 +88,10 @@ typedef struct invocation invocation_t;
  * separator is written at all; `rows_written` and `begun` belong to the query
  * being answered.
  *
+ * `collected` is the collected answer whose rows are being written, whose
+ * values are its own and are read through it, and NULL while rows are
+ * written as they are delivered, when their values are the context's.
+ *
  * What is written gathers in `buffer`, whose first `filled` bytes wait to be
  * handed to the stream a block at a time; an output with a stream owns one.
  * A write that fails is reported once, naming `name`, and `write_failed`
@@ -95,6 +99,7 @@ typedef struct invocation invocation_t;
  */
 struct output {
 	relic_t			*ctx;
+	const relic_result_t	*collected;
 	FILE			*stream;
 	char			*buffer;
 	const char		*name;

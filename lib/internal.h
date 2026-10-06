@@ -709,6 +709,20 @@ void	 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed);
 void	 relic_symtab_reset(relic_symtab_t *table);
 
 /*
+ * A pool of the symbol pool's type that no context owns, as a collected
+ * result's is: the pool's lookup, reading and interning on the table
+ * itself, which charge nothing and report nothing.  relic_symtab_intern()
+ * returns -1, every symbol as it was, when the length or the pool's ceiling
+ * refuses the bytes or memory ran out.
+ */
+const char *relic_symtab_bytes(const relic_symtab_t *table, uint32_t id,
+	    size_t *lengthp);
+uint32_t relic_symtab_find(const relic_symtab_t *table, const void *bytes,
+	    size_t length, uint32_t hash);
+int	 relic_symtab_intern(relic_symtab_t *table, const void *bytes,
+	    size_t length, uint32_t *idp);
+
+/*
  * Interning, all at once, byte strings the pool does not hold, distinct
  * from one another, each of which is to receive the identifier after the
  * last: `count` of them, in the order they are to be numbered.  This is
@@ -768,6 +782,30 @@ bool	 relic_value_decode(const relic_t *ctx, relic_dom_t dom,
 	    relic_value_t *value);
 int	 relic_value_total_order(const relic_t *ctx, relic_dom_t a,
 	    relic_dom_t b);
+
+/*
+ * The bit a collected result's symbol and string identifiers carry, which
+ * no identifier a context assigns has, since a context's stay below the
+ * domain's type bits: a result's value handed to the context is refused as
+ * one it never assigned, rather than read as some value of its own.
+ */
+#define	RELIC_RESULT_ID_BIT	UINT32_C(0x80000000)
+
+_Static_assert(RELIC_DOM_INDEX_MASK < RELIC_RESULT_ID_BIT,
+    "a context's identifiers stay below a result's bit");
+
+/*
+ * The bytes a symbol or string identifier names in `source`, or NULL for
+ * one the source never assigned: the context's pool, or a result's.
+ * relic_value_order_totally() is the total order relic_value_compare()
+ * documents, over values whose bytes `bytes_of` reads from `source`.
+ */
+typedef const char *(*relic_bytes_of_fn)(const void *source, uint32_t id,
+	    size_t *lengthp);
+
+int	 relic_value_order_totally(const relic_value_t *left,
+	    const relic_value_t *right, relic_bytes_of_fn bytes_of,
+	    const void *source);
 int	 relic_value_intern(relic_t *ctx, const relic_value_t *value,
 	    relic_dom_t *domp);
 int	 relic_value_intern_bytes(relic_t *ctx, enum relic_type type,

@@ -19,6 +19,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include <relic.h>
 
@@ -32,6 +33,19 @@ static char program_name[] = "embed";
 static const char rules[] =
     "reaches(X, Y) :- flight(X, Y).\n"
     "reaches(X, Z) :- flight(X, Y), reaches(Y, Z).\n";
+
+/*
+ * What a row callback keeps of the first row: the bytes of its city, copied
+ * while the callback runs, since the row and the bytes it names are
+ * borrowed for the call alone.  The context is how the callback reads them.
+ */
+typedef struct first_city first_city_t;
+
+struct first_city {
+	relic_t	*ctx;
+	char	 name[64];
+	int	 found;
+};
 
 /* The flights added as facts: from, to. */
 static const char *const flights[][2] = {
@@ -69,24 +83,32 @@ add_flights(relic_t *ctx)
 }
 
 /*
- * A row callback that keeps the first row's value and stops the stream.
+ * A row callback that keeps the first row's city and stops the stream.
  */
 static int
 first_destination(void *callback_ctx, const relic_value_t *values,
     size_t count)
 {
-	relic_value_t *first;
+	first_city_t *first;
+	const char *name;
+	size_t length;
 
 	first = callback_ctx;
-	if (count == 1)
-		*first = values[0];
+	if (count == 1 && values[0].type == RELIC_SYMBOL) {
+		name = relic_string(first->ctx, values[0].v.id, &length);
+		if (name != NULL && length < sizeof(first->name)) {
+			bcopy(name, first->name, length + 1);
+			first->found = 1;
+		}
+	}
 
 	return (1);
 }
 
 /*
  * Collect every city reachable from lisbon and print them, one per line.
- * Returns how many there were, or -1 when the query failed.
+ * A collected result holds its own copy of each city's bytes, read through
+ * the result.  Returns how many there were, or -1 when the query failed.
  */
 static int
 print_destinations(relic_t *ctx)
@@ -109,7 +131,7 @@ print_destinations(relic_t *ctx)
 	for (i = 0; i < relic_result_rows(result); i++) {
 		row = relic_result_row(result, i);
 		printf("lisbon reaches %s\n",
-		    relic_string(ctx, row[0].v.id, NULL));
+		    relic_result_string(result, row[0].v.id, NULL));
 	}
 	rows = (int)relic_result_rows(result);
 	relic_result_destroy(result);
@@ -122,13 +144,12 @@ main(void)
 {
 	relic_config_t config;
 	relic_query_t *query;
-	relic_value_t first;
+	first_city_t first;
 	relic_t *ctx;
 	int reached;
 
-	memset(&config, 0, sizeof(config));
+	bzero(&config, sizeof(config));
 	config.max_tuples = 1000;
-	first.type = RELIC_INTEGER;
 
 	ctx = relic_create_config(&config);
 	if (ctx == NULL) {
@@ -144,6 +165,8 @@ main(void)
 	}
 
 	/* Stream a query, keeping only its first row. */
+	bzero(&first, sizeof(first));
+	first.ctx = ctx;
 	query = relic_query_prepare(ctx, "direct", "flight(paris, X)?");
 	if (query == NULL ||
 	    relic_query_run(ctx, query, first_destination, &first) != 0) {
@@ -152,11 +175,11 @@ main(void)
 		return (1);
 	}
 	relic_query_destroy(query);
-	if (first.type != RELIC_SYMBOL) {
+	if (!first.found) {
 		relic_destroy(ctx);
 		return (1);
 	}
-	printf("paris flies to %s\n", relic_string(ctx, first.v.id, NULL));
+	printf("paris flies to %s\n", first.name);
 
 	reached = print_destinations(ctx);
 	relic_destroy(ctx);

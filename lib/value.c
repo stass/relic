@@ -59,11 +59,13 @@ _Static_assert(RELIC_INTEGER_MAX <= RELIC_DOM_INDEX_MASK,
 	"a symbol is a lowercase letter followed by letters, digits and " \
 	"underscores; other bytes make a string"
 
-static int	 compare_bytes(const relic_t *ctx, uint32_t left,
-		    uint32_t right);
+static int	 compare_bytes(relic_bytes_of_fn bytes_of, const void *source,
+		    uint32_t left, uint32_t right);
 static int	 compare_integers(int64_t left, int64_t right);
-static int	 compare_totally(const relic_t *ctx, const relic_value_t *left,
-		    const relic_value_t *right);
+static const char *context_bytes(const void *source, uint32_t id,
+		    size_t *lengthp);
+static bool	 value_held(const relic_t *ctx, const relic_value_t *value);
+static void	 report_foreign(relic_t *ctx, const relic_value_t *foreign);
 static void	 account_value_table(relic_t *ctx);
 static int	 cover_symbol_uses(relic_t *ctx, uint32_t symbol);
 static bool	 decode_integer(const relic_valtab_t *table, uint32_t position,
@@ -207,6 +209,13 @@ value_well_formed(relic_t *ctx, const relic_value_t *value)
 	case RELIC_SYMBOL:
 	case RELIC_STRING:
 		bytes = relic_symbol_bytes(ctx, value->v.id, &length);
+		if (bytes == NULL && (value->v.id & RELIC_RESULT_ID_BIT) != 0) {
+			relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+			    "value belongs to a collected result; build it "
+			    "from its bytes with relic_value_symbol() or "
+			    "relic_value_string()");
+			return (false);
+		}
 		if (bytes == NULL) {
 			relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
 			    "value refers to symbol %lu, which this context "
@@ -1114,26 +1123,27 @@ compare_integers(int64_t left, int64_t right)
 }
 
 /*
- * Order two interned byte strings bytewise, and not by locale collation, so
- * that a result never depends on the environment: lexicographically, by
- * relic_bytes_order(), over strings that may contain NUL bytes.
+ * Order two interned byte strings, whose bytes `bytes_of` reads from
+ * `source`, bytewise, and not by locale collation, so that a result never
+ * depends on the environment: lexicographically, by relic_bytes_order(),
+ * over strings that may contain NUL bytes.
  *
- * A value in the table always names an interned symbol, because
- * relic_value_intern() rejects one that does not, but a value handed to
- * relic_value_compare() is the caller's and may name anything.  An identifier
- * this context never assigned sorts before every symbol, so that the order
- * stays total without a comparator that can fail.
+ * A value in a table always names an interned symbol, because interning
+ * rejects one that does not, but a value handed in by a caller may name
+ * anything.  An identifier the source never assigned sorts before every
+ * symbol, so that the order stays total without a comparator that can fail.
  */
 static int
-compare_bytes(const relic_t *ctx, uint32_t left, uint32_t right)
+compare_bytes(relic_bytes_of_fn bytes_of, const void *source, uint32_t left,
+    uint32_t right)
 {
 	const char *left_bytes;
 	const char *right_bytes;
 	size_t left_length;
 	size_t right_length;
 
-	left_bytes = relic_symbol_bytes(ctx, left, &left_length);
-	right_bytes = relic_symbol_bytes(ctx, right, &right_length);
+	left_bytes = bytes_of(source, left, &left_length);
+	right_bytes = bytes_of(source, right, &right_length);
 
 	if (left_bytes == NULL || right_bytes == NULL) {
 		if (left_bytes == right_bytes)
@@ -1211,7 +1221,8 @@ relic_value_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 	if (left.type == RELIC_INTEGER)
 		order = compare_integers(left.v.integer, right.v.integer);
 	else
-		order = compare_bytes(ctx, left.v.id, right.v.id);
+		order = compare_bytes(context_bytes, ctx, left.v.id,
+		    right.v.id);
 
 	if (order < 0)
 		return (RELIC_ORDER_LESS);
@@ -1248,12 +1259,15 @@ value_type_rank(enum relic_type type)
  * It exists only so that a script can ask for stable output from a column
  * that holds more than one type, and it is not visible to the language: no
  * program can observe that an integer sorts before a symbol.  This is its
- * one definition; relic_value_total_order() reaches it by domain identifier
- * and relic_value_compare() by public value.
+ * one definition, over whatever table `bytes_of` reads a symbol's or a
+ * string's bytes from: relic_value_total_order() reaches it by domain
+ * identifier and relic_value_compare() by public value, both over the
+ * context, and relic_result_compare() over a collected result.
  */
-static int
-compare_totally(const relic_t *ctx, const relic_value_t *left,
-    const relic_value_t *right)
+int
+relic_value_order_totally(const relic_value_t *left,
+    const relic_value_t *right, relic_bytes_of_fn bytes_of,
+    const void *source)
 {
 	unsigned int left_rank;
 	unsigned int right_rank;
@@ -1266,7 +1280,17 @@ compare_totally(const relic_t *ctx, const relic_value_t *left,
 	if (left->type == RELIC_INTEGER)
 		return (compare_integers(left->v.integer, right->v.integer));
 
-	return (compare_bytes(ctx, left->v.id, right->v.id));
+	return (compare_bytes(bytes_of, source, left->v.id, right->v.id));
+}
+
+/*
+ * relic_symbol_bytes() as a reader of any source's bytes, the source being
+ * the context.
+ */
+static const char *
+context_bytes(const void *source, uint32_t id, size_t *lengthp)
+{
+	return (relic_symbol_bytes(source, id, lengthp));
 }
 
 /*
@@ -1297,7 +1321,7 @@ relic_value_total_order(const relic_t *ctx, relic_dom_t a, relic_dom_t b)
 		return (left_known ? 1 : -1);
 	}
 
-	return (compare_totally(ctx, &left, &right));
+	return (relic_value_order_totally(&left, &right, context_bytes, ctx));
 }
 
 /*
@@ -1366,9 +1390,70 @@ relic_value_string(relic_t *ctx, const char *bytes, size_t length,
 	return (value_from_bytes(ctx, RELIC_STRING, bytes, length, value));
 }
 
+/*
+ * Whether a caller's value is one the context holds: an integer, or a
+ * symbol or string identifier the context assigned.
+ */
+static bool
+value_held(const relic_t *ctx, const relic_value_t *value)
+{
+	switch (value->type) {
+	case RELIC_INTEGER:
+		return (true);
+	case RELIC_SYMBOL:
+	case RELIC_STRING:
+		return (relic_symbol_bytes(ctx, value->v.id, NULL) != NULL);
+	}
+
+	return (false);
+}
+
+/*
+ * A comparison cannot fail, so a value the context does not hold compares
+ * equal to everything, and is reported: a caller sorting with one hears of
+ * it rather than getting an order that quietly means nothing.
+ */
 int
 relic_value_compare(relic_t *ctx, const relic_value_t *a,
     const relic_value_t *b)
 {
-	return (compare_totally(ctx, a, b));
+	const relic_value_t *foreign;
+
+	foreign = !value_held(ctx, a) ? a : !value_held(ctx, b) ? b : NULL;
+	if (foreign == NULL)
+		return (relic_value_order_totally(a, b, context_bytes, ctx));
+
+	report_foreign(ctx, foreign);
+
+	return (0);
+}
+
+/*
+ * Report a value compared that the context does not hold, naming a
+ * collected result's value as one, since that is the commonest such
+ * mistake.
+ *
+ * The report is an operation of its own: it enters the context, so the
+ * diagnostic callback runs with the context busy, as every callback does,
+ * and can neither call into the context nor compare its way back here.
+ * Caller code the library is running is inside an operation already, whose
+ * error the report must not displace, so a comparison made there reports
+ * nothing.
+ */
+static void
+report_foreign(relic_t *ctx, const relic_value_t *foreign)
+{
+	if (ctx->busy || relic_enter(ctx, NULL, NULL) != 0)
+		return;
+
+	if (foreign->type != RELIC_INTEGER &&
+	    (foreign->v.id & RELIC_RESULT_ID_BIT) != 0)
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "a value compared belongs to a collected result; "
+		    "relic_result_compare() orders a result's values");
+	else
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "a value compared is not one this context holds");
+
+	relic_leave(ctx);
 }

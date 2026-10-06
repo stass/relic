@@ -44,6 +44,9 @@
 #define	SCENARIO_ARGUMENTS	"a missing argument is reported, not followed"
 #define	SCENARIO_CLASSES	"every diagnostic reaches the callback"
 #define	SCENARIO_COLLECT	"a collected result is the stream, kept"
+#define	SCENARIO_OWN_BYTES	"a result holds its own bytes"
+#define	SCENARIO_COMPARED	"a value compared is reported as an operation"
+#define	OWN_ROWS		6
 #define	SCENARIO_FACT		"an added fact is the fact its text loads"
 #define	SCENARIO_INVALIDATE	"an added fact invalidates what was derived"
 #define	SCENARIO_KIND		"a failure says what kind it is"
@@ -90,6 +93,29 @@ typedef struct diag_log diag_log_t;
 typedef struct first_error first_error_t;
 typedef struct mixed_log mixed_log_t;
 typedef struct reentry reentry_t;
+typedef struct own_row own_row_t;
+typedef struct comparing comparing_t;
+
+/*
+ * What a diagnostic callback that compares a value the context does not
+ * hold saw: how often and how deeply it was called, and what the load it
+ * tries from inside each call returned.
+ */
+struct comparing {
+	relic_t		*ctx;
+	relic_value_t	 foreign;
+	size_t		 calls;
+	size_t		 depth;
+	size_t		 deepest;
+	int		 nested_load;
+};
+
+/* A row of a collected result: its one value and the bytes it reads. */
+struct own_row {
+	relic_value_t	value;
+	size_t		length;
+	char		bytes[8];
+};
 
 /* How many diagnostics a context reported, by level. */
 struct diag_log {
@@ -189,12 +215,22 @@ static int	 refuse_from_row(void *callback_ctx,
 static void	 refuse_from_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
-static void	 write_row(relic_t *ctx, const relic_value_t *row,
-		    size_t columns, char *line);
+static void	 write_row(const relic_result_t *result,
+		    const relic_value_t *row, size_t columns, char *line);
 static char	*answer_text(relic_t *ctx, const char *query_text);
 static int	 compare_lines(const void *left, const void *right);
 static void	 a_callback_cannot_call_into_its_context(void);
 static void	 a_collected_result_is_the_stream_kept(void);
+static void	 a_result_holds_its_own_bytes(void);
+static void	 a_result_copies_each_byte_string_once(void);
+static void	 a_value_compared_is_reported_as_an_operation(void);
+static void	 compare_from_callback(void *callback_ctx,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
+static bool	 result_reads(const relic_result_t *result,
+		    own_row_t rows[OWN_ROWS]);
+static bool	 rows_are(const own_row_t rows[OWN_ROWS],
+		    const own_row_t expected[OWN_ROWS]);
 static void	 a_missing_argument_is_reported_not_followed(void);
 static void	 a_prepared_query_runs_over_the_program_as_it_stands(void);
 static void	 a_refusal_does_not_hide_why_an_operation_failed(void);
@@ -1053,7 +1089,7 @@ answer_text(relic_t *ctx, const char *query_text)
 	}
 	for (i = 0; i < rows; i++) {
 		row = relic_result_row(result, i);
-		write_row(ctx, row, relic_result_columns(result), lines[i]);
+		write_row(result, row, relic_result_columns(result), lines[i]);
 	}
 	relic_result_destroy(result);
 
@@ -1077,7 +1113,8 @@ answer_text(relic_t *ctx, const char *query_text)
  * are.
  */
 static void
-write_row(relic_t *ctx, const relic_value_t *row, size_t columns, char *line)
+write_row(const relic_result_t *result, const relic_value_t *row,
+    size_t columns, char *line)
 {
 	size_t used;
 	size_t column;
@@ -1093,7 +1130,8 @@ write_row(relic_t *ctx, const relic_value_t *row, size_t columns, char *line)
 		else
 			used += (size_t)snprintf(line + used,
 			    ANSWER_WIDTH - used, "%s%s", column > 0 ? " " : "",
-			    relic_string(ctx, row[column].v.id, NULL));
+			    relic_result_string(result, row[column].v.id,
+			    NULL));
 	}
 }
 
@@ -1101,6 +1139,295 @@ static int
 compare_lines(const void *left, const void *right)
 {
 	return (strcmp(left, right));
+}
+
+/*
+ * The bytes of each row's one value, read through the result, and the rows
+ * in the result's order, which a simple insertion sort by
+ * relic_result_compare() finds.  Returns false when the result is not
+ * OWN_ROWS rows of one symbol or string whose bytes fit.
+ */
+static bool
+result_reads(const relic_result_t *result, own_row_t rows[OWN_ROWS])
+{
+	const relic_value_t *row;
+	own_row_t held;
+	const char *read;
+	size_t length;
+	size_t i;
+	size_t j;
+
+	if (relic_result_rows(result) != OWN_ROWS ||
+	    relic_result_columns(result) != 1)
+		return (false);
+
+	for (i = 0; i < OWN_ROWS; i++) {
+		row = relic_result_row(result, i);
+		read = relic_result_string(result, row[0].v.id, &length);
+		if (row[0].type == RELIC_INTEGER || read == NULL ||
+		    length > sizeof(rows[i].bytes))
+			return (false);
+		bzero(&rows[i], sizeof(rows[i]));
+		rows[i].value = row[0];
+		rows[i].length = length;
+		bcopy(read, rows[i].bytes, length);
+	}
+
+	for (i = 1; i < OWN_ROWS; i++) {
+		held = rows[i];
+		for (j = i; j > 0 && relic_result_compare(result, &held.value,
+		    &rows[j - 1].value) < 0; j--)
+			rows[j] = rows[j - 1];
+		rows[j] = held;
+	}
+
+	return (true);
+}
+
+/*
+ * Whether the rows read are, in order, the values `expected` lists.
+ */
+static bool
+rows_are(const own_row_t rows[OWN_ROWS], const own_row_t expected[OWN_ROWS])
+{
+	size_t i;
+
+	for (i = 0; i < OWN_ROWS; i++) {
+		if (rows[i].value.type != expected[i].value.type ||
+		    rows[i].length != expected[i].length ||
+		    bcmp(rows[i].bytes, expected[i].bytes,
+		    expected[i].length) != 0)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * A collected result holds a copy of its symbols' and strings' bytes, so it
+ * reads the bytes the query answered, in the total order, after a further
+ * query, a load, a fact added and the context destroyed, the empty string
+ * and strings the query computed, one holding a NUL, among them.  Its
+ * values are its own: the context reads none of them, refuses each where it
+ * admits a value, and reports one compared; the result reads no identifier
+ * it did not assign.
+ */
+static void
+a_result_holds_its_own_bytes(void)
+{
+	static const char program[] =
+	    "w(\"a\\0b\").\nw(\"cd\").\nw(\"\").\n"
+	    "named(T) :- w(S), T = cat(S, \"!\").\n"
+	    "named(abc).\nnamed(ab).\nnamed(\"\").\n";
+	static const own_row_t expected[OWN_ROWS] = {
+		{ { RELIC_SYMBOL, { 0 } }, 2, "ab" },
+		{ { RELIC_SYMBOL, { 0 } }, 3, "abc" },
+		{ { RELIC_STRING, { 0 } }, 0, "" },
+		{ { RELIC_STRING, { 0 } }, 1, "!" },
+		{ { RELIC_STRING, { 0 } }, 4, "a\0b!" },
+		{ { RELIC_STRING, { 0 } }, 3, "cd!" },
+	};
+	static const uint32_t malformed[] = {
+		0, UINT32_C(1) << 31, UINT32_C(1) << 30, UINT32_MAX
+	};
+	own_row_t before[OWN_ROWS];
+	own_row_t after[OWN_ROWS];
+	relic_result_t *result;
+	relic_query_t *query;
+	relic_value_t mine;
+	relic_value_t theirs;
+	diag_log_t log;
+	relic_t *ctx;
+	char *answered;
+	size_t i;
+	bool read;
+
+	ctx = context_with(program, NULL, &log);
+	if (ctx == NULL)
+		return;
+
+	result = NULL;
+	query = relic_query_prepare(ctx, NULL, "named(T)?");
+	if (query != NULL)
+		result = relic_query_collect(ctx, query);
+	relic_query_destroy(query);
+	read = result != NULL && result_reads(result, before);
+	check(read && rows_are(before, expected), SCENARIO_OWN_BYTES,
+	    "the result reads ab, abc, \"\", \"!\", \"a\\0b!\" and \"cd!\", "
+	    "in order");
+	if (!read) {
+		relic_result_destroy(result);
+		relic_destroy(ctx);
+		return;
+	}
+
+	theirs = before[0].value;
+	check(relic_string(ctx, theirs.v.id, NULL) == NULL,
+	    SCENARIO_OWN_BYTES, "the context reads no result's identifier");
+	check(relic_value_symbol(ctx, "ab", 2, &mine) == 0, SCENARIO_OWN_BYTES,
+	    "the context's ab is made");
+	check(relic_value_compare(ctx, &theirs, &mine) == 0 &&
+	    strstr(relic_error(ctx), "collected result") != NULL,
+	    SCENARIO_OWN_BYTES, "a result's value compared is reported");
+	check(relic_fact_add(ctx, "kept", 1, &theirs) != 0 &&
+	    strstr(relic_error(ctx), "collected result") != NULL,
+	    SCENARIO_OWN_BYTES, "a result's value is refused as a fact's");
+	check(relic_result_compare(result, &theirs, &mine) == 0 &&
+	    relic_result_string(result, mine.v.id, NULL) == NULL,
+	    SCENARIO_OWN_BYTES, "the result reads and orders no value of the "
+	    "context's");
+	for (i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++)
+		checkf(relic_result_string(result, malformed[i], NULL) == NULL,
+		    SCENARIO_OWN_BYTES, "identifier %#x should read as none",
+		    (unsigned int)malformed[i]);
+
+	answered = answer_text(ctx, "w(S), T = cat(S, \"?\")?");
+	check(answered != NULL, SCENARIO_OWN_BYTES, "a further query answers");
+	free(answered);
+	check(relic_load_string(ctx, "more.dl", "w(\"ef\").\n") == 0,
+	    SCENARIO_OWN_BYTES, "a further load is taken");
+	check(relic_value_string(ctx, "gh", 2, &mine) == 0, SCENARIO_OWN_BYTES,
+	    "the context's \"gh\" is made");
+	check(relic_fact_add(ctx, "w", 1, &mine) == 0, SCENARIO_OWN_BYTES,
+	    "a further fact is added");
+	relic_destroy(ctx);
+
+	check(result_reads(result, after) && rows_are(after, expected),
+	    SCENARIO_OWN_BYTES, "the result reads the same bytes in the same "
+	    "order after all of them, the context destroyed among them");
+	relic_result_destroy(result);
+}
+
+/*
+ * The context holds a byte string once whatever its type, and so does a
+ * result: a symbol and a string spelled alike share the result's
+ * identifier, as they share the context's, and a value repeated down a
+ * column is copied once.
+ */
+static void
+a_result_copies_each_byte_string_once(void)
+{
+	relic_result_t *result;
+	relic_query_t *query;
+	const relic_value_t *row;
+	const relic_value_t *first;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t i;
+	bool shared;
+
+	ctx = context_with("same(ab, \"ab\").\nw(1).\nw(2).\nw(3).\n"
+	    "repeated(N, X) :- w(N), X = \"long enough to copy\".\n", NULL,
+	    &log);
+	if (ctx == NULL)
+		return;
+
+	result = NULL;
+	query = relic_query_prepare(ctx, NULL, "same(X, Y)?");
+	if (query != NULL)
+		result = relic_query_collect(ctx, query);
+	relic_query_destroy(query);
+	row = result != NULL ? relic_result_row(result, 0) : NULL;
+	check(row != NULL && row[0].type == RELIC_SYMBOL &&
+	    row[1].type == RELIC_STRING && row[0].v.id == row[1].v.id,
+	    SCENARIO_OWN_BYTES, "a symbol and a string spelled alike share "
+	    "the result's identifier");
+	relic_result_destroy(result);
+
+	result = NULL;
+	query = relic_query_prepare(ctx, NULL, "repeated(N, X)?");
+	if (query != NULL)
+		result = relic_query_collect(ctx, query);
+	relic_query_destroy(query);
+	shared = result != NULL && relic_result_rows(result) == 3;
+	first = shared ? relic_result_row(result, 0) : NULL;
+	for (i = 1; shared && i < 3; i++)
+		shared = relic_result_row(result, i)[1].v.id == first[1].v.id;
+	check(shared, SCENARIO_OWN_BYTES,
+	    "a value repeated down a column has one identifier");
+	relic_result_destroy(result);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A diagnostic callback that compares a value the context does not hold and
+ * then tries to load, both of which the context must refuse to act on while
+ * it runs.
+ */
+static void
+compare_from_callback(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where RELIC_TEST_UNUSED,
+    const char *message RELIC_TEST_UNUSED)
+{
+	comparing_t *comparing;
+
+	comparing = callback_ctx;
+	if (level != RELIC_ERROR)
+		return;
+
+	comparing->calls++;
+	comparing->depth++;
+	if (comparing->depth > comparing->deepest)
+		comparing->deepest = comparing->depth;
+	(void)relic_value_compare(comparing->ctx, &comparing->foreign,
+	    &comparing->foreign);
+	comparing->nested_load = relic_load_string(comparing->ctx, "nested.dl",
+	    "nested(1).\n");
+	comparing->depth--;
+}
+
+/*
+ * A comparison of a value the context does not hold reports it as an
+ * operation of its own: the diagnostic callback runs once, with the context
+ * busy, so its own comparison reports nothing and its load is refused.  A
+ * comparison made by caller code inside an operation reports nothing
+ * either, and the operation's error stands.
+ */
+static void
+a_value_compared_is_reported_as_an_operation(void)
+{
+	comparing_t comparing;
+	relic_t *ctx;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_COMPARED, "a context is created");
+	if (ctx == NULL)
+		return;
+
+	bzero(&comparing, sizeof(comparing));
+	comparing.ctx = ctx;
+	comparing.foreign.type = RELIC_SYMBOL;
+	comparing.foreign.v.id = 1000000;
+	relic_diag_set(ctx, compare_from_callback, &comparing);
+
+	check(relic_value_compare(ctx, &comparing.foreign,
+	    &comparing.foreign) == 0, SCENARIO_COMPARED,
+	    "a value the context does not hold compares equal");
+	checkf(comparing.calls == 1 && comparing.deepest == 1,
+	    SCENARIO_COMPARED, "the report should reach the callback once, "
+	    "not %zu times %zu deep", comparing.calls, comparing.deepest);
+	check(comparing.nested_load != 0, SCENARIO_COMPARED,
+	    "a load from the report's callback is refused");
+	check(relic_error_class(ctx) == RELIC_ERROR_ARGUMENT &&
+	    strstr(relic_error(ctx), "not one this context holds") != NULL,
+	    SCENARIO_COMPARED, "the comparison is the last error");
+
+	comparing.calls = 0;
+	comparing.depth = 0;
+	comparing.deepest = 0;
+	comparing.nested_load = 0;
+	check(relic_load_string(ctx, "broken.dl", "p(.\n") != 0,
+	    SCENARIO_COMPARED, "a load of broken text fails");
+	checkf(comparing.calls == 1 && comparing.deepest == 1,
+	    SCENARIO_COMPARED, "the load's error should reach the callback "
+	    "once, not %zu times %zu deep", comparing.calls,
+	    comparing.deepest);
+	checkf(relic_error_class(ctx) == RELIC_ERROR_REJECTED,
+	    SCENARIO_COMPARED, "the load's error should stand, not \"%s\"",
+	    relic_error(ctx));
+
+	relic_destroy(ctx);
 }
 
 /*
@@ -1762,6 +2089,9 @@ main(void)
 	an_added_fact_is_the_fact_its_text_loads();
 	an_added_fact_invalidates_what_was_derived();
 	a_collected_result_is_the_stream_kept();
+	a_result_holds_its_own_bytes();
+	a_result_copies_each_byte_string_once();
+	a_value_compared_is_reported_as_an_operation();
 	a_missing_argument_is_reported_not_followed();
 	a_prepared_query_runs_over_the_program_as_it_stands();
 	a_context_takes_at_most_the_maximum_threads();

@@ -39,6 +39,10 @@ relic 1.0.0 (unreleased)
     language rejects, an evaluation error, a limit, a file, memory, an
     interrupt, a malformed call or a bug in relic -- so that a program
     need not read the text.
+    An answer is streamed to a row callback, or collected into a result
+    that holds its own copy of every symbol and string and outlives the
+    context, read with relic_result_string() and ordered with
+    relic_result_compare().
     relic_interrupt() stops an evaluation in progress, from a signal
     handler, another thread or a callback, and leaves the context ready
     for the next.

@@ -20,10 +20,10 @@
 #include "answer.h"
 
 static int	 compare_rows(const void *a, const void *b);
-static char	*render_row(relic_t *ctx, const relic_value_t *values,
-		    size_t column_count);
-static void	 render_value(relic_t *ctx, const relic_value_t *value,
-		    FILE *out);
+static char	*render_row(const relic_result_t *result,
+		    const relic_value_t *values, size_t column_count);
+static void	 render_value(const relic_result_t *result,
+		    const relic_value_t *value, FILE *out);
 
 bool
 answer_collect(relic_t *ctx, relic_query_t *query, answer_t *answer)
@@ -43,8 +43,8 @@ answer_collect(relic_t *ctx, relic_query_t *query, answer_t *answer)
 		err(1, "calloc");
 
 	for (size_t r = 0; r < row_count; r++) {
-		answer->rows[r] = render_row(ctx, relic_result_row(result, r),
-		    column_count);
+		answer->rows[r] = render_row(result,
+		    relic_result_row(result, r), column_count);
 		answer->row_count++;
 	}
 	relic_result_destroy(result);
@@ -56,7 +56,8 @@ answer_collect(relic_t *ctx, relic_query_t *query, answer_t *answer)
 
 /* A row as `(v1, v2, ...)`; a row of no columns is `()`. */
 static char *
-render_row(relic_t *ctx, const relic_value_t *values, size_t column_count)
+render_row(const relic_result_t *result, const relic_value_t *values,
+    size_t column_count)
 {
 	char *row = NULL;
 	size_t length;
@@ -70,7 +71,7 @@ render_row(relic_t *ctx, const relic_value_t *values, size_t column_count)
 	for (size_t c = 0; c < column_count; c++) {
 		if (c > 0)
 			fputs(", ", out);
-		render_value(ctx, &values[c], out);
+		render_value(result, &values[c], out);
 	}
 	fputc(')', out);
 
@@ -80,7 +81,8 @@ render_row(relic_t *ctx, const relic_value_t *values, size_t column_count)
 }
 
 static void
-render_value(relic_t *ctx, const relic_value_t *value, FILE *out)
+render_value(const relic_result_t *result, const relic_value_t *value,
+    FILE *out)
 {
 	const unsigned char *bytes;
 	size_t length;
@@ -90,13 +92,13 @@ render_value(relic_t *ctx, const relic_value_t *value, FILE *out)
 		fprintf(out, "%" PRId64, value->v.integer);
 		return;
 	case RELIC_SYMBOL:
-		bytes = (const unsigned char *)relic_string(ctx, value->v.id,
-		    &length);
+		bytes = (const unsigned char *)relic_result_string(result,
+		    value->v.id, &length);
 		fwrite(bytes, 1, length, out);
 		return;
 	case RELIC_STRING:
-		bytes = (const unsigned char *)relic_string(ctx, value->v.id,
-		    &length);
+		bytes = (const unsigned char *)relic_result_string(result,
+		    value->v.id, &length);
 		fputc('"', out);
 		for (size_t i = 0; i < length; i++) {
 			if (bytes[i] < 0x20 || bytes[i] > 0x7e ||

@@ -81,8 +81,10 @@ RELIC_EXPORT const char *relic_version(void);
  * RELIC_ERROR diagnostic, the last of which relic_error() returns, and
  * relic_error_class() what kind of failure it was.  The functions that only
  * read -- relic_string(), relic_value_compare(), relic_query_count(),
- * relic_stats() -- cannot fail and report nothing; relic_string() returns
- * NULL for an identifier it does not know.
+ * relic_stats() -- cannot fail; relic_string() returns NULL for an
+ * identifier it does not know, and relic_value_compare() alone reports an
+ * error, for a value the context does not hold, when no caller code the
+ * library is running made the call.
  *
  * Caller code runs while the context is part way through an operation in
  * four ways: the diagnostic, explain and row callbacks, and the read
@@ -362,13 +364,16 @@ RELIC_EXPORT int relic_value_string(relic_t *ctx, const char *bytes,
 
 /*
  * The bytes of an interned symbol or string, or NULL for an identifier this
- * context never assigned.
+ * context never assigned, a collected result's among them.
  *
  * The result is NUL-terminated for the convenience of a caller that wants a
  * C string, but a string literal may contain NUL bytes, so a caller that must
  * not lose them passes lenp and uses the length.  The bytes belong to the
- * context and stay valid until it is destroyed; the caller neither frees nor
- * modifies them.
+ * context; the caller neither frees nor modifies them.  The bytes of a value
+ * the program holds -- one it states, or one a caller built with the
+ * constructors above -- stay valid until the context is destroyed; the bytes
+ * of a value a query computed are valid while the row callback receiving it
+ * runs, as the row is.
  */
 RELIC_EXPORT const char *relic_string(relic_t *ctx, uint32_t id,
     size_t *lenp);
@@ -480,9 +485,11 @@ RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
  * `predicate` is a NUL-terminated name, which must be a symbol by the rule of
  * relic_value_symbol() and must not be the negation keyword `not`.  `arity`
  * is at most 32, and `values` holds that many, each built by the value
- * constructors, an integer, or read out of a query's answer; it may be NULL
- * when `arity` is zero.  A predicate is identified by its name and arity
- * together, so a fact of a new arity starts a new predicate.
+ * constructors or an integer; it may be NULL when `arity` is zero.  A value
+ * read out of a query's answer is built again from its bytes, since a
+ * collected result's values are the result's and are refused here.  A
+ * predicate is identified by its name and arity together, so a fact of a
+ * new arity starts a new predicate.
  *
  * Adding a fact the program does not hold, like loading one, changes the
  * program, so everything derived before it is discarded and the next
@@ -679,10 +686,11 @@ typedef struct relic_query relic_query_t;
  * A query that names no variable asks whether something holds, and its
  * answer is one row of no values when it does and no rows when it does not.
  *
- * The values are borrowed for the duration of the call; a callback that keeps
- * a row copies it.  The bytes of a symbol or string belong to the context and
- * stay valid until it is destroyed.  The callback returns 0 to receive the
- * next row and nonzero to stop.
+ * The values are borrowed for the duration of the call, and so are the bytes
+ * relic_string() reads for a symbol or a string among them: a callback that
+ * keeps a row copies the bytes it needs, not the identifiers, or the caller
+ * collects the answer with relic_query_collect() instead.  The callback
+ * returns 0 to receive the next row and nonzero to stop.
  */
 typedef int (*relic_row_cb)(void *, const relic_value_t *, size_t);
 
@@ -794,9 +802,17 @@ typedef struct relic_result relic_result_t;
  * present row is a non-NULL pointer to no values.
  *
  * A result holds nothing of the context's state, so it survives later loads,
- * facts and queries and may be destroyed after the context.  The bytes of its
- * symbols and strings are read with relic_string() on the context, for as
- * long as that lives.  relic_result_destroy() accepts NULL.
+ * facts and queries and may be read and destroyed after the context.  It
+ * holds a copy of the bytes of each of its symbols and strings, and its
+ * values are its own: relic_result_string() reads the bytes of a symbol's or
+ * a string's identifier, as relic_string() does for the context's, until
+ * the result is destroyed, and returns NULL for an identifier the result
+ * did not assign; relic_result_compare() orders two of its values as
+ * relic_value_compare() orders the context's, and compares a value that is
+ * not the result's equal to everything.  A result's value is not the
+ * context's: relic_string() returns NULL for it, and relic_value_compare()
+ * and relic_fact_add() refuse it, so a caller handing one back builds it
+ * again from its bytes.  relic_result_destroy() accepts NULL.
  */
 RELIC_EXPORT relic_result_t *relic_query_collect(relic_t *ctx,
     relic_query_t *query);
@@ -804,6 +820,10 @@ RELIC_EXPORT size_t relic_result_rows(const relic_result_t *result);
 RELIC_EXPORT size_t relic_result_columns(const relic_result_t *result);
 RELIC_EXPORT const relic_value_t *relic_result_row(
     const relic_result_t *result, size_t row);
+RELIC_EXPORT const char *relic_result_string(const relic_result_t *result,
+    uint32_t id, size_t *lenp);
+RELIC_EXPORT int relic_result_compare(const relic_result_t *result,
+    const relic_value_t *a, const relic_value_t *b);
 RELIC_EXPORT void relic_result_destroy(relic_result_t *result);
 
 /*
@@ -823,7 +843,12 @@ RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
  * bytewise.  The order exists so that output can be made stable when a
  * column holds more than one type, and it is not the order the language's
  * comparison operators use: those never order values of different types.
- * Both values must belong to `ctx`.
+ * Both values must belong to `ctx`: a value that does not -- a collected
+ * result's, or an identifier the context never assigned -- compares equal
+ * to everything, and is reported as an error, unless caller code the
+ * library is running made the call: the report would displace the error of
+ * the operation the code runs inside, so a comparison there reports
+ * nothing.
  */
 RELIC_EXPORT int relic_value_compare(relic_t *ctx, const relic_value_t *a,
     const relic_value_t *b);

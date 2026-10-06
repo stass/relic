@@ -856,15 +856,20 @@ the_total_order_sorts_across_types(void)
 	}
 
 	/*
-	 * A symbol the context never assigned is ordered rather than read:
-	 * before every symbol it knows, and equal to another it does not.
+	 * A symbol the context never assigned is reported rather than read,
+	 * and compares equal to everything; a collected result's value is
+	 * named as one.
 	 */
 	unknown = values[2];
-	unknown.v.id = UINT32_MAX;
-	check(relic_value_compare(ctx, &unknown, &values[2]) < 0 &&
-	    relic_value_compare(ctx, &values[2], &unknown) > 0 &&
-	    relic_value_compare(ctx, &unknown, &unknown) == 0,
-	    SCENARIO_ORDER, "an unknown symbol sorts before every known one");
+	unknown.v.id = RELIC_DOM_INDEX_MASK;
+	check(relic_value_compare(ctx, &unknown, &values[2]) == 0 &&
+	    relic_value_compare(ctx, &values[2], &unknown) == 0 &&
+	    strstr(relic_error(ctx), "not one this context holds") != NULL,
+	    SCENARIO_ORDER, "an unknown symbol is reported and compares equal");
+	unknown.v.id = RELIC_RESULT_ID_BIT | 1;
+	check(relic_value_compare(ctx, &values[2], &unknown) == 0 &&
+	    strstr(relic_error(ctx), "relic_result_compare()") != NULL,
+	    SCENARIO_ORDER, "a result's symbol is reported as a result's");
 
 	relic_destroy(ctx);
 }

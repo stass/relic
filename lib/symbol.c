@@ -52,6 +52,8 @@ static bool	 symbol_has_bytes(const relic_symtab_t *table, uint32_t id,
 static bool	 pool_has_room(const relic_symtab_t *table,
 		    const relic_fresh_string_t *fresh, size_t count);
 static uint32_t	 symbol_rehash(uint32_t id, void *ctx);
+static void	 place_symbol(relic_symtab_t *table, const char *copy,
+		    size_t length, uint32_t hash);
 
 void
 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed)
@@ -190,22 +192,29 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 }
 
 /*
- * The bytes of an interned symbol, or NULL for an identifier this context
+ * The bytes of an interned symbol, or NULL for an identifier the table
  * never assigned.  The length, when asked for, excludes the terminator.
  */
 const char *
-relic_symbol_bytes(const relic_t *ctx, uint32_t id, size_t *lengthp)
+relic_symtab_bytes(const relic_symtab_t *table, uint32_t id,
+    size_t *lengthp)
 {
 	const relic_symbol_t *symbol;
 
-	if (id == RELIC_ID_NONE || id > ctx->symbols.count)
+	if (id == RELIC_ID_NONE || id > table->count)
 		return (NULL);
 
-	symbol = symbol_at(&ctx->symbols, id);
+	symbol = symbol_at(table, id);
 	if (lengthp != NULL)
 		*lengthp = symbol->length;
 
 	return (symbol->bytes);
+}
+
+const char *
+relic_symbol_bytes(const relic_t *ctx, uint32_t id, size_t *lengthp)
+{
+	return (relic_symtab_bytes(&ctx->symbols, id, lengthp));
 }
 
 size_t
@@ -227,19 +236,78 @@ relic_symbol_hash(const relic_t *ctx, const void *bytes, size_t length)
 }
 
 uint32_t
-relic_symbol_find(const relic_t *ctx, const void *bytes, size_t length,
-    uint32_t hash)
+relic_symtab_find(const relic_symtab_t *table, const void *bytes,
+    size_t length, uint32_t hash)
 {
 	relic_idprobe_t probe;
 	uint32_t id;
 
-	relic_idprobe_open(&probe, &ctx->symbols.index, hash);
+	relic_idprobe_open(&probe, &table->index, hash);
 	while (relic_idprobe_next(&probe, &id)) {
-		if (symbol_has_bytes(&ctx->symbols, id, bytes, length))
+		if (symbol_has_bytes(table, id, bytes, length))
 			return (id);
 	}
 
 	return (RELIC_ID_NONE);
+}
+
+uint32_t
+relic_symbol_find(const relic_t *ctx, const void *bytes, size_t length,
+    uint32_t hash)
+{
+	return (relic_symtab_find(&ctx->symbols, bytes, length, hash));
+}
+
+/*
+ * A pool no context owns -- a collected result's -- charges nothing and
+ * reports nothing, so its interning is the context's without the account:
+ * the index and the entries are grown, then the bytes copied, and only
+ * then is the symbol numbered and placed, so a failure at any step leaves
+ * every symbol findable and none half-made.  The copy refused by the arena
+ * clears the arena's failure, so that a later intern may try again.
+ */
+int
+relic_symtab_intern(relic_symtab_t *table, const void *bytes, size_t length,
+    uint32_t *idp)
+{
+	relic_symbol_t *entries;
+	uint32_t hash;
+	uint32_t id;
+	char *copy;
+
+	if (length > RELIC_STRING_LENGTH_MAX)
+		return (-1);
+
+	hash = relic_hash_bytes(table->hash_seed, bytes, length);
+	id = relic_symtab_find(table, bytes, length, hash);
+	if (id != RELIC_ID_NONE) {
+		*idp = id;
+		return (0);
+	}
+
+	if (table->count >= RELIC_SYMBOL_MAX ||
+	    relic_idtab_reserve(&table->index, 1, symbol_rehash, table) != 0)
+		return (-1);
+
+	entries = relic_grow_array_stepwise(table->entries, &table->capacity,
+	    table->count, 1, 1, sizeof(*table->entries));
+	if (entries == NULL)
+		return (-1);
+	table->entries = entries;
+
+	copy = relic_arena_alloc(&table->strings, length + 1);
+	if (copy == NULL) {
+		relic_arena_clear_failure(&table->strings);
+		return (-1);
+	}
+	if (length > 0)
+		bcopy(bytes, copy, length);
+	copy[length] = '\0';
+
+	place_symbol(table, copy, length, hash);
+	*idp = (uint32_t)table->count;
+
+	return (0);
 }
 
 size_t
@@ -431,19 +499,28 @@ void
 relic_symbol_append(relic_t *ctx, const relic_fresh_string_t *fresh,
     size_t count)
 {
-	relic_symtab_t *table;
-	relic_symbol_t *entry;
 	size_t i;
 
-	table = &ctx->symbols;
-	for (i = 0; i < count; i++) {
-		assert(table->count < table->capacity);
-		entry = &table->entries[table->count];
-		entry->bytes = fresh[i].copy;
-		entry->length = (uint32_t)fresh[i].length;
-		entry->hash = fresh[i].hash;
-		table->count++;
-		relic_idtab_place(&table->index, fresh[i].hash,
-		    (uint32_t)table->count);
-	}
+	for (i = 0; i < count; i++)
+		place_symbol(&ctx->symbols, fresh[i].copy, fresh[i].length,
+		    fresh[i].hash);
+}
+
+/*
+ * Number a copied symbol the next identifier and index it, into room the
+ * entries and the index were grown to hold.
+ */
+static void
+place_symbol(relic_symtab_t *table, const char *copy, size_t length,
+    uint32_t hash)
+{
+	relic_symbol_t *entry;
+
+	assert(table->count < table->capacity);
+	entry = &table->entries[table->count];
+	entry->bytes = copy;
+	entry->length = (uint32_t)length;
+	entry->hash = hash;
+	table->count++;
+	relic_idtab_place(&table->index, hash, (uint32_t)table->count);
 }

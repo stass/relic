@@ -34,19 +34,21 @@ and 6 are not started. The causes and what to try are sorted in
 **A long-lived context's tables only grow.** [Low, component:
 `specs/design-segments.md`, `lib/facts.c`, `lib/import.c`, `lib/symbol.c`,
 `lib/value.c`, `lib/util.c`, `lib/pred.c`, `lib/eval.c`, `lib/magic.c`,
-`lib/result.c`, `include/relic.h`, `cmd/relic/output.c`] No table
+`include/relic.h`] No table
 releases an entry, and two kinds of entry outlive the run that made them:
 a query's constants, interned when it is prepared, so an embedder
 preparing a query per request over distinct keys grows the pool or the
 integer table per key; and the rewrite's generated predicates, which also
 size every per-answer walk from then on. Names are kept out of the
-pool (the design's step 1), so a session's lines do not grow it. Three
-steps of the design remain: results own their bytes through
-`relic_result_string()` (section 8); the segments, the program funnel, the
-run prologue, the sequence table's ordered growth and rewind, and
-instantiating a query's template at each run (sections 3, 5 and 6); the
-rewrite's predicates appended above the program's, rendered and released
-with the rewrite (section 7).
+pool and results own their bytes (the design's steps 1 and 2), so a
+session's lines do not grow the pool and nothing outside the context holds
+an identifier past its run. Two steps of the design remain: the segments,
+the program funnel, the run prologue, the sequence table's ordered growth
+and rewind, and instantiating a query's template at each run (sections 3,
+5 and 6), with `relic_string()` outside an operation and every interface
+admitting a value refusing a run's identifier (section 8); the rewrite's
+predicates appended above the program's, rendered and released with the
+rewrite (section 7).
 
 **The predicate table's entries and index are not charged.** [Low,
 component: `lib/pred.c`, `lib/account.c`] The name store is charged to
