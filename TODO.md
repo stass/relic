@@ -31,16 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**Reading a query's reach completely is a mode beside the rewrite.** [Low,
-component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment
-the rewrite keeps binds a column, it generates nothing and sets
-`reads_completely`, which evaluation and explain each test, and the
-rewrite's query then aliases the caller's rule where it is otherwise an
-arena copy. `read_reached_completely()` closes the reached components over
-their dependencies with a closure of its own. Treating the reached
-predicates as complete components from the start, as the negated part of a
-query already is, would remove both branches and the second closure.
-
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
 and with identical counters, `tc-cyclic` takes 2.62 s against 2.24 s,
