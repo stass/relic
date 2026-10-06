@@ -3,12 +3,12 @@
 % binding X, and q with nothing bound.  So every call of q reads q$ff, and
 % in each of p's twelve adornments the call of r is the only call with a
 % magic rule.  The prefix is still cut before r, the second call to bind a
-% column, so the chain is written once, into a supplementary rule, and each
-% adornment costs about sixty literals.  Were the call of q not counted as
-% a call binding a column, r's magic rule would copy the chain and the
-% adorned rule copy it again, twice that, past the budget of
-% 256 + 16 x 61 = 1232 literals this program's size gives.  The rewrite
-% fits, and answers without a warning.
+% column, so the chain is written once, into a supplementary rule, and the
+% rewrite costs 1433 literals.  Were the call of q not counted as a call
+% binding a column, r's magic rule would copy the chain and the adorned
+% rule copy it again, some fifty literals more in each adornment, past the
+% limit of 1700 this test sets.  The rewrite fits, and answers without a
+% warning.
 
 e(a, b).
 e(b, c).

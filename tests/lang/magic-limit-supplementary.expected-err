@@ -1,1 +1,1 @@
-relic: error: limit exceeded: magic-rules=4 while adorning path/2
+relic: warning: the query's Magic rewrite outgrew magic=11 while adorning path/2; answering it from the whole program

@@ -414,7 +414,7 @@ or
 Write the plan of everything evaluated to the standard error: each part of
 the program as it is planned, and each query's rewrite and plan before its
 rows.
-A rewrite abandoned over its budget is marked by a line
+A rewrite abandoned over its limit is marked by a line
 .Ql abandoned magic rewrite of ,
 after which the whole program is planned as though there were none.
 A part whose predicates have facts counts them as
@@ -674,7 +674,7 @@ limit is a decimal
 from 0, which asks for the default, to the largest both a size and a
 .Vt long long
 can hold, 9223372036854775807 on a 64-bit system.
-.Bl -tag -width magic-preds
+.Bl -tag -width memory
 .It Cm tuples
 the most tuples all relations together may hold, the program's facts
 included; by default there is no limit.
@@ -690,11 +690,15 @@ The limit is not a bound on all the memory
 uses: the text being loaded, the program's rules and queries, and the
 field of a table being imported are sized by what was written, and growing
 an array holds the old one until the new one is filled.
-.It Cm magic-preds
-the most adorned and magic predicates the rewrite of one query may
-generate.
-.It Cm magic-rules
-the most distinct rules the rewrite of one query may generate.
+.It Cm magic
+the most work the Magic rewrite of one query may do: the body literals it
+reads while it searches for what to generate and those of every rule it
+generates, a literal with an expression counting one more per operator,
+call and operand, and the names of the predicates it generates, a literal
+per 64 bytes.
+By default it is in proportion to the size of the program and the query,
+large enough for every rewrite that specializes the program rather than
+multiplies it.
 .El
 .Pp
 A query or evaluation that exceeds
@@ -709,29 +713,12 @@ When its facts are what exceed the limit, the diagnostic names the first
 predicate, in the order the file names them, that the facts read would add
 to:
 .Dl relic: error: limit exceeded: tuples=4 while loading e/1
-Unless a
 .Cm magic
-limit lifts them, the rewrite has budgets in proportion to the program, on
-the predicates it generates, on the literals its search for what to
-generate reads, and on the literals of the rules it drafts, a
-literal with an expression counting one more per operator, call and
-operand, which bound the rules it keeps as well, and a rewrite that
-outgrows one is abandoned with a warning and the query answered from the
-whole program, which never answers differently but may meet an arithmetic
-or string error the rewrite would not have.
-A
-.Cm magic
-limit that is set is a limit like the others.
-.Cm magic-preds
-lifts the budgets on predicates and on literals read, and either limit
-lifts the budget on literals drafted.
-The rewrite searches for what to generate before it generates anything; the
-search can count predicates the finished rewrite drops, so
-.Cm magic-preds
-may refuse a query whose rewrite would have fit.
-.Cm magic-rules
-counts only the rules the rewrite keeps, and set alone leaves the search
-its budgets.
+differs from the other limits: a rewrite that outgrows it, by default or
+as set, is abandoned with a warning and the query answered from the whole
+program, which never answers differently but may meet an arithmetic or
+string error the rewrite would not have.
+No value removes the limit; a value only replaces the default.
 .Sh INTERACTIVE MODE
 With
 .Fl i ,

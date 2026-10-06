@@ -30,12 +30,10 @@ char	*padded_widening_program(unsigned int arity, unsigned int body_length);
 
 /*
  * The widening program with a rule deriving p from p itself and `length`
- * calls on f whose arguments are all constant, followed by `length` / 10
- * unary predicates derived from f.  Every adornment of p copies the long
- * rule and, with the constant calls placed first, the magic rule for its
- * call on p, and drops both, since each derives its head from itself.  The
- * unary predicates raise the budget on predicates, so that it does not stop
- * the rewrite before the budget on literals does.
+ * calls on f whose arguments are all constant.  Every adornment of p copies
+ * the long rule and, with the constant calls placed first, the magic rule
+ * for its call on p, and drops both, since each derives its head from
+ * itself.
  */
 char	*self_calling_program(unsigned int arity, unsigned int length);
 

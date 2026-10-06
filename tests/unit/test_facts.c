@@ -88,7 +88,7 @@ static const char *const session_loads[SESSION_ROUNDS] = {
 /* The facts of the small store beside c/2's in the multi-store refusal. */
 #define	SMALL_STORE_FACTS	8
 
-/* The arity of the widening program whose rewrite outgrows its budget. */
+/* The arity of the widening program whose rewrite outgrows its limit. */
 #define	ABANDONED_ARITY		8
 
 typedef struct diag_log diag_log_t;
@@ -1373,10 +1373,10 @@ the_rewrite_reads_facts_through_a_view(void)
 }
 
 /*
- * A rewrite abandoned over its budget interned the predicates it generated,
+ * A rewrite abandoned over its limit interned the predicates it generated,
  * p's base view among them.  Nothing reads the base view, so it is not
  * referenced, and a later check warns of none of them: the one warning is
- * the budget's.
+ * the limit's.
  */
 static void
 an_abandoned_rewrite_leaves_no_warning(void)

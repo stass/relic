@@ -51,8 +51,6 @@ typedef struct relic_counters relic_counters_t;
 typedef struct relic_diag relic_diag_t;
 typedef struct relic_lexer relic_lexer_t;
 typedef struct relic_magic relic_magic_t;
-typedef struct relic_magic_budget relic_magic_budget_t;
-typedef struct relic_magic_limit relic_magic_limit_t;
 typedef struct relic_staged_set relic_staged_set_t;
 typedef struct relic_staging relic_staging_t;
 typedef struct relic_materialized relic_materialized_t;
@@ -277,32 +275,6 @@ struct relic_adornment_set {
 };
 
 /*
- * How much a query's Magic rewrite may generate of one thing: at most `most`,
- * and `configured` says whether that is a limit the caller set, which fails
- * the query when exceeded, or a budget the library chose, which abandons
- * the rewrite and leaves the query to be answered without it.  The rules a
- * rewrite keeps have a limit and no budget, so when the caller sets no rule
- * limit `most` is SIZE_MAX, and never exceeded.
- */
-struct relic_magic_limit {
-	size_t	most;
-	bool	configured;
-};
-
-/*
- * A budget on the body literals one stage of a query's Magic rewrite reads
- * or drafts: at most `most`, of which `spent` has been charged, in the units
- * relic_body_size() gives, and named `what` in the warning that abandons the
- * rewrite when it is outgrown.  A budget a limit the caller set has lifted
- * has `most` SIZE_MAX.
- */
-struct relic_magic_budget {
-	size_t		 most;
-	size_t		 spent;
-	const char	*what;
-};
-
-/*
  * A query's Magic rewrite, for one run of the query.
  *
  * The fields fall in two groups.  The first is what the rewrite hands the
@@ -335,10 +307,9 @@ struct relic_magic_budget {
  * `complete_components`, for the evaluator to evaluate once the rewrite has
  * returned, and `query` is the query as written.
  *
- * `over_budget` is set when a bound on what the rewrite generates that was
- * not configured, and so is a budget rather than a limit, is exceeded: the
- * rewrite then stops, with a warning rather than an error, and the query is
- * to be answered some other way.
+ * `abandoned` is set when the rewrite outgrows its limit: it then stops,
+ * with a warning rather than an error, and the query is to be answered from
+ * the whole program.
  *
  * The rewrite's working state:
  *
@@ -357,34 +328,32 @@ struct relic_magic_budget {
  *
  * `base_view_count` counts the derived predicates whose base stores hold
  * facts, each of which has a base view and gives each of its adornments one
- * rule over it; the literal budgets count each as a rule of two literals.
+ * rule over it; the limit's default counts each as a rule of two literals.
  *
- * `pred_limit` bounds the predicates the rewrite generates, by the
- * predicate limit or, when none is set, a budget, and `generated_preds`
- * counts the adorned and magic predicates of the adornments kept so far.
- * `rule_limit` bounds the rules the draft keeps by a limit alone, SIZE_MAX
- * when none is set: the draft's literal budget bounds them otherwise.
- * `search_literals` bounds the body literals of the rules a search reads,
- * and `draft_literals` those of every rule drafted, kept or dropped.  Both
- * count a literal as one and one more per node of its expressions, so that
- * neither counts in literals alone while the other counts nodes.
+ * `work_limit` is the most the rewrite may read and generate, and
+ * `work_spent` what it has: the body of every rule a search reads, the
+ * query's included, and of every rule the draft builds, kept or dropped,
+ * the rewritten query's included, and the name of every predicate it
+ * generates.  Both are in the units relic_body_size() gives, a literal
+ * counting one and one more per node of its expressions, a name a literal
+ * per 64 bytes, and `work_spent` is never reset while the rewrite runs, so every search
+ * and the draft are charged to the one count.
  *
  * `rule_index` finds a generated rule by its canonical form, holding
- * positions in `rules` plus one.
+ * positions in `rules` plus one, and `rule_hashes` holds each rule's hash by
+ * its position, of `rule_hash_capacity`, so that growing the index reads no
+ * rule again.
  *
  * The adornments are found by one search or two, before any rule is
  * drafted.  `reads_free`, indexed by predicate identifier minus one like
  * `incomplete`, marks the predicates every call reads through the free
  * adornment: a search marks one when a call first reaches it free, and a
- * second search keeps the marks the first made.  Each search is held on its own
- * to the predicate limit or budget, which the adornments it keeps count
- * against in `generated_preds`, and to `search_literals`, which the bodies of
- * the rules it reads for them count against.  The rule limit does not hold a
- * search: it counts what the draft keeps.  A search records the walk of every
- * rule it reads, `query_walk` the query's and an adornment's `walks` the rest,
- * and the draft replays the walks of the last search rather than walking any
- * body itself.  `walked` holds the adornments the first search kept, with their
- * walks, while a second search reads its walks from them.  The walks, a step
+ * second search keeps the marks the first made.  A search records the walk
+ * of every rule it reads, `query_walk` the query's and an adornment's
+ * `walks` the rest, and the draft replays the walks of the last search
+ * rather than walking any body itself.  `walked` holds the adornments the
+ * first search kept, with their walks, while a second search reads its walks
+ * from them.  The walks, a step
  * per body literal read, are in `walk_arena`, which is emptied when the
  * rewrite returns.  `scratch` holds what walking or drafting one rule needs,
  * the planner's work and the drafts, and is emptied once the rule is walked or
@@ -405,7 +374,7 @@ struct relic_magic {
 	relic_ruletab_t		 rules;
 	relic_rule_t		 query;
 	size_t			 seed_count;
-	bool			 over_budget;
+	bool			 abandoned;
 	bool			 reads_completely;
 
 	/* The rewrite's working state. */
@@ -416,14 +385,13 @@ struct relic_magic {
 	size_t			*rules_by_head;
 	size_t			*first_rule_of;
 	relic_idtab_t		 rule_index;
+	uint32_t		*rule_hashes;
+	size_t			 rule_hash_capacity;
 	uint64_t		 hash_seed;	/* the context's */
 	size_t			 predicate_count;
 	size_t			 base_view_count;
-	size_t			 generated_preds;
-	relic_magic_limit_t	 pred_limit;
-	relic_magic_limit_t	 rule_limit;
-	relic_magic_budget_t	 search_literals;
-	relic_magic_budget_t	 draft_literals;
+	size_t			 work_limit;	/* literal sizes */
+	size_t			 work_spent;
 	bool			*reads_free;
 	relic_walk_t		*query_walk;
 	relic_adornment_set_t	 walked;
@@ -1420,8 +1388,8 @@ const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
  * a column, generates nothing and sets `reads_completely`, and the
  * caller evaluates the components of `completed_late` too and runs the
  * query as written.  Each returns 0, or -1 with a
- * diagnostic reported: memory, a Magic limit exceeded, or a Magic budget
- * exceeded, which is reported as a warning and sets `over_budget`.
+ * diagnostic reported: memory, or the rewrite's limit outgrown, which is
+ * reported as a warning and sets `abandoned`.
  * relic_magic_reset() releases the rewrite, whatever state it is in.
  */
 void	 relic_magic_init(relic_magic_t *magic, relic_t *ctx);
@@ -1638,7 +1606,7 @@ enum relic_table_event_kind relic_table_next(relic_table_reader_t *reader,
  * query's heading, a query's plan, its EMIT shown as `stream` when
  * `streams` says it delivers the query's rows as it derives them, the
  * heading of a query's Magic rewrite, and the line that marks a rewrite
- * abandoned over its budget, after which the whole program is evaluated
+ * abandoned over its limit, after which the whole program is evaluated
  * and shown.  The rules shown between a query's heading and its plan are
  * its group rules.  A query's rule names no predicate, so the functions
  * that show a query are given its answer relation, whose name its head is

@@ -1,12 +1,13 @@
 % A large expression under many adornments.  Each adornment of p/6 reads
-% its rule, and with it an expression of 1023 nodes, so the search's
-% literal budget, which counts a literal's size, one and one more per node,
-% is outgrown after a few of the twenty-four patterns q/1 calls p/6 with;
-% the rewrite is abandoned with a warning and the query answered from the
-% whole program, with the same rows.  Counted in literals alone, the copies
-% would stay far within the budget.
+% its rule, and with it an expression of 1023 nodes, so the rewrite's
+% limit, which counts a literal's size, one and one more per node, is
+% outgrown in the search, after some fifty of the sixty-three patterns q/1
+% calls p/6 with, each binding different columns; the rewrite is abandoned
+% with a warning and the query answered from the whole program, with the
+% same rows.  Counted in literals alone, the copies would stay far within
+% the limit.  p/6 holds one tuple, so each call matches at most one and the
+% whole program's join of the sixty-three calls stays one row wide.
 b(1, 1, 1, 1, 1, 1).
-b(2, 1, 1, 1, 1, 1).
 s(2).
 s(1).
 
@@ -39,6 +40,45 @@ q(X) :-
     p(1, _, 1, _, X, _),
     p(_, 1, 1, _, X, _),
     p(1, 1, 1, _, X, _),
-    p(_, _, _, 1, X, _).
+    p(_, _, _, 1, X, _),
+    p(1, _, _, 1, X, _),
+    p(_, 1, _, 1, X, _),
+    p(1, 1, _, 1, X, _),
+    p(_, _, 1, 1, X, _),
+    p(1, _, 1, 1, X, _),
+    p(_, 1, 1, 1, X, _),
+    p(1, 1, 1, 1, X, _),
+    p(_, _, _, _, _, X),
+    p(1, _, _, _, _, X),
+    p(_, 1, _, _, _, X),
+    p(1, 1, _, _, _, X),
+    p(_, _, 1, _, _, X),
+    p(1, _, 1, _, _, X),
+    p(_, 1, 1, _, _, X),
+    p(1, 1, 1, _, _, X),
+    p(_, _, _, 1, _, X),
+    p(1, _, _, 1, _, X),
+    p(_, 1, _, 1, _, X),
+    p(1, 1, _, 1, _, X),
+    p(_, _, 1, 1, _, X),
+    p(1, _, 1, 1, _, X),
+    p(_, 1, 1, 1, _, X),
+    p(1, 1, 1, 1, _, X),
+    p(_, _, _, _, 1, X),
+    p(1, _, _, _, 1, X),
+    p(_, 1, _, _, 1, X),
+    p(1, 1, _, _, 1, X),
+    p(_, _, 1, _, 1, X),
+    p(1, _, 1, _, 1, X),
+    p(_, 1, 1, _, 1, X),
+    p(1, 1, 1, _, 1, X),
+    p(_, _, _, 1, 1, X),
+    p(1, _, _, 1, 1, X),
+    p(_, 1, _, 1, 1, X),
+    p(1, 1, _, 1, 1, X),
+    p(_, _, 1, 1, 1, X),
+    p(1, _, 1, 1, 1, X),
+    p(_, 1, 1, 1, 1, X),
+    p(1, 1, 1, 1, 1, X).
 
 q(1)?

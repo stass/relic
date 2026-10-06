@@ -696,20 +696,16 @@ RELIC_LANG_TESTS = \
 	tests/lang/import-usage-predicate.dl tests/lang/import-wide.dl \
 	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
-	tests/lang/magic-budget-adornments.dl \
-	tests/lang/magic-budget-literals.dl \
-	tests/lang/magic-budget-rules-draft.dl \
-	tests/lang/magic-budget-rules-limit.dl \
-	tests/lang/magic-budget-subsumed.dl \
-	tests/lang/magic-budget-wide-cut.dl tests/lang/magic-budget.dl \
-	tests/lang/magic-cspa.dl \
-	tests/lang/magic-duplicate-rules.dl \
+	tests/lang/magic-cspa.dl tests/lang/magic-default.dl \
+	tests/lang/magic-default-adornments.dl \
+	tests/lang/magic-default-search.dl \
+	tests/lang/magic-duplicate-rules.dl tests/lang/magic-limit.dl \
 	tests/lang/magic-limit-adorned.dl tests/lang/magic-limit-demand.dl \
-	tests/lang/magic-limit-preds.dl tests/lang/magic-limit-query.dl \
-	tests/lang/magic-limit-rules.dl \
-	tests/lang/magic-limit-supplementary.dl tests/lang/magic-mixed.dl \
+	tests/lang/magic-limit-dropped.dl tests/lang/magic-limit-query.dl \
+	tests/lang/magic-limit-raised.dl tests/lang/magic-limit-subsumed.dl \
+	tests/lang/magic-limit-supplementary.dl \
+	tests/lang/magic-limit-wide-cut.dl tests/lang/magic-mixed.dl \
 	tests/lang/magic-mutual.dl tests/lang/magic-negation.dl \
-	tests/lang/magic-rules-read.dl \
 	tests/lang/magic-same-generation.dl tests/lang/magic-subsumed.dl \
 	tests/lang/magic-supplementary-wide.dl \
 	tests/lang/magic-supplementary.dl tests/lang/materialize.dl \

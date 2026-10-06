@@ -800,8 +800,7 @@ limit_named(relic_config_t *config, const char *key, size_t key_length)
 	const limit_key_t limits[] = {
 		{ "tuples", &config->max_tuples },
 		{ "memory", &config->max_memory },
-		{ "magic-preds", &config->max_magic_preds },
-		{ "magic-rules", &config->max_magic_rules }
+		{ "magic", &config->max_magic }
 	};
 	size_t i;
 

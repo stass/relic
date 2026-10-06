@@ -545,9 +545,12 @@ what is kept would never see the work of building and comparing them. The
 query is charged as a rule is: its walk by each search that reads it and
 its rewritten body by the draft. A call a search notes as subsumed by a free
 adornment is a step of a walk already charged. Nothing else in the rewrite
-loops over anything but the program, once, before the first search: mapping
-its components, indexing its rules by head, interning its base views and
-finding what the query reads completely are one pass each. Ordering a body
+loops over anything but the program, once each: mapping its components,
+indexing its rules by head, interning its base views and finding what the
+query reads completely before the first search, and closing what it
+reaches over its dependencies after the search, when no adornment kept
+binds a column. Growing the index of the rules kept reads no rule again:
+each rule's hash is kept beside it. Ordering a body
 for its walk is the planner's work and costs what it costs the planner,
 charged to the memory limit per D-18; the charge here counts the bodies
 ordered. So the work the rewrite does after its first pass over the program
@@ -572,6 +575,12 @@ measure of the work rather than of some output of it.
   or of an adorned rule's first call when constants alone bind it, at most
   one per adorned rule, whose draft was charged. So the rules kept number at
   most twice the literals charged.
+* *Names.* A generated predicate is named after the one it comes from --
+  `p$bf`, `magic$p$bf`, `sup$p$bf$1$2` -- so a long name in the program is
+  copied, hashed and stored once per predicate generated from it, which no
+  count of literals sees. Every generated predicate is named in one place,
+  and naming one charges a literal per 64 bytes of its name before it is
+  stored: nothing for an ordinary name, and in proportion to a long one.
 * *Working memory.* A search holds its adornments, kept and subsumed, and
   the walk of each rule it reads, a step of a few words per body literal,
   for the draft to replay. The walks grow with the literals read, are
@@ -597,7 +606,9 @@ optimization, and an optimization must not decide whether a query is
 answered, nor generate a program unboundedly larger than the one it
 specializes. So the default is a floor of 768 literals plus 48 times the
 size of the program and the query. The program's size is what one adorned
-copy of it holds, each rule's body plus one for its guard; a derived
+copy of it holds, each rule's body plus one for its guard, with its head
+and each positive call counting a literal per 64 bytes of the predicate's
+name, as the names generated for them are charged; a derived
 predicate whose base store holds facts counts as the one rule over its base
 view that each of its adornments is given, two literals
 (`specs/design-facts.md` section 6); the query's size is its body, which is
@@ -619,11 +630,13 @@ otherwise be the only thing to stop.
 **Outgrowing the limit abandons the rewrite**, whether the limit is the
 default or one the caller set. A warning names the limit's value and the
 predicate being adorned -- the one that exploded, which is what the reader
-has to change -- and the query is then answered from the whole program's
-fixed point, exactly as `-X no-magic` answers it:
+has to change -- or the query, when its own walk or rewritten body is what
+outgrows the limit, and the query is then answered from the whole
+program's fixed point, exactly as `-X no-magic` answers it:
 
 ```text
 relic: warning: the query's Magic rewrite outgrew magic=784 while adorning p/8; answering it from the whole program
+relic: warning: the query's Magic rewrite outgrew magic=1 while rewriting the query; answering it from the whole program
 ```
 
 The whole program never answers differently, though it may meet an

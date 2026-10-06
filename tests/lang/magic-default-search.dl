@@ -1,13 +1,13 @@
-% p(c, Y2, ..., Y8)? reaches p's adornments as tests/lang/magic-budget.dl does,
-% but every rule is padded to twenty literals with f literals over
+% p(c, Y2, ..., Y8)? reaches p's adornments as tests/lang/magic-default.dl
+% does, but every rule is padded to twenty literals with f literals over
 % variables of their own, which bind nothing p is called with.  Finding
 % the adornments reads every rule of each whole, and is charged what it
-% reads, so the rewrite outgrows its budget of searched literals well before
-% it runs out of adornments, and before it drafts a rule.  The program's
-% size in literals, each body and one for its guard, is 21 + 8 x 21 = 189,
-% and its literal budget 256 + 16 x 189 = 3280.  f's fact counts nothing,
-% since no rule derives f and the rewrite copies no fact.
-% The warning names the literals, and the query is answered from the whole
+% reads, so the rewrite outgrows its limit well before it runs out of
+% adornments, and before it drafts a rule.  The program's size in literals,
+% each body and one for its guard, is 21 + 8 x 21 = 189, and with the
+% query's one the default limit is 768 + 48 x 190 = 9888.  f's fact counts
+% nothing, since no rule derives f and the rewrite copies no fact.  The
+% warning names the limit, and the query is answered from the whole
 % program.
 
 f(c, c, c, c, c, c, c, c, c, c, c, c, c, c).

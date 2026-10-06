@@ -31,39 +31,37 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**Meter the Magic rewrite with one limit.** [High, component:
-`lib/magic.c`, `include/relic.h`, `cmd/relic/main.c`, `man/`, `tests/`]
-D-37 replaces `max_magic_preds`, `max_magic_rules`, the two `-l` keys and
-the three budgets with `max_magic`, `-l magic=N`: one count of the literals
-the rewrite reads and generates, search and draft together, that no setting
-lifts (`specs/design-magic.md` section 8). One meter of `most` and `spent`
-replaces `relic_magic_limit_t`, `relic_magic_budget_t` and
-`generated_preds`, is charged in `charge_rule_read()` and `publish_rule()`
-and for the query's walk and rewritten body, and is never reset between
-searches; the default comes from the program's and the query's size; the
-warning becomes `outgrew magic=N while adorning p/n`. The field, the `-l`
-key, `relic.h`, `relic.1` and `relic.3` follow; the `magic-limit-*` tests
-go, the `magic-budget-*` tests are re-sized for the new default, and
-`test_magic.c`'s limit scenarios, `cli.sh` and `perf.sh` move to `-l
-magic`. Then a measurement over the test corpus and `bench/` of what
-rewrites spend against the default, which may lower the factor. Closes the
-unbounded half of the item below: a declined cut is then charged for every
-prefix it copies, so the draft is bounded in every configuration; making
-the cut always succeed stays worth doing, to admit those rewrites.
+**A declined cut makes a long rule's rewrite quadratic.** [Low, component:
+`lib/magic.c`] `cut_prefix()` declines to cut a prefix with more live slots
+than `RELIC_MAX_ARITY`, so every later magic rule of such a rule copies the
+whole prefix: a rule of L binding calls keeps about L rules of L^2/2
+literals, recursive ones whose planning costs about L^3. The rewrite's limit
+charges every copy, so the default abandons such a rewrite early -- a 9 KB
+rule of 1000 calls in 0.05 s -- and the query is answered from the whole
+program; only a caller who raises the limit pays the square. Making the cut
+always possible, for instance by chaining cuts or letting a supplementary
+predicate exceed the arity limit, would keep these rewrites linear and
+admit them.
 
-**A configured Magic limit lets the draft grow faster than the search.**
-[Medium, component: `lib/magic.c`] Either Magic limit lifts the draft's
-literal budget, and the rule limit, when set, counts only rules kept.
-`cut_prefix()` declines to cut a prefix with more live slots than
-`RELIC_MAX_ARITY`, so every later magic rule of such a rule copies the whole
-prefix: a rule of L binding calls keeps about L rules of L^2/2 literals,
-recursive ones whose planning costs about L^3, though the search read L
-literals for it. A 10 KB rule of 1000 calls under `-l magic-rules=1000000`
-took 362 s and 53 GB; under `magic-preds` alone no rule count stops it, and
-only `-l memory` refuses it. Making the cut always possible, for instance by
-chaining cuts or letting a supplementary predicate exceed the arity limit,
-would hold drafted literals to a constant multiple of those searched and so
-bound the draft by what the search reads in every configuration.
+**Calibrate the Magic limit's default.** [Low, component: `lib/magic.c`]
+The default, 768 + 48 x the size of the program and the query, is the sum
+of the three allowances of 256 + 16 x the program's size that the search,
+a second search and the draft each had before D-37, so it admits every
+rewrite they admitted. Measuring what rewrites spend over the test corpus
+and `bench/` may justify a smaller factor, which would abandon a rewrite
+that multiplies the program sooner. D-37 lets the factor fall, never rise.
+
+**A literal that binds nothing new multiplies a join's rows.** [Medium,
+component: `lib/plan.c`, `lib/exec.c`] A positive literal yields one
+binding per tuple it matches even when the rest of the rule reads none of
+the columns it matches on: p(_, X) over two tuples that differ only in the
+first column continues the join twice with the same bindings, so k such
+literals carry 2^k identical rows. A rule of `s(X)` and 48 calls
+`p(_, ..., X, ...)` over two facts of p takes 4.7 s under `-X no-magic`,
+and 63 calls run for minutes. Stopping at a literal's first match when it
+binds nothing a later literal or the head reads, an existence check in the
+plan, would keep each to one row. `relic.3` states that no limit bounds
+evaluation time, which stays true; this case need not cost it.
 
 **Reading a query's reach completely is a mode beside the rewrite.** [Low,
 component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment

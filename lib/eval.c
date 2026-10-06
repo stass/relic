@@ -3425,22 +3425,22 @@ answer_from_program(relic_t *ctx, const relic_query_t *query,
  * query's bindings can reach, running the rewritten query rule last and
  * delivering its rows.
  *
- * A rewrite that outgrows its budget has been reported as a warning, and
+ * A rewrite that outgrows its limit has been reported as a warning, and
  * the query is answered from the whole program instead: the rewrite is an
  * optimization, and must not decide whether a query can be answered.  What
  * the abandoned rewrite derived is discarded with the rest, since it
  * recorded no materialized program.  No row has been delivered when the
  * whole program is turned to, because run_query_rule() delivers none
  * before everything but an interrupt has stopped being able to fail it, an
- * interrupt is not a rewrite over its budget, and a rewrite over its budget
- * fails before it is run.
+ * interrupt does not abandon a rewrite, and a rewrite is abandoned before
+ * it is run.
  */
 static int
 answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
     relic_group_run_t *groups, const relic_row_sink_t *rows)
 {
 	relic_magic_t magic;
-	bool over_budget;
+	bool abandoned;
 	int status;
 
 	relic_magic_init(&magic, ctx);
@@ -3448,10 +3448,10 @@ answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
 	if (status == 0)
 		status = run_query_rule(ctx, &magic.query, query->answer,
 		    groups, rows);
-	over_budget = magic.over_budget;
+	abandoned = magic.abandoned;
 	relic_magic_reset(&magic);
 
-	if (status != 0 && over_budget) {
+	if (status != 0 && abandoned) {
 		relic_explain_abandoned_rewrite(ctx, &query->rule,
 		    query->answer);
 		return (answer_from_program(ctx, query, groups, rows));

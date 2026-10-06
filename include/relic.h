@@ -109,9 +109,8 @@ typedef struct relic_config relic_config_t;
 /*
  * Limits a context enforces, and switches that select internal behaviour.
  * A zeroed structure asks for the defaults: no bound on memory or tuples,
- * and for the Magic Sets rewrite the budgets described below.  A limit of
- * SIZE_MAX bounds nothing it counts; as a Magic limit, it lifts the same
- * budgets as any other.
+ * and for the Magic Sets rewrite the limit described below.  A limit of
+ * SIZE_MAX bounds nothing it counts.
  *
  * The fields correspond one to one with the tool's repeatable -l key=value
  * options, which exist only to parse into this structure: a limit is defined
@@ -160,28 +159,23 @@ typedef struct relic_config relic_config_t;
  * serving such queries for as long as it runs loads the program into a new
  * context and destroys the old one.
  *
- * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
- * single query: the adorned and magic predicates it generates, and the rules it
- * keeps once duplicates are dropped.  Exceeding either fails the query with a
- * diagnostic naming the limit, its configured value and the predicate being
- * adorned.  Unless a limit lifts them, the library sets budgets in
- * proportion to the program, on the predicates the rewrite generates, on the
- * literals its search for what to generate reads and on the literals of
- * every rule it drafts, a literal counting one and one more per
- * node of its expressions, which bounds the rules it keeps as well, and a
- * rewrite outgrowing one is abandoned with a warning and the query answered
- * from the whole program, as it would be with RELIC_F_NO_MAGIC: the rewrite
- * is an optimization, and without a limit the caller asked for it must not
+ * `max_magic` bounds the work of the Magic Sets rewrite of a single query:
+ * the body literals it reads while it searches for what to generate and
+ * those of every rule it generates, a literal counting one and one more per
+ * node of its expressions, and the names of the predicates it generates, a
+ * literal per 64 bytes.  Every predicate and rule the rewrite generates
+ * is counted through the literals it took, so the one limit bounds them
+ * all.  Zero asks for a default in proportion to the program and the query,
+ * large enough for every rewrite that specializes the program rather than
+ * multiplies it; any other value replaces the default, and none removes
+ * the limit.  A rewrite outgrowing it, set or not, is abandoned with a
+ * warning and the query answered from the whole program, as it would be
+ * with RELIC_F_NO_MAGIC: the rewrite is an optimization, and must not
  * decide whether a query is answered.  The whole program never answers
  * differently, but it may meet an undefined arithmetic result, a string too
- * long or an invalid pattern the rewrite would not have evaluated, and fail.
- * `max_magic_preds` lifts the budgets on predicates and on literals read,
- * and either limit lifts the budget on literals drafted.  The budgets bound
- * the rewrite, not what its rules derive.  The rewrite searches for what to
- * generate before it generates anything; the search can count predicates
- * the finished rewrite drops, so `max_magic_preds` may refuse a query whose
- * rewrite would have fit.  `max_magic_rules` counts only the rules the
- * rewrite keeps, and set alone leaves the search its budgets.
+ * long or an invalid pattern the rewrite would not have evaluated, and fail;
+ * `max_tuples` and `max_memory` bound it as they bound the rewrite.  The
+ * limit bounds the rewrite, not what its rules derive.
  *
  * `threads` is how many threads an evaluation may share a round's work
  * among, the calling thread included; zero and one both mean the calling
@@ -216,8 +210,7 @@ typedef struct relic_config relic_config_t;
 struct relic_config {
 	size_t		max_memory;	/* storage and working state, bytes */
 	size_t		max_tuples;
-	size_t		max_magic_preds;
-	size_t		max_magic_rules;
+	size_t		max_magic;	/* the rewrite's work, literals */
 	unsigned int	flags;
 	size_t		threads;	/* the calling thread included */
 };
@@ -756,11 +749,11 @@ RELIC_EXPORT relic_query_t *relic_query_loaded(relic_t *ctx, size_t index);
  * predicates it reads through negation and everything those depend on are
  * evaluated in full, those no rule derives are read as their facts stand, and
  * the rest only as far as the query's bindings reach.  What that derives is
- * discarded by the next query or evaluation.  A rewrite that outgrows one of
- * the budgets no configured Magic limit has lifted is abandoned with a
- * warning, and the query answered from the whole program instead, which can
- * fail on an undefined arithmetic result, a string too long or an invalid
- * pattern the rewrite would not have reached, and never answers differently.
+ * discarded by the next query or evaluation.  A rewrite that outgrows
+ * max_magic is abandoned with a warning, and the query answered from the
+ * whole program instead, which can fail on an undefined arithmetic result,
+ * a string too long or an invalid pattern the rewrite would not have
+ * reached, and never answers differently.
  *
  * No row is delivered until everything that can fail has succeeded.  A query
  * answered in a context whose max_tuples and max_memory each set no limit,

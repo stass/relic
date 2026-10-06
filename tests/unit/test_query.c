@@ -1522,7 +1522,7 @@ preparing_queries_stays_within_the_memory_limit(void)
  * refuses plans that do not fit, before any is built, and names what was
  * being planned: a component by its first member, a query by its answer.  A
  * rewrite refused by the limit fails the query rather than being abandoned
- * for the whole program as a budget would be.  Under a limit that admits
+ * for the whole program as one outgrowing the rewrite's own limit would be.  Under a limit that admits
  * them, the same programs are answered, and every operation gives back what
  * its arenas held.
  */

@@ -1,1 +1,0 @@
-relic: warning: the query's Magic rewrite outgrew its budget of 576 generated literals while adorning p/8; answering it from the whole program

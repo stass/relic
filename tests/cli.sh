@@ -412,25 +412,27 @@ while [ "$limit" -le 10000 ]; do
 	limit=$((limit + 100))
 done
 
-for limit in magic-preds magic-rules; do
-	status=0
-	diagnostic=$("$RELIC" -l "$limit=1" "$work/graph.dl" 2>&1 \
-	    >/dev/null) || status=$?
-	if [ "$status" -ne 1 ]; then
-		fail "an exceeded $limit limit exited $status, expected 1"
-	fi
-	case "$diagnostic" in
-	*"limit exceeded: $limit=1 while adorning path/2"*)
-		;;
-	*)
-		fail "an exceeded $limit limit was reported as '$diagnostic'"
-		;;
-	esac
-done
+# The Magic limit is a ceiling on the rewrite, not on the query: a rewrite
+# that outgrows it is abandoned with one warning naming the limit and the
+# predicate being adorned, and the query is answered from the whole program,
+# with the same rows and a status of 0.
+status=0
+actual=$("$RELIC" -s -l magic=1 "$work/graph.dl" 2>"$work/magic.err") ||
+    status=$?
+if [ "$status" -ne 0 ]; then
+	fail "an outgrown magic limit exited $status, expected 0"
+fi
+if [ "$actual" != "$expected" ]; then
+	fail "an outgrown magic limit answered '$actual', expected '$expected'"
+fi
+outgrown="relic: warning: the query's Magic rewrite outgrew magic=1 while"
+outgrown="$outgrown adorning path/2; answering it from the whole program"
+if [ "$(cat "$work/magic.err")" != "$outgrown" ]; then
+	fail "an outgrown magic limit was reported as '$(cat "$work/magic.err")'"
+fi
 
 actual=$("$RELIC" -s -l tuples=1 -l tuples=0 -l memory=0 \
-    -l magic-preds=1 -l magic-preds=0 -l magic-rules=1 -l magic-rules=0 \
-    "$work/graph.dl")
+    -l magic=1 -l magic=0 "$work/graph.dl")
 if [ "$actual" != "$expected" ]; then
 	fail "limits of zero answered '$actual', expected '$expected'"
 fi

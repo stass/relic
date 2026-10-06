@@ -96,12 +96,10 @@ incomplete-operator
 integer-range
 integer-trailing
 magic-bindings
-magic-budget
-magic-budget-adornments
-magic-budget-literals
-magic-budget-subsumed
-magic-budget-wide-cut
 magic-cspa
+magic-default
+magic-default-adornments
+magic-default-search
 magic-duplicate-rules
 magic-mixed
 magic-mutual

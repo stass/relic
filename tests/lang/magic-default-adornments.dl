@@ -1,0 +1,35 @@
+% A rewrite of many short rules outgrows the rewrite's limit, which bounds
+% the rules it keeps as well as what it reads and drafts.  The query binds
+% p's first four columns, and the recursive rule calls p twenty-eight times,
+% each call placing A, B, C and D in a different four of its columns, so the
+% rewrite reaches 34 adornments.  Finding them reads the query and p's two
+% rules once for each, 1 + 34 x 30 = 1021 literals.  Drafting them cuts the
+% long body into a supplementary predicate before every call but the first,
+% which makes some fifty short rules of each adornment.  The program has two
+% rules of 32 literals in all and the query one, for a limit of 768 + 48 x
+% 33 = 2352, which the adornments' short rules outgrow together though each
+% adornment is linear in the body.  The warning names the limit, and the
+% query is answered from the whole program, as -X no-magic answers it.
+
+e(1, 1, 1, 1, 1, 1, 1, 1).
+f(1, 1, 1, 1).
+
+p(A, B, C, D, E, F, G, H) :- e(A, B, C, D, E, F, G, H).
+p(A, B, C, D, E, F, G, H) :-
+    p(A, B, C, D, _, _, _, _), p(A, B, C, _, D, _, _, _),
+    p(A, B, C, _, _, D, _, _), p(A, B, C, _, _, _, D, _),
+    p(A, B, C, _, _, _, _, D), p(A, B, _, C, D, _, _, _),
+    p(A, B, _, C, _, D, _, _), p(A, B, _, C, _, _, D, _),
+    p(A, B, _, C, _, _, _, D), p(A, B, _, _, C, D, _, _),
+    p(A, B, _, _, C, _, D, _), p(A, B, _, _, C, _, _, D),
+    p(A, B, _, _, _, C, D, _), p(A, B, _, _, _, C, _, D),
+    p(A, B, _, _, _, _, C, D), p(A, _, B, C, D, _, _, _),
+    p(A, _, B, C, _, D, _, _), p(A, _, B, C, _, _, D, _),
+    p(A, _, B, C, _, _, _, D), p(A, _, B, _, C, D, _, _),
+    p(A, _, B, _, C, _, D, _), p(A, _, B, _, C, _, _, D),
+    p(A, _, B, _, _, C, D, _), p(A, _, B, _, _, C, _, D),
+    p(A, _, B, _, _, _, C, D), p(A, _, _, B, C, D, _, _),
+    p(A, _, _, B, C, _, D, _), p(A, _, _, B, C, _, _, D),
+    f(E, F, G, H).
+
+p(1, 1, 1, 1, E, F, G, H)?

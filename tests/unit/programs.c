@@ -205,12 +205,6 @@ self_calling_program(unsigned int arity, unsigned int length)
 	}
 	append(&text, ".\n");
 
-	for (i = 0; i < length / 10; i++) {
-		append(&text, "d%u(X) :- ", i);
-		append_f_padding(&text, arity);
-		append(&text, "X, X).\n");
-	}
-
 	if (text.failed) {
 		free(text.bytes);
 		return (NULL);

@@ -744,7 +744,8 @@ grew without bound once a cut was declined.
 
 One count replaces all five. Everything the rewrite reads or generates,
 search and draft alike, is charged where it is read or generated, in the
-literal-size units the budgets used, to one limit per rewrite: `max_magic`,
+literal-size units the budgets used, the name of each predicate it
+generates counting a literal per 64 bytes, to one limit per rewrite: `max_magic`,
 `-l magic=N`, the most literals a query's rewrite may read and generate.
 The count bounds predicates, rules, the search and the draft by
 construction, since every adornment kept reads a rule of at least one

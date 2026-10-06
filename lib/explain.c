@@ -1348,7 +1348,7 @@ relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 }
 
 /*
- * The line that marks a query's Magic rewrite abandoned over its budget.
+ * The line that marks a query's Magic rewrite abandoned over its limit.
  * The components evaluated for the rewrite before it was abandoned are
  * shown above it, and the whole program's, evaluated to answer the query
  * instead, below it, so the same component can appear on both sides.

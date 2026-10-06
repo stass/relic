@@ -47,14 +47,12 @@
 # variant is ordered in a pass or two.  A rule of 8000 literals over
 # complete relations, called with 125 distinct bound patterns through rules
 # a query reads them all through, is copied and ordered once per pattern by
-# the Magic rewrite; that is far more than the budgets on literals admit, so
-# its runs configure a limit on generated predicates, which sizes the search
-# for the patterns and the draft, lifting the budgets, and one on generated
-# rules.  Each workload holds some 4 million
-# operations or literals, and ordering them by rescoring the body at every
-# step costs the square of the body per plan, 10^10 steps or more: a second
-# or two each in passes, even under AddressSanitizer, and minutes step by
-# step on an optimized build.
+# the Magic rewrite; that is far more than the default limit on the
+# rewrite's work admits, so its runs raise the limit.  Each workload holds
+# some 4 million operations or literals, and ordering them by rescoring the
+# body at every step costs the square of the body per plan, 10^10 steps or
+# more: a second or two each in passes, even under AddressSanitizer, and
+# minutes step by step on an optimized build.
 #
 # Each planning workload then runs again under a memory limit of 16 MiB,
 # far below the hundreds of megabytes its plans or its rewrite hold.  The
@@ -70,7 +68,7 @@
 # some 1.7 GB.  Cut into a supplementary predicate before every call after
 # the first, each prefix is one literal and the rewrite is linear in the
 # calls, a few megabytes.  The run must answer without a diagnostic: a
-# rewrite abandoned over its budget would still answer, from the whole
+# rewrite abandoned over its limit would still answer, from the whole
 # program, and say so.
 #
 # RELIC_PERF_BUDGET is how many seconds of CPU time reachability may take,
@@ -314,8 +312,8 @@ awk -v length_="$body_length" -v patterns="$patterns" 'BEGIN {
 
 status=0
 run_within "$work/patterns-rows" "$work/patterns-err" "$planning_budget" \
-    "$RELIC" -l magic-preds=1000000 -l magic-rules=1000000 \
-    -q 'all(X)?' "$work/patterns.dl" || status=$?
+    "$RELIC" -l magic=100000000 -q 'all(X)?' "$work/patterns.dl" ||
+    status=$?
 
 if [ "$status" -ne 0 ]; then
 	cat "$work/patterns-err" >&2
@@ -361,8 +359,7 @@ refused_within "limit exceeded: memory=$planning_memory while planning p/1" \
     -X no-magic -q 'p(X)?' "$work/long.dl"
 refused_within \
     "limit exceeded: memory=$planning_memory while rewriting the query" \
-    -l magic-preds=1000000 -l magic-rules=1000000 -q 'all(X)?' \
-    "$work/patterns.dl"
+    -l magic=100000000 -q 'all(X)?' "$work/patterns.dl"
 
 awk -v calls="$demand_calls" 'BEGIN {
 	for (i = 1; i <= 200; i++)

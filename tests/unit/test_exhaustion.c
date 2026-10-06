@@ -257,13 +257,15 @@
 
 /*
  * The fallback sweep answers the widening program of arity 6, whose query
- * reaches 2^5 adornments of p, which outgrow the rewrite's budget, so the
- * query is answered from the whole program after a warning.  An undisturbed
- * run makes some 680 allocations; the sweep stops at the first run that
+ * reaches 2^5 adornments of p, under a limit of FALLBACK_LIMIT literals,
+ * which its rewrite of some 1760 outgrows, so the query is answered from the
+ * whole program after a warning.  An undisturbed run makes some 680
+ * allocations; the sweep stops at the first run that
  * needs no refusal, and the bound only keeps a regression that fails every
  * run from sweeping forever.
  */
 #define	WIDENING_ARITY	6
+#define	FALLBACK_LIMIT	1000
 #define	FALLBACK_SWEEP	1024
 
 /*
@@ -2825,6 +2827,7 @@ static void
 an_abandoned_rewrite_out_of_memory_reports_once(void)
 {
 	static const char query_text[] = "p(c, Y2, Y3, Y4, Y5, Y6)?";
+	relic_config_t config;
 	relic_query_t *query;
 	char *program;
 	size_t undisturbed;
@@ -2839,6 +2842,9 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 		return;
 	}
 
+	bzero(&config, sizeof(config));
+	config.max_magic = FALLBACK_LIMIT;
+
 	undisturbed = 0;
 	abandoned_then_refused = 0;
 	completed = 0;
@@ -2849,7 +2855,7 @@ an_abandoned_rewrite_out_of_memory_reports_once(void)
 		size_t before;
 		int status;
 
-		ctx = relic_create();
+		ctx = relic_create_config(&config);
 		if (ctx == NULL) {
 			check(false, SCENARIO_FALLBACK,
 			    "a context should be created");

@@ -105,13 +105,25 @@
  */
 
 /*
- * The budgets of a rewrite: the floor plus the factor times the size of the
- * program, in derived predicates for the predicates it generates, and in the
- * size of body literals -- one each, and one more per node of an expression
- * -- for the literals of the rules it drafts and reads.
+ * The default limit on a rewrite's work: the floor plus the factor times the
+ * size of the program and the query, in the size of body literals -- one
+ * each, and one more per node of an expression.  A rewrite searches at most
+ * twice and drafts once, and each of the three is allowed a floor of 256 and
+ * a factor of 16, which admit a rewrite that specializes the program: a
+ * handful of adornments per predicate, each with its rules, magic rules and
+ * cuts.
  */
-#define	RELIC_MAGIC_BUDGET_FLOOR	256
-#define	RELIC_MAGIC_BUDGET_FACTOR	16
+#define	RELIC_MAGIC_LIMIT_FLOOR		768
+#define	RELIC_MAGIC_LIMIT_FACTOR	48
+
+/*
+ * The bytes of a predicate's name that cost the rewrite one literal.  A
+ * generated predicate's name embeds its source's, so a long source name is
+ * copied, hashed and stored once per predicate generated from it; charging
+ * one literal per this many bytes bounds that work by the limit as a
+ * literal's nodes are bounded, and costs nothing for an ordinary name.
+ */
+#define	RELIC_MAGIC_NAME_BYTES		64
 
 /*
  * No component derives the predicate; no slot has been assigned yet; no
@@ -277,8 +289,7 @@ struct relic_walk {
 	relic_walk_step_t *steps;
 };
 
-static void	 abandon_over_budget(relic_magic_t *magic, const char *what,
-		    size_t budget, relic_pred_id_t source);
+static void	 abandon_rewrite(relic_magic_t *magic, relic_pred_id_t source);
 static int	 add_adornment(relic_magic_t *magic,
 		    relic_adornment_set_t *set, relic_pred_id_t source,
 		    uint32_t bound, uint32_t hash);
@@ -311,16 +322,12 @@ static int	 begin_searching(relic_magic_t *magic);
 static bool	 binds_some_column(const relic_magic_t *magic);
 static relic_arg_t *bound_args(relic_magic_t *magic, const relic_arg_t *args,
 		    uint16_t arity, uint32_t columns);
-static size_t	 budget_for(size_t program_size);
 static uint32_t	 call_columns(const relic_magic_t *magic,
 		    const relic_literal_t *call, uint64_t bound);
 static int	 canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 		    relic_rule_t *rule);
-static int	 charge_literals(relic_magic_t *magic,
-		    relic_magic_budget_t *budget, size_t size,
-		    relic_pred_id_t attributed);
-static int	 charge_rule_read(relic_magic_t *magic,
-		    const relic_rule_t *rule, relic_pred_id_t source);
+static int	 charge_work(relic_magic_t *magic, size_t size,
+		    relic_pred_id_t source);
 static void	 close_complete(relic_closure_t *closure);
 static int	 closure_begin(relic_closure_t *closure, relic_magic_t *magic);
 static uint16_t	 column_count(uint32_t columns);
@@ -332,10 +339,6 @@ static const relic_rule_t *component_rule(const relic_magic_t *magic,
 		    const relic_component_t *component, size_t i);
 static int	 confirm_pred_indexed(relic_magic_t *magic,
 		    relic_pred_id_t source);
-static int	 confirm_pred_limit(relic_magic_t *magic,
-		    relic_pred_id_t source, size_t generated);
-static int	 confirm_rule_limit(relic_magic_t *magic,
-		    relic_pred_id_t attributed);
 static relic_arg_t *copy_args(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering, const relic_arg_t *args,
 		    uint16_t count);
@@ -351,10 +354,8 @@ static int	 copy_literal(relic_magic_t *magic,
 static int	 cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix,
 		    size_t call_ordinal, uint64_t live,
 		    relic_pred_id_t called_pred);
+static size_t	 default_work_limit(size_t size);
 static int	 demand_begin(relic_demand_t *demand, relic_magic_t *magic);
-static int	 exceed(relic_magic_t *magic,
-		    const relic_magic_limit_t *limit, const char *key,
-		    const char *what, relic_pred_id_t source);
 static const relic_adornment_t *find_adornment(
 		    const relic_adornment_set_t *set, relic_pred_id_t source,
 		    uint32_t bound, uint32_t hash);
@@ -386,10 +387,6 @@ static int	 keep_adornment(relic_magic_t *magic, relic_pred_id_t source,
 static bool	 kept_bound_adornment_of_free(const relic_magic_t *magic);
 static uint64_t	*later_slots(relic_magic_t *magic, const relic_rule_t *rule,
 		    const relic_walk_t *walk);
-static relic_magic_limit_t limit_or(size_t configured_limit,
-		    size_t otherwise);
-static relic_magic_budget_t literal_budget_or_lifted(const char *what,
-		    size_t budget, bool lifted);
 static uint64_t	 literal_slots(const relic_magic_t *magic,
 		    const relic_literal_t *literal);
 static bool	 literals_equal(const relic_magic_t *magic,
@@ -404,13 +401,15 @@ static void	 mark_complete(relic_closure_t *closure, size_t position);
 static int	 name_adornment(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound, relic_adornment_t *adornment);
 static int	 name_adornments(relic_magic_t *magic);
+static size_t	 name_size(const relic_magic_t *magic, relic_pred_id_t pred);
 static void	 note_incomplete(relic_magic_t *magic);
 static int	 note_subsumed(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound);
 static uint16_t	 pred_arity(const relic_magic_t *magic, relic_pred_id_t pred);
 static bool	 pred_is_complete(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
-static size_t	 program_size(const relic_ruletab_t *rules);
+static size_t	 program_size(const relic_magic_t *magic,
+		    const relic_ruletab_t *rules);
 static int	 publish_rule(relic_magic_t *magic, const relic_draft_t *draft);
 static int	 reach_adornment(relic_magic_t *magic,
 		    relic_pred_id_t source, uint32_t bound,
@@ -435,8 +434,6 @@ static void	 renumber_arg(relic_renumbering_t *renumbering,
 		    const relic_arg_t *source, relic_arg_t *copy);
 static uint16_t	 renumber_slot(relic_renumbering_t *renumbering,
 		    uint16_t slot);
-static void	 report_limit(relic_magic_t *magic, const char *limit,
-		    size_t configured, relic_pred_id_t source);
 static bool	 restates_head(const relic_rule_t *rule,
 		    const relic_adornment_t *head, const relic_literal_t *call,
 		    uint32_t columns);
@@ -454,9 +451,9 @@ static bool	 rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
 static int	 search_adornments(relic_magic_t *magic,
 		    const relic_rule_t *query);
 static int	 search_once(relic_magic_t *magic, const relic_rule_t *query);
-static void	 set_bounds(relic_magic_t *magic,
-		    const relic_config_t *config,
-		    const relic_program_t *program);
+static void	 set_work_limit(relic_magic_t *magic,
+		    const relic_config_t *config, const relic_program_t *program,
+		    const relic_rule_t *query);
 static uint16_t	 slot_count(uint64_t slots);
 static int	 supplementary_literal(relic_magic_t *magic,
 		    const relic_prefix_t *prefix, size_t call_ordinal,
@@ -496,6 +493,7 @@ relic_magic_reset(relic_magic_t *magic)
 	adornment_set_release(&magic->walked);
 	free(magic->rules.entries);
 	relic_idtab_reset(&magic->rule_index);
+	free(magic->rule_hashes);
 	relic_arena_reset(&magic->arena);
 	relic_arena_reset(&magic->scratch);
 	relic_arena_reset(&magic->walk_arena);
@@ -955,219 +953,154 @@ note_incomplete(relic_magic_t *magic)
 	}
 }
 
-static void
-report_limit(relic_magic_t *magic, const char *limit, size_t configured,
-    relic_pred_id_t source)
-{
-	char described[RELIC_PRED_TEXT_MAX];
-
-	relic_diag_limit(magic->ctx, limit, configured, "adorning",
-	    relic_pred_describe(magic->ctx, source, described,
-	    sizeof(described)));
-}
-
 /*
- * Abandon the rewrite, which outgrew its budget while adorning `source`:
- * warn, and mark it so that its caller answers the query another way.
+ * Abandon the rewrite, whose work outgrew its limit while adorning `source`,
+ * or while rewriting the query when `source` is RELIC_ID_NONE: warn, naming
+ * the limit as the option that raises it, and mark the rewrite so that its
+ * caller answers the query from the whole program.
  */
 static void
-abandon_over_budget(relic_magic_t *magic, const char *what, size_t budget,
-    relic_pred_id_t source)
+abandon_rewrite(relic_magic_t *magic, relic_pred_id_t source)
 {
 	char described[RELIC_PRED_TEXT_MAX];
+	const char *doing;
+	const char *what;
+
+	if (source == RELIC_ID_NONE) {
+		doing = "rewriting";
+		what = RELIC_QUERY_DESCRIPTION;
+	} else {
+		doing = "adorning";
+		what = relic_pred_describe(magic->ctx, source, described,
+		    sizeof(described));
+	}
 
 	relic_diag_warning(magic->ctx, NULL,
-	    "the query's Magic rewrite outgrew its budget of %zu %s while "
-	    "adorning %s; answering it from the whole program", budget, what,
-	    relic_pred_describe(magic->ctx, source, described,
-	    sizeof(described)));
+	    "the query's Magic rewrite outgrew magic=%zu while %s %s; "
+	    "answering it from the whole program", magic->work_limit, doing,
+	    what);
 
-	magic->over_budget = true;
+	magic->abandoned = true;
 }
 
 /*
- * The budget for a program of `program_size`: large enough for every rewrite
- * that specializes the program rather than multiplies it, and small enough
- * that the rewritten program never has more than a constant multiple of the
- * program's size, however many adornments the program's arities allow.
- * Saturates rather than wrapping.
+ * The limit on a rewrite's work when the caller sets none, for a program
+ * and query of `size`: large enough for every rewrite that specializes the
+ * program rather than multiplies it, and small enough that the rewritten
+ * program never has more than a constant multiple of the program's size,
+ * however many adornments the program's arities allow.  Saturates rather
+ * than wrapping.
  */
 static size_t
-budget_for(size_t program_size)
+default_work_limit(size_t size)
 {
-	if (program_size > (SIZE_MAX - RELIC_MAGIC_BUDGET_FLOOR) /
-	    RELIC_MAGIC_BUDGET_FACTOR)
+	if (size > (SIZE_MAX - RELIC_MAGIC_LIMIT_FLOOR) /
+	    RELIC_MAGIC_LIMIT_FACTOR)
 		return (SIZE_MAX);
 
-	return (RELIC_MAGIC_BUDGET_FLOOR +
-	    RELIC_MAGIC_BUDGET_FACTOR * program_size);
+	return (RELIC_MAGIC_LIMIT_FLOOR + RELIC_MAGIC_LIMIT_FACTOR * size);
 }
 
 /*
- * Set the bounds the rewrite is held to, from the Magic limits in `config`
- * and the budgets for `program`.
+ * Set the most the rewrite of `query` may read and generate: the limit the
+ * caller set in `config`, or, when they left it zero, the default for
+ * `program` and the query.  No value removes the limit; a caller's only
+ * scales it.
  *
- * The predicate limit sizes the search for the adornments: setting it
- * replaces the predicate budget and lifts the search's literal budget, since
- * what a search costs is the adornments it keeps, each read through the rules
- * of its source.  It lifts the draft's literal budget too: drafting the
- * adornments a search keeps is charged at least what the search read for
- * them, so a draft budget left beside a lifted search would abandon what the
- * caller sized.  The rule limit sizes only the draft, lifting the draft's
- * literal budget, which bounds the rules it keeps; it counts those rules and
- * nothing the search reads.  A rule limit set alone therefore leaves the
- * search held to both of its budgets: lifting its literal budget would leave
- * it bounded by the predicate budget alone, its work growing as the product
- * of the program's derived predicates and its size.
+ * The program's size is what one adorned copy of it holds, a rule over a
+ * base view counting the two literals it has.  The query's is its body,
+ * which the rewrite walks and rewrites as it does a rule's, so that a long
+ * query over a small program is not abandoned for its length.
  */
 static void
-set_bounds(relic_magic_t *magic, const relic_config_t *config,
-    const relic_program_t *program)
+set_work_limit(relic_magic_t *magic, const relic_config_t *config,
+    const relic_program_t *program, const relic_rule_t *query)
 {
-	size_t literal_budget;
-	bool search_sized;
-	bool draft_sized;
+	size_t size;
 
-	literal_budget = budget_for(program_size(&program->rules) +
-	    2 * magic->base_view_count);
-	search_sized = config->max_magic_preds != 0;
-	draft_sized = search_sized || config->max_magic_rules != 0;
+	size = relic_saturating_sum(program_size(magic, &program->rules),
+	    relic_saturating_sum(magic->base_view_count,
+	    magic->base_view_count));
+	size = relic_saturating_sum(size,
+	    relic_body_size(query->body, query->body_length));
 
-	magic->pred_limit = limit_or(config->max_magic_preds,
-	    budget_for(program->schedule.member_count));
-	magic->rule_limit = limit_or(config->max_magic_rules, SIZE_MAX);
-	magic->search_literals = literal_budget_or_lifted("searched literals",
-	    literal_budget, search_sized);
-	magic->draft_literals = literal_budget_or_lifted("generated literals",
-	    literal_budget, draft_sized);
-}
-
-/*
- * A literal budget named `what`, nothing of it spent, holding at most
- * `budget` unless a limit the caller set has `lifted` it.
- */
-static relic_magic_budget_t
-literal_budget_or_lifted(const char *what, size_t budget, bool lifted)
-{
-	relic_magic_budget_t literals;
-
-	literals.most = lifted ? SIZE_MAX : budget;
-	literals.spent = 0;
-	literals.what = what;
-
-	return (literals);
-}
-
-/*
- * The limit the caller set, `configured_limit`, or, when they left it zero,
- * `otherwise`: a budget, or SIZE_MAX for a count that has none.
- */
-static relic_magic_limit_t
-limit_or(size_t configured_limit, size_t otherwise)
-{
-	relic_magic_limit_t limit;
-
-	limit.configured = configured_limit != 0;
-	if (limit.configured)
-		limit.most = configured_limit;
+	if (config->max_magic != 0)
+		magic->work_limit = config->max_magic;
 	else
-		limit.most = otherwise;
-
-	return (limit);
+		magic->work_limit = default_work_limit(size);
+	magic->work_spent = 0;
 }
 
 /*
- * The size of the program's rules, which with the rules over base views the
- * literal budget is proportional to: what one adorned copy of them holds,
+ * The size of the program's rules: what one adorned copy of them holds,
  * each rule's body plus one for its guard, a literal counting one and one
- * more per node of its expressions.  A rule over a base view,
- * p(X1, ...) :- p$base(X1, ...), counts two.
+ * more per node of its expressions.  The names a copy generates are counted
+ * too, as intern_generated() charges them: each rule's head and each
+ * positive call name the predicates generated for them, and each counts a
+ * literal per RELIC_MAGIC_NAME_BYTES bytes of its name, nothing for an
+ * ordinary one.  Negated and folded predicates are read completely, and
+ * nothing is generated for them.
  */
 static size_t
-program_size(const relic_ruletab_t *rules)
+program_size(const relic_magic_t *magic, const relic_ruletab_t *rules)
 {
+	const relic_literal_t *literal;
 	const relic_rule_t *rule;
 	size_t size;
 	size_t r;
+	size_t i;
 
 	size = 0;
 	for (r = 0; r < rules->count; r++) {
 		rule = &rules->entries[r];
 		size = relic_saturating_sum(size, relic_saturating_sum(1,
 		    relic_body_size(rule->body, rule->body_length)));
+		size = relic_saturating_sum(size, name_size(magic, rule->head));
+
+		for (i = 0; i < rule->body_length; i++) {
+			literal = &rule->body[i];
+			if (literal->kind == RELIC_LITERAL_POSITIVE)
+				size = relic_saturating_sum(size,
+				    name_size(magic, literal->u.atom.pred));
+		}
 	}
 
 	return (size);
 }
 
 /*
- * Report that `source`'s adornment would take the rewrite past a limit or a
- * budget, in the way each is reported, and return -1.
+ * What naming a predicate generated from `pred` costs, in literals: one
+ * per RELIC_MAGIC_NAME_BYTES bytes of `pred`'s name.
  */
-static int
-exceed(relic_magic_t *magic, const relic_magic_limit_t *limit,
-    const char *key, const char *what, relic_pred_id_t source)
+static size_t
+name_size(const relic_magic_t *magic, relic_pred_id_t pred)
 {
-	if (limit->configured)
-		report_limit(magic, key, limit->most, source);
-	else
-		abandon_over_budget(magic, what, limit->most, source);
-
-	return (-1);
+	return (relic_pred_of(magic->ctx, pred)->name.length /
+	    RELIC_MAGIC_NAME_BYTES);
 }
 
 /*
- * Confirm that `generated` more predicates stay within what the rewrite may
- * generate, reporting the predicate being adorned when they would not.
+ * Charge the rewrite for reading or building a body of `size`, on behalf of
+ * `source`, or of the query when that is RELIC_ID_NONE, unless that would
+ * take it past its limit, which abandons the rewrite instead.
+ *
+ * A literal's size is one and one more per node of its expressions, so a
+ * rewrite copying a large expression into many prefixes is charged for the
+ * nodes it copies and walks.  The amount spent never passes the limit,
+ * since only what this admits is added to it, so the subtraction cannot
+ * wrap where the sum could.
  */
 static int
-confirm_pred_limit(relic_magic_t *magic, relic_pred_id_t source,
-    size_t generated)
+charge_work(relic_magic_t *magic, size_t size, relic_pred_id_t source)
 {
-	if (magic->generated_preds + generated <= magic->pred_limit.most)
-		return (0);
+	assert(magic->work_spent <= magic->work_limit);
 
-	return (exceed(magic, &magic->pred_limit, "magic-preds",
-	    "generated predicates", source));
-}
-
-/*
- * Confirm that one more generated rule stays within what the rewrite may
- * generate.
- */
-static int
-confirm_rule_limit(relic_magic_t *magic, relic_pred_id_t attributed)
-{
-	if (magic->rules.count < magic->rule_limit.most)
-		return (0);
-
-	return (exceed(magic, &magic->rule_limit, "magic-rules",
-	    "generated rules", attributed));
-}
-
-/*
- * Charge literals of `size` to `budget`, unless that would take it past
- * what it holds.  A literal's size is one and one more per node of its
- * expressions, so a rewrite copying a large expression into many prefixes is
- * charged for the nodes it copies and walks, and the budget bounds that work
- * as it bounds the literals.  Outgrowing it abandons the rewrite: a budget
- * is in force only where no limit the caller set sizes what it bounds.  The
- * amount spent never passes the budget, since only what this admits is
- * added to it, so the subtraction cannot wrap where the sum could.
- */
-static int
-charge_literals(relic_magic_t *magic, relic_magic_budget_t *budget,
-    size_t size, relic_pred_id_t attributed)
-{
-	assert(budget->spent <= budget->most);
-
-	if (size > budget->most - budget->spent) {
-		abandon_over_budget(magic, budget->what, budget->most,
-		    attributed);
+	if (size > magic->work_limit - magic->work_spent) {
+		abandon_rewrite(magic, source);
 		return (-1);
 	}
 
-	budget->spent += size;
+	magic->work_spent += size;
 
 	return (0);
 }
@@ -1178,12 +1111,20 @@ charge_literals(relic_magic_t *magic, relic_magic_budget_t *budget,
  * undefined-predicate warning must never name it.  It is part of the
  * program's predicate `source`, which diagnostics name in its place, or of
  * the query when `source` is RELIC_ID_NONE.
+ *
+ * Every predicate the rewrite generates is named here, so this is where its
+ * name is charged to the rewrite's limit, a literal per
+ * RELIC_MAGIC_NAME_BYTES bytes, before it is hashed and stored.  The name
+ * was built before the charge, which is the work of one name and no more.
  */
 static int
 intern_generated(relic_magic_t *magic, const char *name, size_t length,
     uint16_t arity, const relic_location_t *where, relic_pred_id_t source,
     relic_pred_id_t *idp)
 {
+	if (charge_work(magic, length / RELIC_MAGIC_NAME_BYTES, source) != 0)
+		return (-1);
+
 	if (relic_pred_intern(magic->ctx, name, length, arity, where, idp) != 0)
 		return (-1);
 
@@ -1552,16 +1493,15 @@ add_adornment(relic_magic_t *magic, relic_adornment_set_t *set,
 /*
  * Keep the adornment calling `source` with the columns of `bound` bound,
  * unless the search has kept it already, and give its position among those
- * kept in *positionp.  A new one counts the predicates naming it will
- * generate -- the adorned one, and the magic one when a column is bound --
- * against the limit on generated predicates.
+ * kept in *positionp.  Keeping one costs nothing of the rewrite's limit: the
+ * search is charged for reading its rules, at least one literal, when it
+ * reaches it in the order kept.
  */
 static int
 keep_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
     uint32_t *positionp)
 {
 	const relic_adornment_t *found;
-	size_t generated;
 	uint32_t hash;
 
 	hash = adornment_hash(&magic->kept, source, bound);
@@ -1571,13 +1511,8 @@ keep_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 		return (0);
 	}
 
-	generated = bound == 0 ? 1 : 2;
-	if (confirm_pred_limit(magic, source, generated) != 0)
-		return (-1);
-
 	if (add_adornment(magic, &magic->kept, source, bound, hash) != 0)
 		return (-1);
-	magic->generated_preds += generated;
 	*positionp = (uint32_t)(magic->kept.count - 1);
 
 	return (0);
@@ -1602,8 +1537,8 @@ note_subsumed(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound)
 
 /*
  * Name and intern the predicates of every adornment the query reaches and
- * keeps, in the order they were recorded.  Their count was confirmed against
- * the limit when they were recorded.
+ * keeps, in the order they were recorded.  There are no more of them than
+ * the literals the search was charged for reading their rules.
  */
 static int
 name_adornments(relic_magic_t *magic)
@@ -2091,7 +2026,7 @@ rehash_rule(uint32_t id, void *ctx)
 
 	magic = ctx;
 
-	return (rule_hash(magic, &magic->rules.entries[id - 1]));
+	return (magic->rule_hashes[id - 1]);
 }
 
 /*
@@ -2113,8 +2048,9 @@ find_rule(const relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 }
 
 /*
- * Append a generated rule and index it.  Room in the table and in the index
- * is made before the rule is stored.  A rule's index entry is its position
+ * Append a generated rule and index it, keeping its hash beside it for the
+ * index to grow by.  Room in the table, in the hashes and in the index is
+ * made before the rule is stored.  A rule's index entry is its position
  * plus one, so the table stops one short of what an identifier can hold.
  * The generated rules are analysed like the program's, indexed by head, so
  * the rewritten query, whose head names no predicate, is kept apart and
@@ -2123,12 +2059,23 @@ find_rule(const relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 static int
 append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 {
+	uint32_t *hashes;
+
 	if (magic->rules.count >= UINT32_MAX - 1) {
 		relic_diag_error(magic->ctx, RELIC_ERROR_LIMIT, NULL,
 		    "a query's Magic rewrite generated more rules than it can "
 		    "index");
 		return (-1);
 	}
+
+	hashes = relic_grow_array(magic->rule_hashes,
+	    &magic->rule_hash_capacity, magic->rules.count + 1,
+	    sizeof(*magic->rule_hashes));
+	if (hashes == NULL) {
+		relic_diag_no_memory(magic->ctx);
+		return (-1);
+	}
+	magic->rule_hashes = hashes;
 
 	if (relic_idtab_reserve(&magic->rule_index, 1, rehash_rule,
 	    magic) != 0) {
@@ -2139,6 +2086,7 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 	if (relic_ruletab_append(magic->ctx, &magic->rules, rule) != 0)
 		return (-1);
 
+	magic->rule_hashes[magic->rules.count - 1] = hash;
 	relic_idtab_place(&magic->rule_index, hash,
 	    (uint32_t)magic->rules.count);
 
@@ -2148,14 +2096,13 @@ append_rule(relic_magic_t *magic, const relic_rule_t *rule, uint32_t hash)
 /*
  * Add a generated rule, renumbered, unless it derives nothing or is a
  * duplicate of one already generated.  Returns 0, or -1 with a diagnostic
- * reported: memory, the budget on literals, or the limit on generated rules.
+ * reported: memory, or the rewrite's limit outgrown.
  *
- * The draft's literal budget is charged on entry, for every draft: whether a
- * rule is kept is known only once it is built, and a long body calling its
- * own predicate drafts copies that are all dropped, each costing the time to
- * build and compare.  Charging what is kept would never see them.  The rule
- * limit measures the rewritten program, so it counts only the rules kept.
- * A dropped copy is rewound out of the arena, which so holds only the rules
+ * The rewrite's limit is charged on entry, for every draft: whether a rule
+ * is kept is known only once it is built, and a long body calling its own
+ * predicate drafts copies that are all dropped, each costing the time to
+ * build and compare.  Charging what is kept would never see them.  A
+ * dropped copy is rewound out of the arena, which so holds only the rules
  * kept; the walk the rule was drafted from is in the arena of the walks,
  * which is released whole once the rewrite has drafted.
  */
@@ -2166,8 +2113,7 @@ publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 	relic_rule_t rule;
 	uint32_t hash;
 
-	if (charge_literals(magic, &magic->draft_literals,
-	    relic_body_size(draft->body, draft->body_length),
+	if (charge_work(magic, relic_body_size(draft->body, draft->body_length),
 	    draft->attributed) != 0)
 		return (-1);
 
@@ -2180,9 +2126,6 @@ publish_rule(relic_magic_t *magic, const relic_draft_t *draft)
 		relic_arena_rewind(&magic->arena, &before_copy);
 		return (0);
 	}
-
-	if (confirm_rule_limit(magic, draft->attributed) != 0)
-		return (-1);
 
 	return (append_rule(magic, &rule, hash));
 }
@@ -2565,7 +2508,7 @@ supplementary_literal(relic_magic_t *magic, const relic_prefix_t *prefix,
  * fits.
  *
  * The supplementary rule is published as every generated rule is, and so is
- * charged to the budgets.  It is attributed to the predicate adorned, or,
+ * charged to the rewrite's limit.  It is attributed to the predicate adorned, or,
  * for the query, which is no predicate, to `called_pred`, as the query's
  * seeds are.  It is never dropped, because its head is new to this rewrite
  * and absent from its own body: the name is built from the adorned
@@ -2573,7 +2516,7 @@ supplementary_literal(relic_magic_t *magic, const relic_prefix_t *prefix,
  * which no adorned name is, and from positions a rewrite visits once, and
  * no name a program writes contains `$`.  Were it ever dropped as equal to
  * a rule already kept, that rule would derive the same relation; the
- * assertion guards the argument rather than correctness.  When a budget
+ * assertion guards the argument rather than correctness.  When the limit
  * abandons the rewrite here, the prefix is left as it was and the predicate
  * stays interned with no rule, as an abandoned adornment's predicates do;
  * the rewrite is discarded whole.
@@ -2778,11 +2721,11 @@ adorn_rule(relic_magic_t *magic, const relic_rule_t *rule,
  * predicate: nothing of it is looked up, and the rewritten rule keeps the
  * query's head and head arity, to run into the same answer relation.
  *
- * The rewritten query is canonicalized here rather than published, so the
- * draft's literal budget does not charge it.  It is one rule as long as the
- * query, which is not part of the program the budget is proportional to:
- * charging it would abandon the rewrite of a long query over a small
- * program.
+ * The rewritten query is canonicalized here rather than published, since it
+ * is kept apart from the generated rules, and is charged to the rewrite's
+ * limit as a published rule is, before it is built.  The limit's default
+ * counts the query's size, so a long query over a small program is not
+ * abandoned for its length.
  */
 static int
 rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
@@ -2799,6 +2742,9 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 
 	status = rewrite_body(magic, query, magic->query_walk, &unbound, 0,
 	    &draft);
+	if (status == 0)
+		status = charge_work(magic, relic_body_size(draft.body,
+		    draft.body_length), RELIC_ID_NONE);
 	if (status == 0) {
 		draft.head = query->head;
 		status = canonicalize(magic, &draft, &magic->query);
@@ -2884,17 +2830,16 @@ begin_searching(relic_magic_t *magic)
 }
 
 /*
- * Begin a search with no adornment recorded and no rule read, keeping the
- * predicates earlier searches read free.  The counts a search is held to
- * are its own, so each search is bounded as a rewrite is.
+ * Begin a search with no adornment recorded, keeping the predicates earlier
+ * searches read free.  What earlier searches were charged stays charged: a
+ * search replaying the walks of the one before still does the work of
+ * reaching their calls, and the rewrite's limit counts every search.
  */
 static void
 begin_search(relic_magic_t *magic)
 {
 	adornment_set_clear(&magic->kept);
 	adornment_set_clear(&magic->subsumed);
-	magic->generated_preds = 0;
-	magic->search_literals.spent = 0;
 }
 
 /*
@@ -3034,26 +2979,6 @@ reach_walk(relic_magic_t *magic, const relic_rule_t *rule, relic_walk_t *walk)
 }
 
 /*
- * Charge a search for reading one rule of an adornment of `source`: its body
- * against the search's literal budget.
- *
- * Drafting an adornment drafts every rule of its source, whole or cut into
- * pieces that hold at least its body between them, and the draft's literal
- * budget, the same as the search's when neither is lifted, charges every
- * draft, kept or dropped, so a search reads no more literals than drafting
- * the adornments it keeps is charged.  The rule limit is not charged: it
- * counts only the rules the draft keeps, after it drops duplicates and rules
- * that derive nothing, which the rules a search reads do not tell.
- */
-static int
-charge_rule_read(relic_magic_t *magic, const relic_rule_t *rule,
-    relic_pred_id_t source)
-{
-	return (charge_literals(magic, &magic->search_literals,
-	    relic_body_size(rule->body, rule->body_length), source));
-}
-
-/*
  * The walks of the rules deriving an adornment's source, one per rule in
  * program order: those the first search recorded for the adornment when a
  * second search reads it, and otherwise room for walks not yet made.  Every
@@ -3091,8 +3016,11 @@ walks_for(relic_magic_t *magic, const relic_adornment_t *adornment)
  * source's base view reads only the base view, which is complete, and calls
  * nothing, so it is neither read nor walked here.
  *
- * Each rule is charged before anything is done for it, room for the walks
- * included, so a limit refuses the search at the rule it is reached by.
+ * Each rule's body is charged to the rewrite's limit before anything is
+ * done for it, room for the walks included, so the limit abandons the
+ * search at the rule it is outgrown by.  Every adornment kept is of a
+ * derived predicate, which has a rule, and every rule has a body literal,
+ * so the search keeps no more adornments than the literals it is charged.
  * The adornment is copied out of the set, because reaching the calls of its
  * rules may keep more adornments and move the set's entries.
  */
@@ -3115,7 +3043,8 @@ reach_rules_of(relic_magic_t *magic, uint32_t position)
 	for (i = first; i < end; i++) {
 		rule = &rules->entries[magic->rules_by_head[i]];
 
-		if (charge_rule_read(magic, rule, adornment.source) != 0)
+		if (charge_work(magic, relic_body_size(rule->body,
+		    rule->body_length), adornment.source) != 0)
 			return (-1);
 
 		if (adornment.walks == NULL) {
@@ -3141,7 +3070,8 @@ reach_rules_of(relic_magic_t *magic, uint32_t position)
  * One search: reach the adornments of the query's calls, then those of the
  * rules of every adornment kept, in the order kept, which appends the
  * adornments their calls reach.  The query is walked the first time a
- * search reads it.
+ * search reads it.  Each body the search reads, the query's included, is
+ * charged to the rewrite's limit before it is walked or its walk replayed.
  */
 static int
 search_once(relic_magic_t *magic, const relic_rule_t *query)
@@ -3150,6 +3080,9 @@ search_once(relic_magic_t *magic, const relic_rule_t *query)
 
 	begin_search(magic);
 
+	if (charge_work(magic, relic_body_size(query->body, query->body_length),
+	    RELIC_ID_NONE) != 0)
+		return (-1);
 	if (magic->query_walk->steps == NULL &&
 	    walk_rule(magic, query, 0, magic->query_walk) != 0)
 		return (-1);
@@ -3220,9 +3153,9 @@ kept_bound_adornment_of_free(const relic_magic_t *magic)
  * adornments are kept, with their walks, in `walked` while the second runs.
  *
  * Each search keeps no more adornments than a rewrite without subsumption
- * would adorn, and is held on its own to the predicate limit or budget and
- * to the search's literal budget, as charge_rule_read() describes.  The
- * query's body is read once in each search and charged to neither.
+ * would adorn, and both are charged to the rewrite's limit for every body
+ * they read, the query's included, as search_once() and reach_rules_of()
+ * charge it.
  */
 static int
 search_adornments(relic_magic_t *magic, const relic_rule_t *query)
@@ -3325,26 +3258,24 @@ read_reached_completely(relic_magic_t *magic, const relic_rule_t *query)
  * derived by some rule -- one no rule derives is complete -- so each
  * adornment's source has rules to generate from.
  *
- * What the rewrite may generate is bounded in predicates and body literals by
- * budgets in proportion to the program, and in predicates and rules by the
- * Magic limits, as set_bounds() sets them: the predicate limit sizes the
- * search, and either limit sizes the draft.  The search counts the predicates
- * of the adornments it keeps and the literals of the rules it reads for them;
- * the supplementary predicates the draft's cuts add are not counted, since each
- * has one rule, which the rule limit and the draft's literal budget count.  The
- * draft's budget holds everything it drafts, kept or dropped, to a constant
- * multiple of the program's size, which counting rules cannot when long rules
- * are copied once per adornment; a literal's size counts the nodes of its
- * expressions too, so a large expression copied into many prefixes is bounded
- * as a long body is.  It bounds the rules kept as well.  Every rule is charged
- * its body before it is kept, and every one but a seed has a body literal, of
- * size at least one.  A seed is the query's, or the magic rule of an adorned
- * rule's first call when constants alone bind it, at most one per adorned rule,
- * whose draft was charged a literal.  So the rules kept number at most twice
- * the literals drafted plus the query's seeds.  The budgets are proportional to
- * the program while the cost of answering without the rewrite is proportional
- * to the data, which is why a caller's limit replaces the budgets on what it
- * sizes rather than being overruled by them.
+ * The rewrite's work is bounded by one limit, which set_work_limit() sets
+ * and charge_work() counts against: every body a search reads, the query's
+ * included, every body the draft builds, kept or dropped, the rewritten
+ * query's included, and the name of every predicate it generates, which
+ * embeds its source's.  Nothing else in the rewrite loops over more than
+ * the program, once each, before the first search or, for a query that
+ * reads what it reaches completely, after it, so the work it does is a
+ * constant multiple of what it is charged.  The one count bounds everything the rewrite generates, by
+ * construction rather than by a count of its own.  Every adornment kept
+ * reads at least one rule of at least one literal, and has at most two
+ * predicates.  Every rule kept is charged its body before it is kept, and
+ * every one but a seed has a body literal: a seed is the magic rule of a
+ * call the query makes, whose walk was charged, or of an adorned rule's
+ * first call when constants alone bind it, at most one per adorned rule,
+ * whose draft was charged.  So the rules kept number at most twice the
+ * literals charged, and each supplementary predicate is the head of one of
+ * them.  A literal's size counts the nodes of its expressions too, so a
+ * large expression copied into many prefixes is bounded as a long body is.
  *
  * The walks the searches record and the draft replays are released when the
  * rewrite returns, whether or not it succeeded.
@@ -3385,7 +3316,7 @@ rewrite(relic_magic_t *magic, const relic_rule_t *query)
 {
 	size_t i;
 
-	set_bounds(magic, &magic->ctx->config, &magic->ctx->program);
+	set_work_limit(magic, &magic->ctx->config, &magic->ctx->program, query);
 
 	if (search_adornments(magic, query) != 0)
 		return (-1);

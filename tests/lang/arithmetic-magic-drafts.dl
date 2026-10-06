@@ -1,11 +1,12 @@
 % A large expression drafted twice under each adornment.  p/6's rule
 % computes Z from an expression of 1023 nodes and then calls r/1 on it,
 % so each adornment of p/6 drafts the expression into its adorned rule and
-% again into the magic rule of that call.  Reading p/6's rule once per
-% adornment fits the search's literal budget; drafting it twice does not
-% fit the draft's, since the budgets count a literal's size, one and one
-% more per node of its expressions, and the rewrite falls back to the
-% whole program with the same rows.
+% again into the magic rule of that call.  q/1 calls p/6 twenty-four ways.
+% Reading p/6's rule once per adornment, some 24 x 1027 literals, fits the
+% default limit of 768 + 48 x 1057 = 51504 for a program of 1056 literals
+% and a query of one; drafting it twice more does not, since the limit
+% counts a literal's size, one and one more per node of its expressions,
+% and the rewrite falls back to the whole program with the same rows.
 b(1, 1, 1, 1, 1, 1).
 b(2, 1, 1, 1, 1, 1).
 s(1).
@@ -30,6 +31,18 @@ q(X) :-
     p(1, _, _, X, _, _),
     p(_, 1, _, X, _, _),
     p(1, 1, _, X, _, _),
-    p(_, _, 1, X, _, _).
+    p(_, _, 1, X, _, _),
+    p(1, _, 1, X, _, _),
+    p(_, 1, 1, X, _, _),
+    p(1, 1, 1, X, _, _),
+    p(_, _, _, _, X, _),
+    p(1, _, _, _, X, _),
+    p(_, 1, _, _, X, _),
+    p(1, 1, _, _, X, _),
+    p(_, _, 1, _, X, _),
+    p(1, _, 1, _, X, _),
+    p(_, 1, 1, _, X, _),
+    p(1, 1, 1, _, X, _),
+    p(_, _, _, 1, X, _).
 
 q(1)?

@@ -18,12 +18,11 @@
  * adornments and seeds, that adornments are memoized so a program calling
  * itself with alternating bindings gives a finite rewrite, that rules equal up
  * to the names of their variables are generated once, that a rule deriving its
- * head from itself is dropped, and that the limits on generated predicates and
- * rules are enforced exactly at their values.  A rewrite that outgrows a budget
- * no configured limit has lifted, on the predicates it generates, the literals
- * it reads to find its adornments or the literals it drafts, is abandoned and
- * the query answered from the whole program.  Last, what the rewrite derives
- * never leaks into a later answer or a later evaluation.
+ * head from itself is dropped, and that the limit on the rewrite's work is
+ * enforced exactly at its value, charging every search and every draft.  A
+ * rewrite that outgrows the limit, its default or one the caller set, is
+ * abandoned and the query answered from the whole program.  Last, what the
+ * rewrite derives never leaks into a later answer or a later evaluation.
  */
 
 #include "config.h"
@@ -40,21 +39,23 @@
 #include "internal.h"
 #include "programs.h"
 
-#define	SCENARIO_BUDGET		"a rewrite over its budget is abandoned"
+#define	SCENARIO_ABANDONED	"a rewrite over its limit is abandoned"
+#define	SCENARIO_DECLINED	"a declined cut is charged every prefix"
 #define	SCENARIO_DEDUP		"equal generated rules are kept once"
 #define	SCENARIO_TREES		"rules equal but for an expression differ"
 #define	SCENARIO_DROPPED	"dropped rules are charged literals"
 #define	SCENARIO_EQUIVALENT	"the rewrite answers as the fixed point does"
-#define	SCENARIO_FACTS		"facts behind a rule fit the literal budget"
-#define	SCENARIO_LIMITS		"the rewrite's limits hold at their values"
-#define	SCENARIO_LITERALS	"a rewrite over its literal budget is abandoned"
+#define	SCENARIO_FACTS		"facts behind a rule fit the rewrite's limit"
+#define	SCENARIO_LIMIT		"the rewrite's limit holds at its value"
 #define	SCENARIO_MEMO		"adornments are memoized"
 #define	SCENARIO_LINEAR		"the rewrite grows linearly in a body's calls"
-#define	SCENARIO_LONG_BODY	"a long body's rewrite fits the budgets"
+#define	SCENARIO_LONG_BODY	"a long body's rewrite fits the limit"
+#define	SCENARIO_LONG_NAME	"a long name is charged per predicate named"
 #define	SCENARIO_NAMES		"adornments are named by their bound columns"
 #define	SCENARIO_STATE		"what the rewrite derives does not leak"
 #define	SCENARIO_TAUTOLOGY	"a rule deriving its own head is dropped"
 #define	SCENARIO_SEARCHED	"the first search is charged what it reads"
+#define	SCENARIO_SEARCHES	"every search is charged what it reads"
 #define	SCENARIO_KEPT		"a rewrite holds only what it keeps"
 
 /*
@@ -66,14 +67,6 @@
 #define	GRAPH_SEEDS	24
 #define	GRAPH_NODES	10
 #define	GRAPH_EDGES	14
-
-/*
- * A limit on generated predicates far above what any program here needs --
- * each has at most two binary predicates, so at most sixteen adorned and
- * magic ones -- which turns a rewrite that never ends into a failed query
- * rather than a hung test.
- */
-#define	PREDS_GUARD	64
 
 /* The ways shape_query() binds p's two columns. */
 #define	QUERY_SHAPES	5
@@ -107,7 +100,7 @@ struct text {
  * What a rewrite of the self-calling program held and spent: the bytes of
  * its arena, of its scratch arena and of the arena of its walks once it is
  * made, the rules it kept, and the literals it was charged for the rules it
- * drafted.
+ * read and drafted.
  */
 struct self_calling_rewrite {
 	size_t	arena_bytes;
@@ -128,22 +121,24 @@ struct rows {
 
 static char	*answer(relic_t *ctx, const char *query_text);
 static char	*calls_program(size_t calls);
+static char	*named_calls_program(size_t name_length, size_t calls,
+		    char **queryp);
 static int	 collect_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static int	 compare_lines(const void *left, const void *right);
 static relic_t	*context_configured(const char *program,
 		    const relic_config_t *config, diag_log_t *log);
 static relic_t	*context_with(const char *program, unsigned int flags,
-		    size_t max_preds, size_t max_rules, diag_log_t *log);
+		    size_t max_magic, diag_log_t *log);
 static void	 count_generated(const char *explained, size_t *rulesp,
 		    size_t *literalsp);
 static size_t	 count_lines_starting(const char *text, const char *prefix);
 static bool	 explain_answer(const char *program, const char *query_text,
-		    size_t max_preds, size_t max_rules, text_t *explained,
-		    diag_log_t *log);
+		    size_t max_magic, text_t *explained, diag_log_t *log);
 static void	 graph_program(unsigned int seed, const char *rules,
 		    char *program, size_t size);
 static bool	 has_line(const char *text, const char *line);
+static bool	 shows_rewrite(const char *explained);
 static void	 shape_query(size_t shape, unsigned int first,
 		    unsigned int second, char *query_text, size_t size);
 static void	 record_diagnostic(void *callback_ctx,
@@ -156,19 +151,20 @@ static void	 adornments_are_named_by_their_bound_columns(void);
 static void	 equal_generated_rules_are_kept_once(void);
 static void	 rules_differing_in_an_expression_are_both_kept(void);
 static void	 a_rule_deriving_its_own_head_is_dropped(void);
-static void	 a_rewrite_over_its_budget_is_abandoned(void);
-static void	 a_rewrite_over_its_literal_budget_is_abandoned(void);
+static void	 a_rewrite_over_its_limit_is_abandoned(void);
 static void	 the_first_search_is_charged_what_it_reads(void);
 static void	 a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void);
 static int	 rewrite_self_calling(unsigned int length,
 		    self_calling_rewrite_t *rewritep);
-static void	 a_rule_limit_leaves_the_search_its_budgets(void);
-static void	 facts_behind_a_rule_fit_the_literal_budget(void);
+static void	 a_declined_cut_is_charged_every_prefix(void);
+static char	*declined_cuts_program(size_t calls);
+static void	 facts_behind_a_rule_fit_the_rewrites_limit(void);
 static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
-static void	 a_long_bodys_rewrite_fits_the_budgets(void);
+static void	 a_long_bodys_rewrite_fits_the_limit(void);
+static void	 a_long_name_is_charged_per_predicate_named(void);
 static void	 a_load_after_a_rewrite_reaches_the_next_query(void);
-static void	 the_limits_hold_at_their_values(void);
-static void	 the_search_is_held_to_the_limits(void);
+static void	 the_limit_holds_at_its_value(void);
+static void	 every_search_is_charged_what_it_reads(void);
 static void	 the_rewrite_answers_as_the_fixed_point_does(void);
 static void	 what_the_rewrite_derives_does_not_leak(void);
 
@@ -225,19 +221,18 @@ record_explained(void *callback_ctx, const char *line)
 }
 
 /*
- * A context holding `program`, configured with `flags` and the two limits on
- * the rewrite, reporting its diagnostics to `log`.
+ * A context holding `program`, configured with `flags` and the limit on the
+ * rewrite's work, reporting its diagnostics to `log`.
  */
 static relic_t *
-context_with(const char *program, unsigned int flags, size_t max_preds,
-    size_t max_rules, diag_log_t *log)
+context_with(const char *program, unsigned int flags, size_t max_magic,
+    diag_log_t *log)
 {
 	relic_config_t config;
 
 	bzero(&config, sizeof(config));
 	config.flags = flags;
-	config.max_magic_preds = max_preds;
-	config.max_magic_rules = max_rules;
+	config.max_magic = max_magic;
 
 	return (context_configured(program, &config, log));
 }
@@ -376,8 +371,8 @@ answer(relic_t *ctx, const char *query_text)
  * collecting what it shows.  Returns whether the query was answered.
  */
 static bool
-explain_answer(const char *program, const char *query_text, size_t max_preds,
-    size_t max_rules, text_t *explained, diag_log_t *log)
+explain_answer(const char *program, const char *query_text, size_t max_magic,
+    text_t *explained, diag_log_t *log)
 {
 	relic_t *ctx;
 	char *rows;
@@ -385,7 +380,7 @@ explain_answer(const char *program, const char *query_text, size_t max_preds,
 	bzero(explained, sizeof(*explained));
 	text_append(explained, "", 0);
 
-	ctx = context_with(program, 0, max_preds, max_rules, log);
+	ctx = context_with(program, 0, max_magic, log);
 	if (ctx == NULL)
 		return (false);
 
@@ -566,10 +561,10 @@ the_rewrite_answers_as_the_fixed_point_does(void)
 				    GRAPH_NODES, query_text,
 				    sizeof(query_text));
 
-				magic = context_with(program, 0, PREDS_GUARD,
-				    0, &magic_log);
+				magic = context_with(program, 0, 0,
+				    &magic_log);
 				whole = context_with(program, RELIC_F_NO_MAGIC,
-				    0, 0, &whole_log);
+				    0, &whole_log);
 				if (magic == NULL || whole == NULL) {
 					relic_destroy(magic);
 					relic_destroy(whole);
@@ -641,7 +636,7 @@ adornments_are_named_by_their_bound_columns(void)
 	size_t i;
 
 	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		if (!explain_answer(program, cases[i].query, 0, 0, &explained,
+		if (!explain_answer(program, cases[i].query, 0, &explained,
 		    &log)) {
 			checkf(false, SCENARIO_NAMES, "%s should be answered",
 			    cases[i].query);
@@ -683,8 +678,7 @@ adornments_are_memoized(void)
 	text_t explained;
 	diag_log_t log;
 
-	if (!explain_answer(program, "swap(a, Y)?", PREDS_GUARD, 0, &explained,
-	    &log)) {
+	if (!explain_answer(program, "swap(a, Y)?", 0, &explained, &log)) {
 		check(false, SCENARIO_MEMO, "swap(a, Y)? should be answered");
 		free(explained.bytes);
 		return;
@@ -716,7 +710,7 @@ equal_generated_rules_are_kept_once(void)
 	text_t explained;
 	diag_log_t log;
 
-	if (!explain_answer(program, "p(a, Z)?", 0, 0, &explained, &log)) {
+	if (!explain_answer(program, "p(a, Z)?", 0, &explained, &log)) {
 		check(false, SCENARIO_DEDUP, "p(a, Z)? should be answered");
 		free(explained.bytes);
 		return;
@@ -756,7 +750,7 @@ rules_differing_in_an_expression_are_both_kept(void)
 	text_t explained;
 	diag_log_t log;
 
-	if (!explain_answer(program, "p(1, Z)?", 0, 0, &explained, &log)) {
+	if (!explain_answer(program, "p(1, Z)?", 0, &explained, &log)) {
 		check(false, SCENARIO_TREES, "p(1, Z)? should be answered");
 		free(explained.bytes);
 		return;
@@ -790,8 +784,7 @@ a_rule_deriving_its_own_head_is_dropped(void)
 	text_t explained;
 	diag_log_t log;
 
-	if (!explain_answer(program, "path(a, X)?", 0, 0, &explained,
-	    &log)) {
+	if (!explain_answer(program, "path(a, X)?", 0, &explained, &log)) {
 		check(false, SCENARIO_TAUTOLOGY,
 		    "path(a, X)? should be answered");
 		free(explained.bytes);
@@ -810,46 +803,72 @@ a_rule_deriving_its_own_head_is_dropped(void)
 }
 
 /*
- * path(a, X)? generates two predicates, path$bf and magic$path$bf, and keeps
- * four rules: the seed, the magic rule and the two adorned rules.  A limit
- * at each count is met and the query answered; one below it fails the query,
- * naming the limit and the predicate being adorned.
+ * Whether -e showed a query answered through its rewrite: a line beginning
+ * with the rewrite's heading, which an abandoned rewrite does not show.
+ */
+static bool
+shows_rewrite(const char *explained)
+{
+	return (strncmp(explained, "magic rewrite of", 16) == 0 ||
+	    strstr(explained, "\nmagic rewrite of") != NULL);
+}
+
+/*
+ * path(a, X)? costs its rewrite 12 literals.  The search reads the query's
+ * one literal and path's two rules for path$bf, 1 + 1 + 2.  The draft writes
+ * the rewritten query, 1, the seed, which has no body, the magic rule of the
+ * recursive call, 2, and the two adorned rules with their guards, 2 and 3.
+ * A limit of 12 admits the rewrite.  One of 11 abandons it at the last
+ * adorned rule, with a warning naming the limit and the predicate being
+ * adorned and no error, and the query is answered from the whole program.  A
+ * query of two calls outgrows a limit of one literal in its own walk, before
+ * any predicate is adorned, and the warning names the query.
  */
 static void
-the_limits_hold_at_their_values(void)
+the_limit_holds_at_its_value(void)
 {
 	static const char program[] =
 	    "edge(a, b).\n"
 	    "edge(b, c).\n"
 	    "path(X, Y) :- edge(X, Y).\n"
 	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
+	static const char adorning[] =
+	    "the query's Magic rewrite outgrew magic=11 while adorning path/2; "
+	    "answering it from the whole program";
+	static const char rewriting[] =
+	    "the query's Magic rewrite outgrew magic=1 while rewriting the "
+	    "query; answering it from the whole program";
 	text_t explained;
 	diag_log_t log;
 	bool answered;
 
-	answered = explain_answer(program, "path(a, X)?", 2, 4, &explained,
+	answered = explain_answer(program, "path(a, X)?", 12, &explained,
 	    &log);
-	checkf(answered && log.errors == 0, SCENARIO_LIMITS,
-	    "limits of two predicates and four rules should admit "
-	    "path(a, X)?, which reported \"%s\"", log.last);
+	checkf(answered && log.errors == 0 && log.warnings == 0 &&
+	    shows_rewrite(explained.bytes), SCENARIO_LIMIT,
+	    "a limit of 12 should admit the rewrite of path(a, X)?, which "
+	    "reported %zu errors and %zu warnings, the last \"%s\"",
+	    log.errors, log.warnings, log.last_warning);
 	free(explained.bytes);
 
-	answered = explain_answer(program, "path(a, X)?", 1, 0, &explained,
+	answered = explain_answer(program, "path(a, X)?", 11, &explained,
 	    &log);
-	checkf(!answered && log.errors == 1 && strcmp(log.last,
-	    "limit exceeded: magic-preds=1 while adorning path/2") == 0,
-	    SCENARIO_LIMITS,
-	    "a limit of one predicate should refuse path(a, X)?, which "
-	    "reported \"%s\"", log.last);
+	checkf(answered && log.errors == 0 && log.warnings == 1 &&
+	    strcmp(log.last_warning, adorning) == 0 &&
+	    !shows_rewrite(explained.bytes), SCENARIO_LIMIT,
+	    "a limit of 11 should abandon the rewrite of path(a, X)? and "
+	    "answer it from the whole program, which reported %zu errors and "
+	    "%zu warnings, the last \"%s\"", log.errors, log.warnings,
+	    log.last_warning);
 	free(explained.bytes);
 
-	answered = explain_answer(program, "path(a, X)?", 0, 3, &explained,
-	    &log);
-	checkf(!answered && log.errors == 1 && strcmp(log.last,
-	    "limit exceeded: magic-rules=3 while adorning path/2") == 0,
-	    SCENARIO_LIMITS,
-	    "a limit of three rules should refuse path(a, X)?, which "
-	    "reported \"%s\"", log.last);
+	answered = explain_answer(program, "path(a, X), path(X, Y)?", 1,
+	    &explained, &log);
+	checkf(answered && log.errors == 0 && log.warnings == 1 &&
+	    strcmp(log.last_warning, rewriting) == 0, SCENARIO_LIMIT,
+	    "a limit of one literal should abandon the rewrite in the walk of "
+	    "a query of two, which reported %zu errors and %zu warnings, the "
+	    "last \"%s\"", log.errors, log.warnings, log.last_warning);
 	free(explained.bytes);
 }
 
@@ -857,25 +876,24 @@ the_limits_hold_at_their_values(void)
  * p(c, X)? calls p bound, and q's last rule calls p free, so the first search
  * keeps p$bf, and r$bf which p's rules call, before it reads p free; it then
  * reads r free too, and the search runs again with both read free from the
- * start.  The finished rewrite generates four predicates, p$ff, r$ff, q$bf
- * and magic$q$bf, and nine rules: the two of each free adornment, q$bf's
- * three, and the magic rules of q's calls from p and from itself.  The first
- * search reaches the eight predicates the rewrite without subsumption would
- * generate, three bound adornments with their magic predicates and two free
- * ones, and reads the eleven rules of those five adornments.  The predicate
- * limit holds the search to that count: at it the query is answered through
- * the subsumed rewrite, and one below refuses it.  The rule limit counts the
- * rules the rewrite keeps rather than those the search reads, so nine admits
- * the query and eight refuses it.
+ * start.  The first search reads the query and the eleven rules of five
+ * adornments, p$bf, r$bf, q$bf, p$ff and r$ff: 1 + 3 + 3 + 5 + 3 + 3 = 18
+ * literals.  The second reads the query and the rules of the three it keeps,
+ * p$ff, r$ff and q$bf, 1 + 3 + 3 + 5 = 12, though it replays the walks the
+ * first recorded.  The draft writes the rewritten query and the nine rules of
+ * the subsumed rewrite, 1 + 4 + 3 + 10 = 18.  So the rewrite costs 48: a
+ * limit of 48 admits it, and one of 47 abandons it in the draft.  Were the
+ * second search charged nothing, or the first's charge forgotten when the
+ * second began, 47 would admit it.
  *
- * An adornment a free one subsumes is generated by no rewrite and counted by
- * no limit.  path(X, Y)? reaches path free, and path's recursive rule then
- * calls it with a column bound, which path$ff subsumes: a limit of one
- * predicate admits the query, which reads path completely, though the
- * search reads both of path's rules.
+ * An adornment a free one subsumes costs nothing beyond the step of the walk
+ * that reaches it.  path(X, Y)? reaches path free, and path's recursive rule
+ * then calls it with a column bound, which path$ff subsumes: the query and
+ * path's two rules cost 1 + 3 = 4, and the query reads path completely and
+ * drafts nothing, so a limit of 4 admits it and one of 3 does not.
  */
 static void
-the_search_is_held_to_the_limits(void)
+every_search_is_charged_what_it_reads(void)
 {
 	static const char program[] =
 	    "e(a, b).\n"
@@ -897,56 +915,50 @@ the_search_is_held_to_the_limits(void)
 	    "path(X, Y) :- edge(X, Y).\n"
 	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
 	static const char query[] = "p(c, X)?";
+	static const char outgrown[] =
+	    "the query's Magic rewrite outgrew magic=47 while adorning q/2; "
+	    "answering it from the whole program";
 	text_t explained;
 	diag_log_t log;
 	bool answered;
 
-	answered = explain_answer(program, query, 8, 9, &explained, &log);
-	checkf(answered && log.errors == 0 &&
+	answered = explain_answer(program, query, 48, &explained, &log);
+	checkf(answered && log.errors == 0 && log.warnings == 0 &&
 	    has_line(explained.bytes, "    adorn p/2 bf, subsumed by p/2 ff") &&
 	    has_line(explained.bytes, "    adorn q/2 bf") &&
 	    count_lines_starting(explained.bytes, "    adorn ") == 5,
-	    SCENARIO_LIMITS,
-	    "limits of eight predicates and nine rules should admit %s "
-	    "through the subsumed rewrite, which reported \"%s\" and "
-	    "showed\n%s", query, log.last, explained.bytes);
+	    SCENARIO_SEARCHES,
+	    "a limit of 48 should admit %s through the subsumed rewrite, which "
+	    "reported \"%s\" and showed\n%s", query,
+	    log.warnings != 0 ? log.last_warning : log.last, explained.bytes);
 	free(explained.bytes);
 
-	answered = explain_answer(program, query, 7, 0, &explained, &log);
-	checkf(!answered && log.errors == 1 && strcmp(log.last,
-	    "limit exceeded: magic-preds=7 while adorning r/2") == 0,
-	    SCENARIO_LIMITS,
-	    "a limit of seven predicates should refuse %s, which reported "
-	    "\"%s\"", query, log.last);
+	answered = explain_answer(program, query, 47, &explained, &log);
+	checkf(answered && log.errors == 0 && log.warnings == 1 &&
+	    strcmp(log.last_warning, outgrown) == 0, SCENARIO_SEARCHES,
+	    "a limit of 47 should abandon the rewrite of %s, which charges both "
+	    "searches, and reported %zu errors and %zu warnings, the last "
+	    "\"%s\"", query, log.errors, log.warnings, log.last_warning);
 	free(explained.bytes);
 
-	answered = explain_answer(program, query, 0, 9, &explained, &log);
+	answered = explain_answer(path_program, "path(X, Y)?", 4, &explained,
+	    &log);
 	checkf(answered && log.errors == 0 && log.warnings == 0 &&
-	    strstr(explained.bytes, "magic rewrite of") != NULL,
-	    SCENARIO_LIMITS,
-	    "a limit of nine rules should admit %s through its rewrite, though "
-	    "its search reads eleven, and reported \"%s\"", query,
-	    log.warnings != 0 ? log.last_warning : log.last);
-	free(explained.bytes);
-
-	answered = explain_answer(program, query, 0, 8, &explained, &log);
-	checkf(!answered && log.errors == 1 && strcmp(log.last,
-	    "limit exceeded: magic-rules=8 while adorning q/2") == 0,
-	    SCENARIO_LIMITS,
-	    "a limit of eight rules should refuse %s, which reported \"%s\"",
-	    query, log.last);
-	free(explained.bytes);
-
-	answered = explain_answer(path_program, "path(X, Y)?", 1, 2,
-	    &explained, &log);
-	checkf(answered && log.errors == 0 &&
 	    has_line(explained.bytes, "    adorn path/2 bf, subsumed by "
 	    "path/2 ff") &&
 	    has_line(explained.bytes, "    read completely: path/2"),
-	    SCENARIO_LIMITS,
-	    "limits of one predicate and two rules should admit path(X, Y)?, "
-	    "which reported \"%s\" and showed\n%s", log.last,
+	    SCENARIO_SEARCHES,
+	    "a limit of 4 should admit path(X, Y)?, which reported \"%s\" and "
+	    "showed\n%s", log.warnings != 0 ? log.last_warning : log.last,
 	    explained.bytes);
+	free(explained.bytes);
+
+	answered = explain_answer(path_program, "path(X, Y)?", 3, &explained,
+	    &log);
+	checkf(answered && log.errors == 0 && log.warnings == 1,
+	    SCENARIO_SEARCHES,
+	    "a limit of 3 should abandon the rewrite of path(X, Y)?, which "
+	    "reported %zu errors and %zu warnings", log.errors, log.warnings);
 	free(explained.bytes);
 }
 
@@ -954,17 +966,14 @@ the_search_is_held_to_the_limits(void)
 #define	WIDENING_ARITY	10
 
 /*
- * With no limit configured, the widening program's rewrite outgrows its
- * budget long before its 2^9 adornments: it is abandoned with one warning
- * naming the budget and the predicate being adorned, no error, and the query
+ * With no limit configured, the widening program's rewrite outgrows the
+ * default long before its 2^9 adornments: it is abandoned with one warning
+ * naming the limit and the predicate being adorned, no error, and the query
  * answered from the whole program, which explain shows as the program's
- * components with no rewrite.  A generous predicate limit sizes the search
- * and lifts its budgets, and with them the draft's, so it lets the whole
- * rewrite run.  A rule limit alone sizes only the draft: the search is held
- * to its budgets and outgrows them as it does with no limit set.
+ * components with no rewrite.  A generous limit lets the whole rewrite run.
  */
 static void
-a_rewrite_over_its_budget_is_abandoned(void)
+a_rewrite_over_its_limit_is_abandoned(void)
 {
 	static const char query[] =
 	    "p(c, Y2, Y3, Y4, Y5, Y6, Y7, Y8, Y9, Y10)?";
@@ -978,134 +987,41 @@ a_rewrite_over_its_budget_is_abandoned(void)
 
 	program = widening_program(WIDENING_ARITY);
 	if (program == NULL) {
-		check(false, SCENARIO_BUDGET, "the widening program is built");
+		check(false, SCENARIO_ABANDONED, "the widening program is built");
 		return;
 	}
 
-	ctx = context_with(program, 0, 0, 0, &log);
+	ctx = context_with(program, 0, 0, &log);
 	if (ctx == NULL) {
 		free(program);
 		return;
 	}
 	rows = answer(ctx, query);
-	checkf(rows != NULL && strcmp(rows, expected) == 0, SCENARIO_BUDGET,
+	checkf(rows != NULL && strcmp(rows, expected) == 0, SCENARIO_ABANDONED,
 	    "the widening query should answer one row of c, not\n%s",
 	    rows != NULL ? rows : "(failed)");
 	free(rows);
 	checkf(log.errors == 0 && log.warnings == 1 && strstr(log.last_warning,
-	    "Magic rewrite outgrew its budget of ") != NULL &&
+	    "Magic rewrite outgrew magic=") != NULL &&
 	    strstr(log.last_warning, "while adorning p/10; answering it from "
-	    "the whole program") != NULL, SCENARIO_BUDGET,
+	    "the whole program") != NULL, SCENARIO_ABANDONED,
 	    "the abandoned rewrite should report one warning and no error, "
 	    "not %zu errors and %zu warnings, the last \"%s\"", log.errors,
 	    log.warnings, log.last_warning);
 	relic_destroy(ctx);
 
-	answered = explain_answer(program, query, 0, 0, &explained, &log);
+	answered = explain_answer(program, query, 0, &explained, &log);
 	checkf(answered && strstr(explained.bytes,
 	    "abandoned magic rewrite of ") != NULL &&
-	    strncmp(explained.bytes, "magic rewrite of", 16) != 0 &&
-	    strstr(explained.bytes, "\nmagic rewrite of") == NULL,
-	    SCENARIO_BUDGET, "an abandoned rewrite should be marked and not "
-	    "explained, but -e showed\n%s", explained.bytes);
+	    !shows_rewrite(explained.bytes), SCENARIO_ABANDONED,
+	    "an abandoned rewrite should be marked and not explained, but -e "
+	    "showed\n%s", explained.bytes);
 	free(explained.bytes);
 
-	answered = explain_answer(program, query, 1000000, 0, &explained,
-	    &log);
-	checkf(answered && log.warnings == 0 && strstr(explained.bytes,
-	    "magic rewrite of") != NULL, SCENARIO_BUDGET,
-	    "a predicate limit should replace the search's budgets and let the "
-	    "rewrite run, which reported %zu warnings", log.warnings);
-	free(explained.bytes);
-
-	answered = explain_answer(program, query, 0, 1000000, &explained,
-	    &log);
-	checkf(answered && log.errors == 0 && log.warnings == 1 &&
-	    strstr(explained.bytes, "abandoned magic rewrite of ") != NULL,
-	    SCENARIO_BUDGET, "a rule limit alone should leave the search its "
-	    "budgets, which abandon the rewrite, and reported %zu errors and "
-	    "%zu warnings, the last \"%s\"", log.errors, log.warnings,
-	    log.last_warning);
-	free(explained.bytes);
-
-	free(program);
-}
-
-/*
- * The padded widening program: its query reaches 2^5 adornments, few
- * enough that the whole rewrite runs quickly, and every body is filled out
- * to 20 literals.
- */
-#define	PADDED_ARITY		6
-#define	PADDED_BODY_LENGTH	20
-
-/*
- * The padded widening program has 7 rules of 20 literals, a budget of 256 +
- * 16 x 147 = 2608 searched literals, its size in literals counting each
- * body and one for its guard.  Its fact is f's, which no rule derives, so it
- * adds no base view.  Finding the adornments reads every rule of each whole,
- * and is charged what it reads, so the literals outgrow their budget: the
- * rewrite is abandoned with one warning naming them and the query answered
- * from the whole program.  A generous predicate limit lifts the search's
- * budgets, so it lets the whole rewrite run; a rule limit alone does not,
- * and the search outgrows its literal budget as it does with no limit set.
- */
-static void
-a_rewrite_over_its_literal_budget_is_abandoned(void)
-{
-	static const char query[] = "p(c, Y2, Y3, Y4, Y5, Y6)?";
-	static const char expected[] = "c c c c c\n";
-	static const char warning[] =
-	    "the query's Magic rewrite outgrew its budget of 2608 searched "
-	    "literals while adorning p/6; answering it from the whole program";
-	char *program;
-	text_t explained;
-	diag_log_t log;
-	relic_t *ctx;
-	char *rows;
-	bool answered;
-
-	program = padded_widening_program(PADDED_ARITY, PADDED_BODY_LENGTH);
-	if (program == NULL) {
-		check(false, SCENARIO_LITERALS,
-		    "the padded widening program is built");
-		return;
-	}
-
-	ctx = context_with(program, 0, 0, 0, &log);
-	if (ctx == NULL) {
-		free(program);
-		return;
-	}
-	rows = answer(ctx, query);
-	checkf(rows != NULL && strcmp(rows, expected) == 0, SCENARIO_LITERALS,
-	    "the padded widening query should answer one row of c, not\n%s",
-	    rows != NULL ? rows : "(failed)");
-	free(rows);
-	checkf(log.errors == 0 && log.warnings == 1 &&
-	    strcmp(log.last_warning, warning) == 0, SCENARIO_LITERALS,
-	    "the abandoned rewrite should report one warning naming its "
-	    "literals and no error, not %zu errors and %zu warnings, the last "
-	    "\"%s\"", log.errors, log.warnings, log.last_warning);
-	relic_destroy(ctx);
-
-	answered = explain_answer(program, query, 1000000, 0, &explained,
-	    &log);
-	checkf(answered && log.errors == 0 && log.warnings == 0 &&
-	    strstr(explained.bytes, "magic rewrite of") != NULL,
-	    SCENARIO_LITERALS, "a generous predicate limit should lift the "
-	    "budgets and let the rewrite run, which reported %zu errors and "
-	    "%zu warnings, the last \"%s\"", log.errors, log.warnings,
-	    log.last_warning);
-	free(explained.bytes);
-
-	answered = explain_answer(program, query, 0, 1000000, &explained,
-	    &log);
-	checkf(answered && log.errors == 0 && log.warnings == 1 &&
-	    strcmp(log.last_warning, warning) == 0, SCENARIO_LITERALS,
-	    "a rule limit alone should leave the search its literal budget, "
-	    "which abandons the rewrite, and reported %zu errors and %zu "
-	    "warnings, the last \"%s\"", log.errors, log.warnings,
+	answered = explain_answer(program, query, 10000000, &explained, &log);
+	checkf(answered && log.warnings == 0 && shows_rewrite(explained.bytes),
+	    SCENARIO_ABANDONED, "a generous limit should let the rewrite run, "
+	    "which reported %zu warnings, the last \"%s\"", log.warnings,
 	    log.last_warning);
 	free(explained.bytes);
 
@@ -1114,22 +1030,24 @@ a_rewrite_over_its_literal_budget_is_abandoned(void)
 
 /*
  * The self-calling program's arity at which the first search cannot read
- * its adornments within the literal budget, and its long rule's calls on f.
+ * its adornments within the default limit, its long rule's calls on f, and
+ * that limit: 768 + 48 x 2048, the program's 2047 literals and the query's
+ * one.
  */
 #define	SELF_CALLING_WIDE_ARITY	11
 #define	SELF_CALLING_LENGTH	2000
+#define	SELF_CALLING_WIDE_LIMIT	99072
 
 /*
  * The search that finds the adornments reads every rule of each, and is
- * charged the literals it reads against the literal budget, so a query
- * reaching more adornments than the budget can read is abandoned before a
- * rule is drafted.  At arity 11 the self-calling program's p has 2^10
- * adornments, each with rules of 2016 literals between them, and a literal
- * budget of 256 + 16 x 2447 = 39408: read whole, its adornments would cost
- * some two million literals.  The rewrite is driven step by step, as a query
- * drives it, to show where it stops: in the first search, having read no more
- * than the budget and drafted nothing.  f has no rule, so nothing need be
- * evaluated before the rewrite.
+ * charged the literals it reads, so a query reaching more adornments than
+ * the limit can read is abandoned before a rule is drafted.  At arity 11 the
+ * self-calling program's p has 2^10 adornments, each with rules of 2034
+ * literals between them: read whole, they would cost some two million
+ * literals.  The rewrite is driven step by step, as a query drives it, to
+ * show where it stops: in the first search, having read no more than the
+ * limit and drafted nothing.  f has no rule, so nothing need be evaluated
+ * before the rewrite.
  */
 static void
 the_first_search_is_charged_what_it_reads(void)
@@ -1151,7 +1069,7 @@ the_first_search_is_charged_what_it_reads(void)
 		return;
 	}
 
-	ctx = context_with(program, 0, 0, 0, &log);
+	ctx = context_with(program, 0, 0, &log);
 	free(program);
 	if (ctx == NULL)
 		return;
@@ -1169,16 +1087,16 @@ the_first_search_is_charged_what_it_reads(void)
 	if (status == 0)
 		status = relic_magic_rewrite(&magic, &query->rule);
 
-	checkf(status != 0 && magic.over_budget, SCENARIO_SEARCHED,
-	    "the rewrite should be abandoned over its budget, and %s",
+	checkf(status != 0 && magic.abandoned, SCENARIO_SEARCHED,
+	    "the rewrite should be abandoned over its limit, and %s",
 	    status == 0 ? "succeeded" : "failed otherwise");
-	checkf(magic.draft_literals.spent == 0 &&
-	    magic.search_literals.spent <= magic.search_literals.most &&
-	    magic.search_literals.most == 39408, SCENARIO_SEARCHED,
-	    "the first search should read at most its budget of 39408 literals "
-	    "and draft none, and read %zu of %zu and drafted %zu",
-	    magic.search_literals.spent, magic.search_literals.most,
-	    magic.draft_literals.spent);
+	checkf(magic.rules.count == 0 &&
+	    magic.work_spent <= magic.work_limit &&
+	    magic.work_limit == SELF_CALLING_WIDE_LIMIT, SCENARIO_SEARCHED,
+	    "the first search should read at most the default of %d literals "
+	    "and draft nothing, and read %zu of %zu and kept %zu rules",
+	    SELF_CALLING_WIDE_LIMIT, magic.work_spent, magic.work_limit,
+	    magic.rules.count);
 	checkf(magic.kept.count < 1024, SCENARIO_SEARCHED,
 	    "the first search should stop short of p's 1024 adornments, and "
 	    "found %zu", magic.kept.count);
@@ -1198,23 +1116,22 @@ the_first_search_is_charged_what_it_reads(void)
 #define	KEPT_ADORNMENTS	64
 #define	KEPT_SHORT	20
 #define	KEPT_SLACK	(64 * 1024)
-#define	KEPT_PRED_LIMIT	100000
+#define	KEPT_LIMIT	10000000
 
 /*
- * A configured predicate limit lifts both literal budgets, so nothing but
- * memory bounds what a rewrite drafts.  Each adornment of the self-calling
- * program's p drafts its long rule, whose head is its own first literal, and
- * drops it; the call on p restates the head and so drafts no magic rule.
- * The rules kept are the same whatever the long rule's length.
+ * Under a limit far above what it needs, a rewrite drafts every rule of the
+ * adornments it keeps.  Each adornment of the self-calling program's p
+ * drafts its long rule, whose head is its own first literal, and drops it;
+ * the call on p restates the head and so drafts no magic rule.  The rules
+ * kept are the same whatever the long rule's length.
  *
- * The literals charged are counted for every draft, kept or dropped, so
- * lengthening the rule by 1980 calls charges each of the 64 adornments
- * 1980 more literals however few it keeps.  The rewrite's arena holds what
- * is kept, and what drafting a rule needed is released once it is drafted,
- * so neither the arena's size nor what the scratch arena still holds can
- * depend on that length: at 2000 calls each is within a few pages of its
- * size at 20, the difference being the per-predicate tables of the 198 more
- * unary predicates the longer program declares.  The walks the search
+ * The literals charged are counted for every rule read and every draft,
+ * kept or dropped, so lengthening the rule by 1980 calls charges each of
+ * the 64 adornments 1980 more literals for the search's reading it and 1980
+ * more for the draft of it it drops: twice that, however few it keeps.  The rewrite's arena holds what is kept, and what drafting a rule
+ * needed is released once it is drafted, so neither the arena's size nor
+ * what the scratch arena still holds can depend on that length: at 2000
+ * calls each is within a few pages of its size at 20.  The walks the search
  * recorded, a step per literal of every rule it read, are released once the
  * rewrite has drafted from them, so the query runs without them.
  */
@@ -1229,7 +1146,7 @@ a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void)
 	    rewrite_self_calling(SELF_CALLING_LENGTH, &longer) != 0)
 		return;
 
-	lengthened_by = KEPT_ADORNMENTS *
+	lengthened_by = 2 * KEPT_ADORNMENTS *
 	    (size_t)(SELF_CALLING_LENGTH - KEPT_SHORT);
 	checkf(longer.literals_charged >= shorter.literals_charged +
 	    lengthened_by, SCENARIO_DROPPED,
@@ -1260,7 +1177,7 @@ a_rewrite_charges_its_drafts_and_holds_what_it_keeps(void)
 
 /*
  * Rewrite the self-calling program's query at KEPT_ARITY, its long rule
- * making `length` calls, under a predicate limit, and measure the rewrite.
+ * making `length` calls, under KEPT_LIMIT, and measure the rewrite.
  * Returns -1 when the rewrite could not be made.
  */
 static int
@@ -1280,7 +1197,7 @@ rewrite_self_calling(unsigned int length, self_calling_rewrite_t *rewritep)
 		return (-1);
 	}
 
-	ctx = context_with(program, 0, KEPT_PRED_LIMIT, 0, &log);
+	ctx = context_with(program, 0, KEPT_LIMIT, &log);
 	free(program);
 	if (ctx == NULL)
 		return (-1);
@@ -1305,7 +1222,7 @@ rewrite_self_calling(unsigned int length, self_calling_rewrite_t *rewritep)
 	rewritep->scratch_bytes = relic_arena_total_bytes(&magic.scratch);
 	rewritep->walk_bytes = relic_arena_total_bytes(&magic.walk_arena);
 	rewritep->rules_kept = magic.rules.count;
-	rewritep->literals_charged = magic.draft_literals.spent;
+	rewritep->literals_charged = magic.work_spent;
 
 	relic_magic_reset(&magic);
 	relic_query_destroy(query);
@@ -1315,93 +1232,156 @@ rewrite_self_calling(unsigned int length, self_calling_rewrite_t *rewritep)
 }
 
 /*
- * The arity of the widening program the rule limit is tested against, whose
- * query reaches 2^11 adornments, each read through 13 rules.
+ * The calls of the rule whose every cut is declined, and two limits on its
+ * rewrite: the default, 768 + 48 x 205 for the program's 204 literals and
+ * the query's one, and a larger one that still admits less than the rewrite
+ * costs.
  */
-#define	LIMITED_ARITY	12
-
-/* The rule limit that program is held to, far above what it would generate. */
-#define	LIMITED_RULES	1000000
-
-/* That program's size in literals, each of its rules' bodies plus a guard. */
-#define	LIMITED_LITERALS	49
+#define	DECLINED_CALLS		200
+#define	DECLINED_DEFAULT	10608
+#define	DECLINED_RAISED		15000
 
 /*
- * A rule limit sizes the draft and not the search for the adornments, which
- * it counts nothing of: set alone, it lifts the draft's literal budget and
- * leaves the search held to the predicate budget and its own literal budget,
- * 256 + 16 x 1 = 272 predicates for the program's one derived predicate and
- * 256 + 16 x LIMITED_LITERALS literals for its rules.  The widening
- * program's query reaches 2^11 adornments of p, and under a rule limit far
- * above what the rewrite would generate it is abandoned in the first search
- * with a warning, having kept and read no more than the budgets, drafted
- * nothing and named no predicate.
+ * r's 32 columns are all bound by the query, and its body is a chain of
+ * calls on p, each binding its first column with a variable a call before
+ * it bound: p(X1, V), p(V, W), p(W, V), p(V, W), ...  Before every call
+ * after the first, 33 or 34 slots are live, the head's 32 and the chain's,
+ * more than a supplementary predicate may have columns, so the cut is
+ * declined and the call's magic rule copies the whole prefix: L calls write
+ * about L^2/2 literals.  Every prefix copied is charged, so
+ * the default abandons the rewrite in the draft, as does a raised limit
+ * below what it costs; no limit lifts the charge.  A limit above it admits
+ * the rewrite, driven step by step to read what it kept: its rules hold at
+ * least the L(L - 1)/2 literals of the prefixes, which shows that the cuts
+ * were declined, and it was charged at least what they hold.
  */
 static void
-a_rule_limit_leaves_the_search_its_budgets(void)
+a_declined_cut_is_charged_every_prefix(void)
 {
-	static const char text[] =
-	    "p(c, Y2, Y3, Y4, Y5, Y6, Y7, Y8, Y9, Y10, Y11, Y12)?";
+	char text[160];
 	relic_query_t *query;
 	relic_magic_t magic;
+	text_t explained;
 	diag_log_t log;
 	relic_t *ctx;
+	size_t literals;
 	char *program;
-	size_t preds_before;
+	bool answered;
 	int status;
+	size_t i;
 
-	program = widening_program(LIMITED_ARITY);
+	program = declined_cuts_program(DECLINED_CALLS);
 	if (program == NULL) {
-		check(false, SCENARIO_SEARCHED,
-		    "the widening program is built");
+		check(false, SCENARIO_DECLINED, "the program is built");
 		return;
 	}
+	snprintf(text, sizeof(text), "r(1");
+	for (i = 1; i < RELIC_MAX_ARITY; i++)
+		strlcat(text, ", 1", sizeof(text));
+	strlcat(text, ")?", sizeof(text));
 
-	ctx = context_with(program, 0, 0, LIMITED_RULES, &log);
+	answered = explain_answer(program, text, 0, &explained, &log);
+	checkf(answered && log.errors == 0 && log.warnings == 1 &&
+	    strstr(log.last_warning, "outgrew magic=10608 while adorning "
+	    "p/2") != NULL && !shows_rewrite(explained.bytes),
+	    SCENARIO_DECLINED,
+	    "the default of %d should abandon a rewrite whose cuts are "
+	    "declined, which reported %zu errors and %zu warnings, the last "
+	    "\"%s\"", DECLINED_DEFAULT, log.errors, log.warnings,
+	    log.last_warning);
+	free(explained.bytes);
+
+	answered = explain_answer(program, text, DECLINED_RAISED, &explained,
+	    &log);
+	checkf(answered && log.errors == 0 && log.warnings == 1 &&
+	    strstr(log.last_warning, "outgrew magic=15000 while adorning "
+	    "p/2") != NULL, SCENARIO_DECLINED,
+	    "a limit of %d should abandon the rewrite too, which reported %zu "
+	    "errors and %zu warnings, the last \"%s\"", DECLINED_RAISED,
+	    log.errors, log.warnings, log.last_warning);
+	free(explained.bytes);
+
+	ctx = context_with(program, 0, 1000000, &log);
 	free(program);
 	if (ctx == NULL)
 		return;
 
 	query = relic_query_prepare(ctx, NULL, text);
 	if (query == NULL || relic_program_ready(ctx) != 0) {
-		check(false, SCENARIO_SEARCHED, "the query is prepared");
+		check(false, SCENARIO_DECLINED, "the query is prepared");
 		relic_query_destroy(query);
 		relic_destroy(ctx);
 		return;
 	}
 
-	preds_before = relic_pred_count(ctx);
 	relic_magic_init(&magic, ctx);
 	status = relic_magic_find_complete(&magic, query);
 	if (status == 0)
 		status = relic_magic_rewrite(&magic, &query->rule);
 
-	checkf(!magic.pred_limit.configured && magic.pred_limit.most == 272 &&
-	    magic.search_literals.most == 256 + 16 * LIMITED_LITERALS &&
-	    magic.draft_literals.most == SIZE_MAX, SCENARIO_SEARCHED,
-	    "a rule limit alone should leave the search its budgets of 272 "
-	    "predicates and %d literals and lift the draft's, which were %zu, "
-	    "%zu and %zu", 256 + 16 * LIMITED_LITERALS, magic.pred_limit.most,
-	    magic.search_literals.most, magic.draft_literals.most);
-	checkf(status != 0 && magic.over_budget && log.errors == 0 &&
-	    log.warnings == 1, SCENARIO_SEARCHED,
-	    "the rewrite should be abandoned over a budget of its search, and "
-	    "%s, reporting \"%s\"", status == 0 ? "succeeded" :
-	    "failed otherwise", log.errors != 0 ? log.last : log.last_warning);
-	checkf(magic.draft_literals.spent == 0 && magic.generated_preds <= 272 &&
-	    magic.search_literals.spent <= magic.search_literals.most,
-	    SCENARIO_SEARCHED,
-	    "the first search should keep and read within its budgets and "
-	    "draft nothing, and kept %zu predicates, read %zu literals and "
-	    "drafted %zu", magic.generated_preds, magic.search_literals.spent,
-	    magic.draft_literals.spent);
-	checkf(relic_pred_count(ctx) == preds_before, SCENARIO_SEARCHED,
-	    "the first search should name no predicate, and named %zu",
-	    relic_pred_count(ctx) - preds_before);
+	literals = 0;
+	for (i = 0; i < magic.rules.count; i++)
+		literals += magic.rules.entries[i].body_length;
+	checkf(status == 0 && log.warnings == 0 &&
+	    literals >= DECLINED_CALLS * (DECLINED_CALLS - 1) / 2 &&
+	    magic.work_spent >= literals, SCENARIO_DECLINED,
+	    "a generous limit should admit the rewrite of %d calls, whose "
+	    "prefixes hold at least %d literals, and it held %zu and was "
+	    "charged %zu, reporting %zu warnings, the last \"%s\"",
+	    DECLINED_CALLS, DECLINED_CALLS * (DECLINED_CALLS - 1) / 2,
+	    literals, magic.work_spent, log.warnings, log.last_warning);
 
 	relic_magic_reset(&magic);
 	relic_query_destroy(query);
 	relic_destroy(ctx);
+}
+
+/*
+ * The program of a_declined_cut_is_charged_every_prefix(): a fact of 32
+ * columns, p over a fact, and r's chain of `calls` calls on p, which
+ * alternates two variables to stay within a rule's 64.
+ * Returns the text, which the caller frees, or NULL when memory ran out.
+ */
+static char *
+declined_cuts_program(size_t calls)
+{
+	static const char facts[] = "e(1, 1).\np(X, Y) :- e(X, Y).\n";
+	char piece[64];
+	text_t text;
+	size_t i;
+
+	bzero(&text, sizeof(text));
+	text_append(&text, facts, strlen(facts));
+	for (i = 1; i <= RELIC_MAX_ARITY; i++) {
+		snprintf(piece, sizeof(piece), "%s1", i == 1 ? "w(" : ", ");
+		text_append(&text, piece, strlen(piece));
+	}
+	text_append(&text, ").\n", strlen(").\n"));
+
+	for (i = 1; i <= RELIC_MAX_ARITY; i++) {
+		snprintf(piece, sizeof(piece), "%sX%zu", i == 1 ? "r(" : ", ",
+		    i);
+		text_append(&text, piece, strlen(piece));
+	}
+	for (i = 1; i <= RELIC_MAX_ARITY; i++) {
+		snprintf(piece, sizeof(piece), "%sX%zu",
+		    i == 1 ? ") :- w(" : ", ", i);
+		text_append(&text, piece, strlen(piece));
+	}
+	text_append(&text, "), p(X1, V)", strlen("), p(X1, V)"));
+	for (i = 1; i < calls; i++) {
+		snprintf(piece, sizeof(piece), "%s",
+		    i % 2 == 1 ? ", p(V, W)" : ", p(W, V)");
+		text_append(&text, piece, strlen(piece));
+	}
+	text_append(&text, ".\n", strlen(".\n"));
+
+	if (text.failed) {
+		free(text.bytes);
+		return (NULL);
+	}
+
+	return (text.bytes);
 }
 
 /* How many facts of e the mixed program holds. */
@@ -1410,14 +1390,14 @@ a_rule_limit_leaves_the_search_its_budgets(void)
 /*
  * A predicate with facts and a rule alike is read on demand, and each of
  * its adornments reads the facts through one rule over its base view,
- * e(X, Y) :- e$base(X, Y), which the budget counts as two literals.  A
+ * e(X, Y) :- e$base(X, Y), which the limit counts as two literals.  A
  * thousand facts of e behind one symmetric rule are rewritten for e(n7, X)?
  * without a warning, and the rewrite copies none of them: the rewritten
  * program holds a few rules, not a thousand.  Its plans read the base store
  * under the base view's name, since e names the derived relation.
  */
 static void
-facts_behind_a_rule_fit_the_literal_budget(void)
+facts_behind_a_rule_fit_the_rewrites_limit(void)
 {
 	char line[64];
 	text_t program;
@@ -1441,8 +1421,8 @@ facts_behind_a_rule_fit_the_literal_budget(void)
 		return;
 	}
 
-	answered = explain_answer(program.bytes, "e(n7, X)?", 0, 0,
-	    &explained, &log);
+	answered = explain_answer(program.bytes, "e(n7, X)?", 0, &explained,
+	    &log);
 	checkf(answered && log.errors == 0 && log.warnings == 0 &&
 	    strstr(explained.bytes, "magic rewrite of") != NULL,
 	    SCENARIO_FACTS,
@@ -1544,8 +1524,8 @@ calls_program(size_t calls)
  * in proportion to L and a positive part that does not depend on it, so
  * twice the rewrite for L bounds the one for 2L.  Each call has a magic
  * rule, so a rewrite of fewer rules than calls was not measured.  A
- * generous limit on rules lifts the budgets, which would otherwise abandon a
- * quadratic rewrite before it could be measured.
+ * generous limit lets a quadratic rewrite run, which the default would
+ * abandon before it could be measured.
  */
 static void
 the_rewrite_grows_linearly_in_a_bodys_calls(void)
@@ -1568,7 +1548,7 @@ the_rewrite_grows_linearly_in_a_bodys_calls(void)
 			return;
 		}
 
-		answered = explain_answer(program, "r(1)?", 0, 1000000,
+		answered = explain_answer(program, "r(1)?", 1000000,
 		    &explained, &log);
 		rules[i] = 0;
 		literals[i] = 0;
@@ -1600,20 +1580,21 @@ the_rewrite_grows_linearly_in_a_bodys_calls(void)
 	    literals[0], literals[1]);
 }
 
-/* The calls in the long body of a_long_bodys_rewrite_fits_the_budgets(). */
+/* The calls in the long body of a_long_bodys_rewrite_fits_the_limit(). */
 #define	LONG_BODY_CALLS		400
 
 /*
- * A rewrite that specializes the program fits its budgets however few rules
- * the program has.  r(X) :- p(X), ..., p(X) with 400 calls and the rule
- * deriving p are 2 rules and 2 + 401 = 403 literals, a literal budget of
- * 256 + 16 x 403 = 6704.  The one adornment of r keeps a magic rule and a
- * supplementary rule per call, over 800 rules of one or two literals each,
- * well within the literal budget, which bounds the rules kept as well: a
- * budget of 256 + 16 x 2 rules would abandon it.
+ * A rewrite that specializes the program fits the default limit however few
+ * rules the program has.  r(X) :- p(X), ..., p(X) with 400 calls and the
+ * rule deriving p are 2 rules and 2 + 401 = 403 literals, and with the
+ * query's one a default of 768 + 48 x 404 = 20160.  The one adornment of r
+ * keeps a magic rule and a supplementary rule per call, over 800 rules of
+ * one or two literals each, well within the limit, which bounds the rules
+ * kept as well: a bound of a multiple of the program's 2 rules would
+ * abandon it.
  */
 static void
-a_long_bodys_rewrite_fits_the_budgets(void)
+a_long_bodys_rewrite_fits_the_limit(void)
 {
 	text_t explained;
 	diag_log_t log;
@@ -1628,7 +1609,7 @@ a_long_bodys_rewrite_fits_the_budgets(void)
 		return;
 	}
 
-	answered = explain_answer(program, "r(1)?", 0, 0, &explained, &log);
+	answered = explain_answer(program, "r(1)?", 0, &explained, &log);
 	rules = 0;
 	literals = 0;
 	if (answered)
@@ -1643,6 +1624,114 @@ a_long_bodys_rewrite_fits_the_budgets(void)
 
 	free(explained.bytes);
 	free(program);
+}
+
+/*
+ * The calls of a_long_name_is_charged_per_predicate_named() and the length
+ * of its long name.
+ */
+#define	NAMED_CALLS		200
+#define	NAMED_LONG		16384
+
+/*
+ * Every predicate the rewrite generates is named after the one it comes
+ * from, so a long name is copied, hashed and stored once per predicate
+ * generated from it, and is charged a literal per 64 bytes each time.  A
+ * rule of 200 calls on p, its head named by 16384 bytes, cuts a prefix
+ * before every call but the first, and each cut names a supplementary
+ * predicate after the head's adorned one: 199 names of 256 literals each,
+ * some 51000 between them, past the default of 768 + 48 x 460 = 22848 for
+ * a program of 459, which counts the head's name once, and a query of one.  The rewrite is
+ * abandoned and the query answered from the whole program.  The same rule
+ * under a one-byte name costs nothing for its names, each shorter than 64
+ * bytes, and is answered through its rewrite.
+ */
+static void
+a_long_name_is_charged_per_predicate_named(void)
+{
+	static const size_t lengths[] = { 1, NAMED_LONG };
+	text_t explained;
+	diag_log_t log;
+	char *program;
+	char *query;
+	bool answered;
+	size_t i;
+
+	for (i = 0; i < 2; i++) {
+		program = named_calls_program(lengths[i], NAMED_CALLS, &query);
+		if (program == NULL) {
+			check(false, SCENARIO_LONG_NAME, "the program is built");
+			return;
+		}
+
+		answered = explain_answer(program, query, 0, &explained, &log);
+		if (lengths[i] == NAMED_LONG)
+			checkf(answered && log.errors == 0 &&
+			    log.warnings == 1 && strstr(log.last_warning,
+			    "outgrew magic=22848 while adorning ") != NULL &&
+			    !shows_rewrite(explained.bytes), SCENARIO_LONG_NAME,
+			    "a head named by %zu bytes should abandon the "
+			    "rewrite, which reported %zu errors and %zu "
+			    "warnings", lengths[i], log.errors, log.warnings);
+		else
+			checkf(answered && log.errors == 0 &&
+			    log.warnings == 0 && shows_rewrite(explained.bytes),
+			    SCENARIO_LONG_NAME,
+			    "a head named by %zu byte should be answered "
+			    "through its rewrite, which reported %zu errors "
+			    "and %zu warnings, the last \"%s\"", lengths[i],
+			    log.errors, log.warnings, log.last_warning);
+
+		free(explained.bytes);
+		free(program);
+		free(query);
+	}
+}
+
+/*
+ * calls_program()'s rule of `calls` calls on p, its head named by
+ * `name_length` bytes, and in *queryp the query binding the head's column.
+ * Returns the text, which the caller frees with *queryp, or NULL when
+ * memory ran out.
+ */
+static char *
+named_calls_program(size_t name_length, size_t calls, char **queryp)
+{
+	static const char facts[] = "e(1, 2).\ne(2, 3).\np(X) :- e(X, _Y).\n";
+	text_t name;
+	text_t text;
+	text_t query;
+	size_t i;
+
+	bzero(&name, sizeof(name));
+	for (i = 0; i < name_length; i++)
+		text_append(&name, "r", 1);
+	if (name.failed) {
+		free(name.bytes);
+		return (NULL);
+	}
+
+	bzero(&text, sizeof(text));
+	text_append(&text, facts, strlen(facts));
+	text_append(&text, name.bytes, name.length);
+	text_append(&text, "(X) :- p(X)", strlen("(X) :- p(X)"));
+	for (i = 1; i < calls; i++)
+		text_append(&text, ", p(X)", strlen(", p(X)"));
+	text_append(&text, ".\n", 2);
+
+	bzero(&query, sizeof(query));
+	text_append(&query, name.bytes, name.length);
+	text_append(&query, "(1)?", strlen("(1)?"));
+	free(name.bytes);
+
+	if (text.failed || query.failed) {
+		free(text.bytes);
+		free(query.bytes);
+		return (NULL);
+	}
+
+	*queryp = query.bytes;
+	return (text.bytes);
 }
 
 /*
@@ -1667,7 +1756,7 @@ what_the_rewrite_derives_does_not_leak(void)
 	relic_pred_id_t pred;
 	char *rows;
 
-	ctx = context_with(program, 0, 0, 0, &log);
+	ctx = context_with(program, 0, 0, &log);
 	if (ctx == NULL)
 		return;
 
@@ -1729,7 +1818,7 @@ a_load_after_a_rewrite_reaches_the_next_query(void)
 	relic_t *ctx;
 	char *rows;
 
-	ctx = context_with(program, 0, 0, 0, &log);
+	ctx = context_with(program, 0, 0, &log);
 	if (ctx == NULL)
 		return;
 
@@ -1773,16 +1862,16 @@ main(void)
 	equal_generated_rules_are_kept_once();
 	rules_differing_in_an_expression_are_both_kept();
 	a_rule_deriving_its_own_head_is_dropped();
-	the_limits_hold_at_their_values();
-	the_search_is_held_to_the_limits();
-	a_rewrite_over_its_budget_is_abandoned();
-	a_rewrite_over_its_literal_budget_is_abandoned();
+	the_limit_holds_at_its_value();
+	every_search_is_charged_what_it_reads();
+	a_rewrite_over_its_limit_is_abandoned();
 	the_first_search_is_charged_what_it_reads();
 	a_rewrite_charges_its_drafts_and_holds_what_it_keeps();
-	a_rule_limit_leaves_the_search_its_budgets();
-	facts_behind_a_rule_fit_the_literal_budget();
+	a_declined_cut_is_charged_every_prefix();
+	facts_behind_a_rule_fit_the_rewrites_limit();
 	the_rewrite_grows_linearly_in_a_bodys_calls();
-	a_long_bodys_rewrite_fits_the_budgets();
+	a_long_bodys_rewrite_fits_the_limit();
+	a_long_name_is_charged_per_predicate_named();
 	what_the_rewrite_derives_does_not_leak();
 	a_load_after_a_rewrite_reaches_the_next_query();
 

@@ -22,10 +22,12 @@ relic 1.0.0 (unreleased)
     rewrite's size allow, and otherwise evaluates in full.  Rounds of
     evaluation can be shared among threads, with the same answers in the
     same order whatever their number.
-  * Optional limits on the tuples held, on the memory relations, values,
-    plans and rewrites occupy, and on the size of a query's rewrite: a
-    load, an evaluation or a query that would exceed one is refused with a
-    diagnostic, and changes nothing.
+  * Optional limits on the tuples held and on the memory relations, values,
+    plans and rewrites occupy: a load, an evaluation or a query that would
+    exceed one is refused with a diagnostic, and changes nothing.  A
+    query's Magic rewrite is held to a limit on its work, in proportion to
+    the program unless set; a rewrite that outgrows it is abandoned with a
+    warning, and the query answered from the whole program.
   * The tool: answers in text, CSV, TSV or JSON; facts imported from CSV
     and TSV tables with declared column types; an interactive mode with
     line editing where libedit is present, where control-C stops the query

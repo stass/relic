@@ -1,0 +1,20 @@
+% A rule the draft drops as a duplicate is charged to the rewrite's limit
+% as a rule it keeps is, since it was built before it was found equal to one
+% kept.  p's rule is written four times, and the draft keeps one copy.  The
+% rewrite reads the query, p's four rules and q's, 2 + 4 + 1 literals, and
+% writes the rewritten query, the seed recording q's binding, q$bf's rule
+% and all four copies of p's rule, 2 + 0 + 2 + 4: 15 in all.  A limit of 14
+% is outgrown at the fourth copy, which the draft would drop, and the
+% warning names p/2.
+
+e(a, b).
+e(b, c).
+f(a, x).
+
+p(X, Y) :- e(X, Y).
+p(X, Y) :- e(X, Y).
+p(X, Y) :- e(X, Y).
+p(X, Y) :- e(X, Y).
+q(X, Y) :- f(X, Y).
+
+p(X, Y), q(a, Z)?

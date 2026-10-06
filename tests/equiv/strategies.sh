@@ -14,7 +14,7 @@
 # counts, and an unstratified program's cycle, found by the shortest path
 # through one aggregate edge rather than two, may be noted by another
 # equally valid path.  Some diagnostics are left out.  The
-# warning that a rewrite outgrew its budget says which strategy answered,
+# warning that a rewrite outgrew its limit says which strategy answered,
 # which runs without the rewrite never report, and the answer it announces
 # is compared like any other.  The notes -vv gives about a comparison of
 # mixed types, about an arithmetic operand that is not an integer, and
@@ -104,7 +104,7 @@ run() {
 	    status=$?
 	echo "$status" > "$work/$label.status"
 
-	grep -v -e '^stats: ' -e "Magic rewrite outgrew its budget" \
+	grep -v -e '^stats: ' -e "Magic rewrite outgrew magic=" \
 	    -e "note: ordering comparison between " \
 	    -e "note: operand of .* is a .*; the comparison is false" \
 	    -e "note: a row of .* holds a value that is not an integer" \
@@ -177,7 +177,7 @@ for path in $RELIC_LANG_TESTS; do
 	fi
 
 	case " $args " in
-	*" -X"* | *" -e"* | *" -i"* | *" -l magic-"*)
+	*" -X"* | *" -e"* | *" -i"* | *" -l magic="*)
 		continue
 		;;
 	esac
