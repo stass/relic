@@ -55,9 +55,7 @@ relation is about the runs that do not stream.
 
 **The predicate table is the wrong place for it.** A predicate is program
 vocabulary. The table that interns predicates is context-lifetime state whose
-program entries are never removed and whose identifiers are never reused
-for another program predicate -- a rewrite's are the run's,
-`specs/design-segments.md` section 7 -- and that is
+entries are never removed and whose identifiers are never reused, and that is
 what makes a predicate identifier usable as a dense index by every later
 stage -- the relation table, the dependency graph and the rewrite's
 per-predicate arrays are all indexed by it (`specs/design-program.md` section
@@ -471,17 +469,24 @@ produce the same rows in the same order and the same explain text.
 * **Discarding only the relations an answer touched.** It would make one of
   the six walks of section 2 incremental and leave the rest, and the cost it
   removed would return with the next stage that iterates over predicates.
-* **Releasing the Magic rewrite's generated predicates here.** They are
-  the run's, appended above the program's count and released with the
-  rewrite, per `specs/design-segments.md` section 7; this design neither
-  depends on that nor is changed by it.
-* **Releasing the symbols and values a query's text introduces here.** A
-  query's variable spellings and source name never enter the pool, and its
-  constants are values in a template that each run instantiates above the
-  pool's mark and releases with the run's derived relations, per
-  `specs/design-segments.md` sections 4 and 5. A collected result owns the
-  bytes it holds, section 8 there, which is what lets the identifiers of
-  an answer be the run's.
+* **Releasing the Magic rewrite's generated predicates.** Adorned and magic
+  predicates enter the predicate table and stay there, bounded by the
+  distinct adornments a program admits, per `specs/design-magic.md` section
+  4, and their names are charged to the memory limit with the name store.
+  They are vocabulary derived from the program rather than from a query,
+  and they are reused by the next query with the same shape; their growth
+  is a different problem with a different bound, D-35, and this design
+  neither depends on nor forecloses a solution to it.
+* **Releasing the values a query's text introduces.** A query's variable
+  spellings and source name never enter the pool
+  (`specs/design-vocabulary.md` section 2), but a constant in a query is
+  interned as a value when the query is compiled, and the tables that hold
+  values never release an entry, per `specs/design-memory.md`. A run of
+  queries over distinct constants therefore grows the symbol pool or the
+  value table, by an entry per distinct constant rather than a predicate
+  and a relation slot per query, within the memory limit, and nothing
+  walks those tables per answer; D-35 and `specs/design-vocabulary.md`
+  section 5 say why that is left as it is.
 * **Keeping an answer across runs.** An answer is emptied when delivered,
   per `specs/design-api.md` section 5.1; a query object that owns its
   relation could keep it, but a cached answer that a later load or fact

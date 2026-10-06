@@ -710,7 +710,7 @@ struct relic_pred {
 
 Predicate names live in the context's name store and are interned by
 their bytes and arity; the symbol pool holds values only
-(`specs/design-segments.md` sections 4 and 7).
+(`specs/design-vocabulary.md` sections 2 and 3).
 
 A predicate may have both facts and rules. Facts seed its relation and rules
 derive further tuples into the same relation.
@@ -741,9 +741,9 @@ String bytes should live in an arena or growable string pool.
 
 The pool holds values and nothing else: a predicate's name lives in the
 context's name store, a variable's spelling and a source name in the arena
-of what was parsed under it, and the lexer and parser intern nothing. The
-values a run introduces sit above a mark and are released when the run's
-derived relations are. Specified in `specs/design-segments.md`.
+of what was parsed under it, and the lexer and parser intern nothing but
+a fact's values, as the fact is staged. Specified in
+`specs/design-vocabulary.md`.
 
 ---
 
@@ -778,12 +778,12 @@ const char *
 relic_string(relic_t *, uint32_t id, size_t *lenp);
 ```
 
-An identifier of a value the program wrote, and its bytes, last for the
-life of the context; one a run introduced lasts until the operation that
-delivered it returns. A collected result owns the bytes of its values and
-reads them through `relic_result_string()`, and every interface that
-takes a value into the program refuses an identifier that is a run's.
-`specs/design-segments.md` section 8.
+A row callback's values, and the bytes `relic_string()` reads for them,
+are borrowed for the call. A collected result owns the bytes of its values
+under identifiers no context assigns and reads them through
+`relic_result_string()`, and the context refuses a result's symbol or
+string.
+`specs/design-vocabulary.md` section 4.
 
 ## 19.2 Internal representation
 
@@ -1816,8 +1816,7 @@ The engine uses arenas for structures with a common lifetime:
 string arena       symbol bytes, packed without alignment
 name store         predicate names and retained source names
 program arena      rules, parsed terms
-query arena        the query's compiled template
-run arena          the query's instance, its constants interned
+query arena        the query's compiled rule
 rewrite arena      the Magic rewrite of one query's program
 evaluation arena   plans and transient binding and join state
 ```
@@ -1844,13 +1843,12 @@ the symbol pool and the value table are specified in
 allocator, which owns what a growth leaves behind;
 `specs/design-comparison-cost.md` section 8 says why.
 
-The symbol pool and the value tables each have a program segment, kept
-for the life of the context, and a run segment above it, released when
-the run's derived relations are, through one interning funnel for the
-program and one prologue for every run: the pool holds values only, a
-compiled query is a template instantiated at each run, and the Magic
-rewrite's predicates are appended above the program's and released with
-the rewrite. Specified in `specs/design-segments.md`, D-34.
+The symbol pool, the value tables, the predicate table and the name store
+grow for the life of the context: nothing un-interns a value or a name.
+The memory limit counts all of them and refuses a growth past it, and a
+long-lived owner whose queries name many distinct constants bounds the
+growth by recreating the context. D-35, `specs/design-vocabulary.md`
+section 5.
 
 ---
 
@@ -3261,17 +3259,15 @@ carries its type, so the value table holds integers only, and a symbol's
 bytes are packed. D-3's decision stands with a new encoding. Specified in
 `specs/design-comparison-cost.md`.
 
-**Table segments, sections 17, 18, 19, 47, 49 and 52.** A long-lived
-context's tables grew with every query: the lexer interned every name, a
-query's constants were interned when it was prepared, and the Magic
-rewrite's predicates stayed in the predicate table. The pool and the value
-tables gain a mark between the program's entries and a run's, and the
-run's are released when its derived relations are, by a rewind of a
-sequence table grown in identifier order; one funnel appends to the
-program and one prologue begins every run. Names leave the pool, a query
-is a template instantiated at each run, generated predicates are rendered
-rather than interned and released with the rewrite, and a result owns the
-bytes it holds. Specified in `specs/design-segments.md`, D-34.
+**Vocabulary, sections 17, 18, 19 and 47.** The symbol pool holds values
+only: a predicate's name lives in a name store charged to the memory
+limit, a variable's spelling and a source name in the arena of what was
+parsed, and the lexer and parser intern nothing but a staged fact's
+values. A collected result owns
+the bytes it holds under identifiers no context assigns, and a row
+callback's values and bytes are borrowed for the call. The context's
+tables grow for its life within the memory limit; reclaiming what one run
+interned is left out, D-35. Specified in `specs/design-vocabulary.md`.
 
 **New sections.** 74 dependency policy, 75 repository and documentation
 conventions, 76 this log.

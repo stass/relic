@@ -246,9 +246,20 @@ evaluation computes strings in, the plans of an evaluation and the rewrite
 of a query; zero leaves either unbounded.
 .Fa max_memory
 does not bound all the memory the library uses: the text being loaded, the
-program's rules and queries, the field of a table being imported and a
-prepared query are sized by what the caller wrote, and growing an array
+program's rules and queries, the field of a table being imported, a
+prepared query and the entry and index slot the context keeps beside each
+predicate's name are sized by what the caller wrote, and growing an array
 holds the old one until the new one is filled.
+Nothing those tables hold is released before the context is destroyed:
+every distinct integer, symbol and string a load, a fact, the constants of
+a query or an evaluation interns, and every predicate a query or the
+rewrite of one names, stays for the life of the context, the values and the
+names counting against
+.Fa max_memory .
+A context that goes on answering queries over new constants therefore grows
+until it reaches the limit, and a caller serving such queries for as long as
+it runs bounds that growth by loading the program into a new context and
+destroying the old one.
 No limit bounds the time an evaluation takes: a join over a few small
 relations whose every result is a duplicate stays inside both however long
 it runs, so a caller evaluating a program it does not trust must bound the
@@ -434,6 +445,9 @@ it returns
 .Dv NULL
 for an identifier the context never assigned, a collected result's among
 them.
+A value carries no owner, only its identifier: another context's identifier
+that this one has assigned too reads as this context's value, so a value is
+passed only to the context or result that made it.
 The bytes of a value the program holds, one it states or one a caller
 built, stay valid until the context is destroyed; those of a value a query
 computed are valid while the row callback receiving it runs.
@@ -713,9 +727,9 @@ for an identifier the result did not assign, and
 .Fn relic_result_compare
 orders two of the result's values as
 .Fn relic_value_compare
-orders the context's, a value not the result's comparing equal to
-everything.
-A result's value is not the context's:
+orders the context's, a value whose identifier the result did not assign
+comparing equal to everything.
+A result's symbol or string is not the context's:
 .Fn relic_string
 returns
 .Dv NULL
@@ -723,7 +737,7 @@ for it, and
 .Fn relic_value_compare
 and
 .Fn relic_fact_add
-refuse it.
+refuse it; an integer is its own value in both.
 .Pp
 .Fn relic_query_prepare
 checks the program first, which must pass, and then
@@ -866,8 +880,8 @@ stopped the operation;
 the call was malformed in C's terms: a
 .Dv NULL
 argument, an index, enumerator or flag the library does not know, a value
-whose type or identifier is not one the context made, a value or query of
-another context, or a call refused while caller code runs;
+whose type or identifier is not one the context made, a query of another
+context, or a call refused while caller code runs;
 .It Dv RELIC_ERROR_INTERNAL
 the library found one of its own invariants false, which is a bug in relic;
 the text begins

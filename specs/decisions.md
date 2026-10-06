@@ -648,3 +648,52 @@ callback's values and bytes last for the call, `relic_string()` and
 `relic_value_compare()` outside an operation refuse an identifier above
 the mark, and every interface that takes a value into the program refuses
 one. D-3, D-4 and D-24 stand. Specified in `specs/design-segments.md`.
+
+### D-35 A context's tables grow for its life; a run's entries are not reclaimed
+
+D-34's program and run segments are not built. The symbol pool, the
+value tables, the predicate table and the name store grow for the life of
+the context, and nothing un-interns a value or a name.
+
+Reclaiming what one run interned would rest on one invariant: no
+identifier a run assigned is reachable once the run ends. Holding it takes
+a mechanism in every subsystem. Every table needs a boundary between the
+program's entries and the run's, and one interning function that discards
+the run's entries before it appends. Every run needs a prologue and an
+epilogue. A query must be compiled as a template and instantiated at each
+run, which reaches the compiler, the rewrite and the planner. The
+rewrite's predicates must be released with it. The public interface must
+refuse a run's identifier outside an operation.
+
+The growth this would reclaim is already counted by `max_memory`, which
+refuses it loudly at the limit. A long-lived owner whose queries name many
+distinct constants bounds the growth by destroying the context and
+creating another. Should a workload need more, the remedy is an explicit
+compaction the caller invokes between operations, not reclamation woven
+through every run.
+
+Three parts of D-34 stand, because each is worth having without the
+segments:
+
+* The pool holds values only. A predicate's name lives in the name store,
+  charged to `max_memory` as the pool is, and the first reference to a
+  predicate copies its source name there. A variable's spelling and a
+  source name live in the arena of what was parsed. The lexer and the
+  parser intern nothing but a fact's values, which are interned as the
+  fact is staged; a rule's or query's constants are interned when the
+  check compiles them.
+* A collected result owns its bytes, in a pool of its own hashed under the
+  context's seed and charged to nothing. Its symbols and strings carry
+  identifiers with bit 31 set, which no context assigns, read through
+  `relic_result_string()` and ordered through `relic_result_compare()`;
+  the context refuses them.
+* A row callback's values, and the bytes `relic_string()` reads for them,
+  are borrowed for the call, and a location's file lives as long as what
+  was parsed under it.
+
+Reverses the rest of D-34: the segments, the mark, the funnel and its
+discard, the run prologue and epilogue, the sequence table and its rewind,
+the query template, the rewrite's predicates as the run's, and the
+refusals of a run's identifier. D-12 and D-17 stand as they were before
+D-34 amended them, and D-3, D-4 and D-24 stand. Specified in
+`specs/design-vocabulary.md`.

@@ -1124,8 +1124,8 @@ What changes is who pays. The pool was left out of `max_memory` by
 caller wrote, and with `cat` it is not: `s(Y) :- s(X), Y = cat(X, "a")`
 interns a string per derivation. **The pool's storage -- its entry array,
 its identifier table, its string arena and the value table's bits over it
--- is charged to `max_memory` whole**, names and literals and computed
-strings alike, checked before each growth by the measure of section 8.3
+-- is charged to `max_memory` whole**, literals and computed strings
+alike, checked before each growth by the measure of section 8.3
 and refused with the store's message:
 
 ```text
@@ -1134,18 +1134,18 @@ relic: limit exceeded: memory=536870912 while deriving s/1
 
 The whole pool rather than the part evaluation added, for the reason the
 integer table is charged whole: the account stays a sum of what exists.
-A program with a name in it counts a few bytes more against its limit than
-it did; the golden tests of the memory limit are re-recorded at their new
-totals, as they were when the integer table was charged.
+A predicate's name is not in the pool; the name store holds it and is
+charged as the pool is (`specs/design-vocabulary.md` section 3).
 
-**The pool is rewound with the relations.** A string the program wrote
-keeps its identifier for the life of the context. A string a run interned
-sits above the pool's mark, and the discard that frees the derived
-relations holding it rewinds the pool, the integer table and their charge
-to the mark, `specs/design-segments.md` sections 3 and 6; between the
-derivation and that discard the memory limit bounds it with everything
-else. A collected result copies the bytes of the strings it holds, so a
-caller keeps an answer's strings without keeping the pool's entries.
+**The pool is not shrunk.** A string once interned keeps its identifier for
+the life of the context, and a discard leaves the pool, as it leaves the
+integer table; the memory limit bounds it with everything else. A string
+a derivation computed was interned for the tuple that holds it, and
+discarding the tuple does not remove the string. Reclaiming strings no
+relation and no statement holds is left absent, section 19, with the
+integer case. A collected result copies the bytes of the strings it holds
+(`specs/design-vocabulary.md` section 4), so a caller keeps an answer's
+strings without keeping the context.
 
 ### 9.2 The frozen round
 
@@ -1700,8 +1700,7 @@ tool has; 5 is what `CLAUDE.md` asks of every feature.
   order over the group that a set does not have, and
   `specs/design-aggregates.md` section 20 leaves it out with the set
   aggregates.
-* **Reclaiming interned strings here.** A run's strings are released
-  with its derived relations by `specs/design-segments.md`, and a
-  program's are kept, section 9.1.
+* **Reclaiming interned strings.** Section 9.1, with the integer case;
+  D-35 says why.
 * **Glob patterns.** `like` and `fnmatch`: a second pattern language for
   what `^` and `$` and `.*` say in the first.

@@ -411,14 +411,6 @@ the list of output columns and names no predicate: the rule is answered into a
 relation the query object owns, per `specs/design-query.md`, and `$q0` is the
 name the query is called by rather than a predicate in the program's table.
 
-**The compiled query is a template.** Its constants are values -- bytes
-and a length, an integer, a float -- in the query's arena rather than
-domain identifiers, wherever a constant can occur in the rule and in the
-group rules its aggregates generate, and each run copies the rule into its
-own arena and interns the constants as it copies, so that a query holds no
-identifier between runs and the identifiers it uses are released with the
-run; `specs/design-segments.md` section 5. The planner reads the copy.
-
 **The output columns are the named variables in order of first occurrence,
 and `_` contributes none.** Variables are numbered into slots in exactly that
 order already -- `specs/design-program.md` section 4 -- so the head is simply

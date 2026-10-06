@@ -142,11 +142,22 @@ typedef struct relic_config relic_config_t;
  * values or names would grow the tables past the limit is refused as it
  * interns them, with "limit exceeded: memory=N".  The limit does not bound the
  * memory the library uses in total: the program's rules and queries, the text
- * being loaded, the field of a table being imported, the evaluation order and
- * a prepared query are sized by what the caller wrote, and the tables and
- * evaluation order of a query's rewrite are a fraction of the rewrite the
- * limit does count.  Nor is it a bound on peak usage, since growing an
- * array holds the old one until the new one is filled.
+ * being loaded, the field of a table being imported, the evaluation order, a
+ * prepared query and the entry and index slot kept beside each predicate's
+ * name are sized by what the caller wrote, and the tables and evaluation
+ * order of a query's
+ * rewrite are a fraction of the rewrite the limit does count.  Nor is it a
+ * bound on peak usage, since growing an array holds the old one until the new
+ * one is filled.
+ *
+ * Those tables release nothing before the context is destroyed.  Every
+ * distinct value a load, a fact, a query's constants or an evaluation interns,
+ * and every predicate a query or its rewrite names, stays for the life of the
+ * context, the values and the names counting against `max_memory`, so a
+ * context that goes on answering queries over new constants grows until it
+ * reaches the limit.  A caller
+ * serving such queries for as long as it runs loads the program into a new
+ * context and destroys the old one.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
  * single query: the adorned and magic predicates it generates, and the rules it
@@ -364,7 +375,10 @@ RELIC_EXPORT int relic_value_string(relic_t *ctx, const char *bytes,
 
 /*
  * The bytes of an interned symbol or string, or NULL for an identifier this
- * context never assigned, a collected result's among them.
+ * context never assigned, a collected result's among them.  A value carries
+ * no owner, only its identifier: another context's identifier that this one
+ * has assigned too reads as this context's value, so a value is passed only
+ * to the context or result that made it.
  *
  * The result is NUL-terminated for the convenience of a caller that wants a
  * C string, but a string literal may contain NUL bytes, so a caller that must
@@ -485,9 +499,9 @@ RELIC_EXPORT int relic_load_string(relic_t *ctx, const char *source_name,
  * `predicate` is a NUL-terminated name, which must be a symbol by the rule of
  * relic_value_symbol() and must not be the negation keyword `not`.  `arity`
  * is at most 32, and `values` holds that many, each built by the value
- * constructors or an integer; it may be NULL when `arity` is zero.  A value
- * read out of a query's answer is built again from its bytes, since a
- * collected result's values are the result's and are refused here.  A
+ * constructors or an integer; it may be NULL when `arity` is zero.  A symbol
+ * or string read out of a query's answer is built again from its bytes,
+ * since a collected result's are the result's and are refused here.  A
  * predicate is identified by its name and arity together, so a fact of a
  * new arity starts a new predicate.
  *
@@ -666,8 +680,9 @@ RELIC_EXPORT int relic_materialize(relic_t *ctx);
  * keeps the context alive.  The request is a C11 atomic; a library built by
  * a compiler without C11 atomics, which no system relic supports has,
  * records it in a volatile sig_atomic_t instead, which a signal handler or
- * a callback may still set and another thread may not.  Each operation forgets any request made before
- * it began, so an interrupt with no operation in progress stops nothing.
+ * a callback may still set and another thread may not.  Each operation
+ * forgets any request made before it began, so an interrupt with no
+ * operation in progress stops nothing.
  * Accepts NULL.
  */
 RELIC_EXPORT void relic_interrupt(relic_t *ctx);
@@ -808,11 +823,12 @@ typedef struct relic_result relic_result_t;
  * a string's identifier, as relic_string() does for the context's, until
  * the result is destroyed, and returns NULL for an identifier the result
  * did not assign; relic_result_compare() orders two of its values as
- * relic_value_compare() orders the context's, and compares a value that is
- * not the result's equal to everything.  A result's value is not the
- * context's: relic_string() returns NULL for it, and relic_value_compare()
- * and relic_fact_add() refuse it, so a caller handing one back builds it
- * again from its bytes.  relic_result_destroy() accepts NULL.
+ * relic_value_compare() orders the context's, and compares a value whose
+ * identifier the result did not assign equal to everything.  A result's
+ * symbol or string is not the context's: relic_string() returns NULL for
+ * it, and relic_value_compare() and relic_fact_add() refuse it, so a caller
+ * handing one back builds it again from its bytes.  An integer is its own
+ * value in both.  relic_result_destroy() accepts NULL.
  */
 RELIC_EXPORT relic_result_t *relic_query_collect(relic_t *ctx,
     relic_query_t *query);
@@ -843,9 +859,9 @@ RELIC_EXPORT void relic_query_destroy(relic_query_t *query);
  * bytewise.  The order exists so that output can be made stable when a
  * column holds more than one type, and it is not the order the language's
  * comparison operators use: those never order values of different types.
- * Both values must belong to `ctx`: a value that does not -- a collected
- * result's, or an identifier the context never assigned -- compares equal
- * to everything, and is reported as an error, unless caller code the
+ * Both values must belong to `ctx`.  A symbol or string whose identifier
+ * the context never assigned, a collected result's among them, compares
+ * equal to everything, and is reported as an error, unless caller code the
  * library is running made the call: the report would displace the error of
  * the operation the code runs inside, so a comparison there reports
  * nothing.
@@ -989,8 +1005,8 @@ RELIC_EXPORT const char *relic_error(relic_t *ctx);
  *	ARGUMENT	the call was malformed in C's terms: a NULL argument,
  *			an index, enumerator or flag the library does not
  *			know, a value whose type or identifier is not one the
- *			context made, a value or query of another context, or
- *			a call made from one of the context's own callbacks
+ *			context made, a query of another context, or a call
+ *			made from one of the context's own callbacks
  *	INTERNAL	an invariant the library checks was false, which is a
  *			bug in relic
  *

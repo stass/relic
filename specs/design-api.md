@@ -83,18 +83,14 @@ int	relic_value_string(relic_t *, const char *bytes, size_t length,
 
 Each fills the value and returns 0, or returns -1 with a diagnostic. The
 identifier stays valid for the life of the context, and interning the same
-bytes again returns the same one. A value the program does not hold is
-interned the way a fact is added, after the run state is discarded, since
-only the program's segment of the pool can give an identifier that lasts
-(`specs/design-segments.md` section 8); a value it holds is returned with
-nothing discarded. `relic_string()` and `relic_value_compare()` called
-outside an operation refuse an identifier a run introduced, which no
-caller holds legitimately once the operation that delivered it has
-returned: `relic_string()` returns NULL, and `relic_value_compare()`,
-which has no failure to return, reports a diagnostic and returns 0, the
-one read-only accessor that reports. `relic_fact_add()`, and every
-interface that takes a value into the program, refuses such an identifier
-with a diagnostic.
+bytes again returns the same one. Every interned value stays for the life
+of the context and is counted by the memory limit, so a long-lived context
+that names many distinct values grows by them (`specs/design-vocabulary.md`
+section 5). `relic_string()` returns NULL for an identifier the context
+never assigned, a result's among them; `relic_value_compare()`, which has
+no failure to return, reports one with a diagnostic and returns 0, the one
+read-only accessor that reports, and does so only when no operation is in
+progress; `relic_fact_add()` refuses one with a diagnostic.
 
 **A symbol is what the language can write as one.** Its bytes must match the
 lexer's symbol rule, `[a-z][A-Za-z0-9_]*`. A symbol the language cannot
@@ -164,8 +160,8 @@ again from the facts, exactly as it does after a load. A fact the base store
 already holds changes nothing and discards nothing. A fact can make a
 negated literal false, so nothing derived before it can be kept without
 incremental maintenance, which architecture section 70 defers. A discard
-with nothing derived to discard only rewinds the symbol pool and the value
-tables, so a run of calls between two queries pays for one discard.
+with nothing derived to discard returns at once, so a run of calls between
+two queries pays for one discard.
 
 ### 4.1 Imported facts
 
@@ -213,11 +209,11 @@ A caller that wants to keep an answer copies it, which is what the collector
 does. Outside a query, `relic_stats()` finds no answers among the tuples
 held; from a row callback it counts the answer being delivered.
 
-**A row's values and bytes last for the call.** A row names its values by
-the context's identifiers, and the bytes `relic_string()` returns for a
-value the run introduced are released with the run's derived relations
-(`specs/design-segments.md` section 8), so a callback that keeps a value
-or its bytes copies the bytes, as it already copies the row.
+**A row's values and bytes are borrowed for the call.** A row names its
+values by the context's identifiers, and a callback that keeps a value or
+its bytes copies the bytes, as it already copies the row: the promise is no
+wider than the call, so how long the context keeps a value's bytes stays
+the library's to decide (`specs/design-vocabulary.md` section 4).
 
 The group relations of a query's aggregates are transient in the same way:
 they are filled when the query runs and emptied with its answer, so they
@@ -268,12 +264,12 @@ int		 relic_result_compare(const relic_result_t *,
 		    const relic_value_t *, const relic_value_t *);
 ```
 
-A result's value passed to the context -- `relic_string()`,
+A result's symbol or string passed to the context -- `relic_string()`,
 `relic_value_compare()`, `relic_fact_add()` -- is refused as one it never
-assigned; a caller that inserts an answer's value as a fact builds it from
-the bytes. `specs/design-segments.md` section 8 gives the reason: the
-identifiers of an answer may be a run's, released when the run's derived
-relations are.
+assigned, while an integer is its own value in both; a caller that
+inserts an answer's symbol or string as a fact builds it from the bytes.
+A result that owns its bytes outlives the context and reads nothing of it
+(`specs/design-vocabulary.md` section 4).
 
 ---
 
@@ -321,7 +317,7 @@ A diagnostic's message and location are borrowed for the call, the
 location's `file` included: it points into the arena of what was parsed
 under the name, which lives as long as the context for a load, as long as
 the query for a prepared query and as long as the call for an import
-(`specs/design-segments.md` section 4). A callback that keeps a location
+(`specs/design-vocabulary.md` section 2). A callback that keeps a location
 copies the name with it.
 
 A refused destroy leaks what it would have released rather than freeing
@@ -418,12 +414,13 @@ incompatible change, which is why the configuration structure is frozen
 without a step limit (architecture section 63 has none) and why a counter
 added to `relic_stats_t` is one too.
 
-`threads` and `parallel_rounds` were added together, as one incompatible
-change, so the interface changed once for both. A result's values
-becoming the result's own, read through `relic_result_string()` and
-ordered by `relic_result_compare()`, changes what `relic_result_row()`
-returns and is `c+1:0:0` with the two accessors added in the same step
-(`specs/design-segments.md` section 8).
+Fields that belong together, such as `threads` and `parallel_rounds`, are
+added as one incompatible change rather than two. A change to what an
+entry point returns is `c+1:0:0` even when the entry points that read the
+new return are added beside it: a result's symbols and strings carrying
+the result's identifiers rather than the context's changes what
+`relic_result_row()` returns, whatever `relic_result_string()` and
+`relic_result_compare()` add (`specs/design-vocabulary.md` section 4).
 
 A new `RELIC_F_` switch is an added interface, `c+1:0:a+1`: the bit is new
 and a caller may depend on its effect, while a library without it ignores the

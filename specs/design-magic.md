@@ -229,22 +229,20 @@ rules may call a predicate `q` with a binding that nothing else asks for,
 and that demand is worth propagating. The subsumption rule has already made
 sure that no such call is to a predicate that is also reached free.
 
-Generated predicates are the rewrite's, `specs/design-segments.md` section
-7: the rewrite appends each to the context's predicate table above the
-program's count, without a symbol and without placing it in the table's
-index, records in the entry what it is -- the program predicate it is part
-of, the adornment, and for a supplementary predicate its two ordinals --
-and renders the name above from the entry wherever it is printed. Where
-the rewrite asks twice for one predicate, a base view reached from two
-places or a supplementary predicate a prefix names again, it finds the
-first answer in a map of its own: an array from program predicate to base
-view, and a table from the adorned predicate and the two ordinals to the
-supplementary predicate, keyed as the adornment memo is. The run releases
-the generated predicates with the rewrite, so a second query with the same
-adornments generates them again under the same identifiers. No atom of a
-program or a query names one, so none is ever referenced, and the
-undefined-predicate warning never names one, whether or not the rewrite
-that generated it was kept.
+Generated predicates enter the context's predicate table like any other and
+are never removed, per `specs/design-program.md` section 3. The adorned
+and magic predicates are bounded by the adornments the program admits, and
+a second query with the same adornments reuses them. A supplementary
+predicate is named after its rule and the call it precedes, so their
+number depends on the shape of the rules and the queries as well, within
+the rewrite's budgets. One cut from the query's rule is named after `$q0`
+whatever the query, so a later query reuses it when its cut at that
+position keeps as many variables, and otherwise gets a predicate of the
+same name and another arity. No atom of a program or a
+query names one, so none is ever referenced, and the undefined-predicate
+warning never names one, whether or not the rewrite that generated it was
+kept. A base view, `p$base`, is interned once, the first time a rewrite
+needs it, and reused by every later one.
 
 ---
 
@@ -859,17 +857,9 @@ and a rule found to be a duplicate or to derive nothing is released from the
 rewrite's arena as soon as it is recognized, so the arena holds the rules
 kept and the names generated, however many were drafted. All of it is released
 when the query has run, successfully or not, as is the schedule of the
-rewritten program, and so are the predicates the rewrite generated and
-their relations: the run frees every relation of a predicate above the
-program's count and truncates the predicate table and the store's
-per-predicate tables to that count, `specs/design-segments.md` section 7.
-The rewrite interns no symbol: its generated predicates are named by
-rendering, and its generated variable names are bytes in its arena. The
-discard that precedes the rewrite's derivation is the run prologue's,
-`specs/design-segments.md` section 3, which also instantiates the query's
-template and rewinds the pool and the value tables; a rewrite abandoned
-over budget re-enters that prologue before the whole program is
-materialized.
+rewritten program. Predicate entries for generated names, and the names
+themselves in the predicate table's name store, belong to the context, as
+every interned entry does (`specs/design-vocabulary.md` section 3).
 
 The rewrite's arena is charged to `max_memory`, per
 `specs/design-planning-cost.md` section 6: the budgets of section 8 bound
