@@ -635,7 +635,8 @@ check_row(void *callback_ctx, const relic_value_t *values, size_t count)
  * another, and its twenty integers, of which 0 and 1000003 the program
  * states, are interned by the batch that first holds them and found by
  * every later one, and every tuple is inserted once, holding exactly what
- * the rule computed.
+ * the rule computed.  The program is checked before it is counted, since
+ * the check is what interns its rule's constants.
  */
 static void
 an_evaluation_resolves_every_batch_whole(void)
@@ -652,7 +653,8 @@ an_evaluation_resolves_every_batch_whole(void)
 	    "S = cat(L, str(X mod 7)), Y = X * 1000003.\n", LONG_BYTES);
 	ctx = relic_create();
 	if (program == NULL || ctx == NULL ||
-	    relic_load_string(ctx, "resolved.dl", program) != 0) {
+	    relic_load_string(ctx, "resolved.dl", program) != 0 ||
+	    relic_check(ctx) != 0) {
 		check(false, SCENARIO_RESOLVED, "the program should load");
 		relic_destroy(ctx);
 		free(program);

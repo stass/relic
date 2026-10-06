@@ -32,25 +32,29 @@ and 6 are not started. The causes and what to try are sorted in
 ## Engine
 
 **A long-lived context's tables only grow.** [Low, component:
-`specs/design-segments.md`, `lib/lex.c`, `lib/parse.c`, `lib/facts.c`,
-`lib/import.c`, `lib/symbol.c`, `lib/value.c`, `lib/util.c`, `lib/pred.c`,
-`lib/eval.c`, `lib/magic.c`, `lib/result.c`, `include/relic.h`,
-`cmd/relic/output.c`] No table
-releases an entry, and three kinds of entry outlive the run that made
-them: the names the lexer interns, a query's source name among them, so a
-session grows the pool by one entry per line; a query's constants,
-interned when it is prepared, so an embedder preparing a query per request
-over distinct keys grows the pool or the integer table per key; and the
-rewrite's generated predicates and their symbols, which also size every
-per-answer walk from then on. The design is written and none of its four
-steps is implemented: the pool holds values only (section 4 and the
-predicate table's name store of section 7); results own their bytes
-through `relic_result_string()` (section 8); the segments, the program
-funnel, the run prologue, the sequence table's ordered growth and rewind,
-and instantiating a query's template at each run (sections 3, 5 and 6);
-the rewrite's predicates appended above the
-program's, rendered and released with the rewrite (section 7). Step 1
-alone closes the growth per line.
+`specs/design-segments.md`, `lib/facts.c`, `lib/import.c`, `lib/symbol.c`,
+`lib/value.c`, `lib/util.c`, `lib/pred.c`, `lib/eval.c`, `lib/magic.c`,
+`lib/result.c`, `include/relic.h`, `cmd/relic/output.c`] No table
+releases an entry, and two kinds of entry outlive the run that made them:
+a query's constants, interned when it is prepared, so an embedder
+preparing a query per request over distinct keys grows the pool or the
+integer table per key; and the rewrite's generated predicates, which also
+size every per-answer walk from then on. Names are kept out of the
+pool (the design's step 1), so a session's lines do not grow it. Three
+steps of the design remain: results own their bytes through
+`relic_result_string()` (section 8); the segments, the program funnel, the
+run prologue, the sequence table's ordered growth and rewind, and
+instantiating a query's template at each run (sections 3, 5 and 6); the
+rewrite's predicates appended above the program's, rendered and released
+with the rewrite (section 7).
+
+**The predicate table's entries and index are not charged.** [Low,
+component: `lib/pred.c`, `lib/account.c`] The name store is charged to
+`max_memory`, but each predicate's entry and its index slot are not, so a
+caller naming many short predicates holds several times the limit outside
+it: under a 1 MiB limit, 144,445 one-byte predicates held 16 MiB of
+entries and 1 MiB of index. Charge the entries and the index as the symbol
+pool charges its own, admitted before each growth.
 
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of

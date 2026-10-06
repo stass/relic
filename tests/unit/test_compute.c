@@ -379,7 +379,6 @@ a_refused_batch_leaves_the_table_unchanged(void)
 	const relic_relation_t *relation;
 	relic_pred_id_t pred;
 	relic_t *ctx;
-	uint32_t name;
 	size_t bytes_before;
 	size_t count_before;
 	size_t projected;
@@ -392,8 +391,7 @@ a_refused_batch_leaves_the_table_unchanged(void)
 		return;
 
 	relation = NULL;
-	if (relic_symbol_intern(ctx, "n", 1, &name) == 0 &&
-	    relic_pred_intern(ctx, name, 1, NULL, &pred) == 0)
+	if (relic_pred_intern(ctx, "n", 1, 1, NULL, &pred) == 0)
 		relation = relic_base_store(ctx, pred);
 	for (i = 0; i < RELIC_INSERT_BATCH; i++)
 		pending[i] = (int64_t)i * 1000003 + 5;
@@ -905,7 +903,6 @@ a_refused_batch_leaves_the_pool_unchanged(void)
 	const relic_relation_t *relation;
 	relic_pred_id_t pred;
 	relic_t *ctx;
-	uint32_t name;
 	size_t pool_before;
 	size_t count_before;
 	size_t projected;
@@ -917,8 +914,7 @@ a_refused_batch_leaves_the_pool_unchanged(void)
 	ctx = context_for("s(\"x\").\n", 0, limit, &diagnostics);
 	batch = calloc(1, sizeof(*batch));
 	relation = NULL;
-	if (ctx != NULL && relic_symbol_intern(ctx, "s", 1, &name) == 0 &&
-	    relic_pred_intern(ctx, name, 1, NULL, &pred) == 0)
+	if (ctx != NULL && relic_pred_intern(ctx, "s", 1, 1, NULL, &pred) == 0)
 		relation = relic_base_store(ctx, pred);
 
 	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);

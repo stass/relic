@@ -90,7 +90,9 @@ static bool	 refused_for_nesting(const diag_log_t *log, uint32_t column);
 static void	 render_comparison(relic_t *ctx,
 		    const relic_ast_comparison_t *comparison, char *out,
 		    size_t size);
-static void	 render_constant(relic_t *ctx, relic_dom_t constant, char *out,
+static bool	 constant_spells(const relic_constant_t *constant,
+		    enum relic_type type, const char *bytes);
+static void	 render_constant(const relic_constant_t *constant, char *out,
 		    size_t size);
 static void	 render_expr(relic_t *ctx, const relic_ast_expr_t *expr,
 		    char *out, size_t size);
@@ -160,10 +162,9 @@ static size_t
 facts_held(relic_t *ctx, const char *name, uint16_t arity)
 {
 	relic_pred_id_t pred;
-	uint32_t symbol;
 
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0 ||
-	    relic_pred_intern(ctx, symbol, arity, NULL, &pred) != 0)
+	if (relic_pred_intern(ctx, name, strlen(name), arity, NULL,
+	    &pred) != 0)
 		return (0);
 
 	return (relic_base_count(ctx, pred));
@@ -260,28 +261,34 @@ statements_keep_the_shape_they_were_written_in(void)
 }
 
 /*
- * A constant becomes the domain identifier a tuple column will hold, and two
- * spellings of one value become one identifier.  A variable keeps its name,
- * and a bare `_` is marked anonymous because every occurrence of one is a
- * distinct variable however identical the names are.
+ * A constant is held as the value it spells, of the type its token says,
+ * and nothing is interned by reading it: a statement the tree keeps adds no
+ * value to the context.  A variable keeps its name, and a bare `_` is
+ * marked anonymous because every occurrence of one is a distinct variable
+ * however identical the names are.
  */
 static void
 terms_hold_the_values_they_spell(void)
 {
 	static const char program[] = "f(a, \"a\", 120, X, _, _Kept, a).\n";
 
-	relic_value_t value;
 	relic_ast_stmt_t *statement;
 	diag_log_t log;
 	relic_t *ctx;
+	size_t values;
 
 	ctx = context_logging_to(&log);
 	check(ctx != NULL, SCENARIO_TERMS, "a context should be created");
 	if (ctx == NULL)
 		return;
 
+	values = relic_value_count(ctx);
 	check(relic_load_string(ctx, "terms.dl", program) == 0, SCENARIO_TERMS,
 	    "the program should load");
+	checkf(relic_value_count(ctx) == values && relic_symbol_count(ctx) == 0,
+	    SCENARIO_TERMS, "reading the statement should intern nothing, not "
+	    "%zu values and %zu symbols", relic_value_count(ctx) - values,
+	    relic_symbol_count(ctx));
 
 	statement = statement_at(ctx, 0);
 	check(statement != NULL && statement->head.arity == 7, SCENARIO_TERMS,
@@ -292,21 +299,17 @@ terms_hold_the_values_they_spell(void)
 	}
 
 	check(statement->head.terms[0].kind == RELIC_TERM_CONSTANT &&
-	    relic_value_decode(ctx, statement->head.terms[0].u.constant,
-	    &value) && value.type == RELIC_SYMBOL, SCENARIO_TERMS,
-	    "a bare identifier should be interned as a symbol");
-
-	check(relic_value_decode(ctx, statement->head.terms[1].u.constant,
-	    &value) && value.type == RELIC_STRING, SCENARIO_TERMS,
-	    "a quoted literal should be interned as a string");
-	check(statement->head.terms[0].u.constant !=
-	    statement->head.terms[1].u.constant, SCENARIO_TERMS,
-	    "the symbol a and the string \"a\" should be different values");
-
-	check(relic_value_decode(ctx, statement->head.terms[2].u.constant,
-	    &value) && value.type == RELIC_INTEGER &&
-	    value.v.integer == 120, SCENARIO_TERMS,
-	    "an integer literal should be interned as its value");
+	    constant_spells(&statement->head.terms[0].u.constant,
+	    RELIC_SYMBOL, "a"), SCENARIO_TERMS,
+	    "a bare identifier should be a symbol");
+	check(statement->head.terms[1].kind == RELIC_TERM_CONSTANT &&
+	    constant_spells(&statement->head.terms[1].u.constant,
+	    RELIC_STRING, "a"), SCENARIO_TERMS,
+	    "a quoted literal should be a string");
+	check(statement->head.terms[2].kind == RELIC_TERM_CONSTANT &&
+	    statement->head.terms[2].u.constant.type == RELIC_INTEGER &&
+	    statement->head.terms[2].u.constant.integer == 120,
+	    SCENARIO_TERMS, "an integer literal should be its value");
 
 	check(statement->head.terms[3].kind == RELIC_TERM_VARIABLE &&
 	    !statement->head.terms[3].u.variable.anonymous, SCENARIO_TERMS,
@@ -318,9 +321,9 @@ terms_hold_the_values_they_spell(void)
 	    !statement->head.terms[5].u.variable.anonymous, SCENARIO_TERMS,
 	    "_Kept is a named variable rather than an anonymous one");
 
-	check(statement->head.terms[0].u.constant ==
-	    statement->head.terms[6].u.constant, SCENARIO_TERMS,
-	    "one symbol written twice should be one value");
+	check(constant_spells(&statement->head.terms[6].u.constant,
+	    RELIC_SYMBOL, "a"), SCENARIO_TERMS,
+	    "one symbol written twice should be the same symbol");
 
 	relic_destroy(ctx);
 }
@@ -340,7 +343,6 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 	const relic_relation_t *store;
 	relic_value_t value;
 	relic_pred_id_t pred;
-	uint32_t symbol;
 	diag_log_t log;
 	relic_t *ctx;
 
@@ -353,8 +355,7 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 	    "both statements should load");
 
 	store = NULL;
-	if (relic_symbol_intern(ctx, "status", 6, &symbol) == 0 &&
-	    relic_pred_intern(ctx, symbol, 2, NULL, &pred) == 0)
+	if (relic_pred_intern(ctx, "status", 6, 2, NULL, &pred) == 0)
 		store = relic_base_store(ctx, pred);
 	check(store != NULL && store->count == 1, SCENARIO_NEGATION,
 	    "a fact with `not` as an argument should be stored");
@@ -574,30 +575,36 @@ loads_alone(const char *program, diag_log_t *log)
  * its name and a string in quotes.
  */
 static void
-render_constant(relic_t *ctx, relic_dom_t constant, char *out, size_t size)
+render_constant(const relic_constant_t *constant, char *out, size_t size)
 {
-	relic_value_t value;
 	char text[64];
 
-	if (!relic_value_decode(ctx, constant, &value)) {
-		strlcat(out, "?", size);
-		return;
-	}
-
-	switch (value.type) {
+	switch (constant->type) {
 	case RELIC_INTEGER:
-		snprintf(text, sizeof(text), "%" PRId64, value.v.integer);
+		snprintf(text, sizeof(text), "%" PRId64, constant->integer);
 		strlcat(out, text, size);
 		return;
 	case RELIC_STRING:
 		strlcat(out, "\"", size);
-		strlcat(out, relic_string(ctx, value.v.id, NULL), size);
+		strlcat(out, constant->bytes, size);
 		strlcat(out, "\"", size);
 		return;
 	case RELIC_SYMBOL:
-		strlcat(out, relic_string(ctx, value.v.id, NULL), size);
+		strlcat(out, constant->bytes, size);
 		return;
 	}
+}
+
+/*
+ * Whether a constant the tree keeps is a symbol or a string of the bytes of
+ * the C string `bytes`.
+ */
+static bool
+constant_spells(const relic_constant_t *constant, enum relic_type type,
+    const char *bytes)
+{
+	return (constant->type == type && constant->length == strlen(bytes) &&
+	    bcmp(constant->bytes, bytes, constant->length) == 0);
 }
 
 /*
@@ -625,10 +632,9 @@ render_expr(relic_t *ctx, const relic_ast_expr_t *expr, char *out,
 	case RELIC_AST_EXPR_TERM:
 		term = &expr->u.term;
 		if (term->kind == RELIC_TERM_VARIABLE)
-			strlcat(out, relic_string(ctx, term->u.variable.name,
-			    NULL), size);
+			strlcat(out, term->u.variable.name.bytes, size);
 		else
-			render_constant(ctx, term->u.constant, out, size);
+			render_constant(&term->u.constant, out, size);
 		return;
 	case RELIC_AST_EXPR_NEGATE:
 		strlcat(out, "(neg ", size);
@@ -646,7 +652,7 @@ render_expr(relic_t *ctx, const relic_ast_expr_t *expr, char *out,
 		return;
 	case RELIC_AST_EXPR_CALL:
 		strlcat(out, "(", size);
-		strlcat(out, relic_string(ctx, expr->u.call.name, NULL), size);
+		strlcat(out, expr->u.call.name.bytes, size);
 		for (i = 0; i < expr->u.call.argc &&
 		    i < RELIC_MAX_FUNCTION_ARITY; i++) {
 			strlcat(out, " ", size);
@@ -781,7 +787,6 @@ static void
 negative_literals_are_terms_wherever_written(void)
 {
 	relic_ast_stmt_t *statement;
-	relic_value_t value;
 	diag_log_t log;
 	relic_t *ctx;
 
@@ -803,13 +808,14 @@ negative_literals_are_terms_wherever_written(void)
 
 	statement = statement_at(ctx, 0);
 	check(statement != NULL && statement->head.arity == 1 &&
-	    relic_value_decode(ctx, statement->head.terms[0].u.constant,
-	    &value) && value.type == RELIC_INTEGER && value.v.integer == -2,
+	    statement->head.terms[0].u.constant.type == RELIC_INTEGER &&
+	    statement->head.terms[0].u.constant.integer == -2,
 	    SCENARIO_NEGATIVE, "a head should hold the negative constant");
 	check(statement != NULL && statement->body_length == 1 &&
 	    statement->body[0].u.atom.arity == 2 &&
-	    relic_value_decode(ctx, statement->body[0].u.atom.terms[1].u.constant,
-	    &value) && value.type == RELIC_INTEGER && value.v.integer == -3,
+	    statement->body[0].u.atom.terms[1].u.constant.type ==
+	    RELIC_INTEGER &&
+	    statement->body[0].u.atom.terms[1].u.constant.integer == -3,
 	    SCENARIO_NEGATIVE, "an argument should hold the negative constant");
 
 	relic_destroy(ctx);
@@ -1342,8 +1348,7 @@ body_literal_is(relic_t *ctx, size_t statement_index, size_t literal_index,
 	if (kind != RELIC_LITERAL_POSITIVE)
 		return (true);
 
-	return (strcmp(relic_string(ctx, literal->u.atom.name, NULL),
-	    name) == 0);
+	return (strcmp(literal->u.atom.name.bytes, name) == 0);
 }
 
 /*
@@ -1378,8 +1383,8 @@ atoms_and_calls_are_told_apart_by_what_follows(void)
 
 	statement = statement_at(ctx, 0);
 	check(statement != NULL && statement->kind == RELIC_STMT_RULE &&
-	    strcmp(relic_string(ctx, statement->head.name, NULL),
-	    "length") == 0 && statement->head.arity == 1,
+	    strcmp(statement->head.name.bytes, "length") == 0 &&
+	    statement->head.arity == 1,
 	    SCENARIO_ATOM_OR_CALL, "length(X) :- ... should define length/1");
 	check(body_literal_is(ctx, 0, 1, RELIC_LITERAL_POSITIVE, "length"),
 	    SCENARIO_ATOM_OR_CALL, "length(X, 3) followed by . is an atom");

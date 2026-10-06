@@ -602,6 +602,21 @@ relic_value_intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
 }
 
 /*
+ * Intern a constant as written, an integer or a symbol's or a string's
+ * bytes.
+ */
+int
+relic_value_intern_constant(relic_t *ctx, const relic_constant_t *constant,
+    relic_dom_t *domp)
+{
+	if (constant->type == RELIC_INTEGER)
+		return (intern_integer(ctx, constant->integer, domp));
+
+	return (relic_value_intern_bytes(ctx, constant->type, constant->bytes,
+	    constant->length, domp));
+}
+
+/*
  * The value a symbol or string identifier names, when the symbol has been
  * interned as a value of `type`.
  */
@@ -680,8 +695,9 @@ relic_value_find_integer(const relic_t *ctx, int64_t integer)
 
 /*
  * The probe is the pool's own lookup, and then the string bit: bytes the
- * pool holds only as a name, or as a symbol value's spelling, have no
- * string identifier until interning one as a string sets the bit.
+ * pool holds only as a symbol value's spelling, or for a value a caller made
+ * and has not interned, have no string identifier until interning one as a
+ * string sets the bit.
  */
 relic_dom_t
 relic_value_find_string(const relic_t *ctx, const char *bytes, size_t length)

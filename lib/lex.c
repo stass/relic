@@ -18,8 +18,10 @@
  *
  * Source text is a sequence of bytes and this module says what those bytes
  * are: a name, a string literal, a number, a punctuation mark, or nothing at
- * all.  It interns the bytes of every name and every string literal, and it
- * reports nothing.  A byte sequence that is not a token comes back as
+ * all.  It interns nothing and it reports nothing.  A token carries its
+ * bytes, and the parser decides what they are: a predicate's name, a
+ * variable's, a function's, or a constant.  A byte sequence that is not a
+ * token comes back as
  * RELIC_TOKEN_ERROR carrying the reason, because the parser is the one that
  * knows whether it is still listening: after the first mistake in a
  * statement it is discarding wreckage and wants silence, and a lexer that
@@ -323,6 +325,9 @@ fail_token(relic_token_t *token, enum relic_lex_error error)
 	token->error = error;
 }
 
+/*
+ * Scan a name, whose spelling is the bytes the token spans.
+ */
 static int
 scan_identifier(relic_lexer_t *lexer, relic_token_t *token,
     enum relic_token_kind kind)
@@ -333,10 +338,12 @@ scan_identifier(relic_lexer_t *lexer, relic_token_t *token,
 	while (in_class(peek(lexer, 0), LEX_IDENT))
 		advance_byte(lexer);
 
-	if (relic_symbol_intern(lexer->ctx, lexer->text + start,
-	    lexer->offset - start, &token->symbol) != 0)
-		return (-1);
-
+	token->bytes = lexer->text + start;
+	token->length = lexer->offset - start;
+	if (token->length > RELIC_STRING_LENGTH_MAX) {
+		fail_token(token, RELIC_LEX_NAME_TOO_LONG);
+		return (0);
+	}
 	token->kind = kind;
 
 	return (0);
@@ -678,7 +685,10 @@ scan_string_escape(relic_lexer_t *lexer, relic_token_t *token, bool *decoded)
 }
 
 /*
- * Scan a string literal, whose opening quote the scan position holds.
+ * Scan a string literal, whose opening quote the scan position holds.  The
+ * token's bytes are the decoded literal in the scratch buffer, which the
+ * next literal overwrites, so they are read before the next token is
+ * scanned.
  *
  * A literal holds arbitrary bytes: those above 0x7f pass through
  * unexamined, so UTF-8 survives without the lexer knowing what UTF-8 is, and
@@ -736,10 +746,12 @@ scan_string(relic_lexer_t *lexer, relic_token_t *token)
 		}
 	}
 
-	if (relic_symbol_intern(lexer->ctx, lexer->decoded,
-	    lexer->decoded_length, &token->symbol) != 0)
-		return (-1);
-
+	token->bytes = lexer->decoded;
+	token->length = lexer->decoded_length;
+	if (token->length > RELIC_STRING_LENGTH_MAX) {
+		fail_token(token, RELIC_LEX_STRING_TOO_LONG);
+		return (0);
+	}
 	token->kind = RELIC_TOKEN_STRING;
 
 	return (0);

@@ -132,6 +132,8 @@ static void	 put_string_literal(relic_explain_line_t *line,
 		    const char *bytes, size_t length);
 static void	 put_subsumed_line(relic_t *ctx,
 		    const relic_adornment_t *adornment);
+static void	 put_spelling(relic_explain_line_t *line,
+		    const relic_spelling_t *spelling);
 static void	 put_symbol(const relic_t *ctx, relic_explain_line_t *line,
 		    uint32_t symbol);
 static void	 put_term(const relic_t *ctx, relic_explain_line_t *line,
@@ -141,7 +143,7 @@ static void	 put_text(relic_explain_line_t *line, const char *bytes,
 static void	 put_uint64(relic_explain_line_t *line, uint64_t value);
 static void	 put_value(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_dom_t dom);
-static void	 put_variable(const relic_t *ctx, relic_explain_line_t *line,
+static void	 put_variable(relic_explain_line_t *line,
 		    const relic_rule_t *rule, uint16_t slot);
 static void	 put_view(relic_explain_line_t *line, enum relic_view view);
 static bool	 reads_as_negation(const relic_t *ctx,
@@ -316,6 +318,12 @@ put_symbol(const relic_t *ctx, relic_explain_line_t *line, uint32_t symbol)
 	put_text(line, bytes, length);
 }
 
+static void
+put_spelling(relic_explain_line_t *line, const relic_spelling_t *spelling)
+{
+	put_text(line, spelling->bytes, spelling->length);
+}
+
 /*
  * A constant, the way the text output format writes it: an integer in
  * decimal, a symbol as its text, and a string as a quoted literal.
@@ -354,15 +362,15 @@ put_value(const relic_t *ctx, relic_explain_line_t *line, relic_dom_t dom)
 }
 
 static void
-put_variable(const relic_t *ctx, relic_explain_line_t *line,
-    const relic_rule_t *rule, uint16_t slot)
+put_variable(relic_explain_line_t *line, const relic_rule_t *rule,
+    uint16_t slot)
 {
 	if (slot >= rule->variable_count) {
 		line_put(line, "?");
 		return;
 	}
 
-	put_symbol(ctx, line, rule->variables[slot].name);
+	put_spelling(line, &rule->variables[slot].name);
 }
 
 static void
@@ -377,7 +385,7 @@ put_pred_name(const relic_t *ctx, relic_explain_line_t *line,
 		return;
 	}
 
-	put_symbol(ctx, line, entry->name);
+	put_spelling(line, &entry->name);
 }
 
 static void
@@ -532,7 +540,7 @@ put_expr(const relic_t *ctx, relic_explain_line_t *line,
 		put_value(ctx, line, expr->u.constant);
 		return;
 	case RELIC_EXPR_VARIABLE:
-		put_variable(ctx, line, rule, expr->u.slot);
+		put_variable(line, rule, expr->u.slot);
 		return;
 	case RELIC_EXPR_NEGATE:
 		parenthesized = negation_needs_parentheses(ctx,
@@ -612,7 +620,7 @@ put_arg(const relic_t *ctx, relic_explain_line_t *line,
 		put_value(ctx, line, arg->u.constant);
 		return;
 	case RELIC_ARG_VARIABLE:
-		put_variable(ctx, line, rule, arg->u.slot);
+		put_variable(line, rule, arg->u.slot);
 		return;
 	case RELIC_ARG_WILDCARD:
 		break;
@@ -637,7 +645,7 @@ put_term(const relic_t *ctx, relic_explain_line_t *line,
 	case RELIC_PLAN_NUMBER:
 	case RELIC_PLAN_TEXT:
 	case RELIC_PLAN_BIND:
-		put_variable(ctx, line, rule, term->u.slot);
+		put_variable(line, rule, term->u.slot);
 		return;
 	case RELIC_PLAN_ANY:
 		break;
@@ -735,12 +743,12 @@ put_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 
 	body = aggregate->body;
 
-	put_variable(ctx, line, rule, aggregate->result);
+	put_variable(line, rule, aggregate->result);
 	line_put(line, " = ");
 	line_put(line, relic_aggregate_spelling(aggregate->fn));
 	if (aggregate->fn != RELIC_AGG_COUNT) {
 		line_put_byte(line, '(');
-		put_variable(ctx, line, body, aggregate->column);
+		put_variable(line, body, aggregate->column);
 		line_put_byte(line, ')');
 	}
 
@@ -932,7 +940,7 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 		return;
 	case RELIC_OP_ASSIGN:
 		line_put(line, "assign ");
-		put_variable(ctx, line, rule, op->u.assign.slot);
+		put_variable(line, rule, op->u.assign.slot);
 		line_put(line, " = ");
 		put_expr(ctx, line, rule, op->u.assign.expr);
 		return;
@@ -965,12 +973,12 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 
 	body = fold->aggregate->body;
 
-	put_variable(ctx, line, rule, fold->slot);
+	put_variable(line, rule, fold->slot);
 	line_put(line, " = ");
 	line_put(line, relic_aggregate_spelling(fold->fn));
 	if (fold->fn != RELIC_AGG_COUNT) {
 		line_put_byte(line, '(');
-		put_variable(ctx, line, body, fold->column);
+		put_variable(line, body, fold->column);
 		line_put_byte(line, ')');
 	}
 	line_put_byte(line, ' ');
@@ -981,7 +989,7 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 		for (column = 0; column < fold->arity; column++) {
 			if (column > 0)
 				line_put(line, ", ");
-			put_variable(ctx, line, body, column);
+			put_variable(line, body, column);
 		}
 		line_put_byte(line, ')');
 	}

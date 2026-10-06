@@ -232,8 +232,10 @@ and
 .Fa max_memory
 the bytes of relation and index storage, the program's facts included,
 together with the table of the integers the program states and evaluation
-computes, the symbol pool, which holds every name, symbol and string the
-program states and every string evaluation computes, the buffers an
+computes, the symbol pool, which holds every symbol and string the program
+states and every string evaluation computes, the names of the predicates
+the program and the rewrites of its queries name and of the sources each
+was first read from, the buffers an
 evaluation computes strings in, the plans of an evaluation and the rewrite
 of a query; zero leaves either unbounded.
 .Fa max_memory
@@ -411,9 +413,8 @@ refuses any other bytes, a NUL among them, which only
 .Fn relic_value_string
 takes.
 A context holds at most 2^30 \- 1 distinct byte strings, which symbols and
-strings share with predicate names, variable names and source names, and at
-most 2^30 \- 1 distinct integers; a byte string is at most 2^32 \- 2 bytes
-long.
+strings share, and at most 2^30 \- 1 distinct integers; a byte string is
+at most 2^32 \- 2 bytes long.
 Interning past a limit, or past
 .Fa max_memory ,
 fails with the reason reported.
@@ -743,9 +744,13 @@ from one, and its
 .Fa file
 may be
 .Dv NULL .
-The message and the location are borrowed for the call; the
+The message and the location are borrowed for the call, the
 .Fa file
-name a location holds stays valid until the context is destroyed.
+name a location holds included, and a callback that keeps either copies
+it.
+The name lives as long as what was parsed under it: a loaded program's as
+long as the context, a prepared query's as long as the query, and an
+import's for the call.
 A message quotes program text as it was written, so a callback that writes
 it to a terminal escapes it first, as
 .Fn relic_diag_stderr
@@ -907,8 +912,8 @@ own, and are counted by
 and
 .Fa tuples_inserted .
 .Fa storage_bytes
-counts relation and index storage, the table of integers and the symbol
-pool together, as
+counts relation and index storage, the table of integers, the symbol pool
+and the names of predicates and their sources together, as
 .Fa max_memory
 does, and
 .Fa string_values

@@ -2088,15 +2088,11 @@ sweep_relation(relic_t *ctx, relic_dom_t *values, size_t count)
 {
 	relic_location_t where;
 	relic_pred_id_t pred;
-	uint32_t name;
 	size_t ordinal;
 	char spelling[32];
 
-	if (relic_symbol_intern(ctx, "edge", 4, &name) != 0)
-		return (NULL);
-
 	bzero(&where, sizeof(where));
-	if (relic_pred_intern(ctx, name, 2, &where, &pred) != 0)
+	if (relic_pred_intern(ctx, "edge", 4, 2, &where, &pred) != 0)
 		return (NULL);
 
 	for (ordinal = 0; ordinal < count; ordinal++) {
@@ -2537,12 +2533,9 @@ static const relic_relation_t *
 relation_named(relic_t *ctx, const char *name, uint16_t arity)
 {
 	relic_pred_id_t pred;
-	uint32_t symbol;
 
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
-		return (NULL);
-
-	if (relic_pred_intern(ctx, symbol, arity, NULL, &pred) != 0)
+	if (relic_pred_intern(ctx, name, strlen(name), arity, NULL,
+	    &pred) != 0)
 		return (NULL);
 
 	return (relic_relation_read(ctx, pred));
@@ -3600,8 +3593,8 @@ rules_are_whole_statements(relic_t *ctx)
 	if (rules->count == 0)
 		return (true);
 
-	spelling = relic_symbol_bytes(ctx, relic_pred_of(ctx,
-	    rules->entries[rules->count - 1].head)->name, NULL);
+	spelling = relic_pred_of(ctx,
+	    rules->entries[rules->count - 1].head)->name.bytes;
 
 	return (spelling != NULL && strncmp(spelling, "agg$", 4) != 0);
 }
@@ -4104,10 +4097,12 @@ fill_table(relic_t *ctx, enum filled_table table, size_t count)
 		}
 
 		snprintf(name, sizeof(name), "fill%zu", i);
-		if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
+		if (table == FILL_SYMBOLS &&
+		    relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
 			return (-1);
 		if (table == FILL_PREDICATES &&
-		    relic_pred_intern(ctx, symbol, 1, NULL, &pred) != 0)
+		    relic_pred_intern(ctx, name, strlen(name), 1, NULL,
+		    &pred) != 0)
 			return (-1);
 	}
 

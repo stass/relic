@@ -217,20 +217,14 @@ predicate(relic_t *ctx, const char *scenario, const char *name, uint16_t arity)
 {
 	relic_location_t where;
 	relic_pred_id_t pred;
-	uint32_t symbol;
-
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0) {
-		checkf(false, scenario, "the name of %s/%u should intern",
-		    name, (unsigned int)arity);
-		return (RELIC_ID_NONE);
-	}
 
 	bzero(&where, sizeof(where));
 	where.file = "test_relation.c";
 	where.line = 1;
 	where.column = 1;
 
-	if (relic_pred_intern(ctx, symbol, arity, &where, &pred) != 0) {
+	if (relic_pred_intern(ctx, name, strlen(name), arity, &where,
+	    &pred) != 0) {
 		checkf(false, scenario, "the predicate %s/%u should intern",
 		    name, (unsigned int)arity);
 		return (RELIC_ID_NONE);
@@ -984,7 +978,8 @@ the_memory_limit_refuses_a_tuple_and_says_so(void)
 
 	for (ordinal = 0; ordinal <= LIMIT_ATTEMPTS; ordinal++)
 		(void)value(ctx, SCENARIO_MEMORY_LIMIT, ordinal);
-	ctx->account.limit = relic_value_storage_bytes(ctx) + MEMORY_LIMIT;
+	ctx->account.limit = relic_value_storage_bytes(ctx) +
+	    ctx->account.name_bytes + MEMORY_LIMIT;
 	snprintf(expected, sizeof(expected),
 	    "limit exceeded: memory=%zu while deriving edge/2",
 	    ctx->account.limit);

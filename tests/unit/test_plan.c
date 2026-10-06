@@ -370,8 +370,8 @@ reads_in_order(const fixture_t *fixture, const char *const *expected,
 		if (op->kind == RELIC_OP_FILTER)
 			continue;
 
-		name = relic_symbol_bytes(fixture->ctx, relic_pred_of(
-		    fixture->ctx, op->u.atom.relation->pred)->name, NULL);
+		name = relic_pred_of(fixture->ctx,
+		    op->u.atom.relation->pred)->name.bytes;
 		if (matched == count || strcmp(name, expected[matched]) != 0)
 			return (false);
 		matched++;
@@ -394,9 +394,8 @@ slot_named(const fixture_t *fixture, size_t rule_index, const char *name)
 	rule = &fixture->ctx->program.rules.entries[rule_index];
 
 	for (slot = 0; slot < rule->variable_count; slot++) {
-		spelling = relic_symbol_bytes(fixture->ctx,
-		    rule->variables[slot].name, NULL);
-		if (spelling != NULL && strcmp(spelling, name) == 0)
+		spelling = rule->variables[slot].name.bytes;
+		if (strcmp(spelling, name) == 0)
 			return (slot);
 	}
 

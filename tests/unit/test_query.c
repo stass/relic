@@ -33,14 +33,18 @@
 #define	SCENARIO_COLUMNS	"a query's columns are its named variables"
 #define	SCENARIO_FACTS		"a fact costs its tuple and comes first"
 #define	SCENARIO_FOREIGN	"a query runs only in its own context"
+#define	SCENARIO_TEXT		"a program keeps nothing of its text"
 #define	SCENARIO_GROUPS		"a query's groups refused by a limit report once"
 #define	SCENARIO_GROWTH		"answering queries does not grow the context"
+#define	SCENARIO_GENERATED	"a rewrite's names are charged to the limit"
 #define	SCENARIO_LIMIT		"an answer refused by a limit is given back"
 #define	SCENARIO_LOADED		"the program's queries are enumerated"
 #define	SCENARIO_NAMES		"answers are named in the order queries compile"
 #define	SCENARIO_PLANNING	"planning is charged to the memory limit"
 #define	SCENARIO_PREPARING	"preparing queries stays within the memory limit"
 #define	SCENARIO_REFUSED	"a refused query leaves the program valid"
+#define	SCENARIO_SESSION	"a session's queries leave the values flat"
+#define	SCENARIO_SOURCE		"a warning names a destroyed query's source"
 #define	SCENARIO_STOP		"a callback can stop the rows"
 #define	SCENARIO_STREAMED	"a streamed answer holds nothing"
 #define	SCENARIO_UNDEFINED	"a query warns of a predicate nothing defines"
@@ -48,6 +52,7 @@
 
 /* How many times the growth test prepares, runs and destroys its query. */
 #define	GROWTH_ROUNDS		64
+#define	SESSION_LINES		1000
 
 /*
  * The memory limit of the planning scenario, which admits every relation
@@ -59,6 +64,9 @@
 #define	PLANNING_RECURSIVE	200
 #define	PREPARING_LIMIT		65536
 #define	PREPARING_MOST		1000000
+#define	GENERATED_LIMIT		(256 * 1024)
+#define	GENERATED_NAME		4000
+#define	GENERATED_ARITY		8
 #define	PLANNING_QUERY		4000
 
 /*
@@ -100,6 +108,7 @@ typedef struct diag_log diag_log_t;
 typedef struct explained explained_t;
 typedef struct integer_rows integer_rows_t;
 typedef struct stopping_rows stopping_rows_t;
+typedef struct string_rows string_rows_t;
 
 /*
  * What a context holds that answering a query could leave behind: its
@@ -116,6 +125,7 @@ struct context_size {
 struct diag_log {
 	size_t	errors;
 	size_t	warnings;
+	char	warned_file[64];	/* the last warning's source name */
 };
 
 /* The first column of each row a query delivered, when it is an integer. */
@@ -128,6 +138,14 @@ struct integer_rows {
  * The rows a callback asks for before it stops them, how many it was given,
  * and whether each was the integer that is its position among them.
  */
+/* The bytes a row's first column must hold, and how many rows held them. */
+struct string_rows {
+	const char	*bytes;
+	size_t		 length;
+	size_t		 matched;
+	relic_t		*ctx;
+};
+
 struct stopping_rows {
 	size_t	wanted;
 	size_t	delivered;
@@ -178,6 +196,13 @@ static void	 refused_under(size_t max_tuples, size_t max_memory,
 		    const char *expected);
 static void	 a_query_runs_only_in_its_own_context(void);
 static void	 a_query_warns_of_an_undefined_predicate(void);
+static void	 a_sessions_queries_leave_the_values_flat(void);
+static void	 a_program_keeps_nothing_of_its_text(void);
+static int	 match_strings(void *callback_ctx,
+		    const relic_value_t *values, size_t count);
+static void	 a_rewrites_names_are_charged_to_the_limit(void);
+static char	*adorned_query(const char *name, unsigned int bound);
+static void	 a_warning_names_a_destroyed_querys_source(void);
 static void	 a_refused_query_leaves_the_program_valid(void);
 static void	 an_answer_refused_by_a_limit_is_given_back(void);
 static void	 planning_is_charged_to_the_memory_limit(void);
@@ -191,16 +216,18 @@ static void	 the_programs_queries_are_enumerated(void);
 
 static void
 record_diagnostic(void *callback_ctx, enum relic_diag_level level,
-    const relic_location_t *where RELIC_UNUSED,
-    const char *message RELIC_UNUSED)
+    const relic_location_t *where, const char *message RELIC_UNUSED)
 {
 	diag_log_t *log;
 
 	log = callback_ctx;
 	if (level == RELIC_ERROR)
 		log->errors++;
-	else if (level == RELIC_WARNING)
+	else if (level == RELIC_WARNING) {
 		log->warnings++;
+		snprintf(log->warned_file, sizeof(log->warned_file), "%s",
+		    where == NULL || where->file == NULL ? "" : where->file);
+	}
 }
 
 static relic_t *
@@ -342,10 +369,9 @@ columns_are_the_named_variables(void)
 	    SCENARIO_COLUMNS, "the head and the answer have three columns");
 
 	for (column = 0; column < rule->head_arity; column++) {
-		spelling = relic_symbol_bytes(ctx,
-		    rule->variables[rule->head_args[column].u.slot].name, NULL);
-		checkf(spelling != NULL &&
-		    strcmp(spelling, expected[column]) == 0,
+		spelling = rule->variables[
+		    rule->head_args[column].u.slot].name.bytes;
+		checkf(strcmp(spelling, expected[column]) == 0,
 		    SCENARIO_COLUMNS, "column %u should be %s",
 		    (unsigned int)column, expected[column]);
 	}
@@ -791,6 +817,314 @@ a_query_warns_of_an_undefined_predicate(void)
 }
 
 /*
+ * An interactive session names each line's query for its place in the
+ * session, and the name is kept only by the query.  So a session of many
+ * lines asking after values the program holds leaves the values where the
+ * first line left them: no symbol, string or byte of value storage for
+ * each line's name.
+ */
+static void
+a_sessions_queries_leave_the_values_flat(void)
+{
+	char source_name[32];
+	relic_query_t *query;
+	relic_stats_t first;
+	relic_stats_t later;
+	size_t first_symbols;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t line;
+	size_t rows;
+	bool answered;
+
+	ctx = context_with("edge(a, b).\nedge(b, c).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	answered = true;
+	for (line = 1; answered && line <= SESSION_LINES; line++) {
+		snprintf(source_name, sizeof(source_name), "<query %zu>",
+		    line);
+		query = relic_query_prepare(ctx, source_name, "path(a, X)?");
+
+		rows = 0;
+		answered = query != NULL &&
+		    relic_query_run(ctx, query, count_rows, &rows) == 0 &&
+		    rows == 2;
+		relic_query_destroy(query);
+
+		if (line == 1) {
+			relic_stats(ctx, &first);
+			first_symbols = relic_symbol_count(ctx);
+		}
+	}
+	relic_stats(ctx, &later);
+
+	checkf(answered, SCENARIO_SESSION,
+	    "every line should answer two rows, line %zu did not", line - 1);
+	checkf(relic_symbol_count(ctx) == first_symbols, SCENARIO_SESSION,
+	    "the pool should hold %zu symbols, as after the first line, "
+	    "not %zu", first_symbols, relic_symbol_count(ctx));
+	checkf(later.symbol_values == first.symbol_values, SCENARIO_SESSION,
+	    "the context should hold %zu symbol values, as after the first "
+	    "line, not %zu", first.symbol_values, later.symbol_values);
+	checkf(later.string_values == first.string_values, SCENARIO_SESSION,
+	    "the context should hold %zu string values, as after the first "
+	    "line, not %zu", first.string_values, later.string_values);
+	checkf(later.storage_bytes == first.storage_bytes, SCENARIO_SESSION,
+	    "the context should hold %zu bytes of storage, as after the "
+	    "first line, not %zu", first.storage_bytes, later.storage_bytes);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * The text of a query of the predicate `name` of GENERATED_ARITY columns,
+ * binding to 0 the columns whose bits are set in `bound` and naming a
+ * variable in each other, in a string the caller frees, or NULL when there
+ * was no memory for it.
+ */
+static char *
+adorned_query(const char *name, unsigned int bound)
+{
+	size_t length;
+	char *text;
+	char *end;
+	unsigned int column;
+
+	length = strlen(name) + GENERATED_ARITY * 4 + 4;
+	text = malloc(length);
+	if (text == NULL)
+		return (NULL);
+
+	end = stpcpy(text, name);
+	*end++ = '(';
+	for (column = 0; column < GENERATED_ARITY; column++) {
+		if (column > 0)
+			*end++ = ',';
+		if (bound & (1u << column))
+			*end++ = '0';
+		else
+			*end++ = (char)('A' + column);
+	}
+	stpcpy(end, ")?");
+
+	return (text);
+}
+
+/*
+ * The rewrite of a query names the predicates it generates after the
+ * predicates they stand for, so each adornment of a predicate with a long
+ * name holds a copy of that name for the life of the context.  Those names
+ * are charged to the memory limit like every value, so a caller asking
+ * after a long-named predicate with a new pattern of bound columns each
+ * time is refused, naming the limit, before the names outgrow it.
+ */
+static void
+a_rewrites_names_are_charged_to_the_limit(void)
+{
+	relic_query_t *query;
+	const char *reported;
+	diag_log_t log;
+	relic_t *ctx;
+	char *name;
+	char *program;
+	char *text;
+	unsigned int bound;
+	size_t names_bytes;
+	size_t rows;
+	bool within;
+
+	name = repeated("w", "x", GENERATED_NAME - 1, "");
+	program = NULL;
+	if (name != NULL && asprintf(&program,
+	    "%s(A, B, C, D, E, F, G, H) :- %s(B, C, D, E, F, G, H, A).\n",
+	    name, name) < 0)
+		program = NULL;
+	if (program == NULL) {
+		check(false, SCENARIO_GENERATED, "the program is written");
+		free(name);
+		return;
+	}
+
+	ctx = limited_context(GENERATED_LIMIT, program, &log);
+	free(program);
+	if (ctx == NULL) {
+		free(name);
+		return;
+	}
+
+	within = true;
+	query = NULL;
+	for (bound = 1; bound < (1u << GENERATED_ARITY); bound++) {
+		text = adorned_query(name, bound);
+		query = text == NULL ? NULL :
+		    relic_query_prepare(ctx, NULL, text);
+		free(text);
+		rows = 0;
+		if (query != NULL &&
+		    relic_query_run(ctx, query, count_rows, &rows) != 0) {
+			relic_query_destroy(query);
+			query = NULL;
+		}
+
+		names_bytes = relic_arena_total_bytes(
+		    &ctx->program.predicates.names);
+		if (names_bytes > ctx->account.limit)
+			within = false;
+		if (query == NULL)
+			break;
+		relic_query_destroy(query);
+	}
+
+	checkf(within, SCENARIO_GENERATED,
+	    "the names should stay within the %zu-byte limit, and hold %zu",
+	    ctx->account.limit, names_bytes);
+	reported = relic_error(ctx);
+	checkf(query != NULL || (reported != NULL &&
+	    strncmp(reported, "limit exceeded: memory=", 23) == 0),
+	    SCENARIO_GENERATED, "a refused query should name the limit, "
+	    "not read \"%s\"", reported == NULL ? "(none)" : reported);
+
+	relic_destroy(ctx);
+	free(name);
+}
+
+/*
+ * Count a row whose first column is a string holding exactly the bytes
+ * wanted.
+ */
+static int
+match_strings(void *callback_ctx, const relic_value_t *values, size_t count)
+{
+	string_rows_t *rows;
+	const char *bytes;
+	size_t length;
+
+	rows = callback_ctx;
+	if (count == 0 || values[0].type != RELIC_STRING)
+		return (0);
+
+	bytes = relic_string(rows->ctx, values[0].v.id, &length);
+	if (bytes != NULL && length == rows->length &&
+	    bcmp(bytes, rows->bytes, length) == 0)
+		rows->matched++;
+
+	return (0);
+}
+
+/*
+ * A program keeps nothing of the text it was loaded from: its rules are
+ * compiled, and their constants interned, after the load has returned and
+ * the caller's text may be gone.  String constants with escapes and an
+ * embedded NUL, in facts, rule bodies, heads and an aggregate's body, two
+ * to a statement, answer the same after the text is overwritten and freed.
+ */
+static void
+a_program_keeps_nothing_of_its_text(void)
+{
+	static const char program[] =
+	    "e(\"a\\0b\", 1).\n"
+	    "e(\"c\\td\", 2).\n"
+	    "tagged(Y) :- e(X, _), X != \"c\\td\", "
+	    "Y = cat(X, \"\\x21tail\").\n"
+	    "kept(N) :- e(\"a\\0b\", N).\n"
+	    "many(K) :- K = count { e(\"c\\td\", N) }.\n";
+	integer_rows_t kept;
+	integer_rows_t many;
+	string_rows_t tagged;
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+	char *text;
+
+	text = strdup(program);
+	if (text == NULL) {
+		check(false, SCENARIO_TEXT, "the program is copied");
+		return;
+	}
+	ctx = context_with(text, &log);
+	memset(text, '#', sizeof(program) - 1);
+	free(text);
+	if (ctx == NULL)
+		return;
+
+	bzero(&tagged, sizeof(tagged));
+	tagged.ctx = ctx;
+	tagged.bytes = "a\0b!tail";
+	tagged.length = 8;
+	query = relic_query_prepare(ctx, NULL, "tagged(Y)?");
+	check(query != NULL &&
+	    relic_query_run(ctx, query, match_strings, &tagged) == 0 &&
+	    tagged.matched == 1, SCENARIO_TEXT,
+	    "a head's string is computed from the fact's and the rule's");
+	relic_query_destroy(query);
+
+	bzero(&kept, sizeof(kept));
+	query = relic_query_prepare(ctx, NULL, "kept(N)?");
+	check(query != NULL &&
+	    relic_query_run(ctx, query, keep_integers, &kept) == 0 &&
+	    kept.count == 1 && kept.values[0] == 1, SCENARIO_TEXT,
+	    "a body's string selects the fact holding it");
+	relic_query_destroy(query);
+
+	bzero(&many, sizeof(many));
+	query = relic_query_prepare(ctx, NULL, "many(K)?");
+	check(query != NULL &&
+	    relic_query_run(ctx, query, keep_integers, &many) == 0 &&
+	    many.count == 1 && many.values[0] == 1, SCENARIO_TEXT,
+	    "an aggregate's string selects the fact holding it");
+	relic_query_destroy(query);
+
+	relic_destroy(ctx);
+}
+
+/*
+ * A predicate's first reference is what its undefined-predicate warning
+ * points at, and the reference may be a query's, whose source name the
+ * caller owns and the query keeps only while it lives.  A query refused
+ * for memory before its check sweeps for undefined predicates leaves the
+ * warning to the next check, which comes after the query is gone and the
+ * caller's buffer is reused; the warning still names the query's source.
+ */
+static void
+a_warning_names_a_destroyed_querys_source(void)
+{
+	char source_name[32];
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+
+	ctx = limited_context(0, "p(0).\n", &log);
+	if (ctx == NULL)
+		return;
+
+	snprintf(source_name, sizeof(source_name), "request.dl");
+	query = relic_query_prepare(ctx, source_name,
+	    "ee(X), p(\"a string the program does not hold\")?");
+	check(query == NULL, SCENARIO_SOURCE,
+	    "the query is refused by the memory limit");
+	checkf(log.warnings == 0, SCENARIO_SOURCE,
+	    "the refused query should draw no warning, it drew %zu",
+	    log.warnings);
+	relic_query_destroy(query);
+
+	snprintf(source_name, sizeof(source_name), "overwritten");
+	ctx->account.limit = 0;
+
+	check(relic_check(ctx) == 0, SCENARIO_SOURCE, "the program checks");
+	checkf(log.warnings == 1, SCENARIO_SOURCE,
+	    "ee/1 should draw one warning, it drew %zu", log.warnings);
+	checkf(strcmp(log.warned_file, "request.dl") == 0, SCENARIO_SOURCE,
+	    "the warning should name request.dl, not \"%s\"",
+	    log.warned_file);
+
+	relic_destroy(ctx);
+}
+
+/*
  * A callback that returns nonzero receives no further rows, and the run still
  * reports success: the caller asked to stop and nothing failed.  The rows
  * delivered are exactly those before the stop, wherever it falls among the
@@ -1000,11 +1334,12 @@ a_query_runs_only_in_its_own_context(void)
 
 /*
  * A context holding a program, under a memory limit of `allowance` bytes
- * past what its values -- the integer table and the symbol pool, which its
- * names and constants fill -- hold once it is loaded.  The limit is set
- * after the load, so that it measures what the scenarios exercise and not
- * the few kilobytes a pool holding a handful of names takes, which a
- * scenario's small limit would otherwise be spent on.
+ * past what its tables -- the integer table, the symbol pool its constants
+ * fill and the name store its predicates' names fill -- hold once it is
+ * loaded.  The limit is set after the load, so that it measures what the
+ * scenarios exercise and not the few kilobytes a pool or a name store
+ * holding a handful of entries takes, which a scenario's small limit would
+ * otherwise be spent on.
  */
 static relic_t *
 limited_context(size_t allowance, const char *program, diag_log_t *log)
@@ -1025,7 +1360,8 @@ limited_context(size_t allowance, const char *program, diag_log_t *log)
 		relic_destroy(ctx);
 		return (NULL);
 	}
-	ctx->account.limit = relic_value_storage_bytes(ctx) + allowance;
+	ctx->account.limit = relic_value_storage_bytes(ctx) +
+	    ctx->account.name_bytes + allowance;
 
 	return (ctx);
 }
@@ -1448,6 +1784,10 @@ main(void)
 	an_unsafe_query_makes_the_program_invalid();
 	a_refused_query_leaves_the_program_valid();
 	a_query_warns_of_an_undefined_predicate();
+	a_sessions_queries_leave_the_values_flat();
+	a_program_keeps_nothing_of_its_text();
+	a_rewrites_names_are_charged_to_the_limit();
+	a_warning_names_a_destroyed_querys_source();
 	a_callback_can_stop_the_rows();
 	a_streamed_answer_holds_nothing();
 	a_query_runs_only_in_its_own_context();

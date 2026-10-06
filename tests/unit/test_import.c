@@ -122,6 +122,7 @@ static void	 a_refused_import_stops_reading(void);
 static void	 a_header_is_skipped(void);
 static void	 a_long_field_crosses_reads(void);
 static void	 a_description_is_read_once(void);
+static void	 a_source_name_is_read_once(void);
 static void	 a_failed_read_adds_nothing(void);
 static void	 a_path_is_opened_and_named(void);
 static void	 a_stream_cannot_call_in(void);
@@ -1155,8 +1156,9 @@ a_failed_import_adds_nothing(void)
  * import stopped is read from the stream, which it reads a chunk at a time.
  *
  * Under the tuple limit, a table whose every row is new is refused at its
- * eleventh row, having interned the predicate's name and that row's symbols
- * but no later row's: e, a0 and b0 to b10.  Under the memory limit, a table
+ * eleventh row, having interned the predicate and that row's symbols but no
+ * later row's: e/2, and a0 and b0 to b10, a predicate's name being no
+ * symbol.  Under the memory limit, a table
  * of distinct pairs over a few values, all interned beforehand so that the
  * import interns nothing, is refused at the row whose columns take the floor
  * past what the limit leaves, the one after half the table.
@@ -1170,6 +1172,7 @@ a_refused_import_stops_reading(void)
 	capture_t capture;
 	relic_dom_t dom;
 	relic_t *ctx;
+	size_t predicates;
 	size_t symbols;
 	size_t length;
 	size_t cutoff;
@@ -1188,17 +1191,20 @@ a_refused_import_stops_reading(void)
 	ctx = context_with_capture(&config, &capture);
 	if (ctx != NULL) {
 		symbols = relic_symbol_count(ctx);
+		predicates = relic_pred_count(ctx);
 		status = import_counting(ctx, table, length, &read);
 		checkf(status == -1 && strcmp(capture.message,
 		    "limit exceeded: tuples=10 while loading e/2") == 0,
 		    SCENARIO_BOUNDED, "the tuple limit should refuse the "
 		    "import, not \"%s\"", capture.message);
 		checkf(relic_symbol_count(ctx) - symbols ==
-		    BOUNDED_TUPLES + 3 && interned(ctx, "e") &&
+		    BOUNDED_TUPLES + 2 && !interned(ctx, "e") &&
 		    interned(ctx, "b10") && !interned(ctx, "b11"),
-		    SCENARIO_BOUNDED, "the refused import should intern e, a0 "
-		    "and b0 to b10, %d symbols, not %zu", BOUNDED_TUPLES + 3,
+		    SCENARIO_BOUNDED, "the refused import should intern a0 "
+		    "and b0 to b10, %d symbols, not %zu", BOUNDED_TUPLES + 2,
 		    relic_symbol_count(ctx) - symbols);
+		check(relic_pred_count(ctx) - predicates == 1,
+		    SCENARIO_BOUNDED, "the refused import should intern e/2");
 		checkf(read >= 0 && (size_t)read <= RELIC_IMPORT_READ_CHUNK,
 		    SCENARIO_BOUNDED, "the refused import should read one "
 		    "chunk of the table, not %ld bytes", read);
@@ -1459,6 +1465,7 @@ struct reentering_read {
 	enum relic_column	*columns;
 	size_t			 column_count;
 	char			*predicate;
+	char			*source_name;
 	size_t			 offset;
 	int			 fail_errno;
 	int			 refusals;
@@ -1480,6 +1487,8 @@ reenter_and_read(reentering_read_t *reading, char *buffer, size_t size)
 			reading->columns[i] = RELIC_COLUMN_STRING;
 		if (reading->predicate != NULL)
 			reading->predicate[0] = 'v';
+		if (reading->source_name != NULL)
+			reading->source_name[0] = 'X';
 	}
 
 	if (reading->fail_errno != 0) {
@@ -1568,6 +1577,54 @@ a_stream_cannot_call_in(void)
 	    "the read function's call should be refused");
 	check(rows_of(reading.ctx, "r(X)?") == 2, SCENARIO_REENTRY,
 	    "the import it ran inside should complete");
+
+	fclose(stream);
+	relic_destroy(reading.ctx);
+}
+
+/*
+ * The source name is borrowed too, and a read function that rewrites it
+ * while the table is read changes nothing: a mistake in the table is
+ * located in the source as it was named when the import began.
+ */
+static void
+a_source_name_is_read_once(void)
+{
+	static const enum relic_column columns[] = { RELIC_COLUMN_INTEGER };
+	char source_name[] = "original.csv";
+	reentering_read_t reading;
+	relic_import_t import;
+	capture_t capture;
+	FILE *stream;
+
+	bzero(&reading, sizeof(reading));
+	reading.ctx = context_with_capture(NULL, &capture);
+	if (reading.ctx == NULL)
+		return;
+
+	reading.table = "1\nx\n";
+	reading.source_name = source_name;
+	stream = reentering_stream(&reading);
+	if (stream == NULL) {
+		printf("skip: %s: no stream with a read function of the "
+		    "caller's own\n", SCENARIO_LOCATION);
+		relic_destroy(reading.ctx);
+		return;
+	}
+
+	bzero(&import, sizeof(import));
+	import.predicate = "n";
+	import.columns = columns;
+	import.column_count = 1;
+	import.format = RELIC_FORMAT_TSV;
+
+	check(relic_import_file(reading.ctx, source_name, stream,
+	    &import) != 0 && source_name[0] == 'X', SCENARIO_LOCATION,
+	    "an import of a field that is not an integer fails");
+	checkf(strcmp(capture.file, "original.csv") == 0 && capture.line == 2,
+	    SCENARIO_LOCATION, "the mistake should be located at "
+	    "original.csv:2, not %s:%u", capture.file,
+	    (unsigned int)capture.line);
 
 	fclose(stream);
 	relic_destroy(reading.ctx);
@@ -1763,6 +1820,7 @@ main(void)
 	a_long_field_crosses_reads();
 	a_stream_cannot_call_in();
 	a_description_is_read_once();
+	a_source_name_is_read_once();
 	a_failed_read_adds_nothing();
 	a_path_is_opened_and_named();
 

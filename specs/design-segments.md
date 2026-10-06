@@ -557,9 +557,9 @@ predicates, `max_magic_preds`, counts per rewrite.
 
 **The program's predicates.** Their names leave the pool with the other
 names of section 4. The context gets a **name store**, an arena of
-alignment one like the pool's string arena, never rewound, holding each
-program predicate's name and the source names of section 4's retained
-locations; an entry keeps a pointer, a length and the hash it was placed
+alignment one like the pool's string arena, never rewound and charged to
+`max_memory` as the pool is, holding each program predicate's name and the
+source names of section 4's retained locations; an entry keeps a pointer, a length and the hash it was placed
 by, exactly as a pool entry does. The table's key is the name's bytes and
 the arity: the hash is the bytes' hash under the context's seed with the
 arity mixed in as one more word, and the probe compares the arity and
@@ -697,10 +697,10 @@ Nothing new is configurable. `RELIC_PRED_MAX` bounds the predicate table
 with the run's generated predicates included; the pool's and the value
 tables' ceilings of `specs/design-memory.md` sections 7 and 8 bound the
 program segment and the run segment together, since the identifiers are
-one space; and `max_memory` charges the tables whole, so a run that
-interns more than the limit admits is refused at the interning, and the
-refusal ends the run as section 5 ends a failed one. A result's pool has the
-symbol pool's ceiling and no charge.
+one space; and `max_memory` charges the tables and the name store whole,
+so a run that interns more than the limit admits is refused at the
+interning, and the refusal ends the run as section 5 ends a failed one. A
+result's pool has the symbol pool's ceiling and no charge.
 
 ---
 

@@ -312,10 +312,9 @@ static relic_pred_id_t
 predicate(relic_t *ctx, const char *name, uint16_t arity)
 {
 	relic_pred_id_t pred;
-	uint32_t symbol_id;
 
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol_id) != 0 ||
-	    relic_pred_intern(ctx, symbol_id, arity, NULL, &pred) != 0)
+	if (relic_pred_intern(ctx, name, strlen(name), arity, NULL,
+	    &pred) != 0)
 		return (RELIC_ID_NONE);
 
 	return (pred);
@@ -545,10 +544,11 @@ a_refused_load_leaves_the_program_as_it_was(void)
  * is materialized first, and loading the facts again, which changes
  * nothing, is seen to keep the relations current.  The memory limit is set
  * once the rule is loaded, at what the context then holds, so that it
- * admits no fact and the context holds the rule alone.  The pool counts
- * against the limit, so the names the refused load uses are interned
- * before the limit is set: what it refuses is then the first store to grow,
- * not a name.
+ * admits no fact and the context holds the rule alone.  The pool and the
+ * name store count against the limit, so the values the refused load uses
+ * are interned, and the program checked so that the name store holds the
+ * rule's predicates and has room for one more, before the limit is set:
+ * what the load refuses is then the first store to grow, not a name.
  */
 static void
 refused_by(enum limit_kind kind)
@@ -589,6 +589,8 @@ refused_by(enum limit_kind kind)
 	else {
 		intern_symbols(ctx, more_names);
 		intern_symbols(control, more_names);
+		check(relic_check(ctx) == 0 && relic_check(control) == 0,
+		    SCENARIO_REFUSED, "the rule checks");
 		ctx->account.limit = bytes_held(ctx);
 		control->account.limit = bytes_held(control);
 		snprintf(expected, sizeof(expected),
@@ -990,11 +992,11 @@ queries_do_not_accumulate_indexes(void)
 }
 
 /*
- * The bytes the symbol pool grows by, past what loading `program` interns,
- * over the session of queries_do_not_accumulate_indexes() run without a
- * limit.  Each query's rewrite interns the names of the predicates it
- * makes, and each load its symbols; a fresh context answering one query
- * holds only that query's names, so the least limit of one query alone
+ * The bytes the symbol pool and the name store grow by, past what loading
+ * `program` holds, over the session of queries_do_not_accumulate_indexes() run
+ * without a limit.  Each query's rewrite keeps the names of the predicates it
+ * makes, and each load interns its symbols; a fresh context answering one
+ * query holds only that query's names, so the least limit of one query alone
  * does not cover the others'.
  */
 static size_t
@@ -1012,13 +1014,13 @@ session_name_bytes(const char *program)
 	if (ctx == NULL)
 		return (0);
 
-	loaded = ctx->account.pool_bytes;
+	loaded = ctx->account.pool_bytes + ctx->account.name_bytes;
 	for (round = 0; round < SESSION_ROUNDS; round++) {
 		for (i = 0; i < SESSION_QUERIES; i++)
 			(void)rows_of(ctx, session_queries[i], &rows);
 		(void)relic_load_string(ctx, "more.dl", session_loads[round]);
 	}
-	grown = ctx->account.pool_bytes - loaded;
+	grown = ctx->account.pool_bytes + ctx->account.name_bytes - loaded;
 	relic_destroy(ctx);
 
 	return (grown);
@@ -1268,7 +1270,7 @@ a_load_over_the_limit_grows_no_store(void)
 /*
  * The bytes the memory limit counts against a context once it has loaded
  * b(0) and then `facts` -- its stores, the integer table the facts'
- * integers grew and the symbol pool holding its names -- or SIZE_MAX when
+ * integers grew and the name store holding its names -- or SIZE_MAX when
  * that could not be measured.
  */
 static size_t
@@ -1305,15 +1307,15 @@ intern_symbols(relic_t *ctx, const char *const *names)
 }
 
 /*
- * The bytes a context's stores, value table and pool hold between
- * operations, when no arena or round holds any: the total the memory limit
- * is enforced against.
+ * The bytes a context's stores, value table, pool and name store hold
+ * between operations, when no arena or round holds any: the total the
+ * memory limit is enforced against.
  */
 static size_t
 bytes_held(const relic_t *ctx)
 {
 	return (ctx->account.store_bytes + ctx->account.value_bytes +
-	    ctx->account.pool_bytes);
+	    ctx->account.pool_bytes + ctx->account.name_bytes);
 }
 
 /*

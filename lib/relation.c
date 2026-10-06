@@ -2440,12 +2440,10 @@ relic_relation_name(const relic_t *ctx, const relic_relation_t *relation,
 		return (buffer);
 	}
 
-	name = NULL;
+	name = "?";
 	pred = relic_pred_of(ctx, relation->pred);
 	if (pred != NULL)
-		name = relic_symbol_bytes(ctx, pred->name, NULL);
-	if (name == NULL)
-		name = "?";
+		name = pred->name.bytes;
 
 	if (is_called_by_predicate(ctx, relation))
 		return (relic_diag_name(name, buffer, size));

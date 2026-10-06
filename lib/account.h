@@ -25,7 +25,7 @@
  * The memory account: the bytes a context holds on the user's behalf while
  * it works, which the configured memory limit is enforced against.
  *
- * Five kinds of holder contribute, each keeping its own part of the total
+ * Six kinds of holder contribute, each keeping its own part of the total
  * exact.  The relation store counts in `store_bytes` the capacity of every
  * relation's columns and indexes, an index being built included: the base
  * stores holding the program's facts and the relations evaluation derives
@@ -33,7 +33,10 @@
  * integer table and of its record of which symbols are string values, and
  * the symbol pool counts in `pool_bytes` its entries, its index and its
  * bytes, whose integers and strings evaluation computes as well as the
- * program writes.  An arena initialized charged counts in `arena_bytes`
+ * program writes.  The predicate table counts in `name_bytes` the bytes of
+ * its name store: the names of the program's predicates, of those a query's
+ * rewrite generates, and of the sources their first references were read
+ * from.  An arena initialized charged counts in `arena_bytes`
  * every chunk it holds from the allocator, and gives them back when it is
  * reset.  Arenas holding what the caller wrote -- the program's rules and
  * queries, the schedule, a query -- are not charged, and neither is the
@@ -55,16 +58,16 @@
  * thread, while no round's workers run.
  *
  * `refused` records that the limit refused an arena a chunk, or the value
- * table or the symbol pool a growth.  A refused round is not recorded,
- * because nothing reports it: the round is run again inserting as it
+ * table, the symbol pool or the name store a growth.  A refused round is not
+ * recorded, because nothing reports it: the round is run again inserting as it
  * derives, which holds no buffers, and whatever refuses that run reports
- * itself.  The arena or the table fails as it would had the allocator
- * refused, and its caller reports the failure through relic_diag_no_memory()
- * as every allocation failure is reported; that function takes the record
- * with relic_account_take_refusal() and reports the limit instead of
- * exhaustion.  Nothing else reads it.  The
- * beginning of an operation, and of each activity within one, clears a
- * record nobody reported, so that no later failure is blamed on it.
+ * itself.  The arena or the table fails as it would had the allocator refused,
+ * and its caller reports the failure through relic_diag_no_memory() as every
+ * allocation failure is reported; that function takes the record with
+ * relic_account_take_refusal() and reports the limit instead of exhaustion.
+ * Nothing else reads it.  The beginning of an operation, and of each activity
+ * within one, clears a record nobody reported, so that no later failure is
+ * blamed on it.
  */
 
 struct relic_account {
@@ -72,6 +75,7 @@ struct relic_account {
 	size_t	store_bytes;	/* relation and index storage */
 	size_t	value_bytes;	/* the integer table and the string bits */
 	size_t	pool_bytes;	/* the symbol pool */
+	size_t	name_bytes;	/* the predicate table's name store */
 	size_t	arena_bytes;	/* chunks of the charged arenas */
 	relic_atomic_size_t round_bytes; /* buffers of a deferred round */
 	bool	refused;

@@ -429,6 +429,22 @@ relic_diag_name(const char *name, char *buffer, size_t size)
 	return (buffer);
 }
 
+const char *
+relic_diag_spelling(const char *bytes, size_t length, char *buffer,
+    size_t size)
+{
+	size_t kept;
+
+	kept = length < size - 1 ? length : size - 1;
+	if (kept > 0)
+		bcopy(bytes, buffer, kept);
+	buffer[kept] = '\0';
+	if (kept < length)
+		relic_diag_mark_cut(buffer, size);
+
+	return (buffer);
+}
+
 /*
  * Mark a name cut to fill all of `buffer` as cut, by ending it in "...".  A
  * buffer too small to hold the mark is not one any caller passes, and a name

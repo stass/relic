@@ -823,9 +823,9 @@ affecting library consumers.
 The identifier's encoding -- its type in its top bits, a symbol value being
 its symbol identifier, and a value table of integers only -- and the
 symbol pool's entry and byte packing are specified in
-`specs/design-comparison-cost.md` section 7. The symbol pool holds every
-byte string, names and literals and the strings evaluation computes alike,
-one identifier per byte string, and its storage and the value table's bits
+`specs/design-comparison-cost.md` section 7. The symbol pool holds the
+bytes of every symbol and string value, literals and the strings evaluation
+computes alike, one identifier per byte string, and its storage and the value table's bits
 over it are charged to the memory limit with relation storage,
 `specs/design-strings.md` section 9.1. D-3 asks for the
 representation to be revisited when a measured workload shows its cost;
@@ -2377,8 +2377,8 @@ maximum string length                2^32 - 2 bytes
 maximum nesting of a pattern's ( )   32
 ```
 
-The symbol pool is charged to the memory limit whole, names and literals
-and the strings evaluation computes alike, since a rule such as
+The symbol pool is charged to the memory limit whole, literals and the
+strings evaluation computes alike, since a rule such as
 `s(Y) :- s(X), Y = cat(X, "a")` interns a string per derivation; so are
 the buffers an evaluation computes strings in. A string longer than the
 length limit and a pattern that is not a regular expression are not

@@ -168,8 +168,8 @@ typedef void relic_term_visitor_t(void *state, const relic_ast_term_t *term);
  * many aggregates it holds.
  */
 struct relic_scope {
-	uint32_t	name;
-	size_t		home;
+	relic_spelling_t	name;
+	size_t			home;
 };
 
 struct relic_scopes {
@@ -195,7 +195,7 @@ struct relic_scope_walk {
  * occurrence a refusal points at and nothing after it is looked at.
  */
 struct relic_group_columns {
-	uint32_t		name[RELIC_MAX_ARITY + 1];
+	relic_spelling_t	name[RELIC_MAX_ARITY + 1];
 	relic_location_t	where[RELIC_MAX_ARITY + 1];
 	uint16_t		count;
 };
@@ -370,7 +370,7 @@ static bool	 literal_assigns(const relic_literal_t *literal,
 static void	 mark_group_predicates_derived(relic_t *ctx,
 		    const relic_compiled_statement_t *compiled);
 static uint16_t	 named_slot(const relic_compiler_t *compiler,
-		    uint32_t name);
+		    const relic_spelling_t *name);
 static void	 note_group_column(void *state, const relic_ast_term_t *term);
 static enum relic_compile_result occupy_slot(relic_compiler_t *compiler,
 		    const relic_ast_variable_t *variable,
@@ -398,18 +398,17 @@ static void	 seed_atom_columns(relic_compiler_t *compiler,
 static void	 seed_group_columns(relic_compiler_t *compiler,
 		    const relic_group_columns_t *columns,
 		    const relic_aggregate_t *aggregate, size_t position);
-static void	 seed_variable(relic_compiler_t *compiler, uint32_t name,
-		    const relic_location_t *where, uint32_t occurrences);
+static void	 seed_variable(relic_compiler_t *compiler,
+		    const relic_spelling_t *name, const relic_location_t *where,
+		    uint32_t occurrences);
 static void	 share_variable(void *state, const relic_ast_term_t *term);
-static bool	 singleton_exempt(const relic_compiler_t *compiler,
-		    const relic_variable_t *variable);
+static bool	 singleton_exempt(const relic_variable_t *variable);
 static enum relic_compile_result store_variables(relic_compiler_t *compiler);
 static uint64_t	 unbound_variables(const relic_compiler_t *compiler);
-static const char *variable_name(const relic_compiler_t *compiler,
-		    const relic_variable_t *variable, char *buffer,
-		    size_t size);
+static const char *variable_name(const relic_variable_t *variable,
+		    char *buffer, size_t size);
 static bool	 variable_is_local(const relic_scopes_t *scopes,
-		    uint32_t name, size_t region);
+		    const relic_spelling_t *name, size_t region);
 static void	 visit_expr_terms(const relic_ast_expr_t *expr,
 		    relic_term_visitor_t *visit, void *state);
 static void	 visit_group_terms(const relic_ast_aggregate_t *aggregate,
@@ -500,16 +499,9 @@ describe_statement(const relic_compiler_t *compiler, char *buffer,
  * is an identifier byte, so it is safe to quote.
  */
 static const char *
-variable_name(const relic_compiler_t *compiler,
-    const relic_variable_t *variable, char *buffer, size_t size)
+variable_name(const relic_variable_t *variable, char *buffer, size_t size)
 {
-	const char *bytes;
-
-	bytes = relic_symbol_bytes(compiler->ctx, variable->name, NULL);
-	if (bytes == NULL)
-		bytes = "?";
-
-	return (relic_diag_name(bytes, buffer, size));
+	return (relic_diag_name(variable->name.bytes, buffer, size));
 }
 
 static void
@@ -544,7 +536,8 @@ occupy_slot(relic_compiler_t *compiler, const relic_ast_variable_t *variable,
 		for (slot = 0; slot < compiler->variable_count; slot++) {
 			entry = &compiler->variables[slot];
 
-			if (entry->anonymous || entry->name != variable->name)
+			if (entry->anonymous || !relic_spelling_equal(
+			    &entry->name, &variable->name))
 				continue;
 
 			entry->occurrences++;
@@ -586,9 +579,16 @@ compile_term(relic_compiler_t *compiler, const relic_ast_term_t *term,
 
 	bzero(arg, sizeof(*arg));
 
+	/*
+	 * A constant becomes a value of the context here, as the statement is
+	 * compiled.  Interning can fail only for want of memory or of
+	 * identifiers, which says nothing about the statement.
+	 */
 	if (term->kind == RELIC_TERM_CONSTANT) {
 		arg->kind = RELIC_ARG_CONSTANT;
-		arg->u.constant = term->u.constant;
+		if (relic_value_intern_constant(compiler->ctx,
+		    &term->u.constant, &arg->u.constant) != 0)
+			return (RELIC_COMPILE_INCOMPLETE);
 
 		return (RELIC_COMPILE_OK);
 	}
@@ -664,10 +664,13 @@ compile_atom(relic_compiler_t *compiler, const relic_ast_atom_t *source,
 	bzero(atom, sizeof(*atom));
 	atom->where = source->where;
 
-	if (relic_pred_intern(compiler->ctx, source->name, source->arity,
-	    &source->where, &atom->pred) != 0)
+	if (relic_pred_intern(compiler->ctx, source->name.bytes,
+	    source->name.length, source->arity, &source->where,
+	    &atom->pred) != 0)
 		return (RELIC_COMPILE_INCOMPLETE);
-	relic_pred_reference(compiler->ctx, atom->pred, &source->where);
+	if (relic_pred_reference(compiler->ctx, atom->pred,
+	    &source->where) != 0)
+		return (RELIC_COMPILE_INCOMPLETE);
 
 	if (source->arity == 0)
 		return (RELIC_COMPILE_OK);
@@ -1048,12 +1051,14 @@ scope_compare(const void *left, const void *right)
 {
 	const relic_scope_t *a;
 	const relic_scope_t *b;
+	int order;
 
 	a = left;
 	b = right;
 
-	if (a->name != b->name)
-		return (a->name < b->name ? -1 : 1);
+	order = relic_spelling_compare(&a->name, &b->name);
+	if (order != 0)
+		return (order);
 	if (a->home != b->home)
 		return (a->home < b->home ? -1 : 1);
 
@@ -1075,7 +1080,8 @@ fold_scopes(relic_scopes_t *scopes)
 	for (in = 0; in < scopes->count; in++) {
 		kept = out > 0 ? &scopes->entries[out - 1] : NULL;
 
-		if (kept != NULL && kept->name == scopes->entries[in].name) {
+		if (kept != NULL && relic_spelling_equal(&kept->name,
+		    &scopes->entries[in].name)) {
 			if (kept->home != scopes->entries[in].home)
 				kept->home = RELIC_REGION_RULE;
 			continue;
@@ -1128,21 +1134,25 @@ classify_scopes(relic_t *ctx, const relic_ast_stmt_t *statement,
  * is `region`: whether every occurrence of it lies inside that aggregate.
  */
 static bool
-variable_is_local(const relic_scopes_t *scopes, uint32_t name, size_t region)
+variable_is_local(const relic_scopes_t *scopes, const relic_spelling_t *name,
+    size_t region)
 {
 	size_t low;
 	size_t high;
 	size_t middle;
+	int order;
 
 	low = 0;
 	high = scopes->count;
 	while (low < high) {
 		middle = low + (high - low) / 2;
 
-		if (scopes->entries[middle].name == name)
+		order = relic_spelling_compare(&scopes->entries[middle].name,
+		    name);
+		if (order == 0)
 			return (scopes->entries[middle].home == region);
 
-		if (scopes->entries[middle].name < name)
+		if (order < 0)
 			low = middle + 1;
 		else
 			high = middle;
@@ -1166,7 +1176,8 @@ note_group_column(void *state, const relic_ast_term_t *term)
 		return;
 
 	for (i = 0; i < columns->count; i++) {
-		if (columns->name[i] == term->u.variable.name)
+		if (relic_spelling_equal(&columns->name[i],
+		    &term->u.variable.name))
 			return;
 	}
 
@@ -1215,7 +1226,7 @@ share_variable(void *state, const relic_ast_term_t *term)
 		return;
 	if (term->kind != RELIC_TERM_VARIABLE || term->u.variable.anonymous)
 		return;
-	if (variable_is_local(walk->compiler->scopes, term->u.variable.name,
+	if (variable_is_local(walk->compiler->scopes, &term->u.variable.name,
 	    walk->position))
 		return;
 
@@ -1257,7 +1268,6 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
 	size_t name_length;
 	size_t length;
 	size_t room;
-	uint32_t symbol;
 	int written;
 
 	head = NULL;
@@ -1267,8 +1277,8 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
 	if (compiler->statement->kind == RELIC_STMT_RULE) {
 		holder = compiler->rule.head;
 		head = relic_pred_of(compiler->ctx, holder);
-		name = relic_symbol_bytes(compiler->ctx, head->name,
-		    &name_length);
+		name = head->name.bytes;
+		name_length = head->name.length;
 	}
 
 	room = GROUP_PREFIX_LENGTH + name_length + GROUP_ORDINALS_MAX;
@@ -1291,14 +1301,12 @@ intern_group_predicate(relic_compiler_t *compiler, size_t position,
 	assert(written > 0 && (size_t)written < room - length);
 	length += (size_t)written;
 
-	if (relic_symbol_intern(compiler->ctx, text, length, &symbol) != 0) {
+	if (relic_pred_intern(compiler->ctx, text, length, arity, where,
+	    idp) != 0) {
 		free(text);
 		return (RELIC_COMPILE_INCOMPLETE);
 	}
 	free(text);
-
-	if (relic_pred_intern(compiler->ctx, symbol, arity, where, idp) != 0)
-		return (RELIC_COMPILE_INCOMPLETE);
 	relic_pred_name_group(compiler->ctx, *idp, holder);
 
 	return (RELIC_COMPILE_OK);
@@ -1311,10 +1319,11 @@ static enum relic_compile_result
 intern_body_atom(relic_compiler_t *compiler, const relic_ast_atom_t *atom,
     relic_pred_id_t *predp)
 {
-	if (relic_pred_intern(compiler->ctx, atom->name, atom->arity,
-	    &atom->where, predp) != 0)
+	if (relic_pred_intern(compiler->ctx, atom->name.bytes,
+	    atom->name.length, atom->arity, &atom->where, predp) != 0)
 		return (RELIC_COMPILE_INCOMPLETE);
-	relic_pred_reference(compiler->ctx, *predp, &atom->where);
+	if (relic_pred_reference(compiler->ctx, *predp, &atom->where) != 0)
+		return (RELIC_COMPILE_INCOMPLETE);
 
 	return (RELIC_COMPILE_OK);
 }
@@ -1393,13 +1402,15 @@ body_is_relation(const relic_compiler_t *compiler,
 			return (false);
 
 		for (j = 0; j < i; j++) {
-			if (atom->terms[j].u.variable.name ==
-			    term->u.variable.name)
+			if (relic_spelling_equal(
+			    &atom->terms[j].u.variable.name,
+			    &term->u.variable.name))
 				return (false);
 		}
 
 		if (aggregate->fn != RELIC_AGG_COUNT &&
-		    term->u.variable.name == aggregate->column.u.variable.name)
+		    relic_spelling_equal(&term->u.variable.name,
+		    &aggregate->column.u.variable.name))
 			names_column = true;
 	}
 
@@ -1430,13 +1441,14 @@ aggregate_is_grouped(const relic_compiler_t *compiler,
  * occupies, which it must already have been given.
  */
 static uint16_t
-named_slot(const relic_compiler_t *compiler, uint32_t name)
+named_slot(const relic_compiler_t *compiler, const relic_spelling_t *name)
 {
 	uint16_t slot;
 
 	for (slot = 0; slot < compiler->variable_count; slot++) {
 		if (!compiler->variables[slot].anonymous &&
-		    compiler->variables[slot].name == name)
+		    relic_spelling_equal(&compiler->variables[slot].name,
+		    name))
 			break;
 	}
 	assert(slot < compiler->variable_count);
@@ -1494,7 +1506,7 @@ key_atom_relation(relic_compiler_t *compiler, const relic_ast_atom_t *atom,
 
 	for (column = 0; column < atom->arity; column++) {
 		if (variable_is_local(compiler->scopes,
-		    atom->terms[column].u.variable.name, position))
+		    &atom->terms[column].u.variable.name, position))
 			continue;
 		aggregate->key_mask |= UINT32_C(1) << column;
 		aggregate->shared_count++;
@@ -1511,7 +1523,7 @@ key_atom_relation(relic_compiler_t *compiler, const relic_ast_atom_t *atom,
 		if ((aggregate->key_mask & (UINT32_C(1) << column)) == 0)
 			continue;
 		shared[key] = named_slot(compiler,
-		    atom->terms[column].u.variable.name);
+		    &atom->terms[column].u.variable.name);
 		key++;
 	}
 	aggregate->shared = shared;
@@ -1606,14 +1618,14 @@ compile_aggregate(relic_compiler_t *compiler,
  * and none for a body with no head.
  */
 static void
-seed_variable(relic_compiler_t *compiler, uint32_t name,
+seed_variable(relic_compiler_t *compiler, const relic_spelling_t *name,
     const relic_location_t *where, uint32_t occurrences)
 {
 	relic_variable_t *seeded;
 
 	seeded = &compiler->variables[compiler->variable_count];
 	bzero(seeded, sizeof(*seeded));
-	seeded->name = name;
+	seeded->name = *name;
 	seeded->where = *where;
 	seeded->occurrences = occurrences;
 	compiler->variable_count++;
@@ -1633,17 +1645,17 @@ seed_group_columns(relic_compiler_t *compiler,
     size_t position)
 {
 	const relic_compiler_t *outer;
-	uint32_t name;
+	const relic_spelling_t *name;
 	uint16_t column;
 	uint16_t i;
 
 	outer = compiler->outer;
 
 	for (i = 0; i < aggregate->shared_count; i++) {
-		name = outer->variables[aggregate->shared[i]].name;
+		name = &outer->variables[aggregate->shared[i]].name;
 
 		for (column = 0; column < columns->count; column++) {
-			if (columns->name[column] == name)
+			if (relic_spelling_equal(&columns->name[column], name))
 				break;
 		}
 		assert(column < columns->count);
@@ -1652,11 +1664,11 @@ seed_group_columns(relic_compiler_t *compiler,
 	}
 
 	for (column = 0; column < columns->count; column++) {
-		if (!variable_is_local(outer->scopes, columns->name[column],
+		if (!variable_is_local(outer->scopes, &columns->name[column],
 		    position))
 			continue;
 
-		seed_variable(compiler, columns->name[column],
+		seed_variable(compiler, &columns->name[column],
 		    &columns->where[column], 1);
 	}
 }
@@ -1672,7 +1684,7 @@ seed_atom_columns(relic_compiler_t *compiler, const relic_ast_atom_t *atom)
 	uint16_t column;
 
 	for (column = 0; column < atom->arity; column++)
-		seed_variable(compiler, atom->terms[column].u.variable.name,
+		seed_variable(compiler, &atom->terms[column].u.variable.name,
 		    &atom->terms[column].where, 0);
 }
 
@@ -1716,7 +1728,7 @@ report_group_unbound(relic_compiler_t *compiler,
 		    &variable->where,
 		    "variable %s in the aggregate of %s is not bound by a "
 		    "positive literal or an assignment of the aggregate body",
-		    variable_name(compiler, variable, named, sizeof(named)),
+		    variable_name(variable, named, sizeof(named)),
 		    described);
 		if (slot < aggregate->shared_count)
 			relic_diag_note(compiler->ctx, &variable->where,
@@ -1822,7 +1834,7 @@ compile_aggregate_body(relic_compiler_t *outer,
 		return (result);
 
 	if (source->fn != RELIC_AGG_COUNT) {
-		column = named_slot(&compiler, source->column.u.variable.name);
+		column = named_slot(&compiler, &source->column.u.variable.name);
 		aggregate->column = column;
 	}
 
@@ -1970,8 +1982,9 @@ compile_head(relic_compiler_t *compiler)
 
 	head = &compiler->statement->head;
 
-	if (relic_pred_intern(compiler->ctx, head->name, head->arity,
-	    &head->where, &compiler->rule.head) != 0)
+	if (relic_pred_intern(compiler->ctx, head->name.bytes,
+	    head->name.length, head->arity, &head->where,
+	    &compiler->rule.head) != 0)
 		return (RELIC_COMPILE_INCOMPLETE);
 
 	relic_pred_name_head(compiler->ctx, compiler->rule.head);
@@ -2154,7 +2167,7 @@ report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
 		    &variable->where,
 		    "variable %s in %s is not bound by a positive body literal "
 		    "or an assignment",
-		    variable_name(compiler, variable, named, sizeof(named)),
+		    variable_name(variable, named, sizeof(named)),
 		    described);
 	}
 }
@@ -2167,17 +2180,12 @@ report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
  * is how a rule documents a column it deliberately ignores.
  */
 static bool
-singleton_exempt(const relic_compiler_t *compiler,
-    const relic_variable_t *variable)
+singleton_exempt(const relic_variable_t *variable)
 {
-	const char *bytes;
-
 	if (variable->anonymous)
 		return (true);
 
-	bytes = relic_symbol_bytes(compiler->ctx, variable->name, NULL);
-
-	return (bytes != NULL && bytes[0] == '_');
+	return (variable->name.length > 0 && variable->name.bytes[0] == '_');
 }
 
 /*
@@ -2199,7 +2207,7 @@ report_singleton_variables(relic_compiler_t *compiler, uint64_t unbound)
 		if (variable->occurrences != 1)
 			continue;
 
-		if (singleton_exempt(compiler, variable))
+		if (singleton_exempt(variable))
 			continue;
 
 		/*
@@ -2210,7 +2218,7 @@ report_singleton_variables(relic_compiler_t *compiler, uint64_t unbound)
 		if ((unbound & (UINT64_C(1) << slot)) != 0)
 			continue;
 
-		variable_name(compiler, variable, named, sizeof(named));
+		variable_name(variable, named, sizeof(named));
 
 		relic_diag_warning(compiler->ctx, &variable->where,
 		    "variable %s occurs only once in this rule", named);

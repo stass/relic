@@ -1619,7 +1619,6 @@ what_the_rewrite_derives_does_not_leak(void)
 	const relic_relation_t *paths;
 	diag_log_t log;
 	relic_t *ctx;
-	uint32_t symbol;
 	relic_pred_id_t pred;
 	char *rows;
 
@@ -1649,8 +1648,7 @@ what_the_rewrite_derives_does_not_leak(void)
 	    "the program should materialize after rewritten queries");
 
 	paths = NULL;
-	if (relic_symbol_intern(ctx, "path", 4, &symbol) == 0 &&
-	    relic_pred_intern(ctx, symbol, 2, NULL, &pred) == 0)
+	if (relic_pred_intern(ctx, "path", 4, 2, NULL, &pred) == 0)
 		paths = relic_relation_read(ctx, pred);
 	checkf(paths != NULL && relic_relation_count(paths) == 4,
 	    SCENARIO_STATE,

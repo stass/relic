@@ -16,11 +16,12 @@
 /*
  * Byte strings interned to identifiers.
  *
- * Every predicate name, symbol and string literal in a program becomes an
+ * Every symbol and string value a context holds has its bytes interned to an
  * identifier here, and the evaluator compares identifiers rather than bytes.
- * Two calls with equal bytes return the same identifier; two calls with
- * unequal bytes return different ones.  Length is part of the key, so bytes
- * that differ only in an embedded NUL are different symbols.
+ * Names of predicates, variables and sources are not values and are kept
+ * elsewhere.  Two calls with equal bytes return the same identifier; two
+ * calls with unequal bytes return different ones.  Length is part of the
+ * key, so bytes that differ only in an embedded NUL are different symbols.
  *
  * Identifiers are assigned in order of first appearance and are never reused,
  * which is what makes a run reproducible.

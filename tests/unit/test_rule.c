@@ -73,7 +73,7 @@ static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
 static size_t	 rule_count(const relic_t *ctx);
-static uint32_t	 symbol(relic_t *ctx, const char *name);
+static bool	 spelled(const relic_spelling_t *spelling, const char *name);
 static void	 a_check_compiles_only_what_is_new(void);
 static void	 a_literal_resolves_to_the_arguments_it_names(void);
 static void	 a_program_that_held_a_bad_rule_stays_refused(void);
@@ -164,19 +164,13 @@ rule_at(const relic_t *ctx, size_t index)
 }
 
 /*
- * The identifier a spelling was interned under, or RELIC_ID_NONE when this
- * context never saw it.  Interning would assign one, so a test that asks
- * about a name the program did not mention must not use this to find out.
+ * Whether a spelling the compiler kept is `name`.
  */
-static uint32_t
-symbol(relic_t *ctx, const char *name)
+static bool
+spelled(const relic_spelling_t *spelling, const char *name)
 {
-	uint32_t id;
-
-	if (relic_symbol_intern(ctx, name, strlen(name), &id) != 0)
-		return (RELIC_ID_NONE);
-
-	return (id);
+	return (spelling->length == strlen(name) &&
+	    bcmp(spelling->bytes, name, spelling->length) == 0);
 }
 
 /*
@@ -219,9 +213,9 @@ variables_are_numbered_as_they_are_written(void)
 		return;
 	}
 
-	checkf(rule->variables[0].name == symbol(ctx, "X") &&
-	    rule->variables[1].name == symbol(ctx, "Z") &&
-	    rule->variables[2].name == symbol(ctx, "Y"), SCENARIO_SLOTS,
+	checkf(spelled(&rule->variables[0].name, "X") &&
+	    spelled(&rule->variables[1].name, "Z") &&
+	    spelled(&rule->variables[2].name, "Y"), SCENARIO_SLOTS,
 	    "the slots hold X, Z, Y in first-occurrence order");
 
 	/*
@@ -279,7 +273,7 @@ a_literal_resolves_to_the_arguments_it_names(void)
 
 	pred = relic_pred_of(ctx, literal->u.atom.pred);
 	checkf(pred != NULL && pred->arity == 2 &&
-	    pred->name == symbol(ctx, "size"), SCENARIO_ARGUMENTS,
+	    spelled(&pred->name, "size"), SCENARIO_ARGUMENTS,
 	    "the first literal resolved to size/2");
 
 	check(literal->u.atom.args[0].kind == RELIC_ARG_VARIABLE &&
@@ -1040,11 +1034,7 @@ a_rule_at_the_nesting_bound_prints_within_it(void)
 static const char *
 pred_spelling(const relic_t *ctx, relic_pred_id_t pred)
 {
-	const char *bytes;
-
-	bytes = relic_symbol_bytes(ctx, relic_pred_of(ctx, pred)->name, NULL);
-
-	return (bytes != NULL ? bytes : "");
+	return (relic_pred_of(ctx, pred)->name.bytes);
 }
 
 /*
@@ -1096,9 +1086,9 @@ an_aggregate_reads_a_group_rule_of_its_own(void)
 	    0 && group->head_arity == 3, SCENARIO_GROUP,
 	    "the group is agg$dir_size$2$0$2/3");
 	check(group->variable_count == 3 &&
-	    group->variables[0].name == symbol(ctx, "Dir") &&
-	    group->variables[1].name == symbol(ctx, "F") &&
-	    group->variables[2].name == symbol(ctx, "Size"), SCENARIO_GROUP,
+	    spelled(&group->variables[0].name, "Dir") &&
+	    spelled(&group->variables[1].name, "F") &&
+	    spelled(&group->variables[2].name, "Size"), SCENARIO_GROUP,
 	    "the group's columns are Dir, F, Size");
 	check(group->head_args[0].kind == RELIC_ARG_VARIABLE &&
 	    group->head_args[0].u.slot == 0 &&
@@ -1110,7 +1100,7 @@ an_aggregate_reads_a_group_rule_of_its_own(void)
 	    aggregate->column == 2, SCENARIO_GROUP, "the aggregate is keyed "
 	    "on the outer Dir in the group's first column and folds its third");
 	check(outer->variable_count == 2 &&
-	    outer->variables[aggregate->result].name == symbol(ctx, "S"),
+	    spelled(&outer->variables[aggregate->result].name, "S"),
 	    SCENARIO_GROUP, "the outer rule numbers only Dir and S");
 	check(relic_pred_of(ctx, outer->head)->program_rules == 1 &&
 	    relic_pred_of(ctx, group->head)->program_rules == 1,
@@ -1404,8 +1394,8 @@ a_fold_in_place_is_keyed_where_its_key_stands(void)
 				break;
 			}
 			keyed = keyed && aggregate->shared_count > k &&
-			    outer->variables[aggregate->shared[k]].name ==
-			    symbol(ctx, cases[i].key_names[k]);
+			    spelled(&outer->variables[
+			    aggregate->shared[k]].name, cases[i].key_names[k]);
 		}
 		checkf(keyed && (aggregate->shared_count > 0 ||
 		    aggregate->shared == NULL), SCENARIO_KEY_COLUMNS,

@@ -70,7 +70,11 @@ introduced and the probe order is fixed at compile time like every other
 one. The bytes live in the context's **name store**, an arena of alignment
 one that is never rewound, which also holds the source name of the one
 location the table retains; a predicate's name is not a symbol of the
-pool, which holds values only (`specs/design-segments.md` section 4).
+pool, which holds values only (`specs/design-segments.md` section 4). The
+store is charged to `max_memory` as the pool is: a copy that would grow it
+is admitted first, and the account is then set to what it holds, so a
+caller naming new predicates without end is refused at the limit rather
+than growing memory nothing counts.
 
 An entry records:
 

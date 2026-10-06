@@ -133,11 +133,18 @@ typedef uint32_t relic_pred_id_t;
  * RELIC_ID_NONE, which it always is for a predicate named by its own name.
  * A diagnostic names a generated predicate by what it is part of, since
  * that is what the reader wrote and can change.
+ *
+ * `name` is in the table's name store, where it never moves, and `hash` is
+ * the hash of the name and the arity the table's index placed the entry
+ * by.  `referenced_at` names its source by a copy in the name store too,
+ * since the statement that referenced the predicate may be a query's, whose
+ * text and arena die with it.
  */
 struct relic_pred {
 	relic_location_t	referenced_at;
 	size_t			program_rules;
-	uint32_t		name;	/* interned spelling */
+	relic_spelling_t	name;
+	uint32_t		hash;
 	relic_pred_id_t		views;
 	relic_pred_id_t		stands_for;
 	enum relic_pred_kind	kind;
@@ -155,12 +162,26 @@ struct relic_pred {
  * and discards: identifiers are stable indexes that every later pass uses,
  * and the relation store is indexed by them, so a predicate's base store
  * keeps its facts under the same identifier across every query.
+ *
+ * `names` is the name store: every predicate's name, and the source names
+ * the entries' retained locations point at, packed in an arena of alignment
+ * one that is never rewound, so a pointer into it lives as long as the
+ * context, and charged to the memory limit as the symbol pool is.  A name
+ * is not a value, and the store keeps the symbol pool holding values
+ * alone.  `sources` holds the source names copied there,
+ * `source_count` of them, and `source_index` finds one by its bytes, so
+ * that each is copied once however many predicates its text referenced.
  */
 struct relic_predtab {
 	relic_pred_t	*entries;	/* indexed by id - 1 */
 	size_t		 count;
 	size_t		 capacity;
 	relic_idtab_t	 index;
+	relic_arena_t	 names;
+	const char	**sources;	/* indexed by position - 1 */
+	size_t		 source_count;
+	size_t		 source_capacity;
+	relic_idtab_t	 source_index;
 	uint64_t	 hash_seed;	/* the context's */
 };
 
@@ -337,10 +358,10 @@ struct relic_literal {
  * One distinct variable of a rule, in the slot its first occurrence was
  * assigned.
  *
- * `name` is the interned spelling, which diagnostics quote and which later
- * explain output names.  `where` is the first occurrence, which is where
- * both the safety error and the singleton warning point.  `occurrences` is
- * what the singleton check reads.
+ * `name` is the spelling, in the arena that holds the rule, which
+ * diagnostics quote and which later explain output names.  `where` is the
+ * first occurrence, which is where both the safety error and the singleton
+ * warning point.  `occurrences` is what the singleton check reads.
  *
  * `anonymous` marks a slot taken by a bare `_`.  Such a slot exists only in
  * a rule that is being rejected: `_` in a positive or a negated body
@@ -351,7 +372,7 @@ struct relic_literal {
  */
 struct relic_variable {
 	relic_location_t	where;
-	uint32_t		name;
+	relic_spelling_t	name;
 	uint32_t		occurrences;
 	bool			anonymous;
 };

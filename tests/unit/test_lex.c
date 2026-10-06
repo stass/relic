@@ -52,11 +52,16 @@ typedef struct scan scan_t;
  * these, assert against it, and release it; nothing is shared between them,
  * so a failing test cannot make the next one fail.  `copy` is the input
  * scan_text() made, or NULL.
+ *
+ * A string token's bytes are in the lexer's scratch buffer, which the next
+ * string overwrites, so the scan copies each into `strings`, at the token's
+ * index, and points the token at its copy.
  */
 struct scan {
 	relic_t		*ctx;
 	char		*copy;
 	relic_token_t	 tokens[TOKEN_MAX];
+	char		*strings[TOKEN_MAX];
 	size_t		 count;
 };
 
@@ -105,13 +110,24 @@ scan_open(scan_t *scan, const char *text, size_t length)
 		relic_token_t token;
 
 		if (relic_lexer_next(&lexer, &token) != 0) {
-			ok = false;	/* interning ran out of memory */
+			ok = false;	/* a literal's buffer could not grow */
 			break;
 		}
 
 		if (scan->count == TOKEN_MAX) {
 			ok = false;
 			break;
+		}
+		if (token.kind == RELIC_TOKEN_STRING) {
+			scan->strings[scan->count] = malloc(token.length + 1);
+			if (scan->strings[scan->count] == NULL) {
+				ok = false;
+				break;
+			}
+			if (token.length > 0)
+				bcopy(token.bytes, scan->strings[scan->count],
+				    token.length);
+			token.bytes = scan->strings[scan->count];
 		}
 		scan->tokens[scan->count] = token;
 		scan->count++;
@@ -158,34 +174,37 @@ scan_text(scan_t *scan, const char *text, const char *scenario)
 static void
 scan_close(scan_t *scan)
 {
+	size_t i;
+
 	relic_destroy(scan->ctx);
 	free(scan->copy);
+	for (i = 0; i < TOKEN_MAX; i++)
+		free(scan->strings[i]);
 	bzero(scan, sizeof(*scan));
 }
 
 /*
- * Whether the interned bytes of the token at `index` are exactly these.
+ * Whether the decoded bytes of the string token at `index` are exactly
+ * these.
  */
 static bool
 string_holds(const scan_t *scan, size_t index, const char *bytes,
     size_t length)
 {
-	const char *interned;
-	size_t interned_length;
+	const relic_token_t *token;
 
 	if (index >= scan->count ||
 	    scan->tokens[index].kind != RELIC_TOKEN_STRING)
 		return (false);
 
-	interned = relic_symbol_bytes(scan->ctx, scan->tokens[index].symbol,
-	    &interned_length);
-	if (interned == NULL || interned_length != length)
+	token = &scan->tokens[index];
+	if (token->length != length)
 		return (false);
 
 	if (length == 0)
 		return (true);
 
-	return (bcmp(interned, bytes, length) == 0);
+	return (bcmp(token->bytes, bytes, length) == 0);
 }
 
 /*

@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#include <strings.h>
 
 #include <relic.h>
 
@@ -26,8 +28,11 @@
  * program -- resolving predicates, numbering variables, checking safety -- is
  * a separate pass over a finished tree.
  *
- * Every node is allocated from the program arena and lives as long as the
- * loaded program.  Nothing here is freed individually.
+ * Every node is allocated from the arena of what was parsed -- the program
+ * arena for a load, a query's own for a prepared query -- and lives as long
+ * as it does, and so does every byte a node points at: the tree holds no
+ * pointer into the text it was read from.  Nothing here is freed
+ * individually.
  */
 
 /*
@@ -74,6 +79,47 @@ typedef struct relic_ast_stmt relic_ast_stmt_t;
 typedef struct relic_ast_stmt_list relic_ast_stmt_list_t;
 typedef struct relic_ast_term relic_ast_term_t;
 typedef struct relic_ast_variable relic_ast_variable_t;
+typedef struct relic_constant relic_constant_t;
+typedef struct relic_spelling relic_spelling_t;
+
+/*
+ * A name as written: `length` bytes at `bytes`, every one an identifier
+ * byte, so a message may quote them as they are.  A spelling is not
+ * interned.  One a structure keeps is a copy where the structure lives --
+ * the arena of the statement that wrote it, or the predicate table's name
+ * store -- followed by a NUL, so that a message can quote it as a C string;
+ * one the parser holds in hand points into the text and is not terminated.
+ * Two spellings are the same name exactly when their bytes are equal, which
+ * relic_spelling_equal() decides; relic_spelling_compare() orders them,
+ * shorter first among those one of which begins the other.
+ */
+struct relic_spelling {
+	const char	*bytes;
+	uint32_t	 length;
+};
+
+static inline bool
+relic_spelling_equal(const relic_spelling_t *a, const relic_spelling_t *b)
+{
+	return (a->length == b->length &&
+	    (a->length == 0 || bcmp(a->bytes, b->bytes, a->length) == 0));
+}
+
+static inline int
+relic_spelling_compare(const relic_spelling_t *a, const relic_spelling_t *b)
+{
+	uint32_t shorter;
+	int order;
+
+	shorter = a->length < b->length ? a->length : b->length;
+	order = shorter > 0 ? memcmp(a->bytes, b->bytes, shorter) : 0;
+	if (order != 0)
+		return (order);
+	if (a->length != b->length)
+		return (a->length < b->length ? -1 : 1);
+
+	return (0);
+}
 
 /*
  * The six built-in comparisons.  A comparison is a filter, except for an
@@ -142,31 +188,49 @@ enum relic_ast_term_kind {
 /*
  * A variable occurrence.
  *
- * `name` is the interned spelling, which diagnostics quote and which variable
- * numbering groups occurrences by.  `anonymous` marks a bare `_`, and every
- * occurrence of one denotes a *distinct* variable, so numbering must not
- * group them by name however identical those names are.  The distinction is
- * recorded once, here, rather than rediscovered by a string comparison
- * wherever variables are examined.
+ * `name` is the spelling, which diagnostics quote and which variable
+ * numbering groups occurrences by.  `anonymous` marks a
+ * bare `_`, and every occurrence of one denotes a *distinct* variable, so
+ * numbering must not group them by name however identical those names are.
+ * The distinction is recorded once, here, rather than rediscovered by a
+ * comparison of spellings wherever variables are examined.
  *
  * A name beginning with `_` that is longer than one character, such as
  * `_Unused`, is an ordinary named variable.
  */
 struct relic_ast_variable {
-	uint32_t	name;
-	bool		anonymous;
+	relic_spelling_t	name;
+	bool			anonymous;
+};
+
+/*
+ * A constant as written: a value of no context yet.  An integer is held as
+ * itself, and a symbol or a string as its `length` bytes at `bytes`, which
+ * any byte may be for a string, a NUL included.  Interning one gives the
+ * domain identifier a tuple column holds, and that is done where the value
+ * is used -- a fact's when the load stages it, a rule's when the check
+ * compiles it -- rather than where it is read, so that reading text
+ * interns nothing.
+ */
+struct relic_constant {
+	const char	*bytes;		/* SYMBOL and STRING */
+	size_t		 length;
+	int64_t		 integer;	/* INTEGER */
+	enum relic_type	 type;
 };
 
 /*
  * A term: a constant or a variable.
  *
- * A constant is already interned, so it holds the same domain identifier that
- * a tuple column will hold and nothing downstream re-derives it.
+ * While the parser holds a term in hand, a variable's spelling and a
+ * symbol's bytes point into the text being parsed, and a string's bytes
+ * into the parser's scratch; a term the tree keeps has its bytes copied
+ * into the tree's arena, terminated.
  */
 struct relic_ast_term {
 	relic_location_t		 where;
 	union {
-		relic_dom_t		 constant;
+		relic_constant_t	 constant;
 		relic_ast_variable_t	 variable;
 	}				 u;
 	enum relic_ast_term_kind	 kind;	/* which arm of u is live */
@@ -178,11 +242,16 @@ struct relic_ast_term {
  * underline.  `terms` holds `arity` of them and is NULL when the arity is
  * zero, which is an ordinary relation holding no columns rather than a
  * special case.
+ *
+ * `name` is the predicate's spelling.  While the parser holds the atom in
+ * hand it points into the text being parsed, which is all a fact the load
+ * stages needs of it; an atom the tree keeps has it copied into the tree's
+ * arena, terminated, with its arguments.
  */
 struct relic_ast_atom {
 	relic_ast_term_t	*terms;
+	relic_spelling_t	 name;
 	relic_location_t	 where;
-	uint32_t		 name;
 	uint16_t		 arity;
 };
 
@@ -206,13 +275,13 @@ enum relic_ast_expr_kind {
  * not, so every call a finished tree holds is resolved.  `args` holds the
  * first `argc` arguments, at most RELIC_MAX_FUNCTION_ARITY of them: an
  * argument past that makes the call no function's, and is parsed and
- * dropped.  `open` is the call's `(`.
+ * dropped.  `open` is the call's `(`.  `name` is in the tree's arena.
  */
 struct relic_ast_call {
 	relic_ast_expr_t	*args[RELIC_MAX_FUNCTION_ARITY];
 	size_t			 argc;
+	relic_spelling_t	 name;
 	relic_location_t	 open;
-	uint32_t		 name;
 	enum relic_function	 fn;
 	bool			 resolved;
 };

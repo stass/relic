@@ -75,12 +75,14 @@ typedef struct importer importer_t;
  * table is read -- the stream's read function, the diagnostic callback --
  * so nothing is read from it after the copy, and a description changed
  * behind the import's back cannot make it keep more columns than it
- * checked.  `columns` is owned; `arity` is the number not skipped;
- * `predicate_name` is the predicate's name, interned.
+ * checked.  `columns` and `predicate` are owned, `predicate` the name the
+ * caller gave, `predicate_length` bytes long; `arity` is the number of
+ * columns not skipped.
  */
 struct import_plan {
 	enum relic_column	*columns;
-	uint32_t		 predicate_name;
+	char			*predicate;
+	size_t			 predicate_length;
 	size_t			 column_count;
 	size_t			 arity;
 	enum relic_format	 format;
@@ -100,6 +102,7 @@ struct importer {
 	relic_table_reader_t	 reader;
 	relic_dom_t		 tuple[RELIC_MAX_ARITY];
 	relic_pred_id_t		 pred;
+	char			*source_name;	/* the importer's copy */
 	uint16_t		 kept;
 	bool			 header_pending;
 };
@@ -717,9 +720,7 @@ relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
  * read, or memory.
  *
  * No caller code runs between the check and the copy, so the plan holds
- * exactly what was checked.  The predicate's name is interned here rather
- * than copied: that is all an import needs of it, and like the values a
- * table's fields intern, it stays interned if the import fails.
+ * exactly what was checked.  A plan that could not be made holds nothing.
  */
 static bool
 import_plan_init(relic_t *ctx, const relic_import_t *import,
@@ -730,16 +731,16 @@ import_plan_init(relic_t *ctx, const relic_import_t *import,
 	if (!validate_import(ctx, import))
 		return (false);
 
-	if (relic_symbol_intern(ctx, import->predicate,
-	    strlen(import->predicate), &plan->predicate_name) != 0)
-		return (false);
-
+	plan->predicate_length = strlen(import->predicate);
+	plan->predicate = malloc(plan->predicate_length + 1);
 	plan->columns = reallocarray(NULL, import->column_count,
 	    sizeof(*plan->columns));
-	if (plan->columns == NULL) {
+	if (plan->predicate == NULL || plan->columns == NULL) {
+		import_plan_reset(plan);
 		relic_diag_no_memory(ctx);
 		return (false);
 	}
+	bcopy(import->predicate, plan->predicate, plan->predicate_length + 1);
 	bcopy(import->columns, plan->columns,
 	    import->column_count * sizeof(*plan->columns));
 
@@ -755,6 +756,7 @@ static void
 import_plan_reset(import_plan_t *plan)
 {
 	free(plan->columns);
+	free(plan->predicate);
 	bzero(plan, sizeof(*plan));
 }
 
@@ -912,6 +914,7 @@ importer_reset(importer_t *importer)
 {
 	relic_table_reader_reset(&importer->reader);
 	relic_staging_reset(&importer->staging);
+	free(importer->source_name);
 }
 
 /*
@@ -921,20 +924,35 @@ importer_reset(importer_t *importer)
  * The predicate is interned before the table is read, and so before any of
  * its values, as a load interns a fact's predicate when it stages the fact.
  * Like the values its fields intern, it stays interned if the import fails.
+ *
+ * The locations the reader reports name the source by the importer's copy
+ * of the name the caller gave, or of "<input>": the stream's read function
+ * is the caller's and may rewrite the caller's buffer while the table is
+ * read, and a location of an import is read only within the call, so the
+ * copy lives exactly as long as the import.
  */
 static int
 stage_table(importer_t *importer, const char *source_name, FILE *stream)
 {
 	const import_plan_t *plan;
 	const char *name;
+	size_t length;
 
 	plan = importer->plan;
-	name = relic_source_name(importer->ctx, source_name);
-	if (name == NULL)
-		return (-1);
+	name = source_name != NULL ? source_name : RELIC_UNNAMED_SOURCE;
 
-	if (relic_pred_intern(importer->ctx, plan->predicate_name,
-	    (uint16_t)plan->arity, NULL, &importer->pred) != 0)
+	length = strlen(name);
+	importer->source_name = malloc(length + 1);
+	if (importer->source_name == NULL) {
+		relic_diag_no_memory(importer->ctx);
+		return (-1);
+	}
+	bcopy(name, importer->source_name, length + 1);
+	name = importer->source_name;
+
+	if (relic_pred_intern(importer->ctx, plan->predicate,
+	    plan->predicate_length, (uint16_t)plan->arity, NULL,
+	    &importer->pred) != 0)
 		return (-1);
 
 	relic_table_reader_init(&importer->reader, plan->format,

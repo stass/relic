@@ -142,15 +142,16 @@ struct relic_function_name {
  *
  *	`failed`	an allocation or a limit refused something *and it was
  *			already reported* by the module that refused it --
- *			interning or staging -- so parsing stops rather than
- *			continuing against a context that can no longer
- *			intern or a load that can no longer commit.  Once it
- *			is set advance() returns false, and every caller
- *			returns false at once.  The token of lookahead is
- *			interned before the parser is done with what
- *			precedes it, so a fact or a term can still be in
- *			hand when the refusal comes, and finishing it would
- *			go on working against the refusal.
+ *			interning a fact's values or its predicate, staging, or
+ *			the lexer's scratch buffer -- so parsing stops rather
+ *			than continuing against a context that can no longer
+ *			intern or a load that can no longer commit.  Once it is
+ *			set advance() returns false, and every caller returns
+ *			false at once.  The token of lookahead is scanned
+ *			before the parser is done with what precedes it, so a
+ *			fact or a term can still be in hand when the refusal
+ *			comes, and finishing it would go on working against the
+ *			refusal.
  *
  *	the arena	an allocation was refused and nobody reported it.
  *			Every allocation the parser makes marks the arena when
@@ -168,6 +169,12 @@ struct relic_function_name {
  * production that raises it lowers it again on every way out, so it is zero
  * between statements.
  *
+ * `held` holds the bytes of the string constants of the statement being
+ * parsed, copied out of the lexer's buffer, which the next string literal
+ * overwrites: a fact the load stages interns its values from there once the
+ * fact is whole, and a term the tree keeps copies them into the tree.  It is
+ * emptied as each statement begins.
+ *
  * `group_body` is the scratch array an aggregate's body is collected in, as
  * `body` is for a statement's, and `in_aggregate` says that one is being
  * read.  An aggregate is refused while another is open, before its body is
@@ -177,6 +184,7 @@ struct relic_function_name {
 struct relic_parser {
 	relic_t			*ctx;
 	relic_arena_t		*arena;
+	relic_arena_t		 held;
 	relic_ast_literal_t	*body;
 	size_t			 body_length;
 	size_t			 body_capacity;
@@ -190,8 +198,6 @@ struct relic_parser {
 	size_t			 error_count;
 	relic_lexer_t		 lexer;
 	relic_token_t		 token;		/* the current token */
-	uint32_t		 negation_symbol;
-	uint32_t		 anonymous_symbol;
 	unsigned int		 expression_descent;
 	bool			 in_aggregate;
 	bool			 reported;
@@ -279,6 +285,8 @@ static bool	 finish_query(relic_parser_t *parser,
 static bool	 finish_rule(relic_parser_t *parser,
 		    const relic_ast_atom_t *head,
 		    const relic_location_t *where);
+static const char *hold_bytes(relic_parser_t *parser, const char *bytes,
+		    size_t length);
 static bool	 head_is_positive(relic_parser_t *parser,
 		    const relic_ast_literal_t *head, const char *what);
 static bool	 integer_term(relic_parser_t *parser,
@@ -286,6 +294,11 @@ static bool	 integer_term(relic_parser_t *parser,
 		    relic_ast_term_t *term);
 static bool	 is_ground(const relic_ast_atom_t *atom);
 static bool	 keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom);
+static const char *keep_bytes(relic_parser_t *parser, const char *bytes,
+		    size_t length);
+static bool	 keep_spelling(relic_parser_t *parser,
+		    relic_spelling_t *spelling);
+static bool	 keep_term(relic_parser_t *parser, relic_ast_term_t *term);
 static bool	 keep_literal(relic_parser_t *parser,
 		    relic_ast_literal_t *literal);
 static int	 load_commit(relic_load_t *load);
@@ -358,7 +371,7 @@ static bool	 parse_term(relic_parser_t *parser, relic_ast_term_t *term);
 static int	 parse_text(relic_parser_t *parser, relic_t *ctx,
 		    relic_arena_t *arena, relic_staging_t *staging,
 		    const char *source_name, const char *text, size_t length);
-static int	 parser_init(relic_parser_t *parser, relic_t *ctx,
+static void	 parser_init(relic_parser_t *parser, relic_t *ctx,
 		    relic_arena_t *arena, relic_staging_t *staging,
 		    const char *source_name, const char *text, size_t length);
 static void	 parser_reset(relic_parser_t *parser);
@@ -380,6 +393,7 @@ static bool	 token_begins_literal(const relic_token_t *token);
 static bool	 token_begins_term(const relic_token_t *token);
 static bool	 token_operator(const relic_parser_t *parser,
 		    enum relic_arith_op *opp);
+static bool	 token_spells(const relic_token_t *token, const char *word);
 
 void
 relic_ast_program_init(relic_ast_program_t *program)
@@ -507,11 +521,9 @@ quoted_suffix(const relic_token_t *token)
 static void
 report_arity_limit(relic_parser_t *parser, const relic_token_t *name)
 {
-	const char *bytes;
 	char named[RELIC_NAME_TEXT_MAX];
 
-	bytes = relic_symbol_bytes(parser->ctx, name->symbol, NULL);
-	relic_diag_name(bytes != NULL ? bytes : "?", named, sizeof(named));
+	relic_diag_spelling(name->bytes, name->length, named, sizeof(named));
 	parse_errorf(parser, &parser->token.where,
 	    "predicate %s has more than %d arguments", named, RELIC_MAX_ARITY);
 }
@@ -552,9 +564,21 @@ report_lex_error(relic_parser_t *parser)
 		    "unexpected character %s after an integer literal",
 		    relic_diag_byte(token->byte, described, sizeof(described)));
 		break;
+	case RELIC_LEX_NAME_TOO_LONG:
+		parse_errorf(parser, &token->where,
+		    "a name of %zu bytes is longer than the %lu a name may "
+		    "hold", token->length,
+		    (unsigned long)RELIC_STRING_LENGTH_MAX);
+		break;
 	case RELIC_LEX_NUMBER_UNSUPPORTED:
 		parse_errorf(parser, &token->where,
 		    "floating-point numbers are not supported");
+		break;
+	case RELIC_LEX_STRING_TOO_LONG:
+		parse_errorf(parser, &token->where,
+		    "a string literal of %zu bytes is longer than the %lu a "
+		    "value may hold", token->length,
+		    (unsigned long)RELIC_STRING_LENGTH_MAX);
 		break;
 	case RELIC_LEX_UNTERMINATED_STRING:
 		parse_errorf(parser, &token->where,
@@ -566,13 +590,14 @@ report_lex_error(relic_parser_t *parser)
 }
 
 /*
- * Take the next token.  Returns false when the parse has failed, whether
- * the lexer's interning refused the token now or a refusal came earlier, and
- * the caller must then return false without finishing what it was doing;
- * see `failed`.  A token the lexer could not make sense of is not a failure.
- * It is reported here, so no other part of the parser has to consider the
- * possibility; it simply fails to match whatever it wanted, and the message
- * it would have produced is suppressed because this one came first.
+ * Take the next token.  Returns false when the parse has failed, whether the
+ * lexer's string buffer could not grow for the token now or a refusal came
+ * earlier, and the caller must then return false without finishing what it was
+ * doing; see `failed`.  A token the lexer could not make sense of is not a
+ * failure.  It is reported here, so no other part of the parser has to
+ * consider the possibility; it simply fails to match whatever it wanted, and
+ * the message it would have produced is suppressed because this one came
+ * first.
  *
  * Where a statement ends is also decided here, and it has to be.  The token
  * of lookahead that a statement is recognized by is fetched by the very
@@ -686,10 +711,7 @@ token_begins_literal(const relic_token_t *token)
  * a comma before it.  So nothing is reserved, and a predicate or a constant
  * may still be called `mod`.
  *
- * `mod` is recognized by its spelling rather than interned beforehand, as
- * `not` is: an interned spelling takes a symbol identifier in every program,
- * and every identifier after it would move, and with them the stripes the
- * program's keys fall in and the storage it reports.
+ * `mod` is recognized by its spelling, as `not` and `_` are.
  */
 static bool
 token_operator(const relic_parser_t *parser, enum relic_arith_op *opp)
@@ -703,13 +725,26 @@ token_operator(const relic_parser_t *parser, enum relic_arith_op *opp)
 		return (true);
 	}
 
-	if (token->kind == RELIC_TOKEN_SYMBOL && token->text_length == 3 &&
-	    bcmp(token->text, "mod", 3) == 0) {
+	if (token->kind == RELIC_TOKEN_SYMBOL && token_spells(token, "mod")) {
 		*opp = RELIC_ARITH_REMAINDER;
 		return (true);
 	}
 
 	return (false);
+}
+
+/*
+ * Whether a name's token is spelled `word`.
+ */
+static bool
+token_spells(const relic_token_t *token, const char *word)
+{
+	size_t length;
+
+	length = strlen(word);
+
+	return (token->length == length &&
+	    bcmp(token->bytes, word, length) == 0);
 }
 
 /*
@@ -725,7 +760,7 @@ token_function(const relic_token_t *token, enum relic_aggregate_fn *fnp)
 	if (token->kind != RELIC_TOKEN_SYMBOL)
 		return (false);
 
-	return (spells_aggregate(token->text, token->text_length, fnp));
+	return (spells_aggregate(token->bytes, token->length, fnp));
 }
 
 /*
@@ -810,9 +845,105 @@ parse_alloc(relic_parser_t *parser, size_t count, size_t size)
 }
 
 /*
- * Build a term from the token that spells it, interning a constant as it
- * goes so that the tree holds the same domain identifier a tuple column
- * will.
+ * Copy `length` bytes into the tree's arena, terminated, and return the
+ * copy, or NULL with the arena marked failed.
+ */
+static const char *
+keep_bytes(relic_parser_t *parser, const char *bytes, size_t length)
+{
+	char *copy;
+
+	copy = parse_alloc(parser, length + 1, 1);
+	if (copy == NULL)
+		return (NULL);
+	if (length > 0)
+		bcopy(bytes, copy, length);
+	copy[length] = '\0';
+
+	return (copy);
+}
+
+/*
+ * Replace a spelling in hand, which points into the text, with a copy in
+ * the tree's arena.
+ */
+static bool
+keep_spelling(relic_parser_t *parser, relic_spelling_t *spelling)
+{
+	const char *copy;
+
+	copy = keep_bytes(parser, spelling->bytes, spelling->length);
+	if (copy == NULL)
+		return (false);
+	spelling->bytes = copy;
+
+	return (true);
+}
+
+/*
+ * Copy what a term in hand points at -- a variable's spelling or a
+ * constant's bytes -- into the tree's arena, so that the term outlives the
+ * text and the statement's scratch.  Every term the tree keeps passes
+ * through here: an atom's arguments in keep_atom(), an expression's leaves
+ * in make_leaf(), and an aggregate's variable in
+ * parse_aggregated_variable().
+ */
+static bool
+keep_term(relic_parser_t *parser, relic_ast_term_t *term)
+{
+	relic_constant_t *constant;
+	const char *copy;
+
+	if (term->kind == RELIC_TERM_VARIABLE)
+		return (keep_spelling(parser, &term->u.variable.name));
+
+	constant = &term->u.constant;
+	if (constant->type == RELIC_INTEGER)
+		return (true);
+
+	copy = keep_bytes(parser, constant->bytes, constant->length);
+	if (copy == NULL)
+		return (false);
+	constant->bytes = copy;
+
+	return (true);
+}
+
+/*
+ * Copy a string literal's decoded bytes out of the lexer's buffer, which
+ * the next literal overwrites, into the statement's scratch, and return the
+ * copy, or NULL with the tree's arena marked failed, as any refusal of the
+ * parser's is.
+ */
+static const char *
+hold_bytes(relic_parser_t *parser, const char *bytes, size_t length)
+{
+	char *copy;
+
+	copy = relic_arena_alloc(&parser->held, length + 1);
+	if (copy == NULL) {
+		relic_arena_clear_failure(&parser->held);
+		relic_arena_fail(parser->arena);
+		return (NULL);
+	}
+	if (length > 0)
+		bcopy(bytes, copy, length);
+	copy[length] = '\0';
+
+	return (copy);
+}
+
+/*
+ * Build a term in hand from the token that spells it: a variable, or a
+ * constant as written, which nothing interns until the term is used.  A
+ * variable's spelling and a symbol's bytes point into the text, and a
+ * string's are held in the statement's scratch.
+ *
+ * A string token's bytes are in the lexer's buffer, which the next token
+ * overwrites, so a string's term is built from the current token, before
+ * the parser advances; parse_term() is the one way a string becomes a term.
+ * A name's bytes are the text's, so a name's token may be kept and its term
+ * built after the token that decides what the name is.
  *
  * Every occurrence of a bare `_` denotes a distinct variable, and that is
  * recorded as a flag here rather than rediscovered by a name comparison
@@ -822,26 +953,32 @@ static bool
 term_from_token(relic_parser_t *parser, const relic_token_t *token,
     relic_ast_term_t *term)
 {
-	relic_value_t value;
+	relic_constant_t *constant;
 
 	bzero(term, sizeof(*term));
 	term->where = token->where;
+	constant = &term->u.constant;
 
 	switch (token->kind) {
 	case RELIC_TOKEN_VARIABLE:
 		term->kind = RELIC_TERM_VARIABLE;
-		term->u.variable.name = token->symbol;
-		term->u.variable.anonymous =
-		    (token->symbol == parser->anonymous_symbol);
+		term->u.variable.name.bytes = token->bytes;
+		term->u.variable.name.length = (uint32_t)token->length;
+		term->u.variable.anonymous = token_spells(token, "_");
 		return (true);
 	case RELIC_TOKEN_SYMBOL:
-		value.type = RELIC_SYMBOL;
-		value.v.id = token->symbol;
-		break;
+		term->kind = RELIC_TERM_CONSTANT;
+		constant->type = RELIC_SYMBOL;
+		constant->bytes = token->bytes;
+		constant->length = token->length;
+		return (true);
 	case RELIC_TOKEN_STRING:
-		value.type = RELIC_STRING;
-		value.v.id = token->symbol;
-		break;
+		term->kind = RELIC_TERM_CONSTANT;
+		constant->type = RELIC_STRING;
+		constant->bytes = hold_bytes(parser, token->bytes,
+		    token->length);
+		constant->length = token->length;
+		return (constant->bytes != NULL);
 	case RELIC_TOKEN_INTEGER:
 		return (integer_term(parser, token, NULL, term));
 	case RELIC_TOKEN_OPERATOR:
@@ -869,14 +1006,8 @@ term_from_token(relic_parser_t *parser, const relic_token_t *token,
 		return (false);
 	}
 
-	term->kind = RELIC_TERM_CONSTANT;
-
-	if (relic_value_intern(parser->ctx, &value, &term->u.constant) != 0) {
-		parser->failed = true;
-		return (false);
-	}
-
-	return (true);
+	/* Unreachable; the switch names every kind. */
+	return (false);
 }
 
 /*
@@ -892,24 +1023,17 @@ static bool
 integer_term(relic_parser_t *parser, const relic_token_t *digits,
     const relic_token_t *minus, relic_ast_term_t *term)
 {
-	relic_value_t value;
-
 	bzero(term, sizeof(*term));
 	term->where = minus != NULL ? minus->where : digits->where;
 	term->kind = RELIC_TERM_CONSTANT;
+	term->u.constant.type = RELIC_INTEGER;
 
-	value.type = RELIC_INTEGER;
 	if (relic_integer_signed(digits->magnitude, minus != NULL,
-	    &value.v.integer) != RELIC_INTEGER_VALID) {
+	    &term->u.constant.integer) != RELIC_INTEGER_VALID) {
 		parse_errorf(parser, &term->where,
 		    "integer literal out of range: %s%.*s%s",
 		    minus != NULL ? "-" : "", quoted_precision(digits),
 		    digits->text, quoted_suffix(digits));
-		return (false);
-	}
-
-	if (relic_value_intern(parser->ctx, &value, &term->u.constant) != 0) {
-		parser->failed = true;
 		return (false);
 	}
 
@@ -952,11 +1076,10 @@ parse_term(relic_parser_t *parser, relic_ast_term_t *term)
 		return (integer_term(parser, &token, &minus, term));
 	}
 
-	token = parser->token;
-	if (!advance(parser))
+	if (!term_from_token(parser, &parser->token, term))
 		return (false);
 
-	return (term_from_token(parser, &token, term));
+	return (advance(parser));
 }
 
 /*
@@ -1398,11 +1521,8 @@ refuse_call(relic_parser_t *parser, const relic_ast_expr_t *expr)
 	char named[RELIC_NAME_TEXT_MAX];
 
 	call = &expr->u.call;
-	name = relic_symbol_bytes(parser->ctx, call->name, &length);
-	if (name == NULL) {
-		name = "?";
-		length = 1;
-	}
+	name = call->name.bytes;
+	length = call->name.length;
 
 	if (spells_aggregate(name, length, &aggregate)) {
 		parse_errorf(parser, &expr->where,
@@ -1442,11 +1562,8 @@ check_argument(relic_parser_t *parser, enum relic_function fn,
 {
 	const relic_function_info_t *info;
 	const relic_ast_term_t *term;
+	const relic_constant_t *constant;
 	enum relic_value_kind wanted;
-	const char *bytes;
-	relic_dom_t type;
-	int64_t integer;
-	size_t length;
 	char described[RELIC_STRING_TEXT_MAX];
 	char named[RELIC_NAME_TEXT_MAX];
 
@@ -1459,41 +1576,30 @@ check_argument(relic_parser_t *parser, enum relic_function fn,
 	if (term->kind != RELIC_TERM_CONSTANT)
 		return (true);
 
-	type = term->u.constant & RELIC_DOM_TYPE_MASK;
-	if ((wanted == RELIC_KIND_STRING && type == RELIC_DOM_STRING) ||
-	    (wanted == RELIC_KIND_INTEGER && type == RELIC_DOM_INTEGER))
+	constant = &term->u.constant;
+	if ((wanted == RELIC_KIND_STRING && constant->type == RELIC_STRING) ||
+	    (wanted == RELIC_KIND_INTEGER && constant->type == RELIC_INTEGER))
 		return (true);
 
-	switch (type) {
-	case RELIC_DOM_INTEGER:
-		if (!relic_value_integer(parser->ctx, term->u.constant,
-		    &integer))
-			integer = 0;
+	switch (constant->type) {
+	case RELIC_INTEGER:
 		parse_errorf(parser, &term->where,
-		    "integer %" PRId64 " cannot be an argument of %s", integer,
-		    info->spelling);
+		    "integer %" PRId64 " cannot be an argument of %s",
+		    constant->integer, info->spelling);
 		return (false);
-	case RELIC_DOM_STRING:
-		bytes = relic_symbol_bytes(parser->ctx,
-		    term->u.constant & RELIC_DOM_INDEX_MASK, &length);
-		if (bytes == NULL) {
-			bytes = "";
-			length = 0;
-		}
+	case RELIC_STRING:
 		parse_errorf(parser, &term->where,
 		    "string %s cannot be an argument of %s",
-		    relic_diag_string(bytes, length, described,
-		    sizeof(described)), info->spelling);
+		    relic_diag_string(constant->bytes, constant->length,
+		    described, sizeof(described)), info->spelling);
 		return (false);
-	default:
+	case RELIC_SYMBOL:
 		break;
 	}
 
-	bytes = relic_symbol_bytes(parser->ctx,
-	    term->u.constant & RELIC_DOM_INDEX_MASK, NULL);
 	parse_errorf(parser, &term->where, "symbol %s cannot be an argument of %s",
-	    relic_diag_name(bytes != NULL ? bytes : "?", named, sizeof(named)),
-	    info->spelling);
+	    relic_diag_spelling(constant->bytes, constant->length, named,
+	    sizeof(named)), info->spelling);
 
 	return (false);
 }
@@ -1511,32 +1617,31 @@ check_operand(relic_parser_t *parser, const relic_ast_expr_t *operand,
     enum relic_arith_op op, bool negation)
 {
 	const relic_ast_term_t *term;
+	const relic_constant_t *constant;
 	const char *spelling;
-	const char *bytes;
 	char named[RELIC_NAME_TEXT_MAX];
 
 	if (operand->kind != RELIC_AST_EXPR_TERM)
 		return (true);
 
 	term = &operand->u.term;
+	constant = &term->u.constant;
 	if (term->kind != RELIC_TERM_CONSTANT ||
-	    (term->u.constant & RELIC_DOM_TYPE_MASK) == RELIC_DOM_INTEGER)
+	    constant->type == RELIC_INTEGER)
 		return (true);
 
 	spelling = negation ? "-" : operator_spelling(op);
 
-	if ((term->u.constant & RELIC_DOM_TYPE_MASK) == RELIC_DOM_STRING) {
+	if (constant->type == RELIC_STRING) {
 		parse_errorf(parser, &term->where,
 		    "a string literal cannot be an operand of %s", spelling);
 		return (false);
 	}
 
-	bytes = relic_symbol_bytes(parser->ctx,
-	    term->u.constant & RELIC_DOM_INDEX_MASK, NULL);
 	parse_errorf(parser, &term->where,
 	    "symbol %s cannot be an operand of %s",
-	    relic_diag_name(bytes != NULL ? bytes : "?", named, sizeof(named)),
-	    spelling);
+	    relic_diag_spelling(constant->bytes, constant->length, named,
+	    sizeof(named)), spelling);
 
 	return (false);
 }
@@ -1559,6 +1664,8 @@ make_leaf(relic_parser_t *parser, const relic_ast_term_t *term,
 	leaf->where = term->where;
 	leaf->u.term = *term;
 	leaf->height = 1;
+	if (!keep_term(parser, &leaf->u.term))
+		return (false);
 
 	*exprp = leaf;
 
@@ -1638,9 +1745,7 @@ make_call(relic_parser_t *parser, const relic_token_t *name,
     relic_ast_expr_t **exprp)
 {
 	relic_ast_expr_t *node;
-	const char *bytes;
 	unsigned int height;
-	size_t length;
 	size_t kept;
 	size_t i;
 
@@ -1662,14 +1767,15 @@ make_call(relic_parser_t *parser, const relic_token_t *name,
 	node->kind = RELIC_AST_EXPR_CALL;
 	node->where = name->where;
 	node->u.call = *call;
-	node->u.call.name = name->symbol;
 	node->u.call.open = *open;
+	node->u.call.name.bytes = name->bytes;
+	node->u.call.name.length = (uint32_t)name->length;
 	node->height = (uint8_t)height;
+	if (!keep_spelling(parser, &node->u.call.name))
+		return (false);
 
-	bytes = relic_symbol_bytes(parser->ctx, name->symbol, &length);
-	if (bytes != NULL)
-		node->u.call.resolved = relic_function_find(bytes, length,
-		    call->argc, &node->u.call.fn);
+	node->u.call.resolved = relic_function_find(name->bytes, name->length,
+	    call->argc, &node->u.call.fn);
 
 	*exprp = node;
 
@@ -1694,7 +1800,8 @@ atom_after_name(relic_parser_t *parser, const relic_token_t *name,
 	size_t term_count;
 
 	bzero(atom, sizeof(*atom));
-	atom->name = name->symbol;
+	atom->name.bytes = name->bytes;
+	atom->name.length = (uint32_t)name->length;
 	atom->where = name->where;
 
 	if (parser->token.kind != RELIC_TOKEN_LPAREN)
@@ -1738,15 +1845,20 @@ atom_after_name(relic_parser_t *parser, const relic_token_t *name,
 }
 
 /*
- * Copy an atom's arguments out of the scratch buffer they were read into
- * and into the tree's arena, so that the atom outlives the buffer.  Every
- * atom the tree keeps passes through here, a head in append_statement() and
- * a body's atom in body_append(), and no other way into the tree exists.
+ * Copy an atom's name out of the text and its arguments out of the scratch
+ * buffer they were read into, both into the tree's arena, so that the atom
+ * outlives the text and the buffer.  Every atom the tree keeps passes
+ * through here, a head in append_statement() and a body's atom in
+ * body_append(), and no other way into the tree exists.
  */
 static bool
 keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
 {
 	relic_ast_term_t *stored;
+	uint16_t i;
+
+	if (!keep_spelling(parser, &atom->name))
+		return (false);
 
 	if (atom->arity == 0)
 		return (true);
@@ -1755,6 +1867,10 @@ keep_atom(relic_parser_t *parser, relic_ast_atom_t *atom)
 	if (stored == NULL)
 		return (false);
 	bcopy(atom->terms, stored, atom->arity * sizeof(*stored));
+	for (i = 0; i < atom->arity; i++) {
+		if (!keep_term(parser, &stored[i]))
+			return (false);
+	}
 
 	atom->terms = stored;
 
@@ -1812,7 +1928,7 @@ parse_atom(relic_parser_t *parser, relic_ast_atom_t *atom,
 		return (false);
 	}
 
-	if (parser->token.symbol == parser->negation_symbol) {
+	if (token_spells(&parser->token, "not")) {
 		parse_errorf(parser, &parser->token.where,
 		    "not is the negation keyword and cannot name a predicate");
 		return (false);
@@ -2002,12 +2118,14 @@ parse_aggregated_variable(relic_parser_t *parser,
 		    describe_token(&parser->token));
 		return (false);
 	}
-	if (parser->token.symbol == parser->anonymous_symbol) {
+	if (token_spells(&parser->token, "_")) {
 		parse_errorf(parser, &parser->token.where,
 		    "%s takes a named variable, not _", spelling);
 		return (false);
 	}
 	if (!term_from_token(parser, &parser->token, &aggregate->column))
+		return (false);
+	if (!keep_term(parser, &aggregate->column))
 		return (false);
 	if (!advance(parser))
 		return (false);
@@ -2286,7 +2404,8 @@ complete_atom(relic_parser_t *parser, const relic_token_t *name,
 
 	literal->kind = RELIC_LITERAL_POSITIVE;
 	atom = &literal->u.atom;
-	atom->name = name->symbol;
+	atom->name.bytes = name->bytes;
+	atom->name.length = (uint32_t)name->length;
 	atom->where = name->where;
 	if (arguments->count > 0) {
 		atom->terms = scratch;
@@ -2369,7 +2488,7 @@ parse_literal(relic_parser_t *parser, relic_ast_literal_t *literal,
 	 * one.
 	 */
 	if (parser->token.kind == RELIC_TOKEN_SYMBOL &&
-	    parser->token.symbol == parser->negation_symbol) {
+	    token_spells(&parser->token, "not")) {
 		if (!advance(parser))
 			return (false);
 		literal->kind = RELIC_LITERAL_NEGATED;
@@ -2576,11 +2695,12 @@ is_ground(const relic_ast_atom_t *atom)
 }
 
 /*
- * Add a ground fact to the load's staging.  Its predicate is interned now,
- * while the text is parsed, as the lexer interns every symbol it reads, so
- * the predicate stays interned if the load later fails.  relic_pred_intern()
- * and relic_staging_add() each report their own refusal, so either refusing
- * stops the parse as a refusal already reported.
+ * Add a ground fact to the load's staging: its values interned, from the
+ * text and the statement's scratch where the fact in hand points, and its
+ * predicate.  Both are interned now, so they stay interned if the load
+ * later fails.  The interning and relic_staging_add() each report their own
+ * refusal, so any of them refusing stops the parse as a refusal already
+ * reported.
  */
 static bool
 stage_fact(relic_parser_t *parser, const relic_ast_atom_t *fact)
@@ -2589,11 +2709,16 @@ stage_fact(relic_parser_t *parser, const relic_ast_atom_t *fact)
 	relic_pred_id_t pred;
 	uint16_t i;
 
-	for (i = 0; i < fact->arity; i++)
-		tuple[i] = fact->terms[i].u.constant;
+	for (i = 0; i < fact->arity; i++) {
+		if (relic_value_intern_constant(parser->ctx,
+		    &fact->terms[i].u.constant, &tuple[i]) != 0) {
+			parser->failed = true;
+			return (false);
+		}
+	}
 
-	if (relic_pred_intern(parser->ctx, fact->name, fact->arity,
-	    &fact->where, &pred) != 0) {
+	if (relic_pred_intern(parser->ctx, fact->name.bytes, fact->name.length,
+	    fact->arity, &fact->where, &pred) != 0) {
 		parser->failed = true;
 		return (false);
 	}
@@ -2624,7 +2749,7 @@ stage_fact(relic_parser_t *parser, const relic_ast_atom_t *fact)
  * A fact a load reads whose arguments are all constants is a tuple, and is
  * staged rather than kept.  It is staged before the token after the `.` is
  * read, so a fact the limits refuse is the last thing the load reads: the
- * lexer interns nothing past it.  Any other fact is kept as what it means, a
+ * parser interns nothing past it.  Any other fact is kept as what it means, a
  * rule with no body: one with a variable, for the check to reject as unsafe
  * with the message an unsafe rule receives, and one in a query's text, for
  * the query parser to refuse as a fact.
@@ -2713,6 +2838,7 @@ parse_statement(relic_parser_t *parser)
 	 * here and reported once.
 	 */
 	parser->body_length = 0;
+	relic_arena_reset(&parser->held);
 	where = parser->token.where;
 
 	if (!parse_literal(parser, &first, "a fact, rule or query", scratch))
@@ -2786,7 +2912,7 @@ parse_program(relic_parser_t *parser)
 	return (parser->failed ? -1 : 0);
 }
 
-static int
+static void
 parser_init(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
     relic_staging_t *staging, const char *source_name, const char *text,
     size_t length)
@@ -2796,52 +2922,49 @@ parser_init(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 	parser->ctx = ctx;
 	parser->arena = arena;
 	parser->staging = staging;
+	relic_arena_init(&parser->held, 1);
 	TAILQ_INIT(&parser->statements);
 
-	/*
-	 * The two spellings the parser recognizes wherever a literal or a
-	 * variable is read are interned once, so that each is matched against
-	 * them by an integer comparison rather than by comparing bytes.
-	 */
-	if (relic_symbol_intern(ctx, "not", 3, &parser->negation_symbol) != 0)
-		return (-1);
-	if (relic_symbol_intern(ctx, "_", 1, &parser->anonymous_symbol) != 0)
-		return (-1);
-
 	relic_lexer_init(&parser->lexer, ctx, source_name, text, length);
-
-	return (0);
 }
 
 static void
 parser_reset(relic_parser_t *parser)
 {
 	relic_lexer_reset(&parser->lexer);
+	relic_arena_reset(&parser->held);
 	free(parser->body);
 	free(parser->group_body);
 	bzero(parser, sizeof(*parser));
 }
 
 /*
- * The stable name a location may point at for the life of the context.
+ * The copy of a source name the locations of what is parsed under it point
+ * at, in the arena that holds what is parsed.
  *
- * Source names are interned like any other byte string, so the bytes live in
- * the symbol pool's string arena and never move: a location stored in the
- * tree stays printable after the load that produced it has returned, and
- * loading one file twice stores one copy of its name.
+ * A source name is not a value, so it is not interned: a location in the
+ * tree stays printable for as long as the tree does, a loaded statement's
+ * for the life of the context and a prepared query's for the life of the
+ * query, and a query's name goes with the query.  The one location kept
+ * past its statement, where a predicate was first referenced, is copied
+ * again by the predicate table.
  */
 const char *
-relic_source_name(relic_t *ctx, const char *name)
+relic_source_name(relic_arena_t *arena, const char *name)
 {
-	uint32_t symbol;
+	char *copy;
+	size_t length;
 
 	if (name == NULL)
 		name = RELIC_UNNAMED_SOURCE;
 
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
+	length = strlen(name);
+	copy = relic_arena_alloc(arena, length + 1);
+	if (copy == NULL)
 		return (NULL);
+	bcopy(name, copy, length + 1);
 
-	return (relic_symbol_bytes(ctx, symbol, NULL));
+	return (copy);
 }
 
 /*
@@ -2871,14 +2994,13 @@ parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 	const char *name;
 	int status;
 
-	bzero(parser, sizeof(*parser));
-
-	name = relic_source_name(ctx, source_name);
-	if (name == NULL)
+	name = relic_source_name(arena, source_name);
+	parser_init(parser, ctx, arena, staging, name, text, length);
+	if (name == NULL) {
+		relic_diag_no_memory(ctx);
+		relic_arena_clear_failure(arena);
 		return (-1);
-
-	if (parser_init(parser, ctx, arena, staging, name, text, length) != 0)
-		return (-1);
+	}
 
 	status = parse_program(parser);
 
@@ -2932,8 +3054,8 @@ load_text(relic_t *ctx, const char *source_name, const char *text,
 /*
  * Load text read from a stream, which the load owns and releases once it is
  * parsed, so that the commit, which grows the base stores, runs without it.
- * The parse produced identifiers, interned names and locations naming an
- * interned source, never pointers into the text; the lexer's state still
+ * The parse produced identifiers, and spellings and source names copied into
+ * the program arena, never pointers into the text; the lexer's state still
  * points there, and neither the commit nor the reset reads it.
  */
 static int
@@ -3353,7 +3475,6 @@ add_fact(relic_t *ctx, const char *predicate, size_t arity,
 	relic_staging_t staging;
 	relic_dom_t tuple[RELIC_MAX_ARITY];
 	relic_pred_id_t pred;
-	uint32_t name;
 	size_t i;
 	int status;
 
@@ -3377,15 +3498,13 @@ add_fact(relic_t *ctx, const char *predicate, size_t arity,
 		return (-1);
 	}
 
-	if (relic_symbol_intern(ctx, predicate, strlen(predicate), &name) != 0)
-		return (-1);
-
 	for (i = 0; i < arity; i++) {
 		if (relic_value_intern(ctx, &values[i], &tuple[i]) != 0)
 			return (-1);
 	}
 
-	if (relic_pred_intern(ctx, name, (uint16_t)arity, NULL, &pred) != 0)
+	if (relic_pred_intern(ctx, predicate, strlen(predicate),
+	    (uint16_t)arity, NULL, &pred) != 0)
 		return (-1);
 
 	relic_staging_init(&staging, ctx);

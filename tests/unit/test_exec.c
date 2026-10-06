@@ -110,7 +110,6 @@ relation(relic_t *ctx, const char *scenario, const char *name,
 	relic_ruletab_t rules;
 	relic_rule_t rule;
 	relic_pred_id_t pred;
-	uint32_t symbol;
 	int appended;
 
 	bzero(&where, sizeof(where));
@@ -118,8 +117,8 @@ relation(relic_t *ctx, const char *scenario, const char *name,
 	where.line = 1;
 	where.column = 1;
 
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0 ||
-	    relic_pred_intern(ctx, symbol, arity, &where, &pred) != 0) {
+	if (relic_pred_intern(ctx, name, strlen(name), arity, &where,
+	    &pred) != 0) {
 		checkf(false, scenario, "%s/%u should intern", name,
 		    (unsigned)arity);
 		return (NULL);

@@ -648,6 +648,13 @@ void	 relic_diag_record_refusal(relic_t *ctx);
 const char *relic_diag_name(const char *name, char *buffer, size_t size);
 
 /*
+ * relic_diag_name() for a name given as `length` bytes with no terminator,
+ * such as a spelling still in the text being parsed.
+ */
+const char *relic_diag_spelling(const char *bytes, size_t length,
+	    char *buffer, size_t size);
+
+/*
  * Room for a string a message quotes: about forty bytes of literal, its
  * quotes, and the mark of a cut.
  */
@@ -765,6 +772,8 @@ int	 relic_value_intern(relic_t *ctx, const relic_value_t *value,
 	    relic_dom_t *domp);
 int	 relic_value_intern_bytes(relic_t *ctx, enum relic_type type,
 	    const void *bytes, size_t length, relic_dom_t *domp);
+int	 relic_value_intern_constant(relic_t *ctx,
+	    const relic_constant_t *constant, relic_dom_t *domp);
 int	 relic_value_intern_integer(relic_t *ctx, int64_t value,
 	    relic_dom_t *domp);
 size_t	 relic_value_storage_bytes(const relic_t *ctx);
@@ -786,16 +795,16 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * occurrence.
  *
  * relic_pending_measure() walks the batch's `count` pending values, the
- * strings' bytes in `bytes`, and fills `map` with each one's identifier,
- * the one the context has assigned it or the one it will be given, and
- * returns the bytes the value table and the pool together will occupy once
- * the new values are interned: the capacity interning them one at a time
- * would reach, so that each holds the same bytes however its values
- * arrived, or SIZE_MAX when a size cannot count it.  A string whose bytes
- * the pool holds with no string value assigned to them -- a name, or a
- * symbol's spelling -- is promised the pool's identifier for them, and the
- * bytes must stay where they are until the commit.  It writes nothing but
- * the map.
+ * strings' bytes in `bytes`, and fills `map` with each one's identifier, the
+ * one the context has assigned it or the one it will be given, and returns the
+ * bytes the value table and the pool together will occupy once the new values
+ * are interned: the capacity interning them one at a time would reach, so that
+ * each holds the same bytes however its values arrived, or SIZE_MAX when a
+ * size cannot count it.  A string whose bytes the pool holds with no string
+ * value assigned to them -- a symbol's spelling, or a value a caller made and
+ * has not interned -- is promised the pool's identifier for them, and the
+ * bytes must stay where they are until the commit.  It writes nothing but the
+ * map.
  *
  * relic_pending_rewrite() replaces every pending marker in `tuples` tuples
  * of `arity` columns with the identifier the map gives it.  It writes
@@ -892,7 +901,9 @@ enum relic_lex_error {
 	RELIC_LEX_EXPECTED_IMPLIES,	/* : not followed by - */
 	RELIC_LEX_EXPECTED_NE,		/* ! not followed by = */
 	RELIC_LEX_INTEGER_TRAILING,	/* identifier byte after the digits */
+	RELIC_LEX_NAME_TOO_LONG,	/* longer than a value may be */
 	RELIC_LEX_NUMBER_UNSUPPORTED,	/* the reserved floating-point form */
+	RELIC_LEX_STRING_TOO_LONG,	/* decoded, longer than a value */
 	RELIC_LEX_UNTERMINATED_STRING
 };
 
@@ -905,11 +916,14 @@ enum relic_lex_error {
  * scanner found a more precise place to point at, such as the offending
  * byte of a bad escape.
  *
- * `symbol` is the interned spelling of a name and the interned *decoded*
- * bytes of a string literal.  The lexer interns bytes and not values: an
- * identifier does not yet know whether it names a predicate or is a symbol
- * constant, and interning it as a value on sight would give every predicate
- * name a domain identifier it never uses.
+ * `bytes` and `length` are a name's spelling, which is its text, and a
+ * string literal's *decoded* bytes, which are in the lexer's scratch buffer
+ * and stay valid only until the next token is scanned.  The lexer interns
+ * nothing: an identifier does not yet know whether it names a predicate, a
+ * variable, a function or a symbol constant, and only a constant is a value.
+ * Neither is longer than a value may be, RELIC_STRING_LENGTH_MAX bytes: a
+ * longer one is an error token, which keeps every length a spelling or a
+ * constant holds within 32 bits.
  *
  * `magnitude` is an integer literal's digits as a number, without a sign: a
  * `-` is always a token of its own, since it may be a subtraction, and the
@@ -922,9 +936,10 @@ enum relic_lex_error {
 struct relic_token {
 	const char		*text;
 	size_t			 text_length;
+	const char		*bytes;		/* names and string bytes */
+	size_t			 length;
 	relic_location_t	 where;
 	uint64_t		 magnitude;	/* RELIC_TOKEN_INTEGER */
-	uint32_t		 symbol;	/* names and string bytes */
 	enum relic_token_kind	 kind;
 	enum relic_lex_error	 error;
 	enum relic_compare_op	 compare;	/* RELIC_TOKEN_COMPARE */
@@ -939,8 +954,8 @@ struct relic_token {
  * range is an ordinary byte that begins no token.
  *
  * `decoded` is the scratch buffer a string literal's escapes are decoded
- * into before the result is interned.  It is reused by every literal in the
- * input and released by relic_lexer_reset().
+ * into, which the literal's token points at.  It is reused by every literal
+ * in the input and released by relic_lexer_reset().
  */
 struct relic_lexer {
 	relic_t			*ctx;
@@ -959,8 +974,9 @@ void	 relic_lexer_reset(relic_lexer_t *lexer);
 
 /*
  * Scan the next token.  Returns 0 having filled *token, which may be an
- * error token, or -1 when interning failed for want of memory, in which case
- * the diagnostic has already been reported and scanning cannot continue.
+ * error token, or -1 when a string literal's scratch buffer could not grow,
+ * in which case the diagnostic has already been reported and scanning cannot
+ * continue.
  */
 int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
 
@@ -1049,25 +1065,29 @@ FILE	*relic_open_input(relic_t *ctx, const char *path);
 int	 relic_close_input(relic_t *ctx, const char *path, FILE *stream);
 
 /*
- * The stable name a location may point at for the life of the context: the
- * source name interned, or "<input>" for NULL.  Returns NULL having reported
- * that memory ran out.
+ * The name the locations of what is parsed under a source name point at: a
+ * copy of the name, or of "<input>" for NULL, in `arena`, which holds what
+ * is parsed, so that a location lives exactly as long as what it locates.
+ * Returns NULL, the arena marked failed, when the arena refused.
  */
 #define	RELIC_UNNAMED_SOURCE	"<input>"
 
-const char *relic_source_name(relic_t *ctx, const char *name);
+const char *relic_source_name(relic_arena_t *arena, const char *name);
 
 /*
  * lib/pred.c
  *
- * relic_pred_intern() assigns an identifier to a (name, arity) pair, or
- * returns the one it already has; `where` is what a refusal names.  The
+ * relic_pred_intern() assigns an identifier to a (name, arity) pair, the
+ * name given as bytes the table copies when the pair is new, or returns the
+ * one it already has; `where` is what a refusal names.  The
  * marks of struct relic_pred are set by relic_pred_name_head(),
  * relic_pred_name_generated(), relic_pred_name_group(),
  * relic_pred_mark_derived(),
  * relic_pred_reference() and
  * relic_pred_make_view(), and read by relic_pred_is_derived() and
- * relic_pred_is_defined().  relic_pred_count_program_rule() counts one more
+ * relic_pred_is_defined(); relic_pred_reference() alone can fail, having
+ * reported that memory ran out, since it copies the reference's source
+ * name.  relic_pred_count_program_rule() counts one more
  * of the program's rules deriving the predicate.
  *
  * relic_pred_describe() writes "name/arity" into the caller's buffer, which
@@ -1084,8 +1104,9 @@ const char *relic_source_name(relic_t *ctx, const char *name);
 
 void	 relic_predtab_init(relic_predtab_t *table, uint64_t hash_seed);
 void	 relic_predtab_reset(relic_predtab_t *table);
-int	 relic_pred_intern(relic_t *ctx, uint32_t name, uint16_t arity,
-	    const relic_location_t *where, relic_pred_id_t *idp);
+int	 relic_pred_intern(relic_t *ctx, const char *name, size_t length,
+	    uint16_t arity, const relic_location_t *where,
+	    relic_pred_id_t *idp);
 const relic_pred_t *relic_pred_of(const relic_t *ctx, relic_pred_id_t id);
 size_t	 relic_pred_count(const relic_t *ctx);
 void	 relic_pred_name_head(relic_t *ctx, relic_pred_id_t id);
@@ -1094,7 +1115,7 @@ void	 relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
 void	 relic_pred_name_group(relic_t *ctx, relic_pred_id_t id,
 	    relic_pred_id_t holder);
 void	 relic_pred_mark_derived(relic_t *ctx, relic_pred_id_t id);
-void	 relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
+int	 relic_pred_reference(relic_t *ctx, relic_pred_id_t id,
 	    const relic_location_t *where);
 void	 relic_pred_make_view(relic_t *ctx, relic_pred_id_t view,
 	    relic_pred_id_t viewed);

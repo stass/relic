@@ -287,9 +287,10 @@ esac
 
 # -l sets each limit the library enforces, by the key the diagnostic names
 # it by, and zero asks for the default.  A repeated key takes its later value.
-# The memory limit counts the symbol pool a load's names fill, so a limit of
-# one byte refuses graph.dl's load at its first name, before any predicate
-# has a store to name, and the refusal names the file being loaded.  The run
+# The memory limit counts the symbol pool a load's constants fill, so a
+# limit of one byte refuses graph.dl's load at its first constant, before any
+# predicate has a store to name, and the refusal names the file being
+# loaded.  The run
 # names it relative to the work directory, so the message holds the name as
 # written whatever the temporary directory's path.
 status=0
@@ -307,10 +308,10 @@ case "$diagnostic" in
 esac
 
 # The limit also counts the working state of a query's Magic rewrite.  A
-# kilobyte past what the program holds without its query has room for the
-# query's names and not for the rewrite's first allocation, which is
-# refused, naming the query.
-rules=$(printf '%s\n' 'p(X) :- q(X).' 'q(X) :- p(X).')
+# kilobyte past what the program holds without its query, a program whose
+# fact holds the query's constant already, has room for the query and not
+# for the rewrite's first allocation, which is refused, naming the query.
+rules=$(printf '%s\n' 'p(X) :- q(X).' 'q(X) :- p(X).' 'r(a).')
 held=$(printf '%s\n' "$rules" | "$RELIC" -X stats 2>&1 >/dev/null |
     sed -n 's/^stats: storage bytes //p')
 status=0
@@ -344,13 +345,13 @@ done
 echo 'two(X, Z) :- edge(X, Y), edge(Y, Z).' >> "$work/chain.dl"
 
 status=0
-diagnostic=$("$RELIC" -a -l memory=11000 "$work/chain.dl" 2>&1 >/dev/null) ||
+diagnostic=$("$RELIC" -a -l memory=15000 "$work/chain.dl" 2>&1 >/dev/null) ||
     status=$?
 if [ "$status" -ne 1 ]; then
 	fail "refused plans exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=11000 while planning two/2"*)
+*"limit exceeded: memory=15000 while planning two/2"*)
 	;;
 *)
 	fail "refused plans were reported as '$diagnostic'"
@@ -358,13 +359,13 @@ case "$diagnostic" in
 esac
 
 status=0
-diagnostic=$("$RELIC" -a -l memory=16000 "$work/chain.dl" 2>&1 >/dev/null) ||
+diagnostic=$("$RELIC" -a -l memory=20000 "$work/chain.dl" 2>&1 >/dev/null) ||
     status=$?
 if [ "$status" -ne 1 ]; then
 	fail "a refused index build exited $status, expected 1"
 fi
 case "$diagnostic" in
-*"limit exceeded: memory=16000 while indexing edge/2"*)
+*"limit exceeded: memory=20000 while indexing edge/2"*)
 	;;
 *)
 	fail "a refused index build was reported as '$diagnostic'"
@@ -372,7 +373,7 @@ case "$diagnostic" in
 esac
 
 # A refusal is reported once, as the limit it is, naming what it fell in:
-# the load interning the program's names, the check compiling its rules, the
+# the load interning the program's facts, the check compiling its rules, the
 # plans of the rules allocated one after another, tuples being derived, or an
 # index being built.  Each limit of the sweep refuses the program somewhere,
 # so each run fails with exactly one such message: none would be a failure

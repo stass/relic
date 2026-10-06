@@ -167,7 +167,6 @@ relation(relic_t *ctx, const char *scenario, const char *name, uint16_t arity)
 	relic_ruletab_t rules;
 	relic_rule_t rule;
 	relic_pred_id_t pred;
-	uint32_t symbol;
 	int appended;
 
 	bzero(&where, sizeof(where));
@@ -175,8 +174,8 @@ relation(relic_t *ctx, const char *scenario, const char *name, uint16_t arity)
 	where.line = 1;
 	where.column = 1;
 
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0 ||
-	    relic_pred_intern(ctx, symbol, arity, &where, &pred) != 0) {
+	if (relic_pred_intern(ctx, name, strlen(name), arity, &where,
+	    &pred) != 0) {
 		checkf(false, scenario, "%s/%u should intern", name,
 		    (unsigned int)arity);
 		return (NULL);
@@ -376,14 +375,14 @@ distinct_by_hand(const relic_relation_t *rel, uint16_t column)
 /*
  * The bytes the memory limit counts against a context that holds no arena
  * and runs no round: its relations' storage, its integer table, which every
- * integer value() interns grows, and the symbol pool holding the relations'
- * names.
+ * integer value() interns grows, the symbol pool and the name store holding
+ * the relations' names.
  */
 static size_t
 charged_bytes(const relic_t *ctx)
 {
 	return (relic_relation_total_bytes(ctx) + ctx->account.value_bytes +
-	    ctx->account.pool_bytes);
+	    ctx->account.pool_bytes + ctx->account.name_bytes);
 }
 
 /*
@@ -1230,14 +1229,14 @@ the_memory_limit_refuses_a_build_whole(void)
  * either: the integer table counts against it as the relation does.
  *
  * With no limit (`max_memory` 0), the bytes charged after each step, the
- * relation's, its integers' and the pool's, are recorded in `unlimited`,
- * which has room for LIMIT_SWEEP_TUPLES.  Under a limit, each step must be
- * refused exactly when the unlimited run held more than the limit after it,
- * and must otherwise leave the same bytes charged: the limit neither lets
- * storage past it nor refuses a tuple that fits.  That is exact for the
- * step as a whole because nothing a step grows shrinks within it, so the
- * bytes after its interning are at most the bytes after its insertion.
- * After every step the storage total must also equal what the arrays hold.
+ * relation's, its integers', the pool's and the names', are recorded in
+ * `unlimited`, which has room for LIMIT_SWEEP_TUPLES.  Under a limit, each
+ * step must be refused exactly when the unlimited run held more than the limit
+ * after it, and must otherwise leave the same bytes charged: the limit neither
+ * lets storage past it nor refuses a tuple that fits.  That is exact for the
+ * step as a whole because nothing a step grows shrinks within it, so the bytes
+ * after its interning are at most the bytes after its insertion.  After
+ * every step the storage total must also equal what the arrays hold.
  * Returns whether all of that held throughout.
  *
  * The limit is set once the relation is named and indexed, so that the

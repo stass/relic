@@ -39,6 +39,7 @@
 #define	SCENARIO_SYMBOLS	"the symbol pool stops at its ceiling"
 #define	SCENARIO_DEFERRED	"a deferred round stops at the integer ceiling"
 #define	SCENARIO_TOO_LONG	"a string too long to be a value fails"
+#define	SCENARIO_LEXED		"a name or literal too long is refused as read"
 
 /*
  * Forty integers loaded and a rule computing a new one from each, which
@@ -59,6 +60,11 @@ _Static_assert(RELIC_STRING_LENGTH_MAX == 2 * (sizeof(STRING_HALF) - 1),
 
 static void	 a_deferred_round_stops_as_serially(size_t threads);
 static void	 a_string_too_long_fails_the_evaluation(void);
+static void	 a_name_or_literal_too_long_is_refused(void);
+static void	 count_error(void *callback_ctx, enum relic_diag_level level,
+		    const relic_location_t *where, const char *message);
+static bool	 loads_with_errors(relic_t *ctx, const char *text,
+		    size_t errors, const char *expected);
 static relic_t	*computing_context(unsigned int flags, size_t threads);
 static int	 count_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
@@ -293,6 +299,90 @@ a_string_too_long_fails_the_evaluation(void)
 }
 
 /*
+ * Count an error diagnostic in the size_t the callback context points at.
+ */
+static void
+count_error(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where RELIC_TEST_UNUSED,
+    const char *message RELIC_TEST_UNUSED)
+{
+	size_t *errors;
+
+	errors = callback_ctx;
+	if (level == RELIC_ERROR)
+		(*errors)++;
+}
+
+/*
+ * Whether loading `text` draws exactly `errors` errors, the last naming
+ * `expected` when one is expected, and succeeds exactly when it draws none.
+ */
+static bool
+loads_with_errors(relic_t *ctx, const char *text, size_t errors,
+    const char *expected)
+{
+	size_t counted;
+	int status;
+
+	counted = 0;
+	relic_diag_set(ctx, count_error, &counted);
+	status = relic_load_string(ctx, "lexed.dl", text);
+	relic_diag_set(ctx, NULL, NULL);
+
+	if (counted != errors || (status == 0) != (errors == 0))
+		return (false);
+
+	return (errors == 0 || diagnosed(ctx, expected));
+}
+
+/*
+ * The lexer refuses a name or a string literal longer than a value may be
+ * as it reads it, a literal by the length its escapes decode to, with one
+ * message, and reads on: the statement after it is read as usual.  A name
+ * or a literal of exactly the longest length is read.
+ */
+static void
+a_name_or_literal_too_long_is_refused(void)
+{
+	char longest_name[] = "n" STRING_HALF STRING_HALF;
+	char text[256];
+	relic_t *ctx;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_LEXED, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	longest_name[RELIC_STRING_LENGTH_MAX] = '\0';
+	snprintf(text, sizeof(text), "%s(1).\n", longest_name);
+	check(loads_with_errors(ctx, text, 0, NULL), SCENARIO_LEXED,
+	    "a name of the longest length should be read");
+
+	snprintf(text, sizeof(text), "%sx(1).\nok(1).\n", longest_name);
+	check(loads_with_errors(ctx, text, 1, "a name of 65 bytes is longer "
+	    "than the " STRING_LIMIT_TEXT " a name may hold"), SCENARIO_LEXED,
+	    "a name one byte longer should draw one error");
+
+	check(loads_with_errors(ctx, "s(\"" STRING_HALF
+	    "0123456789abcdef0123456789abcd\\n\\t\").\n", 0, NULL),
+	    SCENARIO_LEXED, "a literal decoding to the longest length "
+	    "should be read");
+	check(loads_with_errors(ctx, "s(\"" STRING_HALF
+	    "0123456789abcdef0123456789abcde\\n\\t\").\nbad(.\n", 2,
+	    "expected"), SCENARIO_LEXED,
+	    "a literal decoding one byte longer should draw one error, and "
+	    "the statement after it its own");
+	check(loads_with_errors(ctx, "s(\"" STRING_HALF
+	    "0123456789abcdef0123456789abcde\\n\\t\").\n", 1,
+	    "a string literal of 65 bytes is longer than the "
+	    STRING_LIMIT_TEXT " a value may hold"), SCENARIO_LEXED,
+	    "a literal decoding one byte longer should be refused by its "
+	    "decoded length");
+
+	relic_destroy(ctx);
+}
+
+/*
  * Answer a query, counting its rows into *rowsp.  Returns what
  * relic_query_run() returns, or -1 when the query was not prepared.
  */
@@ -385,6 +475,7 @@ main(void)
 	a_deferred_round_stops_as_serially(1);
 	a_deferred_round_stops_as_serially(4);
 	a_string_too_long_fails_the_evaluation();
+	a_name_or_literal_too_long_is_refused();
 
 	return (check_summary("ceiling"));
 }

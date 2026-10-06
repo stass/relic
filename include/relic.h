@@ -126,25 +126,25 @@ typedef struct relic_config relic_config_t;
  *
  * `max_memory` bounds what the program's stores hold and what running the
  * program holds: relation and index storage, the program's facts and what it
- * derives alike, which grows with the data; the table of integer values,
- * which gains an entry for every distinct integer the program states or
- * evaluation computes; the symbol pool, which holds every name, symbol and
- * string the program states and every string evaluation computes; the
- * buffers an evaluation computes strings in; and the plans of an evaluation
- * and the rewritten rules of a query, which grow with the square of a rule's
- * length.  A limit that fits a program's data may therefore refuse its
- * plans, before any tuple is derived.  The names, symbols, strings and
- * integers the caller writes are counted as those evaluation computes are,
- * so a load, an import, a fact or a query whose values would grow the table
- * or the pool past the limit is refused as it interns them, with "limit
- * exceeded: memory=N".  The limit does not bound the memory the library
- * uses in total: the program's rules and queries, the text being loaded,
- * the field of a table being imported, the evaluation order and a prepared
- * query are sized by what the caller wrote, and the tables and evaluation
- * order of a query's rewrite are a fraction of the rewrite the limit does
- * count.
- * Nor is it a bound on peak usage, since growing an array holds the old one
- * until the new one is filled.
+ * derives alike, which grows with the data; the table of integer values, which
+ * gains an entry for every distinct integer the program states or evaluation
+ * computes; the symbol pool, which holds every symbol and string the program
+ * states and every string evaluation computes; the names of the predicates the
+ * program and the rewrites of its queries name, and of the sources each
+ * predicate was first read from; the buffers an evaluation computes strings
+ * in; and the plans of an evaluation and the rewritten rules of a query, which
+ * grow with the square of a rule's length.  A limit that fits a program's data
+ * may therefore refuse its plans, before any tuple is derived.  The names,
+ * symbols, strings and integers the caller writes are counted as those
+ * evaluation computes are, so a load, an import, a fact or a query whose
+ * values or names would grow the tables past the limit is refused as it
+ * interns them, with "limit exceeded: memory=N".  The limit does not bound the
+ * memory the library uses in total: the program's rules and queries, the text
+ * being loaded, the field of a table being imported, the evaluation order and
+ * a prepared query are sized by what the caller wrote, and the tables and
+ * evaluation order of a query's rewrite are a fraction of the rewrite the
+ * limit does count.  Nor is it a bound on peak usage, since growing an
+ * array holds the old one until the new one is filled.
  *
  * `max_magic_preds` and `max_magic_rules` bound the Magic Sets rewrite of a
  * single query: the adorned and magic predicates it generates, and the rules it
@@ -351,9 +351,9 @@ struct relic_value {
  * `v.integer` to the value.
  *
  * A context holds at most 2^30 - 1 distinct byte strings, which symbols and
- * strings share with predicate names, variable names and source names, and
- * at most 2^30 - 1 distinct integers; a byte string is at most 2^32 - 2
- * bytes long.  Interning past a limit fails with the reason reported.
+ * strings share, and at most 2^30 - 1 distinct integers; a byte string is at
+ * most 2^32 - 2 bytes long.  Interning past a limit fails with the reason
+ * reported.
  */
 RELIC_EXPORT int relic_value_symbol(relic_t *ctx, const char *bytes,
     size_t length, relic_value_t *value);
@@ -398,9 +398,10 @@ enum relic_diag_level {
  * the message.
  *
  * Both the message and the location are borrowed and do not outlive the
- * call; a callback that keeps either copies it. The `file` name inside a
- * location is the exception and belongs to the context, so it stays valid
- * until the context is destroyed.
+ * call; a callback that keeps either copies it, the `file` name inside the
+ * location included.  The name lives as long as what was parsed under it:
+ * a loaded program's as long as the context, a prepared query's as long as
+ * the query, and an import's for the call.
  */
 typedef void (*relic_diag_cb)(
     void *,
@@ -858,13 +859,14 @@ typedef struct relic_stats relic_stats_t;
  *			of threads
  *
  * The rest describe the context when the counters are read: the tuples held
- * across every relation -- answers are transient, so only a row callback
- * finds one among them, the answer it is receiving when its query gathers
- * the answer before delivering it -- the bytes of relation and index storage
- * they occupy together with those of the table of integer values and of the
- * symbol pool, which is what the memory limit counts beside evaluation's
- * transient buffers, and the distinct values interned, by type: those the
- * program states and the integers and strings evaluation computed alike.
+ * across every relation -- answers are transient, so only a row callback finds
+ * one among them, the answer it is receiving when its query gathers the answer
+ * before delivering it -- the bytes of relation and index storage they occupy
+ * together with those of the table of integer values, of the symbol pool and
+ * of the names of predicates and their sources, which is what the memory limit
+ * counts beside evaluation's transient buffers, and the distinct values
+ * interned, by type: those the program states and the integers and strings
+ * evaluation computed alike.
  *
  * The counts depend on the evaluation strategy and on how the engine is
  * implemented, and are not stable from one release to the next; only the

@@ -103,6 +103,26 @@ if ! grep -q '^query .* :- edge(a, X)\.$' "$work/plan.replies" ||
 	fail ".plan and .stats replied '$(cat "$work/plan.replies")'"
 fi
 
+# Each line's query is named for its place in the session, and the name is
+# the query's alone: a thousand lines asking after values the program holds
+# leave the values and their storage where the first line left them.
+{
+	echo 'edge(a, X)?'
+	echo '.stats'
+	i=1
+	while [ "$i" -lt 1000 ]; do
+		echo 'edge(a, X)?'
+		i=$((i + 1))
+	done
+	echo '.stats'
+} | "$RELIC" -i -o /dev/null "$work/graph.dl" > "$work/session.replies"
+values=$(grep -E '^stats: (symbol values|string values|storage bytes) ' \
+    "$work/session.replies")
+if [ "$(printf '%s\n' "$values" | wc -l)" -ne 6 ] ||
+    [ "$(printf '%s\n' "$values" | sort -u | wc -l)" -ne 3 ]; then
+	fail "a session of a thousand lines replied '$values'"
+fi
+
 # An unknown command's name is repeated with its control bytes escaped, so
 # that a mistyped line cannot drive the terminal the diagnostic reaches.
 diagnostic=$(printf '.\033[2Jx\n' | "$RELIC" -i 2>&1 >/dev/null) || true

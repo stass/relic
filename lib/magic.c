@@ -138,6 +138,21 @@
 #define	QUERY_ADORNED_NAME_LENGTH	(sizeof(QUERY_ADORNED_NAME) - 1)
 #define	ORDINALS_MAX			(2 * (1 + 20))
 
+/*
+ * The names of a base view's rule's variables, X1 to Xn for a source of
+ * arity n: literals rather than spellings in an arena, so that they live as
+ * long as any copy of the rule, whichever arena the copy is in.
+ */
+static const char *const view_variable_names[] = {
+	"X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8",
+	"X9", "X10", "X11", "X12", "X13", "X14", "X15", "X16",
+	"X17", "X18", "X19", "X20", "X21", "X22", "X23", "X24",
+	"X25", "X26", "X27", "X28", "X29", "X30", "X31", "X32"
+};
+
+_Static_assert(sizeof(view_variable_names) / sizeof(view_variable_names[0]) ==
+    RELIC_MAX_ARITY, "a base view's rule names a variable per column");
+
 typedef struct relic_closure relic_closure_t;
 typedef struct relic_demand relic_demand_t;
 typedef struct relic_draft relic_draft_t;
@@ -1047,8 +1062,8 @@ charge_literals(relic_magic_t *magic, size_t *spent, size_t size,
 }
 
 /*
- * Intern a generated predicate's name and the predicate, which is defined
- * from the start: it is the head of a rule the rewrite generates, and the
+ * Intern a generated predicate by its name, which is defined from the
+ * start: it is the head of a rule the rewrite generates, and the
  * undefined-predicate warning must never name it.  It is part of the
  * program's predicate `source`, which diagnostics name in its place, or of
  * the query when `source` is RELIC_ID_NONE.
@@ -1058,12 +1073,7 @@ intern_generated(relic_magic_t *magic, const char *name, size_t length,
     uint16_t arity, const relic_location_t *where, relic_pred_id_t source,
     relic_pred_id_t *idp)
 {
-	uint32_t symbol;
-
-	if (relic_symbol_intern(magic->ctx, name, length, &symbol) != 0)
-		return (-1);
-
-	if (relic_pred_intern(magic->ctx, symbol, arity, where, idp) != 0)
+	if (relic_pred_intern(magic->ctx, name, length, arity, where, idp) != 0)
 		return (-1);
 
 	relic_pred_name_generated(magic->ctx, *idp, source);
@@ -1115,11 +1125,11 @@ base_view_of(relic_magic_t *magic, relic_pred_id_t source,
 	const char *name;
 	char *text;
 	size_t name_length;
-	uint32_t symbol;
 	uint16_t arity;
 
 	entry = relic_pred_of(magic->ctx, source);
-	name = relic_symbol_bytes(magic->ctx, entry->name, &name_length);
+	name = entry->name.bytes;
+	name_length = entry->name.length;
 	arity = entry->arity;
 
 	text = magic_alloc(magic, name_length + sizeof(suffix) - 1, 1);
@@ -1128,11 +1138,8 @@ base_view_of(relic_magic_t *magic, relic_pred_id_t source,
 	bcopy(name, text, name_length);
 	bcopy(suffix, text + name_length, sizeof(suffix) - 1);
 
-	if (relic_symbol_intern(magic->ctx, text,
-	    name_length + sizeof(suffix) - 1, &symbol) != 0)
-		return (-1);
-
-	if (relic_pred_intern(magic->ctx, symbol, arity, NULL, viewp) != 0)
+	if (relic_pred_intern(magic->ctx, text,
+	    name_length + sizeof(suffix) - 1, arity, NULL, viewp) != 0)
 		return (-1);
 
 	relic_pred_make_view(magic->ctx, *viewp, source);
@@ -1160,7 +1167,6 @@ base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
 	relic_arg_t *args;
 	relic_variable_t *variables;
 	relic_pred_id_t view;
-	char name[16];
 	uint16_t arity;
 	uint16_t column;
 
@@ -1187,10 +1193,9 @@ base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
 		args[column].u.slot = column;
 
 		bzero(&variables[column], sizeof(variables[column]));
-		snprintf(name, sizeof(name), "X%u", (unsigned int)column + 1);
-		if (relic_symbol_intern(magic->ctx, name, strlen(name),
-		    &variables[column].name) != 0)
-			return (-1);
+		variables[column].name.bytes = view_variable_names[column];
+		variables[column].name.length =
+		    (uint32_t)strlen(view_variable_names[column]);
 		variables[column].where = *where;
 		variables[column].occurrences = 2;
 	}
@@ -1222,8 +1227,9 @@ base_view_rule(relic_magic_t *magic, relic_pred_id_t source,
  * the magic one, which holds only the bound columns and exists only when
  * there is one.
  *
- * What the source predicate's entry says is copied first, because interning
- * can grow the predicate table and move the entry.
+ * What the source predicate's entry says is read first, because interning
+ * can grow the predicate table and move the entry; the name it points at is
+ * in the name store, which does not move.
  */
 static int
 name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
@@ -1238,7 +1244,8 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	uint16_t column;
 
 	entry = relic_pred_of(magic->ctx, source);
-	name = relic_symbol_bytes(magic->ctx, entry->name, &name_length);
+	name = entry->name.bytes;
+	name_length = entry->name.length;
 	arity = entry->arity;
 
 	length = MAGIC_PREFIX_LENGTH + name_length + 1 + arity;
@@ -2345,8 +2352,8 @@ intern_supplementary(relic_magic_t *magic, const relic_prefix_t *prefix,
 	if (prefix->adornment->adorned != RELIC_ID_NONE) {
 		adorned = relic_pred_of(magic->ctx,
 		    prefix->adornment->adorned);
-		name = relic_symbol_bytes(magic->ctx, adorned->name,
-		    &name_length);
+		name = adorned->name.bytes;
+		name_length = adorned->name.length;
 	}
 
 	room = SUPPLEMENTARY_PREFIX_LENGTH + name_length + ORDINALS_MAX + 1;

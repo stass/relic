@@ -34,6 +34,9 @@
 #define	SCENARIO_GROWTH		"the table stays exact as it grows"
 #define	SCENARIO_IDENTITY	"(name, arity) identifies a predicate"
 #define	SCENARIO_WHERE		"a predicate remembers the first atom reading it"
+#define	SCENARIO_SOURCES	"a source name is kept once and whole"
+#define	SOURCE_NAMES		100
+#define	LONG_SOURCE		(64 * 1024)
 #define	SCENARIO_ARITY		"no predicate has more than 32 arguments"
 
 /*
@@ -49,6 +52,7 @@ static bool	 intern(relic_t *ctx, const char *name, uint16_t arity,
 static void	 name_and_arity_identify_a_predicate(void);
 static void	 a_predicate_describes_itself_for_a_message(void);
 static void	 a_predicate_remembers_the_first_atom_reading_it(void);
+static void	 a_source_name_is_kept_once_and_whole(void);
 static void	 a_predicate_is_defined_by_what_derives_it(void);
 static void	 the_table_stays_exact_as_it_grows(void);
 static void	 no_predicate_has_more_than_32_arguments(void);
@@ -67,25 +71,19 @@ context(void)
 
 /*
  * Intern a predicate named by its spelling, at a location naming the call.
- *
- * Every scenario below wants a predicate rather than an interned name and a
- * location, so the two steps live here instead of at each call site.
  */
 static bool
 intern(relic_t *ctx, const char *name, uint16_t arity, relic_pred_id_t *idp)
 {
 	relic_location_t where;
-	uint32_t symbol;
-
-	if (relic_symbol_intern(ctx, name, strlen(name), &symbol) != 0)
-		return (false);
 
 	bzero(&where, sizeof(where));
 	where.file = "test.dl";
 	where.line = arity + 1u;
 	where.column = 1;
 
-	return (relic_pred_intern(ctx, symbol, arity, &where, idp) == 0);
+	return (relic_pred_intern(ctx, name, strlen(name), arity, &where,
+	    idp) == 0);
 }
 
 static void
@@ -150,20 +148,15 @@ a_predicate_remembers_the_first_atom_reading_it(void)
 	relic_location_t later;
 	relic_pred_id_t id;
 	relic_pred_id_t again;
-	uint32_t symbol;
+	char source[16];
 
 	ctx = context();
 	if (ctx == NULL)
 		return;
 
-	if (relic_symbol_intern(ctx, "edge", 4, &symbol) != 0) {
-		check(false, SCENARIO_WHERE, "the name interns");
-		relic_destroy(ctx);
-		return;
-	}
-
+	strlcpy(source, "first.dl", sizeof(source));
 	bzero(&first, sizeof(first));
-	first.file = "first.dl";
+	first.file = source;
 	first.line = 3;
 	first.column = 7;
 
@@ -172,8 +165,8 @@ a_predicate_remembers_the_first_atom_reading_it(void)
 	later.line = 99;
 	later.column = 1;
 
-	if (relic_pred_intern(ctx, symbol, 2, &later, &id) != 0 ||
-	    relic_pred_intern(ctx, symbol, 2, &later, &again) != 0) {
+	if (relic_pred_intern(ctx, "edge", 4, 2, &later, &id) != 0 ||
+	    relic_pred_intern(ctx, "edge", 4, 2, &later, &again) != 0) {
 		check(false, SCENARIO_WHERE, "both mentions intern");
 		relic_destroy(ctx);
 		return;
@@ -189,8 +182,9 @@ a_predicate_remembers_the_first_atom_reading_it(void)
 	check(!pred->referenced, SCENARIO_WHERE,
 	    "interning a predicate should not mark it read");
 
-	relic_pred_reference(ctx, id, &first);
-	relic_pred_reference(ctx, again, &later);
+	check(relic_pred_reference(ctx, id, &first) == 0 &&
+	    relic_pred_reference(ctx, again, &later) == 0, SCENARIO_WHERE,
+	    "both readings are recorded");
 
 	checkf(pred->referenced && pred->referenced_at.line == first.line &&
 	    pred->referenced_at.column == first.column &&
@@ -199,6 +193,99 @@ a_predicate_remembers_the_first_atom_reading_it(void)
 	    pred->referenced_at.file, (unsigned int)pred->referenced_at.line,
 	    (unsigned int)pred->referenced_at.column);
 
+	/*
+	 * The location may come from a query, whose source name dies with
+	 * it, so the predicate keeps a copy of the name of its own.
+	 */
+	strlcpy(source, "overwritten", sizeof(source));
+	check(pred->referenced_at.file != source &&
+	    strcmp(pred->referenced_at.file, "first.dl") == 0, SCENARIO_WHERE,
+	    "the remembered location should keep a copy of its source name");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * The name store keeps one copy of each source name, however many
+ * predicates its text first reads and however far the store's index has
+ * grown since.  A copy the memory limit refuses fails the reference and
+ * records nothing, so the predicate is not left read from no source: the
+ * same reference made again, once the limit admits it, records the name.
+ */
+static void
+a_source_name_is_kept_once_and_whole(void)
+{
+	char name[32];
+	char *long_name;
+	relic_location_t where;
+	relic_pred_id_t id;
+	const relic_pred_t *pred;
+	relic_t *ctx;
+	size_t round;
+	size_t i;
+	bool recorded;
+
+	ctx = context();
+	if (ctx == NULL)
+		return;
+
+	bzero(&where, sizeof(where));
+	where.file = name;
+	where.line = 1;
+	where.column = 1;
+
+	recorded = true;
+	for (round = 0; round < 2; round++) {
+		for (i = 0; i < SOURCE_NAMES; i++) {
+			snprintf(name, sizeof(name), "source%zu.dl", i);
+			if (relic_pred_intern(ctx, name, strlen(name),
+			    (uint16_t)(round + 1), &where, &id) != 0 ||
+			    relic_pred_reference(ctx, id, &where) != 0)
+				recorded = false;
+		}
+	}
+	check(recorded, SCENARIO_SOURCES, "every reading is recorded");
+	checkf(ctx->program.predicates.source_count == SOURCE_NAMES,
+	    SCENARIO_SOURCES, "%d source names should be kept once each, "
+	    "and %zu are kept", SOURCE_NAMES,
+	    ctx->program.predicates.source_count);
+
+	long_name = malloc(LONG_SOURCE + 1);
+	if (long_name == NULL) {
+		check(false, SCENARIO_SOURCES, "a long source name is written");
+		relic_destroy(ctx);
+		return;
+	}
+	memset(long_name, 'n', LONG_SOURCE);
+	long_name[LONG_SOURCE] = '\0';
+	where.file = long_name;
+
+	if (relic_pred_intern(ctx, "read", 4, 1, &where, &id) != 0 ||
+	    (pred = relic_pred_of(ctx, id)) == NULL) {
+		check(false, SCENARIO_SOURCES, "the read predicate interns");
+		free(long_name);
+		relic_destroy(ctx);
+		return;
+	}
+
+	ctx->account.limit = ctx->account.name_bytes + 1;
+	check(relic_pred_reference(ctx, id, &where) != 0, SCENARIO_SOURCES,
+	    "a source name the limit refuses fails the reference");
+	check(!pred->referenced, SCENARIO_SOURCES,
+	    "a refused reference records nothing");
+
+	ctx->account.limit = 0;
+	check(relic_pred_reference(ctx, id, &where) == 0 &&
+	    pred->referenced && pred->referenced_at.file != NULL &&
+	    strcmp(pred->referenced_at.file, long_name) == 0,
+	    SCENARIO_SOURCES, "the reference made again records the name");
+	checkf(ctx->account.name_bytes == relic_arena_total_bytes(
+	    &ctx->program.predicates.names), SCENARIO_SOURCES,
+	    "the account should count the %zu bytes the names hold, not %zu",
+	    relic_arena_total_bytes(&ctx->program.predicates.names),
+	    ctx->account.name_bytes);
+
+	free(long_name);
 	relic_destroy(ctx);
 }
 
@@ -400,6 +487,7 @@ main(void)
 {
 	name_and_arity_identify_a_predicate();
 	a_predicate_remembers_the_first_atom_reading_it();
+	a_source_name_is_kept_once_and_whole();
 	a_predicate_is_defined_by_what_derives_it();
 	a_predicate_describes_itself_for_a_message();
 	the_table_stays_exact_as_it_grows();

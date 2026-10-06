@@ -509,9 +509,8 @@ static void	 report_texts_refused(relic_t *ctx,
 		    enum relic_exec_failure failure);
 static int	 resolve_pending(relic_evaluation_t *eval,
 		    relic_relation_t *relation);
-static const char *describe_fold(const relic_t *ctx,
-		    const relic_aggregate_t *aggregate, char *buffer,
-		    size_t size);
+static const char *describe_fold(const relic_aggregate_t *aggregate,
+		    char *buffer, size_t size);
 static const char *type_phrase(relic_dom_t type);
 static bool	 literal_reads_member(const relic_evaluation_t *eval,
 		    const relic_literal_t *literal);
@@ -674,14 +673,14 @@ note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
 	case RELIC_NOTE_SUM_TYPE:
 		relic_diag_note(ctx, note->where,
 		    "a row of %s holds a value that is not an integer; the "
-		    "aggregate has no value", describe_fold(ctx,
-		    note->aggregate, folded, sizeof(folded)));
+		    "aggregate has no value", describe_fold(note->aggregate,
+		    folded, sizeof(folded)));
 		return;
 	case RELIC_NOTE_EXTREME_TYPES:
 		relic_diag_note(ctx, note->where,
 		    "the rows of %s hold values of more than one type; the "
-		    "aggregate has no value", describe_fold(ctx,
-		    note->aggregate, folded, sizeof(folded)));
+		    "aggregate has no value", describe_fold(note->aggregate,
+		    folded, sizeof(folded)));
 		return;
 	}
 }
@@ -693,21 +692,16 @@ note_mixed_comparison(relic_t *ctx, const relic_rule_t *rule,
  * identifier bytes, so it is safe to quote.
  */
 static const char *
-describe_fold(const relic_t *ctx, const relic_aggregate_t *aggregate,
-    char *buffer, size_t size)
+describe_fold(const relic_aggregate_t *aggregate, char *buffer, size_t size)
 {
 	const relic_variable_t *variable;
-	const char *bytes;
 	char named[RELIC_NAME_TEXT_MAX];
 
 	variable = &aggregate->body->variables[aggregate->column];
-	bytes = relic_symbol_bytes(ctx, variable->name, NULL);
-	if (bytes == NULL)
-		bytes = "?";
 
 	snprintf(buffer, size, "%s(%s)",
 	    relic_aggregate_spelling(aggregate->fn),
-	    relic_diag_name(bytes, named, sizeof(named)));
+	    relic_diag_name(variable->name.bytes, named, sizeof(named)));
 
 	return (buffer);
 }
@@ -3600,7 +3594,8 @@ relic_stats(relic_t *ctx, relic_stats_t *stats)
 
 	stats->tuples = relic_relation_total_tuples(ctx);
 	stats->storage_bytes = relic_relation_total_bytes(ctx) +
-	    relic_value_storage_bytes(ctx);
+	    relic_value_storage_bytes(ctx) +
+	    relic_arena_total_bytes(&ctx->program.predicates.names);
 	stats->symbol_values = relic_value_count_of(ctx, RELIC_SYMBOL);
 	stats->string_values = relic_value_count_of(ctx, RELIC_STRING);
 	stats->integer_values = relic_value_count_of(ctx, RELIC_INTEGER);
