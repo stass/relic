@@ -438,6 +438,13 @@ inserted. In a parallel round it is **screened** twice:
    high half is what the stripes of section 6.3 are chosen by -- to the
    worker's **candidate buffer**.
 
+The second screen is probed as the first is. The tuples the store lacks
+are taken in passes over the batch -- the screen slot each selects is
+prefetched, then the entry of the candidate an occupied slot names, then
+that candidate's columns -- before any is probed, so that their misses
+overlap as the store probes' do; `specs/design-deferral-cost.md` section
+4.
+
 **A pending value is screened by value.** A head column holding a value
 the plan computed and the context has not assigned -- an integer, or a
 string with its bytes -- holds a pending marker, and the worker gives the
@@ -466,12 +473,21 @@ bounded by the workers times its distinct new tuples.
 A worker runs its tasks one after another, so its buffer holds their
 candidates in task order, contiguously; the task records its offset and
 count when it finishes. The buffer and the screen are growable arrays
-charged to the account, section 8, and **released at the round's end**,
+charged to the account, section 8, **reserved before the job is
+published** for the candidates the round is expected to gather -- the
+tuples its items inserted the last time they ran, which their histories
+record, section 5.4; a worker's share of them doubled when the pool has
+several workers, since a worker claims whatever tasks it reaches -- and
+grown only by a round that exceeds its estimate, from the estimate
+rather than from nothing. They are **released at the round's end**,
 memory and charge alike, once the merge has taken the candidates: they
 hold data, so they count against the limit while they exist, and they
 must not exist while anything else asks the limit for room, section 8.
 Releasing and reallocating them costs a round a few system calls, which a
-round above the threshold of section 5.4 does not notice.
+round above the threshold of section 5.4 does not notice; a reservation
+the limit or the allocator refuses declines the round before it begins,
+as a refused string buffer does below. `specs/design-deferral-cost.md`
+section 5.
 
 The executor scratches, one per worker, belong to the pool as the task
 array does: sized by the longest plan of the evaluation, grown when a
@@ -517,7 +533,10 @@ counters, scaled by the ratio of its first-operation range now to then; an
 item that has not run yet is estimated at its first-operation range. A
 recursive component's rounds change size gradually, so the previous round
 predicts the next well enough for a threshold whose only cost is a missed
-opportunity or a barrier paid for nothing.
+opportunity or a barrier paid for nothing. The history also records the
+tuples the item **inserted**, unscaled, since a round's new tuples do not
+follow its delta; that is what sizes the round's buffers, section 5.3,
+and an item that has not run is expected to insert what its range holds.
 
 `chain-closure` estimates at most six thousand per round and never
 crosses the threshold: it runs serially, inserting as it derives, and pays
@@ -537,7 +556,10 @@ because a round just above break-even is usually one of those that insert
 most of what they derive. A chain of six thousand edges, whose rounds
 estimate up to eighteen thousand, runs ten per cent slower at sixteen
 threads with the threshold at eight or sixteen thousand, and as fast as
-one thread with it at 65 536.
+one thread with it at 65 536. That measurement predates the parallel
+merge of section 6.3 and the cost `specs/design-deferral-cost.md` takes
+out of a deferred round; its section 7 gives the cost model the threshold
+is measured against once both are in.
 
 The debug switch `-X parallel`, `RELIC_F_PARALLEL_ALWAYS` in the library,
 runs every eligible round deferred, however small its estimate and
@@ -696,9 +718,16 @@ the pool:
    tuple, since the screen of section 5.3 found it absent from the
    frozen store, and the firsts are exactly the tuples the serial
    evaluator inserts. Stripes share nothing, and each writes only its
-   own candidates' marks. Every part reads every candidate's stripe, a
-   byte each, in place of a pass that would copy the candidates into
-   buckets by stripe.
+   own candidates' marks. Before the phase, each worker lists the
+   positions of its candidates by stripe -- a counting sort over the
+   counts it kept while screening, one pass, a worker to a part -- and
+   part `s` walks each worker's list for `s`, which is in derivation
+   order, with a cursor per worker that the tasks advance in task order,
+   so that it reads its own candidates and no other's. The same lists
+   are made for a target's staging once phase 3 has filled it, per
+   canonical stripe and per key stripe of each secondary index, a target
+   and index to a part, and phases 4 and 7 walk them;
+   `specs/design-deferral-cost.md` section 6.
 2. **Count** (serial). Worker 0 turns each task's count of firsts into
    offsets per target in task order, and sums each target's new tuples
    per canonical stripe. The tuple limit is asked of their exact number.
@@ -708,8 +737,8 @@ the pool:
    its new tuples in identifier order: the one at offset `i` becomes
    tuple `count + 1 + i`.
 4. **Classify keys** (parallel). Part `(target, index, s)` walks the
-   target's staging in identifier order, takes the tuples whose key lies
-   in stripe `s`, probes stripe `s` of the frozen key table for each key
+   target's staged tuples listed for stripe `s` of the index, in
+   identifier order, probes stripe `s` of the frozen key table for each key
    and screens the keys it lacks, recording for each staged tuple the
    key it joins: one the index holds, or the new key the first staged
    tuple holding it creates. It counts the stripe's new keys.
@@ -741,9 +770,8 @@ the pool:
    of. Part `s` moves stripe `s` of the target's canonical index into the
    slots phase 5 allocated, if it grew, freeing the old ones, and places
    the stripe's new tuples. Part `(index, s)` does the same for stripe
-   `s` of the index's key table, then walks the staging in identifier
-   order, taking the tuples whose key lies in the stripe, creating each
-   new key and linking each tuple at the end of its key's chain. Placing
+   `s` of the index's key table, then walks the tuples listed for the
+   stripe in identifier order, creating each new key and linking each tuple at the end of its key's chain. Placing
    reads nothing linking writes, so both kinds of part run in one phase.
    Chains are per key and a key is in one stripe, so no two parts touch
    one chain, one entry, one frontier or one `next` slot: `next[last]`
@@ -758,6 +786,17 @@ the result is the serial evaluator's, and phase 5 checks the memory limit
 on the capacities the serial evaluator reaches. A lookup through a
 striped table costs one shift more than an unstriped one, to choose the
 stripe.
+
+**The merge's scratch is one allocation.** Every count the scratch is
+sized by -- each stripe's candidates for its table of firsts and their
+references, each target's new tuples for its staging and its lists, each
+part's tuples for its table of new keys -- is known before any of it is
+made. The merge sums them, charges one block to the round, allocates it
+once and carves it by part; a part opens nothing and frees nothing, and
+the block is released when the merge ends, applied or declined. The
+tables made in it take their slots from the block rather than from the
+allocator, the form of `specs/design-memory.md` section 6;
+`specs/design-deferral-cost.md` section 6.
 
 ---
 
@@ -870,13 +909,15 @@ buffers and screens are
 charged as a second kind of holder, beside the arenas, through an atomic
 charge: a compare-and-swap loop that admits the bytes only if the total
 with them stays under the limit, and an atomic release. The loop runs once
-per growth, which is once per doubling. A refused charge records nothing
+for the reservation a round makes before it is published, section 5.3,
+once per growth beyond it, which is once per doubling, and once for the
+merge's scratch, section 6.3. A refused charge records nothing
 -- the account's record of a refusal is for an arena worker 0 reports on
 -- and is an abandonment, not a failure: the round is rerun serially, and
 if the serial evaluator then refuses, it refuses as it does today. The
 charge exists so that the buffers count against the bound the caller set
-while they exist, and they exist only from a job's publication to its
-round's end: section 6.1 admits a merge only when the store's growth fits
+while they exist, and they exist only from a round's reservation to its
+end: section 6.1 admits a merge only when the store's growth fits
 beside them, and they are released before a serial rerun and before the
 next round, so no growth the serial evaluator makes -- in a rerun, a
 later round, a merge or an index build -- ever asks the limit for room
@@ -1215,6 +1256,11 @@ at one thread and at sixteen, on the workloads of section 2.
    symbol receives is the same on every run and at every thread count.
 6. **Components side by side** (section 13), when a workload asks for it.
 
+What a deferred round costs over a serial one on a single thread, measured
+once steps 1 to 4 were in, is taken down by the steps of
+`specs/design-deferral-cost.md` section 10, each gated there; the
+threshold of step 3 is measured again after them.
+
 Steps 1 and 2 are serial refactorings and could ship on their own; step 3
 is the first that starts a thread. The constants -- `RELIC_CHUNK_WORK`,
 `RELIC_CHUNKS_PER_WORKER`, `RELIC_PARALLEL_MIN_WORK`, the spin bound,
@@ -1369,3 +1415,14 @@ was.
   it reads between two returns of the executor, and ends its task as any
   other reason to abandon the job does, section 4.4; no thread is
   cancelled or signalled.
+* **A screen that forgets.** A fixed-size screen owned by the pool would
+  need no sizing and no charge, and a repeat it had evicted would reach
+  the merge as a candidate; but the candidates would then be bounded by
+  the eviction rate rather than by the distinct new tuples, which is the
+  bound of section 5.3. `specs/design-deferral-cost.md` section 11.
+* **Buffers kept from one round to the next.** They hold data, and
+  data-sized memory is charged while it exists, section 8; a buffer kept
+  uncharged would hold memory the limit cannot see, one kept charged
+  would make what the limit refuses later depend on whether an earlier
+  round was deferred. A round reserves them from its history instead,
+  section 5.3.

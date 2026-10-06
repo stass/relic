@@ -2850,6 +2850,11 @@ reads a frozen store and merges its results in the serial order, and the
 measurement each step is gated by -- is specified in
 `specs/design-parallel.md`.
 
+What a deferred round costs over a serial one on a single thread -- the
+probe of the worker's screen, the growth of its buffers, the merge's
+scratch and passes -- and how that floor is taken down and the threshold
+measured against it, is specified in `specs/design-deferral-cost.md`.
+
 Floating point -- a fourth type equal only to itself, ordered exactly
 against the integers, an exact `total`, and what keeps every platform's
 bytes the same -- is specified in `specs/design-floats.md`.

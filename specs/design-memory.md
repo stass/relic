@@ -395,6 +395,17 @@ correctly reported at the time.
 Splitting the operation makes that state unrepresentable rather than merely
 unlikely, which is why it is worth two functions instead of one.
 
+**A table may live in memory its owner gives it.** The merge of a
+parallel round (`specs/design-parallel.md` section 6.3) makes, per part,
+a table it fills once and discards, sized by a count it knows before it
+makes anything. Such a table is made by a constructor that takes the
+slots' memory from a block its owner allocated and charged for all of
+them, in place of calling the allocator; it is never grown, since it was
+made with room for everything placed in it, and `relic_idtab_reset()` on
+it releases nothing, the owner releasing the block. Probing and placing
+are the same operations on the same slots; only where the slots came from
+differs. `specs/design-deferral-cost.md` section 6.
+
 **No deletion.** Nothing removes an interned symbol or value, so the
 table has no tombstones. This is worth stating rather than leaving implicit:
 tombstones are what makes linear probing delicate, and their absence is a

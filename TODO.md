@@ -32,17 +32,35 @@ and 6 are not started. The causes and what to try are sorted in
 ## Engine
 
 **A deferred round costs more than a serial one on one thread.** [Medium,
-component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
-and with identical counters, `tc-cyclic` takes 2.62 s against 2.24 s,
-`cspa` 0.21 s against 0.19 s, and `chain-closure` 0.61 s against 0.42 s.
-Screening a batch probes the store as inserting it does, and a tuple the
-store lacks then pays for the worker's screen and candidate buffer and is
-probed once more in the merge; the screen starts empty every round and is
-rehashed at each doubling. That overhead is the floor under every gain the
-pool can give, and it is what the threshold of
-`specs/design-parallel.md` section 5.4 must be measured against. Reserving
-the screen from what the round's items estimate, rather than growing it
-from nothing, is the first thing to try.
+component: `lib/task.c`, `lib/merge.c`, `specs/design-deferral-cost.md`]
+Under `-X parallel` at `-j 1`, `tc-cyclic` costs a fifth more than
+serially, `cspa` a twelfth and `chain-closure` half as much again, with
+identical counters. The design's section 2 measured where: the whole of
+`tc-cyclic`'s loss is the one round that inserts a third of what it
+derives, whose task phase takes twice the serial round and whose merge
+half as long again; the merge costs 100 to 150 ns per new tuple on every
+workload. The floor is proportional to new tuples, not derivations or
+rounds. Steps 1 to 4 of the design's section 10 take it down and then
+re-measure the threshold of `specs/design-parallel.md` section 5.4; none
+is started. Its prototype found that sizing the screen before the round
+removes the growth cascade only where history predicts the round, which
+excludes the round that costs most.
+
+**A table's growth hashes every tuple again.** [Low, component:
+`lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
+each entry through a callback that reads the tuple or key it names and
+hashes it again, so a canonical index growing to two million tuples
+recomputes some four million hashes from columns scattered through
+storage. On serial `chain-closure` that is a quarter of the run,
+`relic_hash_words()` under `relic_idtab_reserve()` in a sampled profile.
+A slot that kept the 32-bit hash beside the identifier would rehash from
+the table alone. `specs/design-memory.md` section 6 measured that slot on
+the closure workloads' duplicate checks, which gain nothing from it, and
+kept the identifier alone for the memory; the growth's cost was not in
+that measurement. Measure the hash-keeping slot on `chain-closure`'s
+growth against its peak memory before deciding, and if it loses, record
+the figure in `specs/design-memory.md` section 6 so the question stays
+closed.
 
 ## Benchmarks
 
