@@ -195,7 +195,7 @@ value is ever split by anything but a flush boundary and the output is the
 same bytes whatever the boundaries fall on.
 
 **The stream stays the stream.** The stream is standard output or the file
-`-o` opened, exactly as now; the buffer sits in front of it, so `-o`, the
+`-o` opened; the buffer sits in front of it, so `-o`, the
 truncation rules and the close of `specs/design-cli.md` section 6 do not
 change. The stream's own buffer is set to none with `setvbuf()`, so that
 what other writers send through stdio reaches the descriptor at once, and a
@@ -211,10 +211,11 @@ drops what was appended since without touching the stream. The row being
 written is finished in the buffer and no other follows it, so a closed pipe
 whose `SIGPIPE` is ignored costs one failed call and the formatting of one
 row. The final flush of a query fails the query, and the stream's
-`fflush()` and the close at the end of the run are checked as they are now.
-A row is delivered to the writer by the callback of section 4, which
-returns nonzero once `failed` is set, so the query stops streaming as it
-stops now when a write fails.
+`fflush()` and the close at the end of the run are each checked, and a
+failure of either is reported and fails the run. A row is delivered to the
+writer by the callback of section 4, which returns nonzero once `failed` is
+set, so a failed write stops the query's rows as a callback's nonzero
+return stops them.
 
 **Everything else writes through the buffer.** The JSON framing, the
 per-query separation of section 4.6, and the sorted output of section 5
@@ -226,8 +227,8 @@ the rows before them, on a terminal as in a file, without a list of the
 places that must flush. Diagnostics go to standard error and never touch
 the buffer.
 
-**Sorting.** `-s` collects every row as now and then writes the sorted
-rows through the same appends. It gains the buffer and nothing else.
+**Sorting.** `-s` collects every row of a query, sorts them, and then
+writes them through the same appends.
 
 **Cost.** About 120 lines in `cmd/relic/output.c`, most of them the integer
 renderer and the flush. `chain-closure` writes 2,001,000 rows of about
@@ -333,14 +334,15 @@ struct relic_emit_target {
 The relation is always the one the `EMIT` names, and gives the tuples their
 arity; the sink, when it has a callback, is where they go instead. A
 component's rules, generated rules and every query rule that does not
-stream emit to a relation as now, through the pending batch of
+stream emit to a relation, through the pending batch of
 `specs/design-evaluation-cost.md` section 6. A streaming query rule emits
 to the callback: `EMIT` builds the head tuple into the same pending
 batch, and the batch is drained by decoding each tuple to a
 `relic_value_t` row and calling the callback once per row, in batch order.
-A callback that returns nonzero stops the run as a stopped stream stops it
-now. The batch stays so that one code path fills a tuple whatever its
-target, and the drain is the only place that knows which target it has.
+A callback that returns nonzero stops the run, as it stops the stream of a
+gathered answer. The batch is kept for both targets so that one code path
+fills a tuple whatever its target, and the drain is the only place that
+knows which target it has.
 
 **A streaming run allocates nothing and cannot fail.** The query rule's
 plan and its state are allocated in the evaluation arena before it runs,
@@ -350,9 +352,10 @@ last, and the context sets no limit that could refuse one if it were. The
 only way the run ends early is the callback's own nonzero return. This is
 asserted: the account's totals of store and arena bytes and the count of
 inserted tuples are the same after the run as before it. The consequence
-for a caller is the one `relic_query_run()` promises now, that a stopped
-stream is the caller's doing, with one refinement: a streamed answer that
-was not stopped is complete, and a failure during the query's evaluation
+for a caller is the one `relic_query_run()` promises of every answer, that
+a stopped stream is the caller's doing, with one refinement: a streamed
+answer that was not stopped is complete, and a failure during the query's
+evaluation
 is reported before any row is delivered, since every failure that can
 happen happens in the components the query rule reads, which run first.
 
@@ -366,19 +369,19 @@ depend on the target.
 
 ### 4.3 What else sees it
 
-* **`relic_query_collect()`** collects through the callback as it does now
-  and does not know which target fed it.
+* **`relic_query_collect()`** collects through the callback whichever
+  target fed it, and cannot tell which did.
 * **The counters.** A streamed row is counted as a derivation as it is
   delivered, as every emitted tuple is; it is not an inserted tuple, since
   nothing was inserted, so `tuples inserted` on `chain-closure` falls from
   4,002,000 to 2,001,000 and says what it means. The rest of a batch a
-  callback's stop leaves undelivered is not counted. `-v` counts rows from
-  the callback, as now.
+  callback's stop leaves undelivered is not counted. `-v` counts the rows
+  the callback receives, streamed or gathered alike.
 * **Explain** prints `stream $q0(X, Y)` in place of `emit $q0(X, Y)` for a
   streaming query rule, so a reader sees which queries hold no answer.
 * **Accounting.** An answer relation that streams is empty throughout its
   query's run and counts nothing, which `specs/design-query.md` section 6
-  already requires outside a run and now holds inside one as well. A
+  requires outside a run and which streaming makes hold inside one too. A
   context with a limit never streams, so every answer a limit could bound
   is gathered and bounded.
 * **Diagnostics.** A note the query rule's evaluation reports, such as the
@@ -437,25 +440,24 @@ positive edges from generated rules to `p$ff` and removes the edges to
 `p$bf` and `magic$p$bf`, and a negated literal still names a predicate
 read completely, so no cycle through negation can appear.
 
-**Adorn first, draft second.** The rewrite today drafts a rule as it
-discovers an adornment, and a bound adornment of `p` may be discovered
-before the free one. Rather than drafting and then withdrawing, the
-rewrite finds the set of adornments the query reaches before it drafts
-any, applying the rule as it goes, and then drafts rules for the
-adornments that survive. The search walks each rule's body in the order
-`relic_plan_order()` gives it for each head adornment and records the
-walk, which the draft replays, and drafts nothing. A predicate is read free from the
-first call that reaches it free. A bound adornment of `p` reached before
-that call was reached for nothing, and so was whatever only it reached, so
-a search that kept one runs once more with every predicate the first read
-free read free from the start. The marks are kept whole: a predicate the
-first search read free stays free even when only an adornment the second
-no longer reaches called it free, and is then computed in full beside the
-bound calls it serves. That second search is the last: which
-adornments a rule's calls reach depends only on the adornment the rule is
-read for and on which predicates are read free, so every call the second
-makes the first made too, and every predicate it reaches free is already
-read free.
+**Adorn first, draft second.** A rewrite that drafted a rule as it
+discovered an adornment could discover a bound adornment of `p` before the
+free one, and would have to withdraw what it drafted. Instead the rewrite
+finds the set of adornments the query reaches before it drafts any, applying
+the rule as it goes, and then drafts rules for the adornments that survive.
+The search walks each rule's body in the order `relic_plan_order()` gives it
+for each head adornment and records the walk, which the draft replays, and
+drafts nothing. A predicate is read free from the first call that reaches it
+free. A bound adornment of `p` reached before that call was reached for
+nothing, and so was whatever only it reached, so a search that kept one runs
+once more with every predicate the first read free read free from the start.
+The marks are kept whole: a predicate the first search read free stays free
+even when only an adornment the second no longer reaches called it free, and
+is then computed in full beside the bound calls it serves. That second
+search is the last: which adornments a rule's calls reach depends only on
+the adornment the rule is read for and on which predicates are read free, so
+every call the second makes the first made too, and every predicate it
+reaches free is already read free.
 
 Each search charges the body of every rule it reads to the rewrite's one
 limit, as the draft charges every rule it drafts (`specs/design-magic.md`
@@ -481,7 +483,7 @@ adds a fourth source: every predicate the search adorned free. The
 complete set is closed over components as before, phase 1 evaluates the
 program's own schedule for those components, and the query rule is planned
 over the program's relations exactly as a query against a materialized
-program is now (architecture section 39's second mode). Nothing is copied,
+program is (architecture section 39's second mode). Nothing is copied,
 nothing is named `$ff`, and the rewrite's arena holds the adornment set and
 nothing else.
 
@@ -615,17 +617,17 @@ The canonical index is measured with a tag under the section 5.2 method,
 with large arrays mapped so that the peaks compared hold no allocator
 residue, which would otherwise hide a table's own bytes. Tagged,
 `chain-closure` and `tc-sparse-cyclic` ran 6 and 8 per cent faster and
-peaked 15 to 19 per cent higher: the tag is a byte per slot of the largest table every
-relation has, and the successful search the canonical index mostly does is
-the one a tag helps least. It stays untagged. The decision is a flag at
-one creation site per owner, not a second table type, so a workload that
-shifts the balance changes one argument.
+peaked 15 to 19 per cent higher: the tag is a byte per slot of the largest
+table every relation has, and the successful search the canonical index
+mostly does is the one a tag helps least. It stays untagged. The decision is
+a flag at one creation site per owner, not a second table type, so a
+workload that shifts the balance changes one argument.
 
 **Growth** still asks the owner for each identifier's hash, through the
 callback of `specs/design-memory.md` section 6; a tag is not a hash. The
 owners that section 7 gives a stored hash answer from it without touching
 their bytes, which is what makes their growth cheap; the others recompute
-as now.
+it from their bytes.
 
 ---
 
@@ -670,20 +672,19 @@ two tables.
 
 **The accessors.** `relic_value_intern()` dispatches on the type: a symbol
 or string interns its bytes and tags the result; an integer probes the
-integer table. `relic_value_of()`, which returned a pointer to a stored
-`relic_value_t`, becomes a decode into a struct the caller provides,
-`relic_value_decode(ctx, dom, &value)`, since no struct is stored to point
-at; its callers are the row delivery, the comparison, the sort and the
-formatters, and each already copies the value it reads. The language and
-total orders of `specs/design-memory.md` section 8 compare by type from
-the tag and then by the table, as they compare now by the stored type.
+integer table. No `relic_value_t` is stored to point at, so a value is
+read by a decode into a struct the caller provides,
+`relic_value_decode(ctx, dom, &value)`; its callers are the row delivery,
+the comparison, the sort and the formatters, and each copies the value it
+reads. The language and total orders of `specs/design-memory.md` section 8
+compare by type, read from the tag, and then by the table.
 `relic_value_t` and `relic_string()` are public and do not change: a
 symbol's `v.id` is its symbol identifier as it always was.
 
 **Determinism.** `specs/design-memory.md` section 9 says identifiers are
 assigned in first-appearance order and D-3 that their numeric order means
-nothing. Both stay true within each type; across types the order is now
-the type's, and the thing that made that safe, that nothing may order
+nothing. Both stay true within each type; across types the order is the
+type's, and the thing that makes that safe, that nothing may order
 values by domain identifier, is the invariant D-3 already asserts in one
 place. A tuple's hash folds its identifiers and the probe order changes,
 which the seed of `specs/design-hash-seed.md` already makes unobservable.
@@ -695,8 +696,8 @@ seed; the fold's state is twice a column's width for that reason,
 
 **Limits.** A context holds at most 2^30 - 1 symbols and 2^30 - 1 distinct
 integers, in place of 2^32 - 1 values of every type together. The
-diagnostic for a table that is full is the one the pool and the value
-table give now, and `RELIC_SYMBOL_MAX` moves to the index mask. A float
+diagnostic for a table that is full is the one the pool and the integer
+table give, and `RELIC_SYMBOL_MAX` moves to the index mask. A float
 type, `specs/design-floats.md` section 3.2, takes the integer tag with the
 top bit of the index set, which halves the integer limit and moves no
 other.
@@ -737,7 +738,7 @@ the primitive changes.
 **Per symbol**, at a doubling's worst: sixteen bytes of entry, four of
 slot and one of tag at three-quarters load, and the bytes plus one. A
 nine-byte symbol costs about 40 bytes at capacity and 30 at load, against
-70 now, and no value entry beside it.
+the 70 section 2 measured, and no value entry beside it.
 
 ### 7.3 A row is hashed once on its way in
 
@@ -854,7 +855,7 @@ tree before it, per `CLAUDE.md`.
   the limit test fills a table to 2^30 - 1 under a test hook and reads
   the diagnostic; the ordering tests hold across types; a symbol and a
   string of the same bytes intern to two identifiers that compare
-  unequal, as now.
+  unequal.
 * **Hash once.** A debug build asserts the carried hash against a
   recomputed one on every append; the load tests hold.
 * **Growth.** A unit test grows a relation through many doublings, clears
@@ -888,8 +889,8 @@ because each is measured against the one before it:
 
 Step 1 is the largest win for the least code and blocks nothing; steps 2
 and 3 are independent of each other and of 4 to 6; step 5 needs the tag
-of step 4; step 6 is last because it touches the most files and is measured on the import,
-which none of the others change.
+of step 4; step 6 is last because it touches the most files and is
+measured on the import, which none of the others change.
 
 ---
 

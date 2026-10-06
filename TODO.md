@@ -54,14 +54,6 @@ pool can give, and it is what the threshold of
 the screen from what the round's items estimate, rather than growing it
 from nothing, is the first thing to try.
 
-**The comparison-cost design describes the writer against its past.**
-[Low, component: `specs/design-comparison-cost.md`] Section 4.2 and the
-API section after it describe the row writer and `relic_query_collect()`
-by contrast with an earlier state -- "exactly as now", "checked as they are
-now", "collects through the callback as it does now" -- which reads wrong
-once that state is the design. Each phrase should state the behaviour
-itself.
-
 ## Benchmarks
 
 **`bench/compare/run.sh` compares on one thread only.** [Low, component:
