@@ -31,20 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**A query can derive more through the rewrite than without it.** [Medium,
-component: `lib/magic.c`] Each adornment of a predicate derives a relation of
-its own, and the budget bounds the rules generated, not the tuples those
-relations hold. Once any call reaches a predicate with nothing bound, every
-other call of it reads that free relation, so `path(X, Y)?` holds `path`
-once. A query can still reach one predicate with several bound patterns and
-none free, whether or not the query binds a column itself: a ternary
-predicate called with its first column bound and with its second derives
-two relations, each of which may approach the whole of it. The general
-remedy is for an adornment to read one that binds a subset of its columns; a
-cap on adornments per predicate, falling back to the free one, would bound
-the multiple. The rewrite is correct as it stands, and the tuples count
-against `max_tuples` and `max_memory`.
-
 **The adornment search and the draft each walk a body.** [Medium, component:
 `lib/magic.c`] The search for the adornments a query reaches
 (`reach_calls_in_order()`) and the draft of the rewritten rules
