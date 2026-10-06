@@ -1,0 +1,15 @@
+% A query whose check follows the literal that binds its key streams its
+% rows as it derives them.  a has two edges, so a lookup in the check's
+% place would derive a twice and the query would have to gather; the check
+% derives it once.  exists-gathered.dl answers the same query gathered,
+% with the same rows in the same order.  The counters show the answer
+% relation holding none of them.
+
+edge(a, b).
+edge(a, c).
+edge(b, c).
+node(a).
+node(b).
+node(e).
+
+node(X), edge(X, _)?

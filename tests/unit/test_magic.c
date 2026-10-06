@@ -57,6 +57,7 @@
 #define	SCENARIO_SEARCHED	"the first search is charged what it reads"
 #define	SCENARIO_SEARCHES	"every search is charged what it reads"
 #define	SCENARIO_KEPT		"a rewrite holds only what it keeps"
+#define	SCENARIO_MENTIONS	"a generated rule is planned from its mentions"
 
 /*
  * The generated graphs: GRAPH_NODES nodes and GRAPH_EDGES edges drawn from a
@@ -163,6 +164,7 @@ static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
 static void	 a_long_bodys_rewrite_fits_the_limit(void);
 static void	 a_long_name_is_charged_per_predicate_named(void);
 static void	 a_load_after_a_rewrite_reaches_the_next_query(void);
+static void	 a_generated_rule_is_planned_from_its_mentions(void);
 static void	 the_limit_holds_at_its_value(void);
 static void	 every_search_is_charged_what_it_reads(void);
 static void	 the_rewrite_answers_as_the_fixed_point_does(void);
@@ -1853,6 +1855,86 @@ a_load_after_a_rewrite_reaches_the_next_query(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * A rule the rewrite generates is planned from the variables it mentions,
+ * not from the rule it was drafted from.  In r(X, W) :- a(X, Y), b(Y, Z),
+ * c(Z, W) called with X bound, the prefix before b's call is cut into a
+ * supplementary predicate over X and Y, which r reads later, and b's magic
+ * rule, magic$b$bf(Y) :- sup$r$bf$0$2(X, Y), mentions X once.  X is dead in
+ * that rule though r mentions it three times, so its plan scans the
+ * supplementary relation matching anything in X's column and binding Y.
+ */
+static void
+a_generated_rule_is_planned_from_its_mentions(void)
+{
+	static const char *const program =
+	    "e(1, 2).\ne(2, 3).\n"
+	    "a(X, Y) :- e(X, Y).\nb(X, Y) :- e(X, Y).\nc(X, Y) :- e(X, Y).\n"
+	    "r(X, W) :- a(X, Y), b(Y, Z), c(Z, W).\n";
+	const relic_plan_term_t *terms;
+	const relic_rule_t *rule;
+	const relic_pred_t *head;
+	relic_relation_t *target;
+	relic_query_t *query;
+	relic_magic_t magic;
+	relic_arena_t arena;
+	relic_plan_t plan;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t i;
+	bool planned;
+	int status;
+
+	ctx = context_with(program, 0, 0, &log);
+	if (ctx == NULL)
+		return;
+
+	query = relic_query_prepare(ctx, NULL, "r(1, W)?");
+	if (query == NULL || relic_program_ready(ctx) != 0) {
+		check(false, SCENARIO_MENTIONS, "the query is prepared");
+		relic_query_destroy(query);
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_magic_init(&magic, ctx);
+	status = relic_magic_find_complete(&magic, query);
+	if (status == 0)
+		status = relic_magic_rewrite(&magic, &query->rule);
+
+	rule = NULL;
+	for (i = 0; status == 0 && i < magic.rules.count; i++) {
+		head = relic_pred_of(ctx, magic.rules.entries[i].head);
+		if (head != NULL && strcmp(head->name.bytes, "magic$b$bf") == 0)
+			rule = &magic.rules.entries[i];
+	}
+
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
+	planned = false;
+	if (rule != NULL && rule->body_length == 1) {
+		target = relic_relation_read(ctx, rule->head);
+		planned = target != NULL && relic_plan_rule(ctx, &arena, rule,
+		    target, NULL, &plan) == 0 && plan.op_count == 2;
+	}
+	checkf(planned, SCENARIO_MENTIONS, "b's magic rule should be drafted "
+	    "with one literal and planned, and the rewrite %s",
+	    status == 0 ? "succeeded" : "failed");
+
+	if (planned) {
+		terms = plan.ops[0].u.atom.terms;
+		check(plan.ops[0].kind == RELIC_OP_SCAN &&
+		    rule->body[0].u.atom.args[0].kind == RELIC_ARG_VARIABLE &&
+		    terms[0].action == RELIC_PLAN_ANY &&
+		    terms[1].action == RELIC_PLAN_BIND, SCENARIO_MENTIONS,
+		    "the scan matches anything for X and binds Y");
+	}
+
+	relic_arena_reset(&arena);
+	relic_magic_reset(&magic);
+	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -1874,6 +1956,7 @@ main(void)
 	a_long_name_is_charged_per_predicate_named();
 	what_the_rewrite_derives_does_not_leak();
 	a_load_after_a_rewrite_reaches_the_next_query();
+	a_generated_rule_is_planned_from_its_mentions();
 
 	return (check_summary("test_magic"));
 }

@@ -1,0 +1,11 @@
+stats: iterations 0
+stats: derivations 2
+stats: tuples inserted 2
+stats: tuples scanned 3
+stats: tuples looked up 2
+stats: parallel rounds 0
+stats: tuples held 6
+stats: storage bytes N
+stats: symbol values 4
+stats: string values 0
+stats: integer values 0

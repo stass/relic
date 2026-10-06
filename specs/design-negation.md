@@ -134,15 +134,23 @@ answer. The key's shape decides how the question is asked:
 | Key | Shape | How it is answered |
 | --- | --- | --- |
 | every column | full | the canonical index: find the tuple, check its identifier is inside the view, as `MEMBER` does |
-| some columns | partial | the secondary index keyed on exactly those columns: probe the key, read the first tuple of its chain, check it is inside the view |
+| some columns | partial | the secondary index keyed on exactly those columns: probe the key, read its first tuple at or past the view's start, check it is inside the view |
 | no column | empty | whether the view is empty |
 
 The partial shape is right because of what `specs/design-index.md`
 promises of a chain: its tuples are in increasing identifier order, so the
-first one is the lowest, and if it lies past the view's end no tuple of the
-key does. An `ANTI_MEMBER` always reads through the `all` view, whose range
-is the relation as it was when the plan started, and the negated relation
-is complete by then, section 5, so "inside the view" is "exists".
+first one from the view's start is the lowest there, and if it lies past
+the view's end no tuple of the key does. The probe reads through the view
+its operation is given and begins where a `LOOKUP`'s walk through the same
+view begins: at the chain's head for `all`, `old` and `current`, and for
+`delta` at the key's first tuple at or past the delta's start, which the
+index finds through the key's frontier, `specs/design-index.md` section
+4.1. An `ANTI_MEMBER` is the `all` case: it always reads through the `all`
+view, whose range is the relation as it was when the plan started, and the
+negated relation is complete by then, section 5, so "inside the view" is
+"exists". A positive literal that binds nothing asks the same question
+through whichever view its place in a variant gives it, and keeps the
+answer, `specs/design-existence.md` section 4.
 
 The index is the ordinary secondary index, obtained when the literal is
 placed by the same call a `LOOKUP` makes, and built then if the relation
@@ -152,8 +160,9 @@ does for a lookup, `specs/design-planning-cost.md` section 7. The relation
 is in a lower stratum than the rule, so the build runs over a relation
 that will not change, once, and every later plan over the same key finds
 it. The invariant of `specs/design-plan.md` section 4 widens by one clause:
-`BIND` occurs only in a `SCAN` or a `LOOKUP`; `ANY` occurs in those and in
-an `ANTI_MEMBER`; neither ever occurs in a key column.
+`BIND` occurs only in a `SCAN` or a `LOOKUP`; `ANY` occurs in those, in an
+`ANTI_MEMBER` and in the `EXISTS` of `specs/design-existence.md`; neither
+ever occurs in a key column.
 
 **Without indexes.** Under `RELIC_F_NO_INDEX` a `LOOKUP` is planned as a
 `SCAN`. The partial probe cannot become a different operation, since its

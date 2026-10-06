@@ -31,18 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**A literal that binds nothing new multiplies a join's rows.** [Medium,
-component: `specs/design-existence.md`, `lib/plan.c`, `lib/exec.c`] A
-positive literal yields one binding per tuple it matches even when the
-rest of the rule reads none of the columns it matches on: p(_, X) over two
-tuples that differ only in the first column continues the join twice with
-the same bindings, so k such literals carry 2^k identical rows. A rule of
-`s(X)` and 48 calls `p(_, ..., X, ...)` over two facts of p takes 4.7 s
-under `-X no-magic`, and 63 calls run for minutes. The design is written
-and not implemented: the `EXISTS` operation of `specs/design-existence.md`,
-the `-X no-exists` reference, the perf workload, the plan unit tests and
-the golden `-e` updates its section 9 lists.
-
 **Reading a query's reach completely is a mode beside the rewrite.** [Low,
 component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment
 the rewrite keeps binds a column, it generates nothing and sets
@@ -65,6 +53,14 @@ pool can give, and it is what the threshold of
 `specs/design-parallel.md` section 5.4 must be measured against. Reserving
 the screen from what the round's items estimate, rather than growing it
 from nothing, is the first thing to try.
+
+**The comparison-cost design describes the writer against its past.**
+[Low, component: `specs/design-comparison-cost.md`] Section 4.2 and the
+API section after it describe the row writer and `relic_query_collect()`
+by contrast with an earlier state -- "exactly as now", "checked as they are
+now", "collects through the callback as it does now" -- which reads wrong
+once that state is the design. Each phrase should state the behaviour
+itself.
 
 ## Benchmarks
 

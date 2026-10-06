@@ -34,14 +34,15 @@
  *
  * A lookup of a semi-naive delta, the tuples of one key at or past some
  * identifier, starts from the key's frontier rather than from its first
- * tuple.  The frontier is moved forward as far as each such lookup walks,
- * and deltas only move forward, so over a whole fixed point the positioning
- * walks each chain at most once however many rounds and lookups there are.
- * The evaluator raises an index to a delta's start before any lookup starts
- * there, and a lookup never moves that start: it only walks and moves
- * frontiers, each toward the one start every lookup of the round shares,
- * so the order lookups at one start are made in changes nothing any of them
- * finds.
+ * tuple, and so does an existence check of a delta, which reads only the
+ * first of those tuples.  The frontier is moved forward as far as each such
+ * walk goes, and deltas only move forward, so over a whole fixed point the
+ * positioning walks each chain at most once however many rounds, lookups
+ * and checks there are.  The evaluator raises an index to a delta's start
+ * before any lookup or check starts there, and neither moves that start:
+ * each only walks and moves frontiers, toward the one start every walk of
+ * the round shares, so the order the walks at one start are made in changes
+ * nothing any of them finds.
  *
  * Adding a tuple is four operations, and only the third can fail.
  * relic_index_classify() hashes the tuple's key and probes the key's stripe
@@ -937,7 +938,8 @@ relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since)
 /*
  * The first tuple, in identifier order, that agrees with `probe` on the key
  * columns and whose identifier is at least `since`, or RELIC_ID_NONE when
- * none does: where a lookup of a delta beginning at `since` starts.
+ * none does: where a lookup of a delta beginning at `since` starts, and the
+ * tuple an existence check of that delta reads.
  *
  * Every chain tuple before a key's frontier is below `latest_since`, so a
  * start at or past `latest_since` can be walked to from the frontier.  When
@@ -957,12 +959,13 @@ relic_index_raise_since(relic_index_t *index, relic_tuple_id_t since)
  * pay for each chain once per lookup rather than once.  Nothing wrong would
  * show but the time, so a debug build stops there instead.
  *
- * Every lookup of one key at one start walks toward that start, so each
- * stops at the same tuple and leaves the same frontier, whichever frontier
- * it began from: one that began from an older frontier than another left
- * only walks further to reach the same stop.  Lookups at one start may
- * therefore be made in any order, on any number of threads at once, which
- * is why a frontier is loaded and stored as a relaxed atomic word.
+ * Every lookup or check of one key at one start walks toward that start
+ * through this function, so each stops at the same tuple and leaves the
+ * same frontier, whichever frontier it began from: one that began from an
+ * older frontier than another left only walks further to reach the same
+ * stop.  Lookups and checks at one start may therefore be made in any
+ * order, on any number of threads at once, which is why a frontier is
+ * loaded and stored as a relaxed atomic word.
  *
  * A step of the walk reads the `next` array and no tuple.
  */

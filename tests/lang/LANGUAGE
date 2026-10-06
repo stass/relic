@@ -85,6 +85,7 @@ constructs
 empty
 error-after-recovery
 error-first-token
+exists
 float-exponent
 float-literal
 float-period

@@ -215,8 +215,15 @@ a comparison reads no relation. None of the three has a view.
   store's find returns the identifier rather than a boolean for this
   purpose; `relic_relation_contains()` is that function compared against
   `RELIC_ID_NONE`.
-* `ANTI_MEMBER`, `FILTER` and `AGGREGATE` never read a member and are
-  unchanged.
+* An `EXISTS` reads a member through its view as a `MEMBER` does, and holds
+  when some tuple agreeing on its key lies in the view's range. Keyed on
+  some columns, it reads the first chain tuple at which a `LOOKUP` through
+  the same view would begin its walk, found for `delta` as section 4.2
+  finds it, and holds when that tuple lies before the view's end; keyed on
+  none, it holds when the view's range is not empty;
+  `specs/design-existence.md` section 4.
+* `ANTI_MEMBER`, `FILTER`, `ASSIGN` and `AGGREGATE` never read a member and
+  are unchanged.
 * `EMIT` inserts, through the batch of section 6. The tuple it inserts
   takes an identifier past the relation's end, which is at or past every
   view's end, so **nothing in the round can see it**. That is not a rule
@@ -451,8 +458,8 @@ component start over an empty member in any case.
 
 The delta literal is **ordered with the other positive literals** by the
 greedy order of `specs/design-planner.md` section 5.1, scored like any
-other, and becomes the operation its bound columns give it at the point it
-is placed, per section 5.2 of that document. The planner learns each
+other, and becomes the operation its columns give it at the point it is
+placed, per section 5.2 of that document. The planner learns each
 literal's view from what it already has: the delta literal's index, the set
 of incomplete predicates and body order, and the static mode of the
 rewrite, which asks for no delta literal, is untouched. The operation is:
@@ -460,6 +467,11 @@ rewrite, which asks for no delta literal, is untouched. The operation is:
 * `SCAN` through the delta view when no column is bound;
 * `LOOKUP` through the delta view, on the index keyed on its bound columns,
   when some are, positioned by section 4.2;
+* `EXISTS` through the delta view in place of either when every column not
+  bound holds `_` or a dead variable, so that the literal binds nothing: on
+  the same index, its probe positioned by section 4.2 as the lookup's walk
+  is, or on the delta's emptiness when no column is bound,
+  `specs/design-existence.md` section 4;
 * `MEMBER` through the delta view when every column is bound.
 
 The other member literals of the variant are placed by the same order and read

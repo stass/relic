@@ -670,7 +670,10 @@ RELIC_LANG_TESTS = \
 	tests/lang/comments-only.dl tests/lang/components.dl \
 	tests/lang/constructs.dl tests/lang/empty.dl \
 	tests/lang/error-after-recovery.dl tests/lang/error-first-token.dl \
+	tests/lang/exists.dl tests/lang/exists-gathered.dl \
+	tests/lang/exists-streamed.dl \
 	tests/lang/explain-abandoned.dl tests/lang/explain-check.dl \
+	tests/lang/explain-exists.dl tests/lang/explain-exists-no-index.dl \
 	tests/lang/explain-facts.dl \
 	tests/lang/explain-free.dl \
 	tests/lang/explain-graph.dl tests/lang/explain-long.dl \
@@ -730,8 +733,10 @@ RELIC_LANG_TESTS = \
 	tests/lang/repl-session.dl tests/lang/repl-verbose.dl \
 	tests/lang/reserved-bytes.dl \
 	tests/lang/safe-rules.dl tests/lang/singleton.dl \
-	tests/lang/sort-mixed.dl tests/lang/stats-indexed.dl \
+	tests/lang/sort-mixed.dl tests/lang/stats-exists.dl \
+	tests/lang/stats-indexed.dl \
 	tests/lang/stats-magic.dl tests/lang/stats-naive.dl \
+	tests/lang/stats-no-exists.dl \
 	tests/lang/stats-semi-naive.dl tests/lang/string-escapes.dl \
 	tests/lang/strings-aggregate.dl tests/lang/strings-atom-or-call.dl \
 	tests/lang/strings-binding.dl tests/lang/strings-bytes.dl \

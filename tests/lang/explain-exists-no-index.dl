@@ -1,0 +1,14 @@
+% -e over an existence check planned without indexes.  The check asks by
+% scanning the relation for the first tuple agreeing with its bound
+% columns, as a negated literal's probe does without an index, so it is
+% printed without a key, as a lookup planned without indexes is printed as
+% a scan.
+
+edge(a, b).
+edge(b, c).
+node(a).
+node(c).
+
+leaves(X) :- node(X), edge(X, _).
+
+leaves(X)?

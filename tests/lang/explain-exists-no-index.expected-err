@@ -1,0 +1,8 @@
+stratum 0, component 0: leaves/1
+    rule leaves(X) :- node(X), edge(X, _).
+        scan node(X)
+        exists edge(X, _)
+        emit leaves(X)
+query $q0(X) :- leaves(X).
+    scan leaves(X)
+    stream $q0(X)

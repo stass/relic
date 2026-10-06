@@ -4,9 +4,9 @@
 #
 # Each registered language test is run several times: once as the default
 # evaluator runs it, and once under each alternative -X selects -- the naive
-# fixed point, the planner without indexes and without reordering, each of
-# those again answering from the whole fixed point instead of through the
-# Magic rewrite, rounds whose insertions wait for their end, and every
+# fixed point, the planner without indexes, without reordering and without
+# existence checks, each of those again answering from the whole fixed point
+# instead of through the Magic rewrite, rounds whose insertions wait for their end, and every
 # aggregate body compiled to a group rule.  Every run must agree with the
 # default on standard output, the diagnostics on standard error, and exit
 # status, but for the group rules, held to the default's output and status
@@ -44,7 +44,8 @@
 # the whole fixed point evaluates the program's rules, whatever the fixed
 # point or the planner.  The Magic rewrite evaluates rules generated in the
 # order the planner chooses for each body, and neither the naive fixed point
-# nor the planner without indexes changes that order; the planner without
+# nor the planner without indexes or without existence checks changes that
+# order; the planner without
 # reordering does, so under the rewrite it generates other rules, and only
 # its answers are compared.
 #
@@ -81,9 +82,10 @@ set -eu
 # on its answers, and is the reference whose tuple total those in
 # `whole_rules`, which answer from the whole fixed point too, are held to.
 # Those in `answer_rules` are held to the default's answers and exit status.
-same_rules="naive no-index parallel j4+parallel"
+same_rules="naive no-index no-exists parallel j4+parallel"
 other_rules="no-reorder"
-whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic"
+whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic
+    no-exists+no-magic"
 answer_rules="group-rules"
 
 work=$(mktemp -d) || exit 1

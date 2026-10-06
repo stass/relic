@@ -1,0 +1,13 @@
+% The program of stats-exists.dl planned without existence checks.  Each
+% p(_, X) after the first is a lookup of X matching both tuples of p, so the
+% rule derives s(x) twice for every binding that reaches it: eight times,
+% the two tuples of the first literal doubled by each of the two lookups,
+% where the checks derive it twice.  The query derives its row once either
+% way, and every other count but the reads is the same.
+
+p(a, x).
+p(b, x).
+
+s(X) :- p(_, X), p(_, X), p(_, X).
+
+s(X)?

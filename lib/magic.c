@@ -2900,7 +2900,9 @@ reach_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
  * the planner evaluates it from those slots, and record, for each literal in
  * that order, the slots bound before it, whether it calls a predicate read
  * on demand and, for a call, the columns it binds.  A literal placed binds
- * what relic_plan_literal_binds() says it does, as it would in the plan.
+ * what relic_plan_literal_binds() says it does, as it would in the plan,
+ * but for the rule's dead variables, which the plan never binds and no
+ * other literal holds, so that no step's bound columns can differ.
  *
  * The walk depends on the rule, the slots bound, which predicates are read
  * on demand and the measures of those read completely, none of which

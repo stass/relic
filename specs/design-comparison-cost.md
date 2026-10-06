@@ -248,10 +248,12 @@ section 3 exactly as it is.
 ### 4.1 Which queries stream
 
 Call a plan **distinct** when no generator, a `SCAN` or a `LOOKUP`, has a
-wildcard column, and its `EMIT` reads every slot a generator binds. The
-query rule that runs -- the one written, or the one its rewrite produced --
-streams when three things hold: its plan is distinct, the context sets
-neither `max_tuples` nor `max_memory`, and `RELIC_F_NO_STREAM` is clear.
+wildcard column, an `ANY` term for a `_` or a dead variable
+(`specs/design-existence.md` section 3), and its `EMIT` reads every slot a
+generator binds. The query rule that runs -- the one written, or the one
+its rewrite produced -- streams when three things hold: its plan is
+distinct, the context sets neither `max_tuples` nor `max_memory`, and
+`RELIC_F_NO_STREAM` is clear.
 A plan holding an `AGGREGATE` is never distinct and is always gathered: a
 `sum` can fail on any binding, and a plan that can fail must not have
 delivered rows first, while a `count` may reach the head as an integer the
@@ -269,25 +271,29 @@ The property is decided on the built plan, by `relic_plan_derives_distinct()`
 in `lib/plan.c`, with a switch that names every kind of operation, so that a
 kind added later is decided there rather than assumed to keep it. For the
 planner as it is, a distinct plan is the plan of a query rule whose head
-holds every variable its body binds and whose body has no `_`: every
-variable is bound by a generator, and a wildcard is always a generator's
-column. Deciding on the plan rather than on the query's syntax keeps the
-decision true of what runs, whatever the rewrite or a later planner does to
-the rule.
+holds every variable its body binds and none of whose generators holds `_`
+or a dead variable: every variable is bound by a generator, and a wildcard
+elsewhere is a column of a test -- an `EXISTS` of
+`specs/design-existence.md` section 4, or an `ANTI_MEMBER` -- which binds
+nothing and lets a binding through at most once. So `q(X), p(_, X)?` streams
+when `q` is placed first and `p` is a check after it, and `p(_, X)?`, whose
+one literal binds `X` and is a generator, gathers. Deciding on the plan
+rather than on the query's syntax keeps the decision true of what runs,
+whatever the rewrite or a later planner does to the rule.
 
 **Why its derivations are a set already.** The query rule runs once, after
 every component it reads is at its fixed point, over relations that do not
 change while it runs. Three facts about what a plan reads then hold: a
 relation holds no tuple twice, a view lists each tuple in its range once,
-and a test lets a binding through at most once. Two tuples a generator
-reads under one binding of the slots before it both match its constants and
-its bound slots, so, holding no wildcard, they differ in a column it binds,
-and bind different values there. Each path through the generators therefore
-reaches the `EMIT` with a binding no other path has, and an `EMIT` that
-reads every bound slot derives a tuple no other path derives. The
-derivations of a distinct plan are pairwise distinct, and inserting them
-into a relation would reject nothing. Any other plan has no such guarantee,
-and keeps the relation.
+and a test, an `EXISTS` among them, lets a binding through at most once.
+Two tuples a generator reads under one binding of the slots before it both
+match its constants and its bound slots, so, holding no wildcard, they
+differ in a column it binds, and bind different values there. Each path
+through the generators therefore reaches the `EMIT` with a binding no other
+path has, and an `EMIT` that reads every bound slot derives a tuple no
+other path derives. The derivations of a distinct plan are pairwise
+distinct, and inserting them into a relation would reject nothing. Any
+other plan has no such guarantee, and keeps the relation.
 
 **Why a limit turns streaming off.** Under a limit a query delivers all of
 its rows or none: a query the limit refuses is refused before its first

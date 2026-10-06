@@ -143,8 +143,10 @@ every tuple of a large relation, a scan whose duplicates all collapse --
 returns to its caller as often as one that derives a batch every few steps.
 Only a step with no cursor to resume from cannot stop part way: an
 aggregate's fold, whose running value is not kept between calls, and a
-negated literal's probe that scans its view, a test with no tuple to resume
-at, `specs/design-negation.md` section 4. Such a step charges the tuples it
+probe that scans its view, a test with no tuple to resume at -- a negated
+literal's, `specs/design-negation.md` section 4, or an existence check
+keyed on some columns under `RELIC_F_NO_INDEX`,
+`specs/design-existence.md` section 4. Such a step charges the tuples it
 reads to the second count and, once that is spent, finishes its walk and has
 the join pause as its step returns -- at the next operation when the step
 matched, and otherwise at the step, which has no next match -- so a call
@@ -265,10 +267,10 @@ did.
   quantum returns paused with an empty batch, and running it to its end
   derives what an unpaused run derives; consecutive folds over groups larger
   than a quantum overrun it by at most one fold's walk, and consecutive
-  negated probes that scan a relation larger than a quantum by at most one
-  probe's walk; a fold that pauses the call has its value emitted by the
-  next; a lookup whose chain rejects more than a quantum pauses inside the
-  chain.
+  probes that scan a relation larger than a quantum, negated and positive
+  alike, by at most one probe's walk; a fold that pauses the call has its
+  value emitted by the next; a lookup whose chain rejects more than a
+  quantum pauses inside the chain.
 * `tests/terminal.sh`, at a pseudo-terminal: Ctrl-C during a query that
   would not end returns to the prompt, the next query answers, and the
   session exits with status 1.

@@ -1,0 +1,14 @@
+% The query of exists-streamed.dl, a check after the literal that binds its
+% key, answered with every answer gathered first.  a has two edges, so a
+% lookup in the check's place would derive a twice; the check derives it
+% once, and gathering it in the answer relation gives the same rows as
+% streaming it.  The counters show the answer relation holding both.
+
+edge(a, b).
+edge(a, c).
+edge(b, c).
+node(a).
+node(b).
+node(e).
+
+node(X), edge(X, _)?

@@ -71,6 +71,16 @@
 # rewrite abandoned over its limit would still answer, from the whole
 # program, and say so.
 #
+# A rule s(X) :- p(_, X), ..., p(_, X) over two facts of p that differ only
+# in their first column is answered from the whole program, with 48 calls
+# and then 64.  Every call after the first has X bound and binds nothing
+# the rule reads, so it is a test of whether p holds a tuple for X, and the
+# rule derives s(x) once for each of the two tuples the first call scans.
+# Planned as lookups, each call would continue the join once per tuple it
+# matched, twice, and the rule would derive s(x) 2^48 or 2^64 times: hours,
+# or never.  No counter is needed to tell them
+# apart, so these workloads are held to the planning budget.
+#
 # RELIC_PERF_BUDGET is how many seconds of CPU time reachability may take,
 # 600 unless set, which leaves room for an AddressSanitizer build on a slow
 # machine; make check-msan and make check-tsan set more for MemorySanitizer
@@ -391,3 +401,29 @@ if [ -s "$work/calls-err" ]; then
 	cat "$work/calls-err" >&2
 	fail "the demand calls workload was not answered through its rewrite"
 fi
+
+# Each call after the first tests p for the X the first bound, and the
+# rule's one row is x.
+for checks in 48 64; do
+	awk -v calls="$checks" 'BEGIN {
+		print "p(a, x).";
+		print "p(b, x).";
+		printf "s(X) :- p(_, X)";
+		for (i = 1; i < calls; i++)
+			printf ", p(_, X)";
+		print ".";
+	}' > "$work/checks.dl"
+
+	status=0
+	run_within "$work/checks-rows" "$work/checks-err" "$planning_budget" \
+	    "$RELIC" -X no-magic -q 's(X)?' "$work/checks.dl" || status=$?
+
+	if [ "$status" -ne 0 ]; then
+		cat "$work/checks-err" >&2
+		fail "a rule of $checks calls binding nothing it reads exited $status within a budget of $planning_budget CPU seconds"
+	fi
+
+	if [ "$(cat "$work/checks-rows")" != "x" ]; then
+		fail "the rule of $checks calls answered something other than x"
+	fi
+done

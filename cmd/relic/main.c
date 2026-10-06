@@ -100,8 +100,8 @@ enum stdin_reader {
  * order given; they point into argv and are not copied.  `imports` holds the
  * -I operands, parsed, in the order given.  `config` is what the context is
  * created with: -j sets its thread count, -l its limits, -X naive,
- * no-index, no-reorder, no-magic, no-stream, parallel and group-rules its
- * flags, and a second -v the flag that asks for notes about mixed-type
+ * no-index, no-reorder, no-magic, no-stream, no-exists, parallel and
+ * group-rules its flags, and a second -v the flag that asks for notes about mixed-type
  * comparisons.
  * `verbosity` counts the -v options.
  *
@@ -768,6 +768,11 @@ parse_debug(const char *name, options_t *options)
 
 	if (strcmp(name, "no-stream") == 0) {
 		options->config.flags |= RELIC_F_NO_STREAM;
+		return (0);
+	}
+
+	if (strcmp(name, "no-exists") == 0) {
+		options->config.flags |= RELIC_F_NO_EXISTS;
 		return (0);
 	}
 

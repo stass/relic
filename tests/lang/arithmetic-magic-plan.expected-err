@@ -22,7 +22,7 @@ magic rewrite of $q0(Y) :- later(n2, Y).
                 emit sup$later$bf$0$2(X, M)
         rule magic$at$bf(M) :- sup$later$bf$0$2(X, M).
             delta sup$later$bf$0$2(X, M):
-                scan delta sup$later$bf$0$2(X, M)
+                scan delta sup$later$bf$0$2(_, M)
                 emit magic$at$bf(M)
         rule at$fb(N, X) :- magic$at$fb(X), start(X, N).
             delta magic$at$fb(X) when the delta holds more than 1 tuple:
@@ -59,12 +59,12 @@ magic rewrite of $q0(Y) :- later(n2, Y).
                 emit at$fb(N1, Y)
         rule magic$at$fb(X) :- magic$at$bf(N1), edge(X, Y).
             delta magic$at$bf(N1) when the delta holds more than 1 tuple:
-                scan edge(X, Y)
-                scan delta magic$at$bf(N1)
+                scan edge(X, _)
+                exists delta magic$at$bf(_)
                 emit magic$at$fb(X)
             delta magic$at$bf(N1) otherwise:
-                scan delta magic$at$bf(N1)
-                scan edge(X, Y)
+                exists delta magic$at$bf(_)
+                scan edge(X, _)
                 emit magic$at$fb(X)
     stratum 0, component 2: at$bf/2
         rule at$bf(N, X) :- magic$at$bf(N), start(X, N).

@@ -175,6 +175,7 @@ with `relic_query_collect()`. The strategies are those of
 | naive | `RELIC_F_NAIVE` | default |
 | no-index | `RELIC_F_NO_INDEX` | default |
 | no-stream | `RELIC_F_NO_STREAM` | default |
+| no-exists | `RELIC_F_NO_EXISTS` | default |
 | parallel | `RELIC_F_PARALLEL_ALWAYS` | default |
 | no-reorder | `RELIC_F_NO_REORDER` | -- |
 | no-magic | `RELIC_F_NO_MAGIC` | -- |
@@ -182,6 +183,7 @@ with `relic_query_collect()`. The strategies are those of
 | naive+no-magic | `RELIC_F_NAIVE \| RELIC_F_NO_MAGIC` | no-magic |
 | no-index+no-magic | `RELIC_F_NO_INDEX \| RELIC_F_NO_MAGIC` | no-magic |
 | no-reorder+no-magic | `RELIC_F_NO_REORDER \| RELIC_F_NO_MAGIC` | no-magic |
+| no-exists+no-magic | `RELIC_F_NO_EXISTS \| RELIC_F_NO_MAGIC` | no-magic |
 | parallel+no-magic | `RELIC_F_PARALLEL_ALWAYS \| RELIC_F_NO_MAGIC` | no-magic |
 | group-rules+no-magic | `RELIC_F_GROUP_RULES \| RELIC_F_NO_MAGIC` | -- |
 | materialized | `RELIC_F_GROUP_RULES`, and `relic_materialize()` before the queries | group-rules+no-magic |
@@ -197,11 +199,12 @@ body, counts the materialized strategy's derivations, which runs under
 this flag, where every body derives, rather than knowing which bodies the
 compiler folds in place.
 
-Every strategy's answers must equal the default's. That covers all five
+Every strategy's answers must equal the default's. That covers all six
 equivalences: `semi-naive == naive`, `magic == full materialization`,
-`indexed == no-index`, `reordered == textual order` and `deferred ==
-serial`, the last the rounds of `specs/design-parallel.md` whose
-insertions wait for their end. The materialized strategy adds another
+`indexed == no-index`, `reordered == textual order`, `existence ==
+no-exists` and `deferred == serial`, the last the rounds of
+`specs/design-parallel.md` whose insertions wait for their end. The
+materialized strategy adds another
 path through the evaluator, a query run over
 relations that already hold the fixed point, which `specs/design-magic.md`
 section 9 specifies and nothing else in the differential harness reaches.
@@ -229,8 +232,12 @@ plus one per distinct binding of each rule body's variables over the fixed
 point, and of each group body's, which a context of its own counts as the
 rows of one query per body under the naive fixed point without the
 rewrite. A program with `_` in a positive literal is not counted, since
-one binding may then match several tuples; `_` under `not` multiplies
-nothing, since a negated literal lets a binding through at most once.
+one binding may then match several tuples; nor is one whose positive
+literal holds a variable its rule mentions nowhere else, since such a
+literal derives once per tuple or once per binding as the order makes it
+a generator or an existence check, `specs/design-existence.md`. `_` under
+`not` multiplies nothing, since a negated literal lets a binding through
+at most once.
 
 A program whose negated literals hold `_` is also loaded in its helper
 rendering, `specs/design-negation.md` section 9, and run under the default

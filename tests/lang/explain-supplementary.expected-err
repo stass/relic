@@ -22,7 +22,7 @@ magic rewrite of $q0(W) :- r(1, W).
             emit sup$r$bf$0$2(X, Y)
     stratum 0, component 4: magic$b$bf/1
         rule magic$b$bf(Y) :- sup$r$bf$0$2(X, Y).
-            scan sup$r$bf$0$2(X, Y)
+            scan sup$r$bf$0$2(_, Y)
             emit magic$b$bf(Y)
     stratum 0, component 5: b$bf/2
         rule b$bf(X, Y) :- magic$b$bf(X), e(X, Y).
@@ -36,7 +36,7 @@ magic rewrite of $q0(W) :- r(1, W).
             emit sup$r$bf$0$3(X, Z)
     stratum 0, component 7: magic$c$bf/1
         rule magic$c$bf(Z) :- sup$r$bf$0$3(X, Z).
-            scan sup$r$bf$0$3(X, Z)
+            scan sup$r$bf$0$3(_, Z)
             emit magic$c$bf(Z)
     stratum 0, component 8: c$bf/2
         rule c$bf(X, Y) :- magic$c$bf(X), e(X, Y).

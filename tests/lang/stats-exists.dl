@@ -1,0 +1,15 @@
+% The work of a rule whose literals after the first bind nothing it reads.
+% Each p(_, X) after the first has X bound and `_` in its other column, so
+% it tests whether p holds a tuple for X and lets the binding through once:
+% the rule derives s(x) once for each of the two tuples the first literal
+% scans, and the query once more.  stats-no-exists.dl runs the same program
+% with the literals planned as lookups, each continuing the join once per
+% tuple it matches.  The query is answered from the whole fixed point,
+% without the Magic rewrite, so that the counts are the program's.
+
+p(a, x).
+p(b, x).
+
+s(X) :- p(_, X), p(_, X), p(_, X).
+
+s(X)?

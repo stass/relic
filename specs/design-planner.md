@@ -168,11 +168,15 @@ literal not yet placed is scored, against the slots bound so far, by:
 3. **source position**, earlier first.
 
 The first literal by that order is placed, the bound set grows by what it
-binds, and the step repeats. This is the greedy ordering of architecture
-section 23 and is not a search: each step is a comparison of the literals
-left. `specs/design-planning-cost.md` computes the same order in one pass
-per state of the bound set rather than one comparison per step, so that a
-long body costs its length within a logarithm rather than its square.
+binds, which is the slots of its variables that are not **dead**, and the
+step repeats. A dead variable is one the rule mentions exactly once, head
+included, in a positive literal: nothing else reads it, so it binds nothing,
+as `_` binds nothing, `specs/design-existence.md` section 3. This is the
+greedy ordering of architecture section 23 and is not a search: each step
+is a comparison of the literals left. `specs/design-planning-cost.md`
+computes the same order in one pass per state of the bound set rather than
+one comparison per step, so that a long body costs its length within a
+logarithm rather than its square.
 
 Architecture section 23 lists index availability as the third preference.
 Under section 5.2 it cannot tell two candidates apart: every literal with a
@@ -258,20 +262,26 @@ argument and `medium(Y)` none, so `huge` follows, looked up on `X`, and
 A positive literal becomes, at the point it is placed:
 
 * `MEMBER`, when every argument is bound: the canonical index answers it;
-* `EXISTS`, when some or none are and every other column holds `_` or a
-  variable the rule mentions once, so that the literal binds nothing: the
-  index keyed on its bound columns, or the view's emptiness when it has
-  none, answers whether some tuple agrees, once;
-  `specs/design-existence.md`;
+* `EXISTS`, when some or none are and every other column holds `_` or a dead
+  variable, so that the literal binds nothing: **the index keyed on exactly
+  its bound columns**, which the relation builds if it has none, or the
+  view's emptiness when none are bound, answers once whether some tuple
+  agrees, `specs/design-existence.md` section 4;
 * otherwise `LOOKUP`, when some but not all are, through **the index keyed
   on exactly its bound columns**, which the relation builds if it has none;
 * `SCAN`, when none are.
 
+A generator's `_` and dead variables are `ANY` columns, matching anything
+and binding nothing. A literal is a generator only when it binds a variable
+that is not dead, so every generator binds a slot something reads.
+
 A delta literal follows the same rule through the delta view: a `SCAN` of
 the delta, a `LOOKUP` whose walk starts, through the key's frontier, at the
-key's first tuple inside the delta, `specs/design-index.md` section 4.1, or a
-`MEMBER` that holds only for a tuple of the delta. The delta is never
-copied and has no index of its own; it reads the relation's.
+key's first tuple inside the delta, `specs/design-index.md` section 4.1, a
+`MEMBER` that holds only for a tuple of the delta, or an `EXISTS` whose
+probe begins where that walk begins and holds when some tuple of the delta
+agrees on its key. The delta is never copied and has no index of its own;
+it reads the relation's.
 
 The index is keyed on every bound column because that is the most selective
 lookup there is, and because the alternative -- reusing an index over some of
@@ -302,21 +312,26 @@ tuple that agrees with them instead, `specs/design-negation.md` section 4.
 
 ## 6. The references
 
-Two switches select the planner's own references, the other half of the
+Three switches select the planner's own references, the other half of the
 equivalences of architecture section 66.2:
 
 | Switch | Flag | Effect |
 | --- | --- | --- |
 | `-X no-index` | `RELIC_F_NO_INDEX` | no `LOOKUP`: a literal with bound columns is a `SCAN` of its view that matches them; a delta variant places its delta literal first and has that one plan, since a delta scanned after other literals would be scanned once per binding |
 | `-X no-reorder` | `RELIC_F_NO_REORDER` | positive literals in written order, the delta literal in its written place, and one plan per variant |
+| `-X no-exists` | `RELIC_F_NO_EXISTS` | no `EXISTS`: a literal that binds nothing anything reads is a generator, and continues the join once per tuple it matches |
 
-Both leave everything else as it is: `MEMBER` still answers a fully bound
+Each leaves everything else as it is: `MEMBER` still answers a fully bound
 literal, because the canonical index is not a secondary one, and tests are
 still placed as early as they can be. An `ANTI_MEMBER` naming some columns of
-its relation scans under `-X no-index`, as section 5.2 says, since its answer
-is a yes or a no and it cannot become a different operation. With both
-switches the planner is the textual planner of `specs/design-plan.md` section
-5.1, and a delta variant is the textbook semi-naive scheme.
+its relation, and an `EXISTS` keyed on some, scan under `-X no-index`, as
+section 5.2 and `specs/design-existence.md` section 4 say, since the answer
+is a yes or a no and neither can become a different operation. The order
+does not depend on dead variables, so `-X no-exists` changes operations and
+never the order, `specs/design-existence.md` section 5. With `-X no-index`
+and `-X no-reorder` the planner is the textual planner of
+`specs/design-plan.md` section 5.1, and a delta variant is the textbook
+semi-naive scheme.
 
 Each must give the default's answers, and `tests/equiv/strategies.sh` runs the
 language corpus under each to show it.
@@ -428,8 +443,8 @@ query $q0(X) :- path(a, X).
 
 An operation is its kind followed by the literal it reads, written as it
 would be in a program: `scan`, `lookup` with its key columns, `member`,
-`anti-member`, with its key columns when it probes a secondary index,
-`filter` with its comparison, `aggregate` with the equality
+`exists` and `anti-member`, each with its key columns when it probes a
+secondary index, `filter` with its comparison, `aggregate` with the equality
 it stands for, the relation it folds with its columns named and its key
 columns, `assign` with its equality, and `emit`. An expression prints from
 its tree by the rules of `specs/design-arithmetic.md` section 11, with the
@@ -444,19 +459,30 @@ rule object(M, O) :- source(M, S), O = cat(substr(S, 0, length(S) - 2), ".o").
     assign O = cat(substr(S, 0, length(S) - 2), ".o")
     emit object(M, O)
 ```
- A query's `EMIT`
-that delivers its rows as they are derived rather than inserting them into
-the answer relation is shown as `stream`, `specs/design-comparison-cost.md`
-section 4. An operation over a
-base view names it as the rule does, `lookup link$base(X1, X2) key={0}`: it
-reads the base store of `link`, whose own name denotes its derived relation.
-An operation over a
-member of the component follows its kind with the view it reads when that
-view is `delta` or `old`: `scan delta`, `lookup delta`, `member delta`,
-`scan old`, `lookup old`, `member old`. The `current` view, what a member
-literal of a variant reads unless marked otherwise, and `all` are unmarked.
-Variables are named as the rule names them, `_` is written as
-`_`, and constants as the text output format writes them.
+
+A query's `EMIT` that delivers its rows as they are derived rather than
+inserting them into the answer relation is shown as `stream`,
+`specs/design-comparison-cost.md` section 4. An operation over a base view
+names it as the rule does, `lookup link$base(X1, X2) key={0}`: it reads the
+base store of `link`, whose own name denotes its derived relation. An
+operation over a member of the component follows its kind with the view it
+reads when that view is `delta` or `old`: `scan delta`, `lookup delta`,
+`member delta`, `exists delta`, `scan old`, `lookup old`, `member old`,
+`exists old`. The `current` view, what a member literal of a variant reads
+unless marked otherwise, and `all` are unmarked. Variables are named as the
+rule names them, `_` is written as `_`, and constants as the text output
+format writes them. A dead variable is written as `_` too, in a check and in
+a generator alike, since the plan reads nothing in its column; the `rule`
+line above the plan shows the name the author gave,
+`specs/design-existence.md` section 7:
+
+```text
+rule s(X) :- p(_, X), p(_, X), p(_, X).
+    scan p(_, X)
+    exists p(_, X) key={1}
+    exists p(_, X) key={1}
+    emit s(X)
+```
 
 ### 8.3 Safe to print
 

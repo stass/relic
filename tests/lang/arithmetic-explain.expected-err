@@ -28,7 +28,7 @@ stratum 0, component 2: same/1
     rule same(X) :- n(X), dist(_, _, Y), X = Y.
         scan n(X)
         assign Y = X
-        lookup dist(_, _, Y) key={2}
+        exists dist(_, _, Y) key={2}
         emit same(X)
 query $q0(X, D) :- dist(a, X, D).
     lookup dist(a, X, D) key={0}

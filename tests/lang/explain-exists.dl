@@ -1,0 +1,29 @@
+% -e over the shapes of an existence check.  A positive literal whose
+% columns not bound before it hold `_` or a variable its rule mentions
+% nowhere else binds nothing the rule reads, and is a test of whether some
+% tuple agrees with its bound columns: keyed through the index on them,
+% printed with its key, when some are bound, and asking whether the
+% relation is empty when none is.  A named variable mentioned once, _To,
+% is planned and printed as `_`, as the rule line shows the name it was
+% given.  In the recursive rule the literal holding `_` is checked through
+% the view its place in each delta variant gives it: the delta, or the
+% tuples older than it.  The query streams, since its check lets each
+% binding of X through once.  The program is answered without the Magic
+% rewrite, so that every rule's plan is shown.
+
+edge(a, b).
+edge(b, c).
+edge(c, d).
+edge(c, e).
+node(a).
+node(b).
+node(c).
+
+leaves(X) :- node(X), edge(X, _).
+named(X) :- node(X), edge(X, _To).
+nonempty(X) :- node(X), edge(_, _).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(Z, _), path(X, Y), edge(Y, Z).
+
+node(X), edge(_, X)?

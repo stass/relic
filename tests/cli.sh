@@ -247,7 +247,7 @@ esac
 # every answer before writing it, deferring every round's insertions and
 # compiling every aggregate body to a group rule are selected by name and
 # answer as the default does.
-for reference in no-index no-reorder no-magic no-stream parallel \
+for reference in no-index no-reorder no-exists no-magic no-stream parallel \
     group-rules; do
 	actual=$("$RELIC" -s -X "$reference" "$work/graph.dl")
 	if [ "$actual" != "$expected" ]; then

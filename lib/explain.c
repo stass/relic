@@ -114,6 +114,8 @@ static void	 put_plan(const relic_t *ctx, const relic_rule_t *rule,
 		    const relic_plan_t *plan, unsigned int depth, bool streams);
 static void	 put_pred(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
+static void	 put_probe(const relic_t *ctx, relic_explain_line_t *line,
+		    const relic_rule_t *rule, const relic_op_atom_t *atom);
 static void	 put_pred_name(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
 static void	 put_query_rule(const relic_t *ctx, relic_explain_line_t *line,
@@ -895,6 +897,22 @@ put_view(relic_explain_line_t *line, enum relic_view view)
 }
 
 /*
+ * A probe's atom and key.  The atom shows which columns are `_`, so the key
+ * is printed only where it names the secondary index the probe took, as a
+ * lookup's does; a probe that scans prints without one, as a lookup planned
+ * without indexes prints as a scan.
+ */
+static void
+put_probe(const relic_t *ctx, relic_explain_line_t *line,
+    const relic_rule_t *rule, const relic_op_atom_t *atom)
+{
+	put_op_atom(ctx, line, rule, atom);
+	if (relic_plan_probe_shape(atom->key_mask, atom->arity) ==
+	    RELIC_PROBE_INDEX)
+		put_key(line, atom->key_mask);
+}
+
+/*
  * One operation of a plan.  `streams` says that the plan's EMIT delivers
  * its tuples to the caller as a query's rows rather than writing the
  * relation it names, which its line shows as `stream`.
@@ -920,19 +938,14 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
 		put_view(line, op->u.atom.view);
 		put_op_atom(ctx, line, rule, &op->u.atom);
 		return;
+	case RELIC_OP_EXISTS:
+		line_put(line, "exists ");
+		put_view(line, op->u.atom.view);
+		put_probe(ctx, line, rule, &op->u.atom);
+		return;
 	case RELIC_OP_ANTI_MEMBER:
 		line_put(line, "anti-member ");
-		put_op_atom(ctx, line, rule, &op->u.atom);
-
-		/*
-		 * The atom shows which columns are `_`, so the key is printed
-		 * only where it names the secondary index the probe took, as a
-		 * lookup's does; a probe that scans prints without one, as a
-		 * lookup planned without indexes prints as a scan.
-		 */
-		if (relic_plan_probe_shape(op->u.atom.key_mask,
-		    op->u.atom.arity) == RELIC_PROBE_INDEX)
-			put_key(line, op->u.atom.key_mask);
+		put_probe(ctx, line, rule, &op->u.atom);
 		return;
 	case RELIC_OP_FILTER:
 		line_put(line, "filter ");

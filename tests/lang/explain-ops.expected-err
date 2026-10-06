@@ -13,12 +13,12 @@ stratum 0, component 1: large/1
 stratum 0, component 2: named/1
     rule named(X) :- edge(X, _), name(X, "Al\"ice\\\x09x").
         lookup name(X, "Al\"ice\\\x09x") key={1}
-        lookup edge(X, _) key={0}
+        exists edge(X, _) key={0}
         emit named(X)
 stratum 0, component 3: hostile/1
     rule hostile(X) :- edge(X, _), raw(X, "\x1b[2J\x7f\xff\x00z").
         lookup raw(X, "\x1b[2J\x7f\xff\x00z") key={1}
-        lookup edge(X, _) key={0}
+        exists edge(X, _) key={0}
         emit hostile(X)
 stratum 1, component 4: free/1
     rule free(X) :- edge(X, _), not blocked(X), initialized.

@@ -35,7 +35,7 @@ magic rewrite of $q0(X) :- reach(a, X).
                 emit sup$reach$bf$1$2(X, Y)
         rule magic$link$bf(Y) :- sup$reach$bf$1$2(X, Y).
             delta sup$reach$bf$1$2(X, Y):
-                scan delta sup$reach$bf$1$2(X, Y)
+                scan delta sup$reach$bf$1$2(_, Y)
                 emit magic$link$bf(Y)
         rule reach$bf(X, Z) :- sup$reach$bf$1$2(X, Y), link$bf(Y, Z), not blocked(Z).
             delta sup$reach$bf$1$2(X, Y):

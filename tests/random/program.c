@@ -61,6 +61,8 @@ static uint64_t	 group_variables(const random_program_t *program,
 		    const random_group_t *group,
 		    const random_literal_t *aggregate);
 static bool	 literal_has_operator(const random_literal_t *literal);
+static bool	 rule_has_dead_variable(const random_program_t *program,
+		    const random_rule_t *rule);
 static bool	 literals_have_anonymous(const random_program_t *program,
 		    const random_literal_t *literals, size_t length,
 		    random_literal_kind_t kind);
@@ -853,17 +855,26 @@ random_program_statements(const random_program_t *program)
 }
 
 /*
- * Whether any rule's body, or any group body in it, holds `_` in a positive
- * literal.  A binding of such a body's variables does not name the tuples
- * that satisfy it, since the column `_` stands in may hold several values
- * under one binding.  `_` in a negated literal multiplies nothing: the
- * literal is a test, which lets a binding through at most once.
+ * Whether any rule's body, or any group body in it, holds in a positive
+ * literal a column the rule ignores: `_`, or a named variable the rule
+ * mentions nowhere else.  A binding of such a body's variables does not
+ * name the tuples that satisfy it, since the column may hold several values
+ * under one binding, and whether the literal derives once per tuple or once
+ * per binding depends on whether the planner places it as a generator or,
+ * after every literal it shares a variable with, as an existence check,
+ * which no formula over the bindings tells.  `_` in a negated literal
+ * multiplies nothing: the literal is a test, which lets a binding through
+ * at most once.  A group rule's head holds every variable of its body, so a
+ * group body's named variables are never ignored.
  */
 bool
-random_program_has_positive_anonymous(const random_program_t *program)
+random_program_has_ignored_column(const random_program_t *program)
 {
 	for (size_t r = 0; r < program->rule_count; r++) {
 		const random_body_t *body = &program->rules[r].body;
+
+		if (rule_has_dead_variable(program, &program->rules[r]))
+			return (true);
 
 		if (literals_have_anonymous(program, body->literals,
 		    body->length, LITERAL_POSITIVE))
@@ -881,6 +892,57 @@ random_program_has_positive_anonymous(const random_program_t *program)
 		}
 	}
 	return (false);
+}
+
+/*
+ * Whether a rule's positive literal holds a variable the rule mentions
+ * exactly once, head included: a `_` with a name, which the planner reads as
+ * one.  The positive literals' mentions are counted, one in two columns
+ * twice, and every other mention only noted, since one is enough to keep a
+ * variable alive: a negated literal's arguments, a comparison's operands,
+ * and an aggregate's result and its group body's variables, those it shares
+ * with the rule among them.
+ */
+static bool
+rule_has_dead_variable(const random_program_t *program,
+    const random_rule_t *rule)
+{
+	const random_body_t *body = &rule->body;
+	uint64_t once = 0;
+	uint64_t twice = 0;
+	uint64_t elsewhere;
+
+	elsewhere = terms_variables(rule->head,
+	    program->predicates[rule->head_predicate].arity);
+
+	for (size_t i = 0; i < body->length; i++) {
+		const random_literal_t *literal = &body->literals[i];
+
+		switch (literal->kind) {
+		case LITERAL_POSITIVE:
+			for (size_t a = 0; a < literal_arity(program, literal);
+			    a++) {
+				uint64_t mention = terms_variables(
+				    &literal->args[a], 1);
+
+				twice |= once & mention;
+				once |= mention;
+			}
+			break;
+		case LITERAL_AGGREGATE:
+			elsewhere |= random_literal_variables(program,
+			    literal) | group_variables(program,
+			    &body->groups[literal->group], literal);
+			break;
+		case LITERAL_NEGATED:
+		case LITERAL_COMPARISON:
+			elsewhere |= random_literal_variables(program,
+			    literal);
+			break;
+		}
+	}
+
+	return ((once & ~twice & ~elsewhere) != 0);
 }
 
 /* Whether any literal of the given kind among `literals` holds `_`. */

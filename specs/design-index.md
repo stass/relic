@@ -223,6 +223,9 @@ A lookup through the `delta` view visits the key's tuples in the delta
 contiguous run of the chain: the members at or past `since`, up to the first
 at or past `end`. Stopping at `end` is what every lookup does; starting at
 `since` without walking the chain from its head is what the frontier is for.
+A **check** of a delta, the `EXISTS` of `specs/design-existence.md` section
+4 keyed on some columns, asks for the first tuple of that run alone, and
+finds it through the frontier as a lookup does.
 
 ```c
 void relic_index_raise_since(relic_index_t *, relic_tuple_id_t since);
@@ -234,9 +237,10 @@ relic_tuple_id_t relic_index_first_since(const relic_index_t *,
 `relic_index_raise_since()` raises `latest_since` to `since` when `since` is
 past it. The evaluator raises every index of a member to the start of the
 member's delta whenever it sets the delta, which is the one place a delta
-is set, so before any lookup of the delta is made: a delta view reads only
-its own member, from the delta's first identifier, so every lookup of a
-delta in one round starts at the one `since` its index was raised to.
+is set, so before any lookup or check of the delta is made: a delta view
+reads only its own member, from the delta's first identifier, so every
+lookup and every check of a delta in one round starts at the one `since`
+its index was raised to.
 Raising only loosens the invariant's bound, so it touches no frontier.
 
 `relic_index_first_since()` finds the key as `relic_index_first()` does,
@@ -248,24 +252,26 @@ or, when the walk ran off the chain's end, the chain's last tuple, which is
 still below `since` and so still satisfies the invariant; it is stored only
 when it moved. The function takes the index read-only and writes nothing
 but the frontier, through the array's pointer. The lookup then follows the
-chain with `relic_index_next()` as any lookup does.
+chain with `relic_index_next()` as any lookup does; a check reads the tuple
+returned alone and holds when it is below `end`.
 
-**Several lookups at one `since` may walk one chain at once**, on the
-workers of a parallel round (`specs/design-parallel.md` section 7.2). Each
-walks toward the same `since` from whichever frontier it read, so each
-stops at the same tuple and stores the same frontier; one that read a
-frontier older than another stored only walks further to reach the same
-stop. The race is benign by construction, and relaxed atomics make it a
-defined one. `latest_since` is written between rounds alone, when no lookup
-runs.
+**Several lookups and checks at one `since` may walk one chain at once**,
+on the workers of a parallel round (`specs/design-parallel.md` section
+7.2). Each walks toward the same `since` from whichever frontier it read
+through the same function, whether it then follows the chain or reads one
+tuple, so each stops at the same tuple and stores the same frontier; one
+that read a frontier older than another stored only walks further to reach
+the same stop. The race is benign by construction, and relaxed atomics
+make it a defined one. `latest_since` is written between rounds alone,
+when no lookup or check runs.
 
 **It is amortized constant time because deltas advance.** Within one fixed
 point a member's delta starts where the previous one ended, so the `since`
 an index is asked for never decreases. A key's frontier therefore only
 moves forward and passes each chain tuple at most once over the whole fixed
-point, and after the first lookup of a key in a round every later one of
-that round walks nothing. Positioning costs at most one pass over the
-relation, however many rounds and lookups there are.
+point, and after the first lookup or check of a key in a round every later
+one of that round walks nothing. Positioning costs at most one pass over
+the relation, however many rounds, lookups and checks there are.
 
 **It is correct whatever it is asked.** The invariant depends on `since`
 never decreasing, which the evaluator guarantees: an index is dropped with

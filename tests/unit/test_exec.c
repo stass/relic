@@ -40,6 +40,7 @@
 #define	SCENARIO_NEGLECT	"a batch left full is not written past"
 #define	SCENARIO_PIECES		"pieces of a view derive what the whole does"
 #define	SCENARIO_PROBES		"a probe's scan counts toward the quantum"
+#define	SCENARIO_DELTA_CHECK	"a check of a delta begins at its start"
 #define	SCENARIO_FOLDS		"a fold's reads count toward the quantum"
 #define	SCENARIO_FOLD_EMIT	"a fold that pauses emits its value next call"
 #define	SCENARIO_LOOKUP		"a lookup rejecting its chain pauses inside it"
@@ -85,6 +86,9 @@ static void	 a_folds_reads_count_toward_the_quantum(void);
 static void	 a_fold_that_pauses_emits_its_value_next_call(void);
 static void	 a_lookup_rejecting_its_chain_pauses_inside_it(void);
 static void	 a_probes_scan_counts_toward_the_quantum(void);
+static void	 a_check_of_a_delta_begins_at_its_start(void);
+static void	 probes_scanning_count_toward_the_quantum(
+		    enum relic_op_kind kind);
 static bool	 fill(fixture_t *fixture, const char *scenario, int64_t first,
 		    size_t count);
 static void	 fixture_close(fixture_t *fixture);
@@ -759,17 +763,29 @@ a_folds_reads_count_toward_the_quantum(void)
 }
 
 /*
- * A negated literal's probe that scans has no cursor to resume from, so it
- * charges the tuples it reads to the call as a fold does.  The plan scans
- * r, then three times over for each of r's tuples asks whether p, a
- * relation a quantum large, holds a tuple whose first column is that value
- * and whose second is anything -- the probe of `not p(X, _)` without an
- * index -- which none does, so each probe reads all of p; then it scans the
- * empty z, which rejects every binding.  A call may read one probe's walk
- * past its quantum and no more.
+ * A probe that scans has no cursor to resume from, so it charges the tuples
+ * it reads to the call as a fold does, whether a negated literal asks it or
+ * a positive one.
  */
 static void
 a_probes_scan_counts_toward_the_quantum(void)
+{
+	probes_scanning_count_toward_the_quantum(RELIC_OP_ANTI_MEMBER);
+	probes_scanning_count_toward_the_quantum(RELIC_OP_EXISTS);
+}
+
+/*
+ * The plan scans r, then three times over for each of r's tuples probes p,
+ * a relation a quantum large, then scans the empty z, which rejects every
+ * binding.  Each probe reads all of p: as an ANTI_MEMBER it asks whether p
+ * holds a tuple whose first column is r's value and whose second is
+ * anything -- the probe of `not p(X, _)` without an index -- which none
+ * does; as an EXISTS whether p holds a tuple whose second column is the
+ * last tuple's -- `p(_, last)` -- which only that tuple does.  A call may
+ * read one probe's walk past its quantum and no more.
+ */
+static void
+probes_scanning_count_toward_the_quantum(enum relic_op_kind kind)
 {
 	relic_op_state_t states[6];
 	relic_plan_term_t probe_terms[2];
@@ -791,6 +807,7 @@ a_probes_scan_counts_toward_the_quantum(void)
 
 	if (!fixture_open(&fixture, SCENARIO_PROBES))
 		return;
+	tuple[1] = RELIC_ID_NONE;
 
 	outer = 64;
 	walk = RELIC_EXEC_QUANTUM;
@@ -815,13 +832,19 @@ a_probes_scan_counts_toward_the_quantum(void)
 	}
 
 	bzero(probe_terms, sizeof(probe_terms));
-	probe_terms[0] = fixture.read;
-	probe_terms[1].action = RELIC_PLAN_ANY;
+	if (kind == RELIC_OP_ANTI_MEMBER) {
+		probe_terms[0] = fixture.read;
+		probe_terms[1].action = RELIC_PLAN_ANY;
+	} else {
+		probe_terms[0].action = RELIC_PLAN_ANY;
+		probe_terms[1].action = RELIC_PLAN_CONSTANT;
+		probe_terms[1].u.constant = tuple[1];
+	}
 
 	bzero(ops, sizeof(ops));
 	ops[0] = fixture.ops[0];
 	for (i = 1; i <= 3; i++) {
-		ops[i].kind = RELIC_OP_ANTI_MEMBER;
+		ops[i].kind = kind;
 		ops[i].u.atom.relation = probed;
 		ops[i].u.atom.terms = probe_terms;
 		ops[i].u.atom.arity = 2;
@@ -849,12 +872,115 @@ a_probes_scan_counts_toward_the_quantum(void)
 	} while (status == RELIC_EXEC_PAUSED);
 
 	checkf(most_read <= 2 * RELIC_EXEC_QUANTUM + 1, SCENARIO_PROBES,
-	    "a call should read at most a walk past its quantum, not %llu",
-	    (unsigned long long)most_read);
+	    "a call of kind %d should read at most a walk past its quantum, "
+	    "not %llu", (int)kind, (unsigned long long)most_read);
 	checkf(scratch.counters.tuples_scanned == outer * (3 * walk + 1),
-	    SCENARIO_PROBES, "the plan should read %zu tuples, not %llu",
-	    outer * (3 * walk + 1),
+	    SCENARIO_PROBES, "the plan of kind %d should read %zu tuples, "
+	    "not %llu", (int)kind, outer * (3 * walk + 1),
 	    (unsigned long long)scratch.counters.tuples_scanned);
+
+	fixture_close(&fixture);
+}
+
+/*
+ * An EXISTS of a delta, keyed through an index, asks whether the delta
+ * holds a tuple of the key, which is not whether the relation does.  p
+ * holds (1, 10) and (2, 20) before its delta and (2, 21) in it, and the
+ * plan scans r, which holds 1 and 2, checks `delta p(X, _)` and emits X.
+ * Only 2 has a tuple in the delta, so only 2 is derived; a probe that began
+ * at the head of the key's chain would find (1, 10), which lies below the
+ * delta's end, and derive 1 as well.
+ */
+static void
+a_check_of_a_delta_begins_at_its_start(void)
+{
+	static const int64_t rows[][2] = { { 1, 10 }, { 2, 20 }, { 2, 21 } };
+	relic_tuple_range_t deltas[3];
+	relic_op_state_t states[3];
+	relic_plan_term_t check_terms[2];
+	relic_scratch_t scratch;
+	relic_relation_t *probed;
+	relic_op_t ops[3];
+	relic_plan_t plan;
+	fixture_t fixture;
+	relic_dom_t tuple[2];
+	relic_dom_t batch[RELIC_INSERT_BATCH];
+	relic_dom_t two;
+	enum relic_exec_status status;
+	uint32_t position;
+	size_t derived;
+	size_t i;
+	bool added;
+
+	if (!fixture_open(&fixture, SCENARIO_DELTA_CHECK))
+		return;
+
+	probed = relation(fixture.ctx, SCENARIO_DELTA_CHECK, "p", 2);
+	if (probed == NULL || relic_relation_pred(probed) > 3 ||
+	    !fill(&fixture, SCENARIO_DELTA_CHECK, 1, 2) ||
+	    relic_relation_index(fixture.ctx, probed, UINT32_C(1),
+	    &position) != 0) {
+		check(false, SCENARIO_DELTA_CHECK, "p and its index exist");
+		fixture_close(&fixture);
+		return;
+	}
+	for (i = 0; i < 3; i++) {
+		if (relic_value_intern_integer(fixture.ctx, rows[i][0],
+		    &tuple[0]) != 0 ||
+		    relic_value_intern_integer(fixture.ctx, rows[i][1],
+		    &tuple[1]) != 0 ||
+		    relic_relation_insert(fixture.ctx, probed, tuple,
+		    &added) != 0) {
+			check(false, SCENARIO_DELTA_CHECK, "p fills");
+			fixture_close(&fixture);
+			return;
+		}
+	}
+
+	/* The delta is p's last tuple, and its index learns where it starts. */
+	bzero(deltas, sizeof(deltas));
+	deltas[relic_relation_pred(probed) - 1].first = RELIC_TUPLE_FIRST + 2;
+	deltas[relic_relation_pred(probed) - 1].end = RELIC_TUPLE_FIRST + 3;
+	relic_index_raise_since(&probed->indexes[position],
+	    RELIC_TUPLE_FIRST + 2);
+	fixture.env.deltas = deltas;
+
+	bzero(check_terms, sizeof(check_terms));
+	check_terms[0] = fixture.read;
+	check_terms[1].action = RELIC_PLAN_ANY;
+
+	bzero(ops, sizeof(ops));
+	ops[0] = fixture.ops[0];
+	ops[1].kind = RELIC_OP_EXISTS;
+	ops[1].u.atom.relation = probed;
+	ops[1].u.atom.terms = check_terms;
+	ops[1].u.atom.arity = 2;
+	ops[1].u.atom.key_mask = UINT32_C(1);
+	ops[1].u.atom.index_position = position;
+	ops[1].u.atom.view = RELIC_VIEW_DELTA;
+	ops[2] = fixture.ops[1];
+	plan.ops = ops;
+	plan.op_count = 3;
+
+	relic_scratch_init(&scratch, states, 3, batch, NULL, 1);
+	relic_exec_start(&scratch, &fixture.env, &plan);
+
+	derived = 0;
+	two = RELIC_ID_NONE;
+	(void)relic_value_intern_integer(fixture.ctx, 2, &two);
+	do {
+		status = relic_exec_run(&scratch);
+		for (i = 0; i < scratch.batch_count; i++) {
+			checkf(batch[i] == two, SCENARIO_DELTA_CHECK,
+			    "derivation %zu should be 2", derived + 1);
+			derived++;
+		}
+		scratch.batch_count = 0;
+	} while (status == RELIC_EXEC_PAUSED);
+
+	checkf(derived == 1, SCENARIO_DELTA_CHECK,
+	    "one value has a tuple in the delta, and %zu were derived",
+	    derived);
 
 	fixture_close(&fixture);
 }
@@ -1086,6 +1212,7 @@ main(void)
 	a_folds_reads_count_toward_the_quantum();
 	a_fold_that_pauses_emits_its_value_next_call();
 	a_probes_scan_counts_toward_the_quantum();
+	a_check_of_a_delta_begins_at_its_start();
 	a_lookup_rejecting_its_chain_pauses_inside_it();
 
 	return (check_summary("test_exec"));

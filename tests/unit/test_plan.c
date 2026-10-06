@@ -54,6 +54,11 @@
 #define	SCENARIO_GREEDY		"bound arguments go first, then small relations"
 #define	SCENARIO_INCOMPLETE	"a relation being derived is assumed, not measured"
 #define	SCENARIO_MEMBER		"a fully bound literal is a membership test"
+#define	SCENARIO_EXISTS		"a literal binding nothing read is a check"
+#define	SCENARIO_LIVE		"a variable mentioned twice is not dead"
+#define	SCENARIO_CHECK_PLACED	"a literal is a check where it is placed so"
+#define	SCENARIO_CHECK_VARIANT	"a delta literal may be a check in one plan"
+#define	SCENARIO_NO_EXISTS	"without checks every literal is planned as before"
 #define	SCENARIO_NEGATION	"a negated literal is an ANTI_MEMBER, placed early"
 #define	SCENARIO_PROBE		"a negated literal probes by its named columns"
 #define	SCENARIO_RANKING	"passes choose the step-by-step greedy order"
@@ -172,6 +177,13 @@ static void	 only_plans_some_delta_selects_are_built(void);
 static void	 the_emit_writes_the_relation_it_is_given(void);
 static void	 a_bodyless_rule_is_a_lone_emit_of_constants(void);
 static void	 a_fully_bound_literal_is_a_membership_test(void);
+static void	 a_literal_binding_nothing_read_is_a_check(void);
+static void	 a_variable_mentioned_twice_is_not_dead(void);
+static void	 a_literal_is_a_check_where_it_is_placed_so(void);
+static void	 a_delta_literal_may_be_a_check_in_one_plan(void);
+static void	 without_checks_every_literal_is_planned_as_before(void);
+static bool	 terms_are(const relic_op_atom_t *atom,
+		    const enum relic_term_action *expected);
 static void	 a_negated_literal_is_placed_once_bound(void);
 static void	 a_negated_literal_probes_by_its_named_columns(void);
 static void	 a_relation_being_derived_is_assumed(void);
@@ -469,14 +481,15 @@ a_scans_columns_bind_match_or_ignore(void)
  * A literal whose every argument is a constant or a bound slot asks whether a
  * tuple is present, which the full-tuple index answers without a scan.  An
  * atom of arity zero is always fully bound.  A literal with a wildcard is
- * never a membership test, since only a scan can supply "any value".
+ * never a membership test: with its other columns bound it asks whether some
+ * tuple agrees with them, which is an existence check.
  */
 static void
 a_fully_bound_literal_is_a_membership_test(void)
 {
 	static const enum relic_op_kind bound_kinds[] = {
 		RELIC_OP_SCAN, RELIC_OP_MEMBER, RELIC_OP_MEMBER,
-		RELIC_OP_MEMBER, RELIC_OP_SCAN, RELIC_OP_EMIT
+		RELIC_OP_MEMBER, RELIC_OP_EXISTS, RELIC_OP_EMIT
 	};
 	fixture_t fixture;
 
@@ -488,9 +501,309 @@ a_fully_bound_literal_is_a_membership_test(void)
 	}
 
 	check(kinds_are(&fixture.plan, bound_kinds, 6), SCENARIO_MEMBER,
-	    "bound literals are tests and the wildcard literal a scan");
+	    "bound literals are tests and the wildcard literal a check");
 
 	fixture_release(&fixture);
+}
+
+/*
+ * Whether an operation's terms have exactly these actions, column by
+ * column, for as many columns as its relation has.
+ */
+static bool
+terms_are(const relic_op_atom_t *atom, const enum relic_term_action *expected)
+{
+	uint16_t i;
+
+	for (i = 0; i < atom->arity; i++) {
+		if (atom->terms[i].action != expected[i])
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * A positive literal whose columns not bound before it hold `_` or a
+ * variable the rule mentions nowhere else binds nothing the rule reads, and
+ * is an EXISTS keyed on its bound columns.  In p(X) :- q(X), e(X, _, c),
+ * written order placing q first, e is keyed on X and c, through the index on
+ * exactly those columns, and its middle column is ANY.  A named dead
+ * variable, _Y, gives the same plan as `_`.  Without indexes the check asks
+ * by scanning, its key empty and its terms unchanged.
+ */
+static void
+a_literal_binding_nothing_read_is_a_check(void)
+{
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_EXISTS, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action actions[] = {
+		RELIC_PLAN_BOUND, RELIC_PLAN_ANY, RELIC_PLAN_CONSTANT
+	};
+	static const char *const program = "q(a).\ne(a, b, c).\ne(a, d, c).\n"
+	    "p(X) :- q(X), e(X, _, c).\n"
+	    "p(X) :- q(X), e(X, _Y, c).\n";
+	const relic_op_atom_t *check_atom;
+	const relic_index_t *index;
+	fixture_t fixture;
+	size_t r;
+
+	for (r = 0; r < 2; r++) {
+		if (!fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) ||
+		    !fixture_plan_rule(&fixture, r, NULL) ||
+		    !kinds_are(&fixture.plan, kinds, 3)) {
+			checkf(false, SCENARIO_EXISTS, "rule %zu is a scan, a "
+			    "check and an EMIT", r);
+			fixture_release(&fixture);
+			continue;
+		}
+
+		check_atom = &fixture.plan.ops[1].u.atom;
+		index = relic_relation_index_at(check_atom->relation,
+		    check_atom->index_position);
+		checkf(check_atom->key_mask == UINT32_C(5) &&
+		    relic_index_key_mask(index) == UINT32_C(5) &&
+		    check_atom->view == RELIC_VIEW_ALL, SCENARIO_EXISTS,
+		    "rule %zu is keyed on columns 0 and 2 through their index",
+		    r);
+		checkf(terms_are(check_atom, actions) &&
+		    check_atom->terms[0].u.slot == slot_named(&fixture, r, "X"),
+		    SCENARIO_EXISTS, "rule %zu reads X and c and ignores the "
+		    "middle column", r);
+		fixture_release(&fixture);
+
+		if (!fixture_load(&fixture, program, TEXTUAL_FLAGS, true) ||
+		    !fixture_plan_rule(&fixture, r, NULL) ||
+		    !kinds_are(&fixture.plan, kinds, 3)) {
+			checkf(false, SCENARIO_EXISTS, "rule %zu without indexes "
+			    "is a scan, a check and an EMIT", r);
+			fixture_release(&fixture);
+			continue;
+		}
+
+		check_atom = &fixture.plan.ops[1].u.atom;
+		checkf(check_atom->key_mask == 0 &&
+		    terms_are(check_atom, actions), SCENARIO_EXISTS,
+		    "rule %zu without indexes scans for X and c", r);
+		fixture_release(&fixture);
+	}
+}
+
+/*
+ * A variable is dead only when the rule mentions it once.  In e2(Y, Y) the
+ * literal mentions Y twice, so its scan binds Y at the first column and
+ * matches it at the second, with an empty key.  In Y = b, e2(X, Y) the
+ * assignment binds Y before the literal, so its column is a key column of a
+ * lookup.  A variable an aggregate's body shares with the rule is mentioned
+ * by the aggregate, so e2(X, Y) before count { f(Y) } binds Y.
+ */
+static void
+a_variable_mentioned_twice_is_not_dead(void)
+{
+	static const enum relic_op_kind repeated_kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_SCAN, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action repeated[] = {
+		RELIC_PLAN_BIND, RELIC_PLAN_BOUND
+	};
+	static const enum relic_op_kind assigned_kinds[] = {
+		RELIC_OP_ASSIGN, RELIC_OP_LOOKUP, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action assigned[] = {
+		RELIC_PLAN_BIND, RELIC_PLAN_BOUND
+	};
+	static const enum relic_op_kind shared_kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_LOOKUP, RELIC_OP_AGGREGATE, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action shared[] = {
+		RELIC_PLAN_BOUND, RELIC_PLAN_BIND
+	};
+	static const char *const program = "q(a).\ne2(a, b).\ne2(b, b).\n"
+	    "f(b).\n"
+	    "r(X) :- q(X), e2(Y, Y).\n"
+	    "r(X) :- Y = b, e2(X, Y).\n"
+	    "s(X, N) :- q(X), e2(X, Y), N = count { f(Y) }.\n";
+	fixture_t fixture;
+
+	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	    fixture_plan_rule(&fixture, 0, NULL)) {
+		check(kinds_are(&fixture.plan, repeated_kinds, 3) &&
+		    fixture.plan.ops[1].u.atom.key_mask == 0 &&
+		    terms_are(&fixture.plan.ops[1].u.atom, repeated),
+		    SCENARIO_LIVE, "e2(Y, Y) binds Y and matches it");
+	} else
+		check(false, SCENARIO_LIVE, "the repeated rule is planned");
+	fixture_release(&fixture);
+
+	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	    fixture_plan_rule(&fixture, 1, NULL)) {
+		check(kinds_are(&fixture.plan, assigned_kinds, 3) &&
+		    fixture.plan.ops[1].u.atom.key_mask == UINT32_C(2) &&
+		    terms_are(&fixture.plan.ops[1].u.atom, assigned),
+		    SCENARIO_LIVE, "the assigned Y is a key column");
+	} else
+		check(false, SCENARIO_LIVE, "the assigned rule is planned");
+	fixture_release(&fixture);
+
+	if (fixture_load(&fixture, program, RELIC_F_NO_REORDER, true) &&
+	    fixture_plan_rule(&fixture, fixture.ctx->program.rules.count - 1,
+	    NULL)) {
+		check(kinds_are(&fixture.plan, shared_kinds, 4) &&
+		    terms_are(&fixture.plan.ops[1].u.atom, shared),
+		    SCENARIO_LIVE, "the Y the aggregate shares is bound");
+	} else
+		check(false, SCENARIO_LIVE, "the aggregate's rule is planned");
+	fixture_release(&fixture);
+}
+
+/*
+ * Whether a literal is a check depends on what is bound where it is placed.
+ * Alone, r(X) :- e2(X, Z) scans e2, binding X and ignoring the dead Z.
+ * Placed after q(X), which the ranking puts first as the smaller relation,
+ * the same literal binds nothing the rule reads and is a check keyed on X.
+ */
+static void
+a_literal_is_a_check_where_it_is_placed_so(void)
+{
+	static const enum relic_op_kind alone_kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action alone[] = {
+		RELIC_PLAN_BIND, RELIC_PLAN_ANY
+	};
+	static const enum relic_op_kind last_kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_EXISTS, RELIC_OP_EMIT
+	};
+	static const char *const last_reads[] = { "q", "e2", "r" };
+	static const char *const program = "q(a).\ne2(a, b).\ne2(c, d).\n"
+	    "r(X) :- e2(X, Z).\n"
+	    "r(X) :- e2(X, Z), q(X).\n";
+	fixture_t fixture;
+
+	if (fixture_load(&fixture, program, 0, true) &&
+	    fixture_plan_rule(&fixture, 0, NULL)) {
+		check(kinds_are(&fixture.plan, alone_kinds, 2) &&
+		    terms_are(&fixture.plan.ops[0].u.atom, alone),
+		    SCENARIO_CHECK_PLACED, "alone, e2 binds X and ignores Z");
+	} else
+		check(false, SCENARIO_CHECK_PLACED, "the lone rule is planned");
+	fixture_release(&fixture);
+
+	if (fixture_load(&fixture, program, 0, true) &&
+	    fixture_plan_rule(&fixture, 1, NULL)) {
+		check(kinds_are(&fixture.plan, last_kinds, 3) &&
+		    reads_in_order(&fixture, last_reads, 3) &&
+		    fixture.plan.ops[1].u.atom.key_mask == UINT32_C(1),
+		    SCENARIO_CHECK_PLACED, "after q, e2 is a check keyed on X");
+	} else
+		check(false, SCENARIO_CHECK_PLACED, "the joined rule is planned");
+	fixture_release(&fixture);
+}
+
+/*
+ * The two plans of a variant place its literals in different orders, so a
+ * delta literal can be a check in one and a generator in the other.  In
+ * r(X) :- m(X), p(X, _) with p's delta, the placed plan scans m, the
+ * smaller, and checks the delta for each X; the delta-first plan scans the
+ * delta, binding X, and tests m for it.  m's three tuples over the one
+ * lookup per tuple of the delta-first plan make a threshold of three, so
+ * both plans are built.
+ */
+static void
+a_delta_literal_may_be_a_check_in_one_plan(void)
+{
+	static const enum relic_op_kind placed_kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_EXISTS, RELIC_OP_EMIT
+	};
+	static const enum relic_op_kind first_kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_MEMBER, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action scanned[] = {
+		RELIC_PLAN_BIND, RELIC_PLAN_ANY
+	};
+	relic_variant_plans_t plans;
+	const relic_rule_t *rule;
+	fixture_t fixture;
+	bool incomplete[8];
+	const relic_op_atom_t *delta;
+
+	if (!fixture_load(&fixture, "m(a).\nm(b).\nm(c).\np(a, x).\n"
+	    "r(X) :- m(X), p(X, _).\n", 0, true) ||
+	    relic_pred_count(fixture.ctx) > 8) {
+		check(false, SCENARIO_CHECK_VARIANT, "the program is loaded");
+		fixture_release(&fixture);
+		return;
+	}
+
+	bzero(incomplete, sizeof(incomplete));
+	rule = &fixture.ctx->program.rules.entries[0];
+	incomplete[rule->body[1].u.atom.pred - 1] = true;
+	if (!fixture_plan_variants(&fixture, 0, 1, incomplete, &plans)) {
+		check(false, SCENARIO_CHECK_VARIANT, "the variant is planned");
+		fixture_release(&fixture);
+		return;
+	}
+
+	check(plans.threshold == 3, SCENARIO_CHECK_VARIANT,
+	    "both plans are built, three tuples apart");
+	if (kinds_are(&plans.placed, placed_kinds, 3)) {
+		delta = &plans.placed.ops[1].u.atom;
+		check(delta->view == RELIC_VIEW_DELTA &&
+		    delta->key_mask == UINT32_C(1), SCENARIO_CHECK_VARIANT,
+		    "the placed plan checks the delta for X");
+	} else
+		check(false, SCENARIO_CHECK_VARIANT,
+		    "the placed plan is a scan, a check and an EMIT");
+	if (kinds_are(&plans.delta_first, first_kinds, 3)) {
+		delta = &plans.delta_first.ops[0].u.atom;
+		check(delta->view == RELIC_VIEW_DELTA &&
+		    terms_are(delta, scanned), SCENARIO_CHECK_VARIANT,
+		    "the delta-first plan scans the delta, binding X");
+	} else
+		check(false, SCENARIO_CHECK_VARIANT,
+		    "the delta-first plan is a scan, a member and an EMIT");
+
+	fixture_release(&fixture);
+}
+
+/*
+ * Under RELIC_F_NO_EXISTS no variable is dead and no literal is a check: a
+ * literal binding nothing the rule reads is a lookup, `_` matching anything
+ * and a named variable binding its slot, which nothing reads.
+ */
+static void
+without_checks_every_literal_is_planned_as_before(void)
+{
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_LOOKUP, RELIC_OP_EMIT
+	};
+	static const enum relic_term_action wildcard[] = {
+		RELIC_PLAN_BOUND, RELIC_PLAN_ANY, RELIC_PLAN_CONSTANT
+	};
+	static const enum relic_term_action named[] = {
+		RELIC_PLAN_BOUND, RELIC_PLAN_BIND, RELIC_PLAN_CONSTANT
+	};
+	static const char *const program = "q(a).\ne(a, b, c).\ne(a, d, c).\n"
+	    "p(X) :- q(X), e(X, _, c).\n"
+	    "p(X) :- q(X), e(X, _Y, c).\n";
+	fixture_t fixture;
+	size_t r;
+
+	for (r = 0; r < 2; r++) {
+		if (fixture_load(&fixture, program,
+		    RELIC_F_NO_EXISTS | RELIC_F_NO_REORDER, true) &&
+		    fixture_plan_rule(&fixture, r, NULL)) {
+			checkf(kinds_are(&fixture.plan, kinds, 3) &&
+			    fixture.plan.ops[1].u.atom.key_mask ==
+			    UINT32_C(5) && terms_are(&fixture.plan.ops[1].u.atom,
+			    r == 0 ? wildcard : named), SCENARIO_NO_EXISTS,
+			    "rule %zu looks e up by X and c", r);
+		} else
+			checkf(false, SCENARIO_NO_EXISTS, "rule %zu is planned",
+			    r);
+		fixture_release(&fixture);
+	}
 }
 
 /*
@@ -2388,7 +2701,9 @@ the_ranking_is_the_step_by_step_order(void)
  * rule that drops a variable from its head, or matches with `_`, can derive
  * a tuple twice, whichever operation reads the variable; one that keeps every
  * variable -- repeated in an atom, tested by a membership, a negation or a
- * comparison, or with nothing to bind -- cannot.  The answer is read off the
+ * comparison, or with nothing to bind -- cannot, and neither can one whose
+ * `_` or dead variable is in a literal placed after f(X) binds X, which is
+ * a check.  The answer is read off the
  * plan, so each rule is planned under every combination of the index and
  * reordering switches, which change the operations it is planned into.
  */
@@ -2409,6 +2724,8 @@ a_plan_keeping_every_binding_derives_distinct_rows(void)
 		{ "p(X, Y) :- e(X, Y), e(Y, X).\n", true },
 		{ "p(X, Y) :- e(X, Y), not f(Y), X != Y.\n", true },
 		{ "p :- f(1).\n", true },
+		{ "p(X) :- f(X), e(_, X).\n", true },
+		{ "p(X) :- f(X), e(X, Y).\n", true },
 	};
 	static const unsigned int flag_sets[] = {
 		0, RELIC_F_NO_INDEX, RELIC_F_NO_REORDER, TEXTUAL_FLAGS,
@@ -2794,6 +3111,11 @@ main(void)
 {
 	a_scans_columns_bind_match_or_ignore();
 	a_fully_bound_literal_is_a_membership_test();
+	a_literal_binding_nothing_read_is_a_check();
+	a_variable_mentioned_twice_is_not_dead();
+	a_literal_is_a_check_where_it_is_placed_so();
+	a_delta_literal_may_be_a_check_in_one_plan();
+	without_checks_every_literal_is_planned_as_before();
 	a_comparison_goes_where_its_operands_are_bound();
 	an_assignment_binds_a_slot_of_its_kind();
 	an_equality_of_two_literals_variables_assigns();

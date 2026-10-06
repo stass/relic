@@ -1,0 +1,35 @@
+% Positive literals that bind nothing their rule reads: `_`, and variables
+% the rule mentions once, whether named with a leading underscore or not,
+% as a test of whether some tuple agrees with what is bound.  Each answer
+% holds each binding once however many tuples the literal matches, and a
+% query's own variables are its columns, so `_Y` in a query is answered.
+% The recursive rule joins two paths that end where some path begins, a
+% check of the relation it derives, made of each round's delta and of what
+% was derived before it.
+
+edge(a, b).
+edge(a, c).
+edge(b, c).
+edge(c, d).
+edge(d, e).
+node(a).
+node(b).
+node(e).
+
+out(X) :- node(X), edge(X, _).
+out_named(X) :- node(X), edge(X, _To).
+out_plain(X) :- node(X), edge(X, To).
+any(X) :- node(X), edge(_, _).
+hit(X) :- node(X), edge(_, X).
+
+path(X, Y) :- edge(X, Y).
+path(X, Z) :- path(X, Y), path(Y, Z), path(Z, _).
+
+out(X)?
+out_named(X)?
+out_plain(X)?
+any(X)?
+hit(X)?
+path(X, Y)?
+node(X), edge(X, _)?
+node(X), edge(X, _Y)?

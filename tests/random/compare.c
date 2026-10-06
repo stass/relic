@@ -50,8 +50,8 @@
  * `_` under `not` by a path that never takes the probe.
  *
  * And the semi-naive fixed point must make every derivation exactly once: to
- * materialize a program whose positive literals hold no `_`, one per fact
- * and, for each other rule, one per distinct binding of its body's variables
+ * materialize a program whose positive literals hold no `_` and no variable
+ * their rule mentions nowhere else, one per fact and, for each other rule, one per distinct binding of its body's variables
  * over the fixed point.  An aggregate's braces are compiled to a rule of
  * their own, the group rule, which derives once per distinct binding of the
  * group body's variables -- every aggregate's under RELIC_F_GROUP_RULES,
@@ -100,6 +100,9 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_NO_STREAM] = {
 		"no-stream", RELIC_F_NO_STREAM, false, STRATEGY_DEFAULT, 0,
 		FAULT_NONE },
+	[STRATEGY_NO_EXISTS] = {
+		"no-exists", RELIC_F_NO_EXISTS, false, STRATEGY_DEFAULT, 0,
+		FAULT_NONE },
 	[STRATEGY_PARALLEL] = {
 		"parallel", RELIC_F_PARALLEL_ALWAYS, false, STRATEGY_DEFAULT,
 		PARALLEL_THREADS, FAULT_NONE },
@@ -117,6 +120,9 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 		STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_NO_REORDER_NO_MAGIC] = {
 		"no-reorder+no-magic", RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC,
+		false, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
+	[STRATEGY_NO_EXISTS_NO_MAGIC] = {
+		"no-exists+no-magic", RELIC_F_NO_EXISTS | RELIC_F_NO_MAGIC,
 		false, STRATEGY_NO_MAGIC, 0, FAULT_NONE },
 	[STRATEGY_PARALLEL_NO_MAGIC] = {
 		"parallel+no-magic", RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_MAGIC,
@@ -325,7 +331,7 @@ random_compare(const random_program_t *program,
 	if (failure.kind != FAILURE_NONE)
 		goto done;
 
-	if (!random_program_has_positive_anonymous(program)) {
+	if (!random_program_has_ignored_column(program)) {
 		uint64_t expected_derivations;
 		uint64_t made;
 

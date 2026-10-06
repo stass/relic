@@ -306,8 +306,7 @@ void	random_generate(random_program_t *program, uint64_t seed);
 bool	random_program_is_safe(const random_program_t *program);
 bool	random_program_is_bounded(const random_program_t *program);
 bool	random_constant_is_small(size_t index);
-bool	random_program_has_positive_anonymous(
-	    const random_program_t *program);
+bool	random_program_has_ignored_column(const random_program_t *program);
 uint64_t random_literal_variables(const random_program_t *program,
 	    const random_literal_t *literal);
 char	*random_bindings_text(const random_program_t *program);
@@ -335,12 +334,14 @@ typedef enum random_strategy {
 	STRATEGY_NAIVE,
 	STRATEGY_NO_INDEX,
 	STRATEGY_NO_STREAM,
+	STRATEGY_NO_EXISTS,
 	STRATEGY_PARALLEL,
 	STRATEGY_NO_REORDER,
 	STRATEGY_NO_MAGIC,
 	STRATEGY_NAIVE_NO_MAGIC,
 	STRATEGY_NO_INDEX_NO_MAGIC,
 	STRATEGY_NO_REORDER_NO_MAGIC,
+	STRATEGY_NO_EXISTS_NO_MAGIC,
 	STRATEGY_PARALLEL_NO_MAGIC,
 	STRATEGY_GROUP_RULES,
 	STRATEGY_GROUP_RULES_NO_MAGIC,

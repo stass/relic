@@ -398,6 +398,7 @@ relation_read_as_it_runs(const relic_op_t *op)
 	case RELIC_OP_SCAN:
 	case RELIC_OP_LOOKUP:
 	case RELIC_OP_MEMBER:
+	case RELIC_OP_EXISTS:
 	case RELIC_OP_ANTI_MEMBER:
 		if (op->u.atom.view != RELIC_VIEW_ALL)
 			return (NULL);

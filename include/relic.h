@@ -300,6 +300,16 @@ struct relic_config {
 #define	RELIC_F_GROUP_RULES	0x0080u
 
 /*
+ * Plan a positive literal that binds nothing the rest of its rule reads --
+ * one whose arguments not bound before it are `_` or variables the rule
+ * mentions nowhere else -- as a scan or a lookup, continuing the join once
+ * per tuple it matches, rather than as a test that continues it at most
+ * once.  The answers and the relations are the same; the rule derives each
+ * of its tuples as many more times as the literal matches.
+ */
+#define	RELIC_F_NO_EXISTS	0x0100u
+
+/*
  * Create a context.  Returns NULL when the configuration asks for more than
  * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
  * cannot supply the random bytes the context keys its hash tables with, as

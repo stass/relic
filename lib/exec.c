@@ -1393,6 +1393,7 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		case RELIC_OP_SCAN:
 		case RELIC_OP_LOOKUP:
 		case RELIC_OP_MEMBER:
+		case RELIC_OP_EXISTS:
 		case RELIC_OP_ANTI_MEMBER:
 			scratch->states[level].view = relic_exec_view(env,
 			    &op->u.atom);
@@ -1416,8 +1417,8 @@ resolve_views(relic_scratch_t *scratch, const relic_exec_env_t *env,
  * pause, but finishes all the same, and the call pauses when the step
  * returns, having read at most one such step's walk past its reads.  A
  * fold is such a step, its walk its group's chain through an index or the
- * whole relation when it has no key or no index, and so is a negated
- * literal's probe that scans its view.
+ * whole relation when it has no key or no index, and so is a probe that
+ * scans its view.
  */
 static void
 charge_unresumable_read(relic_scratch_t *scratch)
@@ -1576,9 +1577,10 @@ step_member(const relic_scratch_t *scratch, const relic_op_atom_t *atom,
 }
 
 /*
- * The question an ANTI_MEMBER inverts: whether the relation holds, inside
- * the operation's view, a tuple that agrees with the terms on every column
- * the key reads, asked in the shape the planner chose for the key.
+ * The question an EXISTS asks and an ANTI_MEMBER inverts: whether the
+ * relation holds, inside the operation's view, a tuple that agrees with the
+ * terms on every column they read, asked in the shape the planner chose for
+ * the key.
  */
 static bool
 step_probe(relic_scratch_t *scratch, const relic_op_atom_t *atom,
@@ -1597,11 +1599,16 @@ step_probe(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 }
 
 /*
- * A probe through the secondary index keyed on the columns the atom names.
- * A chain lists its tuples in increasing identifier order, so its first is
- * its lowest, and some tuple of the key lies in the view exactly when that
- * one does: an ANTI_MEMBER reads through `all`, which begins at the
- * relation's first identifier, so only the view's end can exclude it.
+ * A probe through the secondary index keyed on the columns the atom reads:
+ * whether the walk a LOOKUP of the same key through the same view would
+ * make finds a first tuple.  It begins where that walk begins, at the head
+ * of the key's chain for every view but a delta, and for a delta at the
+ * first chain tuple at or past its start, which the index finds from the
+ * key's frontier.  A chain lists its tuples in increasing identifier order,
+ * so the tuple the walk begins at is the lowest of the key's tuples it can
+ * see, and some tuple of the key lies in the view exactly when that one is
+ * below the view's end.  The view's start never excludes it: the other
+ * views begin at the relation's first identifier.
  */
 static bool
 probe_index(relic_scratch_t *scratch, const relic_op_atom_t *atom,
@@ -1612,7 +1619,6 @@ probe_index(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 	relic_tuple_id_t id;
 	uint16_t column;
 
-	assert(atom->view == RELIC_VIEW_ALL);
 	index = relic_relation_index_at(atom->relation, atom->index_position);
 	assert(relic_index_key_mask(index) == atom->key_mask);
 
@@ -1622,7 +1628,11 @@ probe_index(relic_scratch_t *scratch, const relic_op_atom_t *atom,
 			    &atom->terms[column]);
 	}
 
-	id = relic_index_first(index, atom->relation, probe);
+	if (atom->view == RELIC_VIEW_DELTA)
+		id = relic_index_first_since(index, atom->relation, probe,
+		    view->first);
+	else
+		id = relic_index_first(index, atom->relation, probe);
 	if (id == RELIC_ID_NONE || id >= view->end)
 		return (false);
 
@@ -2154,8 +2164,9 @@ emit_head(relic_scratch_t *scratch, const relic_op_atom_t *atom)
  *
  * A test, an ASSIGN and an AGGREGATE succeed at most once, so resuming one
  * always finds nothing more.
- * An ANTI_MEMBER is its probe inverted: the binding survives when no tuple
- * agrees with it on the columns it reads.  The EMIT is not asked here: the
+ * An EXISTS is its probe, and lets the binding through once when some tuple
+ * agrees with it on the columns it reads, however many do.  An ANTI_MEMBER
+ * is its probe inverted: the binding survives when no tuple does.  The EMIT is not asked here: the
  * run loop appends its tuple, and treats it as never matching, so nothing
  * below it is ever entered and nothing backtracks into it.
  */
@@ -2172,6 +2183,10 @@ step(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		if (resume)
 			return (false);
 		return (step_member(scratch, &op->u.atom, &state->view));
+	case RELIC_OP_EXISTS:
+		if (resume)
+			return (false);
+		return (step_probe(scratch, &op->u.atom, &state->view));
 	case RELIC_OP_ANTI_MEMBER:
 		if (resume)
 			return (false);

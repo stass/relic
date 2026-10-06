@@ -59,6 +59,7 @@ enum relic_op_kind {
 	RELIC_OP_SCAN,		/* every tuple of a relation, matching and binding */
 	RELIC_OP_LOOKUP,	/* the tuples an index finds for a bound key */
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
+	RELIC_OP_EXISTS,	/* does some tuple agree on the bound columns? */
 	RELIC_OP_ANTI_MEMBER,	/* does no tuple agree on the named columns? */
 	RELIC_OP_FILTER,	/* does a comparison of two bound values hold? */
 	RELIC_OP_ASSIGN,	/* bind a slot to a value computed from bound ones */
@@ -75,17 +76,19 @@ identifiers; `LOOKUP` walks the identifiers an index holds for a key. Each
 success leaves new bindings in the frame, and asking again moves on to the next
 candidate.
 
-**Tests** succeed at most once. `MEMBER`, `ANTI_MEMBER` and `FILTER` read only
-bound values, bind nothing, and either let the binding through or reject it.
-`EMIT` is a test that always rejects: it derives the head tuple, which the
-evaluation inserts in batches, and then reports that there is nothing further
-down this path, which is what makes it the last operation of every plan.
+**Tests** succeed at most once. `MEMBER`, `EXISTS`, `ANTI_MEMBER` and `FILTER`
+read only bound values, bind nothing, and either let the binding through or
+reject it. `EMIT` is a test that always rejects: it derives the head tuple,
+which the evaluation inserts in batches, and then reports that there is nothing
+further down this path, which is what makes it the last operation of every
+plan.
 
 | Operation | Reads | Binds | Succeeds |
 | --- | --- | --- | --- |
 | `SCAN` | bound columns, constants | unbound columns | once per matching tuple |
 | `LOOKUP` | the key columns, then as `SCAN` | unbound columns | once per matching tuple |
 | `MEMBER` | every column | nothing | once or never |
+| `EXISTS` | every column that is not `ANY` | nothing | once or never |
 | `ANTI_MEMBER` | every column that is not `_` | nothing | once or never |
 | `FILTER` | both operands | nothing | once or never |
 | `ASSIGN` | its expression's slots | its variable's slot | once or never |
@@ -102,13 +105,13 @@ it names only, so its `ANTI_MEMBER` carries a key as a `LOOKUP` does and
 probes the index on those columns, or asks whether the relation is empty
 when it names none, `specs/design-negation.md` section 4.
 
-`EXISTS` is the same probe with the answer kept, for a positive literal
-that binds nothing the rest of the rule reads: its unbound columns hold
-`_` or a variable the rule mentions once, and it succeeds at most once
-rather than once per tuple that agrees on its bound columns. It widens the
-first case of section 5 from "every argument is bound" to "the literal
-binds nothing", `MEMBER` being the case where the key is every column;
-`specs/design-existence.md` specifies it.
+`EXISTS` is the same probe with the answer kept, read through the view its
+literal reads, for a positive literal that binds nothing the rest of the
+rule reads: its unbound columns hold `_` or a variable the rule mentions
+once, and it succeeds at most once rather than once per tuple that agrees
+on its bound columns. It and `MEMBER` are the first case of section 5, a
+literal that binds nothing, `MEMBER` being the case where the key is every
+column; `specs/design-existence.md` specifies it.
 
 `ASSIGN` is the other test that binds. An equality whose one side is a
 bare variable not yet bound, and whose other side reads only bound slots,
@@ -160,10 +163,11 @@ the naive evaluator reads `all`, the relation as it stood when the plan
 started. In a semi-naive delta variant an operation over a member of the
 component being evaluated reads one of three narrower views derived from the
 member's delta: `delta`, `old` or `current`. A `SCAN` walks the view's range,
-a `LOOKUP` the part of its key's chain inside it, and a `MEMBER` holds only
-when the tuple it names lies inside it. An `ANTI_MEMBER` reads and an `EMIT`
-writes through `all`, an `AGGREGATE` folds the relation it reads, a
-group's or an atom's own, through `all`, and a `FILTER` reads no relation.
+a `LOOKUP` the part of its key's chain inside it, a `MEMBER` holds only when
+the tuple it names lies inside it, and an `EXISTS` only when some tuple that
+agrees on its key does. An `ANTI_MEMBER` reads and an `EMIT` writes through
+`all`, an `AGGREGATE` folds the relation it reads, a group's or an atom's
+own, through `all`, and a `FILTER` reads no relation.
 `specs/design-evaluation-cost.md` section 3 defines the views and what each
 operation does under each; section 5.3 below says how a variant's are chosen.
 
@@ -196,11 +200,11 @@ The same variable twice in one atom, `edge(X, X)`, is two terms: the first
 column binds `X` and the second requires the value it just bound. The executor
 processes columns left to right, so that falls out without a case of its own.
 
-`BIND` occurs only in a generator. `ANY` occurs in a generator and in an
-`ANTI_MEMBER`, for a `_` its probe does not read, and neither ever occurs in
-a key column. Every other test reads bound values and constants and nothing
-else, and `EMIT` reads only what the rule's safety guarantees is bound by
-the time it runs.
+`BIND` occurs only in a generator. `ANY` occurs in a generator, in an
+`ANTI_MEMBER` and in an `EXISTS`, for a `_` or a dead variable the operation
+does not read, and neither ever occurs in a key column. Every other test
+reads bound values and constants and nothing else, and `EMIT` reads only
+what the rule's safety guarantees is bound by the time it runs.
 
 **A slot is of one of three kinds**, fixed by the operation that binds it.
 A domain slot's frame entry is a domain identifier. A number slot, bound
@@ -224,11 +228,16 @@ Whatever order a planner chooses, it walks it keeping one `uint64_t`: the set
 of slots bound so far. Each literal is then turned into an operation by one
 rule, applied at the point the literal is placed:
 
-* a **positive literal** whose every argument is a constant or a bound slot
-  becomes `MEMBER`;
+* a **positive literal that binds nothing**, whose every argument is a
+  constant, a bound slot, `_` or a **dead variable** -- one the rule
+  mentions exactly once, head included, in a positive literal -- becomes
+  `MEMBER` when every column is bound and `EXISTS` otherwise,
+  `specs/design-existence.md` section 4;
 * any other positive literal becomes a generator -- `SCAN`, or `LOOKUP` when
   some of its columns are bound and an index covers them -- and adds its
-  variables to the bound set;
+  variables to the bound set but for its dead ones. A dead variable binds
+  nothing, here or in a test: nothing else in the rule reads it, so its
+  column is an `ANY` term, as a `_` is;
 * a **comparison** becomes `FILTER`, and a **negated literal** becomes
   `ANTI_MEMBER`. Neither binds anything, so each must be placed where every
   slot it reads is already bound;
@@ -270,8 +279,9 @@ join, are exactly as written.
 Each later stage replaces a piece of 5.1 and leaves the rest:
 
 * **semi-naive variants** read each member of the component through a view,
-  and the delta literal becomes a `SCAN`, `LOOKUP` or `MEMBER` of the delta
-  by the rule of section 5, wherever the order places it (section 5.3);
+  and the delta literal becomes a `SCAN`, `LOOKUP`, `MEMBER` or `EXISTS` of
+  the delta by the rule of section 5, wherever the order places it (section
+  5.3);
 * **secondary indexes** turn a generator with bound columns into a `LOOKUP`;
 * **greedy ordering** chooses which positive literal to place next by bound
   arguments, estimated cardinality and index availability, breaking ties by
@@ -294,11 +304,14 @@ the previous round. It is planned by the same walk, with two differences:
   when it is written before the delta literal and `current` when it is
   written after it, and a literal over a complete relation reads `all`;
 * the delta literal is ordered with the other positive literals and becomes
-  the operation its bound columns give it where it is placed, by the rule of
+  the operation its columns give it where it is placed, by the rule of
   section 5: a `SCAN` of the delta, a `LOOKUP` of the delta, whose walk
   starts, through the key's frontier, at the key's first tuple inside the
-  delta (`specs/design-index.md` section 4.1), or a `MEMBER` that holds only
-  for a tuple of the delta.
+  delta (`specs/design-index.md` section 4.1), a `MEMBER` that holds only
+  for a tuple of the delta, or an `EXISTS` that holds when some tuple of the
+  delta agrees on its key, its probe beginning where a `LOOKUP` of the
+  delta on the same key begins its walk (`specs/design-existence.md`
+  section 4).
 
 The view decides which tuples a literal can match, and the order decides
 only what each binding costs, so the two are chosen separately.
@@ -314,8 +327,8 @@ enum relic_view {
 struct relic_op_atom {
 	relic_relation_t	*relation;
 	relic_plan_term_t	*terms;
-	uint32_t		 key_mask;		/* LOOKUP only */
-	uint32_t		 index_position;	/* LOOKUP only */
+	uint32_t		 key_mask;		/* LOOKUP and the probes */
+	uint32_t		 index_position;	/* LOOKUP and the probes */
 	enum relic_view		 view;
 };
 ```
@@ -324,7 +337,8 @@ A `LOOKUP` names its index by position in its relation's list of indexes and
 records the key columns it builds the key from, per
 `specs/design-index.md` section 7; its key columns are `CONSTANT` or `BOUND`
 terms like any other column, and its other columns are processed as a
-`SCAN`'s are.
+`SCAN`'s are. The probes, `ANTI_MEMBER` and `EXISTS`, record their key in
+the same two fields, `specs/design-negation.md` section 4.
 
 The plan records *which view* an operation reads and not *which tuples* that
 is. The range changes every round while the plan does not, so the evaluation

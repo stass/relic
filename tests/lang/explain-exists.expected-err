@@ -1,0 +1,34 @@
+stratum 0, component 0: leaves/1
+    rule leaves(X) :- node(X), edge(X, _).
+        scan node(X)
+        exists edge(X, _) key={0}
+        emit leaves(X)
+stratum 0, component 1: named/1
+    rule named(X) :- node(X), edge(X, _To).
+        scan node(X)
+        exists edge(X, _) key={0}
+        emit named(X)
+stratum 0, component 2: nonempty/1
+    rule nonempty(X) :- node(X), edge(_, _).
+        scan node(X)
+        exists edge(_, _)
+        emit nonempty(X)
+stratum 0, component 3 (recursive): path/2
+    rule path(X, Y) :- edge(X, Y).
+        scan edge(X, Y)
+        emit path(X, Y)
+    rule path(X, Z) :- path(Z, _), path(X, Y), edge(Y, Z).
+        delta path(Z, _):
+            scan edge(Y, Z)
+            exists delta path(Z, _) key={0}
+            lookup path(X, Y) key={1}
+            emit path(X, Z)
+        delta path(X, Y):
+            scan edge(Y, Z)
+            lookup delta path(X, Y) key={1}
+            exists old path(Z, _) key={0}
+            emit path(X, Z)
+query $q0(X) :- node(X), edge(_, X).
+    scan node(X)
+    exists edge(_, X) key={1}
+    stream $q0(X)

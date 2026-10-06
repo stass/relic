@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd October 1, 2026
+.Dd October 6, 2026
 .Dt RELIC 3
 .Os
 .Sh NAME
@@ -326,7 +326,8 @@ holds switches, zero by default.
 .Dv RELIC_F_NO_INDEX ,
 .Dv RELIC_F_NO_REORDER ,
 .Dv RELIC_F_NO_MAGIC ,
-.Dv RELIC_F_NO_STREAM
+.Dv RELIC_F_NO_STREAM ,
+.Dv RELIC_F_NO_EXISTS
 and
 .Dv RELIC_F_PARALLEL_ALWAYS
 select alternative evaluation strategies for testing, and
@@ -358,6 +359,14 @@ a query at most once each time it is answered;
 gather every query's answer whole before delivering its first row, even a
 query whose plan derives each row once and could deliver its rows as it
 derives them; the rows and their order are the same;
+.It Dv RELIC_F_NO_EXISTS
+plan a positive literal that binds nothing the rest of its rule reads, its
+other arguments
+.Ql _
+or variables the rule mentions nowhere else, as a scan or a lookup that
+continues the join once per tuple it matches, rather than as a test of
+whether some tuple agrees with its bound arguments, which continues it at
+most once;
 .It Dv RELIC_F_PARALLEL_ALWAYS
 defer the insertions of every round of evaluation that reads none of the
 relations it derives except as they stood when it began, which is every

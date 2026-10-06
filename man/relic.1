@@ -2,7 +2,7 @@
 .\"
 .\" SPDX-License-Identifier: BSD-2-Clause
 .\"
-.Dd October 1, 2026
+.Dd October 6, 2026
 .Dt RELIC 1
 .Os
 .Sh NAME
@@ -537,6 +537,13 @@ variables, which otherwise is folded over the atom's relation where it
 stands;
 .It Cm naive
 evaluate recursion by the naive fixed point;
+.It Cm no-exists
+plan an atom that binds nothing the rest of its rule reads, its other
+arguments
+.Ql _
+or variables the rule names nowhere else, as a scan or a lookup that
+continues the join once per tuple it matches, rather than as a test that
+continues it at most once;
 .It Cm no-index
 build no index, scanning instead;
 .It Cm no-magic

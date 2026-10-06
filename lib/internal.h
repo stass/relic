@@ -1332,9 +1332,13 @@ uint32_t relic_plan_bound_columns(const relic_atom_t *atom, uint16_t arity,
  * in `bound` are bound: every variable of a positive literal, the variable
  * of an equality that assigns it there, the result of an aggregate that
  * binds it there, and nothing for any other test.
- * The planner decides what each literal binds through this, and so does the
- * Magic rewrite, walking a body in the order relic_plan_order() gave, so the
- * two cannot disagree about what is bound where.
+ * The planner decides what each literal binds through this, less the
+ * rule's dead variables -- those the rule mentions once, in a positive
+ * literal, which nothing reads and so no literal binds -- and the Magic
+ * rewrite reads it whole, walking a body in the order relic_plan_order()
+ * gave.  The two cannot disagree about what is bound where any literal
+ * reads it: a dead variable is held by no literal but its own, so it is in
+ * no call's bound columns and in no later literal's.
  */
 uint64_t relic_plan_literal_binds(const relic_t *ctx,
 	    const relic_literal_t *literal, uint64_t bound);
@@ -1368,10 +1372,10 @@ bool	 relic_plan_folds(const relic_plan_t *plan);
 
 /*
  * The atom of an operation over a relation's tuple -- a SCAN, a LOOKUP, a
- * MEMBER, an ANTI_MEMBER or the EMIT -- or NULL for a FILTER, an ASSIGN or
- * an AGGREGATE, whose union holds no atom.  A question about the relation an
- * operation reads or writes asks this rather than the union, so that an
- * operation kind over no relation is answered by construction.
+ * MEMBER, an EXISTS, an ANTI_MEMBER or the EMIT -- or NULL for a FILTER, an
+ * ASSIGN or an AGGREGATE, whose union holds no atom.  A question about the
+ * relation an operation reads or writes asks this rather than the union, so
+ * that an operation kind over no relation is answered by construction.
  */
 const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
 
