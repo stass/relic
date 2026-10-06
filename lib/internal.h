@@ -1137,6 +1137,10 @@ const char *relic_source_name(relic_arena_t *arena, const char *name);
  * the query.
  * relic_pred_identify() writes the predicate itself, generated or not, for
  * an internal error.
+ *
+ * relic_pred_table_bytes() is what the table occupies -- its entries, its
+ * index, the array and the index of the source names, and the name store
+ * -- which the memory account counts as `predtab_bytes`.
  */
 #define	RELIC_QUERY_DESCRIPTION	"the query"
 
@@ -1147,6 +1151,7 @@ int	 relic_pred_intern(relic_t *ctx, const char *name, size_t length,
 	    relic_pred_id_t *idp);
 const relic_pred_t *relic_pred_of(const relic_t *ctx, relic_pred_id_t id);
 size_t	 relic_pred_count(const relic_t *ctx);
+size_t	 relic_pred_table_bytes(const relic_t *ctx);
 void	 relic_pred_name_head(relic_t *ctx, relic_pred_id_t id);
 void	 relic_pred_name_generated(relic_t *ctx, relic_pred_id_t id,
 	    relic_pred_id_t stands_for);

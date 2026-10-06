@@ -38,6 +38,28 @@
 #define	SOURCE_NAMES		100
 #define	LONG_SOURCE		(64 * 1024)
 #define	SCENARIO_ARITY		"no predicate has more than 32 arguments"
+#define	SCENARIO_LIMIT		"the memory limit bounds the whole table"
+
+/*
+ * The bytes the limit scenario lets the table grow by, small enough that
+ * the names it refuses at are a fraction of what their entries, slots and
+ * source names would hold; the most predicates it tries before deciding
+ * the limit refuses nothing; and the predicates it names before the limit
+ * is set when it reads each from a source of its own, more than the
+ * sources the limit admits.
+ */
+#define	TABLE_LIMIT		(256 * 1024)
+#define	TABLE_TRIES		1000000
+#define	TABLE_NAMED		65536
+
+/*
+ * Which step of naming a predicate and reading it the table refused.
+ */
+enum refusal {
+	REFUSED_NONE,
+	REFUSED_INTERN,
+	REFUSED_REFERENCE
+};
 
 /*
  * How many predicates the growth scenario interns.  Enough to make the
@@ -56,6 +78,11 @@ static void	 a_source_name_is_kept_once_and_whole(void);
 static void	 a_predicate_is_defined_by_what_derives_it(void);
 static void	 the_table_stays_exact_as_it_grows(void);
 static void	 no_predicate_has_more_than_32_arguments(void);
+static size_t	 table_bytes(const relic_t *ctx);
+static void	 short_name(size_t n, char *buffer, size_t size);
+static enum refusal intern_and_read(relic_t *ctx, const char *name,
+		    const relic_location_t *where, relic_pred_id_t *idp);
+static void	 the_limit_bounds_the_table(bool distinct_sources);
 
 static relic_t *
 context(void)
@@ -268,7 +295,7 @@ a_source_name_is_kept_once_and_whole(void)
 		return;
 	}
 
-	ctx->account.limit = ctx->account.name_bytes + 1;
+	ctx->account.limit = ctx->account.predtab_bytes + 1;
 	check(relic_pred_reference(ctx, id, &where) != 0, SCENARIO_SOURCES,
 	    "a source name the limit refuses fails the reference");
 	check(!pred->referenced, SCENARIO_SOURCES,
@@ -279,11 +306,10 @@ a_source_name_is_kept_once_and_whole(void)
 	    pred->referenced && pred->referenced_at.file != NULL &&
 	    strcmp(pred->referenced_at.file, long_name) == 0,
 	    SCENARIO_SOURCES, "the reference made again records the name");
-	checkf(ctx->account.name_bytes == relic_arena_total_bytes(
-	    &ctx->program.predicates.names), SCENARIO_SOURCES,
-	    "the account should count the %zu bytes the names hold, not %zu",
-	    relic_arena_total_bytes(&ctx->program.predicates.names),
-	    ctx->account.name_bytes);
+	checkf(ctx->account.predtab_bytes == table_bytes(ctx),
+	    SCENARIO_SOURCES, "the account should count the %zu bytes the "
+	    "table holds, not %zu", table_bytes(ctx),
+	    ctx->account.predtab_bytes);
 
 	free(long_name);
 	relic_destroy(ctx);
@@ -482,6 +508,180 @@ no_predicate_has_more_than_32_arguments(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * What the predicate table holds, measured from its parts rather than read
+ * from the account, so that a part the account leaves out shows: the
+ * entries and the source names' array at their capacity, the two indexes,
+ * and the name store.
+ */
+static size_t
+table_bytes(const relic_t *ctx)
+{
+	const relic_predtab_t *table;
+
+	table = &ctx->program.predicates;
+
+	return (table->capacity * sizeof(*table->entries) +
+	    relic_idtab_bytes(&table->index) +
+	    table->source_capacity * sizeof(*table->sources) +
+	    relic_idtab_bytes(&table->source_index) +
+	    relic_arena_total_bytes(&table->names));
+}
+
+/*
+ * The n-th shortest name over the lowercase letters: "a" to "z", then "aa",
+ * and so on, so that many distinct names hold as few bytes as they can.
+ * Each step takes the lowest letter as n % 26 and then subtracts one from
+ * the quotient before the next, because the names one letter longer begin
+ * after all the shorter ones rather than at a leading 'a' standing for
+ * zero: this is n written in bijective base 26.
+ */
+static void
+short_name(size_t n, char *buffer, size_t size)
+{
+	char reversed[16];
+	size_t length;
+	size_t i;
+
+	length = 0;
+	for (;;) {
+		reversed[length++] = (char)('a' + n % 26);
+		n = n / 26;
+		if (n == 0 || length == sizeof(reversed))
+			break;
+		n--;
+	}
+
+	for (i = 0; i < length && i + 1 < size; i++)
+		buffer[i] = reversed[length - 1 - i];
+	buffer[i] = '\0';
+}
+
+/*
+ * Intern a predicate of no arguments and record that `where` reads it, as
+ * compiling an atom does, and say which of the two the table refused.
+ */
+static enum refusal
+intern_and_read(relic_t *ctx, const char *name, const relic_location_t *where,
+    relic_pred_id_t *idp)
+{
+	if (relic_pred_intern(ctx, name, strlen(name), 0, where, idp) != 0)
+		return (REFUSED_INTERN);
+	if (relic_pred_reference(ctx, *idp, where) != 0)
+		return (REFUSED_REFERENCE);
+
+	return (REFUSED_NONE);
+}
+
+/*
+ * A caller naming predicates without end, or reading them from sources
+ * without end, is refused at the memory limit, which counts all the table
+ * holds: each predicate's entry and index slot as well as its name, and
+ * each source's slot and name.  Short names are the case that matters,
+ * since an entry outweighs its name many times over.
+ *
+ * Naming new predicates, all read from one source, is refused when the
+ * table interns one, and the refused predicate is not in the table.
+ * Reading predicates named before the limit was set, each from a source of
+ * its own, is refused when the table keeps a source name, and the refused
+ * predicate is left unread.  Either succeeds once the limit admits it.
+ */
+static void
+the_limit_bounds_the_table(bool distinct_sources)
+{
+	char name[16];
+	char source[16];
+	relic_location_t where;
+	relic_pred_id_t id;
+	relic_pred_id_t again;
+	relic_t *ctx;
+	enum refusal expected;
+	enum refusal refused;
+	size_t count_before_attempt;
+	size_t limit;
+	size_t n;
+
+	ctx = context();
+	if (ctx == NULL)
+		return;
+
+	bzero(&where, sizeof(where));
+	where.file = "test.dl";
+	where.line = 1;
+	where.column = 1;
+
+	expected = REFUSED_INTERN;
+	if (distinct_sources) {
+		expected = REFUSED_REFERENCE;
+		for (n = 0; n < TABLE_NAMED; n++) {
+			short_name(n, name, sizeof(name));
+			if (relic_pred_intern(ctx, name, strlen(name), 0,
+			    &where, &id) != 0) {
+				check(false, SCENARIO_LIMIT,
+				    "the predicates are named");
+				relic_destroy(ctx);
+				return;
+			}
+		}
+	}
+
+	limit = table_bytes(ctx) + TABLE_LIMIT;
+	ctx->account.limit = limit;
+	refused = REFUSED_NONE;
+	count_before_attempt = 0;
+	for (n = 0; n < TABLE_TRIES && refused == REFUSED_NONE; n++) {
+		short_name(n, name, sizeof(name));
+		if (distinct_sources) {
+			short_name(n, source, sizeof(source));
+			where.file = source;
+		}
+
+		count_before_attempt = relic_pred_count(ctx);
+		refused = intern_and_read(ctx, name, &where, &id);
+	}
+
+	checkf(refused == expected, SCENARIO_LIMIT, "%s should be refused "
+	    "at the limit, and %s was refused", expected == REFUSED_INTERN ?
+	    "interning" : "reading", refused == REFUSED_NONE ? "nothing" :
+	    refused == REFUSED_INTERN ? "interning" : "reading");
+	checkf(table_bytes(ctx) <= limit, SCENARIO_LIMIT,
+	    "a table of %zu predicates holds %zu bytes under a limit of %zu",
+	    relic_pred_count(ctx), table_bytes(ctx), limit);
+	check(relic_error_class(ctx) == RELIC_ERROR_LIMIT, SCENARIO_LIMIT,
+	    "the refusal is reported as the limit");
+	checkf(ctx->account.predtab_bytes == table_bytes(ctx), SCENARIO_LIMIT,
+	    "the account should count the %zu bytes the table holds, not %zu",
+	    table_bytes(ctx), ctx->account.predtab_bytes);
+
+	if (refused == REFUSED_INTERN)
+		checkf(relic_pred_count(ctx) == count_before_attempt,
+		    SCENARIO_LIMIT, "a refused predicate should not be "
+		    "interned, and the table holds %zu, not %zu",
+		    relic_pred_count(ctx), count_before_attempt);
+	if (refused == REFUSED_REFERENCE)
+		check(!relic_pred_of(ctx, id)->referenced, SCENARIO_LIMIT,
+		    "a refused reference should leave the predicate unread");
+	if (refused == REFUSED_NONE) {
+		relic_destroy(ctx);
+		return;
+	}
+
+	ctx->account.limit = 0;
+	check(intern_and_read(ctx, name, &where, &id) == REFUSED_NONE &&
+	    relic_pred_of(ctx, id)->referenced, SCENARIO_LIMIT,
+	    "the refused step succeeds once the limit admits it");
+	check(relic_pred_intern(ctx, name, strlen(name), 0, &where,
+	    &again) == 0 && again == id, SCENARIO_LIMIT,
+	    "the predicate is found again under its identifier");
+	if (refused == REFUSED_INTERN)
+		checkf(relic_pred_count(ctx) == count_before_attempt + 1,
+		    SCENARIO_LIMIT, "the table should hold %zu predicates, "
+		    "not %zu", count_before_attempt + 1,
+		    relic_pred_count(ctx));
+
+	relic_destroy(ctx);
+}
+
 int
 main(void)
 {
@@ -492,6 +692,8 @@ main(void)
 	a_predicate_describes_itself_for_a_message();
 	the_table_stays_exact_as_it_grows();
 	no_predicate_has_more_than_32_arguments();
+	the_limit_bounds_the_table(false);
+	the_limit_bounds_the_table(true);
 
 	return (check_summary("test_pred"));
 }

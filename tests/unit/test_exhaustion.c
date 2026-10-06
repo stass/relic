@@ -1640,6 +1640,12 @@ a_check_that_ran_out_of_memory_can_be_retried(void)
 		checkf(status == 0 || out_of_memory(ctx), SCENARIO_CHECK,
 		    "a check that failed should fail out of memory, with "
 		    "allocation %ld refused", budget);
+		checkf(ctx->account.predtab_bytes ==
+		    relic_pred_table_bytes(ctx), SCENARIO_CHECK,
+		    "the account should hold the %zu bytes the predicate "
+		    "table holds, not %zu, with allocation %ld refused",
+		    relic_pred_table_bytes(ctx), ctx->account.predtab_bytes,
+		    budget);
 
 		if (status != 0) {
 			refused++;

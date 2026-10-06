@@ -933,7 +933,7 @@ a_rewrites_names_are_charged_to_the_limit(void)
 	char *program;
 	char *text;
 	unsigned int bound;
-	size_t names_bytes;
+	size_t table_bytes;
 	size_t rows;
 	bool within;
 
@@ -970,9 +970,8 @@ a_rewrites_names_are_charged_to_the_limit(void)
 			query = NULL;
 		}
 
-		names_bytes = relic_arena_total_bytes(
-		    &ctx->program.predicates.names);
-		if (names_bytes > ctx->account.limit)
+		table_bytes = relic_pred_table_bytes(ctx);
+		if (table_bytes > ctx->account.limit)
 			within = false;
 		if (query == NULL)
 			break;
@@ -980,8 +979,8 @@ a_rewrites_names_are_charged_to_the_limit(void)
 	}
 
 	checkf(within, SCENARIO_GENERATED,
-	    "the names should stay within the %zu-byte limit, and hold %zu",
-	    ctx->account.limit, names_bytes);
+	    "the predicate table should stay within the %zu-byte limit, and "
+	    "holds %zu", ctx->account.limit, table_bytes);
 	reported = relic_error(ctx);
 	checkf(query != NULL || (reported != NULL &&
 	    strncmp(reported, "limit exceeded: memory=", 23) == 0),
@@ -1088,6 +1087,11 @@ a_program_keeps_nothing_of_its_text(void)
  * for memory before its check sweeps for undefined predicates leaves the
  * warning to the next check, which comes after the query is gone and the
  * caller's buffer is reused; the warning still names the query's source.
+ *
+ * The program is checked before the limit is set, so that its rule's
+ * reference has already made the predicate table room for a source name:
+ * recording the query's reference then grows nothing, and the limit refuses
+ * the string the query interns after it.
  */
 static void
 a_warning_names_a_destroyed_querys_source(void)
@@ -1097,9 +1101,12 @@ a_warning_names_a_destroyed_querys_source(void)
 	diag_log_t log;
 	relic_t *ctx;
 
-	ctx = limited_context(0, "p(0).\n", &log);
+	ctx = context_with("p(0).\nq(X) :- p(X).\n", &log);
 	if (ctx == NULL)
 		return;
+	check(relic_check(ctx) == 0, SCENARIO_SOURCE, "the program checks");
+	ctx->account.limit = relic_value_storage_bytes(ctx) +
+	    ctx->account.predtab_bytes;
 
 	snprintf(source_name, sizeof(source_name), "request.dl");
 	query = relic_query_prepare(ctx, source_name,
@@ -1335,9 +1342,9 @@ a_query_runs_only_in_its_own_context(void)
 /*
  * A context holding a program, under a memory limit of `allowance` bytes
  * past what its tables -- the integer table, the symbol pool its constants
- * fill and the name store its predicates' names fill -- hold once it is
+ * fill and the predicate table its predicates fill -- hold once it is
  * loaded.  The limit is set after the load, so that it measures what the
- * scenarios exercise and not the few kilobytes a pool or a name store
+ * scenarios exercise and not the few kilobytes a pool or a predicate table
  * holding a handful of entries takes, which a scenario's small limit would
  * otherwise be spent on.
  */
@@ -1361,7 +1368,7 @@ limited_context(size_t allowance, const char *program, diag_log_t *log)
 		return (NULL);
 	}
 	ctx->account.limit = relic_value_storage_bytes(ctx) +
-	    ctx->account.name_bytes + allowance;
+	    ctx->account.predtab_bytes + allowance;
 
 	return (ctx);
 }

@@ -3594,8 +3594,7 @@ relic_stats(relic_t *ctx, relic_stats_t *stats)
 
 	stats->tuples = relic_relation_total_tuples(ctx);
 	stats->storage_bytes = relic_relation_total_bytes(ctx) +
-	    relic_value_storage_bytes(ctx) +
-	    relic_arena_total_bytes(&ctx->program.predicates.names);
+	    relic_value_storage_bytes(ctx) + relic_pred_table_bytes(ctx);
 	stats->symbol_values = relic_value_count_of(ctx, RELIC_SYMBOL);
 	stats->string_values = relic_value_count_of(ctx, RELIC_STRING);
 	stats->integer_values = relic_value_count_of(ctx, RELIC_INTEGER);

@@ -42,19 +42,53 @@
  */
 #define	RELIC_PRED_MAX	(UINT32_MAX - 1u)
 
+/*
+ * The bytes the table occupies, part by part: the entries and the source
+ * names' array at their capacity, the index of each, and the name store.
+ * A growth is projected by replacing the parts it grows, so the measure and
+ * every projection name the parts in one place.
+ */
+typedef struct predtab_size predtab_size_t;
+
+struct predtab_size {
+	size_t	entries;
+	size_t	index;
+	size_t	sources;
+	size_t	source_index;
+	size_t	names;
+};
+
 static relic_pred_t *pred_at(const relic_predtab_t *table,
 		    relic_pred_id_t id);
 static uint32_t	 pred_hash(uint64_t seed, const char *name, size_t length,
 		    uint16_t arity);
 static uint32_t	 pred_rehash(uint32_t id, void *ctx);
+static void	 measure_table(const relic_predtab_t *table,
+		    predtab_size_t *size);
+static size_t	 size_total(const predtab_size_t *size);
+static size_t	 names_after_copy(const relic_arena_t *names, size_t length);
+static size_t	 bytes_with_predicate(const relic_predtab_t *table,
+		    size_t length);
+static size_t	 bytes_with_source(const relic_predtab_t *table,
+		    size_t length);
+static bool	 admit_growth(relic_t *ctx, size_t projected_bytes);
+static void	 account_table(relic_t *ctx);
+static const char *copy_name(relic_arena_t *names, const char *bytes,
+		    size_t length);
+static const char *grow_for_predicate(relic_predtab_t *table,
+		    const char *name, size_t length);
+static const char *grow_for_source(relic_predtab_t *table, const char *name,
+		    size_t length);
+static const char *room_for_predicate(relic_t *ctx, const char *name,
+		    size_t length);
+static const char *room_for_source(relic_t *ctx, const char *name,
+		    size_t length);
 static int	 pred_store(relic_t *ctx, const char *name, size_t length,
 		    uint16_t arity, uint32_t hash,
 		    const relic_location_t *where, relic_pred_id_t *idp);
 static relic_pred_t *pred_entry(relic_t *ctx, relic_pred_id_t id);
 static const char *describe_aggregate_group(const relic_t *ctx,
 		    const relic_pred_t *group, char *buffer, size_t size);
-static const char *keep_name(relic_t *ctx, const char *bytes,
-		    size_t length);
 static const char *keep_source_name(relic_t *ctx, const char *name);
 static uint32_t	 source_rehash(uint32_t position, void *ctx);
 static const char *write_pred(const relic_t *ctx, relic_pred_id_t id,
@@ -123,38 +157,153 @@ pred_rehash(uint32_t id, void *ctx)
 	return (pred_at(table, id)->hash);
 }
 
+static void
+measure_table(const relic_predtab_t *table, predtab_size_t *size)
+{
+	size->entries = relic_saturating_product(table->capacity,
+	    sizeof(*table->entries));
+	size->index = relic_idtab_bytes(&table->index);
+	size->sources = relic_saturating_product(table->source_capacity,
+	    sizeof(*table->sources));
+	size->source_index = relic_idtab_bytes(&table->source_index);
+	size->names = relic_arena_total_bytes(&table->names);
+}
+
+static size_t
+size_total(const predtab_size_t *size)
+{
+	size_t total;
+
+	total = relic_saturating_sum(size->entries, size->index);
+	total = relic_saturating_sum(total, size->sources);
+	total = relic_saturating_sum(total, size->source_index);
+
+	return (relic_saturating_sum(total, size->names));
+}
+
 /*
- * Copy `length` bytes into the name store, terminated, and return the copy,
- * or NULL when the memory limit or the allocator refused it, for the caller
- * to report through relic_diag_no_memory(), which names the limit when the
- * limit refused.
- *
- * The store is charged as the symbol pool is: a copy that would grow it is
- * admitted first, against the whole total, and the account is then set to
- * what the store holds, so the count cannot drift from it.  The store lives
- * as long as the context, so an allocator's refusal is cleared: left
- * standing, it would refuse every name after this one.
+ * What the predicate table occupies, which the memory account counts as
+ * `predtab_bytes`.
  */
-static const char *
-keep_name(relic_t *ctx, const char *bytes, size_t length)
+size_t
+relic_pred_table_bytes(const relic_t *ctx)
+{
+	predtab_size_t size;
+
+	measure_table(&ctx->program.predicates, &size);
+
+	return (size_total(&size));
+}
+
+/*
+ * What the name store would occupy once it held a copy of `length` bytes
+ * with its terminator, as copy_name() makes it.
+ */
+static size_t
+names_after_copy(const relic_arena_t *names, size_t length)
 {
 	relic_arena_projection_t projected;
-	relic_arena_t *names;
-	size_t held_bytes;
-	char *copy;
-
-	names = &ctx->program.predicates.names;
-	held_bytes = relic_arena_total_bytes(names);
 
 	relic_arena_project(names, &projected);
 	relic_arena_project_alloc(&projected, length + 1);
-	if (projected.total_bytes != held_bytes &&
-	    !relic_account_admit(&ctx->account, held_bytes,
-	    projected.total_bytes))
-		return (NULL);
+
+	return (projected.total_bytes);
+}
+
+/*
+ * What the table would occupy once grow_for_predicate() had made room for a
+ * predicate named by `length` bytes: an entry, a slot in the index and the
+ * name's copy.  An array that could not grow is projected as more than
+ * anything could hold.
+ */
+static size_t
+bytes_with_predicate(const relic_predtab_t *table, size_t length)
+{
+	predtab_size_t size;
+	size_t capacity;
+
+	capacity = relic_grow_array_capacity(table->capacity,
+	    table->count + 1);
+	if (capacity == 0)
+		return (SIZE_MAX);
+
+	measure_table(table, &size);
+	size.entries = relic_saturating_product(capacity,
+	    sizeof(*table->entries));
+	size.index = relic_idtab_bytes_after_reserve(&table->index, 1);
+	size.names = names_after_copy(&table->names, length);
+
+	return (size_total(&size));
+}
+
+/*
+ * What the table would occupy once grow_for_source() had made room for a
+ * source name of `length` bytes: a place in the array of source names, a
+ * slot in their index and the name's copy.
+ */
+static size_t
+bytes_with_source(const relic_predtab_t *table, size_t length)
+{
+	predtab_size_t size;
+	size_t capacity;
+
+	capacity = relic_grow_array_capacity(table->source_capacity,
+	    table->source_count + 1);
+	if (capacity == 0)
+		return (SIZE_MAX);
+
+	measure_table(table, &size);
+	size.sources = relic_saturating_product(capacity,
+	    sizeof(*table->sources));
+	size.source_index = relic_idtab_bytes_after_reserve(
+	    &table->source_index, 1);
+	size.names = names_after_copy(&table->names, length);
+
+	return (size_total(&size));
+}
+
+/*
+ * Whether the memory limit admits the table growing to `projected_bytes`,
+ * asked against the whole total.  A growth the table has room for adds
+ * nothing and is not asked.  A refusal is recorded on the account, so that
+ * the caller's relic_diag_no_memory() reports the limit.
+ */
+static bool
+admit_growth(relic_t *ctx, size_t projected_bytes)
+{
+	size_t held_bytes;
+
+	held_bytes = relic_pred_table_bytes(ctx);
+	if (projected_bytes == held_bytes)
+		return (true);
+
+	return (relic_account_admit(&ctx->account, held_bytes,
+	    projected_bytes));
+}
+
+/*
+ * Set the account's count of the table to what the table occupies, after
+ * anything that may have grown it.  The count is reconciled from the table
+ * rather than adjusted by each growth, so it cannot drift from it.
+ */
+static void
+account_table(relic_t *ctx)
+{
+	ctx->account.predtab_bytes = relic_pred_table_bytes(ctx);
+}
+
+/*
+ * Copy `length` bytes into the name store, terminated, and return the copy,
+ * or NULL when the allocator refused it.  The store lives as long as the
+ * context, so the arena's failure is cleared: left standing, it would
+ * refuse every name after this one.
+ */
+static const char *
+copy_name(relic_arena_t *names, const char *bytes, size_t length)
+{
+	char *copy;
 
 	copy = relic_arena_alloc(names, length + 1);
-	ctx->account.name_bytes = relic_arena_total_bytes(names);
 	if (copy == NULL) {
 		relic_arena_clear_failure(names);
 		return (NULL);
@@ -167,19 +316,111 @@ keep_name(relic_t *ctx, const char *bytes, size_t length)
 }
 
 /*
+ * Grow the table for one more predicate -- a slot in the index and an entry
+ * -- and copy its name into the store, returning the copy, or NULL when the
+ * allocator refused a growth.
+ *
+ * Every growth happens before the predicate is stored, so that a failure
+ * leaves room behind and nothing else.  Storing first and indexing second
+ * would, on a failed index growth, leave a predicate no lookup could reach,
+ * and the next mention of the same pair would assign it a second identifier
+ * -- which would make one predicate into two relations holding half the
+ * answer each.
+ */
+static const char *
+grow_for_predicate(relic_predtab_t *table, const char *name, size_t length)
+{
+	relic_pred_t *entries;
+
+	if (relic_idtab_reserve(&table->index, 1, pred_rehash, table) != 0)
+		return (NULL);
+
+	entries = relic_grow_array(table->entries, &table->capacity,
+	    table->count + 1, sizeof(*table->entries));
+	if (entries == NULL)
+		return (NULL);
+	table->entries = entries;
+
+	return (copy_name(&table->names, name, length));
+}
+
+/*
+ * Grow the table for one more source name -- a slot in their index and a
+ * place in their array -- and copy it into the store, as
+ * grow_for_predicate() does for a predicate.
+ */
+static const char *
+grow_for_source(relic_predtab_t *table, const char *name, size_t length)
+{
+	const char **sources;
+
+	if (relic_idtab_reserve(&table->source_index, 1, source_rehash,
+	    table) != 0)
+		return (NULL);
+
+	sources = relic_grow_array(table->sources, &table->source_capacity,
+	    table->source_count + 1, sizeof(*table->sources));
+	if (sources == NULL)
+		return (NULL);
+	table->sources = sources;
+
+	return (copy_name(&table->names, name, length));
+}
+
+/*
+ * The two ways the table grows, for a predicate and for a source name, each
+ * returning the name's copy, or NULL when the memory limit or the allocator
+ * refused, for the caller to report through relic_diag_no_memory().
+ *
+ * The limit is asked first, for the whole table as the growth would leave
+ * it, and the account is set to what the table holds after whatever grew,
+ * succeeding or not, so that every entry and index slot is charged as well
+ * as every name.
+ */
+static const char *
+room_for_predicate(relic_t *ctx, const char *name, size_t length)
+{
+	relic_predtab_t *table;
+	const char *kept;
+
+	table = &ctx->program.predicates;
+	if (!admit_growth(ctx, bytes_with_predicate(table, length)))
+		return (NULL);
+
+	kept = grow_for_predicate(table, name, length);
+	account_table(ctx);
+
+	return (kept);
+}
+
+static const char *
+room_for_source(relic_t *ctx, const char *name, size_t length)
+{
+	relic_predtab_t *table;
+	const char *kept;
+
+	table = &ctx->program.predicates;
+	if (!admit_growth(ctx, bytes_with_source(table, length)))
+		return (NULL);
+
+	kept = grow_for_source(table, name, length);
+	account_table(ctx);
+
+	return (kept);
+}
+
+/*
  * Append a predicate to the table and return the identifier assigned to it.
  *
- * The array is grown and the name copied before the count advances, so a
- * failure part way through leaves a table that is smaller than it might have
- * been but is entirely consistent: the entry a caller could reach is one
- * that was fully written.
+ * A failure leaves the table with room it did not use but entirely
+ * consistent: the entry a caller could reach is one that was fully written
+ * and indexed.
  */
 static int
 pred_store(relic_t *ctx, const char *name, size_t length, uint16_t arity,
     uint32_t hash, const relic_location_t *where, relic_pred_id_t *idp)
 {
 	relic_predtab_t *table;
-	relic_pred_t *entries;
 	relic_pred_t *stored;
 	const char *kept;
 
@@ -191,15 +432,7 @@ pred_store(relic_t *ctx, const char *name, size_t length, uint16_t arity,
 		return (-1);
 	}
 
-	entries = relic_grow_array(table->entries, &table->capacity,
-	    table->count + 1, sizeof(*table->entries));
-	if (entries == NULL) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	table->entries = entries;
-
-	kept = keep_name(ctx, name, length);
+	kept = room_for_predicate(ctx, name, length);
 	if (kept == NULL) {
 		relic_diag_no_memory(ctx);
 		return (-1);
@@ -216,6 +449,7 @@ pred_store(relic_t *ctx, const char *name, size_t length, uint16_t arity,
 	stored->arity = arity;
 
 	table->count++;
+	relic_idtab_place(&table->index, hash, (uint32_t)table->count);
 	*idp = (relic_pred_id_t)table->count;
 
 	return (0);
@@ -283,27 +517,7 @@ relic_pred_intern(relic_t *ctx, const char *name, size_t length,
 		}
 	}
 
-	/*
-	 * Room in the index is taken before the predicate is stored, so that
-	 * the only step that can fail happens while there is still nothing to
-	 * leave behind.  Storing first and indexing second would, on a failed
-	 * index growth, leave a predicate no lookup could reach, and the next
-	 * mention of the same pair would assign it a second identifier --
-	 * which would make one predicate into two relations holding half the
-	 * answer each.
-	 */
-	if (relic_idtab_reserve(&table->index, 1, pred_rehash, table) != 0) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-
-	if (pred_store(ctx, name, length, arity, hash, where, &id) != 0)
-		return (-1);
-
-	relic_idtab_place(&table->index, hash, id);
-	*idp = id;
-
-	return (0);
+	return (pred_store(ctx, name, length, arity, hash, where, idp));
 }
 
 /*
@@ -493,7 +707,6 @@ keep_source_name(relic_t *ctx, const char *name)
 {
 	relic_predtab_t *table;
 	relic_idprobe_t probe;
-	const char **sources;
 	const char *kept;
 	size_t length;
 	uint32_t position;
@@ -512,16 +725,8 @@ keep_source_name(relic_t *ctx, const char *name)
 
 	if (table->source_count >= UINT32_MAX - 1u)
 		return (NULL);
-	if (relic_idtab_reserve(&table->source_index, 1, source_rehash,
-	    table) != 0)
-		return (NULL);
-	sources = relic_grow_array(table->sources, &table->source_capacity,
-	    table->source_count + 1, sizeof(*table->sources));
-	if (sources == NULL)
-		return (NULL);
-	table->sources = sources;
 
-	kept = keep_name(ctx, name, length);
+	kept = room_for_source(ctx, name, length);
 	if (kept == NULL)
 		return (NULL);
 

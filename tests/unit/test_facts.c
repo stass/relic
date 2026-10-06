@@ -165,7 +165,7 @@ static void	 falsified_through(unsigned int flags, bool materialized,
 		    const char *strategy);
 static void	 an_added_fact_the_limit_refuses_changes_nothing(void);
 static void	 queries_do_not_accumulate_indexes(void);
-static size_t	 session_name_bytes(const char *program);
+static size_t	 session_vocabulary_bytes(const char *program);
 static char	*session_program(void);
 static size_t	 least_limit(const char *program, enum limit_kind kind,
 		    enum step step, const char *query_text);
@@ -545,10 +545,11 @@ a_refused_load_leaves_the_program_as_it_was(void)
  * nothing, is seen to keep the relations current.  The memory limit is set
  * once the rule is loaded, at what the context then holds, so that it
  * admits no fact and the context holds the rule alone.  The pool and the
- * name store count against the limit, so the values the refused load uses
- * are interned, and the program checked so that the name store holds the
- * rule's predicates and has room for one more, before the limit is set:
- * what the load refuses is then the first store to grow, not a name.
+ * predicate table count against the limit, so the values the refused load
+ * uses are interned, and the program checked so that the predicate table
+ * holds the rule's predicates and has room for one more, before the limit
+ * is set: what the load refuses is then the first store to grow, not a
+ * predicate.
  */
 static void
 refused_by(enum limit_kind kind)
@@ -965,7 +966,8 @@ queries_do_not_accumulate_indexes(void)
 	}
 
 	bzero(&config, sizeof(config));
-	config.max_memory = need + session_name_bytes(program) + INDEX_SLACK;
+	config.max_memory = need + session_vocabulary_bytes(program) +
+	    INDEX_SLACK;
 	ctx = context_with(&config, program, &log);
 	free(program);
 	if (ctx == NULL)
@@ -992,15 +994,15 @@ queries_do_not_accumulate_indexes(void)
 }
 
 /*
- * The bytes the symbol pool and the name store grow by, past what loading
- * `program` holds, over the session of queries_do_not_accumulate_indexes() run
- * without a limit.  Each query's rewrite keeps the names of the predicates it
- * makes, and each load interns its symbols; a fresh context answering one
- * query holds only that query's names, so the least limit of one query alone
- * does not cover the others'.
+ * The bytes the symbol pool and the predicate table grow by, past what
+ * loading `program` holds, over the session of
+ * queries_do_not_accumulate_indexes() run without a limit.  Each query's
+ * rewrite keeps the predicates it makes, and each load interns its symbols;
+ * a fresh context answering one query holds only that query's predicates,
+ * so the least limit of one query alone does not cover the others'.
  */
 static size_t
-session_name_bytes(const char *program)
+session_vocabulary_bytes(const char *program)
 {
 	rows_text_t rows;
 	diag_log_t log;
@@ -1014,13 +1016,13 @@ session_name_bytes(const char *program)
 	if (ctx == NULL)
 		return (0);
 
-	loaded = ctx->account.pool_bytes + ctx->account.name_bytes;
+	loaded = ctx->account.pool_bytes + ctx->account.predtab_bytes;
 	for (round = 0; round < SESSION_ROUNDS; round++) {
 		for (i = 0; i < SESSION_QUERIES; i++)
 			(void)rows_of(ctx, session_queries[i], &rows);
 		(void)relic_load_string(ctx, "more.dl", session_loads[round]);
 	}
-	grown = ctx->account.pool_bytes + ctx->account.name_bytes - loaded;
+	grown = ctx->account.pool_bytes + ctx->account.predtab_bytes - loaded;
 	relic_destroy(ctx);
 
 	return (grown);
@@ -1270,8 +1272,8 @@ a_load_over_the_limit_grows_no_store(void)
 /*
  * The bytes the memory limit counts against a context once it has loaded
  * b(0) and then `facts` -- its stores, the integer table the facts'
- * integers grew and the name store holding its names -- or SIZE_MAX when
- * that could not be measured.
+ * integers grew and the predicate table holding its predicates -- or
+ * SIZE_MAX when that could not be measured.
  */
 static size_t
 bytes_after_loading(const char *facts)
@@ -1307,7 +1309,7 @@ intern_symbols(relic_t *ctx, const char *const *names)
 }
 
 /*
- * The bytes a context's stores, value table, pool and name store hold
+ * The bytes a context's stores, value table, pool and predicate table hold
  * between operations, when no arena or round holds any: the total the
  * memory limit is enforced against.
  */
@@ -1315,7 +1317,7 @@ static size_t
 bytes_held(const relic_t *ctx)
 {
 	return (ctx->account.store_bytes + ctx->account.value_bytes +
-	    ctx->account.pool_bytes + ctx->account.name_bytes);
+	    ctx->account.pool_bytes + ctx->account.predtab_bytes);
 }
 
 /*

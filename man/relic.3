@@ -239,22 +239,21 @@ and
 the bytes of relation and index storage, the program's facts included,
 together with the table of the integers the program states and evaluation
 computes, the symbol pool, which holds every symbol and string the program
-states and every string evaluation computes, the names of the predicates
-the program and the rewrites of its queries name and of the sources each
-was first read from, the buffers an
+states and every string evaluation computes, the table of the predicates
+the program and the rewrites of its queries name, with their names and the
+names of the sources each was first read from, the buffers an
 evaluation computes strings in, the plans of an evaluation and the rewrite
 of a query; zero leaves either unbounded.
 .Fa max_memory
 does not bound all the memory the library uses: the text being loaded, the
-program's rules and queries, the field of a table being imported, a
-prepared query and the entry and index slot the context keeps beside each
-predicate's name are sized by what the caller wrote, and growing an array
+program's rules and queries, the field of a table being imported and a
+prepared query are sized by what the caller wrote, and growing an array
 holds the old one until the new one is filled.
 Nothing those tables hold is released before the context is destroyed:
 every distinct integer, symbol and string a load, a fact, the constants of
 a query or an evaluation interns, and every predicate a query or the
 rewrite of one names, stays for the life of the context, the values and the
-names counting against
+predicates counting against
 .Fa max_memory .
 A context that goes on answering queries over new constants therefore grows
 until it reaches the limit, and a caller serving such queries for as long as
@@ -961,8 +960,8 @@ own, and are counted by
 and
 .Fa tuples_inserted .
 .Fa storage_bytes
-counts relation and index storage, the table of integers, the symbol pool
-and the names of predicates and their sources together, as
+counts relation and index storage, the table of integers, the symbol pool,
+and the table of predicates with the names it keeps, together, as
 .Fa max_memory
 does, and
 .Fa string_values

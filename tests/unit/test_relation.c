@@ -979,7 +979,7 @@ the_memory_limit_refuses_a_tuple_and_says_so(void)
 	for (ordinal = 0; ordinal <= LIMIT_ATTEMPTS; ordinal++)
 		(void)value(ctx, SCENARIO_MEMORY_LIMIT, ordinal);
 	ctx->account.limit = relic_value_storage_bytes(ctx) +
-	    ctx->account.name_bytes + MEMORY_LIMIT;
+	    ctx->account.predtab_bytes + MEMORY_LIMIT;
 	snprintf(expected, sizeof(expected),
 	    "limit exceeded: memory=%zu while deriving edge/2",
 	    ctx->account.limit);

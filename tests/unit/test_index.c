@@ -375,14 +375,14 @@ distinct_by_hand(const relic_relation_t *rel, uint16_t column)
 /*
  * The bytes the memory limit counts against a context that holds no arena
  * and runs no round: its relations' storage, its integer table, which every
- * integer value() interns grows, the symbol pool and the name store holding
- * the relations' names.
+ * integer value() interns grows, the symbol pool and the predicate table
+ * holding the relations' predicates.
  */
 static size_t
 charged_bytes(const relic_t *ctx)
 {
 	return (relic_relation_total_bytes(ctx) + ctx->account.value_bytes +
-	    ctx->account.pool_bytes + ctx->account.name_bytes);
+	    ctx->account.pool_bytes + ctx->account.predtab_bytes);
 }
 
 /*

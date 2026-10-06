@@ -31,14 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**The predicate table's entries and index are not charged.** [Low,
-component: `lib/pred.c`, `lib/account.c`] The name store is charged to
-`max_memory`, but each predicate's entry and its index slot are not, so a
-caller naming many short predicates holds several times the limit outside
-it: under a 1 MiB limit, 144,445 one-byte predicates held 16 MiB of
-entries and 1 MiB of index. Charge the entries and the index as the symbol
-pool charges its own, admitted before each growth.
-
 **A query can derive more through the rewrite than without it.** [Medium,
 component: `lib/magic.c`] Each adornment of a predicate derives a relation of
 its own, and the budget bounds the rules generated, not the tuples those
@@ -83,6 +75,15 @@ arena copy. `read_reached_completely()` closes the reached components over
 their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
+
+**A relation table's slots are not charged.** [Low, component:
+`lib/relation.c`] `reltab_cover()` grows the derived and the base relation
+tables to a pointer per predicate up to the highest one holding a relation,
+without asking the memory limit or counting the array in `store_bytes`. A
+predicate costs at most two slots and their doubling slack, a fraction of
+the entry and index slot the predicate table charges for it, so the excess
+is bounded by the limit; it is still memory the limit does not count.
+Project the growth and admit it as `store_bytes` before the array grows.
 
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build

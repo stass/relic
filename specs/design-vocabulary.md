@@ -106,11 +106,15 @@ symbol identifier; D-24's "a symbol is interned once" is about values, and
 a name that is also spelled as a value is stored twice, a predicate's
 worth of bytes.
 
-**The store is charged** to `max_memory` as the pool is: a copy that would
-grow it is admitted first, and the account is then set to what it holds,
+**The table is charged** to `max_memory` as the pool is, whole: its
+entries, its index and the store, with the array and the index of the
+source names. A growth is admitted first, against what the whole table
+would hold after it, and the account is then set to what the table holds,
 so a caller naming new predicates without end is refused at the limit
-rather than growing memory nothing counts. A copy refused fails the
-statement as any resource does and records nothing.
+rather than growing memory nothing counts. Charging the store alone would
+not do: an entry and its index slot outweigh a short name many times over.
+A growth refused fails the statement as any resource does and records
+nothing.
 
 **The one location the context retains** past its statement is the
 predicate table's record of the first atom reading a predicate,
@@ -239,10 +243,12 @@ context, so that an embedder plans for it.
 * **A session's lines.** A thousand `<query N>` queries against one program
   leave `relic_stats()`'s `symbol_values` and `string_values` where the
   first left them, in the REPL test and through the library.
-* **The name store's charge.** A context whose limit admits the program
-  refuses a statement naming one more predicate past it, with the limit
-  named and nothing recorded; the same statement succeeds when the limit
-  is raised.
+* **The predicate table's charge.** A context whose limit admits the
+  program refuses a statement naming one more predicate past it, with the
+  limit named and nothing recorded; the same statement succeeds when the
+  limit is raised. Predicates with names of a byte or two, each read from
+  a source of its own, are refused before the table holds more than the
+  limit.
 * **Results.** A collected result read after a further query, a load, a
   fact addition and the context's destruction gives the same bytes and the
   same order under `relic_result_compare()`, an empty string and one
@@ -293,8 +299,8 @@ context, so that an embedder plans for it.
   unknown predicates from growing the predicate table, and it would give
   the compiled rule, the dependency graph and the stratifier an atom that
   names no predicate, a case each would have to carry. The program model's
-  decision to intern a query's atoms stands, and the name store's charge
-  bounds the growth.
+  decision to intern a query's atoms stands, and the predicate table's
+  charge bounds the growth.
 * **A result that references the context.** It would make a result's life
   the context's and its bytes the context's to move; a result that owns
   its bytes outlives the context.
