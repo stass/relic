@@ -2224,6 +2224,20 @@ ANTI_MEMBER
 
 Comparisons become filters.
 
+A positive literal that binds nothing the rest of the rule reads -- its
+unbound columns all `_`, or variables the rule mentions once -- is a test
+rather than a generator, and becomes:
+
+```text
+EXISTS edge/2 key={0}
+```
+
+which asks whether some tuple agrees on its bound columns and passes each
+binding on at most once, so that a join is not multiplied by tuples that
+differ only where nothing reads. Why that is sound, which columns count as
+dead, and how the executor answers it through the probe a negated literal
+already makes are specified in `specs/design-existence.md`.
+
 ---
 
 # 59. Plan Representation
@@ -2653,6 +2667,7 @@ semi-naive(P)          ==  naive(P)
 magic(Q, P)            ==  Q(full_materialize(P))
 indexed(P)             ==  no-index(P)
 reordered(P)           ==  textual-order(P)
+existence(P)           ==  no-exists(P)
 ```
 
 Each is checked over the curated corpus and over randomly generated safe

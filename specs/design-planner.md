@@ -258,8 +258,13 @@ argument and `medium(Y)` none, so `huge` follows, looked up on `X`, and
 A positive literal becomes, at the point it is placed:
 
 * `MEMBER`, when every argument is bound: the canonical index answers it;
-* `LOOKUP`, when some but not all are, through **the index keyed on exactly
-  its bound columns**, which the relation builds if it has none;
+* `EXISTS`, when some or none are and every other column holds `_` or a
+  variable the rule mentions once, so that the literal binds nothing: the
+  index keyed on its bound columns, or the view's emptiness when it has
+  none, answers whether some tuple agrees, once;
+  `specs/design-existence.md`;
+* otherwise `LOOKUP`, when some but not all are, through **the index keyed
+  on exactly its bound columns**, which the relation builds if it has none;
 * `SCAN`, when none are.
 
 A delta literal follows the same rule through the delta view: a `SCAN` of

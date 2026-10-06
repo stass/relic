@@ -102,6 +102,14 @@ it names only, so its `ANTI_MEMBER` carries a key as a `LOOKUP` does and
 probes the index on those columns, or asks whether the relation is empty
 when it names none, `specs/design-negation.md` section 4.
 
+`EXISTS` is the same probe with the answer kept, for a positive literal
+that binds nothing the rest of the rule reads: its unbound columns hold
+`_` or a variable the rule mentions once, and it succeeds at most once
+rather than once per tuple that agrees on its bound columns. It widens the
+first case of section 5 from "every argument is bound" to "the literal
+binds nothing", `MEMBER` being the case where the key is every column;
+`specs/design-existence.md` specifies it.
+
 `ASSIGN` is the other test that binds. An equality whose one side is a
 bare variable not yet bound, and whose other side reads only bound slots,
 binds the variable to the other side's value where it is placed and adds

@@ -32,16 +32,16 @@ and 6 are not started. The causes and what to try are sorted in
 ## Engine
 
 **A literal that binds nothing new multiplies a join's rows.** [Medium,
-component: `lib/plan.c`, `lib/exec.c`] A positive literal yields one
-binding per tuple it matches even when the rest of the rule reads none of
-the columns it matches on: p(_, X) over two tuples that differ only in the
-first column continues the join twice with the same bindings, so k such
-literals carry 2^k identical rows. A rule of `s(X)` and 48 calls
-`p(_, ..., X, ...)` over two facts of p takes 4.7 s under `-X no-magic`,
-and 63 calls run for minutes. Stopping at a literal's first match when it
-binds nothing a later literal or the head reads, an existence check in the
-plan, would keep each to one row. `relic.3` states that no limit bounds
-evaluation time, which stays true; this case need not cost it.
+component: `specs/design-existence.md`, `lib/plan.c`, `lib/exec.c`] A
+positive literal yields one binding per tuple it matches even when the
+rest of the rule reads none of the columns it matches on: p(_, X) over two
+tuples that differ only in the first column continues the join twice with
+the same bindings, so k such literals carry 2^k identical rows. A rule of
+`s(X)` and 48 calls `p(_, ..., X, ...)` over two facts of p takes 4.7 s
+under `-X no-magic`, and 63 calls run for minutes. The design is written
+and not implemented: the `EXISTS` operation of `specs/design-existence.md`,
+the `-X no-exists` reference, the perf workload, the plan unit tests and
+the golden `-e` updates its section 9 lists.
 
 **Reading a query's reach completely is a mode beside the rewrite.** [Low,
 component: `lib/magic.c`, `lib/eval.c`, `lib/explain.c`] When no adornment
