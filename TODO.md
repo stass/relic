@@ -76,15 +76,6 @@ their dependencies with a closure of its own. Treating the reached
 predicates as complete components from the start, as the negated part of a
 query already is, would remove both branches and the second closure.
 
-**A relation table's slots are not charged.** [Low, component:
-`lib/relation.c`] `reltab_cover()` grows the derived and the base relation
-tables to a pointer per predicate up to the highest one holding a relation,
-without asking the memory limit or counting the array in `store_bytes`. A
-predicate costs at most two slots and their doubling slack, a fraction of
-the entry and index slot the predicate table charges for it, so the excess
-is bounded by the limit; it is still memory the limit does not count.
-Project the growth and admit it as `store_bytes` before the array grows.
-
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/round.c`] Under `-X parallel`, in one build
 and with identical counters, `tc-cyclic` takes 2.62 s against 2.24 s,
