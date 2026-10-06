@@ -31,18 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**A declined cut makes a long rule's rewrite quadratic.** [Low, component:
-`lib/magic.c`] `cut_prefix()` declines to cut a prefix with more live slots
-than `RELIC_MAX_ARITY`, so every later magic rule of such a rule copies the
-whole prefix: a rule of L binding calls keeps about L rules of L^2/2
-literals, recursive ones whose planning costs about L^3. The rewrite's limit
-charges every copy, so the default abandons such a rewrite early -- a 9 KB
-rule of 1000 calls in 0.05 s -- and the query is answered from the whole
-program; only a caller who raises the limit pays the square. Making the cut
-always possible, for instance by chaining cuts or letting a supplementary
-predicate exceed the arity limit, would keep these rewrites linear and
-admit them.
-
 **Calibrate the Magic limit's default.** [Low, component: `lib/magic.c`]
 The default, 768 + 48 x the size of the program and the query, is the sum
 of the three allowances of 256 + 16 x the program's size that the search,
