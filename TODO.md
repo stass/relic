@@ -31,6 +31,26 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
+**Meter the Magic rewrite with one limit.** [High, component:
+`lib/magic.c`, `include/relic.h`, `cmd/relic/main.c`, `man/`, `tests/`]
+D-37 replaces `max_magic_preds`, `max_magic_rules`, the two `-l` keys and
+the three budgets with `max_magic`, `-l magic=N`: one count of the literals
+the rewrite reads and generates, search and draft together, that no setting
+lifts (`specs/design-magic.md` section 8). One meter of `most` and `spent`
+replaces `relic_magic_limit_t`, `relic_magic_budget_t` and
+`generated_preds`, is charged in `charge_rule_read()` and `publish_rule()`
+and for the query's walk and rewritten body, and is never reset between
+searches; the default comes from the program's and the query's size; the
+warning becomes `outgrew magic=N while adorning p/n`. The field, the `-l`
+key, `relic.h`, `relic.1` and `relic.3` follow; the `magic-limit-*` tests
+go, the `magic-budget-*` tests are re-sized for the new default, and
+`test_magic.c`'s limit scenarios, `cli.sh` and `perf.sh` move to `-l
+magic`. Then a measurement over the test corpus and `bench/` of what
+rewrites spend against the default, which may lower the factor. Closes the
+unbounded half of the item below: a declined cut is then charged for every
+prefix it copies, so the draft is bounded in every configuration; making
+the cut always succeed stays worth doing, to admit those rewrites.
+
 **A configured Magic limit lets the draft grow faster than the search.**
 [Medium, component: `lib/magic.c`] Either Magic limit lifts the draft's
 literal budget, and the rule limit, when set, counts only rules kept.

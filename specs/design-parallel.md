@@ -992,8 +992,7 @@ it meant:
 struct relic_config {
 	size_t		max_memory;
 	size_t		max_tuples;
-	size_t		max_magic_preds;
-	size_t		max_magic_rules;
+	size_t		max_magic;
 	unsigned int	flags;
 	size_t		threads;	/* the pool's size; 0 and 1 are one */
 };

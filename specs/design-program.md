@@ -489,7 +489,7 @@ operator. An expression node, `relic_expr_t`, is a constant, a variable's
 slot, a negation, an arithmetic operator over two nodes, or a call of a
 string function over one to three argument nodes, and records its height
 and its node count, which bound every walk over it and are what the Magic
-rewrite's budgets charge; a term is a tree of one node.
+rewrite's limit charges; a term is a tree of one node.
 `specs/design-arithmetic.md` section 6 specifies the node and
 `specs/design-strings.md` section 6 the call:
 

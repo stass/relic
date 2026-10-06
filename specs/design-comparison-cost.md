@@ -451,20 +451,17 @@ read for and on which predicates are read free, so every call the second
 makes the first made too, and every predicate it reaches free is already
 read free.
 
-Each search is held on its own to what bounds it: the predicate limit or
-budget counts the adornments it keeps, and a literal budget of its own the
-bodies of the rules it reads, apart from the drafts, since a query can reach
-far more adornments than it could draft. A search keeps no more adornments
-than the rewrite without subsumption would adorn and reads no more literals
-than drafting them is charged, so where both literal budgets are in force
-or both lifted, neither refuses anything that rewrite admits. The rule limit does not hold a search, since it counts the rules the
-draft keeps after dropping duplicates and rules that derive nothing; the
-search's budgets, which only the predicate limit lifts, bound it when the
-rule limit is the only one set (`specs/decisions.md` D-36). A query whose
-first search reaches more than a limit admits is refused even when
-subsumption would have brought its rewrite within the limit. What a search
+Each search charges the body of every rule it reads to the rewrite's one
+limit, as the draft charges every rule it drafts (`specs/design-magic.md`
+section 8), so a second search is charged again for the walks of the first
+it replays, and the limit's default allows for both. A search keeps no more
+adornments than the rewrite without subsumption would adorn and reads no
+more literals than drafting them is charged. A query whose first search
+outgrows the limit is abandoned even when subsumption would have brought
+its rewrite within it. What a search
 needs to read one rule is released once the rule is read. A rewrite that
-outgrows a budget is abandoned in the search where it outgrows it.
+outgrows its limit in a search is abandoned there, before anything is
+drafted.
 
 ### 5.2 A rewrite with no bound column is no rewrite
 

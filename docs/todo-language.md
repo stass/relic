@@ -32,7 +32,7 @@ have it. Expands at compile time into one rule per combination, so nothing
 below the parser changes; the only decisions are the operator, `;` as in
 Prolog and Souffle, and the wording of `-e`, which shows the expanded rules.
 A body with several disjunctions expands to their product, which the
-literal budget already bounds.
+rewrite's limit already bounds.
 
 **Including another file.** [Low, component: `lib/parse.c`, `cmd/relic/`]
 Souffle's `#include`, clingo's `#include`, CodeQL's `import`. Today files

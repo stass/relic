@@ -262,7 +262,7 @@ The number of nodes is not bounded, only the height: a tree of height 32
 may in principle hold billions of nodes, and the text that writes them is
 what bounds it, as it bounds a body's length. Every count of steps or nodes
 is a `size_t`, and section 10 says what a large expression costs the Magic
-rewrite's budgets.
+rewrite's limit.
 
 ---
 
@@ -609,7 +609,7 @@ expression lives exactly as long as its rule. A term is a one-node tree, so a
 comparison of two terms costs two nodes where it cost two arguments, and the
 compiled form of every v1 program has the same shape it has now with one
 more level of indirection on comparisons. A node records its height and its
-node count so that a walk can size what it needs, and a budget charge what
+node count so that a walk can size what it needs, and a limit charge what
 it costs, without a walk of their own.
 
 The tree is kept, rather than compiled here to the flat form the executor
@@ -1221,18 +1221,18 @@ when generated rules are deduplicated. A generated rule is a compiled rule,
 and everything downstream plans and runs it without knowing that arithmetic
 is in it.
 
-**A literal's size counts its nodes.** The budgets of
-`specs/design-magic.md` section 8 bound a rewrite to a constant multiple of
-the program by counting literals: the program's, for the budget's size, and
-those the rewrite drafts and walks, for what it spends. An expression of a
+**A literal's size counts its nodes.** The limit of
+`specs/design-magic.md` section 8 bounds a rewrite to a constant multiple of
+the program by counting literals: the program's, for the limit's default,
+and those the rewrite drafts and walks, for what it spends. An expression of a
 thousand nodes copied into ten adornments' prefixes is ten thousand nodes
 of arena and of walking that a count of literals would not see, so every
 such count becomes a count of **sizes**, a literal's size being one plus the
 nodes of its expressions, which section 6 records on the node. The program's
-size in literals, the literal budgets, the search's charge for the literals
-it walks and the count a generated rule is measured by all use it, so a
-rewrite over a program of large expressions stays a constant multiple of
-that program's size in nodes, and the budgets bound the work as they did.
+size in literals, the rewrite's limit and its charge for every rule read or
+drafted all use it, so a rewrite over a program of large expressions stays
+a constant multiple of that program's size in nodes, and the limit bounds
+the work as it bounds the literals.
 The termination argument of section 7 there is untouched: an assignment is
 one literal, and size decides cost, not what is generated.
 
@@ -1367,7 +1367,7 @@ this design takes away:
 * **unbounded memory.** A rule that computes a new integer per derivation
   grows the integer table, and the table is charged to `max_memory`, section
   9.1, so `-l memory=` bounds it as it bounds a relation. A large expression
-  copied by the Magic rewrite is charged to the rewrite's budgets, section
+  copied by the Magic rewrite is charged to the rewrite's limit, section
   10. Without a limit such a program runs until the tuple limit, the 2^30
   integer limit or exhaustion stops it, which is the position every
   unbounded recursive program is in today;
@@ -1486,7 +1486,7 @@ arithmetic-strategy      section 4.2's p(1, Y)?: answered by default, failed und
 arithmetic-depth         both nesting bounds at 32 and 33, in every shape
 arithmetic-explain       -e over section 11's program
 arithmetic-magic         a query binding a computed argument through the rewrite
-arithmetic-magic-wide    a large expression under many adornments: budget met, fallback
+arithmetic-magic-wide    a large expression under many adornments: limit met, fallback
 arithmetic-gathered      a computing query gathered, a term-assigning one streamed,
                          and v(X, _), Y = X? gathered for its wildcard
 arithmetic-memory        -l memory= refusing the integer table's growth
@@ -1551,7 +1551,7 @@ Each step lands with its tests and is measured against the one before it.
    closure's time.
 3. **Magic Sets** (section 10). The order function reports bindings; the
    rewrite consumes them; renumbering and deduplication walk trees; the
-   budgets count sizes. `arithmetic-magic` and `arithmetic-magic-wide` hold
+   limit counts sizes. `arithmetic-magic` and `arithmetic-magic-wide` hold
    and `magic(Q, P) == Q(full_materialize(P))` holds over the arithmetic
    corpus that succeeds everywhere.
 4. **The frozen round** (section 9.2). Pending integers in the candidate
@@ -1658,7 +1658,7 @@ the tool has; 5 is what `CLAUDE.md` asks of every feature.
   `integer_values` among the identities.
 * `specs/design-magic.md` sections 5 and 6: the order function reports what
   each literal binds, and the rewrite uses it, section 10 here; section 6.1:
-  renumbering walks expression trees; section 8: budgets count sizes, and
+  renumbering walks expression trees; section 8: the limit counts sizes, and
   the fallback may fail where the rewrite would have answered, sections 10
   and 4.2 here.
 * `specs/design-hardening.md` section 2.4: assignments and expression

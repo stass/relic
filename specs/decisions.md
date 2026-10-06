@@ -726,3 +726,44 @@ as well; a search outgrowing a budget abandons the rewrite with a warning,
 as it does when neither limit is set. Amends D-7 and D-21, which lifted
 every budget when either limit was set. Specified in
 `specs/design-magic.md` section 8.
+
+### D-37 One limit meters the rewrite's work
+
+The rewrite had two configurable limits, on the predicates and on the rules
+it generates, and three budgets in proportion to the program, on the
+predicates it generates, on the literals its search reads and on the
+literals its draft generates, each budget lifted by some configuration of
+the limits (D-7, D-21, D-36). The limits counted outputs, and an output
+bounds work only through a case argument -- every kept adornment yields a
+kept rule, every kept rule holds a literal, except when it does not -- and
+the budgets were lifted per stage, so correctness rested on every cell of
+the matrix of configurations still bounding every stage, and each review
+found a cell that did not: with only the rule limit set the search had no
+bound; then its cost grew with the square of the program; then the draft
+grew without bound once a cut was declined.
+
+One count replaces all five. Everything the rewrite reads or generates,
+search and draft alike, is charged where it is read or generated, in the
+literal-size units the budgets used, to one limit per rewrite: `max_magic`,
+`-l magic=N`, the most literals a query's rewrite may read and generate.
+The count bounds predicates, rules, the search and the draft by
+construction, since every adornment kept reads a rule of at least one
+literal and every rule kept but a seed holds one, and there is no
+configuration in which a stage runs unmetered, since there is nothing to
+lift: a caller's value scales the ceiling and never removes it. Outgrowing
+the limit, set or not, abandons the rewrite with a warning and answers the
+query from the whole program, which answers the same; `RELIC_F_NO_MAGIC`
+serves a caller who wants no rewrite, and `max_tuples` and `max_memory`
+bound the fallback as they bound the rewrite. The query is charged as a
+rule is and sized into the default, so the charge has no exception. The
+default is 768 + 48 x the size of the program and the query: the sum of the
+three allowances of 256 + 16 x the program's size it replaces, one for each
+search a rewrite makes, at most two, and one for its draft, so no rewrite
+the budgets admitted outgrows it; a measurement of what rewrites spend may
+lower the factor, and must not raise it. `max_magic_preds`,
+`max_magic_rules`, `-l magic-preds` and `-l magic-rules` are removed before
+the first release, the one field `max_magic` taking their place in
+`relic_config_t`. Replaces the Magic part of D-7, and D-21 and D-36 whole;
+the part of D-20 that leaves supplementary predicates out of a predicate
+count stands, there being no such count. Specified in
+`specs/design-magic.md` section 8.

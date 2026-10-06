@@ -73,7 +73,7 @@ product of these factors.
    about *L* cubed over 3 operations in all. A rule of four hundred calls on
    one demanded predicate, under five kilobytes of text, takes seconds and
    over a gigabyte to answer through a rewrite sized to admit it, and with
-   no Magic limit set the budget on literals abandons it. The
+   the rewrite's limit on literals abandons it unless raised. The
    supplementary construction of `specs/design-magic.md` section 6 derives
    each prefix from the one before it, so the generated bodies are linear in
    *L*.
@@ -85,10 +85,10 @@ comes from recomputing, at every step, answers that the step before already
 had. The fourth is removed by the supplementary construction, and what remains
 of the rewrite's size is the third: a rule copied whole once per adornment.
 The rewrite holds D-7's invariant, that it generates no more than a constant
-multiple of the program, by budgeting the literals it generates as it
-budgets the rules, per `specs/design-magic.md` section 8: a rewrite whose
+multiple of the program, by charging the literals it reads and generates to
+one limit, per `specs/design-magic.md` section 8: a rewrite whose
 adornments multiply the program is abandoned with the usual warning and the
-query answered from the whole program. This document bounds what the budget
+query answered from the whole program. This document bounds what the limit
 admits the way it bounds the other factors, by charging what it holds.
 
 Multiplied out, a rule of a thousand identical recursive literals -- six
@@ -237,7 +237,8 @@ count and length are each the length of a body, and the rewrite arena holds
 a copy of every body per pattern the program calls it with, and a prefix per
 call. Each is the square of what the program author wrote, at the author's
 choice, and the plans of the rewritten program its cube; the evaluation arena
-is bounded by nothing, and the rewrite arena only by budgets that count rules.
+is bounded by nothing, and the rewrite arena only by a limit that counts
+literals.
 
 **The account** is the context's total of the bytes an operation holds on
 the user's behalf: the relation and index storage that
@@ -366,12 +367,12 @@ own.
 The refusal is a failure of the operation, as a limit refusing a tuple is:
 the evaluation or the query fails, nothing is answered, and the next
 evaluation discards and starts again, per `specs/design-eval.md` section 8.
-The rewrite's budgets of `specs/design-magic.md` section 8 are unchanged. A
-rewrite can reach the memory limit before it outgrows a budget, and then the
-query fails rather than being answered from the whole program: the budget is
-the rewrite's own measure of whether it is worth having, and the limit is the
-user's ceiling on the process, and a rewrite that reaches the ceiling is one
-the user asked not to pay for.
+The rewrite's limit of `specs/design-magic.md` section 8 is unchanged. A
+rewrite can reach the memory limit before it outgrows its own, and then the
+query fails rather than being answered from the whole program: the rewrite's
+limit is its own measure of whether it is worth having, and the memory limit
+is the user's ceiling on the process, and a rewrite that reaches the ceiling
+is one the user asked not to pay for.
 
 ---
 
@@ -425,11 +426,11 @@ set such a limit expect the planning message of section 7.
   structural limit like the arity and variable limits of D-7 would buy no
   representation and would be a restriction that a generated program can
   meet.
-* **A default budget on plans.** The Magic budgets of D-7 exist because the
-  rewrite is optional and has a fallback, and the literal budget of section
-  2 is that mechanism applied to the rewrite's size: it bounds the literals
-  the rewrite drafts, not the plans and delta variants that evaluating them
-  builds. It is the supplementary construction, which keeps every prefix
+* **A default budget on plans.** The Magic limit of D-37 has a default
+  because the rewrite is optional and has a fallback, and it is that
+  mechanism applied to the rewrite's size: it bounds the literals the
+  rewrite reads and drafts, not the plans and delta variants that evaluating
+  them builds. It is the supplementary construction, which keeps every prefix
   after a body's first demand call to one literal wherever its live
   variables fit a predicate, that keeps those plans linear in the body. A rule's plans and its delta variants are the
   evaluation itself: the naive evaluator of D-9 is the

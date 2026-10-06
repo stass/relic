@@ -397,23 +397,13 @@ base store up by the bound columns like any complete relation, so an
 adornment reads only the facts its demand reaches, and the rewrite's size
 does not depend on how many facts there are.
 
-**The budgets** are proportional to the program, `specs/design-magic.md`:
-each is 256 plus 16 per unit of the program.
-
-| Budget | Unit of the program |
-| --- | --- |
-| generated predicates | a member of the program's schedule |
-| searched literals | a rule's body length plus one |
-| generated literals | a rule's body length plus one |
-
-Generated rules have a limit and no budget: the budget on generated
-literals bounds
-them, since every generated rule but a seed has a body literal, and every
-seed but the query's follows a draft charged one. A derived predicate with
-facts counts as though the program held the rule its adornments are given,
+**The rewrite's limit** has a default in proportion to the program and the
+query, `specs/design-magic.md` section 8: 768 plus 48 per literal of them,
+a rule counting its body length plus one. A derived predicate with facts
+counts as though the program held the rule its adornments are given,
 `p(X, Y) :- p$base(X, Y).`: two literals. The facts themselves count
 nothing, since the rewrite copies none of them. A base view counts against
-no budget or limit, since it adds no relation.
+no limit, since it adds no relation.
 
 ---
 
@@ -493,8 +483,8 @@ twice.
 * **Magic.** A bound query over a derived predicate with facts reads them
   through the base view, and `-e` shows one rule over it per adornment; its
   rows begin with its facts; seeds are inserted on every evaluation of a
-  rewrite and shown as `facts: 1`; a rewrite abandoned over its budget leaves
-  no warning about the predicates it generated; the budget goldens are
+  rewrite and shown as `facts: 1`; a rewrite abandoned over its limit leaves
+  no warning about the predicates it generated; the limit goldens are
   re-derived.
 * **Arity zero.** A fact of no columns is staged, stored, seeded and
   answered.
@@ -524,8 +514,8 @@ twice.
    `referenced`; base stores and staging; the commit,
    fed by staging built from each fact statement the parser has already
    made, which the load then drops from its statements; seeding, the
-   discard and the currency pair; base views, completeness and the budgets
-   in Magic; explain's fact counts; `relic_fact_add()` as a load of one.
+   discard and the currency pair; base views, completeness and the limit's
+   default in Magic; explain's fact counts; `relic_fact_add()` as a load of one.
    Every counter test is re-derived. Gate: the language corpus and the
    Magic suites answer the same under every strategy, and the tests of
    section 9 but the memory gate pass.
@@ -580,7 +570,7 @@ of a load's facts are interned before its rules' predicates.
   reservation for *n* entries.
 * `specs/design-planning-cost.md`: the limits bound the program's facts
   as well as what running it does, so a load can be refused; and the
-  program's facts do not raise the Magic budgets.
+  program's facts do not raise the Magic limit's default.
 * `specs/design-eval.md` and `specs/design-evaluation-cost.md` sections
   3.4 and 7: seeding before the first pass, the currency pair, and facts
   stored as this document says.
@@ -588,7 +578,7 @@ of a load's facts are interned before its rules' predicates.
   and a program's facts are in none of them.
 * `specs/design-magic.md`: completeness is the derived mark, base views
   are interned before the rewrite, facts enter an adornment through the
-  base view, the budgets' units, seeds as the rewrite's body-less rules,
+  base view, the limit's units, seeds as the rewrite's body-less rules,
   and the explain example.
 * `specs/design-planner.md`: the explain examples that show fact counts.
 * `specs/design-api.md` section 4: a programmatic fact is committed to its

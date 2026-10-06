@@ -518,7 +518,7 @@ query object owns, per `specs/design-query.md`. Answering one is three steps:
    relations it reads completely are evaluated from the program's schedule,
    the rules the rewrite generates are evaluated from a schedule of their
    own, and the query rule is the rewritten one. A rewrite that outgrows its
-   budget is abandoned, and the query answered from the materialized program
+   limit is abandoned, and the query answered from the materialized program
    instead. A query holding an aggregate also owns the group rules of its
    aggregates, which run once each, after the program's part is evaluated
    and before any rule the rewrite generates, since a generated rule may

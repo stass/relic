@@ -1291,7 +1291,7 @@ drafts `magic$p$b(N) :- N = count { v(X) }.`, a generated rule that folds
 the query's group; a group filled after the generated rules ran would have
 been read empty by that seed, and the query would demand `p(0)` and find
 nothing where the whole program answers. A rewrite abandoned over its
-budget falls back to the whole program's fixed point in step 2 and has no
+limit falls back to the whole program's fixed point in step 2 and has no
 step 4, and the sequence stands.
 
 **The group relations are emptied when the run ends**, with the answer
@@ -1352,8 +1352,8 @@ part of one, and fails the query with an internal error instead.
 
 **A literal's size is one.** The literal holds no expression tree and its
 body is not copied, since what it folds is read completely and never
-rewritten, so the budgets of `specs/design-magic.md` section 8 charge it
-one literal wherever they charge a literal.
+rewritten, so the limit of `specs/design-magic.md` section 8 charges it
+one literal wherever it charges a literal.
 
 The equivalence `magic(Q, P) == Q(full_materialize(P))` holds by the
 argument of section 9.3 there: an aggregate literal reads, in the

@@ -587,7 +587,7 @@ struct relic_expr_call {
 A call node lives in the program arena beside its rule, as every node does,
 and its height and node count are recorded as every node's are: height one
 more than its tallest argument, nodes one more than its arguments' together.
-The Magic rewrite's budgets, which count sizes, need no change to charge a
+The Magic rewrite's limit, which counts sizes, needs no change to charge a
 call what it costs, section 10.
 
 **A constant pattern is compiled with the rule.** When the rule compiler
@@ -1220,7 +1220,7 @@ has its kind and its operands, and a copied `match` keeps its pointer to
 the compiled constant pattern, which lives in the program arena the copy
 outlives nothing of. A supplementary predicate's column that holds a
 computed string holds it interned, when the supplementary tuple was stored.
-The budgets count sizes, and a call's size is its nodes.
+The rewrite's limit counts sizes, and a call's size is its nodes.
 
 ---
 

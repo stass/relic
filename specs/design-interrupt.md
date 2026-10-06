@@ -184,7 +184,7 @@ delta, and discarding derived relations each take time bounded by what the
 store holds rather than by how long the evaluation runs, and each is done
 whole; a frontier, moreover, only moves forward, so its walks over an
 evaluation together cover each chain once. Planning and the Magic rewrite are
-bounded by the program and the rewrite's budgets. An interrupt made during
+bounded by the program and the rewrite's limit. An interrupt made during
 any of them is noticed at the executor's next return.
 
 **Determinism.** An uninterrupted evaluation derives what it derives without
