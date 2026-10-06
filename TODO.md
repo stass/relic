@@ -31,14 +31,6 @@ and 6 are not started. The causes and what to try are sorted in
 
 ## Engine
 
-**Calibrate the Magic limit's default.** [Low, component: `lib/magic.c`]
-The default, 768 + 48 x the size of the program and the query, is the sum
-of the three allowances of 256 + 16 x the program's size that the search,
-a second search and the draft each had before D-37, so it admits every
-rewrite they admitted. Measuring what rewrites spend over the test corpus
-and `bench/` may justify a smaller factor, which would abandon a rewrite
-that multiplies the program sooner. D-37 lets the factor fall, never rise.
-
 **A literal that binds nothing new multiplies a join's rows.** [Medium,
 component: `lib/plan.c`, `lib/exec.c`] A positive literal yields one
 binding per tuple it matches even when the rest of the rule reads none of
