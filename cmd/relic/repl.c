@@ -349,17 +349,22 @@ answer_line(repl_t *repl, char *line, size_t length, size_t line_number)
  * relic_interrupt() only raises a flag, the record is a volatile
  * sig_atomic_t, and write(2) is async-signal-safe.  The session prompts
  * only when standard error is a terminal, so the newline goes where the
- * echo went.
+ * echo went.  A failed write leaves the handler nothing to do, so its
+ * result is ignored; it passes through a variable because GCC does not
+ * accept a (void) cast as ignoring a result that glibc declares
+ * warn_unused_result.
  */
 static void
 interrupt_answer(int signal_number RELIC_CMD_UNUSED)
 {
 	int saved_errno;
+	ssize_t written;
 
 	saved_errno = errno;
 	relic_interrupt(interrupted_ctx);
 	repl_interrupted = 1;
-	(void)write(STDERR_FILENO, "\n", 1);
+	written = write(STDERR_FILENO, "\n", 1);
+	(void)written;
 	errno = saved_errno;
 }
 
