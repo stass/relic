@@ -257,32 +257,47 @@ deferred, which `specs/design-parallel.md` section 12 forbids. So they
 are released at every round's end as today, and made once at its start,
 at the size the round is expected to need.
 
-**The estimate.** A plan's history (`relic_plan_history_t`) records, with
-the work its last run did, the tuples that run **inserted**: on the
-serial path the difference in the context's inserted count across the
-item's turn, on the deferred path the firsts the merge counted for the
-item's tasks. It is recorded unscaled and used unscaled: the new tuples
-of a recursive component's rounds do not follow its delta -- round 2 of
-`tc-cyclic` reads eighteen times round 1's delta and inserts a tenth as
-much -- and the previous round's count predicts the next within a small
-factor, where a count scaled by the delta would predict fifteen million
-for 88 thousand. An item that has not run is expected to insert what its
-first view holds, which is what it is estimated to read. The round's
-**expected candidates** are the sum over its items.
+**The estimate.** Beside a plan's history of the work its last run did,
+an item keeps a record of the tuples that run **inserted**
+(`relic_insert_history_t`): on the serial path the difference in the
+context's inserted count across the item's turn, on the deferred path
+the firsts the merge counted for the item's tasks. The record belongs to
+what derives the tuples rather than to the plan that ran: the two plans
+of a rule's delta variant, of which a round runs the one its delta's
+size selects, derive the same tuples and share one record, so a round
+that crosses from one plan to the other is still predicted. It is
+recorded unscaled and used unscaled: the new tuples of a recursive
+component's rounds do not follow its delta -- round 2 of `tc-cyclic`
+reads eighteen times round 1's delta and inserts a tenth as much -- and
+the previous round's count predicts the next within a small factor,
+where a count scaled by the delta would predict fifteen million for 88
+thousand. An item that has not run is expected to insert nothing: its
+first view bounds neither what it derives nor what of that is new, and a
+rule that reads a hundred million tuples to keep ten would reserve
+gigabytes on that view's word. The round's **expected candidates** are
+the sum over its items. An item keeps its records on every context whose
+rounds may be deferred, `-X parallel` on one thread among them, so that
+the single-worker deferred round reserves as the pool's does.
 
 **The reservation.** Before the job is published, each worker's
 candidates are given room for the expected candidates when the pool has
 one worker, and for twice its share of them otherwise, since a worker
 claims whatever tasks it reaches: the screen reserved for that many
-entries, the entry, stripe and column arrays grown to that many
-candidates of the round's widest arity (`round_needs()`). Growth stays as
-it is for a round that exceeds its estimate; it then starts from the
-estimate rather than from nothing, which for a round predicted within a
-factor of two is one doubling. The reservation is charged as a growth is
-today, through `candidates_reserve()`, so the account sees the same bytes
-it would have seen at the round's end. A reservation the limit or the
-allocator refuses declines the round before anything runs, as a refused
-text buffer does (`begin_worker_texts()`), and the round runs serially.
+entries, the entry and stripe arrays grown to that many candidates, and
+the column array to that many at the expected candidates' width, their
+columns at each target's arity summed and divided by their count,
+rounded up. Growth stays as it is for a round that exceeds its estimate;
+it then starts from the estimate rather than from nothing, which for a
+round predicted within a factor of two is one doubling. The reservation
+is charged as a growth is today, through `candidates_reserve()`, so the
+account sees the same bytes it would have seen at the round's end. A
+reservation the limit or the allocator refuses declines the round before
+anything runs, as a refused text buffer does (`begin_worker_texts()`),
+and the round runs serially.
+
+A refused reservation is counted on the pool, beside the rounds merged
+and abandoned, so that the memory limit's sweep can require that it
+reaches one.
 
 **What it costs.** A round predicted ten times too large -- round 2 of
 `tc-cyclic`, reserved from round 1's 864 thousand -- charges 20 MB on one
@@ -292,11 +307,12 @@ hold none of it, so near the memory limit the deferred round is declined
 where the serial one would run, and runs serially: the outcome
 `specs/design-parallel.md` section 6.1 already provides, paid in time
 and never in a different answer. A round predicted too small pays a
-shorter cascade. The round that costs most today, the first round of a
-recursive rule, is predicted from a view and keeps most of its cascade:
-`docs/todo-parallel.md` wants an estimate from the plan for the same
-round, and when one exists it is a bound on derivations, too loose to
-reserve by; the reservation stays with what was inserted.
+shorter cascade, and an item that has not run pays the whole of it. The
+round that costs most today, the first round of a recursive rule, is such
+an item and keeps its cascade: `docs/todo-parallel.md` wants an estimate
+from the plan for the same round, and when one exists it is a bound on
+derivations, too loose to reserve by; the reservation stays with what was
+inserted.
 
 **Nothing is projected when nothing grows.** `candidates_reserve()`
 first asks whether the arrays hold what the growth adds -- each array's
@@ -526,8 +542,8 @@ what each is measured against; step 4 depends on all three.
 * `specs/design-parallel.md` section 5.3: the batch is screened in
   passes with prefetching, section 4, and the worker's buffers are
   reserved from the round's expected candidates before the job is
-  published, section 5; section 5.4: `relic_plan_history_t` records the
-  tuples an item inserted, and the threshold is re-measured against the
+  published, section 5; section 5.4: an item records the tuples it
+  inserted, and the threshold is re-measured against the
   floor of section 7; section 6.3 phase 1 and phases 4 and 7: a part
   walks its stripe's listed positions rather than every candidate's
   stripe byte, section 6; section 8: the buffers are charged at the

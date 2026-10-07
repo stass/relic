@@ -53,9 +53,9 @@ loaded throughout, so how much of the shortfall is contention is unknown.
 On a quiet machine, record each task's time and each worker's: a long tail
 of tasks points at the cut (`RELIC_CHUNKS_PER_WORKER`, `RELIC_CHUNK_WORK`),
 while even tasks that are each slower than serial point at memory
-bandwidth or at the workers' screens. Reserving a worker's screen from the
-round's estimate rather than growing it from empty, which the item on a
-deferred round's cost on one thread proposes, would help here too.
+bandwidth or at the workers' screens. A worker's screen is reserved from
+what round 2 inserted, so round 3 no longer grows it from empty; that
+gain is not yet measured at sixteen threads.
 
 ## A round cut by a scan over a few tuples
 

@@ -39,6 +39,7 @@
 
 typedef struct relic_candidate relic_candidate_t;
 typedef struct relic_candidates relic_candidates_t;
+typedef struct relic_insert_history relic_insert_history_t;
 typedef struct relic_plan_history relic_plan_history_t;
 typedef struct relic_pool relic_pool_t;
 typedef struct relic_pool_job relic_pool_job_t;
@@ -62,10 +63,24 @@ struct relic_plan_history {
 };
 
 /*
+ * What an item inserted the last time it ran, from which the candidates
+ * its next run gathers are expected: `inserted`, the tuples it inserted
+ * that its target lacked.  `ran` is false until it has run.  The plans
+ * that run one delta variant of a rule derive the same tuples, whichever
+ * a round chooses, and share one such record; their work differs, and
+ * each keeps its own plan history.
+ */
+struct relic_insert_history {
+	uint64_t	inserted;
+	bool		ran;
+};
+
+/*
  * One item of a round, what the serial evaluator runs in one turn: a seed,
  * whose `plan` is NULL and whose head is all constants, or a plan.  `rule`
- * is what the item was built from.  `history` is the plan's, where one is
- * kept, and NULL otherwise.  `target` is the position among the round's
+ * is what the item was built from.  `history` is the plan's and
+ * `insertions` the record of what the item inserted, where they are kept,
+ * and NULL otherwise.  `target` is the position among the round's
  * targets of the relation the item's tuples go into, which for a plan is
  * the relation its EMIT names.  `gained` is set once the item's turn has
  * inserted a tuple its target did not hold, whichever way the round ran.
@@ -74,6 +89,7 @@ struct relic_round_item {
 	const relic_plan_t	*plan;
 	const relic_rule_t	*rule;
 	relic_plan_history_t	*history;
+	relic_insert_history_t	*insertions;
 	size_t			 target;
 	bool			 gained;
 };
@@ -102,10 +118,11 @@ struct relic_round {
  * `cut`, over the contiguous piece `piece` of it.  A seed and a plan whose
  * first operation is not a SCAN are never cut.
  *
- * The rest is written by the worker that runs the task and read by the
- * merge once every task has run: which worker ran it, where its candidates
- * lie among that worker's, the first mixed-type comparison it met, and the
- * work it did, the tuples it read and derived.
+ * The worker that runs the task then writes, for the merge to read once
+ * every task has run, which worker ran it, where its candidates lie among
+ * that worker's, the first mixed-type comparison it met, and the work it
+ * did, the tuples it read and derived.  `inserted` is the merge's: how
+ * many of the task's candidates are tuples new to its target.
  */
 struct relic_round_task {
 	size_t			 item;
@@ -117,6 +134,8 @@ struct relic_round_task {
 	size_t			 candidate_count;
 	relic_mixed_note_t	 note;
 	uint64_t		 work;
+
+	size_t			 inserted;
 };
 
 /*
@@ -242,6 +261,12 @@ struct relic_worker {
  * rather than a round's buffers.  `thread_tasks`
  * counts the tasks of merged rounds that a thread of the pool ran rather
  * than the calling thread, so that a test can tell the threads did work.
+ * `expected_candidates` sums, over the rounds whose candidates the pool
+ * reserved room for, the candidates each was expected to gather, so that
+ * a test can tell the reservations follow what the rounds before inserted;
+ * `reservation_declines` counts the rounds declined because the limit or
+ * the allocator refused that room, so that a test can tell a limit
+ * reached the reservation.
  */
 struct relic_pool {
 	relic_worker_t		*workers;
@@ -254,6 +279,8 @@ struct relic_pool {
 	uint64_t		 abandoned_rounds;
 	uint64_t		 limit_declines;
 	uint64_t		 thread_tasks;
+	uint64_t		 expected_candidates;
+	uint64_t		 reservation_declines;
 };
 
 /*
@@ -304,20 +331,22 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * storage total, for the serial run to grow into.  A round is not run
  * deferred when it reads a relation it writes, when it is too small to
  * repay sharing it among the pool's threads -- unless
- * RELIC_F_PARALLEL_ALWAYS asks for every round -- or when the pool, or the
- * workers' buffers for the strings a calling round computes, could not be
+ * RELIC_F_PARALLEL_ALWAYS asks for every round -- or when the pool, the
+ * workers' buffers for the strings a calling round computes, or the room
+ * reserved for the candidates the round is expected to gather could not be
  * had, and is abandoned when a task could not go on or its merge declined.
  * A deferred round's merge cannot fail: whatever could refuse it is asked
  * before anything is inserted, and a refusal declines the round.
  *
  * relic_round_record() records in an item's history, when it has one,
  * that its turn in a round run serially did `work`, the tuples it read and
- * derived.  relic_round_first_call() gives the first item of a round whose
+ * derived, and inserted `inserted` tuples its target lacked.
+ * relic_round_first_call() gives the first item of a round whose
  * plan calls a function, or NULL when none does.
  */
 bool	 relic_round_run(relic_t *ctx, relic_round_t *round);
 void	 relic_round_record(const relic_round_t *round,
-	    relic_round_item_t *item, uint64_t work);
+	    relic_round_item_t *item, uint64_t work, uint64_t inserted);
 const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
 
 /*
@@ -387,11 +416,17 @@ uint64_t relic_pool_spin_nanoseconds(size_t workers, long processors);
  * abandoned, and abandons the job when the task cannot go on.
  * relic_candidates_init() readies a worker's empty candidates, and
  * relic_candidates_release() releases them, giving the account back what
- * they were charged.
+ * they were charged.  relic_candidates_reserve() gives a worker's empty
+ * candidates room for `tuples` candidates of `words` columns in all before
+ * a round's tasks run, charged as a growth is, and returns 0, or -1 when
+ * the limit or the allocator refused it, whatever was obtained kept and
+ * charged for relic_candidates_release() to give back.
  */
 void	 relic_round_run_task(void *job, size_t task, size_t worker_index);
 void	 relic_candidates_init(relic_candidates_t *candidates,
 	    uint64_t hash_seed);
+int	 relic_candidates_reserve(relic_candidates_t *candidates,
+	    relic_account_t *account, size_t tuples, size_t words);
 void	 relic_candidates_release(relic_candidates_t *candidates,
 	    relic_account_t *account);
 

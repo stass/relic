@@ -43,10 +43,11 @@ workload. The floor is proportional to new tuples, not derivations or
 rounds. Steps 1 to 4 of the design's section 10 take it down and then
 re-measure the threshold of `specs/design-parallel.md` section 5.4. Step
 1, the screen probed in passes and the fast path, is in: round 1 of
-`tc-cyclic`'s task phase at 0.86 of its time before. Steps 2 to 4 are
-not. Its prototype found that sizing the screen before the round
-removes the growth cascade only where history predicts the round, which
-excludes the round that costs most.
+`tc-cyclic`'s task phase at 0.86 of its time before. Step 2, buffers
+reserved from what each item inserted last, is in: the screen moves
+nothing on a round with a history, and `chain-closure`'s task phase is
+at 0.83 of step 1's. Steps 3 and 4 are not. The round that costs most,
+a recursive rule's first, has no history and keeps its growth cascade.
 
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes

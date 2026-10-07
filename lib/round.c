@@ -80,7 +80,19 @@
 #define	RELIC_PARALLEL_MIN_WORK	65536u
 #define	RELIC_CHUNK_WORK	4096u
 
+typedef struct relic_round_expectation relic_round_expectation_t;
+
+/*
+ * What a round's workers are expected to gather in all: `candidates`, and
+ * `words`, their columns.
+ */
+struct relic_round_expectation {
+	uint64_t	candidates;
+	uint64_t	words;
+};
+
 static void	 abandon_round(relic_t *ctx, relic_pool_t *pool);
+static void	 decline_round(relic_t *ctx, relic_pool_t *pool);
 static int	 begin_worker_texts(relic_t *ctx, relic_pool_t *pool);
 static size_t	 end_worker_texts(relic_pool_t *pool);
 static int	 cut_tasks(relic_pool_t *pool, const relic_round_t *round,
@@ -106,6 +118,10 @@ static void	 record_task_work(const relic_pool_t *pool,
 static void	 release_candidates(relic_t *ctx, relic_pool_t *pool);
 static void	 report_task_notes(relic_t *ctx, relic_pool_t *pool,
 		    const relic_round_t *round);
+static int	 reserve_candidates(relic_t *ctx, relic_pool_t *pool,
+		    const relic_round_t *round);
+static relic_round_expectation_t round_expectation(
+		    const relic_round_t *round);
 static bool	 round_is_worth_sharing(const relic_t *ctx,
 		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
@@ -122,6 +138,8 @@ static relic_tuple_range_t view_piece(relic_tuple_range_t view, size_t piece,
 		    size_t pieces);
 static int	 worker_fit(relic_worker_t *worker, size_t op_room,
 		    uint16_t arity_room);
+static size_t	 worker_share(uint64_t expected, size_t workers,
+		    size_t admissible);
 
 /*
  * Under RELIC_F_PARALLEL_ALWAYS every round that may wait is run on the
@@ -156,9 +174,12 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	if (pool_prepare(pool, round) != 0 ||
 	    cut_tasks(pool, round, always) != 0)
 		return (false);
-	if (relic_round_first_call(round) != NULL &&
-	    begin_worker_texts(ctx, pool) != 0)
+	if ((relic_round_first_call(round) != NULL &&
+	    begin_worker_texts(ctx, pool) != 0) ||
+	    reserve_candidates(ctx, pool, round) != 0) {
+		decline_round(ctx, pool);
 		return (false);
+	}
 
 	job_begin(&job, ctx, pool, round);
 	relic_pool_for(pool, pool->task_count, relic_round_run_task, &job);
@@ -205,14 +226,17 @@ relic_round_first_call(const relic_round_t *round)
 
 void
 relic_round_record(const relic_round_t *round, relic_round_item_t *item,
-    uint64_t work)
+    uint64_t work, uint64_t inserted)
 {
-	if (item->history == NULL)
-		return;
-
-	item->history->work = work;
-	item->history->range = item_range(round, item);
-	item->history->ran = true;
+	if (item->history != NULL) {
+		item->history->work = work;
+		item->history->range = item_range(round, item);
+		item->history->ran = true;
+	}
+	if (item->insertions != NULL) {
+		item->insertions->inserted = inserted;
+		item->insertions->ran = true;
+	}
 }
 
 /*
@@ -323,28 +347,153 @@ job_begin(relic_round_job_t *job, relic_t *ctx, relic_pool_t *pool,
 }
 
 /*
- * Record in each item's history the work its tasks did, which the merge
- * has made the item's turn.  An item's tasks are consecutive.
+ * Record in each item's history the work its tasks did and the tuples they
+ * inserted, which the merge has made the item's turn.  An item's tasks are
+ * consecutive.
  */
 static void
 record_task_work(const relic_pool_t *pool, relic_round_t *round)
 {
 	const relic_round_task_t *task;
+	uint64_t inserted;
 	uint64_t work;
 	size_t i;
 
 	work = 0;
+	inserted = 0;
 	for (i = 0; i < pool->task_count; i++) {
 		task = &pool->tasks[i];
 		work += task->work;
+		inserted += task->inserted;
 
 		if (i + 1 == pool->task_count ||
 		    pool->tasks[i + 1].item != task->item) {
 			relic_round_record(round, &round->items[task->item],
-			    work);
+			    work, inserted);
 			work = 0;
+			inserted = 0;
 		}
 	}
+}
+
+/*
+ * Give every worker's candidates, before the round's tasks run, room for
+ * the candidates it is expected to gather, so that a round predicted well
+ * grows none of its buffers, and one that exceeds its prediction grows
+ * from the prediction rather than from nothing.  With one worker that is
+ * every candidate the round is expected to gather; with several, twice an
+ * even share of them, since a worker gathers what the tasks it happens to
+ * claim derive.  Each worker's columns are reserved at the expected
+ * candidates' width, rounded up.  The room is charged as the buffers'
+ * growth is, and released with them at the round's end.  Returns 0, or -1
+ * when the limit or the allocator refused it, which declines the round
+ * before anything runs; what was obtained is the candidates' to release.
+ */
+static int
+reserve_candidates(relic_t *ctx, relic_pool_t *pool,
+    const relic_round_t *round)
+{
+	relic_round_expectation_t expected;
+	uint64_t width;
+	size_t share;
+	size_t i;
+
+	expected = round_expectation(round);
+	share = worker_share(expected.candidates, pool->worker_count,
+	    relic_tuples_admissible(ctx));
+	if (share == 0)
+		return (0);
+
+	width = (expected.words + expected.candidates - 1) /
+	    expected.candidates;
+	for (i = 0; i < pool->worker_count; i++) {
+		if (relic_candidates_reserve(&pool->workers[i].candidates,
+		    &ctx->account, share, share * (size_t)width) != 0) {
+			pool->reservation_declines++;
+			return (-1);
+		}
+	}
+	pool->expected_candidates += expected.candidates;
+
+	return (0);
+}
+
+/*
+ * What a round's items are expected to gather: the tuples each inserted
+ * the last time it ran, and their columns, each at its target's arity.  The
+ * new tuples of a recursive component's rounds do not follow the size of
+ * its delta -- a round may read many times its predecessor's delta and
+ * insert a tenth as much -- but a round's insertions predict the next
+ * round's within a small factor, so they are taken unscaled.  An item that
+ * has not run, or keeps no record, is expected to gather nothing: its
+ * first view bounds neither what it derives nor what of that is new, and
+ * room reserved for a large view that yields little would be charged for
+ * nothing.  Each item's count is below 2^32 and an arity below 2^16, so
+ * neither sum over a round's items can overflow.
+ */
+static relic_round_expectation_t
+round_expectation(const relic_round_t *round)
+{
+	const relic_insert_history_t *insertions;
+	relic_round_expectation_t expected;
+	uint16_t arity;
+	size_t i;
+
+	bzero(&expected, sizeof(expected));
+	for (i = 0; i < round->item_count; i++) {
+		insertions = round->items[i].insertions;
+		if (insertions == NULL || !insertions->ran)
+			continue;
+
+		arity = relic_relation_arity(
+		    round->targets[round->items[i].target]);
+		expected.candidates += insertions->inserted;
+		expected.words += insertions->inserted * arity;
+	}
+
+	return (expected);
+}
+
+/*
+ * The candidates each of `workers` workers is given room for when a round
+ * expects `expected`: all of them for one worker, twice an even share of
+ * them for several, and never more than all of them, nor more than the
+ * `admissible` tuples the tuple limit admits, past which a worker abandons
+ * its round anyway.
+ */
+static size_t
+worker_share(uint64_t expected, size_t workers, size_t admissible)
+{
+	uint64_t share;
+
+	assert(workers > 0);
+
+	if (expected > RELIC_TUPLE_MAX)
+		expected = RELIC_TUPLE_MAX;
+	if (expected > admissible)
+		expected = admissible;
+
+	share = expected;
+	if (workers > 1)
+		share = 2 * ((expected + workers - 1) / workers);
+	if (share > expected)
+		share = expected;
+
+	return ((size_t)share);
+}
+
+/*
+ * Leave a round declined before it was published as though it had never
+ * begun: the workers' buffers for strings and their candidates released,
+ * with their charge.  Either may hold nothing, and releasing nothing is
+ * harmless, so every way a round is declined before publication ends
+ * here.
+ */
+static void
+decline_round(relic_t *ctx, relic_pool_t *pool)
+{
+	(void)end_worker_texts(pool);
+	release_candidates(ctx, pool);
 }
 
 /*

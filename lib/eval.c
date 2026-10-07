@@ -161,13 +161,19 @@ struct relic_emit_target {
  * the caller.  A running plan is only read while it runs; the executor's
  * state is the evaluation's scratch.  `history` is what the plan did the
  * last time it ran, from which a round estimates whether it is worth
- * sharing among threads; it is kept only on a context that has threads.
+ * sharing among threads, and `insertions` is where what its runs inserted
+ * is recorded, from which a round expects the candidates its workers will
+ * gather: `own_insertions`, or for the second plan of a delta variant the
+ * first's, since the two derive the same tuples.  They are used only on a
+ * context whose rounds may be deferred.
  */
 struct relic_running_plan {
 	relic_plan_t		 plan;
 	const relic_rule_t	*rule;
 	relic_emit_target_t	 target;
 	relic_plan_history_t	 history;
+	relic_insert_history_t	*insertions;
+	relic_insert_history_t	 own_insertions;
 };
 
 /*
@@ -570,6 +576,7 @@ static void	 gather_variant_round(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans, relic_round_t *round);
 static int	 run_item(relic_evaluation_t *eval, const relic_round_t *round,
 		    relic_round_item_t *item);
+static bool	 rounds_may_be_deferred(const relic_t *ctx);
 static int	 run_round(relic_evaluation_t *eval, relic_round_t *round);
 static uint64_t	 counted_work(const relic_t *ctx);
 static void	 begin_round(relic_evaluation_t *eval,
@@ -1121,17 +1128,13 @@ static int
 run_round(relic_evaluation_t *eval, relic_round_t *round)
 {
 	const relic_round_item_t *calling;
-	const relic_config_t *config;
 	enum relic_exec_failure failure;
 	int status;
 	size_t i;
 
-	config = &eval->ctx->config;
-	if (config->threads > 1 ||
-	    (config->flags & RELIC_F_PARALLEL_ALWAYS) != 0) {
-		if (relic_round_run(eval->ctx, round))
-			return (0);
-	}
+	if (rounds_may_be_deferred(eval->ctx) &&
+	    relic_round_run(eval->ctx, round))
+		return (0);
 
 	calling = relic_round_first_call(round);
 	if (calling != NULL &&
@@ -1155,19 +1158,21 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
  * An item's turn in a round that inserts as it derives: a seed inserts its
  * head and a plan runs, and the item is marked when its turn inserted a
  * tuple its target did not hold.  An item that keeps a history records the
- * work its turn did.
+ * work its turn did and the tuples it inserted.
  */
 static int
 run_item(relic_evaluation_t *eval, const relic_round_t *round,
     relic_round_item_t *item)
 {
 	relic_emit_target_t target;
+	uint64_t inserted_before;
 	uint64_t work_before;
 	int status;
 
 	bzero(&target, sizeof(target));
 	target.relation = round->targets[item->target];
 	work_before = counted_work(eval->ctx);
+	inserted_before = eval->ctx->counters.tuples_inserted;
 
 	eval->derived = false;
 	if (item->plan == NULL)
@@ -1176,9 +1181,21 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 		status = execute_plan(eval, item->plan, item->rule, &target);
 	item->gained = eval->derived;
 
-	relic_round_record(round, item, counted_work(eval->ctx) - work_before);
+	relic_round_record(round, item, counted_work(eval->ctx) - work_before,
+	    eval->ctx->counters.tuples_inserted - inserted_before);
 
 	return (status);
+}
+
+/*
+ * Whether a context offers its rounds for deferral: it has threads, or
+ * RELIC_F_PARALLEL_ALWAYS asks for every round to be deferred.
+ */
+static bool
+rounds_may_be_deferred(const relic_t *ctx)
+{
+	return (ctx->config.threads > 1 ||
+	    (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0);
 }
 
 /*
@@ -1211,8 +1228,8 @@ begin_round(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 /*
  * Add an item to a round of the component being evaluated: a seed of
  * `rule` when `running` is NULL, and otherwise the running plan of it,
- * with the plan's history on a context whose rounds may be shared among
- * threads.  Its target is the member the rule's head is, and a component's
+ * with the plan's history and its record of insertions on a context whose
+ * rounds may be deferred.  Its target is the member the rule's head is, and a component's
  * round targets its members in the order of their positions.
  */
 static void
@@ -1227,10 +1244,13 @@ add_item(const relic_evaluation_t *eval, relic_round_t *round,
 
 	item->plan = NULL;
 	item->history = NULL;
+	item->insertions = NULL;
 	if (running != NULL) {
 		item->plan = &running->plan;
-		if (eval->ctx->config.threads > 1)
+		if (rounds_may_be_deferred(eval->ctx)) {
 			item->history = &running->history;
+			item->insertions = running->insertions;
+		}
 	}
 	item->rule = rule;
 	item->target = head_member_of(eval, rule);
@@ -1925,6 +1945,8 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 	running->target.rows.callback = NULL;
 	running->target.rows.callback_ctx = NULL;
 	bzero(&running->history, sizeof(running->history));
+	bzero(&running->own_insertions, sizeof(running->own_insertions));
+	running->insertions = &running->own_insertions;
 
 	*runningp = running;
 	return (0);
@@ -2129,6 +2151,13 @@ plan_variant(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 	    make_running_plan(eval, rule, &variant_plans.delta_first, target,
 	    &variant->delta_first) != 0)
 		return (-1);
+
+	/*
+	 * Whichever plan a round runs, the variant derives the same tuples,
+	 * so what one run inserted predicts the next run of either.
+	 */
+	if (variant->placed != NULL && variant->delta_first != NULL)
+		variant->delta_first->insertions = variant->placed->insertions;
 
 	return (0);
 }
@@ -2992,6 +3021,7 @@ gather_query_answer(relic_evaluation_t *eval,
 	item.plan = &running->plan;
 	item.rule = running->rule;
 	item.history = NULL;
+	item.insertions = NULL;
 	item.target = 0;
 	item.gained = false;
 

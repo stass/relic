@@ -61,6 +61,7 @@
 #define	SCENARIO_PATTERN	"an invalid pattern fails as serially"
 #define	SCENARIO_TEXT_TUPLES	"the tuple limit refuses strings as serially"
 #define	SCENARIO_TEXT_MEMORY	"the memory limit refuses strings as serially"
+#define	SCENARIO_HISTORY	"a round reserves what its items inserted"
 
 /* Room for a generated program and for a context's diagnostics. */
 #define	PROGRAM_MAX		(256 * 1024)
@@ -97,6 +98,18 @@
 #define	DEFERRED_THREADS	4
 #define	MANY_THREADS		16
 
+/*
+ * The links of the chain whose closure gains one tuple a round; the links
+ * of a broom's handle, along which the walk's rounds are too small to
+ * share; and the leaves its end fans out to, every number of
+ * BROOM_DIGITS decimal digits, more than any round's work below the
+ * threshold of sharing.
+ */
+#define	HISTORY_CHAIN		50u
+#define	BROOM_HANDLE		10u
+#define	BROOM_DIGITS		5u
+#define	BROOM_LEAVES		100000u
+
 typedef struct diagnostics diagnostics_t;
 typedef struct text text_t;
 
@@ -120,6 +133,10 @@ struct text {
 
 static void	 a_deferred_round_inserts_in_serial_order(size_t threads);
 static void	 a_querys_rewrite_runs_deferred_rounds(size_t threads);
+static uint64_t	 expected_candidates(const relic_t *ctx);
+static uint64_t	 reservation_declines(const relic_t *ctx);
+static void	 rounds_reserve_what_deferred_rounds_inserted(size_t threads);
+static void	 rounds_reserve_what_serial_rounds_inserted(void);
 static void	 appendf(text_t *text, const char *format, ...)
 		    RELIC_TEST_PRINTFLIKE(2, 3);
 static relic_t	*context_for(const char *program, unsigned int flags,
@@ -384,6 +401,111 @@ strings_rounds_merge(size_t threads)
 }
 
 /*
+ * A deferred round expects to gather what its items inserted the last
+ * time each ran, as its merge counted them.  The closure of a chain from
+ * one node gains one tuple a round, the round of its last link none: the
+ * recursive rule's first round has run nothing before and expects
+ * nothing, and each round after it expects the one tuple the round before
+ * inserted, HISTORY_CHAIN rounds in all.  The seed's round has no plan to
+ * keep a history for.
+ */
+static void
+rounds_reserve_what_deferred_rounds_inserted(size_t threads)
+{
+	diagnostics_t diagnostics;
+	text_t program;
+	relic_t *deferred;
+	char what[64];
+	unsigned int i;
+
+	program.length = 0;
+	program.bytes[0] = '\0';
+	for (i = 0; i < HISTORY_CHAIN; i++)
+		appendf(&program, "succ(%u, %u).\n", i, i + 1);
+	appendf(&program,
+	    "reach(0).\n"
+	    "reach(Y) :- reach(X), succ(X, Y).\n");
+
+	snprintf(what, sizeof(what), "a chain on %zu thread(s)", threads);
+	deferred = context_for(program.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, 0, &diagnostics);
+	if (deferred != NULL) {
+		checkf(relic_materialize(deferred) == 0, SCENARIO_HISTORY,
+		    "%s: it materializes", what);
+		checkf(merged_rounds(deferred) > HISTORY_CHAIN &&
+		    abandoned_rounds(deferred) == 0, SCENARIO_HISTORY,
+		    "%s: every round is merged, %" PRIu64 " merged and %"
+		    PRIu64 " abandoned", what, merged_rounds(deferred),
+		    abandoned_rounds(deferred));
+		checkf(expected_candidates(deferred) == HISTORY_CHAIN,
+		    SCENARIO_HISTORY, "%s: the rounds expected %u candidates, "
+		    "not %" PRIu64, what, HISTORY_CHAIN,
+		    expected_candidates(deferred));
+	}
+
+	relic_destroy(deferred);
+}
+
+/*
+ * A round run serially records what it inserted as a deferred round does.
+ * A broom -- a handle of BROOM_HANDLE links whose end fans out to
+ * BROOM_LEAVES leaves -- is walked on a context with threads and without
+ * RELIC_F_PARALLEL_ALWAYS: the walk's rounds along the handle are too small
+ * to share and run serially, the round that reaches the fan inserts every
+ * leaf serially, being predicted as small as the rounds before it, and the
+ * round after it, which reads the leaves, is shared, and expects the
+ * leaves its item inserted serially.  The rule copying the leaves into the
+ * broom, whose first view is every leaf, is shared too, and having no
+ * history expects nothing; so the rounds' expectations sum to the leaves
+ * only if the round reading them took its expectation from the serial
+ * round before it.  A build without threads shares no round.
+ */
+static void
+rounds_reserve_what_serial_rounds_inserted(void)
+{
+	diagnostics_t diagnostics;
+	text_t program;
+	relic_t *ctx;
+	unsigned int i;
+
+	_Static_assert(BROOM_LEAVES == 10u * 10u * 10u * 10u * 10u &&
+	    BROOM_DIGITS == 5u, "the leaves are every number of five digits");
+
+	program.length = 0;
+	program.bytes[0] = '\0';
+	for (i = 0; i < 10; i++)
+		appendf(&program, "digit(%u).\n", i);
+	for (i = 0; i < BROOM_HANDLE; i++)
+		appendf(&program, "succ(%u, %u).\n", i, i + 1);
+	appendf(&program,
+	    "leaf(X) :- digit(A), digit(B), digit(C), digit(D), digit(E), "
+	    "X = 1000000 + A * 10000 + B * 1000 + C * 100 + D * 10 + E.\n"
+	    "succ(%u, X) :- leaf(X).\n"
+	    "reach(0).\n"
+	    "reach(Y) :- reach(X), succ(X, Y).\n", BROOM_HANDLE);
+
+	ctx = context_for(program.bytes, 0, DEFERRED_THREADS, 0, 0,
+	    &diagnostics);
+	if (ctx != NULL) {
+		checkf(relic_materialize(ctx) == 0, SCENARIO_HISTORY,
+		    "a broom: it materializes");
+		if (relic_pool_size(DEFERRED_THREADS) > 1) {
+			checkf(merged_rounds(ctx) > 0, SCENARIO_HISTORY,
+			    "a broom: rounds are shared");
+			checkf(expected_candidates(ctx) == BROOM_LEAVES,
+			    SCENARIO_HISTORY, "a broom: the shared rounds "
+			    "expected %u candidates, not %" PRIu64,
+			    BROOM_LEAVES, expected_candidates(ctx));
+		} else {
+			checkf(merged_rounds(ctx) == 0, SCENARIO_HISTORY,
+			    "a broom: no round is shared without threads");
+		}
+	}
+
+	relic_destroy(ctx);
+}
+
+/*
  * A pattern that is not a regular expression, met by a task, abandons its
  * round, which runs again serially and reports it as the serial run does;
  * the rounds before it are merged, and the strings the failing round's
@@ -614,6 +736,26 @@ static uint64_t
 limit_declines(const relic_t *ctx)
 {
 	return (ctx->pool != NULL ? ctx->pool->limit_declines : 0);
+}
+
+/*
+ * The candidates a context's pool expected its rounds to gather, from what
+ * their items inserted the last time each ran.
+ */
+static uint64_t
+expected_candidates(const relic_t *ctx)
+{
+	return (ctx->pool != NULL ? ctx->pool->expected_candidates : 0);
+}
+
+/*
+ * The rounds a context's pool declined because the room for their
+ * candidates was refused.
+ */
+static uint64_t
+reservation_declines(const relic_t *ctx)
+{
+	return (ctx->pool != NULL ? ctx->pool->reservation_declines : 0);
 }
 
 /*
@@ -886,9 +1028,11 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
  * Materialize a program under limits from what its facts need to more than
  * its evaluation does, in about `steps` steps, and require the deferred
  * context to succeed or fail as the serial one does, with the same
- * diagnostic, leaving the same relations.  A limit that refuses a deferred
- * round's buffers abandons the round, which runs again serially; so does
- * one that would refuse its merge, before the merge changes any relation.
+ * diagnostic, leaving the same relations.  A limit that refuses the room a
+ * deferred round reserves for its candidates declines the round before it
+ * runs, and it runs serially; one that refuses a round's buffers as they
+ * grow abandons the round, which runs again serially; so does one that
+ * would refuse its merge, before the merge changes any relation.
  * The memory limit also counts the evaluation's plans, which relic_stats_t
  * does not report, so its sweep runs to twice the storage.
  *
@@ -907,6 +1051,9 @@ a_querys_rewrite_runs_deferred_rounds(size_t threads)
  *
  * Otherwise the sweep must reach both ways a deferred round ends under a
  * limit: a round abandoned and run again serially, and a round merged.
+ * Under the memory limit it must also reach a round declined at its
+ * reservation, which the rounds after the first of a recursive component
+ * make.
  * Under the memory limit it must also reach an abandoned round whose
  * serial run then succeeds, the case where the buffers' charge alone was
  * in the way, and a merge the limit itself declines, once every task has
@@ -937,6 +1084,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	bool abandoned_seen;
 	bool recovered_seen;
 	bool declined_seen;
+	bool reservation_seen;
 	bool merged_seen;
 	char what[64];
 
@@ -971,6 +1119,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	abandoned_seen = false;
 	recovered_seen = false;
 	declined_seen = false;
+	reservation_seen = false;
 	merged_seen = false;
 
 	for (limit = first; limit <= last; limit += step) {
@@ -1008,6 +1157,8 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 		}
 		if (limit_declines(deferred) > 0)
 			declined_seen = true;
+		if (reservation_declines(deferred) > 0)
+			reservation_seen = true;
 		if (merged_rounds(deferred) > 0)
 			merged_seen = true;
 
@@ -1025,6 +1176,9 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 		checkf(declined_seen || (working > 0 && workers > 1), scenario,
 		    "on %zu thread(s), the sweep has the limit decline a "
 		    "merge", threads);
+		checkf(reservation_seen, scenario, "on %zu thread(s), the "
+		    "sweep has the limit refuse a round's reservation",
+		    threads);
 	}
 }
 
@@ -1397,7 +1551,9 @@ main(void)
 		    false, LIMIT_STEPS, threads);
 		limits_refuse_as_serially(SCENARIO_TEXT_MEMORY, strings.bytes,
 		    true, LIMIT_STEPS, threads);
+		rounds_reserve_what_deferred_rounds_inserted(threads);
 	}
+	rounds_reserve_what_serial_rounds_inserted();
 	computing_rounds_merge(MANY_THREADS);
 	strings_rounds_merge(MANY_THREADS);
 

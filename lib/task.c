@@ -943,6 +943,26 @@ relic_candidates_init(relic_candidates_t *candidates, uint64_t hash_seed)
 	candidates->hash_seed = hash_seed;
 }
 
+/*
+ * The room is made as a growth by that many candidates of that many
+ * columns would make it, and charged likewise, so that the candidates
+ * gathered into it grow nothing until they pass it.
+ */
+int
+relic_candidates_reserve(relic_candidates_t *candidates,
+    relic_account_t *account, size_t tuples, size_t words)
+{
+	relic_candidates_growth_t growth;
+
+	assert(candidates->count == 0 && tuples <= RELIC_TUPLE_MAX);
+
+	bzero(&growth, sizeof(growth));
+	growth.tuples = tuples;
+	growth.words = words;
+
+	return (candidates_reserve(candidates, account, &growth));
+}
+
 void
 relic_candidates_release(relic_candidates_t *candidates,
     relic_account_t *account)

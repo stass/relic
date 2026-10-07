@@ -195,7 +195,6 @@ static int	 scratch_table_open(relic_account_t *account,
 static int	 stage_new_tuples(relic_merge_t *merge);
 static void	 stage_task(void *argument, size_t task, size_t worker_index);
 static size_t	 stripe_candidates(const relic_pool_t *pool, size_t stripe);
-static size_t	 task_first_count(const relic_merge_t *merge, size_t task);
 static const relic_dom_t *tuple_of(const relic_merge_t *merge,
 		    relic_merge_ref_t ref);
 
@@ -676,7 +675,8 @@ firsts_add(const relic_merge_t *merge, relic_merge_firsts_t *firsts,
 
 /*
  * Give each task the positions its firsts take in its target's append, in
- * task order, and each append its count, in all and by stripe.  Returns 0,
+ * task order, and its count of them, and each append its count, in all and
+ * by stripe.  Returns 0,
  * or -1 when the new tuples would pass the tuple limit or a relation's
  * identifier space, which the serial run then reports at the tuple it
  * refuses.
@@ -684,7 +684,7 @@ firsts_add(const relic_merge_t *merge, relic_merge_firsts_t *firsts,
 static int
 count_new_tuples(relic_merge_t *merge)
 {
-	const relic_round_task_t *task;
+	relic_round_task_t *task;
 	relic_append_t *append;
 	size_t firsts;
 	size_t target;
@@ -698,10 +698,12 @@ count_new_tuples(relic_merge_t *merge)
 		append = &merge->appends[target];
 		merge->task_starts[t] = append->count;
 
+		task->inserted = 0;
 		for (s = 0; s < RELIC_STRIPES; s++) {
 			firsts = merge->task_firsts[t * RELIC_STRIPES + s];
 			append->growth.by_stripe[s] += firsts;
 			append->count += firsts;
+			task->inserted += firsts;
 		}
 	}
 
@@ -979,26 +981,10 @@ apply_merge(relic_merge_t *merge)
 	}
 
 	for (t = 0; t < merge->pool->task_count; t++) {
-		if (task_first_count(merge, t) != 0)
+		if (merge->pool->tasks[t].inserted != 0)
 			merge->round->items[merge->pool->tasks[t].item].gained =
 			    true;
 	}
-}
-
-/*
- * How many new tuples task `task` found.
- */
-static size_t
-task_first_count(const relic_merge_t *merge, size_t task)
-{
-	size_t count;
-	size_t s;
-
-	count = 0;
-	for (s = 0; s < RELIC_STRIPES; s++)
-		count += merge->task_firsts[task * RELIC_STRIPES + s];
-
-	return (count);
 }
 
 /*

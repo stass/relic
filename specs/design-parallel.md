@@ -529,14 +529,16 @@ A round runs on the pool when the pool has more than one thread and the
 round's **estimated work** is at least `RELIC_PARALLEL_MIN_WORK`. The
 estimate is the sum over the round's items of the work the same item did
 the last time it ran, measured in tuples read plus derivations from the
-counters, scaled by the ratio of its first-operation range now to then; an
-item that has not run yet is estimated at its first-operation range. A
-recursive component's rounds change size gradually, so the previous round
-predicts the next well enough for a threshold whose only cost is a missed
-opportunity or a barrier paid for nothing. The history also records the
-tuples the item **inserted**, unscaled, since a round's new tuples do not
-follow its delta; that is what sizes the round's buffers, section 5.3,
-and an item that has not run is expected to insert what its range holds.
+counters, scaled by the ratio of its first-operation range now to then;
+an item that has not run yet is estimated at its first-operation range.
+A recursive component's rounds change size gradually, so the previous
+round predicts the next well enough for a threshold whose only cost is a
+missed opportunity or a barrier paid for nothing. Beside the history an
+item records the tuples it **inserted**, unscaled, since a round's new
+tuples do not follow its delta, one record for both plans of a delta
+variant; that is what sizes the round's buffers, section 5.3, and an
+item that has not run is expected to insert nothing, since its range
+bounds neither what it derives nor what of that is new.
 
 `chain-closure` estimates at most six thousand per round and never
 crosses the threshold: it runs serially, inserting as it derives, and pays
