@@ -24,34 +24,28 @@ an idle run under Benchmarks).
 **Parallel evaluation misses its speed-up gates.** [Medium, component:
 `lib/round.c`, `docs/todo-parallel.md`] `specs/design-parallel.md` section
 15 gates step 3 on a six-fold and step 4 on a ten-fold speed-up of
-`tc-cyclic` at sixteen threads; it is 5.3-fold. `dist/3` scales 2.7-fold,
-missing the step 4 gate of `specs/design-arithmetic.md` as well. Steps 5
-and 6 are not started. The causes and what to try are sorted in
-`docs/todo-parallel.md`.
+`tc-cyclic` at sixteen threads; it is 6.2-fold, 2.78 s to 0.45 s, the
+fastest of five runs on a loaded machine, which meets the first and
+misses the second. `dist/3` scales 2.5-fold, missing the step 4 gate of
+`specs/design-arithmetic.md` as well. Steps 5 and 6 are not started. The
+causes and what to try are sorted in `docs/todo-parallel.md`.
 
 ## Engine
 
 **A deferred round costs more than a serial one on one thread.** [Medium,
 component: `lib/task.c`, `lib/merge.c`, `specs/design-deferral-cost.md`]
-Under `-X parallel` at `-j 1`, `tc-cyclic` costs a fifth more than
-serially, `cspa` a twelfth and `chain-closure` half as much again, with
-identical counters. The design's section 2 measured where: the whole of
-`tc-cyclic`'s loss is the one round that inserts a third of what it
-derives, whose task phase takes twice the serial round and whose merge
-half as long again; the merge costs 100 to 150 ns per new tuple on every
-workload. The floor is proportional to new tuples, not derivations or
-rounds. Steps 1 to 4 of the design's section 10 take it down and then
-re-measure the threshold of `specs/design-parallel.md` section 5.4. Step
-1, the screen probed in passes and the fast path, is in: round 1 of
-`tc-cyclic`'s task phase at 0.86 of its time before. Step 2, buffers
-reserved from what each item inserted last, is in: the screen moves
-nothing on a round with a history, and `chain-closure`'s task phase is
-at 0.83 of step 1's. Step 3, the merge's lists and blocks, is in: a
-typical round of `chain-closure` merges in 66 microseconds from 99, and
-the mean round in 130 from 160, held up by the few rounds that grow the
-canonical index, which the serial path grows as well. Step 4 is not. The
-round that costs most, a recursive rule's first, has no history and
-keeps its growth cascade.
+Steps 1 to 4 of the design's section 10 are in. Under `-X parallel` at
+`-j 1`, the fastest of five runs on a loaded machine, `chain-closure`
+costs 1.23 times its serial run, from 1.5; `tc-cyclic` 1.18, from 1.2;
+`cspa` 1.09, as before. Section 7 expected within a sixth, a tenth and a
+few per cent. Two costs remain. `tc-cyclic`'s first recursive round,
+which inserts a third of what it derives, has no history to size its
+buffers from, and keeps its screen's growth cascade. `chain-closure`'s
+merge takes 66 microseconds in a typical round, from 99, and 130 on
+average, from 160, the average held up by the rounds that grow the
+canonical index, which the serial path grows as well and which the item
+below would make cheaper. Re-measure on an idle machine before taking
+either further.
 
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes

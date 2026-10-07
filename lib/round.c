@@ -75,9 +75,11 @@
  * plan is given.  A round below the first runs serially, since publishing
  * it and waiting for every thread costs more than it would gain; a round
  * of the fixed point's last few, which shrink toward nothing, is such a
- * round.  Constants of performance alone, measured on tc-cyclic and cspa.
+ * round.  Constants of performance alone: the first measured at sixteen
+ * threads on tc-cyclic, cspa and chains of six thousand edges, and at two
+ * and four on tc-cyclic and the chains; the second on tc-cyclic and cspa.
  */
-#define	RELIC_PARALLEL_MIN_WORK	65536u
+#define	RELIC_PARALLEL_MIN_WORK	8000u
 #define	RELIC_CHUNK_WORK	4096u
 
 typedef struct relic_round_expectation relic_round_expectation_t;

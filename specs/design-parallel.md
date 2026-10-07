@@ -109,7 +109,9 @@ rounds of about two thousand. The first shape is where cores help; the
 second is a chain of 2,000 dependent steps, and no partitioning of a step
 that takes a third of a millisecond can pay for a barrier. Section 5.4
 tells the two apart at run time and runs the second shape exactly as the
-serial evaluator does.
+serial evaluator does. The boundary is a round's size, not its shape: a
+chain three times as long has rounds of up to a millisecond, and the
+larger of them, past the threshold of section 5.4, are shared.
 
 **Loading is a separate problem.** An import spends its time interning
 symbols into two tables that assign identifiers in order of first
@@ -120,8 +122,8 @@ An estimate of what the first three steps of section 15 can reach, by
 Amdahl's law with the serial part taken as the merge of section 6 at its
 measured share of the insertions: `tc-cyclic` at 16 threads about 7 times
 faster, `cspa` about 5, `chain-closure` unchanged. The parallel merge of
-section 6.3 raises the first two; nothing raises the third, and nothing
-should.
+section 6.3 raises the first two; nothing raises the third at that
+length, and nothing should.
 
 ---
 
@@ -503,11 +505,12 @@ or the allocator would refuse is declined before it begins and runs
 serially.
 
 Every counter the executor advances -- tuples scanned, looked up,
-derivations -- is the worker's own, summed into the context's by worker 0
-after the barrier, once the round is to be merged rather than abandoned. The sum is what the serial evaluator would have
-counted: a chunk reads exactly the tuples the serial plan read while its
-first cursor was inside the chunk, and every derivation is counted whether
-it was screened out or kept.
+derivations -- is the worker's own, summed into the context's by worker
+0 after the barrier, once the round is to be merged rather than
+abandoned. The sum is what the serial evaluator would have counted: a
+chunk reads exactly the tuples the serial plan read while its first
+cursor was inside the chunk, and every derivation is counted whether it
+was screened out or kept.
 
 A `FILTER` under `RELIC_F_NOTE_MIXED` does not call the diagnostic
 callback from a worker. The task records the first mixed comparison it
@@ -540,28 +543,36 @@ variant; that is what sizes the round's buffers, section 5.3, and an
 item that has not run is expected to insert nothing, since its range
 bounds neither what it derives nor what of that is new.
 
-`chain-closure` estimates at most six thousand per round and never
-crosses the threshold: it runs serially, inserting as it derives, and pays
-nothing for the pool but its existence. `tc-cyclic` crosses it in every
-round but its first two: the base pass, and the recursive rule's first
-round, which the base pass predicts from a closure still empty. That
-round inserts most of what it derives, and such a round gains little
-from the pool before the parallel merge of section 6.3 whatever its
-size: its screen and its merge each hash every new tuple, and only the
-screen is shared. A component whose rounds shrink toward its fixed point
--- most do -- runs its last rounds serially, which is right: a barrier
-costs more than a round of a hundred derivations.
+`chain-closure` of two thousand edges estimates at most six thousand per
+round and never crosses the threshold: it runs serially, inserting as it
+derives, and pays nothing for the pool but its existence. A chain of six
+thousand edges has rounds estimated at up to eighteen thousand, and
+shares the larger of them, a little over half. `tc-cyclic` crosses the
+threshold in every round, the recursive rule's first among them, which
+the base pass predicts at the tuples it added. A component whose rounds
+shrink toward its fixed point -- most do -- runs its last rounds
+serially, which is right: a barrier costs more than a round of a hundred
+derivations.
 
-The threshold sits well above the barrier's cost, which measures some
-tens of microseconds, about what a few thousand units of work take,
-because a round just above break-even is usually one of those that insert
-most of what they derive. A chain of six thousand edges, whose rounds
-estimate up to eighteen thousand, runs ten per cent slower at sixteen
-threads with the threshold at eight or sixteen thousand, and as fast as
-one thread with it at 65 536. That measurement predates the parallel
-merge of section 6.3 and the cost `specs/design-deferral-cost.md` takes
-out of a deferred round; its section 7 gives the cost model the threshold
-is measured against once both are in.
+The barrier costs some tens of microseconds, about what a few thousand
+units of work take. The threshold sits above that by the margin a round
+that inserts most of what it derives needs to repay the pool, since the
+merge hashes each of its new tuples again, at the cost per new tuple
+that `specs/design-deferral-cost.md` sets out, shared among the threads
+by section 6.3. Measured at sixteen threads, the fastest of several runs
+each, the threshold at 8 000 takes a chain of six thousand edges from
+6.2 s on one thread to 3.9 s in its closure, and from 7.5 s to 4.7 s in
+its right-recursive form; a threshold of 65 536 shares none of their
+rounds. In the same sweep it takes `tc-cyclic` to 0.43 s, where 65 536,
+which leaves the base pass and the recursive rule's first round on the
+calling thread, reaches 0.58 s; `cspa` is the same under either. At 4
+000 the chains are slower than at 8 000, their smallest shared rounds
+paying a barrier for little, and at 16 000 they give back most of their
+gain. At two and four threads the chains gain as well and `tc-cyclic` is
+unchanged within the noise of a loaded machine. The threshold is a
+single bound on work; one weighing a round's expected new tuples beside
+its work would be measured against the cost model of
+`specs/design-deferral-cost.md` section 7.
 
 The debug switch `-X parallel`, `RELIC_F_PARALLEL_ALWAYS` in the library,
 runs every eligible round deferred, however small its estimate and

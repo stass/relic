@@ -1504,12 +1504,12 @@ layered_program(void)
  * four rounds counts none at one thread and some at two.
  *
  * Without the switch, the paths of the layered graph take a round for each
- * length.  The first two rounds and the last few are not shared: the base
- * pass copies the edges, the recursive rule's first round has no round
- * before it to predict its work and is estimated at the paths it reads,
- * and the rounds near the end extend the few long paths into the last
- * layers.  The rounds between each extend thousands of paths by
- * LAYER_WIDTH edges each, and are shared.  So some rounds and not all are
+ * length.  The first two rounds are not shared: the base pass copies the
+ * edges, and the recursive rule's first round has no round before it to
+ * predict its work and is estimated at the paths it reads; each reads
+ * LAYERED_EDGES tuples, 6 336, below the threshold.  The rounds after them
+ * extend hundreds or thousands of paths by LAYER_WIDTH edges each, or are
+ * predicted from a round that did, and are shared.  So some rounds and not all are
  * counted, and the relation is what the serial evaluator derives.  A build
  * without threads shares none.
  */

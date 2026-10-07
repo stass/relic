@@ -400,21 +400,20 @@ set from measurement on a quiet machine and recorded with each step; the
 figures here are what the measurement is expected to confirm, not the
 gates.
 
-**The threshold.** `RELIC_PARALLEL_MIN_WORK` was set when a round that
-inserts most of what it derives gained nothing from the pool, and
-`docs/todo-parallel.md` already records that the parallel merge has
-changed that. The cost this document removes is the other half of the
-same calibration: it is the floor the threshold protects a round from,
-and with the floor lower the threshold is re-measured, at the chain
-lengths and `tc-cyclic` named there, once sections 4 to 6 are in. The
-cost model of section 3 is what to measure against: a round's deferred
-time is its serial time less its insertions, divided by the workers,
-plus its new tuples at the merge's rate, plus the barrier; a round is
-worth deferring when that is less than its serial time, and the
-threshold is where the two cross for the rounds a workload has. A
-threshold that weighs the expected new tuples beside the expected work
-follows from that model; whether it pays over a single bound is what the
-measurement says, and this document does not decide it.
+**The threshold.** The cost this document removes is the floor
+`RELIC_PARALLEL_MIN_WORK` protects a round from: a round that inserts
+most of what it derives pays it per new tuple, and gains from the pool
+only once its work outweighs it. The threshold is measured with sections
+4 to 6 in, on chains of six thousand edges, whose rounds are of that
+kind and sit near it, and on `tc-cyclic` and `cspa`. The cost model of
+section 3 is what to measure against: a round's deferred time is its
+serial time less its insertions, divided by the workers, plus its new
+tuples at the merge's rate, plus the barrier; a round is worth deferring
+when that is less than its serial time, and the threshold is where the
+two cross for the rounds a workload has. A threshold that weighs the
+expected new tuples beside the expected work follows from that model;
+whether it pays over a single bound is what the measurement says, and
+this document does not decide it.
 
 ---
 
@@ -493,10 +492,9 @@ baseline for the first.
    `-X parallel` no slower than before, since the lists trade sixteen
    parallel reads for one sort.
 4. **The threshold** (section 7). Re-measure `RELIC_PARALLEL_MIN_WORK`
-   with the chains and `tc-cyclic` of `docs/todo-parallel.md`; record
-   the constant and the measurement; close that page's item on the
-   threshold and amend section 5.4 of `specs/design-parallel.md` with the
-   figures.
+   with chains of six thousand edges, `tc-cyclic` and `cspa` at sixteen
+   threads; record the constant, and the measurement in section 5.4 of
+   `specs/design-parallel.md`.
 
 Steps 1 to 3 are independent in what they change and are ordered by
 what each is measured against; step 4 depends on all three.
@@ -570,6 +568,6 @@ what each is measured against; step 4 depends on all three.
   whose slots lie in memory its owner gives it.
 * `specs/architecture.md`: the parallel evaluation section points here
   for the cost of a deferred round.
-* `TODO.md`: the item on a deferred round's cost points here; the items
-  of `docs/todo-parallel.md` on the threshold and on rounds that insert
-  what they derive are resolved by steps 3 and 4 of section 10.
+* `TODO.md`: the item on a deferred round's cost points here.
+  `docs/todo-parallel.md` loses its item on the threshold to step 4 of
+  section 10.
