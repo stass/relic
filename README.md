@@ -179,6 +179,7 @@ linear form.
 
 | File | Contents |
 | --- | --- |
+| [EXAMPLES.md](EXAMPLES.md) | a tour of relic through programs you can run |
 | [man/relic.1](man/relic.1) | the tool and the language |
 | [man/relic.3](man/relic.3) | the library |
 | [specs/architecture.md](specs/architecture.md) | the target design of the system |

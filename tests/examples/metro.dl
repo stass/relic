@@ -1,0 +1,14 @@
+% A toy metro map.  Each link runs both ways.
+link(central, museum).
+link(museum, park).
+link(park, zoo).
+link(central, harbor).
+link(harbor, market).
+link(market, zoo).
+link(market, stadium).
+
+next(X, Y) :- link(X, Y).
+next(X, Y) :- link(Y, X).
+hops(X, Y, 1) :- next(X, Y).
+hops(X, Z, N) :- hops(X, Y, M), next(Y, Z), X != Z, M < 6, N = M + 1.
+stops(X, Y, N) :- hops(X, Y, _), N = min(M) { hops(X, Y, M) }.

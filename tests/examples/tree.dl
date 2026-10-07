@@ -1,0 +1,14 @@
+% A source tree, and what a build makes of it.
+file("src/main.c", 1200).
+file("src/util.c", 300).
+file("src/util.h", 80).
+file("tests/test_util.c", 450).
+file("docs/README.md", 900).
+
+object(S, O) :- file(S, _), substr(S, length(S) - 2) = ".c",
+    O = cat(substr(S, 0, length(S) - 2), ".o").
+test_file(F) :- file(F, _), match(F, "^tests/.*\\.c$") >= 0.
+dir_of(F, D) :- file(F, _), D = substr(F, 0, index(F, "/")).
+dir_size(D, S) :- dir_of(_, D), S = sum(Size) { dir_of(F, D), file(F, Size) }.
+largest(F) :- file(F, Size), Size = max(N) { file(_, N) }.
+label(F, L) :- file(F, Size), L = cat(F, cat(": ", str(Size))).

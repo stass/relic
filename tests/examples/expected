@@ -68,3 +68,143 @@ c
 $ ./query
 b
 c
+$ relic -s -q 'ancestor(alice, X)?' family.dl
+bob
+carol
+dave
+erin
+frank
+gina
+$ relic -s -q 'cousin(dave, X)?' -q 'childless(X)?' family.dl
+frank
+
+erin
+frank
+gina
+$ relic -s -F csv -q 'descendants(X, N)?' family.dl
+alice,6
+bob,3
+carol,1
+dave,1
+erin,0
+frank,0
+gina,0
+$ relic -s -q 'ready(S)?' release.dl
+docs
+package
+test
+$ relic -s -q 'remaining(S, N)?' release.dl
+compile 0
+docs 0
+fetch 0
+package 0
+release 3
+test 0
+$ relic -v -q 'cycle(S)?' release.dl
+2> query 1: 0 rows
+$ relic -v -q 'blocked(release)?' release.dl
+
+2> query 1: 1 row
+$ relic -q 'stops(central, zoo, N)?' metro.dl
+3
+$ relic -s -F json -q 'stops(central, X, N)?' metro.dl
+[
+  ["harbor",1],
+  ["market",2],
+  ["museum",1],
+  ["park",2],
+  ["stadium",3],
+  ["zoo",3]
+]
+$ relic -s -q 'object(S, O)?' -q 'test_file(F)?' tree.dl
+"src/main.c" "src/main.o"
+"src/util.c" "src/util.o"
+"tests/test_util.c" "tests/test_util.o"
+
+"tests/test_util.c"
+$ relic -s -q 'dir_size(D, S)?' -q 'largest(F)?' tree.dl
+"docs" 900
+"src" 1580
+"tests" 450
+
+"src/main.c"
+$ relic -q 'label("src/util.h", L)?' tree.dl
+"src/util.h: 80"
+$ relic -s -T score:symbol,symbol,integer -I score.tsv -q 'best(G, P, S)?' -q 'total(P, T)?' board.dl
+pong bo 12
+snake cy 455
+tetris bo 5100
+
+ada 4510
+bo 5112
+cy 4355
+$ relic -T score:symbol,symbol,integer -I tsv:score=- -q 'best(tetris, P, S)?' board.dl < score.tsv
+bo 5100
+$ relic -T score:symbol,_,integer -I score.tsv -q 'score(P, S), S > 1000?' /dev/null
+ada 4200
+bo 5100
+cy 3900
+$ relic -T person:symbol,string,integer -I csv,header:person=people.csv -q 'person(P, E, A), A > 30?' /dev/null
+ann "ann@example.org" 34
+cid "cid@example.org" 51
+$ relic -s -O ancestor.tsv family.dl && cat ancestor.tsv
+alice	bob
+alice	carol
+alice	dave
+alice	erin
+alice	frank
+alice	gina
+bob	dave
+bob	erin
+bob	gina
+carol	frank
+dave	gina
+$ relic -O ancestor.dl family.dl && relic -s -q 'ancestor(X, gina)?' ancestor.dl
+alice
+bob
+dave
+$ relic -a -v -O stops.csv -O json:next=map.json metro.dl
+2> export 1: 42 rows
+2> export 2: 14 rows
+$ relic -i metro.dl
+relic> .help
+.help         list the commands
+.plan QUERY   run QUERY and show its plan instead of its rows
+.quit         end the session
+.stats        show the evaluation counters
+relic> stops(central, X, 2)?
+park
+market
+relic> .quit
+$ relic -c broken.dl
+2> broken.dl:4:8: error: variable X in rule orphan/1 is not bound by a positive body literal or an assignment
+2> broken.dl:3:36: warning: predicate parnet/2 is referenced but never defined
+# exit 1
+$ relic -vv -q 'adult(P)?' mixed.dl
+2> mixed.dl:4:24: note: ordering comparison between a string and an integer is false
+ann
+2> query 1: 1 row
+$ relic -n -v -q 'hops(X, Y, N)?' metro.dl
+2> query 1: 112 rows
+$ relic -n -e -q 'blocked(release)?' release.dl
+2> magic rewrite of $q0 :- blocked(release).
+2>     adorn blocked/1 b
+2>     seed magic$blocked$b(release).
+2>     stratum 0, component 0: magic$blocked$b/1
+2>         facts: 1
+2>     stratum 1, component 1: blocked$b/1
+2>         rule blocked$b(S) :- magic$blocked$b(S), waits(S, B), not done(B).
+2>             scan magic$blocked$b(S)
+2>             lookup waits(S, B) key={0}
+2>             anti-member done(B)
+2>             emit blocked$b(S)
+2> query $q0 :- blocked$b(release).
+2>     member blocked$b(release)
+2>     stream $q0
+$ relic -j 4 -q 'stops(central, zoo, N)?' metro.dl
+3
+$ relic -l tuples=20 -q 'stops(central, zoo, N)?' metro.dl
+2> relic: error: limit exceeded: tuples=20 while deriving next/2
+# exit 1
+$ relic -q 'blocked(release)?' release.dl | grep -q '^$' && echo blocked
+blocked

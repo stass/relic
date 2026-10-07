@@ -1,0 +1,16 @@
+% Four generations of one family, and who is related to whom.
+parent(alice, bob).
+parent(alice, carol).
+parent(bob, dave).
+parent(bob, erin).
+parent(carol, frank).
+parent(dave, gina).
+
+ancestor(X, Y) :- parent(X, Y).
+ancestor(X, Z) :- parent(X, Y), ancestor(Y, Z).
+sibling(X, Y) :- parent(P, X), parent(P, Y), X != Y.
+cousin(X, Y) :- parent(A, X), parent(B, Y), sibling(A, B).
+person(X) :- parent(X, _).
+person(Y) :- parent(_, Y).
+childless(X) :- person(X), not parent(X, _).
+descendants(X, N) :- person(X), N = count { ancestor(X, D) }.

@@ -83,7 +83,7 @@ pkgconfig_DATA = librelic.pc
 # and the design of each subsystem, and what remains open.
 # specs/ and docs/ are named whole, as tests/lang is, so that a new design
 # document cannot be left out of the tarball.
-EXTRA_DIST = autogen.sh LICENSE README.md bench/baseline.txt \
+EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md bench/baseline.txt \
 	TODO.md docs specs \
 	bench/datasets.sh bench/run.sh \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
@@ -444,13 +444,13 @@ dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/cli.sh \
 	tests/skips.sh tests/symbols.sh tests/version.sh
 
 ##
-## Every example the manual pages and README.md show is run by tests/docs.sh
-## against its entry in tests/examples/expected, in a copy of the files of
-## tests/examples it names.  The directory is not named tests/docs, as make's
-## built-in suffix rule would build a file of that name from tests/docs.sh
-## when make dist asks for it.  The C example of relic(3) is
-## examples/query.c, built here as an embedder builds it, with only the
-## public header on its include path.
+## Every example the manual pages, README.md and EXAMPLES.md show is run by
+## tests/docs.sh against its entry in tests/examples/expected, in a copy of
+## tests/examples, which holds the files they name.  The directory is not
+## named tests/docs, as make's built-in suffix rule would build a file of that
+## name from tests/docs.sh when make dist asks for it.  The C example of
+## relic(3) is examples/query.c, built here as an embedder builds it, with
+## only the public header on its include path.
 ##
 
 dist_check_SCRIPTS += tests/docs.sh

@@ -1,0 +1,4 @@
+% Two mistakes: a variable only a negation binds, and a misspelled name.
+parent(alice, bob).
+grandparent(X, Z) :- parent(X, Y), parnet(Y, Z).
+orphan(X) :- not parent(_, X).

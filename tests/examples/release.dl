@@ -1,0 +1,23 @@
+% A release pipeline: which steps wait on which, and which are finished.
+step(fetch).
+step(compile).
+step(test).
+step(package).
+step(docs).
+step(release).
+waits(compile, fetch).
+waits(test, compile).
+waits(package, compile).
+waits(docs, fetch).
+waits(release, test).
+waits(release, package).
+waits(release, docs).
+done(fetch).
+done(compile).
+
+before(S, B) :- waits(S, B).
+before(S, B) :- waits(S, M), before(M, B).
+blocked(S) :- waits(S, B), not done(B).
+ready(S) :- step(S), not done(S), not blocked(S).
+cycle(S) :- before(S, S).
+remaining(S, N) :- step(S), N = count { before(S, B), not done(B) }.

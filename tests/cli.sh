@@ -12,7 +12,7 @@ set -eu
 : "${RELIC:?RELIC must name the relic executable}"
 
 fail() {
-	echo "$1" >&2
+	echo "$*" >&2
 	exit 1
 }
 

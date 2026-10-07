@@ -1,0 +1,4 @@
+% Ages arrive from two sources; one wrote them as strings.
+age(ann, 34).
+age(bob, "12").
+adult(P) :- age(P, A), A >= 18.

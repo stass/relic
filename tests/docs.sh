@@ -1,6 +1,7 @@
 #!/bin/sh
 #
-# Every example the manual pages and the README show does what they say.
+# Every example the manual pages, the README and EXAMPLES.md show does what
+# they say.
 #
 # An example that was never run is the text most likely to be wrong, and it
 # goes wrong silently: nothing fails when a later change makes it false.  So
@@ -8,27 +9,32 @@
 # no expectation fails as surely as one whose output is wrong.
 #
 # A command line is a line of an example block that begins "$ ": an mdoc
-# .Dl line or a line of a .Bd -literal block, or a line of a fenced block of
-# README.md.  Every one must begin "$ relic ", and every line of a document
-# that holds "$ relic " must be one, so that an example written in markup
-# this script does not read fails rather than going unrun.  The lines after
-# a command line in its block, up to the next, are its transcript, and so
-# none of them begins "$ ": a line beginning "relic> " is a line of input to
-# interactive mode, which prints no prompt when its input is not a terminal,
-# and every other line is a line it prints.
+# .Dl line or a line of a .Bd -literal block of a manual page, or a line of
+# a fenced block of a Markdown document.  Every one must begin "$ relic ",
+# and every line of a document that holds "$ relic " must be one, so that an
+# example written in markup this script does not read fails rather than
+# going unrun.  The lines after a command line in its block, up to the next,
+# are its transcript, and so none of them begins "$ ": a line beginning
+# "relic> " is a line of input to interactive mode, which prints no prompt
+# when its input is not a terminal, and every other line is a line it
+# prints.
 #
 # tests/examples/expected holds an entry per command line, in the same form:
 # the command line, the lines it must print on standard output, lines
 # beginning "2> " for what it must print on standard error, and "# exit N"
-# when it must exit with a status other than zero.  The set of command lines the documents
-# show and the set of entries must be equal, so that a new example cannot go
-# unrun and an entry cannot outlive its example.  A transcript the documents
-# show must be the entry's, so that what a reader sees is what is checked.
+# when it must exit with a status other than zero.  The set of command lines
+# the documents show and the set of entries must be equal, so that a new
+# example cannot go unrun and an entry cannot outlive its example.  A
+# transcript the documents show must be the entry's, so that what a reader
+# sees is what is checked.
 #
-# A fenced block of README.md whose info string names a file after its
-# language, as "```text graph.dl" does, shows that file of tests/examples, and
-# must hold exactly its bytes, so that the program a reader is shown is the
-# one the examples run.
+# A fenced block of a Markdown document whose info string names a file after
+# its language, as "```text graph.dl" does, shows that file of
+# tests/examples, and must hold exactly its bytes, so that the program a
+# reader is shown is the one the examples run.
+#
+# The documents are listed once, in $documents, and each passes through
+# every check its kind of markup has.
 #
 # Each command runs through sh -c in a copy of tests/examples, which holds the
 # files the examples name, with relic defined as a function running the
@@ -46,6 +52,7 @@ set -eu
 : "${RELIC_SRCDIR:?RELIC_SRCDIR must name the source directory}"
 : "${RELIC_BUILDDIR:?RELIC_BUILDDIR must name the build directory}"
 
+documents="man/relic.1 man/relic.3 README.md EXAMPLES.md"
 fixtures="$RELIC_SRCDIR/tests/examples"
 expected="$fixtures/expected"
 query_example="$RELIC_SRCDIR/examples/query.c"
@@ -56,9 +63,11 @@ trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
 
 failures=0
+tab=$(printf '\t')
 
+# Report a failed check, the arguments joined as one message.
 fail() {
-	echo "$1" >&2
+	echo "$*" >&2
 	failures=$((failures + 1))
 }
 
@@ -91,24 +100,38 @@ markdown_examples() {
 	' "$1"
 }
 
-# Hold the examples extracted from a document to what it holds: every
-# command line runs relic, and every line holding "$ relic " was extracted.
+# The examples of a document, named relative to the source directory, by
+# its kind of markup.
+examples_of() {
+	case $1 in
+	*.md)
+		markdown_examples "$RELIC_SRCDIR/$1"
+		;;
+	*)
+		mdoc_examples "$RELIC_SRCDIR/$1"
+		;;
+	esac
+}
+
+# Check the examples extracted from a document, named relative to the source
+# directory, against what it holds: every command line runs relic, and every
+# line holding "$ relic " was extracted.
 check_extracted() {
-	document=$1
+	checked=$1
 	extracted=$2
 
 	grep '^\$ ' "$extracted" | grep -v '^\$ relic ' > "$work/unsupported" ||
 	    true
 	if [ -s "$work/unsupported" ]; then
-		fail "${document##*/} shows commands that do not run relic:"
+		fail "$checked shows commands that do not run relic:"
 		cat "$work/unsupported" >&2
 	fi
 
-	shown=$(grep -c '\$ relic ' "$document" || true)
-	found=$(grep -c '^\$ relic ' "$extracted" || true)
-	if [ "$shown" -ne "$found" ]; then
-		fail "${document##*/} holds $shown lines with '\$ relic ', of which" \
-		    "$found are examples this script reads"
+	relic_lines=$(grep -c '\$ relic ' "$RELIC_SRCDIR/$checked" || true)
+	example_lines=$(grep -c '^\$ relic ' "$extracted" || true)
+	if [ "$relic_lines" -ne "$example_lines" ]; then
+		fail "$checked holds $relic_lines lines with '\$ relic ', of which" \
+		    "$example_lines are examples this script reads"
 	fi
 }
 
@@ -136,19 +159,73 @@ split_entries() {
 	' "$1"
 }
 
+# The files a Markdown document, named relative to the source directory,
+# shows: each fenced block whose info string has a second word, which names
+# the file.  Each such block, empty or not, is written to a file of its own
+# under a directory, and listed beside the name it is shown as.
+shown_files_of() {
+	directory=$2
+
+	rm -rf "$directory"
+	mkdir "$directory"
+	awk -v directory="$directory" '
+	/^(```|~~~)/ && fenced { fenced = 0; next }
+	/^(```|~~~)/ {
+		fenced = 1
+		file = ""
+		if (NF < 2)
+			next
+		count++
+		file = sprintf("%s/%04d", directory, count)
+		printf "" > file
+		printf "%s\t%s\n", file, $2
+		next
+	}
+	fenced && file != "" { print > file }
+	' "$RELIC_SRCDIR/$1"
+}
+
+# Check that every file a document shows, as listed by shown_files_of, is the
+# fixture of that name.
+check_shown_files() {
+	checked=$1
+	listing=$2
+
+	while IFS="$tab" read -r shown_file fixture_name; do
+		case $fixture_name in
+		.* | *[!A-Za-z0-9_.-]*)
+			fail "$checked shows a file no fixture can be named:" \
+			    "$fixture_name"
+			continue
+			;;
+		esac
+		if [ ! -f "$fixtures/$fixture_name" ]; then
+			fail "$checked shows $fixture_name, which tests/examples" \
+			    "does not hold"
+		elif ! diff -u "$fixtures/$fixture_name" "$shown_file" >&2; then
+			fail "$checked shows $fixture_name other than" \
+			    "tests/examples/$fixture_name"
+		fi
+	done < "$listing"
+}
+
 mkdir "$work/documented" "$work/expected"
 
-mdoc_examples "$RELIC_SRCDIR/man/relic.1" > "$work/relic.1"
-mdoc_examples "$RELIC_SRCDIR/man/relic.3" > "$work/relic.3"
-markdown_examples "$RELIC_SRCDIR/README.md" > "$work/README.md"
-for document in man/relic.1 man/relic.3 README.md; do
-	check_extracted "$RELIC_SRCDIR/$document" "$work/${document##*/}"
-done
+: > "$work/documented.txt"
+for document in $documents; do
+	examples_of "$document" > "$work/extracted"
+	check_extracted "$document" "$work/extracted"
+	cat "$work/extracted" >> "$work/documented.txt"
 
-{
-	cat "$work/relic.1" "$work/relic.3" "$work/README.md"
-	echo '$ ./query'
-} > "$work/documented.txt"
+	case $document in
+	*.md)
+		shown_files_of "$document" "$work/shown-files" \
+		    > "$work/shown-files.index"
+		check_shown_files "$document" "$work/shown-files.index"
+		;;
+	esac
+done
+echo '$ ./query' >> "$work/documented.txt"
 
 split_entries "$work/documented.txt" "$work/documented" \
     > "$work/documented.index"
@@ -175,8 +252,6 @@ if [ -s "$work/undocumented" ]; then
 	cat "$work/undocumented" >&2
 fi
 
-tab=$(printf '\t')
-
 # The file of the entry for a command line, compared byte for byte.
 entry_of() {
 	while IFS="$tab" read -r file entry_command; do
@@ -198,44 +273,11 @@ while IFS="$tab" read -r documented command; do
 	if [ "$(sed -n '2,$p' "$documented" | wc -l)" -eq 0 ]; then
 		continue
 	fi
-	sed -e '/^# exit /d' -e 's/^2> //' "$entry" > "$work/shown"
-	if ! diff -u "$work/shown" "$documented" >&2; then
+	sed -e '/^# exit /d' -e 's/^2> //' "$entry" > "$work/transcript"
+	if ! diff -u "$work/transcript" "$documented" >&2; then
 		fail "the documented transcript of '$command' is not its entry"
 	fi
 done < "$work/documented.index"
-
-# Every file README.md shows is the fixture of that name.  The info string's
-# second word names it.  Each such block, empty or not, is written to a file
-# of its own and listed beside the name, and compared with the fixture.
-mkdir "$work/shown-files"
-awk -v directory="$work/shown-files" '
-/^(```|~~~)/ && fenced { fenced = 0; next }
-/^(```|~~~)/ {
-	fenced = 1
-	file = ""
-	if (NF < 2)
-		next
-	count++
-	file = sprintf("%s/%04d", directory, count)
-	printf "" > file
-	printf "%s\t%s\n", file, $2
-	next
-}
-fenced && file != "" { print > file }
-' "$RELIC_SRCDIR/README.md" > "$work/shown-files.index"
-while IFS="$tab" read -r shown name; do
-	case $name in
-	.* | *[!A-Za-z0-9_.-]*)
-		fail "README.md shows a file no fixture can be named: $name"
-		continue
-		;;
-	esac
-	if [ ! -f "$fixtures/$name" ]; then
-		fail "README.md shows $name, which tests/examples does not hold"
-	elif ! diff -u "$fixtures/$name" "$shown" >&2; then
-		fail "README.md shows $name other than tests/examples/$name"
-	fi
-done < "$work/shown-files.index"
 
 # Run every entry and compare what it prints and its status.
 while IFS="$tab" read -r entry command; do

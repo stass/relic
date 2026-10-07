@@ -1,0 +1,3 @@
+% A leaderboard over game scores imported from a table.
+best(G, P, S) :- score(P, G, S), S = max(T) { score(_, G, T) }.
+total(P, T) :- score(P, _, _), T = sum(S) { score(P, G, S) }.
