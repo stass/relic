@@ -207,6 +207,62 @@ relic_hash_int64(uint64_t seed, int64_t value)
 	return (relic_hash_words(seed, halves, 2));
 }
 
+void *
+relic_block_piece(char **cursorp, size_t *bytesp, size_t count, size_t size)
+{
+	size_t bytes;
+	void *piece;
+
+	bytes = relic_saturating_product(count, size);
+	if (bytes > SIZE_MAX - (sizeof(uint64_t) - 1))
+		bytes = SIZE_MAX;
+	else
+		bytes = (bytes + sizeof(uint64_t) - 1) &
+		    ~(sizeof(uint64_t) - 1);
+	*bytesp = relic_saturating_sum(*bytesp, bytes);
+
+	if (*cursorp == NULL)
+		return (NULL);
+	piece = *cursorp;
+	*cursorp += bytes;
+
+	return (piece);
+}
+
+/*
+ * Two passes: one counts each stripe's positions and makes the counts
+ * where each stripe begins, and one writes each position at its stripe's
+ * next place, which, walking the positions in order, leaves every stripe's
+ * in increasing order.
+ */
+void
+relic_list_by_stripe(const uint8_t *stripes, size_t count, uint32_t *list,
+    size_t *starts)
+{
+	size_t next[RELIC_STRIPES];
+	size_t i;
+	size_t s;
+
+	assert(count <= UINT32_MAX);
+
+	bzero(next, sizeof(next));
+	for (i = 0; i < count; i++) {
+		assert(stripes[i] < RELIC_STRIPES);
+		next[stripes[i]]++;
+	}
+
+	starts[0] = 0;
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		starts[s + 1] = starts[s] + next[s];
+		next[s] = starts[s];
+	}
+
+	for (i = 0; i < count; i++) {
+		list[next[stripes[i]]] = (uint32_t)i;
+		next[stripes[i]]++;
+	}
+}
+
 size_t
 relic_grow_array_capacity(size_t capacity, size_t count)
 {
@@ -363,9 +419,50 @@ relic_idtab_init(relic_idtab_t *table, bool tagged)
 void
 relic_idtab_reset(relic_idtab_t *table)
 {
-	free(table->slots);
-	free(table->tags);
+	if (!table->given) {
+		free(table->slots);
+		free(table->tags);
+	}
 	relic_idtab_init(table, table->tagged);
+}
+
+/*
+ * A table given its memory lays out its slots first and its tags after
+ * them, so that the slots keep the alignment the memory has.
+ */
+size_t
+relic_idtab_bytes_for(bool tagged, size_t count)
+{
+	relic_idtab_t empty;
+	size_t capacity;
+
+	if (count == 0)
+		return (0);
+
+	relic_idtab_init(&empty, tagged);
+	capacity = idtab_capacity_for(&empty, count);
+	if (capacity == 0)
+		return (SIZE_MAX);
+
+	return (capacity * idtab_slot_bytes(&empty));
+}
+
+void
+relic_idtab_init_given(relic_idtab_t *table, bool tagged, size_t count,
+    void *memory)
+{
+	relic_idtab_init(table, tagged);
+	if (count == 0)
+		return;
+
+	table->capacity = idtab_capacity_for(table, count);
+	assert(table->capacity != 0);
+	bzero(memory, table->capacity * idtab_slot_bytes(table));
+
+	table->slots = memory;
+	if (tagged)
+		table->tags = (uint8_t *)(table->slots + table->capacity);
+	table->given = true;
 }
 
 /*
@@ -592,6 +689,11 @@ relic_idtab_prepare_growth(const relic_idtab_t *table, size_t added,
 	if (idtab_capacity_holds(table->capacity, table->count, added))
 		return (0);
 
+	/* A table given its memory was made with room for all it holds. */
+	assert(!table->given);
+	if (table->given)
+		return (-1);
+
 	capacity = idtab_capacity_for(table, added);
 	if (capacity == 0)
 		return (-1);
@@ -610,6 +712,7 @@ relic_idtab_complete_growth(relic_idtab_t *table, relic_idtab_t *grown,
 		return;
 
 	assert(grown->count == 0 && grown->tagged == table->tagged);
+	assert(!table->given);
 
 	for (slot = 0; slot < table->capacity; slot++) {
 		id = table->slots[slot];

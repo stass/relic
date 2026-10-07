@@ -178,6 +178,21 @@ relic_saturating_product(size_t count, size_t size)
 }
 
 /*
+ * One allocation carved into arrays, for an owner that knows every array's
+ * length before it allocates any of them.  The owner lays the block out in
+ * one function run twice: with *cursorp NULL to measure it, and then from
+ * the block to carve it, so that the two cannot disagree.
+ * relic_block_piece() adds an array of `count` items of `size` bytes to
+ * *bytesp, the bytes laid out so far, rounded up so that the next array
+ * keeps a uint64_t's alignment, the block's own being malloc()'s, and
+ * saturating at SIZE_MAX; when *cursorp is not NULL it gives the array at
+ * the cursor, and moves the cursor past it, and otherwise gives NULL.  An
+ * array of no items takes no room, and lies where the next does.
+ */
+void	*relic_block_piece(char **cursorp, size_t *bytesp, size_t count,
+	    size_t size);
+
+/*
  * Hash functions keyed by a 64-bit seed.
  *
  * Each context draws its seed at random when it is created, and every table
@@ -263,6 +278,17 @@ relic_hash_stripe(uint64_t hash)
 	return ((size_t)(hash >> (63 - RELIC_STRIPE_BITS) >> 1));
 }
 
+/*
+ * List positions 0 to `count` - 1 by the stripe `stripes[i]` names for
+ * each, as a counting sort does, so that a part working on one stripe
+ * reads its own positions rather than every position's stripe: the
+ * positions of stripe s are `list[starts[s]]` up to `list[starts[s + 1]]`,
+ * in increasing order, and `starts[RELIC_STRIPES]` is `count`.  `count` is
+ * below 2^32, so that a position fits in the list.
+ */
+void	 relic_list_by_stripe(const uint8_t *stripes, size_t count,
+	    uint32_t *list, size_t *starts);
+
 static inline uint32_t
 relic_hash_low(uint64_t hash)
 {
@@ -311,6 +337,7 @@ struct relic_idtab {
 	size_t		 capacity;	/* a power of two, zero if empty */
 	size_t		 count;
 	bool		 tagged;
+	bool		 given;		/* slots in memory its owner gave */
 };
 
 /*
@@ -334,6 +361,27 @@ struct relic_idprobe {
  */
 void	 relic_idtab_init(relic_idtab_t *table, bool tagged);
 void	 relic_idtab_reset(relic_idtab_t *table);
+
+/*
+ * A table whose slots lie in memory its owner gives it, for an owner that
+ * makes many tables it fills once and discards, each sized by a count it
+ * knows before it makes any, and allocates and accounts for all of their
+ * slots as one block.
+ *
+ * relic_idtab_bytes_for() is the bytes the slots and tags of a table of
+ * the kind `tagged` says take, made with room for `count` entries as
+ * relic_idtab_reserve() would make it from empty; zero for no entries, and
+ * SIZE_MAX when no table could hold them.  relic_idtab_init_given() makes
+ * `table` such a table, empty, its slots and tags in `memory`, which holds
+ * that many bytes and is aligned for a uint32_t; it writes every byte it is
+ * given.  The table is never grown: at most `count` entries may be placed
+ * in it, and a reservation for more is a caller's error.
+ * relic_idtab_reset() on it releases nothing, the memory being its
+ * owner's, and leaves an empty table that allocates its own.
+ */
+size_t	 relic_idtab_bytes_for(bool tagged, size_t count);
+void	 relic_idtab_init_given(relic_idtab_t *table, bool tagged,
+	    size_t count, void *memory);
 
 /*
  * Installing an identifier is two operations rather than one, and they are

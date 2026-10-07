@@ -46,8 +46,12 @@ re-measure the threshold of `specs/design-parallel.md` section 5.4. Step
 `tc-cyclic`'s task phase at 0.86 of its time before. Step 2, buffers
 reserved from what each item inserted last, is in: the screen moves
 nothing on a round with a history, and `chain-closure`'s task phase is
-at 0.83 of step 1's. Steps 3 and 4 are not. The round that costs most,
-a recursive rule's first, has no history and keeps its growth cascade.
+at 0.83 of step 1's. Step 3, the merge's lists and blocks, is in: a
+typical round of `chain-closure` merges in 66 microseconds from 99, and
+the mean round in 130 from 160, held up by the few rounds that grow the
+canonical index, which the serial path grows as well. Step 4 is not. The
+round that costs most, a recursive rule's first, has no history and
+keeps its growth cascade.
 
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes

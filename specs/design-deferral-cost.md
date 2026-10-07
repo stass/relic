@@ -325,21 +325,23 @@ With the reservation above that is every add but a handful.
 
 ## 6. The merge walks its own candidates and takes its scratch once
 
-**Each stripe's candidates are listed.** After the tasks have run and
-before the merge, each worker sorts the positions of its candidates by
-the stripe of their target's canonical index -- a counting sort over the
-`by_stripe` counts it already keeps, one pass writing one position per
-candidate into an array of its candidate count -- a worker to a part on
-the pool. A stripe's part of the merge then walks worker by worker, task
-by task, the positions of its own stripe, each worker's list being in
-derivation order and a task's candidates a contiguous run of it; the
-walk keeps a cursor per worker and advances it through the tasks in task
-order. The same is done for a target's staging once it is staged: a
-list of staged positions per canonical stripe, and per secondary index
-per key stripe, built by one counting sort per target and index, a part
-each. Phase 1 reads each candidate once instead of sixteen times; the
-classification and the application read each staged tuple once per
-index instead of sixteen times per index.
+**Each stripe's candidates are listed.** Once the merge has resolved
+the pending values, which can move a candidate to another stripe, each
+worker's candidates are sorted by position into the stripes of their
+targets' canonical indexes -- a counting sort, whose counts are the
+`by_stripe` counts the worker keeps, writing one position per candidate
+into an array of its candidate count -- a worker to a part on the
+pool. A stripe's part of the merge then walks task by task the
+positions of its own stripe in the task's worker's list, each worker's
+list being in derivation order and a task's candidates a contiguous run
+of it; the walk finds each task's run by a search for the task's first
+position, so that it reads exactly the task's candidates whatever order
+the workers ran their tasks in. The same is done for a target's staging
+once it is staged: a list of staged positions per canonical stripe, and
+per secondary index per key stripe, built by one counting sort per
+target and index, a part each. Phase 1 reads each candidate once
+instead of sixteen times; the classification and the application read
+each staged tuple once per index instead of sixteen times per index.
 
 This reverses the choice of `specs/design-parallel.md` section 6.3 that
 every part reads every candidate's stripe, a byte each, in place of a
@@ -349,20 +351,32 @@ writes; what it removes is fifteen of every sixteen reads of the merge's
 three parallel phases, which on one thread is the merge's largest piece
 and on sixteen is a fifteen-sixteenths cut in what each part reads.
 
-**The merge's scratch is one allocation.** Every count a merge's scratch
-is sized by is known before the scratch is made: each stripe's
-candidates for its table of firsts and references, each target's new
-tuples for its staging and for the position lists, each part's tuples
-for its table of new keys. The merge sums them into one block, charges
-it once, allocates it once and carves it by part; `relic_relation_
-append_open()` does the same for a target's staging arrays, one block
-per target in place of three per target and three per index. A part
-opens nothing and frees nothing; `merge_end()` releases the block. The
-tables of firsts and of new keys are made in the block with
-`relic_idtab_prepare_growth()` as today, which allocates; they take a
-form that places slots in memory given to it, and the identifier table
-gains that constructor. Seventy-five allocations and charges a round
-become three.
+**A step's scratch is one allocation.** Every count a step of the
+merge sizes its scratch by is known before the step begins, from the
+steps before it: each worker's candidates for its list and each
+stripe's for its table of firsts and references, once the candidates
+are gathered; each target's new tuples for its staging and its lists,
+once they are counted; each part's tuples for its table of new keys,
+once the staged tuples are listed. Such a step sums its counts into one
+block, charges it once, allocates it once and carves it by part
+(`relic_block_piece()`, measuring and carving with one layout); a part
+opens nothing, frees nothing and cannot fail. The block of the firsts
+is released once they are counted and that of the new keys once the
+keys are classified, so neither is held beside the other, nor at the
+admission of `specs/design-parallel.md` section 6.1; a target's staging
+block, from `relic_relation_append_open()`, is held until the merge
+ends. One block cannot serve the whole merge, since the new keys' counts
+are known only once the staging they classify exists. A block holds
+every part's tables at once, for as long as its step runs, so the
+round's peak counts all of them together; near the memory limit a merge
+may be declined that tables made and freed part by part would have
+fitted, and its round runs serially, slower and the same. The tables of
+firsts and of new keys take their slots from their block, a form of the
+identifier table that places its slots in memory given to it
+(`relic_idtab_init_given()`), and each part makes its table there when
+it begins, so that the parts clear their tables in parallel. A round's
+merge makes two allocations and charges for its steps, and one per
+target.
 
 ---
 
@@ -411,10 +425,11 @@ before the round what today's growth charges during it, the same holder
 of `specs/design-parallel.md` section 8, released at the round's end as
 today; a reservation refused is a round declined before publication,
 which is a round run serially, where the limit judges every insertion as
-it always has. The merge's one block of section 6 is charged as the
-pieces it replaces were, and the admission question of section 6.1 asks
-with it in the total as it asked with them. The storage total after a
-merge is the serial evaluator's byte for byte, as before: the scratch is
+it always has. The blocks of section 6 are charged to the round while
+they are held, and the admission question of section 6.1 asks with the
+staging blocks in the total and without the blocks of the firsts and of
+the new keys, which are released before it asks. The storage total
+after a merge is the serial evaluator's byte for byte: the scratch is
 not storage.
 
 Nothing a program derives changes. The passes of section 4 read what the
@@ -547,10 +562,10 @@ what each is measured against; step 4 depends on all three.
   floor of section 7; section 6.3 phase 1 and phases 4 and 7: a part
   walks its stripe's listed positions rather than every candidate's
   stripe byte, section 6; section 8: the buffers are charged at the
-  round's start for their reservation and the merge's scratch is one
-  charged block; section 15: the measurements of this document's
-  section 10 join the gates; section 18: "a screen that forgets" and
-  "tables that remember the hash" are listed as absent.
+  round's start for their reservation and each step of the merge takes
+  its scratch as one charged block; section 15: the measurements of this
+  document's section 10 join the gates; section 18: "a screen that
+  forgets" and "tables that remember the hash" are listed as absent.
 * `specs/design-memory.md` section 6: the identifier table gains a form
   whose slots lie in memory its owner gives it.
 * `specs/architecture.md`: the parallel evaluation section points here

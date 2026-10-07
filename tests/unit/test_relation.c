@@ -1834,9 +1834,10 @@ append_tuples(relic_t *ctx, relic_relation_t *rel, const relic_dom_t *tuples,
 }
 
 /*
- * The steps of an append once its tuples are staged: classify every part,
- * project, reserve, take, apply every part and finish.  The parts are run
- * last to first, since a merge's threads may run them in any order.
+ * The steps of an append once its tuples are staged: list every part,
+ * classify every part, project, reserve, take, apply every part and
+ * finish.  The parts are run last to first, since a merge's threads may
+ * run them in any order.
  */
 static bool
 append_steps(relic_t *ctx, relic_relation_t *rel, relic_append_t *append)
@@ -1847,6 +1848,8 @@ append_steps(relic_t *ctx, relic_relation_t *rel, relic_append_t *append)
 	size_t during;
 	size_t part;
 
+	for (part = relic_relation_list_parts(append); part-- > 0;)
+		relic_relation_list_append(append, part);
 	for (part = relic_relation_classify_parts(append); part-- > 0;) {
 		if (!classify_part(rel, append, part))
 			return (false);

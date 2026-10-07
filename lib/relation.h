@@ -331,28 +331,36 @@ struct relic_base_growth {
  *
  * `columns`, `hashes` and `stripes` hold each tuple's columns, its wide
  * hash and the stripe of the canonical index that chooses, and `growth`
- * counts the tuples of each stripe.  `keys` has `key_count` records, one
- * per secondary index of the relation, in the relation's order.  `grown`
- * holds, between the reservation and the part that places a stripe, the
- * stripe's table grown for its new tuples, allocated and not yet filled,
- * and nothing otherwise.
+ * counts the tuples of each stripe.  `stripe_list` lists the tuples'
+ * positions by that stripe, those of stripe s from `stripe_start[s]` up to
+ * `stripe_start[s + 1]` in increasing order (relic_list_by_stripe()), so
+ * that the part placing a stripe reads its own tuples and no other's.
+ * `keys` has `key_count` records, one per secondary index of the relation,
+ * in the relation's order.  `grown` holds, between the reservation and the
+ * part that places a stripe, the stripe's table grown for its new tuples,
+ * allocated and not yet filled, and nothing otherwise.
  *
- * `charged` is what the arrays are charged to the round.  `reserved` is
- * what the relation holds from the reservation on, the grown tables of the
- * append and of its keys with it, which the storage total counts until the
- * append is finished, when the grown tables have replaced the tables they
- * were grown from.
+ * Every per-tuple array of the append and of its keys lies in `block`,
+ * one allocation laid out once the count is known; `charged` is what the
+ * block is charged to the round.  `reserved` is what the relation holds
+ * from the reservation on, the grown tables of the append and of its keys
+ * with it, which the storage total counts until the append is finished,
+ * when the grown tables have replaced the tables they were grown from.
  *
  * The caller sets `count` and `growth`; the relation store allocates the
  * arrays, fills them and releases them.  An append of all zeroes holds
- * nothing.  Every part of the work on an append that runs on several
- * threads at once touches one stripe, and so writes no word another
- * stripe's part touches.
+ * nothing.  The parts of the work on an append that run on several
+ * threads at once write no word another part writes: a part that lists
+ * the tuples by stripe writes one index's list, and every other part
+ * touches one stripe of one index.
  */
 struct relic_append {
+	void			*block;
 	relic_dom_t		*columns;
 	uint64_t		*hashes;
 	uint8_t			*stripes;
+	uint32_t		*stripe_list;
+	size_t			 stripe_start[RELIC_STRIPES + 1];
 	relic_append_keys_t	*keys;
 	relic_idtab_t		 grown[RELIC_STRIPES];
 	relic_tuple_growth_t	 growth;
@@ -367,7 +375,9 @@ struct relic_append {
  * What an append brings one secondary index: for each tuple its key's wide
  * hash, the stripe of the index that chooses, and the key it joins there --
  * one the index holds, or a new one, the stripe's new keys numbered on from
- * its last in the order the tuples first bring them.  `new_keys` counts
+ * its last in the order the tuples first bring them.  `stripe_list` and
+ * `stripe_start` list the tuples' positions by their key's stripe, as an
+ * append's own list them by their canonical stripe.  `new_keys` counts
  * each stripe's new keys, and `grown` holds each stripe's key table grown
  * for them, as an append's own `grown` does.
  */
@@ -375,6 +385,8 @@ struct relic_append_keys {
 	uint64_t	*hashes;
 	uint8_t		*stripes;
 	uint32_t	*key_ids;
+	uint32_t	*stripe_list;
+	size_t		 stripe_start[RELIC_STRIPES + 1];
 	size_t		 new_keys[RELIC_STRIPES];
 	relic_idtab_t	 grown[RELIC_STRIPES];
 };

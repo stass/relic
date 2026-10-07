@@ -1789,7 +1789,9 @@ void	 relic_index_link_append(relic_index_t *index,
  * identifier order they take, as a round's merge gathers them (relation.h).
  * relic_relation_append_open() gives it its arrays, charged to the round,
  * and relic_relation_append_close() releases everything it holds, applied
- * or not.  relic_relation_stage() records a tuple of it, and
+ * or not.  relic_relation_stage() records a tuple of it;
+ * relic_relation_list_append() lists its staged tuples by stripe in each
+ * of the relic_relation_list_parts() parts, an index each; and
  * relic_relation_classify_append() classifies its keys in each of the
  * relic_relation_classify_parts() parts, a key stripe each, with room for
  * relic_relation_classify_tuples() new keys.
@@ -1890,6 +1892,8 @@ void	 relic_relation_append_close(relic_t *ctx, relic_append_t *append);
 void	 relic_relation_stage(const relic_relation_t *relation,
 	    relic_append_t *append, size_t position, const relic_dom_t *columns,
 	    uint64_t hash);
+size_t	 relic_relation_list_parts(const relic_append_t *append);
+void	 relic_relation_list_append(relic_append_t *append, size_t part);
 size_t	 relic_relation_classify_parts(const relic_append_t *append);
 size_t	 relic_relation_classify_tuples(const relic_append_t *append,
 	    size_t part);

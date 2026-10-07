@@ -593,24 +593,25 @@ relic_index_classify_append(const relic_index_t *index,
 {
 	const relic_index_stripe_t *stripe;
 	relic_dom_t key[RELIC_MAX_ARITY];
+	uint32_t position;
 	uint32_t key_id;
 	size_t added;
 	size_t i;
 
+	assert(keys->stripe_start[RELIC_STRIPES] == append->count);
 	stripe = &index->stripes[s];
 	added = 0;
 
-	for (i = 0; i < append->count; i++) {
-		if (keys->stripes[i] != s)
-			continue;
-
-		gather_key(index, appended_tuple(append, relation, i), key);
-		key_id = find_key(index, stripe, key, keys->hashes[i]);
+	for (i = keys->stripe_start[s]; i < keys->stripe_start[s + 1]; i++) {
+		position = keys->stripe_list[i];
+		gather_key(index, appended_tuple(append, relation, position),
+		    key);
+		key_id = find_key(index, stripe, key, keys->hashes[position]);
 		if (key_id == RELIC_ID_NONE)
 			key_id = (uint32_t)(stripe->key_count + 1 +
 			    number_new_key(index, relation, append, new_keys,
-			    key, keys->hashes[i], i, &added));
-		keys->key_ids[i] = key_id;
+			    key, keys->hashes[position], position, &added));
+		keys->key_ids[position] = key_id;
 	}
 
 	keys->new_keys[s] = added;
@@ -834,9 +835,11 @@ relic_index_link_append(relic_index_t *index,
 	relic_index_rehash_t rehash;
 	relic_index_stripe_t *stripe;
 	relic_tuple_id_t id;
+	uint32_t position;
 	uint32_t key_id;
 	size_t i;
 
+	assert(keys->stripe_start[RELIC_STRIPES] == append->count);
 	stripe = &index->stripes[s];
 	rehash.index = index;
 	rehash.stripe = stripe;
@@ -844,18 +847,16 @@ relic_index_link_append(relic_index_t *index,
 	relic_idtab_complete_growth(&stripe->keys, &keys->grown[s], key_rehash,
 	    &rehash);
 
-	for (i = 0; i < append->count; i++) {
-		if (keys->stripes[i] != s)
-			continue;
-
-		id = (relic_tuple_id_t)(append->first + i);
-		key_id = keys->key_ids[i];
+	for (i = keys->stripe_start[s]; i < keys->stripe_start[s + 1]; i++) {
+		position = keys->stripe_list[i];
+		id = (relic_tuple_id_t)(append->first + position);
+		key_id = keys->key_ids[position];
 		if (key_id <= stripe->key_count) {
 			chain_link(index, stripe, key_id, id);
 		} else {
 			assert(key_id == stripe->key_count + 1);
 			chain_start(index, stripe, relation, id,
-			    keys->hashes[i]);
+			    keys->hashes[position]);
 		}
 	}
 }

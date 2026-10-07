@@ -789,16 +789,18 @@ on the capacities the serial evaluator reaches. A lookup through a
 striped table costs one shift more than an unstriped one, to choose the
 stripe.
 
-**The merge's scratch is one allocation.** Every count the scratch is
-sized by -- each stripe's candidates for its table of firsts and their
-references, each target's new tuples for its staging and its lists, each
-part's tuples for its table of new keys -- is known before any of it is
-made. The merge sums them, charges one block to the round, allocates it
-once and carves it by part; a part opens nothing and frees nothing, and
-the block is released when the merge ends, applied or declined. The
-tables made in it take their slots from the block rather than from the
-allocator, the form of `specs/design-memory.md` section 6;
-`specs/design-deferral-cost.md` section 6.
+**A step's scratch is one allocation.** Every count a step's scratch is
+sized by -- each worker's candidates for its list and each stripe's for
+its table of firsts and their references, each target's new tuples for
+its staging and its lists, each part's tuples for its table of new
+keys -- is known before the step begins, from the steps before it. The
+step sums them, charges one block to the round, allocates it once and
+carves it by part; a part opens nothing, frees nothing and cannot fail.
+The blocks of the firsts and of the new keys are released when their
+steps end, and a target's staging block when the merge ends, applied or
+declined. The tables made in a block take their slots from it rather
+than from the allocator, the form of `specs/design-memory.md` section
+6; `specs/design-deferral-cost.md` section 6.
 
 ---
 
@@ -912,8 +914,8 @@ charged as a second kind of holder, beside the arenas, through an atomic
 charge: a compare-and-swap loop that admits the bytes only if the total
 with them stays under the limit, and an atomic release. The loop runs once
 for the reservation a round makes before it is published, section 5.3,
-once per growth beyond it, which is once per doubling, and once for the
-merge's scratch, section 6.3. A refused charge records nothing
+once per growth beyond it, which is once per doubling, and once for each
+step of the merge's scratch, section 6.3. A refused charge records nothing
 -- the account's record of a refusal is for an arena worker 0 reports on
 -- and is an abandonment, not a failure: the round is rerun serially, and
 if the serial evaluator then refuses, it refuses as it does today. The

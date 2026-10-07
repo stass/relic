@@ -65,9 +65,9 @@ static void	 classify_keys(relic_relation_t *relation,
 		    const relic_dom_t *columns);
 static size_t	 columns_bytes_after(const relic_relation_t *relation,
 		    size_t added);
-static void	*append_array(relic_t *ctx, relic_append_t *append,
-		    size_t count, size_t size);
 static size_t	 append_grown_bytes(const relic_append_t *append);
+static size_t	 append_layout(const relic_relation_t *relation,
+		    relic_append_t *append, void *block);
 static int	 append_grow(relic_relation_t *relation,
 		    relic_append_t *append);
 static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation,
@@ -557,94 +557,95 @@ insertion_parts_bytes_after(const relic_relation_t *relation, uint64_t hash)
 }
 
 /*
- * Give an append its arrays, for the `count` tuples its caller set, each
- * charged to the round before it is allocated, since only a round's merge
- * makes an append: for each tuple its columns, its hash and its stripe, and
- * for each secondary index of the relation its key's hash, stripe and
- * identifier.  The records of the secondary indexes are sized by the
- * program and are not charged.  Returns 0, or -1 when the limit or the
- * allocator refused; what was obtained is kept, for
+ * Give an append its arrays, for the `count` tuples its caller set, in one
+ * block charged to the round before it is allocated, since only a round's
+ * merge makes an append: for each tuple its columns, its hash and its
+ * stripe, and for each secondary index of the relation its key's hash,
+ * stripe and identifier, and for the canonical index and each secondary
+ * one the list of the tuples by stripe.  The records of the secondary
+ * indexes are sized by the program and are not charged.  Returns 0, or -1
+ * when the limit or the allocator refused; what was obtained is kept, for
  * relic_relation_append_close() to release.
  */
 int
 relic_relation_append_open(relic_t *ctx, const relic_relation_t *relation,
     relic_append_t *append)
 {
-	relic_append_keys_t *keys;
-	size_t words;
-	size_t index;
+	size_t carved;
+	size_t bytes;
 
 	if (append->count == 0)
 		return (0);
 
-	words = relic_saturating_product(append->count, relation->arity);
-	append->columns = append_array(ctx, append, words,
-	    sizeof(*append->columns));
-	if (append->columns == NULL)
-		return (-1);
-	append->hashes = append_array(ctx, append, append->count,
-	    sizeof(*append->hashes));
-	if (append->hashes == NULL)
-		return (-1);
-	append->stripes = append_array(ctx, append, append->count,
-	    sizeof(*append->stripes));
-	if (append->stripes == NULL)
-		return (-1);
-
-	if (relation->index_count == 0)
-		return (0);
-	append->keys = calloc(relation->index_count, sizeof(*append->keys));
-	if (append->keys == NULL)
-		return (-1);
-	append->key_count = relation->index_count;
-
-	for (index = 0; index < append->key_count; index++) {
-		keys = &append->keys[index];
-		keys->hashes = append_array(ctx, append, append->count,
-		    sizeof(*keys->hashes));
-		if (keys->hashes == NULL)
+	if (relation->index_count > 0) {
+		append->keys = calloc(relation->index_count,
+		    sizeof(*append->keys));
+		if (append->keys == NULL)
 			return (-1);
-		keys->stripes = append_array(ctx, append, append->count,
-		    sizeof(*keys->stripes));
-		if (keys->stripes == NULL)
-			return (-1);
-		keys->key_ids = append_array(ctx, append, append->count,
-		    sizeof(*keys->key_ids));
-		if (keys->key_ids == NULL)
-			return (-1);
+		append->key_count = relation->index_count;
 	}
+
+	bytes = append_layout(relation, append, NULL);
+	if (bytes == SIZE_MAX ||
+	    !relic_account_charge_round(&ctx->account, bytes))
+		return (-1);
+	append->block = malloc(bytes);
+	if (append->block == NULL) {
+		relic_account_release_round(&ctx->account, bytes);
+		return (-1);
+	}
+	append->charged = bytes;
+
+	carved = append_layout(relation, append, append->block);
+	assert(carved == bytes);
+	(void)carved;
 
 	return (0);
 }
 
 /*
- * An array of `count` items of `size` bytes for an append, charged to the
- * round before it is allocated, the charge counted in the append; NULL,
- * having charged nothing, when the limit or the allocator refused it.
+ * Lay an append's arrays out from `block`, or only measure them when it is
+ * NULL (relic_block_piece()), and return their bytes, SIZE_MAX when they
+ * are more than a size counts.  The arrays of the secondary indexes go in
+ * the records `append->keys` already holds.
  */
-static void *
-append_array(relic_t *ctx, relic_append_t *append, size_t count, size_t size)
+static size_t
+append_layout(const relic_relation_t *relation, relic_append_t *append,
+    void *block)
 {
-	size_t capacity;
+	relic_append_keys_t *keys;
+	size_t count;
 	size_t bytes;
-	void *items;
+	size_t index;
+	char *cursor;
 
-	capacity = relic_grow_array_capacity(0, count);
-	if (capacity == 0 || capacity > SIZE_MAX / size)
-		return (NULL);
-	bytes = capacity * size;
-	if (!relic_account_charge_round(&ctx->account, bytes))
-		return (NULL);
+	cursor = block;
+	bytes = 0;
+	count = append->count;
 
-	capacity = 0;
-	items = relic_grow_array(NULL, &capacity, count, size);
-	if (items == NULL) {
-		relic_account_release_round(&ctx->account, bytes);
-		return (NULL);
+	append->columns = relic_block_piece(&cursor, &bytes,
+	    relic_saturating_product(count, relation->arity),
+	    sizeof(*append->columns));
+	append->hashes = relic_block_piece(&cursor, &bytes, count,
+	    sizeof(*append->hashes));
+	append->stripes = relic_block_piece(&cursor, &bytes, count,
+	    sizeof(*append->stripes));
+	append->stripe_list = relic_block_piece(&cursor, &bytes, count,
+	    sizeof(*append->stripe_list));
+
+	for (index = 0; index < append->key_count; index++) {
+		keys = &append->keys[index];
+		keys->hashes = relic_block_piece(&cursor, &bytes, count,
+		    sizeof(*keys->hashes));
+		keys->stripes = relic_block_piece(&cursor, &bytes, count,
+		    sizeof(*keys->stripes));
+		keys->key_ids = relic_block_piece(&cursor, &bytes, count,
+		    sizeof(*keys->key_ids));
+		keys->stripe_list = relic_block_piece(&cursor, &bytes, count,
+		    sizeof(*keys->stripe_list));
 	}
-	append->charged += bytes;
 
-	return (items);
+	return (bytes);
 }
 
 /*
@@ -656,21 +657,13 @@ append_array(relic_t *ctx, relic_append_t *append, size_t count, size_t size)
 void
 relic_relation_append_close(relic_t *ctx, relic_append_t *append)
 {
-	relic_append_keys_t *keys;
 	size_t index;
 
-	for (index = 0; index < append->key_count; index++) {
-		keys = &append->keys[index];
-		free(keys->hashes);
-		free(keys->stripes);
-		free(keys->key_ids);
-		release_grown_tables(ctx, keys->grown);
-	}
+	for (index = 0; index < append->key_count; index++)
+		release_grown_tables(ctx, append->keys[index].grown);
 	free(append->keys);
 
-	free(append->columns);
-	free(append->hashes);
-	free(append->stripes);
+	free(append->block);
 	release_grown_tables(ctx, append->grown);
 	relic_account_release_round(&ctx->account, append->charged);
 
@@ -720,6 +713,38 @@ relic_relation_stage(const relic_relation_t *relation, relic_append_t *append,
 }
 
 /*
+ * The parts an append's tuples are listed by stripe in, once every tuple is
+ * staged: part 0 lists them by their stripe of the canonical index, and
+ * part i > 0 by their key's stripe of the secondary index at i - 1.  An
+ * empty append has none.  A caller runs every part, in any order and on
+ * any threads, and no two parts write the same word.
+ */
+size_t
+relic_relation_list_parts(const relic_append_t *append)
+{
+	if (append->count == 0)
+		return (0);
+
+	return (1 + append->key_count);
+}
+
+void
+relic_relation_list_append(relic_append_t *append, size_t part)
+{
+	relic_append_keys_t *keys;
+
+	if (part == 0) {
+		relic_list_by_stripe(append->stripes, append->count,
+		    append->stripe_list, append->stripe_start);
+		return;
+	}
+
+	keys = &append->keys[part - 1];
+	relic_list_by_stripe(keys->stripes, append->count, keys->stripe_list,
+	    keys->stripe_start);
+}
+
+/*
  * The parts an append's keys are classified in, a stripe of a secondary
  * index each: part p is stripe p % RELIC_STRIPES of the secondary index at
  * p / RELIC_STRIPES.  An empty append has none.  A caller runs every part,
@@ -733,23 +758,19 @@ relic_relation_classify_parts(const relic_append_t *append)
 
 /*
  * How many of an append's tuples classify part `part` reads, which is also
- * as many new keys as it can find.
+ * as many new keys as it can find.  The tuples are listed by stripe.
  */
 size_t
 relic_relation_classify_tuples(const relic_append_t *append, size_t part)
 {
 	const relic_append_keys_t *keys;
-	size_t count;
-	size_t i;
+	size_t s;
 
 	keys = &append->keys[part / RELIC_STRIPES];
-	count = 0;
-	for (i = 0; i < append->count; i++) {
-		if (keys->stripes[i] == part % RELIC_STRIPES)
-			count++;
-	}
+	s = part % RELIC_STRIPES;
+	assert(keys->stripe_start[RELIC_STRIPES] == append->count);
 
-	return (count);
+	return (keys->stripe_start[s + 1] - keys->stripe_start[s]);
 }
 
 /*
@@ -1002,17 +1023,20 @@ place_append_stripe(relic_relation_t *relation, relic_append_t *append,
     size_t s)
 {
 	relic_idtab_t *stripe;
+	uint32_t position;
 	size_t i;
 
+	assert(append->stripe_start[RELIC_STRIPES] == append->count);
 	stripe = &relation->index[s];
 	relic_idtab_complete_growth(stripe, &append->grown[s], tuple_rehash,
 	    relation);
 
-	for (i = 0; i < append->count; i++) {
-		if (append->stripes[i] == s)
-			relic_idtab_place(stripe, relic_hash_low(
-			    append->hashes[i]),
-			    (relic_tuple_id_t)(append->first + i));
+	for (i = append->stripe_start[s]; i < append->stripe_start[s + 1];
+	    i++) {
+		position = append->stripe_list[i];
+		relic_idtab_place(stripe, relic_hash_low(
+		    append->hashes[position]),
+		    (relic_tuple_id_t)(append->first + position));
 	}
 }
 

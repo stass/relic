@@ -30,12 +30,15 @@
 #include "harness.h"
 #include "internal.h"
 
+#define	SCENARIO_BLOCK		"a block is carved as it was measured"
 #define	SCENARIO_CONTEXTS	"each context draws a seed of its own"
 #define	SCENARIO_DETERMINISM	"hashing is reproducible within a seed"
 #define	SCENARIO_EMPTY		"a large table starts empty"
 #define	SCENARIO_FLOODING	"keys crafted to collide need the seed"
+#define	SCENARIO_GIVEN		"a table in given memory is a table"
 #define	SCENARIO_GROWTH		"an array grows without losing its contents"
 #define	SCENARIO_KEYED		"a hash depends on its seed"
+#define	SCENARIO_LISTS		"positions are listed by stripe in order"
 #define	SCENARIO_LOOKUP		"a key survives the table growing under it"
 #define	SCENARIO_OVERFLOW	"an impossible array size is refused"
 #define	SCENARIO_PREDICTED	"a growth is exactly what was predicted"
@@ -98,7 +101,12 @@ static size_t	 walk_to(const relic_idtab_t *table, const key_set_t *keys,
 		    uint32_t key);
 static void	 an_array_grows_without_losing_its_contents(void);
 static void	 an_array_refuses_an_impossible_size(void);
+static void	 a_block_is_carved_as_measured(void);
 static void	 a_large_table_starts_empty(void);
+static bool	 listed_in_order(const uint8_t *stripes, size_t count);
+static void	 positions_are_listed_by_stripe(void);
+static void	 a_table_in_given_memory_matches_its_own(void);
+static bool	 given_matches_own(size_t count, bool tagged);
 static void	 equal_input_hashes_equally(void);
 static void	 every_inserted_key_is_found_after_growth(void);
 static void	 found_after_growth(bool tagged);
@@ -1065,6 +1073,225 @@ a_stepwise_growth_is_exactly_what_was_predicted(void)
 }
 
 /*
+ * A table made in memory its owner gives it, with room for a count, holds
+ * its slots exactly as a table that reserved that room for itself: the
+ * same capacity, every key placed in the same slot under the same tag, and
+ * every key found again.  Its bytes are what relic_idtab_bytes_for()
+ * says, which is what the reservation would have allocated, and resetting
+ * it frees nothing, which the sanitizers' builds would report.
+ */
+static void
+a_table_in_given_memory_matches_its_own(void)
+{
+	static const size_t counts[] = { 1, 2, 12, 13, 100, 3000, 4096 };
+	size_t i;
+
+	checkf(relic_idtab_bytes_for(true, 0) == 0 &&
+	    relic_idtab_bytes_for(false, 0) == 0, SCENARIO_GIVEN,
+	    "a table for no entries should take no bytes");
+	checkf(relic_idtab_bytes_for(true, SIZE_MAX) == SIZE_MAX,
+	    SCENARIO_GIVEN, "no table should hold SIZE_MAX entries");
+
+	for (i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+		checkf(given_matches_own(counts[i], false), SCENARIO_GIVEN,
+		    "%zu keys, untagged", counts[i]);
+		checkf(given_matches_own(counts[i], true), SCENARIO_GIVEN,
+		    "%zu keys, tagged", counts[i]);
+	}
+}
+
+/*
+ * Fill a table given its memory and one that reserved its own with the
+ * same `count` keys, and compare them.  Returns whether they agreed.
+ */
+static bool
+given_matches_own(size_t count, bool tagged)
+{
+	enum { KEY_MAX = 4096 };
+
+	relic_idtab_t given;
+	relic_idtab_t own;
+	key_set_t keys;
+	uint32_t storage[KEY_MAX];
+	uint32_t *memory;
+	uint32_t found;
+	size_t bytes;
+	size_t i;
+	bool agree;
+
+	if (count > KEY_MAX)
+		return (false);
+
+	bytes = relic_idtab_bytes_for(tagged, count);
+	memory = malloc(bytes);
+	if (memory == NULL)
+		return (false);
+	memset(memory, 0xa5, bytes);
+
+	keys.keys = storage;
+	keys.count = 0;
+	keys.seed = SEED;
+	relic_idtab_init_given(&given, tagged, count, memory);
+	relic_idtab_init(&own, tagged);
+	agree = relic_idtab_reserve(&own, count, key_rehash, &keys) == 0 &&
+	    relic_idtab_bytes(&own) == bytes &&
+	    relic_idtab_bytes(&given) == bytes &&
+	    own.capacity == given.capacity;
+
+	for (i = 0; i < count && agree; i++) {
+		storage[i] = (uint32_t)(i * 7919u + 13u);
+		keys.count++;
+		relic_idtab_place(&own, relic_hash_word(SEED, storage[i]),
+		    (uint32_t)keys.count);
+		relic_idtab_place(&given, relic_hash_word(SEED, storage[i]),
+		    (uint32_t)keys.count);
+	}
+
+	agree = agree && relic_idtab_has_room(&given, 0) &&
+	    bcmp(own.slots, given.slots,
+	    own.capacity * sizeof(*own.slots)) == 0 &&
+	    (!tagged || bcmp(own.tags, given.tags, own.capacity) == 0);
+	for (i = 0; i < count && agree; i++)
+		agree = key_set_find(&given, &keys, storage[i], &found) &&
+		    found == (uint32_t)(i + 1);
+
+	relic_idtab_reset(&given);
+	agree = agree && given.slots == NULL && given.capacity == 0 &&
+	    given.tagged == tagged;
+	relic_idtab_reset(&own);
+	free(memory);
+
+	return (agree);
+}
+
+/*
+ * A block laid out piece by piece measures what carving it takes: each
+ * piece starts where the one before it ended, rounded up to a uint64_t's
+ * alignment, a piece of no items takes no room, and a piece too large for
+ * a size saturates the measure at SIZE_MAX, which an owner refuses.
+ */
+static void
+a_block_is_carved_as_measured(void)
+{
+	uint64_t storage[16];
+	uint32_t *words;
+	uint8_t *bytes;
+	uint64_t *wide;
+	void *none;
+	size_t measured;
+	size_t carved;
+	char *cursor;
+
+	cursor = NULL;
+	measured = 0;
+	(void)relic_block_piece(&cursor, &measured, 3, sizeof(*bytes));
+	(void)relic_block_piece(&cursor, &measured, 0, sizeof(*words));
+	(void)relic_block_piece(&cursor, &measured, 5, sizeof(*words));
+	(void)relic_block_piece(&cursor, &measured, 2, sizeof(*wide));
+	checkf(measured == 8 + 0 + 24 + 16 && cursor == NULL, SCENARIO_BLOCK,
+	    "a block of 3 bytes, no words, 5 words and 2 wide words should "
+	    "measure 48 bytes, not %zu", measured);
+
+	cursor = (char *)storage;
+	carved = 0;
+	bytes = relic_block_piece(&cursor, &carved, 3, sizeof(*bytes));
+	none = relic_block_piece(&cursor, &carved, 0, sizeof(*words));
+	words = relic_block_piece(&cursor, &carved, 5, sizeof(*words));
+	wide = relic_block_piece(&cursor, &carved, 2, sizeof(*wide));
+	checkf(carved == measured && (char *)bytes == (char *)storage &&
+	    none == (void *)&storage[1] && words == (void *)&storage[1] &&
+	    wide == &storage[4] && cursor == (char *)&storage[6],
+	    SCENARIO_BLOCK, "the pieces should lie where the measure put them");
+
+	measured = 0;
+	cursor = NULL;
+	(void)relic_block_piece(&cursor, &measured, 1, sizeof(*bytes));
+	(void)relic_block_piece(&cursor, &measured, SIZE_MAX / 2,
+	    sizeof(*wide));
+	(void)relic_block_piece(&cursor, &measured, 1, sizeof(*bytes));
+	checkf(measured == SIZE_MAX, SCENARIO_BLOCK,
+	    "a piece past a size should saturate the measure");
+	measured = 0;
+	(void)relic_block_piece(&cursor, &measured, SIZE_MAX - 3, 1);
+	checkf(measured == SIZE_MAX, SCENARIO_BLOCK,
+	    "rounding a piece up past a size should saturate the measure");
+}
+
+/*
+ * A counting sort by stripe lists every position once, each stripe's
+ * together and in increasing order, for stripes spread evenly, crowded
+ * into one, and absent from all but the last; and lists nothing for no
+ * positions.  A round's candidates and an append's tuples are found by
+ * stripe through these lists, and an order within a stripe that was not
+ * increasing would insert them in another order than serially.
+ */
+static void
+positions_are_listed_by_stripe(void)
+{
+	enum { COUNT = 1000 };
+
+	uint8_t stripes[COUNT];
+	size_t i;
+
+	for (i = 0; i < COUNT; i++)
+		stripes[i] = (uint8_t)((i * 7 + i / 13) % RELIC_STRIPES);
+	checkf(listed_in_order(stripes, COUNT), SCENARIO_LISTS,
+	    "stripes spread evenly");
+
+	for (i = 0; i < COUNT; i++)
+		stripes[i] = (uint8_t)(i % 97 == 0 ? 0 : RELIC_STRIPES / 2);
+	checkf(listed_in_order(stripes, COUNT), SCENARIO_LISTS,
+	    "stripes crowded into one");
+
+	for (i = 0; i < COUNT; i++)
+		stripes[i] = (uint8_t)(RELIC_STRIPES - 1);
+	checkf(listed_in_order(stripes, COUNT), SCENARIO_LISTS,
+	    "every position in the last stripe");
+	checkf(listed_in_order(stripes, 0), SCENARIO_LISTS, "no positions");
+}
+
+/*
+ * List `count` positions by the stripes `stripes` names and check the
+ * list: the stripes' runs end to end, each holding exactly its stripe's
+ * positions in increasing order, every position once.  Returns whether
+ * the list held.
+ */
+static bool
+listed_in_order(const uint8_t *stripes, size_t count)
+{
+	enum { COUNT_MAX = 1000 };
+
+	size_t starts[RELIC_STRIPES + 1];
+	uint32_t list[COUNT_MAX];
+	bool seen[COUNT_MAX];
+	size_t s;
+	size_t j;
+
+	if (count > COUNT_MAX)
+		return (false);
+
+	memset(list, 0xff, sizeof(list));
+	relic_list_by_stripe(stripes, count, list, starts);
+	if (starts[0] != 0 || starts[RELIC_STRIPES] != count)
+		return (false);
+
+	bzero(seen, sizeof(seen));
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (starts[s + 1] < starts[s])
+			return (false);
+		for (j = starts[s]; j < starts[s + 1]; j++) {
+			if (list[j] >= count || seen[list[j]] ||
+			    stripes[list[j]] != s ||
+			    (j > starts[s] && list[j] <= list[j - 1]))
+				return (false);
+			seen[list[j]] = true;
+		}
+	}
+
+	return (true);
+}
+
+/*
  * Reserve room for `added` keys in a table already holding `held`, and
  * check the reservation reached the size predicted for it and that the keys
  * then fit without the table growing again.  Returns whether every check
@@ -1479,6 +1706,9 @@ main(void)
 	an_array_grows_without_losing_its_contents();
 	an_array_refuses_an_impossible_size();
 	a_large_table_starts_empty();
+	a_table_in_given_memory_matches_its_own();
+	a_block_is_carved_as_measured();
+	positions_are_listed_by_stripe();
 	equal_input_hashes_equally();
 	every_inserted_key_is_found_after_growth();
 	a_growth_is_exactly_what_was_predicted();

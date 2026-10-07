@@ -34,15 +34,18 @@
  *			pending the identifier the serial run gives it, and
  *			write it over each marker, hashing the candidate
  *			again;
- *	find new tuples	a stripe of the canonical index to a part: mark each
- *			candidate of the stripe a first or a repeat of an
- *			earlier one, counting each task's firsts;
+ *	find new tuples	a worker to a part, list its candidates by stripe;
+ *			then a stripe of the canonical index to a part, mark
+ *			each candidate of the stripe a first or a repeat of
+ *			an earlier one, counting each task's firsts;
  *	count		(worker 0) each task's firsts give it the positions
  *			its new tuples take in its target's append, and each
  *			target its count per stripe; the tuple limit and the
  *			identifier space are asked of the exact total;
  *	stage		a task to a part: copy its firsts, with their hashes
- *			and their keys' hashes, into their positions;
+ *			and their keys' hashes, into their positions; then an
+ *			index of a target to a part, list the staged tuples
+ *			by their stripe of the index;
  *	classify	a stripe of a secondary index to a part: find the key
  *			each staged tuple of the stripe joins, numbering the
  *			stripe's new keys;
@@ -58,20 +61,27 @@
  *			chains.
  *
  * No step up to the application changes what a relation or the integer
- * table holds, and every step that can fail -- a scratch table the limit or
- * the allocator refuses, a limit the new tuples or integers would pass, a
- * growth refused -- is among them.  A failure declines the merge, and the
+ * table holds, and every step that can fail -- scratch the limit or the
+ * allocator refuses, a limit the new tuples or integers would pass, a
+ * growth refused -- is among them.  The scratch of a step is sized before
+ * the step begins, from counts the steps before it found, and taken as one
+ * block charged once, which the step's parts carve between them: no part
+ * allocates, and no part can fail.  A failure declines the merge, and the
  * round runs again serially, where whatever refuses it reports itself; the
  * merge itself never reports and never fails part way.  Every part of a
  * step writes only what its stripe, its task or its worker owns, and the
  * pool's barrier between steps publishes what each step wrote to the
- * next.  Which parts a relation's append is
- * classified and applied in is the relation store's to say, and the merge
- * runs every part it names.
+ * next.  Which parts a relation's append is listed, classified and applied
+ * in is the relation store's to say, and the merge runs every part it
+ * names.
  */
 
 typedef struct relic_merge relic_merge_t;
+typedef struct relic_merge_block relic_merge_block_t;
 typedef struct relic_merge_firsts relic_merge_firsts_t;
+typedef struct relic_merge_firsts_place relic_merge_firsts_place_t;
+typedef struct relic_merge_keys_place relic_merge_keys_place_t;
+typedef struct relic_merge_list relic_merge_list_t;
 typedef struct relic_merge_part relic_merge_part_t;
 typedef struct relic_merge_ref relic_merge_ref_t;
 
@@ -85,9 +95,10 @@ struct relic_merge_ref {
 };
 
 /*
- * The firsts of one stripe met so far: `table` maps a candidate's screen
- * hash to its position in `refs` plus one.  It is made with room for every
- * candidate of the stripe, so finding the firsts never allocates.
+ * The firsts of one stripe met so far, as the stripe's part finds them:
+ * `table` maps a candidate's screen hash to its position in `refs` plus
+ * one, and `count` firsts are met.  The part makes it on its own stack
+ * from the stripe's place in the step's block.
  */
 struct relic_merge_firsts {
 	relic_idtab_t		 table;
@@ -96,8 +107,54 @@ struct relic_merge_firsts {
 };
 
 /*
+ * Where one stripe's firsts lie in the block of the step that finds them:
+ * room for all `room` candidates of the stripe, a table's slots at `slots`
+ * and the references at `refs`, so that finding the firsts never
+ * allocates.  The stripe's part makes its table there when it begins, so
+ * that the parts clear their tables' memory in parallel.
+ */
+struct relic_merge_firsts_place {
+	void			*slots;
+	relic_merge_ref_t	*refs;
+	size_t			 room;
+};
+
+/*
+ * Where the keys new to one classify part's stripe lie in the block of the
+ * step that classifies them: room for `room` keys, a table's slots at
+ * `slots` and the first tuple of each key at `first`.  The part makes its
+ * table there when it begins, as a stripe's firsts are made.
+ */
+struct relic_merge_keys_place {
+	void		*slots;
+	uint32_t	*first;
+	size_t		 room;
+};
+
+/*
+ * A worker's candidates listed by their stripe of the canonical index, as
+ * it stands once the pending values are resolved: those of stripe s are
+ * `list[start[s]]` up to `list[start[s + 1]]`, in increasing position
+ * (relic_list_by_stripe()).
+ */
+struct relic_merge_list {
+	uint32_t	*list;
+	size_t		 start[RELIC_STRIPES + 1];
+};
+
+/*
+ * A step's scratch: one allocation of `bytes` bytes at `memory`, charged
+ * to the round, which the step's parts carve between them.  An empty block
+ * holds nothing and is charged nothing.
+ */
+struct relic_merge_block {
+	void	*memory;
+	size_t	 bytes;
+};
+
+/*
  * A part of the work on one target's append, as the relation store numbers
- * the parts of a classification or of an application.
+ * the parts of a listing, a classification or an application.
  */
 struct relic_merge_part {
 	size_t	target;
@@ -116,69 +173,80 @@ struct relic_merge_part {
  * a reservation for them not yet appended.  `texts_bytes` is at least
  * what the serial run's text buffers would hold by the round's end, which
  * the admission counts.
+ * `worker_lists` lists each worker's candidates by stripe, and
+ * `firsts_places` says where each stripe's firsts lie, in `find_block`,
+ * which holds both while the firsts are found.
  * `task_firsts[t * RELIC_STRIPES + s]` counts task t's firsts in stripe s,
  * and `task_starts[t]` is the position task t's first new tuple takes in
- * its target's append.  `classify_parts` and `apply_parts` list the parts
- * of every target's append.  `refused` is set by a part that could
- * not have the memory it needed, and declines the merge.
+ * its target's append.  `listing_parts`, `classify_parts` and
+ * `apply_parts` number the parts of every target's append.  `keys_places`
+ * says where each classify part's new keys lie, in `classify_block`, which
+ * holds them while the keys are classified.
  */
 struct relic_merge {
-	relic_t			*ctx;
-	relic_pool_t		*pool;
-	relic_round_t		*round;
-	relic_append_t		*appends;
-	size_t			*projected;
-	size_t			*task_firsts;
-	size_t			*task_starts;
-	relic_merge_part_t	*classify_parts;
-	size_t			 classify_part_count;
-	relic_merge_part_t	*apply_parts;
-	size_t			 apply_part_count;
-	relic_pending_t		*pending;
-	size_t			 pending_count;
-	char			*pending_bytes;
-	relic_pending_map_t	 pending_map;
-	size_t			 pending_charged;
-	size_t			 table_projected;
-	size_t			 texts_bytes;
-	bool			 pending_reserved;
-	relic_atomic_bool_t	 refused;
+	relic_t				*ctx;
+	relic_pool_t			*pool;
+	relic_round_t			*round;
+	relic_append_t			*appends;
+	size_t				*projected;
+	relic_merge_list_t		*worker_lists;
+	relic_merge_firsts_place_t	 firsts_places[RELIC_STRIPES];
+	relic_merge_block_t		 find_block;
+	size_t				*task_firsts;
+	size_t				*task_starts;
+	relic_merge_part_t		*listing_parts;
+	size_t				 listing_part_count;
+	relic_merge_part_t		*classify_parts;
+	size_t				 classify_part_count;
+	relic_merge_keys_place_t	*keys_places;
+	relic_merge_block_t		 classify_block;
+	relic_merge_part_t		*apply_parts;
+	size_t				 apply_part_count;
+	relic_pending_t			*pending;
+	size_t				 pending_count;
+	char				*pending_bytes;
+	relic_pending_map_t		 pending_map;
+	size_t				 pending_charged;
+	size_t				 table_projected;
+	size_t				 texts_bytes;
+	bool				 pending_reserved;
 };
 
 static void	 apply_merge(relic_merge_t *merge);
 static void	 apply_part(void *argument, size_t part, size_t worker_index);
-static void	*charged_array(relic_account_t *account, size_t count,
-		    size_t size, size_t *chargedp);
+static void	 block_close(relic_merge_t *merge,
+		    relic_merge_block_t *block);
+static int	 block_open(relic_merge_t *merge, relic_merge_block_t *block,
+		    size_t (*layout)(relic_merge_t *, void *));
+static size_t	 classify_layout(relic_merge_t *merge, void *memory);
 static int	 classify_new_keys(relic_merge_t *merge);
 static void	 classify_part(void *argument, size_t part,
 		    size_t worker_index);
 static int	 count_new_tuples(relic_merge_t *merge);
 static const relic_candidate_t *entry_of(const relic_merge_t *merge,
 		    relic_merge_ref_t ref);
+static size_t	 find_layout(relic_merge_t *merge, void *memory);
 static int	 find_new_tuples(relic_merge_t *merge);
-static void	 gather_pending(relic_merge_t *merge);
 static void	 find_new_in_stripe(void *argument, size_t stripe,
 		    size_t worker_index);
 static bool	 firsts_hold(const relic_merge_t *merge,
 		    const relic_merge_firsts_t *firsts, relic_merge_ref_t ref);
 static void	 firsts_add(const relic_merge_t *merge,
 		    relic_merge_firsts_t *firsts, relic_merge_ref_t ref);
-static void	 firsts_close(relic_account_t *account,
-		    relic_merge_firsts_t *firsts, size_t charged);
-static int	 firsts_open(relic_account_t *account,
-		    relic_merge_firsts_t *firsts, size_t count,
-		    size_t *chargedp);
-static int	 list_parts(const relic_merge_t *merge,
-		    size_t (*parts_of)(const relic_append_t *),
-		    relic_merge_part_t **partsp, size_t *countp);
+static void	 gather_pending(relic_merge_t *merge);
+static bool	 holds_marker(const relic_dom_t *tuple, uint16_t arity);
+static size_t	 list_search(const uint32_t *list, size_t first, size_t end,
+		    size_t position);
+static void	 list_staged_part(void *argument, size_t part,
+		    size_t worker_index);
+static void	 list_worker(void *argument, size_t worker,
+		    size_t worker_index);
 static int	 merge_begin(relic_merge_t *merge, relic_t *ctx,
 		    relic_pool_t *pool, relic_round_t *round);
-static bool	 holds_marker(const relic_dom_t *tuple, uint16_t arity);
 static void	 merge_end(relic_merge_t *merge);
-static void	 new_keys_close(relic_account_t *account,
-		    relic_new_keys_t *new_keys, size_t charged);
-static int	 new_keys_open(relic_account_t *account,
-		    relic_new_keys_t *new_keys, size_t count, size_t *chargedp);
+static int	 number_parts(const relic_merge_t *merge,
+		    size_t (*parts_of)(const relic_append_t *),
+		    relic_merge_part_t **partsp, size_t *countp);
 static size_t	 pending_columns(const relic_pool_t *pool);
 static int	 pending_open(relic_merge_t *merge, size_t count,
 		    size_t bytes);
@@ -190,8 +258,6 @@ static void	 rehash_worker(void *argument, size_t worker,
 		    size_t worker_index);
 static int	 reserve_room(relic_merge_t *merge);
 static int	 resolve_pending(relic_merge_t *merge);
-static int	 scratch_table_open(relic_account_t *account,
-		    relic_idtab_t *table, size_t count, size_t *chargedp);
 static int	 stage_new_tuples(relic_merge_t *merge);
 static void	 stage_task(void *argument, size_t task, size_t worker_index);
 static size_t	 stripe_candidates(const relic_pool_t *pool, size_t stripe);
@@ -214,12 +280,12 @@ relic_round_merge(relic_t *ctx, relic_pool_t *pool, relic_round_t *round,
 }
 
 /*
- * Ready a merge: a record per target and per task, sized by the program and
- * the pool rather than the data, and so not charged, each append starting
- * empty.  Returns 0, or -1 when they could not be allocated or the round
- * holds more candidates than RELIC_TUPLE_MAX, which keeps every position
- * the merge counts within the 32 bits a table holds and is more than any
- * relation can take.
+ * Ready a merge: a record per target, per task and per worker, sized by the
+ * program and the pool rather than the data, and so not charged, each
+ * append starting empty.  Returns 0, or -1 when they could not be
+ * allocated or the round holds more candidates than RELIC_TUPLE_MAX, which
+ * keeps every position the merge counts within the 32 bits a table holds
+ * and is more than any relation can take.
  */
 static int
 merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
@@ -232,7 +298,6 @@ merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
 	merge->ctx = ctx;
 	merge->pool = pool;
 	merge->round = round;
-	relic_atomic_bool_init(&merge->refused, false);
 
 	candidates = 0;
 	for (i = 0; i < pool->task_count; i++)
@@ -247,8 +312,11 @@ merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
 	    RELIC_STRIPES * sizeof(*merge->task_firsts));
 	merge->task_starts = calloc(pool->task_count,
 	    sizeof(*merge->task_starts));
+	merge->worker_lists = calloc(pool->worker_count,
+	    sizeof(*merge->worker_lists));
 	if (merge->appends == NULL || merge->projected == NULL ||
-	    merge->task_firsts == NULL || merge->task_starts == NULL)
+	    merge->task_firsts == NULL || merge->task_starts == NULL ||
+	    merge->worker_lists == NULL)
 		return (-1);
 
 	return (0);
@@ -276,7 +344,7 @@ prepare_merge(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
 		return (-1);
 	if (classify_new_keys(merge) != 0)
 		return (-1);
-	if (list_parts(merge, relic_relation_apply_parts, &merge->apply_parts,
+	if (number_parts(merge, relic_relation_apply_parts, &merge->apply_parts,
 	    &merge->apply_part_count) != 0)
 		return (-1);
 
@@ -519,15 +587,83 @@ holds_marker(const relic_dom_t *tuple, uint16_t arity)
 
 /*
  * Mark every candidate a first or a repeat, a stripe of the canonical
- * index to a part.  Returns 0, or -1 when a stripe's table of firsts could
- * not be had.
+ * index to a part, once every worker's candidates are listed by stripe, a
+ * worker to a part.  The lists and the tables of firsts are the step's
+ * block, released once the firsts are counted.  Returns 0, or -1 when the
+ * block could not be had.
  */
 static int
 find_new_tuples(relic_merge_t *merge)
 {
+	if (block_open(merge, &merge->find_block, find_layout) != 0)
+		return (-1);
+
+	relic_pool_for(merge->pool, merge->pool->worker_count, list_worker,
+	    merge);
 	relic_pool_for(merge->pool, RELIC_STRIPES, find_new_in_stripe, merge);
 
-	return (relic_atomic_bool_load_relaxed(&merge->refused) ? -1 : 0);
+	block_close(merge, &merge->find_block);
+
+	return (0);
+}
+
+/*
+ * Lay the block of the step that finds the firsts out from `memory`, or
+ * only measure it when `memory` is NULL (relic_block_piece()), and return
+ * its bytes, SIZE_MAX when they are more than a size counts: a list of
+ * each worker's candidates, and for each stripe a table of firsts and
+ * their references, with room for every candidate of the stripe.
+ */
+static size_t
+find_layout(relic_merge_t *merge, void *memory)
+{
+	relic_merge_firsts_place_t *place;
+	size_t bytes;
+	size_t s;
+	size_t w;
+	char *cursor;
+
+	cursor = memory;
+	bytes = 0;
+
+	for (w = 0; w < merge->pool->worker_count; w++)
+		merge->worker_lists[w].list = relic_block_piece(&cursor, &bytes,
+		    merge->pool->workers[w].candidates.count,
+		    sizeof(*merge->worker_lists[w].list));
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		place = &merge->firsts_places[s];
+		place->room = stripe_candidates(merge->pool, s);
+		place->slots = relic_block_piece(&cursor, &bytes,
+		    relic_idtab_bytes_for(true, place->room), 1);
+		place->refs = relic_block_piece(&cursor, &bytes, place->room,
+		    sizeof(*place->refs));
+	}
+
+	return (bytes);
+}
+
+/*
+ * List worker `worker`'s candidates by their stripe.  Only the worker's
+ * own list is written.
+ */
+static void
+list_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
+{
+	const relic_candidates_t *candidates;
+	relic_merge_list_t *worker_list;
+	relic_merge_t *merge;
+	size_t s;
+
+	merge = argument;
+	candidates = &merge->pool->workers[worker].candidates;
+	worker_list = &merge->worker_lists[worker];
+	relic_list_by_stripe(candidates->stripes, candidates->count,
+	    worker_list->list, worker_list->start);
+
+	for (s = 0; s < RELIC_STRIPES; s++)
+		assert(worker_list->start[s + 1] - worker_list->start[s] ==
+		    candidates->by_stripe[s]);
 }
 
 /*
@@ -539,44 +675,55 @@ find_new_tuples(relic_merge_t *merge)
  * gathered in an earlier task, which the serial evaluator would have
  * inserted there and found present here.
  *
- * Only the stripe's candidates are touched, and only this part walks them.
+ * A task's candidates are a run of positions among its worker's, and each
+ * worker's list of the stripe holds its positions in increasing order, so
+ * the task's candidates of the stripe are the run of the list from the
+ * first position at or past the task's first candidate up to the first
+ * past its last: found by a search, they are the same run whatever order
+ * the workers ran their tasks in, and the same candidates staging reads.
+ *
+ * The stripe's firsts, their table and their count, are the part's own,
+ * made on its stack at the stripe's place.  Only the stripe's candidates
+ * are touched, and only this part walks them.
  */
 static void
 find_new_in_stripe(void *argument, size_t stripe,
     size_t worker_index RELIC_UNUSED)
 {
-	relic_merge_firsts_t firsts;
+	const relic_merge_firsts_place_t *place;
+	const relic_merge_list_t *worker_list;
 	const relic_round_task_t *task;
 	relic_candidates_t *candidates;
+	relic_merge_firsts_t firsts;
 	relic_merge_t *merge;
 	relic_merge_ref_t ref;
 	size_t task_firsts;
-	size_t charged;
-	size_t end;
+	size_t stripe_end;
+	size_t task_end;
 	size_t t;
 	size_t i;
 
 	merge = argument;
-	if (firsts_open(&merge->ctx->account, &firsts,
-	    stripe_candidates(merge->pool, stripe), &charged) != 0) {
-		relic_atomic_bool_store_relaxed(&merge->refused, true);
-		return;
-	}
+	place = &merge->firsts_places[stripe];
+	relic_idtab_init_given(&firsts.table, true, place->room, place->slots);
+	firsts.refs = place->refs;
+	firsts.count = 0;
 
 	for (t = 0; t < merge->pool->task_count; t++) {
 		task = &merge->pool->tasks[t];
+		worker_list = &merge->worker_lists[task->worker];
 		candidates = &merge->pool->workers[task->worker].candidates;
 		ref.worker = (uint32_t)task->worker;
 
 		task_firsts = 0;
-		end = task->first_candidate + task->candidate_count;
-		for (i = task->first_candidate; i < end; i++) {
-			if (candidates->stripes[i] != stripe)
-				continue;
-
-			ref.position = (uint32_t)i;
+		stripe_end = worker_list->start[stripe + 1];
+		task_end = task->first_candidate + task->candidate_count;
+		i = list_search(worker_list->list, worker_list->start[stripe],
+		    stripe_end, task->first_candidate);
+		for (; i < stripe_end && worker_list->list[i] < task_end; i++) {
+			ref.position = worker_list->list[i];
 			if (firsts_hold(merge, &firsts, ref)) {
-				candidates->entries[i].repeat = true;
+				candidates->entries[ref.position].repeat = true;
 			} else {
 				firsts_add(merge, &firsts, ref);
 				task_firsts++;
@@ -585,7 +732,28 @@ find_new_in_stripe(void *argument, size_t stripe,
 		merge->task_firsts[t * RELIC_STRIPES + stripe] = task_firsts;
 	}
 
-	firsts_close(&merge->ctx->account, &firsts, charged);
+	assert(firsts.count <= place->room);
+}
+
+/*
+ * The first index in [first, end) of `list`, whose positions increase
+ * there, that holds a position at or past `position`; `end` when none
+ * does.
+ */
+static size_t
+list_search(const uint32_t *list, size_t first, size_t end, size_t position)
+{
+	size_t middle;
+
+	while (first < end) {
+		middle = first + (end - first) / 2;
+		if (list[middle] < position)
+			first = middle + 1;
+		else
+			end = middle;
+	}
+
+	return (first);
 }
 
 /*
@@ -725,8 +893,9 @@ count_new_tuples(relic_merge_t *merge)
 }
 
 /*
- * Stage every new tuple in its target's append, a task to a part.  Returns
- * 0, or -1 when an append's arrays could not be had.
+ * Stage every new tuple in its target's append, a task to a part, and then
+ * list each append's staged tuples by stripe, an index to a part.  Returns
+ * 0, or -1 when an append's arrays or the list of parts could not be had.
  */
 static int
 stage_new_tuples(relic_merge_t *merge)
@@ -742,7 +911,29 @@ stage_new_tuples(relic_merge_t *merge)
 	relic_pool_for(merge->pool, merge->pool->task_count, stage_task,
 	    merge);
 
+	if (number_parts(merge, relic_relation_list_parts,
+	    &merge->listing_parts, &merge->listing_part_count) != 0)
+		return (-1);
+	relic_pool_for(merge->pool, merge->listing_part_count, list_staged_part,
+	    merge);
+
 	return (0);
+}
+
+/*
+ * List the staged tuples of one part of a target's append by stripe.
+ */
+static void
+list_staged_part(void *argument, size_t part,
+    size_t worker_index RELIC_UNUSED)
+{
+	const relic_merge_part_t *part_record;
+	relic_merge_t *merge;
+
+	merge = argument;
+	part_record = &merge->listing_parts[part];
+	relic_relation_list_append(&merge->appends[part_record->target],
+	    part_record->part);
 }
 
 /*
@@ -781,32 +972,81 @@ stage_task(void *argument, size_t task, size_t worker_index RELIC_UNUSED)
 		    candidate->hash);
 		position++;
 	}
+
+	assert(position == merge->task_starts[task] + record->inserted);
 }
 
 /*
  * Classify every key the new tuples bring, in every part the relation
- * store names for each target's append.  Returns 0, or -1 when the
- * list of parts or a part's table of new keys could not be had.
+ * store names for each target's append, each part with a table of the new
+ * keys of its stripe, which lie in the step's block, released once every
+ * key is classified.  Returns 0, or -1 when the list of parts, their
+ * records or the block could not be had.
  */
 static int
 classify_new_keys(relic_merge_t *merge)
 {
-	if (list_parts(merge, relic_relation_classify_parts,
+	if (number_parts(merge, relic_relation_classify_parts,
 	    &merge->classify_parts, &merge->classify_part_count) != 0)
+		return (-1);
+	if (merge->classify_part_count == 0)
+		return (0);
+
+	merge->keys_places = calloc(merge->classify_part_count,
+	    sizeof(*merge->keys_places));
+	if (merge->keys_places == NULL)
+		return (-1);
+	if (block_open(merge, &merge->classify_block, classify_layout) != 0)
 		return (-1);
 
 	relic_pool_for(merge->pool, merge->classify_part_count, classify_part,
 	    merge);
 
-	return (relic_atomic_bool_load_relaxed(&merge->refused) ? -1 : 0);
+	block_close(merge, &merge->classify_block);
+
+	return (0);
 }
 
 /*
- * List, in target order, every part `parts_of` gives each target's append.
- * Returns 0, or -1 when the list could not be allocated.
+ * Lay the block of the step that classifies the keys out from `memory`, or
+ * only measure it when `memory` is NULL (relic_block_piece()), and return
+ * its bytes, SIZE_MAX when they are more than a size counts: for each
+ * classify part a table of new keys and the first tuple of each, with room
+ * for every tuple the part reads, which no number of new keys exceeds.
+ */
+static size_t
+classify_layout(relic_merge_t *merge, void *memory)
+{
+	const relic_merge_part_t *part_record;
+	relic_merge_keys_place_t *place;
+	size_t bytes;
+	size_t p;
+	char *cursor;
+
+	cursor = memory;
+	bytes = 0;
+
+	for (p = 0; p < merge->classify_part_count; p++) {
+		part_record = &merge->classify_parts[p];
+		place = &merge->keys_places[p];
+		place->room = relic_relation_classify_tuples(
+		    &merge->appends[part_record->target], part_record->part);
+		place->slots = relic_block_piece(&cursor, &bytes,
+		    relic_idtab_bytes_for(true, place->room), 1);
+		place->first = relic_block_piece(&cursor, &bytes, place->room,
+		    sizeof(*place->first));
+	}
+
+	return (bytes);
+}
+
+/*
+ * Number, in target order, every part `parts_of` gives each target's
+ * append, into an array of records naming each part's target and its part
+ * there.  Returns 0, or -1 when the array could not be allocated.
  */
 static int
-list_parts(const relic_merge_t *merge,
+number_parts(const relic_merge_t *merge,
     size_t (*parts_of)(const relic_append_t *), relic_merge_part_t **partsp,
     size_t *countp)
 {
@@ -841,33 +1081,28 @@ list_parts(const relic_merge_t *merge,
 }
 
 /*
- * Classify the keys of one part of a target's append, with a table of the
- * part's new keys that has room for every tuple the part reads.
+ * Classify the keys of one part of a target's append, with a table of new
+ * keys made on the part's own stack at the part's place, which has room
+ * for every tuple the part reads.
  */
 static void
 classify_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
 {
-	const relic_merge_part_t *listed;
+	const relic_merge_keys_place_t *place;
+	const relic_merge_part_t *part_record;
 	relic_new_keys_t new_keys;
-	relic_append_t *append;
 	relic_merge_t *merge;
-	size_t charged;
 
 	merge = argument;
-	listed = &merge->classify_parts[part];
-	append = &merge->appends[listed->target];
+	part_record = &merge->classify_parts[part];
+	place = &merge->keys_places[part];
 
-	if (new_keys_open(&merge->ctx->account, &new_keys,
-	    relic_relation_classify_tuples(append, listed->part),
-	    &charged) != 0) {
-		relic_atomic_bool_store_relaxed(&merge->refused, true);
-		return;
-	}
-
-	relic_relation_classify_append(merge->round->targets[listed->target],
-	    append, listed->part, &new_keys);
-
-	new_keys_close(&merge->ctx->account, &new_keys, charged);
+	relic_idtab_init_given(&new_keys.table, true, place->room,
+	    place->slots);
+	new_keys.first = place->first;
+	relic_relation_classify_append(
+	    merge->round->targets[part_record->target],
+	    &merge->appends[part_record->target], part_record->part, &new_keys);
 }
 
 /*
@@ -993,20 +1228,20 @@ apply_merge(relic_merge_t *merge)
 static void
 apply_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
 {
-	const relic_merge_part_t *listed;
+	const relic_merge_part_t *part_record;
 	relic_merge_t *merge;
 
 	merge = argument;
-	listed = &merge->apply_parts[part];
-	relic_relation_apply_append(merge->round->targets[listed->target],
-	    &merge->appends[listed->target], listed->part);
+	part_record = &merge->apply_parts[part];
+	relic_relation_apply_append(merge->round->targets[part_record->target],
+	    &merge->appends[part_record->target], part_record->part);
 }
 
 /*
  * Release everything the merge holds, whether it applied or declined: the
  * appends, with their charge and whatever growth they prepared and did not
  * fill, the pending values, their bytes and their map, with their charge,
- * and the records.
+ * a step's block a failure left open, and the records.
  */
 static void
 merge_end(relic_merge_t *merge)
@@ -1035,138 +1270,71 @@ merge_end(relic_merge_t *merge)
 		    merge->pending_charged);
 	}
 
+	block_close(merge, &merge->find_block);
+	block_close(merge, &merge->classify_block);
+
 	free(merge->appends);
 	free(merge->projected);
+	free(merge->worker_lists);
 	free(merge->task_firsts);
 	free(merge->task_starts);
+	free(merge->listing_parts);
 	free(merge->classify_parts);
+	free(merge->keys_places);
 	free(merge->apply_parts);
 }
 
 /*
- * An array of `count` items of `size` bytes, charged to the round before it
- * is allocated, the charge added to *chargedp; NULL, having charged
- * nothing, when the limit or the allocator refused it.
- */
-static void *
-charged_array(relic_account_t *account, size_t count, size_t size,
-    size_t *chargedp)
-{
-	size_t capacity;
-	size_t bytes;
-	void *items;
-
-	capacity = relic_grow_array_capacity(0, count);
-	if (capacity == 0 || capacity > SIZE_MAX / size)
-		return (NULL);
-	bytes = capacity * size;
-	if (!relic_account_charge_round(account, bytes))
-		return (NULL);
-
-	capacity = 0;
-	items = relic_grow_array(NULL, &capacity, count, size);
-	if (items == NULL) {
-		relic_account_release_round(account, bytes);
-		return (NULL);
-	}
-	*chargedp += bytes;
-
-	return (items);
-}
-
-/*
- * Make an empty tagged table with room for `count` entries, charged to the
- * round, the charge added to *chargedp.  Returns 0, or -1 having charged
- * nothing.  Nothing is placed in it but what it has room for, so it never
- * grows and needs no rehash.
+ * Give a step's block the arrays `layout` lays out, charged to the round
+ * before it is allocated.  `layout` sets every part's record each time it
+ * runs: given no memory it measures, setting each part's room and leaving
+ * its arrays NULL, and given the block it carves the arrays from it.  A
+ * step that needs no bytes keeps the records its measuring set, each with
+ * no room and no arrays, which a part with nothing to do reads as such,
+ * and its block is neither allocated nor carved.  Returns 0, or -1 having
+ * charged nothing and holding nothing, when the bytes are more than a size
+ * counts or the limit or the allocator refused them.
  */
 static int
-scratch_table_open(relic_account_t *account, relic_idtab_t *table,
-    size_t count, size_t *chargedp)
+block_open(relic_merge_t *merge, relic_merge_block_t *block,
+    size_t (*layout)(relic_merge_t *, void *))
 {
-	relic_idtab_t empty;
+	relic_account_t *account;
+	size_t carved;
 	size_t bytes;
 
-	relic_idtab_init(&empty, true);
-	bytes = relic_idtab_bytes_after_reserve(&empty, count);
-	if (!relic_account_charge_round(account, bytes))
+	assert(block->memory == NULL && block->bytes == 0);
+	account = &merge->ctx->account;
+
+	bytes = layout(merge, NULL);
+	if (bytes == 0)
+		return (0);
+	if (bytes == SIZE_MAX || !relic_account_charge_round(account, bytes))
 		return (-1);
-	if (relic_idtab_prepare_growth(&empty, count, table) != 0) {
+
+	block->memory = malloc(bytes);
+	if (block->memory == NULL) {
 		relic_account_release_round(account, bytes);
 		return (-1);
 	}
-	*chargedp += bytes;
+	block->bytes = bytes;
+
+	carved = layout(merge, block->memory);
+	assert(carved == bytes);
+	(void)carved;
 
 	return (0);
 }
 
 /*
- * Make an empty table of firsts with room for `count` of them, charged to
- * the round, the charge in *chargedp.  Returns 0, or -1 having charged
- * nothing.
+ * Release a step's block and its charge, leaving it empty.  The tables
+ * carved from it hold nothing of their own, and are forgotten with it.
  */
-static int
-firsts_open(relic_account_t *account, relic_merge_firsts_t *firsts,
-    size_t count, size_t *chargedp)
-{
-	bzero(firsts, sizeof(*firsts));
-	relic_idtab_init(&firsts->table, true);
-	*chargedp = 0;
-	if (count == 0)
-		return (0);
-
-	if (scratch_table_open(account, &firsts->table, count, chargedp) != 0)
-		return (-1);
-	firsts->refs = charged_array(account, count, sizeof(*firsts->refs),
-	    chargedp);
-	if (firsts->refs == NULL) {
-		firsts_close(account, firsts, *chargedp);
-		return (-1);
-	}
-
-	return (0);
-}
-
 static void
-firsts_close(relic_account_t *account, relic_merge_firsts_t *firsts,
-    size_t charged)
+block_close(relic_merge_t *merge, relic_merge_block_t *block)
 {
-	relic_idtab_reset(&firsts->table);
-	free(firsts->refs);
-	relic_account_release_round(account, charged);
-}
-
-/*
- * The same for a part's new keys, with room for `count` of them.
- */
-static int
-new_keys_open(relic_account_t *account, relic_new_keys_t *new_keys,
-    size_t count, size_t *chargedp)
-{
-	bzero(new_keys, sizeof(*new_keys));
-	relic_idtab_init(&new_keys->table, true);
-	*chargedp = 0;
-	if (count == 0)
-		return (0);
-
-	if (scratch_table_open(account, &new_keys->table, count,
-	    chargedp) != 0)
-		return (-1);
-	new_keys->first = charged_array(account, count,
-	    sizeof(*new_keys->first), chargedp);
-	if (new_keys->first == NULL) {
-		new_keys_close(account, new_keys, *chargedp);
-		return (-1);
-	}
-
-	return (0);
-}
-
-static void
-new_keys_close(relic_account_t *account, relic_new_keys_t *new_keys,
-    size_t charged)
-{
-	relic_idtab_reset(&new_keys->table);
-	free(new_keys->first);
-	relic_account_release_round(account, charged);
+	free(block->memory);
+	relic_account_release_round(&merge->ctx->account, block->bytes);
+	block->memory = NULL;
+	block->bytes = 0;
 }
