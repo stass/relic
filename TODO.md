@@ -32,36 +32,23 @@ causes and what to try are sorted in `docs/todo-parallel.md`.
 
 ## Engine
 
-**A deferred round costs more than a serial one on one thread.** [Medium,
-component: `lib/task.c`, `lib/merge.c`, `specs/design-deferral-cost.md`]
-Steps 1 to 4 of the design's section 10 are in. Under `-X parallel` at
-`-j 1`, the fastest of five runs on a loaded machine, `chain-closure`
-costs 1.23 times its serial run, from 1.5; `tc-cyclic` 1.18, from 1.2;
-`cspa` 1.09, as before. Section 7 expected within a sixth, a tenth and a
-few per cent. Two costs remain. `tc-cyclic`'s first recursive round,
-which inserts a third of what it derives, has no history to size its
-buffers from, and keeps its screen's growth cascade. `chain-closure`'s
-merge takes 66 microseconds in a typical round, from 99, and 130 on
-average, from 160, the average held up by the rounds that grow the
-canonical index, which the serial path grows as well and which the item
-below would make cheaper. Re-measure on an idle machine before taking
-either further.
-
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
 each entry through a callback that reads the tuple or key it names and
 hashes it again, so a canonical index growing to two million tuples
-recomputes some four million hashes from columns scattered through
-storage. On serial `chain-closure` that is a quarter of the run,
-`relic_hash_words()` under `relic_idtab_reserve()` in a sampled profile.
-A slot that kept the 32-bit hash beside the identifier would rehash from
-the table alone. `specs/design-memory.md` section 6 measured that slot on
-the closure workloads' duplicate checks, which gain nothing from it, and
-kept the identifier alone for the memory; the growth's cost was not in
-that measurement. Measure the hash-keeping slot on `chain-closure`'s
-growth against its peak memory before deciding, and if it loses, record
-the figure in `specs/design-memory.md` section 6 so the question stays
-closed.
+recomputes some four million hashes from columns scattered through storage.
+On serial `chain-closure` that is a quarter of the run,
+`relic_hash_words()` under `relic_idtab_reserve()` in a sampled profile. It
+is also most of what a deferred round's merge costs on the rounds that grow
+the canonical index, which hold `chain-closure`'s average merge at 130
+microseconds against 66 for a typical round. A slot that kept the 32-bit
+hash beside the identifier would rehash from the table alone.
+`specs/design-memory.md` section 6 measured that slot on the closure
+workloads' duplicate checks, which gain nothing from it, and kept the
+identifier alone for the memory; the growth's cost was not in that
+measurement. Measure the hash-keeping slot on `chain-closure`'s growth
+against its peak memory before deciding, and if it loses, record the figure
+in `specs/design-memory.md` section 6 so the question stays closed.
 
 ## Benchmarks
 

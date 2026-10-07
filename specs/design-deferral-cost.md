@@ -568,6 +568,5 @@ what each is measured against; step 4 depends on all three.
   whose slots lie in memory its owner gives it.
 * `specs/architecture.md`: the parallel evaluation section points here
   for the cost of a deferred round.
-* `TODO.md`: the item on a deferred round's cost points here.
-  `docs/todo-parallel.md` loses its item on the threshold to step 4 of
+* `docs/todo-parallel.md` loses its item on the threshold to step 4 of
   section 10.
