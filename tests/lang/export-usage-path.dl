@@ -1,0 +1,5 @@
+% An export's head is followed by a path.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).

@@ -1,0 +1,4 @@
+% A predicate imported from an empty table is one the program knows and
+% nothing defines, so its export is an empty relation and warns as a
+% query of it does.
+edge(a, b).

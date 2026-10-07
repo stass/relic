@@ -39,7 +39,7 @@
 #define	RELIC_CMD_UNUSED
 #endif
 
-/* Room for "<query N>" with N any size_t, and a terminator. */
+/* Room for "<query N>" or "<export N>" with N any size_t, and a terminator. */
 #define	CMD_QUERY_NAME_MAX	32
 
 /*
@@ -64,38 +64,50 @@ struct cmd_quoted {
 #define	CMD_STRINGIFY_TEXT(value)	#value
 
 /*
- * The formats a query's results can be written in.  Their exact form is part
- * of the tool's interface and is specified with the tool.
+ * The formats rows can be written in.  Their exact form is part of the
+ * tool's interface and is specified with the tool.  A query's results are
+ * written in any but OUTPUT_DL, which writes each row as a fact of an
+ * exported predicate and is written only by an export.
  */
 enum output_format {
 	OUTPUT_TEXT,
 	OUTPUT_CSV,
 	OUTPUT_TSV,
-	OUTPUT_JSON
+	OUTPUT_JSON,
+	OUTPUT_DL
 };
 
 typedef struct output output_t;
 typedef struct invocation invocation_t;
+typedef struct prepared_export prepared_export_t;
+typedef struct export_operand export_operand_t;
 
 /*
  * Where query results go, and in what form.
  *
- * An output with no `stream` discards every row, counting it, which is what
- * -n asks for; output_attach() gives it one to write to.  The rows of one
- * query are written as they are delivered, or collected and sorted first
- * when `sorted` is set.  `queries_written` is what decides whether a query's
- * results need a separator before them, and `separated` whether the format's
- * separator is written at all; `rows_written` and `begun` belong to the query
- * being answered.
+ * An output with no `buffer` discards every row, counting it, which is what
+ * -n asks for.  output_attach() gives it a buffer and a stream to write to;
+ * output_attach_file() gives it a buffer and `pending_path`, the file it
+ * opens when the first bytes must reach it, after which `stream` is that
+ * file and `pending_path` NULL.
+ *
+ * The rows of one query are written as they are delivered, or collected and
+ * sorted first when `sorted` is set.  `queries_written` is what decides
+ * whether a query's results need a separator before them, and `separated`
+ * whether the format's separator is written at all; `rows_written` and
+ * `begun` belong to the query being answered.
  *
  * `collected` is the collected answer whose rows are being written, whose
  * values are its own and are read through it, and NULL while rows are
  * written as they are delivered, when their values are the context's.
  *
  * What is written gathers in `buffer`, whose first `filled` bytes wait to be
- * handed to the stream a block at a time; an output with a stream owns one.
+ * handed to the stream a block at a time; every attached output owns one.
  * A write that fails is reported once, naming `name`, and `write_failed`
  * then keeps anything more from reaching the stream.
+ *
+ * `predicate` is the name each row is a fact of in OUTPUT_DL, borrowed, and
+ * NULL in every other format.
  */
 struct output {
 	relic_t			*ctx;
@@ -103,6 +115,8 @@ struct output {
 	FILE			*stream;
 	char			*buffer;
 	const char		*name;
+	const char		*pending_path;
+	const char		*predicate;
 	const char		*program_name;
 	size_t			 filled;
 	size_t			 queries_written;
@@ -118,21 +132,32 @@ struct output {
  * One invocation of the tool: its context and the queries prepared against
  * it, released together.  `queries` has one entry per query the invocation
  * runs before any interactive session, the -q queries or else the program's
- * own, NULL where one could not be prepared.  `program_name` is what the
- * tool's own messages begin with.  `verbosity` is how many -v were given,
- * and `explain_stream` is where -e sends plans, standard error, or NULL
- * without -e.  `output` is where query results go while queries run, and
- * NULL before and after; a diagnostic hands its gathered rows to the stream
- * before it is written.
+ * own, NULL where one could not be prepared.  `exports` has one entry per
+ * -O, in the order given.  `program_name` is what the tool's own messages
+ * begin with.  `verbosity` is how many -v were given, and `explain_stream`
+ * is where -e sends plans, standard error, or NULL without -e.  `output` is
+ * where rows go while a query or an export runs, and NULL before and after;
+ * a diagnostic hands its gathered rows to the stream before it is written.
  */
 struct invocation {
-	relic_t		 *ctx;
-	relic_query_t	**queries;
-	output_t	 *output;
-	const char	 *program_name;
-	size_t		  query_count;
-	unsigned int	  verbosity;
-	FILE		 *explain_stream;
+	relic_t			 *ctx;
+	relic_query_t		**queries;
+	prepared_export_t	 *exports;
+	output_t		 *output;
+	const char		 *program_name;
+	size_t			  query_count;
+	size_t			  export_count;
+	unsigned int		  verbosity;
+	FILE			 *explain_stream;
+};
+
+/*
+ * One -O, ready to write: its operand, borrowed, and the query of all of its
+ * predicate's columns, owned, or NULL when it could not be prepared.
+ */
+struct prepared_export {
+	const export_operand_t	*operand;
+	relic_query_t		*query;
 };
 
 /*
@@ -147,8 +172,9 @@ struct invocation {
  * is formatted into a fixed buffer, and an argument quoted whole could crowd
  * out what the message says about it.
  *
- * report_rows() writes the line -v adds after a query that succeeded, naming
- * it by its number, when the invocation is verbose enough to want it.
+ * report_rows() writes the line -v adds after a query or an export that
+ * succeeded, naming it by `what` it is, "query" or "export", and its
+ * number, when the invocation is verbose enough to want it.
  *
  * explain_into() sends the plans of everything evaluated to `stream`, or
  * stops sending them when it is NULL.  write_stats() writes the context's
@@ -157,7 +183,8 @@ struct invocation {
 void	report_error(const char *program_name, const char *format, ...)
 	    CMD_PRINTFLIKE(2, 3);
 const char *cmd_quote(const char *bytes, size_t length, cmd_quoted_t *quoted);
-void	report_rows(const invocation_t *invocation, size_t number, size_t rows);
+void	report_rows(const invocation_t *invocation, const char *what,
+	    size_t number, size_t rows);
 void	explain_into(relic_t *ctx, FILE *stream);
 void	write_stats(relic_t *ctx, FILE *stream);
 
@@ -170,6 +197,13 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * output_init() prepares an output that discards rows, and output_attach()
  * gives it a stream, named `name` in messages, to write them to instead,
  * returning 0, or -1 having reported that memory ran out.
+ * output_attach_file() gives it the file at `path` instead, named by its
+ * path, which is created or truncated only when the first bytes reach it
+ * or a query succeeds without writing any; a file that cannot be opened is
+ * reported then, as a write that failed.  Its rows are facts of
+ * `predicate` in OUTPUT_DL, which takes one and is written only to a file;
+ * `predicate` is NULL in any other format.  The caller keeps `path` and
+ * `predicate` for as long as the output.
  *
  * output_query() runs a query and writes its results, handing them to the
  * stream before it returns, and output_discard() runs one and writes nothing
@@ -181,8 +215,9 @@ void	write_stats(relic_t *ctx, FILE *stream);
  * output_flush() flushes the stream and returns -1 when a write to it failed
  * at any point, the output's own or another writer's through the same
  * stream, reported once.  output_write_buffered() only hands the stream
- * what the output has gathered, a write failure reported as a row's is.  output_close() does the same, releases the buffer,
- * and closes the stream unless it is standard output.
+ * what the output has gathered, a write failure reported as a row's is.
+ * output_close() does what output_flush() does, releases the buffer, and
+ * closes the stream unless it is standard output.
  * output_is_stdout() is whether the stream is standard output, which other
  * writers to standard output share.
  *
@@ -194,6 +229,8 @@ int	output_format_named(const char *name, enum output_format *formatp);
 void	output_init(output_t *out, const char *program_name, relic_t *ctx);
 int	output_attach(output_t *out, FILE *stream, const char *name,
 	    enum output_format format, bool sorted);
+int	output_attach_file(output_t *out, const char *path,
+	    enum output_format format, const char *predicate, bool sorted);
 int	output_query(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_discard(output_t *out, relic_query_t *query, size_t *rowsp);
 int	output_flush(output_t *out);
@@ -223,6 +260,7 @@ int	repl_run(invocation_t *invocation, output_t *output,
 extern volatile sig_atomic_t repl_interrupted;
 
 typedef struct column_types column_types_t;
+typedef struct command_paths command_paths_t;
 typedef struct import_operand import_operand_t;
 
 /*
@@ -256,21 +294,51 @@ struct import_operand {
 };
 
 /*
- * What parsing a -I argument came to: an import, an argument that is not
- * one, or no memory to hold it.
+ * One -O operand, parsed: the relation it writes and where.  `operand` is
+ * the argument as given and `path` the file's path, the whole operand or the
+ * part after its first `=`; both point into argv.  `predicate` is allocated
+ * and belongs to the operand.  `arity` is the one its head names when
+ * `has_arity`, and is otherwise the program's to say.
  */
-enum import_parse {
-	IMPORT_PARSED,
-	IMPORT_MALFORMED,
-	IMPORT_NO_MEMORY
+struct export_operand {
+	const char		*operand;
+	const char		*path;
+	char			*predicate;
+	enum output_format	 format;
+	unsigned int		 arity;
+	bool			 has_arity;
 };
 
 /*
- * cmd/relic/import.c
+ * The paths a command line names besides its exports', which no export may
+ * write: the -o file or NULL, the `import_count` imports' tables and the
+ * `file_count` program operands, all borrowed.
+ */
+struct command_paths {
+	const char		*output_path;
+	const import_operand_t	*imports;
+	char *const		*files;
+	size_t			 import_count;
+	size_t			 file_count;
+};
+
+/*
+ * What parsing an -I, -T or -O argument came to: what it names, an argument
+ * that is not one, or no memory to hold it.
+ */
+enum operand_parse {
+	OPERAND_PARSED,
+	OPERAND_MALFORMED,
+	OPERAND_NO_MEMORY
+};
+
+/*
+ * cmd/relic/operand.c
  *
- * import_operand_parse() parses a -I argument into *parsed, and
- * column_types_parse() a -T argument, or each reports why it could not,
- * leaving nothing to free.  import_operand_free() and column_types_free()
+ * import_operand_parse() parses a -I argument into *parsed,
+ * column_types_parse() a -T argument and export_operand_parse() an -O
+ * argument, or each reports why it could not, leaving nothing to free.
+ * import_operand_free(), column_types_free() and export_operand_free()
  * release what a parse allocated.
  *
  * import_operands_resolve() completes every import, once the command line
@@ -279,19 +347,45 @@ enum import_parse {
  * a second -T, and one given lists of columns whose kept types differ.
  * The imports borrow from the column types, which must outlive them.
  *
+ * export_operands_resolve() reports, as a usage error, an export to a path
+ * another export, -o, an import or a program operand spells alike.
+ *
  * import_operand_reads_stdin() is whether the import's path is `-`, the
  * spelling that claims standard input.
  */
-enum import_parse import_operand_parse(const char *program_name,
+enum operand_parse import_operand_parse(const char *program_name,
 	    const char *operand, import_operand_t *parsed);
-enum import_parse column_types_parse(const char *program_name,
+enum operand_parse column_types_parse(const char *program_name,
 	    const char *operand, column_types_t *parsed);
 int	import_operands_resolve(const char *program_name,
 	    import_operand_t *imports, size_t import_count,
 	    const column_types_t *types, size_t type_count);
+enum operand_parse export_operand_parse(const char *program_name,
+	    const char *operand, export_operand_t *parsed);
+int	export_operands_resolve(const char *program_name,
+	    const export_operand_t *exports, size_t export_count,
+	    const command_paths_t *others);
 bool	import_operand_reads_stdin(const import_operand_t *parsed);
 void	import_operand_free(import_operand_t *parsed);
 void	column_types_free(column_types_t *parsed);
+void	export_operand_free(export_operand_t *parsed);
+
+/*
+ * cmd/relic/export.c
+ *
+ * exports_prepare() settles the arity of each of `count` exports and
+ * prepares the query of all its columns, into the invocation's `exports`,
+ * reporting every export the program cannot answer before returning -1; 0
+ * when every one was prepared.  The invocation borrows the operands, which
+ * must outlive it.
+ *
+ * exports_write() writes each prepared export's relation to its file in
+ * order, sorted when `sorted`, and returns 0, or -1 having reported the
+ * first that failed, after which none is written.
+ */
+int	exports_prepare(invocation_t *invocation,
+	    const export_operand_t *operands, size_t count);
+int	exports_write(invocation_t *invocation, bool sorted);
 
 typedef struct line_reader line_reader_t;
 

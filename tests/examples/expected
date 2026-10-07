@@ -53,6 +53,10 @@ ann
 cid
 $ relic -T edge:symbol,symbol -I tsv:edge=- -q 'edge(a, X)?' < edge.tsv
 b
+$ relic -a -O path.tsv -O path.dl graph.dl
+$ relic -O path.dl graph.dl && relic -q 'path(a, X)?' path.dl
+b
+c
 $ relic -i graph.dl
 relic> path(a, X)?
 b

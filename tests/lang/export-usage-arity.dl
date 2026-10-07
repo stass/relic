@@ -1,0 +1,5 @@
+% An arity in a head is a decimal number.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).

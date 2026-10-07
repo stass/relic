@@ -160,8 +160,8 @@ Candidate features, in the priority order of `specs/architecture.md` section
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
 `docs/todo-language.md` in the order worth adding them -- provenance
-first, then disjunction, file inclusion, constraints, relation export,
-per-rule profiling and floating point; what stays out on purpose is in
+first, then disjunction, file inclusion, constraints, per-rule profiling
+and floating point; what stays out on purpose is in
 architecture section 3. Each item names the engines that have it and what a relic
 program does without it; the verdicts are provisional until a design
 exists.
@@ -190,7 +190,6 @@ exists.
     striped by the tuple's, would run the probes in parallel and leave only
     the numbering serial, over the new strings alone; that changes the
     design's section 9.2, which specifies one serial measure.
-* relation export, in `docs/todo-language.md`
 * incremental insertion maintenance [Medium, component: `lib/eval.c`]: any
   change to the program after an evaluation discards every derived relation
   and computes the fixed point again from the facts, so an embedder or a

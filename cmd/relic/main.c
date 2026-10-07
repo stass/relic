@@ -31,9 +31,9 @@
  * evaluate.  Every mistake in the input is therefore reported before anything
  * is evaluated, and a run that evaluates does so over a program and queries
  * that are all known to be valid.  With -c the run stops after preparing;
- * with -a the whole program is materialized before the first query; with -i
- * an interactive session follows the last one, answering into the same
- * output.
+ * with -a the whole program is materialized before the first query; each
+ * -O writes a relation to its file after the last; with -i an interactive
+ * session follows, answering into the same output as the queries.
  *
  * The queries that run are the -q ones when there are any, and otherwise the
  * ones the program contains.  The program's own queries are still checked
@@ -99,11 +99,11 @@ enum stdin_reader {
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `imports` holds the
  * -I operands, parsed, in the order given, and `types` the -T operands
- * their columns may come from.  `config` is what the context is
- * created with: -j sets its thread count, -l its limits, -X naive,
- * no-index, no-reorder, no-magic, no-stream, no-exists, parallel and
- * group-rules its flags, and a second -v the flag that asks for notes about mixed-type
- * comparisons.
+ * their columns may come from.  `exports` holds the -O operands, parsed, in
+ * the order given.  `config` is what the context is created with: -j sets
+ * its thread count, -l its limits, -X naive, no-index, no-reorder,
+ * no-magic, no-stream, no-exists, parallel and group-rules its flags, and a
+ * second -v the flag that asks for notes about mixed-type comparisons.
  * `verbosity` counts the -v options.
  *
  * `stdin_reader` is who reads standard input, which parse_options() decides
@@ -114,11 +114,13 @@ struct options {
 	const char		**queries;
 	import_operand_t	 *imports;
 	column_types_t		 *types;
+	export_operand_t	 *exports;
 	const import_operand_t	 *stdin_import;
 	const char		 *output_path;
 	size_t			  query_count;
 	size_t			  import_count;
 	size_t			  type_count;
+	size_t			  export_count;
 	relic_config_t		  config;
 	enum output_format	  format;
 	enum stdin_reader	  stdin_reader;
@@ -136,6 +138,9 @@ struct options {
 
 static int		 claim_stdin(const char *program_name,
 			    options_t *options, int file_count);
+static void		 command_paths_of(const options_t *options,
+			    char *const *files, int file_count,
+			    command_paths_t *paths);
 static void		*diag_context(const char *program_name);
 static int		 evaluate(invocation_t *invocation,
 			    const options_t *options);
@@ -276,8 +281,8 @@ usage(const char *program_name)
 {
 	fprintf(stderr, "usage: %s [-aceinsv] [-F format] [-I import] "
 	    "[-j threads]\n"
-	    "       %*s [-l limit=value] [-o file] [-q query] [-T types]\n"
-	    "       %*s [-X debug] [file ...]\n", program_name,
+	    "       %*s [-l limit=value] [-O export] [-o file] [-q query]\n"
+	    "       %*s [-T types] [-X debug] [file ...]\n", program_name,
 	    (int)strlen(program_name), "", (int)strlen(program_name), "");
 	fprintf(stderr, "       %s -V\n", program_name);
 }
@@ -349,9 +354,10 @@ cmd_quote(const char *bytes, size_t length, cmd_quoted_t *quoted)
 }
 
 /*
- * The line -v adds after each query that succeeded.  Like the counters of
- * -X stats it is data about the run rather than a complaint, so it is written
- * without the program name and reads the same however the tool was invoked.
+ * The line -v adds after each query or export that succeeded.  Like the
+ * counters of -X stats it is data about the run rather than a complaint, so
+ * it is written without the program name and reads the same however the
+ * tool was invoked.
  *
  * Standard output is flushed first.  The query's rows have reached their
  * stream already, but the plan .plan wrote may wait in standard output's
@@ -360,13 +366,14 @@ cmd_quote(const char *bytes, size_t length, cmd_quoted_t *quoted)
  * overtake it from standard error, which is not buffered.
  */
 void
-report_rows(const invocation_t *invocation, size_t number, size_t rows)
+report_rows(const invocation_t *invocation, const char *what, size_t number,
+    size_t rows)
 {
 	if (invocation->verbosity < 1)
 		return;
 
 	fflush(stdout);
-	fprintf(stderr, "query %zu: %zu %s\n", number, rows,
+	fprintf(stderr, "%s %zu: %zu %s\n", what, number, rows,
 	    rows == 1 ? "row" : "rows");
 }
 
@@ -469,7 +476,9 @@ prepare_queries(invocation_t *invocation, const options_t *options)
 
 /*
  * The phases that decide whether there is anything valid to evaluate: load
- * the input, check the program, prepare the queries.
+ * the input, check the program, and prepare the queries and the query of
+ * each export.  The exports are prepared even when a query could not be, so
+ * that one run reports the mistakes in both.
  *
  * The program is checked only when every operand loaded.  A load is all or
  * nothing, so a file with a syntax error contributes no statements at all,
@@ -481,13 +490,20 @@ static int
 validate(invocation_t *invocation, const options_t *options, int argc,
     char *argv[])
 {
+	int status;
+
 	if (load_operands(invocation->ctx, options, argc, argv) != 0)
 		return (-1);
 
 	if (relic_check(invocation->ctx) != 0)
 		return (-1);
 
-	return (prepare_queries(invocation, options));
+	status = prepare_queries(invocation, options);
+	if (exports_prepare(invocation, options->exports,
+	    options->export_count) != 0)
+		status = -1;
+
+	return (status);
 }
 
 /*
@@ -541,17 +557,20 @@ run_queries(invocation_t *invocation, output_t *output)
 	for (i = 0; i < invocation->query_count; i++) {
 		if (output_query(output, invocation->queries[i], &rows) != 0)
 			return (-1);
-		report_rows(invocation, i + 1, rows);
+		report_rows(invocation, "query", i + 1, rows);
 	}
 
 	return (0);
 }
 
 /*
- * Evaluate: materialize the program when asked to, run the queries, and then
- * the interactive session when asked for one.  The session answers into the
- * same output, so its results follow the queries' own under the same format
- * and separators, and its first query is numbered after theirs.
+ * Evaluate: materialize the program when asked to, run the queries, write
+ * the exports, and then run the interactive session when asked for one.
+ * The exports follow the queries, whose answers someone may be waiting
+ * for, and precede the session, so that what a file holds does not depend
+ * on how the session went.  The session answers into the same output as
+ * the queries, so its results follow theirs under the same format and
+ * separators, and its first query is numbered after theirs.
  */
 static int
 evaluate(invocation_t *invocation, const options_t *options)
@@ -570,6 +589,9 @@ evaluate(invocation_t *invocation, const options_t *options)
 	invocation->output = &output;
 
 	status = run_queries(invocation, &output);
+
+	if (status == 0)
+		status = exports_write(invocation, options->sorted);
 
 	if (status == 0 && options->interactive)
 		status = repl_run(invocation, &output,
@@ -611,6 +633,8 @@ invocation_open(invocation_t *invocation, const char *program_name,
 {
 	invocation->queries = NULL;
 	invocation->query_count = 0;
+	invocation->exports = NULL;
+	invocation->export_count = 0;
 	invocation->output = NULL;
 	invocation->program_name = program_name;
 	invocation->verbosity = options->verbosity;
@@ -675,6 +699,9 @@ invocation_close(invocation_t *invocation)
 	for (i = 0; i < invocation->query_count; i++)
 		relic_query_destroy(invocation->queries[i]);
 	free(invocation->queries);
+	for (i = 0; i < invocation->export_count; i++)
+		relic_query_destroy(invocation->exports[i].query);
+	free(invocation->exports);
 	relic_destroy(invocation->ctx);
 }
 
@@ -967,17 +994,35 @@ report_two_readers(const char *program_name, const options_t *options,
 }
 
 /*
+ * Collect the paths a command line names besides its exports': the -o
+ * file, the imports' tables and the `file_count` program operands at
+ * `files`.
+ */
+static void
+command_paths_of(const options_t *options, char *const *files,
+    int file_count, command_paths_t *paths)
+{
+	paths->output_path = options->output_path;
+	paths->imports = options->imports;
+	paths->import_count = options->import_count;
+	paths->files = files;
+	paths->file_count = file_count > 0 ? (size_t)file_count : 0;
+}
+
+/*
  * Parse the options into *options, and decide who reads standard input
  * once every option and operand is known.  Returns RELIC_EXIT_OK, or the
  * status to exit with having reported why the command line is malformed.
  *
- * `queries`, `imports` and `types` must each have room for every argument,
- * which is the most -q, -I or -T options a command line can hold.
+ * `queries`, `imports`, `types` and `exports` must each have room for every
+ * argument, which is the most -q, -I, -T or -O options a command line can
+ * hold.
  */
 static int
 parse_options(const char *program_name, int argc, char *argv[],
     options_t *options)
 {
+	command_paths_t others;
 	int ch;
 
 	/*
@@ -990,7 +1035,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":aceF:I:ij:l:no:q:sT:vVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":aceF:I:ij:l:nO:o:q:sT:vVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -1016,13 +1061,13 @@ parse_options(const char *program_name, int argc, char *argv[],
 		case 'I':
 			switch (import_operand_parse(program_name, optarg,
 			    &options->imports[options->import_count])) {
-			case IMPORT_PARSED:
+			case OPERAND_PARSED:
 				options->import_count++;
 				break;
-			case IMPORT_MALFORMED:
+			case OPERAND_MALFORMED:
 				usage(program_name);
 				return (RELIC_EXIT_USAGE);
-			case IMPORT_NO_MEMORY:
+			case OPERAND_NO_MEMORY:
 				return (RELIC_EXIT_ERROR);
 			}
 			break;
@@ -1046,6 +1091,19 @@ parse_options(const char *program_name, int argc, char *argv[],
 		case 'n':
 			options->discard_rows = true;
 			break;
+		case 'O':
+			switch (export_operand_parse(program_name, optarg,
+			    &options->exports[options->export_count])) {
+			case OPERAND_PARSED:
+				options->export_count++;
+				break;
+			case OPERAND_MALFORMED:
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			case OPERAND_NO_MEMORY:
+				return (RELIC_EXIT_ERROR);
+			}
+			break;
 		case 'o':
 			options->output_path = optarg;
 			break;
@@ -1059,13 +1117,13 @@ parse_options(const char *program_name, int argc, char *argv[],
 		case 'T':
 			switch (column_types_parse(program_name, optarg,
 			    &options->types[options->type_count])) {
-			case IMPORT_PARSED:
+			case OPERAND_PARSED:
 				options->type_count++;
 				break;
-			case IMPORT_MALFORMED:
+			case OPERAND_MALFORMED:
 				usage(program_name);
 				return (RELIC_EXIT_USAGE);
-			case IMPORT_NO_MEMORY:
+			case OPERAND_NO_MEMORY:
 				return (RELIC_EXIT_ERROR);
 			}
 			break;
@@ -1096,9 +1154,16 @@ parse_options(const char *program_name, int argc, char *argv[],
 		}
 	}
 
-	/* An import's columns may come from a -T given after it. */
+	/*
+	 * An import's columns may come from a -T given after it, and every
+	 * path the command line names, which no export may write, is known
+	 * only once all of it is read.
+	 */
+	command_paths_of(options, argv + optind, argc - optind, &others);
 	if (import_operands_resolve(program_name, options->imports,
-	    options->import_count, options->types, options->type_count) != 0) {
+	    options->import_count, options->types, options->type_count) != 0 ||
+	    export_operands_resolve(program_name, options->exports,
+	    options->export_count, &others) != 0) {
 		usage(program_name);
 		return (RELIC_EXIT_USAGE);
 	}
@@ -1143,6 +1208,9 @@ options_free(options_t *options)
 	for (i = 0; i < options->type_count; i++)
 		column_types_free(&options->types[i]);
 	free(options->types);
+	for (i = 0; i < options->export_count; i++)
+		export_operand_free(&options->exports[i]);
+	free(options->exports);
 	free(options->queries);
 }
 
@@ -1165,8 +1233,10 @@ main(int argc, char *argv[])
 	    sizeof(*options.imports));
 	options.types = calloc(argc > 0 ? (size_t)argc : 1,
 	    sizeof(*options.types));
+	options.exports = calloc(argc > 0 ? (size_t)argc : 1,
+	    sizeof(*options.exports));
 	if (options.queries == NULL || options.imports == NULL ||
-	    options.types == NULL) {
+	    options.types == NULL || options.exports == NULL) {
 		report_error(program_name, "out of memory");
 		options_free(&options);
 		return (RELIC_EXIT_ERROR);

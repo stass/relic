@@ -176,7 +176,7 @@ answer_query(repl_t *repl, const char *text)
 	if (status != 0)
 		return (-1);
 
-	report_rows(repl->invocation, number, rows);
+	report_rows(repl->invocation, "query", number, rows);
 
 	return (0);
 }
@@ -226,7 +226,7 @@ command_plan(repl_t *repl, const char *argument)
 	if (status != 0)
 		return (-1);
 
-	report_rows(repl->invocation, number, rows);
+	report_rows(repl->invocation, "query", number, rows);
 
 	return (0);
 }
@@ -347,8 +347,9 @@ answer_line(repl_t *repl, char *line, size_t length, size_t line_number)
  * the line the terminal echoed ^C on, so that the diagnostic the evaluation
  * reports begins a line of its own.  Each is safe in a handler:
  * relic_interrupt() only raises a flag, the record is a volatile
- * sig_atomic_t, and write(2) is async-signal-safe.  The session prompts only when standard error is a
- * terminal, so the newline goes where the echo went.
+ * sig_atomic_t, and write(2) is async-signal-safe.  The session prompts
+ * only when standard error is a terminal, so the newline goes where the
+ * echo went.
  */
 static void
 interrupt_answer(int signal_number RELIC_CMD_UNUSED)

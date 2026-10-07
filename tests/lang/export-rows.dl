@@ -1,0 +1,6 @@
+% Each export counts its rows under -v after the queries', named by its
+% position among the exports.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).

@@ -55,9 +55,13 @@
  * A write that fails is reported once.  Nothing reaches the stream after it,
  * the rows of the query being written stop coming, and the query fails.
  *
- * An output with no stream attached writes nothing: its queries run and their
+ * An output with nothing attached writes nothing: its queries run and their
  * rows are counted and dropped, which is what -n asks for, and what .plan
  * does with the rows of the query it shows.
+ *
+ * An output attached to a file by its path opens the file only when the
+ * first bytes must reach it, or once a query has succeeded without any, so
+ * that a query that fails leaves the file as it was.
  */
 
 /* The bytes gathered before they are handed to the stream. */
@@ -102,6 +106,9 @@ static bool	 csv_needs_quotes(const char *bytes, size_t length);
 static void	 end_query(output_t *out);
 static char	 field_separator(enum output_format format);
 static void	 flush_buffer(output_t *out);
+static int	 give_buffer(output_t *out, const char *name,
+		    enum output_format format, bool sorted);
+static bool	 open_pending(output_t *out);
 static size_t	 format_decimal(int64_t integer,
 		    char text[INTEGER_TEXT_MAX]);
 static void	 merge_sort(const row_order_t *order,
@@ -127,6 +134,10 @@ static const char *value_bytes(const output_t *out,
 static int	 write_block(FILE *stream, const char *bytes, size_t length);
 static int	 write_collected(output_t *out, relic_query_t *query);
 static void	 write_csv_value(output_t *out, const relic_value_t *value);
+static void	 write_fact(output_t *out, const relic_value_t *values,
+		    size_t count);
+static void	 write_record(output_t *out, const relic_value_t *values,
+		    size_t count);
 static void	 write_integer(output_t *out, int64_t integer);
 static void	 write_json_control(output_t *out, unsigned char byte);
 static void	 write_json_string(output_t *out, const char *bytes,
@@ -184,24 +195,79 @@ int
 output_attach(output_t *out, FILE *stream, const char *name,
     enum output_format format, bool sorted)
 {
-	char *buffer;
+	if (give_buffer(out, name, format, sorted) != 0)
+		return (-1);
 
-	buffer = malloc(OUTPUT_BUFFER_SIZE);
-	if (buffer == NULL) {
+	setvbuf(stream, NULL, _IONBF, 0);
+	out->stream = stream;
+
+	return (0);
+}
+
+int
+output_attach_file(output_t *out, const char *path,
+    enum output_format format, const char *predicate, bool sorted)
+{
+	if (give_buffer(out, path, format, sorted) != 0)
+		return (-1);
+
+	out->pending_path = path;
+	out->predicate = predicate;
+
+	return (0);
+}
+
+/*
+ * Give an output the buffer every output that writes rows has, and what it
+ * writes them as.  Returns 0, or -1 having reported that memory ran out.
+ */
+static int
+give_buffer(output_t *out, const char *name, enum output_format format,
+    bool sorted)
+{
+	out->buffer = malloc(OUTPUT_BUFFER_SIZE);
+	if (out->buffer == NULL) {
 		report_error(out->program_name, "out of memory");
 		return (-1);
 	}
 
-	setvbuf(stream, NULL, _IONBF, 0);
-
-	out->stream = stream;
-	out->buffer = buffer;
 	out->filled = 0;
 	out->name = name;
 	out->format = format;
 	out->sorted = sorted;
 
 	return (0);
+}
+
+/*
+ * Open the file an output was attached to, created or truncated, when it is
+ * not yet open, so that what reaches it can.  Returns whether the output
+ * has a stream.  A file that cannot be opened is reported, and the output
+ * then fails as though a write had: nothing more reaches it.
+ */
+static bool
+open_pending(output_t *out)
+{
+	FILE *stream;
+
+	if (out->write_failed)
+		return (false);
+	if (out->stream != NULL)
+		return (true);
+
+	stream = fopen(out->pending_path, "w");
+	if (stream == NULL) {
+		report_error(out->program_name, "cannot open %s: %s",
+		    out->pending_path, strerror(errno));
+		out->write_failed = true;
+		return (false);
+	}
+
+	setvbuf(stream, NULL, _IONBF, 0);
+	out->stream = stream;
+	out->pending_path = NULL;
+
+	return (true);
 }
 
 /*
@@ -261,9 +327,9 @@ write_block(FILE *stream, const char *bytes, size_t length)
 }
 
 /*
- * Hand the bytes the buffer holds to the stream, and empty the buffer
- * whether or not they were written: put_byte() and put_bytes() rely on a
- * flush leaving room.
+ * Hand the bytes the buffer holds to the stream, opening its file first if
+ * it is not yet open, and empty the buffer whether or not they were
+ * written: put_byte() and put_bytes() rely on a flush leaving room.
  *
  * Once a write has failed nothing more reaches the stream: what was
  * gathered since is dropped here, and receive_row() or write_sorted_rows()
@@ -276,7 +342,7 @@ flush_buffer(output_t *out)
 {
 	int error;
 
-	if (out->filled > 0 && !out->write_failed) {
+	if (out->filled > 0 && !out->write_failed && open_pending(out)) {
 		error = write_block(out->stream, out->buffer, out->filled);
 		if (error != 0)
 			report_write_failure(out, error);
@@ -780,6 +846,7 @@ write_value(output_t *out, const relic_value_t *value)
 {
 	switch (out->format) {
 	case OUTPUT_TEXT:
+	case OUTPUT_DL:
 		write_text_value(out, value);
 		break;
 	case OUTPUT_CSV:
@@ -841,6 +908,7 @@ field_separator(enum output_format format)
 	case OUTPUT_TSV:
 		return ('\t');
 	case OUTPUT_TEXT:
+	case OUTPUT_DL:
 		break;
 	}
 
@@ -848,15 +916,31 @@ field_separator(enum output_format format)
 }
 
 /*
- * Write one row.  A JSON row goes on a line of its own, indented, and every
- * row but the first ends the line of the row before it with a comma.
+ * Write one row, as a fact in OUTPUT_DL and as a record of fields in every
+ * other format.
  */
 static void
 write_row(output_t *out, const relic_value_t *values, size_t count)
 {
-	size_t i;
-
 	begin_query(out);
+
+	if (out->format == OUTPUT_DL)
+		write_fact(out, values, count);
+	else
+		write_record(out, values, count);
+
+	out->rows_written++;
+}
+
+/*
+ * Write a row as a record of fields.  A JSON row goes on a line of its own,
+ * indented, and every row but the first ends the line of the row before it
+ * with a comma.
+ */
+static void
+write_record(output_t *out, const relic_value_t *values, size_t count)
+{
+	size_t i;
 
 	if (out->format == OUTPUT_JSON)
 		put_text(out, out->rows_written == 0 ? "\n  [" : ",\n  [");
@@ -871,8 +955,32 @@ write_row(output_t *out, const relic_value_t *values, size_t count)
 		put_byte(out, ']');
 	else
 		put_byte(out, '\n');
+}
 
-	out->rows_written++;
+/*
+ * Write a row as a fact of the output's predicate, on a line of its own, as
+ * a program writes one: `p(a, "b", 7).`, or `p.` for a row of no values.
+ * Each value is spelled as text output spells it, which is the language's
+ * own spelling, so the line loads back as the fact it was.
+ */
+static void
+write_fact(output_t *out, const relic_value_t *values, size_t count)
+{
+	size_t i;
+
+	put_text(out, out->predicate);
+
+	if (count > 0) {
+		put_byte(out, '(');
+		for (i = 0; i < count; i++) {
+			if (i > 0)
+				put_text(out, ", ");
+			write_value(out, &values[i]);
+		}
+		put_byte(out, ')');
+	}
+
+	put_text(out, ".\n");
 }
 
 /*
@@ -1065,7 +1173,7 @@ output_discard(output_t *out, relic_query_t *query, size_t *rowsp)
 void
 output_write_buffered(output_t *out)
 {
-	if (out->stream != NULL)
+	if (out->buffer != NULL)
 		flush_buffer(out);
 }
 
@@ -1102,13 +1210,17 @@ output_prompted(output_t *out)
  * from its rows.  When sorting, the answer is collected whole and written
  * once it has been sorted, and an interrupt while it is written stops it
  * between two rows in the same way.
+ *
+ * An output whose file is not yet open opens it when the first bytes reach
+ * it, or once the query has succeeded without writing any, so a query that
+ * fails before its first row leaves the file as it was.
  */
 int
 output_query(output_t *out, relic_query_t *query, size_t *rowsp)
 {
 	int status;
 
-	if (out->stream == NULL)
+	if (out->buffer == NULL)
 		return (output_discard(out, query, rowsp));
 
 	out->begun = false;
@@ -1131,6 +1243,7 @@ output_query(output_t *out, relic_query_t *query, size_t *rowsp)
 	*rowsp = out->rows_written;
 
 	flush_buffer(out);
+	(void)open_pending(out);
 
 	return (out->write_failed ? -1 : 0);
 }
@@ -1145,12 +1258,14 @@ output_query(output_t *out, relic_query_t *query, size_t *rowsp)
 int
 output_flush(output_t *out)
 {
-	if (out->stream == NULL)
+	if (out->buffer == NULL)
 		return (0);
 
 	flush_buffer(out);
 	if (out->write_failed)
 		return (-1);
+	if (out->stream == NULL)
+		return (0);
 
 	errno = 0;
 	if (fflush(out->stream) != 0) {
@@ -1172,7 +1287,7 @@ output_close(output_t *out)
 	FILE *stream;
 	bool failed;
 
-	if (out->stream == NULL)
+	if (out->buffer == NULL)
 		return (0);
 
 	failed = output_flush(out) != 0;
@@ -1181,7 +1296,7 @@ output_close(output_t *out)
 	stream = out->stream;
 	out->stream = NULL;
 
-	if (stream == stdout)
+	if (stream == NULL || stream == stdout)
 		return (failed ? -1 : 0);
 
 	if (fclose(stream) != 0 && !failed) {

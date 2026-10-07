@@ -1,0 +1,5 @@
+% A path alone names its format by an extension an export writes.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).

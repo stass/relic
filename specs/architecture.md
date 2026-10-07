@@ -1505,7 +1505,7 @@ Usage:
 
 ```text
 relic [-aceinsvV] [-F format] [-I import] [-j threads] [-l limit=value]
-      [-o file] [-q query] [-T types] [-X debug] [file ...]
+      [-O export] [-o file] [-q query] [-T types] [-X debug] [file ...]
 ```
 
 Options, in the alphabetical order used by the usage message and the manual
@@ -1521,6 +1521,7 @@ page:
 -j threads  share evaluation among this many threads; 0: one per processor
 -l limit=n  set a resource limit; repeatable
 -n          suppress normal query output; useful with -e or -v
+-O export   write a whole relation to a file; repeatable
 -o file     write query output to file instead of stdout
 -q expr     execute expr as a query; repeatable
 -s          sort query results before printing
@@ -1576,6 +1577,10 @@ records become facts of, and a type for each column, and it loads after the
 program's files, in the order given. Its operand, the formats and the rules for
 standard input are specified in `specs/design-import.md`.
 
+An export writes a whole relation to a file, named as an import is, after
+the queries have run: exactly the rows a query with a variable in every
+column would write. It is specified in `specs/design-export.md`.
+
 ---
 
 # 41. CLI Examples
@@ -1614,6 +1619,12 @@ Answer a program's queries over facts imported from a table:
 
 ```sh
 relic -T edge:symbol,symbol -I edge.tsv graph.dl
+```
+
+Write a derived relation to a table, and as facts a later run loads:
+
+```sh
+relic -a -O path.tsv -O path.dl graph.dl
 ```
 
 Force whole-program materialization:
@@ -2009,6 +2020,16 @@ for each column. An imported fact is a fact, staged and committed as a load's
 are, all or nothing. The import is specified in `specs/design-import.md`.
 
 Multiple loads and imports append to the same logical program.
+
+The arities at which a name is a predicate are one call, for a caller that
+names a relation without its arity, as the tool's export does:
+
+```c
+int
+relic_predicate_arities(relic_t *,
+    const char *name,
+    uint64_t *arities);
+```
 
 ---
 
@@ -2466,8 +2487,10 @@ lib/                        librelic
 
 cmd/relic/                  the command-line tool
     cmd.h
-    import.c                the -I operand
+    export.c                writing -O relations
+    input.c                 the interactive session's lines
     main.c
+    operand.c               the -I, -T and -O operands
     output.c
     repl.c
 
@@ -2810,7 +2833,6 @@ Potential additions, in approximate priority order:
 arithmetic expressions
 aggregates
 string operations
-relation export
 incremental insertion maintenance
 DRed-style deletion maintenance
 parallel SCC evaluation
@@ -2820,9 +2842,7 @@ floating point
 ```
 
 The language comes first: arithmetic and aggregates decide which programs
-can be written at all, and relation export is the counterpart of the CSV
-and TSV import of `specs/design-import.md`, a small step past what a query
-written with `-F csv` or `-F tsv` already produces. Incremental
+can be written at all. Incremental
 maintenance and parallel evaluation change the engine rather than the
 language, cost the most to build, and follow. Floating point is the one
 language feature that comes last: no workload measured here needs a
@@ -2855,6 +2875,10 @@ What a deferred round costs over a serial one on a single thread -- the
 probe of the worker's screen, the growth of its buffers, the merge's
 scratch and passes -- and how that floor is taken down and the threshold
 measured against it, is specified in `specs/design-deferral-cost.md`.
+
+Relation export -- a whole relation written to a file, named as an import
+is, in a format a later run reads back -- is specified in
+`specs/design-export.md`.
 
 Floating point -- a fourth type equal only to itself, ordered exactly
 against the integers, an exact `total`, and what keeps every platform's
@@ -3266,6 +3290,13 @@ when it lists none (D-38), and `relic_import_file()` and `relic_import_path()`
 through the library, described by `relic_import_t`, a fifth complete type.
 The reader and importer are `lib/import.c`, and a third fuzz target imports
 its input as a table. Specified in `specs/design-import.md`.
+
+**Relation export, sections 40, 41, 50 and 69.** `-O` writes a whole
+relation to a file, named as an import is, in csv, tsv, json or dl, the
+last a file of facts that loads back as a program (D-39). It is the
+answer to a query of every column, written after the queries.
+`relic_predicate_arities()` says at which arities a name is a predicate.
+Specified in `specs/design-export.md`.
 
 **Comparison cost, sections 19, 22, 33, 43, 47 and 52.** The engine
 comparison found relic trailing on the cost of delivering an answer and

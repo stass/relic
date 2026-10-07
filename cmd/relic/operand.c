@@ -16,7 +16,7 @@
 #include "compat.h"
 
 /*
- * The -I and -T operands.  An import is spelled either as a path alone,
+ * The -I, -T and -O operands.  An import is spelled either as a path alone,
  * whose file name gives the format and the predicate,
  *
  *	path
@@ -33,13 +33,26 @@
  * anywhere on the command line, so imports are completed only once every
  * option is known (import_operands_resolve()).  The result is the
  * relic_import_t the library takes; the words are the tool's spelling, and
- * the library has none of its own.  A path with a head is everything after
- * the first `=`, and nothing in a head can hold one, so such a path may.  A
- * malformed operand is a usage error, as an unknown -F format is.
+ * the library has none of its own.
+ *
+ * An export is spelled as an import is, a path alone or a head and a path,
+ *
+ *	format:predicate[/arity]=path
+ *
+ * and names a format of the tool's output rather than of the library's
+ * import.  Which arity a predicate has is the program's to say, so an
+ * export without one is completed once the program is loaded (export.c).
+ *
+ * A path with a head is everything after the first `=`, and nothing in a
+ * head can hold one, so such a path may.  A malformed operand is a usage
+ * error, as an unknown -F format is.
  */
 
 /* The most columns an import may keep: the arity limit of a predicate. */
 #define	IMPORT_KEPT_MAX	32
+
+/* The largest arity an export may name, the same limit. */
+#define	EXPORT_ARITY_MAX	32
 
 typedef struct column_list column_list_t;
 typedef struct operand_parts operand_parts_t;
@@ -93,26 +106,39 @@ static bool	 first_columns_given(const import_operand_t *imports,
 		    size_t import_count, const column_types_t *declared,
 		    const char *predicate, const enum relic_column **columnsp,
 		    size_t *countp);
+static bool	 export_format_named(word_t name, enum output_format *formatp);
 static bool	 format_named(word_t name, enum relic_format *formatp);
+static const char *other_use_of(const char *path,
+		    const export_operand_t *exports, size_t export_count,
+		    const command_paths_t *others);
 static bool	 is_predicate_name(word_t name);
-static enum import_parse malformed(operand_problem_t *why, const char *problem,
+static enum operand_parse malformed(operand_problem_t *why, const char *problem,
 		    const char *bytes, size_t length);
-static enum import_parse parse_columns(word_t list, column_list_t *parsed,
+static enum operand_parse parse_arity(word_t digits, unsigned int *arityp,
 		    operand_problem_t *why);
-static enum import_parse parse_format(word_t spec, import_operand_t *parsed,
+static enum operand_parse parse_columns(word_t list, column_list_t *parsed,
 		    operand_problem_t *why);
-static enum import_parse parse_head(const operand_parts_t *parts,
+static enum operand_parse parse_export_head(word_t head,
+		    export_operand_t *parsed, operand_problem_t *why);
+static enum operand_parse parse_export_path(const char *path,
+		    export_operand_t *parsed, operand_problem_t *why);
+static enum operand_parse parse_format(word_t spec, import_operand_t *parsed,
+		    operand_problem_t *why);
+static enum operand_parse parse_head(const operand_parts_t *parts,
 		    import_operand_t *parsed, operand_problem_t *why);
-static enum import_parse parse_path_alone(const char *path,
+static enum operand_parse parse_path_alone(const char *path,
 		    import_operand_t *parsed, operand_problem_t *why);
-static enum import_parse parse_predicate(word_t name, char **predicatep,
+static enum operand_parse parse_predicate(word_t name, char **predicatep,
 		    operand_problem_t *why);
 static bool	 kept_types_equal(const enum relic_column *first,
 		    size_t first_count, const enum relic_column *second,
 		    size_t second_count);
 static void	 report_malformed(const char *program_name, const char *what,
 		    const char *operand, const operand_problem_t *why);
-static enum import_parse split_operand(const char *operand,
+static enum operand_parse split_file_name(const char *path,
+		    const char *no_extension, word_t *stemp, word_t *extensionp,
+		    operand_problem_t *why);
+static enum operand_parse split_operand(const char *operand,
 		    operand_parts_t *parts, operand_problem_t *why);
 static bool	 word_is(word_t word, const char *text);
 static word_t	 word_after(word_t word, const char *end);
@@ -126,20 +152,20 @@ static word_t	 word_until(const char *bytes, const char *end, char delimiter);
  * leaves anything behind.  An operand that lists no columns leaves them for
  * import_operands_resolve().
  */
-enum import_parse
+enum operand_parse
 import_operand_parse(const char *program_name, const char *operand,
     import_operand_t *parsed)
 {
 	operand_parts_t parts;
 	operand_problem_t why;
-	enum import_parse status;
+	enum operand_parse status;
 
 	bzero(parsed, sizeof(*parsed));
 	bzero(&why, sizeof(why));
 	parsed->operand = operand;
 
 	status = split_operand(operand, &parts, &why);
-	if (status == IMPORT_PARSED) {
+	if (status == OPERAND_PARSED) {
 		parsed->path = parts.path;
 		if (parts.has_head)
 			status = parse_head(&parts, parsed, &why);
@@ -148,13 +174,13 @@ import_operand_parse(const char *program_name, const char *operand,
 	}
 
 	switch (status) {
-	case IMPORT_PARSED:
+	case OPERAND_PARSED:
 		parsed->import.predicate = parsed->predicate;
-		return (IMPORT_PARSED);
-	case IMPORT_MALFORMED:
+		return (OPERAND_PARSED);
+	case OPERAND_MALFORMED:
 		report_malformed(program_name, "import", operand, &why);
 		break;
-	case IMPORT_NO_MEMORY:
+	case OPERAND_NO_MEMORY:
 		report_error(program_name, "out of memory");
 		break;
 	}
@@ -167,18 +193,18 @@ import_operand_parse(const char *program_name, const char *operand,
  * A head: the format and its option, the predicate and, when it lists
  * them, the columns, which the operand then owns.
  */
-static enum import_parse
+static enum operand_parse
 parse_head(const operand_parts_t *parts, import_operand_t *parsed,
     operand_problem_t *why)
 {
 	column_list_t columns;
-	enum import_parse status;
+	enum operand_parse status;
 
 	status = parse_format(parts->format, parsed, why);
-	if (status == IMPORT_PARSED)
+	if (status == OPERAND_PARSED)
 		status = parse_predicate(parts->predicate, &parsed->predicate,
 		    why);
-	if (status != IMPORT_PARSED || !parts->has_columns)
+	if (status != OPERAND_PARSED || !parts->has_columns)
 		return (status);
 
 	status = parse_columns(parts->columns, &columns, why);
@@ -194,13 +220,13 @@ parse_head(const operand_parts_t *parts, import_operand_t *parsed,
  * the failure and releases what the parse allocated, as an import's parse
  * does.
  */
-enum import_parse
+enum operand_parse
 column_types_parse(const char *program_name, const char *operand,
     column_types_t *parsed)
 {
 	operand_problem_t why;
 	column_list_t columns;
-	enum import_parse status;
+	enum operand_parse status;
 	const char *end;
 	word_t predicate;
 	word_t list;
@@ -211,12 +237,12 @@ column_types_parse(const char *program_name, const char *operand,
 
 	end = operand + strlen(operand);
 	predicate = word_until(operand, end, ':');
-	status = IMPORT_PARSED;
+	status = OPERAND_PARSED;
 	if (predicate.bytes + predicate.length == end)
 		status = malformed(&why, "expected predicate:columns", NULL, 0);
-	if (status == IMPORT_PARSED)
+	if (status == OPERAND_PARSED)
 		status = parse_predicate(predicate, &parsed->predicate, &why);
-	if (status == IMPORT_PARSED) {
+	if (status == OPERAND_PARSED) {
 		list = word_after(predicate, end);
 		status = parse_columns(list, &columns, &why);
 		parsed->columns = columns.types;
@@ -224,12 +250,12 @@ column_types_parse(const char *program_name, const char *operand,
 	}
 
 	switch (status) {
-	case IMPORT_PARSED:
-		return (IMPORT_PARSED);
-	case IMPORT_MALFORMED:
+	case OPERAND_PARSED:
+		return (OPERAND_PARSED);
+	case OPERAND_MALFORMED:
 		report_malformed(program_name, "column types", operand, &why);
 		break;
-	case IMPORT_NO_MEMORY:
+	case OPERAND_NO_MEMORY:
 		report_error(program_name, "out of memory");
 		break;
 	}
@@ -389,7 +415,7 @@ kept_types_equal(const enum relic_column *first, size_t first_count,
  * colon ends the format, the next one, if there is one before the `=`, ends
  * the predicate, and the column list runs from it to the `=`.
  */
-static enum import_parse
+static enum operand_parse
 split_operand(const char *operand, operand_parts_t *parts,
     operand_problem_t *why)
 {
@@ -401,7 +427,7 @@ split_operand(const char *operand, operand_parts_t *parts,
 	equals = strchr(operand, '=');
 	if (equals == NULL) {
 		parts->path = operand;
-		return (IMPORT_PARSED);
+		return (OPERAND_PARSED);
 	}
 	if (equals[1] == '\0')
 		return (malformed(why, "empty path", NULL, 0));
@@ -416,12 +442,12 @@ split_operand(const char *operand, operand_parts_t *parts,
 	rest = word_after(parts->format, equals);
 	parts->predicate = word_until(rest.bytes, equals, ':');
 	if (parts->predicate.bytes + parts->predicate.length == equals)
-		return (IMPORT_PARSED);
+		return (OPERAND_PARSED);
 
 	parts->has_columns = true;
 	parts->columns = word_after(parts->predicate, equals);
 
-	return (IMPORT_PARSED);
+	return (OPERAND_PARSED);
 }
 
 /*
@@ -429,21 +455,46 @@ split_operand(const char *operand, operand_parts_t *parts,
  * predicate name, a dot and an extension that names a format, and the
  * import reads no header.  `-` has no file name, and is named with a head.
  */
-static enum import_parse
+static enum operand_parse
 parse_path_alone(const char *path, import_operand_t *parsed,
     operand_problem_t *why)
+{
+	word_t predicate;
+	word_t extension;
+	enum operand_parse status;
+
+	if (strcmp(path, "-") == 0)
+		return (malformed(why, "standard input needs a head", NULL,
+		    0));
+
+	status = split_file_name(path, "no .csv or .tsv extension, and no "
+	    "'=' before a path", &predicate, &extension, why);
+	if (status != OPERAND_PARSED)
+		return (status);
+	if (!format_named(extension, &parsed->import.format))
+		return (malformed(why, "unknown extension", extension.bytes,
+		    extension.length));
+
+	return (parse_predicate(predicate, &parsed->predicate, why));
+}
+
+/*
+ * Cut the file name of a path named alone, the part after its last slash,
+ * at its last dot: the stem before the dot names a predicate, and the
+ * extension after it a format.  A file name with no dot is malformed, and
+ * `no_extension` is the message that says so, which the caller words to
+ * list the extensions it knows.
+ */
+static enum operand_parse
+split_file_name(const char *path, const char *no_extension, word_t *stemp,
+    word_t *extensionp, operand_problem_t *why)
 {
 	const char *slash;
 	const char *dot;
 	word_t file_name;
-	word_t predicate;
-	word_t extension;
 
 	if (path[0] == '\0')
 		return (malformed(why, "empty path", NULL, 0));
-	if (strcmp(path, "-") == 0)
-		return (malformed(why, "standard input needs a head", NULL,
-		    0));
 
 	slash = strrchr(path, '/');
 	file_name.bytes = slash != NULL ? slash + 1 : path;
@@ -451,26 +502,255 @@ parse_path_alone(const char *path, import_operand_t *parsed,
 
 	dot = strrchr(file_name.bytes, '.');
 	if (dot == NULL)
-		return (malformed(why, "no .csv or .tsv extension, and no '=' "
-		    "before a path", NULL, 0));
+		return (malformed(why, no_extension, NULL, 0));
 
-	extension.bytes = dot + 1;
-	extension.length = file_name.length -
-	    (size_t)(extension.bytes - file_name.bytes);
-	if (!format_named(extension, &parsed->import.format))
+	stemp->bytes = file_name.bytes;
+	stemp->length = (size_t)(dot - file_name.bytes);
+
+	/* The extension begins after the dot that ends the stem. */
+	*extensionp = word_after(*stemp, file_name.bytes + file_name.length);
+
+	return (OPERAND_PARSED);
+}
+
+/*
+ * Parse an -O operand: a path alone, or a head and a path.  Reports the
+ * failure and releases what the parse allocated, as an import's parse does.
+ * Standard output is not a path an export writes, in either shape: a query
+ * writes it, and a second writer would interleave with the rows.
+ */
+enum operand_parse
+export_operand_parse(const char *program_name, const char *operand,
+    export_operand_t *parsed)
+{
+	operand_problem_t why;
+	enum operand_parse status;
+	const char *equals;
+	word_t head;
+
+	bzero(parsed, sizeof(*parsed));
+	bzero(&why, sizeof(why));
+	parsed->operand = operand;
+
+	equals = strchr(operand, '=');
+	parsed->path = equals != NULL ? equals + 1 : operand;
+
+	if (strcmp(parsed->path, "-") == 0) {
+		status = malformed(&why, "no export to standard output", NULL,
+		    0);
+	} else if (equals == NULL) {
+		status = parse_export_path(parsed->path, parsed, &why);
+	} else if (parsed->path[0] == '\0') {
+		status = malformed(&why, "empty path", NULL, 0);
+	} else {
+		head.bytes = operand;
+		head.length = (size_t)(equals - operand);
+		status = parse_export_head(head, parsed, &why);
+	}
+
+	switch (status) {
+	case OPERAND_PARSED:
+		return (OPERAND_PARSED);
+	case OPERAND_MALFORMED:
+		report_malformed(program_name, "export", operand, &why);
+		break;
+	case OPERAND_NO_MEMORY:
+		report_error(program_name, "out of memory");
+		break;
+	}
+	export_operand_free(parsed);
+
+	return (status);
+}
+
+/*
+ * An export's path alone: its extension is the format, and its stem the
+ * predicate, at whatever arity the program has it.
+ */
+static enum operand_parse
+parse_export_path(const char *path, export_operand_t *parsed,
+    operand_problem_t *why)
+{
+	word_t predicate;
+	word_t extension;
+	enum operand_parse status;
+
+	status = split_file_name(path, "no .csv, .tsv, .json or .dl "
+	    "extension, and no '=' before a path", &predicate, &extension,
+	    why);
+	if (status != OPERAND_PARSED)
+		return (status);
+	if (!export_format_named(extension, &parsed->format))
 		return (malformed(why, "unknown extension", extension.bytes,
 		    extension.length));
-
-	predicate.bytes = file_name.bytes;
-	predicate.length = (size_t)(dot - file_name.bytes);
 
 	return (parse_predicate(predicate, &parsed->predicate, why));
 }
 
 /*
+ * An export's head, format:predicate[/arity].  The format cannot hold a
+ * colon and the predicate cannot hold a slash, so the first of each is a
+ * separator.
+ */
+static enum operand_parse
+parse_export_head(word_t head, export_operand_t *parsed,
+    operand_problem_t *why)
+{
+	const char *end;
+	word_t format;
+	word_t after_format;
+	word_t predicate;
+	enum operand_parse status;
+
+	end = head.bytes + head.length;
+	format = word_until(head.bytes, end, ':');
+	if (format.bytes + format.length == end)
+		return (malformed(why, "expected format:predicate before '='",
+		    NULL, 0));
+	if (format.length == 0)
+		return (malformed(why, "empty format", NULL, 0));
+	if (!export_format_named(format, &parsed->format))
+		return (malformed(why, "unknown format", format.bytes,
+		    format.length));
+
+	after_format = word_after(format, end);
+	predicate = word_until(after_format.bytes, end, '/');
+	status = parse_predicate(predicate, &parsed->predicate, why);
+	if (status != OPERAND_PARSED)
+		return (status);
+
+	if (predicate.bytes + predicate.length == end)
+		return (OPERAND_PARSED);
+	parsed->has_arity = true;
+
+	return (parse_arity(word_after(predicate, end), &parsed->arity, why));
+}
+
+/*
+ * The formats an export writes, each named by the same word in a head and
+ * as a path's extension.  dl, facts in the language's own syntax, is
+ * written by an export alone.
+ */
+static bool
+export_format_named(word_t name, enum output_format *formatp)
+{
+	static const struct {
+		const char		*name;
+		enum output_format	 format;
+	} formats[] = {
+		{ "csv", OUTPUT_CSV },
+		{ "dl", OUTPUT_DL },
+		{ "json", OUTPUT_JSON },
+		{ "tsv", OUTPUT_TSV }
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(formats) / sizeof(formats[0]); i++) {
+		if (word_is(name, formats[i].name)) {
+			*formatp = formats[i].format;
+			return (true);
+		}
+	}
+
+	return (false);
+}
+
+/*
+ * An arity: decimal digits, at most EXPORT_ARITY_MAX.  The value is
+ * accumulated only while it is within the limit, so no run of digits can
+ * overflow it.
+ */
+static enum operand_parse
+parse_arity(word_t digits, unsigned int *arityp, operand_problem_t *why)
+{
+	unsigned int arity;
+	size_t i;
+
+	if (digits.length == 0)
+		return (malformed(why, "empty arity", NULL, 0));
+
+	arity = 0;
+	for (i = 0; i < digits.length; i++) {
+		if (digits.bytes[i] < '0' || digits.bytes[i] > '9')
+			return (malformed(why, "not an arity", digits.bytes,
+			    digits.length));
+		arity = arity * 10 + (unsigned int)(digits.bytes[i] - '0');
+		if (arity > EXPORT_ARITY_MAX)
+			return (malformed(why, "arity above "
+			    CMD_STRINGIFY(EXPORT_ARITY_MAX), digits.bytes,
+			    digits.length));
+	}
+	*arityp = arity;
+
+	return (OPERAND_PARSED);
+}
+
+/*
+ * Hold every export to a path nothing else on the command line spells:
+ * another export, the -o file, an imported table or a program operand.  An
+ * export truncates its file, so it would destroy what another writer wrote,
+ * or replace an input with one of its relations -- a program with the facts
+ * of its own predicate, when both are .dl.  Paths are compared as written,
+ * which catches the mistakes a command line makes by naming one file twice
+ * and no more: two spellings of one file are two paths here.  Returns 0, or
+ * -1 having reported the first export at fault.
+ */
+int
+export_operands_resolve(const char *program_name,
+    const export_operand_t *exports, size_t export_count,
+    const command_paths_t *others)
+{
+	cmd_quoted_t quoted;
+	const char *other;
+	size_t i;
+
+	for (i = 0; i < export_count; i++) {
+		other = other_use_of(exports[i].path, exports, i, others);
+		if (other == NULL)
+			continue;
+		report_error(program_name, "invalid export: %s is %s",
+		    cmd_quote(exports[i].path, strlen(exports[i].path),
+		    &quoted), other);
+		return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * What else on the command line spells `path`, described for a message, or
+ * NULL when nothing does: the first `export_count` exports, those before
+ * the one asking, and the paths of `others`.
+ */
+static const char *
+other_use_of(const char *path, const export_operand_t *exports,
+    size_t export_count, const command_paths_t *others)
+{
+	size_t i;
+
+	for (i = 0; i < export_count; i++) {
+		if (strcmp(path, exports[i].path) == 0)
+			return ("the path of an earlier export");
+	}
+	if (others->output_path != NULL &&
+	    strcmp(path, others->output_path) == 0)
+		return ("the -o file");
+	for (i = 0; i < others->import_count; i++) {
+		if (strcmp(path, others->imports[i].path) == 0)
+			return ("an imported table");
+	}
+	for (i = 0; i < others->file_count; i++) {
+		if (strcmp(path, others->files[i]) == 0)
+			return ("a program file");
+	}
+
+	return (NULL);
+}
+
+/*
  * The format and its option: `csv` or `tsv`, and `,header` after it.
  */
-static enum import_parse
+static enum operand_parse
 parse_format(word_t spec, import_operand_t *parsed, operand_problem_t *why)
 {
 	word_t format;
@@ -484,7 +764,7 @@ parse_format(word_t spec, import_operand_t *parsed, operand_problem_t *why)
 		    format.length));
 
 	if (format.length == spec.length)
-		return (IMPORT_PARSED);
+		return (OPERAND_PARSED);
 
 	option = word_after(format, spec.bytes + spec.length);
 	if (!word_is(option, "header"))
@@ -492,7 +772,7 @@ parse_format(word_t spec, import_operand_t *parsed, operand_problem_t *why)
 		    option.length));
 	parsed->import.flags |= RELIC_IMPORT_HEADER;
 
-	return (IMPORT_PARSED);
+	return (OPERAND_PARSED);
 }
 
 /*
@@ -518,7 +798,7 @@ format_named(word_t name, enum relic_format *formatp)
  * The predicate, copied into *predicatep so that it is terminated, as the
  * library needs.
  */
-static enum import_parse
+static enum operand_parse
 parse_predicate(word_t name, char **predicatep, operand_problem_t *why)
 {
 	if (name.length == 0)
@@ -529,9 +809,9 @@ parse_predicate(word_t name, char **predicatep, operand_problem_t *why)
 
 	*predicatep = strndup(name.bytes, name.length);
 	if (*predicatep == NULL)
-		return (IMPORT_NO_MEMORY);
+		return (OPERAND_NO_MEMORY);
 
-	return (IMPORT_PARSED);
+	return (OPERAND_PARSED);
 }
 
 /*
@@ -541,7 +821,7 @@ parse_predicate(word_t name, char **predicatep, operand_problem_t *why)
  * The array is set in *parsed as soon as it is allocated, so that a caller
  * releases it whether or not the rest of the list parses.
  */
-static enum import_parse
+static enum operand_parse
 parse_columns(word_t list, column_list_t *parsed, operand_problem_t *why)
 {
 	const char *end;
@@ -562,7 +842,7 @@ parse_columns(word_t list, column_list_t *parsed, operand_problem_t *why)
 
 	parsed->types = calloc(column_total, sizeof(*parsed->types));
 	if (parsed->types == NULL)
-		return (IMPORT_NO_MEMORY);
+		return (OPERAND_NO_MEMORY);
 	parsed->count = column_total;
 
 	kept = 0;
@@ -598,14 +878,14 @@ parse_columns(word_t list, column_list_t *parsed, operand_problem_t *why)
 		return (malformed(why, "more than "
 		    CMD_STRINGIFY(IMPORT_KEPT_MAX) " columns kept", NULL, 0));
 
-	return (IMPORT_PARSED);
+	return (OPERAND_PARSED);
 }
 
 /*
  * Record why an operand is not what it should be: `problem`, and the
  * `length` bytes at `bytes` that are wrong when they are one word, or NULL.
  */
-static enum import_parse
+static enum operand_parse
 malformed(operand_problem_t *why, const char *problem, const char *bytes,
     size_t length)
 {
@@ -613,14 +893,14 @@ malformed(operand_problem_t *why, const char *problem, const char *bytes,
 	why->word.bytes = bytes;
 	why->word.length = length;
 
-	return (IMPORT_MALFORMED);
+	return (OPERAND_MALFORMED);
 }
 
 /*
- * Report why an operand is not `what` -- an import, column types.  The
- * problem comes first and the operand is quoted cut short, since an
- * argument can be as long as the system allows, so that the message says
- * what is wrong whatever the operand is.
+ * Report why an operand is not `what` it should be -- an import, column
+ * types, an export.  The problem comes first and the operand is quoted cut
+ * short, since an argument can be as long as the system allows, so that the
+ * message says what is wrong whatever the operand is.
  */
 static void
 report_malformed(const char *program_name, const char *what,
@@ -723,6 +1003,13 @@ void
 import_operand_free(import_operand_t *parsed)
 {
 	free(parsed->own_columns);
+	free(parsed->predicate);
+	bzero(parsed, sizeof(*parsed));
+}
+
+void
+export_operand_free(export_operand_t *parsed)
+{
 	free(parsed->predicate);
 	bzero(parsed, sizeof(*parsed));
 }

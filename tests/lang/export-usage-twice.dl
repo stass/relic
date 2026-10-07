@@ -1,0 +1,5 @@
+% Two exports to one path would each truncate what the other wrote.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).

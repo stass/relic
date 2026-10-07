@@ -1,0 +1,1 @@
+relic: error: 'edge' is a predicate of arities 2 and 3; name one in a head, as edge/2, in tsv:edge=out.tsv

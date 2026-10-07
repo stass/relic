@@ -33,6 +33,8 @@ relic 1.0.0 (unreleased)
   * The tool: answers in text, CSV, TSV or JSON; facts imported from CSV and
     TSV tables, -I edge.tsv naming its predicate and format by its file name
     and -T edge:symbol,symbol declaring the predicate's column types once;
+    whole relations written to files with -O path.tsv, in CSV, TSV, JSON or
+    as facts, -O path.dl, that a later run loads back as a program;
     an interactive mode with line editing where libedit is present, where
     control-C stops the query running and returns to the prompt; the plan of
     every evaluation with -e and its counters with -X stats.

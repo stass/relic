@@ -58,6 +58,10 @@ struct predtab_size {
 	size_t	names;
 };
 
+static relic_pred_id_t pred_find(const relic_predtab_t *table,
+		    const char *name, size_t length, uint16_t arity,
+		    uint32_t hash);
+static uint64_t	 written_arities(const relic_t *ctx, const char *name);
 static relic_pred_t *pred_at(const relic_predtab_t *table,
 		    relic_pred_id_t id);
 static uint32_t	 pred_hash(uint64_t seed, const char *name, size_t length,
@@ -482,11 +486,8 @@ relic_pred_intern(relic_t *ctx, const char *name, size_t length,
     uint16_t arity, const relic_location_t *where, relic_pred_id_t *idp)
 {
 	relic_predtab_t *table;
-	relic_idprobe_t probe;
-	const relic_pred_t *candidate;
-	relic_spelling_t asked;
+	relic_pred_id_t found;
 	uint32_t hash;
-	uint32_t id;
 
 	if (arity > RELIC_MAX_ARITY) {
 		relic_diag_internal(ctx, where,
@@ -504,6 +505,30 @@ relic_pred_intern(relic_t *ctx, const char *name, size_t length,
 
 	table = &ctx->program.predicates;
 	hash = pred_hash(table->hash_seed, name, length, arity);
+	found = pred_find(table, name, length, arity, hash);
+	if (found != RELIC_ID_NONE) {
+		*idp = found;
+		return (0);
+	}
+
+	return (pred_store(ctx, name, length, arity, hash, where, idp));
+}
+
+/*
+ * The identifier of the predicate `length` bytes of `name` at `arity`, whose
+ * hash is `hash`, or RELIC_ID_NONE when the table holds none.  Interns
+ * nothing.  `length` is at most RELIC_STRING_LENGTH_MAX, as every name the
+ * table holds is.
+ */
+static relic_pred_id_t
+pred_find(const relic_predtab_t *table, const char *name, size_t length,
+    uint16_t arity, uint32_t hash)
+{
+	relic_idprobe_t probe;
+	const relic_pred_t *candidate;
+	relic_spelling_t asked;
+	uint32_t id;
+
 	asked.bytes = name;
 	asked.length = (uint32_t)length;
 
@@ -511,13 +536,79 @@ relic_pred_intern(relic_t *ctx, const char *name, size_t length,
 	while (relic_idprobe_next(&probe, &id)) {
 		candidate = pred_at(table, id);
 		if (candidate->arity == arity &&
-		    relic_spelling_equal(&candidate->name, &asked)) {
-			*idp = id;
-			return (0);
-		}
+		    relic_spelling_equal(&candidate->name, &asked))
+			return (id);
 	}
 
-	return (pred_store(ctx, name, length, arity, hash, where, idp));
+	return (RELIC_ID_NONE);
+}
+
+/*
+ * The arities at which the program knows `name`: one probe of the table per
+ * arity a predicate may have.  Only a predicate the program wrote counts; a
+ * base view, a rewritten predicate and an aggregate's group predicate are
+ * the library's own, whatever their names.  A name longer than any the
+ * table can hold has no arity.  A predicate a failed load or import interned
+ * stays in the table, as every interned predicate does, so its arity counts.
+ *
+ * The set is a 64-bit word, bit n for arity n, so the arity limit must stay
+ * below 64 for every arity to have a bit.
+ */
+_Static_assert(RELIC_MAX_ARITY < 64,
+    "a set of arities is a uint64_t, one bit per arity");
+
+int
+relic_predicate_arities(relic_t *ctx, const char *name, uint64_t *arities)
+{
+	int status;
+
+	if (relic_enter(ctx, NULL, NULL) != 0)
+		return (-1);
+
+	if (name == NULL || arities == NULL) {
+		relic_diag_error(ctx, RELIC_ERROR_ARGUMENT, NULL,
+		    "the arities of a predicate need its name and somewhere "
+		    "to put them");
+		relic_leave(ctx);
+		return (-1);
+	}
+
+	status = relic_program_ready(ctx);
+	if (status == 0)
+		*arities = written_arities(ctx, name);
+
+	relic_leave(ctx);
+
+	return (status);
+}
+
+/*
+ * The set of arities at which the program wrote a predicate named `name`.
+ */
+static uint64_t
+written_arities(const relic_t *ctx, const char *name)
+{
+	const relic_predtab_t *table;
+	const relic_pred_t *pred;
+	uint64_t found;
+	size_t length;
+	uint16_t arity;
+
+	length = strlen(name);
+	if (length > RELIC_STRING_LENGTH_MAX)
+		return (0);
+
+	table = &ctx->program.predicates;
+	found = 0;
+	for (arity = 0; arity <= RELIC_MAX_ARITY; arity++) {
+		pred = relic_pred_of(ctx, pred_find(table, name, length, arity,
+		    pred_hash(table->hash_seed, name, length, arity)));
+		if (pred != NULL && pred->kind == RELIC_PRED_WRITTEN &&
+		    pred->views == RELIC_ID_NONE)
+			found |= UINT64_C(1) << arity;
+	}
+
+	return (found);
 }
 
 /*

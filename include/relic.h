@@ -617,6 +617,23 @@ RELIC_EXPORT int relic_import_path(relic_t *ctx, const char *path,
     const relic_import_t *import);
 
 /*
+ * The arities at which the program has a predicate named `name`: bit n of
+ * *arities is set when a statement, a fact, an import or a query has named
+ * name/n, a load or import that failed included, and no bit is set for a
+ * name nothing has named.  A predicate is a name and an arity together, so
+ * this is how a caller that names a relation without its arity learns which
+ * one it means, or that the name has several.  Predicates the library
+ * generates are never reported.
+ *
+ * The program is checked first, as by every operation that uses it, so that
+ * every rule loaded has named its predicates.  Returns 0, or -1 with the
+ * reason reported and *arities untouched: the check failed, `name` or
+ * `arities` is NULL, or caller code the context is running made the call.
+ */
+RELIC_EXPORT int relic_predicate_arities(relic_t *ctx, const char *name,
+    uint64_t *arities);
+
+/*
  * Validate the loaded program, returning 0 when it is usable and -1 when it
  * is not, with every mistake already reported through the diagnostic
  * callback.

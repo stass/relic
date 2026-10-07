@@ -2,10 +2,10 @@
 #
 # The command-line tool's handling of its input and output: a program read
 # from standard input, a table imported from it, results written to a file
-# with -o, a write that fails, and a query that fails part way through a
-# run.  The golden language tests cover what the tool prints; these cover
-# where it reads from and writes to, and what a run leaves behind, which a
-# golden file cannot express.
+# with -o, relations written to files with -O, a write that fails, and a
+# query that fails part way through a run.  The golden language tests cover
+# what the tool prints; these cover where it reads from and writes to, and
+# what a run leaves behind, which a golden file cannot express.
 
 set -eu
 
@@ -522,6 +522,122 @@ actual=$("$RELIC" -s -T edge:symbol,symbol -I "$work/tables/edge.tsv" \
     -I "$work/tables/edge.csv" < "$work/graph.dl")
 if [ "$actual" != "$(printf 'b\nc\nd\ne')" ]; then
 	fail "imports of paths alone answered '$actual'"
+fi
+
+# -O writes a whole relation to its file, replacing whatever it held, after
+# the queries, whose results still go to standard output; -n, which writes
+# no query's rows, does not stop it.
+printf 'a\tb\na\tc\nb\tc\n' > "$work/path.expected"
+for discard in "" -n; do
+	echo stale > "$work/path.tsv"
+	# shellcheck disable=SC2086 # an empty option is no option
+	actual=$("$RELIC" -s $discard -O "$work/path.tsv" "$work/graph.dl")
+	if [ "$actual" != "$(if [ -z "$discard" ]; then echo "$expected"; fi)" ]
+	then
+		fail "-O $discard wrote '$actual' to standard output"
+	fi
+	if ! cmp -s "$work/path.expected" "$work/path.tsv"; then
+		fail "-O $discard wrote '$(cat "$work/path.tsv")'"
+	fi
+done
+
+# An export's file is opened only when its turn comes, after the queries:
+# a run that fails validation, a run under -c, and a run whose query fails
+# in evaluation leave it as it was.
+for run in "-q X>1?" "-c" "-l tuples=7 -q path(X,Y)?"; do
+	echo kept > "$work/path.tsv"
+	# shellcheck disable=SC2086 # the run's options are separate words
+	"$RELIC" $run -O "$work/path.tsv" "$work/graph.dl" >/dev/null 2>&1 ||
+	    :
+	if [ "$(cat "$work/path.tsv")" != "kept" ]; then
+		fail "a run with '$run' replaced an export's file"
+	fi
+done
+
+# An export never writes a path the command line spells otherwise: a
+# program operand or an imported table would be replaced by one of its
+# relations.  Each is a usage error, and the file is left as it was.
+printf 'a\tb\n' > "$work/edge.tsv"
+cp "$work/graph.dl" "$work/path.dl"
+for run in "-O dl:path=$work/path.dl $work/path.dl" \
+    "-T edge:symbol,symbol -I $work/edge.tsv -O $work/edge.tsv $work/path.dl"
+do
+	cp "$work/edge.tsv" "$work/edge.kept"
+	cp "$work/path.dl" "$work/path.kept"
+	status=0
+	# shellcheck disable=SC2086 # the run's options are separate words
+	"$RELIC" $run >/dev/null 2>&1 || status=$?
+	if [ "$status" -ne 2 ]; then
+		fail "an export of a file the run reads exited $status, expected 2: $run"
+	fi
+	if ! cmp -s "$work/edge.tsv" "$work/edge.kept" ||
+	    ! cmp -s "$work/path.dl" "$work/path.kept"; then
+		fail "an export replaced a file the run reads: $run"
+	fi
+done
+
+# Exports are written in command-line order, after the materialized program
+# under -a: a head's arity chooses among a name's predicates, and a
+# predicate of no columns without its fact is an empty file.  An export that
+# cannot be opened is an error, reported once naming the file, and ends the
+# run: the export before it is written, the one after it is not.
+cat > "$work/arities.dl" <<'EOF2'
+edge(a, b).
+edge(x, y, z).
+never :- edge(z, z).
+EOF2
+printf 'x\ty\tz\n' > "$work/edge3.expected"
+status=0
+diagnostic=$("$RELIC" -a -O "tsv:edge/3=$work/edge3.tsv" \
+    -O "$work/never.tsv" -O "tsv:edge/2=$work/missing/edge2.tsv" \
+    -O "tsv:edge/2=$work/edge2.tsv" "$work/arities.dl" 2>&1 >/dev/null) ||
+    status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an unwritable export exited $status, expected 1"
+fi
+if [ "$(printf '%s\n' "$diagnostic" |
+    grep -c "cannot open $work/missing/edge2.tsv")" -ne 1 ]; then
+	fail "an unwritable export was reported as '$diagnostic'"
+fi
+if ! cmp -s "$work/edge3.expected" "$work/edge3.tsv"; then
+	fail "edge/3 was exported as '$(cat "$work/edge3.tsv")'"
+fi
+if [ ! -f "$work/never.tsv" ] || [ -s "$work/never.tsv" ]; then
+	fail "a predicate of no columns and no fact was not an empty file"
+fi
+if [ -e "$work/edge2.tsv" ]; then
+	fail "an export ran after one failed"
+fi
+
+# An export whose evaluation fails -- here at a limit the queries before it
+# stay within -- fails the run and leaves its file as it was: the file is
+# opened only when the first row reaches it, and the library delivers none
+# until the evaluation has succeeded.
+echo stale > "$work/path.tsv"
+status=0
+"$RELIC" -l tuples=4 -q 'edge(X, Y)?' -O "$work/path.tsv" \
+    "$work/graph.dl" >/dev/null 2>&1 || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an export failing in evaluation exited $status, expected 1"
+fi
+if [ "$(cat "$work/path.tsv")" != "stale" ]; then
+	fail "an export failing in evaluation replaced its file"
+fi
+
+# A write to an export's file that fails is reported once, naming the file,
+# and fails the run.
+status=0
+diagnostic=$(
+	trap '' XFSZ
+	ulimit -f 0
+	exec "$RELIC" -O "$work/path.tsv" "$work/graph.dl" 2>&1 >/dev/null
+) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a failed write to an export exited $status, expected 1"
+fi
+if [ "$(printf '%s\n' "$diagnostic" |
+    grep -c "cannot write $work/path.tsv")" -ne 1 ]; then
+	fail "a failed write to an export was reported as '$diagnostic'"
 fi
 
 # Standard input has one reader, so two imports of -, or one under -i, are a

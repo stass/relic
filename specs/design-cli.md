@@ -42,17 +42,20 @@ succeeded:
    attempted even after one fails, so that one run reports the mistakes in all
    of them.
 3. **Check** the program.
-4. **Prepare** every query that will run, reporting what is wrong with each of
-   them before any runs. A mistake in the third `-q` is reported even when the
-   first two are fine.
-5. With `-c`, stop here: the program and its queries are valid.
+4. **Prepare** every query that will run, and every `-O` export's query,
+   reporting what is wrong with each of them before any runs. A mistake in
+   the third `-q` is reported even when the first two are fine.
+5. With `-c`, stop here: the program, its queries and its exports are valid.
 6. With `-a`, **materialize** the whole program.
 7. **Open** the output: the `-o` file, or standard output.
 8. **Run** each query in turn and write its results. The first query that fails
    ends the run, because a failure in evaluation -- a limit, most often --
    would recur in every query after it.
-9. With `-i`, run the **interactive session** of section 10.
-10. **Close** the output, and report a write that failed.
+9. **Export** each `-O` relation to its file, in command-line order
+   (`specs/design-export.md` section 5). The first export that fails ends
+   the run.
+10. With `-i`, run the **interactive session** of section 10.
+11. **Close** the output, and report a write that failed.
 
 Validation precedes evaluation throughout: a run either reports mistakes
 without evaluating anything, or evaluates a program and a set of queries that
@@ -120,10 +123,12 @@ query the context has compiled, the program's own among them, from zero.
 evaluation and they demand it. Each conflict is a usage error, as is an
 unknown option, an unknown `-F` format, a malformed `-I` or `-T` operand, an
 import with no column types, a predicate's column types declared twice or
-differently, a second claim on standard input, or a missing operand to an
+differently, a malformed `-O` operand, an export to a path the command line
+names otherwise, a second claim on standard input, or a missing operand to an
 option that takes one.
 Options that do not apply in a mode -- `-e`, `-F`, `-o`, `-s` and `-v` under
-`-c`, and `-F`, `-o` and `-s` under `-n` -- are accepted and have no effect.
+`-c`, and `-F` and `-o` under `-n` -- are accepted and have no effect. `-s`
+under `-n` sorts the exports' rows alone, since `-n` writes no query's.
 
 ### 2.4 Plans
 

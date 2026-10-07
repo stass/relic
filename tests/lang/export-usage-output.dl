@@ -1,0 +1,6 @@
+% An export to the -o file would truncate the query results, whichever
+% option comes first.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).

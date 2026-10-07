@@ -15,6 +15,7 @@
 .Op Fl I Ar import
 .Op Fl j Ar threads
 .Op Fl l Ar limit Ns = Ns Ar value
+.Op Fl O Ar export
 .Op Fl o Ar file
 .Op Fl q Ar query
 .Op Fl T Ar types
@@ -41,7 +42,11 @@ to read.
 Facts may also be imported from CSV and TSV tables with
 .Fl I ,
 as described in
-.Sx IMPORTS .
+.Sx IMPORTS ,
+and relations written to files with
+.Fl O ,
+as described in
+.Sx EXPORTS .
 .Pp
 A program is a sequence of facts, rules and queries.
 A fact is an atom ending in a period, and holds no variable; a rule is an
@@ -406,7 +411,9 @@ The answers are the same.
 Check the program and its queries, and evaluate nothing.
 Every table named with
 .Fl I
-is read and checked too.
+is read and checked too, and every export of
+.Fl O
+is checked and not written.
 It cannot be combined with
 .Fl a
 or
@@ -476,12 +483,21 @@ The limits are described in
 Run every query and write none of its rows.
 The output is never opened, so
 .Fl o
-creates no file.
+creates no file; the exports of
+.Fl O
+are still written.
 With
 .Fl v
 this counts each query's answers; with
 .Fl e
 it shows what each query runs.
+.It Fl O Ar export
+Write every tuple of a relation to a file, once the queries have run.
+The option may be repeated, and the relations are written in the order
+given.
+.Ar export
+is described in
+.Sx EXPORTS .
 .It Fl o Ar file
 Write query results to
 .Ar file ,
@@ -524,7 +540,11 @@ where N is the query's number: its position among the
 .Fl q
 queries, or else the program's own, continued in an interactive session as
 .Sx INTERACTIVE MODE
-describes.
+describes; and after each export that succeeds, a line
+.Ql export N: M rows ,
+N its position among the
+.Fl O
+exports.
 Twice: also a note for the first comparison or aggregate in each rule, and
 in each query each time it is answered, that had no value and was easily
 unintended: a comparison that ordered values of
@@ -709,6 +729,92 @@ When an import or the session reads it, the program is the
 .Ar file
 operands, and with none it is empty.
 Two readers of the standard input are a usage error.
+.Sh EXPORTS
+An
+.Ar export
+is written as a path alone,
+.Bd -literal -offset indent
+path
+.Ed
+.Pp
+or with a head that names what the path does not:
+.Bd -literal -offset indent
+format:predicate[/arity]=path
+.Ed
+.Pp
+and writes every tuple of
+.Ar predicate
+to the file at
+.Ar path ,
+created or truncated.
+A path alone is written in the format its file name's extension names,
+.Ql .csv ,
+.Ql .tsv ,
+.Ql .json
+or
+.Ql .dl ,
+and holds the predicate the rest of the file name names:
+.Ql out/path.tsv
+writes
+.Ql path
+as
+.Cm tsv .
+A file name that says neither is named with a head, whose path is
+everything after the first
+.Ql = .
+The standard output is not a path an export writes; a query writes it.
+An export may not write a path the command line spells otherwise: that of
+another export, the
+.Fl o
+file, an imported table or a program
+.Ar file .
+Each is a usage error.
+Paths are compared as written, so another spelling of the same file, or a
+file the standard input or output is redirected to, is not caught, and an
+export to it truncates it.
+.Pp
+A predicate is a name and an arity together.
+An export with no
+.Ar arity
+writes the one predicate the program has of that name; a name the program
+has at several arities is an error that asks for a head naming one, and a
+name it does not have at all is an error too.
+.Pp
+What an export writes is exactly what a query of the predicate with a
+variable in every column writes, under the same
+.Fl a
+and
+.Fl s ,
+in the format the export names:
+.Cm csv ,
+.Cm tsv
+and
+.Cm json
+as described in
+.Sx OUTPUT ,
+with no header, and
+.Cm dl ,
+each row a fact written as a program writes it,
+.Ql path(a, \(dqAnn Lee\(dq).
+A
+.Cm dl
+file loads back as a program holding the same relation, every value with
+its type; a
+.Cm csv
+or
+.Cm tsv
+file is read back with
+.Fl I
+and the predicate's
+.Fl T ,
+which says what the format does not.
+.Pp
+Exports are written after the queries and before an interactive session.
+Each file is created or truncated only once the relation is known, when
+its first row is written or, for an empty relation, when its query
+succeeds, so a run that fails before then, in evaluation at a limit
+included, leaves the file as it was.
+A write that fails leaves the rows written before it and exits 1.
 .Sh RESOURCE LIMITS
 Each
 .Fl l
@@ -942,6 +1048,11 @@ header whose second column is not needed:
 .Pp
 .Dl $ relic -T edge:symbol,symbol -I edge.tsv reach.dl
 .Dl $ relic -T person:symbol,_,integer -I csv,header:person=people.csv rules.dl
+.Pp
+Write a derived relation to a table, and as facts a later run loads back:
+.Pp
+.Dl $ relic -a -O path.tsv -O path.dl graph.dl
+.Dl $ relic -O path.dl graph.dl && relic -q 'path(a, X)?' path.dl
 .Pp
 Query a table read from the standard input, with no program file:
 .Pp

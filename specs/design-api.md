@@ -189,6 +189,25 @@ description, and the column array it points at, are borrowed for the call
 and read once, when it is checked, since caller code runs while the table
 is read.
 
+### 4.2 A name's arities
+
+```c
+int	relic_predicate_arities(relic_t *, const char *name,
+	    uint64_t *arities);
+```
+
+sets `*arities` to the arities at which the context knows a predicate named
+`name`: bit `n` is set when a statement, a fact, an import or a query has
+named `name/n`. It is for a caller that names a relation without its arity,
+as the tool's export does (`specs/design-export.md` section 7), and needs
+the program's answer to whether the name is ambiguous. Predicates the Magic
+rewrite generates and the group predicates of aggregates are the library's
+own and are never reported. The call begins with a check, as every
+operation that uses the program does, so that every rule loaded has named
+its predicates, and fails as that check fails. It is refused, with a
+diagnostic, when `name` or `arities` is NULL or the context is busy, and
+returns 0, or -1 with `*arities` untouched.
+
 ---
 
 ## 5. Queries and results

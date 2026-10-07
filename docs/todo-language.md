@@ -52,11 +52,6 @@ cannot say so in the program. The natural form is a headless rule the check
 evaluates like a query and reports as an error with the witness tuple, which
 is a small design on top of the query object.
 
-**Relation export.** [Low, component: `cmd/relic/`] Writing a whole
-relation, not a query's answer, to a file in one of the output formats.
-Souffle's `.output`, and the counterpart of `-I`. Listed in architecture
-section 69; the formats exist, so it is a flag and a loop.
-
 **Per-rule profiling.** [Low, component: `lib/eval.c`, `cmd/relic/`]
 Souffle's `-p` reports time and tuples per rule; clingo and the Prologs
 have statistics per predicate. relic's `-X stats` counts the run as a

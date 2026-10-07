@@ -784,3 +784,19 @@ line gives a predicate keeps the same types in the same order, so a
 predicate's types are one fact however many tables fill it. The library's
 `relic_import_t` is unchanged; the vocabulary is the tool's. Specified in
 `specs/design-import.md` section 3.1.
+
+### D-39 An export is a query of all of a predicate's columns, named as an import is
+
+A relation is written to a file by `-O`, whose operand is spelled as an
+`-I` operand is: a path alone names the format by its extension and the
+predicate by the rest of its file name, and a head names them where the
+path cannot, with `/arity` when the program has the name at more than one
+arity. What an export writes is exactly the answer to a query of the
+predicate with a distinct variable in every column, so it reads what a
+query would, materialized or through the Magic rewrite, in a query's
+order, and the tool has one way to read a relation and one way to write
+rows. No header is written, since columns have no names; a `dl` export
+writes the relation as facts in program syntax, the format that reads
+back with every value's type. The library adds one entry point,
+`relic_predicate_arities()`, which says at which arities a name is a
+predicate. Specified in `specs/design-export.md`.

@@ -60,8 +60,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	tests/unit/programs.h
 
 bin_PROGRAMS = relic
-relic_SOURCES = cmd/relic/import.c cmd/relic/input.c cmd/relic/main.c \
-	cmd/relic/output.c cmd/relic/repl.c
+relic_SOURCES = cmd/relic/export.c cmd/relic/input.c cmd/relic/main.c \
+	cmd/relic/operand.c cmd/relic/output.c cmd/relic/repl.c
 
 # The tool links the compatibility objects itself.  Hidden visibility and the
 # export list together make them unreachable through librelic, so the first
@@ -682,6 +682,16 @@ RELIC_LANG_TESTS = \
 	tests/lang/explain-subsumed.dl tests/lang/explain-supplementary.dl \
 	tests/lang/explain-tautology.dl \
 	tests/lang/explain-thresholds.dl tests/lang/explain-views.dl \
+	tests/lang/export-arities.dl tests/lang/export-arities-head.dl \
+	tests/lang/export-arity.dl tests/lang/export-rows.dl \
+	tests/lang/export-undefined.dl tests/lang/export-unknown.dl \
+	tests/lang/export-usage-arity.dl \
+	tests/lang/export-usage-extension.dl \
+	tests/lang/export-usage-format.dl tests/lang/export-usage-head.dl \
+	tests/lang/export-usage-none.dl tests/lang/export-usage-output.dl \
+	tests/lang/export-usage-path.dl tests/lang/export-usage-predicate.dl \
+	tests/lang/export-usage-stdout.dl tests/lang/export-usage-stem.dl \
+	tests/lang/export-usage-twice.dl tests/lang/export-usage-wide.dl \
 	tests/lang/float-exponent.dl tests/lang/float-literal.dl \
 	tests/lang/float-period.dl \
 	tests/lang/format-csv.dl tests/lang/format-integers.dl \

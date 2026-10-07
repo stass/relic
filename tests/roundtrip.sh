@@ -6,7 +6,12 @@
 # relation, and each file is imported with -I under its columns' types.  The
 # imported facts must equal the program's, compared in the text format, which
 # spells every value with its type, and writing them out again must give the
-# first file byte for byte.  The facts are built to hold what each format
+# first file byte for byte.
+#
+# Each relation is also exported with -O: in csv, tsv and json the file must
+# be the query's output byte for byte, and in dl it must load back as a
+# program holding the same relation, a column that mixes types included, and
+# export again to the same bytes.  The facts are built to hold what each format
 # treats specially: every byte value in a string, first, last, alone and
 # doubled, and the pair of a carriage return and a line feed; symbols;
 # integers at both ends of the range; and a row of no columns, which both
@@ -57,6 +62,10 @@ int(0).
 row(a, "x,y\t\"z\"\\", -1).
 row(b, "", 1).
 none().
+mixed(a).
+mixed("a").
+mixed(1).
+mixed("1").
 EOF
 
 # Each relation, the query that writes it, and the columns that read it back.
@@ -104,6 +113,42 @@ for format in csv tsv; do
 			    "the first"
 		fi
 	done
+done
+
+mkdir exported
+for format in csv tsv json; do
+	for relation in $relations; do
+		name=${relation%%:*}
+		rest=${relation#*:}
+		query=${rest%%:*}
+
+		"$RELIC" -s -F "$format" -q "$query" "facts.dl" \
+		    > "$name.$format.query"
+		"$RELIC" -s -O "exported/$name.$format" "facts.dl"
+		if ! cmp -s "$name.$format.query" "exported/$name.$format"; then
+			fail "$name exported as $format differs from its query's" \
+			    "output"
+		fi
+	done
+done
+
+for relation in $relations "mixed:mixed(X)?:"; do
+	name=${relation%%:*}
+	rest=${relation#*:}
+	query=${rest%%:*}
+
+	"$RELIC" -s -O "exported/$name.dl" "facts.dl"
+	"$RELIC" -s -q "$query" "facts.dl" > "$name.text"
+	"$RELIC" -s -q "$query" "exported/$name.dl" > "$name.dl.text"
+	if ! cmp -s "$name.text" "$name.dl.text"; then
+		diff -u "$name.text" "$name.dl.text" >&2 || true
+		fail "$name loaded back from dl differs from the program's"
+	fi
+
+	"$RELIC" -s -O "dl:$name=$name.dl.again" "exported/$name.dl"
+	if ! cmp -s "exported/$name.dl" "$name.dl.again"; then
+		fail "$name exported again as dl differs from the first"
+	fi
 done
 
 # The comparison must have compared something: every byte value in four

@@ -42,6 +42,8 @@
 #include "harness.h"
 
 #define	SCENARIO_ARGUMENTS	"a missing argument is reported, not followed"
+#define	SCENARIO_ARITIES \
+	"a name's arities are those the program named it at"
 #define	SCENARIO_CLASSES	"every diagnostic reaches the callback"
 #define	SCENARIO_COLLECT	"a collected result is the stream, kept"
 #define	SCENARIO_OWN_BYTES	"a result holds its own bytes"
@@ -232,6 +234,7 @@ static bool	 result_reads(const relic_result_t *result,
 static bool	 rows_are(const own_row_t rows[OWN_ROWS],
 		    const own_row_t expected[OWN_ROWS]);
 static void	 a_missing_argument_is_reported_not_followed(void);
+static void	 a_names_arities_are_those_the_program_named_it_at(void);
 static void	 a_prepared_query_runs_over_the_program_as_it_stands(void);
 static void	 a_refusal_does_not_hide_why_an_operation_failed(void);
 static void	 a_value_holds_only_what_its_type_can(void);
@@ -382,6 +385,7 @@ reenter_every_way(reentry_t *reentry)
 	};
 	relic_stats_t stats;
 	relic_value_t symbol;
+	uint64_t arities;
 	size_t inner_rows;
 	FILE *stream;
 
@@ -427,6 +431,8 @@ reenter_every_way(reentry_t *reentry)
 	    "relic_value_symbol()");
 	refused(reentry, relic_value_string(reentry->ctx, "z", 1, &symbol),
 	    "relic_value_string()");
+	refused(reentry, relic_predicate_arities(reentry->ctx, "c", &arities),
+	    "relic_predicate_arities()");
 
 	relic_diag_set(reentry->ctx, NULL, NULL);
 	relic_explain_set(reentry->ctx, NULL, NULL);
@@ -1920,6 +1926,7 @@ a_missing_argument_is_reported_not_followed(void)
 {
 	first_error_t first;
 	relic_value_t value;
+	uint64_t arities;
 	relic_query_t *query;
 	relic_t *ctx;
 	size_t rows;
@@ -1963,6 +1970,20 @@ a_missing_argument_is_reported_not_followed(void)
 	    "a value needs its bytes and somewhere to be stored");
 
 	bzero(&first, sizeof(first));
+	status = relic_predicate_arities(ctx, NULL, &arities);
+	check_argument_refused(ctx, &first, status,
+	    "relic_predicate_arities() with no name",
+	    "the arities of a predicate need its name and somewhere to put "
+	    "them");
+
+	bzero(&first, sizeof(first));
+	status = relic_predicate_arities(ctx, "p", NULL);
+	check_argument_refused(ctx, &first, status,
+	    "relic_predicate_arities() with nowhere to put them",
+	    "the arities of a predicate need its name and somewhere to put "
+	    "them");
+
+	bzero(&first, sizeof(first));
 	status = relic_load_string(ctx, NULL, "p(1).\n");
 	check(status == 0, SCENARIO_ARGUMENTS,
 	    "after the refusals a program loads without a name");
@@ -1975,6 +1996,94 @@ a_missing_argument_is_reported_not_followed(void)
 	    SCENARIO_ARGUMENTS, "after the refusals the program answers");
 
 	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
+/*
+ * The arities of a name are those at which a fact, a rule, an import or a
+ * query has named it, and only those: a predicate the Magic rewrite
+ * generates while it answers a query is the library's and never one of
+ * them, and a name nothing has named has none.  A rule's predicates are
+ * named when the program is checked, which the call does first, and fails
+ * with the check, leaving the caller's set as it was.
+ */
+static void
+a_names_arities_are_those_the_program_named_it_at(void)
+{
+	const relic_import_t import = {
+		.predicate = "imported",
+		.columns = (const enum relic_column[]){ RELIC_COLUMN_SYMBOL },
+		.column_count = 1,
+		.format = RELIC_FORMAT_TSV,
+	};
+	relic_query_t *query;
+	diag_log_t log;
+	relic_t *ctx;
+	uint64_t arities;
+	size_t rows;
+	int status;
+
+	ctx = context_with("edge(a, b).\nedge(a, b, c).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- path(X, Y), edge(Y, Z).\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+
+	status = relic_predicate_arities(ctx, "edge", &arities);
+	checkf(status == 0 && arities == ((UINT64_C(1) << 2) |
+	    (UINT64_C(1) << 3)), SCENARIO_ARITIES,
+	    "edge should have arities 2 and 3, not %#jx", (uintmax_t)arities);
+
+	status = relic_predicate_arities(ctx, "path", &arities);
+	checkf(status == 0 && arities == UINT64_C(1) << 2, SCENARIO_ARITIES,
+	    "path, named by its rules, should have arity 2, not %#jx",
+	    (uintmax_t)arities);
+
+	query = relic_query_prepare(ctx, NULL, "path(a, X)?");
+	rows = 0;
+	if (query != NULL)
+		(void)relic_query_run(ctx, query, count_rows, &rows);
+	relic_query_destroy(query);
+	status = relic_predicate_arities(ctx, "path", &arities);
+	checkf(rows == 1 && status == 0 && arities == UINT64_C(1) << 2,
+	    SCENARIO_ARITIES, "after its rewrite path should still have "
+	    "arity 2 alone, not %#jx", (uintmax_t)arities);
+
+	status = relic_predicate_arities(ctx, "path$bf", &arities);
+	checkf(status == 0 && arities == 0, SCENARIO_ARITIES,
+	    "a predicate only the rewrite generated should have no arity, "
+	    "not %#jx", (uintmax_t)arities);
+
+	query = relic_query_prepare(ctx, NULL, "asked(X, Y, Z, W)?");
+	relic_query_destroy(query);
+	status = relic_predicate_arities(ctx, "asked", &arities);
+	checkf(status == 0 && arities == UINT64_C(1) << 4, SCENARIO_ARITIES,
+	    "a name only a query named should have its arity, not %#jx",
+	    (uintmax_t)arities);
+
+	(void)relic_import_path(ctx, "/dev/null", &import);
+	status = relic_predicate_arities(ctx, "imported", &arities);
+	checkf(status == 0 && arities == UINT64_C(1) << 1, SCENARIO_ARITIES,
+	    "a name an empty import named should have its arity, not %#jx",
+	    (uintmax_t)arities);
+
+	arities = UINT64_MAX;
+	status = relic_predicate_arities(ctx, "unnamed", &arities);
+	checkf(status == 0 && arities == 0, SCENARIO_ARITIES,
+	    "a name nothing named should have no arity, not %#jx",
+	    (uintmax_t)arities);
+
+	relic_destroy(ctx);
+
+	ctx = context_with("bad(X) :- edge(Y, Y).\n", NULL, &log);
+	if (ctx == NULL)
+		return;
+	arities = UINT64_MAX;
+	status = relic_predicate_arities(ctx, "bad", &arities);
+	checkf(status == -1 && arities == UINT64_MAX, SCENARIO_ARITIES,
+	    "a program that fails its check should fail the call and leave "
+	    "the arities untouched, not return %d with %#jx", status,
+	    (uintmax_t)arities);
 	relic_destroy(ctx);
 }
 
@@ -2093,6 +2202,7 @@ main(void)
 	a_result_copies_each_byte_string_once();
 	a_value_compared_is_reported_as_an_operation();
 	a_missing_argument_is_reported_not_followed();
+	a_names_arities_are_those_the_program_named_it_at();
 	a_prepared_query_runs_over_the_program_as_it_stands();
 	a_context_takes_at_most_the_maximum_threads();
 

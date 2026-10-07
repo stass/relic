@@ -109,8 +109,8 @@ c
 
 A query can also be written in the program itself, ending in `?` as above,
 and `relic -i graph.dl` answers queries typed one per line. `relic(1)`
-describes the language, the options, and the import of facts from CSV and
-TSV tables.
+describes the language, the options, the import of facts from CSV and TSV
+tables, and the export of relations.
 
 ## Data files
 
@@ -130,7 +130,16 @@ c
 ```
 
 `-F` and `-o` choose the format of a query's answer and the file it is
-written to.
+written to. `-O` writes a whole relation to a file named the same way, once
+the queries have run: `-O path.tsv` as a table that `-T` and `-I` read back,
+and `-O path.dl` as facts that a later run loads as a program, every value
+keeping its type:
+
+```sh
+$ relic -O path.dl graph.dl && relic -q 'path(a, X)?' path.dl
+b
+c
+```
 
 ## Embedding
 

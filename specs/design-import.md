@@ -952,6 +952,6 @@ plans, rows and diagnostics, in the same order.
   over as a stream of its own. `fmemopen(3)` serves a table that is not
   empty; it refuses a buffer of no bytes on some systems, and `funopen(3)`
   or `fopencookie(3)` serves any table.
-* **Writing tables.** Writing a relation as a table is architecture section
-  69's relation export. A query written with `-F csv` or `-F tsv` writes
-  one, and this design reads exactly that back.
+* **Writing tables.** Writing a relation as a table is `-O`, specified in
+  `specs/design-export.md`. Its csv and tsv are what a query written with
+  `-F csv` or `-F tsv` writes, and this design reads exactly that back.

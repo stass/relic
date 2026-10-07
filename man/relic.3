@@ -20,6 +20,7 @@
 .Nm relic_fact_add ,
 .Nm relic_import_file ,
 .Nm relic_import_path ,
+.Nm relic_predicate_arities ,
 .Nm relic_value_symbol ,
 .Nm relic_value_string ,
 .Nm relic_string ,
@@ -93,6 +94,12 @@ relic library
 .Fa "relic_t *ctx"
 .Fa "const char *path"
 .Fa "const relic_import_t *import"
+.Fc
+.Ft int
+.Fo relic_predicate_arities
+.Fa "relic_t *ctx"
+.Fa "const char *name"
+.Fa "uint64_t *arities"
 .Fc
 .Ft int
 .Fo relic_value_symbol
@@ -602,6 +609,27 @@ does not define; and so is an import given a
 or
 .Fa path .
 The description is borrowed for the call.
+.Pp
+A predicate is a name and an arity together.
+.Fn relic_predicate_arities
+sets
+.Fa *arities
+to the arities at which the program has a predicate named
+.Fa name :
+bit
+.Va n
+is set when a fact, a rule, an import or a query has named
+.Fa name Ns / Ns Va n ,
+in a load or an import that failed too.
+A name nothing has named sets no bit, and a predicate the library
+generates, for a query's rewrite or an aggregate, is never reported.
+It checks the program first, as every operation that uses it does, and
+fails as the check does; a
+.Dv NULL
+.Fa name
+or
+.Fa arities
+is refused.
 .Ss Evaluation
 .Fn relic_check
 validates the program: rule safety, stratification, and warnings about

@@ -1,0 +1,6 @@
+% An export of a name the program does not have is refused before
+% anything is evaluated, since it is most often misspelled.
+edge(a, b).
+edge(b, c).
+edge(x, y, z).
+path(X, Y) :- edge(X, Y).
