@@ -42,7 +42,6 @@ static uint64_t	 hash_fold(uint64_t state, uint32_t unit);
 static uint64_t	 hash_start(uint64_t seed);
 static size_t	 idprobe_empty_slot(relic_idprobe_t *probe);
 static size_t	 idtab_slot_bytes(const relic_idtab_t *table);
-static uint8_t	 idtab_tag(uint32_t hash);
 static bool	 idtab_capacity_holds(size_t capacity, size_t count,
 		    size_t added);
 static size_t	 idtab_capacity_for(const relic_idtab_t *table,
@@ -213,11 +212,10 @@ relic_grow_array_capacity(size_t capacity, size_t count)
 {
 	size_t wanted;
 
+	if (relic_grow_array_holds(capacity, count))
+		return (capacity);
 	if (count == 0)
 		count = 1;
-
-	if (count <= capacity)
-		return (capacity);
 
 	/*
 	 * Doubling from here is not representable, and no allocator could
@@ -380,18 +378,6 @@ idtab_slot_bytes(const relic_idtab_t *table)
 	return (sizeof(*table->slots) + (table->tagged ? sizeof(uint8_t) : 0));
 }
 
-/*
- * The tag of a hash: its top eight bits.  A table of at most 2^24 slots
- * chooses a slot from bits below them, so the tag and the slot are
- * independent there, and above that size they overlap and a tag passes over
- * fewer mismatches, which costs time and nothing else.
- */
-static uint8_t
-idtab_tag(uint32_t hash)
-{
-	return ((uint8_t)(hash >> 24));
-}
-
 void
 relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
     uint32_t hash)
@@ -413,7 +399,7 @@ relic_idprobe_open(relic_idprobe_t *probe, const relic_idtab_t *table,
 	probe->table = table;
 	probe->mask = table->capacity - 1;
 	probe->slot = (size_t)hash & probe->mask;
-	probe->tag = idtab_tag(hash);
+	probe->tag = relic_idtab_tag(hash);
 }
 
 bool

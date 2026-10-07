@@ -54,7 +54,10 @@
  * where whatever refuses it reports itself.
  */
 
+typedef struct relic_candidates_array relic_candidates_array_t;
 typedef struct relic_candidates_growth relic_candidates_growth_t;
+typedef struct relic_candidates_storage relic_candidates_storage_t;
+typedef struct relic_candidates_table relic_candidates_table_t;
 
 /*
  * What the candidate arrays are grown by: `tuples` more candidates of
@@ -68,6 +71,55 @@ struct relic_candidates_growth {
 	size_t	value_bytes;
 };
 
+/*
+ * One growable array of the candidates as a growth asks of it: its
+ * `capacity` in items of `size` bytes, the items it must hold once the
+ * growth is made, and whether the growth grows it at all.
+ */
+struct relic_candidates_array {
+	size_t	capacity;
+	size_t	needed;
+	size_t	size;
+	bool	grows;
+};
+
+/*
+ * One identifier table of the candidates as a growth asks of it: the
+ * table, and how many entries the growth adds to it.
+ */
+struct relic_candidates_table {
+	const relic_idtab_t	*table;
+	size_t			 added;
+};
+
+/*
+ * The growable arrays and the identifier tables of a worker's candidates,
+ * each named, so that a list of them is indexed by name and holds no more
+ * of them than there are.
+ */
+enum relic_candidate_array {
+	RELIC_CANDIDATE_ENTRIES,
+	RELIC_CANDIDATE_STRIPES,
+	RELIC_CANDIDATE_WORDS,
+	RELIC_CANDIDATE_VALUES,
+	RELIC_CANDIDATE_VALUE_BYTES,
+	RELIC_CANDIDATE_ARRAYS
+};
+
+enum relic_candidate_table {
+	RELIC_CANDIDATE_SCREEN,
+	RELIC_CANDIDATE_VALUE_SCREEN,
+	RELIC_CANDIDATE_TABLES
+};
+
+/*
+ * Every array and table of a worker's candidates, as a growth asks of each.
+ */
+struct relic_candidates_storage {
+	relic_candidates_array_t	arrays[RELIC_CANDIDATE_ARRAYS];
+	relic_candidates_table_t	tables[RELIC_CANDIDATE_TABLES];
+};
+
 static size_t	 array_bytes_after(size_t capacity, size_t needed,
 		    bool grows, size_t size);
 static uint32_t	 candidate_rehash(uint32_t position, void *ctx);
@@ -79,15 +131,26 @@ static size_t	 candidates_bytes_after(const relic_candidates_t *candidates,
 		    const relic_candidates_growth_t *growth);
 static int	 candidates_grow(relic_candidates_t *candidates,
 		    const relic_candidates_growth_t *growth);
+static bool	 candidates_have_room(const relic_candidates_t *candidates,
+		    const relic_candidates_growth_t *growth);
 static bool	 candidates_hold(const relic_candidates_t *candidates,
 		    size_t target, const relic_dom_t *tuple, uint16_t arity,
 		    uint64_t hash);
 static int	 candidates_mark_value(relic_candidates_t *candidates,
 		    relic_account_t *account, const relic_pending_t *pending,
 		    const char *pending_bytes, relic_dom_t *markerp);
+static void	 candidates_prefetch(const relic_candidates_t *candidates,
+		    size_t target, const uint64_t *hashes, const bool *held,
+		    size_t count);
 static int	 candidates_reserve(relic_candidates_t *candidates,
 		    relic_account_t *account,
 		    const relic_candidates_growth_t *growth);
+static relic_candidates_storage_t candidates_storage(
+		    const relic_candidates_t *candidates,
+		    const relic_candidates_growth_t *growth);
+static int	 mark_pending(relic_candidates_t *candidates,
+		    relic_account_t *account, relic_scratch_t *scratch,
+		    uint16_t arity);
 static bool	 pending_equal(const relic_candidates_t *candidates,
 		    const relic_pending_t *held, const relic_pending_t *pending,
 		    const char *pending_bytes);
@@ -95,10 +158,6 @@ static uint32_t	 pending_hash(uint64_t seed, const relic_pending_t *pending,
 		    const char *bytes);
 static const char *pending_text(const char *bytes,
 		    const relic_pending_t *pending);
-static uint32_t	 value_rehash(uint32_t position, void *ctx);
-static int	 mark_pending(relic_candidates_t *candidates,
-		    relic_account_t *account, relic_scratch_t *scratch,
-		    uint16_t arity);
 static void	 place_seed(relic_scratch_t *scratch, const relic_rule_t *rule);
 static int	 run_plan_piece(const relic_round_job_t *job,
 		    relic_worker_t *worker, const relic_round_item_t *item,
@@ -107,6 +166,7 @@ static int	 run_task(const relic_round_job_t *job, relic_worker_t *worker,
 		    size_t worker_index, relic_round_task_t *task);
 static int	 screen_batch(const relic_round_job_t *job,
 		    relic_worker_t *worker, size_t target);
+static uint32_t	 value_rehash(uint32_t position, void *ctx);
 static uint64_t	 worker_work(const relic_worker_t *worker);
 
 /*
@@ -261,6 +321,8 @@ screen_batch(const relic_round_job_t *job, relic_worker_t *worker,
 		return (-1);
 	relic_relation_screen(relation, scratch->batch, scratch->batch_count,
 	    hashes, held);
+	candidates_prefetch(&worker->candidates, target, hashes, held,
+	    scratch->batch_count);
 
 	for (i = 0; i < scratch->batch_count; i++) {
 		tuple = &scratch->batch[i * arity];
@@ -350,6 +412,9 @@ candidates_mark_value(relic_candidates_t *candidates,
 		growth.value_bytes = pending->u.text.length;
 	if (candidates_reserve(candidates, account, &growth) != 0)
 		return (-1);
+	assert(candidates->value_count < candidates->value_capacity &&
+	    candidates->value_byte_count + growth.value_bytes <=
+	    candidates->value_byte_capacity);
 
 	added = &candidates->values[candidates->value_count];
 	*added = *pending;
@@ -451,6 +516,65 @@ candidate_rehash(uint32_t position, void *ctx)
 }
 
 /*
+ * Ask for the memory the screen's probes of a batch will read, for those of
+ * its `count` tuples for target `target` that the frozen store lacks,
+ * before any of them is probed, so that their cache misses overlap rather
+ * than wait on one another as the probes, one after another, would.
+ *
+ * A probe that finds a candidate in the slot its hash selects reads three
+ * lines, each named by the one before it: the slot, with its tag beside
+ * it in the tags' own array; the entry of the candidate the slot holds;
+ * and that candidate's columns, which the comparison reads.  So the tuples
+ * are passed over three times: every tuple's slot and tag; then the entry
+ * of each slot holding a candidate of the tuple's tag; then that entry's
+ * columns.  A tuple
+ * whose slot is empty, or holds a candidate of another tag, which the probe
+ * passes over unread, takes the first pass only, as a tuple new to the
+ * worker almost always does.
+ *
+ * The passes change nothing.  A prefetch is a hint that cannot fault, and
+ * a line asked for in vain -- a candidate of the tuple's tag holding other
+ * columns, a slot a growth made by the batch's own additions has moved,
+ * or, for a candidate of no columns, the place just past the last
+ * candidate's columns -- costs only that line.
+ */
+static void
+candidates_prefetch(const relic_candidates_t *candidates, size_t target,
+    const uint64_t *hashes, const bool *held, size_t count)
+{
+	uint32_t screen_hashes[RELIC_INSERT_BATCH];
+	uint32_t positions[RELIC_INSERT_BATCH];
+	const relic_candidate_t *candidate;
+	size_t i;
+
+	assert(count <= RELIC_INSERT_BATCH);
+
+	for (i = 0; i < count; i++) {
+		screen_hashes[i] = relic_candidate_screen_hash(target,
+		    hashes[i]);
+		if (!held[i])
+			relic_idtab_prefetch(&candidates->screen,
+			    screen_hashes[i]);
+	}
+
+	for (i = 0; i < count; i++) {
+		positions[i] = RELIC_ID_NONE;
+		if (!held[i])
+			positions[i] = relic_idtab_peek(&candidates->screen,
+			    screen_hashes[i]);
+		if (positions[i] != RELIC_ID_NONE)
+			RELIC_PREFETCH(&candidates->entries[positions[i] - 1]);
+	}
+
+	for (i = 0; i < count; i++) {
+		if (positions[i] != RELIC_ID_NONE) {
+			candidate = &candidates->entries[positions[i] - 1];
+			RELIC_PREFETCH(&candidates->words[candidate->offset]);
+		}
+	}
+}
+
+/*
  * Whether the worker has gathered this tuple for this target already.
  */
 static bool
@@ -494,6 +618,9 @@ candidates_add(relic_candidates_t *candidates, relic_account_t *account,
 	growth.words = arity;
 	if (candidates_reserve(candidates, account, &growth) != 0)
 		return (-1);
+	assert(candidates->count < candidates->capacity &&
+	    candidates->count < candidates->stripe_capacity &&
+	    candidates->word_count + arity <= candidates->word_capacity);
 
 	candidate = &candidates->entries[candidates->count];
 	candidate->offset = candidates->word_count;
@@ -534,9 +661,13 @@ candidates_reserve(relic_candidates_t *candidates, relic_account_t *account,
 	size_t grown;
 	int status;
 
-	projected = candidates_bytes_after(candidates, growth);
-	if (projected == candidates->charged)
+	if (candidates_have_room(candidates, growth)) {
+		assert(candidates_bytes_after(candidates, growth) ==
+		    candidates->charged);
 		return (0);
+	}
+
+	projected = candidates_bytes_after(candidates, growth);
 	if (projected == SIZE_MAX)
 		return (-1);
 
@@ -556,10 +687,104 @@ candidates_reserve(relic_candidates_t *candidates, relic_account_t *account,
 }
 
 /*
+ * Every array and table of the candidates, as `growth` asks of each.  This
+ * is the one list of them: what they hold, what they would hold once
+ * grown and whether any must grow are each computed from it, and what
+ * candidates_grow() grows is checked against it.
+ */
+static relic_candidates_storage_t
+candidates_storage(const relic_candidates_t *candidates,
+    const relic_candidates_growth_t *growth)
+{
+	relic_candidates_storage_t storage = {
+		.arrays = {
+			[RELIC_CANDIDATE_ENTRIES] = {
+				.capacity = candidates->capacity,
+				.needed = candidates->count + growth->tuples,
+				.size = sizeof(*candidates->entries),
+				.grows = growth->tuples > 0,
+			},
+			[RELIC_CANDIDATE_STRIPES] = {
+				.capacity = candidates->stripe_capacity,
+				.needed = candidates->count + growth->tuples,
+				.size = sizeof(*candidates->stripes),
+				.grows = growth->tuples > 0,
+			},
+			[RELIC_CANDIDATE_WORDS] = {
+				.capacity = candidates->word_capacity,
+				.needed = candidates->word_count + growth->words,
+				.size = sizeof(*candidates->words),
+				.grows = growth->tuples > 0,
+			},
+			[RELIC_CANDIDATE_VALUES] = {
+				.capacity = candidates->value_capacity,
+				.needed = candidates->value_count +
+				    growth->values,
+				.size = sizeof(*candidates->values),
+				.grows = growth->values > 0,
+			},
+			[RELIC_CANDIDATE_VALUE_BYTES] = {
+				.capacity = candidates->value_byte_capacity,
+				.needed = candidates->value_byte_count +
+				    growth->value_bytes,
+				.size = 1,
+				.grows = growth->value_bytes > 0,
+			},
+		},
+		.tables = {
+			[RELIC_CANDIDATE_SCREEN] = {
+				.table = &candidates->screen,
+				.added = growth->tuples,
+			},
+			[RELIC_CANDIDATE_VALUE_SCREEN] = {
+				.table = &candidates->value_screen,
+				.added = growth->values,
+			},
+		},
+	};
+
+	return (storage);
+}
+
+/*
+ * Whether the candidate arrays already hold what `growth` adds, so that
+ * candidates_grow() would grow none of them and nothing is charged: each
+ * array that grows holds the items it needs, and each table has room for
+ * its entries.  It compares counts with capacities, which is cheaper than
+ * projecting bytes through each array's growth policy; most candidates are
+ * added to arrays that already hold them.
+ */
+static bool
+candidates_have_room(const relic_candidates_t *candidates,
+    const relic_candidates_growth_t *growth)
+{
+	const relic_candidates_array_t *array;
+	const relic_candidates_table_t *table;
+	relic_candidates_storage_t storage;
+	size_t i;
+
+	storage = candidates_storage(candidates, growth);
+	for (i = 0; i < RELIC_CANDIDATE_ARRAYS; i++) {
+		array = &storage.arrays[i];
+		if (array->grows &&
+		    !relic_grow_array_holds(array->capacity, array->needed))
+			return (false);
+	}
+	for (i = 0; i < RELIC_CANDIDATE_TABLES; i++) {
+		table = &storage.tables[i];
+		if (!relic_idtab_has_room(table->table, table->added))
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
  * Grow the candidate arrays by `growth`: those of the candidates when it
  * adds a candidate, whatever its arity, those of the pending values when it
- * adds a value, and the values' bytes when it adds a string's.  Whatever a
- * failed growth managed is kept, and counted by the caller.
+ * adds a value, and the values' bytes when it adds a string's, after which
+ * every array and table candidates_storage() names has room for it.
+ * Whatever a failed growth managed is kept, and counted by the caller.
  */
 static int
 candidates_grow(relic_candidates_t *candidates,
@@ -623,68 +848,68 @@ candidates_grow(relic_candidates_t *candidates,
 		candidates->value_bytes = bytes;
 	}
 
+	assert(candidates_have_room(candidates, growth));
+
 	return (0);
 }
 
 /*
- * The bytes the candidate arrays hold.
+ * The bytes the candidate arrays and tables hold: what they would hold
+ * once grown by nothing.
  */
 static size_t
 candidates_bytes(const relic_candidates_t *candidates)
 {
-	return (candidates->capacity * sizeof(*candidates->entries) +
-	    candidates->stripe_capacity * sizeof(*candidates->stripes) +
-	    candidates->word_capacity * sizeof(*candidates->words) +
-	    relic_idtab_bytes(&candidates->screen) +
-	    candidates->value_capacity * sizeof(*candidates->values) +
-	    relic_idtab_bytes(&candidates->value_screen) +
-	    candidates->value_byte_capacity);
+	const relic_candidates_growth_t none = { 0 };
+	relic_candidates_storage_t storage;
+	size_t bytes;
+	size_t i;
+
+	storage = candidates_storage(candidates, &none);
+
+	bytes = 0;
+	for (i = 0; i < RELIC_CANDIDATE_ARRAYS; i++)
+		bytes += storage.arrays[i].capacity * storage.arrays[i].size;
+	for (i = 0; i < RELIC_CANDIDATE_TABLES; i++)
+		bytes += relic_idtab_bytes(storage.tables[i].table);
+
+	return (bytes);
 }
 
 /*
- * The bytes the candidate arrays would hold once grown by `growth`, asked
- * of the growth policies they grow by, or SIZE_MAX when that growth could
- * not happen.  Which arrays grow is what candidates_grow() grows.
+ * The bytes the candidate arrays and tables would hold once grown by
+ * `growth`, asked of the growth policies they grow by: SIZE_MAX when an
+ * array could not grow, and for a table that could not, its present bytes
+ * (relic_idtab_bytes_after_reserve()), which a table bounded by
+ * RELIC_TUPLE_MAX entries never meets.
  */
 static size_t
 candidates_bytes_after(const relic_candidates_t *candidates,
     const relic_candidates_growth_t *growth)
 {
-	bool tuples;
-	bool values;
-	bool value_bytes;
+	const relic_candidates_array_t *array;
+	const relic_candidates_table_t *table;
+	relic_candidates_storage_t storage;
 	size_t bytes;
+	size_t i;
 
-	tuples = growth->tuples > 0;
-	values = growth->values > 0;
-	value_bytes = growth->value_bytes > 0;
+	storage = candidates_storage(candidates, growth);
 
-	bytes = array_bytes_after(candidates->capacity,
-	    candidates->count + growth->tuples, tuples,
-	    sizeof(*candidates->entries));
-	bytes = relic_saturating_sum(bytes,
-	    array_bytes_after(candidates->stripe_capacity,
-	    candidates->count + growth->tuples, tuples,
-	    sizeof(*candidates->stripes)));
-	bytes = relic_saturating_sum(bytes,
-	    array_bytes_after(candidates->word_capacity,
-	    candidates->word_count + growth->words, tuples,
-	    sizeof(*candidates->words)));
-	bytes = relic_saturating_sum(bytes,
-	    relic_idtab_bytes_after_reserve(&candidates->screen,
-	    growth->tuples));
-	bytes = relic_saturating_sum(bytes,
-	    array_bytes_after(candidates->value_capacity,
-	    candidates->value_count + growth->values, values,
-	    sizeof(*candidates->values)));
-	bytes = relic_saturating_sum(bytes,
-	    relic_idtab_bytes_after_reserve(&candidates->value_screen,
-	    growth->values));
+	bytes = 0;
+	for (i = 0; i < RELIC_CANDIDATE_ARRAYS; i++) {
+		array = &storage.arrays[i];
+		bytes = relic_saturating_sum(bytes,
+		    array_bytes_after(array->capacity, array->needed,
+		    array->grows, array->size));
+	}
+	for (i = 0; i < RELIC_CANDIDATE_TABLES; i++) {
+		table = &storage.tables[i];
+		bytes = relic_saturating_sum(bytes,
+		    relic_idtab_bytes_after_reserve(table->table,
+		    table->added));
+	}
 
-	return (relic_saturating_sum(bytes,
-	    array_bytes_after(candidates->value_byte_capacity,
-	    candidates->value_byte_count + growth->value_bytes, value_bytes,
-	    1)));
+	return (bytes);
 }
 
 /*

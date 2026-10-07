@@ -200,17 +200,23 @@ makes, so that their misses overlap:
 1. for each, prefetch the screen slot its screen hash selects
    (`relic_idtab_prefetch()`), as `relic_relation_insert_batch()` does
    for the canonical index;
-2. for each whose slot is occupied, read the position the slot holds
-   (`relic_idtab_peek()`) and prefetch that candidate's entry;
+2. for each whose slot holds a candidate of its tag, read the position
+   the slot holds (`relic_idtab_peek()`, which in a tagged table gives
+   nothing for a slot of another tag) and prefetch that candidate's
+   entry;
 3. for each such candidate, prefetch its columns at the entry's offset,
    which is the comparison a hit makes;
 4. probe, and add what the screen lacks.
 
 Three passes over at most 64 tuples, each a loop over addresses already
-computed, and the fourth is today's loop. A tuple whose slot is empty,
-which a new tuple's usually is, takes the first pass only. The passes
-read nothing the probe does not read and change nothing; a prefetch is a
-hint, and a wrong one costs a line.
+computed, and the fourth is today's loop. A tuple whose slot is empty
+or holds a candidate of another tag, which the probe passes over unread,
+takes the first pass only, as a new tuple almost always does: a slot
+taken at all, which at the screen's loads of three eighths to three
+quarters is a third to a half of them, is taken by another tag 255
+times in 256. The passes read nothing the probe
+does not read and change nothing; a prefetch is a hint, and a wrong one
+costs a line.
 
 A tuple the screen lacks is placed by `relic_idtab_place()`, which walks
 the probe sequence again from the hash. The walk the failed probe just
@@ -220,16 +226,22 @@ know a growth invalidated its cursor, and here a growth can come between
 the probe and the place; the table is hot by then and the second walk
 costs a few per cent, which is not worth an exception to that rule.
 
-**What the measurement decides.** The second and third passes are the
-ones the store does not need, since its slot names the tuple's columns
-directly, and they exist because a candidate's columns are reached
-through its entry. If, with the passes in, a hit still waits on the
-entry, the candidate buffer is laid out as the store is: one array of
+**Entries and columns stay apart.** The second and third passes are
+the ones the store does not need, since its slot names the tuple's
+columns directly; they exist because a candidate's columns are reached
+through its entry. A buffer laid out as the store is -- one array of
 records of the round's widest arity, header and columns together, so
-that a position names a record by multiplication and the screen's hit is
-two misses like the store's. That costs a round whose targets differ in
-arity the difference per candidate, and is done only if the first
-measurement of section 10 asks for it.
+that a position names a record by multiplication -- would make a hit two
+misses like the store's, and would cost a round whose targets differ in
+arity the difference per candidate. It is not built. The second pass
+asks for the entry a pass ahead of the probe, overlapping its miss with
+the batch's others, which is the wait the record would remove. On round
+1 of `tc-cyclic`, interleaved and the fastest of nine runs each, the
+first pass alone takes the task phase to 0.90 of its unprefetched time
+and the three passes to 0.86. How much of what remains a hit spends
+waiting on its entry that measurement does not separate; a profile that
+shows the probe waiting on entries is what reopens the record
+(section 11).
 
 ---
 
@@ -432,11 +444,11 @@ machine, against the step before it; the figures of section 2 are the
 baseline for the first.
 
 1. **The screen probed in passes, and the fast path** (sections 4 and
-   5's last paragraph). `lib/task.c` alone. Gate: identity; round 1 of `tc-cyclic`'s
-   task phase faster by the prototype's margin or more; no workload of
-   `bench/run.sh` slower at one thread without `-X parallel`, since the
-   serial path does not run this code. Decides whether section 4's
-   record layout is built.
+   5's last paragraph). `lib/task.c`, and the identifier table's peek,
+   which passes over a slot of another tag. Gate: identity; round 1 of
+   `tc-cyclic`'s task phase faster by the prototype's margin or more; no
+   workload of `bench/run.sh` slower at one thread without `-X parallel`,
+   since the serial path does not run this code.
 2. **Buffers sized once** (section 5). The history's `inserted`, the
    reservation, the decline. Gate: identity; the allocation-failure
    sweep over the new refusal; `chain-closure` under `-X parallel` at
@@ -497,6 +509,10 @@ what each is measured against; step 4 depends on all three.
   derivations of `tc-cyclic`, and a screen probe before each of those
   would cost more than it saves on the forty-ninth. The store is asked
   first, and the screen only when it says no.
+* **Candidates laid out as the store's records.** Section 4: the passes
+  ask for the entry a hit reads before the columns ahead of the probe,
+  and a round whose targets differ in arity would pay the widest for
+  every candidate.
 * **A screen shared by the workers.** It is the concurrent table
   `specs/design-parallel.md` section 4.3 keeps out.
 * **A counter for what this changes.** The screen's moves, the probes

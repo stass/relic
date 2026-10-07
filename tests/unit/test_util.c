@@ -1387,6 +1387,20 @@ a_tagged_probe_passes_over_other_tags(void)
 		    "handed %zu candidates, not %zu", kind, expected,
 		    candidates_for(&table, absent));
 
+		/*
+		 * Every hash selects the slot the first identifier took, so a
+		 * peek gives that identifier where a probe would hand it over
+		 * there, and nothing where the probe would pass it by.
+		 */
+		checkf(relic_idtab_peek(&table, hashes[0]) == 1,
+		    SCENARIO_TAGS, "%s peek should give the identifier "
+		    "placed under its own hash", kind);
+		expected = tagged ? RELIC_ID_NONE : 1;
+		checkf(relic_idtab_peek(&table, hashes[CHOSEN]) == expected &&
+		    relic_idtab_peek(&table, absent) == expected,
+		    SCENARIO_TAGS, "%s peek for another tag should give %zu",
+		    kind, expected);
+
 		relic_idtab_reset(&table);
 	}
 }

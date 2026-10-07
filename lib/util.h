@@ -141,6 +141,18 @@ void	*relic_grow_array_stepwise(void *items, size_t *capacity, size_t held,
 	    size_t requests, size_t per_request, size_t item_size);
 
 /*
+ * Whether a growable array of `capacity` items holds `count` items, so that
+ * relic_grow_array() would leave it as it is.  An array of no items holds
+ * none: asked for none, it grows to hold one.  Inline, since an owner asks
+ * it of every item it adds.
+ */
+static inline bool
+relic_grow_array_holds(size_t capacity, size_t count)
+{
+	return (capacity > 0 && count <= capacity);
+}
+
+/*
  * The sum of two sizes, and `count` items of `size` bytes, or SIZE_MAX when
  * the result is more than a size_t holds.  A projection of storage built from
  * them says "more than anything could hold" rather than wrapping to a small
@@ -418,14 +430,27 @@ size_t	 relic_idtab_bytes_replaced_by_reserve(const relic_idtab_t *table,
 #endif
 
 /*
+ * The tag of a hash: its top eight bits.  A table of at most 2^24 slots
+ * chooses a slot from bits below them, so the tag and the slot are
+ * independent there, and above that size they overlap and a tag passes over
+ * fewer mismatches, which costs time and nothing else.
+ */
+static inline uint8_t
+relic_idtab_tag(uint32_t hash)
+{
+	return ((uint8_t)(hash >> 24));
+}
+
+/*
  * Hints for a caller about to probe many hashes, which lets their cache
  * misses overlap.  relic_idtab_prefetch() asks for the slot `hash` selects,
- * and its tag in a tagged table; relic_idtab_peek() gives the identifier in
- * that slot, RELIC_ID_NONE when it is empty, whatever hash it was placed
- * under, so that the caller can ask for the key it names too.  Neither is a
- * lookup, and neither changes anything.  A table with no capacity has no
- * slots, and neither touches one.  Both are inline because a batch calls
- * them once per tuple.
+ * and its tag in a tagged table.  relic_idtab_peek() gives the identifier
+ * in that slot when a probe for `hash` would hand it to the caller there --
+ * in a tagged table, when its tag is the hash's -- and RELIC_ID_NONE
+ * otherwise, so that the caller can ask for the key it names too, and asks
+ * for nothing a probe would pass over.  Neither is a lookup, and neither
+ * changes anything.  A table with no capacity has no slots, and neither
+ * touches one.  Both are inline because a batch calls them once per tuple.
  */
 static inline void
 relic_idtab_prefetch(const relic_idtab_t *table, uint32_t hash)
@@ -444,10 +469,16 @@ relic_idtab_prefetch(const relic_idtab_t *table, uint32_t hash)
 static inline uint32_t
 relic_idtab_peek(const relic_idtab_t *table, uint32_t hash)
 {
+	size_t slot;
+
 	if (table->capacity == 0)
 		return (RELIC_ID_NONE);
 
-	return (table->slots[hash & (table->capacity - 1)]);
+	slot = hash & (table->capacity - 1);
+	if (table->tags != NULL && table->tags[slot] != relic_idtab_tag(hash))
+		return (RELIC_ID_NONE);
+
+	return (table->slots[slot]);
 }
 
 /*

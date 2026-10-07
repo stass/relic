@@ -41,8 +41,10 @@ derives, whose task phase takes twice the serial round and whose merge
 half as long again; the merge costs 100 to 150 ns per new tuple on every
 workload. The floor is proportional to new tuples, not derivations or
 rounds. Steps 1 to 4 of the design's section 10 take it down and then
-re-measure the threshold of `specs/design-parallel.md` section 5.4; none
-is started. Its prototype found that sizing the screen before the round
+re-measure the threshold of `specs/design-parallel.md` section 5.4. Step
+1, the screen probed in passes and the fast path, is in: round 1 of
+`tc-cyclic`'s task phase at 0.86 of its time before. Steps 2 to 4 are
+not. Its prototype found that sizing the screen before the round
 removes the growth cascade only where history predicts the round, which
 excludes the round that costs most.
 
