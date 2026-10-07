@@ -48,19 +48,20 @@ grow with the tuples a round inserts.
 ## A round of fewer tasks than workers reserves for every worker
 
 [Medium, component: `lib/round.c`] A round just above
-`RELIC_PARALLEL_MIN_WORK` is cut into pieces of `RELIC_CHUNK_WORK`, one
-or two below 12 288, fewer than a pool of sixteen has workers. Its
-candidate buffers are still reserved as twice an even share for every
-worker of the pool (`worker_share()`), so the round charges twice what it
-expects, and the one or two workers that run its tasks hold room for an
-eighth of it each and grow from there through the cascade the reservation
-exists to avoid. A worker cannot know beforehand which tasks it will
-claim, so the remedy is not a smaller share for some: either cut every
-shared round into at least as many pieces as the pool has workers, which
-the threshold and the piece size would then have to agree on, or reserve
-each worker's share as it claims its first task. Measure the chains of
-six thousand edges, whose shared rounds are mostly of this kind, before
-and after.
+`RELIC_PARALLEL_MIN_WORK` is cut into pieces of `RELIC_CHUNK_WORK`, a
+quarter of the threshold, so a round of one item below 32 000 has fewer
+pieces than a pool of sixteen has workers. Its candidate buffers are still
+reserved as twice an even share for every worker of the pool
+(`worker_share()`), so the round charges twice what it expects, and the
+few workers that run its tasks hold room for an eighth of it each and grow
+from there through the cascade the reservation exists to avoid. A worker
+cannot know beforehand which tasks it will claim, so the remedy is not a
+smaller share for some: either cut every shared round into at least as
+many pieces as the pool has workers, or reserve each worker's share as it
+claims its first task. Measure the chains of six thousand edges, whose
+shared rounds are mostly of this kind, before and after, and on an idle
+machine compare the threshold at 4 000 with 8 000, which a loaded one
+could not separate.
 
 ## A first round is estimated at its view
 

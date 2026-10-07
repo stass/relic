@@ -382,9 +382,19 @@ for nothing. Enough chunks that a worker which draws a heavy one -- a key
 held by a thousand tuples, a node of high degree -- is balanced by the
 others drawing several light ones, and few enough that claiming and
 bookkeeping stay a small fraction of a chunk's work. Both constants are
-constants of performance alone, measured on `tc-cyclic` and `cspa` in
-section 15; correctness does not depend on how a range is cut, only on
-the chunks being contiguous and in order.
+constants of performance alone; correctness does not depend on how a
+range is cut, only on the chunks being contiguous and in order.
+`RELIC_CHUNK_WORK` is a quarter of the threshold of section 5.4, so that
+a round just past the threshold is cut into four chunks and runs on
+several workers rather than one; the two constants move together. With
+the threshold at 8 000, measured at sixteen threads, the fastest of
+several runs each, chunks of 2 048 take a chain of six thousand edges
+to 0.8 of its time with chunks of 4 096, in its closure and in its
+right-recursive form; at four threads to 0.93 and 0.96. `tc-cyclic`,
+`cspa` and `dist/3` are unchanged at either. Chunks of 1 024 make the
+chains a tenth faster again at sixteen threads, and `tc-cyclic`'s time
+grow by a sixth; the larger chunk keeps `tc-cyclic`, the workload section
+15's gates measure, where it was.
 
 The round's tasks are enumerated into the **task array** before the job is
 published, in serial order: item by item, chunk by chunk. The array
@@ -560,16 +570,19 @@ that inserts most of what it derives needs to repay the pool, since the
 merge hashes each of its new tuples again, at the cost per new tuple
 that `specs/design-deferral-cost.md` sets out, shared among the threads
 by section 6.3. Measured at sixteen threads, the fastest of several runs
-each, the threshold at 8 000 takes a chain of six thousand edges from
-6.2 s on one thread to 3.9 s in its closure, and from 7.5 s to 4.7 s in
-its right-recursive form; a threshold of 65 536 shares none of their
-rounds. In the same sweep it takes `tc-cyclic` to 0.43 s, where 65 536,
-which leaves the base pass and the recursive rule's first round on the
-calling thread, reaches 0.58 s; `cspa` is the same under either. At 4
-000 the chains are slower than at 8 000, their smallest shared rounds
-paying a barrier for little, and at 16 000 they give back most of their
-gain. At two and four threads the chains gain as well and `tc-cyclic` is
-unchanged within the noise of a loaded machine. The threshold is a
+each, with chunks of 2 048 units, the threshold at 8 000 takes a chain
+of six thousand edges from 6.2 s on one thread to 3.1 s in its closure,
+and from 7.5 s to 4.0 s in its right-recursive form; a threshold of
+65 536 shares none of their rounds. It takes `tc-cyclic` to 0.44 s,
+where 65 536, which leaves the base pass and the recursive rule's first
+round on the calling thread, reaches 0.58 s; `cspa` is the same under
+either. With chunks of a quarter of the threshold, 16 000 takes the
+chains back to about their one-thread time and slows the other
+workloads. 4 000 against 8 000 goes both ways: at sixteen threads the
+chains and `cspa` a ninth to a sixth faster and `tc-cyclic` and
+`dist/3` a twentieth slower; at four threads `tc-cyclic` a sixth slower,
+`dist/3` and the chains' closure slower and `cspa` faster. A machine
+loaded as this one was cannot separate the two, and 8 000 is kept. The threshold is a
 single bound on work; one weighing a round's expected new tuples beside
 its work would be measured against the cost model of
 `specs/design-deferral-cost.md` section 7.
