@@ -30,11 +30,12 @@ relic 1.0.0 (unreleased)
     query's Magic rewrite is held to a limit on its work, in proportion to
     the program unless set; a rewrite that outgrows it is abandoned with a
     warning, and the query answered from the whole program.
-  * The tool: answers in text, CSV, TSV or JSON; facts imported from CSV
-    and TSV tables with declared column types; an interactive mode with
-    line editing where libedit is present, where control-C stops the query
-    running and returns to the prompt; the plan of every evaluation with -e
-    and its counters with -X stats.
+  * The tool: answers in text, CSV, TSV or JSON; facts imported from CSV and
+    TSV tables, -I edge.tsv naming its predicate and format by its file name
+    and -T edge:symbol,symbol declaring the predicate's column types once;
+    an interactive mode with line editing where libedit is present, where
+    control-C stops the query running and returns to the prompt; the plan of
+    every evaluation with -e and its counters with -X stats.
   * The library: one header, <relic.h>, a pkg-config module, librelic, and
     only relic_ symbols exported.  A failed call returns -1 or NULL, and an
     operation on a context explains its failure through a diagnostic

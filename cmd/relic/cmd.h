@@ -222,20 +222,37 @@ int	repl_run(invocation_t *invocation, output_t *output,
  */
 extern volatile sig_atomic_t repl_interrupted;
 
+typedef struct column_types column_types_t;
 typedef struct import_operand import_operand_t;
+
+/*
+ * One -T operand, parsed: the predicate whose imports take the columns, and
+ * its `column_count` columns.  `operand` is the argument as given and
+ * points into argv; `predicate` and `columns` are allocated and belong to
+ * the operand.
+ */
+struct column_types {
+	const char		*operand;
+	char			*predicate;
+	enum relic_column	*columns;
+	size_t			 column_count;
+};
 
 /*
  * One -I operand, parsed: the import it describes and the storage that
  * description points into.  `operand` is the argument as given and `path`
- * the part after its first `=`; both point into argv.  `predicate` and
- * `columns` are allocated and belong to the operand.
+ * the table's path, the whole operand or the part after its first `=`; both
+ * point into argv.  `predicate` is allocated and belongs to the operand.
+ * `own_columns` is the column list the operand gives, allocated and the
+ * operand's, or NULL when it gives none and takes them from its
+ * predicate's -T, which `import.columns` then borrows from.
  */
 struct import_operand {
 	relic_import_t		 import;
 	const char		*operand;
 	const char		*path;
 	char			*predicate;
-	enum relic_column	*columns;
+	enum relic_column	*own_columns;
 };
 
 /*
@@ -251,17 +268,30 @@ enum import_parse {
 /*
  * cmd/relic/import.c
  *
- * import_operand_parse() parses a -I argument into *parsed, or reports why
- * it could not, leaving nothing to free.  import_operand_free() releases
- * what a parse allocated.
+ * import_operand_parse() parses a -I argument into *parsed, and
+ * column_types_parse() a -T argument, or each reports why it could not,
+ * leaving nothing to free.  import_operand_free() and column_types_free()
+ * release what a parse allocated.
+ *
+ * import_operands_resolve() completes every import, once the command line
+ * is read, with the columns of its predicate's -T when it lists none, and
+ * reports, as a usage error, an import with no columns, a predicate given
+ * a second -T, and one given lists of columns whose kept types differ.
+ * The imports borrow from the column types, which must outlive them.
  *
  * import_operand_reads_stdin() is whether the import's path is `-`, the
  * spelling that claims standard input.
  */
 enum import_parse import_operand_parse(const char *program_name,
 	    const char *operand, import_operand_t *parsed);
+enum import_parse column_types_parse(const char *program_name,
+	    const char *operand, column_types_t *parsed);
+int	import_operands_resolve(const char *program_name,
+	    import_operand_t *imports, size_t import_count,
+	    const column_types_t *types, size_t type_count);
 bool	import_operand_reads_stdin(const import_operand_t *parsed);
 void	import_operand_free(import_operand_t *parsed);
+void	column_types_free(column_types_t *parsed);
 
 typedef struct line_reader line_reader_t;
 

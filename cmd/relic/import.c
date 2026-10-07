@@ -16,19 +16,32 @@
 #include "compat.h"
 
 /*
- * The -I operand: one import, spelled
+ * The -I and -T operands.  An import is spelled either as a path alone,
+ * whose file name gives the format and the predicate,
  *
- *	format[,header]:predicate:column[,column...]=path
+ *	path
  *
- * and parsed into the relic_import_t the library takes.  The words are the
- * tool's spelling; the library has none of its own.  The path is everything
- * after the first `=`, and nothing before that `=` can hold one, so a path
- * may.  A malformed operand is a usage error, as an unknown -F format is.
+ * or with a head that says what a path cannot,
+ *
+ *	format[,header]:predicate[:column[,column...]]=path
+ *
+ * and a predicate's column types are spelled
+ *
+ *	predicate:column[,column...]
+ *
+ * An import that lists no columns takes those of its predicate's -T, given
+ * anywhere on the command line, so imports are completed only once every
+ * option is known (import_operands_resolve()).  The result is the
+ * relic_import_t the library takes; the words are the tool's spelling, and
+ * the library has none of its own.  A path with a head is everything after
+ * the first `=`, and nothing in a head can hold one, so such a path may.  A
+ * malformed operand is a usage error, as an unknown -F format is.
  */
 
 /* The most columns an import may keep: the arity limit of a predicate. */
 #define	IMPORT_KEPT_MAX	32
 
+typedef struct column_list column_list_t;
 typedef struct operand_parts operand_parts_t;
 typedef struct operand_problem operand_problem_t;
 typedef struct word word_t;
@@ -43,47 +56,75 @@ struct word {
 };
 
 /*
- * An operand cut at its separators, before any part is read: the format
- * with its option, the predicate and the column list before the first `=`,
- * and the path after it.
+ * An import operand cut at its separators, before any part is read.  An
+ * operand with a head has the format with its option, the predicate and,
+ * when `has_columns`, the column list before its first `=`, and the path
+ * after it; an operand without one is all path.
  */
 struct operand_parts {
 	word_t		 format;
 	word_t		 predicate;
 	word_t		 columns;
 	const char	*path;
+	bool		 has_head;
+	bool		 has_columns;
 };
 
 /*
- * Why an operand is not an import: what is wrong, and the word of it that
- * is, when the problem is one word's.
+ * A column list, parsed: `count` types at `types`, allocated.
+ */
+struct column_list {
+	enum relic_column	*types;
+	size_t			 count;
+};
+
+/*
+ * Why an operand is not what it should be: what is wrong, and the word of
+ * it that is, when the problem is one word's.
  */
 struct operand_problem {
 	const char	*problem;
 	word_t		 word;
 };
 
+static const column_types_t *columns_of(const column_types_t *types,
+		    size_t type_count, const char *predicate);
+static bool	 first_columns_given(const import_operand_t *imports,
+		    size_t import_count, const column_types_t *declared,
+		    const char *predicate, const enum relic_column **columnsp,
+		    size_t *countp);
+static bool	 format_named(word_t name, enum relic_format *formatp);
 static bool	 is_predicate_name(word_t name);
 static enum import_parse malformed(operand_problem_t *why, const char *problem,
 		    const char *bytes, size_t length);
-static enum import_parse parse_columns(word_t list, import_operand_t *parsed,
+static enum import_parse parse_columns(word_t list, column_list_t *parsed,
 		    operand_problem_t *why);
 static enum import_parse parse_format(word_t spec, import_operand_t *parsed,
 		    operand_problem_t *why);
-static enum import_parse parse_predicate(word_t name,
+static enum import_parse parse_head(const operand_parts_t *parts,
 		    import_operand_t *parsed, operand_problem_t *why);
-static void	 report_malformed(const char *program_name,
+static enum import_parse parse_path_alone(const char *path,
+		    import_operand_t *parsed, operand_problem_t *why);
+static enum import_parse parse_predicate(word_t name, char **predicatep,
+		    operand_problem_t *why);
+static bool	 kept_types_equal(const enum relic_column *first,
+		    size_t first_count, const enum relic_column *second,
+		    size_t second_count);
+static void	 report_malformed(const char *program_name, const char *what,
 		    const char *operand, const operand_problem_t *why);
 static enum import_parse split_operand(const char *operand,
 		    operand_parts_t *parts, operand_problem_t *why);
 static bool	 word_is(word_t word, const char *text);
+static word_t	 word_after(word_t word, const char *end);
 static word_t	 word_until(const char *bytes, const char *end, char delimiter);
 
 /*
- * Parse an operand a part at a time.  Each part's parser either fills in
- * its part of `parsed` or says why it cannot, and this alone reports the
+ * Parse an -I operand: cut it at its separators, then read it as the shape
+ * it has, a path alone or a head and a path.  Each shape's parser either
+ * fills in `parsed` or says why it cannot, and this alone reports the
  * failure and releases what the parse allocated, so no path out of it
- * leaves anything behind.
+ * leaves anything behind.  An operand that lists no columns leaves them for
+ * import_operands_resolve().
  */
 enum import_parse
 import_operand_parse(const char *program_name, const char *operand,
@@ -100,18 +141,18 @@ import_operand_parse(const char *program_name, const char *operand,
 	status = split_operand(operand, &parts, &why);
 	if (status == IMPORT_PARSED) {
 		parsed->path = parts.path;
-		status = parse_format(parts.format, parsed, &why);
+		if (parts.has_head)
+			status = parse_head(&parts, parsed, &why);
+		else
+			status = parse_path_alone(parts.path, parsed, &why);
 	}
-	if (status == IMPORT_PARSED)
-		status = parse_predicate(parts.predicate, parsed, &why);
-	if (status == IMPORT_PARSED)
-		status = parse_columns(parts.columns, parsed, &why);
 
 	switch (status) {
 	case IMPORT_PARSED:
+		parsed->import.predicate = parsed->predicate;
 		return (IMPORT_PARSED);
 	case IMPORT_MALFORMED:
-		report_malformed(program_name, operand, &why);
+		report_malformed(program_name, "import", operand, &why);
 		break;
 	case IMPORT_NO_MEMORY:
 		report_error(program_name, "out of memory");
@@ -123,41 +164,307 @@ import_operand_parse(const char *program_name, const char *operand,
 }
 
 /*
- * Cut an operand into its parts.  The format and the predicate cannot hold
- * a colon, so the first two colons before the `=` are the separators, and
- * the column list runs from the second to the `=`.
+ * A head: the format and its option, the predicate and, when it lists
+ * them, the columns, which the operand then owns.
+ */
+static enum import_parse
+parse_head(const operand_parts_t *parts, import_operand_t *parsed,
+    operand_problem_t *why)
+{
+	column_list_t columns;
+	enum import_parse status;
+
+	status = parse_format(parts->format, parsed, why);
+	if (status == IMPORT_PARSED)
+		status = parse_predicate(parts->predicate, &parsed->predicate,
+		    why);
+	if (status != IMPORT_PARSED || !parts->has_columns)
+		return (status);
+
+	status = parse_columns(parts->columns, &columns, why);
+	parsed->own_columns = columns.types;
+	parsed->import.columns = columns.types;
+	parsed->import.column_count = columns.count;
+
+	return (status);
+}
+
+/*
+ * Parse a -T operand: a predicate, a colon and its column list.  Reports
+ * the failure and releases what the parse allocated, as an import's parse
+ * does.
+ */
+enum import_parse
+column_types_parse(const char *program_name, const char *operand,
+    column_types_t *parsed)
+{
+	operand_problem_t why;
+	column_list_t columns;
+	enum import_parse status;
+	const char *end;
+	word_t predicate;
+	word_t list;
+
+	bzero(parsed, sizeof(*parsed));
+	bzero(&why, sizeof(why));
+	parsed->operand = operand;
+
+	end = operand + strlen(operand);
+	predicate = word_until(operand, end, ':');
+	status = IMPORT_PARSED;
+	if (predicate.bytes + predicate.length == end)
+		status = malformed(&why, "expected predicate:columns", NULL, 0);
+	if (status == IMPORT_PARSED)
+		status = parse_predicate(predicate, &parsed->predicate, &why);
+	if (status == IMPORT_PARSED) {
+		list = word_after(predicate, end);
+		status = parse_columns(list, &columns, &why);
+		parsed->columns = columns.types;
+		parsed->column_count = columns.count;
+	}
+
+	switch (status) {
+	case IMPORT_PARSED:
+		return (IMPORT_PARSED);
+	case IMPORT_MALFORMED:
+		report_malformed(program_name, "column types", operand, &why);
+		break;
+	case IMPORT_NO_MEMORY:
+		report_error(program_name, "out of memory");
+		break;
+	}
+	column_types_free(parsed);
+
+	return (status);
+}
+
+/*
+ * Complete every import with its columns once the command line is read,
+ * and hold each predicate to one list of column types.  An import that
+ * lists no columns takes its predicate's -T, and is a usage error without
+ * one.  Every list a predicate is given, by its -T or by an import of its
+ * own, must keep columns of the same types in the same order, held to the
+ * first given, its -T when it has one: which fields a table skips is that
+ * table's layout, and may differ from one table to the next.  A predicate
+ * has one -T at most.  Returns 0, or -1 having reported the first operand
+ * at fault.  An import completed from a -T borrows its columns, which the
+ * -T owns and outlives it.
+ */
+int
+import_operands_resolve(const char *program_name, import_operand_t *imports,
+    size_t import_count, const column_types_t *types, size_t type_count)
+{
+	const enum relic_column *given;
+	const column_types_t *declared;
+	import_operand_t *import;
+	cmd_quoted_t quoted_predicate;
+	cmd_quoted_t quoted;
+	size_t given_count;
+	size_t i;
+
+	for (i = 0; i < type_count; i++) {
+		/* Only the -T before this one are searched. */
+		if (columns_of(types, i, types[i].predicate) == NULL)
+			continue;
+		report_error(program_name, "invalid column types: a second -T "
+		    "of '%s' in %s", cmd_quote(types[i].predicate,
+		    strlen(types[i].predicate), &quoted_predicate),
+		    cmd_quote(types[i].operand, strlen(types[i].operand),
+		    &quoted));
+		return (-1);
+	}
+
+	for (i = 0; i < import_count; i++) {
+		import = &imports[i];
+		declared = columns_of(types, type_count,
+		    import->import.predicate);
+		cmd_quote(import->import.predicate,
+		    strlen(import->import.predicate), &quoted_predicate);
+		cmd_quote(import->operand, strlen(import->operand), &quoted);
+
+		if (import->own_columns == NULL) {
+			if (declared == NULL) {
+				report_error(program_name, "invalid import: no "
+				    "column types for '%s' in %s",
+				    quoted_predicate.text, quoted.text);
+				return (-1);
+			}
+			import->import.columns = declared->columns;
+			import->import.column_count = declared->column_count;
+			continue;
+		}
+
+		if (first_columns_given(imports, i, declared,
+		    import->import.predicate, &given, &given_count) &&
+		    !kept_types_equal(import->own_columns,
+		    import->import.column_count, given, given_count)) {
+			report_error(program_name, "invalid import: column types "
+			    "other than those given for '%s' elsewhere in %s",
+			    quoted_predicate.text, quoted.text);
+			return (-1);
+		}
+	}
+
+	return (0);
+}
+
+/*
+ * The first of `type_count` column types that names `predicate`, or NULL.
+ */
+static const column_types_t *
+columns_of(const column_types_t *types, size_t type_count,
+    const char *predicate)
+{
+	size_t i;
+
+	for (i = 0; i < type_count; i++) {
+		if (strcmp(types[i].predicate, predicate) == 0)
+			return (&types[i]);
+	}
+
+	return (NULL);
+}
+
+/*
+ * The list of columns `predicate` was given first: those of its -T,
+ * `declared`, when it has one, and otherwise those of the first of the
+ * `import_count` imports that lists its own.  Sets *columnsp and *countp
+ * and returns true, or returns false when nothing gave it any.
+ */
+static bool
+first_columns_given(const import_operand_t *imports, size_t import_count,
+    const column_types_t *declared, const char *predicate,
+    const enum relic_column **columnsp, size_t *countp)
+{
+	size_t i;
+
+	if (declared != NULL) {
+		*columnsp = declared->columns;
+		*countp = declared->column_count;
+		return (true);
+	}
+
+	for (i = 0; i < import_count; i++) {
+		if (imports[i].own_columns == NULL ||
+		    strcmp(imports[i].import.predicate, predicate) != 0)
+			continue;
+		*columnsp = imports[i].own_columns;
+		*countp = imports[i].import.column_count;
+		return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * Whether two column lists keep columns of the same types in the same
+ * order, whatever fields either skips.
+ */
+static bool
+kept_types_equal(const enum relic_column *first, size_t first_count,
+    const enum relic_column *second, size_t second_count)
+{
+	size_t i;
+	size_t j;
+
+	i = 0;
+	j = 0;
+	for (;;) {
+		while (i < first_count && first[i] == RELIC_COLUMN_SKIP)
+			i++;
+		while (j < second_count && second[j] == RELIC_COLUMN_SKIP)
+			j++;
+		if (i == first_count || j == second_count)
+			return (i == first_count && j == second_count);
+		if (first[i] != second[j])
+			return (false);
+		i++;
+		j++;
+	}
+}
+
+/*
+ * Cut an import operand into its parts.  One with no `=` is a path alone.
+ * In a head, the format and the predicate cannot hold a colon, so the first
+ * colon ends the format, the next one, if there is one before the `=`, ends
+ * the predicate, and the column list runs from it to the `=`.
  */
 static enum import_parse
 split_operand(const char *operand, operand_parts_t *parts,
     operand_problem_t *why)
 {
 	const char *equals;
-	const char *after_format;
-	const char *after_predicate;
+	word_t rest;
+
+	bzero(parts, sizeof(*parts));
 
 	equals = strchr(operand, '=');
-	if (equals == NULL)
-		return (malformed(why, "no '=' before a path", NULL, 0));
+	if (equals == NULL) {
+		parts->path = operand;
+		return (IMPORT_PARSED);
+	}
 	if (equals[1] == '\0')
 		return (malformed(why, "empty path", NULL, 0));
-
-	parts->format = word_until(operand, equals, ':');
-	after_format = parts->format.bytes + parts->format.length;
-	if (after_format == equals)
-		return (malformed(why,
-		    "expected format:predicate:columns before '='", NULL, 0));
-
-	parts->predicate = word_until(after_format + 1, equals, ':');
-	after_predicate = parts->predicate.bytes + parts->predicate.length;
-	if (after_predicate == equals)
-		return (malformed(why,
-		    "expected format:predicate:columns before '='", NULL, 0));
-
-	parts->columns.bytes = after_predicate + 1;
-	parts->columns.length = (size_t)(equals - parts->columns.bytes);
+	parts->has_head = true;
 	parts->path = equals + 1;
 
+	parts->format = word_until(operand, equals, ':');
+	if (parts->format.bytes + parts->format.length == equals)
+		return (malformed(why, "expected format:predicate before '='",
+		    NULL, 0));
+
+	rest = word_after(parts->format, equals);
+	parts->predicate = word_until(rest.bytes, equals, ':');
+	if (parts->predicate.bytes + parts->predicate.length == equals)
+		return (IMPORT_PARSED);
+
+	parts->has_columns = true;
+	parts->columns = word_after(parts->predicate, equals);
+
 	return (IMPORT_PARSED);
+}
+
+/*
+ * A path alone: its file name, the part after the last slash, is a
+ * predicate name, a dot and an extension that names a format, and the
+ * import reads no header.  `-` has no file name, and is named with a head.
+ */
+static enum import_parse
+parse_path_alone(const char *path, import_operand_t *parsed,
+    operand_problem_t *why)
+{
+	const char *slash;
+	const char *dot;
+	word_t file_name;
+	word_t predicate;
+	word_t extension;
+
+	if (path[0] == '\0')
+		return (malformed(why, "empty path", NULL, 0));
+	if (strcmp(path, "-") == 0)
+		return (malformed(why, "standard input needs a head", NULL,
+		    0));
+
+	slash = strrchr(path, '/');
+	file_name.bytes = slash != NULL ? slash + 1 : path;
+	file_name.length = strlen(file_name.bytes);
+
+	dot = strrchr(file_name.bytes, '.');
+	if (dot == NULL)
+		return (malformed(why, "no .csv or .tsv extension, and no '=' "
+		    "before a path", NULL, 0));
+
+	extension.bytes = dot + 1;
+	extension.length = file_name.length -
+	    (size_t)(extension.bytes - file_name.bytes);
+	if (!format_named(extension, &parsed->import.format))
+		return (malformed(why, "unknown extension", extension.bytes,
+		    extension.length));
+
+	predicate.bytes = file_name.bytes;
+	predicate.length = (size_t)(dot - file_name.bytes);
+
+	return (parse_predicate(predicate, &parsed->predicate, why));
 }
 
 /*
@@ -172,20 +479,14 @@ parse_format(word_t spec, import_operand_t *parsed, operand_problem_t *why)
 	format = word_until(spec.bytes, spec.bytes + spec.length, ',');
 	if (format.length == 0)
 		return (malformed(why, "empty format", NULL, 0));
-
-	if (word_is(format, "csv"))
-		parsed->import.format = RELIC_FORMAT_CSV;
-	else if (word_is(format, "tsv"))
-		parsed->import.format = RELIC_FORMAT_TSV;
-	else
+	if (!format_named(format, &parsed->import.format))
 		return (malformed(why, "unknown format", format.bytes,
 		    format.length));
 
 	if (format.length == spec.length)
 		return (IMPORT_PARSED);
 
-	option.bytes = format.bytes + format.length + 1;
-	option.length = spec.length - format.length - 1;
+	option = word_after(format, spec.bytes + spec.length);
 	if (!word_is(option, "header"))
 		return (malformed(why, "unknown format option", option.bytes,
 		    option.length));
@@ -195,10 +496,30 @@ parse_format(word_t spec, import_operand_t *parsed, operand_problem_t *why)
 }
 
 /*
- * The predicate, copied so that it is terminated, as the library needs.
+ * Whether a word names a format, the same words in a head and as a path's
+ * extension, setting *formatp when it does.
+ */
+static bool
+format_named(word_t name, enum relic_format *formatp)
+{
+	if (word_is(name, "csv")) {
+		*formatp = RELIC_FORMAT_CSV;
+		return (true);
+	}
+	if (word_is(name, "tsv")) {
+		*formatp = RELIC_FORMAT_TSV;
+		return (true);
+	}
+
+	return (false);
+}
+
+/*
+ * The predicate, copied into *predicatep so that it is terminated, as the
+ * library needs.
  */
 static enum import_parse
-parse_predicate(word_t name, import_operand_t *parsed, operand_problem_t *why)
+parse_predicate(word_t name, char **predicatep, operand_problem_t *why)
 {
 	if (name.length == 0)
 		return (malformed(why, "empty predicate", NULL, 0));
@@ -206,22 +527,22 @@ parse_predicate(word_t name, import_operand_t *parsed, operand_problem_t *why)
 		return (malformed(why, "not a predicate name", name.bytes,
 		    name.length));
 
-	parsed->predicate = strndup(name.bytes, name.length);
-	if (parsed->predicate == NULL)
+	*predicatep = strndup(name.bytes, name.length);
+	if (*predicatep == NULL)
 		return (IMPORT_NO_MEMORY);
-	parsed->import.predicate = parsed->predicate;
 
 	return (IMPORT_PARSED);
 }
 
 /*
- * The column types, separated by commas, into a new array the operand owns:
- * one more column than the list has commas.  Each type is the word from the
- * start of the list, or from just past a comma, to the next comma or the
- * list's end.
+ * The column types, separated by commas, into a new array: one more column
+ * than the list has commas.  Each type is the word from the start of the
+ * list, or from just past a comma, to the next comma or the list's end.
+ * The array is set in *parsed as soon as it is allocated, so that a caller
+ * releases it whether or not the rest of the list parses.
  */
 static enum import_parse
-parse_columns(word_t list, import_operand_t *parsed, operand_problem_t *why)
+parse_columns(word_t list, column_list_t *parsed, operand_problem_t *why)
 {
 	const char *end;
 	const char *cursor;
@@ -230,6 +551,7 @@ parse_columns(word_t list, import_operand_t *parsed, operand_problem_t *why)
 	size_t column_index;
 	size_t kept;
 
+	bzero(parsed, sizeof(*parsed));
 	end = list.bytes + list.length;
 
 	column_total = 1;
@@ -238,9 +560,10 @@ parse_columns(word_t list, import_operand_t *parsed, operand_problem_t *why)
 			column_total++;
 	}
 
-	parsed->columns = calloc(column_total, sizeof(*parsed->columns));
-	if (parsed->columns == NULL)
+	parsed->types = calloc(column_total, sizeof(*parsed->types));
+	if (parsed->types == NULL)
 		return (IMPORT_NO_MEMORY);
+	parsed->count = column_total;
 
 	kept = 0;
 	type_start = list.bytes;
@@ -250,8 +573,8 @@ parse_columns(word_t list, import_operand_t *parsed, operand_problem_t *why)
 
 		type = word_until(type_start, end, ',');
 		if (type.bytes + type.length < end)
-			type_start = type.bytes + type.length + 1;
-		column = &parsed->columns[column_index];
+			type_start = word_after(type, end).bytes;
+		column = &parsed->types[column_index];
 
 		if (type.length == 0)
 			return (malformed(why, "empty column type", NULL, 0));
@@ -275,15 +598,12 @@ parse_columns(word_t list, import_operand_t *parsed, operand_problem_t *why)
 		return (malformed(why, "more than "
 		    CMD_STRINGIFY(IMPORT_KEPT_MAX) " columns kept", NULL, 0));
 
-	parsed->import.columns = parsed->columns;
-	parsed->import.column_count = column_total;
-
 	return (IMPORT_PARSED);
 }
 
 /*
- * Record why an operand is not an import: `problem`, and the `length` bytes
- * at `bytes` that are wrong when they are one word, or NULL.
+ * Record why an operand is not what it should be: `problem`, and the
+ * `length` bytes at `bytes` that are wrong when they are one word, or NULL.
  */
 static enum import_parse
 malformed(operand_problem_t *why, const char *problem, const char *bytes,
@@ -297,26 +617,32 @@ malformed(operand_problem_t *why, const char *problem, const char *bytes,
 }
 
 /*
- * Report why an operand is not an import.  The problem comes first and the
- * operand is quoted cut short, since an argument can be as long as the
- * system allows, so that the message says what is wrong whatever the
- * operand is.
+ * Report why an operand is not `what` -- an import, column types.  The
+ * problem comes first and the operand is quoted cut short, since an
+ * argument can be as long as the system allows, so that the message says
+ * what is wrong whatever the operand is.
  */
 static void
-report_malformed(const char *program_name, const char *operand,
-    const operand_problem_t *why)
+report_malformed(const char *program_name, const char *what,
+    const char *operand, const operand_problem_t *why)
 {
 	cmd_quoted_t quoted_operand;
 	cmd_quoted_t quoted_word;
 
+	if (operand[0] == '\0') {
+		report_error(program_name, "invalid %s: %s", what,
+		    why->problem);
+		return;
+	}
+
 	cmd_quote(operand, strlen(operand), &quoted_operand);
 	if (why->word.bytes == NULL) {
-		report_error(program_name, "invalid import: %s in %s",
+		report_error(program_name, "invalid %s: %s in %s", what,
 		    why->problem, quoted_operand.text);
 		return;
 	}
 
-	report_error(program_name, "invalid import: %s '%s' in %s",
+	report_error(program_name, "invalid %s: %s '%s' in %s", what,
 	    why->problem, cmd_quote(why->word.bytes, why->word.length,
 	    &quoted_word), quoted_operand.text);
 }
@@ -327,6 +653,21 @@ word_is(word_t word, const char *text)
 {
 	return (strlen(text) == word.length &&
 	    bcmp(word.bytes, text, word.length) == 0);
+}
+
+/*
+ * The rest of an operand after `word` and the delimiter that ends it, up to
+ * `end`; `word` must end before `end`, at a delimiter.
+ */
+static word_t
+word_after(word_t word, const char *end)
+{
+	word_t rest;
+
+	rest.bytes = word.bytes + word.length + 1;
+	rest.length = (size_t)(end - rest.bytes);
+
+	return (rest);
 }
 
 /*
@@ -380,6 +721,14 @@ import_operand_reads_stdin(const import_operand_t *parsed)
 
 void
 import_operand_free(import_operand_t *parsed)
+{
+	free(parsed->own_columns);
+	free(parsed->predicate);
+	bzero(parsed, sizeof(*parsed));
+}
+
+void
+column_types_free(column_types_t *parsed)
 {
 	free(parsed->columns);
 	free(parsed->predicate);

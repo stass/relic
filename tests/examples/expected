@@ -45,13 +45,13 @@ $ relic -l tuples=5000000 -l memory=2147483648 -q 'path(X, Y)?' graph.dl
 a b
 b c
 a c
-$ relic -I tsv:edge:symbol,symbol=edge.tsv reach.dl
+$ relic -T edge:symbol,symbol -I edge.tsv reach.dl
 b
 c
-$ relic -I csv,header:person:symbol,_,integer=people.csv rules.dl
+$ relic -T person:symbol,_,integer -I csv,header:person=people.csv rules.dl
 ann
 cid
-$ relic -I tsv:edge:symbol,symbol=- -q 'edge(a, X)?' < edge.tsv
+$ relic -T edge:symbol,symbol -I tsv:edge=- -q 'edge(a, X)?' < edge.tsv
 b
 $ relic -i graph.dl
 relic> path(a, X)?

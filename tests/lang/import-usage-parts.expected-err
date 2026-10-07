@@ -1,4 +1,5 @@
-relic: error: invalid import: expected format:predicate:columns before '=' in tsv:edge=edge.tsv
+relic: error: invalid import: expected format:predicate before '=' in tsv=edge.tsv
 usage: relic [-aceinsv] [-F format] [-I import] [-j threads]
-             [-l limit=value] [-o file] [-q query] [-X debug] [file ...]
+             [-l limit=value] [-o file] [-q query] [-T types]
+             [-X debug] [file ...]
        relic -V

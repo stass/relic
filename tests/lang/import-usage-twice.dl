@@ -1,0 +1,2 @@
+% A predicate has one -T, even when both give the same columns.
+edge(a, b).

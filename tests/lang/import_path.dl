@@ -1,0 +1,5 @@
+% A path alone takes its format from its extension and its predicate from
+% the rest of its file name, and its columns from the predicate's -T.
+reach(X, Y) :- import_path(X, Y).
+reach(X, Z) :- reach(X, Y), import_path(Y, Z).
+reach(a, X)?

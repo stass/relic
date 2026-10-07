@@ -1,0 +1,1 @@
+-I tsv:edge:symbol,symbol=edge.tsv -I tsv:edge:symbol,integer=other.tsv

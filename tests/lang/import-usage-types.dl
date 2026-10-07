@@ -1,0 +1,3 @@
+% An import that lists no columns takes those of its predicate's -T, and
+% with none it has no column types, which are never inferred.
+edge(a, b).

@@ -118,8 +118,10 @@ query the context has compiled, the program's own among them, from zero.
 
 `-V` stands alone. `-c` contradicts both `-a` and `-i`, since it forbids
 evaluation and they demand it. Each conflict is a usage error, as is an
-unknown option, an unknown `-F` format, a malformed `-I` operand, a second
-claim on standard input, or a missing operand to an option that takes one.
+unknown option, an unknown `-F` format, a malformed `-I` or `-T` operand, an
+import with no column types, a predicate's column types declared twice or
+differently, a second claim on standard input, or a missing operand to an
+option that takes one.
 Options that do not apply in a mode -- `-e`, `-F`, `-o`, `-s` and `-v` under
 `-c`, and `-F`, `-o` and `-s` under `-n` -- are accepted and have no effect.
 

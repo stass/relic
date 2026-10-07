@@ -1,2 +1,2 @@
-% Before the = come three parts: the format, the predicate and the columns.
+% A head names a format and a predicate before its =.
 edge(a, b).

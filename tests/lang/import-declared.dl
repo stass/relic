@@ -1,0 +1,5 @@
+% An import with a head and no columns takes its predicate's -T, given
+% before or after it, and one that lists its own keeps columns of the -T's
+% types, skipping whatever fields its own table holds beside them.  A -T
+% that no import uses declares nothing anyone reads, and is no error.
+weight(X, N)?

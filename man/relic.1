@@ -17,6 +17,7 @@
 .Op Fl l Ar limit Ns = Ns Ar value
 .Op Fl o Ar file
 .Op Fl q Ar query
+.Op Fl T Ar types
 .Op Fl X Ar debug
 .Op Ar
 .Nm
@@ -504,6 +505,12 @@ Without
 .Fl s
 the order of the rows is unspecified, though the same on every run over the
 same input.
+.It Fl T Ar types
+Give the column types of a predicate's imports, written
+.Ar predicate : Ns Ar column Ns Op , Ns Ar column ...
+and described in
+.Sx IMPORTS .
+The option may be repeated, once for each predicate.
 .It Fl V
 Print the version and exit.
 .It Fl v
@@ -584,9 +591,14 @@ The queries then run in turn, and the first that fails ends the run.
 .Sh IMPORTS
 An
 .Ar import
-is written
+is written as a path alone,
 .Bd -literal -offset indent
-format[,header]:predicate:column[,column...]=path
+path
+.Ed
+.Pp
+or with a head that names what the path does not:
+.Bd -literal -offset indent
+format[,header]:predicate[:column[,column...]]=path
 .Ed
 .Pp
 and adds a fact of
@@ -597,8 +609,32 @@ or of the standard input when
 .Ar path
 is
 .Ql - .
-The path is everything after the first
+A path alone is read in the format its file name's extension names,
+.Ql .csv
+or
+.Ql .tsv ,
+as facts of the predicate the rest of the file name names, without a
+header:
+.Ql data/edge.tsv
+adds facts of
+.Ql edge .
+The standard input, and a table whose file name says neither, is named with
+a head, whose path is everything after the first
 .Ql = .
+An operand holding a
+.Ql =
+always has a head, so a path holding one is named with a head too; a
+script importing file names it did not choose should give each a head.
+.Pp
+The column types belong to the predicate.
+An import that lists none takes those of the predicate's
+.Fl T ,
+written
+.Ql predicate:column[,column...] ,
+given before or after it; with neither, the import is a usage error.
+An import may list its own, for a table with other fields to skip, but
+every list given for one predicate must keep columns of the same types in
+the same order.
 The predicate's arity is the number of columns not skipped, at most 32.
 A table's facts are added all together or not at all: any mistake in it,
 reported with its line and column, adds none of them.
@@ -904,12 +940,12 @@ Bound the work a query may do:
 Answer a program's queries over a table of edges, and over a CSV file with a
 header whose second column is not needed:
 .Pp
-.Dl $ relic -I tsv:edge:symbol,symbol=edge.tsv reach.dl
-.Dl $ relic -I csv,header:person:symbol,_,integer=people.csv rules.dl
+.Dl $ relic -T edge:symbol,symbol -I edge.tsv reach.dl
+.Dl $ relic -T person:symbol,_,integer -I csv,header:person=people.csv rules.dl
 .Pp
 Query a table read from the standard input, with no program file:
 .Pp
-.Dl $ relic -I tsv:edge:symbol,symbol=- -q 'edge(a, X)?' < edge.tsv
+.Dl $ relic -T edge:symbol,symbol -I tsv:edge=- -q 'edge(a, X)?' < edge.tsv
 .Pp
 Explore a program interactively:
 .Bd -literal -offset indent

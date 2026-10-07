@@ -688,15 +688,22 @@ RELIC_LANG_TESTS = \
 	tests/lang/format-json.dl tests/lang/format-nul.dl \
 	tests/lang/format-text.dl tests/lang/format-tsv.dl \
 	tests/lang/head-not-atom.dl tests/lang/import-check.dl \
-	tests/lang/import-csv.dl tests/lang/import-errors-csv.dl \
-	tests/lang/import-errors-tsv.dl \
+	tests/lang/import-csv.dl tests/lang/import-declared.dl \
+	tests/lang/import-errors-csv.dl tests/lang/import-errors-tsv.dl \
 	tests/lang/import-errors-typed.dl tests/lang/import-order.dl \
 	tests/lang/import-stdin.dl tests/lang/import-tsv.dl \
 	tests/lang/import-usage-arity.dl tests/lang/import-usage-column.dl \
-	tests/lang/import-usage-equals.dl tests/lang/import-usage-format.dl \
-	tests/lang/import-usage-not.dl tests/lang/import-usage-option.dl \
-	tests/lang/import-usage-parts.dl tests/lang/import-usage-path.dl \
-	tests/lang/import-usage-predicate.dl tests/lang/import-wide.dl \
+	tests/lang/import-usage-declare-column.dl \
+	tests/lang/import-usage-declare.dl tests/lang/import-usage-differ.dl \
+	tests/lang/import-usage-disagree.dl \
+	tests/lang/import-usage-equals.dl \
+	tests/lang/import-usage-extension.dl \
+	tests/lang/import-usage-format.dl tests/lang/import-usage-not.dl \
+	tests/lang/import-usage-option.dl tests/lang/import-usage-parts.dl \
+	tests/lang/import-usage-path.dl tests/lang/import-usage-predicate.dl \
+	tests/lang/import-usage-stdin.dl tests/lang/import-usage-stem.dl \
+	tests/lang/import-usage-twice.dl tests/lang/import-usage-types.dl \
+	tests/lang/import-wide.dl tests/lang/import_path.dl \
 	tests/lang/incomplete-operator.dl tests/lang/integer-range.dl \
 	tests/lang/integer-trailing.dl tests/lang/magic-bindings.dl \
 	tests/lang/magic-cspa.dl tests/lang/magic-default.dl \

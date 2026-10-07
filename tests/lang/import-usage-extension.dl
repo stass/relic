@@ -1,0 +1,2 @@
+% A path alone names its format by its extension, csv or tsv, and no other.
+edge(a, b).

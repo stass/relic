@@ -1,0 +1,5 @@
+relic: error: invalid import: not a predicate name 'my-edge' in data/my-edge.tsv
+usage: relic [-aceinsv] [-F format] [-I import] [-j threads]
+             [-l limit=value] [-o file] [-q query] [-T types]
+             [-X debug] [file ...]
+       relic -V

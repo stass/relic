@@ -119,11 +119,12 @@ and `.output` directives or Nemo's `@import`. A program may come from someone
 else, and loading one gives it no capability but computation, so it cannot
 read a file its runner did not name, and it means the same thing on every
 machine it is loaded on. Whoever runs the tool names the data instead. `-I`
-imports a CSV or TSV table as the facts of a predicate; here `edge.tsv`
-holds the two edges of `graph.dl` and `reach.dl` its rules and query:
+imports a CSV or TSV table as the facts of a predicate, named by its file
+name, and `-T` gives the predicate's column types; here `edge.tsv` holds
+the two edges of `graph.dl` and `reach.dl` its rules and query:
 
 ```sh
-$ relic -I tsv:edge:symbol,symbol=edge.tsv reach.dl
+$ relic -T edge:symbol,symbol -I edge.tsv reach.dl
 b
 c
 ```

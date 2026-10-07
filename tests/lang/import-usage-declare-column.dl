@@ -1,0 +1,2 @@
+% A -T operand's columns are the types an import's are.
+edge(a, b).

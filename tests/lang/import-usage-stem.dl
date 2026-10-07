@@ -1,0 +1,3 @@
+% A path alone names its predicate by the rest of its file name, which must
+% be a predicate name.
+edge(a, b).

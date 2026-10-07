@@ -1,0 +1,3 @@
+% An import may list its own columns, but they keep the types its
+% predicate's -T gives, whatever fields its table skips.
+edge(a, b).

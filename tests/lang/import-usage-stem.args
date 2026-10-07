@@ -1,0 +1,1 @@
+-T edge:symbol,symbol -I data/my-edge.tsv

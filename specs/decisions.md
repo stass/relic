@@ -768,3 +768,19 @@ the first release, the one field `max_magic` taking their place in
 the part of D-20 that leaves supplementary predicates out of a predicate
 count stands, there being no such count. Specified in
 `specs/design-magic.md` section 8.
+
+### D-38 A table's file name may name its format and predicate; its columns are the predicate's
+
+A table imported on the command line takes its format and its predicate
+from its file name when no head names them: `-I edge.tsv` imports `edge` as
+tsv. The extension is something the caller wrote, as the format word is, so
+a format is still never guessed from a table's contents, and a path with no
+extension the tool knows is named with a head. Column types stay declared,
+never inferred, but they belong to the predicate rather than the file: `-T
+predicate:columns` gives them once per command line, and an import that
+lists none takes them from it. An import may list its own for a table laid
+out differently, skipping other fields with `_`, but every list a command
+line gives a predicate keeps the same types in the same order, so a
+predicate's types are one fact however many tables fill it. The library's
+`relic_import_t` is unchanged; the vocabulary is the tool's. Specified in
+`specs/design-import.md` section 3.1.

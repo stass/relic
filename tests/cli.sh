@@ -513,6 +513,17 @@ if [ "$actual" != "$(printf 'b\nc\nd')" ]; then
 	fail "a piped program with an import answered '$actual'"
 fi
 
+# A path alone names its predicate by its file name, not by the directories
+# above it, and its format by its extension, csv as well as tsv.
+mkdir "$work/tables"
+printf 'c\td\n' > "$work/tables/edge.tsv"
+printf 'c,e\n' > "$work/tables/edge.csv"
+actual=$("$RELIC" -s -T edge:symbol,symbol -I "$work/tables/edge.tsv" \
+    -I "$work/tables/edge.csv" < "$work/graph.dl")
+if [ "$actual" != "$(printf 'b\nc\nd\ne')" ]; then
+	fail "imports of paths alone answered '$actual'"
+fi
+
 # Standard input has one reader, so two imports of -, or one under -i, are a
 # usage error naming both, and nothing is read.
 for claims in "-I tsv:a:symbol=- -I csv:b:symbol=-" \

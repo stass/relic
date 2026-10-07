@@ -1,2 +1,3 @@
-% The path follows the first =, so an import without one names no table.
+% An operand with no = is a path alone, whose file name ends in the
+% extension that names its format.
 edge(a, b).

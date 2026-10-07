@@ -98,7 +98,8 @@ enum stdin_reader {
 /*
  * What the command line asked for.  `queries` holds the -q arguments in the
  * order given; they point into argv and are not copied.  `imports` holds the
- * -I operands, parsed, in the order given.  `config` is what the context is
+ * -I operands, parsed, in the order given, and `types` the -T operands
+ * their columns may come from.  `config` is what the context is
  * created with: -j sets its thread count, -l its limits, -X naive,
  * no-index, no-reorder, no-magic, no-stream, no-exists, parallel and
  * group-rules its flags, and a second -v the flag that asks for notes about mixed-type
@@ -112,10 +113,12 @@ enum stdin_reader {
 struct options {
 	const char		**queries;
 	import_operand_t	 *imports;
+	column_types_t		 *types;
 	const import_operand_t	 *stdin_import;
 	const char		 *output_path;
 	size_t			  query_count;
 	size_t			  import_count;
+	size_t			  type_count;
 	relic_config_t		  config;
 	enum output_format	  format;
 	enum stdin_reader	  stdin_reader;
@@ -273,8 +276,9 @@ usage(const char *program_name)
 {
 	fprintf(stderr, "usage: %s [-aceinsv] [-F format] [-I import] "
 	    "[-j threads]\n"
-	    "       %*s [-l limit=value] [-o file] [-q query] [-X debug] "
-	    "[file ...]\n", program_name, (int)strlen(program_name), "");
+	    "       %*s [-l limit=value] [-o file] [-q query] [-T types]\n"
+	    "       %*s [-X debug] [file ...]\n", program_name,
+	    (int)strlen(program_name), "", (int)strlen(program_name), "");
 	fprintf(stderr, "       %s -V\n", program_name);
 }
 
@@ -967,8 +971,8 @@ report_two_readers(const char *program_name, const options_t *options,
  * once every option and operand is known.  Returns RELIC_EXIT_OK, or the
  * status to exit with having reported why the command line is malformed.
  *
- * `queries` and `imports` must each have room for every argument, which is
- * the most -q or -I options a command line can hold.
+ * `queries`, `imports` and `types` must each have room for every argument,
+ * which is the most -q, -I or -T options a command line can hold.
  */
 static int
 parse_options(const char *program_name, int argc, char *argv[],
@@ -986,7 +990,7 @@ parse_options(const char *program_name, int argc, char *argv[],
 	 */
 	opterr = 0;
 
-	while ((ch = getopt(argc, argv, ":aceF:I:ij:l:no:q:svVX:")) != -1) {
+	while ((ch = getopt(argc, argv, ":aceF:I:ij:l:no:q:sT:vVX:")) != -1) {
 		if (ch != 'V')
 			options->version_alone = false;
 
@@ -1052,6 +1056,19 @@ parse_options(const char *program_name, int argc, char *argv[],
 		case 's':
 			options->sorted = true;
 			break;
+		case 'T':
+			switch (column_types_parse(program_name, optarg,
+			    &options->types[options->type_count])) {
+			case IMPORT_PARSED:
+				options->type_count++;
+				break;
+			case IMPORT_MALFORMED:
+				usage(program_name);
+				return (RELIC_EXIT_USAGE);
+			case IMPORT_NO_MEMORY:
+				return (RELIC_EXIT_ERROR);
+			}
+			break;
 		case 'v':
 			if (options->verbosity < UINT_MAX)
 				options->verbosity++;
@@ -1077,6 +1094,13 @@ parse_options(const char *program_name, int argc, char *argv[],
 			usage(program_name);
 			return (RELIC_EXIT_USAGE);
 		}
+	}
+
+	/* An import's columns may come from a -T given after it. */
+	if (import_operands_resolve(program_name, options->imports,
+	    options->import_count, options->types, options->type_count) != 0) {
+		usage(program_name);
+		return (RELIC_EXIT_USAGE);
 	}
 
 	/*
@@ -1116,6 +1140,9 @@ options_free(options_t *options)
 	for (i = 0; i < options->import_count; i++)
 		import_operand_free(&options->imports[i]);
 	free(options->imports);
+	for (i = 0; i < options->type_count; i++)
+		column_types_free(&options->types[i]);
+	free(options->types);
 	free(options->queries);
 }
 
@@ -1136,7 +1163,10 @@ main(int argc, char *argv[])
 	    sizeof(*options.queries));
 	options.imports = calloc(argc > 0 ? (size_t)argc : 1,
 	    sizeof(*options.imports));
-	if (options.queries == NULL || options.imports == NULL) {
+	options.types = calloc(argc > 0 ? (size_t)argc : 1,
+	    sizeof(*options.types));
+	if (options.queries == NULL || options.imports == NULL ||
+	    options.types == NULL) {
 		report_error(program_name, "out of memory");
 		options_free(&options);
 		return (RELIC_EXIT_ERROR);

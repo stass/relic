@@ -1,0 +1,1 @@
+-s -I tsv:weight=import-declared.tsv -T weight:symbol,integer -T unused:string -I tsv:weight:symbol,integer=import-declared.more.tsv -I tsv:weight:symbol,_,integer=import-declared.wide.tsv

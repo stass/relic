@@ -1505,7 +1505,7 @@ Usage:
 
 ```text
 relic [-aceinsvV] [-F format] [-I import] [-j threads] [-l limit=value]
-      [-o file] [-q query] [-X debug] [file ...]
+      [-o file] [-q query] [-T types] [-X debug] [file ...]
 ```
 
 Options, in the alphabetical order used by the usage message and the manual
@@ -1524,6 +1524,7 @@ page:
 -o file     write query output to file instead of stdout
 -q expr     execute expr as a query; repeatable
 -s          sort query results before printing
+-T types    column types of a predicate's imports; repeatable
 -v          increase diagnostic verbosity; repeatable
 -V          print version and exit
 -X debug    enable an internal behaviour; repeatable
@@ -1612,7 +1613,7 @@ relic -e -q 'path(a, X)?' graph.dl
 Answer a program's queries over facts imported from a table:
 
 ```sh
-relic -I tsv:edge:symbol,symbol=edge.tsv graph.dl
+relic -T edge:symbol,symbol -I edge.tsv graph.dl
 ```
 
 Force whole-program materialization:
@@ -3260,7 +3261,8 @@ relation statistics live with the tuple store in `lib/relation.c`.
 
 **Table import, sections 40, 41, 48, 50, 64, 67 and 69.** Facts can be
 imported from csv and tsv tables: `-I` on the command line, which loads after
-the program's files, and `relic_import_file()` and `relic_import_path()`
+the program's files and takes its column types from the predicate's `-T`
+when it lists none (D-38), and `relic_import_file()` and `relic_import_path()`
 through the library, described by `relic_import_t`, a fifth complete type.
 The reader and importer are `lib/import.c`, and a third fuzz target imports
 its input as a table. Specified in `specs/design-import.md`.

@@ -1,0 +1,3 @@
+% Standard input has no file name to name a format and a predicate, so an
+% import of it has a head.
+edge(a, b).

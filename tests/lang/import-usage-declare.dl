@@ -1,0 +1,2 @@
+% A -T operand is a predicate, a colon and its columns.
+edge(a, b).

@@ -21,8 +21,9 @@ targets; architecture sections 10.1, 40, 48, 50, 63, 67 and 69.
 ## 1. What this document settles
 
 * how an import is named: a format, whether the table has a header, a
-  predicate, a type for each column and a source -- one `-I` operand on the
-  command line, one `relic_import_t` through the library;
+  predicate, a type for each column and a source -- an `-I` operand and the
+  `-T` of its predicate on the command line, one `relic_import_t` through
+  the library;
 * why program text cannot name one;
 * what each column type accepts, and that nothing is inferred;
 * the tsv and csv formats as read, each the inverse of the tool's output
@@ -90,20 +91,29 @@ column reads that row back.
 
 ### 3.1 On the command line
 
+Two options name imports. `-T` gives a predicate's column types, and `-I`
+names a table, either by its path alone or by a head that says what the
+path cannot:
+
 ```text
--I format[,header]:predicate:column[,column...]=path
+-T predicate:column[,column...]
+-I path
+-I format[,header]:predicate[:column[,column...]]=path
 ```
 
 ```sh
-relic -I tsv:edge:symbol,symbol=edge.tsv graph.dl
-relic -I csv,header:person:symbol,string,integer=people.csv rules.dl
-cut -f 1,3 access.tsv | relic -I tsv:hit:symbol,integer=- rules.dl
+relic -T edge:symbol,symbol -I edge.tsv graph.dl
+relic -T person:symbol,string,integer -I csv,header:person=people.csv rules.dl
+relic -I tsv:edge:symbol,symbol=edge.txt graph.dl
+cut -f 1,3 access.tsv | relic -T hit:symbol,integer -I tsv:hit=- rules.dl
 ```
 
-The operand's grammar:
+The operands' grammar:
 
 ```text
-import     := format [ ",header" ] ":" predicate ":" columns "=" path
+types      := predicate ":" columns
+import     := path | head "=" path
+head       := format [ ",header" ] ":" predicate [ ":" columns ]
 format     := "csv" | "tsv"
 columns    := column ( "," column )*
 column     := "symbol" | "string" | "integer" | "_"
@@ -111,21 +121,50 @@ predicate  := [a-z][A-Za-z0-9_]*, other than "not"
 path       := one or more bytes; "-" is standard input
 ```
 
-`-I` is repeatable, one import per operand, and the operand is
-self-contained, as a `-l` operand is one limit. The path is everything after
-the first `=`. Nothing before that `=` can contain one, so a path may.
-Everything before it is fixed vocabulary and a predicate name, and the tool
-parses it as it parses the rest of the command line. A malformed import --
-an empty path included -- is therefore a usage error, status 2, as an
-unknown `-F` format is:
+Both options are repeatable, one declaration or one import per operand, as
+a `-l` operand is one limit. An `-I` operand that holds a `=` has a head,
+and its path is everything after the first `=`; nothing in a head can hold
+one, so a path may. An operand with no `=` is a path alone. Everything but
+a path is fixed vocabulary and a predicate name, and the tool parses it as
+it parses the rest of the command line. A malformed operand -- an empty
+path included -- is therefore a usage error, status 2, as an unknown `-F`
+format is:
 
 ```text
 relic: error: invalid import: unknown column type 'symbl' in tsv:edge:symbl,symbol=edge.tsv
+relic: error: invalid import: no column types for 'edge' in edge.tsv
 ```
 
-**The format is stated, never guessed from the path.** A pipe, `/dev/fd/3`
-and a file named `data` are read the same way. A format added later is a new
-word in the same place rather than a new option letter.
+**A path alone names its format and its predicate.** The file name's
+extension, `.tsv` or `.csv`, is the format, and the rest of the file name is
+the predicate: `-I data/edge.tsv` imports `edge` as tsv. A path whose file
+name has neither extension, or whose rest is not a predicate name, is a
+usage error that asks for a head; so is `-`, which has no file name. A path
+alone imports no header, so a table with one is named with a head. A path
+that holds a `=` is named with a head too, since its operand would read as
+one.
+
+**A format is named, never guessed from the contents.** The word in a head
+and the extension of a path are both written by the caller. A pipe,
+`/dev/fd/3` and a file named `data` have no extension and are named with a
+head, and a file is read in the format its name says whatever its bytes
+look like. A format added later is a new word in the head and a new
+extension.
+
+**Column types belong to the predicate.** Every table imported into one
+predicate fills columns of the same types, so they are given once, with
+`-T`, and an import that lists none takes them from the `-T` of its
+predicate, given anywhere on the command line. An import may still list its
+own, for a table laid out differently: which fields a table skips with `_`
+is that table's layout, but the types of the columns it keeps are the
+predicate's. Every list a command line gives a predicate, its `-T` and each
+import's own, must therefore keep the same types in the same order, held to
+the first given, the `-T` when there is one, and a list that differs is a
+usage error. So is a second `-T` of one predicate, and an import with no
+columns of its own and no `-T` to take them from, since nothing about a
+column is ever inferred (section 4). A `-T` that no import uses is not an
+error, so that a script can declare a project's predicates once and import
+some of them on each run.
 
 **Column types are words, not letters.** The mistake a declaration can still
 make is to declare as a string a column the program joins as symbols, or the
@@ -183,7 +222,8 @@ later boolean goes without changing that layout. **The enumerators start at
 one,** so a description or column array left zeroed -- by `calloc(3)`, or a
 field forgotten -- is refused rather than read as csv and symbols.
 
-The tool is a client of this interface. It parses an operand into a
+The tool is a client of this interface. It parses an operand, with the
+`-T` of its predicate when the operand lists no columns, into a
 `relic_import_t` and calls `relic_import_path()`, or `relic_import_file()`
 over standard input for `-`. The words of section 3.1 are the tool's
 spelling. The library has no spelling of its own, and takes the
@@ -623,15 +663,17 @@ program:
 
 ```sh
 relic -I tsv:edge:symbol,symbol=- -q 'edge(a, X)?' < edge.tsv
-relic -I tsv:edge:symbol,symbol=edge.tsv -q 'edge(a, X)?' /dev/null
+relic -T edge:symbol,symbol -I edge.tsv -q 'edge(a, X)?' /dev/null
 ```
 
 **An import of `-` when standard input is a terminal is a usage error,** as
 reading a program from one is: the tool would otherwise wait silently for a
 table nobody is typing.
 
-**Exit status.** A malformed `-I` operand, or a second claim on standard
-input, is a usage error, status 2. An import that cannot be read, is
+**Exit status.** A malformed `-I` or `-T` operand, an import with no
+columns, a second `-T` of one predicate, lists of columns that keep
+different types for one predicate, or a second claim on standard input, is
+a usage error, status 2. An import that cannot be read, is
 malformed or is refused by a limit is status 1, as a load that fails is.
 
 Nothing else in the tool changes. `-e` counts imported facts in a
@@ -742,7 +784,15 @@ each, measured as `specs/design-facts.md` section 9 measures a load.
     a load's is.
 * **The tool.** Golden tests in `tests/lang` cover:
   * each usage error of an `-I` operand: unknown format, unknown column
-    type, missing `=`, empty path, bad predicate, `not`, 33 kept columns;
+    type, empty path, bad predicate, `not`, 33 kept columns;
+  * each usage error of a path alone: no extension or another one, a file
+    name that is not a predicate name, `-`;
+  * each usage error of `-T`: a malformed operand, a second `-T` of one
+    predicate, an import with no columns and no `-T`, an import that keeps
+    other types than its predicate's `-T`, and two imports that keep other
+    types than each other;
+  * an import that skips fields its predicate's `-T` does not;
+  * a `-T` given after the `-I` that takes it, and one no import uses;
   * `-c` rejecting a table, and imports loading after file operands;
   * every diagnostic of section 7 with its location, including a field
     named by a byte it holds.
@@ -829,14 +879,18 @@ plans, rows and diagnostics, in the same order.
 ## 14. Amendments this design makes
 
 * Architecture:
-  * section 40: `-I import` in the usage and the option list;
+  * section 40: `-I import` and `-T types` in the usage and the option
+    list;
   * section 41: an import example;
   * section 48: `relic_import_t` joins the complete types;
   * section 50: the import entry points beside the loaders;
   * section 64: `lib/import.c`;
   * section 67: an import fuzz target beside the two over program text;
   * section 69: CSV and TSV import points here;
-  * section 76: logs `-I`, the new complete type and the new fuzz target.
+  * section 76: logs `-I`, `-T` and D-38, the new complete type and the
+    new fuzz target.
+* `specs/decisions.md`: D-38, the file name that names a format and a
+  predicate, and the column types that are the predicate's.
 * `specs/design-cli.md`:
   * section 2: imports are part of the load phase, after the program;
   * section 2.1: an import of `-` claims standard input as the session
