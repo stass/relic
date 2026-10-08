@@ -8,8 +8,8 @@ what was done. Each item carries a severity and a component pointer.
 **Release relic 1.0.** [Critical, component: `specs/design-release.md`]
 What remains, per the design's
 [release gate](specs/design-release.md#the-release-gate): a green run of
-`extended.yml` and `macos.yml` on the release commit, since every job of the
-matrix must pass on it; FreeBSD, OpenBSD and NetBSD, which no workflow
+`extended.yml`, its random-program and fuzz jobs included, and `macos.yml`
+on the release commit, since every job of the matrix must pass on it; FreeBSD, OpenBSD and NetBSD, which no workflow
 reaches, built and tested from the tarball by hand with no autotools
 present, the result recorded in the release's `NEWS` entry; the packaging
 skeletons the design's
@@ -199,12 +199,14 @@ it is a symbol and interning the value checks again.
 
 ## Testing and CI
 
-**No scheduled job runs the random tests or the fuzzers.** [Low,
-component: `.github/workflows/extended.yml`] `make check-random` and the
-fuzz targets of [fuzzing](specs/design-testing.md#fuzzing) run only by
-hand. A weekly job in `extended.yml` could run both, with the working fuzz
-corpus kept as an artifact. Question for the owner: the cadence and the
-time budget are not decided.
+**LeakSanitizer flags macOS's fork handler.** [Low, component:
+`tests/random/main.c`, `Makefile.am`] Built with Homebrew's LLVM, where
+AddressSanitizer detects leaks on macOS, every child the random driver forks
+reports memory `_notify_fork_child` in libSystem allocates, and the child's
+exit status makes the driver report a failure and shrink a program that does
+nothing wrong. Linux, where CI runs the driver, is unaffected. A LeakSanitizer
+suppression for that frame, passed by `check-random` and `check-asan`, would
+let a macOS developer run them with leak detection.
 
 ## Post-1.0
 

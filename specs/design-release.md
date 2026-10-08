@@ -202,6 +202,8 @@ fail rather than skip the lint. They need no jobs of their own.
 | Linux gcc `-m32` | `size_t` and pointer-width assumptions | weekly |
 | Linux gcc, no threads | `--disable-threads`: the pool is the calling thread alone | weekly |
 | distcheck variants | `--disable-shared` and `--disable-static` | weekly |
+| random programs | `make check-random` over ten thousand seeds, a new range each run, ASan + UBSan | weekly |
+| fuzz targets | `make fuzz`, each target fifteen minutes, ASan + UBSan; failing inputs kept as artifacts | weekly |
 | macOS clang | the development platform: `--enable-werror`, ASan (no leak detection there) and UBSan | by hand |
 
 The workflows are `.github/workflows/ci.yml` (every push and pull request),
@@ -225,9 +227,13 @@ commit:
    both glibc and musl.
 2. The full suite runs clean under AddressSanitizer with leak detection and
    under UndefinedBehaviorSanitizer.
-3. relic has no third-party runtime dependency beyond the optional
+3. The random program driver and the fuzz targets run clean at length: the
+   extended workflow, which holds both jobs, is dispatched on the release
+   commit rather than trusted from its last weekly run, since a week's
+   changes can break what the last run passed.
+4. relic has no third-party runtime dependency beyond the optional
    `libedit` (see [dependency policy](architecture.md#dependency-policy)).
-4. The interface version in `configure.ac` matches the interface changes
+5. The interface version in `configure.ac` matches the interface changes
    since the last release, by the rules written beside it
    ([versioning](design-api.md#versioning)).
 

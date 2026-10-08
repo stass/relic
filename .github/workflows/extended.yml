@@ -1,6 +1,7 @@
 # Slower and rarer configurations, run weekly and on demand: MemorySanitizer,
-# ThreadSanitizer, 32-bit pointers, no threads, and distcheck without shared
-# or without static libraries.  As in ci.yml, RELIC_STRICT_CHECK=yes makes a
+# ThreadSanitizer, the random program driver over many seeds, the fuzz
+# targets, 32-bit pointers, no threads, and distcheck without shared or
+# without static libraries.  As in ci.yml, RELIC_STRICT_CHECK=yes makes a
 # skipped test or an unavailable sanitizer fail the job.
 
 name: extended
@@ -46,6 +47,83 @@ jobs:
           ./configure CC=clang CXX=clang++
       - name: Run the suite under the sanitizer
         run: make -j"$(nproc)" ${{ matrix.target }}
+
+  # The random program driver over a range of seeds far past the fifty make
+  # check runs, built with AddressSanitizer and UndefinedBehaviorSanitizer so
+  # that a program which crashes or misbehaves under one strategy is found as
+  # well as one on which two strategies disagree; make check-random sets the
+  # sanitizer options the sanitizer targets use.  Each new run of the
+  # workflow takes the next range of seeds, so the weeks together cover new
+  # programs, while a rerun of a run repeats its range; the range is printed,
+  # and `make check-random RELIC_SEED_START=S RELIC_SEEDS=N` reproduces it.
+  random:
+    name: linux clang random programs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RELIC_SEEDS: '10000'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.LINUX_PACKAGES }}
+      - name: Narrow address randomization for the sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure CC=clang CXX=clang++ --enable-asan --enable-ubsan
+      - name: Build
+        run: make -j"$(nproc)" tests/random/random
+      - name: Run the random program driver
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          start=$((RUN_NUMBER * RELIC_SEEDS + 1))
+          echo "seeds $start to $((start + RELIC_SEEDS - 1))"
+          make check-random RELIC_SEEDS="$RELIC_SEEDS" \
+              RELIC_SEED_START="$start"
+
+  # The four libFuzzer targets, each for FUZZ_SECONDS, under AddressSanitizer
+  # and UndefinedBehaviorSanitizer with the options make fuzz sets.  configure fails rather than build a tree
+  # with nothing to fuzz when the compiler lacks libFuzzer.  An input that
+  # fails a target is kept as an artifact, to be read and, once understood,
+  # copied into the corpus as a regression.
+  fuzz:
+    name: linux clang fuzz targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FUZZ_SECONDS: '900'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.LINUX_PACKAGES }}
+      - name: Narrow address randomization for the sanitizers
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure CC=clang CXX=clang++ --enable-fuzzers \
+              --enable-asan --enable-ubsan
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Fuzz
+        run: make fuzz FUZZ_SECONDS="$FUZZ_SECONDS"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz-artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
 
   linux-variants:
     name: linux ${{ matrix.name }}

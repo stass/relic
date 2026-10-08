@@ -505,9 +505,16 @@ dist_check_SCRIPTS += tests/random/selftest.sh
 RELIC_SEEDS = 1000
 RELIC_SEED_START = 1
 
+## A build configured with a sanitizer runs the driver, and the fuzz targets
+## below, under the options the sanitizer targets use, so that a long run
+## holds a program to what make check-asan and check-ubsan hold the suite
+## to; a build without one ignores them.
+RELIC_RUN_SANITIZED = ASAN_OPTIONS='$(RELIC_ASAN_OPTIONS)' \
+	UBSAN_OPTIONS='$(RELIC_UBSAN_OPTIONS)'
+
 check-random: tests/random/random$(EXEEXT)
-	$(builddir)/tests/random/random -n $(RELIC_SEEDS) \
-	    -s $(RELIC_SEED_START)
+	$(RELIC_RUN_SANITIZED) $(builddir)/tests/random/random \
+	    -n $(RELIC_SEEDS) -s $(RELIC_SEED_START)
 
 ##
 ## Fuzz targets
@@ -583,7 +590,8 @@ fuzz: $(noinst_PROGRAMS)
 		artifacts=fuzz-artifacts/$$target/; \
 		$(MKDIR_P) $$corpus $$artifacts || exit 1; \
 		echo "fuzzing $$target for $(FUZZ_SECONDS) seconds"; \
-		./tests/fuzz/fuzz_$$target -max_total_time=$(FUZZ_SECONDS) \
+		$(RELIC_RUN_SANITIZED) ./tests/fuzz/fuzz_$$target \
+		    -max_total_time=$(FUZZ_SECONDS) \
 		    -max_len=4096 -timeout=10 \
 		    -dict=$(srcdir)/tests/fuzz/relic.dict \
 		    -artifact_prefix=$$artifacts $$corpus \
@@ -591,13 +599,15 @@ fuzz: $(noinst_PROGRAMS)
 	done
 	@$(MKDIR_P) fuzz-corpus/import fuzz-artifacts/import/
 	@echo "fuzzing import for $(FUZZ_SECONDS) seconds"
-	@./tests/fuzz/fuzz_import -max_total_time=$(FUZZ_SECONDS) \
+	@$(RELIC_RUN_SANITIZED) ./tests/fuzz/fuzz_import \
+	    -max_total_time=$(FUZZ_SECONDS) \
 	    -max_len=4096 -timeout=10 \
 	    -artifact_prefix=fuzz-artifacts/import/ fuzz-corpus/import \
 	    $(srcdir)/tests/fuzz/corpus-import
 	@$(MKDIR_P) fuzz-corpus/regex fuzz-artifacts/regex/
 	@echo "fuzzing regex for $(FUZZ_SECONDS) seconds"
-	@./tests/fuzz/fuzz_regex -max_total_time=$(FUZZ_SECONDS) \
+	@$(RELIC_RUN_SANITIZED) ./tests/fuzz/fuzz_regex \
+	    -max_total_time=$(FUZZ_SECONDS) \
 	    -max_len=4096 -timeout=10 \
 	    -dict=$(srcdir)/tests/fuzz/regex.dict \
 	    -artifact_prefix=fuzz-artifacts/regex/ fuzz-corpus/regex \

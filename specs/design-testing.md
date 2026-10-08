@@ -641,6 +641,14 @@ corpus. `make check-random` runs `RELIC_SEEDS` seeds from
 `RELIC_SEED_START`, a thousand from one by default.
 `tests/random/random -p -n 1 -s N` prints the program seed `N` generates.
 
+The extended workflow runs both at length every week, under AddressSanitizer
+and UndefinedBehaviorSanitizer: the random driver over ten thousand seeds,
+each new run taking the next range so the weeks together cover new programs
+(a rerun repeats its range), and every fuzz target for fifteen minutes.
+`make check-random` and `make fuzz` run under the sanitizer options of the
+sanitizer targets, so a long run is as strict as `make check-asan`. Both jobs are part of the [release
+gate](design-release.md#the-release-gate).
+
 ## Alternatives not taken
 
 * **Filtering generated programs through relic's own safety and
