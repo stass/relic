@@ -1,41 +1,44 @@
 # relic
 
-**A small, lean, fast Datalog engine and C library.** Ask what depends on a
-changed package, find a route across a city, or discover who can work on
-what next. Give relic the facts and a few rules; let it follow the connections.
+relic is a small, high-performance Datalog engine and C library for graph
+queries, dependency analysis and relational data processing. It combines
+multi-core evaluation with performance competitive with compiled Datalog
+on substantial analysis workloads, without third-party runtime dependencies.
 
-relic combines recursive queries, multi-core evaluation and performance
-competitive with compiled Datalog on substantial analysis workloads. It
-runs your rules directly, with no compilation step, server to manage or
-third-party runtime dependencies. Use `relic` from the shell, explore in the
-REPL, or bring the same engine into your application through `librelic`.
+The `relic` command-line tool loads and evaluates Datalog programs directly,
+with no program compilation step or server required. It supports batch
+queries, an interactive REPL and table import and export. The `librelic`
+library provides the same engine through a C API.
 
-## What will you ask it?
+## Use cases
 
-* **What breaks if I change this?** Follow package, build or service
-  dependencies, find cycles, and compute the impact of a change. Try the
-  [dependency planner](EXAMPLES.md#what-can-i-work-on-next).
-* **How are these things connected?** Explore network reachability, trace
-  relationships, or find the fewest stops across a
-  [metro map](EXAMPLES.md#fewest-stops-on-the-metro).
-* **What does this code do?** Express call-graph reachability or points-to
-  analysis as rules over facts extracted from source code. The benchmark
+* **Dependency analysis.** Follow package, build or service dependencies,
+  detect cycles and compute the impact of a change. The
+  [dependency planner](EXAMPLES.md#what-can-i-work-on-next) demonstrates
+  scheduling with prerequisites.
+* **Graph queries.** Compute network reachability, trace relationships and
+  find paths. The [metro example](EXAMPLES.md#fewest-stops-on-the-metro)
+  combines recursion and aggregation to find the fewest stops between stations.
+* **Static analysis.** Express call-graph reachability or points-to analysis
+  as rules over facts extracted from source code. The benchmark
   suite includes points-to inputs from Apache httpd, PostgreSQL and Linux.
-* **What is hiding in my tables?** Join CSV and TSV exports, group files by
-  directory, or build a [game leaderboard](EXAMPLES.md#data-in-importing-tables)
-  with counts, sums and high scores.
-* **Who is whose cousin?** Explore a [family tree](EXAMPLES.md#a-family-tree),
-  count descendants, or invent a puzzle of your own.
+* **Table processing.** Join CSV and TSV exports, group files by directory,
+  or compute counts, sums and rankings. A
+  [game leaderboard](EXAMPLES.md#data-in-importing-tables) demonstrates
+  aggregation over imported tables.
+* **Relationship modeling.** Derive indirect relationships from base facts.
+  The [family tree](EXAMPLES.md#a-family-tree) covers ancestry, cousins,
+  negation and descendant counts.
 
-Datalog is a language for stating facts and the rules that follow from
-them. Recursion makes it especially useful when the question involves
-connections of unknown depth. You describe the relationship; the engine
-finds the answers.
+Datalog expresses computations as facts and rules. Its recursive rules
+are useful for relationships of arbitrary depth, such as transitive
+dependencies and reachability. relic evaluates those rules and answers
+queries over the resulting relations.
 
-## Try it: the impact of a change
+## Example: dependency analysis
 
-Save this as `impact.dl`. Three dependencies and two rules are enough to
-follow a change through several layers:
+The following program defines three direct dependencies and derives their
+transitive closure. Save it as `impact.dl`:
 
 ```prolog impact.dl
 depends(web, api).
@@ -46,7 +49,8 @@ affected(App, Changed) :- depends(App, Changed).
 affected(App, Changed) :- depends(App, Middle), affected(Middle, Changed).
 ```
 
-Which applications depend, directly or indirectly, on the database?
+This query returns applications that depend directly or indirectly on the
+database:
 
 ```sh
 $ relic -s -q 'affected(App, database)?' impact.dl
@@ -55,33 +59,32 @@ web
 worker
 ```
 
-A lowercase name is a value; an uppercase name is a variable. `:-` means
-"if", and a query ends in `?`. `-s` sorts the answers. Add more facts and
-the same rules follow the longer chains, including cycles.
+Lowercase identifiers such as `api` are symbols; uppercase identifiers such
+as `App` are variables. `:-` means "if", and a query ends in `?`. `-s` sorts
+the answers. The same rules handle longer dependency chains and cycles.
 
-Run `relic -i impact.dl` to ask more questions interactively, or write
-queries in the program itself. The [example tour](EXAMPLES.md) takes you
-from these first rules through negation, arithmetic, aggregates, tables
-and the C API, with programs you can run.
+Use `relic -i impact.dl` for interactive queries, or include queries in the
+program itself. [EXAMPLES.md](EXAMPLES.md) provides runnable examples of
+negation, arithmetic, aggregates, table processing and the C API.
 
-## Small engine, serious work
+## Features
 
-* **Fast recursive evaluation.** Semi-naive evaluation avoids repeating
+* **Recursive evaluation.** Semi-naive evaluation avoids repeating
   work from earlier rounds. Indexed joins and automatic join ordering keep
   lookups focused. Magic Sets specialize evaluation to a query's bindings,
   so a focused question can avoid computing an entire relation.
-* **Use your cores.** `-j 0` uses the available processors, up to 256 threads;
-  `-j 16` requests sixteen. Large evaluation rounds share their work, while
-  small rounds stay on one thread. Answers, their order and diagnostics
-  stay the same at every thread count.
-* **Easy to carry.** C11, no third-party runtime dependencies, and BSD
+* **Multi-core execution.** `-j 0` uses the available processors, up to 256
+  threads; `-j 16` requests sixteen. Large evaluation rounds share their
+  work, while small rounds stay on one thread. Answers, their order and
+  diagnostics stay the same at every thread count.
+* **Minimal dependencies.** C11, no third-party runtime dependencies, and BSD
   2-Clause licensing. The only optional dependency is `libedit` for REPL
   line editing. A release tarball needs a compiler, `make` and a POSIX shell.
-* **Fits your workflow.** Import CSV or TSV, write answers as text, CSV,
-  TSV or JSON, and export derived relations for another run. `-e` explains
-  the query plan; `-X stats` reports the work the engine does.
+* **Data exchange and diagnostics.** Import CSV or TSV, write answers as
+  text, CSV, TSV or JSON, and export derived relations for another run.
+  `-e` explains the query plan; `-X stats` reports the work the engine does.
 
-## Performance you can inspect
+## Performance
 
 On the benchmark suite's dense cyclic transitive-closure workload
 (`tc-cyclic`), a recorded run takes **2.78 s on one thread and 0.45 s on
@@ -90,8 +93,8 @@ macOS Xeon; speedup depends on the workload, and small rounds or loading
 may gain little from additional threads.
 
 For context-sensitive points-to analysis over the Graspan data sets,
-recorded single-thread runs on a quiet macOS Xeon put relic close to
-**compiled Soufflé**, without compiling the Datalog program:
+recorded single-thread runs on a quiet macOS Xeon show performance
+comparable to **compiled Soufflé**, without compiling the Datalog program:
 
 | Input | Base facts | relic | Compiled Soufflé |
 | --- | ---: | ---: | ---: |
@@ -108,8 +111,8 @@ in [the parallel evaluation notes](docs/todo-parallel.md).
 The [comparison harness](bench/compare/run.sh) checks answers before timing
 relic against Soufflé's interpreted and compiled modes, Nemo, tabled
 SWI-Prolog, clingo, DuckDB and SQLite. It reports wall time, peak memory
-and compilation time separately. Run your own comparison, or inspect
-relic's scaling at several thread counts. Use an installed `relic` or a
+and compilation time separately. To compare engines or measure relic's
+scaling at several thread counts, use an installed `relic` or a
 binary built with `--disable-shared`, so the harness times the executable
 directly:
 
@@ -124,31 +127,31 @@ BENCH_THREADS="1 4 16" bench/run.sh /path/to/relic
 See [benchmark methodology](specs/design-bench.md) and the
 [recorded workload baseline](bench/baseline.txt) for details.
 
-## Reliability is part of the engine
+## Reliability and testing
 
-Speed matters when the answers are right. relic checks its optimizations
-against a simple reference evaluator, compares serial and parallel
-execution, and tests failure paths as well as successful queries.
+relic checks its optimizations against a simple reference evaluator,
+compares serial and parallel execution, and tests failure paths as well
+as successful queries.
 
-* **Fuzz the whole path.** Four libFuzzer targets exercise program loading,
+* **Differential fuzzing.** Four libFuzzer targets exercise program loading,
   evaluation, table import and regular expressions. The evaluation target
   compares optimized answers against naive evaluation of the whole program,
   catching wrong results as well as crashes.
-* **Generate programs, then challenge the optimizations.** The randomized
-  suite compares evaluation strategies with indexing, join reordering,
+* **Randomized testing.** The randomized suite compares evaluation
+  strategies with indexing, join reordering,
   Magic Sets and parallel execution enabled or disabled. Weekly CI is
   configured for 10,000 program seeds and fifteen minutes per fuzz target
   under AddressSanitizer and UndefinedBehaviorSanitizer.
-* **Keep failures reproducible.** The fuzz corpora are replayed by
+* **Regression and sanitizer suites.** The fuzz corpora are replayed by
   `make check`. Dedicated suites run under address, undefined-behavior,
   thread, memory and leak sanitizers where supported.
-* **Keep control of execution.** Tuple and evaluation-memory limits stop
+* **Resource limits and file access.** Tuple and evaluation-memory limits stop
   runaway derivations with diagnostics. Programs express computation;
   the runner chooses which data files they can read and write. The memory
   limit covers evaluation storage, not total process memory.
 
 The [testing design](specs/design-testing.md) explains the reference
-checks, randomized testing and fuzzing. To exercise them locally:
+checks, randomized testing and fuzzing. Run them locally with:
 
 ```sh
 make check
@@ -287,7 +290,7 @@ See the [table examples](EXAMPLES.md#data-in-importing-tables) and
 [relic(1)](man/relic.1) for headers, column selection and explicit predicate
 names.
 
-## The same engine in your application
+## C library
 
 `librelic` installs a single public header, `<relic.h>`, and a pkg-config
 module, `librelic`. [examples/query.c](examples/query.c) loads a program,
