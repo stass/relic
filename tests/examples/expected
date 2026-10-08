@@ -62,9 +62,6 @@ relic> path(a, X)?
 b
 c
 relic> .quit
-$ relic -q 'path(a, X)?' graph.dl
-b
-c
 $ ./query
 b
 c
@@ -208,3 +205,10 @@ $ relic -l tuples=20 -q 'stops(central, zoo, N)?' metro.dl
 # exit 1
 $ relic -q 'blocked(release)?' release.dl | grep -q '^$' && echo blocked
 blocked
+$ relic -s -q 'affected(App, database)?' impact.dl
+api
+web
+worker
+$ relic -n -T edge:symbol,symbol -I edge.tsv -O path.dl reach.dl && relic -q 'path(a, X)?' path.dl
+b
+c

@@ -1,0 +1,6 @@
+depends(web, api).
+depends(api, database).
+depends(worker, api).
+
+affected(App, Changed) :- depends(App, Changed).
+affected(App, Changed) :- depends(App, Middle), affected(Middle, Changed).
