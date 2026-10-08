@@ -94,16 +94,6 @@ context's configuration, beside the other limits.
 
 ## Benchmarks
 
-**`bench/compare/run.sh` compares on one thread only.** [Low, component:
-`bench/compare/run.sh`] The harness runs every engine on one thread, Souffle
-with `-j1` and DuckDB with `threads = 1`, so nothing records how relic's
-speed-up at `-j 16` compares. A threaded column needs a Souffle built with
-OpenMP, since the one on this machine's `PATH` is not and ignores `-j`, and
-its programs translated with `-j16`, since a compiled Souffle program has
-parallel loops only when translated with `-j`. One comparison made by hand
-with Souffle 2.5 built with OpenMP had compiled Souffle leading at sixteen
-threads on `tc-cyclic` and relic leading on `cspa` and `chain-closure`.
-
 **No run is recorded on an idle machine.** [Medium, component: `bench/`]
 [Measurement and reporting](specs/design-bench.md#measurement-and-reporting)
 keeps one comparison run in `bench/compare/results.txt`, which does not

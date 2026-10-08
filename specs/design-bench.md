@@ -94,8 +94,9 @@ Souffle for the C++ program and compiles it with the system C++ compiler at
 `-O3`, defining the number width Souffle reports it was built with, so the
 compiler and its flags are chosen and recorded by the harness rather than
 inherited from a package. The definitions for SQLite, zlib and ncurses
-input and output, and OpenMP, are left out: no workload uses them, and the
-comparison is single-threaded. Compile time is reported in its own column
+input and output are left out because no workload uses them. Parallel runs
+translate programs with the requested thread count and compile and link
+with OpenMP; a Souffle build without OpenMP is refused for these runs. Compile time is reported in its own column
 and is not part of the run time.
 
 **The SQL engines.** A recursive common table expression is SQL's Datalog: a
@@ -109,15 +110,17 @@ the Magic rewrite done by hand, which no Datalog engine here is given; that
 neither DuckDB nor SQLite pushes the constant into a recursive expression
 itself is a measurement of them.
 
-**Threads.** relic evaluates on one thread by default and shares a round
-among threads only when asked with `-j`. The comparison runs relic at that
-default and holds every other engine to one thread as well -- Souffle with
-`-j1`, DuckDB with `SET threads = 1`, clingo at its default of one thread,
-SQLite on one thread by nature -- so the primary numbers compare
-single-threaded engines. An engine that parallelizes without a switch is
-reported as it is, and its user time beside its wall time shows it. What
-threads gain relic is measured by `bench/run.sh`'s `BENCH_THREADS`, not by
-the comparison.
+**Threads.** `BENCH_THREADS` sets one thread count per comparison run,
+from 1 to 256. relic receives `-j`, Souffle receives `-j` during translation
+and execution, and DuckDB receives `SET threads`. The default is one thread.
+SWI-Prolog, clingo's Datalog grounding, Nemo and SQLite retain their serial
+execution; each result records the configured count the engine supports,
+rather than labeling a serial engine as parallel. A parallel comparison can
+select relic, Souffle's three modes and DuckDB with `-e`; the single-core
+run includes the serial engines. Souffle's compiled parallel modes use
+`BENCH_OPENMP_FLAGS`, default `-fopenmp`, with the selected C++ compiler.
+These are trusted compiler flags, with the same shell interpretation as
+the harness's build command.
 
 **No tuning beyond the documented switches.** Each engine runs as its manual
 suggests for this kind of program. Where an engine needs a limit raised to
@@ -384,7 +387,9 @@ power and thermal settings, and whether the machine was idle -- is added by
 whoever records the run. A run kept for comparison by eye is recorded as
 `bench/compare/results.txt`, as `bench/baseline.txt` is for `bench/run.sh`.
 
-Numbers are published only from a run that meets all of these:
+A machine-specific measurement report records its conditions and limits;
+it does not imply a ranking on other platforms. General performance claims
+are published only from a run that meets all of these:
 
 * an idle machine, with its power and thermal settings recorded;
 * at least ten timed runs per cell, with the spread beside the median;
@@ -441,7 +446,15 @@ required; any other engine not installed is skipped with a note. Each
 engine's command can be named by an environment variable -- `RELIC`,
 `SWIPL`, `SOUFFLE`, `CLINGO`, `NMO`, `DUCKDB`, `SQLITE`, and `CXX` for
 Souffle's compiler -- and `BENCH_SCALE`, `BENCH_RUNS` and `BENCH_TIMEOUT`
-set the scale, the number of timed runs and the time limit.
+set the scale, the number of timed runs and the verification time limit.
+`BENCH_THREADS` sets the thread count. `BENCH_ARTIFACTS` retains hyperfine's
+individual samples under `scale-<scale>/threads-<threads>/`; an existing
+run directory is refused so results are not overwritten. Commands in JSON
+reports are replaced with engine/workload labels to avoid publishing local
+paths; sample values are unchanged. The text report records the executable
+versions, switches and compiler. `-o` writes each completed cell immediately,
+so results survive an interrupted sweep. Reports from hyperfine's two
+pretty-printed JSON schemas use the same seconds and bytes.
 
 relic must be a binary. In a build tree configured for shared libraries,
 `./relic` is libtool's wrapper script, whose start-up would be timed as

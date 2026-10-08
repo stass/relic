@@ -27,7 +27,12 @@
 # programs.
 # BENCH_SCALE, 1 by default, multiplies every data set as it does for
 # bench/run.sh; BENCH_RUNS, 5, is the number of timed runs; and
-# BENCH_TIMEOUT, 300, the seconds each engine is given to answer.
+# BENCH_TIMEOUT, 300, the seconds each engine is given to verify its answer.
+# BENCH_THREADS, 1, sets relic, Souffle and DuckDB's thread count; other
+# engines keep their serial execution. Parallel compiled Souffle needs
+# OpenMP and BENCH_OPENMP_FLAGS (default -fopenmp), trusted compiler flags.
+# BENCH_ARTIFACTS names a directory retaining each timed cell's JSON samples;
+# commands in these reports use engine/workload labels instead of local paths.
 #
 # A workload whose data set is downloaded rather than generated, as the
 # Graspan points-to inputs are, runs only when -w names it.  Its archive is
@@ -59,23 +64,26 @@ scale=${BENCH_SCALE:-1}
 cache=$here/cache
 runs=${BENCH_RUNS:-5}
 limit=${BENCH_TIMEOUT:-300}
+threads=${BENCH_THREADS:-1}
+artifacts=${BENCH_ARTIFACTS:-}
+openmp_flags=${BENCH_OPENMP_FLAGS:--fopenmp}
 
 # The switches each engine runs with, recorded in the report's header.
 # SWI-Prolog reads no initialization file, which could change its flags,
 # and its default stack and table space are too small for the larger
-# closures.  Souffle and DuckDB are held to one thread, and DuckDB may not
+# closures.  Souffle and DuckDB use the requested threads, and DuckDB may not
 # download an extension during a run.  DuckDB and SQLite read no
 # initialization file, stop at the first error, and print rows without a
 # header, their columns separated by tabs.  The compiler's
 # switches depend on the Souffle installed and are set once it is found.
-relic_switches="-F tsv"
+relic_switches="-F tsv -j $threads"
 swipl_switches="-f none --stack-limit=16g --table-space=16g"
-souffle_switches="-j1"
+souffle_switches="-j$threads"
 magic_switches="--magic-transform=*"
 clingo_switches="-V0"
 nemo_switches="--report none -o"
 duckdb_switches="-batch -bail -no-init -noheader -cmd '.mode tabs'"
-duckdb_switches="$duckdb_switches -cmd 'SET threads = 1'"
+duckdb_switches="$duckdb_switches -cmd 'SET threads = $threads'"
 duckdb_switches="$duckdb_switches -cmd"
 duckdb_switches="$duckdb_switches 'SET autoinstall_known_extensions = false'"
 sqlite_switches="-batch -bail -init /dev/null -noheader -tabs"
@@ -86,7 +94,7 @@ all_engines="relic swipl souffle-interp souffle souffle-magic clingo nemo"
 all_engines="$all_engines duckdb sqlite"
 
 # The columns of a result, in the order result_row writes them.
-columns="workload engine status rows median fastest spread user"
+columns="workload engine threads scale status rows median fastest spread user"
 columns="$columns peak_bytes compile_seconds"
 
 # An awk prelude giving each result column's number, col["status"] and so on,
@@ -188,6 +196,16 @@ dataset_of() {
 	'' | */* | .*) die "$1 names no valid data set" ;;
 	esac
 	printf '%s\n' "$dataset_name"
+}
+
+# engine_threads ENGINE: the configured count, or one for serial engines.
+engine_threads() {
+	case $1 in
+	relic | souffle | souffle-interp | souffle-magic | duckdb)
+		printf '%s\n' "$threads"
+		;;
+	*) printf '1\n' ;;
+	esac
 }
 
 # engine_tool ENGINE: the command ENGINE's programs are run with.
@@ -635,7 +653,7 @@ compile_souffle() (
 	if [ "$1" = souffle-magic ]; then
 		translate="$translate $(quote "$magic_switches")"
 	fi
-	translate="$translate -g $(quote "$source") $(quote "$program")"
+	translate="$translate $souffle_switches -g $(quote "$source") $(quote "$program")"
 	build="$(quote "$cxx") $cxx_switches -I $(quote "$souffle_include")"
 	build="$build -o $(quote "$binary") $(quote "$source")"
 
@@ -754,35 +772,11 @@ judge_answer() {
 
 # parse_timing FILE: the median, fastest, standard deviation, mean user
 # seconds and peak bytes of hyperfine's JSON export FILE, on one line, or a
-# failure if one is missing.  One run has no deviation, which hyperfine
-# writes as null and this writes as -.  hyperfine writes one key per line
-# and one array element per line; the peak is the largest of the runs'
-# peaks.
+# failure if one is missing. Both pretty-printed JSON schemas are accepted.
+# One run has no deviation, written as null and reported as -. The peak is
+# the largest resident memory across the runs, in bytes.
 parse_timing() {
-	awk '
-		/"median":/ { median = $2 }
-		/"min":/ { fastest = $2 }
-		/"stddev":/ { spread = $2 }
-		/"user":/ { user = $2 }
-		/"memory_usage_byte":/ { in_memory = 1; next }
-		in_memory && /]/ { in_memory = 0 }
-		in_memory {
-			sub(/,/, "", $1)
-			if (peak == "" || $1 + 0 > peak + 0)
-				peak = $1
-		}
-		END {
-			if (median == "" || fastest == "" || spread == "" ||
-			    user == "" || peak == "")
-				exit 1
-			gsub(/,/, "", median)
-			gsub(/,/, "", fastest)
-			gsub(/,/, "", spread)
-			if (spread == "null")
-				spread = "-"
-			gsub(/,/, "", user)
-			print median, fastest, spread, user, peak
-		}' "$1"
+	awk -f "$here/timing.awk" "$1"
 }
 
 # measure ENGINE WORKLOAD: time BENCH_RUNS runs with hyperfine, setting
@@ -792,10 +786,10 @@ parse_timing() {
 measure() {
 	ignore=
 	if [ "$1" = clingo ]; then
-		ignore=-i
+		ignore=$clingo_ignore
 	fi
 
-	if ! hyperfine -N $ignore --style none --runs "$runs" \
+	if ! hyperfine -N $ignore $timing_switches --style none --runs "$runs" \
 	    --export-json "$work/timing.json" "$(engine_command "$1" "$2")" \
 	    > /dev/null 2> "$work/hyperfine.err"; then
 		status=failed
@@ -817,8 +811,9 @@ EOF
 # result_row: the result being recorded, tab-separated, one field for each
 # name in `columns` and in that order.
 result_row() {
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-	    "$workload" "$engine" "$status" "$rows" "$median" "$fastest" \
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	    "$workload" "$engine" "$(engine_threads "$engine")" "$scale" \
+	    "$status" "$rows" "$median" "$fastest" \
 	    "$spread" "$user" "$peak_bytes" "$compile_seconds"
 }
 
@@ -863,6 +858,9 @@ reset_result() {
 record_result() {
 	row=$(result_row)
 	printf '%s\n' "$row" >> "$work/results.tsv"
+	if [ -n "$results" ]; then
+		printf '%s\n' "$row" >> "$results"
+	fi
 	print_result "$row"
 }
 
@@ -872,6 +870,7 @@ record_result() {
 # optional, and a failure otherwise.
 run_engine() {
 	reset_result
+	rm -f "$work/timing.json"
 
 	if [ ! -f "$(programs_of "$workload")/$(program_file "$engine")" ]
 	then
@@ -895,6 +894,15 @@ run_engine() {
 		measure "$engine" "$workload"
 	fi
 
+	if [ -n "$artifacts" ] && [ -f "$work/timing.json" ]; then
+		# Commands contain disposable paths; sample values stay unchanged.
+		awk -v label="$engine $workload" '
+			/"command":/ {
+				print "      \"command\": \"" label "\","; next
+			}
+			{ print }
+		' "$work/timing.json" > "$artifacts/$workload.$engine.json"
+	fi
 	record_result
 }
 
@@ -946,7 +954,8 @@ summarize() {
 # print_header: what a recorded run needs to be reproduced.
 print_header() {
 	echo "# machine: $(machine), $(uname -sr)"
-	echo "# scale $scale, $runs timed runs, ${limit}s to answer"
+	echo "# scale $scale, $runs timed runs, ${limit}s to answer, $threads threads"
+	echo "# $(hyperfine --version)"
 	tools=
 	for engine in $engines; do
 		tool=$(engine_tool "$engine")
@@ -989,6 +998,8 @@ fi
 require_positive BENCH_SCALE "$scale"
 require_positive BENCH_RUNS "$runs"
 require_positive BENCH_TIMEOUT "$limit"
+require_positive BENCH_THREADS "$threads"
+[ "$threads" -le 256 ] || die "BENCH_THREADS must be from 1 to 256"
 for engine in $requested_engines; do
 	member "$engine" $all_engines || die "unknown engine $engine"
 done
@@ -1015,6 +1026,22 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
 	die "timeout(1) is needed to limit the engines"
 fi
+# Hyperfine 2 names metrics explicitly and accepts selected success codes.
+# Earlier releases include the same measures in their default JSON export.
+timing_switches=
+clingo_ignore=-i
+case $(hyperfine --version) in
+'hyperfine 2.'*)
+	timing_switches="--metrics time_wall_clock,time_user,memory_peak_resident"
+	clingo_ignore=--ignore-failure=10,30
+	;;
+esac
+if [ -n "$artifacts" ]; then
+	artifacts=$artifacts/scale-$scale/threads-$threads
+	[ ! -e "$artifacts" ] || die "artifact directory already exists: $artifacts"
+	mkdir -p "$artifacts"
+	artifacts=$(CDPATH= cd -- "$artifacts" && pwd)
+fi
 [ -x /usr/bin/time ] || die "/usr/bin/time is needed to time compilation"
 installed relic || die "cannot run $relic; name the relic to compare"
 case $(head -c 2 "$(command -v "$relic")") in
@@ -1040,6 +1067,19 @@ for engine in $all_engines; do
 done
 engines="relic$other_engines"
 
+# The interpreter must also refuse a thread count its build cannot honor.
+if [ "$threads" -gt 1 ]; then
+	for engine in $engines; do
+		case $engine in
+		souffle | souffle-interp | souffle-magic)
+			"$souffle" --version | grep -qi 'openmp' ||
+			    die "parallel Souffle requires a build with OpenMP"
+			break
+			;;
+		esac
+	done
+fi
+
 # Souffle's compiled programs include the headers installed beside it and
 # are built for the width of its numbers, as souffle -o builds them.
 if member souffle $engines || member souffle-magic $engines; then
@@ -1049,6 +1089,9 @@ if member souffle $engines || member souffle-magic $engines; then
 	[ -n "$domain_bits" ] ||
 	    die "$souffle --version does not report its word size"
 	cxx_switches="-std=c++17 -O3 -DRAM_DOMAIN_SIZE=$domain_bits"
+	if [ "$threads" -gt 1 ]; then
+		cxx_switches="$cxx_switches $openmp_flags"
+	fi
 fi
 
 work=$(mktemp -d) || exit 1
@@ -1056,6 +1099,9 @@ cache_part=
 trap 'rm -rf "$work"; [ -z "$cache_part" ] || rm -f "$cache_part"' EXIT
 trap 'exit 1' HUP INT TERM
 : > "$work/results.tsv"
+if [ -n "$results" ]; then
+	printf '%s\n' $columns | paste -s -d '\t' - > "$results"
+fi
 
 print_header
 for workload in $workloads; do
@@ -1086,12 +1132,6 @@ for workload in $workloads; do
 done
 summarize
 
-if [ -n "$results" ]; then
-	{
-		printf '%s\n' $columns | paste -s -d '\t' -
-		cat "$work/results.tsv"
-	} > "$results"
-fi
 if awk -F '\t' -v columns="$columns" "$column_numbers"'
     $col["status"] ~ /^(failed|mismatch|empty)$/ { found = 1 }
     END { exit !found }' "$work/results.tsv"; then

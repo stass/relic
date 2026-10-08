@@ -87,6 +87,7 @@ EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md bench/baseline.txt \
 	TODO.md docs specs \
 	bench/datasets.sh bench/run.sh \
 	bench/compare/results.tsv bench/compare/suite-summary.tsv \
+	bench/compare/timing.awk tests/fixtures/bench \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
 	tests/fuzz/regex.dict tests/fuzz/relic.dict tests/lang \
@@ -438,7 +439,7 @@ tests_unit_test_header_cxx_CXXFLAGS = $(RELIC_SAN_CFLAGS)
 tests_unit_test_header_cxx_LDADD = librelic.la
 endif
 
-dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/cli.sh \
+dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/bench-timing.sh tests/cli.sh \
 	tests/globals.sh tests/hidden-answers.sh tests/langfiles.sh \
 	tests/magic.sh tests/man.sh tests/output.sh tests/perf.sh \
 	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/roundtrip.sh \

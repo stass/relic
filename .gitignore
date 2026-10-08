@@ -31,6 +31,8 @@
 *.gcno
 /relic
 /librelic.la
+/examples/query
+/tests/pty
 
 # Disposable trees made by the sanitizer and coverage suites.
 /disposable/

@@ -1,0 +1,40 @@
+--- a/src/include/souffle/utility/span.h
++++ b/src/include/souffle/utility/span.h
+@@ -30,6 +30,7 @@
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
++#include <exception>
+ #include <type_traits>
+ 
+ #ifndef TCB_SPAN_NO_EXCEPTIONS
+--- a/src/interpreter/Index.h
++++ b/src/interpreter/Index.h
+@@ -420,7 +420,7 @@
+     }
+ 
+     void insert(const Index& src) {
+-        data = src.data;
++        data = src.data.load();
+     }
+ 
+     bool contains(const Tuple& /* t */) const {
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -424,16 +424,6 @@
+   target_compile_definitions(souffleprof PUBLIC USE_CUSTOM_GETOPTLONG)
+ endif (MSVC)
+ 
+-if (APPLE)
+-  if ("${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "arm64")
+-    # work around a known issue with xcode15 linker
+-    # c++ exceptions handling is broken otherwise
+-    set(CMAKE_CXX_LINK_FLAGS "${CMAKE_CXX_LINK_FLAGS} -Wl,-ld_classic")
+-    target_link_options(libsouffle PUBLIC "-ld_classic")
+-    target_link_options(compiled PUBLIC "-ld_classic")
+-    target_link_options(souffleprof PUBLIC "-ld_classic")
+-  endif()
+-endif()
+ 
+ # --------------------------------------------------
+ # Substitutions for souffle-compile.py
