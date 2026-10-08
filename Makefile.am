@@ -86,6 +86,7 @@ pkgconfig_DATA = librelic.pc
 EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md bench/baseline.txt \
 	TODO.md docs specs \
 	bench/datasets.sh bench/run.sh \
+	bench/compare/results.tsv bench/compare/suite-summary.tsv \
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
 	tests/fuzz/regex.dict tests/fuzz/relic.dict tests/lang \
