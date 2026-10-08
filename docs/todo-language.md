@@ -1,16 +1,17 @@
 # Language and tooling gaps
 
 What other Datalog systems offer that relic does not and is worth adding.
-What relic leaves out on purpose is in architecture section 3.
+What relic leaves out on purpose is in
+[non-goals](../specs/architecture.md#non-goals).
 The engines compared are the ones a relic user might otherwise reach for:
 Souffle, LogicBlox's LogiQL, Nemo, clingo, CodeQL, DDlog and the tabling
 Prologs. Each item names the engines that have the feature, what a relic
 program does without it, and the reason for the verdict. Verdicts are
 provisional until a design exists.
 
-The rule the verdicts follow is architecture section 73: relic is one
-relational engine with no hidden second one, and its simplicity is the
-feature. A feature is worth adding when it changes which programs can be
+The rule the verdicts follow is the architecture's
+[north star](../specs/architecture.md#north-star): relic is one relational
+engine with no hidden second one, and its simplicity is the feature. A feature is worth adding when it changes which programs can be
 written and fits the engine as one more operation or one more rewrite; it is
 declined when it would make relic a database or a Prolog.
 
@@ -37,12 +38,13 @@ rewrite's limit already bounds.
 **Including another file.** [Low, component: `lib/parse.c`, `cmd/relic/`]
 Souffle's `#include`, clingo's `#include`, CodeQL's `import`. Today files
 combine only on the command line, so a shared library of rules cannot be
-named from a program. The import design keeps data file names out of program
-text for reproducibility and safety, and the same argument applies less to
-rules: a rule file names other rule files, not data. It is spelled
-`#include`, which D-30 reserves. The safe form resolves a name relative
-to the including file, refuses `..` and absolute paths, and bounds the
-depth.
+named from a program. Program text
+[cannot name a file](../specs/design-tables.md#program-text-cannot-name-a-file)
+for reproducibility and safety, and the same argument applies less to
+rules: a rule file names other rule files, not data. The spelling and the
+safe form are [reserved](../specs/language.md#reserved-syntax): `#include`,
+resolving a name relative to the including file, refusing `..` and
+absolute paths, and bounding the depth.
 
 **Constraints.** [Low, component: language] A rule with no head,
 `:- task(T), not owner(T, _).`, meaning "this must not hold". LogiQL's
@@ -63,10 +65,10 @@ a fraction: a ratio, a weight, a measurement imported from a table.
 Souffle, LogiQL, Nemo, CodeQL, DDlog and the Prologs have a float type;
 clingo, like relic, has integers only. A relic program scales to an
 integer, cents or parts per thousand, and divides with truncation. The
-design is `specs/design-floats.md` and the decision D-33: a fourth type
-equal only to itself, ordered exactly against the integers, an exact
-`total` aggregate, and what keeps every platform's bytes the same. It
-stays out of version 1, architecture section 3, and comes last in
-section 69 because no workload measured here asks for it; the design is
-recorded so that a later version, or a language built as a superset of
-relic's, adds floats in one way.
+design is `specs/design-floats.md`: a fourth type equal only to itself,
+ordered exactly against the integers, an exact `total` aggregate, and what
+keeps every platform's bytes the same. It stays out of version 1
+([non-goals](../specs/architecture.md#non-goals)) and comes last because no
+workload measured here asks for it; the design is recorded so that a later
+version, or a language built as a superset of relic's, adds floats in one
+way. The item on type tests under Engine in `TODO.md` comes first.

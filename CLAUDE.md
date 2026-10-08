@@ -20,46 +20,21 @@
 ## Dependencies
 
 relic has no third-party runtime dependencies, and that is a product
-requirement rather than a preference: the tool must be as easy to install and
-audit as `awk` or `grep`. The full policy is
-[section 74 of the architecture](specs/architecture.md#74-dependency-policy).
-In order of preference:
+requirement: the tool must be as easy to install and audit as `awk` or `grep`.
+Follow the [dependency policy](specs/architecture.md#dependency-policy). The
+sole optional dependency is `libedit`, used only for REPL line editing.
 
-1. Use the C11 standard library or a BSD interface.
-2. Where a platform lacks one, let `configure` select a replacement from
-   `compat/` for that platform only.
-3. If some future component genuinely needs external code, vendor a pinned
-   upstream release under `vendor/`. Retain its license, provenance and
-   checksums; keep the integration layer separate from upstream sources;
-   document every patch; build it under the same warnings and sanitizers as
-   the rest of the tree.
-4. Write it only when the alternative is worse. A purpose-built
-   open-addressing hash table storing 32-bit identifiers inline is a few
-   hundred auditable lines and is faster than a generic container.
-   Reimplementing a general-purpose library would not be.
-
-The sole optional dependency is `libedit`, used only for REPL line editing.
-
-Development tools are a separate question from runtime dependencies. If a
-build or development tool is missing, install it via homebrew or ask me to
-install it. Do not work around a missing tool.
+Development tools are a separate question. If a build or development tool is
+missing, install it via homebrew or ask me to install it. Do not work around a
+missing tool.
 
 ## Design
 
 * Code should be simple and clean, never over-complicate things.
-* **Human readability is a requirement.** Write code so another developer can
-  understand its purpose, data flow, invariants and failure paths without
-  reconstructing the implementation or reading the conversation. Follow the
-  [readability standard](specs/style.md#readability-standard). Make the main
-  flow read as a sequence of named operations in the problem's vocabulary.
-  Keep representation details in cohesive helpers, name values by their role
-  and units, and make mutation and failure handling explicit. Explain the
-  algorithm and its invariants in enough detail to understand why it works.
-  Comments and blank lines do not repair a function whose structure is hard to
-  follow.
-* Prefer functional style: separate pure computation from code with side
-  effects where practical. Create reusable functions without side effects when
-  doing so does not add complexity.
+* **Human readability is a requirement.** Follow the
+  [readability standard](specs/style.md#readability-standard): another
+  developer must understand purpose, data flow, invariants and failure paths
+  without reconstructing the implementation or reading the conversation.
 * If a design starts getting too complicated or convoluted, or accumulates a
   lot of edge cases, stop and re-evaluate the big picture. A pile of special
   cases is usually a symptom that the architecture is wrong: step back and ask
@@ -85,48 +60,18 @@ install it. Do not work around a missing tool.
 
 ## Code
 
-* Follow the [style guide](specs/style.md). Give structs matching `_t`
-  typedefs (e.g. `typedef struct relic_value relic_value_t;`) and use those
-  typedefs. Separate logical code blocks with blank lines.
-* Prefer the BSD memory primitives from `<strings.h>` (note the trailing `s`)
-  when they fit:
-
-      bzero(buf, n)         instead of memset(buf, 0, n)
-      bcopy(src, dst, n)    instead of memcpy(dst, src, n)
-      bcmp(a, b, n) == 0    instead of memcmp(a, b, n) == 0
-
-  All three are available on FreeBSD, macOS, and Linux glibc. WATCH the
-  argument order on `bcopy` - it is `(src, dst, n)`, the opposite of `memcpy`.
-  This is the classic foot-gun; flag it in code review. Reach for `mem*`
-  whenever the BSD version does not fit: `memset` for non-zero fills, `memcmp`
-  when you need a sign (lexicographic ordering), `memcpy` when call-site types
-  make `bcopy`'s reversed args harder to read. No annotation comments are
-  required - just pick the function that reads cleanest.
-* CLI flags follow BSD style: single-letter options parsed with `getopt(3)`
-  (not `getopt_long`). Avoid `--long-arguments` entirely. When a knob has many
-  variants (resource limits), use a single letter that takes a `key=value`
-  argument and is repeatable (e.g. `-l tuples=5000000 -l memory=2147483648`),
-  not a separate letter per knob.
-* Comment logical blocks concisely only where their purpose or reasoning is
-  not obvious. Comments must be self-contained and self-explanatory: no
-  references to design documents, temporal marks, or narration of the code.
-  Use complete explanations for non-obvious algorithms, representations and
-  contracts; do not compress them into cryptic one-line comments. Remove
-  redundant words, not the reasoning a maintainer needs.
-* Do not leave temporal or campaign-specific marks in code, comments, commit
-  bodies that ship inline (e.g. doc strings), or user-facing docs. No "now
-  fixed", "previously broken", "as of <date>", "Wave 3 changes", "Addressing
-  BUG-12", "post-rebase", "after the security campaign", "(fixed in commit
-  abc123)", or similar. Code and docs describe the current state of the
-  system; the why-and-when belongs in commit messages, which are versioned and
-  read in temporal context. Inline temporal references rot the moment the next
-  change lands and mislead future readers.
-* Source files must be ASCII-only. No em-dashes, smart quotes, arrows,
-  ellipsis characters, non-breaking spaces, or any other byte > 0x7f in `.c`,
-  `.h`, `Makefile.am`, `configure.ac`, `m4/*.m4`, or shell scripts. CI greps
-  the source tree for non-ASCII bytes and fails the build. Markdown under
-  `specs/` and at the repository root is exempt because it is prose, not
-  source.
+* Follow the [style guide](specs/style.md). It covers layout, naming, `_t`
+  typedefs, comments, the BSD memory primitives, and `getopt(3)` flags.
+* Watch the argument order of `bcopy(src, dst, n)`, the opposite of `memcpy`.
+  Flag it in code review.
+* Do not leave temporal or campaign-specific marks in code, comments, doc
+  strings, specs or user-facing docs: no "now fixed", "previously broken",
+  "as of <date>", "Wave 3", "Addressing BUG-12", "(fixed in commit abc123)".
+  Code and docs describe the current state of the system; the why-and-when
+  belongs in commit messages, which are read in temporal context.
+* Source files (`.c`, `.h`, `Makefile.am`, `configure.ac`, `m4/*.m4`, shell
+  scripts) must be ASCII-only; CI fails the build on any byte > 0x7f.
+  Markdown prose is exempt.
 
 ## Tests and sanitizers
 
@@ -139,39 +84,20 @@ install it. Do not work around a missing tool.
   to compile. Trivial typo and one-line obvious-correct fixes are exempt;
   anything involving the evaluator, the Magic rewrite, memory ownership, or a
   multi-step code path is not trivial.
-* Run `make check-asan` periodically. It reconfigures with `--enable-asan`,
-  rebuilds, and runs the full suite under AddressSanitizer. The target exports
-  `ASAN_OPTIONS` as a colon-separated list:
-
-      halt_on_error=1
-      detect_leaks=1
-      detect_stack_use_after_return=1
-      check_initialization_order=1
-      strict_string_checks=1
-      detect_invalid_pointer_pairs=2
-      abort_on_error=1
-      allocator_may_return_null=1
-
-  so leaks, use-after-return, dynamic-init-order fiascos, and a poisoned read
-  all fail the test instead of silently logging, while an allocation the
-  sanitizer will not satisfy returns NULL, as the C library's would, for
-  relic's failure handling to be tested. ASan on macOS defaults to
-  `halt_on_error=0` and `detect_leaks=0`, so the explicit options matter. When
-  ASan fires, treat it as a HIGH finding and fix the root cause before
-  committing. Mandatory before any commit touching allocation, relation or
+* `make check-asan` rebuilds with AddressSanitizer and runs the full suite with
+  the strict `ASAN_OPTIONS` set in `Makefile.am` (leaks, use-after-return and
+  init order fail the run; allocations may return NULL so relic's failure
+  handling is exercised). Treat any ASan report as a HIGH finding and fix the
+  root cause. Mandatory before any commit touching allocation, relation or
   index storage, or query result lifetime.
-* Run `make check-lsan` when LeakSanitizer is available standalone (clang/gcc
-  on Linux; on macOS LSan ships only as part of ASan and is exercised by
-  `check-asan`). Cheaper than full ASan, useful for a quick leak smoke before
-  push.
-* Run `make check-msan` when MemorySanitizer is available (clang on Linux with
-  an MSan-instrumented libc++; not supported on macOS or FreeBSD). MSan catches
-  reads of uninitialized memory that ASan does not. `./configure` auto-detects
-  MSan support; if absent, `make check-msan` is a no-op.
-* `make check-ubsan` runs the suite with `-fsanitize=undefined` and
-  `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`. Catches signed overflow,
-  alignment violations, and shifts past width. Cheap; run alongside
-  `check-asan` when touching arithmetic or bit-level code.
+* `make check-ubsan` runs the suite under UndefinedBehaviorSanitizer. Run it
+  alongside `check-asan` when touching arithmetic or bit-level code.
+* `make check-tsan` runs the suite under ThreadSanitizer with threads
+  enabled. Run it when touching parallel evaluation or anything shared
+  between workers.
+* `make check-lsan` (standalone LeakSanitizer, Linux) and `make check-msan`
+  (MemorySanitizer, clang on Linux) run where available and are no-ops
+  otherwise.
 
 ## Committing
 
@@ -191,36 +117,21 @@ install it. Do not work around a missing tool.
 
 ## Documents
 
-Project documents and what each is for:
-
-| File | Contents |
-| --- | --- |
-| [specs/architecture.md](specs/architecture.md) | the target design of the system |
-| [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
-| [specs/decisions.md](specs/decisions.md) | the numbered decisions (D-N) the design rests on |
-| `specs/design-<feature>.md` | one per subsystem, written before its code |
-| [TODO.md](TODO.md) | forward-looking index of open work, by severity |
-| [NEWS](NEWS) | what changed in each release, for its users |
+[specs/README.md](specs/README.md) indexes the design documents and states
+their conventions. Besides `specs/`, [TODO.md](TODO.md) is the forward-looking
+index of open work and [NEWS](NEWS) says what changed in each release.
 
 * For every major feature, write `specs/design-<feature>.md` first and
-  reference it from `specs/architecture.md` before implementation. This keeps
-  decisions reviewable and durable.
-* **Architecture and design docs are forward-looking and describe the
-  long-term shape of the system, not the current implementation status.**
-  `specs/architecture.md` and every `specs/design-*.md` capture the target
-  design we are building toward. Only edit them when the long-term
-  architecture or design itself changes (a new subsystem, a reversed decision,
-  a renamed primitive). Do **not** rewrite them to record what shipped in a
-  given change, what was deferred for scheduling reasons, or which parts of the
-  design are not yet implemented - that belongs in `TODO.md`.
-  If a change ships a subset of a design doc, the design doc stays unchanged
-  and the deferral is recorded in `TODO.md`.
-  Trimming a design doc to match a partial implementation erodes the durable
-  architecture record and forces future readers to reconstruct intent from
-  commit history.
-* A decision that constrains more than one subsystem gets the next number in
-  `specs/decisions.md`. Decisions are never renumbered; one that reverses
-  another says which.
+  reference it from `specs/architecture.md` before implementation.
+* **Specs describe the target design, in the present tense.** Edit them when
+  the design changes, not to record what shipped, what was deferred, or which
+  parts are not built yet - that belongs in `TODO.md`. A design doc is never
+  trimmed to match a partial implementation.
+* A decision that constrains more than one subsystem is recorded, with its
+  rationale, in the [contracts](specs/architecture.md#contracts) or the
+  pipeline entry of the architecture; any other decision lives in the design
+  doc it shapes. When a
+  decision changes, edit it in place; git holds the history.
 * `TODO.md` is split into categories (major initiatives, bugs by subsystem,
   security residuals, planned features). Each item has a `[Severity]` tag
   (Critical / High / Medium / Low) and a component pointer. Small items live

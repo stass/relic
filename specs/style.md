@@ -1,9 +1,10 @@
-# relic code style
+# Code style
 
 relic follows FreeBSD `style(9)` (Kernel Normal Form), with the project
 conventions below. These rules apply to relic-owned code; preserve upstream
 style and license notices in bundled and vendored sources, such as
-`compat/queue.h`.
+`compat/queue.h`. This guide is engineering practice: it binds how the
+code is written, not what it computes.
 
 **Human readability is a requirement.** Code should make its purpose, data
 flow, invariants and failure paths understandable to another developer.
@@ -32,10 +33,9 @@ look for, and to aim at:
 | Allocation, rehashing and installation of a new table are distinct steps; the comment explains why the fallible step must come first. | `relic_symbol_intern()` in `lib/symbol.c`, over `relic_idtab_reserve()` and `relic_idtab_place()` in `lib/util.c`. |
 | Names carry their role and saved state, and comments explain restoration obligations -- or why there are none. | `relic_exec_run()`, `step()` and `yield_after_emit()` in `lib/exec.c`, with `struct relic_scratch` in `lib/exec.h`: `level` and `resume` say what the loop is doing and where a full batch left it, and the frame's comment says why nothing is saved or restored across join levels. |
 
-Name concrete functions in this table as the tree acquires them, choosing ones
-that genuinely read well rather than whichever happen to exist. Existing files
-may contain older formatting, naming, or comment conventions; their presence
-does not override this guide.
+The examples in this table are chosen because they read well, not because
+they exist; a function that reads better replaces one here. Code in the tree
+that departs from this guide is not a precedent: the guide governs.
 
 ### Structure around meaningful operations
 
@@ -151,39 +151,39 @@ discover what the test intended.
 
 ## Layout and whitespace
 
-- Use tabs for indentation, with tab stops every eight columns. Indent
+* Use tabs for indentation, with tab stops every eight columns. Indent
   continuations four columns beyond the statement's indentation, using tabs
   followed by spaces. Never put spaces before tabs or leave trailing whitespace.
-- Aim for 80 columns. Keep searchable diagnostic strings intact; a slightly
+* Aim for 80 columns. Keep searchable diagnostic strings intact; a slightly
   longer line is acceptable when it reads better.
-- Separate logical blocks with one blank line: declarations, validation,
+* Separate logical blocks with one blank line: declarations, validation,
   preparation, processing, and cleanup should be visually distinct when they
   perform separate tasks. Keep closely related statements together; do not
   insert a blank line after every statement.
-- Put one blank line between declarations and statements, and between functions.
+* Put one blank line between declarations and statements, and between functions.
   Do not add a blank line immediately inside a block with no declarations or
   before its closing brace.
-- Put spaces after control keywords and commas, and around binary operators.
+* Put spaces after control keywords and commas, and around binary operators.
   Do not put spaces after function names, inside parentheses or brackets, or
   between unary operators and their operands.
-- Attach pointer stars to the name: `const char *name`, `data_fill_t *fill`.
+* Attach pointer stars to the name: `const char *name`, `data_fill_t *fill`.
   Write casts and `sizeof` without a following space: `(size_t)n`,
   `sizeof(*fill)`. Always parenthesize the operand of `sizeof`.
-- Wrap long expressions with the operator at the end of the preceding line.
+* Wrap long expressions with the operator at the end of the preceding line.
   Add parentheses where they clarify precedence.
-- Source files must be ASCII-only, including comments and strings. Markdown
+* Source files must be ASCII-only, including comments and strings. Markdown
   prose is exempt.
 
 ## Names, types, and declarations
 
-- Use `lower_snake_case` for functions, variables, struct tags, and typedefs.
+* Use `lower_snake_case` for functions, variables, struct tags, and typedefs.
   Use uppercase names for constants, enum values, and macros with side effects.
   Avoid identifiers reserved to the implementation.
-- **Give every relic-defined struct a matching `_t` typedef and use that typedef
+* **Give every relic-defined struct a matching `_t` typedef and use that typedef
   in declarations, fields, parameters, and return types.** For example,
   `typedef struct data_fill data_fill_t;`. Keep the struct tag for its definition
   and interfaces that require a tag, such as `queue(3)` macros.
-- Typedef the struct itself, never its pointer: write `data_fill_t *`, not a
+* Typedef the struct itself, never its pointer: write `data_fill_t *`, not a
   typedef that hides the indirection. Define each typedef in its owning header
   or source file; include that header where needed instead of duplicating it.
   Forward typedefs support opaque and self-referential types:
@@ -198,63 +198,63 @@ struct data_fill {
 };
 ```
 
-- Put shared types in the appropriate header and private types near the top
+* Put shared types in the appropriate header and private types near the top
   of their source file. Separate type definitions from object declarations;
   use `extern` for shared object declarations in headers.
-- Give each struct member its own line. Order members by logical use, then
+* Give each struct member its own line. Order members by logical use, then
   size (largest first), then name. Align member names with one or two tabs
   where practical; use one space after unusually long types.
-- Put local declarations at the start of their block, ordered by size and
+* Put local declarations at the start of their block, ordered by size and
   then name. Simple initializers are fine; put complicated calls in the
   statement block. A `for` loop may declare its counter in the initializer.
-- Prefer standard fixed-width types such as `uint32_t`, and `bool`, `true`,
+* Prefer standard fixed-width types such as `uint32_t`, and `bool`, `true`,
   and `false` from `<stdbool.h>`. Use designated initializers when they help
   identify fields, and `_Static_assert()` for compile-time assertions.
-- Mark unused parameters and locals with `RELIC_UNUSED` from `lib/internal.h`;
+* Mark unused parameters and locals with `RELIC_UNUSED` from `lib/cdefs.h`;
   do not use `(void)arg;` casts.
 
 ## Functions and control flow
 
-- Prefer functional style: separate pure computation from code with side
+* Prefer functional style: separate pure computation from code with side
   effects where practical. Create reusable functions without side effects
   when doing so does not add complexity.
-- Declare function prototypes at file scope: private `static` functions near
+* Declare function prototypes at file scope: private `static` functions near
   the top of the source file, shared functions in their owning header. Keep
   prototypes in logical order, alphabetically where practical. Use prototype
   syntax, including `(void)` for no parameters; never use K&R declarations.
-- Put a function definition's return type on its own line and its opening
+* Put a function definition's return type on its own line and its opening
   brace on the next line after the parameter list.
-- Put control-flow opening braces on the same line as the condition. Write
+* Put control-flow opening braces on the same line as the condition. Write
   `} else {` on one line. Braces around single statements may be omitted when
   clear; be consistent within each function.
-- Align `case` and `default` with `switch`, and indent their bodies one tab.
+* Align `case` and `default` with `switch`, and indent their bodies one tab.
   Mark intentional fallthrough with `/* FALLTHROUGH */`.
-- Use `for (;;)` for an indefinite loop. Put an empty loop body's semicolon
+* Use `for (;;)` for an indefinite loop. Put an empty loop body's semicolon
   on its own line.
-- Compare pointers with `NULL`, numbers with `0`, and characters with `'\0'`.
+* Compare pointers with `NULL`, numbers with `0`, and characters with `'\0'`.
   Only booleans should be tested directly or with unary `!`.
-- Use `NULL` without a cast when the pointer type is known. Supply the required
+* Use `NULL` without a cast when the pointer type is known. Supply the required
   pointer type for a null variadic argument. Do not cast a `void *` result in C.
-- Parenthesize returned values: `return (result);`. A void function may end
+* Parenthesize returned values: `return (result);`. A void function may end
   without a `return` statement.
 
 ## Comments
 
-- Add a concise comment before a logical block only when its purpose,
+* Add a concise comment before a logical block only when its purpose,
   constraint, or reasoning is not obvious from the code. Explain the reason
   for a check or ordering requirement instead of narrating statements.
-- Make comments self-contained and self-explanatory. State the relevant
+* Make comments self-contained and self-explanatory. State the relevant
   invariant or contract directly; do not refer to design documents or require
   the reader to follow a document path, section number, or link.
-- Do not put temporal or campaign markers in comments: change history, dates
+* Do not put temporal or campaign markers in comments: change history, dates
   of fixes, phase labels, issue references, and commit references belong in
   commit messages. Preserve required copyright and license notices.
-- Use enough sentences to explain the reasoning. Keep a simple observation
+* Use enough sentences to explain the reasoning. Keep a simple observation
   short; give an algorithm, representation, or subtle contract the explanation
   it needs. Document non-obvious ownership, lifetime, units, failure behavior,
   and concurrency requirements where needed. Remove repetition and irrelevant
   detail, not information the reader needs to understand the code.
-- Keep comment syntax consistent within each file. Use `/* ... */` for short
+* Keep comment syntax consistent within each file. Use `/* ... */` for short
   comments in C-style files; use aligned leading `*` lines for a necessary
   multiline comment. Avoid decorative banners and section-number hierarchies.
 
@@ -278,40 +278,40 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
 
 ## File organization and headers
 
-- Keep required copyright and SPDX notices at the top in a comment starting
+* Keep required copyright and SPDX notices at the top in a comment starting
   in column one, followed by a blank line. Preserve attribution in imported
   code; do not add revision-history annotations to relic code.
-- Group includes in this order, with a blank line between groups:
+* Group includes in this order, with a blank line between groups:
   1. System headers (`<sys/...>`). Put `<sys/types.h>` or `<sys/param.h>`
      first when needed; do not include both. Sort the rest alphabetically.
   2. Network headers, when needed.
   3. Other library headers, sorted alphabetically.
   4. Project headers, sorted alphabetically.
-- Use angle brackets for system and installed library headers, and double
+* Use angle brackets for system and installed library headers, and double
   quotes for local headers. The public header `include/relic.h` must remain
   strict C11, must not include `config.h`, and must be includable from C++.
-- Keep function declarations outside functions. Headers must include what
+* Keep function declarations outside functions. Headers must include what
   they need so their users do not depend on a particular include order.
 
 ## Macros and conditional compilation
 
-- Prefer established library facilities to custom machinery, including
+* Prefer established library facilities to custom machinery, including
   `queue(3)` macros for linked lists where suitable.
-- Parenthesize expression-like macro expansions and their arguments where
+* Parenthesize expression-like macro expansions and their arguments where
   needed for precedence. Avoid evaluating an argument more than once.
-- Wrap statement macros in `do { ... } while (0)`, leaving the final
+* Wrap statement macros in `do { ... } while (0)`, leaving the final
   semicolon to the caller. Align continuation backslashes.
-- Use a consistent space or tab after `#define`. A macro replacing a function
+* Use a consistent space or tab after `#define`. A macro replacing a function
   uses the uppercase version of that function's name.
-- Add condition comments to `#endif` or `#else` only for long or confusingly
+* Add condition comments to `#endif` or `#else` only for long or confusingly
   nested regions. Match the opening condition for `#endif` and the inverse
   condition for `#else`; separate the comment with one space.
-- Use branch-prediction hints only when measurements show a benefit in hot
+* Use branch-prediction hints only when measurements show a benefit in hot
   code, and apply them to the complete condition.
 
 ## Library calls and command-line code
 
-- Prefer the BSD memory primitives from `<strings.h>` when they fit:
+* Prefer the BSD memory primitives from `<strings.h>` when they fit:
 
   | Operation | Preferred form |
   | --- | --- |
@@ -321,15 +321,15 @@ data_fill_fits(const data_fill_t *fill, size_t capacity)
 
   Watch `bcopy`'s source-first argument order. Use `memset` for nonzero fills,
   `memcmp` for ordering, and `memcpy` when its call-site types make it clearer.
-- Use the project's error interfaces in library code. CLI diagnostics should
+* Use the project's error interfaces in library code. CLI diagnostics should
   use `err(3)` / `warn(3)` and their variants where appropriate. Prefer
   `printf(3)`-family calls for formatted output.
-- Parse CLI options with `getopt(3)` and single-letter flags. Keep each
+* Parse CLI options with `getopt(3)` and single-letter flags. Keep each
   letter's project-wide meaning; use a repeatable `-l key=value` for resource
   limits. Validate numeric operands, including range and trailing characters.
-- Sort option strings, switch cases, and option descriptions alphabetically
+* Sort option strings, switch cases, and option descriptions alphabetically
   unless intentional fallthrough requires another order.
-- Format usage like a manual-page synopsis: grouped flags without operands,
+* Format usage like a manual-page synopsis: grouped flags without operands,
   separately bracketed options with operands, required arguments, then
   bracketed optional arguments. Use `|` for alternatives. Exit with zero on
   success and one on ordinary failure.

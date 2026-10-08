@@ -6,29 +6,40 @@ what was done. Each item carries a severity and a component pointer.
 ## Major initiatives
 
 **Release relic 1.0.** [Critical, component: `specs/design-release.md`]
-What remains: a green run of `extended.yml` and `macos.yml` on the release
-commit, which architecture section 68 requires of every job; FreeBSD built
-and tested from the tarball by hand; and the release procedure of the
-design's section 5.
+What remains, per the design's
+[release gate](specs/design-release.md#the-release-gate): a green run of
+`extended.yml` and `macos.yml` on the release commit, since every job of the
+matrix must pass on it; FreeBSD, OpenBSD and NetBSD, which no workflow
+reaches, built and tested from the tarball by hand with no autotools
+present, the result recorded in the release's `NEWS` entry; the packaging
+skeletons the design's
+[packaging skeletons](specs/design-release.md#packaging-skeletons) describe,
+of which `contrib/` holds only the homebrew formula, so
+`contrib/freebsd/devel/relic/`, `contrib/openbsd/devel/relic/` and
+`contrib/pkgsrc/devel/relic/` are to write; and the
+[release procedure](specs/design-release.md#the-release-procedure).
 
-**Close the comparison gaps.** [Medium, component:
-`specs/design-comparison-cost.md`] The design's section 10 gates each of its
-six changes on a measurement, and three gates are missed. Step 1: the row
-writer is 11 per cent of `chain-closure` against the 5 per cent asked; what
-remains is formatting 24 MB of rows, and no cheaper formatting is designed.
-Step 5: the item on a growth's slack and transient under Benchmarks. Step 6:
-the item on importing facts under Benchmarks. The work is done when the
-gates hold and the comparison is recorded on an idle machine (the item on
-an idle run under Benchmarks).
+**Close the comparison gaps.** [Medium, component: `bench/compare/`,
+`cmd/relic/output.c`] Six changes were made to close relic's gaps against
+the other engines of `bench/compare/run.sh`, each with a target, and three
+targets are missed. The row writer's share of `chain-closure`'s profile
+is 11 per cent against a target under 5; what remains is formatting 24 MB
+of rows, and no cheaper formatting is designed. The peak above the live
+heap is the item on a growth's slack and transient under Benchmarks, and
+the import's time and peak the item on importing facts there. The work is
+done when the targets hold and the comparison is recorded on an idle
+machine (the item on an idle run under Benchmarks).
 
-**Parallel evaluation misses its speed-up gates.** [Medium, component:
-`lib/round.c`, `docs/todo-parallel.md`] `specs/design-parallel.md` section
-15 gates step 3 on a six-fold and step 4 on a ten-fold speed-up of
-`tc-cyclic` at sixteen threads; it is 6.2-fold, 2.78 s to 0.45 s, the
-fastest of five runs on a loaded machine, which meets the first and
-misses the second. `dist/3` scales 2.5-fold, missing the step 4 gate of
-`specs/design-arithmetic.md` as well. Steps 5 and 6 are not started. The
-causes and what to try are sorted in `docs/todo-parallel.md`.
+**Parallel evaluation misses its speed-up targets.** [Medium, component:
+`lib/round.c`, `docs/todo-parallel.md`] With the pool, `tc-cyclic` should
+run at least six times faster at `-j 16` than at `-j 1`, and with the
+parallel merge at least ten times; it is 6.2-fold, 2.78 s to 0.45 s, the
+fastest of five runs on a loaded macOS Xeon, which meets the first and
+misses the second. `dist/3` and `object/2`, which compute integers and
+strings, should scale as `tc-cyclic` does; `dist/3` scales 2.5-fold.
+Loading in parallel and components side by side, designed in
+`specs/design-parallel.md`, are not built. The causes and what to try are
+sorted in `docs/todo-parallel.md`.
 
 ## Engine
 
@@ -43,12 +54,43 @@ is also most of what a deferred round's merge costs on the rounds that grow
 the canonical index, which hold `chain-closure`'s average merge at 130
 microseconds against 66 for a typical round. A slot that kept the 32-bit
 hash beside the identifier would rehash from the table alone.
-`specs/design-memory.md` section 6 measured that slot on the closure
-workloads' duplicate checks, which gain nothing from it, and kept the
-identifier alone for the memory; the growth's cost was not in that
-measurement. Measure the hash-keeping slot on `chain-closure`'s growth
-against its peak memory before deciding, and if it loses, record the figure
-in `specs/design-memory.md` section 6 so the question stays closed.
+[The identifier table](specs/design-values.md#the-identifier-table) keeps
+the identifier alone because, on the closure workloads' duplicate checks,
+the doubled slot array costs about what the avoided reads save; the
+growth's cost was not in that measurement. Measure the hash-keeping slot on
+`chain-closure`'s growth against its peak memory before deciding, and if it
+loses, add the growth to the reason given under
+[alternatives not taken](specs/design-values.md#alternatives-not-taken) so
+the question stays closed.
+
+**Type tests read the type bits directly.** [Medium, component:
+`lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index
+set, which works only if every type test goes through the accessors that
+split an identifier into type and index
+([the identifier](specs/design-floats.md#the-identifier)). Before floats
+land, route these through a third-bit-aware accessor: `lib/exec.c` masks
+`RELIC_DOM_TYPE_MASK` itself at 765 and 794 and in `cell_type()` at 816,
+and in the min/max fold's mixed-type check at 1881, which would treat a
+group mixing integers and floats as one type; `lib/rule.c` does at 840.
+
+**A Magic rewrite found unstratified reports user errors first.** [Low,
+component: `lib/eval.c`, `lib/stratify.c`] `evaluate_rewrite()` treats an
+unstratified rewrite as an internal error, but `relic_schedule_build()`
+has already run `report_cycle()`, so the user would read "not stratified"
+diagnostics about generated predicates before the internal error. Build
+the rewrite's schedule without reporting cycles.
+
+**`lib/regex.h` shadows the system `<regex.h>`.** [Low, component:
+`lib/regex.h`, `Makefile.am`] `AM_CPPFLAGS` puts `-I$(top_srcdir)/lib` on
+the include path, so any system header that includes `<regex.h>` would get
+relic's. Rename the header.
+
+**Nothing bounds an input's size.** [Low, component: `lib/parse.c`,
+`lib/import.c`, `include/relic.h`] A load reads its whole stream before
+lexing (`read_stream()`), and an import grows one field's buffer without
+bound, so an unterminated csv quote buffers the rest of the file. The
+memory limit leaves both out by contract. A bound on either belongs in the
+context's configuration, beside the other limits.
 
 ## Benchmarks
 
@@ -63,24 +105,24 @@ with Souffle 2.5 built with OpenMP had compiled Souffle leading at sixteen
 threads on `tc-cyclic` and relic leading on `cspa` and `chain-closure`.
 
 **No run is recorded on an idle machine.** [Medium, component: `bench/`]
-`specs/design-bench.md` section 8 keeps one comparison run in
-`bench/compare/results.txt`, which does not exist: it needs an idle
-machine, ten timed runs per cell and the scale sweep, `BENCH_SCALE` 1, 2, 4
-and 8, so the curves show which gaps grow with the input. Section 8's
-criteria also ask for a second machine of a different operating system and
-processor; every run so far is one macOS Xeon. `bench/baseline.txt` was
-recorded on a machine busy with other work; its counters are exact, but its
-seconds are longer than an idle run's and want recording again in the same
-session. The same session should settle whether Souffle and Nemo, which
-write their answers to files where the other engines write to a discarded
-standard output, pay for it: under load a Souffle run writing its file
-showed wall time far above its CPU time, within the noise of a busy
-machine. If the file costs a measurable amount, time Souffle with `-D -`
-and find Nemo an equivalent. The run should include the Graspan workloads,
-`-w cspa-httpd,cspa-postgresql,cspa-linux`, which a default run leaves out.
-Single runs of each, one thread on a quiet machine, gave relic 210, 190 and
-50 seconds against compiled Souffle's 171, 195 and 54, at peaks of 6.2, 6.6
-and 2.1 GB against 5.5, 7.2 and 1.3.
+[Measurement and reporting](specs/design-bench.md#measurement-and-reporting)
+keeps one comparison run in `bench/compare/results.txt`, which does not
+exist: it needs an idle machine, ten timed runs per cell and the scale
+sweep, `BENCH_SCALE` 1, 2, 4 and 8, so the curves show which gaps grow with
+the input. The same criteria ask for a second machine of a different
+operating system and processor; every run so far is one macOS Xeon.
+`bench/baseline.txt` was recorded on a machine busy with other work; its
+counters are exact, but its seconds are longer than an idle run's and want
+recording again in the same session. The same session should settle
+whether Souffle and Nemo, which write their answers to files where the
+other engines write to a discarded standard output, pay for it: under load
+a Souffle run writing its file showed wall time far above its CPU time,
+within the noise of a busy machine. If the file costs a measurable amount,
+time Souffle with `-D -` and find Nemo an equivalent. The run should
+include the Graspan workloads, `-w cspa-httpd,cspa-postgresql,cspa-linux`,
+which a default run leaves out. Single runs of each, one thread on a quiet
+machine, gave relic 210, 190 and 50 seconds against compiled Souffle's 171,
+195 and 54, at peaks of 6.2, 6.6 and 2.1 GB against 5.5, 7.2 and 1.3.
 
 **A bound right-recursive closure costs relic more than the whole
 closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]
@@ -112,10 +154,13 @@ and 49 per cent of the time in the duplicate check of relation insertion;
 the slot array and another on the tuple that confirms it. Souffle's B-tree,
 inserted with the outer loop fixed on the head's first column, lands
 consecutive inserts in the same leaf. A hash stored beside each identifier
-was measured and set aside (`specs/design-evaluation-cost.md` section 5.2).
-Worth measuring next: the stored hash again with batched insertion in
-place, and whether a successful search visits enough slots past the first
-to make prefetching them pay.
+was measured without batching, median user time of five interleaved runs
+on the macOS Xeon: `tc-cyclic` 4.75 s with four-byte slots against 4.36 s
+with eight, `sg-cyclic` 3.42 against 3.56 s, at peaks of 81-82 against
+90-116 MB and 56-69 against 77-102 MB, so it was set aside. Worth measuring
+next: the stored hash again with batched insertion in place, and whether a
+successful search visits enough slots past the first to make prefetching
+them pay.
 
 **A growth's slack and transient keep the peak above the live heap.**
 [Medium, component: `lib/util.c`] `chain-closure`'s peak footprint runs
@@ -133,12 +178,12 @@ limit does not count the transient either: an insertion or a round's merge
 admitted at the limit holds one array's or one table's old generation
 beside the new one while it is copied, one at a time.
 
-**Importing facts misses the comparison's gate.** [Medium, component:
+**Importing facts misses its target.** [Medium, component:
 `lib/symbol.c`, `lib/value.c`, `lib/facts.c`, `lib/import.c`,
-`bench/compare/facts-join`] `specs/design-comparison-cost.md` section 10
-gates its step 6 on `facts-join` at scale 10, three million ternary rows
-naming three million distinct symbols, under 2 s and 120 MB; it takes 2.9
-to 3.2 s and about 220 MiB of resident peak. The peak is the import's
+`bench/compare/facts-join`] The target is `facts-join` at scale 10, three
+million ternary rows naming three million distinct symbols, under 2 s and
+120 MB; on the macOS Xeon it takes 2.9 to 3.2 s and about 220 MiB of
+resident peak. The peak is the import's
 commit, which holds at once the staged facts (about 68 MiB), the symbols
 (about 95 MiB, of which 46 MiB is sixteen-byte entries) and the base store
 it appends to (50 MiB). Two thirds of the time is the import, mostly
@@ -152,44 +197,61 @@ walking the entries in identifier order and placing each by its stored
 hash; and checking an imported symbol field once, where the import checks
 it is a symbol and interning the value checks again.
 
+## Testing and CI
+
+**No scheduled job runs the random tests or the fuzzers.** [Low,
+component: `.github/workflows/extended.yml`] `make check-random` and the
+fuzz targets of [fuzzing](specs/design-testing.md#fuzzing) run only by
+hand. A weekly job in `extended.yml` could run both, with the working fuzz
+corpus kept as an artifact. Question for the owner: the cadence and the
+time budget are not decided.
+
 ## Post-1.0
 
-Candidate features, in the priority order of `specs/architecture.md` section
-69. None may change the language semantics of v1.
+Candidate features, roughly in priority order: what remains of the
+language features first, since they decide which programs can be written;
+then incremental maintenance and parallel evaluation, which change the
+engine and cost the most; floating point last, since no workload measured
+needs it. None may change the language semantics of v1.
 
 **Language and tooling gaps.** [Medium] What Souffle, LogiQL, Nemo, clingo,
 CodeQL, DDlog and the tabling Prologs offer that relic does not, sorted in
 `docs/todo-language.md` in the order worth adding them -- provenance
 first, then disjunction, file inclusion, constraints, per-rule profiling
 and floating point; what stays out on purpose is in
-architecture section 3. Each item names the engines that have it and what a relic
-program does without it; the verdicts are provisional until a design
-exists.
+[non-goals](specs/architecture.md#non-goals). Each item names the engines
+that have it and what a relic program does without it; the verdicts are
+provisional until a design exists.
 
-* string operations, specified in `specs/design-strings.md`, are built;
-  what remains:
-  * [Medium, performance, `lib/exec.c`, `lib/value.c`] the step-2 gate is
-    not met: over a million sources, `object/2` of the design's section 2
-    adds 0.60 s to the load where the same join assigning a constant adds
-    0.13 s, 4.6 times against the 2 the gate asks. Each computed string is
+* string operations, specified in
+  [functions](specs/language.md#functions) and
+  `specs/design-expressions.md`, are built; what remains:
+  * [Medium, performance, `lib/exec.c`, `lib/value.c`] the serial cost is
+    above its target. Over a million sources, `object/2`, `object(M, O)
+    :- source(M, S), O = cat(substr(S, 0, length(S) - 2), ".o")`, adds
+    0.60 s to the load where the same join assigning a constant adds
+    0.13 s, 4.6 times against a target of twice. Each computed string is
     probed in the pool twice, when its text slot is bound and again by the
     measure, which is most of the 0.32 s `str(M)` over the same sources
     costs; interning a million new strings is most of the rest. Probing
     only for a slot some later operation reads as a key, and not for one
     only an `EMIT` or an expression reads, would halve the probes without
-    changing what the measure decides; it is a planner decision the
-    design's section 8.2 would record.
-  * [Medium, performance, `lib/merge.c`] the step-4 gate is not met: over
-    a million sources, `object/2` evaluates in 0.60 s past the load on one
-    thread and 0.33 s on sixteen, 1.8 times, where `tc-cyclic` scales 5.3
-    times (2.66 s to 0.50 s). At sixteen threads the tasks take 0.059 s,
-    gathering the candidates 0.025 s, applying them 0.070 s, and the
-    measure of the pending strings 0.163 s, serially: it probes the pool
-    for each gathered string and numbers the new ones in order of first
-    occurrence. Striping the measure by the string's hash, as the apply is
-    striped by the tuple's, would run the probes in parallel and leave only
-    the numbering serial, over the new strings alone; that changes the
-    design's section 9.2, which specifies one serial measure.
+    changing what the measure decides; it is a planner decision that
+    changes [slots and cells](specs/design-expressions.md#slots-and-cells),
+    which probes at every assignment.
+  * [Medium, performance, `lib/merge.c`] `object/2` should scale as
+    `tc-cyclic` does at sixteen threads: over a million sources it
+    evaluates in 0.60 s past the load on one thread and 0.33 s on sixteen,
+    1.8 times, where `tc-cyclic` scales 5.3 times (2.66 s to 0.50 s). At
+    sixteen threads the tasks take 0.059 s, gathering the candidates
+    0.025 s, applying them 0.070 s, and the measure of the pending strings
+    0.163 s, serially: it probes the pool for each gathered string and
+    numbers the new ones in order of first occurrence. Striping the measure
+    by the string's hash, as the apply is striped by the tuple's, would run
+    the probes in parallel and leave only the numbering serial, over the
+    new strings alone; that changes
+    [interning computed values](specs/design-values.md#interning-computed-values),
+    which specifies one serial measure.
 * incremental insertion maintenance [Medium, component: `lib/eval.c`]: any
   change to the program after an evaluation discards every derived relation
   and computes the fixed point again from the facts, so an embedder or a
@@ -197,17 +259,19 @@ exists.
   for the whole program on every addition. Continuing from the tuples held
   is sound without negation, where a new base fact is a delta the
   semi-naive machinery already understands, and unsound with it, where a new
-  fact can retract a derived one; `specs/design-eval.md` section 6 settles
-  one rule for both, and architecture section 70 defers maintenance.
-  Measure how often a caller adds facts between queries before building
-  either half.
+  fact can retract a derived one;
+  [when the relations are current](specs/design-eval.md#when-the-relations-are-current)
+  settles one rule for both, and [non-goals](specs/architecture.md#non-goals)
+  defers maintenance. Measure how often a caller adds facts between queries
+  before building either half.
 * DRed-style deletion maintenance
-* parallel SCC evaluation, specified in `specs/design-parallel.md`: steps 1
-  to 4 of its section 15 (the executor scratch, deferred rounds on one
-  thread, the pool and the parallel merge) are built; loading in parallel
-  and components side by side remain, and the speed-up gates are a major
+* parallel evaluation, specified in `specs/design-parallel.md`: shared
+  rounds and the parallel merge are built; loading in parallel, components
+  side by side, a threshold that weighs new tuples, streaming queries and
+  the speed-up targets remain, in `docs/todo-parallel.md` and the major
   initiative above
 * better cardinality estimation
 * further Magic Sets and negation optimization
 * floating point [Low, component: language], in `docs/todo-language.md`,
-  specified in `specs/design-floats.md`
+  specified in `specs/design-floats.md`; the item on type tests under
+  Engine comes first

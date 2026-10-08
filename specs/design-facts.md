@@ -1,624 +1,299 @@
-# relic facts design
-
-**Status.** Design document for how a program's facts are stored: as the
-tuples of a per-predicate base store, with nothing per fact in the syntax
-tree, the rule table or the schedule. In the language a fact is a rule with
-an empty body; this document settles where the facts a program states are
-kept, and nothing about what they mean. Forward-looking, like every
-document under `specs/`; `TODO.md` records what is not yet implemented.
-
-**Companions.** `specs/design-evaluation-cost.md` section 7, which traces
-the cost of loading facts to their representation; `specs/design-parser.md`
-sections 5 and 8, the tree and the load; `specs/design-program.md`, the rule
-table and predicate identity; `specs/design-relations.md`, the store a base
-store is; `specs/design-stratify.md` and `specs/design-eval.md`, the
-schedule and the first round; `specs/design-magic.md`, the rewrite of a
-predicate derived by facts and rules alike; `specs/design-api.md` section
-4, `relic_fact_add()`; `specs/design-memory.md`, the account; architecture
-sections 5.1, 54, 69 and 70.
-
----
-
-## 1. What this document settles
-
-* **the base store**: the facts a program states for a predicate are the
-  tuples of that predicate's base store, a set that no change to the
-  program discards;
-* **derived predicates**: a predicate is derived exactly when a rule with
-  it as its head has been appended to a rule table, a mark set in one
-  place, which decides the relation the predicate is read and written
-  through;
-* **the commit**: a load parses its facts into staging and commits them all
-  or nothing, measuring and reserving before it adds anything;
-* when a program is current, as a pair of counts that only grow;
-* the first round, the discard, Magic, explain, the counters and the
-  limits, with the facts in base stores;
-* the tests and the order of work.
-
-A body-less rule is a rule. The Magic rewrite generates body-less rules,
-its seeds, and the evaluator runs them as it runs every rule; the facts a
-program states are held in base stores, and the rule table holds its
-rules.
-
----
-
-## 2. Why
-
-A fact stated in a program is a tuple of a few words. Held as a program
-object it is also a statement with a term and a location per column in the
-syntax tree, a compiled rule with an argument per column in the rule table,
-and an entry in its component's schedule; and the check, the dependency
-analysis and the stratification handle it as a rule. For a program of many
-facts that is several hundred bytes and most of the loading time per fact,
-against about twenty bytes of tuple and index slot.
-
-Nothing about a fact needs the rule machinery: it has no body to plan, no
-variable to bind and no dependency to order. It needs to be a member of its
-predicate's relation whenever that relation is read. The base store is
-exactly that.
-
----
-
-## 3. Base stores and derived predicates
-
-### 3.1 The base store
-
-**The facts a program states for a predicate are the tuples of its base
-store.** A base store is a `relic_relation_t`: columns, a canonical index
-that makes it a set, and whatever secondary indexes plans ask for. Base
-stores live in a table of their own, indexed by predicate identifier, are
-charged to the tuple and memory limits as relations are, and are written
-only by a commit (section 4.3). A program only grows and nothing retracts a
-fact, so a base store's tuples only grow, and the store is released with
-the context.
-
-### 3.2 Derived predicates
-
-**A predicate is derived when a rule with it as its head has been appended
-to a rule table.** Both rule tables -- the program's, and the one a query's
-rewrite builds -- append through one function, whose infallible last step,
-after every allocation it makes has succeeded, stores the rule, advances the
-count and marks the head predicate derived. The one other rule that writes a
-relation, an aggregate's group rule compiled with a query, is held by the
-query rather than by a table, and the query marks its head when it publishes
-it, `specs/design-aggregates.md` section 10. Nothing else sets the mark and
-nothing clears it. So every predicate a rule can write is derived, whichever
-table or query holds the rule, and a predicate that is derived has had a
-rule appended or published.
-
-**A group predicate is derived and has no base store.** An aggregate's
-group predicate, `specs/design-aggregates.md` section 5.2, is derived by the
-group rule its body compiles to, and its generated name holds `$`, which no
-identifier a program writes contains, so no fact can be stated for it and
-nothing stages or seeds a tuple of it.
-
-The mark outlives a rewrite's table, which is freed after its query. That
-is harmless: a predicate only a rewrite derives is one the rewrite
-generated, which nothing but a rewrite reads.
-
-A derived predicate has a **derived relation**, which evaluation writes and
-a change to the program discards.
-
-### 3.3 The relation a predicate is read and written through
-
-Two functions take a predicate to the relation a plan uses, one per role:
-
-* **the relation a rule writes** is the predicate's derived relation,
-  created empty on first use. It is asked only for the head of a rule, and
-  asking it for a predicate that is not derived is an internal error
-  rather than a relation created on the spot, so no rule can write a base
-  store and no mistake can create a second relation for a predicate;
-* **the relation an operation reads** is the derived relation when the
-  predicate is derived, and otherwise the base store of the predicate the
-  read names: its own, or, for a base view (section 3.4), the one it views.
-  A base store with no tuples is created empty on first use, so a
-  predicate that appears only in a query or a body reads as empty.
-
-Where facts are handled as facts rather than read by a plan -- the commit,
-seeding, explain's fact count, the counters and the currency total -- the
-base store is reached directly, by predicate identifier. None of these
-writes a derived relation or reads one in place of a base store, so none
-needs the funnel's choice.
-
-So a predicate of facts alone, like `facts-join`'s `row`, is read straight
-from its base store, and its facts are held once. A derived predicate that
-also has facts holds them twice, in its base store and in its derived
-relation, which is seeded from the base store before its component's first
-pass (section 5.1): a tuple and an index slot more per such fact, the price
-of a discard that never has to separate facts from what was derived.
-
-A predicate becomes derived when its first rule is appended, which is a
-change to the program: the next evaluation discards every derived relation
-and seeds from the base stores, so no plan holds a relation that stopped
-being the one its predicate is read through.
-
-### 3.4 Base views
-
-The Magic rewrite reads a derived predicate's facts under a guard (section
-6), so a base store can be named as a predicate of its own: `p$base`, of
-`p`'s arity, whose predicate entry names `p` as the predicate it views. No
-rule derives it, and the read funnel resolves it to `p`'s base store
-through that entry. No identifier the lexer accepts contains `$`, and
-`relic_fact_add()` rejects `$` in a name, so no program and no caller can
-name or write it.
-
-### 3.5 Defined and referenced
-
-A predicate is **defined** when something derives into it: a rule's head
-names it, its base store holds tuples, or it is a base view. The first is a
-mark, set where a rule's head is compiled, before the rule's safety is
-checked so that one mistake draws one complaint, and where the rewrite
-interns a predicate it generates. The other two are read from the base
-store and the predicate's entry when asked. `defined` is a function of the
-three, so nothing that stores a fact has a mark to remember.
-
-A predicate is **referenced** when an atom of a rule body or a query names
-it, a mark set where every such atom is compiled, whether or not its
-statement goes on to be accepted, and never cleared. When the mark is
-first set it records the atom's location. The undefined-predicate warning
-names a predicate that is referenced and not defined, and points at that
-location. So a predicate a load interned for facts it never committed, or
-that a rewrite generated and then abandoned, is referenced by nothing and
-never named, and the warning depends only on what the program's rules and
-queries read, and points only into text the program holds.
-
----
-
-## 4. Loading
-
-### 4.1 The parser stages a fact
-
-A load parses into staging, and the statement a fact would have been is not
-built. The parser reads a head's terms into its scratch array of
-`RELIC_MAX_ARITY` terms rather than into the program arena, and then:
-
-* followed by `:-`, the head is copied into the arena and the rule parsed
-  as a statement;
-* followed by `,` or `?`, the atom is a query's first literal, and it is
-  copied into the arena and the query parsed as a statement;
-* followed by `.`, with every term a constant, the fact is added to the
-  load's staging (section 4.2), and nothing is kept in the tree;
-* followed by `.`, with a variable among the terms, the head is copied and
-  kept as a statement, and the check rejects it as it rejects any unsafe
-  rule, with the diagnostic an unsafe fact receives: `variable X in fact
-  edge/2 is not bound by a positive body literal or an assignment`. A fact
-  that cannot be a tuple is an error, and keeping its statement keeps that
-  error exact. A rejected statement is never appended to the rule table.
-
-Only a load stages. The parser also reads a query's text, where a fact is
-an error; there it keeps a fact as a statement, and the query parser
-reports it as a fact where a query was expected.
-
-### 4.2 Staging
-
-A load's staging holds a staging set per predicate its facts name, in the
-order their first facts appear. The parser interns a fact's predicate as it
-reads the fact, as the lexer interns the name: a predicate a failed load
-leaves interned holds nothing and is referenced by nothing, which is what
-an unused identifier is (section 3.5). A staging set holds the load's
-distinct facts of its predicate, packed at its arity, an identifier table
-over them that makes it a set, and beside each tuple its hash and a mark
-that the commit sets. A fact finds its set through the set the previous
-fact used, which a file of one predicate's facts always hits, and otherwise
-through a small open-addressing table keyed by predicate identifier.
-
-A tuple's hash is computed once, as the fact is staged, under the context's
-seed and exactly as every relation of the context hashes a tuple, so it is
-the hash the predicate's base store would compute. The set's table rehashes
-from the kept hashes when it grows, reading no columns, and the measure and
-the commit's append (section 4.3) take them rather than hash each tuple
-again.
-
-**Staging measures each fact against the limits.** As it stages a tuple
-the set lacks, staging looks it up in its predicate's base store by its
-staged hash, `relic_relation_contains_hashed()`, an absent store counting
-as empty, and marks it new or not. Nothing can change a base store while a
-load runs, so the mark holds until the commit, which trusts it. A new tuple
-is staged only if the load, with it, can still fit both limits:
-
-* **tuples:** the facts the base stores held when the load began, plus the
-  new tuples, within `max_tuples`;
-* **memory:** a floor under what the commit will hold within `max_memory`:
-  the value table and the symbol pool as they stand, plus the columns of
-  each loaded predicate's base store at its count and its new tuples. The
-  value table and the pool only grow while a load runs, and the commit
-  discards the derived relations before it reserves, so for any growth the
-  stores can hold the floor never exceeds what the commit measures, and
-  staging refuses no load the commit would admit; a growth past what a store
-  can hold the reservation refuses in any case. The floor leaves out the canonical indexes, whose growth
-  depends on how the new tuples fall in the stripes; the commit measures
-  them exactly and can refuse what the floor let through.
-
-A refusal is reported as the commit reports one (section 4.3), naming the
-first predicate whose store the facts staged so far would grow, and ends
-the load: the parser stages a fact before it reads the token after it, and
-stops there, and an import stops at the record. So a load the limits refuse
-stages and interns no more of its input than the fact that shows it, and
-what is derived is not discarded, since nothing in the program changes.
-What staging bounds is the parse, not the read: a file is read whole before
-it is parsed, and an import may have read a chunk of its stream past the
-record that ends it.
-
-Staging is the load's working storage rather than the program's. Its
-packed tuples grow by doubling, and its identifier tables are allocated as
-every identifier table is and hash with the context's seeded hash, since
-the text is untrusted. Staging is charged to no limit. It is proportional
-to the text being loaded, as the text itself and the program arena are,
-which no limit bounds either, except through the new facts the limits
-admit, and it is gone when the load returns; charged, it would count
-against a limit while the derived relations the commit is about to discard
-still did, and they could refuse a load that fits without them. A failed allocation is reported as the load's arena
-exhaustion is. One function releases staging, and it is the load's only
-exit: a load that fails to parse, one the commit refuses and one that
-commits all end there.
-
-### 4.3 The commit
-
-A load is all or nothing in what it adds to the program,
-`specs/design-parser.md` section 8. When the whole input has parsed, the
-load commits its facts, then splices its statements:
-
-Staging has marked every tuple new or not (section 4.2). A load with no new
-tuple commits no fact, and its facts' commit returns at once.
-
-1. **Discard.** If any tuple is new, the program is about to change, so
-   what was derived from it is discarded (section 5.3): the derived
-   relations, the base stores' secondary indexes, and the record of what
-   was materialized. The discard cannot fail, and it leaves the store
-   holding exactly the base stores' columns and canonical indexes, so the
-   limits of the next step count the program's facts and nothing derived.
-2. **Reserve.** Compute what the load adds: its new tuples, and the bytes
-   each base store's columns and canonical index occupy once grown for its
-   new count, an absent store counting as empty. Check both limits once,
-   against the account's totals plus those. A refusal reports `limit
-   exceeded: tuples=N while loading p/2`, or its `memory` form, naming the
-   first predicate, in the order the load first names them, whose store
-   would grow, and the load fails with
-   nothing grown: the base stores' contents and the program are as they
-   were, and the derived relations are discarded, to be evaluated again by
-   the next query. Then create each absent store and grow each store for
-   its new count. A failed allocation among these fails the load the same
-   way, and a store that had grown keeps its capacity, accounted, as any
-   relation that failed to grow does.
-3. **Append.** Append each set's new tuples to its base store in the
-   order they were staged, placing each in the canonical index by its
-   staged hash, `relic_base_append_hashed()`. Room is reserved, every
-   appended tuple is one the store lacks, and no secondary index remains to
-   be linked, so no append looks anything up and none can fail.
-
-Staging's measure and the commit's append trust the staged hash, as the
-append trusts the marks. A debug build computes each tuple's hash as the store would, in
-both, and asserts that it matches the staged one, so it still checks what
-a release build trusts.
-
-### 4.4 relic_fact_add()
-
-`relic_fact_add()` validates its arguments, then stages its one fact and
-commits it as a load does. The fact is in the base store when the call
-returns, with nothing left for the next check. A limit can refuse it,
-which leaves the program as it was. A discard with nothing derived to
-discard returns at once (section 5.3), so a run of calls between two
-queries pays for one discard.
-
-### 4.5 Identifiers and order
-
-A load interns its fact predicates in the order their first facts appear,
-before any rule of the same load is compiled, and a commit appends each
-predicate's new tuples in the order they were parsed. Both depend only on
-the text, so two runs over the same input intern and store alike.
-
----
-
-## 5. Evaluation
-
-### 5.1 Seeding
-
-Before the first pass of a component -- round 0 of a semi-naive fixed point,
-the first pass of a naive one, or the single pass of a component that is
-not recursive -- each member with a base store that holds tuples has its
-derived relation seeded from it: the whole store, in identifier order,
-inserted in batches of the evaluator's batch size. Seeding precedes the
-recording of the first deltas, so every seeded tuple is part of the first
-delta as a gain of round 0. It counts a derivation per base tuple and an
-insertion per tuple the derived relation did not hold. A store with no
-columns seeds through a non-null buffer, as the batch insertion requires.
-
-### 5.2 Body-less rules
-
-A rule with no body inserts its head when its turn comes, after confirming
-that every argument of its head is a constant. The program's rule table
-holds none, since a fact is committed to its base store and an unsafe fact
-is rejected before it is appended; a rewrite's table holds its seeds,
-`magic$p$bf(a).`, which every evaluation of the rewrite inserts.
-
-### 5.3 The discard
-
-A changed program discards every derived relation and no base store, and
-so does every other discard, whatever calls it, through one function: the
-commit's, and the one that precedes each query's rewrite. The base stores'
-secondary indexes are dropped with the derived relations, so an index a
-plan asked for over a base store lives exactly as long as one over a
-derived relation, and the next evaluation builds the ones it asks for
-again. After a discard the store's accounted bytes are the base stores'
-columns and canonical indexes. Every discard clears the record of what was
-materialized (section 5.4).
-
-A discard frees the derived relations rather than emptying them, and the
-next evaluation creates each again on first use. The store records whether
-it may hold anything derived: the mark is set where a derived relation is
-handed out, the only way to create one, and where a secondary index is
-built, the only two things a discard removes, and cleared by the discard
-once it has removed them. Nothing derived exists while the mark is clear,
-so a discard with the mark clear has nothing to do and returns without
-walking the relations, and no later write can reach a derived relation the
-mark does not account for: a pointer kept across a discard names freed
-memory.
-
-### 5.4 When a program is current
-
-The relations are current when they were evaluated from the program as it
-stands. A program changes by gaining rules or by its base stores gaining
-tuples, both of which only grow, so materialization records the pair -- the
-number of rules, and the base stores' tuple total -- and the relations are
-current exactly when a pair is recorded and it has not changed. A discard
-clears the record. One function asks the question, for every caller that
-needs to know. A load of duplicates alone changes neither count and leaves
-the relations current.
-
----
-
-## 6. Magic
-
-**Completeness.** The rewrite asks whether a predicate is complete only of
-the program's predicates and of base views, all of which exist when it
-takes its snapshot of the predicate table. A predicate is complete when it
-is not derived, its base store then being the whole relation, or when its
-component is complete; the rewrite reads a complete predicate as it is and
-never adorns it.
-
-**Base views are interned before the rewrite begins.** When the rewrite
-finds the complete predicates, it interns the base view of every derived
-predicate whose base store holds tuples, so each base view exists when the
-snapshot is taken, and it is complete by the rule above.
-
-**A derived predicate's facts enter each of its adornments as one rule
-over its base view**,
-
-```prolog
-p$bf(X, Y) :- magic$p$bf(X), p$base(X, Y).
+# Facts
+
+The facts a program states are stored as the tuples of a per-predicate
+**base store**, with nothing per fact in the syntax tree, the rule table or
+the schedule. This document covers how a load, an import or
+`relic_fact_add()` stages and commits facts all or nothing, how evaluation
+seeds derived relations from them, how what was derived is discarded when
+the program changes, when the relations are current, and how the Magic
+rewrite reads facts through the base predicate `p$base`. Facts are a
+foundation shared by two pipeline stages: the
+[front end](design-frontend.md), which stages them, and
+[evaluation](design-eval.md), which reads them; what a fact means is in
+[the language reference](language.md#programs).
+
+Related: [architecture: facts](architecture.md#facts),
+[front end](design-frontend.md), [storage](design-storage.md),
+[evaluation](design-eval.md), [Magic Sets](design-magic.md),
+[tables](design-tables.md), [memory](design-memory.md).
+
+## Model
+
+A fact is a tuple of a few words. Held as a program object it would also be
+a statement with a term and location per column, a compiled rule, and a
+schedule entry, and the check and the dependency analysis would handle it
+as a rule: several hundred bytes and most of the loading time per fact,
+against a tuple and an index slot. Nothing about a fact needs the rule
+machinery -- no body to plan, no variable to bind, no dependency to order.
+It needs to be a member of its predicate's relation whenever that relation
+is read, and a base store is exactly that.
+
+```text
+load text / import / relic_fact_add
+        |
+     staging     per predicate, deduplicated, measured against the limits
+        |
+     commit      discard -> reserve -> append
+        |
+   base store of p --seed--> derived relation of p   (only if p is derived)
 ```
 
-and not as a guarded copy of each fact. The rule is not the program's:
-the rewrite adorns `p(X1, ..., Xn) :- p$base(X1, ..., Xn)`, built for the
-purpose, whose one literal is complete and is left as it is, and it is the
-adornment's first rule, so a derived predicate's rows begin with its facts
-under the rewrite as they do when it is materialized. The planner looks the
-base store up by the bound columns like any complete relation, so an
-adornment reads only the facts its demand reaches, and the rewrite's size
-does not depend on how many facts there are.
+A predicate has up to two relations:
 
-**The rewrite's limit** has a default in proportion to the program and the
-query, `specs/design-magic.md` section 8: 768 plus 48 per literal of them,
-a rule counting its body length plus one. A derived predicate with facts
-counts as though the program held the rule its adornments are given,
-`p(X, Y) :- p$base(X, Y).`: two literals. The facts themselves count
-nothing, since the rewrite copies none of them. A base view counts against
-no limit, since it adds no relation.
+* its **base store**, an ordinary relation ([storage](design-storage.md))
+  in a table of its own indexed by predicate identifier. Written only by a
+  commit, it only grows and is released with the context.
+* its **derived relation**, which exists only for a **derived** predicate,
+  one with a rule appended to a rule table
+  ([predicate identity](design-frontend.md#predicate-identity)).
+  Evaluation writes it; a change to the program discards it.
 
----
+An aggregate's group predicate is derived and has no base store: its name
+holds `$`, so no fact can be stated for it.
 
-## 7. The schedule and explain
+## Invariants
 
-**The schedule is built from rules.** It lists the components with at
-least one rule, and a predicate of facts alone is in none; it is read from
-its base store wherever a rule or a query reads it. Loading facts adds
-nothing to the dependency graph, the strata or the rule counts.
+* Only a commit writes a base store, and base stores only grow.
+* No rule can write a base store.
+* A discard removes everything derived -- derived relations and the base
+  stores' secondary indexes -- and never a base store's tuples.
+* The relations are current exactly when the recorded pair (rule count,
+  base-store tuple total) equals the program's; both counts only grow.
+* A commit adds every new tuple of its load or changes no base store's
+  contents.
 
-**Explain** prints a component's heading, then `facts: N`, where N counts
-the component's body-less rules and the tuples its members' base stores
-hold, when that is not zero, then its plans. A rewrite's seed components
-count their seeds. A base store is a set, so N counts distinct facts. A
-predicate of facts alone is in no component and is not printed, and the
-components are numbered without it.
+## The read and write funnel
 
----
+Two functions take a predicate to the relation a plan uses:
 
-## 8. Counters and limits
+* **the relation a rule writes** is the derived relation, created empty on
+  first use. Asking it for a predicate that is not derived is an internal
+  error, not a relation created on the spot, so no rule can write a base
+  store and no mistake can give a predicate a second relation.
+* **the relation an operation reads** is the derived relation of a derived
+  predicate, and otherwise the base store of the predicate the read names --
+  its own, or for the base predicate `p$base` the store of `p`. A base store is
+  created empty on first use, so a predicate named only in a query reads as
+  empty.
 
-* `derivations` and `tuples inserted` count evaluation: the rules'
-  derivations, and the seeding of a derived relation from its base store.
-  A commit is not evaluation and counts in neither.
-* `tuples held` and `storage bytes` count the base stores and the derived
-  relations alike, a fact held in both counted in both.
+Where facts are handled as facts -- the commit, seeding, explain's fact
+count, the counters, the currency total -- the base store is reached
+directly; none of these writes a derived relation or reads one in place of
+a base store, so none needs the funnel's choice.
+
+A predicate of facts alone is read straight from its base store and holds
+its facts once. A derived predicate with facts holds them twice, in its
+base store and in its derived relation, which is seeded from it: a tuple
+and an index slot more per such fact, the price of a discard that never
+has to separate facts from what was derived. A predicate becomes derived
+when its first rule is appended, which moves the rule count, so the next
+evaluation discards and seeds afresh and no plan keeps a relation that
+stopped being the one its predicate is read through.
+
+## Staging
+
+A load's staging holds one **staged set** per predicate its facts name, in
+the order the load first names them: the load's distinct facts packed at
+the arity, an identifier table making them a set, and per tuple its hash
+and a "new" mark. A fact finds its set through the set the previous fact
+used, which a file of one predicate's facts always hits, and otherwise
+through a small table keyed by predicate.
+
+**A tuple's hash is computed once**, under the context's seed and exactly
+as its base store would compute it; the set's table, the base-store lookup
+and the commit's append all reuse it. A debug build recomputes it at the
+append and asserts it matches, checking what a release build trusts.
+
+**Staging measures each fact against the limits.** Staging looks each
+tuple the set lacks up in its base store, an absent store counting as
+empty, and marks it new or not. Nothing can change a base store while a
+load runs, so the commit trusts the mark. A new tuple is staged only if the
+load, with it, fits both limits:
+
+* **tuples**: the base stores' facts when the load began plus the new
+  tuples, within `max_tuples`;
+* **memory**: a floor under what the commit is to hold -- the value table
+  and symbol pool as they stand, plus each loaded predicate's base-store
+  columns at its count and new tuples -- within `max_memory`.
+
+The floor is safe to refuse on. The value table and pool only grow during
+a load, and the commit discards derived relations before it reserves, so
+the floor never exceeds what the commit measures for any growth the stores
+can hold: staging refuses no load the commit would admit. The floor omits
+canonical indexes, whose growth depends on how tuples fall into stripes;
+the commit measures them and can refuse what the floor admitted.
+
+A refusal ends the load at the fact that shows it, since the parser stages
+a fact before reading the next token and an import stops at the record. The
+load then stages and interns no more of its input, and since nothing in the
+program changed, the derived relations survive. Staging bounds the parse,
+not the read: a file is read whole first, and an import may have read a
+buffer past the record that ends it.
+
+**Staging is charged to no limit.** It is the load's working storage,
+proportional to the text as the text and program arena are, bounded by the
+limits only through the new facts they admit, and gone when the load
+returns. Charged, it would count against the limit alongside the derived
+relations the commit is about to discard, and together they could refuse a
+load that fits without them. Its tables hash with the context's seed, since
+the text is untrusted. One function releases staging, on the load's only
+exit.
+
+## The commit
+
+When the input has been read, the load commits its facts, then splices its
+statements ([loading](design-frontend.md#loading)). A load with no new
+tuple commits nothing. Otherwise the commit first computes each store's
+growth, which can fail for memory and then changes nothing, and then:
+
+1. **Discard.** The program is about to change, so what was derived is
+   discarded ([the discard](#the-discard)). It cannot fail, and it leaves
+   only the base stores' columns and canonical indexes, so the next step's
+   limits count the program's facts and nothing derived.
+2. **Reserve.** Compute the new tuples and the bytes each base store's
+   columns and canonical index occupy at its new count; check both limits
+   once against the account plus those; then create absent stores and grow
+   each. A refusal reports
+   `relic: error: limit exceeded: tuples=N while loading p/2` (or
+   `memory=N`), naming the first predicate, in the load's order, whose store
+   would grow. Every base store's contents and the program stay as they
+   were; a store that grew before a failed allocation keeps its capacity,
+   accounted, as any relation that failed to grow does.
+3. **Append.** Append each set's new tuples in staged order, placing each
+   in the canonical index by its staged hash. Room is reserved, every tuple
+   is one the store lacks, and no secondary index remains to be linked, so
+   no append looks anything up and none can fail.
+
+**No step needs an unwind.** Every fallible step precedes the first change
+a reader can see. Truncating stores a refused commit had begun to fill
+would make consistency after a refusal the work of an unwind path; ordering
+every fallible step first avoids it at the cost of one read-only lookup per
+staged fact. A refused commit has discarded the derived relations, which
+the next query evaluates again.
+
+**`relic_fact_add()` is a load of one**: it validates its arguments,
+stages and commits, so the fact is in its base store when the call returns
+and nothing waits for the next check. A run of calls between queries pays
+for one discard, since a discard with nothing derived returns at once.
+**An import is a load whose text is a table** ([tables](design-tables.md)):
+it stages each record as read, measured as a load's facts are, and commits
+once at the end. Duplicates alone change neither count and leave the
+relations current.
+
+## Seeding
+
+Before a component's first pass -- round 0 of a semi-naive fixed point, the
+first naive pass, or a non-recursive component's single pass -- each
+member whose base store holds tuples has its derived relation seeded with
+the whole store, in identifier order, in batches as a plan's output is
+inserted. Seeding precedes the recording of the first deltas, so every
+seeded tuple is part of round 0's gain. It counts a derivation per base
+tuple and an insertion per tuple the derived relation lacked, so
+`derivations` and `tuples inserted` count evaluation, seeding included,
+while a commit counts in neither.
+
+A body-less rule inserts its head when its turn comes, after confirming
+every argument is a constant. The program's rule table holds none, since a
+ground fact goes to its base store and a fact with a variable is rejected;
+a rewrite's table holds its seeds, such as `magic$p$bf(a).`, inserted on
+every evaluation of the rewrite.
+
+## The discard
+
+Every discard goes through one function: the commit's, whole-program
+evaluation's when the relations are not current, and each Magic run's before it
+derives. It frees every derived relation, drops the base stores' secondary
+indexes and clears the record of what was evaluated; base stores' tuples and
+canonical indexes stay. An index over a base store therefore lives exactly as
+long as one over a derived relation, and the next evaluation rebuilds what it
+asks for.
+
+The store keeps a mark that it may hold something derived, set where a
+derived relation is handed out and where a secondary index is built -- the
+only ways to create the two things a discard removes -- and cleared by the
+discard. With the mark clear a discard returns without walking anything. A
+relation pointer, tuple range or index position taken before a discard
+names nothing after it; the evaluator discards only before an evaluation
+begins, and every range and plan dies with its evaluation.
+
+Discarding everything rather than continuing from stale relations is
+deliberate: continuing would be sound without negation or aggregates, where a
+new fact can only add, but not with them, where a new fact can make a derived
+tuple false. One rule for every program keeps the question from arising.
+
+## Currency
+
+A program changes only by gaining rules or base-store tuples, and both
+counts only grow. A successful whole-program evaluation records the
+pair -- rule
+count, base-store tuple total -- and the relations are current exactly
+when a pair is recorded and neither count has moved. A discard clears the
+record, so a failed evaluation leaves the relations stale and the next
+starts again from the facts. A Magic run records nothing, since it derives
+only part of the fixed point. One function answers the question for every
+caller.
+
+## The base predicate
+
+The Magic rewrite reads a derived predicate's facts apart from what its
+rules derive, so a base store can be named as a predicate of its own: **the
+base predicate `p$base`**, of `p`'s arity, whose entry names `p` as the
+predicate whose base store it reads. No rule derives it, and no fact can be
+stated for it, since its name holds `$`. The read side of the funnel
+resolves it to `p`'s base store, which a plan looks up by its bound columns
+like any relation, so a read of it reaches only the facts a demand names.
+How the rewrite uses it -- as the first rule of each adornment, so a derived
+predicate's rows begin with its facts and the rewrite's size does not
+depend on how many facts there are -- is in [Magic Sets](design-magic.md).
+
+## Schedule, explain and counters
+
+The [schedule](design-stratify.md#the-schedule) lists components with at
+least one rule, so a predicate of facts alone is in none, and loading facts
+changes neither the dependency graph nor the strata. Explain prints
+`facts: N` under a component, counting its body-less rules and its members'
+base-store tuples, when that is not zero; components are numbered without
+the fact-only predicates. `tuples held` and `storage bytes` count base
+stores and derived relations alike, a fact held in both counting twice.
+
+## Failure paths and limits
+
 * The tuple and memory limits count every store, base stores included, and
-  refuse a load as sections 4.2 and 4.3 describe, with `while loading`; the
-  activity a limit names is a parameter of the store's refusal.
-* A load needs its staging and the room its commit reserves at once, about
-  twice the new facts' storage, until it returns; only the room counts
-  against the memory limit (section 4.2).
+  refuse a load at staging or at the reserve, `while loading`.
+* A staging refusal changes nothing and keeps the relations current; a
+  reserve refusal leaves base stores and program as they were, with the
+  derived relations discarded.
+* A load holds its staging and its reserved room at once, about twice the
+  new facts' storage, until it returns; only the room is charged.
+* A derived predicate with facts reaches a limit sooner for holding them
+  twice.
+* What a failed load, import or fact addition interned stays interned,
+  holding nothing and referenced by nothing.
 
-A program's facts are refused when they are loaded, if they do not fit,
-and a derived predicate with facts reaches a limit sooner for holding them
-twice.
+## Determinism
 
----
+A load interns predicates and values as it reads them, and the commit
+appends tuples in staged order; seeding inserts a base store in identifier
+order before the first pass; a component's rules then run in program order.
+The same input therefore gives the same identifiers, plans and row order,
+and the rows of a derived predicate with facts begin with all of its facts,
+under whole-program evaluation or under the rewrite.
 
-## 9. The tests
+## Alternatives not taken
 
-* **The relation store.** Reserving for *n* tuples grows the columns, the
-  canonical index and any secondary index once, to exactly the bytes
-  projected for it, charges them, and changes no content, and *n* new tuples
-  then go in without growing anything; a count plus *n* past the largest
-  identifier, or a size no `size_t` expresses, is refused without overflow
-  and grows nothing. The identifier table reserves for *n* entries alike.
-* **Loading.** A fact with a variable is kept as a statement and rejected by
-  the check with its diagnostic, and draws no undefined-predicate warning; a
-  predicate first named by a fact of a load that failed, then referenced by a
-  rule, is warned about at the rule's atom; a query in a loaded file whose
-  first literal is ground is kept as a query; a load that fails to parse
-  commits no fact; a load refused by the tuple limit, and one refused by the
-  memory limit, grow no base store, and leave the program, every base store's
-  contents and the warnings as they were; one refused as it stages stops at
-  the fact that shows it and leaves the relations as current as they were,
-  and one the commit refuses has discarded them; a load of duplicates alone
-  leaves the relations current; a fact in a query's text is reported as a fact where a
-  query was expected.
-* **The funnel.** Asking the write side for a predicate that is not
-  derived is refused; a predicate named only in a query reads as empty; a
-  predicate that gains its first rule after its facts were loaded answers
-  from facts and rules together; a base view reads its predicate's base
-  store.
-* **`relic_fact_add()`.** A fact is visible to the next query without a
-  check; adding it twice changes nothing; a fact that makes a negated
-  literal false changes the answer of a query answered before it, under
-  the default strategy and through the Magic rewrite; a fact the limit
-  refuses changes nothing.
-* **Limits over a session.** Queries with different binding patterns over a
-  base store, run in turn under a memory limit, with loads between them and
-  without, do not accumulate indexes; a load and a `relic_fact_add()` after
-  materialization or a Magic query, under a tuple limit and under a memory
-  limit, are not refused for the derived tuples; a load whose facts name
-  several predicates and exceed the memory limit grows none of their
-  stores.
-* **Magic.** A bound query over a derived predicate with facts reads them
-  through the base view, and `-e` shows one rule over it per adornment; its
-  rows begin with its facts; seeds are inserted on every evaluation of a
-  rewrite and shown as `facts: 1`; a rewrite abandoned over its limit leaves
-  no warning about the predicates it generated; the limit goldens are
-  re-derived.
-* **Arity zero.** A fact of no columns is staged, stored, seeded and
-  answered.
-* **Counters.** Every hand-derived count in `tests/unit/test_eval.c` that
-  includes a program's facts is re-derived, and the test helpers that sum
-  the relations' bytes or tuples sum the base stores too.
-* **Golden.** The language corpus gives the same answers under every
-  strategy, and its goldens record this design's output: `-e` prints no
-  component of facts alone and counts distinct facts, a derived
-  predicate's rows begin with its facts, and warnings follow predicate
-  identifier order. Every golden that differs from its predecessor is
-  read, not regenerated blind.
-* **Memory.** `facts-join` at scale 4 is measured, time and peak. What
-  remains per fact at the peak is the data and the input: the symbols and
-  values its constants intern, the tuple and its index slot, the text of
-  the file, read whole, and the staging set live during the commit, about
-  150 bytes for a ternary fact. The gate is below 200 bytes per fact.
-
----
-
-## 10. Order of work
-
-1. **Reservation for *n* tuples** in the relation store and the identifier
-   table, with their tests.
-2. **Base stores, derived predicates and the commit.** The shared rule
-   append and the derived mark; the two-role funnel; `defined` and
-   `referenced`; base stores and staging; the commit,
-   fed by staging built from each fact statement the parser has already
-   made, which the load then drops from its statements; seeding, the
-   discard and the currency pair; base views, completeness and the limit's
-   default in Magic; explain's fact counts; `relic_fact_add()` as a load of one.
-   Every counter test is re-derived. Gate: the language corpus and the
-   Magic suites answer the same under every strategy, and the tests of
-   section 9 but the memory gate pass.
-3. **The parser's staging.** The scratch head and staging while parsing,
-   so a fact never builds a statement. Gate: `facts-join` at scale 4 below
-   200 bytes per fact at the peak, and its time measured against
-   Souffle's.
-
-Step 2 is one step because its parts are one change of meaning: facts
-leaving the rule table is correct only once a derived predicate's
-adornments read its base view and a rule's head cannot reach a base store.
-
----
-
-## 11. Determinism
-
-* A commit interns predicates, and appends each base store's tuples, in the
-  order the load's text states them.
-* Seeding inserts a base store in identifier order, before the first pass.
-* The rules of a component run in program order after it.
-
-So two runs over the same input produce the same identifiers, plans and
-rows in the same order. The rows of a derived predicate with facts begin
-with all its facts, materialized or under the rewrite, and the predicates
-of a load's facts are interned before its rules' predicates.
-
----
-
-## 12. Amendments this design makes
-
-* Architecture section 5.1: facts are stored as the tuples of their
-  predicate's base store, specified here. Sections 54 and 70: adding a fact
-  commits it to its base store and discards what was derived.
-* `specs/design-parser.md` section 5: the tree holds rules and queries,
-  and the one fact it holds is the unsafe fact the check rejects; section
-  6: the parser interns a fact's predicate, and a failed load leaves its
-  fact predicates interned as it leaves its symbols and values; section 8:
-  a load stages its facts and commits them before it splices.
-* `specs/design-program.md` sections 3 and 11, and decision D-4 of
-  `specs/decisions.md`: the rule table holds the rules a program states; the
-  shared append marks a head derived; `defined` as a function and
-  `referenced` as a mark with its location, and the warning that asks
-  both; and a load's fact predicates are interned as its facts are read,
-  before the rules of earlier loads are compiled.
-* `specs/design-relations.md`: base stores beside the relation table, the
-  funnel's two roles, reservation for *n* tuples, and the refusal's
-  activity.
-* `specs/design-memory.md`: base stores in the account; the account bounds
-  what the program's stores hold and what running the program does, and
-  not the text being loaded or the load's staging; the mark that lets a
-  discard with nothing derived return at once; and the identifier table's
-  reservation for *n* entries.
-* `specs/design-planning-cost.md`: the limits bound the program's facts
-  as well as what running it does, so a load can be refused; and the
-  program's facts do not raise the Magic limit's default.
-* `specs/design-eval.md` and `specs/design-evaluation-cost.md` sections
-  3.4 and 7: seeding before the first pass, the currency pair, and facts
-  stored as this document says.
-* `specs/design-stratify.md`: the schedule lists components with rules,
-  and a program's facts are in none of them.
-* `specs/design-magic.md`: completeness is the derived mark, base views
-  are interned before the rewrite, facts enter an adornment through the
-  base view, the limit's units, seeds as the rewrite's body-less rules,
-  and the explain example.
-* `specs/design-planner.md`: the explain examples that show fact counts.
-* `specs/design-api.md` section 4: a programmatic fact is committed to its
-  base store rather than appended as a statement.
-* `include/relic.h`, `man/relic.1` and `man/relic.3`: the memory limit
-  bounds the base stores, and a load or `relic_fact_add()` can be refused
-  by a limit; `derivations` counts rules and seeding, not facts; a query
-  over facts alone reads them without evaluating them; explain's fact
-  count.
-* In the code, every contract or comment that treats a fact as a rule,
-  holds a predicate to one relation for the context's life, says only the
-  evaluator inserts, treats every relation as re-derivable in full, or
-  asserts that a discard leaves the store empty; among them
-  `lib/account.h`'s statement of what the account bounds, which the
-  design-memory amendment above restates.
-* `TODO.md` follows the implementation.
-
----
-
-## 13. What is deliberately absent
-
-* **Incremental insertion.** A fact added after materialization discards
-  what was derived. A new base tuple is exactly a delta of an extensional
-  predicate, so the base store is what incremental insertion needs, and it
-  is architecture section 69's next step rather than this one.
-* **A representation for imported facts.** CSV and TSV import is the same
-  commit fed by a different reader, and needs no representation of its own
-  (`specs/design-import.md`).
-* **Retracting facts.** Nothing in relic retracts a fact, and a base store
-  has no deletion.
-* **Unwinding a refused commit.** Truncating the stores a refused commit
-  had begun to fill would make consistency after a refusal the work of an
-  unwind path, which the relation store avoids by ordering every fallible
-  step first; measuring and reserving before appending keeps that ordering
-  at the cost of one read-only lookup per staged fact.
-* **Sharing a base store with its derived relation.** A derived predicate
-  with facts could hold them once if its derived relation grew from its
-  base store, but a discard would then have to cut derived tuples out of a
-  store that must keep the facts.
-* **A fact representation in the tree.** A statement kind or a block of
-  facts would keep facts in the program's pipeline, and every evaluation
-  would copy them from the program into the store; the base store keeps
-  them where they are read.
+* **Incremental insertion.** A fact added after evaluation discards what
+  was derived rather than extending it. A new base tuple is exactly a delta
+  of an extensional predicate, so the base store is what incremental
+  maintenance would build on, but with negation or an aggregate a new fact
+  can make a derived tuple false, and maintaining that needs deletion and
+  rederivation through every stratum above it. Discarding is one rule for
+  every program and costs one evaluation per change.
+* **Retracting facts.** Nothing retracts a fact; a base store has no
+  deletion.
+* **Sharing a base store with its derived relation.** Facts would be held
+  once, but a discard would have to cut derived tuples out of a store that
+  must keep the facts.
+* **A fact representation in the tree.** Facts would stay in the program's
+  pipeline and every evaluation would copy them into the store.
+* **Committing an import in batches.** It would bound staging, but a failed
+  import would leave earlier batches committed, breaking all or nothing.

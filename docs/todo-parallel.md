@@ -1,10 +1,23 @@
 # Parallel evaluation: gaps and ideas
 
-Section 15 of `specs/design-parallel.md` builds parallel evaluation in six
-steps, each with a gate. Steps 1 to 4 are in and every identity gate holds:
-output, counters and storage bytes are the same at every thread count. The
-speed-up gate of step 4 is missed, and steps 5 and 6 are not started. This
-page records what is missing and what to try, in the order worth trying it.
+`specs/design-parallel.md` designs parallel evaluation. Shared rounds, the
+pool and the parallel merge are built, and output, counters and storage
+bytes are the same at every thread count. The speed-up targets below are
+missed, and loading in parallel and components side by side are not built.
+This page records what is missing and what to try, in the order worth
+trying it. Times are from a macOS Xeon, loaded unless said otherwise.
+
+## The targets
+
+* `tc-cyclic` at least ten times faster at `-j 16` than at `-j 1`; it is
+  6.2 times, 2.78 s to 0.45 s, the fastest of five runs.
+* `dist/3` (`dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3, D1 = D +
+  1` over the `tc-cyclic` data) and `object/2` (the item on string
+  operations in `TODO.md`) scaling as `tc-cyclic` does at sixteen threads;
+  they scale 2.5 and 1.8 times.
+* Loading in parallel: `facts-join` at scale 10 imports at least four times
+  faster at `-j 16`, and the identifier a symbol receives is the same on
+  every run and at every thread count.
 
 ## Round 3 scales about eight times on sixteen threads
 
@@ -15,8 +28,8 @@ On a quiet machine, record each task's time and each worker's: a long tail
 of tasks points at the cut (`RELIC_CHUNKS_PER_WORKER`, `RELIC_CHUNK_WORK`),
 while even tasks that are each slower than serial point at memory
 bandwidth or at the workers' screens. A worker's screen is reserved from
-what round 2 inserted, so round 3 no longer grows it from empty; that
-gain is not yet measured at sixteen threads.
+what round 2 inserted, so round 3 does not grow it from empty; that
+gain is not measured at sixteen threads.
 
 ## A round cut by a scan over a few tuples
 
@@ -33,17 +46,20 @@ first operation can be cut when it picks one.
 
 ## Rounds that insert what they derive
 
-[Medium, component: `lib/merge.c`] `dist/3` over the `tc-cyclic` data,
-`dist(X, Z, D1) :- dist(X, Y, D), par(Y, Z), D < 3, D1 = D + 1`, scales 2.5
-times on sixteen threads, 4.08 s to 1.64 s, where `tc-cyclic` scales 6.2
-times, 2.78 s to 0.45 s, the fastest of five runs each on a loaded machine.
-Its two large rounds each insert about a million new tuples of three
-columns, 1.96 million in all against `tc-cyclic`'s one million, into 51 MB
-against 18 MB. The computing is not what holds it back: the same program
-with the successor as facts, joined in the same order, takes 1.43 s on
-sixteen threads. Time the merge's steps on a quiet machine; those worker 0
-runs alone, counting the new tuples, reserving and storing the columns,
-grow with the tuples a round inserts.
+[Medium, component: `lib/merge.c`, `lib/round.c`] `dist/3` over the
+`tc-cyclic` data scales 2.5 times on sixteen threads, 4.08 s to 1.64 s,
+where `tc-cyclic` scales 6.2 times, 2.78 s to 0.45 s, the fastest of five
+runs each on a loaded machine. Its two large rounds each insert about a
+million new tuples of three columns, 1.96 million in all against
+`tc-cyclic`'s one million, into 51 MB against 18 MB. The computing is not
+what holds it back: the same program with the successor as facts, joined
+in the same order, takes 1.43 s on sixteen threads. Time the merge's steps
+on a quiet machine; those worker 0 runs alone, counting the new tuples,
+reserving and storing the columns, grow with the tuples a round inserts.
+The threshold that decides whether a round is shared weighs only its work,
+tuples read and derived, not the new tuples its merge will insert, so a
+round whose merge dominates is shared on the same terms as one whose tasks
+do; whether to weigh expected new tuples follows from the timing.
 
 ## A round of fewer tasks than workers reserves for every worker
 
@@ -75,7 +91,8 @@ thread however far each tuple of it fans out. `tc-cyclic`'s, estimated at
 48 727 and deriving some twenty times that, crosses the threshold and is
 shared; a closure from a few seeds would not be.
 
-Ideas, each a change to section 5.4 of the design:
+Ideas, each a change to
+[which rounds are shared](../specs/design-parallel.md#which-rounds-are-shared):
 
 * Estimate an item that has not run from its plan rather than its view: the
   view's size times the fan-out of each lookup, which an index knows as
@@ -84,3 +101,23 @@ Ideas, each a change to section 5.4 of the design:
   order the literals.
 
 The first uses numbers the store keeps exactly and is the one to try first.
+
+## Loading in parallel is not built
+
+[Medium, component: `lib/symbol.c`, `lib/value.c`, `lib/facts.c`,
+`lib/import.c`] A load and an import run on the calling thread: the value
+table and the symbol pool are not striped, so interning, most of an
+import's time, is serial. The design is
+[loading in parallel](../specs/design-parallel.md#loading-in-parallel); its
+target is in the list above. It changes the identifier's layout, a stripe
+field in its index, so it interacts with the item on type tests in
+`TODO.md`.
+
+## Components side by side are not built
+
+[Low, component: `lib/eval.c`, `lib/round.c`] Two components with no path
+between them run one after the other, so a program of many small
+independent components, such as a Magic rewrite generates, gains nothing
+from the pool. The design is
+[components side by side](../specs/design-parallel.md#components-side-by-side).
+Build it when a workload asks for it.

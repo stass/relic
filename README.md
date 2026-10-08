@@ -182,9 +182,10 @@ linear form.
 | [EXAMPLES.md](EXAMPLES.md) | a tour of relic through programs you can run |
 | [man/relic.1](man/relic.1) | the tool and the language |
 | [man/relic.3](man/relic.3) | the library |
+| [specs/README.md](specs/README.md) | the design documents, where to start reading |
 | [specs/architecture.md](specs/architecture.md) | the target design of the system |
+| [specs/language.md](specs/language.md) | the specification of the language |
 | [specs/style.md](specs/style.md) | code style, binding on all relic-owned code |
-| [specs/decisions.md](specs/decisions.md) | the numbered decisions the design rests on |
 | [NEWS](NEWS) | what changed in each release |
 | [TODO.md](TODO.md) | open work, by severity |
 
