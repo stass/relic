@@ -975,7 +975,7 @@ print_header() {
 	done
 	echo
 	printf "%-${name_width}s %-14s %8s %8s %7s %8s %8s %8s %7s  %s\n" \
-	    workload engine median fastest spread user "peak MB" rows compile \
+	    workload engine median fastest spread user "peak MiB" rows compile \
 	    status
 }
 
