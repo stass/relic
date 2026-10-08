@@ -17,9 +17,9 @@
 /*
  * Predicates interned to identifiers.
  *
- * A predicate is (name, arity), per architecture section 17, so foo/1 and
- * foo/2 are unrelated.  The table is the same open-addressing identifier
- * table the symbol pool and the value table use, with the pair as its key:
+ * A predicate is identified by (name, arity), so foo/1 and foo/2 are
+ * unrelated.  The table is the same open-addressing identifier table the
+ * symbol pool and the value table use, with the pair as its key:
  * two mentions of one predicate return one identifier, and every later stage
  * indexes by that identifier rather than by a name and a number.
  *

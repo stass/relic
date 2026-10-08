@@ -18,14 +18,15 @@
  *
  * Source text is a sequence of bytes and this module says what those bytes
  * are: a name, a string literal, a number, a punctuation mark, or nothing at
- * all.  It interns nothing and it reports nothing.  A token carries its
- * bytes, and the parser decides what they are: a predicate's name, a
- * variable's, a function's, or a constant.  A byte sequence that is not a
- * token comes back as
- * RELIC_TOKEN_ERROR carrying the reason, because the parser is the one that
- * knows whether it is still listening: after the first mistake in a
- * statement it is discarding wreckage and wants silence, and a lexer that
- * printed for itself would have to be told so.
+ * all.  It interns nothing and reports no mistake in the text; only a
+ * refusal to grow its string buffer is reported, as out of memory, like any
+ * allocation.  A token carries its bytes, and the parser decides what they
+ * are: a predicate's name, a variable's, a function's, or a constant.  A
+ * byte sequence that is not a token comes back as RELIC_TOKEN_ERROR
+ * carrying the reason, because the parser is the one that knows whether it
+ * is still listening: after the first mistake in a statement it is
+ * discarding wreckage and wants silence, and a lexer that printed for itself
+ * would have to be told so.
  *
  * Classification is byte-oriented and locale-independent.  isalpha(3)
  * answers a question about the process locale, and the answer would decide

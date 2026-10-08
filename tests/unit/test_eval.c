@@ -681,9 +681,9 @@ a_later_load_extends_the_fixed_point(void)
  * A negated literal lets a binding through exactly when the tuple it names
  * is absent from a relation the schedule has already completed.
  *
- * The program is the task graph of architecture section 72: a task is
- * blocked while something it depends on is not done, and ready when it is
- * not blocked.  ship waits on build, which is not done, so ship is blocked;
+ * The program is a small project-tracking task graph: a task is blocked
+ * while something it depends on is not done, and ready when it is not
+ * blocked.  ship waits on build, which is not done, so ship is blocked;
  * build waits only on design, which is done; design waits on nothing.  That
  * puts done/1 in the lowest stratum, blocked/1 above it and ready/1 above
  * that, so ready/1 negates a relation that itself holds a negation.

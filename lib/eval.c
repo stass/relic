@@ -49,10 +49,14 @@
  * one with it, where a later fact can make a derived tuple false; one rule
  * for every program keeps that question from ever being asked.
  *
- * Both fixed points terminate because every value a rule can produce was
- * interned before evaluation began -- a head holds constants and variables,
- * and a variable is bound only from a tuple -- so each relation can hold only
- * finitely many tuples.  Neither overshoots the least fixed point, because
+ * Without expressions both fixed points terminate: a head holds constants
+ * and variables, a variable is bound from a tuple or is an aggregate's
+ * result, and an aggregate folds a complete relation once for each of
+ * finitely many groups, so every value a head can hold is one of finitely
+ * many and each relation can hold only finitely many tuples.  A rule that
+ * computes can produce new values without end, so a program that computes
+ * terminates only if its rules do; the limits and an interrupt bound one
+ * that does not.  Neither overshoots the least fixed point, because
  * every tuple either inserts is justified by tuples already present or by a
  * fact.
  *

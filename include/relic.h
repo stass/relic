@@ -143,10 +143,10 @@ typedef struct relic_config relic_config_t;
  * interns them, with "limit exceeded: memory=N".  The limit does not bound the
  * memory the library uses in total: the program's rules and queries, the text
  * being loaded, the field of a table being imported, the evaluation order, a
- * prepared query and the entry and index slot kept beside each predicate's
- * name are sized by what the caller wrote, and the tables and evaluation
- * order of a query's
- * rewrite are a fraction of the rewrite the limit does count.  Nor is it a
+ * prepared query, and each predicate's slot in the relation tables with the
+ * header of its relation are sized by what the caller wrote, and the tables
+ * and evaluation order of a query's rewrite are a fraction of the rewrite
+ * the limit does count.  Nor is it a
  * bound on peak usage, since growing an array holds the old one until the new
  * one is filled.
  *

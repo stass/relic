@@ -18,7 +18,7 @@
  * The syntax tree becomes a program.
  *
  * Compiling a statement resolves its atoms against the predicate table,
- * numbers its variables into the slots of architecture section 25, and
+ * numbers its variables into the slots of a binding frame, and
  * decides whether the result is safe.  What comes out is a relic_rule_t that
  * mentions no names at all, so that no later stage re-resolves anything: a
  * planner reading one needs no symbol table, and an executor needs no case
@@ -2175,9 +2175,9 @@ report_unbound_variables(relic_compiler_t *compiler, uint64_t unbound)
 /*
  * Whether a variable is exempt from the singleton warning.
  *
- * Architecture section 7 names two exemptions: `_`, which is not a named
- * variable at all, and a longer `_`-prefixed name such as `_Unused`, which
- * is how a rule documents a column it deliberately ignores.
+ * There are two exemptions: `_`, which is not a named variable at all, and
+ * a longer `_`-prefixed name such as `_Unused`, which is how a rule
+ * documents a column it deliberately ignores.
  */
 static bool
 singleton_exempt(const relic_variable_t *variable)

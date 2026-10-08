@@ -19,15 +19,15 @@ dnl macro required after it was expanded.  Choosing the compiler first leaves
 dnl libtool nothing to hook.  Whether it can build the one test that needs it
 dnl is decided once the instrumentation is known, by RELIC_CHECK_CXX.
 AC_PROG_CXX
+LT_PREREQ([2.4.2])
 LT_INIT
 
 dnl The shared library interface version, maintained independently of the
-dnl release version: a release that changes no interface keeps the same
-dnl version-info, and an interface change is a deliberate edit here.  By
-dnl libtool's rules an added entry point is current+1:0:age+1, a removed or
-dnl changed one -- a field added to a complete type among them -- is
-dnl current+1:0:0, and a change inside the library alone is
-dnl current:revision+1:age.
+dnl release version and edited deliberately: a release that changes nothing
+dnl in the library keeps the same version-info.  By libtool's rules a change
+dnl inside the library alone is current:revision+1:age, an added entry point
+dnl is current+1:0:age+1, and a removed or changed one -- a field added to a
+dnl complete type among them -- is current+1:0:0.
 RELIC_ABI_CURRENT=1
 RELIC_ABI_REVISION=0
 RELIC_ABI_AGE=0

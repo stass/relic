@@ -22,10 +22,15 @@
 # gathering: a corpus in which no query streamed would compare a behaviour
 # with itself.
 #
-# The corpus and what it leaves out are those of tests/equiv/strategies.sh,
-# for the same reasons.  Under a tuple or memory limit no query streams, so a
-# test setting one would compare gathering with itself; the rule that turns
-# streaming off under a limit is tested in tests/unit/test_query.c.
+# The corpus is that of tests/equiv/strategies.sh, less the tests that pass
+# -X, -e or -i, for the same reasons.  The tests that suite also leaves out
+# -- those with a Magic limit or a .per-strategy file -- are kept: their
+# diagnostics, or whether they succeed, may differ between the rewrite and
+# whole-program evaluation, but each run here is compared only with a run
+# under the same choice.  Under a tuple or
+# memory limit no query streams, so a test setting one would compare
+# gathering with itself; the rule that turns streaming off under a limit is
+# tested in tests/unit/test_query.c.
 
 set -eu
 
@@ -113,7 +118,7 @@ for path in $RELIC_LANG_TESTS; do
 	fi
 
 	case " $args " in
-	*" -X"* | *" -e"* | *" -i"* | *" -l magic-"*)
+	*" -X"* | *" -e"* | *" -i"*)
 		continue
 		;;
 	esac
