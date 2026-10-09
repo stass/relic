@@ -1,0 +1,217 @@
+diff --git a/src/include/souffle/datastructure/BTree.h b/src/include/souffle/datastructure/BTree.h
+index 5adc0b57d5b..84af8d187ba 100644
+--- a/src/include/souffle/datastructure/BTree.h
++++ b/src/include/souffle/datastructure/BTree.h
+@@ -1026,7 +1026,7 @@ class btree {
+     node* volatile root;
+ 
+     // a lock to synchronize update operations on the root pointer
+-    lock_type root_lock;
++    mutable lock_type root_lock;
+ #else
+     // a pointer to the root node of this tree
+     node* root;
+@@ -1241,6 +1241,12 @@ class btree {
+ 
+                 // get next pointer
+                 auto next = cur->getChild(idx);
++                if (next == nullptr) {
++                    if (cur->lock.validate(cur_lease)) {
++                        assert(false && "B-tree inner node has null child");
++                    }
++                    return insert(k, hints);
++                }
+ 
+                 // get lease on next level
+                 auto next_lease = next->lock.start_read();
+@@ -1568,6 +1574,91 @@ class btree {
+      * referencing its position. If not found, an end-iterator will be returned.
+      */
+     iterator find(const Key& k, operation_hints& hints) const {
++#ifdef IS_PARALLEL
++        node* cur = nullptr;
++        lock_type::Lease cur_lease;
++
++        auto checkHints = [&](node* last_find_end) {
++            if (!last_find_end) return false;
++
++            auto hint_lease = last_find_end->lock.start_read();
++            if (!covers(last_find_end, k)) return false;
++            if (!last_find_end->lock.validate(hint_lease)) return false;
++
++            cur = last_find_end;
++            cur_lease = hint_lease;
++            return true;
++        };
++
++        // test last location searched (temporal locality)
++        if (hints.last_find_end.any(checkHints)) {
++            // register it as a hit
++            hint_stats.contains.addHit();
++        } else {
++            // register it as a miss
++            hint_stats.contains.addMiss();
++        }
++
++        if (!cur) {
++            do {
++                auto root_lease = root_lock.start_read();
++                cur = root;
++
++                if (cur == nullptr) {
++                    if (root_lock.end_read(root_lease)) {
++                        return end();
++                    }
++                    continue;
++                }
++
++                cur_lease = cur->lock.start_read();
++
++                if (root_lock.end_read(root_lease)) {
++                    break;
++                }
++            } while (true);
++        }
++
++        while (true) {
++            auto a = &(cur->keys[0]);
++            auto b = &(cur->keys[cur->numElements]);
++
++            auto pos = search(k, a, b, comp);
++
++            if (pos < b && equal(*pos, k)) {
++                if (!cur->lock.validate(cur_lease)) {
++                    return find(k, hints);
++                }
++                hints.last_find_end.access(cur);
++                return iterator(cur, static_cast<field_index_type>(pos - a));
++            }
++
++            if (!cur->inner) {
++                if (!cur->lock.validate(cur_lease)) {
++                    return find(k, hints);
++                }
++                hints.last_find_end.access(cur);
++                return end();
++            }
++
++            // continue search in child node
++            auto next = cur->getChild(pos - a);
++            if (next == nullptr) {
++                if (cur->lock.validate(cur_lease)) {
++                    assert(false && "B-tree inner node has null child");
++                }
++                return find(k, hints);
++            }
++
++            auto next_lease = next->lock.start_read();
++            if (!cur->lock.end_read(cur_lease)) {
++                return find(k, hints);
++            }
++
++            cur = next;
++            cur_lease = next_lease;
++        }
++#else
+         if (empty()) {
+             return end();
+         }
+@@ -1611,6 +1702,7 @@ class btree {
+             // continue search in child node
+             cur = cur->getChild(pos - a);
+         }
++#endif
+     }
+ 
+     /**
+diff --git a/src/include/souffle/datastructure/BTreeDelete.h b/src/include/souffle/datastructure/BTreeDelete.h
+index 13bdfad09e8..e840927c6c9 100644
+--- a/src/include/souffle/datastructure/BTreeDelete.h
++++ b/src/include/souffle/datastructure/BTreeDelete.h
+@@ -1294,6 +1294,12 @@ class btree_delete {
+ 
+                 // get next pointer
+                 auto next = cur->getChild(idx);
++                if (next == nullptr) {
++                    if (cur->lock.validate(cur_lease)) {
++                        assert(false && "B-tree inner node has null child");
++                    }
++                    return insert(k, hints);
++                }
+ 
+                 // get lease on next level
+                 auto next_lease = next->lock.start_read();
+diff --git a/src/include/souffle/datastructure/LambdaBTree.h b/src/include/souffle/datastructure/LambdaBTree.h
+index 8f7180c01dc..61d7df2a81c 100644
+--- a/src/include/souffle/datastructure/LambdaBTree.h
++++ b/src/include/souffle/datastructure/LambdaBTree.h
+@@ -198,6 +198,12 @@ class LambdaBTree : public btree<Key, Comparator, Allocator, blockSize, SearchSt
+ 
+                 // get next pointer
+                 auto next = cur->getChild(idx);
++                if (next == nullptr) {
++                    if (cur->lock.validate(cur_lease)) {
++                        assert(false && "B-tree inner node has null child");
++                    }
++                    return insert(k, hints, f);
++                }
+ 
+                 // get lease on next level
+                 auto next_lease = next->lock.start_read();
+diff --git a/src/include/souffle/utility/ParallelUtil.h b/src/include/souffle/utility/ParallelUtil.h
+index 92ecf98ce64..91788ee1a0b 100644
+--- a/src/include/souffle/utility/ParallelUtil.h
++++ b/src/include/souffle/utility/ParallelUtil.h
+@@ -444,7 +444,7 @@ class OptimisticReadWriteLock {
+     bool validate(const Lease& lease) {
+         // check whether version number has changed in the mean-while
+         std::atomic_thread_fence(std::memory_order_acquire);
+-        return lease.version == version.load(std::memory_order_relaxed);
++        return lease.version == version.load(std::memory_order_acquire);
+     }
+ 
+     /**
+@@ -466,14 +466,14 @@ class OptimisticReadWriteLock {
+         detail::Waiter wait;
+ 
+         // set last bit => make it odd
+-        auto v = version.fetch_or(0x1, std::memory_order_acquire);
++        auto v = version.fetch_or(0x1, std::memory_order_acq_rel);
+ 
+         // check for concurrent writes
+         while ((v & 0x1) == 1) {
+             // wait for a moment
+             wait();
+             // get an updated version
+-            v = version.fetch_or(0x1, std::memory_order_acquire);
++            v = version.fetch_or(0x1, std::memory_order_acq_rel);
+         }
+ 
+         // done
+@@ -486,7 +486,7 @@ class OptimisticReadWriteLock {
+      * @return true if write permission has been granted, false otherwise.
+      */
+     bool try_start_write() {
+-        auto v = version.fetch_or(0x1, std::memory_order_acquire);
++        auto v = version.fetch_or(0x1, std::memory_order_acq_rel);
+         return !(v & 0x1);
+     }
+ 
+@@ -499,7 +499,7 @@ class OptimisticReadWriteLock {
+      *      be granted, false otherwise.
+      */
+     bool try_upgrade_to_write(const Lease& lease) {
+-        auto v = version.fetch_or(0x1, std::memory_order_acquire);
++        auto v = version.fetch_or(0x1, std::memory_order_acq_rel);
+ 
+         // check whether write privileges have been gained
+         if (v & 0x1) return false;  // there is another writer already
+@@ -539,7 +539,7 @@ class OptimisticReadWriteLock {
+      * @return true if so, false otherwise
+      */
+     bool is_write_locked() const {
+-        return version & 0x1;
++        return version.load(std::memory_order_relaxed) & 0x1;
+     }
+ };
+ 

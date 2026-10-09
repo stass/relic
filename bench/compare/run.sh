@@ -33,6 +33,7 @@
 # OpenMP and BENCH_OPENMP_FLAGS (default -fopenmp), trusted compiler flags.
 # BENCH_ARTIFACTS names a directory retaining each timed cell's JSON samples;
 # commands in these reports use engine/workload labels instead of local paths.
+# BENCH_DUCKDB_MEMORY_LIMIT optionally raises DuckDB memory allowance, in GiB.
 #
 # A workload whose data set is downloaded rather than generated, as the
 # Graspan points-to inputs are, runs only when -w names it.  Its archive is
@@ -67,6 +68,7 @@ limit=${BENCH_TIMEOUT:-300}
 threads=${BENCH_THREADS:-1}
 artifacts=${BENCH_ARTIFACTS:-}
 openmp_flags=${BENCH_OPENMP_FLAGS:--fopenmp}
+duckdb_memory_limit=${BENCH_DUCKDB_MEMORY_LIMIT:-}
 
 # The switches each engine runs with, recorded in the report's header.
 # SWI-Prolog reads no initialization file, which could change its flags,
@@ -77,7 +79,7 @@ openmp_flags=${BENCH_OPENMP_FLAGS:--fopenmp}
 # header, their columns separated by tabs.  The compiler's
 # switches depend on the Souffle installed and are set once it is found.
 relic_switches="-F tsv -j $threads"
-swipl_switches="-f none --stack-limit=16g --table-space=16g"
+swipl_switches="-f none --stack-limit=16g --table-space=64g"
 souffle_switches="-j$threads"
 magic_switches="--magic-transform=*"
 clingo_switches="-V0"
@@ -264,7 +266,13 @@ engine_switches() {
 		;;
 	clingo) echo "$clingo_switches" ;;
 	nemo) echo "$nemo_switches" ;;
-	duckdb) echo "$duckdb_switches" ;;
+	duckdb)
+		if [ -n "$duckdb_memory_limit" ]; then
+			echo "$duckdb_switches; memory limit $duckdb_memory_limit GiB"
+		else
+			echo "$duckdb_switches; memory limit default"
+		fi
+		;;
 	sqlite) echo "$sqlite_switches" ;;
 	*) die "internal error: no switches for engine $1" ;;
 	esac
@@ -598,7 +606,11 @@ engine_command() (
 		    "$(quote "$program")"
 		;;
 	duckdb)
-		joined "$(quote "$duckdb") $duckdb_switches" \
+		memory_switch=
+		if [ -n "$duckdb_memory_limit" ]; then
+			memory_switch="-cmd $(quote "SET memory_limit = '${duckdb_memory_limit}GiB'")"
+		fi
+		joined "$(quote "$duckdb") $duckdb_switches $memory_switch" \
 		    "-cmd $(quote ".cd $(dot_argument "$data")")" \
 		    "-f $(quote "$program")"
 		;;
@@ -999,6 +1011,9 @@ require_positive BENCH_SCALE "$scale"
 require_positive BENCH_RUNS "$runs"
 require_positive BENCH_TIMEOUT "$limit"
 require_positive BENCH_THREADS "$threads"
+if [ -n "$duckdb_memory_limit" ]; then
+	require_positive BENCH_DUCKDB_MEMORY_LIMIT "$duckdb_memory_limit"
+fi
 [ "$threads" -le 256 ] || die "BENCH_THREADS must be from 1 to 256"
 for engine in $requested_engines; do
 	member "$engine" $all_engines || die "unknown engine $engine"

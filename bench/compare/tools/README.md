@@ -68,3 +68,40 @@ and linking with `-fopenmp`; an OpenMP interpreter alone is insufficient.
 
 Set `RELIC`, `SOUFFLE`, `CLINGO`, `NMO`, `SQLITE` and `CXX` to these native
 executables when running the [comparison harness](../run.sh).
+
+## ARM parallel build
+
+The parallel comparison uses a separate Soufflé 2.5 build with the source
+changes from [upstream PR 2581](https://github.com/souffle-lang/souffle/pull/2581),
+pinned at `ecb775c9d90ac7c12c44f4b2d73985addd36587b`. The
+[ARM locking patch](souffle-2.5-arm-locking.patch) has SHA-256
+`981c8a13c041dd86cb5882752ad8a28951601be12277ef8ef152e5d01f74afcd`.
+Apply it after the compatibility build patch. Use a separate build and
+installation directory and set `GIT_PACKAGE_VERSION=2.5-arm-ecb775c`.
+The compiler and OpenMP runtime remain Homebrew clang/libomp 23.1.3.
+
+The stock release [documents sporadic ARM concurrency failures](https://github.com/souffle-lang/souffle/releases/tag/2.5).
+The chain-left interpreter reproducer fails on its second invocation with
+sixteen threads. The proposed patch passes 100 generated-program and 100
+interpreter repetitions with exact answer equality, plus the six upstream
+relation and locking tests. These checks establish observed benchmark
+behavior, not portable C++ race freedom. The proposal remains under upstream
+review, and the original failed attempt is preserved with the measurements.
+
+The single-core comparison retains the stock release plus compatibility
+patch. Soufflé's build variants therefore differ across thread settings;
+their timing differences are not interpreted as speedups caused solely by
+thread count. relic uses the same executable for both settings.
+
+## Memory allowances
+
+The harness gives SWI-Prolog a 16 GiB stack and 64 GiB table space. The
+scale-2 single-core cspa measurement preserves an initial failure with
+16 GiB table space; a retry with the larger allowance is queued separately.
+
+DuckDB uses its default memory limit unless `BENCH_DUCKDB_MEMORY_LIMIT` is
+set to a positive integer number of GiB. On this 128 GiB host, the default
+limit is 102.3 GiB. Queued scale-4 graph-left retries use
+`BENCH_DUCKDB_MEMORY_LIMIT=120` after the default allowance is exhausted.
+The original failures are retained, and retry measurements are recorded
+separately when they complete.
