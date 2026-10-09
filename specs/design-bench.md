@@ -409,9 +409,9 @@ workload whose data cannot be had is skipped with a note rather than failing
 the run.
 
 A workload of downloaded data runs only when `-w` names it. Its data does not
-scale, and the Graspan workloads take each engine minutes where the
-generated ones take seconds, so a default run uses only generated data, needs
-no network and stays short.
+scale. A default run uses only generated data and needs no network.
+Its duration depends on the engines and the number of repetitions; a
+successful verification can be followed by many minutes of timed runs.
 
 Graspan's own release has no working download. The harness takes the inputs
 the papers comparing Datalog engines on CSPA use: the FlowLog benchmark
