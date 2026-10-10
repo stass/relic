@@ -33,6 +33,7 @@
 /librelic.la
 /examples/query
 /tests/pty
+/tests/bench-pairset
 
 # Disposable trees made by the sanitizer and coverage suites.
 /disposable/

@@ -190,6 +190,10 @@ RELIC=/path/to/relic bench/compare/run.sh -e souffle,nemo -o results.tsv
 BENCH_THREADS="1 4 16" bench/run.sh /path/to/relic
 ```
 
+For large tree answers, the optional [parallel bitmap verifier](bench/compare/tools/README.md#exact-tree-answer-verification)
+checks exact set equality without sorting. Verification uses all available
+CPUs and stays outside the reported engine timings.
+
 See [benchmark methodology](specs/design-bench.md) for the workloads,
 measurement procedure and reproducibility requirements.
 

@@ -108,3 +108,26 @@ limit is 102.3 GiB. Queued scale-4 graph-left retries use
 `BENCH_DUCKDB_MEMORY_LIMIT=120` after the default allowance is exhausted.
 The original failures are retained, and retry measurements are recorded
 separately when they complete.
+
+## Exact tree answer verification
+
+The optional `pairset` verifier compares `tree-sg-all` answers as exact sets of node
+pairs, ignoring row order and duplicates. It uses an injective bitmap index,
+so equality does not rely on a probabilistic checksum. It rejects malformed
+rows and IDs outside the generated tree's domain. Verification runs outside
+the measured engine commands and uses all online CPUs, including when the
+engine is measured with one thread.
+
+The verifier's regression tests use Python 3 (`brew install python` on macOS).
+Build it with the system C compiler and enable it for a benchmark invocation:
+
+```sh
+cc -O3 -std=c11 -pthread -o /tmp/relic-pairset bench/compare/pairset.c
+BENCH_PAIRSET=/tmp/relic-pairset bench/compare/run.sh -w tree-sg-all,tree-sg-bound
+```
+
+For scales up to 8, each bitmap uses at most 2 GiB; comparing two answers
+uses two bitmaps. Input files are mapped read-only and must remain unchanged
+while verification runs. Their resident pages also contribute to peak RSS.
+Other workloads, including the single-column `tree-sg-bound` answer, and tree
+scales above 8 use sorted TSV comparison.

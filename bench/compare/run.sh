@@ -34,6 +34,8 @@
 # BENCH_ARTIFACTS names a directory retaining each timed cell's JSON samples;
 # commands in these reports use engine/workload labels instead of local paths.
 # BENCH_DUCKDB_MEMORY_LIMIT optionally raises DuckDB memory allowance, in GiB.
+# BENCH_PAIRSET names the optional exact tree-pair verifier, built from
+# pairset.c. It uses all online CPUs outside the timed engine invocations.
 #
 # A workload whose data set is downloaded rather than generated, as the
 # Graspan points-to inputs are, runs only when -w names it.  Its archive is
@@ -69,6 +71,7 @@ threads=${BENCH_THREADS:-1}
 artifacts=${BENCH_ARTIFACTS:-}
 openmp_flags=${BENCH_OPENMP_FLAGS:--fopenmp}
 duckdb_memory_limit=${BENCH_DUCKDB_MEMORY_LIMIT:-}
+pairset=${BENCH_PAIRSET:-}
 
 # The switches each engine runs with, recorded in the report's header.
 # SWI-Prolog reads no initialization file, which could change its flags,
@@ -724,6 +727,16 @@ normalize_answer() {
 	esac | LC_ALL=C sort -u
 }
 
+# bitmap_answer WORKLOAD: whether this answer uses canonical bounded tree
+# pairs. The generated tree depth is 8 + scale, so IDs need 9 + scale bits.
+bitmap_answer() {
+	[ -n "$pairset" ] && [ "$scale" -le 8 ] || return 1
+	case $1 in
+	tree-sg-all) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
 # verify ENGINE WORKLOAD: run WORKLOAD once with ENGINE under the time limit,
 # leaving its normalized answer in $work/answer and setting status and rows.
 # timeout(1) reports an engine it stopped with 124, or with 137 if the
@@ -757,6 +770,25 @@ verify() {
 		return 0
 	fi
 
+	if bitmap_answer "$2"; then
+		file=$(answer_file "$1")
+		if [ ! -f "$file" ]; then
+			status=failed
+			echo "compare: $1 left no answer in $file" >&2
+			return 0
+		fi
+		if [ "$1" = clingo ]; then
+			tr ' ' '\n' < "$file" | awk '/^[a-z_][A-Za-z0-9_]*\(.*\)$/ {
+				sub(/^[a-z_][A-Za-z0-9_]*\(/, "")
+				sub(/\)$/, "")
+				gsub(/,/, "\t")
+				print
+			}' > "$work/answer"
+		else
+			mv "$file" "$work/answer"
+		fi
+		return 0
+	fi
 	if ! normalize_answer "$1" > "$work/answer"; then
 		status=failed
 		return 0
@@ -768,6 +800,23 @@ verify() {
 # reference, unless it is empty: engines agreeing on no rows would check
 # nothing.  Any other engine's answer must equal the reference.
 judge_answer() {
+	if bitmap_answer "$2"; then
+		if [ "$1" = relic ]; then
+			if ! rows=$("$pairset" -b "$((9 + scale))" "$work/answer"); then
+				status=failed
+				rows=-
+				return 0
+			fi
+		else
+			if ! rows=$("$pairset" -b "$((9 + scale))" \
+			    "$work/reference" "$work/answer"); then
+				status=mismatch
+				rows=-
+				echo "compare: $1 disagrees with relic on $2" >&2
+			fi
+			return 0
+		fi
+	fi
 	if [ "$1" = relic ]; then
 		if [ "$rows" -eq 0 ]; then
 			status=empty
@@ -967,6 +1016,9 @@ summarize() {
 print_header() {
 	echo "# machine: $(machine), $(uname -sr)"
 	echo "# scale $scale, $runs timed runs, ${limit}s to answer, $threads threads"
+	if [ -n "$pairset" ]; then
+		echo "# tree answers: exact bitmap comparison, all online CPUs"
+	fi
 	echo "# $(hyperfine --version)"
 	tools=
 	for engine in $engines; do
@@ -1011,6 +1063,9 @@ require_positive BENCH_SCALE "$scale"
 require_positive BENCH_RUNS "$runs"
 require_positive BENCH_TIMEOUT "$limit"
 require_positive BENCH_THREADS "$threads"
+if [ -n "$pairset" ]; then
+	command -v "$pairset" > /dev/null 2>&1 || die "BENCH_PAIRSET is not executable"
+fi
 if [ -n "$duckdb_memory_limit" ]; then
 	require_positive BENCH_DUCKDB_MEMORY_LIMIT "$duckdb_memory_limit"
 fi

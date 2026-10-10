@@ -34,8 +34,9 @@ is `tests/perf.sh`, which checks counters, not the clock (see
 [testing](design-testing.md)). The comparison fails only on an answer.
 
 `bench/run.sh`, `bench/datasets.sh` and `bench/baseline.txt` ship in the
-release tarball; the comparison harness, which needs other engines
-installed, lives in the repository only.
+release tarball. The comparison harness source and bitmap verifier are
+included for regression tests; running the engine comparison requires the
+workload programs from the repository and the other engines installed.
 
 ## The relic instrument
 
@@ -354,10 +355,16 @@ exit status unable to signal a mismatch.
 The verification run's output is normalized to rows of tab-separated columns
 -- relic's `-F tsv`, SWI-Prolog's rows as the driver prints them, Souffle's
 and Nemo's exported files, clingo's atoms taken apart, the SQL engines' rows
-printed with tabs -- then sorted with duplicates removed, since every engine
-has set semantics but not every one prints a set in order. relic's
-normalized answer is the reference, and every other engine's must equal it
-byte for byte. An engine that leaves no answer file has failed, not
+printed with tabs. The distinct rows must equal relic's reference set exactly,
+regardless of order or duplicates. The general verifier sorts and removes
+duplicates, then compares the normalized files byte for byte. For tree answers,
+a parallel bitmap verifier can compare canonical pairs of `t<number>` symbols
+directly. Each pair has an injective bit index within the configured node
+domain; membership and distinct cardinality establish exact equality, without
+hash collisions. Malformed or out-of-domain rows fail verification. The
+verifier uses all available CPUs independently of the engine's timed thread
+count, and verification is excluded from reported engine timings.
+An engine that leaves no answer file has failed, not
 answered nothing.
 
 Every workload has a non-empty answer, and the harness fails a workload
