@@ -338,6 +338,9 @@ every other engine, each twice over:
 2. **The timed runs**, `BENCH_RUNS` of them, by `hyperfine`, with the
    engine's standard output discarded. Each is the whole process:
    start-up, loading, evaluation and writing the answer.
+   Souffle and Nemo retain their file exports during timed runs; the other
+   engines write to discarded standard output. File I/O can therefore affect
+   large-answer comparisons, which measure each engine's command-line workflow.
 
 Souffle's compiled modes are compiled before the verification run; the
 compilation is timed once and reported in its own column. An engine with no
