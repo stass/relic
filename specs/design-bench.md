@@ -338,9 +338,24 @@ every other engine, each twice over:
 2. **The timed runs**, `BENCH_RUNS` of them, by `hyperfine`, with the
    engine's standard output discarded. Each is the whole process:
    start-up, loading, evaluation and writing the answer.
-   Souffle and Nemo retain their file exports during timed runs; the other
-   engines write to discarded standard output. File I/O can therefore affect
-   large-answer comparisons, which measure each engine's command-line workflow.
+   Every engine serializes its complete answer to discarded standard output.
+   Souffle uses `-D -`; Nemo exports TSV to the empty resource through its
+   defaulted `answer_resource` parameter. Verification uses the same query
+   and format, with file exports for these engines. Command construction
+   requires an explicit verification or timing phase. Disabling answer
+   serialization is not an equivalent timing mode.
+
+`bench/compare/sweep.sh` runs scales 1, 2, 4 and 8 sequentially, at one
+thread and a selected parallel thread count. Scale 1 uses ten repetitions
+and includes the three fixed Graspan datasets; larger scales use three
+repetitions and generated data only. Each sweep requires a fresh results
+directory, executes an isolated source snapshot, and records its source
+revision, source archive and SHA-256 checksums, host, output policy,
+commands, raw samples and per-scenario exit codes. An interrupted scenario is marked
+before it starts and loses its marker only after the harness returns.
+The runner stops on usage errors and preserves engine failures as outcomes.
+It never resumes or overwrites an existing cohort. File-output measurements
+and stdout-output measurements are kept as separate cohorts.
 
 Souffle's compiled modes are compiled before the verification run; the
 compilation is timed once and reported in its own column. An engine with no

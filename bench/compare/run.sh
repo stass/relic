@@ -33,6 +33,8 @@
 # OpenMP and BENCH_OPENMP_FLAGS (default -fopenmp), trusted compiler flags.
 # BENCH_ARTIFACTS names a directory retaining each timed cell's JSON samples;
 # commands in these reports use engine/workload labels instead of local paths.
+# Timed answers are serialized to discarded stdout for every engine;
+# verification captures stdout or file exports for exact comparison.
 # BENCH_DUCKDB_MEMORY_LIMIT optionally raises DuckDB memory allowance, in GiB.
 # BENCH_PAIRSET names the optional exact tree-pair verifier, built from
 # pairset.c. It uses all online CPUs outside the timed engine invocations.
@@ -569,16 +571,24 @@ relic_imports() (
 	done
 )
 
-# engine_command ENGINE WORKLOAD: the command that runs WORKLOAD's program
-# with ENGINE.  relic, SWI-Prolog, clingo, DuckDB and SQLite write the
-# answer to standard output; Souffle and Nemo write it into
-# $work/out/ENGINE.  The SQL engines change to the data set's directory,
+# engine_command ENGINE WORKLOAD PHASE: run the query with verify file
+# exports or timed stdout serialization. The explicit phase prevents a
+# timing caller from retaining verification exports by accident.  The SQL engines change to the data set's directory,
 # where the program names its relation files and DuckDB writes any data it
 # spills to disk.
 engine_command() (
+	case ${3:-} in
+	verify | timed) phase=$3 ;;
+	*) die "internal error: invalid output phase" ;;
+	esac
 	program=$(programs_of "$2")/$(program_file "$1")
 	data=$work/data/$(dataset_of "$2")
 	out=$work/out/$1
+	nemo_output=
+	if [ "$phase" = timed ]; then
+		out=-
+		nemo_output="--param $(quote 'answer_resource=""')"
+	fi
 
 	case $1 in
 	relic)
@@ -605,8 +615,8 @@ engine_command() (
 		;;
 	nemo)
 		joined "$(quote "$nmo") $nemo_switches" \
-		    "-I $(quote "$data") -D $(quote "$out")" \
-		    "$(quote "$program")"
+		    "-I $(quote "$data") -D $(quote "$work/out/$1")" \
+		    "$nemo_output $(quote "$program")"
 		;;
 	duckdb)
 		memory_switch=
@@ -749,7 +759,7 @@ verify() {
 
 	code=0
 	started=$(date +%s)
-	"$timeout" -k 10 "$limit" sh -c "$(engine_command "$1" "$2")" \
+	"$timeout" -k 10 "$limit" sh -c "$(engine_command "$1" "$2" verify)" \
 	    < /dev/null > "$work/stdout" 2> "$work/stderr" || code=$?
 	elapsed=$(($(date +%s) - started))
 	if [ "$code" -eq 124 ] ||
@@ -851,7 +861,7 @@ measure() {
 	fi
 
 	if ! hyperfine -N $ignore $timing_switches --style none --runs "$runs" \
-	    --export-json "$work/timing.json" "$(engine_command "$1" "$2")" \
+	    --export-json "$work/timing.json" "$(engine_command "$1" "$2" timed)" \
 	    > /dev/null 2> "$work/hyperfine.err"; then
 		status=failed
 		echo "compare: timing $1 on $2 failed:" >&2
@@ -1016,6 +1026,8 @@ summarize() {
 print_header() {
 	echo "# machine: $(machine), $(uname -sr)"
 	echo "# scale $scale, $runs timed runs, ${limit}s to answer, $threads threads"
+	echo "# timed answers: complete serialization to discarded stdout"
+	echo "# Souffle timing: -D -; Nemo timing: --param answer_resource=\"\""
 	if [ -n "$pairset" ]; then
 		echo "# tree answers: exact bitmap comparison, all online CPUs"
 	fi

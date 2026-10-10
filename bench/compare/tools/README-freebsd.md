@@ -105,3 +105,55 @@ starting measurements. Each engine verifies its complete answer against
 relic before timing; cases and scenarios run sequentially on each host.
 Raw JSON, TSVs, reports, diagnostics, build details and any failed setup
 attempts are preserved separately.
+
+## Reusable full sweep
+
+Run [sweep.sh](../sweep.sh) from a built checkout. Engine paths use the
+same environment variables as `run.sh`; preflight compiles a tiny Souffle
+program with OpenMP and checks both engines' stdout exports. Missing engines stop the runner
+instead of silently reducing the comparison. For the source-build layout
+above and the installed ports:
+
+```sh
+cd "$HOME/relic-bench/src/relic"
+export PATH="$HOME/relic-bench/tools/installed/hyperfine/bin:$PATH"
+export SOUFFLE="$HOME/relic-bench/tools/installed/souffle/bin/souffle"
+export NMO="$HOME/relic-bench/tools/installed/nemo/bin/nmo"
+export RELIC="$PWD/relic" CXX=/usr/bin/c++ CC=/usr/bin/cc
+
+# Check tools and actual stdout exports without starting the sweep.
+sh bench/compare/sweep.sh -n -j 64 -o "$HOME/relic-bench/results/stdout-01"
+
+# Start after competing workloads have stopped.
+sh bench/compare/sweep.sh -j 64 -o "$HOME/relic-bench/results/stdout-01"
+```
+
+The default parallel setting is 64; `-j` selects another worker count.
+The script runs scales 1, 2, 4 and 8 at one thread and that parallel count,
+using ten repetitions at scale 1 and three at larger scales. It discovers
+all workloads, includes the downloaded Graspan datasets only at scale 1,
+and enables the exact bitmap verifier for supported tree answers. Cached
+Graspan archives are checksum-checked; missing archives are downloaded by
+the harness before their verification. `BENCH_TIMEOUT` defaults to 300
+seconds; other resource/compiler controls remain those of `run.sh`.
+
+For a run that survives SSH disconnection, FreeBSD's base `daemon` can
+supervise the same command (after exporting the environment above):
+
+```sh
+mkdir -p "$HOME/relic-bench/logs"
+daemon -o "$HOME/relic-bench/logs/stdout-01.log" \
+    -p "$HOME/relic-bench/logs/stdout-01.pid" \
+    sh bench/compare/sweep.sh -j 64 -o "$HOME/relic-bench/results/stdout-01"
+tail -f "$HOME/relic-bench/logs/stdout-01.log"
+```
+
+Each scenario retains its TSV, report, diagnostics, exit code and raw JSON
+samples. The directory also records host information, source revision,
+a frozen benchmark-source archive, SHA-256 checksums and output policy.
+The sweep executes that source snapshot, so repository edits cannot change
+the harness or queries during a run. A `.interrupted` marker persists if a
+scenario aborts. `main-sweep-complete` means every scenario returned, not
+that every engine succeeded; review all statuses before publication.
+Choose a new output directory for every restart. The runner does not resume,
+overwrite or mix file-output measurements with stdout-output measurements.

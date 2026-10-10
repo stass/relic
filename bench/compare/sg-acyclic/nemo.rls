@@ -1,6 +1,7 @@
+@parameter $answer_resource = "answer.tsv" .
 @import par :- tsv{resource="par.tsv"} .
 
 sg(?Y, ?Y) :- par(_, ?Y) .
 sg(?X, ?Y) :- par(?X, ?A), sg(?A, ?B), par(?Y, ?B) .
 
-@export sg :- tsv{resource="answer.tsv"} .
+@export sg :- tsv{resource=$answer_resource} .

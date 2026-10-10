@@ -98,10 +98,9 @@ context's configuration, beside the other limits.
 [Medium, component: `bench/compare/`]
 Complete and audit the FreeBSD scale sweep, then compare the machine-specific
 results with [the Mac report](BENCHMARKS.md). Separate OS/compiler/engine
-version differences from core-count effects. Measure output-sink costs in
-separate experiments: Souffle and Nemo export files while the other engines
-write to discarded stdout. Compare Souffle's `-D -` and an equivalent Nemo
-mode, preserving the existing workflow measurements as a distinct cohort.
+version differences from core-count effects. Run the uniform stdout-output sweep and compare it with the preserved
+file-output cohort to quantify output-sink costs, especially for large
+answers. Keep their raw measurements and comparison tables distinct.
 
 **A bound right-recursive closure costs relic more than the whole
 closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]

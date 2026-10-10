@@ -1,3 +1,4 @@
+@parameter $answer_resource = "answer.tsv" .
 @import file :- tsv{resource="file.tsv", format=(string)} .
 
 kind(?P, ?D, ?E) :- file(?P), ~test(?P), ?D = SUBSTR(?P, 1, 7),
@@ -5,4 +6,4 @@ kind(?P, ?D, ?E) :- file(?P), ~test(?P), ?D = SUBSTR(?P, 1, 7),
 test(?P) :- file(?P), REGEX(?P, "/test_[0-9]+[.]") .
 grouped(?D, ?E, #count(?P)) :- kind(?P, ?D, ?E) .
 
-@export grouped :- tsv{resource="answer.tsv", format=(string, string, int)} .
+@export grouped :- tsv{resource=$answer_resource, format=(string, string, int)} .

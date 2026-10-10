@@ -1,3 +1,4 @@
+@parameter $answer_resource = "answer.tsv" .
 @import assign :- tsv{resource="assign.tsv"} .
 @import dereference :- tsv{resource="dereference.tsv"} .
 
@@ -14,4 +15,4 @@ memoryAlias(?X, ?X) :- assign(?X, _) .
 valueAlias(?X, ?Y) :- valueFlow(?Z, ?X), valueFlow(?Z, ?Y) .
 valueAlias(?X, ?Y) :- valueFlow(?Z, ?X), memoryAlias(?Z, ?W), valueFlow(?W, ?Y) .
 
-@export valueFlow :- tsv{resource="answer.tsv"} .
+@export valueFlow :- tsv{resource=$answer_resource} .

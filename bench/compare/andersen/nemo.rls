@@ -1,3 +1,4 @@
+@parameter $answer_resource = "answer.tsv" .
 @import addressOf :- tsv{resource="addressOf.tsv"} .
 @import assign :- tsv{resource="assign.tsv"} .
 @import load :- tsv{resource="load.tsv"} .
@@ -8,4 +9,4 @@ pointsTo(?V, ?W) :- assign(?V, ?U), pointsTo(?U, ?W) .
 pointsTo(?V, ?W) :- load(?V, ?P), pointsTo(?P, ?Q), pointsTo(?Q, ?W) .
 pointsTo(?Q, ?W) :- store(?P, ?V), pointsTo(?P, ?Q), pointsTo(?V, ?W) .
 
-@export pointsTo :- tsv{resource="answer.tsv"} .
+@export pointsTo :- tsv{resource=$answer_resource} .

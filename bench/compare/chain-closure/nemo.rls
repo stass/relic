@@ -1,6 +1,7 @@
+@parameter $answer_resource = "answer.tsv" .
 @import edge :- tsv{resource="edge.tsv"} .
 
 path(?X, ?Y) :- edge(?X, ?Y) .
 path(?X, ?Z) :- edge(?X, ?Y), path(?Y, ?Z) .
 
-@export path :- tsv{resource="answer.tsv"} .
+@export path :- tsv{resource=$answer_resource} .

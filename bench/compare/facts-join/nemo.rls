@@ -1,5 +1,6 @@
+@parameter $answer_resource = "answer.tsv" .
 @import row :- tsv{resource="row.tsv"} .
 
 pair(?A, ?B) :- row(?A, ?V, 7), row(?B, ?V, 13) .
 
-@export pair :- tsv{resource="answer.tsv"} .
+@export pair :- tsv{resource=$answer_resource} .

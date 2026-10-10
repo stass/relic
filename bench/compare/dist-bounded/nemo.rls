@@ -1,6 +1,7 @@
+@parameter $answer_resource = "answer.tsv" .
 @import par :- tsv{resource="par.tsv"} .
 
 dist(?X, ?Y, 1) :- par(?X, ?Y) .
 dist(?X, ?Z, ?E) :- dist(?X, ?Y, ?D), par(?Y, ?Z), ?D < 5, ?E = ?D + 1 .
 
-@export dist :- tsv{resource="answer.tsv"} .
+@export dist :- tsv{resource=$answer_resource} .

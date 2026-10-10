@@ -4,7 +4,7 @@ Apple M3 Max: **12 performance + 4 efficiency cores, 128 GiB RAM**.
 OS: macOS 27.0.1 (26A434), Darwin 27.0.0. Power: AC power, powermode 0 (automatic), battery charged.
 Start load/context: 3.03, 3.87, 3.92 (1, 5, 15 minutes); user stopped competing workloads before start. Background OS activity remains.
 Thermal observations at start: No thermal or performance warning recorded by pmset; at end: Note: No thermal warning level has been recorded; Note: No performance warning level has been recorded; Note: No CPU power status has been recorded. These results describe this machine. FreeBSD measurements
-are in progress and are excluded from these tables.
+are excluded from these tables.
 
 Scale 1 uses **10 repetitions**; scales 2, 4 and 8 use **3**. The 31 workloads
 include three fixed Graspan datasets at scale 1. The other 28 workloads run
@@ -961,7 +961,9 @@ python3 bench/compare/tools/render-mac-results.py --check
 python3 bench/compare/tools/render-mac-results.py
 ```
 
-Rerun with the documented engines installed (use a fresh artifacts directory):
+The recorded tables use file exports for Souffle/Nemo. The comparison harness serializes timed answers to discarded stdout for every engine. Preserve measurements from these output policies in separate cohorts; rerunning these commands does not reproduce the recorded file-output policy.
+
+Run with the documented engines installed (use a fresh artifacts directory):
 
 ```sh
 RELIC=/path/to/relic BENCH_SCALE=1 BENCH_RUNS=10 BENCH_THREADS=1 \

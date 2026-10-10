@@ -128,6 +128,8 @@ case, relic takes **191 s** versus compiled Souffle's **287 s**, while using
 **109 GiB** versus **42.5 GiB** peak memory. The bounded tree favors Souffle
 Magic: **364 ms** versus relic's **407 ms**. Large-answer comparisons include
 file exports for Souffle/Nemo and discarded stdout for the other engines.
+The benchmark harness uses discarded stdout for every engine; results from
+that output policy belong in a separate cohort.
 
 The [full benchmark report](BENCHMARKS.md) contains every workload and scale,
 separate CPU and memory tables, build conditions and diagnosed limits.
@@ -135,7 +137,7 @@ separate CPU and memory tables, build conditions and diagnosed limits.
 preserved, including default-memory failures and separately recorded retries.
 [Methodology](specs/design-bench.md) explains measurement and reproduction.
 
-FreeBSD benchmarking is in progress; its results are excluded from these tables.
+FreeBSD results are excluded from these tables.
 
 ## Reliability and testing
 

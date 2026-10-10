@@ -1,7 +1,8 @@
+@parameter $answer_resource = "answer.tsv" .
 @import parent :- tsv{resource="parent.tsv"} .
 
 sg(?X, ?X) :- parent(_, ?X) .
 sg(?X, ?Y) :- parent(?P, ?X), sg(?P, ?Q), parent(?Q, ?Y) .
 
 answer(?X) :- sg(t2048, ?X) .
-@export answer :- tsv{resource="answer.tsv"} .
+@export answer :- tsv{resource=$answer_resource} .

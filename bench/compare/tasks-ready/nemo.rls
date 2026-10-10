@@ -1,3 +1,4 @@
+@parameter $answer_resource = "answer.tsv" .
 @import task :- tsv{resource="task.tsv"} .
 @import depends :- tsv{resource="depends.tsv"} .
 @import done :- tsv{resource="done.tsv"} .
@@ -7,4 +8,4 @@ waits(?X, ?Z) :- depends(?X, ?Y), waits(?Y, ?Z) .
 blocked(?X) :- waits(?X, _) .
 ready(?X) :- task(?X), ~done(?X), ~blocked(?X) .
 
-@export ready :- tsv{resource="answer.tsv"} .
+@export ready :- tsv{resource=$answer_resource} .

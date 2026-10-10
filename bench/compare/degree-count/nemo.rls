@@ -1,3 +1,4 @@
+@parameter $answer_resource = "answer.tsv" .
 @import edge :- tsv{resource="edge.tsv"} .
 
 node(?X) :- edge(?X, _) .
@@ -12,4 +13,4 @@ source(?X) :- edge(?X, _) .
 target(?Y) :- edge(_, ?Y) .
 degree(?X, ?O, ?I) :- outs(?X, ?O), ins(?X, ?I) .
 
-@export degree :- tsv{resource="answer.tsv"} .
+@export degree :- tsv{resource=$answer_resource} .

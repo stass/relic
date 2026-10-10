@@ -1,7 +1,8 @@
+@parameter $answer_resource = "answer.tsv" .
 @import edge :- tsv{resource="edge.tsv"} .
 
 from(?X, ?Y) :- edge(?X, ?Y) .
 from(?X, ?Z) :- from(?X, ?Y), edge(?Y, ?Z) .
 
 answer(?X) :- from(n0, ?X) .
-@export answer :- tsv{resource="answer.tsv"} .
+@export answer :- tsv{resource=$answer_resource} .

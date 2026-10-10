@@ -381,7 +381,7 @@ conditions = f'''{metadata['processor']}: **{metadata['performance_cores']} perf
 OS: {metadata['os']}. Power: {metadata['power']}.
 Start load/context: {metadata['load_start']}. Background OS activity remains.
 Thermal observations at start: {metadata['thermal_start']}; at end: {metadata['thermal_end'].replace(chr(10), '; ')}. These results describe this machine. FreeBSD measurements
-are in progress and are excluded from these tables.
+are excluded from these tables.
 
 Scale 1 uses **10 repetitions**; scales 2, 4 and 8 use **3**. The 31 workloads
 include three fixed Graspan datasets at scale 1. The other 28 workloads run
@@ -455,7 +455,8 @@ full.extend(['## Raw results and reproduction', '',
              'Regenerate and validate this report without running engines:', '',
              '```sh', 'python3 bench/compare/tools/render-mac-results.py --check',
              'python3 bench/compare/tools/render-mac-results.py', '```', '',
-             'Rerun with the documented engines installed (use a fresh artifacts directory):', '',
+             'The recorded tables use file exports for Souffle/Nemo. The comparison harness serializes timed answers to discarded stdout for every engine. Preserve measurements from these output policies in separate cohorts; rerunning these commands does not reproduce the recorded file-output policy.', '',
+             'Run with the documented engines installed (use a fresh artifacts directory):', '',
              '```sh', 'RELIC=/path/to/relic BENCH_SCALE=1 BENCH_RUNS=10 BENCH_THREADS=1 \\',
              '    BENCH_ARTIFACTS=/path/to/fresh-artifacts bench/compare/run.sh -o single.tsv', '',
              'RELIC=/path/to/relic BENCH_SCALE=1 BENCH_RUNS=10 BENCH_THREADS=16 \\',
@@ -504,13 +505,15 @@ performance = '\n'.join(['## Performance', '',
     f"case, relic takes **{format_time(tree_relic['median'])}** versus compiled Souffle's **{format_time(tree_souffle['median'])}**, while using",
     f"**{format_memory(tree_relic['peak_bytes'])}** versus **{format_memory(tree_souffle['peak_bytes'])}** peak memory. The bounded tree favors Souffle",
     f"Magic: **{format_time(bound_magic['median'])}** versus relic's **{format_time(bound_relic['median'])}**. Large-answer comparisons include",
-    'file exports for Souffle/Nemo and discarded stdout for the other engines.', '',
+    'file exports for Souffle/Nemo and discarded stdout for the other engines.',
+    'The benchmark harness uses discarded stdout for every engine; results from',
+    'that output policy belong in a separate cohort.', '',
     'The [full benchmark report](BENCHMARKS.md) contains every workload and scale,',
     'separate CPU and memory tables, build conditions and diagnosed limits.',
     '[Raw results and individual samples](bench/compare/recorded/m3-max/) are',
     'preserved, including default-memory failures and separately recorded retries.',
     '[Methodology](specs/design-bench.md) explains measurement and reproduction.', '',
-    'FreeBSD benchmarking is in progress; its results are excluded from these tables.', '',])
+    'FreeBSD results are excluded from these tables.', '',])
 readme = repo/'README.md'
 text = readme.read_text()
 start = text.index('## Performance\n')

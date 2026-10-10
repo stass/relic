@@ -100,14 +100,14 @@ thread count. relic uses the same executable for both settings.
 
 The harness gives SWI-Prolog a 16 GiB stack and 64 GiB table space. The
 scale-2 single-core cspa measurement preserves an initial failure with
-16 GiB table space; a retry with the larger allowance is queued separately.
+16 GiB table space; the separately recorded retry with the larger allowance exceeds the verification limit.
 
 DuckDB uses its default memory limit unless `BENCH_DUCKDB_MEMORY_LIMIT` is
 set to a positive integer number of GiB. On this 128 GiB host, the default
-limit is 102.3 GiB. Queued scale-4 graph-left retries use
+limit is 102.3 GiB. Separately recorded scale-4 graph-left retries use
 `BENCH_DUCKDB_MEMORY_LIMIT=120` after the default allowance is exhausted.
 The original failures are retained, and retry measurements are recorded
-separately when they complete.
+separately. See [the full report](../../../BENCHMARKS.md) for their outcomes.
 
 ## Exact tree answer verification
 
@@ -131,3 +131,18 @@ uses two bitmaps. Input files are mapped read-only and must remain unchanged
 while verification runs. Their resident pages also contribute to peak RSS.
 Other workloads, including the single-column `tree-sg-bound` answer, and tree
 scales above 8 use sorted TSV comparison.
+
+## Timed output policy
+
+The comparison harness captures file exports from Souffle and Nemo for
+verification. During timing, Souffle uses `-D -` and Nemo overrides the
+`answer_resource` parameter with the empty string. Every engine serializes
+its complete answer to stdout, which hyperfine discards. This removes the
+extra file-storage work without skipping result serialization. Nemo's
+rule files default the parameter to `answer.tsv` for standalone use.
+
+The recorded M3 Max tables use the file-export policy documented in their
+report. Keep stdout-output measurements in a fresh directory and compare
+the cohorts explicitly. The [sweep runner](../sweep.sh) refuses existing
+output directories and tests the installed engines' output destinations
+before starting. Use `-n` for those preflight checks alone.
