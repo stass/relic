@@ -26,9 +26,14 @@ targets are missed. The row writer's share of `chain-closure`'s profile
 is 11 per cent against a target under 5; what remains is formatting 24 MB
 of rows, and no cheaper formatting is designed. The peak above the live
 heap is the item on a growth's slack and transient under Benchmarks, and
-the import's time and peak the item on importing facts there. The work is
-done when the targets hold and the comparison is recorded on an idle
-machine (the item on an idle run under Benchmarks).
+the import's time and peak the item on importing facts there. Record each
+improvement on an idle machine with the same output sink and compiler
+conditions, exact answer checks and peak memory. The
+[M3 diagnostic evidence](bench/compare/recorded/m3-max/optimization-probes/results.json)
+and [losing cells](bench/compare/recorded/m3-max/optimization-probes/losses.tsv)
+also identify priorities in recursive planning, bound-query factoring,
+bulk loading and the parallel merge; the parallel work is in
+[docs/todo-parallel.md](docs/todo-parallel.md).
 
 **Parallel evaluation misses its speed-up targets.** [Medium, component:
 `lib/round.c`, `docs/todo-parallel.md`] With the pool, `tc-cyclic` should
@@ -42,6 +47,19 @@ Loading in parallel and components side by side, designed in
 sorted in `docs/todo-parallel.md`.
 
 ## Engine
+
+**Recursive planning can discard the cheaper join order.** [Medium,
+component: `lib/plan.c`, `lib/plan.h`] `decide_variant()` retains only the
+delta-first plan when the initial greedy order starts with the delta.
+That decision uses an assumed 1,000 tuples for an incomplete relation.
+At scale 4, `tc-acyclic-bf` crosses that estimate and loses its
+magic-first alternative: it makes 92,938,873 lookups against 19,418,539
+with `-X no-reorder`, for identical answers and 18,923,480 derivations.
+At scale 8 the corresponding counts are 356,557,738 and 72,238,190.
+Keep driver alternatives independent of the initial unknown-cardinality
+estimate and choose from actual round sizes and indexed fan-out. Add a
+counter regression across the estimate boundary before changing the
+planner; raising the constant only moves the boundary.
 
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
@@ -104,20 +122,22 @@ answers. Keep their raw measurements and comparison tables distinct.
 
 **A bound right-recursive closure costs relic more than the whole
 closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]
-On the dense cyclic graph, `tc(500, X)?` over `tc(X, Z) :- par(X, Y),
-tc(Y, Z)` took relic 28 s against 17 s for `tc(X, Y)?`, measured on a busy
-machine. The Magic rewrite carries the binding through the recursive call to
-every node reached, which here is every node, so it computes the whole
-closure and pays for the magic relation besides. The rewrite is correct but
-the query's answer is only the nodes reachable from 500. `bench/run.sh`
-shows the same on a chain: the right-recursive bound query derives two
-million tuples for an answer of 2000, the left-recursive one six thousand.
-A right-linear recursion bound on its first argument can be answered by
-reachability over `par` alone (the right-linear and factoring rewrites of
-Naughton, Ramakrishnan, Sagiv and Ullman); find whether relic's rewrite can
-recognize the case. Souffle's `--magic-transform` produces the identical
-program and runs it in about 0.9 of relic's time, so the gap to Souffle is
-in evaluation rather than in the rewrite: see the next item.
+The M3 Max scale-8 matrix records 189.242 s at one thread and 27.032 s
+at sixteen for 8,000 answers. The Magic rewrite carries the binding
+through every reachable node, materializes 64 million closure tuples,
+and also computes the magic relation. A diagnostic invocation records
+3,191,837,759 derivations. An equivalent forward-reachability program
+returns the exact same set with 406,919 derivations and takes 0.073 s
+at sixteen threads in one exploratory run. On the acyclic input, a
+corresponding rewrite reduces 71,093,957 derivations to 85,357. These
+rule-level experiments are in the M3 diagnostic evidence linked above.
+Design a query transformation for a proven class of right-linear rules,
+using demand propagation and the base rules to produce answers, as in
+the factoring rewrites of Naughton, Ramakrishnan, Sagiv and Ullman. Keep
+positive-length path semantics and the correlation between separate
+bindings; arbitrary recursive rules cannot be reversed. Validate exact
+answers against the original program, including cycles, isolated seeds
+and additional base rules.
 
 **relic's evaluation costs several times Souffle's interpreter per derivation
 on the analyses.** [Medium, component: `lib/eval.c`, `bench/compare/andersen`]
@@ -139,6 +159,13 @@ with eight, `sg-cyclic` 3.42 against 3.56 s, at peaks of 81-82 against
 next: the stored hash again with batched insertion in place, and whether a
 successful search visits enough slots past the first to make prefetching
 them pay.
+
+An M3 Max scale-2 `tc-cyclic` evaluation-window profile places 1,739 of
+2,542 samples in the insertion path; it is retained with the diagnostic
+evidence. Batched hashing and prefetching are already present. Measure
+probe lengths, tuple reads and cache locality before selecting a different
+canonical index layout; a wider slot must justify its memory cost on
+both dense closures and sparse analyses.
 
 **A growth's slack and transient keep the peak above the live heap.**
 [Medium, component: `lib/util.c`] `chain-closure`'s peak footprint runs
@@ -174,6 +201,17 @@ length, eight bytes rather than sixteen, about 23 MiB; growing the pool by
 walking the entries in identifier order and placing each by its stored
 hash; and checking an imported symbol field once, where the import checks
 it is a symbol and interning the value checks again.
+
+On the M3 Max, scale-8 import-only probes take about 0.7-0.8 s for
+`facts-join` and `files-grouped`, before evaluation. DuckDB's complete
+sixteen-thread medians are 0.191 s and 0.076 s. Loading also takes about
+3.585 s of a 7.080 s diagnostic `cspa-linux` run, 0.721 s of 1.164 s
+for `grid-reach`, and 0.245 s of 0.401 s for `tree-sg-bound`. Prioritize
+private bulk construction with ownership transfer into an empty base
+store, then deterministic parallel parsing and interning. Preserve
+all-or-nothing publication, first-input-error ordering and value identity.
+These phase estimates compare separate load-only and complete processes;
+they are not isolated phase timers.
 
 ## Testing and CI
 

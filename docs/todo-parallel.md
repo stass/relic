@@ -5,7 +5,55 @@ pool and the parallel merge are built, and output, counters and storage
 bytes are the same at every thread count. The speed-up targets below are
 missed, and loading in parallel and components side by side are not built.
 This page records what is missing and what to try, in the order worth
-trying it. Times are from a macOS Xeon, loaded unless said otherwise.
+trying it. Times are from a macOS Xeon, loaded unless another platform is
+named. M3 observations refer to the
+[comparison matrix](../bench/compare/recorded/m3-max/results.tsv) and
+[diagnostic probes](../bench/compare/recorded/m3-max/optimization-probes/results.json).
+
+## A lookup cannot drive parallel tasks
+
+[Medium, component: `lib/round.c`, `lib/plan.c`] `item_is_cut()` accepts
+only a first-operation scan; `item_range()` estimates every other plan at
+one tuple. The M3 scale-8 `facts-join` starts with a constant-key lookup,
+returns 571,953 answers and records zero parallel rounds at sixteen
+threads. Give the driving cursor an ordered, partitionable range for
+both scans and indexed matches, and estimate work from its cardinality
+and downstream fan-out. Preserve indexed selection rather than forcing
+a full scan to obtain parallelism.
+
+## Pending values are expanded back into occurrences
+
+[Medium, component: `lib/merge.c`, `lib/task.c`] A worker already gives
+each distinct pending value one marker, but `pending_columns()` and
+`gather_pending()` size and populate the round's value map once per
+candidate column. M3 scale-8 `files-grouped` derives 1,799,657 `kind`
+tuples with two pending strings each, although there are only 206 new
+directory and extension strings. Retain a local-to-round marker map per
+worker: walk candidates in serial task order, create a round descriptor
+only at that local marker's first occurrence, and reuse it thereafter.
+This bounds descriptors by worker-distinct values, at most 3,296 for
+this sixteen-thread rule, while retaining first-occurrence numbering.
+The column rewrite still visits every pending column. Test identifiers,
+diagnostics, limit refusals and allocation failure before changing this
+ownership path.
+
+## Candidate replication makes large rounds expensive
+
+[Medium, component: `lib/task.c`, `lib/merge.c`] M3 scale-8 `tc-cyclic`
+at sixteen threads takes 22.512 s and peaks at 23.46 GiB, against
+Souffle's 13.616 s and 1.49 GiB; relic's serial peak is 1.46 GiB.
+Per-worker screening bounds candidates by workers times distinct new
+tuples, and merge staging and scratch add further storage. Measure live
+candidates, cross-worker repeats and each merge allocation separately
+from allocator retention. Evaluate bounded batches routed to one owner
+per tuple-hash partition, retaining the earliest logical derivation
+position for deterministic commit. This requires a design change to
+the deferred round, including worker-independent hashes for pending
+values, exact collision checks and the serial fallback on refusal.
+The target is scratch proportional to distinct new tuples plus bounded
+producer buffers, independent of worker count. The scale-8 all-pairs
+tree, which peaks at 109.1 GiB at sixteen threads, is a capacity gate
+alongside the closure timings.
 
 ## The targets
 
