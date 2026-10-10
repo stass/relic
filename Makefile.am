@@ -83,7 +83,7 @@ pkgconfig_DATA = librelic.pc
 # and the design of each subsystem, and what remains open.
 # specs/ and docs/ are named whole, as tests/lang is, so that a new design
 # document cannot be left out of the tarball.
-EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md bench/baseline.txt \
+EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md BENCHMARKS.md bench/baseline.txt \
 	TODO.md docs specs \
 	bench/datasets.sh bench/run.sh \
 	bench/compare/results.tsv bench/compare/suite-summary.tsv \

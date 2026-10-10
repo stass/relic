@@ -94,25 +94,14 @@ context's configuration, beside the other limits.
 
 ## Benchmarks
 
-**No run is recorded on an idle machine.** [Medium, component: `bench/`]
-[Measurement and reporting](specs/design-bench.md#measurement-and-reporting)
-keeps one comparison run in `bench/compare/results.txt`, which does not
-exist: it needs an idle machine, ten timed runs per cell and the scale
-sweep, `BENCH_SCALE` 1, 2, 4 and 8, so the curves show which gaps grow with
-the input. The same criteria ask for a second machine of a different
-operating system and processor; every run so far is one macOS Xeon.
-`bench/baseline.txt` was recorded on a machine busy with other work; its
-counters are exact, but its seconds are longer than an idle run's and want
-recording again in the same session. The same session should settle
-whether Souffle and Nemo, which write their answers to files where the
-other engines write to a discarded standard output, pay for it: under load
-a Souffle run writing its file showed wall time far above its CPU time,
-within the noise of a busy machine. If the file costs a measurable amount,
-time Souffle with `-D -` and find Nemo an equivalent. The run should
-include the Graspan workloads, `-w cspa-httpd,cspa-postgresql,cspa-linux`,
-which a default run leaves out. Single runs of each, one thread on a quiet
-machine, gave relic 210, 190 and 50 seconds against compiled Souffle's 171,
-195 and 54, at peaks of 6.2, 6.6 and 2.1 GB against 5.5, 7.2 and 1.3.
+**Compare output sinks and validate scaling on a second platform.**
+[Medium, component: `bench/compare/`]
+Complete and audit the FreeBSD scale sweep, then compare the machine-specific
+results with [the Mac report](BENCHMARKS.md). Separate OS/compiler/engine
+version differences from core-count effects. Measure output-sink costs in
+separate experiments: Souffle and Nemo export files while the other engines
+write to discarded stdout. Compare Souffle's `-D -` and an equivalent Nemo
+mode, preserving the existing workflow measurements as a distinct cohort.
 
 **A bound right-recursive closure costs relic more than the whole
 closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]

@@ -1,38 +1,33 @@
-# bench/run.sh at BENCH_SCALE=1 and BENCH_THREADS="1 16" on one machine, for
-# comparison by eye.
-#
-# Intel Xeon W-3245 at 3.20 GHz (16 cores, 32 threads), macOS 26, Apple
-# clang 21, relic configured with --disable-shared (-g -O2), on a machine
-# busy with other work, which makes every time longer than an idle run's.
-# Each workload was run three times and the fastest time kept; the counters
-# do not vary between runs or with the thread count.  Timing is noisy and
-# machine-dependent: compare the counters exactly and the seconds only by
-# order of magnitude.
+# Apple M3 Max (12 performance + 4 efficiency cores), 128 GiB RAM
+# macOS 27.0.1, Apple clang 21, --disable-shared --enable-threads, -O3 -g
+# AC power, automatic power mode; competing user workloads stopped.
+# BENCH_SCALE=1, BENCH_THREADS="1 16"; one run per workload and count.
+# Wall seconds are single measurements; counters are exact.
 
 workload                     threads  seconds     derived       held     scanned   looked up
-chain, right-recursive             1     0.52     2005001    2005001     2005001     2003000
-chain, right-recursive            16     0.53     2005001    2005001     2005001     2003000
+chain, right-recursive             1     0.24     2005001    2005001     2005001     2003000
+chain, right-recursive            16     0.24     2005001    2005001     2005001     2003000
 chain, left-recursive              1     0.00        4001       4001        2001        4000
 chain, left-recursive             16     0.00        4001       4001        2001        4000
-chain, whole closure               1     0.86     4004000    4004000     4006000     4000000
-chain, whole closure              16     0.87     4004000    4004000     4006000     4000000
-chain, distances                   1     0.70     4002000    2003000     4004000     1999000
-chain, distances                  16     0.69     4002000    2003000     4004000     1999000
-graph, reachability                1     0.06      119999     119994       40000       99999
-graph, reachability               16     0.05      119999     119994       40000       99999
-graph, left-recursive              1     0.06      119997     119995          11      139996
-graph, left-recursive             16     0.06      119997     119995          11      139996
-graph, degrees                     1     0.09      439976     339982      439976      199988
-graph, degrees                    16     0.08      439976     339982      439976      199988
-grid, reachability                 1     0.03       67199      67199       44998       44700
-grid, reachability                16     0.03       67199      67199       44998       44700
-tree, same generation              1     0.01        3093      10249         156        4236
-tree, same generation             16     0.01        3093      10249         156        4236
-tree, all generations              1     0.04      350544     175784      350546      262140
-tree, all generations             16     0.02      350544     175784      350546      262140
-tasks, ready                       1     0.08      155377     240232      267899       47002
-tasks, ready                      16     0.08      155377     240232      267899       47002
-facts, load and join               1     0.22       17572     308786        8786       11743
-facts, load and join              16     0.22       17572     308786        8786       11743
-files, grouped                     1     0.35      676938     752098      752092      224846
-files, grouped                    16     0.24      676938     752098      752092      224846
+chain, whole closure               1     0.39     4004000    4004000     4006000     4000000
+chain, whole closure              16     0.38     4004000    4004000     4006000     4000000
+chain, distances                   1     0.34     4002000    2003000     4004000     1999000
+chain, distances                  16     0.34     4002000    2003000     4004000     1999000
+graph, reachability                1     0.03      119999     119994       40000       99999
+graph, reachability               16     0.03      119999     119994       40000       99999
+graph, left-recursive              1     0.03      119997     119995          11      139996
+graph, left-recursive             16     0.03      119997     119995          11      139996
+graph, degrees                     1     0.04      239988     139994      239988      199988
+graph, degrees                    16     0.03      239988     139994      239988      199988
+grid, reachability                 1     0.01       67199      67199       44998       44700
+grid, reachability                16     0.01       67199      67199       44998       44700
+tree, same generation              1     0.00        3093      10249         156        4236
+tree, same generation             16     0.00        3093      10249         156        4236
+tree, all generations              1     0.02      350544     175784      350546      262140
+tree, all generations             16     0.01      350544     175784      350546      262140
+tasks, ready                       1     0.04      155377     240232      267899       47002
+tasks, ready                      16     0.03      155377     240232      267899       47002
+facts, load and join               1     0.10       17572     308786        8786       11743
+facts, load and join              16     0.10       17572     308786        8786       11743
+files, grouped                     1     0.16      452092     527252      527246      224846
+files, grouped                    16     0.11      452092     527252      527246      224846
