@@ -1,5 +1,8 @@
 # Benchmark engine builds on Apple Silicon
 
+For native ports and source builds on FreeBSD, see the
+[FreeBSD build instructions](README-freebsd.md).
+
 The M3 Max comparison uses pinned native executables: Soufflé 2.5,
 clingo 5.8.0, Nemo 0.10.1, SWI-Prolog 9.2.9, DuckDB 1.5.5 and SQLite 3.51.2.
 The benchmark driver uses hyperfine 2.0.0. relic is built with Apple clang,

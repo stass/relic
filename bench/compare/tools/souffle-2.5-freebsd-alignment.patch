@@ -1,0 +1,17 @@
+--- a/src/include/souffle/utility/ParallelUtil.h
++++ b/src/include/souffle/utility/ParallelUtil.h
+@@ -30,9 +30,14 @@
+ #else
+ // 64 bytes on x86-64 │ L1_CACHE_BYTES │ L1_CACHE_SHIFT │ __cacheline_aligned │
+ // ...
++#if defined(__FreeBSD__) && defined(__x86_64__)
++constexpr std::size_t hardware_constructive_interference_size = 64;
++constexpr std::size_t hardware_destructive_interference_size = 64;
++#else
+ constexpr std::size_t hardware_constructive_interference_size = 2 * sizeof(max_align_t);
+ constexpr std::size_t hardware_destructive_interference_size = 2 * sizeof(max_align_t);
+ #endif
++#endif
+ 
+ #ifdef _OPENMP
+ 
