@@ -124,8 +124,8 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
-**Small FreeBSD timing regressions depend on code placement.** [Medium,
-component: `bench/compare/`, `lib/util.c`, `lib/exec.c`, `lib/import.c`]
+**Validate a build policy against code-placement regressions.** [Medium,
+component: `bench/compare/`, `configure.ac`, `tests/globals.sh`]
 The [original cohorts](bench/compare/recorded/freebsd-5995wx/recursive-planning/report.txt)
 measure 2.6-2.7% more serial cyclic-closure time and 1.3-1.4% more
 facts-join time with equal tuple work and relation storage. The
@@ -134,21 +134,25 @@ reproduce the facts increase with import and validation alone. Permuting
 only linked text sections changes the cyclic revision comparison from
 +2.69% to -0.89% and facts-join from +1.70% to +0.02%; one permutation
 does not establish a robust build or attribute every part of the cyclic
-difference. Repeat these controls after bound-query factoring and bulk
-loading, with indexed driver slicing judged alongside loading. Keep the
-guarded and ordinary-Magic references. The
+difference. The
 [alignment and hardware-counter comparison](bench/compare/recorded/freebsd-5995wx/code-alignment/report.txt)
 identifies 64-byte function alignment as a candidate: cyclic median spread
-across three layouts falls from 2.67% to 0.83%, with 5.90% more text.
-Validate it across the broader matrix and supported machines before
-setting a default. The
+across three layouts falls from 2.67% to 0.83%, with 5.90% more text. The
 [isolated probe-placement test](bench/compare/recorded/freebsd-5995wx/probe-alignment/report.txt)
 does not support a probe-only attribute: offsets 0, 16 and 32 differ by at
 most 0.20% on closure with surrounding code fixed. The C alignment
-attribute slows closure by 1.37% in ordinary link order. Preserve equal
-argument lengths and multiple layouts in further comparisons. The
-performance gate remains open; steps 3-5 of the benchmark plan cover the
-expensive paths.
+attribute slows closure by 1.37% in ordinary link order. The
+[four-way build comparison](bench/compare/recorded/freebsd-5995wx/build-policy/report.txt)
+finds ThinLTO lowers ordinary serial medians by 12.5-24.2% and selected
+64-worker medians by 5.8-18.4%, with 29.6% more text. Adding global
+64-byte alignment keeps the nine substantive serial layout spreads below
+0.75%, but grows text by 35.1% and costs 1.1-1.5% on 64-worker cyclic
+closure against ThinLTO alone in two cohorts. Validate ThinLTO across
+supported machines and toolchains, and repair the bitcode audit below,
+before setting a default; keep alignment a separately measured choice.
+Preserve equal argument lengths, multiple layouts, and guarded and
+ordinary-Magic references. Repeat these controls after bulk loading and
+indexed driver slicing; steps 4-5 of the benchmark plan cover those paths.
 
 **Compare output sinks and validate scaling on a second platform.**
 [Medium, component: `bench/compare/`]
@@ -242,6 +246,17 @@ These phase estimates compare separate load-only and complete processes;
 they are not isolated phase timers.
 
 ## Testing and CI
+
+**The global-state audit needs native symbol classification.** [Medium,
+component: `tests/globals.sh`] LLVM bitcode has no ELF section placement,
+but the audit accepts its seven-column `nm` output as native ELF and
+reports constant tables as writable data. Support LTO inputs without
+discarding suspect definitions. Also check every object's `nm` exit status:
+the loop's pipelines suppress failures, so an unreadable object after the
+first can pass unnoticed. Cover constants, mutable globals, thread-local
+state and failed symbol reads. The
+[build-policy experiment](bench/compare/recorded/freebsd-5995wx/build-policy/report.txt)
+retains the ThinLTO suite failures and a separate native-object audit.
 
 **LeakSanitizer flags macOS's fork handler.** [Low, component:
 `tests/random/main.c`, `Makefile.am`] Built with Homebrew's LLVM, where
