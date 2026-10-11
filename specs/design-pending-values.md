@@ -144,14 +144,21 @@ it frees the single block and releases exactly its recorded charge.
 
 A separate merge-owned object holds:
 
-* the ordinary `relic_pending_map_t`, opened with room for `U` entries;
+* the ordinary `relic_pending_map_t`, opened with room for `R` entries;
 * the copied pending-string buffer;
 * the projected persistent value-storage size;
 * its charge and the receipt for any successful value reservation.
 
-The string allocation contains at least one addressable byte when `U > 0`,
-even if `S = 0`. An empty string can then name offset zero without forming
-a pointer from `NULL`. This minimum allocation is charged. Payload content
+The object is opened after collection, and only when `R > 0`. Collection
+needs only the worker descriptors, the local maps and each worker's
+checked byte base, not the copied buffer, so the map can be sized by the
+descriptors actually referenced. Opening charges the map and the string
+buffer together, all or nothing. When `R = 0` nothing is opened, and no
+resolution teardown is needed.
+
+The string allocation contains at least one addressable byte even if
+`S = 0`. An empty string can then name offset zero without forming a
+pointer from `NULL`. This minimum allocation is charged. Payload content
 for a zero-length string is never read.
 
 The resolver's fresh-string records borrow bytes from this buffer until
@@ -160,8 +167,8 @@ descriptors. The descriptor array can therefore disappear after the
 rewrite barrier, while the resolution map and byte buffer remain live
 through the merge's reservation and apply phases.
 
-The resolution owner records its allocations independently of `R` and of
-the temporary descriptor pointer. Its close routine unreserves a live
+The resolution owner records its allocations independently of the
+temporary descriptor pointer. Its close routine unreserves a live
 reservation when necessary, closes the value map, frees the byte buffer
 and releases its charge. Partial initialization and repeated cleanup are
 safe. Releasing descriptors cannot make the merge forget these resources.
@@ -172,12 +179,13 @@ All derivation tasks have completed successfully before this phase. The
 caller owns the compaction object; no worker modifies candidates, pending
 tables or byte buffers while it is being populated.
 
-Copy each worker's used string bytes once into its assigned, disjoint span
-of the merge-owned buffer. Skip zero-length copies. A text descriptor copied
-from worker `w` adds that worker's byte base to its offset; the source
-descriptor remains unchanged. Validate its offset and length against the
-source span before rebasing. A byte range and its length determine a value;
-no C-string terminator or text encoding is assumed.
+Assign each worker a disjoint span of the string buffer the resolution
+will hold: its byte base is the sum of the earlier workers' `Sw`, which
+`S` bounds. A text descriptor copied from worker `w` adds that worker's
+byte base to its offset; the source descriptor remains unchanged. Validate
+its offset and length against the source span before rebasing. A byte
+range and its length determine a value; no C-string terminator or text
+encoding is assumed.
 
 Walk the task array in serial order. Each task identifies its worker and a
 contiguous range of that worker's candidates. Walk that range in candidate
@@ -210,9 +218,13 @@ collection follows the merge-decline path before any candidate mutation.
 Because no candidate changes between collection and rewriting, each marker
 the rewrite reads has a validated, nonzero mapping in the correct slice.
 
-If `R` is zero, close the temporary and resolution storage and continue
-with no pending values. Otherwise measurement receives exactly the `R`
-populated descriptors; capacity `U` is not its input count.
+If `R` is zero, close the temporary storage and continue with no pending
+values; no resolution storage was opened. Otherwise open the merge-owned
+resolution with room for `R` entries and `max(S, 1)` string bytes, and copy
+each worker's used string bytes once into its span, skipping zero-length
+copies. A refusal of that allocation leaves candidates and global values
+untouched. Measurement then receives exactly the `R` populated
+descriptors; capacity `U` is not its input count.
 
 ## Measuring and rewriting
 
@@ -227,10 +239,9 @@ the copied byte buffer. Its existing behavior is the authority for:
 * reuse of a symbol pool entry as a string and its required string-use bit;
 * stepwise growth of the value tables, symbol pool and use-bit storage.
 
-The map's input count becomes `R`, and its identifier array is valid for
-those `R` descriptors. Allocation remains charged at room `U`. An
-unrepresentable storage projection declines the merge. Measurement does
-not reserve or publish values.
+The map's room and input count are both `R`; its identifier array holds
+one promise per descriptor. An unrepresentable storage projection declines
+the merge. Measurement does not reserve or publish values.
 
 ### One rewrite and rehash per candidate
 
@@ -347,7 +358,7 @@ serial rewrite helper.
 | Owner | Responsibility |
 | --- | --- |
 | `lib/task.c`, candidate records in `lib/round.h` | Normalize batch markers locally; own worker pending descriptors, payload bytes and candidates until round release |
-| `resolve_pending()` in `lib/merge.c` | Size and own temporary compaction storage; enumerate first references; measure compact descriptors; wait for rewrite completion; close temporary storage |
+| `resolve_pending()` in `lib/merge.c` | Size and own temporary compaction storage; enumerate first references; open the resolution when `R > 0`; measure compact descriptors; wait for rewrite completion; close temporary storage |
 | Merge-owned resolution object | Own the value map, copied bytes, charge, projection and reservation receipt through apply or decline |
 | `lib/value.c` | Determine canonical identifiers, project persistent storage, reserve, append and unwind uncommitted string copies |
 | `lib/round.c`, `lib/pool.c` | Enforce derivation/rewrite barriers, release abandoned candidate buffers and run the serial retry |
@@ -357,7 +368,8 @@ serial rewrite helper.
 The data-sized resolution workspace is bounded by:
 
 ```text
-bridge_bytes(U) + relic_pending_map_bytes(U) + max(S, 1)
+bridge_bytes(U)                                             when R = 0
+bridge_bytes(U) + relic_pending_map_bytes(R) + max(S, 1)    when R > 0
 ```
 
 Here `bridge_bytes(U)` is the checked aligned layout of `U` local-map
@@ -365,14 +377,14 @@ entries and `U` pending descriptors. It is zero when `U = 0`; the whole
 resolution path is then empty. Map entries use the existing 32-bit marker
 width. Worker-span records add bounded `O(W)` control storage.
 
-Temporary mapping and descriptor storage is `O(U)`, string storage is
-`O(S)`, and neither is proportional to pending occurrences `P` at fixed
-worker tables. Preparing maps and copying string bytes takes `O(U + S)`
-work, with `O(W)` worker bookkeeping. Candidate traversal and rewriting
-take `O(C)` work. Measurement receives `R` descriptors and hashes their
-referenced payloads, with `R <= U`, rather than receiving `P` descriptors.
-Worker-side expression evaluation and local value hashing are separate
-costs and retain their existing behavior.
+Temporary mapping and descriptor storage is `O(U)`, the resolution map is
+`O(R)`, string storage is `O(S)`, and none is proportional to pending
+occurrences `P` at fixed worker tables. Preparing maps and copying string
+bytes takes `O(U + S)` work, with `O(W)` worker bookkeeping. Candidate
+traversal and rewriting take `O(C)` work. Measurement receives `R`
+descriptors and hashes their referenced payloads, with `R <= U`, rather
+than receiving `P` descriptors. Worker-side expression evaluation and
+local value hashing are separate costs and retain their existing behavior.
 
 For the scale-8 `files-grouped` fixture, 1,799,657 `kind` tuples contain
 roughly 3.6 million pending directory and extension columns. The 206
@@ -399,19 +411,21 @@ Every owned allocation is charged before it is requested. A refused
 allocation closes the objects opened so far and gives back their charges.
 Temporary storage has one scoped cleanup path; merge-owned resolution
 storage has one close path used after both success and decline. Cleanup
-is based on owned resources, even when no descriptors were referenced.
+is based on owned resources; when no descriptor is referenced, no
+resolution storage exists to clean up.
 
-A refusal during sizing, allocation, collection or measurement leaves
-candidate columns untouched. A failure in a later merge phase can find
-rewritten private candidates; it discards them whole. No inverse mapping
-or marker restoration is needed. The derivation and rewrite barriers must
-both be complete before any storage they reference is released.
+A refusal during sizing, allocation, collection, the resolution allocation
+that follows collection, or measurement leaves candidate columns
+untouched. A failure in a later merge phase can find rewritten private
+candidates; it discards them whole. No inverse mapping or marker
+restoration is needed. The derivation and rewrite barriers must both be
+complete before any storage they reference is released.
 
 The merge reports no resource-refusal diagnostic. The established serial
 retry reports the failure it encounters, preserving the existing tuple,
 memory and value-limit contract. An admitted merge makes no weaker
-persistent-storage check because its workspace is smaller. Temporary
-admission can improve and formerly declined rounds can merge successfully.
+persistent-storage check because its workspace is smaller. A round that
+an occurrence-sized workspace would not fit can merge successfully.
 Allocator failures retain the ordinary guarantees of consistent state and
 accounted retained capacities; identical allocator failure points across
 strategies are not required.
@@ -447,7 +461,8 @@ and charged capacities, not RSS or elapsed time.
 | First occurrence | Interleaved task ownership, including the example above and several targets, preserves integer and string identifier order |
 | Existing values | Already assigned columns remain unchanged; a string over symbol-only pool bytes reuses the pool entry and sets the string-use bit correctly |
 | Byte strings | Empty strings, embedded NULs, unequal lengths, large strings and hash collisions preserve exact value equality and safe byte lifetimes |
-| Empty/unused storage | No-pending rounds allocate nothing; unused local entries are not interned; `R = 0` releases any opened storage |
+| Empty/unused storage | No-pending rounds allocate nothing; unused local entries are not interned; `R = 0 < U` opens no resolution storage; partially referenced worker tables size the map by `R` |
+| Late refusal | A limit or allocator refusal of the resolution after collection leaves candidates, value tables and relations untouched and returns every charge |
 | Rehashing | A normalized candidate's hash, stripe and per-worker stripe counts agree with its promised words before cross-worker screening |
 | Scope release | Temporary maps can be released at the rewrite barrier without dangling references; the copied bytes remain live through reserve, append and rollback |
 | Exhaustion | The existing nth-allocation failure suite covers partial opens, copied bytes, map allocation and late relation-reservation failure after value reservation |
@@ -458,6 +473,9 @@ and charged capacities, not RSS or elapsed time.
 
 Extend round tests, value tests, the allocation-failure suite in
 `tests/unit/test_exhaustion.c`, and string/aggregate equivalence cases.
+Real rounds always reference every worker-local value and let the pool
+assign tasks to workers, so `tests/unit/test_merge.c` builds rounds by hand
+to fix that assignment and to hold values no candidate references.
 Inspect persistent value contents and stored identifiers as the round
 tests do; comparing printed strings alone would miss renumbering. Verify
 that computed fixture values are absent using read-only lookup rather than

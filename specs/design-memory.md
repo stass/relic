@@ -326,7 +326,9 @@ the account.
 The merge's [pending-value workspace](design-pending-values.md#storage-ownership)
 is charged through that same round account. Local marker maps and compact
 descriptors are sized by worker-local distinct values and released after
-the candidate rewrite barrier. The resolution map and copied string bytes
+the candidate rewrite barrier. The resolution map and the copied string
+bytes are opened only when some candidate holds a pending value, the map
+sized by the values candidates reference; they are charged together and
 remain charged until value append or reservation rollback and cleanup.
 Capacity, alignment padding and the addressable byte used for empty-string
 payloads are counted; early release follows actual ownership lifetime.

@@ -202,7 +202,8 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_eval tests/unit/test_exec \
 	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
 	tests/unit/test_interrupt \
-	tests/unit/test_lex tests/unit/test_magic tests/unit/test_parse \
+	tests/unit/test_lex tests/unit/test_magic tests/unit/test_merge \
+	tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
 	tests/unit/test_regex tests/unit/test_relation tests/unit/test_round \
 	tests/unit/test_rule tests/unit/test_stratify tests/unit/test_strfn \
@@ -265,6 +266,9 @@ tests_unit_test_lex_LDADD = librelic_internal.la $(LTLIBOBJS)
 tests_unit_test_magic_SOURCES = tests/unit/test_magic.c tests/unit/harness.c \
 	tests/unit/programs.c
 tests_unit_test_magic_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_merge_SOURCES = tests/unit/test_merge.c tests/unit/harness.c
+tests_unit_test_merge_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_parse_SOURCES = tests/unit/test_parse.c tests/unit/harness.c
 tests_unit_test_parse_LDADD = librelic_internal.la $(LTLIBOBJS)

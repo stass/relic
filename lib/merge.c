@@ -190,28 +190,33 @@ struct relic_merge_span {
  * what the value resolver measures.  `descriptors` has room for `room`,
  * every worker's pending values together, and holds `count`; equal values
  * of two workers are two descriptors, which the resolver promises one
- * identifier.  `spans` has a record for each of the pool's workers.  The
- * maps and the descriptors lie in `block`, charged to the round.
+ * identifier.  `string_bytes` is the bytes of every worker's pending
+ * strings together, which the spans divide between the workers.  `spans`
+ * has a record for each of the pool's workers.  The maps and the
+ * descriptors lie in `block`, charged to the round.
  */
 struct relic_merge_compaction {
 	relic_merge_t		*merge;
 	relic_pending_t		*descriptors;
 	size_t			 room;
 	size_t			 count;
+	size_t			 string_bytes;
 	relic_merge_block_t	 block;
 	relic_merge_span_t	 spans[RELIC_THREADS_MAX];
 };
 
 /*
  * The round's pending values once they are resolved, which the merge
- * holds until it applies or declines: `map` holds the identifier promised
- * each compact descriptor, and `bytes` the copy of every worker's pending
- * strings, which the map's new strings point into until they are appended
- * or their reservation is given back.  `charged` is what the two were
- * charged, `bytes` being NULL when they are not held.  `projected` is the
- * bytes the value table and the pool will hold once they have taken the
- * new values, and `reserved` says they hold a reservation for them not yet
- * appended.  The map's count is zero unless some value was promised.
+ * holds until it applies or declines.  It is opened only when some
+ * candidate holds a pending value, once every such value has its compact
+ * descriptor.  `map` holds the identifier promised each descriptor, and
+ * `bytes` the copy of every worker's pending strings, which the map's new
+ * strings point into until they are appended or their reservation is given
+ * back.  `charged` is what the two were charged, `bytes` being NULL when
+ * they are not held.  `projected` is the bytes the value table and the
+ * pool will hold once they have taken the new values, and `reserved` says
+ * they hold a reservation for them not yet appended.  The map's count is
+ * zero unless some value was promised.
  */
 struct relic_merge_resolution {
 	relic_pending_map_t	 map;
@@ -273,6 +278,7 @@ static void	 classify_part(void *argument, size_t part,
 static int	 collect_descriptors(relic_merge_compaction_t *compaction);
 static int	 compact_and_resolve(relic_merge_compaction_t *compaction);
 static size_t	 compaction_layout(void *owner, void *memory);
+static void	 copy_strings(const relic_merge_compaction_t *compaction);
 static int	 count_new_tuples(relic_merge_t *merge);
 static int	 describe_marker(relic_merge_compaction_t *compaction,
 		    size_t worker, relic_dom_t marker);
@@ -443,13 +449,14 @@ prepare_merge(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
  * written, and each candidate that held a marker is hashed again.
  *
  * Nothing is interned until the merge can no longer be declined.  The
- * compaction's maps and descriptors are released once every part has
- * rewritten its candidates; the resolved values, whose new strings point
- * into the merge's copy of the workers' bytes, stay until merge_end().
- * Returns 0, or -1 when the workers hold more pending values than a
- * marker can count, the scratch or the values could not be had, a marker
- * names none of its worker's values, or the new values' storage is more
- * than a size counts.
+ * resolution, sized by the descriptors, is opened only once the walk has
+ * made them.  The compaction's maps and descriptors are released once
+ * every part has rewritten its candidates; the resolved values, whose new
+ * strings point into the merge's copy of the workers' bytes, stay until
+ * merge_end().  Returns 0, or -1 when the workers hold more pending values
+ * than a marker can count or more string bytes than a size counts, the
+ * scratch or the resolution could not be had, a marker names none of its
+ * worker's values, or the new values' storage is more than a size counts.
  */
 static int
 resolve_pending(relic_merge_t *merge)
@@ -462,7 +469,9 @@ resolve_pending(relic_merge_t *merge)
 	compaction.room = pending_value_count(merge->pool);
 	if (compaction.room == 0)
 		return (0);
-	if (compaction.room > RELIC_DOM_INDEX_MASK)
+	compaction.string_bytes = pending_string_bytes(merge->pool);
+	if (compaction.room > RELIC_DOM_INDEX_MASK ||
+	    compaction.string_bytes == SIZE_MAX)
 		return (-1);
 
 	if (block_open(merge, &compaction.block, compaction_layout,
@@ -547,13 +556,14 @@ compaction_layout(void *owner, void *memory)
 
 /*
  * Resolve the pending values into the merge's resolution, the compaction's
- * block open: open the resolution and copy the workers' strings into it,
- * describe every local marker the candidates hold, measure the
+ * block open: describe every local marker the candidates hold; then, when
+ * some candidate holds a pending value, open the resolution with room for
+ * the descriptors, copy the workers' strings into it, measure the
  * descriptors, and rewrite every worker's candidates.  Values no candidate
- * holds are never described, and when there are none the resolution is
- * released again.  Returns 0, or -1 as resolve_pending() does, the
- * candidates untouched, leaving whatever resolution it opened for
- * merge_end() to release.
+ * holds are never described, and when no candidate holds one no resolution
+ * is opened.  Returns 0, or -1 as
+ * resolve_pending() does, the candidates untouched, leaving whatever
+ * resolution it opened for merge_end() to release.
  */
 static int
 compact_and_resolve(relic_merge_compaction_t *compaction)
@@ -563,17 +573,16 @@ compact_and_resolve(relic_merge_compaction_t *compaction)
 
 	merge = compaction->merge;
 	resolution = &merge->resolution;
-	if (resolution_open(merge, compaction->room,
-	    pending_string_bytes(merge->pool)) != 0)
-		return (-1);
 	prepare_spans(compaction);
-
 	if (collect_descriptors(compaction) != 0)
 		return (-1);
-	if (compaction->count == 0) {
-		resolution_close(merge);
+	if (compaction->count == 0)
 		return (0);
-	}
+
+	if (resolution_open(merge, compaction->count,
+	    compaction->string_bytes) != 0)
+		return (-1);
+	copy_strings(compaction);
 
 	resolution->projected = relic_pending_measure(merge->ctx,
 	    compaction->descriptors, compaction->count, resolution->bytes,
@@ -588,51 +597,12 @@ compact_and_resolve(relic_merge_compaction_t *compaction)
 }
 
 /*
- * Give the merge's resolution a map with room for `room` descriptors and a
- * buffer for `string_bytes` bytes of pending strings, at least one so that
- * an empty string names a byte that exists, charged to the round before
- * either is allocated.  Returns 0, or -1 having charged and holding
- * nothing, when their bytes are more than a size counts or the limit or
- * the allocator refused them.
- */
-static int
-resolution_open(relic_merge_t *merge, size_t room, size_t string_bytes)
-{
-	relic_merge_resolution_t *resolution;
-	relic_account_t *account;
-	size_t buffer_bytes;
-	size_t charge;
-
-	resolution = &merge->resolution;
-	account = &merge->ctx->account;
-	assert(resolution->bytes == NULL);
-	buffer_bytes = string_bytes > 0 ? string_bytes : 1;
-	charge = relic_saturating_sum(relic_pending_map_bytes(room),
-	    buffer_bytes);
-	if (charge == SIZE_MAX || !relic_account_charge_round(account, charge))
-		return (-1);
-
-	resolution->bytes = malloc(buffer_bytes);
-	if (resolution->bytes == NULL) {
-		relic_account_release_round(account, charge);
-		return (-1);
-	}
-	if (relic_pending_map_open(&resolution->map, room) != 0) {
-		free(resolution->bytes);
-		resolution->bytes = NULL;
-		relic_account_release_round(account, charge);
-		return (-1);
-	}
-	resolution->charged = charge;
-
-	return (0);
-}
-
-/*
  * Ready every worker's span: clear its map, no marker having a descriptor
- * yet, and copy its pending strings' bytes, once, into the resolution's
- * buffer, which must be open, the workers' end to end in worker order,
- * recording where its begin.
+ * yet, and give it where its pending strings' bytes will begin in the
+ * resolution's copy, the workers' end to end in worker order, so that
+ * describing a string can name its bytes there before the copy is made.
+ * The offsets stay within the compaction's `string_bytes`, their sum, which
+ * resolve_pending() refused when it saturated, so no partial sum wraps.
  */
 static void
 prepare_spans(relic_merge_compaction_t *compaction)
@@ -640,25 +610,21 @@ prepare_spans(relic_merge_compaction_t *compaction)
 	const relic_candidates_t *holder;
 	relic_merge_span_t *span;
 	relic_merge_t *merge;
-	size_t copied;
+	size_t base;
 	size_t w;
 
 	merge = compaction->merge;
-	copied = 0;
+	base = 0;
 	for (w = 0; w < merge->pool->worker_count; w++) {
 		holder = &merge->pool->workers[w].candidates;
 		span = &compaction->spans[w];
 		if (holder->value_count > 0)
 			bzero(span->descriptor_of, holder->value_count *
 			    sizeof(*span->descriptor_of));
-
-		span->byte_base = copied;
-		if (holder->value_byte_count > 0)
-			bcopy(holder->value_bytes,
-			    merge->resolution.bytes + copied,
-			    holder->value_byte_count);
-		copied += holder->value_byte_count;
+		span->byte_base = base;
+		base += holder->value_byte_count;
 	}
+	assert(base == compaction->string_bytes);
 }
 
 /*
@@ -714,7 +680,7 @@ collect_descriptors(relic_merge_compaction_t *compaction)
  * Give local marker `marker` of worker `worker` the next compact
  * descriptor, a copy of the value it names, unless an earlier occurrence
  * gave it one.  A string's descriptor names its bytes where the worker's
- * landed in the merge's copy.  A map entry goes from zero to its
+ * land in the merge's copy.  A map entry goes from zero to its
  * descriptor once, so the descriptors never outnumber the pending values,
  * the compaction's room.  Returns 0, or -1 having described nothing when
  * the marker names none of the worker's values or a string's bytes lie
@@ -757,6 +723,68 @@ describe_marker(relic_merge_compaction_t *compaction, size_t worker,
 	span->descriptor_of[marker - 1] = (uint32_t)compaction->count;
 
 	return (0);
+}
+
+/*
+ * Give the merge's resolution a map with room for `room` descriptors and a
+ * buffer for `string_bytes` bytes of pending strings, at least one so that
+ * an empty string names a byte that exists, charged to the round before
+ * either is allocated.  Returns 0, or -1 having charged and holding
+ * nothing, when their bytes are more than a size counts or the limit or
+ * the allocator refused them.
+ */
+static int
+resolution_open(relic_merge_t *merge, size_t room, size_t string_bytes)
+{
+	relic_merge_resolution_t *resolution;
+	relic_account_t *account;
+	size_t buffer_bytes;
+	size_t charge;
+
+	resolution = &merge->resolution;
+	account = &merge->ctx->account;
+	assert(resolution->bytes == NULL);
+	buffer_bytes = string_bytes > 0 ? string_bytes : 1;
+	charge = relic_saturating_sum(relic_pending_map_bytes(room),
+	    buffer_bytes);
+	if (charge == SIZE_MAX || !relic_account_charge_round(account, charge))
+		return (-1);
+
+	resolution->bytes = malloc(buffer_bytes);
+	if (resolution->bytes == NULL) {
+		relic_account_release_round(account, charge);
+		return (-1);
+	}
+	if (relic_pending_map_open(&resolution->map, room) != 0) {
+		free(resolution->bytes);
+		resolution->bytes = NULL;
+		relic_account_release_round(account, charge);
+		return (-1);
+	}
+	resolution->charged = charge;
+
+	return (0);
+}
+
+/*
+ * Copy every worker's pending strings' bytes, once, into the open
+ * resolution's buffer, where the worker's span says they begin.
+ */
+static void
+copy_strings(const relic_merge_compaction_t *compaction)
+{
+	const relic_candidates_t *holder;
+	const relic_merge_t *merge;
+	size_t w;
+
+	merge = compaction->merge;
+	for (w = 0; w < merge->pool->worker_count; w++) {
+		holder = &merge->pool->workers[w].candidates;
+		if (holder->value_byte_count > 0)
+			bcopy(holder->value_bytes, merge->resolution.bytes +
+			    compaction->spans[w].byte_base,
+			    holder->value_byte_count);
+	}
 }
 
 /*
@@ -1573,7 +1601,7 @@ block_open(relic_merge_t *merge, relic_merge_block_t *block,
     size_t (*layout)(void *, void *), void *owner)
 {
 	relic_account_t *account;
-	size_t carved;
+	size_t carved RELIC_UNUSED;
 	size_t bytes;
 
 	assert(block->memory == NULL && block->bytes == 0);
@@ -1594,7 +1622,6 @@ block_open(relic_merge_t *merge, relic_merge_block_t *block,
 
 	carved = layout(owner, block->memory);
 	assert(carved == bytes);
-	(void)carved;
 
 	return (0);
 }

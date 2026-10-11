@@ -170,18 +170,6 @@ all-distinct comparisons under the measurement rules above, at scales 1,
 measurement and rewrite time and the charged merge workspace separately
 from process RSS.
 
-**Test coverage.** The round tests reach the merge only through real
-rounds, so task-to-worker assignment follows the pool's scheduling and
-some states never occur: pending values no candidate references, an
-invalid marker or text range, and saturated sizes. A fixture that hands
-`relic_round_merge()` constructed workers and tasks would pin the design's
-interleaved worker-1, worker-0, worker-1 task order, with equal local
-markers naming different values and different markers naming equal ones
-over several targets, and check the promised identifiers, rewritten
-words, stripes and stripe counts exactly. It would also check that a
-rejected compaction leaves the candidates untouched and returns its
-charge, including the one-byte buffer minimum.
-
 ## 3. Factor eligible bound recursion
 
 [Medium, components: `lib/magic.c`, `lib/stratify.c`, `lib/eval.c`]
