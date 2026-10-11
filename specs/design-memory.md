@@ -285,6 +285,15 @@ what a copy passes through, nor what the allocator keeps afterwards. A grown
 table that is deliberately kept allocated beside the one it replaces across a
 phase, as a round's merge does, is held, and is charged.
 
+[Canonical membership layouts](design-membership-locality.md#failure-paths-and-limits)
+include control bytes, cached hashes and actual allocation padding in
+their pure byte projectors. A prepared replacement is charged beside
+its source until completion or abandonment. Relation payload adoption
+transfers the same allocations and charges once; it needs no layout
+conversion. Layouts can consume different bytes, but each selected
+layout preserves the same count-based capacities and refusal decisions
+across seeds and worker counts.
+
 **Every growth is projected before it is made.** The holder computes the bytes
 it would hold afterwards with the same pure functions its growth uses (the
 growable-array companions above, the identifier table's bytes after a

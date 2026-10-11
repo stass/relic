@@ -303,7 +303,19 @@ built on demand for the bound columns of a lookup and never published half
 built; they list a key's tuples in identifier order, so a lookup sees them
 in the order a scan would, and can start at the first tuple of a delta.
 
-See [design-storage.md](design-storage.md).
+Canonical membership slots name insertion-order tuple IDs; changing
+their layout never reorders columns or changes a delta. Tags and cached
+hashes can reject candidates, while exact domain-word equality alone
+establishes membership. Fixed unkeyed stripes and count-based capacity
+preserve deterministic memory admission under keyed placement. The
+relation and private fact builder share one payload representation,
+including its growth and accounting, so adoption needs no conversion.
+Representation selection measures complete lookup, construction and
+growth costs before imposing metadata on every relation; the compact
+identifier table remains the fallback when no alternative earns its cost.
+
+See [design-storage.md](design-storage.md) and
+[canonical membership locality](design-membership-locality.md).
 
 ### Facts
 

@@ -152,13 +152,22 @@ a hash seed and a growth history.
 
 Each relation has one index whose key is the whole tuple and whose value is a
 tuple identifier. It answers membership, which duplicate elimination,
-membership tests in plans and fixed-point detection all reduce to. It is the
-identifier table of [values](design-values.md#the-identifier-table):
-a slot holds a tuple identifier and nothing else, the key stays in the column
-array, and no tuple is stored twice. It is untagged, because its searches are
-mostly successful.
+membership tests in plans and fixed-point detection all reduce to. The
+reference representation uses the untagged identifier table of
+[values](design-values.md#the-identifier-table): a slot holds a tuple ID,
+the key stays in the column array, and no tuple is stored twice. This
+keeps successful membership compact; even a filtered lookup must read
+the matching tuple to establish equality.
 
-**It is striped.** It is a constant number of identifier tables, and a tuple's
+[Canonical membership locality](design-membership-locality.md) defines
+the controlled comparison with linear tags, grouped tags and cached
+hashes. One selected representation serves relations and fact builders;
+complete workload and growth measurements justify any added storage.
+Every representation retains exact column equality, insertion-order
+IDs, count-based capacities and the reservation/publication boundary.
+No choice changes generic identifier tables for unrelated owners.
+
+**It is striped.** It is a constant number of membership tables, and a tuple's
 entry lives in the one its wide hash's unkeyed top bits choose. A stripe is
 found from the hash alone, so a lookup probes one table as an unstriped index
 would, and tuples of different stripes can be placed at once, which is what
@@ -177,9 +186,11 @@ the one that would break the other form.
 **A load's hash is carried in.** Every relation and fact builder of a context
 hashes a tuple with the same function under the context's seed, so the hash a
 load operation prepares for a fact is the one its base store would compute.
-Membership and append reuse that operation's hash; canonical growth can
-rehash existing columns. An empty destination adopts its builder's index,
-while append work for a populated destination carries prepared hashes.
+Membership and append reuse that operation's hash; canonical growth
+recovers each existing entry's keyed hash from its columns or the
+selected layout's validated cache. An empty destination adopts its
+builder's index, while append work for a populated destination carries
+prepared hashes.
 A debug build recomputes and compares.
 
 ## Insertion

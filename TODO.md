@@ -35,7 +35,10 @@ also identify priorities in recursive planning, bound-query factoring,
 bulk loading, [indexed driver slicing](specs/design-driver-slicing.md),
 [direct grouped reduction](specs/design-group-reduction.md) and
 [bounded candidate routing](specs/design-round-routing.md); the parallel work is in
-[docs/todo-parallel.md](docs/todo-parallel.md). The
+[docs/todo-parallel.md](docs/todo-parallel.md).
+[Canonical membership locality](specs/design-membership-locality.md)
+defines the subsequent measured choice of tags or cached hashes, with
+retention of the compact index when neither earns its cost. The
 [implementation plan](docs/todo-benchmark-performance.md) orders these
 changes and defines their design, regression and performance gates.
 
@@ -63,14 +66,14 @@ is also most of what a deferred round's merge costs on the rounds that grow
 the canonical index, which hold `chain-closure`'s average merge at 130
 microseconds against 66 for a typical round. A slot that kept the 32-bit
 hash beside the identifier would rehash from the table alone.
-[The identifier table](specs/design-values.md#the-identifier-table) keeps
-the identifier alone because, on the closure workloads' duplicate checks,
-the doubled slot array costs about what the avoided reads save; the
-growth's cost was not in that measurement. Measure the hash-keeping slot on
-`chain-closure`'s growth against its peak memory before deciding, and if it
-loses, add the growth to the reason given under
-[alternatives not taken](specs/design-values.md#alternatives-not-taken) so
-the question stays closed.
+The [membership locality design](specs/design-membership-locality.md)
+includes that cached-hash candidate alongside the compact reference and
+tagged alternatives. Measure complete `chain-closure` runs and isolated
+growth against steady storage and peak memory; successful duplicate
+checks alone do not settle the tradeoff. Its
+[adoption rule](specs/design-membership-locality.md#adoption-rule)
+governs the shared experiment. Record measured rejection, if applicable,
+in the design's alternatives with the benchmark artifact.
 
 **Type tests read the type bits directly.** [Medium, component:
 `lib/exec.c`, `lib/rule.c`] Floats take tag 3 with the top bit of the index

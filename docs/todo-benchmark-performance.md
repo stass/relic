@@ -408,25 +408,56 @@ parallel peak is 109.1 GiB, is the large-capacity acceptance case.
 
 [Medium, components: `lib/relation.c`, `lib/index.c`, `lib/util.c`]
 
+The [membership locality design](../specs/design-membership-locality.md)
+defines the representation experiments, probe proofs, shared payload
+boundary and adoption gates. Implement its measurement and comparison
+sequence before choosing a production layout.
+
 **Evidence.** The M3 scale-2 dense-closure profile places 1,739 of 2,542
 evaluation-window samples in the insertion path. Batched hashing and
 prefetching already exist. Re-profile full closures after the preceding
-changes before selecting another representation.
+changes before selecting another representation. Inclusive insertion
+samples are not a measurement of canonical lookup alone; split hashing,
+membership, secondary maintenance and growth.
 
 **Implementation gate.** Measure probe lengths, successful versus failed
-membership checks, dependent tuple reads and growth rehashing. Compare a
-compact blocked/tagged membership layout with a wider cached-key or
-cached-hash layout, preserving the relation's tuple identifiers and
-insertion order. Retain keyed hashing and exact equality; fingerprints
-only reject mismatches. Select a layout only when the measurements justify
-its code and memory cost, and edit the storage/value specs in place.
+membership checks, dependent tuple reads, placement walks and growth
+rehashing. Compare the untagged identifier reference, existing linear
+tags, sixteen-slot grouped tags and a full 32-bit cached hash beside each
+identifier. Keep stripe selection, capacity policy, batching and compiler
+settings fixed; measure prefetch/vector changes separately. The grouped
+candidate uses five logical bytes per slot, the cached-hash candidate
+eight, against four for the reference. Preserve tuple IDs and insertion
+order, keyed placement and exact equality.
+
+Build isolated candidates with one layout each, without a public switch,
+runtime selector or changes to every generic table owner. Compare lookup,
+construction and growth together; cached hashes must justify permanent
+storage beyond their rehash savings. Include private fact-builder adoption
+and both ordinary and prepared growth. Charge all metadata and held
+replacements, and measure allocator transients separately.
+
+**Regression evidence.** Use an independent reference set, exact-hash
+collisions, wrapped group probes, nullary/high-arity keys, growth failure
+injection and projection checks. Confirm identical IDs, deltas and chains.
+Limit/refusal equivalence is within each candidate across seeds and
+workers, since different layouts consume different bytes. Establish
+reduced comparisons or zero cached-growth column rehashes structurally,
+then measure timing in separate production binaries. Close results need
+predetermined code-layout controls as well as interleaved samples; the
+[FreeBSD placement study](../bench/compare/recorded/freebsd-5995wx/code-alignment/report.txt)
+demonstrates why a hot-probe timing alone is insufficient attribution.
 
 **Exit criteria.** Show repeatable gains on `tc-cyclic`, `tc-acyclic`,
 `tc-sparse-cyclic` and same-generation workloads, with sparse analyses,
-small relations and high-arity relations as controls. Include growth
-peaks, collision-heavy inputs and memory-limit behavior. If no candidate
-provides a worthwhile net gain, retain the existing layout and record the
-measured rejection in the design's alternatives section.
+small relations, loading and high-arity relations as controls. Include
+`chain-closure` growth, large all-pairs trees, collision-heavy inputs,
+growth peaks and memory-limit behavior. A wider representation needs a
+complete-run gain unavailable from cheaper candidates. Unexplained
+repeatable control regressions block adoption. Update storage/value specs
+with the measured selection and remove rejected production paths. If no
+candidate provides a worthwhile net gain, retain the reference and record
+the measured rejection and artifact in the design's alternatives section.
 
 ## Review, tests and delivery
 

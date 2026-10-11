@@ -42,6 +42,9 @@ A newcomer should read:
   pool and value tables, the hash seed.
 * [Storage](design-storage.md) -- relations, the canonical index,
   secondary indexes, deltas and frontiers.
+* [Canonical membership locality](design-membership-locality.md) --
+  measured selection of compact tags or cached hashes, exact probing,
+  growth ownership and storage costs.
 
 **Pipeline**, in the order a program and its queries pass through it
 

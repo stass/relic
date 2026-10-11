@@ -7,9 +7,9 @@ writes, evaluation interns the integers and strings it computes, and from
 then on joins, hashing and duplicate elimination are integer work over dense
 arrays that never inspect a payload. Only comparison, sorting and output
 decode an identifier. Values are a foundation under every pipeline stage.
-This document covers the identifier table every lookup in the engine is
-built on, the symbol pool, the value table, the interning of computed
-values, and the hash function with its per-context seed.
+This document covers the common identifier table, the symbol pool,
+the value table, the interning of computed values, and the hash function
+with its per-context seed.
 
 Related: [architecture: values](architecture.md#values),
 [architecture: determinism](architecture.md#determinism),
@@ -82,36 +82,46 @@ identifier. See [bulk import](design-bulk-load.md#decoding-and-value-dictionarie
 ## The identifier table
 
 Interning, duplicate elimination and every index reduce to one question: given
-a key, which 32-bit identifier has been assigned to it? One open-addressing
-table answers it for all of them (`lib/util.h`).
+a key, which 32-bit identifier has been assigned to it? The common
+open-addressing identifier table answers it without owning the key
+(`lib/util.h`). A canonical membership alternative is confined to the
+relation payload, as [membership locality](design-membership-locality.md)
+describes; it does not widen this table for every owner.
 
 **A slot holds an identifier and nothing else** -- no key, pointer or hash.
 The key lives where its owner already keeps it (a symbol's bytes, a tuple's
 columns), so an entry costs four bytes and nothing is stored twice; that is
-the reason for a purpose-built table rather than a generic container. A hash
-stored beside the identifier would let a probe pass a mismatch without asking
-the owner, but the canonical index's duplicate checks are almost all
-successful searches, which read the matching tuple either way, so the doubled
-slot array costs about what the avoided reads save.
+the reason for a purpose-built table rather than a generic container.
+A full hash beside every identifier doubles slot storage. A successful
+lookup still reads the matching key, so avoided mismatches alone do not
+establish that this storage pays for itself. Canonical membership also
+measures growth, where a cached hash can avoid rereading tuple columns.
 
 **A tag is the cheaper form of that idea.** A table created tagged keeps one
 byte per slot: the top eight bits of the hash the slot's identifier was placed
 under. The low bits choose the slot, so the tag separates keys that share a
 neighbourhood, and a probe passes an occupied slot whose tag differs without
-asking the owner. An unsuccessful search then compares against one mismatching
-key in 256, for a quarter of the slot array's size. Each owner chooses once,
-at creation:
+asking the owner. With well-distributed independent slot and tag bits,
+an unsuccessful search compares against one mismatching key in 256 on
+average, for a quarter of the slot array's size. Above `2^24` slots those
+bits overlap and filtering weakens without affecting correctness. Each
+owner chooses once, at creation:
 
 | Table | Its searches | Tagged |
 | --- | --- | --- |
 | symbol pool, integer table | unsuccessful when new; key far away | yes |
 | index keys, staging sets, distinct counts | mostly unsuccessful | yes |
-| a relation's canonical index | mostly successful | no |
+| a relation's canonical index, reference layout | successful duplicate checks are important | no |
 | predicate table, rewrite tables | small | no |
 
-The canonical index stays untagged because a tag helps its typical search
-least and costs a byte per slot of the largest table every relation has. The
-choice is one argument at one creation site.
+The canonical reference stays untagged to avoid an unconditional byte
+per slot on the largest table every relation has. Its layout comparison
+includes this existing tagged table before introducing another probe
+implementation. Selection uses measured hits, misses, growth and total
+memory, rather than assuming every stage of evaluation has the same
+duplicate rate. The [adoption rule](design-membership-locality.md#adoption-rule)
+requires complete workload gains and keeps the reference when additional
+metadata does not earn its cost.
 
 **The probe sequence exists in one place.** Slots are probed linearly from the
 hash's low bits. A probe cursor hands each candidate identifier to the caller,
@@ -548,9 +558,12 @@ call, and a collected result copies the bytes it holds.
 
 * **A tagged 64-bit cell or a plain 16-byte value** as the column; see
   [domain identifiers](#domain-identifiers).
-* **A hash stored beside each identifier.** On the canonical index the
-  doubled slot array costs about what the avoided reads save; the tag gives
-  the unsuccessful-search benefit at a quarter of the cost.
+* **A hash stored beside every generic identifier.** It doubles slot
+  storage for all owners. The tag offers mismatch filtering at a quarter
+  of that additional cost. A canonical-specific cached-hash candidate
+  also targets growth and is evaluated under
+  [membership locality](design-membership-locality.md#cached-hashes);
+  successful-lookup behavior alone cannot reject or justify it.
 * **A generic container** parameterized over keys and values: larger, slower
   and harder to read than a table of inline 32-bit identifiers.
 * **A second table for computed values.** It gives one value two identifiers.
