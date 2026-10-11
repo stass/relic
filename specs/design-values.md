@@ -335,17 +335,21 @@ nothing changes the tables until the merge cannot fail. A shared round is a
 deferred round, one whose insertions wait for its end, whose work is divided
 among threads; it reads the **frozen store**, the store as it stood when the
 round began ([parallel evaluation](design-parallel.md#model)). During the
-round, a candidate with a pending column is new against the frozen store --
-a value the
-context lacked when the round began is in no relation the round reads -- and
-is screened against the worker's own candidates by value, a pending column
-hashing and comparing by its integer or bytes. The merge collects one
-descriptor per referenced worker-local value in task, candidate and column
-order, preserving semantic first occurrence. It *measures* that compact
-sequence through the same value resolver into one map, and the projected
-bytes join the relations' growth in the admission check. Candidates retain
-their local markers until a single *rewrite* composes the local-to-descriptor
-map with the promised identifiers. The tables remain untouched throughout.
+round, a candidate with a pending column is new against the frozen store:
+its value is absent from every stored tuple. Bounded packets route private
+values by semantic payload to one owner per partition. Its exact dictionary
+gives equal values one canonical round handle, enabling tuple owners to
+deduplicate across all producers before publication. No public identifier
+is assigned by routing, and no producer retains a full-round value table.
+
+The merge orders unique tuples by minimum logical position and collects
+one descriptor per referenced canonical handle in tuple/column order.
+It *measures* that compact sequence through the ordinary resolver, and
+the projected bytes join relation growth in admission. Owned candidate
+columns retain private handles until one *rewrite* composes the compact
+map with promised identifiers. Routing hashes are recomputed from final
+words before persistent stripe classification. Global tables remain
+untouched throughout these private phases.
 A round that does not fit is declined and run serially. Reservation occurs
 beside the relations' reservations; *append* publishes values in the phase
 that cannot fail. The descriptor bound, mapping and byte lifetimes are in
@@ -355,9 +359,10 @@ that cannot fail. The descriptor bound, mapping and byte lifetimes are in
 **The identifiers are the same at every thread count.** The serial evaluator
 interns a value at the commit of the first batch holding it; the merge
 interns it under its rank in first-occurrence order among the candidates in
-task order. Candidates in task order are the serial derivation order with
-duplicates removed -- duplicates of stored tuples, whose values were interned
-already, or of earlier candidates of the same worker, which come first -- so
+task order. The unique tuples ordered by their minimum positions are the
+serial derivation order with duplicates removed. Stored tuples already
+have their values, and a duplicate's earliest copy contains every value
+the later copy contains at an earlier logical position, so
 the first occurrence is the same tuple in both, each table gains the same
 values in the same order, and, both reserving the stepwise capacity, holds the
 same bytes. `relic_stats()` reports the same counts and storage, and every

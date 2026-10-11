@@ -33,8 +33,8 @@ conditions, exact answer checks and peak memory. The
 and [losing cells](bench/compare/recorded/m3-max/optimization-probes/losses.tsv)
 also identify priorities in recursive planning, bound-query factoring,
 bulk loading, [indexed driver slicing](specs/design-driver-slicing.md),
-[direct grouped reduction](specs/design-group-reduction.md) and the
-parallel merge; the parallel work is in
+[direct grouped reduction](specs/design-group-reduction.md) and
+[bounded candidate routing](specs/design-round-routing.md); the parallel work is in
 [docs/todo-parallel.md](docs/todo-parallel.md). The
 [implementation plan](docs/todo-benchmark-performance.md) orders these
 changes and defines their design, regression and performance gates.

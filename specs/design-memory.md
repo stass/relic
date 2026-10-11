@@ -324,14 +324,22 @@ derived. These buffers live for one round and are charged as one part of
 the account.
 
 The merge's [pending-value workspace](design-pending-values.md#storage-ownership)
-is charged through that same round account. Local marker maps and compact
-descriptors are sized by worker-local distinct values and released after
-the candidate rewrite barrier. The resolution map and the copied string
-bytes are opened only when some candidate holds a pending value, the map
-sized by the values candidates reference; they are charged together and
-remain charged until value append or reservation rollback and cleanup.
+is charged through that same round account. Owner maps and compact
+descriptors are sized by private value entries and released after the
+candidate rewrite barrier. The resolution map and copied string bytes
+open only when a candidate references a pending value; the map is sized
+by referenced handles. They stay charged until value append or reservation
+rollback and cleanup.
 Capacity, alignment padding and the addressable byte used for empty-string
 payloads are counted; early release follows actual ownership lifetime.
+
+[Candidate routing](design-round-routing.md#memory-bounds-and-admission)
+also charges packet payload and screens, routing lists/receipts, private
+tuple/value owners and ordering references. Transport has one total byte
+ceiling across active lanes, installed before their data buffers are
+initialized. The executor checks its private pending-output allowance
+before copying a head's bytes. Global owner data grows with distinct new
+tuples and values, not copies retained by each worker.
 
 **They grow on several threads at once**, so their part of the account is
 one atomic word, raised by compare-and-swap only when the whole total with
@@ -340,15 +348,22 @@ calling thread while no round's workers run.
 
 **A shared round's merge admits them as the serial run would hold them.** A
 shared round is a deferred round whose work is divided among threads. Before
-its merge, admission adds per buffer the largest capacity any worker
-reached. A buffer doubles until it fits ([growable
-arrays](#growable-arrays)), so its capacity is a function of the largest
-request alone, and the workers together make every request the serial run
-makes: the largest capacity any of them reached is at least the serial
-run's. It can exceed it for pending bytes -- a string the serial run
-interned earlier in the round is not pending there -- so admission is never
-laxer than the serial run, and a merge declined on that excess runs
-serially, where the limit judges exactly.
+its merge, admission retains per-buffer capacity peaks over all lanes,
+tasks and waves, including prefix scratch. Ordinary expression and regex
+buffers double until they fit, so their largest request determines the
+serial floor ([growable arrays](#growable-arrays)).
+
+Transport allowances can clip pending-buffer capacities. The emitter
+therefore records its largest single-head pending-byte requirement, `H`,
+before the allowance. Ordinary output flushes a nonempty batch when a
+head will not fit, and grows the buffer only for one head in an empty
+batch. The serial run can have fewer pending values than the frozen run,
+so admission projects `H` through the ordinary growth rule from its
+ordinary initial capacity and takes at least that and the observed peak.
+Sizing is checked; the bound needs no batch-length multiplier or row log.
+It can cause a conservative serial retry, but cannot admit a merge the
+serial run would refuse. The full argument is in
+[routing admission](design-round-routing.md#preserve-the-serial-refusal-contract).
 
 **A refused deferred round reports nothing of its own.** In a serial round a
 buffer growth the limit refuses is reported as any refusal is. In a deferred

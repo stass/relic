@@ -1,521 +1,350 @@
 # Pending value compaction
 
-This document covers value resolution at the start of a deferred round's
-merge. Workers collect computed values under local markers. The merge
-preserves that local deduplication, orders compact descriptors by their
-first logical occurrence, and resolves them through the ordinary value
-interner before comparing candidates across workers.
+This document defines value resolution at the publication boundary of a
+deferred round. It collects one descriptor per referenced private value,
+orders descriptors by logical first occurrence, and rewrites candidate
+columns once to the ordinary resolver's promised domain identifiers.
+Private routing identity and public value identity have separate owners.
 
-Related: [architecture](architecture.md#parallel-evaluation),
+Related: [parallel evaluation](design-parallel.md),
+[bounded candidate routing](design-round-routing.md),
 [computed values](design-values.md#interning-computed-values),
-[ordered merge](design-parallel.md#admission-and-the-ordered-merge),
-[memory](design-memory.md#round-scoped-buffers),
-[testing](design-testing.md),
-[implementation plan](../docs/todo-benchmark-performance.md).
+[memory](design-memory.md), [storage](design-storage.md),
+[testing](design-testing.md).
 
 ## Model
 
 A candidate column contains either an assigned domain identifier or a
-pending marker. Domain identifiers have nonzero type bits. A marker has
-zero type bits and a positive index into a private pending-value table;
-zero is neither a value identifier nor a marker.
+canonical pending handle. Domain identifiers have nonzero type bits. A
+pending handle has zero type bits and names an entry in a round-owned
+value partition; zero is neither a value nor a handle.
 
-During derivation, a worker normalizes a batch's markers into its own
-table. Each distinct pending integer or string value has one local marker
-for that worker and round. An integer descriptor holds its numeric value;
-a string descriptor holds an offset and length in the worker's private
-byte buffer. Equality includes the value kind and the complete payload,
-including embedded NUL bytes in strings.
+[Routing](design-round-routing.md#canonicalize-pending-values-before-comparing-tuples)
+normalizes producers' packet-local values into these private dictionaries.
+Every distinct pending integer or text value has one canonical handle for
+the round. Its descriptor contains an integer or an offset and length in
+its owner's byte buffer. Equality uses kind and complete payload. Owner
+handles are not public identifiers, and their allocation order has no
+semantic significance.
 
-The merge uses three mappings:
+Only a sealed round reaches compaction: production has ended, all packets
+are acknowledged, and tuple owners hold globally unique target tuples.
+An ordered reference vector lists those tuples by their earliest logical
+derivation positions. Compaction consumes this order, not owner storage
+order or packet arrival order.
 
-| Mapping | Index or key | Result |
+| Mapping | Key | Result |
 | --- | --- | --- |
-| Worker pending table | Worker-local marker | Integer or string descriptor |
-| Local-to-round map | Worker identity and its local marker | Compact round descriptor number |
-| Resolution map | Compact round descriptor number | Promised domain identifier |
+| Private value directory | Canonical pending handle | Owner and local entry, with its semantic descriptor |
+| Owner-to-compact map | Owner and local entry | Descriptor number at first ordered reference |
+| Resolution map | Compact descriptor number | Promised domain identifier |
 
-A compact descriptor represents a **referenced worker-local value**, not
-necessarily a globally distinct value. Equal values from different workers
-can have different descriptor numbers; the existing value resolver gives
-them the same promised identifier.
-
-Candidate columns keep their local markers while descriptors are collected
-and measured. One rewrite then replaces each local marker directly with
-its promised identifier through the two maps. Compact round descriptor
-numbers are never stored in candidate columns.
+Candidate columns keep canonical pending handles during collection and
+measurement. One rewrite composes the last two mappings to replace them
+with domain promises. Compact descriptor numbers never occupy candidate
+columns. Packet-to-owner normalization constructs an owned candidate;
+it is outside this publication rewrite.
 
 ```text
-workers: local markers + distinct values + owned string bytes
-    -> barrier: completed candidate buffers
-    -> serial task-order walk: compact descriptors and local-to-round maps
-    -> ordinary value measurement: descriptor-to-identifier map
-    -> parallel rewrite: local marker -> promised identifier; rehash tuple
-    -> barrier: temporary compaction storage released
-    -> tuple merge, admission, value append and tuple publication
+sealed unique candidates + immutable private value owners
+    -> ordered candidate/column walk: compact descriptors and owner maps
+    -> ordinary value measurement: descriptor-to-identifier promises
+    -> parallel candidate rewrite; recompute affected hashes and stripes
+    -> barrier: release temporary maps, descriptors and routing state
+    -> admission, value append and tuple publication
 ```
 
-No global value is interned during descriptor collection, measurement or
-candidate rewriting. A promised identifier is private until reservation
-and append succeed. The value tables' identifier-space checks remain part
-of reservation, before any tuple naming a promised value is published.
+The resolver remains responsible for integer identifiers, byte-pool
+sharing, symbol/string use bits and stepwise capacity projections. Neither
+routing nor compaction publishes global values. A promised identifier is
+private until reservation and append succeed.
 
 ## Invariants
 
-* **One descriptor per referenced local marker.** A zero-initialized map
-  slot is filled once, on that marker's first occurrence in task order.
-  Later occurrences reuse it.
-* **Descriptor order is logical derivation order.** The caller walks the
-  task array, each task's candidate range, and each tuple's columns in
-  order. Worker number and completion order do not assign identifiers.
-* **Worker identity is part of a marker's meaning.** Marker 1 from two
-  workers can denote different values. Only the owning worker's map can
-  translate a candidate's marker.
-* **Candidate columns change namespace once.** They contain local markers
-  until the rewrite and promised identifiers afterward. Collection and
-  measurement leave them untouched.
-* **Global equality stays in the value layer.** Compaction deduplicates
-  local marker references; it does not implement another string or integer
-  interner.
-* **Cross-worker tuple comparison uses normalized columns.** Rewriting,
-  hash recomputation and stripe correction finish before any merge stripe
-  list is built.
-* **Private storage is charged for its lifetime.** Temporary maps and
-  descriptors have an earlier release point than the resolution map and
-  the string bytes it borrows.
-* **A declined merge publishes nothing.** Private rewritten candidates
-  can be discarded; the serial retry starts from the established store.
+* **One descriptor per referenced canonical handle.** Its zero-initialized
+  owner-map slot is filled on first reference and reused thereafter.
+* **Descriptor order is logical first occurrence.** The caller walks
+  unique candidates by their minimum derivation positions, then columns
+  in head order. Owner number, private handle and arrival order do not
+  assign public identifiers.
+* **Handle interpretation belongs to one accessor.** Partition and local
+  index decoding is range-checked; compaction does not duplicate routing's
+  bit layout or treat a handle as a dense global array index.
+* **Owned candidate columns change namespace once.** Collection and
+  measurement leave them untouched; the rewrite replaces handles directly
+  with promises, followed by hash and stripe correction.
+* **Semantic equality remains the value layer's.** Private canonicalization
+  uses its exact operations. Compaction deduplicates references, not text
+  spellings with another comparator or a second persistent interner.
+* **Resolver bytes outlive resolution.** Temporary descriptor maps can be
+  released at the rewrite barrier; borrowed string bytes cannot be released
+  until append or reservation rollback ends.
+* **A declined merge publishes nothing.** Rewritten private candidates
+  need no inverse mapping: the whole attempt is released before serial retry.
 
 ## Sizing the work
 
-Let `W` be the worker count. For worker `w`, let `Vw` be its pending-table
-entry count and `Sw` its used pending-string bytes. Define:
+Let the value partitions hold `Vp` entries and `Sp` used text bytes. Define:
 
 ```text
-U = sum(Vw)                         descriptor capacity
-S = sum(Sw)                         copied string bytes
-C = total candidate columns
-P = pending occurrences among those columns
-R = referenced worker-local values  actual compact descriptor count
-G = distinct semantic values represented by those descriptors
+V = sum(Vp)                       private distinct value entries
+S = sum(Sp)                       private distinct text bytes
+D = unique new target tuples
+C = their total columns
+P = pending column occurrences
+R = referenced canonical handles  compact descriptor count
 
-G <= R <= min(U, P)
-P <= C
+R <= min(V, P)
+P <= C <= RELIC_MAX_ARITY * D
 ```
 
-Capacity is obtained from worker tables without first scanning candidate
-columns. Only referenced entries become descriptors, so unused worker
-entries are neither measured nor interned. The implementation does not
-need an invariant that every allocated worker value remains referenced.
-There is one ordered collection walk before measurement, with no separate
-pass to count pending column occurrences.
+Canonicalization gives different referenced handles different semantic
+values. A successful routed round references every value it accepted:
+values are taken only from outgoing rows, and dropping a duplicate tuple
+retains the same values in its earliest copy. The compaction interface
+nevertheless handles unused dictionary entries and `R < V`; direct tests
+can construct them without weakening normal ownership.
 
-Compute `U`, `S` and each worker's map and byte spans with checked size
-arithmetic. The temporary descriptor namespace uses the existing pending
-marker width, so `U` must fit `RELIC_DOM_INDEX_MASK`; exceeding it declines
-the optimization. This is a workspace admission condition, distinct from
-the final value tables' capacity limits. A serial retry can still succeed
-when cross-worker duplication makes this capacity too large.
+Allocate descriptor capacity and owner-map spans from `V`, without a pass
+that expands pending columns into occurrences. Collection determines `R`
+in one ordered walk. Open the ordinary resolution map with room for `R`,
+not `V`, and only when `R` is nonzero.
 
-If `U` is zero, resolution allocates nothing and leaves the ordinary merge
-to process candidates containing assigned identifiers.
+Compute `V`, `S`, map spans, aligned offsets and byte sizes with checked
+arithmetic. Both compact descriptor numbering and the routing handle
+namespace must be representable. A private workspace overflow declines
+this attempt, separately from public value-table capacity limits, which
+remain the resolver's responsibility. `V = 0` needs no compaction storage
+and leaves assigned candidate words unchanged.
 
 ## Storage ownership
 
 ### Temporary compaction storage
 
-A compaction object local to `resolve_pending()` owns one charged block
-containing:
+One charged block owns the zeroed maps, one slot per value-owner entry,
+and capacity for `V` compact descriptors, with `R` populated. A fixed
+per-partition record gives its map offset and text-byte base. These
+control records follow the fixed partition count; they are not one
+record per candidate column.
 
-* `U` local-to-round map entries, initially zero;
-* room for `U` compact pending descriptors, with `R` entries populated.
-
-Use the existing checked block-layout helpers for typed alignment and byte
-counts. Per-worker span records identify a map slice of `Vw` entries and a
-string-byte base offset. These control records are bounded by the worker
-count, as the merge's other per-worker records are; data-sized storage is
-charged through the round account.
-
-The object exists only during collection, measurement and the rewrite job.
-Its lifetime encloses the pool barrier that finishes rewriting. Closing
-it frees the single block and releases exactly its recorded charge.
+The compaction object's scope encloses collection, measurement and the
+rewrite barrier. Once no rewrite part can read it, closing the object
+frees its block and gives back its recorded charge. It owns neither the
+candidate columns nor the longer-lived resolver payload.
 
 ### Merge-owned resolution storage
 
-A separate merge-owned object holds:
+A separate resolution object holds:
 
-* the ordinary `relic_pending_map_t`, opened with room for `R` entries;
-* the copied pending-string buffer;
-* the projected persistent value-storage size;
-* its charge and the receipt for any successful value reservation.
+* the ordinary `relic_pending_map_t`, opened for `R` descriptors;
+* copied text bytes, with `max(S, 1)` addressable bytes when `R > 0`;
+* the projected persistent value storage and its accounted charge;
+* the receipt for any live value reservation.
 
-The object is opened after collection, and only when `R > 0`. Collection
-needs only the worker descriptors, the local maps and each worker's
-checked byte base, not the copied buffer, so the map can be sized by the
-descriptors actually referenced. Opening charges the map and the string
-buffer together, all or nothing. When `R = 0` nothing is opened, and no
-resolution teardown is needed.
+It opens after collection, only when `R > 0`, charging the map and text
+buffer together. With no referenced handle it opens nothing, even if
+private owners contain unused entries. An empty string can safely name
+offset zero in the addressable byte without reading a payload byte or
+forming a pointer from `NULL`.
 
-The string allocation contains at least one addressable byte even if
-`S = 0`. An empty string can then name offset zero without forming a
-pointer from `NULL`. This minimum allocation is charged. Payload content
-for a zero-length string is never read.
+Each value owner's used bytes are copied once into a disjoint span of
+that buffer. They already represent globally distinct private values,
+so this copy has no worker-replication term. Descriptors reference the
+copied buffer, and the ordinary resolver may continue borrowing those
+bytes after descriptor collection and rewriting end.
 
-The resolver's fresh-string records borrow bytes from this buffer until
-append or reservation rollback completes. They do not borrow compact
-descriptors. The descriptor array can therefore disappear after the
-rewrite barrier, while the resolution map and byte buffer remain live
-through the merge's reservation and apply phases.
-
-The resolution owner records its allocations independently of the
-temporary descriptor pointer. Its close routine unreserves a live
-reservation when necessary, closes the value map, frees the byte buffer
-and releases its charge. Partial initialization and repeated cleanup are
-safe. Releasing descriptors cannot make the merge forget these resources.
+Cleanup follows owned resources rather than the final descriptor count.
+A partial open frees what it obtained. A live reservation is unreserved
+before closing its map and freeing the payload. Successful append ends
+the reservation; subsequent cleanup releases private workspace only.
 
 ## Collecting compact descriptors
 
-All derivation tasks have completed successfully before this phase. The
-caller owns the compaction object; no worker modifies candidates, pending
-tables or byte buffers while it is being populated.
+The caller traverses the ordered unique-candidate vector. Each reference
+selects an immutable owner block, tuple entry and target schema. For each
+column:
 
-Assign each worker a disjoint span of the string buffer the resolution
-will hold: its byte base is the sum of the earlier workers' `Sw`, which
-`S` bounds. A text descriptor copied from worker `w` adds that worker's
-byte base to its offset; the source descriptor remains unchanged. Validate
-its offset and length against the source span before rebasing. A byte
-range and its length determine a value; no C-string terminator or text
-encoding is assumed.
+1. Leave an assigned domain identifier out of compaction.
+2. Decode a pending handle through the round's value accessor and validate
+   its owner, entry and payload range.
+3. If that entry already has a compact number, reuse it.
+4. Otherwise append its descriptor, record the new positive compact number,
+   and rebase a text offset to its owner's assigned span in the copied
+   payload buffer.
 
-Walk the task array in serial order. Each task identifies its worker and a
-contiguous range of that worker's candidates. Walk that range in candidate
-order and each candidate in head-column order:
+All range and rebasing checks precede writes. No cast makes an unvalidated
+marker into an array index. Candidate words remain unchanged. Only the
+map/descriptors mutate, and no worker runs a producer while this walk
+borrows private owner data.
 
-```text
-for task in task order:
-    local_map = this task's worker map slice
-    for candidate in the task's candidate range:
-        for column in head order:
-            if column already has domain type bits:
-                continue
-            m = column's worker-local marker
-            validate m against this worker's pending table
-            if local_map[m - 1] == 0:
-                copy worker.pending[m - 1] into descriptors[R]
-                rebase a copied text descriptor to the merge byte buffer
-                R += 1
-                local_map[m - 1] = R
-```
-
-This walk writes only maps and descriptors. The worker's pending table,
-candidate words, hashes and stripe counts remain unchanged. The map's
-one-time zero-to-positive transition establishes the descriptor bound by
-construction; no second hash table or list of already-seen values is needed.
-
-Gathering checks marker and descriptor bounds before indexing or copying.
-Debug assertions also identify internal contract violations. A refused
-collection follows the merge-decline path before any candidate mutation.
-Because no candidate changes between collection and rewriting, each marker
-the rewrite reads has a validated, nonzero mapping in the correct slice.
-
-If `R` is zero, close the temporary storage and continue with no pending
-values; no resolution storage was opened. Otherwise open the merge-owned
-resolution with room for `R` entries and `max(S, 1)` string bytes, and copy
-each worker's used string bytes once into its span, skipping zero-length
-copies. A refusal of that allocation leaves candidates and global values
-untouched. Measurement then receives exactly the `R` populated
-descriptors; capacity `U` is not its input count.
+If `R = 0`, close the temporary block and continue with assigned values.
+Otherwise open the resolution object, copy the used text spans, and pass
+exactly the populated `R` descriptors to value measurement. Failure of
+that allocation leaves candidates and global values untouched.
 
 ## Measuring and rewriting
 
 ### Ordinary value measurement
 
-Call `relic_pending_measure()` with the compact descriptor sequence and
-the copied byte buffer. Its existing behavior is the authority for:
+`relic_value_measure_pending()` consumes the compact descriptors in their
+first-occurrence order. Its existing rules govern existing values,
+integer numbering, pool-byte reuse, string-use bits, identifier exhaustion
+and stepwise growth of persistent tables. Measurement promises IDs but
+reserves and appends nothing.
 
-* reuse of an assigned integer or string identifier;
-* deduplication of equal values from different workers;
-* first-occurrence numbering of new values within each value table;
-* reuse of a symbol pool entry as a string and its required string-use bit;
-* stepwise growth of the value tables, symbol pool and use-bit storage.
-
-The map's room and input count are both `R`; its identifier array holds
-one promise per descriptor. An unrepresentable storage projection declines
-the merge. Measurement does not reserve or publish values.
+The private canonical namespace is injective by construction: one value
+owner and one exact dictionary entry per typed value, with no pending
+value already assigned in the frozen context. Tuple-owner uniqueness
+therefore survives mapping canonical handles to domain promises. The
+resolver is not a late opportunity to repair an invalid tuple-owner
+canonicalization or silently collapse tuples after append positions have
+been assigned.
 
 ### One rewrite and rehash per candidate
 
-After measurement, publish a read-only rewrite job containing the maps and
-resolution state. One part owns one worker's candidate buffer; the physical
-thread running that part need not be that worker's derivation thread.
+A rewrite job partitions immutable candidate blocks into disjoint spans.
+Every candidate has one writer. A pending column names a validated owner
+map entry, which names a populated resolver promise; those two lookups
+replace the column directly. No intermediate descriptor number is stored
+in the tuple.
 
-For a pending column whose local marker is `m` in worker `w`:
+For a tuple with rewritten columns, compute the ordinary relation wide
+hash and canonical stripe from the promised words. A routing hash over
+semantic pending payload is not that stored-tuple hash. Fully assigned
+candidates can retain their ordinary hashes. Secondary key hashes are
+computed from normalized words during staging as usual.
 
-```text
-r = local_to_round[w][m - 1]
-column = resolution.ids[r - 1]
-```
-
-Assigned columns are unchanged. The two indexed reads use maps already
-validated and published before the job. The part allocates nothing and
-cannot fail. A candidate with any rewritten column receives a recomputed
-tuple hash and stripe. Correct its worker's old and new stripe counts
-before recording the new stripe; when they are equal the net change is
-zero. Candidates with no pending columns reuse their existing hash.
-
-Each part writes only its worker's words, candidate metadata and stripe
-counts. It reads the compaction maps, promised identifiers and target
-relation metadata. No value table, relation or secondary index is changed.
-
-The worker's candidate screen refers to its collection-time columns and
-hashes. That screen is no longer consulted after derivation completes;
-it is released with the candidates rather than rebuilt. Cross-worker
-screening uses the normalized candidates and their recomputed hashes.
-
-When `relic_pool_for()` returns, its barrier establishes that all parts
-have finished. Close the temporary compaction object before allocating
-the blocks for finding new tuples, staging or classifying keys. Later
-merge phases cannot retain a pointer to that local object or its block.
+The rewrite barrier precedes append planning that reads hashes or stripes.
+Only after that barrier can temporary maps and descriptors disappear.
+Retained private value entries and payload can then be released once no
+other finalization reader needs them: the resolution object owns the
+bytes its map borrows. Routing membership tables end earlier, at sealing.
+Candidate columns remain live until staging takes them.
 
 ## Ordered identity: example and proof
 
-Suppose the frozen store lacks string values `amber`, `blue` and integer
-`7`. Tasks in serial order produce the following two-column candidates:
+Suppose a later task's `p(1, "violet")` arrives before an earlier task's
+copy, and `p(2, "amber")` arrives between them. Tuple ownership retains
+one copy of each and moves the first tuple's position to its earlier
+witness. Finalization visits `p(1, "violet")` first even if the private
+value dictionary encountered `"amber"` first. Compaction therefore presents
+`"violet"` first to the ordinary resolver. Reusing the value in another
+target adds no descriptor and changes no identifier.
 
-| Task | Worker | Values | Local markers |
-| ---: | ---: | --- | --- |
-| 0 | 1 | string `amber`, integer `7` | `1, 2` |
-| 1 | 0 | integer `7`, string `blue` | `1, 2` |
-| 2 | 1 | string `amber`, string `blue` | `1, 3` |
+Every newly computed head value is absent from the frozen value tables,
+so a tuple containing it is absent from the frozen relation. Removing
+copies of a duplicate tuple keeps an earlier occurrence of exactly the
+same values in exactly the same columns. Replacing all copies by their
+minimum-position tuple preserves the minimum tuple/column position for
+each value. The ordered unique stream therefore has the same semantic
+first-value sequence as the original derivations.
 
-Worker 0's pending table contains `7, blue`. Worker 1's contains
-`amber, 7, blue`. Scanning workers by number would encounter `blue` before
-`amber`, which is not serial first occurrence.
-
-Task-order compaction produces five descriptors:
-
-```text
-1: worker 1, local 1 -> string amber
-2: worker 1, local 2 -> integer 7
-3: worker 0, local 1 -> integer 7
-4: worker 0, local 2 -> string blue
-5: worker 1, local 3 -> string blue
-```
-
-If the existing pool and integer counts are `s` and `i`, measurement
-promises strings `amber` and `blue` the pool indexes `s + 1` and `s + 2`,
-and integer `7` the integer index `i + 1`, under their respective type
-bits. Descriptors 2 and 3 map to the same integer identifier; 4 and 5 map
-to the same string identifier. Task 2's repeated `amber` needs no sixth
-descriptor.
-
-More generally, let the reference sequence be every pending occurrence
-among retained candidates in task, candidate and column order. Compaction
-keeps only the first occurrence of each `(worker, local marker)` pair.
-Every removed occurrence is equal in kind and payload to an earlier kept
-one. The earliest occurrence of any semantic value therefore survives,
-and first-occurrence order among semantic values is unchanged.
-
-The value resolver sees that ordered subsequence and uses exact typed
-equality. It assigns the same identifiers and persistent capacities as
-measurement of the full occurrence sequence. Rewriting through the maps
-then gives every candidate the same words, hashes and stripes as that
-reference. Tuple deduplication, identifiers and ordered commit consequently
-have the same inputs.
-
-The existing task-screen contract connects the retained-candidate sequence
-to serial derivation: removing a stored tuple removes only values already
-assigned, and a worker's repeated candidate has an earlier equal candidate.
-Cross-worker tuple deduplication occurs after value resolution. It cannot
-remove a value's first semantic occurrence before that value is measured.
+The resolver assigns IDs to that sequence in ordinary order. Private
+owner order, worker count, wave size and packet numbering cannot affect
+the result. Values computed only inside expressions and never emitted
+are excluded, as in ordinary execution.
 
 ## Admission, apply and cleanup
 
-Resolution state remains merge-owned after candidate rewriting. The
-ordinary merge finds new tuples, assigns append positions and classifies
-keys. Its admission includes projected persistent value growth and every
-private allocation still live at that point. Released compaction storage
-is no longer charged; the resolution map and copied byte buffer still are.
+The value projection joins exact target growth and the serial executor
+scratch floor in the ordinary merge admission question. All live private
+workspace stays charged while that question is asked. Output-byte limits
+can shorten routed batches, so the round supplies the conservative
+pending-buffer floor defined by
+[bounded routing](design-round-routing.md#preserve-the-serial-refusal-contract),
+not merely its observed transport peak.
 
-`relic_pending_reserve()` runs before relation reservations. Only after it
-succeeds does the resolution owner record an active reservation. A later
-failure releases that reservation with `relic_pending_unreserve()` before
-freeing the map or copied bytes. This rewinds uncommitted string copies;
-capacities that a refused reserve retained remain accounted as the value
-layer specifies.
+Value and target reservation finish before apply. A refusal gives back
+uncommitted value reservations and all private work, then the selected
+round reruns serially. A public reservation that grew an array before an
+allocator refusal retains and accounts that capacity under the ordinary
+storage contract.
 
-Once every reservation succeeds, `relic_pending_append()` publishes the
-values and string-use bits before tuples naming them are published. It
-cannot fail. The reservation receipt is consumed, so ordinary cleanup does
-not rewind committed pool data. The pool owns its copies, independently
-of the merge's byte buffer.
-
-The serial batch resolver keeps its measure/rewrite/commit contract. The
-deferred merge composes its local map with the existing resolution map;
-it does not manufacture a partially initialized value map to call the
-serial rewrite helper.
-
-| Owner | Responsibility |
-| --- | --- |
-| `lib/task.c`, candidate records in `lib/round.h` | Normalize batch markers locally; own worker pending descriptors, payload bytes and candidates until round release |
-| `resolve_pending()` in `lib/merge.c` | Size and own temporary compaction storage; enumerate first references; open the resolution when `R > 0`; measure compact descriptors; wait for rewrite completion; close temporary storage |
-| Merge-owned resolution object | Own the value map, copied bytes, charge, projection and reservation receipt through apply or decline |
-| `lib/value.c` | Determine canonical identifiers, project persistent storage, reserve, append and unwind uncommitted string copies |
-| `lib/round.c`, `lib/pool.c` | Enforce derivation/rewrite barriers, release abandoned candidate buffers and run the serial retry |
+Apply appends values before tuples naming them. Candidate IDs are already
+promises backed by that reservation, and no dictionary lookup can assign
+another ID on a worker. The subsequent relation/index append is infallible.
+Resolver bytes are released only after append or rollback completes.
 
 ## Memory and work bounds
 
-The data-sized resolution workspace is bounded by:
+Compaction uses:
 
 ```text
-bridge_bytes(U)                                             when R = 0
-bridge_bytes(U) + relic_pending_map_bytes(R) + max(S, 1)    when R > 0
+bridge_bytes(V)                                            when R = 0
+bridge_bytes(V) + relic_pending_map_bytes(R) + max(S, 1)   when R > 0
 ```
 
-Here `bridge_bytes(U)` is the checked aligned layout of `U` local-map
-entries and `U` pending descriptors. It is zero when `U = 0`; the whole
-resolution path is then empty. Map entries use the existing 32-bit marker
-width. Worker-span records add bounded `O(W)` control storage.
+`bridge_bytes(V)` is the checked aligned layout of maps and compact
+metadata; it is zero when `V = 0`. Per-partition records have fixed size.
+The bound is `O(V + S)`, with no descriptor or copied-payload term per
+candidate column or per worker. Candidate traversal and rewriting cost
+`O(C)`; map initialization and payload copying cost `O(V + S)`. Value
+measurement additionally hashes the referenced semantic payloads.
 
-Temporary mapping and descriptor storage is `O(U)`, the resolution map is
-`O(R)`, string storage is `O(S)`, and none is proportional to pending
-occurrences `P` at fixed worker tables. Preparing maps and copying string
-bytes takes `O(U + S)` work, with `O(W)` worker bookkeeping. Candidate
-traversal and rewriting take `O(C)` work. Measurement receives `R`
-descriptors and hashes their referenced payloads, with `R <= U`, rather
-than receiving `P` descriptors. Worker-side expression evaluation and
-local value hashing are separate costs and retain their existing behavior.
-
-For the scale-8 `files-grouped` fixture, 1,799,657 `kind` tuples contain
-roughly 3.6 million pending directory and extension columns. The 206
-distinct string values give at most `16 * 206 = 3296` worker-local
-descriptors at sixteen workers. This is a descriptor bound, not a promise
-of the same factor of end-to-end speedup.
-
-When values are all distinct, `R = U = P` and compaction saves no
-descriptors. The additional local maps cost four bytes per local value
-plus alignment/control storage. Releasing the temporary block before the
-later merge allocations limits its overlap, but this does not by itself
-guarantee a lower peak. All-distinct computed values are an acceptance
-control for both memory and runtime.
+These are publication costs. Packets have their own fixed total budget,
+and private value/tuple ownership has the separate
+[routing bound](design-round-routing.md#memory-bounds-and-admission).
+Ordering references and append staging remain visible allocations; compact
+resolution is not a claim that the entire round uses only value-sized
+memory.
 
 ## Failure paths and limits
 
-Check count sums, typed-array byte sizes, block alignment, byte-buffer
-offsets and combined charges before allocation or pointer formation.
-Use `relic_pending_map_bytes()` as the authority for the value map's
-allocation size. `SIZE_MAX` from a projection or an unrepresentable marker
-capacity declines resolution; a truncated count never authorizes storage.
+Sizing, allocation, collection and measurement can decline before any
+candidate changes. A later failure can find rewritten private candidates;
+they are discarded rather than restored. Both rewrite and routing barriers
+complete before any referenced storage is released.
 
-Every owned allocation is charged before it is requested. A refused
-allocation closes the objects opened so far and gives back their charges.
-Temporary storage has one scoped cleanup path; merge-owned resolution
-storage has one close path used after both success and decline. Cleanup
-is based on owned resources; when no descriptor is referenced, no
-resolution storage exists to clean up.
+Integer sums of capacities, aligned offsets, owner spans, byte lengths
+and descriptor numbers are checked before allocation or access. Handles
+must denote a live entry, map entries must be populated before rewriting,
+and promises must have valid domain type bits. Internal malformed input
+never reaches a relation, diagnostic value or caller callback.
 
-A refusal during sizing, allocation, collection, the resolution allocation
-that follows collection, or measurement leaves candidate columns
-untouched. A failure in a later merge phase can find rewritten private
-candidates; it discards them whole. No inverse mapping or marker
-restoration is needed. The derivation and rewrite barriers must both be
-complete before any storage they reference is released.
-
-The merge reports no resource-refusal diagnostic. The established serial
-retry reports the failure it encounters, preserving the existing tuple,
-memory and value-limit contract. An admitted merge makes no weaker
-persistent-storage check because its workspace is smaller. A round that
-an occurrence-sized workspace would not fit can merge successfully.
-Allocator failures retain the ordinary guarantees of consistent state and
-accounted retained capacities; identical allocator failure points across
-strategies are not required.
-
-Interruption follows the existing executor and round boundaries. An
-abandoned round releases this workspace before retry/reporting, and the
-pool remains reusable. Compaction introduces neither asynchronous teardown
-nor mutation of live global value tables.
+No private failure is reported as a new user-visible resource limit.
+Serial retry establishes the original refusal and diagnostic. Memory
+charges track allocations at capacity through partial initialization and
+cleanup, including the addressable byte for empty text. Unused entries
+are not interned merely because their table allocated room.
 
 ## Determinism and validation
 
-Descriptor numbers can vary with the assignment of tasks to workers,
-because worker-local deduplication changes the compact sequence. Promised
-identifiers cannot vary: the sequence preserves each semantic value's
-first logical occurrence. Tests compare identifiers and persistent state,
-not the scheduling-dependent private descriptor numbers.
+Tests compare exact stored IDs, domain kinds, pool use bits, candidate
+words, final hashes/stripes and charges, not just printed strings.
+Required cases include:
 
-The regression is written first and fails on the uncompacted merge. Use
-the existing forced-deferred, one-worker path in `tests/unit/test_round.c`
-to make candidate allocation deterministic. A program emits many distinct
-tuples containing a few computed strings absent from the loaded context.
-Choose a documented accounted-memory budget that accommodates candidate
-and ordinary merge storage plus compact value resolution, but cannot
-accommodate occurrence-sized resolution. Require that the computing round
-actually merges with no abandonment: answer equality alone would allow a
-silent serial fallback to pass. Establish the budget from fixture sizes
-and charged capacities, not RSS or elapsed time.
+* different packet markers for equal values and equal markers for different
+  values, canonicalized through real owners before compaction;
+* late earlier tuple witnesses, multiple targets and repeated columns;
+* mixed integers and text, existing pool bytes, empty strings and NULs;
+* no-pending rounds, unused owner entries, `R = 0 < V`, and `R < V`;
+* dictionary and compact-number limits, bad handles and byte ranges;
+* late resolution allocation refusal, partial value reservation, rewrite
+  barrier lifetime and every cleanup path;
+* all-distinct values as well as many tuple references to a small vocabulary.
 
-| Concern | Required evidence |
-| --- | --- |
-| Repeated occurrences | Repetition within one tuple, across batches and across tasks retains one descriptor per referenced local marker |
-| Worker identity | Equal local numbers for different values stay distinct; different local numbers for equal cross-worker values resolve identically |
-| First occurrence | Interleaved task ownership, including the example above and several targets, preserves integer and string identifier order |
-| Existing values | Already assigned columns remain unchanged; a string over symbol-only pool bytes reuses the pool entry and sets the string-use bit correctly |
-| Byte strings | Empty strings, embedded NULs, unequal lengths, large strings and hash collisions preserve exact value equality and safe byte lifetimes |
-| Empty/unused storage | No-pending rounds allocate nothing; unused local entries are not interned; `R = 0 < U` opens no resolution storage; partially referenced worker tables size the map by `R` |
-| Late refusal | A limit or allocator refusal of the resolution after collection leaves candidates, value tables and relations untouched and returns every charge |
-| Rehashing | A normalized candidate's hash, stripe and per-worker stripe counts agree with its promised words before cross-worker screening |
-| Scope release | Temporary maps can be released at the rewrite barrier without dangling references; the copied bytes remain live through reserve, append and rollback |
-| Exhaustion | The existing nth-allocation failure suite covers partial opens, copied bytes, map allocation and late relation-reservation failure after value reservation |
-| Resource limits | Pure sizing tests exercise marker/count/offset boundaries without huge allocations; integration sweeps compare serial and deferred refusals and recovery |
-| Concurrency | Forced deferral and 2, 4 and 16 workers give the serial identifiers, tuple order, counters and persistent storage; successful merges are required |
-| Reuse | A failed query followed by a successful query on the same context and pool leaves no old maps, reservations, leaked charges or string-use bits |
-| All-distinct control | Actual workspace and phase time include the added local maps and show the tradeoff when no occurrence compacts |
+Keep direct compaction/merge fixtures for states normal production cannot
+create. Full route/evaluator tests separately prove that owner handles
+are canonical and tuple minima preserve ordering. Allocation injection,
+ASan, UBSan and TSan cover ownership, arithmetic and shared barriers;
+standalone LSan/MSan run where supported.
 
-Extend round tests, value tests, the allocation-failure suite in
-`tests/unit/test_exhaustion.c`, and string/aggregate equivalence cases.
-Real rounds always reference every worker-local value and let the pool
-assign tasks to workers, so `tests/unit/test_merge.c` builds rounds by hand
-to fix that assignment and to hold values no candidate references.
-Inspect persistent value contents and stored identifiers as the round
-tests do; comparing printed strings alone would miss renumbering. Verify
-that computed fixture values are absent using read-only lookup rather than
-interning the expected result before the test.
-
-Run the required code/security/readability review before implementation
-tests, then the full suite and ASan, UBSan and TSan for the ownership,
-size-arithmetic and shared-worker changes. LSan and MSan run on supported
-Linux configurations. Review every payload `bcopy(src, dst, n)` for its
-source-first argument order.
-
-Measure `files-grouped` after loading is isolated, alongside end-to-end
-comparisons, low-cardinality integers and all-distinct computed strings.
-Record descriptor counts, charged peak workspace, collection/measurement/
-rewrite time and process peak RSS separately. Production counters and
-public ABI do not need new fields for test or benchmark instrumentation.
-The optimization meets its mechanism goal when resolution storage and
-measurement follow `U` and `R`, first-occurrence identity is preserved,
-and the targeted merge improves without an unexplained control regression.
+Performance counters bound descriptors by referenced handles and copies
+by owned value bytes. Timing comparisons include all-distinct inputs so
+that reference-map and ownership costs remain visible. Neither a clock
+threshold nor a small answer alone proves compact allocation.
 
 ## Alternatives not taken
 
-* **Concatenating worker pending tables.** Worker order is not logical
-  derivation order, so it can renumber values and change subsequent storage.
-* **Descriptors per tuple column.** It expands references to an already
-  deduplicated value and makes resolution memory follow occurrences.
-* **Global interning while workers derive.** Arrival order would assign
-  identifiers and introduce shared mutation into frozen-store execution.
-* **A second global value hash table in compaction.** The ordinary value
-  resolver already canonicalizes typed values. Local-map compaction reduces
-  its input without duplicating equality or interning policy.
-* **Intermediate round markers in candidate columns.** Keeping columns
-  local until the one identifier rewrite avoids another write pass and a
-  third column interpretation between collection and publication.
-* **Sorting values by local marker, worker or hash.** Those keys do not
-  preserve global first occurrence. The ordered candidate walk already
-  supplies the required order.
-* **Borrowing all text directly from worker buffers.** The value API uses
-  offsets into one byte span. One copy per worker-local text buffer keeps
-  that contract and a clear lifetime without a new multi-buffer value API.
-* **A representation switch for all-distinct workloads.** A single mapping
-  rule keeps numbering and cleanup independent of cardinality heuristics;
-  the uniform cost is measured explicitly on all-distinct controls.
+* **Descriptors per pending column.** A repeated vocabulary would regain
+  occurrence-sized memory. Maps are sized by private value entries.
+* **Use private handles as final domain identifiers.** Their order follows
+  private dictionary arrival, and their encoding is a routing detail.
+* **Rewrite through descriptor numbers first.** It adds another full tuple
+  pass and temporarily makes columns use a third retained namespace.
+* **Borrow a resumable producer's bytes.** A drained packet is reusable;
+  resolver payload must have its own lifetime through append or rollback.
+* **Keep dictionaries just to serve resolver borrows.** One compact copied
+  payload separates that lifetime from routing hashes and owner tables.
+* **Intern values while collecting references.** Publication must follow
+  complete reservation so a declined deferred round changes no identity.

@@ -35,15 +35,16 @@ Souffle's 13.616 s and 1.49 GiB; relic's serial peak is 1.46 GiB.
 Per-worker screening bounds candidates by workers times distinct new
 tuples, and merge staging and scratch add further storage. Measure live
 candidates, cross-worker repeats and each merge allocation separately
-from allocator retention. Evaluate bounded batches routed to one owner
-per tuple-hash partition, retaining the earliest logical derivation
-position for deterministic commit. This requires a design change to
-the deferred round, including worker-independent hashes for pending
-values, exact collision checks and the serial fallback on refusal.
-The target is scratch proportional to distinct new tuples plus bounded
-producer buffers, independent of worker count. The scale-8 all-pairs
-tree, which peaks at 109.1 GiB at sixteen threads, is a capacity gate
-alongside the closure timings.
+from allocator retention. Implement
+[bounded candidate routing](../specs/design-round-routing.md): bounded
+producer packets, value canonicalization and global tuple ownership in
+barrier-separated phases, then ordering by minimum logical positions.
+The bound includes distinct pending payload and all sorting/resolution
+scratch, with no full-round candidate or value table per worker. Private
+output allowances and the conservative serial scratch floor preserve
+limit behavior. The scale-8 all-pairs tree, which peaks at 109.1 GiB at
+sixteen threads, is a capacity gate alongside closure timings and the
+low-duplicate controls in the implementation plan.
 
 ## The targets
 

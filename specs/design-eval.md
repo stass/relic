@@ -476,6 +476,16 @@ component's pass, a query's group rules and a gathered query rule may be
 deferred too, since none reads what it writes. A naive pass may not: each rule
 reads what the rules before it in the pass inserted.
 
+A deferred round can pause producers and drain
+[bounded candidate packets](design-round-routing.md) many times before
+that insertion boundary. These waves change neither views nor deltas.
+Private value owners canonicalize pending values, tuple owners retain
+unique candidates and minimum positions, and final ordering recovers the
+serial insertion stream. Output quotas are private yield/refusal reasons;
+an oversized transport head reruns serially rather than becoming a new
+language or value limit. Task work and notes survive lane pauses and are
+published only with a successful round.
+
 **Counters.** The context counts rounds, derivations (new or not, facts
 seeded included), insertions, tuples scanned and tuples read from index
 chains, for `relic_stats()` and `-X stats`; they are not a stable interface.

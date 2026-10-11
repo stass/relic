@@ -533,17 +533,31 @@ frozen before preparation begins, and a refusal discards prefix and task
 effects together before the serial retry. These rules preserve the
 ordered merge's proof for both access paths and for constant-test prefixes.
 
-Computed values stay worker-local during derivation. The merge gathers
-one descriptor per referenced worker-local value in logical first-occurrence
-order, then uses the ordinary value resolver to assign identifiers. Private
-columns are rewritten directly to those promises before tuple deduplication
-and commit. This preserves value identity without another interner and
-bounds resolution descriptors by local distinct values rather than column
-occurrences.
+Producers retain bounded packets, not a full candidate history per worker.
+Barrier-separated jobs first canonicalize pending values in round-owned
+value partitions, then deduplicate target tuples in tuple partitions.
+Every owner has one writer per phase. A tuple retains its minimum logical
+derivation position even when that witness arrives late; ordering those
+minima recovers the serial insertion stream. Private pending handles name
+semantic values and never become public IDs. A shared byte ceiling covers
+transport and pending output copies, while owner data follows global
+distinct tuples and values.
+
+The merge walks ordered unique tuples and collects one descriptor per
+referenced private value, then uses the ordinary resolver to promise
+identifiers. Owned columns are rewritten directly to those promises;
+stored hashes and stripes are recomputed before reserved append. Draining
+publishes no values or tuples and crosses no delta boundary. Exact final
+storage projections and a conservative serial scratch floor govern
+admission, including when transport quotas shorten executor batches. A
+refusal releases the attempt before serial retry. These phase and
+ownership rules remove worker replication without concurrent global
+insertion or a queue deadlock protocol.
 
 See [design-parallel.md](design-parallel.md),
 [ordered driving cursors](design-driver-slicing.md) and
-[pending value compaction](design-pending-values.md).
+[pending value compaction](design-pending-values.md), with
+[bounded candidate routing](design-round-routing.md) defining round ownership.
 
 ### Library interface
 

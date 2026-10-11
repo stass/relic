@@ -354,30 +354,47 @@ from eliminated intermediates and all charged reduction workspace.
 ## 7. Bound candidate storage across workers
 
 [Medium, components: `lib/round.c`, `lib/task.c`, `lib/merge.c`,
-`lib/relation.c`]
+`lib/route.c`, `lib/exec.c`, `lib/value.c`, `lib/relation.c`]
 
 **Evidence.** At scale 8 and sixteen threads, `tc-cyclic` takes 22.512 s
 and peaks at 23.46 GiB. Souffle takes 13.616 s and 1.49 GiB; relic's
 serial peak is 1.46 GiB. Per-worker screening admits up to workers times
 distinct new tuples, with further merge staging and scratch.
 
-**Implementation gate.** First measure globally unique candidates,
-cross-worker repeats, pending values, per-step scratch and allocator
-retention. If replication is substantial, prototype bounded candidate
-batches routed to one owner per tuple-hash partition. An owner deduplicates
-exactly and records the earliest logical derivation position. Final
-identifier assignment and commit follow that position, independent of
-arrival order. This changes deferred-round ownership and needs its own
-`specs/design-round-routing.md` plus an architecture link before code.
+**Implementation.** Apply
+[bounded candidate routing](../specs/design-round-routing.md). Profile
+globally unique candidates, local copies, pending values, each merge
+workspace and allocator retention before tuning. Producers use resumable
+lanes and bounded packets. Barrier-separated value-owner and tuple-owner
+jobs retain one private copy of each semantic value and new target tuple.
+Owners keep minimum task/emission positions; final ordering supplies the
+ordinary resolver and reserved append with the serial sequence.
 
-**Required design properties.** Routing hashes pending values by semantic
-value consistently across workers and confirms collisions exactly. The
-store stays frozen until the deterministic publication boundary. A global
-buffer budget and a draining protocol guarantee progress under backpressure;
-refusal releases private work and permits the established serial fallback.
-For `D` distinct new tuples, `V` distinct new pending values and total
-producer-buffer budget `B`, target data storage of `O(D + V + B)` without
-a workers-times-`D` term. Include ordering scratch in that bound.
+**Implementation order.** Establish the candidate/value replication
+regressions first, with constructed arrival schedules. Add bounded lane
+continuations and private output-byte allowances; then semantic value
+ownership, tuple ownership and ordered unique finalization. Adapt compact
+resolution to canonical owner handles and remove worker-run assumptions
+and the redundant merge duplicate table. Keep each verified intermediate
+behind its completion gate until the bounded path is end to end; the
+serial evaluator and forced one-worker deferral are the references.
+
+**Required properties.** One total byte budget covers packets, pending
+output copies, local tables and routing lists. Full packets drain; a head
+too large for empty transport declines before an oversized copy. Candidate
+and value owners grow with global distinct data, and the store stays
+frozen across every wave. Canonical private handles are never public IDs
+or semantic routing hashes. Refusal joins phases and releases private state
+before serial retry. For `D` distinct tuples, `V` pending values and `S`
+text bytes, target `O(D + V + S + B)` data storage for fixed schemas and
+indexes, including order/compaction scratch. Account for executor scratch,
+staging and final storage separately.
+
+Transport allowances can clip capacity, so preserve the serial pending
+buffer floor by projecting the largest pending head size through ordinary
+growth. Ordinary output grows only for one head in an empty batch, which
+makes that bound sufficient. A conservative refusal retries serially;
+private quotas cannot weaken memory admission.
 
 **Regression and exit criteria.** Add a failing memory-scaling regression
 with extensive cross-worker duplication. Test skewed partitions, computed
