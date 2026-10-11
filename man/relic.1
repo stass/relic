@@ -571,6 +571,11 @@ arguments
 or variables the rule names nowhere else, as a scan or a lookup that
 continues the join once per tuple it matches, rather than as a test that
 continues it at most once;
+.It Cm no-factor
+rewrite every bound recursive predicate by the ordinary Magic Sets
+construction, deriving the answers of every state its demand reaches,
+rather than by walking the states reachable from each requested binding and
+answering for that binding alone;
 .It Cm no-index
 build no index, scanning instead;
 .It Cm no-magic

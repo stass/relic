@@ -723,10 +723,12 @@ it is the same on every run.
 
 The multiple admits every rewrite that specializes the program and refuses
 one that multiplies it. A rewrite makes at most two searches, each reading
-the rules of each adornment it keeps once, and one draft, copying each of
-those rules once -- whole, or cut into pieces holding at least its body
-between them -- with a magic rule per demand call and a supplementary rule
-per cut. A handful of adornments per predicate costs a few copies of the
+the rules of each adornment it keeps once -- twice for one whose factoring
+certificate a rule fails, which is then read as an ordinary adornment -- and
+one draft, copying each of those rules once -- whole, or cut into pieces
+holding at least its body between them -- with a magic rule per demand call
+and a supplementary rule per cut, or a walk seed, a transition per
+recursive rule and an answer rule per base rule for a factored adornment. A handful of adornments per predicate costs a few copies of the
 program per stage; the default allows each of the three stages the same
 floor and factor. The floor admits every rewrite of a small program
 outright.

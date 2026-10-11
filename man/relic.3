@@ -333,10 +333,12 @@ holds switches, zero by default.
 .Dv RELIC_F_NO_INDEX ,
 .Dv RELIC_F_NO_REORDER ,
 .Dv RELIC_F_NO_MAGIC ,
+.Dv RELIC_F_NO_FACTOR ,
 .Dv RELIC_F_NO_STREAM ,
-.Dv RELIC_F_NO_EXISTS
-and
+.Dv RELIC_F_NO_EXISTS ,
 .Dv RELIC_F_PARALLEL_ALWAYS
+and
+.Dv RELIC_F_GROUP_RULES
 select alternative evaluation strategies for testing, and
 .Dv RELIC_F_NOTE_MIXED
 asks for a diagnostic:
@@ -352,6 +354,11 @@ reading what the previous round derived, which goes first;
 .It Dv RELIC_F_NO_MAGIC
 answer every query from the whole program rather than through its Magic
 Sets rewrite;
+.It Dv RELIC_F_NO_FACTOR
+rewrite every bound recursive predicate by the ordinary Magic Sets
+construction, deriving the answers of every state its demand reaches,
+rather than by walking the states reachable from each requested binding
+and answering for that binding alone;
 .It Dv RELIC_F_NOTE_MIXED
 report, as a note pointing at it, the first comparison or aggregate in each
 rule that had no value: a comparison that ordered values of different types,
@@ -379,7 +386,13 @@ defer the insertions of every round of evaluation that reads none of the
 relations it derives except as they stood when it began, which is every
 round but a pass of the naive fixed point, to the round's end, cutting the
 scan each rule starts from into pieces, as a round run on several threads
-is run; the relations and every count of work are the same.
+is run; the relations and every count of work are the same;
+.It Dv RELIC_F_GROUP_RULES
+compile the body of every aggregate into a rule of its own whose relation
+the aggregate folds, even a body of one atom whose arguments are distinct
+variables, which otherwise is folded over the atom's relation where it
+stands; the answers are the same, but the copies are tuples held and
+counted, so a limit may refuse one way and not the other.
 .El
 .Pp
 No switch changes an answer, though two strategies may hold different

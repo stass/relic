@@ -1,4 +1,7 @@
 The Magic rewrite cuts the query's body into supplementary predicates of
 the query's own, and the limit refuses one of them, named as the query;
 full materialization has no such predicates and is refused while deriving
-path/2.  The golden file pins the default's message.
+path/2.  Where the limit falls depends on how many tuples a strategy
+derives before the query's predicates, so the rewrite without factoring,
+which holds no walk, is refused deriving path/2 at this limit.  The golden
+file pins the default's message.

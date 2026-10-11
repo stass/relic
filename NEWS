@@ -25,9 +25,12 @@ relic 1.0.0 (unreleased)
     tested for a matching tuple rather than joined once per match, and
     queries answered through a Magic Sets rewrite, which restricts what is
     derived to what the query's constants reach wherever negation and the
-    rewrite's size allow, and otherwise evaluates in full.  Rounds of
-    evaluation can be shared among threads, with the same answers in the
-    same order whatever their number.
+    rewrite's size allow, and otherwise evaluates in full.  A recursion
+    that passes the free columns of a bound call through unchanged, as a
+    transitive closure queried from a node does, is walked from each bound
+    value and answered for it alone, rather than for every node the walk
+    reaches.  Rounds of evaluation can be shared among threads, with the
+    same answers in the same order whatever their number.
   * Optional limits on the tuples held and on the memory relations, values,
     plans and rewrites occupy: a load, an evaluation or a query that would
     exceed one is refused with a diagnostic, and changes nothing.  A

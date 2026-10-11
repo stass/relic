@@ -40,7 +40,9 @@
  * hold the same computed strings, and a string evaluation computes is
  * interned only when a tuple holding it is stored.  A strategy whose rules
  * differ from every other's, because its planner's order decides what the
- * Magic rewrite generates, has no reference.
+ * Magic rewrite generates, has no reference.  The ordinary rewrite without
+ * factoring generates rules of its own, so its totals are held only to its
+ * naive fixed point's.
  *
  * A program whose negated literals hold `_` is also loaded in its helper
  * rendering, random_helper_text(), where each such literal negates instead
@@ -109,6 +111,12 @@ static const strategy_t strategies[STRATEGY_COUNT] = {
 	[STRATEGY_NO_REORDER] = {
 		"no-reorder", RELIC_F_NO_REORDER, false, STRATEGY_NONE, 0,
 		FAULT_NONE },
+	[STRATEGY_NO_FACTOR] = {
+		"no-factor", RELIC_F_NO_FACTOR, false, STRATEGY_NONE, 0,
+		FAULT_NONE },
+	[STRATEGY_NAIVE_NO_FACTOR] = {
+		"naive+no-factor", RELIC_F_NAIVE | RELIC_F_NO_FACTOR, false,
+		STRATEGY_NO_FACTOR, 0, FAULT_NONE },
 	[STRATEGY_NO_MAGIC] = {
 		"no-magic", RELIC_F_NO_MAGIC, false, STRATEGY_NONE, 0,
 		FAULT_NONE },

@@ -172,42 +172,41 @@ from process RSS.
 
 ## 3. Factor eligible bound recursion
 
-[Medium, components: `lib/magic.c`, `lib/stratify.c`, `lib/eval.c`]
+[Medium, component: `lib/magic.c`]
 
-**Evidence.** The scale-8 cyclic bound query returns 8,000 answers after
-about 3.19 billion derivations. An equivalent forward-reachability program
-uses 406,919 derivations. The diagnostic timings are 28.014 s and 0.073 s
-at sixteen threads; exact answer sets match. The acyclic probe reduces
-71,093,957 derivations to 85,357.
+A bound call on a predicate whose rules pass the certificate of
+[bound query factoring](../specs/design-query-factoring.md) is answered by
+walking from each requested binding, and `-X no-factor` keeps ordinary
+Magic as the reference. `tests/unit/test_magic.c` holds a right-recursive
+closure over a 1000-edge chain, queried from its first node, to at most
+8N + 64 derivations, where the unfactored rewrite derives N(N + 1)/2; it
+compares factored, unfactored and naive whole-program answers over
+generated graphs for different base and transition relations, several
+origins, growing requests, column mappings and every certificate
+rejection, and holds the exact work-limit charges.
 
-**Implementation.** Apply
-[bound query factoring](../specs/design-query-factoring.md): certify every
-rule of an adornment as a positive state transition or a base over complete
-inputs. For `P = R* B`, propagate `(origin, current state)` through `R` and
-produce origin-associated answers through `B`, including source facts.
-`R` and `B` need not coincide. Integrate certification with adornment search
-and free-call subsumption, then emit ordinary rules through the existing
-charged draft path. Complete and ineligible calls retain their established
-behavior.
+One local M3 run of each, the same binary with and without `-X no-factor`,
+answers identically:
 
-**Design and regression.** Implement the design's slot/arity preflight,
-deterministic walk names, origin attribution and single rewrite budget.
-Add `RELIC_F_NO_FACTOR` and `-X no-factor` consistently to configuration,
-CLI help, manuals and the strategy matrix. Write the chain work-counter
-regression first and confirm it fails before implementation. Use the
-independent ordinary-Magic and naive references for different base and
-transition relations, growing correlated requests and positive-length
-paths, including an isolated seed that is not itself an answer.
+| Workload | Scale | Threads | Derivations, factored / not | Wall, factored / not | Peak RSS, factored / not |
+| --- | ---: | ---: | --- | --- | --- |
+| `chain-right` | 8 | 1 | 48,002 / 128,040,001 | 0.01 s / 25.1 s | 5 MB / 3.5 GB |
+| `chain-right` | 8 | 16 | 48,002 / 128,040,001 | 0.01 s / 11.3 s | 7 MB / 3.5 GB |
+| `tc-acyclic-bf` | 8 | 1 | 167,090 / 71,093,957 | 0.07 s / 2.79 s | 27 MB / 124 MB |
+| `tc-acyclic-bf` | 8 | 16 | 167,090 / 71,093,957 | 0.07 s / 0.51 s | 28 MB / 444 MB |
+| `tc-cyclic-bf` | 8 | 1 | 805,760 / 3,191,837,759 | 0.09 s / 106.0 s | 28 MB / 1.75 GB |
+| `tc-cyclic-bf` | 8 | 16 | 805,760 / 3,191,837,759 | 0.08 s / 14.9 s | 32 MB / 7.2 GB |
 
-**Exit criteria.** Eligible single-source closure does work proportional
-to the relevant edges and reachable nodes and holds no all-pairs closure.
-Compare exact sets with unfactored and naive evaluation on small random
-graphs, including cycles, self-loops, additional base rules and correlated
-calls from several seeds. Unsupported shapes take the established path.
-Verify rewrite-limit and allocation-failure behavior, query reuse, and
-identical plans and unsorted output across repeated runs and thread counts.
-Do not require an optimized strategy's derivation order to match a different
-strategy; their answer sets must match.
+The ineligible controls `chain-left`, `tc-acyclic-fb` and `tc-cyclic-fb`
+derive, take and hold the same either way at scale 4.
+
+**Remaining measurement.** Run the targeted `chain-right`,
+`tc-acyclic-bf` and `tc-cyclic-bf` comparisons against the rival engines
+at scales 1, 2, 4 and 8 and at one and sixteen threads under the
+measurement rules above, recording generated relation sizes, persistent
+index storage and rewrite and planning time beside the totals, with a
+program whose base and transition relations differ, a query from several
+origins, and the ineligible controls.
 
 ## 4. Build and load base relations in bulk
 

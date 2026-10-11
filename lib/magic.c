@@ -89,6 +89,35 @@
  * so there is no second stage: the query reads those predicates completely,
  * and runs as written over the program's own relations.
  *
+ * A bound adornment of a recursive predicate whose rules pass its free
+ * columns through unchanged is factored rather than copied.  Called as
+ * path$bf, the copy of path(X, Z) :- edge(X, Y), path(Y, Z) derives the paths
+ * of every node the demand reaches -- on a chain, every suffix of it.
+ * Factored, the rewrite walks the states reachable from each requested
+ * binding, the binding kept beside each as its origin, and answers for the
+ * origin alone:
+ *
+ *	walk$path$bf(A, A) :- magic$path$bf(A).
+ *	walk$path$bf(A, Y) :- walk$path$bf(A, X), edge(X, Y).
+ *	path$bf(A, Y) :- walk$path$bf(A, X), edge(X, Y).
+ *
+ * The first rule seeds a walk at each request.  A recursive rule becomes a
+ * transition from the state its head binds to the state its call binds; a
+ * rule that does not call the predicate turns a reached state into answers
+ * for the origin.  The origin is the whole bound tuple, so two requests
+ * never exchange answers, and the seed is a request rather than an answer:
+ * only a rule that does not call the predicate, or a fact, makes one.
+ *
+ * That is the predicate's least fixed point only when every rule of the
+ * adornment fits it, so the search certifies the adornment whole before it
+ * factors any of it: every literal is a positive atom of a predicate read
+ * completely, but for at most one call on the predicate itself, and such a
+ * call holds in each free column the variable the head holds there, which
+ * nothing else in the rule reads.  No transition can then see or change an
+ * answer.  A certified adornment calls nothing on demand, so its rules reach
+ * no other adornment; an adornment that fails is rewritten as an ordinary
+ * one, every rule of it.
+ *
  * The rewrite terminates because adornments are memoized on the predicate and
  * the bound columns, and a predicate of arity n has at most 2^n of them.  The
  * kept adornments are the worklist: reading one adornment's rules keeps the
@@ -154,6 +183,44 @@
 #define	ORDINALS_MAX			(2 * (1 + 20))
 
 /*
+ * A factored adornment's walk predicate is named walk$ and the adorned
+ * predicate's name.
+ */
+#define	WALK_PREFIX		"walk$"
+#define	WALK_PREFIX_LENGTH	(sizeof(WALK_PREFIX) - 1)
+
+/*
+ * The most columns a factored adornment may bind: its walk has two columns
+ * for each, the origin and the state reached, and no more than a predicate
+ * may have.
+ */
+#define	RELIC_FACTOR_MAX_BOUND	(RELIC_MAX_ARITY / 2)
+
+/*
+ * What a certificate records for a rule that does not call its own
+ * predicate, a base rule.
+ */
+#define	RELIC_NO_SELF_CALL	SIZE_MAX
+
+/*
+ * The names of a factored rule's origin variables, one per bound column:
+ * literals, for the reason the base view's variable names are, and holding
+ * a `$`, so that no variable of the program shares one.
+ */
+static const char *const origin_variable_names[] = {
+	"Origin$0", "Origin$1", "Origin$2", "Origin$3",
+	"Origin$4", "Origin$5", "Origin$6", "Origin$7",
+	"Origin$8", "Origin$9", "Origin$10", "Origin$11",
+	"Origin$12", "Origin$13", "Origin$14", "Origin$15"
+};
+
+_Static_assert(sizeof(origin_variable_names) /
+    sizeof(origin_variable_names[0]) == RELIC_FACTOR_MAX_BOUND,
+    "a factored rule names an origin variable per bound column");
+_Static_assert(RELIC_MAX_ARITY + RELIC_FACTOR_MAX_BOUND <= RELIC_MAX_VARIABLES,
+    "the answer rule over a base view fits a rule's slots");
+
+/*
  * The names of a base view's rule's variables, X1 to Xn for a source of
  * arity n: literals rather than spellings in an arena, so that they live as
  * long as any copy of the rule, whichever arena the copy is in.
@@ -171,6 +238,7 @@ _Static_assert(sizeof(view_variable_names) / sizeof(view_variable_names[0]) ==
 typedef struct relic_closure relic_closure_t;
 typedef struct relic_demand relic_demand_t;
 typedef struct relic_draft relic_draft_t;
+typedef struct relic_factored_slots relic_factored_slots_t;
 typedef struct relic_prefix relic_prefix_t;
 typedef struct relic_renumbering relic_renumbering_t;
 typedef struct relic_walk_step relic_walk_step_t;
@@ -235,6 +303,35 @@ struct relic_draft {
 };
 
 /*
+ * The proof that an adornment factors, which certify() finds and the draft
+ * follows: for the i-th rule deriving the adornment's source, in program
+ * order, `self_call[i]` is the body position of its one call on the source,
+ * which makes it a transition, or RELIC_NO_SELF_CALL, which makes it a base
+ * rule.  Every rule has passed every check its generated rule needs, the
+ * room for its slots included, so the draft checks nothing again.
+ */
+struct relic_certificate {
+	size_t	*self_call;
+};
+
+/*
+ * The slots of a rule drafted for a factored adornment.  It copies some
+ * of its source rule's slots, renumbered 0, 1, ... in slot order --
+ * `renamed[s]` is the one source slot s takes, or RELIC_NO_SLOT when it is
+ * not copied -- and adds `origin_count` origin slots after them, from
+ * `first_origin`.  `view` is the scratch rule whose variable table names
+ * them all, the copied slots by their source variables and the origin slots
+ * Origin$0, Origin$1 and so on, which the draft gives canonicalize() as its
+ * source in place of the rule it was drafted from.
+ */
+struct relic_factored_slots {
+	relic_rule_t	view;
+	uint16_t	renamed[RELIC_MAX_VARIABLES];
+	uint16_t	first_origin;
+	uint16_t	origin_count;
+};
+
+/*
  * The prefix of a body being rewritten: the literals evaluated so far as the
  * generated rules write them, `length` of them in `body`, which has room for
  * the whole body and a guard.  `rule` is the rule being rewritten, the
@@ -254,13 +351,18 @@ struct relic_prefix {
  * The slots of a rule being renumbered.  `renamed[s]` is the slot the source
  * rule's slot s takes, or RELIC_NO_SLOT until it has occurred; `original[n]`
  * is the source slot that slot n came from, and `occurrences[n]` how often it
- * occurs.  `count` slots have been assigned.
+ * occurs.  `count` slots have been assigned.  The draft's source holds
+ * `source_count` slots; `stray` records that a slot outside them occurred,
+ * which canonicalize() reports as an internal error rather than index past
+ * `renamed` for, whichever draft the slot came from.
  */
 struct relic_renumbering {
 	uint32_t	occurrences[RELIC_MAX_VARIABLES];
 	uint16_t	renamed[RELIC_MAX_VARIABLES];
 	uint16_t	original[RELIC_MAX_VARIABLES];
 	uint16_t	count;
+	uint16_t	source_count;
+	bool		stray;
 };
 
 /*
@@ -326,6 +428,10 @@ static uint32_t	 call_columns(const relic_magic_t *magic,
 		    const relic_literal_t *call, uint64_t bound);
 static int	 canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 		    relic_rule_t *rule);
+static int	 certify(relic_magic_t *magic, uint32_t position,
+		    relic_certificate_t **certificatep);
+static int	 charge_rules_of(relic_magic_t *magic,
+		    const relic_adornment_t *adornment);
 static int	 charge_work(relic_magic_t *magic, size_t size,
 		    relic_pred_id_t source);
 static void	 close_complete(relic_closure_t *closure);
@@ -351,11 +457,32 @@ static int	 copy_aggregate(relic_magic_t *magic,
 static int	 copy_literal(relic_magic_t *magic,
 		    relic_renumbering_t *renumbering,
 		    const relic_literal_t *source, relic_literal_t *copy);
+static uint64_t	 copied_slots(const relic_magic_t *magic,
+		    const relic_rule_t *rule, size_t self_call, uint32_t bound);
 static int	 cut_prefix(relic_magic_t *magic, relic_prefix_t *prefix,
 		    size_t call_ordinal, uint64_t live,
 		    relic_pred_id_t called_pred);
 static size_t	 default_work_limit(size_t size);
 static int	 demand_begin(relic_demand_t *demand, relic_magic_t *magic);
+static int	 draft_answer(relic_magic_t *magic,
+		    const relic_adornment_t *adornment,
+		    const relic_rule_t *rule);
+static int	 draft_transition(relic_magic_t *magic,
+		    const relic_adornment_t *adornment,
+		    const relic_rule_t *rule, size_t self_call);
+static int	 draft_walk_seed(relic_magic_t *magic,
+		    const relic_adornment_t *adornment,
+		    const relic_location_t *where);
+static int	 factor_rules(relic_magic_t *magic,
+		    const relic_adornment_t *adornment);
+static relic_arg_t factored_arg(const relic_factored_slots_t *slots,
+		    const relic_arg_t *source);
+static int	 factored_literal(relic_magic_t *magic,
+		    const relic_factored_slots_t *slots,
+		    const relic_literal_t *source, relic_literal_t *copy);
+static int	 factored_slots_begin(relic_magic_t *magic,
+		    const relic_rule_t *source, uint64_t copied,
+		    uint16_t origin_count, relic_factored_slots_t *slots);
 static const relic_adornment_t *find_adornment(
 		    const relic_adornment_set_t *set, relic_pred_id_t source,
 		    uint32_t bound, uint32_t hash);
@@ -398,14 +525,22 @@ static int	 map_components(relic_magic_t *magic);
 static void	 mark_body_complete(relic_closure_t *closure,
 		    const relic_rule_t *rule);
 static void	 mark_complete(relic_closure_t *closure, size_t position);
+static bool	 may_factor(const relic_magic_t *magic,
+		    const relic_adornment_t *adornment);
 static int	 name_adornment(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound, relic_adornment_t *adornment);
 static int	 name_adornments(relic_magic_t *magic);
 static size_t	 name_size(const relic_magic_t *magic, relic_pred_id_t pred);
+static int	 name_walk(relic_magic_t *magic, relic_adornment_t *adornment,
+		    const char *adorned, size_t adorned_length);
 static void	 note_incomplete(relic_magic_t *magic);
 static int	 note_subsumed(relic_magic_t *magic, relic_pred_id_t source,
 		    uint32_t bound);
+static relic_arg_t origin_arg(const relic_factored_slots_t *slots,
+		    uint16_t i);
 static uint16_t	 pred_arity(const relic_magic_t *magic, relic_pred_id_t pred);
+static bool	 passes_output_through(const relic_magic_t *magic,
+		    const relic_rule_t *rule, size_t self_call, uint32_t bound);
 static bool	 pred_is_complete(const relic_magic_t *magic,
 		    relic_pred_id_t pred);
 static size_t	 program_size(const relic_magic_t *magic,
@@ -444,6 +579,9 @@ static int	 rewrite_body(relic_magic_t *magic, const relic_rule_t *rule,
 static int	 rewrite_query(relic_magic_t *magic,
 		    const relic_rule_t *query);
 static bool	 rule_derives_nothing(const relic_rule_t *rule);
+static bool	 rule_factors(const relic_magic_t *magic,
+		    const relic_rule_t *rule, uint32_t bound,
+		    size_t *self_callp);
 static uint32_t	 rule_hash(const relic_magic_t *magic,
 		    const relic_rule_t *rule);
 static bool	 rules_equal(const relic_magic_t *magic, const relic_rule_t *a,
@@ -461,8 +599,18 @@ static int	 supplementary_literal(relic_magic_t *magic,
 static int	 view_walk(relic_magic_t *magic, relic_walk_t *walk);
 static void	 visit_body(relic_demand_t *demand, const relic_rule_t *rule);
 static void	 visit_demanded(relic_demand_t *demand, size_t position);
+static relic_arg_t *walk_args(relic_magic_t *magic,
+		    const relic_adornment_t *adornment,
+		    const relic_factored_slots_t *slots,
+		    const relic_arg_t *atom_args);
+static int	 walk_literal(relic_magic_t *magic,
+		    const relic_adornment_t *adornment,
+		    const relic_factored_slots_t *slots,
+		    const relic_arg_t *head_args,
+		    const relic_location_t *where, relic_literal_t *literal);
 static int	 walk_rule(relic_magic_t *magic, const relic_rule_t *rule,
 		    uint64_t bound, relic_walk_t *walk);
+static int	 walk_rules_of(relic_magic_t *magic, uint32_t position);
 static relic_walk_t *walks_for(relic_magic_t *magic,
 		    const relic_adornment_t *adornment);
 
@@ -1094,7 +1242,6 @@ static int
 charge_work(relic_magic_t *magic, size_t size, relic_pred_id_t source)
 {
 	assert(magic->work_spent <= magic->work_limit);
-
 	if (size > magic->work_limit - magic->work_spent) {
 		abandon_rewrite(magic, source);
 		return (-1);
@@ -1301,7 +1448,7 @@ view_walk(relic_magic_t *magic, relic_walk_t *walk)
  * Name and intern the predicates of an adornment: `name$` followed by a b or
  * an f per column for the adorned predicate, and the same after `magic$` for
  * the magic one, which holds only the bound columns and exists only when
- * there is one.
+ * there is one.  A factored adornment names its walk last.
  *
  * What the source predicate's entry says is read first, because interning
  * can grow the predicate table and move the entry; the name it points at is
@@ -1348,8 +1495,42 @@ name_adornment(relic_magic_t *magic, relic_pred_id_t source, uint32_t bound,
 	if (bound == 0)
 		return (0);
 
-	return (intern_generated(magic, text, length, column_count(bound),
-	    NULL, source, &adornment->magic));
+	if (intern_generated(magic, text, length, column_count(bound), NULL,
+	    source, &adornment->magic) != 0)
+		return (-1);
+
+	if (adornment->certificate == NULL)
+		return (0);
+
+	return (name_walk(magic, adornment, text + MAGIC_PREFIX_LENGTH,
+	    length - MAGIC_PREFIX_LENGTH));
+}
+
+/*
+ * Name and intern a factored adornment's walk predicate: walk$ and the
+ * adorned predicate's name, the `adorned_length` bytes at `adorned`, with two
+ * columns per bound column, the origin's and the state's.  The name holds
+ * two `$`, which no adorned name does, and begins with neither magic$ nor
+ * sup$, so it is no other predicate the rewrite generates.
+ */
+static int
+name_walk(relic_magic_t *magic, relic_adornment_t *adornment,
+    const char *adorned, size_t adorned_length)
+{
+	char *text;
+	size_t length;
+
+	length = WALK_PREFIX_LENGTH + adorned_length;
+	text = magic_alloc(magic, length, 1);
+	if (text == NULL)
+		return (-1);
+
+	bcopy(WALK_PREFIX, text, WALK_PREFIX_LENGTH);
+	bcopy(adorned, text + WALK_PREFIX_LENGTH, adorned_length);
+
+	return (intern_generated(magic, text, length,
+	    2 * column_count(adornment->bound), NULL, adornment->source,
+	    &adornment->walk));
 }
 
 /*
@@ -1481,6 +1662,7 @@ add_adornment(relic_magic_t *magic, relic_adornment_set_t *set,
 	recorded->source = source;
 	recorded->adorned = RELIC_ID_NONE;
 	recorded->magic = RELIC_ID_NONE;
+	recorded->walk = RELIC_ID_NONE;
 	recorded->bound = bound;
 	recorded->kept_before = magic->kept.count;
 
@@ -1558,12 +1740,19 @@ name_adornments(relic_magic_t *magic)
 
 /*
  * Give an occurrence of a source slot its slot in the generated rule,
- * assigning the next one the first time the slot occurs.
+ * assigning the next one the first time the slot occurs.  A slot the source
+ * does not hold is marked stray and takes slot 0, for canonicalize() to
+ * refuse the rule.
  */
 static uint16_t
 renumber_slot(relic_renumbering_t *renumbering, uint16_t slot)
 {
 	uint16_t renamed;
+
+	if (slot >= renumbering->source_count || slot >= RELIC_MAX_VARIABLES) {
+		renumbering->stray = true;
+		return (0);
+	}
 
 	if (renumbering->renamed[slot] == RELIC_NO_SLOT) {
 		renumbering->renamed[slot] = renumbering->count;
@@ -1748,6 +1937,8 @@ canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 	for (i = 0; i < RELIC_MAX_VARIABLES; i++)
 		renumbering.renamed[i] = RELIC_NO_SLOT;
 	renumbering.count = 0;
+	renumbering.source_count = draft->source->variable_count;
+	renumbering.stray = false;
 
 	rule->head = draft->head;
 	rule->head_arity = draft->head_arity;
@@ -1769,6 +1960,12 @@ canonicalize(relic_magic_t *magic, const relic_draft_t *draft,
 			return (-1);
 	}
 	rule->body_length = draft->body_length;
+	if (renumbering.stray) {
+		relic_diag_internal(magic->ctx, &rule->where,
+		    "a query's Magic rewrite drafted a variable its source "
+		    "does not hold");
+		return (-1);
+	}
 
 	rule->variables = magic_alloc(magic, renumbering.count,
 	    sizeof(*rule->variables));
@@ -2755,12 +2952,448 @@ rewrite_query(relic_magic_t *magic, const relic_rule_t *query)
 }
 
 /*
- * Generate the rules of one adornment: the rule over its source's base view
- * first, when the source has facts, then every rule deriving the source, in
- * program order, each rewritten for that call by replaying the walk the
- * search recorded for it.  The rule over the base view is numbered after the
- * program's rules, and calls nothing on demand, so it cuts no prefix and
- * names no supplementary predicate.
+ * Begin the slots of a rule drafted from `source` for a factored adornment:
+ * the source slots of `copied`, renumbered in slot order, then
+ * `origin_count` origin slots.  The certificate checked that they fit a
+ * rule.  The view's variable table is in the scratch arena, with the rest of
+ * the draft, and the origin variables' names are literals, so the copy
+ * canonicalize() makes of the table points at nothing the scratch arena
+ * holds.
+ */
+static int
+factored_slots_begin(relic_magic_t *magic, const relic_rule_t *source,
+    uint64_t copied, uint16_t origin_count, relic_factored_slots_t *slots)
+{
+	relic_variable_t *variables;
+	relic_variable_t *origin;
+	uint16_t copied_count;
+	uint16_t slot;
+	uint16_t n;
+	uint16_t i;
+
+	copied_count = slot_count(copied);
+	assert(origin_count <= RELIC_FACTOR_MAX_BOUND &&
+	    copied_count + origin_count <= RELIC_MAX_VARIABLES);
+
+	variables = draft_alloc(magic, copied_count + origin_count,
+	    sizeof(*variables));
+	if (variables == NULL)
+		return (-1);
+
+	n = 0;
+	for (slot = 0; slot < RELIC_MAX_VARIABLES; slot++) {
+		slots->renamed[slot] = RELIC_NO_SLOT;
+		if ((copied & (UINT64_C(1) << slot)) == 0)
+			continue;
+
+		slots->renamed[slot] = n;
+		variables[n] = source->variables[slot];
+		n++;
+	}
+	assert(n == copied_count);
+
+	slots->first_origin = copied_count;
+	slots->origin_count = origin_count;
+	for (i = 0; i < origin_count; i++) {
+		origin = &variables[copied_count + i];
+		bzero(origin, sizeof(*origin));
+		origin->name.bytes = origin_variable_names[i];
+		origin->name.length =
+		    (uint32_t)strlen(origin_variable_names[i]);
+		origin->where = source->where;
+	}
+
+	bzero(&slots->view, sizeof(slots->view));
+	slots->view.variables = variables;
+	slots->view.variable_count = copied_count + origin_count;
+	slots->view.where = source->where;
+	slots->view.origin = source->origin;
+	slots->view.head = source->head;
+
+	return (0);
+}
+
+/*
+ * A source rule's argument in the slots of a factored rule: a constant or
+ * `_` as it is, a variable in the slot its source slot was renumbered to,
+ * which the certificate made sure is copied.
+ */
+static relic_arg_t
+factored_arg(const relic_factored_slots_t *slots, const relic_arg_t *source)
+{
+	relic_arg_t arg;
+
+	arg = *source;
+	if (source->kind == RELIC_ARG_VARIABLE) {
+		assert(slots->renamed[source->u.slot] != RELIC_NO_SLOT);
+		arg.u.slot = slots->renamed[source->u.slot];
+	}
+
+	return (arg);
+}
+
+/* The `i`th origin slot of a factored rule, as an argument. */
+static relic_arg_t
+origin_arg(const relic_factored_slots_t *slots, uint16_t i)
+{
+	relic_arg_t arg;
+
+	assert(i < slots->origin_count);
+	bzero(&arg, sizeof(arg));
+	arg.kind = RELIC_ARG_VARIABLE;
+	arg.u.slot = slots->first_origin + i;
+
+	return (arg);
+}
+
+/*
+ * A positive literal of a source rule in the slots of a factored rule, its
+ * arguments copied into the scratch arena.
+ */
+static int
+factored_literal(relic_magic_t *magic, const relic_factored_slots_t *slots,
+    const relic_literal_t *source, relic_literal_t *copy)
+{
+	relic_arg_t *args;
+	uint16_t arity;
+	uint16_t column;
+
+	assert(source->kind == RELIC_LITERAL_POSITIVE);
+	*copy = *source;
+
+	arity = pred_arity(magic, source->u.atom.pred);
+	if (arity == 0)
+		return (0);
+
+	args = draft_alloc(magic, arity, sizeof(*args));
+	if (args == NULL)
+		return (-1);
+	for (column = 0; column < arity; column++)
+		args[column] = factored_arg(slots,
+		    &source->u.atom.args[column]);
+	copy->u.atom.args = args;
+
+	return (0);
+}
+
+/*
+ * The arguments of a walk tuple, in the slots of a factored rule, for an
+ * atom over the adornment's source whose arguments are `atom_args`: the
+ * origin slots, then what the atom holds in the adornment's bound columns,
+ * in column order, which is the state the atom stands at.  Every walk tuple
+ * but the seed's, whose state is its origin, is laid out here.  Returns
+ * NULL when the scratch arena refused, which has been reported.
+ */
+static relic_arg_t *
+walk_args(relic_magic_t *magic, const relic_adornment_t *adornment,
+    const relic_factored_slots_t *slots, const relic_arg_t *atom_args)
+{
+	relic_arg_t *args;
+	uint16_t arity;
+	uint16_t column;
+	uint16_t n;
+
+	args = draft_alloc(magic, 2 * slots->origin_count, sizeof(*args));
+	if (args == NULL)
+		return (NULL);
+
+	for (n = 0; n < slots->origin_count; n++)
+		args[n] = origin_arg(slots, n);
+	arity = pred_arity(magic, adornment->source);
+	for (column = 0; column < arity; column++) {
+		if ((adornment->bound & (UINT32_C(1) << column)) == 0)
+			continue;
+
+		args[n] = factored_arg(slots, &atom_args[column]);
+		n++;
+	}
+	assert(n == 2 * slots->origin_count);
+
+	return (args);
+}
+
+/*
+ * A literal reading the adornment's walk at the state of a source rule's
+ * head, whose arguments are `head_args`: the state the rule starts from.
+ */
+static int
+walk_literal(relic_magic_t *magic, const relic_adornment_t *adornment,
+    const relic_factored_slots_t *slots, const relic_arg_t *head_args,
+    const relic_location_t *where, relic_literal_t *literal)
+{
+	relic_arg_t *args;
+
+	args = walk_args(magic, adornment, slots, head_args);
+	if (args == NULL)
+		return (-1);
+
+	bzero(literal, sizeof(*literal));
+	literal->kind = RELIC_LITERAL_POSITIVE;
+	literal->where = *where;
+	literal->u.atom.where = *where;
+	literal->u.atom.pred = adornment->walk;
+	literal->u.atom.args = args;
+
+	return (0);
+}
+
+/*
+ * Generate the rule seeding a factored adornment's walk at every request,
+ *
+ *	walk$p$alpha(A, A) :- magic$p$alpha(A).
+ *
+ * located at `where`, the first rule deriving the source.  It is drafted
+ * from no rule of the program, as the rule over a base view is, so its
+ * variables are the origin's alone.
+ */
+static int
+draft_walk_seed(relic_magic_t *magic, const relic_adornment_t *adornment,
+    const relic_location_t *where)
+{
+	relic_factored_slots_t slots;
+	relic_literal_t request;
+	relic_rule_t place;
+	relic_draft_t draft;
+	relic_arg_t *head_args;
+	relic_arg_t *request_args;
+	uint16_t origins;
+	uint16_t i;
+
+	bzero(&place, sizeof(place));
+	place.where = *where;
+	place.origin = RELIC_ORIGIN_QUERY;
+	place.head = adornment->source;
+
+	origins = column_count(adornment->bound);
+	if (factored_slots_begin(magic, &place, 0, origins, &slots) != 0)
+		return (-1);
+
+	head_args = draft_alloc(magic, 2 * origins, sizeof(*head_args));
+	request_args = draft_alloc(magic, origins, sizeof(*request_args));
+	if (head_args == NULL || request_args == NULL)
+		return (-1);
+	for (i = 0; i < origins; i++) {
+		head_args[i] = origin_arg(&slots, i);
+		head_args[origins + i] = origin_arg(&slots, i);
+		request_args[i] = origin_arg(&slots, i);
+	}
+
+	bzero(&request, sizeof(request));
+	request.kind = RELIC_LITERAL_POSITIVE;
+	request.where = *where;
+	request.u.atom.where = *where;
+	request.u.atom.pred = adornment->magic;
+	request.u.atom.args = request_args;
+
+	bzero(&draft, sizeof(draft));
+	draft.source = &slots.view;
+	draft.head = adornment->walk;
+	draft.head_args = head_args;
+	draft.head_arity = 2 * origins;
+	draft.body = &request;
+	draft.body_length = 1;
+	draft.attributed = adornment->source;
+
+	return (publish_rule(magic, &draft));
+}
+
+/*
+ * Generate the transition of a recursive rule the certificate found calling
+ * its predicate at body position `self_call`.  Written p(S, Y) :- G,
+ * p(T, Y), with S the head's bound columns and T the call's, it becomes
+ *
+ *	walk$p$alpha(A, T) :- walk$p$alpha(A, S), G.
+ *
+ * the literals of G in their written order.  Y and the call are dropped;
+ * the certificate proved that nothing else reads Y, and that S and G bind
+ * every variable of T.
+ */
+static int
+draft_transition(relic_magic_t *magic, const relic_adornment_t *adornment,
+    const relic_rule_t *rule, size_t self_call)
+{
+	relic_factored_slots_t slots;
+	relic_literal_t *body;
+	relic_arg_t *head_args;
+	relic_draft_t draft;
+	uint64_t copied;
+	uint16_t origins;
+	size_t length;
+	size_t i;
+
+	origins = column_count(adornment->bound);
+	copied = copied_slots(magic, rule, self_call, adornment->bound);
+	if (factored_slots_begin(magic, rule, copied, origins, &slots) != 0)
+		return (-1);
+
+	head_args = walk_args(magic, adornment, &slots,
+	    rule->body[self_call].u.atom.args);
+	body = draft_alloc(magic, rule->body_length, sizeof(*body));
+	if (head_args == NULL || body == NULL)
+		return (-1);
+
+	if (walk_literal(magic, adornment, &slots, rule->head_args,
+	    &rule->where, &body[0]) != 0)
+		return (-1);
+	length = 1;
+	for (i = 0; i < rule->body_length; i++) {
+		if (i == self_call)
+			continue;
+
+		if (factored_literal(magic, &slots, &rule->body[i],
+		    &body[length]) != 0)
+			return (-1);
+		length++;
+	}
+
+	bzero(&draft, sizeof(draft));
+	draft.source = &slots.view;
+	draft.head = adornment->walk;
+	draft.head_args = head_args;
+	draft.head_arity = 2 * origins;
+	draft.body = body;
+	draft.body_length = length;
+	draft.attributed = adornment->source;
+
+	return (publish_rule(magic, &draft));
+}
+
+/*
+ * Generate the answer rule of a base rule, one of the program's or the rule
+ * over the source's base view.  Written p(S, Y) :- H, it becomes
+ *
+ *	p$alpha(A, Y) :- walk$p$alpha(A, S), H.
+ *
+ * the head's bound columns holding the origin and its free ones what the
+ * base rule's head holds there, the literals of H in their written order.
+ * A constant or a repeated variable in S constrains the state the walk
+ * reached, and one shared between S and Y passes the state into the answer.
+ */
+static int
+draft_answer(relic_magic_t *magic, const relic_adornment_t *adornment,
+    const relic_rule_t *rule)
+{
+	relic_factored_slots_t slots;
+	relic_literal_t *body;
+	relic_arg_t *head_args;
+	relic_draft_t draft;
+	uint64_t copied;
+	uint16_t origins;
+	uint16_t column;
+	uint16_t n;
+	size_t i;
+
+	origins = column_count(adornment->bound);
+	copied = copied_slots(magic, rule, RELIC_NO_SELF_CALL,
+	    adornment->bound);
+	if (factored_slots_begin(magic, rule, copied, origins, &slots) != 0)
+		return (-1);
+
+	head_args = draft_alloc(magic, rule->head_arity, sizeof(*head_args));
+	body = draft_alloc(magic, rule->body_length + 1, sizeof(*body));
+	if (head_args == NULL || body == NULL)
+		return (-1);
+
+	n = 0;
+	for (column = 0; column < rule->head_arity; column++) {
+		if ((adornment->bound & (UINT32_C(1) << column)) == 0) {
+			head_args[column] = factored_arg(&slots,
+			    &rule->head_args[column]);
+			continue;
+		}
+
+		head_args[column] = origin_arg(&slots, n);
+		n++;
+	}
+
+	if (walk_literal(magic, adornment, &slots, rule->head_args,
+	    &rule->where, &body[0]) != 0)
+		return (-1);
+	for (i = 0; i < rule->body_length; i++) {
+		if (factored_literal(magic, &slots, &rule->body[i],
+		    &body[i + 1]) != 0)
+			return (-1);
+	}
+
+	bzero(&draft, sizeof(draft));
+	draft.source = &slots.view;
+	draft.head = adornment->adorned;
+	draft.head_args = head_args;
+	draft.head_arity = rule->head_arity;
+	draft.body = body;
+	draft.body_length = rule->body_length + 1;
+	draft.attributed = adornment->source;
+
+	return (publish_rule(magic, &draft));
+}
+
+/*
+ * Generate the rules of a factored adornment from its certificate: the
+ * walk's seed, then the answer rule over the source's base view when the
+ * source has facts, then a rule per rule deriving the source, in program
+ * order, a transition for each the certificate found calling the source and
+ * an answer rule for every other.  Each is drafted in the scratch arena,
+ * which is emptied once it is published, as adorn_rule() empties it.
+ */
+static int
+factor_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
+{
+	const relic_ruletab_t *rules;
+	const relic_location_t *where;
+	const relic_rule_t *rule;
+	relic_rule_t over_facts;
+	size_t self_call;
+	size_t first;
+	size_t end;
+	size_t i;
+	int status;
+
+	rules = &magic->ctx->program.rules;
+	first = magic->first_rule_of[adornment->source - 1];
+	end = magic->first_rule_of[adornment->source];
+	assert(first < end && adornment->walk != RELIC_ID_NONE);
+	where = &rules->entries[magic->rules_by_head[first]].where;
+
+	status = draft_walk_seed(magic, adornment, where);
+	relic_arena_reset(&magic->scratch);
+	if (status != 0)
+		return (-1);
+
+	if (relic_base_count(magic->ctx, adornment->source) > 0) {
+		status = base_view_rule(magic, adornment->source, where,
+		    &over_facts);
+		if (status == 0)
+			status = draft_answer(magic, adornment, &over_facts);
+		relic_arena_reset(&magic->scratch);
+		if (status != 0)
+			return (-1);
+	}
+
+	for (i = first; i < end; i++) {
+		rule = &rules->entries[magic->rules_by_head[i]];
+		self_call = adornment->certificate->self_call[i - first];
+
+		if (self_call == RELIC_NO_SELF_CALL)
+			status = draft_answer(magic, adornment, rule);
+		else
+			status = draft_transition(magic, adornment, rule,
+			    self_call);
+		relic_arena_reset(&magic->scratch);
+		if (status != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Generate the rules of one adornment: a factored one's from its
+ * certificate, and an ordinary one's as follows.  The rule over its source's
+ * base view first, when the source has facts, then every rule deriving the
+ * source, in program order, each rewritten for that call by replaying the
+ * walk the search recorded for it.  The rule over the base view is numbered
+ * after the program's rules, and calls nothing on demand, so it cuts no
+ * prefix and names no supplementary predicate.
  */
 static int
 adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
@@ -2772,6 +3405,9 @@ adorn_rules(relic_magic_t *magic, const relic_adornment_t *adornment)
 	size_t first;
 	size_t end;
 	size_t i;
+
+	if (adornment->certificate != NULL)
+		return (factor_rules(magic, adornment));
 
 	rules = &magic->ctx->program.rules;
 	first = magic->first_rule_of[adornment->source - 1];
@@ -3011,12 +3647,295 @@ walks_for(relic_magic_t *magic, const relic_adornment_t *adornment)
 }
 
 /*
- * Read the rules deriving the source of the adornment kept at `position`,
- * each walked for the columns the adornment binds, and reach the adornments
- * their calls read.  A rule is walked the first time any search reads it
- * for this adornment, and its walk read thereafter.  The rule over the
- * source's base view reads only the base view, which is complete, and calls
- * nothing, so it is neither read nor walked here.
+ * Whether an adornment may factor, before any of its rules is read: the
+ * reference control leaves factoring on, the adornment binds a column, and
+ * no more than RELIC_FACTOR_MAX_BOUND of them, so that its walk of two
+ * columns per bound one is a predicate, and its source is the one member
+ * of a recursive component.
+ */
+static bool
+may_factor(const relic_magic_t *magic, const relic_adornment_t *adornment)
+{
+	const relic_component_t *component;
+	size_t position;
+
+	if ((magic->ctx->config.flags & RELIC_F_NO_FACTOR) != 0 ||
+	    adornment->bound == 0 ||
+	    column_count(adornment->bound) > RELIC_FACTOR_MAX_BOUND)
+		return (false);
+
+	position = component_of(magic, adornment->source);
+	if (position == RELIC_NO_COMPONENT)
+		return (false);
+	component = component_at(magic, position);
+
+	return (component->recursive && component->member_count == 1);
+}
+
+/*
+ * Whether a rule calling its own head at body position `self_call` passes
+ * its output through.  Written p(S, Y) :- G, p(T, Y), with S the head's
+ * columns in `bound` and T the call's, each column of Y holds a variable of
+ * its own, which the call holds in the same column and which nothing else
+ * reads: no other column of Y, no column of S or T, no literal of G.  And S
+ * and G bind every variable of T, whose columns hold no `_`.
+ */
+static bool
+passes_output_through(const relic_magic_t *magic, const relic_rule_t *rule,
+    size_t self_call, uint32_t bound)
+{
+	const relic_arg_t *head;
+	const relic_arg_t *call;
+	uint64_t output;
+	uint64_t state;
+	uint64_t successor;
+	uint64_t inputs;
+	uint64_t slot;
+	uint16_t column;
+	size_t i;
+
+	head = rule->head_args;
+	call = rule->body[self_call].u.atom.args;
+	output = state = successor = inputs = 0;
+	for (column = 0; column < rule->head_arity; column++) {
+		if ((bound & (UINT32_C(1) << column)) != 0) {
+			if (call[column].kind == RELIC_ARG_WILDCARD)
+				return (false);
+			state |= arg_slot(&head[column]);
+			successor |= arg_slot(&call[column]);
+			continue;
+		}
+
+		if (head[column].kind != RELIC_ARG_VARIABLE ||
+		    call[column].kind != RELIC_ARG_VARIABLE ||
+		    call[column].u.slot != head[column].u.slot)
+			return (false);
+		slot = arg_slot(&head[column]);
+		if ((output & slot) != 0)
+			return (false);
+		output |= slot;
+	}
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (i != self_call)
+			inputs |= literal_slots(magic, &rule->body[i]);
+	}
+
+	return ((output & (state | successor | inputs)) == 0 &&
+	    (successor & ~(state | inputs)) == 0);
+}
+
+/*
+ * The source slots the rule drafted from `rule` for a factored adornment
+ * binding the columns of `bound` reads.  A base rule, which `self_call`
+ * RELIC_NO_SELF_CALL marks, gives an answer rule reading every slot of its
+ * head and body.  A rule calling its head at body position `self_call`
+ * gives a transition reading the head's columns in `bound` and every
+ * literal but that call, whose bound columns read nothing else, as
+ * passes_output_through() checked.
+ */
+static uint64_t
+copied_slots(const relic_magic_t *magic, const relic_rule_t *rule,
+    size_t self_call, uint32_t bound)
+{
+	uint64_t slots;
+	uint16_t column;
+	size_t i;
+
+	slots = 0;
+	for (column = 0; column < rule->head_arity; column++) {
+		if (self_call == RELIC_NO_SELF_CALL ||
+		    (bound & (UINT32_C(1) << column)) != 0)
+			slots |= arg_slot(&rule->head_args[column]);
+	}
+	for (i = 0; i < rule->body_length; i++) {
+		if (i != self_call)
+			slots |= literal_slots(magic, &rule->body[i]);
+	}
+
+	return (slots);
+}
+
+/*
+ * Whether `rule`, deriving the source of an adornment binding the columns of
+ * `bound`, passes every check of the certificate, recording in *self_callp
+ * the body position of its one call on its own head, or RELIC_NO_SELF_CALL
+ * when it makes none.  Its body is positive atoms alone, each reading a
+ * complete predicate but that one call.  A rule making the call passes its
+ * output through, and binds the state it calls with from its head's state
+ * and its other literals, as passes_output_through() checks with it; and
+ * the rule drafted from it has room for its slots, the source slots it
+ * copies and an origin slot per bound column.
+ */
+static bool
+rule_factors(const relic_magic_t *magic, const relic_rule_t *rule,
+    uint32_t bound, size_t *self_callp)
+{
+	const relic_literal_t *literal;
+	size_t self_call;
+	size_t i;
+
+	self_call = RELIC_NO_SELF_CALL;
+	for (i = 0; i < rule->body_length; i++) {
+		literal = &rule->body[i];
+		if (literal->kind != RELIC_LITERAL_POSITIVE)
+			return (false);
+
+		if (literal->u.atom.pred != rule->head) {
+			if (!pred_is_complete(magic, literal->u.atom.pred))
+				return (false);
+			continue;
+		}
+		if (self_call != RELIC_NO_SELF_CALL)
+			return (false);
+		self_call = i;
+	}
+
+	if (self_call != RELIC_NO_SELF_CALL &&
+	    !passes_output_through(magic, rule, self_call, bound))
+		return (false);
+
+	if (slot_count(copied_slots(magic, rule, self_call, bound)) +
+	    column_count(bound) > RELIC_MAX_VARIABLES)
+		return (false);
+
+	*self_callp = self_call;
+	return (true);
+}
+
+/*
+ * Look for the certificate that the adornment kept at `position` factors:
+ * in *certificatep, or NULL when a rule deriving its source fails a check.
+ * Each rule's body is charged before it is checked, and the first rule
+ * failing ends the look, since the adornment is then walked as an ordinary
+ * one, which charges every body again.  The certificate is in the arena of
+ * the walks, and released with them; a rejected one stays there until then,
+ * no larger than the bodies the ordinary walk charges.  Returns 0, whether
+ * or not a certificate was found, or -1 when the limit or the arena refused,
+ * which has been reported.
+ */
+static int
+certify(relic_magic_t *magic, uint32_t position,
+    relic_certificate_t **certificatep)
+{
+	const relic_ruletab_t *rules;
+	const relic_rule_t *rule;
+	relic_certificate_t *certificate;
+	relic_pred_id_t source;
+	uint32_t bound;
+	size_t first;
+	size_t end;
+	size_t i;
+
+	*certificatep = NULL;
+	source = magic->kept.entries[position].source;
+	bound = magic->kept.entries[position].bound;
+	rules = &magic->ctx->program.rules;
+	first = magic->first_rule_of[source - 1];
+	end = magic->first_rule_of[source];
+	assert(first < end);
+
+	certificate = walk_alloc(magic, 1, sizeof(*certificate));
+	if (certificate == NULL)
+		return (-1);
+	certificate->self_call = walk_alloc(magic, end - first,
+	    sizeof(*certificate->self_call));
+	if (certificate->self_call == NULL)
+		return (-1);
+
+	for (i = first; i < end; i++) {
+		rule = &rules->entries[magic->rules_by_head[i]];
+
+		if (charge_work(magic, relic_body_size(rule->body,
+		    rule->body_length), source) != 0)
+			return (-1);
+
+		if (!rule_factors(magic, rule, bound,
+		    &certificate->self_call[i - first]))
+			return (0);
+	}
+
+	*certificatep = certificate;
+	return (0);
+}
+
+/*
+ * Charge the bodies of the rules deriving an adornment's source, as a search
+ * reading them does, for a second search reading the certificate the first
+ * found.
+ */
+static int
+charge_rules_of(relic_magic_t *magic, const relic_adornment_t *adornment)
+{
+	const relic_ruletab_t *rules;
+	const relic_rule_t *rule;
+	size_t i;
+
+	rules = &magic->ctx->program.rules;
+	for (i = magic->first_rule_of[adornment->source - 1];
+	    i < magic->first_rule_of[adornment->source]; i++) {
+		rule = &rules->entries[magic->rules_by_head[i]];
+		if (charge_work(magic, relic_body_size(rule->body,
+		    rule->body_length), adornment->source) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Read the rules deriving the source of the adornment kept at `position`.
+ * A second search reads what the first found for the adornment, which it
+ * finds in the walked set: a certificate, replayed here, or walks, which
+ * walk_rules_of() reads through walks_for().  Only an adornment the first
+ * search has not walked, so not in that set, is certified, which keeps the
+ * two searches deciding alike.  It is certified when it may factor, and
+ * walked as an ordinary one only when some rule fails.  A certified
+ * adornment calls nothing read on demand, its one recursive call becoming a
+ * step of its walk, so no adornment is reached from it -- not even the one
+ * the ordinary walk of that call would reach, whose answers are what
+ * factoring does without.
+ */
+static int
+reach_rules_of(relic_magic_t *magic, uint32_t position)
+{
+	const relic_adornment_t *walked;
+	relic_adornment_t adornment;
+	relic_certificate_t *certificate;
+
+	adornment = magic->kept.entries[position];
+	walked = find_adornment(&magic->walked, adornment.source,
+	    adornment.bound, adornment_hash(&magic->walked, adornment.source,
+	    adornment.bound));
+
+	if (walked != NULL && walked->certificate != NULL) {
+		if (charge_rules_of(magic, &adornment) != 0)
+			return (-1);
+		magic->kept.entries[position].certificate =
+		    walked->certificate;
+		return (0);
+	}
+
+	if (walked == NULL && may_factor(magic, &adornment)) {
+		if (certify(magic, position, &certificate) != 0)
+			return (-1);
+		if (certificate != NULL) {
+			magic->kept.entries[position].certificate =
+			    certificate;
+			return (0);
+		}
+	}
+
+	return (walk_rules_of(magic, position));
+}
+
+/*
+ * Read the rules deriving the source of the ordinary adornment kept at
+ * `position`, each walked for the columns the adornment binds, and reach
+ * the adornments their calls read.  A rule is walked the first time any
+ * search reads it for this adornment, and its walk read thereafter.  The
+ * rule over the source's base view reads only the base view, which is
+ * complete, and calls nothing, so it is neither read nor walked here.
  *
  * Each rule's body is charged to the rewrite's limit before anything is
  * done for it, room for the walks included, so the limit abandons the
@@ -3027,7 +3946,7 @@ walks_for(relic_magic_t *magic, const relic_adornment_t *adornment)
  * rules may keep more adornments and move the set's entries.
  */
 static int
-reach_rules_of(relic_magic_t *magic, uint32_t position)
+walk_rules_of(relic_magic_t *magic, uint32_t position)
 {
 	const relic_ruletab_t *rules;
 	const relic_rule_t *rule;
@@ -3267,11 +4186,12 @@ read_reached_completely(relic_magic_t *magic, const relic_rule_t *query)
  * embeds its source's.  Nothing else in the rewrite loops over more than
  * the program, once each, before the first search or, for a query that
  * reads what it reaches completely, after it, so the work it does is a
- * constant multiple of what it is charged.  The one count bounds everything the rewrite generates, by
- * construction rather than by a count of its own.  Every adornment kept
- * reads at least one rule of at least one literal, and has at most two
- * predicates.  Every rule kept is charged its body before it is kept, and
- * every one but a seed has a body literal: a seed is the magic rule of a
+ * constant multiple of what it is charged.  The one count bounds everything
+ * the rewrite generates, by construction rather than by a count of its own.
+ * Every adornment kept reads at least one rule of at least one literal, and
+ * has at most three predicates: its answers, its requests and, when it
+ * factors, its walk.  Every rule kept is charged its body before it is kept,
+ * and every one but a seed has a body literal: a seed is the magic rule of a
  * call the query makes, whose walk was charged, or of an adorned rule's
  * first call when constants alone bind it, at most one per adorned rule,
  * whose draft was charged.  So the rules kept number at most twice the
@@ -3296,15 +4216,18 @@ relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query)
 /*
  * Release the walks once the rewrite has drafted from them, or has failed:
  * nothing after the rewrite reads them, and the query runs with the rewrite
- * holding only what it hands on.  No adornment is left pointing at a walk.
+ * holding only what it hands on.  No adornment is left pointing at a walk
+ * or a certificate.
  */
 static void
 release_walks(relic_magic_t *magic)
 {
 	size_t i;
 
-	for (i = 0; i < magic->kept.count; i++)
+	for (i = 0; i < magic->kept.count; i++) {
 		magic->kept.entries[i].walks = NULL;
+		magic->kept.entries[i].certificate = NULL;
+	}
 	adornment_set_release(&magic->walked);
 	magic->query_walk = NULL;
 	relic_arena_reset(&magic->walk_arena);

@@ -5,8 +5,10 @@
 % rewritten query's plan.
 %
 % path(a, X)? calls path with its first column bound.  The recursive rule
-% passes the binding along edge, so magic$path$bf is recursive too, and holds
-% every node reachable from a.  path(X, d)? binds the second column, and the
+% passes the binding along edge and its second column through to the head,
+% so the adornment is factored: walk$path$bf pairs the origin a with every
+% node reachable from it, and path$bf reads the base rule from each, its
+% origin in the bound column.  path(X, d)? binds the second column, and the
 % planner puts the recursive call first, where it is called with that same
 % column bound; the magic rule that would record the call derives
 % magic$path$fb from itself and is dropped, leaving the seed alone.

@@ -9,39 +9,30 @@ release,package
 release,build
 $ relic -n -e -q 'path(a, X)?' graph.dl
 2> magic rewrite of $q0(X) :- path(a, X).
-2>     adorn path/2 bf
+2>     adorn path/2 bf, factored
 2>     seed magic$path$bf(a).
-2>     stratum 0, component 0 (recursive): magic$path$bf/1
+2>     stratum 0, component 0: magic$path$bf/1
 2>         facts: 1
-2>         rule magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
-2>             delta magic$path$bf(X):
+2>     stratum 0, component 1 (recursive): walk$path$bf/2
+2>         rule walk$path$bf(Origin$0, Origin$0) :- magic$path$bf(Origin$0).
+2>             scan magic$path$bf(Origin$0)
+2>             emit walk$path$bf(Origin$0, Origin$0)
+2>         rule walk$path$bf(Origin$0, Y) :- walk$path$bf(Origin$0, X), edge(X, Y).
+2>             delta walk$path$bf(Origin$0, X):
 2>                 choose lowest estimated work; ties: delta-first
 2>                 plan delta-first:
-2>                     scan delta magic$path$bf(X)
+2>                     scan delta walk$path$bf(Origin$0, X)
 2>                     lookup edge(X, Y) key={0}
-2>                     emit magic$path$bf(Y)
+2>                     emit walk$path$bf(Origin$0, Y)
 2>                 plan input-first:
 2>                     scan edge(X, Y)
-2>                     member delta magic$path$bf(X)
-2>                     emit magic$path$bf(Y)
-2>     stratum 0, component 1 (recursive): path$bf/2
-2>         rule path$bf(X, Y) :- magic$path$bf(X), edge(X, Y).
+2>                     lookup delta walk$path$bf(Origin$0, X) key={1}
+2>                     emit walk$path$bf(Origin$0, Y)
+2>     stratum 0, component 2: path$bf/2
+2>         rule path$bf(Origin$0, Y) :- walk$path$bf(Origin$0, X), edge(X, Y).
 2>             scan edge(X, Y)
-2>             member magic$path$bf(X)
-2>             emit path$bf(X, Y)
-2>         rule path$bf(X, Z) :- magic$path$bf(X), edge(X, Y), path$bf(Y, Z).
-2>             delta path$bf(Y, Z):
-2>                 choose lowest estimated work; ties: delta-first
-2>                 plan delta-first:
-2>                     scan delta path$bf(Y, Z)
-2>                     lookup edge(X, Y) key={1}
-2>                     member magic$path$bf(X)
-2>                     emit path$bf(X, Z)
-2>                 plan input-first:
-2>                     scan edge(X, Y)
-2>                     member magic$path$bf(X)
-2>                     lookup delta path$bf(Y, Z) key={0}
-2>                     emit path$bf(X, Z)
+2>             lookup walk$path$bf(Origin$0, X) key={1}
+2>             emit path$bf(Origin$0, Y)
 2> query $q0(X) :- path$bf(a, X).
 2>     lookup path$bf(a, X) key={0}
 2>     stream $q0(X)

@@ -1211,7 +1211,8 @@ put_adornment(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
- * One adornment of a query's rewrite, "adorn p/2 bf".
+ * One adornment of a query's rewrite, "adorn p/2 bf", or "adorn p/2 bf,
+ * factored" for one the rewrite factored, which names a walk predicate.
  */
 static void
 put_adorn_line(relic_t *ctx, const relic_adornment_t *adornment)
@@ -1220,6 +1221,8 @@ put_adorn_line(relic_t *ctx, const relic_adornment_t *adornment)
 
 	line_begin(&line, 1);
 	put_adorn(ctx, &line, adornment->source, adornment->bound);
+	if (adornment->walk != RELIC_ID_NONE)
+		line_put(&line, ", factored");
 	line_finish(ctx, &line);
 }
 

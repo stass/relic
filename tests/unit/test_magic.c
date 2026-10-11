@@ -40,11 +40,15 @@
 #include "programs.h"
 
 #define	SCENARIO_ABANDONED	"a rewrite over its limit is abandoned"
+#define	SCENARIO_CHAIN		"a bound chain derives linearly"
 #define	SCENARIO_DECLINED	"a declined cut is charged every prefix"
 #define	SCENARIO_DEDUP		"equal generated rules are kept once"
 #define	SCENARIO_TREES		"rules equal but for an expression differ"
 #define	SCENARIO_DROPPED	"dropped rules are charged literals"
 #define	SCENARIO_EQUIVALENT	"the rewrite answers as the fixed point does"
+#define	SCENARIO_FACTORED	"factoring answers as its references do"
+#define	SCENARIO_FACTOR_FITS	"factoring fits the rule representation"
+#define	SCENARIO_FACTOR_SAME	"a factored rewrite is deterministic"
 #define	SCENARIO_FACTS		"facts behind a rule fit the rewrite's limit"
 #define	SCENARIO_LIMIT		"the rewrite's limit holds at its value"
 #define	SCENARIO_MEMO		"adornments are memoized"
@@ -121,6 +125,7 @@ struct rows {
 };
 
 static char	*answer(relic_t *ctx, const char *query_text);
+static char	*answer_rows(relic_t *ctx, const char *query_text, bool sort);
 static char	*calls_program(size_t calls);
 static char	*named_calls_program(size_t name_length, size_t calls,
 		    char **queryp);
@@ -136,6 +141,9 @@ static void	 count_generated(const char *explained, size_t *rulesp,
 static size_t	 count_lines_starting(const char *text, const char *prefix);
 static bool	 explain_answer(const char *program, const char *query_text,
 		    size_t max_magic, text_t *explained, diag_log_t *log);
+static bool	 explain_with(const char *program, const char *query_text,
+		    unsigned int flags, size_t max_magic, text_t *explained,
+		    diag_log_t *log);
 static void	 graph_program(unsigned int seed, const char *rules,
 		    char *program, size_t size);
 static bool	 has_line(const char *text, const char *line);
@@ -163,6 +171,20 @@ static void	 facts_behind_a_rule_fit_the_rewrites_limit(void);
 static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
 static void	 a_long_bodys_rewrite_fits_the_limit(void);
 static void	 a_long_name_is_charged_per_predicate_named(void);
+static void	 a_bound_chain_derives_linearly(void);
+static void	 factoring_answers_as_its_references_do(void);
+static void	 walk_of(const char *adorn, char *walk, size_t size);
+static void	 factoring_fits_the_rule_representation(void);
+static void	 check_factoring_fits(const char *what, const char *program,
+		    const char *query_text, const char *adorn);
+static char	*wide_bound_program(unsigned int bound);
+static char	*many_slots_program(unsigned int base_slots);
+static void	 a_factored_rewrite_is_deterministic(void);
+static void	 a_walk_is_charged_its_name(void);
+static char	*named_closure_program(size_t name_length, char **queryp);
+static size_t	 least_admitted_limit(const char *program,
+		    const char *query_text, unsigned int flags);
+static void	 an_abandoned_factored_rewrite_leaves_its_context_usable(void);
 static void	 a_load_after_a_rewrite_reaches_the_next_query(void);
 static void	 a_generated_rule_is_planned_from_its_mentions(void);
 static void	 the_limit_holds_at_its_value(void);
@@ -333,6 +355,13 @@ compare_lines(const void *left, const void *right)
 static char *
 answer(relic_t *ctx, const char *query_text)
 {
+	return (answer_rows(ctx, query_text, true));
+}
+
+/* answer(), its rows in the order they were delivered unless `sort`. */
+static char *
+answer_rows(relic_t *ctx, const char *query_text, bool sort)
+{
 	relic_query_t *query;
 	rows_t rows;
 	text_t sorted;
@@ -350,7 +379,7 @@ answer(relic_t *ctx, const char *query_text)
 
 	bzero(&sorted, sizeof(sorted));
 	text_append(&sorted, "", 0);
-	if (rows.count > 0)
+	if (sort && rows.count > 0)
 		qsort(rows.lines, rows.count, sizeof(*rows.lines),
 		    compare_lines);
 	for (i = 0; i < rows.count; i++) {
@@ -376,13 +405,22 @@ static bool
 explain_answer(const char *program, const char *query_text, size_t max_magic,
     text_t *explained, diag_log_t *log)
 {
+	return (explain_with(program, query_text, 0, max_magic, explained,
+	    log));
+}
+
+/* explain_answer() in a context configured with `flags`. */
+static bool
+explain_with(const char *program, const char *query_text, unsigned int flags,
+    size_t max_magic, text_t *explained, diag_log_t *log)
+{
 	relic_t *ctx;
 	char *rows;
 
 	bzero(explained, sizeof(*explained));
 	text_append(explained, "", 0);
 
-	ctx = context_with(program, 0, max_magic, log);
+	ctx = context_with(program, flags, max_magic, log);
 	if (ctx == NULL)
 		return (false);
 
@@ -610,7 +648,9 @@ the_rewrite_answers_as_the_fixed_point_does(void)
  * column; its magic predicate adds `magic$` in front and holds only the
  * bound columns.  A query that binds nothing has no magic predicate for its
  * own call and generates no seed, though the rules it reaches may still call
- * path with a column bound.
+ * path with a column bound.  A call binding path's first column factors,
+ * since the recursive rule passes the second through; one binding only the
+ * second does not.
  */
 static void
 adornments_are_named_by_their_bound_columns(void)
@@ -620,11 +660,11 @@ adornments_are_named_by_their_bound_columns(void)
 		const char	*adorn;
 		const char	*seed;
 	} cases[] = {
-		{ "path(a, X)?", "    adorn path/2 bf",
+		{ "path(a, X)?", "    adorn path/2 bf, factored",
 		    "    seed magic$path$bf(a)." },
 		{ "path(X, c)?", "    adorn path/2 fb",
 		    "    seed magic$path$fb(c)." },
-		{ "path(a, c)?", "    adorn path/2 bb",
+		{ "path(a, c)?", "    adorn path/2 bb, factored",
 		    "    seed magic$path$bb(a, c)." },
 		{ "path(X, Y)?", "    adorn path/2 ff", NULL }
 	};
@@ -816,55 +856,120 @@ shows_rewrite(const char *explained)
 }
 
 /*
- * path(a, X)? costs its rewrite 12 literals.  The search reads the query's
- * one literal and path's two rules for path$bf, 1 + 1 + 2.  The draft writes
- * the rewritten query, 1, the seed, which has no body, the magic rule of the
- * recursive call, 2, and the two adorned rules with their guards, 2 and 3.
- * A limit of 12 admits the rewrite.  One of 11 abandons it at the last
- * adorned rule, with a warning naming the limit and the predicate being
- * adorned and no error, and the query is answered from the whole program.  A
- * query of two calls outgrows a limit of one literal in its own walk, before
- * any predicate is adorned, and the warning names the query.
+ * Unfactored, path(a, X)? costs its rewrite 12 literals.  The search reads
+ * the query's one literal and path's two rules for path$bf, 1 + 1 + 2.  The
+ * draft writes the rewritten query, 1, the seed, which has no body, the
+ * magic rule of the recursive call, 2, and the two adorned rules with their
+ * guards, 2 and 3.  A limit of 12 admits the rewrite.  One of 11 abandons it
+ * at the last adorned rule, with a warning naming the limit and the
+ * predicate being adorned and no error, and the query is answered from the
+ * whole program.
+ *
+ * Factored, it costs 10.  The search certifies path$bf, reading the same
+ * 1 + 1 + 2, and the draft writes the rewritten query and its seed, 1, the
+ * walk's seed, 1, the answer rule of the base rule, 2, and the transition
+ * of the recursive one, 2.  A limit of 10 admits it, and one of 9 abandons
+ * it at the transition.
+ *
+ * A certificate a rule fails is charged what it read, and the walks that
+ * follow are charged every body again.  p's recursive rule observes its
+ * output, so p(a, X)? reads p's rules twice, 1 + 3 each, beside the query's
+ * literal, and drafts the rewritten query, 1, the magic rule of the
+ * recursive call, 2, and the two adorned rules with their guards, 2 and 4:
+ * 18, where the unfactored rewrite, which reads them once, costs 14.
+ *
+ * A second search replays the certificate the first found, charged as the
+ * walks it would otherwise replay are.  The query reaches r bound before
+ * free, so the search runs twice.  The first reads the query's three
+ * literals, p's rules for the certificate of p$bf, 1 + 2, r's for the
+ * certificate of r$bf, which the left-recursive rule fails, and again for
+ * its walks, 1 + 2 each, and r's for r$ff, 1 + 2: 15.  The second reads
+ * the query and p's and r's rules once more for p$bf and r$ff, 9.  The
+ * draft writes the query's seed and the rewritten query, 1 + 3, p's walk
+ * seed, transition and answer rule, 1 + 2 + 2, and r$ff's two rules,
+ * 1 + 2: 12.  So the rewrite costs 36, and were the replay charged
+ * nothing, 33 would admit it.
+ *
+ * A query of two calls outgrows a limit of one literal in its own walk,
+ * before any predicate is adorned, and the warning names the query.
  */
 static void
 the_limit_holds_at_its_value(void)
 {
-	static const char program[] =
+	static const char path_program[] =
 	    "edge(a, b).\n"
 	    "edge(b, c).\n"
 	    "path(X, Y) :- edge(X, Y).\n"
 	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
-	static const char adorning[] =
-	    "the query's Magic rewrite outgrew magic=11 while adorning path/2; "
-	    "answering it from the whole program";
+	static const char observing_program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "p(X, Y) :- edge(X, Y).\n"
+	    "p(X, Z) :- edge(X, Y), p(Y, W), edge(W, Z).\n";
+	static const char replaying_program[] =
+	    "edge(a, b).\n"
+	    "edge(b, c).\n"
+	    "edge(c, d).\n"
+	    "p(X, Y) :- edge(X, Y).\n"
+	    "p(X, Z) :- edge(X, Y), p(Y, Z).\n"
+	    "r(X, Y) :- edge(X, Y).\n"
+	    "r(X, Z) :- r(X, Y), edge(Y, Z).\n";
+	static const struct {
+		const char	*program;
+		const char	*query;
+		unsigned int	 flags;
+		size_t		 admitted;
+		const char	*adorning;
+	} cases[] = {
+		{ path_program, "path(a, X)?", RELIC_F_NO_FACTOR, 12,
+		    "path/2" },
+		{ path_program, "path(a, X)?", 0, 10, "path/2" },
+		{ observing_program, "p(a, X)?", RELIC_F_NO_FACTOR, 14,
+		    "p/2" },
+		{ observing_program, "p(a, X)?", 0, 18, "p/2" },
+		{ replaying_program, "p(a, X), r(b, Y), r(Z, W)?", 0, 36,
+		    "r/2" }
+	};
 	static const char rewriting[] =
 	    "the query's Magic rewrite outgrew magic=1 while rewriting the "
 	    "query; answering it from the whole program";
+	char outgrown[256];
 	text_t explained;
 	diag_log_t log;
+	size_t limit;
+	size_t i;
 	bool answered;
 
-	answered = explain_answer(program, "path(a, X)?", 12, &explained,
-	    &log);
-	checkf(answered && log.errors == 0 && log.warnings == 0 &&
-	    shows_rewrite(explained.bytes), SCENARIO_LIMIT,
-	    "a limit of 12 should admit the rewrite of path(a, X)?, which "
-	    "reported %zu errors and %zu warnings, the last \"%s\"",
-	    log.errors, log.warnings, log.last_warning);
-	free(explained.bytes);
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		limit = cases[i].admitted;
+		answered = explain_with(cases[i].program, cases[i].query,
+		    cases[i].flags, limit, &explained, &log);
+		checkf(answered && log.errors == 0 && log.warnings == 0 &&
+		    shows_rewrite(explained.bytes), SCENARIO_LIMIT,
+		    "a limit of %zu should admit the rewrite of %s with flags "
+		    "%#x, which reported %zu errors and %zu warnings, the "
+		    "last \"%s\"", limit, cases[i].query, cases[i].flags,
+		    log.errors, log.warnings, log.last_warning);
+		free(explained.bytes);
 
-	answered = explain_answer(program, "path(a, X)?", 11, &explained,
-	    &log);
-	checkf(answered && log.errors == 0 && log.warnings == 1 &&
-	    strcmp(log.last_warning, adorning) == 0 &&
-	    !shows_rewrite(explained.bytes), SCENARIO_LIMIT,
-	    "a limit of 11 should abandon the rewrite of path(a, X)? and "
-	    "answer it from the whole program, which reported %zu errors and "
-	    "%zu warnings, the last \"%s\"", log.errors, log.warnings,
-	    log.last_warning);
-	free(explained.bytes);
+		limit--;
+		snprintf(outgrown, sizeof(outgrown), "the query's Magic "
+		    "rewrite outgrew magic=%zu while adorning %s; answering it "
+		    "from the whole program", limit, cases[i].adorning);
+		answered = explain_with(cases[i].program, cases[i].query,
+		    cases[i].flags, limit, &explained, &log);
+		checkf(answered && log.errors == 0 && log.warnings == 1 &&
+		    strcmp(log.last_warning, outgrown) == 0 &&
+		    !shows_rewrite(explained.bytes), SCENARIO_LIMIT,
+		    "a limit of %zu should abandon the rewrite of %s with "
+		    "flags %#x and answer it from the whole program, which "
+		    "reported %zu errors and %zu warnings, the last \"%s\"",
+		    limit, cases[i].query, cases[i].flags, log.errors,
+		    log.warnings, log.last_warning);
+		free(explained.bytes);
+	}
 
-	answered = explain_answer(program, "path(a, X), path(X, Y)?", 1,
+	answered = explain_answer(path_program, "path(a, X), path(X, Y)?", 1,
 	    &explained, &log);
 	checkf(answered && log.errors == 0 && log.warnings == 1 &&
 	    strcmp(log.last_warning, rewriting) == 0, SCENARIO_LIMIT,
@@ -1804,6 +1909,847 @@ what_the_rewrite_derives_does_not_leak(void)
 	relic_destroy(ctx);
 }
 
+/* The edges of the chain a_bound_chain_derives_linearly() closes. */
+#define	CHAIN_EDGES	1000
+
+/*
+ * A right-recursive closure over a chain n0 -> n1 -> ... of CHAIN_EDGES
+ * edges, queried from n0, answers every later node.  Factored, the rewrite
+ * walks from n0 alone: one walk tuple and one answer per node reached, a
+ * few derivations per edge, and at most 8N + 64 between the seeds, the
+ * walk, the answers and the query's rows.  The ordinary rewrite derives
+ * path$bf for every node the demand reaches, every suffix of the chain,
+ * N(N + 1)/2 tuples, which no linear bound admits.  Explain shows the
+ * adornment factored, so the bound is met by the transformation rather
+ * than by a planner that happens to do less, and RELIC_F_NO_FACTOR, which
+ * answers the same, passes the bound, so the bound tells the two apart.
+ */
+static void
+a_bound_chain_derives_linearly(void)
+{
+	static const unsigned int flags[] = { 0, RELIC_F_NO_FACTOR };
+	char line[64];
+	relic_stats_t stats;
+	text_t explained;
+	text_t program;
+	diag_log_t log;
+	relic_t *ctx;
+	char *rows;
+	size_t answered;
+	uint64_t bound;
+	unsigned int i;
+	bool factors;
+	size_t f;
+
+	bzero(&program, sizeof(program));
+	for (i = 0; i < CHAIN_EDGES; i++) {
+		snprintf(line, sizeof(line), "edge(n%u, n%u).\n", i, i + 1);
+		text_append(&program, line, strlen(line));
+	}
+	text_append(&program, "path(X, Y) :- edge(X, Y).\n",
+	    strlen("path(X, Y) :- edge(X, Y).\n"));
+	text_append(&program, "path(X, Z) :- edge(X, Y), path(Y, Z).\n",
+	    strlen("path(X, Z) :- edge(X, Y), path(Y, Z).\n"));
+	if (program.failed) {
+		free(program.bytes);
+		check(false, SCENARIO_CHAIN, "the chain program is built");
+		return;
+	}
+
+	bound = 8 * (uint64_t)CHAIN_EDGES + 64;
+	for (f = 0; f < sizeof(flags) / sizeof(flags[0]); f++) {
+		factors = (flags[f] & RELIC_F_NO_FACTOR) == 0;
+		ctx = context_with(program.bytes, flags[f], 0, &log);
+		if (ctx == NULL)
+			break;
+
+		bzero(&explained, sizeof(explained));
+		text_append(&explained, "", 0);
+		relic_explain_set(ctx, record_explained, &explained);
+		rows = answer(ctx, "path(n0, X)?");
+		relic_stats(ctx, &stats);
+
+		answered = rows != NULL ? count_lines_starting(rows, "n") : 0;
+		checkf(answered == CHAIN_EDGES && log.errors == 0 &&
+		    log.warnings == 0, SCENARIO_CHAIN,
+		    "path(n0, X)? with flags %#x should answer the chain's %d "
+		    "later nodes, and answered %zu with %zu errors and %zu "
+		    "warnings", flags[f], CHAIN_EDGES, answered, log.errors,
+		    log.warnings);
+
+		checkf((stats.derivations <= bound) == factors, SCENARIO_CHAIN,
+		    "path(n0, X)? over a chain of %d edges with flags %#x "
+		    "should derive %s %llu tuples, not %llu", CHAIN_EDGES,
+		    flags[f], factors ? "at most" : "more than",
+		    (unsigned long long)bound,
+		    (unsigned long long)stats.derivations);
+		checkf(!explained.failed && has_line(explained.bytes,
+		    "    adorn path/2 bf, factored") == factors,
+		    SCENARIO_CHAIN, "path(n0, X)? with flags %#x should %s "
+		    "path/2 bf, but -e showed\n%.2000s", flags[f],
+		    factors ? "factor" : "not factor", explained.bytes);
+
+		free(rows);
+		free(explained.bytes);
+		relic_destroy(ctx);
+	}
+	free(program.bytes);
+}
+
+/* The most queries per program in factoring_answers_as_its_references_do(). */
+#define	FACTOR_QUERIES	3
+
+/*
+ * Over generated graphs, every query below answers through the default
+ * rewrite as it does through the unfactored one and from the naive whole
+ * fixed point, and -e shows the adornment named beside it: factored where
+ * the program passes the certificate, ordinary or subsumed where it does
+ * not, or nothing in particular where the query reads what it reaches
+ * completely.  The structure does not depend on the facts, so it is
+ * checked on the first graph.
+ *
+ * The factored programs give the base and the transition different
+ * relations, base rules with constants and repeated variables in their
+ * heads, origins that are no answer of their own, several recursive and
+ * base rules beside facts, several origins and requests that grow from
+ * earlier answers, bound columns that do not lead, a state of two columns
+ * requested by origins that share one of them, a repeated state and
+ * repeated outputs.  The others break one check each, one of them in a
+ * single rule beside valid ones: an output the recursive call repeats, a `_`
+ * or a variable only the recursive call holds in its bound columns,
+ * an observed or a changed output, a second recursive call, mutual
+ * recursion, a comparison, a negation, a call on a predicate read on
+ * demand, or a free call that subsumes the bound one.  One query reaches a
+ * free call only in a second search, which replays p$bf's certificate.
+ */
+static void
+factoring_answers_as_its_references_do(void)
+{
+	static const char closure[] =
+	    "p(X, Y) :- edge(X, Y).\n"
+	    "p(X, Z) :- edge(X, Y), p(Y, Z).\n";
+	static const struct {
+		const char	*name;
+		const char	*rules;
+		const char	*extra;
+		struct {
+			const char	*text;
+			const char	*adorn;
+		} queries[FACTOR_QUERIES];
+	} programs[] = {
+		{ "closure", closure, "", {
+		    { "p(n0, X)?", "    adorn p/2 bf, factored" },
+		    { "p(n3, n3)?", "    adorn p/2 bb, factored" } } },
+		{ "distinct-base", "p(X, Y) :- edge(Y, X), mark(Y).\n"
+		    "p(X, Z) :- edge(X, Y), mark(X), p(Y, Z).\n", "", {
+		    { "p(n1, X)?", "    adorn p/2 bf, factored" },
+		    { "p(n2, X)?", "    adorn p/2 bf, factored" } } },
+		{ "marked-ends", "p(X, X) :- mark(X).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf, factored" },
+		    { "p(n1, X)?", "    adorn p/2 bf, factored" } } },
+		{ "several", "p(n0, n5).\np(n7, n7).\n"
+		    "p(X, Y) :- edge(X, Y), mark(Y).\n"
+		    "p(X, Y) :- edge(Y, X), mark(X).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, Z).\n"
+		    "p(X, Z) :- edge(Y, X), node(Y), p(Y, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf, factored" },
+		    { "p(n4, X)?", "    adorn p/2 bf, factored" } } },
+		{ "origins", closure, "", {
+		    { "mark(S), p(S, T)?", "    adorn p/2 bf, factored" },
+		    { "p(n0, X), p(X, n2)?", "    adorn p/2 bb, factored" },
+		    { "p(n0, X), p(X, Y)?", "    adorn p/2 bf, factored" } } },
+		{ "growing", closure,
+		    "r(X, Y) :- p(X, Y), mark(Y).\n"
+		    "r(X, Z) :- r(X, Y), p(Y, Z), mark(Z).\n", {
+		    { "r(n0, X)?", "    adorn p/2 bf, factored" } } },
+		{ "second-column", "p(Y, X) :- edge(X, Y).\n"
+		    "p(Z, X) :- edge(X, Y), p(Z, Y).\n", "", {
+		    { "p(X, n0)?", "    adorn p/2 fb, factored" },
+		    { "p(n1, X)?", "    adorn p/2 bf" } } },
+		{ "constants", "p(n1, Y) :- edge(n2, Y).\n"
+		    "p(X, X) :- mark(X).\n"
+		    "p(X, Z) :- edge(X, X), p(n3, Z).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, Z).\n", "", {
+		    { "p(n1, X)?", "    adorn p/2 bf, factored" },
+		    { "p(n0, X)?", "    adorn p/2 bf, factored" },
+		    { "p(n3, n3)?", "    adorn p/2 bb, factored" } } },
+		{ "vector-state", "s(X, C, Y) :- edge(X, Y), edge(C, Y).\n"
+		    "s(X, C, Z) :- edge(X, Y), edge(C, D), s(Y, D, Z).\n", "", {
+		    { "s(n0, n1, Z)?", "    adorn s/3 bbf, factored" },
+		    { "s(n2, n2, Z)?", "    adorn s/3 bbf, factored" },
+		    { "s(n0, C, Z)?", "    adorn s/3 bff" } } },
+		{ "correlated-state", "s(X, C, Y) :- edge(X, Y), edge(C, Y).\n"
+		    "s(X, C, Z) :- edge(X, Y), edge(C, D), s(Y, D, Z).\n",
+		    "start(n0, n1).\nstart(n0, n2).\nstart(n1, n2).\n", {
+		    { "start(S, C), s(S, C, Z)?",
+		      "    adorn s/3 bbf, factored" } } },
+		{ "repeated-state", "s(X, Y, Z) :- edge(X, Z), edge(Y, Z).\n"
+		    "s(X, X, Z) :- edge(X, Y), s(Y, Y, Z).\n", "", {
+		    { "s(n0, n0, Z)?", "    adorn s/3 bbf, factored" },
+		    { "s(n0, n1, Z)?", "    adorn s/3 bbf, factored" } } },
+		{ "repeated-output", "q(X, Y, Y) :- edge(X, Y).\n"
+		    "q(X, Y, Z) :- edge(X, W), q(W, Y, Z).\n", "", {
+		    { "q(n0, Y, Z)?", "    adorn q/3 bff, factored" },
+		    { "q(n1, Y, Y)?", "    adorn q/3 bff, factored" } } },
+		{ "repeated-call-output", "q(X, Y, Y) :- edge(X, Y).\n"
+		    "q(X, Y, Y) :- edge(X, W), q(W, Y, Y).\n", "", {
+		    { "q(n0, Y, Z)?", "    adorn q/3 bff" } } },
+		{ "wildcard-successor", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, _), p(_, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf, subsumed by p/2 ff" } } },
+		{ "unbound-successor", "s(X, C, Y) :- edge(X, Y), edge(C, Y).\n"
+		    "s(X, C, Z) :- edge(X, C), s(W, W, Z).\n", "", {
+		    { "s(n0, n1, Z)?",
+		      "    adorn s/3 bbf, subsumed by s/3 fff" } } },
+		{ "observed-output", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, Z), mark(Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" },
+		    { "p(n2, X)?", "    adorn p/2 bf" } } },
+		{ "one-bad-rule", closure,
+		    "p(X, Z) :- mark(X), p(X, W), edge(Z, W).\n", {
+		    { "p(n0, X)?", "    adorn p/2 bf" },
+		    { "p(n3, X)?", "    adorn p/2 bf" } } },
+		{ "changed-output", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, W), edge(W, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" } } },
+		{ "nonlinear", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), p(Y, W), p(W, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" } } },
+		{ "mutual", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), q(Y, Z).\n"
+		    "q(X, Z) :- edge(X, Y), p(Y, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" } } },
+		{ "compared", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), Y != n3, p(Y, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" } } },
+		{ "negated", "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- edge(X, Y), not mark(Y), p(Y, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" } } },
+		{ "demanded-input", "r(X, Y) :- edge(X, Y).\n"
+		    "r(X, Z) :- edge(X, Y), r(Y, Z).\n"
+		    "p(X, Y) :- edge(X, Y).\n"
+		    "p(X, Z) :- r(X, Y), p(Y, Z).\n", "", {
+		    { "p(n0, X)?", "    adorn p/2 bf" } } },
+		{ "subsumed", closure, "", {
+		    { "p(n0, X), p(Y, Z)?",
+		      "    adorn p/2 bf, subsumed by p/2 ff" } } },
+		{ "replayed", closure,
+		    "r(X, Y) :- edge(X, Y).\n"
+		    "r(X, Z) :- r(X, Y), edge(Y, Z).\n", {
+		    { "p(n0, X), r(n1, Y), r(Z, W)?",
+		      "    adorn p/2 bf, factored" } } },
+		{ "read-completely", closure,
+		    "c(X) :- node(X), not p(n0, X).\n", {
+		    { "c(X)?", NULL },
+		    { "p(n0, X), c(X)?", NULL } } }
+	};
+	char rules[PROGRAM_MAX];
+	char program[PROGRAM_MAX];
+	char walk[QUERY_MAX];
+	const char *query_text;
+	const char *adorn;
+	text_t explained;
+	diag_log_t log;
+	diag_log_t unfactored_log;
+	diag_log_t whole_log;
+	relic_t *factored;
+	relic_t *unfactored;
+	relic_t *whole;
+	char *expected;
+	char *reference;
+	char *actual;
+	size_t compared;
+	size_t p;
+	size_t q;
+	unsigned int seed;
+
+	compared = 0;
+	for (seed = 0; seed < GRAPH_SEEDS; seed++) {
+		for (p = 0; p < sizeof(programs) / sizeof(programs[0]); p++) {
+			snprintf(rules, sizeof(rules), "%s%s",
+			    programs[p].rules, programs[p].extra);
+			graph_program(seed, rules, program, sizeof(program));
+
+			for (q = 0; q < FACTOR_QUERIES; q++) {
+				query_text = programs[p].queries[q].text;
+				adorn = programs[p].queries[q].adorn;
+				if (query_text == NULL)
+					break;
+
+				factored = context_with(program, 0, 0, &log);
+				unfactored = context_with(program,
+				    RELIC_F_NO_FACTOR, 0, &unfactored_log);
+				whole = context_with(program,
+				    RELIC_F_NO_MAGIC | RELIC_F_NAIVE, 0,
+				    &whole_log);
+				if (factored == NULL || unfactored == NULL ||
+				    whole == NULL) {
+					relic_destroy(factored);
+					relic_destroy(unfactored);
+					relic_destroy(whole);
+					return;
+				}
+
+				bzero(&explained, sizeof(explained));
+				text_append(&explained, "", 0);
+				if (seed == 0)
+					relic_explain_set(factored,
+					    record_explained, &explained);
+
+				expected = answer(whole, query_text);
+				reference = answer(unfactored, query_text);
+				actual = answer(factored, query_text);
+
+				checkf(expected != NULL && reference != NULL &&
+				    actual != NULL &&
+				    strcmp(expected, actual) == 0 &&
+				    strcmp(reference, actual) == 0,
+				    SCENARIO_FACTORED,
+				    "program %s, seed %u, %s: the default "
+				    "answered\n%s\nthe unfactored rewrite\n%s\n"
+				    "the fixed point\n%s", programs[p].name,
+				    seed, query_text,
+				    actual != NULL ? actual : "(failed)",
+				    reference != NULL ? reference : "(failed)",
+				    expected != NULL ? expected : "(failed)");
+				checkf(log.errors == 0 && log.warnings == 0,
+				    SCENARIO_FACTORED,
+				    "program %s, seed %u, %s: the default "
+				    "reported %zu errors and %zu warnings, the "
+				    "last \"%s\"", programs[p].name, seed,
+				    query_text, log.errors, log.warnings,
+				    log.errors != 0 ? log.last :
+				    log.last_warning);
+				if (seed == 0 && adorn != NULL) {
+					walk_of(adorn, walk, sizeof(walk));
+					checkf(!explained.failed &&
+					    has_line(explained.bytes, adorn) &&
+					    (strstr(explained.bytes, walk) !=
+					    NULL) == (strstr(adorn,
+					    ", factored") != NULL),
+					    SCENARIO_FACTORED,
+					    "program %s, %s should show "
+					    "\"%s\", and %s only if "
+					    "factored, not\n%s",
+					    programs[p].name, query_text,
+					    adorn, walk, explained.bytes);
+				}
+
+				free(expected);
+				free(reference);
+				free(actual);
+				free(explained.bytes);
+				relic_destroy(factored);
+				relic_destroy(unfactored);
+				relic_destroy(whole);
+				compared++;
+			}
+		}
+	}
+
+	checkf(compared > 0, SCENARIO_FACTORED,
+	    "some query should be compared");
+}
+
+/*
+ * The start of the rules -e shows over the walk of the adornment an adorn
+ * line `adorn` names, "walk$p$bf(" for "    adorn p/2 bf, factored".
+ */
+static void
+walk_of(const char *adorn, char *walk, size_t size)
+{
+	const char *pred;
+	const char *slash;
+	const char *mask;
+
+	pred = adorn + strlen("    adorn ");
+	slash = strchr(pred, '/');
+	mask = slash != NULL ? strchr(slash, ' ') : NULL;
+	if (mask == NULL) {
+		snprintf(walk, size, "(no walk in \"%s\")", adorn);
+		return;
+	}
+	mask++;
+	snprintf(walk, size, "walk$%.*s$%.*s(", (int)(slash - pred), pred,
+	    (int)strcspn(mask, ","), mask);
+}
+
+/*
+ * The walk holds two columns per bound one, and a factored rule an origin
+ * slot per bound column beside the source slots it copies, so factoring
+ * stops where those would not fit a predicate or a rule.  w binds sixteen
+ * columns into a walk of RELIC_MAX_ARITY columns, which factors, and
+ * seventeen, which does not.  p's rules copy 63 source slots beside the
+ * origin's, the transition's output slot not among them though its own
+ * rule holds RELIC_MAX_VARIABLES, which factors with the origin in the last
+ * slot there is; a base rule holding RELIC_MAX_VARIABLES slots of its own
+ * leaves no room for the origin, and does not.  Every query answers as the
+ * unfactored rewrite does.
+ */
+static void
+factoring_fits_the_rule_representation(void)
+{
+	char adorn[64];
+	char query_text[256];
+	char *program;
+	size_t used;
+	unsigned int bound;
+	unsigned int column;
+
+	for (bound = RELIC_MAX_ARITY / 2; bound <= RELIC_MAX_ARITY / 2 + 1;
+	    bound++) {
+		program = wide_bound_program(bound);
+		if (program == NULL) {
+			check(false, SCENARIO_FACTOR_FITS,
+			    "the wide program is built");
+			return;
+		}
+
+		used = (size_t)snprintf(query_text, sizeof(query_text),
+		    "w(a");
+		for (column = 1; column < bound; column++)
+			used += (size_t)snprintf(query_text + used,
+			    sizeof(query_text) - used, ", c");
+		snprintf(query_text + used, sizeof(query_text) - used,
+		    ", Y)?");
+
+		used = (size_t)snprintf(adorn, sizeof(adorn),
+		    "    adorn w/%u ", bound + 1);
+		for (column = 0; column < bound; column++)
+			adorn[used++] = 'b';
+		snprintf(adorn + used, sizeof(adorn) - used, "f%s",
+		    bound <= RELIC_MAX_ARITY / 2 ? ", factored" : "");
+
+		check_factoring_fits("a wide bound call", program, query_text,
+		    adorn);
+		free(program);
+	}
+
+	program = many_slots_program(RELIC_MAX_VARIABLES - 1);
+	if (program != NULL)
+		check_factoring_fits("rules filling the last slot", program,
+		    "p(a, X)?", "    adorn p/2 bf, factored");
+	else
+		check(false, SCENARIO_FACTOR_FITS,
+		    "the program filling the last slot is built");
+	free(program);
+
+	program = many_slots_program(RELIC_MAX_VARIABLES);
+	if (program != NULL)
+		check_factoring_fits("a base rule of every slot", program,
+		    "p(a, X)?", "    adorn p/2 bf");
+	else
+		check(false, SCENARIO_FACTOR_FITS,
+		    "the program of every slot is built");
+	free(program);
+}
+
+/*
+ * One case of factoring_fits_the_rule_representation(): `query_text`
+ * answers over `program` as the unfactored rewrite does, with no
+ * diagnostic, and -e shows `adorn`.
+ */
+static void
+check_factoring_fits(const char *what, const char *program,
+    const char *query_text, const char *adorn)
+{
+	text_t explained;
+	diag_log_t log;
+	diag_log_t unfactored_log;
+	relic_t *factored;
+	relic_t *unfactored;
+	char *reference;
+	char *actual;
+
+	factored = context_with(program, 0, 0, &log);
+	unfactored = context_with(program, RELIC_F_NO_FACTOR, 0,
+	    &unfactored_log);
+	if (factored == NULL || unfactored == NULL) {
+		relic_destroy(factored);
+		relic_destroy(unfactored);
+		return;
+	}
+
+	bzero(&explained, sizeof(explained));
+	text_append(&explained, "", 0);
+	relic_explain_set(factored, record_explained, &explained);
+	reference = answer(unfactored, query_text);
+	actual = answer(factored, query_text);
+
+	checkf(reference != NULL && actual != NULL &&
+	    strcmp(reference, "b\nc\n") == 0 && strcmp(reference, actual) == 0,
+	    SCENARIO_FACTOR_FITS, "%s: %s answered\n%s\nwhere the unfactored "
+	    "rewrite answered\n%s", what, query_text,
+	    actual != NULL ? actual : "(failed)",
+	    reference != NULL ? reference : "(failed)");
+	checkf(log.errors == 0 && log.warnings == 0, SCENARIO_FACTOR_FITS,
+	    "%s: %s reported %zu errors and %zu warnings, the last \"%s\"",
+	    what, query_text, log.errors, log.warnings,
+	    log.errors != 0 ? log.last : log.last_warning);
+	checkf(!explained.failed && has_line(explained.bytes, adorn),
+	    SCENARIO_FACTOR_FITS, "%s: %s should show \"%s\", not\n%.3000s",
+	    what, query_text, adorn, explained.bytes);
+
+	free(reference);
+	free(actual);
+	free(explained.bytes);
+	relic_destroy(factored);
+	relic_destroy(unfactored);
+}
+
+/*
+ * A closure over a -> b -> c of `bound` + 1 columns, the last free: the
+ * first bound column walks along edge, and every other holds c, which
+ * one() states.
+ *
+ *	w(X1, X2, ..., Y) :- edge(X1, Y), one(X2), ...
+ *	w(X1, X2, ..., Y) :- edge(X1, Z), w(Z, X2, ..., Y).
+ */
+static char *
+wide_bound_program(unsigned int bound)
+{
+	text_t text;
+	char term[32];
+	unsigned int column;
+	unsigned int rule;
+
+	bzero(&text, sizeof(text));
+	text_append(&text, "edge(a, b).\nedge(b, c).\none(c).\n",
+	    strlen("edge(a, b).\nedge(b, c).\none(c).\n"));
+
+	for (rule = 0; rule < 2; rule++) {
+		text_append(&text, "w(X1", 4);
+		for (column = 2; column <= bound; column++) {
+			snprintf(term, sizeof(term), ", X%u", column);
+			text_append(&text, term, strlen(term));
+		}
+		text_append(&text, ", Y) :- ", 8);
+
+		if (rule == 0) {
+			text_append(&text, "edge(X1, Y)", 11);
+			for (column = 2; column <= bound; column++) {
+				snprintf(term, sizeof(term), ", one(X%u)",
+				    column);
+				text_append(&text, term, strlen(term));
+			}
+		} else {
+			text_append(&text, "edge(X1, Z), w(Z", 16);
+			for (column = 2; column <= bound; column++) {
+				snprintf(term, sizeof(term), ", X%u", column);
+				text_append(&text, term, strlen(term));
+			}
+			text_append(&text, ", Y)", 4);
+		}
+		text_append(&text, ".\n", 2);
+	}
+
+	if (text.failed) {
+		free(text.bytes);
+		return (NULL);
+	}
+
+	return (text.bytes);
+}
+
+/*
+ * A closure over a -> b -> c whose base rule holds `base_slots` slots: X,
+ * Y and `base_slots` - 2 more, each read twice by same(), which holds c.
+ * The recursive rule reads RELIC_MAX_VARIABLES - 3 of them, so that with X,
+ * Y and its output Z it holds RELIC_MAX_VARIABLES slots.
+ */
+static char *
+many_slots_program(unsigned int base_slots)
+{
+	text_t text;
+	char term[32];
+	unsigned int v;
+
+	bzero(&text, sizeof(text));
+	text_append(&text, "edge(a, b).\nedge(b, c).\nsame(c, c).\n",
+	    strlen("edge(a, b).\nedge(b, c).\nsame(c, c).\n"));
+
+	text_append(&text, "p(X, Y) :- edge(X, Y)", 21);
+	for (v = 0; v + 2 < base_slots; v++) {
+		snprintf(term, sizeof(term), ", same(V%u, V%u)", v, v);
+		text_append(&text, term, strlen(term));
+	}
+	text_append(&text, ".\n", 2);
+
+	text_append(&text, "p(X, Z) :- edge(X, Y)", 21);
+	for (v = 0; v + 3 < RELIC_MAX_VARIABLES; v++) {
+		snprintf(term, sizeof(term), ", same(V%u, V%u)", v, v);
+		text_append(&text, term, strlen(term));
+	}
+	text_append(&text, ", p(Y, Z).\n", 11);
+
+	if (text.failed) {
+		free(text.bytes);
+		return (NULL);
+	}
+
+	return (text.bytes);
+}
+
+/*
+ * A factored rewrite's plans and rows do not depend on how it runs: on the
+ * calling thread, with every round deferred to 1, 2, 4 and 16 threads, and
+ * a second time each way, the query shows the same plans and delivers the
+ * same rows in the same order.  Its several origins share states, so a
+ * walk mixing them would show in the rows.
+ */
+static void
+a_factored_rewrite_is_deterministic(void)
+{
+	static const size_t threads[] = { 0, 1, 2, 4, 16 };
+	static const char rules[] =
+	    "p(n0, n5).\n"
+	    "p(X, Y) :- edge(X, Y), mark(Y).\n"
+	    "p(X, Z) :- edge(X, Y), p(Y, Z).\n"
+	    "p(X, Z) :- edge(Y, X), node(Y), p(Y, Z).\n";
+	static const char query_text[] = "node(S), p(S, T)?";
+	char program[PROGRAM_MAX];
+	relic_config_t config;
+	text_t explained;
+	diag_log_t log;
+	relic_t *ctx;
+	char *first_rows;
+	char *first_explained;
+	char *rows;
+	size_t run;
+	size_t t;
+
+	graph_program(3, rules, program, sizeof(program));
+	first_rows = NULL;
+	first_explained = NULL;
+
+	for (t = 0; t < sizeof(threads) / sizeof(threads[0]); t++) {
+		for (run = 0; run < 2; run++) {
+			bzero(&config, sizeof(config));
+			config.threads = threads[t];
+			if (threads[t] > 0)
+				config.flags = RELIC_F_PARALLEL_ALWAYS;
+			ctx = context_configured(program, &config, &log);
+			if (ctx == NULL)
+				break;
+
+			bzero(&explained, sizeof(explained));
+			text_append(&explained, "", 0);
+			relic_explain_set(ctx, record_explained, &explained);
+			rows = answer_rows(ctx, query_text, false);
+
+			checkf(rows != NULL && !explained.failed &&
+			    has_line(explained.bytes,
+			    "    adorn p/2 bf, factored") &&
+			    log.errors == 0 && log.warnings == 0,
+			    SCENARIO_FACTOR_SAME, "%s on %zu threads should "
+			    "be answered through a factored rewrite, and "
+			    "reported %zu errors and %zu warnings and "
+			    "showed\n%s", query_text, threads[t], log.errors,
+			    log.warnings, explained.bytes);
+
+			if (first_rows == NULL && rows != NULL &&
+			    !explained.failed) {
+				first_rows = rows;
+				first_explained = explained.bytes;
+				relic_destroy(ctx);
+				continue;
+			}
+
+			checkf(rows != NULL && first_rows != NULL &&
+			    strcmp(rows, first_rows) == 0, SCENARIO_FACTOR_SAME,
+			    "%s on %zu threads, run %zu, delivered\n%s\nwhere "
+			    "the first run delivered\n%s", query_text,
+			    threads[t], run + 1, rows != NULL ? rows :
+			    "(failed)", first_rows != NULL ? first_rows :
+			    "(failed)");
+			checkf(first_explained != NULL && !explained.failed &&
+			    strcmp(explained.bytes, first_explained) == 0,
+			    SCENARIO_FACTOR_SAME, "%s on %zu threads, run %zu, "
+			    "showed\n%s\nwhere the first run showed\n%s",
+			    query_text, threads[t], run + 1, explained.bytes,
+			    first_explained != NULL ? first_explained :
+			    "(failed)");
+
+			free(rows);
+			free(explained.bytes);
+			relic_destroy(ctx);
+		}
+	}
+
+	free(first_rows);
+	free(first_explained);
+}
+
+/* The largest limit least_admitted_limit() tries. */
+#define	ADMITTED_LIMIT_MAX	((size_t)1 << 22)
+
+/*
+ * A factored adornment names a walk after its source as well as its
+ * answers and requests, and the walk's name is charged as theirs are.  A
+ * closure named by NAMED_LONG bytes raises the least limit the factored
+ * rewrite of a bound call fits by at least NAMED_LONG / 64 literals more
+ * than it raises the unfactored rewrite's, which names no walk.
+ */
+static void
+a_walk_is_charged_its_name(void)
+{
+	static const size_t lengths[] = { 1, NAMED_LONG };
+	static const unsigned int flags[] = { 0, RELIC_F_NO_FACTOR };
+	size_t least[2][2];
+	char *program;
+	char *query;
+	size_t l;
+	size_t f;
+
+	for (l = 0; l < 2; l++) {
+		program = named_closure_program(lengths[l], &query);
+		if (program == NULL) {
+			check(false, SCENARIO_LONG_NAME,
+			    "the named closure is built");
+			return;
+		}
+		for (f = 0; f < 2; f++)
+			least[l][f] = least_admitted_limit(program, query,
+			    flags[f]);
+		free(program);
+		free(query);
+	}
+
+	checkf(least[0][0] != 0 && least[0][1] != 0 && least[1][0] != 0 &&
+	    least[1][1] != 0 && least[1][0] - least[0][0] >=
+	    least[1][1] - least[0][1] + NAMED_LONG / 64, SCENARIO_LONG_NAME,
+	    "a closure named by %d bytes should cost its factored rewrite at "
+	    "least %d literals more than its unfactored one, and the least "
+	    "limits were %zu and %zu factored, %zu and %zu not, for a name "
+	    "of 1 and %d bytes", NAMED_LONG, NAMED_LONG / 64, least[0][0],
+	    least[1][0], least[0][1], least[1][1], NAMED_LONG);
+}
+
+/*
+ * A closure over a -> b -> c whose predicate is named by `name_length`
+ * bytes, and in *queryp the call binding its first column to a.  The
+ * caller frees both; NULL when memory ran out.
+ */
+static char *
+named_closure_program(size_t name_length, char **queryp)
+{
+	text_t name;
+	text_t text;
+	size_t i;
+
+	*queryp = NULL;
+	bzero(&name, sizeof(name));
+	text_append(&name, "p", 1);
+	for (i = 1; i < name_length; i++)
+		text_append(&name, "q", 1);
+
+	bzero(&text, sizeof(text));
+	text_append(&text, "edge(a, b).\nedge(b, c).\n",
+	    strlen("edge(a, b).\nedge(b, c).\n"));
+	text_append(&text, name.bytes, name.length);
+	text_append(&text, "(X, Y) :- edge(X, Y).\n",
+	    strlen("(X, Y) :- edge(X, Y).\n"));
+	text_append(&text, name.bytes, name.length);
+	text_append(&text, "(X, Z) :- edge(X, Y), ",
+	    strlen("(X, Z) :- edge(X, Y), "));
+	text_append(&text, name.bytes, name.length);
+	text_append(&text, "(Y, Z).\n", strlen("(Y, Z).\n"));
+
+	if (!name.failed) {
+		text_append(&name, "(a, X)?", strlen("(a, X)?"));
+		*queryp = name.bytes;
+	}
+	if (name.failed || text.failed) {
+		free(name.bytes);
+		free(text.bytes);
+		*queryp = NULL;
+		return (NULL);
+	}
+
+	return (text.bytes);
+}
+
+/*
+ * The least limit on the rewrite's work at which `query_text` is answered
+ * over `program`, configured with `flags`, through its rewrite, with no
+ * diagnostic; 0 when none up to ADMITTED_LIMIT_MAX is.  A larger limit
+ * admits whatever a smaller one does, so the least is found by bisection.
+ */
+static size_t
+least_admitted_limit(const char *program, const char *query_text,
+    unsigned int flags)
+{
+	diag_log_t log;
+	relic_t *ctx;
+	char *rows;
+	size_t low;
+	size_t high;
+	size_t middle;
+	bool admitted;
+
+	low = 1;
+	high = ADMITTED_LIMIT_MAX + 1;
+	while (low < high) {
+		middle = low + (high - low) / 2;
+		ctx = context_with(program, flags, middle, &log);
+		if (ctx == NULL)
+			return (0);
+		rows = answer(ctx, query_text);
+		admitted = rows != NULL && log.errors == 0 &&
+		    log.warnings == 0;
+		free(rows);
+		relic_destroy(ctx);
+
+		if (admitted)
+			high = middle;
+		else
+			low = middle + 1;
+	}
+
+	return (low <= ADMITTED_LIMIT_MAX ? low : 0);
+}
+
+/*
+ * A factored rewrite abandoned at its limit leaves its context usable:
+ * path(a, X)? over the closure, whose factored rewrite costs 10, is
+ * answered from the whole program under a limit of 9, with a warning, and
+ * asked again reads the path that evaluation left complete, needing no
+ * rewrite and warning no more, with the same rows.
+ */
+static void
+an_abandoned_factored_rewrite_leaves_its_context_usable(void)
+{
+	static const char program[] =
+	    "edge(a, b).\nedge(b, c).\nedge(c, a).\n"
+	    "path(X, Y) :- edge(X, Y).\n"
+	    "path(X, Z) :- edge(X, Y), path(Y, Z).\n";
+	diag_log_t log;
+	relic_t *ctx;
+	char *rows;
+	size_t run;
+
+	ctx = context_with(program, 0, 9, &log);
+	if (ctx == NULL)
+		return;
+
+	for (run = 0; run < 2; run++) {
+		rows = answer(ctx, "path(a, X)?");
+		checkf(rows != NULL && strcmp(rows, "a\nb\nc\n") == 0 &&
+		    log.errors == 0 && log.warnings == 1 &&
+		    strstr(log.last_warning, "outgrew magic=9 while adorning "
+		    "path/2") != NULL, SCENARIO_ABANDONED,
+		    "path(a, X)? under magic=9, run %zu, should answer a, b "
+		    "and c after the one warning of the first run, and "
+		    "answered\n%s\nwith %zu errors and %zu warnings, the last "
+		    "\"%s\"", run + 1, rows != NULL ? rows : "(failed)",
+		    log.errors, log.warnings, log.last_warning);
+		free(rows);
+	}
+
+	relic_destroy(ctx);
+}
+
 /*
  * Loading more of the program after a rewritten query must reach the next
  * query: a fact extending the graph, and a rule adding a way to derive path,
@@ -1957,6 +2903,12 @@ main(void)
 	what_the_rewrite_derives_does_not_leak();
 	a_load_after_a_rewrite_reaches_the_next_query();
 	a_generated_rule_is_planned_from_its_mentions();
+	a_bound_chain_derives_linearly();
+	factoring_answers_as_its_references_do();
+	factoring_fits_the_rule_representation();
+	a_factored_rewrite_is_deterministic();
+	a_walk_is_charged_its_name();
+	an_abandoned_factored_rewrite_leaves_its_context_usable();
 
 	return (check_summary("test_magic"));
 }

@@ -310,6 +310,18 @@ struct relic_config {
 #define	RELIC_F_NO_EXISTS	0x0100u
 
 /*
+ * Rewrite every predicate a query reads on demand by the ordinary Magic
+ * Sets construction, never by bound query factoring.  Factoring replaces
+ * a bound recursive predicate whose rules pass its free columns through
+ * unchanged with a walk of the states reachable from each requested
+ * binding, paired with that binding, and answers drawn from the reached
+ * states; it derives no answers for the states it passes through.  The
+ * answers are the same; the ordinary rewrite derives every answer of every
+ * state its demand reaches.
+ */
+#define	RELIC_F_NO_FACTOR	0x0200u
+
+/*
  * Create a context.  Returns NULL when the configuration asks for more than
  * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
  * cannot supply the random bytes the context keys its hash tables with, as

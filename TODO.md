@@ -111,6 +111,22 @@ notices. Keep the start on the relation instead, which a new index's
 frontiers, each at its key's first tuple, satisfy at any start; that
 deletes the per-build raise, provided clearing a relation resets the start.
 
+**A rejected factoring certificate narrows the default rewrite limit.**
+[Medium, component: `lib/magic.c`, `specs/design-magic.md`] The first
+search charges the bodies of an adornment that may factor before
+certifying it, and charges them again when a rule fails and it is walked
+as an ordinary one, so it can read an adornment twice where the default
+limit, a floor of 768 and a factor of 48, allows each of three stages one
+reading. A recursive `p/7` queried with all 127 bound masks, whose last
+rule compares, needs a limit of 10,423 and is abandoned at its default of
+8,352, which `-X no-factor` rewrites within at 8,253; the answers are the
+same, but from the whole program. Either allow a fourth stage its floor
+and factor (1,024 and 64), which moves the calibrated default goldens
+(`magic-default*.dl`, `arithmetic-magic-*.dl`, `explain-abandoned.dl`,
+the default-limit cases of `tests/unit/test_magic.c`), or charge a
+rejected certificate's bodies once between certification and the walk,
+which the factoring design's separate charging forbids as written.
+
 **A planner that emits an indexed operation must record its access.**
 [Low, component: `lib/plan.c`] `place_atom()`, `place_probe()` and
 `place_aggregate()` each call `record_access()`. An operation holds its
@@ -151,24 +167,14 @@ version differences from core-count effects. Run the uniform stdout-output sweep
 file-output cohort to quantify output-sink costs, especially for large
 answers. Keep their raw measurements and comparison tables distinct.
 
-**A bound right-recursive closure costs relic more than the whole
-closure.** [Medium, component: `lib/magic.c`, `bench/compare/tc-cyclic-bf`]
-The M3 Max scale-8 matrix records 189.242 s at one thread and 27.032 s
-at sixteen for 8,000 answers. The Magic rewrite carries the binding
-through every reachable node, materializes 64 million closure tuples,
-and also computes the magic relation. A diagnostic invocation records
-3,191,837,759 derivations. An equivalent forward-reachability program
-returns the exact same set with 406,919 derivations and takes 0.073 s
-at sixteen threads in one exploratory run. On the acyclic input, a
-corresponding rewrite reduces 71,093,957 derivations to 85,357. These
-rule-level experiments are in the M3 diagnostic evidence linked above.
-Implement [bound query factoring](specs/design-query-factoring.md): certify
-an entire adornment's state/output separation, carry each original binding
-through state propagation, and produce answers from all base rules and
-facts. Preserve the ordinary Magic reference with `no-factor`. Validate
-positive-length semantics, different transition and base relations,
-correlated calls, subsumption, rewrite limits and allocation failure under
-the [ordered plan](docs/todo-benchmark-performance.md#3-factor-eligible-bound-recursion).
+**Bound query factoring awaits its rival comparison.** [Medium, component:
+`lib/magic.c`, `bench/compare/tc-cyclic-bf`] The M3 Max scale-8 matrix
+records 189.242 s at one thread and 27.032 s at sixteen for the 8,000
+answers of `tc-cyclic-bf`, which the unfactored rewrite reaches after
+3,191,837,759 derivations. [Bound query factoring](specs/design-query-factoring.md)
+answers it with 805,760 derivations in about 0.1 s in a local run. Measure
+`chain-right`, `tc-acyclic-bf` and `tc-cyclic-bf` against the rival engines
+under the [ordered plan](docs/todo-benchmark-performance.md#3-factor-eligible-bound-recursion).
 
 **relic's evaluation costs several times Souffle's interpreter per derivation
 on the analyses.** [Medium, component: `lib/eval.c`, `bench/compare/andersen`]

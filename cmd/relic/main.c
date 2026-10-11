@@ -102,8 +102,9 @@ enum stdin_reader {
  * their columns may come from.  `exports` holds the -O operands, parsed, in
  * the order given.  `config` is what the context is created with: -j sets
  * its thread count, -l its limits, -X naive, no-index, no-reorder,
- * no-magic, no-stream, no-exists, parallel and group-rules its flags, and a
- * second -v the flag that asks for notes about mixed-type comparisons.
+ * no-magic, no-factor, no-stream, no-exists, parallel and group-rules its
+ * flags, and a second -v the flag that asks for notes about mixed-type
+ * comparisons.
  * `verbosity` counts the -v options.
  *
  * `stdin_reader` is who reads standard input, which parse_options() decides
@@ -804,6 +805,11 @@ parse_debug(const char *name, options_t *options)
 
 	if (strcmp(name, "no-exists") == 0) {
 		options->config.flags |= RELIC_F_NO_EXISTS;
+		return (0);
+	}
+
+	if (strcmp(name, "no-factor") == 0) {
+		options->config.flags |= RELIC_F_NO_FACTOR;
 		return (0);
 	}
 

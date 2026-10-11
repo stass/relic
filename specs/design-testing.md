@@ -77,6 +77,7 @@ complete. The eval fuzz target and the derivation-count oracle both use it.
 | --- | --- |
 | semi-naive == naive | `-X naive` |
 | Magic rewrite == whole-program evaluation | `-X no-magic` |
+| factored bound recursion == ordinary Magic | `-X no-factor` |
 | indexed == unindexed | `-X no-index` |
 | planner order == textual order | `-X no-reorder` |
 | existence checks == full generators | `-X no-exists` |
@@ -165,6 +166,9 @@ The pairs are chosen by which rules a strategy evaluates:
 * no-reorder under the rewrite has no reference: the planner's order is the
   rewrite's sideways information passing strategy, so changing it generates
   different rules, and only its answers are compared;
+* no-factor generates the ordinary rules for adornments the default
+  factors, so it is compared with the default on answers and diagnostics,
+  and is the reference naive+no-factor's totals are held to;
 * the group-rule strategies hold group relations the others fold away, so
   only the materialized strategy is held to group-rules without the rewrite;
   group-rules under the rewrite has no reference.

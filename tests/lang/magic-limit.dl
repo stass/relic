@@ -1,10 +1,11 @@
-% The rewrite of path(a, X)? costs 12 literals: the search reads the query
-% and path's two rules, 1 + 1 + 2, and the draft writes the rewritten query,
-% the seed, the magic rule of the recursive call and the two adorned rules
-% with their guards, 1 + 0 + 2 + 2 + 3.  A limit of 11 is outgrown at the
-% last of them, which is path's, and the warning names path/2.  A limit the
-% caller sets is outgrown as the default is: the rewrite is abandoned, and
-% the query is answered from the whole program with the same rows.
+% The factored rewrite of path(a, X)? costs 10 literals: the search reads
+% the query and path's two rules, 1 + 1 + 2, and the draft writes the
+% rewritten query and its seed, the walk's seed, the answer rule of the base
+% rule and the transition of the recursive one, 1 + 0 + 1 + 2 + 2.  A limit
+% of 9 is outgrown at the last of them, which is path's, and the warning
+% names path/2.  A limit the caller sets is outgrown as the default is: the
+% rewrite is abandoned, and the query is answered from the whole program
+% with the same rows.
 
 edge(a, b).
 edge(b, c).

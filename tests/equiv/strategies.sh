@@ -6,7 +6,8 @@
 # evaluator runs it, and once under each alternative -X selects -- the naive
 # fixed point, the planner without indexes, without reordering and without
 # existence checks, each of those again answering from the whole fixed point
-# instead of through the Magic rewrite, rounds whose insertions wait for their end, and every
+# instead of through the Magic rewrite, the rewrite without factoring,
+# rounds whose insertions wait for their end, and every
 # aggregate body compiled to a group rule.  Every run must agree with the
 # default on standard output, the diagnostics on standard error, and exit
 # status, but for the group rules, held to the default's output and status
@@ -40,14 +41,16 @@
 # describe the work done or the storage used, differ between strategies by
 # design, and are left out.
 #
-# The rules evaluated are the same within each of two groups.  Answering from
-# the whole fixed point evaluates the program's rules, whatever the fixed
-# point or the planner.  The Magic rewrite evaluates rules generated in the
-# order the planner chooses for each body, and neither the naive fixed point
-# nor the planner without indexes or without existence checks changes that
-# order; the planner without
+# The rules evaluated are the same within each of three groups.  Answering
+# from the whole fixed point evaluates the program's rules, whatever the
+# fixed point or the planner.  The Magic rewrite evaluates rules generated in
+# the order the planner chooses for each body, and neither the naive fixed
+# point nor the planner without indexes or without existence checks changes
+# that order; the planner without
 # reordering does, so under the rewrite it generates other rules, and only
-# its answers are compared.
+# its answers are compared.  The rewrite without factoring generates the
+# ordinary rules for the adornments the default factors, so its runs form
+# the third group.
 #
 # A comparison between two runs that both went wrong the same way would pass,
 # so the default run is also held to the test's golden output wherever the
@@ -82,8 +85,12 @@ set -eu
 # on its answers, and is the reference whose tuple total those in
 # `whole_rules`, which answer from the whole fixed point too, are held to.
 # Those in `answer_rules` are held to the default's answers and exit status.
+# The no-factor run, the rewrite without factoring, is in `other_rules`,
+# and is the reference whose tuple total those in `ordinary_rules`, which
+# rewrite without factoring too, are held to.
 same_rules="naive no-index no-exists parallel j4+parallel"
-other_rules="no-reorder"
+other_rules="no-reorder no-factor"
+ordinary_rules="naive+no-factor"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic
     no-exists+no-magic"
 answer_rules="group-rules"
@@ -208,6 +215,11 @@ for path in $RELIC_LANG_TESTS; do
 	for strategy in $other_rules; do
 		run_strategy "$strategy"
 		compare default "$strategy" out err status
+	done
+
+	for strategy in $ordinary_rules; do
+		run_strategy "$strategy"
+		compare no-factor "$strategy" out err status held
 	done
 
 	for strategy in $answer_rules; do

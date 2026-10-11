@@ -191,8 +191,8 @@
 
 /*
  * The evaluation sweep's program is the transitive closure of a chain of
- * this many edges, which derives EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 paths,
- * and a stratum above it that finds the chain's one sink by negation.
+ * this many edges, which derives EVAL_CLOSURE paths, and a stratum above
+ * it that finds the chain's one sink by negation.
  * That is enough to grow the path relation's columns and index several times
  * over, so a refusal can land in preparing the query, in planning a positive
  * or a negated literal, in any relation's growth, or in creating the answer
@@ -203,6 +203,7 @@
  * its buffers afresh and its merge a screen for every stripe it touches.
  */
 #define	EVAL_CHAIN	40
+#define	EVAL_CLOSURE	(EVAL_CHAIN * (EVAL_CHAIN + 1) / 2)
 #define	EVAL_SWEEP	8192
 
 /*
@@ -380,8 +381,9 @@ typedef struct eval_sweep eval_sweep_t;
 /*
  * One way of answering the evaluation sweep's query: how the strategy is
  * named in a failure, the query, the relations that hold the closure and
- * the sink once it is answered, the flags that select the strategy, and how
- * many rows the answer has.
+ * the sink once it is answered, the flags that select the strategy, how
+ * many rows the answer has, and how many tuples the closure's relation
+ * holds.
  */
 struct eval_sweep {
 	const char	*strategy;
@@ -391,6 +393,7 @@ struct eval_sweep {
 	unsigned int	 flags;
 	size_t		 threads;
 	size_t		 rows;
+	size_t		 held;
 };
 
 /*
@@ -2577,11 +2580,13 @@ count_answer(void *callback_ctx, const relic_value_t *values RELIC_UNUSED,
  * mean something of the failed run survived into the retry.
  *
  * Answered from the whole fixed point, the closure is the path relation.
- * Answered through the Magic rewrite, it is path$bf, which holds the whole
- * closure too, because the query's binding reaches every node of the chain;
- * the negated sink is read completely, so the sweep also lands in the part
- * of the program evaluated before the rewrite.  A query that reaches path
- * free reads it completely instead of rewriting, into the path relation.
+ * Answered through the Magic rewrite, it is path$bf, which the factored
+ * rewrite fills with the answers from n0 alone, and the unfactored one with
+ * the whole closure, because the query's binding reaches every node of the
+ * chain; the negated sink is read completely, so the sweep also lands in
+ * the part of the program evaluated before the rewrite.  A query that
+ * reaches path free reads it completely instead of rewriting, into the
+ * path relation.
  * And a query that calls sink bound before calling it free finds its
  * adornments in a second search, which reads sink through sink$f whatever
  * the call binds.  Three queries read a predicate nothing states or
@@ -2605,35 +2610,38 @@ a_query_that_ran_out_of_memory_can_be_retried(void)
 {
 	static const eval_sweep_t sweeps[] = {
 		{ "from the whole fixed point", "path(n0, X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN },
+		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through the Magic rewrite", "path(n0, X), not sink(X)?",
-		    "path$bf", "sink", 0, 0, EVAL_CHAIN - 1 },
+		    "path$bf", "sink", 0, 0, EVAL_CHAIN - 1, EVAL_CHAIN },
+		{ "through the unfactored Magic rewrite",
+		    "path(n0, X), not sink(X)?", "path$bf", "sink",
+		    RELIC_F_NO_FACTOR, 0, EVAL_CHAIN - 1, EVAL_CLOSURE },
 		{ "reading what it reaches completely",
 		    "path(X, Y), not sink(Y)?", "path", "sink", 0, 0,
-		    EVAL_CHAIN * (EVAL_CHAIN + 1) / 2 - EVAL_CHAIN },
+		    EVAL_CLOSURE - EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through a second search", "path(n0, X), sink(X), sink(Y)?",
-		    "path$bf", "sink$f", 0, 0, 1 },
+		    "path$bf", "sink$f", 0, 0, 1, EVAL_CHAIN },
 		{ "naming a predicate nothing states", "path(n0, X), ghost(X)?",
-		    "path", "sink", RELIC_F_NO_MAGIC, 0, 0 },
+		    "path", "sink", RELIC_F_NO_MAGIC, 0, 0, EVAL_CLOSURE },
 		{ "negating a predicate nothing states",
 		    "path(n0, X), not ghost(X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN },
+		    RELIC_F_NO_MAGIC, 0, EVAL_CHAIN, EVAL_CLOSURE },
 		{ "naming a predicate nothing states, in body order",
 		    "path(n0, X), ghost(X)?", "path", "sink",
-		    RELIC_F_NO_MAGIC | RELIC_F_NO_REORDER, 0, 0 },
+		    RELIC_F_NO_MAGIC | RELIC_F_NO_REORDER, 0, 0, EVAL_CLOSURE },
 		{ "from the whole fixed point, deferred", "path(n0, X)?",
 		    "path", "sink", RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS,
-		    0, EVAL_CHAIN },
+		    0, EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through the Magic rewrite, deferred",
 		    "path(n0, X), not sink(X)?", "path$bf", "sink",
-		    RELIC_F_PARALLEL_ALWAYS, 0, EVAL_CHAIN - 1 },
+		    RELIC_F_PARALLEL_ALWAYS, 0, EVAL_CHAIN - 1, EVAL_CHAIN },
 		{ "from the whole fixed point, on four threads",
 		    "path(n0, X)?", "path", "sink",
 		    RELIC_F_NO_MAGIC | RELIC_F_PARALLEL_ALWAYS, 4,
-		    EVAL_CHAIN },
+		    EVAL_CHAIN, EVAL_CLOSURE },
 		{ "through the Magic rewrite, on four threads",
 		    "path(n0, X), not sink(X)?", "path$bf", "sink",
-		    RELIC_F_PARALLEL_ALWAYS, 4, EVAL_CHAIN - 1 }
+		    RELIC_F_PARALLEL_ALWAYS, 4, EVAL_CHAIN - 1, EVAL_CHAIN }
 	};
 	char *program;
 	size_t i;
@@ -2660,7 +2668,6 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	relic_query_t *query;
 	size_t completed;
 	size_t evaluating;
-	size_t expected_paths;
 	size_t refused;
 	size_t rows;
 	size_t workers_refused;
@@ -2672,7 +2679,6 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 	config.threads = sweep->threads;
 	workers_refused = relic_atomic_size_load(&worker_refusals);
 
-	expected_paths = (size_t)EVAL_CHAIN * (EVAL_CHAIN + 1) / 2;
 	completed = 0;
 	evaluating = 0;
 	refused = 0;
@@ -2772,11 +2778,11 @@ sweep_query_retry(const eval_sweep_t *sweep, const char *program)
 
 		paths = relation_named(ctx, sweep->paths, 2);
 		checkf(paths != NULL &&
-		    relic_relation_count(paths) == expected_paths,
+		    relic_relation_count(paths) == sweep->held,
 		    SCENARIO_EVALUATE,
 		    "answered %s, the %s relation should hold %zu tuples, not "
 		    "%zu, with allocation %ld refused", sweep->strategy,
-		    sweep->paths, expected_paths,
+		    sweep->paths, sweep->held,
 		    paths != NULL ? relic_relation_count(paths) : 0, budget);
 
 		sinks = relation_named(ctx, sweep->sinks, 1);
