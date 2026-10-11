@@ -88,16 +88,17 @@ relation. It performs 92,938,873 lookups against 19,418,539 under
 `-X no-reorder`, with identical answers and derivations. At scale 8 the
 corresponding counts are 356,557,738 and 72,238,190.
 
-**Implementation.** Retain a useful indexed-prefix driver independently
-of whether the initial greedy order selects the delta first. Choose
-between that driver and a delta driver using actual round cardinalities
-and indexed fan-out. Keep the candidate set bounded and the decision a
-deterministic integer computation. Account for added plans and indexes;
-explain output must show the alternatives and their selection rule.
+**Implementation.** Construct delta-first and input-first alternatives
+using the structural ranking in
+[recursive plan selection](../specs/design-recursive-planning.md).
+Choose from complete-plan work recipes using frozen view sizes and
+existing index key counts. Account for both candidates and their metadata;
+explain output shows the alternatives and deterministic tie rule.
 Increasing the unknown-cardinality constant does not resolve the defect.
 
-**Design and regression.** Update
-[delta variants](../specs/design-planning.md#delta-variants). First add a
+**Design and regression.** Implement the
+[recursive planning design](../specs/design-recursive-planning.md), linked
+from [delta variants](../specs/design-planning.md#delta-variants). First add a
 counter regression that crosses the estimate boundary and fails on the
 unfixed planner. Compare answers with textual-order and naive evaluation
 on manageable inputs; verify identical results and work across thread

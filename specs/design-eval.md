@@ -301,8 +301,9 @@ for each recursive component:
 	round 0: every body-less rule and every exit rule, in program order
 	while some member gained a tuple in the last round:
 		advance the deltas
+		select every due variant's plan from the round-boundary statistics
 		for every due variant, in planning order:
-			run the plan its delta's size selects
+			run its selected plan
 ```
 
 **A delta is a range of tuple identifiers.** The store is append-only, so
@@ -330,9 +331,13 @@ are, in body order, *m1* to *mk*, has *k* variants. In variant *i*, literal
 `current`, and every other literal reads `all`. Views follow body order, not
 plan order: the view decides which tuples a literal can match, the nesting
 decides only what each binding costs, and a join's result does not depend on
-its nesting. So the delta literal is ordered like any other, and a variant
-whose order puts another literal first also keeps a delta-first plan; each
-round runs the one its delta's size selects ([planning](design-planning.md)).
+its nesting. A variant retains at most two plans constructed by structural
+ordering policies. Before any item of a round runs, its plans are compared
+using work estimates from those same views and index key counts. The
+selected plan belongs to the round item and is also the plan a declined
+shared round retries serially. Candidate construction, estimates and the
+selection boundary are specified in
+[recursive plan selection](design-recursive-planning.md).
 
 An **exit rule** has no positive literal over a member, as
 `path(X, Y) :- edge(X, Y)`. It has no variant, since everything it reads was

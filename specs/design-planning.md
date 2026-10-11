@@ -5,17 +5,17 @@ it turns each compiled rule into a plan, an ordered array of operations the
 executor runs. This document covers the operations, the static binding
 analysis that fixes every column's fate before anything runs, where tests,
 assignments and aggregates go, the statistics and integer estimates behind the
-greedy order, access paths and probe shapes, the two plans of a semi-naive
-delta variant, queries as rules, the order the Magic Sets rewrite borrows,
-what planning costs and charges, and the text of `-e`, which only this
-document defines ([explain](#explain)).
+greedy order, access paths and probe shapes, the structural alternatives of
+semi-naive delta variants, queries as rules, the order the Magic Sets
+rewrite borrows, what planning costs and charges, and the text of `-e`,
+which only this document defines ([explain](#explain)).
 
 Related: [architecture](architecture.md#planning),
 [language](language.md#safety), [front end](design-frontend.md),
 [storage](design-storage.md), [evaluation](design-eval.md),
 [expressions](design-expressions.md), [aggregates](design-aggregates.md),
 [Magic Sets](design-magic.md), [memory](design-memory.md),
-[testing](design-testing.md).
+[testing](design-testing.md), [recursive plan selection](design-recursive-planning.md).
 
 ## Model
 
@@ -390,13 +390,16 @@ empty relation estimates zero, so it goes first among literals binding as
 many arguments and ends the join when reached; a nonempty one never
 estimates below one. An incomplete relation is guessed at a fixed tuple
 count, narrowed by a fixed factor per bound column: bigger than a small
-table of facts, smaller than a large one. In a delta variant a member read
-through `old` or `current` beside its delta is guessed at a fixed multiple
-of the delta's guess, saying only that a member is larger than its delta,
-true by construction, which ranks the delta ahead of other member literals
-bound alike. The constants are named in `lib/plan.h`; none is a
-measurement, and all are visible, which is all determinism asks of a
-heuristic.
+table of facts, smaller than a large one. A non-delta member read through
+`old` or `current` receives the fixed multiplier named in `lib/plan.h`.
+These guesses rank the remaining literals during ordinary greedy walks.
+They are not measurements.
+
+The distinguished delta is placed structurally when its candidate plans
+are constructed, so its guessed size cannot remove an alternative. The
+round's choice uses actual view sizes and existing index key counts, as
+specified in [recursive plan selection](design-recursive-planning.md).
+That selector never requests fresh distinct-column scans.
 
 **Estimates are integers.** Floating point is deterministic on most
 platforms but not all -- x87 extended precision rounds differently -- and
@@ -561,78 +564,36 @@ so they are identical at every thread count.
 ## Delta variants
 
 A rule of a recursive component evaluated semi-naively runs as **delta
-variants**, one per body literal reading a member of the component; in
-each, the **delta literal** reads only what its relation gained last round.
-Which views a variant's literals read, and why, is
-[evaluation](design-eval.md#the-semi-naive-fixed-point)'s; the views follow
-body order, not plan order, so the planner orders a variant by the same
-walk as any rule and the delta literal may go anywhere.
+variants**, one per body literal reading a member of the component. The
+distinguished literal reads its member's `delta`; other member literals
+read `old` or `current` according to their original body positions. Plan
+order cannot change that assignment.
 
-**The delta literal is ordered like any other**, scored by its view's
-estimate, and becomes the operation its columns give it: a `SCAN` of the
-delta, a `LOOKUP` whose walk starts at the delta through the frontier, a
-`MEMBER` that holds only for a delta tuple, or an `EXISTS` probing from
-where that walk starts. The delta is never copied and has no index of its
-own. So a small complete relation that binds the delta's lookup columns
-goes first -- the shape the Magic rewrite produces, a magic relation of a
-few bindings guarding a rule whose delta holds the answers so far for all
-of them.
+Each variant has a counted family of at most two plans, built once when
+its component starts:
 
-### Two plans and a threshold
+* **delta-first**, with the distinguished literal pinned before the other
+  positives, followed by ordinary greedy ordering;
+* **input-first**, with another positive preferred over the delta when
+  their bound-column ranks tie, followed by cardinality and source-position
+  ranking among the other literals.
 
-Whether the placed order beats the delta first depends on the delta's
-size, which changes every round. So when the order places another positive
-literal before the delta literal, the variant keeps two plans:
+Identical complete orders collapse before emission. Otherwise both plans
+are retained, with their indexes and work recipes; an estimated cost does
+not prune a candidate. A fully bound delta can still be the first literal
+in both walks because bound-column rank takes precedence.
 
-* the **placed plan**, the greedy order, whose **prefix estimate** is the
-  product of the estimates of the positive literals before the delta
-  literal: the bindings reaching it each round, each one lookup of the
-  delta whatever it holds;
-* the **delta-first plan**, with the delta pinned first, whose **fan-out
-  estimate** is the product of the estimates of the positive literals
-  after it: the bindings each delta tuple leads to.
+Before any item of a round executes, the calling thread estimates each
+retained plan's complete work from its operation views and the distinct-key
+counts of its indexes. It selects the lower estimate, preferring delta-first
+on a tie. Estimation is integer arithmetic, allocates nothing and reads no
+tuples. Reference modes retain one plan: textual order under
+`-X no-reorder`, including its combination with `-X no-index`, and
+delta-first under `-X no-index` alone.
 
-A round with D delta tuples costs the placed plan about the prefix and the
-delta-first plan about D times the fan-out, so the **threshold** is the
-prefix over the fan-out, in integer division, and a round runs the placed
-plan when its delta holds more tuples than the threshold and the
-delta-first plan otherwise -- one integer comparison, with nothing planned
-or allocated in the round. A prefix of zero, from a relation before the
-delta found empty, makes the threshold zero; otherwise a fan-out of zero,
-or a quotient no delta can reach, makes it one no delta exceeds. A fan-out
-of zero means a relation after the delta is empty, so the placed plan never
-runs, and such a rule derives nothing either way. **Both orders are decided
-before either plan is emitted, and only a plan some delta of at least one
-tuple would select is built**, so a plan no round would run costs no index
-maintained through the fixed point. When the order puts the delta first
-anyway the plans coincide and there is one.
-
-**Why a round chooses.** No constant can stand in for a delta's size. In
-`r(X, Z) :- g(X), big(X, Y), r(Y, Z)`, with `g` holding 999 tuples and
-`big` a thousand `Y` per `X`, each `Y` reached from ten `X`, the placed
-plan walks 999 000 bindings every round while the delta-first plan costs
-ten per delta tuple: a hundred thousand times the work on a one-tuple delta,
-a tenth of it on a million-tuple delta. A fixed point has both kinds of
-round.
-
-**Why both sides carry an estimate.** Comparing the delta's size with the
-prefix alone would weigh the plans' outer loops and ignore what each delta
-tuple goes on to cost, which is all of the delta-first plan's work when
-the literals after the delta fan out. Prefix against D times fan-out
-compares the two plans' work within the estimates' accuracy. The placed
-plan's work after the delta literal is shared by both plans, and the
-delta-first plan's own scan of the delta is common too, so both are left
-out of both sides. A guard the delta-first plan tests for membership
-contributes its estimate, one tuple unless its relation is empty, to the
-fan-out product, so a guard that rejects most bindings makes the
-delta-first plan look dearer than it is and lowers the threshold; the
-placed plan is then chosen a little early, costing at most the prefix's
-lookups.
-
-**The references keep one plan.** Under `-X no-reorder` the delta stays in
-its written place, the textbook semi-naive scheme. Under `-X no-index`
-alone every lookup is a scan, so a delta placed after other literals would
-be scanned whole per binding; the delta goes first and that is the plan.
+The algorithm, statistics ownership, cost equations and correctness
+argument are defined in [recursive plan selection](design-recursive-planning.md).
+The [explain contract](#explain) below defines how the family is printed.
 
 ## Queries as rules
 
@@ -726,11 +687,11 @@ and plan before its rows. With no callback nothing is formatted. Like a
 diagnostic callback, it may read through the context and any other call it
 makes is refused ([library interface](design-api.md)).
 
-**The lines are what ran**, not a reconstruction: a query against a program
-already materialized prints only its own plan, because nothing else was
-planned. Which of a variant's two plans a round chose is not printed, so
-the lines depend on the plans and not on how many rounds ran. The command
-line writes them to standard error, like `-X stats`, since both describe
+**The lines describe the plans evaluation builds.** A query against a
+program already materialized prints only its own plan, because nothing
+else was planned. Which of a variant's two plans a round chose is not
+printed, so the lines depend on the plans and not on how many rounds ran.
+The command line writes them to standard error, like `-X stats`, since both describe
 the run rather than its results; standard output stays the rows alone.
 Under `-c` nothing is evaluated and `-e` prints nothing. The text is for
 people and may change between releases; within a build it is a
@@ -748,14 +709,16 @@ stratum 0, component 0 (recursive): path/2
         scan edge(X, Y)
         emit path(X, Y)
     rule path(X, Z) :- edge(X, Y), path(Y, Z).
-        delta path(Y, Z) when the delta holds more than 3 tuples:
-            scan edge(X, Y)
-            lookup delta path(Y, Z) key={0}
-            emit path(X, Z)
-        delta path(Y, Z) otherwise:
-            scan delta path(Y, Z)
-            lookup edge(X, Y) key={1}
-            emit path(X, Z)
+        delta path(Y, Z):
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta path(Y, Z)
+                lookup edge(X, Y) key={1}
+                emit path(X, Z)
+            plan input-first:
+                scan edge(X, Y)
+                lookup delta path(Y, Z) key={0}
+                emit path(X, Z)
 query $q0(X) :- path(a, X).
     lookup path(a, X) key={0}
     stream $q0(X)
@@ -775,11 +738,16 @@ Each nesting level is four spaces.
   exit rule of a recursive component and every rule under `-X naive` are
   followed by their plan. A recursive rule under semi-naive evaluation runs
   only as its variants and has no plan of its own.
-* **A variant** with one plan is headed `delta`, its delta literal and
-  `:`. One with two shows the placed plan under
-  `delta <literal> when the delta holds more than N tuples:` (`tuple` when
-  N is one), then the delta-first plan under `delta <literal> otherwise:`.
-  A variant whose threshold left one plan built uses the one-plan heading.
+* **A variant** is headed `delta`, its delta literal and `:`. With one
+  plan, its operations follow at one greater indentation. With two, the
+  next indentation contains the line
+  `choose lowest estimated work; ties: delta-first`, followed by
+  `plan delta-first:` and its operations one level deeper, then
+  `plan input-first:` and its operations at that same deeper level.
+  These names describe structural ordering policies. The estimated work
+  uses [the recursive selector's equations](design-recursive-planning.md#estimating-work).
+  Runtime costs and selected-plan traces are not printed: a family has
+  the same text regardless of the number of rounds that execute it.
 * **A query** is `query` and its compiled rule, the head named `$qN`. Its
   own aggregate group rules appear under that heading with their plans,
   before the query's plan; a program's group rules appear under their own
@@ -879,9 +847,10 @@ reached a few tuples on, and says so, since the message names planning.
 
 ### What planning charges
 
-The arena holding an evaluation's plans and the arenas of a query's rewrite
-are charged to the memory limit with relation and index storage, because
-they hold what an operation multiplies out of the program: plans whose
+The arena holding an evaluation's plans, work recipes and statistics
+catalog, and the arenas of a query's rewrite, are charged to the memory
+limit with relation and index storage, because they hold what an operation
+multiplies out of the program: plans whose
 number and length each follow a body's length, and a rule copy per
 adornment. The arenas holding the program and a query as the caller wrote
 them are not, because the caller bounds them and a query may outlive its
@@ -926,8 +895,8 @@ on accounted storage and evaluation memory, not on the process.
 * the operations: the column classification against the bound set and the
   dead mask, which depends only on the rule;
 * indexes: keyed by column set, named by position;
-* each round's plan: an integer comparison between plans built once per
-  component;
+* each round's plan: integer work estimates from fixed views and index
+  key counts, with a fixed tie rule between plans built once per component;
 * query names: compilation order;
 * `-e`: a function of the plans; nothing in a plan is ordered by a pointer,
   a hash or a domain identifier;
@@ -948,16 +917,17 @@ derivation order and byte-identical `-e` output
   explainable; a search would make plans harder to predict for little gain.
 * **Replanning during a fixed point.** It would chase changing
   cardinalities at a cost hard to bound and make `-e` depend on how many
-  rounds ran; a variant's two plans capture the one decision that depends
-  on round size.
+  rounds ran. A bounded comparison of precompiled alternatives adapts to
+  the round's statistics without rebuilding plans or indexes.
 * **Caching plans across evaluations.** Plans are cheap to build, and a
   cached one holding relation pointers would need invalidating by whatever
   discards derived state; a plan also depends on the complete relations
   before it, so it can exist only once they do.
-* **Multi-column statistics, or estimates in `-e`.** Independence is good
-  enough for ordering. Printed estimates would move every golden plan with
-  the constants; the threshold is shown because without it a reader could
-  not tell which plan a round runs.
+* **Additional histograms or per-round estimates in `-e`.** Ordinary
+  ordering uses column counts, and the recursive selector uses the joint
+  key counts indexes already maintain. Data scans and histograms are not
+  part of round selection. Explain names the alternatives and selection
+  rule without making its text depend on iteration count.
 * **A generator that stops after its first match.** A resumed generator
   that matched must reject while one paused mid-walk without matching must
   continue, so a `once` flag needs a matched-already bit surviving an
@@ -971,11 +941,11 @@ derivation order and byte-identical `-e` output
   `X` once per tuple, duplicates included; removing them needs a hash of
   bindings per generator to save a cost linear in the relation, while the
   exponential cost came from later literals, which are checks.
-* **A cost model for tests, or folding `MEMBER` into `EXISTS`.** A check,
-  like `MEMBER`, is scored by the tuples agreeing with its key though it
-  passes a binding at most once; capping that is a change to the estimate
-  for both shapes, not to the operation. `MEMBER` keeps its name, its
-  canonical-index path and familiar vocabulary for one switch arm.
+* **Evaluating tests while estimating, or folding `MEMBER` into `EXISTS`.**
+  The recursive work estimate charges for a check but does not execute it;
+  expression and aggregate failures belong to the selected plan's execution.
+  `MEMBER` retains its canonical-index path and vocabulary. Ordinary greedy
+  ranking still uses the literal's bound columns and cardinality estimate.
 * **A limit on body length, or a default budget on plans.** A long body
   costs what its plans hold, which the memory limit bounds. Plans and
   variants are the evaluation itself, not an optimization with a fallback,

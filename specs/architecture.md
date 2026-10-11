@@ -355,15 +355,23 @@ every comparison and negated literal at the earliest point its variables
 are bound. Estimates are integer arithmetic, so plans are identical on
 every platform. A component's rules are planned when the component starts,
 so every relation of a lower component is measured complete. A delta
-variant whose delta is not placed first keeps the delta-first plan as well,
-and each round picks one by the delta's size. Ordering a body costs a
+variant retains at most two structural alternatives: delta-first and an
+input-first order that defers the delta on equal bound-column rank.
+Guessed delta cardinality does not decide whether an alternative exists.
+Before any round item executes, the calling thread chooses from integer
+work estimates using the same fixed views as execution and existing index
+key counts. Plans and indexes are built once per component; selection
+allocates nothing, reads no tuples and depends on neither thread count nor
+timing. This keeps runtime adaptation outside the executor and preserves
+the serial/shared-round equivalence. Ordering a body costs a
 bounded number of passes over it, and the plans' memory is charged to the
 memory limit, so a limit on memory is a limit on planning time.
 `relic_explain_set()` installs the callback that receives the text `-e`
 prints, one line of printable ASCII at a time as each plan is built (see
 [Explain](design-planning.md#explain)).
 
-See [design-planning.md](design-planning.md).
+See [design-planning.md](design-planning.md) and
+[recursive plan selection](design-recursive-planning.md).
 
 ### Evaluation
 

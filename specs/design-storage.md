@@ -425,6 +425,19 @@ plan creating an index after another's chose one -- with nothing for either to
 know; and since a discard happens only outside an evaluation and a plan lives
 only within one, no plan names a dropped index.
 
+### Key counts for plan selection
+
+A secondary index exposes its distinct-key count through a const accessor:
+the sum of its existing per-stripe key counts. The accessor reads only
+stripe headers, moves no frontier and never scans tuples or table slots.
+Its result describes the entire owning relation, not a delta or old view.
+
+The [recursive plan selector](design-recursive-planning.md#statistics-at-a-round-boundary)
+combines this count with the tuple count of an operation's own view to
+estimate lookup work. It caches the sum in evaluation-owned storage,
+versioned by the append-only relation's tuple count. The store maintains
+no additional count and has no statistics-cache invalidation callbacks.
+
 ## Failure paths and limits
 
 The store contributes two totals to the limits ([architecture:

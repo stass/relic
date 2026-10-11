@@ -58,10 +58,11 @@ At scale 4, `tc-acyclic-bf` crosses that estimate and loses its
 magic-first alternative: it makes 92,938,873 lookups against 19,418,539
 with `-X no-reorder`, for identical answers and 18,923,480 derivations.
 At scale 8 the corresponding counts are 356,557,738 and 72,238,190.
-Keep driver alternatives independent of the initial unknown-cardinality
-estimate and choose from actual round sizes and indexed fan-out. Add a
-counter regression across the estimate boundary before changing the
-planner; raising the constant only moves the boundary.
+Implement [recursive plan selection](specs/design-recursive-planning.md):
+structural alternatives independent of guessed delta cardinality, with
+work estimates from frozen views and index key counts. Add a counter
+regression across the estimate boundary before changing the planner;
+raising the constant only moves the boundary.
 
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes

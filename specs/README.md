@@ -56,6 +56,9 @@ A newcomer should read:
 * [Planning](design-planning.md) -- plans, the greedy planner, access
   paths and existence checks; the `-e` output format is specified in its
   [Explain](design-planning.md#explain) section.
+* [Recursive plan selection](design-recursive-planning.md) -- structural
+  alternatives for delta variants, estimates from frozen views and index
+  key counts, and deterministic selection at round boundaries.
 * [Evaluation](design-eval.md) -- the executor, the naive and semi-naive
   fixed points, query answers, streaming and interrupts.
 * [Expressions](design-expressions.md) -- arithmetic, string functions and
