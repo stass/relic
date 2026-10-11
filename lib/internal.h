@@ -28,6 +28,7 @@
 #include "atomic.h"
 #include "cdefs.h"
 #include "compat.h"
+#include "cost.h"
 #include "exec.h"
 #include "frozen.h"
 #include "plan.h"
@@ -336,8 +337,8 @@ struct relic_adornment_set {
  * the rewritten query's included, and the name of every predicate it
  * generates.  Both are in the units relic_body_size() gives, a literal
  * counting one and one more per node of its expressions, a name a literal
- * per 64 bytes, and `work_spent` is never reset while the rewrite runs, so every search
- * and the draft are charged to the one count.
+ * per 64 bytes, and `work_spent` is never reset while the rewrite runs, so
+ * every search and the draft are charged to the one count.
  *
  * `rule_index` finds a generated rule by its canonical form, holding
  * positions in `rules` plus one, and `rule_hashes` holds each rule's hash by
@@ -867,9 +868,9 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * most RELIC_DOM_INDEX_MASK.
  */
 struct relic_pending_map {
-	relic_dom_t		*ids;		/* per pending value, batch order */
+	relic_dom_t		*ids;		/* each value's, batch order */
 	int64_t			*fresh;		/* new integers, as first met */
-	uint32_t		*seen;		/* hash of fresh, holding index + 1 */
+	uint32_t		*seen;		/* hash of fresh, index + 1 */
 	relic_fresh_string_t	*strings;	/* new strings, as first met */
 	uint32_t		*strings_seen;	/* hash of strings, index + 1 */
 	size_t			 room;
@@ -1285,28 +1286,19 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
 	    const bool *incomplete, relic_plan_t *plan);
 
 /*
- * Plan a semi-naive delta variant of a rule into *plans (plan.h): its plan
- * with `delta_literal` ordered like any other positive literal, the same
- * variant with it placed first, and the delta size above which a round runs
- * the first rather than the second, emitting only the plans some delta
- * selects.  `delta_literal` is the body index of the positive literal that
- * reads the delta, which must be over a relation `incomplete` marks; the
- * variant's other literals over marked relations read the old or current
- * view.  Otherwise arguments and failures are as for relic_plan_rule().
+ * Plan a semi-naive delta variant of a rule into *family (plan.h): its
+ * delta-first plan and its input-first plan, kept once when the two orders
+ * are the same, or the one plan a reference configuration asks for, each
+ * with the work recipe a round chooses by when there are two.
+ * `delta_literal` is the body index of the positive literal that reads the
+ * delta, which must be over a relation `incomplete` marks; the variant's
+ * other literals over marked relations read the old or current view.
+ * Otherwise arguments and failures are as for relic_plan_rule().
  */
 int	 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
 	    const relic_rule_t *rule, relic_relation_t *target,
 	    size_t delta_literal, const bool *incomplete,
-	    relic_variant_plans_t *plans);
-
-/*
- * The threshold between a variant's two plans, given the placed plan's
- * prefix estimate and the delta-first plan's fan-out estimate: the delta
- * size above which the placed plan is the cheaper, zero when it always is,
- * and RELIC_PLAN_NEVER when it never is.
- */
-uint64_t relic_plan_delta_threshold(uint64_t prefix_estimate,
-	    uint64_t fanout_estimate);
+	    relic_plan_family_t *family);
 
 /*
  * The order relic_plan_rule() would place a rule's body literals in, as body
@@ -1626,8 +1618,7 @@ void	 relic_explain_component(relic_t *ctx,
 void	 relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_plan_t *plan, unsigned int depth);
 void	 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
-	    size_t delta_literal, const relic_plan_t *placed,
-	    const relic_plan_t *delta_first, uint64_t threshold,
+	    size_t delta_literal, const relic_plan_family_t *family,
 	    unsigned int depth);
 void	 relic_explain_query(relic_t *ctx, const relic_rule_t *rule,
 	    const relic_relation_t *answer);

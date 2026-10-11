@@ -24,7 +24,6 @@
 
 #include "config.h"
 
-#include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -43,8 +42,9 @@
 #define	SCENARIO_ASSIGN		"an assignment binds a slot of its kind"
 #define	SCENARIO_EQUALITY	"an equality of two literals' variables assigns"
 #define	SCENARIO_COMPARISONS	"a comparison goes where its operands are bound"
-#define	SCENARIO_BUILT		"only plans some delta selects are built"
-#define	SCENARIO_PLACED		"a delta literal is placed like any other"
+#define	SCENARIO_FAMILY		"a variant keeps both its join orders"
+#define	SCENARIO_GUARD		"a guard of any size keeps the input-first plan"
+#define	SCENARIO_RETAINED	"estimates never discard a candidate"
 #define	SCENARIO_WRITTEN	"a textual variant keeps its written order"
 #define	SCENARIO_DELTA_REFUSED	"a delta literal must be a member literal"
 #define	SCENARIO_DISTINCT	"a plan keeping every binding derives distinct rows"
@@ -126,7 +126,7 @@ static bool	 fixture_plan_rule(fixture_t *fixture, size_t rule_index,
 		    const bool *incomplete);
 static bool	 fixture_plan_variants(fixture_t *fixture,
 		    size_t rule_index, size_t delta_literal,
-		    const bool *incomplete, relic_variant_plans_t *plans);
+		    const bool *incomplete, relic_plan_family_t *family);
 static bool	 fixture_plan_variant(fixture_t *fixture, const char *program,
 		    unsigned int flags, size_t rule_index,
 		    size_t delta_literal);
@@ -171,9 +171,13 @@ static void	 a_comparison_goes_where_its_operands_are_bound(void);
 static void	 an_assignment_binds_a_slot_of_its_kind(void);
 static void	 an_equality_of_two_literals_variables_assigns(void);
 static void	 a_delta_literal_must_be_positive(void);
-static void	 a_delta_literal_is_placed_like_any_other(void);
+static void	 a_variant_keeps_both_orders(void);
+static void	 a_guard_of_any_size_keeps_the_input_first_plan(void);
+static char	*guarded_program(size_t guards, bool permuted);
+static bool	 recipe_is(const relic_plan_candidate_t *candidate,
+		    const enum relic_cost_kind *expected, size_t count);
 static void	 a_textual_variant_keeps_its_written_order(void);
-static void	 only_plans_some_delta_selects_are_built(void);
+static void	 estimates_never_discard_a_candidate(void);
 static void	 the_emit_writes_the_relation_it_is_given(void);
 static void	 a_bodyless_rule_is_a_lone_emit_of_constants(void);
 static void	 a_fully_bound_literal_is_a_membership_test(void);
@@ -285,7 +289,7 @@ static bool
 fixture_plan_variant(fixture_t *fixture, const char *program,
     unsigned int flags, size_t rule_index, size_t delta_literal)
 {
-	relic_variant_plans_t plans;
+	relic_plan_family_t family;
 	const relic_rule_t *rule;
 	bool incomplete[8];
 
@@ -301,21 +305,22 @@ fixture_plan_variant(fixture_t *fixture, const char *program,
 		incomplete[rule->body[delta_literal].u.atom.pred - 1] = true;
 
 	return (fixture_plan_variants(fixture, rule_index, delta_literal,
-	    incomplete, &plans));
+	    incomplete, &family));
 }
 
 /*
  * Plan the delta variant of the rule at `rule_index` for the body literal at
- * `delta_literal`, both of its plans, into the relation of its head.
+ * `delta_literal`, the whole family of its plans, into the relation of its
+ * head.
  */
 static bool
 fixture_plan_variants(fixture_t *fixture, size_t rule_index,
-    size_t delta_literal, const bool *incomplete, relic_variant_plans_t *plans)
+    size_t delta_literal, const bool *incomplete, relic_plan_family_t *family)
 {
 	const relic_rule_t *rule;
 	relic_relation_t *target;
 
-	bzero(plans, sizeof(*plans));
+	bzero(family, sizeof(*family));
 	if (rule_index >= fixture->ctx->program.rules.count)
 		return (false);
 
@@ -325,7 +330,7 @@ fixture_plan_variants(fixture_t *fixture, size_t rule_index,
 		return (false);
 
 	return (relic_plan_variant(fixture->ctx, &fixture->arena, rule,
-	    target, delta_literal, incomplete, plans) == 0);
+	    target, delta_literal, incomplete, family) == 0);
 }
 
 static bool
@@ -704,16 +709,14 @@ a_literal_is_a_check_where_it_is_placed_so(void)
 /*
  * The two plans of a variant place its literals in different orders, so a
  * delta literal can be a check in one and a generator in the other.  In
- * r(X) :- m(X), p(X, _) with p's delta, the placed plan scans m, the
- * smaller, and checks the delta for each X; the delta-first plan scans the
- * delta, binding X, and tests m for it.  m's three tuples over the one
- * lookup per tuple of the delta-first plan make a threshold of three, so
- * both plans are built.
+ * r(X) :- m(X), p(X, _) with p's delta, neither literal has a bound column,
+ * so the input-first plan scans m and checks the delta for each X; the
+ * delta-first plan scans the delta, binding X, and tests m for it.
  */
 static void
 a_delta_literal_may_be_a_check_in_one_plan(void)
 {
-	static const enum relic_op_kind placed_kinds[] = {
+	static const enum relic_op_kind input_kinds[] = {
 		RELIC_OP_SCAN, RELIC_OP_EXISTS, RELIC_OP_EMIT
 	};
 	static const enum relic_op_kind first_kinds[] = {
@@ -722,7 +725,9 @@ a_delta_literal_may_be_a_check_in_one_plan(void)
 	static const enum relic_term_action scanned[] = {
 		RELIC_PLAN_BIND, RELIC_PLAN_ANY
 	};
-	relic_variant_plans_t plans;
+	relic_plan_family_t family;
+	const relic_plan_t *input_first;
+	const relic_plan_t *delta_first;
 	const relic_rule_t *rule;
 	fixture_t fixture;
 	bool incomplete[8];
@@ -739,24 +744,26 @@ a_delta_literal_may_be_a_check_in_one_plan(void)
 	bzero(incomplete, sizeof(incomplete));
 	rule = &fixture.ctx->program.rules.entries[0];
 	incomplete[rule->body[1].u.atom.pred - 1] = true;
-	if (!fixture_plan_variants(&fixture, 0, 1, incomplete, &plans)) {
-		check(false, SCENARIO_CHECK_VARIANT, "the variant is planned");
+	if (!fixture_plan_variants(&fixture, 0, 1, incomplete, &family) ||
+	    family.count != 2) {
+		check(false, SCENARIO_CHECK_VARIANT, "the variant is planned "
+		    "with two plans");
 		fixture_release(&fixture);
 		return;
 	}
 
-	check(plans.threshold == 3, SCENARIO_CHECK_VARIANT,
-	    "both plans are built, three tuples apart");
-	if (kinds_are(&plans.placed, placed_kinds, 3)) {
-		delta = &plans.placed.ops[1].u.atom;
+	input_first = &family.candidates[RELIC_FAMILY_INPUT_FIRST].plan;
+	delta_first = &family.candidates[RELIC_FAMILY_DELTA_FIRST].plan;
+	if (kinds_are(input_first, input_kinds, 3)) {
+		delta = &input_first->ops[1].u.atom;
 		check(delta->view == RELIC_VIEW_DELTA &&
 		    delta->key_mask == UINT32_C(1), SCENARIO_CHECK_VARIANT,
-		    "the placed plan checks the delta for X");
+		    "the input-first plan checks the delta for X");
 	} else
 		check(false, SCENARIO_CHECK_VARIANT,
-		    "the placed plan is a scan, a check and an EMIT");
-	if (kinds_are(&plans.delta_first, first_kinds, 3)) {
-		delta = &plans.delta_first.ops[0].u.atom;
+		    "the input-first plan is a scan, a check and an EMIT");
+	if (kinds_are(delta_first, first_kinds, 3)) {
+		delta = &delta_first->ops[0].u.atom;
 		check(delta->view == RELIC_VIEW_DELTA &&
 		    terms_are(delta, scanned), SCENARIO_CHECK_VARIANT,
 		    "the delta-first plan scans the delta, binding X");
@@ -984,7 +991,7 @@ a_textual_variant_keeps_its_written_order(void)
 	static const char *const recursive = "e(a, b).\n"
 	    "p(X, Y) :- e(X, Y).\n"
 	    "p(X, Z) :- p(X, Y), p(Y, Z).\n";
-	relic_variant_plans_t plans;
+	relic_plan_family_t family;
 	fixture_t fixture;
 	const relic_op_atom_t *old;
 	const relic_op_atom_t *delta;
@@ -1002,18 +1009,19 @@ a_textual_variant_keeps_its_written_order(void)
 	}
 	incomplete[fixture.ctx->program.rules.entries[1].head - 1] = true;
 
-	check(fixture_plan_variants(&fixture, 1, 0, incomplete, &plans) &&
-	    plans.placed.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
-	    plans.placed.ops[1].u.atom.view == RELIC_VIEW_CURRENT,
+	check(fixture_plan_variants(&fixture, 1, 0, incomplete, &family) &&
+	    family.candidates[0].plan.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
+	    family.candidates[0].plan.ops[1].u.atom.view == RELIC_VIEW_CURRENT,
 	    SCENARIO_WRITTEN, "a member literal after the delta literal reads "
 	    "the current view");
 
-	if (fixture_plan_variants(&fixture, 1, 1, incomplete, &plans)) {
-		fixture.plan = plans.placed;
+	if (fixture_plan_variants(&fixture, 1, 1, incomplete, &family)) {
+		fixture.plan = family.candidates[0].plan;
 		check(kinds_are(&fixture.plan, recursive_kinds, 3) &&
-		    plans.delta_first.ops == NULL && plans.threshold == 0,
+		    family.count == 1 &&
+		    family.candidates[0].recipe.step_count == 0,
 		    SCENARIO_WRITTEN, "the variant is one plan of two SCANs "
-		    "and an EMIT");
+		    "and an EMIT, with no recipe to choose by");
 
 		x = slot_named(&fixture, 1, "X");
 		y = slot_named(&fixture, 1, "Y");
@@ -1048,8 +1056,8 @@ a_textual_variant_keeps_its_written_order(void)
 		incomplete[fixture.ctx->program.rules.entries[0].body[0].u.atom.
 		    pred - 1] = true;
 		if (fixture_plan_variants(&fixture, 0, 1, incomplete,
-		    &plans)) {
-			fixture.plan = plans.placed;
+		    &family) && family.count == 1) {
+			fixture.plan = family.candidates[0].plan;
 			check(kinds_are(&fixture.plan, constant_kinds, 4) &&
 			    fixture.plan.ops[0].u.atom.view ==
 			    RELIC_VIEW_OLD &&
@@ -1078,102 +1086,114 @@ a_textual_variant_keeps_its_written_order(void)
 }
 
 /*
- * The default planner orders a delta literal like any other literal, and
- * gives it the operation its bound columns give it where it goes.
+ * A delta variant keeps two plans: one with its delta literal placed first,
+ * and one ordered like any other rule except that the delta literal loses
+ * every tie on bound columns to the literals it could follow.
  *
  *	m(a).  m(b).
  *	par(a, c).  par(a, d).  par(b, c).  par(b, d).  par(c, e).  par(d, e).
  *	tc(X, Y) :- m(X), par(X, Y).
  *	tc(X, Z) :- m(X), par(X, Y), tc(Y, Z).
  *
- * With tc still being derived, its delta is assumed to hold 1000 tuples, m
- * is measured at 2 and par at 6, so m goes first and binds X, par follows
+ * Input-first, m and par outrank the unbound delta whatever it is assumed
+ * to hold; m, measured at 2, goes before par at 6 and binds X, par follows
  * with X bound, and the delta comes last, looked up on Y: the loop nest a
- * magic relation guarding its rule calls for.  The prefix estimate is m's 2
- * times par's 6 over its 4 distinct first columns, rounded up, 2: 4.  Pinned
- * first instead, the delta is scanned, par looked up on Y -- 6 over 3
- * distinct second columns, 2 -- and m tested, 1: a fan-out of 2.  A round
- * runs the placed plan when its delta holds more than 4 / 2 = 2 tuples.
+ * magic relation guarding its rule calls for.  Delta-first, the delta is
+ * scanned, par looked up on Y and m tested.  Each plan has a recipe of one
+ * step per operation, counted as its operation is.
  *
- * Without indexes the placed plan would scan the whole delta once for each
- * binding of the guard and its join, where the delta-first plan scans it
- * once, so under RELIC_F_NO_INDEX a variant has the delta-first plan alone.
+ * Without indexes a delta placed after other literals would be scanned
+ * whole once for each binding that reaches it, where the delta-first plan
+ * scans it once, so under RELIC_F_NO_INDEX the variant has the delta-first
+ * plan alone, and no recipe.
  *
- * A fully bound delta literal is a MEMBER of the delta, placed first for
- * its two bound arguments.  And a member read beside its delta is taken to
- * hold ten deltas, so in p(X, Z) :- p(X, Y), p(Y, Z) the delta goes first in
- * both variants, against the old view and against the current one; with no
- * other order to weigh, the plan is the only one and every round runs it.
+ * A fully bound delta literal outranks every other literal under both
+ * policies, so both place it first as a MEMBER of the delta, and the one
+ * order is kept once.  In p(X, Z) :- p(X, Y), p(Y, Z) the delta and the
+ * other member literal tie on bound columns, so the policies part: the
+ * delta-first plan scans the delta and looks the other view up, and the
+ * input-first plan scans the other view and looks the delta up.
  */
 static void
-a_delta_literal_is_placed_like_any_other(void)
+a_variant_keeps_both_orders(void)
 {
-	static const enum relic_op_kind placed_kinds[] = {
+	static const enum relic_op_kind input_kinds[] = {
 		RELIC_OP_SCAN, RELIC_OP_LOOKUP, RELIC_OP_LOOKUP, RELIC_OP_EMIT
 	};
-	static const enum relic_op_kind pinned_kinds[] = {
+	static const enum relic_op_kind first_kinds[] = {
 		RELIC_OP_SCAN, RELIC_OP_LOOKUP, RELIC_OP_MEMBER, RELIC_OP_EMIT
 	};
-	static const char *const placed_reads[] = { "m", "par", "tc", "tc" };
-	relic_variant_plans_t plans;
-	fixture_t fixture;
-	bool incomplete[8];
-	const relic_op_atom_t *delta;
-
-	bzero(incomplete, sizeof(incomplete));
-	if (!fixture_load(&fixture, "m(a).\nm(b).\n"
+	static const enum relic_cost_kind input_costs[] = {
+		RELIC_COST_SCAN, RELIC_COST_LOOKUP, RELIC_COST_LOOKUP,
+		RELIC_COST_EMIT
+	};
+	static const enum relic_cost_kind first_costs[] = {
+		RELIC_COST_SCAN, RELIC_COST_LOOKUP, RELIC_COST_PROBE,
+		RELIC_COST_EMIT
+	};
+	static const char *const input_reads[] = { "m", "par", "tc", "tc" };
+	static const char *const program = "m(a).\nm(b).\n"
 	    "par(a, c).\npar(a, d).\npar(b, c).\npar(b, d).\n"
 	    "par(c, e).\npar(d, e).\n"
 	    "tc(X, Y) :- m(X), par(X, Y).\n"
-	    "tc(X, Z) :- m(X), par(X, Y), tc(Y, Z).\n", 0, true) ||
+	    "tc(X, Z) :- m(X), par(X, Y), tc(Y, Z).\n";
+	relic_plan_family_t family;
+	const relic_plan_candidate_t *candidate;
+	fixture_t fixture;
+	bool incomplete[8];
+	const relic_op_atom_t *delta;
+	const relic_plan_t *plan;
+
+	bzero(incomplete, sizeof(incomplete));
+	if (!fixture_load(&fixture, program, 0, true) ||
 	    relic_pred_count(fixture.ctx) > 8) {
-		check(false, SCENARIO_PLACED, "the guarded closure is loaded");
+		check(false, SCENARIO_FAMILY, "the guarded closure is loaded");
 		fixture_release(&fixture);
 		return;
 	}
 	incomplete[fixture.ctx->program.rules.entries[1].head - 1] = true;
 
-	if (fixture_plan_variants(&fixture, 1, 2, incomplete, &plans) &&
-	    plans.placed.ops != NULL && plans.delta_first.ops != NULL) {
-		fixture.plan = plans.placed;
+	if (fixture_plan_variants(&fixture, 1, 2, incomplete, &family) &&
+	    family.count == 2) {
+		candidate = &family.candidates[RELIC_FAMILY_INPUT_FIRST];
+		fixture.plan = candidate->plan;
 		delta = &fixture.plan.ops[2].u.atom;
-		check(kinds_are(&fixture.plan, placed_kinds, 4) &&
-		    reads_in_order(&fixture, placed_reads, 4), SCENARIO_PLACED,
-		    "the guard and its join go before the delta");
+		check(kinds_are(&fixture.plan, input_kinds, 4) &&
+		    reads_in_order(&fixture, input_reads, 4), SCENARIO_FAMILY,
+		    "input-first, the guard and its join go before the delta");
 		check(delta->view == RELIC_VIEW_DELTA && delta->key_mask == 1u,
-		    SCENARIO_PLACED, "the delta is looked up on its first "
-		    "column");
+		    SCENARIO_FAMILY, "input-first, the delta is looked up on "
+		    "its first column");
+		check(recipe_is(candidate, input_costs, 4), SCENARIO_FAMILY,
+		    "the input-first recipe counts each of its operations");
 
-		fixture.plan = plans.delta_first;
-		check(kinds_are(&fixture.plan, pinned_kinds, 4) &&
-		    fixture.plan.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
-		    fixture.plan.ops[1].u.atom.key_mask == 2u,
-		    SCENARIO_PLACED, "pinned, the delta is scanned and par "
-		    "looked up on its second column");
-		checkf(plans.threshold == 2, SCENARIO_PLACED, "the threshold "
-		    "should be 2, was %" PRIu64, plans.threshold);
+		candidate = &family.candidates[RELIC_FAMILY_DELTA_FIRST];
+		plan = &candidate->plan;
+		check(kinds_are(plan, first_kinds, 4) &&
+		    plan->ops[0].u.atom.view == RELIC_VIEW_DELTA &&
+		    plan->ops[1].u.atom.key_mask == 2u,
+		    SCENARIO_FAMILY, "delta-first, the delta is scanned and "
+		    "par looked up on its second column");
+		check(recipe_is(candidate, first_costs, 4), SCENARIO_FAMILY,
+		    "the delta-first recipe counts each of its operations");
 	} else {
-		check(false, SCENARIO_PLACED, "the variant's two plans are "
+		check(false, SCENARIO_FAMILY, "the variant's two plans are "
 		    "built");
 	}
 	fixture_release(&fixture);
 
-	if (fixture_load(&fixture, "m(a).\nm(b).\n"
-	    "par(a, c).\npar(a, d).\npar(b, c).\npar(b, d).\n"
-	    "par(c, e).\npar(d, e).\n"
-	    "tc(X, Y) :- m(X), par(X, Y).\n"
-	    "tc(X, Z) :- m(X), par(X, Y), tc(Y, Z).\n", RELIC_F_NO_INDEX,
-	    true) && relic_pred_count(fixture.ctx) <= 8) {
+	if (fixture_load(&fixture, program, RELIC_F_NO_INDEX, true) &&
+	    relic_pred_count(fixture.ctx) <= 8) {
 		check(fixture_plan_variants(&fixture, 1, 2, incomplete,
-		    &plans) && plans.placed.ops == NULL &&
-		    plans.threshold == RELIC_PLAN_NEVER &&
-		    plans.delta_first.ops != NULL &&
-		    plans.delta_first.ops[0].u.atom.view == RELIC_VIEW_DELTA,
-		    SCENARIO_PLACED, "without indexes a placed delta would be "
-		    "scanned once per binding before it, so the variant is its "
-		    "delta-first plan alone");
+		    &family) && family.count == 1 &&
+		    family.candidates[0].recipe.step_count == 0 &&
+		    family.candidates[0].plan.ops[0].u.atom.view ==
+		    RELIC_VIEW_DELTA,
+		    SCENARIO_FAMILY, "without indexes a delta placed later "
+		    "would be scanned once per binding before it, so the "
+		    "variant is its delta-first plan alone");
 	} else {
-		check(false, SCENARIO_PLACED, "the guarded closure is loaded "
+		check(false, SCENARIO_FAMILY, "the guarded closure is loaded "
 		    "without indexes");
 	}
 	fixture_release(&fixture);
@@ -1186,70 +1206,205 @@ a_delta_literal_is_placed_like_any_other(void)
 		incomplete[fixture.ctx->program.rules.entries[0].head - 1] =
 		    true;
 		check(fixture_plan_variants(&fixture, 1, 1, incomplete,
-		    &plans) && plans.delta_first.ops == NULL &&
-		    plans.threshold == 0 &&
-		    plans.placed.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
-		    plans.placed.ops[1].u.atom.view == RELIC_VIEW_OLD,
-		    SCENARIO_PLACED, "the delta goes before the old view, in "
-		    "the variant's only plan");
+		    &family) && family.count == 2 &&
+		    family.candidates[RELIC_FAMILY_DELTA_FIRST].plan.ops[0].
+		    u.atom.view == RELIC_VIEW_DELTA &&
+		    family.candidates[RELIC_FAMILY_DELTA_FIRST].plan.ops[1].
+		    u.atom.view == RELIC_VIEW_OLD &&
+		    family.candidates[RELIC_FAMILY_INPUT_FIRST].plan.ops[0].
+		    u.atom.view == RELIC_VIEW_OLD &&
+		    family.candidates[RELIC_FAMILY_INPUT_FIRST].plan.ops[1].
+		    u.atom.view == RELIC_VIEW_DELTA,
+		    SCENARIO_FAMILY, "against the old view, the self-join "
+		    "keeps the delta first and the old view first");
 		check(fixture_plan_variants(&fixture, 1, 0, incomplete,
-		    &plans) && plans.delta_first.ops == NULL &&
-		    plans.placed.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
-		    plans.placed.ops[1].u.atom.view == RELIC_VIEW_CURRENT,
-		    SCENARIO_PLACED, "the delta goes before the current view");
+		    &family) && family.count == 2 &&
+		    family.candidates[RELIC_FAMILY_DELTA_FIRST].plan.ops[1].
+		    u.atom.view == RELIC_VIEW_CURRENT &&
+		    family.candidates[RELIC_FAMILY_INPUT_FIRST].plan.ops[0].
+		    u.atom.view == RELIC_VIEW_CURRENT,
+		    SCENARIO_FAMILY, "against the current view, the self-join "
+		    "keeps both orders too");
 		check(fixture_plan_variants(&fixture, 2, 1, incomplete,
-		    &plans) && plans.delta_first.ops == NULL &&
-		    plans.placed.ops[0].kind == RELIC_OP_MEMBER &&
-		    plans.placed.ops[0].u.atom.view == RELIC_VIEW_DELTA,
-		    SCENARIO_PLACED, "a fully bound delta literal is a MEMBER "
-		    "of the delta, placed first");
+		    &family) && family.count == 1 &&
+		    family.candidates[0].recipe.step_count == 0 &&
+		    family.candidates[0].plan.ops[0].kind == RELIC_OP_MEMBER &&
+		    family.candidates[0].plan.ops[0].u.atom.view ==
+		    RELIC_VIEW_DELTA,
+		    SCENARIO_FAMILY, "a fully bound delta literal is a MEMBER "
+		    "of the delta, first in the one order both policies "
+		    "reach");
 	} else {
-		check(false, SCENARIO_PLACED, "the self-join is loaded");
+		check(false, SCENARIO_FAMILY, "the self-join is loaded");
 	}
 	fixture_release(&fixture);
 }
 
 /*
- * A variant's plan that no delta would select is not built, so neither are
- * the indexes it would read.
+ * Whether a candidate's recipe has a step for each of its plan's `count`
+ * operations, in order, counted as `expected` says.
+ */
+static bool
+recipe_is(const relic_plan_candidate_t *candidate,
+    const enum relic_cost_kind *expected, size_t count)
+{
+	const relic_cost_recipe_t *recipe;
+	size_t i;
+
+	recipe = &candidate->recipe;
+	if (recipe->step_count != count || candidate->plan.op_count != count)
+		return (false);
+
+	for (i = 0; i < count; i++) {
+		if (recipe->steps[i].op != &candidate->plan.ops[i] ||
+		    recipe->steps[i].kind != expected[i])
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * The guarded closure of a_variant_keeps_both_orders() over `guards`
+ * guard tuples, each of which has two par successors that have none, so
+ * that materializing it is cheap at any size.  Permuted, the guard is
+ * named zz rather than m and the recursive rule's body is written in the
+ * reverse order, the delta literal first.  Returns the program, which the
+ * caller frees, or NULL when it could not be allocated.
+ */
+static char *
+guarded_program(size_t guards, bool permuted)
+{
+	static const char *const rules[2] = {
+		"tc(X, Y) :- m(X), par(X, Y).\n"
+		"tc(X, Z) :- m(X), par(X, Y), tc(Y, Z).\n",
+		"tc(X, Y) :- zz(X), par(X, Y).\n"
+		"tc(X, Z) :- tc(Y, Z), par(X, Y), zz(X).\n"
+	};
+	char *program;
+	size_t capacity;
+	size_t length;
+	size_t i;
+	int written;
+
+	capacity = guards * 96 + 256;
+	program = malloc(capacity);
+	if (program == NULL)
+		return (NULL);
+
+	written = snprintf(program, capacity, "%s", rules[permuted]);
+	length = (size_t)written;
+	for (i = 0; i < guards && written >= 0; i++) {
+		written = snprintf(program + length, capacity - length,
+		    "%s(%zu).\npar(%zu, %zu).\npar(%zu, %zu).\n",
+		    permuted ? "zz" : "m", i, i, i + 100000, i, i + 200000);
+		if (written < 0 || (size_t)written >= capacity - length) {
+			free(program);
+			return (NULL);
+		}
+		length += (size_t)written;
+	}
+
+	return (program);
+}
+
+/*
+ * Whether the input-first plan exists does not depend on what the delta is
+ * assumed to hold.  The delta loses ties on bound columns before any
+ * estimate is compared, so a guard measured below, at or above the
+ * RELIC_PLAN_UNKNOWN_TUPLES the planner assumes of a relation it is still
+ * deriving goes first in the input-first plan, and the delta is looked up
+ * last.  Neither the guard's name nor where the delta literal is written
+ * makes the difference.
+ */
+static void
+a_guard_of_any_size_keeps_the_input_first_plan(void)
+{
+	static const size_t sizes[] = {
+		RELIC_PLAN_UNKNOWN_TUPLES - 1, RELIC_PLAN_UNKNOWN_TUPLES,
+		RELIC_PLAN_UNKNOWN_TUPLES + 1, 2 * RELIC_PLAN_UNKNOWN_TUPLES
+	};
+	static const char *const reads[2][4] = {
+		{ "m", "par", "tc", "tc" },
+		{ "zz", "par", "tc", "tc" }
+	};
+	relic_plan_family_t family;
+	const relic_op_atom_t *delta;
+	fixture_t fixture;
+	bool incomplete[8];
+	char *program;
+	size_t delta_literal;
+	size_t i;
+	size_t p;
+
+	for (p = 0; p < 2; p++) {
+		delta_literal = p == 0 ? 2 : 0;
+		for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+			program = guarded_program(sizes[i], p == 1);
+			if (program == NULL) {
+				check(false, SCENARIO_GUARD, "the program is "
+				    "allocated");
+				return;
+			}
+			if (!fixture_load(&fixture, program, 0, true) ||
+			    relic_pred_count(fixture.ctx) > 8) {
+				checkf(false, SCENARIO_GUARD, "the closure "
+				    "over %zu guards is loaded", sizes[i]);
+				fixture_release(&fixture);
+				free(program);
+				continue;
+			}
+			free(program);
+
+			bzero(incomplete, sizeof(incomplete));
+			incomplete[fixture.ctx->program.rules.entries[1].
+			    head - 1] = true;
+			if (fixture_plan_variants(&fixture, 1, delta_literal,
+			    incomplete, &family) && family.count == 2) {
+				fixture.plan = family.candidates[
+				    RELIC_FAMILY_INPUT_FIRST].plan;
+				delta = &fixture.plan.ops[2].u.atom;
+				checkf(reads_in_order(&fixture, reads[p], 4) &&
+				    fixture.plan.ops[2].kind ==
+				    RELIC_OP_LOOKUP &&
+				    delta->view == RELIC_VIEW_DELTA,
+				    SCENARIO_GUARD, "over %zu guards, %s, "
+				    "the input-first plan reads the guard "
+				    "first and looks the delta up last",
+				    sizes[i], p == 0 ? "as written" :
+				    "renamed and permuted");
+			} else {
+				checkf(false, SCENARIO_GUARD, "over %zu "
+				    "guards, %s, the variant keeps two plans",
+				    sizes[i], p == 0 ? "as written" :
+				    "renamed and permuted");
+			}
+			fixture_release(&fixture);
+		}
+	}
+}
+
+/*
+ * A candidate is kept whatever its work would be estimated at: an
+ * estimate is approximate, and the sizes it is made from change from
+ * round to round.
  *
  *	loop(X) :- e(X, X).
  *	r(a, Z) :- e(a, Y), r(Y, Z), loop(Z).
  *	r(X, Z) :- loop(X), e(X, Y), r(Y, Z).
  *
- * With no loops in e, loop is empty.  In the first rule e(a, Y) is bound
- * and goes first, so the placed plan loops over its bindings every round,
- * while the delta-first plan tests each delta tuple against the empty loop:
- * a fan-out of zero, cheaper whatever the delta holds, so the placed plan is
- * never run and never built.  In the second, the empty loop goes first and
- * the placed plan reads nothing at all, so the delta-first plan is the one
- * never built.
- *
- * The threshold between the two is the prefix estimate over the fan-out, in
- * integer division, with those two cases at its ends; a quotient no delta
- * can exceed, since a delta holds at most RELIC_TUPLE_MAX tuples, is the
- * second case too.
+ * With no loops in e, loop is empty.  In the first rule the delta-first
+ * plan tests each delta tuple against the empty loop, and in the second
+ * the input-first plan scans the empty loop first and reads nothing more.
+ * Each variant still keeps both of its plans, each with its recipe.
  */
 static void
-only_plans_some_delta_selects_are_built(void)
+estimates_never_discard_a_candidate(void)
 {
-	relic_variant_plans_t plans;
+	relic_plan_family_t family;
 	fixture_t fixture;
 	bool incomplete[8];
-
-	check(relic_plan_delta_threshold(4, 2) == 2 &&
-	    relic_plan_delta_threshold(3, 5) == 0 &&
-	    relic_plan_delta_threshold(0, 5) == 0 &&
-	    relic_plan_delta_threshold(0, 0) == 0 &&
-	    relic_plan_delta_threshold(4, 0) == RELIC_PLAN_NEVER,
-	    SCENARIO_BUILT, "the threshold is the prefix over the fan-out, "
-	    "zero for an empty prefix and never for an empty fan-out");
-	check(relic_plan_delta_threshold(RELIC_TUPLE_MAX - 1, 1) ==
-	    RELIC_TUPLE_MAX - 1 &&
-	    relic_plan_delta_threshold(RELIC_TUPLE_MAX, 1) ==
-	    RELIC_PLAN_NEVER &&
-	    relic_plan_delta_threshold((uint64_t)1e10, 1) == RELIC_PLAN_NEVER,
-	    SCENARIO_BUILT, "a threshold no delta can exceed is never");
+	size_t rule;
 
 	bzero(incomplete, sizeof(incomplete));
 	if (!fixture_load(&fixture, "e(a, b).\ne(b, c).\ne(c, d).\n"
@@ -1258,20 +1413,22 @@ only_plans_some_delta_selects_are_built(void)
 	    "r(a, Z) :- e(a, Y), r(Y, Z), loop(Z).\n"
 	    "r(X, Z) :- loop(X), e(X, Y), r(Y, Z).\n", 0, true) ||
 	    relic_pred_count(fixture.ctx) > 8) {
-		check(false, SCENARIO_BUILT, "the program is loaded");
+		check(false, SCENARIO_RETAINED, "the program is loaded");
 		fixture_release(&fixture);
 		return;
 	}
 	incomplete[fixture.ctx->program.rules.entries[1].head - 1] = true;
 
-	check(fixture_plan_variants(&fixture, 2, 1, incomplete, &plans) &&
-	    plans.threshold == RELIC_PLAN_NEVER && plans.placed.ops == NULL &&
-	    plans.delta_first.ops != NULL, SCENARIO_BUILT, "a fan-out of zero "
-	    "builds only the delta-first plan");
-	check(fixture_plan_variants(&fixture, 3, 2, incomplete, &plans) &&
-	    plans.threshold == 0 && plans.placed.ops != NULL &&
-	    plans.delta_first.ops == NULL, SCENARIO_BUILT, "a prefix of zero "
-	    "builds only the placed plan");
+	for (rule = 2; rule <= 3; rule++) {
+		checkf(fixture_plan_variants(&fixture, rule, rule == 2 ? 1 : 2,
+		    incomplete, &family) && family.count == 2 &&
+		    family.candidates[0].recipe.step_count ==
+		    family.candidates[0].plan.op_count &&
+		    family.candidates[1].recipe.step_count ==
+		    family.candidates[1].plan.op_count, SCENARIO_RETAINED,
+		    "rule %zu keeps both plans beside an empty relation, each "
+		    "with its recipe", rule);
+	}
 	fixture_release(&fixture);
 }
 
@@ -1281,9 +1438,9 @@ only_plans_some_delta_selects_are_built(void)
  * error rather than read as an atom it is not, and so is one over a relation
  * the planner is not told is being derived, which would leave the variant's
  * other member literals reading the whole relation, and a variant asked for
- * with no delta literal at all.  Each of the three ways a variant's orders
- * are decided -- written, pinned first alone without indexes, and placed
- * then pinned -- refuses alike.
+ * with no delta literal at all.  Each of the three families a variant can
+ * have -- the written order, the delta-first order alone without indexes,
+ * and both orders -- refuses alike, and holds no candidate after.
  */
 static void
 a_delta_literal_must_be_positive(void)
@@ -1293,7 +1450,7 @@ a_delta_literal_must_be_positive(void)
 	static const unsigned int flag_sets[] = {
 		TEXTUAL_FLAGS, RELIC_F_NO_INDEX, 0
 	};
-	relic_variant_plans_t plans;
+	relic_plan_family_t family;
 	fixture_t fixture;
 	size_t i;
 
@@ -1318,8 +1475,9 @@ a_delta_literal_must_be_positive(void)
 		fixture_release(&fixture);
 
 		checkf(fixture_load(&fixture, program, flag_sets[i], false) &&
-		    !fixture_plan_variants(&fixture, 0, 0, NULL, &plans) &&
-		    fixture.errors == 1, SCENARIO_DELTA_REFUSED,
+		    !fixture_plan_variants(&fixture, 0, 0, NULL, &family) &&
+		    fixture.errors == 1 && family.count == 0,
+		    SCENARIO_DELTA_REFUSED,
 		    "a delta literal over a relation not being derived is "
 		    "refused with one error, flags %#x", flag_sets[i]);
 		fixture_release(&fixture);
@@ -1327,8 +1485,8 @@ a_delta_literal_must_be_positive(void)
 
 	check(fixture_load(&fixture, program, 0, false) &&
 	    !fixture_plan_variants(&fixture, 0, RELIC_PLAN_NO_DELTA, NULL,
-	    &plans) && fixture.errors == 1 && plans.placed.ops == NULL &&
-	    plans.delta_first.ops == NULL, SCENARIO_DELTA_REFUSED,
+	    &family) && fixture.errors == 1 && family.count == 0,
+	    SCENARIO_DELTA_REFUSED,
 	    "a variant with no delta literal is refused with one error");
 	fixture_release(&fixture);
 }
@@ -3120,8 +3278,9 @@ main(void)
 	an_assignment_binds_a_slot_of_its_kind();
 	an_equality_of_two_literals_variables_assigns();
 	a_textual_variant_keeps_its_written_order();
-	a_delta_literal_is_placed_like_any_other();
-	only_plans_some_delta_selects_are_built();
+	a_variant_keeps_both_orders();
+	a_guard_of_any_size_keeps_the_input_first_plan();
+	estimates_never_discard_a_candidate();
 	a_delta_literal_must_be_positive();
 	the_emit_writes_the_relation_it_is_given();
 	a_bodyless_rule_is_a_lone_emit_of_constants();

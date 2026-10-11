@@ -1340,6 +1340,7 @@ run_postfix(relic_scratch_t *scratch, const relic_exec_env_t *env,
 
 	return (RELIC_RUN_VALUE);
 }
+
 /*
  * The identifiers an operation's view covers now: the whole relation, or a
  * range derived from the delta of the member being read, as plan.h sets out.

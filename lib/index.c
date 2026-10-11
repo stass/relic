@@ -889,6 +889,23 @@ relic_index_key_mask(const relic_index_t *index)
 }
 
 /*
+ * The distinct keys the index holds, the sum of its stripes' counts.  Only
+ * the stripe headers are read: no table is probed and no tuple is visited.
+ */
+size_t
+relic_index_key_count(const relic_index_t *index)
+{
+	size_t count;
+	size_t s;
+
+	count = 0;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		count += index->stripes[s].key_count;
+
+	return (count);
+}
+
+/*
  * The first tuple, in identifier order, that agrees with `probe` on the key
  * columns, or RELIC_ID_NONE when none does.
  */

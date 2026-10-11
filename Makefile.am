@@ -35,7 +35,7 @@ LIBOBJDIR = compat/
 
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
-	lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
+	lib/cost.c lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
@@ -53,7 +53,7 @@ dist_man1_MANS = man/relic.1
 dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
-	lib/cdefs.h lib/depgraph.h \
+	lib/cdefs.h lib/cost.h lib/depgraph.h \
 	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
 	lib/relation.h lib/round.h lib/strfn.h lib/util.h tests/unit/harness.h \
@@ -197,7 +197,8 @@ tests_unit_test_compat_replacements_CPPFLAGS = $(AM_CPPFLAGS) \
 ##
 
 RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
-	tests/unit/test_arith tests/unit/test_compute tests/unit/test_diag \
+	tests/unit/test_arith tests/unit/test_compute tests/unit/test_cost \
+	tests/unit/test_diag \
 	tests/unit/test_eval tests/unit/test_exec \
 	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
 	tests/unit/test_interrupt \
@@ -235,6 +236,9 @@ tests_unit_test_arith_portable_SOURCES = tests/unit/test_arith.c \
 	tests/unit/harness.c lib/arith.c
 tests_unit_test_arith_portable_CPPFLAGS = $(AM_CPPFLAGS) \
 	-DRELIC_ARITH_PORTABLE
+
+tests_unit_test_cost_SOURCES = tests/unit/test_cost.c tests/unit/harness.c
+tests_unit_test_cost_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_diag_SOURCES = tests/unit/test_diag.c tests/unit/harness.c
 tests_unit_test_diag_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -692,9 +696,9 @@ RELIC_LANG_TESTS = \
 	tests/lang/explain-graph.dl tests/lang/explain-long.dl \
 	tests/lang/explain-magic.dl tests/lang/explain-materialized.dl \
 	tests/lang/explain-ops.dl tests/lang/explain-restating.dl \
+	tests/lang/explain-retained.dl \
 	tests/lang/explain-subsumed.dl tests/lang/explain-supplementary.dl \
-	tests/lang/explain-tautology.dl \
-	tests/lang/explain-thresholds.dl tests/lang/explain-views.dl \
+	tests/lang/explain-tautology.dl tests/lang/explain-views.dl \
 	tests/lang/export-arities.dl tests/lang/export-arities-head.dl \
 	tests/lang/export-arity.dl tests/lang/export-rows.dl \
 	tests/lang/export-undefined.dl tests/lang/export-unknown.dl \

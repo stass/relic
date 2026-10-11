@@ -20,6 +20,24 @@
 # generous against the first and unreachable by the second, and it does not
 # depend on how fast the machine is.
 #
+# A recursive rule guarded by a complete relation, the shape the Magic
+# rewrite gives a bound closure, is written out by hand and evaluated from
+# the whole program, so that no rewrite of the query can stand in for the
+# planner:
+#
+#	tc(X, Z) :- reach(X), par(X, Y), tc(Y, Z).
+#
+# over the benchmarks' dense acyclic graph at scale 4, 4000 nodes and
+# 200 000 edges, with reach/1 the 1825 nodes reachable from node 500.  Each
+# round can scan the delta of tc and look up every predecessor of its first
+# column, most of which reach/1 then rejects, or scan reach/1 and its edges
+# and look up the delta.  The second is the written order, which the
+# reference -X no-reorder keeps.  Both plans must be available whatever the
+# planner assumes about the size of a relation it cannot yet measure, so
+# the default reads, scanned and looked up together, at most twice what the
+# written order reads and gives the same answers; a planner that kept the
+# delta-first plan alone reads about five times as much.
+#
 # A recursive cycle of 200 000 predicates, p0 :- p1, p1 :- p2 and so on back
 # to p0, with one fact, is answered through its Magic rewrite.  Everything is
 # one component, and the fact travels one predicate per semi-naive round, so
@@ -221,6 +239,56 @@ fi
 work_done=$((scanned + looked_up))
 if [ "$work_done" -gt "$work_bound" ]; then
 	fail "reachability read $work_done tuples ($scanned scanned, $looked_up looked up), more than the bound of $work_bound"
+fi
+
+: "${RELIC_SRCDIR:?RELIC_SRCDIR must name the source tree}"
+mkdir "$work/guarded"
+(
+	. "$RELIC_SRCDIR/bench/datasets.sh"
+	dataset dense-acyclic "$work/guarded" 4 &&
+	    source_facts "$work/guarded" > "$work/guarded/facts.dl"
+) || fail "the guarded closure's data set could not be generated"
+cat > "$work/guarded/rules.dl" <<'EOF'
+reach(500).
+reach(Y) :- reach(X), par(X, Y).
+tc(X, Y) :- reach(X), par(X, Y).
+tc(X, Z) :- reach(X), par(X, Y), tc(Y, Z).
+EOF
+
+# Run the guarded closure with the switches given, leaving its sorted rows
+# in the file the first argument names and the tuples it read in
+# guarded_read.
+run_guarded() {
+	rows=$1
+	shift
+
+	status=0
+	run_within "$work/rows" "$work/stats" "$budget" \
+	    "$RELIC" -X stats -X no-magic "$@" -q 'tc(500, X)?' \
+	    "$work/guarded/facts.dl" "$work/guarded/rules.dl" || status=$?
+	if [ "$status" -ne 0 ]; then
+		cat "$work/stats" >&2
+		fail "the guarded closure $* exited $status within a budget of $budget CPU seconds"
+	fi
+	sort "$work/rows" > "$rows"
+
+	scanned=$(counter "tuples scanned")
+	looked_up=$(counter "tuples looked up")
+	if [ -z "$scanned" ] || [ -z "$looked_up" ]; then
+		cat "$work/stats" >&2
+		fail "the guarded closure $* reported no scan or lookup counters"
+	fi
+	guarded_read=$((scanned + looked_up))
+}
+
+run_guarded "$work/guarded/written" -X no-reorder
+written_read=$guarded_read
+run_guarded "$work/guarded/planned"
+if ! cmp -s "$work/guarded/written" "$work/guarded/planned"; then
+	fail "the guarded closure's answers depend on its join order"
+fi
+if [ "$guarded_read" -gt $((2 * written_read)) ]; then
+	fail "the guarded closure read $guarded_read tuples, more than twice the $written_read of its written order"
 fi
 
 awk -v count="$cycle" 'BEGIN {

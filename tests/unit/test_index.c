@@ -127,7 +127,6 @@ static size_t	 distinct_by_hand(const relic_relation_t *rel, uint16_t column);
 static size_t	 storage_by_hand(const relic_t *ctx);
 static size_t	 charged_bytes(const relic_t *ctx);
 static size_t	 index_bytes_by_hand(const relic_index_t *index);
-static size_t	 index_key_count(const relic_index_t *index);
 static void	 a_key_first_held_late_is_found_by_its_values(void);
 static void	 a_lookup_visits_a_keys_tuples_in_order(void);
 static void	 an_index_built_late_matches_one_kept_up(void);
@@ -285,22 +284,6 @@ index_bytes_by_hand(const relic_index_t *index)
 }
 
 /*
- * How many distinct keys an index holds, over every stripe.
- */
-static size_t
-index_key_count(const relic_index_t *index)
-{
-	size_t count;
-	size_t s;
-
-	count = 0;
-	for (s = 0; s < RELIC_STRIPES; s++)
-		count += index->stripes[s].key_count;
-
-	return (count);
-}
-
-/*
  * Whether the index at `position` agrees with a scan of the relation: for the
  * key of every tuple, walking the index from that key visits exactly the
  * tuples a scan finds holding it, in identifier order.
@@ -447,9 +430,10 @@ a_lookup_visits_a_keys_tuples_in_order(void)
 	    SCENARIO_CHAINS, "the index on column 0 agrees with a scan");
 	check(index_agrees(rel, outer_columns, SCENARIO_CHAINS),
 	    SCENARIO_CHAINS, "the index on columns 0 and 2 agrees with a scan");
-	checkf(index_key_count(&rel->indexes[first_column]) == SWEEP_VALUES,
-	    SCENARIO_CHAINS, "column 0 should hold %u keys, not %zu",
-	    SWEEP_VALUES, index_key_count(&rel->indexes[first_column]));
+	checkf(relic_index_key_count(&rel->indexes[first_column]) ==
+	    SWEEP_VALUES, SCENARIO_CHAINS, "column 0 should hold %u keys, "
+	    "not %zu", SWEEP_VALUES,
+	    relic_index_key_count(&rel->indexes[first_column]));
 
 	absent[0] = value(ctx, SWEEP_VALUES + 1);
 	absent[1] = value(ctx, 0);
@@ -574,9 +558,9 @@ a_key_first_held_late_is_found_by_its_values(void)
 		return;
 	}
 
-	checkf(index_key_count(&rel->indexes[kept_up]) == LATE_KEYS,
+	checkf(relic_index_key_count(&rel->indexes[kept_up]) == LATE_KEYS,
 	    SCENARIO_LATE_KEY, "column 0 should hold %u keys, not %zu",
-	    LATE_KEYS, index_key_count(&rel->indexes[kept_up]));
+	    LATE_KEYS, relic_index_key_count(&rel->indexes[kept_up]));
 	check(index_agrees(rel, kept_up, SCENARIO_LATE_KEY), SCENARIO_LATE_KEY,
 	    "the index kept up agrees with a scan");
 	check(index_agrees(rel, built, SCENARIO_LATE_KEY), SCENARIO_LATE_KEY,

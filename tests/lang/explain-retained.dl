@@ -1,0 +1,17 @@
+% -e over variants one of whose two plans would be estimated to do no
+% work at all, which still keep both.  loop holds nothing.  The first
+% variant's delta-first plan tests each delta tuple against loop and finds
+% nothing; the second variant's input-first plan reads loop first and so
+% reads nothing more.  An estimate is not a proof, and the sizes it is made
+% from change from round to round, so each variant shows both of its plans
+% under the rule a round chooses between them by.
+
+e(a, b).
+e(b, c).
+e(c, d).
+
+loop(X) :- e(X, X).
+
+r(X, Y) :- e(X, Y).
+r(a, Z) :- e(a, Y), r(Y, Z), loop(Z).
+r(X, Z) :- loop(X), e(X, Y), r(Y, Z).

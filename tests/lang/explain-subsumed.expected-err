@@ -9,66 +9,76 @@ magic rewrite of $q0(X) :- p(a, X).
             scan e(X, Y)
             emit r$ff(X, Y)
         rule r$ff(X, Z) :- e(X, Y), r$ff(Y, Z).
-            delta r$ff(Y, Z) when the delta holds more than 2 tuples:
-                scan e(X, Y)
-                lookup delta r$ff(Y, Z) key={0}
-                emit r$ff(X, Z)
-            delta r$ff(Y, Z) otherwise:
-                scan delta r$ff(Y, Z)
-                lookup e(X, Y) key={1}
-                emit r$ff(X, Z)
+            delta r$ff(Y, Z):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta r$ff(Y, Z)
+                    lookup e(X, Y) key={1}
+                    emit r$ff(X, Z)
+                plan input-first:
+                    scan e(X, Y)
+                    lookup delta r$ff(Y, Z) key={0}
+                    emit r$ff(X, Z)
     stratum 0, component 1 (recursive): magic$q$bf/1
         rule magic$q$bf(X) :- start(X).
             scan start(X)
             emit magic$q$bf(X)
         rule magic$q$bf(Y) :- magic$q$bf(X), f(X, Y).
-            delta magic$q$bf(X) when the delta holds more than 2 tuples:
-                scan f(X, Y)
-                member delta magic$q$bf(X)
-                emit magic$q$bf(Y)
-            delta magic$q$bf(X) otherwise:
-                scan delta magic$q$bf(X)
-                lookup f(X, Y) key={0}
-                emit magic$q$bf(Y)
+            delta magic$q$bf(X):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta magic$q$bf(X)
+                    lookup f(X, Y) key={0}
+                    emit magic$q$bf(Y)
+                plan input-first:
+                    scan f(X, Y)
+                    member delta magic$q$bf(X)
+                    emit magic$q$bf(Y)
     stratum 0, component 2 (recursive): p$ff/2, q$bf/2
         rule p$ff(X, Y) :- r$ff(X, Y).
             scan r$ff(X, Y)
             emit p$ff(X, Y)
         rule p$ff(X, Y) :- start(X), q$bf(X, Y).
-            delta q$bf(X, Y) when the delta holds more than 1 tuple:
-                scan start(X)
-                lookup delta q$bf(X, Y) key={0}
-                emit p$ff(X, Y)
-            delta q$bf(X, Y) otherwise:
-                scan delta q$bf(X, Y)
-                member start(X)
-                emit p$ff(X, Y)
+            delta q$bf(X, Y):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta q$bf(X, Y)
+                    member start(X)
+                    emit p$ff(X, Y)
+                plan input-first:
+                    scan start(X)
+                    lookup delta q$bf(X, Y) key={0}
+                    emit p$ff(X, Y)
         rule q$bf(X, Y) :- magic$q$bf(X), f(X, Y).
             scan f(X, Y)
             member magic$q$bf(X)
             emit q$bf(X, Y)
         rule q$bf(X, Z) :- magic$q$bf(X), f(X, Y), q$bf(Y, Z).
-            delta q$bf(Y, Z) when the delta holds more than 2 tuples:
-                scan f(X, Y)
-                member magic$q$bf(X)
-                lookup delta q$bf(Y, Z) key={0}
-                emit q$bf(X, Z)
-            delta q$bf(Y, Z) otherwise:
-                scan delta q$bf(Y, Z)
-                lookup f(X, Y) key={1}
-                member magic$q$bf(X)
-                emit q$bf(X, Z)
+            delta q$bf(Y, Z):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta q$bf(Y, Z)
+                    lookup f(X, Y) key={1}
+                    member magic$q$bf(X)
+                    emit q$bf(X, Z)
+                plan input-first:
+                    scan f(X, Y)
+                    member magic$q$bf(X)
+                    lookup delta q$bf(Y, Z) key={0}
+                    emit q$bf(X, Z)
         rule q$bf(X, Y) :- magic$q$bf(X), g(X), p$ff(Y, _).
-            delta p$ff(Y, _) when the delta holds more than 1 tuple:
-                scan g(X)
-                member magic$q$bf(X)
-                scan delta p$ff(Y, _)
-                emit q$bf(X, Y)
-            delta p$ff(Y, _) otherwise:
-                scan delta p$ff(Y, _)
-                scan g(X)
-                member magic$q$bf(X)
-                emit q$bf(X, Y)
+            delta p$ff(Y, _):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta p$ff(Y, _)
+                    scan g(X)
+                    member magic$q$bf(X)
+                    emit q$bf(X, Y)
+                plan input-first:
+                    scan g(X)
+                    member magic$q$bf(X)
+                    scan delta p$ff(Y, _)
+                    emit q$bf(X, Y)
 query $q0(X) :- p$ff(a, X).
     lookup p$ff(a, X) key={0}
     stream $q0(X)

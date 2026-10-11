@@ -54,11 +54,7 @@ struct relic_explain_line {
 	bool	truncated;
 };
 
-static void	 begin_variant_heading(const relic_t *ctx,
-		    relic_explain_line_t *line, const relic_rule_t *rule,
-		    size_t delta_literal, unsigned int depth);
 static unsigned int binds_as_tightly(const relic_expr_t *expr);
-static void	 finish_heading(const relic_t *ctx, relic_explain_line_t *line);
 static void	 line_begin(relic_explain_line_t *line, unsigned int depth);
 static void	 line_finish(const relic_t *ctx, relic_explain_line_t *line);
 static void	 line_put(relic_explain_line_t *line, const char *text);
@@ -142,7 +138,8 @@ static void	 put_term(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_plan_term_t *term);
 static void	 put_text(relic_explain_line_t *line, const char *bytes,
 		    size_t length);
-static void	 put_uint64(relic_explain_line_t *line, uint64_t value);
+static void	 put_text_line(const relic_t *ctx, const char *text,
+		    unsigned int depth);
 static void	 put_value(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_dom_t dom);
 static void	 put_variable(relic_explain_line_t *line,
@@ -245,15 +242,6 @@ put_size(relic_explain_line_t *line, size_t value)
 	char text[24];
 
 	snprintf(text, sizeof(text), "%zu", value);
-	line_put(line, text);
-}
-
-static void
-put_uint64(relic_explain_line_t *line, uint64_t value)
-{
-	char text[24];
-
-	snprintf(text, sizeof(text), "%" PRIu64, value);
 	line_put(line, text);
 }
 
@@ -1109,69 +1097,59 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 }
 
 /*
- * Begin the heading of one of a delta variant's plans: the literal that
- * reads the delta, after which the caller says when a round runs the plan,
- * if the variant has two.
+ * One line holding `text` alone, at `depth`.
  */
 static void
-begin_variant_heading(const relic_t *ctx, relic_explain_line_t *line,
-    const relic_rule_t *rule, size_t delta_literal, unsigned int depth)
+put_text_line(const relic_t *ctx, const char *text, unsigned int depth)
 {
-	line_begin(line, depth);
-	line_put(line, "delta ");
-	if (delta_literal < rule->body_length)
-		put_literal(ctx, line, rule, &rule->body[delta_literal]);
-}
+	relic_explain_line_t line;
 
-/*
- * End a heading with its colon and hand the line over.
- */
-static void
-finish_heading(const relic_t *ctx, relic_explain_line_t *line)
-{
-	line_put_byte(line, ':');
-	line_finish(ctx, line);
+	line_begin(&line, depth);
+	line_put(&line, text);
+	line_finish(ctx, &line);
 }
 
 /*
  * A delta variant, headed by the literal that reads the delta and nested
- * under the rule it is a variant of, with the plans it was given: NULL for
- * a plan not built because no round would run it.  A variant with both
- * shows the placed plan headed by the threshold a round's delta must exceed
- * for it to run, then the delta-first plan.  Which a round chose is not
- * shown, so that the lines are a function of the plans and not of how many
- * rounds ran.
+ * under the rule it is a variant of, with the plans of its family.  A lone
+ * plan follows the heading directly.  Two follow the rule a round chooses
+ * between them by, each under the name of the policy that ordered it.
+ * Which a round chose is not shown, so that the lines are a function of the
+ * plans and not of how many rounds ran.
  */
 void
 relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
-    size_t delta_literal, const relic_plan_t *placed,
-    const relic_plan_t *delta_first, uint64_t threshold, unsigned int depth)
+    size_t delta_literal, const relic_plan_family_t *family,
+    unsigned int depth)
 {
 	relic_explain_line_t line;
 
 	if (!relic_explaining(ctx))
 		return;
 
-	if (placed == NULL || delta_first == NULL) {
-		begin_variant_heading(ctx, &line, rule, delta_literal,
-		    depth + 2);
-		finish_heading(ctx, &line);
-		put_plan(ctx, rule, placed != NULL ? placed : delta_first,
-		    depth + 3, false);
+	line_begin(&line, depth + 2);
+	line_put(&line, "delta ");
+	if (delta_literal < rule->body_length)
+		put_literal(ctx, &line, rule, &rule->body[delta_literal]);
+	line_put_byte(&line, ':');
+	line_finish(ctx, &line);
+
+	if (family->count == 1) {
+		put_plan(ctx, rule, &family->candidates[0].plan, depth + 3,
+		    false);
 		return;
 	}
 
-	begin_variant_heading(ctx, &line, rule, delta_literal, depth + 2);
-	line_put(&line, " when the delta holds more than ");
-	put_uint64(&line, threshold);
-	line_put(&line, threshold == 1 ? " tuple" : " tuples");
-	finish_heading(ctx, &line);
-	put_plan(ctx, rule, placed, depth + 3, false);
-
-	begin_variant_heading(ctx, &line, rule, delta_literal, depth + 2);
-	line_put(&line, " otherwise");
-	finish_heading(ctx, &line);
-	put_plan(ctx, rule, delta_first, depth + 3, false);
+	put_text_line(ctx, "choose lowest estimated work; ties: delta-first",
+	    depth + 3);
+	put_text_line(ctx, "plan delta-first:", depth + 3);
+	put_plan(ctx, rule,
+	    &family->candidates[RELIC_FAMILY_DELTA_FIRST].plan, depth + 4,
+	    false);
+	put_text_line(ctx, "plan input-first:", depth + 3);
+	put_plan(ctx, rule,
+	    &family->candidates[RELIC_FAMILY_INPUT_FIRST].plan, depth + 4,
+	    false);
 }
 
 void

@@ -182,14 +182,13 @@ struct relic_running_plan {
 
 /*
  * A semi-naive delta variant of `rule`, in which body literal
- * `delta_literal` reads its member's delta.  `placed` runs it with the delta
- * literal ordered like any other and `delta_first` with the delta literal
- * placed first; a round runs `placed` when the delta holds more than
- * `threshold` tuples and `delta_first` otherwise, since which is cheaper
- * depends on a size known only when the round starts.  Each is NULL when no
- * round would run it, and at least one is not (relic_variant_plans_t).
- * Both read every literal through the same view, so they derive the same
- * tuples.
+ * `delta_literal` reads its member's delta.  `family` holds its one or two
+ * candidate plans and their recipes (relic_plan_family_t), and `running`
+ * what runs each, at the same position: `family.count` of them, none NULL.
+ * With two, each round runs whichever its recipe estimates the less work
+ * for, since which is cheaper depends on sizes known only when the round
+ * starts.  Every candidate reads every literal through the same view, so
+ * they derive the same tuples.
  *
  * `empty_old_views` counts the literals the variant reads through the old
  * view while that view is still empty, one for each member literal written
@@ -200,9 +199,8 @@ struct relic_running_plan {
  */
 struct relic_variant {
 	const relic_rule_t	*rule;
-	relic_running_plan_t	*placed;
-	relic_running_plan_t	*delta_first;
-	uint64_t		 threshold;
+	relic_plan_family_t	 family;
+	relic_running_plan_t	*running[RELIC_FAMILY_MAX];
 	size_t			 delta_literal;
 	size_t			 empty_old_views;
 };
@@ -285,7 +283,8 @@ struct relic_delta_work {
  *
  * `fixed_point` is how the component is evaluated.  The variants and the
  * `work` of running them exist exactly when it is RELIC_FIXED_SEMI_NAIVE,
- * because the one decision sets both.
+ * because the one decision sets both.  `catalog` holds the index statistics
+ * the recipes of the variants with two plans read, each index once.
  */
 struct relic_component_plans {
 	const size_t		 *rule_indexes;
@@ -294,6 +293,7 @@ struct relic_component_plans {
 	relic_relation_t	**members;
 	relic_round_item_t	 *items;
 	relic_delta_work_t	  work;
+	relic_cost_catalog_t	  catalog;
 	size_t			  rule_count;
 	size_t			  planned_count;
 	size_t			  variant_count;
@@ -612,7 +612,12 @@ static int	 gather_query_answer(relic_evaluation_t *eval,
 		    const relic_running_plan_t *running);
 static relic_running_plan_t *variant_plan(
 		    const relic_evaluation_t *eval,
+		    relic_component_plans_t *plans,
 		    const relic_variant_t *variant);
+static size_t	 collect_index_reads(const relic_component_plans_t *plans,
+		    relic_cost_statistic_t *entries);
+static int	 plan_catalog(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
 
 /*
  * A type, given as a domain identifier's type bits, as a note names it,
@@ -1233,8 +1238,9 @@ begin_round(relic_evaluation_t *eval, const relic_component_plans_t *plans,
  * Add an item to a round of the component being evaluated: a seed of
  * `rule` when `running` is NULL, and otherwise the running plan of it,
  * with the plan's history and its record of insertions on a context whose
- * rounds may be deferred.  Its target is the member the rule's head is, and a component's
- * round targets its members in the order of their positions.
+ * rounds may be deferred.  Its target is the member the rule's head is,
+ * and a component's round targets its members in the order of their
+ * positions.
  */
 static void
 add_item(const relic_evaluation_t *eval, relic_round_t *round,
@@ -1463,33 +1469,25 @@ record_gain(relic_delta_work_t *work, size_t member)
 }
 
 /*
- * The plan of a variant this round runs: the placed plan when its delta
- * holds more tuples than the variant's threshold, and the delta-first plan
- * otherwise, or whichever of the two was built when only one was.
+ * The plan of a variant this round runs: its only plan, or of its two the
+ * one relic_cost_choose() estimates does the less work over the views the
+ * round reads.  Estimating refreshes the component's catalog, and reads
+ * nothing a worker writes, since no worker runs while a round is gathered.
  */
 static relic_running_plan_t *
-variant_plan(const relic_evaluation_t *eval, const relic_variant_t *variant)
+variant_plan(const relic_evaluation_t *eval, relic_component_plans_t *plans,
+    const relic_variant_t *variant)
 {
-	const relic_tuple_range_t *delta;
-
-	if (variant->placed == NULL)
-		return (variant->delta_first);
-	if (variant->delta_first == NULL)
-		return (variant->placed);
-
-	delta = &eval->deltas[variant->rule->body[
-	    variant->delta_literal].u.atom.pred - 1];
-	if (delta->end - delta->first > variant->threshold)
-		return (variant->placed);
-
-	return (variant->delta_first);
+	return (variant->running[relic_cost_choose(&variant->family,
+	    &eval->env, &plans->catalog)]);
 }
 
 /*
  * Gather the variants due this round into a round, in the order they were
- * planned, each with the plan its delta's size selects.  Every view of a
+ * planned, each with the plan its estimated work selects.  Every view of a
  * variant is a member's old, delta or current view, fixed by the deltas
- * before the round begins, so the round reads nothing it writes.
+ * before the round begins, so the round reads nothing it writes, and the
+ * choice is made before any of it runs.
  */
 static void
 gather_variant_round(relic_evaluation_t *eval,
@@ -1504,7 +1502,7 @@ gather_variant_round(relic_evaluation_t *eval,
 
 	for (i = 0; i < due_count; i++) {
 		variant = &plans->variants[plans->work.due[i]];
-		add_item(eval, round, variant_plan(eval, variant),
+		add_item(eval, round, variant_plan(eval, plans, variant),
 		    variant->rule);
 	}
 }
@@ -2125,16 +2123,17 @@ plan_base(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 
 /*
  * Plan the variant of `rule` whose delta literal is body literal
- * `delta_literal`: the plans a round may choose between, each left NULL when
- * the planner built none because no round would run it, and the threshold
- * a round chooses by.
+ * `delta_literal`: the family of plans a round chooses between, and what
+ * runs each.  The variant holds no candidate until every one has what runs
+ * it.
  */
 static int
 plan_variant(relic_evaluation_t *eval, const relic_component_plans_t *plans,
     const relic_rule_t *rule, size_t delta_literal, relic_variant_t *variant)
 {
-	relic_variant_plans_t variant_plans;
+	relic_plan_family_t family;
 	relic_relation_t *target;
+	size_t i;
 
 	bzero(variant, sizeof(*variant));
 	variant->rule = rule;
@@ -2142,26 +2141,24 @@ plan_variant(relic_evaluation_t *eval, const relic_component_plans_t *plans,
 	target = head_relation_of(eval, plans, rule);
 
 	if (relic_plan_variant(eval->ctx, eval->arena, rule,
-	    target, delta_literal, eval->is_member, &variant_plans) != 0)
-		return (-1);
-	variant->threshold = variant_plans.threshold;
-
-	if (variant_plans.placed.ops != NULL &&
-	    make_running_plan(eval, rule, &variant_plans.placed, target,
-	    &variant->placed) != 0)
+	    target, delta_literal, eval->is_member, &family) != 0)
 		return (-1);
 
-	if (variant_plans.delta_first.ops != NULL &&
-	    make_running_plan(eval, rule, &variant_plans.delta_first, target,
-	    &variant->delta_first) != 0)
-		return (-1);
+	for (i = 0; i < family.count; i++) {
+		if (make_running_plan(eval, rule, &family.candidates[i].plan,
+		    target, &variant->running[i]) != 0)
+			return (-1);
+	}
 
 	/*
 	 * Whichever plan a round runs, the variant derives the same tuples,
-	 * so what one run inserted predicts the next run of either.
+	 * so what one run inserted predicts the next run of any.
 	 */
-	if (variant->placed != NULL && variant->delta_first != NULL)
-		variant->delta_first->insertions = variant->placed->insertions;
+	for (i = 1; i < family.count; i++)
+		variant->running[i]->insertions =
+		    variant->running[0]->insertions;
+
+	variant->family = family;
 
 	return (0);
 }
@@ -2401,10 +2398,7 @@ group_by_delta_member(relic_evaluation_t *eval,
 static const relic_plan_t *
 variant_any_plan(const relic_variant_t *variant)
 {
-	if (variant->placed != NULL)
-		return (&variant->placed->plan);
-
-	return (&variant->delta_first->plan);
+	return (&variant->family.candidates[0].plan);
 }
 
 /*
@@ -2471,10 +2465,94 @@ op_reads_old(const relic_op_t *op)
 }
 
 /*
+ * Collect an entry for every recipe step of the component's families that
+ * reads an index into `entries`, or only count them when `entries` is
+ * NULL, and return how many there are.  Each entry starts at zero tuples
+ * and zero keys, the truth for an empty relation, and is counted when a
+ * round first estimates a plan reading it (cost.h).
+ */
+static size_t
+collect_index_reads(const relic_component_plans_t *plans,
+    relic_cost_statistic_t *entries)
+{
+	const relic_plan_family_t *family;
+	const relic_cost_recipe_t *recipe;
+	const relic_relation_t *relation;
+	uint32_t position;
+	size_t c;
+	size_t count;
+	size_t i;
+	size_t s;
+
+	count = 0;
+	for (i = 0; i < plans->variant_count; i++) {
+		family = &plans->variants[i].family;
+		for (c = 0; c < family->count; c++) {
+			recipe = &family->candidates[c].recipe;
+			for (s = 0; s < recipe->step_count; s++) {
+				if (!relic_cost_step_index(&recipe->steps[s],
+				    &relation, &position))
+					continue;
+				if (entries != NULL) {
+					bzero(&entries[count],
+					    sizeof(entries[count]));
+					entries[count].relation = relation;
+					entries[count].index_position =
+					    position;
+				}
+				count++;
+			}
+		}
+	}
+
+	return (count);
+}
+
+/*
+ * Build the catalog the component's recipes estimate lookups from: an
+ * entry per index a recipe step reads, sorted so that the entries of one
+ * index are adjacent, and then kept once.
+ */
+static int
+plan_catalog(relic_evaluation_t *eval, relic_component_plans_t *plans)
+{
+	relic_cost_statistic_t *entries;
+	size_t collected RELIC_UNUSED;
+	size_t count;
+	size_t distinct;
+	size_t i;
+
+	count = collect_index_reads(plans, NULL);
+	entries = evaluation_alloc(eval, count, sizeof(*entries));
+	if (entries == NULL)
+		return (-1);
+	collected = collect_index_reads(plans, entries);
+	assert(collected == count);
+
+	if (count > 1)
+		qsort(entries, count, sizeof(*entries),
+		    relic_cost_statistic_compare);
+
+	distinct = 0;
+	for (i = 0; i < count; i++) {
+		if (distinct > 0 && relic_cost_statistic_compare(&entries[i],
+		    &entries[distinct - 1]) == 0)
+			continue;
+		entries[distinct++] = entries[i];
+	}
+
+	plans->catalog.entries = entries;
+	plans->catalog.count = distinct;
+
+	return (0);
+}
+
+/*
  * Prepare what a semi-naive round needs to run only the variants that can
- * derive something: the variants grouped by the member their delta literal
- * reads and by each member they read through the old view, and room for the
- * sets a round keeps.  The members must be marked.
+ * derive something, and to choose each one's plan: the variants grouped by
+ * the member their delta literal reads and by each member they read
+ * through the old view, room for the sets a round keeps, and the catalog
+ * its estimates read.  The members must be marked.
  */
 static int
 plan_delta_work(relic_evaluation_t *eval, relic_component_plans_t *plans)
@@ -2486,7 +2564,10 @@ plan_delta_work(relic_evaluation_t *eval, relic_component_plans_t *plans)
 	if (group_by_delta_member(eval, plans) != 0)
 		return (-1);
 
-	return (group_by_old_member(eval, plans));
+	if (group_by_old_member(eval, plans) != 0)
+		return (-1);
+
+	return (plan_catalog(eval, plans));
 }
 
 /*
@@ -2592,12 +2673,7 @@ explain_component(const relic_evaluation_t *eval,
 		for (j = 0; j < rule_plans->variant_count; j++) {
 			variant = &rule_plans->variants[j];
 			relic_explain_variant(eval->ctx, rule_plans->rule,
-			    variant->delta_literal,
-			    variant->placed == NULL ? NULL :
-			    &variant->placed->plan,
-			    variant->delta_first == NULL ? NULL :
-			    &variant->delta_first->plan, variant->threshold,
-			    depth);
+			    variant->delta_literal, &variant->family, depth);
 		}
 	}
 }

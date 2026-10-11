@@ -3,14 +3,16 @@ stratum 0, component 0 (recursive): path/2
         scan edge(X, Y)
         emit path(X, Y)
     rule path(X, Z) :- edge(X, Y), path(Y, Z).
-        delta path(Y, Z) when the delta holds more than 2 tuples:
-            scan edge(X, Y)
-            lookup delta path(Y, Z) key={0}
-            emit path(X, Z)
-        delta path(Y, Z) otherwise:
-            scan delta path(Y, Z)
-            lookup edge(X, Y) key={1}
-            emit path(X, Z)
+        delta path(Y, Z):
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta path(Y, Z)
+                lookup edge(X, Y) key={1}
+                emit path(X, Z)
+            plan input-first:
+                scan edge(X, Y)
+                lookup delta path(Y, Z) key={0}
+                emit path(X, Z)
 query $q0(X) :- path(a, X).
     lookup path(a, X) key={0}
     stream $q0(X)

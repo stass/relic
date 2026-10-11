@@ -576,8 +576,8 @@ build no index, scanning instead;
 .It Cm no-magic
 answer every query from the whole program;
 .It Cm no-reorder
-join a rule's atoms in the order they are written, but for the one reading
-what the previous round derived, which goes first;
+join a rule's atoms in the order they are written, even the one reading
+what the previous round derived;
 .It Cm no-stream
 gather every query's answer whole before writing its first row, as a query
 whose plan may derive a row twice is answered, rather than writing the rows

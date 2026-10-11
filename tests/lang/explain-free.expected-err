@@ -7,41 +7,66 @@ stratum 0, component 0 (recursive): pointsTo/2
         scan addressOf(V, W)
         emit pointsTo(V, W)
     rule pointsTo(V, W) :- assign(V, U), pointsTo(U, W).
-        delta pointsTo(U, W) when the delta holds more than 1 tuple:
-            scan assign(V, U)
-            lookup delta pointsTo(U, W) key={0}
-            emit pointsTo(V, W)
-        delta pointsTo(U, W) otherwise:
-            scan delta pointsTo(U, W)
-            lookup assign(V, U) key={1}
-            emit pointsTo(V, W)
+        delta pointsTo(U, W):
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta pointsTo(U, W)
+                lookup assign(V, U) key={1}
+                emit pointsTo(V, W)
+            plan input-first:
+                scan assign(V, U)
+                lookup delta pointsTo(U, W) key={0}
+                emit pointsTo(V, W)
     rule pointsTo(V, W) :- load(V, P), pointsTo(P, Q), pointsTo(Q, W).
         delta pointsTo(P, Q):
-            scan load(V, P)
-            lookup delta pointsTo(P, Q) key={0}
-            lookup pointsTo(Q, W) key={0}
-            emit pointsTo(V, W)
-        delta pointsTo(Q, W) when the delta holds more than 1 tuple:
-            scan load(V, P)
-            lookup old pointsTo(P, Q) key={0}
-            lookup delta pointsTo(Q, W) key={0}
-            emit pointsTo(V, W)
-        delta pointsTo(Q, W) otherwise:
-            scan delta pointsTo(Q, W)
-            lookup old pointsTo(P, Q) key={1}
-            lookup load(V, P) key={1}
-            emit pointsTo(V, W)
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta pointsTo(P, Q)
+                lookup load(V, P) key={1}
+                lookup pointsTo(Q, W) key={0}
+                emit pointsTo(V, W)
+            plan input-first:
+                scan load(V, P)
+                lookup delta pointsTo(P, Q) key={0}
+                lookup pointsTo(Q, W) key={0}
+                emit pointsTo(V, W)
+        delta pointsTo(Q, W):
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta pointsTo(Q, W)
+                lookup old pointsTo(P, Q) key={1}
+                lookup load(V, P) key={1}
+                emit pointsTo(V, W)
+            plan input-first:
+                scan load(V, P)
+                lookup old pointsTo(P, Q) key={0}
+                lookup delta pointsTo(Q, W) key={0}
+                emit pointsTo(V, W)
     rule pointsTo(Q, W) :- store(P, V), pointsTo(P, Q), pointsTo(V, W).
         delta pointsTo(P, Q):
-            scan store(P, V)
-            lookup delta pointsTo(P, Q) key={0}
-            lookup pointsTo(V, W) key={0}
-            emit pointsTo(Q, W)
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta pointsTo(P, Q)
+                lookup store(P, V) key={0}
+                lookup pointsTo(V, W) key={0}
+                emit pointsTo(Q, W)
+            plan input-first:
+                scan store(P, V)
+                lookup pointsTo(V, W) key={0}
+                lookup delta pointsTo(P, Q) key={0}
+                emit pointsTo(Q, W)
         delta pointsTo(V, W):
-            scan store(P, V)
-            lookup delta pointsTo(V, W) key={0}
-            lookup old pointsTo(P, Q) key={0}
-            emit pointsTo(Q, W)
+            choose lowest estimated work; ties: delta-first
+            plan delta-first:
+                scan delta pointsTo(V, W)
+                lookup store(P, V) key={1}
+                lookup old pointsTo(P, Q) key={0}
+                emit pointsTo(Q, W)
+            plan input-first:
+                scan store(P, V)
+                lookup old pointsTo(P, Q) key={0}
+                lookup delta pointsTo(V, W) key={0}
+                emit pointsTo(Q, W)
 query $q0(X, Y) :- pointsTo(X, Y).
     scan pointsTo(X, Y)
     stream $q0(X, Y)

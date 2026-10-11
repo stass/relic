@@ -50,20 +50,6 @@ sorted in `docs/todo-parallel.md`.
 
 ## Engine
 
-**Recursive planning can discard the cheaper join order.** [Medium,
-component: `lib/plan.c`, `lib/plan.h`] `decide_variant()` retains only the
-delta-first plan when the initial greedy order starts with the delta.
-That decision uses an assumed 1,000 tuples for an incomplete relation.
-At scale 4, `tc-acyclic-bf` crosses that estimate and loses its
-magic-first alternative: it makes 92,938,873 lookups against 19,418,539
-with `-X no-reorder`, for identical answers and 18,923,480 derivations.
-At scale 8 the corresponding counts are 356,557,738 and 72,238,190.
-Implement [recursive plan selection](specs/design-recursive-planning.md):
-structural alternatives independent of guessed delta cardinality, with
-work estimates from frozen views and index key counts. Add a counter
-regression across the estimate boundary before changing the planner;
-raising the constant only moves the boundary.
-
 **A table's growth hashes every tuple again.** [Low, component:
 `lib/util.c`, `lib/relation.c`] `relic_idtab_complete_growth()` rehashes
 each entry through a callback that reads the tuple or key it names and

@@ -16,7 +16,9 @@ relic 1.0.0 (unreleased)
     numbers, and 1.5 is reserved for them, as are # and $ outside a string
     or a comment.
   * Evaluation: semi-naive fixed points, secondary indexes built when a plan
-    first asks for one, joins ordered by estimated cost, an atom that binds
+    first asks for one, joins ordered by estimated cost, each round of a
+    recursive rule choosing between two join orders by the work it
+    estimates for each over what the round reads, an atom that binds
     nothing the rest of its rule reads, through _ or a variable named once,
     tested for a matching tuple rather than joined once per match, and
     queries answered through a Magic Sets rewrite, which restricts what is

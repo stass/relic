@@ -19,15 +19,16 @@
 /*
  * The store as code that must only read it sees it.
  *
- * The executor reads the context, its relations and their indexes and must
- * never write them.  It is compiled against this header and not against
- * the ones that define a context, a relation or an index, which refuse to
- * be included beside it (RELIC_FROZEN_ONLY), so here those types are
- * incomplete.  Such code can hold a pointer to one and pass it on, and it
- * cannot name a member of one, to read it or to write it.  What it can do
- * with them is exactly the functions below, each of which takes them const
- * and hands back nothing that could be written through without a cast that
- * discards const, which the compiler's warnings report.
+ * The executor and the work estimator (lib/cost.c) read the context, its
+ * relations and their indexes and must never write them.  They are
+ * compiled against this header and not against the ones that define a
+ * context, a relation or an index, which refuse to be included beside it
+ * (RELIC_FROZEN_ONLY), so here those types are incomplete.  Such code can
+ * hold a pointer to one and pass it on, and it cannot name a member of
+ * one, to read it or to write it.  What it can do with them is exactly the
+ * functions below, each of which takes them const and hands back nothing
+ * that could be written through without a cast that discards const, which
+ * the compiler's warnings report.
  *
  * A const pointer alone would not do: it covers the members of the
  * structure it points at and not what their pointers reach, and a relation
@@ -166,9 +167,12 @@ relic_tuple_equal(const relic_dom_t *left, const relic_dom_t *right,
  * lib/index.c
  *
  * relic_index_key_mask() gives the columns an index is keyed on, bit c for
- * column c.  relic_index_first() and relic_index_next() walk, in identifier
- * order, the tuples of `relation` that agree with a probe on those columns;
- * the probe is laid out as a tuple, and its other columns are not read.
+ * column c, and relic_index_key_count() the distinct keys it holds over its
+ * whole relation: none for an empty relation, and otherwise at least one
+ * and no more than the relation's tuples.  relic_index_first() and
+ * relic_index_next() walk, in identifier order, the tuples of `relation`
+ * that agree with a probe on those columns; the probe is laid out as a
+ * tuple, and its other columns are not read.
  * relic_index_first_since() starts such a walk at the first of those tuples
  * whose identifier is at least `since`, from the key's frontier, which it
  * moves forward when `since` is the start relic_index_raise_since() last
@@ -177,6 +181,7 @@ relic_tuple_equal(const relic_dom_t *left, const relic_dom_t *right,
  * would have to walk the chain from its head.
  */
 uint32_t relic_index_key_mask(const relic_index_t *index);
+size_t	 relic_index_key_count(const relic_index_t *index);
 relic_tuple_id_t relic_index_first(const relic_index_t *index,
 	    const relic_relation_t *relation, const relic_dom_t *probe);
 relic_tuple_id_t relic_index_first_since(const relic_index_t *index,

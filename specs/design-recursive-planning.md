@@ -195,8 +195,14 @@ discard. No insertion path has a cache-invalidation obligation.
 Collect references from retained recipes, order them by predicate identity
 and index position, and coalesce duplicates. Construction is bounded by
 the plans' size and uses no quadratic search for an existing descriptor.
-Numeric identities provide deterministic catalog ordering without sorting
-addresses or inspecting hash-table slots.
+Numeric identities provide deterministic catalog ordering without
+inspecting hash-table slots. The two relations one predicate can have, its
+derived relation and the base store its base view reads, tie on both keys
+and are ordered by relation identity; nothing observable depends on the
+catalog's order. A recipe step reads the index its operation names, and
+the estimator finds the entry by searching the ordered catalog. Recipes
+are therefore never written after compilation, and a step cannot read
+another index's entry.
 
 Only the calling thread refreshes this catalog, while assembling the due
 variants of a round. Refresh is lazy for sources those variants actually
@@ -343,8 +349,8 @@ Timing and work history do not feed the cost selector.
 | --- | --- |
 | `lib/plan.c`, `lib/plan.h` | Construct and validate orders, collapse identical orders, emit the counted family and immutable recipes |
 | `lib/index.c`, `lib/frozen.h` | Expose the const sum of secondary-index key counts |
-| `lib/cost.c` | Evaluate recipes and cache metadata using the frozen-store interface; the module is compiled with `RELIC_FROZEN_ONLY` |
-| `lib/eval.c` | Own the catalog and running candidates, establish the round boundary, select and publish round items |
+| `lib/cost.c` | Evaluate recipes, apply the selection rule and cache metadata using the frozen-store interface; the module is compiled with `RELIC_FROZEN_ONLY` |
+| `lib/eval.c` | Own the catalog and running candidates, establish the round boundary, and publish round items with the plans selected |
 | `lib/explain.c` | Describe the family and deterministic selection rule using the planning document's text contract |
 | `lib/round.c`, `lib/task.c` | Execute the selected operation array under existing round and view contracts |
 

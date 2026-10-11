@@ -29,16 +29,19 @@
  * than in how a plan is run.
  */
 
+typedef struct relic_cost_recipe relic_cost_recipe_t;
+typedef struct relic_cost_step relic_cost_step_t;
 typedef struct relic_op relic_op_t;
 typedef struct relic_op_aggregate relic_op_aggregate_t;
 typedef struct relic_op_assign relic_op_assign_t;
 typedef struct relic_op_atom relic_op_atom_t;
 typedef struct relic_op_filter relic_op_filter_t;
 typedef struct relic_plan relic_plan_t;
+typedef struct relic_plan_candidate relic_plan_candidate_t;
+typedef struct relic_plan_family relic_plan_family_t;
 typedef struct relic_plan_term relic_plan_term_t;
 typedef struct relic_postfix relic_postfix_t;
 typedef struct relic_step relic_step_t;
-typedef struct relic_variant_plans relic_variant_plans_t;
 
 /*
  * The operations.
@@ -78,7 +81,7 @@ enum relic_op_kind {
 	RELIC_OP_SCAN,		/* match and bind every tuple of a relation */
 	RELIC_OP_LOOKUP,	/* the same, by an index on bound columns */
 	RELIC_OP_MEMBER,	/* is this fully bound tuple present? */
-	RELIC_OP_EXISTS,	/* does some tuple agree on the bound columns? */
+	RELIC_OP_EXISTS,	/* does a tuple agree on the bound columns? */
 	RELIC_OP_ANTI_MEMBER,	/* does no tuple agree on the named columns? */
 	RELIC_OP_FILTER,	/* does a comparison of bound values hold? */
 	RELIC_OP_ASSIGN,	/* bind a slot to a value from bound ones */
@@ -140,7 +143,7 @@ enum relic_slot_kind {
 struct relic_plan_term {
 	union {
 		relic_dom_t	constant;	/* RELIC_PLAN_CONSTANT */
-		uint16_t	slot;		/* BOUND, NUMBER, TEXT and BIND */
+		uint16_t	slot;		/* BOUND, NUMBER, TEXT, BIND */
 	}			u;
 	enum relic_term_action	action;		/* which arm of u is live */
 };
@@ -192,10 +195,10 @@ enum relic_view {
  * written by whoever takes the EMIT's tuples, through a pointer of its own.
  *
  * `view` is the view a SCAN, LOOKUP, MEMBER, EXISTS or ANTI_MEMBER reads
- * through, fixed by the planner; an ANTI_MEMBER's is always `all`.  The range it
- * denotes changes from one round to the next, and for `all` from one plan to
- * the next, so the evaluation resolves it when the plan starts.  An EMIT
- * writes past the end of every view of its relation.
+ * through, fixed by the planner; an ANTI_MEMBER's is always `all`.  The
+ * range it denotes changes from one round to the next, and for `all` from
+ * one plan to the next, so the evaluation resolves it when the plan
+ * starts.  An EMIT writes past the end of every view of its relation.
  *
  * `key_mask` and `index_position` are set on a LOOKUP, an EXISTS and an
  * ANTI_MEMBER: the columns it looks up by, bit c for column c, and the
@@ -386,8 +389,7 @@ struct relic_op {
  *	operation, binds, a generator, an ASSIGN or an AGGREGATE;
  *	every test reads only constants and bound slots.
  *
- * A plan that was built therefore always has `ops`; a plan left unbuilt, as
- * a variant's plan no round would run is, has `ops` NULL and no operations.
+ * A plan that was built therefore always has `ops`.
  *
  * A plan lives in the evaluation arena and is discarded when the evaluation
  * it was built for ends.
@@ -398,35 +400,93 @@ struct relic_plan {
 };
 
 /*
- * The plans of one semi-naive delta variant, between which each round
- * chooses by the size of the delta, known only when the round starts.
+ * How the work estimator counts one operation of a plan (lib/cost.c).
+ * Each operation has exactly one class, chosen by its kind and, for an
+ * AGGREGATE, by how it reaches its group's rows.  B is the estimated
+ * bindings reaching the operation, N the tuples of the view it reads, and
+ * Q = ceil(B * N / max(1, K)) the tuples a lookup visits, K being the
+ * distinct keys of the index it reads:
  *
- * `placed` orders the delta literal like any other positive literal, and
- * `delta_first` places it before them all.  When the placed order puts
- * another positive literal first, a round whose delta holds D tuples costs
- * the placed plan about its prefix estimate -- the bindings that reach the
- * delta literal, one lookup of the delta each -- and the delta-first plan
- * about D times its fan-out estimate -- the bindings each delta tuple leads
- * to.  A round runs `placed` when D exceeds `threshold`, the prefix over the
- * fan-out, and `delta_first` otherwise.  When the placed order puts the
- * delta literal first anyway, or under RELIC_F_NO_REORDER, there is one
- * order, `threshold` is zero and `placed` is the plan.  Under
- * RELIC_F_NO_INDEX alone, which would scan a placed delta once per binding
- * before it, `delta_first` is the plan and `threshold` RELIC_PLAN_NEVER.
- *
- * Both plans read every literal through the same view, so they derive the
- * same tuples and differ only in cost.  A plan no delta of at least one
- * tuple would select is not built: `placed` when `threshold` is
- * RELIC_PLAN_NEVER, and `delta_first` when `threshold` is zero.  At least
- * one of the two is always built.
+ *	SCAN		B * N visits; B * N bindings onward
+ *	LOOKUP		B probes and Q visits; Q onward
+ *	PROBE		a MEMBER or an EXISTS: B probes; none onward from an
+ *			empty view, B otherwise
+ *	ANTI_PROBE	an ANTI_MEMBER: B probes; B onward
+ *	OPERATION	a FILTER or an ASSIGN: B operations; B onward
+ *	FOLD_SCAN	B folds and B * N group-row visits; B onward
+ *	FOLD_LOOKUP	B folds and Q visits; B onward
+ *	FOLD_PROBE	B folds and B visits, none when the relation is
+ *			empty; B onward
+ *	EMIT		B emissions
  */
-struct relic_variant_plans {
-	relic_plan_t	placed;
-	relic_plan_t	delta_first;
-	uint64_t	threshold;
+enum relic_cost_kind {
+	RELIC_COST_SCAN,
+	RELIC_COST_LOOKUP,
+	RELIC_COST_PROBE,
+	RELIC_COST_ANTI_PROBE,
+	RELIC_COST_OPERATION,
+	RELIC_COST_FOLD_SCAN,
+	RELIC_COST_FOLD_LOOKUP,
+	RELIC_COST_FOLD_PROBE,
+	RELIC_COST_EMIT
 };
 
-#define	RELIC_PLAN_NEVER	UINT64_MAX
+/*
+ * One step of a work recipe: the operation `op` of the candidate's plan,
+ * counted as `kind` says.  A step of kind LOOKUP or FOLD_LOOKUP reads K
+ * from the index its operation looks up through, which
+ * relic_cost_step_index() names (lib/cost.h).  A recipe is complete once
+ * compiled and nothing writes it afterwards.
+ */
+struct relic_cost_step {
+	const relic_op_t	*op;
+	enum relic_cost_kind	 kind;
+};
+
+/*
+ * A plan's work recipe: a step for each of its operations, in plan order.
+ * It is compiled from the plan once its access paths are known and reads
+ * nothing the plan does not, so estimating it can neither change the plan
+ * nor run any of it.
+ */
+struct relic_cost_recipe {
+	relic_cost_step_t	*steps;
+	size_t			 step_count;
+};
+
+/*
+ * One of a delta variant's plans, with the recipe that estimates its work.
+ * The recipe is compiled only when the variant has two plans to choose
+ * between; a lone plan is never estimated and its recipe is empty.
+ */
+struct relic_plan_candidate {
+	relic_plan_t		plan;
+	relic_cost_recipe_t	recipe;
+};
+
+#define	RELIC_FAMILY_DELTA_FIRST	0
+#define	RELIC_FAMILY_INPUT_FIRST	1
+#define	RELIC_FAMILY_MAX		2
+
+/*
+ * The plans of one semi-naive delta variant, between which each round
+ * chooses by estimated work, known only when the round starts.
+ *
+ * `count` is one or two.  With two, candidate RELIC_FAMILY_DELTA_FIRST
+ * places the delta literal before every other positive literal and
+ * candidate RELIC_FAMILY_INPUT_FIRST prefers any other positive literal to
+ * the delta when their bound columns tie; the two orders differ, since an
+ * order both policies reach is kept once.  With one, the candidate is the
+ * variant's only plan: the orders coincided, or a reference configuration
+ * asked for one.
+ *
+ * Every candidate reads each literal through the same view, so all of a
+ * family's plans derive the same tuples and differ only in cost.
+ */
+struct relic_plan_family {
+	relic_plan_candidate_t	candidates[RELIC_FAMILY_MAX];
+	size_t			count;
+};
 
 /*
  * The delta literal of a rule's ordinary plan, in which every literal reads
@@ -438,10 +498,11 @@ struct relic_variant_plans {
  * What the planner assumes about a relation it cannot measure, one the
  * component being planned is still deriving: how many tuples it holds, and
  * by how much binding one of its columns narrows it.  A member a variant
- * reads beside its own delta, through the old or current view, is taken to
- * hold RELIC_PLAN_DELTAS_HELD deltas' worth: a member is larger than its
- * delta, which ranks the delta ahead of every other member literal bound
- * alike.
+ * reads beside its own delta, through the old or current view, holds the
+ * deltas of the rounds before and is taken to hold RELIC_PLAN_DELTAS_HELD
+ * deltas' worth when it is ranked against the relations it is measured
+ * beside.  These guesses only rank literals against each other; neither
+ * a variant's delta literal nor which of its plans exist depends on them.
  */
 #define	RELIC_PLAN_UNKNOWN_TUPLES	1000u
 #define	RELIC_PLAN_UNKNOWN_DISTINCT	10u

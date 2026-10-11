@@ -14,30 +14,34 @@ $ relic -n -e -q 'path(a, X)?' graph.dl
 2>     stratum 0, component 0 (recursive): magic$path$bf/1
 2>         facts: 1
 2>         rule magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
-2>             delta magic$path$bf(X) when the delta holds more than 2 tuples:
-2>                 scan edge(X, Y)
-2>                 member delta magic$path$bf(X)
-2>                 emit magic$path$bf(Y)
-2>             delta magic$path$bf(X) otherwise:
-2>                 scan delta magic$path$bf(X)
-2>                 lookup edge(X, Y) key={0}
-2>                 emit magic$path$bf(Y)
+2>             delta magic$path$bf(X):
+2>                 choose lowest estimated work; ties: delta-first
+2>                 plan delta-first:
+2>                     scan delta magic$path$bf(X)
+2>                     lookup edge(X, Y) key={0}
+2>                     emit magic$path$bf(Y)
+2>                 plan input-first:
+2>                     scan edge(X, Y)
+2>                     member delta magic$path$bf(X)
+2>                     emit magic$path$bf(Y)
 2>     stratum 0, component 1 (recursive): path$bf/2
 2>         rule path$bf(X, Y) :- magic$path$bf(X), edge(X, Y).
 2>             scan edge(X, Y)
 2>             member magic$path$bf(X)
 2>             emit path$bf(X, Y)
 2>         rule path$bf(X, Z) :- magic$path$bf(X), edge(X, Y), path$bf(Y, Z).
-2>             delta path$bf(Y, Z) when the delta holds more than 2 tuples:
-2>                 scan edge(X, Y)
-2>                 member magic$path$bf(X)
-2>                 lookup delta path$bf(Y, Z) key={0}
-2>                 emit path$bf(X, Z)
-2>             delta path$bf(Y, Z) otherwise:
-2>                 scan delta path$bf(Y, Z)
-2>                 lookup edge(X, Y) key={1}
-2>                 member magic$path$bf(X)
-2>                 emit path$bf(X, Z)
+2>             delta path$bf(Y, Z):
+2>                 choose lowest estimated work; ties: delta-first
+2>                 plan delta-first:
+2>                     scan delta path$bf(Y, Z)
+2>                     lookup edge(X, Y) key={1}
+2>                     member magic$path$bf(X)
+2>                     emit path$bf(X, Z)
+2>                 plan input-first:
+2>                     scan edge(X, Y)
+2>                     member magic$path$bf(X)
+2>                     lookup delta path$bf(Y, Z) key={0}
+2>                     emit path$bf(X, Z)
 2> query $q0(X) :- path$bf(a, X).
 2>     lookup path$bf(a, X) key={0}
 2>     stream $q0(X)

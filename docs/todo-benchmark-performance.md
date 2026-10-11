@@ -80,36 +80,53 @@ Timeouts and failed verifications remain statuses, never numeric timings.
 
 ## 1. Correct recursive plan selection
 
-[Medium, components: `lib/plan.c`, `lib/plan.h`, `lib/eval.c`]
+[Medium, components: `lib/plan.c`, `lib/cost.c`, `lib/eval.c`]
 
-**Evidence.** At scale 4, `tc-acyclic-bf` loses its magic-first alternative
-when the magic relation exceeds the assumed 1,000 tuples of an incomplete
-relation. It performs 92,938,873 lookups against 19,418,539 under
-`-X no-reorder`, with identical answers and derivations. At scale 8 the
-corresponding counts are 356,557,738 and 72,238,190.
+Each delta variant keeps a delta-first and an input-first plan, and each
+round runs the one estimated to do less work, as
+[recursive plan selection](../specs/design-recursive-planning.md)
+describes. The guarded closure in `tests/perf.sh` holds the work-counter
+cliff closed: at scale 4 it scans and looks up 19.4 million tuples rather
+than 94.3 million, and at scale 8 it makes 72.1 million lookups rather
+than 356.6 million, against 72.2 million in textual order. Answers agree with textual-order and naive
+evaluation, and answers and counters agree across thread counts. What
+remains before the policy is accepted as the default:
 
-**Implementation.** Construct delta-first and input-first alternatives
-using the structural ranking in
-[recursive plan selection](../specs/design-recursive-planning.md).
-Choose from complete-plan work recipes using frozen view sizes and
-existing index key counts. Account for both candidates and their metadata;
-explain output shows the alternatives and deterministic tie rule.
-Increasing the unknown-cardinality constant does not resolve the defect.
+**Retained-index cost.** An input-first plan looks its delta up through
+an index on the recursive relation, and that index is built and
+maintained on every insertion whether or not a round chooses the plan.
+On `bench/run.sh`'s chain distances at scale 2 storage grows from
+201.7 MB to 235.4 MB and the wall time from about 1.7 s to 1.9 s, with
+every round choosing delta-first. The whole closure over the same chain
+needs the index anyway and is unchanged in storage and lookups. The design
+requires a repeatable regression of this kind to be resolved before the
+policy is enabled by default. Candidate directions: build the index when a
+round first selects the plan, which needs a key estimate before the index
+exists; index the delta alone for the round; or accept and document the
+cost.
 
-**Design and regression.** Implement the
-[recursive planning design](../specs/design-recursive-planning.md), linked
-from [delta variants](../specs/design-planning.md#delta-variants). First add a
-counter regression that crosses the estimate boundary and fails on the
-unfixed planner. Compare answers with textual-order and naive evaluation
-on manageable inputs; verify identical results and work across thread
-counts. Use adversarial selectivity and skew to check that retaining an
-alternative does not make every large delta select it unconditionally.
+**Benchmarks.** Run the targeted `tc-acyclic-bf` and `tc-cyclic-bf`
+comparisons against the rival engines at scales 1, 2, 4 and 8 and at one
+and sixteen threads, under the measurement rules above, and confirm the
+indexed-prefix control remains competitive.
 
-**Exit criteria.** The work-counter cliff disappears across scales and
-the indexed-prefix control remains competitive on the reproducer. Require
-an input-size-based counter bound, rather than a wall-clock assertion.
-Measure the added index memory and planning cost on long-rule workloads.
-Keep a reproducer whose shape is outside step 3's factoring class so the
+**Adversarial selectivity and skew.** Check with skewed keys and
+correlated columns that retaining an alternative does not make every large
+delta select it unconditionally.
+
+**Measurement.** Measure planning time, selection time and the added
+index memory separately on long-rule and many-round workloads.
+
+**Test coverage.** The design's validation table also asks for semantic
+coverage of input-first plans (nonlinear and mutual recursion, repeated
+variables, constants, assignments, aggregates and existence checks against
+the references), for failure behaviour (an allocation failure publishes
+no partial family, memory limits charge both candidates, a parallel
+refusal retries the selected plan), and for the scale-8 counter bound,
+which is too slow for `tests/perf.sh` and belongs in the benchmark
+artifacts.
+
+Keep the guarded reproducer outside step 3's factoring class so the
 planner regression remains independently exercised.
 
 ## 2. Compact pending values at the merge boundary

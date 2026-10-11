@@ -14,58 +14,80 @@ magic rewrite of $q0(X) :- reach(a, X).
             scan magic$reach$bf(X)
             emit magic$link$bf(X)
         rule reach$bf(X, Y) :- magic$reach$bf(X), link$bf(X, Y), not blocked(Y).
-            delta link$bf(X, Y) when the delta holds more than 1 tuple:
-                scan magic$reach$bf(X)
-                lookup delta link$bf(X, Y) key={0}
-                anti-member blocked(Y)
-                emit reach$bf(X, Y)
-            delta link$bf(X, Y) otherwise:
-                scan delta link$bf(X, Y)
-                anti-member blocked(Y)
-                member magic$reach$bf(X)
-                emit reach$bf(X, Y)
+            delta link$bf(X, Y):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta link$bf(X, Y)
+                    anti-member blocked(Y)
+                    member magic$reach$bf(X)
+                    emit reach$bf(X, Y)
+                plan input-first:
+                    scan magic$reach$bf(X)
+                    lookup delta link$bf(X, Y) key={0}
+                    anti-member blocked(Y)
+                    emit reach$bf(X, Y)
         rule sup$reach$bf$1$2(X, Y) :- magic$reach$bf(X), reach$bf(X, Y).
-            delta reach$bf(X, Y) when the delta holds more than 1 tuple:
-                scan magic$reach$bf(X)
-                lookup delta reach$bf(X, Y) key={0}
-                emit sup$reach$bf$1$2(X, Y)
-            delta reach$bf(X, Y) otherwise:
-                scan delta reach$bf(X, Y)
-                member magic$reach$bf(X)
-                emit sup$reach$bf$1$2(X, Y)
+            delta reach$bf(X, Y):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta reach$bf(X, Y)
+                    member magic$reach$bf(X)
+                    emit sup$reach$bf$1$2(X, Y)
+                plan input-first:
+                    scan magic$reach$bf(X)
+                    lookup delta reach$bf(X, Y) key={0}
+                    emit sup$reach$bf$1$2(X, Y)
         rule magic$link$bf(Y) :- sup$reach$bf$1$2(X, Y).
             delta sup$reach$bf$1$2(X, Y):
                 scan delta sup$reach$bf$1$2(_, Y)
                 emit magic$link$bf(Y)
         rule reach$bf(X, Z) :- sup$reach$bf$1$2(X, Y), link$bf(Y, Z), not blocked(Z).
             delta sup$reach$bf$1$2(X, Y):
-                scan delta sup$reach$bf$1$2(X, Y)
-                lookup link$bf(Y, Z) key={0}
-                anti-member blocked(Z)
-                emit reach$bf(X, Z)
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta sup$reach$bf$1$2(X, Y)
+                    lookup link$bf(Y, Z) key={0}
+                    anti-member blocked(Z)
+                    emit reach$bf(X, Z)
+                plan input-first:
+                    scan link$bf(Y, Z)
+                    anti-member blocked(Z)
+                    lookup delta sup$reach$bf$1$2(X, Y) key={1}
+                    emit reach$bf(X, Z)
             delta link$bf(Y, Z):
-                scan delta link$bf(Y, Z)
-                anti-member blocked(Z)
-                lookup old sup$reach$bf$1$2(X, Y) key={1}
-                emit reach$bf(X, Z)
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta link$bf(Y, Z)
+                    anti-member blocked(Z)
+                    lookup old sup$reach$bf$1$2(X, Y) key={1}
+                    emit reach$bf(X, Z)
+                plan input-first:
+                    scan old sup$reach$bf$1$2(X, Y)
+                    lookup delta link$bf(Y, Z) key={0}
+                    anti-member blocked(Z)
+                    emit reach$bf(X, Z)
         rule link$bf(X1, X2) :- magic$link$bf(X1), link$base(X1, X2).
-            delta magic$link$bf(X1) when the delta holds more than 2 tuples:
-                scan link$base(X1, X2)
-                member delta magic$link$bf(X1)
-                emit link$bf(X1, X2)
-            delta magic$link$bf(X1) otherwise:
-                scan delta magic$link$bf(X1)
-                lookup link$base(X1, X2) key={0}
-                emit link$bf(X1, X2)
+            delta magic$link$bf(X1):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta magic$link$bf(X1)
+                    lookup link$base(X1, X2) key={0}
+                    emit link$bf(X1, X2)
+                plan input-first:
+                    scan link$base(X1, X2)
+                    member delta magic$link$bf(X1)
+                    emit link$bf(X1, X2)
         rule link$bf(X, Y) :- magic$link$bf(X), bridge(X, Y).
-            delta magic$link$bf(X) when the delta holds more than 2 tuples:
-                scan bridge(X, Y)
-                member delta magic$link$bf(X)
-                emit link$bf(X, Y)
-            delta magic$link$bf(X) otherwise:
-                scan delta magic$link$bf(X)
-                lookup bridge(X, Y) key={0}
-                emit link$bf(X, Y)
+            delta magic$link$bf(X):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta magic$link$bf(X)
+                    lookup bridge(X, Y) key={0}
+                    emit link$bf(X, Y)
+                plan input-first:
+                    scan bridge(X, Y)
+                    member delta magic$link$bf(X)
+                    emit link$bf(X, Y)
 query $q0(X) :- reach$bf(a, X).
     lookup reach$bf(a, X) key={0}
     stream $q0(X)

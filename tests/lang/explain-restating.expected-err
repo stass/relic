@@ -19,18 +19,20 @@ magic rewrite of $q0(Y) :- p(a, Y).
             lookup p$base(X1, X2) key={0}
             emit p$bf(X1, X2)
         rule p$bf(X, Y) :- magic$p$bf(X), q$b(X), p$bf(X, Z), s(Z, Y).
-            delta p$bf(X, Z) when the delta holds more than 1 tuple:
-                scan magic$p$bf(X)
-                member q$b(X)
-                lookup delta p$bf(X, Z) key={0}
-                lookup s(Z, Y) key={0}
-                emit p$bf(X, Y)
-            delta p$bf(X, Z) otherwise:
-                scan delta p$bf(X, Z)
-                member magic$p$bf(X)
-                member q$b(X)
-                lookup s(Z, Y) key={0}
-                emit p$bf(X, Y)
+            delta p$bf(X, Z):
+                choose lowest estimated work; ties: delta-first
+                plan delta-first:
+                    scan delta p$bf(X, Z)
+                    member magic$p$bf(X)
+                    member q$b(X)
+                    lookup s(Z, Y) key={0}
+                    emit p$bf(X, Y)
+                plan input-first:
+                    scan magic$p$bf(X)
+                    member q$b(X)
+                    lookup delta p$bf(X, Z) key={0}
+                    lookup s(Z, Y) key={0}
+                    emit p$bf(X, Y)
 query $q0(Y) :- p$bf(a, Y).
     lookup p$bf(a, Y) key={0}
     stream $q0(Y)
