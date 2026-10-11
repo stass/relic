@@ -2035,15 +2035,17 @@ what_the_rewrite_derives_does_not_leak(void)
 
 /*
  * A right-recursive closure over a chain n0 -> n1 -> ... of CHAIN_EDGES
- * edges, queried from n0, answers every later node.  Factored, the rewrite
- * walks from n0 alone: one walk tuple and one answer per node reached, a
- * few derivations per edge, and at most 8N + 64 between the seeds, the
- * walk, the answers and the query's rows.  The ordinary rewrite derives
- * path$bf for every node the demand reaches, every suffix of the chain,
- * N(N + 1)/2 tuples, which no linear bound admits.  Explain shows the
- * adornment factored, so the bound is met by the transformation rather
- * than by a planner that happens to do less, and RELIC_F_NO_FACTOR, which
- * answers the same, passes the bound, so the bound tells the two apart.
+ * edges, queried from n0, answers every later node and not n0: the
+ * answers are the nodes a positive number of edges away, not the states
+ * the walk reaches.  Factored, the rewrite walks from n0 alone: one walk
+ * tuple and one answer per node reached, some 3N derivations between the
+ * seeds, the walk, the answers and the query's rows, held to a generous
+ * 8N + 64.  The ordinary rewrite derives path$bf for every node the demand
+ * reaches, every suffix of the chain, N(N + 1)/2 tuples, over sixty times
+ * that bound.  Explain shows the adornment factored, so the bound is met
+ * by this transformation rather than by another, and RELIC_F_NO_FACTOR,
+ * which answers the same, exceeds the bound, so the count tells the two
+ * apart.
  */
 static void
 a_bound_chain_derives_linearly(void)
@@ -2089,14 +2091,23 @@ a_bound_chain_derives_linearly(void)
 		relic_explain_set(ctx, record_explained, &explained);
 		rows = answer(ctx, "path(n0, X)?");
 		relic_stats(ctx, &stats);
+		relic_destroy(ctx);
 
+		/*
+		 * Every answer is a node of the chain, n0 to n<CHAIN_EDGES>,
+		 * and the rows are distinct, so CHAIN_EDGES of them without
+		 * n0 are exactly n1 to n<CHAIN_EDGES>.
+		 */
 		answered = rows != NULL ? count_lines_starting(rows, "n") : 0;
-		checkf(answered == CHAIN_EDGES && log.errors == 0 &&
-		    log.warnings == 0, SCENARIO_CHAIN,
+		checkf(answered == CHAIN_EDGES && !has_line(rows, "n0") &&
+		    log.errors == 0 && log.warnings == 0, SCENARIO_CHAIN,
 		    "path(n0, X)? with flags %#x should answer the chain's %d "
-		    "later nodes, and answered %zu with %zu errors and %zu "
-		    "warnings", flags[f], CHAIN_EDGES, answered, log.errors,
-		    log.warnings);
+		    "later nodes, n0 not among them, and answered %zu%s with "
+		    "%zu errors and %zu warnings, the last \"%s\"", flags[f],
+		    CHAIN_EDGES, answered, rows == NULL ? " (failed)" :
+		    has_line(rows, "n0") ? " including n0" : "", log.errors,
+		    log.warnings, log.errors != 0 ? log.last :
+		    log.last_warning);
 
 		checkf((stats.derivations <= bound) == factors, SCENARIO_CHAIN,
 		    "path(n0, X)? over a chain of %d edges with flags %#x "
@@ -2107,12 +2118,12 @@ a_bound_chain_derives_linearly(void)
 		checkf(!explained.failed && has_line(explained.bytes,
 		    "    adorn path/2 bf, factored") == factors,
 		    SCENARIO_CHAIN, "path(n0, X)? with flags %#x should %s "
-		    "path/2 bf, but -e showed\n%.2000s", flags[f],
-		    factors ? "factor" : "not factor", explained.bytes);
+		    "path/2 bf, but -e showed\n%s", flags[f],
+		    factors ? "factor" : "not factor",
+		    explained.failed ? "(failed)" : explained.bytes);
 
 		free(rows);
 		free(explained.bytes);
-		relic_destroy(ctx);
 	}
 	free(program.bytes);
 }
