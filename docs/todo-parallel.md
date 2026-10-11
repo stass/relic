@@ -9,6 +9,8 @@ trying it. Times are from a macOS Xeon, loaded unless another platform is
 named. M3 observations refer to the
 [comparison matrix](../bench/compare/recorded/m3-max/results.tsv) and
 [diagnostic probes](../bench/compare/recorded/m3-max/optimization-probes/results.json).
+Cross-subsystem sequencing and acceptance criteria are in the
+[benchmark performance plan](todo-benchmark-performance.md).
 
 ## A lookup cannot drive parallel tasks
 
