@@ -120,17 +120,22 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
-**Recursive planning has small serial timing regressions.** [Medium,
-component: `lib/plan.c`, `lib/eval.c`, `lib/exec.c`]
-Profile the scale-1 `tc-cyclic-bf` and `facts-join` controls against the
-pre-selection planner with identical compiler flags and discarded stdout.
-Two ten-pair alternating cohorts on the FreeBSD 5995WX measure 2.6-2.7%
-more wall time for single-worker cyclic closure and 1.3-1.4% for the
-single-worker facts join. Cyclic closure's work counters and relation
-storage agree, so additional derivations do not explain the difference.
-Resolve the repeatable overhead before accepting the policy's performance
-gate; the [samples and report](bench/compare/recorded/freebsd-5995wx/recursive-planning/report.txt)
-also retain the acyclic improvement and the noisy parallel distance control.
+**Small FreeBSD timing regressions depend on code placement.** [Medium,
+component: `bench/compare/`, `lib/exec.c`, `lib/import.c`]
+The [original cohorts](bench/compare/recorded/freebsd-5995wx/recursive-planning/report.txt)
+measure 2.6-2.7% more serial cyclic-closure time and 1.3-1.4% more
+facts-join time with equal tuple work and relation storage. The
+[diagnostic controls](bench/compare/recorded/freebsd-5995wx/recursive-planning-analysis/report.txt)
+reproduce the facts increase with import and validation alone. Permuting
+only linked text sections changes the cyclic revision comparison from
++2.69% to -0.89% and facts-join from +1.70% to +0.02%; one permutation
+does not establish a robust build or attribute every part of the cyclic
+difference. Repeat these controls after bound-query factoring and bulk
+loading, with indexed driver slicing judged alongside loading. Keep the
+guarded and ordinary-Magic references, and compare several predetermined
+layouts before a residual few-percent difference justifies a planner
+mechanism. The performance gate remains open; the expensive paths are
+covered by steps 3-5 of the benchmark plan.
 
 **Compare output sinks and validate scaling on a second platform.**
 [Medium, component: `bench/compare/`]
