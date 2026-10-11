@@ -120,6 +120,18 @@ error, but undercharges acquisition until then.
 
 ## Benchmarks
 
+**Recursive planning has small serial timing regressions.** [Medium,
+component: `lib/plan.c`, `lib/eval.c`, `lib/exec.c`]
+Profile the scale-1 `tc-cyclic-bf` and `facts-join` controls against the
+pre-selection planner with identical compiler flags and discarded stdout.
+Two ten-pair alternating cohorts on the FreeBSD 5995WX measure 2.6-2.7%
+more wall time for single-worker cyclic closure and 1.3-1.4% for the
+single-worker facts join. Cyclic closure's work counters and relation
+storage agree, so additional derivations do not explain the difference.
+Resolve the repeatable overhead before accepting the policy's performance
+gate; the [samples and report](bench/compare/recorded/freebsd-5995wx/recursive-planning/report.txt)
+also retain the acyclic improvement and the noisy parallel distance control.
+
 **Compare output sinks and validate scaling on a second platform.**
 [Medium, component: `bench/compare/`]
 Complete and audit the FreeBSD scale sweep, then compare the machine-specific
