@@ -287,8 +287,8 @@ struct relic_adornment_set {
  * `complete_components` marks, by position in the program's schedule, the
  * components the query reads completely, which the evaluator evaluates
  * before the rewrite.  The predicates the query reads completely are those
- * the query reaches through negation, everything they depend on, and those
- * no rule derives, which their base stores hold whole.
+ * the query reaches through negation or aggregation, their dependencies,
+ * and those no rule derives, which their base stores hold whole.
  *
  * `kept` holds the adornments the rewrite generates predicates and rules
  * for, in the order they were first asked for, which is also the order their

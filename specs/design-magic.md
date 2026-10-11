@@ -4,9 +4,11 @@ A query that binds some of its arguments needs only the part of the
 program's fixed point it can reach. The Magic Sets rewrite specializes the
 program to the query: each predicate the query reaches on demand is replaced
 by adorned copies, one per pattern of bound arguments it is called with, and
-each copy's rules are guarded by a magic relation holding the bound values
-it is actually asked about. The output is ordinary compiled rules, which the
-ordinary analysis, planner and evaluator run. This document covers which
+each ordinary copy's rules are guarded by a magic relation holding the bound
+values it is actually asked about. Eligible bound copies use
+[query factoring](design-query-factoring.md) to propagate states with their
+original binding and produce answers from base rules. The output is ordinary
+compiled rules, which the ordinary analysis, planner and evaluator run. This document covers which
 predicates a query reads completely, the generated rules and their names,
 the order bindings flow in, the subsumption of bound adornments by a free
 one, the single limit on the rewrite's work and its fallback, and why the
@@ -20,7 +22,8 @@ Related: [architecture: Magic Sets](architecture.md#magic-sets),
 [negation](language.md#negation), [aggregates](language.md#aggregates),
 [generated names](architecture.md#naming), [planning](design-planning.md),
 [stratification](design-stratify.md), [evaluation](design-eval.md),
-[facts](design-facts.md), [aggregates](design-aggregates.md).
+[facts](design-facts.md), [aggregates](design-aggregates.md),
+[bound query factoring](design-query-factoring.md).
 
 ## Model
 
@@ -46,7 +49,7 @@ query -> find what is read completely -> materialize the complete part
    reads in full, evaluated exactly as whole-program evaluation evaluates them,
    in schedule order.
 2. **The demanded part** is rewritten: every other predicate the query
-   reaches is replaced by adorned copies guarded by magic relations, planned
+   reaches is replaced by ordinary or factored adorned copies, planned
    against the relations phase 1 made complete, and evaluated by the same
    engine. The rewritten query then runs once over the result.
 
@@ -70,8 +73,9 @@ abandoned and the query answered from the whole program.
   read completely.
 * Generated names contain `$`, so they collide with nothing a program
   writes ([naming](architecture.md#naming)).
-* Body order is the planner's; the draft replays the search's walks, so the
-  two cannot disagree.
+* Ordinary demand calls follow the planner's body order; their draft replays
+  the search's walks. Factored adornments replay the search's complete
+  certificate instead. Neither path rediscovers its meaning while drafting.
 * Everything the rewrite reads or generates is charged before it is done,
   and its remaining work is a constant multiple of that charge.
 * A rewritten query changes neither the program nor what a later query
@@ -186,6 +190,7 @@ and stay readable in explain output:
 | --- | --- | --- |
 | adorned copy of `path/2`, first argument bound | `path$bf` | 2 |
 | its magic predicate: the bound values asked about | `magic$path$bf` | 1 |
+| factored states with their original binding | `walk$path$bf` | Twice the bound-column count |
 | supplementary predicate: the prefix before the second call binding a column in rule 0 deriving `r$bf` (see the example below) | `sup$r$bf$0$2` | its live variables |
 | base predicate of a derived predicate `link` with facts | `link$base` | 2 |
 
@@ -215,8 +220,8 @@ predicate, so the undefined-predicate warning never names one.
 
 ## Sideways information passing
 
-The rewrite needs, for each rule and each adornment of its head, the order
-in which the body's literals bind their variables: a literal's adornment is
+For each rule of an ordinary adornment, the rewrite needs the order
+in which its body's literals bind their variables: a literal's adornment is
 what the literals before it have bound. That order is the planner's. The
 planner's ordering is split from the plan it emits (`relic_plan_order()`,
 see lib/internal.h): it gives the body indexes in the order the plan would
@@ -241,14 +246,15 @@ relation estimates zero and is placed first.
 A bad order costs demand precision, never correctness: every order gives
 the same answers, as the [soundness and completeness
 argument](#soundness-and-completeness) shows. Under `-X no-reorder` the
-order is the written one, which makes the textbook left-to-right rewrite
-available as a reference.
+order is the written one; combined with `-X no-factor`, this makes the
+textbook left-to-right rewrite available as a reference.
 
 ## The generated rules
 
-Take a predicate *p* adorned with *α* and a rule deriving *p*, its body in
-the order above. A **demand call** is a positive literal over a predicate
-read on demand whose adornment *β* binds at least one column. The draft
+For an ordinary adorned copy, take a predicate *p* adorned with *α* and a
+rule deriving *p*, its body in the order above. A **demand call** is a
+positive literal over a predicate read on demand whose adornment *β* binds
+at least one column. The draft
 walks the body keeping a **prefix**: the literals evaluated so far, as the
 generated rules write them. The prefix starts as the guard
 `magic$p$α(...)` over the head's bound arguments, or empty when *α* binds
@@ -351,6 +357,24 @@ in a prefix has its shared and result slots renumbered and keeps the
 predicate it folds, its key columns and its compiled body; the folded
 predicate is read completely and never adorned.
 
+## Factored bound adornments
+
+An eligible bound adornment uses
+[bound query factoring](design-query-factoring.md) in place of its ordinary
+recursive copies. Its source rules prove a separation between state and
+unchanged outputs over complete positive inputs. The search records that
+certificate for the whole adornment and discovers no calls from the
+recursive atom it replaces. The draft emits a walk seeded from the magic
+relation, transitions that retain the original binding, and answers from
+the base rules and source facts. Ordinary callers still request and read
+the same adorned predicate.
+
+Factoring does not promote another predicate into the complete set. A
+failed certificate uses ordinary walks for every rule of the adornment.
+Free-call subsumption takes precedence over either mode, before predicates
+are named or rules drafted. `-X no-factor` selects ordinary Magic while
+leaving the other query optimizations enabled.
+
 ## Facts and the base predicate
 
 The facts a program states are tuples of their predicate's base store, not
@@ -372,8 +396,11 @@ planner looks the facts up by the bound columns like any complete relation;
 the adornment reads only the facts its demand reaches; and the rewrite's
 size does not depend on how many facts there are. The rule calls nothing on
 demand, so it generates no magic rule, cuts no prefix and names no
-supplementary predicate. Being first, it makes an adornment's rows begin
-with its facts, as a derived predicate's rows do when it is materialized.
+supplementary predicate. Being first, it makes an ordinary adornment's rows
+begin with its facts, as a derived predicate's rows do when materialized.
+A factored adornment uses the same virtual base rule to form an answer
+from each reached state; its walk seed precedes that answer rule. The
+source facts are still read through one base view, never copied per fact.
 
 ## The query and its seeds
 
@@ -399,7 +426,7 @@ path(X, Z) :- edge(X, Y), path(Y, Z).
 path(a, X)?
 ```
 
-the rewrite generates
+the ordinary rewrite, selected by `-X no-factor`, generates
 
 ```prolog
 magic$path$bf(a).
@@ -411,6 +438,11 @@ magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
 The magic relation is the set of nodes reachable from `a`, and `path$bf`
 holds paths starting at those nodes only. `edge` holds facts alone, so it is
 read from its base store with no evaluation at all.
+
+The default factored construction keeps the original binding in
+`walk$path$bf` and derives answers only for that binding; its generated
+rules and positive-length argument are in
+[the factoring example](design-query-factoring.md#a-single-source-closure).
 
 ## Free adornments subsume bound ones
 
@@ -442,14 +474,21 @@ appear.
 **Adorn first, draft second.** A rewrite that drafted rules as it
 discovered adornments could reach a bound adornment of `p` before the free
 one and would have to withdraw what it drafted. So the search finds the
-adornments before anything is drafted. It walks each rule's body once for
-the adornment of its head: it orders the body with the planner, records for
+adornments before anything is drafted. For an ordinary adornment it walks
+each rule's body once for the adornment of its head: it orders the body with the planner, records for
 each literal the variables bound before it, whether it calls a predicate
 read on demand and which columns such a call binds, reaches the adornment
 each call reads, and drafts nothing. The kept adornments are the worklist:
 reading one adornment's rules keeps the adornments its calls need. A
 predicate is read free from the first call that reaches it free, and every
 later call on it, whatever it binds, reaches the free adornment.
+
+A factored adornment's certificate replaces those walks and has no outgoing
+demanded calls. A later free call replaces that bound candidate with the
+ordinary free adornment; no walk predicate is drafted for the subsumed
+candidate. Certification and ordinary call discovery are both fixed for
+one source, adornment and complete set, so the two-search argument also
+applies to this mode.
 
 **Why two searches, and why not three.** An adornment of `p` binding
 columns that a call reached *before* `p` was first reached free was reached
@@ -467,13 +506,14 @@ kept whole: a predicate the first search read free stays free in the second
 even when only an adornment the second does not reach called it free, and
 is then computed in full beside the bound calls it serves.
 
-The second search reads the walks the first recorded rather than walking
-any rule again: within one rewrite a walk depends on the rule and on the
+The second search reuses the ordinary walks or factoring certificate the
+first recorded. Within one rewrite a walk depends on the rule and on the
 adornment it is read for -- which predicates are read on demand, and the
 measures of those read completely, do not change while it runs -- and not on
 which predicates are read free, which decides only the adornment a call
 reaches. The draft replays the walks the last search kept, with the
-adornment each call reached, so search and draft cannot disagree.
+adornment each call reached, or emits the retained certificate's rules,
+so search and draft cannot disagree.
 
 When no kept adornment binds a column, nothing is drafted and the query
 reads what it reached completely ([what a query reads
@@ -586,6 +626,8 @@ generated, before the work.**
 * A search charges each rule it reads, its body's size, before the rule is
   walked or its walk replayed. Every search charges what it reads, so a
   second search is charged again for the walks of the first it replays.
+  Factoring recognition and certificate replay use the same charge. A
+  rejected recognition that also needs an ordinary walk charges both reads.
 * The draft charges each rule it drafts before the draft is canonicalized
   and compared with the rules kept, whether the rule is then kept or dropped
   as a duplicate or as one that derives nothing. A dropped rule is built
@@ -617,7 +659,9 @@ measures the work rather than some output of it.
   so the search reads at least one rule for it, and a rule has at least one
   body literal (a statement with none is a fact). A search keeps no more
   adornments than the literals it is charged, and the rewrite generates at
-  most two predicates per adornment, the adorned one and its magic one.
+  most three predicates per adornment: adorned answers, magic requests and,
+  for a factored adornment, walks. The extra walk also has a charged seed
+  rule.
 * **Supplementary predicates.** Each is the head of exactly one rule,
   drafted and charged with at least the prefix it cuts.
 * **Rules.** Every generated rule is charged its body before it is kept, and
@@ -628,9 +672,9 @@ measures the work rather than some output of it.
   adorned rule's first call when constants alone bind it, at most one per
   adorned rule, whose draft was charged. So the rules kept number at most
   twice the literals charged.
-* **Working memory.** A search holds its adornments and the recorded walk
-  of each rule it reads, a few words per body literal. The walks grow with
-  the literals charged, are charged to the memory limit, and are released
+* **Working memory.** A search holds its adornments and recorded walks or
+  factoring certificates, bounded by the source bodies inspected. They grow
+  with the literals charged, are charged to the memory limit, and are released
   once the draft is done. The planner's working state for one rule is
   released once the rule is walked or drafted.
 
@@ -715,8 +759,8 @@ that reaches it is one the caller asked not to pay for.
 ### Attribution
 
 A generated rule is attributed to the source predicate its head belongs to:
-an adorned or supplementary rule to the predicate adorned, a magic rule to
-the predicate whose demand it records, so a seed is attributed to the
+an adorned, supplementary or factored walk rule to the predicate adorned,
+a magic rule to the predicate whose demand it records, so a seed is attributed to the
 predicate the query calls. Generated predicates are attributed the same way,
 so every diagnostic about one -- a tuple or memory limit refusing its
 relation, or the memory its plans take -- names the source predicate:
@@ -753,18 +797,18 @@ group relations are emptied with the answer
 
 The rewrite's storage lives for one query run, in arenas charged to
 `max_memory`: one for the rules kept and the names built, a scratch arena
-emptied after each rule is walked or drafted, and one for the recorded walks,
-emptied when the rewrite returns. A rule found to be a duplicate or to derive
-nothing is released as soon as it is recognized, so the rewrite holds the
+emptied after each rule is inspected or drafted, and one for recorded walks
+and factoring certificates, emptied when the rewrite returns. A rule found
+to be a duplicate or to derive nothing is released as soon as it is recognized, so the rewrite holds the
 rules kept, however many were drafted.
 
 ## Soundness and completeness
 
 **Sound.** Unfolding every supplementary literal into the body of its rule
-gives the rules the classic construction generates, because a
+gives the ordinary rules the classic construction generates, because a
 supplementary predicate carries every variable of its prefix that the rest
-of the rule reads; so the argument is made for those. Every generated rule
-is then a source rule with literals renamed and, for an adorned rule, a
+of the rule reads; so the argument is made for those. Each ordinary generated
+rule is then a source rule with literals renamed and, for an adorned rule, a
 guard added; or a magic rule, whose head no answer reads except through a
 guard. By induction on derivations, every tuple of `p$α` is a tuple of *p*
 in the program's least model: a guard only restricts, an adorned literal
@@ -776,8 +820,9 @@ argument. So every answer is an answer of whole-program evaluation.
 
 **Complete.** Claim: if `p(t)` is in the least model, and either *α* binds
 no column or `magic$p$α` holds the bound part of *t*, then `p$α(t)` is
-derived. By induction on the height of a derivation of `p(t)`: take the rule
-instance at its root and walk its body in the planner's order. At each
+derived. For an ordinary adornment, induct on the height of a derivation of
+`p(t)`: take the rule instance at its root and walk its body in the planner's
+order. At each
 literal over a predicate read on demand with adornment *β*, the magic rule
 for that literal fires: its guard holds by assumption, and every literal
 before it holds -- complete ones and tests because the least model agrees,
@@ -789,8 +834,15 @@ reason, so the prefix it stands for holds through it. A restating call needs
 no magic rule: its demand is the guard's own tuple, which holds by
 assumption. A subsumed call reads `q$ff`, which holds every tuple of *q* by
 the claim for an adornment binding nothing. Every literal of the adorned
-rule then holds, and it derives `p$α(t)`. Applied to the query, whose
-rewrite has no guard, this gives every answer.
+rule then holds, and it derives `p$α(t)`.
+
+For a factored adornment, the
+[factoring equivalence](design-query-factoring.md#least-fixed-point-equivalence)
+establishes both claims: its adorned answers are source tuples, and it
+derives every source answer for each requested original binding. This
+holds for growing sets of requests, so it composes with ordinary callers
+in a positive fixed point. Applying the combined argument to the query,
+whose rewrite has no guard, gives every answer.
 
 That the rewrite answers every query as whole-program evaluation does is what
 the test suite checks, over the language corpus and under every strategy.
@@ -807,28 +859,31 @@ component the query does not read shows as a gap; a `magic rewrite of`
 heading listing the adornments in the order recorded (a subsumed one noted
 `subsumed by p/2 ff`), the seeds, and `read completely:` when nothing is
 bound; the components of the rewritten program nested beneath it; and the
-rewritten query's plan. For the graph program above (excerpt from
-tests/lang/explain-graph):
+rewritten query's plan. The factored graph program above has this structure
+(operation details omitted):
 
 ```text
 magic rewrite of $q0(X) :- path(a, X).
-    adorn path/2 bf
+    adorn path/2 bf, factored
     seed magic$path$bf(a).
-    stratum 0, component 0 (recursive): magic$path$bf/1
+    stratum 0, component 0: magic$path$bf/1
         facts: 1
-        rule magic$path$bf(Y) :- magic$path$bf(X), edge(X, Y).
+    stratum 0, component 1 (recursive): walk$path$bf/2
+        rule walk$path$bf(Origin$0, Origin$0) :- magic$path$bf(Origin$0).
             ...
-    stratum 0, component 1 (recursive): path$bf/2
-        rule path$bf(X, Y) :- magic$path$bf(X), edge(X, Y).
-            scan edge(X, Y)
-            member magic$path$bf(X)
-            emit path$bf(X, Y)
-        ...
+        rule walk$path$bf(Origin$0, Y) :- walk$path$bf(Origin$0, X), edge(X, Y).
+            ...
+    stratum 0, component 2: path$bf/2
+        rule path$bf(Origin$0, Y) :- walk$path$bf(Origin$0, X), edge(X, Y).
+            ...
 query $q0(X) :- path$bf(a, X).
     lookup path$bf(a, X) key={0}
     stream $q0(X)
 ```
 
+* A walk predicate is not listed under `adorn`; `, factored` marks the
+  source adornment it implements. Its generated rules appear in normal
+  component output.
 * A supplementary predicate is not listed under `adorn`: it belongs to the
   rule that generated it and appears as the head of its one rule, in the
   component of the rules that read it when they are recursive through it,
@@ -848,9 +903,11 @@ The line grammar is owned by [design-planning.md](design-planning.md).
 * The complete part is found by a walk whose order depends only on the
   program and the query, and is evaluated in schedule order.
 * Adornments are recorded in the order they are first reached and processed
-  in that order. Within an adornment, its base-predicate rule comes first, then
-  the program's rules in program order, and within a rule its magic and
-  supplementary rules in body order and then the adorned rule.
+  in that order. Within an ordinary adornment, its base-predicate rule comes
+  first, then the program's rules in program order, and within a rule its magic and
+  supplementary rules in body order and then the adorned rule. A factored
+  adornment instead emits its walk seed first, its virtual base answer,
+  then its certified source rules in program order.
 * Body order is the planner's, which is deterministic.
 * Names derive from the predicate and the adornment, and for a
   supplementary predicate from the positions of its rule and its call.

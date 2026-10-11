@@ -120,13 +120,13 @@ returns the exact same set with 406,919 derivations and takes 0.073 s
 at sixteen threads in one exploratory run. On the acyclic input, a
 corresponding rewrite reduces 71,093,957 derivations to 85,357. These
 rule-level experiments are in the M3 diagnostic evidence linked above.
-Design a query transformation for a proven class of right-linear rules,
-using demand propagation and the base rules to produce answers, as in
-the factoring rewrites of Naughton, Ramakrishnan, Sagiv and Ullman. Keep
-positive-length path semantics and the correlation between separate
-bindings; arbitrary recursive rules cannot be reversed. Validate exact
-answers against the original program, including cycles, isolated seeds
-and additional base rules.
+Implement [bound query factoring](specs/design-query-factoring.md): certify
+an entire adornment's state/output separation, carry each original binding
+through state propagation, and produce answers from all base rules and
+facts. Preserve the ordinary Magic reference with `no-factor`. Validate
+positive-length semantics, different transition and base relations,
+correlated calls, subsumption, rewrite limits and allocation failure under
+the [ordered plan](docs/todo-benchmark-performance.md#3-factor-eligible-bound-recursion).
 
 **relic's evaluation costs several times Souffle's interpreter per derivation
 on the analyses.** [Medium, component: `lib/eval.c`, `bench/compare/andersen`]

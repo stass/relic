@@ -53,6 +53,8 @@ A newcomer should read:
   strata and the evaluation schedule.
 * [Magic Sets](design-magic.md) -- the rewrite that specializes a query's
   program to its bindings, its limit and its fallback.
+* [Bound query factoring](design-query-factoring.md) -- certified
+  right-linear recursion, correlated demand propagation and base answers.
 * [Planning](design-planning.md) -- plans, the greedy planner, access
   paths and existence checks; the `-e` output format is specified in its
   [Explain](design-planning.md#explain) section.

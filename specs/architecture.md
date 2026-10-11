@@ -444,14 +444,26 @@ they depend on, are read completely, evaluated from the program's own
 schedule first, so the rewrite never crosses a negative edge. The rest is
 read on demand through adorned copies such as `path$bf`, guarded by magic
 relations such as `magic$path$bf`; generated names contain `$`, which no
-program identifier can, so they cannot collide. Bindings flow through a
-body in the planner's order, so the rewrite has no ordering of its own.
+program identifier can, so they cannot collide. Ordinary demand calls
+follow the planner's body order.
+
+A bound right-linear adornment whose recursive rules separate state from
+unchanged outputs is factored into state propagation and base answers.
+Each `walk$path$bf` tuple retains both the original requested binding and
+the current state. This preserves correlation across callers and avoids
+materializing answers for every intermediate state. Eligibility requires
+positive relational rules over complete external inputs; the whole
+adornment is certified before generation. The transformation emits ordinary
+rules, uses the same rewrite budget and leaves the original program
+available for complete reads and fallback. `-X no-factor` retains ordinary
+Magic as an independent reference.
 
 One limit, `max_magic`, meters everything the rewrite reads and generates;
 a rewrite that outgrows it is abandoned with a warning and the query
 answered from the whole program (see [Query modes](#query-modes)).
 
-See [design-magic.md](design-magic.md).
+See [design-magic.md](design-magic.md) and
+[bound query factoring](design-query-factoring.md).
 
 ### Parallel evaluation
 
@@ -587,8 +599,8 @@ the remedies are `--program-prefix` and a renamed pkg-config module, and
 neither touches the source tree. This is flagged, not designed around.
 
 Names the engine generates -- a query's `$q<serial>`, `path$bf`,
-`magic$path$bf`, `sup$...`, `agg$...`, `p$base` -- contain `$`, which no
-program identifier may, so a collision with a user predicate is impossible
+`magic$path$bf`, `walk$path$bf`, `sup$...`, `agg$...`, `p$base` -- contain `$`,
+which no program identifier may, so a collision with a user predicate is impossible
 by construction rather than avoided by a uniquifying counter, and the names
 stay readable in `-e` output.
 

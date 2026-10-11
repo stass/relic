@@ -645,8 +645,9 @@ whose last literal is a check, streams.
 
 ## Static planning for Magic Sets
 
-The Magic Sets rewrite chooses how bindings flow through a body (sideways
-information passing) by asking the planner for an **order alone**, so it
+For ordinary adornments, the Magic Sets rewrite chooses how bindings flow
+through a body (sideways information passing) by asking the planner for an
+**order alone**, so it
 keeps no notion of body order of its own. The order is always decided
 before any operation is built: a first walk places literals and records
 what each binds, a second replays it into operations. The first walk builds
@@ -761,6 +762,8 @@ Each nesting level is four spaces.
   components.
 * **A Magic rewrite** is headed `magic rewrite of` and the query's rule,
   then `adorn p/2 bf` lines (`, subsumed by p/2 ff` for a subsumed one),
+  with `, factored` on a retained adornment using
+  [bound query factoring](design-query-factoring.md),
   `seed` lines, an optional `read completely:` line, the rewritten
   program's components one level deeper, and the rewritten query. An
   abandoned rewrite prints `abandoned magic rewrite of` and the query's

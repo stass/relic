@@ -186,23 +186,24 @@ uses 406,919 derivations. The diagnostic timings are 28.014 s and 0.073 s
 at sixteen threads; exact answer sets match. The acyclic probe reduces
 71,093,957 derivations to 85,357.
 
-**Implementation.** Recognize a proven class of bound right-linear
-recursions and emit ordinary demand-propagation and answer rules into the
-existing pipeline. For a relation of the form `P = R* B`, propagate demand
-through `R` and produce answers through `B`. Reversing the recursive rule
-is valid only under the necessary algebraic conditions; `R` and `B` need
-not be the same relation. Keep the original program available for calls
-that require complete relations and for ineligible queries.
+**Implementation.** Apply
+[bound query factoring](../specs/design-query-factoring.md): certify every
+rule of an adornment as a positive state transition or a base over complete
+inputs. For `P = R* B`, propagate `(origin, current state)` through `R` and
+produce origin-associated answers through `B`, including source facts.
+`R` and `B` need not coincide. Integrate certification with adornment search
+and free-call subsumption, then emit ordinary rules through the existing
+charged draft path. Complete and ineligible calls retain their established
+behavior.
 
-**Design and regression.** Write `specs/design-query-factoring.md` and
-link it from the architecture's Magic Sets pipeline entry before
-implementation. State eligibility, the least-fixed-point equivalence,
-query-binding correlation, deterministic naming and charged rewrite work.
-The design must preserve positive-length paths, including an isolated seed
-that is not itself an answer. Use the
-[right-linear rewriting paper](https://sigmodrecord.org/publications/sigmodRecord/8906/pdfs/66926.66948.pdf)
-as a proof reference. Establish a switchable reference path and failing
-work-counter regression before the optimization.
+**Design and regression.** Implement the design's slot/arity preflight,
+deterministic walk names, origin attribution and single rewrite budget.
+Add `RELIC_F_NO_FACTOR` and `-X no-factor` consistently to configuration,
+CLI help, manuals and the strategy matrix. Write the chain work-counter
+regression first and confirm it fails before implementation. Use the
+independent ordinary-Magic and naive references for different base and
+transition relations, growing correlated requests and positive-length
+paths, including an isolated seed that is not itself an answer.
 
 **Exit criteria.** Eligible single-source closure does work proportional
 to the relevant edges and reachable nodes and holds no all-pairs closure.
