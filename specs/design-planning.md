@@ -513,6 +513,22 @@ rule succ_edge(X, Z) :- n(X), Y = X + 1, edge(Y, Z).
     emit succ_edge(X, Z)
 ```
 
+### Driving cursors
+
+A prepared plan records whether its first generator follows only tests
+that bind nothing. This structural certificate names the driver position
+for [ordered cursor slicing](design-driver-slicing.md#finding-the-driver).
+The scheduler can divide that scan's view or that lookup's matching chain
+without changing operation order, access masks or view assignments. An
+assignment or aggregate before the generator leaves the plan unsliced;
+it does not cause reordering to obtain a different driver.
+
+This metadata is derived for each prepared plan and belongs to its charged
+storage. Match counts, boundaries and prefix results belong to one frozen
+round. They are absent from candidate selection, static Magic planning
+and explain's operation sequence. A lookup remains indexed whether it
+runs as one task or many.
+
 ### Probe shapes
 
 `EXISTS` and `ANTI_MEMBER` are **probes**: whether the relation holds,

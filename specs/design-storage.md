@@ -341,6 +341,23 @@ A lookup holds no pointer into the relation or the index across the
 operations below it, only the next identifier and the end, so an insertion
 below that grows `next`, the stripes or the column array invalidates nothing.
 
+### Frozen driving slices
+
+[Ordered driving cursors](design-driver-slicing.md#constructing-slices)
+divide a lookup's visits by match ordinal. During a frozen round,
+storage-owned helpers count the chain inside its view and locate a bounded
+number of starting identifiers in a second forward walk. They expose
+identifiers and progress through `lib/frozen.h`, keep no per-match array,
+and add no per-key length or navigation metadata to insertion.
+
+Each slice starts directly at its prepared identifier and stops before
+the next slice's start, or before the original view end for the last slice.
+The worker still uses ordinary tuple matching. A slice's starting
+identifier is not a new delta start: boundary walks never move a frontier,
+and workers do not seek to their starts through the delta-positioning API.
+The index and relation remain frozen from preparation through the task
+barrier, and prepared cursors expire before the merge mutates storage.
+
 ### Lookup of a delta
 
 A lookup through a delta view visits the key's tuples in the delta
@@ -399,6 +416,15 @@ through a pointer, so a lookup handed the index read-only can move them, and
 each is a relaxed atomic word; every walk of one round stops at the same
 tuple, so the race is benign ([parallel evaluation](design-parallel.md) gives
 the argument). The recorded start is written between rounds only.
+
+The positioning helper also supports bounded progress for cursor
+preparation. It probes the key once, keeps private seek state and follows
+at most a requested number of links before returning progress. Only a
+completed seek to the recorded delta start can publish its frontier stop;
+a cancelled seek can leave the old frontier in place. The non-resumable
+entry drains this same helper, preserving one implementation of the
+invariant. Counting matches and locating slice boundaries use the
+positioned cursor and never publish another frontier.
 
 ### Building and lifetime
 

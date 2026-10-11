@@ -18,10 +18,14 @@ Cross-subsystem sequencing and acceptance criteria are in the
 only a first-operation scan; `item_range()` estimates every other plan at
 one tuple. The M3 scale-8 `facts-join` starts with a constant-key lookup,
 returns 571,953 answers and records zero parallel rounds at sixteen
-threads. Give the driving cursor an ordered, partitionable range for
-both scans and indexed matches, and estimate work from its cardinality
-and downstream fan-out. Preserve indexed selection rather than forcing
-a full scan to obtain parallelism.
+threads. Implement
+[ordered driving cursors](../specs/design-driver-slicing.md): a certified
+binding-free prefix executed once, exact driver visits, bounded ordinal
+slices and direct cursor startup. Charge count and boundary walks to the
+scheduling decision and preserve the selected indexed plan. The
+[implementation plan](todo-benchmark-performance.md#5-partition-indexed-driving-cursors)
+sets the regression and measurement gates; the cursor design covers
+frontiers, prefix diagnostics, views, cancellation and fallback.
 
 ## Pending values are expanded back into occurrences
 
@@ -142,16 +146,14 @@ thread however far each tuple of it fans out. `tc-cyclic`'s, estimated at
 48 727 and deriving some twenty times that, crosses the threshold and is
 shared; a closure from a few seeds would not be.
 
-Ideas, each a change to
-[which rounds are shared](../specs/design-parallel.md#which-rounds-are-shared):
-
-* Estimate an item that has not run from its plan rather than its view: the
-  view's size times the fan-out of each lookup, which an index knows as
-  tuples per key.
-* Estimate it from the planner's cardinality estimates, which already
-  order the literals.
-
-The first uses numbers the store keeps exactly and is the one to try first.
+Implement the [driver scheduling model](../specs/design-driver-slicing.md#first-execution-and-measured-history):
+start the shared execution-cost walk with exact driver visits and use
+downstream view sizes and index key counts. Reuse the recursive estimator's
+operation rules without charging already-built indexes again. Keep prefix
+cost separate from driver-scaled history and test small drivers with large
+fan-out independently from large-driver cases. The averaged suffix model
+remains a heuristic under skew; measure mispredictions and count-pass
+costs when the scheduler declines sharing.
 
 ## Loading in parallel is not built
 

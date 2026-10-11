@@ -254,6 +254,13 @@ destination capacity while its new-row builder remains private. Moving
 ownership changes which holder accounts for the bytes; it does not allocate
 another copy or give an adopted array an accounting exemption.
 
+The pool's task array, per-item cursor-preparation records and fixed
+executor state are bounded by the program and worker count and are not
+charged. [Driving slices](design-driver-slicing.md#bounds-and-storage-ownership)
+add no data-sized match array. Prefix function buffers use the ordinary
+charged round scratch and contribute to its retained serial-memory floor,
+even when a prefix rejects before a worker runs the driver.
+
 **It charges capacity, not transients.** A holder is charged the bytes its
 arrays actually hold -- allocated capacity, not the smaller number a count
 implies, since a limit that ignored the difference would let storage reach

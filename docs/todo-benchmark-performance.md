@@ -264,25 +264,41 @@ loading must also leave enough budget for grouped execution in step 6.
 ## 5. Partition indexed driving cursors
 
 [Medium, components: `lib/plan.c`, `lib/round.c`, `lib/exec.c`,
-`lib/index.c`]
+`lib/index.c`, `lib/task.c`, `lib/cost.c`]
 
 **Evidence.** Scale-8 `facts-join` returns 571,953 rows and records zero
 parallel rounds at sixteen threads. Its first operation is a constant-key
 lookup; task cutting admits only a first-operation scan.
 
-**Implementation.** Give the plan's driving cursor an ordered range that
-can be divided into disjoint slices, whether it enumerates a scan or
-indexed matches. Use its actual cardinality and downstream fan-out to
-estimate work. Retain indexed selection. Choose a bounded representation
-for lookup slices and account for its construction cost; materializing an
-unbounded list of matches can consume the gain the split is meant to buy.
+**Implementation.** Apply
+[ordered driving cursors](../specs/design-driver-slicing.md): certify the
+first scan or lookup after a binding-free test prefix, run the prefix once
+privately, then divide the driver's visits by match ordinal. Count a
+lookup chain and locate bounded slice starts in two forward link walks;
+retain the index, original operation views and serial-order merge. Add no
+full match array or insert-time navigation metadata. Slice execution starts
+directly at its prepared cursor and cannot backtrack into the prefix or
+treat a slice boundary as a delta start.
 
-**Design and regression.** Update the access-path, task-cutting and
-frozen-store contracts before implementation. Add a failing regression
-showing substantial indexed work is left serial. Check that slices cover
-the original cursor exactly once, in its logical order, with correct
-semi-naive view boundaries. Include skew, empty matches, more workers than
-matches, a constant-test prefix, cancellation and failure during slicing.
+**Design and regression.** Write the default-scheduling regression first:
+explain retains both indexed lookups, multiple nonempty tasks are prepared
+and the round merges, with the serial answers and work counters. In the
+recorded scale-8 plan, 595,792 total lookups comprise 23,839 driver visits
+and 571,953 suffix matches; the 571,953 result rows are not the driver's
+cardinality. Implement the design's prefix ownership, resumable delta
+positioning, cursor lifetime and failure matrix before enabling slicing.
+Exercise all views, repeated variables, skew, empty matches, more workers
+than matches, constant-expression errors, cancellation and allocation
+refusal. Preparation link steps remain separate from public tuple reads.
+
+**Scheduling and measurement.** Use exact driver visits and the shared
+execution cost model for a first suffix estimate, then physical-plan
+history, with prefix work separate. Charge count, boundary and positioning
+work to scheduling; measure declined attempts too. Validate default
+thresholds on cheap suffixes and shrinking rounds as well as the target
+join. Verify metadata scales with items and workers, not matches, and
+worker count does not multiply setup walks. Measure loading, index builds,
+preparation, execution and merge separately, then the complete command.
 
 **Exit criteria.** The selective benchmark distributes useful work among
 multiple workers and improves execution time after loading is isolated.

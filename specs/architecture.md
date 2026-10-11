@@ -484,7 +484,7 @@ writes only through views -- ranges of tuple identifiers fixed before it
 began -- can be a **deferred round**, one whose insertions wait until its
 end, so its plans read a **frozen store**: the store as it stood when the
 round began. A **shared round** is a deferred round whose work is divided
-among the threads: its first scans are cut into pieces, workers derive
+among the threads: its driving cursors are cut into pieces, workers derive
 from their pieces and set aside the tuples the store lacks, and the merge,
 itself shared among the workers, inserts them exactly as the serial evaluator
 would have, in the same order and with the same identifiers. Relations,
@@ -494,6 +494,18 @@ evaluator would not: whatever goes wrong on a worker, the round is rerun
 serially. The store's read-only promise during a round is carried by the
 type system (`lib/frozen.h`) rather than by a list of callers.
 
+An eligible plan's first scan or lookup is its driving cursor. Any leading
+tests that bind nothing execute once, privately; tasks run only the suffix
+under disjoint, ordered slices of that cursor. Lookup slices divide match
+ordinals using bounded boundary walks, preserving indexed selection
+without a full match array or insert-time navigation metadata. Slicing
+uses the prepared plan and fixed views, never changes plan selection, and
+never treats a slice boundary as a delta start. Preparation costs influence
+scheduling but do not become public evaluation counters. The store is
+frozen before preparation begins, and a refusal discards prefix and task
+effects together before the serial retry. These rules preserve the
+ordered merge's proof for both access paths and for constant-test prefixes.
+
 Computed values stay worker-local during derivation. The merge gathers
 one descriptor per referenced worker-local value in logical first-occurrence
 order, then uses the ordinary value resolver to assign identifiers. Private
@@ -502,7 +514,8 @@ and commit. This preserves value identity without another interner and
 bounds resolution descriptors by local distinct values rather than column
 occurrences.
 
-See [design-parallel.md](design-parallel.md) and
+See [design-parallel.md](design-parallel.md),
+[ordered driving cursors](design-driver-slicing.md) and
 [pending value compaction](design-pending-values.md).
 
 ### Library interface

@@ -402,6 +402,10 @@ Execution-work history remains per candidate for deciding whether a round
 is worth sharing. Inserted-tuple history remains per variant, shared by
 its candidates, because both derive the same set into the same target.
 Timing and work history do not feed the cost selector.
+[Driver slicing](design-driver-slicing.md#scheduling-by-useful-work) uses
+actual driver visits and separate prefix/suffix work for scheduling after
+selection. Its link walks, worker count and prepared task boundaries
+cannot influence candidate choice or build an unselected access path.
 
 ### Preparing selected plans
 

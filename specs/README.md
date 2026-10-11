@@ -71,6 +71,8 @@ A newcomer should read:
   aggregates in strata and in the Magic rewrite.
 * [Parallel evaluation](design-parallel.md) -- the worker pool, deferred
   and shared rounds over a frozen store, and the serial-order merge.
+* [Ordered driving cursors](design-driver-slicing.md) -- bounded scan and
+  index-chain slices, once-executed prefixes and preparation-aware scheduling.
 * [Pending value compaction](design-pending-values.md) -- compact worker
   markers, deterministic value resolution and merge workspace ownership.
 

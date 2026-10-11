@@ -62,8 +62,9 @@ terms name what follows:
 * the **frozen store** is the store as it stood when the round began, which
   is what every plan of a deferred round reads.
 
-While a shared round's plans run, no relation they read is modified -- not
-its columns, its indexes or its count. What the plans derive is gathered as
+From cursor preparation through the workers' completion barrier, no
+relation a shared round reads is modified -- not its columns, its indexes
+or its count. What the plans derive is gathered as
 **candidates**, tuples the frozen store does not hold, and inserted after
 the last plan of the round has finished. Four things follow, and they are
 the whole design.
@@ -77,8 +78,8 @@ the barrier, a plan on a worker reads memory nothing writes until it
 returns. That holds for every array the store has or comes to have, and the
 compiler enforces it ([the frozen-store contract](#the-frozen-store-contract)).
 
-**The result is the serial evaluator's, tuple for tuple**, since tasks run
-in serial order and the merge inserts by the serial rules
+**The result is the serial evaluator's, tuple for tuple**, since tasks are
+enumerated in serial order and the merge inserts by the serial rules
 ([determinism](#determinism)).
 
 **A shared round never fails, because it can always be run again
@@ -99,10 +100,10 @@ boundary, so a component may mix them from round to round.
 
 ## Invariants
 
-* Between publishing a job and its barrier, no relation, index, value table
-  or symbol pool is modified. The only shared words a task writes are the
-  job's coordination words, index frontiers, and the memory account's total
-  for its own buffers.
+* From cursor preparation through the job's barrier, no relation, index,
+  value table or symbol pool is modified. The only shared words a task
+  writes are the job's coordination words, index frontiers, and the memory
+  account's total for its own buffers.
 * Tasks are enumerated in serial order and each worker claims them in
   increasing order, so each worker's candidates are in serial order.
 * A worker's candidates are the tuples the frozen store lacked that it had
@@ -226,26 +227,29 @@ pool.
 
 ### Cutting tasks
 
-A seed is one task emitting one tuple. A plan whose first operation is a
-`SCAN` is cut by that view into contiguous pieces, a task being the plan run
-with its first cursor confined to one piece; nothing else in the executor
-changes. A plan starting any other way -- a lookup keyed by constants -- is
-one task: a chain cannot be cut without walking it, and such plans are rare
-and short.
+A seed is one task emitting one tuple. An eligible plan's first `SCAN` or
+`LOOKUP` is its **driver**, possibly following tests that bind nothing.
+The caller executes those tests once, privately, then partitions the
+driver's ordered visits into contiguous slices. Tasks start at the driver
+and cannot backtrack above it. A plan with an assignment or aggregate
+before its first generator remains a whole-plan task. Empty sequences and
+rejected prefixes retain an empty task record for their item.
 
-The number of pieces follows the item's **estimated work**, not its range: a
-work-per-piece constant divides the estimate, clamped to at least one and at
-most a multiple of the pool's size and the range itself. A delta-first plan
-over a small delta with a large fan-out is then cut finely, where cutting by
-range would give it one task and a barrier for nothing. Enough pieces that a
-worker drawing a heavy one -- a node of high degree -- is balanced by others
-drawing light ones, few enough that claiming stays cheap. Correctness
-depends only on the pieces being contiguous and in order. The work per piece
-is a fraction of the sharing threshold, so a round just past it is cut into
-several pieces rather than run by one worker.
+[Ordered driving cursors](design-driver-slicing.md) defines recognition,
+cursor lifetime and construction. Scans use arithmetic boundaries; lookup
+chains are counted once and walked again to locate match-ordinal boundaries,
+with no full match array or persistent index metadata. A slice holds its
+first identifier and exclusive fence. Indexed selection and all original
+operation views remain intact; slice starts never become delta starts.
+
+The number of pieces follows estimated driver-and-suffix work, including
+downstream fan-out, clamped by actual driver visits and a multiple of the
+pool's size. Several ordered pieces per worker help distribute uneven
+suffix work. One driver tuple remains indivisible. Preparation's prefix
+work does not multiply the piece count or the public counters.
 
 Tasks are enumerated into the **task array**, in serial order, before the
-job is published. The task array and the per-worker executor scratches
+job is published. The task array, prepared-item records and executor scratches
 belong to the pool, grow to the largest round seen, and are not charged:
 they are sized by the program and the thread count, not the data, as
 relation headers are. A failed growth runs the round serially, so a memory
@@ -253,17 +257,22 @@ limit that admits a program at one thread admits it at any count.
 
 ### Which rounds are shared
 
-A round is shared when the pool has more than one thread and its estimated
-work reaches a threshold (constants in lib/round.c). The estimate sums, over
-its items, the work the same item did when it last ran -- tuples read plus
-derivations -- scaled by the ratio of its first range in this round to its
-range in that run; an item that has not run is estimated at its first range. A
-component's rounds change size gradually, so the previous round predicts the
-next well enough for a threshold whose only cost is a missed opportunity or a
-wasted barrier. A chain's closure never crosses it; a dense closure crosses it
-every round; a component whose rounds shrink toward its fixed point runs its
-last rounds serially, which is right, since a barrier costs more than a round
-of a hundred derivations.
+A round is shared when multiple available workers have enough independent
+work to repay preparation, task setup and the pool barrier. The
+[scheduling model](design-driver-slicing.md#scheduling-by-useful-work)
+uses the measured driver cardinality and downstream costs on a first run,
+then scales the selected plan's successful suffix-work history by its
+driver visits. Prefix work is kept separate. This model uses the same
+execution costing rules as recursive estimation; it does not change that
+estimator's pure, thread-independent choice of plan.
+
+Lookup counting and boundary walks have an explicit serial preparation
+charge, including a count pass followed by a decision to run serially.
+The policy requires useful tasks and an estimated saving over that charge,
+with conservative thresholds in lib/round.c. Data skew and merge cost can
+make the estimate optimistic, so default enablement requires measured gains
+on targeted joins and controls. A one-worker ordinary round performs no
+slicing preparation.
 
 **`-X parallel`** (`RELIC_F_PARALLEL_ALWAYS`) defers every eligible round
 however small and whatever the pool's size, and cuts every item as finely as
@@ -278,8 +287,10 @@ For several workers to run one plan, the executor's state belongs to whoever
 runs it: an **executor scratch** per worker holds the frame, operation
 states and the batch of derived tuples, and a running plan is read-only.
 Every task resolves the same view ranges, fixed before the job was
-published, and runs the executor exactly as the serial evaluator does up to
-its EMIT. Only a full batch's destination differs: serially it is inserted;
+published. A sliced task runs the ordinary executor from its prepared
+driver cursor through its suffix; an unsliced task runs the whole plan.
+Prefix records and task records together describe the serial execution.
+A full batch's destination differs: serially it is inserted;
 in a deferred round it is **screened**.
 
 ### The two-stage screen
@@ -322,14 +333,16 @@ A worker runs its tasks one after another, so its buffer holds their
 candidates contiguously in task order, each task recording its offset and
 count.
 
-**Counters and notes.** Executor counters are per worker, summed by worker 0
-after the barrier when the round is merged. The sum is the serial count: a
-piece reads exactly the tuples the serial plan read while its first cursor
+**Counters and notes.** Suffix executor counters are per worker, summed by
+worker 0 after the barrier when the round is merged, with each prepared
+item's prefix counters added once. The sum is the serial count: a piece
+reads exactly the tuples the serial plan read while its driving cursor
 was inside it, and every derivation is counted whether screened out or kept.
-A mixed-type comparison noted under `RELIC_F_NOTE_MIXED` is recorded in the
-task's record and reported by worker 0 when the merge reaches that task,
-once per rule, so it comes in task order and names the comparison the serial
-evaluator names first. Within the task where a tuple limit refuses, it may
+A mixed-type comparison noted under `RELIC_F_NOTE_MIXED` is recorded in
+the prefix or task record. Worker 0 reports notes in item order, the prefix
+before its tasks, using the existing once-per-rule suppression, so the
+comparison named is the serial evaluator's first. Within the task where a
+tuple limit refuses, it may
 name a comparison the serial run reaches only after the refused tuple -- the
 same latitude a batch already has.
 
@@ -350,7 +363,12 @@ indexes new tuples -- and besides:
 * **per round: setup** -- reserving buffers, the barrier, and a few
   allocations for the merge's scratch.
 
-So the floor is proportional to a round's **new tuples**, not its
+Indexed slicing also pays serial chain-positioning, counting and boundary
+walks before task execution. These costs depend on driver visits even when
+few new tuples result and are included in the
+[scheduling decision](design-driver-slicing.md#pieces-and-the-preparation-charge).
+
+The merge's floor is proportional to a round's **new tuples**, not its
 derivations or its number of rounds: a round inserting one tuple in hundreds
 costs about its serial self, and one inserting a large share of what it
 derives costs a multiple of it on one thread and gains only once its work
@@ -583,8 +601,11 @@ hold, so a future write on the task path does not compile, however the
 representation grows. That replaces the table a design would otherwise keep
 of what writes when; the list of the store's writers -- the merge, planning,
 a load's commit, a query's clear, the discard -- is a consequence rather than
-a rule. A task therefore reads counts, columns and indexes as they stood when
-the job was published, holding pointers as long as it likes.
+a rule. Cursor preparation and tasks therefore read counts, columns and
+indexes from one frozen interval. Storage-owned cursor helpers expose only
+identifiers and progress, including bounded delta positioning. A prepared
+slice keeps identifiers rather than pointers into the store, expires at
+round end and cannot survive an index growth, clear or discard.
 
 ### The benign frontier race
 
@@ -612,6 +633,12 @@ reaches the stop, so a stale frontier costs a few links and gives the same
 answer. Relaxed atomics make it a defined program rather than a C11 data
 race, and ThreadSanitizer has nothing to report. Between rounds only worker
 0 runs, and the merge sets a new key's frontier to its first tuple.
+
+Driver preparation positions at that same delta start through a bounded
+storage helper. Its count and boundary walks publish no frontiers. Tasks
+start directly from the identifiers preparation found; a slice boundary
+is never passed off as a delta start. Thus slicing introduces no second
+target for the frontier writers of one round.
 
 ## Failure paths and limits
 
@@ -695,9 +722,10 @@ A successful evaluation gives identical output at every thread count,
 `parallel_rounds` aside:
 
 * A plan run over a piece derives exactly what the whole plan derives while
-  its first cursor is in the piece, in the same order: everything below the
-  first operation is a function of the binding and the frozen store, and the
-  round's rule makes that store the one the serial plan reads.
+  its driving cursor is in the piece, in the same order: the prefix runs
+  once, and everything below the driver is a function of its binding and
+  the frozen store. The round's rule makes that store the one the serial
+  plan reads.
 * The tasks' candidates in task order are the serial derivation order with
   duplicates removed -- those the frozen store held, duplicates serially too,
   and those a worker's screen caught, repeats of its own earlier, and so
@@ -708,7 +736,8 @@ A successful evaluation gives identical output at every thread count,
 * Computed integers and strings are interned in serial order of first
   occurrence, under the serial identifiers and capacities, so the value
   table, symbol pool and storage total agree too.
-* Work counters are sums over pieces of the serial counts.
+* Work counters are the prefix counts once per item plus the sums over
+  pieces of the serial suffix counts; preparation links add no tuple reads.
 * The hash seed decides where a key sits within a table and nothing
   reported; stripes are unkeyed and constant in number.
 * An abandoned round runs serially, so every refusal is the serial
