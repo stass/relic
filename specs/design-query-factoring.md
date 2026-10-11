@@ -436,7 +436,11 @@ Certificate arrays follow source-rule count; slot maps follow the fixed
 variable bound. Array lengths, name lengths and allocation sizes use
 checked arithmetic. Do not raise the default work ceiling merely to conceal
 unmetered recognition or copying. The default remains a function of the
-original program and query, independent of their data or number of origins.
+original program and query, independent of their data or number of origins,
+and of whether factoring is enabled. It allows for certification, metered
+as above, as one of the [four readings](design-magic.md#the-default-is-in-proportion-to-the-program)
+of an adornment's rules: certification, the ordinary walk after a rejected
+certificate, the second search's replay and the draft.
 
 Outcomes follow the existing boundaries:
 

@@ -3,12 +3,14 @@
 % p's first four columns, and the recursive rule calls p twenty-eight times,
 % each call placing A, B, C and D in a different four of its columns, so the
 % rewrite reaches 34 adornments.  Finding them reads the query and p's two
-% rules once for each, 1 + 34 x 30 = 1021 literals.  Drafting them cuts the
-% long body into a supplementary predicate before every call but the first,
-% which makes some fifty short rules of each adornment.  The program has two
-% rules of 32 literals in all and the query one, for a limit of 768 + 48 x
-% 33 = 2352, which the adornments' short rules outgrow together though each
-% adornment is linear in the body.  The warning names the limit, and the
+% rules twice for each, once to certify it for factoring, which the
+% recursive rule's second call on p refuses, and once to walk it, 1 + 2 x
+% 34 x 30 = 2041 literals.  Drafting them cuts the long body into a
+% supplementary predicate before every call but the first, which makes some
+% fifty short rules of each adornment.  The program has two rules of 32
+% literals in all and the query one, for a limit of 1024 + 64 x 33 = 3136,
+% which the adornments' short rules outgrow together though each adornment
+% is linear in the body.  The warning names the limit, and the
 % query is answered from the whole program, as -X no-magic answers it.
 
 e(1, 1, 1, 1, 1, 1, 1, 1).

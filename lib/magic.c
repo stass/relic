@@ -136,14 +136,16 @@
 /*
  * The default limit on a rewrite's work: the floor plus the factor times the
  * size of the program and the query, in the size of body literals -- one
- * each, and one more per node of an expression.  A rewrite searches at most
- * twice and drafts once, and each of the three is allowed a floor of 256 and
- * a factor of 16, which admit a rewrite that specializes the program: a
- * handful of adornments per predicate, each with its rules, magic rules and
- * cuts.
+ * each, and one more per node of an expression.  A rewrite reads an
+ * adornment's rules at most four times: to certify it for factoring, to
+ * walk it when a rule fails the certificate, in the second search, and to
+ * draft it.  Each reading is allowed a floor of 256 and a factor of 16,
+ * which admit a rewrite that specializes the program: a handful of
+ * adornments per predicate, each with its rules, magic rules and cuts.
+ * The default is the same whether or not factoring is enabled.
  */
-#define	RELIC_MAGIC_LIMIT_FLOOR		768
-#define	RELIC_MAGIC_LIMIT_FACTOR	48
+#define	RELIC_MAGIC_LIMIT_FLOOR		1024
+#define	RELIC_MAGIC_LIMIT_FACTOR	64
 
 /*
  * The bytes of a predicate's name that cost the rewrite one literal.  A

@@ -111,22 +111,6 @@ notices. Keep the start on the relation instead, which a new index's
 frontiers, each at its key's first tuple, satisfy at any start; that
 deletes the per-build raise, provided clearing a relation resets the start.
 
-**A rejected factoring certificate narrows the default rewrite limit.**
-[Medium, component: `lib/magic.c`, `specs/design-magic.md`] The first
-search charges the bodies of an adornment that may factor before
-certifying it, and charges them again when a rule fails and it is walked
-as an ordinary one, so it can read an adornment twice where the default
-limit, a floor of 768 and a factor of 48, allows each of three stages one
-reading. A recursive `p/7` queried with all 127 bound masks, whose last
-rule compares, needs a limit of 10,423 and is abandoned at its default of
-8,352, which `-X no-factor` rewrites within at 8,253; the answers are the
-same, but from the whole program. Either allow a fourth stage its floor
-and factor (1,024 and 64), which moves the calibrated default goldens
-(`magic-default*.dl`, `arithmetic-magic-*.dl`, `explain-abandoned.dl`,
-the default-limit cases of `tests/unit/test_magic.c`), or charge a
-rejected certificate's bodies once between certification and the walk,
-which the factoring design's separate charging forbids as written.
-
 **A planner that emits an indexed operation must record its access.**
 [Low, component: `lib/plan.c`] `place_atom()`, `place_probe()` and
 `place_aggregate()` each call `record_access()`. An operation holds its

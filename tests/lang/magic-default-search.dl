@@ -1,11 +1,13 @@
 % p(c, Y2, ..., Y8)? reaches p's adornments as tests/lang/magic-default.dl
 % does, but every rule is padded to twenty literals with f literals over
 % variables of their own, which bind nothing p is called with.  Finding
-% the adornments reads every rule of each whole, and is charged what it
-% reads, so the rewrite outgrows its limit well before it runs out of
-% adornments, and before it drafts a rule.  The program's size in literals,
-% each body and one for its guard, is 21 + 8 x 21 = 189, and with the
-% query's one the default limit is 768 + 48 x 190 = 9888.  f's fact counts
+% the adornments certifies each for factoring and reads every rule of each
+% whole, and is charged what it reads, so the rewrite outgrows its limit
+% well before it runs out of adornments, and before it drafts a rule: the
+% bodies of the 128 adornments' rules alone are 128 x 9 x 20 = 23040
+% literals.  The program's size in literals, each body and one for its
+% guard, is 21 + 8 x 21 = 189, and with the query's one the default limit
+% is 1024 + 64 x 190 = 13184.  f's fact counts
 % nothing, since no rule derives f and the rewrite copies no fact.  The
 % warning names the limit, and the query is answered from the whole
 % program.

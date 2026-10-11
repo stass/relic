@@ -1,5 +1,5 @@
 % A limit the caller sets replaces the default.  This is magic-default.dl's
-% program, whose rewrite costs 4098 literals against a default of 2208:
+% program, whose rewrite costs 4885 literals against a default of 2944:
 % under a limit of a million the rewrite runs, and the query is answered
 % through it without a warning.
 

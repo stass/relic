@@ -722,16 +722,24 @@ abandoned for its length. The default is fixed for a program and a query, so
 it is the same on every run.
 
 The multiple admits every rewrite that specializes the program and refuses
-one that multiplies it. A rewrite makes at most two searches, each reading
-the rules of each adornment it keeps once -- twice for one whose factoring
-certificate a rule fails, which is then read as an ordinary adornment -- and
-one draft, copying each of those rules once -- whole, or cut into pieces
-holding at least its body between them -- with a magic rule per demand call
-and a supplementary rule per cut, or a walk seed, a transition per
-recursive rule and an answer rule per base rule for a factored adornment. A handful of adornments per predicate costs a few copies of the
-program per stage; the default allows each of the three stages the same
-floor and factor. The floor admits every rewrite of a small program
-outright.
+one that multiplies it. A rewrite reads the rules of each adornment it
+keeps at most four times, each reading charged:
+
+* the first search certifies the adornment for factoring,
+* and walks it as an ordinary adornment when a rule fails the certificate;
+* the second search replays what the first found, certificate or walks;
+* the draft copies each rule once -- whole, or cut into pieces holding at
+  least its body between them -- with a magic rule per demand call and a
+  supplementary rule per cut, or a walk seed, a transition per recursive
+  rule and an answer rule per base rule for a factored adornment.
+
+A handful of adornments per predicate costs a few copies of the program per
+reading; the default allows each of the four readings the same floor and
+factor, and is the same whether or not factoring is enabled, so that
+`-X no-factor` changes how a query is rewritten and not what it may spend.
+A failed certification is real work, and is charged, rather than hidden by
+a default that does not count it. The floor admits every rewrite of a small
+program outright.
 
 ### Outgrowing the limit falls back
 
@@ -741,7 +749,7 @@ that exploded, which is what the reader has to change -- or the query, when
 its own walk or rewritten body is what outgrew it:
 
 ```text
-relic: warning: the query's Magic rewrite outgrew magic=2352 while adorning p/8; answering it from the whole program
+relic: warning: the query's Magic rewrite outgrew magic=3136 while adorning p/8; answering it from the whole program
 ```
 
 The query is then answered from the whole program's fixed point, exactly as

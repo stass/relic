@@ -56,6 +56,7 @@
 #define	SCENARIO_LONG_BODY	"a long body's rewrite fits the limit"
 #define	SCENARIO_LONG_NAME	"a long name is charged per predicate named"
 #define	SCENARIO_NAMES		"adornments are named by their bound columns"
+#define	SCENARIO_REJECTED	"a rejected certificate fits the default limit"
 #define	SCENARIO_STATE		"what the rewrite derives does not leak"
 #define	SCENARIO_TAUTOLOGY	"a rule deriving its own head is dropped"
 #define	SCENARIO_SEARCHED	"the first search is charged what it reads"
@@ -170,6 +171,8 @@ static char	*declined_cuts_program(size_t calls);
 static void	 facts_behind_a_rule_fit_the_rewrites_limit(void);
 static void	 the_rewrite_grows_linearly_in_a_bodys_calls(void);
 static void	 a_long_bodys_rewrite_fits_the_limit(void);
+static void	 a_rejected_certificate_fits_the_default_limit(void);
+static void	 every_mask_query(unsigned int arity, text_t *text);
 static void	 a_long_name_is_charged_per_predicate_named(void);
 static void	 a_bound_chain_derives_linearly(void);
 static void	 factoring_answers_as_its_references_do(void);
@@ -1138,12 +1141,12 @@ a_rewrite_over_its_limit_is_abandoned(void)
 /*
  * The self-calling program's arity at which the first search cannot read
  * its adornments within the default limit, its long rule's calls on f, and
- * that limit: 768 + 48 x 2048, the program's 2047 literals and the query's
+ * that limit: 1024 + 64 x 2048, the program's 2047 literals and the query's
  * one.
  */
 #define	SELF_CALLING_WIDE_ARITY	11
 #define	SELF_CALLING_LENGTH	2000
-#define	SELF_CALLING_WIDE_LIMIT	99072
+#define	SELF_CALLING_WIDE_LIMIT	132096
 
 /*
  * The search that finds the adornments reads every rule of each, and is
@@ -1340,12 +1343,12 @@ rewrite_self_calling(unsigned int length, self_calling_rewrite_t *rewritep)
 
 /*
  * The calls of the rule whose every cut is declined, and two limits on its
- * rewrite: the default, 768 + 48 x 205 for the program's 204 literals and
+ * rewrite: the default, 1024 + 64 x 205 for the program's 204 literals and
  * the query's one, and a larger one that still admits less than the rewrite
  * costs.
  */
 #define	DECLINED_CALLS		200
-#define	DECLINED_DEFAULT	10608
+#define	DECLINED_DEFAULT	14144
 #define	DECLINED_RAISED		15000
 
 /*
@@ -1389,7 +1392,7 @@ a_declined_cut_is_charged_every_prefix(void)
 
 	answered = explain_answer(program, text, 0, &explained, &log);
 	checkf(answered && log.errors == 0 && log.warnings == 1 &&
-	    strstr(log.last_warning, "outgrew magic=10608 while adorning "
+	    strstr(log.last_warning, "outgrew magic=14144 while adorning "
 	    "p/2") != NULL && !shows_rewrite(explained.bytes),
 	    SCENARIO_DECLINED,
 	    "the default of %d should abandon a rewrite whose cuts are "
@@ -1694,7 +1697,7 @@ the_rewrite_grows_linearly_in_a_bodys_calls(void)
  * A rewrite that specializes the program fits the default limit however few
  * rules the program has.  r(X) :- p(X), ..., p(X) with 400 calls and the
  * rule deriving p are 2 rules and 2 + 401 = 403 literals, and with the
- * query's one a default of 768 + 48 x 404 = 20160.  The one adornment of r
+ * query's one a default of 1024 + 64 x 404 = 26880.  The one adornment of r
  * keeps a magic rule and a supplementary rule per call, over 800 rules of
  * one or two literals each, well within the limit, which bounds the rules
  * kept as well: a bound of a multiple of the program's 2 rules would
@@ -1733,6 +1736,124 @@ a_long_bodys_rewrite_fits_the_limit(void)
 	free(program);
 }
 
+/* The columns of p in a_rejected_certificate_fits_the_default_limit(). */
+#define	REJECTED_ARITY		7
+
+/*
+ * A rejected certificate's rules are read twice, to certify and to walk,
+ * and the default limit allows for it.  p's three rules hold bodies of 8, 9
+ * and 8 atoms and a comparison of size 3, 31 literals with their guards,
+ * and the query calls p under each of its 127 masks binding a column, for
+ * 158 and a default of 1024 + 64 x 158 = 11136.  The pad atoms make each
+ * reading of p's rules cost as much as the program's size beside the long
+ * query.  An adornment leaving a column free fails its certificate at the
+ * recursive rule, whose call changes that column; the one binding every
+ * column passes it there and fails at the comparison, in the last rule.
+ * So the first search charges the bodies of every adornment before walking
+ * them, and the rewrite needs some 10,400 where the unfactored one needs
+ * some 8,300.  Both are rewritten, with no warning and no adornment
+ * factored, and answer as the whole program does.
+ */
+static void
+a_rejected_certificate_fits_the_default_limit(void)
+{
+	static const char program[] =
+	    "e(a, a, a, a, a, a, a, b, b, b, b, b, b, b).\n"
+	    "s(b, b, b, b, b, b, b).\npad(a).\npad(b).\n"
+	    "p(X1, X2, X3, X4, X5, X6, X7) :- s(X1, X2, X3, X4, X5, X6, X7),"
+	    " pad(X1), pad(X2), pad(X3), pad(X4), pad(X5), pad(X6),"
+	    " pad(X7).\n"
+	    "p(X1, X2, X3, X4, X5, X6, X7) :-"
+	    " e(X1, X2, X3, X4, X5, X6, X7, Y1, Y2, Y3, Y4, Y5, Y6, Y7),"
+	    " pad(X1), pad(X2), pad(X3), pad(X4), pad(X5), pad(X6),"
+	    " pad(X7), p(Y1, Y2, Y3, Y4, Y5, Y6, Y7).\n"
+	    "p(X1, X2, X3, X4, X5, X6, X7) :- s(X1, X2, X3, X4, X5, X6, X7),"
+	    " pad(X1), pad(X2), pad(X3), pad(X4), pad(X5), pad(X6),"
+	    " pad(X7), X1 != zz.\n";
+	static const unsigned int flags[] = { 0, RELIC_F_NO_FACTOR };
+	text_t query_text;
+	text_t explained;
+	diag_log_t log;
+	relic_t *ctx;
+	char *expected;
+	char *rows;
+	size_t f;
+
+	every_mask_query(REJECTED_ARITY, &query_text);
+	if (query_text.failed) {
+		check(false, SCENARIO_REJECTED, "the query is built");
+		free(query_text.bytes);
+		return;
+	}
+
+	ctx = context_with(program, RELIC_F_NO_MAGIC, 0, &log);
+	expected = ctx != NULL ? answer(ctx, query_text.bytes) : NULL;
+	relic_destroy(ctx);
+
+	for (f = 0; f < sizeof(flags) / sizeof(flags[0]); f++) {
+		bzero(&explained, sizeof(explained));
+		text_append(&explained, "", 0);
+		ctx = context_with(program, flags[f], 0, &log);
+		if (ctx != NULL)
+			relic_explain_set(ctx, record_explained, &explained);
+		rows = ctx != NULL ? answer(ctx, query_text.bytes) : NULL;
+		relic_destroy(ctx);
+
+		checkf(rows != NULL && log.errors == 0 && log.warnings == 0 &&
+		    !explained.failed && shows_rewrite(explained.bytes),
+		    SCENARIO_REJECTED, "the 127 calls on p with flags %#x "
+		    "should be rewritten within the default limit, and "
+		    "reported %zu errors and %zu warnings, the last \"%s\"",
+		    flags[f], log.errors, log.warnings,
+		    log.errors != 0 ? log.last : log.last_warning);
+		checkf(!explained.failed &&
+		    has_line(explained.bytes, "    adorn p/7 bbbbbbb") &&
+		    strstr(explained.bytes, ", factored") == NULL,
+		    SCENARIO_REJECTED, "with flags %#x no adornment of p "
+		    "should factor, the one binding every column among them, "
+		    "but -e showed\n%.2000s", flags[f], explained.bytes);
+		checkf(expected != NULL && rows != NULL &&
+		    strcmp(rows, expected) == 0, SCENARIO_REJECTED,
+		    "with flags %#x the 127 calls answered\n%s\nwhere the "
+		    "whole program answered\n%s", flags[f],
+		    rows != NULL ? rows : "(failed)",
+		    expected != NULL ? expected : "(failed)");
+
+		free(rows);
+		free(explained.bytes);
+	}
+	free(expected);
+	free(query_text.bytes);
+}
+
+/*
+ * In *text, a query calling p of `arity` columns once under each mask
+ * binding a column: a in the bound columns and _ in the free ones, so the
+ * calls reach every adornment of p but the free one.  text->failed is set
+ * when memory ran out.
+ */
+static void
+every_mask_query(unsigned int arity, text_t *text)
+{
+	unsigned int mask;
+	unsigned int column;
+
+	bzero(text, sizeof(*text));
+	for (mask = 1; mask < 1u << arity; mask++) {
+		if (mask > 1)
+			text_append(text, ", ", 2);
+		text_append(text, "p(", 2);
+		for (column = 0; column < arity; column++) {
+			if (column > 0)
+				text_append(text, ", ", 2);
+			text_append(text, (mask & (1u << column)) != 0 ?
+			    "a" : "_", 1);
+		}
+		text_append(text, ")", 1);
+	}
+	text_append(text, "?", 1);
+}
+
 /*
  * The calls of a_long_name_is_charged_per_predicate_named() and the length
  * of its long name.
@@ -1747,11 +1868,11 @@ a_long_bodys_rewrite_fits_the_limit(void)
  * rule of 200 calls on p, its head named by 16384 bytes, cuts a prefix
  * before every call but the first, and each cut names a supplementary
  * predicate after the head's adorned one: 199 names of 256 literals each,
- * some 51000 between them, past the default of 768 + 48 x 460 = 22848 for
- * a program of 459, which counts the head's name once, and a query of one.  The rewrite is
- * abandoned and the query answered from the whole program.  The same rule
- * under a one-byte name costs nothing for its names, each shorter than 64
- * bytes, and is answered through its rewrite.
+ * some 51000 between them, past the default of 1024 + 64 x 460 = 30464 for
+ * a program of 459, which counts the head's name once, and a query of one.
+ * The rewrite is abandoned and the query answered from the whole program.
+ * The same rule under a one-byte name costs nothing for its names, each
+ * shorter than 64 bytes, and is answered through its rewrite.
  */
 static void
 a_long_name_is_charged_per_predicate_named(void)
@@ -1775,7 +1896,7 @@ a_long_name_is_charged_per_predicate_named(void)
 		if (lengths[i] == NAMED_LONG)
 			checkf(answered && log.errors == 0 &&
 			    log.warnings == 1 && strstr(log.last_warning,
-			    "outgrew magic=22848 while adorning ") != NULL &&
+			    "outgrew magic=30464 while adorning ") != NULL &&
 			    !shows_rewrite(explained.bytes), SCENARIO_LONG_NAME,
 			    "a head named by %zu bytes should abandon the "
 			    "rewrite, which reported %zu errors and %zu "
@@ -2899,6 +3020,7 @@ main(void)
 	facts_behind_a_rule_fit_the_rewrites_limit();
 	the_rewrite_grows_linearly_in_a_bodys_calls();
 	a_long_bodys_rewrite_fits_the_limit();
+	a_rejected_certificate_fits_the_default_limit();
 	a_long_name_is_charged_per_predicate_named();
 	what_the_rewrite_derives_does_not_leak();
 	a_load_after_a_rewrite_reaches_the_next_query();

@@ -3,11 +3,14 @@
 % p, so the planner places it first, and each rule then calls p with one
 % more column bound than its head was called with.  With no limit
 % configured, the rewrite's limit is in proportion to the program and the
-% query, 768 + 48 x 30 = 2208 literals for a program of 29, each body and
-% one for its guard, and a query of one.  Finding the adornments reads the
-% query and the eight rules of each, 1 + 64 x 21 = 1345 literals, which the
-% limit admits; drafting them copies each rule with its guard and adds a
-% magic rule for each call, 64 x 43 = 2752 literals more, which outgrows it.
+% query, 1024 + 64 x 30 = 2944 literals for a program of 29, each body and
+% one for its guard, and a query of one.  Finding the adornments certifies
+% each for factoring, reading its rules as far as the first that changes a
+% column it leaves free, some 800 literals, and then reads the query and
+% the eight rules of each but the one binding every column, which factors,
+% 1 + 63 x 21 = 1324 literals; the limit admits both.  Drafting them copies
+% each rule with its guard and adds a magic rule for each call, some 2700
+% literals more, which outgrows it.
 % Outgrowing it abandons the rewrite with a warning; the query is answered
 % from the whole program, as -X no-magic answers it.
 

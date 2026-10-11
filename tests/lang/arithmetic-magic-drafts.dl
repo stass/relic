@@ -3,7 +3,7 @@
 % so each adornment of p/6 drafts the expression into its adorned rule and
 % again into the magic rule of that call.  q/1 calls p/6 twenty-four ways.
 % Reading p/6's rule once per adornment, some 24 x 1027 literals, fits the
-% default limit of 768 + 48 x 1057 = 51504 for a program of 1056 literals
+% default limit of 1024 + 64 x 1057 = 68672 for a program of 1056 literals
 % and a query of one; drafting it twice more does not, since the limit
 % counts a literal's size, one and one more per node of its expressions,
 % and the rewrite falls back to the whole program with the same rows.

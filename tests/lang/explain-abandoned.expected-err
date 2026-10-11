@@ -2,7 +2,7 @@ stratum 0, component 0: h/1
     rule h(X) :- f(X, c, c, c, c, c, c, c, c, c).
         lookup f(X, c, c, c, c, c, c, c, c, c) key={1,2,3,4,5,6,7,8,9}
         emit h(X)
-relic: warning: the query's Magic rewrite outgrew magic=2352 while adorning p/7; answering it from the whole program
+relic: warning: the query's Magic rewrite outgrew magic=3136 while adorning p/7; answering it from the whole program
 abandoned magic rewrite of $q0(Y2, Y3, Y4, Y5, Y6, Y7) :- p(c, Y2, Y3, Y4, Y5, Y6, Y7), not h(d).
 stratum 0, component 0: h/1
     rule h(X) :- f(X, c, c, c, c, c, c, c, c, c).
