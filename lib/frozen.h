@@ -114,8 +114,10 @@ enum relic_order {
  * tuple holding some columns, or RELIC_ID_NONE.
  * relic_relation_index_at() gives the secondary index at a position
  * relic_relation_index() gave, found afresh each time since the array
- * holding it can grow between two lookups.  relic_relation_arity() gives
- * the columns of each of a relation's tuples.
+ * holding it can grow between two lookups.  relic_relation_index_find()
+ * gives the position of the index keyed on a mask, if the relation has
+ * built one, and builds none.  relic_relation_arity() gives the columns of
+ * each of a relation's tuples.
  *
  * relic_relation_screen() looks up a batch of tuples packed at the
  * relation's arity as inserting them would, and inserts none: it gives
@@ -132,6 +134,8 @@ relic_tuple_id_t relic_relation_find(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
 const relic_index_t *relic_relation_index_at(const relic_relation_t *relation,
 	    uint32_t position);
+bool	 relic_relation_index_find(const relic_relation_t *relation,
+	    uint32_t key_mask, uint32_t *positionp);
 void	 relic_relation_screen(const relic_relation_t *relation,
 	    const relic_dom_t *tuples, size_t count, uint64_t *hashes,
 	    bool *held);

@@ -38,6 +38,17 @@
 # written order reads and gives the same answers; a planner that kept the
 # delta-first plan alone reads about five times as much.
 #
+# Distances along a chain of 1000 edges,
+#
+#	dist(X, Z, E) :- dist(X, Y, D), edge(Y, Z), D < 1000000, E = D + 1.
+#
+# derive half a million tuples.  Its input-first plan would look the delta
+# of dist up on its second column through an index nothing else reads, and
+# every round's estimate, which charges building that index, keeps the
+# delta-first plan, the written order.  An index is built only for a plan a
+# round runs, so the default holds exactly the storage of -X no-reorder;
+# the unused index would add some two megabytes.
+#
 # A recursive cycle of 200 000 predicates, p0 :- p1, p1 :- p2 and so on back
 # to p0, with one fact, is answered through its Magic rewrite.  Everything is
 # one component, and the fact travels one predicate per semi-naive round, so
@@ -125,6 +136,7 @@ nodes=100000
 edges=1000000
 work_bound=2500000
 cycle=200000
+chain=1000
 session_lines=100000
 body_length=8000
 recursive_every=16
@@ -289,6 +301,47 @@ if ! cmp -s "$work/guarded/written" "$work/guarded/planned"; then
 fi
 if [ "$guarded_read" -gt $((2 * written_read)) ]; then
 	fail "the guarded closure read $guarded_read tuples, more than twice the $written_read of its written order"
+fi
+
+awk -v count="$chain" 'BEGIN {
+	for (i = 0; i < count; i++)
+		printf "edge(n%d, n%d).\n", i, i + 1;
+	print "dist(X, Y, 1) :- edge(X, Y).";
+	print "dist(X, Z, E) :- dist(X, Y, D), edge(Y, Z), D < 1000000, E = D + 1.";
+}' > "$work/chain.dl"
+
+# Run the chain distances with the switches given, leaving their sorted
+# rows in the file the first argument names and the bytes they stored in
+# chain_storage.
+run_chain() {
+	rows=$1
+	shift
+
+	status=0
+	run_within "$work/rows" "$work/stats" "$budget" \
+	    "$RELIC" -X stats -X no-magic "$@" -q 'dist(X, Y, D)?' \
+	    "$work/chain.dl" || status=$?
+	if [ "$status" -ne 0 ]; then
+		cat "$work/stats" >&2
+		fail "the chain distances $* exited $status within a budget of $budget CPU seconds"
+	fi
+	sort "$work/rows" > "$rows"
+
+	chain_storage=$(counter "storage bytes")
+	if [ -z "$chain_storage" ]; then
+		cat "$work/stats" >&2
+		fail "the chain distances $* reported no storage counter"
+	fi
+}
+
+run_chain "$work/chain-written" -X no-reorder
+written_storage=$chain_storage
+run_chain "$work/chain-planned"
+if ! cmp -s "$work/chain-written" "$work/chain-planned"; then
+	fail "the chain distances' answers depend on their join order"
+fi
+if [ "$chain_storage" -ne "$written_storage" ]; then
+	fail "the chain distances stored $chain_storage bytes, not the $written_storage of their written order: an index no round reads was built"
 fi
 
 awk -v count="$cycle" 'BEGIN {

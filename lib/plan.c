@@ -18,8 +18,8 @@
  * The walk keeps one set, the slots bound so far, and turns each literal into
  * an operation at the point it is placed.  A positive literal whose every
  * argument is already bound is a membership test; one with some bound
- * arguments is a lookup through the index keyed on exactly those columns,
- * which the relation builds if it has none; one with none bound is a scan.
+ * arguments is a lookup through the index keyed on exactly those columns;
+ * one with none bound is a scan.
  * A lookup and a scan bind what they can.  A positive literal that would
  * bind nothing the rule reads -- every argument it does not have bound is
  * `_` or a dead variable -- is an existence check instead, a test keyed on
@@ -132,7 +132,8 @@
  * which plans a variant has never depends on one.  Two identical orders are
  * kept once.  When two are kept, each has a recipe from which a round,
  * knowing the sizes of its views and the keys of its indexes, estimates
- * its work and runs the cheaper (lib/cost.c).  Under RELIC_F_NO_REORDER
+ * its work, and the cost of building the indexes it lacks, and runs the
+ * cheaper (lib/cost.c).  Under RELIC_F_NO_REORDER
  * the delta literal stays where it is written and there is one order;
  * under RELIC_F_NO_INDEX alone, which would scan a deferred delta once per
  * binding before it, the delta goes first.
@@ -156,6 +157,17 @@
  * rewrite ask for the order alone, from a set of slots its caller already
  * binds, and so borrow the planner's notion of body order rather than keep
  * one of its own.
+ *
+ * The second walk emits a draft (plan.h), which names each index an
+ * operation reads by its relation and mask and builds none.
+ * relic_plan_prepare() makes the plan the executor runs: it has the
+ * relation build every index the draft names and lacks, and gives each
+ * operation the position of its index.  An ordinary plan is prepared as
+ * soon as it is emitted.  A variant's candidates stay drafts, so that the
+ * evaluation can prepare each when a round first runs it, and a plan no
+ * round chooses costs its relations no index.  Whether an operation reads
+ * a secondary index is decided in one place, op_index_read(), which both
+ * the draft's list of indexes and the binding of positions follow.
  *
  * Three switches select the references the default is tested against.
  * RELIC_F_NO_INDEX makes every lookup a scan matching the same columns,
@@ -206,6 +218,9 @@ typedef struct relic_plan_score relic_plan_score_t;
  *
  * `ops` has room for one operation per body literal and one EMIT, which is
  * exactly what a plan holds, and is NULL when only the order is wanted.
+ * `accesses` has as much room, and holds the `access_count` indexes the
+ * operations emitted so far read, one per operation reading one, until
+ * coalesce_accesses() keeps each index once.
  * `target` is the relation the EMIT writes, and NULL when only the order is
  * wanted.
  * `delta_literal` is the body index of the literal that reads the delta, or
@@ -223,6 +238,8 @@ struct relic_planner {
 	bool			*placed;
 	relic_ranked_literal_t	*ranking;
 	relic_op_t		*ops;
+	relic_plan_access_t	*accesses;
+	size_t			 access_count;
 	size_t			 order_count;
 	size_t			 ranking_count;
 	size_t			 op_count;
@@ -262,20 +279,24 @@ static relic_op_t *append_op(relic_planner_t *planner,
 		    enum relic_op_kind kind);
 static unsigned int append_steps(const relic_planner_t *planner,
 		    const relic_expr_t *expr, relic_postfix_t *postfix);
+static int	 access_compare(const void *left, const void *right);
 static uint64_t	 arg_slots(const relic_arg_t *args, uint16_t count);
 static bool	 atom_slots(const relic_op_atom_t *atom, uint64_t *bindsp,
 		    uint64_t *readsp);
+static int	 bind_index(relic_t *ctx, relic_op_t *op);
 static void	 bind_slot(relic_planner_t *planner, uint16_t slot,
 		    enum relic_slot_kind kind);
 static uint32_t	 bound_columns(const relic_planner_t *planner,
 		    const relic_atom_t *atom, uint16_t arity);
+static int	 coalesce_accesses(relic_planner_t *planner);
 static uint16_t	 column_count(uint32_t columns);
 static int	 compare_ranked(const void *a, const void *b);
 static int	 compile_postfix(relic_planner_t *planner,
 		    const relic_expr_t *expr, const relic_location_t *where,
 		    relic_postfix_t *postfix);
 static int	 compile_recipe(relic_arena_t *arena,
-		    const relic_plan_t *plan, relic_cost_recipe_t *recipe);
+		    const relic_plan_draft_t *draft,
+		    relic_cost_recipe_t *recipe);
 static int	 confirm_delta_literal(relic_t *ctx, const relic_rule_t *rule,
 		    size_t delta_literal, const bool *incomplete);
 static int	 confirm_order_complete(const relic_planner_t *planner);
@@ -289,7 +310,8 @@ static size_t	 divide_rounding_up(size_t dividend, size_t divisor);
 static int	 emit_body(relic_planner_t *planner);
 static int	 emit_family(relic_planner_t *planners, size_t count,
 		    relic_plan_family_t *family);
-static int	 emit_plan(relic_planner_t *planner, relic_plan_t *plan);
+static int	 emit_draft(relic_planner_t *planner,
+		    relic_plan_draft_t *draft);
 static size_t	 estimate_unknown(uint16_t arity, uint32_t bound,
 		    enum relic_view view);
 static uint32_t	 free_columns(const relic_planner_t *planner,
@@ -302,6 +324,8 @@ static size_t	 family_policies(const relic_t *ctx,
 		    enum relic_order_policy *policies);
 static bool	 is_incomplete(const bool *incomplete, relic_pred_id_t pred);
 static uint32_t	 named_columns(const relic_atom_t *atom, uint16_t arity);
+static uint32_t	*op_index_read(relic_op_t *op,
+		    const relic_relation_t **relationp, uint32_t *maskp);
 static int	 order_body(relic_planner_t *planner);
 static bool	 orders_equal(const relic_planner_t *left,
 		    const relic_planner_t *right);
@@ -351,6 +375,8 @@ static int	 planner_prepare_order(relic_planner_t *planner);
 static void	 planner_release(relic_planner_t *planner);
 static int	 rank_positives(relic_planner_t *planner);
 static void	 read_term(const relic_arg_t *arg, relic_plan_term_t *term);
+static void	 record_access(relic_planner_t *planner,
+		    relic_op_t *op, relic_relation_t *relation);
 static void	 scan_term(relic_planner_t *planner, const relic_arg_t *arg,
 		    relic_plan_term_t *term);
 static int	 score_positive(relic_t *ctx, const bool *incomplete,
@@ -424,6 +450,163 @@ append_atom_op(relic_planner_t *planner, enum relic_op_kind kind,
 		return (NULL);
 
 	return (op);
+}
+
+/*
+ * The secondary index an operation reads, if it reads one: its position
+ * field, with the relation and the key mask in *relationp and *maskp, or
+ * NULL.  A LOOKUP reads one, as do an EXISTS and an ANTI_MEMBER whose key
+ * names some columns but not all, and an AGGREGATE folding through a
+ * lookup.  The draft's list of indexes and the positions
+ * relic_plan_prepare() binds both follow this, so no operation reads an
+ * index its plan did not name.  The switch names every kind of operation,
+ * so that one added later must be classified here rather than read an
+ * index no draft names.
+ */
+static uint32_t *
+op_index_read(relic_op_t *op, const relic_relation_t **relationp,
+    uint32_t *maskp)
+{
+	relic_op_atom_t *atom;
+	uint32_t *positionp;
+
+	atom = &op->u.atom;
+	positionp = NULL;
+	switch (op->kind) {
+	case RELIC_OP_SCAN:
+	case RELIC_OP_MEMBER:
+	case RELIC_OP_FILTER:
+	case RELIC_OP_ASSIGN:
+	case RELIC_OP_EMIT:
+		break;
+	case RELIC_OP_LOOKUP:
+		positionp = &atom->index_position;
+		break;
+	case RELIC_OP_EXISTS:
+	case RELIC_OP_ANTI_MEMBER:
+		if (relic_plan_probe_shape(atom->key_mask, atom->arity) ==
+		    RELIC_PROBE_INDEX)
+			positionp = &atom->index_position;
+		break;
+	case RELIC_OP_AGGREGATE:
+		if (op->u.aggregate.access != RELIC_FOLD_LOOKUP)
+			break;
+		*relationp = op->u.aggregate.relation;
+		*maskp = op->u.aggregate.key_mask;
+		return (&op->u.aggregate.index_position);
+	}
+
+	if (positionp != NULL) {
+		*relationp = atom->relation;
+		*maskp = atom->key_mask;
+	}
+
+	return (positionp);
+}
+
+/*
+ * Record the index an operation just emitted over `relation` reads, if it
+ * reads one.  The operation holds its relation read-only, and building the
+ * index needs it writable, so the caller passes the relation it placed the
+ * operation over.  There is always room: no operation reads more than one
+ * index.  coalesce_accesses() keeps each index once when the draft is
+ * complete.
+ */
+static void
+record_access(relic_planner_t *planner, relic_op_t *op,
+    relic_relation_t *relation)
+{
+	const relic_relation_t *read;
+	relic_plan_access_t *access;
+	uint32_t key_mask;
+
+	if (op_index_read(op, &read, &key_mask) == NULL)
+		return;
+	assert(read == relation);
+
+	access = &planner->accesses[planner->access_count];
+	planner->access_count++;
+	access->relation = relation;
+	access->key_mask = key_mask;
+}
+
+/*
+ * qsort(3) order of pointers into the recorded accesses: the accesses of
+ * one index adjacent, and among them the one recorded first, first.  Only
+ * the grouping is observable, so the relations may be ordered by address.
+ */
+static int
+access_compare(const void *left, const void *right)
+{
+	const relic_plan_access_t *left_access;
+	const relic_plan_access_t *right_access;
+
+	left_access = *(const relic_plan_access_t *const *)left;
+	right_access = *(const relic_plan_access_t *const *)right;
+
+	if (left_access->relation != right_access->relation)
+		return ((uintptr_t)left_access->relation <
+		    (uintptr_t)right_access->relation ? -1 : 1);
+	if (left_access->key_mask != right_access->key_mask)
+		return (left_access->key_mask < right_access->key_mask ?
+		    -1 : 1);
+	if (left_access != right_access)
+		return ((uintptr_t)left_access < (uintptr_t)right_access ?
+		    -1 : 1);
+
+	return (0);
+}
+
+/*
+ * Keep each index the draft's operations read once, where it is first
+ * read.  The accesses are sorted through pointers so that each index's are
+ * adjacent, every one after the first of its index is marked a duplicate by
+ * a NULL relation, and the rest close up in the order they were recorded,
+ * which drops the duplicates: N log N for N accesses
+ * however many distinct indexes a long body reads.  Returns -1 when the
+ * pointers could not be allocated, which marks the arena failed so that
+ * the caller's boundary reports it.
+ */
+static int
+coalesce_accesses(relic_planner_t *planner)
+{
+	relic_plan_access_t **sorted;
+	relic_plan_access_t *first;
+	size_t count;
+	size_t kept;
+	size_t i;
+
+	count = planner->access_count;
+	if (count < 2)
+		return (0);
+
+	sorted = calloc(count, sizeof(*sorted));
+	if (sorted == NULL) {
+		relic_arena_fail(planner->arena);
+		return (-1);
+	}
+	for (i = 0; i < count; i++)
+		sorted[i] = &planner->accesses[i];
+	qsort(sorted, count, sizeof(*sorted), access_compare);
+
+	first = sorted[0];
+	for (i = 1; i < count; i++) {
+		if (sorted[i]->relation == first->relation &&
+		    sorted[i]->key_mask == first->key_mask)
+			sorted[i]->relation = NULL;
+		else
+			first = sorted[i];
+	}
+	free(sorted);
+
+	kept = 0;
+	for (i = 0; i < count; i++) {
+		if (planner->accesses[i].relation != NULL)
+			planner->accesses[kept++] = planner->accesses[i];
+	}
+	planner->access_count = kept;
+
+	return (0);
 }
 
 /*
@@ -638,8 +821,7 @@ positive_kind(const relic_planner_t *planner,
 /*
  * Place a positive literal as the operation positive_kind() chooses: an
  * EXISTS probing by its bound columns, or a generator or a MEMBER.  A LOOKUP
- * names the index keyed on its bound columns, which is built here when the
- * relation has none, so a plan never names an index that does not exist.
+ * reads the index keyed on its bound columns, which the draft names.
  *
  * The bound columns are taken before any term is decided, because deciding
  * a scan's terms binds slots: in edge(X, X) with X unbound, the second
@@ -653,7 +835,6 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 	enum relic_op_kind kind;
 	relic_op_t *op;
 	uint32_t bound;
-	uint32_t index_position;
 	uint16_t i;
 
 	relation = relic_relation_read(planner->ctx, atom->pred);
@@ -667,19 +848,13 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 		return (place_probe(planner, RELIC_OP_EXISTS, atom, relation,
 		    view, bound));
 
-	index_position = 0;
-	if (kind == RELIC_OP_LOOKUP && relic_relation_index(planner->ctx,
-	    relation, bound, &index_position) != 0)
-		return (-1);
-
 	op = append_atom_op(planner, kind, relation);
 	if (op == NULL)
 		return (-1);
 	op->u.atom.view = view;
-	if (kind == RELIC_OP_LOOKUP) {
+	if (kind == RELIC_OP_LOOKUP)
 		op->u.atom.key_mask = bound;
-		op->u.atom.index_position = index_position;
-	}
+	record_access(planner, op, relation);
 
 	for (i = 0; i < relation->arity; i++) {
 		if (kind == RELIC_OP_MEMBER)
@@ -736,9 +911,8 @@ probe_key(const relic_planner_t *planner, const relic_relation_t *relation,
  * asking whether a tuple agrees with `atom` on the columns in `read`.  The
  * caller places it only where each of those columns is a constant or a
  * bound slot; every other column is one the probe does not read, `_` or a
- * dead variable, and its term is ANY.  A key that names some columns takes
- * the index on exactly them, built here when the relation has none, as
- * place_atom() does for a lookup.
+ * dead variable, and its term is ANY.  A key that names some columns reads
+ * the index on exactly them, as a lookup does.
  */
 static int
 place_probe(relic_planner_t *planner, enum relic_op_kind kind,
@@ -748,23 +922,16 @@ place_probe(relic_planner_t *planner, enum relic_op_kind kind,
 	relic_plan_term_t *term;
 	relic_op_t *op;
 	uint32_t key;
-	uint32_t index_position;
 	uint16_t i;
 
 	key = probe_key(planner, relation, read);
-
-	index_position = 0;
-	if (relic_plan_probe_shape(key, relation->arity) ==
-	    RELIC_PROBE_INDEX && relic_relation_index(planner->ctx, relation,
-	    key, &index_position) != 0)
-		return (-1);
 
 	op = append_atom_op(planner, kind, relation);
 	if (op == NULL)
 		return (-1);
 	op->u.atom.view = view;
 	op->u.atom.key_mask = key;
-	op->u.atom.index_position = index_position;
+	record_access(planner, op, relation);
 
 	for (i = 0; i < relation->arity; i++) {
 		term = &op->u.atom.terms[i];
@@ -1071,8 +1238,7 @@ fold_access(const relic_planner_t *planner, uint32_t key_mask,
  * over the relation it folds.  It binds its result slot when nothing has, a
  * number slot for a count or a sum and a domain slot for a min or a max, and
  * otherwise compares with it, reading it as the kind of slot it is.  A
- * lookup names the index keyed on the literal's key columns, built here
- * when the relation has none.
+ * lookup reads the index keyed on the literal's key columns.
  */
 static int
 place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
@@ -1081,7 +1247,6 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 	relic_op_aggregate_t *fold;
 	relic_relation_t *relation;
 	relic_op_t *op;
-	uint32_t index_position;
 
 	aggregate = &literal->u.aggregate;
 	relation = relic_relation_read(planner->ctx, aggregate->source);
@@ -1101,13 +1266,7 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 	fold->slot = aggregate->result;
 	fold->key_mask = aggregate->key_mask;
 	fold->access = fold_access(planner, fold->key_mask, fold->arity);
-
-	if (fold->access == RELIC_FOLD_LOOKUP) {
-		if (relic_relation_index(planner->ctx, relation,
-		    fold->key_mask, &index_position) != 0)
-			return (-1);
-		fold->index_position = index_position;
-	}
+	record_access(planner, op, relation);
 
 	fold->binds = (planner->bound & slot_bit(fold->slot)) == 0;
 	if (!fold->binds) {
@@ -1942,24 +2101,35 @@ planner_prepare_order(relic_planner_t *planner)
 }
 
 /*
- * Emit the plan of a decided order into *plan: an operation per literal and
- * the EMIT, which is where the relations and indexes the plan reads are
- * created.  The body length comes from a compiled rule held in memory, so
- * one more than it cannot wrap.
+ * Emit the draft of a decided order into *draft: an operation per literal
+ * and the EMIT, and the indexes they read.  Emitting creates the relations
+ * the plan reads, but builds none of the indexes.  The body length comes
+ * from a compiled rule held in memory, so one more than it cannot wrap.
  */
 static int
-emit_plan(relic_planner_t *planner, relic_plan_t *plan)
+emit_draft(relic_planner_t *planner, relic_plan_draft_t *draft)
 {
-	planner->ops = relic_arena_allocarray(planner->arena,
-	    planner->rule->body_length + 1, sizeof(*planner->ops));
-	if (planner->ops == NULL)
+	size_t room;
+
+	room = planner->rule->body_length + 1;
+	planner->ops = relic_arena_allocarray(planner->arena, room,
+	    sizeof(*planner->ops));
+	planner->accesses = relic_arena_allocarray(planner->arena, room,
+	    sizeof(*planner->accesses));
+	if (planner->ops == NULL || planner->accesses == NULL)
 		return (-1);
 
-	if (emit_body(planner) != 0 || place_emit(planner) != 0)
+	if (emit_body(planner) != 0)
+		return (-1);
+	if (place_emit(planner) != 0)
+		return (-1);
+	if (coalesce_accesses(planner) != 0)
 		return (-1);
 
-	plan->ops = planner->ops;
-	plan->op_count = planner->op_count;
+	draft->ops = planner->ops;
+	draft->op_count = planner->op_count;
+	draft->accesses = planner->accesses;
+	draft->access_count = planner->access_count;
 
 	return (0);
 }
@@ -2064,35 +2234,35 @@ fold_cost_kind(const relic_op_aggregate_t *fold)
 }
 
 /*
- * Compile the work recipe of an emitted plan into *recipe: a step per
+ * Compile the work recipe of an emitted draft into *recipe: a step per
  * operation, in plan order.  Returns -1 when the arena refused, which the
  * caller's boundary reports.
  */
 static int
-compile_recipe(relic_arena_t *arena, const relic_plan_t *plan,
+compile_recipe(relic_arena_t *arena, const relic_plan_draft_t *draft,
     relic_cost_recipe_t *recipe)
 {
 	relic_cost_step_t *steps;
 	size_t i;
 
-	steps = relic_arena_allocarray(arena, plan->op_count, sizeof(*steps));
+	steps = relic_arena_allocarray(arena, draft->op_count, sizeof(*steps));
 	if (steps == NULL)
 		return (-1);
 
-	for (i = 0; i < plan->op_count; i++) {
+	for (i = 0; i < draft->op_count; i++) {
 		bzero(&steps[i], sizeof(steps[i]));
-		steps[i].op = &plan->ops[i];
-		steps[i].kind = cost_kind(&plan->ops[i]);
+		steps[i].op = &draft->ops[i];
+		steps[i].kind = cost_kind(&draft->ops[i]);
 	}
 
 	recipe->steps = steps;
-	recipe->step_count = plan->op_count;
+	recipe->step_count = draft->op_count;
 
 	return (0);
 }
 
 /*
- * Emit the plans of the first `count` decided orders into a family, in
+ * Emit the drafts of the first `count` decided orders into a family, in
  * family order, each with its recipe when there are two to choose between.
  * The count is set last, so that a family whose emission failed part way
  * holds no candidate.
@@ -2106,11 +2276,11 @@ emit_family(relic_planner_t *planners, size_t count,
 
 	for (i = 0; i < count; i++) {
 		candidate = &family->candidates[i];
-		if (emit_plan(&planners[i], &candidate->plan) != 0)
+		if (emit_draft(&planners[i], &candidate->draft) != 0)
 			return (-1);
 		if (count == 1)
 			continue;
-		if (compile_recipe(planners[i].arena, &candidate->plan,
+		if (compile_recipe(planners[i].arena, &candidate->draft,
 		    &candidate->recipe) != 0)
 			return (-1);
 	}
@@ -2125,7 +2295,7 @@ emit_family(relic_planner_t *planners, size_t count,
  * with the planners in `planners`, which have room for RELIC_FAMILY_MAX and
  * are zeroed, and emit the distinct ones into *family.  Both orders are
  * decided before either is emitted, so that an order both policies reach
- * builds nothing twice.
+ * is emitted once.
  */
 static int
 plan_family(relic_planner_t *planners, relic_t *ctx, relic_arena_t *arena,
@@ -2197,6 +2367,7 @@ relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
     relic_relation_t *target, const bool *incomplete, relic_plan_t *plan)
 {
 	relic_planner_t planner;
+	relic_plan_draft_t draft;
 	int status;
 
 	bzero(plan, sizeof(*plan));
@@ -2208,18 +2379,97 @@ relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	if (status == 0)
 		status = decide_order(&planner);
 	if (status == 0)
-		status = emit_plan(&planner, plan);
+		status = emit_draft(&planner, &draft);
 	planner_release(&planner);
 
-	return (planning_status(ctx, arena, status));
+	status = planning_status(ctx, arena, status);
+	if (status != 0)
+		return (-1);
+
+	return (relic_plan_prepare(ctx, arena, &draft, plan));
+}
+
+/*
+ * Give an operation copied from a draft the position of the index it reads,
+ * if it reads one.  relic_plan_prepare() has had the relation build every
+ * index the draft names, and the draft names every index an operation
+ * reads, so a miss is an internal error rather than an index to build.
+ */
+static int
+bind_index(relic_t *ctx, relic_op_t *op)
+{
+	const relic_relation_t *relation;
+	uint32_t key_mask;
+	uint32_t *positionp;
+
+	positionp = op_index_read(op, &relation, &key_mask);
+	if (positionp == NULL)
+		return (0);
+
+	if (relic_relation_index_find(relation, key_mask, positionp))
+		return (0);
+
+	relic_diag_internal(ctx, NULL,
+	    "a plan reads an index its draft does not name");
+
+	return (-1);
+}
+
+/*
+ * Make the plan the executor runs of a draft, into *plan: copy the
+ * operations into `arena`, have each relation build the indexes the draft
+ * names that it lacks, then give each operation the position of the index
+ * it reads.  Returns 0, or -1 with a diagnostic reported and *plan empty:
+ * memory refused the copy, memory or the memory limit refused an index, or
+ * an operation reads an index the draft does not name, which is an
+ * internal error.  The copy is made first, so a refused copy builds
+ * nothing; after either later failure the indexes built so far stay built,
+ * and are maintained like any other, and nothing reads a plan that was not
+ * made.
+ */
+int
+relic_plan_prepare(relic_t *ctx, relic_arena_t *arena,
+    const relic_plan_draft_t *draft, relic_plan_t *plan)
+{
+	const relic_plan_access_t *access;
+	relic_op_t *ops;
+	uint32_t position;
+	size_t i;
+
+	bzero(plan, sizeof(*plan));
+
+	ops = relic_arena_allocarray(arena, draft->op_count, sizeof(*ops));
+	if (ops == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	bcopy(draft->ops, ops, draft->op_count * sizeof(*ops));
+
+	for (i = 0; i < draft->access_count; i++) {
+		access = &draft->accesses[i];
+		if (relic_relation_index(ctx, access->relation,
+		    access->key_mask, &position) != 0)
+			return (-1);
+	}
+
+	for (i = 0; i < draft->op_count; i++) {
+		if (bind_index(ctx, &ops[i]) != 0)
+			return (-1);
+	}
+
+	plan->ops = ops;
+	plan->op_count = draft->op_count;
+
+	return (0);
 }
 
 /*
  * Plan a semi-naive delta variant of a rule into *family: one or two
  * candidate plans, each with its recipe when there are two (plan.h).
- * Arguments and failures are as for relic_plan_rule(), and a request
- * without a delta literal is refused as an internal error.  A failure
- * leaves the family with no candidate.
+ * Arguments and failures are as for relic_plan_rule(), except that no
+ * index is built, so none is refused, and a request without a delta
+ * literal is refused as an internal error.  A failure leaves the family
+ * with no candidate.
  */
 int
 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,

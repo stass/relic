@@ -1,0 +1,31 @@
+% A recursive rule whose rounds keep the delta-first plan while the delta is
+% small and switch to input-first once it grows, so that the index only
+% input-first reads, on the first column of reach, is built in a later
+% round, when the delta no longer starts at the first tuple.  The index
+% must be raised to that delta before any lookup is made from it, which an
+% assertion-enabled build checks on every lookup.
+%
+% node/1 is a binary tree of 31 nodes, each with its parent at half its
+% number, and every node also has ten predecessors outside the tree, so a
+% delta-first lookup of the predecessors of a node is estimated to find
+% eleven, the edges per target.  reach(X, 1) climbs from the root down one
+% level of the tree per round: each round's delta doubles, until scanning
+% the whole edge relation and looking the delta up is estimated to cost
+% less.
+
+node(1).
+node(N) :- node(M), M < 31, N = M + 1.
+extra(1).
+extra(J) :- extra(I), I < 10, J = I + 1.
+
+edge(C, P) :- node(C), C > 1, P = C / 2.
+edge(X, P) :- node(P), extra(J), X = 100 * P + J.
+
+reach(1, 1).
+reach(X, Z) :- edge(X, Y), reach(Y, Z).
+
+reached(N) :- N = count { reach(X, Z) }.
+leaf(X) :- reach(X, 1), X > 15, X < 32.
+
+reached(N)?
+leaf(X)?

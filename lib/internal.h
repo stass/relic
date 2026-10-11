@@ -1286,19 +1286,32 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
 	    const bool *incomplete, relic_plan_t *plan);
 
 /*
- * Plan a semi-naive delta variant of a rule into *family (plan.h): its
- * delta-first plan and its input-first plan, kept once when the two orders
- * are the same, or the one plan a reference configuration asks for, each
- * with the work recipe a round chooses by when there are two.
- * `delta_literal` is the body index of the positive literal that reads the
- * delta, which must be over a relation `incomplete` marks; the variant's
- * other literals over marked relations read the old or current view.
- * Otherwise arguments and failures are as for relic_plan_rule().
+ * Plan a semi-naive delta variant of a rule into *family (plan.h): the
+ * drafts of its delta-first plan and its input-first plan, kept once when
+ * the two orders are the same, or the one plan a reference configuration
+ * asks for, each with the work recipe a round chooses by when there are
+ * two.  `delta_literal` is the body index of the positive literal that
+ * reads the delta, which must be over a relation `incomplete` marks; the
+ * variant's other literals over marked relations read the old or current
+ * view.  The relations the drafts read are created, and the indexes they
+ * read are not built.  Otherwise arguments and failures are as for
+ * relic_plan_rule().
  */
 int	 relic_plan_variant(relic_t *ctx, relic_arena_t *arena,
 	    const relic_rule_t *rule, relic_relation_t *target,
 	    size_t delta_literal, const bool *incomplete,
 	    relic_plan_family_t *family);
+
+/*
+ * Make the plan the executor runs of a draft into `arena`: build each index
+ * the draft names that its relation lacks, and give each operation the
+ * position of the index it reads.  Returns 0, or -1 with a diagnostic
+ * reported: memory or the memory limit refused an index or the plan, or an
+ * operation reads an index the draft does not name, which is an internal
+ * error.  An index built before a failure stays built.
+ */
+int	 relic_plan_prepare(relic_t *ctx, relic_arena_t *arena,
+	    const relic_plan_draft_t *draft, relic_plan_t *plan);
 
 /*
  * The order relic_plan_rule() would place a rule's body literals in, as body

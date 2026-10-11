@@ -37,7 +37,9 @@ typedef struct relic_op_assign relic_op_assign_t;
 typedef struct relic_op_atom relic_op_atom_t;
 typedef struct relic_op_filter relic_op_filter_t;
 typedef struct relic_plan relic_plan_t;
+typedef struct relic_plan_access relic_plan_access_t;
 typedef struct relic_plan_candidate relic_plan_candidate_t;
+typedef struct relic_plan_draft relic_plan_draft_t;
 typedef struct relic_plan_family relic_plan_family_t;
 typedef struct relic_plan_term relic_plan_term_t;
 typedef struct relic_postfix relic_postfix_t;
@@ -203,11 +205,14 @@ enum relic_view {
  * `key_mask` and `index_position` are set on a LOOKUP, an EXISTS and an
  * ANTI_MEMBER: the columns it looks up by, bit c for column c, and the
  * position in relation->indexes of the index keyed on exactly those columns.
- * The index is named by position because positions are fixed until the
- * relations are next discarded, which no plan outlives, and addresses are
- * not.  The mask of an EXISTS or an ANTI_MEMBER, the probes, is one of the
- * three shapes of enum relic_probe_shape, which the planner chooses and the
- * executor and explain read back through relic_plan_probe_shape() alone.
+ * The planner sets the mask; relic_plan_prepare() sets the position, which
+ * in a draft's operations (relic_plan_draft_t) is unset and means nothing.
+ * The index is named by
+ * position because positions are fixed until the relations are next
+ * discarded, which no plan outlives, and addresses are not.  The mask of an
+ * EXISTS or an ANTI_MEMBER, the probes, is one of the three shapes of enum
+ * relic_probe_shape, which the planner chooses and the executor and explain
+ * read back through relic_plan_probe_shape() alone.
  */
 struct relic_op_atom {
 	const relic_relation_t	*relation;
@@ -341,7 +346,8 @@ enum relic_fold_access {
  * the relation of an atom folded in place, whose key columns are whichever
  * its shared variables stand in.  `access` says how the group's rows are
  * reached, and for RELIC_FOLD_LOOKUP `index_position` names the index
- * keyed on `key_mask` as a LOOKUP's does.  `fn` folds column `column` of
+ * keyed on `key_mask` as a LOOKUP's does, once relic_plan_prepare() has set
+ * it.  `fn` folds column `column` of
  * each row, which `count` does not read.
  *
  * `binds` says whether the fold binds `slot` or, bound before, compares its
@@ -380,14 +386,17 @@ struct relic_op {
 };
 
 /*
- * One rule's plan.  Three invariants hold for every plan the planner builds,
- * and the executor relies on them without checking:
+ * One rule's plan, as the executor runs it.  Four invariants hold for every
+ * plan relic_plan_prepare() makes, and the executor relies on them without
+ * checking:
  *
  *	the last operation is EMIT, and it is the only one;
  *	every BOUND or NUMBER term and every slot a program or a fold reads
  *	is one an earlier operation, or an earlier column of the same
  *	operation, binds, a generator, an ASSIGN or an AGGREGATE;
- *	every test reads only constants and bound slots.
+ *	every test reads only constants and bound slots;
+ *	every operation that reads a secondary index names, by position, a
+ *	published index of its relation keyed on its mask.
  *
  * A plan that was built therefore always has `ops`.
  *
@@ -397,6 +406,35 @@ struct relic_op {
 struct relic_plan {
 	relic_op_t	*ops;
 	size_t		 op_count;
+};
+
+/*
+ * A secondary index a plan's operations read: the one of `relation` keyed
+ * on the columns of `key_mask`.  It names the index whether or not the
+ * relation has built it.
+ */
+struct relic_plan_access {
+	relic_relation_t	*relation;
+	uint32_t		 key_mask;
+};
+
+/*
+ * A plan as the planner emits it, before its indexes are bound: `ops` and
+ * `op_count` as a plan's, except that an operation names the index it reads
+ * by its mask alone and its position means nothing, and `accesses`, the
+ * indexes the operations read, `access_count` of them, each once, in the
+ * order the operations first read them.  Every invariant of a plan holds
+ * of a draft except that its operations name a published index by
+ * position, which is what relic_plan_prepare() establishes when it makes a
+ * plan of one.  The executor never reads a draft, so emitting one
+ * builds no index: a draft can be held, explained and estimated without
+ * the relations it reads paying for the indexes it would need.
+ */
+struct relic_plan_draft {
+	const relic_op_t		*ops;
+	const relic_plan_access_t	*accesses;
+	size_t				 op_count;
+	size_t				 access_count;
 };
 
 /*
@@ -432,11 +470,11 @@ enum relic_cost_kind {
 };
 
 /*
- * One step of a work recipe: the operation `op` of the candidate's plan,
+ * One step of a work recipe: the operation `op` of the candidate's draft,
  * counted as `kind` says.  A step of kind LOOKUP or FOLD_LOOKUP reads K
- * from the index its operation looks up through, which
- * relic_cost_step_index() names (lib/cost.h).  A recipe is complete once
- * compiled and nothing writes it afterwards.
+ * from the index of its operation's relation keyed on its mask, when the
+ * relation has built it.  A recipe is complete once compiled and nothing
+ * writes it afterwards.
  */
 struct relic_cost_step {
 	const relic_op_t	*op;
@@ -445,9 +483,8 @@ struct relic_cost_step {
 
 /*
  * A plan's work recipe: a step for each of its operations, in plan order.
- * It is compiled from the plan once its access paths are known and reads
- * nothing the plan does not, so estimating it can neither change the plan
- * nor run any of it.
+ * It is compiled from the draft and reads nothing the draft does not, so
+ * estimating it can neither change the plan nor run any of it.
  */
 struct relic_cost_recipe {
 	relic_cost_step_t	*steps;
@@ -455,12 +492,14 @@ struct relic_cost_recipe {
 };
 
 /*
- * One of a delta variant's plans, with the recipe that estimates its work.
- * The recipe is compiled only when the variant has two plans to choose
- * between; a lone plan is never estimated and its recipe is empty.
+ * One of a delta variant's plans, as a draft, with the recipe that
+ * estimates its work.  The recipe is compiled only when the variant has two
+ * plans to choose between; a lone plan is never estimated and its recipe
+ * is empty.  What runs a candidate is the plan relic_plan_prepare() makes
+ * of its draft, which the evaluation holds.
  */
 struct relic_plan_candidate {
-	relic_plan_t		plan;
+	relic_plan_draft_t	draft;
 	relic_cost_recipe_t	recipe;
 };
 

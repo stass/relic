@@ -77,6 +77,7 @@
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_INTEGER	"interning an integer survives a failed allocation"
 #define	SCENARIO_INTERFACE	"an added fact or collected answer reports once"
+#define	SCENARIO_LATE_INDEX	"a late index out of memory can be retried"
 #define	SCENARIO_LOAD		"a load that ran out of memory adds nothing"
 #define	SCENARIO_LOADED		"a loaded query out of memory reports once"
 #define	SCENARIO_LOOKAHEAD	"a refusal in the lookahead reports once"
@@ -513,6 +514,8 @@ static bool	 values_agree(const relic_t *ctx,
 		    const relic_t *reference);
 static void	 sweep_compute_retry(const char *program, size_t threads,
 		    const relic_t *reference);
+static void	 a_late_index_out_of_memory_can_be_retried(void);
+static void	 sweep_late_index_retry(uint32_t flags, size_t threads);
 static void	 a_query_that_ran_out_of_memory_can_be_retried(void);
 static void	 sweep_query_retry(const eval_sweep_t *sweep,
 		    const char *program);
@@ -3162,6 +3165,141 @@ sweep_compute_retry(const char *program, size_t threads,
 }
 
 /*
+ * Materialize a closure whose rounds keep the delta-first plan while the
+ * delta is small and switch to input-first once it grows, with the nth
+ * allocation refused, for every allocation an undisturbed run makes, then
+ * materialize it again with the allocator restored.  The index only
+ * input-first reads, on the first column of reach, is built when a round
+ * first chooses that plan, between rounds of the fixed point, so the sweep
+ * refuses an allocation inside that build as well as before and after it.
+ * Each failure must say so once and leave the account holding what the
+ * relations hold, and the retry must reach the whole closure.
+ *
+ * The sweep is known to straddle the build when some refused run leaves
+ * reach grown past its one fact and without the index, and another leaves
+ * the index built: every allocation between them was refused in turn.
+ */
+static void
+a_late_index_out_of_memory_can_be_retried(void)
+{
+	sweep_late_index_retry(0, 1);
+	sweep_late_index_retry(RELIC_F_PARALLEL_ALWAYS, 4);
+}
+
+/*
+ * One configuration's sweep of a_late_index_out_of_memory_can_be_retried().
+ */
+static void
+sweep_late_index_retry(uint32_t flags, size_t threads)
+{
+	static const char program[] =
+	    "node(1).\n"
+	    "node(N) :- node(M), M < 31, N = M + 1.\n"
+	    "extra(1).\n"
+	    "extra(J) :- extra(I), I < 10, J = I + 1.\n"
+	    "edge(C, P) :- node(C), C > 1, P = C / 2.\n"
+	    "edge(X, P) :- node(P), extra(J), X = 100 * P + J.\n"
+	    "reach(1, 1).\n"
+	    "reach(X, Z) :- edge(X, Y), reach(Y, Z).\n";
+	const size_t closure = 31 + 31 * 10;
+	relic_config_t config;
+	size_t refused_before;
+	size_t refused_after;
+	long budget;
+	bool undisturbed;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.threads = threads;
+
+	refused_before = 0;
+	refused_after = 0;
+	undisturbed = false;
+
+	for (budget = 0; budget < EVAL_SWEEP && !undisturbed; budget++) {
+		const relic_relation_t *reach;
+		uint32_t position;
+		size_t before;
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_LATE_INDEX,
+			    "a context should be created");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+
+		if (relic_load_string(ctx, "late.dl", program) != 0 ||
+		    relic_check(ctx) != 0) {
+			check(false, SCENARIO_LATE_INDEX,
+			    "the program should load and check before the "
+			    "sweep begins");
+			relic_destroy(ctx);
+			break;
+		}
+
+		errors_reported = 0;
+		before = allocations_made();
+		refuse_allocations_after(budget);
+		status = relic_materialize(ctx);
+		serve_every_allocation();
+		undisturbed = allocations_made() - before <= (size_t)budget;
+
+		reach = relation_named(ctx, "reach", 2);
+		if (status != 0 && reach != NULL &&
+		    relic_relation_count(reach) > 1) {
+			if (relic_relation_index_find(reach, 1, &position))
+				refused_after++;
+			else
+				refused_before++;
+		}
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u),
+		    SCENARIO_LATE_INDEX, "on %zu thread(s), a materialization "
+		    "that %s should report %d message(s), not %zu, with "
+		    "allocation %ld refused", threads,
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(status == 0 || out_of_memory(ctx), SCENARIO_LATE_INDEX,
+		    "on %zu thread(s), a materialization that failed should "
+		    "fail out of memory, with allocation %ld refused", threads,
+		    budget);
+		checkf(ctx->account.arena_bytes == 0 &&
+		    ctx->account.round_bytes == 0 &&
+		    ctx->account.store_bytes == storage_by_hand(ctx),
+		    SCENARIO_LATE_INDEX, "on %zu thread(s), the account should "
+		    "hold the relations' %zu bytes and no arena's or round's, "
+		    "not %zu, %zu and %zu, with allocation %ld refused",
+		    threads, storage_by_hand(ctx), ctx->account.store_bytes,
+		    ctx->account.arena_bytes, ctx->account.round_bytes, budget);
+
+		status = relic_materialize(ctx);
+		reach = relation_named(ctx, "reach", 2);
+		checkf(status == 0 && reach != NULL &&
+		    relic_relation_count(reach) == closure,
+		    SCENARIO_LATE_INDEX, "on %zu thread(s), the retry should "
+		    "reach %zu tuples, not %zu, with allocation %ld refused",
+		    threads, closure,
+		    reach != NULL ? relic_relation_count(reach) : 0, budget);
+		checkf(reach != NULL &&
+		    relic_relation_index_find(reach, 1, &position),
+		    SCENARIO_LATE_INDEX, "on %zu thread(s), the retry should "
+		    "have chosen input-first and built its index, with "
+		    "allocation %ld refused", threads, budget);
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused_before > 0 && refused_after > 0 && undisturbed,
+	    SCENARIO_LATE_INDEX, "on %zu thread(s), the sweep should refuse "
+	    "materializations before and after the late index is built, not "
+	    "%zu and %zu, and reach one that completes undisturbed, in %d "
+	    "attempts", threads, refused_before, refused_after, EVAL_SWEEP);
+}
+
+/*
  * Whether a context holds the integers and strings `reference` holds, under
  * the same identifiers, in a table and a pool of the same size.
  */
@@ -4196,6 +4334,7 @@ main(void)
 	an_index_survives_a_failed_allocation();
 	a_query_that_ran_out_of_memory_can_be_retried();
 	a_computing_round_out_of_memory_can_be_retried();
+	a_late_index_out_of_memory_can_be_retried();
 	a_string_batch_out_of_memory_can_be_retried();
 	a_materialization_out_of_memory_reports_once();
 	an_abandoned_rewrite_out_of_memory_reports_once();

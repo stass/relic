@@ -1755,6 +1755,22 @@ relic_relation_index_at(const relic_relation_t *relation, uint32_t position)
 	return (&relation->indexes[position]);
 }
 
+bool
+relic_relation_index_find(const relic_relation_t *relation,
+    uint32_t key_mask, uint32_t *positionp)
+{
+	size_t position;
+
+	for (position = 0; position < relation->index_count; position++) {
+		if (relation->indexes[position].key_mask == key_mask) {
+			*positionp = (uint32_t)position;
+			return (true);
+		}
+	}
+
+	return (false);
+}
+
 /*
  * Whether `key_mask` names a nonempty proper subset of this relation's
  * columns, which is what a secondary index can be keyed on.  Every column is
@@ -1879,12 +1895,8 @@ relic_relation_index(relic_t *ctx, relic_relation_t *relation,
 		return (-1);
 	}
 
-	for (position = 0; position < relation->index_count; position++) {
-		if (relation->indexes[position].key_mask == key_mask) {
-			*positionp = (uint32_t)position;
-			return (0);
-		}
-	}
+	if (relic_relation_index_find(relation, key_mask, positionp))
+		return (0);
 
 	indexes = relic_grow_array(relation->indexes,
 	    &relation->index_capacity, relation->index_count + 1,

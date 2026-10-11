@@ -47,6 +47,7 @@
 #define	SCENARIO_RETAINED	"estimates never discard a candidate"
 #define	SCENARIO_WRITTEN	"a textual variant keeps its written order"
 #define	SCENARIO_DELTA_REFUSED	"a delta literal must be a member literal"
+#define	SCENARIO_DRAFT		"a draft names its indexes and builds none"
 #define	SCENARIO_DISTINCT	"a plan keeping every binding derives distinct rows"
 #define	SCENARIO_EMIT_TARGET	"the EMIT writes the relation it is given"
 #define	SCENARIO_ESTIMATE	"the smaller estimate goes first"
@@ -130,7 +131,13 @@ static bool	 fixture_plan_variants(fixture_t *fixture,
 static bool	 fixture_plan_variant(fixture_t *fixture, const char *program,
 		    unsigned int flags, size_t rule_index,
 		    size_t delta_literal);
+static bool	 fixture_prepare(fixture_t *fixture,
+		    const relic_plan_draft_t *draft);
 static bool	 kinds_are(const relic_plan_t *plan,
+		    const enum relic_op_kind *expected, size_t count);
+static bool	 draft_kinds_are(const relic_plan_draft_t *draft,
+		    const enum relic_op_kind *expected, size_t count);
+static bool	 ops_kinds_are(const relic_op_t *ops, size_t op_count,
 		    const enum relic_op_kind *expected, size_t count);
 static bool	 reads_in_order(const fixture_t *fixture,
 		    const char *const *expected, size_t count);
@@ -208,6 +215,12 @@ static void	 nested_expression(char *text, size_t size, const char *open,
 		    const char *inner, unsigned int levels);
 static void	 each_operation_builds_its_strings_above_a_base(void);
 static void	 a_fold_in_place_reads_its_key_columns(void);
+static void	 a_draft_names_its_indexes_and_builds_none(void);
+static const relic_relation_t *draft_relation(const relic_plan_draft_t *draft,
+		    size_t op);
+static bool	 accesses_are(const relic_plan_draft_t *draft,
+		    const size_t *ops, size_t count);
+static bool	 positions_bound(const relic_plan_t *plan);
 static const relic_op_aggregate_t *fold_planned(fixture_t *fixture,
 		    const char *program, unsigned int flags, size_t op);
 
@@ -348,19 +361,45 @@ fixture_release(fixture_t *fixture)
 }
 
 /*
- * Whether a plan's operations are exactly these kinds, in this order.
+ * Make the fixture's plan the plan a candidate's draft prepares to, as an
+ * evaluation does when a round first runs it.
+ */
+static bool
+fixture_prepare(fixture_t *fixture, const relic_plan_draft_t *draft)
+{
+	return (relic_plan_prepare(fixture->ctx, &fixture->arena, draft,
+	    &fixture->plan) == 0);
+}
+
+/*
+ * Whether a plan's, or a draft's, operations are exactly these kinds, in
+ * this order.
  */
 static bool
 kinds_are(const relic_plan_t *plan, const enum relic_op_kind *expected,
     size_t count)
 {
+	return (ops_kinds_are(plan->ops, plan->op_count, expected, count));
+}
+
+static bool
+draft_kinds_are(const relic_plan_draft_t *draft,
+    const enum relic_op_kind *expected, size_t count)
+{
+	return (ops_kinds_are(draft->ops, draft->op_count, expected, count));
+}
+
+static bool
+ops_kinds_are(const relic_op_t *ops, size_t op_count,
+    const enum relic_op_kind *expected, size_t count)
+{
 	size_t i;
 
-	if (plan->op_count != count)
+	if (op_count != count)
 		return (false);
 
 	for (i = 0; i < count; i++) {
-		if (plan->ops[i].kind != expected[i])
+		if (ops[i].kind != expected[i])
 			return (false);
 	}
 
@@ -726,8 +765,8 @@ a_delta_literal_may_be_a_check_in_one_plan(void)
 		RELIC_PLAN_BIND, RELIC_PLAN_ANY
 	};
 	relic_plan_family_t family;
-	const relic_plan_t *input_first;
-	const relic_plan_t *delta_first;
+	const relic_plan_draft_t *input_first;
+	const relic_plan_draft_t *delta_first;
 	const relic_rule_t *rule;
 	fixture_t fixture;
 	bool incomplete[8];
@@ -752,9 +791,9 @@ a_delta_literal_may_be_a_check_in_one_plan(void)
 		return;
 	}
 
-	input_first = &family.candidates[RELIC_FAMILY_INPUT_FIRST].plan;
-	delta_first = &family.candidates[RELIC_FAMILY_DELTA_FIRST].plan;
-	if (kinds_are(input_first, input_kinds, 3)) {
+	input_first = &family.candidates[RELIC_FAMILY_INPUT_FIRST].draft;
+	delta_first = &family.candidates[RELIC_FAMILY_DELTA_FIRST].draft;
+	if (draft_kinds_are(input_first, input_kinds, 3)) {
 		delta = &input_first->ops[1].u.atom;
 		check(delta->view == RELIC_VIEW_DELTA &&
 		    delta->key_mask == UINT32_C(1), SCENARIO_CHECK_VARIANT,
@@ -762,7 +801,7 @@ a_delta_literal_may_be_a_check_in_one_plan(void)
 	} else
 		check(false, SCENARIO_CHECK_VARIANT,
 		    "the input-first plan is a scan, a check and an EMIT");
-	if (kinds_are(delta_first, first_kinds, 3)) {
+	if (draft_kinds_are(delta_first, first_kinds, 3)) {
 		delta = &delta_first->ops[0].u.atom;
 		check(delta->view == RELIC_VIEW_DELTA &&
 		    terms_are(delta, scanned), SCENARIO_CHECK_VARIANT,
@@ -1010,13 +1049,13 @@ a_textual_variant_keeps_its_written_order(void)
 	incomplete[fixture.ctx->program.rules.entries[1].head - 1] = true;
 
 	check(fixture_plan_variants(&fixture, 1, 0, incomplete, &family) &&
-	    family.candidates[0].plan.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
-	    family.candidates[0].plan.ops[1].u.atom.view == RELIC_VIEW_CURRENT,
+	    family.candidates[0].draft.ops[0].u.atom.view == RELIC_VIEW_DELTA &&
+	    family.candidates[0].draft.ops[1].u.atom.view == RELIC_VIEW_CURRENT,
 	    SCENARIO_WRITTEN, "a member literal after the delta literal reads "
 	    "the current view");
 
-	if (fixture_plan_variants(&fixture, 1, 1, incomplete, &family)) {
-		fixture.plan = family.candidates[0].plan;
+	if (fixture_plan_variants(&fixture, 1, 1, incomplete, &family) &&
+	    fixture_prepare(&fixture, &family.candidates[0].draft)) {
 		check(kinds_are(&fixture.plan, recursive_kinds, 3) &&
 		    family.count == 1 &&
 		    family.candidates[0].recipe.step_count == 0,
@@ -1056,8 +1095,8 @@ a_textual_variant_keeps_its_written_order(void)
 		incomplete[fixture.ctx->program.rules.entries[0].body[0].u.atom.
 		    pred - 1] = true;
 		if (fixture_plan_variants(&fixture, 0, 1, incomplete,
-		    &family) && family.count == 1) {
-			fixture.plan = family.candidates[0].plan;
+		    &family) && family.count == 1 &&
+		    fixture_prepare(&fixture, &family.candidates[0].draft)) {
 			check(kinds_are(&fixture.plan, constant_kinds, 4) &&
 			    fixture.plan.ops[0].u.atom.view ==
 			    RELIC_VIEW_OLD &&
@@ -1142,7 +1181,7 @@ a_variant_keeps_both_orders(void)
 	fixture_t fixture;
 	bool incomplete[8];
 	const relic_op_atom_t *delta;
-	const relic_plan_t *plan;
+	const relic_plan_draft_t *draft;
 
 	bzero(incomplete, sizeof(incomplete));
 	if (!fixture_load(&fixture, program, 0, true) ||
@@ -1154,9 +1193,9 @@ a_variant_keeps_both_orders(void)
 	incomplete[fixture.ctx->program.rules.entries[1].head - 1] = true;
 
 	if (fixture_plan_variants(&fixture, 1, 2, incomplete, &family) &&
-	    family.count == 2) {
+	    family.count == 2 && fixture_prepare(&fixture,
+	    &family.candidates[RELIC_FAMILY_INPUT_FIRST].draft)) {
 		candidate = &family.candidates[RELIC_FAMILY_INPUT_FIRST];
-		fixture.plan = candidate->plan;
 		delta = &fixture.plan.ops[2].u.atom;
 		check(kinds_are(&fixture.plan, input_kinds, 4) &&
 		    reads_in_order(&fixture, input_reads, 4), SCENARIO_FAMILY,
@@ -1168,10 +1207,10 @@ a_variant_keeps_both_orders(void)
 		    "the input-first recipe counts each of its operations");
 
 		candidate = &family.candidates[RELIC_FAMILY_DELTA_FIRST];
-		plan = &candidate->plan;
-		check(kinds_are(plan, first_kinds, 4) &&
-		    plan->ops[0].u.atom.view == RELIC_VIEW_DELTA &&
-		    plan->ops[1].u.atom.key_mask == 2u,
+		draft = &candidate->draft;
+		check(draft_kinds_are(draft, first_kinds, 4) &&
+		    draft->ops[0].u.atom.view == RELIC_VIEW_DELTA &&
+		    draft->ops[1].u.atom.key_mask == 2u,
 		    SCENARIO_FAMILY, "delta-first, the delta is scanned and "
 		    "par looked up on its second column");
 		check(recipe_is(candidate, first_costs, 4), SCENARIO_FAMILY,
@@ -1187,7 +1226,7 @@ a_variant_keeps_both_orders(void)
 		check(fixture_plan_variants(&fixture, 1, 2, incomplete,
 		    &family) && family.count == 1 &&
 		    family.candidates[0].recipe.step_count == 0 &&
-		    family.candidates[0].plan.ops[0].u.atom.view ==
+		    family.candidates[0].draft.ops[0].u.atom.view ==
 		    RELIC_VIEW_DELTA,
 		    SCENARIO_FAMILY, "without indexes a delta placed later "
 		    "would be scanned once per binding before it, so the "
@@ -1207,29 +1246,29 @@ a_variant_keeps_both_orders(void)
 		    true;
 		check(fixture_plan_variants(&fixture, 1, 1, incomplete,
 		    &family) && family.count == 2 &&
-		    family.candidates[RELIC_FAMILY_DELTA_FIRST].plan.ops[0].
+		    family.candidates[RELIC_FAMILY_DELTA_FIRST].draft.ops[0].
 		    u.atom.view == RELIC_VIEW_DELTA &&
-		    family.candidates[RELIC_FAMILY_DELTA_FIRST].plan.ops[1].
+		    family.candidates[RELIC_FAMILY_DELTA_FIRST].draft.ops[1].
 		    u.atom.view == RELIC_VIEW_OLD &&
-		    family.candidates[RELIC_FAMILY_INPUT_FIRST].plan.ops[0].
+		    family.candidates[RELIC_FAMILY_INPUT_FIRST].draft.ops[0].
 		    u.atom.view == RELIC_VIEW_OLD &&
-		    family.candidates[RELIC_FAMILY_INPUT_FIRST].plan.ops[1].
+		    family.candidates[RELIC_FAMILY_INPUT_FIRST].draft.ops[1].
 		    u.atom.view == RELIC_VIEW_DELTA,
 		    SCENARIO_FAMILY, "against the old view, the self-join "
 		    "keeps the delta first and the old view first");
 		check(fixture_plan_variants(&fixture, 1, 0, incomplete,
 		    &family) && family.count == 2 &&
-		    family.candidates[RELIC_FAMILY_DELTA_FIRST].plan.ops[1].
+		    family.candidates[RELIC_FAMILY_DELTA_FIRST].draft.ops[1].
 		    u.atom.view == RELIC_VIEW_CURRENT &&
-		    family.candidates[RELIC_FAMILY_INPUT_FIRST].plan.ops[0].
+		    family.candidates[RELIC_FAMILY_INPUT_FIRST].draft.ops[0].
 		    u.atom.view == RELIC_VIEW_CURRENT,
 		    SCENARIO_FAMILY, "against the current view, the self-join "
 		    "keeps both orders too");
 		check(fixture_plan_variants(&fixture, 2, 1, incomplete,
 		    &family) && family.count == 1 &&
 		    family.candidates[0].recipe.step_count == 0 &&
-		    family.candidates[0].plan.ops[0].kind == RELIC_OP_MEMBER &&
-		    family.candidates[0].plan.ops[0].u.atom.view ==
+		    family.candidates[0].draft.ops[0].kind == RELIC_OP_MEMBER &&
+		    family.candidates[0].draft.ops[0].u.atom.view ==
 		    RELIC_VIEW_DELTA,
 		    SCENARIO_FAMILY, "a fully bound delta literal is a MEMBER "
 		    "of the delta, first in the one order both policies "
@@ -1252,11 +1291,11 @@ recipe_is(const relic_plan_candidate_t *candidate,
 	size_t i;
 
 	recipe = &candidate->recipe;
-	if (recipe->step_count != count || candidate->plan.op_count != count)
+	if (recipe->step_count != count || candidate->draft.op_count != count)
 		return (false);
 
 	for (i = 0; i < count; i++) {
-		if (recipe->steps[i].op != &candidate->plan.ops[i] ||
+		if (recipe->steps[i].op != &candidate->draft.ops[i] ||
 		    recipe->steps[i].kind != expected[i])
 			return (false);
 	}
@@ -1360,9 +1399,9 @@ a_guard_of_any_size_keeps_the_input_first_plan(void)
 			incomplete[fixture.ctx->program.rules.entries[1].
 			    head - 1] = true;
 			if (fixture_plan_variants(&fixture, 1, delta_literal,
-			    incomplete, &family) && family.count == 2) {
-				fixture.plan = family.candidates[
-				    RELIC_FAMILY_INPUT_FIRST].plan;
+			    incomplete, &family) && family.count == 2 &&
+			    fixture_prepare(&fixture, &family.candidates[
+			    RELIC_FAMILY_INPUT_FIRST].draft)) {
 				delta = &fixture.plan.ops[2].u.atom;
 				checkf(reads_in_order(&fixture, reads[p], 4) &&
 				    fixture.plan.ops[2].kind ==
@@ -1423,9 +1462,9 @@ estimates_never_discard_a_candidate(void)
 		checkf(fixture_plan_variants(&fixture, rule, rule == 2 ? 1 : 2,
 		    incomplete, &family) && family.count == 2 &&
 		    family.candidates[0].recipe.step_count ==
-		    family.candidates[0].plan.op_count &&
+		    family.candidates[0].draft.op_count &&
 		    family.candidates[1].recipe.step_count ==
-		    family.candidates[1].plan.op_count, SCENARIO_RETAINED,
+		    family.candidates[1].draft.op_count, SCENARIO_RETAINED,
 		    "rule %zu keeps both plans beside an empty relation, each "
 		    "with its recipe", rule);
 	}
@@ -3264,6 +3303,204 @@ each_operation_builds_its_strings_above_a_base(void)
 	fixture_release(&fixture);
 }
 
+/*
+ * The relation operation `op` of a draft reads.
+ */
+static const relic_relation_t *
+draft_relation(const relic_plan_draft_t *draft, size_t op)
+{
+	if (draft->ops[op].kind == RELIC_OP_AGGREGATE)
+		return (draft->ops[op].u.aggregate.relation);
+
+	return (draft->ops[op].u.atom.relation);
+}
+
+/*
+ * Whether a draft names exactly the indexes operations `ops` read, in that
+ * order, each keyed on the first column.
+ */
+static bool
+accesses_are(const relic_plan_draft_t *draft, const size_t *ops,
+    size_t count)
+{
+	size_t i;
+
+	if (draft->access_count != count)
+		return (false);
+
+	for (i = 0; i < count; i++) {
+		if (draft->accesses[i].relation != draft_relation(draft,
+		    ops[i]) || draft->accesses[i].key_mask != UINT32_C(1))
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Whether every operation of a plan that reads a secondary index names, by
+ * position, an index of its relation keyed on its mask: a LOOKUP, an EXISTS
+ * or ANTI_MEMBER of the index shape, and a fold through a lookup.
+ */
+static bool
+positions_bound(const relic_plan_t *plan)
+{
+	const relic_relation_t *relation;
+	const relic_index_t *index;
+	const relic_op_t *op;
+	uint32_t key_mask;
+	uint32_t position;
+	size_t i;
+
+	for (i = 0; i < plan->op_count; i++) {
+		op = &plan->ops[i];
+		switch (op->kind) {
+		case RELIC_OP_EXISTS:
+		case RELIC_OP_ANTI_MEMBER:
+			if (relic_plan_probe_shape(op->u.atom.key_mask,
+			    op->u.atom.arity) != RELIC_PROBE_INDEX)
+				continue;
+			/* FALLTHROUGH */
+		case RELIC_OP_LOOKUP:
+			relation = op->u.atom.relation;
+			key_mask = op->u.atom.key_mask;
+			position = op->u.atom.index_position;
+			break;
+		case RELIC_OP_AGGREGATE:
+			if (op->u.aggregate.access != RELIC_FOLD_LOOKUP)
+				continue;
+			relation = op->u.aggregate.relation;
+			key_mask = op->u.aggregate.key_mask;
+			position = op->u.aggregate.index_position;
+			break;
+		default:
+			continue;
+		}
+		if (position >= relation->index_count)
+			return (false);
+		index = relic_relation_index_at(relation, position);
+		if (index->key_mask != key_mask)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * A variant's candidates are drafts: planning one builds no index, and its
+ * draft names every index its operations read, once, where they first read
+ * it, whatever reads it -- a lookup, a probe or a looked-up fold.  In the
+ * written order of
+ *
+ *	r(X, Z, U, N) :- a(X), e(X, Y), f(Y, Z), e(X, W), f(W, U), g(W),
+ *	    m(X, _), not h(X, _), not g(Y), N = count { k(X, V) }.
+ *
+ * the delta of a binds X, so the negated h and the fold go next, each
+ * keyed on X, then e is looked up on X, which binds Y for the negated g, a
+ * test of the whole tuple that reads no index, then f on Y, e on X again
+ * and f on W, which name no second index, then g is a membership test and
+ * m a check keyed on X.  Preparing the draft builds each index it names
+ * and gives every operation the position of its own; preparing it again
+ * builds nothing more.
+ */
+static void
+a_draft_names_its_indexes_and_builds_none(void)
+{
+	static const enum relic_op_kind kinds[] = {
+		RELIC_OP_SCAN, RELIC_OP_ANTI_MEMBER, RELIC_OP_AGGREGATE,
+		RELIC_OP_LOOKUP, RELIC_OP_ANTI_MEMBER, RELIC_OP_LOOKUP,
+		RELIC_OP_LOOKUP, RELIC_OP_LOOKUP, RELIC_OP_MEMBER,
+		RELIC_OP_EXISTS, RELIC_OP_EMIT
+	};
+	static const size_t first_readers[] = { 1, 2, 3, 5, 9 };
+	static const char *const program = "a(1).\ne(1, 2).\nf(2, 3).\n"
+	    "g(2).\nh(1, 1).\nk(1, 4).\nm(1, 5).\n"
+	    "r(X, Z, U, N) :- a(X), e(X, Y), f(Y, Z), e(X, W), f(W, U), "
+	    "g(W), m(X, _), not h(X, _), not g(Y), "
+	    "N = count { k(X, V) }.\n";
+	const relic_plan_draft_t *draft;
+	const relic_relation_t *relation;
+	relic_plan_family_t family;
+	const relic_rule_t *rule;
+	relic_relation_t *e;
+	fixture_t fixture;
+	bool incomplete[16];
+	uint32_t position;
+	size_t indexes;
+	size_t i;
+
+	bzero(incomplete, sizeof(incomplete));
+	if (!fixture_load(&fixture, program, RELIC_F_NO_REORDER, false) ||
+	    relic_pred_count(fixture.ctx) > 16) {
+		check(false, SCENARIO_DRAFT, "the program is loaded");
+		fixture_release(&fixture);
+		return;
+	}
+	rule = &fixture.ctx->program.rules.entries[0];
+	incomplete[rule->body[0].u.atom.pred - 1] = true;
+
+	if (!fixture_plan_variants(&fixture, 0, 0, incomplete, &family) ||
+	    family.count != 1 ||
+	    !draft_kinds_are(&family.candidates[0].draft, kinds, 11)) {
+		check(false, SCENARIO_DRAFT, "the variant is one draft of a "
+		    "scan, a negated probe, a fold, a lookup, a negated "
+		    "member, three lookups, a member, a check and an EMIT");
+		fixture_release(&fixture);
+		return;
+	}
+	draft = &family.candidates[0].draft;
+
+	indexes = 0;
+	for (i = 0; i < draft->op_count; i++)
+		indexes += draft_relation(draft, i)->index_count;
+	check(indexes == 0, SCENARIO_DRAFT, "planning the variant builds no "
+	    "index");
+	check(accesses_are(draft, first_readers, 5), SCENARIO_DRAFT,
+	    "the draft names h, k, e, f and m on their first column, e and "
+	    "f once each");
+
+	/*
+	 * An index of e on its second column, which the draft does not read,
+	 * puts the one it does at position 1, so a position left unbound at
+	 * 0 names the wrong index.
+	 */
+	e = draft->accesses[2].relation;
+	if (relic_relation_index(fixture.ctx, e, UINT32_C(2), &position) !=
+	    0 || position != 0) {
+		check(false, SCENARIO_DRAFT,
+		    "e is indexed on its second column");
+		fixture_release(&fixture);
+		return;
+	}
+
+	if (!fixture_prepare(&fixture, draft)) {
+		check(false, SCENARIO_DRAFT, "the draft is prepared");
+		fixture_release(&fixture);
+		return;
+	}
+	check(positions_bound(&fixture.plan), SCENARIO_DRAFT, "preparing the "
+	    "draft gives each operation the position of its index");
+	check(fixture.plan.ops[3].u.atom.index_position == 1, SCENARIO_DRAFT,
+	    "the lookup of e names e's first-column index, at position 1");
+	for (i = 0; i < draft->access_count; i++) {
+		relation = draft->accesses[i].relation;
+		checkf(relation->index_count == (relation == e ? 2u : 1u),
+		    SCENARIO_DRAFT, "access %zu's relation has %u index(es), "
+		    "not %zu", i, relation == e ? 2u : 1u,
+		    relation->index_count);
+	}
+
+	check(fixture_prepare(&fixture, draft) &&
+	    positions_bound(&fixture.plan), SCENARIO_DRAFT, "preparing the "
+	    "draft again binds the same indexes");
+	indexes = 0;
+	for (i = 0; i < draft->access_count; i++)
+		indexes += draft->accesses[i].relation->index_count;
+	check(indexes == 6, SCENARIO_DRAFT, "preparing again builds no index");
+
+	fixture_release(&fixture);
+}
+
 int
 main(void)
 {
@@ -3300,6 +3537,7 @@ main(void)
 	a_fold_in_place_reads_its_key_columns();
 	a_program_holds_the_stack_its_shape_needs();
 	each_operation_builds_its_strings_above_a_base();
+	a_draft_names_its_indexes_and_builds_none();
 
 	return (check_summary("test_plan"));
 }

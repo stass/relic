@@ -89,34 +89,26 @@ describes. The guarded closure in `tests/perf.sh` holds the work-counter
 cliff closed: at scale 4 it scans and looks up 19.4 million tuples rather
 than 94.3 million, and at scale 8 it makes 72.1 million lookups rather
 than 356.6 million, against 72.2 million in textual order. Answers agree with textual-order and naive
-evaluation, and answers and counters agree across thread counts. What
-remains before the policy is accepted as the default:
+evaluation, and answers and counters agree across thread counts.
 
-**Retained-index cost.** An input-first plan looks its delta up through
-an index on the recursive relation, and that index is built and
-maintained on every insertion whether or not a round chooses the plan.
-On `bench/run.sh`'s chain distances at scale 2 storage grows from
-201.7 MB to 235.4 MB and the wall time from about 1.7 s to 1.9 s, with
-every round choosing delta-first. The whole closure over the same chain
-needs the index anyway and is unchanged in storage and lookups. The design
-requires a repeatable regression of this kind to be resolved before the
-policy is enabled by default. Implement
-[first-use index preparation](../specs/design-recursive-planning.md#preparing-selected-plans):
-retain alternative access requirements without creating their extra
-indexes, include whole-relation acquisition work in selection, and build
-only for selected plans before execution. Use the design's explicit
-provisional key count for an absent index; preserve complete maintained
-indexes after acquisition. Add a regression proving that every round of
-chain distances stays delta-first and the extra index is never built.
-Recheck charged storage and timings against the control, guarded-closure
-work counters, and alternatives used briefly before substantial growth.
+An index only an input-first plan reads is built when a round first
+chooses that plan, and selection charges its build. On `bench/run.sh`'s
+chain distances at scale 2 every round keeps delta-first, the index is
+never built, and storage is 201.7 MB, wall time about 1.7 s, as in
+textual order; `tests/perf.sh` holds a 1000-edge chain to the storage of
+its textual order. What remains before the policy is accepted as the
+default:
 
-**Estimator simplicity.** Remove the evaluation-owned key-count catalog
-and read existing index counts directly through the const accessor. Delete
-catalog collection, sorting, searching and refresh state; keep the estimator
-a pure function of const inputs. Test immediate reflection of index growth
-and distinct derived/base relation identities, and measure selection
-overhead on many-round and long-rule controls.
+**Acquired-index maintenance.** An index acquired by an alternative is
+maintained for the rest of the evaluation, whichever plan later rounds
+choose. Over a braid of 1000 layers of two nodes, each feeding both of
+the next, the transitive closure guarded by every node chooses
+input-first while its delta is large, roughly the first 250 rounds, and
+delta-first for the 750 after, which derive about half of the relation's
+2 million tuples. It stores 42.3 MB against 33.9 MB with delta-first alone
+(+25%), and reads 8.6 million tuples against 8.0 million, at the same
+wall time. Decide whether acquisition should weigh expected maintenance,
+or an index that later rounds stop reading should be released.
 
 **Benchmarks.** Run the targeted `tc-acyclic-bf` and `tc-cyclic-bf`
 comparisons against the rival engines at scales 1, 2, 4 and 8 and at one
@@ -125,10 +117,21 @@ indexed-prefix control remains competitive.
 
 **Adversarial selectivity and skew.** Check with skewed keys and
 correlated columns that retaining an alternative does not make every large
-delta select it unconditionally.
+delta select it unconditionally. The uniform `N / K` estimate already
+misjudges mixed fan-in: a guarded closure over a 2000-node chain plus six
+nodes with 2000 predecessors outside the guard each spreads those 12 000
+edges over every target, estimates delta-first's predecessor lookups at
+about seven per tuple instead of one, and chooses input-first in most
+rounds, reading 10.6 million tuples against 6.0 million for delta-first
+alone and 12.0 million for input-first alone. A hub whose delta is
+filtered by a later membership test chooses between the two references'
+counts. Neither depends on the provisional count of an absent index.
 
 **Measurement.** Measure planning time, selection time and the added
-index memory separately on long-rule and many-round workloads.
+index memory separately on long-rule and many-round workloads. End to
+end, the perf suite's 8000-literal rule of 500 variants and its cycle of
+200 000 rounds take 0.61 s and 0.25 s user time; ordering two plans per
+variant costs the long rule about 20% over ordering one.
 
 **Test coverage.** The design's validation table also asks for semantic
 coverage of input-first plans (nonlinear and mutual recursion, repeated

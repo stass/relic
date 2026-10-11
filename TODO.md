@@ -99,6 +99,24 @@ bound, so an unterminated csv quote buffers the rest of the file. The
 memory limit leaves both out by contract. A bound on either belongs in the
 context's configuration, beside the other limits.
 
+**An index built mid-component must be raised by its builder.** [Medium,
+component: `lib/index.c`, `lib/relation.h`, `lib/eval.c`] Each index keeps
+its own `latest_since`, yet `set_delta()` always raises every index of a
+member to the same start, so an index built between rounds is correct only
+because `prepare_candidate()` raises it; a build anywhere else would leave
+its delta lookups walking from a stale frontier, which only an assertion
+notices. Keep the start on the relation instead, which a new index's
+frontiers, each at its key's first tuple, satisfy at any start; that
+deletes the per-build raise, provided clearing a relation resets the start.
+
+**A planner that emits an indexed operation must record its access.**
+[Low, component: `lib/plan.c`] `place_atom()`, `place_probe()` and
+`place_aggregate()` each call `record_access()`. An operation holds its
+relation read-only, which `-Wcast-qual` keeps a single walk of the finished
+draft from undoing, so the draft's accesses cannot be derived from its
+operations. A missed call fails loudly, preparation reporting an internal
+error, but undercharges acquisition until then.
+
 ## Benchmarks
 
 **Compare output sinks and validate scaling on a second platform.**
@@ -183,22 +201,22 @@ commit, which holds at once the staged facts (about 68 MiB), the symbols
 it appends to (50 MiB). Two thirds of the time is the import, mostly
 interning the symbols and the staging set, each probe a cache miss into a
 table of millions; the query is the rest, much of it building the join's
-index. Candidates, none designed: for a load into an empty store, handing
-the staged facts to the store rather than copying them, so that the peak
-holds them once; an entry of a 32-bit offset into the string arena and a
-length, eight bytes rather than sixteen, about 23 MiB; growing the pool by
-walking the entries in identifier order and placing each by its stored
-hash; and checking an imported symbol field once, where the import checks
-it is a symbol and interning the value checks again.
+index. Implement [bulk loading](specs/design-bulk-load.md): adopt a private
+builder's payload into an empty base store, then batch table decoding and
+dictionary reconciliation while preserving scalar identity and failure
+prefixes. Its validated field descriptors also remove repeated symbol
+grammar checks. Measure ordered global publication before enabling parallel
+import. Pool-entry packing remains a separate memory-layout candidate and
+must preserve byte-pointer lifetime, addressable range and affordable rehash.
 
 On the M3 Max, scale-8 import-only probes take about 0.7-0.8 s for
 `facts-join` and `files-grouped`, before evaluation. DuckDB's complete
 sixteen-thread medians are 0.191 s and 0.076 s. Loading also takes about
 3.585 s of a 7.080 s diagnostic `cspa-linux` run, 0.721 s of 1.164 s
-for `grid-reach`, and 0.245 s of 0.401 s for `tree-sg-bound`. Prioritize
-private bulk construction with ownership transfer into an empty base
-store, then deterministic parallel parsing and interning. Preserve
-all-or-nothing publication, first-input-error ordering and value identity.
+for `grid-reach`, and 0.245 s of 0.401 s for `tree-sg-bound`. Follow the
+[ordered implementation and measurement gates](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk),
+including all-or-nothing publication, first-input-error ordering, partial
+value effects and the single-payload first-load memory regression.
 These phase estimates compare separate load-only and complete processes;
 they are not isolated phase timers.
 

@@ -17,7 +17,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <strings.h>
 
 #include "cost.h"
 
@@ -26,7 +25,9 @@
  * the bindings estimated to reach the step, from one, and W, the work
  * accumulated, from zero (plan.h gives each step's rule).  The walk stops
  * once no binding reaches the next step, since nothing after it runs, or
- * once W has saturated, since nothing after it can lower W.
+ * once W has saturated, since nothing after it can lower W.  A candidate's
+ * estimate adds to W the work of building the indexes its draft names and
+ * its relations lack, which preparing it would do before it ran.
  *
  * Every quantity is an unsigned 64-bit count and every sum and product
  * saturates at UINT64_MAX rather than wrapping, so a plan whose work does
@@ -41,61 +42,18 @@ _Static_assert(sizeof(relic_tuple_id_t) <= sizeof(uint32_t),
 _Static_assert((relic_tuple_id_t)-1 > 0,
     "tuple counts are unsigned");
 
-static relic_tuple_id_t	 index_keys(relic_cost_catalog_t *catalog,
-			    const relic_cost_step_t *step);
-static relic_tuple_id_t	 range_length(relic_tuple_range_t range);
-static uint64_t		 saturating_add(uint64_t left, uint64_t right);
-static uint64_t		 saturating_multiply(uint64_t left, uint64_t right);
-
-int
-relic_cost_statistic_compare(const void *left, const void *right)
-{
-	const relic_cost_statistic_t *left_entry;
-	const relic_cost_statistic_t *right_entry;
-	relic_pred_id_t left_pred;
-	relic_pred_id_t right_pred;
-
-	left_entry = left;
-	right_entry = right;
-	left_pred = relic_relation_pred(left_entry->relation);
-	right_pred = relic_relation_pred(right_entry->relation);
-
-	if (left_pred != right_pred)
-		return (left_pred < right_pred ? -1 : 1);
-	if (left_entry->index_position != right_entry->index_position)
-		return (left_entry->index_position <
-		    right_entry->index_position ? -1 : 1);
-	if (left_entry->relation != right_entry->relation)
-		return ((uintptr_t)left_entry->relation <
-		    (uintptr_t)right_entry->relation ? -1 : 1);
-
-	return (0);
-}
-
-bool
-relic_cost_step_index(const relic_cost_step_t *step,
-    const relic_relation_t **relationp, uint32_t *positionp)
-{
-	const relic_op_t *op;
-
-	op = step->op;
-	if (step->kind == RELIC_COST_LOOKUP) {
-		*relationp = op->u.atom.relation;
-		*positionp = op->u.atom.index_position;
-		return (true);
-	}
-	if (step->kind == RELIC_COST_FOLD_LOOKUP) {
-		*relationp = op->u.aggregate.relation;
-		*positionp = op->u.aggregate.index_position;
-		return (true);
-	}
-
-	return (false);
-}
+static uint64_t	 acquisition_work(const relic_plan_draft_t *draft);
+static uint64_t	 execution_work(const relic_cost_recipe_t *recipe,
+		    const relic_exec_env_t *env);
+static relic_tuple_id_t index_keys(const relic_relation_t *relation,
+		    uint32_t key_mask);
+static relic_tuple_id_t range_length(relic_tuple_range_t range);
+static uint64_t	 saturating_add(uint64_t left, uint64_t right);
+static uint64_t	 saturating_multiply(uint64_t left, uint64_t right);
 
 size_t
 relic_cost_choose(const relic_plan_family_t *family,
-    const relic_exec_env_t *env, relic_cost_catalog_t *catalog)
+    const relic_exec_env_t *env)
 {
 	const relic_plan_candidate_t *candidates;
 	uint64_t delta_first;
@@ -107,17 +65,28 @@ relic_cost_choose(const relic_plan_family_t *family,
 
 	candidates = family->candidates;
 	delta_first = relic_cost_estimate(
-	    &candidates[RELIC_FAMILY_DELTA_FIRST].recipe, env, catalog);
+	    &candidates[RELIC_FAMILY_DELTA_FIRST], env);
 	input_first = relic_cost_estimate(
-	    &candidates[RELIC_FAMILY_INPUT_FIRST].recipe, env, catalog);
+	    &candidates[RELIC_FAMILY_INPUT_FIRST], env);
 
 	return (input_first < delta_first ? RELIC_FAMILY_INPUT_FIRST :
 	    RELIC_FAMILY_DELTA_FIRST);
 }
 
 uint64_t
-relic_cost_estimate(const relic_cost_recipe_t *recipe,
-    const relic_exec_env_t *env, relic_cost_catalog_t *catalog)
+relic_cost_estimate(const relic_plan_candidate_t *candidate,
+    const relic_exec_env_t *env)
+{
+	return (saturating_add(execution_work(&candidate->recipe, env),
+	    acquisition_work(&candidate->draft)));
+}
+
+/*
+ * The work of running a recipe's plan once, by the walk above.
+ */
+static uint64_t
+execution_work(const relic_cost_recipe_t *recipe,
+    const relic_exec_env_t *env)
 {
 	const relic_cost_step_t *step;
 	const relic_op_t *op;
@@ -147,7 +116,8 @@ relic_cost_estimate(const relic_cost_recipe_t *recipe,
 			tuples = range_length(relic_exec_view(env,
 			    &op->u.atom));
 			visits = relic_cost_lookup_visits(bindings, tuples,
-			    index_keys(catalog, step));
+			    index_keys(op->u.atom.relation,
+			    op->u.atom.key_mask));
 			work = saturating_add(work,
 			    saturating_add(bindings, visits));
 			bindings = visits;
@@ -174,7 +144,8 @@ relic_cost_estimate(const relic_cost_recipe_t *recipe,
 			tuples = range_length(
 			    relic_relation_all(op->u.aggregate.relation));
 			visits = relic_cost_lookup_visits(bindings, tuples,
-			    index_keys(catalog, step));
+			    index_keys(op->u.aggregate.relation,
+			    op->u.aggregate.key_mask));
 			work = saturating_add(work,
 			    saturating_add(bindings, visits));
 			break;
@@ -185,6 +156,35 @@ relic_cost_estimate(const relic_cost_recipe_t *recipe,
 			    tuples == 0 ? 0 : bindings));
 			break;
 		}
+	}
+
+	return (work);
+}
+
+/*
+ * The work of building the indexes a draft names that their relations
+ * lack: two units per tuple of the relation for each, a visit of the tuple
+ * and a probe of the new index for its key.  The draft names each index
+ * once, so each is charged once however many operations read it, and
+ * whether or not the walk above reaches them: preparing the plan builds
+ * them all.
+ */
+static uint64_t
+acquisition_work(const relic_plan_draft_t *draft)
+{
+	const relic_plan_access_t *access;
+	uint64_t work;
+	uint32_t position;
+	size_t i;
+
+	work = 0;
+	for (i = 0; i < draft->access_count; i++) {
+		access = &draft->accesses[i];
+		if (relic_relation_index_find(access->relation,
+		    access->key_mask, &position))
+			continue;
+		work = saturating_add(work, saturating_multiply(2,
+		    range_length(relic_relation_all(access->relation))));
 	}
 
 	return (work);
@@ -215,63 +215,30 @@ relic_cost_lookup_visits(uint64_t bindings, relic_tuple_id_t tuples,
 }
 
 /*
- * The distinct keys of the index `step` looks up through, from its catalog
- * entry, counted afresh when its relation holds a different number of
- * tuples than when the entry was last counted (cost.h).  The entry is the
- * first not ordered before the index, by binary search; counting reads the
- * index's stripe headers alone.  The catalog holds every index its recipes
- * read (cost.h); were one missing, the lookup would be estimated as
- * visiting every tuple of its view, which costs a worse choice and never a
- * wrong answer.
+ * The distinct keys over the whole relation of its index keyed on
+ * `key_mask`, as the index's stripe headers count them.  An index the
+ * relation has not built is taken to hold a key per tuple, the most it
+ * could: the estimate of its lookups is the least it could be, so the
+ * plan that would build it is not ruled out before it is tried, and
+ * acquisition_work() charges the build.  Nothing here builds an index to
+ * learn its count.
  */
 static relic_tuple_id_t
-index_keys(relic_cost_catalog_t *catalog, const relic_cost_step_t *step)
+index_keys(const relic_relation_t *relation, uint32_t key_mask)
 {
-	relic_cost_statistic_t wanted;
-	relic_cost_statistic_t *statistic;
-	const relic_index_t *index;
-	size_t high;
-	size_t keys;
-	size_t low;
-	size_t middle;
 	relic_tuple_id_t tuples;
-	bool found;
+	uint32_t position;
+	size_t keys;
 
-	bzero(&wanted, sizeof(wanted));
-	found = relic_cost_step_index(step, &wanted.relation,
-	    &wanted.index_position);
-	assert(found);
-	if (!found)
-		return (0);
+	tuples = range_length(relic_relation_all(relation));
+	if (!relic_relation_index_find(relation, key_mask, &position))
+		return (tuples);
 
-	low = 0;
-	high = catalog->count;
-	while (low < high) {
-		middle = low + (high - low) / 2;
-		if (relic_cost_statistic_compare(&catalog->entries[middle],
-		    &wanted) < 0)
-			low = middle + 1;
-		else
-			high = middle;
-	}
-	found = low < catalog->count &&
-	    relic_cost_statistic_compare(&catalog->entries[low], &wanted) == 0;
-	assert(found);
-	if (!found)
-		return (0);
-	statistic = &catalog->entries[low];
+	keys = relic_index_key_count(relic_relation_index_at(relation,
+	    position));
+	assert(keys <= tuples);
 
-	tuples = range_length(relic_relation_all(statistic->relation));
-	if (tuples != statistic->tuple_count) {
-		index = relic_relation_index_at(statistic->relation,
-		    statistic->index_position);
-		keys = relic_index_key_count(index);
-		assert(keys <= tuples);
-		statistic->key_count = (relic_tuple_id_t)keys;
-		statistic->tuple_count = tuples;
-	}
-
-	return (statistic->key_count);
+	return ((relic_tuple_id_t)keys);
 }
 
 /*

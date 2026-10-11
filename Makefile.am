@@ -760,7 +760,8 @@ RELIC_LANG_TESTS = \
 	tests/lang/query-option-unsafe.dl tests/lang/query-option.dl \
 	tests/lang/query-recursion.dl tests/lang/query-undefined.dl \
 	tests/lang/query-unsafe.dl tests/lang/query-zero-arity.dl \
-	tests/lang/recovery.dl tests/lang/repl-check.dl \
+	tests/lang/recovery.dl tests/lang/recursion-late-index.dl \
+	tests/lang/repl-check.dl \
 	tests/lang/repl-discard.dl tests/lang/repl-errors.dl \
 	tests/lang/repl-json.dl tests/lang/repl-limit.dl \
 	tests/lang/repl-plan-materialized.dl tests/lang/repl-plan.dl \

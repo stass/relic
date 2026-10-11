@@ -129,6 +129,7 @@ query-undefined
 query-unsafe
 query-zero-arity
 recovery
+recursion-late-index
 reserved-bytes
 safe-rules
 singleton

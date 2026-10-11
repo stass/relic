@@ -106,8 +106,11 @@ static void	 put_op(const relic_t *ctx, relic_explain_line_t *line,
 		    bool streams);
 static void	 put_op_atom(const relic_t *ctx, relic_explain_line_t *line,
 		    const relic_rule_t *rule, const relic_op_atom_t *atom);
-static void	 put_plan(const relic_t *ctx, const relic_rule_t *rule,
-		    const relic_plan_t *plan, unsigned int depth, bool streams);
+static void	 put_ops(const relic_t *ctx, const relic_rule_t *rule,
+		    const relic_op_t *ops, size_t op_count, unsigned int depth,
+		    bool streams);
+static void	 put_draft(const relic_t *ctx, const relic_rule_t *rule,
+		    const relic_plan_draft_t *draft, unsigned int depth);
 static void	 put_pred(const relic_t *ctx, relic_explain_line_t *line,
 		    relic_pred_id_t pred);
 static void	 put_probe(const relic_t *ctx, relic_explain_line_t *line,
@@ -1000,19 +1003,20 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 }
 
 /*
- * One line per operation, in plan order, indented by `depth` levels, the
- * EMIT shown as put_op() shows it for `streams`.
+ * One line per operation of a plan or a draft, in plan order, indented by
+ * `depth` levels, the EMIT shown as put_op() shows it for `streams`.  No
+ * line reads an index position, which a draft's operations lack.
  */
 static void
-put_plan(const relic_t *ctx, const relic_rule_t *rule,
-    const relic_plan_t *plan, unsigned int depth, bool streams)
+put_ops(const relic_t *ctx, const relic_rule_t *rule, const relic_op_t *ops,
+    size_t op_count, unsigned int depth, bool streams)
 {
 	relic_explain_line_t line;
 	size_t i;
 
-	for (i = 0; i < plan->op_count; i++) {
+	for (i = 0; i < op_count; i++) {
 		line_begin(&line, depth);
-		put_op(ctx, &line, rule, &plan->ops[i], streams);
+		put_op(ctx, &line, rule, &ops[i], streams);
 		line_finish(ctx, &line);
 	}
 }
@@ -1093,7 +1097,8 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 	line_finish(ctx, &line);
 
 	if (plan != NULL)
-		put_plan(ctx, rule, plan, depth + 2, false);
+		put_ops(ctx, rule, plan->ops, plan->op_count, depth + 2,
+		    false);
 }
 
 /*
@@ -1107,6 +1112,17 @@ put_text_line(const relic_t *ctx, const char *text, unsigned int depth)
 	line_begin(&line, depth);
 	line_put(&line, text);
 	line_finish(ctx, &line);
+}
+
+/*
+ * A variant's candidate, as its draft's operations, which are the
+ * operations its plan runs once prepared.
+ */
+static void
+put_draft(const relic_t *ctx, const relic_rule_t *rule,
+    const relic_plan_draft_t *draft, unsigned int depth)
+{
+	put_ops(ctx, rule, draft->ops, draft->op_count, depth, false);
 }
 
 /*
@@ -1135,21 +1151,18 @@ relic_explain_variant(relic_t *ctx, const relic_rule_t *rule,
 	line_finish(ctx, &line);
 
 	if (family->count == 1) {
-		put_plan(ctx, rule, &family->candidates[0].plan, depth + 3,
-		    false);
+		put_draft(ctx, rule, &family->candidates[0].draft, depth + 3);
 		return;
 	}
 
 	put_text_line(ctx, "choose lowest estimated work; ties: delta-first",
 	    depth + 3);
 	put_text_line(ctx, "plan delta-first:", depth + 3);
-	put_plan(ctx, rule,
-	    &family->candidates[RELIC_FAMILY_DELTA_FIRST].plan, depth + 4,
-	    false);
+	put_draft(ctx, rule,
+	    &family->candidates[RELIC_FAMILY_DELTA_FIRST].draft, depth + 4);
 	put_text_line(ctx, "plan input-first:", depth + 3);
-	put_plan(ctx, rule,
-	    &family->candidates[RELIC_FAMILY_INPUT_FIRST].plan, depth + 4,
-	    false);
+	put_draft(ctx, rule,
+	    &family->candidates[RELIC_FAMILY_INPUT_FIRST].draft, depth + 4);
 }
 
 void
@@ -1177,7 +1190,7 @@ relic_explain_query_plan(relic_t *ctx, const relic_rule_t *rule,
 	if (!relic_explaining(ctx))
 		return;
 
-	put_plan(ctx, rule, plan, 1, streams);
+	put_ops(ctx, rule, plan->ops, plan->op_count, 1, streams);
 }
 
 /*
