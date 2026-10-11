@@ -143,7 +143,7 @@ struct relic_round_task {
  * that none of the worker's earlier candidates is: where its columns begin
  * in the worker's `words`, its wide hash, which the merge probes by without
  * hashing again, and the target it is for.  The hash of a tuple holding a
- * pending integer is over its markers until the merge rewrites them to
+ * pending value is over its markers until the merge rewrites them to
  * identifiers and hashes it again.  `repeat` is the merge's: set
  * when another worker's earlier candidate is the same tuple for the same
  * target, so that this one is not new after all.
@@ -327,10 +327,10 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * relation holds the tuples it held, every counter is as it was and the
  * round has given back its buffers, for the caller to run the round
  * serially; only a reservation the allocator refused part way leaves some
- * of a relation's arrays, or the integer table's, larger, counted in the
- * storage total, for the serial run to grow into.  A round is not run
- * deferred when it reads a relation it writes, when it is too small to
- * repay sharing it among the pool's threads -- unless
+ * of a relation's arrays, or the value table's or the pool's, larger,
+ * counted in the storage total, for the serial run to grow into.  A round
+ * is not run deferred when it reads a relation it writes, when it is too
+ * small to repay sharing it among the pool's threads -- unless
  * RELIC_F_PARALLEL_ALWAYS asks for every round -- or when the pool, the
  * workers' buffers for the strings a calling round computes, or the room
  * reserved for the candidates the round is expected to gather could not be

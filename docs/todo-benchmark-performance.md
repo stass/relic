@@ -147,37 +147,40 @@ planner regression remains independently exercised.
 
 ## 2. Compact pending values at the merge boundary
 
-[Medium, components: `lib/merge.c`, `lib/task.c`, `lib/value.c`]
+[Medium, component: `lib/merge.c`]
 
-**Evidence.** Scale-8 `files-grouped` derives 1,799,657 `kind` tuples with
-two pending strings each, but only 206 distinct new strings. Workers
-already deduplicate values; the merge allocates and resolves descriptors
-per column occurrence.
+A deferred merge resolves one descriptor per referenced worker-local value,
+as [pending value compaction](../specs/design-pending-values.md) designs,
+rather than one per pending column. Scale-8 `files-grouped` derives
+1,799,657 `kind` tuples with two pending strings each but only 206 distinct
+new strings, so at sixteen threads it needs at most 3,296 descriptors
+instead of roughly 3.6 million. `tests/unit/test_round.c` holds a
+one-worker merge of 60,000 pending columns over 15 values within less than
+the memory one occurrence-sized descriptor table would take.
 
-**Implementation.** Apply [pending value compaction](../specs/design-pending-values.md):
-map each referenced worker-local marker to one compact descriptor, ordered
-by first occurrence among candidates. Keep columns local until a single
-rewrite maps them to the ordinary value resolver's promised identifiers.
-Release temporary mapping storage at the rewrite barrier; retain the
-resolution map and copied bytes through commit or rollback. At sixteen
-threads this rule needs at most 3,296 descriptors, instead of roughly
-3.6 million.
+In five interleaved local runs on the M3 at sixteen threads, scale-8
+`files-grouped` took a median 0.84 s against 0.88 s and peaked at about
+422 MB against 485 MB; an all-distinct control, one computed string per
+file, took 1.20 s against 1.22 s and peaked at about 873 MB against
+938 MB. One-thread runs, which merge nothing, were unchanged.
 
-**Design and regression.** Implement the
-[pending-value design](../specs/design-pending-values.md) with the
-[computed-value](../specs/design-values.md#interning-computed-values) and
-[parallel merge](../specs/design-parallel.md#the-parallel-merge) contracts.
-Add a failing allocation/count regression for many tuple occurrences of
-few new values. Include values shared across tasks and workers, mixed
-integer/string output, symbol/string use bits, all-distinct values, limit
-refusal and injected allocation failure. Check first-occurrence numbering
-and memory accounting against serial execution.
+**Remaining measurement.** Run the targeted `files-grouped` and
+all-distinct comparisons under the measurement rules above, at scales 1,
+2, 4 and 8 and at one and sixteen threads, recording collection,
+measurement and rewrite time and the charged merge workspace separately
+from process RSS.
 
-**Exit criteria.** Descriptor storage follows worker-distinct values;
-the low-cardinality reproducer's temporary memory drops accordingly.
-Identifiers, output, diagnostics and limit behavior agree across thread
-counts. Measure all-distinct computed values as well, since the new maps
-have a cost when little deduplication is possible.
+**Test coverage.** The round tests reach the merge only through real
+rounds, so task-to-worker assignment follows the pool's scheduling and
+some states never occur: pending values no candidate references, an
+invalid marker or text range, and saturated sizes. A fixture that hands
+`relic_round_merge()` constructed workers and tasks would pin the design's
+interleaved worker-1, worker-0, worker-1 task order, with equal local
+markers naming different values and different markers naming equal ones
+over several targets, and check the promised identifiers, rewritten
+words, stripes and stripe counts exactly. It would also check that a
+rejected compaction leaves the candidates untouched and returns its
+charge, including the one-byte buffer minimum.
 
 ## 3. Factor eligible bound recursion
 

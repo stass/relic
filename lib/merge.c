@@ -30,9 +30,11 @@
  * identifier, and then makes every part of every relation what the serial
  * insertions would have made it, each part at once.
  *
- *	resolve		(worker 0) promise each value the candidates hold
- *			pending the identifier the serial run gives it, and
- *			write it over each marker, hashing the candidate
+ *	resolve		(worker 0) describe each value a candidate holds
+ *			pending once, where task order first meets it, and
+ *			promise it the identifier the serial run gives it;
+ *			then a worker to a part, write the promises over its
+ *			candidates' markers, hashing each such candidate
  *			again;
  *	find new tuples	a worker to a part, list its candidates by stripe;
  *			then a stripe of the canonical index to a part, mark
@@ -60,9 +62,9 @@
  *			table, place the canonical entries and link the
  *			chains.
  *
- * No step up to the application changes what a relation or the integer
- * table holds, and every step that can fail -- scratch the limit or the
- * allocator refuses, a limit the new tuples or integers would pass, a
+ * No step up to the application changes what a relation, the value table
+ * or the pool holds, and every step that can fail -- scratch the limit or
+ * the allocator refuses, a limit the new tuples or values would pass, a
  * growth refused -- is among them.  The scratch of a step is sized before
  * the step begins, from counts the steps before it found, and taken as one
  * block charged once, which the step's parts carve between them: no part
@@ -78,12 +80,15 @@
 
 typedef struct relic_merge relic_merge_t;
 typedef struct relic_merge_block relic_merge_block_t;
+typedef struct relic_merge_compaction relic_merge_compaction_t;
 typedef struct relic_merge_firsts relic_merge_firsts_t;
 typedef struct relic_merge_firsts_place relic_merge_firsts_place_t;
 typedef struct relic_merge_keys_place relic_merge_keys_place_t;
 typedef struct relic_merge_list relic_merge_list_t;
 typedef struct relic_merge_part relic_merge_part_t;
 typedef struct relic_merge_ref relic_merge_ref_t;
+typedef struct relic_merge_span relic_merge_span_t;
+typedef struct relic_merge_resolution relic_merge_resolution_t;
 
 /*
  * A candidate, named by the worker that gathered it and its position among
@@ -162,17 +167,66 @@ struct relic_merge_part {
 };
 
 /*
+ * One worker's part of a compaction.  `descriptor_of[m - 1]` is the
+ * number, counting from one, of the compact descriptor that worker-local
+ * marker m was given at its first occurrence, and zero while no candidate
+ * column met so far holds m; there is an entry for each of the worker's
+ * pending values.  `byte_base` is where the worker's pending strings'
+ * bytes begin in the merge's copy of every worker's.
+ */
+struct relic_merge_span {
+	uint32_t	*descriptor_of;
+	size_t		 byte_base;
+};
+
+/*
+ * The scratch resolve_pending() compacts the round's pending values in,
+ * which it releases once every candidate is rewritten.
+ *
+ * A worker gives each distinct value it holds pending one local marker, so
+ * one value may fill many candidate columns.  The compaction keeps one
+ * descriptor per local marker some candidate holds, in the order the walk
+ * of the candidates in task order first meets each, and that sequence is
+ * what the value resolver measures.  `descriptors` has room for `room`,
+ * every worker's pending values together, and holds `count`; equal values
+ * of two workers are two descriptors, which the resolver promises one
+ * identifier.  `spans` has a record for each of the pool's workers.  The
+ * maps and the descriptors lie in `block`, charged to the round.
+ */
+struct relic_merge_compaction {
+	relic_merge_t		*merge;
+	relic_pending_t		*descriptors;
+	size_t			 room;
+	size_t			 count;
+	relic_merge_block_t	 block;
+	relic_merge_span_t	 spans[RELIC_THREADS_MAX];
+};
+
+/*
+ * The round's pending values once they are resolved, which the merge
+ * holds until it applies or declines: `map` holds the identifier promised
+ * each compact descriptor, and `bytes` the copy of every worker's pending
+ * strings, which the map's new strings point into until they are appended
+ * or their reservation is given back.  `charged` is what the two were
+ * charged, `bytes` being NULL when they are not held.  `projected` is the
+ * bytes the value table and the pool will hold once they have taken the
+ * new values, and `reserved` says they hold a reservation for them not yet
+ * appended.  The map's count is zero unless some value was promised.
+ */
+struct relic_merge_resolution {
+	relic_pending_map_t	 map;
+	char			*bytes;
+	size_t			 charged;
+	size_t			 projected;
+	bool			 reserved;
+};
+
+/*
  * A merge under way.  `appends` holds each target's new tuples, and
  * `projected` the bytes each target will hold once it has taken them.
- * `pending` holds the round's `pending_count` pending values in task
- * order, the strings' bytes in `pending_bytes`, where each worker's lie
- * together, `pending_map` the identifier each is promised, and
- * `table_projected` the bytes the value table and the pool will hold once
- * they have taken the new ones; `pending_charged` is what the three were
- * charged, and `pending_reserved` says the value table and the pool hold
- * a reservation for them not yet appended.  `texts_bytes` is at least
- * what the serial run's text buffers would hold by the round's end, which
- * the admission counts.
+ * `resolution` holds the round's resolved pending values.  `texts_bytes`
+ * is at least what the serial run's text buffers would hold by the round's
+ * end, which the admission counts.
  * `worker_lists` lists each worker's candidates by stripe, and
  * `firsts_places` says where each stripe's firsts lie, in `find_block`,
  * which holds both while the firsts are found.
@@ -202,14 +256,8 @@ struct relic_merge {
 	relic_merge_block_t		 classify_block;
 	relic_merge_part_t		*apply_parts;
 	size_t				 apply_part_count;
-	relic_pending_t			*pending;
-	size_t				 pending_count;
-	char				*pending_bytes;
-	relic_pending_map_t		 pending_map;
-	size_t				 pending_charged;
-	size_t				 table_projected;
+	relic_merge_resolution_t	 resolution;
 	size_t				 texts_bytes;
-	bool				 pending_reserved;
 };
 
 static void	 apply_merge(relic_merge_t *merge);
@@ -217,15 +265,20 @@ static void	 apply_part(void *argument, size_t part, size_t worker_index);
 static void	 block_close(relic_merge_t *merge,
 		    relic_merge_block_t *block);
 static int	 block_open(relic_merge_t *merge, relic_merge_block_t *block,
-		    size_t (*layout)(relic_merge_t *, void *));
-static size_t	 classify_layout(relic_merge_t *merge, void *memory);
+		    size_t (*layout)(void *, void *), void *owner);
+static size_t	 classify_layout(void *owner, void *memory);
 static int	 classify_new_keys(relic_merge_t *merge);
 static void	 classify_part(void *argument, size_t part,
 		    size_t worker_index);
+static int	 collect_descriptors(relic_merge_compaction_t *compaction);
+static int	 compact_and_resolve(relic_merge_compaction_t *compaction);
+static size_t	 compaction_layout(void *owner, void *memory);
 static int	 count_new_tuples(relic_merge_t *merge);
+static int	 describe_marker(relic_merge_compaction_t *compaction,
+		    size_t worker, relic_dom_t marker);
 static const relic_candidate_t *entry_of(const relic_merge_t *merge,
 		    relic_merge_ref_t ref);
-static size_t	 find_layout(relic_merge_t *merge, void *memory);
+static size_t	 find_layout(void *owner, void *memory);
 static int	 find_new_tuples(relic_merge_t *merge);
 static void	 find_new_in_stripe(void *argument, size_t stripe,
 		    size_t worker_index);
@@ -233,8 +286,6 @@ static bool	 firsts_hold(const relic_merge_t *merge,
 		    const relic_merge_firsts_t *firsts, relic_merge_ref_t ref);
 static void	 firsts_add(const relic_merge_t *merge,
 		    relic_merge_firsts_t *firsts, relic_merge_ref_t ref);
-static void	 gather_pending(relic_merge_t *merge);
-static bool	 holds_marker(const relic_dom_t *tuple, uint16_t arity);
 static size_t	 list_search(const uint32_t *list, size_t first, size_t end,
 		    size_t position);
 static void	 list_staged_part(void *argument, size_t part,
@@ -247,17 +298,24 @@ static void	 merge_end(relic_merge_t *merge);
 static int	 number_parts(const relic_merge_t *merge,
 		    size_t (*parts_of)(const relic_append_t *),
 		    relic_merge_part_t **partsp, size_t *countp);
-static size_t	 pending_columns(const relic_pool_t *pool);
-static int	 pending_open(relic_merge_t *merge, size_t count,
-		    size_t bytes);
 static size_t	 pending_string_bytes(const relic_pool_t *pool);
+static size_t	 pending_value_count(const relic_pool_t *pool);
 static int	 prepare_merge(relic_merge_t *merge, relic_t *ctx,
 		    relic_pool_t *pool, relic_round_t *round,
 		    size_t texts_bytes);
-static void	 rehash_worker(void *argument, size_t worker,
-		    size_t worker_index);
+static void	 prepare_spans(relic_merge_compaction_t *compaction);
 static int	 reserve_room(relic_merge_t *merge);
+static void	 resolution_close(relic_merge_t *merge);
+static int	 resolution_open(relic_merge_t *merge, size_t room,
+		    size_t string_bytes);
+static bool	 resolution_promised(
+		    const relic_merge_resolution_t *resolution);
 static int	 resolve_pending(relic_merge_t *merge);
+static bool	 rewrite_markers(const relic_merge_span_t *span,
+		    const relic_dom_t *promised, relic_dom_t *tuple,
+		    uint16_t arity);
+static void	 rewrite_worker(void *argument, size_t worker,
+		    size_t worker_index);
 static int	 stage_new_tuples(relic_merge_t *merge);
 static void	 stage_task(void *argument, size_t task, size_t worker_index);
 static size_t	 stripe_candidates(const relic_pool_t *pool, size_t stripe);
@@ -286,12 +344,19 @@ relic_round_merge(relic_t *ctx, relic_pool_t *pool, relic_round_t *round,
  * allocated or the round holds more candidates than RELIC_TUPLE_MAX, which
  * keeps every position the merge counts within the 32 bits a table holds
  * and is more than any relation can take.
+ *
+ * The steps walk candidates two ways: task by task, through each task's
+ * run of its worker's candidates, and worker by worker, through all of a
+ * worker's.  The two meet the same candidates only when the tasks' runs
+ * cover every candidate the workers hold, which a worker's tasks do, its
+ * runs following one another; a merge whose counts disagree is declined.
  */
 static int
 merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
     relic_round_t *round)
 {
 	size_t candidates;
+	size_t held;
 	size_t i;
 
 	bzero(merge, sizeof(*merge));
@@ -302,7 +367,11 @@ merge_begin(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
 	candidates = 0;
 	for (i = 0; i < pool->task_count; i++)
 		candidates += pool->tasks[i].candidate_count;
-	if (candidates > RELIC_TUPLE_MAX)
+	held = 0;
+	for (i = 0; i < pool->worker_count; i++)
+		held += pool->workers[i].candidates.count;
+	assert(candidates == held);
+	if (candidates != held || candidates > RELIC_TUPLE_MAX)
 		return (-1);
 
 	merge->appends = calloc(round->target_count, sizeof(*merge->appends));
@@ -352,70 +421,80 @@ prepare_merge(relic_merge_t *merge, relic_t *ctx, relic_pool_t *pool,
 }
 
 /*
- * Promise every value the candidates hold pending the identifier it will
- * take, and write it over each marker, hashing each candidate that held one
- * again, a worker's candidates to a part.  The values are gathered in task
- * order, each task's candidates in the order its worker derived them and
- * each candidate's columns in order, which is the order the serial
- * evaluator meets them in, and the value table and the pool promise
- * identifiers in order of first occurrence: each value is promised the
- * identifier the serial run gives it.  Nothing is interned until the merge
- * can no longer be declined.  Returns 0, or -1 when the round holds more
- * pending columns than a marker can count or their arrays could not be had.
+ * Promise every value the candidates hold pending the identifier the serial
+ * run gives it, and write that identifier over each column holding it.
+ *
+ * A worker holds each distinct value it met pending once, and its
+ * candidates' columns hold local markers naming those values, so one value
+ * can fill many columns.  The walk of the candidates in task order, each
+ * task's candidates in the order its worker derived them and each
+ * candidate's columns in order, meets the values in the order the serial
+ * evaluator meets them.  It gives a local marker a compact descriptor the
+ * first time it meets it and passes over it after that: every occurrence it
+ * passes over follows an equal one it kept, so each value's first
+ * occurrence among the descriptors is its first in the walk.  The value
+ * resolver promises new values identifiers in order of first occurrence,
+ * so from the descriptors it promises each value the identifier the serial
+ * run gives it, having measured no more descriptors than the workers hold
+ * pending values, however many columns hold them.  Equal values of two
+ * workers are two descriptors, promised one identifier.  Then, a worker's
+ * candidates to a part, each local marker is replaced by the identifier
+ * promised its descriptor, the descriptor number itself never being
+ * written, and each candidate that held a marker is hashed again.
+ *
+ * Nothing is interned until the merge can no longer be declined.  The
+ * compaction's maps and descriptors are released once every part has
+ * rewritten its candidates; the resolved values, whose new strings point
+ * into the merge's copy of the workers' bytes, stay until merge_end().
+ * Returns 0, or -1 when the workers hold more pending values than a
+ * marker can count, the scratch or the values could not be had, a marker
+ * names none of its worker's values, or the new values' storage is more
+ * than a size counts.
  */
 static int
 resolve_pending(relic_merge_t *merge)
 {
-	size_t count;
+	relic_merge_compaction_t compaction;
+	int status;
 
-	count = pending_columns(merge->pool);
-	if (count == 0)
+	bzero(&compaction, sizeof(compaction));
+	compaction.merge = merge;
+	compaction.room = pending_value_count(merge->pool);
+	if (compaction.room == 0)
 		return (0);
-	if (count > RELIC_DOM_INDEX_MASK ||
-	    pending_open(merge, count, pending_string_bytes(merge->pool)) != 0)
+	if (compaction.room > RELIC_DOM_INDEX_MASK)
 		return (-1);
 
-	gather_pending(merge);
-	assert(merge->pending_count == count);
-	merge->table_projected = relic_pending_measure(merge->ctx,
-	    merge->pending, merge->pending_count, merge->pending_bytes,
-	    &merge->pending_map);
-	relic_pool_for(merge->pool, merge->pool->worker_count, rehash_worker,
-	    merge);
+	if (block_open(merge, &compaction.block, compaction_layout,
+	    &compaction) != 0)
+		return (-1);
+	status = compact_and_resolve(&compaction);
+	block_close(merge, &compaction.block);
 
-	return (0);
+	return (status);
 }
 
 /*
- * How many columns of every worker's candidates hold a pending marker.  A
- * worker that met no value the context lacked holds none.
+ * How many values every worker holds pending together, each distinct value
+ * of a worker counted once, saturating at SIZE_MAX.
  */
 static size_t
-pending_columns(const relic_pool_t *pool)
+pending_value_count(const relic_pool_t *pool)
 {
-	const relic_candidates_t *candidates;
 	size_t count;
-	size_t i;
 	size_t w;
 
 	count = 0;
-	for (w = 0; w < pool->worker_count; w++) {
-		candidates = &pool->workers[w].candidates;
-		if (candidates->value_count == 0)
-			continue;
-
-		for (i = 0; i < candidates->word_count; i++) {
-			if ((candidates->words[i] & RELIC_DOM_TYPE_MASK) == 0)
-				count++;
-		}
-	}
+	for (w = 0; w < pool->worker_count; w++)
+		count = relic_saturating_sum(count,
+		    pool->workers[w].candidates.value_count);
 
 	return (count);
 }
 
 /*
  * The bytes of every worker's pending strings, each distinct string of a
- * worker counted once.
+ * worker counted once, saturating at SIZE_MAX.
  */
 static size_t
 pending_string_bytes(const relic_pool_t *pool)
@@ -425,81 +504,187 @@ pending_string_bytes(const relic_pool_t *pool)
 
 	bytes = 0;
 	for (w = 0; w < pool->worker_count; w++)
-		bytes += pool->workers[w].candidates.value_byte_count;
+		bytes = relic_saturating_sum(bytes,
+		    pool->workers[w].candidates.value_byte_count);
 
 	return (bytes);
 }
 
 /*
- * Make the arrays of `count` pending values, the buffer for `bytes` bytes of
- * their strings, and their map, charged to the round.  Returns 0, or -1
- * having charged nothing, when their bytes are more than a size can count
- * or the limit or the allocator refused them.
+ * Lay the compaction's block out from `memory`, or only measure it when
+ * `memory` is NULL (relic_block_piece()), and return its bytes, SIZE_MAX
+ * when they are more than a size counts: each worker's map, with an entry
+ * for each of its pending values, and room for a descriptor for every
+ * pending value.
+ */
+static size_t
+compaction_layout(void *owner, void *memory)
+{
+	relic_merge_compaction_t *compaction;
+	const relic_pool_t *pool;
+	relic_merge_span_t *span;
+	size_t bytes;
+	size_t w;
+	char *cursor;
+
+	compaction = owner;
+	pool = compaction->merge->pool;
+	cursor = memory;
+	bytes = 0;
+
+	assert(pool->worker_count <= RELIC_THREADS_MAX);
+	for (w = 0; w < pool->worker_count; w++) {
+		span = &compaction->spans[w];
+		span->descriptor_of = relic_block_piece(&cursor, &bytes,
+		    pool->workers[w].candidates.value_count,
+		    sizeof(*span->descriptor_of));
+	}
+	compaction->descriptors = relic_block_piece(&cursor, &bytes,
+	    compaction->room, sizeof(*compaction->descriptors));
+
+	return (bytes);
+}
+
+/*
+ * Resolve the pending values into the merge's resolution, the compaction's
+ * block open: open the resolution and copy the workers' strings into it,
+ * describe every local marker the candidates hold, measure the
+ * descriptors, and rewrite every worker's candidates.  Values no candidate
+ * holds are never described, and when there are none the resolution is
+ * released again.  Returns 0, or -1 as resolve_pending() does, the
+ * candidates untouched, leaving whatever resolution it opened for
+ * merge_end() to release.
  */
 static int
-pending_open(relic_merge_t *merge, size_t count, size_t bytes)
+compact_and_resolve(relic_merge_compaction_t *compaction)
 {
-	relic_account_t *account;
-	size_t charge;
+	relic_merge_resolution_t *resolution;
+	relic_merge_t *merge;
 
-	account = &merge->ctx->account;
-	charge = relic_saturating_sum(relic_saturating_product(count,
-	    sizeof(*merge->pending)), relic_pending_map_bytes(count));
-	charge = relic_saturating_sum(charge, bytes);
-	if (charge == SIZE_MAX || !relic_account_charge_round(account, charge))
+	merge = compaction->merge;
+	resolution = &merge->resolution;
+	if (resolution_open(merge, compaction->room,
+	    pending_string_bytes(merge->pool)) != 0)
 		return (-1);
+	prepare_spans(compaction);
 
-	merge->pending = calloc(count, sizeof(*merge->pending));
-	merge->pending_bytes = malloc(bytes > 0 ? bytes : 1);
-	if (merge->pending == NULL || merge->pending_bytes == NULL ||
-	    relic_pending_map_open(&merge->pending_map, count) != 0) {
-		free(merge->pending);
-		free(merge->pending_bytes);
-		merge->pending = NULL;
-		merge->pending_bytes = NULL;
-		relic_account_release_round(account, charge);
+	if (collect_descriptors(compaction) != 0)
 		return (-1);
+	if (compaction->count == 0) {
+		resolution_close(merge);
+		return (0);
 	}
-	merge->pending_charged = charge;
+
+	resolution->projected = relic_pending_measure(merge->ctx,
+	    compaction->descriptors, compaction->count, resolution->bytes,
+	    &resolution->map);
+	if (resolution->projected == SIZE_MAX)
+		return (-1);
+
+	relic_pool_for(merge->pool, merge->pool->worker_count, rewrite_worker,
+	    compaction);
 
 	return (0);
 }
 
 /*
- * Gather the candidates' pending values into the round's, in task order,
- * rewriting each marker, which names a value among its worker's, to name it
- * among the round's.  Each worker's string bytes are copied once, together,
- * and a string among the round's names its bytes where its worker's landed.
+ * Give the merge's resolution a map with room for `room` descriptors and a
+ * buffer for `string_bytes` bytes of pending strings, at least one so that
+ * an empty string names a byte that exists, charged to the round before
+ * either is allocated.  Returns 0, or -1 having charged and holding
+ * nothing, when their bytes are more than a size counts or the limit or
+ * the allocator refused them.
+ */
+static int
+resolution_open(relic_merge_t *merge, size_t room, size_t string_bytes)
+{
+	relic_merge_resolution_t *resolution;
+	relic_account_t *account;
+	size_t buffer_bytes;
+	size_t charge;
+
+	resolution = &merge->resolution;
+	account = &merge->ctx->account;
+	assert(resolution->bytes == NULL);
+	buffer_bytes = string_bytes > 0 ? string_bytes : 1;
+	charge = relic_saturating_sum(relic_pending_map_bytes(room),
+	    buffer_bytes);
+	if (charge == SIZE_MAX || !relic_account_charge_round(account, charge))
+		return (-1);
+
+	resolution->bytes = malloc(buffer_bytes);
+	if (resolution->bytes == NULL) {
+		relic_account_release_round(account, charge);
+		return (-1);
+	}
+	if (relic_pending_map_open(&resolution->map, room) != 0) {
+		free(resolution->bytes);
+		resolution->bytes = NULL;
+		relic_account_release_round(account, charge);
+		return (-1);
+	}
+	resolution->charged = charge;
+
+	return (0);
+}
+
+/*
+ * Ready every worker's span: clear its map, no marker having a descriptor
+ * yet, and copy its pending strings' bytes, once, into the resolution's
+ * buffer, which must be open, the workers' end to end in worker order,
+ * recording where its begin.
  */
 static void
-gather_pending(relic_merge_t *merge)
+prepare_spans(relic_merge_compaction_t *compaction)
 {
 	const relic_candidates_t *holder;
-	const relic_round_task_t *task;
-	relic_candidates_t *candidates;
-	relic_candidate_t *candidate;
-	size_t base[RELIC_THREADS_MAX];
-	relic_pending_t *value;
-	relic_dom_t *tuple;
-	uint16_t arity;
-	uint16_t column;
+	relic_merge_span_t *span;
+	relic_merge_t *merge;
 	size_t copied;
-	size_t end;
-	size_t t;
-	size_t i;
 	size_t w;
 
-	assert(merge->pool->worker_count <= RELIC_THREADS_MAX);
+	merge = compaction->merge;
 	copied = 0;
 	for (w = 0; w < merge->pool->worker_count; w++) {
 		holder = &merge->pool->workers[w].candidates;
-		base[w] = copied;
+		span = &compaction->spans[w];
+		if (holder->value_count > 0)
+			bzero(span->descriptor_of, holder->value_count *
+			    sizeof(*span->descriptor_of));
+
+		span->byte_base = copied;
 		if (holder->value_byte_count > 0)
-			bcopy(holder->value_bytes, merge->pending_bytes + copied,
+			bcopy(holder->value_bytes,
+			    merge->resolution.bytes + copied,
 			    holder->value_byte_count);
 		copied += holder->value_byte_count;
 	}
+}
 
+/*
+ * Give every local marker the candidates hold a compact descriptor, at its
+ * first occurrence in the walk of every task's candidates in task order,
+ * each task's in the order its worker derived them and each candidate's
+ * columns in order.  Only the maps and the descriptors are written: the
+ * candidates keep their markers until every one has a descriptor and the
+ * descriptors their promises.  Returns 0, or -1 when a marker names none
+ * of its worker's values.
+ */
+static int
+collect_descriptors(relic_merge_compaction_t *compaction)
+{
+	const relic_candidates_t *candidates;
+	const relic_candidate_t *candidate;
+	const relic_round_task_t *task;
+	const relic_merge_t *merge;
+	const relic_dom_t *tuple;
+	uint16_t arity;
+	uint16_t column;
+	size_t end;
+	size_t t;
+	size_t i;
+
+	merge = compaction->merge;
 	for (t = 0; t < merge->pool->task_count; t++) {
 		task = &merge->pool->tasks[t];
 		candidates = &merge->pool->workers[task->worker].candidates;
@@ -515,38 +700,87 @@ gather_pending(relic_merge_t *merge)
 			for (column = 0; column < arity; column++) {
 				if ((tuple[column] & RELIC_DOM_TYPE_MASK) != 0)
 					continue;
-
-				assert(tuple[column] <= candidates->value_count);
-				value = &merge->pending[merge->pending_count];
-				*value = candidates->values[tuple[column] - 1];
-				if (value->kind == RELIC_PENDING_TEXT)
-					value->u.text.offset += base[task->worker];
-				merge->pending_count++;
-				tuple[column] =
-				    (relic_dom_t)merge->pending_count;
+				if (describe_marker(compaction, task->worker,
+				    tuple[column]) != 0)
+					return (-1);
 			}
 		}
 	}
+
+	return (0);
 }
 
 /*
- * Write the identifier promised over every marker among worker `worker`'s
- * candidates, and hash each candidate that held one again, moving it to
- * its stripe.  Only the worker's own candidates are touched.
+ * Give local marker `marker` of worker `worker` the next compact
+ * descriptor, a copy of the value it names, unless an earlier occurrence
+ * gave it one.  A string's descriptor names its bytes where the worker's
+ * landed in the merge's copy.  A map entry goes from zero to its
+ * descriptor once, so the descriptors never outnumber the pending values,
+ * the compaction's room.  Returns 0, or -1 having described nothing when
+ * the marker names none of the worker's values or a string's bytes lie
+ * outside the worker's, which a worker's pending values never do.
+ */
+static int
+describe_marker(relic_merge_compaction_t *compaction, size_t worker,
+    relic_dom_t marker)
+{
+	const relic_candidates_t *candidates;
+	const relic_pending_t *value;
+	relic_merge_span_t *span;
+	relic_pending_t *descriptor;
+	bool valid;
+
+	candidates = &compaction->merge->pool->workers[worker].candidates;
+	span = &compaction->spans[worker];
+	valid = marker >= 1 && marker <= candidates->value_count;
+	assert(valid);
+	if (!valid)
+		return (-1);
+	if (span->descriptor_of[marker - 1] != 0)
+		return (0);
+
+	value = &candidates->values[marker - 1];
+	valid = value->kind != RELIC_PENDING_TEXT ||
+	    (value->u.text.offset <= candidates->value_byte_count &&
+	    value->u.text.length <= candidates->value_byte_count -
+	    value->u.text.offset);
+	assert(valid);
+	if (!valid)
+		return (-1);
+
+	assert(compaction->count < compaction->room);
+	descriptor = &compaction->descriptors[compaction->count];
+	*descriptor = *value;
+	if (descriptor->kind == RELIC_PENDING_TEXT)
+		descriptor->u.text.offset += span->byte_base;
+	compaction->count++;
+	span->descriptor_of[marker - 1] = (uint32_t)compaction->count;
+
+	return (0);
+}
+
+/*
+ * Write the identifier promised over every local marker among worker
+ * `worker`'s candidates, through the worker's map of descriptors, and hash
+ * each candidate that held one again, moving it to its stripe.  The walk
+ * that described the markers met every candidate, so every marker has a
+ * descriptor.  Only the worker's own candidates and stripe counts are
+ * written; the compaction and the promises are only read.
  */
 static void
-rehash_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
+rewrite_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
 {
+	const relic_merge_compaction_t *compaction;
 	const relic_relation_t *relation;
+	const relic_merge_t *merge;
 	relic_candidates_t *candidates;
 	relic_candidate_t *candidate;
-	relic_merge_t *merge;
 	relic_dom_t *tuple;
-	uint16_t arity;
 	size_t stripe;
 	size_t i;
 
-	merge = argument;
+	compaction = argument;
+	merge = compaction->merge;
 	candidates = &merge->pool->workers[worker].candidates;
 	if (candidates->value_count == 0)
 		return;
@@ -554,14 +788,13 @@ rehash_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
 	for (i = 0; i < candidates->count; i++) {
 		candidate = &candidates->entries[i];
 		relation = merge->round->targets[candidate->target];
-		arity = relic_relation_arity(relation);
 		tuple = &candidates->words[candidate->offset];
-		if (!holds_marker(tuple, arity))
+		if (!rewrite_markers(&compaction->spans[worker],
+		    merge->resolution.map.ids, tuple,
+		    relic_relation_arity(relation)))
 			continue;
 
-		relic_pending_rewrite(&merge->pending_map, tuple, 1, arity);
 		candidate->hash = relic_relation_hash(relation, tuple);
-
 		stripe = relic_hash_stripe(candidate->hash);
 		candidates->by_stripe[candidates->stripes[i]]--;
 		candidates->by_stripe[stripe]++;
@@ -570,19 +803,30 @@ rehash_worker(void *argument, size_t worker, size_t worker_index RELIC_UNUSED)
 }
 
 /*
- * Whether a tuple holds a pending marker in some column.
+ * Replace each local marker among `tuple`'s `arity` columns with the
+ * identifier `promised` holds for the descriptor `span` maps the marker
+ * to, and return whether any column held a marker.
  */
 static bool
-holds_marker(const relic_dom_t *tuple, uint16_t arity)
+rewrite_markers(const relic_merge_span_t *span, const relic_dom_t *promised,
+    relic_dom_t *tuple, uint16_t arity)
 {
+	uint32_t descriptor;
 	uint16_t column;
+	bool rewritten;
 
+	rewritten = false;
 	for (column = 0; column < arity; column++) {
-		if ((tuple[column] & RELIC_DOM_TYPE_MASK) == 0)
-			return (true);
+		if ((tuple[column] & RELIC_DOM_TYPE_MASK) != 0)
+			continue;
+
+		descriptor = span->descriptor_of[tuple[column] - 1];
+		assert(descriptor != 0);
+		tuple[column] = promised[descriptor - 1];
+		rewritten = true;
 	}
 
-	return (false);
+	return (rewritten);
 }
 
 /*
@@ -595,7 +839,7 @@ holds_marker(const relic_dom_t *tuple, uint16_t arity)
 static int
 find_new_tuples(relic_merge_t *merge)
 {
-	if (block_open(merge, &merge->find_block, find_layout) != 0)
+	if (block_open(merge, &merge->find_block, find_layout, merge) != 0)
 		return (-1);
 
 	relic_pool_for(merge->pool, merge->pool->worker_count, list_worker,
@@ -615,14 +859,16 @@ find_new_tuples(relic_merge_t *merge)
  * their references, with room for every candidate of the stripe.
  */
 static size_t
-find_layout(relic_merge_t *merge, void *memory)
+find_layout(void *owner, void *memory)
 {
 	relic_merge_firsts_place_t *place;
+	relic_merge_t *merge;
 	size_t bytes;
 	size_t s;
 	size_t w;
 	char *cursor;
 
+	merge = owner;
 	cursor = memory;
 	bytes = 0;
 
@@ -996,7 +1242,8 @@ classify_new_keys(relic_merge_t *merge)
 	    sizeof(*merge->keys_places));
 	if (merge->keys_places == NULL)
 		return (-1);
-	if (block_open(merge, &merge->classify_block, classify_layout) != 0)
+	if (block_open(merge, &merge->classify_block, classify_layout,
+	    merge) != 0)
 		return (-1);
 
 	relic_pool_for(merge->pool, merge->classify_part_count, classify_part,
@@ -1015,14 +1262,16 @@ classify_new_keys(relic_merge_t *merge)
  * for every tuple the part reads, which no number of new keys exceeds.
  */
 static size_t
-classify_layout(relic_merge_t *merge, void *memory)
+classify_layout(void *owner, void *memory)
 {
 	const relic_merge_part_t *part_record;
 	relic_merge_keys_place_t *place;
+	relic_merge_t *merge;
 	size_t bytes;
 	size_t p;
 	char *cursor;
 
+	merge = owner;
 	cursor = memory;
 	bytes = 0;
 
@@ -1130,8 +1379,8 @@ reserve_room(relic_merge_t *merge)
 	size_t t;
 
 	table_now = relic_value_storage_bytes(merge->ctx);
-	table_then = merge->pending_count > 0 ? merge->table_projected :
-	    table_now;
+	table_then = resolution_promised(&merge->resolution) ?
+	    merge->resolution.projected : table_now;
 
 	growth = 0;
 	for (t = 0; t < merge->round->target_count; t++) {
@@ -1158,10 +1407,11 @@ reserve_room(relic_merge_t *merge)
 	 * meets before it inserts the batch, and so before any relation has
 	 * grown.
 	 */
-	if (merge->pending_count > 0) {
-		if (relic_pending_reserve(merge->ctx, &merge->pending_map) != 0)
+	if (resolution_promised(&merge->resolution)) {
+		if (relic_pending_reserve(merge->ctx,
+		    &merge->resolution.map) != 0)
 			return (-1);
-		merge->pending_reserved = true;
+		merge->resolution.reserved = true;
 	}
 	for (t = 0; t < merge->round->target_count; t++) {
 		if (relic_relation_reserve_append(merge->ctx,
@@ -1180,10 +1430,10 @@ reserve_room(relic_merge_t *merge)
 }
 
 /*
- * Give the integer table the new integers, under the identifiers the
- * candidates already hold, and every target its new tuples: their columns,
- * and then, a stripe to a part, their canonical entries and their links in
- * every secondary index.
+ * Give the value table and the pool the new values, under the identifiers
+ * the candidates already hold, and every target its new tuples: their
+ * columns, and then, a stripe to a part, their canonical entries and their
+ * links in every secondary index.
  * Nothing here can fail.  Every item one of whose tasks inserted a new
  * tuple has gained, and each new tuple counts as inserted.
  */
@@ -1193,11 +1443,11 @@ apply_merge(relic_merge_t *merge)
 	relic_relation_t *relation;
 	size_t t;
 
-	if (merge->pending_count > 0) {
-		relic_pending_append(merge->ctx, &merge->pending_map);
-		merge->pending_reserved = false;
+	if (resolution_promised(&merge->resolution)) {
+		relic_pending_append(merge->ctx, &merge->resolution.map);
+		merge->resolution.reserved = false;
 		assert(relic_value_storage_bytes(merge->ctx) ==
-		    merge->table_projected);
+		    merge->resolution.projected);
 	}
 
 	for (t = 0; t < merge->round->target_count; t++)
@@ -1240,8 +1490,8 @@ apply_part(void *argument, size_t part, size_t worker_index RELIC_UNUSED)
 /*
  * Release everything the merge holds, whether it applied or declined: the
  * appends, with their charge and whatever growth they prepared and did not
- * fill, the pending values, their bytes and their map, with their charge,
- * a step's block a failure left open, and the records.
+ * fill, the resolved values, a step's block a failure left open, and the
+ * records.
  */
 static void
 merge_end(relic_merge_t *merge)
@@ -1254,21 +1504,7 @@ merge_end(relic_merge_t *merge)
 			    &merge->appends[t]);
 	}
 
-	/*
-	 * A reservation made for a merge that then declined is given back:
-	 * the serial run makes its own, and the copies of the new strings
-	 * must not be made twice.
-	 */
-	if (merge->pending_reserved)
-		relic_pending_unreserve(merge->ctx, &merge->pending_map);
-
-	if (merge->pending != NULL) {
-		free(merge->pending);
-		free(merge->pending_bytes);
-		relic_pending_map_close(&merge->pending_map);
-		relic_account_release_round(&merge->ctx->account,
-		    merge->pending_charged);
-	}
+	resolution_close(merge);
 
 	block_close(merge, &merge->find_block);
 	block_close(merge, &merge->classify_block);
@@ -1285,19 +1521,56 @@ merge_end(relic_merge_t *merge)
 }
 
 /*
- * Give a step's block the arrays `layout` lays out, charged to the round
- * before it is allocated.  `layout` sets every part's record each time it
- * runs: given no memory it measures, setting each part's room and leaving
- * its arrays NULL, and given the block it carves the arrays from it.  A
- * step that needs no bytes keeps the records its measuring set, each with
- * no room and no arrays, which a part with nothing to do reads as such,
- * and its block is neither allocated nor carved.  Returns 0, or -1 having
- * charged nothing and holding nothing, when the bytes are more than a size
- * counts or the limit or the allocator refused them.
+ * Release the merge's resolution, its map and its bytes with their
+ * charge, leaving it empty; a resolution never opened, or released already,
+ * holds nothing.  A reservation made for a merge that then declined is
+ * given back first, while the bytes its new strings point into exist: the
+ * serial run makes its own, and the copies of the new strings must not be
+ * made twice.
+ */
+static void
+resolution_close(relic_merge_t *merge)
+{
+	relic_merge_resolution_t *resolution;
+
+	resolution = &merge->resolution;
+	if (resolution->reserved)
+		relic_pending_unreserve(merge->ctx, &resolution->map);
+
+	if (resolution->bytes != NULL) {
+		relic_pending_map_close(&resolution->map);
+		free(resolution->bytes);
+		relic_account_release_round(&merge->ctx->account,
+		    resolution->charged);
+	}
+	bzero(resolution, sizeof(*resolution));
+}
+
+/*
+ * Whether the merge has promised pending values identifiers, which it
+ * must reserve room for and append.
+ */
+static bool
+resolution_promised(const relic_merge_resolution_t *resolution)
+{
+	return (resolution->map.count > 0);
+}
+
+/*
+ * Give a step's block the arrays `layout` lays out for `owner`, the merge
+ * or a step's own record, charged to the round before it is allocated.
+ * `layout` sets every part's record each time it runs: given no memory it
+ * measures, setting each part's room and leaving its arrays NULL, and given
+ * the block it carves the arrays from it.  A step that needs no bytes keeps
+ * the records its measuring set, each with no room and no arrays, which a
+ * part with nothing to do reads as such, and its block is neither
+ * allocated nor carved.  Returns 0, or -1 having charged nothing and
+ * holding nothing, when the bytes are more than a size counts or the limit
+ * or the allocator refused them.
  */
 static int
 block_open(relic_merge_t *merge, relic_merge_block_t *block,
-    size_t (*layout)(relic_merge_t *, void *))
+    size_t (*layout)(void *, void *), void *owner)
 {
 	relic_account_t *account;
 	size_t carved;
@@ -1306,7 +1579,7 @@ block_open(relic_merge_t *merge, relic_merge_block_t *block,
 	assert(block->memory == NULL && block->bytes == 0);
 	account = &merge->ctx->account;
 
-	bytes = layout(merge, NULL);
+	bytes = layout(owner, NULL);
 	if (bytes == 0)
 		return (0);
 	if (bytes == SIZE_MAX || !relic_account_charge_round(account, bytes))
@@ -1319,7 +1592,7 @@ block_open(relic_merge_t *merge, relic_merge_block_t *block,
 	}
 	block->bytes = bytes;
 
-	carved = layout(merge, block->memory);
+	carved = layout(owner, block->memory);
 	assert(carved == bytes);
 	(void)carved;
 

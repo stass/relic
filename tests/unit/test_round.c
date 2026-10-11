@@ -62,6 +62,7 @@
 #define	SCENARIO_TEXT_TUPLES	"the tuple limit refuses strings as serially"
 #define	SCENARIO_TEXT_MEMORY	"the memory limit refuses strings as serially"
 #define	SCENARIO_HISTORY	"a round reserves what its items inserted"
+#define	SCENARIO_COMPACT	"a merge resolves each local value once"
 
 /* Room for a generated program and for a context's diagnostics. */
 #define	PROGRAM_MAX		(256 * 1024)
@@ -110,6 +111,22 @@
 #define	BROOM_DIGITS		5u
 #define	BROOM_LEAVES		100000u
 
+/*
+ * The facts of the program whose one round holds few pending values in
+ * many columns; the new directory and extension strings and the new
+ * integers its tuples hold, each twice in a tuple; and the pending columns
+ * of each tuple it derives.
+ */
+#define	COMPACT_FILES		10000u
+#define	COMPACT_DIRS		7u
+#define	COMPACT_EXTS		3u
+#define	COMPACT_NUMBERS		5u
+#define	COMPACT_NUMBER_BASE	7000000
+#define	COMPACT_PENDING		6u
+
+/* The bytes of each constant the string program's long strings repeat. */
+#define	LONG_STRING_BYTES	3000u
+
 typedef struct diagnostics diagnostics_t;
 typedef struct text text_t;
 
@@ -151,12 +168,19 @@ static size_t	 lines_in(const diagnostics_t *diagnostics);
 static void	 limits_refuse_as_serially(const char *scenario,
 		    const char *program, bool memory, size_t steps,
 		    size_t threads);
-static size_t	 least_memory_limit(const char *program, size_t low,
-		    size_t high);
+static size_t	 least_memory_limit(const char *program, bool merging,
+		    size_t low, size_t high);
+static bool	 materializes_under(const char *program, bool merging,
+		    size_t limit);
+static void	 compact_program(text_t *text);
+static size_t	 compact_values_held(const relic_t *ctx);
+static void	 compacted_rounds_agree(size_t threads, size_t max_memory);
 static void	 computing_rounds_merge(size_t threads);
+static void	 pending_values_resolve_once(void);
 static void	 errors_fail_as_serially(size_t threads);
 static void	 sums_overflow_as_serially(size_t threads);
 static bool	 values_agree(const relic_t *serial, const relic_t *deferred);
+static void	 byte_string_rules(text_t *text);
 static void	 string_program(text_t *text);
 static void	 strings_rounds_merge(size_t threads);
 static void	 patterns_fail_as_serially(size_t threads);
@@ -349,6 +373,34 @@ string_program(text_t *text)
 }
 
 /*
+ * Add to the string program rules computing strings whose bytes only
+ * byte-for-byte equality tells apart: cut/2 strings holding a NUL byte,
+ * each the prefix of the next -- "", "z", "z\0" and "z\0" with a digit --
+ * and long/2 two strings of twice LONG_STRING_BYTES bytes and more, each
+ * derived several times.  The limits' sweeps run the string program
+ * without them, the band of limits they search for being narrow.
+ */
+static void
+byte_string_rules(text_t *text)
+{
+	unsigned int i;
+	unsigned int j;
+
+	appendf(text,
+	    "cut(I, S) :- idx(I), S = substr(cat(\"z\\0\", str(I)), 0, "
+	    "I mod 4).\n");
+
+	appendf(text, "long(I, S) :- idx(I), I < 6, S = ");
+	for (j = 0; j < 2; j++) {
+		appendf(text, "cat(\"");
+		for (i = 0; i < LONG_STRING_BYTES; i++)
+			appendf(text, "%c", j == 0 ? 'x' : 'y');
+		appendf(text, "\", ");
+	}
+	appendf(text, "str(I mod 2))).\n");
+}
+
+/*
  * A round whose plans compute strings the context lacks is merged, not
  * abandoned, and the merge interns them as the serial run does: in the
  * same order, under the same identifiers, into a pool of the same size.
@@ -367,6 +419,7 @@ strings_rounds_merge(size_t threads)
 	char what[64];
 
 	string_program(&failing);
+	byte_string_rules(&failing);
 	snprintf(what, sizeof(what), "strings on %zu thread(s)", threads);
 	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
 	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
@@ -1103,7 +1156,7 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 	workers = relic_pool_size(threads);
 	working = 0;
 	if (memory) {
-		least = least_memory_limit(program, loaded.storage_bytes,
+		least = least_memory_limit(program, false, loaded.storage_bytes,
 		    needed.storage_bytes * 2 + WORKING_MAX);
 		if (least > needed.storage_bytes * 2)
 			working = least - needed.storage_bytes +
@@ -1183,34 +1236,54 @@ limits_refuse_as_serially(const char *scenario, const char *program,
 }
 
 /*
- * The least memory limit in [low, high] under which a serial context
- * materializes `program`, found by bisection, or `high` when none below it
- * does.  A context that succeeds under a limit succeeds under any larger
- * one, which is what the bisection relies on.
+ * The least memory limit in [low, high] under which `program`
+ * materializes, as materializes_under() asks it, found by bisection, or
+ * `high` when none below it does.  A context that succeeds under a limit
+ * succeeds under any larger one, which is what the bisection relies on.
  */
 static size_t
-least_memory_limit(const char *program, size_t low, size_t high)
+least_memory_limit(const char *program, bool merging, size_t low,
+    size_t high)
 {
-	diagnostics_t diagnostics;
-	relic_t *ctx;
 	size_t middle;
-	int status;
 
 	while (low < high) {
 		middle = low + (high - low) / 2;
-		ctx = context_for(program, 0, 0, 0, middle, &diagnostics);
-		if (ctx == NULL)
-			return (high);
-		status = relic_materialize(ctx);
-		relic_destroy(ctx);
-
-		if (status == 0)
+		if (materializes_under(program, merging, middle))
 			high = middle;
 		else
 			low = middle + 1;
 	}
 
 	return (high);
+}
+
+/*
+ * Whether a context under a memory limit of `limit` bytes materializes
+ * `program`: a serial one, or when `merging` a deferred one on the calling
+ * thread alone that also merges its every round, declining none at its
+ * reservation and abandoning none.
+ */
+static bool
+materializes_under(const char *program, bool merging, size_t limit)
+{
+	diagnostics_t diagnostics;
+	relic_t *ctx;
+	bool succeeded;
+
+	ctx = context_for(program, merging ? RELIC_F_PARALLEL_ALWAYS : 0,
+	    merging ? 1 : 0, 0, limit, &diagnostics);
+	if (ctx == NULL)
+		return (false);
+
+	succeeded = relic_materialize(ctx) == 0;
+	if (merging)
+		succeeded = succeeded && merged_rounds(ctx) > 0 &&
+		    abandoned_rounds(ctx) == 0 &&
+		    reservation_declines(ctx) == 0;
+	relic_destroy(ctx);
+
+	return (succeeded);
 }
 
 /*
@@ -1327,6 +1400,175 @@ computing_rounds_merge(size_t threads)
 
 	relic_destroy(serial);
 	relic_destroy(deferred);
+}
+
+/*
+ * A merge resolves each value a worker holds pending once, however many of
+ * its candidates' columns hold it.  kind/7 derives one tuple for each of
+ * COMPACT_FILES files, in one round on one worker, over many tasks and
+ * many batches.  Each tuple holds COMPACT_PENDING pending columns over
+ * fifteen new values: one of seven strings, one of three strings and one
+ * of five integers, each held twice in the tuple.
+ *
+ * The test bounds memory, not time.  It finds the least memory limit under
+ * which the serial context materializes the program, and the least under
+ * which the deferred one does while merging its every round.  What lies
+ * between the two is what the deferred round holds beside the serial run:
+ * its candidates, its workers' text buffers, its merge's scratch and its
+ * value resolution.  A resolution sized by occurrences would by itself
+ * take a pending descriptor and a value map entry for every pending column,
+ * more than that difference; one sized by the worker's fifteen values
+ * takes a few kilobytes.
+ *
+ * The deferred context under its least limit must then hold what the
+ * serial context holds, word for word, and the round must have interned
+ * exactly the fifteen values, which the loaded program lacked.
+ */
+static void
+pending_values_resolve_once(void)
+{
+	size_t occurrence_bytes;
+	size_t occurrences;
+	size_t serial_least;
+	size_t merging_least;
+	size_t high;
+
+	compact_program(&failing);
+	occurrences = COMPACT_FILES * COMPACT_PENDING;
+	occurrence_bytes = occurrences * sizeof(relic_pending_t) +
+	    relic_pending_map_bytes(occurrences);
+	high = WORKING_MAX + 4 * occurrence_bytes;
+
+	serial_least = least_memory_limit(failing.bytes, false, 0, high);
+	merging_least = least_memory_limit(failing.bytes, true, serial_least,
+	    high);
+	checkf(serial_least < high && merging_least < high, SCENARIO_COMPACT,
+	    "both contexts materialize under %zu bytes, the serial under "
+	    "%zu and the deferred under %zu", high, serial_least,
+	    merging_least);
+	checkf(merging_least - serial_least < occurrence_bytes,
+	    SCENARIO_COMPACT, "the deferred round holds %zu bytes beside the "
+	    "serial run, less than the %zu its %zu pending columns would "
+	    "take resolved by occurrence", merging_least - serial_least,
+	    occurrence_bytes, occurrences);
+
+	compacted_rounds_agree(1, merging_least);
+}
+
+/*
+ * The program of pending_values_resolve_once(): COMPACT_FILES files, each
+ * deriving a kind/7 tuple whose directory, extension and number are held
+ * twice each.
+ */
+static void
+compact_program(text_t *text)
+{
+	unsigned int i;
+
+	text->length = 0;
+	text->bytes[0] = '\0';
+	for (i = 0; i < COMPACT_FILES; i++)
+		appendf(text, "file(%u).\n", i);
+	appendf(text,
+	    "kind(I, D, E, N, D, E, N) :- file(I),\n"
+	    "    D = cat(\"dir\", str(I mod %u)),\n"
+	    "    E = cat(\"ext\", str(I mod %u)),\n"
+	    "    N = I mod %u + %d.\n",
+	    COMPACT_DIRS, COMPACT_EXTS, COMPACT_NUMBERS, COMPACT_NUMBER_BASE);
+}
+
+/*
+ * Materialize the compact program serially and deferred on `threads`
+ * threads under a memory limit of `max_memory`, zero for none, and require
+ * the deferred context to merge every round, to hold what the serial one
+ * holds word for word, to have interned exactly the values kind/7
+ * computes, which the loaded program lacked, and to have given back every
+ * byte its rounds and merges charged.  On several workers, equal values of
+ * different workers are resolved to one identifier.
+ */
+static void
+compacted_rounds_agree(size_t threads, size_t max_memory)
+{
+	diagnostics_t serial_diagnostics;
+	diagnostics_t deferred_diagnostics;
+	relic_t *serial;
+	relic_t *deferred;
+	size_t loaded_values;
+	size_t computed_values;
+	int serial_status;
+	int deferred_status;
+	char what[96];
+
+	compact_program(&failing);
+	snprintf(what, sizeof(what), "few values in many columns on %zu "
+	    "thread(s), under %zu bytes", threads, max_memory);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS, threads,
+	    0, max_memory, &deferred_diagnostics);
+	if (serial != NULL && deferred != NULL) {
+		loaded_values = compact_values_held(deferred);
+		serial_status = relic_materialize(serial);
+		deferred_status = relic_materialize(deferred);
+		checkf(serial_status == 0 && deferred_status == 0,
+		    SCENARIO_COMPACT, "%s: both materialize", what);
+		computed_values = compact_values_held(deferred);
+		checkf(merged_rounds(deferred) > 0 &&
+		    abandoned_rounds(deferred) == 0 &&
+		    reservation_declines(deferred) == 0, SCENARIO_COMPACT,
+		    "%s: every round is merged, %" PRIu64 " merged, %" PRIu64
+		    " abandoned and %" PRIu64 " declined", what,
+		    merged_rounds(deferred), abandoned_rounds(deferred),
+		    reservation_declines(deferred));
+		checkf(loaded_values == 0 && computed_values ==
+		    COMPACT_DIRS + COMPACT_EXTS + COMPACT_NUMBERS,
+		    SCENARIO_COMPACT, "%s: the merge interned the %u values, "
+		    "held %zu before and %zu after", what,
+		    COMPACT_DIRS + COMPACT_EXTS + COMPACT_NUMBERS,
+		    loaded_values, computed_values);
+		checkf(shared_as_expected(deferred, threads),
+		    SCENARIO_COMPACT, "%s: the rounds are shared when the "
+		    "pool has threads", what);
+		contexts_agree(SCENARIO_COMPACT, what, serial, deferred);
+		checkf(deferred->account.round_bytes == 0, SCENARIO_COMPACT,
+		    "%s: the rounds gave back their buffers", what);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
+/*
+ * How many of the values kind/7 computes a context has assigned, asked
+ * without interning any: the strings "dir0" up to COMPACT_DIRS and "ext0"
+ * up to COMPACT_EXTS, and COMPACT_NUMBERS integers from
+ * COMPACT_NUMBER_BASE.
+ */
+static size_t
+compact_values_held(const relic_t *ctx)
+{
+	char bytes[16];
+	size_t held;
+	int length;
+	unsigned int i;
+
+	held = 0;
+	for (i = 0; i < COMPACT_DIRS; i++) {
+		length = snprintf(bytes, sizeof(bytes), "dir%u", i);
+		if (relic_value_find_string(ctx, bytes, (size_t)length) != 0)
+			held++;
+	}
+	for (i = 0; i < COMPACT_EXTS; i++) {
+		length = snprintf(bytes, sizeof(bytes), "ext%u", i);
+		if (relic_value_find_string(ctx, bytes, (size_t)length) != 0)
+			held++;
+	}
+	for (i = 0; i < COMPACT_NUMBERS; i++) {
+		if (relic_value_find_integer(ctx,
+		    COMPACT_NUMBER_BASE + (int64_t)i) != 0)
+			held++;
+	}
+
+	return (held);
 }
 
 /*
@@ -1554,6 +1796,10 @@ main(void)
 		rounds_reserve_what_deferred_rounds_inserted(threads);
 	}
 	rounds_reserve_what_serial_rounds_inserted();
+	pending_values_resolve_once();
+	compacted_rounds_agree(2, 0);
+	compacted_rounds_agree(DEFERRED_THREADS, 0);
+	compacted_rounds_agree(MANY_THREADS, 0);
 	computing_rounds_merge(MANY_THREADS);
 	strings_rounds_merge(MANY_THREADS);
 

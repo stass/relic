@@ -27,23 +27,6 @@ scheduling decision and preserve the selected indexed plan. The
 sets the regression and measurement gates; the cursor design covers
 frontiers, prefix diagnostics, views, cancellation and fallback.
 
-## Pending values are expanded back into occurrences
-
-[Medium, component: `lib/merge.c`, `lib/task.c`] A worker already gives
-each distinct pending value one marker, but `pending_columns()` and
-`gather_pending()` size and populate the round's value map once per
-candidate column. M3 scale-8 `files-grouped` derives 1,799,657 `kind`
-tuples with two pending strings each, although there are only 206 new
-directory and extension strings. Implement
-[pending value compaction](../specs/design-pending-values.md): one compact
-descriptor per referenced worker-local marker, collected in logical task
-order, then one direct rewrite from local markers to promised identifiers.
-This bounds descriptors by worker-distinct values, at most 3,296 for this
-sixteen-thread rule, while retaining first-occurrence numbering. The column
-rewrite still visits candidate columns. Verify the scoped release of maps,
-the longer byte-buffer lifetime, identifiers, diagnostics and resource
-refusals before changing this ownership path.
-
 ## Candidate replication makes large rounds expensive
 
 [Medium, component: `lib/task.c`, `lib/merge.c`] M3 scale-8 `tc-cyclic`
