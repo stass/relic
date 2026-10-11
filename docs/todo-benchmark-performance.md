@@ -100,10 +100,23 @@ On `bench/run.sh`'s chain distances at scale 2 storage grows from
 every round choosing delta-first. The whole closure over the same chain
 needs the index anyway and is unchanged in storage and lookups. The design
 requires a repeatable regression of this kind to be resolved before the
-policy is enabled by default. Candidate directions: build the index when a
-round first selects the plan, which needs a key estimate before the index
-exists; index the delta alone for the round; or accept and document the
-cost.
+policy is enabled by default. Implement
+[first-use index preparation](../specs/design-recursive-planning.md#preparing-selected-plans):
+retain alternative access requirements without creating their extra
+indexes, include whole-relation acquisition work in selection, and build
+only for selected plans before execution. Use the design's explicit
+provisional key count for an absent index; preserve complete maintained
+indexes after acquisition. Add a regression proving that every round of
+chain distances stays delta-first and the extra index is never built.
+Recheck charged storage and timings against the control, guarded-closure
+work counters, and alternatives used briefly before substantial growth.
+
+**Estimator simplicity.** Remove the evaluation-owned key-count catalog
+and read existing index counts directly through the const accessor. Delete
+catalog collection, sorting, searching and refresh state; keep the estimator
+a pure function of const inputs. Test immediate reflection of index growth
+and distinct derived/base relation identities, and measure selection
+overhead on many-round and long-rule controls.
 
 **Benchmarks.** Run the targeted `tc-acyclic-bf` and `tc-cyclic-bf`
 comparisons against the rival engines at scales 1, 2, 4 and 8 and at one

@@ -37,9 +37,11 @@ schedule -> component -> plans -> executor -> batch -> taker
                                                   `-> gather as candidates
 ```
 
-* A component is planned when it starts, once everything it reads is
-  complete, so the planner can measure those relations and build their
-  indexes once. Plans are never rebuilt inside a fixed point.
+* A component is planned when it starts, once its external inputs are
+  complete, so the planner can measure those relations. Ordinary and
+  delta-first plans acquire their indexes then; an alternative acquires
+  extra indexes at first selection, before that round executes. Plans are
+  never rebuilt inside a fixed point.
 * The **executor** runs one plan, an array of operations ending in `EMIT`
   (`lib/plan.h`). It reads the context and the relations, writes only its
   **scratch**, derives head tuples into a **batch**, and returns when the
@@ -333,7 +335,9 @@ plan order: the view decides which tuples a literal can match, the nesting
 decides only what each binding costs, and a join's result does not depend on
 its nesting. A variant retains at most two plans constructed by structural
 ordering policies. Before any item of a round runs, its plans are compared
-using work estimates from those same views and index key counts. The
+using execution and acquisition estimates from those same views and
+available indexes. All choices precede preparation of missing access
+paths, which finishes before any round item executes. The prepared
 selected plan belongs to the round item and is also the plan a declined
 shared round retries serially. Candidate construction, estimates and the
 selection boundary are specified in
@@ -734,9 +738,9 @@ exists for the caller who must not rely on any order
   identity changes each round. A range and a per-key frontier reach the same
   tuples in the same order with no copy.
 * **Replanning a variant each round from its delta's size.** It costs the
-  planner's work per round, may need an index built inside the fixed point,
-  and makes explain output depend on how many rounds ran. Two plans built
-  when the component is planned, chosen per round, give most of the benefit;
+  planner's work per round and makes explain output depend on how many
+  rounds ran. Two plans built when the component is planned, chosen per
+  round, give most of the benefit;
   one plan with a guessed delta size is badly wrong on some round for some
   bodies ([planning](design-planning.md)).
 * **A separate reference evaluator in the test suite.** It would test a

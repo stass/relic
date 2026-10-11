@@ -491,9 +491,13 @@ charges](#what-planning-charges)).
 
 ## Access paths
 
-A relation builds an index the first time a plan asks, at planning time,
-so a plan never names a missing index and later plans on the same key find
-it built. The index is keyed on every bound column because that is the
+A candidate records an index requirement by relation and key mask.
+Preparing an executable plan builds or reuses that index and binds its
+position, so an executable plan never names a missing index. Ordinary and
+delta-first plans are prepared at component start; an alternative's extra
+indexes are acquired at its first selection, before the round executes
+([recursive plan selection](design-recursive-planning.md#preparing-selected-plans)).
+The index is keyed on every bound column because that is the
 most selective lookup there is, and because reusing an index on a subset
 of the bound columns would make one rule's plan depend on which rules were
 planned before it. The price is an index per binding pattern, each charged
@@ -579,16 +583,19 @@ its component starts:
   ranking among the other literals.
 
 Identical complete orders collapse before emission. Otherwise both plans
-are retained, with their indexes and work recipes; an estimated cost does
-not prune a candidate. A fully bound delta can still be the first literal
-in both walks because bound-column rank takes precedence.
+are retained, with access requirements and work recipes; an estimated cost
+does not prune a candidate, and retaining one does not build its extra
+indexes. A fully bound delta can still be the first literal in both walks
+because bound-column rank takes precedence.
 
 Before any item of a round executes, the calling thread estimates each
-retained plan's complete work from its operation views and the distinct-key
-counts of its indexes. It selects the lower estimate, preferring delta-first
-on a tie. Estimation is integer arithmetic, allocates nothing and reads no
-tuples. Reference modes retain one plan: textual order under
-`-X no-reorder`, including its combination with `-X no-index`, and
+retained plan's complete work from its operation views and direct index
+key counts, including acquisition work and provisional counts for missing
+indexes. It selects the lower estimate, preferring delta-first on a tie.
+All choices precede preparation of the selected plans' access paths.
+Estimation is a pure function of const inputs, uses integer arithmetic,
+allocates nothing and reads no tuples. Reference modes retain one plan:
+textual order under `-X no-reorder`, including its combination with `-X no-index`, and
 delta-first under `-X no-index` alone.
 
 The algorithm, statistics ownership, cost equations and correctness
@@ -847,8 +854,8 @@ reached a few tuples on, and says so, since the message names planning.
 
 ### What planning charges
 
-The arena holding an evaluation's plans, work recipes and statistics
-catalog, and the arenas of a query's rewrite, are charged to the memory
+The arena holding an evaluation's plans, work recipes and access
+requirements, and the arenas of a query's rewrite, are charged to the memory
 limit with relation and index storage, because they hold what an operation
 multiplies out of the program: plans whose
 number and length each follow a body's length, and a rule copy per
@@ -895,8 +902,9 @@ on accounted storage and evaluation memory, not on the process.
 * the operations: the column classification against the bound set and the
   dead mask, which depends only on the rule;
 * indexes: keyed by column set, named by position;
-* each round's plan: integer work estimates from fixed views and index
-  key counts, with a fixed tie rule between plans built once per component;
+* each round's plan: integer execution and acquisition estimates from fixed
+  views and access paths, with a fixed tie rule between plans compiled once
+  per component and prepared before execution;
 * query names: compilation order;
 * `-e`: a function of the plans; nothing in a plan is ordered by a pointer,
   a hash or a domain identifier;
@@ -918,7 +926,8 @@ derivation order and byte-identical `-e` output
 * **Replanning during a fixed point.** It would chase changing
   cardinalities at a cost hard to bound and make `-e` depend on how many
   rounds ran. A bounded comparison of precompiled alternatives adapts to
-  the round's statistics without rebuilding plans or indexes.
+  the round's statistics without rebuilding plans. Indexes needed only by
+  an alternative are built once, when that alternative is first selected.
 * **Caching plans across evaluations.** Plans are cheap to build, and a
   cached one holding relation pointers would need invalidating by whatever
   discards derived state; a plan also depends on the complete relations

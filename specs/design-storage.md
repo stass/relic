@@ -366,10 +366,11 @@ rounds and lookups there are.
 
 **It is correct whatever it is asked.** The invariant depends on `since` never
 decreasing, which the evaluator guarantees: a clear or discard drops the
-indexes, an index over a component member is built when its component starts,
-over the then-empty member, and a relation is a member of one component. The
-guarantee is checked rather than trusted. A call whose `since` is below the
-recorded start walks the chain from its head and leaves the frontier where it
+indexes, and a relation is a member of one component. An index built at a
+later round boundary is initialized to the member's current delta start
+before any prepared plan can use it. The guarantee is checked rather than
+trusted. A call whose `since` is below the recorded start walks the chain
+from its head and leaves the frontier where it
 is; it costs the chain's length and happens on no path the evaluator has. A
 call whose `since` is past the recorded start is a caller that did not raise
 the index, which a debug build stops at: it could move nothing, since the
@@ -385,10 +386,12 @@ the argument). The recorded start is written between rounds only.
 
 ### Building and lifetime
 
-The planner asks a relation for an index by mask. An existing one is returned;
-otherwise one is **built** over every tuple the relation holds before the
-planner returns. Building inserts each existing tuple, in identifier order,
-into an empty index -- classify, check the memory limit, reserve, link -- so
+Preparing an executable plan asks a relation for an index by mask. An
+existing one is returned; otherwise one is **built** over every tuple the
+relation holds before preparation returns. A retained alternative can
+record an access requirement without publishing an index. Building inserts
+each existing tuple, in identifier order, into an empty index -- classify,
+check the memory limit, reserve, link -- so
 every chain of a built index is the chain insertion would have produced.
 
 **A half-built index is never published.** The index joins the relation's list
@@ -399,25 +402,26 @@ one holding all of them, and every lookup through it would miss the rest
 without a word. While a build runs its storage is in the total, so the limit
 sees it.
 
-Most indexes are built empty. A component is planned when it starts, over its
-own members, which are empty then, and over relations of earlier components,
-which are complete; a query is planned over complete relations. So an index
-over a relation that grows is built before the growth starts, and one built
-over tuples already held is built once, over a relation that does not change
-again in that evaluation.
+Ordinary and delta-first plans acquire their indexes when the component
+starts; a query acquires its indexes over complete relations. An index
+needed only by a recursive alternative is acquired at the round boundary
+where that plan is first selected. Such a build can read a populated,
+growing relation. Every build runs at a preparation boundary with no
+executor or worker active, using the same full-index construction and
+failure contract.
 
 **An index is extended by insertion, never rebuilt**, and lives until its
-relation is cleared or the next discard. Keeping indexes across a discard
-would save nothing: the next evaluation's planner asks for the masks its plans
-need when each component starts, and an index built then costs the same per
-tuple as keeping it current would have. What dropping buys is that the
-indexes a relation pays for on every insertion and against the memory limit
-are the ones asked for since the program last changed, so whether an
+relation is cleared or the next discard. After a discard, preparation asks
+for the masks the new evaluation's plans need. Rebuilding a derived
+relation's demanded indexes costs the same per tuple as maintaining them
+through that growth. What dropping buys is that the indexes a relation
+pays for on every insertion and against the memory limit
+are the ones acquired since the program last changed, so whether an
 evaluation fits a limit does not depend on what an earlier program's queries
 asked.
 
-**A plan names an index by position, not address.** A relation's indexes are
-a growable array, so an index's address moves when another is built. A plan
+**A prepared plan names an index by position, not address.** A relation's
+indexes are a growable array, so an index's address moves when another is built. A plan
 names its index by position in the relation's array, fixed from the build to
 the next discard because indexes are only appended, and reaches it through the
 relation, which never moves. Plans can then be built in any order -- one rule's
@@ -434,9 +438,10 @@ Its result describes the entire owning relation, not a delta or old view.
 
 The [recursive plan selector](design-recursive-planning.md#statistics-at-a-round-boundary)
 combines this count with the tuple count of an operation's own view to
-estimate lookup work. It caches the sum in evaluation-owned storage,
-versioned by the append-only relation's tuple count. The store maintains
-no additional count and has no statistics-cache invalidation callbacks.
+estimate lookup work. It reads the sum directly, with no evaluation-owned
+statistics catalog or additional storage counter. An alternative's absent
+index uses the selector's explicit provisional estimate and acquisition
+charge; the store does not create an index to supply its statistics.
 
 ## Failure paths and limits
 
