@@ -845,8 +845,8 @@ relic_pending_map_close(relic_pending_map_t *map)
  * The identifier a pending integer is given: the one the integer table
  * holds it under, or, for an integer it lacks, the one after the table's
  * count that its position among the batch's new integers gives it.  The
- * map's table of new integers is looked up first, so two pending copies of
- * one new integer are promised one identifier.
+ * integer table is looked up first, then the map's new integers, so two
+ * pending copies of one new integer are promised one identifier.
  */
 static relic_dom_t
 measure_integer(const relic_valtab_t *table, relic_pending_map_t *map,

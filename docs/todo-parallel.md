@@ -30,14 +30,15 @@ each distinct pending value one marker, but `pending_columns()` and
 `gather_pending()` size and populate the round's value map once per
 candidate column. M3 scale-8 `files-grouped` derives 1,799,657 `kind`
 tuples with two pending strings each, although there are only 206 new
-directory and extension strings. Retain a local-to-round marker map per
-worker: walk candidates in serial task order, create a round descriptor
-only at that local marker's first occurrence, and reuse it thereafter.
-This bounds descriptors by worker-distinct values, at most 3,296 for
-this sixteen-thread rule, while retaining first-occurrence numbering.
-The column rewrite still visits every pending column. Test identifiers,
-diagnostics, limit refusals and allocation failure before changing this
-ownership path.
+directory and extension strings. Implement
+[pending value compaction](../specs/design-pending-values.md): one compact
+descriptor per referenced worker-local marker, collected in logical task
+order, then one direct rewrite from local markers to promised identifiers.
+This bounds descriptors by worker-distinct values, at most 3,296 for this
+sixteen-thread rule, while retaining first-occurrence numbering. The column
+rewrite still visits candidate columns. Verify the scoped release of maps,
+the longer byte-buffer lifetime, identifiers, diagnostics and resource
+refusals before changing this ownership path.
 
 ## Candidate replication makes large rounds expensive
 

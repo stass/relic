@@ -273,7 +273,8 @@ type bits. Zero is never an identifier.
 Identifiers are assigned in order of first appearance within each type, so
 they are reproducible, but their numeric order means nothing: **nothing may
 order values by domain identifier**; ordering decodes the values. A value
-evaluation computes is interned only when a tuple holding it is stored.
+evaluation computes is interned when its output batch or admitted round
+is committed, before tuples naming it are inserted.
 
 The rejected alternatives are a tagged 64-bit cell, whose boxed integers have
 two encodings every construction site must keep canonical, and the public value
@@ -463,7 +464,16 @@ evaluator would not: whatever goes wrong on a worker, the round is rerun
 serially. The store's read-only promise during a round is carried by the
 type system (`lib/frozen.h`) rather than by a list of callers.
 
-See [design-parallel.md](design-parallel.md).
+Computed values stay worker-local during derivation. The merge gathers
+one descriptor per referenced worker-local value in logical first-occurrence
+order, then uses the ordinary value resolver to assign identifiers. Private
+columns are rewritten directly to those promises before tuple deduplication
+and commit. This preserves value identity without another interner and
+bounds resolution descriptors by local distinct values rather than column
+occurrences.
+
+See [design-parallel.md](design-parallel.md) and
+[pending value compaction](design-pending-values.md).
 
 ### Library interface
 

@@ -277,10 +277,11 @@ the assigned identifier or zero. A value without one is written into the
 batch's head tuple as a **pending marker**: its position in the batch's
 pending array, counting from one, under type bits of zero. No value has zero
 type bits, so nothing that decodes can mistake a marker for an identifier,
-and a marker never reaches a relation, a store hash or a callback, because
-every batch is **resolved** before it goes anywhere. One pending array holds
-both kinds -- an integer, or a byte range in the batch's pending bytes -- so
-resolution is one loop over the columns.
+and only assigned identifiers reach published relations, their indexes
+and callbacks. Batches and candidate buffers carry markers privately until
+their value-resolution boundary. One pending array holds both kinds -- an
+integer, or a byte range in the batch's pending bytes -- so resolution is
+one loop over the columns.
 
 **A new value's identifier is known before it is assigned.** The tables
 number new entries in order, so a new value's identifier is a function of the
@@ -328,14 +329,18 @@ round, a candidate with a pending column is new against the frozen store --
 a value the
 context lacked when the round began is in no relation the round reads -- and
 is screened against the worker's own candidates by value, a pending column
-hashing and comparing by its integer or bytes. The merge *measures* every
-task's pending values in task order into one map before modifying anything,
-and the projected bytes join the relations' growth in the one question put to
-the memory limit; a round that does not fit is declined and run serially. It
-*rewrites* before modifying anything, so every point where it may decline
-finds the tables untouched. It *commits* in the reservation phase beside the
-relations' reservations and appends in the phase that cannot fail
-([parallel evaluation](design-parallel.md)).
+hashing and comparing by its integer or bytes. The merge collects one
+descriptor per referenced worker-local value in task, candidate and column
+order, preserving semantic first occurrence. It *measures* that compact
+sequence through the same value resolver into one map, and the projected
+bytes join the relations' growth in the admission check. Candidates retain
+their local markers until a single *rewrite* composes the local-to-descriptor
+map with the promised identifiers. The tables remain untouched throughout.
+A round that does not fit is declined and run serially. Reservation occurs
+beside the relations' reservations; *append* publishes values in the phase
+that cannot fail. The descriptor bound, mapping and byte lifetimes are in
+[pending value compaction](design-pending-values.md), and admission is in
+[parallel evaluation](design-parallel.md).
 
 **The identifiers are the same at every thread count.** The serial evaluator
 interns a value at the commit of the first batch holding it; the merge

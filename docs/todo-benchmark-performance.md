@@ -121,17 +121,19 @@ two pending strings each, but only 206 distinct new strings. Workers
 already deduplicate values; the merge allocates and resolves descriptors
 per column occurrence.
 
-**Implementation.** Allocate a local-to-round marker map per worker. Walk
-candidates in serial task order, append a round descriptor at a local
-marker's first occurrence, and reuse that descriptor for later columns.
-Resolve those descriptors through the existing value machinery. Keep the
-column rewrite linear in candidate columns, while descriptor allocation
-and resolution depend on worker-distinct values. At sixteen threads this
-rule needs at most 3,296 descriptors, instead of roughly 3.6 million.
+**Implementation.** Apply [pending value compaction](../specs/design-pending-values.md):
+map each referenced worker-local marker to one compact descriptor, ordered
+by first occurrence among candidates. Keep columns local until a single
+rewrite maps them to the ordinary value resolver's promised identifiers.
+Release temporary mapping storage at the rewrite barrier; retain the
+resolution map and copied bytes through commit or rollback. At sixteen
+threads this rule needs at most 3,296 descriptors, instead of roughly
+3.6 million.
 
-**Design and regression.** Update
-[interning computed values](../specs/design-values.md#interning-computed-values)
-and the merge sections of [parallel evaluation](../specs/design-parallel.md).
+**Design and regression.** Implement the
+[pending-value design](../specs/design-pending-values.md) with the
+[computed-value](../specs/design-values.md#interning-computed-values) and
+[parallel merge](../specs/design-parallel.md#the-parallel-merge) contracts.
 Add a failing allocation/count regression for many tuple occurrences of
 few new values. Include values shared across tasks and workers, mixed
 integer/string output, symbol/string use bits, all-distinct values, limit

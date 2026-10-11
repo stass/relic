@@ -293,6 +293,14 @@ strings its plans compute, the regex matcher's work space, and, in a
 derived. These buffers live for one round and are charged as one part of
 the account.
 
+The merge's [pending-value workspace](design-pending-values.md#storage-ownership)
+is charged through that same round account. Local marker maps and compact
+descriptors are sized by worker-local distinct values and released after
+the candidate rewrite barrier. The resolution map and copied string bytes
+remain charged until value append or reservation rollback and cleanup.
+Capacity, alignment padding and the addressable byte used for empty-string
+payloads are counted; early release follows actual ownership lifetime.
+
 **They grow on several threads at once**, so their part of the account is
 one atomic word, raised by compare-and-swap only when the whole total with
 the new bytes stays within the limit. Every other part changes only on the

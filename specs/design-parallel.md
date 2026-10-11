@@ -434,17 +434,23 @@ pending bytes -- a string the serial run interned earlier in the round is
 not pending there -- and a merge declined on that excess runs serially,
 where the limit judges exactly.
 
-**Pending values are resolved first.** Worker 0 gathers every worker's
-pending values in task order -- each task's candidates in derivation order,
-each candidate's columns in order, the order the serial evaluator meets them
--- and promises each the identifier the serial run gives it: its own when
-the context has one, else the next in order of first occurrence. Workers
-rewrite their candidates' markers to those identifiers and hash again, so
-stripes and screens read final identifiers. The value table's and symbol
-pool's growth joins the relations' in the one admission question; values are
-appended in the steps that cannot fail, before the tuples naming them; a
-merge declined after reserving gives the reservation back, rewinding the
-pool so no copy of a new string is left behind.
+**Pending values are resolved first.** Worker 0 walks candidates in task,
+candidate and column order and collects one descriptor per referenced
+worker-local value. A map per worker reuses that descriptor for later
+occurrences, so value measurement consumes the compact sequence without
+expanding it per column. The ordinary value resolver promises identifiers
+in semantic first-occurrence order. Workers rewrite local markers directly
+to those promises and recompute affected hashes and stripes before the
+tuple merge reads them. Temporary compaction storage is released at that
+barrier; the resolution map and the bytes it borrows remain live through
+reservation and apply. These mappings and lifetimes are specified in
+[pending value compaction](design-pending-values.md).
+
+The value table's and symbol pool's growth joins the relations' in the
+admission question; values are appended in the steps that cannot fail,
+before the tuples naming them. A merge declined after reserving gives the
+reservation back, rewinding the pool so no uncommitted copy of a new
+string remains.
 
 **The order.** Candidates are inserted task by task in task-array order,
 into each task's relation, by the serial insertion's rules; a seed's tuple
@@ -453,8 +459,9 @@ counted as tuples inserted, and a relation that gained is recorded as
 having gained, which is what the next round's deltas advance from. A
 candidate another worker's candidate already inserted is found as a
 duplicate in the ordinary way: that is the whole treatment of cross-worker
-duplicates. Candidates carry the hashes computed when screened, so the merge
-hashes nothing.
+duplicates. Candidates whose columns already hold final identifiers reuse
+the hashes computed during screening. Resolving pending columns recomputes
+their hashes and stripes before any merge stripe list is built.
 
 ## The parallel merge
 
@@ -494,7 +501,11 @@ reach.
 Steps are separated by the pool's barrier; *parallel* steps are cut into
 parts, each writing only what its stripe, task or worker owns.
 
-1. **Resolve** (worker 0): pending values, as above.
+1. **Resolve** (worker 0, then parallel). Compact pending descriptors in
+   logical first-occurrence order and measure them through the value
+   resolver. Rewrite each worker's candidates to promised identifiers and
+   recompute their hashes and stripes. Release temporary compaction storage
+   at the completion barrier.
 2. **Find new tuples** (parallel). Each worker lists its candidates by
    canonical stripe, a counting sort over counts kept while screening. Then
    part *s* walks, task by task, the stripe-*s* candidates of each task's

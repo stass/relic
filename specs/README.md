@@ -67,6 +67,8 @@ A newcomer should read:
   aggregates in strata and in the Magic rewrite.
 * [Parallel evaluation](design-parallel.md) -- the worker pool, deferred
   and shared rounds over a frozen store, and the serial-order merge.
+* [Pending value compaction](design-pending-values.md) -- compact worker
+  markers, deterministic value resolution and merge workspace ownership.
 
 **Interfaces**
 
