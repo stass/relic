@@ -154,10 +154,14 @@ guarded and ordinary-Magic references. The
 identifies 64-byte function alignment as a candidate: cyclic median spread
 across three layouts falls from 2.67% to 0.83%, with 5.90% more text.
 Validate it across the broader matrix and supported machines before
-setting a default. Isolate the hash-probe function's placement to test
-the largest profile shift; unchanged retired work and mixed cache/stall
-counters do not establish one hardware cause. The performance gate remains
-open; steps 3-5 of the benchmark plan cover the expensive paths.
+setting a default. The
+[isolated probe-placement test](bench/compare/recorded/freebsd-5995wx/probe-alignment/report.txt)
+does not support a probe-only attribute: offsets 0, 16 and 32 differ by at
+most 0.20% on closure with surrounding code fixed. The C alignment
+attribute slows closure by 1.37% in ordinary link order. Preserve equal
+argument lengths and multiple layouts in further comparisons. The
+performance gate remains open; steps 3-5 of the benchmark plan cover the
+expensive paths.
 
 **Compare output sinks and validate scaling on a second platform.**
 [Medium, component: `bench/compare/`]
