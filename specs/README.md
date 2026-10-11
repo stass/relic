@@ -69,6 +69,9 @@ A newcomer should read:
   the regular-expression matcher, and how computed values are interned.
 * [Aggregates](design-aggregates.md) -- group rules, folding in place, and
   aggregates in strata and in the Magic rewrite.
+* [Direct grouped reduction](design-group-reduction.md) -- certified
+  producer reduction, reusable summaries, bounded partial groups and
+  lookup-time aggregate outcomes.
 * [Parallel evaluation](design-parallel.md) -- the worker pool, deferred
   and shared rounds over a frozen store, and the serial-order merge.
 * [Ordered driving cursors](design-driver-slicing.md) -- bounded scan and

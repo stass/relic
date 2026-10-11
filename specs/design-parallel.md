@@ -654,6 +654,35 @@ round end and are released before a serial rerun and before the next round,
 so no serial growth ever asks the limit for room they hold; the check that
 an operation gave back every charged byte covers them.
 
+## Grouped reduction
+
+[Direct group reduction](design-group-reduction.md) uses ordinary executor
+batches with a reducer taker in place of candidate collection. Certified
+producer rows are already distinct, so their contributions combine into
+group state without retaining a tuple per derivation. A source already
+stored as a complete relation supplies distinct rows directly.
+
+Parallel reduction uses resumable lanes and a fixed total budget for
+partial maps. Each pool part exclusively owns one lane's scratch for a
+wave; it need not run on the same physical thread on the next wave.
+At barriers the caller drains partials into one private global builder.
+The state bound is groups plus the partial budget and retained payload,
+not one complete group table per worker. Logical first occurrences,
+rather than drain order, determine key and retained-value publication.
+
+A configured memory limit selects serial summary construction, even under
+forced deferral. The same logical reduction still runs; this scheduling
+rule preserves serial admission when partial combination changes transient
+payload lifetimes. Completed summary consumers remain eligible for the
+ordinary shared-round path.
+
+No global values or readable summaries are published until construction
+and reservation succeed. A failed parallel attempt releases all private
+state and reruns the same physical reduction serially. A completed summary
+is a frozen read source for ordinary outer-plan aggregate operations;
+those operations report type-invalid or overflowing outcomes only when
+reached. Outer result tuples still use the ordinary ordered merge.
+
 ## Loading in parallel
 
 [Bulk loading](design-bulk-load.md) preserves the ordinary global

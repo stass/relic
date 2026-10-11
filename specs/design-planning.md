@@ -38,6 +38,11 @@ recursion; the executor runs it with an explicit-level loop
 
 ### The operations
 
+`EMIT` carries head terms and the output arity validated against its
+taker's schema. Its destination is the taker's, whether a relation, answer
+sink or reducer. It has no input-relation handle; static analysis reads
+its schema directly, while relational read operations require relations.
+
 There are nine operations (see `lib/plan.h`). **Generators** can succeed
 more than once, leaving new bindings each time. **Tests** read only
 constants and bound slots and succeed at most once; two of them also bind a
@@ -275,6 +280,23 @@ the shared variables -- a set, not a prefix, as indexes are keyed on sets.
 The case is written into the operation. Under `-X no-index` the fold walks
 the whole relation matching key columns, so the reference has no index the
 default lacks.
+
+### Summary access for aggregates
+
+An aggregate resolves its source through the evaluation's physical source
+bindings. It can read ordinary rows or an immutable
+[group summary](design-group-reduction.md). A summary operation retains
+the original key-slot mapping, function, result kind and bind-or-compare
+behavior, but probes completed group state instead of walking row chains.
+It requests no secondary index. An unkeyed count of stored rows can use
+the source's exact tuple count.
+
+Summary construction is a scheduled caller operation over complete input,
+never a side effect of an aggregate step. Ordinary atom planning requests
+a row source and cannot receive a summary. The producer-removal certificate
+reuses `relic_plan_derives_distinct()` on the completed producer plan;
+source usage, schedule and lifetime checks belong to the reduction scope.
+Neither a column's observed cardinality nor an estimate proves uniqueness.
 
 ## Dead variables and existence checks
 
@@ -787,6 +809,12 @@ Each nesting level is four spaces.
   has examples.
 
 ### Operation lines
+
+[Group reduction](design-group-reduction.md#explain-counters-and-the-reference-strategy)
+adds source-reduction and key-projection action lines to the component
+layout, and a `summary` annotation to an aggregate using completed state.
+These describe physical access while keeping the original rule, aggregate
+signature and key-column spelling. They contain no worker-specific data.
 
 An operation is its kind followed by what it reads, as a program writes
 it:

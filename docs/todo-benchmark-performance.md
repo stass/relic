@@ -312,34 +312,57 @@ command meets the competitive acceptance goal.
 ## 6. Reduce eligible grouped pipelines directly
 
 [Medium, components: `lib/plan.c`, `lib/exec.c`, `lib/rule.c`,
-`lib/merge.c`]
+`lib/eval.c`, `lib/magic.c`, `lib/reduce.c`, `lib/fold.c`]
 
 **Evidence.** `files-grouped` materializes roughly 1.8 million `kind`
 tuples to return 1,200 groups. The remaining profile after steps 2 and 4
 determines how much of the gap belongs to grouping, expressions and indexes.
 
-**Implementation.** Plan a grouped reduction over an eligible source
-pipeline. Evaluate its filter and projection and combine per-group state
-without retaining an intermediate whose rows no other consumer needs.
-For `degree-count`, evaluate reusable per-key counts or grouped summaries
-when their construction is cheaper than repeated tuple-chain walks.
-Reuse the evaluator and exact aggregate arithmetic.
+**Implementation.** Apply
+[direct grouped reduction](../specs/design-group-reduction.md). Reuse the
+executor's distinct-plan proof and certify every source consumer before
+omitting its rows. The file pipeline reduces `kind` directly, supplies
+`group` with ordered keys and leaves its aggregate at the ordinary outer
+plan position. Named source removal belongs only to partial query runs;
+full materialization retains real relations. For `degree-count`, choose
+reusable summaries over the stored edges, including outgoing and incoming
+families in one source traversal when justified.
 
-**Design gate.** Write `specs/design-group-reduction.md` and link it from
-the architecture's aggregate entry. Prove eligibility from row uniqueness
-and consumer requirements. Datalog counts distinct bindings, so counting
-join derivations is not a general substitute. Preserve materialization
-when another reader needs it, and preserve strict stratum boundaries,
-empty-group behavior and the existing failure contract.
+**Implementation order.** Establish the failing source-store regression
+and the explicit `RELIC_F_NO_GROUP_REDUCTION` / `-X no-group-reduction`
+reference first. Extract shared accumulator semantics, including two-word
+sum combination and lookup-time invalid/overflow outcomes. Add run-owned
+source bindings and conservative consumer certificates, then serial
+producer reduction and key projection. Add stored-source summaries and
+their cost policy, followed by bounded parallel partials and ordered value
+publication. Keep all borrowing plans inside their scope, including query
+group rules, Magic copies and fallback.
 
-**Regression and exit criteria.** Differentially test against materialized
-group rules, including duplicate-producing joins, shared intermediates,
-empty groups, exact sums, overflow and mixed types. Require bounded
-aggregate state proportional to groups for the proven-unique pipeline,
-with deterministic output and failure behavior across thread counts.
-Measure `files-grouped` and `degree-count` end to end against DuckDB after
-loading is optimized; report retained base storage separately from the
-intermediate storage eliminated by this step.
+Use serial construction when a configured memory limit is active, even
+under forced deferral, so transient group/payload ownership cannot change
+the refusal with worker count. Keep the source row ceiling after removal
+of its store. Summary consumers retain ordinary parallel-round behavior.
+
+**Regression and exit criteria.** Exercise the design's uniqueness,
+consumer, scope, value and failure matrix against materialized group rules.
+Include duplicate-producing joins, a second source reader or key mask,
+querying a removed source afterward, empty independent-domain groups,
+unrequested overflow, mixed types with an overflowing integer subset,
+and the source row ceiling after its store is removed. Use one global
+builder plus a fixed partial budget, not a group table per worker; verify
+that replaced extrema and pending values do not retain row-sized storage.
+Check identifiers, output, notes and successful counters across worker
+counts, while allowing removed work and storage to differ from the
+materialized reference.
+
+Measure source expression execution, group updates, partial drains,
+finalization, value publication and outer folds separately. Require removal
+of the large `kind` row store and its index, then lower end-to-end time
+against the best rival under the common measurement rules. Compare degree
+summaries with the cost of building and walking their ordinary indexes.
+Use nearly unique keys, selective single-key demand, large keys, many
+signatures and tiny inputs as controls. Report retained base storage apart
+from eliminated intermediates and all charged reduction workspace.
 
 ## 7. Bound candidate storage across workers
 

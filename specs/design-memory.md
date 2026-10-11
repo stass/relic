@@ -217,6 +217,21 @@ and it does not bound peak usage.
   query's Magic rewrite;
 * the round-scoped buffers ([below](#round-scoped-buffers)).
 
+[Grouped reduction](design-group-reduction.md#ownership-failure-paths-and-limits)
+also charges its run-scoped group tables, accumulator arrays, retained key
+and extreme bytes, bounded partial maps, ordering scratch and resolution
+descriptors at capacity. Their global state follows groups rather than
+source rows; removing a source store creates no accounting exemption for
+its replacement. Published summaries stay charged through their consumers
+and are released when the run ends. The logical source row ceiling that
+bounds exact sums is separate from the configured stored-tuple limit.
+
+Summary construction is serial whenever `max_memory` is set. This gives
+the same allocation and refusal sequence at each worker count; a partial
+group merge can otherwise retain different temporary extrema at different
+times. Unrestricted parallel construction still charges every allocation,
+and its bounded partial budget is independent of the number of groups.
+
 Each is charged because it grows with what running the program does, not only
 with what the caller wrote. `n(Y) :- n(X), Y = X + 1` interns an integer per
 derivation and `s(Y) :- s(X), Y = cat(X, "a")` a string per derivation; each

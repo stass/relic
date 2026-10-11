@@ -395,7 +395,10 @@ See [design-planning.md](design-planning.md) and
 ### Evaluation
 
 The executor (`lib/exec.c`) runs a plan with an explicit loop and no C
-recursion, and hands its derivations back in batches; it never inserts. A
+recursion, and hands its derivations back in batches; it never inserts.
+Its `EMIT` describes output terms and arity, while the batch taker owns
+the insertion, answer or reduction destination. An output schema is not
+a readable relation. A
 recursive component -- a set of mutually recursive predicates, its
 members -- is evaluated semi-naively (`lib/eval.c`): each round runs rule
 variants in which one recursive literal reads the previous round's delta,
@@ -446,7 +449,31 @@ group is complete before it is folded. `sum` is exact in a 128-bit
 accumulator, so both its value and its overflow are functions of the
 group's set of rows, never of the order they arrived in.
 
-See [design-aggregates.md](design-aggregates.md).
+A certified nonrecursive producer can reduce distinct rows directly into
+group state when every consumer is a fold or an exact projection of the
+same keys. Named source rows are omitted only within a partial query run;
+full materialization retains them for later queries. Evaluation-owned
+source bindings distinguish a complete summary from a readable relation,
+so an ordinary atom cannot mistake an omitted store for an empty one.
+Complete stored relations can also supply reusable fold summaries when
+their construction pays for itself.
+
+Summary construction retains exact accumulators and type-invalid outcomes;
+only a consumer that reaches its fold reports an overflow or mixed-type
+note. This preserves outer filtering and empty-group behavior. The logical
+source row ceiling still bounds exact arithmetic when no row store exists.
+One global builder and bounded parallel partials keep state proportional
+to groups and retained bytes; ordered publication resolves retained values
+before consumers run. Strict aggregate edges and the materialization
+currency contract remain intact.
+
+With a configured memory limit, summary construction runs serially: group
+combination order can change transient ownership, and serial construction
+keeps limit refusals independent of worker count without reconstructing
+that allocation history. Immutable consumers can still run in parallel.
+
+See [design-aggregates.md](design-aggregates.md) and
+[direct grouped reduction](design-group-reduction.md).
 
 ### Magic Sets
 

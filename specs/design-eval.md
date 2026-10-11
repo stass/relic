@@ -48,8 +48,8 @@ schedule -> component -> plans -> executor -> batch -> taker
   batch is full, when a quantum of work is done, when it has recorded an
   error, or when the plan ends.
 * The **taker** is the evaluation code that called it. It takes the batch,
-  inserting it into the relation the `EMIT` names, delivering it to a
-  query's caller as rows, or, in a **shared round** (a round whose work is
+  inserting it into its target relation, delivering it to a query's caller
+  as rows, reducing it into certified group state, or, in a **shared round** (a round whose work is
   divided among threads, [parallel evaluation](design-parallel.md#model)),
   screening it into candidates; then it resumes the executor.
 * A **round** is a sequence of plans each of whose views is fixed when the
@@ -507,6 +507,22 @@ What evaluation relies on:
 
 ## Answering a query
 
+[Direct group reduction](design-group-reduction.md) can omit a certified
+named intermediate during a partial query run. That run still records no
+whole-program currency. Every plan resolves source access through the
+run's binding table: ordinary atoms require rows, while folds can read a
+completed summary. Full materialization and queries over a current fixed
+point retain named relations; no summary stands in for a readable store.
+
+A query's reduction scope spans complete-part evaluation, query group
+rules, generated rules and the final query plan. Those nested evaluations
+borrow it. A reduced producer runs at its original schedule position into
+a reducer taker; a key projection receives ordered keys at its own turn.
+The scope releases private state on failure and destroys borrowing plans
+before summaries on exit or Magic fallback. Subsequent queries and fact
+changes therefore use the existing discard boundary without cache
+invalidation rules.
+
 ### The query object and its answer relation
 
 A query compiles into a rule whose head is its output columns and names no
@@ -545,9 +561,12 @@ allocations, so a query may be destroyed after its context
 relation table, which is indexed by predicate, so `relic_destroy()` releases
 no answer relation: it never owned one.
 
-**The planner confirms the emit target fits**: the relation an `EMIT` writes
-is handed to it, and its arity must equal the rule's head arity, or planning
-reports an internal error instead of the plan reading past the head.
+**The planner confirms the emit target fits**: the taker's output schema
+must have the rule's head arity, or planning reports an internal error
+instead of the plan reading past the head. `EMIT` keeps that validated
+arity and the head terms, without a relation handle; row-reading
+operations retain mandatory relation handles. This also lets a reducer
+consume batches without creating a dummy readable source relation.
 
 **`$q<serial>` is a display name.** The serial counts the queries a context
 has compiled, the program's and prepared ones interleaved, a rejected query
