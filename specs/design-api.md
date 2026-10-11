@@ -104,9 +104,12 @@ query that is not being answered enters nothing either
 **A callback must return to the library.** One that leaves by `longjmp(3)`
 or a C++ exception leaves its context busy for good, and every later call
 on it refused. Every callback runs on the thread that started the
-operation: the threads of a context's pool run a round's tasks and nothing
-else, and whatever a round reports is reported by the calling thread when
-the round's merge reaches it ([parallel evaluation](design-parallel.md)).
+operation. The context's pool runs internal evaluation and bulk-import jobs;
+workers never invoke caller code. Callbacks run at boundaries where those
+jobs cannot mutate the state a callback's context readers observe. Round
+diagnostics are reported by the caller when the merge reaches them
+([parallel evaluation](design-parallel.md)); import failures follow the
+[ordered input path](design-bulk-load.md#scalar-replay-is-the-refusal-path).
 
 ## Destroy order
 

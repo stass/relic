@@ -158,11 +158,13 @@ The first uses numbers the store keeps exactly and is the one to try first.
 [Medium, component: `lib/symbol.c`, `lib/value.c`, `lib/facts.c`,
 `lib/import.c`] A load and an import run on the calling thread: the value
 table and the symbol pool are not striped, so interning, most of an
-import's time, is serial. The design is
-[loading in parallel](../specs/design-parallel.md#loading-in-parallel); its
-target is in the list above. It changes the identifier's layout, a stripe
-field in its index, so it interacts with the item on type tests in
-`TODO.md`.
+import's time, is serial. Implement
+[bulk loading](../specs/design-bulk-load.md): transferable private fact
+payloads, then bounded table windows with private dictionary reconciliation
+and ordered global identifiers. Preserve scalar input errors and retained
+values through the whole-window admission proof and replay path. Measure
+ordered publication separately before enabling the parallel path; this
+design keeps the identifier encoding and whole-load fact atomicity.
 
 ## Components side by side are not built
 

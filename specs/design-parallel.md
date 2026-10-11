@@ -629,33 +629,29 @@ an operation gave back every charged byte covers them.
 
 ## Loading in parallel
 
-A parallel load decomposes as follows. An import's time is interning, and a
-symbol's identifier is visible to a caller, so a parallel load must keep
-identifiers a function of the input: the same bytes intern to the same
-identifier on every run and at every thread count. That calls for the value
-table and symbol pool striped by hash, with the same constant stripe count
-as the indexes, assigning identifiers per stripe:
+[Bulk loading](design-bulk-load.md) preserves the ordinary global
+first-occurrence identifiers and uses private dictionaries to distribute
+work. CSV/TSV input is framed into bounded windows by the same state
+machine that decodes it; pieces are independent of worker count. Workers
+decode, validate, hash and reconcile values against frozen tables, then
+classify records against frozen builders and base stores.
 
-1. **Cut the input at record boundaries**, a piece per worker: a statement
-   end for a fact file; a record end for a table, where whether a line feed
-   ends a record depends on the quotes before it, which a serial scan counts
-   up to each cut so each worker starts in the right state.
-2. **Parse each piece on a worker** into its own staging: every field as a
-   byte span with its hash, and the piece's distinct spans. A parse error
-   fails the load with the first error in input order.
-3. **Intern by stripe**: worker *s* walks the pieces in input order and
-   interns stripe *s*'s distinct spans into stripe *s* of the tables, from
-   the stripe's own counter. An identifier carries its stripe in a fixed
-   field of its index, so a stripe's identifiers follow first appearance
-   within the stripe -- a function of the input and the constant count.
-4. **Resolve and commit**: each worker rewrites its facts as identifiers and
-   stages them; the commit reserves and appends per base store, striped by
-   relation.
+The caller assigns promised identifiers and proves that the entire window
+can pass every scalar admission check. An unproved window changes no
+semantic state and replays through the scalar importer, which establishes
+the first error and retained-value prefix. A proved window reserves all
+space before disjoint byte copies and builder appends; the caller publishes
+entries in the existing global value tables. Barriers separate every
+frozen-read phase from reservation and mutation.
 
-Steps 1, 2 and 4 share nothing, and step 3 shares nothing per stripe. The
-cost is a stripe field in the identifier, which decoding and the tables'
-growth read, and a per-stripe share of the identifier space, which a hash
-fills evenly.
+Only the final load commit changes base facts. Empty destinations adopt
+complete builder payloads; populated ones receive reserved, ordered
+appends with one writer per canonical stripe. Source program parsing and
+individual fact additions retain their scalar semantic boundaries and
+share these builders. Parallel import neither changes the domain encoding
+nor contributes evaluation parallel-round counters. Numbering and global
+table publication remain serial phases whose measured cost is part of
+parallel-loading acceptance.
 
 ## Components side by side
 
@@ -747,7 +743,7 @@ evaluation discards.
   default is one thread; the library reads the processors online only to
   decide whether idle workers spin.
 * **A stripe count following the thread count.** It would make a program's
-  memory, and a parallel load's identifiers, depend on `-j`.
+  persistent storage layout and memory depend on `-j`.
 * **`pthread_atfork()` handlers.** A pool learns of a fork from the process
   it records; a handler would be global state.
 * **C11 `<threads.h>`.** Not on every platform relic builds for; POSIX

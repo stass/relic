@@ -228,23 +228,27 @@ strategy; their answer sets must match.
 are 0.191 s and 0.076 s. Import is also about half of the diagnostic
 `cspa-linux` runtime and most of the grid and bounded-tree runtimes.
 
-**Implementation, in commit order.** First introduce a private bulk
-relation builder whose finished storage can become an empty base relation.
-Make ownership transfer part of the builder/commit interface and retain
-atomic append semantics for existing stores. Then batch parsing and value
-resolution: identify valid record boundaries, parse chunks into private
-staging, deduplicate values, resolve identifiers and publish only after
-fallible preparation succeeds. Parallelize those stages once the serial
-bulk path establishes their invariants.
+**Implementation, in commit order.** Apply
+[bulk fact construction and import](../specs/design-bulk-load.md). Introduce
+the storage-owned payload and private builder, with ownership transfer to
+empty base stores and one atomic commit across adopted and appended
+destinations. Then add bounded CSV/TSV windows, shared parser transitions,
+private dictionaries and ordered value publication. A whole-window proof
+admits deterministic prefixes; an unproved window replays through the
+scalar importer. Parallelize the independent jobs after the scalar bulk
+path is covered. Source program parsing remains scalar and uses the same
+builders.
 
-**Design gate.** Write `specs/design-bulk-load.md`, link it from the
-architecture, and reconcile facts, storage, values and parallel-loading
-specs. Compare the existing striped-identifier proposal with bulk
-dictionary merging that preserves global first-input-occurrence numbering.
-Prefer the latter if its serial numbering cost is small; record the
-measured tradeoff before selecting a representation. A change to visible
-identifier encoding requires an explicit cross-subsystem decision. CSV
-chunk boundaries must follow the parser's quote state, not newline alone.
+**Design and measurement gates.** Preserve the ordinary domain encoding and
+global first-occurrence numbering. Measure dictionary reconciliation,
+ordered numbering, table publication and reservation separately on
+all-distinct and repetitive inputs before enabling parallel import by
+default; the identifier-design comparison is architectural until measured.
+Add `RELIC_F_NO_BATCH_IMPORT` / `-X no-batch-import`, its help/manual text,
+and strategy coverage as the scalar event reference. Verify bounded
+nonseekable replay, failed-read boundaries, partial value effects and
+actual ownership/account transfer. A change to visible identifier encoding
+requires a separate cross-subsystem decision.
 
 **Regression and exit criteria.** Exercise empty and populated stores,
 duplicates spanning chunks, quoted multiline records, malformed input,

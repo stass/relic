@@ -37,14 +37,24 @@ index the table of that type.
   context actually assigned, and they count distinct values by type.
 
 Interning happens at three points only. A fact's values are interned as the
-fact is staged by a load, an import or a fact addition; a rule's or query's
-constants when the program check compiles the statement; a value evaluation
+input is accepted for staging by a load, an import or a fact addition;
+a rule's or query's constants when the program check compiles the statement;
+a value evaluation
 computes when the batch holding it is resolved, before it reaches a relation.
 A statement that fails before it is compiled or staged interns nothing.
 A fourth path puts bytes in the pool without making them a value: a caller
 building a value through `relic_value_symbol()` or `relic_value_string()`
 interns the bytes, admitted and charged like any other, and leaves the use
 bits alone until the value enters the program.
+
+An import can prepare a bounded window's values in private dictionaries.
+It assigns new pool and integer identifiers in global first-field-occurrence
+order and publishes only after a whole-window proof and reservation.
+Symbol and string descriptors share byte equality but request separate
+use bits. An unproved window follows scalar replay before changing values,
+preserving the scalar failure prefix. The batch adapter shares the ordinary
+value-layer equality and growth functions; no stripe bits enter the domain
+identifier. See [bulk import](design-bulk-load.md#decoding-and-value-dictionaries).
 
 ## Invariants
 

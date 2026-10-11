@@ -246,6 +246,14 @@ caller-owned arena *cannot* be charged at all: a query may be destroyed after
 its context, and an arena charged to an account the context owns could not give
 its bytes back once the context is gone.
 
+[Bulk-load builders](design-bulk-load.md#ownership-and-memory-accounting)
+and bounded import windows belong to that input-sized staging. An empty
+base store takes ownership of a builder payload at commit and counts its
+actual capacity once in the store account. An append reserves ordinary
+destination capacity while its new-row builder remains private. Moving
+ownership changes which holder accounts for the bytes; it does not allocate
+another copy or give an adopted array an accounting exemption.
+
 **It charges capacity, not transients.** A holder is charged the bytes its
 arrays actually hold -- allocated capacity, not the smaller number a count
 implies, since a limit that ignored the difference would let storage reach

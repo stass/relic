@@ -25,16 +25,16 @@ mistakes are made: a field with a space, a capital first letter, a quote or
 a backslash must become an escaped string literal, and a script that
 forgets writes a program that does not parse, or one with a symbol where a
 string was meant, which parses and joins with nothing. The engine already
-knows how to spell values. Interoperability, not speed, is the reason for
-the feature: an import saves only a small part of the resident memory a
-load of the same facts peaks at, since interning the values dominates
-both.
+knows how to spell values, so the format and column types define their
+meaning without an external conversion script. Import construction and
+parallelism are specified in [bulk loading](design-bulk-load.md).
 
 An **import** names a format, whether the table has a header, a predicate,
 a type for each column (or `_` to skip it) and a source. The library reads
-the table in one pass through a pure state machine, types each field as it
-ends, stages each record's tuple, and commits the whole table through the
-commit every load uses.
+the external stream once, using a pure state machine for record framing and
+decoding. It preserves scalar field-event semantics through admitted batch
+windows or scalar replay, stages each new tuple, and commits the whole
+table through the commit every load uses.
 
 An **export** names a format, a predicate (with its arity when the name has
 several) and a file. Its contents are the answer to a query of the
@@ -286,14 +286,17 @@ tuple when the record ends. Because events are consumed in order, a mistake
 the importer finds in a field is met before anything the reader would find
 after it.
 
-**It holds one field and one tuple.** A field's decoded bytes accumulate in
-one buffer that grows to the longest field and is reused; neither a
-record's text nor the file's is ever held.
+**Scalar reading holds one field and one tuple.** A field's decoded bytes
+accumulate in a reused buffer. Batch import additionally holds a bounded
+raw-input window, piece dictionaries and record tokens. Its framer and
+decoders use the same parser transitions. An oversized record switches to
+scalar continuation through buffered input, so batching never requires the
+whole file or an arbitrarily large raw record in memory.
 
 ## Staging and the commit
 
-An import is a load whose text is a table. It stages its facts as it reads
-them and, when the whole input has been read, commits them through the
+An import is a load whose text is a table. It accepts facts in input order
+and, when the whole input has been read, commits them through the
 commit of [facts](design-facts.md):
 
 * **All or nothing.** A read error, a malformed record, a field its column
@@ -311,9 +314,17 @@ commit of [facts](design-facts.md):
   derived; one that adds anything discards everything derived, as any new
   fact does.
 * **What a failed import interned stays interned.** The predicate is
-  interned before the table is read, and values as their fields are, and a
-  failed import leaves them holding nothing and referenced by nothing, as a
-  failed load does.
+  interned before the table is read. Values consumed before failure remain
+  in the context even though the import adds no facts, as with a failed load.
+
+A batch window publishes values only when its final monotone projections
+prove that every scalar field and staging prefix is admissible. An
+unproved window replays from the last accepted boundary through the scalar
+consumer before reporting an input or limit error. This preserves the
+refused record's value effects and prevents values from later records
+being interned. Base facts still publish only after the complete input
+and, for an owned path, its close succeed. See the
+[window proof](design-bulk-load.md#proving-a-whole-window-admissible).
 
 An import that commits nothing defines nothing: a predicate is defined when
 its base store holds tuples, so a program reading a predicate imported from
@@ -332,11 +343,17 @@ every file, so one run reports the first mistake in each.
 **The first mistake is the first the reader meets reading forward.** A
 field's bytes are checked as read, its type when it ends, a record's width
 when a field beyond the last column begins or when the record ends short.
-With one pass and one state, the mistake reported is determined by the
-input alone. That is also why a record with too many fields does not say
+The scalar consumer's forward event order determines the reported mistake.
+That is also why a record with too many fields does not say
 how many: counting them would mean reading on through bytes that may hold
 mistakes of their own -- a quote opened in an extra field can run to the end
 of the input.
+
+Parallel pieces report no diagnostic themselves. A malformed or refused
+window follows the scalar replay above, using the same field/record event
+order. Read-ahead errors remain queued behind earlier successful reads;
+the failed-read boundary follows `feed_chunk()` rather than treating a
+partial failed read as successfully supplied bytes.
 
 **Every mistake has a location**: the source name, and the line and column
 of the byte to look at, counting bytes from one, as the lexer's do. A line

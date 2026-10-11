@@ -57,6 +57,13 @@ Relations are database state, not program structure, which is why they live in
 tables of their own rather than in the predicate's record: the derived
 database can be discarded without touching the program that derived it.
 
+Packed columns, the canonical index and their count/capacity state form an
+owned payload. A private [fact builder](design-bulk-load.md#private-fact-builders)
+uses this same representation without becoming a registered relation.
+An empty base relation can consume the payload at commit while keeping its
+own stable header. Published relation metadata and secondary indexes are
+outside the transferable payload.
+
 ## Invariants
 
 * **A relation is a set.** Every tuple it holds is distinct, and inserting one
@@ -167,11 +174,13 @@ comparison at a null pointer, which the standard does not permit and a
 sanitizer reports. The loop is defined for every arity and needs no case for
 the one that would break the other form.
 
-**A load's hash is carried in.** Every relation and staging set of a context
+**A load's hash is carried in.** Every relation and fact builder of a context
 hashes a tuple with the same function under the context's seed, so the hash a
-load's staging computed for a fact is the one its base store would compute;
-membership and the base append take it as a parameter, and a fact is hashed
-once on its way in. A debug build recomputes and compares.
+load operation prepares for a fact is the one its base store would compute.
+Membership and append reuse that operation's hash; canonical growth can
+rehash existing columns. An empty destination adopts its builder's index,
+while append work for a populated destination carries prepared hashes.
+A debug build recomputes and compares.
 
 ## Insertion
 
@@ -225,18 +234,25 @@ and batch insertion both hash first and then perform one insertion by that
 hash, so they cannot disagree about what a duplicate is or where a limit
 falls.
 
-**A load's commit reserves, then appends.** The commit has already looked
-every staged fact up and knows how many each base store gains. The store
-checks both limits once, against the totals plus everything the commit adds,
-and refuses the whole load before any store is created or grown. It then
-reserves room in each store, growing its columns and each stripe of its
-canonical index at most once to exactly the bytes projected, and the commit
-appends each fact into that room without looking anything up; no append can
-fail. Such a reservation is made only of a relation without secondary
+**A load's commit reserves, then adopts or appends.** The commit knows
+every builder tuple is new to its base store. An empty destination takes
+the builder's complete payload; a populated destination reserves space
+for an append. The store checks both limits once against the resulting
+totals, including adopted capacities and replacement of any empty retained
+payload, before any destination grows or takes ownership. Superseded empty
+payloads are then released, making their replacement credits available to
+ordinary reservation. All headers and append space are reserved before any
+action applies. Adoption consumes one owner, and append needs no membership
+lookup; neither can fail. An append reservation is made only of a relation without secondary
 indexes, which a base store is at commit because the commit discards first:
 what a secondary index would grow by depends on how many facts bring a new
 key, which the commit has not asked, so a reservation of a relation with one
 is refused as an internal error rather than made short.
+
+The [bulk-load commit](design-bulk-load.md#preparing-and-committing-the-load)
+defines the ownership receipt, barriers and accounting. Private builder
+capacity is load staging until adopted; it is never simultaneously owned
+and charged as both staging and a published relation.
 
 **A round's merge appends many new tuples at once.** A **deferred round**, one
 whose insertions wait for its end

@@ -15,7 +15,8 @@ foundation shared by two pipeline stages: the
 Related: [architecture: facts](architecture.md#facts),
 [front end](design-frontend.md), [storage](design-storage.md),
 [evaluation](design-eval.md), [Magic Sets](design-magic.md),
-[tables](design-tables.md), [memory](design-memory.md).
+[tables](design-tables.md), [memory](design-memory.md),
+[bulk loading](design-bulk-load.md).
 
 ## Model
 
@@ -31,9 +32,9 @@ is read, and a base store is exactly that.
 ```text
 load text / import / relic_fact_add
         |
-     staging     per predicate, deduplicated, measured against the limits
+     builders    per predicate, distinct new facts, measured against the limits
         |
-     commit      discard -> reserve -> append
+     commit      discard -> reserve all -> adopt / append
         |
    base store of p --seed--> derived relation of p   (only if p is derived)
 ```
@@ -92,22 +93,25 @@ stopped being the one its predicate is read through.
 
 ## Staging
 
-A load's staging holds one **staged set** per predicate its facts name, in
-the order the load first names them: the load's distinct facts packed at
-the arity, an identifier table making them a set, and per tuple its hash
-and a "new" mark. A fact finds its set through the set the previous fact
-used, which a file of one predicate's facts always hits, and otherwise
-through a small table keyed by predicate.
+A load's staging holds one private **fact builder** per predicate its facts
+name, in first-mention order. It holds the distinct tuples its base store
+lacks, packed at the arity and indexed in the canonical representation an
+ordinary relation uses. A predicate is recorded even when its first fact
+is already held, preserving the refusal diagnostic's predicate order.
+Existing facts need no retained row or newness mark. A fact finds its
+builder through the previous fact's builder or a table keyed by predicate.
 
-**A tuple's hash is computed once**, under the context's seed and exactly
-as its base store would compute it; the set's table, the base-store lookup
-and the commit's append all reuse it. A debug build recomputes it at the
-append and asserts it matches, checking what a release build trusts.
+Tuple hashes use the context's seed and the base store's hashing function.
+A staging operation reuses its prepared hash for membership and insertion;
+canonical-index growth can rehash stored columns. An append to a populated
+base prepares hashes for its commit work, while an empty base adopts the
+builder's complete index. The payload and ownership interface are specified
+in [bulk loading](design-bulk-load.md#private-fact-builders).
 
 **Staging measures each fact against the limits.** Staging looks each
-tuple the set lacks up in its base store, an absent store counting as
-empty, and marks it new or not. Nothing can change a base store while a
-load runs, so the commit trusts the mark. A new tuple is staged only if the
+tuple the builder lacks up in its base store, an absent store counting as
+empty. Nothing can change a base store while a load runs, so every retained
+tuple is still new at commit. A new tuple is staged only if the
 load, with it, fits both limits:
 
 * **tuples**: the base stores' facts when the load began plus the new
@@ -127,8 +131,10 @@ A refusal ends the load at the fact that shows it, since the parser stages
 a fact before reading the next token and an import stops at the record. The
 load then stages and interns no more of its input, and since nothing in the
 program changed, the derived relations survive. Staging bounds the parse,
-not the read: a file is read whole first, and an import may have read a
-buffer past the record that ends it.
+not the read: a program file is read whole first, and an import can have
+read ahead within its bounded window. A batch window is admitted only when
+its final monotone projections prove every scalar prefix fits; otherwise
+the scalar event path replays its input and determines the refusal.
 
 **Staging is charged to no limit.** It is the load's working storage,
 proportional to the text as the text and program arena are, bounded by the
@@ -143,26 +149,28 @@ exit.
 
 When the input has been read, the load commits its facts, then splices its
 statements ([loading](design-frontend.md#loading)). A load with no new
-tuple commits nothing. Otherwise the commit first computes each store's
-growth, which can fail for memory and then changes nothing, and then:
+tuple commits nothing. Otherwise the commit prepares its manifest and any
+append work, which can fail for memory and then changes nothing, and then:
 
 1. **Discard.** The program is about to change, so what was derived is
    discarded ([the discard](#the-discard)). It cannot fail, and it leaves
    only the base stores' columns and canonical indexes, so the next step's
    limits count the program's facts and nothing derived.
-2. **Reserve.** Compute the new tuples and the bytes each base store's
-   columns and canonical index occupy at its new count; check both limits
-   once against the account plus those; then create absent stores and grow
-   each. A refusal reports
+2. **Reserve.** Project each destination's final payload: the builder's
+   actual capacity for an empty store, or ordinary growth for an append.
+   Check both limits once against the resulting account, release superseded
+   empty payloads so replacement credits are real, create absent headers
+   and reserve every append before applying any action. A refusal reports
    `relic: error: limit exceeded: tuples=N while loading p/2` (or
    `memory=N`), naming the first predicate, in the load's order, whose store
    would grow. Every base store's contents and the program stay as they
    were; a store that grew before a failed allocation keeps its capacity,
    accounted, as any relation that failed to grow does.
-3. **Append.** Append each set's new tuples in staged order, placing each
-   in the canonical index by its staged hash. Room is reserved, every tuple
-   is one the store lacks, and no secondary index remains to be linked, so
-   no append looks anything up and none can fail.
+3. **Apply.** An empty destination consumes its builder's columns and
+   canonical index. A populated destination appends the builder's tuples
+   in staged order, placing their identifiers by the prepared hashes.
+   Every reservation has succeeded, every tuple is new, and no secondary
+   index remains to be linked. Ownership moves and appends cannot fail.
 
 **No step needs an unwind.** Every fallible step precedes the first change
 a reader can see. Truncating stores a refused commit had begun to fill
@@ -176,9 +184,9 @@ stages and commits, so the fact is in its base store when the call returns
 and nothing waits for the next check. A run of calls between queries pays
 for one discard, since a discard with nothing derived returns at once.
 **An import is a load whose text is a table** ([tables](design-tables.md)):
-it stages each record as read, measured as a load's facts are, and commits
-once at the end. Duplicates alone change neither count and leave the
-relations current.
+it accepts records in input order, scalar or in admitted windows, measured
+as a load's facts are, and commits once at the end. Duplicates alone change
+neither count and leave the relations current.
 
 ## Seeding
 
@@ -242,9 +250,9 @@ predicate whose base store it reads. No rule derives it, and no fact can be
 stated for it, since its name holds `$`. The read side of the funnel
 resolves it to `p`'s base store, which a plan looks up by its bound columns
 like any relation, so a read of it reaches only the facts a demand names.
-How the rewrite uses it -- as the first rule of each adornment, so a derived
-predicate's rows begin with its facts and the rewrite's size does not
-depend on how many facts there are -- is in [Magic Sets](design-magic.md).
+How the rewrite uses it -- as the first rule of an ordinary adornment, or
+as a base answer rule under factoring, with rewrite size independent of
+fact count -- is in [Magic Sets](design-magic.md).
 
 ## Schedule, explain and counters
 
@@ -260,24 +268,26 @@ stores and derived relations alike, a fact held in both counting twice.
 
 * The tuple and memory limits count every store, base stores included, and
   refuse a load at staging or at the reserve, `while loading`.
-* A staging refusal changes nothing and keeps the relations current; a
-  reserve refusal leaves base stores and program as they were, with the
-  derived relations discarded.
-* A load holds its staging and its reserved room at once, about twice the
-  new facts' storage, until it returns; only the room is charged.
+* A staging refusal changes no base facts or program statements and keeps
+  derived relations current; a reserve refusal leaves contents as they were,
+  with the derived relations discarded.
+* An empty store adopts staging's payload and charges its capacity once.
+  An append can hold private new rows beside an enlarged destination until
+  it returns; only published/reserved destination storage is charged.
 * A derived predicate with facts reaches a limit sooner for holding them
   twice.
-* What a failed load, import or fact addition interned stays interned,
-  holding nothing and referenced by nothing.
+* New values interned by a failed load, import or fact addition remain
+  interned even though no new fact refers to them.
 
 ## Determinism
 
-A load interns predicates and values as it reads them, and the commit
-appends tuples in staged order; seeding inserts a base store in identifier
-order before the first pass; a component's rules then run in program order.
+A load interns predicates and values in their semantic input order, scalar
+or in proven batches, and the commit preserves staged tuple order through
+adoption or append. Seeding inserts a base store in identifier order before
+the first pass; a component's rules then run in program order.
 The same input therefore gives the same identifiers, plans and row order,
-and the rows of a derived predicate with facts begin with all of its facts,
-under whole-program evaluation or under the rewrite.
+and whole-program derived relations begin with their base facts. Query
+rewrites follow the order of their ordinary or factored generated rules.
 
 ## Alternatives not taken
 

@@ -310,19 +310,31 @@ See [design-storage.md](design-storage.md).
 Facts are tuples, not program objects: a ground fact costs a tuple and an
 index slot, with nothing in the rule table or schedule. A load, an import
 and `relic_fact_add()` reach the base stores through one commit that
-measures and reserves everything first and then appends infallibly, so a
-refused commit adds nothing and needs no unwinding. A predicate is derived
+measures and reserves everything first and then adopts or appends infallibly,
+so a refused commit adds nothing and needs no unwinding. A predicate is derived
 exactly when a rule with it as head has been added; its derived relation
 is seeded from its base store when evaluation starts, and the Magic
 rewrite reads the base store on its own through the base predicate
 `p$base` (see [design-magic.md](design-magic.md#facts-and-the-base-predicate)).
+
+Private fact builders own the same tuple and canonical-index payload as
+base relations. An empty destination takes ownership at commit, avoiding
+a second full copy; a populated destination receives a reserved append.
+Table imports prepare bounded windows with private worker dictionaries.
+The coordinator preserves global first-occurrence value identifiers and
+publishes a window only when monotone projections prove every scalar
+prefix admissible. An unproved window replays through the scalar importer,
+preserving error order and the values retained after a failed input.
+Only the final load commit publishes base facts. This keeps parallel work
+outside identifier assignment and leaves the domain encoding unchanged.
 
 Whether the relations hold the program's fixed point is decided by a pair
 of counts that only grow, of rules and of facts. When either has grown
 since the relations were computed, everything derived is discarded and
 re-derived from the base stores by the next evaluation.
 
-See [design-facts.md](design-facts.md).
+See [design-facts.md](design-facts.md) and
+[bulk fact construction and import](design-bulk-load.md).
 
 ### Analysis
 
@@ -535,7 +547,9 @@ inferred. Program text cannot name a file, because a program is untrusted
 input and must not open a path of its choosing. Each input format is the
 exact inverse of the output format of the same name, the first mistake ends
 an import, and an import commits through the same all-or-nothing commit a
-load uses. `-O` exports a relation as exactly the answer to a query with a
+load uses. Bounded batch decoding and scalar replay share the format's
+state machine ([bulk import](design-bulk-load.md#bounded-table-input)).
+`-O` exports a relation as exactly the answer to a query with a
 distinct variable in every column, in csv, tsv, json or `dl`, the last
 loading back as a program with every value's type intact.
 

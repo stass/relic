@@ -49,6 +49,8 @@ A newcomer should read:
   check, predicate identity and safety.
 * [Facts](design-facts.md) -- base stores, the all-or-nothing commit, and
   when derived relations are current.
+* [Bulk fact construction and import](design-bulk-load.md) -- transferable
+  staging payloads, ordered value publication and bounded parallel imports.
 * [Analysis](design-stratify.md) -- the dependency graph, components,
   strata and the evaluation schedule.
 * [Magic Sets](design-magic.md) -- the rewrite that specializes a query's
