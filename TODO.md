@@ -122,7 +122,7 @@ error, but undercharges acquisition until then.
 ## Benchmarks
 
 **Small FreeBSD timing regressions depend on code placement.** [Medium,
-component: `bench/compare/`, `lib/exec.c`, `lib/import.c`]
+component: `bench/compare/`, `lib/util.c`, `lib/exec.c`, `lib/import.c`]
 The [original cohorts](bench/compare/recorded/freebsd-5995wx/recursive-planning/report.txt)
 measure 2.6-2.7% more serial cyclic-closure time and 1.3-1.4% more
 facts-join time with equal tuple work and relation storage. The
@@ -133,10 +133,15 @@ only linked text sections changes the cyclic revision comparison from
 does not establish a robust build or attribute every part of the cyclic
 difference. Repeat these controls after bound-query factoring and bulk
 loading, with indexed driver slicing judged alongside loading. Keep the
-guarded and ordinary-Magic references, and compare several predetermined
-layouts before a residual few-percent difference justifies a planner
-mechanism. The performance gate remains open; the expensive paths are
-covered by steps 3-5 of the benchmark plan.
+guarded and ordinary-Magic references. The
+[alignment and hardware-counter comparison](bench/compare/recorded/freebsd-5995wx/code-alignment/report.txt)
+identifies 64-byte function alignment as a candidate: cyclic median spread
+across three layouts falls from 2.67% to 0.83%, with 5.90% more text.
+Validate it across the broader matrix and supported machines before
+setting a default. Isolate the hash-probe function's placement to test
+the largest profile shift; unchanged retired work and mixed cache/stall
+counters do not establish one hardware cause. The performance gate remains
+open; steps 3-5 of the benchmark plan cover the expensive paths.
 
 **Compare output sinks and validate scaling on a second platform.**
 [Medium, component: `bench/compare/`]
