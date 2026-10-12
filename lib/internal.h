@@ -1415,7 +1415,10 @@ int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
  *
  * relic_report_mixed_note() reports the mixed-type comparison a note
  * records for a plan of `rule`, unless the rule has had one reported, and
- * clears the note.
+ * clears the note.  relic_refuse_interrupted() fails the operation when
+ * the caller has interrupted it, reporting what it was doing: `verb` --
+ * deriving, delivering -- and the relation it was doing it to; it returns
+ * 0 when it has not been interrupted.
  */
 int	 relic_query_answer(relic_t *ctx, relic_query_t *query,
 	    relic_row_cb callback, void *callback_ctx);
@@ -1423,6 +1426,8 @@ bool	 relic_relations_current(const relic_t *ctx);
 void	 relic_discard_derived(relic_t *ctx);
 void	 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
 	    relic_mixed_note_t *note);
+int	 relic_refuse_interrupted(relic_t *ctx, const char *verb,
+	    const relic_relation_t *relation);
 
 /*
  * lib/facts.c

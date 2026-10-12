@@ -1,0 +1,23 @@
+% A test of constants that reads more than a quantum before it holds still
+% lets the rule reach what it reads next.  Without an index, q(19999, _)
+% is checked by reading q until a tuple holds, and q's 20000 tuples are
+% derived with 19999, every digit at its last fact, the last of them, so
+% the check reads all of q.  Every thread count derives v's 100 values.
+e(0).
+e(1).
+d(0).
+d(1).
+d(2).
+d(3).
+d(4).
+d(5).
+d(6).
+d(7).
+d(8).
+d(9).
+q(N, N) :- e(A), d(B), d(C), d(D), d(E),
+    N = A * 10000 + B * 1000 + C * 100 + D * 10 + E.
+v(X) :- d(A), d(B), X = A * 10 + B.
+p(X) :- q(19999, _), v(X).
+
+p(X)?

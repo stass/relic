@@ -1,0 +1,16 @@
+% A comparison of constants is tested before the rule reads anything, once
+% for the rule rather than once for each tuple it goes on to read.  Its note
+% is the rule's, as one a comparison of bound values makes is: early names
+% the first comparison it makes, which rejects every binding, late names
+% the one it makes after its own test of constants holds, and kept, whose
+% tests hold, derives what it reads.  Answers are unchanged.
+v(1).
+v(2).
+w(a).
+early(X) :- w(a), 1 < a, v(X).
+late(X) :- 3 > 2, v(X), X > b.
+kept(X) :- w(a), 2 > 1, v(X).
+
+early(X)?
+late(X)?
+kept(X)?

@@ -21,6 +21,7 @@
 
 #include "config.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -42,6 +43,7 @@
 #define	SCENARIO_DEADLINE	"another thread stops an evaluation"
 #define	SCENARIO_GATHERED	"a gathered answer stops between rows"
 #define	SCENARIO_MATERIALIZE	"an interrupted materialization fails"
+#define	SCENARIO_NOTE		"an interrupt from a note fails the evaluation"
 #define	SCENARIO_NULL		"interrupting no context does nothing"
 #define	SCENARIO_QUERY		"an interrupted query fails"
 #define	SCENARIO_STOPPED	"a callback that stops the rows succeeds"
@@ -99,6 +101,9 @@ static int	 count_rows(void *callback_ctx, const relic_value_t *values,
 static bool	 error_says(const interrupter_t *interrupter,
 		    const char *expected);
 static void	 interrupt_from_explain(void *callback_ctx, const char *line);
+static void	 interrupt_from_note(void *callback_ctx,
+		    enum relic_diag_level level, const relic_location_t *where,
+		    const char *message);
 static int	 interrupt_from_row(void *callback_ctx,
 		    const relic_value_t *values, size_t count);
 static int	 interrupt_and_stop(void *callback_ctx,
@@ -116,6 +121,8 @@ static void	 an_interrupted_materialization_fails(unsigned int flags,
 		    size_t threads);
 static void	 an_interrupted_query_fails(unsigned int flags,
 		    size_t threads);
+static void	 an_interrupt_from_a_note_fails(const char *program,
+		    unsigned int flags, size_t threads);
 static void	 another_thread_stops_an_evaluation(void);
 static void	 interrupting_no_context_does_nothing(void);
 
@@ -139,6 +146,22 @@ interrupt_from_explain(void *callback_ctx, const char *line RELIC_TEST_UNUSED)
 	interrupter = callback_ctx;
 	interrupter->lines++;
 	if (interrupter->lines == interrupter->after)
+		relic_interrupt(interrupter->ctx);
+}
+
+/*
+ * A diagnostic callback that records errors as record_error() does and
+ * interrupts its context on every note.
+ */
+static void
+interrupt_from_note(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message)
+{
+	interrupter_t *interrupter;
+
+	interrupter = callback_ctx;
+	record_error(callback_ctx, level, where, message);
+	if (level == RELIC_NOTE)
 		relic_interrupt(interrupter->ctx);
 }
 
@@ -343,6 +366,66 @@ an_interrupted_query_fails(unsigned int flags, size_t threads)
 	    rows);
 
 	relic_query_destroy(query);
+	relic_destroy(ctx);
+}
+
+/*
+ * A note about a comparison of mixed types is reported to the diagnostic
+ * callback while the rule that made it is derived, and an interrupt the
+ * callback makes there fails the evaluation as one from anywhere else
+ * would, naming that rule, whether the note came from a serial run or from
+ * the tasks of a shared round, which report what they noted only once the
+ * round has merged.
+ */
+static void
+an_interrupt_from_a_note_fails(const char *program, unsigned int flags,
+    size_t threads)
+{
+	interrupter_t interrupter;
+	relic_config_t config;
+	relic_stats_t stats;
+	relic_t *ctx;
+	bool shares;
+
+#ifdef RELIC_THREADS
+	shares = true;
+#else
+	shares = false;
+#endif
+	bzero(&config, sizeof(config));
+	config.flags = flags | RELIC_F_NOTE_MIXED;
+	config.threads = threads;
+	ctx = relic_create_config(&config);
+	if (ctx == NULL) {
+		check(false, SCENARIO_NOTE, "a context is created");
+		return;
+	}
+	bzero(&interrupter, sizeof(interrupter));
+	interrupter.ctx = ctx;
+	relic_diag_set(ctx, interrupt_from_note, &interrupter);
+
+	if (relic_load_string(ctx, "note.dl", program) != 0) {
+		check(false, SCENARIO_NOTE, "the program loads");
+		relic_destroy(ctx);
+		return;
+	}
+
+	checkf(relic_materialize(ctx) == -1 &&
+	    error_says(&interrupter, "interrupted while deriving bad/1"),
+	    SCENARIO_NOTE, "at %zu threads the materialization of \"%s\" "
+	    "should fail as interrupted, not with \"%s\"", threads, program,
+	    interrupter.last_error);
+	relic_stats(ctx, &stats);
+	checkf((stats.parallel_rounds > 0) == (shares && threads > 1),
+	    SCENARIO_NOTE, "at %zu threads the round deriving \"%s\" should "
+	    "be shared only on more than one, and %" PRIu64 " were", threads,
+	    program, stats.parallel_rounds);
+
+	relic_diag_set(ctx, record_error, &interrupter);
+	checkf(relic_materialize(ctx) == 0, SCENARIO_NOTE, "at %zu threads "
+	    "the next materialization of \"%s\" should succeed", threads,
+	    program);
+
 	relic_destroy(ctx);
 }
 
@@ -643,9 +726,20 @@ another_thread_stops_an_evaluation(void)
 int
 main(void)
 {
+	static const char *const noting[] = {
+		"v(1). v(2). w(a).\nbad(X) :- w(a), 1 < a, v(X).\n",
+		"v(1). v(2).\nbad(X) :- v(X), X < a.\n",
+	};
+	size_t i;
+
 	an_interrupted_materialization_fails(0, 0);
 	an_interrupted_query_fails(0, 0);
 	a_gathered_answer_stops_between_rows(0, 0);
+	for (i = 0; i < sizeof(noting) / sizeof(noting[0]); i++) {
+		an_interrupt_from_a_note_fails(noting[i], 0, 0);
+		an_interrupt_from_a_note_fails(noting[i],
+		    RELIC_F_PARALLEL_ALWAYS, 4);
+	}
 
 	/*
 	 * Again with every round shared among four threads: a worker finds

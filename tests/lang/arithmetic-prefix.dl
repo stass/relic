@@ -1,0 +1,10 @@
+% A zero divisor in a test of constants is an evaluation error too, met
+% once, before the rule reads anything: the evaluation stops with no rows
+% and a nonzero exit, naming the rule, however many tuples the rule would
+% have gone on to read.
+v(1). v(2). v(3).
+w(a).
+
+bad(X) :- w(a), 1 < 12 / 0, v(X).
+
+bad(X)?

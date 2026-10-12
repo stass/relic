@@ -24,8 +24,9 @@
 /*
  * The tasks of a deferred round, as a worker runs them.
  *
- * A task is an item of the round run over the whole of its first
- * operation's view, or over one contiguous piece of it.  It runs the
+ * A task is an item of the round run whole, or from its driver over one
+ * slice of the driver's visits, its prefix having run once when the round
+ * was prepared (enum relic_task_form).  It runs the
  * executor exactly as the serial evaluator does, up to the EMIT, and what
  * differs is where a full batch goes: rather than inserted, it is screened.
  * A tuple the frozen store holds is one the serial insertion would have
@@ -159,9 +160,9 @@ static uint32_t	 pending_hash(uint64_t seed, const relic_pending_t *pending,
 static const char *pending_text(const char *bytes,
 		    const relic_pending_t *pending);
 static void	 place_seed(relic_scratch_t *scratch, const relic_rule_t *rule);
-static int	 run_plan_piece(const relic_round_job_t *job,
+static int	 run_plan(const relic_round_job_t *job,
 		    relic_worker_t *worker, const relic_round_item_t *item,
-		    const relic_round_task_t *task);
+		    relic_round_task_t *task);
 static int	 run_task(const relic_round_job_t *job, relic_worker_t *worker,
 		    size_t worker_index, relic_round_task_t *task);
 static int	 screen_batch(const relic_round_job_t *job,
@@ -211,12 +212,26 @@ run_task(const relic_round_job_t *job, relic_worker_t *worker,
 	task->worker = worker_index;
 	task->first_candidate = worker->candidates.count;
 	work_before = worker_work(worker);
+	bzero(&task->reads, sizeof(task->reads));
 
-	if (item->plan == NULL) {
-		place_seed(scratch, item->rule);
-		status = screen_batch(job, worker, item->target);
-	} else {
-		status = run_plan_piece(job, worker, item, task);
+	status = 0;
+	switch (task->form) {
+	case RELIC_TASK_WHOLE:
+		if (item->plan == NULL) {
+			place_seed(scratch, item->rule);
+			status = screen_batch(job, worker, item->target);
+		} else {
+			relic_exec_start(scratch, job->round->env, item->plan);
+			status = run_plan(job, worker, item, task);
+		}
+		break;
+	case RELIC_TASK_SLICE:
+		relic_exec_start_slice(scratch, job->round->env, item->plan,
+		    task->slice);
+		status = run_plan(job, worker, item, task);
+		break;
+	case RELIC_TASK_EMPTY:
+		break;
 	}
 
 	task->candidate_count = worker->candidates.count -
@@ -257,27 +272,22 @@ place_seed(relic_scratch_t *scratch, const relic_rule_t *rule)
 }
 
 /*
- * Run a task's plan over its piece, or over its whole first view when it is
- * not cut, screening each batch as the executor pauses.  A plan that met an
- * evaluation error has ended, and what its batch holds is not screened: the
- * round is abandoned, and its serial run meets the error, or one before it,
- * and reports it.  An interrupt is looked for at every return of the
- * executor and abandons the round alike, to be reported by its serial run.
+ * Run the plan started on the worker's scratch to its end, screening each
+ * batch as the executor pauses, and record what its driver read.  A plan
+ * that met an evaluation error has ended, and what its batch holds is not
+ * screened: the round is abandoned, and its serial run meets the error,
+ * or one before it, and reports it.  An interrupt is looked for at every
+ * return of the executor and abandons the round alike, to be reported by
+ * its serial run.
  */
 static int
-run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
-    const relic_round_item_t *item, const relic_round_task_t *task)
+run_plan(const relic_round_job_t *job, relic_worker_t *worker,
+    const relic_round_item_t *item, relic_round_task_t *task)
 {
 	enum relic_exec_status status;
 	relic_scratch_t *scratch;
 
 	scratch = &worker->scratch;
-	if (task->cut)
-		relic_exec_start_piece(scratch, job->round->env, item->plan,
-		    task->piece);
-	else
-		relic_exec_start(scratch, job->round->env, item->plan);
-
 	do {
 		status = relic_exec_run(scratch);
 		if (scratch->error.failed)
@@ -287,6 +297,7 @@ run_plan_piece(const relic_round_job_t *job, relic_worker_t *worker,
 		if (relic_signal_flag_raised(job->interrupted))
 			return (-1);
 	} while (status == RELIC_EXEC_PAUSED);
+	task->reads = scratch->driver_reads;
 
 	return (0);
 }

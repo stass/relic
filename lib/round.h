@@ -44,6 +44,7 @@ typedef struct relic_plan_history relic_plan_history_t;
 typedef struct relic_pool relic_pool_t;
 typedef struct relic_pool_job relic_pool_job_t;
 typedef struct relic_pool_threads relic_pool_threads_t;
+typedef struct relic_prepared_item relic_prepared_item_t;
 typedef struct relic_round relic_round_t;
 typedef struct relic_round_item relic_round_item_t;
 typedef struct relic_round_job relic_round_job_t;
@@ -52,14 +53,15 @@ typedef struct relic_worker relic_worker_t;
 
 /*
  * What a plan did the last time it ran, from which the next run's work is
- * estimated: `work`, the tuples it read and derived, and `range`, the
- * tuples its first scan's view held then, one for a plan that is not cut.
- * `ran` is false until it has run.
+ * estimated: `work`, the tuples it read and derived, and of them `reads`,
+ * what its driver and the prefix before it read (relic_driver_reads_t), as
+ * the run counted them, whichever way the round ran.  `ran` is false until
+ * it has run.
  */
 struct relic_plan_history {
-	uint64_t	work;
-	uint64_t	range;
-	bool		ran;
+	uint64_t		work;
+	relic_driver_reads_t	reads;
+	bool			ran;
 };
 
 /*
@@ -114,28 +116,95 @@ struct relic_round {
 };
 
 /*
- * One task: an item run over its first operation's whole view or, when
- * `cut`, over the contiguous piece `piece` of it.  A seed and a plan whose
- * first operation is not a SCAN are never cut.
+ * How a task runs its item, which is how the item was prepared
+ * (relic_prepared_item_t): a seed's turn or a plan with no driver, run
+ * whole from its first operation; nothing at all, for a plan whose prefix
+ * rejected or whose driver has nothing to visit; or a plan run from its
+ * driver over one slice of the driver's visits, its prefix having run once
+ * when the item was prepared.
+ */
+enum relic_task_form {
+	RELIC_TASK_WHOLE,
+	RELIC_TASK_EMPTY,
+	RELIC_TASK_SLICE
+};
+
+/*
+ * What became of a round offered for deferral (relic_round_run()): it was
+ * declined, for the caller to run serially; it merged; or it merged and
+ * then failed, having reported why.
+ */
+enum relic_round_outcome {
+	RELIC_ROUND_DECLINED,
+	RELIC_ROUND_MERGED,
+	RELIC_ROUND_FAILED
+};
+
+/*
+ * One task: item `item` run as `form` says, and for a SLICE over `slice`
+ * (relic_exec_start_slice()), never empty.  An item's tasks are
+ * consecutive and its slices in the order of the driver's visits, so the
+ * tasks in order derive what the items derive serially, in that order.
  *
  * The worker that runs the task then writes, for the merge to read once
  * every task has run, which worker ran it, where its candidates lie among
- * that worker's, the first mixed-type comparison it met, and the work it
- * did, the tuples it read and derived.  `inserted` is the merge's: how
- * many of the task's candidates are tuples new to its target.
+ * that worker's, the first mixed-type comparison it met, the work it did,
+ * the tuples it read and derived, and what its driver read.  `inserted` is
+ * the merge's: how many of the task's candidates are tuples new to its
+ * target.
  */
 struct relic_round_task {
 	size_t			 item;
-	relic_tuple_range_t	 piece;
-	bool			 cut;
+	relic_tuple_range_t	 slice;
+	enum relic_task_form	 form;
 
 	size_t			 worker;
 	size_t			 first_candidate;
 	size_t			 candidate_count;
 	relic_mixed_note_t	 note;
 	uint64_t		 work;
+	relic_driver_reads_t	 reads;
 
 	size_t			 inserted;
+};
+
+/*
+ * How an item of a round about to be shared was prepared, by worker 0
+ * before the round's tasks are cut (lib/slice.c), and the share of the
+ * round it is given (lib/round.c).
+ *
+ * `form` is the form of its tasks.  A seed and a plan with no driver are
+ * WHOLE, and are not prepared.  A plan with a driver has had its prefix
+ * run, once, on worker 0's scratch: `prefix_reads` is what the prefix
+ * read and `note` its first mixed-type comparison, both the item's to
+ * commit with the round and never a task's, and `reads` what the run
+ * counted of its driver and prefix (relic_driver_reads_t), as a serial
+ * run counts them, its driver unread.  When the prefix held, the
+ * driver's visits were found: `driving` starts at the first tuple the
+ * driver visits and ends at the fence it stops before, its view's end;
+ * `visits` counts them, M; and `links` is what finding them followed of
+ * the driver's chain, positioning toward a delta's start and counting,
+ * none for a SCAN, whose visits are its view.  The item is SLICE when
+ * there is a visit to cut and EMPTY otherwise, when its prefix rejected or
+ * its driver has nothing to visit.
+ *
+ * `estimate` is the work its tasks are expected to do, and `pieces` how
+ * many tasks it is cut into, one for a WHOLE or EMPTY item.  Once the
+ * round's tasks are cut, its tasks are the `pieces` from `first_task` on,
+ * so what the round reports and records of an item is read from its own
+ * tasks rather than found by where one item's tasks end.
+ */
+struct relic_prepared_item {
+	relic_exec_counters_t	prefix_reads;
+	relic_mixed_note_t	note;
+	relic_driver_reads_t	reads;
+	relic_tuple_range_t	driving;
+	uint64_t		visits;
+	uint64_t		links;
+	uint64_t		estimate;
+	size_t			pieces;
+	size_t			first_task;
+	enum relic_task_form	form;
 };
 
 /*
@@ -267,20 +336,34 @@ struct relic_worker {
  * `reservation_declines` counts the rounds declined because the limit or
  * the allocator refused that room, so that a test can tell a limit
  * reached the reservation.
+ *
+ * `prepared` holds a record for each item of the round being run, in room
+ * for `prepared_capacity`, kept and sized as the tasks are.
+ * `lookup_slices` counts the nonempty slices of LOOKUP drivers in merged
+ * rounds, so that a test can tell an indexed driver was divided;
+ * `preparation_links` counts the chain links preparing rounds followed,
+ * shared or declined, which no public counter holds; and
+ * `preparation_declines` counts the rounds declined once prepared, as not
+ * repaying their preparation and their threads.
  */
 struct relic_pool {
 	relic_worker_t		*workers;
 	relic_pool_threads_t	*threads;
 	relic_round_task_t	*tasks;
+	relic_prepared_item_t	*prepared;
 	size_t			 worker_count;
 	size_t			 task_count;
 	size_t			 task_capacity;
+	size_t			 prepared_capacity;
 	uint64_t		 merged_rounds;
 	uint64_t		 abandoned_rounds;
 	uint64_t		 limit_declines;
 	uint64_t		 thread_tasks;
 	uint64_t		 expected_candidates;
 	uint64_t		 reservation_declines;
+	uint64_t		 lookup_slices;
+	uint64_t		 preparation_links;
+	uint64_t		 preparation_declines;
 };
 
 /*
@@ -321,14 +404,20 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * lib/round.c
  *
  * relic_round_run() runs a round deferred on the context's pool, creating
- * the pool the first time, and returns whether it did.  When it did, the
+ * the pool the first time, and says what became of it.  When it ran, the
  * round's candidates are inserted and every item that inserted a tuple its
- * target lacked is marked as having gained.  When it did not, every
- * relation holds the tuples it held, every counter is as it was and the
- * round has given back its buffers, for the caller to run the round
- * serially; only a reservation the allocator refused part way leaves some
- * of a relation's arrays, or the value table's or the pool's, larger,
- * counted in the storage total, for the serial run to grow into.  A round
+ * target lacked is marked as having gained, and the round reports what its
+ * items noted, item by item, looking for an interrupt after each as a
+ * serial run looks after reporting each note.  It is then
+ * RELIC_ROUND_MERGED, or RELIC_ROUND_FAILED when the diagnostic callback
+ * interrupted the context: the interrupt has been reported, for the
+ * evaluation to fail as the serial run would have.  When it did not run,
+ * RELIC_ROUND_DECLINED, every relation holds the tuples it held, every
+ * counter is as it was and the round has given back its buffers, for the
+ * caller to run the round serially; only a reservation the allocator
+ * refused part way leaves some of a relation's arrays, or the value
+ * table's or the pool's, larger, counted in the storage total, for the
+ * serial run to grow into.  A round
  * is not run deferred when it reads a relation it writes, when it is too
  * small to repay sharing it among the pool's threads -- unless
  * RELIC_F_PARALLEL_ALWAYS asks for every round -- or when the pool, the
@@ -339,15 +428,50 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
  * before anything is inserted, and a refusal declines the round.
  *
  * relic_round_record() records in an item's history, when it has one,
- * that its turn in a round run serially did `work`, the tuples it read and
- * derived, and inserted `inserted` tuples its target lacked.
- * relic_round_first_call() gives the first item of a round whose
- * plan calls a function, or NULL when none does.
+ * that its turn did `work`, the tuples it read and derived, of which its
+ * driver and prefix read `reads`, and inserted `inserted` tuples its
+ * target lacked.  relic_round_first_call() gives the first item of a round
+ * whose plan calls a function, or NULL when none does.
  */
-bool	 relic_round_run(relic_t *ctx, relic_round_t *round);
-void	 relic_round_record(const relic_round_t *round,
-	    relic_round_item_t *item, uint64_t work, uint64_t inserted);
+enum relic_round_outcome relic_round_run(relic_t *ctx, relic_round_t *round);
+void	 relic_round_record(relic_round_item_t *item, uint64_t work,
+	    const relic_driver_reads_t *reads, uint64_t inserted);
 const relic_round_item_t *relic_round_first_call(const relic_round_t *round);
+
+/*
+ * lib/slice.c
+ *
+ * relic_slice_prepare() prepares an item whose plan has a driver for a
+ * shared round, on worker 0's scratch, over the round's views: it runs
+ * the plan's prefix once and, when the prefix holds, finds and counts the
+ * driver's visits, filling *prepared but for its estimate and pieces.
+ * The scratch is left with nothing counted, noted or met.  Returns 0, or
+ * -1 when the prefix met a failure or `interrupted` was raised, for the
+ * round to be declined and the failure met again serially.
+ *
+ * relic_slice_cut() writes the slices of a SLICE item cut into
+ * `prepared->pieces` pieces into the tasks at `tasks`, one each, adding
+ * the chain links it followed to *linksp: the pieces hold the driver's
+ * visits in order, each once, and differ in size by at most one visit.
+ * Returns 0, or -1 when `interrupted` was raised part way or the driver's
+ * chain ended before its count said it would, which leaves the tasks
+ * unusable.  relic_slice_cut_links() is how many links it will follow:
+ * for a LOOKUP driver cut into several pieces, as far as the first visit
+ * of the last piece, and none otherwise, a SCAN's slices being found by
+ * arithmetic.
+ *
+ * They read the store as frozen.h presents it, and move nothing but a
+ * key's frontier toward the round's delta start, which a lookup there
+ * would have moved anyway.
+ */
+int	 relic_slice_prepare(relic_prepared_item_t *prepared,
+	    relic_scratch_t *scratch, const relic_exec_env_t *env,
+	    const relic_plan_t *plan, const relic_signal_flag_t *interrupted);
+int	 relic_slice_cut(const relic_prepared_item_t *prepared,
+	    const relic_plan_t *plan, relic_round_task_t *tasks,
+	    const relic_signal_flag_t *interrupted, uint64_t *linksp);
+uint64_t relic_slice_cut_links(const relic_prepared_item_t *prepared,
+	    const relic_plan_t *plan);
 
 /*
  * lib/merge.c

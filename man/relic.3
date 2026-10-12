@@ -390,7 +390,8 @@ most once;
 defer the insertions of every round of evaluation that reads none of the
 relations it derives except as they stood when it began, which is every
 round but a pass of the naive fixed point, to the round's end, cutting the
-scan each rule starts from into pieces, as a round run on several threads
+scan or lookup each rule starts from, after any tests of constants, into
+pieces as finely as the threads allow, as a round run on several threads
 is run, and read every table an import reads a window of records at a
 time, as a large table read on several threads is read, whatever its size
 and the number of threads; the relations, the values and every count of

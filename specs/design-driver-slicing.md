@@ -99,14 +99,18 @@ tuple, including its downstream lookups, computations and emissions.
 
 ## Finding the driver
 
-The planner records a driver position, or absence of one, in the prepared
-plan. It determines this while walking the completed operation order,
-using the operation semantics in `lib/plan.h`. The prefix consists of
-`MEMBER`, `EXISTS`, `ANTI_MEMBER` and `FILTER`: operations that bind
-nothing and succeed at most once. The first generator is the driver.
-An `ASSIGN`, `AGGREGATE` or `EMIT` reached first terminates recognition.
-This is a structural certificate, not an estimate of what a particular
-input happens to make single-valued.
+`relic_plan_driver()` derives the driver position, or its absence, from a
+prepared plan's completed operation order each time it is asked, using the
+operation semantics in `lib/plan.h`. The prefix consists of `MEMBER`,
+`EXISTS`, `ANTI_MEMBER` and `FILTER`: operations that bind nothing and
+succeed at most once. The first generator is the driver. An `ASSIGN`,
+`AGGREGATE` or `EMIT` reached first terminates recognition. Its switch
+names every operation kind, so a kind added later must be classified
+before it compiles. This is a structural certificate, not an estimate of
+what a particular input happens to make single-valued. Nothing stores
+it: a plan cannot carry a driver its operations contradict, and a plan
+built by hand, as the unit tests build them, needs no extra field to be
+read correctly.
 
 Binding analysis proves that every prefix operand is a constant and that
 the driver's key is constant. A prefix filter can evaluate a constant
@@ -342,8 +346,8 @@ prefix's executed operations and reads, the first pass and any delta
 positioning, the predicted second pass, task setup and the pool's startup
 threshold. These are costs, not public evaluation-counter increments.
 The conservative policy requires total estimated suffix work to reach
-`RELIC_PARALLEL_MIN_WORK` and exceed four times the round's total
-chain-preparation link work. Each lookup contributes its positioning and
+`RELIC_PARALLEL_MIN_WORK` and exceed `RELIC_PREPARATION_SHARE` (four)
+times the round's total chain-preparation link work. Each lookup contributes its positioning and
 count pass, plus a boundary pass only when it has multiple pieces. Scan
 drivers incur no link-preparation charge. Constants are shared policy
 parameters measured with the benchmarks, never workload-name tests.
@@ -353,7 +357,8 @@ It also requires useful independent tasks. For per-item suffix estimates
 estimate is the larger of `ceil(sum(E) / active_workers)` and
 `max(ceil(E[i] / P[i]))`, where active workers are bounded by nonempty task
 count and pool size. Sharing requires this plus preparation and the
-startup allowance to be smaller than `sum(E)`; ties decline. Saturated or
+startup allowance, `RELIC_PARALLEL_STARTUP_WORK`, to be smaller than
+`sum(E)`; ties decline. Saturated or
 otherwise inconclusive comparisons decline, unless deferral is forced.
 This prevents a large indivisible item from justifying a barrier by itself.
 
@@ -434,10 +439,11 @@ preparation counters are exposed as language or API behavior.
 
 | Component | Responsibility |
 | --- | --- |
-| `lib/plan.h`, `lib/plan.c` | Derive the driver certificate from the completed operation order and retain it in the prepared plan. |
+| `lib/plan.h`, `lib/plan.c` | Derive the driver certificate from the completed operation order whenever it is asked for. |
 | `lib/frozen.h`, `lib/index.c` | Open the exact key's cursor, position toward the real delta start with bounded progress, count and locate identifiers without exposing mutable storage. |
 | `lib/cost.c`, `lib/cost.h` | Share pure execution-cost arithmetic between candidate estimation and the scheduler's measured-driver suffix estimate. |
 | `lib/exec.h`, `lib/exec.c` | Run prefix preparation and bounded suffixes through the same dispatcher; preserve cursor and lower-level state across every yield; observe actual driver visits. |
+| `lib/slice.c` | Prepare an item behind the frozen-store boundary: run its prefix on worker 0's scratch, open and count its driving sequence, and locate its slices' starts, each walk interruptible. |
 | `lib/round.h`, `lib/round.c` | Own prepared-item records, charge preparation to scheduling, construct all ordered tasks before publication, and commit or discard prefix counts and notes with the round. |
 | `lib/task.c` | Consume the task's whole-plan, empty or prepared-slice form; retain continuations while filling bounded candidate packets. |
 | `lib/eval.c` | Record serial driver/suffix observations and keep the selected plan on fallback. |

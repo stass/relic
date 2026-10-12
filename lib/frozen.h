@@ -39,10 +39,10 @@
  * compile.
  *
  * Such code stores to two words outside its own: a key's frontier, which
- * relic_index_first_since() moves inside lib/index.c, and the memory
- * account's total for a round's buffers, which it reaches only through the
- * two functions of lib/account.c below.  The account is incomplete here
- * too, so no other part of it can be written.
+ * relic_index_first_since() and relic_index_seek_walk() move inside
+ * lib/index.c, and the memory account's total for a round's buffers, which
+ * it reaches only through the two functions of lib/account.c below.  The
+ * account is incomplete here too, so no other part of it can be written.
  */
 
 typedef struct relic_account relic_account_t;
@@ -209,6 +209,43 @@ relic_tuple_id_t relic_index_first_since(const relic_index_t *index,
 	    relic_tuple_id_t since);
 relic_tuple_id_t relic_index_next(const relic_index_t *index,
 	    relic_tuple_id_t id);
+
+/*
+ * The walk relic_index_first_since() makes, a bounded number of links at
+ * a time, so that a caller can look for an interrupt between steps of a
+ * long one.  relic_index_seek_begin() probes for the key and readies the
+ * walk toward `since` in *seek, which is the caller's.
+ * relic_index_seek_walk() follows at most `links` links of it, which must
+ * be positive so that a caller walking until it stops makes progress, adds
+ * those it followed to *walkedp, and returns whether the walk has stopped.
+ * relic_index_seek_found() is then what relic_index_first_since() would
+ * have returned.  The key's frontier is moved only when the walk stops,
+ * as relic_index_first_since() would have moved it, so a walk abandoned
+ * part way leaves it as it was.
+ *
+ * The state holds identifiers and no pointer into the index: the key's
+ * stripe and identifier, the start walked toward, where the walk began
+ * and where it is.  It is meaningful only while nothing is inserted into
+ * the relation.
+ */
+typedef struct relic_index_seek relic_index_seek_t;
+
+struct relic_index_seek {
+	relic_tuple_id_t	since;
+	relic_tuple_id_t	from;
+	relic_tuple_id_t	at;
+	uint32_t		stripe;
+	uint32_t		key_id;
+	bool			publishes;
+	bool			stopped;
+};
+
+void	 relic_index_seek_begin(const relic_index_t *index,
+	    const relic_relation_t *relation, const relic_dom_t *probe,
+	    relic_tuple_id_t since, relic_index_seek_t *seek);
+bool	 relic_index_seek_walk(const relic_index_t *index,
+	    relic_index_seek_t *seek, uint64_t links, uint64_t *walkedp);
+relic_tuple_id_t relic_index_seek_found(const relic_index_seek_t *seek);
 
 /*
  * The longest byte string a symbol or string value holds: its length fits

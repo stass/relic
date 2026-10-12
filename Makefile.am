@@ -39,8 +39,8 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
-	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c lib/symbol.c \
-	lib/task.c lib/util.c lib/value.c lib/window.c
+	lib/round.c lib/rule.c lib/slice.c lib/stratify.c lib/strfn.c \
+	lib/symbol.c lib/task.c lib/util.c lib/value.c lib/window.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -702,7 +702,8 @@ RELIC_LANG_TESTS = \
 	tests/lang/arithmetic-magic-wide.dl tests/lang/arithmetic-memory.dl \
 	tests/lang/arithmetic-mixed.dl tests/lang/arithmetic-negation.dl \
 	tests/lang/arithmetic-negative.dl tests/lang/arithmetic-order.dl \
-	tests/lang/arithmetic-overflow.dl tests/lang/arithmetic-probe.dl \
+	tests/lang/arithmetic-overflow.dl tests/lang/arithmetic-prefix.dl \
+	tests/lang/arithmetic-probe.dl \
 	tests/lang/arithmetic-recursion.dl \
 	tests/lang/arithmetic-strategy.dl \
 	tests/lang/arithmetic-strategy-full.dl \
@@ -782,6 +783,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/negation-recursive.dl tests/lang/negation-strata.dl \
 	tests/lang/negation-tasks.dl tests/lang/not-as-predicate.dl \
 	tests/lang/not-symbol.dl tests/lang/predicate-identity.dl \
+	tests/lang/prefix-quantum.dl \
 	tests/lang/query-bindings.dl tests/lang/query-columns-limit.dl \
 	tests/lang/query-columns.dl tests/lang/query-comparisons.dl \
 	tests/lang/query-duplicates.dl tests/lang/query-graph.dl \
@@ -823,7 +825,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/variable-limit-max.dl tests/lang/variable-limit.dl \
 	tests/lang/verbose-counts.dl tests/lang/verbose-discard.dl \
 	tests/lang/verbose-mixed.dl tests/lang/verbose-one.dl \
-	tests/lang/zero-arity.dl
+	tests/lang/verbose-prefix.dl tests/lang/zero-arity.dl
 
 # Every test runs through tests/strict.sh, whatever its kind, so that
 # RELIC_STRICT_CHECK=yes in the environment turns a skipped test into a

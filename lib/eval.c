@@ -473,8 +473,6 @@ static int	 confirm_seed(const relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    const relic_rule_t *rule);
 static bool	 seed_head_is_constant(const relic_rule_t *rule);
-static int	 refuse_interrupted(relic_t *ctx, const char *verb,
-		    const relic_relation_t *relation);
 static int	 execute_plan(relic_evaluation_t *eval,
 		    const relic_plan_t *plan, const relic_rule_t *rule,
 		    const relic_emit_target_t *target);
@@ -1013,14 +1011,11 @@ count_derivation(relic_evaluation_t *eval, bool added)
 }
 
 /*
- * Fail the operation when the caller has interrupted it, reporting what it
- * was doing: `verb` -- deriving, delivering -- and the relation it was
- * doing it to.  Returns 0 when it has not been interrupted.  It is called
- * only where the operation could already fail, so a failure here leaves
- * the context as any other failure there does.
+ * Every caller is at a point where its operation could already fail, so a
+ * failure here leaves the context as any other failure there does.
  */
-static int
-refuse_interrupted(relic_t *ctx, const char *verb,
+int
+relic_refuse_interrupted(relic_t *ctx, const char *verb,
     const relic_relation_t *relation)
 {
 	char described[RELIC_PRED_TEXT_MAX];
@@ -1067,7 +1062,7 @@ execute_plan(relic_evaluation_t *eval, const relic_plan_t *plan,
 			return (-1);
 		if (eval->stopped)
 			return (0);
-		if (refuse_interrupted(eval->ctx, "deriving",
+		if (relic_refuse_interrupted(eval->ctx, "deriving",
 		    target->relation) != 0)
 			return (-1);
 	} while (status == RELIC_EXEC_PAUSED);
@@ -1151,9 +1146,16 @@ run_round(relic_evaluation_t *eval, relic_round_t *round)
 	int status;
 	size_t i;
 
-	if (rounds_may_be_deferred(eval->ctx) &&
-	    relic_round_run(eval->ctx, round))
-		return (0);
+	if (rounds_may_be_deferred(eval->ctx)) {
+		switch (relic_round_run(eval->ctx, round)) {
+		case RELIC_ROUND_MERGED:
+			return (0);
+		case RELIC_ROUND_FAILED:
+			return (-1);
+		case RELIC_ROUND_DECLINED:
+			break;
+		}
+	}
 
 	calling = relic_round_first_call(round);
 	if (calling != NULL &&
@@ -1184,6 +1186,7 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
     relic_round_item_t *item)
 {
 	relic_emit_target_t target;
+	relic_driver_reads_t reads;
 	uint64_t inserted_before;
 	uint64_t work_before;
 	int status;
@@ -1194,14 +1197,17 @@ run_item(relic_evaluation_t *eval, const relic_round_t *round,
 	inserted_before = eval->ctx->counters.tuples_inserted;
 
 	eval->derived = false;
-	if (item->plan == NULL)
+	bzero(&reads, sizeof(reads));
+	if (item->plan == NULL) {
 		status = insert_seed(eval, item->rule, target.relation);
-	else
+	} else {
 		status = execute_plan(eval, item->plan, item->rule, &target);
+		reads = eval->scratch.driver_reads;
+	}
 	item->gained = eval->derived;
 
-	relic_round_record(round, item, counted_work(eval->ctx) - work_before,
-	    eval->ctx->counters.tuples_inserted - inserted_before);
+	relic_round_record(item, counted_work(eval->ctx) - work_before,
+	    &reads, eval->ctx->counters.tuples_inserted - inserted_before);
 
 	return (status);
 }
@@ -3059,7 +3065,7 @@ deliver_gathered_answer(relic_t *ctx, const relic_relation_t *answer,
 	range = relic_relation_all(answer);
 
 	for (id = range.first; id < range.end; id++) {
-		if (refuse_interrupted(ctx, "delivering", answer) != 0)
+		if (relic_refuse_interrupted(ctx, "delivering", answer) != 0)
 			return (-1);
 
 		tuple = relic_relation_tuple(answer, id);

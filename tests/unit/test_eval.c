@@ -1503,15 +1503,12 @@ layered_program(void)
  * is shared only when the context has more than one thread: a program of
  * four rounds counts none at one thread and some at two.
  *
- * Without the switch, the paths of the layered graph take a round for each
- * length.  The first two rounds are not shared: the base pass copies the
- * edges, and the recursive rule's first round has no round before it to
- * predict its work and is estimated at the paths it reads; each reads
- * LAYERED_EDGES tuples, 6 336, below the threshold.  The rounds after them
- * extend hundreds or thousands of paths by LAYER_WIDTH edges each, or are
- * predicted from a round that did, and are shared.  So some rounds and not all are
- * counted, and the relation is what the serial evaluator derives.  A build
- * without threads shares none.
+ * Without the switch, the chain's rounds are a few tuples each and none is
+ * shared, however many threads there are.  The paths of the layered graph
+ * take a round for each length, and each extends hundreds or thousands of
+ * paths by LAYER_WIDTH edges, or is expected to from its driver's view or
+ * the round before it, and is shared.  The relation is what the serial
+ * evaluator derives.  A build without threads shares none.
  */
 static void
 rounds_are_shared_when_they_repay_it(void)
@@ -1553,6 +1550,18 @@ rounds_are_shared_when_they_repay_it(void)
 	}
 	relic_destroy(ctx);
 
+	ctx = context_threaded(chain, 0, DEFERRAL_THREADS);
+	if (ctx != NULL && relic_materialize(ctx) == 0) {
+		relic_stats(ctx, &stats);
+		checkf(stats.iterations > 0 && stats.parallel_rounds == 0,
+		    SCENARIO_SHARED, "the chain's %" PRIu64 " rounds are too "
+		    "small to share, %" PRIu64 " were", stats.iterations,
+		    stats.parallel_rounds);
+	} else {
+		check(false, SCENARIO_SHARED, "the chain materializes");
+	}
+	relic_destroy(ctx);
+
 	layered = layered_program();
 	if (layered == NULL) {
 		check(false, SCENARIO_SHARED, "the layered graph is written");
@@ -1567,9 +1576,9 @@ rounds_are_shared_when_they_repay_it(void)
 		    LAYERED_PATHS, stats.tuples - LAYERED_EDGES);
 		if (threads_available) {
 			checkf(stats.parallel_rounds > 0 &&
-			    stats.parallel_rounds < stats.iterations,
+			    stats.parallel_rounds <= stats.iterations,
 			    SCENARIO_SHARED, "some of %" PRIu64 " rounds are "
-			    "shared and not all, not %" PRIu64,
+			    "shared, not %" PRIu64,
 			    stats.iterations, stats.parallel_rounds);
 			check(ctx->pool != NULL && ctx->pool->thread_tasks > 0,
 			    SCENARIO_SHARED, "the pool's threads run some of "

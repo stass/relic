@@ -1,0 +1,5 @@
+verbose-prefix.dl:10:19: note: ordering comparison between an integer and a symbol is false
+query 1: 0 rows
+verbose-prefix.dl:11:25: note: ordering comparison between an integer and a symbol is false
+query 2: 0 rows
+query 3: 2 rows

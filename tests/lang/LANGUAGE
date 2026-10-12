@@ -64,6 +64,7 @@ arithmetic-negation
 arithmetic-negative
 arithmetic-order
 arithmetic-overflow
+arithmetic-prefix
 arithmetic-probe
 arithmetic-recursion
 arithmetic-syntax

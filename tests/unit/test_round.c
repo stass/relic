@@ -63,9 +63,11 @@
 #define	SCENARIO_TEXT_MEMORY	"the memory limit refuses strings as serially"
 #define	SCENARIO_HISTORY	"a round reserves what its items inserted"
 #define	SCENARIO_COMPACT	"a merge resolves each local value once"
+#define	SCENARIO_DRIVER		"a lookup drives a shared round"
+#define	SCENARIO_DELTA_DRIVER	"a delta lookup drives its rounds"
 
 /* Room for a generated program and for a context's diagnostics. */
-#define	PROGRAM_MAX		(256 * 1024)
+#define	PROGRAM_MAX		(1024 * 1024)
 #define	DIAGNOSTICS_MAX		4096
 
 /*
@@ -127,6 +129,17 @@
 /* The bytes of each constant the string program's long strings repeat. */
 #define	LONG_STRING_BYTES	3000u
 
+/*
+ * The facts row(A, V, 7) of the join a lookup drives, each of its own V,
+ * and the facts row(B, V, 13) it joins for each V.
+ */
+#define	DRIVER_MATCHES		3000u
+#define	DRIVER_FAN		8u
+
+/* The layers of the graph the delta lookups walk, and its nodes a layer. */
+#define	DELTA_LAYERS		12u
+#define	DELTA_WIDTH		8u
+
 typedef struct diagnostics diagnostics_t;
 typedef struct text text_t;
 
@@ -149,6 +162,8 @@ struct text {
 };
 
 static void	 a_deferred_round_inserts_in_serial_order(size_t threads);
+static void	 a_delta_lookup_drives_its_rounds(size_t threads);
+static void	 a_lookup_drives_a_shared_round(size_t threads);
 static void	 a_querys_rewrite_runs_deferred_rounds(size_t threads);
 static uint64_t	 expected_candidates(const relic_t *ctx);
 static uint64_t	 reservation_declines(const relic_t *ctx);
@@ -191,6 +206,7 @@ static uint64_t	 thread_tasks(const relic_t *ctx);
 static void	 record_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
 		    const char *message);
+static void	 record_explained(void *callback_ctx, const char *line);
 static int	 record_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static uint64_t	 merged_rounds(const relic_t *ctx);
@@ -240,9 +256,9 @@ appendf(text_t *text, const char *format, ...)
  *	two member literals, so that a round runs two variants of one rule;
  *	even/1 and odd/1, mutually recursive over a chain, a component of two
  *	members whose rounds write both;
- *	reach/1 from a constant, whose plan starts with a lookup and is not
- *	cut; pair/2 over two derivations of one relation filtered by a
- *	comparison, with many duplicates across the items of one round;
+ *	reach/1 from a constant, whose plan is driven by a lookup and is cut
+ *	along its chain; pair/2 over two derivations of one relation filtered
+ *	by a comparison, with many duplicates across the items of one round;
  *	lonely/1 behind a negation, and done/0 of no columns;
  *	span/1, total/1, both/2, near/2 and dist/3 over idx/2, a number for
  *	each node, computing integers: span/1 one the value table lacks for
@@ -465,8 +481,8 @@ strings_rounds_merge(size_t threads)
 static void
 rounds_reserve_what_deferred_rounds_inserted(size_t threads)
 {
+	static text_t program;
 	diagnostics_t diagnostics;
-	text_t program;
 	relic_t *deferred;
 	char what[64];
 	unsigned int i;
@@ -516,8 +532,8 @@ rounds_reserve_what_deferred_rounds_inserted(size_t threads)
 static void
 rounds_reserve_what_serial_rounds_inserted(void)
 {
+	static text_t program;
 	diagnostics_t diagnostics;
-	text_t program;
 	relic_t *ctx;
 	unsigned int i;
 
@@ -556,6 +572,174 @@ rounds_reserve_what_serial_rounds_inserted(void)
 	}
 
 	relic_destroy(ctx);
+}
+
+/*
+ * A round whose plan starts with a lookup is shared on its work, without
+ * RELIC_F_PARALLEL_ALWAYS:
+ *
+ *	pair(A, B) :- row(A, V, 7), row(B, V, 13).
+ *
+ * over DRIVER_MATCHES facts row(A, V, 7), each of its own V, and
+ * DRIVER_FAN facts row(B, V, 13) for each V.  The plan looks both literals
+ * up, the first on its constant and the second on V and its constant, so
+ * the round has no scan to cut; it is cut along the first lookup's
+ * matches into several tasks, and derives what the serial evaluator
+ * derives, tuple for tuple, counting the same reads.  A pool of one worker
+ * shares nothing.
+ */
+static void
+a_lookup_drives_a_shared_round(size_t threads)
+{
+	diagnostics_t serial_diagnostics;
+	diagnostics_t deferred_diagnostics;
+	diagnostics_t explained;
+	relic_stats_t stats;
+	relic_t *serial;
+	relic_t *deferred;
+	const char *at;
+	size_t lookups;
+	char what[64];
+	unsigned int i;
+	unsigned int k;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (i = 0; i < DRIVER_MATCHES; i++) {
+		appendf(&failing, "row(%u,%u,7).\n", i, i);
+		for (k = 0; k < DRIVER_FAN; k++)
+			appendf(&failing, "row(%u,%u,13).\n",
+			    i * DRIVER_FAN + k, i);
+	}
+	appendf(&failing, "pair(A, B) :- row(A, V, 7), row(B, V, 13).\n");
+
+	snprintf(what, sizeof(what), "a join on %zu thread(s)", threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, 0, threads, 0, 0,
+	    &deferred_diagnostics);
+	if (serial != NULL && deferred != NULL) {
+		bzero(&explained, sizeof(explained));
+		relic_explain_set(deferred, record_explained, &explained);
+		checkf(relic_materialize(serial) == 0 &&
+		    relic_materialize(deferred) == 0, SCENARIO_DRIVER,
+		    "%s: both materialize", what);
+
+		lookups = 0;
+		for (at = explained.text; (at = strstr(at, "lookup row(")) !=
+		    NULL; at++)
+			lookups++;
+		checkf(lookups == 2 && strstr(explained.text, "scan ") == NULL,
+		    SCENARIO_DRIVER, "%s: both literals are looked up: \"%s\"",
+		    what, explained.text);
+
+		if (relic_pool_size(threads) > 1) {
+			checkf(merged_rounds(deferred) > 0 &&
+			    abandoned_rounds(deferred) == 0, SCENARIO_DRIVER,
+			    "%s: the join is merged, %" PRIu64 " merged and %"
+			    PRIu64 " abandoned", what, merged_rounds(deferred),
+			    abandoned_rounds(deferred));
+			checkf(deferred->pool->lookup_slices > 1,
+			    SCENARIO_DRIVER, "%s: the lookup is cut into "
+			    "slices, %" PRIu64 " of them", what,
+			    deferred->pool->lookup_slices);
+		} else {
+			checkf(merged_rounds(deferred) == 0, SCENARIO_DRIVER,
+			    "%s: no round is shared on one worker", what);
+		}
+		checkf(shared_as_expected(deferred, threads), SCENARIO_DRIVER,
+		    "%s: the rounds are shared when the pool has threads",
+		    what);
+		relic_stats(deferred, &stats);
+		checkf(stats.tuples == DRIVER_MATCHES * (1 + DRIVER_FAN) +
+		    DRIVER_MATCHES * DRIVER_FAN, SCENARIO_DRIVER,
+		    "%s: the join derives %u pairs, not %zu", what,
+		    DRIVER_MATCHES * DRIVER_FAN,
+		    stats.tuples - DRIVER_MATCHES * (1 + DRIVER_FAN));
+		contexts_agree(SCENARIO_DRIVER, what, serial, deferred);
+		checkf(deferred->account.round_bytes == 0, SCENARIO_DRIVER,
+		    "%s: the rounds gave back their buffers", what);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
+}
+
+/*
+ * The rounds of a recursion whose plans are driven by a lookup of a delta,
+ * and rounds whose plans test a fact before their driver, are shared under
+ * RELIC_F_PARALLEL_ALWAYS and derive what the serial evaluator does:
+ *
+ *	s(7, Y) :- flag(1), s(7, X), next(X, Y).
+ *	s(8, Y) :- flag(1), s(8, X), next(X, Y).
+ *	some(Y) :- flag(1), s(8, Y).
+ *	none(Y) :- flag(2), s(7, Y).
+ *
+ * over a layered graph next/2 of DELTA_LAYERS layers of DELTA_WIDTH nodes,
+ * every node joined to every node of the next layer, both walks seeded at
+ * the first layer.  Each round of the recursion looks its delta up on 7 or
+ * on 8, whose chains are interleaved, so each chain's visits begin at its
+ * first tuple at or past the delta's start, found from the key's frontier.
+ * some/1's plan tests flag(1), which holds, before its lookup, and none/1's
+ * flag(2), which does not, so its round has no visit to divide and derives
+ * nothing.  A pool of one worker runs the same tasks on the calling thread.
+ */
+static void
+a_delta_lookup_drives_its_rounds(size_t threads)
+{
+	diagnostics_t serial_diagnostics;
+	diagnostics_t deferred_diagnostics;
+	relic_t *serial;
+	relic_t *deferred;
+	char what[64];
+	unsigned int layer;
+	unsigned int from;
+	unsigned int to;
+
+	failing.length = 0;
+	failing.bytes[0] = '\0';
+	for (layer = 0; layer + 1 < DELTA_LAYERS; layer++) {
+		for (from = 0; from < DELTA_WIDTH; from++) {
+			for (to = 0; to < DELTA_WIDTH; to++)
+				appendf(&failing, "next(l%u_%u, l%u_%u).\n",
+				    layer, from, layer + 1, to);
+		}
+	}
+	for (from = 0; from < DELTA_WIDTH; from++)
+		appendf(&failing, "s(7, l0_%u).\ns(8, l0_%u).\n", from, from);
+	appendf(&failing,
+	    "flag(1).\n"
+	    "s(7, Y) :- flag(1), s(7, X), next(X, Y).\n"
+	    "s(8, Y) :- flag(1), s(8, X), next(X, Y).\n"
+	    "some(Y) :- flag(1), s(8, Y).\n"
+	    "none(Y) :- flag(2), s(7, Y).\n");
+
+	snprintf(what, sizeof(what), "delta lookups on %zu thread(s)",
+	    threads);
+	serial = context_for(failing.bytes, 0, 0, 0, 0, &serial_diagnostics);
+	deferred = context_for(failing.bytes, RELIC_F_PARALLEL_ALWAYS,
+	    threads, 0, 0, &deferred_diagnostics);
+	if (serial != NULL && deferred != NULL) {
+		checkf(relic_materialize(serial) == 0 &&
+		    relic_materialize(deferred) == 0, SCENARIO_DELTA_DRIVER,
+		    "%s: both materialize", what);
+		checkf(merged_rounds(deferred) > 0 &&
+		    abandoned_rounds(deferred) == 0 &&
+		    deferred->pool->lookup_slices > 1, SCENARIO_DELTA_DRIVER,
+		    "%s: the rounds are merged and their lookups cut, %" PRIu64
+		    " merged, %" PRIu64 " abandoned and %" PRIu64 " slices",
+		    what, merged_rounds(deferred), abandoned_rounds(deferred),
+		    deferred->pool->lookup_slices);
+		checkf(shared_as_expected(deferred, threads),
+		    SCENARIO_DELTA_DRIVER, "%s: the rounds are shared when the "
+		    "pool has threads", what);
+		contexts_agree(SCENARIO_DELTA_DRIVER, what, serial, deferred);
+		checkf(deferred->account.round_bytes == 0,
+		    SCENARIO_DELTA_DRIVER, "%s: the rounds gave back their "
+		    "buffers", what);
+	}
+
+	relic_destroy(serial);
+	relic_destroy(deferred);
 }
 
 /*
@@ -631,6 +815,23 @@ record_diagnostic(void *callback_ctx, enum relic_diag_level level,
 	if (written > 0 && (size_t)written <
 	    sizeof(diagnostics->text) - diagnostics->length)
 		diagnostics->length += (size_t)written;
+}
+
+/*
+ * Keep a line of a plan explained, one per line, as long as it fits.
+ */
+static void
+record_explained(void *callback_ctx, const char *line)
+{
+	diagnostics_t *explained;
+	int written;
+
+	explained = callback_ctx;
+	written = snprintf(explained->text + explained->length,
+	    sizeof(explained->text) - explained->length, "%s\n", line);
+	if (written > 0 && (size_t)written <
+	    sizeof(explained->text) - explained->length)
+		explained->length += (size_t)written;
 }
 
 /*
@@ -1797,6 +1998,12 @@ main(void)
 		rounds_reserve_what_deferred_rounds_inserted(threads);
 	}
 	rounds_reserve_what_serial_rounds_inserted();
+	a_lookup_drives_a_shared_round(1);
+	a_lookup_drives_a_shared_round(DEFERRED_THREADS);
+	a_lookup_drives_a_shared_round(MANY_THREADS);
+	a_delta_lookup_drives_its_rounds(1);
+	a_delta_lookup_drives_its_rounds(DEFERRED_THREADS);
+	a_delta_lookup_drives_its_rounds(MANY_THREADS);
 	pending_values_resolve_once();
 	compacted_rounds_agree(2, 0);
 	compacted_rounds_agree(DEFERRED_THREADS, 0);

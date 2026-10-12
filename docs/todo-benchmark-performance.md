@@ -302,45 +302,72 @@ grouped execution in step 6.
 [Medium, components: `lib/plan.c`, `lib/round.c`, `lib/exec.c`,
 `lib/index.c`, `lib/task.c`, `lib/cost.c`]
 
-**Evidence.** Scale-8 `facts-join` returns 571,953 rows and records zero
-parallel rounds at sixteen threads. Its first operation is a constant-key
-lookup; task cutting admits only a first-operation scan.
+**Evidence.** Scale-8 `facts-join` returns 571,953 rows. Its first
+operation is a constant-key lookup, and at 4ed6ec1 task cutting admitted
+only a first-operation scan, so it recorded zero parallel rounds at
+sixteen threads. In its plan, 595,792 lookups comprise 23,839 driver
+visits and 571,953 suffix matches; the result rows are not the driver's
+cardinality.
 
-**Implementation.** Apply
-[ordered driving cursors](../specs/design-driver-slicing.md): certify the
-first scan or lookup after a binding-free test prefix, run the prefix once
-privately, then divide the driver's visits by match ordinal. Count a
-lookup chain and locate bounded slice starts in two forward link walks;
-retain the index, original operation views and serial-order merge. Add no
-full match array or insert-time navigation metadata. Slice execution starts
-directly at its prepared cursor and cannot backtrack into the prefix or
-treat a slice boundary as a delta start.
+**Implementation.** Rounds are cut by
+[ordered driving cursors](../specs/design-driver-slicing.md). A plan's
+driver is its first scan or lookup after a binding-free test prefix
+(`relic_plan_driver()`), computed from the plan rather than stored. Before
+a round is shared, worker 0 runs each item's prefix once and counts its
+driver's visits, a lookup's in one forward link walk with a resumable
+delta seek (`relic_index_seek_*()`), then locates slice starts by ordinal
+in a second (`relic_slice_prepare()`, `relic_slice_cut()` in
+`lib/slice.c`). Each task runs its slice from the prepared cursor
+(`relic_exec_start_slice()`) and never backtracks into the prefix; the
+index, every other operation's view and the serial-order merge are
+unchanged, and nothing is added at insert time. An item's work is
+predicted from its history scaled by the driver's visits, or for an item
+without one walked from the visits by the shared cost model
+(`relic_cost_driven()`), the prefix left out. A prepared round is shared
+when that work is at least `RELIC_PARALLEL_MIN_WORK`, more than
+`RELIC_PREPARATION_SHARE` times the links preparation follows, and more
+than its shared span plus worker 0's preparation and
+`RELIC_PARALLEL_STARTUP_WORK` (`round_repays()`); a round declined once
+prepared counts in `preparation_declines`.
 
-**Design and regression.** Write the default-scheduling regression first:
-explain retains both indexed lookups, multiple nonempty tasks are prepared
-and the round merges, with the serial answers and work counters. In the
-recorded scale-8 plan, 595,792 total lookups comprise 23,839 driver visits
-and 571,953 suffix matches; the 571,953 result rows are not the driver's
-cardinality. Implement the design's prefix ownership, resumable delta
-positioning, cursor lifetime and failure matrix before enabling slicing.
-Exercise all views, repeated variables, skew, empty matches, more workers
-than matches, constant-expression errors, cancellation and allocation
-refusal. Preparation link steps remain separate from public tuple reads.
+The executor asks a plan's prefix tests before its join (`run_tests()`),
+so reaching the driver is decided in one place, opens the driver's cursor
+only once the prefix has held, and counts the driver's visits from its
+cursor at every return rather than in the lookup step. `test_round` holds
+the default-scheduling regression: both lookups are retained, the round
+is cut into several tasks and merged, and answers and counters match the
+serial run; `test_exec` holds slices against the whole run.
 
-**Scheduling and measurement.** Use exact driver visits and the shared
-execution cost model for a first suffix estimate, then physical-plan
-history, with prefix work separate. Charge count, boundary and positioning
-work to scheduling; measure declined attempts too. Validate default
-thresholds on cheap suffixes and shrinking rounds as well as the target
-join. Verify metadata scales with items and workers, not matches, and
-worker count does not multiply setup walks. Measure loading, index builds,
-preparation, execution and merge separately, then the complete command.
+**Measurements.** On the p620 (FreeBSD, clang 19), against 4ed6ec1, the
+median of seven interleaved runs of the complete command, wall time and
+peak RSS:
 
-**Exit criteria.** The selective benchmark distributes useful work among
-multiple workers and improves execution time after loading is isolated.
-Query answers, work counters and serial-order commit remain identical
-across thread counts. Combined with step 4, the complete `facts-join`
-command meets the competitive acceptance goal.
+| Scale | j1 | j4 | j8 | j12 | j16 |
+| ---: | --- | --- | --- | --- | --- |
+| 4 | 0.55 / 0.55 s | 0.55 / 0.54 s | 0.53 / 0.52 s | 0.50 / 0.49 s | 0.48 / 0.47 s |
+| 8 | 1.23 / 1.24 s | 1.22 / 1.22 s | 1.13 / 1.08 s | 1.06 / 1.03 s | 1.05 / 1.00 s |
+
+Scale-8 peak RSS grows from 243-250 MB to 260-268 MB at eight threads and
+more. The import alone takes 0.88 s at one thread and 0.66 s at sixteen
+(step 4), so most of the command is still loading. The other benchmark
+workloads are unchanged within noise at one and sixteen threads.
+
+The serial cost is the prefix phase and the visit count. Counted with
+`pmcstat` at one thread over five runs, instructions grow by at most 0.83%
+(`dist-bounded`), 0.33% on the closures and nothing on `facts-join`;
+cycles grow by 0.5-2.9% in the default build and by -0.8 to +1.1% when
+both builds align functions and blocks to 64 bytes, so most of the
+default build's cycle difference is layout.
+
+**What remains.** The validation and tuning listed under
+[driver slicing](todo-parallel.md#driver-slicing-is-not-validated-beyond-its-target):
+the thresholds are set by reasoning alone, the preparation walks need
+direct tests against an independent list of visits, and no test raises an
+interrupt inside a walk. Repeat the comparisons on the M3 under the
+measurement rules above, measuring loading, index builds, preparation,
+execution and merge separately. The complete scale-8 command is still
+dominated by its import, so the competitive acceptance goal for
+`facts-join` rests on step 4's remaining serial import work.
 
 ## 6. Reduce eligible grouped pipelines directly
 

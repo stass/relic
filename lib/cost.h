@@ -18,7 +18,9 @@
  * The work estimator (lib/cost.c): how much work a delta variant's plan
  * would do in the round about to run, from the sizes of the views it reads
  * and the distinct keys of the indexes it looks up through, and what
- * building the indexes it lacks would cost.
+ * building the indexes it lacks would cost; and, by the same rules, how
+ * much a round's prepared plans are expected to do, which decides whether
+ * the round is shared and how finely it is cut (lib/round.c).
  *
  * A round chooses between the two plans of a variant (plan.h) by this
  * estimate, before any of its items runs.  The estimate is integer
@@ -49,6 +51,32 @@ size_t	 relic_cost_choose(const relic_plan_family_t *family,
  */
 uint64_t relic_cost_estimate(const relic_plan_candidate_t *candidate,
 	    const relic_exec_env_t *env);
+
+/*
+ * What a round's scheduler expects a prepared plan to do in the round
+ * about to run, walked over the plan's own operations by the rules a
+ * candidate's recipe is (plan.h), with no index to build: the indexes a
+ * prepared plan reads exist.
+ *
+ * relic_cost_plan() is the work of running the plan once from its first
+ * operation.  relic_cost_driven() is the work of its driver at `driver`
+ * (relic_plan_driver()) and everything after it, when the driver visits
+ * `visits` tuples: one unit for each, and the operations after it walked
+ * from `visits` bindings, as though every tuple visited matched, since how
+ * many match is not known before they are read.  The prefix before the
+ * driver is not counted.  Both saturate at UINT64_MAX.
+ */
+uint64_t relic_cost_plan(const relic_plan_t *plan,
+	    const relic_exec_env_t *env);
+uint64_t relic_cost_driven(const relic_plan_t *plan, size_t driver,
+	    uint64_t visits, const relic_exec_env_t *env);
+
+/*
+ * The class the estimator counts an operation as (plan.h): by its kind and,
+ * for an AGGREGATE, by how it reaches its group's rows.  A recipe's steps
+ * are classified by it, so a recipe and a prepared plan are counted alike.
+ */
+enum relic_cost_kind relic_cost_kind_of(const relic_op_t *op);
 
 /*
  * The tuples a lookup is estimated to visit for `bindings` probes into a

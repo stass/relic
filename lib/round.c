@@ -27,13 +27,14 @@
  * decided here, from the round's plans, rather than trusted to the caller.
  *
  * The round is cut into tasks, enumerated in serial order: item by item,
- * and a plan whose first operation is a SCAN piece by piece of that scan's
- * view.  The pool's workers claim the tasks (lib/pool.c), each worker its
- * own in increasing order.  A task derives exactly what the serial
- * evaluator derives while its first cursor is inside its piece, in the
- * same order, and screens what it derives (lib/task.c): a worker's
- * candidates are the tuples it derived that neither the frozen store nor
- * its own earlier candidates hold.
+ * and a plan with a driver (plan.h) slice by slice of the driver's visits,
+ * in their order, its prefix having been run once when the item was
+ * prepared (lib/slice.c).  The pool's workers claim the tasks
+ * (lib/pool.c), each worker its own in increasing order.  A task derives
+ * exactly what the serial evaluator derives while the driver's cursor is
+ * inside its slice, in the same order, and screens what it derives
+ * (lib/task.c): a worker's candidates are the tuples it derived that
+ * neither the frozen store nor its own earlier candidates hold.
  *
  * The merge then inserts the candidates as the serial evaluator would have
  * inserted them, on the pool's workers (lib/merge.c).  The candidates in
@@ -51,21 +52,28 @@
  * grow, for memory or for the memory limit, more candidates than the tuple
  * limit could still admit, new tuples or integers a limit would refuse,
  * room the allocator would not give, storage the pool itself could not
- * get, an evaluation error a task met, or an interrupt a task found -- is
- * abandoned: its candidates
- * are released, its counts forgotten, and the caller runs the round
- * serially, where whatever refuses it refuses it as it always would.  So a
- * limit or an error is reported only in a round run serially, at the tuple
- * the serial evaluator meets it, and a merge never fails.
+ * get, an evaluation error a prefix or a task met, or an interrupt
+ * preparation or a task found -- is declined or abandoned: its candidates
+ * are released, its counts and notes forgotten, and the caller runs the
+ * round serially, where whatever refuses it refuses it as it always
+ * would.  So a limit or an error is reported only in a round run serially,
+ * at the tuple the serial evaluator meets it, and a merge never fails.
+ *
+ * Whether a round is shared is decided twice.  Before anything is
+ * prepared, a round whose items could not do enough work even were each
+ * driver to visit its whole view is declined at the cost of arithmetic.
+ * Once prepared, with each driver's visits counted, the round is shared
+ * only when its expected work repays what preparing and sharing it costs
+ * (round_repays()).
  */
 
 /*
- * How many pieces a plan's first scan is cut into for each worker.  Enough
- * that a worker which draws a heavy piece is balanced by others drawing
- * several light ones, and few enough that claiming and bookkeeping stay a
- * small part of a piece's work.  A constant of performance alone: what a
- * round derives does not depend on how its scans are cut, only on the
- * pieces being contiguous and in order.
+ * How many pieces a plan's driver is cut into for each worker, at most.
+ * Enough that a worker which draws a heavy piece is balanced by others
+ * drawing several light ones, and few enough that claiming and bookkeeping
+ * stay a small part of a piece's work.  A constant of performance alone:
+ * what a round derives does not depend on how its drivers are cut, only on
+ * the pieces being contiguous and in order.
  */
 #define	RELIC_CHUNKS_PER_WORKER	8u
 
@@ -84,6 +92,17 @@
 #define	RELIC_PARALLEL_MIN_WORK	8000u
 #define	RELIC_CHUNK_WORK	(RELIC_PARALLEL_MIN_WORK / 4)
 
+/*
+ * What sharing a round costs beside its work, in the same units: waking
+ * the pool and waiting for its slowest worker, taken as one piece's work;
+ * and how many times the links preparing its drivers followed the round's
+ * expected work must exceed, since a link costs about what a visit does
+ * and the round would not follow them serially.  Constants of performance
+ * alone, set by that reasoning and not tuned.
+ */
+#define	RELIC_PARALLEL_STARTUP_WORK	RELIC_CHUNK_WORK
+#define	RELIC_PREPARATION_SHARE		4u
+
 typedef struct relic_round_expectation relic_round_expectation_t;
 
 /*
@@ -98,48 +117,51 @@ struct relic_round_expectation {
 static void	 abandon_round(relic_t *ctx, relic_pool_t *pool);
 static void	 decline_round(relic_t *ctx, relic_pool_t *pool);
 static int	 begin_worker_texts(relic_t *ctx, relic_pool_t *pool);
+static uint64_t	 ceiling_divide(uint64_t dividend, uint64_t divisor);
 static size_t	 end_worker_texts(relic_pool_t *pool);
-static int	 cut_tasks(relic_pool_t *pool, const relic_round_t *round,
-		    bool finest);
+static int	 cut_tasks(relic_t *ctx, relic_pool_t *pool,
+		    const relic_round_t *round);
+static uint64_t	 driven_estimate(const relic_round_t *round,
+		    const relic_round_item_t *item, size_t driver,
+		    uint64_t visits);
 static void	 forget_worker_counters(relic_pool_t *pool);
-static uint64_t	 item_estimate(const relic_round_t *round,
-		    const relic_round_item_t *item);
-static bool	 item_is_cut(const relic_round_item_t *item);
+static bool	 is_lookup_driven(const relic_round_item_t *item);
 static size_t	 item_pieces(const relic_pool_t *pool,
-		    const relic_round_t *round, const relic_round_item_t *item,
-		    bool finest);
-static uint64_t	 item_range(const relic_round_t *round,
-		    const relic_round_item_t *item);
-static relic_tuple_range_t item_view(const relic_round_t *round,
-		    const relic_round_item_t *item);
+		    const relic_prepared_item_t *prepared, bool finest);
+static uint64_t	 item_setup(const relic_round_item_t *item,
+		    const relic_prepared_item_t *prepared);
 static void	 job_begin(relic_round_job_t *job, relic_t *ctx,
 		    relic_pool_t *pool, const relic_round_t *round);
-static const relic_relation_t *relation_read_as_it_runs(
-		    const relic_op_t *op);
+static uint64_t	 optimistic_estimate(const relic_round_t *round,
+		    const relic_round_item_t *item);
 static int	 pool_prepare(relic_pool_t *pool, const relic_round_t *round);
+static int	 prepare_items(relic_t *ctx, relic_pool_t *pool,
+		    const relic_round_t *round, bool finest);
 static void	 record_task_work(const relic_pool_t *pool,
 		    relic_round_t *round);
+static const relic_relation_t *relation_read_as_it_runs(
+		    const relic_op_t *op);
 static void	 release_candidates(relic_t *ctx, relic_pool_t *pool);
-static void	 report_task_notes(relic_t *ctx, relic_pool_t *pool,
+static int	 report_notes(relic_t *ctx, relic_pool_t *pool,
 		    const relic_round_t *round);
 static int	 reserve_candidates(relic_t *ctx, relic_pool_t *pool,
 		    const relic_round_t *round);
 static relic_round_expectation_t round_expectation(
 		    const relic_round_t *round);
-static bool	 round_is_worth_sharing(const relic_t *ctx,
+static bool	 round_may_repay(const relic_t *ctx,
 		    const relic_round_t *round);
 static void	 round_needs(const relic_round_t *round, size_t *op_roomp,
 		    uint16_t *arity_roomp);
 static bool	 round_reads_no_target(const relic_round_t *round);
-static uint64_t	 scaled_work(uint64_t work, uint64_t range_now,
-		    uint64_t range_then);
-static void	 take_worker_counters(relic_pool_t *pool,
+static bool	 round_repays(const relic_pool_t *pool,
+		    const relic_round_t *round);
+static uint64_t	 saturating_add(uint64_t left, uint64_t right);
+static uint64_t	 scaled_work(uint64_t work, uint64_t now, uint64_t then);
+static void	 take_counters(relic_pool_t *pool, const relic_round_t *round,
 		    relic_counters_t *counters);
 static uint64_t	 tasks_run_by_threads(const relic_pool_t *pool);
-static size_t	 view_pieces(const relic_pool_t *pool,
-		    relic_tuple_range_t view);
-static relic_tuple_range_t view_piece(relic_tuple_range_t view, size_t piece,
-		    size_t pieces);
+static uint64_t	 whole_estimate(const relic_round_t *round,
+		    const relic_round_item_t *item);
 static int	 worker_fit(relic_worker_t *worker, size_t op_room,
 		    uint16_t arity_room);
 static size_t	 worker_share(uint64_t expected, size_t workers,
@@ -151,38 +173,63 @@ static size_t	 worker_share(uint64_t expected, size_t workers,
  * cut as finely as the pool allows, so that small programs exercise what
  * large ones do.  Otherwise a round is shared only when the context has
  * threads to share it with and it is expected to repay them.
+ *
+ * The workers' buffers for strings are begun before any item is prepared,
+ * since a prefix can compute one, and worker 0's scratch runs the
+ * prefixes, so what their strings grew it to counts toward what the
+ * serial run would hold, as a task's would.
+ *
+ * A round the caller interrupted before its tasks all ended is abandoned,
+ * for its serial run to report the interrupt, whatever its tasks saw: a
+ * task that runs no plan, or one that ends between looks, never sees it.
+ * An interrupt made while the merged round reports its notes fails it
+ * instead, as it would fail the serial run reporting the same notes.
  */
-bool
+enum relic_round_outcome
 relic_round_run(relic_t *ctx, relic_round_t *round)
 {
 	relic_round_job_t job;
 	relic_pool_t *pool;
 	size_t texts_bytes;
 	bool always;
+	int status;
 
 	always = (ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0;
-	if (!always && !round_is_worth_sharing(ctx, round))
-		return (false);
+	if (!always && !round_may_repay(ctx, round))
+		return (RELIC_ROUND_DECLINED);
 	if (!round_reads_no_target(round))
-		return (false);
+		return (RELIC_ROUND_DECLINED);
 
 	if (ctx->pool == NULL) {
 		if (relic_pool_create(&ctx->pool, ctx->config.threads,
 		    ctx->hash_seed) != 0)
-			return (false);
+			return (RELIC_ROUND_DECLINED);
 	}
 	pool = ctx->pool;
 	relic_pool_adopt(pool);
 	if (!always && pool->worker_count < 2)
-		return (false);
-	if (pool_prepare(pool, round) != 0 ||
-	    cut_tasks(pool, round, always) != 0)
-		return (false);
-	if ((relic_round_first_call(round) != NULL &&
-	    begin_worker_texts(ctx, pool) != 0) ||
-	    reserve_candidates(ctx, pool, round) != 0) {
+		return (RELIC_ROUND_DECLINED);
+	if (pool_prepare(pool, round) != 0)
+		return (RELIC_ROUND_DECLINED);
+	if (relic_round_first_call(round) != NULL &&
+	    begin_worker_texts(ctx, pool) != 0)
+		return (RELIC_ROUND_DECLINED);
+	if (prepare_items(ctx, pool, round, always) != 0) {
 		decline_round(ctx, pool);
-		return (false);
+		return (RELIC_ROUND_DECLINED);
+	}
+	if (!always && !round_repays(pool, round)) {
+		pool->preparation_declines++;
+		decline_round(ctx, pool);
+		return (RELIC_ROUND_DECLINED);
+	}
+	if (cut_tasks(ctx, pool, round) != 0) {
+		decline_round(ctx, pool);
+		return (RELIC_ROUND_DECLINED);
+	}
+	if (reserve_candidates(ctx, pool, round) != 0) {
+		decline_round(ctx, pool);
+		return (RELIC_ROUND_DECLINED);
 	}
 
 	job_begin(&job, ctx, pool, round);
@@ -190,14 +237,15 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	texts_bytes = end_worker_texts(pool);
 
 	if (relic_atomic_bool_load_relaxed(&job.abandoned) ||
+	    relic_signal_flag_raised(&ctx->interrupted) ||
 	    !relic_round_merge(ctx, pool, round, texts_bytes)) {
 		abandon_round(ctx, pool);
 		pool->abandoned_rounds++;
-		return (false);
+		return (RELIC_ROUND_DECLINED);
 	}
 
-	report_task_notes(ctx, pool, round);
-	take_worker_counters(pool, &ctx->counters);
+	status = report_notes(ctx, pool, round);
+	take_counters(pool, round, &ctx->counters);
 	release_candidates(ctx, pool);
 
 	record_task_work(pool, round);
@@ -206,7 +254,7 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	if (pool->worker_count > 1)
 		ctx->counters.parallel_rounds++;
 
-	return (true);
+	return (status == 0 ? RELIC_ROUND_MERGED : RELIC_ROUND_FAILED);
 }
 
 /*
@@ -229,12 +277,12 @@ relic_round_first_call(const relic_round_t *round)
 }
 
 void
-relic_round_record(const relic_round_t *round, relic_round_item_t *item,
-    uint64_t work, uint64_t inserted)
+relic_round_record(relic_round_item_t *item, uint64_t work,
+    const relic_driver_reads_t *reads, uint64_t inserted)
 {
 	if (item->history != NULL) {
 		item->history->work = work;
-		item->history->range = item_range(round, item);
+		item->history->reads = *reads;
 		item->history->ran = true;
 	}
 	if (item->insertions != NULL) {
@@ -244,13 +292,17 @@ relic_round_record(const relic_round_t *round, relic_round_item_t *item,
 }
 
 /*
- * Whether a round is worth sharing: the context has threads to share it
- * with, and the round is expected to do enough work to repay them.  The
- * work summed so far stays below the threshold, so comparing each estimate
- * with what remains of it cannot overflow.
+ * Whether a round could repay sharing it, asked before anything is
+ * prepared: the context has threads to share it with, and the round could
+ * do enough work were each driver to visit every tuple of its view.  It
+ * declines only rounds too small to share however their drivers turn out,
+ * and its view of a LOOKUP driver is that optimistic so that a selective
+ * key does not decline a round its fan-out would repay.  The work summed
+ * so far stays below the threshold, so comparing each estimate with what
+ * remains of it cannot overflow.
  */
 static bool
-round_is_worth_sharing(const relic_t *ctx, const relic_round_t *round)
+round_may_repay(const relic_t *ctx, const relic_round_t *round)
 {
 	uint64_t estimate;
 	uint64_t work;
@@ -261,7 +313,7 @@ round_is_worth_sharing(const relic_t *ctx, const relic_round_t *round)
 
 	work = 0;
 	for (i = 0; i < round->item_count; i++) {
-		estimate = item_estimate(round, &round->items[i]);
+		estimate = optimistic_estimate(round, &round->items[i]);
 		if (estimate >= RELIC_PARALLEL_MIN_WORK - work)
 			return (true);
 		work += estimate;
@@ -271,66 +323,112 @@ round_is_worth_sharing(const relic_t *ctx, const relic_round_t *round)
 }
 
 /*
- * The work an item is expected to do: what it did the last time it ran,
- * scaled by how its first scan's view has grown or shrunk since, or the
- * view itself for an item that has not run or keeps no history.  A
- * recursive component's rounds change size gradually, so the round before
- * predicts the next well enough for a threshold whose only cost is a
- * missed chance or a barrier paid for nothing.  An item whose view was
- * empty last time did work that no tuple of it accounts for -- the rest of
- * its plan found nothing to read -- so there is nothing to scale, and it
- * is expected to do that much again and to read its view now.
+ * The most work an item is expected to do before its driver is prepared:
+ * as driven_estimate() expects of its driver visiting its whole view, or
+ * the whole plan's for an item with no driver.
  */
 static uint64_t
-item_estimate(const relic_round_t *round, const relic_round_item_t *item)
+optimistic_estimate(const relic_round_t *round,
+    const relic_round_item_t *item)
 {
-	const relic_plan_history_t *history;
-	uint64_t range;
+	relic_tuple_range_t view;
+	size_t driver;
 
-	range = item_range(round, item);
-	history = item->history;
-	if (history == NULL || !history->ran)
-		return (range);
-	if (history->range == 0)
-		return (history->work + range);
+	if (item->plan == NULL)
+		return (whole_estimate(round, item));
+	driver = relic_plan_driver(item->plan);
+	if (driver == RELIC_PLAN_NO_DRIVER)
+		return (whole_estimate(round, item));
 
-	return (scaled_work(history->work, range, history->range));
+	view = relic_exec_view(round->env, &item->plan->ops[driver].u.atom);
+
+	return (driven_estimate(round, item, driver,
+	    view.end > view.first ? view.end - view.first : 0));
 }
 
 /*
- * `work` times `range_now` over `range_then`, which is not zero, or
- * UINT64_MAX when that is more than a uint64_t holds.  A range is at most
- * a relation's tuples, below 2^32, so the remainder's product fits.
+ * The work an item whose driver is at `driver` is expected to do from its
+ * driver on when the driver visits `visits` tuples: what the driver and
+ * the operations after it did the last time the plan ran, scaled by how
+ * many tuples the driver visited then and visits now, or, for a plan that
+ * has not run, keeps no history or visited nothing, what the estimator
+ * walks from the visits (relic_cost_driven()).  A recursive component's
+ * rounds change size gradually, so the round before predicts the next well
+ * enough for a decision whose only cost is a missed chance or a barrier
+ * paid for nothing.  The prefix is left out: it runs once, and has run
+ * when the estimate decides anything but the first check.
  */
 static uint64_t
-scaled_work(uint64_t work, uint64_t range_now, uint64_t range_then)
+driven_estimate(const relic_round_t *round, const relic_round_item_t *item,
+    size_t driver, uint64_t visits)
+{
+	const relic_plan_history_t *history;
+
+	history = item->history;
+	if (history == NULL || !history->ran || history->reads.visits == 0)
+		return (relic_cost_driven(item->plan, driver, visits,
+		    round->env));
+
+	assert(history->work >= history->reads.prefix);
+
+	return (scaled_work(history->work - history->reads.prefix, visits,
+	    history->reads.visits));
+}
+
+/*
+ * The work an item with no driver is expected to do, run whole: one
+ * derivation for a seed, what the plan did the last time it ran, or what
+ * the estimator walks for one that has not (relic_cost_plan()).  Such a
+ * plan starts with an assignment or a fold, whose work does not follow a
+ * view the round can measure.
+ */
+static uint64_t
+whole_estimate(const relic_round_t *round, const relic_round_item_t *item)
+{
+	if (item->plan == NULL)
+		return (1);
+	if (item->history != NULL && item->history->ran)
+		return (item->history->work);
+
+	return (relic_cost_plan(item->plan, round->env));
+}
+
+/*
+ * `work` times `now` over `then`, rounded up, or UINT64_MAX when that is
+ * more than a uint64_t holds.  Both counts are a driver's visits of one
+ * view, at most a relation's tuples, below 2^32, so the remainder's
+ * product fits.
+ */
+static uint64_t
+scaled_work(uint64_t work, uint64_t now, uint64_t then)
 {
 	uint64_t whole;
 	uint64_t part;
 
-	whole = work / range_then;
-	part = work % range_then * range_now / range_then;
-	if (whole != 0 && range_now > (UINT64_MAX - part) / whole)
+	assert(now <= RELIC_TUPLE_MAX && then > 0 &&
+	    then <= RELIC_TUPLE_MAX);
+
+	whole = work / then;
+	part = ceiling_divide(work % then * now, then);
+	if (whole != 0 && now > (UINT64_MAX - part) / whole)
 		return (UINT64_MAX);
 
-	return (whole * range_now + part);
+	return (whole * now + part);
 }
 
 /*
- * The tuples an item's first scan reads, as the round resolves its view,
- * or one for an item that is not cut.
+ * `dividend` over `divisor`, which is not zero, rounded up.
  */
 static uint64_t
-item_range(const relic_round_t *round, const relic_round_item_t *item)
+ceiling_divide(uint64_t dividend, uint64_t divisor)
 {
-	relic_tuple_range_t view;
+	return (dividend / divisor + (dividend % divisor != 0));
+}
 
-	if (!item_is_cut(item))
-		return (1);
-
-	view = item_view(round, item);
-
-	return (view.end - view.first);
+static uint64_t
+saturating_add(uint64_t left, uint64_t right)
+{
+	return (left > UINT64_MAX - right ? UINT64_MAX : left + right);
 }
 
 /*
@@ -351,32 +449,34 @@ job_begin(relic_round_job_t *job, relic_t *ctx, relic_pool_t *pool,
 }
 
 /*
- * Record in each item's history the work its tasks did and the tuples they
- * inserted, which the merge has made the item's turn.  An item's tasks are
- * consecutive.
+ * Record in each item's history the work its prefix and its tasks did and
+ * the tuples they inserted, which the merge has made the item's turn, as
+ * the item's serial turn would have recorded them.
  */
 static void
 record_task_work(const relic_pool_t *pool, relic_round_t *round)
 {
+	const relic_prepared_item_t *prepared;
 	const relic_round_task_t *task;
+	relic_driver_reads_t reads;
 	uint64_t inserted;
 	uint64_t work;
+	size_t piece;
 	size_t i;
 
-	work = 0;
-	inserted = 0;
-	for (i = 0; i < pool->task_count; i++) {
-		task = &pool->tasks[i];
-		work += task->work;
-		inserted += task->inserted;
-
-		if (i + 1 == pool->task_count ||
-		    pool->tasks[i + 1].item != task->item) {
-			relic_round_record(round, &round->items[task->item],
-			    work, inserted);
-			work = 0;
-			inserted = 0;
+	for (i = 0; i < round->item_count; i++) {
+		prepared = &pool->prepared[i];
+		reads = prepared->reads;
+		work = relic_exec_work(0, &prepared->prefix_reads);
+		inserted = 0;
+		for (piece = 0; piece < prepared->pieces; piece++) {
+			task = &pool->tasks[prepared->first_task + piece];
+			work += task->work;
+			reads.prefix += task->reads.prefix;
+			reads.visits += task->reads.visits;
+			inserted += task->inserted;
 		}
+		relic_round_record(&round->items[i], work, &reads, inserted);
 	}
 }
 
@@ -489,8 +589,10 @@ worker_share(uint64_t expected, size_t workers, size_t admissible)
 /*
  * Leave a round declined before it was published as though it had never
  * begun: the workers' buffers for strings and their candidates released,
- * with their charge.  Either may hold nothing, and releasing nothing is
- * harmless, so every way a round is declined before publication ends
+ * with their charge, and whatever preparing its items counted, noted or
+ * met forgotten, with the prepared records, which the next round's
+ * preparation writes afresh.  Any may hold nothing, and releasing nothing
+ * is harmless, so every way a round is declined before publication ends
  * here.
  */
 static void
@@ -498,6 +600,7 @@ decline_round(relic_t *ctx, relic_pool_t *pool)
 {
 	(void)end_worker_texts(pool);
 	release_candidates(ctx, pool);
+	forget_worker_counters(pool);
 }
 
 /*
@@ -569,12 +672,13 @@ relation_read_as_it_runs(const relic_op_t *op)
 
 /*
  * Ready the pool for a round: each worker's scratch holding the round's
- * longest plan and widest target.  Returns 0, or -1, unreported, when
- * something could not be allocated.
+ * longest plan and widest target, and a prepared record for each item.
+ * Returns 0, or -1, unreported, when something could not be allocated.
  */
 static int
 pool_prepare(relic_pool_t *pool, const relic_round_t *round)
 {
+	relic_prepared_item_t *prepared;
 	size_t op_room;
 	size_t i;
 	uint16_t arity_room;
@@ -584,6 +688,12 @@ pool_prepare(relic_pool_t *pool, const relic_round_t *round)
 		if (worker_fit(&pool->workers[i], op_room, arity_room) != 0)
 			return (-1);
 	}
+
+	prepared = relic_grow_array(pool->prepared, &pool->prepared_capacity,
+	    round->item_count, sizeof(*pool->prepared));
+	if (prepared == NULL)
+		return (-1);
+	pool->prepared = prepared;
 
 	return (0);
 }
@@ -656,122 +766,51 @@ worker_fit(relic_worker_t *worker, size_t op_room, uint16_t arity_room)
 }
 
 /*
- * Whether an item is cut into pieces of its first operation's view: a plan
- * whose first operation is a SCAN.  A seed derives one tuple, and a plan
- * that starts elsewhere -- a LOOKUP whose key is all constants, a test of
- * constants -- has no range to cut without walking it, and such a plan is
- * rare and short.
- */
-static bool
-item_is_cut(const relic_round_item_t *item)
-{
-	return (item->plan != NULL &&
-	    item->plan->ops[0].kind == RELIC_OP_SCAN);
-}
-
-/*
- * The view an item that is cut reads with its first scan, as the round
- * resolves it.
- */
-static relic_tuple_range_t
-item_view(const relic_round_t *round, const relic_round_item_t *item)
-{
-	assert(item_is_cut(item));
-
-	return (relic_exec_view(round->env, &item->plan->ops[0].u.atom));
-}
-
-/*
- * How many pieces an item is cut into: one for an item that is not cut,
- * and otherwise its expected work in pieces of RELIC_CHUNK_WORK, at least
- * one and at most what view_pieces() allows, or `finest`, that most.  A
- * plan over a small delta with a large fan-out below it is then cut
- * finely, where cutting by its range alone would give it one piece.
- */
-static size_t
-item_pieces(const relic_pool_t *pool, const relic_round_t *round,
-    const relic_round_item_t *item, bool finest)
-{
-	uint64_t wanted;
-	size_t most;
-
-	if (!item_is_cut(item))
-		return (1);
-
-	most = view_pieces(pool, item_view(round, item));
-	if (finest)
-		return (most);
-
-	wanted = item_estimate(round, item) / RELIC_CHUNK_WORK;
-	if (wanted < 1)
-		return (1);
-	if (wanted > most)
-		return (most);
-
-	return ((size_t)wanted);
-}
-
-/*
- * The most pieces a view is cut into: as many as the pool's workers use to
- * balance their shares, and never more than the view holds tuples, so that
- * each piece holds one.  An empty view is one empty piece.
- */
-static size_t
-view_pieces(const relic_pool_t *pool, relic_tuple_range_t view)
-{
-	size_t pieces;
-	size_t tuples;
-
-	tuples = view.end - view.first;
-
-	pieces = RELIC_CHUNKS_PER_WORKER * pool->worker_count;
-	if (pieces > tuples)
-		pieces = tuples;
-
-	return (pieces > 0 ? pieces : 1);
-}
-
-/*
- * Enumerate the round's tasks in serial order: item by item, and the pieces
- * of an item that is cut in the order of its view, growing the pool's task
- * array as each item needs.  Returns 0, or -1, unreported, when the array
- * could not grow.
+ * Prepare every item of the round on worker 0, in order: a seed and a plan
+ * with no driver are run whole, and are expected to do what
+ * whole_estimate() says; a plan with a driver has its prefix run and its
+ * driver's visits counted (relic_slice_prepare()), and is expected to do
+ * what driven_estimate() says of those visits.  Each item is then given
+ * its pieces, `finest` asking for as many as the pool allows.  The links
+ * preparation followed are counted whatever becomes of the round.  Returns
+ * 0, or -1 when a prefix met a failure or the evaluation was interrupted,
+ * for the round to be declined.
  */
 static int
-cut_tasks(relic_pool_t *pool, const relic_round_t *round, bool finest)
+prepare_items(relic_t *ctx, relic_pool_t *pool, const relic_round_t *round,
+    bool finest)
 {
 	const relic_round_item_t *item;
-	relic_round_task_t *tasks;
-	relic_round_task_t *task;
-	relic_tuple_range_t view;
-	size_t pieces;
-	size_t piece;
+	relic_prepared_item_t *prepared;
+	size_t driver;
 	size_t i;
-
-	pool->task_count = 0;
+	int status;
 
 	for (i = 0; i < round->item_count; i++) {
 		item = &round->items[i];
-		bzero(&view, sizeof(view));
-		if (item_is_cut(item))
-			view = item_view(round, item);
-		pieces = item_pieces(pool, round, item, finest);
+		prepared = &pool->prepared[i];
 
-		tasks = relic_grow_array(pool->tasks, &pool->task_capacity,
-		    pool->task_count + pieces, sizeof(*pool->tasks));
-		if (tasks == NULL)
+		driver = item->plan == NULL ? RELIC_PLAN_NO_DRIVER :
+		    relic_plan_driver(item->plan);
+		if (driver == RELIC_PLAN_NO_DRIVER) {
+			bzero(prepared, sizeof(*prepared));
+			prepared->form = RELIC_TASK_WHOLE;
+			prepared->pieces = 1;
+			prepared->estimate = whole_estimate(round, item);
+			continue;
+		}
+
+		status = relic_slice_prepare(prepared,
+		    &pool->workers[0].scratch, round->env, item->plan,
+		    &ctx->interrupted);
+		pool->preparation_links += prepared->links;
+		if (status != 0)
 			return (-1);
-		pool->tasks = tasks;
 
-		for (piece = 0; piece < pieces; piece++) {
-			task = &pool->tasks[pool->task_count];
-			pool->task_count++;
-
-			bzero(task, sizeof(*task));
-			task->item = i;
-			task->cut = item_is_cut(item);
-			if (task->cut)
-				task->piece = view_piece(view, piece, pieces);
+		if (prepared->form == RELIC_TASK_SLICE) {
+			prepared->estimate = driven_estimate(round, item,
+			    driver, prepared->visits);
+			prepared->pieces = item_pieces(pool, prepared, finest);
 		}
 	}
 
@@ -779,53 +818,259 @@ cut_tasks(relic_pool_t *pool, const relic_round_t *round, bool finest)
 }
 
 /*
- * Piece `piece` of a view cut into `pieces`: the pieces are contiguous and
- * in order, together cover the view exactly, and differ in size by at most
- * one tuple.  A view holds fewer than 2^32 tuples and a round far fewer than
- * 2^32 pieces, so the products fit in 64 bits.
+ * How many pieces a SLICE item is cut into: its expected work in pieces of
+ * RELIC_CHUNK_WORK, at least one; or, when `finest`, as many as there may
+ * be.  There may be no more than the pool's workers use to balance their
+ * shares, and no more than the driver's visits, so that each piece holds
+ * one.  A plan over a small delta with a large fan-out below it is then
+ * cut finely, where cutting by its visits alone would give it one piece,
+ * and a single visit is never divided, however much work is below it.
  */
-static relic_tuple_range_t
-view_piece(relic_tuple_range_t view, size_t piece, size_t pieces)
+static size_t
+item_pieces(const relic_pool_t *pool, const relic_prepared_item_t *prepared,
+    bool finest)
 {
-	relic_tuple_range_t range;
-	uint64_t tuples;
+	uint64_t wanted;
+	uint64_t most;
 
-	tuples = view.end - view.first;
-	range.first = view.first +
-	    (relic_tuple_id_t)(tuples * piece / pieces);
-	range.end = view.first +
-	    (relic_tuple_id_t)(tuples * (piece + 1) / pieces);
+	assert(prepared->form == RELIC_TASK_SLICE && prepared->visits > 0);
 
-	return (range);
+	most = (uint64_t)RELIC_CHUNKS_PER_WORKER * pool->worker_count;
+	if (most > prepared->visits)
+		most = prepared->visits;
+	if (finest)
+		return ((size_t)most);
+
+	wanted = prepared->estimate / RELIC_CHUNK_WORK;
+	if (wanted < 1)
+		return (1);
+	if (wanted > most)
+		return ((size_t)most);
+
+	return ((size_t)wanted);
 }
 
 /*
- * Report each task's first mixed-type comparison in task order, which is
- * the order the serial evaluator meets them in, once the round has merged.
+ * Whether a prepared round repays sharing it, by its items' expected work
+ * E, the sum of their estimates, against what preparing and sharing it
+ * costs.  It does when E is at least RELIC_PARALLEL_MIN_WORK; when E is
+ * more than RELIC_PREPARATION_SHARE times the links preparing its drivers
+ * follows, counting the pass that will find the starts of the pieces of a
+ * lookup cut into several (relic_slice_cut_links()); and when the round
+ * would end sooner shared than serially.  Shared, it takes at least an
+ * even share of E for each busy worker, one that has a task, and at least
+ * its largest piece, a piece's work being taken as an even share of its
+ * item's: a round of one large item that is not cut gains nothing.  To
+ * that is added what worker 0 does before the tasks run -- the links and
+ * each item's setup (item_setup()) -- and RELIC_PARALLEL_STARTUP_WORK, and
+ * the sum must be below E.  An estimate that saturated cannot be
+ * compared, and declines.
  */
-static void
-report_task_notes(relic_t *ctx, relic_pool_t *pool,
-    const relic_round_t *round)
+static bool
+round_repays(const relic_pool_t *pool, const relic_round_t *round)
 {
-	relic_round_task_t *task;
+	const relic_prepared_item_t *prepared;
+	uint64_t largest;
+	uint64_t links;
+	uint64_t piece;
+	uint64_t setup;
+	uint64_t tasks;
+	uint64_t total;
+	uint64_t busy;
+	uint64_t span;
 	size_t i;
 
-	for (i = 0; i < pool->task_count; i++) {
-		task = &pool->tasks[i];
-		relic_report_mixed_note(ctx, round->items[task->item].rule,
-		    &task->note);
+	total = 0;
+	links = 0;
+	setup = 0;
+	tasks = 0;
+	largest = 0;
+	for (i = 0; i < round->item_count; i++) {
+		prepared = &pool->prepared[i];
+		total = saturating_add(total, prepared->estimate);
+		links = saturating_add(links, saturating_add(prepared->links,
+		    relic_slice_cut_links(prepared, round->items[i].plan)));
+		setup = saturating_add(setup, item_setup(&round->items[i],
+		    prepared));
+		if (prepared->form != RELIC_TASK_EMPTY)
+			tasks += prepared->pieces;
+
+		piece = ceiling_divide(prepared->estimate, prepared->pieces);
+		if (piece > largest)
+			largest = piece;
 	}
+
+	if (total == UINT64_MAX || total < RELIC_PARALLEL_MIN_WORK)
+		return (false);
+	/* E > RELIC_PREPARATION_SHARE * links, without the product. */
+	if (links >= ceiling_divide(total, RELIC_PREPARATION_SHARE))
+		return (false);
+
+	busy = tasks < pool->worker_count ? tasks : pool->worker_count;
+	span = ceiling_divide(total, busy > 0 ? busy : 1);
+	if (largest > span)
+		span = largest;
+
+	return (saturating_add(saturating_add(span, links), saturating_add(
+	    setup, RELIC_PARALLEL_STARTUP_WORK)) < total);
 }
 
 /*
- * Add what every worker counted to the context's counters, and start
- * counting afresh.
+ * What worker 0 does for a prepared item before its tasks run, besides
+ * following links: a unit for each operation of its prefix, as the cost
+ * model counts a test (cost.h), whether or not the prefix ran to its end,
+ * the tuples its prefix read, and a unit for each task it is cut into.
+ */
+static uint64_t
+item_setup(const relic_round_item_t *item,
+    const relic_prepared_item_t *prepared)
+{
+	size_t driver;
+	size_t prefix;
+
+	prefix = 0;
+	if (item->plan != NULL) {
+		driver = relic_plan_driver(item->plan);
+		if (driver != RELIC_PLAN_NO_DRIVER)
+			prefix = driver;
+	}
+
+	return (saturating_add(saturating_add(prefix, relic_exec_work(0,
+	    &prepared->prefix_reads)), prepared->pieces));
+}
+
+/*
+ * Whether an item's plan has a driver and it is a LOOKUP.
+ */
+static bool
+is_lookup_driven(const relic_round_item_t *item)
+{
+	size_t driver;
+
+	if (item->plan == NULL)
+		return (false);
+	driver = relic_plan_driver(item->plan);
+
+	return (driver != RELIC_PLAN_NO_DRIVER &&
+	    item->plan->ops[driver].kind == RELIC_OP_LOOKUP);
+}
+
+/*
+ * Enumerate the round's tasks in serial order: item by item, and the
+ * slices of a SLICE item in the order of its driver's visits.  The task
+ * array is grown once, to the round's pieces, and nothing is published
+ * until every task is written.  Returns 0, or -1, unreported, when the
+ * array could not grow, or the evaluation was interrupted or a lookup's
+ * chain ended short while its pieces were found, for the round to be
+ * declined.
+ */
+static int
+cut_tasks(relic_t *ctx, relic_pool_t *pool, const relic_round_t *round)
+{
+	relic_prepared_item_t *prepared;
+	relic_round_task_t *tasks;
+	relic_round_task_t *task;
+	uint64_t links;
+	size_t count;
+	size_t piece;
+	size_t first;
+	size_t i;
+	int status;
+
+	count = 0;
+	for (i = 0; i < round->item_count; i++) {
+		if (pool->prepared[i].pieces > SIZE_MAX - count)
+			return (-1);
+		count += pool->prepared[i].pieces;
+	}
+	tasks = relic_grow_array(pool->tasks, &pool->task_capacity, count,
+	    sizeof(*pool->tasks));
+	if (tasks == NULL)
+		return (-1);
+	pool->tasks = tasks;
+
+	pool->task_count = 0;
+	for (i = 0; i < round->item_count; i++) {
+		prepared = &pool->prepared[i];
+		assert(prepared->pieces >= 1);
+		first = pool->task_count;
+		prepared->first_task = first;
+		for (piece = 0; piece < prepared->pieces; piece++) {
+			task = &pool->tasks[pool->task_count];
+			pool->task_count++;
+
+			bzero(task, sizeof(*task));
+			task->item = i;
+			task->form = prepared->form;
+		}
+
+		if (prepared->form != RELIC_TASK_SLICE)
+			continue;
+		links = 0;
+		status = relic_slice_cut(prepared, round->items[i].plan,
+		    &pool->tasks[first], &ctx->interrupted, &links);
+		pool->preparation_links += links;
+		if (status != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Report each item's first mixed-type comparisons in item order, its
+ * prefix's before its tasks' and its tasks' in task order, which is the
+ * order the serial evaluator meets them in, once the round has merged.
+ * The serial evaluator looks for an interrupt as it goes on from each
+ * note, so an interrupt the diagnostic callback makes is found after the
+ * item that noted it, and named for that item's target.  Returns 0, or -1
+ * when it was found and reported, the later items' notes unreported.
+ */
+static int
+report_notes(relic_t *ctx, relic_pool_t *pool, const relic_round_t *round)
+{
+	relic_prepared_item_t *prepared;
+	const relic_round_item_t *item;
+	size_t task;
+	size_t i;
+
+	for (i = 0; i < round->item_count; i++) {
+		prepared = &pool->prepared[i];
+		item = &round->items[i];
+		relic_report_mixed_note(ctx, item->rule, &prepared->note);
+		for (task = prepared->first_task; task < prepared->first_task +
+		    prepared->pieces; task++)
+			relic_report_mixed_note(ctx, item->rule,
+			    &pool->tasks[task].note);
+		if (relic_refuse_interrupted(ctx, "deriving",
+		    round->targets[item->target]) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Add what the round counted to the context's counters -- each item's
+ * prefix once, and what every worker's tasks counted -- and start counting
+ * afresh.  Count the slices of indexed drivers the round ran.
  */
 static void
-take_worker_counters(relic_pool_t *pool, relic_counters_t *counters)
+take_counters(relic_pool_t *pool, const relic_round_t *round,
+    relic_counters_t *counters)
 {
+	const relic_prepared_item_t *prepared;
 	relic_worker_t *worker;
 	size_t i;
+
+	for (i = 0; i < round->item_count; i++) {
+		prepared = &pool->prepared[i];
+		relic_exec_counters_add(&counters->read,
+		    &prepared->prefix_reads);
+		if (prepared->form == RELIC_TASK_SLICE &&
+		    is_lookup_driven(&round->items[i]))
+			pool->lookup_slices += prepared->pieces;
+	}
 
 	for (i = 0; i < pool->worker_count; i++) {
 		worker = &pool->workers[i];
