@@ -1508,7 +1508,7 @@ reserve_then_fill(relic_t *ctx, relic_relation_t *rel, size_t added,
 	projected = relic_relation_bytes_after_growth(rel, &growth);
 	store_bytes_before = ctx->account.store_bytes;
 
-	if (relic_relation_reserve(ctx, rel, &growth) != 0 ||
+	if (relic_relation_reserve(ctx, rel, &growth, NULL) != 0 ||
 	    relic_relation_bytes(rel) != projected ||
 	    ctx->account.store_bytes - store_bytes_before !=
 	    projected - bytes_before)
@@ -1601,7 +1601,7 @@ a_reservation_for_many_holds_them_all(void)
 	bzero(&growth, sizeof(growth));
 	growth.by_stripe[0] = 1;
 
-	check(relic_relation_reserve(ctx, rel, &growth) != 0,
+	check(relic_relation_reserve(ctx, rel, &growth, NULL) != 0,
 	    SCENARIO_RESERVED,
 	    "reserving in a relation with a secondary index should fail");
 	reported = relic_error(ctx);
@@ -1638,7 +1638,7 @@ refused_as_too_large(relic_t *ctx, relic_relation_t *rel, size_t added,
 	checkf(relic_relation_bytes_after_growth(rel, &growth) ==
 	    relic_relation_bytes(rel), SCENARIO_RESERVED,
 	    "reserving %s should project no growth", what);
-	checkf(relic_relation_reserve(ctx, rel, &growth) != 0,
+	checkf(relic_relation_reserve(ctx, rel, &growth, NULL) != 0,
 	    SCENARIO_RESERVED, "reserving %s should fail", what);
 
 	reported = relic_error(ctx);

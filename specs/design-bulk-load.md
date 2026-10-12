@@ -283,11 +283,12 @@ reaches its capacity whether its growth was deferred or not.
 The parts run on the context's existing pool, adopted into the current
 process, when it has more than one worker and the commit's appends hold
 at least `RELIC_COMMIT_PARALLEL_TUPLES` tuples, a measured count below
-which waking the pool costs more than it saves; otherwise they run on the
-calling thread. The parts are the same either way. A commit never makes
-a pool. Job storage is prepared before the no-failure phase; apply runs
-to completion without a failure or callback after publishing only some
-destinations.
+which waking the pool costs more than it saves, or whatever their count
+under `RELIC_F_PARALLEL_ALWAYS`, so that small loads exercise the shared
+path; otherwise they run on the calling thread, and no growth defers.
+The parts are the same either way. A commit never makes a pool. Job
+storage is prepared before the no-failure phase; apply runs to completion
+without a failure or callback after publishing only some destinations.
 
 The receipt owns all resources needed to finish or clean up preparation.
 It holds the actual builder/destination owners, not an index into an array

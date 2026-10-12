@@ -124,15 +124,6 @@ Placing in parallel needs the symbol index partitioned by hash, as the
 canonical index is by stripe, which is the storage-layout alternative the
 bulk-load design names under persistent lookup partitioning.
 
-**An import into a populated store appends its facts one at a time.**
-[Medium, component: `lib/relation.c`, `lib/facts.c`] An empty store adopts
-a builder's payload whole, but `append_builder()` copies, indexes and
-counts each staged tuple on the calling thread when the store already
-holds facts. The bulk-load design's append copies the columns, then places
-each canonical stripe as a job of its own, publishing counts and totals
-after the barrier; prepare those stripe lists before the commit's no-failure
-phase.
-
 **A batch window's scratch grows with its records, not its bytes.** [Low,
 component: `lib/window.c`, `lib/import.c`] A window holds up to
 `RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays
@@ -266,8 +257,8 @@ and batches large tables over the pool; at scale 8 the import alone takes
 0.89 s at one thread and 0.66 s at sixteen on the p620, and 0.34 s at
 sixteen on the M3, against DuckDB's complete sixteen-thread median of
 0.191 s ([step 4](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)).
-The serial steps left -- framing, symbol placement and the populated-store
-append, the entries above -- bound the parallel gain. Measure scale 10,
+The serial steps left -- framing and symbol placement, the entries
+above -- bound the parallel gain. Measure scale 10,
 time and peak, once they are parallel. Pool-entry packing remains a
 separate memory-layout candidate and must preserve byte-pointer lifetime,
 addressable range and affordable rehash.

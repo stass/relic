@@ -189,10 +189,12 @@ decided after, once per operation -- a window's publication, a load's
 commit, a round's merge -- on the calling thread, before the operation's
 first reservation, by a pure test that reports nothing and sets no
 refusal state: every deferrable growth of the operation defers when its
-whole admitted footprint, every table and destination it reserves, plus
-every table those growths would replace fits the limit, and none does
-otherwise. A growth that does not defer completes at once, stripe by
-stripe, each old table freed as its replacement is filled, and its
+parts run on a pool and its whole admitted footprint, every table and
+destination it reserves, plus every table those growths would replace
+fits the limit, and none does otherwise. Parts that all run on the
+calling thread gain nothing from deferral, which would only hold every
+replaced table at once. A growth that does not defer completes at once,
+stripe by stripe, each old table freed as its replacement is filled, and its
 overlap stays an uncharged transient, as every growth's old generation
 is. From reservation until the parts end the account counts each
 receipt's prepared tables beside the tables they replace. A failed or

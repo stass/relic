@@ -418,31 +418,10 @@ struct relic_stripe_fill {
 };
 
 /*
- * What a load's commit does to the base store of a builder's predicate:
- * give it the builder's tuples, at least one.
- *
- * A store holding no tuple adopts the builder's payload whole, `adopt`
- * set; whether its header exists, and what capacity it kept, does not
- * matter.  A store holding tuples has them appended: `hashes[i]` is the
- * wide hash of builder tuple i, and `added` counts the tuples by the stripe
- * of the canonical index each falls in, both computed before the commit
- * discards anything, so that preparing them can fail while nothing has
- * changed.  An adoption has neither.
- *
- * `builder` points into the load's staging, which must not move or release
- * it until the action is released.
- */
-struct relic_base_action {
-	relic_builder_t		*builder;
-	uint64_t		*hashes;	/* an append's, by tuple */
-	relic_tuple_growth_t	 added;		/* an append's, by stripe */
-	bool			 adopt;
-};
-
-/*
- * Tuples a relation takes all at once, as a round's merge gives them: none
- * of them in the relation and no two of them equal, in the order they take
- * their identifiers, tuple i becoming `first + i`.
+ * Tuples a relation takes all at once, as a round's merge or a load's
+ * commit gives them: none of them in the relation and no two of them
+ * equal, in the order they take their identifiers, tuple i becoming
+ * `first + i`.
  *
  * `columns`, `hashes` and `stripes` hold each tuple's columns, its wide
  * hash and the stripe of the canonical index that chooses, and `growth`
@@ -456,18 +435,24 @@ struct relic_base_action {
  * allocated and not yet filled, and nothing otherwise.
  *
  * Every per-tuple array of the append and of its keys lies in `block`,
- * one allocation laid out once the count is known; `charged` is what the
- * block is charged to the round.  `reserved` is what the relation holds
- * from the reservation on, the grown tables of the append and of its keys
- * with it, which the storage total counts until the append is finished,
- * when the grown tables have replaced the tables they were grown from.
+ * one allocation laid out once the count is known, but for a load's
+ * columns, which it borrows from the builder; `charged` is what the block
+ * is charged to the round, nothing for a load's, which is staging.
+ * `reserved` is what the relation holds from the reservation on, the
+ * grown tables of the append and of its keys with it, which the storage
+ * total counts until the append is finished, when the grown tables have
+ * replaced the tables they were grown from.
  *
- * The caller sets `count` and `growth`; the relation store allocates the
- * arrays, fills them and releases them.  An append of all zeroes holds
- * nothing.  The parts of the work on an append that run on several
- * threads at once write no word another part writes: a part that lists
- * the tuples by stripe writes one index's list, and every other part
- * touches one stripe of one index.
+ * A merge sets `count` and `growth`, relic_relation_append_open() lays
+ * out the arrays, and the merge's parts fill them.  A load's commit has
+ * its arrays laid out and filled by relic_base_action_prepare(), the
+ * columns borrowed.  Either way the reservation sets `first`, `reserved`
+ * and `grown`, and relic_relation_append_close() releases the block and
+ * any grown table left unfilled.  An append of all zeroes holds nothing.
+ * The parts of the work on an append that run on several threads at once
+ * write no word another part writes: a part that lists the tuples by
+ * stripe writes one index's list, and every other part touches one stripe
+ * of one index.
  */
 struct relic_append {
 	void			*block;
@@ -504,6 +489,33 @@ struct relic_append_keys {
 	size_t		 stripe_start[RELIC_STRIPES + 1];
 	size_t		 new_keys[RELIC_STRIPES];
 	relic_idtab_t	 grown[RELIC_STRIPES];
+};
+
+/*
+ * What a load's commit does to the base store of a builder's predicate:
+ * give it the builder's tuples, at least one.
+ *
+ * A store holding no tuple adopts the builder's payload whole, `adopt`
+ * set; whether its header exists, and what capacity it kept, does not
+ * matter.  A store holding tuples has them appended through `append`,
+ * which borrows the builder's columns and holds each tuple's wide hash and
+ * canonical stripe, the tuples counted and listed by stripe, all prepared
+ * before the commit discards anything, so that preparing them can fail
+ * while nothing has changed; it has no secondary index's records, since
+ * the commit discards those indexes.  An adoption's append is empty.
+ *
+ * `store` is the base store, set once the reservation has found or made
+ * it, and `projected` the bytes the limits admitted it to hold once the
+ * action is applied, which a debug build checks it holds then.  `builder`
+ * points into the load's staging, which must not move or release it until
+ * the action is released.
+ */
+struct relic_base_action {
+	relic_builder_t		*builder;
+	relic_relation_t	*store;
+	relic_append_t		 append;
+	size_t			 projected;
+	bool			 adopt;
 };
 
 /*

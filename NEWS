@@ -31,9 +31,10 @@ relic 1.0.0 (unreleased)
     value and answered for it alone, rather than for every node the walk
     reaches.  Rounds of evaluation, a join that starts from a lookup of
     constants divided along that lookup's matches as one that starts from
-    a scan is along its tuples, and the reading of a large table imported
-    from a regular file on eight threads or more, can be shared among
-    threads, with the same answers in the same order whatever their
+    a scan is along its tuples, the reading of a large table imported
+    from a regular file on eight threads or more, and the adding of a
+    large load's facts to relations that already hold some, can be shared
+    among threads, with the same answers in the same order whatever their
     number.
   * Optional limits on the tuples held and on the memory relations, values,
     plans and rewrites occupy: a load, an evaluation or a query that would

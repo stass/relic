@@ -272,8 +272,8 @@ workers, the p620 on three of four tables at eight, losing 9% on
 `files8`, and on all four from sixteen.
 
 **What remains.** The steps left on the calling thread bound the parallel
-gain: framing each window, placing new values in the symbol index, and
-appending into a populated store, each a `TODO.md` entry.
+gain: framing each window and placing new values in the symbol index,
+each a `TODO.md` entry.
 
 **Design and measurement gates.** Preserve the ordinary domain encoding and
 global first-occurrence numbering. Measure dictionary reconciliation,

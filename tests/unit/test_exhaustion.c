@@ -526,7 +526,8 @@ static void	 a_first_load_moves_its_facts_into_place(void);
 static size_t	 inserted_bytes(relic_t *ctx, const relic_relation_t *model);
 static void	 a_mixed_commit_out_of_memory_adds_nothing(void);
 static void	 sweep_load(const load_case_t *load, bool from_stream);
-static void	 sweep_mixed_commit(const char *later);
+static void	 sweep_mixed_commit(const char *later, size_t facts,
+		    bool pooled);
 static int	 load_sweep_program(relic_t *ctx, const char *program,
 		    bool from_stream);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
@@ -1264,38 +1265,60 @@ inserted_bytes(relic_t *ctx, const relic_relation_t *model)
  * predicates, so the load is run naming each first.  Whichever request is
  * refused, the load reports once, adds no fact, and leaves the storage
  * total what the relations hold; and the same load succeeds once the
- * allocator recovers.
+ * allocator recovers.  The commit runs on the calling thread, its stripes
+ * growing as it reserves, and on the pool the materialization made, its
+ * stripes' growth deferred to the parts placing them.  The pooled load
+ * appends more tuples than the one stripe holding held(a) has room for,
+ * so some stripe grows however the tuples fall.
  */
 static void
 a_mixed_commit_out_of_memory_adds_nothing(void)
 {
 	sweep_mixed_commit(
-	    "held(b).\nfresh(c).\nheld(a).\nfresh(c).\nheld(d).\n");
+	    "held(b).\nfresh(c).\nheld(a).\nfresh(c).\nheld(d).\n", 4,
+	    false);
 	sweep_mixed_commit(
-	    "fresh(c).\nheld(b).\nheld(a).\nfresh(c).\nheld(d).\n");
+	    "fresh(c).\nheld(b).\nheld(a).\nfresh(c).\nheld(d).\n", 4,
+	    false);
+	sweep_mixed_commit(
+	    "held(b).\nfresh(c).\nheld(a).\nfresh(c).\nheld(d).\n"
+	    "held(e).\nheld(f).\nheld(g).\nheld(h).\nheld(i).\nheld(j).\n"
+	    "held(k).\nheld(l).\nheld(m).\nheld(n).\nheld(o).\nheld(p).\n"
+	    "held(q).\nheld(r).\n", 18, true);
 }
 
 /*
  * The sweep a_mixed_commit_out_of_memory_adds_nothing() runs for `later`,
- * a load stating fresh(c), held(a), held(b) and held(d) in some order.
+ * a load stating fresh(c), held(a) and new facts of held, which leave the
+ * stores holding `facts` facts, on a context with a pool of two workers
+ * when `pooled`.
  */
 static void
-sweep_mixed_commit(const char *later)
+sweep_mixed_commit(const char *later, size_t facts, bool pooled)
 {
+	relic_config_t config;
+	uint64_t deferred;
 	size_t refused;
 	size_t completed;
 	long budget;
 	relic_t *ctx;
+	bool shares;
 	int status;
 
+	bzero(&config, sizeof(config));
+	if (pooled) {
+		config.threads = 2;
+		config.flags = RELIC_F_PARALLEL_ALWAYS;
+	}
 	refused = 0;
 	completed = 0;
 
 	for (budget = 0; budget < LOAD_SWEEP; budget++) {
-		ctx = relic_create();
+		ctx = relic_create_config(&config);
 		if (ctx == NULL || relic_load_string(ctx, "first.dl",
 		    "held(a).\nseen(X) :- held(X).\n") != 0 ||
-		    relic_materialize(ctx) != 0) {
+		    relic_materialize(ctx) != 0 ||
+		    (pooled && ctx->pool == NULL)) {
 			check(false, SCENARIO_LOAD,
 			    "a context should hold a fact and a derivation");
 			relic_destroy(ctx);
@@ -1304,9 +1327,11 @@ sweep_mixed_commit(const char *later)
 		relic_diag_set(ctx, count_error, NULL);
 		errors_reported = 0;
 
+		deferred = ctx->counters.commits_deferred;
 		refuse_allocations_after(budget);
 		status = relic_load_string(ctx, "later.dl", later);
 		serve_every_allocation();
+		deferred = ctx->counters.commits_deferred - deferred;
 
 		checkf(errors_reported == (status != 0 ? 1u : 0u) &&
 		    (status == 0 || out_of_memory(ctx)), SCENARIO_LOAD,
@@ -1314,20 +1339,26 @@ sweep_mixed_commit(const char *later)
 		    "memory, not %zu, with allocation %ld refused",
 		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
 		    errors_reported, budget);
-		checkf(relic_base_total(ctx) == (status != 0 ? 1u : 4u) &&
+		shares = pooled && relic_pool_workers(ctx->pool) > 1;
+		checkf(status != 0 || deferred == (shares ? 1u : 0u),
+		    SCENARIO_LOAD, "a mixed load %s should %sdefer its "
+		    "stripes' growth, with allocation %ld refused",
+		    shares ? "on a pool" : "on the calling thread",
+		    shares ? "" : "not ", budget);
+		checkf(relic_base_total(ctx) == (status != 0 ? 1u : facts) &&
 		    ctx->account.store_bytes == storage_by_hand(ctx),
-		    SCENARIO_LOAD, "a mixed load that %s should hold %d facts "
+		    SCENARIO_LOAD, "a mixed load that %s should hold %zu facts "
 		    "and account its storage exactly, not %zu facts and %zu "
 		    "bytes for %zu, with allocation %ld refused",
-		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 4,
-		    relic_base_total(ctx), ctx->account.store_bytes,
-		    storage_by_hand(ctx), budget);
+		    status != 0 ? "failed" : "succeeded",
+		    status != 0 ? (size_t)1 : facts, relic_base_total(ctx),
+		    ctx->account.store_bytes, storage_by_hand(ctx), budget);
 		if (status == 0)
 			completed++;
 		else {
 			refused++;
 			checkf(relic_load_string(ctx, "later.dl", later) == 0 &&
-			    relic_base_total(ctx) == 4, SCENARIO_LOAD,
+			    relic_base_total(ctx) == facts, SCENARIO_LOAD,
 			    "a mixed load should succeed once the allocator "
 			    "recovers, with allocation %ld refused", budget);
 		}

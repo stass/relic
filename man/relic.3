@@ -253,7 +253,8 @@ of a query; zero leaves either unbounded.
 .Fa max_memory
 does not bound all the memory the library uses: the text being loaded, the
 program's rules and queries, the field of a table being imported and a
-prepared query are sized by what the caller wrote, and growing an array
+prepared query are sized by what the caller wrote, a load holds the facts
+it states in staging of its own until it adds them, and growing an array
 holds the old one until the new one is filled.
 Nothing those tables hold is released before the context is destroyed:
 every distinct integer, symbol and string a load, a fact, the constants of

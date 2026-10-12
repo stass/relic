@@ -65,11 +65,17 @@ static void	 classify_keys(relic_relation_t *relation,
 		    const relic_dom_t *columns);
 static size_t	 columns_bytes_after(const relic_relation_t *relation,
 		    size_t added);
+static void	 append_columns(relic_relation_t *relation,
+		    const relic_append_t *append);
 static size_t	 append_grown_bytes(const relic_append_t *append);
 static size_t	 append_layout(const relic_relation_t *relation,
 		    relic_append_t *append, void *block);
 static int	 append_grow(relic_relation_t *relation,
 		    relic_append_t *append);
+static size_t	 canonical_bytes_replaced(const relic_relation_t *relation,
+		    const relic_tuple_growth_t *growth);
+static void	 canonical_layout(relic_append_t *append, char **cursorp,
+		    size_t *bytesp);
 static int	 enforce_limits(relic_t *ctx, const relic_relation_t *relation,
 		    uint64_t hash);
 static bool	 exceeds_tuple_limit(const relic_t *ctx);
@@ -108,7 +114,8 @@ static int	 relation_insert_hashed(relic_t *ctx,
 		    relic_relation_t *relation, const relic_dom_t *columns,
 		    uint64_t hash, bool *addedp);
 static int	 relation_grow(relic_t *ctx, relic_relation_t *relation,
-		    const relic_tuple_growth_t *growth);
+		    const relic_tuple_growth_t *growth,
+		    relic_idtab_t grown[RELIC_STRIPES]);
 static bool	 relation_too_large(relic_t *ctx,
 		    const relic_relation_t *relation, size_t added,
 		    size_t *columnsp);
@@ -126,16 +133,21 @@ static relic_relation_t *reltab_relation(relic_t *ctx,
 static void	 reltab_reset(relic_reltab_t *table);
 static void	 adopt_builder(relic_t *ctx, relic_relation_t *store,
 		    relic_builder_t *builder);
-static void	 append_builder(relic_relation_t *store,
-		    const relic_base_action_t *action);
 static size_t	 base_bytes(const relic_t *ctx) RELIC_UNUSED;
-static int	 bases_fit(relic_t *ctx, const relic_base_action_t *actions,
-		    size_t count);
+static int	 bases_fit(relic_t *ctx, relic_base_action_t *actions,
+		    size_t count, bool *sharep, bool *deferp);
+static int	 builder_append_open(const relic_relation_t *store,
+		    relic_builder_t *builder, relic_append_t *append);
 static bool	 builder_has_room_for_one(const relic_builder_t *builder,
 		    uint64_t hash);
 static int	 builder_realize(relic_builder_t *builder,
 		    const relic_builder_projection_t *projection);
 static uint32_t	 builder_rehash(uint32_t id, void *ctx);
+static bool	 commit_shares(relic_t *ctx, size_t appended);
+static int	 commit_reserve_append(relic_t *ctx, relic_relation_t *store,
+		    relic_append_t *append, bool defer);
+static void	 place_commit_part(void *argument, size_t part,
+		    size_t worker_index);
 static relic_tuple_id_t payload_append(relic_payload_t *payload,
 		    uint16_t arity, const relic_dom_t *columns, uint64_t hash);
 static size_t	 payload_bytes(const relic_payload_t *payload);
@@ -771,12 +783,7 @@ append_layout(const relic_relation_t *relation, relic_append_t *append,
 	append->columns = relic_block_piece(&cursor, &bytes,
 	    relic_saturating_product(count, relation->arity),
 	    sizeof(*append->columns));
-	append->hashes = relic_block_piece(&cursor, &bytes, count,
-	    sizeof(*append->hashes));
-	append->stripes = relic_block_piece(&cursor, &bytes, count,
-	    sizeof(*append->stripes));
-	append->stripe_list = relic_block_piece(&cursor, &bytes, count,
-	    sizeof(*append->stripe_list));
+	canonical_layout(append, &cursor, &bytes);
 
 	for (index = 0; index < append->key_count; index++) {
 		keys = &append->keys[index];
@@ -791,6 +798,22 @@ append_layout(const relic_relation_t *relation, relic_append_t *append,
 	}
 
 	return (bytes);
+}
+
+/*
+ * Lay out, at *cursorp, which is NULL when only measuring, and adding to
+ * *bytesp, the arrays every append has for the canonical index: each
+ * tuple's hash and stripe, and the list of the tuples by stripe.
+ */
+static void
+canonical_layout(relic_append_t *append, char **cursorp, size_t *bytesp)
+{
+	append->hashes = relic_block_piece(cursorp, bytesp, append->count,
+	    sizeof(*append->hashes));
+	append->stripes = relic_block_piece(cursorp, bytesp, append->count,
+	    sizeof(*append->stripes));
+	append->stripe_list = relic_block_piece(cursorp, bytesp,
+	    append->count, sizeof(*append->stripe_list));
 }
 
 /*
@@ -993,21 +1016,38 @@ relic_relation_bytes_during_append(const relic_relation_t *relation,
 {
 	size_t bytes;
 	size_t index;
-	size_t s;
 
 	bytes = relic_relation_bytes_after_append(relation, append);
 	if (append->count == 0)
 		return (bytes);
 
-	for (s = 0; s < RELIC_STRIPES; s++)
-		bytes = relic_saturating_sum(bytes,
-		    relic_idtab_bytes_replaced_by_reserve(
-		    &relation->payload.index[s], append->growth.by_stripe[s]));
+	bytes = relic_saturating_sum(bytes,
+	    canonical_bytes_replaced(relation, &append->growth));
 
 	for (index = 0; index < relation->index_count; index++)
 		bytes = relic_saturating_sum(bytes,
 		    relic_index_bytes_replaced_by_append(
 		    &relation->indexes[index], &append->keys[index]));
+
+	return (bytes);
+}
+
+/*
+ * The bytes of the canonical stripes that growing them for `growth`
+ * replaces, which a deferred growth holds beside their replacements.
+ */
+static size_t
+canonical_bytes_replaced(const relic_relation_t *relation,
+    const relic_tuple_growth_t *growth)
+{
+	size_t bytes;
+	size_t s;
+
+	bytes = 0;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes = relic_saturating_sum(bytes,
+		    relic_idtab_bytes_replaced_by_reserve(
+		    &relation->payload.index[s], growth->by_stripe[s]));
 
 	return (bytes);
 }
@@ -1114,6 +1154,18 @@ void
 relic_relation_take_append(relic_t *ctx, relic_relation_t *relation,
     const relic_append_t *append)
 {
+	append_columns(relation, append);
+	relation->payload.count += append->count;
+	ctx->store.tuple_count += append->count;
+}
+
+/*
+ * Copy an append's columns after the relation's last tuple, into room its
+ * reservation made, counting nothing.
+ */
+static void
+append_columns(relic_relation_t *relation, const relic_append_t *append)
+{
 	size_t words;
 
 	assert(append->first == relation->payload.count + 1);
@@ -1122,9 +1174,6 @@ relic_relation_take_append(relic_t *ctx, relic_relation_t *relation,
 	if (words != 0)
 		bcopy(append->columns, tuple_at(relation, append->first),
 		    words * sizeof(*relation->payload.columns));
-
-	relation->payload.count += append->count;
-	ctx->store.tuple_count += append->count;
 }
 
 /*
@@ -1179,6 +1228,8 @@ place_append_stripe(relic_relation_t *relation, relic_append_t *append,
 	stripe = &relation->payload.index[s];
 	relic_idtab_complete_growth(stripe, &append->grown[s], tuple_rehash,
 	    relation);
+	assert(relic_idtab_has_room(stripe,
+	    append->stripe_start[s + 1] - append->stripe_start[s]));
 
 	for (i = append->stripe_start[s]; i < append->stripe_start[s + 1];
 	    i++) {
@@ -1337,16 +1388,22 @@ relation_too_large(relic_t *ctx, const relic_relation_t *relation,
  * afterwards wrong and nothing having reported an error.
  *
  * Whatever a failed reservation did manage is kept.  Capacity is not wasted,
- * and the caller reconciles the storage total from what the relation actually
- * holds rather than from which step failed.
+ * and the caller reconciles the storage total from what the relation and
+ * `grown` actually hold rather than from which step failed.
+ *
+ * When `grown` is not NULL, each stripe's growth is prepared in grown[s],
+ * which holds nothing on entry, allocated and not filled, for the part
+ * placing the stripe's tuples to complete (place_append_stripe()), rather
+ * than completed here; either way the stripe reaches the same capacity.
  */
 static int
 relation_grow(relic_t *ctx, relic_relation_t *relation,
-    const relic_tuple_growth_t *growth)
+    const relic_tuple_growth_t *growth, relic_idtab_t grown[RELIC_STRIPES])
 {
 	relic_dom_t *columns;
 	size_t needed_columns;
 	size_t s;
+	int status;
 	char described[RELIC_PRED_TEXT_MAX];
 
 	if (relation->index_count != 0) {
@@ -1362,8 +1419,15 @@ relation_grow(relic_t *ctx, relic_relation_t *relation,
 		return (-1);
 
 	for (s = 0; s < RELIC_STRIPES; s++) {
-		if (relic_idtab_reserve(&relation->payload.index[s],
-		    growth->by_stripe[s], tuple_rehash, relation) != 0) {
+		if (grown != NULL)
+			status = relic_idtab_prepare_growth(
+			    &relation->payload.index[s], growth->by_stripe[s],
+			    &grown[s]);
+		else
+			status = relic_idtab_reserve(
+			    &relation->payload.index[s], growth->by_stripe[s],
+			    tuple_rehash, relation);
+		if (status != 0) {
 			relic_diag_no_memory(ctx);
 			return (-1);
 		}
@@ -1382,26 +1446,44 @@ relation_grow(relic_t *ctx, relic_relation_t *relation,
 }
 
 /*
- * Make room in a relation without secondary indexes for `growth` and keep
- * the storage total in step.
+ * Make room in a relation without secondary indexes for `growth`, each
+ * stripe's growth prepared in grown[s] when `grown` is not NULL
+ * (relation_grow()), and keep the storage total in step: it counts what
+ * the relation holds and, until their stripes complete them, the prepared
+ * tables.  `grown` holds nothing on entry, and its tables are the
+ * caller's: the part placing a stripe completes its table, and
+ * relic_relation_append_close() releases, and takes out of the total, any
+ * no part completed.
  *
- * The total is reconciled from what the relation holds before and after, so
- * it stays exact whether the reservation succeeded, failed part way through,
- * or grew nothing at all.  A total maintained by adding at the successful
- * sites and subtracting at the failing ones would be a list of places to
- * remember, and the list would be wrong the first time a step was added.
+ * The total is reconciled from what the relation and `grown` hold before
+ * and after, so it stays exact whether the reservation succeeded, failed
+ * part way through, or grew nothing at all.  A total maintained by adding
+ * at the successful sites and subtracting at the failing ones would be a
+ * list of places to remember, and the list would be wrong the first time a
+ * step was added.
  */
 int
 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
-    const relic_tuple_growth_t *growth)
+    const relic_tuple_growth_t *growth, relic_idtab_t grown[RELIC_STRIPES])
 {
 	size_t bytes_before;
+	size_t s;
 	int status;
 
+	if (grown != NULL) {
+		for (s = 0; s < RELIC_STRIPES; s++)
+			assert(relic_idtab_bytes(&grown[s]) == 0);
+	}
+
 	bytes_before = relic_relation_bytes(relation);
-	status = relation_grow(ctx, relation, growth);
+	status = relation_grow(ctx, relation, growth, grown);
 	ctx->account.store_bytes +=
 	    relic_relation_bytes(relation) - bytes_before;
+	if (grown != NULL) {
+		for (s = 0; s < RELIC_STRIPES; s++)
+			ctx->account.store_bytes +=
+			    relic_idtab_bytes(&grown[s]);
+	}
 
 	return (status);
 }
@@ -2809,18 +2891,15 @@ relic_builder_admit(relic_builder_t *builder,
 /*
  * Describe what the commit does to the base store of `builder`'s predicate
  * with the builder's tuples, of which there is at least one, as `action`:
- * an adoption when the store holds no tuple, and otherwise an append, whose
- * hashes and stripe counts are computed here.  Returns 0, or -1 when memory
- * ran out, having reported nothing.  The action is released with
+ * an adoption when the store holds no tuple, and otherwise an append,
+ * prepared here (builder_append_open()).  Returns 0, or -1 when memory ran
+ * out, having reported nothing.  The action is released with
  * relic_base_action_release() whatever this returns.
  */
 int
 relic_base_action_prepare(const relic_t *ctx, relic_base_action_t *action,
     relic_builder_t *builder)
 {
-	uint64_t hash;
-	size_t i;
-
 	assert(relic_builder_count(builder) > 0);
 
 	bzero(action, sizeof(*action));
@@ -2829,58 +2908,118 @@ relic_base_action_prepare(const relic_t *ctx, relic_base_action_t *action,
 	if (action->adopt)
 		return (0);
 
-	action->hashes = reallocarray(NULL, relic_builder_count(builder),
-	    sizeof(*action->hashes));
-	if (action->hashes == NULL)
-		return (-1);
+	return (builder_append_open(relic_base_store(ctx, builder->pred),
+	    builder, &action->append));
+}
 
-	for (i = 0; i < relic_builder_count(builder); i++) {
-		hash = relic_tuple_hash(builder->hash_seed,
-		    relic_builder_tuple(builder, i), builder->arity);
-		action->hashes[i] = hash;
-		action->added.by_stripe[relic_hash_stripe(hash)]++;
+/*
+ * Make `append`, which holds all zeroes, the append of `builder`'s tuples
+ * to `store`, which holds tuples and lacks every one of them: the
+ * builder's columns, borrowed, and for each tuple its wide hash and
+ * canonical stripe, the tuples counted and listed by stripe.  The arrays
+ * are the load's staging, charged to nothing.  Returns 0, or -1 when
+ * memory ran out, having reported nothing.  A debug build checks what the
+ * commit trusts: that the store lacks every tuple, under the hash the
+ * builder gives it.
+ */
+static int
+builder_append_open(const relic_relation_t *store RELIC_UNUSED,
+    relic_builder_t *builder, relic_append_t *append)
+{
+	const relic_dom_t *tuple;
+	char *cursor;
+	uint64_t hash;
+	size_t bytes;
+	size_t carved RELIC_UNUSED;
+	size_t i;
+
+	assert(store->arity == builder->arity &&
+	    store->hash_seed == builder->hash_seed);
+
+	append->count = relic_builder_count(builder);
+	append->columns = builder->payload.columns;
+
+	cursor = NULL;
+	bytes = 0;
+	canonical_layout(append, &cursor, &bytes);
+	if (bytes == SIZE_MAX)
+		return (-1);
+	append->block = malloc(bytes);
+	if (append->block == NULL)
+		return (-1);
+	cursor = append->block;
+	carved = 0;
+	canonical_layout(append, &cursor, &carved);
+	assert(carved == bytes);
+
+	for (i = 0; i < append->count; i++) {
+		tuple = relic_builder_tuple(builder, i);
+		hash = relic_tuple_hash(builder->hash_seed, tuple,
+		    builder->arity);
+		assert(relation_find_hashed(store, tuple, hash) ==
+		    RELIC_ID_NONE);
+		append->hashes[i] = hash;
+		append->stripes[i] = (uint8_t)relic_hash_stripe(hash);
+		append->growth.by_stripe[append->stripes[i]]++;
 	}
+	relic_list_by_stripe(append->stripes, append->count,
+	    append->stripe_list, append->stripe_start);
 
 	return (0);
 }
 
+/*
+ * Release what preparing and reserving left in `action`: an append's
+ * arrays, and whatever growth it prepared that no part completed, which
+ * the storage total counted.
+ */
 void
-relic_base_action_release(relic_base_action_t *action)
+relic_base_action_release(relic_t *ctx, relic_base_action_t *action)
 {
-	free(action->hashes);
-	action->hashes = NULL;
+	relic_relation_append_close(ctx, &action->append);
 }
 
 /*
  * Check that the base stores can take what `actions` gives them, under
- * both configured limits, before any of them changes.  Returns 0, or -1
+ * both configured limits, before any of them changes, and record in each
+ * action the bytes its store is projected to hold.  Returns 0, or -1
  * having reported the refusal: a limit's against the predicate of the
- * first action, and a store too large to grow against its own.
+ * first action, and a store too large to grow against its own.  When the
+ * stores fit, *sharep says whether the appends' parts run on the pool
+ * (commit_shares()), and *deferp whether their stripes grow in those
+ * parts: they do when the parts share and the memory limit admits every
+ * table those growths replace held beside its replacement, and otherwise
+ * grow at once, since parts on the calling thread alone gain nothing from
+ * holding every replaced table.
  *
  * An adoption's store, absent or empty, is projected as holding the
  * builder's payload, without the tags adopting it drops, in place of
  * whatever empty capacity it kept; an append's as its relation grown by
- * the tuples it gains.  Sums that a
- * size_t cannot hold cannot fit any limit either, and are refused as a
- * store too large to grow.
+ * the tuples it gains.  Sums that a size_t cannot hold cannot fit any
+ * limit either, and are refused as a store too large to grow.
  */
 static int
-bases_fit(relic_t *ctx, const relic_base_action_t *actions, size_t count)
+bases_fit(relic_t *ctx, relic_base_action_t *actions, size_t count,
+    bool *sharep, bool *deferp)
 {
 	const relic_relation_t *store;
 	size_t added;
 	size_t added_total;
+	size_t appended;
 	size_t bytes_after;
 	size_t bytes_before;
 	size_t held_bytes;
 	size_t held_tuples;
 	size_t projected;
+	size_t replaced;
 	size_t i;
 	char described[RELIC_PRED_TEXT_MAX];
 
 	added_total = 0;
+	appended = 0;
 	bytes_before = 0;
 	bytes_after = 0;
+	replaced = 0;
 
 	for (i = 0; i < count; i++) {
 		store = relic_base_store(ctx, actions[i].builder->pred);
@@ -2893,9 +3032,12 @@ bases_fit(relic_t *ctx, const relic_base_action_t *actions, size_t count)
 			    &actions[i].builder->payload);
 		} else {
 			assert(store != NULL && store->payload.count != 0);
-			added = relic_tuple_growth_total(&actions[i].added);
+			added = actions[i].append.count;
 			projected = relic_relation_bytes_after_growth(store,
-			    &actions[i].added);
+			    &actions[i].append.growth);
+			replaced = relic_saturating_sum(replaced,
+			    canonical_bytes_replaced(store,
+			    &actions[i].append.growth));
 		}
 
 		if (added > RELIC_TUPLE_MAX - held_tuples ||
@@ -2910,8 +3052,11 @@ bases_fit(relic_t *ctx, const relic_base_action_t *actions, size_t count)
 		}
 
 		added_total += added;
+		if (!actions[i].adopt)
+			appended += added;
 		bytes_before += held_bytes;
 		bytes_after += projected;
+		actions[i].projected = projected;
 	}
 
 	if (relic_limit_set(ctx->config.max_tuples) &&
@@ -2923,6 +3068,10 @@ bases_fit(relic_t *ctx, const relic_base_action_t *actions, size_t count)
 	if (relic_account_exceeds(&ctx->account, bytes_before, bytes_after))
 		return (relic_bases_refuse(ctx, "memory", ctx->account.limit,
 		    actions[0].builder->pred));
+
+	*sharep = commit_shares(ctx, appended);
+	*deferp = *sharep && !relic_account_exceeds(&ctx->account,
+	    bytes_before, relic_saturating_sum(bytes_after, replaced));
 
 	return (0);
 }
@@ -2945,29 +3094,35 @@ relic_bases_refuse(relic_t *ctx, const char *key, size_t limit,
 
 /*
  * Make every base store of `actions`, which holds at least one action,
- * ready to take its builder's tuples.  Returns 0, or -1 having reported the
- * refusal.  The caller has discarded what was derived, so no base store has
- * a secondary index.
+ * ready to take its builder's tuples, and give each action its store.
+ * Returns 0, setting *sharep to whether relic_bases_apply() is to run the
+ * appends' parts on the pool, or -1 having reported the refusal.  The
+ * caller has discarded what was derived, so no base store has a secondary
+ * index.
  *
  * Both limits are checked once, over every store together, before any
  * store changes, so a refusal by either leaves every store as it was.  Then
  * every adoption's existing store gives back the empty capacity the
  * builder's payload is to replace, before any append reserves, so that the
  * credit the limit check counted on is real by the time anything spends
- * it.  Then each absent store is created and each append's grown.  A failed
- * allocation among those can leave stores empty, created, or with capacity
- * they do not use, all accounted, but no store gains a tuple.
+ * it.  Then each absent store is created and each append's grown, its
+ * stripes' growth deferred to the parts placing them when bases_fit() says
+ * so, which it says only of parts that share.  A failed allocation among
+ * those can leave stores empty, created, or with capacity they do not use,
+ * all accounted, but no store gains a tuple.
  */
 int
-relic_bases_reserve(relic_t *ctx, const relic_base_action_t *actions,
-    size_t count)
+relic_bases_reserve(relic_t *ctx, relic_base_action_t *actions,
+    size_t count, bool *sharep)
 {
 	relic_relation_t *store;
 	size_t i;
+	bool defer;
+	bool prepared;
 
 	assert(count > 0);
 
-	if (bases_fit(ctx, actions, count) != 0)
+	if (bases_fit(ctx, actions, count, sharep, &defer) != 0)
 		return (-1);
 
 	for (i = 0; i < count; i++) {
@@ -2977,57 +3132,148 @@ relic_bases_reserve(relic_t *ctx, const relic_base_action_t *actions,
 			relic_relation_clear(ctx, store);
 	}
 
+	prepared = false;
 	for (i = 0; i < count; i++) {
 		store = reltab_relation(ctx, &ctx->store.bases,
 		    actions[i].builder->pred);
 		if (store == NULL)
 			return (-1);
+		actions[i].store = store;
 
-		if (!actions[i].adopt &&
-		    relic_relation_reserve(ctx, store, &actions[i].added) != 0)
+		if (actions[i].adopt)
+			continue;
+		if (commit_reserve_append(ctx, store, &actions[i].append,
+		    defer) != 0)
 			return (-1);
+		if (append_grown_bytes(&actions[i].append) > 0)
+			prepared = true;
 	}
+
+	if (prepared)
+		ctx->counters.commits_deferred++;
 
 	return (0);
 }
 
 /*
+ * Grow `store` for a load's `append` (relic_relation_reserve()), each
+ * stripe's growth prepared in the append when `defer` is set, and record
+ * what the storage total then counts for the store and the append, which
+ * relic_relation_finish_append() reconciles.  Returns 0, or -1 having
+ * reported why the store could not grow; what grew stays, and is counted.
+ */
+static int
+commit_reserve_append(relic_t *ctx, relic_relation_t *store,
+    relic_append_t *append, bool defer)
+{
+	int status;
+
+	status = relic_relation_reserve(ctx, store, &append->growth,
+	    defer ? append->grown : NULL);
+	append->first = (relic_tuple_id_t)(store->payload.count + 1);
+	append->reserved = relic_saturating_sum(relic_relation_bytes(store),
+	    append_grown_bytes(append));
+
+	return (status);
+}
+
+/*
  * Give every base store of `actions` its builder's tuples, into what
- * relic_bases_reserve() made ready.  Nothing here can fail, so either every
+ * relic_bases_reserve() made ready, running the appends' parts on the pool
+ * when it said to `share` them.  Nothing here can fail, so either every
  * store gains its tuples or, the reserve having failed, none does.
  *
  * An adoption moves the builder's payload into its empty store, through
- * adopt_builder(), and an append copies the builder's tuples after the
- * store's own, through append_builder().
+ * adopt_builder().  An append copies the builder's columns after the
+ * store's own, and then each canonical stripe, a part of its own,
+ * completes any growth deferred to it and places the stripe's new tuples
+ * (place_commit_part()).  Once
+ * every part has run the new tuples are counted, by the store, the
+ * context's total and the base total, and the storage total is brought up
+ * to date.
  */
 void
-relic_bases_apply(relic_t *ctx, const relic_base_action_t *actions,
-    size_t count)
+relic_bases_apply(relic_t *ctx, relic_base_action_t *actions, size_t count,
+    bool share)
 {
-	relic_builder_t *builder;
-	relic_relation_t *store;
+	relic_base_action_t *action;
 	size_t added;
+	size_t part;
 	size_t i;
 
 	for (i = 0; i < count; i++) {
-		builder = actions[i].builder;
-		store = reltab_find(&ctx->store.bases, builder->pred);
-		assert(store != NULL && store->index_count == 0);
-		assert(store->arity == builder->arity &&
-		    store->hash_seed == builder->hash_seed);
+		action = &actions[i];
+		assert(action->store->index_count == 0);
+		assert(action->store->arity == action->builder->arity &&
+		    action->store->hash_seed == action->builder->hash_seed);
+		if (action->adopt)
+			adopt_builder(ctx, action->store, action->builder);
+		else
+			append_columns(action->store, &action->append);
+	}
 
-		added = relic_builder_count(builder);
-		if (actions[i].adopt)
-			adopt_builder(ctx, store, builder);
+	if (share) {
+		relic_pool_for(ctx->pool, count * RELIC_STRIPES,
+		    place_commit_part, actions);
+		ctx->counters.commits_shared++;
+	} else {
+		for (part = 0; part < count * RELIC_STRIPES; part++)
+			place_commit_part(actions, part, 0);
+	}
+
+	for (i = 0; i < count; i++) {
+		action = &actions[i];
+		if (action->adopt)
+			added = relic_relation_count(action->store);
 		else {
-			assert(added ==
-			    relic_tuple_growth_total(&actions[i].added));
-			append_builder(store, &actions[i]);
+			added = action->append.count;
+			action->store->payload.count += added;
+			relic_relation_finish_append(ctx, action->store,
+			    &action->append);
 		}
-
 		ctx->store.tuple_count += added;
 		ctx->store.base_tuple_count += added;
+		assert(relic_relation_bytes(action->store) ==
+		    action->projected);
 	}
+}
+
+/*
+ * Whether a commit's appends, holding `appended` tuples, are placed on the
+ * context's pool: when there is something to place, the pool has more
+ * than one worker, and the appends are large enough to repay waking it,
+ * or RELIC_F_PARALLEL_ALWAYS asks however small they are.  A commit makes
+ * no pool.
+ */
+static bool
+commit_shares(relic_t *ctx, size_t appended)
+{
+	if (appended == 0 || ctx->pool == NULL ||
+	    relic_pool_workers(ctx->pool) < 2)
+		return (false);
+
+	return ((ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0 ||
+	    appended >= RELIC_COMMIT_PARALLEL_TUPLES);
+}
+
+/*
+ * Place part `part` of a commit whose actions are `argument`: stripe
+ * part % RELIC_STRIPES of the append of action part / RELIC_STRIPES, which
+ * an adoption has nothing in.  Each action has a store of its own, and a
+ * part writes one stripe of its action's store and of its append, while
+ * the parts of one action all read the store's columns, which no part
+ * writes.
+ */
+static void
+place_commit_part(void *argument, size_t part,
+    size_t worker_index RELIC_UNUSED)
+{
+	relic_base_action_t *action;
+
+	action = (relic_base_action_t *)argument + part / RELIC_STRIPES;
+	if (!action->adopt)
+		place_append_stripe(action->store, &action->append,
+		    part % RELIC_STRIPES);
 }
 
 /*
@@ -3050,31 +3296,6 @@ adopt_builder(relic_t *ctx, relic_relation_t *store, relic_builder_t *builder)
 	store->payload = builder->payload;
 	payload_init(&builder->payload, true);
 	ctx->account.store_bytes += payload_bytes(&store->payload);
-}
-
-/*
- * Copy each tuple of an append's builder, in builder order, to the position
- * after `store`'s last, and place it under the hash `action` prepared,
- * looking nothing up.  A debug build checks what a release build trusts:
- * the room, the hashes, and that the store lacks every tuple.
- */
-static void
-append_builder(relic_relation_t *store, const relic_base_action_t *action)
-{
-	const relic_dom_t *columns;
-	uint64_t hash;
-	size_t t;
-
-	for (t = 0; t < relic_builder_count(action->builder); t++) {
-		columns = relic_builder_tuple(action->builder, t);
-		hash = action->hashes[t];
-		assert(insertion_parts_bytes_after(store, hash) ==
-		    insertion_parts_bytes(store, hash));
-		assert(hash == tuple_hash(store, columns));
-		assert(relation_find_hashed(store, columns, hash) ==
-		    RELIC_ID_NONE);
-		tuple_append(store, columns, hash);
-	}
 }
 
 /*

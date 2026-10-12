@@ -115,7 +115,8 @@ static enum staging_verdict judge_staging(const relic_staging_t *staging,
 		    size_t value_bytes);
 static int	 prepare_actions(relic_staging_t *staging,
 		    relic_base_action_t **actionsp, size_t *countp);
-static void	 release_actions(relic_base_action_t *actions, size_t count);
+static void	 release_actions(relic_t *ctx, relic_base_action_t *actions,
+		    size_t count);
 static size_t	 row_bytes(uint16_t arity);
 static int	 set_add(relic_staging_t *staging, relic_staged_set_t *set,
 		    const relic_dom_t *tuple);
@@ -312,23 +313,24 @@ relic_staging_commit(relic_staging_t *staging)
 {
 	relic_base_action_t *actions;
 	size_t count;
+	bool share;
 	int status;
 
 	if (staging->new_tuples == 0)
 		return (0);
 
 	if (prepare_actions(staging, &actions, &count) != 0) {
-		release_actions(actions, count);
+		release_actions(staging->ctx, actions, count);
 		relic_diag_no_memory(staging->ctx);
 		return (-1);
 	}
 
 	relic_discard_derived(staging->ctx);
-	status = relic_bases_reserve(staging->ctx, actions, count);
+	status = relic_bases_reserve(staging->ctx, actions, count, &share);
 	if (status == 0)
-		relic_bases_apply(staging->ctx, actions, count);
+		relic_bases_apply(staging->ctx, actions, count, share);
 
-	release_actions(actions, count);
+	release_actions(staging->ctx, actions, count);
 
 	return (status);
 }
@@ -376,12 +378,12 @@ prepare_actions(relic_staging_t *staging, relic_base_action_t **actionsp,
 }
 
 static void
-release_actions(relic_base_action_t *actions, size_t count)
+release_actions(relic_t *ctx, relic_base_action_t *actions, size_t count)
 {
 	size_t i;
 
 	for (i = 0; i < count; i++)
-		relic_base_action_release(&actions[i]);
+		relic_base_action_release(ctx, &actions[i]);
 	free(actions);
 }
 

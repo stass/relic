@@ -35,6 +35,9 @@
 	"a batch is staged only where its columns can grow"
 #define	SCENARIO_BUILDER_GROWTH \
 	"a builder grows as insertions grow a relation"
+#define	SCENARIO_COMMIT_APPEND	"a commit appends alike however it runs"
+#define	SCENARIO_COMMIT_MIXED \
+	"a mixed commit places each store on the pool"
 #define	SCENARIO_NO_TREE	"a load's facts build no statements"
 #define	SCENARIO_FACT_ADD	"an added fact is a load of one"
 #define	SCENARIO_FUNNEL		"a predicate is read from the store it has"
@@ -103,8 +106,42 @@ static const char *const session_loads[SESSION_ROUNDS] = {
 /* The arity of the widening program whose rewrite outgrows its limit. */
 #define	ABANDONED_ARITY		8
 
+/*
+ * The facts a store holds before a commit appends to it, and the facts a
+ * small append adds: enough that every canonical stripe grows.
+ */
+#define	APPEND_HELD		1000
+#define	APPEND_ADDED		2000
+
+typedef struct append_case append_case_t;
 typedef struct diag_log diag_log_t;
 typedef struct rows_text rows_text_t;
+
+/*
+ * How an append case limits its commit's memory: the final size is what
+ * the commit ends holding, and the peak that with every table its stripes'
+ * growth replaces held beside its replacement.
+ */
+enum append_limit {
+	APPEND_UNLIMITED,	/* no limit */
+	APPEND_AT_PEAK,		/* exactly the peak */
+	APPEND_BELOW_PEAK,	/* a byte less */
+	APPEND_AT_FINAL,	/* exactly the final size */
+	APPEND_SHORT		/* a byte less */
+};
+
+/*
+ * A commit appending `added` facts to a store of APPEND_HELD, in a context
+ * of `threads` and `flags` given a pool of its threads when `pooled`.
+ */
+struct append_case {
+	const char		*label;
+	size_t			 added;
+	size_t			 threads;
+	unsigned int		 flags;
+	bool			 pooled;
+	enum append_limit	 limit;
+};
 
 /* Which limit a scenario sets. */
 enum limit_kind {
@@ -197,6 +234,15 @@ static void	 a_batch_is_staged_only_where_its_columns_grow(void);
 static void	 a_builder_grows_as_insertions_grow_a_relation(void);
 static bool	 grown_alike(const relic_builder_t *builder,
 		    const relic_relation_t *relation);
+static void	 a_commit_appends_alike_however_it_runs(void);
+static void	 commit_append(const append_case_t *append);
+static void	 a_mixed_commit_places_each_store_on_the_pool(void);
+static relic_dom_t *numbered_pairs(relic_t *ctx, size_t count);
+static int	 stage_and_commit(relic_t *ctx, relic_pred_id_t pred,
+		    const relic_dom_t *pairs, size_t first, size_t end,
+		    size_t allowed);
+static bool	 holds_pairs(const relic_relation_t *store,
+		    const relic_dom_t *pairs, size_t count);
 static bool	 holds_in_order(relic_t *ctx, const char *name,
 		    const char *const *names);
 static size_t	 base_bytes_by_hand(const relic_t *ctx);
@@ -1596,7 +1642,8 @@ a_store_adopts_or_appends_by_what_it_holds(void)
 	empty = relic_relation_read(ctx, predicate(ctx, "empty", 1));
 	bzero(&growth, sizeof(growth));
 	growth.by_stripe[0] = RETAINED_TUPLES;
-	if (empty == NULL || relic_relation_reserve(ctx, empty, &growth) != 0) {
+	if (empty == NULL ||
+	    relic_relation_reserve(ctx, empty, &growth, NULL) != 0) {
 		check(false, SCENARIO_ADOPT, "an empty store is given room");
 		relic_destroy(ctx);
 		return;
@@ -1853,6 +1900,366 @@ grown_alike(const relic_builder_t *builder, const relic_relation_t *relation)
 	return (true);
 }
 
+/*
+ * A commit appending to a populated store ends alike however it runs:
+ * its parts placed on the calling thread or on the context's pool, and
+ * the stripes' growth deferred to those parts or completed at once.  The
+ * store holds its facts and then the new ones, in the order staged, each
+ * found under its own identifier, in exactly the bytes an ordinary
+ * reservation for the new tuples projects, which the storage total
+ * counts.  The pool shares the parts of an append of
+ * RELIC_COMMIT_PARALLEL_TUPLES tuples and not of one fewer, unless
+ * RELIC_F_PARALLEL_ALWAYS asks, and a commit makes no pool.  The growth
+ * defers only when the parts share and the limit admits the peak, exactly
+ * at it included, and otherwise completes at once; a limit a byte short of
+ * the final size refuses the commit.
+ */
+static void
+a_commit_appends_alike_however_it_runs(void)
+{
+	static const append_case_t appends[] = {
+		{ "on the calling thread", APPEND_ADDED, 1, 0, false,
+		    APPEND_UNLIMITED },
+		{ "with threads and no pool", APPEND_ADDED, 4,
+		    RELIC_F_PARALLEL_ALWAYS, false, APPEND_UNLIMITED },
+		{ "forced onto the pool", APPEND_ADDED, 4,
+		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_UNLIMITED },
+		{ "one short of the sharing count",
+		    RELIC_COMMIT_PARALLEL_TUPLES - 1, 4, 0, true,
+		    APPEND_UNLIMITED },
+		{ "at the sharing count", RELIC_COMMIT_PARALLEL_TUPLES, 4, 0,
+		    true, APPEND_UNLIMITED },
+		{ "at its peak on the pool", APPEND_ADDED, 4,
+		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_AT_PEAK },
+		{ "a byte below its peak on the pool", APPEND_ADDED, 4,
+		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_BELOW_PEAK },
+		{ "at its final size on the calling thread", APPEND_ADDED, 1,
+		    0, false, APPEND_AT_FINAL },
+		{ "at its final size on the pool", APPEND_ADDED, 4,
+		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_AT_FINAL },
+		{ "a byte short of its final size", APPEND_ADDED, 4,
+		    RELIC_F_PARALLEL_ALWAYS, true, APPEND_SHORT },
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(appends) / sizeof(appends[0]); i++)
+		commit_append(&appends[i]);
+}
+
+/* Run one case of a_commit_appends_alike_however_it_runs(). */
+static void
+commit_append(const append_case_t *append)
+{
+	relic_config_t config;
+	relic_counters_t before;
+	relic_tuple_growth_t growth;
+	const relic_relation_t *store;
+	relic_dom_t *pairs;
+	relic_pred_id_t pred;
+	diag_log_t log;
+	relic_t *ctx;
+	uint64_t deferred;
+	uint64_t shared;
+	size_t allowed;
+	size_t final_bytes;
+	size_t held_bytes;
+	size_t replaced;
+	size_t i;
+	bool defers;
+	bool refused;
+	bool shares;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.threads = append->threads;
+	config.flags = append->flags;
+	ctx = context_with(&config, NULL, &log);
+	if (ctx == NULL)
+		return;
+	pred = predicate(ctx, "e", 2);
+	pairs = numbered_pairs(ctx, APPEND_HELD + append->added);
+	if (pred == RELIC_ID_NONE || pairs == NULL ||
+	    (append->pooled && relic_pool_create(&ctx->pool,
+	    ctx->config.threads, ctx->hash_seed) != 0) ||
+	    stage_and_commit(ctx, pred, pairs, 0, APPEND_HELD,
+	    SIZE_MAX) != 0) {
+		checkf(false, SCENARIO_COMMIT_APPEND, "%s: a store is given "
+		    "its first facts", append->label);
+		free(pairs);
+		relic_destroy(ctx);
+		return;
+	}
+
+	store = relic_base_store(ctx, pred);
+	bzero(&growth, sizeof(growth));
+	for (i = APPEND_HELD; i < APPEND_HELD + append->added; i++)
+		growth.by_stripe[relic_hash_stripe(relic_tuple_hash(
+		    store->hash_seed, &pairs[i * 2], 2))]++;
+	held_bytes = relic_relation_bytes(store);
+	final_bytes = relic_relation_bytes_after_growth(store, &growth);
+	replaced = 0;
+	for (i = 0; i < RELIC_STRIPES; i++)
+		replaced += relic_idtab_bytes_replaced_by_reserve(
+		    &store->payload.index[i], growth.by_stripe[i]);
+	switch (append->limit) {
+	case APPEND_AT_PEAK:
+	case APPEND_BELOW_PEAK:
+		allowed = final_bytes - held_bytes + replaced -
+		    (append->limit == APPEND_BELOW_PEAK ? 1 : 0);
+		break;
+	case APPEND_AT_FINAL:
+	case APPEND_SHORT:
+		allowed = final_bytes - held_bytes -
+		    (append->limit == APPEND_SHORT ? 1 : 0);
+		break;
+	case APPEND_UNLIMITED:
+	default:
+		allowed = SIZE_MAX;
+		break;
+	}
+	before = ctx->counters;
+
+	status = stage_and_commit(ctx, pred, pairs, APPEND_HELD,
+	    APPEND_HELD + append->added, allowed);
+	refused = append->limit == APPEND_SHORT;
+	shares = append->pooled && relic_pool_workers(ctx->pool) > 1 &&
+	    ((append->flags & RELIC_F_PARALLEL_ALWAYS) != 0 ||
+	    append->added >= RELIC_COMMIT_PARALLEL_TUPLES) && !refused;
+	defers = shares && (append->limit == APPEND_UNLIMITED ||
+	    append->limit == APPEND_AT_PEAK);
+	shared = ctx->counters.commits_shared - before.commits_shared;
+	deferred = ctx->counters.commits_deferred - before.commits_deferred;
+
+	checkf(status == (refused ? -1 : 0) &&
+	    log.errors == (refused ? 1u : 0u), SCENARIO_COMMIT_APPEND,
+	    "%s: the commit should %s, but it returned %d, reporting \"%s\"",
+	    append->label, refused ? "be refused" : "succeed", status,
+	    log.last_error);
+	checkf(holds_pairs(store, pairs, refused ? APPEND_HELD :
+	    APPEND_HELD + append->added) &&
+	    relic_base_total(ctx) == relic_relation_count(store) &&
+	    ctx->store.tuple_count == relic_relation_count(store),
+	    SCENARIO_COMMIT_APPEND, "%s: the store should hold %s, each "
+	    "found under its identifier, and the totals count them",
+	    append->label, refused ? "its facts alone" :
+	    "its facts and then the new ones");
+	checkf(relic_relation_bytes(store) == (refused ? held_bytes :
+	    final_bytes) && ctx->account.store_bytes == base_bytes_by_hand(ctx),
+	    SCENARIO_COMMIT_APPEND, "%s: the store should hold %zu bytes, "
+	    "not %zu, and the storage total its %zu, not %zu", append->label,
+	    refused ? held_bytes : final_bytes, relic_relation_bytes(store),
+	    base_bytes_by_hand(ctx), ctx->account.store_bytes);
+	checkf(shared == (shares ? 1u : 0u), SCENARIO_COMMIT_APPEND,
+	    "%s: the commit's parts should %s on the pool, but they %s",
+	    append->label, shares ? "run" : "not run",
+	    shared != 0 ? "did" : "did not");
+	checkf(deferred == (defers ? 1u : 0u), SCENARIO_COMMIT_APPEND,
+	    "%s: the commit's stripe growth should %s, but it %s",
+	    append->label, defers ? "be deferred to its parts" :
+	    "be completed by its reservation", deferred != 0 ? "was deferred" :
+	    "was completed by its reservation");
+	checkf((ctx->pool != NULL) == append->pooled, SCENARIO_COMMIT_APPEND,
+	    "%s: the context should %shave a pool after the commit, since a "
+	    "commit makes none", append->label, append->pooled ? "" : "not ");
+
+	free(pairs);
+	relic_destroy(ctx);
+}
+
+/*
+ * A commit on the pool that appends to two populated stores and gives a
+ * third, named between them, its first facts places every append in its
+ * own store: each store holds its facts in the order staged, under their
+ * own identifiers, and the totals and the storage total count them.
+ */
+static void
+a_mixed_commit_places_each_store_on_the_pool(void)
+{
+	relic_config_t config;
+	relic_counters_t before;
+	relic_staging_t staging;
+	const relic_relation_t *fresh_store;
+	relic_dom_t *pairs;
+	relic_pred_id_t fresh;
+	relic_pred_id_t held;
+	relic_pred_id_t other;
+	diag_log_t log;
+	relic_t *ctx;
+	uint64_t deferred;
+	uint64_t shared;
+	size_t i;
+	bool shares;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.threads = 4;
+	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	ctx = context_with(&config, NULL, &log);
+	if (ctx == NULL)
+		return;
+	held = predicate(ctx, "e", 2);
+	fresh = predicate(ctx, "f", 2);
+	other = predicate(ctx, "g", 2);
+	pairs = numbered_pairs(ctx, APPEND_HELD + APPEND_ADDED);
+	if (held == RELIC_ID_NONE || fresh == RELIC_ID_NONE ||
+	    other == RELIC_ID_NONE || pairs == NULL ||
+	    relic_pool_create(&ctx->pool, ctx->config.threads,
+	    ctx->hash_seed) != 0 ||
+	    stage_and_commit(ctx, held, pairs, 0, APPEND_HELD,
+	    SIZE_MAX) != 0 ||
+	    stage_and_commit(ctx, other, pairs, 0, APPEND_HELD,
+	    SIZE_MAX) != 0) {
+		check(false, SCENARIO_COMMIT_MIXED,
+		    "two stores are given their first facts");
+		free(pairs);
+		relic_destroy(ctx);
+		return;
+	}
+	shares = relic_pool_workers(ctx->pool) > 1;
+	before = ctx->counters;
+
+	relic_staging_init(&staging, ctx);
+	status = 0;
+	for (i = APPEND_HELD; i < APPEND_HELD + APPEND_ADDED && status == 0;
+	    i++) {
+		status = relic_staging_add(&staging, held, &pairs[i * 2]);
+		if (status == 0)
+			status = relic_staging_add(&staging, fresh,
+			    &pairs[i * 2]);
+		if (status == 0)
+			status = relic_staging_add(&staging, other,
+			    &pairs[i * 2]);
+	}
+	if (status == 0)
+		status = relic_staging_commit(&staging);
+	relic_staging_reset(&staging);
+	shared = ctx->counters.commits_shared - before.commits_shared;
+	deferred = ctx->counters.commits_deferred - before.commits_deferred;
+
+	fresh_store = relic_base_store(ctx, fresh);
+	checkf(status == 0 && log.errors == 0, SCENARIO_COMMIT_MIXED,
+	    "the commit should succeed, but it returned %d, reporting "
+	    "\"%s\"", status, log.last_error);
+	check(holds_pairs(relic_base_store(ctx, held), pairs,
+	    APPEND_HELD + APPEND_ADDED) &&
+	    holds_pairs(relic_base_store(ctx, other), pairs,
+	    APPEND_HELD + APPEND_ADDED) && fresh_store != NULL &&
+	    holds_pairs(fresh_store, pairs + APPEND_HELD * 2, APPEND_ADDED),
+	    SCENARIO_COMMIT_MIXED, "each populated store should hold its "
+	    "facts and then the new ones, and the new store the new ones, "
+	    "each found under its identifier");
+	checkf(relic_base_total(ctx) == 2 * (APPEND_HELD + APPEND_ADDED) +
+	    APPEND_ADDED && ctx->store.tuple_count == relic_base_total(ctx) &&
+	    ctx->account.store_bytes == base_bytes_by_hand(ctx),
+	    SCENARIO_COMMIT_MIXED, "the totals should count %d facts and the "
+	    "storage total %zu bytes, not %zu facts and %zu bytes",
+	    2 * (APPEND_HELD + APPEND_ADDED) + APPEND_ADDED,
+	    base_bytes_by_hand(ctx), relic_base_total(ctx),
+	    ctx->account.store_bytes);
+	checkf(shared == (shares ? 1u : 0u) && deferred == shared,
+	    SCENARIO_COMMIT_MIXED, "the commit's parts should %s on the pool "
+	    "with their growth deferred, but %zu shared and %zu deferred",
+	    shares ? "run" : "not run", (size_t)shared, (size_t)deferred);
+
+	free(pairs);
+	relic_destroy(ctx);
+}
+
+/*
+ * The pairs (s<i>, i) for each i below `count`, interned in `ctx`, in a
+ * new array of 2 * `count` identifiers, or NULL.
+ */
+static relic_dom_t *
+numbered_pairs(relic_t *ctx, size_t count)
+{
+	relic_dom_t *pairs;
+	char name[32];
+	size_t i;
+
+	pairs = reallocarray(NULL, count, 2 * sizeof(*pairs));
+	if (pairs == NULL)
+		return (NULL);
+
+	for (i = 0; i < count; i++) {
+		snprintf(name, sizeof(name), "s%zu", i);
+		if (relic_value_intern_bytes(ctx, RELIC_SYMBOL, name,
+		    strlen(name), &pairs[i * 2]) != 0 ||
+		    relic_value_intern_integer(ctx, (int64_t)i,
+		    &pairs[i * 2 + 1]) != 0) {
+			free(pairs);
+			return (NULL);
+		}
+	}
+
+	return (pairs);
+}
+
+/*
+ * Stage the pairs from `first` below `end` as facts of `pred` and commit
+ * them, under a memory limit of `allowed` bytes past what the context
+ * holds once they are staged, or none when `allowed` is SIZE_MAX; staging
+ * is never limited.  Returns what the commit returned, or -1 when a pair
+ * could not be staged.
+ */
+static int
+stage_and_commit(relic_t *ctx, relic_pred_id_t pred, const relic_dom_t *pairs,
+    size_t first, size_t end, size_t allowed)
+{
+	relic_staging_t staging;
+	size_t i;
+	int status;
+
+	relic_staging_init(&staging, ctx);
+	status = 0;
+	for (i = first; i < end && status == 0; i++)
+		status = relic_staging_add(&staging, pred, &pairs[i * 2]);
+
+	if (status == 0 && allowed != SIZE_MAX)
+		ctx->account.limit = bytes_held(ctx) +
+		    ctx->account.arena_bytes + allowed;
+	if (status == 0)
+		status = relic_staging_commit(&staging);
+	ctx->account.limit = 0;
+	relic_staging_reset(&staging);
+
+	return (status);
+}
+
+/*
+ * Whether `store` holds exactly the first `count` of `pairs`, in order,
+ * each found by its columns under its own identifier, and its canonical
+ * index lists each tuple once.
+ */
+static bool
+holds_pairs(const relic_relation_t *store, const relic_dom_t *pairs,
+    size_t count)
+{
+	const relic_dom_t *tuple;
+	relic_tuple_id_t id;
+	size_t listed;
+	size_t i;
+
+	if (relic_relation_count(store) != count)
+		return (false);
+
+	listed = 0;
+	for (i = 0; i < RELIC_STRIPES; i++)
+		listed += store->payload.index[i].count;
+	if (listed != count)
+		return (false);
+
+	for (i = 0; i < count; i++) {
+		id = (relic_tuple_id_t)(i + 1);
+		tuple = relic_relation_tuple(store, id);
+		if (tuple == NULL || tuple[0] != pairs[i * 2] ||
+		    tuple[1] != pairs[i * 2 + 1] ||
+		    relic_relation_find(store, &pairs[i * 2]) != id)
+			return (false);
+	}
+
+	return (true);
+}
+
 int
 main(void)
 {
@@ -1873,6 +2280,8 @@ main(void)
 	a_store_adopts_or_appends_by_what_it_holds();
 	a_batch_is_staged_only_where_its_columns_grow();
 	a_builder_grows_as_insertions_grow_a_relation();
+	a_commit_appends_alike_however_it_runs();
+	a_mixed_commit_places_each_store_on_the_pool();
 
 	return (check_summary("test_facts"));
 }

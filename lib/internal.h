@@ -187,8 +187,10 @@ struct relic_valtab {
  *
  * `windows_staged` and `windows_declined` count the windows of table input
  * a batch import staged whole and the ones it declined and read again a
- * field at a time.  relic_stats() reports neither; they show the tests
- * which way an import went.
+ * field at a time.  `commits_shared` counts the load commits whose appends
+ * were placed on the pool, and `commits_deferred` those whose appends'
+ * stripes grew in the parts placing them.  relic_stats() reports none of
+ * these; they show the tests which way an import or a commit went.
  */
 struct relic_counters {
 	uint64_t		iterations;
@@ -198,6 +200,8 @@ struct relic_counters {
 	uint64_t		parallel_rounds;
 	uint64_t		windows_staged;
 	uint64_t		windows_declined;
+	uint64_t		commits_shared;
+	uint64_t		commits_deferred;
 };
 
 /*
@@ -1703,7 +1707,12 @@ void	 relic_index_link_append(relic_index_t *index,
  * releases the description.
  * relic_bases_reserve() makes every store of a manifest of actions ready,
  * checking both limits once over all of them before changing any, and
- * relic_bases_apply() then gives each its tuples, which cannot fail.
+ * relic_bases_apply() then gives each its tuples, which cannot fail.  The
+ * appends are placed a canonical stripe to a part, on the context's pool
+ * when it exists with more than one worker and the appends hold at least
+ * RELIC_COMMIT_PARALLEL_TUPLES tuples, or RELIC_F_PARALLEL_ALWAYS asks,
+ * and on the calling thread otherwise; a commit makes no pool.  The
+ * reservation decides which, and the apply is given its decision.
  * relic_bases_refuse() reports a limit refusing a load, naming the first
  * predicate whose store the load would grow, as the reservation and
  * staging both do.
@@ -1736,8 +1745,11 @@ void	 relic_index_link_append(relic_index_t *index,
  * the stripe of the canonical index each falls in, for the stripes' slots,
  * and in all, relic_tuple_growth_total(), for the columns.  It grows each
  * array at most once and keeps the storage total in step, and refuses a
- * relation with secondary indexes as an internal error.  An insertion makes
- * its own room, for one tuple and the keys it brings.
+ * relation with secondary indexes as an internal error.  With `grown` not
+ * NULL, each stripe's growth is prepared in grown[s], which holds nothing
+ * on entry and is counted in the total until the stripe completes it,
+ * rather than completed.  An insertion makes its own room, for one tuple
+ * and the keys it brings.
  *
  * A reservation applies no configured limit.
  * relic_relation_bytes_after_growth() gives the bytes the relation would
@@ -1808,6 +1820,20 @@ void	 relic_index_link_append(relic_index_t *index,
  * and indexes hold, which the memory limit counts together with the charged
  * arenas in the context's account.
  */
+
+/*
+ * The fewest tuples a load's commit appends on the pool rather than on the
+ * calling thread: a constant of performance alone, a little past the count
+ * at which placing them on 16 workers, waking the pool included, begins to
+ * beat placing them on one, some 12000 on the machine it was measured on.
+ * The tests run a commit one tuple short of it, so it is at least two.
+ */
+#ifndef RELIC_COMMIT_PARALLEL_TUPLES
+#define	RELIC_COMMIT_PARALLEL_TUPLES	16384u
+#endif
+_Static_assert(RELIC_COMMIT_PARALLEL_TUPLES >= 2,
+    "a commit one tuple short of sharing must append a tuple");
+
 void	 relic_store_init(relic_store_t *store);
 void	 relic_store_reset(relic_store_t *store);
 relic_relation_t *relic_relation_written(relic_t *ctx, relic_pred_id_t pred);
@@ -1839,11 +1865,11 @@ void	 relic_builder_admit(relic_builder_t *builder,
 	    const relic_builder_batch_t *batch);
 int	 relic_base_action_prepare(const relic_t *ctx,
 	    relic_base_action_t *action, relic_builder_t *builder);
-void	 relic_base_action_release(relic_base_action_t *action);
-int	 relic_bases_reserve(relic_t *ctx, const relic_base_action_t *actions,
-	    size_t count);
-void	 relic_bases_apply(relic_t *ctx, const relic_base_action_t *actions,
-	    size_t count);
+void	 relic_base_action_release(relic_t *ctx, relic_base_action_t *action);
+int	 relic_bases_reserve(relic_t *ctx, relic_base_action_t *actions,
+	    size_t count, bool *sharep);
+void	 relic_bases_apply(relic_t *ctx, relic_base_action_t *actions,
+	    size_t count, bool share);
 relic_relation_t *relic_relation_create(relic_t *ctx, relic_pred_id_t pred,
 	    size_t serial, uint16_t arity);
 void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);
@@ -1893,7 +1919,8 @@ void	 relic_relation_finish_append(relic_t *ctx,
 	    const relic_relation_t *relation, const relic_append_t *append);
 size_t	 relic_tuples_admissible(const relic_t *ctx);
 int	 relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
-	    const relic_tuple_growth_t *growth);
+	    const relic_tuple_growth_t *growth,
+	    relic_idtab_t grown[RELIC_STRIPES]);
 size_t	 relic_relation_count(const relic_relation_t *relation);
 relic_tuple_id_t relic_relation_end(const relic_relation_t *relation);
 relic_tuple_range_t relic_relation_since(const relic_relation_t *relation,
