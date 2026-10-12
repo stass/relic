@@ -74,6 +74,7 @@
 #define	SCENARIO_FALLBACK	"an abandoned rewrite out of memory reports once"
 #define	SCENARIO_GROWTH	"an intern at a table's growth point reports once"
 #define	SCENARIO_IMPORT		"an import that ran out of memory adds nothing"
+#define	SCENARIO_IMPORT_ONCE	"an import refused once reads on or fails"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_INTEGER	"interning an integer survives a failed allocation"
@@ -409,7 +410,8 @@ struct eval_sweep {
  * is the state every allocation outside a swept region runs in.  Once the
  * budget reaches zero every later request is refused as well, so a sweep
  * step models an allocator that has run out rather than one that
- * hiccupped.
+ * hiccupped, unless the sweep asked for one refusal alone, which serves
+ * every request after it.
  *
  * A context's worker threads allocate too, so both counters are atomic and
  * a request takes its place in the budget by compare-and-swap: exactly the
@@ -453,6 +455,7 @@ enum refused_requests {
 static enum refused_requests refusing = REFUSE_ALLOCATOR;
 
 static relic_atomic_size_t allocations_remaining = SERVE_EVERY;
+static bool	 refusing_once;
 static relic_atomic_size_t allocations_seen;
 static relic_atomic_size_t worker_refusals;
 
@@ -503,6 +506,7 @@ bool		 relic_test_arena_refuses(void);
 static bool	 refuse_this_request(enum refused_requests kind);
 static void	 serve_every_allocation(void);
 static void	 refuse_allocations_after(long served);
+static void	 refuse_one_allocation_after(long served);
 static void	 context_creation_reports_a_failed_allocation(void);
 static void	 context_creation_fails_without_entropy(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
@@ -517,6 +521,7 @@ static void	 sweep_mixed_commit(const char *later);
 static int	 load_sweep_program(relic_t *ctx, const char *program,
 		    bool from_stream);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
+static void	 an_import_refused_once_reads_on_or_fails(void);
 static void	 a_path_whose_close_fails_adds_nothing(void);
 static bool	 write_temporary(const char *text, char *path, size_t size);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
@@ -599,6 +604,9 @@ refuse_this_request(enum refused_requests kind)
 		if (remaining == SERVE_EVERY)
 			return (false);
 		if (remaining == 0) {
+			if (refusing_once)
+				relic_atomic_size_store(&allocations_remaining,
+				    SERVE_EVERY);
 			count_worker_refusal();
 			return (true);
 		}
@@ -627,11 +635,24 @@ static void
 serve_every_allocation(void)
 {
 	relic_atomic_size_store(&allocations_remaining, SERVE_EVERY);
+	refusing_once = false;
 }
 
 static void
 refuse_allocations_after(long served)
 {
+	relic_atomic_size_store(&allocations_remaining, (size_t)served);
+}
+
+/*
+ * Refuse the request after the next `served` and serve every one after it.
+ * Only a sweep whose context runs no worker thread asks for one refusal,
+ * since two threads could both take the one.
+ */
+static void
+refuse_one_allocation_after(long served)
+{
+	refusing_once = true;
 	relic_atomic_size_store(&allocations_remaining, (size_t)served);
 }
 
@@ -1531,6 +1552,98 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 	checkf(completed > 0, SCENARIO_IMPORT,
 	    "the sweep should reach an import that completes, in %d attempts",
 	    LOAD_SWEEP);
+}
+
+/*
+ * An import refused one allocation, the allocator serving every request
+ * after it, either fails out of memory, having said so once and added
+ * nothing, or ends as an import never refused does.  A refusal while a
+ * batch import works on a window of its own declines the window, which is
+ * then read a field at a time, and the import goes on: the sweep must meet
+ * at least one such import that succeeds.
+ */
+static void
+an_import_refused_once_reads_on_or_fails(void)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SKIP, RELIC_COLUMN_STRING,
+		RELIC_COLUMN_INTEGER
+	};
+	static const char table[] =
+	    "ann,x,\"a quoted field long enough to make its buffer grow\",7\n"
+	    "bob,y,b,8\n"
+	    "ann,z,\"a quoted field long enough to make its buffer grow\",7\n"
+	    "cy,w,\"c\",9\n";
+	relic_import_t import;
+	size_t symbols;
+	size_t read_on;
+	long budget;
+
+	bzero(&import, sizeof(import));
+	import.predicate = "person";
+	import.columns = columns;
+	import.column_count = 4;
+	import.format = RELIC_FORMAT_CSV;
+
+	symbols = 0;
+	read_on = 0;
+	for (budget = -1; budget < LOAD_SWEEP; budget++) {
+		relic_t *ctx;
+		FILE *stream;
+		int status;
+
+		ctx = relic_create();
+		stream = tmpfile();
+		if (ctx == NULL || stream == NULL ||
+		    fwrite(table, 1, sizeof(table) - 1, stream) !=
+		    sizeof(table) - 1) {
+			check(false, SCENARIO_IMPORT_ONCE,
+			    "a context and a table should be made");
+			relic_destroy(ctx);
+			if (stream != NULL)
+				fclose(stream);
+			return;
+		}
+
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		rewind(stream);
+		if (budget >= 0)
+			refuse_one_allocation_after(budget);
+		status = relic_import_file(ctx, "people.csv", stream, &import);
+		serve_every_allocation();
+
+		if (budget < 0) {
+			check(status == 0, SCENARIO_IMPORT_ONCE,
+			    "an import never refused should succeed");
+			symbols = relic_symbol_count(ctx);
+		} else if (status != 0) {
+			checkf(errors_reported == 1 && out_of_memory(ctx) &&
+			    relic_base_total(ctx) == 0, SCENARIO_IMPORT_ONCE,
+			    "a failed import should say it ran out of memory "
+			    "once and add nothing, with allocation %ld refused",
+			    budget);
+		} else {
+			checkf(errors_reported == 0 &&
+			    relic_base_total(ctx) == 3 &&
+			    relic_symbol_count(ctx) == symbols,
+			    SCENARIO_IMPORT_ONCE, "an import that succeeded "
+			    "should have added three facts and %zu symbols, "
+			    "not %zu and %zu, with allocation %ld refused",
+			    symbols, relic_base_total(ctx),
+			    relic_symbol_count(ctx), budget);
+			if (ctx->counters.windows_declined > 0)
+				read_on++;
+		}
+
+		fclose(stream);
+		relic_destroy(ctx);
+	}
+
+	checkf(read_on > 0, SCENARIO_IMPORT_ONCE,
+	    "the sweep should reach a window declined for memory whose import "
+	    "succeeds, in %d attempts", LOAD_SWEEP);
 }
 
 /*
@@ -4576,6 +4689,7 @@ main(void)
 	a_first_load_moves_its_facts_into_place();
 	a_mixed_commit_out_of_memory_adds_nothing();
 	an_import_that_ran_out_of_memory_adds_nothing();
+	an_import_refused_once_reads_on_or_fails();
 	a_path_whose_close_fails_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();
 	a_check_that_ran_out_of_memory_can_be_retried();

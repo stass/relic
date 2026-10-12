@@ -2555,6 +2555,65 @@ relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
 }
 
 /*
+ * Make room in `builder` for the tuples `growth` counts by stripe, all of
+ * them ones it lacks, reaching the capacities adding them one at a time
+ * would: each stripe reserved for its own count reaches what reserving one
+ * at a time reaches, and the columns grow stepwise as payload_reserve_one()
+ * grows them.  Returns 0, or -1 having reported nothing, when the builder
+ * would hold more than it can or memory ran out; what grew stays, and
+ * holds no new tuple.
+ */
+int
+relic_builder_reserve(relic_builder_t *builder,
+    const relic_tuple_growth_t *growth)
+{
+	relic_payload_t *payload;
+	relic_dom_t *columns;
+	size_t needed_columns;
+	size_t added;
+	size_t s;
+
+	payload = &builder->payload;
+	added = relic_tuple_growth_total(growth);
+	if (added == 0)
+		return (0);
+	if (added > RELIC_TUPLE_MAX - payload->count ||
+	    !columns_holding(payload->count + added, builder->arity,
+	    &needed_columns))
+		return (-1);
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (growth->by_stripe[s] > 0 &&
+		    relic_idtab_reserve(&payload->index[s],
+		    growth->by_stripe[s], builder_rehash, builder) != 0)
+			return (-1);
+	}
+
+	columns = relic_grow_array_stepwise(payload->columns,
+	    &payload->column_capacity, payload->count * builder->arity,
+	    added, builder->arity, sizeof(*payload->columns));
+	if (columns == NULL)
+		return (-1);
+	payload->columns = columns;
+	assert(payload->column_capacity >= needed_columns);
+
+	return (0);
+}
+
+/*
+ * Add `columns`, of wide hash `hash`, which the builder lacks and has
+ * reserved room for, as its last tuple.  Nothing here can fail.
+ */
+void
+relic_builder_append_hashed(relic_builder_t *builder,
+    const relic_dom_t *columns, uint64_t hash)
+{
+	assert(!relic_builder_contains_hashed(builder, columns, hash));
+
+	(void)payload_append(&builder->payload, builder->arity, columns, hash);
+}
+
+/*
  * The base commit.  A load gives every base store its facts in one step,
  * the builders of its predicates described by a manifest of actions, one
  * per store that gains a tuple: relic_base_action_prepare() describes

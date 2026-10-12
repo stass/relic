@@ -322,6 +322,16 @@ struct relic_config {
 #define	RELIC_F_NO_FACTOR	0x0200u
 
 /*
+ * Import every table a field at a time, typing and interning each field
+ * and staging each record as it is read, rather than a window of records
+ * at a time, each window's fields decoded and its values and records
+ * checked before any is interned or staged.  The facts, the values and the
+ * identifiers they are given are the same, and so is a failed import's
+ * message and what it leaves interned.
+ */
+#define	RELIC_F_NO_BATCH_IMPORT	0x0400u
+
+/*
  * Create a context.  Returns NULL when the configuration asks for more than
  * RELIC_THREADS_MAX threads, when memory is exhausted, or when getentropy(2)
  * cannot supply the random bytes the context keys its hash tables with, as

@@ -87,8 +87,8 @@ static uint32_t	 integer_rehash(uint32_t id, void *ctx);
 static relic_dom_t measure_integer(const relic_valtab_t *table,
 		    relic_pending_map_t *map, int64_t integer, size_t mask);
 static relic_dom_t measure_string(const relic_t *ctx,
-		    relic_pending_map_t *map, const char *bytes, size_t length,
-		    size_t mask);
+		    relic_pending_map_t *map, enum relic_type type,
+		    const char *bytes, size_t length, size_t mask);
 static size_t	 seen_size(size_t count);
 static bool	 admit_value_table(relic_t *ctx, size_t fresh_integers,
 		    uint32_t symbol);
@@ -877,18 +877,19 @@ measure_integer(const relic_valtab_t *table, relic_pending_map_t *map,
 }
 
 /*
- * The identifier a pending string of `length` bytes at `bytes` is given, a
- * string value's in every case: the one the context has assigned it; or,
- * when the pool holds the bytes under a symbol whose string bit is clear,
- * that symbol's, which the commit makes a string value by setting the bit;
- * or, for bytes the pool lacks, the one after the pool's count that their
- * position among the batch's new strings gives them, found as a new
- * integer's is.  The highest symbol promised is kept, since the commit
- * sets the bit of every one and the bits must reach that far.
+ * The identifier a pending value of `type`, a string or a symbol, of
+ * `length` bytes at `bytes` is given, a value of that type in every case:
+ * the one the context has assigned it; or, when the pool holds the bytes
+ * under a symbol whose bit for the type is clear, that symbol's, which the
+ * commit makes a value of the type by setting the bit; or, for bytes the
+ * pool lacks, the one after the pool's count that their position among the
+ * batch's new strings gives them, found as a new integer's is.  The
+ * highest symbol promised is kept, since the commit sets the bit of every
+ * one and the bits must reach that far.
  */
 static relic_dom_t
 measure_string(const relic_t *ctx, relic_pending_map_t *map,
-    const char *bytes, size_t length, size_t mask)
+    enum relic_type type, const char *bytes, size_t length, size_t mask)
 {
 	const relic_fresh_string_t *fresh;
 	uint32_t symbol;
@@ -918,10 +919,10 @@ measure_string(const relic_t *ctx, relic_pending_map_t *map,
 		    map->strings_seen[slot]);
 	}
 
-	if (symbol > map->highest_string)
-		map->highest_string = symbol;
+	if (symbol > map->highest_use)
+		map->highest_use = symbol;
 
-	return (RELIC_DOM_STRING | symbol);
+	return (dom_type_bits(type) | symbol);
 }
 
 /*
@@ -968,7 +969,7 @@ relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
 	map->count = count;
 	map->fresh_count = 0;
 	map->string_count = 0;
-	map->highest_string = 0;
+	map->highest_use = 0;
 	mask = seen_size(count) - 1;
 	bzero(map->seen, (mask + 1) * sizeof(*map->seen));
 	bzero(map->strings_seen, (mask + 1) * sizeof(*map->strings_seen));
@@ -980,15 +981,18 @@ relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
 			    pending[i].u.integer, mask);
 			break;
 		case RELIC_PENDING_TEXT:
+		case RELIC_PENDING_SYMBOL:
 			text = &pending[i].u.text;
 			map->ids[i] = measure_string(ctx, map,
+			    pending[i].kind == RELIC_PENDING_SYMBOL ?
+			    RELIC_SYMBOL : RELIC_STRING,
 			    bytes + text->offset, text->length, mask);
 			break;
 		}
 	}
 
 	return (relic_saturating_sum(value_table_bytes_after(table,
-	    map->fresh_count, map->highest_string),
+	    map->fresh_count, map->highest_use),
 	    relic_symbol_pool_bytes_after(ctx, map->strings,
 	    map->string_count)));
 }
@@ -1025,7 +1029,7 @@ relic_pending_reserve(relic_t *ctx, relic_pending_map_t *map)
 	if (reserve_integers(ctx, map->fresh_count) != 0)
 		return (-1);
 
-	if (cover_symbol_uses(ctx, map->highest_string) != 0)
+	if (cover_symbol_uses(ctx, map->highest_use) != 0)
 		return (-1);
 
 	return (relic_symbol_reserve(ctx, map->strings, map->string_count,
@@ -1055,14 +1059,27 @@ relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
 
 	for (i = 0; i < map->count; i++) {
 		id = map->ids[i];
-		if ((id & RELIC_DOM_TYPE_MASK) != RELIC_DOM_STRING)
+		if ((id & RELIC_DOM_TYPE_MASK) == RELIC_DOM_INTEGER)
 			continue;
 
 		assert((id & RELIC_DOM_INDEX_MASK) <=
 		    table->symbol_use_capacity);
 		record_symbol_use(table, id & RELIC_DOM_INDEX_MASK,
-		    RELIC_STRING);
+		    (id & RELIC_DOM_TYPE_MASK) == RELIC_DOM_SYMBOL ?
+		    RELIC_SYMBOL : RELIC_STRING);
 	}
+}
+
+/*
+ * The checks relic_pending_reserve() makes of the identifiers' room before
+ * it grows anything, made without growing anything.
+ */
+bool
+relic_pending_fits(const relic_t *ctx, const relic_pending_map_t *map)
+{
+	return (map->fresh_count <= RELIC_INTEGER_MAX -
+	    ctx->values.integer_count &&
+	    relic_symbol_has_room(ctx, map->string_count));
 }
 
 /*

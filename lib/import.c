@@ -15,7 +15,7 @@
 #include <string.h>
 #include <strings.h>
 
-#include "internal.h"
+#include "window.h"
 
 /*
  * Importing facts from csv and tsv tables.
@@ -66,40 +66,57 @@ enum import_progress {
 	IMPORT_FAILED
 };
 
-typedef struct import_plan import_plan_t;
+/*
+ * How staging a window went: staged, with more of the table to come, or
+ * the table's last; declined, with nothing of it staged; failed, having
+ * reported why; or not begun, since the input holds nothing more and the
+ * reader is to say what its end means.
+ */
+enum window_outcome {
+	WINDOW_STAGED,
+	WINDOW_ENDED,
+	WINDOW_DECLINED,
+	WINDOW_FAILED,
+	WINDOW_NONE
+};
+
+typedef struct import_input import_input_t;
 typedef struct importer importer_t;
 
 /*
- * What an import reads, copied from the caller's description once it has
- * been checked.  The description is borrowed, and caller code runs while a
- * table is read -- the stream's read function, the diagnostic callback --
- * so nothing is read from it after the copy, and a description changed
- * behind the import's back cannot make it keep more columns than it
- * checked.  `columns` and `predicate` are owned, `predicate` the name the
- * caller gave, `predicate_length` bytes long; `arity` is the number of
- * columns not skipped.
+ * What an import has read of its stream and not yet staged: the one
+ * buffer through which both ways of reading a table read it, `length`
+ * bytes in `capacity`.  `failed` says the read after them failed, with
+ * `read_errno`, and `ended` that the stream ended after them.  Neither is
+ * acted on before every byte held has been, so a window read ahead and
+ * then declined is read again field by field exactly as it was read.
  */
-struct import_plan {
-	enum relic_column	*columns;
-	char			*predicate;
-	size_t			 predicate_length;
-	size_t			 column_count;
-	size_t			 arity;
-	enum relic_format	 format;
-	bool			 header;
+struct import_input {
+	FILE			*stream;
+	char			*bytes;
+	size_t			 length;
+	size_t			 capacity;
+	int			 read_errno;
+	bool			 failed;
+	bool			 ended;
 };
 
 /*
  * An import in progress.  `tuple` holds the values of the current record's
  * kept columns, `kept` of them so far.  `header_pending` is set while the
  * first record is still to be read as a header: its fields are neither typed
- * nor interned, and its end stages nothing.
+ * nor interned, and its end stages nothing.  `boundary` is the location of
+ * the first byte the input holds, which begins a record: where the next
+ * window, or the reader, begins.
  */
 struct importer {
 	relic_t			*ctx;
-	const import_plan_t	*plan;
+	const relic_import_plan_t *plan;
 	relic_staging_t		 staging;
 	relic_table_reader_t	 reader;
+	import_input_t		 input;
+	relic_window_t		 window;
+	relic_location_t	 boundary;
 	relic_dom_t		 tuple[RELIC_MAX_ARITY];
 	relic_pred_id_t		 pred;
 	char			*source_name;	/* the importer's copy */
@@ -108,9 +125,11 @@ struct importer {
 };
 
 static void	 advance_location(relic_location_t *where, unsigned char byte);
+static int	 analyze_window(importer_t *importer, size_t *value_bytesp);
 static enum relic_table_event_kind append_field_byte(
 		    relic_table_reader_t *reader, unsigned char byte,
 		    relic_table_event_t *event);
+static void	 consume_input(import_input_t *input, size_t length);
 static const char *describe_field(const char *bytes, size_t length,
 		    char *buffer, size_t size);
 static enum relic_table_event_kind end_field(relic_table_reader_t *reader,
@@ -120,35 +139,47 @@ static enum relic_table_event_kind end_of_input(relic_table_reader_t *reader,
 static enum relic_table_event_kind end_record(relic_table_reader_t *reader,
 		    relic_table_event_t *event);
 static bool	 extra_field_begun(const relic_table_reader_t *reader);
-static enum import_progress feed_chunk(importer_t *importer,
-		    const char *source_name, FILE *stream, char *chunk);
+static enum import_progress feed_reader(importer_t *importer);
+static int	 fill_window(import_input_t *input);
 static bool	 field_value(relic_t *ctx, enum relic_column column,
 		    const relic_table_event_t *event, relic_dom_t *valuep);
 static int	 import_named_file(relic_t *ctx, const char *path,
-		    const import_plan_t *plan);
+		    const relic_import_plan_t *plan);
 static bool	 import_plan_init(relic_t *ctx, const relic_import_t *import,
-		    import_plan_t *plan);
-static void	 import_plan_reset(import_plan_t *plan);
+		    relic_import_plan_t *plan);
+static void	 import_plan_reset(relic_import_plan_t *plan);
 static int	 import_stream(relic_t *ctx, const char *source_name,
-		    FILE *stream, const import_plan_t *plan);
+		    FILE *stream, const relic_import_plan_t *plan);
 static void	 importer_init(importer_t *importer, relic_t *ctx,
-		    const import_plan_t *plan);
+		    const relic_import_plan_t *plan, FILE *stream);
 static void	 importer_reset(importer_t *importer);
 static bool	 is_delimiter(const relic_table_reader_t *reader,
 		    unsigned char byte);
+static bool	 is_plain(enum relic_format format,
+		    enum relic_table_state state, unsigned char byte);
 static size_t	 kept_columns(const enum relic_column *columns,
 		    size_t column_count);
+static int	 frame_window(importer_t *importer);
+static enum window_outcome decline_window(importer_t *importer);
 static enum relic_table_event_kind mistake(relic_table_reader_t *reader,
 		    enum relic_table_mistake which,
 		    const relic_location_t *where, unsigned char byte,
 		    relic_table_event_t *event);
-static int	 read_table(importer_t *importer, const char *source_name,
-		    FILE *stream);
-static void	 report_mistake(relic_t *ctx, const import_plan_t *plan,
+static enum relic_table_event_kind next_event(relic_table_reader_t *reader,
+		    relic_table_event_t *event);
+static enum relic_table_event_kind out_of_memory(
+		    relic_table_reader_t *reader, relic_table_event_t *event);
+static int	 read_plain_run(relic_table_reader_t *reader);
+static int	 publish_window(importer_t *importer);
+static int	 read_chunk(import_input_t *input);
+static enum import_progress read_fields(importer_t *importer);
+static int	 read_table(importer_t *importer);
+static void	 report_mistake(relic_t *ctx, const relic_import_plan_t *plan,
 		    const relic_table_event_t *event);
 static unsigned char separator_of(enum relic_format format);
-static int	 stage_table(importer_t *importer, const char *source_name,
-		    FILE *stream);
+static int	 stage_table(importer_t *importer, const char *source_name);
+static enum window_outcome stage_window(importer_t *importer);
+static enum import_progress stage_windows(importer_t *importer);
 static enum relic_table_event_kind step(relic_table_reader_t *reader,
 		    unsigned char byte, const relic_location_t *here,
 		    relic_table_event_t *event);
@@ -180,6 +211,8 @@ static enum import_progress take_field(importer_t *importer,
 		    const relic_table_event_t *event);
 static enum import_progress take_record(importer_t *importer);
 static bool	 validate_import(relic_t *ctx, const relic_import_t *import);
+static bool	 window_admissible(const importer_t *importer,
+		    size_t value_bytes);
 
 /*
  * The reader.
@@ -216,6 +249,30 @@ relic_table_reader_init(relic_table_reader_t *reader, enum relic_format format,
 }
 
 void
+relic_table_reader_frame_only(relic_table_reader_t *reader)
+{
+	assert(reader->field == NULL);
+
+	reader->frames = true;
+}
+
+void
+relic_table_reader_start_at(relic_table_reader_t *reader,
+    const relic_location_t *where)
+{
+	assert(reader->state == RELIC_TABLE_AT_RECORD &&
+	    reader->fields_ended == 0);
+
+	reader->where = *where;
+}
+
+size_t
+relic_table_unread(const relic_table_reader_t *reader)
+{
+	return (reader->input_length);
+}
+
+void
 relic_table_reader_reset(relic_table_reader_t *reader)
 {
 	free(reader->field);
@@ -231,8 +288,27 @@ relic_table_feed(relic_table_reader_t *reader, const char *bytes,
 	reader->input_is_last = last;
 }
 
+/*
+ * A reader that only frames drops its FIELD events here, the one place
+ * where its events differ from a decoding reader's.
+ */
 enum relic_table_event_kind
 relic_table_next(relic_table_reader_t *reader, relic_table_event_t *event)
+{
+	enum relic_table_event_kind kind;
+
+	do
+		kind = next_event(reader, event);
+	while (kind == RELIC_TABLE_FIELD && reader->frames);
+
+	return (kind);
+}
+
+/*
+ * The next event the table's bytes cause, FIELD events included.
+ */
+static enum relic_table_event_kind
+next_event(relic_table_reader_t *reader, relic_table_event_t *event)
 {
 	for (;;) {
 		relic_location_t here;
@@ -250,6 +326,9 @@ relic_table_next(relic_table_reader_t *reader, relic_table_event_t *event)
 		if (extra_field_begun(reader))
 			return (mistake(reader, RELIC_TABLE_TOO_MANY_FIELDS,
 			    &reader->where, 0, event));
+
+		if (read_plain_run(reader) != 0)
+			return (out_of_memory(reader, event));
 
 		if (reader->input_length == 0) {
 			if (!reader->input_is_last) {
@@ -270,6 +349,89 @@ relic_table_next(relic_table_reader_t *reader, relic_table_event_t *event)
 		if (kind != RELIC_TABLE_MORE)
 			return (kind);
 	}
+}
+
+/*
+ * Whether `byte`, read in `state`, is plain: data that changes nothing but
+ * the field and the column, whatever comes before or after it in the run.
+ * Outside quotes that is every byte but a delimiter and the format's
+ * quote or escape, which step_unquoted() decides by this test; inside
+ * quotes it is every byte but a quote and the line feed, which is data
+ * too but begins a line.  No byte is plain in a state that waits for the
+ * byte after a quote, an escape or a carriage return.
+ */
+static bool
+is_plain(enum relic_format format, enum relic_table_state state,
+    unsigned char byte)
+{
+	switch (state) {
+	case RELIC_TABLE_AT_RECORD:
+	case RELIC_TABLE_AT_FIELD:
+	case RELIC_TABLE_IN_FIELD:
+		return (byte != separator_of(format) && byte != '\n' &&
+		    byte != '\r' &&
+		    byte != (format == RELIC_FORMAT_CSV ? '"' : '\\'));
+	case RELIC_TABLE_IN_QUOTES:
+		return (byte != '"' && byte != '\n');
+	case RELIC_TABLE_AFTER_QUOTE:
+	case RELIC_TABLE_AFTER_BACKSLASH:
+	case RELIC_TABLE_AFTER_RETURN:
+	case RELIC_TABLE_RECORD_ENDED:
+	case RELIC_TABLE_STOPPED:
+		break;
+	}
+
+	return (false);
+}
+
+/*
+ * Read the plain bytes the input begins with at once, as step() would read
+ * them one at a time: the same bytes appended, the same column reached, a
+ * field begun where it would begin one.  Most of a table's bytes are read
+ * here.  Returns 0, or -1 when the field could not grow.
+ */
+static int
+read_plain_run(relic_table_reader_t *reader)
+{
+	const unsigned char *input;
+	enum relic_table_state state;
+	enum relic_format format;
+	size_t run;
+	char *field;
+
+	input = (const unsigned char *)reader->input;
+	state = reader->state;
+	format = reader->format;
+	for (run = 0; run < reader->input_length &&
+	    is_plain(format, state, input[run]); run++)
+		continue;
+	if (run == 0)
+		return (0);
+
+	if (state == RELIC_TABLE_AT_RECORD || state == RELIC_TABLE_AT_FIELD) {
+		reader->field_where = reader->where;
+		reader->state = RELIC_TABLE_IN_FIELD;
+	}
+
+	if (!reader->frames) {
+		field = relic_grow_array(reader->field,
+		    &reader->field_capacity, reader->field_length + run,
+		    sizeof(*reader->field));
+		if (field == NULL)
+			return (-1);
+		reader->field = field;
+		bcopy(input, reader->field + reader->field_length, run);
+		reader->field_length += run;
+	}
+
+	reader->input += run;
+	reader->input_length -= run;
+	if (run > UINT32_MAX - reader->where.column)
+		reader->where.column = UINT32_MAX;
+	else
+		reader->where.column += (uint32_t)run;
+
+	return (0);
 }
 
 /*
@@ -397,21 +559,21 @@ static enum relic_table_event_kind
 step_unquoted(relic_table_reader_t *reader, unsigned char byte,
     const relic_location_t *here, relic_table_event_t *event)
 {
+	if (is_plain(reader->format, reader->state, byte)) {
+		reader->state = RELIC_TABLE_IN_FIELD;
+		return (append_field_byte(reader, byte, event));
+	}
+
 	if (is_delimiter(reader, byte))
 		return (step_delimiter(reader, byte, here, event));
 
-	if (reader->format == RELIC_FORMAT_CSV && byte == '"')
+	assert(byte == (reader->format == RELIC_FORMAT_CSV ? '"' : '\\'));
+	if (reader->format == RELIC_FORMAT_CSV)
 		return (mistake(reader, RELIC_TABLE_QUOTE_IN_UNQUOTED, here, 0,
 		    event));
 
-	if (reader->format == RELIC_FORMAT_TSV && byte == '\\') {
-		reader->state = RELIC_TABLE_AFTER_BACKSLASH;
-		return (RELIC_TABLE_MORE);
-	}
-
-	reader->state = RELIC_TABLE_IN_FIELD;
-
-	return (append_field_byte(reader, byte, event));
+	reader->state = RELIC_TABLE_AFTER_BACKSLASH;
+	return (RELIC_TABLE_MORE);
 }
 
 /*
@@ -549,12 +711,13 @@ end_of_input(relic_table_reader_t *reader, relic_table_event_t *event)
 }
 
 /*
- * End the field being read, emitting its bytes, and go on in `next`.  The
- * field's length is taken into the event before it is cleared, so the bytes
- * the event points at stay as they are until the next byte is appended,
- * which cannot happen before the caller has seen the event.  Before the
- * first byte of any field the buffer does not exist, and an empty field's
- * bytes are then an empty string rather than NULL.
+ * End the field being read, emitting its bytes, which are none when the
+ * reader only frames, and go on in `next`.  The field's length is taken
+ * into the event before it is cleared, so the bytes the event points at
+ * stay as they are until the next byte is appended, which cannot happen
+ * before the caller has seen the event.  Before the first byte of any
+ * field the buffer does not exist, and an empty field's bytes are then an
+ * empty string rather than NULL.
  */
 static enum relic_table_event_kind
 end_field(relic_table_reader_t *reader, enum relic_table_state next,
@@ -600,24 +763,24 @@ end_record(relic_table_reader_t *reader, relic_table_event_t *event)
  * the reader with RELIC_TABLE_NO_MEMORY when the field cannot grow: memory
  * the reader could not have is not the table's mistake, and the caller
  * reports it as what it is.  The buffer grows only when it is full, which is
- * rarely, so every other byte costs a comparison and a store.
+ * rarely, so every other byte costs a comparison and a store.  A reader
+ * that only frames keeps no byte.
  */
 static enum relic_table_event_kind
 append_field_byte(relic_table_reader_t *reader, unsigned char byte,
     relic_table_event_t *event)
 {
+	if (reader->frames)
+		return (RELIC_TABLE_MORE);
+
 	if (reader->field_length == reader->field_capacity) {
 		char *field;
 
 		field = relic_grow_array(reader->field,
 		    &reader->field_capacity, reader->field_length + 1,
 		    sizeof(*reader->field));
-		if (field == NULL) {
-			bzero(event, sizeof(*event));
-			event->kind = RELIC_TABLE_NO_MEMORY;
-			event->where = reader->where;
-			return (stop(reader, event));
-		}
+		if (field == NULL)
+			return (out_of_memory(reader, event));
 		reader->field = field;
 	}
 
@@ -625,6 +788,19 @@ append_field_byte(relic_table_reader_t *reader, unsigned char byte,
 	reader->field_length++;
 
 	return (RELIC_TABLE_MORE);
+}
+
+/*
+ * Stop the reader with RELIC_TABLE_NO_MEMORY: the field could not grow.
+ */
+static enum relic_table_event_kind
+out_of_memory(relic_table_reader_t *reader, relic_table_event_t *event)
+{
+	bzero(event, sizeof(*event));
+	event->kind = RELIC_TABLE_NO_MEMORY;
+	event->where = reader->where;
+
+	return (stop(reader, event));
 }
 
 /*
@@ -669,7 +845,7 @@ int
 relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
     const relic_import_t *import)
 {
-	import_plan_t plan;
+	relic_import_plan_t plan;
 	int status;
 
 	if (relic_enter(ctx, "importing",
@@ -693,7 +869,7 @@ relic_import_file(relic_t *ctx, const char *source_name, FILE *stream,
 int
 relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
 {
-	import_plan_t plan;
+	relic_import_plan_t plan;
 	int status;
 
 	if (relic_enter(ctx, "importing",
@@ -724,7 +900,7 @@ relic_import_path(relic_t *ctx, const char *path, const relic_import_t *import)
  */
 static bool
 import_plan_init(relic_t *ctx, const relic_import_t *import,
-    import_plan_t *plan)
+    relic_import_plan_t *plan)
 {
 	bzero(plan, sizeof(*plan));
 
@@ -753,7 +929,7 @@ import_plan_init(relic_t *ctx, const relic_import_t *import,
 }
 
 static void
-import_plan_reset(import_plan_t *plan)
+import_plan_reset(relic_import_plan_t *plan)
 {
 	free(plan->columns);
 	free(plan->predicate);
@@ -766,7 +942,8 @@ import_plan_reset(import_plan_t *plan)
  * a close that fails fails the import with nothing added.
  */
 static int
-import_named_file(relic_t *ctx, const char *path, const import_plan_t *plan)
+import_named_file(relic_t *ctx, const char *path,
+    const relic_import_plan_t *plan)
 {
 	importer_t importer;
 	FILE *stream;
@@ -776,8 +953,8 @@ import_named_file(relic_t *ctx, const char *path, const import_plan_t *plan)
 	if (stream == NULL)
 		return (-1);
 
-	importer_init(&importer, ctx, plan);
-	status = stage_table(&importer, path, stream);
+	importer_init(&importer, ctx, plan, stream);
+	status = stage_table(&importer, path);
 	if (status != 0)
 		fclose(stream);
 	else
@@ -885,13 +1062,13 @@ validate_import(relic_t *ctx, const relic_import_t *import)
  */
 static int
 import_stream(relic_t *ctx, const char *source_name, FILE *stream,
-    const import_plan_t *plan)
+    const relic_import_plan_t *plan)
 {
 	importer_t importer;
 	int status;
 
-	importer_init(&importer, ctx, plan);
-	status = stage_table(&importer, source_name, stream);
+	importer_init(&importer, ctx, plan, stream);
+	status = stage_table(&importer, source_name);
 	if (status == 0)
 		status = relic_staging_commit(&importer.staging);
 	importer_reset(&importer);
@@ -900,26 +1077,32 @@ import_stream(relic_t *ctx, const char *source_name, FILE *stream,
 }
 
 static void
-importer_init(importer_t *importer, relic_t *ctx, const import_plan_t *plan)
+importer_init(importer_t *importer, relic_t *ctx,
+    const relic_import_plan_t *plan, FILE *stream)
 {
 	bzero(importer, sizeof(*importer));
 	importer->ctx = ctx;
 	importer->plan = plan;
+	importer->input.stream = stream;
 	importer->header_pending = plan->header;
 	relic_staging_init(&importer->staging, ctx);
+	relic_window_init(&importer->window, (uint16_t)plan->arity);
 }
 
 static void
 importer_reset(importer_t *importer)
 {
+	relic_window_reset(&importer->window);
 	relic_table_reader_reset(&importer->reader);
 	relic_staging_reset(&importer->staging);
+	free(importer->input.bytes);
 	free(importer->source_name);
 }
 
 /*
- * Read the table from `stream` and stage its records, none yet committed.
- * Returns 0, or -1 having reported why the table cannot be imported.
+ * Read the table from the importer's stream and stage its records, none
+ * yet committed.  Returns 0, or -1 having reported why the table cannot be
+ * imported.
  *
  * The predicate is interned before the table is read, and so before any of
  * its values, as a load interns a fact's predicate when it stages the fact.
@@ -932,9 +1115,9 @@ importer_reset(importer_t *importer)
  * copy lives exactly as long as the import.
  */
 static int
-stage_table(importer_t *importer, const char *source_name, FILE *stream)
+stage_table(importer_t *importer, const char *source_name)
 {
-	const import_plan_t *plan;
+	const relic_import_plan_t *plan;
 	const char *name;
 	size_t length;
 
@@ -957,77 +1140,456 @@ stage_table(importer_t *importer, const char *source_name, FILE *stream)
 
 	relic_table_reader_init(&importer->reader, plan->format,
 	    plan->column_count, name);
+	importer->boundary = importer->reader.where;
 
-	return (read_table(importer, name, stream));
+	return (read_table(importer));
 }
 
 /*
- * Read the whole table, feeding the stream to the reader a chunk at a time
- * and handing the reader's events to the importer in order.  Returns 0 when
- * the table ended with every record staged, or -1 having reported the first
- * mistake, a failed read, or memory.
+ * Read the whole table and stage its records.  Returns 0 when the table
+ * ended with every record staged, or -1 having reported the first mistake,
+ * a failed read, or memory.
+ *
+ * The table is staged a window at a time, unless the context's flags say
+ * not to, for as long as each window is admitted whole; the first that is
+ * not, and the rest of the table after it, are read a field at a time, as
+ * the flag reads all of it.  Both stage exactly the same facts and intern
+ * exactly the same values under the same identifiers, and a window is
+ * admitted only when reading it a field at a time could not fail, so the
+ * import fails, when it does, at the same record and with the same
+ * message as a field at a time, with the same values interned.
  */
 static int
-read_table(importer_t *importer, const char *source_name, FILE *stream)
+read_table(importer_t *importer)
 {
-	relic_table_event_t event;
 	enum import_progress progress;
-	char *chunk;
 
-	chunk = malloc(RELIC_IMPORT_READ_CHUNK);
-	if (chunk == NULL) {
-		relic_diag_no_memory(importer->ctx);
-		return (-1);
-	}
-
-	do {
-		if (relic_table_next(&importer->reader, &event) ==
-		    RELIC_TABLE_MORE)
-			progress = feed_chunk(importer, source_name, stream,
-			    chunk);
-		else
-			progress = take_event(importer, &event);
-	} while (progress == IMPORT_READ_ON);
-
-	free(chunk);
+	progress = IMPORT_READ_ON;
+	if ((importer->ctx->config.flags & RELIC_F_NO_BATCH_IMPORT) == 0)
+		progress = stage_windows(importer);
+	if (progress == IMPORT_READ_ON)
+		progress = read_fields(importer);
 
 	return (progress == IMPORT_TABLE_ENDED ? 0 : -1);
 }
 
 /*
- * Read the next chunk of the stream into `chunk` and feed it to the reader.
- * Reads on, or fails having reported a failed read.
- *
- * A short read with no error on the stream is its end, and the chunk it
- * filled is the table's last.  errno is cleared before the read, because a
- * stream whose error indicator was already set can return short without
- * touching it, and the message would then name whatever an earlier call
- * left behind.  A stream that fails without saying why, such as one whose
- * read function sets no errno, is reported as an input error rather than as
- * no error at all.
+ * Stage windows of the table for as long as each is admitted whole.
+ * Returns IMPORT_TABLE_ENDED when the last window of the table was,
+ * IMPORT_FAILED having reported why room for one could not be made, or
+ * IMPORT_READ_ON when one was declined, which leaves its bytes in the input
+ * for the reader to read from `boundary`.  No window is staged after the
+ * first that is not, so the window's storage is released before the
+ * reader begins.
  */
 static enum import_progress
-feed_chunk(importer_t *importer, const char *source_name, FILE *stream,
-    char *chunk)
+stage_windows(importer_t *importer)
 {
-	size_t got;
-	int read_errno;
+	enum window_outcome outcome;
 
-	errno = 0;
-	got = fread(chunk, 1, RELIC_IMPORT_READ_CHUNK, stream);
-	read_errno = errno;
+	do {
+		if (fill_window(&importer->input) != 0)
+			outcome = WINDOW_NONE;
+		else
+			outcome = stage_window(importer);
+	} while (outcome == WINDOW_STAGED);
+	relic_window_reset(&importer->window);
 
-	if (got < RELIC_IMPORT_READ_CHUNK && ferror(stream)) {
-		relic_diag_error(importer->ctx, RELIC_ERROR_IO, NULL,
-		    "cannot read %s: %s", source_name,
-		    strerror(read_errno != 0 ? read_errno : EIO));
+	switch (outcome) {
+	case WINDOW_ENDED:
+		return (IMPORT_TABLE_ENDED);
+	case WINDOW_FAILED:
+		return (IMPORT_FAILED);
+	case WINDOW_STAGED:
+	case WINDOW_DECLINED:
+	case WINDOW_NONE:
+		break;
+	}
+
+	return (IMPORT_READ_ON);
+}
+
+/*
+ * Read the stream until the input holds a window's worth, or the stream
+ * has ended or failed.  Returns 0, or -1 when there was no room to read
+ * into, having reported nothing.
+ */
+static int
+fill_window(import_input_t *input)
+{
+	while (!input->ended && !input->failed && input->length <=
+	    RELIC_IMPORT_WINDOW_BYTES - RELIC_IMPORT_READ_CHUNK) {
+		if (read_chunk(input) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Stage the window the input begins with: frame it, decode it, prove it
+ * admissible, then make room for its values and its new tuples and add
+ * them, which cannot fail once the room is made.  A window that cannot be
+ * framed, decoded or proved is declined, and nothing of it has been
+ * interned or staged.  A failure making room is the import's.  An input
+ * that holds nothing, once filled, has ended or failed, and holds no
+ * window.
+ */
+static enum window_outcome
+stage_window(importer_t *importer)
+{
+	relic_window_t *window;
+	size_t value_bytes;
+
+	window = &importer->window;
+	relic_window_clear(window);
+	if (importer->input.length == 0)
+		return (WINDOW_NONE);
+
+	if (frame_window(importer) != 0)
+		return (decline_window(importer));
+	if (analyze_window(importer, &value_bytes) != 0)
+		return (decline_window(importer));
+	if (!window_admissible(importer, value_bytes))
+		return (decline_window(importer));
+
+	if (publish_window(importer) != 0)
+		return (WINDOW_FAILED);
+
+	importer->ctx->counters.windows_staged++;
+	consume_input(&importer->input, window->length);
+	importer->boundary = window->end;
+	importer->header_pending = false;
+
+	return (window->ends_input ? WINDOW_ENDED : WINDOW_STAGED);
+}
+
+/*
+ * Decline the window: the reader reads it, from `boundary`, and the rest of
+ * the table after it.
+ */
+static enum window_outcome
+decline_window(importer_t *importer)
+{
+	importer->ctx->counters.windows_declined++;
+
+	return (WINDOW_DECLINED);
+}
+
+/*
+ * Frame the input into a window of its whole records, divided into pieces
+ * of about RELIC_IMPORT_PIECE_BYTES, by a reader of the table's structure
+ * begun at `boundary`; whatever follows the last whole record waits for
+ * the next window.  Returns 0, or -1 when the input cannot be framed: it
+ * holds a mistake or no whole record, or memory ran out.
+ *
+ * The reader is fed the input as the table's last bytes only when the
+ * stream has ended after them, so that a record the end of the input ends
+ * is whole only then.  The window's first record is the table's header
+ * while the import still expects one.
+ */
+static int
+frame_window(importer_t *importer)
+{
+	relic_table_reader_t reader;
+	relic_table_event_t event;
+	enum relic_table_event_kind kind;
+	relic_window_t *window;
+	relic_window_piece_t *piece;
+	import_input_t *input;
+	relic_location_t end;
+	size_t records;
+	size_t length;
+	bool header;
+	int status;
+
+	window = &importer->window;
+	input = &importer->input;
+	relic_table_reader_init(&reader, importer->plan->format,
+	    importer->plan->column_count, importer->source_name);
+	relic_table_reader_frame_only(&reader);
+	relic_table_reader_start_at(&reader, &importer->boundary);
+	relic_table_feed(&reader, input->bytes, input->length, input->ended);
+
+	piece = NULL;
+	end = importer->boundary;
+	length = 0;
+	records = 0;
+	header = importer->header_pending;
+	status = 0;
+	while ((kind = relic_table_next(&reader, &event)) ==
+	    RELIC_TABLE_RECORD) {
+		if (piece == NULL) {
+			piece = relic_window_add_piece(window);
+			if (piece == NULL) {
+				status = -1;
+				break;
+			}
+			piece->start = length;
+			piece->where = end;
+			piece->header = header;
+			piece->first_tuple = window->tuple_count;
+		}
+		if (header) {
+			header = false;
+		} else {
+			piece->tuples++;
+			window->tuple_count++;
+		}
+		records++;
+		length = input->length - relic_table_unread(&reader);
+		end = reader.where;
+
+		piece->length = length - piece->start;
+		if (piece->length >= RELIC_IMPORT_PIECE_BYTES)
+			piece = NULL;
+	}
+	relic_table_reader_reset(&reader);
+
+	if (status != 0 || records == 0 ||
+	    (kind != RELIC_TABLE_MORE && kind != RELIC_TABLE_END))
+		return (-1);
+
+	window->input = input->bytes;
+	window->length = length;
+	window->end = end;
+	window->ends_input = kind == RELIC_TABLE_END;
+	window->pieces[window->piece_count - 1].last = window->ends_input;
+
+	return (relic_window_size(window));
+}
+
+/*
+ * Decode the window's pieces, number their values, and find the tuples
+ * new to the predicate's facts, into the window alone.  *value_bytesp is
+ * what the value table and the pool would hold with the window's values
+ * interned.  Returns 0, or -1 when a field holds no value its column
+ * accepts, a value would be given an identifier no identifier can name,
+ * or memory ran out.
+ *
+ * The map is open only when the window holds a value; a window of tuples
+ * of no columns has none, and its values take no more room than they do.
+ */
+static int
+analyze_window(importer_t *importer, size_t *value_bytesp)
+{
+	relic_window_t *window;
+	relic_t *ctx;
+	size_t i;
+
+	ctx = importer->ctx;
+	window = &importer->window;
+	for (i = 0; i < window->piece_count; i++) {
+		if (relic_window_decode_piece(ctx, importer->plan,
+		    importer->source_name, window, &window->pieces[i]) != 0)
+			return (-1);
+	}
+
+	if (relic_window_gather(window) != 0)
+		return (-1);
+	*value_bytesp = relic_value_storage_bytes(ctx);
+	if (window->mapped) {
+		*value_bytesp = relic_pending_measure(ctx, window->values,
+		    window->value_count, window->decoded, &window->map);
+		if (!relic_pending_fits(ctx, &window->map))
+			return (-1);
+	}
+
+	relic_window_resolve(ctx, window);
+
+	return (relic_window_classify(window,
+	    relic_staging_builder(&importer->staging, importer->pred),
+	    relic_base_store(ctx, importer->pred)));
+}
+
+/*
+ * Whether the window can be staged with no check failing that reading it a
+ * field at a time would make, its identifiers having been found to fit.
+ * The value table and the pool, grown to what interning the window's
+ * values makes them, `value_bytes`, must fit the memory limit, which asks
+ * about each growth: each grows to no more than that, so if the last fits
+ * every one does.  Interning asks the limit only about a growth, so the
+ * question is put only when the values take more room than they do now.
+ * And the new tuples, with the values in, must pass staging's checks,
+ * which grow with each tuple too.  It reports nothing and changes nothing.
+ */
+static bool
+window_admissible(const importer_t *importer, size_t value_bytes)
+{
+	const relic_window_t *window;
+	const relic_t *ctx;
+	size_t current;
+
+	ctx = importer->ctx;
+	window = &importer->window;
+	current = relic_value_storage_bytes(ctx);
+	if (value_bytes == SIZE_MAX || (value_bytes > current &&
+	    relic_account_exceeds(&ctx->account, current, value_bytes)))
+		return (false);
+
+	return (relic_staging_admits(&importer->staging, importer->pred,
+	    window->fresh_count, value_bytes));
+}
+
+/*
+ * Intern the window's values and stage its new tuples, in input order.
+ * Room for both is made first, so that nothing is added unless everything
+ * can be.  Returns 0, or -1 having reported that memory ran out, with the
+ * values and the facts staged as they were.
+ *
+ * Staging is reserved whenever the window holds a tuple, fresh or not,
+ * since the first tuple a field-at-a-time import stages begins the
+ * predicate's staged set, and with it the floor its store's rows add,
+ * whether or not the tuple is new.
+ */
+static int
+publish_window(importer_t *importer)
+{
+	relic_window_t *window;
+	relic_t *ctx;
+	uint32_t position;
+	size_t i;
+
+	ctx = importer->ctx;
+	window = &importer->window;
+	if (window->mapped && relic_pending_reserve(ctx, &window->map) != 0) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (window->tuple_count > 0 && relic_staging_reserve(&importer->staging,
+	    importer->pred, &window->growth) != 0) {
+		if (window->mapped)
+			relic_pending_unreserve(ctx, &window->map);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	if (window->mapped)
+		relic_pending_append(ctx, &window->map);
+	for (i = 0; i < window->fresh_count; i++) {
+		position = window->fresh[i];
+		relic_staging_append(&importer->staging, importer->pred,
+		    window->tuples + (size_t)position * window->arity,
+		    window->hashes[position]);
+	}
+
+	return (0);
+}
+
+/*
+ * Read the table from `boundary` one field at a time, feeding the reader
+ * the input and handing its events to the importer in order.
+ */
+static enum import_progress
+read_fields(importer_t *importer)
+{
+	relic_table_event_t event;
+	enum import_progress progress;
+
+	relic_table_reader_start_at(&importer->reader, &importer->boundary);
+	do {
+		if (relic_table_next(&importer->reader, &event) ==
+		    RELIC_TABLE_MORE)
+			progress = feed_reader(importer);
+		else
+			progress = take_event(importer, &event);
+	} while (progress == IMPORT_READ_ON);
+
+	return (progress);
+}
+
+/*
+ * Feed the reader every byte the input holds, reading the next chunk of
+ * the stream first when it holds none.  Reads on, or fails having
+ * reported a failed read or memory.  The reader borrows the bytes, which
+ * stay where they are until it asks for more, having read them all.  A
+ * failed read is reported once every byte read before it has been fed,
+ * and so once every record before it has been staged.  A stream that
+ * fails without saying why, such as one whose read function sets no
+ * errno, is reported as an input error rather than as no error at all.
+ */
+static enum import_progress
+feed_reader(importer_t *importer)
+{
+	import_input_t *input;
+
+	input = &importer->input;
+	if (input->length == 0 && !input->ended && !input->failed &&
+	    read_chunk(input) != 0) {
+		relic_diag_no_memory(importer->ctx);
 		return (IMPORT_FAILED);
 	}
 
-	relic_table_feed(&importer->reader, chunk, got,
-	    got < RELIC_IMPORT_READ_CHUNK);
+	if (input->length == 0 && input->failed) {
+		relic_diag_error(importer->ctx, RELIC_ERROR_IO, NULL,
+		    "cannot read %s: %s", importer->source_name,
+		    strerror(input->read_errno != 0 ? input->read_errno :
+		    EIO));
+		return (IMPORT_FAILED);
+	}
+
+	relic_table_feed(&importer->reader, input->bytes, input->length,
+	    input->ended);
+	input->length = 0;
 
 	return (IMPORT_READ_ON);
+}
+
+/*
+ * Read the next chunk of the stream after the bytes the input holds.
+ * Returns 0, or -1 when there was no room for it, having read nothing.
+ *
+ * A short read with no error on the stream is its end.  A short read with
+ * an error has failed, and whatever bytes it returned are dropped rather
+ * than taken for what the stream holds.  errno is cleared before the read,
+ * because a stream whose error indicator was already set can return short
+ * without touching it, and the message would then name whatever an
+ * earlier call left behind.
+ */
+static int
+read_chunk(import_input_t *input)
+{
+	char *bytes;
+	size_t got;
+	int read_errno;
+
+	assert(!input->ended && !input->failed);
+
+	bytes = relic_grow_array(input->bytes, &input->capacity,
+	    input->length + RELIC_IMPORT_READ_CHUNK, sizeof(*bytes));
+	if (bytes == NULL)
+		return (-1);
+	input->bytes = bytes;
+
+	errno = 0;
+	got = fread(input->bytes + input->length, 1, RELIC_IMPORT_READ_CHUNK,
+	    input->stream);
+	read_errno = errno;
+
+	if (got < RELIC_IMPORT_READ_CHUNK && ferror(input->stream)) {
+		input->failed = true;
+		input->read_errno = read_errno;
+		return (0);
+	}
+
+	input->length += got;
+	input->ended = got < RELIC_IMPORT_READ_CHUNK;
+
+	return (0);
+}
+
+/*
+ * Drop the first `length` bytes the input holds, which have been staged.
+ */
+static void
+consume_input(import_input_t *input, size_t length)
+{
+	assert(length <= input->length);
+
+	if (length < input->length)
+		bcopy(input->bytes + length, input->bytes,
+		    input->length - length);
+	input->length -= length;
 }
 
 /*
@@ -1195,7 +1757,7 @@ take_end(importer_t *importer, const relic_table_event_t *event)
  * Report a mistake the reader found in the table's structure.
  */
 static void
-report_mistake(relic_t *ctx, const import_plan_t *plan,
+report_mistake(relic_t *ctx, const relic_import_plan_t *plan,
     const relic_table_event_t *event)
 {
 	char described[RELIC_BYTE_TEXT_MAX];

@@ -40,7 +40,7 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
 	lib/round.c lib/rule.c lib/stratify.c lib/strfn.c lib/symbol.c \
-	lib/task.c lib/util.c lib/value.c
+	lib/task.c lib/util.c lib/value.c lib/window.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -56,7 +56,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/cdefs.h lib/cost.h lib/depgraph.h \
 	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
-	lib/relation.h lib/round.h lib/strfn.h lib/util.h tests/unit/harness.h \
+	lib/relation.h lib/round.h lib/strfn.h lib/util.h lib/window.h \
+	tests/unit/harness.h \
 	tests/unit/programs.h
 
 bin_PROGRAMS = relic
@@ -382,6 +383,25 @@ tests_unit_test_ceiling_SOURCES = tests/unit/test_ceiling.c \
 	tests/unit/harness.c $(librelic_internal_la_SOURCES)
 tests_unit_test_ceiling_CPPFLAGS = $(AM_CPPFLAGS) $(RELIC_CEILING_DEFINES)
 tests_unit_test_ceiling_LDADD = $(LTLIBOBJS)
+
+##
+## A batch import reads a table in windows of records, cut into pieces at
+## record ends, out of reads of a fixed chunk, all large enough that every
+## table the import suite reads fits in one window.  This program compiles
+## the library from source with all three made small, as the ceiling suite
+## lowers its ceilings, and runs the import suite again, so that its tables
+## span many windows and pieces and the reads cut them at every byte.
+##
+
+RELIC_SMALL_WINDOWS = -DRELIC_IMPORT_READ_CHUNK=16u \
+	-DRELIC_IMPORT_WINDOW_BYTES=64u -DRELIC_IMPORT_PIECE_BYTES=8u
+
+RELIC_TEST_BINARIES += tests/unit/test_import_small_windows
+tests_unit_test_import_small_windows_SOURCES = tests/unit/test_import.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_import_small_windows_CPPFLAGS = $(AM_CPPFLAGS) \
+	$(RELIC_SMALL_WINDOWS)
+tests_unit_test_import_small_windows_LDADD = $(LTLIBOBJS)
 
 ##
 ## The canonical index and every secondary index's key table are striped,

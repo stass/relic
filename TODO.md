@@ -104,6 +104,32 @@ bound, so an unterminated csv quote buffers the rest of the file. The
 memory limit leaves both out by contract. A bound on either belongs in the
 context's configuration, beside the other limits.
 
+**A batch import's admission proof restates the scalar checks.** [Medium,
+component: `lib/window.c`, `lib/import.c`, `lib/facts.c`, `lib/value.c`]
+A window is admitted only if reading it a field at a time could not fail,
+and the proof holds because each check is copied: `decode_field()` repeats
+`field_value()`'s type checks and `relic_symbol_intern()`'s length
+ceiling, `relic_pending_fits()` the integer ceiling of
+`reserve_integers()`, and `relic_staging_admits()` the limits of
+`admit_new_tuple()`, the builder's ceilings and the floor
+`staging_set_of()` adds. A check added to the scalar path alone lets a
+window admit what a field at a time refuses. Give each layer one pure
+check that both paths call, so the proof is the scalar check applied to
+the window's totals.
+
+**A batch window's scratch grows with its records, not its bytes.** [Low,
+component: `lib/window.c`, `lib/import.c`] A window holds up to
+`RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays
+take about 16 bytes per record, so a table of one-byte records takes some
+32 MiB of scratch per 2 MiB window, outside the memory account. Cap the
+records a window holds as well as its bytes.
+
+**One declined window reads the rest of the table a field at a time.**
+[Low, component: `lib/import.c`] A record longer than a window less a
+read chunk, or one refused allocation, ends batching for the rest of the
+import, which may be most of a large table. Resume windows once the
+reader stands at a record boundary with its input consumed.
+
 **An index built mid-component must be raised by its builder.** [Medium,
 component: `lib/index.c`, `lib/relation.h`, `lib/eval.c`] Each index keeps
 its own `latest_since`, yet `set_delta()` always raises every index of a

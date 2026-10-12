@@ -285,10 +285,11 @@ The scalar field buffer keeps the existing longest-field behavior.
 ### Read errors and read-ahead
 
 Use the existing `RELIC_IMPORT_READ_CHUNK` transport unit and retain its
-read outcomes while bytes are speculative. In `feed_chunk()`, a short read
-with `ferror()` reports an I/O error before feeding any bytes returned by
-that failed read. The batch input adapter preserves that boundary rather
-than treating the partial bytes as a successfully read prefix.
+read outcomes while bytes are speculative. One input adapter reads the
+stream for both batch and scalar processing: a short read with `ferror()`
+drops the bytes that failed read returned and records the failure, which
+is reported once every byte read before it has been consumed, rather than
+treating the partial bytes as a successfully read prefix.
 
 An I/O failure observed during read-ahead is recorded, not immediately
 reported ahead of earlier buffered events. Scalar replay processes earlier

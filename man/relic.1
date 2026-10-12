@@ -564,6 +564,13 @@ variables, which otherwise is folded over the atom's relation where it
 stands;
 .It Cm naive
 evaluate recursion by the naive fixed point;
+.It Cm no-batch-import
+read every table of
+.Fl I
+a field at a time, typing and interning each field and staging each record
+as it is read, rather than a window of records at a time; the facts, the
+values and a refused import's message are the same, but a refused import
+may have read less of its table;
 .It Cm no-exists
 plan an atom that binds nothing the rest of its rule reads, its other
 arguments

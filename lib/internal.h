@@ -182,6 +182,11 @@ struct relic_valtab {
  * executor advances as it runs and relic_stats() reports.  Each field is
  * defined where relic_stats_t documents the one of the same name, and the
  * fields of `read` are relic_stats_t's tuples_scanned and tuples_looked_up.
+ *
+ * `windows_staged` and `windows_declined` count the windows of table input
+ * a batch import staged whole and the ones it declined and read again a
+ * field at a time.  relic_stats() reports neither; they show the tests
+ * which way an import went.
  */
 struct relic_counters {
 	uint64_t		iterations;
@@ -189,6 +194,8 @@ struct relic_counters {
 	uint64_t		tuples_inserted;
 	relic_exec_counters_t	read;
 	uint64_t		parallel_rounds;
+	uint64_t		windows_staged;
+	uint64_t		windows_declined;
 };
 
 /*
@@ -848,16 +855,20 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * size cannot count it.  A string whose bytes the pool holds with no string
  * value assigned to them -- a symbol's spelling, or a value a caller made and
  * has not interned -- is promised the pool's identifier for them, and the
- * bytes must stay where they are until the commit.  It writes nothing but the
- * map.
+ * bytes must stay where they are until the commit.  A pending symbol, which
+ * only an import has, is measured as a string is, sharing its new bytes
+ * with any string of the same bytes, under a symbol's type.  It writes
+ * nothing but the map.  relic_pending_fits() says whether every identifier
+ * the map promised is one an identifier can name.
  *
  * relic_pending_rewrite() replaces every pending marker in `tuples` tuples
  * of `arity` columns with the identifier the map gives it.  It writes
  * nothing but the tuples.
  *
  * relic_pending_commit() interns the map's new values, each under exactly
- * the identifier the map promised, and makes every string it promised a
- * string value.  It returns 0, or -1 with a diagnostic reported when the
+ * the identifier the map promised, and makes every symbol or string it
+ * promised a value of its type.  It returns 0, or -1 with a diagnostic
+ * reported when the
  * table or the pool could not grow, for memory or because it holds as many
  * values as an identifier can name; their contents are then as they were.
  * It is two halves, for a caller that must make every fallible step before
@@ -890,7 +901,7 @@ struct relic_pending_map {
 	size_t			 count;
 	size_t			 fresh_count;
 	size_t			 string_count;
-	uint32_t		 highest_string; /* symbol, or RELIC_ID_NONE */
+	uint32_t		 highest_use;	/* symbol, or RELIC_ID_NONE */
 	relic_arena_mark_t	 copies;	/* the reserved strings' */
 };
 
@@ -902,6 +913,8 @@ void	 relic_pending_map_close(relic_pending_map_t *map);
 size_t	 relic_pending_measure(const relic_t *ctx,
 	    const relic_pending_t *pending, size_t count, const char *bytes,
 	    relic_pending_map_t *map);
+bool	 relic_pending_fits(const relic_t *ctx,
+	    const relic_pending_map_t *map);
 void	 relic_pending_rewrite(const relic_pending_map_t *map,
 	    relic_dom_t *tuples, size_t count, uint16_t arity);
 int	 relic_pending_commit(relic_t *ctx, relic_pending_map_t *map);
@@ -1452,9 +1465,13 @@ void	 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
  * A load's facts are staged as they are read, then committed to the base
  * stores all or nothing.  relic_staging_add() stages one fact, given its
  * predicate and its arity of interned values; a fact staged twice is held
- * once.  relic_staging_commit() adds every staged fact the base stores lack,
- * or, refused by a limit or by memory, reports why and adds none.
- * relic_staging_reset() releases the staging, and is every load's exit.
+ * once.  A batch of one predicate's facts is staged in steps, as
+ * lib/facts.c describes, by relic_staging_builder(),
+ * relic_staging_admits(), relic_staging_reserve() and
+ * relic_staging_append().  relic_staging_commit() adds every staged fact
+ * the base stores lack, or, refused by a limit or by memory, reports why
+ * and adds none.  relic_staging_reset() releases the staging, and is every
+ * load's exit.
  * `last` is the set the previous fact used, and `by_pred` holds each set's
  * position plus one, keyed by its predicate.  `base_tuples`, `new_tuples`
  * and `columns_floor` are what staging measures a new fact against the
@@ -1476,15 +1493,27 @@ void	 relic_staging_init(relic_staging_t *staging, relic_t *ctx);
 void	 relic_staging_reset(relic_staging_t *staging);
 int	 relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
 	    const relic_dom_t *tuple);
+const relic_builder_t *relic_staging_builder(const relic_staging_t *staging,
+	    relic_pred_id_t pred);
+bool	 relic_staging_admits(const relic_staging_t *staging,
+	    relic_pred_id_t pred, size_t added, size_t value_bytes);
+int	 relic_staging_reserve(relic_staging_t *staging, relic_pred_id_t pred,
+	    const relic_tuple_growth_t *growth);
+void	 relic_staging_append(relic_staging_t *staging, relic_pred_id_t pred,
+	    const relic_dom_t *tuple, uint64_t hash);
 int	 relic_staging_commit(relic_staging_t *staging);
 
 /*
  * lib/import.c
  *
  * RELIC_IMPORT_READ_CHUNK is how much of the stream an import reads per
- * call.  Only the number of read calls depends on it, since the reader holds
- * one field, not the chunk, and it bounds how far an import may have read
- * past the record that ends it.
+ * call.  An import stages a table a window at a time (lib/window.h), each
+ * window at most RELIC_IMPORT_WINDOW_BYTES of input, framed into pieces of
+ * about RELIC_IMPORT_PIECE_BYTES, and from a record no window can hold on
+ * it reads the table one field at a time.  So a window bounds how far an
+ * import may have read past the record that ends it.  None of the three
+ * limits a table: each sets only how its input is divided, and a build may
+ * set them lower to exercise the divisions.
  *
  * The table reader: the state machine that alone decides where the fields
  * and records of a csv or tsv table end, and what bytes each field holds
@@ -1518,10 +1547,36 @@ int	 relic_staging_commit(relic_staging_t *staging);
  * begins, and when a record ends short, so the first mistake a table holds
  * is the first reported, whatever it is.
  *
+ * Before it reads anything, a reader can be made to frame the table
+ * rather than decode it, by relic_table_reader_frame_only(): it makes the
+ * same transitions, and so finds the same boundaries and the same
+ * mistakes, but collects no field's bytes, and relic_table_next() returns
+ * none of its FIELD events, so its events are RECORD, END, MORE and the
+ * mistakes, and it never runs out of memory.  And it can be made to begin
+ * at a record boundary of a table another reader has read up to, by
+ * relic_table_reader_start_at(), given the location of the boundary's
+ * byte: it then reports the locations a reader of the whole table would.
+ * relic_table_unread() is how many of the bytes last fed the reader has
+ * not read; when it has just emitted a RECORD, the bytes it has read end
+ * exactly at the record's end.
+ *
  * relic_table_reader_reset() releases the field buffer.
  */
 
-#define	RELIC_IMPORT_READ_CHUNK	(64u * 1024u)
+#ifndef RELIC_IMPORT_READ_CHUNK
+#define	RELIC_IMPORT_READ_CHUNK		(64u * 1024u)
+#endif
+#ifndef RELIC_IMPORT_WINDOW_BYTES
+#define	RELIC_IMPORT_WINDOW_BYTES	(32u * RELIC_IMPORT_READ_CHUNK)
+#endif
+#ifndef RELIC_IMPORT_PIECE_BYTES
+#define	RELIC_IMPORT_PIECE_BYTES	(64u * 1024u)
+#endif
+
+_Static_assert(RELIC_IMPORT_READ_CHUNK > 0 &&
+    RELIC_IMPORT_WINDOW_BYTES >= 2 * RELIC_IMPORT_READ_CHUNK &&
+    RELIC_IMPORT_PIECE_BYTES > 0,
+    "a window holds a chunk beyond what it carries over");
 
 enum relic_table_event_kind {
 	RELIC_TABLE_MORE,
@@ -1582,9 +1637,10 @@ struct relic_table_event {
 /*
  * A reader.  `input` is the part of the bytes last fed that has not been
  * read, and `input_is_last` says whether the table ends after it.
- * `field` accumulates the field being read; it grows by doubling to the
- * longest field and is reused for every one.  `fields_ended` counts the
- * fields of the current record read so far.
+ * `field` accumulates the field being read, unless the reader only
+ * `frames`; it grows by doubling to the longest field and is reused for
+ * every one.  `fields_ended` counts the fields of the current record read
+ * so far.
  *
  * `where` is the location of the next byte.  The other locations are the
  * places a later event points back to: the current field's first byte, the
@@ -1607,10 +1663,15 @@ struct relic_table_reader {
 	enum relic_format		 format;
 	enum relic_table_state		 state;
 	bool				 input_is_last;
+	bool				 frames;
 };
 
 void	 relic_table_reader_init(relic_table_reader_t *reader,
 	    enum relic_format format, size_t width, const char *source_name);
+void	 relic_table_reader_frame_only(relic_table_reader_t *reader);
+void	 relic_table_reader_start_at(relic_table_reader_t *reader,
+	    const relic_location_t *where);
+size_t	 relic_table_unread(const relic_table_reader_t *reader);
 void	 relic_table_reader_reset(relic_table_reader_t *reader);
 void	 relic_table_feed(relic_table_reader_t *reader, const char *bytes,
 	    size_t length, bool last);
@@ -1763,10 +1824,13 @@ void	 relic_index_link_append(relic_index_t *index,
  * releases what it still holds; relic_builder_contains_hashed() and
  * relic_builder_add_hashed() make it a set, in the order its tuples were
  * added, which relic_builder_count() and relic_builder_tuple() read back.
- * Its commit publishes them: relic_base_action_prepare() describes, before
- * anything changes, what one store gains -- the builder's whole payload if
- * the store holds no tuple, its tuples appended otherwise -- and
- * relic_base_action_release() releases the description.
+ * A batch of tuples it lacks is added in two halves, the fallible first:
+ * relic_builder_reserve() makes room for them all, returning -1 with
+ * nothing reported when it cannot, and relic_builder_append_hashed() adds
+ * each.  Its commit publishes them: relic_base_action_prepare() describes,
+ * before anything changes, what one store gains -- the builder's whole
+ * payload if the store holds no tuple, its tuples appended otherwise --
+ * and relic_base_action_release() releases the description.
  * relic_bases_reserve() makes every store of a manifest of actions ready,
  * checking both limits once over all of them before changing any, and
  * relic_bases_apply() then gives each its tuples, which cannot fail.
@@ -1893,6 +1957,10 @@ const relic_dom_t *relic_builder_tuple(const relic_builder_t *builder,
 bool	 relic_builder_contains_hashed(const relic_builder_t *builder,
 	    const relic_dom_t *columns, uint64_t hash);
 int	 relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
+	    const relic_dom_t *columns, uint64_t hash);
+int	 relic_builder_reserve(relic_builder_t *builder,
+	    const relic_tuple_growth_t *growth);
+void	 relic_builder_append_hashed(relic_builder_t *builder,
 	    const relic_dom_t *columns, uint64_t hash);
 int	 relic_base_action_prepare(const relic_t *ctx,
 	    relic_base_action_t *action, relic_builder_t *builder);

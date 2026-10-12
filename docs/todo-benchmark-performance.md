@@ -218,34 +218,31 @@ origins, and the ineligible controls.
 are 0.191 s and 0.076 s. Import is also about half of the diagnostic
 `cspa-linux` runtime and most of the grid and bounded-tree runtimes.
 
-**Implementation, in commit order.** Apply
-[bulk fact construction and import](../specs/design-bulk-load.md) to the
-table path; staging's private builders and the adopting commit are the
-foundation it builds on. Add bounded CSV/TSV windows, shared parser
-transitions, private dictionaries and ordered value publication. A
-whole-window proof admits deterministic prefixes; an unproved window
-replays through the scalar importer. Parallelize the independent jobs
-after the scalar bulk path is covered. Source program parsing remains
-scalar and uses the same builders.
+**Implementation.** The table path of
+[bulk fact construction and import](../specs/design-bulk-load.md) stages
+bounded CSV/TSV windows through private builders on the calling thread,
+with `-X no-batch-import` as the scalar reference. What remains is to run
+the window's independent jobs -- piece decoding, classification by stripe
+and the builder appends -- on the context's worker pool. Source program
+parsing remains scalar and uses the same builders.
 
 **Design and measurement gates.** Preserve the ordinary domain encoding and
 global first-occurrence numbering. Measure dictionary reconciliation,
 ordered numbering, table publication and reservation separately on
 all-distinct and repetitive inputs before enabling parallel import by
 default; the identifier-design comparison is architectural until measured.
-Add `RELIC_F_NO_BATCH_IMPORT` / `-X no-batch-import`, its help/manual text,
-and strategy coverage as the scalar event reference. Verify bounded
-nonseekable replay, failed-read boundaries, partial value effects and
-actual ownership/account transfer. A change to visible identifier encoding
-requires a separate cross-subsystem decision.
+A change to visible identifier encoding requires a separate
+cross-subsystem decision.
 
 **Regression and exit criteria.** Exercise empty and populated stores,
 duplicates spanning chunks, quoted multiline records, malformed input,
 first-error ordering, existing values and allocation/limit failures. Base
 facts publish all or nothing, and repeated and parallel loads preserve
-the documented identities and ordering. Demonstrate lower serial load
-time and peak memory, then a substantial parallel load gain on large
-inputs without slowing small imports. Judge the competitive `facts-join`
+the documented identities and ordering, with 1, 2, 4, 8 and 16 workers
+and the disabled-thread build agreeing on identifiers, capacities,
+diagnostics and output. Demonstrate lower serial load time and peak
+memory, then a substantial parallel load gain on large inputs without
+slowing small imports. Judge the competitive `facts-join`
 result together with step 5; loading must also leave enough budget for
 grouped execution in step 6.
 

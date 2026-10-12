@@ -39,6 +39,7 @@
 #include "internal.h"
 
 #define	SCENARIO_ALL_OR_NOTHING	"an import is all or nothing"
+#define	SCENARIO_BATCH		"a batch import ends as a scalar one does"
 #define	SCENARIO_BOUNDED	"a refused import stops reading"
 #define	SCENARIO_DERIVED	"an import discards what was derived"
 #define	SCENARIO_DESCRIPTION	"a malformed description is refused unread"
@@ -56,13 +57,21 @@
 /* A byte string with a length, for tables that hold NUL. */
 #define	TABLE(text)	(text), (sizeof(text) - 1)
 
+/* The same, and an array of columns with its length, as a batch case's. */
+#define	BATCH_TABLE(text)	.table = (text), .length = sizeof(text) - 1
+#define	BATCH_COLUMNS(array)	.columns = (array), \
+	.column_count = sizeof(array) / sizeof((array)[0])
+
 /* The longest transcript and message a test compares. */
 #define	TRANSCRIPT_MAX	1024
 #define	MESSAGE_MAX	512
 
+typedef struct batch_case batch_case_t;
 typedef struct capture capture_t;
+typedef struct import_outcome import_outcome_t;
 typedef struct reader_case reader_case_t;
 typedef struct reentering_read reentering_read_t;
+typedef struct window_tally window_tally_t;
 
 /*
  * One table and the transcript its reading must give.  `width` is the number
@@ -88,7 +97,72 @@ struct capture {
 	size_t		errors;
 };
 
+/*
+ * A table imported a window at a time and a field at a time, as e/N of the
+ * description's columns, by import `flags`.  `program` is loaded first,
+ * `max_tuples` limits the context and `max_memory` the memory the import
+ * may take it to, each when it is set.  `pad`, when set, is
+ * what follows a first field of symbol p and filler in a record of the same
+ * columns, which is put before the table to move where the reads and the
+ * windows cut it.  A table that is `whole` is well formed and fits every
+ * limit, so a batch import stages every window of it and declines none.
+ */
+struct batch_case {
+	const char		*label;
+	const char		*program;
+	const char		*table;
+	size_t			 length;
+	const char		*pad;
+	enum relic_format	 format;
+	unsigned int		 flags;
+	const enum relic_column	*columns;
+	size_t			 column_count;
+	size_t			 max_tuples;
+	size_t			 max_memory;
+	bool			 whole;
+};
+
+/* The windows batch imports staged and declined. */
+struct window_tally {
+	uint64_t	staged;
+	uint64_t	declined;
+};
+
+/*
+ * What a table imported one way left: the context, the status of the first
+ * import and the diagnostics as they stood after it, and the status of a
+ * second import of the same table, which meets the facts the first added.
+ */
+struct import_outcome {
+	relic_t		*ctx;
+	capture_t	 capture;
+	capture_t	 after_first;
+	int		 status;
+	int		 again;
+};
+
 static void	 append_text(char *out, size_t size, const char *text);
+static void	 compare_import_ways(const batch_case_t *batch,
+		    const char *table, size_t length, const char *label,
+		    window_tally_t *tally);
+static void	 compare_shifted_imports(const batch_case_t *batch,
+		    window_tally_t *tally);
+static size_t	 accounted_bytes(const relic_t *ctx);
+static void	 compare_generated_imports(const char *label,
+		    size_t odd_row, const char *odd, size_t max_tuples,
+		    size_t max_memory, window_tally_t *tally);
+static void	 compare_memory_limits(window_tally_t *tally);
+static const char *context_difference(const relic_t *a, const relic_t *b);
+static const char *facts_difference(const relic_t *a, const relic_t *b);
+static char	*generated_table(size_t rows, size_t odd_row,
+		    const char *odd, size_t *lengthp);
+static int	 import_one_way(const batch_case_t *batch, const char *table,
+		    size_t length, unsigned int flags,
+		    import_outcome_t *outcome);
+static char	*record_longer_than_a_window(void);
+static char	*shifted_table(const batch_case_t *batch, size_t shift,
+		    size_t *lengthp);
+static const char *values_difference(const relic_t *a, const relic_t *b);
 static void	 check_tables(const reader_case_t *cases, size_t count);
 static void	 capture_diagnostic(void *callback_ctx,
 		    enum relic_diag_level level, const relic_location_t *where,
@@ -112,13 +186,14 @@ static bool	 interned(const relic_t *ctx, const char *name);
 static size_t	 row_offset(const char *table, size_t rows);
 static FILE	*table_stream(const char *table, size_t length);
 static void	 transcribe(const reader_case_t *table, size_t piece,
-		    char *out, size_t size);
+		    bool frames, bool fields, char *out, size_t size);
 
 static void	 csv_is_read_by_its_rules(void);
 static void	 every_refusal_reads_nothing(void);
 static void	 facts_are_held_once(void);
 static void	 a_failed_import_adds_nothing(void);
 static void	 a_refused_import_stops_reading(void);
+static void	 refused_import_stops_reading(unsigned, size_t, const char *);
 static void	 a_header_is_skipped(void);
 static void	 a_long_field_crosses_reads(void);
 static void	 a_description_is_read_once(void);
@@ -127,6 +202,12 @@ static void	 a_failed_read_adds_nothing(void);
 static void	 a_path_is_opened_and_named(void);
 static void	 a_stream_cannot_call_in(void);
 static void	 an_import_discards_derived_facts(void);
+static void	 a_batch_import_matches_the_scalar_import(void);
+static void	 a_failed_read_ahead_waits_its_turn(void);
+static void	 compare_failed_reads(const char *label, const char *table,
+		    size_t fail_at);
+static int	 import_failing(const char *table, size_t fail_at,
+		    unsigned int flags, import_outcome_t *outcome);
 static void	 integer_columns_hold_the_language_integers(void);
 static void	 locations_stop_at_their_largest_value(void);
 static void	 messages_quote_only_what_is_safe(void);
@@ -221,40 +302,51 @@ describe_event(const relic_table_event_t *event, char *out, size_t size)
 /*
  * Read a table, feeding it `piece` bytes at a time, and write the events as
  * a transcript separated by " | ", up to and including the one that stops
- * the reader.
+ * the reader, leaving out its FIELD events unless `fields` is set.  A reader
+ * that `frames` reads only the table's structure.  A reader that asks for
+ * more once it has been given the last of the table is given nothing, and
+ * the transcript ends in "more".
  */
 static void
-transcribe(const reader_case_t *table, size_t piece, char *out, size_t size)
+transcribe(const reader_case_t *table, size_t piece, bool frames,
+    bool fields, char *out, size_t size)
 {
 	relic_table_reader_t reader;
 	relic_table_event_t event;
 	char described[256];
 	size_t fed;
+	bool fed_last;
 
 	out[0] = '\0';
 	fed = 0;
+	fed_last = false;
 	relic_table_reader_init(&reader, table->format, table->width, "t");
+	if (frames)
+		relic_table_reader_frame_only(&reader);
 
 	for (;;) {
 		enum relic_table_event_kind kind;
 
 		kind = relic_table_next(&reader, &event);
-		if (kind == RELIC_TABLE_MORE) {
+		if (kind == RELIC_TABLE_MORE && !fed_last) {
 			size_t length;
 
 			length = table->length - fed;
 			if (length > piece)
 				length = piece;
+			fed_last = fed + length == table->length;
 			relic_table_feed(&reader, table->table + fed, length,
-			    fed + length == table->length);
+			    fed_last);
 			fed += length;
 			continue;
 		}
 
-		describe_event(&event, described, sizeof(described));
-		if (out[0] != '\0')
-			append_text(out, size, " | ");
-		append_text(out, size, described);
+		if (kind != RELIC_TABLE_FIELD || fields) {
+			describe_event(&event, described, sizeof(described));
+			if (out[0] != '\0')
+				append_text(out, size, " | ");
+			append_text(out, size, described);
+		}
 
 		if (kind != RELIC_TABLE_FIELD && kind != RELIC_TABLE_RECORD)
 			break;
@@ -264,19 +356,26 @@ transcribe(const reader_case_t *table, size_t piece, char *out, size_t size)
 }
 
 /*
- * Check each table's transcript, read whole and read a byte at a time.
+ * Check each table's transcript, read whole and read a byte at a time, and
+ * that a reader framing it, fed either way, finds the same records and the
+ * same mistake or end in the same places.
  */
 static void
 check_tables(const reader_case_t *cases, size_t count)
 {
 	char whole[TRANSCRIPT_MAX];
 	char bytewise[TRANSCRIPT_MAX];
+	char structure[TRANSCRIPT_MAX];
+	char framed[TRANSCRIPT_MAX];
 	size_t i;
 
 	for (i = 0; i < count; i++) {
-		transcribe(&cases[i], cases[i].length + 1, whole,
+		transcribe(&cases[i], cases[i].length + 1, false, true, whole,
 		    sizeof(whole));
-		transcribe(&cases[i], 1, bytewise, sizeof(bytewise));
+		transcribe(&cases[i], 1, false, true, bytewise,
+		    sizeof(bytewise));
+		transcribe(&cases[i], cases[i].length + 1, false, false,
+		    structure, sizeof(structure));
 
 		checkf(strcmp(whole, cases[i].transcript) == 0, SCENARIO_READER,
 		    "table %zu should read as \"%s\", not \"%s\"", i,
@@ -284,6 +383,16 @@ check_tables(const reader_case_t *cases, size_t count)
 		checkf(strcmp(bytewise, whole) == 0, SCENARIO_READER,
 		    "table %zu fed a byte at a time should read as \"%s\", "
 		    "not \"%s\"", i, whole, bytewise);
+
+		transcribe(&cases[i], cases[i].length + 1, true, true, framed,
+		    sizeof(framed));
+		checkf(strcmp(framed, structure) == 0, SCENARIO_READER,
+		    "table %zu framed should read as \"%s\", not \"%s\"", i,
+		    structure, framed);
+		transcribe(&cases[i], 1, true, true, framed, sizeof(framed));
+		checkf(strcmp(framed, structure) == 0, SCENARIO_READER,
+		    "table %zu framed a byte at a time should read as \"%s\", "
+		    "not \"%s\"", i, structure, framed);
 	}
 }
 
@@ -1139,11 +1248,13 @@ a_failed_import_adds_nothing(void)
 }
 
 /*
- * The rows a refused import is given, and the distinct values of each of
- * its columns.
+ * The rows a refused import is given, enough for its tables to span several
+ * windows and for half of them to need more memory than the import's own
+ * bookkeeping, and the distinct values of each of its columns, enough for
+ * that many distinct pairs.
  */
-#define	BOUNDED_ROWS	40000
-#define	BOUNDED_VALUES	200
+#define	BOUNDED_ROWS	(RELIC_IMPORT_WINDOW_BYTES / 4 + 40000)
+#define	BOUNDED_VALUES	1024
 
 /* The limit on tuples the first refusal is held to. */
 #define	BOUNDED_TUPLES	10
@@ -1153,18 +1264,32 @@ a_failed_import_adds_nothing(void)
  * base stores past the limit, rather than staging and interning the whole
  * table first.  Each table ends in a malformed record, which an import
  * reading on would reach and report in place of the limit, and where the
- * import stopped is read from the stream, which it reads a chunk at a time.
+ * import stopped is read from the stream.  A batch import reads at most a
+ * window past the facts it staged; an import with batching off reads a
+ * chunk at a time.
+ */
+static void
+a_refused_import_stops_reading(void)
+{
+	refused_import_stops_reading(0, RELIC_IMPORT_WINDOW_BYTES, "a window");
+	refused_import_stops_reading(RELIC_F_NO_BATCH_IMPORT,
+	    RELIC_IMPORT_READ_CHUNK, "a chunk");
+}
+
+/*
+ * Check a refused import, made with context `flags`, reads no more than
+ * `ahead` bytes, named by `unit`, past the row it is refused at.
  *
  * Under the tuple limit, a table whose every row is new is refused at its
  * eleventh row, having interned the predicate and that row's symbols but no
  * later row's: e/2, and a0 and b0 to b10, a predicate's name being no
- * symbol.  Under the memory limit, a table
- * of distinct pairs over a few values, all interned beforehand so that the
- * import interns nothing, is refused at the row whose columns take the floor
- * past what the limit leaves, the one after half the table.
+ * symbol.  Under the memory limit, a table of distinct pairs over a few
+ * values, all interned beforehand so that the import interns nothing, is
+ * refused at the row whose columns take the floor past what the limit
+ * leaves, the one after half the table.
  */
 static void
-a_refused_import_stops_reading(void)
+refused_import_stops_reading(unsigned flags, size_t ahead, const char *unit)
 {
 	char expected[TRANSCRIPT_MAX];
 	char name[32];
@@ -1187,6 +1312,7 @@ a_refused_import_stops_reading(void)
 		return;
 	}
 	bzero(&config, sizeof(config));
+	config.flags = flags;
 	config.max_tuples = BOUNDED_TUPLES;
 	ctx = context_with_capture(&config, &capture);
 	if (ctx != NULL) {
@@ -1205,9 +1331,12 @@ a_refused_import_stops_reading(void)
 		    relic_symbol_count(ctx) - symbols);
 		check(relic_pred_count(ctx) - predicates == 1,
 		    SCENARIO_BOUNDED, "the refused import should intern e/2");
-		checkf(read >= 0 && (size_t)read <= RELIC_IMPORT_READ_CHUNK,
-		    SCENARIO_BOUNDED, "the refused import should read one "
-		    "chunk of the table, not %ld bytes", read);
+		cutoff = row_offset(table, BOUNDED_TUPLES + 1);
+		checkf(read >= 0 && (size_t)read >= cutoff &&
+		    (size_t)read <= cutoff + ahead,
+		    SCENARIO_BOUNDED, "the refused import should stop within "
+		    "%s of row %d, byte %zu, not at byte %ld", unit,
+		    BOUNDED_TUPLES + 1, cutoff, read);
 		relic_destroy(ctx);
 	}
 	free(table);
@@ -1217,7 +1346,9 @@ a_refused_import_stops_reading(void)
 		check(false, SCENARIO_BOUNDED, "the table is built");
 		return;
 	}
-	ctx = context_with_capture(NULL, &capture);
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	ctx = context_with_capture(&config, &capture);
 	if (ctx != NULL) {
 		for (i = 0; i < BOUNDED_VALUES; i++) {
 			snprintf(name, sizeof(name), "a%zu", i);
@@ -1242,10 +1373,10 @@ a_refused_import_stops_reading(void)
 		    capture.message);
 		cutoff = row_offset(table, BOUNDED_ROWS / 2 + 1);
 		checkf(read >= 0 && (size_t)read >= cutoff &&
-		    (size_t)read <= cutoff + RELIC_IMPORT_READ_CHUNK,
+		    (size_t)read <= cutoff + ahead,
 		    SCENARIO_BOUNDED, "the refused import should stop within "
-		    "a chunk of row %d, byte %zu, not at byte %ld",
-		    BOUNDED_ROWS / 2 + 1, cutoff, read);
+		    "%s of row %zu, byte %zu, not at byte %ld", unit,
+		    (size_t)BOUNDED_ROWS / 2 + 1, cutoff, read);
 		relic_destroy(ctx);
 	}
 	free(table);
@@ -1457,7 +1588,8 @@ a_long_field_crosses_reads(void)
  * A stream's read function of the caller's own.  On its first read it tries
  * to materialize the context, and when `columns` is set it changes every one
  * of the `column_count` columns it points at to a string column.  It then
- * serves `table`, or fails every read with `fail_errno` when that is set.
+ * serves `table`, or, when `fail_errno` is set, serves it up to byte
+ * `fail_at` and fails every read from there with `fail_errno`.
  */
 struct reentering_read {
 	relic_t			*ctx;
@@ -1467,6 +1599,7 @@ struct reentering_read {
 	char			*predicate;
 	char			*source_name;
 	size_t			 offset;
+	size_t			 fail_at;
 	int			 fail_errno;
 	int			 refusals;
 	int			 calls;
@@ -1491,12 +1624,15 @@ reenter_and_read(reentering_read_t *reading, char *buffer, size_t size)
 			reading->source_name[0] = 'X';
 	}
 
-	if (reading->fail_errno != 0) {
+	if (reading->fail_errno != 0 && reading->offset >= reading->fail_at) {
 		errno = reading->fail_errno;
 		return (-1);
 	}
 
 	remaining = strlen(reading->table) - reading->offset;
+	if (reading->fail_errno != 0 &&
+	    remaining > reading->fail_at - reading->offset)
+		remaining = reading->fail_at - reading->offset;
 	if (size > remaining)
 		size = remaining;
 	bcopy(reading->table + reading->offset, buffer, size);
@@ -1799,6 +1935,693 @@ a_path_is_opened_and_named(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * The lengths of filler put before a padded table, enough for its first
+ * byte to fall at every offset within a read chunk of the import built to
+ * read small ones, and a few more where the chunks are large.
+ */
+#define	BATCH_SHIFTS	(RELIC_IMPORT_READ_CHUNK < 32 ? \
+	RELIC_IMPORT_READ_CHUNK + 1 : 33)
+
+/*
+ * The rows of the generated tables, enough to span several windows, and
+ * the distinct symbols they repeat.
+ */
+#define	GENERATED_ROWS		(RELIC_IMPORT_WINDOW_BYTES / 6 + 200)
+#define	GENERATED_SYMBOLS	5000
+
+/*
+ * The columns of the generated tables, and the program loaded before
+ * them, which holds one of their values in each column.
+ */
+static const enum relic_column generated_columns[] = {
+	RELIC_COLUMN_SYMBOL, RELIC_COLUMN_INTEGER, RELIC_COLUMN_STRING
+};
+#define	GENERATED_PROGRAM	"e(s3, 3, \"s4\").\n"
+
+/* The memory limits a long import is compared under, past the first. */
+#define	MEMORY_STEPS		8
+
+/*
+ * Every table is imported a window at a time and a field at a time, into
+ * contexts made alike, and the two must end alike: the same status and
+ * diagnostic, the same values interned in the same order with the same
+ * uses, the same capacities and accounting, and the same facts in the same
+ * order.  Among the tables are every quoting and escape, line ends of both
+ * kinds, a header, skipped columns, symbols and strings of the same bytes,
+ * tuples of no columns, a type error before a malformed record, a limit
+ * met before a malformed tail, and tables long enough to span windows.
+ */
+static void
+a_batch_import_matches_the_scalar_import(void)
+{
+	static const enum relic_column symbol_string[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_STRING
+	};
+	static const enum relic_column symbol_skip_integer[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SKIP, RELIC_COLUMN_INTEGER
+	};
+	static const enum relic_column string_symbol[] = {
+		RELIC_COLUMN_STRING, RELIC_COLUMN_SYMBOL
+	};
+	static const enum relic_column skipped[] = {
+		RELIC_COLUMN_SKIP, RELIC_COLUMN_SKIP
+	};
+	static const batch_case_t cases[] = {
+		{ .label = "tsv escapes", BATCH_TABLE("a\ta\nb\ta\\tb\n"
+		    "a\t\\\\\nc\tline\\none\nb\ta\\tb\n\tempty\na\t\n"),
+		    .pad = "\tq\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_string) },
+		{ .label = "csv quoting", BATCH_TABLE("a,\"x,y\"\r\n"
+		    "b,\"say \"\"hi\"\"\"\nc,\"two\nlines\"\r\na,\"x,y\"\n"
+		    "\"d\",\n"),
+		    .pad = ",q\n", .format = RELIC_FORMAT_CSV,
+		    BATCH_COLUMNS(symbol_string), .whole = true },
+		{ .label = "csv header",
+		    BATCH_TABLE("name,text\r\na,b\nb,\"a\"\n"),
+		    .format = RELIC_FORMAT_CSV, .flags = RELIC_IMPORT_HEADER,
+		    BATCH_COLUMNS(symbol_string), .whole = true },
+		{ .label = "a header alone", BATCH_TABLE("name\tx\tn\n"),
+		    .format = RELIC_FORMAT_TSV, .flags = RELIC_IMPORT_HEADER,
+		    BATCH_COLUMNS(symbol_skip_integer), .whole = true },
+		{ .label = "no final line end",
+		    BATCH_TABLE("a\tskip\t1\nb\tskip\t-2"),
+		    .pad = "\tq\t0\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_skip_integer), .whole = true },
+		{ .label = "a quoted last field and no final line end",
+		    BATCH_TABLE("a,b\nc,\"d\""),
+		    .pad = ",q\n", .format = RELIC_FORMAT_CSV,
+		    BATCH_COLUMNS(symbol_string), .whole = true },
+		{ .label = "an empty table", BATCH_TABLE(""),
+		    .format = RELIC_FORMAT_TSV, BATCH_COLUMNS(symbol_string),
+		    .whole = true },
+		{ .label = "values of the program",
+		    .program = "e(a, \"b\").\ne(c, \"a\").\n",
+		    BATCH_TABLE("b\tb\na\tb\nc\ta\nb\tc\n"), .pad = "\tq\n",
+		    .format = RELIC_FORMAT_TSV, BATCH_COLUMNS(symbol_string),
+		    .whole = true },
+		{ .label = "strings before symbols",
+		    .program = "e(\"a\", b).\n",
+		    BATCH_TABLE("a\ta\nb\tb\nc\ta\n"), .pad = "\tq\n",
+		    .format = RELIC_FORMAT_TSV, BATCH_COLUMNS(string_symbol),
+		    .whole = true },
+		{ .label = "integers", BATCH_TABLE("x\t-\t9223372036854775807\n"
+		    "y\t-\t-9223372036854775808\nx\t-\t0\nz\t-\t0\n"
+		    "y\t-\t9223372036854775807\n"), .pad = "\t-\t7\n",
+		    .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_skip_integer), .whole = true },
+		{ .label = "no columns", BATCH_TABLE("a\tb\nc\td\n"),
+		    .pad = "\tq\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(skipped), .whole = true },
+		{ .label = "a type error before a malformed record",
+		    BATCH_TABLE("a\t-\t1\nb\t-\tx\nc\t-\t3\nd\n"),
+		    .pad = "\t-\t0\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_skip_integer) },
+		{ .label = "a symbol column refusing a field",
+		    BATCH_TABLE("a\tb\nB\tc\n"), .pad = "\tq\n",
+		    .format = RELIC_FORMAT_TSV, BATCH_COLUMNS(symbol_string) },
+		{ .label = "a malformed tail", BATCH_TABLE("a,b\nc,d\ne,\"f\n"),
+		    .pad = ",q\n", .format = RELIC_FORMAT_CSV,
+		    BATCH_COLUMNS(symbol_string) },
+		{ .label = "a quote in an unquoted field",
+		    BATCH_TABLE("a,b\nc,d\"e\n"), .pad = ",q\n",
+		    .format = RELIC_FORMAT_CSV, BATCH_COLUMNS(symbol_string) },
+		{ .label = "a limit before a malformed tail",
+		    BATCH_TABLE("a\tb\nc\td\ne\tf\ng\th\ni\n"),
+		    .pad = "\tq\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_string), .max_tuples = 3 },
+		{ .label = "a limit met by the program",
+		    .program = "e(a, \"b\").\n", BATCH_TABLE("a\tb\nc\td\n"),
+		    .pad = "\tq\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_string), .max_tuples = 2 },
+	};
+	window_tally_t tally;
+	char *long_record;
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		bzero(&tally, sizeof(tally));
+		compare_shifted_imports(&cases[i], &tally);
+		checkf(!cases[i].whole || tally.declined == 0, SCENARIO_BATCH,
+		    "%s: a well-formed table should have every window staged, "
+		    "not %" PRIu64 " declined", cases[i].label, tally.declined);
+	}
+
+	bzero(&tally, sizeof(tally));
+	compare_generated_imports("a long table", 0, NULL, 0, 0, &tally);
+	checkf(tally.staged >= 4 && tally.declined == 0, SCENARIO_BATCH,
+	    "a long table imported twice should be staged in two windows or "
+	    "more each and none declined, not %" PRIu64 " staged and %"
+	    PRIu64 " declined", tally.staged, tally.declined);
+	compare_generated_imports("a type error in a late window",
+	    GENERATED_ROWS - 100, "s1\tx\tq\n", 0, 0, &tally);
+	compare_generated_imports("a short record in a late window",
+	    GENERATED_ROWS / 2, "s1\t2\n", 0, 0, &tally);
+	long_record = record_longer_than_a_window();
+	if (long_record == NULL)
+		check(false, SCENARIO_BATCH, "the record is built");
+	else
+		compare_generated_imports("a record longer than a window",
+		    GENERATED_ROWS / 2, long_record, 0, 0, &tally);
+	free(long_record);
+	compare_generated_imports("a tuple limit in a late window", 0, NULL,
+	    GENERATED_ROWS / 2, 0, &tally);
+	compare_memory_limits(&tally);
+	checkf(tally.staged > 0 && tally.declined > 0, SCENARIO_BATCH,
+	    "the long tables should have windows staged and windows declined, "
+	    "not %" PRIu64 " and %" PRIu64, tally.staged, tally.declined);
+}
+
+/*
+ * A record of the generated tables' columns longer than a window, in a new
+ * string, or NULL when memory ran out.
+ */
+static char *
+record_longer_than_a_window(void)
+{
+	size_t length;
+	char *record;
+
+	length = RELIC_IMPORT_WINDOW_BYTES + RELIC_IMPORT_READ_CHUNK;
+	record = malloc(length + 1);
+	if (record == NULL)
+		return (NULL);
+	memset(record, 'y', length);
+	bcopy("s1\t1\t", record, 5);
+	record[length - 1] = '\n';
+	record[length] = '\0';
+
+	return (record);
+}
+
+/*
+ * Compare the two ways of importing the long generated table under memory
+ * limits stepped from what the context holds before the import to what it
+ * holds after, so that some limit refuses the import at each stage of it.
+ */
+static void
+compare_memory_limits(window_tally_t *tally)
+{
+	char label[64];
+	relic_config_t config;
+	capture_t capture;
+	relic_t *ctx;
+	size_t before;
+	size_t after;
+	size_t length;
+	size_t step;
+	char *table;
+
+	table = generated_table(GENERATED_ROWS, 0, NULL, &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		return;
+	}
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_NO_BATCH_IMPORT;
+	ctx = context_with_capture(&config, &capture);
+	before = 0;
+	after = 0;
+	if (ctx != NULL && relic_load_string(ctx, "program.dl",
+	    GENERATED_PROGRAM) == 0) {
+		before = accounted_bytes(ctx);
+		if (import_table(ctx, "table", RELIC_FORMAT_TSV, 0, "e",
+		    generated_columns, 3, table, length) == 0)
+			after = accounted_bytes(ctx);
+	}
+	relic_destroy(ctx);
+	free(table);
+	if (after <= before) {
+		check(false, SCENARIO_BATCH, "the long table is imported");
+		return;
+	}
+
+	for (step = 0; step <= MEMORY_STEPS; step++) {
+		snprintf(label, sizeof(label), "a memory limit %zu/%d of the "
+		    "way", step, MEMORY_STEPS);
+		compare_generated_imports(label, 0, NULL, 0,
+		    before + (after - before) * step / MEMORY_STEPS, tally);
+	}
+}
+
+/* The bytes a context's account holds against its memory limit. */
+static size_t
+accounted_bytes(const relic_t *ctx)
+{
+	return (ctx->account.store_bytes + ctx->account.value_bytes +
+	    ctx->account.pool_bytes);
+}
+
+/*
+ * Compare the two ways of importing a table, behind every length of
+ * filler a padded table takes.
+ */
+static void
+compare_shifted_imports(const batch_case_t *batch, window_tally_t *tally)
+{
+	char label[128];
+	size_t shifts;
+	size_t shift;
+	size_t length;
+	char *table;
+
+	shifts = batch->pad != NULL ? BATCH_SHIFTS : 1;
+	for (shift = 0; shift < shifts; shift++) {
+		table = shifted_table(batch, shift, &length);
+		if (table == NULL) {
+			check(false, SCENARIO_BATCH, "the table is built");
+			return;
+		}
+		snprintf(label, sizeof(label), "%s behind %zu bytes",
+		    batch->label, length - batch->length);
+		compare_import_ways(batch, table, length, label, tally);
+		free(table);
+	}
+}
+
+/*
+ * The table of `batch` behind a padding record whose first field is `shift`
+ * bytes long, or behind none at shift 0.  NULL when memory ran out.
+ */
+static char *
+shifted_table(const batch_case_t *batch, size_t shift, size_t *lengthp)
+{
+	size_t pad_length;
+	size_t rest;
+	char *table;
+
+	rest = shift > 0 ? strlen(batch->pad) : 0;
+	pad_length = shift > 0 ? shift + rest : 0;
+	table = malloc(pad_length + batch->length + 1);
+	if (table == NULL)
+		return (NULL);
+	if (shift > 0) {
+		table[0] = 'p';
+		memset(table + 1, 'x', shift - 1);
+		bcopy(batch->pad, table + shift, rest);
+	}
+	bcopy(batch->table, table + pad_length, batch->length);
+	table[pad_length + batch->length] = '\0';
+
+	*lengthp = pad_length + batch->length;
+	return (table);
+}
+
+/*
+ * Compare the two ways of importing a generated table of a symbol, an
+ * integer and a string column, holding `odd` in place of row `odd_row` when
+ * it is set, under a tuple limit of `max_tuples` and a memory limit of
+ * `max_memory` when each is set.
+ */
+static void
+compare_generated_imports(const char *label, size_t odd_row,
+    const char *odd, size_t max_tuples, size_t max_memory,
+    window_tally_t *tally)
+{
+	batch_case_t batch;
+	size_t length;
+	char *table;
+
+	table = generated_table(GENERATED_ROWS, odd_row, odd, &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		return;
+	}
+
+	bzero(&batch, sizeof(batch));
+	batch.label = label;
+	batch.program = GENERATED_PROGRAM;
+	batch.table = table;
+	batch.length = length;
+	batch.format = RELIC_FORMAT_TSV;
+	batch.columns = generated_columns;
+	batch.column_count = 3;
+	batch.max_tuples = max_tuples;
+	batch.max_memory = max_memory;
+	compare_import_ways(&batch, table, length, label, tally);
+
+	free(table);
+}
+
+/*
+ * A table of `rows` records repeating a few symbols, integers and strings,
+ * with duplicate records among them, the record at `odd_row` replaced by
+ * `odd` when that is set.  NULL when memory ran out.
+ */
+static char *
+generated_table(size_t rows, size_t odd_row, const char *odd,
+    size_t *lengthp)
+{
+	size_t capacity;
+	size_t length;
+	size_t i;
+	char *table;
+
+	capacity = rows * 32 + (odd != NULL ? strlen(odd) : 0) + 1;
+	table = malloc(capacity);
+	if (table == NULL)
+		return (NULL);
+
+	length = 0;
+	for (i = 0; i < rows; i++) {
+		if (odd != NULL && i == odd_row)
+			length += (size_t)snprintf(table + length,
+			    capacity - length, "%s", odd);
+		else
+			length += (size_t)snprintf(table + length,
+			    capacity - length, "s%zu\t%zu\ts%zu\n",
+			    i * 7 % GENERATED_SYMBOLS, i % 13,
+			    i * 3 % GENERATED_SYMBOLS);
+	}
+
+	*lengthp = length;
+	return (table);
+}
+
+/*
+ * Import a table both ways and check they end alike, adding the batch
+ * import's windows to `tally`.
+ */
+static void
+compare_import_ways(const batch_case_t *batch, const char *table,
+    size_t length, const char *label, window_tally_t *tally)
+{
+	import_outcome_t batched;
+	import_outcome_t scalar;
+	const capture_t *reported;
+	const capture_t *expected;
+	const char *difference;
+
+	if (import_one_way(batch, table, length, 0, &batched) != 0 ||
+	    import_one_way(batch, table, length, RELIC_F_NO_BATCH_IMPORT,
+	    &scalar) != 0) {
+		check(false, SCENARIO_BATCH, "a context is made and loaded");
+		relic_destroy(batched.ctx);
+		relic_destroy(scalar.ctx);
+		return;
+	}
+
+	checkf(batched.status == scalar.status &&
+	    batched.again == scalar.again, SCENARIO_BATCH,
+	    "%s: a batch import should end %d then %d, as one a field at a "
+	    "time does, not %d then %d", label, scalar.status, scalar.again,
+	    batched.status, batched.again);
+	reported = &batched.after_first;
+	expected = &scalar.after_first;
+	checkf(reported->errors == expected->errors &&
+	    strcmp(reported->message, expected->message) == 0 &&
+	    strcmp(reported->file, expected->file) == 0 &&
+	    reported->line == expected->line &&
+	    reported->column == expected->column, SCENARIO_BATCH,
+	    "%s: a batch import should report \"%s\" at %u:%u, as one a "
+	    "field at a time does, not \"%s\" at %u:%u", label,
+	    expected->message, expected->line, expected->column,
+	    reported->message, reported->line, reported->column);
+	checkf(strcmp(batched.capture.message, scalar.capture.message) == 0,
+	    SCENARIO_BATCH, "%s: a second batch import should report \"%s\", "
+	    "not \"%s\"", label, scalar.capture.message,
+	    batched.capture.message);
+
+	checkf(scalar.ctx->counters.windows_staged == 0 &&
+	    scalar.ctx->counters.windows_declined == 0, SCENARIO_BATCH,
+	    "%s: an import a field at a time should read no window", label);
+	tally->staged += batched.ctx->counters.windows_staged;
+	tally->declined += batched.ctx->counters.windows_declined;
+
+	difference = context_difference(batched.ctx, scalar.ctx);
+	checkf(difference == NULL, SCENARIO_BATCH, "%s: a batch import "
+	    "should leave the context as one a field at a time does, but "
+	    "its %s differ", label, difference != NULL ? difference : "");
+
+	relic_destroy(batched.ctx);
+	relic_destroy(scalar.ctx);
+}
+
+/*
+ * Import the table of `batch` twice into a new context of `flags`, made
+ * and loaded as `batch` says.  Returns 0, or -1 when the context could not
+ * be made or loaded, with outcome->ctx then NULL or to be destroyed.
+ */
+static int
+import_one_way(const batch_case_t *batch, const char *table, size_t length,
+    unsigned int flags, import_outcome_t *outcome)
+{
+	relic_config_t config;
+
+	bzero(outcome, sizeof(*outcome));
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.max_tuples = batch->max_tuples;
+	outcome->ctx = context_with_capture(&config, &outcome->capture);
+	if (outcome->ctx == NULL)
+		return (-1);
+	if (batch->program != NULL && relic_load_string(outcome->ctx,
+	    "program.dl", batch->program) != 0)
+		return (-1);
+	if (batch->max_memory != 0)
+		outcome->ctx->account.limit = batch->max_memory;
+
+	outcome->status = import_table(outcome->ctx, "table", batch->format,
+	    batch->flags, "e", batch->columns, batch->column_count, table,
+	    length);
+	outcome->after_first = outcome->capture;
+	outcome->again = import_table(outcome->ctx, "table", batch->format,
+	    batch->flags, "e", batch->columns, batch->column_count, table,
+	    length);
+
+	return (0);
+}
+
+/*
+ * What differs between two contexts' values, accounting and facts, or NULL
+ * when nothing does.
+ */
+static const char *
+context_difference(const relic_t *a, const relic_t *b)
+{
+	const char *difference;
+
+	difference = values_difference(a, b);
+	if (difference != NULL)
+		return (difference);
+
+	if (a->account.store_bytes != b->account.store_bytes ||
+	    a->account.value_bytes != b->account.value_bytes ||
+	    a->account.pool_bytes != b->account.pool_bytes)
+		return ("accounted bytes");
+
+	return (facts_difference(a, b));
+}
+
+/*
+ * What differs between the values two contexts interned: their bytes,
+ * integers and order, the types each was interned as, and the capacities
+ * of the tables holding them.
+ */
+static const char *
+values_difference(const relic_t *a, const relic_t *b)
+{
+	const char *a_bytes;
+	const char *b_bytes;
+	size_t a_length;
+	size_t b_length;
+	size_t i;
+
+	if (a->symbols.count != b->symbols.count ||
+	    a->symbols.capacity != b->symbols.capacity)
+		return ("symbol counts or capacities");
+	for (i = 1; i <= a->symbols.count; i++) {
+		a_bytes = relic_symbol_bytes(a, (uint32_t)i, &a_length);
+		b_bytes = relic_symbol_bytes(b, (uint32_t)i, &b_length);
+		if (a_length != b_length ||
+		    bcmp(a_bytes, b_bytes, a_length) != 0)
+			return ("symbols");
+	}
+
+	if (a->values.symbol_use_capacity != b->values.symbol_use_capacity ||
+	    a->values.symbol_values != b->values.symbol_values ||
+	    a->values.string_values != b->values.string_values)
+		return ("value counts or use capacities");
+	for (i = 0; i < a->values.symbol_use_capacity; i++)
+		if (a->values.symbol_uses[i] != b->values.symbol_uses[i])
+			return ("symbol uses");
+
+	if (a->values.integer_count != b->values.integer_count ||
+	    a->values.integer_capacity != b->values.integer_capacity)
+		return ("integer counts or capacities");
+	for (i = 0; i < a->values.integer_count; i++)
+		if (a->values.integers[i] != b->values.integers[i])
+			return ("integers");
+
+	return (NULL);
+}
+
+/*
+ * What differs between the facts two contexts hold: their predicates, and
+ * each base store's tuples in order.
+ */
+static const char *
+facts_difference(const relic_t *a, const relic_t *b)
+{
+	const relic_relation_t *a_store;
+	const relic_relation_t *b_store;
+	size_t count;
+	size_t pred;
+	size_t i;
+
+	if (relic_pred_count(a) != relic_pred_count(b) ||
+	    a->store.bases.count != b->store.bases.count)
+		return ("predicates");
+
+	for (pred = 1; pred <= a->store.bases.count; pred++) {
+		a_store = relic_base_store(a, (relic_pred_id_t)pred);
+		b_store = relic_base_store(b, (relic_pred_id_t)pred);
+		if ((a_store == NULL) != (b_store == NULL))
+			return ("base stores");
+		if (a_store == NULL)
+			continue;
+		count = relic_relation_count(a_store);
+		if (count != relic_relation_count(b_store) ||
+		    a_store->arity != b_store->arity)
+			return ("fact counts");
+		for (i = 1; i <= count && a_store->arity > 0; i++)
+			if (bcmp(relic_relation_tuple(a_store,
+			    (relic_tuple_id_t)i), relic_relation_tuple(b_store,
+			    (relic_tuple_id_t)i), a_store->arity *
+			    sizeof(relic_dom_t)) != 0)
+				return ("facts");
+	}
+
+	return (NULL);
+}
+
+/*
+ * A read that fails after a batch import has read ahead is reported where
+ * an import a field at a time would meet it: after the records read before
+ * it are staged and their values interned, and never ahead of an earlier
+ * refusal.  The bytes the failing read returned are not read.  Each table
+ * is read both ways, failing at the same byte, and must end alike.
+ */
+static void
+a_failed_read_ahead_waits_its_turn(void)
+{
+	size_t length;
+	char *table;
+
+	table = generated_table(GENERATED_ROWS, 0, NULL, &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		return;
+	}
+	compare_failed_reads("a read failing at once", table, 0);
+	compare_failed_reads("a read failing in the first record", table, 3);
+	compare_failed_reads("a read failing after a chunk", table,
+	    RELIC_IMPORT_READ_CHUNK + 5);
+	compare_failed_reads("a read failing after a window", table,
+	    RELIC_IMPORT_WINDOW_BYTES + RELIC_IMPORT_READ_CHUNK + 5);
+	compare_failed_reads("a read failing at the end", table, length);
+	free(table);
+
+	table = generated_table(GENERATED_ROWS, GENERATED_ROWS / 2,
+	    "s1\tx\ts2\n", &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		return;
+	}
+	compare_failed_reads("a read failing after a type error", table,
+	    row_offset(table, GENERATED_ROWS / 2 + 1) + 7);
+	free(table);
+}
+
+/*
+ * Import `table` both ways from a stream failing at byte `fail_at`, and
+ * check they end alike.
+ */
+static void
+compare_failed_reads(const char *label, const char *table, size_t fail_at)
+{
+	import_outcome_t batched;
+	import_outcome_t scalar;
+	const char *difference;
+	int made;
+
+	made = import_failing(table, fail_at, 0, &batched);
+	if (made > 0) {
+		printf("skip: %s: no stream with a read function of the "
+		    "caller's own\n", SCENARIO_BATCH);
+		return;
+	}
+	if (made < 0 || import_failing(table, fail_at,
+	    RELIC_F_NO_BATCH_IMPORT, &scalar) != 0) {
+		check(false, SCENARIO_BATCH, "a context and a stream are made");
+		relic_destroy(batched.ctx);
+		return;
+	}
+
+	checkf(scalar.status == -1, SCENARIO_BATCH, "%s: the import should "
+	    "fail", label);
+	checkf(batched.status == scalar.status &&
+	    strcmp(batched.capture.message, scalar.capture.message) == 0 &&
+	    batched.capture.line == scalar.capture.line, SCENARIO_BATCH,
+	    "%s: a batch import should end %d, reporting \"%s\" at line %u, "
+	    "not %d, reporting \"%s\" at line %u", label, scalar.status,
+	    scalar.capture.message, scalar.capture.line, batched.status,
+	    batched.capture.message, batched.capture.line);
+	difference = context_difference(batched.ctx, scalar.ctx);
+	checkf(difference == NULL, SCENARIO_BATCH, "%s: a batch import "
+	    "should leave the context as one a field at a time does, but "
+	    "its %s differ", label, difference != NULL ? difference : "");
+
+	relic_destroy(batched.ctx);
+	relic_destroy(scalar.ctx);
+}
+
+/*
+ * Import `table` as the generated tables are imported, into a new context
+ * of `flags`, from a stream that fails at byte `fail_at`.  Returns 0, -1
+ * when the context or the stream could not be made, or 1 when no stream
+ * with a read function of the caller's own can be.
+ */
+static int
+import_failing(const char *table, size_t fail_at, unsigned int flags,
+    import_outcome_t *outcome)
+{
+	relic_config_t config;
+	reentering_read_t reading;
+	relic_import_t import;
+	FILE *stream;
+
+	bzero(outcome, sizeof(*outcome));
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	outcome->ctx = context_with_capture(&config, &outcome->capture);
+	if (outcome->ctx == NULL)
+		return (-1);
+
+	bzero(&reading, sizeof(reading));
+	reading.ctx = outcome->ctx;
+	reading.table = table;
+	reading.fail_at = fail_at;
+	reading.fail_errno = EIO;
+	stream = reentering_stream(&reading);
+	if (stream == NULL) {
+		relic_destroy(outcome->ctx);
+		outcome->ctx = NULL;
+		return (1);
+	}
+
+	bzero(&import, sizeof(import));
+	import.predicate = "e";
+	import.columns = generated_columns;
+	import.column_count = 3;
+	import.format = RELIC_FORMAT_TSV;
+	outcome->status = relic_import_file(outcome->ctx, "table", stream,
+	    &import);
+	fclose(stream);
+
+	return (0);
+}
+
 int
 main(void)
 {
@@ -1823,6 +2646,8 @@ main(void)
 	a_source_name_is_read_once();
 	a_failed_read_adds_nothing();
 	a_path_is_opened_and_named();
+	a_batch_import_matches_the_scalar_import();
+	a_failed_read_ahead_waits_its_turn();
 
 	return (check_summary("import"));
 }

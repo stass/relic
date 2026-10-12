@@ -97,6 +97,8 @@ struct relic_staged_set {
 
 static int	 admit_new_tuple(relic_staging_t *staging,
 		    const relic_staged_set_t *set);
+static size_t	 find_set(const relic_staging_t *staging,
+		    relic_pred_id_t pred);
 static relic_pred_id_t first_growing(const relic_staging_t *staging,
 		    const relic_staged_set_t *set);
 static bool	 held_by_store(const relic_staged_set_t *set,
@@ -156,6 +158,133 @@ relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
 	}
 
 	return (set_add(staging, set, tuple));
+}
+
+/*
+ * Staging a batch of tuples at once, which a batch import does with a
+ * window's: relic_staging_builder() gives the builder the batch's tuples
+ * are to be new to, relic_staging_admits() whether the limits admit the
+ * new ones, relic_staging_reserve() makes room for them, and
+ * relic_staging_append() stages each, as relic_staging_add() would have
+ * one at a time.
+ */
+
+/*
+ * The builder of `pred`'s staged set, or NULL when the load has staged no
+ * fact of `pred` yet.
+ */
+const relic_builder_t *
+relic_staging_builder(const relic_staging_t *staging, relic_pred_id_t pred)
+{
+	size_t position;
+
+	position = find_set(staging, pred);
+	if (position == staging->set_count)
+		return (NULL);
+
+	return (&staging->sets[position].builder);
+}
+
+/*
+ * Whether staging `added` new tuples of `pred`, with the value table and
+ * the pool holding `value_bytes`, passes every check relic_staging_add()
+ * would make of them one at a time: the builder can hold them, and the
+ * limits admit them.  Those checks only grow with each tuple, so checking
+ * them at the last tuple, with the values' final bytes, checks every one.
+ * It reports nothing and changes nothing.
+ *
+ * The tuple limit is admit_new_tuple()'s, asked of the last of `added`:
+ * the base stores' facts and every new one, those staged and these, within
+ * it, each difference taken only once the one before it is known not to
+ * wrap.  The floor is admit_new_tuple()'s too, and when `pred` has no
+ * staged set yet it includes the rows of its store, which staging_set_of()
+ * adds when the first tuple begins the set.
+ */
+bool
+relic_staging_admits(const relic_staging_t *staging, relic_pred_id_t pred,
+    size_t added, size_t value_bytes)
+{
+	const relic_relation_t *store;
+	const relic_account_t *account;
+	size_t position;
+	size_t held;
+	size_t floor_bytes;
+	size_t max_tuples;
+	size_t row;
+	uint16_t arity;
+
+	if (added == 0)
+		return (true);
+
+	position = find_set(staging, pred);
+	arity = relic_pred_of(staging->ctx, pred)->arity;
+	row = (size_t)arity * sizeof(relic_dom_t);
+	held = position < staging->set_count ?
+	    relic_builder_count(&staging->sets[position].builder) : 0;
+	if (added > RELIC_TUPLE_MAX - held ||
+	    (arity > 0 && held + added > SIZE_MAX / arity))
+		return (false);
+
+	max_tuples = staging->ctx->config.max_tuples;
+	if (relic_limit_set(max_tuples) &&
+	    (staging->base_tuples > max_tuples ||
+	    added > max_tuples - staging->base_tuples ||
+	    staging->new_tuples > max_tuples - staging->base_tuples - added))
+		return (false);
+
+	floor_bytes = staging->columns_floor;
+	if (position == staging->set_count) {
+		store = relic_base_store(staging->ctx, pred);
+		if (store != NULL)
+			floor_bytes = relic_saturating_sum(floor_bytes,
+			    relic_saturating_product(
+			    relic_relation_count(store), row));
+	}
+	floor_bytes = relic_saturating_sum(relic_saturating_sum(floor_bytes,
+	    relic_saturating_product(added, row)), value_bytes);
+	account = &staging->ctx->account;
+
+	return (!relic_limit_set(account->limit) ||
+	    floor_bytes <= account->limit);
+}
+
+/*
+ * Make room in `pred`'s staged set, begun if the load has staged no fact
+ * of it, for the new tuples `growth` counts.  Returns 0, or -1 when memory
+ * ran out, having reported nothing.
+ */
+int
+relic_staging_reserve(relic_staging_t *staging, relic_pred_id_t pred,
+    const relic_tuple_growth_t *growth)
+{
+	relic_staged_set_t *set;
+
+	if (staging_set_of(staging, pred, &set) != 0)
+		return (-1);
+
+	return (relic_builder_reserve(&set->builder, growth));
+}
+
+/*
+ * Stage `tuple`, of wide hash `hash`, which neither `pred`'s builder nor
+ * its base store holds, into room relic_staging_reserve() made.
+ */
+void
+relic_staging_append(relic_staging_t *staging, relic_pred_id_t pred,
+    const relic_dom_t *tuple, uint64_t hash)
+{
+	relic_staged_set_t *set;
+	size_t position;
+
+	position = find_set(staging, pred);
+	assert(position < staging->set_count);
+	set = &staging->sets[position];
+	assert(!held_by_store(set, tuple, hash));
+
+	relic_builder_append_hashed(&set->builder, tuple, hash);
+	staging->new_tuples++;
+	staging->columns_floor = relic_saturating_sum(staging->columns_floor,
+	    row_bytes(set));
 }
 
 /*
@@ -316,10 +445,8 @@ row_bytes(const relic_staged_set_t *set)
 }
 
 /*
- * The staged set of `pred` in *setp, begun empty if this is the predicate's
- * first fact in the load.  A fact finds its set through the set the previous
- * fact used, which a file of one predicate's facts always does, and
- * otherwise through the table from predicate to set.  Returns 0, or -1 when
+ * The staged set of `pred` in *setp, found by find_set(), or begun empty if
+ * this is the predicate's first fact in the load.  Returns 0, or -1 when
  * memory ran out, having reported nothing.
  */
 static int
@@ -328,26 +455,17 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 {
 	relic_staged_set_t *sets;
 	relic_staged_set_t *set;
-	relic_idprobe_t probe;
+	size_t position;
 	uint32_t hash;
-	uint32_t id;
 
-	if (staging->set_count > 0 &&
-	    staging->sets[staging->last].builder.pred == pred) {
-		*setp = &staging->sets[staging->last];
+	position = find_set(staging, pred);
+	if (position < staging->set_count) {
+		staging->last = position;
+		*setp = &staging->sets[position];
 		return (0);
 	}
 
 	hash = relic_hash_word(staging->ctx->hash_seed, pred);
-	relic_idprobe_open(&probe, &staging->by_pred, hash);
-	while (relic_idprobe_next(&probe, &id)) {
-		if (staging->sets[id - 1].builder.pred == pred) {
-			staging->last = id - 1;
-			*setp = &staging->sets[id - 1];
-			return (0);
-		}
-	}
-
 	if (relic_idtab_reserve(&staging->by_pred, 1, staging_rehash,
 	    staging) != 0)
 		return (-1);
@@ -373,6 +491,32 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 	*setp = set;
 
 	return (0);
+}
+
+/*
+ * The position of `pred`'s staged set, or the count of sets when there is
+ * none: the set the previous fact used, which a file of one predicate's
+ * facts always finds, or else the one the table from predicate to set
+ * holds.
+ */
+static size_t
+find_set(const relic_staging_t *staging, relic_pred_id_t pred)
+{
+	relic_idprobe_t probe;
+	uint32_t id;
+
+	if (staging->set_count > 0 &&
+	    staging->sets[staging->last].builder.pred == pred)
+		return (staging->last);
+
+	relic_idprobe_open(&probe, &staging->by_pred,
+	    relic_hash_word(staging->ctx->hash_seed, pred));
+	while (relic_idprobe_next(&probe, &id)) {
+		if (staging->sets[id - 1].builder.pred == pred)
+			return (id - 1);
+	}
+
+	return (staging->set_count);
 }
 
 /*

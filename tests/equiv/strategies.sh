@@ -7,8 +7,9 @@
 # fixed point, the planner without indexes, without reordering and without
 # existence checks, each of those again answering from the whole fixed point
 # instead of through the Magic rewrite, the rewrite without factoring,
-# rounds whose insertions wait for their end, and every
-# aggregate body compiled to a group rule.  Every run must agree with the
+# rounds whose insertions wait for their end, tables imported a field at a
+# time rather than a window at a time, and every aggregate body compiled to
+# a group rule.  Every run must agree with the
 # default on standard output, the diagnostics on standard error, and exit
 # status, but for the group rules, held to the default's output and status
 # alone: they hold copies the default does not, which a limit message
@@ -88,7 +89,7 @@ set -eu
 # The no-factor run, the rewrite without factoring, is in `other_rules`,
 # and is the reference whose tuple total those in `ordinary_rules`, which
 # rewrite without factoring too, are held to.
-same_rules="naive no-index no-exists parallel j4+parallel"
+same_rules="naive no-index no-exists parallel j4+parallel no-batch-import"
 other_rules="no-reorder no-factor"
 ordinary_rules="naive+no-factor"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic

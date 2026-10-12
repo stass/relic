@@ -336,10 +336,11 @@ holds switches, zero by default.
 .Dv RELIC_F_NO_FACTOR ,
 .Dv RELIC_F_NO_STREAM ,
 .Dv RELIC_F_NO_EXISTS ,
-.Dv RELIC_F_PARALLEL_ALWAYS
-and
+.Dv RELIC_F_PARALLEL_ALWAYS ,
 .Dv RELIC_F_GROUP_RULES
-select alternative evaluation strategies for testing, and
+and
+.Dv RELIC_F_NO_BATCH_IMPORT
+select alternative strategies for testing, and
 .Dv RELIC_F_NOTE_MIXED
 asks for a diagnostic:
 .Bl -tag -width RELIC_F_PARALLEL_ALWAYS
@@ -392,7 +393,14 @@ compile the body of every aggregate into a rule of its own whose relation
 the aggregate folds, even a body of one atom whose arguments are distinct
 variables, which otherwise is folded over the atom's relation where it
 stands; the answers are the same, but the copies are tuples held and
-counted, so a limit may refuse one way and not the other.
+counted, so a limit may refuse one way and not the other;
+.It Dv RELIC_F_NO_BATCH_IMPORT
+import every table a field at a time, typing and interning each field and
+staging each record as it is read, rather than a window of records at a
+time, each window's fields decoded and its values and records checked
+before any is interned or staged; the facts, the values, the identifiers
+they are given and a refused import's message are the same, but a refused
+import may have read less of its stream.
 .El
 .Pp
 No switch changes an answer, though two strategies may hold different

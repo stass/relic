@@ -245,10 +245,11 @@ esac
 
 # The planner's references, answering without the Magic rewrite or without
 # its factoring, gathering every answer before writing it, deferring every
-# round's insertions and compiling every aggregate body to a group rule are
-# selected by name and answer as the default does.
+# round's insertions, compiling every aggregate body to a group rule and
+# importing a table a field at a time are selected by name and answer as the
+# default does.
 for reference in no-index no-reorder no-exists no-magic no-factor no-stream \
-    parallel group-rules; do
+    parallel group-rules no-batch-import; do
 	actual=$("$RELIC" -s -X "$reference" "$work/graph.dl")
 	if [ "$actual" != "$expected" ]; then
 		fail "-X $reference answered '$actual', expected '$expected'"

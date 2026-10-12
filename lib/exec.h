@@ -292,17 +292,20 @@ struct relic_match_space {
 /*
  * A value an EMIT derived that the context had not assigned an identifier
  * when it was computed: an integer, or a string whose bytes are `text` in
- * the batch's pending bytes.
+ * the batch's pending bytes.  A batch import's values are pending too, and
+ * may also be symbols, whose bytes, `text` as a string's, it has checked
+ * are a symbol's.
  */
 enum relic_pending_kind {
 	RELIC_PENDING_INTEGER,
-	RELIC_PENDING_TEXT
+	RELIC_PENDING_TEXT,
+	RELIC_PENDING_SYMBOL
 };
 
 struct relic_pending {
 	union {
 		int64_t		integer;	/* INTEGER */
-		relic_text_t	text;		/* TEXT */
+		relic_text_t	text;		/* TEXT, SYMBOL */
 	}			u;
 	enum relic_pending_kind	kind;
 };

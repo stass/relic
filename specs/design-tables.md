@@ -352,8 +352,8 @@ of the input.
 Parallel pieces report no diagnostic themselves. A malformed or refused
 window follows the scalar replay above, using the same field/record event
 order. Read-ahead errors remain queued behind earlier successful reads;
-the failed-read boundary follows `feed_chunk()` rather than treating a
-partial failed read as successfully supplied bytes.
+the bytes a failed read returned are dropped rather than treated as
+successfully supplied.
 
 **Every mistake has a location**: the source name, and the line and column
 of the byte to look at, counting bytes from one, as the lexer's do. A line
