@@ -1538,16 +1538,23 @@ interned(const relic_t *ctx, const char *name)
 	    relic_symbol_hash(ctx, name, strlen(name))) != RELIC_ID_NONE);
 }
 
-/* The offset of the byte after the first `rows` rows of a table. */
+/*
+ * The offset of the byte after the first `rows` rows of a table.  The
+ * table is measured once: a sanitizer checking string arguments measures
+ * the rest of the table at each strchr(3), which over a table of windows
+ * is quadratic.
+ */
 static size_t
 row_offset(const char *table, size_t rows)
 {
 	const char *end;
+	const char *limit;
 	size_t i;
 
 	end = table;
+	limit = table + strlen(table);
 	for (i = 0; i < rows; i++)
-		end = strchr(end, '\n') + 1;
+		end = (const char *)memchr(end, '\n', (size_t)(limit - end)) + 1;
 
 	return ((size_t)(end - table));
 }
