@@ -191,6 +191,7 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 	relic_round_job_t job;
 	relic_pool_t *pool;
 	size_t texts_bytes;
+	size_t workers;
 	bool always;
 	int status;
 
@@ -206,8 +207,8 @@ relic_round_run(relic_t *ctx, relic_round_t *round)
 			return (RELIC_ROUND_DECLINED);
 	}
 	pool = ctx->pool;
-	relic_pool_adopt(pool);
-	if (!always && pool->worker_count < 2)
+	workers = relic_pool_workers(pool);
+	if (!always && workers < 2)
 		return (RELIC_ROUND_DECLINED);
 	if (pool_prepare(pool, round) != 0)
 		return (RELIC_ROUND_DECLINED);

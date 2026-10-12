@@ -500,9 +500,12 @@ bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
  * workers.  `hash_seed` is the seed of the context the pool serves.
  * Returns 0, or -1 when the pool could not be allocated.
  *
- * relic_pool_adopt() makes the pool the calling process's before a job:
- * a pool carried into a child of fork(2) has none of its threads there,
- * and becomes the calling thread alone.
+ * relic_pool_workers() is the count of workers an operation decides by
+ * whether, and how finely, to share its work.  It and relic_pool_for()
+ * first make the pool the calling process's: a pool carried into a child
+ * of fork(2) has none of its threads there, and becomes the calling thread
+ * alone.  An operation reads the count this way before it sizes anything by
+ * it, and the count does not change while the operation runs.
  *
  * relic_pool_for() runs `run_part` for each of `part_count` parts, on every
  * worker of the pool, the calling thread as worker 0, and returns once
@@ -526,7 +529,7 @@ bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
 size_t	 relic_pool_size(size_t threads);
 int	 relic_pool_create(relic_pool_t **poolp, size_t workers,
 	    uint64_t hash_seed);
-void	 relic_pool_adopt(relic_pool_t *pool);
+size_t	 relic_pool_workers(relic_pool_t *pool);
 void	 relic_pool_for(relic_pool_t *pool, size_t part_count,
 	    relic_pool_part_fn run_part, void *argument);
 void	 relic_pool_free(relic_pool_t *pool);

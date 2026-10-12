@@ -113,6 +113,8 @@ static bool	 fault_signals_open(void);
 static void	 threads_start_and_stop_with_the_pool(void);
 static void	 a_refused_start_is_not_an_error(void);
 static void	 a_pool_carried_into_a_child_of_fork(void);
+static void	 count_part(void *argument, size_t part, size_t worker_index);
+static void	 a_job_dispatched_in_a_child_of_fork(void);
 
 #endif /* RELIC_THREADS */
 
@@ -571,6 +573,61 @@ a_pool_carried_into_a_child_of_fork(void)
 	    threads_joined);
 }
 
+/* A job's part: count the part into the job's tally. */
+static void
+count_part(void *argument, size_t part RELIC_UNUSED,
+    size_t worker_index RELIC_UNUSED)
+{
+	size_t *tally;
+
+	tally = argument;
+	(*tally)++;
+}
+
+/*
+ * A job a child of fork(2) dispatches runs: the dispatch itself makes the
+ * pool the child's, so a caller that has not read the worker count runs
+ * every part on the calling thread rather than waiting at the barrier for
+ * threads the child does not have.  The child gives up after FORK_SECONDS.
+ */
+static void
+a_job_dispatched_in_a_child_of_fork(void)
+{
+	relic_pool_t *pool;
+	size_t tally;
+	pid_t child;
+	int status;
+
+	if (relic_pool_create(&pool, POOL_THREADS, 1) != 0) {
+		check(false, SCENARIO_FORK, "a pool is created");
+		return;
+	}
+	if (pool->worker_count != POOL_THREADS) {
+		check(false, SCENARIO_FORK, "the pool's threads start");
+		relic_pool_free(pool);
+		return;
+	}
+	child = fork();
+	if (child == 0) {
+		alarm(FORK_SECONDS);
+		tally = 0;
+		relic_pool_for(pool, 64, count_part, &tally);
+		_exit(tally == 64 && pool->worker_count == 1 ? 0 : 1);
+	}
+	check(child > 0, SCENARIO_FORK, "a child is forked");
+
+	if (child > 0) {
+		status = -1;
+		while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+			continue;
+		check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+		    SCENARIO_FORK, "a job the child dispatches runs every part "
+		    "on the child's thread");
+	}
+
+	relic_pool_free(pool);
+}
+
 #endif /* RELIC_THREADS */
 
 /*
@@ -637,6 +694,7 @@ main(void)
 	threads_start_and_stop_with_the_pool();
 	a_refused_start_is_not_an_error();
 	a_pool_carried_into_a_child_of_fork();
+	a_job_dispatched_in_a_child_of_fork();
 #endif
 	waiters_spin_only_on_processors_of_their_own();
 	without_threads_rounds_run_alone();

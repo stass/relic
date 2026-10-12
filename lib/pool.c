@@ -88,6 +88,7 @@ struct relic_pool_job {
 	relic_atomic_size_t	 finished;
 };
 
+static void	 adopt(relic_pool_t *pool);
 static void	 job_work(relic_pool_job_t *job, size_t worker_index);
 
 /*
@@ -235,8 +236,20 @@ relic_pool_create(relic_pool_t **poolp, size_t workers, uint64_t hash_seed)
 	return (0);
 }
 
-void
-relic_pool_adopt(relic_pool_t *pool RELIC_UNUSED)
+size_t
+relic_pool_workers(relic_pool_t *pool)
+{
+	adopt(pool);
+
+	return (pool->worker_count);
+}
+
+/*
+ * Make the pool the calling process's: one carried into a child of fork(2)
+ * has none of its threads there, and becomes the calling thread alone.
+ */
+static void
+adopt(relic_pool_t *pool RELIC_UNUSED)
 {
 #ifdef RELIC_THREADS
 	size_t i;
@@ -268,6 +281,7 @@ relic_pool_for(relic_pool_t *pool RELIC_UNUSED, size_t part_count,
 	relic_atomic_size_init(&job.finished, 0);
 
 #ifdef RELIC_THREADS
+	adopt(pool);
 	if (pool->worker_count > 1 && part_count > 1) {
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
 		publish(pool->threads, &job, false);

@@ -1248,12 +1248,12 @@ outgrows_window(const import_input_t *input)
 
 /*
  * Make the context's pool ready to share a table's windows: made the first
- * time, as a round makes it, and adopted by the calling process, which a
- * fork leaves with one worker.  Returns 0, or -1 when the pool cannot be
- * made or, unless batching is forced, runs fewer than
- * RELIC_IMPORT_BATCH_WORKERS workers, as the pool of a forked child, or
- * one whose threads did not all start, may; the table is then read a field
- * at a time.  Reports nothing.
+ * time, as a round makes it, and made the calling process's by
+ * relic_pool_workers(), which leaves a forked child's with one worker.
+ * Returns 0, or -1 when the pool cannot be made or, unless batching is
+ * forced, runs fewer than RELIC_IMPORT_BATCH_WORKERS workers, as the pool of
+ * a forked child, or one whose threads did not all start, may; the table is
+ * then read a field at a time.  Reports nothing.
  */
 static int
 prepare_batching(relic_t *ctx)
@@ -1263,9 +1263,8 @@ prepare_batching(relic_t *ctx)
 		    ctx->hash_seed) != 0)
 			return (-1);
 	}
-	relic_pool_adopt(ctx->pool);
-	if (!batching_forced(ctx) &&
-	    ctx->pool->worker_count < RELIC_IMPORT_BATCH_WORKERS)
+	if (relic_pool_workers(ctx->pool) < RELIC_IMPORT_BATCH_WORKERS &&
+	    !batching_forced(ctx))
 		return (-1);
 
 	return (0);
