@@ -21,24 +21,28 @@
  * The facts a program states for a predicate are the tuples of its base
  * store, which nothing but this commit writes.  A load stages its facts as
  * it reads them: one staged set per predicate its facts name, in the order
- * the load first names them, each holding the load's distinct facts of that
- * predicate packed at its arity, an identifier table over them that makes
- * the set a set, and per tuple its hash and a mark.  The hash is the one
- * every relation of the context gives the tuple, computed once as the fact
- * is staged and used by the set's table, the base store's lookup and the
- * append alike.
+ * the load first names them, even when the first fact named is one the
+ * store holds already, so that a refusal can name predicates in that order.
+ * Each set holds a builder (relation.h) of the facts new to the base store,
+ * in the order the load first states them, packed at the predicate's arity
+ * and indexed as the store's own tuples are: the payload an empty store
+ * adopts at the commit as it stands.  A fact the store or the builder holds
+ * already is not staged again.  The hash every relation of the context gives
+ * a tuple is computed once as the fact is staged, and serves the builder's
+ * lookup, the store's and the builder's insertion alike; the builder keeps
+ * no hashes, so its growth and an append to a populated store compute them
+ * again from the columns.
  *
- * Staging measures each fact as it stages it: it looks the tuple up in its
- * predicate's base store and marks it new or not.  Nothing can change a base
- * store while a load runs, so the mark holds until the commit.  A new tuple
- * is staged only if the load, with it, can still fit the limits: the base
- * stores' facts plus the new ones must fit the tuple limit, and a floor
- * under what the commit will hold must fit the memory limit.  So a load the
- * limits refuse is parsed no further than the fact that shows it, rather
- * than staging and interning the rest of its input first.
+ * Nothing can change a base store while a load runs, so a fact found new
+ * stays new until the commit.  A new tuple is staged only if the load, with
+ * it, can still fit the limits: the base stores' facts plus the new ones
+ * must fit the tuple limit, and a floor under what the commit will hold
+ * must fit the memory limit.  So a load the limits refuse is parsed no
+ * further than the fact that shows it, rather than staging and interning
+ * the rest of its input first.
  *
  * The floor, `columns_floor`, is the bytes the columns of the loaded
- * predicates' base stores must hold once every new tuple is appended, each
+ * predicates' base stores must hold once every new tuple is in them, each
  * store's count plus its new tuples at its arity, to which the value table
  * and the symbol pool are added.  Those two only grow while a load runs, and
  * the commit discards the derived relations before it reserves, so for any
@@ -48,21 +52,27 @@
  * commit measures exactly, and can still refuse what the floor let
  * through.
  *
- * When the whole load has been read, the commit adds the new tuples in
- * three steps, ordered so that every step that can fail comes before the
- * first that changes anything a reader can see:
+ * When the whole load has been read, the commit gives each base store its
+ * new tuples in four steps, ordered so that every step that can fail comes
+ * before the first that changes a base store's contents:
+ *
+ *	prepare: describe what each store gains, in the order the load first
+ *	named the predicates: a store holding no fact takes its builder's
+ *	payload whole, and one holding facts has the builder's tuples
+ *	appended, their hashes computed here.  A failure here changes
+ *	nothing.
  *
  *	discard: when any tuple is new the program is about to change, so what
  *	was derived from it is discarded.  That cannot fail, and it leaves the
  *	store holding the base stores alone, so the limits of the next step
  *	count the program's facts and nothing derived.
  *
- *	reserve: make room in every store for its new tuples, both limits
- *	checked once over all of them before any store grows.
+ *	reserve: make every store ready for what it gains, both limits checked
+ *	once over all of them before any store changes.
  *
- *	append: add each new tuple, in the order it was staged.  Room is made,
- *	and every tuple appended is one its store lacks, so no append looks
- *	anything up and none can fail.
+ *	apply: give each store its tuples, in the order they were staged.
+ *	Room is made, and every tuple is one its store lacks, so nothing looks
+ *	anything up and nothing can fail.
  *
  * A refusal, by staging or by the reserve, names the first predicate, in
  * the order the load names them, whose store the facts read so far would
@@ -73,46 +83,30 @@
  *
  * Staging is the load's working storage rather than the program's, and is
  * charged to no limit: the limits bound it through the new tuples they
- * admit, and it is released when the load returns.  Charged, it would count
- * against the memory limit while the derived relations the commit is about
- * to discard still did.  Its identifier tables hash with the context's seed,
- * since the text is untrusted.
+ * admit, and what the commit does not adopt is released when the load
+ * returns.  Charged, it would count against the memory limit while the
+ * derived relations the commit is about to discard still did.  An adopted
+ * payload is charged once, as the store's, by the commit that adopts it.
+ * Builders hash with the context's seed, since the text is untrusted.
  */
 
 struct relic_staged_set {
-	relic_dom_t	*tuples;	/* packed at the arity */
-	uint64_t	*hashes;	/* by tuple: as a relation hashes it */
-	bool		*marks;		/* by tuple: new to the base store */
-	relic_idtab_t	 index;		/* tuple position + 1 */
+	relic_builder_t	 builder;	/* the facts new to the store */
 	const relic_relation_t *store;	/* base store as staging began */
-	size_t		 count;
-	size_t		 column_capacity;
-	size_t		 hash_capacity;
-	size_t		 mark_capacity;
-	size_t		 new_count;
-	uint64_t	 hash_seed;
-	relic_pred_id_t	 pred;
-	uint16_t	 arity;
 };
 
 static int	 admit_new_tuple(relic_staging_t *staging,
 		    const relic_staged_set_t *set);
-static int	 collect_growths(relic_staging_t *staging,
-		    relic_base_growth_t **growthsp, size_t *countp);
-static void	 commit_append(relic_staging_t *staging);
 static relic_pred_id_t first_growing(const relic_staging_t *staging,
 		    const relic_staged_set_t *set);
 static bool	 held_by_store(const relic_staged_set_t *set,
 		    const relic_dom_t *tuple, uint64_t hash);
+static int	 prepare_actions(relic_staging_t *staging,
+		    relic_base_action_t **actionsp, size_t *countp);
+static void	 release_actions(relic_base_action_t *actions, size_t count);
 static size_t	 row_bytes(const relic_staged_set_t *set);
 static int	 set_add(relic_staging_t *staging, relic_staged_set_t *set,
 		    const relic_dom_t *tuple);
-static uint64_t	 set_hash(const relic_staged_set_t *set,
-		    const relic_dom_t *tuple);
-static uint32_t	 set_rehash(uint32_t id, void *ctx);
-static void	 set_reset(relic_staged_set_t *set);
-static const relic_dom_t *set_tuple(const relic_staged_set_t *set,
-		    size_t position);
 static int	 staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 		    relic_staged_set_t **setp);
 static uint32_t	 staging_rehash(uint32_t id, void *ctx);
@@ -128,7 +122,8 @@ relic_staging_init(relic_staging_t *staging, relic_t *ctx)
 
 /*
  * Release everything staging holds.  This is a load's only exit, whether
- * it failed to parse, was refused by the commit or committed.
+ * it failed to parse, was refused by the commit or committed.  A builder
+ * whose payload a store adopted holds nothing by then.
  */
 void
 relic_staging_reset(relic_staging_t *staging)
@@ -136,7 +131,7 @@ relic_staging_reset(relic_staging_t *staging)
 	size_t i;
 
 	for (i = 0; i < staging->set_count; i++)
-		set_reset(&staging->sets[i]);
+		relic_builder_reset(&staging->sets[i].builder);
 
 	free(staging->sets);
 	relic_idtab_reset(&staging->by_pred);
@@ -145,9 +140,9 @@ relic_staging_reset(relic_staging_t *staging)
 
 /*
  * Stage the fact `pred(tuple...)`, `tuple` holding the predicate's arity of
- * interned values.  A fact already staged is staged once.  Returns 0, or -1
- * having reported why the fact could not be staged: a limit the load can no
- * longer fit, or memory.
+ * interned values.  A fact already staged, or already held, is not staged
+ * again.  Returns 0, or -1 having reported why the fact could not be
+ * staged: a limit the load can no longer fit, or memory.
  */
 int
 relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
@@ -171,32 +166,84 @@ relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
 int
 relic_staging_commit(relic_staging_t *staging)
 {
-	relic_base_growth_t *growths;
-	size_t growth_count;
+	relic_base_action_t *actions;
+	size_t count;
 	int status;
 
 	if (staging->new_tuples == 0)
 		return (0);
 
-	if (collect_growths(staging, &growths, &growth_count) != 0) {
+	if (prepare_actions(staging, &actions, &count) != 0) {
+		release_actions(actions, count);
 		relic_diag_no_memory(staging->ctx);
 		return (-1);
 	}
 
 	relic_discard_derived(staging->ctx);
-
-	status = relic_bases_reserve(staging->ctx, growths, growth_count);
+	status = relic_bases_reserve(staging->ctx, actions, count);
 	if (status == 0)
-		commit_append(staging);
+		relic_bases_apply(staging->ctx, actions, count);
 
-	free(growths);
+	release_actions(actions, count);
 
 	return (status);
 }
 
 /*
+ * The commit's manifest, into a new array in *actionsp: an action for each
+ * set whose builder holds a tuple, in the order the load first named their
+ * predicates.  Returns 0, or -1 when memory ran out, having reported
+ * nothing.  Whatever this returns, the caller releases the *countp actions
+ * with release_actions().
+ */
+static int
+prepare_actions(relic_staging_t *staging, relic_base_action_t **actionsp,
+    size_t *countp)
+{
+	relic_base_action_t *actions;
+	relic_builder_t *builder;
+	size_t count;
+	size_t i;
+	int status;
+
+	*actionsp = NULL;
+	*countp = 0;
+
+	actions = reallocarray(NULL, staging->set_count, sizeof(*actions));
+	if (actions == NULL)
+		return (-1);
+
+	count = 0;
+	status = 0;
+	for (i = 0; i < staging->set_count && status == 0; i++) {
+		builder = &staging->sets[i].builder;
+		if (relic_builder_count(builder) == 0)
+			continue;
+
+		status = relic_base_action_prepare(staging->ctx,
+		    &actions[count], builder);
+		count++;
+	}
+
+	*actionsp = actions;
+	*countp = count;
+
+	return (status);
+}
+
+static void
+release_actions(relic_base_action_t *actions, size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++)
+		relic_base_action_release(&actions[i]);
+	free(actions);
+}
+
+/*
  * Whether the base store of `set`'s predicate, which a predicate lacks
- * until it holds a fact, holds `tuple`, of wide hash `hash`, already.
+ * until something asks for it, holds `tuple`, of wide hash `hash`, already.
  */
 static bool
 held_by_store(const relic_staged_set_t *set, const relic_dom_t *tuple,
@@ -253,85 +300,19 @@ first_growing(const relic_staging_t *staging, const relic_staged_set_t *set)
 	size_t i;
 
 	for (i = 0; i < staging->set_count; i++) {
-		if (staging->sets[i].new_count > 0 || &staging->sets[i] == set)
-			return (staging->sets[i].pred);
+		if (relic_builder_count(&staging->sets[i].builder) > 0 ||
+		    &staging->sets[i] == set)
+			return (staging->sets[i].builder.pred);
 	}
 
-	return (set->pred);
+	return (set->builder.pred);
 }
 
 /* The bytes one tuple of `set`'s predicate takes in its store's columns. */
 static size_t
 row_bytes(const relic_staged_set_t *set)
 {
-	return ((size_t)set->arity * sizeof(relic_dom_t));
-}
-
-/*
- * The growth of each base store that gains a tuple, in the order the load
- * first named their predicates, into a new array in *growthsp: its new
- * tuples by the stripe of its canonical index each falls in.
- * Returns 0, or -1 when memory ran out, having reported nothing.
- */
-static int
-collect_growths(relic_staging_t *staging, relic_base_growth_t **growthsp,
-    size_t *countp)
-{
-	const relic_staged_set_t *set;
-	relic_base_growth_t *growths;
-	relic_tuple_growth_t *added;
-	size_t count;
-	size_t i;
-	size_t t;
-
-	growths = reallocarray(NULL, staging->set_count, sizeof(*growths));
-	if (growths == NULL)
-		return (-1);
-
-	count = 0;
-	for (i = 0; i < staging->set_count; i++) {
-		set = &staging->sets[i];
-		if (set->new_count == 0)
-			continue;
-
-		growths[count].pred = set->pred;
-		added = &growths[count].added;
-		bzero(added, sizeof(*added));
-		for (t = 0; t < set->count; t++) {
-			if (set->marks[t])
-				added->by_stripe[relic_hash_stripe(
-				    set->hashes[t])]++;
-		}
-		count++;
-	}
-
-	*growthsp = growths;
-	*countp = count;
-
-	return (0);
-}
-
-/*
- * Append every new tuple to its base store, set by set, each set's in the
- * order it was staged.
- */
-static void
-commit_append(relic_staging_t *staging)
-{
-	const relic_staged_set_t *set;
-	size_t i;
-	size_t t;
-
-	for (i = 0; i < staging->set_count; i++) {
-		set = &staging->sets[i];
-
-		for (t = 0; t < set->count; t++) {
-			if (set->marks[t])
-				relic_base_append_hashed(staging->ctx,
-				    set->pred, set_tuple(set, t),
-				    set->hashes[t]);
-		}
-	}
+	return ((size_t)set->builder.arity * sizeof(relic_dom_t));
 }
 
 /*
@@ -352,7 +333,7 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 	uint32_t id;
 
 	if (staging->set_count > 0 &&
-	    staging->sets[staging->last].pred == pred) {
+	    staging->sets[staging->last].builder.pred == pred) {
 		*setp = &staging->sets[staging->last];
 		return (0);
 	}
@@ -360,7 +341,7 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 	hash = relic_hash_word(staging->ctx->hash_seed, pred);
 	relic_idprobe_open(&probe, &staging->by_pred, hash);
 	while (relic_idprobe_next(&probe, &id)) {
-		if (staging->sets[id - 1].pred == pred) {
+		if (staging->sets[id - 1].builder.pred == pred) {
 			staging->last = id - 1;
 			*setp = &staging->sets[id - 1];
 			return (0);
@@ -378,16 +359,12 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 	staging->sets = sets;
 
 	set = &staging->sets[staging->set_count];
-	bzero(set, sizeof(*set));
-	relic_idtab_init(&set->index, true);
-	set->hash_seed = staging->ctx->hash_seed;
-	set->pred = pred;
-	set->arity = relic_pred_of(staging->ctx, pred)->arity;
+	relic_builder_init(&set->builder, staging->ctx, pred);
 	set->store = relic_base_store(staging->ctx, pred);
 	if (set->store != NULL)
 		staging->columns_floor = relic_saturating_sum(
 		    staging->columns_floor, relic_saturating_product(
-		    set->store->count, row_bytes(set)));
+		    relic_relation_count(set->store), row_bytes(set)));
 
 	staging->set_count++;
 	relic_idtab_place(&staging->by_pred, hash,
@@ -410,156 +387,40 @@ staging_rehash(uint32_t id, void *ctx)
 	staging = ctx;
 
 	return (relic_hash_word(staging->ctx->hash_seed,
-	    staging->sets[id - 1].pred));
+	    staging->sets[id - 1].builder.pred));
 }
 
 /*
- * Add a tuple to a set unless the set holds it, marked new or not to its
- * base store.  A new tuple is admitted by the limits first.  Room in the
- * table, the columns, the hashes and the marks is made before the tuple is
- * stored, so a failure leaves the set and the staging's counts as they
- * were.  Returns 0, or -1 having reported that the load no longer fits a
- * limit or that the set cannot grow: past the identifiers a set numbers its
- * tuples with, or out of memory.
+ * Stage a tuple of `set`'s predicate unless the builder or the base store
+ * holds it already.  A new tuple is admitted by the limits first, and the
+ * builder makes room before it stores the tuple, so a failure leaves the
+ * set and the staging's counts as they were.  Returns 0, or -1 having
+ * reported that the load no longer fits a limit or that the builder cannot
+ * grow: past the identifiers a relation numbers its tuples with, or out of
+ * memory.
  */
 static int
 set_add(relic_staging_t *staging, relic_staged_set_t *set,
     const relic_dom_t *tuple)
 {
-	char described[RELIC_PRED_TEXT_MAX];
-	relic_idprobe_t probe;
-	relic_dom_t *tuples;
-	uint64_t *hashes;
-	bool *marks;
 	uint64_t hash;
-	uint32_t id;
-	uint16_t column;
-	bool is_new;
 
-	hash = set_hash(set, tuple);
-	relic_idprobe_open(&probe, &set->index, relic_hash_low(hash));
-	while (relic_idprobe_next(&probe, &id)) {
-		if (set->arity == 0 || bcmp(set_tuple(set, id - 1), tuple,
-		    set->arity * sizeof(*tuple)) == 0)
-			return (0);
-	}
+	hash = relic_tuple_hash(set->builder.hash_seed, tuple,
+	    set->builder.arity);
+	if (relic_builder_contains_hashed(&set->builder, tuple, hash) ||
+	    held_by_store(set, tuple, hash))
+		return (0);
 
-	is_new = !held_by_store(set, tuple, hash);
-	if (is_new && admit_new_tuple(staging, set) != 0)
+	if (admit_new_tuple(staging, set) != 0)
 		return (-1);
 
-	if (set->count >= UINT32_MAX - 1) {
-		relic_diag_error(staging->ctx, RELIC_ERROR_LIMIT, NULL,
-		    "too many facts of %s in one load",
-		    relic_pred_describe(staging->ctx, set->pred, described,
-		    sizeof(described)));
+	if (relic_builder_add_hashed(staging->ctx, &set->builder, tuple,
+	    hash) != 0)
 		return (-1);
-	}
 
-	if (relic_idtab_reserve(&set->index, 1, set_rehash, set) != 0) {
-		relic_diag_no_memory(staging->ctx);
-		return (-1);
-	}
-
-	hashes = relic_grow_array(set->hashes, &set->hash_capacity,
-	    set->count + 1, sizeof(*set->hashes));
-	if (hashes == NULL) {
-		relic_diag_no_memory(staging->ctx);
-		return (-1);
-	}
-	set->hashes = hashes;
-
-	marks = relic_grow_array(set->marks, &set->mark_capacity,
-	    set->count + 1, sizeof(*set->marks));
-	if (marks == NULL) {
-		relic_diag_no_memory(staging->ctx);
-		return (-1);
-	}
-	set->marks = marks;
-
-	if (set->arity > 0) {
-		/*
-		 * The column count is checked rather than formed and hoped
-		 * for, though a set this large could not have been built.
-		 */
-		if (set->count + 1 > SIZE_MAX / set->arity) {
-			relic_diag_no_memory(staging->ctx);
-			return (-1);
-		}
-		tuples = relic_grow_array(set->tuples, &set->column_capacity,
-		    (set->count + 1) * set->arity, sizeof(*set->tuples));
-		if (tuples == NULL) {
-			relic_diag_no_memory(staging->ctx);
-			return (-1);
-		}
-		set->tuples = tuples;
-
-		for (column = 0; column < set->arity; column++)
-			set->tuples[set->count * set->arity + column] =
-			    tuple[column];
-	}
-
-	set->hashes[set->count] = hash;
-	set->marks[set->count] = is_new;
-	set->count++;
-	relic_idtab_place(&set->index, relic_hash_low(hash),
-	    (uint32_t)set->count);
-
-	if (is_new) {
-		set->new_count++;
-		staging->new_tuples++;
-		staging->columns_floor = relic_saturating_sum(
-		    staging->columns_floor, row_bytes(set));
-	}
+	staging->new_tuples++;
+	staging->columns_floor = relic_saturating_sum(staging->columns_floor,
+	    row_bytes(set));
 
 	return (0);
-}
-
-/*
- * The staged tuple at `position`, or a pointer that is never read for a set
- * of arity zero.
- */
-static const relic_dom_t *
-set_tuple(const relic_staged_set_t *set, size_t position)
-{
-	static const relic_dom_t no_columns[1];
-
-	if (set->arity == 0)
-		return (no_columns);
-
-	return (&set->tuples[position * set->arity]);
-}
-
-/*
- * A tuple's wide hash as every relation of the context computes it, which is
- * what lets the commit hand it to the base store.
- */
-static uint64_t
-set_hash(const relic_staged_set_t *set, const relic_dom_t *tuple)
-{
-	return (relic_tuple_hash(set->hash_seed, tuple, set->arity));
-}
-
-/*
- * The hash of the `id`th staged tuple of a set, for its table to use when
- * it grows: the one kept beside the tuple, so growing reads no columns.
- */
-static uint32_t
-set_rehash(uint32_t id, void *ctx)
-{
-	const relic_staged_set_t *set;
-
-	set = ctx;
-
-	return (relic_hash_low(set->hashes[id - 1]));
-}
-
-static void
-set_reset(relic_staged_set_t *set)
-{
-	free(set->tuples);
-	free(set->hashes);
-	free(set->marks);
-	relic_idtab_reset(&set->index);
-	bzero(set, sizeof(*set));
 }

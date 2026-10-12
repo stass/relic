@@ -363,6 +363,18 @@ void	 relic_idtab_init(relic_idtab_t *table, bool tagged);
 void	 relic_idtab_reset(relic_idtab_t *table);
 
 /*
+ * Make a tagged table untagged for good, releasing its tags and keeping
+ * every entry where it is: tags filter a probe without choosing a slot, so
+ * the untagged table finds what the tagged one did, with the same capacity.
+ * This is for an owner whose searches mostly missed while it filled the
+ * table and will mostly succeed afterwards.  A given table keeps its tags.
+ * relic_idtab_bytes_untagged() is the bytes the table occupies once its
+ * tags are dropped.
+ */
+void	 relic_idtab_drop_tags(relic_idtab_t *table);
+size_t	 relic_idtab_bytes_untagged(const relic_idtab_t *table);
+
+/*
  * A table whose slots lie in memory its owner gives it, for an owner that
  * makes many tables it fills once and discards, each sized by a count it
  * knows before it makes any, and allocates and accounts for all of their

@@ -1918,11 +1918,12 @@ layouts_agree(const relic_relation_t *one, const relic_relation_t *many)
 	size_t x;
 	size_t s;
 
-	if (one->column_capacity != many->column_capacity)
+	if (one->payload.column_capacity != many->payload.column_capacity)
 		return (false);
 
 	for (s = 0; s < RELIC_STRIPES; s++) {
-		if (!tables_agree(&one->index[s], &many->index[s]))
+		if (!tables_agree(&one->payload.index[s],
+		    &many->payload.index[s]))
 			return (false);
 	}
 
@@ -2104,8 +2105,9 @@ a_screen_finds_what_an_insertion_would(void)
 	check(relic_relation_insert_batch(ctx, plain, tuples, BATCH, added,
 	    &completed) == 0 && relic_relation_count(plain) ==
 	    relic_relation_count(screened) &&
-	    bcmp(plain->columns, screened->columns,
-	    relic_relation_count(plain) * 2 * sizeof(*plain->columns)) == 0,
+	    bcmp(plain->payload.columns, screened->payload.columns,
+	    relic_relation_count(plain) * 2 *
+	    sizeof(*plain->payload.columns)) == 0,
 	    SCENARIO_SCREEN, "the hashed batch numbers the tuples as the "
 	    "plain one does");
 

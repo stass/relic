@@ -1753,16 +1753,26 @@ void	 relic_index_link_append(relic_index_t *index,
  * Every function below takes a relation of the context it was obtained from.
  *
  * The evaluator inserts into derived relations, through an EMIT and by
- * seeding one from its predicate's base store, and a load's commit appends
- * to base stores and nothing else does.  That is what makes every derived
+ * seeding one from its predicate's base store, and a load's commit adds to
+ * base stores and nothing else does.  That is what makes every derived
  * tuple re-derivable, and so what makes discarding every derived relation
  * safe: the next evaluation seeds and derives it again.
- * relic_bases_reserve() makes room for a commit's new facts, checking both
- * limits once over every store it grows before growing any, and
- * relic_base_append_hashed() then appends one fact the store lacks without
- * looking anything up.  relic_bases_refuse() reports a limit refusing a
- * load, naming the first predicate whose store the load would grow, as the
- * reservation and staging both do.
+ *
+ * A load builds each predicate's new facts in a builder (relation.h):
+ * relic_builder_init() makes an empty one and relic_builder_reset()
+ * releases what it still holds; relic_builder_contains_hashed() and
+ * relic_builder_add_hashed() make it a set, in the order its tuples were
+ * added, which relic_builder_count() and relic_builder_tuple() read back.
+ * Its commit publishes them: relic_base_action_prepare() describes, before
+ * anything changes, what one store gains -- the builder's whole payload if
+ * the store holds no tuple, its tuples appended otherwise -- and
+ * relic_base_action_release() releases the description.
+ * relic_bases_reserve() makes every store of a manifest of actions ready,
+ * checking both limits once over all of them before changing any, and
+ * relic_bases_apply() then gives each its tuples, which cannot fail.
+ * relic_bases_refuse() reports a limit refusing a load, naming the first
+ * predicate whose store the load would grow, as the reservation and
+ * staging both do.
  *
  * relic_relation_insert() reports through *addedp whether the tuple was not
  * already present, which is what fixed-point detection reads, and returns -1
@@ -1874,10 +1884,23 @@ size_t	 relic_base_count(const relic_t *ctx, relic_pred_id_t pred);
 size_t	 relic_base_total(const relic_t *ctx);
 int	 relic_bases_refuse(relic_t *ctx, const char *key, size_t limit,
 	    relic_pred_id_t pred);
-int	 relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
-	    size_t count);
-void	 relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
+void	 relic_builder_init(relic_builder_t *builder, const relic_t *ctx,
+	    relic_pred_id_t pred);
+void	 relic_builder_reset(relic_builder_t *builder);
+size_t	 relic_builder_count(const relic_builder_t *builder);
+const relic_dom_t *relic_builder_tuple(const relic_builder_t *builder,
+	    size_t position);
+bool	 relic_builder_contains_hashed(const relic_builder_t *builder,
 	    const relic_dom_t *columns, uint64_t hash);
+int	 relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
+	    const relic_dom_t *columns, uint64_t hash);
+int	 relic_base_action_prepare(const relic_t *ctx,
+	    relic_base_action_t *action, relic_builder_t *builder);
+void	 relic_base_action_release(relic_base_action_t *action);
+int	 relic_bases_reserve(relic_t *ctx, const relic_base_action_t *actions,
+	    size_t count);
+void	 relic_bases_apply(relic_t *ctx, const relic_base_action_t *actions,
+	    size_t count);
 relic_relation_t *relic_relation_create(relic_t *ctx, relic_pred_id_t pred,
 	    size_t serial, uint16_t arity);
 void	 relic_relation_clear(relic_t *ctx, relic_relation_t *relation);

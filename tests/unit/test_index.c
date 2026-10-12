@@ -300,12 +300,12 @@ index_agrees(const relic_relation_t *rel, uint32_t position,
 
 	index = &rel->indexes[position];
 
-	for (id = RELIC_TUPLE_FIRST; id <= rel->count; id++) {
+	for (id = RELIC_TUPLE_FIRST; id <= relic_relation_count(rel); id++) {
 		tuple = relic_relation_tuple(rel, id);
 
 		walked = relic_index_first(index, rel, tuple);
-		for (expected = RELIC_TUPLE_FIRST; expected <= rel->count;
-		    expected++) {
+		for (expected = RELIC_TUPLE_FIRST;
+		    expected <= relic_relation_count(rel); expected++) {
 			if (!keys_agree(rel->arity, index->key_mask,
 			    relic_relation_tuple(rel, expected), tuple))
 				continue;
@@ -341,7 +341,7 @@ distinct_by_hand(const relic_relation_t *rel, uint16_t column)
 	bool seen;
 
 	distinct = 0;
-	for (id = RELIC_TUPLE_FIRST; id <= rel->count; id++) {
+	for (id = RELIC_TUPLE_FIRST; id <= relic_relation_count(rel); id++) {
 		held = relic_relation_tuple(rel, id)[column];
 
 		seen = false;
@@ -616,7 +616,7 @@ a_lookup_walking_while_its_key_grows(void)
 	bzero(probe, sizeof(probe));
 	probe[0] = value(ctx, 0);
 	before = 0;
-	for (id = RELIC_TUPLE_FIRST; id <= rel->count; id++) {
+	for (id = RELIC_TUPLE_FIRST; id <= relic_relation_count(rel); id++) {
 		if (relic_relation_tuple(rel, id)[0] == probe[0])
 			before++;
 	}
@@ -663,7 +663,7 @@ first_since_by_scan(const relic_relation_t *rel, uint32_t key_mask,
 {
 	relic_tuple_id_t id;
 
-	for (id = since; id <= rel->count; id++) {
+	for (id = since; id <= relic_relation_count(rel); id++) {
 		if (keys_agree(rel->arity, key_mask,
 		    relic_relation_tuple(rel, id), probe))
 			return (id);

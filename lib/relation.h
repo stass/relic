@@ -40,12 +40,14 @@
 
 typedef struct relic_append relic_append_t;
 typedef struct relic_append_keys relic_append_keys_t;
+typedef struct relic_base_action relic_base_action_t;
+typedef struct relic_builder relic_builder_t;
 typedef struct relic_index_key relic_index_key_t;
 typedef struct relic_index_pending relic_index_pending_t;
 typedef struct relic_index_stripe relic_index_stripe_t;
 typedef struct relic_new_keys relic_new_keys_t;
+typedef struct relic_payload relic_payload_t;
 typedef struct relic_relation_stats relic_relation_stats_t;
-typedef struct relic_base_growth relic_base_growth_t;
 typedef struct relic_reltab relic_reltab_t;
 typedef struct relic_store relic_store_t;
 typedef struct relic_tuple_growth relic_tuple_growth_t;
@@ -188,18 +190,38 @@ struct relic_relation_stats {
 };
 
 /*
- * A set of tuples: one predicate's, or one query's answer.
+ * The tuples of a set and the canonical index over them: the storage a
+ * relation holds, and the storage a load's fact builder holds until the
+ * commit hands it to an empty base store, which then holds it as its own.
+ * A payload has one owner at a time, and handing it over moves it whole,
+ * so no tuple array or index is ever copied to change hands.
  *
- * `columns` holds `count` tuples of `arity` identifiers each, end to end, so
- * the tuple with identifier `id` begins at `(id - 1) * arity`.  Capacity is
- * counted in columns rather than in tuples so that one growth policy serves
- * every arity including zero, where a tuple occupies no columns at all.
+ * `columns` holds `count` tuples of the owner's arity of identifiers each,
+ * end to end, so the tuple with identifier `id` begins at
+ * `(id - 1) * arity`.  Capacity is counted in columns rather than in tuples
+ * so that one growth policy serves every arity including zero, where a
+ * tuple occupies no columns at all.
  *
  * `index` is the canonical index, which answers membership: striped, each
  * stripe maps the low half of the wide hash of a whole tuple to the
  * identifiers of the tuples in that stripe that share it.  It stores
  * identifiers and no keys: the key is the tuple, and the tuple is already in
- * `columns`.
+ * `columns`.  A relation's stripes are untagged, since a membership test
+ * that finds a candidate usually finds the tuple.  A builder's are tagged,
+ * since a load's tests mostly miss, and a store adopting the payload drops
+ * the tags, leaving every entry where it is.
+ */
+struct relic_payload {
+	relic_dom_t		*columns;
+	relic_idtab_t		 index[RELIC_STRIPES];
+	size_t			 count;			/* tuples */
+	size_t			 column_capacity;	/* domain identifiers */
+};
+
+/*
+ * A set of tuples: one predicate's, or one query's answer.
+ *
+ * `payload` holds its tuples and its canonical index.
  *
  * `hash_seed` is the context's, copied when the relation is created.  Every
  * hash computed over the relation's tuples is keyed by it: the canonical
@@ -229,11 +251,8 @@ struct relic_relation_stats {
  * against a limit.
  */
 struct relic_relation {
-	relic_dom_t		*columns;
-	relic_idtab_t		 index[RELIC_STRIPES];
+	relic_payload_t		 payload;
 	relic_index_t		*indexes;
-	size_t			 count;			/* tuples */
-	size_t			 column_capacity;	/* domain identifiers */
 	size_t			 index_count;
 	size_t			 index_capacity;
 	relic_relation_stats_t	 stats;
@@ -288,8 +307,8 @@ struct relic_reltab {
  * data.
  *
  * `base_tuple_count` is how many of those tuples the base stores hold.  A
- * base store gains a tuple only through relic_base_append_hashed(), which
- * counts it, and loses none until the store is reset, so the count is kept
+ * base store gains tuples only through relic_bases_apply(), which counts
+ * them, and loses none until the store is reset, so the count is kept
  * where the tuples arrive rather than summed over every store when asked.
  *
  * `holds_derived` is set whenever the store hands out a derived relation or
@@ -317,11 +336,46 @@ struct relic_tuple_growth {
 };
 
 /*
- * How many facts a load's commit adds to one predicate's base store.
+ * A load's private set of one predicate's new facts: the distinct tuples
+ * its load staged that the predicate `pred`'s base store lacks, in the
+ * order the load first staged them, held in the payload a relation of the
+ * predicate would hold them in.  `hash_seed` is the context's and `arity`
+ * the predicate's, so the builder's canonical index places and finds a
+ * tuple exactly as the base store's does.
+ *
+ * Nothing registers a builder in the store or counts it in either total:
+ * it is the load's staging, which the limits bound through the tuples they
+ * admit to it.  Only the base commit (relic_bases_apply()) publishes its
+ * tuples, by giving an empty base store its whole payload or by appending
+ * its tuples to a populated one.
  */
-struct relic_base_growth {
-	relic_pred_id_t		pred;
-	relic_tuple_growth_t	added;
+struct relic_builder {
+	relic_payload_t		 payload;
+	uint64_t		 hash_seed;
+	relic_pred_id_t		 pred;
+	uint16_t		 arity;
+};
+
+/*
+ * What a load's commit does to the base store of a builder's predicate:
+ * give it the builder's tuples, at least one.
+ *
+ * A store holding no tuple adopts the builder's payload whole, `adopt`
+ * set; whether its header exists, and what capacity it kept, does not
+ * matter.  A store holding tuples has them appended: `hashes[i]` is the
+ * wide hash of builder tuple i, and `added` counts the tuples by the stripe
+ * of the canonical index each falls in, both computed before the commit
+ * discards anything, so that preparing them can fail while nothing has
+ * changed.  An adoption has neither.
+ *
+ * `builder` points into the load's staging, which must not move or release
+ * it until the action is released.
+ */
+struct relic_base_action {
+	relic_builder_t		*builder;
+	uint64_t		*hashes;	/* an append's, by tuple */
+	relic_tuple_growth_t	 added;		/* an append's, by stripe */
+	bool			 adopt;
 };
 
 /*

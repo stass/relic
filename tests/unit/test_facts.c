@@ -29,6 +29,7 @@
 #include "internal.h"
 #include "programs.h"
 
+#define	SCENARIO_ADOPT		"a store adopts or appends by what it holds"
 #define	SCENARIO_ARITY_ZERO	"a fact of no columns is a fact like any other"
 #define	SCENARIO_NO_TREE	"a load's facts build no statements"
 #define	SCENARIO_FACT_ADD	"an added fact is a load of one"
@@ -87,6 +88,13 @@ static const char *const session_loads[SESSION_ROUNDS] = {
 
 /* The facts of the small store beside c/2's in the multi-store refusal. */
 #define	SMALL_STORE_FACTS	8
+
+/*
+ * The tuples the empty store of the adoption scenario is given room for
+ * before any fact is loaded into it: far more capacity than the load's
+ * builder takes.
+ */
+#define	RETAINED_TUPLES		((size_t)1 << 16)
 
 /* The arity of the widening program whose rewrite outgrows its limit. */
 #define	ABANDONED_ARITY		8
@@ -180,6 +188,10 @@ static void	 the_rewrite_reads_facts_through_a_view(void);
 static void	 an_abandoned_rewrite_leaves_no_warning(void);
 static void	 a_fact_of_no_columns_is_a_fact(void);
 static void	 a_loads_facts_build_no_statements(void);
+static void	 a_store_adopts_or_appends_by_what_it_holds(void);
+static bool	 holds_in_order(relic_t *ctx, const char *name,
+		    const char *const *names);
+static size_t	 base_bytes_by_hand(const relic_t *ctx);
 static size_t	 tree_growth(relic_t *ctx, const char *text);
 
 static void
@@ -1362,9 +1374,9 @@ the_rewrite_reads_facts_through_a_view(void)
 	check(relic_pred_of(ctx, view)->views == viewed, SCENARIO_MAGIC,
 	    "p$base views p");
 	checkf(store != NULL && relic_relation_read(ctx, view) == store &&
-	    store->count == 2, SCENARIO_MAGIC, "a base view should read its "
-	    "predicate's base store of 2 facts, not %zu",
-	    store != NULL ? store->count : 0);
+	    relic_relation_count(store) == 2, SCENARIO_MAGIC, "a base view "
+	    "should read its predicate's base store of 2 facts, not %zu",
+	    store != NULL ? relic_relation_count(store) : 0);
 	checkf(log.errors == 0 && log.warnings == 0, SCENARIO_MAGIC,
 	    "nothing should be reported, not %zu errors and %zu warnings",
 	    log.errors, log.warnings);
@@ -1530,8 +1542,9 @@ a_fact_of_no_columns_is_a_fact(void)
 	status = relic_materialize(ctx);
 	check(status == 0, SCENARIO_ARITY_ZERO, "the program is materialized");
 	derived = relic_relation_read(ctx, predicate(ctx, "done", 0));
-	checkf(derived->count == 1, SCENARIO_ARITY_ZERO, "the fact should be "
-	    "seeded into done/0's relation, which holds %zu", derived->count);
+	checkf(relic_relation_count(derived) == 1, SCENARIO_ARITY_ZERO,
+	    "the fact should be seeded into done/0's relation, which holds "
+	    "%zu", relic_relation_count(derived));
 	check(answers(ctx, "done?", "()"), SCENARIO_ARITY_ZERO,
 	    "the fixed point answers the seeded fact");
 
@@ -1540,6 +1553,129 @@ a_fact_of_no_columns_is_a_fact(void)
 	    "has no row");
 
 	relic_destroy(ctx);
+}
+
+/*
+ * One load gives facts to a store nothing has created, to one created
+ * empty that kept capacity, and to one holding facts.  Each holds its new
+ * facts once, after any it held, in the order the load first states them;
+ * the empty store is the same relation afterwards; and the storage total is
+ * what the stores hold.  The empty store's capacity is credited against the
+ * payload that replaces it, so a limit that admits the load only with that
+ * credit admits it.  A second load appends to the store the first filled.
+ */
+static void
+a_store_adopts_or_appends_by_what_it_holds(void)
+{
+	static const char *const names[] = { "u", "v", "w", NULL };
+	static const char *const held_order[] = { "u", "w", "v", NULL };
+	static const char *const empty_order[] = { "v", "u", NULL };
+	static const char *const empty_later[] = { "v", "u", "w", NULL };
+	static const char *const absent_order[] = { "w", NULL };
+	relic_tuple_growth_t growth;
+	const relic_relation_t *empty_before;
+	relic_relation_t *empty;
+	diag_log_t log;
+	relic_t *ctx;
+	size_t retained;
+	int status;
+
+	ctx = context_with(NULL, "held(u).\n", &log);
+	if (ctx == NULL)
+		return;
+	intern_symbols(ctx, names);
+
+	empty = relic_relation_read(ctx, predicate(ctx, "empty", 1));
+	bzero(&growth, sizeof(growth));
+	growth.by_stripe[0] = RETAINED_TUPLES;
+	if (empty == NULL || relic_relation_reserve(ctx, empty, &growth) != 0) {
+		check(false, SCENARIO_ADOPT, "an empty store is given room");
+		relic_destroy(ctx);
+		return;
+	}
+	empty_before = empty;
+	retained = relic_relation_bytes(empty);
+
+	/*
+	 * Below what the context holds before the load, on purpose: staging
+	 * checks the limit against values and a floor of the facts' columns,
+	 * which fit easily, and the commit fits only by giving back the empty
+	 * store's capacity.
+	 */
+	ctx->account.limit = bytes_held(ctx) + ctx->account.arena_bytes -
+	    retained / 2;
+
+	status = relic_load_string(ctx, "mixed.dl",
+	    "empty(v).\nheld(u).\nheld(w).\nabsent(w).\nempty(u).\n"
+	    "held(v).\nempty(v).\nheld(w).\n");
+	checkf(status == 0, SCENARIO_ADOPT, "a load that fits once the empty "
+	    "store's %zu bytes are given back should commit, but reported "
+	    "\"%s\"", retained, log.last_error);
+	check(holds_in_order(ctx, "held", held_order) &&
+	    holds_in_order(ctx, "empty", empty_order) &&
+	    holds_in_order(ctx, "absent", absent_order), SCENARIO_ADOPT,
+	    "each store holds its new facts once, in the order first stated");
+	check(relic_base_store(ctx, predicate(ctx, "empty", 1)) ==
+	    empty_before && relic_relation_bytes(empty_before) < retained,
+	    SCENARIO_ADOPT, "the empty store is kept and its retained room "
+	    "replaced");
+	checkf(ctx->account.store_bytes == base_bytes_by_hand(ctx) &&
+	    relic_base_total(ctx) == 6, SCENARIO_ADOPT, "the storage total "
+	    "should be the stores' %zu bytes, not %zu",
+	    base_bytes_by_hand(ctx), ctx->account.store_bytes);
+
+	ctx->account.limit = 0;
+	status = relic_load_string(ctx, "later.dl", "empty(w).\nempty(u).\n");
+	check(status == 0 && holds_in_order(ctx, "empty", empty_later) &&
+	    ctx->account.store_bytes == base_bytes_by_hand(ctx),
+	    SCENARIO_ADOPT, "a later load appends to the store a load filled");
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Whether the base store of name/1 holds exactly the symbols of the
+ * NULL-terminated `names`, in that order.
+ */
+static bool
+holds_in_order(relic_t *ctx, const char *name, const char *const *names)
+{
+	const relic_relation_t *store;
+	const relic_dom_t *tuple;
+	relic_dom_t dom;
+	size_t i;
+
+	store = relic_base_store(ctx, predicate(ctx, name, 1));
+	if (store == NULL)
+		return (false);
+
+	for (i = 0; names[i] != NULL; i++) {
+		tuple = relic_relation_tuple(store, (relic_tuple_id_t)(i + 1));
+		if (tuple == NULL || relic_value_intern_bytes(ctx,
+		    RELIC_SYMBOL, names[i], strlen(names[i]), &dom) != 0 ||
+		    tuple[0] != dom)
+			return (false);
+	}
+
+	return (relic_relation_count(store) == i);
+}
+
+/* The bytes every base store holds, summed store by store. */
+static size_t
+base_bytes_by_hand(const relic_t *ctx)
+{
+	const relic_relation_t *store;
+	size_t bytes;
+	size_t pred;
+
+	bytes = 0;
+	for (pred = 1; pred <= ctx->store.bases.count; pred++) {
+		store = relic_base_store(ctx, (relic_pred_id_t)pred);
+		if (store != NULL)
+			bytes += relic_relation_bytes(store);
+	}
+
+	return (bytes);
 }
 
 int
@@ -1559,6 +1695,7 @@ main(void)
 	an_abandoned_rewrite_leaves_no_warning();
 	a_fact_of_no_columns_is_a_fact();
 	a_loads_facts_build_no_statements();
+	a_store_adopts_or_appends_by_what_it_holds();
 
 	return (check_summary("test_facts"));
 }

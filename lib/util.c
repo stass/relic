@@ -426,6 +426,19 @@ relic_idtab_reset(relic_idtab_t *table)
 	relic_idtab_init(table, table->tagged);
 }
 
+void
+relic_idtab_drop_tags(relic_idtab_t *table)
+{
+	/* A given table's tags are part of its owner's block. */
+	assert(!table->given);
+	if (table->given)
+		return;
+
+	free(table->tags);
+	table->tags = NULL;
+	table->tagged = false;
+}
+
 /*
  * A table given its memory lays out its slots first and its tags after
  * them, so that the slots keep the alignment the memory has.
@@ -732,6 +745,12 @@ size_t
 relic_idtab_bytes(const relic_idtab_t *table)
 {
 	return (table->capacity * idtab_slot_bytes(table));
+}
+
+size_t
+relic_idtab_bytes_untagged(const relic_idtab_t *table)
+{
+	return (table->capacity * sizeof(*table->slots));
 }
 
 size_t

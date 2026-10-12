@@ -128,7 +128,13 @@ The builder's columns and canonical index are the final representation
 of an initially empty base store. Its canonical stripes contain ordinary
 tuple identifiers, and use the same unkeyed stripe routing, keyed table
 probing and growth policy as published storage. There is no separate flat
-staging index to translate at commit.
+staging index to translate at commit. Staging lookups mostly miss, so the
+builder's stripes also keep the identifier table's per-slot tags, which
+let a probe pass unrelated entries without reading their columns. Tags
+filter candidates and choose no slot: adoption releases them as it moves
+the payload, leaving the slots and capacities an ordinary insertion
+sequence would have built, and the admission check measures the payload
+without them.
 
 A scalar append computes a tuple hash for its membership checks and
 insertion. A batch carries hashes with its window until the builder append

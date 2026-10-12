@@ -124,9 +124,27 @@ static relic_relation_t *reltab_find(const relic_reltab_t *table,
 static relic_relation_t *reltab_relation(relic_t *ctx,
 		    relic_reltab_t *table, relic_pred_id_t pred);
 static void	 reltab_reset(relic_reltab_t *table);
+static void	 adopt_builder(relic_t *ctx, relic_relation_t *store,
+		    relic_builder_t *builder);
+static void	 append_builder(relic_relation_t *store,
+		    const relic_base_action_t *action);
 static size_t	 base_bytes(const relic_t *ctx) RELIC_UNUSED;
-static int	 bases_fit(relic_t *ctx, const relic_base_growth_t *growths,
+static int	 bases_fit(relic_t *ctx, const relic_base_action_t *actions,
 		    size_t count);
+static uint32_t	 builder_rehash(uint32_t id, void *ctx);
+static relic_tuple_id_t payload_append(relic_payload_t *payload,
+		    uint16_t arity, const relic_dom_t *columns, uint64_t hash);
+static size_t	 payload_bytes(const relic_payload_t *payload);
+static size_t	 payload_bytes_untagged(const relic_payload_t *payload);
+static relic_tuple_id_t payload_find(const relic_payload_t *payload,
+		    uint16_t arity, const relic_dom_t *columns, uint64_t hash);
+static void	 payload_init(relic_payload_t *payload, bool tagged);
+static void	 payload_release(relic_payload_t *payload);
+static int	 payload_reserve_one(relic_payload_t *payload, uint64_t hash,
+		    size_t needed_columns, relic_rehash_fn rehash,
+		    void *rehash_ctx);
+static relic_dom_t *payload_tuple(const relic_payload_t *payload,
+		    uint16_t arity, relic_tuple_id_t id);
 static void	 tuple_append(relic_relation_t *relation,
 		    const relic_dom_t *columns, uint64_t hash);
 static relic_dom_t *tuple_at(const relic_relation_t *relation,
@@ -134,8 +152,6 @@ static relic_dom_t *tuple_at(const relic_relation_t *relation,
 static uint64_t	 tuple_hash(const relic_relation_t *relation,
 		    const relic_dom_t *columns);
 static uint32_t	 tuple_rehash(uint32_t id, void *ctx);
-static relic_idtab_t *writable_canonical_stripe(relic_relation_t *relation,
-		    uint64_t hash);
 
 void
 relic_store_init(relic_store_t *store)
@@ -152,6 +168,171 @@ relic_store_reset(relic_store_t *store)
 }
 
 /*
+ * Make `payload` empty, holding nothing that needs releasing, with its
+ * canonical stripes tagged or not as `tagged` says.
+ */
+static void
+payload_init(relic_payload_t *payload, bool tagged)
+{
+	size_t s;
+
+	bzero(payload, sizeof(*payload));
+	for (s = 0; s < RELIC_STRIPES; s++)
+		relic_idtab_init(&payload->index[s], tagged);
+}
+
+/*
+ * Release the tuples and canonical index `payload` holds, leaving it empty.
+ */
+static void
+payload_release(relic_payload_t *payload)
+{
+	size_t s;
+
+	for (s = 0; s < RELIC_STRIPES; s++)
+		relic_idtab_reset(&payload->index[s]);
+	free(payload->columns);
+	payload->columns = NULL;
+	payload->column_capacity = 0;
+	payload->count = 0;
+}
+
+/*
+ * The bytes of tuple and index storage a payload holds: its columns and
+ * every stripe of its canonical index.
+ */
+static size_t
+payload_bytes(const relic_payload_t *payload)
+{
+	size_t bytes;
+	size_t s;
+
+	bytes = payload->column_capacity * sizeof(*payload->columns);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes += relic_idtab_bytes(&payload->index[s]);
+
+	return (bytes);
+}
+
+/* What payload_bytes() gives once the canonical stripes drop their tags. */
+static size_t
+payload_bytes_untagged(const relic_payload_t *payload)
+{
+	size_t bytes;
+	size_t s;
+
+	bytes = payload->column_capacity * sizeof(*payload->columns);
+	for (s = 0; s < RELIC_STRIPES; s++)
+		bytes += relic_idtab_bytes_untagged(&payload->index[s]);
+
+	return (bytes);
+}
+
+/*
+ * Where the columns of the tuple with identifier `id` begin, in a payload
+ * of tuples of `arity` columns.  Identifier zero names no tuple, so the
+ * array is indexed one lower; this is the only place that translation is
+ * written.  The caller must have established that the identifier is within
+ * what the payload has room for.
+ *
+ * The result is writable even though the payload is not, because tuple
+ * storage is what a payload holds rather than what it is, and
+ * payload_append() writes a new tuple through this.  Every other caller
+ * only reads.
+ */
+static relic_dom_t *
+payload_tuple(const relic_payload_t *payload, uint16_t arity,
+    relic_tuple_id_t id)
+{
+	return (payload->columns + ((size_t)id - 1) * arity);
+}
+
+/*
+ * The identifier of the tuple of `arity` columns holding `columns`, whose
+ * wide hash is `hash`, or RELIC_ID_NONE when the payload does not hold it.
+ */
+static relic_tuple_id_t
+payload_find(const relic_payload_t *payload, uint16_t arity,
+    const relic_dom_t *columns, uint64_t hash)
+{
+	relic_idprobe_t probe;
+	relic_tuple_id_t id;
+
+	relic_idprobe_open(&probe, &payload->index[relic_hash_stripe(hash)],
+	    relic_hash_low(hash));
+	while (relic_idprobe_next(&probe, &id)) {
+		if (relic_tuple_equal(payload_tuple(payload, arity, id),
+		    columns, arity))
+			return (id);
+	}
+
+	return (RELIC_ID_NONE);
+}
+
+/*
+ * Make room in `payload` for one more tuple, of wide hash `hash`: a slot in
+ * its canonical stripe, which `rehash` and `rehash_ctx` let grow, and
+ * `needed_columns` columns in all.  Every one-tuple growth, an insertion's
+ * or a builder's, goes through this, which is what lets an empty store
+ * adopt a builder's payload with the capacities its own insertions would
+ * have reached.
+ * Returns 0, or -1 when memory ran out, having reported nothing; what was
+ * grown before the failure stays, and holds no new tuple.
+ */
+static int
+payload_reserve_one(relic_payload_t *payload, uint64_t hash,
+    size_t needed_columns, relic_rehash_fn rehash, void *rehash_ctx)
+{
+	relic_dom_t *columns;
+
+	if (relic_idtab_reserve(&payload->index[relic_hash_stripe(hash)], 1,
+	    rehash, rehash_ctx) != 0)
+		return (-1);
+
+	columns = relic_grow_array(payload->columns, &payload->column_capacity,
+	    needed_columns, sizeof(*payload->columns));
+	if (columns == NULL)
+		return (-1);
+	payload->columns = columns;
+
+	return (0);
+}
+
+/*
+ * Store a tuple the payload has room for, as the one after its last, and
+ * place it in its canonical stripe under its wide hash.  Nothing here can
+ * fail.  The columns are written before the count admits them, so a tuple
+ * another operation can reach is one that was written in full.  Returns the
+ * tuple's identifier.
+ */
+static relic_tuple_id_t
+payload_append(relic_payload_t *payload, uint16_t arity,
+    const relic_dom_t *columns, uint64_t hash)
+{
+	relic_dom_t *destination;
+	relic_tuple_id_t id;
+	uint16_t column;
+
+	id = (relic_tuple_id_t)(payload->count + 1);
+	destination = payload_tuple(payload, arity, id);
+
+	/*
+	 * A loop rather than a block copy, for the reason relic_tuple_equal()
+	 * gives: `columns` may be null for a tuple of arity zero, and a copy
+	 * of zero bytes from a null pointer is not defined.
+	 */
+	for (column = 0; column < arity; column++)
+		destination[column] = columns[column];
+
+	payload->count++;
+
+	relic_idtab_place(&payload->index[relic_hash_stripe(hash)],
+	    relic_hash_low(hash), id);
+
+	return (id);
+}
+
+/*
  * Release a relation's tuples and every index, leaving it empty and in
  * place.  An index asked for again is built over the tuples held by then at
  * the same cost per tuple as keeping it up would have had, so dropping it
@@ -165,14 +346,8 @@ static void
 relation_empty(relic_relation_t *relation)
 {
 	size_t position;
-	size_t s;
 
-	for (s = 0; s < RELIC_STRIPES; s++)
-		relic_idtab_reset(&relation->index[s]);
-	free(relation->columns);
-	relation->columns = NULL;
-	relation->column_capacity = 0;
-	relation->count = 0;
+	payload_release(&relation->payload);
 
 	for (position = 0; position < relation->index_count; position++)
 		relic_index_free(&relation->indexes[position]);
@@ -212,11 +387,8 @@ static void
 relation_init(relic_relation_t *relation, const relic_t *ctx,
     relic_pred_id_t pred, size_t serial, uint16_t arity)
 {
-	size_t s;
-
 	bzero(relation, sizeof(*relation));
-	for (s = 0; s < RELIC_STRIPES; s++)
-		relic_idtab_init(&relation->index[s], false);
+	payload_init(&relation->payload, false);
 	relation->hash_seed = ctx->hash_seed;
 	relation->pred = pred;
 	relation->serial = serial;
@@ -233,7 +405,7 @@ relation_init(relic_relation_t *relation, const relic_t *ctx,
 void
 relic_relation_clear(relic_t *ctx, relic_relation_t *relation)
 {
-	ctx->store.tuple_count -= relation->count;
+	ctx->store.tuple_count -= relation->payload.count;
 	ctx->account.store_bytes -= relic_relation_bytes(relation);
 	relation_empty(relation);
 }
@@ -268,25 +440,15 @@ reltab_reset(relic_reltab_t *table)
 	bzero(table, sizeof(*table));
 }
 
-/*
- * Where a tuple's columns begin.  Identifier zero names no tuple, so the
- * array is indexed one lower; this is the only place that translation is
- * written.  The caller must have established that the identifier is within
- * what the relation has room for.
- *
- * The result is writable even though the relation is not, because tuple
- * storage is what a relation holds rather than what it is, and tuple_append()
- * writes a new tuple through this.  Every other caller only reads.
- */
 static relic_dom_t *
 tuple_at(const relic_relation_t *relation, relic_tuple_id_t id)
 {
-	return (relation->columns + ((size_t)id - 1) * relation->arity);
+	return (payload_tuple(&relation->payload, relation->arity, id));
 }
 
 /*
  * The wide hash of a whole tuple, which is what the canonical index is keyed
- * on, and what a load's staging computes to hand the base store.  A tuple of
+ * on, and what a load's staging computes once per fact it stages.  A tuple of
  * no columns has a defined hash, which is what lets a relation of arity zero
  * use this path like any other.
  */
@@ -321,19 +483,12 @@ tuple_rehash(uint32_t id, void *ctx)
 }
 
 /*
- * The stripe of the canonical index a tuple of wide hash `hash` lives in,
- * read-only and writable.
+ * The stripe of the canonical index a tuple of wide hash `hash` lives in.
  */
 static const relic_idtab_t *
 canonical_stripe(const relic_relation_t *relation, uint64_t hash)
 {
-	return (&relation->index[relic_hash_stripe(hash)]);
-}
-
-static relic_idtab_t *
-writable_canonical_stripe(relic_relation_t *relation, uint64_t hash)
-{
-	return (&relation->index[relic_hash_stripe(hash)]);
+	return (&relation->payload.index[relic_hash_stripe(hash)]);
 }
 
 /*
@@ -344,18 +499,8 @@ static relic_tuple_id_t
 relation_find_hashed(const relic_relation_t *relation,
     const relic_dom_t *columns, uint64_t hash)
 {
-	relic_idprobe_t probe;
-	relic_tuple_id_t id;
-
-	relic_idprobe_open(&probe, canonical_stripe(relation, hash),
-	    relic_hash_low(hash));
-	while (relic_idprobe_next(&probe, &id)) {
-		if (relic_tuple_equal(tuple_at(relation, id), columns,
-		    relation->arity))
-			return (id);
-	}
-
-	return (RELIC_ID_NONE);
+	return (payload_find(&relation->payload, relation->arity, columns,
+	    hash));
 }
 
 /*
@@ -389,11 +534,11 @@ static bool
 relation_columns_after_reserve(const relic_relation_t *relation,
     size_t added, size_t *columnsp)
 {
-	if (added > RELIC_TUPLE_MAX - relation->count)
+	if (added > RELIC_TUPLE_MAX - relation->payload.count)
 		return (false);
 
-	return (columns_holding(relation->count + added, relation->arity,
-	    columnsp));
+	return (columns_holding(relation->payload.count + added,
+	    relation->arity, columnsp));
 }
 
 /*
@@ -405,12 +550,8 @@ relic_relation_bytes(const relic_relation_t *relation)
 {
 	size_t bytes;
 	size_t position;
-	size_t s;
 
-	bytes = relation->column_capacity * sizeof(*relation->columns);
-	for (s = 0; s < RELIC_STRIPES; s++)
-		bytes += relic_idtab_bytes(&relation->index[s]);
-
+	bytes = payload_bytes(&relation->payload);
 	for (position = 0; position < relation->index_count; position++)
 		bytes += relic_index_bytes(&relation->indexes[position]);
 
@@ -452,7 +593,7 @@ relic_relation_bytes_after_growth(const relic_relation_t *relation,
 
 	for (s = 0; s < RELIC_STRIPES; s++)
 		bytes = relic_saturating_sum(bytes,
-		    relic_idtab_bytes_after_reserve(&relation->index[s],
+		    relic_idtab_bytes_after_reserve(&relation->payload.index[s],
 		    growth->by_stripe[s]));
 	if (bytes == SIZE_MAX)
 		return (relic_relation_bytes(relation));
@@ -492,13 +633,13 @@ columns_bytes_after(const relic_relation_t *relation, size_t added)
 	if (!relation_columns_after_reserve(relation, added, &needed_columns))
 		return (SIZE_MAX);
 
-	grown_capacity = relic_grow_array_capacity(relation->column_capacity,
-	    needed_columns);
+	grown_capacity = relic_grow_array_capacity(
+	    relation->payload.column_capacity, needed_columns);
 	if (grown_capacity == 0)
 		return (SIZE_MAX);
 
 	return (relic_saturating_product(grown_capacity,
-	    sizeof(*relation->columns)));
+	    sizeof(*relation->payload.columns)));
 }
 
 /*
@@ -515,7 +656,8 @@ insertion_parts_bytes(const relic_relation_t *relation, uint64_t hash)
 	size_t bytes;
 	size_t position;
 
-	bytes = relation->column_capacity * sizeof(*relation->columns) +
+	bytes = relation->payload.column_capacity *
+	    sizeof(*relation->payload.columns) +
 	    relic_idtab_bytes(canonical_stripe(relation, hash));
 
 	for (position = 0; position < relation->index_count; position++)
@@ -805,26 +947,29 @@ relic_relation_bytes_after_append(const relic_relation_t *relation,
 	size_t index;
 	size_t s;
 
-	if (append->count > RELIC_TUPLE_MAX - relation->count)
+	if (append->count > RELIC_TUPLE_MAX - relation->payload.count)
 		return (SIZE_MAX);
 	if (append->count == 0)
 		return (relic_relation_bytes(relation));
 
-	columns = relic_grow_array_capacity_stepwise(relation->column_capacity,
-	    relation->count * relation->arity, append->count, relation->arity);
+	columns = relic_grow_array_capacity_stepwise(
+	    relation->payload.column_capacity,
+	    relation->payload.count * relation->arity, append->count,
+	    relation->arity);
 	if (columns == 0)
 		return (SIZE_MAX);
 
-	bytes = relic_saturating_product(columns, sizeof(*relation->columns));
+	bytes = relic_saturating_product(columns,
+	    sizeof(*relation->payload.columns));
 	for (s = 0; s < RELIC_STRIPES; s++)
 		bytes = relic_saturating_sum(bytes,
-		    relic_idtab_bytes_after_reserve(&relation->index[s],
+		    relic_idtab_bytes_after_reserve(&relation->payload.index[s],
 		    append->growth.by_stripe[s]));
 
 	for (index = 0; index < relation->index_count; index++)
 		bytes = relic_saturating_sum(bytes,
 		    relic_index_bytes_after_append(&relation->indexes[index],
-		    relation->count, append, &append->keys[index]));
+		    relation->payload.count, append, &append->keys[index]));
 
 	return (bytes);
 }
@@ -853,8 +998,8 @@ relic_relation_bytes_during_append(const relic_relation_t *relation,
 
 	for (s = 0; s < RELIC_STRIPES; s++)
 		bytes = relic_saturating_sum(bytes,
-		    relic_idtab_bytes_replaced_by_reserve(&relation->index[s],
-		    append->growth.by_stripe[s]));
+		    relic_idtab_bytes_replaced_by_reserve(
+		    &relation->payload.index[s], append->growth.by_stripe[s]));
 
 	for (index = 0; index < relation->index_count; index++)
 		bytes = relic_saturating_sum(bytes,
@@ -903,28 +1048,29 @@ append_grow(relic_relation_t *relation, relic_append_t *append)
 	size_t index;
 	size_t s;
 
-	if (append->count > RELIC_TUPLE_MAX - relation->count)
+	if (append->count > RELIC_TUPLE_MAX - relation->payload.count)
 		return (-1);
-	append->first = (relic_tuple_id_t)(relation->count + 1);
+	append->first = (relic_tuple_id_t)(relation->payload.count + 1);
 	if (append->count == 0)
 		return (0);
 
-	columns = relic_grow_array_stepwise(relation->columns,
-	    &relation->column_capacity, relation->count * relation->arity,
-	    append->count, relation->arity, sizeof(*relation->columns));
+	columns = relic_grow_array_stepwise(relation->payload.columns,
+	    &relation->payload.column_capacity,
+	    relation->payload.count * relation->arity, append->count,
+	    relation->arity, sizeof(*relation->payload.columns));
 	if (columns == NULL)
 		return (-1);
-	relation->columns = columns;
+	relation->payload.columns = columns;
 
 	for (s = 0; s < RELIC_STRIPES; s++) {
-		if (relic_idtab_prepare_growth(&relation->index[s],
+		if (relic_idtab_prepare_growth(&relation->payload.index[s],
 		    append->growth.by_stripe[s], &append->grown[s]) != 0)
 			return (-1);
 	}
 
 	for (index = 0; index < relation->index_count; index++) {
 		if (relic_index_reserve_append(&relation->indexes[index],
-		    relation->count, append, &append->keys[index]) != 0)
+		    relation->payload.count, append, &append->keys[index]) != 0)
 			return (-1);
 	}
 
@@ -967,14 +1113,14 @@ relic_relation_take_append(relic_t *ctx, relic_relation_t *relation,
 {
 	size_t words;
 
-	assert(append->first == relation->count + 1);
+	assert(append->first == relation->payload.count + 1);
 
 	words = append->count * relation->arity;
 	if (words != 0)
 		bcopy(append->columns, tuple_at(relation, append->first),
-		    words * sizeof(*relation->columns));
+		    words * sizeof(*relation->payload.columns));
 
-	relation->count += append->count;
+	relation->payload.count += append->count;
 	ctx->store.tuple_count += append->count;
 }
 
@@ -1027,7 +1173,7 @@ place_append_stripe(relic_relation_t *relation, relic_append_t *append,
 	size_t i;
 
 	assert(append->stripe_start[RELIC_STRIPES] == append->count);
-	stripe = &relation->index[s];
+	stripe = &relation->payload.index[s];
 	relic_idtab_complete_growth(stripe, &append->grown[s], tuple_rehash,
 	    relation);
 
@@ -1213,21 +1359,21 @@ relation_grow(relic_t *ctx, relic_relation_t *relation,
 		return (-1);
 
 	for (s = 0; s < RELIC_STRIPES; s++) {
-		if (relic_idtab_reserve(&relation->index[s],
+		if (relic_idtab_reserve(&relation->payload.index[s],
 		    growth->by_stripe[s], tuple_rehash, relation) != 0) {
 			relic_diag_no_memory(ctx);
 			return (-1);
 		}
 	}
 
-	columns = relic_grow_array(relation->columns,
-	    &relation->column_capacity, needed_columns,
-	    sizeof(*relation->columns));
+	columns = relic_grow_array(relation->payload.columns,
+	    &relation->payload.column_capacity, needed_columns,
+	    sizeof(*relation->payload.columns));
 	if (columns == NULL) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
-	relation->columns = columns;
+	relation->payload.columns = columns;
 
 	return (0);
 }
@@ -1266,27 +1412,17 @@ relic_relation_reserve(relic_t *ctx, relic_relation_t *relation,
 static int
 insertion_grow(relic_t *ctx, relic_relation_t *relation, uint64_t hash)
 {
-	relic_dom_t *columns;
 	size_t needed_columns;
 	size_t position;
 
 	if (relation_too_large(ctx, relation, 1, &needed_columns))
 		return (-1);
 
-	if (relic_idtab_reserve(writable_canonical_stripe(relation, hash), 1,
+	if (payload_reserve_one(&relation->payload, hash, needed_columns,
 	    tuple_rehash, relation) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
-
-	columns = relic_grow_array(relation->columns,
-	    &relation->column_capacity, needed_columns,
-	    sizeof(*relation->columns));
-	if (columns == NULL) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	relation->columns = columns;
 
 	for (position = 0; position < relation->index_count; position++) {
 		if (relic_index_reserve_pending(&relation->indexes[position],
@@ -1342,7 +1478,7 @@ classify_keys(relic_relation_t *relation, const relic_dom_t *columns)
 	relic_tuple_id_t id;
 	size_t position;
 
-	id = (relic_tuple_id_t)(relation->count + 1);
+	id = (relic_tuple_id_t)(relation->payload.count + 1);
 	for (position = 0; position < relation->index_count; position++)
 		relic_index_classify(&relation->indexes[position], relation,
 		    columns, id);
@@ -1356,33 +1492,17 @@ classify_keys(relic_relation_t *relation, const relic_dom_t *columns)
  * Nothing here can fail, which is what lets the columns and every index entry
  * be published together.  The identifier is the one past the last, which is
  * what makes the store append-only: nothing here can name a tuple that
- * already exists.  The columns are written before the count admits them, so a
- * tuple another operation can reach is one that was written in full.
+ * already exists.
  */
 static void
 tuple_append(relic_relation_t *relation, const relic_dom_t *columns,
     uint64_t hash)
 {
-	relic_dom_t *destination;
-	relic_tuple_id_t id;
+	relic_tuple_id_t id RELIC_UNUSED;
 	size_t position;
-	uint16_t column;
 
-	id = (relic_tuple_id_t)(relation->count + 1);
-	destination = tuple_at(relation, id);
-
-	/*
-	 * A loop rather than a block copy, for the reason relic_tuple_equal()
-	 * gives: `columns` may be null for a relation of arity zero, and a
-	 * copy of zero bytes from a null pointer is not defined.
-	 */
-	for (column = 0; column < relation->arity; column++)
-		destination[column] = columns[column];
-
-	relation->count++;
-
-	relic_idtab_place(writable_canonical_stripe(relation, hash),
-	    relic_hash_low(hash), id);
+	id = payload_append(&relation->payload, relation->arity, columns,
+	    hash);
 
 	for (position = 0; position < relation->index_count; position++) {
 		assert(relation->indexes[position].pending.tuple == id);
@@ -1680,7 +1800,7 @@ relic_relation_contains_hashed(const relic_relation_t *relation,
 const relic_dom_t *
 relic_relation_tuple(const relic_relation_t *relation, relic_tuple_id_t id)
 {
-	if (id == RELIC_ID_NONE || id > relation->count)
+	if (id == RELIC_ID_NONE || id > relation->payload.count)
 		return (NULL);
 
 	return (tuple_at(relation, id));
@@ -1689,7 +1809,7 @@ relic_relation_tuple(const relic_relation_t *relation, relic_tuple_id_t id)
 size_t
 relic_relation_count(const relic_relation_t *relation)
 {
-	return (relation->count);
+	return (relation->payload.count);
 }
 
 /*
@@ -1699,7 +1819,7 @@ relic_relation_count(const relic_relation_t *relation)
 relic_tuple_id_t
 relic_relation_end(const relic_relation_t *relation)
 {
-	return ((relic_tuple_id_t)(relation->count + 1));
+	return ((relic_tuple_id_t)(relation->payload.count + 1));
 }
 
 /*
@@ -1852,7 +1972,7 @@ index_build(relic_t *ctx, const relic_relation_t *relation,
 {
 	relic_tuple_id_t id;
 
-	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
+	for (id = RELIC_TUPLE_FIRST; id <= relation->payload.count; id++) {
 		relic_index_classify(index, relation, tuple_at(relation, id),
 		    id);
 		if (index_make_room(ctx, relation, index) != 0)
@@ -1974,7 +2094,7 @@ count_distinct(relic_t *ctx, const relic_relation_t *relation,
 	relic_idtab_init(&seen, true);
 	distinct = 0;
 
-	for (id = RELIC_TUPLE_FIRST; id <= relation->count; id++) {
+	for (id = RELIC_TUPLE_FIRST; id <= relation->payload.count; id++) {
 		value = tuple_at(relation, id)[column];
 		hash = relic_hash_word(relation->hash_seed, value);
 
@@ -2025,9 +2145,9 @@ relic_relation_distinct(relic_t *ctx, relic_relation_t *relation,
 	}
 
 	stats = &relation->stats;
-	if (stats->counted_at != relation->count) {
+	if (stats->counted_at != relation->payload.count) {
 		stats->known = 0;
-		stats->counted_at = relation->count;
+		stats->counted_at = relation->payload.count;
 	}
 
 	if ((stats->known & (UINT32_C(1) << column)) == 0) {
@@ -2201,7 +2321,7 @@ relic_base_count(const relic_t *ctx, relic_pred_id_t pred)
 
 	store = relic_base_store(ctx, pred);
 
-	return (store == NULL ? 0 : store->count);
+	return (store == NULL ? 0 : store->payload.count);
 }
 
 /*
@@ -2309,24 +2429,207 @@ relic_relation_discard_all(relic_t *ctx)
 }
 
 /*
- * Check that the base stores can grow as `growths` asks, under both
- * configured limits, before any of them grows.  Returns 0, or -1 having
- * reported the refusal against the predicate of the first growth.
+ * Builders.  A builder is a payload with no relation around it: no
+ * secondary index, no statistics, no place in the store and no share of
+ * either total, so building one is invisible to everything but its owner.
+ * Its canonical index is the one a relation of its arity would build, so
+ * that an empty base store can take the payload as it stands, except that
+ * its stripes are tagged: a load mostly looks up tuples it has not seen,
+ * and a tag rejects most other tuples in a probe's way without reading
+ * their columns.  Adopting the payload drops the tags.
+ */
+
+/*
+ * Make `builder` an empty builder of facts of `pred`, a predicate `ctx`
+ * has interned, hashed as every relation of `ctx` hashes them.
+ */
+void
+relic_builder_init(relic_builder_t *builder, const relic_t *ctx,
+    relic_pred_id_t pred)
+{
+	bzero(builder, sizeof(*builder));
+	payload_init(&builder->payload, true);
+	builder->hash_seed = ctx->hash_seed;
+	builder->pred = pred;
+	builder->arity = relic_pred_of(ctx, pred)->arity;
+}
+
+/*
+ * Release the tuples a builder holds, leaving it empty: all of them if the
+ * commit never took them, and nothing if an adoption did.
+ */
+void
+relic_builder_reset(relic_builder_t *builder)
+{
+	payload_release(&builder->payload);
+}
+
+size_t
+relic_builder_count(const relic_builder_t *builder)
+{
+	return (builder->payload.count);
+}
+
+/*
+ * The columns of builder tuple `position`, counted from zero in the order
+ * the tuples were added.  For a builder of arity zero the result is never
+ * read.
+ */
+const relic_dom_t *
+relic_builder_tuple(const relic_builder_t *builder, size_t position)
+{
+	assert(position < builder->payload.count);
+
+	return (payload_tuple(&builder->payload, builder->arity,
+	    (relic_tuple_id_t)(position + 1)));
+}
+
+/*
+ * Whether a builder holds `columns`, whose wide hash under the builder's
+ * seed is `hash`.  A debug build checks the hash.
+ */
+bool
+relic_builder_contains_hashed(const relic_builder_t *builder,
+    const relic_dom_t *columns, uint64_t hash)
+{
+	assert(hash == relic_tuple_hash(builder->hash_seed, columns,
+	    builder->arity));
+
+	return (payload_find(&builder->payload, builder->arity, columns,
+	    hash) != RELIC_ID_NONE);
+}
+
+/*
+ * The hash of builder tuple `id` for its canonical stripe to use when it
+ * grows, which is what tuple_rehash() gives a relation's.
+ */
+static uint32_t
+builder_rehash(uint32_t id, void *ctx)
+{
+	const relic_builder_t *builder;
+
+	builder = ctx;
+
+	return (relic_hash_words(builder->hash_seed,
+	    payload_tuple(&builder->payload, builder->arity, id),
+	    builder->arity));
+}
+
+/*
+ * Add `columns`, of wide hash `hash`, which the builder lacks, as its last
+ * tuple, growing its columns and canonical stripe as an insertion into a
+ * relation grows them.  Room is made before the tuple is stored, so a
+ * failure leaves the builder holding what it held.  Returns 0, or -1 having
+ * reported that the builder is full or that memory ran out.
+ */
+int
+relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
+    const relic_dom_t *columns, uint64_t hash)
+{
+	relic_payload_t *payload;
+	size_t needed_columns;
+	char described[RELIC_PRED_TEXT_MAX];
+
+	payload = &builder->payload;
+	assert(!relic_builder_contains_hashed(builder, columns, hash));
+
+	if (payload->count >= RELIC_TUPLE_MAX ||
+	    !columns_holding(payload->count + 1, builder->arity,
+	    &needed_columns)) {
+		relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
+		    "too many facts of %s in one load",
+		    relic_pred_describe(ctx, builder->pred, described,
+		    sizeof(described)));
+		return (-1);
+	}
+
+	if (payload_reserve_one(payload, hash, needed_columns, builder_rehash,
+	    builder) != 0) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	(void)payload_append(payload, builder->arity, columns, hash);
+
+	return (0);
+}
+
+/*
+ * The base commit.  A load gives every base store its facts in one step,
+ * the builders of its predicates described by a manifest of actions, one
+ * per store that gains a tuple: relic_base_action_prepare() describes
+ * each before anything changes, relic_bases_reserve() makes room for all
+ * of them or for none, and relic_bases_apply() publishes all of them.
+ */
+
+/*
+ * Describe what the commit does to the base store of `builder`'s predicate
+ * with the builder's tuples, of which there is at least one, as `action`:
+ * an adoption when the store holds no tuple, and otherwise an append, whose
+ * hashes and stripe counts are computed here.  Returns 0, or -1 when memory
+ * ran out, having reported nothing.  The action is released with
+ * relic_base_action_release() whatever this returns.
+ */
+int
+relic_base_action_prepare(const relic_t *ctx, relic_base_action_t *action,
+    relic_builder_t *builder)
+{
+	uint64_t hash;
+	size_t i;
+
+	assert(relic_builder_count(builder) > 0);
+
+	bzero(action, sizeof(*action));
+	action->builder = builder;
+	action->adopt = relic_base_count(ctx, builder->pred) == 0;
+	if (action->adopt)
+		return (0);
+
+	action->hashes = reallocarray(NULL, relic_builder_count(builder),
+	    sizeof(*action->hashes));
+	if (action->hashes == NULL)
+		return (-1);
+
+	for (i = 0; i < relic_builder_count(builder); i++) {
+		hash = relic_tuple_hash(builder->hash_seed,
+		    relic_builder_tuple(builder, i), builder->arity);
+		action->hashes[i] = hash;
+		action->added.by_stripe[relic_hash_stripe(hash)]++;
+	}
+
+	return (0);
+}
+
+void
+relic_base_action_release(relic_base_action_t *action)
+{
+	free(action->hashes);
+	action->hashes = NULL;
+}
+
+/*
+ * Check that the base stores can take what `actions` gives them, under
+ * both configured limits, before any of them changes.  Returns 0, or -1
+ * having reported the refusal: a limit's against the predicate of the
+ * first action, and a store too large to grow against its own.
  *
- * A store not yet created is projected as an empty relation of its
- * predicate's arity, which is what it will be when it is created.  Sums that
- * a size_t cannot hold cannot fit any limit either, and are refused as a
+ * An adoption's store, absent or empty, is projected as holding the
+ * builder's payload, without the tags adopting it drops, in place of
+ * whatever empty capacity it kept; an append's as its relation grown by
+ * the tuples it gains.  Sums that a
+ * size_t cannot hold cannot fit any limit either, and are refused as a
  * store too large to grow.
  */
 static int
-bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
+bases_fit(relic_t *ctx, const relic_base_action_t *actions, size_t count)
 {
 	const relic_relation_t *store;
-	relic_relation_t absent;
 	size_t added;
 	size_t added_total;
 	size_t bytes_after;
 	size_t bytes_before;
+	size_t held_bytes;
+	size_t held_tuples;
 	size_t projected;
 	size_t i;
 	char described[RELIC_PRED_TEXT_MAX];
@@ -2336,28 +2639,34 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 	bytes_after = 0;
 
 	for (i = 0; i < count; i++) {
-		store = relic_base_store(ctx, growths[i].pred);
-		if (store == NULL) {
-			relation_init(&absent, ctx, growths[i].pred, 0,
-			    relic_pred_of(ctx, growths[i].pred)->arity);
-			store = &absent;
+		store = relic_base_store(ctx, actions[i].builder->pred);
+		held_bytes = store == NULL ? 0 : relic_relation_bytes(store);
+		held_tuples = store == NULL ? 0 : relic_relation_count(store);
+		if (actions[i].adopt) {
+			assert(store == NULL || store->payload.count == 0);
+			added = relic_builder_count(actions[i].builder);
+			projected = payload_bytes_untagged(
+			    &actions[i].builder->payload);
+		} else {
+			assert(store != NULL && store->payload.count != 0);
+			added = relic_tuple_growth_total(&actions[i].added);
+			projected = relic_relation_bytes_after_growth(store,
+			    &actions[i].added);
 		}
 
-		added = relic_tuple_growth_total(&growths[i].added);
-		projected = relic_relation_bytes_after_growth(store,
-		    &growths[i].added);
-		if (added > RELIC_TUPLE_MAX - store->count ||
+		if (added > RELIC_TUPLE_MAX - held_tuples ||
 		    added > SIZE_MAX - added_total ||
+		    held_bytes > SIZE_MAX - bytes_before ||
 		    projected > SIZE_MAX - bytes_after) {
 			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "the relation of %s is too large to grow",
-			    relic_pred_describe(ctx, growths[i].pred,
+			    relic_pred_describe(ctx, actions[i].builder->pred,
 			    described, sizeof(described)));
 			return (-1);
 		}
 
 		added_total += added;
-		bytes_before += relic_relation_bytes(store);
+		bytes_before += held_bytes;
 		bytes_after += projected;
 	}
 
@@ -2365,11 +2674,11 @@ bases_fit(relic_t *ctx, const relic_base_growth_t *growths, size_t count)
 	    (ctx->store.tuple_count > ctx->config.max_tuples ||
 	    added_total > ctx->config.max_tuples - ctx->store.tuple_count))
 		return (relic_bases_refuse(ctx, "tuples",
-		    ctx->config.max_tuples, growths[0].pred));
+		    ctx->config.max_tuples, actions[0].builder->pred));
 
 	if (relic_account_exceeds(&ctx->account, bytes_before, bytes_after))
 		return (relic_bases_refuse(ctx, "memory", ctx->account.limit,
-		    growths[0].pred));
+		    actions[0].builder->pred));
 
 	return (0);
 }
@@ -2391,21 +2700,22 @@ relic_bases_refuse(relic_t *ctx, const char *key, size_t limit,
 }
 
 /*
- * Make room in the base stores for the facts a load's commit is about to
- * append: `added` more tuples for each predicate of `growths`, counted by
- * canonical stripe, which holds at least one growth, each of at least one
- * tuple.  Returns 0, or -1 having reported the refusal.
+ * Make every base store of `actions`, which holds at least one action,
+ * ready to take its builder's tuples.  Returns 0, or -1 having reported the
+ * refusal.  The caller has discarded what was derived, so no base store has
+ * a secondary index.
  *
  * Both limits are checked once, over every store together, before any
- * store is created or grown, so a refusal by either leaves every store as it
- * was.  Only a failed allocation among the growths that follow can leave a
- * store with more capacity than it holds, accounted, as a relation that
- * failed to grow keeps what it obtained.  A base store has no secondary
- * index when a commit reserves, since the commit discards what was derived
- * before reserving.
+ * store changes, so a refusal by either leaves every store as it was.  Then
+ * every adoption's existing store gives back the empty capacity the
+ * builder's payload is to replace, before any append reserves, so that the
+ * credit the limit check counted on is real by the time anything spends
+ * it.  Then each absent store is created and each append's grown.  A failed
+ * allocation among those can leave stores empty, created, or with capacity
+ * they do not use, all accounted, but no store gains a tuple.
  */
 int
-relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
+relic_bases_reserve(relic_t *ctx, const relic_base_action_t *actions,
     size_t count)
 {
 	relic_relation_t *store;
@@ -2413,16 +2723,24 @@ relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 
 	assert(count > 0);
 
-	if (bases_fit(ctx, growths, count) != 0)
+	if (bases_fit(ctx, actions, count) != 0)
 		return (-1);
 
 	for (i = 0; i < count; i++) {
+		store = reltab_find(&ctx->store.bases,
+		    actions[i].builder->pred);
+		if (actions[i].adopt && store != NULL)
+			relic_relation_clear(ctx, store);
+	}
+
+	for (i = 0; i < count; i++) {
 		store = reltab_relation(ctx, &ctx->store.bases,
-		    growths[i].pred);
+		    actions[i].builder->pred);
 		if (store == NULL)
 			return (-1);
 
-		if (relic_relation_reserve(ctx, store, &growths[i].added) != 0)
+		if (!actions[i].adopt &&
+		    relic_relation_reserve(ctx, store, &actions[i].added) != 0)
 			return (-1);
 	}
 
@@ -2430,28 +2748,88 @@ relic_bases_reserve(relic_t *ctx, const relic_base_growth_t *growths,
 }
 
 /*
- * Append a fact the base store `pred` lacks, into room relic_bases_reserve()
- * made: store it and place it in the canonical index by its wide hash
- * `hash`, which the caller computed under the context's seed, looking
- * nothing up.  Nothing here can fail.  A debug build checks what a release
- * build trusts: the room, the hash, and that the store lacks the fact.
+ * Give every base store of `actions` its builder's tuples, into what
+ * relic_bases_reserve() made ready.  Nothing here can fail, so either every
+ * store gains its tuples or, the reserve having failed, none does.
+ *
+ * An adoption moves the builder's payload into its empty store, through
+ * adopt_builder(), and an append copies the builder's tuples after the
+ * store's own, through append_builder().
  */
 void
-relic_base_append_hashed(relic_t *ctx, relic_pred_id_t pred,
-    const relic_dom_t *columns, uint64_t hash)
+relic_bases_apply(relic_t *ctx, const relic_base_action_t *actions,
+    size_t count)
 {
+	relic_builder_t *builder;
 	relic_relation_t *store;
+	size_t added;
+	size_t i;
 
-	store = reltab_find(&ctx->store.bases, pred);
-	assert(store != NULL && store->index_count == 0);
-	assert(insertion_parts_bytes_after(store, hash) ==
-	    insertion_parts_bytes(store, hash));
-	assert(hash == tuple_hash(store, columns));
-	assert(relation_find_hashed(store, columns, hash) == RELIC_ID_NONE);
+	for (i = 0; i < count; i++) {
+		builder = actions[i].builder;
+		store = reltab_find(&ctx->store.bases, builder->pred);
+		assert(store != NULL && store->index_count == 0);
+		assert(store->arity == builder->arity &&
+		    store->hash_seed == builder->hash_seed);
 
-	tuple_append(store, columns, hash);
-	ctx->store.tuple_count++;
-	ctx->store.base_tuple_count++;
+		added = relic_builder_count(builder);
+		if (actions[i].adopt)
+			adopt_builder(ctx, store, builder);
+		else {
+			assert(added ==
+			    relic_tuple_growth_total(&actions[i].added));
+			append_builder(store, &actions[i]);
+		}
+
+		ctx->store.tuple_count += added;
+		ctx->store.base_tuple_count += added;
+	}
+}
+
+/*
+ * Move `builder`'s payload whole into `store`, which holds nothing, and
+ * leave the builder empty.  The tuples keep their identifiers, and the
+ * canonical index, built under the store's seed and arity, is the store's
+ * as it stands once its tags are dropped, which the store's lookups, that
+ * mostly find what they look for, have no use for.
+ */
+static void
+adopt_builder(relic_t *ctx, relic_relation_t *store, relic_builder_t *builder)
+{
+	size_t s;
+
+	assert(store->payload.count == 0 && payload_bytes(&store->payload) == 0);
+
+	for (s = 0; s < RELIC_STRIPES; s++)
+		relic_idtab_drop_tags(&builder->payload.index[s]);
+	store->payload = builder->payload;
+	payload_init(&builder->payload, true);
+	ctx->account.store_bytes += payload_bytes(&store->payload);
+}
+
+/*
+ * Copy each tuple of an append's builder, in builder order, to the position
+ * after `store`'s last, and place it under the hash `action` prepared,
+ * looking nothing up.  A debug build checks what a release build trusts:
+ * the room, the hashes, and that the store lacks every tuple.
+ */
+static void
+append_builder(relic_relation_t *store, const relic_base_action_t *action)
+{
+	const relic_dom_t *columns;
+	uint64_t hash;
+	size_t t;
+
+	for (t = 0; t < relic_builder_count(action->builder); t++) {
+		columns = relic_builder_tuple(action->builder, t);
+		hash = action->hashes[t];
+		assert(insertion_parts_bytes_after(store, hash) ==
+		    insertion_parts_bytes(store, hash));
+		assert(hash == tuple_hash(store, columns));
+		assert(relation_find_hashed(store, columns, hash) ==
+		    RELIC_ID_NONE);
+		tuple_append(store, columns, hash);
+	}
 }
 
 /*

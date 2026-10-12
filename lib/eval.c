@@ -2795,16 +2795,16 @@ seed_member(relic_evaluation_t *eval, relic_relation_t *derived)
 	size_t completed;
 	size_t first;
 	size_t count;
+	size_t held;
 	size_t i;
 	int status;
 
 	store = relic_base_store(eval->ctx, derived->pred);
-	if (store == NULL || store->count == 0)
-		return (0);
+	held = store == NULL ? 0 : relic_relation_count(store);
 
-	for (first = 0; first < store->count; first += count) {
-		count = store->count - first < RELIC_INSERT_BATCH ?
-		    store->count - first : RELIC_INSERT_BATCH;
+	for (first = 0; first < held; first += count) {
+		count = held - first < RELIC_INSERT_BATCH ?
+		    held - first : RELIC_INSERT_BATCH;
 		tuples = store->arity == 0 ? no_columns :
 		    relic_relation_tuple(store,
 		    (relic_tuple_id_t)(RELIC_TUPLE_FIRST + first));

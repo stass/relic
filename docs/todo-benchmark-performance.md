@@ -219,15 +219,14 @@ are 0.191 s and 0.076 s. Import is also about half of the diagnostic
 `cspa-linux` runtime and most of the grid and bounded-tree runtimes.
 
 **Implementation, in commit order.** Apply
-[bulk fact construction and import](../specs/design-bulk-load.md). Introduce
-the storage-owned payload and private builder, with ownership transfer to
-empty base stores and one atomic commit across adopted and appended
-destinations. Then add bounded CSV/TSV windows, shared parser transitions,
-private dictionaries and ordered value publication. A whole-window proof
-admits deterministic prefixes; an unproved window replays through the
-scalar importer. Parallelize the independent jobs after the scalar bulk
-path is covered. Source program parsing remains scalar and uses the same
-builders.
+[bulk fact construction and import](../specs/design-bulk-load.md) to the
+table path; staging's private builders and the adopting commit are the
+foundation it builds on. Add bounded CSV/TSV windows, shared parser
+transitions, private dictionaries and ordered value publication. A
+whole-window proof admits deterministic prefixes; an unproved window
+replays through the scalar importer. Parallelize the independent jobs
+after the scalar bulk path is covered. Source program parsing remains
+scalar and uses the same builders.
 
 **Design and measurement gates.** Preserve the ordinary domain encoding and
 global first-occurrence numbering. Measure dictionary reconciliation,
@@ -244,12 +243,11 @@ requires a separate cross-subsystem decision.
 duplicates spanning chunks, quoted multiline records, malformed input,
 first-error ordering, existing values and allocation/limit failures. Base
 facts publish all or nothing, and repeated and parallel loads preserve
-the documented identities and ordering. Instrument builder ownership to
-prove that a first load does not hold duplicate full tuple arrays at
-commit. Demonstrate lower serial load time and peak memory, then a
-substantial parallel load gain on large inputs without slowing small
-imports. Judge the competitive `facts-join` result together with step 5;
-loading must also leave enough budget for grouped execution in step 6.
+the documented identities and ordering. Demonstrate lower serial load
+time and peak memory, then a substantial parallel load gain on large
+inputs without slowing small imports. Judge the competitive `facts-join`
+result together with step 5; loading must also leave enough budget for
+grouped execution in step 6.
 
 ## 5. Partition indexed driving cursors
 

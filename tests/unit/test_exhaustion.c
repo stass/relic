@@ -62,6 +62,7 @@
 #include "internal.h"
 #include "programs.h"
 
+#define	SCENARIO_ADOPT		"a first load moves its facts into place"
 #define	SCENARIO_AGGREGATE	"an aggregate out of memory can be retried"
 #define	SCENARIO_ARENA		"an arena refusal anywhere is reported once"
 #define	SCENARIO_CHECK		"a check that ran out of memory can be retried"
@@ -104,6 +105,12 @@
  * below several times over.
  */
 #define	LOAD_SWEEP	80
+
+/*
+ * How many facts the ownership check stages: enough that a copy of their
+ * tuples is far larger than anything else a commit allocates.
+ */
+#define	ADOPTED_FACTS	65536
 
 /*
  * The bytes of the symbol the lookahead sweep's programs place after a fact
@@ -449,6 +456,13 @@ static relic_atomic_size_t allocations_remaining = SERVE_EVERY;
 static relic_atomic_size_t allocations_seen;
 static relic_atomic_size_t worker_refusals;
 
+/*
+ * The bytes every allocator request has asked for, served or not, whatever
+ * is being refused: a realloc() counts the whole size it asks for.  A
+ * difference across an operation bounds what it allocated.
+ */
+static relic_atomic_size_t bytes_requested;
+
 #ifdef RELIC_THREADS
 static pthread_t main_thread;
 #endif
@@ -483,6 +497,7 @@ void		*relic_test_reallocarray(void *items, size_t count,
 		    size_t size);
 
 static size_t	 allocations_made(void);
+static void	 count_request(size_t count, size_t size);
 static void	 count_worker_refusal(void);
 bool		 relic_test_arena_refuses(void);
 static bool	 refuse_this_request(enum refused_requests kind);
@@ -494,7 +509,11 @@ static void	 interning_a_symbol_survives_a_failed_allocation(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 interning_an_integer_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
+static void	 a_first_load_moves_its_facts_into_place(void);
+static size_t	 inserted_bytes(relic_t *ctx, const relic_relation_t *model);
+static void	 a_mixed_commit_out_of_memory_adds_nothing(void);
 static void	 sweep_load(const load_case_t *load, bool from_stream);
+static void	 sweep_mixed_commit(const char *later);
 static int	 load_sweep_program(relic_t *ctx, const char *program,
 		    bool from_stream);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
@@ -616,6 +635,13 @@ refuse_allocations_after(long served)
 	relic_atomic_size_store(&allocations_remaining, (size_t)served);
 }
 
+static void
+count_request(size_t count, size_t size)
+{
+	relic_atomic_size_add_relaxed(&bytes_requested,
+	    relic_saturating_product(count, size));
+}
+
 bool
 relic_test_arena_refuses(void)
 {
@@ -625,6 +651,7 @@ relic_test_arena_refuses(void)
 void *
 relic_test_calloc(size_t count, size_t size)
 {
+	count_request(count, size);
 	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
@@ -676,6 +703,7 @@ relic_test_fclose(FILE *stream)
 void *
 relic_test_malloc(size_t size)
 {
+	count_request(1, size);
 	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
@@ -685,6 +713,7 @@ relic_test_malloc(size_t size)
 void *
 relic_test_realloc(void *block, size_t size)
 {
+	count_request(1, size);
 	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
@@ -694,6 +723,7 @@ relic_test_realloc(void *block, size_t size)
 void *
 relic_test_reallocarray(void *items, size_t count, size_t size)
 {
+	count_request(count, size);
 	if (refuse_this_request(REFUSE_ALLOCATOR))
 		return (NULL);
 
@@ -1062,6 +1092,219 @@ a_load_that_ran_out_of_memory_adds_nothing(void)
 		sweep_load(&loads[i], false);
 		sweep_load(&loads[i], true);
 	}
+}
+
+/*
+ * A load into a base store that holds no fact gives the store the tuples
+ * and canonical index it staged rather than a copy of them.  No answer can
+ * tell a copy from the original, so the check is on what the commit asks
+ * the allocator for: staging ADOPTED_FACTS facts of a binary predicate
+ * holds twice that many identifiers, and the commit that publishes them
+ * must request a small fraction of that.  The store is absent before the
+ * load in one case and created empty in the other; both are adopted, both
+ * hold exactly the storage inserting the same facts one by one builds, and
+ * both are readable afterwards and released once with their context.
+ */
+static void
+a_first_load_moves_its_facts_into_place(void)
+{
+	static const char *const names[] = { "absent", "empty" };
+	const relic_relation_t *store;
+	const relic_dom_t *last;
+	relic_staging_t staging;
+	relic_dom_t tuple[2];
+	relic_dom_t expected[2];
+	relic_pred_id_t pred;
+	relic_t *ctx;
+	size_t requested;
+	size_t tuple_bytes;
+	size_t before;
+	size_t which;
+	size_t i;
+	int status;
+
+	tuple_bytes = (size_t)ADOPTED_FACTS * 2 * sizeof(relic_dom_t);
+
+	for (which = 0; which < sizeof(names) / sizeof(names[0]); which++) {
+		ctx = relic_create();
+		if (ctx == NULL || relic_pred_intern(ctx, names[which],
+		    strlen(names[which]), 2, NULL, &pred) != 0) {
+			check(false, SCENARIO_ADOPT,
+			    "a context should be made");
+			relic_destroy(ctx);
+			return;
+		}
+		if (which == 1 && relic_relation_read(ctx, pred) == NULL) {
+			check(false, SCENARIO_ADOPT,
+			    "an empty base store should be made");
+			relic_destroy(ctx);
+			return;
+		}
+
+		relic_staging_init(&staging, ctx);
+		status = 0;
+		for (i = 0; i < ADOPTED_FACTS && status == 0; i++) {
+			status = relic_value_intern_integer(ctx, (int64_t)i,
+			    &tuple[0]);
+			if (status == 0)
+				status = relic_value_intern_integer(ctx,
+				    (int64_t)i + ADOPTED_FACTS, &tuple[1]);
+			if (status == 0)
+				status = relic_staging_add(&staging, pred,
+				    tuple);
+		}
+		bcopy(tuple, expected, sizeof(expected));
+
+		before = relic_atomic_size_load(&bytes_requested);
+		if (status == 0)
+			status = relic_staging_commit(&staging);
+		requested = relic_atomic_size_load(&bytes_requested) - before;
+		relic_staging_reset(&staging);
+
+		store = relic_base_store(ctx, pred);
+		checkf(status == 0 && store != NULL &&
+		    relic_relation_count(store) == ADOPTED_FACTS,
+		    SCENARIO_ADOPT, "the %s store should hold every fact",
+		    names[which]);
+		checkf(requested < tuple_bytes / 16, SCENARIO_ADOPT,
+		    "committing %zu bytes of tuples into the %s store "
+		    "requested %zu bytes", tuple_bytes, names[which],
+		    requested);
+
+		if (store != NULL && relic_relation_count(store) > 0) {
+			last = relic_relation_tuple(store,
+			    (relic_tuple_id_t)relic_relation_count(store));
+			checkf(last != NULL && last[0] == expected[0] &&
+			    last[1] == expected[1] &&
+			    relic_relation_contains_hashed(store, expected,
+			    relic_tuple_hash(ctx->hash_seed, expected, 2)),
+			    SCENARIO_ADOPT, "the %s store should read and "
+			    "find its last fact", names[which]);
+		}
+		if (store != NULL)
+			checkf(relic_relation_bytes(store) ==
+			    inserted_bytes(ctx, store), SCENARIO_ADOPT,
+			    "the %s store should hold the storage inserting "
+			    "its facts builds", names[which]);
+
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * The bytes a relation holds once every tuple of `model` has been inserted
+ * into it one at a time, in order, or zero when one could not be.
+ */
+static size_t
+inserted_bytes(relic_t *ctx, const relic_relation_t *model)
+{
+	relic_relation_t *relation;
+	relic_tuple_id_t id;
+	size_t bytes;
+	bool added;
+
+	relation = relic_relation_create(ctx, RELIC_ID_NONE, 0, model->arity);
+	if (relation == NULL)
+		return (0);
+
+	bytes = 0;
+	for (id = 1; id <= relic_relation_count(model); id++) {
+		if (relic_relation_insert(ctx, relation,
+		    relic_relation_tuple(model, id), &added) != 0 || !added)
+			break;
+	}
+	if (relic_relation_count(relation) == relic_relation_count(model))
+		bytes = relic_relation_bytes(relation);
+
+	relic_relation_clear(ctx, relation);
+	relic_relation_free(relation);
+
+	return (bytes);
+}
+
+/*
+ * A load that appends to a store holding a fact and gives another store,
+ * not yet created, its first facts, with the nth allocation refused for
+ * every n across it, after a materialization the commit has to discard.
+ * The commit prepares its actions in the order the load names the
+ * predicates, so the load is run naming each first.  Whichever request is
+ * refused, the load reports once, adds no fact, and leaves the storage
+ * total what the relations hold; and the same load succeeds once the
+ * allocator recovers.
+ */
+static void
+a_mixed_commit_out_of_memory_adds_nothing(void)
+{
+	sweep_mixed_commit(
+	    "held(b).\nfresh(c).\nheld(a).\nfresh(c).\nheld(d).\n");
+	sweep_mixed_commit(
+	    "fresh(c).\nheld(b).\nheld(a).\nfresh(c).\nheld(d).\n");
+}
+
+/*
+ * The sweep a_mixed_commit_out_of_memory_adds_nothing() runs for `later`,
+ * a load stating fresh(c), held(a), held(b) and held(d) in some order.
+ */
+static void
+sweep_mixed_commit(const char *later)
+{
+	size_t refused;
+	size_t completed;
+	long budget;
+	relic_t *ctx;
+	int status;
+
+	refused = 0;
+	completed = 0;
+
+	for (budget = 0; budget < LOAD_SWEEP; budget++) {
+		ctx = relic_create();
+		if (ctx == NULL || relic_load_string(ctx, "first.dl",
+		    "held(a).\nseen(X) :- held(X).\n") != 0 ||
+		    relic_materialize(ctx) != 0) {
+			check(false, SCENARIO_LOAD,
+			    "a context should hold a fact and a derivation");
+			relic_destroy(ctx);
+			return;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		refuse_allocations_after(budget);
+		status = relic_load_string(ctx, "later.dl", later);
+		serve_every_allocation();
+
+		checkf(errors_reported == (status != 0 ? 1u : 0u) &&
+		    (status == 0 || out_of_memory(ctx)), SCENARIO_LOAD,
+		    "a mixed load that %s should report %d message(s) out of "
+		    "memory, not %zu, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 0,
+		    errors_reported, budget);
+		checkf(relic_base_total(ctx) == (status != 0 ? 1u : 4u) &&
+		    ctx->account.store_bytes == storage_by_hand(ctx),
+		    SCENARIO_LOAD, "a mixed load that %s should hold %d facts "
+		    "and account its storage exactly, not %zu facts and %zu "
+		    "bytes for %zu, with allocation %ld refused",
+		    status != 0 ? "failed" : "succeeded", status != 0 ? 1 : 4,
+		    relic_base_total(ctx), ctx->account.store_bytes,
+		    storage_by_hand(ctx), budget);
+		if (status == 0)
+			completed++;
+		else {
+			refused++;
+			checkf(relic_load_string(ctx, "later.dl", later) == 0 &&
+			    relic_base_total(ctx) == 4, SCENARIO_LOAD,
+			    "a mixed load should succeed once the allocator "
+			    "recovers, with allocation %ld refused", budget);
+		}
+
+		relic_destroy(ctx);
+	}
+
+	checkf(refused > 0 && completed > 0, SCENARIO_LOAD,
+	    "the mixed sweep should reach both a refused and a completed "
+	    "load in %d attempts, not %zu and %zu", LOAD_SWEEP, refused,
+	    completed);
 }
 
 /*
@@ -2164,7 +2407,7 @@ index_finds_every_tuple(const relic_relation_t *rel, uint32_t position)
 	index = &rel->indexes[position];
 	chained = 0;
 
-	for (id = RELIC_TUPLE_FIRST; id <= rel->count; id++) {
+	for (id = RELIC_TUPLE_FIRST; id <= relic_relation_count(rel); id++) {
 		first = relic_index_first(index, rel,
 		    relic_relation_tuple(rel, id));
 
@@ -2181,7 +2424,7 @@ index_finds_every_tuple(const relic_relation_t *rel, uint32_t position)
 			return (false);
 	}
 
-	return (chained == rel->count);
+	return (chained == relic_relation_count(rel));
 }
 
 /*
@@ -4330,6 +4573,8 @@ main(void)
 	interning_a_value_survives_a_failed_allocation();
 	interning_an_integer_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();
+	a_first_load_moves_its_facts_into_place();
+	a_mixed_commit_out_of_memory_adds_nothing();
 	an_import_that_ran_out_of_memory_adds_nothing();
 	a_path_whose_close_fails_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();

@@ -357,9 +357,10 @@ not_is_a_keyword_only_where_a_literal_begins(void)
 	store = NULL;
 	if (relic_pred_intern(ctx, "status", 6, 2, NULL, &pred) == 0)
 		store = relic_base_store(ctx, pred);
-	check(store != NULL && store->count == 1, SCENARIO_NEGATION,
+	check(store != NULL && relic_relation_count(store) == 1,
+	    SCENARIO_NEGATION,
 	    "a fact with `not` as an argument should be stored");
-	if (store == NULL || store->count != 1) {
+	if (store == NULL || relic_relation_count(store) != 1) {
 		relic_destroy(ctx);
 		return;
 	}

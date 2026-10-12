@@ -716,12 +716,13 @@ relations_agree(const relic_t *serial, const relic_t *deferred)
 		}
 
 		if (left->arity != right->arity ||
-		    left->count != right->count ||
+		    relic_relation_count(left) != relic_relation_count(right) ||
 		    relic_relation_bytes(left) != relic_relation_bytes(right))
 			return (false);
-		if (left->count > 0 && left->arity > 0 &&
-		    bcmp(left->columns, right->columns, left->count *
-		    left->arity * sizeof(*left->columns)) != 0)
+		if (relic_relation_count(left) > 0 && left->arity > 0 &&
+		    bcmp(left->payload.columns, right->payload.columns,
+		    relic_relation_count(left) * left->arity *
+		    sizeof(*left->payload.columns)) != 0)
 			return (false);
 	}
 
