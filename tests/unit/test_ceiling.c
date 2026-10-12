@@ -40,6 +40,7 @@
 #define	SCENARIO_DEFERRED	"a deferred round stops at the integer ceiling"
 #define	SCENARIO_TOO_LONG	"a string too long to be a value fails"
 #define	SCENARIO_LEXED		"a name or literal too long is refused as read"
+#define	SCENARIO_IMPORTED	"an imported field too long is refused at it"
 
 /*
  * Forty integers loaded and a rule computing a new one from each, which
@@ -58,9 +59,21 @@
 _Static_assert(RELIC_STRING_LENGTH_MAX == 2 * (sizeof(STRING_HALF) - 1),
     "twice the half string is the longest a value may be");
 
+/* The errors an import reports, and where the last of them is. */
+typedef struct import_errors {
+	size_t		errors;
+	uint32_t	line;
+	uint32_t	column;
+} import_errors_t;
+
 static void	 a_deferred_round_stops_as_serially(size_t threads);
 static void	 a_string_too_long_fails_the_evaluation(void);
 static void	 a_name_or_literal_too_long_is_refused(void);
+static void	 an_imported_field_too_long_is_refused(void);
+static void	 note_error(void *callback_ctx, enum relic_diag_level level,
+		    const relic_location_t *where, const char *message);
+static bool	 imports_with_error(relic_t *ctx, const char *text,
+		    const char *expected, uint32_t line, uint32_t column);
 static void	 count_error(void *callback_ctx, enum relic_diag_level level,
 		    const relic_location_t *where, const char *message);
 static bool	 loads_with_errors(relic_t *ctx, const char *text,
@@ -383,6 +396,107 @@ a_name_or_literal_too_long_is_refused(void)
 }
 
 /*
+ * An imported string or symbol longer than a value may be fails the import
+ * at the field, with the field's location, as a malformed field does.  A
+ * symbol field that is no symbol is refused as that, however long it is,
+ * and a field of exactly the longest length is imported.
+ */
+static void
+an_imported_field_too_long_is_refused(void)
+{
+	char text[512];
+	char longest[] = STRING_HALF STRING_HALF;
+	relic_t *ctx;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_IMPORTED, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	snprintf(text, sizeof(text), "%s,a%s\n", longest, longest + 1);
+	check(imports_with_error(ctx, text, NULL, 0, 0), SCENARIO_IMPORTED,
+	    "a string and a symbol of the longest length should be imported");
+
+	snprintf(text, sizeof(text), "ok,ok\nx%s,ok\n", longest);
+	check(imports_with_error(ctx, text, "a symbol or string of 65 bytes "
+	    "is longer than the " STRING_LIMIT_TEXT " a value may hold", 2, 1),
+	    SCENARIO_IMPORTED, "a string one byte longer should be refused at "
+	    "its field");
+
+	snprintf(text, sizeof(text), "ok,a%s\n", longest);
+	check(imports_with_error(ctx, text, "a symbol or string of 65 bytes "
+	    "is longer than the " STRING_LIMIT_TEXT " a value may hold", 1, 4),
+	    SCENARIO_IMPORTED, "a symbol one byte longer should be refused at "
+	    "its field");
+
+	snprintf(text, sizeof(text), "ok,A%s\n", longest);
+	check(imports_with_error(ctx, text, "expected a symbol, found", 1, 4),
+	    SCENARIO_IMPORTED, "a long field that is no symbol should be "
+	    "refused as no symbol");
+
+	relic_destroy(ctx);
+}
+
+/* Count an error, and keep where it is. */
+static void
+note_error(void *callback_ctx, enum relic_diag_level level,
+    const relic_location_t *where, const char *message RELIC_TEST_UNUSED)
+{
+	import_errors_t *seen;
+
+	seen = callback_ctx;
+	if (level != RELIC_ERROR)
+		return;
+
+	seen->errors++;
+	seen->line = where != NULL ? where->line : 0;
+	seen->column = where != NULL ? where->column : 0;
+}
+
+/*
+ * Whether importing `text` as csv facts of row(string, symbol) draws no
+ * error and succeeds, when `expected` is NULL, or fails with one error,
+ * naming `expected`, at `line` and `column`.
+ */
+static bool
+imports_with_error(relic_t *ctx, const char *text, const char *expected,
+    uint32_t line, uint32_t column)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_STRING, RELIC_COLUMN_SYMBOL
+	};
+	relic_import_t import;
+	import_errors_t seen;
+	FILE *stream;
+	int status;
+
+	stream = tmpfile();
+	if (stream == NULL || fputs(text, stream) == EOF ||
+	    fseek(stream, 0, SEEK_SET) != 0) {
+		if (stream != NULL)
+			fclose(stream);
+		return (false);
+	}
+
+	bzero(&import, sizeof(import));
+	import.predicate = "row";
+	import.columns = columns;
+	import.column_count = sizeof(columns) / sizeof(columns[0]);
+	import.format = RELIC_FORMAT_CSV;
+	bzero(&seen, sizeof(seen));
+	relic_diag_set(ctx, note_error, &seen);
+	status = relic_import_file(ctx, "rows.csv", stream, &import);
+	relic_diag_set(ctx, NULL, NULL);
+	fclose(stream);
+
+	if (expected == NULL)
+		return (status == 0 && seen.errors == 0);
+
+	return (status == -1 && seen.errors == 1 && seen.line == line &&
+	    seen.column == column && diagnosed(ctx, expected));
+}
+
+/*
  * Answer a query, counting its rows into *rowsp.  Returns what
  * relic_query_run() returns, or -1 when the query was not prepared.
  */
@@ -476,6 +590,7 @@ main(void)
 	a_deferred_round_stops_as_serially(4);
 	a_string_too_long_fails_the_evaluation();
 	a_name_or_literal_too_long_is_refused();
+	an_imported_field_too_long_is_refused();
 
 	return (check_summary("ceiling"));
 }

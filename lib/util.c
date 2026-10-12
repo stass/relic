@@ -753,16 +753,45 @@ relic_idtab_bytes_untagged(const relic_idtab_t *table)
 	return (table->capacity * sizeof(*table->slots));
 }
 
+bool
+relic_idtab_capacity_after_reserve(const relic_idtab_t *table, size_t added,
+    size_t *capacityp)
+{
+	*capacityp = table->capacity;
+	if (idtab_capacity_holds(table->capacity, table->count, added))
+		return (true);
+	if (table->given)
+		return (false);
+
+	*capacityp = idtab_capacity_for(table, added);
+
+	return (*capacityp != 0);
+}
+
+int
+relic_idtab_grow_to(relic_idtab_t *table, size_t capacity,
+    relic_rehash_fn rehash, void *ctx)
+{
+	relic_idtab_t grown;
+
+	if (capacity == table->capacity)
+		return (0);
+
+	assert(capacity > table->capacity && !table->given);
+	assert((capacity & (capacity - 1)) == 0);
+	if (idtab_allocate(table, capacity, &grown) != 0)
+		return (-1);
+	relic_idtab_complete_growth(table, &grown, rehash, ctx);
+
+	return (0);
+}
+
 size_t
 relic_idtab_bytes_after_reserve(const relic_idtab_t *table, size_t added)
 {
 	size_t capacity;
 
-	if (idtab_capacity_holds(table->capacity, table->count, added))
-		return (relic_idtab_bytes(table));
-
-	capacity = idtab_capacity_for(table, added);
-	if (capacity == 0)
+	if (!relic_idtab_capacity_after_reserve(table, added, &capacity))
 		return (relic_idtab_bytes(table));
 
 	return (capacity * idtab_slot_bytes(table));

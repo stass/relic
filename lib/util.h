@@ -437,6 +437,25 @@ void	 relic_idtab_place(relic_idtab_t *table, uint32_t hash, uint32_t id);
 bool	 relic_idtab_has_room(const relic_idtab_t *table, size_t added);
 
 /*
+ * A reservation by projection, for an owner that decides what every table
+ * grows to before it grows any.
+ *
+ * relic_idtab_capacity_after_reserve() stores in *capacityp the capacity
+ * relic_idtab_reserve() would leave the table with after making room for
+ * `added` more entries, its own when it has room already.  It returns
+ * false, with the table's own capacity stored, when the reservation would
+ * refuse them: no table whose size a size_t can express holds them, or
+ * the table's memory was given and holds too few.
+ * relic_idtab_grow_to() then grows the table to such a capacity, exactly,
+ * leaving it as it is when that is its own; it returns 0, or -1 with the
+ * table as it was when memory ran out.
+ */
+bool	 relic_idtab_capacity_after_reserve(const relic_idtab_t *table,
+	    size_t added, size_t *capacityp);
+int	 relic_idtab_grow_to(relic_idtab_t *table, size_t capacity,
+	    relic_rehash_fn rehash, void *ctx);
+
+/*
  * A reservation in two halves, for an owner that allocates while it may
  * still fail and moves the entries later, possibly on another thread and
  * alongside other tables' moves.

@@ -95,6 +95,13 @@ struct relic_staged_set {
 	const relic_relation_t *store;	/* base store as staging began */
 };
 
+/* The limit, if any, that staging more new tuples would pass. */
+enum staging_verdict {
+	STAGING_FITS,
+	STAGING_TUPLES,
+	STAGING_MEMORY
+};
+
 static int	 admit_new_tuple(relic_staging_t *staging,
 		    const relic_staged_set_t *set);
 static size_t	 find_set(const relic_staging_t *staging,
@@ -103,15 +110,20 @@ static relic_pred_id_t first_growing(const relic_staging_t *staging,
 		    const relic_staged_set_t *set);
 static bool	 held_by_store(const relic_staged_set_t *set,
 		    const relic_dom_t *tuple, uint64_t hash);
+static enum staging_verdict judge_staging(const relic_staging_t *staging,
+		    size_t floor_bytes, size_t row, size_t added,
+		    size_t value_bytes);
 static int	 prepare_actions(relic_staging_t *staging,
 		    relic_base_action_t **actionsp, size_t *countp);
 static void	 release_actions(relic_base_action_t *actions, size_t count);
-static size_t	 row_bytes(const relic_staged_set_t *set);
+static size_t	 row_bytes(uint16_t arity);
 static int	 set_add(relic_staging_t *staging, relic_staged_set_t *set,
 		    const relic_dom_t *tuple);
 static int	 staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 		    relic_staged_set_t **setp);
 static uint32_t	 staging_rehash(uint32_t id, void *ctx);
+static size_t	 store_rows_bytes(const relic_relation_t *store,
+		    uint16_t arity);
 
 void
 relic_staging_init(relic_staging_t *staging, relic_t *ctx)
@@ -163,11 +175,12 @@ relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
 /*
  * Staging a batch of tuples at once, which a batch import does with a
  * window's: relic_staging_builder() gives the builder the batch's tuples
- * are to be new to, relic_staging_admits() whether the limits admit the
- * new ones, relic_staging_reserve() makes room for them,
- * relic_staging_stripe_fills() describes where the parts filling each
- * canonical stripe write them, and relic_staging_admit() then counts them,
- * as relic_staging_add() would have staged and counted each one at a time.
+ * are to be new to, relic_staging_admits() whether the builder can grow
+ * for the new ones and the limits admit them, relic_staging_reserve()
+ * makes room for them, relic_staging_stripe_fills() describes where the
+ * parts filling each canonical stripe write them, and relic_staging_admit()
+ * then counts them, as relic_staging_add() would have staged and counted
+ * each one at a time.
  */
 
 /*
@@ -187,66 +200,49 @@ relic_staging_builder(const relic_staging_t *staging, relic_pred_id_t pred)
 }
 
 /*
- * Whether staging `added` new tuples of `pred`, with the value table and
- * the pool holding `value_bytes`, passes every check relic_staging_add()
- * would make of them one at a time: the builder can hold them, and the
- * limits admit them.  Those checks only grow with each tuple, so checking
- * them at the last tuple, with the values' final bytes, checks every one.
- * It reports nothing and changes nothing.
+ * Whether staging the new tuples of `pred` that `growth` counts by stripe,
+ * with the value table and the pool holding `value_bytes`, passes every
+ * check relic_staging_add() would make of them one at a time: the builder
+ * can grow for them, as relic_builder_project() judges, and the limits
+ * admit them, as judge_staging() judges.  Those checks only grow with
+ * each tuple, so asking them of all the tuples, with the values' final
+ * bytes, asks them of every one.  It reports nothing and changes nothing.
  *
- * The tuple limit is admit_new_tuple()'s, asked of the last of `added`:
- * the base stores' facts and every new one, those staged and these, within
- * it, each difference taken only once the one before it is known not to
- * wrap.  The floor is admit_new_tuple()'s too, and when `pred` has no
- * staged set yet it includes the rows of its store, which staging_set_of()
- * adds when the first tuple begins the set.
+ * When `pred` has no staged set yet, the builder judged is the empty one
+ * staging_set_of() would begin, and the floor gains the rows of its store,
+ * store_rows_bytes(), as staging_set_of() adds them when the first tuple
+ * begins the set.
  */
 bool
 relic_staging_admits(const relic_staging_t *staging, relic_pred_id_t pred,
-    size_t added, size_t value_bytes)
+    const relic_tuple_growth_t *growth, size_t value_bytes)
 {
-	const relic_relation_t *store;
-	const relic_account_t *account;
-	size_t position;
-	size_t held;
+	relic_builder_t empty;
+	relic_builder_projection_t projection;
+	const relic_builder_t *builder;
+	size_t added;
 	size_t floor_bytes;
-	size_t max_tuples;
-	size_t row;
-	uint16_t arity;
+	size_t position;
 
+	added = relic_tuple_growth_total(growth);
 	if (added == 0)
 		return (true);
 
 	position = find_set(staging, pred);
-	arity = relic_pred_of(staging->ctx, pred)->arity;
-	row = (size_t)arity * sizeof(relic_dom_t);
-	held = position < staging->set_count ?
-	    relic_builder_count(&staging->sets[position].builder) : 0;
-	if (added > RELIC_TUPLE_MAX - held ||
-	    (arity > 0 && held + added > SIZE_MAX / arity))
-		return (false);
-
-	max_tuples = staging->ctx->config.max_tuples;
-	if (relic_limit_set(max_tuples) &&
-	    (staging->base_tuples > max_tuples ||
-	    added > max_tuples - staging->base_tuples ||
-	    staging->new_tuples > max_tuples - staging->base_tuples - added))
-		return (false);
-
 	floor_bytes = staging->columns_floor;
-	if (position == staging->set_count) {
-		store = relic_base_store(staging->ctx, pred);
-		if (store != NULL)
-			floor_bytes = relic_saturating_sum(floor_bytes,
-			    relic_saturating_product(
-			    relic_relation_count(store), row));
+	if (position < staging->set_count) {
+		builder = &staging->sets[position].builder;
+	} else {
+		relic_builder_init(&empty, staging->ctx, pred);
+		builder = &empty;
+		floor_bytes = relic_saturating_sum(floor_bytes,
+		    store_rows_bytes(relic_base_store(staging->ctx, pred),
+		    builder->arity));
 	}
-	floor_bytes = relic_saturating_sum(relic_saturating_sum(floor_bytes,
-	    relic_saturating_product(added, row)), value_bytes);
-	account = &staging->ctx->account;
 
-	return (!relic_limit_set(account->limit) ||
-	    floor_bytes <= account->limit);
+	return (relic_builder_project(builder, growth, &projection) ==
+	    RELIC_BUILDER_FITS && judge_staging(staging, floor_bytes,
+	    row_bytes(builder->arity), added, value_bytes) == STAGING_FITS);
 }
 
 /*
@@ -302,7 +298,8 @@ relic_staging_admit(relic_staging_t *staging, relic_pred_id_t pred,
 	relic_builder_admit(&set->builder, batch);
 	staging->new_tuples += batch->count;
 	staging->columns_floor = relic_saturating_sum(staging->columns_floor,
-	    relic_saturating_product(batch->count, row_bytes(set)));
+	    relic_saturating_product(batch->count,
+	    row_bytes(set->builder.arity)));
 }
 
 /*
@@ -413,27 +410,60 @@ admit_new_tuple(relic_staging_t *staging, const relic_staged_set_t *set)
 {
 	const relic_account_t *account;
 	relic_t *ctx;
-	size_t floor_bytes;
-	size_t max_tuples;
 
 	ctx = staging->ctx;
 	account = &ctx->account;
-	max_tuples = ctx->config.max_tuples;
-
-	if (relic_limit_set(max_tuples) &&
-	    (staging->base_tuples > max_tuples ||
-	    staging->new_tuples >= max_tuples - staging->base_tuples))
-		return (relic_bases_refuse(ctx, "tuples", max_tuples,
-		    first_growing(staging, set)));
-
-	floor_bytes = relic_saturating_sum(
-	    relic_saturating_sum(account->value_bytes, account->pool_bytes),
-	    relic_saturating_sum(staging->columns_floor, row_bytes(set)));
-	if (relic_limit_set(account->limit) && floor_bytes > account->limit)
+	switch (judge_staging(staging, staging->columns_floor,
+	    row_bytes(set->builder.arity), 1,
+	    relic_saturating_sum(account->value_bytes, account->pool_bytes))) {
+	case STAGING_FITS:
+		break;
+	case STAGING_TUPLES:
+		return (relic_bases_refuse(ctx, "tuples",
+		    ctx->config.max_tuples, first_growing(staging, set)));
+	case STAGING_MEMORY:
 		return (relic_bases_refuse(ctx, "memory", account->limit,
 		    first_growing(staging, set)));
+	}
 
 	return (0);
+}
+
+/*
+ * The limit, if any, that staging `added` more new tuples, each `row`
+ * bytes in its store's columns, would pass.  Staging one tuple and
+ * proving a window's both ask this, so they refuse the same tuples.
+ *
+ * The tuple limit holds the base stores' facts and every new one, those
+ * staged and these.  The memory limit holds the floor: `floor_bytes`, the
+ * columns of the loaded predicates' stores before these tuples, plus their
+ * rows, plus `value_bytes`, what the value table and the pool hold.
+ */
+static enum staging_verdict
+judge_staging(const relic_staging_t *staging, size_t floor_bytes,
+    size_t row, size_t added, size_t value_bytes)
+{
+	const relic_account_t *account;
+	size_t floor_after;
+	size_t max_tuples;
+	size_t room;
+
+	max_tuples = staging->ctx->config.max_tuples;
+	if (relic_limit_set(max_tuples)) {
+		if (staging->base_tuples > max_tuples)
+			return (STAGING_TUPLES);
+		room = max_tuples - staging->base_tuples;
+		if (added > room || staging->new_tuples > room - added)
+			return (STAGING_TUPLES);
+	}
+
+	account = &staging->ctx->account;
+	floor_after = relic_saturating_sum(relic_saturating_sum(floor_bytes,
+	    relic_saturating_product(added, row)), value_bytes);
+	if (relic_limit_set(account->limit) && floor_after > account->limit)
+		return (STAGING_MEMORY);
+
+	return (STAGING_FITS);
 }
 
 /*
@@ -455,11 +485,26 @@ first_growing(const relic_staging_t *staging, const relic_staged_set_t *set)
 	return (set->builder.pred);
 }
 
-/* The bytes one tuple of `set`'s predicate takes in its store's columns. */
+/* The bytes one tuple of `arity` columns takes in its store's columns. */
 static size_t
-row_bytes(const relic_staged_set_t *set)
+row_bytes(uint16_t arity)
 {
-	return ((size_t)set->builder.arity * sizeof(relic_dom_t));
+	return ((size_t)arity * sizeof(relic_dom_t));
+}
+
+/*
+ * The bytes the columns of `store`, a base store of `arity` columns or
+ * NULL when its predicate has none yet, add to the floor as its
+ * predicate's set begins.
+ */
+static size_t
+store_rows_bytes(const relic_relation_t *store, uint16_t arity)
+{
+	if (store == NULL)
+		return (0);
+
+	return (relic_saturating_product(relic_relation_count(store),
+	    row_bytes(arity)));
 }
 
 /*
@@ -497,10 +542,8 @@ staging_set_of(relic_staging_t *staging, relic_pred_id_t pred,
 	set = &staging->sets[staging->set_count];
 	relic_builder_init(&set->builder, staging->ctx, pred);
 	set->store = relic_base_store(staging->ctx, pred);
-	if (set->store != NULL)
-		staging->columns_floor = relic_saturating_sum(
-		    staging->columns_floor, relic_saturating_product(
-		    relic_relation_count(set->store), row_bytes(set)));
+	staging->columns_floor = relic_saturating_sum(staging->columns_floor,
+	    store_rows_bytes(set->store, set->builder.arity));
 
 	staging->set_count++;
 	relic_idtab_place(&staging->by_pred, hash,
@@ -582,7 +625,7 @@ set_add(relic_staging_t *staging, relic_staged_set_t *set,
 
 	staging->new_tuples++;
 	staging->columns_floor = relic_saturating_sum(staging->columns_floor,
-	    row_bytes(set));
+	    row_bytes(set->builder.arity));
 
 	return (0);
 }

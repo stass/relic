@@ -106,6 +106,8 @@ static size_t	 integer_table_bytes_after(const relic_valtab_t *table,
 		    size_t fresh_integers);
 static bool	 integer_table_has_room(const relic_valtab_t *table,
 		    size_t count);
+static bool	 integers_can_number(const relic_valtab_t *table,
+		    size_t count);
 static int	 reserve_integers(relic_t *ctx, size_t count);
 static size_t	 value_table_bytes_after(const relic_valtab_t *table,
 		    size_t fresh_integers, uint32_t symbol);
@@ -431,6 +433,19 @@ admit_value_table(relic_t *ctx, size_t fresh_integers, uint32_t symbol)
 }
 
 /*
+ * Whether `count` more integers can be numbered, the table then holding no
+ * more than a domain identifier's position can name.  Interning one
+ * integer and committing a batch's both ask this, and the batch's proof
+ * asks it through relic_pending_fits(), so they refuse the same integers.
+ */
+static bool
+integers_can_number(const relic_valtab_t *table, size_t count)
+{
+	return (table->integer_count <= RELIC_INTEGER_MAX &&
+	    count <= RELIC_INTEGER_MAX - table->integer_count);
+}
+
+/*
  * Whether the integer table's array and index already have room for `count`
  * more integers, so that reserving them grows nothing.
  */
@@ -466,7 +481,7 @@ reserve_integers(relic_t *ctx, size_t count)
 	table = &ctx->values;
 	if (count == 0)
 		return (0);
-	if (count > RELIC_INTEGER_MAX - table->integer_count)
+	if (!integers_can_number(table, count))
 		return (-1);
 	if (!integer_table_has_room(table, count) &&
 	    !admit_value_table(ctx, count, 0))
@@ -554,7 +569,7 @@ intern_integer(relic_t *ctx, int64_t integer, relic_dom_t *domp)
 	 * would then treat as a different value.
 	 */
 	if (reserve_integers(ctx, 1) != 0) {
-		if (table->integer_count >= RELIC_INTEGER_MAX)
+		if (!integers_can_number(table, 1))
 			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct integers");
 		else
@@ -1269,8 +1284,7 @@ relic_pending_append(relic_t *ctx, const relic_pending_map_t *map)
 bool
 relic_pending_fits(const relic_t *ctx, const relic_pending_map_t *map)
 {
-	return (map->fresh_count <= RELIC_INTEGER_MAX -
-	    ctx->values.integer_count &&
+	return (integers_can_number(&ctx->values, map->fresh_count) &&
 	    relic_symbol_has_room(ctx, map->string_count));
 }
 
@@ -1283,8 +1297,7 @@ int
 relic_pending_commit(relic_t *ctx, relic_pending_map_t *map)
 {
 	if (relic_pending_reserve(ctx, map) != 0) {
-		if (map->fresh_count > RELIC_INTEGER_MAX -
-		    ctx->values.integer_count)
+		if (!integers_can_number(&ctx->values, map->fresh_count))
 			relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 			    "too many distinct integers");
 		else if (!relic_symbol_has_room(ctx, map->string_count))

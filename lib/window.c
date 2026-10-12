@@ -284,9 +284,8 @@ piece_decode(const relic_window_job_t *job, relic_window_piece_t *piece)
 
 /*
  * Give a field the token of its value under its kept column's type: the
- * checks are the ones interning the field one at a time makes, without
- * the diagnostics.  Returns 0, or -1 when the column refuses the field or
- * memory ran out.
+ * verdict is the one the field consumer reports, without the diagnostic.
+ * Returns 0, or -1 when the column refuses the field or memory ran out.
  */
 static int
 decode_field(const relic_t *ctx, enum relic_column column,
@@ -296,21 +295,15 @@ decode_field(const relic_t *ctx, enum relic_column column,
 	relic_pending_t value;
 
 	bzero(&value, sizeof(value));
+	if (relic_judge_field(column, event->bytes, event->length,
+	    &value.u.integer) != RELIC_FIELD_VALID)
+		return (-1);
 	if (column == RELIC_COLUMN_INTEGER) {
-		if (relic_lex_integer(event->bytes, event->length,
-		    &value.u.integer) != RELIC_INTEGER_VALID)
-			return (-1);
 		value.kind = RELIC_PENDING_INTEGER;
 		return (piece_value(window, piece, &value, NULL,
 		    relic_pending_hash(ctx, &value, NULL), decodedp,
 		    tokenp));
 	}
-
-	if (column == RELIC_COLUMN_SYMBOL &&
-	    !relic_lex_is_symbol(event->bytes, event->length))
-		return (-1);
-	if (event->length > RELIC_STRING_LENGTH_MAX)
-		return (-1);
 
 	value.kind = column == RELIC_COLUMN_SYMBOL ? RELIC_PENDING_SYMBOL :
 	    RELIC_PENDING_TEXT;
@@ -318,6 +311,37 @@ decode_field(const relic_t *ctx, enum relic_column column,
 
 	return (piece_value(window, piece, &value, event->bytes,
 	    relic_pending_hash(ctx, &value, event->bytes), decodedp, tokenp));
+}
+
+enum relic_field_verdict
+relic_judge_field(enum relic_column column, const char *bytes,
+    size_t length, int64_t *integerp)
+{
+	switch (column) {
+	case RELIC_COLUMN_INTEGER:
+		switch (relic_lex_integer(bytes, length, integerp)) {
+		case RELIC_INTEGER_VALID:
+			return (RELIC_FIELD_VALID);
+		case RELIC_INTEGER_OUT_OF_RANGE:
+			return (RELIC_FIELD_OUT_OF_RANGE);
+		case RELIC_INTEGER_MALFORMED:
+			break;
+		}
+		return (RELIC_FIELD_NOT_INTEGER);
+	case RELIC_COLUMN_SYMBOL:
+		if (!relic_lex_is_symbol(bytes, length))
+			return (RELIC_FIELD_NOT_SYMBOL);
+		/* FALLTHROUGH */
+	case RELIC_COLUMN_STRING:
+		return (length > RELIC_STRING_LENGTH_MAX ?
+		    RELIC_FIELD_TOO_LONG : RELIC_FIELD_VALID);
+	case RELIC_COLUMN_SKIP:
+		break;
+	}
+
+	/* Unreachable: a skipped field is dropped before it is judged. */
+	assert(!"a field judged under no kept column");
+	return (RELIC_FIELD_NOT_SYMBOL);
 }
 
 /*

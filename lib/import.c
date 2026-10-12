@@ -242,6 +242,8 @@ static enum import_progress take_record(importer_t *importer);
 static bool	 validate_import(relic_t *ctx, const relic_import_t *import);
 static bool	 window_admissible(const importer_t *importer,
 		    size_t value_bytes);
+static void	 window_growth(const relic_window_t *window,
+		    relic_tuple_growth_t *growth);
 
 /*
  * The reader.
@@ -1594,6 +1596,7 @@ analyze_window(importer_t *importer, size_t *value_bytesp)
 static bool
 window_admissible(const importer_t *importer, size_t value_bytes)
 {
+	relic_tuple_growth_t growth;
 	const relic_window_t *window;
 	const relic_t *ctx;
 	size_t current;
@@ -1605,8 +1608,20 @@ window_admissible(const importer_t *importer, size_t value_bytes)
 	    relic_account_exceeds(&ctx->account, current, value_bytes)))
 		return (false);
 
+	window_growth(window, &growth);
+
 	return (relic_staging_admits(&importer->staging, importer->pred,
-	    window->fresh_count, value_bytes));
+	    &growth, value_bytes));
+}
+
+/* The window's new tuples, counted by the canonical stripe each falls in. */
+static void
+window_growth(const relic_window_t *window, relic_tuple_growth_t *growth)
+{
+	size_t s;
+
+	for (s = 0; s < RELIC_STRIPES; s++)
+		growth->by_stripe[s] = window->fresh_by_stripe[s];
 }
 
 /*
@@ -1630,12 +1645,10 @@ publish_window(importer_t *importer)
 	relic_builder_batch_t batch;
 	window_fill_t fill;
 	relic_t *ctx;
-	size_t s;
 
 	ctx = importer->ctx;
 	window = &importer->window;
-	for (s = 0; s < RELIC_STRIPES; s++)
-		growth.by_stripe[s] = window->fresh_by_stripe[s];
+	window_growth(window, &growth);
 
 	if (importer->mapped &&
 	    relic_pending_reserve(ctx, &importer->map) != 0) {
@@ -1859,8 +1872,9 @@ take_field(importer_t *importer, const relic_table_event_t *event)
 
 /*
  * The value a field holds under its kept column's type, interned as a
- * program's constant is.  Returns false having reported a field the type
- * refuses, or memory.
+ * program's constant is once relic_judge_field() admits it, the verdict
+ * a batch's decoding parts ask too.  Returns false having reported a field
+ * the verdict refuses, or a refusal of interning.
  *
  * A field is located at its first byte, which for a quoted csv field is the
  * opening quote, and is quoted in a message as it was decoded, the value it
@@ -1873,49 +1887,38 @@ field_value(relic_t *ctx, enum relic_column column,
 	char described[IMPORT_FIELD_TEXT_MAX];
 	int64_t integer;
 
-	switch (column) {
-	case RELIC_COLUMN_SYMBOL:
-		if (!relic_lex_is_symbol(event->bytes, event->length)) {
-			relic_diag_error(ctx, RELIC_ERROR_REJECTED,
-			    &event->where, "expected a symbol, found %s",
-			    describe_field(event->bytes, event->length,
-			    described, sizeof(described)));
-			return (false);
-		}
-		return (relic_value_intern_bytes(ctx, RELIC_SYMBOL,
-		    event->bytes, event->length, valuep) == 0);
-	case RELIC_COLUMN_STRING:
-		return (relic_value_intern_bytes(ctx, RELIC_STRING,
-		    event->bytes, event->length, valuep) == 0);
-	case RELIC_COLUMN_INTEGER:
-		switch (relic_lex_integer(event->bytes, event->length,
-		    &integer)) {
-		case RELIC_INTEGER_VALID:
+	switch (relic_judge_field(column, event->bytes, event->length,
+	    &integer)) {
+	case RELIC_FIELD_VALID:
+		if (column == RELIC_COLUMN_INTEGER)
 			return (relic_value_intern_integer(ctx, integer,
 			    valuep) == 0);
-		case RELIC_INTEGER_MALFORMED:
-			relic_diag_error(ctx, RELIC_ERROR_REJECTED,
-			    &event->where, "expected an integer, found %s",
-			    describe_field(event->bytes, event->length,
-			    described, sizeof(described)));
-			return (false);
-		case RELIC_INTEGER_OUT_OF_RANGE:
-			relic_diag_error(ctx, RELIC_ERROR_REJECTED,
-			    &event->where, "integer out of range: %s",
-			    describe_field(event->bytes, event->length,
-			    described, sizeof(described)));
-			return (false);
-		}
-		break;
-	case RELIC_COLUMN_SKIP:
-		break;
+		return (relic_value_intern_bytes(ctx,
+		    column == RELIC_COLUMN_SYMBOL ? RELIC_SYMBOL :
+		    RELIC_STRING, event->bytes, event->length, valuep) == 0);
+	case RELIC_FIELD_TOO_LONG:
+		relic_symbol_refuse_length(ctx, &event->where, event->length);
+		return (false);
+	case RELIC_FIELD_NOT_SYMBOL:
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
+		    "expected a symbol, found %s", describe_field(event->bytes,
+		    event->length, described, sizeof(described)));
+		return (false);
+	case RELIC_FIELD_NOT_INTEGER:
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
+		    "expected an integer, found %s",
+		    describe_field(event->bytes, event->length, described,
+		    sizeof(described)));
+		return (false);
+	case RELIC_FIELD_OUT_OF_RANGE:
+		relic_diag_error(ctx, RELIC_ERROR_REJECTED, &event->where,
+		    "integer out of range: %s", describe_field(event->bytes,
+		    event->length, described, sizeof(described)));
+		return (false);
 	}
 
-	/*
-	 * Unreachable: the plan holds only the four types, and the caller
-	 * drops a skipped field.
-	 */
-	assert(!"a field typed by no kept column");
+	/* Unreachable: every verdict is answered above. */
+	assert(!"a field verdict answered by no case");
 	return (false);
 }
 

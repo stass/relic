@@ -262,4 +262,26 @@ void	 relic_window_resolve_part(void *job, size_t piece,
 void	 relic_window_classify_part(void *job, size_t stripe,
 	    size_t worker_index);
 
+/* Whether a field's bytes are a value of its column's type, or why not. */
+enum relic_field_verdict {
+	RELIC_FIELD_VALID,
+	RELIC_FIELD_NOT_SYMBOL,
+	RELIC_FIELD_NOT_INTEGER,
+	RELIC_FIELD_OUT_OF_RANGE,
+	RELIC_FIELD_TOO_LONG
+};
+
+/*
+ * relic_judge_field() is the verdict on a field's `length` bytes under its
+ * kept column's type, which the importer's field consumer turns into its
+ * diagnostic and a decoding part into an undecoded piece, so that both
+ * refuse the same fields: a symbol column's must be one symbol, an integer
+ * column's one integer in range, and a symbol's or a string's no longer
+ * than a value may be.  A symbol's grammar is judged before its length, so
+ * a field that is no symbol is refused as that however long it is.  A
+ * valid integer is stored in *integerp.  `column` must be kept.
+ */
+enum relic_field_verdict relic_judge_field(enum relic_column column,
+	    const char *bytes, size_t length, int64_t *integerp);
+
 #endif /* RELIC_WINDOW_H */

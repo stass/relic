@@ -131,6 +131,10 @@ static void	 append_builder(relic_relation_t *store,
 static size_t	 base_bytes(const relic_t *ctx) RELIC_UNUSED;
 static int	 bases_fit(relic_t *ctx, const relic_base_action_t *actions,
 		    size_t count);
+static bool	 builder_has_room_for_one(const relic_builder_t *builder,
+		    uint64_t hash);
+static int	 builder_realize(relic_builder_t *builder,
+		    const relic_builder_projection_t *projection);
 static uint32_t	 builder_rehash(uint32_t id, void *ctx);
 static relic_tuple_id_t payload_append(relic_payload_t *payload,
 		    uint16_t arity, const relic_dom_t *columns, uint64_t hash);
@@ -272,10 +276,9 @@ payload_find(const relic_payload_t *payload, uint16_t arity,
 /*
  * Make room in `payload` for one more tuple, of wide hash `hash`: a slot in
  * its canonical stripe, which `rehash` and `rehash_ctx` let grow, and
- * `needed_columns` columns in all.  Every one-tuple growth, an insertion's
- * or a builder's, goes through this, which is what lets an empty store
- * adopt a builder's payload with the capacities its own insertions would
- * have reached.
+ * `needed_columns` columns in all.  Every insertion into a relation grows
+ * through this, and a builder grows as relic_builder_project() projects,
+ * which for one tuple is this growth.
  * Returns 0, or -1 when memory ran out, having reported nothing; what was
  * grown before the failure stays, and holds no new tuple.
  */
@@ -2517,85 +2520,207 @@ builder_rehash(uint32_t id, void *ctx)
 
 /*
  * Add `columns`, of wide hash `hash`, which the builder lacks, as its last
- * tuple, growing its columns and canonical stripe as an insertion into a
- * relation grows them.  Room is made before the tuple is stored, so a
- * failure leaves the builder holding what it held.  Returns 0, or -1 having
- * reported that the builder is full or that memory ran out.
+ * tuple, growing its columns and canonical stripe as relic_builder_project()
+ * projects one tuple's growth.  Room is made before the tuple is stored, so
+ * a failure leaves the builder holding what it held.  Returns 0, or -1
+ * having reported that the builder is full or that memory ran out.
  */
 int
 relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
     const relic_dom_t *columns, uint64_t hash)
 {
-	relic_payload_t *payload;
-	size_t needed_columns;
+	relic_builder_projection_t projection;
+	relic_tuple_growth_t growth;
 	char described[RELIC_PRED_TEXT_MAX];
 
-	payload = &builder->payload;
 	assert(!relic_builder_contains_hashed(builder, columns, hash));
 
-	if (payload->count >= RELIC_TUPLE_MAX ||
-	    !columns_holding(payload->count + 1, builder->arity,
-	    &needed_columns)) {
+	/*
+	 * Most tuples find room already there, and a projection that would
+	 * grow nothing costs more than the tuple's append.
+	 */
+	if (builder_has_room_for_one(builder, hash)) {
+		(void)payload_append(&builder->payload, builder->arity,
+		    columns, hash);
+		return (0);
+	}
+
+	bzero(&growth, sizeof(growth));
+	growth.by_stripe[relic_hash_stripe(hash)] = 1;
+	switch (relic_builder_project(builder, &growth, &projection)) {
+	case RELIC_BUILDER_FITS:
+		break;
+	case RELIC_BUILDER_FULL:
 		relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
 		    "too many facts of %s in one load",
 		    relic_pred_describe(ctx, builder->pred, described,
 		    sizeof(described)));
 		return (-1);
-	}
-
-	if (payload_reserve_one(payload, hash, needed_columns, builder_rehash,
-	    builder) != 0) {
+	case RELIC_BUILDER_TOO_LARGE:
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
 
-	(void)payload_append(payload, builder->arity, columns, hash);
+	if (builder_realize(builder, &projection) != 0) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	(void)payload_append(&builder->payload, builder->arity, columns, hash);
 
 	return (0);
 }
 
 /*
  * Make room in `builder` for the tuples `growth` counts by stripe, all of
- * them ones it lacks, reaching the capacities adding them one at a time
- * would: each stripe reserved for its own count reaches what reserving one
- * at a time reaches, and the columns grow stepwise as payload_reserve_one()
- * grows them.  Returns 0, or -1 having reported nothing, when the builder
- * would hold more than it can or memory ran out; what grew stays, and
- * holds no new tuple.
+ * them ones it lacks, as relic_builder_project() projects.  Returns 0, or
+ * -1 having reported nothing, when the projection finds the builder cannot
+ * grow that far or memory ran out; what grew stays, and holds no new
+ * tuple.
  */
 int
 relic_builder_reserve(relic_builder_t *builder,
     const relic_tuple_growth_t *growth)
 {
-	relic_payload_t *payload;
-	relic_dom_t *columns;
+	relic_builder_projection_t projection;
+
+	if (relic_builder_project(builder, growth, &projection) !=
+	    RELIC_BUILDER_FITS)
+		return (-1);
+
+	return (builder_realize(builder, &projection));
+}
+
+/*
+ * What `builder` grows to for `growth`, tuples it lacks counted by stripe,
+ * in *projection: the capacities adding them one at a time would reach.
+ * Each stripe reserved for its own count reaches what reserving one at a
+ * time reaches, and the columns grow stepwise, a tuple's columns a step,
+ * which for one tuple is the growth payload_reserve_one() makes for a
+ * relation's insertion; so an empty store adopts a builder's payload with
+ * the capacities its own insertions would have reached, however the
+ * tuples arrived.  Zero growth projects the builder as it is.
+ *
+ * Every count and capacity a reservation forms is checked here, the
+ * column bytes among them, so that a growth this finds to fit fails to be
+ * reserved only when memory runs out, and a growth it refuses is refused
+ * by the scalar and the batch path alike.  The held tuples' columns, the
+ * count times the arity, lie within the column capacity, so that product
+ * is the one not checked.
+ */
+enum relic_builder_verdict
+relic_builder_project(const relic_builder_t *builder,
+    const relic_tuple_growth_t *growth,
+    relic_builder_projection_t *projection)
+{
+	const relic_payload_t *payload;
 	size_t needed_columns;
 	size_t added;
 	size_t s;
 
 	payload = &builder->payload;
+	assert(payload->count * builder->arity <= payload->column_capacity);
+	projection->column_capacity = payload->column_capacity;
+	for (s = 0; s < RELIC_STRIPES; s++)
+		projection->stripe_capacity[s] = payload->index[s].capacity;
+
 	added = relic_tuple_growth_total(growth);
 	if (added == 0)
-		return (0);
+		return (RELIC_BUILDER_FITS);
 	if (added > RELIC_TUPLE_MAX - payload->count ||
 	    !columns_holding(payload->count + added, builder->arity,
 	    &needed_columns))
-		return (-1);
+		return (RELIC_BUILDER_FULL);
+
+	projection->column_capacity = relic_grow_array_capacity_stepwise(
+	    payload->column_capacity, payload->count * builder->arity, added,
+	    builder->arity);
+	if (projection->column_capacity == 0 ||
+	    projection->column_capacity > SIZE_MAX / sizeof(*payload->columns))
+		return (RELIC_BUILDER_TOO_LARGE);
 
 	for (s = 0; s < RELIC_STRIPES; s++) {
 		if (growth->by_stripe[s] > 0 &&
-		    relic_idtab_reserve(&payload->index[s],
-		    growth->by_stripe[s], builder_rehash, builder) != 0)
+		    !relic_idtab_capacity_after_reserve(&payload->index[s],
+		    growth->by_stripe[s], &projection->stripe_capacity[s]))
+			return (RELIC_BUILDER_TOO_LARGE);
+	}
+
+	return (RELIC_BUILDER_FITS);
+}
+
+/*
+ * Whether `builder` already has room for one more tuple, of wide hash
+ * `hash`, so that relic_builder_project() would find its growth to fit and
+ * grow nothing: an identifier is left, the columns hold the tuple's by the
+ * rule relic_grow_array() grows by, and the hash's stripe has room.  A
+ * debug build asks the projection the same question.
+ */
+static bool
+builder_has_room_for_one(const relic_builder_t *builder, uint64_t hash)
+{
+	const relic_payload_t *payload;
+	size_t needed_columns;
+	bool room;
+
+	payload = &builder->payload;
+	room = payload->count < RELIC_TUPLE_MAX &&
+	    columns_holding(payload->count + 1, builder->arity,
+	    &needed_columns) &&
+	    relic_grow_array_holds(payload->column_capacity, needed_columns) &&
+	    relic_idtab_has_room(&payload->index[relic_hash_stripe(hash)], 1);
+#ifndef NDEBUG
+	if (room) {
+		relic_builder_projection_t projection;
+		relic_tuple_growth_t growth;
+		size_t s;
+
+		bzero(&growth, sizeof(growth));
+		growth.by_stripe[relic_hash_stripe(hash)] = 1;
+		assert(relic_builder_project(builder, &growth, &projection) ==
+		    RELIC_BUILDER_FITS);
+		assert(projection.column_capacity == payload->column_capacity);
+		for (s = 0; s < RELIC_STRIPES; s++)
+			assert(projection.stripe_capacity[s] ==
+			    payload->index[s].capacity);
+	}
+#endif
+
+	return (room);
+}
+
+/*
+ * Grow `builder` to `projection`, which relic_builder_project() found to
+ * fit: each array whose projected capacity exceeds its own grown to
+ * exactly that capacity, and every other left as it is, so that the
+ * reservation computes no capacity of its own.  Returns 0, or -1 when
+ * memory ran out, having reported nothing; what grew stays, and holds no
+ * new tuple.
+ */
+static int
+builder_realize(relic_builder_t *builder,
+    const relic_builder_projection_t *projection)
+{
+	relic_payload_t *payload;
+	relic_dom_t *columns;
+	size_t s;
+
+	payload = &builder->payload;
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (relic_idtab_grow_to(&payload->index[s],
+		    projection->stripe_capacity[s], builder_rehash,
+		    builder) != 0)
 			return (-1);
 	}
 
-	columns = relic_grow_array_stepwise(payload->columns,
-	    &payload->column_capacity, payload->count * builder->arity,
-	    added, builder->arity, sizeof(*payload->columns));
-	if (columns == NULL)
-		return (-1);
-	payload->columns = columns;
-	assert(payload->column_capacity >= needed_columns);
+	if (projection->column_capacity > payload->column_capacity) {
+		columns = reallocarray(payload->columns,
+		    projection->column_capacity, sizeof(*payload->columns));
+		if (columns == NULL)
+			return (-1);
+		payload->columns = columns;
+		payload->column_capacity = projection->column_capacity;
+	}
 
 	return (0);
 }

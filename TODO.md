@@ -104,25 +104,6 @@ bound, so an unterminated csv quote buffers the rest of the file. The
 memory limit leaves both out by contract. A bound on either belongs in the
 context's configuration, beside the other limits.
 
-**A batch import's admission proof restates the scalar checks.** [Medium,
-component: `lib/window.c`, `lib/import.c`, `lib/facts.c`, `lib/value.c`]
-A window is admitted only if reading it a field at a time could not fail,
-and the proof holds because each check is copied: `decode_field()` repeats
-`field_value()`'s type checks and `relic_symbol_intern()`'s length
-ceiling, `relic_pending_fits()` the integer ceiling of
-`reserve_integers()`, and `relic_staging_admits()` the limits of
-`admit_new_tuple()`, the builder's ceilings and the floor
-`staging_set_of()` adds. A check added to the scalar path alone lets a
-window admit what a field at a time refuses. The builder's column bytes
-are one such check missing: `relic_staging_admits()` bounds the column
-words, but on a 32-bit build without `max_memory` the next stepwise column
-capacity can overflow its byte size, so a window is admitted and then its
-reservation fails, keeping none of the values a field at a time would
-have interned before the same failure. Give each layer one pure check that
-both paths call, the builder's growth projected once for admission and
-reservation, so the proof is the scalar check applied to the window's
-totals.
-
 **A batch import frames each window on the calling thread.** [Medium,
 component: `lib/import.c`] Framing is one pass of the reader over the
 window, and the pool waits for it. Sampled at eight threads, it is 38% of

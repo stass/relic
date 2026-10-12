@@ -709,7 +709,9 @@ const char *relic_diag_byte(unsigned char byte, char *buffer, size_t size);
  * hash, or RELIC_ID_NONE: the lookup half of interning, which writes
  * nothing.  relic_symbol_pool_bytes() is what the pool occupies -- its
  * entries, its index and its arena of bytes -- which the memory account
- * counts as `pool_bytes`.
+ * counts as `pool_bytes`.  relic_symbol_refuse_length() reports bytes of
+ * `length` too long to be a value, at `where` when the caller knows it,
+ * as interning them reports them.
  */
 const char *relic_symbol_bytes(const relic_t *ctx, uint32_t id,
 	    size_t *lengthp);
@@ -721,6 +723,8 @@ uint32_t relic_symbol_hash(const relic_t *ctx, const void *bytes,
 int	 relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	    uint32_t *idp);
 size_t	 relic_symbol_pool_bytes(const relic_t *ctx);
+void	 relic_symbol_refuse_length(relic_t *ctx,
+	    const relic_location_t *where, size_t length);
 void	 relic_symtab_init(relic_symtab_t *table, uint64_t hash_seed);
 void	 relic_symtab_reset(relic_symtab_t *table);
 
@@ -1487,7 +1491,8 @@ int	 relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
 const relic_builder_t *relic_staging_builder(const relic_staging_t *staging,
 	    relic_pred_id_t pred);
 bool	 relic_staging_admits(const relic_staging_t *staging,
-	    relic_pred_id_t pred, size_t added, size_t value_bytes);
+	    relic_pred_id_t pred, const relic_tuple_growth_t *growth,
+	    size_t value_bytes);
 int	 relic_staging_reserve(relic_staging_t *staging, relic_pred_id_t pred,
 	    const relic_tuple_growth_t *growth);
 void	 relic_staging_stripe_fills(relic_staging_t *staging,
@@ -1681,6 +1686,10 @@ void	 relic_index_link_append(relic_index_t *index,
  * releases what it still holds; relic_builder_contains_hashed() and
  * relic_builder_add_hashed() make it a set, in the order its tuples were
  * added, which relic_builder_count() and relic_builder_tuple() read back.
+ * relic_builder_project() is the one judge of whether a builder can grow
+ * for so many new tuples, by stripe, and of the capacities it grows to;
+ * adding one tuple and reserving a batch both grow as it projects, and a
+ * batch import's proof asks it of a window's new tuples.
  * A batch of tuples it lacks is added in two halves, the fallible first:
  * relic_builder_reserve() makes room for them all, returning -1 with
  * nothing reported when it cannot.  relic_builder_stripe_fills() then
@@ -1817,6 +1826,9 @@ const relic_dom_t *relic_builder_tuple(const relic_builder_t *builder,
 	    size_t position);
 int	 relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
 	    const relic_dom_t *columns, uint64_t hash);
+enum relic_builder_verdict relic_builder_project(
+	    const relic_builder_t *builder, const relic_tuple_growth_t *growth,
+	    relic_builder_projection_t *projection);
 int	 relic_builder_reserve(relic_builder_t *builder,
 	    const relic_tuple_growth_t *growth);
 void	 relic_builder_stripe_fills(relic_builder_t *builder,

@@ -42,6 +42,7 @@ typedef struct relic_append relic_append_t;
 typedef struct relic_append_keys relic_append_keys_t;
 typedef struct relic_base_action relic_base_action_t;
 typedef struct relic_builder_batch relic_builder_batch_t;
+typedef struct relic_builder_projection relic_builder_projection_t;
 typedef struct relic_index_key relic_index_key_t;
 typedef struct relic_index_pending relic_index_pending_t;
 typedef struct relic_index_stripe relic_index_stripe_t;
@@ -355,6 +356,28 @@ struct relic_builder {
 	uint64_t		 hash_seed;
 	relic_pred_id_t		 pred;
 	uint16_t		 arity;
+};
+
+/*
+ * What a builder grows to for a growth, as relic_builder_project() finds
+ * it: the capacity of its columns, in identifiers, and of each stripe of
+ * its canonical index, in slots.  Each is one a reservation can allocate.
+ */
+struct relic_builder_projection {
+	size_t	column_capacity;
+	size_t	stripe_capacity[RELIC_STRIPES];
+};
+
+/*
+ * Why a builder can or cannot grow as asked: FULL when it would hold more
+ * tuples than identifiers number or columns than a size_t counts, and
+ * TOO_LARGE when an array it would grow to holds more bytes than a size_t
+ * counts, which no allocator could serve.
+ */
+enum relic_builder_verdict {
+	RELIC_BUILDER_FITS,
+	RELIC_BUILDER_FULL,
+	RELIC_BUILDER_TOO_LARGE
 };
 
 /*

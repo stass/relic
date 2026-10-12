@@ -149,10 +149,7 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	 * hashing them is the first thing that would read them.
 	 */
 	if (length > RELIC_STRING_LENGTH_MAX) {
-		relic_diag_error(ctx, RELIC_ERROR_REJECTED, NULL,
-		    "a symbol or string of %zu bytes is longer than the %lu "
-		    "a value may hold", length,
-		    (unsigned long)RELIC_STRING_LENGTH_MAX);
+		relic_symbol_refuse_length(ctx, NULL, length);
 		return (-1);
 	}
 
@@ -189,6 +186,15 @@ relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	*idp = (uint32_t)table->count;
 
 	return (0);
+}
+
+void
+relic_symbol_refuse_length(relic_t *ctx, const relic_location_t *where,
+    size_t length)
+{
+	relic_diag_error(ctx, RELIC_ERROR_REJECTED, where,
+	    "a symbol or string of %zu bytes is longer than the %lu a value "
+	    "may hold", length, (unsigned long)RELIC_STRING_LENGTH_MAX);
 }
 
 /*

@@ -31,6 +31,10 @@
 
 #define	SCENARIO_ADOPT		"a store adopts or appends by what it holds"
 #define	SCENARIO_ARITY_ZERO	"a fact of no columns is a fact like any other"
+#define	SCENARIO_BATCH_ROOM \
+	"a batch is staged only where its columns can grow"
+#define	SCENARIO_BUILDER_GROWTH \
+	"a builder grows as insertions grow a relation"
 #define	SCENARIO_NO_TREE	"a load's facts build no statements"
 #define	SCENARIO_FACT_ADD	"an added fact is a load of one"
 #define	SCENARIO_FUNNEL		"a predicate is read from the store it has"
@@ -189,6 +193,10 @@ static void	 an_abandoned_rewrite_leaves_no_warning(void);
 static void	 a_fact_of_no_columns_is_a_fact(void);
 static void	 a_loads_facts_build_no_statements(void);
 static void	 a_store_adopts_or_appends_by_what_it_holds(void);
+static void	 a_batch_is_staged_only_where_its_columns_grow(void);
+static void	 a_builder_grows_as_insertions_grow_a_relation(void);
+static bool	 grown_alike(const relic_builder_t *builder,
+		    const relic_relation_t *relation);
 static bool	 holds_in_order(relic_t *ctx, const char *name,
 		    const char *const *names);
 static size_t	 base_bytes_by_hand(const relic_t *ctx);
@@ -1678,6 +1686,173 @@ base_bytes_by_hand(const relic_t *ctx)
 	return (bytes);
 }
 
+/*
+ * A batch of new tuples is staged only when the builder's columns can grow
+ * to hold them: the capacity adding them one at a time reaches must be a
+ * number of bytes a size_t holds, as well as a number of identifiers.  A
+ * builder of 2^29 pairs whose columns are full passes the second and, with
+ * a 32-bit size_t, fails the first, since one more pair doubles its 2^30
+ * identifiers to 2^31, 2^33 bytes.  The builder's projection, which adding
+ * one tuple grows as, judges the same.  The builder is given those counts
+ * without the columns, which neither check reads.
+ */
+static void
+a_batch_is_staged_only_where_its_columns_grow(void)
+{
+	relic_builder_projection_t projection;
+	relic_tuple_growth_t growth;
+	relic_staging_t staging;
+	const relic_builder_t *staged;
+	relic_builder_t *builder;
+	relic_dom_t tuple[2];
+	relic_pred_id_t pred;
+	diag_log_t log;
+	relic_t *ctx;
+	enum relic_builder_verdict verdict;
+	size_t capacity;
+	size_t count;
+	bool admitted;
+	bool fits;
+
+	ctx = context_with(NULL, NULL, &log);
+	if (ctx == NULL)
+		return;
+	if (relic_pred_intern(ctx, "e", 1, 2, NULL, &pred) != 0 ||
+	    relic_value_intern_bytes(ctx, RELIC_SYMBOL, "a", 1,
+	    &tuple[0]) != 0 ||
+	    relic_value_intern_bytes(ctx, RELIC_SYMBOL, "b", 1,
+	    &tuple[1]) != 0) {
+		check(false, SCENARIO_BATCH_ROOM, "the predicate and its "
+		    "values are interned");
+		relic_destroy(ctx);
+		return;
+	}
+
+	relic_staging_init(&staging, ctx);
+	if (relic_staging_add(&staging, pred, tuple) != 0) {
+		check(false, SCENARIO_BATCH_ROOM, "a tuple is staged");
+		relic_staging_reset(&staging);
+		relic_destroy(ctx);
+		return;
+	}
+	staged = relic_staging_builder(&staging, pred);
+	builder = (relic_builder_t *)(uintptr_t)staged;
+	count = builder->payload.count;
+	capacity = builder->payload.column_capacity;
+	builder->payload.count = (size_t)1 << 29;
+	builder->payload.column_capacity = builder->payload.count * 2;
+
+	fits = ((size_t)1 << 31) <= SIZE_MAX / sizeof(relic_dom_t);
+	bzero(&growth, sizeof(growth));
+	growth.by_stripe[0] = 1;
+	admitted = relic_staging_admits(&staging, pred, &growth, 0);
+	verdict = relic_builder_project(builder, &growth, &projection);
+
+	builder->payload.count = count;
+	builder->payload.column_capacity = capacity;
+	checkf(admitted == fits, SCENARIO_BATCH_ROOM, "one more pair after "
+	    "2^29 should be %s when 2^31 identifiers %s a size_t of bytes",
+	    fits ? "admitted" : "refused", fits ? "fit" : "do not fit");
+	checkf(verdict == (fits ? RELIC_BUILDER_FITS : RELIC_BUILDER_TOO_LARGE),
+	    SCENARIO_BATCH_ROOM, "the builder's projection of one more pair "
+	    "should be %s, not verdict %d", fits ? "that it fits" :
+	    "too large", (int)verdict);
+
+	relic_staging_reset(&staging);
+	relic_destroy(ctx);
+}
+
+/*
+ * A builder grows as a relation of its arity grows by insertion, tuple by
+ * tuple, so that an empty base store adopting its payload holds what its
+ * own insertions would have reached: after each tuple the columns and
+ * every canonical stripe have the same capacities, past the smallest
+ * array and through its doublings, and for arity zero, whose one tuple
+ * has no columns.
+ */
+static void
+a_builder_grows_as_insertions_grow_a_relation(void)
+{
+	static const uint16_t arities[] = { 0, 2 };
+	relic_builder_t builder;
+	char name[8];
+	relic_dom_t tuple[2];
+	relic_relation_t *relation;
+	relic_pred_id_t pred;
+	diag_log_t log;
+	relic_t *ctx;
+	uint64_t hash;
+	size_t count;
+	size_t a;
+	size_t i;
+	bool added;
+	bool grew;
+
+	ctx = context_with(NULL, NULL, &log);
+	if (ctx == NULL)
+		return;
+
+	for (a = 0; a < sizeof(arities) / sizeof(arities[0]); a++) {
+		snprintf(name, sizeof(name), "g%u", (unsigned int)arities[a]);
+		relation = relic_relation_create(ctx, RELIC_ID_NONE, 0,
+		    arities[a]);
+		if (relation == NULL || relic_pred_intern(ctx, name,
+		    strlen(name), arities[a], NULL, &pred) != 0) {
+			check(false, SCENARIO_BUILDER_GROWTH, "a relation and "
+			    "a predicate are made");
+			relic_relation_free(relation);
+			break;
+		}
+		relic_builder_init(&builder, ctx, pred);
+
+		count = arities[a] == 0 ? 1 : 40;
+		grew = true;
+		for (i = 0; i < count && grew; i++) {
+			grew = relic_value_intern_integer(ctx, (int64_t)i,
+			    &tuple[0]) == 0;
+			tuple[1] = tuple[0];
+			hash = relic_tuple_hash(builder.hash_seed, tuple,
+			    arities[a]);
+			grew = grew && relic_builder_add_hashed(ctx, &builder,
+			    tuple, hash) == 0 && relic_relation_insert(ctx,
+			    relation, tuple, &added) == 0 && added &&
+			    grown_alike(&builder, relation);
+			checkf(grew, SCENARIO_BUILDER_GROWTH, "after tuple %zu "
+			    "of arity %u, the builder should hold what the "
+			    "relation holds", i + 1, (unsigned int)arities[a]);
+		}
+
+		relic_builder_reset(&builder);
+		relic_relation_clear(ctx, relation);
+		relic_relation_free(relation);
+	}
+
+	relic_destroy(ctx);
+}
+
+/*
+ * Whether a builder and a relation hold their tuples in arrays of the same
+ * capacities: the columns and every stripe of the canonical index.
+ */
+static bool
+grown_alike(const relic_builder_t *builder, const relic_relation_t *relation)
+{
+	size_t s;
+
+	if (builder->payload.count != relation->payload.count ||
+	    builder->payload.column_capacity !=
+	    relation->payload.column_capacity)
+		return (false);
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (builder->payload.index[s].capacity !=
+		    relation->payload.index[s].capacity)
+			return (false);
+	}
+
+	return (true);
+}
+
 int
 main(void)
 {
@@ -1696,6 +1871,8 @@ main(void)
 	a_fact_of_no_columns_is_a_fact();
 	a_loads_facts_build_no_statements();
 	a_store_adopts_or_appends_by_what_it_holds();
+	a_batch_is_staged_only_where_its_columns_grow();
+	a_builder_grows_as_insertions_grow_a_relation();
 
 	return (check_summary("test_facts"));
 }
