@@ -62,5 +62,8 @@ relic 1.0.0 (unreleased)
     handler, another thread or a callback, and leaves the context ready
     for the next.
   * No runtime dependency beyond the C library; libedit is optional.
+  * Optional ThinLTO builds, enabled with --enable-thinlto, check compiler,
+    archive and linker compatibility during configuration. Object audits
+    cover LLVM bitcode as well as native objects.
   * Built and tested on macOS, on Linux with glibc and with musl, and on
     FreeBSD.

@@ -478,6 +478,15 @@ whose expectations are written by hand, cover that code:
   [release](design-release.md)); and performance stays proportional to size
   on counters, not the clock (`tests/perf.sh`).
 
+The object audits use the configured compiler and symbol reader. Each LLVM
+bitcode object is lowered to a private native object without further
+optimization before its sections or undefined names are inspected. Every
+named data candidate must survive lowering, and every object read must
+succeed. The native format determines symbol spelling independently for
+each object. `tests/object-audits.sh` exercises native and bitcode constants,
+mutable globals, thread-local state, allocator references, paths with spaces
+and corrupt objects, including corruption after a valid object.
+
 Three things are deliberately absent from the differential runs:
 
 * **No limits.** Strategies derive different amounts, so a limit would fire

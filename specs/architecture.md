@@ -987,8 +987,20 @@ packaging skeletons live in `contrib/` rather than forming a second build.
 The tool lives in `cmd/relic/` rather than `usr.bin/relic/` for the same
 reason.
 
+`--enable-thinlto` enables LLVM ThinLTO and defaults to off. Configuration
+checks that the selected compiler emits bitcode and that the selected
+archiver, archive indexer, symbol reader and linker can consume it. A
+requested option that the toolchain cannot support is an error. The flags
+apply to compilation and linking through `CFLAGS` and `CXXFLAGS`, including
+the header and installed-library tests, without changing the requested
+optimization level. The C++ compiler is optional and must link an object
+produced by the C compiler before its header test is enabled. Installed
+static archives contain bitcode and require a compatible toolchain;
+shared libraries and executables contain native code. Runtime dependencies
+are independent of this build option.
+
 `./configure --help` lists the options: debug builds, `-Werror`, threads,
-each sanitizer, coverage, fuzzers and `libedit`. Every installed path
+ThinLTO, each sanitizer, coverage, fuzzers and `libedit`. Every installed path
 derives from an autoconf directory variable, so `--prefix`, `--libdir`,
 `--mandir` and `DESTDIR` relocate the whole install. `make check-asan`,
 `check-ubsan`, `check-lsan`, `check-msan` and `check-tsan` run the suite

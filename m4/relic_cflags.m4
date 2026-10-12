@@ -124,21 +124,36 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 AC_LANG_POP([$1])
 ])
 
-# _RELIC_CXX_LINKS_INSTRUMENTED(RESULT-VAR)
+# _RELIC_CXX_LINKS_LIBRARY_OBJECT(RESULT-VAR)
 # -----------------------------------------
-# Set RESULT-VAR to yes when the C++ compiler links a program compiled and
-# linked with the build's instrumentation, RELIC_SAN_CFLAGS, and to no when
-# it cannot.
-AC_DEFUN([_RELIC_CXX_LINKS_INSTRUMENTED], [
+# A header consumer must link what the C compiler produces, including its
+# bitcode format or instrumentation runtime. Linking an empty C++ program
+# tests only the C++ compiler against itself and cannot establish that.
+AC_DEFUN([_RELIC_CXX_LINKS_LIBRARY_OBJECT], [
+relic_saved_CFLAGS=$CFLAGS
 relic_saved_CXXFLAGS=$CXXFLAGS
-relic_saved_LDFLAGS=$LDFLAGS
-CXXFLAGS="$CXXFLAGS $RELIC_SAN_CFLAGS"
-LDFLAGS="$LDFLAGS $RELIC_SAN_CFLAGS"
-AC_LANG_PUSH([C++])
-AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[]])], [$1=yes], [$1=no])
-AC_LANG_POP([C++])
+relic_saved_LIBS=$LIBS
+CFLAGS="$RELIC_SAN_CFLAGS $CFLAGS"
+CXXFLAGS="$RELIC_SAN_CFLAGS $CXXFLAGS"
+$1=no
+AC_LANG_PUSH([C])
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+int relic_cxx_probe(void);
+int relic_cxx_probe(void) { return (7); }
+]])], [
+    mv conftest.$ac_objext conftest-relic.$ac_objext
+    LIBS="conftest-relic.$ac_objext $LIBS"
+    AC_LANG_PUSH([C++])
+    AC_LINK_IFELSE([AC_LANG_PROGRAM(
+	[[extern "C" int relic_cxx_probe(void);]],
+	[[return (relic_cxx_probe() != 7);]])], [$1=yes])
+    AC_LANG_POP([C++])
+    rm -f conftest-relic.$ac_objext
+])
+AC_LANG_POP([C])
+CFLAGS=$relic_saved_CFLAGS
 CXXFLAGS=$relic_saved_CXXFLAGS
-LDFLAGS=$relic_saved_LDFLAGS
+LIBS=$relic_saved_LIBS
 ])
 
 # RELIC_CHECK_CXX
@@ -172,7 +187,7 @@ AS_IF([test -n "$RELIC_SAN_CFLAGS"],
 	[AC_MSG_WARN([omitting the C++ header test: $CXX is not of the family of $CC])
 	 relic_cxx_works=no])])
 AS_VAR_IF([relic_cxx_works], [yes],
-    [_RELIC_CXX_LINKS_INSTRUMENTED([relic_cxx_works])])
+    [_RELIC_CXX_LINKS_LIBRARY_OBJECT([relic_cxx_works])])
 AC_MSG_CHECKING([whether $CXX can build the C++ header test])
 AC_MSG_RESULT([$relic_cxx_works])
 AM_CONDITIONAL([RELIC_HAVE_CXX], [test "x$relic_cxx_works" = xyes])

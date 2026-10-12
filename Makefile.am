@@ -94,7 +94,7 @@ EXTRA_DIST = autogen.sh EXAMPLES.md LICENSE README.md BENCHMARKS.md bench/baseli
 	compat/README.md examples/embed.c tests/coverage-report.sh \
 	tests/fuzz/corpus tests/fuzz/corpus-import tests/fuzz/corpus-regex \
 	tests/fuzz/regex.dict tests/fuzz/relic.dict tests/lang \
-	tests/hidden-answers.awk tests/langtest.sh tests/strict.sh
+	tests/hidden-answers.awk tests/langtest.sh tests/strict.sh tests/object-tools.sh
 
 ##
 ## The example is built and run by make installcheck, against the installed
@@ -127,7 +127,7 @@ installcheck-local:
 	    $(RELIC_WERROR_CFLAGS) $(RELIC_SAN_CFLAGS) $(CPPFLAGS) $(CFLAGS) \
 	    $$(pkg-config --cflags librelic) \
 	    -o "$$work/embed$(EXEEXT)" $(srcdir)/examples/embed.c \
-	    $(LDFLAGS) $$(pkg-config --libs librelic); status=$$?; \
+	    $(LDFLAGS) $$(pkg-config $(RELIC_PKG_CONFIG_FLAGS) --libs librelic); status=$$?; \
 	if [ $$status -eq 0 ]; then \
 		LD_LIBRARY_PATH='$(libdir)' "$$work/embed$(EXEEXT)"; \
 		status=$$?; \
@@ -471,9 +471,13 @@ endif
 
 dist_check_SCRIPTS = tests/allocators.sh tests/ascii.sh tests/bench-output.sh tests/bench-pairset.sh tests/bench-sweep.sh tests/bench-timing.sh tests/cli.sh \
 	tests/globals.sh tests/hidden-answers.sh tests/langfiles.sh \
-	tests/magic.sh tests/man.sh tests/output.sh tests/perf.sh \
+	tests/magic.sh tests/man.sh tests/object-audits.sh tests/output.sh tests/perf.sh \
 	tests/pkgconfig.sh tests/reentry.sh tests/repl.sh tests/roundtrip.sh \
 	tests/skips.sh tests/symbols.sh tests/version.sh
+
+if RELIC_THINLTO
+dist_check_SCRIPTS += tests/thinlto.sh
+endif
 
 ##
 ## Every example the manual pages, README.md and EXAMPLES.md show is run by
@@ -844,6 +848,17 @@ DL_LOG_COMPILER = $(RELIC_STRICT) $(SHELL) $(abs_top_srcdir)/tests/langtest.sh
 SH_LOG_COMPILER = $(RELIC_STRICT) $(SHELL)
 
 AM_TESTS_ENVIRONMENT = \
+	RELIC_CC='$(CC)'; export RELIC_CC; \
+	RELIC_CXX='$(CXX)'; export RELIC_CXX; \
+	RELIC_AR='$(AR)'; export RELIC_AR; \
+	RELIC_RANLIB='$(RANLIB)'; export RELIC_RANLIB; \
+	RELIC_CXXFLAGS='$(CXXFLAGS)'; export RELIC_CXXFLAGS; \
+	RELIC_CPPFLAGS='$(CPPFLAGS)'; export RELIC_CPPFLAGS; \
+	RELIC_LDFLAGS='$(LDFLAGS)'; export RELIC_LDFLAGS; \
+	RELIC_LIBS='$(LIBS)'; export RELIC_LIBS; \
+	RELIC_CFLAGS='$(CFLAGS)'; export RELIC_CFLAGS; \
+	RELIC_NM='$(NM)'; export RELIC_NM; \
+	RELIC_LTO_CFLAGS='$(RELIC_LTO_CFLAGS)'; export RELIC_LTO_CFLAGS; \
 	RELIC='$(abs_top_builddir)/relic$(EXEEXT)'; export RELIC; \
 	RELIC_BUILDDIR='$(abs_top_builddir)'; export RELIC_BUILDDIR; \
 	RELIC_SRCDIR='$(abs_top_srcdir)'; export RELIC_SRCDIR; \

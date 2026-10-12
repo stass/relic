@@ -22,6 +22,12 @@ AC_PROG_CXX
 LT_PREREQ([2.4.2])
 LT_INIT
 
+dnl A consumer of a static-only installation needs the private dependencies
+dnl recorded by pkg-config; a shared consumer tests the public link flags.
+RELIC_PKG_CONFIG_FLAGS=
+AS_IF([test "x$enable_shared" = xno], [RELIC_PKG_CONFIG_FLAGS=--static])
+AC_SUBST([RELIC_PKG_CONFIG_FLAGS])
+
 dnl The shared library interface version, maintained independently of the
 dnl release version and edited deliberately: a release that changes nothing
 dnl in the library keeps the same version-info.  By libtool's rules a change
@@ -40,11 +46,10 @@ dnl by <sys/random.h> on macOS.  compat.h includes whichever exists, so no
 dnl engine source has to know which one it is.
 AC_CHECK_HEADERS([sys/random.h])
 
-dnl The instrumentation is settled first, because what follows depends on
-dnl it: which replacements are compiled, and whether the C++ compiler can
-dnl build the test that needs it.  Neither macro adds to CFLAGS, so the
-dnl probes below are compiled as they would be without them.
+dnl Settle the build modes before checking replacements and C++ linkage, so
+dnl those probes use the code-generation settings of the library.
 RELIC_ARG_SANITIZERS
+RELIC_ARG_THINLTO
 RELIC_CHECK_CXX
 
 dnl A replacement is compiled from compat/ only on a platform whose C library
@@ -111,6 +116,7 @@ AC_MSG_NOTICE([
     compiler          $CC
     warning flags    $RELIC_WARN_CFLAGS
     instrumentation   $RELIC_SAN_CFLAGS
+    ThinLTO           $enable_thinlto
     assertions        $relic_assertions
     libedit           $relic_libedit
     C++ header test   $relic_cxx_works

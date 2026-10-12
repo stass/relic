@@ -32,41 +32,31 @@
 set -eu
 
 : "${RELIC_BUILDDIR:?RELIC_BUILDDIR must name the build directory}"
+# shellcheck source=tests/object-tools.sh
+. "$(dirname "$0")/object-tools.sh"
 
 fail() {
 	echo "$1" >&2
 	exit 1
 }
 
-reported=$(mktemp) || exit 1
-listing=$(mktemp) || exit 1
-trap 'rm -f "$reported" "$listing"' EXIT
+work=$(mktemp -d) || exit 1
+reported="$work/reported"
+listing="$work/undefined"
+: > "$reported"
+trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
 
-objects=$(find "$RELIC_BUILDDIR/lib" -name 'tests_unit_test_exhaustion-*.o' \
-    -type f 2>/dev/null || true)
+find "$RELIC_BUILDDIR/lib" -name 'tests_unit_test_exhaustion-*.o' \
+    -type f > "$work/objects" || fail "cannot list allocation-failure objects"
 
-if [ -z "$objects" ]; then
+if [ ! -s "$work/objects" ]; then
 	fail "no objects of the allocation-failure suite under $RELIC_BUILDDIR"
 fi
 
-if ! command -v nm >/dev/null 2>&1; then
+if ! audit_nm_available; then
 	echo "nm is not available; skipping the allocator check" >&2
 	exit 77
-fi
-
-# Mach-O gives every C identifier a leading underscore and ELF does not, and
-# either may decorate a name after a $ or an @ with a variant or a version.
-# The format is determined from the output, as tests/globals.sh does.
-first=$(echo "$objects" | sed -n '1p')
-
-if nm -m "$first" >/dev/null 2>&1 &&
-    nm -m "$first" 2>/dev/null | grep -q '(__'; then
-	prefix=_
-elif nm "$first" >/dev/null 2>&1; then
-	prefix=
-else
-	fail "nm understands neither object format for $first"
 fi
 
 allocators='malloc|calloc|realloc|reallocf|reallocarray|aligned_alloc'
@@ -101,11 +91,13 @@ listed="$listed|llvm_gcda_emit_arcs|llvm_gcda_emit_function"
 listed="$listed|llvm_gcda_end_file|llvm_gcda_start_file"
 listed="$listed|llvm_gcda_summary_info|llvm_gcov_init"
 
-for object in $objects; do
-	if ! nm -u "$object" > "$listing" 2>/dev/null; then
-		echo "$object: nm cannot read it"
-		continue
+while IFS= read -r object; do
+	audit_object "$object" "$work" || fail "$object: cannot audit object"
+	prefix=
+	if [ "$audit_format" = macho ]; then
+		prefix=_
 	fi
+	$RELIC_NM -u "$audit_native" > "$listing" || fail "$object: nm cannot read it"
 
 	# A name's base strips the underscores, the fortified _chk suffix and
 	# the large-file 64 suffix an implementation may spell an allocator
@@ -130,8 +122,8 @@ for object in $objects; do
 			print object ": " name " allocates"
 		else if (name !~ /^(__|_[A-Z])/ && name !~ listed)
 			print object ": " name " is not known to allocate nothing"
-	}' "$listing"
-done > "$reported"
+	}' "$listing" >> "$reported"
+done < "$work/objects"
 
 if [ -s "$reported" ]; then
 	echo "the allocation-failure suite cannot vouch for these names:" >&2

@@ -20,20 +20,24 @@ env:
 
 jobs:
   macos:
-    name: macos clang
+    name: macos clang (ThinLTO ${{ matrix.thinlto }})
     runs-on: macos-15
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        thinlto: ['no', 'yes']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # The compiler and libedit come with the system.
       - name: Install build tools
-        run: brew install autoconf automake libtool pkgconf mandoc
+        run: brew install autoconf automake libtool pkgconf mandoc hyperfine
       - name: Configure
         run: |
           ./autogen.sh
-          ./configure --enable-werror
+          ./configure --enable-werror --enable-thinlto=${{ matrix.thinlto }}
       - name: Build
         run: make -j"$(sysctl -n hw.ncpu)"
       - name: Test
@@ -41,6 +45,8 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)" check ||
               { cat test-suite.log; exit 1; }
       - name: AddressSanitizer without leak detection
+        if: matrix.thinlto == 'no'
         run: make -j"$(sysctl -n hw.ncpu)" check-asan
       - name: UndefinedBehaviorSanitizer
+        if: matrix.thinlto == 'no'
         run: make -j"$(sysctl -n hw.ncpu)" check-ubsan

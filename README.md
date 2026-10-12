@@ -207,6 +207,7 @@ only:
 ```text
 --enable-debug          assertions, -O0 -g3                    (default: no)
 --enable-werror         treat warnings as errors               (default: no)
+--enable-thinlto        LLVM link-time optimization            (default: no)
 --disable-threads       evaluate on the calling thread alone   (default: threads)
 --enable-asan           AddressSanitizer                       (default: no)
 --enable-ubsan          UndefinedBehaviorSanitizer             (default: no)
@@ -222,6 +223,28 @@ only:
 The standard autotools options apply unchanged, including `--prefix`,
 `--program-prefix`, `--disable-shared`, `--disable-static` and `DESTDIR`
 staged installation.
+
+ThinLTO optimizes across source files at link time. Enable it with
+`./configure --enable-thinlto`; use `CFLAGS='-O3 -g'` to select the
+optimization level used by the benchmark builds. Configuration checks the
+selected compiler, archiver, archive indexer, symbol reader and linker,
+and fails if they cannot build ThinLTO. Clang with the native toolchains
+on macOS and FreeBSD supports this option. Other installations may need
+matching LLVM tools selected through `CC`, `AR`, `RANLIB` and `NM`, and an
+LTO-capable linker selected through `LDFLAGS`.
+
+Executables and shared libraries contain native code. The installed static
+archive contains LLVM bitcode, so programs linking it need a compatible
+compiler and linker. For a static-only installation, use
+`pkg-config --static --libs librelic` to include its private dependencies.
+ThinLTO adds no runtime dependency and does not change
+the runtime worker count. It can increase executable size; function
+alignment is a separate compiler setting.
+
+LLVM bitcode also retains the compiler's source filename, which
+`-ffile-prefix-map` does not rewrite. For distributable static archives,
+build in the source tree or invoke `configure` through a relative source
+path so that this filename does not contain an absolute build-machine path.
 
 </details>
 

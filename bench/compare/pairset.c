@@ -191,7 +191,7 @@ scan_file(const char *path, unsigned int worker_count, pair_set_t *seen,
 	scan_worker_t *workers;
 	struct stat status;
 	pthread_t *threads;
-	const char *input;
+	char *input;
 	size_t size, offset;
 	unsigned int i, started;
 	int fd, error;
@@ -254,7 +254,7 @@ scan_file(const char *path, unsigned int worker_count, pair_set_t *seen,
 	}
 	free(threads);
 	free(workers);
-	if (munmap((void *)input, size) == -1)
+	if (munmap(input, size) == -1)
 		err(2, "unmap %s", path);
 	return (valid);
 }

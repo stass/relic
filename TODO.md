@@ -218,8 +218,8 @@ finds ThinLTO lowers ordinary serial medians by 12.5-24.2% and selected
 64-byte alignment keeps the nine substantive serial layout spreads below
 0.75%, but grows text by 35.1% and costs 1.1-1.5% on 64-worker cyclic
 closure against ThinLTO alone in two cohorts. Validate ThinLTO across
-supported machines and toolchains, and repair the bitcode audit below,
-before setting a default; keep alignment a separately measured choice.
+supported machines and toolchains before setting a default; keep alignment
+a separately measured choice.
 Preserve equal argument lengths, multiple layouts, and guarded and
 ordinary-Magic references. Repeat these controls after bulk loading and
 indexed driver slicing; steps 4-5 of the benchmark plan cover those paths.
@@ -317,16 +317,24 @@ they are not isolated phase timers.
 
 ## Testing and CI
 
-**The global-state audit needs native symbol classification.** [Medium,
-component: `tests/globals.sh`] LLVM bitcode has no ELF section placement,
-but the audit accepts its seven-column `nm` output as native ELF and
-reports constant tables as writable data. Support LTO inputs without
-discarding suspect definitions. Also check every object's `nm` exit status:
-the loop's pipelines suppress failures, so an unreadable object after the
-first can pass unnoticed. Cover constants, mutable globals, thread-local
-state and failed symbol reads. The
-[build-policy experiment](bench/compare/recorded/freebsd-5995wx/build-policy/report.txt)
-retains the ThinLTO suite failures and a separate native-object audit.
+**Native global merging hides source ownership from the object audit.**
+[Medium, component: `tests/globals.sh`] On Apple clang at `-O3`, a mutable
+file-static struct with separately used integer and pointer fields becomes
+`__MergedGlobals` in the native object. Its C spelling is reserved to the
+implementation, so the audit cannot distinguish it from compiler-owned
+state. Preserve declaration provenance before native optimization rather
+than special-casing generated names or disabling production optimizations.
+The bitcode audit checks data-candidate names across lowering; native
+objects need an equivalent source of ownership information.
+
+**ThinLTO archives retain the compiler's source filename.** [Medium,
+component: `m4/relic_cflags.m4`, `Makefile.am`] Clang's `-ffile-prefix-map`
+rewrites debug paths but not LLVM IR's `source_filename`. An out-of-tree
+build invoked through an absolute source path exposes that path in its
+installed bitcode archive. Make source naming reproducible independently
+of how configure is invoked, while preserving out-of-tree builds, compiler
+wrappers and cross-compilation. Relative source paths avoid the disclosure;
+the build instructions describe that packaging constraint.
 
 **LeakSanitizer flags macOS's fork handler.** [Low, component:
 `tests/random/main.c`, `Makefile.am`] Built with Homebrew's LLVM, where
