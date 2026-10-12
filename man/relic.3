@@ -300,9 +300,10 @@ The threads are the context's own: they are started the first time an
 evaluation shares a round or an import shares the reading of a table, run
 only inside an operation the caller started, call none of the caller's
 callbacks, and are joined when the context is destroyed.
-An import shares a table only among eight threads or more, and only when
-reading its first 2 MiB does not reach its end; a smaller table, or one
-read on fewer threads, is read a field at a time on the calling thread.
+An import shares a table only among eight threads or more, only when it
+is read from a regular file, and only when reading its first 2 MiB does
+not reach its end; any other table is read a field at a time on the
+calling thread.
 They block every signal but those a fault in them raises, so a signal sent
 to the process is taken by one of the caller's threads.
 The calling thread cannot be cancelled while it waits for them.
@@ -392,10 +393,10 @@ relations it derives except as they stood when it began, which is every
 round but a pass of the naive fixed point, to the round's end, cutting the
 scan or lookup each rule starts from, after any tests of constants, into
 pieces as finely as the threads allow, as a round run on several threads
-is run, and read every table an import reads a window of records at a
-time, as a large table read on several threads is read, whatever its size
-and the number of threads; the relations, the values and every count of
-work are the same;
+is run, and read every table an import reads from a regular file a window
+of records at a time, as a large table read on several threads is read,
+whatever its size and the number of threads; the relations, the values and
+every count of work are the same;
 .It Dv RELIC_F_GROUP_RULES
 compile the body of every aggregate into a rule of its own whose relation
 the aggregate folds, even a body of one atom whose arguments are distinct
@@ -407,7 +408,8 @@ import every table a field at a time, typing and interning each field and
 staging each record as it is read, whatever the number of threads and even
 with
 .Dv RELIC_F_PARALLEL_ALWAYS ,
-as a small table or one read on fewer than eight threads always is, rather
+as a small table, one read on fewer than eight threads or one read from
+anything but a regular file always is, rather
 than a window of records at a time, each window's fields decoded and its
 values and records checked before any is interned or staged; the facts,
 the values, the identifiers they are given and a refused import's message
@@ -641,6 +643,12 @@ does not define; and so is an import given a
 or
 .Fa path .
 The description is borrowed for the call.
+.Pp
+Only a table read from a regular file is read a window of records at a
+time.
+Any other table is read a field at a time, 64 KiB at a read, so a mistake
+is reported once the 64 KiB holding it, or the end of the table, has
+arrived, rather than a window's worth.
 .Pp
 A predicate is a name and an arity together.
 .Fn relic_predicate_arities

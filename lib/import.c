@@ -6,6 +6,9 @@
 
 #include "config.h"
 
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -145,6 +148,10 @@ static enum relic_table_event_kind append_field_byte(
 		    relic_table_reader_t *reader, unsigned char byte,
 		    relic_table_event_t *event);
 static bool	 may_batch(const relic_t *ctx);
+static bool	 reads_a_regular_file(FILE *stream);
+#ifdef RELIC_IMPORT_REGULAR_FILE
+bool		 RELIC_IMPORT_REGULAR_FILE(FILE *stream);
+#endif
 static bool	 batching_forced(const relic_t *ctx);
 static bool	 outgrows_window(const import_input_t *input);
 static int	 prepare_batching(relic_t *ctx);
@@ -1174,17 +1181,18 @@ stage_table(importer_t *importer, const char *source_name)
  * a failed read, or memory.
  *
  * The table is staged a window at a time when the context may batch it,
- * its first window does not hold it all (unless batching is forced), and
- * the pool is ready to share it, for as long as each window is admitted
- * whole; the first that is not, and the rest of the table after it, are
- * read a field at a time, as a table not batched is read whole.  The
- * first window's bytes are the reader's when the table is not batched; a
- * read for them that failed is the reader's to report, and one that found
- * no room the reader makes again.  Both stage exactly the same facts and intern
- * exactly the same values under the same identifiers, and a window is
- * admitted only when reading it a field at a time could not fail, so the
- * import fails, when it does, at the same record and with the same
- * message as a field at a time, with the same values interned.
+ * the stream is a regular file, its first window does not hold it all
+ * (unless batching is forced), and the pool is ready to share it, for as
+ * long as each window is admitted whole; the first that is not, and the
+ * rest of the table after it, are read a field at a time, as a table not
+ * batched is read whole.  The first window's bytes are the reader's when
+ * the table is not batched; a read for them that failed is the reader's to
+ * report, and one that found no room the reader makes again.  Both stage
+ * exactly the same facts and intern exactly the same values under the same
+ * identifiers, and a window is admitted only when reading it a field at a
+ * time could not fail, so the import fails, when it does, at the same
+ * record and with the same message as a field at a time, with the same
+ * values interned.
  */
 static int
 read_table(importer_t *importer)
@@ -1195,7 +1203,8 @@ read_table(importer_t *importer)
 
 	ctx = importer->ctx;
 	batched = false;
-	if (may_batch(ctx) && fill_window(&importer->input) == 0 &&
+	if (may_batch(ctx) && reads_a_regular_file(importer->input.stream) &&
+	    fill_window(&importer->input) == 0 &&
 	    (batching_forced(ctx) || outgrows_window(&importer->input)))
 		batched = prepare_batching(ctx) == 0;
 
@@ -1223,6 +1232,38 @@ may_batch(const relic_t *ctx)
 		return (true);
 
 	return (ctx->config.threads >= RELIC_IMPORT_BATCH_WORKERS);
+}
+
+/*
+ * Whether the stream reads a regular file, whose reads return what it
+ * holds without waiting for a producer to write more.  A window is read
+ * whole before any of its records is typed, so a pipe, a socket, a
+ * terminal or a stream of the caller's own, whose producer may send a
+ * malformed record and then wait, is read a field at a time, its mistake
+ * reported once the chunk holding it has arrived.  A stream without a
+ * descriptor, or one fstat(2) cannot describe, is not a regular file.
+ */
+static bool
+reads_a_regular_file(FILE *stream)
+{
+	struct stat status;
+	int descriptor;
+
+#ifdef RELIC_IMPORT_REGULAR_FILE
+	/*
+	 * The small-window import suite's stand-in.  No regular file a test
+	 * can make fails to read, so that build names a function here that
+	 * takes a failing stream of the suite's own for one, and the read
+	 * errors a batch import meets are reached.  No other build defines it.
+	 */
+	if (RELIC_IMPORT_REGULAR_FILE(stream))
+		return (true);
+#endif
+
+	descriptor = fileno(stream);
+
+	return (descriptor >= 0 && fstat(descriptor, &status) == 0 &&
+	    S_ISREG(status.st_mode));
 }
 
 /*

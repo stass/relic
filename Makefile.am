@@ -393,9 +393,16 @@ tests_unit_test_ceiling_LDADD = $(LTLIBOBJS)
 ## lowers its ceilings, and runs the import suite again, so that its tables
 ## span many windows and pieces and the reads cut them at every byte.
 ##
+## Only a regular file is batched, and no regular file a test can make fails
+## to read.  RELIC_IMPORT_REGULAR_FILE names the function lib/import.c asks
+## whether to take a stream for a regular file as well, so that this program
+## batches the failing streams of the suite's own and reaches the read
+## errors a batch import meets.
+##
 
 RELIC_SMALL_WINDOWS = -DRELIC_IMPORT_READ_CHUNK=16u \
-	-DRELIC_IMPORT_WINDOW_BYTES=64u -DRELIC_IMPORT_PIECE_BYTES=8u
+	-DRELIC_IMPORT_WINDOW_BYTES=64u -DRELIC_IMPORT_PIECE_BYTES=8u \
+	-DRELIC_IMPORT_REGULAR_FILE=relic_test_regular_file
 
 RELIC_TEST_BINARIES += tests/unit/test_import_small_windows
 tests_unit_test_import_small_windows_SOURCES = tests/unit/test_import.c \

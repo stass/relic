@@ -471,8 +471,9 @@ included; 0 asks for one per processor online, up to 256, and the default
 is 1.
 A round of evaluation is shared only when it holds enough work to repay the
 threads, so a program of small rounds runs as it would on one thread, and a
-table is shared only among eight threads or more, and only when reading
-its first 2 MiB does not reach its end.
+table is shared only among eight threads or more, only when it is read
+from a regular file, and only when reading its first 2 MiB does not reach
+its end.
 The answers, their order, every diagnostic and every counter
 .Fl X Cm stats
 writes but the parallel rounds are the same whatever the number of threads;
@@ -577,7 +578,8 @@ as it is read, whatever the number of threads
 .Fl j
 gives and even with
 .Cm parallel ,
-as a small table or one read on fewer than eight threads always is, rather
+as a small table, one read on fewer than eight threads or one read from
+anything but a regular file always is, rather
 than a window of records at a time; the facts, the values and a refused
 import's message are the same, but a refused import may have read less of
 its table;
@@ -612,8 +614,8 @@ gives: its rules' derivations gathered as they run and inserted when the
 round ends, in the order they would have been inserted as they were
 derived; and read every table
 .Fl I
-imports a window of records at a time, as a large table is read on several
-threads, however small it is;
+imports from a regular file a window of records at a time, as a large
+table is read on several threads, however small it is;
 .It Cm stats
 write the evaluation counters to the standard error when the run ends,
 whether or not it succeeded;

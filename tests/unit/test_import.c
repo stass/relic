@@ -24,8 +24,14 @@
 
 #include "config.h"
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
 #include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -33,7 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/types.h>
+#include <unistd.h>
 
 #include "harness.h"
 #include "internal.h"
@@ -54,6 +60,14 @@
 #define	SCENARIO_SKIP		"a skipped column interns nothing"
 #define	SCENARIO_STRING		"a string column holds any bytes"
 #define	SCENARIO_SYMBOL		"a symbol column holds the language's symbols"
+#define	SCENARIO_WAITING \
+	"a producer that waits hears of its mistake"
+
+/*
+ * How long an import from a producer that waits, and the producer itself,
+ * may take before it is taken to have hung.
+ */
+#define	PRODUCER_SECONDS	20
 
 /* A byte string with a length, for tables that hold NUL. */
 #define	TABLE(text)	(text), (sizeof(text) - 1)
@@ -80,6 +94,8 @@ typedef struct reader_case reader_case_t;
 typedef struct reentering_read reentering_read_t;
 typedef struct window_tally window_tally_t;
 typedef struct batch_way batch_way_t;
+typedef struct producer producer_t;
+typedef struct producer_channel producer_channel_t;
 
 /*
  * One table and the transcript its reading must give.  `width` is the number
@@ -152,6 +168,46 @@ static const batch_way_t batch_ways[] = {
 	{ 0, RELIC_IMPORT_BATCH_WORKERS, "batching threads, by choice" },
 };
 
+#ifdef RELIC_IMPORT_REGULAR_FILE
+/*
+ * The failing stream lib/import.c takes for a regular file while one is
+ * imported, or NULL.
+ */
+static FILE	*regular_stand_in;
+
+bool		 relic_test_regular_file(FILE *stream);
+#endif
+
+/*
+ * A producer that waits, once start_producer() has forked it: its process,
+ * the read end of its pipe until the import takes it (-1 for a FIFO, or
+ * once taken), and the write end of the channel it waits on.
+ */
+struct producer {
+	pid_t	pid;
+	int	data;
+	int	control;
+};
+
+/*
+ * The channels a producer that waits sends its table through: a pipe, or
+ * a FIFO the import opens by its path.
+ */
+struct producer_channel {
+	const char	*label;
+	bool		 by_path;
+};
+
+static const producer_channel_t producer_channels[] = {
+	{ "a pipe", false },
+	{ "a FIFO", true },
+};
+
+/* The columns of the table a producer that waits sends. */
+static const enum relic_column waiting_columns[] = {
+	RELIC_COLUMN_SYMBOL, RELIC_COLUMN_INTEGER
+};
+
 /* The windows batch imports staged and declined. */
 struct window_tally {
 	uint64_t	staged;
@@ -170,6 +226,22 @@ struct import_outcome {
 	int		 again;
 };
 
+static void	 a_waiting_producer_hears_its_mistake(void);
+static bool	 make_fifo_directory(char *directory, size_t size);
+static char	*malformed_chunk(void);
+static int	 import_chunk_from_file(const char *chunk, const char *name,
+		    import_outcome_t *outcome);
+static int	 import_from_producer(const char *chunk, const char *fifo,
+		    const batch_way_t *way, import_outcome_t *outcome,
+		    bool *sentp);
+static int	 start_producer(producer_t *producer, const char *chunk,
+		    const char *fifo);
+static void	 close_channel(const int data[2], const char *fifo);
+_Noreturn static void produce_and_wait(const char *chunk, int descriptor,
+		    int control);
+static int	 import_from_channel(relic_t *ctx, producer_t *producer,
+		    const char *fifo, int *statusp);
+static bool	 stop_producer(producer_t *producer, const char *fifo);
 static void	 append_text(char *out, size_t size, const char *text);
 static void	 check_same_outcome(const import_outcome_t *batched,
 		    const import_outcome_t *scalar, const char *label,
@@ -2682,7 +2754,10 @@ facts_difference(const relic_t *a, const relic_t *b)
  * an import a field at a time would meet it: after the records read before
  * it are staged and their values interned, and never ahead of an earlier
  * refusal.  The bytes the failing read returned are not read.  Each table
- * is read both ways, failing at the same byte, and must end alike.
+ * is read both ways, failing at the same byte, and must end alike.  A
+ * failing stream has no descriptor, so it is read a field at a time,
+ * however the context batches, unless the build takes it for a regular
+ * file, as the small-window build does (Makefile.am).
  */
 static void
 a_failed_read_ahead_waits_its_turn(void)
@@ -2755,6 +2830,20 @@ compare_failed_reads(const char *label, const char *table, size_t fail_at)
 		    way->name, scalar.status, batched.status);
 		check_same_outcome(&batched, &scalar, label, way,
 		    "a failed read");
+#ifdef RELIC_IMPORT_REGULAR_FILE
+		checkf((way->flags & BATCHED) == 0 ||
+		    fail_at <= RELIC_IMPORT_WINDOW_BYTES ||
+		    batched.ctx->counters.windows_staged > 0, SCENARIO_BATCH,
+		    "%s, %s: a stream taken for a regular file should be "
+		    "batched", label, way->name);
+#else
+		checkf(batched.ctx->counters.windows_staged == 0 &&
+		    batched.ctx->counters.windows_declined == 0,
+		    SCENARIO_BATCH, "%s, %s: a stream without a descriptor "
+		    "should be read a field at a time, not stage %zu windows",
+		    label, way->name,
+		    (size_t)batched.ctx->counters.windows_staged);
+#endif
 		relic_destroy(batched.ctx);
 	}
 
@@ -2801,11 +2890,370 @@ import_failing(const char *table, size_t fail_at, unsigned int flags,
 	import.columns = generated_columns;
 	import.column_count = 3;
 	import.format = RELIC_FORMAT_TSV;
+#ifdef RELIC_IMPORT_REGULAR_FILE
+	regular_stand_in = stream;
+#endif
 	outcome->status = relic_import_file(outcome->ctx, "table", stream,
 	    &import);
+#ifdef RELIC_IMPORT_REGULAR_FILE
+	regular_stand_in = NULL;
+#endif
 	fclose(stream);
 
 	return (0);
+}
+
+#ifdef RELIC_IMPORT_REGULAR_FILE
+/* Whether lib/import.c takes `stream` for a regular file. */
+bool
+relic_test_regular_file(FILE *stream)
+{
+	return (stream != NULL && stream == regular_stand_in);
+}
+#endif
+
+/*
+ * A table read from a pipe, or from a FIFO it is named by, is read a field
+ * at a time however the context batches, so a producer that sends one
+ * transport chunk holding a malformed record and then waits, its end still
+ * open, has the mistake reported without sending more: without a window's
+ * worth of the table, or its end.  The import ends as one a field at a
+ * time of the same bytes from a file does, with the same diagnostics, the
+ * same values interned and no fact added, and stages no window.  An
+ * import that waits for more is ended by SIGALRM after PRODUCER_SECONDS,
+ * which fails the suite.
+ */
+static void
+a_waiting_producer_hears_its_mistake(void)
+{
+	import_outcome_t produced;
+	import_outcome_t scalar;
+	char directory[1024];
+	char fifo[1024 + sizeof("/table")];
+	const producer_channel_t *channel;
+	const batch_way_t *way;
+	const char *path;
+	char *chunk;
+	size_t c;
+	size_t w;
+	bool sent;
+
+	signal(SIGALRM, SIG_DFL);
+	chunk = malformed_chunk();
+	if (chunk == NULL || !make_fifo_directory(directory,
+	    sizeof(directory))) {
+		check(false, SCENARIO_WAITING, "a chunk and a directory are "
+		    "made");
+		free(chunk);
+		return;
+	}
+	snprintf(fifo, sizeof(fifo), "%s/table", directory);
+
+	for (c = 0; c < sizeof(producer_channels) /
+	    sizeof(producer_channels[0]); c++) {
+		channel = &producer_channels[c];
+		path = channel->by_path ? fifo : NULL;
+		if (import_chunk_from_file(chunk, path != NULL ? path : "table",
+		    &scalar) != 0) {
+			check(false, SCENARIO_WAITING, "a context is made");
+			break;
+		}
+		checkf(scalar.status == -1 && scalar.capture.errors == 1,
+		    SCENARIO_WAITING, "the chunk's malformed record should "
+		    "fail an import from a file with one error, not %zu",
+		    scalar.capture.errors);
+
+		for (w = 0; w < sizeof(batch_ways) / sizeof(batch_ways[0]);
+		    w++) {
+			way = &batch_ways[w];
+			if (import_from_producer(chunk, path, way, &produced,
+			    &sent) != 0) {
+				check(false, SCENARIO_WAITING, "a context, a "
+				    "producer and its channel are made");
+				break;
+			}
+			checkf(sent, SCENARIO_WAITING, "%s, %s: the producer "
+			    "should send its chunk and wait until the import "
+			    "returns", channel->label, way->name);
+			checkf(produced.status == scalar.status &&
+			    produced.ctx->counters.windows_staged == 0 &&
+			    produced.ctx->counters.windows_declined == 0,
+			    SCENARIO_WAITING, "%s, %s: the import should end "
+			    "%d staging no window, not %d staging %zu",
+			    channel->label, way->name, scalar.status,
+			    produced.status,
+			    (size_t)produced.ctx->counters.windows_staged);
+			check_same_outcome(&produced, &scalar, channel->label,
+			    way, "an import from a producer that waits");
+			relic_destroy(produced.ctx);
+		}
+		relic_destroy(scalar.ctx);
+	}
+
+	rmdir(directory);
+	free(chunk);
+}
+
+/*
+ * Make a directory of the user's own for the FIFO, under $TMPDIR or /tmp,
+ * its path in `directory`.  Returns whether it was made.
+ */
+static bool
+make_fifo_directory(char *directory, size_t size)
+{
+	const char *base;
+	int length;
+
+	base = getenv("TMPDIR");
+	if (base == NULL || base[0] == '\0')
+		base = "/tmp";
+	length = snprintf(directory, size, "%s/relic-fifo-XXXXXX", base);
+	if (length < 0 || (size_t)length >= size)
+		return (false);
+
+	return (mkdtemp(directory) != NULL);
+}
+
+/*
+ * One transport chunk of a two-column table, a symbol and an integer to a
+ * record, whose middle record's integer is malformed.  Returns the chunk,
+ * RELIC_IMPORT_READ_CHUNK bytes the caller frees, or NULL.
+ */
+static char *
+malformed_chunk(void)
+{
+	char *chunk;
+	size_t record;
+	size_t i;
+
+	_Static_assert(RELIC_IMPORT_READ_CHUNK % 8 == 0,
+	    "each half of a chunk holds whole four-byte records");
+	chunk = malloc(RELIC_IMPORT_READ_CHUNK);
+	if (chunk == NULL)
+		return (NULL);
+	for (i = 0; i < RELIC_IMPORT_READ_CHUNK; i += 4) {
+		record = i / 4;
+		chunk[i] = (char)('a' + record % 26);
+		chunk[i + 1] = '\t';
+		chunk[i + 2] = i == RELIC_IMPORT_READ_CHUNK / 2 ? 'x' :
+		    (char)('0' + record % 10);
+		chunk[i + 3] = '\n';
+	}
+
+	return (chunk);
+}
+
+/*
+ * Import the chunk from a file, a field at a time, into a new context,
+ * naming it `name`.  Returns 0, or -1 when the context could not be made.
+ */
+static int
+import_chunk_from_file(const char *chunk, const char *name,
+    import_outcome_t *outcome)
+{
+	relic_config_t config;
+
+	bzero(outcome, sizeof(*outcome));
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_NO_BATCH_IMPORT;
+	config.threads = 1;
+	outcome->ctx = context_with_capture(&config, &outcome->capture);
+	if (outcome->ctx == NULL)
+		return (-1);
+	outcome->status = import_table(outcome->ctx, name, RELIC_FORMAT_TSV, 0,
+	    "e", waiting_columns, 2, chunk, RELIC_IMPORT_READ_CHUNK);
+
+	return (0);
+}
+
+/*
+ * Import the chunk into a new context configured `way` as a producer sends
+ * it: through the FIFO at `fifo`, or through a pipe when `fifo` is NULL.
+ * The producer waits after the chunk, its end open, until the import has
+ * returned; *sentp says whether it sent the chunk and then exited of its
+ * own accord.  Returns 0, or -1 when the context, the channel or the
+ * producer could not be made.
+ */
+static int
+import_from_producer(const char *chunk, const char *fifo,
+    const batch_way_t *way, import_outcome_t *outcome, bool *sentp)
+{
+	relic_config_t config;
+	producer_t producer;
+	int imported;
+
+	bzero(outcome, sizeof(*outcome));
+	bzero(&config, sizeof(config));
+	config.flags = way->flags;
+	config.threads = way->threads;
+	outcome->ctx = context_with_capture(&config, &outcome->capture);
+	if (outcome->ctx == NULL)
+		return (-1);
+	if (start_producer(&producer, chunk, fifo) != 0) {
+		relic_destroy(outcome->ctx);
+		outcome->ctx = NULL;
+		return (-1);
+	}
+
+	alarm(PRODUCER_SECONDS);
+	imported = import_from_channel(outcome->ctx, &producer, fifo,
+	    &outcome->status);
+	alarm(0);
+
+	*sentp = stop_producer(&producer, fifo);
+	if (imported != 0) {
+		relic_destroy(outcome->ctx);
+		outcome->ctx = NULL;
+		return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * Make the channel, a FIFO at `fifo` or a pipe when it is NULL, and fork
+ * the producer that sends the chunk through it.  Returns 0, or -1 having
+ * made nothing that lasts.
+ */
+static int
+start_producer(producer_t *producer, const char *chunk, const char *fifo)
+{
+	int control[2];
+	int data[2];
+	int descriptor;
+
+	data[0] = -1;
+	data[1] = -1;
+	if (fifo != NULL) {
+		if (mkfifo(fifo, 0600) != 0)
+			return (-1);
+	} else if (pipe(data) != 0)
+		return (-1);
+	if (pipe(control) != 0) {
+		close_channel(data, fifo);
+		return (-1);
+	}
+
+	producer->pid = fork();
+	if (producer->pid == 0) {
+		close(control[1]);
+		if (fifo != NULL) {
+			alarm(PRODUCER_SECONDS);
+			descriptor = open(fifo, O_WRONLY);
+			alarm(0);
+		} else {
+			close(data[0]);
+			descriptor = data[1];
+		}
+		produce_and_wait(chunk, descriptor, control[0]);
+	}
+
+	close(control[0]);
+	if (producer->pid < 0) {
+		close(control[1]);
+		close_channel(data, fifo);
+		return (-1);
+	}
+	if (data[1] >= 0)
+		close(data[1]);
+	producer->data = data[0];
+	producer->control = control[1];
+
+	return (0);
+}
+
+/* Undo a channel start_producer() made: unlink the FIFO, or close the pipe. */
+static void
+close_channel(const int data[2], const char *fifo)
+{
+	if (fifo != NULL) {
+		unlink(fifo);
+		return;
+	}
+	close(data[0]);
+	close(data[1]);
+}
+
+/*
+ * The producer: send the chunk through `descriptor`, then wait, the
+ * channel open, until `control` ends.  Ends the process, with status 0
+ * when the whole chunk was sent.
+ */
+static void
+produce_and_wait(const char *chunk, int descriptor, int control)
+{
+	size_t written;
+	ssize_t wrote;
+	char byte;
+
+	if (descriptor < 0)
+		_exit(1);
+	for (written = 0; written < RELIC_IMPORT_READ_CHUNK;
+	    written += (size_t)wrote) {
+		wrote = write(descriptor, chunk + written,
+		    RELIC_IMPORT_READ_CHUNK - written);
+		if (wrote < 0 && errno == EINTR)
+			wrote = 0;
+		else if (wrote <= 0)
+			_exit(1);
+	}
+	while (read(control, &byte, 1) < 0 && errno == EINTR)
+		continue;
+	_exit(0);
+}
+
+/*
+ * Import from the producer's channel into `ctx`, setting *statusp to what
+ * the import returned.  Returns 0, or -1 when no stream could be made of
+ * the pipe.
+ */
+static int
+import_from_channel(relic_t *ctx, producer_t *producer, const char *fifo,
+    int *statusp)
+{
+	relic_import_t import;
+	FILE *stream;
+
+	bzero(&import, sizeof(import));
+	import.predicate = "e";
+	import.columns = waiting_columns;
+	import.column_count = 2;
+	import.format = RELIC_FORMAT_TSV;
+
+	if (fifo != NULL) {
+		*statusp = relic_import_path(ctx, fifo, &import);
+		return (0);
+	}
+
+	stream = fdopen(producer->data, "r");
+	if (stream == NULL)
+		return (-1);
+	producer->data = -1;
+	*statusp = relic_import_file(ctx, "table", stream, &import);
+	fclose(stream);
+
+	return (0);
+}
+
+/*
+ * Release the producer from its wait and reap it, closing what the import
+ * left of the channel.  Returns whether it exited with status 0.
+ */
+static bool
+stop_producer(producer_t *producer, const char *fifo)
+{
+	int status;
+
+	close(producer->control);
+	if (producer->data >= 0)
+		close(producer->data);
+	status = -1;
+	while (waitpid(producer->pid, &status, 0) < 0 && errno == EINTR)
+		continue;
+	if (fifo != NULL)
+		unlink(fifo);
+
+	return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
 int
@@ -2835,6 +3283,7 @@ main(void)
 	a_path_is_opened_and_named();
 	a_batch_import_matches_the_scalar_import();
 	a_failed_read_ahead_waits_its_turn();
+	a_waiting_producer_hears_its_mistake();
 
 	return (check_summary("import"));
 }
