@@ -55,6 +55,7 @@
 #define	SCENARIO_NO_THREADS	"a build without threads evaluates alone"
 #define	SCENARIO_SPIN \
 	"a waiter spins only when every worker has a processor"
+#define	SCENARIO_FILLER	"worker 0 runs a job's filler while others work"
 
 /*
  * The threads the test's contexts are configured with, and the length of
@@ -85,7 +86,34 @@
 /* Room for the chain program. */
 #define	PROGRAM_MAX	4096
 
+/*
+ * The parts of a filled job, and the steps of a filler that does not run
+ * out within any test.
+ */
+#define	FILLED_PARTS	64
+#define	ENDLESS_STEPS	SIZE_MAX
+
 #ifdef RELIC_THREADS
+
+typedef struct filled_job filled_job_t;
+
+/*
+ * A job with a filler.  The filler has `steps_left` steps, and counts in
+ * `steps` those it has run and in `calls` its calls, noting whether each
+ * ran on `caller`.  A part counts itself in `parts_run`, and in
+ * `parts_on_caller` when it ran on worker 0, after it has waited for
+ * `steps` to reach `steps_awaited`.
+ */
+struct filled_job {
+	pthread_t		 caller;
+	relic_atomic_size_t	 steps;
+	relic_atomic_size_t	 parts_run;
+	relic_atomic_size_t	 parts_on_caller;
+	size_t			 steps_left;
+	size_t			 steps_awaited;
+	size_t			 calls;
+	bool			 steps_on_caller;
+};
 
 int		 relic_test_pthread_create(pthread_t *thread,
 		    const pthread_attr_t *attributes,
@@ -115,6 +143,14 @@ static void	 a_refused_start_is_not_an_error(void);
 static void	 a_pool_carried_into_a_child_of_fork(void);
 static void	 count_part(void *argument, size_t part, size_t worker_index);
 static void	 a_job_dispatched_in_a_child_of_fork(void);
+static void	 filled_job_init(filled_job_t *job, size_t steps_left,
+		    size_t steps_awaited);
+static void	 filled_part(void *argument, size_t part,
+		    size_t worker_index);
+static bool	 filled_step(void *argument);
+static void	 a_filler_runs_until_the_others_finish(void);
+static void	 a_filler_that_runs_out_joins_the_parts(void);
+static void	 a_job_run_alone_runs_no_filler(void);
 
 #endif /* RELIC_THREADS */
 
@@ -628,6 +664,174 @@ a_job_dispatched_in_a_child_of_fork(void)
 	relic_pool_free(pool);
 }
 
+static void
+filled_job_init(filled_job_t *job, size_t steps_left, size_t steps_awaited)
+{
+	job->caller = pthread_self();
+	relic_atomic_size_init(&job->steps, 0);
+	relic_atomic_size_init(&job->parts_run, 0);
+	relic_atomic_size_init(&job->parts_on_caller, 0);
+	job->steps_left = steps_left;
+	job->steps_awaited = steps_awaited;
+	job->calls = 0;
+	job->steps_on_caller = true;
+}
+
+/*
+ * A filled job's part: wait until the filler has run the steps the job
+ * awaits, then count the part in.
+ */
+static void
+filled_part(void *argument, size_t part RELIC_UNUSED, size_t worker_index)
+{
+	filled_job_t *job;
+
+	job = argument;
+	while (relic_atomic_size_load_acquire(&job->steps) <
+	    job->steps_awaited)
+		continue;
+	relic_atomic_size_add_relaxed(&job->parts_run, 1);
+	if (worker_index == 0)
+		relic_atomic_size_add_relaxed(&job->parts_on_caller, 1);
+}
+
+/* A filled job's filler step. */
+static bool
+filled_step(void *argument)
+{
+	filled_job_t *job;
+
+	job = argument;
+	job->calls++;
+	if (!pthread_equal(pthread_self(), job->caller))
+		job->steps_on_caller = false;
+	if (job->steps_left == 0)
+		return (false);
+
+	if (job->steps_left != ENDLESS_STEPS)
+		job->steps_left--;
+	relic_atomic_size_add_acq_rel(&job->steps, 1);
+
+	return (job->steps_left > 0);
+}
+
+/*
+ * A filler with work to spare stops when the other workers have finished
+ * the job.  Every part waits for the filler's first step, so the filler
+ * runs at least one; and it never runs out, so worker 0 claims no part
+ * before the others have claimed them all.  A filler that went on past
+ * the others would never return, which the alarm reports.
+ */
+static void
+a_filler_runs_until_the_others_finish(void)
+{
+	relic_pool_filler_t filler;
+	relic_pool_t *pool;
+	filled_job_t job;
+
+	if (relic_pool_create(&pool, POOL_THREADS, 1) != 0) {
+		check(false, SCENARIO_FILLER, "a pool is created");
+		return;
+	}
+	if (pool->worker_count != POOL_THREADS) {
+		check(false, SCENARIO_FILLER, "the pool's threads start");
+		relic_pool_free(pool);
+		return;
+	}
+
+	filled_job_init(&job, ENDLESS_STEPS, 1);
+	filler.step = filled_step;
+	filler.argument = &job;
+	alarm(FORK_SECONDS);
+	relic_pool_for_filled(pool, FILLED_PARTS, filled_part, &job, &filler);
+	alarm(0);
+
+	check(relic_atomic_size_load_acquire(&job.parts_run) == FILLED_PARTS,
+	    SCENARIO_FILLER, "every part of the job runs");
+	check(relic_atomic_size_load_acquire(&job.steps) >= 1,
+	    SCENARIO_FILLER, "the filler steps before the others finish");
+	check(relic_atomic_size_load_acquire(&job.parts_on_caller) == 0,
+	    SCENARIO_FILLER, "worker 0 claims no part while it fills");
+	check(job.steps_on_caller, SCENARIO_FILLER,
+	    "every step runs on the calling thread");
+
+	relic_pool_free(pool);
+}
+
+/*
+ * A filler that runs out leaves worker 0 to claim parts with the others.
+ * Every part waits for the filler's last step, so all of its steps run,
+ * and none is asked of it once it has said that none remains.
+ */
+static void
+a_filler_that_runs_out_joins_the_parts(void)
+{
+	relic_pool_filler_t filler;
+	relic_pool_t *pool;
+	filled_job_t job;
+
+	if (relic_pool_create(&pool, POOL_THREADS, 1) != 0) {
+		check(false, SCENARIO_FILLER, "a pool is created");
+		return;
+	}
+	if (pool->worker_count != POOL_THREADS) {
+		check(false, SCENARIO_FILLER, "the pool's threads start");
+		relic_pool_free(pool);
+		return;
+	}
+
+	filled_job_init(&job, 3, 3);
+	filler.step = filled_step;
+	filler.argument = &job;
+	alarm(FORK_SECONDS);
+	relic_pool_for_filled(pool, FILLED_PARTS, filled_part, &job, &filler);
+	alarm(0);
+
+	check(relic_atomic_size_load_acquire(&job.parts_run) == FILLED_PARTS,
+	    SCENARIO_FILLER, "every part of the job runs");
+	checkf(relic_atomic_size_load_acquire(&job.steps) == 3 &&
+	    job.calls == 3, SCENARIO_FILLER, "a filler of three steps is "
+	    "called three times, not %zu", job.calls);
+
+	relic_pool_free(pool);
+}
+
+/*
+ * A job of one part runs on the calling thread, and so does every job of a
+ * pool of one worker; neither runs its filler.
+ */
+static void
+a_job_run_alone_runs_no_filler(void)
+{
+	relic_pool_filler_t filler;
+	relic_pool_t *pool;
+	filled_job_t job;
+
+	if (relic_pool_create(&pool, POOL_THREADS, 1) == 0) {
+		filled_job_init(&job, ENDLESS_STEPS, 0);
+		filler.step = filled_step;
+		filler.argument = &job;
+		relic_pool_for_filled(pool, 1, filled_part, &job, &filler);
+		check(job.calls == 0 &&
+		    relic_atomic_size_load_acquire(&job.parts_run) == 1,
+		    SCENARIO_FILLER, "a job of one part runs no filler");
+		relic_pool_free(pool);
+	}
+
+	if (relic_pool_create(&pool, 1, 1) == 0) {
+		filled_job_init(&job, ENDLESS_STEPS, 0);
+		filler.step = filled_step;
+		filler.argument = &job;
+		relic_pool_for_filled(pool, FILLED_PARTS, filled_part, &job,
+		    &filler);
+		check(job.calls == 0 &&
+		    relic_atomic_size_load_acquire(&job.parts_run) ==
+		    FILLED_PARTS, SCENARIO_FILLER,
+		    "a pool of one worker runs no filler");
+		relic_pool_free(pool);
+	}
+}
+
 #endif /* RELIC_THREADS */
 
 /*
@@ -695,6 +899,9 @@ main(void)
 	a_refused_start_is_not_an_error();
 	a_pool_carried_into_a_child_of_fork();
 	a_job_dispatched_in_a_child_of_fork();
+	a_filler_runs_until_the_others_finish();
+	a_filler_that_runs_out_joins_the_parts();
+	a_job_run_alone_runs_no_filler();
 #endif
 	waiters_spin_only_on_processors_of_their_own();
 	without_threads_rounds_run_alone();

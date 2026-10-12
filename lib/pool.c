@@ -55,6 +55,13 @@
  * the job for the last time when it counts itself in, since worker 0 may
  * return and the job end the moment the count is complete.
  *
+ * A job may carry a filler, serial work of the caller's that worker 0 runs
+ * in bounded steps before it claims any part.  It stops once the filler
+ * has no step left or every other worker has counted itself in, which a
+ * worker does only on finding every part claimed; either way it then
+ * claims whatever parts remain, counts itself in and waits as above.  A
+ * job worker 0 runs alone runs no filler.
+ *
  * The threads run nothing but parts of jobs -- a round's tasks, the steps
  * of its merge: no planning, no diagnostic and none of the caller's
  * callbacks.  Every signal is blocked in them but those a
@@ -163,6 +170,8 @@ struct relic_pool_threads {
 };
 
 static uint64_t	 await_job(relic_pool_threads_t *threads, uint64_t seen);
+static void	 job_fill(relic_pool_job_t *job,
+		    const relic_pool_filler_t *filler, size_t workers);
 static void	 await_workers(relic_pool_threads_t *threads,
 		    relic_pool_job_t *job, size_t workers);
 static void	 finish_job(relic_pool_threads_t *threads,
@@ -266,8 +275,16 @@ adopt(relic_pool_t *pool RELIC_UNUSED)
 }
 
 void
-relic_pool_for(relic_pool_t *pool RELIC_UNUSED, size_t part_count,
+relic_pool_for(relic_pool_t *pool, size_t part_count,
     relic_pool_part_fn run_part, void *argument)
+{
+	relic_pool_for_filled(pool, part_count, run_part, argument, NULL);
+}
+
+void
+relic_pool_for_filled(relic_pool_t *pool RELIC_UNUSED, size_t part_count,
+    relic_pool_part_fn run_part, void *argument,
+    const relic_pool_filler_t *filler RELIC_UNUSED)
 {
 	relic_pool_job_t job;
 #ifdef RELIC_THREADS
@@ -285,6 +302,8 @@ relic_pool_for(relic_pool_t *pool RELIC_UNUSED, size_t part_count,
 	if (pool->worker_count > 1 && part_count > 1) {
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
 		publish(pool->threads, &job, false);
+		if (filler != NULL)
+			job_fill(&job, filler, pool->worker_count);
 		job_work(&job, 0);
 		finish_job(pool->threads, &job, pool->worker_count);
 		await_workers(pool->threads, &job, pool->worker_count);
@@ -295,6 +314,25 @@ relic_pool_for(relic_pool_t *pool RELIC_UNUSED, size_t part_count,
 
 	job_work(&job, 0);
 }
+
+#ifdef RELIC_THREADS
+
+/*
+ * Run the filler's steps on worker 0 while it has one and fewer than the
+ * `workers` - 1 others have counted themselves into the job.  The count
+ * is read before each step, so a job whose other workers all leave while
+ * a step runs is held up by the rest of that step and no more.
+ */
+static void
+job_fill(relic_pool_job_t *job, const relic_pool_filler_t *filler,
+    size_t workers)
+{
+	while (relic_atomic_size_load_acquire(&job->finished) < workers - 1)
+		if (!filler->step(filler->argument))
+			break;
+}
+
+#endif /* RELIC_THREADS */
 
 /*
  * Claim the job's parts one after another and run each, until none is left.

@@ -193,15 +193,26 @@ check and its wait. A worker touches the job for the last time when it counts
 itself in.
 
 **A job's filler.** A job may carry a filler: bounded steps of the
-caller's own serial work, which only worker 0 runs. Before it claims a
-part, worker 0 runs steps while the filler has one; once the parts are
-all claimed, and before it counts itself into the job, it runs steps
-while the filler has one and another worker has not counted itself in,
-reading that count with acquire ordering between steps. It then counts
-itself in once and waits at the ordinary barrier. Steps run outside the
-pool's mutex. A job that runs on the calling thread alone runs no step.
-The pool keeps no state about a filler beyond the job, and a job without
-one is unchanged.
+caller's own serial work, which only worker 0 runs. Before each step,
+worker 0 reads the job's existing completion count with acquire
+ordering, and it runs the step only while the filler has one and some
+other worker has not counted itself in. Once either is not so it stops,
+claims whatever parts remain, counts itself in once and waits at the
+ordinary barrier. A worker counts itself in only after finding every
+part claimed, so a filler that stops because the others have finished
+leaves no part for worker 0. Steps run outside the pool's mutex. A job
+that runs on the calling thread alone runs no step. The pool keeps no
+state about a filler beyond the job: the caller keeps whatever the
+filler had not done, for the next job's filler or to finish itself, and
+a job without one is unchanged.
+
+The guarantee is about delay, not idleness. The barrier waits for at
+most one step in progress after the other workers finish, never for the
+filler's remaining work. And worker 0 gives up its share of the parts
+while it steps, so a step is not taken only from time it would have
+spent waiting: the filler pays where the serial work it removes costs
+more than the share of parts the other workers take on, which is
+measured, not assumed.
 
 A step runs while parts write, so it must neither block nor run caller
 code, and it reads and writes nothing a part writes or reads. Only a bulk

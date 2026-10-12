@@ -114,6 +114,10 @@ struct import_input {
  * the first byte the input holds, which begins a record: where the next
  * window, or the reader, begins.  `map` is what the value layer numbered
  * the window's values as, opened while `mapped` is set.
+ *
+ * `framer` frames the window after the one being staged while that one is
+ * analyzed, or the window `boundary` begins once that one is staged; the
+ * window it frames begins `frame_start` bytes into the input.
  */
 struct importer {
 	relic_t			*ctx;
@@ -122,8 +126,10 @@ struct importer {
 	relic_table_reader_t	 reader;
 	import_input_t		 input;
 	relic_window_t		 window;
+	relic_framer_t		 framer;
 	relic_pending_map_t	 map;
 	relic_location_t	 boundary;
+	size_t			 frame_start;
 	relic_dom_t		 tuple[RELIC_MAX_ARITY];
 	relic_pred_id_t		 pred;
 	char			*source_name;	/* the importer's copy */
@@ -143,7 +149,8 @@ struct window_fill {
 };
 
 static void	 advance_location(relic_location_t *where, unsigned char byte);
-static int	 analyze_window(importer_t *importer, size_t *value_bytesp);
+static int	 analyze_window(importer_t *importer,
+		    const relic_pool_filler_t *ahead, size_t *value_bytesp);
 static enum relic_table_event_kind append_field_byte(
 		    relic_table_reader_t *reader, unsigned char byte,
 		    relic_table_event_t *event);
@@ -166,7 +173,7 @@ static enum relic_table_event_kind end_record(relic_table_reader_t *reader,
 		    relic_table_event_t *event);
 static bool	 extra_field_begun(const relic_table_reader_t *reader);
 static enum import_progress feed_reader(importer_t *importer);
-static int	 fill_window(import_input_t *input);
+static int	 fill_input(import_input_t *input, size_t target);
 static bool	 field_value(relic_t *ctx, enum relic_column column,
 		    const relic_table_event_t *event, relic_dom_t *valuep);
 static int	 import_named_file(relic_t *ctx, const char *path,
@@ -186,7 +193,9 @@ static bool	 is_plain(enum relic_format format,
 static size_t	 kept_columns(const enum relic_column *columns,
 		    size_t column_count);
 static void	 forget_window(importer_t *importer);
-static int	 frame_window(importer_t *importer);
+static void	 frame_rest(importer_t *importer);
+static bool	 frame_ahead(void *argument);
+static bool	 frame_step(void *argument);
 static enum window_outcome decline_window(importer_t *importer);
 static void	 fill_stripe(void *argument, size_t stripe,
 		    size_t worker_index);
@@ -1118,6 +1127,8 @@ importer_init(importer_t *importer, relic_t *ctx,
 	importer->header_pending = plan->header;
 	relic_staging_init(&importer->staging, ctx);
 	relic_window_init(&importer->window, (uint16_t)plan->arity);
+	relic_framer_init(&importer->framer, RELIC_IMPORT_WINDOW_BYTES,
+	    RELIC_IMPORT_PIECE_BYTES);
 }
 
 static void
@@ -1125,6 +1136,7 @@ importer_reset(importer_t *importer)
 {
 	forget_window(importer);
 	relic_window_reset(&importer->window);
+	relic_framer_reset(&importer->framer);
 	relic_table_reader_reset(&importer->reader);
 	relic_staging_reset(&importer->staging);
 	free(importer->input.bytes);
@@ -1206,7 +1218,7 @@ read_table(importer_t *importer)
 	ctx = importer->ctx;
 	batched = false;
 	if (may_batch(ctx) && reads_a_regular_file(importer->input.stream) &&
-	    fill_window(&importer->input) == 0 &&
+	    fill_input(&importer->input, RELIC_IMPORT_WINDOW_BYTES) == 0 &&
 	    (batching_forced(ctx) || outgrows_window(&importer->input)))
 		batched = prepare_batching(ctx) == 0;
 
@@ -1280,8 +1292,8 @@ batching_forced(const relic_t *ctx)
 }
 
 /*
- * Whether the table goes on past the window fill_window() has read of it:
- * its end has not been met, and no read has failed.
+ * Whether the table goes on past the window's worth fill_input() has read
+ * of it: its end has not been met, and no read has failed.
  */
 static bool
 outgrows_window(const import_input_t *input)
@@ -1320,21 +1332,25 @@ prepare_batching(relic_t *ctx)
  * IMPORT_READ_ON when one was declined, which leaves its bytes in the input
  * for the reader to read from `boundary`.  No window is staged after the
  * first that is not, so the window's storage is released before the
- * reader begins.
+ * reader begins.  The input holds the first window's horizon already, or
+ * the whole table.
  */
 static enum import_progress
 stage_windows(importer_t *importer)
 {
 	enum window_outcome outcome;
 
-	do {
-		if (fill_window(&importer->input) != 0)
-			outcome = WINDOW_NONE;
-		else
-			outcome = stage_window(importer);
-	} while (outcome == WINDOW_STAGED);
+	importer->frame_start = 0;
+	relic_framer_begin(&importer->framer, importer->plan,
+	    importer->source_name, &importer->boundary,
+	    importer->header_pending, importer->input.length,
+	    importer->input.ended);
+	do
+		outcome = stage_window(importer);
+	while (outcome == WINDOW_STAGED);
 	forget_window(importer);
 	relic_window_reset(&importer->window);
+	relic_framer_reset(&importer->framer);
 
 	switch (outcome) {
 	case WINDOW_ENDED:
@@ -1351,15 +1367,14 @@ stage_windows(importer_t *importer)
 }
 
 /*
- * Read the stream until the input holds a window's worth, or the stream
- * has ended or failed.  Returns 0, or -1 when there was no room to read
- * into, having reported nothing.
+ * Read the stream in chunks until the input holds `target` bytes, or the
+ * stream has ended or failed.  Returns 0, or -1 when there was no room to
+ * read into, having reported nothing.
  */
 static int
-fill_window(import_input_t *input)
+fill_input(import_input_t *input, size_t target)
 {
-	while (!input->ended && !input->failed && input->length <=
-	    RELIC_IMPORT_WINDOW_BYTES - RELIC_IMPORT_READ_CHUNK) {
+	while (!input->ended && !input->failed && input->length < target) {
 		if (read_chunk(input) != 0)
 			return (-1);
 	}
@@ -1368,28 +1383,63 @@ fill_window(import_input_t *input)
 }
 
 /*
- * Stage the window the input begins with: frame it, decode it, prove it
- * admissible, then make room for its values and its new tuples and add
- * them, which cannot fail once the room is made.  A window that cannot be
- * framed, decoded or proved is declined, and nothing of it has been
- * interned or staged.  A failure making room is the import's.  An input
- * that holds nothing, once filled, has ended or failed, and holds no
+ * Stage the window the input begins with, which the framer is framing.
+ *
+ * The framing is finished first, on the calling thread; the input holds
+ * the window's horizon, or the rest of the table, so nothing need be read
+ * for it.  The window then takes the framer's manifest, and the framer
+ * begins on the next window, at this one's end, once the input holds the
+ * next window's horizon too.  This window's analysis jobs carry the next
+ * one's framing as their filler, and whatever it leaves is finished when
+ * the next window is staged.
+ *
+ * A window that cannot be framed, decoded or proved admissible is
+ * declined, with nothing of it interned or staged and the next window's
+ * framing dropped, and so is one whose next horizon there is no room to
+ * read.  An admitted window's values and new tuples are added once room
+ * is made for them, which cannot fail after; a failure making it is the
+ * import's.  An input that holds nothing has ended or failed, and holds no
  * window.
  */
 static enum window_outcome
 stage_window(importer_t *importer)
 {
+	relic_pool_filler_t filler;
+	const relic_pool_filler_t *ahead;
+	import_input_t *input;
 	relic_window_t *window;
 	size_t value_bytes;
 
+	input = &importer->input;
 	window = &importer->window;
 	forget_window(importer);
-	if (importer->input.length == 0)
+	if (input->length == 0)
 		return (WINDOW_NONE);
 
-	if (frame_window(importer) != 0)
+	assert(importer->framer.state != RELIC_FRAMING_NONE);
+	frame_rest(importer);
+	if (importer->framer.state != RELIC_FRAMED)
 		return (decline_window(importer));
-	if (analyze_window(importer, &value_bytes) != 0)
+	relic_window_take_frame(window, &importer->framer);
+
+	ahead = NULL;
+	if (!window->ends_input) {
+		if (fill_input(input, window->length +
+		    RELIC_IMPORT_WINDOW_BYTES) != 0)
+			return (decline_window(importer));
+		importer->frame_start = window->length;
+		relic_framer_begin(&importer->framer, importer->plan,
+		    importer->source_name, &window->end, false,
+		    input->length - window->length, input->ended);
+		filler.step = frame_ahead;
+		filler.argument = importer;
+		ahead = &filler;
+	}
+	window->input = input->bytes;
+
+	if (relic_window_size(window) != 0)
+		return (decline_window(importer));
+	if (analyze_window(importer, ahead, &value_bytes) != 0)
 		return (decline_window(importer));
 	if (!window_admissible(importer, value_bytes))
 		return (decline_window(importer));
@@ -1398,7 +1448,8 @@ stage_window(importer_t *importer)
 		return (WINDOW_FAILED);
 
 	importer->ctx->counters.windows_staged++;
-	consume_input(&importer->input, window->length);
+	consume_input(input, window->length);
+	importer->frame_start = 0;
 	importer->boundary = window->end;
 	importer->header_pending = false;
 
@@ -1418,86 +1469,50 @@ decline_window(importer_t *importer)
 }
 
 /*
- * Frame the input into a window of its whole records, divided into pieces
- * of about RELIC_IMPORT_PIECE_BYTES, by a reader of the table's structure
- * begun at `boundary`; whatever follows the last whole record waits for
- * the next window.  Returns 0, or -1 when the input cannot be framed: it
- * holds a mistake or no whole record, or memory ran out.
- *
- * The reader is fed the input as the table's last bytes only when the
- * stream has ended after them, so that a record the end of the input ends
- * is whole only then.  The window's first record is the table's header
- * while the import still expects one.
+ * One step of the framer over the window it frames, which begins
+ * `frame_start` bytes into the input.  The base is found anew at each
+ * step, since the input's bytes move when a window is consumed.
  */
-static int
-frame_window(importer_t *importer)
+static bool
+frame_step(void *argument)
 {
-	relic_table_reader_t reader;
-	relic_table_event_t event;
-	enum relic_table_event_kind kind;
-	relic_window_t *window;
-	relic_window_piece_t *piece;
-	import_input_t *input;
-	relic_location_t end;
-	size_t records;
-	size_t length;
-	bool header;
-	int status;
+	importer_t *importer;
 
-	window = &importer->window;
-	input = &importer->input;
-	relic_table_reader_init(&reader, importer->plan->format,
-	    importer->plan->column_count, importer->source_name);
-	relic_table_reader_frame_only(&reader);
-	relic_table_reader_start_at(&reader, &importer->boundary);
-	relic_table_feed(&reader, input->bytes, input->length, input->ended);
+	importer = argument;
+	assert(importer->frame_start + importer->framer.buffered <=
+	    importer->input.length);
 
-	piece = NULL;
-	end = importer->boundary;
-	length = 0;
-	records = 0;
-	header = importer->header_pending;
-	status = 0;
-	while ((kind = relic_table_next(&reader, &event)) ==
-	    RELIC_TABLE_RECORD) {
-		if (piece == NULL) {
-			piece = relic_window_add_piece(window);
-			if (piece == NULL) {
-				status = -1;
-				break;
-			}
-			piece->start = length;
-			piece->where = end;
-			piece->header = header;
-			piece->first_tuple = window->tuple_count;
-		}
-		if (header) {
-			header = false;
-		} else {
-			piece->tuples++;
-			window->tuple_count++;
-		}
-		records++;
-		length = input->length - relic_table_unread(&reader);
-		end = reader.where;
+	return (relic_framer_step(&importer->framer,
+	    importer->input.bytes + importer->frame_start,
+	    RELIC_IMPORT_READ_CHUNK));
+}
 
-		piece->length = length - piece->start;
-		if (piece->length >= RELIC_IMPORT_PIECE_BYTES)
-			piece = NULL;
-	}
-	relic_table_reader_reset(&reader);
+/*
+ * A step of the framer as the filler of a window's analysis jobs, run on
+ * the calling thread while the parts run on the others.  The stream is
+ * read, and the input's bytes moved, only between jobs, and the parts read
+ * no byte after the window's, where the framer reads; so the filler and
+ * the parts share nothing either writes.  The steps are counted for the
+ * tests.
+ */
+static bool
+frame_ahead(void *argument)
+{
+	importer_t *importer;
 
-	if (status != 0 || records == 0 ||
-	    (kind != RELIC_TABLE_MORE && kind != RELIC_TABLE_END))
-		return (-1);
+	importer = argument;
+	if (importer->framer.state == RELIC_FRAMING)
+		importer->ctx->counters.frames_ahead++;
 
-	window->input = input->bytes;
-	window->length = length;
-	window->end = end;
-	window->ends_input = kind == RELIC_TABLE_END;
-	window->pieces[window->piece_count - 1].last = window->ends_input;
+	return (frame_step(importer));
+}
 
-	return (relic_window_size(window));
+/* Finish, on the calling thread, whatever framing the framer has left. */
+static void
+frame_rest(importer_t *importer)
+{
+	while (frame_step(importer))
+		continue;
 }
 
 /*
@@ -1524,9 +1539,14 @@ forget_window(importer_t *importer)
  *
  * The map is open only when the window holds a value; a window of tuples
  * of no columns has none, and its values take no more room than they do.
+ *
+ * The jobs whose parts only read what the window's framing and earlier
+ * steps wrote carry `ahead`, the framing of the next window, as their
+ * filler, when it is not NULL.
  */
 static int
-analyze_window(importer_t *importer, size_t *value_bytesp)
+analyze_window(importer_t *importer, const relic_pool_filler_t *ahead,
+    size_t *value_bytesp)
 {
 	relic_window_t *window;
 	relic_pending_batch_t batch;
@@ -1544,8 +1564,8 @@ analyze_window(importer_t *importer, size_t *value_bytesp)
 	job.ids = NULL;
 	job.tuple_seed = ctx->hash_seed;
 
-	relic_pool_for(ctx->pool, window->piece_count,
-	    relic_window_decode_part, &job);
+	relic_pool_for_filled(ctx->pool, window->piece_count,
+	    relic_window_decode_part, &job, ahead);
 	if (!relic_window_decoded(window))
 		return (-1);
 	if (relic_window_gather(window) != 0)
@@ -1558,8 +1578,8 @@ analyze_window(importer_t *importer, size_t *value_bytesp)
 			return (-1);
 		importer->mapped = true;
 		job.ids = importer->map.ids;
-		relic_pool_for(ctx->pool, RELIC_WINDOW_VALUE_PARTS,
-		    relic_window_find_part, &job);
+		relic_pool_for_filled(ctx->pool, RELIC_WINDOW_VALUE_PARTS,
+		    relic_window_find_part, &job, ahead);
 
 		batch.values = window->values;
 		batch.hashes = window->value_hashes;
@@ -1571,12 +1591,12 @@ analyze_window(importer_t *importer, size_t *value_bytesp)
 			return (-1);
 	}
 
-	relic_pool_for(ctx->pool, window->piece_count,
-	    relic_window_resolve_part, &job);
+	relic_pool_for_filled(ctx->pool, window->piece_count,
+	    relic_window_resolve_part, &job, ahead);
 	if (relic_window_list(window) != 0)
 		return (-1);
-	relic_pool_for(ctx->pool, RELIC_STRIPES, relic_window_classify_part,
-	    &job);
+	relic_pool_for_filled(ctx->pool, RELIC_STRIPES,
+	    relic_window_classify_part, &job, ahead);
 	relic_window_rank(window);
 
 	return (0);

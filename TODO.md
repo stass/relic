@@ -104,16 +104,15 @@ bound, so an unterminated csv quote buffers the rest of the file. The
 memory limit leaves both out by contract. A bound on either belongs in the
 context's configuration, beside the other limits.
 
-**A batch import frames each window on the calling thread.** [Medium,
-component: `lib/import.c`] Framing is one pass of the reader over the
-window, and the pool waits for it. Sampled at eight threads, it is 38% of
-the calling thread on a 158 MB table of two columns of repeated values
-and 17% on 52 MB of distinct symbols, the largest serial step left. The
-reader alone may decide where records end
-([bulk loading](specs/design-bulk-load.md)), so the candidate is to frame
-the next window, from the boundary the current window's framing found, on
-a thread of the pool while the current window is analyzed, discarding it
-when the current one is declined.
+**Framing ahead is unmeasured.** [Medium, component: `lib/import.c`,
+`lib/pool.c`] Framing a window in place was sampled at eight threads as
+38% of the calling thread on a 158 MB table of two columns of repeated
+values and 17% on 52 MB of distinct symbols. A batch import frames the
+next window as the filler of the current window's analysis jobs
+([framing ahead](specs/design-bulk-load.md#framing-ahead)), and worker 0
+gives up its share of those jobs' parts while it frames. Measure it
+against framing in place on those tables at eight and sixteen threads on
+the p620 and the M3, and keep it only where it wins.
 
 **A batch import places new values in the symbol index one at a time.**
 [Medium, component: `lib/symbol.c`, `lib/value.c`] Publishing a window's

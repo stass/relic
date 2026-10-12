@@ -22,9 +22,11 @@
  * Batch import: a window of a table's input, cut at a record boundary,
  * staged all at once or not at all.
  *
- * lib/import.c frames a window into pieces of whole records and then
- * analyzes it in steps, each a job of parts that the context's pool runs
- * at once (round.h), with a step of its own between two jobs:
+ * lib/import.c frames a window into pieces of whole records, with a
+ * framer, and then analyzes it in steps, each a job of parts that the
+ * context's pool runs at once (round.h), with a step of its own between
+ * two jobs, while the calling thread frames the next window between and
+ * instead of its own parts of the jobs that only read:
  *
  *	decode		a piece to a part: a dictionary of the distinct
  *			values its kept fields hold, and a token per field
@@ -60,6 +62,7 @@ typedef struct relic_import_plan relic_import_plan_t;
 typedef struct relic_window_value relic_window_value_t;
 typedef struct relic_window relic_window_t;
 typedef struct relic_window_job relic_window_job_t;
+typedef struct relic_framer relic_framer_t;
 
 /*
  * The values a window holds are divided among this many parts for finding
@@ -105,7 +108,7 @@ struct relic_window_value {
  * A piece of a window: whole records, `length` bytes from offset `start`,
  * the first at `where`.  `header` says its first record is the table's
  * header, which yields no tuple, and `last` that the input ends with it.
- * Its `tuples` tuples are the window's from `first_tuple`.  The importer
+ * Its `tuples` tuples are the window's from `first_tuple`.  A framer
  * frames these.
  *
  * Decoding fills the rest.  `values` lists the distinct values its kept
@@ -207,6 +210,54 @@ struct relic_window {
 };
 
 /*
+ * How a framer stands: framing nothing, before it is begun or once the
+ * window has taken what it framed; framing a window; having framed it
+ * into at least one whole record; or having left it unframed, which
+ * declines the window.
+ */
+enum relic_framing {
+	RELIC_FRAMING_NONE,
+	RELIC_FRAMING,
+	RELIC_FRAMED,
+	RELIC_UNFRAMED
+};
+
+/*
+ * A window being framed, by `reader`, which reads the table's structure
+ * alone, begun at the window's first byte.  The window is the whole
+ * records within `horizon` bytes of that byte, or before the end of input
+ * when that comes first, cut into pieces of at least `piece_bytes` but
+ * the last.  `buffered` of its bytes are in memory, and `ended` says the
+ * stream ended successfully after them; `fed` of them have been fed the
+ * reader.
+ *
+ * The rest is the window's manifest as far as it is framed, which the
+ * window takes once it is: `piece_count` pieces in `pieces`, holding
+ * `tuple_count` tuples and the window's first `length` bytes, the end of
+ * the last record framed, whose next byte is at `end`.  `ends_input` says
+ * the table ends with them.  `header` says the next record is the
+ * table's header, and `open` that the last piece takes it.
+ */
+struct relic_framer {
+	relic_table_reader_t	 reader;
+	relic_window_piece_t	*pieces;
+	relic_location_t	 end;
+	size_t			 horizon;
+	size_t			 piece_bytes;
+	size_t			 buffered;
+	size_t			 fed;
+	size_t			 length;
+	size_t			 piece_count;
+	size_t			 piece_capacity;
+	size_t			 tuple_count;
+	enum relic_framing	 state;
+	bool			 ended;
+	bool			 header;
+	bool			 open;
+	bool			 ends_input;
+};
+
+/*
  * What the parts of a window's jobs read, and where they write: the
  * context, the import's plan and source name, the window, and the
  * predicate's builder and base store, either of which may be NULL.  `ids`
@@ -233,10 +284,10 @@ struct relic_window_job {
  * sized by what each piece held, and relic_window_reset() releases
  * everything.
  *
- * The importer frames a window by adding each piece with
- * relic_window_add_piece(), which returns it zeroed, or NULL when memory
- * ran out, and then sizes the window's arrays for its length and its
- * tuples with relic_window_size().  Then come the steps above, the parts
+ * The importer frames a window with a framer, and once it is framed gives
+ * the window its manifest with relic_window_take_frame(), and sizes the
+ * window's arrays for its length and its tuples with relic_window_size().
+ * Then come the steps above, the parts
  * of each job run by relic_window_decode_part(), relic_window_find_part(),
  * relic_window_resolve_part() and relic_window_classify_part(), and the
  * steps between them by relic_window_decoded(), which says whether every
@@ -248,7 +299,8 @@ struct relic_window_job {
 void	 relic_window_init(relic_window_t *window, uint16_t arity);
 void	 relic_window_clear(relic_window_t *window);
 void	 relic_window_reset(relic_window_t *window);
-relic_window_piece_t *relic_window_add_piece(relic_window_t *window);
+void	 relic_window_take_frame(relic_window_t *window,
+	    relic_framer_t *framer);
 int	 relic_window_size(relic_window_t *window);
 bool	 relic_window_decoded(const relic_window_t *window);
 int	 relic_window_gather(relic_window_t *window);
@@ -261,6 +313,45 @@ void	 relic_window_resolve_part(void *job, size_t piece,
 	    size_t worker_index);
 void	 relic_window_classify_part(void *job, size_t stripe,
 	    size_t worker_index);
+
+/*
+ * relic_framer_init() makes a framer of windows whose horizon is `horizon`
+ * bytes from their first and whose pieces end at the first record end at
+ * least `piece_bytes` after their start; it frames nothing until begun.
+ * relic_framer_reset() releases everything it holds, leaving it as
+ * relic_framer_init() made it.
+ *
+ * relic_framer_begin() begins framing a window of the table `plan`
+ * describes, whose first byte is at `where`, which begins a record, and
+ * whose first record is the table's header when `header` is set.  The
+ * window's first `buffered` bytes are in memory, all it will be given,
+ * and `ended` says the stream ended successfully after them.  The bytes
+ * before the horizon are fed as the table's last only when the stream
+ * ended strictly before the horizon, so a window's records do not depend
+ * on whether its end was found at the horizon or later.  `source_name` is
+ * borrowed for as long as the framing lasts.  Whatever the framer had
+ * framed is forgotten.
+ *
+ * relic_framer_step() feeds the reader at most `most` more of those
+ * bytes, the window's first now at `bytes`, and records the records they
+ * complete.  Returns whether the framing goes on, which it no longer does
+ * once every byte held before the horizon has been fed or the reader has
+ * met the end of input, a mistake or a want of memory; the window is
+ * then framed when it holds a whole record, and unframed otherwise.  The
+ * reader holds none of the bytes between steps, so they may have moved
+ * from one step to the next.  A step of a framer not framing does nothing
+ * and returns false.  Pieces are cut by their bytes alone, so how the
+ * window was stepped decides nothing about them either.
+ */
+void	 relic_framer_init(relic_framer_t *framer, size_t horizon,
+	    size_t piece_bytes);
+void	 relic_framer_reset(relic_framer_t *framer);
+void	 relic_framer_begin(relic_framer_t *framer,
+	    const relic_import_plan_t *plan, const char *source_name,
+	    const relic_location_t *where, bool header, size_t buffered,
+	    bool ended);
+bool	 relic_framer_step(relic_framer_t *framer, const char *bytes,
+	    size_t most);
 
 /* Whether a field's bytes are a value of its column's type, or why not. */
 enum relic_field_verdict {

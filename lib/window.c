@@ -40,6 +40,7 @@ static int	 decode_field(const relic_t *ctx, enum relic_column column,
 		    relic_window_t *window, relic_window_piece_t *piece,
 		    size_t *decodedp, relic_dom_t *tokenp);
 static void	 divide_values(relic_window_t *window);
+static int	 frame_record(relic_framer_t *framer);
 static bool	 equal_values(const relic_window_t *window,
 		    const relic_pending_t *a, const relic_pending_t *b,
 		    const char *b_bytes);
@@ -112,24 +113,172 @@ piece_reset(relic_window_piece_t *piece)
 	relic_idtab_reset(&piece->seen);
 }
 
-relic_window_piece_t *
-relic_window_add_piece(relic_window_t *window)
+/*
+ * The window takes the framer's manifest, giving it the window's emptied
+ * pieces to frame the next window into; a cleared window's pieces hold no
+ * dictionary.  The framer frames nothing until it is begun again.
+ */
+void
+relic_window_take_frame(relic_window_t *window, relic_framer_t *framer)
+{
+	relic_window_piece_t *pieces;
+	size_t capacity;
+
+	assert(framer->state == RELIC_FRAMED && framer->piece_count > 0);
+	assert(window->piece_count == 0);
+
+	pieces = window->pieces;
+	capacity = window->piece_capacity;
+	window->pieces = framer->pieces;
+	window->piece_capacity = framer->piece_capacity;
+	window->piece_count = framer->piece_count;
+	window->tuple_count = framer->tuple_count;
+	window->length = framer->length;
+	window->end = framer->end;
+	window->ends_input = framer->ends_input;
+	window->pieces[window->piece_count - 1].last = framer->ends_input;
+
+	framer->pieces = pieces;
+	framer->piece_capacity = capacity;
+	framer->piece_count = 0;
+	framer->state = RELIC_FRAMING_NONE;
+}
+
+void
+relic_framer_init(relic_framer_t *framer, size_t horizon, size_t piece_bytes)
+{
+	bzero(framer, sizeof(*framer));
+	framer->horizon = horizon;
+	framer->piece_bytes = piece_bytes;
+	framer->state = RELIC_FRAMING_NONE;
+}
+
+void
+relic_framer_reset(relic_framer_t *framer)
+{
+	relic_table_reader_reset(&framer->reader);
+	free(framer->pieces);
+	relic_framer_init(framer, framer->horizon, framer->piece_bytes);
+}
+
+void
+relic_framer_begin(relic_framer_t *framer, const relic_import_plan_t *plan,
+    const char *source_name, const relic_location_t *where, bool header,
+    size_t buffered, bool ended)
+{
+	relic_table_reader_reset(&framer->reader);
+	relic_table_reader_init(&framer->reader, plan->format,
+	    plan->column_count, source_name);
+	relic_table_reader_frame_only(&framer->reader);
+	relic_table_reader_start_at(&framer->reader, where);
+
+	framer->end = *where;
+	framer->buffered = buffered;
+	framer->fed = 0;
+	framer->length = 0;
+	framer->piece_count = 0;
+	framer->tuple_count = 0;
+	framer->state = RELIC_FRAMING;
+	framer->ended = ended;
+	framer->header = header;
+	framer->open = false;
+	framer->ends_input = false;
+}
+
+bool
+relic_framer_step(relic_framer_t *framer, const char *bytes, size_t most)
+{
+	relic_table_event_t event;
+	enum relic_table_event_kind kind;
+	size_t feedable;
+	size_t span;
+	bool last;
+
+	if (framer->state != RELIC_FRAMING)
+		return (false);
+
+	feedable = framer->buffered < framer->horizon ? framer->buffered :
+	    framer->horizon;
+	assert(framer->fed <= feedable && most > 0);
+	span = feedable - framer->fed < most ? feedable - framer->fed : most;
+	last = framer->ended && framer->buffered < framer->horizon &&
+	    framer->fed + span == framer->buffered;
+	relic_table_feed(&framer->reader, bytes + framer->fed, span, last);
+	framer->fed += span;
+
+	while ((kind = relic_table_next(&framer->reader, &event)) ==
+	    RELIC_TABLE_RECORD) {
+		if (frame_record(framer) != 0) {
+			framer->state = RELIC_UNFRAMED;
+			return (false);
+		}
+	}
+
+	switch (kind) {
+	case RELIC_TABLE_MORE:
+		if (framer->fed < feedable)
+			return (true);
+		break;
+	case RELIC_TABLE_END:
+		framer->ends_input = true;
+		break;
+	default:
+		framer->state = RELIC_UNFRAMED;
+		return (false);
+	}
+
+	framer->state = framer->piece_count > 0 ? RELIC_FRAMED :
+	    RELIC_UNFRAMED;
+
+	return (false);
+}
+
+/*
+ * Add the record the framer's reader has just completed to the
+ * manifest: in the open piece, or in a new one begun with it.  Returns 0,
+ * or -1 when memory ran out for a new piece.  A span fed the reader is
+ * read to its end before the next is fed, so the record ends as many
+ * bytes before the span's end as the reader has left unread.
+ */
+static int
+frame_record(relic_framer_t *framer)
 {
 	relic_window_piece_t *pieces;
 	relic_window_piece_t *piece;
 
-	pieces = relic_grow_array(window->pieces, &window->piece_capacity,
-	    window->piece_count + 1, sizeof(*pieces));
-	if (pieces == NULL)
-		return (NULL);
-	window->pieces = pieces;
+	if (!framer->open) {
+		pieces = relic_grow_array(framer->pieces,
+		    &framer->piece_capacity, framer->piece_count + 1,
+		    sizeof(*pieces));
+		if (pieces == NULL)
+			return (-1);
+		framer->pieces = pieces;
 
-	piece = &pieces[window->piece_count];
-	bzero(piece, sizeof(*piece));
-	relic_idtab_init(&piece->seen, true);
-	window->piece_count++;
+		piece = &pieces[framer->piece_count++];
+		bzero(piece, sizeof(*piece));
+		relic_idtab_init(&piece->seen, true);
+		piece->start = framer->length;
+		piece->where = framer->end;
+		piece->header = framer->header;
+		piece->first_tuple = framer->tuple_count;
+		framer->open = true;
+	}
+	piece = &framer->pieces[framer->piece_count - 1];
 
-	return (piece);
+	if (framer->header) {
+		framer->header = false;
+	} else {
+		piece->tuples++;
+		framer->tuple_count++;
+	}
+	framer->length = framer->fed - relic_table_unread(&framer->reader);
+	framer->end = framer->reader.where;
+
+	piece->length = framer->length - piece->start;
+	if (piece->length >= framer->piece_bytes)
+		framer->open = false;
+
+	return (0);
 }
 
 /*

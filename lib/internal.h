@@ -189,8 +189,10 @@ struct relic_valtab {
  * a batch import staged whole and the ones it declined and read again a
  * field at a time.  `commits_shared` counts the load commits whose appends
  * were placed on the pool, and `commits_deferred` those whose appends'
- * stripes grew in the parts placing them.  relic_stats() reports none of
- * these; they show the tests which way an import or a commit went.
+ * stripes grew in the parts placing them.  `frames_ahead` counts the
+ * steps of framing a batch import ran as the filler of a window's jobs.
+ * relic_stats() reports none of these; they show the tests which way an
+ * import or a commit went.
  */
 struct relic_counters {
 	uint64_t		iterations;
@@ -200,6 +202,7 @@ struct relic_counters {
 	uint64_t		parallel_rounds;
 	uint64_t		windows_staged;
 	uint64_t		windows_declined;
+	uint64_t		frames_ahead;
 	uint64_t		commits_shared;
 	uint64_t		commits_deferred;
 };
@@ -1512,10 +1515,11 @@ int	 relic_staging_commit(relic_staging_t *staging);
  * call.  An import stages a table a window at a time (lib/window.h), each
  * window at most RELIC_IMPORT_WINDOW_BYTES of input, framed into pieces of
  * about RELIC_IMPORT_PIECE_BYTES, and from a record no window can hold on
- * it reads the table one field at a time.  So a window bounds how far an
- * import may have read past the record that ends it.  None of the three
- * limits a table: each sets only how its input is divided, and a build may
- * set them lower to exercise the divisions.
+ * it reads the table one field at a time.  It frames the next window
+ * while it analyzes one, so it may have read two windows and a chunk past
+ * the record that ends the last window it staged, and no more.  None of
+ * the three limits a table: each sets only how its input is divided, and
+ * a build may set them lower to exercise the divisions.
  *
  * A window's analysis costs more than reading its fields one at a time, and
  * repays it only shared among threads: a table is staged a window at a
@@ -1540,9 +1544,8 @@ int	 relic_staging_commit(relic_staging_t *staging);
 #define	RELIC_IMPORT_BATCH_WORKERS	8u
 
 _Static_assert(RELIC_IMPORT_READ_CHUNK > 0 &&
-    RELIC_IMPORT_WINDOW_BYTES >= 2 * RELIC_IMPORT_READ_CHUNK &&
-    RELIC_IMPORT_PIECE_BYTES > 0,
-    "a window holds a chunk beyond what it carries over");
+    RELIC_IMPORT_WINDOW_BYTES > 0 && RELIC_IMPORT_PIECE_BYTES > 0,
+    "a table's input is divided into parts of some bytes");
 
 /*
  * lib/explain.c

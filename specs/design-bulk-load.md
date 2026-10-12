@@ -97,7 +97,8 @@ refused import has read.
 fields is analyzed, so on a pipe, a socket, a terminal or a stream of the
 caller's own without a descriptor, a producer that sends a malformed
 record and then waits would see its error reported only once a window,
-or two with framing ahead, had arrived, or never. The importer identifies
+or with framing ahead two windows and a transport chunk, had arrived, or
+never. The importer identifies
 its input by `fstat(2)` on the stream's descriptor and batches only when
 that names a regular file; a stream without a descriptor, or one
 `fstat(2)` cannot describe, is not one. A path is not evidence, since it
@@ -315,58 +316,90 @@ and record targets, independent of the configured worker count. They are
 tuning parameters, not language limits. A window cannot extend across an
 arbitrarily large record merely to fill the worker pool.
 
-At a size target, select a completed record prefix and retain the partial
-suffix for the next window. A transport buffer ending inside a normal
-record is not a reason to abandon batching. The adapter retains the
-suffix's bytes and framing state within the same bounded workspace and
-extends it while the preceding window is analyzed, as
-[framing ahead](#framing-ahead) describes. Buffer movement or reuse
-waits until no job borrows it. A record that alone exhausts that workspace
-takes scalar continuation instead of an unbounded window allocation.
+A window is defined from its own first byte. Its horizon is
+`RELIC_IMPORT_WINDOW_BYTES` from that byte: the window is the whole
+records the reader completes in the bytes before the horizon, or before
+the end of input when that comes first, and the partial suffix after its
+last whole record begins the next window. How the stream was read --
+where its transport chunks fell, how far past the horizon it has been
+read -- decides nothing. A transport buffer ending inside a normal
+record is not a reason to abandon batching. A record that alone exceeds
+the horizon takes scalar continuation instead of an unbounded window
+allocation.
+
+**The end of input at the horizon.** The bytes before the horizon are
+fed to the reader as the table's last only when the stream has ended
+successfully and the end lies strictly before the horizon. Reaching the
+horizon is not the end of input, and neither is an end found exactly at
+it: a final record no line feed ends, lying across or exactly up to the
+horizon, belongs to the next window, which begins with it and holds the
+end strictly before its own horizon. So whether the reader has read
+past the horizon, or found the stream's end there, before it frames a
+window cannot change which records the window holds.
+
+One framing implementation serves every window: a framer begun at a
+window's first byte, fed at most `RELIC_IMPORT_READ_CHUNK` of buffered
+bytes a step, records each whole record into the window's manifest of
+pieces until it reaches the horizon or the end of input, or finds a
+mistake or runs out of memory, which leaves the window unframed and
+takes scalar replay from its boundary. Framing a window in place and
+framing it ahead are the same steps, run on different threads.
 
 ### Framing ahead
 
 Framing is one serial pass of the reader over a window, and its next
 boundary is known only once the current window's framing ends. The
 calling thread frames the next window while the current one is analyzed,
-in the time it would otherwise spend on its share of the analysis jobs or
-waiting at their barriers. The calling thread is worker 0 of every job,
-and the table reader is incremental, so framing needs no thread of its
-own and no job that outlives a barrier.
+in steps run between and instead of its own analysis parts. The calling
+thread is worker 0 of every job, and the table reader is incremental, so
+framing needs no thread of its own and no job that outlives a barrier.
 
 * **The analysis jobs carry the framer as their filler.** Worker 0 runs
-  framing steps instead of claiming parts and while it would otherwise
-  wait at the barrier ([a job's filler](design-parallel.md#the-worker-pool)).
-  Only the frozen-read analysis jobs carry it; the stripe fills and every
-  other job that publishes do not.
+  framing steps while some other worker is still at work, then claims
+  any parts left and counts itself in
+  ([a job's filler](design-parallel.md#the-worker-pool)). A job's
+  completion can therefore wait for one framing step in progress, never
+  for the framing that remains. Only the frozen-read analysis jobs --
+  decoding, finding, resolving and classifying -- carry it; the stripe
+  fills and every other job that publishes do not, and a job that runs
+  on the calling thread alone runs no step.
+* **The framer outlives a job, not a window.** The framing state -- the
+  reader's state, the next window's manifest and how far it has been fed
+  -- belongs to the importer, so the framing one job's filler leaves
+  undone continues in the next job's, and what the last job leaves is
+  finished on the calling thread once the current window is staged,
+  before the next one is analyzed.
 * **A step frames buffered bytes and reads nothing.** A step feeds the
-  framer at most `RELIC_IMPORT_READ_CHUNK` of bytes already in the
-  buffer and records the records it completes as the next window's
-  pieces. It never reads the stream, so it neither blocks nor runs a
-  stream's callbacks while parts run.
+  framer at most `RELIC_IMPORT_READ_CHUNK` of bytes already in the buffer
+  and records the records it completes as the next window's pieces. It
+  never reads the stream, so it neither blocks nor runs a stream's
+  callbacks while parts run.
 * **The caller reads between jobs.** Before a window's analysis
-  dispatches, the caller reads the stream until the buffer holds that
-  window and the next window's bytes, or the stream ends or fails, so
-  read-ahead is bounded by two windows. The input is a regular file, so
-  these reads wait on storage, never on a producer. Every read happens on
-  the calling thread outside a job, records its outcome as read-ahead
-  always does, and reports nothing.
+  dispatches, the caller reads the stream in transport chunks until the
+  buffer holds the next window's horizon, that is the current window and
+  a horizon of bytes after it, or the stream ends or fails. Read-ahead
+  past the accepted boundary is therefore bounded by two windows plus at
+  most one transport chunk, the read that crosses the next horizon. Only
+  a regular file is batched, so these reads wait on storage, never on a
+  producer. Every read happens on the calling thread outside a job,
+  records its outcome as read-ahead always does, and reports nothing.
 * **One framer, three positions.** The input adapter distinguishes the
   accepted boundary, where replay begins; the framing cursor, which owns
   the framer's parser state and the next window's start; and the
   buffered end. The framer is fed a span only after it has consumed the
-  previous one, and only a successful end of input marks a feed as the
-  last; a recorded read failure never does. A window's bound is measured
-  from its own start, whatever the buffer's capacity. The framer lives
-  for one window's framing, and a partial record at its end is framed
-  again, from its first byte, by the next window's framer.
-* **Bytes move only when nothing borrows them.** Pieces record offsets
-  from their window's start. Batching sizes the buffer once for two
-  windows and their transport chunks, so reads append past every borrowed
-  span. Consuming a window advances the accepted boundary; the remaining
-  bytes move to the front only between windows, when no job runs and no
-  framer is alive, and the next window's base pointer is set from its
-  offset when its analysis begins.
+  previous one, and only the end-of-input rule above marks a feed as the
+  last; a recorded read failure never does. The framer lives for one
+  window's framing, and a partial record at its end is framed again, from
+  its first byte, by the next window's framer.
+* **Bytes move only between jobs.** Pieces record offsets from their
+  window's start. The stream is read, and a consumed window's bytes
+  dropped from the front of the buffer, only on the calling thread
+  between jobs. The framer is begun only once the bytes it frames are
+  read, and fixes then how many it holds and whether the stream ended
+  after them; it holds none of them between steps and finds its base
+  anew at each, and a window's base is set after the read-ahead. So
+  neither a read that grows the buffer nor a consumption that shifts it
+  is ever seen through a stale pointer.
 * **Two framing manifests, one analysis workspace.** The current
   window's manifest -- its pieces, record counts and end -- is analyzed
   while the next one's is framed; analysis never overlaps analysis, so
@@ -378,20 +411,19 @@ own and no job that outlives a barrier.
   boundary only once the current window is staged. A declined current
   window discards the next window's manifest, and scalar replay reads
   every buffered byte from the accepted boundary, then the recorded read
-  outcomes, then the stream. A staged current window whose next window
-  is not fully framed finishes that framing on the calling thread, after
-  reading what the buffer lacks, before analyzing it.
+  outcomes, then the stream.
 
 Framing ahead changes no boundary, piece, value, diagnostic or replay
 position: the reader decides every boundary from the same bytes, in the
-same order. What it moves is time, and how far the file has been read
-when a window's values are published, which the batched and scalar paths
-already differ in. The serial
-phases of a window -- gathering, numbering, admission, reservation and
-value publication -- remain on the calling thread and frame nothing;
-framing still bounds an import when it takes longer than the rest of a
-window's work. Worker 0 frames instead of analyzing, so framing ahead is
-kept only where it beats framing each window before its analysis at the
+same order, whatever the steps' schedule. What it moves is time, and how
+far the file has been read when a window's values are published, which
+the batched and scalar paths already differ in. The serial phases of a
+window -- gathering, numbering, admission, reservation and value
+publication -- remain on the calling thread and frame nothing; framing
+still bounds an import when it takes longer than the rest of a window's
+work. Worker 0 gives up its share of the analysis parts while it frames,
+so the steps are not taken only from idle time: framing ahead is kept
+only where it beats framing each window before its analysis at the
 batching worker counts, measured beside the frame-only reader's own
 speed.
 
@@ -438,11 +470,11 @@ successful reads first, then observes the recorded failed read if it gets
 that far. A read-ahead failure cannot replace an earlier field or staging
 failure. A short successful read retains ordinary EOF semantics.
 
-Read-ahead is bounded by two windows, and only the caller reads or closes
-a stream. Only a regular file is batched, so only a regular file is read
-ahead beyond the scalar transport chunk. A stream the caller opens on a
-regular file, standard input redirected from one among them, is batched
-like a path's; every input not positively identified as a regular file
+Read-ahead is bounded by two windows plus at most one transport chunk,
+and only the caller reads or closes a stream. Only a regular file is
+batched, so only a regular file is read ahead beyond the scalar transport
+chunk. A stream the caller opens on a regular file, standard input
+redirected from one among them, is batched like a path's; every input not positively identified as a regular file
 takes the scalar consumer from the start and uses the same buffered input
 adapter. Diagnostics run on the caller after all jobs that could refer to
 their buffers have joined.
@@ -860,7 +892,7 @@ independent checks rather than comparing two uses of the same new helper.
 | Allocation failure | Nth-allocation sweeps cover private decline, value/builder reservation, pool copies, manifest preparation and late destination reserve; the context can load/query again afterward |
 | Concurrency | 1, 2, 4, 8 and 16 workers and disabled-thread builds agree on IDs, capacities, diagnostics and output; instrumentation proves both bulk apply and replay paths actually execute |
 | Striping | Symbol-pool and append capacities agree across hash seeds and thread counts, with deferred and immediate stripe growth alike; input crowded into one stripe keeps its answers, capacities and bounded probes |
-| Framing ahead | Windows framed ahead and framed in place give the same pieces; a declined window discards the framing ahead and replays every buffered byte; a refused import has read at most two windows past its last accepted boundary |
+| Framing ahead | Windows framed ahead and framed in place give the same windows and pieces under every schedule of framing steps, the end of input and quoted records around the horizon included; a job whose other workers finish while framing remains completes, the framing finishing later; a declined window discards the framing ahead and replays every buffered byte, with the scalar diagnostic and retained values; a refused import has read at most two windows and one transport chunk past its last accepted boundary |
 | Streaming inputs | A producer that writes one transport chunk holding a malformed record and keeps its pipe open sees the error reported without a window's worth of input or EOF, with the scalar diagnostic order, retained values and no facts added; a FIFO named by path, a stream without a descriptor and forced batching are all read by the scalar consumer; a test build that takes a failing stream for a regular file shows windows staged before the failed read, so the batch path's read errors stay covered |
 | Small-input cost | Tiny, empty, header-only, duplicate-heavy and one-fact inputs avoid unnecessary dispatch and keep their established behavior |
 

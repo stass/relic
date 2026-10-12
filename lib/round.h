@@ -401,6 +401,22 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
 		    size_t worker_index);
 
 /*
+ * A job's filler: serial work of the caller's that worker 0 runs in steps
+ * while the pool's other workers run the job's parts.  `step` runs one
+ * step with `argument` and returns whether another remains; called when
+ * none does, it does nothing and returns false.  A step should be short,
+ * since the job can end no sooner than the step in progress does.
+ */
+typedef bool	(*relic_pool_step_fn)(void *argument);
+
+typedef struct relic_pool_filler relic_pool_filler_t;
+
+struct relic_pool_filler {
+	relic_pool_step_fn	 step;
+	void			*argument;
+};
+
+/*
  * lib/round.c
  *
  * relic_round_run() runs a round deferred on the context's pool, creating
@@ -516,6 +532,13 @@ bool	 relic_round_merge(relic_t *ctx, relic_pool_t *pool,
  * the calling thread alone, as it would have anyway, without waking the
  * pool.
  *
+ * relic_pool_for_filled() is relic_pool_for() with a filler, which may be
+ * NULL.  When the job is shared, the calling thread runs the filler's
+ * steps before it claims a part, until the filler has none left or every
+ * other worker has left the job, and then claims what parts remain; a job
+ * the calling thread runs alone runs none.  Whatever the filler has not
+ * done when the call returns is the caller's.
+ *
  * relic_pool_free() stops and joins the pool's threads and releases the
  * pool and everything it kept.
  *
@@ -532,6 +555,9 @@ int	 relic_pool_create(relic_pool_t **poolp, size_t workers,
 size_t	 relic_pool_workers(relic_pool_t *pool);
 void	 relic_pool_for(relic_pool_t *pool, size_t part_count,
 	    relic_pool_part_fn run_part, void *argument);
+void	 relic_pool_for_filled(relic_pool_t *pool, size_t part_count,
+	    relic_pool_part_fn run_part, void *argument,
+	    const relic_pool_filler_t *filler);
 void	 relic_pool_free(relic_pool_t *pool);
 uint64_t relic_pool_spin_nanoseconds(size_t workers, long processors);
 

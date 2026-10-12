@@ -43,6 +43,7 @@
 
 #include "harness.h"
 #include "internal.h"
+#include "window.h"
 
 #define	SCENARIO_ALL_OR_NOTHING	"an import is all or nothing"
 #define	SCENARIO_BATCH		"a batch import ends as a scalar one does"
@@ -50,6 +51,8 @@
 #define	SCENARIO_DERIVED	"an import discards what was derived"
 #define	SCENARIO_DESCRIPTION	"a malformed description is refused unread"
 #define	SCENARIO_DUPLICATES	"a fact is held once"
+#define	SCENARIO_FRAMING \
+	"a window is framed alike however its framing is stepped"
 #define	SCENARIO_HEADER		"a header is read and not imported"
 #define	SCENARIO_INTEGER	"an integer column holds the language's integers"
 #define	SCENARIO_LOCATION	"a mistake is located in its source"
@@ -89,6 +92,8 @@
 
 typedef struct batch_case batch_case_t;
 typedef struct capture capture_t;
+typedef struct framing framing_t;
+typedef struct framing_case framing_case_t;
 typedef struct import_outcome import_outcome_t;
 typedef struct reader_case reader_case_t;
 typedef struct reentering_read reentering_read_t;
@@ -96,6 +101,47 @@ typedef struct window_tally window_tally_t;
 typedef struct batch_way batch_way_t;
 typedef struct producer producer_t;
 typedef struct producer_channel producer_channel_t;
+
+/*
+ * The horizon and the piece size the framing scenarios frame windows
+ * under, and the most pieces a window of theirs is cut into.
+ */
+#define	FRAMING_HORIZON		32
+#define	FRAMING_PIECE		8
+#define	FRAMING_PIECES_MAX	8
+
+/*
+ * A table the framing scenarios frame, as a window from its first byte,
+ * in csv or, when `tsv` is set, tsv, and the window it must be framed
+ * into: `tuples` tuples in `pieces`
+ * pieces, ending `length` bytes in, the table's last when `ends_input`
+ * is set, or no window at all when `unframed` is.
+ */
+struct framing_case {
+	const char	*label;
+	const char	*table;
+	size_t		 table_length;
+	size_t		 tuples;
+	size_t		 pieces;
+	size_t		 length;
+	bool		 tsv;
+	bool		 header;
+	bool		 ends_input;
+	bool		 unframed;
+};
+
+#define	FRAMING_TABLE(text)	.table = text, .table_length = sizeof(text) - 1
+
+/* A window as a framer framed it. */
+struct framing {
+	relic_window_piece_t	 pieces[FRAMING_PIECES_MAX];
+	relic_location_t	 end;
+	size_t			 length;
+	size_t			 piece_count;
+	size_t			 tuple_count;
+	enum relic_framing	 state;
+	bool			 ends_input;
+};
 
 /*
  * One table and the transcript its reading must give.  `width` is the number
@@ -208,10 +254,14 @@ static const enum relic_column waiting_columns[] = {
 	RELIC_COLUMN_SYMBOL, RELIC_COLUMN_INTEGER
 };
 
-/* The windows batch imports staged and declined. */
+/*
+ * The windows batch imports staged and declined, and the steps of framing
+ * they ran as the filler of a window's jobs.
+ */
 struct window_tally {
 	uint64_t	staged;
 	uint64_t	declined;
+	uint64_t	framed_ahead;
 };
 
 /*
@@ -268,6 +318,7 @@ static void	 import_again(const batch_case_t *batch, const char *table,
 static int	 import_first(const batch_case_t *batch, const char *table,
 		    size_t length, unsigned int flags, size_t threads,
 		    import_outcome_t *outcome);
+static char	*faults_a_window_apart(void);
 static char	*record_longer_than_a_window(void);
 static char	*shifted_table(const batch_case_t *batch, size_t shift,
 		    size_t *lengthp);
@@ -316,6 +367,12 @@ static void	 a_path_is_opened_and_named(void);
 static void	 a_stream_cannot_call_in(void);
 static void	 an_import_discards_derived_facts(void);
 static void	 a_batch_import_matches_the_scalar_import(void);
+static void	 a_window_is_framed_alike_however_stepped(void);
+static void	 frame_case(const framing_case_t *test, size_t buffered,
+		    bool ended, size_t most, framing_t *framingp);
+static void	 frame_every_step(const framing_case_t *test,
+		    size_t buffered, bool ended, const framing_t *reference);
+static bool	 same_framing(const framing_t *a, const framing_t *b);
 static void	 a_failed_read_ahead_waits_its_turn(void);
 static void	 compare_failed_reads(const char *label, const char *table,
 		    size_t fail_at);
@@ -1378,15 +1435,16 @@ a_failed_import_adds_nothing(void)
  * base stores past the limit, rather than staging and interning the whole
  * table first.  Each table ends in a malformed record, which an import
  * reading on would reach and report in place of the limit, and where the
- * import stopped is read from the stream.  A batch import reads at most a
- * window past the facts it staged; an import with batching off reads a
- * chunk at a time.
+ * import stopped is read from the stream.  A batch import reads at most
+ * two windows and the chunk that crossed the second's horizon past the
+ * facts it staged; an import with batching off reads a chunk at a time.
  */
 static void
 a_refused_import_stops_reading(void)
 {
-	refused_import_stops_reading(BATCHED, RELIC_IMPORT_WINDOW_BYTES,
-	    "a window");
+	refused_import_stops_reading(BATCHED,
+	    2 * RELIC_IMPORT_WINDOW_BYTES + RELIC_IMPORT_READ_CHUNK,
+	    "two windows and a chunk");
 	refused_import_stops_reading(RELIC_F_NO_BATCH_IMPORT,
 	    RELIC_IMPORT_READ_CHUNK, "a chunk");
 }
@@ -2270,6 +2328,7 @@ a_batch_import_matches_the_scalar_import(void)
 	};
 	window_tally_t tally;
 	char *long_record;
+	char *faults;
 	size_t i;
 
 	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -2286,6 +2345,11 @@ a_batch_import_matches_the_scalar_import(void)
 	    "a long table imported twice should be staged in two windows or "
 	    "more each and none declined, not %" PRIu64 " staged and %"
 	    PRIu64 " declined", tally.staged, tally.declined);
+#ifdef RELIC_THREADS
+	checkf(tally.framed_ahead > 0, SCENARIO_BATCH, "a long table imported "
+	    "on four threads should frame windows ahead, not %" PRIu64
+	    " steps", tally.framed_ahead);
+#endif
 	compare_generated_imports("a type error in a late window",
 	    GENERATED_ROWS - 100, "s1\tx\tq\n", 0, 0, &tally);
 	compare_generated_imports("a short record in a late window",
@@ -2297,6 +2361,13 @@ a_batch_import_matches_the_scalar_import(void)
 		compare_generated_imports("a record longer than a window",
 		    GENERATED_ROWS / 2, long_record, 0, 0, &tally);
 	free(long_record);
+	faults = faults_a_window_apart();
+	if (faults == NULL)
+		check(false, SCENARIO_BATCH, "the records are built");
+	else
+		compare_generated_imports("a type error a window before a "
+		    "short record", GENERATED_ROWS / 4, faults, 0, 0, &tally);
+	free(faults);
 	compare_generated_imports("a tuple limit in a late window", 0, NULL,
 	    GENERATED_ROWS / 2, 0, &tally);
 	compare_memory_limits(&tally);
@@ -2325,6 +2396,45 @@ record_longer_than_a_window(void)
 	record[length] = '\0';
 
 	return (record);
+}
+
+/*
+ * Records of the generated tables' columns, in a new string, or NULL when
+ * memory ran out: a type error, then more than a window of good records,
+ * then a record short of a field.  The window holding the type error is
+ * analyzed while the next is framed, and that framing meets the short
+ * record; the type error, before it, is what the import reports.
+ */
+static char *
+faults_a_window_apart(void)
+{
+	static const char type_error[] = "s1\tx\tq\n";
+	static const char good[] = "s2\t2\ts3\n";
+	static const char short_record[] = "s1\t2\n";
+	char *at;
+	char *records;
+	size_t i;
+	size_t length;
+	size_t rows;
+
+	rows = (RELIC_IMPORT_WINDOW_BYTES + RELIC_IMPORT_READ_CHUNK) /
+	    (sizeof(good) - 1) + 1;
+	length = sizeof(type_error) - 1 + rows * (sizeof(good) - 1) +
+	    sizeof(short_record) - 1;
+	records = malloc(length + 1);
+	if (records == NULL)
+		return (NULL);
+
+	at = records;
+	bcopy(type_error, at, sizeof(type_error) - 1);
+	at += sizeof(type_error) - 1;
+	for (i = 0; i < rows; i++) {
+		bcopy(good, at, sizeof(good) - 1);
+		at += sizeof(good) - 1;
+	}
+	bcopy(short_record, at, sizeof(short_record));
+
+	return (records);
 }
 
 /*
@@ -2570,6 +2680,7 @@ compare_batched_import(const batch_case_t *batch, const char *table,
 
 	tally->staged += batched.ctx->counters.windows_staged;
 	tally->declined += batched.ctx->counters.windows_declined;
+	tally->framed_ahead += batched.ctx->counters.frames_ahead;
 
 	relic_destroy(scalar.ctx);
 	relic_destroy(batched.ctx);
@@ -3263,6 +3374,234 @@ stop_producer(producer_t *producer, const char *fifo)
 	return (WIFEXITED(status) && WEXITSTATUS(status) == 0);
 }
 
+/*
+ * Frame the window a case's table begins with, of which `buffered` bytes
+ * are in memory, `ended` saying the stream ended after them, in steps of
+ * at most `most` bytes, into *framingp.  A window cut into more pieces
+ * than a framing holds is recorded as unframed.
+ */
+static void
+frame_case(const framing_case_t *test, size_t buffered, bool ended,
+    size_t most, framing_t *framingp)
+{
+	relic_import_plan_t plan;
+	relic_location_t start;
+	relic_framer_t framer;
+
+	bzero(&plan, sizeof(plan));
+	plan.format = test->tsv ? RELIC_FORMAT_TSV : RELIC_FORMAT_CSV;
+	plan.column_count = 2;
+	start.file = "t";
+	start.line = 1;
+	start.column = 1;
+
+	relic_framer_init(&framer, FRAMING_HORIZON, FRAMING_PIECE);
+	relic_framer_begin(&framer, &plan, "t", &start, test->header,
+	    buffered, ended);
+	while (relic_framer_step(&framer, test->table, most))
+		continue;
+
+	bzero(framingp, sizeof(*framingp));
+	framingp->state = framer.state;
+	if (framer.state == RELIC_FRAMED &&
+	    framer.piece_count > FRAMING_PIECES_MAX)
+		framingp->state = RELIC_UNFRAMED;
+	if (framingp->state == RELIC_FRAMED) {
+		bcopy(framer.pieces, framingp->pieces,
+		    framer.piece_count * sizeof(framer.pieces[0]));
+		framingp->end = framer.end;
+		framingp->length = framer.length;
+		framingp->piece_count = framer.piece_count;
+		framingp->tuple_count = framer.tuple_count;
+		framingp->ends_input = framer.ends_input;
+	}
+	relic_framer_reset(&framer);
+}
+
+/* Whether two framings frame the same window into the same pieces. */
+static bool
+same_framing(const framing_t *a, const framing_t *b)
+{
+	const relic_window_piece_t *p;
+	const relic_window_piece_t *q;
+	size_t i;
+
+	if (a->state != b->state)
+		return (false);
+	if (a->state != RELIC_FRAMED)
+		return (true);
+	if (a->length != b->length || a->piece_count != b->piece_count ||
+	    a->tuple_count != b->tuple_count ||
+	    a->ends_input != b->ends_input || a->end.line != b->end.line ||
+	    a->end.column != b->end.column)
+		return (false);
+	for (i = 0; i < a->piece_count; i++) {
+		p = &a->pieces[i];
+		q = &b->pieces[i];
+		if (p->start != q->start || p->length != q->length ||
+		    p->first_tuple != q->first_tuple ||
+		    p->tuples != q->tuples || p->header != q->header ||
+		    p->where.line != q->where.line ||
+		    p->where.column != q->where.column)
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * Check that a case's window, `buffered` bytes of it held and its end
+ * found when `ended` is set, frames as `reference` in steps of every size
+ * from one byte to past the horizon.
+ */
+static void
+frame_every_step(const framing_case_t *test, size_t buffered, bool ended,
+    const framing_t *reference)
+{
+	framing_t framing;
+	size_t most;
+
+	for (most = 1; most <= FRAMING_HORIZON + 1; most++) {
+		frame_case(test, buffered, ended, most, &framing);
+		checkf(same_framing(&framing, reference), SCENARIO_FRAMING,
+		    "%s: %zu bytes held%s, framed %zu at a time, should "
+		    "frame the same window", test->label, buffered,
+		    ended ? " and the end found" : "", most);
+	}
+}
+
+/*
+ * A window is the whole records before its horizon, cut into pieces by
+ * their bytes, however the framing is stepped and however far past the
+ * horizon the stream has been read.  The reference framing has the whole
+ * table in memory, its end found, and frames it in one step; it must
+ * frame the window each case expects, and so must every step size from
+ * one byte to past the horizon, with as little of the stream in memory as
+ * the importer ever holds, its horizon, and with every amount more.  An
+ * end found at or after the horizon decides nothing: a record no line
+ * feed ends lying up to the horizon is left to the next window whether
+ * the end was found there or not, and a quoted line feed or a carriage
+ * return before the horizon ends no record there.
+ */
+static void
+a_window_is_framed_alike_however_stepped(void)
+{
+	static const framing_case_t cases[] = {
+		{ .label = "a quoted line feed across the horizon",
+		    FRAMING_TABLE("a,b\na,b\na,b\na,b\na,b\na,b\n"
+		    "c,\"x\nyyyyyy\"\nd,e\n"),
+		    .tuples = 6, .pieces = 3, .length = 24 },
+		{ .label = "a quoted line feed across the horizon, "
+		    "after a header",
+		    FRAMING_TABLE("h,k\na,b\na,b\na,b\na,b\na,b\n"
+		    "c,\"x\nyyyyyy\"\nd,e\n"),
+		    .header = true, .tuples = 5, .pieces = 3, .length = 24 },
+		{ .label = "a closing quote before the horizon, its line feed "
+		    "at it", FRAMING_TABLE("a,b\na,b\na,b\na,b\na,b\na,b\n"
+		    "c,\"xyzw\"\nd,e\n"),
+		    .tuples = 6, .pieces = 3, .length = 24 },
+		{ .label = "a carriage return before the horizon, its line "
+		    "feed at it", FRAMING_TABLE("a,b\na,b\na,b\na,b\na,b\na,b\n"
+		    "c,ddddd\r\nd,e\n"),
+		    .tuples = 6, .pieces = 3, .length = 24 },
+		{ .label = "a tsv escape split by the horizon",
+		    FRAMING_TABLE("a\tb\na\tb\na\tb\na\tb\na\tb\na\tb\n"
+		    "a\tb\nc\tx\\n\nd\te\n"), .tsv = true,
+		    .tuples = 7, .pieces = 4, .length = 28 },
+		{ .label = "a last record without a line feed up to the "
+		    "horizon", FRAMING_TABLE("a,b\na,b\na,b\na,b\na,b\na,b\n"
+		    "c,dddddd"),
+		    .tuples = 6, .pieces = 3, .length = 24 },
+		{ .label = "a last line feed at the horizon",
+		    FRAMING_TABLE("a,b\na,b\na,b\na,b\na,b\na,b\na,b\nc,d\n"),
+		    .tuples = 8, .pieces = 4, .length = 32 },
+		{ .label = "a last record without a line feed before the "
+		    "horizon", FRAMING_TABLE("a,b\nc,d"),
+		    .tuples = 2, .pieces = 1, .length = 7, .ends_input = true },
+		{ .label = "a quoted last field before the horizon",
+		    FRAMING_TABLE("a,b\nc,\"d\ne\""),
+		    .tuples = 2, .pieces = 1, .length = 11,
+		    .ends_input = true },
+		{ .label = "a record longer than the horizon",
+		    FRAMING_TABLE("a,xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+		    "b,c\n"), .unframed = true },
+		{ .label = "an unterminated quote before the horizon",
+		    FRAMING_TABLE("a,b\nc,\"d"), .unframed = true },
+	};
+	static const framing_case_t cut_short = {
+		.label = "a read failed short of the horizon",
+		FRAMING_TABLE("a,b\nc,d"),
+	};
+	const framing_case_t *test;
+	framing_t short_of_horizon;
+	framing_t reference;
+	size_t buffered;
+	size_t first;
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		test = &cases[i];
+		frame_case(test, test->table_length, true, SIZE_MAX,
+		    &reference);
+		if (test->unframed) {
+			checkf(reference.state == RELIC_UNFRAMED,
+			    SCENARIO_FRAMING, "%s: no window should be "
+			    "framed", test->label);
+		} else {
+			checkf(reference.state == RELIC_FRAMED &&
+			    reference.tuple_count == test->tuples &&
+			    reference.piece_count == test->pieces &&
+			    reference.length == test->length &&
+			    reference.ends_input == test->ends_input,
+			    SCENARIO_FRAMING, "%s: the window should hold %zu "
+			    "tuples in %zu pieces and %zu bytes, %s the "
+			    "table, not %zu in %zu and %zu, %s", test->label,
+			    test->tuples, test->pieces, test->length,
+			    test->ends_input ? "ending" : "not ending",
+			    reference.tuple_count, reference.piece_count,
+			    reference.length,
+			    reference.ends_input ? "ending" : "not ending");
+		}
+
+		/*
+		 * The importer holds a window's horizon, or the whole table
+		 * and its end; a table held whole may yet go on only where
+		 * that cannot change the window.
+		 */
+		first = test->table_length < FRAMING_HORIZON ?
+		    test->table_length : FRAMING_HORIZON;
+		for (buffered = first; buffered <= test->table_length;
+		    buffered++) {
+			if (buffered < test->table_length ||
+			    test->table_length >= FRAMING_HORIZON)
+				frame_every_step(test, buffered, false,
+				    &reference);
+			if (buffered == test->table_length)
+				frame_every_step(test, buffered, true,
+				    &reference);
+		}
+	}
+
+	/*
+	 * A read that failed short of the horizon leaves the window its
+	 * whole records, the last no end of input completes.
+	 */
+	frame_case(&cut_short, cut_short.table_length, true, SIZE_MAX,
+	    &reference);
+	frame_case(&cut_short, cut_short.table_length, false, SIZE_MAX,
+	    &short_of_horizon);
+	checkf(reference.state == RELIC_FRAMED && reference.tuple_count == 2 &&
+	    short_of_horizon.state == RELIC_FRAMED &&
+	    short_of_horizon.tuple_count == 1 &&
+	    short_of_horizon.length == 4 && !short_of_horizon.ends_input,
+	    SCENARIO_FRAMING, "%s: held short of the horizon without its end, "
+	    "the window should hold 1 tuple in 4 bytes, not %zu in %zu",
+	    cut_short.label, short_of_horizon.tuple_count,
+	    short_of_horizon.length);
+	frame_every_step(&cut_short, cut_short.table_length, false,
+	    &short_of_horizon);
+}
+
 int
 main(void)
 {
@@ -3289,6 +3628,7 @@ main(void)
 	a_failed_read_adds_nothing();
 	a_path_is_opened_and_named();
 	a_batch_import_matches_the_scalar_import();
+	a_window_is_framed_alike_however_stepped();
 	a_failed_read_ahead_waits_its_turn();
 	a_waiting_producer_hears_its_mistake();
 
