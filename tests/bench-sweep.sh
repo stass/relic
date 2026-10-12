@@ -84,9 +84,15 @@ BINARY
 chmod +x "$binary"
 """)
     compiler.chmod(0o755)
+    # The sweep requires hyperfine on PATH; the stubbed harness never runs it.
+    stubs = root / 'bin'
+    stubs.mkdir()
+    (stubs / 'hyperfine').write_text('#!/bin/sh\nexit 0\n')
+    (stubs / 'hyperfine').chmod(0o755)
     calls = root / 'calls.jsonl'
     environment = dict(os.environ, BENCH_PAIRSET=str(tool), SWEEP_TEST_CALLS=str(calls),
-                       SWEEP_TEST_LIVE=str(compare / 'run.sh'))
+                       SWEEP_TEST_LIVE=str(compare / 'run.sh'),
+                       PATH=str(stubs) + os.pathsep + os.environ.get('PATH', ''))
     original_harness = (compare / 'run.sh').read_text()
     for name in ['RELIC', 'SWIPL', 'SOUFFLE', 'CLINGO', 'NMO', 'DUCKDB', 'SQLITE', 'CXX', 'CC']:
         environment[name] = str(tool)
