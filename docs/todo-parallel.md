@@ -3,7 +3,7 @@
 `specs/design-parallel.md` designs parallel evaluation. Shared rounds, the
 pool and the parallel merge are built, and output, counters and storage
 bytes are the same at every thread count. The speed-up targets below are
-missed, and loading in parallel and components side by side are not built.
+missed, and components side by side are not built.
 This page records what is missing and what to try, in the order worth
 trying it. Times are from a macOS Xeon, loaded unless another platform is
 named. M3 observations refer to the
@@ -166,19 +166,6 @@ reads already added. Either report notes in a form that lets the round
 stop where serial evaluation would, or state that the counters of a
 failed evaluation depend on its thread count. `test_interrupt` checks
 the status alone.
-
-## Loading in parallel is not built
-
-[Medium, component: `lib/symbol.c`, `lib/value.c`, `lib/facts.c`,
-`lib/import.c`] A load and an import run on the calling thread: the value
-table and the symbol pool are not striped, so interning, most of an
-import's time, is serial. Implement
-[bulk loading](../specs/design-bulk-load.md): transferable private fact
-payloads, then bounded table windows with private dictionary reconciliation
-and ordered global identifiers. Preserve scalar input errors and retained
-values through the whole-window admission proof and replay path. Measure
-ordered publication separately before enabling the parallel path; this
-design keeps the identifier encoding and whole-load fact atomicity.
 
 ## Components side by side are not built
 

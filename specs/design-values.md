@@ -163,17 +163,46 @@ stored tuple. Tombstones are what make linear probing delicate; a table that
 must delete should be a different type.
 
 **Striped tables.** A table several threads fill at once without a lock -- a
-relation's canonical index, a secondary index's key table -- is a constant
-number of ordinary tables, and a key lives in the stripe chosen by the top
-bits of a wide hash. The wide hash's low half is the ordinary keyed hash,
+relation's canonical index, a secondary index's key table, the symbol pool's
+index -- is a constant number of ordinary tables, and a key lives in the
+stripe chosen by the top bits of a wide hash. The wide hash's low half is the ordinary keyed hash,
 which chooses slot and tag; its high half is an *unkeyed* fold of the same
 words, computed in the same loop, which chooses the stripe. Unkeyed on
 purpose: each stripe grows as its own keys need, so what a striped table holds
 depends on how keys fall among stripes, and a keyed choice would make the
 storage a program reports, and the insertion a memory limit refuses, differ
-between runs. Crowding keys into one stripe gains an attacker nothing, since
-slot and tag are keyed within it. The stripe count is a constant rather than
-the thread count for the same reason.
+between runs. Unkeyed routing lets an author crowd keys into one stripe on
+purpose, which costs the table its parallelism and nothing else: slot and
+tag stay keyed within the stripe, so crowding builds no probe cluster, and
+every capacity projection holds however the keys fall, all in one stripe
+included. The stripe count is a constant rather than the thread count for
+the same reason.
+
+**Final size and peak are different questions.** A table's growth can be
+prepared, an allocation that moves nothing, and completed later by the
+part that fills the stripe, so that stripes grow on several threads at
+once; until it completes, the stripe's old table is held beside its
+replacement. Admission asks the final size, which is what interning or
+inserting one key at a time reaches, so a batch is admitted exactly when
+its keys one at a time would be. Whether the growth is deferred is
+decided after, once per operation -- a window's publication, a load's
+commit, a round's merge -- on the calling thread, before the operation's
+first reservation, by a pure test that reports nothing and sets no
+refusal state: every deferrable growth of the operation defers when its
+whole admitted footprint, every table and destination it reserves, plus
+every table those growths would replace fits the limit, and none does
+otherwise. A growth that does not defer completes at once, stripe by
+stripe, each old table freed as its replacement is filled, and its
+overlap stays an uncharged transient, as every growth's old generation
+is. From reservation until the parts end the account counts each
+receipt's prepared tables beside the tables they replace. A failed or
+declined operation releases, with the receipt, the charge for the
+prepared tables it frees; the installed tables it leaves, and the
+capacities they keep, remain charged. The final
+capacities are the same either way, and placement still runs a stripe to
+a part. A round's merge admits its relations' growth on the peak instead
+and always defers it, since a merge that does not fit declines to the
+serial evaluator; its footprint for the test is that admitted peak.
 
 ## Domain identifiers
 
@@ -207,9 +236,20 @@ halving the integers' index space and moving nothing else.
 ## The symbol pool
 
 The pool (`lib/symbol.c`) maps a byte string to a symbol identifier through a
-tagged identifier table over its entries. An entry records a pointer to the
-bytes, their length, and the hash it was placed under, which is what the
-rehash callback returns and what the tag is cut from.
+tagged, striped identifier table over its entries. A byte string's wide
+hash folds its bytes keyed and unkeyed in one pass: the unkeyed half
+chooses the stripe and the keyed half the slot and the tag. An entry
+records a pointer to the bytes, their length, and the keyed half it was
+placed under, which is what the rehash callback returns and what the tag
+is cut from; a stripe only ever rehashes its own entries, so no entry
+records its stripe. Every lookup is given the wide hash, and whatever
+keeps a byte value's hash for a later lookup or placement -- a pending
+value, a window's dictionary, a new string awaiting its entry -- keeps the
+wide one, so the stripe is never recomputed from the bytes and cannot
+disagree with the one the entry was placed in. Private dictionaries that
+partition values among their own parts keep choosing those parts from
+the keyed half. The frozen store's string lookup hashes its argument
+itself. A collected result's symbol table is the same striped table.
 
 * **The length is explicit**, because a string may contain NUL bytes; a
   terminator is stored after it anyway, for callers that want a C string. A
@@ -226,6 +266,25 @@ rehash callback returns and what the tag is cut from.
   behind, and clears the arena's failure flag -- the one exception to the
   sticky-flag contract
   ([the sticky failure flag](design-memory.md#the-sticky-failure-flag)).
+* **A batch of new symbols is placed a stripe to a part.** A reservation
+  is an owned receipt: the arena mark its byte copies follow, each
+  stripe's growth for that stripe's count of new symbols, and the list of
+  the new symbols by stripe. It grows the entry array and copies the
+  bytes, as a reservation of one does, and defers the stripes' growth
+  when its operation's test allows (above). Publication appends the
+  entries in identifier order on the calling thread; then each stripe, as
+  a part of its own, completes any deferred growth and places its new
+  identifiers in identifier order, and the account is reconciled after
+  the barrier. A caller with a pool runs the parts on it, and one without
+  runs them itself; the parts write disjoint tables, so the result is the
+  same. Each stripe reaches the capacity interning its symbols one at a
+  time would reach. A failed reservation or an unreserve releases the
+  receipt -- the copies rewound to the mark, the prepared tables freed --
+  and reconciles what grew. No pointer into the entry array survives a
+  reservation's growth.
+* **The integer table's index is one table.** Striping it would add
+  growth receipts and admission terms that only a measured placement cost
+  would repay.
 * **The pool is charged to `max_memory` whole**, as are the integer table and
   the use bits.
 
@@ -318,9 +377,19 @@ three steps that mirror an insertion:
    bits hold once the new values are in, at the **stepwise** capacity
    interning one at a time would reach
    ([growable arrays](design-memory.md#growable-arrays)), and writes
-   nothing but the map. The use bits are projected from the
-   highest identifier promised, since a string over an existing high symbol
-   identifier can need the bits grown and no pool entry.
+   nothing but the map and the caller's probe. The use bits are projected
+   from the highest identifier promised, since a string over an existing
+   high symbol identifier can need the bits grown and no pool entry.
+   The **map** holds what commit needs: each value's identifier and the
+   new values in identifier order, with their hashes by value and their
+   bytes borrowed from the batch until reservation copies them or cleanup
+   ends. The **probe** -- each value's hash and the slots of the table
+   that finds a value's first occurrence -- is scratch measurement
+   borrows from its caller: the evaluator reuses one across batches, and
+   a round's merge releases its allocation and charge once measurement
+   ends. A batch import finds its values with its window's own
+   dictionaries and numbers them into the map directly, so it has no
+   probe.
 2. **Rewrite** replaces each marker with its promised identifier and writes
    nothing but the batch, which can then be hashed, screened and classified
    like any other while the tables hold exactly what they held.
@@ -331,7 +400,9 @@ three steps that mirror an insertion:
    fail. The use bits are reserved up front with the pool, to cover the
    highest identifier the map holds, precisely so that setting a bit at
    append time cannot need a growth. A caller that declines after a
-   successful reservation unreserves, rewinding the pool's copies.
+   successful reservation unreserves, releasing the pool's receipt. The
+   new symbols are placed a stripe to a part after the append, as the
+   pool places any batch.
 
 **Serially**, the evaluator measures, asks the memory limit and refuses as an
 insertion refuses, naming the predicate being derived into, and otherwise

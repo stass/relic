@@ -49,9 +49,9 @@ parallel merge at least ten times; it is 6.2-fold, 2.78 s to 0.45 s, the
 fastest of five runs on a loaded macOS Xeon, which meets the first and
 misses the second. `dist/3` and `object/2`, which compute integers and
 strings, should scale as `tc-cyclic` does; `dist/3` scales 2.5-fold.
-Loading in parallel and components side by side, designed in
-`specs/design-parallel.md`, are not built. The causes and what to try are
-sorted in `docs/todo-parallel.md`.
+Components side by side, designed in `specs/design-parallel.md`, are not
+built, and parallel loading misses its target. The causes and what to try
+are sorted in `docs/todo-parallel.md`.
 
 ## Engine
 
@@ -286,34 +286,19 @@ admitted at the limit holds one array's or one table's old generation
 beside the new one while it is copied, one at a time.
 
 **Importing facts misses its target.** [Medium, component:
-`lib/symbol.c`, `lib/value.c`, `lib/facts.c`, `lib/import.c`,
+`lib/import.c`, `lib/symbol.c`, `lib/relation.c`,
 `bench/compare/facts-join`] The target is `facts-join` at scale 10, three
 million ternary rows naming three million distinct symbols, under 2 s and
-120 MB; on the macOS Xeon it takes 2.9 to 3.2 s and about 220 MiB of
-resident peak. The peak is the import's
-commit, which holds at once the staged facts (about 68 MiB), the symbols
-(about 95 MiB, of which 46 MiB is sixteen-byte entries) and the base store
-it appends to (50 MiB). Two thirds of the time is the import, mostly
-interning the symbols and the staging set, each probe a cache miss into a
-table of millions; the query is the rest, much of it building the join's
-index. Implement [bulk loading](specs/design-bulk-load.md): adopt a private
-builder's payload into an empty base store, then batch table decoding and
-dictionary reconciliation while preserving scalar identity and failure
-prefixes. Its validated field descriptors also remove repeated symbol
-grammar checks. Measure ordered global publication before enabling parallel
-import. Pool-entry packing remains a separate memory-layout candidate and
-must preserve byte-pointer lifetime, addressable range and affordable rehash.
-
-On the M3 Max, scale-8 import-only probes take about 0.7-0.8 s for
-`facts-join` and `files-grouped`, before evaluation. DuckDB's complete
-sixteen-thread medians are 0.191 s and 0.076 s. Loading also takes about
-3.585 s of a 7.080 s diagnostic `cspa-linux` run, 0.721 s of 1.164 s
-for `grid-reach`, and 0.245 s of 0.401 s for `tree-sg-bound`. Follow the
-[ordered implementation and measurement gates](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk),
-including all-or-nothing publication, first-input-error ordering, partial
-value effects and the single-payload first-load memory regression.
-These phase estimates compare separate load-only and complete processes;
-they are not isolated phase timers.
+120 MB. Bulk loading builds private payloads that an empty store adopts
+and batches large tables over the pool; at scale 8 the import alone takes
+0.89 s at one thread and 0.66 s at sixteen on the p620, and 0.34 s at
+sixteen on the M3, against DuckDB's complete sixteen-thread median of
+0.191 s ([step 4](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)).
+The serial steps left -- framing, symbol placement and the populated-store
+append, the entries above -- bound the parallel gain. Measure scale 10,
+time and peak, once they are parallel. Pool-entry packing remains a
+separate memory-layout candidate and must preserve byte-pointer lifetime,
+addressable range and affordable rehash.
 
 ## Testing and CI
 
@@ -405,7 +390,7 @@ provisional until a design exists.
   before building either half.
 * DRed-style deletion maintenance
 * parallel evaluation, specified in `specs/design-parallel.md`: shared
-  rounds and the parallel merge are built; loading in parallel, components
+  rounds, the parallel merge and parallel loading are built; components
   side by side, a threshold that weighs new tuples, streaming queries and
   the speed-up targets remain, in `docs/todo-parallel.md` and the major
   initiative above

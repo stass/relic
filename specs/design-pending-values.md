@@ -271,8 +271,13 @@ Compaction uses:
 
 ```text
 bridge_bytes(V)                                            when R = 0
-bridge_bytes(V) + relic_pending_map_bytes(R) + max(S, 1)   when R > 0
+bridge_bytes(V) + relic_pending_map_bytes(R)
+    + relic_pending_probe_bytes(R) + max(S, 1)              when R > 0
 ```
+
+The merge charges the probe beside the map while it measures and
+releases the probe's allocation and charge once measurement ends; the map
+lives until append or rollback.
 
 `bridge_bytes(V)` is the checked aligned layout of maps and compact
 metadata; it is zero when `V = 0`. Per-partition records have fixed size.

@@ -254,7 +254,12 @@ payload, before any destination grows or takes ownership. Superseded empty
 payloads are then released, making their replacement credits available to
 ordinary reservation. All headers and append space are reserved before any
 action applies. Adoption consumes one owner, and append needs no membership
-lookup; neither can fail. An append reservation is made only of a relation without secondary
+lookup; neither can fail. An append shares a round's merge's canonical
+stripe work but borrows the builder's columns and has no secondary-index
+records: reservation prepares each canonical stripe's growth when the
+commit's deferral test allows and completes it at once otherwise, and apply
+copies the columns, fills each stripe in a part of its own, and then
+publishes the counts. An append reservation is made only of a relation without secondary
 indexes, which a base store is at commit because the commit discards first:
 what a secondary index would grow by depends on how many facts bring a new
 key, which the commit has not asked, so a reservation of a relation with one

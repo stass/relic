@@ -348,9 +348,11 @@ peak RSS:
 | 8 | 1.23 / 1.24 s | 1.22 / 1.22 s | 1.13 / 1.08 s | 1.06 / 1.03 s | 1.05 / 1.00 s |
 
 Scale-8 peak RSS grows from 243-250 MB to 260-268 MB at eight threads and
-more. The import alone takes 0.88 s at one thread and 0.66 s at sixteen
-(step 4), so most of the command is still loading. The other benchmark
-workloads are unchanged within noise at one and sixteen threads.
+more. The import alone takes 0.88 s at one thread (step 4) and 0.67 s at
+sixteen in both builds, so most of the command is still loading. The other
+benchmark workloads are unchanged within noise at one and sixteen threads;
+scale-4 `tc-sparse-cyclic`, measured again on an idle machine, takes 7.27
+against 7.38 s at one thread and 1.90 against 1.92 s at sixteen.
 
 The serial cost is the prefix phase and the visit count. Counted with
 `pmcstat` at one thread over five runs, instructions grow by at most 0.83%

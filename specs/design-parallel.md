@@ -125,18 +125,24 @@ boundary, so a component may mix them from round to round.
 **Ownership.** A context owns its pool. The library holds no global mutable
 state, so there is no process-wide pool and nothing `pthread_once()` would
 guard; two contexts on two threads keep two pools that never meet. Threads
-are started the first time an evaluation shares a round, so a context that
-only loads, or has one thread, never starts one; they are joined when the
-context is destroyed. The calling thread is worker 0 and takes part in every
+are started the first time an evaluation shares a round or an import
+batches a table, so a context that only loads program text, or has one
+thread, never starts one; a load's commit uses a pool the context already
+has and never starts one. The threads are joined when the context is
+destroyed. The calling thread is worker 0 and takes part in every
 job. A thread that cannot be started is not an error: the pool runs with
 those it got, down to the calling thread alone. The thread count is a
 performance knob and must not decide whether a program can be evaluated.
 
 **Fork.** A pool carried into a child of `fork(2)` has none of its threads
 there. It records the process that started them and checks before every job
-and on destruction: in another process it releases the threads' records
-without joining them and is the calling thread alone, so a child may
-evaluate on the context as well as destroy it.
+-- in the one function that dispatches a job, before it reads the worker
+count or touches a synchronization object -- and on destruction: in another
+process it releases the threads' records without joining them and is the
+calling thread alone, so a child may evaluate on the context as well as
+destroy it. The worker count an operation decides by is read only through
+a function that makes the same check, so no caller can read a count the
+child does not have.
 
 **Signals.** A pool thread blocks every signal except those a fault in the
 thread raises (`SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`, `SIGTRAP`,
@@ -185,6 +191,25 @@ worker whose report completes the count -- `fetch_add` tells it so -- takes
 the mutex before signalling, so the signal cannot fall between worker 0's
 check and its wait. A worker touches the job for the last time when it counts
 itself in.
+
+**A job's filler.** A job may carry a filler: bounded steps of the
+caller's own serial work, which only worker 0 runs. Before it claims a
+part, worker 0 runs steps while the filler has one; once the parts are
+all claimed, and before it counts itself into the job, it runs steps
+while the filler has one and another worker has not counted itself in,
+reading that count with acquire ordering between steps. It then counts
+itself in once and waits at the ordinary barrier. Steps run outside the
+pool's mutex. A job that runs on the calling thread alone runs no step.
+The pool keeps no state about a filler beyond the job, and a job without
+one is unchanged.
+
+A step runs while parts write, so it must neither block nor run caller
+code, and it reads and writes nothing a part writes or reads. Only a bulk
+import's window-analysis jobs carry one, frozen-read jobs whose parts
+write only their window's private slices; the step frames the next
+window from bytes already buffered, performing no I/O
+([framing ahead](design-bulk-load.md#framing-ahead)). No job that
+publishes carries a filler.
 
 **Abandoning.** A private allocation refusal, an exact unique count beyond
 admissible tuples, an oversized transport row, an evaluation error or an
@@ -610,17 +635,21 @@ can pass every scalar admission check. An unproved window changes no
 semantic state and replays through the scalar importer, which establishes
 the first error and retained-value prefix. A proved window reserves all
 space before its builder appends; the caller copies the new values' bytes
-and publishes their entries in the existing global value tables. Barriers
-separate every frozen-read phase from reservation and mutation.
+and appends their entries to the global value tables, and the pool's
+striped index is filled a stripe to a part. Barriers separate every
+frozen-read phase from reservation and mutation. While a window's
+analysis jobs run, the caller frames the next window from buffered bytes
+as their filler, in bounded steps it runs in place of claiming parts or
+idling at the barrier.
 
 Only the final load commit changes base facts. Empty destinations adopt
 complete builder payloads; populated ones receive reserved, ordered
-appends with one writer per canonical stripe. Source program parsing and
-individual fact additions retain their scalar semantic boundaries and
-share these builders. Parallel import neither changes the domain encoding
-nor contributes evaluation parallel-round counters. Numbering and global
-table publication remain serial phases whose measured cost is part of
-parallel-loading acceptance.
+appends with one writer per canonical stripe, run on the context's
+existing pool when they are large. Source program parsing and individual fact additions retain
+their scalar semantic boundaries and share these builders. Parallel
+import neither changes the domain encoding nor contributes evaluation
+parallel-round counters. Numbering and entry append remain serial phases
+whose measured cost is part of parallel-loading acceptance.
 
 ## Components side by side
 

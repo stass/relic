@@ -178,11 +178,15 @@ sequence of one-at-a-time growths reaches. The two differ, because a growth
 raises a capacity to the request only when doubling falls short: one request
 for 128 more items from a capacity of 8 lands on 136, while 128 single
 insertions land on 256. An owner that makes room for many insertions at once
--- a round's merge, a load's commit, a batch of computed values -- grows to the
+-- a round's merge, a load's staging, a batch of computed values -- grows to the
 stepwise capacity in one allocation, so it holds exactly what inserting one at
 a time would have held. That is what makes the bytes a table holds a function
 of what it holds and not of how it was batched, and so the same at every
-thread count.
+thread count. A load's commit into a relation that already holds tuples is
+the one exception: it grows the relation's columns once to the request, as
+relation reservation does, so their capacity also depends on how the facts
+were divided among loads. It never depends on the thread count, since a load
+commits as one unit however its table was read.
 
 **A buffer sized by the data a plan meets doubles until it fits**, and is
 never raised to the request. The text stack, the pending bytes and the regex
@@ -416,11 +420,12 @@ the limit promises.
 
 ## Determinism
 
-* **What a table holds is a function of its contents, not of how they
-  arrived.** An owner that makes room for many insertions at once grows to
-  the stepwise capacity, so the bytes it holds are those one-at-a-time
-  insertion would reach, whatever the batching and whatever the thread
-  count ([growable arrays](#growable-arrays)).
+* **What a table holds does not depend on the thread count.** An owner that
+  makes room for many insertions at once grows to the stepwise capacity, so
+  the bytes it holds are those one-at-a-time insertion would reach, whatever
+  the batching and whatever the thread count; a load's commit into a
+  populated relation grows its columns once to the request, the same at
+  every thread count ([growable arrays](#growable-arrays)).
 * **A data-sized buffer's capacity depends on its largest request alone**,
   so a shared round's admission can ask for the serial capacity without
   running serially ([round-scoped buffers](#round-scoped-buffers)).

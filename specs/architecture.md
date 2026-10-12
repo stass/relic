@@ -276,6 +276,17 @@ order values by domain identifier**; ordering decodes the values. A value
 evaluation computes is interned when its output batch or admitted round
 is committed, before tuples naming it are inserted.
 
+The symbol pool's lookup index is striped as a relation's canonical index
+is: a byte string's stripe is chosen by the unkeyed half of its wide hash
+and its slot by the keyed half, so a batch of new symbols numbered in
+first-appearance order can be placed a stripe to a thread, while what each
+stripe holds and costs is a function of the strings alone, the same for
+every seed and thread count. Striping moves no identifier and puts no
+stripe bits in one. Every pool lookup is given the wide hash, and
+whatever keeps a byte value's hash for a later lookup or placement keeps
+the wide one; a pool entry keeps only the keyed half its stripe rehashes
+by.
+
 The rejected alternatives are a tagged 64-bit cell, whose boxed integers have
 two encodings every construction site must keep canonical, and the public value
 struct, whose padding defeats a word-wise hash. The representation sits behind
@@ -331,7 +342,9 @@ rewrite reads the base store on its own through the base predicate
 
 Private fact builders own the same tuple and canonical-index payload as
 base relations. An empty destination takes ownership at commit, avoiding
-a second full copy; a populated destination receives a reserved append.
+a second full copy; a populated destination receives a reserved append
+filled a canonical stripe to a part, with the stripe work a round's merge
+uses.
 Table imports prepare bounded windows with private worker dictionaries.
 The coordinator preserves global first-occurrence value identifiers and
 publishes a window only when monotone projections prove every scalar

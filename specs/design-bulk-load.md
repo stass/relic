@@ -78,7 +78,8 @@ scalar importer's single pass, and repays it only shared among workers, so
 the scalar importer is the production path for fewer effective workers
 than `RELIC_IMPORT_BATCH_WORKERS` and for a table its first window holds
 whole, which also spares a small import the pool's start and the batch
-preparation. A table is batched when the context's pool runs at least
+preparation. A table is batched when its input is positively identified
+as a regular file, the context's pool runs at least
 `RELIC_IMPORT_BATCH_WORKERS` workers, a measured count below which
 batching does not repay its preparation, and reading its first window
 neither reaches its end nor fails. The count is of workers running, not
@@ -86,10 +87,29 @@ threads configured: a forked child's pool runs one, and a pool whose
 threads did not all start runs fewer. A pool that cannot be made leaves
 the table to the scalar importer, as it leaves a round to the serial
 evaluator. `RELIC_F_PARALLEL_ALWAYS`, `-X parallel`, batches every table
-at any worker count, so that tests and benchmarks exercise the pipeline
-whatever production scheduling selects. Both paths stage the same facts
-and intern the same values under the same identifiers, so the choice is
-visible only in time, memory and how far a refused import has read.
+read from a regular file at any worker count, so that tests and
+benchmarks exercise the pipeline whatever production scheduling selects.
+Both paths stage the same facts and intern the same values under the same
+identifiers, so the choice is visible only in time, memory and how far a
+refused import has read.
+
+**Only a regular file is batched.** A window is read before any of its
+fields is analyzed, so on a pipe, a socket, a terminal or a stream of the
+caller's own without a descriptor, a producer that sends a malformed
+record and then waits would see its error reported only once a window,
+or two with framing ahead, had arrived, or never. The importer identifies
+its input by `fstat(2)` on the stream's descriptor and batches only when
+that names a regular file; a stream without a descriptor, or one
+`fstat(2)` cannot describe, is not one. A path is not evidence, since it
+can name a FIFO; a stream the caller opened on a regular file is, standard
+input redirected from one among them. Every other input takes the scalar
+consumer before the first window is read, keeping its 64 KiB transport
+and so reporting an error once the transport chunk holding it has
+arrived, with the same builders and commit, and `RELIC_F_PARALLEL_ALWAYS`
+does not override this. The scalar transport's own reads may block until
+a chunk has arrived, so this keeps the scalar importer's responsiveness
+rather than promising a report after a few malformed bytes. The manual
+pages state the restriction wherever they describe batching.
 
 ## Invariants
 
@@ -233,12 +253,41 @@ contents, with no secondary indexes or cached distinct-column counts from
 another span.
 
 For an append, builder tuple `i` becomes base tuple `old_count + i`.
-Copying columns finishes before index work reads those columns. Each
-canonical stripe has one writer, and stripe work follows builder tuple
-order. The coordinator publishes counts and totals after the barrier.
-The pool and job storage are prepared before the no-failure phase;
-apply runs to completion without a failure or callback after publishing
-only some destinations.
+The append shares the canonical stripe work of a round's merge
+([storage](design-storage.md)) -- its stripe list, its prepared
+growths, the part that fills a stripe and the cleanup of growth no part
+completed -- but has a constructor of its own: it borrows the builder's
+immutable columns rather than copying them, is built before discard
+without regard to the destination's secondary indexes, and its
+workspace is load staging, owned and released by the commit's receipt
+and charged to nothing.
+
+* **Preparation**, before discard, computes each builder tuple's wide
+  hash, the stripe counts and the list of tuples by stripe.
+* **Reservation** grows the destination as an ordinary relation
+  reservation does -- the columns grown once to hold the new tuples, each
+  canonical stripe reserved for its count -- except that a stripe's
+  growth may be prepared and completed by its part ([final size and
+  peak](design-values.md#the-identifier-table)).
+* **Apply** copies the builder's columns after the destination's last
+  tuple, then runs one part per canonical stripe, which completes any
+  deferred growth and places the stripe's tuples in builder order.
+  Copying publishes no count: after the barrier the coordinator adds the
+  tuples to the relation's count, the context's total and the base total,
+  once each, and reconciles the storage total.
+
+Admission asks the final sizes that ordinary relation reservation
+reaches, the same projection reservation then realizes, and each stripe
+reaches its capacity whether its growth was deferred or not.
+
+The parts run on the context's existing pool, adopted into the current
+process, when it has more than one worker and the commit's appends hold
+at least `RELIC_COMMIT_PARALLEL_TUPLES` tuples, a measured count below
+which waking the pool costs more than it saves; otherwise they run on the
+calling thread. The parts are the same either way. A commit never makes
+a pool. Job storage is prepared before the no-failure phase; apply runs
+to completion without a failure or callback after publishing only some
+destinations.
 
 The receipt owns all resources needed to finish or clean up preparation.
 It holds the actual builder/destination owners, not an index into an array
@@ -269,14 +318,86 @@ At a size target, select a completed record prefix and retain the partial
 suffix for the next window. A transport buffer ending inside a normal
 record is not a reason to abandon batching. The adapter retains the
 suffix's bytes and framing state within the same bounded workspace and
-extends it after the preceding window finishes. Buffer movement or reuse
+extends it while the preceding window is analyzed, as
+[framing ahead](#framing-ahead) describes. Buffer movement or reuse
 waits until no job borrows it. A record that alone exhausts that workspace
 takes scalar continuation instead of an unbounded window allocation.
 
+### Framing ahead
+
+Framing is one serial pass of the reader over a window, and its next
+boundary is known only once the current window's framing ends. The
+calling thread frames the next window while the current one is analyzed,
+in the time it would otherwise spend on its share of the analysis jobs or
+waiting at their barriers. The calling thread is worker 0 of every job,
+and the table reader is incremental, so framing needs no thread of its
+own and no job that outlives a barrier.
+
+* **The analysis jobs carry the framer as their filler.** Worker 0 runs
+  framing steps instead of claiming parts and while it would otherwise
+  wait at the barrier ([a job's filler](design-parallel.md#the-worker-pool)).
+  Only the frozen-read analysis jobs carry it; the stripe fills and every
+  other job that publishes do not.
+* **A step frames buffered bytes and reads nothing.** A step feeds the
+  framer at most `RELIC_IMPORT_READ_CHUNK` of bytes already in the
+  buffer and records the records it completes as the next window's
+  pieces. It never reads the stream, so it neither blocks nor runs a
+  stream's callbacks while parts run.
+* **The caller reads between jobs.** Before a window's analysis
+  dispatches, the caller reads the stream until the buffer holds that
+  window and the next window's bytes, or the stream ends or fails, so
+  read-ahead is bounded by two windows. The input is a regular file, so
+  these reads wait on storage, never on a producer. Every read happens on
+  the calling thread outside a job, records its outcome as read-ahead
+  always does, and reports nothing.
+* **One framer, three positions.** The input adapter distinguishes the
+  accepted boundary, where replay begins; the framing cursor, which owns
+  the framer's parser state and the next window's start; and the
+  buffered end. The framer is fed a span only after it has consumed the
+  previous one, and only a successful end of input marks a feed as the
+  last; a recorded read failure never does. A window's bound is measured
+  from its own start, whatever the buffer's capacity. The framer lives
+  for one window's framing, and a partial record at its end is framed
+  again, from its first byte, by the next window's framer.
+* **Bytes move only when nothing borrows them.** Pieces record offsets
+  from their window's start. Batching sizes the buffer once for two
+  windows and their transport chunks, so reads append past every borrowed
+  span. Consuming a window advances the accepted boundary; the remaining
+  bytes move to the front only between windows, when no job runs and no
+  framer is alive, and the next window's base pointer is set from its
+  offset when its analysis begins.
+* **Two framing manifests, one analysis workspace.** The current
+  window's manifest -- its pieces, record counts and end -- is analyzed
+  while the next one's is framed; analysis never overlaps analysis, so
+  the decoded bytes, dictionaries and tuple arrays exist once. A step
+  that cannot grow the next manifest marks it unframed, which takes scalar
+  replay from its boundary as any unframed window does.
+* **The next window is used only after the current one is staged.** Its
+  framing began at the current window's end, which is the accepted
+  boundary only once the current window is staged. A declined current
+  window discards the next window's manifest, and scalar replay reads
+  every buffered byte from the accepted boundary, then the recorded read
+  outcomes, then the stream. A staged current window whose next window
+  is not fully framed finishes that framing on the calling thread, after
+  reading what the buffer lacks, before analyzing it.
+
+Framing ahead changes no boundary, piece, value, diagnostic or replay
+position: the reader decides every boundary from the same bytes, in the
+same order. What it moves is time, and how far the file has been read
+when a window's values are published, which the batched and scalar paths
+already differ in. The serial
+phases of a window -- gathering, numbering, admission, reservation and
+value publication -- remain on the calling thread and frame nothing;
+framing still bounds an import when it takes longer than the rest of a
+window's work. Worker 0 frames instead of analyzing, so framing ahead is
+kept only where it beats framing each window before its analysis at the
+batching worker counts, measured beside the frame-only reader's own
+speed.
+
 ### One parser state machine
 
-Refactor the pure table reader's transitions so framing and decoding use
-the same state machine. Framing observes boundaries and byte locations
+Framing and decoding run the same state machine, the pure table reader's
+transitions. Framing observes boundaries and byte locations
 without collecting decoded field payloads. Decoding emits the existing
 field, record, end and mistake events. A sink or output policy changes
 what is retained, not which transitions occur.
@@ -316,10 +437,14 @@ successful reads first, then observes the recorded failed read if it gets
 that far. A read-ahead failure cannot replace an earlier field or staging
 failure. A short successful read retains ordinary EOF semantics.
 
-Read-ahead is bounded by the window, and only the caller reads or closes a
-stream. Pipes and caller-provided streams use the same buffered replay
-interface as regular files. Diagnostics run on the caller after all jobs
-that could refer to their buffers have joined.
+Read-ahead is bounded by two windows, and only the caller reads or closes
+a stream. Only a regular file is batched, so only a regular file is read
+ahead beyond the scalar transport chunk. A stream the caller opens on a
+regular file, standard input redirected from one among them, is batched
+like a path's; every input not positively identified as a regular file
+takes the scalar consumer from the start and uses the same buffered input
+adapter. Diagnostics run on the caller after all jobs that could refer to
+their buffers have joined.
 
 ## Decoding and value dictionaries
 
@@ -431,6 +556,35 @@ does not call mutating admission/reporting helpers or set the context's
 error or limit-refusal state. A declined projection must leave scalar
 replay's diagnostic state as untouched as its values and rows.
 
+### One check per layer
+
+The proof restates no scalar check. Each layer that can refuse a field
+or a record exposes one pure check, which its scalar operation calls
+before it changes anything and which the proof calls with the window's
+totals:
+
+| Layer | Pure check | Scalar caller | Proof's argument |
+| --- | --- | --- | --- |
+| Field | the verdict on a field's bytes under its column's type: symbol grammar, integer syntax and range, the pool's length ceiling | the field consumer, which turns a refusal into its diagnostic | each field, on its decoding worker |
+| Value tables | room in the integer table and the pool for so many new entries | interning one value | the window's new integers and new byte strings |
+| Staging | the tuple limit and the memory floor for so many new tuples of a predicate, given the value bytes, the floor including the predicate's stored rows when its set has not begun | staging one new tuple, with the account's current value bytes | the window's new tuples, with the projected value bytes |
+| Builder | the builder's growth for so many new tuples: tuple identifiers, column words, column bytes and each stripe | adding one tuple | the window's new tuples by stripe |
+
+The builder's growth is computed once, by one projection that checks
+every count, product and capacity a reservation forms, including the
+byte size of the stepwise column capacity whether or not a memory limit
+is set. It returns either the validated capacities or the reason growth
+is impossible; impossible growth is never represented as unchanged
+bytes. Admission asks whether the projection exists, the scalar path
+turns its reason into its diagnostic, and reservation realizes its
+capacities and never computes one the projection did not. Zero growth
+projects the builder as it is, and arity zero keeps the array's minimum
+allocation. The field verdict keeps the scalar consumer's precedence
+between refusals, a malformed symbol before an overlong one. A check
+added to a layer is therefore added to both paths at once, and a window
+the proof admits cannot reach a refusal its scalar reading would have
+met earlier.
+
 The string arena is projected in global first-byte-occurrence order, one
 copy and terminator at a time, as ordinary interning allocates it. Arrays
 and tables use stepwise capacity, including use bits for old pool entries.
@@ -486,22 +640,27 @@ decline to replay against context capacities that have already changed.
 Retained capacities remain accounted, and uncommitted pool copies are
 rewound through their reservation owner.
 
-The coordinator copies each new string's bytes and terminator from the
-immutable piece bytes into a destination allocated in identifier order
-through the existing arena policy, as ordinary interning does. The copies
-are not a pool job: beside placing the entries in the global lookup tables
-they cost too little to measure, and making them as the entries are
-published keeps every write to the pool on the coordinator. Empty strings
-have a valid destination; zero-length payload copies are skipped. Review
-every `bcopy(src, dst, n)` for source-first order.
+The coordinator's value reservation copies each new string's bytes and
+terminator from the immutable piece bytes into a destination allocated in
+identifier order through the existing arena policy, as ordinary interning
+does, and the receipt owns those copies; publication initializes the
+entries from them and allocates and copies nothing. The copies are not a
+pool job: beside placing the entries in the global lookup tables they
+cost too little to measure, and making them on the coordinator keeps
+every write to the pool's entries and arena there. Empty strings have a valid destination; zero-length payload
+copies are skipped. Review every `bcopy(src, dst, n)` for source-first
+order.
 
-The coordinator appends dictionary entries and places them in the existing
-global lookup tables in the promised order, then records symbol/string
-uses. Those tables retain their current identifier layout and lookup
-representation. This ordered publication is a measurable serial phase;
-workers have already done parsing, hashing, lookup and duplicate comparison.
-The design does not claim that assigning numbers also parallelizes writes
-to one open-addressed table.
+The coordinator appends dictionary entries in the promised order and
+records symbol/string uses. New integers are placed in the integer
+table's index there too. New pool entries are placed in the pool's
+striped index a stripe to a part on the pool, each part placing its
+stripe's entries in identifier order
+([the symbol pool](design-values.md#the-symbol-pool)). The window
+carries each new byte value's wide hash from decoding, so no part hashes
+bytes again. Identifier layout is unchanged: a stripe holds identifiers,
+and which stripe holds one depends on its bytes alone. Numbering and
+entry append stay a measurable serial phase.
 
 With values live, append the admitted new rows into the builder's reserved
 positions. Copying columns precedes canonical-index placement, and each
@@ -634,13 +793,20 @@ to demonstrate that jobs ran.
 
 The target uses private dictionaries and ordered publication because
 identifiers are observable and independent work does not require changing
-their encoding. The comparison is architectural; throughput is established
-by phase measurements. Before enabling parallel import by default,
-record the actual cost of ordered numbering, entry placement and reservation
-separately from worker work on all-distinct as well as repetitive inputs.
-If those serial phases dominate, resolve that measured bottleneck before
-claiming a parallel loading gain. Changing identifier encoding requires a
-separate cross-subsystem decision, not an implementation shortcut.
+their encoding. It also partitions the pool's lookup index, the third
+row, by the unkeyed stripe of each byte string's wide hash: sampled at
+eight threads on 52 MB of distinct symbols, placing new entries in the
+pool's single index was a fifth of the calling thread, the largest
+publication step. Striping keeps global first-appearance numbering and
+moves no identifier; it changes the pool's table layout, its growth
+accounting and the hash every pool lookup is given, under the rules the
+other striped tables already follow. The comparison is architectural; throughput is established
+by phase measurements. Parallel import's acceptance records the cost of
+ordered numbering, entry placement and reservation separately from worker
+work on all-distinct as well as repetitive inputs, and a parallel loading
+gain is claimed only where those serial phases do not dominate.
+Changing identifier encoding requires a separate cross-subsystem
+decision, not an implementation shortcut.
 Persistent lookup partitioning can retain global identifiers; it is a
 storage-layout alternative, distinct from partitioning the identifier space.
 
@@ -654,7 +820,7 @@ storage-layout alternative, distinct from partitioning the identifier space.
 | `lib/table.h` | Declare the pure table reader and the lexical field rules, which need no context, for the importer and the workers alike |
 | `lib/window.c`, `lib/window.h` | Run a window's decode, find, resolve and classify parts, compiled against `lib/frozen.h` alone, each part writing only its own window slices |
 | `lib/value.c`, `lib/symbol.c` | Reconcile values under canonical equality, assign ordinary identifiers, project/reserve storage, own byte-copy receipts and publish values/use bits |
-| `lib/pool.c` | Execute disjoint jobs and establish completion barriers without loader-specific scheduling state |
+| `lib/pool.c` | Execute disjoint jobs, run a job's filler steps on worker 0 and establish completion barriers, without loader-specific scheduling state |
 | Source parser and fact API | Keep their scalar semantic boundaries while staging through the shared builder |
 
 Immutable piece and reservation descriptions make data ownership visible
@@ -692,6 +858,9 @@ independent checks rather than comparing two uses of the same new helper.
 | Transport and callbacks | Failed short reads discard their returned bytes, successful short reads end input, close failures precede commit, caller-mutated descriptions cannot affect copied plans, and interrupts preserve the existing non-interruptible import contract |
 | Allocation failure | Nth-allocation sweeps cover private decline, value/builder reservation, pool copies, manifest preparation and late destination reserve; the context can load/query again afterward |
 | Concurrency | 1, 2, 4, 8 and 16 workers and disabled-thread builds agree on IDs, capacities, diagnostics and output; instrumentation proves both bulk apply and replay paths actually execute |
+| Striping | Symbol-pool and append capacities agree across hash seeds and thread counts, with deferred and immediate stripe growth alike; input crowded into one stripe keeps its answers, capacities and bounded probes |
+| Framing ahead | Windows framed ahead and framed in place give the same pieces; a declined window discards the framing ahead and replays every buffered byte; a refused import has read at most two windows past its last accepted boundary |
+| Streaming inputs | A producer that writes one transport chunk holding a malformed record and keeps its pipe open sees the error reported without a window's worth of input or EOF, with the scalar diagnostic order, retained values and no facts added; a FIFO named by path, a stream without a descriptor and forced batching are all read by the scalar consumer; a test build that takes a failing stream for a regular file shows windows staged before the failed read, so the batch path's read errors stay covered |
 | Small-input cost | Tiny, empty, header-only, duplicate-heavy and one-fact inputs avoid unnecessary dispatch and keep their established behavior |
 
 Extend `test_facts`, `test_import`, `test_value`, `test_symbol`, relation
