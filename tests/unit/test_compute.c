@@ -109,6 +109,9 @@ static int	 count_row(void *callback_ctx, const relic_value_t *values,
 		    size_t count);
 static relic_t	*context_for(const char *program, unsigned int flags,
 		    size_t max_memory, diagnostics_t *diagnostics);
+static size_t	 measure_pending(const relic_t *ctx,
+		    const relic_pending_t *pending, size_t count,
+		    const char *bytes, relic_pending_map_t *map);
 static bool	 append_measured(relic_t *ctx, const int64_t *pending,
 		    size_t count);
 static void	 the_measure_promises_what_the_commit_assigns(void);
@@ -180,6 +183,30 @@ context_for(const char *program, unsigned int flags, size_t max_memory,
 }
 
 /*
+ * Measure `count` pending values, the strings' bytes in `bytes`, into
+ * `map`, with a probe that lives only while it measures, as a merge's
+ * does.  Returns what relic_pending_measure() returns, or SIZE_MAX when
+ * the probe could not be made.
+ */
+static size_t
+measure_pending(const relic_t *ctx, const relic_pending_t *pending,
+    size_t count, const char *bytes, relic_pending_map_t *map)
+{
+	relic_arena_t arena;
+	relic_pending_probe_t probe;
+	size_t projected;
+
+	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
+	projected = SIZE_MAX;
+	if (relic_pending_probe_init(&probe, &arena, count) == 0)
+		projected = relic_pending_measure(ctx, pending, count, bytes,
+		    &probe, map);
+	relic_arena_reset(&arena);
+
+	return (projected);
+}
+
+/*
  * Measure `count` pending integers into `map` as the executor hands them
  * over, each an entry of the batch's pending values, and return the bytes
  * the measure projects, or SIZE_MAX when the entries could not be made.
@@ -200,7 +227,7 @@ measure_integers(const relic_t *ctx, const int64_t *integers, size_t count,
 		pending[i].kind = RELIC_PENDING_INTEGER;
 		pending[i].u.integer = integers[i];
 	}
-	projected = relic_pending_measure(ctx, pending, count, NULL, map);
+	projected = measure_pending(ctx, pending, count, NULL, map);
 	free(pending);
 
 	return (projected);
@@ -582,7 +609,7 @@ append_strings(relic_t *ctx, size_t first, size_t count)
 	relic_arena_init(&arena, RELIC_ARENA_ANY_OBJECT);
 	appended = false;
 	if (relic_pending_map_init(&map, &arena, count) == 0) {
-		projected = relic_pending_measure(ctx, batch->pending,
+		projected = measure_pending(ctx, batch->pending,
 		    batch->count, batch->bytes, &map);
 		appended = relic_pending_commit(ctx, &map) == 0 &&
 		    relic_value_storage_bytes(ctx) == projected;
@@ -678,7 +705,7 @@ the_measure_promises_strings_what_is_assigned(void)
 	spelled = RELIC_DOM_STRING | (symbol & RELIC_DOM_INDEX_MASK);
 	first_new = RELIC_DOM_STRING | (relic_dom_t)(pool_count + 1);
 
-	projected = relic_pending_measure(ctx, batch->pending, batch->count,
+	projected = measure_pending(ctx, batch->pending, batch->count,
 	    batch->bytes, &map);
 	check(map.string_count == 2 && map.fresh_count == 1, SCENARIO_STRINGS,
 	    "two strings and one integer are new");
@@ -775,7 +802,7 @@ a_computed_name_grows_the_string_bits_alone(void)
 	pool_count = ctx->symbols.count;
 	before = relic_value_storage_bytes(ctx);
 
-	projected = relic_pending_measure(ctx, &pending, 1, name, &map);
+	projected = measure_pending(ctx, &pending, 1, name, &map);
 	check(map.string_count == 0 && map.ids[0] == (RELIC_DOM_STRING | id),
 	    SCENARIO_NAME, "the name's identifier is promised, with no entry");
 	check(projected > before, SCENARIO_NAME,
@@ -936,7 +963,7 @@ a_refused_batch_leaves_the_pool_unchanged(void)
 
 	pool_before = ctx->account.pool_bytes;
 	count_before = ctx->symbols.count;
-	projected = relic_pending_measure(ctx, batch->pending, batch->count,
+	projected = measure_pending(ctx, batch->pending, batch->count,
 	    batch->bytes, &map);
 	check(projected > limit, SCENARIO_POOL_REFUSED,
 	    "the batch's strings take more than the limit");

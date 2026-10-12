@@ -298,6 +298,8 @@ static void	 list_staged_part(void *argument, size_t part,
 		    size_t worker_index);
 static void	 list_worker(void *argument, size_t worker,
 		    size_t worker_index);
+static size_t	 measure_descriptors(
+		    const relic_merge_compaction_t *compaction);
 static int	 merge_begin(relic_merge_t *merge, relic_t *ctx,
 		    relic_pool_t *pool, relic_round_t *round);
 static void	 merge_end(relic_merge_t *merge);
@@ -584,9 +586,7 @@ compact_and_resolve(relic_merge_compaction_t *compaction)
 		return (-1);
 	copy_strings(compaction);
 
-	resolution->projected = relic_pending_measure(merge->ctx,
-	    compaction->descriptors, compaction->count, resolution->bytes,
-	    &resolution->map);
+	resolution->projected = measure_descriptors(compaction);
 	if (resolution->projected == SIZE_MAX)
 		return (-1);
 
@@ -764,6 +764,42 @@ resolution_open(relic_merge_t *merge, size_t room, size_t string_bytes)
 	resolution->charged = charge;
 
 	return (0);
+}
+
+/*
+ * Measure the compaction's descriptors into the open resolution's map,
+ * with a probe charged to the round only while it measures.  Returns what
+ * relic_pending_measure() returns, or SIZE_MAX when the limit or the
+ * allocator refused the probe.
+ */
+static size_t
+measure_descriptors(const relic_merge_compaction_t *compaction)
+{
+	relic_pending_probe_t probe;
+	relic_merge_resolution_t *resolution;
+	relic_account_t *account;
+	relic_merge_t *merge;
+	size_t projected;
+	size_t charge;
+
+	merge = compaction->merge;
+	resolution = &merge->resolution;
+	account = &merge->ctx->account;
+	charge = relic_pending_probe_bytes(compaction->count);
+	if (charge == SIZE_MAX || !relic_account_charge_round(account, charge))
+		return (SIZE_MAX);
+	if (relic_pending_probe_open(&probe, compaction->count) != 0) {
+		relic_account_release_round(account, charge);
+		return (SIZE_MAX);
+	}
+
+	projected = relic_pending_measure(merge->ctx, compaction->descriptors,
+	    compaction->count, resolution->bytes, &probe, &resolution->map);
+
+	relic_pending_probe_close(&probe);
+	relic_account_release_round(account, charge);
+
+	return (projected);
 }
 
 /*

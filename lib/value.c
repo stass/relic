@@ -780,15 +780,10 @@ relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 	map->room = room;
 
 	map->ids = relic_arena_allocarray(arena, room, sizeof(*map->ids));
-	map->hashes = relic_arena_allocarray(arena, room,
-	    sizeof(*map->hashes));
-	map->slots = relic_arena_allocarray(arena, relic_pending_slots(room),
-	    sizeof(*map->slots));
 	map->fresh = relic_arena_allocarray(arena, room, sizeof(*map->fresh));
 	map->strings = relic_arena_allocarray(arena, room,
 	    sizeof(*map->strings));
-	if (map->ids == NULL || map->hashes == NULL || map->slots == NULL ||
-	    map->fresh == NULL || map->strings == NULL)
+	if (map->ids == NULL || map->fresh == NULL || map->strings == NULL)
 		return (-1);
 
 	return (0);
@@ -807,12 +802,10 @@ relic_pending_map_bytes(size_t room)
 
 	assert(room <= RELIC_DOM_INDEX_MASK);
 
-	per_entry = sizeof(*map->ids) + sizeof(*map->hashes) +
-	    sizeof(*map->fresh) + sizeof(*map->strings);
+	per_entry = sizeof(*map->ids) + sizeof(*map->fresh) +
+	    sizeof(*map->strings);
 
-	return (relic_saturating_sum(relic_saturating_product(room, per_entry),
-	    relic_saturating_product(relic_pending_slots(room),
-	    sizeof(*map->slots))));
+	return (relic_saturating_product(room, per_entry));
 }
 
 int
@@ -824,12 +817,9 @@ relic_pending_map_open(relic_pending_map_t *map, size_t room)
 	map->room = room;
 
 	map->ids = calloc(room, sizeof(*map->ids));
-	map->hashes = calloc(room, sizeof(*map->hashes));
-	map->slots = calloc(relic_pending_slots(room), sizeof(*map->slots));
 	map->fresh = calloc(room, sizeof(*map->fresh));
 	map->strings = calloc(room, sizeof(*map->strings));
-	if (map->ids == NULL || map->hashes == NULL || map->slots == NULL ||
-	    map->fresh == NULL || map->strings == NULL) {
+	if (map->ids == NULL || map->fresh == NULL || map->strings == NULL) {
 		relic_pending_map_close(map);
 		return (-1);
 	}
@@ -841,11 +831,70 @@ void
 relic_pending_map_close(relic_pending_map_t *map)
 {
 	free(map->ids);
-	free(map->hashes);
-	free(map->slots);
 	free(map->fresh);
 	free(map->strings);
 	bzero(map, sizeof(*map));
+}
+
+int
+relic_pending_probe_init(relic_pending_probe_t *probe, relic_arena_t *arena,
+    size_t room)
+{
+	bzero(probe, sizeof(*probe));
+	probe->room = room;
+
+	probe->hashes = relic_arena_allocarray(arena, room,
+	    sizeof(*probe->hashes));
+	probe->slots = relic_arena_allocarray(arena,
+	    relic_pending_slots(room), sizeof(*probe->slots));
+	if (probe->hashes == NULL || probe->slots == NULL)
+		return (-1);
+
+	return (0);
+}
+
+/*
+ * A probe's arrays have exactly the sizes relic_pending_probe_bytes()
+ * counts, as a map's have relic_pending_map_bytes().
+ */
+size_t
+relic_pending_probe_bytes(size_t room)
+{
+	relic_pending_probe_t *probe;
+
+	assert(room <= RELIC_DOM_INDEX_MASK);
+
+	return (relic_saturating_sum(
+	    relic_saturating_product(room, sizeof(*probe->hashes)),
+	    relic_saturating_product(relic_pending_slots(room),
+	    sizeof(*probe->slots))));
+}
+
+int
+relic_pending_probe_open(relic_pending_probe_t *probe, size_t room)
+{
+	assert(room > 0 && room <= RELIC_DOM_INDEX_MASK);
+
+	bzero(probe, sizeof(*probe));
+	probe->room = room;
+
+	probe->hashes = calloc(room, sizeof(*probe->hashes));
+	probe->slots = calloc(relic_pending_slots(room),
+	    sizeof(*probe->slots));
+	if (probe->hashes == NULL || probe->slots == NULL) {
+		relic_pending_probe_close(probe);
+		return (-1);
+	}
+
+	return (0);
+}
+
+void
+relic_pending_probe_close(relic_pending_probe_t *probe)
+{
+	free(probe->hashes);
+	free(probe->slots);
+	bzero(probe, sizeof(*probe));
 }
 
 uint32_t
@@ -1116,24 +1165,25 @@ number_new(const relic_t *ctx, const relic_pending_batch_t *batch,
  */
 size_t
 relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
-    size_t count, const char *bytes, relic_pending_map_t *map)
+    size_t count, const char *bytes, relic_pending_probe_t *probe,
+    relic_pending_map_t *map)
 {
 	relic_pending_batch_t batch;
 	size_t slot_count;
 	size_t i;
 
-	assert(count <= map->room);
+	assert(count <= map->room && count <= probe->room);
 
 	for (i = 0; i < count; i++)
-		map->hashes[i] = relic_pending_hash(ctx, &pending[i], bytes);
+		probe->hashes[i] = relic_pending_hash(ctx, &pending[i], bytes);
 	batch.values = pending;
-	batch.hashes = map->hashes;
+	batch.hashes = probe->hashes;
 	batch.bytes = bytes;
 	batch.count = count;
 
 	slot_count = relic_pending_slots(count);
-	bzero(map->slots, slot_count * sizeof(*map->slots));
-	relic_pending_find(ctx, &batch, NULL, count, map->slots, slot_count,
+	bzero(probe->slots, slot_count * sizeof(*probe->slots));
+	relic_pending_find(ctx, &batch, NULL, count, probe->slots, slot_count,
 	    map->ids);
 
 	return (relic_pending_number(ctx, &batch, map));

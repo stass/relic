@@ -1638,7 +1638,8 @@ pending_values_resolve_once(void)
 	compact_program(&failing);
 	occurrences = COMPACT_FILES * COMPACT_PENDING;
 	occurrence_bytes = occurrences * sizeof(relic_pending_t) +
-	    relic_pending_map_bytes(occurrences);
+	    relic_pending_map_bytes(occurrences) +
+	    relic_pending_probe_bytes(occurrences);
 	high = WORKING_MAX + 4 * occurrence_bytes;
 
 	serial_least = least_memory_limit(failing.bytes, false, 0, high);

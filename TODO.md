@@ -152,15 +152,6 @@ each canonical stripe as a job of its own, publishing counts and totals
 after the barrier; prepare those stripe lists before the commit's no-failure
 phase.
 
-**A batch import's numbering map holds arrays only measuring reads.**
-[Medium, component: `lib/value.c`, `lib/import.c`] `relic_pending_map_open()`
-gives every map `hashes` and `slots`, about 20 bytes a value, which only
-`relic_pending_measure()` uses; a window finds its values with its own
-`value_hashes` and `value_slots`, so each window allocates and zeroes the
-map's for nothing. Make them the measuring caller's scratch rather than
-part of every map, with `relic_pending_map_bytes()` (charged by the merge)
-following.
-
 **A batch window's scratch grows with its records, not its bytes.** [Low,
 component: `lib/window.c`, `lib/import.c`] A window holds up to
 `RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays

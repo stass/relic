@@ -62,6 +62,7 @@ typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
 typedef struct relic_pending_map relic_pending_map_t;
+typedef struct relic_pending_probe relic_pending_probe_t;
 typedef struct relic_valtab relic_valtab_t;
 typedef struct relic_activity relic_activity_t;
 typedef struct relic_walk relic_walk_t;
@@ -848,22 +849,24 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * occurrence.
  *
  * relic_pending_measure() walks the batch's `count` pending values, the
- * strings' bytes in `bytes`, and fills `map` with each one's identifier, the
- * one the context has assigned it or the one it will be given, and returns the
- * bytes the value table and the pool together will occupy once the new values
- * are interned: the capacity interning them one at a time would reach, so that
- * each holds the same bytes however its values arrived, or SIZE_MAX when a
- * size cannot count it.  A string whose bytes the pool holds with no string
+ * strings' bytes in `bytes`, finding them with the scratch of `probe`, and
+ * fills `map` with each one's identifier, the one the context has assigned
+ * it or the one it will be given, and returns the bytes the value table and
+ * the pool together will occupy once the new values are interned: the
+ * capacity interning them one at a time would reach, so that each holds the
+ * same bytes however its values arrived, or SIZE_MAX when a size cannot
+ * count it.  A string whose bytes the pool holds with no string
  * value assigned to them -- a symbol's spelling, or a value a caller made and
  * has not interned -- is promised the pool's identifier for them, and the
  * bytes must stay where they are until the commit.  A pending symbol, which
  * only an import has, is measured as a string is, sharing its new bytes
  * with any string of the same bytes, under a symbol's type.  It writes
- * nothing but the map.  It is two steps, for a caller that shares the
- * reading among parts that run at once: relic_pending_find() (exec.h),
- * which finds each value in the context or among the values before it,
- * into the map's `ids`, and relic_pending_number(), which then walks the
- * batch in order and gives each value its identifier.
+ * nothing but the map and the probe.  It is two steps, for a caller that
+ * shares the reading among parts that run at once, with hashes and slots
+ * of its own: relic_pending_find() (exec.h), which finds each value in the
+ * context or among the values before it, into the map's `ids`, and
+ * relic_pending_number(), which then walks the batch in order and gives
+ * each value its identifier.
  * relic_pending_fits() says whether every identifier the map promised is
  * one an identifier can name.
  *
@@ -895,12 +898,25 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * the map itself: relic_pending_map_bytes() is what the map then holds,
  * SIZE_MAX when a size cannot count it, and relic_pending_map_close()
  * frees it.  An opened map has room for at least one pending value and at
- * most RELIC_DOM_INDEX_MASK.
+ * most RELIC_DOM_INDEX_MASK.  A map lives until its values are appended or
+ * given back; it keeps each new string's hash, and borrows a new string's
+ * bytes from the batch until relic_pending_reserve() copies them.
+ *
+ * A probe is relic_pending_measure()'s scratch: each value's hash and the
+ * slots of the table that finds a value's first occurrence, which nothing
+ * reads once measuring returns.  relic_pending_probe_init(),
+ * relic_pending_probe_bytes(), relic_pending_probe_open() and
+ * relic_pending_probe_close() give it room as their map counterparts give
+ * a map, so that a caller holds a probe only while it measures.
  */
+struct relic_pending_probe {
+	uint32_t		*hashes;	/* each value's, batch order */
+	uint32_t		*slots;		/* relic_pending_slots(room) */
+	size_t			 room;
+};
+
 struct relic_pending_map {
 	relic_dom_t		*ids;		/* each value's, batch order */
-	uint32_t		*hashes;	/* each value's, batch order */
-	uint32_t		*slots;		/* relic_pending_find()'s */
 	int64_t			*fresh;		/* new integers, as first met */
 	relic_fresh_string_t	*strings;	/* new strings, as first met */
 	size_t			 room;
@@ -916,9 +932,14 @@ int	 relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 size_t	 relic_pending_map_bytes(size_t room);
 int	 relic_pending_map_open(relic_pending_map_t *map, size_t room);
 void	 relic_pending_map_close(relic_pending_map_t *map);
+int	 relic_pending_probe_init(relic_pending_probe_t *probe,
+	    relic_arena_t *arena, size_t room);
+size_t	 relic_pending_probe_bytes(size_t room);
+int	 relic_pending_probe_open(relic_pending_probe_t *probe, size_t room);
+void	 relic_pending_probe_close(relic_pending_probe_t *probe);
 size_t	 relic_pending_measure(const relic_t *ctx,
 	    const relic_pending_t *pending, size_t count, const char *bytes,
-	    relic_pending_map_t *map);
+	    relic_pending_probe_t *probe, relic_pending_map_t *map);
 size_t	 relic_pending_number(const relic_t *ctx,
 	    const relic_pending_batch_t *batch, relic_pending_map_t *map);
 bool	 relic_pending_fits(const relic_t *ctx,

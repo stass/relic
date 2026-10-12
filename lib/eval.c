@@ -374,6 +374,7 @@ struct relic_evaluation {
 	relic_exec_env_t	 env;
 	relic_scratch_t		 scratch;
 	relic_pending_map_t	 pending_map;
+	relic_pending_probe_t	 pending_probe;
 	bool			 derived;
 	bool			 stopped;
 };
@@ -827,7 +828,7 @@ resolve_pending(relic_evaluation_t *eval, relic_relation_t *relation)
 
 	projected = relic_pending_measure(eval->ctx, scratch->pending,
 	    scratch->pending_count, scratch->pending_bytes.bytes,
-	    &eval->pending_map);
+	    &eval->pending_probe, &eval->pending_map);
 	status = relic_relation_admit_values(eval->ctx, relation, projected);
 	if (status == 0) {
 		relic_pending_rewrite(&eval->pending_map, scratch->batch,
@@ -2000,8 +2001,9 @@ fit_scratch(relic_evaluation_t *eval, const relic_plan_t *plan)
 
 /*
  * Room for the pending values of a batch of the scratch's width, and the
- * map that resolves them: one pending value per column at most.  Returns
- * the pending array, or NULL with the arena's refusal reported.
+ * map that resolves them and the probe that measures them: one pending
+ * value per column at most.  Returns the pending array, or NULL with the
+ * arena's refusal reported.
  */
 static relic_pending_t *
 make_pending_room(relic_evaluation_t *eval)
@@ -2015,6 +2017,11 @@ make_pending_room(relic_evaluation_t *eval)
 		return (NULL);
 
 	if (relic_pending_map_init(&eval->pending_map, eval->arena,
+	    columns) != 0) {
+		relic_diag_no_memory(eval->ctx);
+		return (NULL);
+	}
+	if (relic_pending_probe_init(&eval->pending_probe, eval->arena,
 	    columns) != 0) {
 		relic_diag_no_memory(eval->ctx);
 		return (NULL);
