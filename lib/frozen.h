@@ -19,9 +19,10 @@
 /*
  * The store as code that must only read it sees it.
  *
- * The executor and the work estimator (lib/cost.c) read the context, its
- * relations and their indexes and must never write them.  They are
- * compiled against this header and not against the ones that define a
+ * The executor, the work estimator (lib/cost.c) and a batch import's
+ * analysis of a window (lib/window.c) read the context, its relations and
+ * their indexes, and a load's builders, and must never write them.  They
+ * are compiled against this header and not against the ones that define a
  * context, a relation or an index, which refuse to be included beside it
  * (RELIC_FROZEN_ONLY), so here those types are incomplete.  Such code can
  * hold a pointer to one and pass it on, and it cannot name a member of
@@ -45,6 +46,7 @@
  */
 
 typedef struct relic_account relic_account_t;
+typedef struct relic_builder relic_builder_t;
 typedef struct relic_index relic_index_t;
 typedef struct relic_relation relic_relation_t;
 typedef struct relic_tuple_range relic_tuple_range_t;
@@ -141,6 +143,20 @@ void	 relic_relation_screen(const relic_relation_t *relation,
 	    bool *held);
 uint64_t relic_relation_hash(const relic_relation_t *relation,
 	    const relic_dom_t *tuple);
+
+/*
+ * relic_tuple_hash() is the wide hash every relation of a context gives a
+ * tuple of `arity` columns, under the context's `seed`.
+ * relic_relation_contains_hashed() says whether a relation holds a tuple
+ * whose hash that is, and relic_builder_contains_hashed() whether a load's
+ * builder of new facts (relation.h) does; a debug build checks the hash.
+ */
+uint64_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
+	    uint16_t arity);
+bool	 relic_relation_contains_hashed(const relic_relation_t *relation,
+	    const relic_dom_t *columns, uint64_t hash);
+bool	 relic_builder_contains_hashed(const relic_builder_t *builder,
+	    const relic_dom_t *columns, uint64_t hash);
 
 /*
  * Whether two tuples of one arity hold the same values.

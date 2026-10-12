@@ -48,6 +48,7 @@
 #define	SCENARIO_INTEGER	"an integer column holds the language's integers"
 #define	SCENARIO_LOCATION	"a mistake is located in its source"
 #define	SCENARIO_MESSAGE	"a message names the field it refuses"
+#define	SCENARIO_POLICY		"a table is batched only where batching repays"
 #define	SCENARIO_READER		"the reader reads each format by its rules"
 #define	SCENARIO_REENTRY	"a stream's read function cannot call in"
 #define	SCENARIO_SKIP		"a skipped column interns nothing"
@@ -62,6 +63,12 @@
 #define	BATCH_COLUMNS(array)	.columns = (array), \
 	.column_count = sizeof(array) / sizeof((array)[0])
 
+/*
+ * The context flag that stages a table a window at a time however small
+ * it is and however few threads read it.
+ */
+#define	BATCHED		RELIC_F_PARALLEL_ALWAYS
+
 /* The longest transcript and message a test compares. */
 #define	TRANSCRIPT_MAX	1024
 #define	MESSAGE_MAX	512
@@ -72,6 +79,7 @@ typedef struct import_outcome import_outcome_t;
 typedef struct reader_case reader_case_t;
 typedef struct reentering_read reentering_read_t;
 typedef struct window_tally window_tally_t;
+typedef struct batch_way batch_way_t;
 
 /*
  * One table and the transcript its reading must give.  `width` is the number
@@ -122,6 +130,28 @@ struct batch_case {
 	bool			 whole;
 };
 
+/*
+ * A way a table is read besides a field at a time: the context's flags and
+ * threads, and what to call it.
+ */
+struct batch_way {
+	unsigned int	 flags;
+	size_t		 threads;
+	const char	*name;
+};
+
+/*
+ * The ways a table is compared with its reading a field at a time: a
+ * window at a time on one thread and on several, and as the context
+ * chooses on enough threads to batch a large table, its first window read
+ * to tell.
+ */
+static const batch_way_t batch_ways[] = {
+	{ BATCHED, 1, "one thread, batched" },
+	{ BATCHED, 4, "four threads, batched" },
+	{ 0, RELIC_IMPORT_BATCH_WORKERS, "batching threads, by choice" },
+};
+
 /* The windows batch imports staged and declined. */
 struct window_tally {
 	uint64_t	staged;
@@ -129,19 +159,24 @@ struct window_tally {
 };
 
 /*
- * What a table imported one way left: the context, the status of the first
- * import and the diagnostics as they stood after it, and the status of a
- * second import of the same table, which meets the facts the first added.
+ * What a table imported one way left: the context, its diagnostics, the
+ * status of the first import and that of a second import of the same
+ * table, which meets the facts the first added.
  */
 struct import_outcome {
 	relic_t		*ctx;
 	capture_t	 capture;
-	capture_t	 after_first;
 	int		 status;
 	int		 again;
 };
 
 static void	 append_text(char *out, size_t size, const char *text);
+static void	 check_same_outcome(const import_outcome_t *batched,
+		    const import_outcome_t *scalar, const char *label,
+		    const batch_way_t *way, const char *imports);
+static void	 compare_batched_import(const batch_case_t *batch,
+		    const char *table, size_t length, const char *label,
+		    const batch_way_t *way, window_tally_t *tally);
 static void	 compare_import_ways(const batch_case_t *batch,
 		    const char *table, size_t length, const char *label,
 		    window_tally_t *tally);
@@ -156,8 +191,10 @@ static const char *context_difference(const relic_t *a, const relic_t *b);
 static const char *facts_difference(const relic_t *a, const relic_t *b);
 static char	*generated_table(size_t rows, size_t odd_row,
 		    const char *odd, size_t *lengthp);
-static int	 import_one_way(const batch_case_t *batch, const char *table,
-		    size_t length, unsigned int flags,
+static void	 import_again(const batch_case_t *batch, const char *table,
+		    size_t length, import_outcome_t *outcome);
+static int	 import_first(const batch_case_t *batch, const char *table,
+		    size_t length, unsigned int flags, size_t threads,
 		    import_outcome_t *outcome);
 static char	*record_longer_than_a_window(void);
 static char	*shifted_table(const batch_case_t *batch, size_t shift,
@@ -193,6 +230,10 @@ static void	 every_refusal_reads_nothing(void);
 static void	 facts_are_held_once(void);
 static void	 a_failed_import_adds_nothing(void);
 static void	 a_refused_import_stops_reading(void);
+static void	 batching_follows_the_threads_and_the_table(void);
+static void	 check_batching(const char *table, size_t length,
+		    unsigned int flags, size_t threads, bool batched,
+		    const char *label);
 static void	 refused_import_stops_reading(unsigned, size_t, const char *);
 static void	 a_header_is_skipped(void);
 static void	 a_long_field_crosses_reads(void);
@@ -207,7 +248,8 @@ static void	 a_failed_read_ahead_waits_its_turn(void);
 static void	 compare_failed_reads(const char *label, const char *table,
 		    size_t fail_at);
 static int	 import_failing(const char *table, size_t fail_at,
-		    unsigned int flags, import_outcome_t *outcome);
+		    unsigned int flags, size_t threads,
+		    import_outcome_t *outcome);
 static void	 integer_columns_hold_the_language_integers(void);
 static void	 locations_stop_at_their_largest_value(void);
 static void	 messages_quote_only_what_is_safe(void);
@@ -1271,7 +1313,8 @@ a_failed_import_adds_nothing(void)
 static void
 a_refused_import_stops_reading(void)
 {
-	refused_import_stops_reading(0, RELIC_IMPORT_WINDOW_BYTES, "a window");
+	refused_import_stops_reading(BATCHED, RELIC_IMPORT_WINDOW_BYTES,
+	    "a window");
 	refused_import_stops_reading(RELIC_F_NO_BATCH_IMPORT,
 	    RELIC_IMPORT_READ_CHUNK, "a chunk");
 }
@@ -1463,6 +1506,91 @@ pairs_table(size_t rows, size_t values, size_t *lengthp)
 
 	*lengthp = length;
 	return (table);
+}
+
+/*
+ * A table is staged a window at a time only where that repays: on
+ * RELIC_IMPORT_BATCH_WORKERS threads or more, and when it is larger than
+ * the window its first read fills.  RELIC_F_PARALLEL_ALWAYS batches any
+ * table on any number of threads, and RELIC_F_NO_BATCH_IMPORT none.
+ * Whether an import was batched shows in the windows it staged; the facts
+ * are the same either way.
+ */
+static void
+batching_follows_the_threads_and_the_table(void)
+{
+	static const char small[] = "a\tb\nc\td\n";
+	char *large;
+	size_t length;
+
+	large = pairs_table(BOUNDED_ROWS, BOUNDED_VALUES, &length);
+	if (large == NULL) {
+		check(false, SCENARIO_POLICY, "the table is built");
+		return;
+	}
+	/* Without the malformed record pairs_table() ends it with. */
+	length -= sizeof("x\n") - 1;
+
+	check_batching(large, length, 0, 1, false,
+	    "a large table on one thread");
+	check_batching(large, length, 0, RELIC_IMPORT_BATCH_WORKERS - 1, false,
+	    "a large table on too few threads");
+	check_batching(small, sizeof(small) - 1, 0, RELIC_IMPORT_BATCH_WORKERS,
+	    false, "a small table on enough threads");
+	check_batching(large, length, 0, RELIC_IMPORT_BATCH_WORKERS, true,
+	    "a large table on enough threads");
+	check_batching(small, sizeof(small) - 1, RELIC_F_PARALLEL_ALWAYS, 1,
+	    true, "a small table on one thread, batching forced");
+	check_batching(large, length,
+	    RELIC_F_PARALLEL_ALWAYS | RELIC_F_NO_BATCH_IMPORT,
+	    RELIC_IMPORT_BATCH_WORKERS, false,
+	    "a large table on enough threads, batching off");
+
+	free(large);
+}
+
+/*
+ * Check an import of `table` into a context of `flags` and `threads` is
+ * staged a window at a time exactly when `batched` says.  A library built
+ * without threads has one, so on enough threads it batches only when
+ * forced to.
+ */
+static void
+check_batching(const char *table, size_t length, unsigned int flags,
+    size_t threads, bool batched, const char *label)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SYMBOL
+	};
+	relic_config_t config;
+	capture_t capture;
+	relic_t *ctx;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.flags = flags;
+	config.threads = threads;
+	ctx = context_with_capture(&config, &capture);
+	if (ctx == NULL) {
+		check(false, SCENARIO_POLICY, "a context is made");
+		return;
+	}
+	if (ctx->config.threads < threads &&
+	    (flags & RELIC_F_PARALLEL_ALWAYS) == 0)
+		batched = false;
+
+	status = import_table(ctx, "table", RELIC_FORMAT_TSV, 0, "e",
+	    columns, 2, table, length);
+	checkf(status == 0 && capture.errors == 0, SCENARIO_POLICY,
+	    "%s: the import should succeed", label);
+	checkf((ctx->counters.windows_staged > 0) == batched &&
+	    ctx->counters.windows_declined == 0, SCENARIO_POLICY,
+	    "%s: the import should %s, not stage %zu and decline %zu",
+	    label, batched ? "stage windows" : "stage no window",
+	    (size_t)ctx->counters.windows_staged,
+	    (size_t)ctx->counters.windows_declined);
+
+	relic_destroy(ctx);
 }
 
 /*
@@ -1969,8 +2097,9 @@ static const enum relic_column generated_columns[] = {
  * uses, the same capacities and accounting, and the same facts in the same
  * order.  Among the tables are every quoting and escape, line ends of both
  * kinds, a header, skipped columns, symbols and strings of the same bytes,
- * tuples of no columns, a type error before a malformed record, a limit
- * met before a malformed tail, and tables long enough to span windows.
+ * fields holding NUL and bytes above 127, tuples of no columns, a type
+ * error before a malformed record, a limit met before a malformed tail,
+ * and tables long enough to span windows.
  */
 static void
 a_batch_import_matches_the_scalar_import(void)
@@ -1997,6 +2126,11 @@ a_batch_import_matches_the_scalar_import(void)
 		    "\"d\",\n"),
 		    .pad = ",q\n", .format = RELIC_FORMAT_CSV,
 		    BATCH_COLUMNS(symbol_string), .whole = true },
+		{ .label = "nul and high bytes",
+		    BATCH_TABLE("a,\"\0\xff\"\nb,\"x\0\"\nc,\"\xc3\xa9\"\n"
+		    "a,\"x\0\"\nc,\"\0\xff\"\n"),
+		    .format = RELIC_FORMAT_CSV, BATCH_COLUMNS(symbol_string),
+		    .whole = true },
 		{ .label = "csv header",
 		    BATCH_TABLE("name,text\r\na,b\nb,\"a\"\n"),
 		    .format = RELIC_FORMAT_CSV, .flags = RELIC_IMPORT_HEADER,
@@ -2299,78 +2433,120 @@ generated_table(size_t rows, size_t odd_row, const char *odd,
 }
 
 /*
- * Import a table both ways and check they end alike, adding the batch
- * import's windows to `tally`.
+ * Import a table each of the batch_ways and check each ends as the import
+ * a field at a time does, adding the batch imports' windows to `tally`.
+ * The windows' jobs are divided among the threads differently each time,
+ * and nothing they write may depend on how.
  */
 static void
 compare_import_ways(const batch_case_t *batch, const char *table,
     size_t length, const char *label, window_tally_t *tally)
 {
+	size_t w;
+
+	for (w = 0; w < sizeof(batch_ways) / sizeof(batch_ways[0]); w++)
+		compare_batched_import(batch, table, length, label,
+		    &batch_ways[w], tally);
+}
+
+/*
+ * Import a table `way` and a field at a time, each into a context of its
+ * own, and check the two end alike: after the first import, and again
+ * after a second, which meets the facts the first added.  Adds the batch
+ * import's windows to `tally`.
+ */
+static void
+compare_batched_import(const batch_case_t *batch, const char *table,
+    size_t length, const char *label, const batch_way_t *way,
+    window_tally_t *tally)
+{
 	import_outcome_t batched;
 	import_outcome_t scalar;
+
+	bzero(&batched, sizeof(batched));
+	if (import_first(batch, table, length, RELIC_F_NO_BATCH_IMPORT, 1,
+	    &scalar) != 0 || import_first(batch, table, length, way->flags,
+	    way->threads, &batched) != 0) {
+		check(false, SCENARIO_BATCH, "a context is made and loaded");
+		relic_destroy(scalar.ctx);
+		relic_destroy(batched.ctx);
+		return;
+	}
+	checkf(scalar.ctx->counters.windows_staged == 0 &&
+	    scalar.ctx->counters.windows_declined == 0, SCENARIO_BATCH,
+	    "%s, %s: an import a field at a time should read no window",
+	    label, way->name);
+
+	checkf(batched.status == scalar.status, SCENARIO_BATCH, "%s, %s: a "
+	    "batch import should end %d, as one a field at a time does, not "
+	    "%d", label, way->name, scalar.status, batched.status);
+	check_same_outcome(&batched, &scalar, label, way, "one import");
+
+	import_again(batch, table, length, &scalar);
+	import_again(batch, table, length, &batched);
+	checkf(batched.again == scalar.again, SCENARIO_BATCH, "%s, %s: a "
+	    "second batch import should end %d, not %d", label, way->name,
+	    scalar.again, batched.again);
+	check_same_outcome(&batched, &scalar, label, way, "two imports");
+
+	tally->staged += batched.ctx->counters.windows_staged;
+	tally->declined += batched.ctx->counters.windows_declined;
+
+	relic_destroy(scalar.ctx);
+	relic_destroy(batched.ctx);
+}
+
+/*
+ * Check a batch import has reported what the import a field at a time
+ * reported, as many errors with the last at the same place, and left its
+ * context as the other left its own, after `imports`.
+ */
+static void
+check_same_outcome(const import_outcome_t *batched,
+    const import_outcome_t *scalar, const char *label,
+    const batch_way_t *way, const char *imports)
+{
 	const capture_t *reported;
 	const capture_t *expected;
 	const char *difference;
 
-	if (import_one_way(batch, table, length, 0, &batched) != 0 ||
-	    import_one_way(batch, table, length, RELIC_F_NO_BATCH_IMPORT,
-	    &scalar) != 0) {
-		check(false, SCENARIO_BATCH, "a context is made and loaded");
-		relic_destroy(batched.ctx);
-		relic_destroy(scalar.ctx);
-		return;
-	}
-
-	checkf(batched.status == scalar.status &&
-	    batched.again == scalar.again, SCENARIO_BATCH,
-	    "%s: a batch import should end %d then %d, as one a field at a "
-	    "time does, not %d then %d", label, scalar.status, scalar.again,
-	    batched.status, batched.again);
-	reported = &batched.after_first;
-	expected = &scalar.after_first;
+	reported = &batched->capture;
+	expected = &scalar->capture;
 	checkf(reported->errors == expected->errors &&
 	    strcmp(reported->message, expected->message) == 0 &&
 	    strcmp(reported->file, expected->file) == 0 &&
 	    reported->line == expected->line &&
 	    reported->column == expected->column, SCENARIO_BATCH,
-	    "%s: a batch import should report \"%s\" at %u:%u, as one a "
-	    "field at a time does, not \"%s\" at %u:%u", label,
+	    "%s, %s: after %s, a batch import should have reported %zu "
+	    "errors, the last \"%s\" at %u:%u, not %zu, the last \"%s\" at "
+	    "%u:%u", label, way->name, imports, expected->errors,
 	    expected->message, expected->line, expected->column,
-	    reported->message, reported->line, reported->column);
-	checkf(strcmp(batched.capture.message, scalar.capture.message) == 0,
-	    SCENARIO_BATCH, "%s: a second batch import should report \"%s\", "
-	    "not \"%s\"", label, scalar.capture.message,
-	    batched.capture.message);
+	    reported->errors, reported->message, reported->line,
+	    reported->column);
 
-	checkf(scalar.ctx->counters.windows_staged == 0 &&
-	    scalar.ctx->counters.windows_declined == 0, SCENARIO_BATCH,
-	    "%s: an import a field at a time should read no window", label);
-	tally->staged += batched.ctx->counters.windows_staged;
-	tally->declined += batched.ctx->counters.windows_declined;
-
-	difference = context_difference(batched.ctx, scalar.ctx);
-	checkf(difference == NULL, SCENARIO_BATCH, "%s: a batch import "
-	    "should leave the context as one a field at a time does, but "
-	    "its %s differ", label, difference != NULL ? difference : "");
-
-	relic_destroy(batched.ctx);
-	relic_destroy(scalar.ctx);
+	difference = context_difference(batched->ctx, scalar->ctx);
+	checkf(difference == NULL, SCENARIO_BATCH, "%s, %s: after %s, a "
+	    "batch import should leave the context as one a field at a time "
+	    "does, but its %s differ", label, way->name, imports,
+	    difference != NULL ? difference : "");
 }
 
 /*
- * Import the table of `batch` twice into a new context of `flags`, made
- * and loaded as `batch` says.  Returns 0, or -1 when the context could not
- * be made or loaded, with outcome->ctx then NULL or to be destroyed.
+ * Import the table of `batch` into a new context of `flags` and `threads`,
+ * made and loaded as `batch` says.  Returns 0, or -1 when the context
+ * could not be made or loaded, with outcome->ctx then NULL or to be
+ * destroyed.
  */
 static int
-import_one_way(const batch_case_t *batch, const char *table, size_t length,
-    unsigned int flags, import_outcome_t *outcome)
+import_first(const batch_case_t *batch, const char *table, size_t length,
+    unsigned int flags, size_t threads, import_outcome_t *outcome)
 {
 	relic_config_t config;
 
 	bzero(outcome, sizeof(*outcome));
 	bzero(&config, sizeof(config));
 	config.flags = flags;
+	config.threads = threads;
 	config.max_tuples = batch->max_tuples;
 	outcome->ctx = context_with_capture(&config, &outcome->capture);
 	if (outcome->ctx == NULL)
@@ -2384,12 +2560,18 @@ import_one_way(const batch_case_t *batch, const char *table, size_t length,
 	outcome->status = import_table(outcome->ctx, "table", batch->format,
 	    batch->flags, "e", batch->columns, batch->column_count, table,
 	    length);
-	outcome->after_first = outcome->capture;
+
+	return (0);
+}
+
+/* Import the table of `batch` again into the context of `outcome`. */
+static void
+import_again(const batch_case_t *batch, const char *table, size_t length,
+    import_outcome_t *outcome)
+{
 	outcome->again = import_table(outcome->ctx, "table", batch->format,
 	    batch->flags, "e", batch->columns, batch->column_count, table,
 	    length);
-
-	return (0);
 }
 
 /*
@@ -2534,57 +2716,60 @@ a_failed_read_ahead_waits_its_turn(void)
 }
 
 /*
- * Import `table` both ways from a stream failing at byte `fail_at`, and
- * check they end alike.
+ * Import `table` from a stream failing at byte `fail_at`, each of the
+ * batch_ways and a field at a time, and check they end alike.
  */
 static void
 compare_failed_reads(const char *label, const char *table, size_t fail_at)
 {
 	import_outcome_t batched;
 	import_outcome_t scalar;
-	const char *difference;
+	const batch_way_t *way;
+	size_t w;
 	int made;
 
-	made = import_failing(table, fail_at, 0, &batched);
+	made = import_failing(table, fail_at, RELIC_F_NO_BATCH_IMPORT, 1,
+	    &scalar);
 	if (made > 0) {
 		printf("skip: %s: no stream with a read function of the "
 		    "caller's own\n", SCENARIO_BATCH);
 		return;
 	}
-	if (made < 0 || import_failing(table, fail_at,
-	    RELIC_F_NO_BATCH_IMPORT, &scalar) != 0) {
+	if (made < 0) {
 		check(false, SCENARIO_BATCH, "a context and a stream are made");
-		relic_destroy(batched.ctx);
 		return;
 	}
-
 	checkf(scalar.status == -1, SCENARIO_BATCH, "%s: the import should "
 	    "fail", label);
-	checkf(batched.status == scalar.status &&
-	    strcmp(batched.capture.message, scalar.capture.message) == 0 &&
-	    batched.capture.line == scalar.capture.line, SCENARIO_BATCH,
-	    "%s: a batch import should end %d, reporting \"%s\" at line %u, "
-	    "not %d, reporting \"%s\" at line %u", label, scalar.status,
-	    scalar.capture.message, scalar.capture.line, batched.status,
-	    batched.capture.message, batched.capture.line);
-	difference = context_difference(batched.ctx, scalar.ctx);
-	checkf(difference == NULL, SCENARIO_BATCH, "%s: a batch import "
-	    "should leave the context as one a field at a time does, but "
-	    "its %s differ", label, difference != NULL ? difference : "");
 
-	relic_destroy(batched.ctx);
+	for (w = 0; w < sizeof(batch_ways) / sizeof(batch_ways[0]); w++) {
+		way = &batch_ways[w];
+		if (import_failing(table, fail_at, way->flags, way->threads,
+		    &batched) != 0) {
+			check(false, SCENARIO_BATCH,
+			    "a context and a stream are made");
+			break;
+		}
+		checkf(batched.status == scalar.status, SCENARIO_BATCH,
+		    "%s, %s: a batch import should end %d, not %d", label,
+		    way->name, scalar.status, batched.status);
+		check_same_outcome(&batched, &scalar, label, way,
+		    "a failed read");
+		relic_destroy(batched.ctx);
+	}
+
 	relic_destroy(scalar.ctx);
 }
 
 /*
  * Import `table` as the generated tables are imported, into a new context
- * of `flags`, from a stream that fails at byte `fail_at`.  Returns 0, -1
- * when the context or the stream could not be made, or 1 when no stream
- * with a read function of the caller's own can be.
+ * of `flags` and `threads`, from a stream that fails at byte `fail_at`.
+ * Returns 0, -1 when the context or the stream could not be made, or 1
+ * when no stream with a read function of the caller's own can be.
  */
 static int
 import_failing(const char *table, size_t fail_at, unsigned int flags,
-    import_outcome_t *outcome)
+    size_t threads, import_outcome_t *outcome)
 {
 	relic_config_t config;
 	reentering_read_t reading;
@@ -2594,6 +2779,7 @@ import_failing(const char *table, size_t fail_at, unsigned int flags,
 	bzero(outcome, sizeof(*outcome));
 	bzero(&config, sizeof(config));
 	config.flags = flags;
+	config.threads = threads;
 	outcome->ctx = context_with_capture(&config, &outcome->capture);
 	if (outcome->ctx == NULL)
 		return (-1);
@@ -2638,6 +2824,7 @@ main(void)
 	every_refusal_reads_nothing();
 	a_failed_import_adds_nothing();
 	a_refused_import_stops_reading();
+	batching_follows_the_threads_and_the_table();
 	facts_are_held_once();
 	an_import_discards_derived_facts();
 	a_long_field_crosses_reads();

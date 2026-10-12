@@ -84,12 +84,20 @@ static uint32_t	 find_integer(const relic_valtab_t *table, int64_t integer,
 		    uint32_t hash);
 static size_t	 integer_table_bytes(const relic_valtab_t *table);
 static uint32_t	 integer_rehash(uint32_t id, void *ctx);
-static relic_dom_t measure_integer(const relic_valtab_t *table,
-		    relic_pending_map_t *map, int64_t integer, size_t mask);
-static relic_dom_t measure_string(const relic_t *ctx,
-		    relic_pending_map_t *map, enum relic_type type,
-		    const char *bytes, size_t length, size_t mask);
-static size_t	 seen_size(size_t count);
+static relic_dom_t find_assigned(const relic_t *ctx,
+		    const relic_pending_batch_t *batch, size_t position);
+static bool	 is_marker(relic_dom_t id);
+static relic_dom_t marker_of(size_t position);
+static size_t	 marker_position(relic_dom_t marker);
+static relic_dom_t number_marked(const relic_t *ctx,
+		    const relic_pending_batch_t *batch, size_t position,
+		    relic_pending_map_t *map);
+static relic_dom_t number_new(const relic_t *ctx,
+		    const relic_pending_batch_t *batch, size_t position,
+		    relic_pending_map_t *map);
+static relic_dom_t pending_type_bits(const relic_pending_t *value);
+static bool	 pending_equal(const relic_pending_batch_t *batch,
+		    size_t a, size_t b);
 static bool	 admit_value_table(relic_t *ctx, size_t fresh_integers,
 		    uint32_t symbol);
 static void	 append_integer(relic_valtab_t *table, int64_t integer,
@@ -748,12 +756,12 @@ relic_value_integer(const relic_t *ctx, relic_dom_t dom, int64_t *integerp)
 }
 
 /*
- * The slots of a pending map's tables of new values for a batch of `count`
- * pending values: the least power of two at least twice the count, so a
- * table is at most half full and every probe ends at an empty slot.
+ * The slots relic_pending_find() needs to find `count` values among each
+ * other: the least power of two at least twice the count, so its table is
+ * at most half full and every probe ends at an empty slot.
  */
-static size_t
-seen_size(size_t count)
+size_t
+relic_pending_slots(size_t count)
 {
 	size_t size;
 
@@ -772,15 +780,15 @@ relic_pending_map_init(relic_pending_map_t *map, relic_arena_t *arena,
 	map->room = room;
 
 	map->ids = relic_arena_allocarray(arena, room, sizeof(*map->ids));
+	map->hashes = relic_arena_allocarray(arena, room,
+	    sizeof(*map->hashes));
+	map->slots = relic_arena_allocarray(arena, relic_pending_slots(room),
+	    sizeof(*map->slots));
 	map->fresh = relic_arena_allocarray(arena, room, sizeof(*map->fresh));
-	map->seen = relic_arena_allocarray(arena, seen_size(room),
-	    sizeof(*map->seen));
 	map->strings = relic_arena_allocarray(arena, room,
 	    sizeof(*map->strings));
-	map->strings_seen = relic_arena_allocarray(arena, seen_size(room),
-	    sizeof(*map->strings_seen));
-	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL ||
-	    map->strings == NULL || map->strings_seen == NULL)
+	if (map->ids == NULL || map->hashes == NULL || map->slots == NULL ||
+	    map->fresh == NULL || map->strings == NULL)
 		return (-1);
 
 	return (0);
@@ -796,16 +804,15 @@ relic_pending_map_bytes(size_t room)
 {
 	relic_pending_map_t *map;
 	size_t per_entry;
-	size_t per_slot;
 
 	assert(room <= RELIC_DOM_INDEX_MASK);
 
-	per_entry = sizeof(*map->ids) + sizeof(*map->fresh) +
-	    sizeof(*map->strings);
-	per_slot = sizeof(*map->seen) + sizeof(*map->strings_seen);
+	per_entry = sizeof(*map->ids) + sizeof(*map->hashes) +
+	    sizeof(*map->fresh) + sizeof(*map->strings);
 
 	return (relic_saturating_sum(relic_saturating_product(room, per_entry),
-	    relic_saturating_product(seen_size(room), per_slot)));
+	    relic_saturating_product(relic_pending_slots(room),
+	    sizeof(*map->slots))));
 }
 
 int
@@ -817,12 +824,12 @@ relic_pending_map_open(relic_pending_map_t *map, size_t room)
 	map->room = room;
 
 	map->ids = calloc(room, sizeof(*map->ids));
+	map->hashes = calloc(room, sizeof(*map->hashes));
+	map->slots = calloc(relic_pending_slots(room), sizeof(*map->slots));
 	map->fresh = calloc(room, sizeof(*map->fresh));
-	map->seen = calloc(seen_size(room), sizeof(*map->seen));
 	map->strings = calloc(room, sizeof(*map->strings));
-	map->strings_seen = calloc(seen_size(room), sizeof(*map->strings_seen));
-	if (map->ids == NULL || map->fresh == NULL || map->seen == NULL ||
-	    map->strings == NULL || map->strings_seen == NULL) {
+	if (map->ids == NULL || map->hashes == NULL || map->slots == NULL ||
+	    map->fresh == NULL || map->strings == NULL) {
 		relic_pending_map_close(map);
 		return (-1);
 	}
@@ -834,95 +841,159 @@ void
 relic_pending_map_close(relic_pending_map_t *map)
 {
 	free(map->ids);
+	free(map->hashes);
+	free(map->slots);
 	free(map->fresh);
-	free(map->seen);
 	free(map->strings);
-	free(map->strings_seen);
 	bzero(map, sizeof(*map));
 }
 
-/*
- * The identifier a pending integer is given: the one the integer table
- * holds it under, or, for an integer it lacks, the one after the table's
- * count that its position among the batch's new integers gives it.  The
- * integer table is looked up first, then the map's new integers, so two
- * pending copies of one new integer are promised one identifier.
- */
-static relic_dom_t
-measure_integer(const relic_valtab_t *table, relic_pending_map_t *map,
-    int64_t integer, size_t mask)
+uint32_t
+relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
+    const char *bytes)
 {
-	uint32_t hash;
-	uint32_t id;
-	size_t slot;
+	if (value->kind == RELIC_PENDING_INTEGER)
+		return (relic_hash_int64(ctx->values.hash_seed,
+		    value->u.integer));
 
-	hash = relic_hash_int64(table->hash_seed, integer);
-	id = find_integer(table, integer, hash);
-	if (id != RELIC_ID_NONE)
-		return (RELIC_DOM_INTEGER | id);
-
-	for (slot = hash & mask; map->seen[slot] != 0;
-	    slot = (slot + 1) & mask) {
-		if (map->fresh[map->seen[slot] - 1] == integer)
-			break;
-	}
-	if (map->seen[slot] == 0) {
-		map->fresh[map->fresh_count] = integer;
-		map->fresh_count++;
-		map->seen[slot] = (uint32_t)map->fresh_count;
-	}
-
-	return (RELIC_DOM_INTEGER |
-	    (uint32_t)(table->integer_count + map->seen[slot]));
+	return (relic_symbol_hash(ctx, bytes + value->u.text.offset,
+	    value->u.text.length));
 }
 
 /*
- * The identifier a pending value of `type`, a string or a symbol, of
- * `length` bytes at `bytes` is given, a value of that type in every case:
- * the one the context has assigned it; or, when the pool holds the bytes
- * under a symbol whose bit for the type is clear, that symbol's, which the
- * commit makes a value of the type by setting the bit; or, for bytes the
- * pool lacks, the one after the pool's count that their position among the
- * batch's new strings gives them, found as a new integer's is.  The
- * highest symbol promised is kept, since the commit sets the bit of every
- * one and the bits must reach that far.
+ * The members are visited in batch order, so the first of several equal
+ * values to enter the table is the earliest, and the marker every later
+ * one is given names it.  The table holds markers, zero in an empty slot.
  */
-static relic_dom_t
-measure_string(const relic_t *ctx, relic_pending_map_t *map,
-    enum relic_type type, const char *bytes, size_t length, size_t mask)
+void
+relic_pending_find(const relic_t *ctx, const relic_pending_batch_t *batch,
+    const uint32_t *members, size_t member_count, uint32_t *slots,
+    size_t slot_count, relic_dom_t *ids)
 {
-	const relic_fresh_string_t *fresh;
-	uint32_t symbol;
-	uint32_t hash;
+	size_t position;
+	size_t mask;
 	size_t slot;
+	size_t m;
 
-	hash = relic_symbol_hash(ctx, bytes, length);
-	symbol = relic_symbol_find(ctx, bytes, length, hash);
-	if (symbol == RELIC_ID_NONE) {
-		for (slot = hash & mask; map->strings_seen[slot] != 0;
+	assert(batch->count <= RELIC_DOM_INDEX_MASK);
+	assert(slot_count >= relic_pending_slots(member_count) &&
+	    (slot_count & (slot_count - 1)) == 0);
+
+	mask = slot_count - 1;
+	for (m = 0; m < member_count; m++) {
+		position = members != NULL ? members[m] : m;
+		assert(position < batch->count);
+		ids[position] = find_assigned(ctx, batch, position);
+		if (ids[position] != RELIC_ID_NONE)
+			continue;
+
+		for (slot = batch->hashes[position] & mask; slots[slot] != 0;
 		    slot = (slot + 1) & mask) {
-			fresh = &map->strings[map->strings_seen[slot] - 1];
-			if (fresh->hash == hash && fresh->length == length &&
-			    (length == 0 ||
-			    bcmp(fresh->bytes, bytes, length) == 0))
+			if (pending_equal(batch, marker_position(slots[slot]),
+			    position))
 				break;
 		}
-		if (map->strings_seen[slot] == 0) {
-			map->strings[map->string_count].bytes = bytes;
-			map->strings[map->string_count].copy = NULL;
-			map->strings[map->string_count].length = length;
-			map->strings[map->string_count].hash = hash;
-			map->string_count++;
-			map->strings_seen[slot] = (uint32_t)map->string_count;
-		}
-		symbol = (uint32_t)(relic_symbol_count(ctx) +
-		    map->strings_seen[slot]);
+		if (slots[slot] == 0)
+			slots[slot] = marker_of(position);
+		ids[position] = slots[slot];
+	}
+}
+
+/*
+ * The marker naming the batch's value at `position`, and the position a
+ * marker names.  A batch holds no more than RELIC_DOM_INDEX_MASK values,
+ * so a marker has no type bits, and no identifier is one.
+ */
+static relic_dom_t
+marker_of(size_t position)
+{
+	assert(position < RELIC_DOM_INDEX_MASK);
+
+	return ((relic_dom_t)position + 1);
+}
+
+static bool
+is_marker(relic_dom_t id)
+{
+	return ((id & RELIC_DOM_TYPE_MASK) == 0);
+}
+
+static size_t
+marker_position(relic_dom_t marker)
+{
+	assert(marker != RELIC_ID_NONE && is_marker(marker));
+
+	return ((size_t)marker - 1);
+}
+
+/*
+ * The identifier the context has assigned the batch's value at `position`,
+ * or RELIC_ID_NONE when it has none.  For a symbol or a string that is the
+ * pool's identifier for its bytes, under the value's type, whether or not
+ * the context has made them a value of that type yet: when it has not,
+ * relic_pending_append() makes them one by setting the type's bit.
+ */
+static relic_dom_t
+find_assigned(const relic_t *ctx, const relic_pending_batch_t *batch,
+    size_t position)
+{
+	const relic_pending_t *value;
+	uint32_t id;
+
+	value = &batch->values[position];
+	if (value->kind == RELIC_PENDING_INTEGER) {
+		id = find_integer(&ctx->values, value->u.integer,
+		    batch->hashes[position]);
+		return (id == RELIC_ID_NONE ? RELIC_ID_NONE :
+		    RELIC_DOM_INTEGER | id);
 	}
 
-	if (symbol > map->highest_use)
-		map->highest_use = symbol;
+	id = relic_symbol_find(ctx, batch->bytes + value->u.text.offset,
+	    value->u.text.length, batch->hashes[position]);
 
-	return (dom_type_bits(type) | symbol);
+	return (id == RELIC_ID_NONE ? RELIC_ID_NONE :
+	    pending_type_bits(value) | id);
+}
+
+/*
+ * Whether the batch's values at positions `a` and `b` would be interned as
+ * one: two integers of one value, or two symbols or strings of the same
+ * bytes, whatever their types, since the pool holds the bytes once.
+ */
+static bool
+pending_equal(const relic_pending_batch_t *batch, size_t a, size_t b)
+{
+	const relic_pending_t *left;
+	const relic_pending_t *right;
+
+	left = &batch->values[a];
+	right = &batch->values[b];
+	if ((left->kind == RELIC_PENDING_INTEGER) !=
+	    (right->kind == RELIC_PENDING_INTEGER))
+		return (false);
+	if (left->kind == RELIC_PENDING_INTEGER)
+		return (left->u.integer == right->u.integer);
+
+	return (batch->hashes[a] == batch->hashes[b] &&
+	    left->u.text.length == right->u.text.length &&
+	    (left->u.text.length == 0 ||
+	    bcmp(batch->bytes + left->u.text.offset,
+	    batch->bytes + right->u.text.offset, left->u.text.length) == 0));
+}
+
+static relic_dom_t
+pending_type_bits(const relic_pending_t *value)
+{
+	switch (value->kind) {
+	case RELIC_PENDING_INTEGER:
+		return (RELIC_DOM_INTEGER);
+	case RELIC_PENDING_SYMBOL:
+		return (dom_type_bits(RELIC_SYMBOL));
+	case RELIC_PENDING_TEXT:
+		break;
+	}
+
+	return (dom_type_bits(RELIC_STRING));
 }
 
 /*
@@ -948,53 +1019,124 @@ uses_capacity_covering(const relic_valtab_t *table, uint32_t symbol)
 }
 
 /*
- * Each pending value is measured in batch order, so new values are
- * promised identifiers in order of first occurrence, which is the order
- * relic_pending_append() numbers them in.  The projection is of the value
- * table and the pool together, each part at the capacity interning the new
- * values one at a time would reach.
+ * Values are numbered in batch order, so a new value is promised an
+ * identifier by its first occurrence, which is the order
+ * relic_pending_append() interns them in.  The highest symbol a value is
+ * promised is kept because the commit records a use of each, and the
+ * record must reach that far.  The projection is of the value table and
+ * the pool together, each part at the capacity interning the new values
+ * one at a time would reach.
+ */
+size_t
+relic_pending_number(const relic_t *ctx, const relic_pending_batch_t *batch,
+    relic_pending_map_t *map)
+{
+	relic_dom_t id;
+	size_t i;
+
+	assert(batch->count <= map->room);
+
+	map->count = batch->count;
+	map->fresh_count = 0;
+	map->string_count = 0;
+	map->highest_use = 0;
+	for (i = 0; i < batch->count; i++) {
+		if (is_marker(map->ids[i]))
+			map->ids[i] = number_marked(ctx, batch, i, map);
+		id = map->ids[i];
+		if ((id & RELIC_DOM_TYPE_MASK) != RELIC_DOM_INTEGER &&
+		    (id & RELIC_DOM_INDEX_MASK) > map->highest_use)
+			map->highest_use = id & RELIC_DOM_INDEX_MASK;
+	}
+
+	return (relic_saturating_sum(value_table_bytes_after(&ctx->values,
+	    map->fresh_count, map->highest_use),
+	    relic_symbol_pool_bytes_after(ctx, map->strings,
+	    map->string_count)));
+}
+
+/*
+ * The identifier the batch's value at `position` is promised, given the
+ * marker relic_pending_find() left it, every value before it numbered.  A
+ * marker naming the value itself marks the first of its value, which is
+ * promised a new identifier; a later copy takes the one its first was
+ * promised, under its own type.
+ */
+static relic_dom_t
+number_marked(const relic_t *ctx, const relic_pending_batch_t *batch,
+    size_t position, relic_pending_map_t *map)
+{
+	size_t first;
+
+	first = marker_position(map->ids[position]);
+	assert(first <= position);
+	if (first == position)
+		return (number_new(ctx, batch, position, map));
+
+	return ((map->ids[first] & RELIC_DOM_INDEX_MASK) |
+	    pending_type_bits(&batch->values[position]));
+}
+
+/*
+ * Promise the batch's value at `position`, the first of its value, the
+ * identifier after the last one promised of its kind: an integer the one
+ * after the table's count its place among the new integers gives it, and
+ * a symbol or a string the one after the pool's count its place among the
+ * new bytes gives it.
+ */
+static relic_dom_t
+number_new(const relic_t *ctx, const relic_pending_batch_t *batch,
+    size_t position, relic_pending_map_t *map)
+{
+	const relic_pending_t *value;
+	relic_fresh_string_t *fresh;
+
+	value = &batch->values[position];
+	if (value->kind == RELIC_PENDING_INTEGER) {
+		map->fresh[map->fresh_count] = value->u.integer;
+		map->fresh_count++;
+		return (RELIC_DOM_INTEGER |
+		    (uint32_t)(ctx->values.integer_count + map->fresh_count));
+	}
+
+	fresh = &map->strings[map->string_count];
+	fresh->bytes = batch->bytes + value->u.text.offset;
+	fresh->copy = NULL;
+	fresh->length = value->u.text.length;
+	fresh->hash = batch->hashes[position];
+	map->string_count++;
+
+	return (pending_type_bits(value) |
+	    (uint32_t)(relic_symbol_count(ctx) + map->string_count));
+}
+
+/*
+ * One part holding every value finds them, and numbering them then gives
+ * each its identifier.
  */
 size_t
 relic_pending_measure(const relic_t *ctx, const relic_pending_t *pending,
     size_t count, const char *bytes, relic_pending_map_t *map)
 {
-	const relic_valtab_t *table;
-	const relic_text_t *text;
-	size_t mask;
+	relic_pending_batch_t batch;
+	size_t slot_count;
 	size_t i;
 
-	table = &ctx->values;
 	assert(count <= map->room);
 
-	map->count = count;
-	map->fresh_count = 0;
-	map->string_count = 0;
-	map->highest_use = 0;
-	mask = seen_size(count) - 1;
-	bzero(map->seen, (mask + 1) * sizeof(*map->seen));
-	bzero(map->strings_seen, (mask + 1) * sizeof(*map->strings_seen));
+	for (i = 0; i < count; i++)
+		map->hashes[i] = relic_pending_hash(ctx, &pending[i], bytes);
+	batch.values = pending;
+	batch.hashes = map->hashes;
+	batch.bytes = bytes;
+	batch.count = count;
 
-	for (i = 0; i < count; i++) {
-		switch (pending[i].kind) {
-		case RELIC_PENDING_INTEGER:
-			map->ids[i] = measure_integer(table, map,
-			    pending[i].u.integer, mask);
-			break;
-		case RELIC_PENDING_TEXT:
-		case RELIC_PENDING_SYMBOL:
-			text = &pending[i].u.text;
-			map->ids[i] = measure_string(ctx, map,
-			    pending[i].kind == RELIC_PENDING_SYMBOL ?
-			    RELIC_SYMBOL : RELIC_STRING,
-			    bytes + text->offset, text->length, mask);
-			break;
-		}
-	}
+	slot_count = relic_pending_slots(count);
+	bzero(map->slots, slot_count * sizeof(*map->slots));
+	relic_pending_find(ctx, &batch, NULL, count, map->slots, slot_count,
+	    map->ids);
 
-	return (relic_saturating_sum(value_table_bytes_after(table,
-	    map->fresh_count, map->highest_use),
-	    relic_symbol_pool_bytes_after(ctx, map->strings,
-	    map->string_count)));
+	return (relic_pending_number(ctx, &batch, map));
 }
 
 void

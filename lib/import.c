@@ -15,6 +15,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "internal.h"
 #include "window.h"
 
 /*
@@ -82,6 +83,7 @@ enum window_outcome {
 
 typedef struct import_input import_input_t;
 typedef struct importer importer_t;
+typedef struct window_fill window_fill_t;
 
 /*
  * What an import has read of its stream and not yet staged: the one
@@ -107,7 +109,8 @@ struct import_input {
  * first record is still to be read as a header: its fields are neither typed
  * nor interned, and its end stages nothing.  `boundary` is the location of
  * the first byte the input holds, which begins a record: where the next
- * window, or the reader, begins.
+ * window, or the reader, begins.  `map` is what the value layer numbered
+ * the window's values as, opened while `mapped` is set.
  */
 struct importer {
 	relic_t			*ctx;
@@ -116,12 +119,24 @@ struct importer {
 	relic_table_reader_t	 reader;
 	import_input_t		 input;
 	relic_window_t		 window;
+	relic_pending_map_t	 map;
 	relic_location_t	 boundary;
 	relic_dom_t		 tuple[RELIC_MAX_ARITY];
 	relic_pred_id_t		 pred;
 	char			*source_name;	/* the importer's copy */
 	uint16_t		 kept;
 	bool			 header_pending;
+	bool			 mapped;
+};
+
+/*
+ * What the parts filling a window's new tuples into the predicate's
+ * builder read: where each stripe's tuples go, and the window's tuples as
+ * a batch.
+ */
+struct window_fill {
+	const relic_stripe_fill_t	*fills;
+	const relic_builder_batch_t	*batch;
 };
 
 static void	 advance_location(relic_location_t *where, unsigned char byte);
@@ -129,6 +144,10 @@ static int	 analyze_window(importer_t *importer, size_t *value_bytesp);
 static enum relic_table_event_kind append_field_byte(
 		    relic_table_reader_t *reader, unsigned char byte,
 		    relic_table_event_t *event);
+static bool	 may_batch(const relic_t *ctx);
+static bool	 batching_forced(const relic_t *ctx);
+static bool	 outgrows_window(const import_input_t *input);
+static int	 prepare_batching(relic_t *ctx);
 static void	 consume_input(import_input_t *input, size_t length);
 static const char *describe_field(const char *bytes, size_t length,
 		    char *buffer, size_t size);
@@ -159,8 +178,11 @@ static bool	 is_plain(enum relic_format format,
 		    enum relic_table_state state, unsigned char byte);
 static size_t	 kept_columns(const enum relic_column *columns,
 		    size_t column_count);
+static void	 forget_window(importer_t *importer);
 static int	 frame_window(importer_t *importer);
 static enum window_outcome decline_window(importer_t *importer);
+static void	 fill_stripe(void *argument, size_t stripe,
+		    size_t worker_index);
 static enum relic_table_event_kind mistake(relic_table_reader_t *reader,
 		    enum relic_table_mistake which,
 		    const relic_location_t *where, unsigned char byte,
@@ -1092,6 +1114,7 @@ importer_init(importer_t *importer, relic_t *ctx,
 static void
 importer_reset(importer_t *importer)
 {
+	forget_window(importer);
 	relic_window_reset(&importer->window);
 	relic_table_reader_reset(&importer->reader);
 	relic_staging_reset(&importer->staging);
@@ -1150,10 +1173,14 @@ stage_table(importer_t *importer, const char *source_name)
  * ended with every record staged, or -1 having reported the first mistake,
  * a failed read, or memory.
  *
- * The table is staged a window at a time, unless the context's flags say
- * not to, for as long as each window is admitted whole; the first that is
- * not, and the rest of the table after it, are read a field at a time, as
- * the flag reads all of it.  Both stage exactly the same facts and intern
+ * The table is staged a window at a time when the context may batch it,
+ * its first window does not hold it all (unless batching is forced), and
+ * the pool is ready to share it, for as long as each window is admitted
+ * whole; the first that is not, and the rest of the table after it, are
+ * read a field at a time, as a table not batched is read whole.  The
+ * first window's bytes are the reader's when the table is not batched; a
+ * read for them that failed is the reader's to report, and one that found
+ * no room the reader makes again.  Both stage exactly the same facts and intern
  * exactly the same values under the same identifiers, and a window is
  * admitted only when reading it a field at a time could not fail, so the
  * import fails, when it does, at the same record and with the same
@@ -1163,14 +1190,85 @@ static int
 read_table(importer_t *importer)
 {
 	enum import_progress progress;
+	relic_t *ctx;
+	bool batched;
+
+	ctx = importer->ctx;
+	batched = false;
+	if (may_batch(ctx) && fill_window(&importer->input) == 0 &&
+	    (batching_forced(ctx) || outgrows_window(&importer->input)))
+		batched = prepare_batching(ctx) == 0;
 
 	progress = IMPORT_READ_ON;
-	if ((importer->ctx->config.flags & RELIC_F_NO_BATCH_IMPORT) == 0)
+	if (batched)
 		progress = stage_windows(importer);
 	if (progress == IMPORT_READ_ON)
 		progress = read_fields(importer);
 
 	return (progress == IMPORT_TABLE_ENDED ? 0 : -1);
+}
+
+/*
+ * Whether the context may stage a table a window at a time (internal.h):
+ * never under RELIC_F_NO_BATCH_IMPORT, always under
+ * RELIC_F_PARALLEL_ALWAYS, and otherwise when it has
+ * RELIC_IMPORT_BATCH_WORKERS threads or more.
+ */
+static bool
+may_batch(const relic_t *ctx)
+{
+	if ((ctx->config.flags & RELIC_F_NO_BATCH_IMPORT) != 0)
+		return (false);
+	if (batching_forced(ctx))
+		return (true);
+
+	return (ctx->config.threads >= RELIC_IMPORT_BATCH_WORKERS);
+}
+
+/*
+ * Whether the context stages every table a window at a time, whatever its
+ * size and however few workers its pool runs, unless
+ * RELIC_F_NO_BATCH_IMPORT forbids it.
+ */
+static bool
+batching_forced(const relic_t *ctx)
+{
+	return ((ctx->config.flags & RELIC_F_PARALLEL_ALWAYS) != 0);
+}
+
+/*
+ * Whether the table goes on past the window fill_window() has read of it:
+ * its end has not been met, and no read has failed.
+ */
+static bool
+outgrows_window(const import_input_t *input)
+{
+	return (!input->ended && !input->failed);
+}
+
+/*
+ * Make the context's pool ready to share a table's windows: made the first
+ * time, as a round makes it, and adopted by the calling process, which a
+ * fork leaves with one worker.  Returns 0, or -1 when the pool cannot be
+ * made or, unless batching is forced, runs fewer than
+ * RELIC_IMPORT_BATCH_WORKERS workers, as the pool of a forked child, or
+ * one whose threads did not all start, may; the table is then read a field
+ * at a time.  Reports nothing.
+ */
+static int
+prepare_batching(relic_t *ctx)
+{
+	if (ctx->pool == NULL) {
+		if (relic_pool_create(&ctx->pool, ctx->config.threads,
+		    ctx->hash_seed) != 0)
+			return (-1);
+	}
+	relic_pool_adopt(ctx->pool);
+	if (!batching_forced(ctx) &&
+	    ctx->pool->worker_count < RELIC_IMPORT_BATCH_WORKERS)
+		return (-1);
+
+	return (0);
 }
 
 /*
@@ -1193,6 +1291,7 @@ stage_windows(importer_t *importer)
 		else
 			outcome = stage_window(importer);
 	} while (outcome == WINDOW_STAGED);
+	forget_window(importer);
 	relic_window_reset(&importer->window);
 
 	switch (outcome) {
@@ -1242,7 +1341,7 @@ stage_window(importer_t *importer)
 	size_t value_bytes;
 
 	window = &importer->window;
-	relic_window_clear(window);
+	forget_window(importer);
 	if (importer->input.length == 0)
 		return (WINDOW_NONE);
 
@@ -1360,9 +1459,23 @@ frame_window(importer_t *importer)
 }
 
 /*
+ * Forget the window the importer last framed, and the map of its values.
+ */
+static void
+forget_window(importer_t *importer)
+{
+	relic_window_clear(&importer->window);
+	if (importer->mapped) {
+		relic_pending_map_close(&importer->map);
+		importer->mapped = false;
+	}
+}
+
+/*
  * Decode the window's pieces, number their values, and find the tuples
- * new to the predicate's facts, into the window alone.  *value_bytesp is
- * what the value table and the pool would hold with the window's values
+ * new to the predicate's facts, into the window and the map alone: the
+ * steps lib/window.h lists, each job on the pool.  *value_bytesp is what
+ * the value table and the pool would hold with the window's values
  * interned.  Returns 0, or -1 when a field holds no value its column
  * accepts, a value would be given an identifier no identifier can name,
  * or memory ran out.
@@ -1374,32 +1487,57 @@ static int
 analyze_window(importer_t *importer, size_t *value_bytesp)
 {
 	relic_window_t *window;
+	relic_pending_batch_t batch;
+	relic_window_job_t job;
 	relic_t *ctx;
-	size_t i;
 
 	ctx = importer->ctx;
 	window = &importer->window;
-	for (i = 0; i < window->piece_count; i++) {
-		if (relic_window_decode_piece(ctx, importer->plan,
-		    importer->source_name, window, &window->pieces[i]) != 0)
-			return (-1);
-	}
+	job.ctx = ctx;
+	job.plan = importer->plan;
+	job.source_name = importer->source_name;
+	job.window = window;
+	job.builder = relic_staging_builder(&importer->staging, importer->pred);
+	job.store = relic_base_store(ctx, importer->pred);
+	job.ids = NULL;
+	job.tuple_seed = ctx->hash_seed;
 
+	relic_pool_for(ctx->pool, window->piece_count,
+	    relic_window_decode_part, &job);
+	if (!relic_window_decoded(window))
+		return (-1);
 	if (relic_window_gather(window) != 0)
 		return (-1);
+
 	*value_bytesp = relic_value_storage_bytes(ctx);
-	if (window->mapped) {
-		*value_bytesp = relic_pending_measure(ctx, window->values,
-		    window->value_count, window->decoded, &window->map);
-		if (!relic_pending_fits(ctx, &window->map))
+	if (window->value_count > 0) {
+		if (relic_pending_map_open(&importer->map,
+		    window->value_count) != 0)
+			return (-1);
+		importer->mapped = true;
+		job.ids = importer->map.ids;
+		relic_pool_for(ctx->pool, RELIC_WINDOW_VALUE_PARTS,
+		    relic_window_find_part, &job);
+
+		batch.values = window->values;
+		batch.hashes = window->value_hashes;
+		batch.bytes = window->decoded;
+		batch.count = window->value_count;
+		*value_bytesp = relic_pending_number(ctx, &batch,
+		    &importer->map);
+		if (!relic_pending_fits(ctx, &importer->map))
 			return (-1);
 	}
 
-	relic_window_resolve(ctx, window);
+	relic_pool_for(ctx->pool, window->piece_count,
+	    relic_window_resolve_part, &job);
+	if (relic_window_list(window) != 0)
+		return (-1);
+	relic_pool_for(ctx->pool, RELIC_STRIPES, relic_window_classify_part,
+	    &job);
+	relic_window_rank(window);
 
-	return (relic_window_classify(window,
-	    relic_staging_builder(&importer->staging, importer->pred),
-	    relic_base_store(ctx, importer->pred)));
+	return (0);
 }
 
 /*
@@ -1432,10 +1570,11 @@ window_admissible(const importer_t *importer, size_t value_bytes)
 }
 
 /*
- * Intern the window's values and stage its new tuples, in input order.
- * Room for both is made first, so that nothing is added unless everything
- * can be.  Returns 0, or -1 having reported that memory ran out, with the
- * values and the facts staged as they were.
+ * Intern the window's values and stage its new tuples, in input order,
+ * the tuples a stripe of the builder to a part on the pool.  Room for both
+ * is made first, so that nothing is added unless everything can be.
+ * Returns 0, or -1 having reported that memory ran out, with the values
+ * and the facts staged as they were.
  *
  * Staging is reserved whenever the window holds a tuple, fresh or not,
  * since the first tuple a field-at-a-time import stages begins the
@@ -1446,34 +1585,59 @@ static int
 publish_window(importer_t *importer)
 {
 	relic_window_t *window;
+	relic_tuple_growth_t growth;
+	relic_stripe_fill_t fills[RELIC_STRIPES];
+	relic_builder_batch_t batch;
+	window_fill_t fill;
 	relic_t *ctx;
-	uint32_t position;
-	size_t i;
+	size_t s;
 
 	ctx = importer->ctx;
 	window = &importer->window;
-	if (window->mapped && relic_pending_reserve(ctx, &window->map) != 0) {
+	for (s = 0; s < RELIC_STRIPES; s++)
+		growth.by_stripe[s] = window->fresh_by_stripe[s];
+
+	if (importer->mapped &&
+	    relic_pending_reserve(ctx, &importer->map) != 0) {
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
 	if (window->tuple_count > 0 && relic_staging_reserve(&importer->staging,
-	    importer->pred, &window->growth) != 0) {
-		if (window->mapped)
-			relic_pending_unreserve(ctx, &window->map);
+	    importer->pred, &growth) != 0) {
+		if (importer->mapped)
+			relic_pending_unreserve(ctx, &importer->map);
 		relic_diag_no_memory(ctx);
 		return (-1);
 	}
 
-	if (window->mapped)
-		relic_pending_append(ctx, &window->map);
-	for (i = 0; i < window->fresh_count; i++) {
-		position = window->fresh[i];
-		relic_staging_append(&importer->staging, importer->pred,
-		    window->tuples + (size_t)position * window->arity,
-		    window->hashes[position]);
-	}
+	if (importer->mapped)
+		relic_pending_append(ctx, &importer->map);
+	if (window->fresh_count == 0)
+		return (0);
+
+	batch.tuples = window->tuples;
+	batch.hashes = window->hashes;
+	batch.ranks = window->ranks;
+	batch.stripe_list = window->stripe_list;
+	batch.stripe_start = window->stripe_start;
+	batch.count = window->fresh_count;
+	relic_staging_stripe_fills(&importer->staging, importer->pred, fills);
+	fill.fills = fills;
+	fill.batch = &batch;
+	relic_pool_for(ctx->pool, RELIC_STRIPES, fill_stripe, &fill);
+	relic_staging_admit(&importer->staging, importer->pred, &batch);
 
 	return (0);
+}
+
+/* A pool part: the builder's stripe filled with the tuples ranked in it. */
+static void
+fill_stripe(void *argument, size_t stripe, size_t worker_index RELIC_UNUSED)
+{
+	const window_fill_t *fill;
+
+	fill = argument;
+	relic_stripe_fill(&fill->fills[stripe], fill->batch);
 }
 
 /*

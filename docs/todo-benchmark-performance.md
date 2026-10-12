@@ -220,11 +220,62 @@ are 0.191 s and 0.076 s. Import is also about half of the diagnostic
 
 **Implementation.** The table path of
 [bulk fact construction and import](../specs/design-bulk-load.md) stages
-bounded CSV/TSV windows through private builders on the calling thread,
-with `-X no-batch-import` as the scalar reference. What remains is to run
-the window's independent jobs -- piece decoding, classification by stripe
-and the builder appends -- on the context's worker pool. Source program
-parsing remains scalar and uses the same builders.
+new facts in private builders that an empty store adopts whole, on both
+import paths. A table is read a field at a time unless the context's pool
+runs at least `RELIC_IMPORT_BATCH_WORKERS` (eight) workers and the table
+outgrows its first 2 MiB window; it is then staged a window at a time,
+with piece decoding, value finding, token resolution, classification by
+stripe and the stripe fills run as jobs on the pool. `-X parallel` forces
+batching at any worker count and `-X no-batch-import` is the scalar
+reference at every worker count. Source program parsing remains scalar
+and uses the same builders.
+
+**Measurements.** Import alone (`-c`), the median of five runs, wall time
+and peak RSS. `facts8` is the scale-8 `facts-join` row table, `files8`
+the scale-8 `files` table, `distinct` 52 MB of distinct symbol pairs and
+`repeat6` 158 MB of repeated integer and symbol pairs. "Before" is
+ff14dba, the importer before this stage; "default" is one thread.
+
+On the p620 (FreeBSD, 128 threads, clang 19):
+
+| Table | Before | Default | Scalar | Batched j1 | j2 | j4 | j8 | j16 | j32 | j64 |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `facts8` | 0.97 s, 258 MB | 0.89 s, 203 MB | 0.90 s, 202 MB | 1.14 s, 241 MB | 1.06 | 0.90 | 0.76 | 0.66 | 0.65 | 0.68 |
+| `files8` | 0.91 s, 241 MB | 0.67 s, 203 MB | 0.66 s, 203 MB | 0.90 s, 224 MB | 0.91 | 0.79 | 0.72 | 0.58 | 0.58 | 0.61 |
+| `distinct` | 1.65 s, 249 MB | 1.47 s, 183 MB | 1.47 s, 183 MB | 1.78 s, 235 MB | 1.73 | 1.33 | 1.06 | 0.85 | 0.82 | 0.83 |
+| `repeat6` | 2.61 s, 52 MB | 2.34 s, 25 MB | 2.34 s, 25 MB | 2.90 s, 53 MB | 3.23 | 2.23 | 1.63 | 1.20 | 1.12 | 1.09 |
+
+Batched peak RSS grows with the workers, to 252-271 MB at j64 for the
+first three tables and 76 MB for `repeat6`. The default at j8 and above
+batches and matches the forced run within noise. A 1,000-row import
+takes 1.06 ms by default at j1, j8 and j64 alike, against 1.08 ms before
+and 1.43 ms forced to batch at j8.
+
+On the M3 (macOS, 16 threads), the batched columns force batching at each
+worker count and the scalar column, the path the default takes, reads a
+field at a time:
+
+| Table | Before | Scalar | Batched j1 | j2 | j4 | j8 | j12 | j16 |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `facts8` | 1.24 s, 206 MB | 0.69 s, 136 MB | 0.78 s, 183 MB | 0.56 | 0.42 | 0.37 | 0.35 | 0.34 |
+| `files8` | 0.81 s, 204 MB | 0.55 s, 163 MB | 0.66 s, 167 MB | 0.47 | 0.39 | 0.33 | 0.32 | 0.32 |
+| `distinct` | 1.79 s, 228 MB | 1.54 s, 159 MB | 1.22 s, 209 MB | 0.78 | 0.55 | 0.45 | 0.43 | 0.42 |
+| `repeat6` | 2.45 s, 56 MB | 1.96 s, 27 MB | 2.17 s, 51 MB | 1.39 | 0.96 | 0.74 | 0.67 | 0.69 |
+
+The serial gain is the builders': the default is 8-26% faster than before
+on the p620, and the scalar path 14-44% on the M3, with 16-52% less peak memory. Batching
+on one worker is 21-36% slower than the scalar importer on the p620, and
+on the M3 on three tables of four, which is why one worker reads a field
+at a time. Eight is where batching
+wins on most tables on both machines: the M3 wins everywhere from two
+workers, the p620 on three of four tables at eight, losing 9% on
+`files8`, and on all four from sixteen.
+
+**What remains.** The steps left on the calling thread bound the parallel
+gain: framing each window, placing new values in the symbol index, and
+appending into a populated store, each a `TODO.md` entry. A window also
+allocates numbering arrays it never reads, and the admission proof
+restates the scalar checks rather than sharing them.
 
 **Design and measurement gates.** Preserve the ordinary domain encoding and
 global first-occurrence numbering. Measure dictionary reconciliation,

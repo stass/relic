@@ -164,9 +164,10 @@ relic_staging_add(relic_staging_t *staging, relic_pred_id_t pred,
  * Staging a batch of tuples at once, which a batch import does with a
  * window's: relic_staging_builder() gives the builder the batch's tuples
  * are to be new to, relic_staging_admits() whether the limits admit the
- * new ones, relic_staging_reserve() makes room for them, and
- * relic_staging_append() stages each, as relic_staging_add() would have
- * one at a time.
+ * new ones, relic_staging_reserve() makes room for them,
+ * relic_staging_stripe_fills() describes where the parts filling each
+ * canonical stripe write them, and relic_staging_admit() then counts them,
+ * as relic_staging_add() would have staged and counted each one at a time.
  */
 
 /*
@@ -266,12 +267,30 @@ relic_staging_reserve(relic_staging_t *staging, relic_pred_id_t pred,
 }
 
 /*
- * Stage `tuple`, of wide hash `hash`, which neither `pred`'s builder nor
- * its base store holds, into room relic_staging_reserve() made.
+ * Describe where the parts filling each canonical stripe of `pred`'s
+ * builder write a batch's new tuples, into room relic_staging_reserve()
+ * made; relic_stripe_fill() fills one.  The parts can run at once, each
+ * writing only its stripe of the builder.
  */
 void
-relic_staging_append(relic_staging_t *staging, relic_pred_id_t pred,
-    const relic_dom_t *tuple, uint64_t hash)
+relic_staging_stripe_fills(relic_staging_t *staging, relic_pred_id_t pred,
+    relic_stripe_fill_t fills[RELIC_STRIPES])
+{
+	size_t position;
+
+	position = find_set(staging, pred);
+	assert(position < staging->set_count);
+
+	relic_builder_stripe_fills(&staging->sets[position].builder, fills);
+}
+
+/*
+ * Count the tuples `batch` ranks, with which every stripe of `pred`'s
+ * builder was filled, as staged, as relic_staging_add() counts each.
+ */
+void
+relic_staging_admit(relic_staging_t *staging, relic_pred_id_t pred,
+    const relic_builder_batch_t *batch)
 {
 	relic_staged_set_t *set;
 	size_t position;
@@ -279,12 +298,11 @@ relic_staging_append(relic_staging_t *staging, relic_pred_id_t pred,
 	position = find_set(staging, pred);
 	assert(position < staging->set_count);
 	set = &staging->sets[position];
-	assert(!held_by_store(set, tuple, hash));
 
-	relic_builder_append_hashed(&set->builder, tuple, hash);
-	staging->new_tuples++;
+	relic_builder_admit(&set->builder, batch);
+	staging->new_tuples += batch->count;
 	staging->columns_floor = relic_saturating_sum(staging->columns_floor,
-	    row_bytes(set));
+	    relic_saturating_product(batch->count, row_bytes(set)));
 }
 
 /*

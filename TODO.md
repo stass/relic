@@ -113,9 +113,53 @@ ceiling, `relic_pending_fits()` the integer ceiling of
 `reserve_integers()`, and `relic_staging_admits()` the limits of
 `admit_new_tuple()`, the builder's ceilings and the floor
 `staging_set_of()` adds. A check added to the scalar path alone lets a
-window admit what a field at a time refuses. Give each layer one pure
-check that both paths call, so the proof is the scalar check applied to
-the window's totals.
+window admit what a field at a time refuses. The builder's column bytes
+are one such check missing: `relic_staging_admits()` bounds the column
+words, but on a 32-bit build without `max_memory` the next stepwise column
+capacity can overflow its byte size, so a window is admitted and then its
+reservation fails, keeping none of the values a field at a time would
+have interned before the same failure. Give each layer one pure check that
+both paths call, the builder's growth projected once for admission and
+reservation, so the proof is the scalar check applied to the window's
+totals.
+
+**A batch import frames each window on the calling thread.** [Medium,
+component: `lib/import.c`] Framing is one pass of the reader over the
+window, and the pool waits for it. Sampled at eight threads, it is 38% of
+the calling thread on a 158 MB table of two columns of repeated values
+and 17% on 52 MB of distinct symbols, the largest serial step left. The
+reader alone may decide where records end
+([bulk loading](specs/design-bulk-load.md)), so the candidate is to frame
+the next window, from the boundary the current window's framing found, on
+a thread of the pool while the current window is analyzed, discarding it
+when the current one is declined.
+
+**A batch import places new values in the symbol index one at a time.**
+[Medium, component: `lib/symbol.c`, `lib/value.c`] Publishing a window's
+values is serial: on 52 MB of distinct symbols at eight threads it is 20%
+of the calling thread, nearly all of it `relic_idtab_place()` under
+`relic_symbol_append()`; the byte copies do not show in the samples.
+Placing in parallel needs the symbol index partitioned by hash, as the
+canonical index is by stripe, which is the storage-layout alternative the
+bulk-load design names under persistent lookup partitioning.
+
+**An import into a populated store appends its facts one at a time.**
+[Medium, component: `lib/relation.c`, `lib/facts.c`] An empty store adopts
+a builder's payload whole, but `append_builder()` copies, indexes and
+counts each staged tuple on the calling thread when the store already
+holds facts. The bulk-load design's append copies the columns, then places
+each canonical stripe as a job of its own, publishing counts and totals
+after the barrier; prepare those stripe lists before the commit's no-failure
+phase.
+
+**A batch import's numbering map holds arrays only measuring reads.**
+[Medium, component: `lib/value.c`, `lib/import.c`] `relic_pending_map_open()`
+gives every map `hashes` and `slots`, about 20 bytes a value, which only
+`relic_pending_measure()` uses; a window finds its values with its own
+`value_hashes` and `value_slots`, so each window allocates and zeroes the
+map's for nothing. Make them the measuring caller's scratch rather than
+part of every map, with `relic_pending_map_bytes()` (charged by the merge)
+following.
 
 **A batch window's scratch grows with its records, not its bytes.** [Low,
 component: `lib/window.c`, `lib/import.c`] A window holds up to

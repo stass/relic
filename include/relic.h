@@ -178,21 +178,25 @@ typedef struct relic_config relic_config_t;
  * limit bounds the rewrite, not what its rules derive.
  *
  * `threads` is how many threads an evaluation may share a round's work
- * among, the calling thread included; zero and one both mean the calling
- * thread alone, which is the default, and more than RELIC_THREADS_MAX is
- * refused when the context is created.  It is the one field no -l option
- * sets: the tool's -j sets it.  The threads are the context's own: they
- * are started the first time an evaluation shares a round, run only inside
- * an operation the caller started, call none of the caller's callbacks,
- * block every signal but those a fault in them raises, and are joined when
- * the context is destroyed.  A child forked between operations may go on
- * using a context its parent created, on the calling thread alone.  A
- * round is shared only when it holds enough work to repay the threads'
- * coordination, and the answers, the relations, every diagnostic and every
- * counter but parallel_rounds are the same whatever the number of threads.
- * A thread that cannot be started is not an error: the evaluation uses
- * those that could be.  A library built without threads accepts the field
- * and runs every round on the calling thread.
+ * among, and an import the reading of a table, the calling thread
+ * included; zero and one both mean the calling thread alone, which is the
+ * default, and more than RELIC_THREADS_MAX is refused when the context is
+ * created.  It is the one field no -l option sets: the tool's -j sets it.
+ * The threads are the context's own: they are started the first time an
+ * evaluation shares a round or an import shares the reading of a table,
+ * run only inside an operation the caller started, call none of the
+ * caller's callbacks, block every signal but those a fault in them raises,
+ * and are joined when the context is destroyed.  A child forked between
+ * operations may go on using a context its parent created, on the calling
+ * thread alone.  A round is shared only when it holds enough work to repay
+ * the threads' coordination, and a table only among eight threads or
+ * more, and only when reading its first 2 MiB does not reach its end.
+ * The answers, the relations, the values, every diagnostic and every
+ * counter but parallel_rounds are the same whatever the number of
+ * threads; only how much of its stream a refused import has read may
+ * differ.  A thread that cannot be started is not an error: the operation
+ * uses those that could be.  A library built without threads accepts the
+ * field and runs everything on the calling thread.
  *
  * `flags` holds RELIC_F_ switches.  Most select an alternative evaluation
  * strategy that must give the same answers as the default; they exist so
@@ -284,8 +288,11 @@ struct relic_config {
  * have been inserted as it was derived, and the scan each rule starts from
  * is cut into pieces run one after another.  That is how a round runs on
  * several threads, and the switch runs every round that way however little
- * work it holds, so that the way is exercised by every program.  The
- * relations and every count of work come out as they do without it.
+ * work it holds, so that the way is exercised by every program.  It reads
+ * every table an import reads a window of records at a time too, as a large
+ * table is read on several threads, whatever the table's size and the
+ * number of threads.  The relations, the values and every count of work
+ * come out as they do without it.
  */
 #define	RELIC_F_PARALLEL_ALWAYS	0x0040u
 
@@ -323,11 +330,13 @@ struct relic_config {
 
 /*
  * Import every table a field at a time, typing and interning each field
- * and staging each record as it is read, rather than a window of records
- * at a time, each window's fields decoded and its values and records
- * checked before any is interned or staged.  The facts, the values and the
- * identifiers they are given are the same, and so is a failed import's
- * message and what it leaves interned.
+ * and staging each record as it is read, whatever the number of threads
+ * and even with RELIC_F_PARALLEL_ALWAYS, as a small table or one read on
+ * fewer than eight threads always is.  A table is otherwise read a window
+ * of records at a time, each window's fields decoded and its values and
+ * records checked before any is interned or staged.  The facts, the values
+ * and the identifiers they are given are the same, and so is a failed
+ * import's message and what it leaves interned.
  */
 #define	RELIC_F_NO_BATCH_IMPORT	0x0400u
 

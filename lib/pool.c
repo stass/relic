@@ -24,10 +24,11 @@
  *
  * The calling thread is worker 0 and takes part in every job; the pool
  * starts a thread for each other worker when it is created, which is the
- * first time an evaluation shares a round.  Between jobs the threads wait,
- * first spinning for a bounded while, so that a component's rounds in
- * quick succession do not each pay a sleep and a wake-up, and then parked
- * on a condition variable, where they cost nothing.
+ * first time an evaluation shares a round or an import shares a table.
+ * Between jobs the threads wait, first spinning for a bounded while, so
+ * that a component's rounds in quick succession do not each pay a sleep
+ * and a wake-up, and then parked on a condition variable, where they cost
+ * nothing.
  *
  * Spinning pays only while the thread being waited for runs on another
  * processor.  A pool with more workers than the machine has processors

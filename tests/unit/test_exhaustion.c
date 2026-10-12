@@ -108,6 +108,15 @@
 #define	LOAD_SWEEP	80
 
 /*
+ * The table an import on a pool of threads is swept with: records enough
+ * to cut a window into a dozen pieces, so that a pool's threads decode
+ * some of them, repeating a few hundred values.
+ */
+#define	POOLED_IMPORT_ROWS	60000
+#define	POOLED_IMPORT_VALUES	300
+#define	POOLED_IMPORT_THREADS	4
+
+/*
  * How many facts the ownership check stages: enough that a copy of their
  * tuples is far larger than anything else a commit allocates.
  */
@@ -522,6 +531,8 @@ static int	 load_sweep_program(relic_t *ctx, const char *program,
 		    bool from_stream);
 static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
 static void	 an_import_refused_once_reads_on_or_fails(void);
+static void	 an_import_on_threads_refused_once_reads_on_or_fails(void);
+static FILE	*pooled_import_table(void);
 static void	 a_path_whose_close_fails_adds_nothing(void);
 static bool	 write_temporary(const char *text, char *path, size_t size);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
@@ -600,20 +611,22 @@ refuse_this_request(enum refused_requests kind)
 	relic_atomic_size_add_relaxed(&allocations_seen, 1);
 
 	remaining = relic_atomic_size_load(&allocations_remaining);
-	do {
+	for (;;) {
 		if (remaining == SERVE_EVERY)
 			return (false);
-		if (remaining == 0) {
-			if (refusing_once)
-				relic_atomic_size_store(&allocations_remaining,
-				    SERVE_EVERY);
+		if (remaining > 0) {
+			if (relic_atomic_size_swap_if(&allocations_remaining,
+			    &remaining, remaining - 1))
+				return (false);
+			continue;
+		}
+		if (!refusing_once ||
+		    relic_atomic_size_swap_if(&allocations_remaining,
+		    &remaining, SERVE_EVERY)) {
 			count_worker_refusal();
 			return (true);
 		}
-	} while (!relic_atomic_size_swap_if(&allocations_remaining,
-	    &remaining, remaining - 1));
-
-	return (false);
+	}
 }
 
 static void
@@ -646,8 +659,8 @@ refuse_allocations_after(long served)
 
 /*
  * Refuse the request after the next `served` and serve every one after it.
- * Only a sweep whose context runs no worker thread asks for one refusal,
- * since two threads could both take the one.
+ * The refusal is claimed by exchange, so of threads that meet it at once
+ * only one is refused.
  */
 static void
 refuse_one_allocation_after(long served)
@@ -1557,10 +1570,11 @@ an_import_that_ran_out_of_memory_adds_nothing(void)
 /*
  * An import refused one allocation, the allocator serving every request
  * after it, either fails out of memory, having said so once and added
- * nothing, or ends as an import never refused does.  A refusal while a
- * batch import works on a window of its own declines the window, which is
- * then read a field at a time, and the import goes on: the sweep must meet
- * at least one such import that succeeds.
+ * nothing, or ends as an import never refused does.  The import is made
+ * to stage its table a window at a time, small as the table is, and a
+ * refusal while it works on a window of its own declines the window, which
+ * is then read a field at a time, and the import goes on: the sweep must
+ * meet at least one such import that succeeds.
  */
 static void
 an_import_refused_once_reads_on_or_fails(void)
@@ -1574,6 +1588,7 @@ an_import_refused_once_reads_on_or_fails(void)
 	    "bob,y,b,8\n"
 	    "ann,z,\"a quoted field long enough to make its buffer grow\",7\n"
 	    "cy,w,\"c\",9\n";
+	relic_config_t config;
 	relic_import_t import;
 	size_t symbols;
 	size_t read_on;
@@ -1585,6 +1600,9 @@ an_import_refused_once_reads_on_or_fails(void)
 	import.column_count = 4;
 	import.format = RELIC_FORMAT_CSV;
 
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_PARALLEL_ALWAYS;
+
 	symbols = 0;
 	read_on = 0;
 	for (budget = -1; budget < LOAD_SWEEP; budget++) {
@@ -1592,7 +1610,7 @@ an_import_refused_once_reads_on_or_fails(void)
 		FILE *stream;
 		int status;
 
-		ctx = relic_create();
+		ctx = relic_create_config(&config);
 		stream = tmpfile();
 		if (ctx == NULL || stream == NULL ||
 		    fwrite(table, 1, sizeof(table) - 1, stream) !=
@@ -1644,6 +1662,133 @@ an_import_refused_once_reads_on_or_fails(void)
 	checkf(read_on > 0, SCENARIO_IMPORT_ONCE,
 	    "the sweep should reach a window declined for memory whose import "
 	    "succeeds, in %d attempts", LOAD_SWEEP);
+}
+
+/*
+ * The same, for an import on a pool of threads, made to stage its table a
+ * window at a time, swept over every allocation an import never refused
+ * makes.  The pool's threads allocate as they decode their pieces, so some
+ * refusals land on them, and each declines its window as a refusal on the
+ * calling thread does; one that lands where the pool is made leaves the
+ * table to be read a field at a time.
+ */
+static void
+an_import_on_threads_refused_once_reads_on_or_fails(void)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_INTEGER
+	};
+	relic_config_t config;
+	relic_import_t import;
+	size_t workers_refused;
+	size_t symbols;
+	size_t read_on;
+	size_t sweep;
+	long budget;
+	FILE *stream;
+
+	bzero(&import, sizeof(import));
+	import.predicate = "row";
+	import.columns = columns;
+	import.column_count = 2;
+	import.format = RELIC_FORMAT_TSV;
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.threads = POOLED_IMPORT_THREADS;
+
+	stream = pooled_import_table();
+	if (stream == NULL) {
+		check(false, SCENARIO_IMPORT_ONCE, "the table should be made");
+		return;
+	}
+
+	workers_refused = relic_atomic_size_load(&worker_refusals);
+	symbols = 0;
+	read_on = 0;
+	sweep = 0;
+	for (budget = -1; budget < (long)sweep; budget++) {
+		size_t before;
+		relic_t *ctx;
+		int status;
+
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_IMPORT_ONCE,
+			    "a context should be made");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		rewind(stream);
+		before = allocations_made();
+		if (budget >= 0)
+			refuse_one_allocation_after(budget);
+		status = relic_import_file(ctx, "rows.tsv", stream, &import);
+		serve_every_allocation();
+
+		if (budget < 0) {
+			check(status == 0, SCENARIO_IMPORT_ONCE,
+			    "an import on threads never refused should "
+			    "succeed");
+			symbols = relic_symbol_count(ctx);
+			sweep = allocations_made() - before;
+		} else if (status != 0) {
+			checkf(errors_reported == 1 && out_of_memory(ctx) &&
+			    relic_base_total(ctx) == 0, SCENARIO_IMPORT_ONCE,
+			    "a failed import on threads should say it ran out "
+			    "of memory once and add nothing, with allocation "
+			    "%ld refused", budget);
+		} else {
+			checkf(errors_reported == 0 &&
+			    relic_base_total(ctx) == POOLED_IMPORT_VALUES &&
+			    relic_symbol_count(ctx) == symbols,
+			    SCENARIO_IMPORT_ONCE, "an import on threads that "
+			    "succeeded should have added %d facts and %zu "
+			    "symbols, not %zu and %zu, with allocation %ld "
+			    "refused", POOLED_IMPORT_VALUES, symbols,
+			    relic_base_total(ctx), relic_symbol_count(ctx),
+			    budget);
+			if (ctx->counters.windows_declined > 0)
+				read_on++;
+		}
+
+		relic_destroy(ctx);
+	}
+	fclose(stream);
+
+	checkf(read_on > 0, SCENARIO_IMPORT_ONCE,
+	    "the sweep should reach a window on threads declined for memory "
+	    "whose import succeeds, in %zu attempts", sweep);
+	workers_refused = relic_atomic_size_load(&worker_refusals) -
+	    workers_refused;
+	check(!THREADS_AVAILABLE || workers_refused > 0, SCENARIO_IMPORT_ONCE,
+	    "the sweep should refuse an allocation on a thread of the pool");
+}
+
+/*
+ * A temporary file holding POOLED_IMPORT_ROWS records of a symbol and an
+ * integer, the POOLED_IMPORT_VALUES distinct records repeated in turn,
+ * which each import rewinds; NULL when it could not be made.
+ */
+static FILE *
+pooled_import_table(void)
+{
+	FILE *stream;
+	size_t i;
+
+	stream = tmpfile();
+	if (stream == NULL)
+		return (NULL);
+	for (i = 0; i < POOLED_IMPORT_ROWS; i++) {
+		if (fprintf(stream, "s%zu\t%zu\n", i % POOLED_IMPORT_VALUES,
+		    i % POOLED_IMPORT_VALUES) < 0) {
+			fclose(stream);
+			return (NULL);
+		}
+	}
+
+	return (stream);
 }
 
 /*
@@ -4690,6 +4835,7 @@ main(void)
 	a_mixed_commit_out_of_memory_adds_nothing();
 	an_import_that_ran_out_of_memory_adds_nothing();
 	an_import_refused_once_reads_on_or_fails();
+	an_import_on_threads_refused_once_reads_on_or_fails();
 	a_path_whose_close_fails_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();
 	a_check_that_ran_out_of_memory_can_be_retried();

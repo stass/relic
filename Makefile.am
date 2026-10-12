@@ -56,7 +56,8 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/cdefs.h lib/cost.h lib/depgraph.h \
 	lib/exec.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
-	lib/relation.h lib/round.h lib/strfn.h lib/util.h lib/window.h \
+	lib/relation.h lib/round.h lib/strfn.h lib/table.h lib/util.h \
+	lib/window.h \
 	tests/unit/harness.h \
 	tests/unit/programs.h
 
@@ -386,8 +387,8 @@ tests_unit_test_ceiling_LDADD = $(LTLIBOBJS)
 
 ##
 ## A batch import reads a table in windows of records, cut into pieces at
-## record ends, out of reads of a fixed chunk, all large enough that every
-## table the import suite reads fits in one window.  This program compiles
+## record ends, out of reads of a fixed chunk, all large enough that most
+## tables the import suite reads fit in one window.  This program compiles
 ## the library from source with all three made small, as the ceiling suite
 ## lowers its ceilings, and runs the import suite again, so that its tables
 ## span many windows and pieces and the reads cut them at every byte.

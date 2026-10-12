@@ -2601,16 +2601,76 @@ relic_builder_reserve(relic_builder_t *builder,
 }
 
 /*
- * Add `columns`, of wide hash `hash`, which the builder lacks and has
- * reserved room for, as its last tuple.  Nothing here can fail.
+ * Describe, once relic_builder_reserve() has made room for a batch, where
+ * the part filling each canonical stripe of the builder writes the batch's
+ * tuples: fills[s] for stripe s.  The builder must not change until every
+ * stripe is filled and relic_builder_admit() has counted them.
  */
 void
-relic_builder_append_hashed(relic_builder_t *builder,
-    const relic_dom_t *columns, uint64_t hash)
+relic_builder_stripe_fills(relic_builder_t *builder,
+    relic_stripe_fill_t fills[RELIC_STRIPES])
 {
-	assert(!relic_builder_contains_hashed(builder, columns, hash));
+	relic_payload_t *payload;
+	size_t s;
 
-	(void)payload_append(&builder->payload, builder->arity, columns, hash);
+	payload = &builder->payload;
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		fills[s].columns = payload->columns;
+		fills[s].index = &payload->index[s];
+		fills[s].held = payload->count;
+		fills[s].stripe = s;
+		fills[s].arity = builder->arity;
+	}
+}
+
+/*
+ * Write each tuple of `batch` that falls in the fill's stripe and that the
+ * batch ranks at the place its rank gives it after the builder's last
+ * tuple, and place it in the stripe, in the order the tuples are listed,
+ * which is the order adding them one at a time would place them in.
+ * Nothing here can fail.
+ */
+void
+relic_stripe_fill(const relic_stripe_fill_t *fill,
+    const relic_builder_batch_t *batch)
+{
+	const relic_dom_t *source;
+	relic_dom_t *destination;
+	relic_tuple_id_t id;
+	uint32_t position;
+	uint16_t column;
+	size_t i;
+
+	for (i = batch->stripe_start[fill->stripe];
+	    i < batch->stripe_start[fill->stripe + 1]; i++) {
+		position = batch->stripe_list[i];
+		if (batch->ranks[position] == 0)
+			continue;
+
+		source = batch->tuples + (size_t)position * fill->arity;
+		assert(relic_hash_stripe(batch->hashes[position]) ==
+		    fill->stripe);
+		assert(batch->ranks[position] <= RELIC_TUPLE_MAX - fill->held);
+		id = (relic_tuple_id_t)(fill->held + batch->ranks[position]);
+		destination = fill->columns + ((size_t)id - 1) * fill->arity;
+		for (column = 0; column < fill->arity; column++)
+			destination[column] = source[column];
+		relic_idtab_place(fill->index,
+		    relic_hash_low(batch->hashes[position]), id);
+	}
+}
+
+/*
+ * Count the tuples `batch` ranks, with which every stripe of the builder
+ * was filled, as its own.
+ */
+void
+relic_builder_admit(relic_builder_t *builder,
+    const relic_builder_batch_t *batch)
+{
+	assert(batch->count <= RELIC_TUPLE_MAX - builder->payload.count);
+
+	builder->payload.count += batch->count;
 }
 
 /*
@@ -2857,7 +2917,8 @@ adopt_builder(relic_t *ctx, relic_relation_t *store, relic_builder_t *builder)
 {
 	size_t s;
 
-	assert(store->payload.count == 0 && payload_bytes(&store->payload) == 0);
+	assert(store->payload.count == 0 &&
+	    payload_bytes(&store->payload) == 0);
 
 	for (s = 0; s < RELIC_STRIPES; s++)
 		relic_idtab_drop_tags(&builder->payload.index[s]);

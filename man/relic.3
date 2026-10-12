@@ -291,15 +291,18 @@ and
 bound it as they bound the rewrite.
 .Pp
 .Fa threads
-is how many threads an evaluation may share a round's work among, the
-calling thread included; zero and one both mean the calling thread alone,
-which is the default, and more than
+is how many threads an evaluation may share a round's work among, and an
+import the reading of a table, the calling thread included; zero and one
+both mean the calling thread alone, which is the default, and more than
 .Dv RELIC_THREADS_MAX ,
 256, is refused.
 The threads are the context's own: they are started the first time an
-evaluation shares a round, run only inside an operation the caller started,
-call none of the caller's callbacks, and are joined when the context is
-destroyed.
+evaluation shares a round or an import shares the reading of a table, run
+only inside an operation the caller started, call none of the caller's
+callbacks, and are joined when the context is destroyed.
+An import shares a table only among eight threads or more, and only when
+reading its first 2 MiB does not reach its end; a smaller table, or one
+read on fewer threads, is read a field at a time on the calling thread.
 They block every signal but those a fault in them raises, so a signal sent
 to the process is taken by one of the caller's threads.
 The calling thread cannot be cancelled while it waits for them.
@@ -310,21 +313,22 @@ A child of
 .Xr fork 2
 has none of its parent's threads.
 Forked between operations, it may go on using a context its parent created,
-whose rounds then run on the calling thread alone, and destroying the
-context there joins nothing; this relies on the C library's allocator
-working in a child of a process with threads, which POSIX does not promise
-but the systems relic runs on provide.
+whose rounds and imports then run on the calling thread alone, and
+destroying the context there joins nothing; this relies on the C library's
+allocator working in a child of a process with threads, which POSIX does
+not promise but the systems relic runs on provide.
 A context forked while one of its operations runs is refused in the child
 as it would be in the parent until that operation returns, which in the
 child it never does.
 A round is shared only when it holds enough work to repay the threads'
-coordination, and the answers, the relations, every diagnostic and every
-counter but
+coordination, and the answers, the relations, the values, every diagnostic
+and every counter but
 .Fa parallel_rounds
-are the same whatever the number of threads.
-A thread that cannot be started is not an error: the evaluation uses those
+are the same whatever the number of threads; only how much of its stream a
+refused import has read may differ.
+A thread that cannot be started is not an error: the operation uses those
 that could be.
-A library built without threads accepts the field and runs every round on
+A library built without threads accepts the field and runs everything on
 the calling thread.
 .Pp
 .Fa flags
@@ -387,7 +391,10 @@ defer the insertions of every round of evaluation that reads none of the
 relations it derives except as they stood when it began, which is every
 round but a pass of the naive fixed point, to the round's end, cutting the
 scan each rule starts from into pieces, as a round run on several threads
-is run; the relations and every count of work are the same;
+is run, and read every table an import reads a window of records at a
+time, as a large table read on several threads is read, whatever its size
+and the number of threads; the relations, the values and every count of
+work are the same;
 .It Dv RELIC_F_GROUP_RULES
 compile the body of every aggregate into a rule of its own whose relation
 the aggregate folds, even a body of one atom whose arguments are distinct
@@ -396,11 +403,14 @@ stands; the answers are the same, but the copies are tuples held and
 counted, so a limit may refuse one way and not the other;
 .It Dv RELIC_F_NO_BATCH_IMPORT
 import every table a field at a time, typing and interning each field and
-staging each record as it is read, rather than a window of records at a
-time, each window's fields decoded and its values and records checked
-before any is interned or staged; the facts, the values, the identifiers
-they are given and a refused import's message are the same, but a refused
-import may have read less of its stream.
+staging each record as it is read, whatever the number of threads and even
+with
+.Dv RELIC_F_PARALLEL_ALWAYS ,
+as a small table or one read on fewer than eight threads always is, rather
+than a window of records at a time, each window's fields decoded and its
+values and records checked before any is interned or staged; the facts,
+the values, the identifiers they are given and a refused import's message
+are the same, but a refused import may have read less of its stream.
 .El
 .Pp
 No switch changes an answer, though two strategies may hold different

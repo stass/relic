@@ -311,6 +311,53 @@ struct relic_pending {
 };
 
 /*
+ * Pending values interned together (internal.h): `count` of them, the
+ * bytes of each symbol or string at its offset in `bytes`, and the hash of
+ * each, relic_pending_hash(), which is what the value table or the pool
+ * finds it by: an integer's by its value, a symbol's or a string's by its
+ * bytes.  relic_pending_hash() hashes one value alone, reading a symbol's
+ * or a string's bytes at `bytes` plus its offset, so that a caller can
+ * hash the values before it has made a batch of them.
+ *
+ * relic_pending_find() is the reading half of numbering a batch's values;
+ * relic_pending_number() (internal.h) completes it.  The members it reads
+ * are the `member_count` positions in `members`, in increasing order, or
+ * every value of the batch when `members` is NULL.  For each it writes to
+ * `ids` the identifier the context has assigned the value, or, when it
+ * has none, a marker: the position, plus one, of the earliest member equal
+ * to it.  A marker has no type bits, so no identifier is one.  A batch of
+ * a new symbol a, a again, and a symbol b the context holds is given 1, 1
+ * and b's identifier, and numbering then gives both a's one new
+ * identifier.
+ *
+ * Values are equal when they are integers of one value, or symbols or
+ * strings of the same bytes, whatever their types.  `slots` is the table of
+ * the members met so far: `slot_count` zeroed slots, a power of two at
+ * least relic_pending_slots(member_count).
+ *
+ * It reads the context and writes nothing but `slots` and the members'
+ * `ids`.  A batch's values can therefore be divided among parts that run
+ * at once, each with slots of its own, provided equal values are members
+ * of one part, as dividing them by their hashes makes them.
+ */
+typedef struct relic_pending_batch relic_pending_batch_t;
+
+struct relic_pending_batch {
+	const relic_pending_t	*values;
+	const uint32_t		*hashes;
+	const char		*bytes;
+	size_t			 count;
+};
+
+uint32_t relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
+	    const char *bytes);
+size_t	 relic_pending_slots(size_t count);
+void	 relic_pending_find(const relic_t *ctx,
+	    const relic_pending_batch_t *batch, const uint32_t *members,
+	    size_t member_count, uint32_t *slots, size_t slot_count,
+	    relic_dom_t *ids);
+
+/*
  * Everything the executor writes while it runs one plan.
  *
  * `plan` and `env` are the plan being run and what it reads, set when the

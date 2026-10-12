@@ -41,7 +41,7 @@
 typedef struct relic_append relic_append_t;
 typedef struct relic_append_keys relic_append_keys_t;
 typedef struct relic_base_action relic_base_action_t;
-typedef struct relic_builder relic_builder_t;
+typedef struct relic_builder_batch relic_builder_batch_t;
 typedef struct relic_index_key relic_index_key_t;
 typedef struct relic_index_pending relic_index_pending_t;
 typedef struct relic_index_stripe relic_index_stripe_t;
@@ -50,6 +50,7 @@ typedef struct relic_payload relic_payload_t;
 typedef struct relic_relation_stats relic_relation_stats_t;
 typedef struct relic_reltab relic_reltab_t;
 typedef struct relic_store relic_store_t;
+typedef struct relic_stripe_fill relic_stripe_fill_t;
 typedef struct relic_tuple_growth relic_tuple_growth_t;
 
 /*
@@ -353,6 +354,43 @@ struct relic_builder {
 	relic_payload_t		 payload;
 	uint64_t		 hash_seed;
 	relic_pred_id_t		 pred;
+	uint16_t		 arity;
+};
+
+/*
+ * A batch of tuples at a builder's arity, some of them new to it, which it
+ * takes all at once, as a batch import gives it a window's: tuple i's
+ * columns are at `tuples` + i * arity and its wide hash is `hashes[i]`.
+ * `ranks[i]` is zero for a tuple the builder is not to take, and otherwise
+ * its place among those it takes, from one, in the order it takes them,
+ * which no two share.  `stripe_list` lists the tuples by the stripe of the
+ * canonical index each falls in, as relic_list_by_stripe() does, those of
+ * stripe s from `stripe_start[s]` up to `stripe_start[s + 1]`, so that
+ * the part filling a stripe reads its own tuples and no other's.  `count`
+ * is how many it ranks.
+ */
+struct relic_builder_batch {
+	const relic_dom_t	*tuples;
+	const uint64_t		*hashes;
+	const uint32_t		*ranks;
+	const uint32_t		*stripe_list;
+	const size_t		*stripe_start;
+	size_t			 count;
+};
+
+/*
+ * All that the part filling one canonical stripe of a builder with a
+ * batch may write: the columns of the batch's tuple ranked r, at `arity`
+ * columns a tuple from `columns`, as the builder's tuple `held` + r, after
+ * the tuples it held before the batch, and its entry in `index`, the
+ * stripe's table of the canonical index.  The room was made before the
+ * fill was described; a fill can grow, count or publish nothing.
+ */
+struct relic_stripe_fill {
+	relic_dom_t		*columns;
+	relic_idtab_t		*index;
+	size_t			 held;
+	size_t			 stripe;
 	uint16_t		 arity;
 };
 

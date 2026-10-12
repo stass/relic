@@ -66,11 +66,30 @@ and interns names and constants at its own semantic boundaries. A period
 or newline is not a general program-text partition boundary.
 
 `RELIC_F_NO_BATCH_IMPORT`, exposed as `-X no-batch-import`, selects the
-scalar field-event importer while retaining the same builders and commit.
-This provides an independent reference for decoding, interning and refusal
-order. One worker still exercises the batch pipeline; it is not the scalar
-reference. Existing public function signatures and configuration layout
-remain unchanged; the reference control uses an available flag bit.
+scalar field-event importer at every worker count while retaining the same
+builders and commit. This provides an independent reference for decoding,
+interning and refusal order. Existing public function signatures and
+configuration layout remain unchanged; the reference control uses an
+available flag bit.
+
+Execution policy chooses between the two paths; it adds no parser or
+publication mechanism of its own. A window's analysis costs more than the
+scalar importer's single pass, and repays it only shared among workers, so
+the scalar importer is the production path for fewer effective workers
+than `RELIC_IMPORT_BATCH_WORKERS` and for a table its first window holds
+whole, which also spares a small import the pool's start and the batch
+preparation. A table is batched when the context's pool runs at least
+`RELIC_IMPORT_BATCH_WORKERS` workers, a measured count below which
+batching does not repay its preparation, and reading its first window
+neither reaches its end nor fails. The count is of workers running, not
+threads configured: a forked child's pool runs one, and a pool whose
+threads did not all start runs fewer. A pool that cannot be made leaves
+the table to the scalar importer, as it leaves a round to the serial
+evaluator. `RELIC_F_PARALLEL_ALWAYS`, `-X parallel`, batches every table
+at any worker count, so that tests and benchmarks exercise the pipeline
+whatever production scheduling selects. Both paths stage the same facts
+and intern the same values under the same identifiers, so the choice is
+visible only in time, memory and how far a refused import has read.
 
 ## Invariants
 
@@ -467,12 +486,14 @@ decline to replay against context capacities that have already changed.
 Retained capacities remain accounted, and uncommitted pool copies are
 rewound through their reservation owner.
 
-String-copy destinations are allocated serially in identifier order,
-through the existing arena policy. Workers can fill these disjoint reserved
-ranges from immutable piece bytes, including each terminator. They allocate
-nothing, and a barrier precedes publication of any pool entry referring to
-them. Empty strings have a valid destination; zero-length payload copies
-are skipped. Review every `bcopy(src, dst, n)` for source-first order.
+The coordinator copies each new string's bytes and terminator from the
+immutable piece bytes into a destination allocated in identifier order
+through the existing arena policy, as ordinary interning does. The copies
+are not a pool job: beside placing the entries in the global lookup tables
+they cost too little to measure, and making them as the entries are
+published keeps every write to the pool on the coordinator. Empty strings
+have a valid destination; zero-length payload copies are skipped. Review
+every `bcopy(src, dst, n)` for source-first order.
 
 The coordinator appends dictionary entries and places them in the existing
 global lookup tables in the promised order, then records symbol/string
@@ -535,25 +556,29 @@ from accounted persistent capacity.
 ## Failure paths and limits
 
 The existing context pool runs piece decoding, dictionary reconciliation,
-tuple classification, reserved byte copies and stripe append work as
-separate jobs. Their barriers separate frozen reads from mutation. The
-calling thread owns stream operations, all context reservations, numbering,
-diagnostics, totals and final publication. Disabled-thread builds execute
-the same jobs on the caller.
+token resolution, tuple classification and stripe append work as separate
+jobs. Their barriers separate frozen reads from mutation. The calling
+thread owns stream operations, all context reservations, numbering,
+diagnostics, totals and final publication. Disabled-thread builds have one
+worker, and so import through the scalar path unless
+`RELIC_F_PARALLEL_ALWAYS` asks for batches, whose jobs they then execute
+on the caller.
 
 Worker-facing interfaces expose the pure table decoder, const value/store
 lookups and private output owners. They do not expose a mutable context or
-its accounting and publication APIs. Move the pure reader declarations
-out of the broad internal interface as needed, and enforce the existing
-frozen-store compilation boundary for worker code. Apply jobs receive only
-their reserved byte ranges or stripe destinations, not authority to grow
-or publish a relation. The coordinator retains that authority through its
-receipt.
+its accounting and publication APIs. Move the pure reader declarations out
+of the broad internal interface as needed. The analysis jobs only read,
+and are compiled against the existing frozen-store boundary. Apply jobs
+write, so they cannot be frozen readers: each receives a descriptor of
+only its stripe destinations, the reserved column rows and the one
+canonical stripe table it fills, and no authority to grow a relation, add
+to its tuple count or publish it. The coordinator retains that authority
+through its receipt.
 
 Pool setup and all job metadata are fallible preparation, never part of a
-no-failure apply. A small import can execute the jobs serially to avoid
-dispatch overhead; that choice changes no framing, numbering, admission
-or ownership rule. A worker-count change does not change the input pieces.
+no-failure apply. A small import takes the scalar path rather than pay
+for dispatch; that choice changes no framing, numbering, admission or
+ownership rule. A worker-count change does not change the input pieces.
 
 | Failure boundary | Observable result |
 | --- | --- |
@@ -626,6 +651,8 @@ storage-layout alternative, distinct from partitioning the identifier space.
 | `lib/relation.c`, `lib/relation.h` | Own the reusable payload representation, private builder operations, exact growth, adoption and prepared base appends |
 | `lib/facts.c` | Keep predicate/input order, perform staging admission, prepare the load manifest and run its single commit |
 | `lib/import.c` | Share parser transitions, own buffering/replay, produce validated records, coordinate windows and preserve input diagnostics |
+| `lib/table.h` | Declare the pure table reader and the lexical field rules, which need no context, for the importer and the workers alike |
+| `lib/window.c`, `lib/window.h` | Run a window's decode, find, resolve and classify parts, compiled against `lib/frozen.h` alone, each part writing only its own window slices |
 | `lib/value.c`, `lib/symbol.c` | Reconcile values under canonical equality, assign ordinary identifiers, project/reserve storage, own byte-copy receipts and publish values/use bits |
 | `lib/pool.c` | Execute disjoint jobs and establish completion barriers without loader-specific scheduling state |
 | Source parser and fact API | Keep their scalar semantic boundaries while staging through the shared builder |
@@ -682,7 +709,15 @@ Separate input/framing, decoding, dictionary lookup, ordered numbering,
 value reservation/publication, tuple construction and final commit. Record
 wall time, user CPU, peak RSS, live staging and final accounted capacity.
 Use new and populated contexts, repetitive and all-distinct values, and
-vary worker count through 1, 4, 8, 12 and 16 on the M3.
+vary worker count through 1, 4, 8, 12 and 16 on the M3 and through 1 to
+64 on the p620. The default is judged against the importer before this
+design, and forced batching at each worker count against the scalar
+importer, with serial time, parallel time and peak memory reported
+separately. `RELIC_IMPORT_BATCH_WORKERS` is the least worker count at
+which forced batching beats the scalar importer on most large tables on
+both machines. A table may still lose at that count; the stage's entry in
+[the benchmark plan](../docs/todo-benchmark-performance.md) records the
+measurements and that trade-off.
 
 Acceptance requires lower first-load peak memory and serial load time,
 then a substantial measured parallel gain on large imports without a

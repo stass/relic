@@ -497,15 +497,17 @@ derivations or by workers times global distinct tuples.
 `const` alone does not keep a task from writing the store: it covers the
 members a pointer reaches, not what they point at, and a relation reaches
 its columns and indexes, and the context everything, through pointers. So
-the executor and task code are compiled against one narrow header,
-lib/frozen.h, in which the context, a relation, an index and the memory
-account are **incomplete types**, and the headers that complete them refuse
-to be included beside it. Such code can hold and pass a pointer to one but
-cannot name a member, to read or to write. It can call exactly the functions
-that header declares -- tuple access, index walks, value order, the lookup
-half of interning, the screen's probe, charging and releasing a round's
-bytes -- each taking its operands `const` and returning nothing writable
-without a cast the compiler's warnings report.
+the executor, task code and a batch import's window analysis are compiled
+against one narrow header, lib/frozen.h, in which the context, a relation,
+an index and the memory account are **incomplete types**, and the headers
+that complete them refuse to be included beside it. Such code can hold and
+pass a pointer to one but cannot name a member, to read or to write. Of
+the context's operations it can call exactly the functions that header
+declares -- tuple access, index walks, value order, the lookup half of
+interning, the screen's probe, charging and releasing a round's bytes --
+each taking its operands `const` and returning nothing writable without a
+cast the compiler's warnings report; beside them it calls only code that
+reaches no context, such as the table decoder.
 
 An incomplete type covers every array a relation holds and any it comes to
 hold, so a future write on the task path does not compile, however the
@@ -607,9 +609,9 @@ The caller assigns promised identifiers and proves that the entire window
 can pass every scalar admission check. An unproved window changes no
 semantic state and replays through the scalar importer, which establishes
 the first error and retained-value prefix. A proved window reserves all
-space before disjoint byte copies and builder appends; the caller publishes
-entries in the existing global value tables. Barriers separate every
-frozen-read phase from reservation and mutation.
+space before its builder appends; the caller copies the new values' bytes
+and publishes their entries in the existing global value tables. Barriers
+separate every frozen-read phase from reservation and mutation.
 
 Only the final load commit changes base facts. Empty destinations adopt
 complete builder payloads; populated ones receive reserved, ordered

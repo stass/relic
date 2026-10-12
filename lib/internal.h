@@ -37,6 +37,7 @@
 #include "relation.h"
 #include "round.h"
 #include "strfn.h"
+#include "table.h"
 #include "util.h"
 
 /*
@@ -858,8 +859,13 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * bytes must stay where they are until the commit.  A pending symbol, which
  * only an import has, is measured as a string is, sharing its new bytes
  * with any string of the same bytes, under a symbol's type.  It writes
- * nothing but the map.  relic_pending_fits() says whether every identifier
- * the map promised is one an identifier can name.
+ * nothing but the map.  It is two steps, for a caller that shares the
+ * reading among parts that run at once: relic_pending_find() (exec.h),
+ * which finds each value in the context or among the values before it,
+ * into the map's `ids`, and relic_pending_number(), which then walks the
+ * batch in order and gives each value its identifier.
+ * relic_pending_fits() says whether every identifier the map promised is
+ * one an identifier can name.
  *
  * relic_pending_rewrite() replaces every pending marker in `tuples` tuples
  * of `arity` columns with the identifier the map gives it.  It writes
@@ -893,10 +899,10 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  */
 struct relic_pending_map {
 	relic_dom_t		*ids;		/* each value's, batch order */
+	uint32_t		*hashes;	/* each value's, batch order */
+	uint32_t		*slots;		/* relic_pending_find()'s */
 	int64_t			*fresh;		/* new integers, as first met */
-	uint32_t		*seen;		/* hash of fresh, index + 1 */
 	relic_fresh_string_t	*strings;	/* new strings, as first met */
-	uint32_t		*strings_seen;	/* hash of strings, index + 1 */
 	size_t			 room;
 	size_t			 count;
 	size_t			 fresh_count;
@@ -913,6 +919,8 @@ void	 relic_pending_map_close(relic_pending_map_t *map);
 size_t	 relic_pending_measure(const relic_t *ctx,
 	    const relic_pending_t *pending, size_t count, const char *bytes,
 	    relic_pending_map_t *map);
+size_t	 relic_pending_number(const relic_t *ctx,
+	    const relic_pending_batch_t *batch, relic_pending_map_t *map);
 bool	 relic_pending_fits(const relic_t *ctx,
 	    const relic_pending_map_t *map);
 void	 relic_pending_rewrite(const relic_pending_map_t *map,
@@ -1039,54 +1047,11 @@ void	 relic_lexer_reset(relic_lexer_t *lexer);
 int	 relic_lexer_next(relic_lexer_t *lexer, relic_token_t *token);
 
 /*
- * Whether `length` bytes are exactly one symbol as the lexer scans one: a
- * lowercase letter followed by letters, digits and underscores.  Bytes that
- * reach the program by another road than text -- a value or a predicate name
- * built through the interface -- are held to it, so that everything the
- * program holds is something the language could have written.
- */
-bool	 relic_lex_is_symbol(const char *bytes, size_t length);
-
-/*
  * Whether `length` bytes may name a predicate: a symbol, other than the
  * negation keyword, which the grammar reads as `not` wherever a predicate
  * name would stand.
  */
 bool	 relic_lex_is_predicate_name(const char *bytes, size_t length);
-
-/*
- * The language's integer rule, in two pieces that the lexer and the parser
- * each use and that table import uses together.
- *
- * relic_lex_magnitude() converts `length` bytes that must be `[0-9]+` into
- * their magnitude, which must be at most RELIC_MAGNITUDE_MAX, the magnitude
- * of INT64_MIN.  relic_integer_signed() gives a magnitude a sign, and says
- * whether the result fits int64_t: RELIC_MAGNITUDE_MAX fits only when it is
- * negative.
- *
- * relic_lex_integer() is the whole rule applied to `length` bytes: the range
- * must be `-?[0-9]+` and its value must fit int64_t.
- *
- * Each returns RELIC_INTEGER_VALID with its result stored, or the way the
- * bytes fail the rule, leaving the result untouched, since a range that is
- * no integer and one that is an integer out of range are reported
- * differently.  Nothing past the range is read.  A leading zero is
- * accepted, and `-0` is zero.
- */
-#define	RELIC_MAGNITUDE_MAX	((uint64_t)INT64_MAX + 1u)
-
-enum relic_integer_verdict {
-	RELIC_INTEGER_VALID,
-	RELIC_INTEGER_MALFORMED,	/* not the digits the rule asks for */
-	RELIC_INTEGER_OUT_OF_RANGE	/* digits whose value does not fit */
-};
-
-enum relic_integer_verdict relic_lex_magnitude(const char *bytes,
-	    size_t length, uint64_t *magnitudep);
-enum relic_integer_verdict relic_integer_signed(uint64_t magnitude,
-	    bool negative, int64_t *valuep);
-enum relic_integer_verdict relic_lex_integer(const char *bytes, size_t length,
-	    int64_t *valuep);
 
 /*
  * lib/parse.c
@@ -1467,11 +1432,11 @@ void	 relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
  * predicate and its arity of interned values; a fact staged twice is held
  * once.  A batch of one predicate's facts is staged in steps, as
  * lib/facts.c describes, by relic_staging_builder(),
- * relic_staging_admits(), relic_staging_reserve() and
- * relic_staging_append().  relic_staging_commit() adds every staged fact
- * the base stores lack, or, refused by a limit or by memory, reports why
- * and adds none.  relic_staging_reset() releases the staging, and is every
- * load's exit.
+ * relic_staging_admits(), relic_staging_reserve(),
+ * relic_staging_stripe_fills() and relic_staging_admit().
+ * relic_staging_commit() adds every staged fact the base stores lack, or,
+ * refused by a limit or by memory, reports why and adds none.
+ * relic_staging_reset() releases the staging, and is every load's exit.
  * `last` is the set the previous fact used, and `by_pred` holds each set's
  * position plus one, keyed by its predicate.  `base_tuples`, `new_tuples`
  * and `columns_floor` are what staging measures a new fact against the
@@ -1499,8 +1464,10 @@ bool	 relic_staging_admits(const relic_staging_t *staging,
 	    relic_pred_id_t pred, size_t added, size_t value_bytes);
 int	 relic_staging_reserve(relic_staging_t *staging, relic_pred_id_t pred,
 	    const relic_tuple_growth_t *growth);
-void	 relic_staging_append(relic_staging_t *staging, relic_pred_id_t pred,
-	    const relic_dom_t *tuple, uint64_t hash);
+void	 relic_staging_stripe_fills(relic_staging_t *staging,
+	    relic_pred_id_t pred, relic_stripe_fill_t fills[RELIC_STRIPES]);
+void	 relic_staging_admit(relic_staging_t *staging, relic_pred_id_t pred,
+	    const relic_builder_batch_t *batch);
 int	 relic_staging_commit(relic_staging_t *staging);
 
 /*
@@ -1515,52 +1482,15 @@ int	 relic_staging_commit(relic_staging_t *staging);
  * limits a table: each sets only how its input is divided, and a build may
  * set them lower to exercise the divisions.
  *
- * The table reader: the state machine that alone decides where the fields
- * and records of a csv or tsv table end, and what bytes each field holds
- * once its format's quoting or escapes are decoded.  It is a function of its
- * state and the bytes it is fed, with no context and no input or output of
- * its own, so it reads a table the same way whether the table arrives in one
- * piece or a byte at a time.
+ * A window's analysis costs more than reading its fields one at a time, and
+ * repays it only shared among threads: a table is staged a window at a
+ * time when the context's pool runs at least RELIC_IMPORT_BATCH_WORKERS
+ * workers and reading the table's first window does not reach its end,
+ * and otherwise a field at a time, as RELIC_F_NO_BATCH_IMPORT asks.
+ * RELIC_F_PARALLEL_ALWAYS asks for windows whatever the table and the
+ * threads.
  *
- * relic_table_reader_init() prepares a reader of a table in `format` whose
- * records have `width` fields each, at least one, and names the locations
- * it reports `source_name`, which it borrows.  relic_table_feed() hands it
- * the next `length` bytes of the table, which it borrows until it asks for
- * more, and says whether they are the last.  relic_table_next() fills in
- * the next event and returns its kind:
- *
- *	RELIC_TABLE_MORE	every byte fed has been read; feed more
- *	RELIC_TABLE_FIELD	a field ended: its decoded bytes, where its
- *				first byte is, and its position in its record,
- *				from zero.  The bytes stay valid until the next
- *				call.
- *	RELIC_TABLE_RECORD	a record ended, with a field per column
- *	RELIC_TABLE_END		the table ended, at `where`, the end of the
- *				input
- *	RELIC_TABLE_MISTAKE	the table is malformed, as `mistake` says, at
- *				`where`
- *	RELIC_TABLE_NO_MEMORY	the field could not grow
- *
- * After END, MISTAKE or NO_MEMORY the reader stops, and every later call
- * returns the same event.  A record with the wrong number of fields is a
- * mistake: the reader checks the width when a field beyond the last column
- * begins, and when a record ends short, so the first mistake a table holds
- * is the first reported, whatever it is.
- *
- * Before it reads anything, a reader can be made to frame the table
- * rather than decode it, by relic_table_reader_frame_only(): it makes the
- * same transitions, and so finds the same boundaries and the same
- * mistakes, but collects no field's bytes, and relic_table_next() returns
- * none of its FIELD events, so its events are RECORD, END, MORE and the
- * mistakes, and it never runs out of memory.  And it can be made to begin
- * at a record boundary of a table another reader has read up to, by
- * relic_table_reader_start_at(), given the location of the boundary's
- * byte: it then reports the locations a reader of the whole table would.
- * relic_table_unread() is how many of the bytes last fed the reader has
- * not read; when it has just emitted a RECORD, the bytes it has read end
- * exactly at the record's end.
- *
- * relic_table_reader_reset() releases the field buffer.
+ * The table reader is lib/table.h's.
  */
 
 #ifndef RELIC_IMPORT_READ_CHUNK
@@ -1572,111 +1502,12 @@ int	 relic_staging_commit(relic_staging_t *staging);
 #ifndef RELIC_IMPORT_PIECE_BYTES
 #define	RELIC_IMPORT_PIECE_BYTES	(64u * 1024u)
 #endif
+#define	RELIC_IMPORT_BATCH_WORKERS	8u
 
 _Static_assert(RELIC_IMPORT_READ_CHUNK > 0 &&
     RELIC_IMPORT_WINDOW_BYTES >= 2 * RELIC_IMPORT_READ_CHUNK &&
     RELIC_IMPORT_PIECE_BYTES > 0,
     "a window holds a chunk beyond what it carries over");
-
-enum relic_table_event_kind {
-	RELIC_TABLE_MORE,
-	RELIC_TABLE_FIELD,
-	RELIC_TABLE_RECORD,
-	RELIC_TABLE_END,
-	RELIC_TABLE_MISTAKE,
-	RELIC_TABLE_NO_MEMORY
-};
-
-enum relic_table_mistake {
-	RELIC_TABLE_TOO_MANY_FIELDS,	/* at the first extra field */
-	RELIC_TABLE_TOO_FEW_FIELDS,	/* at the end of the record */
-	RELIC_TABLE_UNKNOWN_ESCAPE,	/* tsv; at `byte`, after a backslash */
-	RELIC_TABLE_ESCAPE_AT_END,	/* tsv; a backslash ends the input */
-	RELIC_TABLE_STRAY_RETURN,	/* a return not before a line feed */
-	RELIC_TABLE_QUOTE_IN_UNQUOTED,	/* csv; at the quote */
-	RELIC_TABLE_AFTER_CLOSING_QUOTE, /* csv; at `byte` */
-	RELIC_TABLE_UNTERMINATED_QUOTE	/* csv; at the opening quote */
-};
-
-/*
- * Where the reader stands.  Each state also decides what the end of the
- * input means there, since the end is not a byte.
- */
-enum relic_table_state {
-	RELIC_TABLE_AT_RECORD,		/* at the start of a record */
-	RELIC_TABLE_AT_FIELD,		/* at a field, after a separator */
-	RELIC_TABLE_IN_FIELD,		/* inside an unquoted field */
-	RELIC_TABLE_IN_QUOTES,		/* inside a quoted csv field */
-	RELIC_TABLE_AFTER_QUOTE,	/* after a quote inside quotes */
-	RELIC_TABLE_AFTER_BACKSLASH,	/* after a tsv backslash */
-	RELIC_TABLE_AFTER_RETURN,	/* after a carriage return */
-	RELIC_TABLE_RECORD_ENDED,	/* the record's last field has ended */
-	RELIC_TABLE_STOPPED		/* `stopped` is the last event */
-};
-
-typedef struct relic_table_event relic_table_event_t;
-typedef struct relic_table_reader relic_table_reader_t;
-
-/*
- * One event.  `bytes` and `length` are a field's decoded bytes, never NULL,
- * and `position` the field's position in its record.  `byte` is the byte a
- * mistake names, and `fields_found` the number of fields a record with too
- * few has.
- */
-struct relic_table_event {
-	const char			*bytes;
-	size_t				 length;
-	size_t				 position;
-	size_t				 fields_found;
-	relic_location_t		 where;
-	enum relic_table_event_kind	 kind;
-	enum relic_table_mistake	 mistake;
-	unsigned char			 byte;
-};
-
-/*
- * A reader.  `input` is the part of the bytes last fed that has not been
- * read, and `input_is_last` says whether the table ends after it.
- * `field` accumulates the field being read, unless the reader only
- * `frames`; it grows by doubling to the longest field and is reused for
- * every one.  `fields_ended` counts the fields of the current record read
- * so far.
- *
- * `where` is the location of the next byte.  The other locations are the
- * places a later event points back to: the current field's first byte, the
- * carriage return that must be followed by a line feed, and the end of the
- * record whose last field has ended.
- */
-struct relic_table_reader {
-	const char			*input;
-	char				*field;
-	size_t				 input_length;
-	size_t				 field_length;
-	size_t				 field_capacity;
-	size_t				 width;
-	size_t				 fields_ended;
-	relic_location_t		 where;
-	relic_location_t		 field_where;
-	relic_location_t		 return_where;
-	relic_location_t		 record_end_where;
-	relic_table_event_t		 stopped;
-	enum relic_format		 format;
-	enum relic_table_state		 state;
-	bool				 input_is_last;
-	bool				 frames;
-};
-
-void	 relic_table_reader_init(relic_table_reader_t *reader,
-	    enum relic_format format, size_t width, const char *source_name);
-void	 relic_table_reader_frame_only(relic_table_reader_t *reader);
-void	 relic_table_reader_start_at(relic_table_reader_t *reader,
-	    const relic_location_t *where);
-size_t	 relic_table_unread(const relic_table_reader_t *reader);
-void	 relic_table_reader_reset(relic_table_reader_t *reader);
-void	 relic_table_feed(relic_table_reader_t *reader, const char *bytes,
-	    size_t length, bool last);
-enum relic_table_event_kind relic_table_next(relic_table_reader_t *reader,
-	    relic_table_event_t *event);
 
 /*
  * lib/explain.c
@@ -1826,11 +1657,15 @@ void	 relic_index_link_append(relic_index_t *index,
  * added, which relic_builder_count() and relic_builder_tuple() read back.
  * A batch of tuples it lacks is added in two halves, the fallible first:
  * relic_builder_reserve() makes room for them all, returning -1 with
- * nothing reported when it cannot, and relic_builder_append_hashed() adds
- * each.  Its commit publishes them: relic_base_action_prepare() describes,
- * before anything changes, what one store gains -- the builder's whole
- * payload if the store holds no tuple, its tuples appended otherwise --
- * and relic_base_action_release() releases the description.
+ * nothing reported when it cannot.  relic_builder_stripe_fills() then
+ * describes where each stripe of the canonical index takes the batch's
+ * new tuples, relic_stripe_fill() writes and places those of one stripe,
+ * a stripe to a part, and once every stripe is filled
+ * relic_builder_admit() counts them.  Its commit publishes them:
+ * relic_base_action_prepare() describes, before anything changes, what
+ * one store gains -- the builder's whole payload if the store holds no
+ * tuple, its tuples appended otherwise -- and relic_base_action_release()
+ * releases the description.
  * relic_bases_reserve() makes every store of a manifest of actions ready,
  * checking both limits once over all of them before changing any, and
  * relic_bases_apply() then gives each its tuples, which cannot fail.
@@ -1902,10 +1737,10 @@ void	 relic_index_link_append(relic_index_t *index,
  * the identifier of the tuple holding some columns, the range of every
  * tuple, a relation's predicate and its indexes -- are in frozen.h.
  *
- * Every relation of a context hashes a tuple with relic_tuple_hash() under
- * the context's seed, so a caller that has already hashed one that way, as
- * a load's staging does, passes the hash to the _hashed forms rather than
- * have it computed again.
+ * Every relation of a context hashes a tuple with relic_tuple_hash()
+ * (frozen.h) under the context's seed, so a caller that has already hashed
+ * one that way, as a load's staging does, passes the hash to the _hashed
+ * forms rather than have it computed again.
  *
  * relic_relation_since() gives the identifier range a semi-naive delta
  * walks, and relic_relation_end() is the mark a later delta is measured
@@ -1954,14 +1789,16 @@ void	 relic_builder_reset(relic_builder_t *builder);
 size_t	 relic_builder_count(const relic_builder_t *builder);
 const relic_dom_t *relic_builder_tuple(const relic_builder_t *builder,
 	    size_t position);
-bool	 relic_builder_contains_hashed(const relic_builder_t *builder,
-	    const relic_dom_t *columns, uint64_t hash);
 int	 relic_builder_add_hashed(relic_t *ctx, relic_builder_t *builder,
 	    const relic_dom_t *columns, uint64_t hash);
 int	 relic_builder_reserve(relic_builder_t *builder,
 	    const relic_tuple_growth_t *growth);
-void	 relic_builder_append_hashed(relic_builder_t *builder,
-	    const relic_dom_t *columns, uint64_t hash);
+void	 relic_builder_stripe_fills(relic_builder_t *builder,
+	    relic_stripe_fill_t fills[RELIC_STRIPES]);
+void	 relic_stripe_fill(const relic_stripe_fill_t *fill,
+	    const relic_builder_batch_t *batch);
+void	 relic_builder_admit(relic_builder_t *builder,
+	    const relic_builder_batch_t *batch);
 int	 relic_base_action_prepare(const relic_t *ctx,
 	    relic_base_action_t *action, relic_builder_t *builder);
 void	 relic_base_action_release(relic_base_action_t *action);
@@ -1986,10 +1823,6 @@ int	 relic_relation_insert_batch_hashed(relic_t *ctx,
 	    size_t *completedp);
 bool	 relic_relation_contains(const relic_relation_t *relation,
 	    const relic_dom_t *columns);
-bool	 relic_relation_contains_hashed(const relic_relation_t *relation,
-	    const relic_dom_t *columns, uint64_t hash);
-uint64_t relic_tuple_hash(uint64_t seed, const relic_dom_t *columns,
-	    uint16_t arity);
 size_t	 relic_relation_bytes(const relic_relation_t *relation);
 size_t	 relic_relation_bytes_after_growth(const relic_relation_t *relation,
 	    const relic_tuple_growth_t *growth);

@@ -461,17 +461,22 @@ The standard input is then never read as a program, and with no
 the program is empty.
 A run that fails before the session would begin ends without one.
 .It Fl j Ar threads
-Share the work of evaluation among as many as
+Share the work of evaluation, and of reading the tables
+.Fl I
+imports, among as many as
 .Ar threads
 threads, the one running
 .Nm
 included; 0 asks for one per processor online, up to 256, and the default
 is 1.
 A round of evaluation is shared only when it holds enough work to repay the
-threads, so a program of small rounds runs as it would on one thread.
+threads, so a program of small rounds runs as it would on one thread, and a
+table is shared only among eight threads or more, and only when reading
+its first 2 MiB does not reach its end.
 The answers, their order, every diagnostic and every counter
 .Fl X Cm stats
-writes but the parallel rounds are the same whatever the number of threads.
+writes but the parallel rounds are the same whatever the number of threads;
+only how much of its table a refused import has read may differ.
 .Ar threads
 is at most 256.
 .It Fl l Ar limit Ns = Ns Ar value
@@ -568,9 +573,14 @@ evaluate recursion by the naive fixed point;
 read every table of
 .Fl I
 a field at a time, typing and interning each field and staging each record
-as it is read, rather than a window of records at a time; the facts, the
-values and a refused import's message are the same, but a refused import
-may have read less of its table;
+as it is read, whatever the number of threads
+.Fl j
+gives and even with
+.Cm parallel ,
+as a small table or one read on fewer than eight threads always is, rather
+than a window of records at a time; the facts, the values and a refused
+import's message are the same, but a refused import may have read less of
+its table;
 .It Cm no-exists
 plan an atom that binds nothing the rest of its rule reads, its other
 arguments
@@ -600,7 +610,10 @@ however little work it holds and however many threads
 .Fl j
 gives: its rules' derivations gathered as they run and inserted when the
 round ends, in the order they would have been inserted as they were
-derived;
+derived; and read every table
+.Fl I
+imports a window of records at a time, as a large table is read on several
+threads, however small it is;
 .It Cm stats
 write the evaluation counters to the standard error when the run ends,
 whether or not it succeeded;
