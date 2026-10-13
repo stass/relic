@@ -395,6 +395,7 @@ static int	 import_failing(const char *table, size_t fail_at,
 		    import_outcome_t *outcome);
 static void	 integer_columns_hold_the_language_integers(void);
 static void	 compare_long_field_late(window_tally_t *tally);
+static void	 compare_long_field_after_resuming(window_tally_t *tally);
 static void	 fields_are_held_to_their_bound(void);
 static void	 locations_stop_at_their_largest_value(void);
 static void	 messages_quote_only_what_is_safe(void);
@@ -2656,6 +2657,7 @@ a_batch_import_matches_the_scalar_import(void)
 	    GENERATED_ROWS / 2, 0, &tally);
 	compare_memory_limits(&tally);
 	compare_long_field_late(&tally);
+	compare_long_field_after_resuming(&tally);
 	checkf(tally.staged > 0 && tally.declined > 0, SCENARIO_BATCH,
 	    "the long tables should have windows staged and windows declined, "
 	    "not %" PRIu64 " and %" PRIu64, tally.staged, tally.declined);
@@ -2692,6 +2694,90 @@ compare_long_field_late(window_tally_t *tally)
 	batch.column_count = 3;
 	batch.max_input = BATCH_INPUT_MAX;
 	compare_import_ways(&batch, table, length, label, tally);
+
+	free(table);
+}
+
+/*
+ * Compare the two ways of importing a generated table whose first record
+ * is longer than a window, its two symbols each at the input limit, so
+ * that its window is declined and windows resume after it, and whose
+ * record half way through holds a field one byte past the limit, short
+ * enough to be framed in a window after resuming.
+ */
+static void
+compare_long_field_after_resuming(window_tally_t *tally)
+{
+	static const char label[] = "a field past the input limit after "
+	    "windows resume";
+	window_tally_t local;
+	batch_case_t batch;
+	size_t generated;
+	size_t length;
+	size_t limit;
+	size_t prefix;
+	size_t w;
+	char *odd;
+	char *rows;
+	char *table;
+	const batch_way_t *way;
+
+	limit = RELIC_IMPORT_WINDOW_BYTES / 2 + RELIC_IMPORT_READ_CHUNK;
+	prefix = 2 * limit + 4;
+	_Static_assert(RELIC_IMPORT_WINDOW_BYTES / 2 + RELIC_IMPORT_READ_CHUNK
+	    + 8 < RELIC_IMPORT_WINDOW_BYTES, "a field past the limit fits a "
+	    "window");
+
+	odd = malloc(limit + 8);
+	if (odd == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		return;
+	}
+	bcopy("s1\t1\t", odd, 5);
+	memset(odd + 5, 'x', limit + 1);
+	bcopy("\n", odd + 5 + limit + 1, 2);
+	rows = generated_table(GENERATED_ROWS, GENERATED_ROWS / 2, odd,
+	    &generated);
+	free(odd);
+	table = rows != NULL ? malloc(prefix + generated) : NULL;
+	if (table == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		free(rows);
+		return;
+	}
+	memset(table, 'y', limit);
+	bcopy("\t1\t", table + limit, 3);
+	memset(table + limit + 3, 'y', limit);
+	table[prefix - 1] = '\n';
+	bcopy(rows, table + prefix, generated);
+	free(rows);
+	length = prefix + generated;
+
+	bzero(&batch, sizeof(batch));
+	batch.label = label;
+	batch.program = GENERATED_PROGRAM;
+	batch.table = table;
+	batch.length = length;
+	batch.format = RELIC_FORMAT_TSV;
+	batch.columns = generated_columns;
+	batch.column_count = 3;
+	batch.max_input = limit;
+	for (w = 0; w < sizeof(batch_ways) / sizeof(batch_ways[0]); w++) {
+		way = &batch_ways[w];
+		bzero(&local, sizeof(local));
+		compare_batched_import(&batch, table, length, label, way,
+		    &local);
+		checkf((way->flags & BATCHED) == 0 ||
+		    (local.declined >= 4 && local.staged >= 2), SCENARIO_BATCH,
+		    "%s, %s: each of two imports should decline a window at "
+		    "the long record and one at the long field and stage "
+		    "windows between them, not %" PRIu64 " declined and %"
+		    PRIu64 " staged in all", label, way->name, local.declined,
+		    local.staged);
+		tally->staged += local.staged;
+		tally->declined += local.declined;
+		tally->framed_ahead += local.framed_ahead;
+	}
 
 	free(table);
 }

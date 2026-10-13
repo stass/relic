@@ -1269,16 +1269,15 @@ stage_table(importer_t *importer, const char *source_name)
  * values under the same identifiers, and a window is admitted only when
  * reading it a field at a time could not fail, so the import fails, when
  * it does, at the same record and with the same message as a field at a
- * time, with the same values interned.  Each turn of the loop stages a
- * window or reads a record, or ends the import.
+ * time, with the same values interned.  Each turn of the batched loop
+ * stages windows until one is declined, then reads that window's records
+ * a field at a time, or ends the import.
  */
 static int
 read_table(importer_t *importer)
 {
 	enum import_progress progress;
 	relic_t *ctx;
-	size_t horizon;
-	size_t most_records;
 	bool batched;
 
 	ctx = importer->ctx;
@@ -1288,13 +1287,17 @@ read_table(importer_t *importer)
 	    (batching_forced(ctx) || outgrows_window(&importer->input)))
 		batched = prepare_batching(ctx) == 0;
 
-	horizon = batched ? RELIC_IMPORT_WINDOW_BYTES : SIZE_MAX;
-	most_records = batched ? RELIC_IMPORT_WINDOW_RECORDS : SIZE_MAX;
+	if (!batched) {
+		progress = read_fields(importer, SIZE_MAX, SIZE_MAX);
+		return (progress == IMPORT_TABLE_ENDED ? 0 : -1);
+	}
+
 	do {
-		progress = batched ? stage_windows(importer) : IMPORT_READ_ON;
+		progress = stage_windows(importer);
 		if (progress == IMPORT_READ_ON)
-			progress = read_fields(importer, horizon,
-			    most_records);
+			progress = read_fields(importer,
+			    RELIC_IMPORT_WINDOW_BYTES,
+			    RELIC_IMPORT_WINDOW_RECORDS);
 	} while (progress == IMPORT_READ_ON);
 
 	return (progress == IMPORT_TABLE_ENDED ? 0 : -1);
@@ -1398,9 +1401,10 @@ prepare_batching(relic_t *ctx)
  * Stage windows of the table from `boundary` for as long as each is
  * admitted whole.  Returns IMPORT_TABLE_ENDED when the last window of the
  * table was, IMPORT_FAILED having reported why room for one could not be
- * made, or IMPORT_READ_ON when one was declined, which leaves its bytes in
- * the input for the reader to read from `boundary`, or the input holds
- * nothing for the reader to read but the table's end or a failed read.
+ * made, or IMPORT_READ_ON for the reader to go on from `boundary`: when a
+ * window was declined, its bytes are left in the input, and when the
+ * stream ended or failed with no record left to frame, the reader meets
+ * that end or reports that failure.
  * The last window framed is forgotten before the reader begins, and its
  * storage kept for the windows after it.  A window there is no room to
  * read the horizon of is declined.
@@ -1791,14 +1795,21 @@ fill_stripe(void *argument, size_t stripe, size_t worker_index RELIC_UNUSED)
  * `most_records`th read, a header counted, or ends `horizon` bytes or more
  * past `boundary`.  In the last case returns IMPORT_READ_ON with
  * `boundary` at that record's end and the input beginning there, its bytes
- * after the record unread.  A window's bounds read the records of a window
- * declined there, and of one that would have held no record, the first;
- * SIZE_MAX for both reads the rest of the table.
+ * after the record unread.  SIZE_MAX for both reads the rest of the table.
+ *
+ * Given a declined window's bounds, the reader reads every record the
+ * window held, since the framer kept only records ending at or before its
+ * horizon, and also the record that crosses the horizon when the window
+ * ended short of it.  A window that could not be framed is read to the
+ * first record ending at or past the horizon, or to the cap, unless a
+ * refusal stops the reader first; for one whose first record is longer
+ * than a window, that is that record alone.
  *
  * The input holds the bytes last fed the reader, and nothing else, from
  * the first feed on; `dropped` counts, saturating, the bytes read past
- * `boundary` that feed_reader() has dropped from it.  The reader is fed
- * nothing before the bytes it has not read move to the input's start.
+ * `boundary` that have been dropped from it to make room for the next
+ * chunk.  The reader is fed nothing before the bytes it has not read move
+ * to the input's start.
  */
 static enum import_progress
 read_fields(importer_t *importer, size_t horizon, size_t most_records)
@@ -1820,6 +1831,7 @@ read_fields(importer_t *importer, size_t horizon, size_t most_records)
 	do {
 		if (relic_table_next(reader, &event) == RELIC_TABLE_MORE) {
 			dropped = relic_saturating_sum(dropped, input->length);
+			consume_input(input, input->length);
 			progress = feed_reader(importer);
 			continue;
 		}
@@ -1843,8 +1855,8 @@ read_fields(importer_t *importer, size_t horizon, size_t most_records)
 }
 
 /*
- * Drop the bytes the input holds, which the reader has read all of, and
- * feed it the next chunk of the stream.  Reads on, or fails having
+ * Feed the reader the next chunk of the stream, into an input the caller
+ * has emptied of the bytes the reader read.  Reads on, or fails having
  * reported a failed read or memory.  The reader borrows the bytes, which
  * stay where they are until it asks for more.  A failed read is reported
  * once every byte read before it has been fed, and so once every record
@@ -1858,7 +1870,7 @@ feed_reader(importer_t *importer)
 	import_input_t *input;
 
 	input = &importer->input;
-	consume_input(input, input->length);
+	assert(input->length == 0);
 	if (!input->ended && !input->failed && read_chunk(input) != 0) {
 		relic_diag_no_memory(importer->ctx);
 		return (IMPORT_FAILED);
