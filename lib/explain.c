@@ -966,8 +966,9 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
  * its columns named after the variables of the compiled body, whose slot c
  * is column c, and its key columns when it has any: `N = count
  * agg$p$1$0$2(X, Y) key={0}` for a group relation, `N = count edge(Y, X)
- * key={1}` for an atom folded in place.  A fold of a reduced source names
- * the source, which holds no rows, and ends ` summary`.
+ * key={1}` for an atom folded in place.  A fold of a summary names the
+ * predicate, whose relation it does not read, and ends ` summary`; an
+ * unkeyed count, which reads only the tuple count, ends ` cardinality`.
  */
 static void
 put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
@@ -1006,6 +1007,8 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 		put_key(line, fold->key_mask);
 	if (fold->access == RELIC_FOLD_SUMMARY)
 		line_put(line, " summary");
+	else if (fold->access == RELIC_FOLD_CARDINALITY)
+		line_put(line, " cardinality");
 }
 
 /*
@@ -1108,35 +1111,68 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 }
 
 /*
+ * "kind/3 key={1,2} count, sum(0)": a predicate, the key its folds group
+ * on, "count" when one counts, and each signature, named by its function
+ * and the column it folds.
+ */
+static void
+put_signatures(const relic_t *ctx, relic_explain_line_t *line,
+    relic_pred_id_t pred, uint32_t key_mask, bool counts,
+    const relic_reduce_signature_t *signatures, size_t count)
+{
+	size_t i;
+
+	put_pred(ctx, line, pred);
+	put_key(line, key_mask);
+	if (counts)
+		line_put(line, " count");
+	for (i = 0; i < count; i++) {
+		line_put(line, i == 0 && !counts ? " " : ", ");
+		line_put(line, relic_aggregate_spelling(signatures[i].fn));
+		line_put_byte(line, '(');
+		put_size(line, signatures[i].column);
+		line_put_byte(line, ')');
+	}
+}
+
+/*
  * "reduce kind/3 key={1,2} count, sum(0)", beneath the plan of the rule
- * last shown: its rows go to the source's reduction, each signature named
- * by its function and, but for a count, the column it folds.
+ * last shown: its rows go to the source's reduction.
  */
 void
 relic_explain_reduction(relic_t *ctx, const relic_reduced_source_t *source,
     unsigned int depth)
 {
-	const relic_reduce_signature_t *signature;
 	relic_explain_line_t line;
-	size_t i;
 
 	if (!relic_explaining(ctx))
 		return;
 
 	line_begin(&line, depth + 2);
 	line_put(&line, "reduce ");
-	put_pred(ctx, &line, source->pred);
-	put_key(&line, source->key_mask);
-	for (i = 0; i < source->signature_count; i++) {
-		signature = &source->signatures[i];
-		line_put(&line, i == 0 ? " " : ", ");
-		line_put(&line, relic_aggregate_spelling(signature->fn));
-		if (signature->fn == RELIC_AGG_COUNT)
-			continue;
-		line_put_byte(&line, '(');
-		put_size(&line, signature->column);
-		line_put_byte(&line, ')');
-	}
+	put_signatures(ctx, &line, source->pred, source->key_mask,
+	    source->counts, source->signatures, source->signature_count);
+	line_finish(ctx, &line);
+}
+
+/*
+ * "summarize edge/2 key={0} count", beneath a component's heading: the
+ * component's folds of the relation on that key read the summary built
+ * of its rows before the component's plans were made.
+ */
+void
+relic_explain_summary(relic_t *ctx, const relic_fold_family_t *family,
+    unsigned int depth)
+{
+	relic_explain_line_t line;
+
+	if (!relic_explaining(ctx))
+		return;
+
+	line_begin(&line, depth + 1);
+	line_put(&line, "summarize ");
+	put_signatures(ctx, &line, family->pred, family->key_mask,
+	    family->counts, family->signatures, family->signature_count);
 	line_finish(ctx, &line);
 }
 

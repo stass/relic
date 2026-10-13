@@ -1945,7 +1945,9 @@ fold_row(const relic_exec_env_t *env, const relic_op_aggregate_t *aggregate,
  *
  * A fold of a summary reads no row: the group's count and accumulator
  * were completed when the source was reduced, and a key no row holds
- * leaves the fold empty, as a walk that matches nothing does.
+ * leaves the fold empty, as a walk that matches nothing does.  Nor does
+ * an unkeyed count, whose group is the whole view: its count is the
+ * view's length.
  */
 static void
 fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
@@ -1966,8 +1968,9 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		group = relic_summary_find(aggregate->summary, key);
 		if (group == RELIC_SUMMARY_NONE)
 			return;
-		fold->state = *relic_summary_state(aggregate->summary, group,
-		    aggregate->signature, &fold->extreme);
+		if (aggregate->fn != RELIC_AGG_COUNT)
+			fold->state = *relic_summary_state(aggregate->summary,
+			    group, aggregate->signature, &fold->extreme);
 		fold->rows = relic_summary_rows(aggregate->summary, group);
 		return;
 	}
@@ -2006,6 +2009,10 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 		scratch->counters.tuples_looked_up++;
 		tuple = relic_relation_tuple(aggregate->relation, id);
 		(void)fold_row(env, aggregate, fold, tuple);
+		return;
+	case RELIC_FOLD_CARDINALITY:
+		fold->rows = view->end > view->first ?
+		    view->end - view->first : 0;
 		return;
 	case RELIC_FOLD_SUMMARY:
 		break;

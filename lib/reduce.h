@@ -37,6 +37,7 @@
  * and lives until the scope ends.
  */
 
+typedef struct relic_fold_family relic_fold_family_t;
 typedef struct relic_key_projection relic_key_projection_t;
 typedef struct relic_reduce_batch relic_reduce_batch_t;
 typedef struct relic_reduce_signature relic_reduce_signature_t;
@@ -45,9 +46,10 @@ typedef struct relic_reducer relic_reducer_t;
 typedef struct relic_reduction relic_reduction_t;
 
 /*
- * One accumulator a source's folds need: the function, and the column it
- * folds, which is zero for a count, so that two counts of one source are
- * one signature.  Folds of the same signature read the same state.
+ * One accumulator a source's folds need: a sum, a min or a max, and the
+ * column it folds.  Folds of the same signature read the same state.  A
+ * count is never a signature, since it reads the row count its group
+ * keeps whatever the signatures.
  */
 struct relic_reduce_signature {
 	enum relic_aggregate_fn	fn;
@@ -85,7 +87,9 @@ enum relic_source_state {
 /*
  * A source the scope admitted: predicate `pred`, folded on the key columns
  * of `key_mask`, with the `signature_count` signatures every fold over it
- * needs, in order of first use, and its summary once it is REDUCED.
+ * needs, in order of first use, and its summary once it is REDUCED.  A
+ * count has no signature: it is the row count every group keeps, and
+ * `counts` says whether a fold counts.
  */
 struct relic_reduced_source {
 	relic_reduce_signature_t	*signatures;
@@ -94,6 +98,32 @@ struct relic_reduced_source {
 	uint32_t			 key_mask;
 	size_t				 signature_count;
 	enum relic_source_state		 state;
+	bool				 counts;
+};
+
+/*
+ * The folds of one stored relation on one key, which the scope may answer
+ * from a summary of the relation's rows rather than by reading them
+ * (specs/design-group-reduction.md, reusable summaries): predicate
+ * `pred`, whose relation has `arity` columns, the key columns of
+ * `key_mask`, never every column, and the `signature_count` signatures
+ * the run's folds of it on that key need, in order of first use, and
+ * `counts` whether one counts, which needs no signature, as for a source.
+ * A family is chosen at the turn of a component whose plans would fold it,
+ * and once built its `summary` serves every later fold of the run.  The
+ * summary describes the relation at `built_at` tuples.  `next` is the
+ * position plus one in the scope of the predicate's next family, or zero.
+ */
+struct relic_fold_family {
+	relic_reduce_signature_t	*signatures;
+	relic_summary_t			*summary;
+	relic_pred_id_t			 pred;
+	uint32_t			 key_mask;
+	size_t				 signature_count;
+	size_t				 built_at;
+	uint32_t			 next;
+	uint16_t			 arity;
+	bool				 counts;
 };
 
 /*
@@ -111,21 +141,26 @@ struct relic_key_projection {
 };
 
 /*
- * A query run's scope: the `source_count` sources and the
- * `projection_count` projections it admitted, with `source_of` and
- * `projection_of`, indexed by predicate identifier minus one for the
- * `predicate_count` predicates that existed when it admitted them, holding
- * each one's position plus one, or zero.  Everything is in `arena`, which
- * is charged; the summaries are charged as they are built.
+ * A run's scope: the `source_count` sources and the `projection_count`
+ * projections it admitted, and the `family_count` families of folds of
+ * stored relations it may summarize.  `source_of`, `projection_of` and
+ * `family_of` are indexed by predicate identifier minus one for the
+ * `predicate_count` predicates that existed when the scope was chosen,
+ * and hold the position plus one of the predicate's source, projection
+ * or first family, or zero.  Everything is in `arena`, which is charged;
+ * the summaries are charged as they are built.
  */
 struct relic_reduction {
 	relic_arena_t		 arena;
 	relic_reduced_source_t	*sources;
 	relic_key_projection_t	*projections;
+	relic_fold_family_t	*families;
 	uint32_t		*source_of;
 	uint32_t		*projection_of;
+	uint32_t		*family_of;
 	size_t			 source_count;
 	size_t			 projection_count;
+	size_t			 family_count;
 	size_t			 predicate_count;
 };
 
@@ -162,5 +197,19 @@ int	 relic_reducer_finish(relic_t *ctx, relic_reducer_t *reducer,
 size_t	 relic_reducer_peak(const relic_reducer_t *reducer);
 void	 relic_reducer_close(relic_t *ctx, relic_reducer_t *reducer);
 void	 relic_summary_destroy(relic_t *ctx, relic_summary_t *summary);
+
+/*
+ * relic_summarize_relation() builds the summaries of the `count` families
+ * of `relation`'s predicate in `families`, none built yet, in one walk of
+ * its tuples in identifier order, each tuple taken by every family's
+ * builder, and gives each family its summary only once all of them are
+ * made.  Every tuple the walk visits counts as scanned, and the interrupt
+ * is looked for every RELIC_REDUCE_CHUNK of them.  The builders' arrays
+ * come from `arena`.  Returns 0, or -1 having reported the refusal, with
+ * no family given a summary.
+ */
+int	 relic_summarize_relation(relic_t *ctx, relic_arena_t *arena,
+	    const relic_relation_t *relation,
+	    relic_fold_family_t *const *families, size_t count);
 
 #endif /* RELIC_REDUCE_H */

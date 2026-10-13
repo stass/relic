@@ -505,14 +505,39 @@ does not establish parallel performance. Before enabling the completed
 feature by default, revalidate the serial gain, the parallel time and
 bounded memory on the p620 and the M3.
 
-Still to do, in order: stored-source summaries with their cost policy,
-multi-mask traversal and the unkeyed count shortcut; bounded parallel
-partials, the default-enablement blocker; `EMIT` carrying an output
-schema rather than a relation handle, as the design requires -- a reduced
-producer's `EMIT` still names the source's empty relation, kept unread
-only by the planner's row-read guard
-(`relic_reduction_confirm_rows()`); and reducing query-owned group rules,
-whose sources the inventory blocks.
+Stored-source summaries are in place too (`lib/summarize.c`,
+`lib/reduce.c`): a component's drafts choose them by cost before its
+plans are prepared, several key masks of one relation share one walk, a
+count needs no accumulator, and an unkeyed count of a stored relation
+reads its tuple count. On `degree-count` at scale 8 (800,000 edges) the
+summaries replace both of `edge`'s indexes at equal time and memory, so
+the policy holds rather than wins there. M3 Max, median of five
+interleaved runs, identical answers; the tree before stored summaries is
+the base:
+
+| Threads | Base | Summaries | Reference |
+|---|---|---|---|
+| 1 | 0.35 s, 49 MB | 0.33 s, 46 MB | 0.34 s, 49 MB |
+| 16 | 0.14 s, 150 MB | 0.15 s, 149 MB | 0.15 s, 150 MB |
+
+`files-grouped`, `facts-join`, `tc-cyclic`, `graph-reach` and `cspa`
+are unchanged against the base within noise, and `files-grouped` holds
+6% less at one worker, its counts having no accumulator. The p620 was
+saturated by unrelated work, and its measurement is outstanding.
+
+Still to do, in order: bounded parallel partials, the default-enablement
+blocker; `EMIT` carrying an output schema rather than a relation handle,
+as the design requires -- a reduced producer's `EMIT` still names the
+source's empty relation, kept unread only by the planner's row-read
+guard (`relic_reduction_confirm_rows()`); and reducing query-owned group
+rules, whose sources the inventory blocks. Query-owned folds also choose
+no stored summary of their own: `plan_query()` prepares the query's
+plans without drafting them, and after a materialization the scope that
+held its families has ended. Drafting, choosing and preparing should be
+one path every consumer's plans take. Selection does not foresee an
+index a later component reads, which is then built beside the summary.
+The allocation and interrupt sweeps do not yet reach the stored
+builder's failure paths with more than one family.
 
 ## 7. Bound candidate storage across workers
 

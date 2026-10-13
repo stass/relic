@@ -154,6 +154,8 @@ fold_kind(const relic_op_aggregate_t *fold)
 		return (RELIC_COST_FOLD_SCAN);
 	case RELIC_FOLD_LOOKUP:
 		return (RELIC_COST_FOLD_LOOKUP);
+	case RELIC_FOLD_CARDINALITY:
+		return (RELIC_COST_FOLD_CARDINALITY);
 	case RELIC_FOLD_SUMMARY:
 		return (RELIC_COST_FOLD_SUMMARY);
 	case RELIC_FOLD_PROBE:
@@ -274,6 +276,9 @@ count_op(relic_cost_walk_t *walk, const relic_op_t *op,
 		walk->work = saturating_add(walk->work, saturating_add(
 		    bindings, tuples == 0 ? 0 : bindings));
 		break;
+	case RELIC_COST_FOLD_CARDINALITY:
+		walk->work = saturating_add(walk->work, bindings);
+		break;
 	case RELIC_COST_FOLD_SUMMARY:
 		walk->work = saturating_add(walk->work,
 		    saturating_add(bindings, bindings));
@@ -332,6 +337,81 @@ relic_cost_lookup_visits(uint64_t bindings, relic_tuple_id_t tuples,
 
 	return (saturating_add(saturating_multiply(quotient, tuples),
 	    remainder_share / divisor + (remainder_share % divisor != 0)));
+}
+
+uint64_t
+relic_cost_reaching(const relic_op_t *ops, size_t position,
+    const relic_exec_env_t *env)
+{
+	relic_cost_walk_t walk;
+	size_t i;
+
+	walk.bindings = 1;
+	walk.work = 0;
+	for (i = 0; i < position && walk.bindings > 0; i++)
+		count_op(&walk, &ops[i], relic_cost_kind_of(&ops[i]), env);
+
+	return (walk.bindings);
+}
+
+void
+relic_cost_add_fold(relic_cost_summary_t *family,
+    const relic_op_aggregate_t *fold, uint64_t bindings)
+{
+	relic_tuple_id_t tuples;
+	uint64_t visits;
+
+	assert(fold->access == RELIC_FOLD_SCAN ||
+	    fold->access == RELIC_FOLD_LOOKUP);
+	tuples = range_length(relic_relation_all(fold->relation));
+	if (fold->access == RELIC_FOLD_SCAN)
+		visits = saturating_multiply(bindings, tuples);
+	else
+		visits = relic_cost_lookup_visits(bindings, tuples,
+		    family->groups);
+
+	family->probes = saturating_add(family->probes, bindings);
+	family->row_work = saturating_add(family->row_work,
+	    saturating_add(bindings, visits));
+}
+
+void
+relic_cost_add_index(relic_cost_summary_t *family, relic_tuple_id_t tuples)
+{
+	family->row_work = saturating_add(family->row_work,
+	    saturating_multiply(2, tuples));
+}
+
+bool
+relic_cost_choose_summaries(relic_cost_summary_t *families, size_t count,
+    relic_tuple_id_t tuples)
+{
+	uint64_t updates;
+	uint64_t summary;
+	uint64_t saved;
+	size_t i;
+
+	saved = 0;
+	for (i = 0; i < count; i++) {
+		updates = saturating_add(1, families[i].accumulators);
+		summary = saturating_add(saturating_multiply(updates,
+		    saturating_add(tuples, families[i].groups)),
+		    saturating_multiply(2, families[i].probes));
+		families[i].chosen = families[i].probes > 0 &&
+		    families[i].row_work != UINT64_MAX &&
+		    families[i].row_work > summary;
+		if (families[i].chosen)
+			saved = saturating_add(saved,
+			    families[i].row_work - summary);
+	}
+
+	if (saved > tuples)
+		return (true);
+
+	for (i = 0; i < count; i++)
+		families[i].chosen = false;
+
+	return (false);
 }
 
 /*

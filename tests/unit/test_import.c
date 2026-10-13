@@ -2722,11 +2722,12 @@ compare_long_field_after_resuming(window_tally_t *tally)
 	char *table;
 	const batch_way_t *way;
 
-	limit = RELIC_IMPORT_WINDOW_BYTES / 2 + RELIC_IMPORT_READ_CHUNK;
-	prefix = 2 * limit + 4;
 	_Static_assert(RELIC_IMPORT_WINDOW_BYTES / 2 + RELIC_IMPORT_READ_CHUNK
 	    + 8 < RELIC_IMPORT_WINDOW_BYTES, "a field past the limit fits a "
 	    "window");
+
+	limit = RELIC_IMPORT_WINDOW_BYTES / 2 + RELIC_IMPORT_READ_CHUNK;
+	prefix = 2 * limit + 4;
 
 	odd = malloc(limit + 8);
 	if (odd == NULL) {

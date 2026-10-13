@@ -503,6 +503,23 @@ op_index_read(relic_op_t *op, const relic_relation_t **relationp,
 }
 
 /*
+ * The question op_index_read() answers, asked of a copy, since the answer
+ * it gives is a position the caller could write.
+ */
+bool
+relic_plan_reads_index(const relic_op_t *op, const relic_relation_t *relation,
+    uint32_t key_mask)
+{
+	const relic_relation_t *read;
+	relic_op_t copy;
+	uint32_t mask;
+
+	copy = *op;
+	return (op_index_read(&copy, &read, &mask) != NULL &&
+	    read == relation && mask == key_mask);
+}
+
+/*
  * Record the index an operation just emitted over `relation` reads, if it
  * reads one.  The operation holds its relation read-only, and building the
  * index needs it writable, so the caller passes the relation it placed the
@@ -1216,15 +1233,21 @@ place_comparison(relic_planner_t *planner, const relic_literal_t *literal)
 
 /*
  * How an AGGREGATE reaches its group's rows, from which of the relation's
- * columns are key columns: all of its rows with no key, the one tuple the
- * key names when every column is one, and otherwise those an index on the
+ * columns are key columns: with no key, the relation's tuple count for a
+ * count and all of its rows for any other function; the one tuple the
+ * key names when every column is one; and otherwise those an index on the
  * key columns holds, or, under RELIC_F_NO_INDEX, those a walk of the whole
- * relation matches.
+ * relation matches.  RELIC_F_NO_GROUP_REDUCTION, the reference strategy,
+ * walks the rows of an unkeyed count too.
  */
 static enum relic_fold_access
-fold_access(const relic_planner_t *planner, uint32_t key_mask,
-    uint16_t arity)
+fold_access(const relic_planner_t *planner, enum relic_aggregate_fn fn,
+    uint32_t key_mask, uint16_t arity)
 {
+	if (key_mask == 0 && fn == RELIC_AGG_COUNT &&
+	    (planner->ctx->config.flags & RELIC_F_NO_GROUP_REDUCTION) == 0)
+		return (RELIC_FOLD_CARDINALITY);
+
 	if (key_mask == 0)
 		return (RELIC_FOLD_SCAN);
 
@@ -1288,7 +1311,7 @@ place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 		fold->access = RELIC_FOLD_SUMMARY;
 	} else {
 		fold->arity = relation->arity;
-		fold->access = fold_access(planner, fold->key_mask,
+		fold->access = fold_access(planner, fold->fn, fold->key_mask,
 		    fold->arity);
 		record_access(planner, op, relation);
 	}
@@ -2345,11 +2368,26 @@ int
 relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
     relic_relation_t *target, const bool *incomplete, relic_plan_t *plan)
 {
-	relic_planner_t planner;
 	relic_plan_draft_t draft;
-	int status;
 
 	bzero(plan, sizeof(*plan));
+
+	if (relic_plan_draft_rule(ctx, arena, rule, target, incomplete,
+	    &draft) != 0)
+		return (-1);
+
+	return (relic_plan_prepare(ctx, arena, &draft, plan));
+}
+
+int
+relic_plan_draft_rule(relic_t *ctx, relic_arena_t *arena,
+    const relic_rule_t *rule, relic_relation_t *target,
+    const bool *incomplete, relic_plan_draft_t *draft)
+{
+	relic_planner_t planner;
+	int status;
+
+	bzero(draft, sizeof(*draft));
 
 	status = planner_init(&planner, ctx, arena, rule, target,
 	    RELIC_PLAN_NO_DELTA, RELIC_POLICY_GREEDY, incomplete);
@@ -2358,14 +2396,10 @@ relic_plan_rule(relic_t *ctx, relic_arena_t *arena, const relic_rule_t *rule,
 	if (status == 0)
 		status = decide_order(&planner);
 	if (status == 0)
-		status = emit_draft(&planner, &draft);
+		status = emit_draft(&planner, draft);
 	planner_release(&planner);
 
-	status = planning_status(ctx, arena, status);
-	if (status != 0)
-		return (-1);
-
-	return (relic_plan_prepare(ctx, arena, &draft, plan));
+	return (planning_status(ctx, arena, status));
 }
 
 /*

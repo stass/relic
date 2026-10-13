@@ -125,6 +125,17 @@ draft from undoing, so the draft's accesses cannot be derived from its
 operations. A missed call fails loudly, preparation reporting an internal
 error, but undercharges acquisition until then.
 
+**A group table's bulk steps run between interrupt polls.** [Medium,
+component: `lib/reduce.c`, `lib/relation.c`] The producer reducer and the
+stored-relation summary builder look for the interrupt every
+`RELIC_REDUCE_CHUNK` rows, but a group array's growth copies every group,
+the key table's growth rehashes all of it, a finished summary's table and
+accumulators are laid down in one pass before the polled walk, and the
+distinct counts summary selection estimates from (`count_distinct()`) walk
+a relation unpolled. Each is linear in the groups or rows, so a large
+table delays an interrupt by that much. Bound them as the row walk is
+bounded, or poll inside them, and test an interrupt landing in each.
+
 ## Benchmarks
 
 **Validate a build policy against code-placement regressions.** [Medium,

@@ -22,8 +22,10 @@ Related: [architecture](architecture.md#aggregates),
 A **source** is the logical relation an aggregate folds, including every
 column that distinguishes its rows. A **family** identifies that source
 and one grouping key mask. It contains the aggregate signatures its
-consumers need: function and, except for `count`, aggregated column.
-Identical signatures share state. Outer slot numbers are bindings of a
+consumers need: function and aggregated column. A `count` needs no
+signature, since every entry keeps its group's row count, and a family
+records only whether some consumer counts. Identical signatures share
+state. Outer slot numbers are bindings of a
 consumer, not part of a family's identity.
 
 The run's use inventory supplies a family's complete signature set before
@@ -506,6 +508,36 @@ one state update per requested family, retained bytes, finalization and
 publication work. An index needed by another reader is not charged as a
 saving, and a full-key fold already has at most one row per probe.
 
+Concretely, the expected probes of each fold come from the work walk of
+the consumer rule's draft, planned as it will be but with no index
+built: the bindings reaching its `AGGREGATE` operation. A family's
+group estimate is the exact key count of its index when one exists, and
+otherwise the product of its key columns' distinct-value counts, capped
+at the row count. That product is never below the true group count, so
+it never overestimates the rows a lookup visits, and an uncertain
+estimate leans toward row folds. Row folds cost each fold's probes and
+visits plus two units per row for an index only the folds need: one not
+yet built that no other operation of the component's drafts reads. A
+summary costs, per row and per group, one unit and one per accumulator
+the family holds, and two units per probe. A family's accumulators are
+every signature the run's folds of it need, so a consumer that uses
+few of them pays for them all. The families of one relation with
+positive savings are chosen together only when their combined saving
+exceeds the one traversal that builds them all. A family whose folds no
+binding reaches is not chosen, since nothing shows it would be read. A
+recursive consumer's draft reads its own relations as empty, so a fold
+after such a read chooses no summary, though it reads one already built.
+The drafts weighed are those the component will prepare, a recursive
+rule's delta-first plans included, in storage released once the choice
+is made.
+
+Every value of a stored row already has its identifier, so a summary of
+stored rows finds a group by its key's identifiers and reads the key
+from the group's first row, which stays in place during the traversal,
+rather than copying it. Its groups hold row counts and the requested
+accumulators only; the completed summary has the same layout and lookup
+as a producer's.
+
 An unkeyed count over a stored complete relation reads its tuple count
 directly; it does not build a one-entry table or visit every row. This
 shortcut is disabled with the group-reduction reference so its work
@@ -635,7 +667,13 @@ existing rule/component layout, not generated language predicates:
 reduce kind/3 key={1,2} count
 project group/2 from summary kind/3 key={1,2}
 aggregate N = count kind(P, D, E) key={1,2} summary
+summarize edge/2 key={0} count
+aggregate N = count edge(X, Y) cardinality
 ```
+
+A summary of a stored relation is named beneath the heading of the
+component whose folds chose it, one line per family; an unkeyed count
+that reads the tuple count ends `cardinality`.
 
 Worker counts, private pointers, hash slots, partial-map arrival order and
 data values appear nowhere in those annotations. One selected strategy

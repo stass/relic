@@ -207,6 +207,8 @@ struct relic_valtab {
  * into group state rather than stored, `reduced_rows` the rows they
  * derived, and `reduced_groups` the groups their summaries hold; the
  * lookups folds made in a summary are `read.summary_probes`.
+ * `summaries_built` counts the summaries built over stored relations
+ * for their folds, whose rows a build visits count as scanned.
  * `reduction_peak` is the most bytes one reduction held at once: its
  * builder, and the summary and scratch of its finishing.
  *
@@ -229,6 +231,7 @@ struct relic_counters {
 	uint64_t		sources_reduced;
 	uint64_t		reduced_rows;
 	uint64_t		reduced_groups;
+	uint64_t		summaries_built;
 	size_t			reduction_peak;
 };
 
@@ -1392,6 +1395,23 @@ int	 relic_plan_rule(relic_t *ctx, relic_arena_t *arena,
 	    const bool *incomplete, relic_plan_t *plan);
 
 /*
+ * The draft relic_plan_rule() would prepare, into *draft, the relations it
+ * reads created and the indexes it reads not built: what the choice of a
+ * component's summaries estimates before any plan of it is prepared.
+ * Arguments and failures are as for relic_plan_rule(), less an index
+ * refused.
+ */
+int	 relic_plan_draft_rule(relic_t *ctx, relic_arena_t *arena,
+	    const relic_rule_t *rule, relic_relation_t *target,
+	    const bool *incomplete, relic_plan_draft_t *draft);
+
+/*
+ * Whether an operation reads the index of `relation` keyed on `key_mask`.
+ */
+bool	 relic_plan_reads_index(const relic_op_t *op,
+	    const relic_relation_t *relation, uint32_t key_mask);
+
+/*
  * Plan a semi-naive delta variant of a rule into *family (plan.h): the
  * drafts of its delta-first plan and its input-first plan, kept once when
  * the two orders are the same, or the one plan a reference configuration
@@ -1532,22 +1552,25 @@ int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
 /*
  * lib/uses.c
  *
- * The scope of a query run's direct grouped reductions (lib/reduce.h).
+ * The scope of a run's direct grouped reductions and summaries
+ * (lib/reduce.h): a query's run, or the whole program's materialization.
  *
  * relic_reduction_begin() makes `reduction` empty and makes it the
- * context's for the query run about to start, unless
+ * context's for the run about to start, unless
  * RELIC_F_NO_GROUP_REDUCTION turns reduction off; relic_reduction_end()
  * destroys every summary it holds, releases it, and leaves the context
  * with none.  Every plan that holds one of its summaries must have been
  * released before then.
  *
- * relic_reduction_select() admits into the context's scope the sources
- * whose every use is a fold of one key or a projection of that key, and
- * of which the query reaches a fold, and promotes into `magic`'s complete
+ * relic_reduction_select() records in the context's scope the families
+ * of the run's folds of stored relations, then admits the sources whose
+ * every use is a fold of one key or a projection of that key, and of
+ * which the query reaches a fold, and promotes into `magic`'s complete
  * part the projections the query reaches.  It is called once `magic` has
  * found what the query reads completely and before any of that is
- * evaluated.  It returns 0, or -1 with the failure reported; with no
- * scope it admits nothing.
+ * evaluated, or, with `magic` and `query` NULL, before the whole program
+ * is materialized, which admits no source.  It returns 0, or -1 with the
+ * failure reported; with no scope it records nothing.
  *
  * relic_reduction_source() and relic_reduction_projection() are the
  * scope's entry for a predicate, or NULL; the source's is writable, since
@@ -1555,9 +1578,13 @@ int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
  *
  * relic_reduction_fold() is how the planner resolves an aggregate's
  * source: 0 with *summaryp NULL when the fold reads rows, 0 with the
- * summary and the position of the fold's signature among the source's
- * when it reads a summary, and -1 with an internal error reported when
- * the source's rows are not there and no summary stands in for them.
+ * summary and the position of the fold's signature among the source's or
+ * the family's when it reads a summary, and -1 with an internal error
+ * reported when the source's rows are not there and no summary stands in
+ * for them, or a family's summary no longer describes its relation.
+ * relic_reduction_family() is the family a fold of a stored relation
+ * would read when summarized: one with no summary yet that holds the
+ * fold's signature, or NULL.
  * relic_reduction_confirm_rows() is how it resolves every other read of a
  * relation's rows: 0, or -1 with an internal error at `where` when the
  * relation is a source the scope reduces.
@@ -1572,6 +1599,26 @@ const relic_key_projection_t *relic_reduction_projection(const relic_t *ctx,
 	    relic_pred_id_t pred);
 int	 relic_reduction_fold(relic_t *ctx, const relic_aggregate_t *aggregate,
 	    const relic_summary_t **summaryp, uint16_t *signaturep);
+relic_fold_family_t *relic_reduction_family(relic_t *ctx,
+	    const relic_aggregate_t *aggregate);
+
+/*
+ * lib/summarize.c
+ *
+ * relic_summarize_drafts() chooses, from the `draft_count` drafts of
+ * every plan a component will prepare first, folding or not, made before
+ * any of them is prepared, the families of stored relations worth
+ * summarizing, and builds them, over the views `env` resolves: an index a
+ * plan missing from the drafts reads would be counted as a saving.
+ * *builtp and *built_countp are the families it built, in the order they
+ * were, from `arena`, for explain to name.  Returns 0, or -1 with the failure reported; a family
+ * whose build was refused is left unbuilt.  With no scope it builds
+ * nothing.
+ */
+int	 relic_summarize_drafts(relic_t *ctx, relic_arena_t *arena,
+	    const relic_plan_draft_t *drafts, size_t draft_count,
+	    const relic_exec_env_t *env, const relic_fold_family_t ***builtp,
+	    size_t *built_countp);
 int	 relic_reduction_confirm_rows(relic_t *ctx, relic_pred_id_t pred,
 	    const relic_location_t *where);
 
@@ -1725,7 +1772,9 @@ _Static_assert(RELIC_IMPORT_WINDOW_RECORDS > 0,
  * whose rows a source's reduction takes instead of its relation, with the
  * source, its key and its folds' signatures; relic_explain_projection()
  * annotates a projection's rule, which the source's keys replace, with
- * the source it reads them from.  `depth` is the level a
+ * the source it reads them from; relic_explain_summary() names, under a
+ * component's heading, a family of a stored relation summarized for its
+ * folds, with its key and signatures.  `depth` is the level a
  * component's heading is indented to, one more for a component of a
  * rewritten program than for one of the program itself; what belongs to
  * the component is indented beneath it.  None can fail.
@@ -1752,6 +1801,8 @@ void	 relic_explain_reduction(relic_t *ctx,
 void	 relic_explain_projection(relic_t *ctx,
 	    const relic_key_projection_t *projection,
 	    const relic_reduced_source_t *source, unsigned int depth);
+void	 relic_explain_summary(relic_t *ctx, const relic_fold_family_t *family,
+	    unsigned int depth);
 
 /*
  * lib/index.c

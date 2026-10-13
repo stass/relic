@@ -293,6 +293,9 @@ struct relic_delta_work {
  * `fixed_point` is how the component is evaluated.  The variants and the
  * `work` of running them exist exactly when it is RELIC_FIXED_SEMI_NAIVE,
  * because the one decision sets both.
+ *
+ * `summaries` are the `summary_count` families of stored relations built
+ * for the component's folds before its plans were made (lib/summarize.c).
  */
 struct relic_component_plans {
 	const size_t		 *rule_indexes;
@@ -300,12 +303,14 @@ struct relic_component_plans {
 	relic_variant_t		 *variants;
 	relic_relation_t	**members;
 	relic_round_item_t	 *items;
+	const relic_fold_family_t **summaries;
 	relic_delta_work_t	  work;
 	size_t			  rule_count;
 	size_t			  planned_count;
 	size_t			  variant_count;
 	size_t			  member_count;
 	size_t			  item_capacity;
+	size_t			  summary_count;
 	enum relic_fixed_point	  fixed_point;
 };
 
@@ -564,6 +569,11 @@ static int	 plan_base(relic_evaluation_t *eval,
 		    const relic_component_plans_t *plans,
 		    relic_rule_plans_t *rule_plans);
 static int	 plan_delta_work(relic_evaluation_t *eval,
+		    relic_component_plans_t *plans);
+static bool	 rule_folds(const relic_rule_t *rule);
+static int	 choose_summaries(relic_evaluation_t *eval,
+		    const relic_schedule_t *schedule,
+		    const relic_component_t *component,
 		    relic_component_plans_t *plans);
 static int	 plan_component(relic_evaluation_t *eval,
 		    const relic_schedule_t *schedule,
@@ -2691,10 +2701,127 @@ choose_fixed_point(const relic_t *ctx, const relic_component_t *component)
 }
 
 /*
- * Plan one component: how it reaches its fixed point, its members, its
- * rules, and, when it will be evaluated semi-naively, the delta variants of
- * its rules.  The members are marked throughout, which is how the planner
- * knows which relations it cannot yet measure.
+ * Whether a rule's body holds an aggregate literal.
+ */
+static bool
+rule_folds(const relic_rule_t *rule)
+{
+	size_t i;
+
+	for (i = 0; i < rule->body_length; i++)
+		if (rule->body[i].kind == RELIC_LITERAL_AGGREGATE)
+			return (true);
+
+	return (false);
+}
+
+/*
+ * Choose and build the summaries of stored relations a component's folds
+ * would read that are worth building (lib/summarize.c), when one of its
+ * rules holds an aggregate, so that the plans made next read them.  The
+ * choice weighs the drafts plan_rules() will prepare: every rule's
+ * ordinary plan, or, for a recursive rule of a semi-naive component, the
+ * delta-first plan of each variant, since an index any of them reads is
+ * no saving of a summary.  The drafts are made in an arena of their own,
+ * given back once the choice is made, so a component that chooses holds
+ * only its plans afterwards; only the list of the families built is kept.
+ * A run with no scope, or with no family to summarize, drafts nothing.
+ * The members must be marked and their relations resolved.
+ */
+static int
+choose_summaries(relic_evaluation_t *eval, const relic_schedule_t *schedule,
+    const relic_component_t *component, relic_component_plans_t *plans)
+{
+	const relic_fold_family_t **built;
+	relic_plan_draft_t *drafts;
+	relic_plan_family_t family;
+	const relic_rule_t *rule;
+	relic_arena_t scratch;
+	size_t built_count;
+	size_t count;
+	size_t i;
+	size_t j;
+	int status;
+
+	plans->summaries = NULL;
+	plans->summary_count = 0;
+	if (eval->ctx->reduction == NULL ||
+	    eval->ctx->reduction->family_count == 0)
+		return (0);
+
+	count = 0;
+	for (i = 0; i < component->rule_count; i++)
+		if (rule_folds(rule_of(eval, schedule, component, i)))
+			break;
+	if (i == component->rule_count)
+		return (0);
+	for (i = 0; i < component->rule_count; i++) {
+		rule = rule_of(eval, schedule, component, i);
+		if (rule->body_length == 0)
+			continue;
+		count += plans->fixed_point == RELIC_FIXED_SEMI_NAIVE &&
+		    rule_is_recursive(eval, rule) ?
+		    count_member_literals(eval, rule) : 1;
+	}
+
+	relic_arena_init_charged(&scratch, &eval->ctx->account);
+	status = -1;
+	drafts = relic_arena_allocarray(&scratch, count, sizeof(*drafts));
+	if (drafts == NULL) {
+		relic_diag_no_memory(eval->ctx);
+		goto done;
+	}
+
+	count = 0;
+	for (i = 0; i < component->rule_count; i++) {
+		rule = rule_of(eval, schedule, component, i);
+		if (rule->body_length == 0)
+			continue;
+		if (plans->fixed_point != RELIC_FIXED_SEMI_NAIVE ||
+		    !rule_is_recursive(eval, rule)) {
+			if (relic_plan_draft_rule(eval->ctx, &scratch, rule,
+			    head_relation_of(eval, plans, rule),
+			    eval->is_member, &drafts[count++]) != 0)
+				goto done;
+			continue;
+		}
+		for (j = 0; j < rule->body_length; j++) {
+			if (!literal_reads_member(eval, &rule->body[j]))
+				continue;
+			if (relic_plan_variant(eval->ctx, &scratch, rule,
+			    head_relation_of(eval, plans, rule), j,
+			    eval->is_member, &family) != 0)
+				goto done;
+			drafts[count++] =
+			    family.candidates[RELIC_FAMILY_DELTA_FIRST].draft;
+		}
+	}
+
+	if (relic_summarize_drafts(eval->ctx, &scratch, drafts, count,
+	    &eval->env, &built, &built_count) != 0)
+		goto done;
+	if (built_count > 0) {
+		plans->summaries = evaluation_alloc(eval, built_count,
+		    sizeof(*plans->summaries));
+		if (plans->summaries == NULL)
+			goto done;
+		bcopy(built, plans->summaries,
+		    built_count * sizeof(*plans->summaries));
+		plans->summary_count = built_count;
+	}
+	status = 0;
+
+done:
+	relic_arena_reset(&scratch);
+	return (status);
+}
+
+/*
+ * Plan one component: how it reaches its fixed point, its members, the
+ * summaries its folds read, its rules, and, when it will be evaluated
+ * semi-naively, the delta variants of its rules.  The members are marked
+ * throughout, which is how the planner knows which relations it cannot
+ * yet measure.
  */
 static int
 plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
@@ -2709,7 +2836,9 @@ plan_component(relic_evaluation_t *eval, const relic_schedule_t *schedule,
 
 	mark_members(eval, schedule, component, true);
 
-	status = plan_rules(eval, schedule, component, plans);
+	status = choose_summaries(eval, schedule, component, plans);
+	if (status == 0)
+		status = plan_rules(eval, schedule, component, plans);
 	if (status == 0 && plans->fixed_point == RELIC_FIXED_SEMI_NAIVE)
 		status = plan_delta_work(eval, plans);
 	if (status == 0)
@@ -2744,8 +2873,8 @@ allocate_round_items(relic_evaluation_t *eval, relic_component_plans_t *plans)
 /*
  * Show a component's plans through the explain callback, if one is installed:
  * its heading, how many facts it has -- its seeds, the rules without a plan,
- * and the facts its members' base stores hold -- and each other rule with its
- * plan or its delta variants.
+ * and the facts its members' base stores hold -- the summaries built for
+ * its folds, and each other rule with its plan or its delta variants.
  */
 static void
 explain_component(const relic_evaluation_t *eval,
@@ -2766,6 +2895,8 @@ explain_component(const relic_evaluation_t *eval,
 		facts += relic_base_count(eval->ctx, plans->members[i]->pred);
 
 	relic_explain_component(eval->ctx, schedule, position, facts, depth);
+	for (i = 0; i < plans->summary_count; i++)
+		relic_explain_summary(eval->ctx, plans->summaries[i], depth);
 
 	for (i = 0; i < plans->planned_count; i++) {
 		rule_plans = &plans->planned[i];
@@ -3271,10 +3402,18 @@ project_keys(relic_evaluation_t *eval, const relic_schedule_t *schedule,
  * derived -- and it is discarded before every component is planned and
  * evaluated in schedule order.  The discard comes before the evaluation
  * begins, so no delta range can span it.
+ *
+ * The evaluation has a reduction scope of its own, which summarizes stored
+ * relations for the folds that read them and reduces no source, since
+ * every relation of the fixed point is kept for the queries after it.  It
+ * ends with the evaluation, and no summary outlives it.
  */
 static int
 materialize_program(relic_t *ctx)
 {
+	relic_reduction_t reduction;
+	int status;
+
 	if (relic_relations_current(ctx))
 		return (0);
 
@@ -3283,8 +3422,13 @@ materialize_program(relic_t *ctx)
 
 	relic_discard_derived(ctx);
 
-	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
-	    NULL, 0) != 0)
+	relic_reduction_begin(&reduction, ctx);
+	status = relic_reduction_select(ctx, NULL, NULL);
+	if (status == 0)
+		status = evaluate_schedule(ctx, &ctx->program.rules,
+		    &ctx->program.schedule, NULL, 0);
+	relic_reduction_end(&reduction, ctx);
+	if (status != 0)
 		return (-1);
 
 	record_materialized(ctx);

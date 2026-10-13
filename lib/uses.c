@@ -54,6 +54,16 @@
  * that they are evaluated from the program's schedule, where the keys can
  * replace their rules, and the rewrite reads them rather than generating
  * rules that would read the source's rows.
+ *
+ * The same pass records the run's fold families: for each predicate and
+ * each key it is folded on, short of every column, the signatures of all
+ * its folds on that key.  A family's summary is built over the stored
+ * relation when a component's plans would fold it (lib/summarize.c), so
+ * the signatures every later fold needs are known before it is built and
+ * a built summary never has to grow.  A fold whose family has a summary
+ * reads it; any other fold of a stored relation reads its rows.  The
+ * whole program's materialization has a scope of its own for the
+ * families, with no query and no source admitted.
  */
 
 typedef struct relic_use_tally relic_use_tally_t;
@@ -103,11 +113,25 @@ static int	 promote_projections(relic_reduction_t *reduction,
 static int	 add_signatures(relic_t *ctx, relic_reduction_t *reduction,
 		    const relic_rule_t *rule);
 static int	 add_signature(relic_t *ctx, relic_reduction_t *reduction,
-		    relic_reduced_source_t *source,
-		    const relic_aggregate_t *aggregate);
-static uint16_t	 signature_column(const relic_aggregate_t *aggregate);
+		    relic_reduce_signature_t **signaturesp, size_t *countp,
+		    bool *countsp, const relic_aggregate_t *aggregate);
+static size_t	 signature_of(const relic_reduce_signature_t *signatures,
+		    size_t count, const relic_aggregate_t *aggregate);
+static bool	 holds_fold(const relic_reduce_signature_t *signatures,
+		    size_t count, bool counts, const relic_aggregate_t *aggregate,
+		    uint16_t *atp);
 static relic_reduced_source_t *source_of(relic_reduction_t *reduction,
 		    relic_pred_id_t pred);
+static size_t	 count_folds(const relic_rule_t *rule);
+static int	 record_families(relic_t *ctx, relic_reduction_t *reduction,
+		    const relic_query_t *query);
+static int	 add_families(relic_t *ctx, relic_reduction_t *reduction,
+		    const relic_rule_t *rule);
+static relic_fold_family_t *family_of(relic_reduction_t *reduction,
+		    relic_pred_id_t pred, uint32_t key_mask);
+static int	 family_fold(relic_t *ctx, relic_reduction_t *reduction,
+		    const relic_aggregate_t *aggregate,
+		    const relic_summary_t **summaryp, uint16_t *signaturep);
 
 void
 relic_reduction_begin(relic_reduction_t *reduction, relic_t *ctx)
@@ -125,22 +149,29 @@ relic_reduction_end(relic_reduction_t *reduction, relic_t *ctx)
 
 	for (i = 0; i < reduction->source_count; i++)
 		relic_summary_destroy(ctx, reduction->sources[i].summary);
+	for (i = 0; i < reduction->family_count; i++)
+		relic_summary_destroy(ctx, reduction->families[i].summary);
 	relic_arena_reset(&reduction->arena);
 	if (ctx->reduction == reduction)
 		ctx->reduction = NULL;
 	reduction->sources = NULL;
 	reduction->projections = NULL;
+	reduction->families = NULL;
 	reduction->source_of = NULL;
 	reduction->projection_of = NULL;
+	reduction->family_of = NULL;
 	reduction->source_count = 0;
 	reduction->projection_count = 0;
+	reduction->family_count = 0;
 	reduction->predicate_count = 0;
 }
 
 /*
- * Choose the run's sources and projections, and make the projections the
- * query reaches complete in `magic`, which relic_magic_find_complete() has
- * just walked.  Nothing is chosen when the run reduces nothing, and a
+ * Record the run's fold families, then, for a query, choose its sources
+ * and projections, and make the projections the query reaches complete in
+ * `magic`, which relic_magic_find_complete() has just walked.  The whole
+ * program's materialization passes neither a query nor `magic`, and
+ * admits no source.  Nothing is chosen when the run folds nothing, and a
  * scope that chose nothing is a run without reductions: no failure here
  * leaves anything half chosen, since the scope is published only whole.
  */
@@ -159,6 +190,12 @@ relic_reduction_select(relic_t *ctx, relic_magic_t *magic,
 		return (0);
 
 	count = relic_pred_count(ctx);
+	reduction->predicate_count = count;
+	if (record_families(ctx, reduction, query) != 0)
+		return (-1);
+	if (magic == NULL)
+		return (0);
+
 	tallies = scope_alloc(ctx, reduction, count, sizeof(*tallies));
 	if (tallies == NULL)
 		return (-1);
@@ -204,7 +241,7 @@ any_fold(const relic_t *ctx, const relic_query_t *query)
 		if (has_aggregate(&rules->entries[i]))
 			return (true);
 
-	return (has_aggregate(&query->rule));
+	return (query != NULL && has_aggregate(&query->rule));
 }
 
 /*
@@ -561,7 +598,6 @@ record_scope(relic_t *ctx, relic_reduction_t *reduction,
 	bzero(reduction->source_of, count * sizeof(*reduction->source_of));
 	bzero(reduction->projection_of,
 	    count * sizeof(*reduction->projection_of));
-	reduction->predicate_count = count;
 
 	for (i = 0; i < count; i++) {
 		if (!tallies[i].admitted)
@@ -678,8 +714,9 @@ add_signatures(relic_t *ctx, relic_reduction_t *reduction,
 			continue;
 		aggregate = &rule->body[i].u.aggregate;
 		source = source_of(reduction, aggregate->source);
-		if (source != NULL &&
-		    add_signature(ctx, reduction, source, aggregate) != 0)
+		if (source != NULL && add_signature(ctx, reduction,
+		    &source->signatures, &source->signature_count,
+		    &source->counts, aggregate) != 0)
 			return (-1);
 	}
 
@@ -687,42 +724,77 @@ add_signatures(relic_t *ctx, relic_reduction_t *reduction,
 }
 
 /*
- * Add a fold's signature to its source's, unless an earlier fold's is the
- * same.  A source has few folds, so the array grows by copying.
+ * Add a fold's signature to the `*countp` of `*signaturesp`, a source's or
+ * a family's, unless an earlier fold's is the same, or for a count set
+ * *countsp, a count having no signature.  Either has few folds, so the
+ * array grows by copying.
  */
 static int
 add_signature(relic_t *ctx, relic_reduction_t *reduction,
-    relic_reduced_source_t *source, const relic_aggregate_t *aggregate)
+    relic_reduce_signature_t **signaturesp, size_t *countp, bool *countsp,
+    const relic_aggregate_t *aggregate)
 {
 	relic_reduce_signature_t *signatures;
-	uint16_t column;
-	size_t i;
 
-	column = signature_column(aggregate);
-	for (i = 0; i < source->signature_count; i++)
-		if (source->signatures[i].fn == aggregate->fn &&
-		    source->signatures[i].column == column)
-			return (0);
+	if (aggregate->fn == RELIC_AGG_COUNT) {
+		*countsp = true;
+		return (0);
+	}
+	if (signature_of(*signaturesp, *countp, aggregate) < *countp)
+		return (0);
 
-	signatures = scope_alloc(ctx, reduction, source->signature_count + 1,
+	signatures = scope_alloc(ctx, reduction, *countp + 1,
 	    sizeof(*signatures));
 	if (signatures == NULL)
 		return (-1);
-	if (source->signature_count > 0)
-		bcopy(source->signatures, signatures,
-		    source->signature_count * sizeof(*signatures));
-	signatures[source->signature_count].fn = aggregate->fn;
-	signatures[source->signature_count].column = column;
-	source->signatures = signatures;
-	source->signature_count++;
+	if (*countp > 0)
+		bcopy(*signaturesp, signatures, *countp * sizeof(*signatures));
+	signatures[*countp].fn = aggregate->fn;
+	signatures[*countp].column = aggregate->column;
+	*signaturesp = signatures;
+	(*countp)++;
 
 	return (0);
 }
 
-static uint16_t
-signature_column(const relic_aggregate_t *aggregate)
+/*
+ * The position of a fold's signature among `count` signatures, or `count`
+ * when none is its.
+ */
+static size_t
+signature_of(const relic_reduce_signature_t *signatures, size_t count,
+    const relic_aggregate_t *aggregate)
 {
-	return (aggregate->fn == RELIC_AGG_COUNT ? 0 : aggregate->column);
+	size_t i;
+
+	for (i = 0; i < count; i++)
+		if (signatures[i].fn == aggregate->fn &&
+		    signatures[i].column == aggregate->column)
+			return (i);
+
+	return (count);
+}
+
+/*
+ * Whether the `count` signatures and `counts` of a source or a family hold
+ * a fold, with *atp set to its signature's position; a count has none,
+ * since it reads its group's row count.
+ */
+static bool
+holds_fold(const relic_reduce_signature_t *signatures, size_t count,
+    bool counts, const relic_aggregate_t *aggregate, uint16_t *atp)
+{
+	size_t at;
+
+	*atp = 0;
+	if (aggregate->fn == RELIC_AGG_COUNT)
+		return (counts);
+	at = signature_of(signatures, count, aggregate);
+	if (at == count)
+		return (false);
+	*atp = (uint16_t)at;
+
+	return (true);
 }
 
 static relic_reduced_source_t *
@@ -730,7 +802,8 @@ source_of(relic_reduction_t *reduction, relic_pred_id_t pred)
 {
 	uint32_t at;
 
-	if (pred == RELIC_ID_NONE || pred - 1 >= reduction->predicate_count)
+	if (reduction->source_of == NULL || pred == RELIC_ID_NONE ||
+	    pred - 1 >= reduction->predicate_count)
 		return (NULL);
 	at = reduction->source_of[pred - 1];
 
@@ -753,8 +826,8 @@ relic_reduction_projection(const relic_t *ctx, relic_pred_id_t pred)
 	uint32_t at;
 
 	reduction = ctx->reduction;
-	if (reduction == NULL || pred == RELIC_ID_NONE ||
-	    pred - 1 >= reduction->predicate_count)
+	if (reduction == NULL || reduction->projection_of == NULL ||
+	    pred == RELIC_ID_NONE || pred - 1 >= reduction->predicate_count)
 		return (NULL);
 	at = reduction->projection_of[pred - 1];
 
@@ -763,11 +836,12 @@ relic_reduction_projection(const relic_t *ctx, relic_pred_id_t pred)
 
 /*
  * Resolve a fold: to its source's summary and the signature's position in
- * it when the source is REDUCED, leaving *summaryp NULL when the fold
- * reads rows.  A fold planned before its source's turn, or one whose key
- * or signature the inventory did not record, is a broken invariant: the
- * inventory saw every fold and the schedule orders every reader after
- * its source.
+ * it when the source is REDUCED, to its family's when the family has
+ * been summarized, and otherwise to its relation's rows, leaving
+ * *summaryp NULL.  A fold of a source planned before its source's turn,
+ * or one whose key or signature the inventory did not record, is a
+ * broken invariant: the inventory saw every fold and the schedule orders
+ * every reader after its source.
  */
 int
 relic_reduction_fold(relic_t *ctx, const relic_aggregate_t *aggregate,
@@ -775,32 +849,224 @@ relic_reduction_fold(relic_t *ctx, const relic_aggregate_t *aggregate,
 {
 	const relic_reduced_source_t *source;
 	char name[RELIC_PRED_TEXT_MAX];
-	uint16_t column;
-	size_t i;
 
 	*summaryp = NULL;
 	*signaturep = 0;
-	source = relic_reduction_source(ctx, aggregate->source);
-	if (source == NULL || source->state == RELIC_SOURCE_STORED)
+	if (ctx->reduction == NULL)
 		return (0);
 
+	source = source_of(ctx->reduction, aggregate->source);
+	if (source == NULL || source->state == RELIC_SOURCE_STORED)
+		return (family_fold(ctx, ctx->reduction, aggregate, summaryp,
+		    signaturep));
+
 	if (source->state == RELIC_SOURCE_REDUCED &&
-	    source->key_mask == aggregate->key_mask) {
-		column = signature_column(aggregate);
-		for (i = 0; i < source->signature_count; i++) {
-			if (source->signatures[i].fn != aggregate->fn ||
-			    source->signatures[i].column != column)
-				continue;
-			*summaryp = source->summary;
-			*signaturep = (uint16_t)i;
-			return (0);
-		}
+	    source->key_mask == aggregate->key_mask &&
+	    holds_fold(source->signatures, source->signature_count,
+	    source->counts, aggregate, signaturep)) {
+		*summaryp = source->summary;
+		return (0);
 	}
 
 	relic_diag_internal(ctx, &aggregate->where,
 	    "a fold of %s does not match its reduction",
 	    relic_pred_identify(ctx, aggregate->source, name, sizeof(name)));
 	return (-1);
+}
+
+/*
+ * Resolve a fold of a stored relation to its family's summary when the
+ * family has one holding the fold's signature, which a family built from
+ * the inventory always does.  The summary describes the relation as it
+ * was built from: complete, since a component folds only relations an
+ * earlier component finished, and nothing derives into a finished
+ * relation for the rest of the run.  A relation that has grown since is a
+ * broken invariant, reported rather than answered from the summary.
+ */
+static int
+family_fold(relic_t *ctx, relic_reduction_t *reduction,
+    const relic_aggregate_t *aggregate, const relic_summary_t **summaryp,
+    uint16_t *signaturep)
+{
+	const relic_fold_family_t *family;
+	const relic_relation_t *relation;
+	char name[RELIC_PRED_TEXT_MAX];
+	uint16_t at;
+
+	family = family_of(reduction, aggregate->source, aggregate->key_mask);
+	if (family == NULL || family->summary == NULL ||
+	    !holds_fold(family->signatures, family->signature_count,
+	    family->counts, aggregate, &at))
+		return (0);
+
+	relation = relic_relation_read(ctx, family->pred);
+	if (relation == NULL)
+		return (-1);
+	if (relic_relation_count(relation) != family->built_at) {
+		relic_diag_internal(ctx, &aggregate->where,
+		    "%s has grown since its summary was built",
+		    relic_pred_identify(ctx, family->pred, name,
+		    sizeof(name)));
+		return (-1);
+	}
+
+	*summaryp = family->summary;
+	*signaturep = at;
+	return (0);
+}
+
+relic_fold_family_t *
+relic_reduction_family(relic_t *ctx, const relic_aggregate_t *aggregate)
+{
+	relic_fold_family_t *family;
+	uint16_t at;
+
+	if (ctx->reduction == NULL)
+		return (NULL);
+
+	family = family_of(ctx->reduction, aggregate->source,
+	    aggregate->key_mask);
+	if (family == NULL || family->summary != NULL ||
+	    !holds_fold(family->signatures, family->signature_count,
+	    family->counts, aggregate, &at))
+		return (NULL);
+
+	return (family);
+}
+
+/*
+ * The aggregate literals of a rule's body.
+ */
+static size_t
+count_folds(const relic_rule_t *rule)
+{
+	size_t count;
+	size_t i;
+
+	count = 0;
+	for (i = 0; i < rule->body_length; i++)
+		if (rule->body[i].kind == RELIC_LITERAL_AGGREGATE)
+			count++;
+
+	return (count);
+}
+
+/*
+ * Record the families of every fold of the program's rules and, for a
+ * query, of its rule and group rules.  There are at most as many families
+ * as folds, which is what the array is sized for.
+ */
+static int
+record_families(relic_t *ctx, relic_reduction_t *reduction,
+    const relic_query_t *query)
+{
+	const relic_ruletab_t *rules;
+	size_t folds;
+	size_t i;
+
+	rules = &ctx->program.rules;
+	folds = 0;
+	for (i = 0; i < rules->count; i++)
+		folds += count_folds(&rules->entries[i]);
+	if (query != NULL) {
+		folds += count_folds(&query->rule);
+		for (i = 0; i < query->group_rule_count; i++)
+			folds += count_folds(&query->group_rules[i]);
+	}
+	if (folds == 0)
+		return (0);
+
+	reduction->families = scope_alloc(ctx, reduction, folds,
+	    sizeof(*reduction->families));
+	reduction->family_of = scope_alloc(ctx, reduction,
+	    reduction->predicate_count, sizeof(*reduction->family_of));
+	if (reduction->families == NULL || reduction->family_of == NULL)
+		return (-1);
+	bzero(reduction->family_of,
+	    reduction->predicate_count * sizeof(*reduction->family_of));
+
+	for (i = 0; i < rules->count; i++)
+		if (add_families(ctx, reduction, &rules->entries[i]) != 0)
+			return (-1);
+	if (query == NULL)
+		return (0);
+	if (add_families(ctx, reduction, &query->rule) != 0)
+		return (-1);
+	for (i = 0; i < query->group_rule_count; i++)
+		if (add_families(ctx, reduction, &query->group_rules[i]) != 0)
+			return (-1);
+
+	return (0);
+}
+
+/*
+ * Add each fold of a rule to the family of its predicate and key, made
+ * when it is the first fold of them.  A fold on every column reaches at
+ * most one row however it is planned, and has no family.
+ */
+static int
+add_families(relic_t *ctx, relic_reduction_t *reduction,
+    const relic_rule_t *rule)
+{
+	const relic_aggregate_t *aggregate;
+	relic_fold_family_t *family;
+	const relic_pred_t *pred;
+	uint32_t *link;
+	size_t i;
+
+	for (i = 0; i < rule->body_length; i++) {
+		if (rule->body[i].kind != RELIC_LITERAL_AGGREGATE)
+			continue;
+		aggregate = &rule->body[i].u.aggregate;
+		pred = relic_pred_of(ctx, aggregate->source);
+		if (pred == NULL ||
+		    aggregate->source - 1 >= reduction->predicate_count ||
+		    aggregate->key_mask == relic_plan_all_columns(pred->arity))
+			continue;
+
+		family = family_of(reduction, aggregate->source,
+		    aggregate->key_mask);
+		if (family == NULL) {
+			link = &reduction->family_of[aggregate->source - 1];
+			while (*link != 0)
+				link = &reduction->families[*link - 1].next;
+			family = &reduction->families[reduction->family_count];
+			bzero(family, sizeof(*family));
+			family->pred = aggregate->source;
+			family->key_mask = aggregate->key_mask;
+			family->arity = pred->arity;
+			reduction->family_count++;
+			*link = (uint32_t)reduction->family_count;
+		}
+		if (add_signature(ctx, reduction, &family->signatures,
+		    &family->signature_count, &family->counts,
+		    aggregate) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * The family of `pred` on the key columns of `key_mask`, or NULL.
+ */
+static relic_fold_family_t *
+family_of(relic_reduction_t *reduction, relic_pred_id_t pred,
+    uint32_t key_mask)
+{
+	size_t at;
+
+	if (reduction->family_of == NULL || pred == RELIC_ID_NONE ||
+	    pred - 1 >= reduction->predicate_count)
+		return (NULL);
+
+	for (at = reduction->family_of[pred - 1]; at != 0;
+	    at = reduction->families[at - 1].next) {
+		if (reduction->families[at - 1].key_mask == key_mask)
+			return (&reduction->families[at - 1]);
+	}
+
+	return (NULL);
 }
 
 /*

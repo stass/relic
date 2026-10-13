@@ -49,6 +49,12 @@
 #define	SCENARIO_CEILING	"the row ceiling outlives the store"
 #define	SCENARIO_PEAK		"the peak counts the summary"
 #define	SCENARIO_CHUNKED	"many retained values are interned in chunks"
+#define	SCENARIO_STORED		"a stored relation is summarized once per family"
+#define	SCENARIO_CARDINALITY	"an unkeyed count reads no rows"
+#define	SCENARIO_ACCUMULATORS	"stored accumulators answer as rows do"
+#define	SCENARIO_BUILT_INDEX	"an index built already is no saving"
+#define	SCENARIO_DELTA_INDEX	"an index a delta plan reads is no saving"
+#define	SCENARIO_UNREACHED	"a fold no binding reaches is not summarized"
 
 /*
  * The memory limits a_memory_limit_refuses_a_reduction_cleanly() tries:
@@ -168,6 +174,16 @@ static void	 many_retained_values_are_interned_in_chunks(void);
 static bool	 answers_under_limit(const char *program, size_t limit,
 		    const char *expected);
 static void	 a_memory_limit_refuses_a_reduction_cleanly(void);
+static void	 write_degree(char *program, size_t size);
+static void	 a_stored_relation_is_summarized_once_per_family(void);
+static void	 an_unkeyed_count_reads_no_rows(void);
+static void	 summarized_as_reference(const char *scenario,
+		    const char *program, unsigned int flags, const char *query,
+		    uint64_t summaries);
+static void	 stored_accumulators_answer_as_rows_do(void);
+static void	 an_index_built_already_is_no_saving(void);
+static void	 an_index_a_delta_plan_reads_is_no_saving(void);
+static void	 a_fold_no_binding_reaches_is_not_summarized(void);
 
 static void
 append_text(rendering_t *rendering, const char *text, size_t length)
@@ -800,7 +816,6 @@ static void
 the_peak_counts_the_summary(void)
 {
 	relic_dom_t rows[3 * FILES];
-	relic_reduce_signature_t signature;
 	relic_reduced_source_t source;
 	relic_reduce_batch_t batch;
 	relic_relation_t *relation;
@@ -829,11 +844,8 @@ the_peak_counts_the_summary(void)
 		}
 	}
 
-	bzero(&signature, sizeof(signature));
-	signature.fn = RELIC_AGG_COUNT;
 	bzero(&source, sizeof(source));
-	source.signatures = &signature;
-	source.signature_count = 1;
+	source.counts = true;
 	source.key_mask = UINT32_C(1) << 1;
 	bzero(&batch, sizeof(batch));
 	batch.rows = rows;
@@ -1031,6 +1043,351 @@ a_memory_limit_refuses_a_reduction_cleanly(void)
 		(void)answers_under_limit(program, limit, expected);
 }
 
+/*
+ * The degree fixture: a ring of RING nodes, each with an edge to the
+ * RING_STEPS nodes the steps reach; SIDE sources with edges into the ring
+ * and none in, SIDE sinks with an edge from the ring and none out, two
+ * self-loops, and two facts stated twice, which the base relation holds
+ * once.
+ */
+#define	RING			40
+#define	SIDE			5
+#define	DEGREE_NODES		(RING + 2 * SIDE)
+#define	DEGREE_RULES \
+	"node(X) :- edge(X, _).\n" \
+	"node(Y) :- edge(_, Y).\n" \
+	"degree(X, O, I) :- node(X), O = count { edge(X, Y) },\n" \
+	"    I = count { edge(Z, X) }.\n"
+
+static void
+write_degree(char *program, size_t size)
+{
+	static const unsigned int steps[] = { 1, 3, 7, 11 };
+	size_t used;
+	unsigned int i;
+	unsigned int s;
+
+	used = 0;
+	for (i = 0; i < RING; i++)
+		for (s = 0; s < sizeof(steps) / sizeof(steps[0]); s++)
+			used += (size_t)snprintf(program + used, size - used,
+			    "edge(%u, %u).\n", i, (i + steps[s]) % RING);
+	for (i = 0; i < SIDE; i++)
+		used += (size_t)snprintf(program + used, size - used,
+		    "edge(%u, %u). edge(%u, %u). edge(%u, %u).\n",
+		    100 + i, i, 100 + i, i + 1, i, 200 + i);
+	(void)snprintf(program + used, size - used, "%s%s",
+	    "edge(5, 5). edge(6, 6). edge(0, 1). edge(100, 0).\n",
+	    DEGREE_RULES);
+}
+
+/*
+ * The degrees fold the base relation edge on its first column and on its
+ * second, each once for every node.  The run summarizes each of the two
+ * families once, in one walk of edge, rather than once for each node, and
+ * never builds the indexes the folds would read rows through: each fold
+ * is one probe of a summary.  So it is in the whole program's
+ * materialization, which has a scope of its own.  The reference reads
+ * rows through both indexes.  A second query builds its summaries again,
+ * since none outlives the run that built it.
+ */
+static void
+a_stored_relation_is_summarized_once_per_family(void)
+{
+	static const struct {
+		const char	*name;
+		unsigned int	 flags;
+	} runs[] = {
+		{ "the query's run", 0 },
+		{ "the materialization", RELIC_F_NO_MAGIC },
+	};
+	static char program[PROGRAM_MAX];
+	static char reference[RENDERED_MAX];
+	static char answer[RENDERED_MAX];
+	const relic_relation_t *edge;
+	relic_t *ctx;
+	size_t r;
+
+	write_degree(program, sizeof(program));
+	ctx = context_flagged(program, RELIC_F_NO_GROUP_REDUCTION);
+	if (ctx == NULL)
+		return;
+	check(run_query(ctx, "degree(X, O, I)?", reference) == 0,
+	    SCENARIO_STORED, "the reference should answer");
+	edge = relation_named(ctx, "edge", 2);
+	checkf(ctx->counters.summaries_built == 0 && edge != NULL &&
+	    edge->index_count == 2, SCENARIO_STORED, "the reference should "
+	    "fold through two indexes and build no summary, not %" PRIu64,
+	    ctx->counters.summaries_built);
+	relic_destroy(ctx);
+
+	for (r = 0; r < sizeof(runs) / sizeof(runs[0]); r++) {
+		ctx = context_flagged(program, runs[r].flags);
+		if (ctx == NULL)
+			return;
+		checkf(run_query(ctx, "degree(X, O, I)?", answer) == 0 &&
+		    strcmp(answer, reference) == 0, SCENARIO_STORED,
+		    "%s should answer as the reference does", runs[r].name);
+		edge = relation_named(ctx, "edge", 2);
+		checkf(ctx->counters.summaries_built == 2 &&
+		    ctx->counters.read.summary_probes == 2 * DEGREE_NODES,
+		    SCENARIO_STORED, "%s should build 2 summaries and probe "
+		    "them %u times, not %" PRIu64 " and %" PRIu64,
+		    runs[r].name, 2 * DEGREE_NODES,
+		    ctx->counters.summaries_built,
+		    ctx->counters.read.summary_probes);
+		checkf(edge != NULL && edge->index_count == 0 &&
+		    relic_relation_count(edge) == RING * 4 + SIDE * 3 + 2,
+		    SCENARIO_STORED, "%s should keep edge's rows once each "
+		    "and build no index of it", runs[r].name);
+		if (runs[r].flags == 0) {
+			check(run_query(ctx, "degree(X, O, I)?", answer) == 0 &&
+			    strcmp(answer, reference) == 0 &&
+			    ctx->counters.summaries_built == 4,
+			    SCENARIO_STORED, "a second query should build its "
+			    "summaries again and answer the same");
+		}
+		relic_destroy(ctx);
+	}
+}
+
+/*
+ * An unkeyed count of a stored relation reads its tuple count, visiting
+ * none of its rows: the reference, which walks them, scans exactly the
+ * relation's tuples more, and both count the duplicate fact once.
+ */
+static void
+an_unkeyed_count_reads_no_rows(void)
+{
+	static char program[PROGRAM_MAX];
+	static char reference[RENDERED_MAX];
+	static char answer[RENDERED_MAX];
+	uint64_t scanned;
+	size_t used;
+	relic_t *ctx;
+	unsigned int i;
+
+	used = 0;
+	for (i = 0; i < FILES; i++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "e(%u, %u).\n", i, i + 1);
+	(void)snprintf(program + used, sizeof(program) - used,
+	    "e(0, 1).\ntotal(N) :- N = count { e(X, Y) }.\n");
+
+	ctx = context_flagged(program, RELIC_F_NO_GROUP_REDUCTION);
+	if (ctx == NULL)
+		return;
+	check(run_query(ctx, "total(N)?", reference) == 0 &&
+	    strcmp(reference, "240") == 0, SCENARIO_CARDINALITY,
+	    "the reference should count every distinct fact");
+	scanned = ctx->counters.read.tuples_scanned;
+	relic_destroy(ctx);
+
+	ctx = context_flagged(program, 0);
+	if (ctx == NULL)
+		return;
+	check(run_query(ctx, "total(N)?", answer) == 0 &&
+	    strcmp(answer, reference) == 0, SCENARIO_CARDINALITY,
+	    "the count should answer as the reference does");
+	checkf(scanned - ctx->counters.read.tuples_scanned == FILES,
+	    SCENARIO_CARDINALITY, "the count should scan %u tuples fewer "
+	    "than the reference, not %" PRIu64, FILES,
+	    scanned - ctx->counters.read.tuples_scanned);
+	relic_destroy(ctx);
+}
+
+
+/*
+ * Answer `query` over `program` under `flags`, and under them with the
+ * reference too, checking that the answers agree and that the run builds
+ * `summaries` summaries of stored relations, and the reference none.
+ */
+static void
+summarized_as_reference(const char *scenario, const char *program,
+    unsigned int flags, const char *query, uint64_t summaries)
+{
+	static char reference[RENDERED_MAX];
+	static char answer[RENDERED_MAX];
+	relic_t *ctx;
+
+	ctx = context_flagged(program, flags | RELIC_F_NO_GROUP_REDUCTION);
+	if (ctx == NULL)
+		return;
+	checkf(run_query(ctx, query, reference) == 0 &&
+	    ctx->counters.summaries_built == 0, scenario,
+	    "the reference should answer %s building no summary", query);
+	relic_destroy(ctx);
+
+	ctx = context_flagged(program, flags);
+	if (ctx == NULL)
+		return;
+	checkf(run_query(ctx, query, answer) == 0 &&
+	    strcmp(answer, reference) == 0, scenario,
+	    "%s should answer as the reference does", query);
+	checkf(ctx->counters.summaries_built == summaries, scenario,
+	    "%s should build %" PRIu64 " summaries, not %" PRIu64, query,
+	    summaries, ctx->counters.summaries_built);
+	relic_destroy(ctx);
+}
+
+/*
+ * A count, a sum, a min and a max of one stored relation on one key, read
+ * from one summary of three accumulators: KEYS_W keys of ROWS_W rows each,
+ * holding ties, a sum whose exact total passes through 2^63 and comes back
+ * to zero, groups of mixed types, whose sum and extremes have no value
+ * while their count does, and a key with no rows.  The family holds the
+ * three accumulators stats needs whichever rule folds it, so a query of
+ * counted alone, whose one count would not repay updating them, keeps
+ * its row folds, and so do ones of extremes and of highest, whose min and
+ * max meet a mixed group without a sum before them, and whose max meets
+ * it alone; the materialization, which derives stats too, builds the
+ * summary for stats, and the others read it.
+ */
+static void
+stored_accumulators_answer_as_rows_do(void)
+{
+#define	KEYS_W	20
+#define	ROWS_W	12
+	static const struct {
+		unsigned int	flags;
+		uint64_t	counted;
+	} runs[] = {
+		{ 0, 0 },
+		{ RELIC_F_NO_MAGIC, 1 },
+	};
+	static char program[PROGRAM_MAX];
+	size_t used;
+	size_t r;
+	unsigned int k;
+	unsigned int i;
+
+	used = 0;
+	for (k = 0; k <= KEYS_W; k++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "key(%u).\n", k);
+	for (k = 0; k < KEYS_W; k++) {
+		for (i = 0; i < ROWS_W; i++) {
+			if (k == 2 && i < 4)
+				used += (size_t)snprintf(program + used,
+				    sizeof(program) - used, "w(%u, %u, %s).\n",
+				    k, i, i < 2 ? "4611686018427387904" :
+				    "-4611686018427387904");
+			else if (k % 7 == 3 && i == 5)
+				used += (size_t)snprintf(program + used,
+				    sizeof(program) - used,
+				    "w(%u, %u, \"x\").\n", k, i);
+			else
+				used += (size_t)snprintf(program + used,
+				    sizeof(program) - used, "w(%u, %u, %u).\n",
+				    k, i, (k * 7 + i) % 5);
+		}
+	}
+	(void)snprintf(program + used, sizeof(program) - used, "%s",
+	    "stats(K, N, S, LO, HI) :- key(K), N = count { w(K, I, V) },\n"
+	    "    S = sum(V1) { w(K, I1, V1) },\n"
+	    "    LO = min(V2) { w(K, I2, V2) },\n"
+	    "    HI = max(V3) { w(K, I3, V3) }.\n"
+	    "counted(K, N) :- key(K), N = count { w(K, I, V) }.\n"
+	    "extremes(K, LO, HI) :- key(K), LO = min(V2) { w(K, I2, V2) },\n"
+	    "    HI = max(V3) { w(K, I3, V3) }.\n"
+	    "highest(K, HI) :- key(K), HI = max(V3) { w(K, I3, V3) }.\n");
+
+	for (r = 0; r < sizeof(runs) / sizeof(runs[0]); r++) {
+		summarized_as_reference(SCENARIO_ACCUMULATORS, program,
+		    runs[r].flags, "stats(K, N, S, LO, HI)?", 1);
+		summarized_as_reference(SCENARIO_ACCUMULATORS, program,
+		    runs[r].flags, "counted(K, N)?", runs[r].counted);
+		summarized_as_reference(SCENARIO_ACCUMULATORS, program,
+		    runs[r].flags, "extremes(K, LO, HI)?", runs[r].counted);
+		summarized_as_reference(SCENARIO_ACCUMULATORS, program,
+		    runs[r].flags, "highest(K, HI)?", runs[r].counted);
+	}
+#undef	KEYS_W
+#undef	ROWS_W
+}
+
+/*
+ * A fold whose index an earlier component built is not credited with the
+ * index's construction, which a summary would not save: here p's rule
+ * reads e's index on its first column before r's folds are planned, so
+ * the ten probes of three groups' rows remain cheaper than a summary.
+ */
+static void
+an_index_built_already_is_no_saving(void)
+{
+	static const unsigned int flags[] = { 0, RELIC_F_NO_MAGIC };
+	static char program[PROGRAM_MAX];
+	size_t used;
+	size_t f;
+	unsigned int i;
+
+	used = (size_t)snprintf(program, sizeof(program), "%s",
+	    "key(1). key(4). key(7).\n"
+	    "p(X) :- key(X), e(X, _).\n"
+	    "r(X, N) :- p(X), N = count { e(X, Y) }.\n");
+	for (i = 0; i < 100; i++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "e(%u, %u).\n", i % 10, i);
+
+	for (f = 0; f < sizeof(flags) / sizeof(flags[0]); f++)
+		summarized_as_reference(SCENARIO_BUILT_INDEX, program,
+		    flags[f], "r(X, N)?", 0);
+}
+
+/*
+ * The index a recursive rule's delta-first plan reads is built whatever
+ * the folds do, so it is no saving of a summary even when the rule's
+ * ordinary plan would read e otherwise: r's second rule, run semi-naively,
+ * looks e up on its first column for each new r, which is the index the
+ * first rule's count would read.
+ */
+static void
+an_index_a_delta_plan_reads_is_no_saving(void)
+{
+	static char program[PROGRAM_MAX];
+	size_t used;
+	unsigned int i;
+
+	used = (size_t)snprintf(program, sizeof(program), "%s",
+	    "key(1). key(4). key(7).\n"
+	    "r(X, N) :- key(X), N = count { e(X, Y) }.\n"
+	    "r(Y, N) :- e(X, Y), r(X, N).\n");
+	for (i = 0; i < 100; i++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "e(%u, %u).\n", i % 10, i);
+
+	summarized_as_reference(SCENARIO_DELTA_INDEX, program,
+	    RELIC_F_NO_MAGIC, "r(X, N)?", 0);
+}
+
+/*
+ * A recursive rule's draft reads its own relations empty, so no binding
+ * reaches a fold after such a read, and nothing shows a summary of it
+ * would be read:
+ * however much the index builds would cost, none is built, here with the
+ * rule's order kept as written so that both folds would look rows up,
+ * through indexes of e that only they read.  e's 100 rows have 20 keys
+ * on its first column and 25 on its second.
+ */
+static void
+a_fold_no_binding_reaches_is_not_summarized(void)
+{
+	static char program[PROGRAM_MAX];
+	size_t used;
+	unsigned int i;
+
+	used = (size_t)snprintf(program, sizeof(program), "%s",
+	    "reach(0).\n"
+	    "reach(Y) :- reach(X), f(X, Y), O = count { e(Y, Z) },\n"
+	    "    I = count { e(W, Y) }, O >= I.\n");
+	for (i = 0; i < 100; i++)
+		used += (size_t)snprintf(program + used, sizeof(program) - used,
+		    "e(%u, %u). f(%u, %u).\n", i % 20, i % 25, i % 20, i % 25);
+
+	summarized_as_reference(SCENARIO_UNREACHED, program,
+	    RELIC_F_NO_REORDER | RELIC_F_NO_MAGIC, "reach(X)?", 0);
+}
+
 #ifdef RELIC_REDUCE_ROWS_MAX
 /*
  * A reduced source has no store, but keeps the ceiling on its rows that a
@@ -1091,6 +1448,12 @@ main(void)
 	many_retained_values_are_interned_in_chunks();
 #endif
 	a_memory_limit_refuses_a_reduction_cleanly();
+	a_stored_relation_is_summarized_once_per_family();
+	an_unkeyed_count_reads_no_rows();
+	stored_accumulators_answer_as_rows_do();
+	an_index_built_already_is_no_saving();
+	an_index_a_delta_plan_reads_is_no_saving();
+	a_fold_no_binding_reaches_is_not_summarized();
 #ifdef RELIC_REDUCE_ROWS_MAX
 	the_row_ceiling_outlives_the_store();
 #endif

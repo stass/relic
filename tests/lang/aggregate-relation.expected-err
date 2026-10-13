@@ -26,25 +26,26 @@ stratum 1, component 5: in/2
         aggregate N = count e(Y, X) key={1}
         emit in(X, N)
 stratum 1, component 6: mid/2
+    summarize t/3 key={1} count
     rule mid(Y, N) :- node(Y), N = count { t(X, Y, Z) }.
         scan node(Y)
-        aggregate N = count t(X, Y, Z) key={1}
+        aggregate N = count t(X, Y, Z) key={1} summary
         emit mid(Y, N)
 stratum 1, component 7: edges/1
     rule edges(N) :- N = count { e(X, Y) }.
-        aggregate N = count e(X, Y)
+        aggregate N = count e(X, Y) cardinality
         emit edges(N)
 stratum 1, component 8: targets/1
     rule targets(N) :- N = count { e(_, Y) }.
-        aggregate N = count agg$targets$1$0$1(Y)
+        aggregate N = count agg$targets$1$0$1(Y) cardinality
         emit targets(N)
 stratum 1, component 9: from_a/1
     rule from_a(N) :- N = count { e(a, Y) }.
-        aggregate N = count agg$from_a$1$0$1(Y)
+        aggregate N = count agg$from_a$1$0$1(Y) cardinality
         emit from_a(N)
 stratum 1, component 10: loops/1
     rule loops(N) :- N = count { e(X, X) }.
-        aggregate N = count agg$loops$1$0$1(X)
+        aggregate N = count agg$loops$1$0$1(X) cardinality
         emit loops(N)
 stratum 1, component 11: paths/2
     rule paths(X, N) :- node(X), N = count { e(X, Y), e(Y, Z) }.

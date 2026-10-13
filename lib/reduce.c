@@ -68,6 +68,7 @@ typedef struct relic_groups relic_groups_t;
 typedef struct relic_held relic_held_t;
 typedef struct relic_retained relic_retained_t;
 typedef struct relic_seen relic_seen_t;
+typedef struct relic_stored_builder relic_stored_builder_t;
 
 /*
  * A value a builder holds: an identifier the context had assigned, or a
@@ -185,6 +186,37 @@ struct relic_summary {
 	uint16_t		 key_count;
 };
 
+/*
+ * The builder of one family's summary over a stored relation
+ * (relic_summarize_relation()).  Every value of a stored tuple is an
+ * identifier the context assigned, so none of a reducer's pending values
+ * arise: a group is found by its key's identifiers, hashed as the summary
+ * hashes them, and its key is read from its `first` tuple, which stays in
+ * place for the walk, rather than copied.  `capacity` groups are laid out
+ * in one block of `block_bytes`, each with its first tuple, row count,
+ * and an accumulator and an extreme's identifier per signature, in the
+ * order of the keys' first occurrence; `table` finds a group by its key,
+ * holding positions plus one.  `charged` is what the builder holds of the
+ * account.
+ */
+struct relic_stored_builder {
+	const relic_fold_family_t	*family;
+	const relic_relation_t		*relation;
+	relic_tuple_id_t		*first;
+	uint64_t			*rows;
+	relic_fold_state_t		*states;
+	relic_dom_t			*extremes;
+	void				*block;
+	relic_idtab_t			 table;
+	size_t				 group_count;
+	size_t				 capacity;
+	size_t				 block_bytes;
+	size_t				 charged;
+	uint64_t			 hash_seed;
+	uint16_t			 key_columns[RELIC_MAX_ARITY];
+	uint16_t			 key_count;
+};
+
 static bool	 charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
 static void	 release(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
 static size_t	 lay_out_groups(const relic_reducer_t *reducer,
@@ -249,6 +281,28 @@ static void	 discard_summary(relic_t *ctx, relic_reducer_t *reducer,
 static int	 fill_summary(relic_t *ctx, const relic_reducer_t *reducer,
 		    const relic_relation_t *relation,
 		    relic_summary_t *summary);
+static void	 stored_open(relic_t *ctx, relic_stored_builder_t *builder,
+		    const relic_fold_family_t *family,
+		    const relic_relation_t *relation);
+static bool	 stored_charge(relic_t *ctx, relic_stored_builder_t *builder,
+		    size_t bytes);
+static void	 stored_release(relic_t *ctx,
+		    relic_stored_builder_t *builder, size_t bytes);
+static size_t	 lay_out_stored(relic_stored_builder_t *builder,
+		    size_t capacity, void *memory);
+static int	 grow_stored(relic_t *ctx, relic_stored_builder_t *builder);
+static uint32_t	 rehash_stored(uint32_t id, void *owner);
+static size_t	 find_stored(const relic_stored_builder_t *builder,
+		    uint32_t hash, const relic_dom_t *key);
+static int	 add_stored(relic_t *ctx, relic_stored_builder_t *builder,
+		    uint32_t hash, relic_tuple_id_t id, size_t *groupp);
+static int	 take_stored(relic_t *ctx, relic_stored_builder_t *builder,
+		    relic_tuple_id_t id, const relic_dom_t *tuple);
+static int	 finish_stored(relic_t *ctx, relic_stored_builder_t *builder,
+		    relic_summary_t **summaryp);
+static void	 discard_stored(relic_t *ctx, relic_stored_builder_t *builder,
+		    relic_summary_t *summary);
+static void	 close_stored(relic_t *ctx, relic_stored_builder_t *builder);
 
 /*
  * Charge `bytes` more to the account for the builder, reporting the
@@ -857,9 +911,6 @@ take_row(relic_t *ctx, relic_reducer_t *reducer,
 	rows = reducer->groups.rows[group];
 	for (s = 0; s < reducer->signature_count; s++) {
 		signature = &reducer->signatures[s];
-		if (signature->fn == RELIC_AGG_COUNT)
-			continue;
-
 		at = group * reducer->signature_count + s;
 		state = &reducer->groups.states[at];
 		extreme = &reducer->groups.extremes[at];
@@ -1530,4 +1581,456 @@ relic_summary_state(const relic_summary_t *summary, size_t group,
 	*extremep = summary->extremes[at];
 
 	return (&summary->states[at]);
+}
+
+/*
+ * The tuples are walked in identifier order, every family's builder taking
+ * each run of RELIC_REDUCE_CHUNK of them in turn.  The summaries are made
+ * into `summaries` and handed to the families together, so a refusal part
+ * way through destroys those already made and leaves every family as it
+ * was.
+ */
+int
+relic_summarize_relation(relic_t *ctx, relic_arena_t *arena,
+    const relic_relation_t *relation, relic_fold_family_t *const *families,
+    size_t count)
+{
+	relic_stored_builder_t *builders;
+	relic_summary_t **summaries;
+	const relic_dom_t *tuple;
+	relic_tuple_id_t first;
+	relic_tuple_id_t last;
+	relic_tuple_id_t end;
+	relic_tuple_id_t id;
+	size_t f;
+	int status;
+
+	builders = relic_arena_allocarray(arena, count, sizeof(*builders));
+	summaries = relic_arena_allocarray(arena, count, sizeof(*summaries));
+	if (builders == NULL || summaries == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	bzero(summaries, count * sizeof(*summaries));
+	for (f = 0; f < count; f++) {
+		assert(families[f]->summary == NULL &&
+		    families[f]->arity == relation->arity);
+		stored_open(ctx, &builders[f], families[f], relation);
+	}
+
+	status = 0;
+	end = relic_relation_end(relation);
+	for (first = 1; status == 0 && first < end; first = last) {
+		status = relic_refuse_interrupted(ctx, "summarizing",
+		    relation);
+		last = end - first < RELIC_REDUCE_CHUNK ? end :
+		    first + RELIC_REDUCE_CHUNK;
+		for (f = 0; status == 0 && f < count; f++) {
+			tuple = relic_relation_tuple(relation, first);
+			for (id = first; status == 0 && id < last; id++) {
+				status = take_stored(ctx, &builders[f], id,
+				    tuple);
+				tuple += relation->arity;
+			}
+		}
+		if (status == 0)
+			ctx->counters.read.tuples_scanned += last - first;
+	}
+
+	for (f = 0; status == 0 && f < count; f++)
+		status = finish_stored(ctx, &builders[f], &summaries[f]);
+
+	for (f = 0; f < count; f++) {
+		close_stored(ctx, &builders[f]);
+		if (status != 0) {
+			relic_summary_destroy(ctx, summaries[f]);
+			continue;
+		}
+		families[f]->summary = summaries[f];
+		families[f]->built_at = relic_relation_count(relation);
+	}
+	if (status == 0)
+		ctx->counters.summaries_built += count;
+
+	return (status);
+}
+
+static void
+stored_open(relic_t *ctx, relic_stored_builder_t *builder,
+    const relic_fold_family_t *family, const relic_relation_t *relation)
+{
+	uint16_t column;
+
+	bzero(builder, sizeof(*builder));
+	builder->family = family;
+	builder->relation = relation;
+	builder->hash_seed = ctx->hash_seed;
+	relic_idtab_init(&builder->table, true);
+	for (column = 0; column < family->arity; column++) {
+		if ((family->key_mask & (UINT32_C(1) << column)) != 0)
+			builder->key_columns[builder->key_count++] = column;
+	}
+}
+
+/*
+ * Charge and give back `bytes` for the builder, as charge() and release()
+ * do for a reducer.
+ */
+static bool
+stored_charge(relic_t *ctx, relic_stored_builder_t *builder, size_t bytes)
+{
+	if (!relic_account_charge(&ctx->account, bytes)) {
+		relic_diag_no_memory(ctx);
+		return (false);
+	}
+	builder->charged += bytes;
+
+	return (true);
+}
+
+static void
+stored_release(relic_t *ctx, relic_stored_builder_t *builder, size_t bytes)
+{
+	assert(bytes <= builder->charged);
+	relic_account_release(&ctx->account, bytes);
+	builder->charged -= bytes;
+}
+
+/*
+ * Lay out the arrays of `capacity` groups in `memory`, or only measure
+ * them when it is NULL, and return their bytes, SIZE_MAX when a size
+ * cannot count them.
+ */
+static size_t
+lay_out_stored(relic_stored_builder_t *builder, size_t capacity,
+    void *memory)
+{
+	size_t per_signature;
+	size_t bytes;
+	char *cursor;
+
+	cursor = memory;
+	bytes = 0;
+	per_signature = relic_saturating_product(capacity,
+	    builder->family->signature_count);
+	builder->first = relic_block_piece(&cursor, &bytes, capacity,
+	    sizeof(*builder->first));
+	builder->rows = relic_block_piece(&cursor, &bytes, capacity,
+	    sizeof(*builder->rows));
+	builder->states = relic_block_piece(&cursor, &bytes, per_signature,
+	    sizeof(*builder->states));
+	builder->extremes = relic_block_piece(&cursor, &bytes, per_signature,
+	    sizeof(*builder->extremes));
+
+	return (bytes);
+}
+
+/*
+ * Give the groups room for one more, in a new block charged before it is
+ * allocated, the old one given back once the groups are copied out of it.
+ */
+static int
+grow_stored(relic_t *ctx, relic_stored_builder_t *builder)
+{
+	relic_stored_builder_t grown;
+	size_t per_signature;
+	size_t capacity;
+	size_t bytes;
+
+	grown = *builder;
+	capacity = relic_grow_array_capacity(builder->capacity,
+	    builder->group_count + 1);
+	bytes = capacity == 0 ? SIZE_MAX :
+	    lay_out_stored(&grown, capacity, NULL);
+	if (bytes == SIZE_MAX) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!stored_charge(ctx, builder, bytes))
+		return (-1);
+	grown.block = malloc(bytes);
+	if (grown.block == NULL) {
+		stored_release(ctx, builder, bytes);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	(void)lay_out_stored(&grown, capacity, grown.block);
+	per_signature = builder->group_count *
+	    builder->family->signature_count;
+	if (builder->group_count > 0) {
+		bcopy(builder->first, grown.first, builder->group_count *
+		    sizeof(*grown.first));
+		bcopy(builder->rows, grown.rows, builder->group_count *
+		    sizeof(*grown.rows));
+		bcopy(builder->states, grown.states, per_signature *
+		    sizeof(*grown.states));
+		bcopy(builder->extremes, grown.extremes, per_signature *
+		    sizeof(*grown.extremes));
+	}
+
+	free(builder->block);
+	stored_release(ctx, builder, builder->block_bytes);
+	builder->first = grown.first;
+	builder->rows = grown.rows;
+	builder->states = grown.states;
+	builder->extremes = grown.extremes;
+	builder->block = grown.block;
+	builder->block_bytes = bytes;
+	builder->capacity = capacity;
+
+	return (0);
+}
+
+/*
+ * The hash of group `id`'s key, position plus one, for the table's growth.
+ */
+static uint32_t
+rehash_stored(uint32_t id, void *owner)
+{
+	const relic_stored_builder_t *builder = owner;
+	const relic_dom_t *tuple;
+	relic_dom_t key[RELIC_MAX_ARITY];
+	uint16_t k;
+
+	tuple = relic_relation_tuple(builder->relation,
+	    builder->first[id - 1]);
+	for (k = 0; k < builder->key_count; k++)
+		key[k] = tuple[builder->key_columns[k]];
+
+	return (relic_hash_words(builder->hash_seed, key, builder->key_count));
+}
+
+/*
+ * The position of the group of `key`, whose hash is `hash`, or SIZE_MAX
+ * when no tuple taken so far has it.
+ */
+static size_t
+find_stored(const relic_stored_builder_t *builder, uint32_t hash,
+    const relic_dom_t *key)
+{
+	relic_idprobe_t probe;
+	const relic_dom_t *tuple;
+	uint32_t id;
+	uint16_t k;
+
+	relic_idprobe_open(&probe, &builder->table, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		tuple = relic_relation_tuple(builder->relation,
+		    builder->first[id - 1]);
+		for (k = 0; k < builder->key_count; k++) {
+			if (tuple[builder->key_columns[k]] != key[k])
+				break;
+		}
+		if (k == builder->key_count)
+			return (id - 1);
+	}
+
+	return (SIZE_MAX);
+}
+
+/*
+ * Make the group whose first tuple is `id`, with no rows, its position in
+ * *groupp.  The table is reserved before the group is counted, so a
+ * refusal leaves no group the table cannot find.
+ */
+static int
+add_stored(relic_t *ctx, relic_stored_builder_t *builder, uint32_t hash,
+    relic_tuple_id_t id, size_t *groupp)
+{
+	size_t table_growth;
+	size_t group;
+	size_t s;
+
+	if (builder->group_count == builder->capacity &&
+	    grow_stored(ctx, builder) != 0)
+		return (-1);
+
+	if (!relic_idtab_has_room(&builder->table, 1)) {
+		table_growth = relic_idtab_bytes_after_reserve(&builder->table,
+		    1) - relic_idtab_bytes(&builder->table);
+		if (!stored_charge(ctx, builder, table_growth))
+			return (-1);
+		if (relic_idtab_reserve(&builder->table, 1, rehash_stored,
+		    builder) != 0) {
+			stored_release(ctx, builder, table_growth);
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+	}
+
+	group = builder->group_count++;
+	builder->first[group] = id;
+	builder->rows[group] = 0;
+	for (s = 0; s < builder->family->signature_count; s++) {
+		relic_fold_init(&builder->states[group *
+		    builder->family->signature_count + s]);
+		builder->extremes[group *
+		    builder->family->signature_count + s] = 0;
+	}
+	relic_idtab_place(&builder->table, hash, (uint32_t)(group + 1));
+	*groupp = group;
+
+	return (0);
+}
+
+/*
+ * Fold tuple `id` into its group, as fold_row() in lib/exec.c folds a
+ * stored row, an extreme kept as the identifier of the value that
+ * replaced it.  A group whose rows leave a signature outside its
+ * function's domain keeps counting them, as a reducer's does, since its
+ * row count is every count's.
+ */
+static int
+take_stored(relic_t *ctx, relic_stored_builder_t *builder,
+    relic_tuple_id_t id, const relic_dom_t *tuple)
+{
+	const relic_reduce_signature_t *signature;
+	relic_value_view_t extreme;
+	relic_value_view_t value;
+	relic_dom_t key[RELIC_MAX_ARITY];
+	uint64_t rows;
+	uint32_t hash;
+	size_t group;
+	size_t at;
+	size_t s;
+	uint16_t k;
+	bool known RELIC_UNUSED;
+
+	for (k = 0; k < builder->key_count; k++)
+		key[k] = tuple[builder->key_columns[k]];
+	hash = relic_hash_words(builder->hash_seed, key, builder->key_count);
+	group = find_stored(builder, hash, key);
+	if (group == SIZE_MAX &&
+	    add_stored(ctx, builder, hash, id, &group) != 0)
+		return (-1);
+
+	rows = builder->rows[group];
+	for (s = 0; s < builder->family->signature_count; s++) {
+		signature = &builder->family->signatures[s];
+		at = group * builder->family->signature_count + s;
+		known = relic_value_view(ctx, tuple[signature->column], &value);
+		assert(known);
+		bzero(&extreme, sizeof(extreme));
+		if (builder->extremes[at] != 0) {
+			known = relic_value_view(ctx, builder->extremes[at],
+			    &extreme);
+			assert(known);
+		}
+		if (relic_fold_add(signature->fn, &builder->states[at], rows,
+		    &extreme, &value) == RELIC_FOLD_REPLACED)
+			builder->extremes[at] = tuple[signature->column];
+	}
+	builder->rows[group] = rows + 1;
+
+	return (0);
+}
+
+/*
+ * Copy the groups into a summary laid out for exactly them, charged to
+ * the builder until it is whole and then handed over with its charge.
+ */
+static int
+finish_stored(relic_t *ctx, relic_stored_builder_t *builder,
+    relic_summary_t **summaryp)
+{
+	relic_summary_t *summary;
+	const relic_dom_t *tuple;
+	relic_dom_t *key;
+	size_t signature_count;
+	size_t bytes;
+	size_t g;
+	uint32_t hash;
+	uint16_t k;
+
+	*summaryp = NULL;
+	signature_count = builder->family->signature_count;
+	summary = calloc(1, sizeof(*summary));
+	if (summary == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	summary->group_count = builder->group_count;
+	summary->signature_count = signature_count;
+	summary->key_count = builder->key_count;
+	summary->hash_seed = builder->hash_seed;
+	relic_idtab_init(&summary->table, true);
+
+	bytes = relic_saturating_sum(lay_out_summary(summary, NULL),
+	    sizeof(*summary));
+	if (bytes == SIZE_MAX) {
+		free(summary);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!stored_charge(ctx, builder, bytes)) {
+		free(summary);
+		return (-1);
+	}
+	summary->block = malloc(bytes - sizeof(*summary));
+	if (summary->block == NULL) {
+		stored_release(ctx, builder, bytes);
+		free(summary);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	summary->bytes = bytes;
+	(void)lay_out_summary(summary, summary->block);
+
+	if (builder->group_count > 0) {
+		bcopy(builder->rows, summary->rows, builder->group_count *
+		    sizeof(*summary->rows));
+		bcopy(builder->states, summary->states, builder->group_count *
+		    signature_count * sizeof(*summary->states));
+		bcopy(builder->extremes, summary->extremes,
+		    builder->group_count * signature_count *
+		    sizeof(*summary->extremes));
+	}
+	for (g = 0; g < builder->group_count; g++) {
+		if (g > 0 && g % RELIC_REDUCE_CHUNK == 0 &&
+		    relic_refuse_interrupted(ctx, "summarizing",
+		    builder->relation) != 0) {
+			discard_stored(ctx, builder, summary);
+			return (-1);
+		}
+		tuple = relic_relation_tuple(builder->relation,
+		    builder->first[g]);
+		key = &summary->keys[g * summary->key_count];
+		for (k = 0; k < summary->key_count; k++)
+			key[k] = tuple[builder->key_columns[k]];
+		hash = relic_hash_words(summary->hash_seed, key,
+		    summary->key_count);
+		relic_idtab_place(&summary->table, hash, (uint32_t)(g + 1));
+	}
+
+	builder->charged -= bytes;
+	*summaryp = summary;
+
+	return (0);
+}
+
+/*
+ * Destroy a summary the builder still holds the charge of, one whose
+ * finishing was refused.
+ */
+static void
+discard_stored(relic_t *ctx, relic_stored_builder_t *builder,
+    relic_summary_t *summary)
+{
+	free(summary->block);
+	stored_release(ctx, builder, summary->bytes);
+	free(summary);
+}
+
+/*
+ * Give back everything the builder holds; a summary it finished is the
+ * caller's.
+ */
+static void
+close_stored(relic_t *ctx, relic_stored_builder_t *builder)
+{
+	free(builder->block);
+	relic_idtab_reset(&builder->table);
+	relic_account_release(&ctx->account, builder->charged);
+	builder->charged = 0;
 }
