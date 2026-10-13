@@ -97,19 +97,6 @@ the rewrite's schedule without reporting cycles.
 the include path, so any system header that includes `<regex.h>` would get
 relic's. Rename the header.
 
-**A batch window's scratch grows with its records, not its bytes.** [Low,
-component: `lib/window.c`, `lib/import.c`] A window holds up to
-`RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays
-take about 16 bytes per record, so a table of one-byte records takes some
-32 MiB of scratch per 2 MiB window, outside the memory account. Cap the
-records a window holds as well as its bytes.
-
-**One declined window reads the rest of the table a field at a time.**
-[Low, component: `lib/import.c`] A record longer than a window less a
-read chunk, or one refused allocation, ends batching for the rest of the
-import, which may be most of a large table. Resume windows once the
-reader stands at a record boundary with its input consumed.
-
 **An index built mid-component must be raised by its builder.** [Medium,
 component: `lib/index.c`, `lib/relation.h`, `lib/eval.c`] Each index keeps
 its own `latest_since`, yet `set_delta()` always raises every index of a

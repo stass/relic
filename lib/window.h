@@ -228,29 +228,33 @@ enum relic_framing {
  * A window being framed, by `reader`, which reads the table's structure
  * alone, begun at the window's first byte.  The window is the whole
  * records within `horizon` bytes of that byte, or before the end of input
- * when that comes first, cut into pieces of at least `piece_bytes` but
- * the last.  `buffered` of its bytes are in memory, and `ended` says the
- * stream ended successfully after them; `fed` of them have been fed the
- * reader.
+ * when that comes first, and no more than `most_records` of them, cut
+ * into pieces of at least `piece_bytes` but the last.  `buffered` bytes
+ * from the window's first are in memory, which may run past the window's
+ * end, and `ended` says the stream ended successfully after them; `fed`
+ * of them have been fed the reader.
  *
  * The rest is the window's manifest as far as it is framed, which the
  * window takes once it is: `piece_count` pieces in `pieces`, holding
- * `tuple_count` tuples and the window's first `length` bytes, the end of
- * the last record framed, whose next byte is at `end`.  `ends_input` says
- * the table ends with them.  `header` says the next record is the
- * table's header, and `open` that the last piece takes it.
+ * `record_count` records, `tuple_count` of them tuples, and the window's
+ * first `length` bytes, the end of the last record framed, whose next
+ * byte is at `end`.  `ends_input` says the table ends with them.
+ * `header` says the next record is the table's header, and `open` that
+ * the last piece takes it.
  */
 struct relic_framer {
 	relic_table_reader_t	 reader;
 	relic_window_piece_t	*pieces;
 	relic_location_t	 end;
 	size_t			 horizon;
+	size_t			 most_records;
 	size_t			 piece_bytes;
 	size_t			 buffered;
 	size_t			 fed;
 	size_t			 length;
 	size_t			 piece_count;
 	size_t			 piece_capacity;
+	size_t			 record_count;
 	size_t			 tuple_count;
 	enum relic_framing	 state;
 	bool			 ended;
@@ -318,8 +322,9 @@ void	 relic_window_classify_part(void *job, size_t stripe,
 
 /*
  * relic_framer_init() makes a framer of windows whose horizon is `horizon`
- * bytes from their first and whose pieces end at the first record end at
- * least `piece_bytes` after their start; it frames nothing until begun.
+ * bytes from their first, which hold at most `most_records` records, and
+ * whose pieces end at the first record end at least `piece_bytes` after
+ * their start; it frames nothing until begun.
  * relic_framer_reset() releases everything it holds, leaving it as
  * relic_framer_init() made it.
  *
@@ -337,16 +342,23 @@ void	 relic_window_classify_part(void *job, size_t stripe,
  * relic_framer_step() feeds the reader at most `most` more of those
  * bytes, the window's first now at `bytes`, and records the records they
  * complete.  Returns whether the framing goes on, which it no longer does
- * once every byte held before the horizon has been fed or the reader has
- * met the end of input, a mistake or a want of memory; the window is
- * then framed when it holds a whole record, and unframed otherwise.  The
- * reader holds none of the bytes between steps, so they may have moved
- * from one step to the next.  A step of a framer not framing does nothing
- * and returns false.  Pieces are cut by their bytes alone, so how the
- * window was stepped decides nothing about them either.
+ * once every byte held before the horizon has been fed, the window holds
+ * `most_records` records, or the reader has met the end of input, a
+ * mistake or a want of memory; the window is then framed when it holds a
+ * whole record, and unframed otherwise.  The cap is met as the record
+ * that reaches it is framed, before the reader reads on, so it ends the
+ * window at the same record however the window was stepped; it is the end
+ * of input only when that record ends where the bytes fed as the table's
+ * last do.  The reader holds none of the bytes between steps that go on,
+ * so they may have moved from one step to the next; a step that ends the
+ * framing may leave the reader pointing at bytes it did not read, which
+ * nothing reads before relic_framer_begin() feeds it anew.  A step of a
+ * framer not framing does nothing and returns false.  Pieces are cut by
+ * their bytes alone, so how the window was stepped decides nothing about
+ * them either.
  */
 void	 relic_framer_init(relic_framer_t *framer, size_t horizon,
-	    size_t piece_bytes);
+	    size_t most_records, size_t piece_bytes);
 void	 relic_framer_reset(relic_framer_t *framer);
 void	 relic_framer_begin(relic_framer_t *framer,
 	    const relic_import_plan_t *plan, const char *source_name,
