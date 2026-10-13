@@ -1364,7 +1364,7 @@ more ([architecture: limits](architecture.md#limits)).
 
 Nothing else is bounded by the language: a program may hold any number of
 statements, a body any number of literals, and an expression any number of
-nodes within its depth. The resource limits on tuples, memory and the
-Magic Sets rewrite's work belong to the tool and the library
-([architecture: limits](architecture.md#limits)), and no limit bounds the
-time an evaluation takes.
+nodes within its depth. The resource limits on tuples, memory, the size of
+one input and the Magic Sets rewrite's work belong to the tool and the
+library ([architecture: limits](architecture.md#limits)), and no limit
+bounds the time an evaluation takes.

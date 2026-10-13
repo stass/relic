@@ -158,9 +158,10 @@ as successful queries.
   `make check`. Dedicated suites run under address, undefined-behavior,
   thread, memory and leak sanitizers where supported.
 * **Resource limits and file access.** Tuple and evaluation-memory limits stop
-  runaway derivations with diagnostics. Programs express computation;
-  the runner chooses which data files they can read and write. The memory
-  limit covers evaluation storage, not total process memory.
+  runaway derivations with diagnostics, and an input limit bounds the size of
+  one program file or one field of an imported table. Programs express
+  computation; the runner chooses which data files they can read and write.
+  The memory limit covers evaluation storage, not total process memory.
 
 The [testing design](specs/design-testing.md) explains the reference
 checks, randomized testing and fuzzing. Run them locally with:

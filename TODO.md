@@ -97,13 +97,6 @@ the rewrite's schedule without reporting cycles.
 the include path, so any system header that includes `<regex.h>` would get
 relic's. Rename the header.
 
-**Nothing bounds an input's size.** [Low, component: `lib/parse.c`,
-`lib/import.c`, `include/relic.h`] A load reads its whole stream before
-lexing (`read_stream()`), and an import grows one field's buffer without
-bound, so an unterminated csv quote buffers the rest of the file. The
-memory limit leaves both out by contract. A bound on either belongs in the
-context's configuration, beside the other limits.
-
 **A batch window's scratch grows with its records, not its bytes.** [Low,
 component: `lib/window.c`, `lib/import.c`] A window holds up to
 `RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays

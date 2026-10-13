@@ -370,7 +370,8 @@ static bool	 parse_statement(relic_parser_t *parser);
 static bool	 parse_term(relic_parser_t *parser, relic_ast_term_t *term);
 static int	 parse_text(relic_parser_t *parser, relic_t *ctx,
 		    relic_arena_t *arena, relic_staging_t *staging,
-		    const char *source_name, const char *text, size_t length);
+		    const char *source_name, const char *text, size_t length,
+		    size_t text_max);
 static void	 parser_init(relic_parser_t *parser, relic_t *ctx,
 		    relic_arena_t *arena, relic_staging_t *staging,
 		    const char *source_name, const char *text, size_t length);
@@ -2978,6 +2979,9 @@ relic_source_name(relic_arena_t *arena, const char *name)
  * were reported on.  The caller decides what to do with the statements only
  * once all three agree, which is what lets a load be all or nothing.
  *
+ * A text longer than `text_max` bytes is refused as over the input limit
+ * before any of it is read; SIZE_MAX holds the text to no limit.
+ *
  * The arena flag is cleared once its failure has been reported.  A parse is
  * the phase that flag belongs to, and leaving it set on the program arena
  * would make one transient exhaustion refuse every later load for the life of
@@ -2989,7 +2993,7 @@ relic_source_name(relic_arena_t *arena, const char *name)
 static int
 parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
     relic_staging_t *staging, const char *source_name, const char *text,
-    size_t length)
+    size_t length, size_t text_max)
 {
 	const char *name;
 	int status;
@@ -2999,6 +3003,11 @@ parse_text(relic_parser_t *parser, relic_t *ctx, relic_arena_t *arena,
 	if (name == NULL) {
 		relic_diag_no_memory(ctx);
 		relic_arena_clear_failure(arena);
+		return (-1);
+	}
+
+	if (length > text_max) {
+		relic_diag_input_limit(ctx, NULL);
 		return (-1);
 	}
 
@@ -3078,7 +3087,8 @@ load_read_text(relic_t *ctx, const char *source_name, char *text,
 /*
  * Parse text into `load`: its statements onto the load's own list and its
  * facts into the load's staging, neither yet in the program.  Returns 0, or
- * -1 having reported every mistake; the caller resets `load` either way.
+ * -1 having reported every mistake or that the text is over the input limit;
+ * the caller resets `load` either way.
  */
 static int
 load_parse(relic_load_t *load, relic_t *ctx, const char *source_name,
@@ -3087,7 +3097,7 @@ load_parse(relic_load_t *load, relic_t *ctx, const char *source_name,
 	relic_staging_init(&load->staging, ctx);
 
 	return (parse_text(&load->parser, ctx, &ctx->program_arena,
-	    &load->staging, source_name, text, length));
+	    &load->staging, source_name, text, length, relic_input_max(ctx)));
 }
 
 /*
@@ -3175,9 +3185,13 @@ relic_parse_query(relic_t *ctx, relic_arena_t *arena, const char *source_name,
 
 	*statementp = NULL;
 
-	/* No staging: a fact in a query's text stays a statement to refuse. */
+	/*
+	 * No staging: a fact in a query's text stays a statement to refuse.
+	 * No input limit: it bounds what is loaded and imported, and a query's
+	 * text may be one the tool writes, such as an export's.
+	 */
 	status = parse_text(&parser, ctx, arena, NULL, source_name, text,
-	    strlen(text));
+	    strlen(text), SIZE_MAX);
 
 	if (status == 0) {
 		statement = only_query(&parser);
@@ -3200,6 +3214,9 @@ relic_parse_query(relic_t *ctx, relic_arena_t *arena, const char *source_name,
  * a length into the text with no buffer to refill beneath it.  An incremental
  * reader would bound only the text, while the load's staged facts, held until
  * its all-or-nothing commit, grow with the input regardless.
+ *
+ * A stream is read no further than one byte past the input limit, which is
+ * all parse_text() needs to refuse it, so an endless one is refused too.
  */
 static int
 read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
@@ -3208,10 +3225,14 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 	char *text;
 	size_t capacity;
 	size_t length;
+	size_t most;
 
 	text = NULL;
 	capacity = 0;
 	length = 0;
+	most = relic_input_max(ctx);
+	if (most != SIZE_MAX)
+		most++;
 
 	for (;;) {
 		char *grown;
@@ -3229,6 +3250,8 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		text = grown;
 
 		room = capacity - length;
+		if (room > most - length)
+			room = most - length;
 
 		/*
 		 * Cleared first, because a stream whose error indicator was
@@ -3243,7 +3266,7 @@ read_stream(relic_t *ctx, const char *source_name, FILE *stream, char **textp,
 		read_errno = errno;
 		length += got;
 
-		if (got == room)
+		if (got == room && length < most)
 			continue;
 
 		if (ferror(stream)) {

@@ -36,12 +36,14 @@ relic 1.0.0 (unreleased)
     large load's facts to relations that already hold some, can be shared
     among threads, with the same answers in the same order whatever their
     number.
-  * Optional limits on the tuples held and on the memory relations, values,
-    plans and rewrites occupy: a load, an evaluation or a query that would
-    exceed one is refused with a diagnostic, and changes nothing.  A
-    query's Magic rewrite is held to a limit on its work, in proportion to
-    the program unless set; a rewrite that outgrows it is abandoned with a
-    warning, and the query answered from the whole program.
+  * Optional limits on the tuples held, on the memory relations, values,
+    plans and rewrites occupy, and on the bytes of one program text or one
+    field of an imported table: a load, an import, an evaluation or a query
+    that would exceed one is refused with a diagnostic, and changes
+    nothing.  A query's Magic rewrite is held to a limit on its work, in
+    proportion to the program unless set; a rewrite that outgrows it is
+    abandoned with a warning, and the query answered from the whole
+    program.
   * The tool: answers in text, CSV, TSV or JSON; facts imported from CSV and
     TSV tables, -I edge.tsv naming its predicate and format by its file name
     and -T edge:symbol,symbol declaring the predicate's column types once;

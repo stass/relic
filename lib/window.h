@@ -82,7 +82,9 @@ typedef struct relic_framer relic_framer_t;
  * behind the import's back cannot make it keep more columns than it
  * checked.  `columns` and `predicate` are owned, `predicate` the name the
  * caller gave, `predicate_length` bytes long; `arity` is the number of
- * columns not skipped.
+ * columns not skipped.  `field_max`, the input limit as relic_input_max()
+ * gives it, is the bound every reader of the table is made with, so the
+ * scalar importer and a window's decoders refuse the same field.
  */
 struct relic_import_plan {
 	enum relic_column	*columns;
@@ -90,6 +92,7 @@ struct relic_import_plan {
 	size_t			 predicate_length;
 	size_t			 column_count;
 	size_t			 arity;
+	size_t			 field_max;
 	enum relic_format	 format;
 	bool			 header;
 };

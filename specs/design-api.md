@@ -286,8 +286,8 @@ The configuration holds the limits, the switches and the thread count, and
 the tool's `-l`, `-X` and `-j` merely parse into it, so a limit exists in
 exactly one place.
 
-* **Limits.** A zero tuple or memory limit means none; a zero Magic limit
-  asks for the default proportional to the program. What each limit
+* **Limits.** A zero tuple, memory or input limit means none; a zero Magic
+  limit asks for the default proportional to the program. What each limit
   counts, and that exceeding one is a diagnostic and discards partial
   results, is [Limits](architecture.md#limits). The limits bound what is
   stored, not what is computed: a join that derives nothing new, or a

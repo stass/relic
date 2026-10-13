@@ -547,6 +547,10 @@ $ relic -l tuples=20 -q 'stops(central, zoo, N)?' metro.dl
 relic: error: limit exceeded: tuples=20 while deriving next/2
 ```
 
+`-l input` bounds what is read instead: a program file, or one field of a
+table imported with `-I`, longer than the limit is refused before anything
+of it is added.
+
 ## Embedding relic in C
 
 Everything above is a client of `librelic`: load a program, prepare a

@@ -108,9 +108,9 @@ typedef struct relic_config relic_config_t;
 
 /*
  * Limits a context enforces, and switches that select internal behaviour.
- * A zeroed structure asks for the defaults: no bound on memory or tuples,
- * and for the Magic Sets rewrite the limit described below.  A limit of
- * SIZE_MAX bounds nothing it counts.
+ * A zeroed structure asks for the defaults: no bound on memory, tuples or
+ * input, and for the Magic Sets rewrite the limit described below.  A limit
+ * of SIZE_MAX bounds nothing it counts.
  *
  * The fields correspond one to one with the tool's repeatable -l key=value
  * options, which exist only to parse into this structure: a limit is defined
@@ -142,13 +142,13 @@ typedef struct relic_config relic_config_t;
  * values or names would grow the tables past the limit is refused as it
  * interns them, with "limit exceeded: memory=N".  The limit does not bound the
  * memory the library uses in total: the program's rules and queries, the text
- * being loaded, the field of a table being imported, the evaluation order, a
- * prepared query, and each predicate's slot in the relation tables with the
- * header of its relation are sized by what the caller wrote, and the tables
- * and evaluation order of a query's rewrite are a fraction of the rewrite
- * the limit does count.  Nor is it a
- * bound on peak usage, since growing an array holds the old one until the new
- * one is filled.
+ * being loaded and the field of a table being imported, which `max_input`
+ * bounds, the evaluation order, a prepared query, and each predicate's slot
+ * in the relation tables with the header of its relation are sized by what
+ * the caller wrote, and the tables and evaluation order of a query's rewrite
+ * are a fraction of the rewrite the limit does count.  Nor is it a bound on
+ * peak usage, since growing an array holds the old one until the new one is
+ * filled.
  *
  * Those tables release nothing before the context is destroyed.  Every
  * distinct value a load, a fact, a query's constants or an evaluation interns,
@@ -176,6 +176,21 @@ typedef struct relic_config relic_config_t;
  * long or an invalid pattern the rewrite would not have evaluated, and fail;
  * `max_tuples` and `max_memory` bound it as they bound the rewrite.  The
  * limit bounds the rewrite, not what its rules derive.
+ *
+ * `max_input` bounds the bytes of one input: the text of a load, whether
+ * relic_load_string(), relic_load_file() or relic_load_path() gives it, and
+ * the bytes one field of an imported table holds once its format is
+ * decoded, a header's and a skipped column's among them.  A text or a field
+ * longer than that is refused with nothing added, as any failed load or
+ * import is, with "limit exceeded: input=N while loading f.dl" for a text
+ * and the same, "while importing", for a field, located at the field's
+ * first byte.  A stream is read no further than one byte past the limit,
+ * and an import's field, a quoted csv field left open among them, holds no
+ * more than the limit before it is refused, so a stream that never ends is
+ * refused too.  A table read a window of records at a time may have read up
+ * to two windows and a chunk past the field, buffers whose size is fixed by
+ * the library, which the limit does not count.  A query's text is not an
+ * input and is held to no such limit.
  *
  * `threads` is how many threads an evaluation may share a round's work
  * among, and an import the reading of a table, the calling thread
@@ -215,6 +230,7 @@ struct relic_config {
 	size_t		max_memory;	/* storage and working state, bytes */
 	size_t		max_tuples;
 	size_t		max_magic;	/* the rewrite's work, literals */
+	size_t		max_input;	/* a text or a table field, bytes */
 	unsigned int	flags;
 	size_t		threads;	/* the calling thread included */
 };

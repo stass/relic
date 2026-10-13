@@ -18,6 +18,7 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <stdbool.h>
@@ -27,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #include "harness.h"
 #include "internal.h"
@@ -44,6 +46,7 @@
 #define	SCENARIO_DEPTH		"an expression's nesting is bounded both ways"
 #define	SCENARIO_EXPRESSION	"an expression is the tree its precedence builds"
 #define	SCENARIO_EXPR_ERROR	"an expression's mistake is reported where written"
+#define	SCENARIO_INPUT		"a load's text is held to the input limit"
 #define	SCENARIO_LIMIT		"a structural limit is enforced where written"
 #define	SCENARIO_MOD		"`mod` is an operator only after an operand"
 #define	SCENARIO_NEGATION	"`not` is a keyword only where a literal begins"
@@ -53,6 +56,7 @@
 #define	SCENARIO_TERMS		"a term holds the value it spells"
 
 typedef struct diag_log diag_log_t;
+typedef struct failing_read failing_read_t;
 
 /*
  * Everything the context reported during a load, so that a test can count
@@ -64,6 +68,16 @@ struct diag_log {
 	size_t		errors;
 	uint32_t	first_column;
 	char		first[256];
+};
+
+/*
+ * A stream's reads: the first fails, and the later ones serve `text`, from
+ * `offset` on.
+ */
+struct failing_read {
+	const char	*text;
+	size_t		 offset;
+	size_t		 calls;
 };
 
 static relic_ast_stmt_t *statement_at(relic_t *ctx, size_t index);
@@ -97,6 +111,12 @@ static void	 render_constant(const relic_constant_t *constant, char *out,
 static void	 render_expr(relic_t *ctx, const relic_ast_expr_t *expr,
 		    char *out, size_t size);
 static relic_t	*context_logging_to(diag_log_t *log);
+static relic_t	*context_configured(const relic_config_t *config,
+		    diag_log_t *log);
+static void	 loads_are_held_to_the_input_limit(void);
+static ssize_t	 fail_then_read(failing_read_t *reading, char *buffer,
+		    size_t size);
+static FILE	*failing_stream(failing_read_t *reading);
 static size_t	 facts_held(relic_t *ctx, const char *name, uint16_t arity);
 static void	 statements_keep_the_shape_they_were_written_in(void);
 static void	 terms_hold_the_values_they_spell(void);
@@ -135,11 +155,17 @@ record_diagnostic(void *callback_ctx, enum relic_diag_level level,
 static relic_t *
 context_logging_to(diag_log_t *log)
 {
+	return (context_configured(NULL, log));
+}
+
+static relic_t *
+context_configured(const relic_config_t *config, diag_log_t *log)
+{
 	relic_t *ctx;
 
 	bzero(log, sizeof(*log));
 
-	ctx = relic_create();
+	ctx = relic_create_config(config);
 	if (ctx == NULL)
 		return (NULL);
 
@@ -1641,6 +1667,186 @@ an_opened_input_is_closed_on_exec(void)
 	relic_destroy(ctx);
 }
 
+/*
+ * Fail the first read, then serve the text.
+ */
+static ssize_t
+fail_then_read(failing_read_t *reading, char *buffer, size_t size)
+{
+	size_t remaining;
+
+	reading->calls++;
+	if (reading->calls == 1) {
+		errno = EIO;
+		return (-1);
+	}
+
+	remaining = strlen(reading->text) - reading->offset;
+	if (size > remaining)
+		size = remaining;
+	bcopy(reading->text + reading->offset, buffer, size);
+	reading->offset += size;
+
+	return ((ssize_t)size);
+}
+
+#if defined(HAVE_FUNOPEN)
+static int
+funopen_read(void *cookie, char *buffer, int size)
+{
+	return ((int)fail_then_read(cookie, buffer, (size_t)size));
+}
+
+/* A stream whose reads run fail_then_read(), or NULL. */
+static FILE *
+failing_stream(failing_read_t *reading)
+{
+	return (funopen(reading, funopen_read, NULL, NULL, NULL));
+}
+#elif defined(HAVE_FOPENCOOKIE)
+static ssize_t
+cookie_read(void *cookie, char *buffer, size_t size)
+{
+	return (fail_then_read(cookie, buffer, size));
+}
+
+/* A stream whose reads run fail_then_read(), or NULL. */
+static FILE *
+failing_stream(failing_read_t *reading)
+{
+	cookie_io_functions_t functions = { cookie_read, NULL, NULL, NULL };
+
+	return (fopencookie(reading, "r", functions));
+}
+#else
+/* No way to make a stream run caller code on this platform. */
+static FILE *
+failing_stream(failing_read_t *reading RELIC_TEST_UNUSED)
+{
+	return (NULL);
+}
+#endif
+
+/*
+ * A load whose text is longer than the input limit is refused with nothing
+ * of it added, whether a string, a stream or a file gives it, and a text at
+ * the limit loads.  A stream is read no further than one byte past the
+ * limit, and one whose read had already failed is refused for the failure,
+ * whatever it serves after.  A query's text is held to no input limit, and a
+ * limit of zero or SIZE_MAX sets none.
+ */
+static void
+loads_are_held_to_the_input_limit(void)
+{
+	static const char fits[] = "edge(a, b).\n";
+	static const char longer[] = "edge(b, c). edge(c, d).\n";
+	static const size_t unlimited[] = { 0, SIZE_MAX };
+	static const char refused[] = "limit exceeded: input=12 while loading ";
+	char path[] = "/tmp/relic-input-XXXXXX";
+	failing_read_t reading;
+	relic_config_t config;
+	relic_query_t *query;
+	diag_log_t log;
+	FILE *stream;
+	relic_t *ctx;
+	size_t i;
+	long read;
+	int descriptor;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.max_input = sizeof(fits) - 1;
+	ctx = context_configured(&config, &log);
+	check(ctx != NULL, SCENARIO_INPUT, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	status = relic_load_string(ctx, "long.dl", longer);
+	check(status != 0 &&
+	    strncmp(log.first, refused, sizeof(refused) - 1) == 0 &&
+	    strcmp(log.first + sizeof(refused) - 1, "long.dl") == 0,
+	    SCENARIO_INPUT, "a text past the limit should be refused as the "
+	    "input limit");
+	check(statement_count(ctx) == 0 && facts_held(ctx, "edge", 2) == 0,
+	    SCENARIO_INPUT, "a refused text should add nothing");
+
+	status = relic_load_string(ctx, "fits.dl", fits);
+	check(status == 0, SCENARIO_INPUT, "a text at the limit should load");
+	check(facts_held(ctx, "edge", 2) == 1, SCENARIO_INPUT,
+	    "the fact of a text at the limit should be held");
+
+	stream = tmpfile();
+	check(stream != NULL, SCENARIO_INPUT, "a stream should be made");
+	if (stream != NULL) {
+		for (i = 0; i < 4096; i++)
+			fputs(longer, stream);
+		rewind(stream);
+		log.errors = 0;
+		status = relic_load_file(ctx, "stream.dl", stream);
+		check(status != 0 && log.errors == 1 &&
+		    facts_held(ctx, "edge", 2) == 1, SCENARIO_INPUT,
+		    "a stream past the limit should be refused");
+		read = ftell(stream);
+		checkf(read == (long)sizeof(fits), SCENARIO_INPUT,
+		    "a stream should be read one byte past the limit, %zu "
+		    "bytes, not %ld", sizeof(fits), read);
+		fclose(stream);
+	}
+
+	bzero(&reading, sizeof(reading));
+	reading.text = longer;
+	stream = failing_stream(&reading);
+	if (stream != NULL) {
+		check(fgetc(stream) == EOF && ferror(stream), SCENARIO_INPUT,
+		    "the stream's first read should fail");
+		status = relic_load_file(ctx, "failed.dl", stream);
+		check(status != 0 &&
+		    relic_error_class(ctx) == RELIC_ERROR_IO, SCENARIO_INPUT,
+		    "a stream whose read failed should be refused for the "
+		    "failure, not for the input limit");
+		fclose(stream);
+	}
+
+	descriptor = mkstemp(path);
+	check(descriptor != -1, SCENARIO_INPUT, "a file should be made");
+	if (descriptor != -1) {
+		check(write(descriptor, longer, sizeof(longer) - 1) ==
+		    (ssize_t)(sizeof(longer) - 1), SCENARIO_INPUT,
+		    "the file should be written");
+		close(descriptor);
+		log.errors = 0;
+		status = relic_load_path(ctx, path);
+		check(status != 0 && log.errors == 1 &&
+		    strncmp(log.first, refused, sizeof(refused) - 1) == 0 &&
+		    facts_held(ctx, "edge", 2) == 1,
+		    SCENARIO_INPUT, "a file past the limit should be refused");
+		unlink(path);
+	}
+
+	query = relic_query_prepare(ctx, NULL, "edge(X, Y), edge(Y, Z)?");
+	check(query != NULL, SCENARIO_INPUT,
+	    "a query's text should be held to no input limit");
+	relic_query_destroy(query);
+
+	relic_destroy(ctx);
+
+	for (i = 0; i < sizeof(unlimited) / sizeof(unlimited[0]); i++) {
+		config.max_input = unlimited[i];
+		ctx = context_configured(&config, &log);
+		check(ctx != NULL, SCENARIO_INPUT,
+		    "a context should be created");
+		if (ctx == NULL)
+			return;
+		status = relic_load_string(ctx, "long.dl", longer);
+		checkf(status == 0, SCENARIO_INPUT,
+		    "an input limit of %zu should hold a text to none",
+		    unlimited[i]);
+		check(facts_held(ctx, "edge", 2) == 2, SCENARIO_INPUT,
+		    "the facts of the long text should be held");
+		relic_destroy(ctx);
+	}
+}
+
 int
 main(void)
 {
@@ -1664,6 +1870,7 @@ main(void)
 	call_mistakes_are_reported_where_written();
 	calls_count_toward_both_nesting_bounds();
 	an_opened_input_is_closed_on_exec();
+	loads_are_held_to_the_input_limit();
 
 	return (check_summary("parse"));
 }

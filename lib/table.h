@@ -73,11 +73,12 @@ enum relic_integer_verdict relic_lex_integer(const char *bytes, size_t length,
  * piece or a byte at a time.
  *
  * relic_table_reader_init() prepares a reader of a table in `format` whose
- * records have `width` fields each, at least one, and names the locations
- * it reports `source_name`, which it borrows.  relic_table_feed() hands it
- * the next `length` bytes of the table, which it borrows until it asks for
- * more, and says whether they are the last.  relic_table_next() fills in
- * the next event and returns its kind:
+ * records have `width` fields each, at least one, and whose fields hold at
+ * most `field_max` decoded bytes, and names the locations it reports
+ * `source_name`, which it borrows.  relic_table_feed() hands it the next
+ * `length` bytes of the table, which it borrows until it asks for more, and
+ * says whether they are the last.  relic_table_next() fills in the next
+ * event and returns its kind:
  *
  *	RELIC_TABLE_MORE	every byte fed has been read; feed more
  *	RELIC_TABLE_FIELD	a field ended: its decoded bytes, where its
@@ -89,23 +90,26 @@ enum relic_integer_verdict relic_lex_integer(const char *bytes, size_t length,
  *				input
  *	RELIC_TABLE_MISTAKE	the table is malformed, as `mistake` says, at
  *				`where`
+ *	RELIC_TABLE_TOO_LONG	the field, which begins at `where`, would
+ *				hold more than `field_max` bytes
  *	RELIC_TABLE_NO_MEMORY	the field could not grow
  *
- * After END, MISTAKE or NO_MEMORY the reader stops, and every later call
- * returns the same event.  A record with the wrong number of fields is a
- * mistake: the reader checks the width when a field beyond the last column
- * begins, and when a record ends short, so the first mistake a table holds
- * is the first reported, whatever it is.
+ * After END, MISTAKE, TOO_LONG or NO_MEMORY the reader stops, and every
+ * later call returns the same event.  A record with the wrong number of
+ * fields is a mistake: the reader checks the width when a field beyond the
+ * last column begins, and when a record ends short, so the first mistake a
+ * table holds is the first reported, whatever it is.
  *
  * Before it reads anything, a reader can be made to frame the table
  * rather than decode it, by relic_table_reader_frame_only(): it makes the
  * same transitions, and so finds the same boundaries and the same
  * mistakes, but collects no field's bytes, and relic_table_next() returns
  * none of its FIELD events, so its events are RECORD, END, MORE and the
- * mistakes, and it never runs out of memory.  And it can be made to begin
- * at a record boundary of a table another reader has read up to, by
- * relic_table_reader_start_at(), given the location of the boundary's
- * byte: it then reports the locations a reader of the whole table would.
+ * mistakes, and it never runs out of memory or finds a field too long.  And
+ * it can be made to begin at a record boundary of a table another reader
+ * has read up to, by relic_table_reader_start_at(), given the location of
+ * the boundary's byte: it then reports the locations a reader of the whole
+ * table would.
  * relic_table_unread() is how many of the bytes last fed the reader has
  * not read; when it has just emitted a RECORD, the bytes it has read end
  * exactly at the record's end.
@@ -119,6 +123,7 @@ enum relic_table_event_kind {
 	RELIC_TABLE_RECORD,
 	RELIC_TABLE_END,
 	RELIC_TABLE_MISTAKE,
+	RELIC_TABLE_TOO_LONG,
 	RELIC_TABLE_NO_MEMORY
 };
 
@@ -174,8 +179,8 @@ struct relic_table_event {
  * read, and `input_is_last` says whether the table ends after it.
  * `field` accumulates the field being read, unless the reader only
  * `frames`; it grows by doubling to the longest field and is reused for
- * every one.  `fields_ended` counts the fields of the current record read
- * so far.
+ * every one, and `field_length` never passes `field_max`.  `fields_ended`
+ * counts the fields of the current record read so far.
  *
  * `where` is the location of the next byte.  The other locations are the
  * places a later event points back to: the current field's first byte, the
@@ -188,6 +193,7 @@ struct relic_table_reader {
 	size_t				 input_length;
 	size_t				 field_length;
 	size_t				 field_capacity;
+	size_t				 field_max;
 	size_t				 width;
 	size_t				 fields_ended;
 	relic_location_t		 where;
@@ -202,7 +208,8 @@ struct relic_table_reader {
 };
 
 void	 relic_table_reader_init(relic_table_reader_t *reader,
-	    enum relic_format format, size_t width, const char *source_name);
+	    enum relic_format format, size_t width, size_t field_max,
+	    const char *source_name);
 void	 relic_table_reader_frame_only(relic_table_reader_t *reader);
 void	 relic_table_reader_start_at(relic_table_reader_t *reader,
 	    const relic_location_t *where);

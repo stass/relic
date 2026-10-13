@@ -169,7 +169,7 @@ relic_framer_begin(relic_framer_t *framer, const relic_import_plan_t *plan,
 {
 	relic_table_reader_reset(&framer->reader);
 	relic_table_reader_init(&framer->reader, plan->format,
-	    plan->column_count, source_name);
+	    plan->column_count, plan->field_max, source_name);
 	relic_table_reader_frame_only(&framer->reader);
 	relic_table_reader_start_at(&framer->reader, where);
 
@@ -359,9 +359,10 @@ relic_window_decode_part(void *argument, size_t piece,
  * byte with the location that byte has in the table, so it emits the
  * events a reader of the whole table would.  Framing found the piece's
  * records whole and well formed by the same transitions, so the only
- * reasons left to stop are a field its column refuses and memory; the
- * counts are checked rather than trusted all the same, since a tuple
- * beyond the piece's would be written past them.
+ * reasons left to stop are a field its column refuses, a field longer than
+ * the plan's `field_max`, and memory; the counts are checked rather than
+ * trusted all the same, since a tuple beyond the piece's would be written
+ * past them.
  */
 static void
 piece_decode(const relic_window_job_t *job, relic_window_piece_t *piece)
@@ -383,7 +384,7 @@ piece_decode(const relic_window_job_t *job, relic_window_piece_t *piece)
 	    piece->length <= window->length - piece->start);
 
 	relic_table_reader_init(&reader, job->plan->format,
-	    job->plan->column_count, job->source_name);
+	    job->plan->column_count, job->plan->field_max, job->source_name);
 	relic_table_reader_start_at(&reader, &piece->where);
 	relic_table_feed(&reader, window->input + piece->start, piece->length,
 	    piece->last);

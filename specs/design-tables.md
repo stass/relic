@@ -287,7 +287,9 @@ the importer finds in a field is met before anything the reader would find
 after it.
 
 **Scalar reading holds one field and one tuple.** A field's decoded bytes
-accumulate in a reused buffer. Batch import additionally holds a bounded
+accumulate in a reused buffer, which the reader grows in one place, where
+it holds the field to `max_input` (see [failure paths and
+limits](#failure-paths-and-limits)). Batch import additionally holds a bounded
 raw-input window, piece dictionaries and record tokens. Its framer and
 decoders use the same parser transitions. An oversized record switches to
 scalar continuation through buffered input, so batching never requires the
@@ -472,14 +474,21 @@ same way, including when it comes from an untrusted party.
   long-lived context untrusted tables must allow for; a load has the same
   property. The reader may have read a buffer of the stream past the
   record that ended the import.
-* **Nothing bounds the field buffer but the longest field.** A quoted csv
-  field left open early holds the rest of the input before it is reported,
-  since a quoted field may hold line feeds. A load reading a stream whole
-  has the same exposure. The field buffer is sized by the input, not by
-  what the program stores, so it is not charged to `memory`, a ceiling on
-  accounted storage and evaluation memory rather than on the process
-  ([the memory limit](design-memory.md#the-memory-limit)); a caller that
-  must bound it bounds its input before handing it over.
+* **The input limit bounds the field buffer.** A field whose decoded
+  bytes would pass `max_input` is refused as it grows past it, with
+  `limit exceeded: input=N while importing t.csv` located at the field's
+  first byte -- for a quoted csv field, its opening quote. So a quoted
+  field left open early, which may hold line feeds and would otherwise
+  hold the rest of the input, holds at most the limit. Every field is
+  held to it, a header's and a skipped column's included, since the reader
+  holds each one's bytes whatever its column does with them. The field
+  buffer is sized by the input, not by what the program stores, so it is
+  not charged to `memory`, a ceiling on accounted storage and evaluation
+  memory rather than on the process
+  ([the memory limit](design-memory.md#the-memory-limit)); the input limit
+  is its bound, and with none set the longest field is. A record is not
+  held as a whole -- each field is typed and interned as it ends -- so a
+  record needs no bound of its own.
 * **Crafted collisions gain nothing.** Staging, the symbol pool and the
   value table hash with the context's random seed.
 * **A string column holds any bytes**, which text and json output escape

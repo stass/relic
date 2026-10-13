@@ -190,6 +190,8 @@ static enum relic_table_event_kind end_of_input(relic_table_reader_t *reader,
 static enum relic_table_event_kind end_record(relic_table_reader_t *reader,
 		    relic_table_event_t *event);
 static bool	 extra_field_begun(const relic_table_reader_t *reader);
+static enum relic_table_event_kind field_too_long(
+		    relic_table_reader_t *reader, relic_table_event_t *event);
 static enum import_progress feed_reader(importer_t *importer);
 static int	 fill_input(import_input_t *input, size_t target);
 static bool	 field_value(relic_t *ctx, enum relic_column column,
@@ -210,6 +212,9 @@ static bool	 is_plain(enum relic_format format,
 		    enum relic_table_state state, unsigned char byte);
 static size_t	 kept_columns(const enum relic_column *columns,
 		    size_t column_count);
+static enum relic_table_event_kind make_field_room(
+		    relic_table_reader_t *reader, size_t count,
+		    relic_table_event_t *event);
 static void	 forget_window(importer_t *importer);
 static void	 frame_rest(import_framing_t *framing);
 static bool	 frame_ahead(void *argument);
@@ -225,7 +230,8 @@ static enum relic_table_event_kind next_event(relic_table_reader_t *reader,
 		    relic_table_event_t *event);
 static enum relic_table_event_kind out_of_memory(
 		    relic_table_reader_t *reader, relic_table_event_t *event);
-static int	 read_plain_run(relic_table_reader_t *reader);
+static enum relic_table_event_kind read_plain_run(
+		    relic_table_reader_t *reader, relic_table_event_t *event);
 static int	 publish_window(importer_t *importer);
 static int	 read_chunk(import_input_t *input);
 static enum import_progress read_fields(importer_t *importer);
@@ -294,12 +300,13 @@ static void	 window_growth(const relic_window_t *window,
 
 void
 relic_table_reader_init(relic_table_reader_t *reader, enum relic_format format,
-    size_t width, const char *source_name)
+    size_t width, size_t field_max, const char *source_name)
 {
 	bzero(reader, sizeof(*reader));
 
 	reader->format = format;
 	reader->width = width;
+	reader->field_max = field_max;
 	reader->state = RELIC_TABLE_AT_RECORD;
 	reader->where.file = source_name;
 	reader->where.line = 1;
@@ -385,8 +392,9 @@ next_event(relic_table_reader_t *reader, relic_table_event_t *event)
 			return (mistake(reader, RELIC_TABLE_TOO_MANY_FIELDS,
 			    &reader->where, 0, event));
 
-		if (read_plain_run(reader) != 0)
-			return (out_of_memory(reader, event));
+		kind = read_plain_run(reader, event);
+		if (kind != RELIC_TABLE_MORE)
+			return (kind);
 
 		if (reader->input_length == 0) {
 			if (!reader->input_is_last) {
@@ -446,16 +454,17 @@ is_plain(enum relic_format format, enum relic_table_state state,
  * Read the plain bytes the input begins with at once, as step() would read
  * them one at a time: the same bytes appended, the same column reached, a
  * field begun where it would begin one.  Most of a table's bytes are read
- * here.  Returns 0, or -1 when the field could not grow.
+ * here.  Returns RELIC_TABLE_MORE, or the event that stopped the reader
+ * when the field could not take the run.
  */
-static int
-read_plain_run(relic_table_reader_t *reader)
+static enum relic_table_event_kind
+read_plain_run(relic_table_reader_t *reader, relic_table_event_t *event)
 {
 	const unsigned char *input;
+	enum relic_table_event_kind kind;
 	enum relic_table_state state;
 	enum relic_format format;
 	size_t run;
-	char *field;
 
 	input = (const unsigned char *)reader->input;
 	state = reader->state;
@@ -464,7 +473,7 @@ read_plain_run(relic_table_reader_t *reader)
 	    is_plain(format, state, input[run]); run++)
 		continue;
 	if (run == 0)
-		return (0);
+		return (RELIC_TABLE_MORE);
 
 	if (state == RELIC_TABLE_AT_RECORD || state == RELIC_TABLE_AT_FIELD) {
 		reader->field_where = reader->where;
@@ -472,12 +481,9 @@ read_plain_run(relic_table_reader_t *reader)
 	}
 
 	if (!reader->frames) {
-		field = relic_grow_array(reader->field,
-		    &reader->field_capacity, reader->field_length + run,
-		    sizeof(*reader->field));
-		if (field == NULL)
-			return (-1);
-		reader->field = field;
+		kind = make_field_room(reader, run, event);
+		if (kind != RELIC_TABLE_MORE)
+			return (kind);
 		bcopy(input, reader->field + reader->field_length, run);
 		reader->field_length += run;
 	}
@@ -489,7 +495,7 @@ read_plain_run(relic_table_reader_t *reader)
 	else
 		reader->where.column += (uint32_t)run;
 
-	return (0);
+	return (RELIC_TABLE_MORE);
 }
 
 /*
@@ -817,35 +823,71 @@ end_record(relic_table_reader_t *reader, relic_table_event_t *event)
 }
 
 /*
- * Append one decoded byte to the field.  Returns RELIC_TABLE_MORE, or stops
- * the reader with RELIC_TABLE_NO_MEMORY when the field cannot grow: memory
- * the reader could not have is not the table's mistake, and the caller
- * reports it as what it is.  The buffer grows only when it is full, which is
- * rarely, so every other byte costs a comparison and a store.  A reader
- * that only frames keeps no byte.
+ * Append one decoded byte to the field.  Returns RELIC_TABLE_MORE, or the
+ * event make_field_room() stopped the reader with.  A reader that only
+ * frames keeps no byte.
  */
 static enum relic_table_event_kind
 append_field_byte(relic_table_reader_t *reader, unsigned char byte,
     relic_table_event_t *event)
 {
+	enum relic_table_event_kind kind;
+
 	if (reader->frames)
 		return (RELIC_TABLE_MORE);
 
-	if (reader->field_length == reader->field_capacity) {
-		char *field;
-
-		field = relic_grow_array(reader->field,
-		    &reader->field_capacity, reader->field_length + 1,
-		    sizeof(*reader->field));
-		if (field == NULL)
-			return (out_of_memory(reader, event));
-		reader->field = field;
-	}
+	kind = make_field_room(reader, 1, event);
+	if (kind != RELIC_TABLE_MORE)
+		return (kind);
 
 	reader->field[reader->field_length] = (char)byte;
 	reader->field_length++;
 
 	return (RELIC_TABLE_MORE);
+}
+
+/*
+ * Make room in the field for `count` more decoded bytes, the one way a
+ * field grows, so no field holds more than `field_max`.  Returns
+ * RELIC_TABLE_MORE, or stops the reader: with RELIC_TABLE_TOO_LONG when the
+ * field would pass `field_max`, and with RELIC_TABLE_NO_MEMORY when it
+ * cannot grow, since memory the reader could not have is not the table's
+ * mistake and the caller reports it as what it is.  The buffer grows only
+ * when the bytes do not fit in it, which is rarely, so a byte usually costs
+ * two comparisons.
+ */
+static enum relic_table_event_kind
+make_field_room(relic_table_reader_t *reader, size_t count,
+    relic_table_event_t *event)
+{
+	char *field;
+
+	if (count > reader->field_max - reader->field_length)
+		return (field_too_long(reader, event));
+	if (count <= reader->field_capacity - reader->field_length)
+		return (RELIC_TABLE_MORE);
+
+	field = relic_grow_array(reader->field, &reader->field_capacity,
+	    reader->field_length + count, sizeof(*reader->field));
+	if (field == NULL)
+		return (out_of_memory(reader, event));
+	reader->field = field;
+
+	return (RELIC_TABLE_MORE);
+}
+
+/*
+ * Stop the reader with RELIC_TABLE_TOO_LONG, at the field's first byte: the
+ * field would hold more than `field_max` bytes.
+ */
+static enum relic_table_event_kind
+field_too_long(relic_table_reader_t *reader, relic_table_event_t *event)
+{
+	bzero(event, sizeof(*event));
+	event->kind = RELIC_TABLE_TOO_LONG;
+	event->where = reader->field_where;
+
+	return (stop(reader, event));
 }
 
 /*
@@ -980,6 +1022,7 @@ import_plan_init(relic_t *ctx, const relic_import_t *import,
 
 	plan->column_count = import->column_count;
 	plan->arity = kept_columns(plan->columns, plan->column_count);
+	plan->field_max = relic_input_max(ctx);
 	plan->format = import->format;
 	plan->header = (import->flags & RELIC_IMPORT_HEADER) != 0;
 
@@ -1202,7 +1245,7 @@ stage_table(importer_t *importer, const char *source_name)
 		return (-1);
 
 	relic_table_reader_init(&importer->reader, plan->format,
-	    plan->column_count, name);
+	    plan->column_count, plan->field_max, name);
 	importer->boundary = importer->reader.where;
 
 	return (read_table(importer));
@@ -1862,6 +1905,9 @@ take_event(importer_t *importer, const relic_table_event_t *event)
 		return (take_end(importer, event));
 	case RELIC_TABLE_MISTAKE:
 		report_mistake(importer->ctx, importer->plan, event);
+		return (IMPORT_FAILED);
+	case RELIC_TABLE_TOO_LONG:
+		relic_diag_input_limit(importer->ctx, &event->where);
 		return (IMPORT_FAILED);
 	case RELIC_TABLE_NO_MEMORY:
 		relic_diag_no_memory(importer->ctx);
