@@ -434,9 +434,10 @@ framing needs no thread of its own and no job that outlives a barrier.
 * **The next window is used only after the current one is staged.** Its
   framing began at the current window's end, which is the accepted
   boundary only once the current window is staged. A declined current
-  window discards the next window's manifest, and scalar replay reads
-  every buffered byte from the accepted boundary, then the recorded read
-  outcomes, then the stream.
+  window discards the next window's manifest, and scalar replay reads the
+  declined window's records from the accepted boundary, out of the
+  buffered bytes, then the recorded read outcomes, then the stream; the
+  bytes after them stay buffered for the windows that follow.
 
 Framing ahead changes no boundary, piece, value, diagnostic or replay
 position: the reader decides every boundary from the same bytes, in the
@@ -474,11 +475,14 @@ for example, an unterminated quoted field is discovered at end of input
 but names its opening quote.
 
 If a record exceeds the window bound, or framing cannot establish a clean
-window, the importer switches to scalar processing from the last accepted
-boundary. It consumes the already buffered prefix and continues streaming
-through the same reader. No seek or reread of the external stream is needed,
-and the pipeline does not retain an oversized record's entire raw text.
-The scalar field buffer keeps the existing longest-field behavior.
+window, the importer replays the window through the scalar reader from
+the last accepted boundary ([scalar
+replay](#scalar-replay-is-the-refusal-path)), which reads the buffered
+prefix and goes on streaming through the same input adapter, and windows
+resume at the record boundary where the replay ends. No seek or reread
+of the external stream is needed, and the pipeline does not retain an
+oversized record's entire raw text. The scalar field buffer keeps the
+existing longest-field behavior.
 
 ### Read errors and read-ahead
 
@@ -496,7 +500,10 @@ that far. A read-ahead failure cannot replace an earlier field or staging
 failure. A short successful read retains ordinary EOF semantics.
 
 Read-ahead is bounded by two windows plus at most one transport chunk,
-and only the caller reads or closes a stream. Only a regular file is
+and only the caller reads or closes a stream. A replay reads the stream
+only once it has read every buffered byte, a transport chunk at a time,
+and windows that resume after it read ahead from its end, so neither
+widens the bound. Only a regular file is
 batched, so only a regular file is read ahead beyond the scalar transport
 chunk. A stream the caller opens on a regular file, standard input
 redirected from one among them, is batched like a path's; every input not positively identified as a regular file
@@ -666,9 +673,34 @@ Before proof succeeds, the current window has added no context values,
 type-use bits or builder rows. If it is malformed, cannot be certified, or
 private speculative work cannot be allocated, join its workers, release
 its private analysis and replay its saved input through the ordinary
-field-event consumer. Continue the remainder of that import on the scalar
-path. The saved input provider delivers buffered bytes and recorded read
-outcomes before reading more from the stream.
+field-event consumer. The saved input provider delivers buffered bytes and
+recorded read outcomes before reading more from the stream.
+
+**A replay reads one window's records, then windows resume.** The replay
+reads from the declined window's boundary by the window's own two bounds,
+except that a record crossing the horizon is read rather than left: it
+ends after the first record that ends at or past the horizon, or once it
+has read the record cap's records, or at the end of the table. Its
+records are therefore every record the declined window holds, and for a
+window the horizon ends, the record that crosses it -- which, when no
+record ends before the horizon, is the over-long record that left the
+window unframed. Where the replay ends the reader stands at a record
+boundary holding no partial record, and the bytes it has not read return
+to the input adapter, in front of the recorded read outcomes, as the
+start of the next window, which is framed from that boundary afresh.
+
+The replay does not ask why the window was declined. A window declined
+for something its records hold -- a malformed record, a field its column
+refuses, a refusing limit -- holds the record the scalar consumer refuses
+first, and the replay reads every record of the window, so the scalar
+consumer meets that refusal, reports it and ends the import as it would
+have. A window declined for capacity -- an over-long record, a refused
+private allocation, a projection more conservative than the scalar
+checks -- reads to the replay's end without a refusal, and the import goes
+on in windows. Every replay reads at least one record or ends the
+import, so declines cannot recur without progress. Windows and replays
+alternate over consecutive spans of the input, so facts are staged and
+values interned in input order whichever path reads each record.
 
 Speculative allocation helpers return failure without reporting it. A
 failure already reported by operation setup, such as a refused pool setup,
@@ -683,8 +715,10 @@ just as it does in scalar import. A tuple-limit refusal retains the values
 of the refused record but interns no later record.
 
 Previously accepted windows remain staged and their values remain interned.
-The replay starts after them, so it cannot renumber or double-apply them.
-If replay fails, the load discards all private rows and adds no base facts.
+The replay starts after them, so it cannot renumber or double-apply them,
+and the windows that resume after a replay start after its records, which
+it has staged. If replay fails, the load discards all private rows and
+adds no base facts.
 A syntax/type/limit failure is reported once by the scalar consumer, with
 its ordinary location and bounded description of the offending field.
 
@@ -748,7 +782,9 @@ successful close.
 Workers can borrow immutable pool byte pointers, whose addresses do not
 move, but cannot retain pointers into growable entry arrays. Fresh payloads
 remain owned by their window until the pool has copied them. A replay keeps
-raw bytes and transport outcomes, not any speculative promised identifiers.
+raw bytes and transport outcomes, not any speculative promised identifiers;
+the window buffers keep their capacity, emptied, for the windows that
+resume after it, and are released with the import.
 
 Private builders and window buffers are load staging, proportional to
 input, and retain the existing exemption from `max_memory`. Windowing bounds
@@ -801,7 +837,7 @@ ownership rule. A worker-count change does not change the input pieces.
 | Failure boundary | Observable result |
 | --- | --- |
 | Invalid import description or missing input | Existing argument/open diagnostic; no table data handled |
-| Unproved window or private speculation refusal | Scalar replay from its saved boundary determines the input or limit failure, if any |
+| Unproved window or private speculation refusal | Scalar replay of the window's records from its saved boundary determines the input or limit failure, if any; without one, windows resume where the replay ends |
 | Allocation failure during admitted reservation | One ordinary memory diagnostic; no base facts added; owned reservations cleaned up and retained capacity accounted |
 | Later scalar record failure | Earlier accepted values remain; all staged rows are released; derived state remains until a commit begins |
 | Owned input close failure | No base commit; values already interned remain |
@@ -910,15 +946,15 @@ independent checks rather than comparing two uses of the same new helper.
 | Duplicates and currency | Duplicates within pieces, across windows and against base stores preserve first occurrence; duplicate-only loads keep materialized relations current |
 | Dictionary identity | Mixed symbols/strings sharing bytes, existing constructor-only bytes, high use-bit indexes, repeated integers and all-distinct values match scalar IDs and use counts |
 | Framing | Every possible byte split around quotes, doubled quotes, embedded newlines, CRLF, TSV escapes and EOF agrees with the pure reader; skipped fields and headers still validate structure |
-| Oversized records | The buffered prefix replays once into scalar continuation on nonseekable input, without retaining an unbounded complete raw record |
+| Oversized records | The buffered prefix replays once into scalar continuation without a seek or reread of the stream and without retaining an unbounded complete raw record, and windows resume after the record |
 | Failure order | Type errors before later syntax errors, earlier staging limits before malformed tails, and read-ahead I/O failures produce the scalar diagnostic and interned prefix |
 | Partial value effects | A pool append followed by refused use-bit growth, and a refused tuple after successful field interning, match the scalar state exactly |
 | Limits | Whole-window proofs use final monotone capacity and the original staging floor; exact commit can still refuse; arity zero, near identifier limits and checked size arithmetic are covered without huge allocations |
 | Transport and callbacks | Failed short reads discard their returned bytes, successful short reads end input, close failures precede commit, caller-mutated descriptions cannot affect copied plans, and interrupts preserve the existing non-interruptible import contract |
-| Allocation failure | Nth-allocation sweeps cover private decline, value/builder reservation, pool copies, manifest preparation and late destination reserve; the context can load/query again afterward |
+| Allocation failure | Nth-allocation sweeps cover private decline, value/builder reservation, pool copies, manifest preparation and late destination reserve; a window declined for a refused private allocation is replayed and every window after it is staged; the context can load/query again afterward |
 | Concurrency | 1, 2, 4, 8 and 16 workers and disabled-thread builds agree on IDs, capacities, diagnostics and output; instrumentation proves both bulk apply and replay paths actually execute |
 | Striping | Symbol-pool and append capacities agree across hash seeds and thread counts, with deferred and immediate stripe growth alike; input crowded into one stripe keeps its answers, capacities and bounded probes |
-| Framing ahead | Windows framed ahead and framed in place give the same windows and pieces under every schedule of framing steps, the end of input and quoted records around the horizon included, and so do windows the record cap ends, at the end of input or short of it; a table of records shorter than eight bytes is staged in windows of at most the cap's records; a job whose other workers finish while framing remains completes, the framing finishing later; a declined window discards the framing ahead and replays every buffered byte, with the scalar diagnostic and retained values; a refused import has read at most two windows and one transport chunk past its last accepted boundary |
+| Framing ahead | Windows framed ahead and framed in place give the same windows and pieces under every schedule of framing steps, the end of input and quoted records around the horizon included, and so do windows the record cap ends, at the end of input or short of it; a table of records shorter than eight bytes is staged in windows of at most the cap's records; a job whose other workers finish while framing remains completes, the framing finishing later; a declined window discards the framing ahead and replays its records from the buffered bytes, with the scalar diagnostic and retained values, and a table whose first record is longer than a window is staged in windows after it; a refused import has read at most two windows and one transport chunk past its last accepted boundary |
 | Streaming inputs | A producer that writes one transport chunk holding a malformed record and keeps its pipe open sees the error reported without a window's worth of input or EOF, with the scalar diagnostic order, retained values and no facts added; a FIFO named by path, a stream without a descriptor and forced batching are all read by the scalar consumer; a test build that takes a failing stream for a regular file shows windows staged before the failed read, so the batch path's read errors stay covered |
 | Small-input cost | Tiny, empty, header-only, duplicate-heavy and one-fact inputs avoid unnecessary dispatch and keep their established behavior |
 

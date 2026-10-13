@@ -113,12 +113,6 @@ Placing in parallel needs the symbol index partitioned by hash, as the
 canonical index is by stripe, which is the storage-layout alternative the
 bulk-load design names under persistent lookup partitioning.
 
-**One declined window reads the rest of the table a field at a time.**
-[Low, component: `lib/import.c`] A record longer than a window less a
-read chunk, or one refused allocation, ends batching for the rest of the
-import, which may be most of a large table. Resume windows once the
-reader stands at a record boundary with its input consumed.
-
 **An index built mid-component must be raised by its builder.** [Medium,
 component: `lib/index.c`, `lib/relation.h`, `lib/eval.c`] Each index keeps
 its own `latest_since`, yet `set_delta()` always raises every index of a

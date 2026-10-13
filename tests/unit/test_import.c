@@ -60,6 +60,7 @@
 #define	SCENARIO_POLICY		"a table is batched only where batching repays"
 #define	SCENARIO_READER		"the reader reads each format by its rules"
 #define	SCENARIO_RECORD_CAP	"a window holds at most its records"
+#define	SCENARIO_RESUME		"windows go on after a declined window"
 #define	SCENARIO_REENTRY	"a stream's read function cannot call in"
 #define	SCENARIO_SKIP		"a skipped column interns nothing"
 #define	SCENARIO_STRING		"a string column holds any bytes"
@@ -374,6 +375,7 @@ static void	 a_batch_import_matches_the_scalar_import(void);
 static void	 a_window_holds_at_most_its_records(void);
 static void	 check_capped_import(const char *label, const char *table,
 		    size_t length);
+static void	 windows_go_on_after_a_declined_window(void);
 static void	 a_window_is_framed_alike_however_stepped(void);
 static void	 frame_case(const framing_case_t *test, size_t buffered,
 		    bool ended, size_t most, framing_t *framingp);
@@ -2978,6 +2980,91 @@ check_capped_import(const char *label, const char *table, size_t length)
 }
 
 /*
+ * A declined window does not end batching: the reader reads its records a
+ * field at a time and windows go on from the record boundary after them.
+ * A generated table whose first record is longer than a window has its
+ * first window declined, unframed, and the rest staged in two windows or
+ * more on every way that batches it.  Read with a header, that record is
+ * the header, which the reader reads before windows go on without one.
+ * Every way ends as the import a field at a time does.
+ */
+static void
+windows_go_on_after_a_declined_window(void)
+{
+	static const unsigned int header_flags[] = { 0, RELIC_IMPORT_HEADER };
+	import_outcome_t batched;
+	import_outcome_t scalar;
+	batch_case_t batch;
+	uint64_t declined;
+	uint64_t staged;
+	size_t f;
+	size_t length;
+	size_t w;
+	char *long_record;
+	char *table;
+	const batch_way_t *way;
+
+	long_record = record_longer_than_a_window();
+	table = long_record != NULL ? generated_table(GENERATED_ROWS, 0,
+	    long_record, &length) : NULL;
+	free(long_record);
+	if (table == NULL) {
+		check(false, SCENARIO_RESUME, "the table is built");
+		return;
+	}
+
+	bzero(&batch, sizeof(batch));
+	batch.program = GENERATED_PROGRAM;
+	batch.table = table;
+	batch.length = length;
+	batch.format = RELIC_FORMAT_TSV;
+	batch.columns = generated_columns;
+	batch.column_count = 3;
+	for (f = 0; f < sizeof(header_flags) / sizeof(header_flags[0]); f++) {
+		batch.flags = header_flags[f];
+		batch.label = batch.flags != 0 ?
+		    "a header longer than a window" :
+		    "a first record longer than a window";
+		for (w = 0; w < sizeof(batch_ways) / sizeof(batch_ways[0]);
+		    w++) {
+			way = &batch_ways[w];
+			if (import_first(&batch, table, length,
+			    RELIC_F_NO_BATCH_IMPORT, 1, &scalar) != 0) {
+				check(false, SCENARIO_RESUME,
+				    "a context is made and loaded");
+				relic_destroy(scalar.ctx);
+				break;
+			}
+			if (import_first(&batch, table, length, way->flags,
+			    way->threads, &batched) != 0) {
+				check(false, SCENARIO_RESUME,
+				    "a context is made and loaded");
+				relic_destroy(scalar.ctx);
+				relic_destroy(batched.ctx);
+				break;
+			}
+
+			staged = batched.ctx->counters.windows_staged;
+			declined = batched.ctx->counters.windows_declined;
+			checkf((way->flags & BATCHED) == 0 ||
+			    (batched.status == 0 && declined == 1 &&
+			    staged >= 2), SCENARIO_RESUME, "%s, %s: one window "
+			    "should be declined and two or more staged after "
+			    "it, not %" PRIu64 " declined and %" PRIu64
+			    " staged", batch.label, way->name, declined,
+			    staged);
+			check_same_outcome(&batched, &scalar, batch.label, way,
+			    "one import");
+
+			relic_destroy(scalar.ctx);
+			relic_destroy(batched.ctx);
+		}
+	}
+
+	free(table);
+}
+
+/*
  * A read that fails after a batch import has read ahead is reported where
  * an import a field at a time would meet it: after the records read before
  * it are staged and their values interned, and never ahead of an earlier
@@ -3800,6 +3887,7 @@ main(void)
 	a_path_is_opened_and_named();
 	a_batch_import_matches_the_scalar_import();
 	a_window_holds_at_most_its_records();
+	windows_go_on_after_a_declined_window();
 	a_window_is_framed_alike_however_stepped();
 	a_failed_read_ahead_waits_its_turn();
 	a_waiting_producer_hears_its_mistake();

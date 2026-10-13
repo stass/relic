@@ -44,6 +44,7 @@
 
 
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #ifdef RELIC_THREADS
 #include <pthread.h>
@@ -75,6 +76,8 @@
 #define	SCENARIO_GROWTH	"an intern at a table's growth point reports once"
 #define	SCENARIO_IMPORT		"an import that ran out of memory adds nothing"
 #define	SCENARIO_IMPORT_ONCE	"an import refused once reads on or fails"
+#define	SCENARIO_IMPORT_RESUME \
+	"a window declined for memory is read and windows go on"
 #define	SCENARIO_INDEX		"an index survives a failed allocation"
 #define	SCENARIO_INSERT		"a relation survives a failed allocation"
 #define	SCENARIO_INTEGER	"interning an integer survives a failed allocation"
@@ -115,6 +118,20 @@
 #define	POOLED_IMPORT_ROWS	60000
 #define	POOLED_IMPORT_VALUES	300
 #define	POOLED_IMPORT_THREADS	4
+
+/*
+ * The table a window declined for memory is swept with: three windows'
+ * worth of records at the record cap and one more, each a digit and a
+ * line feed, staged in CAPPED_IMPORT_WINDOWS windows when nothing is
+ * refused; and how far the sweep looks for the first refusal that
+ * declines a window, well past the import's requests before its first
+ * window is analyzed.
+ */
+#define	CAPPED_IMPORT_ROWS \
+	(3 * (size_t)RELIC_IMPORT_WINDOW_RECORDS + 1)
+#define	CAPPED_IMPORT_WINDOWS	4
+#define	CAPPED_IMPORT_VALUES	10
+#define	CAPPED_IMPORT_SWEEP	400
 
 /*
  * How many facts the ownership check stages: enough that a copy of their
@@ -534,6 +551,8 @@ static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
 static void	 an_import_refused_once_reads_on_or_fails(void);
 static void	 an_import_on_threads_refused_once_reads_on_or_fails(void);
 static FILE	*pooled_import_table(void);
+static void	 a_window_declined_for_memory_is_read_and_windows_go_on(void);
+static FILE	*capped_import_table(void);
 static void	 a_path_whose_close_fails_adds_nothing(void);
 static bool	 write_temporary(const char *text, char *path, size_t size);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
@@ -1814,6 +1833,109 @@ pooled_import_table(void)
 	for (i = 0; i < POOLED_IMPORT_ROWS; i++) {
 		if (fprintf(stream, "s%zu\t%zu\n", i % POOLED_IMPORT_VALUES,
 		    i % POOLED_IMPORT_VALUES) < 0) {
+			fclose(stream);
+			return (NULL);
+		}
+	}
+
+	return (stream);
+}
+
+/*
+ * A window declined because an allocation was refused is read a field at
+ * a time, and windows go on after it: a refusal of memory is no mistake
+ * of the table's, so it costs the import one window's batching, not the
+ * rest of the table's.  The sweep refuses one allocation of an import
+ * forced to batch, from the first on, and stops at the first import that
+ * succeeds having declined a window.  Every refusal before that one either
+ * failed the import or came before batching began, so the declined window
+ * is the first, and every window after it must have been staged.
+ */
+static void
+a_window_declined_for_memory_is_read_and_windows_go_on(void)
+{
+	static const enum relic_column columns[] = { RELIC_COLUMN_INTEGER };
+	relic_config_t config;
+	relic_import_t import;
+	uint64_t declined;
+	uint64_t staged;
+	long budget;
+	FILE *stream;
+	relic_t *ctx;
+	int status;
+	bool reached;
+
+	stream = capped_import_table();
+	if (stream == NULL) {
+		check(false, SCENARIO_IMPORT_RESUME,
+		    "the table should be made");
+		return;
+	}
+	bzero(&import, sizeof(import));
+	import.predicate = "digit";
+	import.columns = columns;
+	import.column_count = 1;
+	import.format = RELIC_FORMAT_TSV;
+	bzero(&config, sizeof(config));
+	config.flags = RELIC_F_PARALLEL_ALWAYS;
+	config.threads = 1;
+
+	reached = false;
+	for (budget = 0; budget < CAPPED_IMPORT_SWEEP && !reached; budget++) {
+		ctx = relic_create_config(&config);
+		if (ctx == NULL) {
+			check(false, SCENARIO_IMPORT_RESUME,
+			    "a context should be made");
+			break;
+		}
+		relic_diag_set(ctx, count_error, NULL);
+		errors_reported = 0;
+
+		rewind(stream);
+		refuse_one_allocation_after(budget);
+		status = relic_import_file(ctx, "digits.tsv", stream, &import);
+		serve_every_allocation();
+
+		declined = ctx->counters.windows_declined;
+		staged = ctx->counters.windows_staged;
+		if (status == 0 && declined > 0) {
+			reached = true;
+			checkf(errors_reported == 0 && declined == 1 &&
+			    staged == CAPPED_IMPORT_WINDOWS - 1 &&
+			    relic_base_total(ctx) == CAPPED_IMPORT_VALUES,
+			    SCENARIO_IMPORT_RESUME, "with allocation %ld "
+			    "refused, the import should decline one window, "
+			    "stage the %d after it and add %d facts, not "
+			    "decline %" PRIu64 ", stage %" PRIu64 " and add "
+			    "%zu", budget, CAPPED_IMPORT_WINDOWS - 1,
+			    CAPPED_IMPORT_VALUES, declined, staged,
+			    relic_base_total(ctx));
+		}
+		relic_destroy(ctx);
+	}
+	fclose(stream);
+
+	checkf(reached, SCENARIO_IMPORT_RESUME, "the sweep should reach a "
+	    "window declined for memory whose import succeeds, in %d "
+	    "attempts", CAPPED_IMPORT_SWEEP);
+}
+
+/*
+ * A temporary file holding CAPPED_IMPORT_ROWS records of one digit,
+ * CAPPED_IMPORT_VALUES distinct ones in turn, which the import rewinds;
+ * NULL when it could not be made.
+ */
+static FILE *
+capped_import_table(void)
+{
+	FILE *stream;
+	size_t i;
+
+	stream = tmpfile();
+	if (stream == NULL)
+		return (NULL);
+	for (i = 0; i < CAPPED_IMPORT_ROWS; i++) {
+		if (fprintf(stream, "%zu\n", i % CAPPED_IMPORT_VALUES) < 0) {
 			fclose(stream);
 			return (NULL);
 		}
@@ -4867,6 +4989,7 @@ main(void)
 	an_import_that_ran_out_of_memory_adds_nothing();
 	an_import_refused_once_reads_on_or_fails();
 	an_import_on_threads_refused_once_reads_on_or_fails();
+	a_window_declined_for_memory_is_read_and_windows_go_on();
 	a_path_whose_close_fails_adds_nothing();
 	a_refusal_in_the_lookahead_reports_once();
 	a_check_that_ran_out_of_memory_can_be_retried();
