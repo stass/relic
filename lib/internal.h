@@ -617,6 +617,18 @@ void	 relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
 	    const char *verb, const char *subject);
 
 /*
+ * Report the input limit refusing a text or a table's field, in the form of
+ * relic_diag_limit() and naming the activity in progress, at `where`, which
+ * may be NULL.
+ *
+ * relic_input_max() is the most bytes one input may hold: `max_input`, or
+ * SIZE_MAX when that sets no limit, so a check against it needs no case for
+ * an unset limit.
+ */
+void	 relic_diag_input_limit(relic_t *ctx, const relic_location_t *where);
+size_t	 relic_input_max(const relic_t *ctx);
+
+/*
  * Record what the operation in progress is now doing, as a verb and the
  * description of what it acts on -- "planning" and "path/2" -- which
  * relic_diag_no_memory() names when the memory limit refused a charged

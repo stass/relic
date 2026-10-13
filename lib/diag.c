@@ -288,19 +288,42 @@ relic_diag_no_memory(relic_t *ctx)
 	    ctx->diag.activity.verb, ctx->diag.activity.subject);
 }
 
-void
-relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
-    const char *verb, const char *subject)
+static void
+diag_limit_at(relic_t *ctx, const relic_location_t *where, const char *limit,
+    size_t configured, const char *verb, const char *subject)
 {
 	if (verb == NULL) {
-		relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
+		relic_diag_error(ctx, RELIC_ERROR_LIMIT, where,
 		    "limit exceeded: %s=%zu", limit, configured);
 		return;
 	}
 
-	relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
+	relic_diag_error(ctx, RELIC_ERROR_LIMIT, where,
 	    "limit exceeded: %s=%zu while %s %s", limit, configured, verb,
 	    subject);
+}
+
+void
+relic_diag_limit(relic_t *ctx, const char *limit, size_t configured,
+    const char *verb, const char *subject)
+{
+	diag_limit_at(ctx, NULL, limit, configured, verb, subject);
+}
+
+void
+relic_diag_input_limit(relic_t *ctx, const relic_location_t *where)
+{
+	diag_limit_at(ctx, where, "input", ctx->config.max_input,
+	    ctx->diag.activity.verb, ctx->diag.activity.subject);
+}
+
+size_t
+relic_input_max(const relic_t *ctx)
+{
+	if (!relic_limit_set(ctx->config.max_input))
+		return (SIZE_MAX);
+
+	return (ctx->config.max_input);
 }
 
 void

@@ -118,6 +118,16 @@ an incremental reader would bound only the text, since the load's staging
 grows with the input until the commit regardless. The buffer is freed before
 the commit, since nothing the parse kept points into it.
 
+**One text is at most `max_input` bytes** when the input limit is set
+([limits](architecture.md#limits)). The parser checks a load's text where it
+begins, before the first token, which every load reaches -- from a string, a
+stream or a file -- so no entry point can skip it. The parser takes the bound
+from its caller, and a query's text is held to none. Reading a stream stops
+one byte past the limit, which is all the check needs to see, so a load from
+an endless stream holds at most the limit and one byte. The refusal, `limit
+exceeded: input=N while loading f.dl`, is a load's refusal: nothing is parsed
+and nothing added.
+
 **Locations** give a source name and the line and column of a token's first
 byte, from one. Columns count bytes, a tab being one: the number exists to
 find a byte, and anything else would make the lexer know an encoding and a

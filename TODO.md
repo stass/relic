@@ -97,13 +97,6 @@ the rewrite's schedule without reporting cycles.
 the include path, so any system header that includes `<regex.h>` would get
 relic's. Rename the header.
 
-**Nothing bounds an input's size.** [Low, component: `lib/parse.c`,
-`lib/import.c`, `include/relic.h`] A load reads its whole stream before
-lexing (`read_stream()`), and an import grows one field's buffer without
-bound, so an unterminated csv quote buffers the rest of the file. The
-memory limit leaves both out by contract. A bound on either belongs in the
-context's configuration, beside the other limits.
-
 **A batch import places new values in the symbol index one at a time.**
 [Medium, component: `lib/symbol.c`, `lib/value.c`] Publishing a window's
 values is serial: on 52 MB of distinct symbols at eight threads it is 20%

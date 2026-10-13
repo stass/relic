@@ -863,9 +863,18 @@ the rewrite of a query may occupy together; by default there is no limit.
 A long rule's plans can need more memory than the data does.
 The limit is not a bound on all the memory
 .Nm
-uses: the text being loaded, the program's rules and queries, and the
-field of a table being imported are sized by what was written, and growing
-an array holds the old one until the new one is filled.
+uses: the text being loaded and the field of a table being imported, which
+.Cm input
+bounds, and the program's rules and queries are sized by what was written,
+and growing an array holds the old one until the new one is filled.
+.It Cm input
+the most bytes one input may hold: a program file, or the program read
+from the standard input, and one field of a table imported with
+.Fl I ,
+once its quoting or escapes are decoded; by default there is no limit.
+A file is read no further than one byte past the limit, and a quoted field
+left open holds no more than the limit before it is refused, located at
+its opening quote.
 .It Cm magic
 the most work the Magic rewrite of one query may do: the body literals it
 reads while it searches for what to generate and those of every rule it
@@ -889,6 +898,10 @@ When its facts are what exceed the limit, the diagnostic names the first
 predicate, in the order the file names them, that the facts read would add
 to:
 .Dl relic: error: limit exceeded: tuples=4 while loading e/1
+A file or a table that exceeds
+.Cm input
+is refused the same way, with nothing of it added:
+.Dl relic: error: limit exceeded: input=1024 while loading graph.dl
 .Cm magic
 differs from the other limits: a rewrite that outgrows it, by default or
 as set, is abandoned with a warning and the query answered from the whole

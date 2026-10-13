@@ -308,6 +308,58 @@ case "$diagnostic" in
 	;;
 esac
 
+# The input limit bounds a program file, refused whole and naming the file,
+# and a field of an imported table, refused where the field begins.  A file
+# exactly at the limit loads.  A query's text is held to no input limit,
+# whether -q gives it or the tool writes it for -O: the query an export of
+# long.dl prepares, long_name_of_a_relation(V1, V2)?, is a byte longer than
+# the file.
+size=$(wc -c < "$work/graph.dl" | tr -d ' ')
+status=0
+diagnostic=$(cd "$work" && "$RELIC" -l input=$((size - 1)) graph.dl 2>&1 \
+    >/dev/null) || status=$?
+if [ "$status" -ne 1 ]; then
+	fail "an exceeded input limit exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"limit exceeded: input=$((size - 1)) while loading graph.dl")
+	;;
+*)
+	fail "an exceeded input limit was reported as '$diagnostic'"
+	;;
+esac
+actual=$("$RELIC" -s -l input="$size" "$work/graph.dl")
+if [ "$actual" != "$expected" ]; then
+	fail "a program at the input limit answered '$actual'"
+fi
+printf 'long_name_of_a_relation(a, b).\n' > "$work/long.dl"
+size=$(wc -c < "$work/long.dl" | tr -d ' ')
+actual=$("$RELIC" -s -l input="$size" \
+    -O "tsv:long_name_of_a_relation=$work/long.out" \
+    -q 'long_name_of_a_relation(X, Y), long_name_of_a_relation(X, Z)?' \
+    "$work/long.dl")
+if [ "$actual" != "a b b" ] ||
+    [ "$(cat "$work/long.out")" != "$(printf 'a\tb')" ]; then
+	fail "a query or an export longer than the input limit answered" \
+	    "'$actual' and wrote '$(cat "$work/long.out")'"
+fi
+
+printf 'a\tbcde\n' > "$work/long.tsv"
+status=0
+diagnostic=$(cd "$work" && "$RELIC" -l input=3 \
+    -I tsv:edge:symbol,symbol=long.tsv -q 'edge(X, Y)?' 2>&1 >/dev/null) ||
+    status=$?
+if [ "$status" -ne 1 ]; then
+	fail "a field past the input limit exited $status, expected 1"
+fi
+case "$diagnostic" in
+*"long.tsv:1:3: error: limit exceeded: input=3 while importing long.tsv")
+	;;
+*)
+	fail "a field past the input limit was reported as '$diagnostic'"
+	;;
+esac
+
 # The limit also counts the working state of a query's Magic rewrite.  A
 # kilobyte past what the program holds without its query, a program whose
 # fact holds the query's constant already, has room for the query and not
@@ -433,7 +485,7 @@ if [ "$(cat "$work/magic.err")" != "$outgrown" ]; then
 fi
 
 actual=$("$RELIC" -s -l tuples=1 -l tuples=0 -l memory=0 \
-    -l magic=1 -l magic=0 "$work/graph.dl")
+    -l input=1 -l input=0 -l magic=1 -l magic=0 "$work/graph.dl")
 if [ "$actual" != "$expected" ]; then
 	fail "limits of zero answered '$actual', expected '$expected'"
 fi
@@ -443,8 +495,8 @@ fi
 # number, signed, surrounded by space, followed by other bytes, or too large
 # for a size.
 for argument in tuples tuples5 bogus=1 =1 tuples= tuples=many \
-    tuples=-1 tuples=+1 tuples=-0 'tuples= 5' tuples=5x 'tuples=5 ' \
-    tuples=99999999999999999999999; do
+    input= input=x max_input=1 tuples=-1 tuples=+1 tuples=-0 'tuples= 5' \
+    tuples=5x 'tuples=5 ' tuples=99999999999999999999999; do
 	status=0
 	diagnostic=$("$RELIC" -l "$argument" "$work/graph.dl" 2>&1 \
 	    >/dev/null) || status=$?

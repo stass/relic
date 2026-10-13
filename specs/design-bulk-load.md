@@ -435,6 +435,18 @@ without collecting decoded field payloads. Decoding emits the existing
 field, record, end and mistake events. A sink or output policy changes
 what is retained, not which transitions occur.
 
+**The field bound is the reader's.** Every reader is made with the most
+decoded bytes a field may hold, the import plan's copy of `max_input`, and
+stops when a field would pass it, in the one function that grows a field
+([tables](design-tables.md#failure-paths-and-limits)). A decoding part's
+reader therefore stops on the field the scalar reader stops on: the piece
+does not decode, the window is declined, and scalar replay reports the
+refusal at that field. Nothing in the window path tests a field's length
+for itself, so the two paths cannot disagree about which field is too
+long. A framing reader holds no field and has nothing to bound; a field
+too long for its window leaves the window unframed, which scalar replay
+handles the same way.
+
 CSV quotes, doubled quotes, embedded newlines, CRLF and end-of-input states
 therefore decide boundaries in exactly one place. TSV escapes and incomplete
 escapes use those same transition rules for the TSV format. Counting quotes
@@ -471,7 +483,11 @@ that far. A read-ahead failure cannot replace an earlier field or staging
 failure. A short successful read retains ordinary EOF semantics.
 
 Read-ahead is bounded by two windows plus at most one transport chunk,
-and only the caller reads or closes a stream. Only a regular file is
+and only the caller reads or closes a stream. That bound, and the window's
+own arrays, are fixed by the importer rather than by the input, so
+`max_input`, which bounds what one field may make the importer hold, does
+not count them; a batch import refused by the input limit may have read
+that far past the field. Only a regular file is
 batched, so only a regular file is read ahead beyond the scalar transport
 chunk. A stream the caller opens on a regular file, standard input
 redirected from one among them, is batched like a path's; every input not positively identified as a regular file

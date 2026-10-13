@@ -255,15 +255,16 @@ past the limit is refused as it interns them.
 holding the program's rules, the schedule and a prepared query, the analysis
 scratch the dependency graph is built in, and the parser's held bytes for the
 statement being parsed; the text a load reads and the staging that holds its
-facts until commit (proportional to the text and released when the load
-returns); the tables and evaluation order of a rewrite, a constant fraction of
-the rewrite the limit does count; and the tables of relation pointers, the
-individually allocated relation headers and each relation's array of
-secondary-index headers, all sized by the program's predicates and binding
-patterns. A collected result is the caller's and charged to nothing. A
-caller-owned arena *cannot* be charged at all: a query may be destroyed after
-its context, and an arena charged to an account the context owns could not give
-its bytes back once the context is gone.
+facts until commit (proportional to the text, which `max_input` bounds, and
+released when the load returns), and the one field an import holds, which it
+bounds too ([limits](architecture.md#limits)); the tables and evaluation order
+of a rewrite, a constant fraction of the rewrite the limit does count; and the
+tables of relation pointers, the individually allocated relation headers and
+each relation's array of secondary-index headers, all sized by the program's
+predicates and binding patterns. A collected result is the caller's and
+charged to nothing. A caller-owned arena *cannot* be charged at all: a query
+may be destroyed after its context, and an arena charged to an account the
+context owns could not give its bytes back once the context is gone.
 
 [Bulk-load builders](design-bulk-load.md#ownership-and-memory-accounting)
 and bounded import windows belong to that input-sized staging. An empty

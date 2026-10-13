@@ -54,6 +54,7 @@
 #define	SCENARIO_FRAMING \
 	"a window is framed alike however its framing is stepped"
 #define	SCENARIO_HEADER		"a header is read and not imported"
+#define	SCENARIO_INPUT		"a field is held to the input limit"
 #define	SCENARIO_INTEGER	"an integer column holds the language's integers"
 #define	SCENARIO_LOCATION	"a mistake is located in its source"
 #define	SCENARIO_MESSAGE	"a message names the field it refuses"
@@ -170,12 +171,13 @@ struct capture {
 /*
  * A table imported a window at a time and a field at a time, as e/N of the
  * description's columns, by import `flags`.  `program` is loaded first,
- * `max_tuples` limits the context and `max_memory` the memory the import
- * may take it to, each when it is set.  `pad`, when set, is
- * what follows a first field of symbol p and filler in a record of the same
- * columns, which is put before the table to move where the reads and the
- * windows cut it.  A table that is `whole` is well formed and fits every
- * limit, so a batch import stages every window of it and declines none.
+ * `max_tuples` limits the context, `max_memory` the memory the import
+ * may take it to and `max_input` its fields, each when it is set.  `pad`,
+ * when set, is what follows a first field of symbol p and filler in a
+ * record of the same columns, which is put before the table to move where
+ * the reads and the windows cut it.  A table that is `whole` is well formed
+ * and fits every limit, so a batch import stages every window of it and
+ * declines none.
  */
 struct batch_case {
 	const char		*label;
@@ -189,6 +191,7 @@ struct batch_case {
 	size_t			 column_count;
 	size_t			 max_tuples;
 	size_t			 max_memory;
+	size_t			 max_input;
 	bool			 whole;
 };
 
@@ -345,14 +348,16 @@ static char	*pairs_table(size_t rows, size_t values, size_t *lengthp);
 static bool	 interned(const relic_t *ctx, const char *name);
 static size_t	 row_offset(const char *table, size_t rows);
 static FILE	*table_stream(const char *table, size_t length);
-static void	 transcribe(const reader_case_t *table, size_t piece,
-		    bool frames, bool fields, char *out, size_t size);
+static void	 transcribe(const reader_case_t *table, size_t field_max,
+		    size_t piece, bool frames, bool fields, char *out,
+		    size_t size);
 
 static void	 csv_is_read_by_its_rules(void);
 static void	 every_refusal_reads_nothing(void);
 static void	 facts_are_held_once(void);
 static void	 a_failed_import_adds_nothing(void);
 static void	 a_refused_import_stops_reading(void);
+static void	 a_long_field_stops_reading(void);
 static void	 batching_follows_the_threads_and_the_table(void);
 static void	 check_batching(const char *table, size_t length,
 		    unsigned int flags, size_t threads, bool batched,
@@ -380,11 +385,14 @@ static int	 import_failing(const char *table, size_t fail_at,
 		    unsigned int flags, size_t threads,
 		    import_outcome_t *outcome);
 static void	 integer_columns_hold_the_language_integers(void);
+static void	 compare_long_field_late(window_tally_t *tally);
+static void	 fields_are_held_to_their_bound(void);
 static void	 locations_stop_at_their_largest_value(void);
 static void	 messages_quote_only_what_is_safe(void);
 static void	 mistakes_name_their_source(void);
 static void	 skipped_columns_intern_nothing(void);
 static void	 string_columns_hold_any_bytes(void);
+static void	 the_input_limit_bounds_a_field(void);
 static void	 symbol_columns_hold_the_language_symbols(void);
 static void	 tsv_is_read_by_its_rules(void);
 
@@ -460,6 +468,10 @@ describe_event(const relic_table_event_t *event, char *out, size_t size)
 			append_text(out, size, piece);
 		}
 		return;
+	case RELIC_TABLE_TOO_LONG:
+		snprintf(out, size, "too-long %" PRIu32 ":%" PRIu32,
+		    event->where.line, event->where.column);
+		return;
 	case RELIC_TABLE_NO_MEMORY:
 		append_text(out, size, "no-memory");
 		return;
@@ -471,7 +483,8 @@ describe_event(const relic_table_event_t *event, char *out, size_t size)
 }
 
 /*
- * Read a table, feeding it `piece` bytes at a time, and write the events as
+ * Read a table, its fields held to `field_max` bytes, feeding it `piece`
+ * bytes at a time, and write the events as
  * a transcript separated by " | ", up to and including the one that stops
  * the reader, leaving out its FIELD events unless `fields` is set.  A reader
  * that `frames` reads only the table's structure.  A reader that asks for
@@ -479,8 +492,8 @@ describe_event(const relic_table_event_t *event, char *out, size_t size)
  * the transcript ends in "more".
  */
 static void
-transcribe(const reader_case_t *table, size_t piece, bool frames,
-    bool fields, char *out, size_t size)
+transcribe(const reader_case_t *table, size_t field_max, size_t piece,
+    bool frames, bool fields, char *out, size_t size)
 {
 	relic_table_reader_t reader;
 	relic_table_event_t event;
@@ -491,7 +504,8 @@ transcribe(const reader_case_t *table, size_t piece, bool frames,
 	out[0] = '\0';
 	fed = 0;
 	fed_last = false;
-	relic_table_reader_init(&reader, table->format, table->width, "t");
+	relic_table_reader_init(&reader, table->format, table->width,
+	    field_max, "t");
 	if (frames)
 		relic_table_reader_frame_only(&reader);
 
@@ -541,12 +555,12 @@ check_tables(const reader_case_t *cases, size_t count)
 	size_t i;
 
 	for (i = 0; i < count; i++) {
-		transcribe(&cases[i], cases[i].length + 1, false, true, whole,
-		    sizeof(whole));
-		transcribe(&cases[i], 1, false, true, bytewise,
+		transcribe(&cases[i], SIZE_MAX, cases[i].length + 1, false,
+		    true, whole, sizeof(whole));
+		transcribe(&cases[i], SIZE_MAX, 1, false, true, bytewise,
 		    sizeof(bytewise));
-		transcribe(&cases[i], cases[i].length + 1, false, false,
-		    structure, sizeof(structure));
+		transcribe(&cases[i], SIZE_MAX, cases[i].length + 1, false,
+		    false, structure, sizeof(structure));
 
 		checkf(strcmp(whole, cases[i].transcript) == 0, SCENARIO_READER,
 		    "table %zu should read as \"%s\", not \"%s\"", i,
@@ -555,12 +569,13 @@ check_tables(const reader_case_t *cases, size_t count)
 		    "table %zu fed a byte at a time should read as \"%s\", "
 		    "not \"%s\"", i, whole, bytewise);
 
-		transcribe(&cases[i], cases[i].length + 1, true, true, framed,
-		    sizeof(framed));
+		transcribe(&cases[i], SIZE_MAX, cases[i].length + 1, true,
+		    true, framed, sizeof(framed));
 		checkf(strcmp(framed, structure) == 0, SCENARIO_READER,
 		    "table %zu framed should read as \"%s\", not \"%s\"", i,
 		    structure, framed);
-		transcribe(&cases[i], 1, true, true, framed, sizeof(framed));
+		transcribe(&cases[i], SIZE_MAX, 1, true, true, framed,
+		    sizeof(framed));
 		checkf(strcmp(framed, structure) == 0, SCENARIO_READER,
 		    "table %zu framed a byte at a time should read as \"%s\", "
 		    "not \"%s\"", i, structure, framed);
@@ -706,7 +721,7 @@ locations_stop_at_their_largest_value(void)
 	static const char table[] = "a\nb\nc\\q";
 	enum relic_table_event_kind kind;
 
-	relic_table_reader_init(&reader, RELIC_FORMAT_TSV, 1, "t");
+	relic_table_reader_init(&reader, RELIC_FORMAT_TSV, 1, SIZE_MAX, "t");
 	reader.where.line = UINT32_MAX - 1;
 	relic_table_feed(&reader, table, sizeof(table) - 1, true);
 
@@ -721,7 +736,7 @@ locations_stop_at_their_largest_value(void)
 	relic_table_reader_reset(&reader);
 
 	/* A line longer than a column can count stops at the last column. */
-	relic_table_reader_init(&reader, RELIC_FORMAT_TSV, 1, "t");
+	relic_table_reader_init(&reader, RELIC_FORMAT_TSV, 1, SIZE_MAX, "t");
 	reader.where.column = UINT32_MAX - 1;
 	relic_table_feed(&reader, "ab\\q", 5, true);
 
@@ -731,6 +746,72 @@ locations_stop_at_their_largest_value(void)
 	    "a mistake past the last column should be at that column");
 
 	relic_table_reader_reset(&reader);
+}
+
+/* A field bound a few bytes of a table pass, so each case stays short. */
+#define	READER_FIELD_MAX	3
+
+/*
+ * A field holds at most the reader's bound of decoded bytes, a quoted field
+ * left open among them: the reader stops at the byte that would pass it,
+ * located at the field's first byte, read whole or a byte at a time.  A
+ * reader that only frames holds no field, so the bound changes nothing it
+ * finds.
+ */
+static void
+fields_are_held_to_their_bound(void)
+{
+	static const reader_case_t cases[] = {
+		{ TABLE("abc\n"), RELIC_FORMAT_TSV, 1,
+		    "field 0 1:1 abc | record | end 2:1" },
+		{ TABLE("abcd\n"), RELIC_FORMAT_TSV, 1, "too-long 1:1" },
+		{ TABLE("a\tbcde"), RELIC_FORMAT_TSV, 2,
+		    "field 0 1:1 a | too-long 1:3" },
+		{ TABLE("ab\nabcd\n"), RELIC_FORMAT_TSV, 1,
+		    "field 0 1:1 ab | record | too-long 2:1" },
+		{ TABLE("\\t\\t\\t\n"), RELIC_FORMAT_TSV, 1,
+		    "field 0 1:1 \\x09\\x09\\x09 | record | end 2:1" },
+		{ TABLE("ab\\t\\t"), RELIC_FORMAT_TSV, 1, "too-long 1:1" },
+		{ TABLE("abc,\n"), RELIC_FORMAT_CSV, 2,
+		    "field 0 1:1 abc | field 1 1:5  | record | end 2:1" },
+		{ TABLE("\"abc\""), RELIC_FORMAT_CSV, 1,
+		    "field 0 1:1 abc | record | end 1:6" },
+		{ TABLE("\"a\"\"b\""), RELIC_FORMAT_CSV, 1,
+		    "field 0 1:1 a\"b | record | end 1:7" },
+		{ TABLE("\"a\"\"bc\""), RELIC_FORMAT_CSV, 1, "too-long 1:1" },
+		{ TABLE("x,\"abc"), RELIC_FORMAT_CSV, 2,
+		    "field 0 1:1 x | unterminated 1:3" },
+		{ TABLE("x,\"abcd"), RELIC_FORMAT_CSV, 2,
+		    "field 0 1:1 x | too-long 1:3" },
+		{ TABLE("x,\"ab\ncd\""), RELIC_FORMAT_CSV, 2,
+		    "field 0 1:1 x | too-long 1:3" }
+	};
+	char whole[TRANSCRIPT_MAX];
+	char bytewise[TRANSCRIPT_MAX];
+	char framed[TRANSCRIPT_MAX];
+	char unbounded[TRANSCRIPT_MAX];
+	size_t i;
+
+	for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		transcribe(&cases[i], READER_FIELD_MAX, cases[i].length + 1,
+		    false, true, whole, sizeof(whole));
+		transcribe(&cases[i], READER_FIELD_MAX, 1, false, true,
+		    bytewise, sizeof(bytewise));
+		checkf(strcmp(whole, cases[i].transcript) == 0, SCENARIO_INPUT,
+		    "bounded table %zu should read as \"%s\", not \"%s\"", i,
+		    cases[i].transcript, whole);
+		checkf(strcmp(bytewise, whole) == 0, SCENARIO_INPUT,
+		    "bounded table %zu fed a byte at a time should read as "
+		    "\"%s\", not \"%s\"", i, whole, bytewise);
+
+		transcribe(&cases[i], READER_FIELD_MAX, 1, true, true, framed,
+		    sizeof(framed));
+		transcribe(&cases[i], SIZE_MAX, 1, true, true, unbounded,
+		    sizeof(unbounded));
+		checkf(strcmp(framed, unbounded) == 0, SCENARIO_INPUT,
+		    "bounded table %zu framed should read as \"%s\", not "
+		    "\"%s\"", i, unbounded, framed);
+	}
 }
 
 /*
@@ -1162,6 +1243,103 @@ mistakes_name_their_source(void)
 }
 
 /*
+ * The input limit refuses an import with a field that decodes to more
+ * bytes than the limit, adding nothing of the table, and locates the
+ * refusal at the field; a field at the limit imports, however many bytes
+ * its quoting or escapes are written in.  A header's field and a skipped
+ * column's are held to it too.  Zero and SIZE_MAX set no limit.
+ */
+static void
+the_input_limit_bounds_a_field(void)
+{
+	static const enum relic_column columns[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_STRING
+	};
+	static const enum relic_column skipping[] = {
+		RELIC_COLUMN_SYMBOL, RELIC_COLUMN_SKIP
+	};
+	static const size_t unlimited[] = { 0, SIZE_MAX };
+	static const char refused[] =
+	    "limit exceeded: input=4 while importing t";
+	char table[1024];
+	relic_config_t config;
+	capture_t capture;
+	relic_t *ctx;
+	size_t i;
+	int status;
+
+	bzero(&config, sizeof(config));
+	config.max_input = 4;
+	ctx = context_with_capture(&config, &capture);
+	if (ctx == NULL) {
+		check(false, SCENARIO_INPUT, "a context is made");
+		return;
+	}
+
+	status = import_table(ctx, "t", RELIC_FORMAT_CSV, 0, "p", columns, 2,
+	    TABLE("ab,\"abcd\"\nc,\"a\"\"bcd\"\n"));
+	check(status == -1 && strcmp(capture.message, refused) == 0 &&
+	    strcmp(capture.file, "t") == 0 && capture.line == 2 &&
+	    capture.column == 3, SCENARIO_INPUT,
+	    "a field decoding to five bytes should be refused at t:2:3");
+	check(rows_of(ctx, "p(X, Y)?") == 0, SCENARIO_INPUT,
+	    "the refused import should add nothing");
+
+	check(import_table(ctx, "t", RELIC_FORMAT_CSV, 0, "p", columns, 2,
+	    TABLE("ab,\"abcdefgh")) == -1 &&
+	    strcmp(capture.message, refused) == 0 && capture.line == 1 &&
+	    capture.column == 4, SCENARIO_INPUT,
+	    "a quoted field left open should be refused at its quote");
+
+	check(import_table(ctx, "t", RELIC_FORMAT_CSV, RELIC_IMPORT_HEADER,
+	    "p", columns, 2, TABLE("names,x\nab,c\n")) == -1 &&
+	    strcmp(capture.message, refused) == 0 && capture.line == 1 &&
+	    capture.column == 1, SCENARIO_INPUT,
+	    "a header's field should be held to the limit");
+
+	check(import_table(ctx, "t", RELIC_FORMAT_CSV, 0, "q", skipping, 2,
+	    TABLE("a,abcde\n")) == -1 &&
+	    strcmp(capture.message, refused) == 0 && capture.line == 1 &&
+	    capture.column == 3, SCENARIO_INPUT,
+	    "a skipped column's field should be held to the limit");
+
+	status = import_table(ctx, "t", RELIC_FORMAT_CSV, 0, "p", columns, 2,
+	    TABLE("abcd,\"a\"\"bc\"\n"));
+	check(status == 0, SCENARIO_INPUT, "fields at the limit should import");
+	check(rows_of(ctx, "p(X, Y)?") == 1, SCENARIO_INPUT,
+	    "fields at the limit should be a fact");
+	status = import_table(ctx, "t", RELIC_FORMAT_TSV, 0, "p", columns, 2,
+	    TABLE("a\t\\t\\t\\t\\t\n"));
+	check(status == 0, SCENARIO_INPUT,
+	    "four escapes should be four bytes of the limit, not eight");
+	check(rows_of(ctx, "p(X, Y)?") == 2, SCENARIO_INPUT,
+	    "four escapes at the limit should be a fact");
+
+	relic_destroy(ctx);
+
+	table[0] = 'a';
+	table[1] = ',';
+	memset(table + 2, 'x', sizeof(table) - 3);
+	table[sizeof(table) - 1] = '\n';
+	for (i = 0; i < sizeof(unlimited) / sizeof(unlimited[0]); i++) {
+		config.max_input = unlimited[i];
+		ctx = context_with_capture(&config, &capture);
+		if (ctx == NULL) {
+			check(false, SCENARIO_INPUT, "a context is made");
+			return;
+		}
+		status = import_table(ctx, "t", RELIC_FORMAT_CSV, 0, "p",
+		    columns, 2, table, sizeof(table));
+		checkf(status == 0, SCENARIO_INPUT,
+		    "an input limit of %zu should hold a field to none",
+		    unlimited[i]);
+		check(rows_of(ctx, "p(X, Y)?") == 1, SCENARIO_INPUT,
+		    "the long field should be a fact");
+		relic_destroy(ctx);
+	}
+}
+
+/*
  * The header record is read by the format's rules and must have a field per
  * column, and is then dropped.  The flag says a header is there, so a table
  * with no record at all is refused.
@@ -1447,6 +1625,76 @@ a_refused_import_stops_reading(void)
 	    "two windows and a chunk");
 	refused_import_stops_reading(RELIC_F_NO_BATCH_IMPORT,
 	    RELIC_IMPORT_READ_CHUNK, "a chunk");
+}
+
+/* An input limit far below a chunk, so reading past it is measurable. */
+#define	LONG_FIELD_MAX	100
+
+/*
+ * An import refused for a field past the input limit stops reading near
+ * it, however long the field goes on: within a chunk of the byte that
+ * passes the limit read a field at a time, and within two windows and a
+ * chunk read a window at a time.
+ */
+static void
+a_long_field_stops_reading(void)
+{
+	static const struct {
+		unsigned int	 flags;
+		size_t		 ahead;
+		const char	*unit;
+	} ways[] = {
+		{ RELIC_F_NO_BATCH_IMPORT, RELIC_IMPORT_READ_CHUNK, "a chunk" },
+		{ BATCHED, 2 * RELIC_IMPORT_WINDOW_BYTES +
+		    RELIC_IMPORT_READ_CHUNK, "two windows and a chunk" }
+	};
+	char expected[TRANSCRIPT_MAX];
+	relic_config_t config;
+	capture_t capture;
+	relic_t *ctx;
+	size_t length;
+	size_t cutoff;
+	size_t i;
+	long read;
+	char *table;
+	int status;
+
+	length = 2 + LONG_FIELD_MAX + 2 * RELIC_IMPORT_WINDOW_BYTES +
+	    2 * RELIC_IMPORT_READ_CHUNK;
+	table = malloc(length);
+	if (table == NULL) {
+		check(false, SCENARIO_INPUT, "the table is built");
+		return;
+	}
+	table[0] = 'a';
+	table[1] = '\t';
+	memset(table + 2, 'x', length - 2);
+	cutoff = 2 + LONG_FIELD_MAX + 1;
+	snprintf(expected, sizeof(expected),
+	    "limit exceeded: input=%d while importing e", LONG_FIELD_MAX);
+
+	for (i = 0; i < sizeof(ways) / sizeof(ways[0]); i++) {
+		bzero(&config, sizeof(config));
+		config.flags = ways[i].flags;
+		config.max_input = LONG_FIELD_MAX;
+		ctx = context_with_capture(&config, &capture);
+		if (ctx == NULL) {
+			check(false, SCENARIO_INPUT, "a context is made");
+			break;
+		}
+		status = import_counting(ctx, table, length, &read);
+		checkf(status == -1 && strcmp(capture.message, expected) == 0 &&
+		    capture.line == 1 && capture.column == 3, SCENARIO_INPUT,
+		    "a field past the limit should be refused at e:1:3 with "
+		    "\"%s\", not at %u:%u with \"%s\"", expected, capture.line,
+		    capture.column, capture.message);
+		checkf(read >= 0 && (size_t)read <= cutoff + ways[i].ahead,
+		    SCENARIO_INPUT, "the refused import should stop within %s "
+		    "of byte %zu, not at byte %ld", ways[i].unit, cutoff, read);
+		relic_destroy(ctx);
+	}
+
+	free(table);
 }
 
 /*
@@ -2209,6 +2457,13 @@ a_path_is_opened_and_named(void)
 	RELIC_IMPORT_READ_CHUNK + 1 : 33)
 
 /*
+ * The input limit the batch cases that set one are compared under, longer
+ * than any padding field, and a field of exactly that many bytes.
+ */
+#define	BATCH_INPUT_MAX		40
+#define	BATCH_INPUT_FIELD	"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+/*
  * The rows of the generated tables, enough to span several windows, and
  * the distinct symbols they repeat.
  */
@@ -2325,6 +2580,26 @@ a_batch_import_matches_the_scalar_import(void)
 		    .program = "e(a, \"b\").\n", BATCH_TABLE("a\tb\nc\td\n"),
 		    .pad = "\tq\n", .format = RELIC_FORMAT_TSV,
 		    BATCH_COLUMNS(symbol_string), .max_tuples = 2 },
+		{ .label = "a field at the input limit",
+		    BATCH_TABLE("a,\"" BATCH_INPUT_FIELD "\"\nb,c\n"),
+		    .pad = ",q\n", .format = RELIC_FORMAT_CSV,
+		    BATCH_COLUMNS(symbol_string),
+		    .max_input = BATCH_INPUT_MAX, .whole = true },
+		{ .label = "a field past the input limit",
+		    BATCH_TABLE("a\tb\nc\t" BATCH_INPUT_FIELD "y\nd\te\n"),
+		    .pad = "\tq\n", .format = RELIC_FORMAT_TSV,
+		    BATCH_COLUMNS(symbol_string),
+		    .max_input = BATCH_INPUT_MAX },
+		{ .label = "an open quote past the input limit",
+		    BATCH_TABLE("a,b\nc,\"" BATCH_INPUT_FIELD "y\n"),
+		    .pad = ",q\n", .format = RELIC_FORMAT_CSV,
+		    BATCH_COLUMNS(symbol_string),
+		    .max_input = BATCH_INPUT_MAX },
+		{ .label = "a header past the input limit",
+		    BATCH_TABLE("name," BATCH_INPUT_FIELD "y\na,b\n"),
+		    .format = RELIC_FORMAT_CSV, .flags = RELIC_IMPORT_HEADER,
+		    BATCH_COLUMNS(symbol_string),
+		    .max_input = BATCH_INPUT_MAX },
 	};
 	window_tally_t tally;
 	char *long_record;
@@ -2371,9 +2646,45 @@ a_batch_import_matches_the_scalar_import(void)
 	compare_generated_imports("a tuple limit in a late window", 0, NULL,
 	    GENERATED_ROWS / 2, 0, &tally);
 	compare_memory_limits(&tally);
+	compare_long_field_late(&tally);
 	checkf(tally.staged > 0 && tally.declined > 0, SCENARIO_BATCH,
 	    "the long tables should have windows staged and windows declined, "
 	    "not %" PRIu64 " and %" PRIu64, tally.staged, tally.declined);
+}
+
+/*
+ * Compare the two ways of importing a generated table whose record half way
+ * through holds a field past the input limit.
+ */
+static void
+compare_long_field_late(window_tally_t *tally)
+{
+	static const char label[] = "a field past the input limit in a late "
+	    "window";
+	static const char odd[] = "s1\t1\t" BATCH_INPUT_FIELD "y\n";
+	batch_case_t batch;
+	size_t length;
+	char *table;
+
+	table = generated_table(GENERATED_ROWS, GENERATED_ROWS / 2, odd,
+	    &length);
+	if (table == NULL) {
+		check(false, SCENARIO_BATCH, "the table is built");
+		return;
+	}
+
+	bzero(&batch, sizeof(batch));
+	batch.label = label;
+	batch.program = GENERATED_PROGRAM;
+	batch.table = table;
+	batch.length = length;
+	batch.format = RELIC_FORMAT_TSV;
+	batch.columns = generated_columns;
+	batch.column_count = 3;
+	batch.max_input = BATCH_INPUT_MAX;
+	compare_import_ways(&batch, table, length, label, tally);
+
+	free(table);
 }
 
 /*
@@ -2738,6 +3049,7 @@ import_first(const batch_case_t *batch, const char *table, size_t length,
 	config.flags = flags;
 	config.threads = threads;
 	config.max_tuples = batch->max_tuples;
+	config.max_input = batch->max_input;
 	outcome->ctx = context_with_capture(&config, &outcome->capture);
 	if (outcome->ctx == NULL)
 		return (-1);
@@ -3608,16 +3920,19 @@ main(void)
 	tsv_is_read_by_its_rules();
 	csv_is_read_by_its_rules();
 	locations_stop_at_their_largest_value();
+	fields_are_held_to_their_bound();
 	symbol_columns_hold_the_language_symbols();
 	integer_columns_hold_the_language_integers();
 	string_columns_hold_any_bytes();
 	skipped_columns_intern_nothing();
 	messages_quote_only_what_is_safe();
 	mistakes_name_their_source();
+	the_input_limit_bounds_a_field();
 	a_header_is_skipped();
 	every_refusal_reads_nothing();
 	a_failed_import_adds_nothing();
 	a_refused_import_stops_reading();
+	a_long_field_stops_reading();
 	batching_follows_the_threads_and_the_table();
 	facts_are_held_once();
 	an_import_discards_derived_facts();

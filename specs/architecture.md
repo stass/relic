@@ -812,17 +812,35 @@ See [design-memory.md](design-memory.md).
 
 Limits protect command-line and embedded users from accidental combinatorial
 explosion. The configurable limits are on tuples across all relations, on
-memory (see [Memory and failure](#memory-and-failure)), and on the work of one
-query's Magic rewrite. They are fields of `relic_config_t`, and the tool's `-l
-key=value` keys correspond to them one to one: a limit is defined in one place,
-and the tool only parses into it. A zero tuple or memory limit means unlimited.
+memory (see [Memory and failure](#memory-and-failure)), on the work of one
+query's Magic rewrite, and on the size of one input. They are fields of
+`relic_config_t`, and the tool's `-l key=value` keys correspond to them one to
+one: a limit is defined in one place, and the tool only parses into it. A zero
+tuple, memory or input limit means unlimited, and so does `SIZE_MAX`.
+
+The input limit, `max_input`, bounds what the memory limit leaves out by
+contract because the caller sized it: the bytes of one program text a load
+parses, from a string, a stream or a file, and the decoded bytes of one field
+of an imported table. Without it a load holds its whole stream before lexing,
+and an unterminated csv quote makes one field of the rest of the file. A
+query's text is not an input: the caller writes it, or the tool does for an
+export, and it is held to no such limit. Each is checked in the one place
+every path reaches: a load's text where the parser begins, so a stream is read
+no further than one byte past the limit; and a field where the table reader
+grows it, the reader that the scalar importer and a batch import's decoders
+share, so a field one byte past the limit is refused with the same diagnostic
+whichever path meets it, located at the field. The fixed transport and window
+buffers of a batch import are not counted: their size is the importer's, not
+the input's. A refused text or field adds nothing, as any refused load or
+import adds nothing.
 
 An exceeded limit is an ordinary error, never an abort. The diagnostic names
 the limit, its configured value and the operation that exceeded it -- a
-predicate, an aggregate of one, or the query:
+predicate, an aggregate of one, the query, or the source being read:
 
 ```text
 relic: error: limit exceeded: tuples=N while deriving p/2
+relic: error: limit exceeded: input=N while loading graph.dl
 ```
 
 Partial results are discarded: a query that exceeds a limit delivers no rows
