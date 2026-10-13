@@ -271,9 +271,39 @@ wins on most tables on both machines: the M3 wins everywhere from two
 workers, the p620 on three of four tables at eight, losing 9% on
 `files8`, and on all four from sixteen.
 
-**What remains.** The steps left on the calling thread bound the parallel
-gain: framing each window and placing new values in the symbol index,
-each a `TODO.md` entry.
+**Framing ahead.** The calling thread frames the next window as the
+filler of the current window's analysis jobs instead of before them
+([framing ahead](../specs/design-bulk-load.md#framing-ahead)). Medians of
+seven interleaved runs against framing each window in place, with peak
+memory within 5% throughout:
+
+| Table | p620 j8 | j16 | j32 | M3 j8 | j16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `facts8` | 0.79 -> 0.67 s | 0.67 -> 0.60 | 0.66 -> 0.57 | not measured | not measured |
+| `files8` | 0.70 -> 0.60 s | 0.59 -> 0.53 | 0.59 -> 0.51 | not measured | not measured |
+| `distinct` | 1.05 -> 0.88 s | 0.84 -> 0.75 | 0.84 -> 0.74 | 0.45 -> 0.40 s | 0.44 -> 0.36 |
+| `repeat6` | 1.67 -> 0.87 s | 1.28 -> 0.80 | 1.19 -> 0.81 | 0.75 -> 0.47 s | 0.69 -> 0.48 |
+
+With it, batching wins on all four tables at eight workers on the
+p620, `files8` included. What the framer writes while the parts run
+must sit on cache lines no part reads. With the framer's state beside
+the window the parts read, and its step counter in the context they
+read, some address-space layouts put a framer write and a part read on
+one line, and those runs took twice as long, 1.8 s against 0.87 on
+`repeat6` at j8, with twice the user time.
+
+The classify parts had the same fault among themselves: each counted its
+new tuples, and kept its screen's header, in an array beside its
+neighbours' and bumped them at every new tuple. Kept in locals and
+stored once, the medians of seven interleaved runs on the p620 at j8,
+j16 and j32 fall from 0.67, 0.59 and 0.57 s to 0.58, 0.53 and 0.53 on
+`facts8`, from 0.60, 0.53 and 0.52 to 0.52, 0.46 and 0.46 on `files8`,
+from 0.88, 0.75 and 0.73 to 0.77, 0.66 and 0.63 on `distinct`, and by
+0.01 to 0.03 s on `repeat6`, with peaks unchanged.
+
+**What remains.** The step left on the calling thread bounds the
+parallel gain: placing new values in the symbol index, a `TODO.md`
+entry.
 
 **Design and measurement gates.** Preserve the ordinary domain encoding and
 global first-occurrence numbering. Measure dictionary reconciliation,

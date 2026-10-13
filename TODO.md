@@ -104,16 +104,6 @@ bound, so an unterminated csv quote buffers the rest of the file. The
 memory limit leaves both out by contract. A bound on either belongs in the
 context's configuration, beside the other limits.
 
-**Framing ahead is unmeasured.** [Medium, component: `lib/import.c`,
-`lib/pool.c`] Framing a window in place was sampled at eight threads as
-38% of the calling thread on a 158 MB table of two columns of repeated
-values and 17% on 52 MB of distinct symbols. A batch import frames the
-next window as the filler of the current window's analysis jobs
-([framing ahead](specs/design-bulk-load.md#framing-ahead)), and worker 0
-gives up its share of those jobs' parts while it frames. Measure it
-against framing in place on those tables at eight and sixteen threads on
-the p620 and the M3, and keep it only where it wins.
-
 **A batch import places new values in the symbol index one at a time.**
 [Medium, component: `lib/symbol.c`, `lib/value.c`] Publishing a window's
 values is serial: on 52 MB of distinct symbols at eight threads it is 20%
@@ -256,11 +246,10 @@ and batches large tables over the pool; at scale 8 the import alone takes
 0.89 s at one thread and 0.66 s at sixteen on the p620, and 0.34 s at
 sixteen on the M3, against DuckDB's complete sixteen-thread median of
 0.191 s ([step 4](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)).
-The serial steps left -- framing and symbol placement, the entries
-above -- bound the parallel gain. Measure scale 10,
-time and peak, once they are parallel. Pool-entry packing remains a
-separate memory-layout candidate and must preserve byte-pointer lifetime,
-addressable range and affordable rehash.
+The serial step left -- symbol placement, the entry above -- bounds the
+parallel gain. Measure scale 10, time and peak, once it is parallel.
+Pool-entry packing remains a separate memory-layout candidate and must
+preserve byte-pointer lifetime, addressable range and affordable rehash.
 
 ## Testing and CI
 

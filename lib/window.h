@@ -155,9 +155,9 @@ struct relic_window_piece {
  * in the input, and `hashes` and `stripes` each one's wide hash and the
  * stripe of the canonical index it chooses once resolved.  `stripe_list`
  * lists the tuples by stripe, as relic_list_by_stripe() lists them from
- * `stripe_start`, and stripe s's `screens[s]`, whose slots lie in
- * `screen_memory` from `screen_start[s]`, finds its tuples new to the
- * builder and the store by hash, holding their positions plus one.
+ * `stripe_start`, and stripe s's classify part screens its tuples new to
+ * the builder and the store by hash, in a table of their positions plus
+ * one whose slots lie in `screen_memory` from `screen_start[s]`.
  * `ranks` holds one for each new tuple and zero for every other once the
  * classify parts have marked them, and relic_window_rank() then gives each
  * new tuple its place among the window's, from one, in input order; there
@@ -180,7 +180,6 @@ struct relic_window {
 	uint32_t		*stripe_list;
 	uint32_t		*ranks;
 	char			*screen_memory;
-	relic_idtab_t		 screens[RELIC_STRIPES];
 	size_t			 value_start[RELIC_WINDOW_VALUE_PARTS + 1];
 	size_t			 value_slot_start[RELIC_WINDOW_VALUE_PARTS];
 	size_t			 value_slot_count[RELIC_WINDOW_VALUE_PARTS];

@@ -53,8 +53,9 @@ static int	 piece_value(relic_window_t *window,
 		    const char *bytes, uint32_t hash, size_t *decodedp,
 		    relic_dom_t *tokenp);
 static size_t	 place_dictionaries(relic_window_t *window);
-static bool	 screened(const relic_window_t *window, size_t stripe,
-		    const relic_dom_t *tuple, uint64_t hash);
+static bool	 screened(const relic_window_t *window,
+		    const relic_idtab_t *screen, const relic_dom_t *tuple,
+		    uint64_t hash);
 static int	 size_screens(relic_window_t *window);
 static int	 size_value_slots(relic_window_t *window);
 static int	 size_values(relic_window_t *window, size_t count);
@@ -865,18 +866,23 @@ size_screens(relic_window_t *window)
  * A tuple is new when neither the builder nor the base store holds it and
  * no earlier tuple of the window is it.  Equal tuples share a stripe, so
  * the earlier tuples it could be are the stripe's, which the stripe's
- * screen, holding the new ones found so far, answers for.
+ * screen, holding the new ones found so far, answers for.  A part keeps
+ * its screen and count in locals and stores the count once, since the
+ * parts of neighbouring stripes run at once and would otherwise write one
+ * cache line at every new tuple.
  */
 void
 relic_window_classify_part(void *argument, size_t stripe,
     size_t worker_index RELIC_UNUSED)
 {
+	relic_idtab_t screen;
 	const relic_window_job_t *job;
 	const relic_dom_t *tuple;
 	relic_window_t *window;
 	uint64_t hash;
 	uint32_t position;
 	size_t end;
+	size_t fresh;
 	size_t i;
 
 	job = argument;
@@ -886,9 +892,10 @@ relic_window_classify_part(void *argument, size_t stripe,
 	if (end == window->stripe_start[stripe])
 		return;
 
-	relic_idtab_init_given(&window->screens[stripe], true,
+	relic_idtab_init_given(&screen, true,
 	    end - window->stripe_start[stripe],
 	    window->screen_memory + window->screen_start[stripe]);
+	fresh = 0;
 	for (i = window->stripe_start[stripe]; i < end; i++) {
 		position = window->stripe_list[i];
 		tuple = window_tuple(window, position);
@@ -898,14 +905,14 @@ relic_window_classify_part(void *argument, size_t stripe,
 		    relic_builder_contains_hashed(job->builder, tuple, hash)) ||
 		    (job->store != NULL &&
 		    relic_relation_contains_hashed(job->store, tuple, hash)) ||
-		    screened(window, stripe, tuple, hash))
+		    screened(window, &screen, tuple, hash))
 			continue;
 
-		relic_idtab_place(&window->screens[stripe],
-		    relic_hash_low(hash), position + 1);
+		relic_idtab_place(&screen, relic_hash_low(hash), position + 1);
 		window->ranks[position] = 1;
-		window->fresh_by_stripe[stripe]++;
+		fresh++;
 	}
+	window->fresh_by_stripe[stripe] = fresh;
 }
 
 /*
@@ -925,14 +932,13 @@ slot_aligned(size_t offset)
 }
 
 static bool
-screened(const relic_window_t *window, size_t stripe,
+screened(const relic_window_t *window, const relic_idtab_t *screen,
     const relic_dom_t *tuple, uint64_t hash)
 {
 	relic_idprobe_t probe;
 	uint32_t id;
 
-	relic_idprobe_open(&probe, &window->screens[stripe],
-	    relic_hash_low(hash));
+	relic_idprobe_open(&probe, screen, relic_hash_low(hash));
 	while (relic_idprobe_next(&probe, &id)) {
 		if (relic_tuple_equal(window_tuple(window, id - 1), tuple,
 		    window->arity))

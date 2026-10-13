@@ -215,10 +215,17 @@ more than the share of parts the other workers take on, which is
 measured, not assumed.
 
 A step runs while parts write, so it must neither block nor run caller
-code, and it reads and writes nothing a part writes or reads. Only a bulk
-import's window-analysis jobs carry one, frozen-read jobs whose parts
-write only their window's private slices; the step frames the next
-window from bytes already buffered, performing no I/O
+code, and it reads and writes nothing a part writes or reads. Nor may
+it write a cache line a part reads often: a step writes its state at
+every record and every feed, and a line it shares with a part's inputs
+moves between processors at each write. So the state a filler steps is
+a type aligned and padded to `RELIC_CACHE_LINE`, which keeps it on lines
+of its own whatever the layout of the address space. The arrays it fills
+and the stack it runs on are left to the allocator; a step writes those
+far less often. Only a bulk import's window-analysis jobs carry one,
+frozen-read jobs whose parts write only their window's private slices;
+the step frames the next window from bytes already buffered, performing
+no I/O
 ([framing ahead](design-bulk-load.md#framing-ahead)). No job that
 publishes carries a filler.
 

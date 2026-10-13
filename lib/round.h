@@ -401,11 +401,21 @@ typedef void	(*relic_pool_part_fn)(void *argument, size_t part,
 		    size_t worker_index);
 
 /*
+ * The span at which two processors' accesses to memory interfere: a 64-byte
+ * line together with the one Intel's adjacent-line prefetcher fetches with
+ * it, or a 128-byte line on Apple's arm64.
+ */
+#define	RELIC_CACHE_LINE	128
+
+/*
  * A job's filler: serial work of the caller's that worker 0 runs in steps
  * while the pool's other workers run the job's parts.  `step` runs one
  * step with `argument` and returns whether another remains; called when
  * none does, it does nothing and returns false.  A step should be short,
- * since the job can end no sooner than the step in progress does.
+ * since the job can end no sooner than the step in progress does.  What a
+ * step writes must lie on cache lines no part reads, or every write takes
+ * the line from the processors running the parts; the state a step keeps
+ * is kept off theirs by aligning it to RELIC_CACHE_LINE.
  */
 typedef bool	(*relic_pool_step_fn)(void *argument);
 

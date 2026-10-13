@@ -84,6 +84,7 @@ enum window_outcome {
 	WINDOW_NONE
 };
 
+typedef struct import_framing import_framing_t;
 typedef struct import_input import_input_t;
 typedef struct importer importer_t;
 typedef struct window_fill window_fill_t;
@@ -107,6 +108,23 @@ struct import_input {
 };
 
 /*
+ * A window's framing: `framer`, over the window that begins `start` bytes
+ * into `input`, and `frames_ahead`, how many steps it has run as the
+ * filler of a window's jobs since the import last counted them.  A filler
+ * steps it while the parts run, so the alignment of its first member
+ * aligns and pads it to RELIC_CACHE_LINE (round.h), which keeps it off
+ * every line a part reads.  That holds for this state only: the pieces the
+ * framer fills and the stack its steps run on are left to the allocator,
+ * where a step writes far less often.
+ */
+struct import_framing {
+	_Alignas(RELIC_CACHE_LINE) relic_framer_t framer;
+	const import_input_t	*input;
+	size_t			 start;
+	uint64_t		 frames_ahead;
+};
+
+/*
  * An import in progress.  `tuple` holds the values of the current record's
  * kept columns, `kept` of them so far.  `header_pending` is set while the
  * first record is still to be read as a header: its fields are neither typed
@@ -115,9 +133,10 @@ struct import_input {
  * window, or the reader, begins.  `map` is what the value layer numbered
  * the window's values as, opened while `mapped` is set.
  *
- * `framer` frames the window after the one being staged while that one is
- * analyzed, or the window `boundary` begins once that one is staged; the
- * window it frames begins `frame_start` bytes into the input.
+ * `framing` frames the window after the one being staged while that one
+ * is analyzed, or the window `boundary` begins once that one is staged.
+ * It is over-aligned and points into the importer, so an importer is an
+ * automatic object, neither allocated by malloc() nor copied.
  */
 struct importer {
 	relic_t			*ctx;
@@ -126,16 +145,15 @@ struct importer {
 	relic_table_reader_t	 reader;
 	import_input_t		 input;
 	relic_window_t		 window;
-	relic_framer_t		 framer;
 	relic_pending_map_t	 map;
 	relic_location_t	 boundary;
-	size_t			 frame_start;
 	relic_dom_t		 tuple[RELIC_MAX_ARITY];
 	relic_pred_id_t		 pred;
 	char			*source_name;	/* the importer's copy */
 	uint16_t		 kept;
 	bool			 header_pending;
 	bool			 mapped;
+	import_framing_t	 framing;
 };
 
 /*
@@ -193,9 +211,9 @@ static bool	 is_plain(enum relic_format format,
 static size_t	 kept_columns(const enum relic_column *columns,
 		    size_t column_count);
 static void	 forget_window(importer_t *importer);
-static void	 frame_rest(importer_t *importer);
+static void	 frame_rest(import_framing_t *framing);
 static bool	 frame_ahead(void *argument);
-static bool	 frame_step(void *argument);
+static bool	 frame_step(import_framing_t *framing);
 static enum window_outcome decline_window(importer_t *importer);
 static void	 fill_stripe(void *argument, size_t stripe,
 		    size_t worker_index);
@@ -1127,8 +1145,9 @@ importer_init(importer_t *importer, relic_t *ctx,
 	importer->header_pending = plan->header;
 	relic_staging_init(&importer->staging, ctx);
 	relic_window_init(&importer->window, (uint16_t)plan->arity);
-	relic_framer_init(&importer->framer, RELIC_IMPORT_WINDOW_BYTES,
+	relic_framer_init(&importer->framing.framer, RELIC_IMPORT_WINDOW_BYTES,
 	    RELIC_IMPORT_PIECE_BYTES);
+	importer->framing.input = &importer->input;
 }
 
 static void
@@ -1136,7 +1155,7 @@ importer_reset(importer_t *importer)
 {
 	forget_window(importer);
 	relic_window_reset(&importer->window);
-	relic_framer_reset(&importer->framer);
+	relic_framer_reset(&importer->framing.framer);
 	relic_table_reader_reset(&importer->reader);
 	relic_staging_reset(&importer->staging);
 	free(importer->input.bytes);
@@ -1340,8 +1359,8 @@ stage_windows(importer_t *importer)
 {
 	enum window_outcome outcome;
 
-	importer->frame_start = 0;
-	relic_framer_begin(&importer->framer, importer->plan,
+	importer->framing.start = 0;
+	relic_framer_begin(&importer->framing.framer, importer->plan,
 	    importer->source_name, &importer->boundary,
 	    importer->header_pending, importer->input.length,
 	    importer->input.ended);
@@ -1350,7 +1369,9 @@ stage_windows(importer_t *importer)
 	while (outcome == WINDOW_STAGED);
 	forget_window(importer);
 	relic_window_reset(&importer->window);
-	relic_framer_reset(&importer->framer);
+	relic_framer_reset(&importer->framing.framer);
+	importer->ctx->counters.frames_ahead += importer->framing.frames_ahead;
+	importer->framing.frames_ahead = 0;
 
 	switch (outcome) {
 	case WINDOW_ENDED:
@@ -1416,23 +1437,23 @@ stage_window(importer_t *importer)
 	if (input->length == 0)
 		return (WINDOW_NONE);
 
-	assert(importer->framer.state != RELIC_FRAMING_NONE);
-	frame_rest(importer);
-	if (importer->framer.state != RELIC_FRAMED)
+	assert(importer->framing.framer.state != RELIC_FRAMING_NONE);
+	frame_rest(&importer->framing);
+	if (importer->framing.framer.state != RELIC_FRAMED)
 		return (decline_window(importer));
-	relic_window_take_frame(window, &importer->framer);
+	relic_window_take_frame(window, &importer->framing.framer);
 
 	ahead = NULL;
 	if (!window->ends_input) {
 		if (fill_input(input, window->length +
 		    RELIC_IMPORT_WINDOW_BYTES) != 0)
 			return (decline_window(importer));
-		importer->frame_start = window->length;
-		relic_framer_begin(&importer->framer, importer->plan,
+		importer->framing.start = window->length;
+		relic_framer_begin(&importer->framing.framer, importer->plan,
 		    importer->source_name, &window->end, false,
 		    input->length - window->length, input->ended);
 		filler.step = frame_ahead;
-		filler.argument = importer;
+		filler.argument = &importer->framing;
 		ahead = &filler;
 	}
 	window->input = input->bytes;
@@ -1449,7 +1470,7 @@ stage_window(importer_t *importer)
 
 	importer->ctx->counters.windows_staged++;
 	consume_input(input, window->length);
-	importer->frame_start = 0;
+	importer->framing.start = 0;
 	importer->boundary = window->end;
 	importer->header_pending = false;
 
@@ -1469,49 +1490,45 @@ decline_window(importer_t *importer)
 }
 
 /*
- * One step of the framer over the window it frames, which begins
- * `frame_start` bytes into the input.  The base is found anew at each
- * step, since the input's bytes move when a window is consumed.
+ * One step of the framing over the window it frames, which begins
+ * `start` bytes into the input.  The base is found anew at each step,
+ * since the input's bytes move when a window is consumed.
  */
 static bool
-frame_step(void *argument)
+frame_step(import_framing_t *framing)
 {
-	importer_t *importer;
+	assert(framing->start + framing->framer.buffered <=
+	    framing->input->length);
 
-	importer = argument;
-	assert(importer->frame_start + importer->framer.buffered <=
-	    importer->input.length);
-
-	return (relic_framer_step(&importer->framer,
-	    importer->input.bytes + importer->frame_start,
-	    RELIC_IMPORT_READ_CHUNK));
+	return (relic_framer_step(&framing->framer,
+	    framing->input->bytes + framing->start, RELIC_IMPORT_READ_CHUNK));
 }
 
 /*
- * A step of the framer as the filler of a window's analysis jobs, run on
+ * A step of the framing as the filler of a window's analysis jobs, run on
  * the calling thread while the parts run on the others.  The stream is
  * read, and the input's bytes moved, only between jobs, and the parts read
  * no byte after the window's, where the framer reads; so the filler and
- * the parts share nothing either writes.  The steps are counted for the
- * tests.
+ * the parts share nothing either writes, and the framing's alignment
+ * keeps its state off the parts' cache lines.
  */
 static bool
 frame_ahead(void *argument)
 {
-	importer_t *importer;
+	import_framing_t *framing;
 
-	importer = argument;
-	if (importer->framer.state == RELIC_FRAMING)
-		importer->ctx->counters.frames_ahead++;
+	framing = argument;
+	if (framing->framer.state == RELIC_FRAMING)
+		framing->frames_ahead++;
 
-	return (frame_step(importer));
+	return (frame_step(framing));
 }
 
-/* Finish, on the calling thread, whatever framing the framer has left. */
+/* Finish, on the calling thread, whatever the framing has left. */
 static void
-frame_rest(importer_t *importer)
+frame_rest(import_framing_t *framing)
 {
-	while (frame_step(importer))
+	while (frame_step(framing))
 		continue;
 }
 
