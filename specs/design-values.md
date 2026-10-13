@@ -186,12 +186,17 @@ replacement. Admission asks the final size, which is what interning or
 inserting one key at a time reaches, so a batch is admitted exactly when
 its keys one at a time would be. Whether the growth is deferred is
 decided after, once per operation -- a window's publication, a load's
-commit, a round's merge -- on the calling thread, before the operation's
-first reservation, by a pure test that reports nothing and sets no
-refusal state: every deferrable growth of the operation defers when its
-parts run on a pool and its whole admitted footprint, every table and
-destination it reserves, plus every table those growths would replace
-fits the limit, and none does otherwise. Parts that all run on the
+commit, a round's merge -- on the calling thread, by a pure test that
+reports nothing and sets no refusal state: every deferrable growth of the
+operation defers when its parts run on a pool and its whole admitted
+footprint, every table and destination it reserves, plus every table
+those growths would replace fits the limit, and none does otherwise. An
+operation reserves its deferrable growths last, together, so that the
+test can ask what is already charged plus what they add and replace, and
+no reservation after them can be refused for the replaced tables they
+hold. The pool's batch makes that hold by construction: it defers only
+when one call reserves and places it, and a caller that reserves the
+batch apart from its append grows the stripes at once. Parts that all run on the
 calling thread gain nothing from deferral, which would only hold every
 replaced table at once. A growth that does not defer completes at once,
 stripe by stripe, each old table freed as its replacement is filled, and its
@@ -271,9 +276,16 @@ itself. A collected result's symbol table is the same striped table.
 * **A batch of new symbols is placed a stripe to a part.** A reservation
   is an owned receipt: the arena mark its byte copies follow, each
   stripe's growth for that stripe's count of new symbols, and the list of
-  the new symbols by stripe. It grows the entry array and copies the
-  bytes, as a reservation of one does, and defers the stripes' growth
-  when its operation's test allows (above). Publication appends the
+  the new symbols by stripe. The pool holds the prepared tables, one
+  beside each stripe it replaces, so its bytes count them; the caller
+  holds the list, built once from the batch's wide hashes before the
+  pool's size is projected, so that the projection and the placement read
+  the same counts. A reservation grows the entry array and copies the
+  bytes, as a reservation of one does. When the batch is reserved and
+  placed in one call, as a window's publication and an evaluator's commit
+  place theirs, it defers the stripes' growth when the test allows
+  (above); a round's merge reserves its values with its relations and
+  appends them later, so its stripes grow at once. Publication appends the
   entries in identifier order on the calling thread; then each stripe, as
   a part of its own, completes any deferred growth and places its new
   identifiers in identifier order, and the account is reconciled after

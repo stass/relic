@@ -329,7 +329,10 @@ struct relic_pending {
  * bytes of each symbol or string at its offset in `bytes`, and the hash of
  * each, relic_pending_hash(), which is what the value table or the pool
  * finds it by: an integer's by its value, a symbol's or a string's by its
- * bytes.  relic_pending_hash() hashes one value alone, reading a symbol's
+ * bytes.  A symbol's or a string's is the pool's wide hash, whose keyed
+ * low half, relic_hash_low(), is what any other table of them is keyed by;
+ * an integer's is the table's 32 bits.  relic_pending_hash() hashes one
+ * value alone, reading a symbol's
  * or a string's bytes at `bytes` plus its offset, so that a caller can
  * hash the values before it has made a batch of them.
  *
@@ -358,12 +361,12 @@ typedef struct relic_pending_batch relic_pending_batch_t;
 
 struct relic_pending_batch {
 	const relic_pending_t	*values;
-	const uint32_t		*hashes;
+	const uint64_t		*hashes;
 	const char		*bytes;
 	size_t			 count;
 };
 
-uint32_t relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
+uint64_t relic_pending_hash(const relic_t *ctx, const relic_pending_t *value,
 	    const char *bytes);
 size_t	 relic_pending_slots(size_t count);
 void	 relic_pending_find(const relic_t *ctx,

@@ -104,15 +104,6 @@ bound, so an unterminated csv quote buffers the rest of the file. The
 memory limit leaves both out by contract. A bound on either belongs in the
 context's configuration, beside the other limits.
 
-**A batch import places new values in the symbol index one at a time.**
-[Medium, component: `lib/symbol.c`, `lib/value.c`] Publishing a window's
-values is serial: on 52 MB of distinct symbols at eight threads it is 20%
-of the calling thread, nearly all of it `relic_idtab_place()` under
-`relic_symbol_append()`; the byte copies do not show in the samples.
-Placing in parallel needs the symbol index partitioned by hash, as the
-canonical index is by stripe, which is the storage-layout alternative the
-bulk-load design names under persistent lookup partitioning.
-
 **A batch window's scratch grows with its records, not its bytes.** [Low,
 component: `lib/window.c`, `lib/import.c`] A window holds up to
 `RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays
@@ -243,11 +234,13 @@ beside the new one while it is copied, one at a time.
 million ternary rows naming three million distinct symbols, under 2 s and
 120 MB. Bulk loading builds private payloads that an empty store adopts
 and batches large tables over the pool; at scale 8 the import alone takes
-0.89 s at one thread and 0.66 s at sixteen on the p620, and 0.34 s at
+0.93 s at one thread and 0.46 s at sixteen on the p620, and 0.34 s at
 sixteen on the M3, against DuckDB's complete sixteen-thread median of
 0.191 s ([step 4](docs/todo-benchmark-performance.md#4-build-and-load-base-relations-in-bulk)).
-The serial step left -- symbol placement, the entry above -- bounds the
-parallel gain. Measure scale 10, time and peak, once it is parallel.
+With the symbol index striped and placed over the pool, scale 10 imports
+in 1.62 s at one thread and 0.95 s at sixteen on the p620, meeting the
+time, but peaks at 282 MB and 355 MB, about three times the memory
+target; account where the peak goes before choosing what to shrink.
 Pool-entry packing remains a separate memory-layout candidate and must
 preserve byte-pointer lifetime, addressable range and affordable rehash.
 

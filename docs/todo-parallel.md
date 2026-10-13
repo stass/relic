@@ -103,6 +103,35 @@ shared rounds are mostly of this kind, before and after, and on an idle
 machine compare the threshold at 4 000 with 8 000, which a loaded one
 could not separate.
 
+## A job of few parts wakes every worker
+
+[Medium, component: `lib/pool.c`] `relic_pool_for()` wakes the whole pool
+whatever the job's part count, so a load's commit or a window's symbol
+placement, sixteen parts each, wakes 64 or 128 workers at `-j 64` and
+`-j 128` (`-j 0` on a 128-thread machine). Measured on a 64-core
+Threadripper, that wake costs a flat 0.26-0.7 ms per job whatever the
+work, even right after a job while the workers should still be spinning,
+so a commit shared at `-j 128` breaks even only at some 24-32 thousand
+tuples against some 2 thousand at `-j 16`. Waking at most as many workers
+as the job has parts would make every wide pool behave as a sixteen-wide
+one for these jobs, and lets one threshold serve every worker count. The
+cause of the slow wake is not established; wake-ups serializing on the
+pool's mutex until the first woken have spent their spin is the guess to
+test first.
+
+## Deferred growth of a few stripes is slower than growing them at once
+
+[Low, component: `lib/relation.c`, `lib/symbol.c`] When a shared commit
+grows only one or two canonical stripes, the part that completes each
+growth rehashes the whole stripe alone, some three times slower than the
+calling thread does it: appending 1 024 tuples to a store at the edge of
+doubling took 5.1 ms deferred against 3.0 ms serial at `-j 16` and `-j 32`,
+still slower with four stripes growing, and faster from twelve (8.8 against
+19.9 ms). The symbol pool's batches defer under the same rule. Deferring
+only when enough stripes grow, or growing a lone stripe at once, would
+keep the gain without the loss; measure on the commit and on the pool's
+batches before choosing.
+
 ## Driver slicing is not validated beyond its target
 
 [Medium, component: `lib/slice.c`, `lib/round.c`] A round's drivers are

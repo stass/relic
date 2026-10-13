@@ -29,9 +29,9 @@
 /*
  * The library sources in this program are compiled with their allocator
  * calls, their entropy source and their closing of a stream renamed, and
- * this file supplies the replacements.  Undefining the names here, before anything is included,
- * lets this one translation unit reach the real interfaces to implement
- * them.
+ * this file supplies the replacements.  Undefining the names here, before
+ * anything is included, lets this one translation unit reach the real
+ * interfaces to implement them.
  */
 #undef calloc
 #undef fclose
@@ -519,6 +519,7 @@ static void	 refuse_one_allocation_after(long served);
 static void	 context_creation_reports_a_failed_allocation(void);
 static void	 context_creation_fails_without_entropy(void);
 static void	 interning_a_symbol_survives_a_failed_allocation(void);
+static void	 a_symbol_placed_in_room_survives_a_refused_copy(void);
 static void	 interning_a_value_survives_a_failed_allocation(void);
 static void	 interning_an_integer_survives_a_failed_allocation(void);
 static void	 a_load_that_ran_out_of_memory_adds_nothing(void);
@@ -534,6 +535,7 @@ static void	 an_import_that_ran_out_of_memory_adds_nothing(void);
 static void	 an_import_refused_once_reads_on_or_fails(void);
 static void	 an_import_on_threads_refused_once_reads_on_or_fails(void);
 static FILE	*pooled_import_table(void);
+static bool	 pool_settled(const relic_t *ctx);
 static void	 a_path_whose_close_fails_adds_nothing(void);
 static bool	 write_temporary(const char *text, char *path, size_t size);
 static void	 a_refusal_in_the_lookahead_reports_once(void);
@@ -931,6 +933,67 @@ interning_a_symbol_survives_a_failed_allocation(void)
 
 		relic_destroy(ctx);
 	}
+}
+
+/*
+ * A new symbol the pool already has room for -- here a second symbol in
+ * the first's stripe -- is copied and placed without growing anything, so
+ * of all the requests it makes only its copy's in the arena can be
+ * refused.  Refused there, it must add nothing and leave the account as it
+ * stands, and the retry must number it next.
+ */
+static void
+a_symbol_placed_in_room_survives_a_refused_copy(void)
+{
+	char text[16];
+	relic_t *ctx;
+	size_t requested;
+	uint32_t first;
+	uint32_t second;
+	unsigned int n;
+	unsigned int stripe;
+	int status;
+
+	ctx = relic_create();
+	if (ctx == NULL) {
+		check(false, SCENARIO_SYMBOL, "a context should be created");
+		return;
+	}
+	check(relic_symbol_intern(ctx, "alpha", 5, &first) == 0,
+	    SCENARIO_SYMBOL, "the first symbol should be interned");
+	stripe = relic_hash_stripe(relic_symbol_hash(ctx, "alpha", 5));
+	for (n = 0; n < 1000; n++) {
+		snprintf(text, sizeof(text), "s%u", n);
+		if (relic_hash_stripe(relic_symbol_hash(ctx, text,
+		    strlen(text))) == stripe)
+			break;
+	}
+	check(n < 1000, SCENARIO_SYMBOL,
+	    "a second symbol should share the first's stripe");
+
+	requested = relic_atomic_size_load(&bytes_requested);
+	refusing = REFUSE_ARENA;
+	refuse_allocations_after(0);
+	status = relic_symbol_intern(ctx, text, strlen(text), &second);
+	serve_every_allocation();
+	refusing = REFUSE_ALLOCATOR;
+
+	check(relic_atomic_size_load(&bytes_requested) == requested,
+	    SCENARIO_SYMBOL, "a symbol with room should grow nothing");
+	check(status != 0, SCENARIO_SYMBOL,
+	    "a symbol whose copy the arena refused should fail");
+	check(relic_symbol_count(ctx) == 1 && pool_settled(ctx),
+	    SCENARIO_SYMBOL, "a refused copy should add nothing and leave "
+	    "the account as it stands");
+
+	check(relic_symbol_intern(ctx, text, strlen(text), &second) == 0 &&
+	    second == first + 1, SCENARIO_SYMBOL,
+	    "the retry should number the symbol next");
+	check(relic_symbol_count(ctx) == 2 && pool_settled(ctx),
+	    SCENARIO_SYMBOL, "the retry should leave the account as it "
+	    "stands");
+
+	relic_destroy(ctx);
 }
 
 /*
@@ -1758,12 +1821,20 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 		status = relic_import_file(ctx, "rows.tsv", stream, &import);
 		serve_every_allocation();
 
+		checkf(pool_settled(ctx), SCENARIO_IMPORT_ONCE,
+		    "the symbol pool should be counted as it stands, with no "
+		    "table prepared, with allocation %ld refused", budget);
 		if (budget < 0) {
 			check(status == 0, SCENARIO_IMPORT_ONCE,
 			    "an import on threads never refused should "
 			    "succeed");
 			symbols = relic_symbol_count(ctx);
 			sweep = allocations_made() - before;
+			check(!THREADS_AVAILABLE ||
+			    ctx->counters.symbols_deferred > 0,
+			    SCENARIO_IMPORT_ONCE, "the sweep should cover a "
+			    "window whose new symbols grow the pool's stripes "
+			    "in the parts placing them");
 		} else if (status != 0) {
 			checkf(errors_reported == 1 && out_of_memory(ctx) &&
 			    relic_base_total(ctx) == 0, SCENARIO_IMPORT_ONCE,
@@ -1795,6 +1866,24 @@ an_import_on_threads_refused_once_reads_on_or_fails(void)
 	    workers_refused;
 	check(!THREADS_AVAILABLE || workers_refused > 0, SCENARIO_IMPORT_ONCE,
 	    "the sweep should refuse an allocation on a thread of the pool");
+}
+
+/*
+ * Whether the account counts the symbol pool as it stands and no stripe
+ * of its index holds a table prepared to grow into, as every reservation
+ * leaves it, failed or not.
+ */
+static bool
+pool_settled(const relic_t *ctx)
+{
+	size_t s;
+
+	for (s = 0; s < RELIC_STRIPES; s++) {
+		if (ctx->symbols.grown[s].capacity != 0)
+			return (false);
+	}
+
+	return (ctx->account.pool_bytes == relic_symbol_pool_bytes(ctx));
 }
 
 /*
@@ -4859,6 +4948,7 @@ main(void)
 	context_creation_reports_a_failed_allocation();
 	context_creation_fails_without_entropy();
 	interning_a_symbol_survives_a_failed_allocation();
+	a_symbol_placed_in_room_survives_a_refused_copy();
 	interning_a_value_survives_a_failed_allocation();
 	interning_an_integer_survives_a_failed_allocation();
 	a_load_that_ran_out_of_memory_adds_nothing();

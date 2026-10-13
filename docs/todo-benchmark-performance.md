@@ -301,9 +301,34 @@ j16 and j32 fall from 0.67, 0.59 and 0.57 s to 0.58, 0.53 and 0.53 on
 from 0.88, 0.75 and 0.73 to 0.77, 0.66 and 0.63 on `distinct`, and by
 0.01 to 0.03 s on `repeat6`, with peaks unchanged.
 
-**What remains.** The step left on the calling thread bounds the
-parallel gain: placing new values in the symbol index, a `TODO.md`
-entry.
+**Symbol placement.** The symbol pool's index is split into
+`RELIC_STRIPES` stripes chosen by the high half of a wide hash, and a
+window's new symbols are placed a stripe per part on the pool
+([symbol pool](../specs/design-values.md)). Medians of interleaved runs on
+the p620 at j16 against the single index:
+
+| Table | Single index | Striped |
+| --- | ---: | ---: |
+| `facts8` | 0.53 s | 0.46 s |
+| `files8` | 0.45 s | 0.38 s |
+| `distinct` | 0.66 s | 0.57 s |
+| `facts-join` scale 10 | 1.04 s | 0.95 s |
+
+The scalar path pays 1-6% at j1 (`facts8` 0.88 -> 0.93 s, scale-10
+`facts-join` 1.57 -> 1.62 s, `files8` 0.66 -> 0.68 s, `distinct`
+1.57 -> 1.58 s), most of it the wide hash's second fold. Peak RSS on the
+p620 rises 16-17 MB at j1 and 24-26 MB at j16 (`facts8` 202 -> 219 MB and
+241 -> 267 MB) while the accounted pool, store and value bytes are
+identical to the byte and the M3 shows no rise; jemalloc's exit statistics
+keep 7.6 MB more resident after every free and 24 MB more retained. The
+likeliest cause is the sixteen stripes growing in step, each freed table
+too small to serve the next, larger allocation, and not yet confirmed.
+
+**What remains.** Scale-10 `facts-join` imports in under 2 s but peaks at
+282 MB at j1 and 355 MB at j16 against a 120 MB target, a `TODO.md`
+entry. The striped pool's extra resident memory on FreeBSD wants
+confirming and, if it is the allocator's, allocating the stripes' tables
+together.
 
 **Design and measurement gates.** Preserve the ordinary domain encoding and
 global first-occurrence numbering. Measure dictionary reconciliation,

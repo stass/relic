@@ -1663,10 +1663,12 @@ window_growth(const relic_window_t *window, relic_tuple_growth_t *growth)
 
 /*
  * Intern the window's values and stage its new tuples, in input order,
- * the tuples a stripe of the builder to a part on the pool.  Room for both
- * is made first, so that nothing is added unless everything can be.
- * Returns 0, or -1 having reported that memory ran out, with the values
- * and the facts staged as they were.
+ * the tuples a stripe of the builder to a part on the pool.  Staging is
+ * reserved first and the values committed after, so that nothing is added
+ * unless everything can be.  Returns 0, or -1 having reported that memory
+ * ran out, with the values and the facts staged as they were and whatever
+ * grew kept and counted; analyze_window() has made sure every value has an
+ * identifier, so memory is the one thing a commit can lack.
  *
  * Staging is reserved whenever the window holds a tuple, fresh or not,
  * since the first tuple a field-at-a-time import stages begins the
@@ -1687,21 +1689,19 @@ publish_window(importer_t *importer)
 	window = &importer->window;
 	window_growth(window, &growth);
 
-	if (importer->mapped &&
-	    relic_pending_reserve(ctx, &importer->map) != 0) {
-		relic_diag_no_memory(ctx);
-		return (-1);
-	}
-	if (window->tuple_count > 0 && relic_staging_reserve(&importer->staging,
-	    importer->pred, &growth) != 0) {
-		if (importer->mapped)
-			relic_pending_unreserve(ctx, &importer->map);
-		relic_diag_no_memory(ctx);
-		return (-1);
+	if (window->tuple_count > 0) {
+		if (relic_staging_reserve(&importer->staging, importer->pred,
+		    &growth) != 0) {
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
 	}
 
-	if (importer->mapped)
-		relic_pending_append(ctx, &importer->map);
+	if (importer->mapped) {
+		if (relic_pending_commit(ctx, &importer->map) != 0)
+			return (-1);
+	}
+
 	if (window->fresh_count == 0)
 		return (0);
 

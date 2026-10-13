@@ -58,6 +58,7 @@ typedef struct relic_staged_set relic_staged_set_t;
 typedef struct relic_staging relic_staging_t;
 typedef struct relic_materialized relic_materialized_t;
 typedef struct relic_fresh_string relic_fresh_string_t;
+typedef struct relic_fresh_stripes relic_fresh_stripes_t;
 typedef struct relic_symbol relic_symbol_t;
 typedef struct relic_symtab relic_symtab_t;
 typedef struct relic_token relic_token_t;
@@ -146,12 +147,19 @@ struct relic_symbol {
  * The bytes are packed in an arena of alignment one: a string is read as
  * bytes and never as an object, so one symbol's bytes and terminator follow
  * the previous symbol's with no padding.
+ *
+ * The index is striped (util.h): a symbol is placed in the stripe its
+ * bytes' wide hash chooses, under the hash's keyed half, which is what its
+ * entry keeps.  `grown[s]` is the table a reservation prepared for stripe
+ * s to grow into, empty unless one awaits its append; the pool's bytes
+ * count it beside the stripe it replaces.
  */
 struct relic_symtab {
 	relic_symbol_t	*entries;	/* indexed by id - 1 */
 	size_t		 count;
 	size_t		 capacity;
-	relic_idtab_t	 index;
+	relic_idtab_t	 index[RELIC_STRIPES];
+	relic_idtab_t	 grown[RELIC_STRIPES];
 	relic_arena_t	 strings;
 	uint64_t	 hash_seed;	/* the context's */
 };
@@ -189,7 +197,9 @@ struct relic_valtab {
  * a batch import staged whole and the ones it declined and read again a
  * field at a time.  `commits_shared` counts the load commits whose appends
  * were placed on the pool, and `commits_deferred` those whose appends'
- * stripes grew in the parts placing them.  `frames_ahead` counts the
+ * stripes grew in the parts placing them.  `symbols_shared` and
+ * `symbols_deferred` count the same of the pool's batches of new strings.
+ * `frames_ahead` counts the
  * steps of framing a batch import ran as the filler of a window's jobs.
  * relic_stats() reports none of these; they show the tests which way an
  * import or a commit went.
@@ -205,6 +215,8 @@ struct relic_counters {
 	uint64_t		frames_ahead;
 	uint64_t		commits_shared;
 	uint64_t		commits_deferred;
+	uint64_t		symbols_shared;
+	uint64_t		symbols_deferred;
 };
 
 /*
@@ -724,8 +736,8 @@ const char *relic_symbol_bytes(const relic_t *ctx, uint32_t id,
 	    size_t *lengthp);
 size_t	 relic_symbol_count(const relic_t *ctx);
 uint32_t relic_symbol_find(const relic_t *ctx, const void *bytes,
-	    size_t length, uint32_t hash);
-uint32_t relic_symbol_hash(const relic_t *ctx, const void *bytes,
+	    size_t length, uint64_t hash);
+uint64_t relic_symbol_hash(const relic_t *ctx, const void *bytes,
 	    size_t length);
 int	 relic_symbol_intern(relic_t *ctx, const void *bytes, size_t length,
 	    uint32_t *idp);
@@ -745,7 +757,7 @@ void	 relic_symtab_reset(relic_symtab_t *table);
 const char *relic_symtab_bytes(const relic_symtab_t *table, uint32_t id,
 	    size_t *lengthp);
 uint32_t relic_symtab_find(const relic_symtab_t *table, const void *bytes,
-	    size_t length, uint32_t hash);
+	    size_t length, uint64_t hash);
 int	 relic_symtab_intern(relic_symtab_t *table, const void *bytes,
 	    size_t length, uint32_t *idp);
 
@@ -756,41 +768,74 @@ int	 relic_symtab_intern(relic_symtab_t *table, const void *bytes,
  * relic_symbol_intern() split into the steps a caller that must ask the
  * memory limit first, and must not fail once it starts to write, needs.
  *
- * relic_symbol_pool_bytes_after() is what the pool would occupy once it
- * held them, having grown as interning them one at a time would grow it,
- * or SIZE_MAX when a size cannot count it.  It reads the pool and writes
- * nothing.  relic_symbol_has_room() says whether identifiers remain for
- * them.  relic_symbol_reserve() makes room for them all -- the index, the
- * entries, and a copy of each one's bytes in the arena -- and returns -1,
- * having reported nothing, when there is not the room or the allocator
- * refuses; the index and the entries it grew stay grown and counted, no
- * copy stays in the arena, and the pool's contents are as they were.
+ * relic_symbol_list() lists them by the stripe of the pool's index each is
+ * placed in, which every step after reads.  It writes nothing but
+ * `stripes`.  relic_symbol_pool_bytes_after() is what the pool would
+ * occupy once it held them, having grown as interning them one at a time
+ * would grow it, or SIZE_MAX when a size cannot count it or a stripe could
+ * not grow.  It reads the pool and writes nothing.
+ * relic_symbol_has_room() says whether identifiers remain for them.
+ * relic_symbol_reserve() makes room for them all -- each stripe of the
+ * index, the entries, and a copy of each one's bytes in the arena -- and
+ * returns -1, having reported nothing, when there is not the room or the
+ * allocator refuses; the stripes and the entries it grew stay grown and
+ * counted, no copy stays, and the pool's contents are as they were.
  * relic_symbol_append() then numbers them, and cannot fail.  A reservation
  * sets *copiesp to where its copies begin in the arena, and
  * relic_symbol_unreserve() gives back the copies of one that will not be
  * appended after all, leaving the pool as a reservation that failed does:
  * nothing may allocate from the pool between the two.
+ * relic_symbol_add() is a reservation and its append in one call, which
+ * fails as the reservation does.
+ *
+ * The append places the strings a stripe to a part, on the context's pool
+ * when it has more than one worker and the batch holds at least
+ * RELIC_SYMBOL_PARALLEL_COUNT strings, or RELIC_F_PARALLEL_ALWAYS asks,
+ * and on the calling thread otherwise; it makes no pool.  Each stripe
+ * grows when it is reserved, except under relic_symbol_add(): when its
+ * append shares, and the memory limit admits every table the growth
+ * replaces held beside its replacement, each stripe's growth is prepared
+ * by the reservation and completed by the part that places the stripe, so
+ * that the stripes grow on several threads at once.  Only the one call can
+ * defer, so nothing is reserved while the replaced tables are held, and
+ * nothing finds the pool with a stripe not yet grown.  Each stripe reaches
+ * the same capacity either way.
  *
  * A fresh string's `bytes` must stay readable until it is reserved, and
  * `copy` is where the reservation put it, or NULL once a reservation has
- * failed or been given back.
+ * failed or been given back.  `hash` is relic_symbol_hash() of its bytes.
+ *
+ * The positions in the batch of the strings stripe s is to place are
+ * `list[start[s]]` up to `list[start[s + 1]]`, in increasing order.  The
+ * caller gives `list` room for the batch's strings.
  */
 struct relic_fresh_string {
 	const char	*bytes;
 	char		*copy;
 	size_t		 length;
-	uint32_t	 hash;
+	uint64_t	 hash;
 };
 
+struct relic_fresh_stripes {
+	uint32_t	*list;
+	size_t		 start[RELIC_STRIPES + 1];
+};
+
+void	 relic_symbol_list(const relic_fresh_string_t *fresh, size_t count,
+	    relic_fresh_stripes_t *stripes);
 size_t	 relic_symbol_pool_bytes_after(const relic_t *ctx,
-	    const relic_fresh_string_t *fresh, size_t count);
+	    const relic_fresh_string_t *fresh, size_t count,
+	    const relic_fresh_stripes_t *stripes);
 bool	 relic_symbol_has_room(const relic_t *ctx, size_t count);
 int	 relic_symbol_reserve(relic_t *ctx, relic_fresh_string_t *fresh,
-	    size_t count, relic_arena_mark_t *copiesp);
+	    size_t count, const relic_fresh_stripes_t *stripes,
+	    relic_arena_mark_t *copiesp);
+int	 relic_symbol_add(relic_t *ctx, relic_fresh_string_t *fresh,
+	    size_t count, const relic_fresh_stripes_t *stripes);
 void	 relic_symbol_unreserve(relic_t *ctx, relic_fresh_string_t *fresh,
 	    size_t count, const relic_arena_mark_t *copies);
 void	 relic_symbol_append(relic_t *ctx, const relic_fresh_string_t *fresh,
-	    size_t count);
+	    size_t count, const relic_fresh_stripes_t *stripes);
 
 /*
  * lib/value.c
@@ -891,12 +936,14 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * reported when the
  * table or the pool could not grow, for memory or because it holds as many
  * values as an identifier can name; their contents are then as they were.
- * It is two halves, for a caller that must make every fallible step before
- * it changes anything and must report nothing itself:
- * relic_pending_reserve() grows the table and the pool to hold the new
- * values, returning -1, with no diagnostic and the contents unchanged, when
- * it could not, and relic_pending_append() then interns them, and cannot
- * fail.  Nothing may intern a value between the two.  A caller that decides
+ * The pool's growth may be deferred to the parts placing its new strings,
+ * as relic_symbol_add() defers it.  The commit is two halves for a caller
+ * that must make every fallible step before it changes anything and must
+ * report nothing itself: relic_pending_reserve() grows the table and the
+ * pool to hold the new values, every growth at once, returning -1, with no
+ * diagnostic and the contents unchanged, when it could not.
+ * relic_pending_append() then interns them, and cannot fail.  Nothing may
+ * intern a value between the two.  A caller that decides
  * not to append after a reservation succeeded calls
  * relic_pending_unreserve() instead, which leaves the table and the pool as
  * a reservation that failed would: grown and counted, with no copy of a new
@@ -921,7 +968,7 @@ void	 relic_valtab_reset(relic_valtab_t *table);
  * a map, so that a caller holds a probe only while it measures.
  */
 struct relic_pending_probe {
-	uint32_t		*hashes;	/* each value's, batch order */
+	uint64_t		*hashes;	/* each value's, batch order */
 	uint32_t		*slots;		/* relic_pending_slots(room) */
 	size_t			 room;
 };
@@ -930,6 +977,7 @@ struct relic_pending_map {
 	relic_dom_t		*ids;		/* each value's, batch order */
 	int64_t			*fresh;		/* new integers, as first met */
 	relic_fresh_string_t	*strings;	/* new strings, as first met */
+	relic_fresh_stripes_t	 stripes;	/* of the new strings */
 	size_t			 room;
 	size_t			 count;
 	size_t			 fresh_count;
@@ -1825,11 +1873,26 @@ void	 relic_index_link_append(relic_index_t *index,
  */
 
 /*
+ * The fewest new strings whose placement in the pool's index is shared
+ * among the pool's workers rather than done on the calling thread: a
+ * constant of performance alone.  The tests reserve a batch one short of
+ * it, so it is at least two, and a batch of one never wakes the pool.
+ */
+#ifndef RELIC_SYMBOL_PARALLEL_COUNT
+#define	RELIC_SYMBOL_PARALLEL_COUNT	4096u
+#endif
+_Static_assert(RELIC_SYMBOL_PARALLEL_COUNT >= 2,
+    "a batch one string short of sharing must hold a string");
+
+/*
  * The fewest tuples a load's commit appends on the pool rather than on the
- * calling thread: a constant of performance alone, a little past the count
- * at which placing them on 16 workers, waking the pool included, begins to
- * beat placing them on one, some 12000 on the machine it was measured on.
- * The tests run a commit one tuple short of it, so it is at least two.
+ * calling thread: a constant of performance alone.  Where sharing, waking
+ * the pool included, begins to beat one thread depends on the workers and
+ * the store: measured on a 64-core machine, some 2000 tuples into a store
+ * that need not grow at 16 and 32 workers, 16000 at 8 and 64, and 32000
+ * at 128 or into a small store that must grow.  This count sits among
+ * them, within a fraction of a millisecond of the best at each.  The tests
+ * run a commit one tuple short of it, so it is at least two.
  */
 #ifndef RELIC_COMMIT_PARALLEL_TUPLES
 #define	RELIC_COMMIT_PARALLEL_TUPLES	16384u

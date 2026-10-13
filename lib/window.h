@@ -101,7 +101,7 @@ struct relic_import_plan {
  */
 struct relic_window_value {
 	relic_pending_t		 value;
-	uint32_t		 hash;
+	uint64_t		 hash;
 };
 
 /*
@@ -171,7 +171,7 @@ struct relic_window {
 	relic_window_piece_t	*pieces;
 	char			*decoded;
 	relic_pending_t		*values;
-	uint32_t		*value_hashes;
+	uint64_t		*value_hashes;
 	uint32_t		*value_members;
 	uint32_t		*value_slots;
 	relic_dom_t		*tuples;

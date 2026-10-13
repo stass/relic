@@ -32,7 +32,7 @@
 
 _Static_assert(RELIC_WINDOW_VALUE_PART_BITS > 0 &&
     RELIC_WINDOW_VALUE_PART_BITS < 32,
-    "a value's part is chosen by the top bits of its 32-bit hash");
+    "a value's part is chosen by the top bits of its hash's keyed half");
 
 static void	 copy_dictionaries(relic_window_t *window);
 static int	 decode_field(const relic_t *ctx, enum relic_column column,
@@ -50,7 +50,7 @@ static uint32_t	 piece_rehash(uint32_t id, void *ctx);
 static void	 piece_reset(relic_window_piece_t *piece);
 static int	 piece_value(relic_window_t *window,
 		    relic_window_piece_t *piece, const relic_pending_t *value,
-		    const char *bytes, uint32_t hash, size_t *decodedp,
+		    const char *bytes, uint64_t hash, size_t *decodedp,
 		    relic_dom_t *tokenp);
 static size_t	 place_dictionaries(relic_window_t *window);
 static bool	 screened(const relic_window_t *window,
@@ -60,7 +60,7 @@ static int	 size_screens(relic_window_t *window);
 static int	 size_value_slots(relic_window_t *window);
 static int	 size_values(relic_window_t *window, size_t count);
 static size_t	 slot_aligned(size_t offset);
-static size_t	 value_part(uint32_t hash);
+static size_t	 value_part(uint64_t hash);
 static const relic_dom_t *window_tuple(const relic_window_t *window,
 		    size_t position);
 
@@ -503,7 +503,7 @@ relic_judge_field(enum relic_column column, const char *bytes,
  */
 static int
 piece_value(relic_window_t *window, relic_window_piece_t *piece,
-    const relic_pending_t *value, const char *bytes, uint32_t hash,
+    const relic_pending_t *value, const char *bytes, uint64_t hash,
     size_t *decodedp, relic_dom_t *tokenp)
 {
 	relic_window_value_t *values;
@@ -512,7 +512,7 @@ piece_value(relic_window_t *window, relic_window_piece_t *piece,
 	size_t length;
 	uint32_t id;
 
-	relic_idprobe_open(&probe, &piece->seen, hash);
+	relic_idprobe_open(&probe, &piece->seen, relic_hash_low(hash));
 	while (relic_idprobe_next(&probe, &id)) {
 		if (equal_values(window, &piece->values[id - 1].value, value,
 		    bytes)) {
@@ -545,7 +545,8 @@ piece_value(relic_window_t *window, relic_window_piece_t *piece,
 	}
 
 	piece->value_count++;
-	relic_idtab_place(&piece->seen, hash, (uint32_t)piece->value_count);
+	relic_idtab_place(&piece->seen, relic_hash_low(hash),
+	    (uint32_t)piece->value_count);
 	*tokenp = (relic_dom_t)(piece->value_count - 1);
 
 	return (0);
@@ -576,7 +577,7 @@ piece_rehash(uint32_t id, void *ctx)
 
 	piece = ctx;
 
-	return (piece->values[id - 1].hash);
+	return (relic_hash_low(piece->values[id - 1].hash));
 }
 
 bool
@@ -640,7 +641,7 @@ static int
 size_values(relic_window_t *window, size_t count)
 {
 	relic_pending_t *values;
-	uint32_t *hashes;
+	uint64_t *hashes;
 	uint32_t *members;
 
 	values = relic_grow_array(window->values, &window->value_capacity,
@@ -738,14 +739,15 @@ size_value_slots(relic_window_t *window)
 }
 
 /*
- * The part a value of hash `hash` is found by: its hash's top bits, which
- * leave the low bits that choose its slot in the part's table to spread
- * the part's values.
+ * The part a value of hash `hash` is found by: the top bits of its keyed
+ * half, which leave the low bits that choose its slot in the part's table
+ * to spread the part's values.
  */
 static size_t
-value_part(uint32_t hash)
+value_part(uint64_t hash)
 {
-	return ((size_t)(hash >> (32 - RELIC_WINDOW_VALUE_PART_BITS)));
+	return ((size_t)(relic_hash_low(hash) >>
+	    (32 - RELIC_WINDOW_VALUE_PART_BITS)));
 }
 
 void
