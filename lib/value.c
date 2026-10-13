@@ -760,6 +760,50 @@ relic_value_bytes(const relic_t *ctx, relic_dom_t dom, size_t *lengthp)
 }
 
 bool
+relic_value_view(const relic_t *ctx, relic_dom_t dom, relic_value_view_t *view)
+{
+	relic_value_t value;
+
+	bzero(view, sizeof(*view));
+	if (!relic_value_decode(ctx, dom, &value))
+		return (false);
+
+	view->type = value.type;
+	if (value.type == RELIC_INTEGER) {
+		view->integer = value.v.integer;
+		return (true);
+	}
+
+	view->bytes = relic_symbol_bytes(ctx, value.v.id, &view->length);
+	if (view->bytes == NULL) {
+		bzero(view, sizeof(*view));
+		return (false);
+	}
+
+	return (true);
+}
+
+enum relic_order
+relic_value_view_order(const relic_value_view_t *left,
+    const relic_value_view_t *right)
+{
+	int order;
+
+	if (left->type != right->type)
+		return (RELIC_ORDER_UNORDERED);
+
+	if (left->type != RELIC_INTEGER)
+		return (relic_bytes_order(left->bytes, left->length,
+		    right->bytes, right->length));
+
+	order = compare_integers(left->integer, right->integer);
+	if (order < 0)
+		return (RELIC_ORDER_LESS);
+
+	return (order > 0 ? RELIC_ORDER_GREATER : RELIC_ORDER_EQUAL);
+}
+
+bool
 relic_value_integer(const relic_t *ctx, relic_dom_t dom, int64_t *integerp)
 {
 	relic_value_t value;

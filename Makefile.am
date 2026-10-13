@@ -36,7 +36,7 @@ LIBOBJDIR = compat/
 noinst_LTLIBRARIES = librelic_internal.la
 librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/cost.c lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
-	lib/expr.c lib/facts.c lib/import.c lib/index.c lib/lex.c \
+	lib/expr.c lib/facts.c lib/fold.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
 	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
 	lib/round.c lib/rule.c lib/slice.c lib/stratify.c lib/strfn.c \
@@ -54,7 +54,7 @@ dist_man3_MANS = man/relic.3
 noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
 	lib/cdefs.h lib/cost.h lib/depgraph.h \
-	lib/exec.h \
+	lib/exec.h lib/fold.h \
 	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
 	lib/relation.h lib/round.h lib/strfn.h lib/table.h lib/util.h \
 	lib/window.h \
@@ -202,8 +202,8 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_arith tests/unit/test_compute tests/unit/test_cost \
 	tests/unit/test_diag \
 	tests/unit/test_eval tests/unit/test_exec \
-	tests/unit/test_facts tests/unit/test_import tests/unit/test_index \
-	tests/unit/test_interrupt \
+	tests/unit/test_facts tests/unit/test_fold tests/unit/test_import \
+	tests/unit/test_index tests/unit/test_interrupt \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_merge \
 	tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
@@ -255,6 +255,9 @@ tests_unit_test_exec_LDADD = librelic_internal.la $(LTLIBOBJS)
 tests_unit_test_facts_SOURCES = tests/unit/test_facts.c tests/unit/harness.c \
 	tests/unit/programs.c
 tests_unit_test_facts_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_fold_SOURCES = tests/unit/test_fold.c tests/unit/harness.c
+tests_unit_test_fold_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_import_SOURCES = tests/unit/test_import.c tests/unit/harness.c
 tests_unit_test_import_LDADD = librelic_internal.la $(LTLIBOBJS)
@@ -694,6 +697,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/aggregate-limit-query.dl \
 	tests/lang/aggregate-magic.dl tests/lang/aggregate-minmax.dl \
 	tests/lang/aggregate-mixed.dl tests/lang/aggregate-nested.dl \
+	tests/lang/aggregate-outcome.dl \
 	tests/lang/aggregate-overflow.dl tests/lang/aggregate-parallel.dl \
 	tests/lang/aggregate-project.dl tests/lang/aggregate-query.dl \
 	tests/lang/aggregate-relation.dl \

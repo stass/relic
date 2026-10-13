@@ -46,10 +46,13 @@ enum relic_arith_status relic_arith_negate(int64_t operand, int64_t *resultp);
  * the integers does not fit.  Every operation is on unsigned words, whose
  * wrapping is defined, so no signed overflow happens anywhere.
  *
- * A zeroed sum is zero.  relic_sum_add() adds one value.  relic_sum_fits()
- * says whether the total fits int64_t, which is when the high word is the
- * sign extension of the low one, and relic_sum_value() gives it when it
- * does.
+ * A zeroed sum is zero.  relic_sum_add() adds one value, and
+ * relic_sum_combine() adds the total of another sum, so that sums kept
+ * over disjoint parts of the addends combine to the sum of them all; the
+ * bound above is on the addends of all the parts together, so a combined
+ * total is exact under it as an added one is.  relic_sum_fits() says
+ * whether the total fits int64_t, which is when the high word is the sign
+ * extension of the low one, and relic_sum_value() gives it when it does.
  */
 typedef struct relic_sum relic_sum_t;
 
@@ -59,6 +62,7 @@ struct relic_sum {
 };
 
 void	 relic_sum_add(relic_sum_t *sum, int64_t addend);
+void	 relic_sum_combine(relic_sum_t *sum, const relic_sum_t *more);
 bool	 relic_sum_fits(const relic_sum_t *sum);
 int64_t	 relic_sum_value(const relic_sum_t *sum);
 

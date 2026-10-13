@@ -186,6 +186,27 @@ relic_sum_add(relic_sum_t *sum, int64_t addend)
 	sum->hi += high + carry;
 }
 
+/*
+ * Add another sum's total, as relic_sum_add() adds a value's 128-bit image:
+ * the low words with the carry out of them into the high words.  The other
+ * sum's words are read before either is written, so a sum may be combined
+ * with itself.
+ */
+void
+relic_sum_combine(relic_sum_t *sum, const relic_sum_t *more)
+{
+	uint64_t carry;
+	uint64_t high;
+	uint64_t low;
+
+	low = more->lo;
+	high = more->hi;
+
+	sum->lo += low;
+	carry = sum->lo < low ? 1 : 0;
+	sum->hi += high + carry;
+}
+
 bool
 relic_sum_fits(const relic_sum_t *sum)
 {

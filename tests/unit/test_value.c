@@ -48,6 +48,7 @@
 #define	SCENARIO_TYPED		"a domain identifier carries its type"
 #define	SCENARIO_TYPES		"the three types are distinct domains"
 #define	SCENARIO_UNASSIGNED	"an identifier never assigned names no value"
+#define	SCENARIO_VIEW		"a view shows and orders its value"
 
 static relic_dom_t	 intern_integer(relic_t *ctx, int64_t value);
 static relic_dom_t	 intern_numbered(relic_t *ctx, enum relic_type type,
@@ -62,6 +63,7 @@ static void		 a_decoded_value_carries_no_stale_bytes(void);
 static void		 a_malformed_value_is_refused(void);
 static void		 an_unassigned_identifier_names_no_value(void);
 static void		 an_identifier_carries_its_type(void);
+static void		 a_view_shows_its_value_and_orders_as_it(void);
 static void		 equal_values_intern_to_one_identifier(void);
 static void		 every_integer_round_trips(void);
 static void		 the_comparison_order_holds_within_a_type(void);
@@ -628,6 +630,111 @@ an_unassigned_identifier_names_no_value(void)
 }
 
 /*
+ * A view shows the value an identifier names -- its type, and its integer
+ * or its bytes -- and orders views exactly as relic_value_order() orders
+ * the identifiers, which is the oracle here: every pair of a set of values
+ * chosen at the edges of each type's order -- an empty string, a prefix,
+ * an embedded NUL, bytes above 0x7f, symbols differing in case -- and a
+ * symbol and a string of one spelling, which are unordered.  A symbol is
+ * spelled as an identifier, so the unusual bytes are strings.  An
+ * identifier the context never assigned gives no view, and leaves the
+ * view zeroed.
+ */
+static void
+a_view_shows_its_value_and_orders_as_it(void)
+{
+	static const struct {
+		enum relic_type	 type;
+		const char	*bytes;
+		size_t		 length;
+		int64_t		 integer;
+	} values[] = {
+		{ RELIC_INTEGER, NULL, 0, INT64_MIN },
+		{ RELIC_INTEGER, NULL, 0, -1 },
+		{ RELIC_INTEGER, NULL, 0, 0 },
+		{ RELIC_INTEGER, NULL, 0, INT64_MAX },
+		{ RELIC_SYMBOL, "a", 1, 0 },
+		{ RELIC_SYMBOL, "aB", 2, 0 },
+		{ RELIC_SYMBOL, "ab", 2, 0 },
+		{ RELIC_STRING, "", 0, 0 },
+		{ RELIC_STRING, "a", 1, 0 },
+		{ RELIC_STRING, "a\0b", 3, 0 },
+		{ RELIC_STRING, "aB", 2, 0 },
+		{ RELIC_STRING, "\x80", 1, 0 },
+		{ RELIC_STRING, "\xff", 1, 0 }
+	};
+	enum { COUNT = sizeof(values) / sizeof(values[0]) };
+	relic_value_view_t views[COUNT];
+	relic_value_view_t view;
+	relic_value_view_t zeroed;
+	relic_dom_t doms[COUNT];
+	relic_t *ctx;
+	size_t i;
+	size_t j;
+	bool shown;
+
+	ctx = relic_create();
+	check(ctx != NULL, SCENARIO_VIEW, "a context should be created");
+	if (ctx == NULL)
+		return;
+
+	for (i = 0; i < COUNT; i++) {
+		if (values[i].type == RELIC_INTEGER)
+			doms[i] = intern_integer(ctx, values[i].integer);
+		else if (relic_value_intern_bytes(ctx, values[i].type,
+		    values[i].bytes, values[i].length, &doms[i]) != 0)
+			doms[i] = RELIC_ID_NONE;
+
+		shown = relic_value_view(ctx, doms[i], &views[i]);
+		if (values[i].type == RELIC_INTEGER)
+			shown = shown && views[i].type == RELIC_INTEGER &&
+			    views[i].integer == values[i].integer;
+		else
+			shown = shown && views[i].type == values[i].type &&
+			    views[i].bytes != NULL &&
+			    views[i].length == values[i].length &&
+			    bcmp(views[i].bytes, values[i].bytes,
+			    values[i].length) == 0;
+		checkf(shown, SCENARIO_VIEW,
+		    "value %zu should be shown with its type and contents", i);
+	}
+
+	for (i = 0; i < COUNT; i++) {
+		for (j = 0; j < COUNT; j++)
+			checkf(relic_value_view_order(&views[i], &views[j]) ==
+			    relic_value_order(ctx, doms[i], doms[j]),
+			    SCENARIO_VIEW, "views %zu and %zu should order as "
+			    "their identifiers do", i, j);
+	}
+
+	check(relic_value_view_order(&views[7], &views[8]) ==
+	    RELIC_ORDER_LESS && relic_value_view_order(&views[8],
+	    &views[9]) == RELIC_ORDER_LESS && relic_value_view_order(
+	    &views[9], &views[10]) == RELIC_ORDER_LESS &&
+	    relic_value_view_order(&views[11], &views[10]) ==
+	    RELIC_ORDER_GREATER, SCENARIO_VIEW,
+	    "the strings should order \"\" < a < a\\0b < aB < 0x80");
+	check(relic_value_view_order(&views[4], &views[8]) ==
+	    RELIC_ORDER_UNORDERED, SCENARIO_VIEW,
+	    "the symbol and the string a should be unordered");
+
+	bzero(&zeroed, sizeof(zeroed));
+	memset(&view, 0xa5, sizeof(view));
+	shown = relic_value_view(ctx, RELIC_DOM_INTEGER, &view);
+	check(!shown && bcmp(&view, &zeroed, sizeof(view)) == 0,
+	    SCENARIO_VIEW, "an unassigned identifier should leave the view "
+	    "zeroed");
+	memset(&view, 0xa5, sizeof(view));
+	shown = relic_value_view(ctx, RELIC_DOM_STRING |
+	    (doms[6] & RELIC_DOM_INDEX_MASK), &view);
+	check(!shown && bcmp(&view, &zeroed, sizeof(view)) == 0,
+	    SCENARIO_VIEW, "a symbol never used as a string should give no "
+	    "string view");
+
+	relic_destroy(ctx);
+}
+
+/*
  * Decoding writes every byte of the value, the padding and the member its
  * type does not use included, and a failed decode leaves the value zeroed,
  * so a value handed to a caller carries nothing from wherever its memory
@@ -676,6 +783,7 @@ main(void)
 	a_malformed_value_is_refused();
 	an_identifier_carries_its_type();
 	an_unassigned_identifier_names_no_value();
+	a_view_shows_its_value_and_orders_as_it();
 	equal_values_intern_to_one_identifier();
 	every_integer_round_trips();
 	interning_stays_within_the_memory_limit();

@@ -1,0 +1,14 @@
+% Which outcome a group gives does not depend on how far its rows were
+% walked.  A sum over rows of which one is not an integer has no value
+% even when the integers before it already total past the 64-bit range:
+% the type comes before the range, so -vv notes it once and nothing
+% fails.  A key with no rows sums to zero, and has no min and no note.
+v(a, 9223372036854775807). v(a, 1). v(a, x).
+v(b, 9223372036854775807). v(b, x). v(b, 1).
+k(a). k(b). k(c).
+
+typed(K, S) :- k(K), S = sum(Z) { v(K, Z) }.
+least(K, M) :- k(K), K = c, M = min(Z) { v(K, Z) }.
+
+typed(K, S)?
+least(K, M)?

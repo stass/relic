@@ -295,6 +295,37 @@ relic_dom_t relic_value_find_string(const relic_t *ctx, const char *bytes,
 	    size_t length);
 
 /*
+ * A value as its type and its contents, whether or not the context has
+ * assigned it an identifier: an integer, or a symbol's or a string's
+ * `length` bytes at `bytes`, which the view borrows from wherever they
+ * are kept -- the pool, or a buffer of computed strings -- and which must
+ * stay there while the view is read.  `bytes` points at addressable
+ * memory even when `length` is zero, and is not read then.
+ *
+ * relic_value_view() fills *view with the value an identifier names and
+ * returns true, or returns false, with *view zeroed, for an identifier the
+ * context never assigned; the bytes of a symbol or a string are the pool's,
+ * which never move while the context exists.  relic_value_view_order()
+ * orders two views as relic_value_order() orders the values they show,
+ * one type at a time, and calls two of different types unordered; it reads
+ * no context, so it orders a value the context lacks as it would order it
+ * once assigned.
+ */
+typedef struct relic_value_view relic_value_view_t;
+
+struct relic_value_view {
+	const char	*bytes;		/* RELIC_SYMBOL, RELIC_STRING */
+	size_t		 length;	/* RELIC_SYMBOL, RELIC_STRING */
+	int64_t		 integer;	/* RELIC_INTEGER */
+	enum relic_type	 type;
+};
+
+bool	 relic_value_view(const relic_t *ctx, relic_dom_t dom,
+	    relic_value_view_t *view);
+enum relic_order relic_value_view_order(const relic_value_view_t *left,
+	    const relic_value_view_t *right);
+
+/*
  * lib/account.c
  *
  * relic_account_charge_round() admits `bytes` more for a round's buffers

@@ -20,7 +20,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include "cdefs.h"
 #include "exec.h"
+#include "fold.h"
 
 /*
  * The executor: running one plan, an array of operations ending in EMIT.
@@ -93,14 +95,16 @@ struct relic_cell {
 };
 
 /*
- * The accumulator of one AGGREGATE's fold: the rows it has folded, the
- * exact sum of their column for a sum, and for a min or a max the extreme
- * value so far, meaningful once `rows` is not zero.
+ * One AGGREGATE's fold of a group's rows: the rows it has folded, the
+ * function's state over them (fold.h), and for a min or a max the extreme
+ * so far, its identifier and the view of its value the state compares
+ * with, meaningful once `rows` is not zero.
  */
 struct relic_fold {
-	relic_sum_t	sum;
-	uint64_t	rows;
-	relic_dom_t	extreme;
+	relic_fold_state_t	state;
+	relic_value_view_t	extreme_view;
+	uint64_t		rows;
+	relic_dom_t		extreme;
 };
 
 /*
@@ -174,14 +178,15 @@ static enum relic_emit_end emit_head(relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom);
 static size_t	 emit_pending_bytes(const relic_scratch_t *scratch,
 		    const relic_op_atom_t *atom);
-static bool	 fold_group(relic_scratch_t *scratch,
+static void	 fold_group(relic_scratch_t *scratch,
 		    const relic_exec_env_t *env,
 		    const relic_op_aggregate_t *aggregate,
 		    const relic_tuple_range_t *view, relic_fold_t *fold);
-static bool	 fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
+static bool	 fold_row(const relic_exec_env_t *env,
 		    const relic_op_aggregate_t *aggregate, relic_fold_t *fold,
 		    const relic_dom_t *tuple);
 static bool	 fold_value(relic_scratch_t *scratch,
+		    const relic_exec_env_t *env,
 		    const relic_op_aggregate_t *aggregate,
 		    const relic_fold_t *fold, relic_cell_t *valuep);
 static void	 gather_fold_key(const relic_scratch_t *scratch,
@@ -1883,52 +1888,42 @@ key_matches(const relic_op_aggregate_t *aggregate, const relic_dom_t *probe,
 }
 
 /*
- * Fold one row into the accumulator.  Returns false when the row puts the
- * group outside the function's domain -- a sum's row that is not an
- * integer, or a min's or a max's row of another type than the first --
- * having recorded the note, and the fold then has no value.  A count reads
- * no column: its group may have none, and then a tuple holds no value.
+ * Fold one row into the fold.  Returns false when the row leaves the group
+ * outside the function's domain -- a sum's row that is not an integer, or
+ * a min's or a max's row of another type than the first -- and the group
+ * then has no value whatever its other rows hold, so the walk stops there.
+ * A count reads no column: its group may have none, and then a tuple holds
+ * no value.  Every column of a stored tuple holds a value the context
+ * assigned, so a view of it is always had.
  */
 static bool
-fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
-    const relic_op_aggregate_t *aggregate, relic_fold_t *fold,
-    const relic_dom_t *tuple)
+fold_row(const relic_exec_env_t *env, const relic_op_aggregate_t *aggregate,
+    relic_fold_t *fold, const relic_dom_t *tuple)
 {
-	relic_dom_t value;
-	enum relic_order order;
-	int64_t integer;
+	relic_value_view_t value;
+	const relic_value_view_t *read;
+	relic_dom_t dom;
+	bool known RELIC_UNUSED;
 
-	switch (aggregate->fn) {
-	case RELIC_AGG_COUNT:
+	dom = 0;
+	read = NULL;
+	if (aggregate->fn != RELIC_AGG_COUNT) {
+		dom = tuple[aggregate->column];
+		known = relic_value_view(env->ctx, dom, &value);
+		assert(known);
+		read = &value;
+	}
+
+	switch (relic_fold_add(aggregate->fn, &fold->state, fold->rows,
+	    &fold->extreme_view, read)) {
+	case RELIC_FOLD_INVALIDATED:
+		return (false);
+	case RELIC_FOLD_REPLACED:
+		fold->extreme = dom;
+		fold->extreme_view = value;
 		break;
-	case RELIC_AGG_SUM:
-		if (!relic_value_integer(env->ctx, tuple[aggregate->column],
-		    &integer)) {
-			record_aggregate_note(scratch, env, aggregate,
-			    RELIC_NOTE_SUM_TYPE);
-			return (false);
-		}
-		relic_sum_add(&fold->sum, integer);
-		break;
-	case RELIC_AGG_MIN:
-	case RELIC_AGG_MAX:
-		value = tuple[aggregate->column];
-		if (fold->rows == 0) {
-			fold->extreme = value;
-			break;
-		}
-		if ((value & RELIC_DOM_TYPE_MASK) !=
-		    (fold->extreme & RELIC_DOM_TYPE_MASK)) {
-			record_aggregate_note(scratch, env, aggregate,
-			    RELIC_NOTE_EXTREME_TYPES);
-			return (false);
-		}
-		order = relic_value_order(env->ctx, value, fold->extreme);
-		if ((aggregate->fn == RELIC_AGG_MIN &&
-		    order == RELIC_ORDER_LESS) ||
-		    (aggregate->fn == RELIC_AGG_MAX &&
-		    order == RELIC_ORDER_GREATER))
-			fold->extreme = value;
+	case RELIC_FOLD_KEPT:
+	case RELIC_FOLD_TIED:
 		break;
 	}
 
@@ -1939,14 +1934,14 @@ fold_row(relic_scratch_t *scratch, const relic_exec_env_t *env,
 
 /*
  * Fold every row of the group the key slots name, reached as the
- * operation's access says, within `view`.  Returns false when a row put the
- * group outside the function's domain.  The walk holds no tuple past the
- * row it folds, and the relation is complete, so nothing inserts into it
- * while the walk runs.  A fold cannot pause part way, since its running
- * value lives in its caller's frame, so it charges the rows it reads to
- * the call's reads and goes on, and the call pauses once its step returns.
+ * operation's access says, within `view`, stopping at a row that leaves
+ * the group with no value.  The walk holds no tuple past the row it folds,
+ * and the relation is complete, so nothing inserts into it while the walk
+ * runs.  A fold cannot pause part way, since its running value lives in
+ * its caller's frame, so it charges the rows it reads to the call's reads
+ * and goes on, and the call pauses once its step returns.
  */
-static bool
+static void
 fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
     const relic_op_aggregate_t *aggregate, const relic_tuple_range_t *view,
     relic_fold_t *fold)
@@ -1965,10 +1960,10 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			scratch->counters.tuples_scanned++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
 			if (key_matches(aggregate, key, tuple) &&
-			    !fold_row(scratch, env, aggregate, fold, tuple))
-				return (false);
+			    !fold_row(env, aggregate, fold, tuple))
+				return;
 		}
-		return (true);
+		return;
 	case RELIC_FOLD_LOOKUP:
 		index = relic_relation_index_at(aggregate->relation,
 		    aggregate->index_position);
@@ -1979,53 +1974,56 @@ fold_group(relic_scratch_t *scratch, const relic_exec_env_t *env,
 			charge_unresumable_read(scratch);
 			scratch->counters.tuples_looked_up++;
 			tuple = relic_relation_tuple(aggregate->relation, id);
-			if (!fold_row(scratch, env, aggregate, fold, tuple))
-				return (false);
+			if (!fold_row(env, aggregate, fold, tuple))
+				return;
 		}
-		return (true);
+		return;
 	case RELIC_FOLD_PROBE:
 		id = relic_relation_find(aggregate->relation, key);
 		if (id == RELIC_ID_NONE || id < view->first || id >= view->end)
-			return (true);
+			return;
 		scratch->counters.tuples_looked_up++;
 		tuple = relic_relation_tuple(aggregate->relation, id);
-		return (fold_row(scratch, env, aggregate, fold, tuple));
+		(void)fold_row(env, aggregate, fold, tuple);
+		return;
 	}
-
-	return (true);
 }
 
 /*
- * The value a completed fold gives: the row count for a count, the total
- * for a sum, and the extreme for a min or a max, whose empty group has no
- * value.  A total that does not fit int64_t records the overflow, which
- * ends the plan.
+ * The value a completed fold gives, as relic_fold_outcome() decides it:
+ * the row count for a count, the total for a sum, and the extreme for a
+ * min or a max, whose empty group has no value and draws no note.  A group
+ * left with no value by its rows' types records the aggregate's note, and
+ * a total that does not fit int64_t records the overflow, which ends the
+ * plan.
  */
 static bool
-fold_value(relic_scratch_t *scratch, const relic_op_aggregate_t *aggregate,
-    const relic_fold_t *fold, relic_cell_t *valuep)
+fold_value(relic_scratch_t *scratch, const relic_exec_env_t *env,
+    const relic_op_aggregate_t *aggregate, const relic_fold_t *fold,
+    relic_cell_t *valuep)
 {
-	switch (aggregate->fn) {
-	case RELIC_AGG_COUNT:
-		*valuep = number_cell((int64_t)fold->rows);
-		return (true);
-	case RELIC_AGG_SUM:
-		if (!relic_sum_fits(&fold->sum)) {
-			record_error(scratch, &aggregate->where,
-			    RELIC_FAIL_OVERFLOW);
-			return (false);
-		}
-		*valuep = number_cell(relic_sum_value(&fold->sum));
-		return (true);
-	case RELIC_AGG_MIN:
-	case RELIC_AGG_MAX:
+	int64_t integer;
+
+	switch (relic_fold_outcome(aggregate->fn, &fold->state, fold->rows,
+	    &integer)) {
+	case RELIC_FOLD_VALUE:
 		break;
+	case RELIC_FOLD_EMPTY:
+		return (false);
+	case RELIC_FOLD_MIXED:
+		record_aggregate_note(scratch, env, aggregate,
+		    aggregate->fn == RELIC_AGG_SUM ? RELIC_NOTE_SUM_TYPE :
+		    RELIC_NOTE_EXTREME_TYPES);
+		return (false);
+	case RELIC_FOLD_OVERFLOW:
+		record_error(scratch, &aggregate->where, RELIC_FAIL_OVERFLOW);
+		return (false);
 	}
 
-	if (fold->rows == 0)
-		return (false);
-
-	*valuep = dom_cell(fold->extreme);
+	if (aggregate->fn == RELIC_AGG_MIN || aggregate->fn == RELIC_AGG_MAX)
+		*valuep = dom_cell(fold->extreme);
+	else
+		*valuep = number_cell(integer);
 
 	return (true);
 }
@@ -2050,9 +2048,9 @@ step_aggregate(relic_scratch_t *scratch, const relic_exec_env_t *env,
 	uint16_t slot;
 
 	bzero(&fold, sizeof(fold));
-	if (!fold_group(scratch, env, aggregate, view, &fold))
-		return (false);
-	if (!fold_value(scratch, aggregate, &fold, &value))
+	relic_fold_init(&fold.state);
+	fold_group(scratch, env, aggregate, view, &fold);
+	if (!fold_value(scratch, env, aggregate, &fold, &value))
 		return (false);
 
 	slot = aggregate->slot;
