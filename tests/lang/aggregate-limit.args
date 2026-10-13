@@ -1,1 +1,1 @@
--l tuples=20
+-l tuples=20 -X no-group-reduction

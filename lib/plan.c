@@ -835,6 +835,9 @@ place_atom(relic_planner_t *planner, const relic_atom_t *atom,
 	uint32_t bound;
 	uint16_t i;
 
+	if (relic_reduction_confirm_rows(planner->ctx, atom->pred,
+	    &atom->where) != 0)
+		return (-1);
 	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
@@ -954,6 +957,9 @@ place_negated(relic_planner_t *planner, const relic_atom_t *atom)
 {
 	relic_relation_t *relation;
 
+	if (relic_reduction_confirm_rows(planner->ctx, atom->pred,
+	    &atom->where) != 0)
+		return (-1);
 	relation = relic_relation_read(planner->ctx, atom->pred);
 	if (relation == NULL)
 		return (-1);
@@ -1236,35 +1242,56 @@ fold_access(const relic_planner_t *planner, uint32_t key_mask,
  * over the relation it folds.  It binds its result slot when nothing has, a
  * number slot for a count or a sum and a domain slot for a min or a max, and
  * otherwise compares with it, reading it as the kind of slot it is.  A
- * lookup reads the index keyed on the literal's key columns.
+ * lookup reads the index keyed on the literal's key columns.  A fold of a
+ * source the run reduced reads its summary, and no relation: nothing
+ * records an access, since nothing that changes is read.
  */
 static int
 place_aggregate(relic_planner_t *planner, const relic_literal_t *literal)
 {
 	const relic_aggregate_t *aggregate;
+	const relic_summary_t *summary;
+	const relic_pred_t *source;
 	relic_op_aggregate_t *fold;
 	relic_relation_t *relation;
 	relic_op_t *op;
+	uint16_t signature;
 
 	aggregate = &literal->u.aggregate;
-	relation = relic_relation_read(planner->ctx, aggregate->source);
-	if (relation == NULL)
+	if (relic_reduction_fold(planner->ctx, aggregate, &summary,
+	    &signature) != 0)
 		return (-1);
+	relation = NULL;
+	if (summary == NULL) {
+		relation = relic_relation_read(planner->ctx,
+		    aggregate->source);
+		if (relation == NULL)
+			return (-1);
+	}
 
 	op = append_op(planner, RELIC_OP_AGGREGATE);
 	fold = &op->u.aggregate;
 	fold->relation = relation;
 	fold->aggregate = aggregate;
+	fold->summary = summary;
+	fold->signature = signature;
 	fold->key_slots = aggregate->shared;
 	fold->where = aggregate->where;
 	fold->fn = aggregate->fn;
-	fold->arity = relation->arity;
 	fold->key_count = aggregate->shared_count;
 	fold->column = aggregate->column;
 	fold->slot = aggregate->result;
 	fold->key_mask = aggregate->key_mask;
-	fold->access = fold_access(planner, fold->key_mask, fold->arity);
-	record_access(planner, op, relation);
+	if (summary != NULL) {
+		source = relic_pred_of(planner->ctx, aggregate->source);
+		fold->arity = source == NULL ? 0 : source->arity;
+		fold->access = RELIC_FOLD_SUMMARY;
+	} else {
+		fold->arity = relation->arity;
+		fold->access = fold_access(planner, fold->key_mask,
+		    fold->arity);
+		record_access(planner, op, relation);
+	}
 
 	fold->binds = (planner->bound & slot_bit(fold->slot)) == 0;
 	if (!fold->binds) {

@@ -19,6 +19,16 @@ of which `contrib/` holds only the homebrew formula, so
 `contrib/pkgsrc/devel/relic/` are to write; and the
 [release procedure](specs/design-release.md#the-release-procedure).
 
+**Direct grouped reduction is enabled but not releasable as the default.**
+[High, component: `lib/reduce.c`, `lib/eval.c`] The serial reducer makes
+`files-grouped` 12 to 15 per cent faster at one worker, with 11 to 23 per
+cent less memory, but makes it 1.8 to 2.3 times slower at `-j 16`, where the
+materialized reference partitions the producer. A release enables it by
+default only once bounded parallel partials land and the serial gain, the
+parallel time and bounded memory are revalidated on the p620 and the M3;
+[step 6 of the plan](docs/todo-benchmark-performance.md#6-reduce-eligible-grouped-pipelines-directly)
+has the measurements and the remaining work.
+
 **Close the comparison gaps.** [Medium, component: `bench/compare/`,
 `cmd/relic/output.c`] Six changes were made to close relic's gaps against
 the other engines of `bench/compare/run.sh`, each with a target, and three

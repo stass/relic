@@ -38,9 +38,10 @@ librelic_internal_la_SOURCES = lib/account.c lib/api.c lib/arena.c lib/arith.c \
 	lib/cost.c lib/depgraph.c lib/diag.c lib/eval.c lib/exec.c lib/explain.c \
 	lib/expr.c lib/facts.c lib/fold.c lib/import.c lib/index.c lib/lex.c \
 	lib/literal.c lib/magic.c lib/merge.c lib/parse.c lib/plan.c \
-	lib/pool.c lib/pred.c lib/regex.c lib/relation.c lib/result.c \
-	lib/round.c lib/rule.c lib/slice.c lib/stratify.c lib/strfn.c \
-	lib/symbol.c lib/task.c lib/util.c lib/value.c lib/window.c
+	lib/pool.c lib/pred.c lib/reduce.c lib/regex.c lib/relation.c \
+	lib/result.c lib/round.c lib/rule.c lib/slice.c lib/stratify.c \
+	lib/strfn.c lib/symbol.c lib/task.c lib/uses.c lib/util.c \
+	lib/value.c lib/window.c
 
 lib_LTLIBRARIES = librelic.la
 librelic_la_SOURCES =
@@ -55,8 +56,9 @@ noinst_HEADERS = cmd/relic/cmd.h compat/compat.h compat/queue.h \
 	lib/account.h lib/arena.h lib/arith.h lib/ast.h lib/atomic.h \
 	lib/cdefs.h lib/cost.h lib/depgraph.h \
 	lib/exec.h lib/fold.h \
-	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/regex.h \
-	lib/relation.h lib/round.h lib/strfn.h lib/table.h lib/util.h \
+	lib/frozen.h lib/internal.h lib/plan.h lib/program.h lib/reduce.h \
+	lib/regex.h lib/relation.h lib/round.h lib/strfn.h lib/table.h \
+	lib/util.h \
 	lib/window.h \
 	tests/unit/harness.h \
 	tests/unit/programs.h
@@ -207,6 +209,7 @@ RELIC_TEST_BINARIES += tests/unit/test_api tests/unit/test_arena \
 	tests/unit/test_lex tests/unit/test_magic tests/unit/test_merge \
 	tests/unit/test_parse \
 	tests/unit/test_plan tests/unit/test_pred tests/unit/test_query \
+	tests/unit/test_reduce \
 	tests/unit/test_regex tests/unit/test_relation tests/unit/test_round \
 	tests/unit/test_rule tests/unit/test_stratify tests/unit/test_strfn \
 	tests/unit/test_symbol tests/unit/test_text tests/unit/test_util \
@@ -286,6 +289,10 @@ tests_unit_test_pred_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_query_SOURCES = tests/unit/test_query.c tests/unit/harness.c
 tests_unit_test_query_LDADD = librelic_internal.la $(LTLIBOBJS)
+
+tests_unit_test_reduce_SOURCES = tests/unit/test_reduce.c \
+	tests/unit/harness.c
+tests_unit_test_reduce_LDADD = librelic_internal.la $(LTLIBOBJS)
 
 tests_unit_test_relation_SOURCES = tests/unit/test_relation.c \
 	tests/unit/harness.c
@@ -438,6 +445,21 @@ tests_unit_test_index_one_stripe_SOURCES = tests/unit/test_index.c \
 tests_unit_test_index_one_stripe_CPPFLAGS = $(AM_CPPFLAGS) \
 	$(RELIC_ONE_STRIPE)
 tests_unit_test_index_one_stripe_LDADD = $(LTLIBOBJS)
+
+##
+## A reduced source keeps the ceiling on its rows that its store would
+## have, RELIC_TUPLE_MAX, which no test can reach.  This program compiles
+## the library from source with the ceiling lowered to the rows of the
+## reduction suite's pipeline, so that the suite runs within it and its
+## last scenario passes it.
+##
+
+RELIC_TEST_BINARIES += tests/unit/test_reduce_ceiling
+tests_unit_test_reduce_ceiling_SOURCES = tests/unit/test_reduce.c \
+	tests/unit/harness.c $(librelic_internal_la_SOURCES)
+tests_unit_test_reduce_ceiling_CPPFLAGS = $(AM_CPPFLAGS) \
+	-DRELIC_REDUCE_ROWS_MAX=240
+tests_unit_test_reduce_ceiling_LDADD = $(LTLIBOBJS)
 
 ##
 ## A context's worker pool starts and joins threads the operating system
@@ -700,6 +722,7 @@ RELIC_LANG_TESTS = \
 	tests/lang/aggregate-outcome.dl \
 	tests/lang/aggregate-overflow.dl tests/lang/aggregate-parallel.dl \
 	tests/lang/aggregate-project.dl tests/lang/aggregate-query.dl \
+	tests/lang/aggregate-reduced-limit.dl \
 	tests/lang/aggregate-relation.dl \
 	tests/lang/aggregate-shared.dl tests/lang/aggregate-shortest.dl \
 	tests/lang/aggregate-stratify.dl tests/lang/aggregate-sum.dl \

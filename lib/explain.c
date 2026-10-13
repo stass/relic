@@ -966,7 +966,8 @@ put_op(const relic_t *ctx, relic_explain_line_t *line,
  * its columns named after the variables of the compiled body, whose slot c
  * is column c, and its key columns when it has any: `N = count
  * agg$p$1$0$2(X, Y) key={0}` for a group relation, `N = count edge(Y, X)
- * key={1}` for an atom folded in place.
+ * key={1}` for an atom folded in place.  A fold of a reduced source names
+ * the source, which holds no rows, and ends ` summary`.
  */
 static void
 put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
@@ -987,7 +988,10 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 	}
 	line_put_byte(line, ' ');
 
-	put_relation_name(ctx, line, fold->relation);
+	if (fold->access == RELIC_FOLD_SUMMARY)
+		put_pred_name(ctx, line, fold->aggregate->source);
+	else
+		put_relation_name(ctx, line, fold->relation);
 	if (fold->arity > 0) {
 		line_put_byte(line, '(');
 		for (column = 0; column < fold->arity; column++) {
@@ -1000,6 +1004,8 @@ put_op_aggregate(const relic_t *ctx, relic_explain_line_t *line,
 
 	if (fold->key_count > 0)
 		put_key(line, fold->key_mask);
+	if (fold->access == RELIC_FOLD_SUMMARY)
+		line_put(line, " summary");
 }
 
 /*
@@ -1099,6 +1105,62 @@ relic_explain_rule(relic_t *ctx, const relic_rule_t *rule,
 	if (plan != NULL)
 		put_ops(ctx, rule, plan->ops, plan->op_count, depth + 2,
 		    false);
+}
+
+/*
+ * "reduce kind/3 key={1,2} count, sum(0)", beneath the plan of the rule
+ * last shown: its rows go to the source's reduction, each signature named
+ * by its function and, but for a count, the column it folds.
+ */
+void
+relic_explain_reduction(relic_t *ctx, const relic_reduced_source_t *source,
+    unsigned int depth)
+{
+	const relic_reduce_signature_t *signature;
+	relic_explain_line_t line;
+	size_t i;
+
+	if (!relic_explaining(ctx))
+		return;
+
+	line_begin(&line, depth + 2);
+	line_put(&line, "reduce ");
+	put_pred(ctx, &line, source->pred);
+	put_key(&line, source->key_mask);
+	for (i = 0; i < source->signature_count; i++) {
+		signature = &source->signatures[i];
+		line_put(&line, i == 0 ? " " : ", ");
+		line_put(&line, relic_aggregate_spelling(signature->fn));
+		if (signature->fn == RELIC_AGG_COUNT)
+			continue;
+		line_put_byte(&line, '(');
+		put_size(&line, signature->column);
+		line_put_byte(&line, ')');
+	}
+	line_finish(ctx, &line);
+}
+
+/*
+ * "project group/2 from summary kind/3 key={1,2}", in place of the plan of
+ * the projection's rule, which the source's keys replace.
+ */
+void
+relic_explain_projection(relic_t *ctx,
+    const relic_key_projection_t *projection,
+    const relic_reduced_source_t *source, unsigned int depth)
+{
+	relic_explain_line_t line;
+
+	if (!relic_explaining(ctx))
+		return;
+
+	line_begin(&line, depth + 2);
+	line_put(&line, "project ");
+	put_pred(ctx, &line, projection->pred);
+	line_put(&line, " from summary ");
+	put_pred(ctx, &line, source->pred);
+	put_key(&line, source->key_mask);
+	line_finish(ctx, &line);
 }
 
 /*

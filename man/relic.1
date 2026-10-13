@@ -595,6 +595,13 @@ rewrite every bound recursive predicate by the ordinary Magic Sets
 construction, deriving the answers of every state its demand reaches,
 rather than by walking the states reachable from each requested binding and
 answering for that binding alone;
+.It Cm no-group-reduction
+fold every aggregate by walking the stored rows of the relation it folds,
+storing every relation the program names, rather than reducing a relation
+a query proves distinct and reads only through folds and rules projecting
+its grouping key straight into one state per group, summarizing a complete
+relation that folds read repeatedly, or counting an unkeyed group by its
+relation's size;
 .It Cm no-index
 build no index, scanning instead;
 .It Cm no-magic

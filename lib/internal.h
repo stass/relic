@@ -34,6 +34,7 @@
 #include "plan.h"
 #include "program.h"
 #include "queue.h"
+#include "reduce.h"
 #include "relation.h"
 #include "round.h"
 #include "strfn.h"
@@ -201,8 +202,16 @@ struct relic_valtab {
  * `symbols_deferred` count the same of the pool's batches of new strings.
  * `frames_ahead` counts the
  * steps of framing a batch import ran as the filler of a window's jobs.
+ *
+ * `sources_reduced` counts the sources whose rows were reduced straight
+ * into group state rather than stored, `reduced_rows` the rows they
+ * derived, and `reduced_groups` the groups their summaries hold; the
+ * lookups folds made in a summary are `read.summary_probes`.
+ * `reduction_peak` is the most bytes one reduction held at once: its
+ * builder, and the summary and scratch of its finishing.
+ *
  * relic_stats() reports none of these; they show the tests which way an
- * import or a commit went.
+ * import, a commit or a grouped source went.
  */
 struct relic_counters {
 	uint64_t		iterations;
@@ -217,6 +226,10 @@ struct relic_counters {
 	uint64_t		commits_deferred;
 	uint64_t		symbols_shared;
 	uint64_t		symbols_deferred;
+	uint64_t		sources_reduced;
+	uint64_t		reduced_rows;
+	uint64_t		reduced_groups;
+	size_t			reduction_peak;
 };
 
 /*
@@ -360,7 +373,9 @@ struct relic_adornment_set {
  * since what the query reads on demand is what nothing has evaluated when the
  * rewrite is planned.  `component_of` gives, for each predicate, the position
  * of its component in the program's schedule, or SIZE_MAX when no rule
- * derives it.
+ * derives it.  `called` marks, by position, the components a positive
+ * literal of a body the query reaches calls, whether or not they turned
+ * out complete.
  *
  * `rules_by_head` holds the indexes into the program's rule table of every
  * rule, grouped by head and in program order within a head: those deriving
@@ -423,6 +438,7 @@ struct relic_magic {
 	relic_t			*ctx;
 	relic_arena_t		 arena;
 	bool			*incomplete;
+	bool			*called;
 	size_t			*component_of;
 	size_t			*rules_by_head;
 	size_t			*first_rule_of;
@@ -486,6 +502,12 @@ struct relic_materialized {
  * the context; a query's is cleared when its answer begins, so each answer
  * is reported on once.
  *
+ * `reduction` is the scope of the direct grouped reductions of the query
+ * run under way (lib/uses.c), which the planner resolves every read of a
+ * relation through, or NULL outside one and when reduction is turned off.
+ * It belongs to the run, which holds it from before its first evaluation
+ * until after its last plan is released.
+ *
  * `hash_seed` keys every hash the context's tables compute.  It is drawn
  * from the operating system when the context is created and never changes;
  * each table owner copies it when it is initialized.  No result depends on
@@ -525,6 +547,7 @@ struct relic {
 	uint64_t		 hash_seed;
 	relic_materialized_t	 materialized;
 	relic_pool_t		*pool;
+	relic_reduction_t	*reduction;
 	relic_signal_flag_t	 interrupted;
 	bool			 query_mixed_noted;
 	bool			 busy;
@@ -1483,12 +1506,74 @@ const relic_op_atom_t *relic_op_atom(const relic_op_t *op);
  * diagnostic reported: memory, or the rewrite's limit outgrown, which is
  * reported as a warning and sets `abandoned`.
  * relic_magic_reset() releases the rewrite, whatever state it is in.
+ *
+ * Between finding what the query reads completely and evaluating it, a
+ * direct reduction may add to it.  relic_magic_component_of() is the
+ * position in the program's schedule of a predicate's component, or
+ * SIZE_MAX when no rule derives it, and relic_magic_reaches() whether the
+ * query reaches the component at `position`: reads it completely, or
+ * calls it through a positive literal of a body the query reaches.
+ * relic_magic_complete_also() makes the `count` components at `positions`
+ * complete too, with everything they depend on, so that the rewrite reads
+ * them as it reads the rest; it returns 0, or -1 with the failure
+ * reported.
  */
 void	 relic_magic_init(relic_magic_t *magic, relic_t *ctx);
 void	 relic_magic_reset(relic_magic_t *magic);
 int	 relic_magic_find_complete(relic_magic_t *magic,
 	    const relic_query_t *query);
+size_t	 relic_magic_component_of(const relic_magic_t *magic,
+	    relic_pred_id_t pred);
+bool	 relic_magic_reaches(const relic_magic_t *magic, size_t position);
+int	 relic_magic_complete_also(relic_magic_t *magic,
+	    const size_t *positions, size_t count);
 int	 relic_magic_rewrite(relic_magic_t *magic, const relic_rule_t *query);
+
+/*
+ * lib/uses.c
+ *
+ * The scope of a query run's direct grouped reductions (lib/reduce.h).
+ *
+ * relic_reduction_begin() makes `reduction` empty and makes it the
+ * context's for the query run about to start, unless
+ * RELIC_F_NO_GROUP_REDUCTION turns reduction off; relic_reduction_end()
+ * destroys every summary it holds, releases it, and leaves the context
+ * with none.  Every plan that holds one of its summaries must have been
+ * released before then.
+ *
+ * relic_reduction_select() admits into the context's scope the sources
+ * whose every use is a fold of one key or a projection of that key, and
+ * of which the query reaches a fold, and promotes into `magic`'s complete
+ * part the projections the query reaches.  It is called once `magic` has
+ * found what the query reads completely and before any of that is
+ * evaluated.  It returns 0, or -1 with the failure reported; with no
+ * scope it admits nothing.
+ *
+ * relic_reduction_source() and relic_reduction_projection() are the
+ * scope's entry for a predicate, or NULL; the source's is writable, since
+ * its turn records what it became.
+ *
+ * relic_reduction_fold() is how the planner resolves an aggregate's
+ * source: 0 with *summaryp NULL when the fold reads rows, 0 with the
+ * summary and the position of the fold's signature among the source's
+ * when it reads a summary, and -1 with an internal error reported when
+ * the source's rows are not there and no summary stands in for them.
+ * relic_reduction_confirm_rows() is how it resolves every other read of a
+ * relation's rows: 0, or -1 with an internal error at `where` when the
+ * relation is a source the scope reduces.
+ */
+void	 relic_reduction_begin(relic_reduction_t *reduction, relic_t *ctx);
+void	 relic_reduction_end(relic_reduction_t *reduction, relic_t *ctx);
+int	 relic_reduction_select(relic_t *ctx, relic_magic_t *magic,
+	    const relic_query_t *query);
+relic_reduced_source_t *relic_reduction_source(relic_t *ctx,
+	    relic_pred_id_t pred);
+const relic_key_projection_t *relic_reduction_projection(const relic_t *ctx,
+	    relic_pred_id_t pred);
+int	 relic_reduction_fold(relic_t *ctx, const relic_aggregate_t *aggregate,
+	    const relic_summary_t **summaryp, uint16_t *signaturep);
+int	 relic_reduction_confirm_rows(relic_t *ctx, relic_pred_id_t pred,
+	    const relic_location_t *where);
 
 /*
  * lib/eval.c
@@ -1636,7 +1721,11 @@ _Static_assert(RELIC_IMPORT_WINDOW_RECORDS > 0,
  * and shown.  The rules shown between a query's heading and its plan are
  * its group rules.  A query's rule names no predicate, so the functions
  * that show a query are given its answer relation, whose name its head is
- * written with.  `depth` is the level a
+ * written with.  relic_explain_reduction() annotates the rule last shown,
+ * whose rows a source's reduction takes instead of its relation, with the
+ * source, its key and its folds' signatures; relic_explain_projection()
+ * annotates a projection's rule, which the source's keys replace, with
+ * the source it reads them from.  `depth` is the level a
  * component's heading is indented to, one more for a component of a
  * rewritten program than for one of the program itself; what belongs to
  * the component is indented beneath it.  None can fail.
@@ -1658,6 +1747,11 @@ void	 relic_explain_rewrite(relic_t *ctx, const relic_rule_t *query,
 	    const relic_relation_t *answer, const relic_magic_t *magic);
 void	 relic_explain_abandoned_rewrite(relic_t *ctx,
 	    const relic_rule_t *query, const relic_relation_t *answer);
+void	 relic_explain_reduction(relic_t *ctx,
+	    const relic_reduced_source_t *source, unsigned int depth);
+void	 relic_explain_projection(relic_t *ctx,
+	    const relic_key_projection_t *projection,
+	    const relic_reduced_source_t *source, unsigned int depth);
 
 /*
  * lib/index.c

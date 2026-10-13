@@ -154,6 +154,8 @@ fold_kind(const relic_op_aggregate_t *fold)
 		return (RELIC_COST_FOLD_SCAN);
 	case RELIC_FOLD_LOOKUP:
 		return (RELIC_COST_FOLD_LOOKUP);
+	case RELIC_FOLD_SUMMARY:
+		return (RELIC_COST_FOLD_SUMMARY);
 	case RELIC_FOLD_PROBE:
 		break;
 	}
@@ -271,6 +273,10 @@ count_op(relic_cost_walk_t *walk, const relic_op_t *op,
 		    relic_relation_all(op->u.aggregate.relation));
 		walk->work = saturating_add(walk->work, saturating_add(
 		    bindings, tuples == 0 ? 0 : bindings));
+		break;
+	case RELIC_COST_FOLD_SUMMARY:
+		walk->work = saturating_add(walk->work,
+		    saturating_add(bindings, bindings));
 		break;
 	}
 }

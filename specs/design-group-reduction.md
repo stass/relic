@@ -539,7 +539,8 @@ reference selects row folds before execution.
 | --- | --- |
 | `lib/rule.c`, `lib/program.h` | Preserve the logical group schema and aggregate signatures; classify semantic read sites without changing language compilation. |
 | `lib/plan.c`, `lib/plan.h` | Reuse the distinctness proof, validate reducer output schemas and resolve each aggregate to a row access or immutable summary. |
-| `lib/eval.c`, `lib/magic.c` | Own the run scope and source bindings, promote reached key projections, dispatch physical schedule actions, and destroy them before fallback/discard. |
+| `lib/uses.c` | Inventory every use of every predicate once per run, admit sources and key projections, collect aggregate signatures, and resolve each fold and row read against the run's scope. |
+| `lib/eval.c`, `lib/magic.c` | Own the run scope's lifetime and source bindings, promote reached key projections into the complete part, dispatch physical schedule actions, and destroy them before fallback/discard. |
 | `lib/fold.c`, `lib/fold.h` | Shared accumulator add/combine/outcome operations over borrowed semantic value views; no context mutation or diagnostic emission. |
 | `lib/reduce.c`, `lib/reduce.h` | Private group builders, bounded lane jobs, retained payload ownership, ordering, publication and immutable summary lookup. |
 | `lib/exec.c`, `lib/frozen.h` | Preserve normal expression evaluation and result-slot handling; expose completed summaries only through const read operations. |

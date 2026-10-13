@@ -85,16 +85,22 @@ set -eu
 # answers and diagnostics.  The no-magic run is compared with the default
 # on its answers, and is the reference whose tuple total those in
 # `whole_rules`, which answer from the whole fixed point too, are held to.
-# Those in `answer_rules` are held to the default's answers and exit status.
+# Those in `answer_rules` are held to the default's answers and exit status:
+# group-rules stores every aggregate's group, and no-group-reduction every
+# source the default may reduce straight into group state.  The no-exists
+# run evaluates the default's rules, but plans a literal holding `_` as a
+# scan that may derive a row twice, which the default's existence check
+# derives once, so it may store a source the default reduces: it is in
+# `other_rules`, held to the default's answers and diagnostics.
 # The no-factor run, the rewrite without factoring, is in `other_rules`,
 # and is the reference whose tuple total those in `ordinary_rules`, which
 # rewrite without factoring too, are held to.
-same_rules="naive no-index no-exists parallel j4+parallel no-batch-import"
-other_rules="no-reorder no-factor"
+same_rules="naive no-index parallel j4+parallel no-batch-import"
+other_rules="no-reorder no-factor no-exists"
 ordinary_rules="naive+no-factor"
 whole_rules="naive+no-magic no-index+no-magic no-reorder+no-magic
     no-exists+no-magic"
-answer_rules="group-rules"
+answer_rules="group-rules no-group-reduction group-rules+no-group-reduction"
 
 work=$(mktemp -d) || exit 1
 trap 'rm -rf "$work"' EXIT

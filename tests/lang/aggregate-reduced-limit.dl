@@ -1,0 +1,6 @@
+% A group the query's run reduces stores none of its rows, and the tuple
+% limit counts only stored tuples: the count of every pair is answered
+% under the limit that aggregate-limit.dl's stored group exceeds.
+n(1). n(2). n(3). n(4). n(5). n(6).
+pairs(C) :- C = count { n(X), n(Y) }.
+pairs(C)?

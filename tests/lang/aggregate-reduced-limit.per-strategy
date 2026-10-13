@@ -1,0 +1,6 @@
+The default reduces the group of pairs/1 into its count and stores none
+of its 36 rows, so it answers under tuples=20.  A strategy that stores the
+group -- group-rules, no-group-reduction, or no-magic, which answers from
+the whole fixed point without a run's reductions -- passes the limit and
+fails, as aggregate-limit.dl pins.  The golden file pins the default's
+answer.

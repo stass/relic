@@ -110,4 +110,33 @@ enum relic_fold_step relic_fold_combine(enum relic_aggregate_fn fn,
 enum relic_fold_outcome relic_fold_outcome(enum relic_aggregate_fn fn,
 	    const relic_fold_state_t *state, uint64_t rows, int64_t *integerp);
 
+/*
+ * A summary (lib/reduce.c) as the folds that read it see it: the completed
+ * groups of one reduced source, each with its key, its row count and one
+ * accumulator per aggregate signature the source's folds asked for, which
+ * nothing changes once it is published.  The type is incomplete outside
+ * lib/reduce.c, so a reader has these functions and nothing to write.
+ *
+ * relic_summary_groups() is how many groups the summary holds: one per key
+ * some row of the source holds, in the order the keys first occurred.
+ * relic_summary_key() is a group's key, its key columns' identifiers in
+ * increasing column order.  relic_summary_find() is the group whose key is
+ * `key`, laid out the same way, or RELIC_SUMMARY_NONE when no row holds
+ * it, which is the empty group: a key column holding zero, a value the
+ * context never assigned, is in no group.  relic_summary_rows() is a
+ * group's row count, and relic_summary_state() the accumulator of the
+ * group's `signature`th signature, with the extreme of a min or a max that
+ * holds a value in *extremep.
+ */
+#define	RELIC_SUMMARY_NONE	SIZE_MAX
+
+size_t	 relic_summary_groups(const relic_summary_t *summary);
+const relic_dom_t *relic_summary_key(const relic_summary_t *summary,
+	    size_t group);
+size_t	 relic_summary_find(const relic_summary_t *summary,
+	    const relic_dom_t *key);
+uint64_t relic_summary_rows(const relic_summary_t *summary, size_t group);
+const relic_fold_state_t *relic_summary_state(const relic_summary_t *summary,
+	    size_t group, size_t signature, relic_dom_t *extremep);
+
 #endif /* RELIC_FOLD_H */

@@ -330,12 +330,15 @@ struct relic_op_assign {
  * every column is a key column, by probing for the one tuple the key names.
  * A fold with no key walks the whole relation, which is then the group, and
  * so does one under RELIC_F_NO_INDEX, as a generator with bound columns is
- * scanned under it.
+ * scanned under it.  A fold of a source the query's run reduced reads no
+ * rows: it finds the key's group in the source's summary and reads the
+ * group's state (lib/reduce.h).
  */
 enum relic_fold_access {
 	RELIC_FOLD_SCAN,
 	RELIC_FOLD_LOOKUP,
-	RELIC_FOLD_PROBE
+	RELIC_FOLD_PROBE,
+	RELIC_FOLD_SUMMARY
 };
 
 /*
@@ -347,7 +350,9 @@ enum relic_fold_access {
  * its shared variables stand in.  `access` says how the group's rows are
  * reached, and for RELIC_FOLD_LOOKUP `index_position` names the index
  * keyed on `key_mask` as a LOOKUP's does, once relic_plan_prepare() has set
- * it.  `fn` folds column `column` of
+ * it.  For RELIC_FOLD_SUMMARY `relation` is NULL, since the source holds
+ * no rows, and the fold reads accumulator `signature` of `summary`, which
+ * the run owns and outlives the plan.  `fn` folds column `column` of
  * each row, which `count` does not read.
  *
  * `binds` says whether the fold binds `slot` or, bound before, compares its
@@ -361,6 +366,7 @@ enum relic_fold_access {
 struct relic_op_aggregate {
 	const relic_relation_t	*relation;
 	const relic_aggregate_t	*aggregate;
+	const relic_summary_t	*summary;		/* RELIC_FOLD_SUMMARY */
 	const uint16_t		*key_slots;
 	relic_location_t	 where;
 	uint32_t		 key_mask;
@@ -370,6 +376,7 @@ struct relic_op_aggregate {
 	uint16_t		 arity;
 	uint16_t		 key_count;
 	uint16_t		 column;
+	uint16_t		 signature;		/* RELIC_FOLD_SUMMARY */
 	enum relic_slot_kind	 kind;
 	uint16_t		 slot;
 	bool			 binds;
@@ -473,6 +480,7 @@ struct relic_plan_draft {
  *	FOLD_LOOKUP	B folds and Q visits; B onward
  *	FOLD_PROBE	B folds and B visits, none when the relation is
  *			empty; B onward
+ *	FOLD_SUMMARY	B folds and B summary probes; B onward
  *	EMIT		B emissions
  */
 enum relic_cost_kind {
@@ -484,6 +492,7 @@ enum relic_cost_kind {
 	RELIC_COST_FOLD_SCAN,
 	RELIC_COST_FOLD_LOOKUP,
 	RELIC_COST_FOLD_PROBE,
+	RELIC_COST_FOLD_SUMMARY,
 	RELIC_COST_EMIT
 };
 

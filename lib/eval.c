@@ -147,10 +147,14 @@ struct relic_row_sink {
  * the arity of `relation`, the relation the EMIT names, and are inserted
  * into it; or, when `rows` has a callback, each is delivered to it as a row
  * instead, and the relation is never written.  Only a query's rule is ever
- * given rows, and only when query_streams() admits its plan.
+ * given rows, and only when query_streams() admits its plan.  With
+ * `reducer`, the tuples are reduced into it instead, and the relation,
+ * the source of the reduction, is still never written: only a source's
+ * producer is given one, by reduce_source().
  */
 struct relic_emit_target {
 	relic_relation_t	*relation;
+	relic_reducer_t		*reducer;
 	relic_row_sink_t	 rows;
 };
 
@@ -453,6 +457,24 @@ static uint16_t	 widest_head(const relic_ruletab_t *rules);
 static void	 evaluation_end(relic_evaluation_t *eval);
 static int	 evaluate_component(relic_evaluation_t *eval,
 		    relic_component_plans_t *plans);
+static int	 evaluate_scheduled(relic_evaluation_t *eval,
+		    const relic_schedule_t *schedule, size_t position,
+		    unsigned depth);
+static bool	 reduction_certified(const relic_t *ctx,
+		    const relic_component_plans_t *plans);
+static int	 reduce_source(relic_evaluation_t *eval,
+		    const relic_schedule_t *schedule, size_t position,
+		    relic_component_plans_t *plans,
+		    relic_reduced_source_t *source, unsigned depth);
+static int	 run_reduction(relic_evaluation_t *eval,
+		    const relic_component_plans_t *plans,
+		    relic_reducer_t *reducer, relic_summary_t **summaryp);
+static int	 project_keys(relic_evaluation_t *eval,
+		    const relic_schedule_t *schedule, size_t position,
+		    const relic_key_projection_t *projection,
+		    const relic_reduced_source_t *source, unsigned depth);
+static int	 reduce_batch(relic_evaluation_t *eval,
+		    const relic_emit_target_t *target);
 static int	 seed_member(relic_evaluation_t *eval,
 		    relic_relation_t *derived);
 static int	 seed_members(relic_evaluation_t *eval,
@@ -919,6 +941,42 @@ insert_batch(relic_evaluation_t *eval, relic_relation_t *relation)
 }
 
 /*
+ * Reduce the batch into the target's reducer, counting a derivation for
+ * each tuple the reducer took, none of them inserted, and empty it.  Its
+ * pending values are read where the batch's markers name them: the
+ * reducer keeps what it retains of them, and they are not interned until
+ * the reduction ends.  Returns -1 when the reducer refused, which it has
+ * reported.
+ */
+static int
+reduce_batch(relic_evaluation_t *eval, const relic_emit_target_t *target)
+{
+	relic_reduce_batch_t batch;
+	relic_scratch_t *scratch;
+	size_t taken;
+	size_t i;
+	int status;
+
+	scratch = &eval->scratch;
+	batch.rows = scratch->batch;
+	batch.count = scratch->batch_count;
+	batch.pending = scratch->pending;
+	batch.pending_count = scratch->pending_count;
+	batch.bytes = scratch->pending_bytes.bytes;
+	batch.byte_count = scratch->pending_bytes.used;
+	status = relic_reducer_take(eval->ctx, target->reducer,
+	    target->relation, &batch, &taken);
+
+	for (i = 0; i < taken; i++)
+		count_derivation(eval, false);
+	scratch->batch_count = 0;
+	scratch->pending_count = 0;
+	scratch->pending_bytes.used = 0;
+
+	return (status);
+}
+
+/*
  * Add the work the executor counted to the context's counters, and start
  * counting afresh.
  */
@@ -954,8 +1012,8 @@ relic_report_mixed_note(relic_t *ctx, const relic_rule_t *rule,
  * insertion or its values were refused, which the store has reported; a
  * delivery cannot fail.
  *
- * This is the one place that tells the two kinds of target apart, so a
- * tuple is built the same way whichever it is for.  The note goes before
+ * This is the one place that tells the kinds of target apart, so a tuple
+ * is built the same way whichever it is for.  The note goes before
  * the tuples, since the comparison it names was made before the batch's
  * later tuples were derived, and the counts go first of all, so that a row
  * callback reading the statistics finds the work that derived its row.  A
@@ -981,6 +1039,9 @@ take_batch(relic_evaluation_t *eval, const relic_rule_t *rule,
 		scratch->pending_bytes.used = 0;
 		return (-1);
 	}
+
+	if (target->reducer != NULL)
+		return (reduce_batch(eval, target));
 
 	if (target->rows.callback == NULL) {
 		if (resolve_pending(eval, target->relation) != 0)
@@ -2077,9 +2138,8 @@ make_running_plan(relic_evaluation_t *eval, const relic_rule_t *rule,
 
 	running->plan = *plan;
 	running->rule = rule;
+	bzero(&running->target, sizeof(running->target));
 	running->target.relation = target;
-	running->target.rows.callback = NULL;
-	running->target.rows.callback_ctx = NULL;
 	bzero(&running->history, sizeof(running->history));
 	bzero(&running->own_insertions, sizeof(running->own_insertions));
 	running->insertions = &running->own_insertions;
@@ -2958,7 +3018,6 @@ static int
 evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
     const relic_schedule_t *schedule, const bool *wanted, unsigned depth)
 {
-	relic_component_plans_t *plans;
 	relic_evaluation_t eval;
 	size_t i;
 	int status;
@@ -2977,21 +3036,229 @@ evaluate_schedule(relic_t *ctx, const relic_ruletab_t *rules,
 		if (wanted != NULL && !wanted[i])
 			continue;
 
-		plans = &eval.components[i];
 		note_planning_component(ctx, schedule, i);
-
-		status = plan_component(&eval, schedule,
-		    &schedule->components[i], plans);
-		if (status != 0)
-			break;
-
-		explain_component(&eval, schedule, i, plans, depth);
-		status = evaluate_component(&eval, plans);
+		status = evaluate_scheduled(&eval, schedule, i, depth);
 	}
 
 	evaluation_end(&eval);
 
 	return (status);
+}
+
+/*
+ * Plan and evaluate component `position` of a schedule.  Over the
+ * program's rules, in a run with a reduction scope (lib/uses.c), the
+ * component may be a source the run reduces or a projection its keys
+ * fill; every other component, and every component of a rewrite's
+ * generated rules, is evaluated as planned.  A projection whose source was
+ * reduced is not planned at all, since its rule reads rows the source does
+ * not hold; one whose source was stored is evaluated as any other.  The
+ * source comes earlier in the schedule than its projections, which read
+ * it, so its fate is decided by the time theirs is.
+ */
+static int
+evaluate_scheduled(relic_evaluation_t *eval, const relic_schedule_t *schedule,
+    size_t position, unsigned depth)
+{
+	const relic_key_projection_t *projection;
+	const relic_component_t *component;
+	relic_component_plans_t *plans;
+	relic_reduced_source_t *source;
+	relic_pred_id_t pred;
+	relic_t *ctx;
+
+	ctx = eval->ctx;
+	component = &schedule->components[position];
+	plans = &eval->components[position];
+	source = NULL;
+	if (ctx->reduction != NULL && eval->rules == &ctx->program.rules &&
+	    component->member_count == 1) {
+		pred = schedule->members[component->first_member];
+		projection = relic_reduction_projection(ctx, pred);
+		if (projection != NULL) {
+			source = &ctx->reduction->sources[projection->source];
+			if (source->state == RELIC_SOURCE_REDUCED)
+				return (project_keys(eval, schedule, position,
+				    projection, source, depth));
+		}
+		source = relic_reduction_source(ctx, pred);
+	}
+
+	if (plan_component(eval, schedule, component, plans) != 0)
+		return (-1);
+
+	if (source != NULL && source->state == RELIC_SOURCE_PROMISED)
+		return (reduce_source(eval, schedule, position, plans, source,
+		    depth));
+
+	explain_component(eval, schedule, position, plans, depth);
+	return (evaluate_component(eval, plans));
+}
+
+/*
+ * Whether a source's producer, as planned, derives each of its rows once
+ * (specs/design-group-reduction.md): one rule with a base plan that proves
+ * it derives no tuple twice over relations that do not change while it
+ * runs, which a component that does not read itself guarantees, folding
+ * nothing, and no fact beside it.
+ */
+static bool
+reduction_certified(const relic_t *ctx, const relic_component_plans_t *plans)
+{
+	const relic_running_plan_t *base;
+
+	if (plans->member_count != 1 || plans->rule_count != 1 ||
+	    plans->planned_count != 1 ||
+	    plans->fixed_point != RELIC_FIXED_ONE_PASS)
+		return (false);
+
+	base = plans->planned[0].base;
+	return (base != NULL && relic_plan_derives_distinct(&base->plan) &&
+	    !relic_plan_folds(&base->plan) &&
+	    relic_base_count(ctx, plans->members[0]->pred) == 0);
+}
+
+/*
+ * Evaluate a source the run chose to reduce, at its component's turn.  A
+ * producer the certificate admits runs into a reducer rather than the
+ * source's relation, which stays empty, and the summary the reducer
+ * becomes stands in for the rows; one it does not admit is evaluated as
+ * any other, and the source is stored, its folds reading its rows.  Either
+ * way the source's fate is settled for the rest of the run.
+ */
+static int
+reduce_source(relic_evaluation_t *eval, const relic_schedule_t *schedule,
+    size_t position, relic_component_plans_t *plans,
+    relic_reduced_source_t *source, unsigned depth)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+	relic_summary_t *summary;
+	relic_reducer_t *reducer;
+	uint64_t derived_before;
+	size_t peak;
+	relic_t *ctx;
+	int status;
+
+	ctx = eval->ctx;
+	explain_component(eval, schedule, position, plans, depth);
+	if (!reduction_certified(ctx, plans)) {
+		source->state = RELIC_SOURCE_STORED;
+		return (evaluate_component(eval, plans));
+	}
+	relic_explain_reduction(ctx, source, depth);
+
+	relic_diag_activity(ctx, "deriving", relic_relation_describe(ctx,
+	    plans->members[0], described, sizeof(described)));
+	if (relic_reducer_open(ctx, source, plans->members[0]->arity,
+	    &reducer) != 0)
+		return (-1);
+	derived_before = ctx->counters.derivations;
+	status = run_reduction(eval, plans, reducer, &summary);
+	peak = relic_reducer_peak(reducer);
+	relic_reducer_close(ctx, reducer);
+	if (status != 0)
+		return (-1);
+
+	source->summary = summary;
+	source->state = RELIC_SOURCE_REDUCED;
+	ctx->counters.sources_reduced++;
+	ctx->counters.reduced_rows += ctx->counters.derivations -
+	    derived_before;
+	ctx->counters.reduced_groups += relic_summary_groups(summary);
+	if (peak > ctx->counters.reduction_peak)
+		ctx->counters.reduction_peak = peak;
+
+	return (0);
+}
+
+/*
+ * Run a certified producer's plan into `reducer`, serially, and make the
+ * summary of what it derived.  The texts a plan's calls need are begun
+ * around it, as a round's are.
+ */
+static int
+run_reduction(relic_evaluation_t *eval, const relic_component_plans_t *plans,
+    relic_reducer_t *reducer, relic_summary_t **summaryp)
+{
+	const relic_rule_plans_t *rule_plans;
+	enum relic_exec_failure failure;
+	relic_emit_target_t target;
+	int status;
+
+	rule_plans = &plans->planned[0];
+	bzero(&target, sizeof(target));
+	target.relation = plans->members[0];
+	target.reducer = reducer;
+	if (relic_plan_calls(&rule_plans->base->plan) &&
+	    relic_scratch_begin_texts(&eval->scratch, &eval->ctx->account,
+	    &failure) != 0) {
+		report_texts_refused(eval->ctx, target.relation, failure);
+		return (-1);
+	}
+
+	status = execute_plan(eval, &rule_plans->base->plan, rule_plans->rule,
+	    &target);
+	relic_scratch_end_texts(&eval->scratch);
+	if (status != 0)
+		return (-1);
+
+	return (relic_reducer_finish(eval->ctx, reducer, target.relation,
+	    summaryp));
+}
+
+/*
+ * Fill a projection's relation from its source's summary in place of its
+ * rule: each group's key once, permuted into the head, in the order the
+ * keys first occurred, each counted as the rule's EMIT would count it.
+ * The rule is not planned, so the component's relation is resolved here,
+ * and the interrupt is looked for every batch's worth of keys, as a plan
+ * looks for it every quantum.
+ */
+static int
+project_keys(relic_evaluation_t *eval, const relic_schedule_t *schedule,
+    size_t position, const relic_key_projection_t *projection,
+    const relic_reduced_source_t *source, unsigned depth)
+{
+	relic_dom_t tuple[RELIC_MAX_ARITY];
+	const relic_component_t *component;
+	relic_component_plans_t *plans;
+	relic_relation_t *relation;
+	const relic_dom_t *key;
+	size_t groups;
+	size_t g;
+	uint16_t column;
+	bool added;
+
+	component = &schedule->components[position];
+	plans = &eval->components[position];
+	if (plan_members(eval, schedule, component, plans) != 0)
+		return (-1);
+	relation = plans->members[0];
+
+	if (relic_explaining(eval->ctx)) {
+		relic_explain_component(eval->ctx, schedule, position, 0,
+		    depth);
+		relic_explain_rule(eval->ctx, rule_of(eval, schedule,
+		    component, 0), NULL, depth);
+		relic_explain_projection(eval->ctx, projection, source, depth);
+	}
+
+	groups = relic_summary_groups(source->summary);
+	for (g = 0; g < groups; g++) {
+		key = relic_summary_key(source->summary, g);
+		for (column = 0; column < relation->arity; column++)
+			tuple[column] = key[projection->keys[column]];
+		if (relic_relation_insert(eval->ctx, relation, tuple,
+		    &added) != 0)
+			return (-1);
+		count_derivation(eval, added);
+		if ((g + 1) % RELIC_INSERT_BATCH == 0 &&
+		    relic_refuse_interrupted(eval->ctx, "deriving",
+		    relation) != 0)
+			return (-1);
+	}
+
+	return (0);
 }
 
 /*
@@ -3503,7 +3770,9 @@ evaluate_read_completely(relic_t *ctx, relic_magic_t *magic,
  * then the fixed point of the rules the rewrite generates, or of the
  * program's rules for the components it found read completely.  The group
  * relations come before the generated rules because a generated rule may
- * fold one.
+ * fold one.  The sources the run reduces are chosen once what the query
+ * reads completely is known, which they must be, and before any of it is
+ * evaluated, since their producers run at their components' turns.
  * Finding what the query reads completely and generating the rules are the
  * rewrite's, and a refusal by the memory limit in either names the query;
  * the evaluations between them name what they plan.
@@ -3528,6 +3797,8 @@ derive_for_rewrite(relic_t *ctx, relic_magic_t *magic,
 
 	note_query_activity(ctx, "rewriting", query->answer);
 	if (relic_magic_find_complete(magic, query) != 0)
+		return (-1);
+	if (relic_reduction_select(ctx, magic, query) != 0)
 		return (-1);
 
 	if (evaluate_schedule(ctx, &ctx->program.rules, &ctx->program.schedule,
@@ -3590,22 +3861,30 @@ answer_from_program(relic_t *ctx, const relic_query_t *query,
  * before everything but an interrupt has stopped being able to fail it, an
  * interrupt does not abandon a rewrite, and a rewrite is abandoned before
  * it is run.
+ *
+ * The run's reduction scope lives exactly as long as the rewrite: the
+ * group run, whose plans may read the scope's summaries, is finished
+ * before the scope ends, and an answer from the whole program has none.
  */
 static int
 answer_through_rewrite(relic_t *ctx, const relic_query_t *query,
     relic_group_run_t *groups, const relic_row_sink_t *rows)
 {
+	relic_reduction_t reduction;
 	relic_magic_t magic;
 	bool abandoned;
 	int status;
 
 	relic_magic_init(&magic, ctx);
+	relic_reduction_begin(&reduction, ctx);
 	status = derive_for_rewrite(ctx, &magic, query, groups);
 	if (status == 0)
 		status = run_query_rule(ctx, &magic.query, query->answer,
 		    groups, rows);
 	abandoned = magic.abandoned;
 	relic_magic_reset(&magic);
+	group_run_finish(ctx, groups);
+	relic_reduction_end(&reduction, ctx);
 
 	if (status != 0 && abandoned) {
 		relic_explain_abandoned_rewrite(ctx, &query->rule,

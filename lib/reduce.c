@@ -1,0 +1,1533 @@
+/*
+ * Copyright (c) 2025-2026 Stanislav Sedov <stas@deglitch.com>
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+#include "config.h"
+
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "internal.h"
+
+/*
+ * The builder of a direct grouped reduction, and the summary it becomes
+ * (lib/reduce.h, specs/design-group-reduction.md).
+ *
+ * A builder keeps one group per distinct key among the rows it takes, in
+ * the order the keys first occur, and in each group the row count and an
+ * accumulator per signature (lib/fold.h).  A row's values are identifiers
+ * the context assigned or values it has not, which the producer's batch
+ * holds pending (lib/exec.h); a key is found by its values, hashed and
+ * compared as values whatever the representation, so a pending string and
+ * the same string assigned would be one key, and a symbol and a string of
+ * the same bytes are two.  Nothing a batch holds outlives it: a key's text
+ * is copied into the builder's key bytes once, when its group is made, and
+ * a min's or a max's text into a buffer of the extreme's own, which the
+ * next extreme reuses, so a group holds its key and its extremes and no
+ * storage that grows with its rows.  Every row is counted against the most
+ * a relation could hold, so that a group's exact sum cannot wrap however
+ * the source's rows were never stored.
+ *
+ * Finishing gives the values the groups retain -- keys, and the extremes
+ * of groups whose extreme has a value -- the identifiers they will keep,
+ * interning those the context lacks in the order of their first
+ * occurrence among the source's rows, and copies the groups into a
+ * summary keyed by identifiers, which is what a fold probes with.  The
+ * summary is laid out and charged before any value is interned, and is
+ * handed to the caller only once every group is in it, so a refusal at
+ * any step leaves no summary, though it may leave values interned, as a
+ * refused insertion leaves the values of the batches before it.  Every
+ * walk finishing makes -- of the groups, of the retained values while
+ * they are sorted and while they are interned -- looks for the interrupt
+ * every RELIC_REDUCE_CHUNK steps, so no step of it grows with the input.
+ */
+
+/*
+ * The most rows one source may reduce: as many as a relation could hold,
+ * so that every group's sum has fewer than 2^32 addends and its exact
+ * total stays far inside the two words that hold it (lib/arith.h).  A test
+ * build lowers it to reach the refusal.
+ */
+#ifndef RELIC_REDUCE_ROWS_MAX
+#define	RELIC_REDUCE_ROWS_MAX	((uint64_t)RELIC_TUPLE_MAX)
+#endif
+
+/*
+ * The steps a walk finishing makes between looks for the interrupt, and
+ * the retained values interned as one batch.
+ */
+#define	RELIC_REDUCE_CHUNK	4096u
+
+typedef struct relic_extreme relic_extreme_t;
+typedef struct relic_groups relic_groups_t;
+typedef struct relic_held relic_held_t;
+typedef struct relic_retained relic_retained_t;
+typedef struct relic_seen relic_seen_t;
+
+/*
+ * A value a builder holds: an identifier the context had assigned, or a
+ * value it had not, an integer or a symbol's or a string's `length` bytes,
+ * a key's at `offset` in the builder's key bytes and an extreme's at the
+ * start of the extreme's buffer.
+ */
+struct relic_held {
+	union {
+		relic_dom_t	dom;		/* assigned */
+		int64_t		integer;	/* RELIC_INTEGER */
+		size_t		offset;		/* a key's text */
+	}			u;
+	size_t			length;		/* RELIC_SYMBOL, RELIC_STRING */
+	enum relic_type		type;
+	bool			assigned;
+};
+
+/*
+ * The extreme of one group's min or max: the value, held as above, the
+ * buffer an owned text is copied into, `capacity` bytes the extremes the
+ * group holds in turn reuse, and the ordinal of the row that holds it,
+ * the first of equal ones.
+ */
+struct relic_extreme {
+	char		*bytes;
+	size_t		 capacity;
+	relic_held_t	 value;
+	uint64_t	 ordinal;
+};
+
+/*
+ * The groups' arrays, `capacity` groups each, laid out in one block: each
+ * group's `key_count` key values, its row count, the ordinal of its first
+ * row, the hash of its key, and `signature_count` accumulators and
+ * extremes, one per signature; a count's and a sum's extreme is unused.
+ */
+struct relic_groups {
+	relic_held_t		*keys;
+	uint64_t		*rows;
+	uint64_t		*first;
+	uint32_t		*hashes;
+	relic_fold_state_t	*states;
+	relic_extreme_t		*extremes;
+};
+
+/*
+ * A row's value as a builder reads it: a view of it, and its identifier,
+ * or zero when the context has none.
+ */
+struct relic_seen {
+	relic_value_view_t	view;
+	relic_dom_t		dom;
+};
+
+/*
+ * A value finishing gives an identifier to: the held value, the bytes it
+ * is held in, and where it first occurs, the ordinal of the row and the
+ * column, which is what orders the values interned.
+ */
+struct relic_retained {
+	relic_held_t	*held;
+	const char	*bytes;
+	uint64_t	 ordinal;
+	uint16_t	 column;
+};
+
+/*
+ * A builder.  `signatures` are the source's, borrowed from the scope,
+ * `key_columns` the source columns of its key in increasing order, and
+ * `table` finds a group by its key's hash, holding group positions plus
+ * one.  `charged` is what it holds of the account now, `peak` the most it
+ * has, and `rows_seen` the rows it has taken, each the ordinal of the
+ * next.
+ */
+struct relic_reducer {
+	const relic_reduce_signature_t	*signatures;
+	relic_groups_t			 groups;
+	void				*block;
+	char				*key_bytes;
+	relic_idtab_t			 table;
+	size_t				 signature_count;
+	size_t				 group_count;
+	size_t				 group_capacity;
+	size_t				 block_bytes;
+	size_t				 key_bytes_used;
+	size_t				 key_bytes_capacity;
+	size_t				 charged;
+	size_t				 peak;
+	uint64_t			 rows_seen;
+	uint64_t			 hash_seed;
+	uint16_t			 key_columns[RELIC_MAX_ARITY];
+	uint16_t			 key_count;
+	uint16_t			 arity;
+};
+
+/*
+ * A summary: `group_count` groups, each's key identifiers, row count, and
+ * `signature_count` accumulators and extremes, in the order of the keys'
+ * first occurrence, and `table`, which finds a group by its key and is
+ * laid out in the same block, sized for exactly the groups it holds.
+ * `bytes` is the block's, charged to the account until it is destroyed.
+ */
+struct relic_summary {
+	relic_dom_t		*keys;
+	uint64_t		*rows;
+	relic_fold_state_t	*states;
+	relic_dom_t		*extremes;
+	void			*block;
+	relic_idtab_t		 table;
+	size_t			 bytes;
+	size_t			 group_count;
+	size_t			 signature_count;
+	uint64_t		 hash_seed;
+	uint16_t		 key_count;
+};
+
+static bool	 charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
+static void	 release(relic_t *ctx, relic_reducer_t *reducer, size_t bytes);
+static size_t	 lay_out_groups(const relic_reducer_t *reducer,
+		    size_t capacity, void *memory, relic_groups_t *groups);
+static int	 grow_groups(relic_t *ctx, relic_reducer_t *reducer);
+static int	 reserve_key_bytes(relic_t *ctx, relic_reducer_t *reducer,
+		    size_t length);
+static uint32_t	 rehash_group(uint32_t id, void *owner);
+static void	 see_value(const relic_t *ctx,
+		    const relic_reduce_batch_t *batch, relic_dom_t value,
+		    relic_seen_t *seen);
+static uint32_t	 key_hash(const relic_reducer_t *reducer,
+		    const relic_seen_t *key);
+static void	 held_view(const relic_t *ctx, const char *bytes,
+		    const relic_held_t *held, relic_value_view_t *view);
+static bool	 views_equal(const relic_value_view_t *left,
+		    const relic_value_view_t *right);
+static bool	 key_matches(const relic_t *ctx,
+		    const relic_reducer_t *reducer, size_t group,
+		    const relic_seen_t *key);
+static size_t	 find_group(const relic_t *ctx,
+		    const relic_reducer_t *reducer, uint32_t hash,
+		    const relic_seen_t *key);
+static int	 add_group(relic_t *ctx, relic_reducer_t *reducer,
+		    uint32_t hash, const relic_seen_t *key, size_t *groupp);
+static void	 hold(relic_held_t *held, const relic_seen_t *seen,
+		    size_t offset);
+static int	 retain_extreme(relic_t *ctx, relic_reducer_t *reducer,
+		    relic_extreme_t *extreme, const relic_seen_t *seen);
+static int	 take_row(relic_t *ctx, relic_reducer_t *reducer,
+		    const relic_reduce_batch_t *batch, const relic_dom_t *row);
+static void	 refuse_rows(relic_t *ctx, const relic_relation_t *relation);
+static int	 poll_walk(relic_t *ctx, const relic_relation_t *relation,
+		    size_t step);
+static int	 count_retained(relic_t *ctx, const relic_reducer_t *reducer,
+		    const relic_relation_t *relation, size_t *countp);
+static int	 collect_retained(relic_t *ctx, relic_reducer_t *reducer,
+		    const relic_relation_t *relation,
+		    relic_retained_t *retained);
+static bool	 retained_before(const relic_retained_t *left,
+		    const relic_retained_t *right);
+static int	 sort_retained(relic_t *ctx, const relic_relation_t *relation,
+		    relic_retained_t *retained, relic_retained_t *spare,
+		    size_t count, relic_retained_t **sortedp);
+static int	 publish(relic_t *ctx, relic_reducer_t *reducer,
+		    const relic_relation_t *relation);
+static int	 intern_retained(relic_t *ctx, relic_reducer_t *reducer,
+		    const relic_relation_t *relation,
+		    relic_retained_t *retained, size_t count);
+static size_t	 retained_text(const relic_retained_t *retained,
+		    size_t count);
+static void	 describe_retained(const relic_retained_t *retained,
+		    size_t count, relic_pending_t *pending, char *text);
+static int	 intern_chunk(relic_t *ctx, relic_reducer_t *reducer,
+		    const relic_relation_t *relation,
+		    relic_retained_t *retained, size_t count);
+static size_t	 lay_out_summary(relic_summary_t *summary, void *memory);
+static int	 open_summary(relic_t *ctx, relic_reducer_t *reducer,
+		    relic_summary_t **summaryp);
+static void	 discard_summary(relic_t *ctx, relic_reducer_t *reducer,
+		    relic_summary_t *summary);
+static int	 fill_summary(relic_t *ctx, const relic_reducer_t *reducer,
+		    const relic_relation_t *relation,
+		    relic_summary_t *summary);
+
+/*
+ * Charge `bytes` more to the account for the builder, reporting the
+ * refusal: the memory limit's, which the account records, as every
+ * charged arena's is reported.
+ */
+static bool
+charge(relic_t *ctx, relic_reducer_t *reducer, size_t bytes)
+{
+	if (!relic_account_charge(&ctx->account, bytes)) {
+		relic_diag_no_memory(ctx);
+		return (false);
+	}
+
+	reducer->charged += bytes;
+	if (reducer->charged > reducer->peak)
+		reducer->peak = reducer->charged;
+
+	return (true);
+}
+
+static void
+release(relic_t *ctx, relic_reducer_t *reducer, size_t bytes)
+{
+	assert(bytes <= reducer->charged);
+	relic_account_release(&ctx->account, bytes);
+	reducer->charged -= bytes;
+}
+
+int
+relic_reducer_open(relic_t *ctx, const relic_reduced_source_t *source,
+    uint16_t arity, relic_reducer_t **reducerp)
+{
+	relic_reducer_t *reducer;
+	uint16_t column;
+
+	*reducerp = NULL;
+	if (!relic_account_charge(&ctx->account, sizeof(*reducer))) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	reducer = calloc(1, sizeof(*reducer));
+	if (reducer == NULL) {
+		relic_account_release(&ctx->account, sizeof(*reducer));
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	reducer->charged = sizeof(*reducer);
+	reducer->peak = reducer->charged;
+	reducer->signatures = source->signatures;
+	reducer->signature_count = source->signature_count;
+	reducer->hash_seed = ctx->hash_seed;
+	reducer->arity = arity;
+	for (column = 0; column < arity; column++) {
+		if ((source->key_mask & (UINT32_C(1) << column)) != 0)
+			reducer->key_columns[reducer->key_count++] = column;
+	}
+	relic_idtab_init(&reducer->table, true);
+
+	*reducerp = reducer;
+
+	return (0);
+}
+
+/*
+ * Every extreme's buffer, the key bytes, the table, the groups' block and
+ * the builder itself are given back, which is everything it charged.
+ */
+void
+relic_reducer_close(relic_t *ctx, relic_reducer_t *reducer)
+{
+	size_t extremes;
+	size_t i;
+
+	if (reducer == NULL)
+		return;
+
+	extremes = reducer->group_count * reducer->signature_count;
+	for (i = 0; i < extremes; i++) {
+		free(reducer->groups.extremes[i].bytes);
+		release(ctx, reducer, reducer->groups.extremes[i].capacity);
+	}
+
+	release(ctx, reducer, relic_idtab_bytes(&reducer->table));
+	relic_idtab_reset(&reducer->table);
+	free(reducer->key_bytes);
+	release(ctx, reducer, reducer->key_bytes_capacity);
+	free(reducer->block);
+	release(ctx, reducer, reducer->block_bytes);
+
+	assert(reducer->charged == sizeof(*reducer));
+	relic_account_release(&ctx->account, sizeof(*reducer));
+	free(reducer);
+}
+
+size_t
+relic_reducer_peak(const relic_reducer_t *reducer)
+{
+	return (reducer->peak);
+}
+
+/*
+ * Lay the groups' arrays out for `capacity` groups from `memory`, or only
+ * measure them when `memory` is NULL (relic_block_piece()), and return
+ * their bytes, SIZE_MAX when a size cannot count them.
+ */
+static size_t
+lay_out_groups(const relic_reducer_t *reducer, size_t capacity,
+    void *memory, relic_groups_t *groups)
+{
+	size_t per_signature;
+	size_t bytes;
+	char *cursor;
+
+	cursor = memory;
+	bytes = 0;
+	per_signature = relic_saturating_product(capacity,
+	    reducer->signature_count);
+
+	groups->keys = relic_block_piece(&cursor, &bytes,
+	    relic_saturating_product(capacity, reducer->key_count),
+	    sizeof(*groups->keys));
+	groups->rows = relic_block_piece(&cursor, &bytes, capacity,
+	    sizeof(*groups->rows));
+	groups->first = relic_block_piece(&cursor, &bytes, capacity,
+	    sizeof(*groups->first));
+	groups->hashes = relic_block_piece(&cursor, &bytes, capacity,
+	    sizeof(*groups->hashes));
+	groups->states = relic_block_piece(&cursor, &bytes, per_signature,
+	    sizeof(*groups->states));
+	groups->extremes = relic_block_piece(&cursor, &bytes, per_signature,
+	    sizeof(*groups->extremes));
+
+	return (bytes);
+}
+
+/*
+ * Give the groups room for one more, in a new block charged before it is
+ * allocated, the old one given back once the groups are copied out of
+ * it.
+ */
+static int
+grow_groups(relic_t *ctx, relic_reducer_t *reducer)
+{
+	relic_groups_t grown;
+	relic_groups_t *old;
+	size_t capacity;
+	size_t per_signature;
+	size_t bytes;
+	void *block;
+
+	capacity = relic_grow_array_capacity(reducer->group_capacity,
+	    reducer->group_count + 1);
+	bytes = capacity == 0 ? SIZE_MAX :
+	    lay_out_groups(reducer, capacity, NULL, &grown);
+	if (bytes == SIZE_MAX) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!charge(ctx, reducer, bytes))
+		return (-1);
+
+	block = malloc(bytes);
+	if (block == NULL) {
+		release(ctx, reducer, bytes);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	(void)lay_out_groups(reducer, capacity, block, &grown);
+
+	old = &reducer->groups;
+	per_signature = reducer->group_count * reducer->signature_count;
+	if (reducer->group_count > 0) {
+		bcopy(old->keys, grown.keys, reducer->group_count *
+		    reducer->key_count * sizeof(*grown.keys));
+		bcopy(old->rows, grown.rows, reducer->group_count *
+		    sizeof(*grown.rows));
+		bcopy(old->first, grown.first, reducer->group_count *
+		    sizeof(*grown.first));
+		bcopy(old->hashes, grown.hashes, reducer->group_count *
+		    sizeof(*grown.hashes));
+		bcopy(old->states, grown.states, per_signature *
+		    sizeof(*grown.states));
+		bcopy(old->extremes, grown.extremes, per_signature *
+		    sizeof(*grown.extremes));
+	}
+
+	free(reducer->block);
+	release(ctx, reducer, reducer->block_bytes);
+	reducer->block = block;
+	reducer->block_bytes = bytes;
+	reducer->groups = grown;
+	reducer->group_capacity = capacity;
+
+	return (0);
+}
+
+/*
+ * Give the key bytes room for `length` more.
+ */
+static int
+reserve_key_bytes(relic_t *ctx, relic_reducer_t *reducer, size_t length)
+{
+	size_t capacity;
+	size_t needed;
+	char *bytes;
+
+	if (length <= reducer->key_bytes_capacity - reducer->key_bytes_used)
+		return (0);
+
+	needed = relic_saturating_sum(reducer->key_bytes_used, length);
+	capacity = needed == SIZE_MAX ? 0 :
+	    relic_grow_array_capacity(reducer->key_bytes_capacity, needed);
+	if (capacity == 0) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!charge(ctx, reducer, capacity - reducer->key_bytes_capacity))
+		return (-1);
+
+	bytes = realloc(reducer->key_bytes, capacity);
+	if (bytes == NULL) {
+		release(ctx, reducer, capacity - reducer->key_bytes_capacity);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	reducer->key_bytes = bytes;
+	reducer->key_bytes_capacity = capacity;
+
+	return (0);
+}
+
+static uint32_t
+rehash_group(uint32_t id, void *owner)
+{
+	const relic_reducer_t *reducer;
+
+	reducer = owner;
+
+	return (reducer->groups.hashes[id - 1]);
+}
+
+/*
+ * The value a row's column holds: an identifier, which the context
+ * assigned, or a pending marker, which names the batch's pending value
+ * one less than it.  A pending string or symbol borrows the batch's bytes;
+ * an empty one points at an addressable empty string instead, since the
+ * batch's bytes may be none.  The executor that filled the batch made
+ * every marker name one of its values and every text lie in its bytes.
+ */
+static void
+see_value(const relic_t *ctx, const relic_reduce_batch_t *batch,
+    relic_dom_t value, relic_seen_t *seen)
+{
+	const relic_pending_t *held;
+	bool known RELIC_UNUSED;
+
+	bzero(seen, sizeof(*seen));
+	if ((value & RELIC_DOM_TYPE_MASK) != 0) {
+		seen->dom = value;
+		known = relic_value_view(ctx, value, &seen->view);
+		assert(known);
+		return;
+	}
+
+	assert(value >= 1 && value <= batch->pending_count);
+	held = &batch->pending[value - 1];
+	seen->view.bytes = "";
+	switch (held->kind) {
+	case RELIC_PENDING_INTEGER:
+		seen->view.type = RELIC_INTEGER;
+		seen->view.integer = held->u.integer;
+		return;
+	case RELIC_PENDING_TEXT:
+		seen->view.type = RELIC_STRING;
+		break;
+	case RELIC_PENDING_SYMBOL:
+		seen->view.type = RELIC_SYMBOL;
+		break;
+	}
+
+	assert(held->u.text.offset <= batch->byte_count &&
+	    held->u.text.length <= batch->byte_count - held->u.text.offset);
+	seen->view.length = held->u.text.length;
+	if (held->u.text.length > 0)
+		seen->view.bytes = batch->bytes + held->u.text.offset;
+}
+
+/*
+ * The hash of a key, from each value's type and contents, so that equal
+ * values hash alike whether or not the context has assigned them.
+ */
+static uint32_t
+key_hash(const relic_reducer_t *reducer, const relic_seen_t *key)
+{
+	uint32_t words[2 * RELIC_MAX_ARITY];
+	const relic_value_view_t *view;
+	uint16_t k;
+
+	for (k = 0; k < reducer->key_count; k++) {
+		view = &key[k].view;
+		words[2 * k] = (uint32_t)view->type;
+		words[2 * k + 1] = view->type == RELIC_INTEGER ?
+		    relic_hash_int64(reducer->hash_seed, view->integer) :
+		    relic_hash_bytes(reducer->hash_seed, view->bytes,
+		    view->length);
+	}
+
+	return (relic_hash_words(reducer->hash_seed, words,
+	    2 * (size_t)reducer->key_count));
+}
+
+/*
+ * A view of a held value, whose text, if owned, is at `bytes` plus its
+ * offset.
+ */
+static void
+held_view(const relic_t *ctx, const char *bytes, const relic_held_t *held,
+    relic_value_view_t *view)
+{
+	bool known RELIC_UNUSED;
+
+	if (held->assigned) {
+		known = relic_value_view(ctx, held->u.dom, view);
+		assert(known);
+		return;
+	}
+
+	bzero(view, sizeof(*view));
+	view->type = held->type;
+	view->bytes = "";
+	if (held->type == RELIC_INTEGER) {
+		view->integer = held->u.integer;
+		return;
+	}
+
+	view->length = held->length;
+	if (held->length > 0)
+		view->bytes = bytes + held->u.offset;
+}
+
+static bool
+views_equal(const relic_value_view_t *left, const relic_value_view_t *right)
+{
+	if (left->type != right->type)
+		return (false);
+
+	if (left->type == RELIC_INTEGER)
+		return (left->integer == right->integer);
+
+	return (left->length == right->length &&
+	    bcmp(left->bytes, right->bytes, left->length) == 0);
+}
+
+/*
+ * Whether group `group`'s key is `key`: two identifiers are the same value
+ * exactly when they are equal, and any other pair is compared as values.
+ */
+static bool
+key_matches(const relic_t *ctx, const relic_reducer_t *reducer,
+    size_t group, const relic_seen_t *key)
+{
+	const relic_held_t *held;
+	relic_value_view_t view;
+	uint16_t k;
+
+	held = &reducer->groups.keys[group * reducer->key_count];
+	for (k = 0; k < reducer->key_count; k++) {
+		if (held[k].assigned && key[k].dom != 0) {
+			if (held[k].u.dom != key[k].dom)
+				return (false);
+			continue;
+		}
+
+		held_view(ctx, reducer->key_bytes, &held[k], &view);
+		if (!views_equal(&view, &key[k].view))
+			return (false);
+	}
+
+	return (true);
+}
+
+/*
+ * The group whose key is `key`, of hash `hash`, or SIZE_MAX.
+ */
+static size_t
+find_group(const relic_t *ctx, const relic_reducer_t *reducer,
+    uint32_t hash, const relic_seen_t *key)
+{
+	relic_idprobe_t probe;
+	uint32_t id;
+
+	relic_idprobe_open(&probe, &reducer->table, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		if (reducer->groups.hashes[id - 1] == hash &&
+		    key_matches(ctx, reducer, id - 1, key))
+			return (id - 1);
+	}
+
+	return (SIZE_MAX);
+}
+
+/*
+ * Hold a row's value: its identifier, or its contents, a text's bytes at
+ * `offset` in whatever holds them.
+ */
+static void
+hold(relic_held_t *held, const relic_seen_t *seen, size_t offset)
+{
+	bzero(held, sizeof(*held));
+	held->type = seen->view.type;
+	if (seen->dom != 0) {
+		held->assigned = true;
+		held->u.dom = seen->dom;
+		return;
+	}
+
+	if (seen->view.type == RELIC_INTEGER) {
+		held->u.integer = seen->view.integer;
+		return;
+	}
+
+	held->u.offset = offset;
+	held->length = seen->view.length;
+}
+
+/*
+ * Make a group for `key`, of hash `hash`, with no rows yet, every room it
+ * needs made before anything is written: the groups', the table's, and
+ * the key bytes' for the key's texts the context has not assigned.
+ */
+static int
+add_group(relic_t *ctx, relic_reducer_t *reducer, uint32_t hash,
+    const relic_seen_t *key, size_t *groupp)
+{
+	relic_held_t *held;
+	size_t text;
+	size_t table_growth;
+	size_t group;
+	size_t s;
+	uint16_t k;
+
+	if (reducer->group_count == reducer->group_capacity &&
+	    grow_groups(ctx, reducer) != 0)
+		return (-1);
+
+	if (!relic_idtab_has_room(&reducer->table, 1)) {
+		table_growth = relic_idtab_bytes_after_reserve(&reducer->table,
+		    1) - relic_idtab_bytes(&reducer->table);
+		if (!charge(ctx, reducer, table_growth))
+			return (-1);
+		if (relic_idtab_reserve(&reducer->table, 1, rehash_group,
+		    reducer) != 0) {
+			release(ctx, reducer, table_growth);
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+	}
+
+	text = 0;
+	for (k = 0; k < reducer->key_count; k++) {
+		if (key[k].dom == 0 && key[k].view.type != RELIC_INTEGER)
+			text = relic_saturating_sum(text, key[k].view.length);
+	}
+	if (reserve_key_bytes(ctx, reducer, text) != 0)
+		return (-1);
+
+	group = reducer->group_count;
+	held = &reducer->groups.keys[group * reducer->key_count];
+	for (k = 0; k < reducer->key_count; k++) {
+		hold(&held[k], &key[k], reducer->key_bytes_used);
+		if (key[k].dom == 0 && key[k].view.length > 0) {
+			bcopy(key[k].view.bytes, reducer->key_bytes +
+			    reducer->key_bytes_used, key[k].view.length);
+			reducer->key_bytes_used += key[k].view.length;
+		}
+	}
+	reducer->groups.rows[group] = 0;
+	reducer->groups.first[group] = reducer->rows_seen;
+	reducer->groups.hashes[group] = hash;
+	for (s = 0; s < reducer->signature_count; s++) {
+		relic_fold_init(&reducer->groups.states[
+		    group * reducer->signature_count + s]);
+		bzero(&reducer->groups.extremes[
+		    group * reducer->signature_count + s],
+		    sizeof(relic_extreme_t));
+	}
+
+	reducer->group_count++;
+	relic_idtab_place(&reducer->table, hash, (uint32_t)reducer->group_count);
+	*groupp = group;
+
+	return (0);
+}
+
+/*
+ * Make a row's value its group's extreme, at the row being taken: its
+ * identifier, or its contents, an owned text copied into the extreme's
+ * buffer, which grows only to the longest text it has held.
+ */
+static int
+retain_extreme(relic_t *ctx, relic_reducer_t *reducer,
+    relic_extreme_t *extreme, const relic_seen_t *seen)
+{
+	size_t capacity;
+	char *bytes;
+
+	if (seen->dom == 0 && seen->view.type != RELIC_INTEGER &&
+	    seen->view.length > extreme->capacity) {
+		capacity = relic_grow_array_capacity(extreme->capacity,
+		    seen->view.length);
+		if (capacity == 0) {
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+		if (!charge(ctx, reducer, capacity - extreme->capacity))
+			return (-1);
+		bytes = realloc(extreme->bytes, capacity);
+		if (bytes == NULL) {
+			release(ctx, reducer, capacity - extreme->capacity);
+			relic_diag_no_memory(ctx);
+			return (-1);
+		}
+		extreme->bytes = bytes;
+		extreme->capacity = capacity;
+	}
+
+	hold(&extreme->value, seen, 0);
+	if (seen->dom == 0 && seen->view.length > 0)
+		bcopy(seen->view.bytes, extreme->bytes, seen->view.length);
+	extreme->ordinal = reducer->rows_seen;
+
+	return (0);
+}
+
+/*
+ * Report that a source has more rows than a relation could hold, as the
+ * relation store reports a relation it cannot grow.
+ */
+static void
+refuse_rows(relic_t *ctx, const relic_relation_t *relation)
+{
+	char described[RELIC_PRED_TEXT_MAX];
+
+	relic_diag_error(ctx, RELIC_ERROR_LIMIT, NULL,
+	    "the relation of %s is too large to grow",
+	    relic_relation_describe(ctx, relation, described,
+	    sizeof(described)));
+}
+
+int
+relic_reducer_take(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_relation_t *relation, const relic_reduce_batch_t *batch,
+    size_t *takenp)
+{
+	size_t i;
+
+	for (i = 0; i < batch->count; i++) {
+		*takenp = i;
+		if (reducer->rows_seen >= RELIC_REDUCE_ROWS_MAX) {
+			refuse_rows(ctx, relation);
+			return (-1);
+		}
+		if (take_row(ctx, reducer, batch,
+		    &batch->rows[i * reducer->arity]) != 0)
+			return (-1);
+	}
+	*takenp = batch->count;
+
+	return (0);
+}
+
+/*
+ * Reduce one row into the group of its key, made when it is the key's
+ * first: its row count, and each signature's accumulator, a min's or a
+ * max's extreme replaced when the row's value is the new one.
+ */
+static int
+take_row(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_reduce_batch_t *batch, const relic_dom_t *row)
+{
+	relic_seen_t key[RELIC_MAX_ARITY];
+	const relic_reduce_signature_t *signature;
+	relic_value_view_t extreme_view;
+	relic_extreme_t *extreme;
+	relic_fold_state_t *state;
+	relic_seen_t value;
+	uint64_t rows;
+	uint32_t hash;
+	size_t group;
+	size_t at;
+	size_t s;
+	uint16_t k;
+
+	for (k = 0; k < reducer->key_count; k++)
+		see_value(ctx, batch, row[reducer->key_columns[k]], &key[k]);
+	hash = key_hash(reducer, key);
+	group = find_group(ctx, reducer, hash, key);
+	if (group == SIZE_MAX &&
+	    add_group(ctx, reducer, hash, key, &group) != 0)
+		return (-1);
+
+	rows = reducer->groups.rows[group];
+	for (s = 0; s < reducer->signature_count; s++) {
+		signature = &reducer->signatures[s];
+		if (signature->fn == RELIC_AGG_COUNT)
+			continue;
+
+		at = group * reducer->signature_count + s;
+		state = &reducer->groups.states[at];
+		extreme = &reducer->groups.extremes[at];
+		see_value(ctx, batch, row[signature->column], &value);
+		held_view(ctx, extreme->bytes, &extreme->value, &extreme_view);
+
+		switch (relic_fold_add(signature->fn, state, rows,
+		    &extreme_view, &value.view)) {
+		case RELIC_FOLD_REPLACED:
+			if (retain_extreme(ctx, reducer, extreme, &value) != 0)
+				return (-1);
+			break;
+		case RELIC_FOLD_KEPT:
+		case RELIC_FOLD_TIED:
+		case RELIC_FOLD_INVALIDATED:
+			break;
+		}
+	}
+
+	reducer->groups.rows[group] = rows + 1;
+	reducer->rows_seen++;
+
+	return (0);
+}
+
+/*
+ * Look for the interrupt before step `step` of a walk finishing makes,
+ * once every RELIC_REDUCE_CHUNK steps.
+ */
+static int
+poll_walk(relic_t *ctx, const relic_relation_t *relation, size_t step)
+{
+	if (step == 0 || step % RELIC_REDUCE_CHUNK != 0)
+		return (0);
+
+	return (relic_refuse_interrupted(ctx, "deriving", relation));
+}
+
+/*
+ * Count into *countp the values the groups retain that the context has
+ * not assigned: every such key value, and the extreme of every min or max
+ * whose group gives it a value.  An extreme the rows' types left with none
+ * is never read, and is not retained.
+ */
+static int
+count_retained(relic_t *ctx, const relic_reducer_t *reducer,
+    const relic_relation_t *relation, size_t *countp)
+{
+	const relic_fold_state_t *state;
+	const relic_extreme_t *extreme;
+	size_t count;
+	size_t at;
+	size_t g;
+	size_t s;
+	uint16_t k;
+
+	count = 0;
+	for (g = 0; g < reducer->group_count; g++) {
+		if (poll_walk(ctx, relation, g) != 0)
+			return (-1);
+		for (k = 0; k < reducer->key_count; k++) {
+			if (!reducer->groups.keys[g * reducer->key_count +
+			    k].assigned)
+				count++;
+		}
+		for (s = 0; s < reducer->signature_count; s++) {
+			at = g * reducer->signature_count + s;
+			state = &reducer->groups.states[at];
+			extreme = &reducer->groups.extremes[at];
+			if ((reducer->signatures[s].fn == RELIC_AGG_MIN ||
+			    reducer->signatures[s].fn == RELIC_AGG_MAX) &&
+			    !state->invalid && !extreme->value.assigned)
+				count++;
+		}
+	}
+	*countp = count;
+
+	return (0);
+}
+
+/*
+ * List what count_retained() counts, each with where it first occurs: a
+ * key value at its group's first row, an extreme at the row that holds
+ * it, in the column each is of.
+ */
+static int
+collect_retained(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_relation_t *relation, relic_retained_t *retained)
+{
+	relic_extreme_t *extreme;
+	relic_held_t *held;
+	size_t count;
+	size_t at;
+	size_t g;
+	size_t s;
+	uint16_t k;
+
+	count = 0;
+	for (g = 0; g < reducer->group_count; g++) {
+		if (poll_walk(ctx, relation, g) != 0)
+			return (-1);
+		for (k = 0; k < reducer->key_count; k++) {
+			held = &reducer->groups.keys[g * reducer->key_count +
+			    k];
+			if (held->assigned)
+				continue;
+			retained[count].held = held;
+			retained[count].bytes = reducer->key_bytes;
+			retained[count].ordinal = reducer->groups.first[g];
+			retained[count].column = reducer->key_columns[k];
+			count++;
+		}
+		for (s = 0; s < reducer->signature_count; s++) {
+			at = g * reducer->signature_count + s;
+			extreme = &reducer->groups.extremes[at];
+			if ((reducer->signatures[s].fn != RELIC_AGG_MIN &&
+			    reducer->signatures[s].fn != RELIC_AGG_MAX) ||
+			    reducer->groups.states[at].invalid ||
+			    extreme->value.assigned)
+				continue;
+			retained[count].held = &extreme->value;
+			retained[count].bytes = extreme->bytes;
+			retained[count].ordinal = extreme->ordinal;
+			retained[count].column = reducer->signatures[s].column;
+			count++;
+		}
+	}
+
+	return (0);
+}
+
+static bool
+retained_before(const relic_retained_t *left, const relic_retained_t *right)
+{
+	if (left->ordinal != right->ordinal)
+		return (left->ordinal < right->ordinal);
+
+	return (left->column < right->column);
+}
+
+/*
+ * Sort the retained values by where they first occur, by a bottom-up merge
+ * sort between `retained` and `spare`, each of `count`, stable so that the
+ * order of two values of one row and column -- a key value and an extreme
+ * of the same value -- is the order they were listed.  *sortedp is
+ * whichever array holds the result.  Each pass writes every value once,
+ * the interrupt looked for as it does.
+ */
+static int
+sort_retained(relic_t *ctx, const relic_relation_t *relation,
+    relic_retained_t *retained, relic_retained_t *spare, size_t count,
+    relic_retained_t **sortedp)
+{
+	relic_retained_t *from;
+	relic_retained_t *to;
+	relic_retained_t *swap;
+	size_t width;
+	size_t start;
+	size_t middle;
+	size_t end;
+	size_t left;
+	size_t right;
+	size_t out;
+
+	from = retained;
+	to = spare;
+	for (width = 1; width < count; width *= 2) {
+		for (start = 0; start < count; start += 2 * width) {
+			middle = count - start < width ? count : start + width;
+			end = count - middle < width ? count : middle + width;
+			left = start;
+			right = middle;
+			for (out = start; out < end; out++) {
+				if (poll_walk(ctx, relation, out) != 0)
+					return (-1);
+				if (left < middle && (right == end ||
+				    !retained_before(&from[right],
+				    &from[left])))
+					to[out] = from[left++];
+				else
+					to[out] = from[right++];
+			}
+		}
+
+		swap = from;
+		from = to;
+		to = swap;
+	}
+
+	*sortedp = from;
+
+	return (0);
+}
+
+/*
+ * Lay a summary's block out from `memory`, or only measure it when
+ * `memory` is NULL, for the groups and signatures it records, and return
+ * its bytes, SIZE_MAX when a size cannot count them.  The key table comes
+ * last, sized for exactly the groups, and is placed once.
+ */
+static size_t
+lay_out_summary(relic_summary_t *summary, void *memory)
+{
+	size_t per_signature;
+	size_t table_bytes;
+	size_t bytes;
+	char *cursor;
+	void *table;
+
+	cursor = memory;
+	bytes = 0;
+	per_signature = relic_saturating_product(summary->group_count,
+	    summary->signature_count);
+	table_bytes = relic_idtab_bytes_for(true, summary->group_count);
+
+	summary->keys = relic_block_piece(&cursor, &bytes,
+	    relic_saturating_product(summary->group_count,
+	    summary->key_count), sizeof(*summary->keys));
+	summary->rows = relic_block_piece(&cursor, &bytes,
+	    summary->group_count, sizeof(*summary->rows));
+	summary->states = relic_block_piece(&cursor, &bytes, per_signature,
+	    sizeof(*summary->states));
+	summary->extremes = relic_block_piece(&cursor, &bytes, per_signature,
+	    sizeof(*summary->extremes));
+	table = relic_block_piece(&cursor, &bytes, table_bytes, 1);
+	if (table != NULL && summary->group_count > 0)
+		relic_idtab_init_given(&summary->table, true,
+		    summary->group_count, table);
+
+	return (table_bytes == SIZE_MAX ? SIZE_MAX : bytes);
+}
+
+/*
+ * Make an empty summary of the builder's shape, its block allocated and
+ * charged to the builder, which holds the charge, and so counts it in
+ * its peak, until relic_reducer_finish() hands the summary over.
+ */
+static int
+open_summary(relic_t *ctx, relic_reducer_t *reducer,
+    relic_summary_t **summaryp)
+{
+	relic_summary_t *summary;
+	size_t bytes;
+
+	*summaryp = NULL;
+	summary = calloc(1, sizeof(*summary));
+	if (summary == NULL) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	summary->group_count = reducer->group_count;
+	summary->signature_count = reducer->signature_count;
+	summary->key_count = reducer->key_count;
+	summary->hash_seed = reducer->hash_seed;
+	relic_idtab_init(&summary->table, true);
+
+	bytes = relic_saturating_sum(lay_out_summary(summary, NULL),
+	    sizeof(*summary));
+	if (bytes == SIZE_MAX) {
+		free(summary);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!charge(ctx, reducer, bytes)) {
+		free(summary);
+		return (-1);
+	}
+
+	summary->block = malloc(bytes - sizeof(*summary));
+	if (summary->block == NULL) {
+		release(ctx, reducer, bytes);
+		free(summary);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	summary->bytes = bytes;
+	(void)lay_out_summary(summary, summary->block);
+
+	*summaryp = summary;
+
+	return (0);
+}
+
+/*
+ * Destroy a summary the builder still holds the charge of, one whose
+ * finishing was refused.
+ */
+static void
+discard_summary(relic_t *ctx, relic_reducer_t *reducer,
+    relic_summary_t *summary)
+{
+	free(summary->block);
+	release(ctx, reducer, summary->bytes);
+	free(summary);
+}
+
+void
+relic_summary_destroy(relic_t *ctx, relic_summary_t *summary)
+{
+	if (summary == NULL)
+		return;
+
+	free(summary->block);
+	relic_account_release(&ctx->account, summary->bytes);
+	free(summary);
+}
+
+/*
+ * Copy the builder's groups into the summary, every value they retain
+ * holding its identifier by now, and place each group in the key table.
+ */
+static int
+fill_summary(relic_t *ctx, const relic_reducer_t *reducer,
+    const relic_relation_t *relation, relic_summary_t *summary)
+{
+	const relic_extreme_t *extreme;
+	const relic_held_t *held;
+	relic_dom_t *key;
+	uint32_t hash;
+	size_t at;
+	size_t g;
+	size_t s;
+	uint16_t k;
+
+	for (g = 0; g < reducer->group_count; g++) {
+		if (poll_walk(ctx, relation, g) != 0)
+			return (-1);
+		key = &summary->keys[g * summary->key_count];
+		held = &reducer->groups.keys[g * reducer->key_count];
+		for (k = 0; k < reducer->key_count; k++) {
+			assert(held[k].assigned);
+			key[k] = held[k].u.dom;
+		}
+		summary->rows[g] = reducer->groups.rows[g];
+
+		for (s = 0; s < reducer->signature_count; s++) {
+			at = g * reducer->signature_count + s;
+			extreme = &reducer->groups.extremes[at];
+			summary->states[at] = reducer->groups.states[at];
+			summary->extremes[at] = extreme->value.assigned ?
+			    extreme->value.u.dom : 0;
+		}
+
+		hash = relic_hash_words(summary->hash_seed, key,
+		    summary->key_count);
+		relic_idtab_place(&summary->table, hash, (uint32_t)(g + 1));
+	}
+
+	return (0);
+}
+
+/*
+ * The summary is charged to the builder from when it is opened, so the
+ * builder's peak counts it beside everything finishing holds, and its
+ * charge passes to the summary only once it is whole: relic_summary_destroy()
+ * gives it back from then.
+ */
+int
+relic_reducer_finish(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_relation_t *relation, relic_summary_t **summaryp)
+{
+	relic_summary_t *summary;
+
+	*summaryp = NULL;
+	if (open_summary(ctx, reducer, &summary) != 0)
+		return (-1);
+
+	if (publish(ctx, reducer, relation) != 0) {
+		discard_summary(ctx, reducer, summary);
+		return (-1);
+	}
+	if (fill_summary(ctx, reducer, relation, summary) != 0) {
+		discard_summary(ctx, reducer, summary);
+		return (-1);
+	}
+
+	reducer->charged -= summary->bytes;
+	*summaryp = summary;
+
+	return (0);
+}
+
+/*
+ * Give every retained value the context has not assigned its identifier,
+ * interning them in the order they first occur, each value once however
+ * many groups retain it.  The list and its sorting space are charged
+ * while they are held.
+ */
+static int
+publish(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_relation_t *relation)
+{
+	relic_retained_t *retained;
+	relic_retained_t *sorted;
+	size_t count;
+	size_t bytes;
+	int status;
+
+	if (count_retained(ctx, reducer, relation, &count) != 0)
+		return (-1);
+	if (count == 0)
+		return (0);
+
+	bytes = relic_saturating_product(relic_saturating_product(count, 2),
+	    sizeof(*retained));
+	if (bytes == SIZE_MAX) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!charge(ctx, reducer, bytes))
+		return (-1);
+	retained = malloc(bytes);
+	if (retained == NULL) {
+		release(ctx, reducer, bytes);
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+
+	status = collect_retained(ctx, reducer, relation, retained);
+	if (status == 0)
+		status = sort_retained(ctx, relation, retained,
+		    retained + count, count, &sorted);
+	if (status == 0)
+		status = intern_retained(ctx, reducer, relation, sorted,
+		    count);
+
+	free(retained);
+	release(ctx, reducer, bytes);
+
+	return (status);
+}
+
+/*
+ * Intern the `count` retained values, sorted, RELIC_REDUCE_CHUNK at a time,
+ * the interrupt looked for before each chunk.  A value an earlier chunk
+ * interned a later chunk finds assigned, so each value is interned once,
+ * in the order it first occurs, however many groups retain it.
+ */
+static int
+intern_retained(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_relation_t *relation, relic_retained_t *retained,
+    size_t count)
+{
+	size_t start;
+	size_t chunk;
+
+	for (start = 0; start < count; start += chunk) {
+		if (relic_refuse_interrupted(ctx, "deriving", relation) != 0)
+			return (-1);
+		chunk = count - start < RELIC_REDUCE_CHUNK ? count - start :
+		    RELIC_REDUCE_CHUNK;
+		if (intern_chunk(ctx, reducer, relation, retained + start,
+		    chunk) != 0)
+			return (-1);
+	}
+
+	return (0);
+}
+
+/*
+ * The text bytes of `count` retained values, SIZE_MAX when a size cannot
+ * count them.
+ */
+static size_t
+retained_text(const relic_retained_t *retained, size_t count)
+{
+	size_t text;
+	size_t i;
+
+	text = 0;
+	for (i = 0; i < count; i++) {
+		if (retained[i].held->type != RELIC_INTEGER)
+			text = relic_saturating_sum(text,
+			    retained[i].held->length);
+	}
+
+	return (text);
+}
+
+/*
+ * Describe `count` retained values as a batch's pending values, each
+ * text copied into `text`, retained_text() bytes, in order.
+ */
+static void
+describe_retained(const relic_retained_t *retained, size_t count,
+    relic_pending_t *pending, char *text)
+{
+	const relic_held_t *held;
+	size_t used;
+	size_t i;
+
+	used = 0;
+	for (i = 0; i < count; i++) {
+		held = retained[i].held;
+		bzero(&pending[i], sizeof(pending[i]));
+		switch (held->type) {
+		case RELIC_INTEGER:
+			pending[i].kind = RELIC_PENDING_INTEGER;
+			pending[i].u.integer = held->u.integer;
+			continue;
+		case RELIC_STRING:
+			pending[i].kind = RELIC_PENDING_TEXT;
+			break;
+		case RELIC_SYMBOL:
+			pending[i].kind = RELIC_PENDING_SYMBOL;
+			break;
+		}
+		pending[i].u.text.offset = used;
+		pending[i].u.text.length = held->length;
+		if (held->length > 0)
+			bcopy(retained[i].bytes + held->u.offset, text + used,
+			    held->length);
+		used += held->length;
+	}
+}
+
+/*
+ * Intern `count` retained values, at most RELIC_REDUCE_CHUNK, as one batch
+ * of pending values (internal.h), in stages: the batch's storage -- its
+ * pending values, their text, the probe and the map -- charged and
+ * allocated; the values described into it; measured, which says the
+ * identifier each will have and what the value table and the pool will
+ * then hold; admitted by the memory limit as values derived into the
+ * source's relation would be; and committed.  Only a commit that succeeded
+ * gives the held values their identifiers.  Every path gives the storage
+ * back.
+ */
+static int
+intern_chunk(relic_t *ctx, relic_reducer_t *reducer,
+    const relic_relation_t *relation, relic_retained_t *retained,
+    size_t count)
+{
+	relic_pending_probe_t probe;
+	relic_pending_map_t map;
+	relic_pending_t *pending;
+	size_t projected;
+	size_t text;
+	size_t room;
+	size_t i;
+	char *copy;
+	int status;
+
+	assert(count > 0 && count <= RELIC_REDUCE_CHUNK);
+	text = retained_text(retained, count);
+	room = relic_saturating_sum(relic_saturating_sum(
+	    count * sizeof(*pending), text),
+	    relic_saturating_sum(relic_pending_map_bytes(count),
+	    relic_pending_probe_bytes(count)));
+	if (room == SIZE_MAX) {
+		relic_diag_no_memory(ctx);
+		return (-1);
+	}
+	if (!charge(ctx, reducer, room))
+		return (-1);
+
+	status = -1;
+	pending = malloc(count * sizeof(*pending));
+	copy = malloc(text > 0 ? text : 1);
+	if (pending == NULL || copy == NULL) {
+		relic_diag_no_memory(ctx);
+		goto free_batch;
+	}
+	if (relic_pending_probe_open(&probe, count) != 0) {
+		relic_diag_no_memory(ctx);
+		goto free_batch;
+	}
+	if (relic_pending_map_open(&map, count) != 0) {
+		relic_pending_probe_close(&probe);
+		relic_diag_no_memory(ctx);
+		goto free_batch;
+	}
+
+	describe_retained(retained, count, pending, copy);
+	projected = relic_pending_measure(ctx, pending, count, copy, &probe,
+	    &map);
+	relic_pending_probe_close(&probe);
+	if (projected == SIZE_MAX) {
+		relic_diag_no_memory(ctx);
+		goto close_map;
+	}
+	if (relic_relation_admit_values(ctx, relation, projected) != 0)
+		goto close_map;
+	if (relic_pending_commit(ctx, &map) != 0)
+		goto close_map;
+
+	for (i = 0; i < count; i++) {
+		retained[i].held->assigned = true;
+		retained[i].held->u.dom = map.ids[i];
+	}
+	status = 0;
+
+close_map:
+	relic_pending_map_close(&map);
+free_batch:
+	free(copy);
+	free(pending);
+	release(ctx, reducer, room);
+
+	return (status);
+}
+
+size_t
+relic_summary_groups(const relic_summary_t *summary)
+{
+	return (summary->group_count);
+}
+
+const relic_dom_t *
+relic_summary_key(const relic_summary_t *summary, size_t group)
+{
+	assert(group < summary->group_count);
+
+	return (&summary->keys[group * summary->key_count]);
+}
+
+/*
+ * A key value of zero, which a key slot holds for a value the context
+ * never assigned, is no group's: every group's key holds identifiers.
+ */
+size_t
+relic_summary_find(const relic_summary_t *summary, const relic_dom_t *key)
+{
+	relic_idprobe_t probe;
+	const relic_dom_t *held;
+	uint32_t hash;
+	uint32_t id;
+	uint16_t k;
+
+	if (summary->group_count == 0)
+		return (RELIC_SUMMARY_NONE);
+	for (k = 0; k < summary->key_count; k++) {
+		if (key[k] == 0)
+			return (RELIC_SUMMARY_NONE);
+	}
+
+	hash = relic_hash_words(summary->hash_seed, key, summary->key_count);
+	relic_idprobe_open(&probe, &summary->table, hash);
+	while (relic_idprobe_next(&probe, &id)) {
+		held = &summary->keys[(size_t)(id - 1) * summary->key_count];
+		for (k = 0; k < summary->key_count; k++) {
+			if (held[k] != key[k])
+				break;
+		}
+		if (k == summary->key_count)
+			return (id - 1);
+	}
+
+	return (RELIC_SUMMARY_NONE);
+}
+
+uint64_t
+relic_summary_rows(const relic_summary_t *summary, size_t group)
+{
+	assert(group < summary->group_count);
+
+	return (summary->rows[group]);
+}
+
+const relic_fold_state_t *
+relic_summary_state(const relic_summary_t *summary, size_t group,
+    size_t signature, relic_dom_t *extremep)
+{
+	size_t at;
+
+	assert(group < summary->group_count &&
+	    signature < summary->signature_count);
+	at = group * summary->signature_count + signature;
+	*extremep = summary->extremes[at];
+
+	return (&summary->states[at]);
+}
