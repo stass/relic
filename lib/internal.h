@@ -1513,13 +1513,20 @@ int	 relic_staging_commit(relic_staging_t *staging);
  *
  * RELIC_IMPORT_READ_CHUNK is how much of the stream an import reads per
  * call.  An import stages a table a window at a time (lib/window.h), each
- * window at most RELIC_IMPORT_WINDOW_BYTES of input, framed into pieces of
- * about RELIC_IMPORT_PIECE_BYTES, and from a record no window can hold on
- * it reads the table one field at a time.  It frames the next window
- * while it analyzes one, so it may have read two windows and a chunk past
- * the record that ends the last window it staged, and no more.  None of
- * the three limits a table: each sets only how its input is divided, and
- * a build may set them lower to exercise the divisions.
+ * window at most RELIC_IMPORT_WINDOW_BYTES of input and at most
+ * RELIC_IMPORT_WINDOW_RECORDS records, framed into pieces of about
+ * RELIC_IMPORT_PIECE_BYTES, and from a record no window can hold on it
+ * reads the table one field at a time.  It frames the next window while it
+ * analyzes one, so it may have read two windows and a chunk past the
+ * record that ends the last window it staged, and no more.  None of the
+ * four limits a table: each sets only how its input is divided, and a
+ * build may set them lower to exercise the divisions.
+ *
+ * A window's analysis takes scratch for each record, some 32 bytes for a
+ * record of one column, whatever the record's length, so the record cap
+ * keeps a window of very short records from taking many times its input's
+ * bytes in scratch.  At an eighth of the window's bytes it cuts only a
+ * window whose records average fewer than eight bytes.
  *
  * A window's analysis costs more than reading its fields one at a time, and
  * repays it only shared among threads: a table is staged a window at a
@@ -1538,6 +1545,9 @@ int	 relic_staging_commit(relic_staging_t *staging);
 #ifndef RELIC_IMPORT_WINDOW_BYTES
 #define	RELIC_IMPORT_WINDOW_BYTES	(32u * RELIC_IMPORT_READ_CHUNK)
 #endif
+#ifndef RELIC_IMPORT_WINDOW_RECORDS
+#define	RELIC_IMPORT_WINDOW_RECORDS	(RELIC_IMPORT_WINDOW_BYTES / 8u)
+#endif
 #ifndef RELIC_IMPORT_PIECE_BYTES
 #define	RELIC_IMPORT_PIECE_BYTES	(64u * 1024u)
 #endif
@@ -1546,6 +1556,8 @@ int	 relic_staging_commit(relic_staging_t *staging);
 _Static_assert(RELIC_IMPORT_READ_CHUNK > 0 &&
     RELIC_IMPORT_WINDOW_BYTES > 0 && RELIC_IMPORT_PIECE_BYTES > 0,
     "a table's input is divided into parts of some bytes");
+_Static_assert(RELIC_IMPORT_WINDOW_RECORDS > 0,
+    "a window holds some records");
 
 /*
  * lib/explain.c

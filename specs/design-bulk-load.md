@@ -76,13 +76,13 @@ Execution policy chooses between the two paths; it adds no parser or
 publication mechanism of its own. A window's analysis costs more than the
 scalar importer's single pass, and repays it only shared among workers, so
 the scalar importer is the production path for fewer effective workers
-than `RELIC_IMPORT_BATCH_WORKERS` and for a table its first window holds
-whole, which also spares a small import the pool's start and the batch
-preparation. A table is batched when its input is positively identified
-as a regular file, the context's pool runs at least
+than `RELIC_IMPORT_BATCH_WORKERS` and for a table that ends within its
+first window's horizon, which also spares a small import the pool's start
+and the batch preparation. A table is batched when its input is
+positively identified as a regular file, the context's pool runs at least
 `RELIC_IMPORT_BATCH_WORKERS` workers, a measured count below which
-batching does not repay its preparation, and reading its first window
-neither reaches its end nor fails. The count is of workers running, not
+batching does not repay its preparation, and reading its first window's
+horizon neither reaches its end nor fails. The count is of workers running, not
 threads configured: a forked child's pool runs one, and a pool whose
 threads did not all start runs fewer. A pool that cannot be made leaves
 the table to the scalar importer, as it leaves a round to the serial
@@ -317,15 +317,33 @@ tuning parameters, not language limits. A window cannot extend across an
 arbitrarily large record merely to fill the worker pool.
 
 A window is defined from its own first byte. Its horizon is
-`RELIC_IMPORT_WINDOW_BYTES` from that byte: the window is the whole
-records the reader completes in the bytes before the horizon, or before
-the end of input when that comes first, and the partial suffix after its
-last whole record begins the next window. How the stream was read --
-where its transport chunks fell, how far past the horizon it has been
-read -- decides nothing. A transport buffer ending inside a normal
-record is not a reason to abandon batching. A record that alone exceeds
-the horizon takes scalar continuation instead of an unbounded window
-allocation.
+`RELIC_IMPORT_WINDOW_BYTES` from that byte, and its record cap is
+`RELIC_IMPORT_WINDOW_RECORDS`: the window is the whole records the
+reader completes in the bytes before the horizon, or before the end of
+input when that comes first, up to the cap, a header among them, and the
+rest of the input after its last record begins the next window. How the
+stream was read -- where its transport chunks fell, how far past the
+horizon it has been read -- decides nothing. A transport buffer ending
+inside a normal record is not a reason to abandon batching. A record
+that alone exceeds the horizon takes scalar continuation instead of an
+unbounded window allocation.
+
+**The record cap bounds a window's scratch.** A window's input is
+bounded by its horizon, but its analysis scratch grows with its records:
+each one's tuple words, wide hash, stripe, stripe-list entry, rank and
+screen slots, about 32 bytes for a record of one kept column. Without a
+cap a window of records of one byte and a line feed, a million of them,
+would take some 32 MiB of scratch for its 2 MiB of input, none of it in
+the memory account. The cap is the horizon's bytes over eight, 256 Ki
+records for the 2 MiB horizon. A window is cut by it only when its
+records average fewer than eight bytes, which no measured benchmark
+table's do over the whole table (they average nine to twenty-three), and
+a window it cuts takes about the 8 MiB of scratch a window of eight-byte
+records already takes. A lower cap would cut the windows of the measured tables,
+and with them the pieces a window shares among workers; whether that
+would repay is a measurement, not a bound. The tuple words of wider
+records are bounded by the horizon in any case: each column costs at
+least a delimiter byte of input.
 
 **The end of input at the horizon.** The bytes before the horizon are
 fed to the reader as the table's last only when the stream has ended
@@ -335,15 +353,22 @@ it: a final record no line feed ends, lying across or exactly up to the
 horizon, belongs to the next window, which begins with it and holds the
 end strictly before its own horizon. So whether the reader has read
 past the horizon, or found the stream's end there, before it frames a
-window cannot change which records the window holds.
+window cannot change which records the window holds. Reaching the cap
+is not the end of input either: a window the cap ends is the table's
+last only when the bytes before its horizon were fed as the table's last
+and its last record ends where they do, which is where the reader, read
+on, would meet the end.
 
 One framing implementation serves every window: a framer begun at a
 window's first byte, fed at most `RELIC_IMPORT_READ_CHUNK` of buffered
 bytes a step, records each whole record into the window's manifest of
-pieces until it reaches the horizon or the end of input, or finds a
-mistake or runs out of memory, which leaves the window unframed and
-takes scalar replay from its boundary. Framing a window in place and
-framing it ahead are the same steps, run on different threads.
+pieces until it reaches the horizon, the record cap or the end of input,
+or finds a mistake or runs out of memory, which leaves the window
+unframed and takes scalar replay from its boundary. The cap is checked
+as each record is framed, before another byte is read, so a window the
+cap ends holds the same records however its framing is stepped. Framing
+a window in place and framing it ahead are the same steps, run on
+different threads.
 
 ### Framing ahead
 
@@ -727,7 +752,8 @@ raw bytes and transport outcomes, not any speculative promised identifiers.
 
 Private builders and window buffers are load staging, proportional to
 input, and retain the existing exemption from `max_memory`. Windowing bounds
-speculative memory independently of file length; accumulated distinct new
+speculative memory independently of file length, the horizon bounding a
+window's bytes and the record cap its per-record scratch; accumulated distinct new
 facts still require staging until the all-or-nothing commit. The configured
 memory limit is not an RSS or input-byte limit.
 
@@ -892,7 +918,7 @@ independent checks rather than comparing two uses of the same new helper.
 | Allocation failure | Nth-allocation sweeps cover private decline, value/builder reservation, pool copies, manifest preparation and late destination reserve; the context can load/query again afterward |
 | Concurrency | 1, 2, 4, 8 and 16 workers and disabled-thread builds agree on IDs, capacities, diagnostics and output; instrumentation proves both bulk apply and replay paths actually execute |
 | Striping | Symbol-pool and append capacities agree across hash seeds and thread counts, with deferred and immediate stripe growth alike; input crowded into one stripe keeps its answers, capacities and bounded probes |
-| Framing ahead | Windows framed ahead and framed in place give the same windows and pieces under every schedule of framing steps, the end of input and quoted records around the horizon included; a job whose other workers finish while framing remains completes, the framing finishing later; a declined window discards the framing ahead and replays every buffered byte, with the scalar diagnostic and retained values; a refused import has read at most two windows and one transport chunk past its last accepted boundary |
+| Framing ahead | Windows framed ahead and framed in place give the same windows and pieces under every schedule of framing steps, the end of input and quoted records around the horizon included, and so do windows the record cap ends, at the end of input or short of it; a table of records shorter than eight bytes is staged in windows of at most the cap's records; a job whose other workers finish while framing remains completes, the framing finishing later; a declined window discards the framing ahead and replays every buffered byte, with the scalar diagnostic and retained values; a refused import has read at most two windows and one transport chunk past its last accepted boundary |
 | Streaming inputs | A producer that writes one transport chunk holding a malformed record and keeps its pipe open sees the error reported without a window's worth of input or EOF, with the scalar diagnostic order, retained values and no facts added; a FIFO named by path, a stream without a descriptor and forced batching are all read by the scalar consumer; a test build that takes a failing stream for a regular file shows windows staged before the failed read, so the batch path's read errors stay covered |
 | Small-input cost | Tiny, empty, header-only, duplicate-heavy and one-fact inputs avoid unnecessary dispatch and keep their established behavior |
 

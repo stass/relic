@@ -1146,7 +1146,7 @@ importer_init(importer_t *importer, relic_t *ctx,
 	relic_staging_init(&importer->staging, ctx);
 	relic_window_init(&importer->window, (uint16_t)plan->arity);
 	relic_framer_init(&importer->framing.framer, RELIC_IMPORT_WINDOW_BYTES,
-	    RELIC_IMPORT_PIECE_BYTES);
+	    RELIC_IMPORT_WINDOW_RECORDS, RELIC_IMPORT_PIECE_BYTES);
 	importer->framing.input = &importer->input;
 }
 
@@ -1214,18 +1214,18 @@ stage_table(importer_t *importer, const char *source_name)
  * a failed read, or memory.
  *
  * The table is staged a window at a time when the context may batch it,
- * the stream is a regular file, its first window does not hold it all
- * (unless batching is forced), and the pool is ready to share it, for as
- * long as each window is admitted whole; the first that is not, and the
- * rest of the table after it, are read a field at a time, as a table not
- * batched is read whole.  The first window's bytes are the reader's when
- * the table is not batched; a read for them that failed is the reader's to
- * report, and one that found no room the reader makes again.  Both stage
- * exactly the same facts and intern exactly the same values under the same
- * identifiers, and a window is admitted only when reading it a field at a
- * time could not fail, so the import fails, when it does, at the same
- * record and with the same message as a field at a time, with the same
- * values interned.
+ * the stream is a regular file, its first window's horizon of bytes does
+ * not hold it all (unless batching is forced), and the pool is ready to
+ * share it, for as long as each window is admitted whole; the first that
+ * is not, and the rest of the table after it, are read a field at a time,
+ * as a table not batched is read whole.  The first window's bytes are the
+ * reader's when the table is not batched; a read for them that failed is
+ * the reader's to report, and one that found no room the reader makes
+ * again.  Both stage exactly the same facts and intern exactly the same
+ * values under the same identifiers, and a window is admitted only when
+ * reading it a field at a time could not fail, so the import fails, when
+ * it does, at the same record and with the same message as a field at a
+ * time, with the same values interned.
  */
 static int
 read_table(importer_t *importer)

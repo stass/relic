@@ -113,13 +113,6 @@ Placing in parallel needs the symbol index partitioned by hash, as the
 canonical index is by stripe, which is the storage-layout alternative the
 bulk-load design names under persistent lookup partitioning.
 
-**A batch window's scratch grows with its records, not its bytes.** [Low,
-component: `lib/window.c`, `lib/import.c`] A window holds up to
-`RELIC_IMPORT_WINDOW_BYTES` of input, but its tuple, hash and fresh arrays
-take about 16 bytes per record, so a table of one-byte records takes some
-32 MiB of scratch per 2 MiB window, outside the memory account. Cap the
-records a window holds as well as its bytes.
-
 **One declined window reads the rest of the table a field at a time.**
 [Low, component: `lib/import.c`] A record longer than a window less a
 read chunk, or one refused allocation, ends batching for the rest of the

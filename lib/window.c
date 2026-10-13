@@ -41,6 +41,7 @@ static int	 decode_field(const relic_t *ctx, enum relic_column column,
 		    size_t *decodedp, relic_dom_t *tokenp);
 static void	 divide_values(relic_window_t *window);
 static int	 frame_record(relic_framer_t *framer);
+static bool	 holds_the_end(const relic_framer_t *framer);
 static bool	 equal_values(const relic_window_t *window,
 		    const relic_pending_t *a, const relic_pending_t *b,
 		    const char *b_bytes);
@@ -146,10 +147,14 @@ relic_window_take_frame(relic_window_t *window, relic_framer_t *framer)
 }
 
 void
-relic_framer_init(relic_framer_t *framer, size_t horizon, size_t piece_bytes)
+relic_framer_init(relic_framer_t *framer, size_t horizon,
+    size_t most_records, size_t piece_bytes)
 {
+	assert(most_records > 0);
+
 	bzero(framer, sizeof(*framer));
 	framer->horizon = horizon;
+	framer->most_records = most_records;
 	framer->piece_bytes = piece_bytes;
 	framer->state = RELIC_FRAMING_NONE;
 }
@@ -159,7 +164,8 @@ relic_framer_reset(relic_framer_t *framer)
 {
 	relic_table_reader_reset(&framer->reader);
 	free(framer->pieces);
-	relic_framer_init(framer, framer->horizon, framer->piece_bytes);
+	relic_framer_init(framer, framer->horizon, framer->most_records,
+	    framer->piece_bytes);
 }
 
 void
@@ -178,6 +184,7 @@ relic_framer_begin(relic_framer_t *framer, const relic_import_plan_t *plan,
 	framer->fed = 0;
 	framer->length = 0;
 	framer->piece_count = 0;
+	framer->record_count = 0;
 	framer->tuple_count = 0;
 	framer->state = RELIC_FRAMING;
 	framer->ended = ended;
@@ -202,8 +209,7 @@ relic_framer_step(relic_framer_t *framer, const char *bytes, size_t most)
 	    framer->horizon;
 	assert(framer->fed <= feedable && most > 0);
 	span = feedable - framer->fed < most ? feedable - framer->fed : most;
-	last = framer->ended && framer->buffered < framer->horizon &&
-	    framer->fed + span == framer->buffered;
+	last = holds_the_end(framer) && framer->fed + span == framer->buffered;
 	relic_table_feed(&framer->reader, bytes + framer->fed, span, last);
 	framer->fed += span;
 
@@ -211,6 +217,12 @@ relic_framer_step(relic_framer_t *framer, const char *bytes, size_t most)
 	    RELIC_TABLE_RECORD) {
 		if (frame_record(framer) != 0) {
 			framer->state = RELIC_UNFRAMED;
+			return (false);
+		}
+		if (framer->record_count == framer->most_records) {
+			framer->ends_input = holds_the_end(framer) &&
+			    framer->length == framer->buffered;
+			framer->state = RELIC_FRAMED;
 			return (false);
 		}
 	}
@@ -232,6 +244,17 @@ relic_framer_step(relic_framer_t *framer, const char *bytes, size_t most)
 	    RELIC_UNFRAMED;
 
 	return (false);
+}
+
+/*
+ * Whether the bytes the framer holds before the horizon are the table's
+ * last: the stream ended successfully strictly before the horizon.  An
+ * end found at or after it is the next window's to meet.
+ */
+static bool
+holds_the_end(const relic_framer_t *framer)
+{
+	return (framer->ended && framer->buffered < framer->horizon);
 }
 
 /*
@@ -266,6 +289,7 @@ frame_record(relic_framer_t *framer)
 	}
 	piece = &framer->pieces[framer->piece_count - 1];
 
+	framer->record_count++;
 	if (framer->header) {
 		framer->header = false;
 	} else {
