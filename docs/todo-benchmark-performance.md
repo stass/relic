@@ -9,6 +9,7 @@ reference is the simplified engine, with the default one-thread path given
 the same weight as useful parallel execution.
 
 The [scan-only comparison](../bench/compare/recorded/scan-only.md),
+[rough rival refresh](../bench/compare/recorded/m3-max/rough-rivals/README.md),
 [completed investigations](../bench/compare/recorded/focused-investigations.md)
 and [complexity audit](../bench/compare/recorded/complexity/README.md) supply
 evidence. Use the
@@ -32,6 +33,9 @@ CPU starvation is not a reason to repeat the completed Mac cohort.
 
 Use the existing benchmark families to map the remaining costs: ingestion,
 bound and unbound graph queries, program analyses, and small commands.
+The rough rival comparison locates the largest remaining complete-command
+gaps in grouping/join throughput, full closure and parallel memory; its
+two-run observations do not select an implementation or locate a live owner.
 Reuse valid evidence and profile only where the simplified engine makes
 the old attribution uncertain. Rank work within each family; an aggregate
 score must not hide a default-path regression or a large memory cost.
